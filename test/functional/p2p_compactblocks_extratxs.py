@@ -7,6 +7,7 @@
 from test_framework.blocktools import (
     COINBASE_MATURITY,
     NORMAL_GBT_REQUEST_PARAMS,
+    REGTEST_GENERIC_P2P_MATMUL_ARGS,
     create_block,
     add_witness_commitment,
 )
@@ -96,6 +97,7 @@ class CompactBlocksBlockReconstructionLimitTest(BitcoinTestFramework):
             "-acceptnonstdtxn=0",
             "-incrementalrelayfee=0.00001",
             "-debug=net",
+            *REGTEST_GENERIC_P2P_MATMUL_ARGS,
         ]]
         self.utxos = []
 

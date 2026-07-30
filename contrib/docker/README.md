@@ -3,6 +3,14 @@
 
 This Dockerfile builds and runs a **BTX** full node from source.
 
+The image does not activate proposed MatMul v4.7 rules by itself; activation
+is determined only by reviewed network parameters, and all transition heights
+in the implementation PR remain disabled. A CPU-only container is not an
+Epoch-A Profile 1 ExactReplay performance qualification. Operators preparing
+accelerated validation must expose and certify the intended backend on the
+physical host. See
+[`doc/btx-matmul-v4.7-transition-roadmap.md`](../../doc/btx-matmul-v4.7-transition-roadmap.md).
+
 ## Features
 
 * Post-quantum blockchain with MatMul PoW and shielded pool

@@ -1,5 +1,10 @@
 # MatMul Mining Memory Investigation Tracker
 
+> **Historical implementation tracker.** This March 2026 investigation
+> predates MatMul v4.7. Its memory observations remain useful, but its
+> workload and activation assumptions do not define the proposed transition.
+> See the [canonical roadmap](../doc/btx-matmul-v4.7-transition-roadmap.md).
+
 Last updated: 2026-03-10 20:00 (Asia/Tokyo)
 Owner: Codex session (handoff-safe tracker)
 Priority: P0 (production confidence / operator trust)
@@ -16,7 +21,7 @@ Priority: P0 (production confidence / operator trust)
 Use the same binary and loop structure for all comparisons:
 
 ```bash
-BIN=/Users/admin/Documents/btxchain/btx-node/build-btx/bin
+BIN="${BTX_BIN_DIR:-./build-btx/bin}"
 DATADIR=/tmp/btx-memtest-<tag>
 
 # Start regtest node

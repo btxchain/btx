@@ -13,6 +13,31 @@ active from genesis, enforces reduced-data transaction constraints (BIP
 This repository contains the full node implementation, wallet, mining
 infrastructure, and test suites.
 
+## Proposed MatMul v4.7 transition
+
+This branch is the implementation candidate for a staged MatMul v4.7
+transition. It does **not** activate new consensus merely by being merged:
+every public activation height remains disabled until a separate, narrowly
+reviewed activation change.
+
+The transition deliberately separates verification authority from workload
+size:
+
+1. **Epoch A:** Profile 1 mining with epsilon-zero ExactReplay required for
+   every claimed block; succinct proofs may run only as optional shadow data.
+2. **Epoch B:** Profile 1 with both a mandatory durable proof and ExactReplay.
+3. **Epoch C:** Profile 1 with the succinct proof as consensus authority;
+   ExactReplay becomes an optional audit.
+4. **Epoch D:** Profile 2 with succinct-proof authority, activated at a
+   separate height with its own workload/difficulty calibration.
+
+Profile 1 is therefore the ExactReplay launch candidate. Profile 2 is retained
+for the later proof-authoritative workload; it is not a routine-replay
+requirement for Epoch A. The 182-byte digest-only header and header-derived
+work statement are preserved across the transition. See the
+[canonical transition roadmap](doc/btx-matmul-v4.7-transition-roadmap.md)
+and [ExactReplay launch-candidate gates](doc/matmul-v4-exact-replay-launch-candidate.md).
+
 Pre-sunset shielded launch status: the reset-chain Smile-only surface was live
 on `main` before the v0.32 sunset. `DIRECT_SMILE` was the default direct
 shielded spend backend, shared-ring `BATCH_SMILE` ingress was the bridge-in
@@ -161,6 +186,76 @@ Mersenne prime field (q = 2^31 - 1). The core work unit — large dense matrix
 multiplication — is the same operation that dominates GPU and TPU workloads for
 AI/ML training and inference, making the mining hardware directly reusable for
 productive computation.
+
+> **MatMul v4.7 Resident Curriculum transition — proposed, not activated.**
+> The implementation preserves the 182-byte digest-only header and a
+> header-derived work statement, but divides the consensus change into four
+> separately activated epochs:
+>
+> - **A:** Profile 1 with epsilon-zero ExactReplay authority and optional
+>   shadow proofs.
+> - **B:** Profile 1 with a mandatory durable proof **and** ExactReplay.
+> - **C:** Profile 1 with the succinct proof as authority; ExactReplay becomes
+>   optional audit policy.
+> - **D:** Profile 2 with proof authority and an atomic workload/difficulty
+>   recalibration.
+>
+> Profile 1 is four sequential rounds, 16 FFN layers, `b_seq=16,384`, and
+> `T_leaf=1,024`. Profile 2 is approximately 16 times heavier and is not a
+> routine validator requirement at launch. Sampled/Freivalds carriers and
+> unfinished GKR/FRI machinery are never allowed to silently become
+> authority. Every public activation height remains disabled; merging this
+> implementation does not activate any epoch. See the
+> [canonical roadmap](doc/btx-matmul-v4.7-transition-roadmap.md) and
+> [Epoch-A launch gates](doc/matmul-v4-exact-replay-launch-candidate.md).
+
+### MatMul v4.7 — Profile 1 ExactReplay build and measurement
+
+The Epoch-A consensus oracle is full Profile 1 ExactReplay. Accelerated
+implementations must be byte-identical to the portable reference. A device
+mismatch retries through that oracle before permanent rejection or peer
+punishment.
+
+**Build with full acceleration.** The portable CPU path remains the
+deterministic oracle, not the Epoch-A performance baseline:
+
+```bash
+# CUDA (e.g. sm_120 / Blackwell-class; see src/CMakeLists.txt for native MXFP4 recipes)
+cmake -B build -DBTX_ENABLE_CUDA_EXPERIMENTAL=ON -DBTX_CUDA_ARCHITECTURES=120
+# AMD ROCm/HIP and Apple Metal are selected the same way via their backend TUs.
+cmake --build build -j
+```
+
+**Select the mining backend** (auto-detects the best admissible device by
+default; override per run):
+
+```bash
+BTX_MATMUL_V4_BACKEND=auto   # developer convenience; may resolve to CPU
+BTX_MATMUL_V4_BACKEND=cuda   # request a specific backend
+BTX_MATMUL_V4_BACKEND=cpu    # force the portable scalar path
+```
+
+Production qualification must additionally require the requested backend and
+fail on any fallback; selecting a backend name without checking device
+coverage telemetry is not certification.
+
+**Benchmark Profile 1 end to end:**
+
+```bash
+cmake --build build --target matmul-v4-rc-harness
+BTX_MATMUL_V4_BACKEND=metal \
+  build/bin/matmul-v4-rc-harness \
+  --base-production --episodes 100 --backend metal \
+  --source-revision "$(git rev-parse --short=12 HEAD)" \
+  --out profile1-metal-loaded-100.json
+```
+
+Use the strict CUDA equivalent on NVIDIA. Activation review requires at least
+100 continuous dimension-bound samples, frozen cross-machine digest parity,
+and actual-consensus back-to-back/reorg scenarios—not a toy run, sampled
+carrier timing, or a Profile 2 replay.
+
+### Currently active pre-v4.7 algorithm
 
 ### How It Works
 

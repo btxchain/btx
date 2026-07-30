@@ -1,3 +1,11 @@
+> **Historical implementation prompt — do not use as current MatMul policy.**
+> The milestones and “single source of truth” claim below describe the original
+> MatMul implementation program. The current transition authority is
+> [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md):
+> Profile-1 ExactReplay first, then mandatory Profile-1 dual validation,
+> Profile-1 proof authority, and finally Profile-2 proof authority at separate
+> disabled-until-reviewed heights.
+
 You are implementing MatMul-based Proof-of-Work for the BTX blockchain node.
 Work autonomously. Do not ask questions. Make the best decision and move on.
 If you need information, read the spec or search online.

@@ -2,6 +2,11 @@
 
 Status: design / planning. Companion to the canonical token spec [`wBTX.md`](wBTX.md).
 
+Consensus references in this bridge plan follow the
+[MatMul v4.7 transition roadmap](../doc/btx-matmul-v4.7-transition-roadmap.md).
+The bridge does not infer chain finality from unauthenticated MatMul chainwork:
+Epoch-A block work is authenticated only after Profile 1 ExactReplay.
+
 This document inventories what BTX **already** provides for bridging BTX to a wrapped, EVM-native
 representation (wBTX), defines the trust/security models, and lays out the work to make wBTX↔BTX
 bridging robust, scalable, and secure — the BTX side, the EVM side, and the developer surface.

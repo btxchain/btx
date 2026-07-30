@@ -1,5 +1,12 @@
 # BTX Deployment Readiness Assessment (Rev 2)
 
+> **Historical assessment (2026-02-17).** Its “near production-ready” verdict
+> predates MatMul v4.7 and is not an activation verdict for this branch.
+> Profile 1 ExactReplay is the proposed Epoch-A authority; mandatory and then
+> authoritative Profile 1 proofs are Epochs B/C; Profile 2 proof authority is
+> a separate Epoch D. All heights remain disabled. See
+> [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md).
+
 **Date**: 2026-02-17
 **Reviewer**: Claude (static code analysis against actual source)
 **Branch**: `claude/review-deployment-readiness-31AOK` (merged from `main` at `ad27a65`)

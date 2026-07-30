@@ -1,5 +1,14 @@
 # BTX Fast-Start Validating Nodes
 
+Fast-start changes sync mechanics, not consensus activation or verification
+authority. The proposed MatMul v4.7 implementation keeps all heights disabled.
+At future Epochs A/B, a near-tip claimed block still requires Profile 1
+ExactReplay even when historical state was bootstrapped from a snapshot;
+checkpoint/assumeutxo trust must be disclosed rather than described as replay
+of all history. Profile 2 is reserved for a later proof-authoritative epoch.
+See
+[`doc/btx-matmul-v4.7-transition-roadmap.md`](../../doc/btx-matmul-v4.7-transition-roadmap.md).
+
 This directory contains the first-run bootstrap wrapper for operators who want
 to:
 

@@ -1,5 +1,12 @@
 # Spec Edits for `nMatMulPeerVerifyBudgetPerMin` Rationale
 
+> **Superseded edit proposal.** Do not apply the old Phase-2 budget edits below
+> to current specifications. MatMul v4.7 uses the header-first ExactReplay
+> scheduler and admission invariants in
+> [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md),
+> with Profile 1 authoritative in ExactReplay Epochs A/B and proof authority
+> introduced only at separately reviewed Epoch-C/D heights.
+
 This document contains the exact edits to apply to
 `doc/btx-matmul-pow-spec.md` to add explicit justification for the
 `nMatMulPeerVerifyBudgetPerMin` default value of 8.

@@ -54,6 +54,9 @@ run_functional_step() {
 run_step "MatMul unit tests" \
   "$TEST_BIN" --run_test='matmul_*'
 
+run_step "ENC-DR-LT unit tests" \
+  "$TEST_BIN" --run_test='matmul_v4_lt_tests'
+
 run_functional_step "Functional: feature_btx_block_capacity.py" \
   python3 "$ROOT_DIR/test/functional/feature_btx_block_capacity.py" --configfile="$TMP_CONFIG"
 run_functional_step "Functional: feature_btx_subsidy_schedule.py" \

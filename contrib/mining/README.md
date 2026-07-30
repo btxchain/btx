@@ -1,6 +1,14 @@
 Mining Operator Helpers
 -----------------------
 
+These helpers follow the active chain parameters; merely building the proposed
+MatMul v4.7 branch does not activate it. Epoch A will use Profile 1 with
+ExactReplay authority and optional shadow proofs. Epochs B/C introduce
+mandatory and then authoritative Profile 1 proofs, and Epoch D separately
+selects Profile 2. Do not configure Profile 2 as an interim ExactReplay
+default. See
+[`doc/btx-matmul-v4.7-transition-roadmap.md`](../../doc/btx-matmul-v4.7-transition-roadmap.md).
+
 This directory contains optional operator tooling for local solo-mining
 workflows. These scripts are not required for `getblocktemplate` / external
 miner setups, but they provide a safer starting point than ad-hoc shell loops

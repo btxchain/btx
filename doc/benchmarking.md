@@ -37,6 +37,36 @@ The output will look similar to:
 ...
 ```
 
+MatMul v4.7 ExactReplay campaigns
+---------------------------------
+
+`bench_btx` microbenchmarks do not establish the Epoch-A latency gate.
+Profile 1 ExactReplay must be measured end to end with production dimensions,
+a real accelerator, and dimension-bound headers:
+
+```bash
+BTX_MATMUL_V4_BACKEND=metal \
+  build-metal/bin/matmul-v4-rc-harness \
+  --base-production --episodes 100 --backend metal \
+  --source-revision "$(git rev-parse --short=12 HEAD)" \
+  --out profile1-metal-loaded-100.json
+```
+
+Use the equivalent strict CUDA build/backend invocation on NVIDIA. A p99 claim
+requires at least 100 continuous samples; a 12-sample tail is useful
+cross-backend evidence but is not a stable p99. Reports used for activation
+review must record 100 distinct `matmul_dim=4096` headers, exact device
+coverage, zero unintended CPU fallback, the maximum and nearest-rank
+percentiles, worst adjacent pair, and ending queue depth at 90-second arrivals.
+
+Also run the actual-consensus two-winner/back-to-back and three-branch reorg
+campaigns with one device submitter. Cross-machine certification requires
+byte-identical digests for the same frozen headers across Metal, CUDA, and the
+portable oracle. Profile 2 timing is research evidence for Epoch D; it is not
+an Epoch-A ExactReplay acceptance result. See
+[the transition roadmap](btx-matmul-v4.7-transition-roadmap.md) and
+[launch-candidate gates](matmul-v4-exact-replay-launch-candidate.md).
+
 Help
 ---------------------
 
@@ -70,6 +100,21 @@ Benchmarks are ill-suited for testing denial-of-service issues as they are
 restricted to the same input set (introducing bias). [Fuzz
 tests](/doc/fuzzing.md) are better suited for this purpose, as they are
 specifically aimed at exploring the possible input space.
+
+MatMul Proof-of-Work Benchmarking
+----------------------------------
+
+The `bench_btx` framework above covers general node/wallet microbenchmarks. It
+does **not** cover the MatMul proof-of-work workload — that has its own
+dedicated benchmark tool.
+
+The proposed MatMul v4.7 workload is integrated but **not activated on any
+public network**. Its Epoch-A benchmark is Profile 1 ExactReplay, using
+`matmul-v4-rc-harness --base-production` as described above. Profile 2 is
+measured only for later Epoch-D engineering. Legacy carrier, coupled-puzzle,
+and `run-full-benchmark.py --shape profile2-production` reports remain useful as dated
+component evidence, but they do not substitute for the corrected Profile 1
+activation campaign.
 
 Going Further
 --------------------

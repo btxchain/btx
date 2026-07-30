@@ -1,3 +1,11 @@
+> **HISTORICAL — superseded by MatMul v4.7.** This dated design record is
+> retained for provenance. It is not the proposed launch contract. Epoch A uses
+> Profile 1 with ExactReplay and optional shadow proofs; later, separately
+> activated epochs require dual validation, Profile 1 proof authority, and only
+> then Profile 2 proof authority. See
+> [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md).
+> All new activation heights remain disabled.
+
 # BTX MatMul Product-Digest Mining Fix
 
 **Status**: Active fix document for the post-`61000` mining/validation contract

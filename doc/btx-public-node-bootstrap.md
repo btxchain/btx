@@ -1,5 +1,13 @@
 # BTX Public Node Bootstrap (Archival)
 
+> **MatMul v4.7 note:** this bootstrap procedure does not opt a node into an
+> inactive consensus epoch. All transition heights remain disabled until a
+> separately reviewed activation release. Epochs A/B require Profile 1
+> ExactReplay for every claimed block, so future validating-node release notes
+> must state accelerator requirements and IBD/checkpoint assumptions. Profile 2
+> is not an Epoch-A validator requirement. See
+> [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md).
+
 This runbook is the canonical mainnet bootstrap path for operators who only
 have this repository and public Internet access.
 

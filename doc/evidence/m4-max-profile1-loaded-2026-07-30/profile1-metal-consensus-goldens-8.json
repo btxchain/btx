@@ -1,0 +1,189 @@
+{
+  "tool": "rc-episode-harness",
+  "schema_version": 2,
+  "stub": false,
+  "device_id": "metal_int8_mpp_tensorops_fused_extract:<redacted-host>",
+  "backend": "metal_int8_mpp_tensorops_fused_extract",
+  "backend_requested": "metal",
+  "backend_resolution_reason": "rc_exactpanels_and_episode_self_qualified",
+  "profile": "episode",
+  "mem_cap_bytes": 0,
+  "toy": false,
+  "medium": false,
+  "production_dims": true,
+  "rounds_override": 0,
+  "episode_profile": 1,
+  "header_matmul_dim": 4096,
+  "evidence_kind": "production_chrono_measured",
+  "wall_clock_provenance": "chrono_steady_clock",
+  "device_resident": true,
+  "all_consensus_macs_on_device": true,
+  "native_path_eligible": false,
+  "hardware": {
+    "metal_device_name": "Apple M4 Max",
+    "apple_silicon_identity": "m4_class",
+    "metal4_mpp_compile_ok": true
+  },
+  "native_mxfp4": {
+    "sm120a_kernel_linked": false,
+    "attempted": true,
+    "qualified": false,
+    "exact_panels_qualified": true,
+    "selected_backend": "Unqualified",
+    "arch_key": "",
+    "deficit_reason": "requires Apple Metal RC Ozaki ExactPanels self-qual (rc_metal_ozaki_exact_panels_device_qualify)",
+    "native_declined": false
+  },
+  "peak_rss_kib": 6968352,
+  "run_variance": {
+    "episode_cv": 0.002351213871351297,
+    "n_runs": 8,
+    "episode_wall_samples_s": [
+      28.304075208,
+      28.09933825,
+      28.101399667,
+      28.116984583,
+      28.137450167,
+      28.128540292,
+      28.13290075,
+      28.134747583
+    ],
+    "sample_min_s": 28.09933825,
+    "sample_max_s": 28.304075208,
+    "nearest_rank_p50_s": 28.128540292,
+    "nearest_rank_p95_s": 28.304075208,
+    "nearest_rank_p99_s": 28.304075208,
+    "empirical_p99_claimable": false,
+    "back_to_back": {
+      "block_interval_s": 90,
+      "max_immediate_two_block_drain_s": 56.403413458,
+      "max_queue_wait_at_interval_s": 0,
+      "max_arrival_to_verdict_at_interval_s": 28.304075208,
+      "ending_queued_work_s": 0,
+      "no_expanding_queue": true
+    },
+    "note": "Continuous in-process samples with no cooldown. Percentiles use the nearest-rank estimator; p99 is claimable only at n>=100. Back-to-back queue metrics use the measured single-Metal-device service times at a 90-second block cadence."
+  },
+  "params": {
+    "rounds": 4,
+    "d_head": 128,
+    "n_q": 512,
+    "n_ctx": 786432,
+    "L_lyr": 16,
+    "d_model": 4096,
+    "b_seq": 16384,
+    "T_leaf": 1024
+  },
+  "working_set_bytes_est": 2818572288,
+  "episode_digests": [
+    "ad578b1120d52083d05d7ceb78406a07bd87f59bc6991f2969930a8bd863bb49",
+    "acf62f5cd9906b761be9fcc0aee86ad94a530762a93685f53706d060b23227d1",
+    "1f3cd6428314d9e47b73d8f2e547cf572b1706b6711b82e92fe6f528b2445a55",
+    "da988aee5eef47a507d018447bcc44d709c657cff216b3378f97bfe778013441",
+    "d7b1eee3b44a9860a80110d6932ec91c566b429cb13e7ff3b73c27f315f4d627",
+    "7fa1a5426c57884722cceb3214d12a4e8674fa877b907d3a98f0fddf44d3e10e",
+    "2bb88109cd0fb6735ad7dbd6c3cc606b91a7a36e47922505244421693ceb727f",
+    "8b0af2ec782b5c6e8a22221b1bb4e56bb686657d701ad7cd277844908fe7f260"
+  ],
+  "extractmx_self_qual": {
+    "status": "pass",
+    "episodes": 8,
+    "digests_stable": true,
+    "exact_gemm_backend_ok": true,
+    "mining_accelerator_ok": true,
+    "native_mxfp4_qualified": false,
+    "native_fp8_qualified": false,
+    "deficit_reason": "",
+    "boundary_vector_notes": "Production dimensions: strict device coverage forbids CPU GEMM fallback; resolver toy+medium byte-parity self-qual is binding."
+  },
+  "exact_replay_acceleration": {
+    "provider": "metal_int8_mpp_tensorops_fused_extract",
+    "resolution_reason": "rc_exactpanels_and_episode_self_qualified",
+    "device_backend_present": true,
+    "require_device": true,
+    "fully_accelerated": true,
+    "full_metal_pipeline": true,
+    "all_consensus_macs_on_device": true,
+    "output_row_tile": 256,
+    "expected_macs": 1129198441725952,
+    "device_calls": 1088,
+    "device_macs": 1129198441725952,
+    "phase1_device_calls": 64,
+    "phase1_device_macs": 3298534883328,
+    "phase2_device_calls": 1024,
+    "phase2_device_macs": 1125899906842624,
+    "device_fused_ffn_calls": 512,
+    "device_fused_ffn_chain_calls": 32,
+    "device_fused_phase1_calls": 32,
+    "device_extract_elements": 184685690880,
+    "device_xof_calls": 1152,
+    "device_xof_elements": 77311508480,
+    "device_xof_s": 10.744133721,
+    "resident_ffn_chain_s": 206.214717584,
+    "device_merkle_rounds": 32,
+    "operand_xof_on_device": true,
+    "merkle_on_device": true,
+    "resident_ffn_chain_on_device": true,
+    "phase2_extract_on_device": true,
+    "phase1_extract_on_device": true,
+    "cpu_calls": 0,
+    "cpu_macs": 0,
+    "cpu_fallbacks": 0,
+    "first_failure": "",
+    "device_resident": true,
+    "device_residency_note": "Self-qualified Metal operand XOF, exact contractions, ExtractMX, resident FFN chain, streaming Merkle leaves, and Merkle subtree folding produced the consensus digest."
+  },
+  "phase_wall_s": {
+    "phase1": 0.44925482275,
+    "phase2": 26.987253359375,
+    "phase3": 0.7079062552499999,
+    "total": 28.1444295625,
+    "provenance": "chrono_steady_clock",
+    "evidence_kind": "chrono_measured"
+  },
+  "k_curve": {
+    "measured": false,
+    "mode": "skipped",
+    "note": "Skipped at production dimensions to avoid two extra full episodes outside the requested measurement.",
+    "store_all_wall_s": 0,
+    "store_only_x0_wall_s": 0,
+    "k_estimate": 0,
+    "digests_match": false,
+    "points": [
+      {
+        "checkpoint": "StoreAll",
+        "wall_s": 0,
+        "recompute_ratio": 0
+      },
+      {
+        "checkpoint": "StoreOnlyX0",
+        "wall_s": 0,
+        "recompute_ratio": 0
+      }
+    ]
+  },
+  "residency_sweep": [
+    {
+      "working_set_bytes": 2818572288,
+      "wall_s": 28.1444295625,
+      "dims": "production",
+      "note": "Single working-set point; not a 64→256 MB cliff sweep."
+    }
+  ],
+  "allocation_cap_verdicts": {
+    "512MiB": "skip",
+    "2GiB": "skip",
+    "8GiB": "skip",
+    "note": "Only an explicitly requested --mem-cap receives pass/fail evidence; ordinary runs and other named caps remain skip."
+  },
+  "verifier_floor": {
+    "measured": true,
+    "binding": true,
+    "evidence_kind": "production_exact_replay_chrono_measured",
+    "wall_s": 28.1444295625,
+    "note": "Measured end-to-end production ExactReplay wall-clock with strict full-Metal pipeline coverage; claim comparison is constant-time."
+  },
+  "gpu_campaign_present": true,
+  "nvlink_campaign_present": false,
+  "consensus_note": "nMatMulRCHeight remains INT32_MAX; ENC_RC activation is NO-GO. This harness never recommends raising consensus height. Projections/MAC estimates are NOT EVIDENCE for rc-gate GO. Cross-host Metal and datacenter campaigns remain Stage G blockers."
+}

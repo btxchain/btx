@@ -1,5 +1,12 @@
 # BTX Download-and-Go Guide
 
+> **Release/activation boundary:** a build that contains MatMul v4.7 code has
+> not activated it. Use only a published release whose network parameters and
+> release notes explicitly name an activation height. The implementation PR
+> keeps all heights disabled. Epoch A is Profile 1 ExactReplay; Profile 2 and
+> proof authority occur only in later, separately reviewed epochs. See
+> [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md).
+
 This guide is the shortest path from a precompiled BTX binary to:
 
 - wallet balance access

@@ -6,6 +6,8 @@ Current BTX architecture/readiness source of truth
 Use these docs first when you need the live post-`61000` hardening status,
 security closeout, or future-upgrade boundary:
 
+- [MatMul v4.7 Consensus Transition Roadmap](btx-matmul-v4.7-transition-roadmap.md)
+- [MatMul v4 ExactReplay Launch Candidate](matmul-v4-exact-replay-launch-candidate.md)
 - [BTX Security Documentation](security/README.md)
 - [BTX Post-Launch Optimization Roadmap](btx-postlaunch-optimization-roadmap.md)
 - [BTX MatMul Product-Digest Mining Fix](btx-matmul-product-digest-mining-fix-2026-04-03.md)
@@ -47,6 +49,14 @@ service-profile, or release-publication workflow:
 - [BTX CUDA Multi-Device Mining](btx-cuda-multi-device.md)
 - [Mining Operator Helpers](../contrib/mining/README.md)
 - [Fast-Start Validating Node Helpers](../contrib/faststart/README.md)
+
+The MatMul v4.7 implementation in this branch is pre-activation. Operators
+must not interpret a binary containing it as an activated network change.
+Epoch A uses Profile 1 with ExactReplay authority and optional shadow proofs;
+Epoch B requires both a durable proof and ExactReplay; Epoch C makes the
+Profile 1 proof authoritative; and only Epoch D selects Profile 2 with proof
+authority. Each height requires a separate review and remains disabled in this
+documentation PR.
 
 The release automation docs above now cover both the one-command local release
 cut (`scripts/release/cut_release.py`) and the self-hosted GitHub Actions

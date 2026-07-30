@@ -2,6 +2,12 @@
 
 Date: 2026-06-08
 
+> **Historical legacy-workload note.** The nonce-seeded `n=512` optimization
+> below is preserved for the currently active pre-v4.7 chain and provenance.
+> It is not Profile 1 ExactReplay launch evidence. MatMul v4.7 heights remain
+> disabled; Profile 2 is reserved for later proof authority. See
+> [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md).
+
 ## Context
 
 At `nMatMulNonceSeedHeight` the MatMul PoW solver switches from the legacy
