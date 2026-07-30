@@ -94,6 +94,9 @@ struct OzakiDeviceArena {
     OzakiDeviceBuf dWS;
     OzakiDeviceBuf dOutI64;
     OzakiDeviceBuf dHostStage; // staging for device-pointer int8 factor path
+    OzakiDeviceBuf dLraw;      // raw int8 panels for the device-side pack
+    OzakiDeviceBuf dRraw;
+    OzakiDeviceBuf dPackErr;   // 4-byte pack failure flags
     cudaStream_t stream{nullptr};
 
     [[nodiscard]] bool EnsureStream()
@@ -304,6 +307,152 @@ __device__ __forceinline__ uint8_t LoadNibble(const uint8_t* pack, size_t idx)
     const uint8_t byte = pack[idx >> 1];
     return (idx & 1u) ? static_cast<uint8_t>((byte >> 4) & 0x0Fu)
                       : static_cast<uint8_t>(byte & 0x0Fu);
+}
+
+// ---------------------------------------------------------------------------
+// Device-side panel pack for the SM120 QMMA path.
+//
+// PackOzakiPanelsMmaFp4 ran on ONE host thread, and at production dims that
+// serial factor+encode dominated the whole episode (the lane lost to dense
+// INT8 by ~100x end to end while the GPU idled). The factor of each K-block
+// is independent of every other block, so it maps one-thread-per-(outer,block)
+// on the device; outputs are byte-per-element, so no packing races. The
+// device port mirrors the pinned host tables verbatim and is gated by the
+// rc_ozaki_* suites (device pack must reproduce the host pack bit-for-bit)
+// plus the FP32->int32 exactness check downstream.
+// ---------------------------------------------------------------------------
+
+__device__ __forceinline__ bool IsM11Device(int32_t mu)
+{
+    switch (mu) {
+    case 0:
+    case 1:
+    case -1:
+    case 2:
+    case -2:
+    case 3:
+    case -3:
+    case 4:
+    case -4:
+    case 6:
+    case -6:
+        return true;
+    default:
+        return false;
+    }
+}
+
+__device__ __forceinline__ uint8_t EncodeE2M1NibbleDevice(int8_t mu)
+{
+    switch (mu) {
+    case 0: return 0x0;
+    case 1: return 0x2;
+    case -1: return 0xA;
+    case 2: return 0x4;
+    case -2: return 0xC;
+    case 3: return 0x5;
+    case -3: return 0xD;
+    case 4: return 0x6;
+    case -4: return 0xE;
+    case 6: return 0x7;
+    case -6: return 0xF;
+    default: return 0xFF;
+    }
+}
+
+/** Device port of FactorBlockToMx: shared e in {0..3} + M11 mantissas, or fail. */
+__device__ __forceinline__ bool FactorBlockToMxDevice(const int8_t* vals, uint32_t n,
+                                                      uint8_t& e_out, int8_t* mu_out)
+{
+    for (int e = 3; e >= 0; --e) {
+        const int32_t scale = 1 << e;
+        bool ok = true;
+        for (uint32_t i = 0; i < n; ++i) {
+            const int32_t v = static_cast<int32_t>(vals[i]);
+            if ((v % scale) != 0) {
+                ok = false;
+                break;
+            }
+            const int32_t mu = v / scale;
+            if (!IsM11Device(mu)) {
+                ok = false;
+                break;
+            }
+        }
+        if (!ok) continue;
+        e_out = static_cast<uint8_t>(e);
+        for (uint32_t i = 0; i < n; ++i) {
+            mu_out[i] = static_cast<int8_t>(static_cast<int32_t>(vals[i]) / scale);
+        }
+        for (uint32_t i = n; i < kMxBlk; ++i) mu_out[i] = 0;
+        return true;
+    }
+    return false;
+}
+
+// err bit 1: a left block failed to factor; bit 2: a right block failed. Matches the
+// host pack's error cases (the encode-reject case is unreachable once factoring
+// succeeded, exactly as on host where FactorBlockToMx only emits M11 mantissas).
+__global__ void rc_ozaki_pack_left_kernel(const int8_t* __restrict__ L, uint32_t rows,
+                                          uint32_t K, uint32_t Kpad, uint32_t kblocks,
+                                          uint8_t ue8m0_bias, uint8_t* __restrict__ A_pack,
+                                          uint8_t* __restrict__ SFa,
+                                          unsigned int* __restrict__ err)
+{
+    const uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= rows * kblocks) return;
+    const uint32_t r = idx / kblocks;
+    const uint32_t bj = idx % kblocks;
+    const uint32_t k0 = bj * kMxBlk;
+    const uint32_t n = (k0 >= K) ? 0u : min(kMxBlk, K - k0);
+    int8_t block[kMxBlk] = {};
+    for (uint32_t t = 0; t < n; ++t) {
+        block[t] = L[static_cast<size_t>(r) * K + (k0 + t)];
+    }
+    uint8_t e = 0;
+    int8_t mu_tmp[kMxBlk] = {};
+    if (n > 0 && !FactorBlockToMxDevice(block, n, e, mu_tmp)) {
+        atomicOr(err, 1u);
+        return;
+    }
+    SFa[static_cast<size_t>(r) * kblocks + bj] =
+        static_cast<uint8_t>(ue8m0_bias + e);
+    for (uint32_t t = 0; t < kMxBlk; ++t) {
+        const int8_t mu = (t < n) ? mu_tmp[t] : int8_t{0};
+        A_pack[static_cast<size_t>(r) * Kpad + (k0 + t)] =
+            static_cast<uint8_t>(EncodeE2M1NibbleDevice(mu) << 2);
+    }
+}
+
+__global__ void rc_ozaki_pack_right_kernel(const int8_t* __restrict__ R, uint32_t K,
+                                           uint32_t cols, uint32_t Npad, uint32_t kblocks,
+                                           uint8_t ue8m0_bias, uint8_t* __restrict__ B_pack,
+                                           uint8_t* __restrict__ SFb,
+                                           unsigned int* __restrict__ err)
+{
+    const uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= cols * kblocks) return;
+    const uint32_t c = idx / kblocks;
+    const uint32_t bj = idx % kblocks;
+    const uint32_t k0 = bj * kMxBlk;
+    const uint32_t n = (k0 >= K) ? 0u : min(kMxBlk, K - k0);
+    int8_t block[kMxBlk] = {};
+    for (uint32_t t = 0; t < n; ++t) {
+        block[t] = R[static_cast<size_t>(k0 + t) * cols + c];
+    }
+    uint8_t e = 0;
+    int8_t mu_tmp[kMxBlk] = {};
+    if (n > 0 && !FactorBlockToMxDevice(block, n, e, mu_tmp)) {
+        atomicOr(err, 2u);
+        return;
+    }
+    SFb[static_cast<size_t>(c) * kblocks + bj] =
+        static_cast<uint8_t>(ue8m0_bias + e);
+    for (uint32_t t = 0; t < kMxBlk; ++t) {
+        const int8_t mu = (t < n) ? mu_tmp[t] : int8_t{0};
+        B_pack[static_cast<size_t>(k0 + t) * Npad + c] =
+            static_cast<uint8_t>(EncodeE2M1NibbleDevice(mu) << 2);
+    }
 }
 
 /** Block-scaled E2M1 GEMM → FP32 (honest MXFP4 datatype path; not IMMA INT8). */
@@ -1123,7 +1272,9 @@ __global__ void rc_ozaki_mxfp4_tcgen05_gemm(const uint8_t* __restrict__ A,
  * Pack for SM120 QMMA.SF: one e2m1 per byte in bits 5-2 (EncodeE2M1Nibble << 2).
  * A: M×K row-major, B: K×N row-major, SFA/SFB: UE8M0 [outer × kblocks].
  */
-[[nodiscard]] bool PackOzakiPanelsMmaFp4(const std::vector<int8_t>& Lpanel,
+// Host reference for the device pack above; retained for cross-checks and as the
+// byte-authoritative statement of the SM120 QMMA operand layout.
+[[maybe_unused]] [[nodiscard]] bool PackOzakiPanelsMmaFp4(const std::vector<int8_t>& Lpanel,
                                          const std::vector<int8_t>& Rpanel, uint32_t rows,
                                          uint32_t K, uint32_t cols, std::vector<uint8_t>& A_pack,
                                          std::vector<uint8_t>& B_pack, std::vector<uint8_t>& SFa,
@@ -1243,38 +1394,82 @@ __global__ void rc_ozaki_mxfp4_tcgen05_gemm(const uint8_t* __restrict__ A,
         if (error) *error = "rc_ozaki_mxfp4_mma: K not multiple of 32";
         return false;
     }
-    std::vector<uint8_t> A_pack, B_pack, SFa, SFb;
-    uint32_t Mpad = 0, Npad = 0, Kpad = 0;
-    if (!PackOzakiPanelsMmaFp4(Lpanel, Rpanel, rows, len, cols, A_pack, B_pack, SFa, SFb, Mpad, Npad,
-                               Kpad, error)) {
+    // Device-side pack (see rc_ozaki_pack_*_kernel). The old host PackOzakiPanelsMmaFp4
+    // serialized the factor+encode on one CPU thread, which dominated production episodes;
+    // uploading the RAW int8 panels and packing on device replaces both the serial pack and
+    // the (larger) packed-operand H2D. Same shapes, same bytes, same error cases.
+    if (rows == 0 || cols == 0) {
+        if (error) *error = "PackOzakiPanelsMmaFp4: degenerate";
         return false;
     }
+    const uint32_t Mpad = AlignUp(rows, 16u);
+    const uint32_t Npad = AlignUp(cols, 8u);
+    const uint32_t Kpad = AlignUp(len, kMxBlk);
     if (Kpad != len) {
         if (error) *error = "rc_ozaki_mxfp4_mma: unexpected K pad";
         return false;
     }
     const uint32_t kblocks = Kpad / kMxBlk;
+    const size_t a_bytes = static_cast<size_t>(Mpad) * Kpad;
+    const size_t b_bytes = static_cast<size_t>(Kpad) * Npad;
+    const size_t sfa_bytes = static_cast<size_t>(Mpad) * kblocks;
+    const size_t sfb_bytes = static_cast<size_t>(Npad) * kblocks;
 
     auto& arena = Arena();
-    if (!arena.Ensure(A_pack.size(), B_pack.size(), SFa.size(), SFb.size(),
-                      static_cast<size_t>(Mpad) * Npad)) {
+    if (!arena.Ensure(a_bytes, b_bytes, sfa_bytes, sfb_bytes,
+                      static_cast<size_t>(Mpad) * Npad) ||
+        !arena.dLraw.Ensure(Lpanel.size()) || !arena.dRraw.Ensure(Rpanel.size()) ||
+        !arena.dPackErr.Ensure(sizeof(unsigned int))) {
         if (error) *error = "rc_ozaki_mxfp4_mma arena ensure failed";
         return false;
     }
     cudaStream_t s = stream != nullptr ? stream : arena.stream;
 
-    if (cudaMemcpyAsync(arena.dA.p, A_pack.data(), A_pack.size(), cudaMemcpyHostToDevice, s) !=
-            cudaSuccess ||
-        cudaMemcpyAsync(arena.dB.p, B_pack.data(), B_pack.size(), cudaMemcpyHostToDevice, s) !=
-            cudaSuccess ||
-        cudaMemcpyAsync(arena.dSFa.p, SFa.data(), SFa.size(), cudaMemcpyHostToDevice, s) !=
-            cudaSuccess ||
-        cudaMemcpyAsync(arena.dSFb.p, SFb.data(), SFb.size(), cudaMemcpyHostToDevice, s) !=
-            cudaSuccess ||
+    if (cudaMemcpyAsync(arena.dLraw.p, Lpanel.data(), Lpanel.size(), cudaMemcpyHostToDevice,
+                        s) != cudaSuccess ||
+        cudaMemcpyAsync(arena.dRraw.p, Rpanel.data(), Rpanel.size(), cudaMemcpyHostToDevice,
+                        s) != cudaSuccess ||
+        cudaMemsetAsync(arena.dA.p, 0, a_bytes, s) != cudaSuccess ||
+        cudaMemsetAsync(arena.dB.p, 0, b_bytes, s) != cudaSuccess ||
+        cudaMemsetAsync(arena.dSFa.p, kUe8m0Bias, sfa_bytes, s) != cudaSuccess ||
+        cudaMemsetAsync(arena.dSFb.p, kUe8m0Bias, sfb_bytes, s) != cudaSuccess ||
+        cudaMemsetAsync(arena.dPackErr.p, 0, sizeof(unsigned int), s) != cudaSuccess ||
         cudaMemsetAsync(arena.dD.p, 0, static_cast<size_t>(Mpad) * Npad * sizeof(float), s) !=
             cudaSuccess) {
         if (error) *error = "rc_ozaki_mxfp4_mma H2D failed";
         return false;
+    }
+
+    {
+        const uint32_t threads = 128;
+        const uint32_t left_items = rows * kblocks;
+        const uint32_t right_items = cols * kblocks;
+        rc_ozaki_pack_left_kernel<<<(left_items + threads - 1) / threads, threads, 0, s>>>(
+            static_cast<const int8_t*>(arena.dLraw.p), rows, len, Kpad, kblocks, kUe8m0Bias,
+            static_cast<uint8_t*>(arena.dA.p), static_cast<uint8_t*>(arena.dSFa.p),
+            static_cast<unsigned int*>(arena.dPackErr.p));
+        rc_ozaki_pack_right_kernel<<<(right_items + threads - 1) / threads, threads, 0, s>>>(
+            static_cast<const int8_t*>(arena.dRraw.p), len, cols, Npad, kblocks, kUe8m0Bias,
+            static_cast<uint8_t*>(arena.dB.p), static_cast<uint8_t*>(arena.dSFb.p),
+            static_cast<unsigned int*>(arena.dPackErr.p));
+        if (cudaGetLastError() != cudaSuccess) {
+            if (error) *error = "rc_ozaki_mxfp4_mma pack kernel launch failed";
+            return false;
+        }
+        unsigned int pack_err = 0;
+        if (cudaMemcpyAsync(&pack_err, arena.dPackErr.p, sizeof(pack_err),
+                            cudaMemcpyDeviceToHost, s) != cudaSuccess ||
+            cudaStreamSynchronize(s) != cudaSuccess) {
+            if (error) *error = "rc_ozaki_mxfp4_mma pack readback failed";
+            return false;
+        }
+        if (pack_err != 0) {
+            if (error) {
+                *error = (pack_err & 1u) ? "PackOzakiPanelsMmaFp4: left not MX-factorable"
+                                         : "PackOzakiPanelsMmaFp4: right not MX-factorable";
+            }
+            return false;
+        }
     }
 
     dim3 grid(Npad / 8u, Mpad / 16u);
