@@ -57,24 +57,24 @@ submitter, and no cooldown:
 
 | Metric | Result |
 |---|---:|
-| Mean | 28.161364843 s |
-| Nearest-rank p50 | 28.158275375 s |
-| Nearest-rank p95 | 28.186103583 s |
-| Nearest-rank p99 | **28.199380542 s** |
-| Maximum | 28.333386041 s |
-| Worst adjacent pair | **56.468757541 s** |
+| Mean | 28.171553715 s |
+| Nearest-rank p50 | 28.168290875 s |
+| Nearest-rank p95 | 28.202504625 s |
+| Nearest-rank p99 | **28.210448250 s** |
+| Maximum | 28.362590458 s |
+| Worst adjacent pair | **56.495303916 s** |
 | Queue wait at 90-second arrivals | **0 s** |
 | Ending queued work | **0 s** |
-| Peak RSS | 6,968,592 KiB |
+| Peak RSS | 6,972,688 KiB |
 
 All 100 digests were distinct and 51 met the easy campaign target. The exact
 14,114,980,521,574,400 expected MACs ran on Metal with
 `full_metal_pipeline=true`; CPU calls and fallbacks were zero.
 
 The actual consensus worker then accepted two valid golden winners queued with
-zero arrival gap in 56.453810958 seconds total. In a three-branch reorg, two
-stale jobs were canceled, the in-flight replay stopped in 0.015051625 seconds,
-and a distinct valid canonical winner completed 28.133079875 seconds after the
+zero arrival gap in 56.439502250 seconds total. In a three-branch reorg, two
+stale jobs were canceled, the in-flight replay stopped in 0.023179917 seconds,
+and a distinct valid canonical winner completed 28.101862542 seconds after the
 tip change.
 
 Raw evidence and reproduction commands are in
