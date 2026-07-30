@@ -1245,6 +1245,9 @@ if(BTX_ENABLE_CUDA_EXPERIMENTAL)
     cuda/matmul_v4_rc_rowleaf_gpu.cu
     # Stage-3 Fp3 NTT/LDE (BTX_GPU_LDE); provider-neutral BtxGpuFp3Lde* ABI.
     cuda/matmul_v4_rc_fp3_lde_gpu.cu
+    # ENC_RC ExactReplay CUDA resident accelerator (Phase-1/2 IMMA + device ExtractMX).
+    # ExactGemmBackend Launch* ABI mirrors Metal LaunchRcExactReplay*.
+    cuda/matmul_v4_rc_exact_replay_cuda.cu
   )
   # PUBLIC so bitcoin_common consumers of BtxGpuFp3Lde* can see the CUDA
   # provider is the linked implementation (Metal mm guards on the same define).
@@ -1350,6 +1353,9 @@ else()
       cuda/matmul_v4_rc_fp3_lde_gpu_stub.cpp
     )
   endif()
+  target_sources(btx_matmul_backend PRIVATE
+    cuda/matmul_v4_rc_exact_replay_cuda_stub.cpp
+  )
 endif()
 if(BTX_ENABLE_HIP)
   # --- D2: isolate hip::device from g++ TUs ---------------------------------
