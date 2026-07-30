@@ -869,7 +869,8 @@ ResolvedRCExactGemm ResolveExactGemmBackendForRC()
     // until dedicated device lanes land; GEMM+Extract residency is the claim.
     ResolvedExactGemm resolved = ResolveExactGemmBackendForLT();
     matmul::v4::lt::ExactGemmBackend backend = resolved.backend;
-    std::string provider_label = resolved.label;
+    std::string provider_label =
+        resolved.label != nullptr ? std::string{resolved.label} : std::string{"cpu"};
     const bool explicit_cuda = requested == "cuda" || requested == "nvidia";
     const bool automatic_cuda = requested.empty() || requested == "auto";
     if (backend.gemm_s8s8 != nullptr && (explicit_cuda || automatic_cuda) &&
@@ -878,7 +879,7 @@ ResolvedRCExactGemm ResolveExactGemmBackendForRC()
         backend.rc_fused_ffn_chain = &matmul_v4::cuda::LaunchRcExactReplayFusedFfnChain;
         backend.rc_phase1 = &matmul_v4::cuda::LaunchRcExactReplayPhase1;
         // Distinct cache key so a prior plain-LT CUDA resolve cannot drop fused slots.
-        provider_label = resolved.label.empty() ? "cuda_rc_exact" : (resolved.label + "_rc_exact");
+        provider_label = provider_label.empty() ? "cuda_rc_exact" : (provider_label + "_rc_exact");
     }
     out.backend =
         GateExactGemmWithRCSelfQualCached(backend, provider_label.c_str(), /*epoch=*/-1);
