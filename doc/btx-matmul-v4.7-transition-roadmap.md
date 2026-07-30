@@ -123,11 +123,11 @@ C, or D rules.
 The corrected Apple M4 Max Metal campaign used 100 distinct
 `matmul_dim=4096` headers:
 
-- loaded nearest-rank p99: **28.199380542 seconds**;
-- maximum replay: **28.333386041 seconds**;
-- worst adjacent pair: **56.468757541 seconds**;
-- actual two-winner zero-gap worker drain: **56.453810958 seconds**;
-- three-branch canonical verdict after reorg: **28.133079875 seconds**;
+- loaded nearest-rank p99: **28.210448250 seconds**;
+- maximum replay: **28.362590458 seconds**;
+- worst adjacent pair: **56.495303916 seconds**;
+- actual two-winner zero-gap worker drain: **56.439502250 seconds**;
+- three-branch canonical verdict after reorg: **28.101862542 seconds**;
 - full Metal pipeline with zero CPU contraction calls or fallbacks.
 
 The reported RTX 5060 Ti CUDA campaign is additional cross-backend evidence:
