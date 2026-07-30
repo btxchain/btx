@@ -13,7 +13,7 @@ later proof-authoritative workload. See
 
 ## Corrected loaded p99 campaign
 
-- Source revision: `7b540e46e0`
+- Source revision: `718775a8302c`
 - Profile: 1
 - Header dimension: 4,096
 - Episode: four rounds, 16 FFN layers, `b_seq=16,384`,
@@ -27,22 +27,22 @@ BTX_MATMUL_V4_BACKEND=metal \
   --base-production \
   --episodes 100 \
   --backend metal \
-  --source-revision 7b540e46e0 \
+  --source-revision 718775a8302c449604d4d6c4f0d447c9e716e5a2 \
   --out doc/evidence/m4-max-profile1-loaded-2026-07-30/profile1-metal-loaded-100.json
 ```
 
 The process ran 100 distinct headers continuously with no cooldown:
 
-- Mean: **28.161364843 seconds**
-- Nearest-rank p50: **28.158275375 seconds**
-- Nearest-rank p95: **28.186103583 seconds**
-- Nearest-rank p99: **28.199380542 seconds**
-- Maximum: **28.333386041 seconds**
-- Coefficient of variation: **0.0783%**
-- Worst adjacent two-episode drain: **56.468757541 seconds**
+- Mean: **28.171553715 seconds**
+- Nearest-rank p50: **28.168290875 seconds**
+- Nearest-rank p95: **28.202504625 seconds**
+- Nearest-rank p99: **28.210448250 seconds**
+- Maximum: **28.362590458 seconds**
+- Coefficient of variation: **0.0980%**
+- Worst adjacent two-episode drain: **56.495303916 seconds**
 - Maximum queue wait at 90-second arrivals: **0 seconds**
 - Ending queued work at 90-second arrivals: **0 seconds**
-- Peak RSS: **6,968,592 KiB**
+- Peak RSS: **6,972,688 KiB**
 
 All 100 digests were distinct; 51 were below the `0x207fffff` target.
 The report records `full_metal_pipeline=true`, 13,600 device calls, 400
@@ -68,12 +68,12 @@ BTX_RUN_PROFILE1_METAL_SCHEDULER_TESTS=1 \
 Results:
 
 - Two valid winners were queued with zero arrival gap. The first completed in
-  **28.318292583 seconds**, the second required **28.134979167 seconds**, and
-  both drained in **56.453810958 seconds** with ending queue depth zero.
+  **28.308719584 seconds**, the second required **28.129786958 seconds**, and
+  both drained in **56.439502250 seconds** with ending queue depth zero.
 - In the three-branch reorg, one correctly claimed stale branch was already
   replaying and another was queued. `CancelIf` canceled both stale jobs. The
-  running replay exited **0.015051625 seconds** after cancellation, and the
-  distinct valid canonical winner completed **28.133079875 seconds** after the
+  running replay exited **0.023179917 seconds** after cancellation, and the
+  distinct valid canonical winner completed **28.101862542 seconds** after the
   reorg.
 - The complete worker suite passed all **310 assertions**.
 
@@ -90,10 +90,11 @@ identical timings, but its digests cannot be claimed by a consensus-valid
 correctly caused a digest mismatch and invoked the portable device-mismatch
 retry.
 
-Revision `7b540e46e0` fixed the harness to bind `matmul_dim=4096` and added a
-machine-readable `header_matmul_dim` field. The diagnostic corpus is retained
-as `profile1-metal-loaded-100-pre-dimension-bind.json`; it is not launch
-evidence. Its p99 was 28.186119792 seconds versus 28.199380542 seconds for the
+The launch-candidate source at revision `718775a8302c` binds
+`matmul_dim=4096` and records a machine-readable `header_matmul_dim` field.
+The diagnostic corpus is retained as
+`profile1-metal-loaded-100-pre-dimension-bind.json`; it is not launch
+evidence. Its p99 was 28.186119792 seconds versus 28.210448250 seconds for the
 corrected corpus, confirming that the defect affected claim binding rather
 than the measured workload cost.
 
