@@ -192,7 +192,10 @@ bool ExpandMxDispatched(
                 "device_operand_xof_declined_or_wrong_size";
         }
     }
-    output = ExpandMxDequantInt8(seed, rows, columns);
+    // Host ExpandMx is byte-identical to the serial oracle; use the parallel
+    // verifier path for large CUDA/Metal-declined operands (K/V/W).
+    const uint32_t threads = std::max(1u, std::thread::hardware_concurrency());
+    output = ExpandMxDequantInt8Parallel(seed, rows, columns, threads);
     return true;
 }
 
@@ -2037,6 +2040,33 @@ void RoundMerkleStream::Absorb(const int8_t* data, size_t len)
     assert(!m_finalized);
     if (len == 0) return;
     m_absorbed += len;
+
+    // Host fast path (CUDA ExactReplay has no device Merkle lane yet): empty
+    // partial + T_leaf-aligned payload → parallel leaf SHA256d. Skip when the
+    // Metal device-leaves lane is active so EmitLeaf batching stays authoritative.
+    if (!m_device_leaves_complete && m_partial.empty() && m_t_leaf > 0 &&
+        (len % m_t_leaf) == 0) {
+        const size_t n_leaves = len / m_t_leaf;
+        if (n_leaves >= 64) {
+            const size_t base = m_leaves.size();
+            m_leaves.resize(base + n_leaves);
+            const uint32_t workers = std::max(
+                1u, std::min(static_cast<uint32_t>(n_leaves),
+                             std::thread::hardware_concurrency()));
+            const uint32_t t_leaf = m_t_leaf;
+            ParallelForLocal(n_leaves, workers, [&](size_t i) {
+                std::vector<unsigned char> pre;
+                pre.reserve(1 + t_leaf);
+                pre.push_back(kRCLeafTag);
+                const auto* leaf =
+                    reinterpret_cast<const unsigned char*>(data) + i * t_leaf;
+                pre.insert(pre.end(), leaf, leaf + t_leaf);
+                m_leaves[base + i] = Sha256dBytes(pre.data(), pre.size());
+            });
+            return;
+        }
+    }
+
     size_t off = 0;
     while (off < len) {
         const size_t space = static_cast<size_t>(m_t_leaf) - m_partial.size();

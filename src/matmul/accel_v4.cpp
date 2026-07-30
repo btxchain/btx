@@ -8,6 +8,7 @@
 #include <ascend/matmul_v4_lt_accel.h>
 #include <cuda/matmul_v4_lt_accel.h>
 #include <cuda/matmul_v4_lt_tensor_gemm.h>
+#include <cuda/matmul_v4_rc_exact_replay_cuda.h>
 #include <hip/matmul_v4_lt_accel.h>
 #include <matmul/backend_capabilities_v4.h>
 #include <matmul/exact_gemm_resolve.h>
@@ -861,11 +862,31 @@ ResolvedRCExactGemm ResolveExactGemmBackendForRC()
     // that is not byte-identical to the int64 oracle is declined here and falls
     // through to the CPU ExactGemm — so mining engages on any proven-exact device
     // without ever admitting a divergent one.
-    const ResolvedExactGemm resolved = ResolveExactGemmBackendForLT();
+    //
+    // When CUDA ExactReplay self-probes available, attach the Metal-parity fused
+    // Phase-1 / FFN / FFN-chain Launch* callbacks before the RC gate (same shape
+    // as the Apple Metal block above). ExpandMx / Merkle stay host-side on CUDA
+    // until dedicated device lanes land; GEMM+Extract residency is the claim.
+    ResolvedExactGemm resolved = ResolveExactGemmBackendForLT();
+    matmul::v4::lt::ExactGemmBackend backend = resolved.backend;
+    std::string provider_label = resolved.label;
+    const bool explicit_cuda = requested == "cuda" || requested == "nvidia";
+    const bool automatic_cuda = requested.empty() || requested == "auto";
+    if (backend.gemm_s8s8 != nullptr && (explicit_cuda || automatic_cuda) &&
+        matmul_v4::cuda::IsRcExactReplayCudaAvailable()) {
+        backend.rc_fused_ffn = &matmul_v4::cuda::LaunchRcExactReplayFusedFfn;
+        backend.rc_fused_ffn_chain = &matmul_v4::cuda::LaunchRcExactReplayFusedFfnChain;
+        backend.rc_phase1 = &matmul_v4::cuda::LaunchRcExactReplayPhase1;
+        // Distinct cache key so a prior plain-LT CUDA resolve cannot drop fused slots.
+        provider_label = resolved.label.empty() ? "cuda_rc_exact" : (resolved.label + "_rc_exact");
+    }
     out.backend =
-        GateExactGemmWithRCSelfQualCached(resolved.backend, resolved.label, /*epoch=*/-1);
+        GateExactGemmWithRCSelfQualCached(backend, provider_label.c_str(), /*epoch=*/-1);
     out.self_qualified = out.backend.gemm_s8s8 != nullptr;
-    out.provider = out.self_qualified ? resolved.label : "cpu";
+    out.provider = out.self_qualified ? provider_label : "cpu";
+    if (out.self_qualified && out.backend.rc_fused_ffn != nullptr) {
+        out.provider += "_fused_extract";
+    }
     out.reason = out.self_qualified ? "generic_exactgemm_and_rc_self_qualified"
                                     : "no_rc_self_qualified_device_backend";
     return out;
