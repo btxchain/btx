@@ -1,3 +1,11 @@
+> **HISTORICAL — superseded by MatMul v4.7.** This dated design record is
+> retained for provenance. It is not the proposed launch contract. Epoch A uses
+> Profile 1 with ExactReplay and optional shadow proofs; later, separately
+> activated epochs require dual validation, Profile 1 proof authority, and only
+> then Profile 2 proof authority. See
+> [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md).
+> All new activation heights remain disabled.
+
 > **Note**: This document is a historical analysis. Current values: 24 MB serialized, 24 MWU weight, 480k sigops, 90s blocks. See README.md for current parameters.
 
 # BTX MatMul PoW Specification: Deep Analysis Report

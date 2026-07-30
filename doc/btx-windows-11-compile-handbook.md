@@ -105,7 +105,7 @@ winget install --id Nvidia.Nsight.Compute --exact --source winget
 Choose a short path and clone the repository:
 
 ```powershell
-git clone https://github.com/btxchain/btx-node.git C:\src\btx-node
+git clone https://github.com/example/staging-repo C:\src\btx-node
 Set-Location C:\src\btx-node
 ```
 
@@ -351,7 +351,7 @@ Get the normal Windows build working first. Then add CUDA later.
 If you want the minimum reliable public Windows flow, it is this:
 
 ```powershell
-git clone https://github.com/btxchain/btx-node.git C:\src\btx-node
+git clone https://github.com/example/staging-repo C:\src\btx-node
 Set-Location C:\src\btx-node
 powershell -ExecutionPolicy Bypass -File .\contrib\devtools\build-btx-windows.ps1 -InstallDependencies
 Start-Process -FilePath .\build-windows-msvc\bin\Release\btxd.exe

@@ -8,7 +8,7 @@ cd "${ROOT_DIR}"
 MODE="all"
 ONLY_CSV=""
 TOKEN_FILE="${ROOT_DIR}/../github.key"
-REPO_SLUG="btxchain/btx-node"
+REPO_SLUG="example/staging-repo"
 POLL_TIMEOUT_SECONDS=3600
 POLL_INTERVAL_SECONDS=20
 RUN_LOCAL="true"
@@ -26,7 +26,7 @@ Options:
   --mode <all|ci|readiness>     Local matrix mode (default: all)
   --only <csv>                  Restrict local jobs (job names or targets)
   --token-file <path>           GitHub API token file (default: ../github.key)
-  --repo <owner/name>           Repository slug (default: btxchain/btx-node)
+  --repo <owner/name>           Repository slug (default: example/staging-repo)
   --poll-timeout-seconds <n>    Max wait for remote job conclusions
                                 (default: 3600)
   --poll-interval-seconds <n>   Poll interval for remote jobs (default: 20)

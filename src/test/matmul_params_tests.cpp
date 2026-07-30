@@ -110,6 +110,24 @@ BOOST_AUTO_TEST_CASE(matmul_freivalds_payload_mining_policy_matches_network_poli
     auto disabled = main_consensus;
     disabled.fMatMulFreivaldsEnabled = false;
     BOOST_CHECK(!ShouldIncludeMatMulFreivaldsPayloadForMining(61'000, disabled));
+
+    auto seal_mode = regtest_consensus;
+    seal_mode.nMatMulV4Height = 1;
+    seal_mode.nMatMulBMX4CHeight = 1;
+    seal_mode.nMatMulDRLTHeight = 1;
+    seal_mode.fMatMulLTSealAsPoW = true;
+    BOOST_CHECK(!ShouldIncludeMatMulFreivaldsPayloadForMining(1, seal_mode));
+
+    // F6: ENC_RC / ENC_RC_COUPLED never carry a Freivalds product sketch.
+    auto rc_mode = regtest_consensus;
+    rc_mode.nMatMulV4Height = 1;
+    rc_mode.nMatMulBMX4CHeight = 1;
+    rc_mode.nMatMulRCHeight = 1;
+    rc_mode.fMatMulRCUseToyDims = true;
+    BOOST_CHECK(!ShouldIncludeMatMulFreivaldsPayloadForMining(1, rc_mode));
+    rc_mode.nMatMulRCCoupledHeight = 1;
+    rc_mode.fMatMulRCCoupledUseToyDims = true;
+    BOOST_CHECK(!ShouldIncludeMatMulFreivaldsPayloadForMining(1, rc_mode));
 }
 
 BOOST_AUTO_TEST_CASE(matmul_params_regtest)
@@ -122,6 +140,25 @@ BOOST_AUTO_TEST_CASE(matmul_params_regtest)
     BOOST_CHECK_EQUAL(c.nMatMulTranscriptBlockSize, 8U);
     BOOST_CHECK_EQUAL(c.nMatMulNoiseRank, 4U);
     BOOST_CHECK_EQUAL(c.nMatMulMaxFutureMtpDriftHeight, std::numeric_limits<int32_t>::max());
+}
+
+BOOST_AUTO_TEST_CASE(matmul_lt_regtest_defaults_and_phase_a_override)
+{
+    const auto defaults = CreateChainParams(EmptyArgs(), ChainType::REGTEST);
+    const auto& default_consensus = defaults->GetConsensus();
+    BOOST_CHECK_EQUAL(default_consensus.nMatMulDRLTHeight, 100);
+    BOOST_CHECK_EQUAL(default_consensus.nMatMulConsensusQStar, 256U);
+    BOOST_CHECK(default_consensus.fMatMulLTSealAsPoW);
+
+    ArgsManager phase_a_args;
+    phase_a_args.ForceSetArg("-regtestmatmulltsealaspow", "0");
+    const auto phase_a = CreateChainParams(phase_a_args, ChainType::REGTEST);
+    BOOST_CHECK(!phase_a->GetConsensus().fMatMulLTSealAsPoW);
+
+    ArgsManager phase_b_args;
+    phase_b_args.ForceSetArg("-regtestmatmulltsealaspow", "1");
+    const auto phase_b = CreateChainParams(phase_b_args, ChainType::REGTEST);
+    BOOST_CHECK(phase_b->GetConsensus().fMatMulLTSealAsPoW);
 }
 
 BOOST_AUTO_TEST_CASE(matmul_params_shieldedv2dev)

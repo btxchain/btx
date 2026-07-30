@@ -24,26 +24,26 @@ import sys
 payload = {
     "overall_status": "pass",
     "configuration": {
-        "ssh_private_key_name": "id_ed25519",
+        "ssh_private_key_name": "ssh-key-file",
     },
     "steps": [
         {
             "command": [
                 "scp",
                 "-i",
-                "/Users/admin/.ssh/id_ed25519",
-                "/private/tmp/btx-m22-old/source.tar.gz",
+                "/path/to/.ssh/ssh-key-file",
+                "<redacted-temporary-path>",
                 "root@198.51.100.8:/root/upload.tar.gz",
             ],
-            "cwd": "/Users/admin/Documents/btxchain/btx-node",
-            "log": "/private/tmp/btx-m22-old/logs/source_upload.log",
+            "cwd": "/path/to/Documents/example/staging-repo",
+            "log": "<redacted-temporary-path>",
         }
     ],
     "artifacts": {
         "source_archive": {
-            "path": "/private/tmp/btx-m22-old/source.tar.gz",
+            "path": "<redacted-temporary-path>",
         },
-        "remote_extract_dir": "/private/tmp/btx-m22-old/artifacts/remote_artifacts",
+        "remote_extract_dir": "<redacted-temporary-path>",
     },
 }
 for target in sys.argv[1:]:
@@ -111,7 +111,7 @@ if not any("pending external input" in blocker for blocker in summary["blockers"
     raise SystemExit("expected placeholder blockers in packet-local m25 output")
 
 rendered_manifest = json.dumps(manifest)
-if "/Users/admin" in rendered_manifest or "/private/tmp/" in rendered_manifest:
+if "<redacted-home>" in rendered_manifest or "/private/tmp/" in rendered_manifest:
     raise SystemExit("intake manifest still leaks creator-machine local paths")
 
 packet_entry = next(
@@ -127,7 +127,7 @@ if packet_entry["copied_to"] != "scripts/m25_shielded_external_closeout_check.py
 
 for hosted_manifest in [source_packet_hosted, direct_hosted]:
     step = hosted_manifest["steps"][0]
-    if step["command"][2] != "~/.ssh/id_ed25519":
+    if step["command"][2] != "~/.ssh/ssh-key-file":
         raise SystemExit(f"unexpected sanitized ssh key token: {step['command'][2]!r}")
     if step["command"][3] != "source.tar.gz":
         raise SystemExit(f"unexpected sanitized source token: {step['command'][3]!r}")
@@ -140,19 +140,19 @@ for hosted_manifest in [source_packet_hosted, direct_hosted]:
     if hosted_manifest["artifacts"]["remote_extract_dir"] != "artifacts/remote_artifacts":
         raise SystemExit("hosted manifest remote_extract_dir was not sanitized")
     rendered = json.dumps(hosted_manifest)
-    if "/Users/admin" in rendered or "/private/tmp/btx-m22-old" in rendered:
+    if "<redacted-home>" in rendered or "<redacted-temporary-path>" in rendered:
         raise SystemExit("hosted manifest still leaks creator-machine local paths")
 
 for hosted_manifest in [source_packet_validation, direct_validation]:
     step = hosted_manifest["steps"][0]
-    if step["command"][2] != "~/.ssh/id_ed25519":
+    if step["command"][2] != "~/.ssh/ssh-key-file":
         raise SystemExit(f"unexpected sanitized validation ssh key token: {step['command'][2]!r}")
     if hosted_manifest["artifacts"]["source_archive"]["path"] != "source.tar.gz":
         raise SystemExit("hosted validation manifest source_archive path was not sanitized")
     if hosted_manifest["artifacts"]["remote_extract_dir"] != "artifacts/remote_artifacts":
         raise SystemExit("hosted validation manifest remote_extract_dir was not sanitized")
     rendered = json.dumps(hosted_manifest)
-    if "/Users/admin" in rendered or "/private/tmp/btx-m22-old" in rendered:
+    if "<redacted-home>" in rendered or "<redacted-temporary-path>" in rendered:
         raise SystemExit("hosted validation manifest still leaks creator-machine local paths")
 PY
 

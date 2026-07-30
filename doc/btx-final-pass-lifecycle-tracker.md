@@ -39,12 +39,12 @@ Scope: startup, wallet creation, mining, block verification, mining rewards, sen
   - Artifacts:
     - `/tmp/btx-m15-full-matrix-real.json`
     - `/tmp/btx-m15-full-matrix-logs/mac-host-single-node-artifact.json`
-    - `/Users/admin/Documents/btxchain/btx-node/.btx-validation/m15-centos-container-single-node-artifact.json`
+    - `/path/to/Documents/example/staging-repo/.btx-validation/m15-centos-container-single-node-artifact.json`
     - `/tmp/btx-m15-full-matrix-logs/mac-centos-bridge-artifact.json`
 - `2026-02-20`: Documentation coverage completed:
-  - `/Users/admin/Documents/btxchain/README.md`
-  - `/Users/admin/Documents/btxchain/btx-node/README.md`
-  - `/Users/admin/Documents/btxchain/btx-node/doc/m15-full-lifecycle-runbook.md`
+  - `/path/to/Documents/example/staging-repo`
+  - `/path/to/Documents/example/staging-repo/README.md`
+  - `/path/to/Documents/example/staging-repo/doc/m15-full-lifecycle-runbook.md`
   - Added docs gate: `test/util/m15_docs_sync_test.sh` and integrated into `scripts/test_btx_parallel.sh`.
 - `2026-02-20`: Post-update gates re-run:
   - `bash test/util/m15_full_lifecycle_matrix_test.sh` -> pass
@@ -71,7 +71,7 @@ Scope: startup, wallet creation, mining, block verification, mining rewards, sen
   - fail-first result before doc update:
     - `bash test/util/m15_docs_sync_test.sh` -> fail (expected)
   - docs update:
-    - `/Users/admin/Documents/btxchain/README.md` now includes single-node lifecycle command and expected output lines
+    - `/path/to/Documents/example/staging-repo` now includes single-node lifecycle command and expected output lines
   - post-fix validation:
     - `bash test/util/m15_docs_sync_test.sh` -> pass
     - `bash test/util/m15_single_node_wallet_lifecycle_test.sh` -> pass
@@ -108,7 +108,7 @@ Scope: startup, wallet creation, mining, block verification, mining rewards, sen
   - fail-first result before docs update:
     - `bash test/util/m15_docs_sync_test.sh` -> fail (expected)
   - docs update:
-    - `/Users/admin/Documents/btxchain/README.md` now includes lifecycle artifact no-skip highlights for:
+    - `/path/to/Documents/example/staging-repo` now includes lifecycle artifact no-skip highlights for:
       - `/tmp/btx-m15-single-node.json`
       - `/tmp/btx-m15-full-matrix.json`
   - post-fix validation:

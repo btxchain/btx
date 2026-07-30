@@ -5,10 +5,12 @@
 #include <chainparams.h>
 #include <common/args.h>
 #include <pow.h>
+#include <primitives/block.h>
 #include <test/util/setup_common.h>
 #include <util/chaintype.h>
 
 #include <boost/test/unit_test.hpp>
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <limits>
@@ -159,6 +161,69 @@ BOOST_AUTO_TEST_CASE(product_digest_activation_disables_phase2_even_in_ibd)
         params,
         /*phase2_enabled=*/true,
         /*is_ibd=*/true));
+}
+
+BOOST_AUTO_TEST_CASE(v4_expensive_count_matches_mandatory_contextual_validation)
+{
+    auto params = MainParams();
+    params.nMatMulV4Height = 100;
+    params.fSkipMatMulValidation = true;
+
+    // Legacy phase2 policy is disabled, but ContextualCheckBlock's v4
+    // exclusive cascade still performs the profile's verification/recompute.
+    // The admission count must therefore remain nonzero at v4 heights.
+    BOOST_CHECK(ShouldRunMatMulExpensiveVerification(
+        /*block_height=*/100, /*best_known_height=*/100, params,
+        /*phase2_enabled=*/false, /*is_ibd=*/false));
+    BOOST_CHECK_EQUAL(CountMatMulExpensiveVerifyChecks(
+        /*first_height=*/99, /*header_count=*/3, /*best_known_height=*/101,
+        params, /*phase2_enabled=*/false, /*is_ibd=*/false), 2U);
+}
+
+BOOST_AUTO_TEST_CASE(expensive_body_admission_excludes_cheap_payload_rejects)
+{
+    auto params = MainParams();
+    params.nMatMulV4Height = 100;
+    params.nMatMulDRLTHeight = std::numeric_limits<int32_t>::max();
+    params.nMatMulBMX4CHeight = std::numeric_limits<int32_t>::max();
+    params.nMatMulV4Dimension = 64;
+    params.nMatMulV4MinDimension = 64;
+    params.nMatMulV4MaxDimension = 64;
+
+    CBlock block;
+    block.matmul_dim = 64;
+
+    // Production ENC-DR reaches its predicate only with an empty A/B/C body.
+    BOOST_CHECK(MatMulBodyReachesExpensiveVerification(block, params, 100));
+    block.matrix_c_data.assign(1, 0);
+    BOOST_CHECK(!MatMulBodyReachesExpensiveVerification(block, params, 100));
+    block.matrix_c_data.clear();
+    block.matrix_a_data.assign(1, 0);
+    BOOST_CHECK(!MatMulBodyReachesExpensiveVerification(block, params, 100));
+
+    // Regtest flat-sketch replay rejects missing/oversized payloads before
+    // its verifier, while a bounded non-empty sketch reaches that predicate.
+    block.matrix_a_data.clear();
+    params.fMatMulV4FlatSketchReplay = true;
+    BOOST_CHECK(!MatMulBodyReachesExpensiveVerification(block, params, 100));
+    block.matrix_c_data.assign(1, 0);
+    BOOST_CHECK(MatMulBodyReachesExpensiveVerification(block, params, 100));
+    const uint64_t m{params.nMatMulV4Dimension / params.nMatMulV4TranscriptBlockSize};
+    block.matrix_c_data.assign(2 * m * m + 1, 0);
+    BOOST_CHECK(!MatMulBodyReachesExpensiveVerification(block, params, 100));
+
+    // Legacy required-product and malformed-product branches likewise return
+    // before Freivalds/full-transcript work.
+    params.nMatMulV4Height = std::numeric_limits<int32_t>::max();
+    params.fMatMulV4FlatSketchReplay = false;
+    params.fMatMulFreivaldsEnabled = true;
+    params.fMatMulRequireProductPayload = true;
+    block.matrix_c_data.clear();
+    BOOST_CHECK(!MatMulBodyReachesExpensiveVerification(block, params, 99));
+    block.matrix_c_data.assign(1, 0);
+    BOOST_CHECK(!MatMulBodyReachesExpensiveVerification(block, params, 99));
+    block.matrix_c_data.assign(static_cast<size_t>(block.matmul_dim) * block.matmul_dim, 0);
+    BOOST_CHECK(MatMulBodyReachesExpensiveVerification(block, params, 99));
 }
 
 BOOST_AUTO_TEST_CASE(phase2_ibd_batch_count_enforces_budgeting)
@@ -379,7 +444,39 @@ BOOST_AUTO_TEST_CASE(validation_rate_limit_ibd_budget_floor_supports_repeated_he
     params.nMatMulPeerVerifyBudgetPerMin = 32;
 
     BOOST_CHECK_EQUAL(EffectiveMatMulPeerVerifyBudgetPerMin(params, /*is_ibd=*/false), 32U);
+    // WP-10 / C2 residual: the IBD floor is now a TWO-REGIME function of the
+    // reference height (see EffectiveMatMulPeerVerifyBudgetPerMin in pow.cpp).
+    //
+    // (a) Fast-phase bootstrap regime — the default reference_height=-1 sentinel
+    //     (and any height < nFastMineHeight) retains the full 200000 floor, since
+    //     every fast-phase header is phase-2-relevant. This preserves the old
+    //     honest-bootstrap contract, so the original assertion still holds as-is.
     BOOST_CHECK_GE(EffectiveMatMulPeerVerifyBudgetPerMin(params, /*is_ibd=*/true), 200'000U);
+    BOOST_CHECK_EQUAL(
+        EffectiveMatMulPeerVerifyBudgetPerMin(params, /*is_ibd=*/true, /*reference_height=*/-1),
+        200'000U);
+
+    // (b) Post-fast-phase IBD regime — with a concrete reference_height at/above
+    //     nFastMineHeight the floor is BOUNDED to
+    //     max(base, global, nMatMulIbdPeerVerifyBudgetPerMin) instead of the old
+    //     unconditional 200000, restoring concrete per-peer accountability during
+    //     near-tip catch-up. Compute the expected bound from the public budget
+    //     accessors (base == the non-IBD value at that height) so this locks the
+    //     new two-regime contract without hard-coding the arithmetic.
+    const int32_t post_fast_height = static_cast<int32_t>(params.nFastMineHeight);
+    const uint32_t base_at_height =
+        EffectiveMatMulPeerVerifyBudgetPerMin(params, /*is_ibd=*/false, post_fast_height);
+    const uint32_t global_at_height =
+        EffectiveMatMulGlobalVerifyBudgetPerMin(params, post_fast_height);
+    const uint32_t expected_bounded =
+        std::max({base_at_height, global_at_height, params.nMatMulIbdPeerVerifyBudgetPerMin});
+    BOOST_CHECK_EQUAL(
+        EffectiveMatMulPeerVerifyBudgetPerMin(params, /*is_ibd=*/true, post_fast_height),
+        expected_bounded);
+    // The post-fast-phase bound is a strict tightening of the old 200000 floor.
+    BOOST_CHECK_LT(
+        EffectiveMatMulPeerVerifyBudgetPerMin(params, /*is_ibd=*/true, post_fast_height),
+        200'000U);
 }
 
 BOOST_AUTO_TEST_CASE(validation_rate_limit_fast_phase_budget_floor_outside_ibd)

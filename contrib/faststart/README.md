@@ -1,5 +1,14 @@
 # BTX Fast-Start Validating Nodes
 
+Fast-start changes sync mechanics, not consensus activation or verification
+authority. The proposed MatMul v4.7 implementation keeps all heights disabled.
+At future Epochs A/B, a near-tip claimed block still requires Profile 1
+ExactReplay even when historical state was bootstrapped from a snapshot;
+checkpoint/assumeutxo trust must be disclosed rather than described as replay
+of all history. Profile 2 is reserved for a later proof-authoritative epoch.
+See
+[`doc/btx-matmul-v4.7-transition-roadmap.md`](../../doc/btx-matmul-v4.7-transition-roadmap.md).
+
 This directory contains the first-run bootstrap wrapper for operators who want
 to:
 
@@ -145,7 +154,7 @@ That flow:
 2. verifies the manifest against `SHA256SUMS` and `SHA256SUMS.asc` for remote releases,
 3. selects the matching binary archive for the current platform,
 4. verifies the archive and `snapshot.manifest.json`,
-5. extracts `btxd` / `btx-cli` plus the bundled helper scripts/docs,
+5. extracts `btxd` / `/path/to/btx-cli` plus the bundled helper scripts/docs,
 6. runs `btx-faststart.py` with the chosen preset.
 
 Machine-readable install summary
@@ -238,7 +247,7 @@ poller sees the snapshot chain disappear, unless `--follow` is set. If the
 daemon reaches a better active chainstate before `loadtxoutset` runs, the
 wrapper now treats the snapshot as superseded and continues instead of failing.
 Daemon-side RPC connection overrides such as `--daemon-arg=-rpcport=...` are
-also mirrored into the wrapper's internal `btx-cli` calls automatically.
+also mirrored into the wrapper's internal `/path/to/btx-cli` calls automatically.
 The snapshot base block must be known in the local header chain before
 `loadtxoutset` can activate it; the wrapper waits for headers using the
 manifest block hash and does not require the full base block to be downloaded.
@@ -256,10 +265,10 @@ contrib/faststart/service-faststart.sh \
 Adaptive service-challenge example:
 
 ```bash
-btx-cli listmatmulservicechallengeprofiles 0.25 0.75 0.25 6 1 adaptive_window 24 4 35
-btx-cli getmatmulservicechallengeprofile balanced 0.25 0.75 0.25 6 1 adaptive_window 24 4 35
-btx-cli getmatmulservicechallengeplan solves_per_hour 600 0.25 0.75 adaptive_window 24 0.25 6 4 35
-btx-cli issuematmulservicechallengeprofile \
+/path/to/btx-cli listmatmulservicechallengeprofiles 0.25 0.75 0.25 6 1 adaptive_window 24 4 35
+/path/to/btx-cli getmatmulservicechallengeprofile balanced 0.25 0.75 0.25 6 1 adaptive_window 24 4 35
+/path/to/btx-cli getmatmulservicechallengeplan solves_per_hour 600 0.25 0.75 adaptive_window 24 0.25 6 4 35
+/path/to/btx-cli issuematmulservicechallengeprofile \
   rate_limit \
   "signup:/v1/messages" \
   "user:alice@example.com" \
@@ -274,7 +283,7 @@ btx-cli issuematmulservicechallengeprofile \
   24 \
   4 \
   35
-btx-cli getmatmulservicechallenge \
+/path/to/btx-cli getmatmulservicechallenge \
   rate_limit \
   "signup:/v1/messages" \
   "user:alice@example.com" \

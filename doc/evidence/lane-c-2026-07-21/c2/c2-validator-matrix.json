@@ -1,0 +1,112 @@
+{
+  "tool": "c2-validator-matrix",
+  "method": "taskset CPU pinning; no --validator-profile flag in harness",
+  "profiles": {
+    "floor": "0-3 (4 cores)",
+    "mid": "0-7 (8 cores)",
+    "dc": "0-23 (all)"
+  },
+  "stage_i_budgets_s": {
+    "happy_path": 0.9,
+    "exact_replay": 9.0,
+    "interval": 90
+  },
+  "gkr_runs": [
+    {
+      "run": "dc-medium-gkr",
+      "verify_s": 0.51282016,
+      "prove_s": 1447.110607299,
+      "wall_s": 1448.19,
+      "peak_rss_kib": 7806668,
+      "proof_bytes": 26402989,
+      "ok": true,
+      "note": "problems arise: prove over budget; HBM GKR PARKED; ExactReplay fallback"
+    },
+    {
+      "run": "dc-toy-gkr",
+      "verify_s": 0.28635386,
+      "prove_s": 11.299619796,
+      "wall_s": 11.7,
+      "peak_rss_kib": 376496,
+      "proof_bytes": 14559273,
+      "ok": true,
+      "note": "problems arise: prove over budget; HBM GKR PARKED; ExactReplay fallback"
+    },
+    {
+      "run": "floor-medium-gkr",
+      "verify_s": 0.511882819,
+      "prove_s": 1436.509931691,
+      "wall_s": 1437.56,
+      "peak_rss_kib": 7807036,
+      "proof_bytes": 26402989,
+      "ok": true,
+      "note": "problems arise: prove over budget; HBM GKR PARKED; ExactReplay fallback"
+    },
+    {
+      "run": "floor-toy-gkr",
+      "verify_s": 0.286692778,
+      "prove_s": 10.968539376,
+      "wall_s": 11.38,
+      "peak_rss_kib": 376456,
+      "proof_bytes": 14559273,
+      "ok": true,
+      "note": "problems arise: prove over budget; HBM GKR PARKED; ExactReplay fallback"
+    },
+    {
+      "run": "mid-medium-gkr",
+      "verify_s": 0.511424339,
+      "prove_s": 1436.096057958,
+      "wall_s": 1437.17,
+      "peak_rss_kib": 7806824,
+      "proof_bytes": 26402989,
+      "ok": true,
+      "note": "problems arise: prove over budget; HBM GKR PARKED; ExactReplay fallback"
+    },
+    {
+      "run": "mid-toy-gkr",
+      "verify_s": 0.285808361,
+      "prove_s": 10.970046525,
+      "wall_s": 11.37,
+      "peak_rss_kib": 376820,
+      "proof_bytes": 14559273,
+      "ok": true,
+      "note": "problems arise: prove over budget; HBM GKR PARKED; ExactReplay fallback"
+    }
+  ],
+  "happy_path_meet_0_9": [
+    {
+      "run": "dc-medium-gkr",
+      "verify_s": 0.51282016,
+      "meet": true
+    },
+    {
+      "run": "dc-toy-gkr",
+      "verify_s": 0.28635386,
+      "meet": true
+    },
+    {
+      "run": "floor-medium-gkr",
+      "verify_s": 0.511882819,
+      "meet": true
+    },
+    {
+      "run": "floor-toy-gkr",
+      "verify_s": 0.286692778,
+      "meet": true
+    },
+    {
+      "run": "mid-medium-gkr",
+      "verify_s": 0.511424339,
+      "meet": true
+    },
+    {
+      "run": "mid-toy-gkr",
+      "verify_s": 0.285808361,
+      "meet": true
+    }
+  ],
+  "production_exactreplay": null,
+  "note": "Production GKR prove deferred if RSS risk; ExactReplay filled from C1b when ready",
+  "gate_verdict": "NO-GO",
+  "timestamp": "2026-07-20T19:23:37Z"
+}

@@ -11,7 +11,7 @@ self-hosted runners when no runner is online.
 
 Options:
   --token-file <path>    GitHub API token file (default: ../github.key)
-  --repo <owner/name>    Repository slug (default: btxchain/btx-node)
+  --repo <owner/name>    Repository slug (default: example/staging-repo)
   --head-sha <sha>       Optional commit SHA filter (default: no filter)
   --cancel-non-head-active
                          When --head-sha is set, force-cancel active runs for
@@ -27,7 +27,7 @@ USAGE
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TOKEN_FILE="${ROOT_DIR}/../github.key"
-REPO_SLUG="btxchain/btx-node"
+REPO_SLUG="example/staging-repo"
 HEAD_SHA=""
 LAUNCH_COUNT=1
 MAX_ROUNDS=240

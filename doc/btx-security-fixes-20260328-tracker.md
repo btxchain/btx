@@ -1,6 +1,6 @@
 # BTX Security Fixes 2026-03-28 Tracker
 
-Source: `/Users/admin/Documents/btxchain/docs/btx-security-fixes-20260328.rtf`
+Source: `/path/to/Documents/example/staging-repo/btx-security-fixes-20260328.rtf`
 
 This tracker evaluates each finding named in the source report against the current `btx-node` codebase and records the disposition for this hardening branch.
 

@@ -13,7 +13,7 @@ Status: complete for the pre-`61000` reset-chain launch surface baseline
 Paper working mirror:
 - `doc/research/smile-2021-564-working-mirror.md`
 - `doc/research/smile-2021-564.txt`
-- source PDF mirrored from `/Users/admin/Downloads/2021-564.pdf`
+- source PDF mirrored from `/path/to/Downloads/2021-564.pdf`
 
 ## Protocol Definition
 

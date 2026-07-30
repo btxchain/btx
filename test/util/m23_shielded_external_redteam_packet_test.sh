@@ -24,26 +24,26 @@ import sys
 payload = {
     "overall_status": "pass",
     "configuration": {
-        "ssh_private_key_name": "id_ed25519",
+        "ssh_private_key_name": "ssh-key-file",
     },
     "steps": [
         {
             "command": [
                 "scp",
                 "-i",
-                "/Users/admin/.ssh/id_ed25519",
-                "/private/tmp/btx-m22-old/source.tar.gz",
+                "/path/to/.ssh/ssh-key-file",
+                "<redacted-temporary-path>",
                 "root@198.51.100.8:/root/upload.tar.gz",
             ],
-            "cwd": "/Users/admin/Documents/btxchain/btx-node",
-            "log": "/private/tmp/btx-m22-old/logs/source_upload.log",
+            "cwd": "/path/to/Documents/example/staging-repo",
+            "log": "<redacted-temporary-path>",
         }
     ],
     "artifacts": {
         "source_archive": {
-            "path": "/private/tmp/btx-m22-old/source.tar.gz",
+            "path": "<redacted-temporary-path>",
         },
-        "remote_extract_dir": "/private/tmp/btx-m22-old/artifacts/remote_artifacts",
+        "remote_extract_dir": "<redacted-temporary-path>",
     },
 }
 for target in sys.argv[1:]:
@@ -134,7 +134,7 @@ if summary["overall_status"] != "fail":
     raise SystemExit("expected placeholder derived intake summary to fail")
 
 rendered_packet_manifest = json.dumps(packet_manifest)
-if "/Users/admin" in rendered_packet_manifest or tmp_root in rendered_packet_manifest:
+if "<redacted-home>" in rendered_packet_manifest or tmp_root in rendered_packet_manifest:
     raise SystemExit("packet manifest still leaks creator-machine local paths")
 
 packet_entry = next(
@@ -159,14 +159,14 @@ for ref in required_refs:
         raise SystemExit(f"missing expected relative packet reference: {ref}")
 
 for text in [participant_brief, operator_checklist, window_guide]:
-    if tmp_root in text or "/Users/admin/Documents/btxchain/infra/" in text:
+    if tmp_root in text or "/path/to/Documents/example/staging-repo/" in text:
         raise SystemExit("creator-machine absolute path leaked into packet docs")
 
 if "infra/btx-seed-server-spec.md" not in window_guide:
     raise SystemExit("packet window guide no longer points at bundled infra spec")
 
 step = hosted_manifest["steps"][0]
-if step["command"][2] != "~/.ssh/id_ed25519":
+if step["command"][2] != "~/.ssh/ssh-key-file":
     raise SystemExit(f"unexpected sanitized ssh key token: {step['command'][2]!r}")
 if step["command"][3] != "source.tar.gz":
     raise SystemExit(f"unexpected sanitized source token: {step['command'][3]!r}")
@@ -178,17 +178,17 @@ if hosted_manifest["artifacts"]["source_archive"]["path"] != "source.tar.gz":
     raise SystemExit("hosted manifest source_archive path was not sanitized")
 if hosted_manifest["artifacts"]["remote_extract_dir"] != "artifacts/remote_artifacts":
     raise SystemExit("hosted manifest remote_extract_dir was not sanitized")
-if "/Users/admin" in json.dumps(hosted_manifest) or "/private/tmp/btx-m22-old" in json.dumps(hosted_manifest):
+if "<redacted-home>" in json.dumps(hosted_manifest) or "<redacted-temporary-path>" in json.dumps(hosted_manifest):
     raise SystemExit("hosted manifest still leaks creator-machine local paths")
 
 validation_step = hosted_validation_manifest["steps"][0]
-if validation_step["command"][2] != "~/.ssh/id_ed25519":
+if validation_step["command"][2] != "~/.ssh/ssh-key-file":
     raise SystemExit(f"unexpected sanitized validation ssh key token: {validation_step['command'][2]!r}")
 if hosted_validation_manifest["artifacts"]["source_archive"]["path"] != "source.tar.gz":
     raise SystemExit("hosted validation manifest source_archive path was not sanitized")
 if hosted_validation_manifest["artifacts"]["remote_extract_dir"] != "artifacts/remote_artifacts":
     raise SystemExit("hosted validation manifest remote_extract_dir was not sanitized")
-if "/Users/admin" in json.dumps(hosted_validation_manifest) or "/private/tmp/btx-m22-old" in json.dumps(hosted_validation_manifest):
+if "<redacted-home>" in json.dumps(hosted_validation_manifest) or "<redacted-temporary-path>" in json.dumps(hosted_validation_manifest):
     raise SystemExit("hosted validation manifest still leaks creator-machine local paths")
 PY
 

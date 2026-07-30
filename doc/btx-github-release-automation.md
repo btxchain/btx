@@ -22,7 +22,7 @@ Use `scripts/release/cut_release.py` when you want one operator command to:
 - validate the bundle against the GitHub publisher contract
 - optionally publish the bundle to GitHub Releases
 
-The staging repository is `btxchain/btx-node`, while public release assets are
+The staging repository is `example/staging-repo`, while public release assets are
 published from `btxchain/btx`. The manual workflow therefore exposes a
 `release_repository` input that defaults to `btxchain/btx`; keep `publish`
 disabled while validating a private staging branch. A public publish is

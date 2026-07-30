@@ -57,7 +57,7 @@ required_snippets = [
     "/firewalls/",
     "/droplets/",
     "\"overall_status\": \"pass\"",
-    "REPO_ROOT.parent / \"infra\" / \"digitalocean_api.key\"",
+    "REPO_ROOT.parent / \"infra\" / \"credential-file\"",
     "\"ssh_private_key_name\"",
     "sanitize_manifest_value",
     "manifest_display_path",
@@ -67,7 +67,7 @@ missing = [snippet for snippet in required_snippets if snippet not in text]
 if missing:
     raise SystemExit(f"missing expected m22 remote redteam logic: {missing}")
 
-if "/Users/admin/Documents/btxchain/infra/digitalocean_api.key" in text:
+if "/path/to/Documents/example/staging-repo/credential-file" in text:
     raise SystemExit("m22 still hard-codes the creator-machine DigitalOcean token path")
 
 if "\"ssh_private_key\"" in text:
@@ -91,14 +91,14 @@ output_dir = tmp_root / "output"
 output_dir.mkdir()
 manifest = {
     "configuration": {
-        "ssh_private_key_name": "id_ed25519",
+        "ssh_private_key_name": "ssh-key-file",
     },
     "steps": [
         {
             "command": [
                 "scp",
                 "-i",
-                str(pathlib.Path.home() / ".ssh" / "id_ed25519"),
+                str(pathlib.Path.home() / ".ssh" / "ssh-key-file"),
                 str(output_dir / "source.tar.gz"),
                 "root@198.51.100.8:/root/upload.tar.gz",
             ],
@@ -119,7 +119,7 @@ if step["cwd"] != "<repo>":
     raise SystemExit(f"unexpected sanitized cwd: {step['cwd']!r}")
 if step["log"] != "logs/remote.log":
     raise SystemExit(f"unexpected sanitized log path: {step['log']!r}")
-if step["command"][2] != "~/.ssh/id_ed25519":
+if step["command"][2] != "~/.ssh/ssh-key-file":
     raise SystemExit(f"unexpected sanitized ssh key token: {step['command'][2]!r}")
 if step["command"][3] != "source.tar.gz":
     raise SystemExit(f"unexpected sanitized local source token: {step['command'][3]!r}")

@@ -13,3 +13,12 @@ if(PYTHON_COMMAND)
     COMMAND ${PYTHON_COMMAND} ${PROJECT_BINARY_DIR}/test/util/rpcauth-test.py
   )
 endif()
+
+# The parser suite is a POSIX shell test. Register it whenever the standalone
+# report target is part of a test-enabled Unix build so CI/CTest exercises the
+# exact built binary rather than relying on a manual contrib invocation.
+if(BUILD_TESTS AND UNIX AND TARGET matmul-v4-report)
+  add_test(NAME matmul_v4_report_cli
+    COMMAND ${PROJECT_SOURCE_DIR}/contrib/matmul-v4/test-report-cli.sh $<TARGET_FILE:matmul-v4-report>
+  )
+endif()

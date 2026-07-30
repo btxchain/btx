@@ -1,7 +1,7 @@
 # PQ Multisig Full Implementation Tracker
 
 ## Metadata
-- Workspace: `/Users/admin/Documents/btxchain/btx-node`
+- Workspace: `/path/to/Documents/example/staging-repo`
 - Branch: `codex/pq-multisig-full-impl-20260221` (continuation of `codex/pq-multisig-full-impl-20260220`)
 - Canonical source: User prompt plan embedded below (verbatim capture section)
 - Execution mode: strict TDD (fail-first test -> minimal fix -> green tests -> refactor on green)
@@ -140,11 +140,11 @@
 | 2026-02-20 | `FUZZ=pq_merkle ./ci/scratch/build-asan-fuzz/bin/fuzz /tmp/pq_fuzz_smoke/pq_merkle` | PASS | Targeted PQ fuzz smoke |
 | 2026-02-20 | `FUZZ=pq_script_verify ./ci/scratch/build-asan-fuzz/bin/fuzz /tmp/pq_fuzz_smoke/pq_script_verify` | PASS | Targeted PQ fuzz smoke |
 | 2026-02-20 | `git push -u origin codex/pq-multisig-full-impl-20260220` | PASS | Branch pushed to remote |
-| 2026-02-20 | `curl https://api.github.com/repos/btxchain/btx-node/actions/runs?branch=codex/pq-multisig-full-impl-20260220` | PASS | API query succeeded; no workflow runs found (`runs=0`) |
+| 2026-02-20 | `curl https://api.github.com/repos/example/staging-repo/actions/runs?branch=codex/pq-multisig-full-impl-20260220` | PASS | API query succeeded; no workflow runs found (`runs=0`) |
 | 2026-02-20 | `git fetch --all --prune && git checkout main && git pull --ff-only origin main` | PASS | Mandatory sync rerun during continuation cycle |
 | 2026-02-20 | `git checkout codex/pq-multisig-full-impl-20260220` | PASS | Reused existing date branch containing implemented changes |
-| 2026-02-20 | `curl -s 'https://api.github.com/repos/btxchain/btx-node/actions/runs?branch=codex/pq-multisig-full-impl-20260220'` | FAIL | GitHub API returned `404 Not Found` (unauthenticated/private visibility) |
-| 2026-02-20 | `curl -s 'https://api.github.com/repos/btxchain/btx-node/pulls?head=btxchain:codex/pq-multisig-full-impl-20260220&state=open'` | FAIL | GitHub API returned `404 Not Found` (unauthenticated/private visibility) |
+| 2026-02-20 | `curl -s 'https://api.github.com/repos/example/staging-repo/actions/runs?branch=codex/pq-multisig-full-impl-20260220'` | FAIL | GitHub API returned `404 Not Found` (unauthenticated/private visibility) |
+| 2026-02-20 | `curl -s 'https://api.github.com/repos/example/staging-repo/pulls?head=btxchain:codex/pq-multisig-full-impl-20260220&state=open'` | FAIL | GitHub API returned `404 Not Found` (unauthenticated/private visibility) |
 | 2026-02-20 | `./build/bin/test_btx --run_test='pq_multisig_tests/build_p2mr_multisig_script_enforces_limits_and_mixed_algorithms' --catch_system_errors=no --color_output=false` | FAIL | Fail-first proof: single-key multisig script was still accepted |
 | 2026-02-20 | `./build/bin/test_btx --run_test='pq_multisig_descriptor_tests/parse_multi_pq_rejects_single_key_multisig' --catch_system_errors=no --color_output=false` | FAIL | Fail-first proof: descriptor parser accepted `multi_pq(1, key)` |
 | 2026-02-20 | `python3 test/functional/rpc_pq_multisig.py --descriptors` | FAIL | Fail-first proof: `createmultisig` did not reject one-key multisig |
@@ -157,20 +157,20 @@
 | 2026-02-20 | `./build/bin/test_btx --run_test='pq_multisig_descriptor_tests/*' --catch_system_errors=no --color_output=false` | PASS | Full pq multisig descriptor suite green |
 | 2026-02-20 | `python3 test/functional/feature_pq_multisig.py --descriptors` | PASS | End-to-end multiparty PSBT flow still green after fix |
 | 2026-02-20 | `git push origin codex/pq-multisig-full-impl-20260220` | PASS | Pushed continuation hardening commits (`9cbc89d57a`, `f59ba4996c`) |
-| 2026-02-20 | `curl -s 'https://api.github.com/repos/btxchain/btx-node/actions/runs?branch=codex/pq-multisig-full-impl-20260220'` | FAIL | Post-push CI query still returns `404 Not Found` |
-| 2026-02-20 | `curl -s 'https://api.github.com/repos/btxchain/btx-node/pulls?head=btxchain:codex/pq-multisig-full-impl-20260220&state=open'` | FAIL | Post-push PR query still returns `404 Not Found` |
+| 2026-02-20 | `curl -s 'https://api.github.com/repos/example/staging-repo/actions/runs?branch=codex/pq-multisig-full-impl-20260220'` | FAIL | Post-push CI query still returns `404 Not Found` |
+| 2026-02-20 | `curl -s 'https://api.github.com/repos/example/staging-repo/pulls?head=btxchain:codex/pq-multisig-full-impl-20260220&state=open'` | FAIL | Post-push PR query still returns `404 Not Found` |
 | 2026-02-20 | `env -i HOME="$HOME" PATH="$PATH" USER="$USER" bash -c 'FILE_ENV="./ci/test/00_setup_env_native_centos.sh" RUN_FUNCTIONAL_TESTS=false CTEST_REGEX="(pq_multisig_tests|pq_multisig_descriptor_tests|pq_consensus_tests|pq_policy_tests|pq_phase4_tests|pq_descriptor_tests)" ./ci/test_run_all.sh'` | PASS | CentOS Docker impacted-suite lane green (`100% tests passed, 0 failed out of 6`) |
 | 2026-02-20 | `git fetch --all --prune && git checkout main && git pull --ff-only origin main` | PASS | Mandatory sync rerun for continuation cycle |
 | 2026-02-20 | `git checkout codex/pq-multisig-full-impl-20260220` | PASS | Reused existing date branch containing full implementation history |
-| 2026-02-20 | `curl -s 'https://api.github.com/repos/btxchain/btx-node/actions/runs?branch=codex/pq-multisig-full-impl-20260220' | jq '{message,status,total_count}'` | FAIL | Still `404 Not Found` without repository auth |
-| 2026-02-20 | `curl -s 'https://api.github.com/repos/btxchain/btx-node/pulls?head=btxchain:codex/pq-multisig-full-impl-20260220&state=open' | jq '{message,status}'` | FAIL | Still `404 Not Found` without repository auth |
+| 2026-02-20 | `curl -s 'https://api.github.com/repos/example/staging-repo/actions/runs?branch=codex/pq-multisig-full-impl-20260220' | jq '{message,status,total_count}'` | FAIL | Still `404 Not Found` without repository auth |
+| 2026-02-20 | `curl -s 'https://api.github.com/repos/example/staging-repo/pulls?head=btxchain:codex/pq-multisig-full-impl-20260220&state=open' | jq '{message,status}'` | FAIL | Still `404 Not Found` without repository auth |
 | 2026-02-20 | `./build/bin/test_btx --run_test='pq_multisig_tests/*' --catch_system_errors=no --color_output=false` | PASS | Host unit regression sweep green |
 | 2026-02-20 | `./build/bin/test_btx --run_test='pq_multisig_descriptor_tests/*' --catch_system_errors=no --color_output=false` | PASS | Host descriptor regression sweep green |
 | 2026-02-20 | `python3 test/functional/rpc_pq_multisig.py --descriptors` | PASS | RPC behavior regression green |
 | 2026-02-20 | `python3 test/functional/feature_pq_multisig.py --descriptors` | PASS | End-to-end multisig PSBT flow green |
 | 2026-02-20 | `git push origin codex/pq-multisig-full-impl-20260220` | PASS | Pushed cycle-8 tracker update (`d326cf189b`) |
-| 2026-02-20 | `curl -s 'https://api.github.com/repos/btxchain/btx-node/actions/runs?branch=codex/pq-multisig-full-impl-20260220' | jq '{message,status,total_count}'` | FAIL | Post-push CI check still blocked (`404`) |
-| 2026-02-20 | `curl -s 'https://api.github.com/repos/btxchain/btx-node/pulls?head=btxchain:codex/pq-multisig-full-impl-20260220&state=open' | jq '{message,status}'` | FAIL | Post-push PR check still blocked (`404`) |
+| 2026-02-20 | `curl -s 'https://api.github.com/repos/example/staging-repo/actions/runs?branch=codex/pq-multisig-full-impl-20260220' | jq '{message,status,total_count}'` | FAIL | Post-push CI check still blocked (`404`) |
+| 2026-02-20 | `curl -s 'https://api.github.com/repos/example/staging-repo/pulls?head=btxchain:codex/pq-multisig-full-impl-20260220&state=open' | jq '{message,status}'` | FAIL | Post-push PR check still blocked (`404`) |
 | 2026-02-20 | `web.search_query('Bitcoin multisig vulnerability OP_CHECKSIGADD issue BIP342 advisory', 'PSBT multisig vulnerability duplicate key attack advisory', 'Bitcoin Core security advisories multisig wallet', 'BIP 174 handling duplicated keys invalid')` | PASS | Online multisig vulnerability reconnaissance completed |
 | 2026-02-20 | `web.open(bitcoincore advisories, BIP174, BIP147, BIP342, BIP387)` | PASS | Primary-source review completed; no new critical/high issue identified |
 | 2026-02-20 | `./build/bin/test_btx --run_test='pq_multisig_tests/*' --catch_system_errors=no` | PASS | Host unit gate rerun in continuation cycle |
@@ -178,11 +178,11 @@
 | 2026-02-20 | `python3 test/functional/rpc_pq_multisig.py --descriptors` | PASS | Host RPC multisig functional rerun green |
 | 2026-02-20 | `python3 test/functional/feature_pq_multisig.py --descriptors` | PASS | Host end-to-end multisig PSBT flow rerun green |
 | 2026-02-20 | `env -i HOME="$HOME" PATH="$PATH" SHELL=/bin/bash TERM=xterm-256color USER="$USER" LANG=C.UTF-8 LC_ALL=C.UTF-8 FILE_ENV="./ci/test/00_setup_env_native_centos.sh" RUN_FUNCTIONAL_TESTS=false CTEST_REGEX="(pq_multisig_tests|pq_multisig_descriptor_tests|pq_consensus_tests|pq_policy_tests|pq_phase4_tests|pq_descriptor_tests)" ./ci/test_run_all.sh` | PASS | CentOS Docker impacted suites rerun green (`100% tests passed, 0 failed out of 6`) |
-| 2026-02-20 | `curl -s 'https://api.github.com/repos/btxchain/btx-node/actions/runs?branch=codex/pq-multisig-full-impl-20260220' | jq '{message,status,total_count}'` | FAIL | Continuation CI poll still blocked (`404`) |
-| 2026-02-20 | `curl -s 'https://api.github.com/repos/btxchain/btx-node/pulls?head=btxchain:codex/pq-multisig-full-impl-20260220&state=open' | jq '{message,status}'` | FAIL | Continuation PR poll still blocked (`404`) |
+| 2026-02-20 | `curl -s 'https://api.github.com/repos/example/staging-repo/actions/runs?branch=codex/pq-multisig-full-impl-20260220' | jq '{message,status,total_count}'` | FAIL | Continuation CI poll still blocked (`404`) |
+| 2026-02-20 | `curl -s 'https://api.github.com/repos/example/staging-repo/pulls?head=btxchain:codex/pq-multisig-full-impl-20260220&state=open' | jq '{message,status}'` | FAIL | Continuation PR poll still blocked (`404`) |
 | 2026-02-20 | `git push origin codex/pq-multisig-full-impl-20260220` | PASS | Pushed cycle-10 tracker update (`3163e11d8d`) |
-| 2026-02-20 | `curl -s 'https://api.github.com/repos/btxchain/btx-node/actions/runs?branch=codex/pq-multisig-full-impl-20260220' | jq '{message,status,total_count}'` | FAIL | Post-push CI poll still blocked (`404`) |
-| 2026-02-20 | `curl -s 'https://api.github.com/repos/btxchain/btx-node/pulls?head=btxchain:codex/pq-multisig-full-impl-20260220&state=open' | jq '{message,status}'` | FAIL | Post-push PR poll still blocked (`404`) |
+| 2026-02-20 | `curl -s 'https://api.github.com/repos/example/staging-repo/actions/runs?branch=codex/pq-multisig-full-impl-20260220' | jq '{message,status,total_count}'` | FAIL | Post-push CI poll still blocked (`404`) |
+| 2026-02-20 | `curl -s 'https://api.github.com/repos/example/staging-repo/pulls?head=btxchain:codex/pq-multisig-full-impl-20260220&state=open' | jq '{message,status}'` | FAIL | Post-push PR poll still blocked (`404`) |
 | 2026-02-20 | `./build/bin/test_btx --run_test='pq_multisig_tests/build_p2mr_multisig_script_enforces_limits_and_mixed_algorithms' --catch_system_errors=no --color_output=false` | FAIL | Fail-first proof: duplicate PQ pubkeys in multisig leaf were accepted |
 | 2026-02-20 | `./build/bin/test_btx --run_test='pq_multisig_descriptor_tests/parse_multi_pq_rejects_duplicate_keys' --catch_system_errors=no --color_output=false` | FAIL | Fail-first proof: descriptor parser accepted duplicate keys in `multi_pq` |
 | 2026-02-20 | `./build/bin/test_btx --run_test='pq_policy_tests/p2mr_multisig_duplicate_pubkeys_rejected_by_policy' --catch_system_errors=no --color_output=false` | FAIL | Fail-first proof: policy parser did not reject duplicate keys |
@@ -201,14 +201,14 @@
 | 2026-02-20 | `python3 test/functional/feature_pq_multisig.py --descriptors` | PASS | Host end-to-end multisig functional rerun green |
 | 2026-02-20 | `python3 test/lint/lint-includes.py` | PASS | Include ordering checks green after new `<set>` includes |
 | 2026-02-20 | `python3 test/lint/lint-files.py` | PASS | File metadata lint green |
-| 2026-02-20 | `curl -s 'https://api.github.com/repos/btxchain/btx-node/actions/runs?branch=codex/pq-multisig-full-impl-20260220' | jq '{message,status,total_count}'` | FAIL | Continuation CI poll remains blocked (`404 Not Found`) |
-| 2026-02-20 | `curl -s 'https://api.github.com/repos/btxchain/btx-node/pulls?head=btxchain:codex/pq-multisig-full-impl-20260220&state=open' | jq '{message,status}'` | FAIL | Continuation PR poll remains blocked (`404 Not Found`) |
+| 2026-02-20 | `curl -s 'https://api.github.com/repos/example/staging-repo/actions/runs?branch=codex/pq-multisig-full-impl-20260220' | jq '{message,status,total_count}'` | FAIL | Continuation CI poll remains blocked (`404 Not Found`) |
+| 2026-02-20 | `curl -s 'https://api.github.com/repos/example/staging-repo/pulls?head=btxchain:codex/pq-multisig-full-impl-20260220&state=open' | jq '{message,status}'` | FAIL | Continuation PR poll remains blocked (`404 Not Found`) |
 | 2026-02-20 | `git push origin codex/pq-multisig-full-impl-20260220` | PASS | Pushed duplicate-key hardening commits (`dbb9f79876`, `86a24a4309`) |
-| 2026-02-20 | `curl -s 'https://api.github.com/repos/btxchain/btx-node/actions/runs?branch=codex/pq-multisig-full-impl-20260220' | jq '{message,status,total_count}'` | FAIL | Post-push CI poll remains blocked (`404 Not Found`) |
-| 2026-02-20 | `curl -s 'https://api.github.com/repos/btxchain/btx-node/pulls?head=btxchain:codex/pq-multisig-full-impl-20260220&state=open' | jq '{message,status}'` | FAIL | Post-push PR poll remains blocked (`404 Not Found`) |
+| 2026-02-20 | `curl -s 'https://api.github.com/repos/example/staging-repo/actions/runs?branch=codex/pq-multisig-full-impl-20260220' | jq '{message,status,total_count}'` | FAIL | Post-push CI poll remains blocked (`404 Not Found`) |
+| 2026-02-20 | `curl -s 'https://api.github.com/repos/example/staging-repo/pulls?head=btxchain:codex/pq-multisig-full-impl-20260220&state=open' | jq '{message,status}'` | FAIL | Post-push PR poll remains blocked (`404 Not Found`) |
 | 2026-02-20 | `git push origin codex/pq-multisig-full-impl-20260220` | PASS | Pushed tracker follow-up commit (`4eed757481`) |
-| 2026-02-20 | `curl -s 'https://api.github.com/repos/btxchain/btx-node/actions/runs?branch=codex/pq-multisig-full-impl-20260220' | jq '{message,status,total_count}'` | FAIL | Latest post-push CI poll remains blocked (`404 Not Found`) |
-| 2026-02-20 | `curl -s 'https://api.github.com/repos/btxchain/btx-node/pulls?head=btxchain:codex/pq-multisig-full-impl-20260220&state=open' | jq '{message,status}'` | FAIL | Latest post-push PR poll remains blocked (`404 Not Found`) |
+| 2026-02-20 | `curl -s 'https://api.github.com/repos/example/staging-repo/actions/runs?branch=codex/pq-multisig-full-impl-20260220' | jq '{message,status,total_count}'` | FAIL | Latest post-push CI poll remains blocked (`404 Not Found`) |
+| 2026-02-20 | `curl -s 'https://api.github.com/repos/example/staging-repo/pulls?head=btxchain:codex/pq-multisig-full-impl-20260220&state=open' | jq '{message,status}'` | FAIL | Latest post-push PR poll remains blocked (`404 Not Found`) |
 | 2026-02-20 | `git fetch --all --prune && git checkout main && git pull --ff-only origin main` | PASS | Mandatory sync rerun for current continuation cycle |
 | 2026-02-20 | `git checkout codex/pq-multisig-full-impl-20260220 && git pull --ff-only origin codex/pq-multisig-full-impl-20260220` | PASS | Reused existing date branch, verified clean/up-to-date |
 | 2026-02-20 | `./build/bin/test_btx --run_test='pq_multisig_tests/*' --catch_system_errors=no --color_output=false` | PASS | Host multisig unit gate rerun green |
@@ -232,8 +232,8 @@
 | 2026-02-20 | `python3 test/lint/lint-op-success-p2tr.py` | PASS | Opcode lint gate green |
 | 2026-02-20 | `python3 test/lint/lint-shell.py` | PASS | Shell lint gate green |
 | 2026-02-20 | `python3 test/lint/lint-python.py` | FAIL | `mypy` missing on host (`FileNotFoundError: mypy`) |
-| 2026-02-20 | `curl -s 'https://api.github.com/repos/btxchain/btx-node/actions/runs?branch=codex/pq-multisig-full-impl-20260220' | jq '{message,status,total_count}'` | FAIL | Continuation CI poll remains blocked (`404 Not Found`) |
-| 2026-02-20 | `curl -s 'https://api.github.com/repos/btxchain/btx-node/pulls?head=btxchain:codex/pq-multisig-full-impl-20260220&state=open' | jq '{message,status}'` | FAIL | Continuation PR poll remains blocked (`404 Not Found`) |
+| 2026-02-20 | `curl -s 'https://api.github.com/repos/example/staging-repo/actions/runs?branch=codex/pq-multisig-full-impl-20260220' | jq '{message,status,total_count}'` | FAIL | Continuation CI poll remains blocked (`404 Not Found`) |
+| 2026-02-20 | `curl -s 'https://api.github.com/repos/example/staging-repo/pulls?head=btxchain:codex/pq-multisig-full-impl-20260220&state=open' | jq '{message,status}'` | FAIL | Continuation PR poll remains blocked (`404 Not Found`) |
 | 2026-02-20 | `git fetch --all --prune` | PASS | Mandatory sync rerun for latest continuation cycle |
 | 2026-02-20 | `git checkout main` | FAIL | Blocked by local tracker modification (`would be overwritten by checkout`) |
 | 2026-02-20 | `git stash push -m 'tmp-tracker-sync-20260220' -- doc/pq-multisig-full-implementation-tracker.md` | PASS | Temporary stash created to allow mandatory branch sync commands |
@@ -265,13 +265,13 @@
 | 2026-02-20 | `python3 test/lint/lint-op-success-p2tr.py` | PASS | Static/lint gate green |
 | 2026-02-20 | `python3 test/lint/lint-shell.py` | PASS | Static/lint gate green |
 | 2026-02-20 | `python3 test/lint/lint-python.py` | FAIL | `mypy` missing on host (`FileNotFoundError: mypy`) |
-| 2026-02-20 | `PATH="/Users/admin/Documents/btxchain/btx-node/.ci-lint-venv311/bin:$PATH" python3 test/lint/lint-python.py` | PASS | `Success: no issues found in 349 source files` with local mypy venv and `lief.pyi` shim |
+| 2026-02-20 | `PATH="/path/to/Documents/example/staging-repo/.ci-lint-venv311/bin:$PATH" python3 test/lint/lint-python.py` | PASS | `Success: no issues found in 349 source files` with local mypy venv and `lief.pyi` shim |
 | 2026-02-20 | `env -i HOME="$HOME" PATH="$PATH" USER="$USER" SHELL=/bin/bash TERM=xterm-256color LANG=C.UTF-8 LC_ALL=C.UTF-8 bash -c 'FILE_ENV="./ci/test/00_setup_env_native_asan.sh" RUN_FUNCTIONAL_TESTS=false CTEST_REGEX="(pq_multisig_tests|pq_multisig_descriptor_tests|pq_multisig_wallet_tests|pq_consensus_tests|pq_policy_tests|pq_phase4_tests|pq_descriptor_tests|pq_wallet_tests)" ./ci/test_run_all.sh'` | PASS | Definitive ASan impacted-lane rerun after `lief.pyi` (`100% tests passed, 0 failed out of 8`) |
-| 2026-02-20 | `curl -s 'https://api.github.com/repos/btxchain/btx-node/actions/runs?branch=codex/pq-multisig-full-impl-20260220' | jq '{message,status,total_count}'` | FAIL | Latest continuation CI poll remains blocked (`404 Not Found`) |
-| 2026-02-20 | `curl -s 'https://api.github.com/repos/btxchain/btx-node/pulls?head=btxchain:codex/pq-multisig-full-impl-20260220&state=open' | jq '{message,status}'` | FAIL | Latest continuation PR poll remains blocked (`404 Not Found`) |
+| 2026-02-20 | `curl -s 'https://api.github.com/repos/example/staging-repo/actions/runs?branch=codex/pq-multisig-full-impl-20260220' | jq '{message,status,total_count}'` | FAIL | Latest continuation CI poll remains blocked (`404 Not Found`) |
+| 2026-02-20 | `curl -s 'https://api.github.com/repos/example/staging-repo/pulls?head=btxchain:codex/pq-multisig-full-impl-20260220&state=open' | jq '{message,status}'` | FAIL | Latest continuation PR poll remains blocked (`404 Not Found`) |
 | 2026-02-20 | `git push origin codex/pq-multisig-full-impl-20260220` | PASS | Pushed commits `aa8eca637f` and `6f2124ae96` |
-| 2026-02-20 | `curl -s 'https://api.github.com/repos/btxchain/btx-node/actions/runs?branch=codex/pq-multisig-full-impl-20260220' | jq '{message,status,total_count,workflow_runs: (.workflow_runs|length)}'` | FAIL | Post-push CI poll still blocked (`404 Not Found`) |
-| 2026-02-20 | `curl -s 'https://api.github.com/repos/btxchain/btx-node/pulls?head=btxchain:codex/pq-multisig-full-impl-20260220&state=open' | jq '{message,status,length: length}'` | FAIL | Post-push PR poll still blocked (`404 Not Found`) |
+| 2026-02-20 | `curl -s 'https://api.github.com/repos/example/staging-repo/actions/runs?branch=codex/pq-multisig-full-impl-20260220' | jq '{message,status,total_count,workflow_runs: (.workflow_runs|length)}'` | FAIL | Post-push CI poll still blocked (`404 Not Found`) |
+| 2026-02-20 | `curl -s 'https://api.github.com/repos/example/staging-repo/pulls?head=btxchain:codex/pq-multisig-full-impl-20260220&state=open' | jq '{message,status,length: length}'` | FAIL | Post-push PR poll still blocked (`404 Not Found`) |
 | 2026-02-20 | `gh pr create --base main --head codex/pq-multisig-full-impl-20260220 --title "PQ multisig full implementation" --body "<summary>"` | FAIL | `gh` CLI unavailable in environment (`command not found: gh`) |
 | 2026-02-20 | `git fetch --all --prune` | PASS | Mandatory sync completed for continuation cycle on new date branch |
 | 2026-02-20 | `git checkout main` | PASS | Switched to `main` before branch recreation |
@@ -290,12 +290,12 @@
 | 2026-02-20 | `FUZZ=pq_merkle ./ci/scratch/build-asan-fuzz/bin/fuzz /tmp/pq_fuzz_smoke_20260221/pq_merkle` | PASS | Direct PQ fuzz smoke mitigation passed (1 seed file) |
 | 2026-02-20 | `FUZZ=pq_script_verify ./ci/scratch/build-asan-fuzz/bin/fuzz /tmp/pq_fuzz_smoke_20260221/pq_script_verify` | PASS | Direct PQ fuzz smoke mitigation passed (1 seed file) |
 | 2026-02-20 | `git push -u origin codex/pq-multisig-full-impl-20260221` | PASS | New-date continuation branch pushed; GitHub provided PR URL |
-| 2026-02-20 | `curl -s 'https://api.github.com/repos/btxchain/btx-node/actions/runs?branch=codex/pq-multisig-full-impl-20260221' | jq '{message,status,total_count,workflow_runs: (.workflow_runs|length)}'` | FAIL | CI observation still blocked (`404 Not Found`) |
-| 2026-02-20 | `curl -s 'https://api.github.com/repos/btxchain/btx-node/pulls?head=btxchain:codex/pq-multisig-full-impl-20260221&state=open' | jq '{message,status,length: length}'` | FAIL | PR observation still blocked (`404 Not Found`) |
+| 2026-02-20 | `curl -s 'https://api.github.com/repos/example/staging-repo/actions/runs?branch=codex/pq-multisig-full-impl-20260221' | jq '{message,status,total_count,workflow_runs: (.workflow_runs|length)}'` | FAIL | CI observation still blocked (`404 Not Found`) |
+| 2026-02-20 | `curl -s 'https://api.github.com/repos/example/staging-repo/pulls?head=btxchain:codex/pq-multisig-full-impl-20260221&state=open' | jq '{message,status,length: length}'` | FAIL | PR observation still blocked (`404 Not Found`) |
 | 2026-02-20 | `gh --version` | FAIL | GitHub CLI unavailable (`command not found: gh`) |
 | 2026-02-20 | `git push origin codex/pq-multisig-full-impl-20260221` | PASS | Pushed follow-up tracker commit (`039fd68b78`) |
-| 2026-02-20 | `curl -s 'https://api.github.com/repos/btxchain/btx-node/actions/runs?branch=codex/pq-multisig-full-impl-20260221' | jq '{message,status,total_count,workflow_runs: (.workflow_runs|length)}'` | FAIL | Post-push CI observation still blocked (`404 Not Found`) |
-| 2026-02-20 | `curl -s 'https://api.github.com/repos/btxchain/btx-node/pulls?head=btxchain:codex/pq-multisig-full-impl-20260221&state=open' | jq '{message,status,length: length}'` | FAIL | Post-push PR observation still blocked (`404 Not Found`) |
+| 2026-02-20 | `curl -s 'https://api.github.com/repos/example/staging-repo/actions/runs?branch=codex/pq-multisig-full-impl-20260221' | jq '{message,status,total_count,workflow_runs: (.workflow_runs|length)}'` | FAIL | Post-push CI observation still blocked (`404 Not Found`) |
+| 2026-02-20 | `curl -s 'https://api.github.com/repos/example/staging-repo/pulls?head=btxchain:codex/pq-multisig-full-impl-20260221&state=open' | jq '{message,status,length: length}'` | FAIL | Post-push PR observation still blocked (`404 Not Found`) |
 
 ## Blocker Log + Mitigation
 
@@ -311,7 +311,7 @@
 | 2026-02-20 | `ci/test/03_test_script.sh` fuzz invocation ordering with `FUZZ_TESTS_CONFIG="pq_script_verify"` | Full native fuzz lane build completed but smoke run exited with argument parse error before target execution | Executed direct `FUZZ=<target> ./ci/scratch/build-asan-fuzz/bin/fuzz /tmp/pq_fuzz_smoke_20260221/<target>` smoke runs for `pq_descriptor_parse`, `pq_merkle`, and `pq_script_verify` with seed corpus | Mitigated |
 | 2026-02-20 | CentOS container compile/link resources exhausted during targeted lane (`cc1plus`/`ld` killed by signal 9) | Initial CentOS gate attempt failed before tests, delaying cycle closure | Re-ran same impacted gate with constrained resources (`MAKEJOBS=-j1`, `GOAL=test_btx`); lane completed and all 8 targeted suites passed | Mitigated |
 | 2026-02-20 | Parallelized git operations raced during mandatory sync (`index.lock` + branch pull conflict) | Interrupted sync workflow and temporarily prevented deterministic branch updates | Recovered with stash-based tracker preservation and reran sync commands sequentially (`fetch` -> `checkout main` -> `pull` -> return branch) | Mitigated |
-| 2026-02-20 | CI/PR API visibility blocked (`404 Not Found`) for unauthenticated GitHub REST calls on `btxchain/btx-node` | Cannot observe Actions jobs or enumerate/open PRs from this environment | Continued full local validation + branch push evidence; require authenticated GitHub token/`gh` access to complete CI observation loop | Open (external dependency) |
+| 2026-02-20 | CI/PR API visibility blocked (`404 Not Found`) for unauthenticated GitHub REST calls on `example/staging-repo` | Cannot observe Actions jobs or enumerate/open PRs from this environment | Continued full local validation + branch push evidence; require authenticated GitHub token/`gh` access to complete CI observation loop | Open (external dependency) |
 | 2026-02-20 | GitHub CLI unavailable (`gh` command missing) | Cannot create PR from this environment even after local gates are green | Attempted `gh pr create`; command unavailable. PR creation must be done via GitHub web UI or by installing/authenticating `gh` | Open (external dependency) |
 
 ## Cycle Reporting Log
@@ -424,8 +424,8 @@
     - `./build/bin/test_btx --run_test='pq_multisig_descriptor_tests/*' --catch_system_errors=no --color_output=false` -> PASS.
     - `python3 test/functional/feature_pq_multisig.py --descriptors` -> PASS.
 - CI deltas:
-  - `curl -s 'https://api.github.com/repos/btxchain/btx-node/actions/runs?branch=codex/pq-multisig-full-impl-20260220'` -> `404 Not Found`.
-  - `curl -s 'https://api.github.com/repos/btxchain/btx-node/pulls?head=btxchain:codex/pq-multisig-full-impl-20260220&state=open'` -> `404 Not Found`.
+  - `curl -s 'https://api.github.com/repos/example/staging-repo/actions/runs?branch=codex/pq-multisig-full-impl-20260220'` -> `404 Not Found`.
+  - `curl -s 'https://api.github.com/repos/example/staging-repo/pulls?head=btxchain:codex/pq-multisig-full-impl-20260220&state=open'` -> `404 Not Found`.
   - CI monitoring loop remains blocked by external auth/tooling constraints.
 - Vulnerability findings + fixes:
   - Finding: single-key `multi_pq` acceptance in builder/parser/RPC conflicted with policy+signing assumptions, creating a nonstandard-output footgun.
@@ -452,8 +452,8 @@
   - Re-ran CI and PR API checks post-push.
 - Tests run + exact results:
   - `git push origin codex/pq-multisig-full-impl-20260220` -> PASS.
-  - `curl -s 'https://api.github.com/repos/btxchain/btx-node/actions/runs?branch=codex/pq-multisig-full-impl-20260220'` -> FAIL (`404 Not Found`).
-  - `curl -s 'https://api.github.com/repos/btxchain/btx-node/pulls?head=btxchain:codex/pq-multisig-full-impl-20260220&state=open'` -> FAIL (`404 Not Found`).
+  - `curl -s 'https://api.github.com/repos/example/staging-repo/actions/runs?branch=codex/pq-multisig-full-impl-20260220'` -> FAIL (`404 Not Found`).
+  - `curl -s 'https://api.github.com/repos/example/staging-repo/pulls?head=btxchain:codex/pq-multisig-full-impl-20260220&state=open'` -> FAIL (`404 Not Found`).
 - CI deltas:
   - Branch is updated on origin; remote CI status remains unobservable from this environment due auth restriction.
 - Vulnerability findings + fixes:
@@ -492,8 +492,8 @@
   - `python3 test/functional/rpc_pq_multisig.py --descriptors` -> PASS.
   - `python3 test/functional/feature_pq_multisig.py --descriptors` -> PASS.
 - CI deltas:
-  - `curl -s 'https://api.github.com/repos/btxchain/btx-node/actions/runs?branch=codex/pq-multisig-full-impl-20260220'` -> `404 Not Found`.
-  - `curl -s 'https://api.github.com/repos/btxchain/btx-node/pulls?head=btxchain:codex/pq-multisig-full-impl-20260220&state=open'` -> `404 Not Found`.
+  - `curl -s 'https://api.github.com/repos/example/staging-repo/actions/runs?branch=codex/pq-multisig-full-impl-20260220'` -> `404 Not Found`.
+  - `curl -s 'https://api.github.com/repos/example/staging-repo/pulls?head=btxchain:codex/pq-multisig-full-impl-20260220&state=open'` -> `404 Not Found`.
   - No CI job status deltas were observable due external auth limitation.
 - Vulnerability findings + fixes:
   - No new critical/high findings in this cycle.
@@ -518,8 +518,8 @@
   - Re-polled GitHub Actions and PR APIs after push.
 - Tests run + exact results:
   - `git push origin codex/pq-multisig-full-impl-20260220` -> PASS.
-  - `curl -s 'https://api.github.com/repos/btxchain/btx-node/actions/runs?branch=codex/pq-multisig-full-impl-20260220' | jq '{message,status,total_count}'` -> FAIL (`404 Not Found`).
-  - `curl -s 'https://api.github.com/repos/btxchain/btx-node/pulls?head=btxchain:codex/pq-multisig-full-impl-20260220&state=open' | jq '{message,status}'` -> FAIL (`404 Not Found`).
+  - `curl -s 'https://api.github.com/repos/example/staging-repo/actions/runs?branch=codex/pq-multisig-full-impl-20260220' | jq '{message,status,total_count}'` -> FAIL (`404 Not Found`).
+  - `curl -s 'https://api.github.com/repos/example/staging-repo/pulls?head=btxchain:codex/pq-multisig-full-impl-20260220&state=open' | jq '{message,status}'` -> FAIL (`404 Not Found`).
 - CI deltas:
   - No observable CI status change due external auth block.
 - Vulnerability findings + fixes:
@@ -541,8 +541,8 @@
   - `python3 test/functional/rpc_pq_multisig.py --descriptors` -> PASS.
   - `python3 test/functional/feature_pq_multisig.py --descriptors` -> PASS.
   - `env -i HOME="$HOME" PATH="$PATH" SHELL=/bin/bash TERM=xterm-256color USER="$USER" LANG=C.UTF-8 LC_ALL=C.UTF-8 FILE_ENV="./ci/test/00_setup_env_native_centos.sh" RUN_FUNCTIONAL_TESTS=false CTEST_REGEX="(pq_multisig_tests|pq_multisig_descriptor_tests|pq_consensus_tests|pq_policy_tests|pq_phase4_tests|pq_descriptor_tests)" ./ci/test_run_all.sh` -> PASS (`100% tests passed, 0 failed out of 6`).
-  - `curl -s 'https://api.github.com/repos/btxchain/btx-node/actions/runs?branch=codex/pq-multisig-full-impl-20260220' | jq '{message,status,total_count}'` -> FAIL (`404 Not Found`).
-  - `curl -s 'https://api.github.com/repos/btxchain/btx-node/pulls?head=btxchain:codex/pq-multisig-full-impl-20260220&state=open' | jq '{message,status}'` -> FAIL (`404 Not Found`).
+  - `curl -s 'https://api.github.com/repos/example/staging-repo/actions/runs?branch=codex/pq-multisig-full-impl-20260220' | jq '{message,status,total_count}'` -> FAIL (`404 Not Found`).
+  - `curl -s 'https://api.github.com/repos/example/staging-repo/pulls?head=btxchain:codex/pq-multisig-full-impl-20260220&state=open' | jq '{message,status}'` -> FAIL (`404 Not Found`).
 - CI deltas:
   - No observable CI job state changes; endpoint access remains blocked by repository authentication requirements.
 - Vulnerability findings + fixes:
@@ -562,8 +562,8 @@
   - Confirmed local branch is clean and in sync with origin.
 - Tests run + exact results:
   - `git push origin codex/pq-multisig-full-impl-20260220` -> PASS.
-  - `curl -s 'https://api.github.com/repos/btxchain/btx-node/actions/runs?branch=codex/pq-multisig-full-impl-20260220' | jq '{message,status,total_count}'` -> FAIL (`404 Not Found`).
-  - `curl -s 'https://api.github.com/repos/btxchain/btx-node/pulls?head=btxchain:codex/pq-multisig-full-impl-20260220&state=open' | jq '{message,status}'` -> FAIL (`404 Not Found`).
+  - `curl -s 'https://api.github.com/repos/example/staging-repo/actions/runs?branch=codex/pq-multisig-full-impl-20260220' | jq '{message,status,total_count}'` -> FAIL (`404 Not Found`).
+  - `curl -s 'https://api.github.com/repos/example/staging-repo/pulls?head=btxchain:codex/pq-multisig-full-impl-20260220&state=open' | jq '{message,status}'` -> FAIL (`404 Not Found`).
   - `git rev-parse --short HEAD && git status --short --branch` -> PASS (`3163e11d8d`, working tree clean).
 - CI deltas:
   - No observable CI state due unchanged external authentication block.
@@ -601,8 +601,8 @@
     - `python3 test/lint/lint-files.py` -> PASS.
     - `env -i HOME="$HOME" PATH="$PATH" USER="$USER" bash -c 'FILE_ENV="./ci/test/00_setup_env_native_centos.sh" MAKEJOBS=-j1 GOAL=test_btx RUN_FUNCTIONAL_TESTS=false CTEST_REGEX="(pq_multisig_tests|pq_multisig_descriptor_tests|pq_multisig_wallet_tests|pq_consensus_tests|pq_policy_tests|pq_phase4_tests|pq_descriptor_tests|pq_wallet_tests)" ./ci/test_run_all.sh'` -> PASS (`100% tests passed, 0 failed out of 8`).
 - CI deltas:
-  - `curl -s 'https://api.github.com/repos/btxchain/btx-node/actions/runs?branch=codex/pq-multisig-full-impl-20260220' | jq '{message,status,total_count}'` -> FAIL (`404 Not Found`).
-  - `curl -s 'https://api.github.com/repos/btxchain/btx-node/pulls?head=btxchain:codex/pq-multisig-full-impl-20260220&state=open' | jq '{message,status}'` -> FAIL (`404 Not Found`).
+  - `curl -s 'https://api.github.com/repos/example/staging-repo/actions/runs?branch=codex/pq-multisig-full-impl-20260220' | jq '{message,status,total_count}'` -> FAIL (`404 Not Found`).
+  - `curl -s 'https://api.github.com/repos/example/staging-repo/pulls?head=btxchain:codex/pq-multisig-full-impl-20260220&state=open' | jq '{message,status}'` -> FAIL (`404 Not Found`).
   - No observable branch CI/PR state changes from this environment.
 - Vulnerability findings + fixes:
   - Finding: duplicate PQ pubkeys in a multisig leaf could create confusing/redundant semantics and mismatch operational expectations for signer uniqueness.
@@ -625,8 +625,8 @@
   - Re-polled Actions and PR APIs after push.
 - Tests run + exact results:
   - `git push origin codex/pq-multisig-full-impl-20260220` -> PASS.
-  - `curl -s 'https://api.github.com/repos/btxchain/btx-node/actions/runs?branch=codex/pq-multisig-full-impl-20260220' | jq '{message,status,total_count}'` -> FAIL (`404 Not Found`).
-  - `curl -s 'https://api.github.com/repos/btxchain/btx-node/pulls?head=btxchain:codex/pq-multisig-full-impl-20260220&state=open' | jq '{message,status}'` -> FAIL (`404 Not Found`).
+  - `curl -s 'https://api.github.com/repos/example/staging-repo/actions/runs?branch=codex/pq-multisig-full-impl-20260220' | jq '{message,status,total_count}'` -> FAIL (`404 Not Found`).
+  - `curl -s 'https://api.github.com/repos/example/staging-repo/pulls?head=btxchain:codex/pq-multisig-full-impl-20260220&state=open' | jq '{message,status}'` -> FAIL (`404 Not Found`).
 - CI deltas:
   - Branch advanced on origin from `3173e6e9c3` to `86a24a4309`.
   - Remote CI status remains unobservable due repository authentication restrictions.
@@ -645,8 +645,8 @@
   - Re-polled Actions and PR APIs again after push.
 - Tests run + exact results:
   - `git push origin codex/pq-multisig-full-impl-20260220` -> PASS.
-  - `curl -s 'https://api.github.com/repos/btxchain/btx-node/actions/runs?branch=codex/pq-multisig-full-impl-20260220' | jq '{message,status,total_count}'` -> FAIL (`404 Not Found`).
-  - `curl -s 'https://api.github.com/repos/btxchain/btx-node/pulls?head=btxchain:codex/pq-multisig-full-impl-20260220&state=open' | jq '{message,status}'` -> FAIL (`404 Not Found`).
+  - `curl -s 'https://api.github.com/repos/example/staging-repo/actions/runs?branch=codex/pq-multisig-full-impl-20260220' | jq '{message,status,total_count}'` -> FAIL (`404 Not Found`).
+  - `curl -s 'https://api.github.com/repos/example/staging-repo/pulls?head=btxchain:codex/pq-multisig-full-impl-20260220&state=open' | jq '{message,status}'` -> FAIL (`404 Not Found`).
 - CI deltas:
   - Branch advanced on origin from `86a24a4309` to `4eed757481`.
   - CI/PR visibility still blocked externally; no observable workflow deltas.
@@ -697,7 +697,7 @@
   - Re-ran the impacted ASan Docker lane after the shim change and captured a clean pass (`8/8`).
 - Tests run + exact results:
   - `python3 test/lint/lint-python.py` -> FAIL (`FileNotFoundError: mypy`).
-  - `PATH="/Users/admin/Documents/btxchain/btx-node/.ci-lint-venv311/bin:$PATH" python3 test/lint/lint-python.py` -> PASS (`Success: no issues found in 349 source files`).
+  - `PATH="/path/to/Documents/example/staging-repo/.ci-lint-venv311/bin:$PATH" python3 test/lint/lint-python.py` -> PASS (`Success: no issues found in 349 source files`).
   - `env -i HOME="$HOME" PATH="$PATH" USER="$USER" SHELL=/bin/bash TERM=xterm-256color LANG=C.UTF-8 LC_ALL=C.UTF-8 bash -c 'FILE_ENV="./ci/test/00_setup_env_native_asan.sh" RUN_FUNCTIONAL_TESTS=false CTEST_REGEX="(pq_multisig_tests|pq_multisig_descriptor_tests|pq_multisig_wallet_tests|pq_consensus_tests|pq_policy_tests|pq_phase4_tests|pq_descriptor_tests|pq_wallet_tests)" ./ci/test_run_all.sh'` -> PASS (`100% tests passed, 0 failed out of 8`).
 - CI deltas:
   - No branch state change yet in this cycle (commit/push pending).
@@ -720,8 +720,8 @@
   - Pushed branch head to origin and re-polled Actions/PR APIs.
 - Tests run + exact results:
   - `git push origin codex/pq-multisig-full-impl-20260220` -> PASS.
-  - `curl -s 'https://api.github.com/repos/btxchain/btx-node/actions/runs?branch=codex/pq-multisig-full-impl-20260220' | jq '{message,status,total_count,workflow_runs: (.workflow_runs|length)}'` -> FAIL (`404 Not Found`).
-  - `curl -s 'https://api.github.com/repos/btxchain/btx-node/pulls?head=btxchain:codex/pq-multisig-full-impl-20260220&state=open' | jq '{message,status,length: length}'` -> FAIL (`404 Not Found`).
+  - `curl -s 'https://api.github.com/repos/example/staging-repo/actions/runs?branch=codex/pq-multisig-full-impl-20260220' | jq '{message,status,total_count,workflow_runs: (.workflow_runs|length)}'` -> FAIL (`404 Not Found`).
+  - `curl -s 'https://api.github.com/repos/example/staging-repo/pulls?head=btxchain:codex/pq-multisig-full-impl-20260220&state=open' | jq '{message,status,length: length}'` -> FAIL (`404 Not Found`).
 - CI deltas:
   - Branch advanced on origin from `e361e62141` to `6f2124ae96`.
   - Workflow/PR visibility still unavailable from this environment due repository authentication restrictions.
@@ -789,13 +789,13 @@
 - Completed tasks:
   - Committed cycle tracker updates and pushed `codex/pq-multisig-full-impl-20260221` to origin.
   - Captured GitHub-provided PR creation URL from push response:
-    - `https://github.com/btxchain/btx-node/pull/new/codex/pq-multisig-full-impl-20260221`
+    - `https://github.com/example/staging-repo/pull/new/codex/pq-multisig-full-impl-20260221`
   - Re-ran Actions/PR observation checks for the new branch.
   - Re-validated CLI availability for PR creation path (`gh`).
 - Tests run + exact results:
   - `git push -u origin codex/pq-multisig-full-impl-20260221` -> PASS.
-  - `curl -s 'https://api.github.com/repos/btxchain/btx-node/actions/runs?branch=codex/pq-multisig-full-impl-20260221' | jq '{message,status,total_count,workflow_runs: (.workflow_runs|length)}'` -> FAIL (`404 Not Found`).
-  - `curl -s 'https://api.github.com/repos/btxchain/btx-node/pulls?head=btxchain:codex/pq-multisig-full-impl-20260221&state=open' | jq '{message,status,length: length}'` -> FAIL (`404 Not Found`).
+  - `curl -s 'https://api.github.com/repos/example/staging-repo/actions/runs?branch=codex/pq-multisig-full-impl-20260221' | jq '{message,status,total_count,workflow_runs: (.workflow_runs|length)}'` -> FAIL (`404 Not Found`).
+  - `curl -s 'https://api.github.com/repos/example/staging-repo/pulls?head=btxchain:codex/pq-multisig-full-impl-20260221&state=open' | jq '{message,status,length: length}'` -> FAIL (`404 Not Found`).
   - `gh --version` -> FAIL (`command not found: gh`).
 - CI deltas:
   - Remote branch now exists and tracks origin.
@@ -816,8 +816,8 @@
   - Re-ran Actions and PR observation API checks after push.
 - Tests run + exact results:
   - `git push origin codex/pq-multisig-full-impl-20260221` -> PASS.
-  - `curl -s 'https://api.github.com/repos/btxchain/btx-node/actions/runs?branch=codex/pq-multisig-full-impl-20260221' | jq '{message,status,total_count,workflow_runs: (.workflow_runs|length)}'` -> FAIL (`404 Not Found`).
-  - `curl -s 'https://api.github.com/repos/btxchain/btx-node/pulls?head=btxchain:codex/pq-multisig-full-impl-20260221&state=open' | jq '{message,status,length: length}'` -> FAIL (`404 Not Found`).
+  - `curl -s 'https://api.github.com/repos/example/staging-repo/actions/runs?branch=codex/pq-multisig-full-impl-20260221' | jq '{message,status,total_count,workflow_runs: (.workflow_runs|length)}'` -> FAIL (`404 Not Found`).
+  - `curl -s 'https://api.github.com/repos/example/staging-repo/pulls?head=btxchain:codex/pq-multisig-full-impl-20260221&state=open' | jq '{message,status,length: length}'` -> FAIL (`404 Not Found`).
 - CI deltas:
   - Branch head advanced remotely.
   - CI status still not observable without authenticated repo access.
@@ -832,7 +832,7 @@
 ## Latest Prompt Delta Capture (Continuation Turn)
 
 ```markdown
-You are working in `/Users/admin/Documents/btxchain/btx-node`.
+You are working in `/path/to/Documents/example/staging-repo`.
 
 Treat the plan document below this prompt as the canonical source of truth and execute it fully, end-to-end, with zero deferrals. Reference and use the tracking document at pq-multisig-full-implementation-tracker.md while doing this development work. All of the content contained within this prompt should be in that document, so you can reference and remember between context shifts. Continue with the work that remains. If all work is complete, and all tests pass both locally and in CI, analyze both local code and search online for multisig vulnerabilities, problems, edge cases, and so on to fully address and resolve all potential issues proactively. ONLY switch to vulnerability analysis when all code is complete and ready for use. Ensure that ALL work is fully completed.
 ```
@@ -844,7 +844,7 @@ The full execution requirements and full plan body in this continuation prompt a
 ## Latest Prompt Delta Capture (Continuation Turn 2)
 
 ```markdown
-You are working in `/Users/admin/Documents/btxchain/btx-node`.
+You are working in `/path/to/Documents/example/staging-repo`.
 
 Treat the plan document below this prompt as the canonical source of truth and execute it fully, end-to-end, with zero deferrals. Reference and use the tracking document at pq-multisig-full-implementation-tracker.md while doing this development work. All of the content contained within this prompt should be in that document, so you can reference and remember between context shifts. Continue with the work that remains. If all work is complete, and all tests pass both locally and in CI, analyze both local code and search online for multisig vulnerabilities, problems, edge cases, and so on to fully address and resolve all potential issues proactively. ONLY switch to vulnerability analysis when all code is complete and ready for use. Ensure that ALL work is fully completed.
 ```
@@ -856,7 +856,7 @@ The execution requirements and full plan content in this continuation prompt mat
 ## Latest Prompt Delta Capture (Continuation Turn 3)
 
 ```markdown
-You are working in `/Users/admin/Documents/btxchain/btx-node`.
+You are working in `/path/to/Documents/example/staging-repo`.
 
 Treat the plan document below this prompt as the canonical source of truth and execute it fully, end-to-end, with zero deferrals. Reference and use the tracking document at pq-multisig-full-implementation-tracker.md while doing this development work. All of the content contained within this prompt should be in that document, so you can reference and remember between context shifts. Continue with the work that remains. If all work is complete, and all tests pass both locally and in CI, analyze both local code and search online for multisig vulnerabilities, problems, edge cases, and so on to fully address and resolve all potential issues proactively. ONLY switch to vulnerability analysis when all code is complete and ready for use. Ensure that ALL work is fully completed.
 ```
@@ -868,7 +868,7 @@ The execution requirements and full plan content in this continuation prompt mat
 ## Latest Prompt Delta Capture (Continuation Turn 4)
 
 ```markdown
-You are working in `/Users/admin/Documents/btxchain/btx-node`.
+You are working in `/path/to/Documents/example/staging-repo`.
 
 Treat the plan document below this prompt as the canonical source of truth and execute it fully, end-to-end, with zero deferrals. Reference and use the tracking document at pq-multisig-full-implementation-tracker.md while doing this development work. All of the content contained within this prompt should be in that document, so you can reference and remember between context shifts. Continue with the work that remains. If all work is complete, and all tests pass both locally and in CI, analyze both local code and search online for multisig vulnerabilities, problems, edge cases, and so on to fully address and resolve all potential issues proactively. ONLY switch to vulnerability analysis when all code is complete and ready for use. Ensure that ALL work is fully completed.
 ```
@@ -880,7 +880,7 @@ The execution requirements and full plan content in this continuation prompt mat
 ## Latest Prompt Delta Capture (Continuation Turn 5)
 
 ```markdown
-You are working in `/Users/admin/Documents/btxchain/btx-node`.
+You are working in `/path/to/Documents/example/staging-repo`.
 
 Treat the plan document below this prompt as the canonical source of truth and execute it fully, end-to-end, with zero deferrals. Reference and use the tracking document at pq-multisig-full-implementation-tracker.md while doing this development work. All of the content contained within this prompt should be in that document, so you can reference and remember between context shifts. Continue with the work that remains. If all work is complete, and all tests pass both locally and in CI, analyze both local code and search online for multisig vulnerabilities, problems, edge cases, and so on to fully address and resolve all potential issues proactively. ONLY switch to vulnerability analysis when all code is complete and ready for use. Ensure that ALL work is fully completed.
 ```
@@ -892,7 +892,7 @@ The execution requirements and full plan content in this continuation prompt mat
 ## Latest Prompt Delta Capture (Continuation Turn 6)
 
 ```markdown
-You are working in `/Users/admin/Documents/btxchain/btx-node`.
+You are working in `/path/to/Documents/example/staging-repo`.
 
 Treat the plan document below this prompt as the canonical source of truth and execute it fully, end-to-end, with zero deferrals. Reference and use the tracking document at pq-multisig-full-implementation-tracker.md while doing this development work. All of the content contained within this prompt should be in that document, so you can reference and remember between context shifts. Continue with the work that remains. If all work is complete, and all tests pass both locally and in CI, analyze both local code and search online for multisig vulnerabilities, problems, edge cases, and so on to fully address and resolve all potential issues proactively. ONLY switch to vulnerability analysis when all code is complete and ready for use. Ensure that ALL work is fully completed.
 ```
@@ -904,7 +904,7 @@ The execution requirements and full plan content in this continuation prompt mat
 ## Verbatim Prompt Capture (Canonical Source)
 
 ```markdown
-You are working in `/Users/admin/Documents/btxchain/btx-node`.
+You are working in `/path/to/Documents/example/staging-repo`.
 
 Treat the plan document below this prompt as the canonical source of truth and execute it fully, end-to-end, with zero deferrals. Create a tracking document to reference and use while doing this development work, or reference the one that already exists (if there is one). Include all of the content contained within this prompt in that document, so you can reference and remember between context shifts.
 
@@ -919,7 +919,7 @@ Execution requirements (mandatory):
   - `codex/pq-multisig-full-impl-<YYYYMMDD>`
 
 2) Status tracking document
-- Create/update: `/Users/admin/Documents/btxchain/btx-node/doc/pq-multisig-full-implementation-tracker.md`
+- Create/update: `/path/to/Documents/example/staging-repo/doc/pq-multisig-full-implementation-tracker.md`
 - Include:
   - phase-by-phase task checklist
   - acceptance criteria per task
@@ -1412,7 +1412,7 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
 ### CI delta
 - `gh --version` still fails (`command not found: gh`).
 - Direct Actions API query still fails unauthenticated with `404` for branch runs:
-  - `curl -fsSL "https://api.github.com/repos/btxchain/btx-node/actions/runs?branch=codex/pq-multisig-full-impl-20260221&per_page=5"`
+  - `curl -fsSL "https://api.github.com/repos/example/staging-repo/actions/runs?branch=codex/pq-multisig-full-impl-20260221&per_page=5"`
 
 ### Vulnerability findings and fixes (this cycle)
 - Critical/high findings from sanitizer/fuzz/lint reruns: none.
@@ -1503,7 +1503,7 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
 |---|---|---|
 | Push | `git push origin codex/pq-multisig-full-impl-20260221` | PASS (`63392ee86c..13157eba1a`) |
 | CI tooling check | `gh --version` | FAIL (`command not found: gh`) |
-| CI API check | `curl -i -sS "https://api.github.com/repos/btxchain/btx-node/actions/runs?branch=codex/pq-multisig-full-impl-20260221&per_page=5"` | FAIL (`HTTP/2 404`, `{"message":"Not Found"}`) |
+| CI API check | `curl -i -sS "https://api.github.com/repos/example/staging-repo/actions/runs?branch=codex/pq-multisig-full-impl-20260221&per_page=5"` | FAIL (`HTTP/2 404`, `{"message":"Not Found"}`) |
 
 ### CI delta
 - Branch advanced on origin to include PSBT hardening + tracker updates.
@@ -1643,9 +1643,9 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
 ## Cycle 28 - 2026-02-21 (PSBT merge-order malformed partial-signature hardening)
 
 ### Completed tasks
-- Added fail-first regression `combinepsbt_replaces_malformed_p2mr_partial_sig_with_valid_one` in `/Users/admin/Documents/btxchain/btx-node/src/test/pq_phase4_tests.cpp`.
+- Added fail-first regression `combinepsbt_replaces_malformed_p2mr_partial_sig_with_valid_one` in `/path/to/Documents/example/staging-repo/src/test/pq_phase4_tests.cpp`.
 - Reproduced merge-order poisoning: malformed P2MR partial signature inserted first prevented later valid signature from replacing it during `combinepsbt`.
-- Implemented merge hardening in `/Users/admin/Documents/btxchain/btx-node/src/psbt.cpp`:
+- Implemented merge hardening in `/path/to/Documents/example/staging-repo/src/psbt.cpp`:
   - added well-formedness checks (`IsDefinedP2MRSighashType`, `IsWellFormedP2MRPartialSig`);
   - changed `PSBTInput::Merge` for `m_p2mr_pq_sigs` to replace malformed existing entries when a well-formed signature arrives for the same key.
 - Revalidated host, functional, Docker (CentOS + ASan), lint/static, and PQ fuzz-smoke lanes after fix.
@@ -1697,9 +1697,9 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
 ## Cycle 29 - 2026-02-21 (order-independent selection for conflicting P2MR partial signatures)
 
 ### Completed tasks
-- Added fail-first regression `combinepsbt_replaces_wrong_but_well_formed_p2mr_partial_sig_with_valid_one` in `/Users/admin/Documents/btxchain/btx-node/src/test/pq_phase4_tests.cpp`.
+- Added fail-first regression `combinepsbt_replaces_wrong_but_well_formed_p2mr_partial_sig_with_valid_one` in `/path/to/Documents/example/staging-repo/src/test/pq_phase4_tests.cpp`.
 - Proved fail-first against pre-fix `src/psbt.cpp` by temporarily restoring revision `271e4a4566`: combine retained an invalid-but-size-correct signature and finalization failed.
-- Implemented order-independent canonicalization in `/Users/admin/Documents/btxchain/btx-node/src/psbt.cpp`:
+- Implemented order-independent canonicalization in `/path/to/Documents/example/staging-repo/src/psbt.cpp`:
   - added cryptographic validation helper for candidate P2MR partial signatures (`IsValidP2MRPartialSigForInput`);
   - added `CanonicalizeP2MRPartialSigs` pass in `CombinePSBTs` to select a deterministic valid candidate per `(leaf_hash,pubkey)` independent of merge order.
 - Kept prior malformed-entry replacement logic in `PSBTInput::Merge` and layered canonicalization on top for same-size invalid conflicts.
@@ -1814,18 +1814,18 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
 
 ### Completed tasks
 - Added fail-first consensus/policy coverage for P2MR OP_SUCCESS and annex behavior in:
-  - `/Users/admin/Documents/btxchain/btx-node/src/test/pq_consensus_tests.cpp`
-  - `/Users/admin/Documents/btxchain/btx-node/src/test/pq_policy_tests.cpp`
-  - `/Users/admin/Documents/btxchain/btx-node/src/test/script_tests.cpp`
+  - `/path/to/Documents/example/staging-repo/src/test/pq_consensus_tests.cpp`
+  - `/path/to/Documents/example/staging-repo/src/test/pq_policy_tests.cpp`
+  - `/path/to/Documents/example/staging-repo/src/test/script_tests.cpp`
 - Implemented P2MR-specific OP_SUCCESS semantics:
-  - Added `IsOpSuccessP2MR()` declaration in `/Users/admin/Documents/btxchain/btx-node/src/script/script.h`.
-  - Added `IsOpSuccessP2MR()` definition in `/Users/admin/Documents/btxchain/btx-node/src/script/script.cpp`, excluding defined PQ opcodes (`OP_CHECKSIG_MLDSA`, `OP_CHECKSIG_SLHDSA`, `OP_CHECKSIGFROMSTACK`, `OP_CHECKSIGADD_MLDSA`, `OP_CHECKSIGADD_SLHDSA`).
-  - Extended OP_SUCCESS pre-scan in `/Users/admin/Documents/btxchain/btx-node/src/script/interpreter.cpp` to run for `SigVersion::P2MR` and use `IsOpSuccessP2MR()`.
+  - Added `IsOpSuccessP2MR()` declaration in `/path/to/Documents/example/staging-repo/src/script/script.h`.
+  - Added `IsOpSuccessP2MR()` definition in `/path/to/Documents/example/staging-repo/src/script/script.cpp`, excluding defined PQ opcodes (`OP_CHECKSIG_MLDSA`, `OP_CHECKSIG_SLHDSA`, `OP_CHECKSIGFROMSTACK`, `OP_CHECKSIGADD_MLDSA`, `OP_CHECKSIGADD_SLHDSA`).
+  - Extended OP_SUCCESS pre-scan in `/path/to/Documents/example/staging-repo/src/script/interpreter.cpp` to run for `SigVersion::P2MR` and use `IsOpSuccessP2MR()`.
 - Implemented P2MR annex support at consensus and relay policy:
-  - Added annex parsing/hash population in P2MR witness path in `/Users/admin/Documents/btxchain/btx-node/src/script/interpreter.cpp`.
-  - Added standardness rejection reason `p2mr-annex` (while stripping annex before stack-shape checks) in `/Users/admin/Documents/btxchain/btx-node/src/policy/policy.cpp`.
+  - Added annex parsing/hash population in P2MR witness path in `/path/to/Documents/example/staging-repo/src/script/interpreter.cpp`.
+  - Added standardness rejection reason `p2mr-annex` (while stripping annex before stack-shape checks) in `/path/to/Documents/example/staging-repo/src/policy/policy.cpp`.
 - Added dedicated opcode-classification unit test:
-  - `script_tests/p2mr_opsuccess_excludes_defined_pq_opcodes` in `/Users/admin/Documents/btxchain/btx-node/src/test/script_tests.cpp`.
+  - `script_tests/p2mr_opsuccess_excludes_defined_pq_opcodes` in `/path/to/Documents/example/staging-repo/src/test/script_tests.cpp`.
 
 ### TDD evidence (fail-first then fix)
 | Area | Command | Result |
@@ -1879,7 +1879,7 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
 ### Cycle 32 addendum (CI observation capability blocker)
 - Attempted branch-head CI polling after push using:
   - `gh api ...` (failed: `gh` CLI not installed in execution environment)
-  - Python GitHub REST call to `https://api.github.com/repos/btxchain/btx-node/actions/runs?head_sha=df5b0ed602fb1941414f972ff2ce7ca8dc258925` (failed: HTTP 404 without authenticated token for private repository visibility)
+  - Python GitHub REST call to `https://api.github.com/repos/example/staging-repo/actions/runs?head_sha=df5b0ed602fb1941414f972ff2ce7ca8dc258925` (failed: HTTP 404 without authenticated token for private repository visibility)
 - Impact: cannot programmatically observe Actions run/job states from this environment despite successful push.
 - Mitigation selected:
   - keep full local gates green (host + functional + CentOS + ASan + lint + fuzz smoke);
@@ -1889,20 +1889,20 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
 ## Cycle 33 - 2026-02-21 (Part 7.2 descriptor support + host validation)
 
 ### Completed tasks
-- Added descriptor support for new P2MR HTLC/refund leaves in `/Users/admin/Documents/btxchain/btx-node/src/script/descriptor.cpp`:
+- Added descriptor support for new P2MR HTLC/refund leaves in `/path/to/Documents/example/staging-repo/src/script/descriptor.cpp`:
   - New `MRLeafType` variants: `HTLC`, `REFUND`.
   - `BuildP2MRLeafScript()` now dispatches to `BuildP2MRHTLCLeaf()` and `BuildP2MRRefundLeaf()`.
   - Parser support for `mr(htlc(<20-byte-hash160>,<oracle_key>))` and `mr(refund(<timeout>,<spender_key>))`.
   - Round-trip rendering support in `ToStringHelper()` for `htlc(...)` and `refund(...)` leaves.
-- Added descriptor tests in `/Users/admin/Documents/btxchain/btx-node/src/test/pq_descriptor_tests.cpp`:
+- Added descriptor tests in `/path/to/Documents/example/staging-repo/src/test/pq_descriptor_tests.cpp`:
   - `mr_descriptor_parses_htlc_leaf`
   - `mr_descriptor_parses_refund_leaf`
   - `mr_descriptor_parses_two_leaf_htlc_refund_tree`
   - `mr_descriptor_rejects_htlc_wrong_hash_length`
 - Continued Part 3.1/7.1 work from prior cycle in current working set:
-  - `MiniscriptContext::P2MR` + `IsP2MR()` helper (`/Users/admin/Documents/btxchain/btx-node/src/script/miniscript.h`)
-  - HTLC/refund/atomic-swap script builders (`/Users/admin/Documents/btxchain/btx-node/src/script/pqm.h`, `/Users/admin/Documents/btxchain/btx-node/src/script/pqm.cpp`)
-  - New script template unit suite registration and tests (`/Users/admin/Documents/btxchain/btx-node/src/test/CMakeLists.txt`, `/Users/admin/Documents/btxchain/btx-node/src/test/script_htlc_templates_tests.cpp`)
+  - `MiniscriptContext::P2MR` + `IsP2MR()` helper (`/path/to/Documents/example/staging-repo/src/script/miniscript.h`)
+  - HTLC/refund/atomic-swap script builders (`/path/to/Documents/example/staging-repo/src/script/pqm.h`, `/path/to/Documents/example/staging-repo/src/script/pqm.cpp`)
+  - New script template unit suite registration and tests (`/path/to/Documents/example/staging-repo/src/test/CMakeLists.txt`, `/path/to/Documents/example/staging-repo/src/test/script_htlc_templates_tests.cpp`)
 
 ### Test evidence (host)
 | Command | Result |
@@ -1942,10 +1942,10 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
 ## Cycle 34 - 2026-02-21 (Part 6.2 external signer post-signature size validation)
 
 ### Completed tasks
-- Added fail-first tests for external signer returned-signature validation in `/Users/admin/Documents/btxchain/btx-node/src/test/pq_phase4_tests.cpp`:
+- Added fail-first tests for external signer returned-signature validation in `/path/to/Documents/example/staging-repo/src/test/pq_phase4_tests.cpp`:
   - `external_signer_rejects_invalid_p2mr_partial_sig_size`
   - `external_signer_rejects_invalid_p2mr_csfs_sig_size`
-- Implemented production validation in `/Users/admin/Documents/btxchain/btx-node/src/external_signer.cpp`:
+- Implemented production validation in `/path/to/Documents/example/staging-repo/src/external_signer.cpp`:
   - Validates each returned `m_p2mr_pq_sigs` entry has algorithm-consistent signature size (raw or raw+sighash-byte with valid sighash).
   - Validates each returned `m_p2mr_csfs_sigs` entry has exact algorithm-consistent signature size.
   - Rejects signer response with explicit error if malformed signatures are present.
@@ -1979,7 +1979,7 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
   - `42e5b8515e` (`pq-wallet: validate external-signer p2mr sig sizes`)
   - `b3009081a3` (`pq-docs: record cycle 34 signer validation`)
 - CI observation attempt after push:
-  - `curl -s 'https://api.github.com/repos/btxchain/btx-node/actions/runs?branch=codex/pq-multisig-full-impl-20260221' | jq '{message,status,total_count,workflow_runs: (.workflow_runs|length)}'`
+  - `curl -s 'https://api.github.com/repos/example/staging-repo/actions/runs?branch=codex/pq-multisig-full-impl-20260221' | jq '{message,status,total_count,workflow_runs: (.workflow_runs|length)}'`
   - Result: `404 Not Found` (unauthenticated/private visibility blocker persists).
 
 ### Vulnerability findings + fixes (this cycle)
@@ -1999,14 +1999,14 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
 ## Cycle 35 - 2026-02-21 (Part 6.1 protocol extension: signer capability parsing)
 
 ### Completed tasks
-- Extended external signer capability surface in `/Users/admin/Documents/btxchain/btx-node/src/external_signer.h`:
+- Extended external signer capability surface in `/path/to/Documents/example/staging-repo/src/external_signer.h`:
   - Added `m_supports_p2mr` and `m_pq_algorithms`.
   - Added accessors `SupportsP2MR()` and `SupportedPQAlgorithms()`.
-- Extended JSON parsing in `/Users/admin/Documents/btxchain/btx-node/src/external_signer.cpp` `Enumerate()`:
+- Extended JSON parsing in `/path/to/Documents/example/staging-repo/src/external_signer.cpp` `Enumerate()`:
   - Parses optional `capabilities.p2mr` boolean.
   - Parses optional `capabilities.pq_algorithms[]` strings.
   - Stores capability data on each discovered signer.
-- Added fail-first and passing unit tests in `/Users/admin/Documents/btxchain/btx-node/src/test/pq_phase4_tests.cpp`:
+- Added fail-first and passing unit tests in `/path/to/Documents/example/staging-repo/src/test/pq_phase4_tests.cpp`:
   - `external_signer_enumerate_parses_p2mr_capabilities`
   - `external_signer_enumerate_defaults_without_p2mr_capabilities`
 
@@ -2046,16 +2046,16 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
   - `ae38a0c8da` (`pq-wallet: parse p2mr signer capabilities`)
   - `67a5960027` (`pq-docs: record cycle 35 capability parsing`)
 - Post-push CI observation attempt:
-  - `curl -s 'https://api.github.com/repos/btxchain/btx-node/actions/runs?branch=codex/pq-multisig-full-impl-20260221' | jq '{message,status,total_count,workflow_runs: (.workflow_runs|length)}'`
+  - `curl -s 'https://api.github.com/repos/example/staging-repo/actions/runs?branch=codex/pq-multisig-full-impl-20260221' | jq '{message,status,total_count,workflow_runs: (.workflow_runs|length)}'`
   - Result: `{"message":"Not Found","status":"404",...}` (visibility/auth blocker still active).
 
 ## Cycle 36 - 2026-02-21 (Part 6.2 pre-sign P2MR metadata/fingerprint enforcement)
 
 ### Completed tasks
-- Added fail-first external-signer tests in `/Users/admin/Documents/btxchain/btx-node/src/test/pq_phase4_tests.cpp`:
+- Added fail-first external-signer tests in `/path/to/Documents/example/staging-repo/src/test/pq_phase4_tests.cpp`:
   - `external_signer_rejects_p2mr_input_missing_required_metadata`
   - `external_signer_requires_p2mr_fingerprint_match_from_p2mr_paths`
-- Implemented pre-sign P2MR input validation in `/Users/admin/Documents/btxchain/btx-node/src/external_signer.cpp`:
+- Implemented pre-sign P2MR input validation in `/path/to/Documents/example/staging-repo/src/external_signer.cpp`:
   - Detects true P2MR prevouts from input UTXO scriptPubKey (`witness v2`, 32-byte program).
   - Requires P2MR metadata before signer invocation: `m_p2mr_leaf_script`, `m_p2mr_control_block`, `m_p2mr_merkle_root`, and non-empty `m_p2mr_bip32_paths`.
   - Requires signer fingerprint match against deserialized `m_p2mr_bip32_paths` origins for each P2MR input.
@@ -2106,25 +2106,25 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
   - `2cceabd5af` (`pq-wallet: enforce p2mr signer preconditions`)
   - `00a41340b3` (`pq-docs: record cycle 36 signer preconditions`)
 - Post-push CI observation attempt:
-  - `curl -s 'https://api.github.com/repos/btxchain/btx-node/actions/runs?branch=codex/pq-multisig-full-impl-20260221' | jq '{message,status,total_count,workflow_runs: (.workflow_runs|length)}'`
+  - `curl -s 'https://api.github.com/repos/example/staging-repo/actions/runs?branch=codex/pq-multisig-full-impl-20260221' | jq '{message,status,total_count,workflow_runs: (.workflow_runs|length)}'`
   - Result: `{"message":"Not Found","status":"404",...}` (private-repo visibility/auth blocker persists in this environment).
 
 ## Cycle 37 - 2026-02-21 (Part 3 miniscript PQ multisig fragments + CI-failure repro loop)
 
 ### Completed tasks
-- Implemented P2MR miniscript multisig fragments in `/Users/admin/Documents/btxchain/btx-node/src/script/miniscript.h` and `/Users/admin/Documents/btxchain/btx-node/src/script/miniscript.cpp`:
+- Implemented P2MR miniscript multisig fragments in `/path/to/Documents/example/staging-repo/src/script/miniscript.h` and `/path/to/Documents/example/staging-repo/src/script/miniscript.cpp`:
   - New fragments: `MULTI_MLDSA`, `MULTI_SLHDSA`.
   - Parser support: `multi_mldsa(k,key1,...)`, `multi_slhdsa(k,key1,...)` in `Parse()`.
   - Script decode support from script form back to miniscript for both PQ multisig fragment types.
   - Script size model + witness size model + ops/stack accounting + satisfaction path wiring for both fragments.
   - Context/key-size guards: P2MR-only parsing for PQ multisig fragments; strict ML-DSA/SLH-DSA key-length checks; `multi_slhdsa` constrained to `1-of-N`.
-- Added/updated fail-first miniscript tests in `/Users/admin/Documents/btxchain/btx-node/src/test/miniscript_tests.cpp`:
+- Added/updated fail-first miniscript tests in `/path/to/Documents/example/staging-repo/src/test/miniscript_tests.cpp`:
   - `parse_multi_mldsa_p2mr_fragment`
   - `parse_multi_slhdsa_p2mr_fragment`
   - `parse_multi_pq_fragments_require_p2mr_context_and_valid_sizes`
   - `multi_mldsa_p2mr_satisfaction`
 - Fixed CI lint failure from authenticated Actions logs:
-  - Replaced locale-dependent `std::to_string(...)` in `/Users/admin/Documents/btxchain/btx-node/src/test/pq_phase4_tests.cpp` with locale-independent `strprintf(...)`.
+  - Replaced locale-dependent `std::to_string(...)` in `/path/to/Documents/example/staging-repo/src/test/pq_phase4_tests.cpp` with locale-independent `strprintf(...)`.
 
 ### TDD evidence (fail-first then fix)
 | Area | Command | Result |
@@ -2147,7 +2147,7 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
 | `env -i HOME="$HOME" PATH="$PATH" USER="$USER" SHELL=/bin/bash TERM=xterm-256color LANG=C.UTF-8 LC_ALL=C.UTF-8 bash -c 'FILE_ENV="./ci/test/00_setup_env_native_centos_functional_override.sh" MAKEJOBS=-j1 GOAL=test_btx CTEST_REGEX="(miniscript_tests|pq_multisig_tests|pq_multisig_descriptor_tests|pq_multisig_wallet_tests|pq_consensus_tests|pq_policy_tests|pq_phase4_tests|pq_descriptor_tests|pq_wallet_tests)" ./ci/test_run_all.sh'` | PASS (`9/9` targeted ctest + functional: `feature_pq_multisig.py --descriptors`, `rpc_pq_multisig.py`, `rpc_pq_wallet.py`) |
 
 ### CI delta (authenticated GitHub API)
-- Authenticated polling (using `/Users/admin/Documents/btxchain/github.key`) succeeded.
+- Authenticated polling (using `/path/to/Documents/example/staging-repo`) succeeded.
 - Branch head observed: `ef340ab1c239bb8462e6ae3074cd6ca951201940`.
 - Current/previous run status snapshot:
   - `22253513321` (`CI`) completed `failure`.
@@ -2212,16 +2212,16 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
 
 ### Completed tasks
 - Added deterministic PQ wallet derivation utility files:
-  - `/Users/admin/Documents/btxchain/btx-node/src/wallet/pq_keyderivation.h`
-  - `/Users/admin/Documents/btxchain/btx-node/src/wallet/pq_keyderivation.cpp`
+  - `/path/to/Documents/example/staging-repo/src/wallet/pq_keyderivation.h`
+  - `/path/to/Documents/example/staging-repo/src/wallet/pq_keyderivation.cpp`
 - Implemented deterministic derivation API using HKDF-HMAC-SHA256:
   - `wallet::DerivePQSeedFromBIP39(...)`
   - `wallet::DerivePQKeyFromBIP39(...)`
   - path semantics encoded as `m/87h/coin_typeh/accounth/change/index` with explicit algorithm domain separation.
 - Integrated new wallet source into build:
-  - `/Users/admin/Documents/btxchain/btx-node/src/wallet/CMakeLists.txt` includes `pq_keyderivation.cpp`.
+  - `/path/to/Documents/example/staging-repo/src/wallet/CMakeLists.txt` includes `pq_keyderivation.cpp`.
 - Added deterministic derivation unit coverage:
-  - `/Users/admin/Documents/btxchain/btx-node/src/test/pq_phase4_tests.cpp`
+  - `/path/to/Documents/example/staging-repo/src/test/pq_phase4_tests.cpp`
   - New test: `pq_key_derivation_deterministic`.
 
 ### Test evidence
@@ -2249,15 +2249,15 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
 
 ### Completed tasks
 - Fixed CentOS/ASan `-Werror` narrowing break in PQ miniscript witness-size calculation:
-  - `/Users/admin/Documents/btxchain/btx-node/src/script/miniscript.h`
+  - `/path/to/Documents/example/staging-repo/src/script/miniscript.h`
   - Added explicit `uint32_t` intermediates for `MULTI_MLDSA` and `MULTI_SLHDSA` witness-size arithmetic.
 - Fixed ASan `-Wswitch` compile break in miniscript fuzz target after new PQ fragment enums were introduced:
-  - `/Users/admin/Documents/btxchain/btx-node/src/test/fuzz/miniscript.cpp`
+  - `/path/to/Documents/example/staging-repo/src/test/fuzz/miniscript.cpp`
   - Added explicit handling for `PK_MLDSA`, `PK_SLHDSA`, `MULTI_MLDSA`, `MULTI_SLHDSA` in all affected switches.
 - Extended external signer RPC capability surface for PQ/P2MR and aligned mock/test coverage:
-  - `/Users/admin/Documents/btxchain/btx-node/src/rpc/external_signer.cpp`
-  - `/Users/admin/Documents/btxchain/btx-node/test/functional/mocks/signer.py`
-  - `/Users/admin/Documents/btxchain/btx-node/test/functional/rpc_signer.py`
+  - `/path/to/Documents/example/staging-repo/src/rpc/external_signer.cpp`
+  - `/path/to/Documents/example/staging-repo/test/functional/mocks/signer.py`
+  - `/path/to/Documents/example/staging-repo/test/functional/rpc_signer.py`
   - `enumeratesigners` now includes `capabilities.p2mr` and `capabilities.pq_algorithms`.
 
 ### TDD evidence (fail-first then fix)
@@ -2477,8 +2477,8 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
 ## Cycle 42 - 2026-02-21 (external signer functional fail-first remediation for P2MR descriptors)
 
 ### Completed tasks
-- Reproduced and fixed fail-first regressions in `/Users/admin/Documents/btxchain/btx-node/test/functional/wallet_signer.py` after prior mock signer P2MR descriptor migration.
-- Updated `/Users/admin/Documents/btxchain/btx-node/test/functional/mocks/signer.py` `getdescriptors` output to deterministic fixed-key P2MR descriptors (`mr(pk_slh(<hex32>))`) to keep external-signer wallet descriptor setup valid without PQ xpriv derivation in test harness.
+- Reproduced and fixed fail-first regressions in `/path/to/Documents/example/staging-repo/test/functional/wallet_signer.py` after prior mock signer P2MR descriptor migration.
+- Updated `/path/to/Documents/example/staging-repo/test/functional/mocks/signer.py` `getdescriptors` output to deterministic fixed-key P2MR descriptors (`mr(pk_slh(<hex32>))`) to keep external-signer wallet descriptor setup valid without PQ xpriv derivation in test harness.
 - Hardened wallet-signer functional flow for current BTX behavior:
   - assert descriptors-only wallet creation policy (`descriptors=true`),
   - assert imported active descriptors are `mr(...)/pk_slh(...)` based,
@@ -2670,7 +2670,7 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
 
 #### Open blockers
 - Repo-wide literal marker debt remains (`297` TODO/FIXME/XXX matches excluding `depends/*` and `src/leveldb/*`).
-- CI monitoring still pending authenticated API poll in this cycle (to run after commit/push using `/Users/admin/Documents/btxchain/github.key`).
+- CI monitoring still pending authenticated API poll in this cycle (to run after commit/push using `/path/to/Documents/example/staging-repo`).
 
 ### Cycle 15 (User-Reported Gap Closure + CI Failure Reproduction + Local Mac Gates)
 - Completed tasks:
@@ -2779,7 +2779,7 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
 
 #### Completed tasks
 - Implemented and validated a live cross-host regtest interoperability harness:
-  - `/Users/admin/Documents/btxchain/btx-node/test/util/pq_cross_os_mac_centos_interop.sh`
+  - `/path/to/Documents/example/staging-repo/test/util/pq_cross_os_mac_centos_interop.sh`
 - Hardened the harness for mixed host/container environments:
   - container binary probing includes `/workspace/build-centos-run/bin`
   - host gateway discovery supports `host.docker.internal` and `/proc/net/route` fallback
@@ -2794,7 +2794,7 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
 
 #### Test evidence
 - Command:
-  - `bash /Users/admin/Documents/btxchain/btx-node/test/util/pq_cross_os_mac_centos_interop.sh`
+  - `bash /path/to/Documents/example/staging-repo/test/util/pq_cross_os_mac_centos_interop.sh`
 - Result: PASS
 - Evidence emitted by harness:
   - `host_gateway=192.168.65.254`
@@ -2971,7 +2971,7 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
 - Impact: signer-side or middleware tampering could inject irrelevant P2MR signature material into PSBTs, increasing ambiguity and potential DoS surface for downstream finalization/combination.
 
 #### TDD fail-first proof
-- Added failing tests in `/Users/admin/Documents/btxchain/btx-node/src/test/pq_phase4_tests.cpp`:
+- Added failing tests in `/path/to/Documents/example/staging-repo/src/test/pq_phase4_tests.cpp`:
   - `external_signer_rejects_p2mr_partial_sig_for_unselected_leaf_hash`
   - `external_signer_rejects_p2mr_csfs_signature_without_message`
 - Fail-first commands/results:
@@ -2979,7 +2979,7 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
   - `./build-btx/bin/test_btx --run_test='pq_phase4_tests/external_signer_rejects_p2mr_csfs_signature_without_message' --catch_system_errors=no` -> FAIL (`!signer.SignTransaction(...)` failed).
 
 #### Implementation
-- Updated `/Users/admin/Documents/btxchain/btx-node/src/external_signer.cpp`:
+- Updated `/path/to/Documents/example/staging-repo/src/external_signer.cpp`:
   - Compute selected leaf hash from `m_p2mr_leaf_script` when present.
   - Reject signer-returned P2MR partial signatures whose leaf hash does not match selected leaf hash for that input.
   - Reject CSFS signature/message orphan entries:
@@ -3022,13 +3022,13 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
 - Impact: wallet/descriptors could construct unusable outputs (funds-at-risk usability failure).
 
 #### TDD fail-first proof
-- Added fail-first assertion in `/Users/admin/Documents/btxchain/btx-node/src/test/pq_multisig_tests.cpp` within `build_p2mr_multisig_script_enforces_limits_and_mixed_algorithms`:
+- Added fail-first assertion in `/path/to/Documents/example/staging-repo/src/test/pq_multisig_tests.cpp` within `build_p2mr_multisig_script_enforces_limits_and_mixed_algorithms`:
   - `BuildP2MRMultisigScript(2, oversized_mldsa_leaf).empty()` must be true when constructed script exceeds 10KB.
 - Fail-first command/result:
   - `./build-btx/bin/test_btx --run_test='pq_multisig_tests/build_p2mr_multisig_script_enforces_limits_and_mixed_algorithms' --catch_system_errors=no` -> FAIL.
 
 #### Implementation
-- Updated `/Users/admin/Documents/btxchain/btx-node/src/script/pqm.cpp`:
+- Updated `/path/to/Documents/example/staging-repo/src/script/pqm.cpp`:
   - Added incremental and final `MAX_P2MR_SCRIPT_SIZE` checks in `BuildP2MRMultisigScript()`:
     - after each key push
     - after each opcode append
@@ -3064,13 +3064,13 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
 - A malicious or buggy signer could drop existing coordinator/cosigner metadata (including existing partial signatures or unknown/proprietary fields), causing data-loss and multisig coordination regression.
 
 #### TDD fail-first proof
-- Added fail-first regression in `/Users/admin/Documents/btxchain/btx-node/src/test/pq_phase4_tests.cpp`:
+- Added fail-first regression in `/path/to/Documents/example/staging-repo/src/test/pq_phase4_tests.cpp`:
   - `external_signer_preserves_existing_psbt_input_metadata`
 - Fail-first command/result:
   - `./build-btx/bin/test_btx --run_test='pq_phase4_tests/external_signer_preserves_existing_psbt_input_metadata' --catch_system_errors=no` -> FAIL (`request_psbt.inputs[0].unknown.contains(unknown_key)` false).
 
 #### Implementation
-- Updated `/Users/admin/Documents/btxchain/btx-node/src/external_signer.cpp`:
+- Updated `/path/to/Documents/example/staging-repo/src/external_signer.cpp`:
   - Replaced direct assignment with merge semantics:
     - `PartiallySignedTransaction merged_psbtx = psbtx;`
     - `merged_psbtx.Merge(signer_psbtx)`
@@ -3094,13 +3094,13 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
 - In `SCRIPT_VERIFY_NONE`, non-minimal numeric encodings were accepted, diverging from the intended `OP_CHECKSIGADD`-style strictness and increasing malleability surface for PQ multisig script-path satisfaction.
 
 #### TDD fail-first proof
-- Added fail-first test in `/Users/admin/Documents/btxchain/btx-node/src/test/pq_consensus_tests.cpp`:
+- Added fail-first test in `/path/to/Documents/example/staging-repo/src/test/pq_consensus_tests.cpp`:
   - `op_checksigadd_requires_minimal_counter_encoding`
 - Fail-first command/result:
   - `./build-btx/bin/test_btx --run_test='pq_consensus_tests/op_checksigadd_requires_minimal_counter_encoding' --catch_system_errors=no` -> FAIL.
 
 #### Implementation
-- Updated `/Users/admin/Documents/btxchain/btx-node/src/script/interpreter.cpp`:
+- Updated `/path/to/Documents/example/staging-repo/src/script/interpreter.cpp`:
   - changed CHECKSIGADD counter parse to unconditional minimal requirement:
     - `const CScriptNum n(stacktop(-2), /*fRequireMinimal=*/true);`
 
@@ -3123,13 +3123,13 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
 - Impact: malicious signer/client could inject irrelevant P2MR metadata into non-P2MR inputs, creating PSBT ambiguity and potential downstream processing abuse.
 
 #### TDD fail-first proof
-- Added fail-first regression in `/Users/admin/Documents/btxchain/btx-node/src/test/pq_phase4_tests.cpp`:
+- Added fail-first regression in `/path/to/Documents/example/staging-repo/src/test/pq_phase4_tests.cpp`:
   - `external_signer_rejects_p2mr_material_for_non_p2mr_input`
 - Fail-first command/result:
   - `./build-btx/bin/test_btx --run_test='pq_phase4_tests/external_signer_rejects_p2mr_material_for_non_p2mr_input' --catch_system_errors=no` -> FAIL.
 
 #### Implementation
-- Updated `/Users/admin/Documents/btxchain/btx-node/src/external_signer.cpp`:
+- Updated `/path/to/Documents/example/staging-repo/src/external_signer.cpp`:
   - In `ValidateExternalSignerP2MRSignatures`, derive input prevout type.
   - Reject signer response if input is known non-P2MR and contains any P2MR-specific material (`leaf_script/control_block/pq_sigs/csfs_msgs/csfs_sigs/p2mr_bip32_paths/p2mr_merkle_root`).
 
@@ -3151,13 +3151,13 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
 - A malicious signer could omit `m_p2mr_leaf_script/m_p2mr_control_block` in its response and still provide wrong-leaf `(leaf_hash,pubkey)->sig` entries, bypassing selected-leaf binding.
 
 #### TDD fail-first proof
-- Added fail-first regression in `/Users/admin/Documents/btxchain/btx-node/src/test/pq_phase4_tests.cpp`:
+- Added fail-first regression in `/path/to/Documents/example/staging-repo/src/test/pq_phase4_tests.cpp`:
   - `external_signer_rejects_wrong_leaf_sig_when_signer_omits_leaf_metadata`
 - Fail-first command/result:
   - `./build-btx/bin/test_btx --run_test='pq_phase4_tests/external_signer_rejects_wrong_leaf_sig_when_signer_omits_leaf_metadata' --catch_system_errors=no` -> FAIL.
 
 #### Implementation
-- Updated `/Users/admin/Documents/btxchain/btx-node/src/external_signer.cpp`:
+- Updated `/path/to/Documents/example/staging-repo/src/external_signer.cpp`:
   - `ValidateExternalSignerP2MRSignatures` now takes both request PSBT and signer PSBT.
   - Leaf-hash binding is anchored to request input selected leaf when present (fallback to signer leaf only if request leaf absent).
   - `SignTransaction` updated to call new validation signature.
@@ -3179,16 +3179,16 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
 - Existing invalid-signature-size tests implicitly relied on missing prevout metadata and now needed explicit P2MR metadata fixtures to target the intended checks.
 
 #### TDD fail-first proof
-- Added fail-first regression in `/Users/admin/Documents/btxchain/btx-node/src/test/pq_phase4_tests.cpp`:
+- Added fail-first regression in `/path/to/Documents/example/staging-repo/src/test/pq_phase4_tests.cpp`:
   - `external_signer_rejects_p2mr_material_without_prevout_script`
 - Fail-first command/result:
   - `./build-btx/bin/test_btx --run_test='pq_phase4_tests/external_signer_rejects_p2mr_material_without_prevout_script' --catch_system_errors=no` -> FAIL.
 
 #### Implementation
-- Updated `/Users/admin/Documents/btxchain/btx-node/src/external_signer.cpp`:
+- Updated `/path/to/Documents/example/staging-repo/src/external_signer.cpp`:
   - Reject signer response if any P2MR material is present for an input lacking prevout script metadata:
     - error: `Signer returned P2MR material for input <n> without prevout script`.
-- Updated tests in `/Users/admin/Documents/btxchain/btx-node/src/test/pq_phase4_tests.cpp`:
+- Updated tests in `/path/to/Documents/example/staging-repo/src/test/pq_phase4_tests.cpp`:
   - `external_signer_rejects_invalid_p2mr_partial_sig_size`
   - `external_signer_rejects_invalid_p2mr_csfs_sig_size`
   to include P2MR witness metadata and selected-leaf hashes so they continue to assert signature-size validation paths.
@@ -3213,13 +3213,13 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
 - Risk: malicious or buggy combiner/signer could inject divergent merkle-root metadata into merged PSBTs, creating inconsistent state for downstream tooling.
 
 #### TDD fail-first proof
-- Added regression test in `/Users/admin/Documents/btxchain/btx-node/src/test/pq_phase4_tests.cpp`:
+- Added regression test in `/path/to/Documents/example/staging-repo/src/test/pq_phase4_tests.cpp`:
   - `combinepsbt_rejects_conflicting_p2mr_merkle_root`
 - Fail-first command/result (before `psbt.cpp` fix):
   - `cmake --build build-btx --target test_btx -j8 && ./build-btx/bin/test_btx --run_test='pq_phase4_tests/combinepsbt_rejects_conflicting_p2mr_merkle_root' --catch_system_errors=no` -> FAIL (`check !CombinePSBTs(out, {a, b}) has failed`).
 
 #### Implementation
-- Updated `/Users/admin/Documents/btxchain/btx-node/src/psbt.cpp` in `PSBTInput::Merge`:
+- Updated `/path/to/Documents/example/staging-repo/src/psbt.cpp` in `PSBTInput::Merge`:
   - retain existing set-if-null behavior,
   - add explicit conflict rejection when both roots are non-null and different:
     - throws `std::ios_base::failure("Conflicting P2MR merkle roots")`.
@@ -3267,13 +3267,13 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
 - This reduced diagnosability and made conflict handling less explicit for hostile/malicious signer responses.
 
 #### TDD fail-first proof
-- Added regression test in `/Users/admin/Documents/btxchain/btx-node/src/test/pq_phase4_tests.cpp`:
+- Added regression test in `/path/to/Documents/example/staging-repo/src/test/pq_phase4_tests.cpp`:
   - `external_signer_rejects_conflicting_selected_leaf_metadata`
 - Fail-first command/result:
   - `./build-btx/bin/test_btx --run_test='pq_phase4_tests/external_signer_rejects_conflicting_selected_leaf_metadata' --catch_system_errors=no` -> FAIL (missing expected explicit conflict error text).
 
 #### Implementation
-- Updated `/Users/admin/Documents/btxchain/btx-node/src/external_signer.cpp` in `ValidateExternalSignerP2MRSignatures(...)`:
+- Updated `/path/to/Documents/example/staging-repo/src/external_signer.cpp` in `ValidateExternalSignerP2MRSignatures(...)`:
   - if both request and signer provide selected leaf metadata and either script/control differs, return false with explicit error:
   - `Signer returned conflicting selected P2MR leaf for input <n>`.
 
@@ -3322,13 +3322,13 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
 - Resulting behavior deferred to generic PSBT merge conflict handling and returned a non-specific error path.
 
 #### TDD fail-first proof
-- Added regression test in `/Users/admin/Documents/btxchain/btx-node/src/test/pq_phase4_tests.cpp`:
+- Added regression test in `/path/to/Documents/example/staging-repo/src/test/pq_phase4_tests.cpp`:
   - `external_signer_rejects_unsupported_selected_leaf_version`
 - Fail-first command/result:
   - `./build-btx/bin/test_btx --run_test='pq_phase4_tests/external_signer_rejects_unsupported_selected_leaf_version' --catch_system_errors=no` -> FAIL.
 
 #### Implementation
-- Updated `/Users/admin/Documents/btxchain/btx-node/src/external_signer.cpp` in `ValidateExternalSignerP2MRSignatures(...)`:
+- Updated `/path/to/Documents/example/staging-repo/src/external_signer.cpp` in `ValidateExternalSignerP2MRSignatures(...)`:
   - reject unsupported leaf version in request selected leaf metadata,
   - reject unsupported leaf version in signer-selected leaf metadata,
   - explicit errors:
@@ -3370,14 +3370,14 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
 - Threat model: malicious signer could inject unexpected or conflicting derivation metadata and influence downstream trust/attribution paths.
 
 #### TDD fail-first proof
-- Added regression tests in `/Users/admin/Documents/btxchain/btx-node/src/test/pq_phase4_tests.cpp`:
+- Added regression tests in `/path/to/Documents/example/staging-repo/src/test/pq_phase4_tests.cpp`:
   - `external_signer_rejects_unexpected_p2mr_bip32_derivation`
   - `external_signer_rejects_conflicting_p2mr_bip32_derivation`
 - Fail-first command/result:
   - `./build-btx/bin/test_btx --run_test='pq_phase4_tests/external_signer_rejects_unexpected_p2mr_bip32_derivation' --catch_system_errors=no` -> FAIL (accepted injected derivation).
 
 #### Implementation
-- Updated `/Users/admin/Documents/btxchain/btx-node/src/external_signer.cpp` in `ValidateExternalSignerP2MRSignatures(...)`:
+- Updated `/path/to/Documents/example/staging-repo/src/external_signer.cpp` in `ValidateExternalSignerP2MRSignatures(...)`:
   - deserialize/validate every signer-returned P2MR derivation encoding,
   - reject signer-returned P2MR derivation keys missing from request,
   - reject signer-returned derivation bytes that conflict with request bytes.
@@ -3422,14 +3422,14 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
 - Threat model: malicious signer could inject validly-sized signatures for undeclared pubkeys and pollute PSBT metadata.
 
 #### TDD fail-first proof
-- Added regression test in `/Users/admin/Documents/btxchain/btx-node/src/test/pq_phase4_tests.cpp`:
+- Added regression test in `/path/to/Documents/example/staging-repo/src/test/pq_phase4_tests.cpp`:
   - `external_signer_rejects_unexpected_p2mr_partial_sig_pubkey`
 - Explicit fail-first execution was captured by temporarily removing the new validation guard and running:
   - `./build-btx/bin/test_btx --run_test='pq_phase4_tests/external_signer_rejects_unexpected_p2mr_partial_sig_pubkey' --catch_system_errors=no` -> FAIL
   - failure text: signer accepted unexpected signature pubkey and did not emit expected rejection.
 
 #### Implementation
-- Updated `/Users/admin/Documents/btxchain/btx-node/src/external_signer.cpp` in `ValidateExternalSignerP2MRSignatures(...)`:
+- Updated `/path/to/Documents/example/staging-repo/src/external_signer.cpp` in `ValidateExternalSignerP2MRSignatures(...)`:
   - for each `(leaf_hash,pubkey)->sig` in `m_p2mr_pq_sigs`, require `pubkey` to exist in `request_input.m_p2mr_bip32_paths`.
   - reject on mismatch with explicit error:
     - `Signer returned unexpected P2MR partial signature pubkey for input <n>`.
@@ -3474,7 +3474,7 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
 - Threat model: malicious signer could inject unexpected or conflicting CSFS message/signature metadata and contaminate PSBT state.
 
 #### TDD fail-first proof
-- Added regression tests in `/Users/admin/Documents/btxchain/btx-node/src/test/pq_phase4_tests.cpp`:
+- Added regression tests in `/path/to/Documents/example/staging-repo/src/test/pq_phase4_tests.cpp`:
   - `external_signer_rejects_unexpected_p2mr_csfs_message`
   - `external_signer_rejects_conflicting_p2mr_csfs_message`
 - Fail-first command/result:
@@ -3482,7 +3482,7 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
   - failure showed signer accepted injected CSFS metadata.
 
 #### Implementation
-- Updated `/Users/admin/Documents/btxchain/btx-node/src/external_signer.cpp` in `ValidateExternalSignerP2MRSignatures(...)`:
+- Updated `/path/to/Documents/example/staging-repo/src/external_signer.cpp` in `ValidateExternalSignerP2MRSignatures(...)`:
   - require every signer-returned CSFS message key to exist in `request_input.m_p2mr_csfs_msgs`,
   - require signer-returned CSFS message bytes to match request bytes,
   - preserve existing signature-size/message-pair checks.
@@ -3531,13 +3531,13 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
 - This allowed malformed request metadata to fall through to command invocation paths instead of deterministic precondition rejection.
 
 #### TDD fail-first proof
-- Added regression test in `/Users/admin/Documents/btxchain/btx-node/src/test/pq_phase4_tests.cpp`:
+- Added regression test in `/path/to/Documents/example/staging-repo/src/test/pq_phase4_tests.cpp`:
   - `external_signer_rejects_p2mr_prevout_commitment_mismatch`
 - Fail-first evidence:
   - `./build-btx/bin/test_btx --run_test='pq_phase4_tests/external_signer_rejects_p2mr_prevout_commitment_mismatch' --catch_system_errors=no` -> FAIL (signer command path reached unexpectedly).
 
 #### Implementation
-- Updated `/Users/admin/Documents/btxchain/btx-node/src/external_signer.cpp` in `ValidateP2MRSignerPreconditions(...)`:
+- Updated `/path/to/Documents/example/staging-repo/src/external_signer.cpp` in `ValidateP2MRSignerPreconditions(...)`:
   - parse/validate prevout P2MR witness program,
   - require request `m_p2mr_merkle_root` to match prevout witness commitment,
   - require supported request `m_p2mr_leaf_version`,
@@ -3547,7 +3547,7 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
     - `Input <n> selected P2MR leaf does not match prevout commitment`
 
 #### Companion test-fixture hardening
-- Added helper in `/Users/admin/Documents/btxchain/btx-node/src/test/pq_phase4_tests.cpp`:
+- Added helper in `/path/to/Documents/example/staging-repo/src/test/pq_phase4_tests.cpp`:
   - `ConfigureSingleLeafP2MRInput(...)`
 - Refactored external-signer tests to use a valid committed single-leaf P2MR root + explicit leaf version by default, preserving their intended assertion targets under stricter preconditions.
 
@@ -3585,7 +3585,7 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
   - `docker image prune -f --filter "label=bitcoin-ci-test"`
   - `docker container prune -f`
   - `docker volume prune -f`
-  - `find /Users/admin/Documents/btxchain/btx-node/test -maxdepth 1 -name 'cache.stale.*' -mtime +1 -exec rm -rf {} +`
+  - `find /path/to/Documents/example/staging-repo/test -maxdepth 1 -name 'cache.stale.*' -mtime +1 -exec rm -rf {} +`
   - `find /var/folders -type d -name 'bitcoin_func_test_*' -mtime +1 -prune -exec rm -rf {} + 2>/dev/null || true`
 - Captured:
   - `df -h`
@@ -3603,13 +3603,13 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
 - This allowed internally inconsistent selected-leaf metadata to pass preconditions and reach signer command invocation.
 
 #### TDD fail-first proof
-- Added regression test in `/Users/admin/Documents/btxchain/btx-node/src/test/pq_phase4_tests.cpp`:
+- Added regression test in `/path/to/Documents/example/staging-repo/src/test/pq_phase4_tests.cpp`:
   - `external_signer_rejects_p2mr_control_leaf_version_mismatch`
 - Fail-first:
   - `./build-btx/bin/test_btx --run_test='pq_phase4_tests/external_signer_rejects_p2mr_control_leaf_version_mismatch' --catch_system_errors=no` -> FAIL.
 
 #### Implementation
-- Updated `/Users/admin/Documents/btxchain/btx-node/src/external_signer.cpp` in `ValidateP2MRSignerPreconditions(...)`:
+- Updated `/path/to/Documents/example/staging-repo/src/external_signer.cpp` in `ValidateP2MRSignerPreconditions(...)`:
   - compute `control_leaf_version = input.m_p2mr_control_block.front() & P2MR_LEAF_MASK`,
   - reject on mismatch with explicit error:
     - `Input <n> selected P2MR control block leaf version mismatch`.
@@ -3656,13 +3656,13 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
 - A malicious/buggy signer could return signatures for request-declared pubkeys belonging to a different fingerprint.
 
 #### TDD fail-first proof
-- Added regression test in `/Users/admin/Documents/btxchain/btx-node/src/test/pq_phase4_tests.cpp`:
+- Added regression test in `/path/to/Documents/example/staging-repo/src/test/pq_phase4_tests.cpp`:
   - `external_signer_rejects_partial_sig_pubkey_with_nonmatching_fingerprint`
 - Fail-first evidence (pre-fix):
   - `./build-btx/bin/test_btx --run_test='pq_phase4_tests/external_signer_rejects_partial_sig_pubkey_with_nonmatching_fingerprint' --catch_system_errors=no` -> FAIL.
 
 #### Implementation
-- Updated `/Users/admin/Documents/btxchain/btx-node/src/external_signer.cpp`:
+- Updated `/path/to/Documents/example/staging-repo/src/external_signer.cpp`:
   - Added `HasMatchingP2MRFingerprintForPubKey(...)` helper.
   - Extended `ValidateExternalSignerP2MRSignatures(...)` to accept signer fingerprint and enforce that each returned partial-sig pubkey resolves to a `m_p2mr_bip32_paths` key origin fingerprint equal to signer fingerprint.
   - Added explicit rejection message:
@@ -3700,13 +3700,13 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
 - This allowed malformed request metadata to reach external signer command execution.
 
 #### TDD fail-first proof
-- Added regression test in `/Users/admin/Documents/btxchain/btx-node/src/test/pq_phase4_tests.cpp`:
+- Added regression test in `/path/to/Documents/example/staging-repo/src/test/pq_phase4_tests.cpp`:
   - `external_signer_rejects_malformed_request_p2mr_bip32_origin`
 - Fail-first evidence:
   - `cmake --build build-btx --target test_btx -j8 && ./build-btx/bin/test_btx --run_test='pq_phase4_tests/external_signer_rejects_malformed_request_p2mr_bip32_origin' --catch_system_errors=no` -> FAIL (unexpected exception from signer command path before precondition rejection).
 
 #### Implementation
-- Updated `/Users/admin/Documents/btxchain/btx-node/src/external_signer.cpp`:
+- Updated `/path/to/Documents/example/staging-repo/src/external_signer.cpp`:
   - In `ValidateP2MRSignerPreconditions(...)`, parse and validate every request `m_p2mr_bip32_paths` entry.
   - Reject immediately on malformed entry with explicit error:
     - `Input <n> has invalid P2MR BIP32 derivation encoding for pubkey size <m>`.
@@ -3754,14 +3754,14 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
 - This allowed inconsistent request metadata to reach signer command invocation paths.
 
 #### TDD fail-first proof
-- Added regression tests in `/Users/admin/Documents/btxchain/btx-node/src/test/pq_phase4_tests.cpp`:
+- Added regression tests in `/path/to/Documents/example/staging-repo/src/test/pq_phase4_tests.cpp`:
   - `external_signer_rejects_request_p2mr_metadata_without_prevout_script`
   - `external_signer_rejects_request_p2mr_metadata_for_non_p2mr_prevout`
 - Fail-first evidence:
   - `cmake --build build-btx --target test_btx -j8 && ./build-btx/bin/test_btx --run_test='pq_phase4_tests/external_signer_rejects_request_p2mr_metadata_without_prevout_script' --catch_system_errors=no` -> FAIL before implementation (unexpected signer command path).
 
 #### Implementation
-- Updated `/Users/admin/Documents/btxchain/btx-node/src/external_signer.cpp` in `ValidateP2MRSignerPreconditions(...)`:
+- Updated `/path/to/Documents/example/staging-repo/src/external_signer.cpp` in `ValidateP2MRSignerPreconditions(...)`:
   - Compute `request_has_p2mr_material` from request metadata fields.
   - Reject when request has P2MR metadata but prevout script is absent:
     - `Input <n> missing prevout script for P2MR metadata`.
@@ -3798,14 +3798,14 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
 - A signer response could inject CSFS signatures for request-known messages using pubkeys outside signer-owned P2MR derivation paths, causing avoidable finalization DoS surface.
 
 #### TDD fail-first proof
-- Added regression tests in `/Users/admin/Documents/btxchain/btx-node/src/test/pq_phase4_tests.cpp`:
+- Added regression tests in `/path/to/Documents/example/staging-repo/src/test/pq_phase4_tests.cpp`:
   - `external_signer_rejects_unexpected_p2mr_csfs_signature_pubkey`
   - `external_signer_rejects_nonmatching_fingerprint_p2mr_csfs_signature_pubkey`
 - Fail-first evidence:
   - `./build-btx/bin/test_btx --run_test='pq_phase4_tests/*' --catch_system_errors=no` -> FAIL (both new tests accepted signer response pre-fix).
 
 #### Implementation
-- Updated `/Users/admin/Documents/btxchain/btx-node/src/external_signer.cpp` in `ValidateExternalSignerP2MRSignatures(...)`:
+- Updated `/path/to/Documents/example/staging-repo/src/external_signer.cpp` in `ValidateExternalSignerP2MRSignatures(...)`:
   - For every returned CSFS signature:
     - Require pubkey membership in `request_input.m_p2mr_bip32_paths`.
     - Require signer fingerprint match via `HasMatchingP2MRFingerprintForPubKey(...)`.
@@ -3862,13 +3862,13 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
 - This allowed signer responses to mutate merkle-root metadata and potentially create inconsistent PSBT state or downstream finalization ambiguity.
 
 #### TDD fail-first proof
-- Added regression test in `/Users/admin/Documents/btxchain/btx-node/src/test/pq_phase4_tests.cpp`:
+- Added regression test in `/path/to/Documents/example/staging-repo/src/test/pq_phase4_tests.cpp`:
   - `external_signer_rejects_conflicting_signer_p2mr_merkle_root`
 - Fail-first command/result (before implementation):
   - `cmake --build build-btx --target test_btx -j8 && ./build-btx/bin/test_btx --run_test='pq_phase4_tests/external_signer_rejects_conflicting_signer_p2mr_merkle_root' --catch_system_errors=no` -> FAIL (expected conflict error not emitted).
 
 #### Implementation
-- Updated `/Users/admin/Documents/btxchain/btx-node/src/external_signer.cpp` in `ValidateExternalSignerP2MRSignatures(...)`:
+- Updated `/path/to/Documents/example/staging-repo/src/external_signer.cpp` in `ValidateExternalSignerP2MRSignatures(...)`:
   - Parse/validate witness program for P2MR prevout scripts.
   - Reject signer response when returned root conflicts with request root:
     - `Signer returned conflicting P2MR merkle root for input <n>`.
@@ -3903,14 +3903,14 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
 - Chain argument also lacked strict validation before command assembly.
 
 #### TDD fail-first proof
-- Added regression tests in `/Users/admin/Documents/btxchain/btx-node/src/test/pq_phase4_tests.cpp`:
+- Added regression tests in `/path/to/Documents/example/staging-repo/src/test/pq_phase4_tests.cpp`:
   - `external_signer_command_args_are_not_shell_quoted`
   - `external_signer_rejects_invalid_chain_argument`
 - Fail-first command/result (before implementation):
   - `cmake --build build-btx --target test_btx -j8 && ./build-btx/bin/test_btx --run_test='pq_phase4_tests/external_signer_command_args_are_not_shell_quoted:pq_phase4_tests/external_signer_rejects_invalid_chain_argument' --catch_system_errors=no` -> FAIL.
 
 #### Implementation
-- Updated `/Users/admin/Documents/btxchain/btx-node/src/external_signer.cpp`:
+- Updated `/path/to/Documents/example/staging-repo/src/external_signer.cpp`:
   - Added strict chain allowlist check in `IsSupportedExternalSignerChain(...)`.
   - `ExternalSigner::NetworkArg()` now throws on invalid chain argument.
   - Removed `ShellEscape(...)` usage for signer argv construction in:
@@ -3958,7 +3958,7 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
   - stale functional temp cleanup under `/var/folders` and test cache cleanup -> completed.
 - Capacity snapshot:
   - `docker system df` -> Images `39` (`19.12GB`), Build cache `12.14GB`.
-  - `du -sh /Users/admin/Documents/btxchain/btx-node/build-btx` -> `2.0G`.
+  - `du -sh /path/to/Documents/example/staging-repo/build-btx` -> `2.0G`.
 
 #### Next actions
 1. Commit this slice with scope prefix (`pq-wallet: harden external signer argv and chain validation`).
@@ -3976,11 +3976,11 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
 
 #### Reproduction (fail-first)
 - Local warning-as-error reproduction of the compile failure:
-  - `cd /Users/admin/Documents/btxchain/btx-node/build-fuzz-smoke && CMD=$(jq -r '.[] | select(.file|endswith("/src/common/run_command.cpp")) | .command' compile_commands.json | head -n 1) && CMD=${CMD/ -o / -Werror -o } && eval "$CMD"`
+  - `cd /path/to/Documents/example/staging-repo/build-fuzz-smoke && CMD=$(jq -r '.[] | select(.file|endswith("/src/common/run_command.cpp")) | .command' compile_commands.json | head -n 1) && CMD=${CMD/ -o / -Werror -o } && eval "$CMD"`
   - Result: FAIL with `unused member function 'ScopedBlockSigPipe'`.
 
 #### Implementation
-- Updated `/Users/admin/Documents/btxchain/btx-node/src/common/run_command.cpp`:
+- Updated `/path/to/Documents/example/staging-repo/src/common/run_command.cpp`:
   - Restricted `ScopedBlockSigPipe` definition to builds where it is used:
     - from `#ifndef WIN32`
     - to `#if !defined(WIN32) && defined(ENABLE_EXTERNAL_SIGNER)`
@@ -3988,7 +3988,7 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
 
 #### Green evidence (macOS)
 - Compile warning-as-error repro now passes:
-  - `cd /Users/admin/Documents/btxchain/btx-node/build-fuzz-smoke && CMD=$(jq -r '.[] | select(.file|endswith("/src/common/run_command.cpp")) | .command' compile_commands.json | head -n 1) && CMD=${CMD/ -o / -Werror -o } && eval "$CMD"` -> PASS.
+  - `cd /path/to/Documents/example/staging-repo/build-fuzz-smoke && CMD=$(jq -r '.[] | select(.file|endswith("/src/common/run_command.cpp")) | .command' compile_commands.json | head -n 1) && CMD=${CMD/ -o / -Werror -o } && eval "$CMD"` -> PASS.
 - Impacted unit tests:
   - `cmake --build build-btx --target test_btx -j8 && ./build-btx/bin/test_btx --run_test='pq_phase4_tests/external_signer_*:system_tests/run_command' --catch_system_errors=no` -> PASS (`36` tests).
   - `for i in {1..10}; do ./build-btx/bin/test_btx --run_test='system_tests/run_command' --catch_system_errors=no; done` -> PASS (`10/10` iterations).
@@ -4031,7 +4031,7 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
 - External signer command execution uses argv tokenization, so whitespace in `--desc` content can split into unintended arguments and alter signer command semantics.
 
 #### TDD fail-first proof
-- Added regression tests in `/Users/admin/Documents/btxchain/btx-node/src/test/pq_phase4_tests.cpp`:
+- Added regression tests in `/path/to/Documents/example/staging-repo/src/test/pq_phase4_tests.cpp`:
   - `external_signer_rejects_displayaddress_descriptor_with_whitespace`
   - `external_signer_rejects_getp2mrpubkeys_descriptor_with_whitespace`
 - Fail-first command/result (before implementation):
@@ -4039,7 +4039,7 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
   - Result: **FAIL** (`exception std::runtime_error expected but not raised`).
 
 #### Implementation
-- Updated `/Users/admin/Documents/btxchain/btx-node/src/external_signer.cpp`:
+- Updated `/path/to/Documents/example/staging-repo/src/external_signer.cpp`:
   - Added `IsSafeExternalSignerDescriptorArg(...)` rejecting whitespace/control bytes.
   - Enforced validation in:
     - `ExternalSigner::DisplayAddress(...)`
@@ -4081,14 +4081,14 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
   - `docker image prune -f --filter "label=bitcoin-ci-test"`
   - `docker container prune -f`
   - `docker volume prune -f`
-  - stale test temp cleanup under `/Users/admin/Documents/btxchain/btx-node/test` and `/var/folders`
+  - stale test temp cleanup under `/path/to/Documents/example/staging-repo/test` and `/var/folders`
 - Capacity snapshot:
   - `df -h` on host root: `271Gi` available.
   - `docker system df`: images `39` (`19.12GB`), build cache `12.14GB`.
   - `du -sh` build dirs:
-    - `/Users/admin/Documents/btxchain/btx-node/build-btx` -> `2.0G`
-    - `/Users/admin/Documents/btxchain/btx-node/build-asan-ubsan` -> `2.5G`
-    - `/Users/admin/Documents/btxchain/btx-node/build-fuzz-smoke` -> `1.0G`
+    - `/path/to/Documents/example/staging-repo/build-btx` -> `2.0G`
+    - `/path/to/Documents/example/staging-repo/build-asan-ubsan` -> `2.5G`
+    - `/path/to/Documents/example/staging-repo/build-fuzz-smoke` -> `1.0G`
 
 #### Next actions
 1. Commit slice with scope prefix (`pq-wallet: reject unsafe whitespace in signer descriptor args`).
@@ -4118,7 +4118,7 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
 
 #### Test evidence (command + result)
 - Command:
-  - `python3` JSON-RPC harness run from `/Users/admin/Documents/btxchain/btx-node` performing:
+  - `python3` JSON-RPC harness run from `/path/to/Documents/example/staging-repo` performing:
     1. create signer/watch-only wallets on both nodes,
     2. fund signer UTXOs with explicit high fee rate,
     3. extract concrete PQ keys from witness leaf scripts,

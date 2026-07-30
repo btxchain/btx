@@ -3,7 +3,7 @@
 Date: 2026-03-21
 
 Primary source:
-- local PDF: `/Users/admin/Downloads/2021-564.pdf`
+- local PDF: `/path/to/Downloads/2021-564.pdf`
 - local extracted text mirror: `doc/research/smile-2021-564.txt`
 - upstream paper: <https://eprint.iacr.org/2021/564.pdf>
 

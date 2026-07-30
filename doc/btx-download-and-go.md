@@ -1,5 +1,12 @@
 # BTX Download-and-Go Guide
 
+> **Release/activation boundary:** a build that contains MatMul v4.7 code has
+> not activated it. Use only a published release whose network parameters and
+> release notes explicitly name an activation height. The implementation PR
+> keeps all heights disabled. Epoch A is Profile 1 ExactReplay; Profile 2 and
+> proof authority occur only in later, separately reviewed epochs. See
+> [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md).
+
 This guide is the shortest path from a precompiled BTX binary to:
 
 - wallet balance access
@@ -108,7 +115,7 @@ miningmaxheaderlag=8
 
 ```bash
 SNAPSHOT_BLOCKHASH="$(jq -r .blockhash /path/to/snapshot.manifest.json)"
-btx-cli getblockheader "$SNAPSHOT_BLOCKHASH" false
+/path/to/btx-cli getblockheader "$SNAPSHOT_BLOCKHASH" false
 ```
 
 The full snapshot base block does not need to be downloaded before loading the
@@ -118,13 +125,13 @@ retry after header sync advances.
 8. Load the snapshot:
 
 ```bash
-btx-cli -rpcclienttimeout=0 loadtxoutset /path/to/snapshot.dat
+/path/to/btx-cli -rpcclienttimeout=0 loadtxoutset /path/to/snapshot.dat
 ```
 
 9. Monitor background validation:
 
 ```bash
-btx-cli getchainstates
+/path/to/btx-cli getchainstates
 ```
 
 Once the snapshot chainstate is active, wallet and mining RPCs become usable
@@ -136,7 +143,7 @@ and monitor `getmininginfo.chain_guard` while miners keep requesting work.
 When checking readiness manually, pass a BIP 9 template-request object:
 
 ```bash
-btx-cli getblocktemplate '{"rules":["segwit"]}'
+/path/to/btx-cli getblocktemplate '{"rules":["segwit"]}'
 ```
 
 If you prefer a one-command bootstrap flow, the scripts under
@@ -156,15 +163,15 @@ historical shielded-block replay before wallet/service RPCs become usable.
 Transparent and combined balances:
 
 ```bash
-btx-cli getbalances
-btx-cli z_gettotalbalance
+/path/to/btx-cli getbalances
+/path/to/btx-cli z_gettotalbalance
 ```
 
 Historical/pre-sunset transparent-to-shielded compatibility flows:
 
 ```bash
-btx-cli -rpcwallet=mywallet z_planshieldfunds 25.0 "btxs1..."
-btx-cli -rpcwallet=mywallet z_shieldfunds 25.0 "btxs1..."
+/path/to/btx-cli -rpcwallet=mywallet z_planshieldfunds 25.0 "btxs1..."
+/path/to/btx-cli -rpcwallet=mywallet z_shieldfunds 25.0 "btxs1..."
 ```
 
 Do not use these as current production ingress after the v0.32 sunset: new
@@ -176,7 +183,7 @@ for historical chunking, fees, and stuck-transaction recovery.
 
 For idle-time solo mining after a `--preset miner` install, hand the installed
 binary paths and generated config directly into the helper scripts instead of
-assuming `btxd` / `btx-cli` are already on `PATH`:
+assuming `btxd` / `/path/to/btx-cli` are already on `PATH`:
 
 ```bash
 contrib/mining/start-live-mining.sh \
@@ -207,17 +214,17 @@ available flags dynamically.
 Current challenge and service profile:
 
 ```bash
-btx-cli getmatmulchallenge
-btx-cli getmatmulchallengeprofile 1 0.25 0.75 2 35
-btx-cli listmatmulservicechallengeprofiles 0.25 0.75 0.25 6 1 adaptive_window 24 4 35
-btx-cli getmatmulservicechallengeprofile balanced 0.25 0.75 0.25 6 1 adaptive_window 24 4 35
-btx-cli getmatmulservicechallengeplan solves_per_hour 600 0.25 0.75 adaptive_window 24 0.25 6 4 35
+/path/to/btx-cli getmatmulchallenge
+/path/to/btx-cli getmatmulchallengeprofile 1 0.25 0.75 2 35
+/path/to/btx-cli listmatmulservicechallengeprofiles 0.25 0.75 0.25 6 1 adaptive_window 24 4 35
+/path/to/btx-cli getmatmulservicechallengeprofile balanced 0.25 0.75 0.25 6 1 adaptive_window 24 4 35
+/path/to/btx-cli getmatmulservicechallengeplan solves_per_hour 600 0.25 0.75 adaptive_window 24 0.25 6 4 35
 ```
 
 Profile-based application challenge / verification flow:
 
 ```bash
-btx-cli issuematmulservicechallengeprofile \
+/path/to/btx-cli issuematmulservicechallengeprofile \
   rate_limit \
   "signup:/v1/messages" \
   "user:alice@example.com" \
@@ -232,14 +239,14 @@ btx-cli issuematmulservicechallengeprofile \
   24 \
   4 \
   35
-btx-cli solvematmulservicechallenge '{...}' 250000
-btx-cli redeemmatmulserviceproof '{...}'
+/path/to/btx-cli solvematmulservicechallenge '{...}' 250000
+/path/to/btx-cli redeemmatmulserviceproof '{...}'
 ```
 
 Raw target-based application challenge / verification flow:
 
 ```bash
-btx-cli getmatmulservicechallenge \
+/path/to/btx-cli getmatmulservicechallenge \
   rate_limit \
   "signup:/v1/messages" \
   "user:alice@example.com" \
@@ -253,16 +260,16 @@ btx-cli getmatmulservicechallenge \
   3.0 \
   4 \
   35
-btx-cli solvematmulservicechallenge '{...}' 250000 1500 2
-btx-cli verifymatmulserviceproof '{...}'
-btx-cli redeemmatmulserviceproof '{...}'
+/path/to/btx-cli solvematmulservicechallenge '{...}' 250000 1500 2
+/path/to/btx-cli verifymatmulserviceproof '{...}'
+/path/to/btx-cli redeemmatmulserviceproof '{...}'
 ```
 
 Batch verification / redemption:
 
 ```bash
-btx-cli verifymatmulserviceproofs '[{...},{...}]'
-btx-cli redeemmatmulserviceproofs '[{...},{...}]'
+/path/to/btx-cli verifymatmulserviceproofs '[{...},{...}]'
+/path/to/btx-cli redeemmatmulserviceproofs '[{...},{...}]'
 ```
 
 These RPCs are intended for:

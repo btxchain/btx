@@ -1,0 +1,1734 @@
+// Copyright (c) 2026 The BTX developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+
+#include <matmul/matmul_v4_rc_stage3_production_family_programs.h>
+
+#include <crypto/common.h>
+#include <matmul/matmul_v4_rc_stage3_coupled_air.h>
+#include <matmul/matmul_v4_rc_stage3_episode_air.h>
+#include <matmul/matmul_v4_rc_stage3_extract_stream_ctl.h>
+#include <matmul/matmul_v4_rc_stage3_gemm_extract.h>
+#include <matmul/matmul_v4_rc_stage3_relation_closure.h>
+#include <matmul/matmul_v4_rc_stage3_role_bytecode.h>
+#include <matmul/matmul_v4_rc_stage3_soundness_scenarios.h>
+
+#include <algorithm>
+#include <functional>
+#include <limits>
+#include <numeric>
+#include <set>
+
+namespace matmul::v4::rc::universal_topology {
+namespace {
+
+namespace aq = air_quotient;
+namespace cb = constraint_bytecode;
+namespace gf = gkr_field;
+namespace sites = soundness_scenarios;
+namespace fpb = fixed_program_provenance_bytecode;
+using gf::Fp3;
+
+void SchemaU16(
+    std::vector<unsigned char>& out,
+    uint16_t value)
+{
+    unsigned char encoded[2];
+    WriteLE16(encoded, value);
+    out.insert(out.end(), encoded, encoded + sizeof(encoded));
+}
+
+void SchemaU32(
+    std::vector<unsigned char>& out,
+    uint32_t value)
+{
+    unsigned char encoded[4];
+    WriteLE32(encoded, value);
+    out.insert(out.end(), encoded, encoded + sizeof(encoded));
+}
+
+void SchemaRoot(
+    std::vector<unsigned char>& out,
+    const uint256& value)
+{
+    out.insert(out.end(), value.begin(), value.end());
+}
+
+std::vector<unsigned char>
+ExtractChaChaSchemaSuffix(
+    sites::ProductionProofSiteKind kind,
+    RCStage3RelationRole role,
+    RCStage3RelationEndpoint endpoint,
+    const fpb::ManifestV1& manifest)
+{
+    if ((kind != sites::ProductionProofSiteKind::
+                     EpisodeExtractChaCha &&
+         kind != sites::ProductionProofSiteKind::
+                     CoupledExtractChaCha) ||
+        (role != RCStage3RelationRole::EpisodeExtract &&
+         role != RCStage3RelationRole::CoupledExtract)) {
+        return {};
+    }
+    std::vector<unsigned char> out;
+    static constexpr char domain[] =
+        "BTX_RC_STAGE3_PRODUCTION_FIXED_PROGRAM_ABI_V1";
+    out.insert(
+        out.end(), domain, domain + sizeof(domain) - 1);
+    SchemaU16(out, fixed_program_abi_v1::Version);
+    out.push_back(static_cast<unsigned char>(
+        kind));
+    out.push_back(static_cast<unsigned char>(role));
+    SchemaU16(
+        out, static_cast<uint16_t>(endpoint));
+    out.push_back(static_cast<unsigned char>(
+        stage3_hash_air::ProgramKind::
+            ChaCha20Block));
+    SchemaU32(out, manifest.rows);
+    SchemaU32(out, manifest.columns);
+    SchemaU32(out, manifest.programs);
+    SchemaU32(out, manifest.challenge_width);
+    SchemaU32(
+        out,
+        fixed_program_abi_v1::
+            BoundaryExpectedBase);
+    SchemaU32(
+        out,
+        fixed_program_abi_v1::
+            BoundaryExpectedCount);
+    SchemaU32(
+        out,
+        fixed_program_abi_v1::BoundaryMaskBase);
+    SchemaU32(
+        out,
+        fixed_program_abi_v1::BoundaryMaskCount);
+    SchemaU32(
+        out,
+        fixed_program_abi_v1::InputAddressBase);
+    SchemaU32(
+        out,
+        fixed_program_abi_v1::InputMaskBase);
+    SchemaU32(out, fixed_program_abi_v1::InputSlots);
+    SchemaU32(
+        out,
+        fixed_program_abi_v1::OutputAddress);
+    SchemaU32(
+        out,
+        fixed_program_abi_v1::OutputValue);
+    SchemaRoot(out, manifest.fixed_program_commitment);
+    SchemaRoot(out, manifest.immutable_schedule_root);
+    SchemaU32(
+        out, static_cast<uint32_t>(
+                 manifest.immutable_schedule_columns.size()));
+    for (uint32_t column :
+         manifest.immutable_schedule_columns) {
+        SchemaU32(out, column);
+    }
+    return out;
+}
+
+class FragmentProgramBuilder {
+public:
+    explicit FragmentProgramBuilder(cb::Program& program)
+        : m_program(program)
+    {
+    }
+
+    uint32_t Current(uint32_t column)
+    {
+        return Emit({cb::Opcode::Current, column, 0, Fp3::Zero()});
+    }
+
+    uint32_t Next(uint32_t column)
+    {
+        return Emit({cb::Opcode::Next, column, 0, Fp3::Zero()});
+    }
+
+    uint32_t Challenge(uint32_t column)
+    {
+        return Emit({cb::Opcode::Challenge, column, 0, Fp3::Zero()});
+    }
+
+    uint32_t Constant(const Fp3& value)
+    {
+        return Emit({cb::Opcode::Constant, 0, 0, value});
+    }
+
+    uint32_t Add(uint32_t lhs, uint32_t rhs)
+    {
+        return Emit({cb::Opcode::Add, lhs, rhs, Fp3::Zero()});
+    }
+
+    uint32_t Sub(uint32_t lhs, uint32_t rhs)
+    {
+        return Emit({cb::Opcode::Sub, lhs, rhs, Fp3::Zero()});
+    }
+
+    uint32_t Mul(uint32_t lhs, uint32_t rhs)
+    {
+        return Emit({cb::Opcode::Mul, lhs, rhs, Fp3::Zero()});
+    }
+
+private:
+    uint32_t Emit(cb::Instruction instruction)
+    {
+        m_program.instructions.push_back(std::move(instruction));
+        return static_cast<uint32_t>(m_program.instructions.size() - 1);
+    }
+
+    cb::Program& m_program;
+};
+
+void AppendFragment(
+    cb::ProgramTable& table,
+    aq::AirKind kind,
+    uint32_t degree,
+    const std::function<void(FragmentProgramBuilder&)>& emit)
+{
+    cb::Program program;
+    program.role = table.role;
+    program.constraint_ordinal =
+        static_cast<uint32_t>(table.programs.size());
+    program.kind = kind;
+    program.declared_degree = degree;
+    program.current_width = table.current_width;
+    program.next_width = table.next_width;
+    program.challenge_width = table.challenge_width;
+    FragmentProgramBuilder builder(program);
+    emit(builder);
+    table.programs.push_back(std::move(program));
+}
+
+void AppendFragmentBoolean(cb::ProgramTable& table, uint32_t column)
+{
+    AppendFragment(
+        table, aq::AirKind::kEverywhere, 2,
+        [column](FragmentProgramBuilder& b) {
+            const uint32_t value = b.Current(column);
+            b.Mul(value, b.Sub(value, b.Constant(Fp3::One())));
+        });
+}
+
+/**
+ * Pin-independent portion of ResolveRCStage3SignedRangeKernelConstraintSystem.
+ *
+ * The table is intentionally a PARTIAL family: it contains, in byte-for-byte
+ * native order, all 143 signed-range constraints. The native pin constants
+ * MAX_ABS and LOGICAL_ROWS become explicit trace parameters, with a canonical
+ * 31-bit decomposition and transition constancy. This yields one immutable
+ * 177-constraint ProgramTable for every production shard shape. What remains
+ * outside the fragment is ownership: the recursive parent must root-pin those
+ * parameter columns and the 69 relation columns to the canonical manifest.
+ */
+bool BuildSignedRangeLocalFragment(
+    RCStage3RelationRole role,
+    cb::ProgramTable& out,
+    std::string* why)
+{
+    if (role != RCStage3RelationRole::EpisodeGemm &&
+        role != RCStage3RelationRole::CoupledGemm) {
+        out = {};
+        if (why != nullptr) {
+            *why =
+                "stage3:production_family_programs:"
+                "signed_range_role";
+        }
+        return false;
+    }
+    constexpr uint32_t MAX_ABS =
+        kRCStage3SignedRangeColumns;
+    constexpr uint32_t MAX_ABS_BITS = MAX_ABS + 1;
+    constexpr uint32_t LOGICAL_ROWS =
+        MAX_ABS_BITS + kRCStage3SignedRangeBits;
+    constexpr uint32_t COLUMNS = LOGICAL_ROWS + 1;
+    out = {};
+    out.role = role;
+    out.current_width = COLUMNS;
+    out.next_width = COLUMNS;
+    AppendFragmentBoolean(out, kRCStage3RangeActive);
+    AppendFragmentBoolean(out, kRCStage3RangeSign);
+    AppendFragmentBoolean(out, kRCStage3RangeZero);
+    for (uint32_t bit = 0; bit < kRCStage3SignedRangeBits; ++bit) {
+        AppendFragmentBoolean(
+            out, kRCStage3RangeMagnitudeBits + bit);
+        AppendFragmentBoolean(
+            out, kRCStage3RangeDifferenceBits + bit);
+    }
+    AppendFragment(
+        out, aq::AirKind::kEverywhere, 1,
+        [](FragmentProgramBuilder& b) {
+            uint32_t sum = b.Constant(Fp3::Zero());
+            uint64_t weight = 1;
+            for (uint32_t bit = 0;
+                 bit < kRCStage3SignedRangeBits;
+                 ++bit) {
+                sum = b.Add(
+                    sum,
+                    b.Mul(
+                        b.Constant(gf::FromU64_3(weight)),
+                        b.Current(
+                            kRCStage3RangeMagnitudeBits + bit)));
+                weight <<= 1;
+            }
+            b.Sub(b.Current(kRCStage3RangeMagnitude), sum);
+        });
+    AppendFragment(
+        out, aq::AirKind::kEverywhere, 2,
+        [](FragmentProgramBuilder& b) {
+            const uint32_t signed_factor = b.Sub(
+                b.Constant(Fp3::One()),
+                b.Mul(
+                    b.Constant(gf::FromU64_3(2)),
+                    b.Current(kRCStage3RangeSign)));
+            b.Sub(
+                b.Current(kRCStage3RangeValue),
+                b.Mul(
+                    b.Current(kRCStage3RangeMagnitude),
+                    signed_factor));
+        });
+    AppendFragment(
+        out, aq::AirKind::kEverywhere, 2,
+        [](FragmentProgramBuilder& b) {
+            b.Mul(
+                b.Current(kRCStage3RangeMagnitude),
+                b.Current(kRCStage3RangeZero));
+        });
+    AppendFragment(
+        out, aq::AirKind::kEverywhere, 2,
+        [](FragmentProgramBuilder& b) {
+            b.Sub(
+                b.Mul(
+                    b.Current(kRCStage3RangeMagnitude),
+                    b.Current(kRCStage3RangeMagnitudeInverse)),
+                b.Sub(
+                    b.Constant(Fp3::One()),
+                    b.Current(kRCStage3RangeZero)));
+        });
+    AppendFragment(
+        out, aq::AirKind::kEverywhere, 2,
+        [](FragmentProgramBuilder& b) {
+            b.Mul(
+                b.Current(kRCStage3RangeSign),
+                b.Current(kRCStage3RangeZero));
+        });
+    // Native constraint 70: magnitude + difference == MAX_ABS.
+    AppendFragment(
+        out, aq::AirKind::kEverywhere, 1,
+        [](FragmentProgramBuilder& b) {
+            uint32_t difference = b.Constant(Fp3::Zero());
+            uint64_t weight = 1;
+            for (uint32_t bit = 0;
+                 bit < kRCStage3SignedRangeBits;
+                 ++bit) {
+                difference = b.Add(
+                    difference,
+                    b.Mul(
+                        b.Constant(gf::FromU64_3(weight)),
+                        b.Current(
+                            kRCStage3RangeDifferenceBits + bit)));
+                weight <<= 1;
+            }
+            b.Sub(
+                b.Add(
+                    b.Current(kRCStage3RangeMagnitude),
+                    difference),
+                b.Current(MAX_ABS));
+        });
+    AppendFragment(
+        out, aq::AirKind::kTransition, 2,
+        [](FragmentProgramBuilder& b) {
+            b.Mul(
+                b.Next(kRCStage3RangeActive),
+                b.Sub(
+                    b.Constant(Fp3::One()),
+                    b.Current(kRCStage3RangeActive)));
+        });
+    AppendFragment(
+        out, aq::AirKind::kTransition, 1,
+        [](FragmentProgramBuilder& b) {
+            b.Sub(
+                b.Next(kRCStage3RangeRemaining),
+                b.Sub(
+                    b.Current(kRCStage3RangeRemaining),
+                    b.Current(kRCStage3RangeActive)));
+        });
+    AppendFragment(
+        out, aq::AirKind::kFirstRow, 1,
+        [](FragmentProgramBuilder& b) {
+            b.Sub(
+                b.Current(kRCStage3RangeRemaining),
+                b.Current(LOGICAL_ROWS));
+        });
+    AppendFragment(
+        out, aq::AirKind::kFirstRow, 1,
+        [](FragmentProgramBuilder& b) {
+            b.Sub(
+                b.Current(kRCStage3RangeActive),
+                b.Constant(Fp3::One()));
+        });
+    AppendFragment(
+        out, aq::AirKind::kLastRow, 1,
+        [](FragmentProgramBuilder& b) {
+            b.Sub(
+                b.Current(kRCStage3RangeRemaining),
+                b.Current(kRCStage3RangeActive));
+        });
+    const auto inactive_value =
+        [&out](uint32_t column, uint32_t expected_column,
+               uint64_t expected_constant, bool use_column) {
+            AppendFragment(
+                out, aq::AirKind::kEverywhere, 2,
+                [=](FragmentProgramBuilder& b) {
+                    const uint32_t expected =
+                        use_column
+                        ? b.Current(expected_column)
+                        : b.Constant(
+                              gf::FromU64_3(expected_constant));
+                    b.Mul(
+                        b.Sub(
+                            b.Constant(Fp3::One()),
+                            b.Current(kRCStage3RangeActive)),
+                        b.Sub(b.Current(column), expected));
+                });
+        };
+    inactive_value(kRCStage3RangeValue, 0, 0, false);
+    inactive_value(kRCStage3RangeSign, 0, 0, false);
+    inactive_value(kRCStage3RangeZero, 0, 1, false);
+    inactive_value(kRCStage3RangeMagnitudeInverse, 0, 0, false);
+    inactive_value(kRCStage3RangeMagnitude, 0, 0, false);
+    for (uint32_t bit = 0;
+         bit < kRCStage3SignedRangeBits;
+         ++bit) {
+        inactive_value(
+            kRCStage3RangeMagnitudeBits + bit,
+            0, 0, false);
+        inactive_value(
+            kRCStage3RangeDifferenceBits + bit,
+            MAX_ABS_BITS + bit, 0, true);
+    }
+    // Parameter canonicity. These are extra to the 143 native constraints:
+    // MAX_ABS is a unique 31-bit integer, and both public parameters are
+    // constant over the trace before the recursive parent root-pins them.
+    for (uint32_t bit = 0;
+         bit < kRCStage3SignedRangeBits;
+         ++bit) {
+        AppendFragmentBoolean(out, MAX_ABS_BITS + bit);
+    }
+    AppendFragment(
+        out, aq::AirKind::kEverywhere, 1,
+        [](FragmentProgramBuilder& b) {
+            uint32_t sum = b.Constant(Fp3::Zero());
+            uint64_t weight = 1;
+            for (uint32_t bit = 0;
+                 bit < kRCStage3SignedRangeBits;
+                 ++bit) {
+                sum = b.Add(
+                    sum,
+                    b.Mul(
+                        b.Constant(gf::FromU64_3(weight)),
+                        b.Current(MAX_ABS_BITS + bit)));
+                weight <<= 1;
+            }
+            b.Sub(b.Current(MAX_ABS), sum);
+        });
+    AppendFragment(
+        out, aq::AirKind::kTransition, 1,
+        [](FragmentProgramBuilder& b) {
+            b.Sub(b.Next(MAX_ABS), b.Current(MAX_ABS));
+        });
+    AppendFragment(
+        out, aq::AirKind::kTransition, 1,
+        [](FragmentProgramBuilder& b) {
+            b.Sub(
+                b.Next(LOGICAL_ROWS),
+                b.Current(LOGICAL_ROWS));
+        });
+    if (!cb::ValidateProgramTable(out, why)) {
+        out = {};
+        return false;
+    }
+    return true;
+}
+
+/**
+ * All-tile parametric form of
+ * BuildRCStage3EpisodeExtractStreamTransportProgramTable. TILE is a canonical
+ * u32 and MULTIPLICITY is constrained to {-1,+1}; both are constant across
+ * the trace. The first twelve programs are the native dual-LogUp relation
+ * with those parameters loaded from columns rather than baked constants.
+ * Exact tile-set aggregation and manifest ownership remain parent duties.
+ */
+bool BuildRangeExtractCtlParametricFragment(
+    cb::ProgramTable& out,
+    std::string* why)
+{
+    constexpr uint32_t SOURCE = 0;
+    constexpr uint32_t MASK = 1;
+    constexpr uint32_t ADDRESS = 2;
+    constexpr uint32_t INVERSE_1 = 3;
+    constexpr uint32_t INVERSE_2 = 4;
+    constexpr uint32_t RUNNING_1 = 5;
+    constexpr uint32_t RUNNING_2 = 6;
+    constexpr uint32_t TILE = 7;
+    constexpr uint32_t MULTIPLICITY = 8;
+    constexpr uint32_t TILE_BITS = 9;
+    constexpr uint32_t COLUMNS = TILE_BITS + 32;
+    constexpr uint32_t CHALLENGE_WIDTH = 6;
+    out = {};
+    out.role = RCStage3RelationRole::EpisodeExtract;
+    out.current_width = COLUMNS;
+    out.next_width = COLUMNS;
+    out.challenge_width = CHALLENGE_WIDTH;
+
+    for (uint32_t lane = 0; lane < 2; ++lane) {
+        const uint32_t inverse =
+            lane == 0 ? INVERSE_1 : INVERSE_2;
+        const uint32_t running =
+            lane == 0 ? RUNNING_1 : RUNNING_2;
+        const uint32_t gamma_idx = 2 * lane;
+        const uint32_t alpha_idx = 2 * lane + 1;
+        const uint32_t sum_idx = 4 + lane;
+        AppendFragmentBoolean(out, MASK);
+        AppendFragment(
+            out, aq::AirKind::kEverywhere, 5,
+            [=](FragmentProgramBuilder& b) {
+                const uint32_t gamma =
+                    b.Challenge(gamma_idx);
+                const uint32_t gamma2 =
+                    b.Mul(gamma, gamma);
+                const uint32_t gamma3 =
+                    b.Mul(gamma2, gamma);
+                const uint32_t tuple = b.Add(
+                    b.Constant(gf::FromU64_3(
+                        kRCStage3ExtractStreamCtlBusId)),
+                    b.Add(
+                        b.Mul(gamma, b.Current(TILE)),
+                        b.Add(
+                            b.Mul(
+                                gamma2,
+                                b.Current(ADDRESS)),
+                            b.Mul(
+                                gamma3,
+                                b.Current(SOURCE)))));
+                b.Sub(
+                    b.Mul(
+                        b.Current(inverse),
+                        b.Sub(
+                            b.Challenge(alpha_idx),
+                            tuple)),
+                    b.Current(MASK));
+            });
+        AppendFragment(
+            out, aq::AirKind::kEverywhere, 2,
+            [inverse](FragmentProgramBuilder& b) {
+                b.Mul(
+                    b.Sub(
+                        b.Constant(Fp3::One()),
+                        b.Current(MASK)),
+                    b.Current(inverse));
+            });
+        AppendFragment(
+            out, aq::AirKind::kFirstRow, 1,
+            [running](FragmentProgramBuilder& b) {
+                b.Current(running);
+            });
+        AppendFragment(
+            out, aq::AirKind::kTransition, 3,
+            [running, inverse](FragmentProgramBuilder& b) {
+                const uint32_t contribution = b.Mul(
+                    b.Current(MULTIPLICITY),
+                    b.Mul(
+                        b.Current(MASK),
+                        b.Current(inverse)));
+                b.Sub(
+                    b.Next(running),
+                    b.Add(
+                        b.Current(running),
+                        contribution));
+            });
+        AppendFragment(
+            out, aq::AirKind::kLastRow, 3,
+            [running, inverse, sum_idx](
+                FragmentProgramBuilder& b) {
+                const uint32_t contribution = b.Mul(
+                    b.Current(MULTIPLICITY),
+                    b.Mul(
+                        b.Current(MASK),
+                        b.Current(inverse)));
+                b.Sub(
+                    b.Add(
+                        b.Current(running),
+                        contribution),
+                    b.Challenge(sum_idx));
+            });
+    }
+    for (uint32_t bit = 0; bit < 32; ++bit) {
+        AppendFragmentBoolean(out, TILE_BITS + bit);
+    }
+    AppendFragment(
+        out, aq::AirKind::kEverywhere, 1,
+        [](FragmentProgramBuilder& b) {
+            uint32_t sum = b.Constant(Fp3::Zero());
+            for (uint32_t bit = 0; bit < 32; ++bit) {
+                sum = b.Add(
+                    sum,
+                    b.Mul(
+                        b.Constant(
+                            gf::FromU64_3(
+                                uint64_t{1} << bit)),
+                        b.Current(TILE_BITS + bit)));
+            }
+            b.Sub(b.Current(TILE), sum);
+        });
+    AppendFragment(
+        out, aq::AirKind::kEverywhere, 2,
+        [](FragmentProgramBuilder& b) {
+            const uint32_t multiplicity =
+                b.Current(MULTIPLICITY);
+            b.Sub(
+                b.Mul(multiplicity, multiplicity),
+                b.Constant(Fp3::One()));
+        });
+    AppendFragment(
+        out, aq::AirKind::kTransition, 1,
+        [](FragmentProgramBuilder& b) {
+            b.Sub(b.Next(TILE), b.Current(TILE));
+        });
+    AppendFragment(
+        out, aq::AirKind::kTransition, 1,
+        [](FragmentProgramBuilder& b) {
+            b.Sub(
+                b.Next(MULTIPLICITY),
+                b.Current(MULTIPLICITY));
+        });
+    if (!cb::ValidateProgramTable(out, why)) {
+        out = {};
+        return false;
+    }
+    return true;
+}
+
+bool RetagProgramTable(
+    cb::ProgramTable& table,
+    RCStage3RelationRole role,
+    std::string* why)
+{
+    table.role = role;
+    for (auto& program : table.programs) {
+        program.role = role;
+    }
+    return cb::ValidateProgramTable(table, why);
+}
+
+bool BuildDirectProduct(
+    RCStage3RelationRole role,
+    const std::vector<cb::ProgramTable>& components,
+    cb::ProgramTable& out,
+    std::string* why)
+{
+    out = {};
+    out.role = role;
+    uint32_t column_offset = 0;
+    uint32_t challenge_offset = 0;
+    for (const auto& component : components) {
+        if (component.role != role ||
+            !cb::ValidateProgramTable(component, why) ||
+            component.current_width != component.next_width ||
+            column_offset >
+                std::numeric_limits<uint32_t>::max() -
+                    component.current_width ||
+            challenge_offset >
+                std::numeric_limits<uint32_t>::max() -
+                    component.challenge_width) {
+            out = {};
+            if (why != nullptr && why->empty()) {
+                *why =
+                    "stage3:production_family_programs:"
+                    "direct_product_component";
+            }
+            return false;
+        }
+        for (const auto& source : component.programs) {
+            cb::Program program = source;
+            program.constraint_ordinal =
+                static_cast<uint32_t>(out.programs.size());
+            for (auto& instruction : program.instructions) {
+                switch (instruction.opcode) {
+                case cb::Opcode::Current:
+                case cb::Opcode::Next:
+                    instruction.lhs += column_offset;
+                    break;
+                case cb::Opcode::Challenge:
+                    instruction.lhs += challenge_offset;
+                    break;
+                default:
+                    break;
+                }
+            }
+            out.programs.push_back(std::move(program));
+        }
+        column_offset += component.current_width;
+        challenge_offset += component.challenge_width;
+    }
+    if (components.empty()) {
+        if (why != nullptr) {
+            *why =
+                "stage3:production_family_programs:"
+                "direct_product_empty";
+        }
+        return false;
+    }
+    out.current_width = column_offset;
+    out.next_width = column_offset;
+    out.challenge_width = challenge_offset;
+    for (auto& program : out.programs) {
+        program.current_width = out.current_width;
+        program.next_width = out.next_width;
+        program.challenge_width = out.challenge_width;
+    }
+    return cb::ValidateProgramTable(out, why);
+}
+
+bool BuildEpisodeWiringDirectProduct(
+    cb::ProgramTable& out,
+    std::string* why)
+{
+    cb::ProgramTable copy;
+    cb::ProgramTable transpose;
+    cb::ProgramTable residual;
+    cb::ProgramTable round_order;
+    if (!BuildRCStage3EpisodeLocalKernelProgramTable(
+            RCStage3EpisodeAirFamily::WiringEqualityFp3V1,
+            copy, why) ||
+        !BuildRCStage3EpisodeWiringTransposeProgramTable(
+            transpose, why)) {
+        return false;
+    }
+    residual.role = RCStage3RelationRole::EpisodeWiring;
+    residual.current_width = 4;
+    residual.next_width = 4;
+    AppendFragment(
+        residual, aq::AirKind::kEverywhere, 1,
+        [](FragmentProgramBuilder& b) {
+            b.Sub(
+                b.Current(2),
+                b.Add(b.Current(0), b.Current(1)));
+        });
+    AppendFragment(
+        residual, aq::AirKind::kEverywhere, 1,
+        [](FragmentProgramBuilder& b) {
+            b.Sub(b.Current(3), b.Current(2));
+        });
+    if (!cb::ValidateProgramTable(residual, why)) return false;
+
+    round_order.role = RCStage3RelationRole::EpisodeWiring;
+    round_order.current_width = 2;
+    round_order.next_width = 2;
+    AppendFragment(
+        round_order, aq::AirKind::kEverywhere, 1,
+        [](FragmentProgramBuilder& b) {
+            b.Sub(b.Current(0), b.Current(1));
+        });
+    if (!cb::ValidateProgramTable(round_order, why)) return false;
+
+    static_assert(
+        production_family_col_v1::EpisodeWiringTranspose ==
+        2U + 3U);
+    static_assert(
+        production_family_col_v1::EpisodeWiringResidual ==
+        2U + 8U + 3U);
+    static_assert(
+        production_family_col_v1::EpisodeWiringRoundOrder ==
+        2U + 8U + 4U + 1U);
+    return BuildDirectProduct(
+        RCStage3RelationRole::EpisodeWiring,
+        {copy, transpose, residual, round_order}, out, why);
+}
+
+bool BuildEpisodeBuilderDirectProduct(
+    cb::ProgramTable& out,
+    std::string* why)
+{
+    cb::ProgramTable trace;
+    cb::ProgramTable params;
+    cb::ProgramTable seed_chain;
+    cb::ProgramTable operand_xof;
+    if (!BuildRCStage3EpisodeBuilderTraceProgramTable(trace, why) ||
+        !BuildRCStage3RootChainVectorProgramTable(
+            RCStage3RelationRole::EpisodeDigest, params, why) ||
+        !BuildRCStage3RootChainVectorProgramTable(
+            RCStage3RelationRole::EpisodeDigest, seed_chain, why) ||
+        !BuildRCStage3RootChainVectorProgramTable(
+            RCStage3RelationRole::EpisodeDigest, operand_xof, why) ||
+        !RetagProgramTable(
+            params,
+            RCStage3RelationRole::EpisodeDeterministicBuilder,
+            why) ||
+        !RetagProgramTable(
+            seed_chain,
+            RCStage3RelationRole::EpisodeDeterministicBuilder,
+            why) ||
+        !RetagProgramTable(
+            operand_xof,
+            RCStage3RelationRole::EpisodeDeterministicBuilder,
+            why)) {
+        return false;
+    }
+    static_assert(
+        production_family_col_v1::EpisodeBuilderTrace == 5U);
+    static_assert(
+        production_family_col_v1::EpisodeBuilderParams ==
+        6U + 4U);
+    static_assert(
+        production_family_col_v1::EpisodeBuilderSeedChain ==
+        6U + 5U + 4U);
+    static_assert(
+        production_family_col_v1::EpisodeBuilderOperandXof ==
+        6U + 5U + 5U + 4U);
+    return BuildDirectProduct(
+        RCStage3RelationRole::EpisodeDeterministicBuilder,
+        {trace, params, seed_chain, operand_xof}, out, why);
+}
+
+bool BuildEpisodeTileTreeDirectProduct(
+    cb::ProgramTable& out,
+    std::string* why)
+{
+    cb::ProgramTable stream;
+    cb::ProgramTable hash;
+    if (!BuildRCStage3EpisodeTileTreeByteBridgeProgramTable(
+            stream, why) ||
+        !BuildRCStage3HashKernelOutputProgramTable(
+            RCStage3RelationRole::EpisodeTileTree,
+            hash, why)) {
+        return false;
+    }
+    static_assert(
+        production_family_col_v1::EpisodeTileTreeHash ==
+        15U + kRCStage3HashKernelOutputColumnV1);
+    return BuildDirectProduct(
+        RCStage3RelationRole::EpisodeTileTree,
+        {stream, hash}, out, why);
+}
+
+bool BuildEpisodeDigestDirectProduct(
+    cb::ProgramTable& out,
+    std::string* why)
+{
+    cb::ProgramTable roots;
+    cb::ProgramTable preimage;
+    cb::ProgramTable target;
+    cb::ProgramTable pow;
+    cb::ProgramTable hash;
+    if (!BuildRCStage3RootChainVectorProgramTable(
+            RCStage3RelationRole::EpisodeDigest,
+            roots, why) ||
+        !BuildRCStage3EpisodeDigestPreimageByteBridgeProgramTable(
+            preimage, why) ||
+        !BuildRCStage3EpisodeHeaderTargetEqualityProgramTable(
+            target, why) ||
+        !BuildRCStage3EpisodePowProgramTable(pow, why) ||
+        !BuildRCStage3HashKernelOutputProgramTable(
+            RCStage3RelationRole::EpisodeDigest,
+            hash, why)) {
+        return false;
+    }
+    static_assert(
+        production_family_col_v1::EpisodeDigestRoundRoots == 4U);
+    static_assert(
+        production_family_col_v1::EpisodeDigestHeaderTarget ==
+        5U + 13U);
+    static_assert(
+        production_family_col_v1::EpisodeDigestPow ==
+        5U + 13U + 2U);
+    static_assert(
+        production_family_col_v1::EpisodeDigestValue ==
+        5U + 13U + 2U + 12U +
+            kRCStage3HashKernelOutputColumnV1);
+    return BuildDirectProduct(
+        RCStage3RelationRole::EpisodeDigest,
+        {roots, preimage, target, pow, hash}, out, why);
+}
+
+bool BuildCoupledGemmDirectProduct(
+    cb::ProgramTable& out,
+    std::string* why)
+{
+    static_assert(
+        production_family_col_v1::CoupledGemmOutput ==
+        coupled_air_col::GEMM_OUT);
+    cb::ProgramTable gemm;
+    cb::ProgramTable range;
+    if (!BuildRCStage3CoupledLocalKernelProgramTable(
+            RCStage3RelationRole::CoupledGemm,
+            gemm, why) ||
+        !BuildSignedRangeLocalFragment(
+            RCStage3RelationRole::CoupledGemm,
+            range, why)) {
+        return false;
+    }
+    static_assert(
+        production_family_col_v1::CoupledGemmSignedRange ==
+        5U + kRCStage3RangeValue);
+    return BuildDirectProduct(
+        RCStage3RelationRole::CoupledGemm,
+        {gemm, range}, out, why);
+}
+
+bool BuildCoupledHashDirectProduct(
+    RCStage3RelationRole role,
+    cb::ProgramTable& out,
+    std::string* why)
+{
+    cb::ProgramTable roots;
+    cb::ProgramTable hash;
+    if (!BuildRCStage3RootChainVectorProgramTable(
+            role, roots, why) ||
+        !BuildRCStage3HashKernelOutputProgramTable(
+            role, hash, why)) {
+        return false;
+    }
+    static_assert(
+        production_family_col_v1::CoupledHashOutput ==
+        5U + kRCStage3HashKernelOutputColumnV1);
+    return BuildDirectProduct(
+        role, {roots, hash}, out, why);
+}
+
+/**
+ * The fixed SHA/ChaCha instruction AIR is one opcode kernel; immutable
+ * preprocessed selector rows choose the canonical Sha256Compression or
+ * ChaCha20Block schedule. BuildRCStage3CoupledHashKernelProgramTable emits
+ * that exact 462-constraint opcode table. Retagging only its committed role is
+ * therefore the canonical partial kernel for every registered fixed-program
+ * site.  The output-cell wrapper adds one selector-muxed column so consumers
+ * cannot accidentally name a value slot which is an output for only a subset
+ * of opcodes. It does NOT bind the selected schedule, public boundary,
+ * SSA-copy provenance, or multi-instance manifest, so callers must keep the
+ * site's semantic_relation_complete bit false.
+ */
+bool BuildFixedProgramLocalFragment(
+    RCStage3RelationRole role,
+    cb::ProgramTable& out,
+    std::string* why)
+{
+    if (!BuildRCStage3HashKernelOutputProgramTable(
+            RCStage3RelationRole::EpisodeDigest, out, why)) {
+        return false;
+    }
+    return RetagProgramTable(out, role, why);
+}
+
+/** The exact structural stub the tests used (matmul_v4_rc_stage3_universal_
+ * topology_tests.cpp OneColumnProgram), reproduced here so the honest
+ * production path never depends on a *_tests.cpp translation unit. Unlike
+ * that helper, callers below never mark this complete. */
+cb::ProgramTable OneColumnStubProgram(RCStage3RelationRole role)
+{
+    cb::ProgramTable table;
+    table.role = role;
+    table.current_width = 1;
+    table.next_width = 1;
+    cb::Program program;
+    program.role = role;
+    program.kind = aq::AirKind::kEverywhere;
+    program.declared_degree = 1;
+    program.current_width = 1;
+    program.next_width = 1;
+    program.instructions.push_back(
+        {cb::Opcode::Current, 0, 0, Fp3::Zero()});
+    table.programs.push_back(std::move(program));
+    return table;
+}
+
+ProductionFamilyProgramSourceV1 StubSource(
+    const sites::ProductionProofSiteEntry& site, uint32_t family_index)
+{
+    ProductionFamilyProgramSourceV1 source;
+    source.family_index = family_index;
+    source.kind = site.kind;
+    source.role = site.role;
+    source.program = OneColumnStubProgram(site.role);
+    source.public_input_schema = {
+        static_cast<unsigned char>(family_index),
+        static_cast<unsigned char>(static_cast<uint16_t>(site.role))};
+    // Deliberately empty/false: a 1-column program proves nothing about the
+    // relation this site names, so it must not claim any endpoint or
+    // completeness. This is the honest counterpart of the *_tests.cpp
+    // OneColumnProgram helper, which claims every role endpoint complete.
+    source.semantic_endpoints.clear();
+    source.semantic_relation_complete = false;
+    return source;
+}
+
+/** One real, already-unit-tested bytecode program plus the exact single
+ * endpoint it closes. Returns false when this site is served by a canonical
+ * partial fragment instead of a semantically complete local program. */
+bool RealFamilyFor(
+    sites::ProductionProofSiteKind kind,
+    RCStage3RelationRole role,
+    cb::ProgramTable& program,
+    RCStage3RelationEndpoint& endpoint,
+    std::string* why)
+{
+    switch (kind) {
+    case sites::ProductionProofSiteKind::EpisodeBuilderCounterXof:
+        if (role != RCStage3RelationRole::EpisodeDeterministicBuilder) {
+            return false;
+        }
+        if (!BuildEpisodeBuilderDirectProduct(program, why)) {
+            return false;
+        }
+        endpoint = RCStage3RelationEndpoint::EpisodeBuilderTrace;
+        return true;
+    case sites::ProductionProofSiteKind::EpisodeDigestSha256d:
+        if (role != RCStage3RelationRole::EpisodeDigest) return false;
+        if (!BuildEpisodeDigestDirectProduct(program, why)) return false;
+        endpoint = RCStage3RelationEndpoint::EpisodeDigestPow;
+        return true;
+    case sites::ProductionProofSiteKind::EpisodeTileTreeSha256d:
+        if (role != RCStage3RelationRole::EpisodeTileTree) return false;
+        if (!BuildEpisodeTileTreeDirectProduct(program, why)) {
+            return false;
+        }
+        endpoint = RCStage3RelationEndpoint::EpisodeTileTreeStream;
+        return true;
+    case sites::ProductionProofSiteKind::EpisodeGemmSumcheck:
+        if (role != RCStage3RelationRole::EpisodeGemm) return false;
+        if (!BuildRCStage3EpisodeLocalKernelProgramTable(
+                RCStage3EpisodeAirFamily::GemmEndpointFp3V1,
+                program, why)) {
+            return false;
+        }
+        endpoint = RCStage3RelationEndpoint::EpisodeGemmSumcheck;
+        return true;
+    case sites::ProductionProofSiteKind::EpisodeWiring:
+        if (role != RCStage3RelationRole::EpisodeWiring) return false;
+        if (!BuildEpisodeWiringDirectProduct(program, why)) {
+            return false;
+        }
+        endpoint = RCStage3RelationEndpoint::EpisodeWiringCopy;
+        return true;
+    case sites::ProductionProofSiteKind::EpisodeExtractCore:
+        if (role != RCStage3RelationRole::EpisodeExtract) return false;
+        // scale_e=0 is the canonical wired default (matches
+        // ResolveRCStage3EpisodeAirConstraintSystem's ExtractSamplerCoreFp3V1
+        // case); other public scale exponents are proved by the same
+        // builder at a different scale_e, not a different table shape.
+        if (!BuildRCStage3EpisodeExtractLocalKernelProgramTable(
+                /*scale_e=*/0, program, why)) {
+            return false;
+        }
+        endpoint = RCStage3RelationEndpoint::EpisodeExtractSampler;
+        return true;
+    case sites::ProductionProofSiteKind::CoupledBank:
+        if (role != RCStage3RelationRole::CoupledBank) return false;
+        if (!BuildRCStage3CoupledBankDequantProgramTableCanonical(
+                program, why)) {
+            return false;
+        }
+        endpoint = RCStage3RelationEndpoint::CoupledBankPages;
+        return true;
+    case sites::ProductionProofSiteKind::CoupledGemm:
+        if (role != RCStage3RelationRole::CoupledGemm) return false;
+        if (!BuildCoupledGemmDirectProduct(program, why)) {
+            return false;
+        }
+        endpoint = RCStage3RelationEndpoint::CoupledGemmOutputY;
+        return true;
+    case sites::ProductionProofSiteKind::CoupledExtractCore:
+        if (role != RCStage3RelationRole::CoupledExtract) return false;
+        // scale_e=0 is the canonical wired default, matching the
+        // EpisodeExtractCore family above.
+        if (!BuildRCStage3CoupledExtractLocalKernelProgramTable(
+                /*scale_e=*/0, program, why)) {
+            return false;
+        }
+        endpoint = RCStage3RelationEndpoint::CoupledExtractSampler;
+        return true;
+    case sites::ProductionProofSiteKind::CoupledBarrierSha256d:
+        if (role != RCStage3RelationRole::CoupledBarrier) return false;
+        if (!BuildCoupledHashDirectProduct(
+                RCStage3RelationRole::CoupledBarrier,
+                program, why)) {
+            return false;
+        }
+        endpoint = RCStage3RelationEndpoint::CoupledBarrierHash;
+        return true;
+    case sites::ProductionProofSiteKind::CoupledDigestSha256d:
+        if (role != RCStage3RelationRole::CoupledDigest) return false;
+        if (!BuildCoupledHashDirectProduct(
+                RCStage3RelationRole::CoupledDigest,
+                program, why)) {
+            return false;
+        }
+        endpoint = RCStage3RelationEndpoint::CoupledDigestHash;
+        return true;
+    case sites::ProductionProofSiteKind::CoupledExchange:
+        if (role != RCStage3RelationRole::CoupledExchange) return false;
+        if (!BuildRCStage3CoupledExchangeTransportProgramTable(
+                program, why)) {
+            return false;
+        }
+        endpoint = RCStage3RelationEndpoint::CoupledExchangeOutput;
+        return true;
+    case sites::ProductionProofSiteKind::CoupledPermutation:
+        if (role != RCStage3RelationRole::CoupledPermutation) return false;
+        if (!BuildRCStage3CoupledPermutationTransportProgramTable(
+                program, why)) {
+            return false;
+        }
+        endpoint = RCStage3RelationEndpoint::CoupledPermutationOutput;
+        return true;
+    case sites::ProductionProofSiteKind::CoupledMix:
+        if (role != RCStage3RelationRole::CoupledMix) return false;
+        if (!BuildRCStage3CoupledLocalKernelProgramTable(
+                RCStage3RelationRole::CoupledMix, program, why)) {
+            return false;
+        }
+        endpoint = RCStage3RelationEndpoint::CoupledMixArithmetic;
+        return true;
+    default:
+        return false;
+    }
+}
+
+/**
+ * Canonical but deliberately incomplete fragments for the remaining sites
+ * which previously had a structural one-column placeholder. A successful
+ * return replaces that placeholder with executable relation bytecode, but it
+ * never grants a semantic endpoint or completeness claim.
+ */
+bool PartialFamilyFor(
+    sites::ProductionProofSiteKind kind,
+    RCStage3RelationRole role,
+    cb::ProgramTable& program,
+    std::string* why)
+{
+    switch (kind) {
+    case sites::ProductionProofSiteKind::EpisodeGemmOpenings:
+        return role == RCStage3RelationRole::EpisodeGemm &&
+            BuildRCStage3EpisodeSemanticMemoryProgramTable(
+                role, program, why);
+    case sites::ProductionProofSiteKind::EpisodeSignedRange:
+        return role == RCStage3RelationRole::EpisodeGemm &&
+            BuildSignedRangeLocalFragment(role, program, why);
+    case sites::ProductionProofSiteKind::EpisodeRangeExtractCtl:
+        return role == RCStage3RelationRole::EpisodeExtract &&
+            BuildRangeExtractCtlParametricFragment(program, why);
+    case sites::ProductionProofSiteKind::CoupledExtractChaCha:
+        return role == RCStage3RelationRole::CoupledExtract &&
+            BuildProductionCoupledExtractChaChaProgramTableV1(
+                program, nullptr, nullptr, why);
+    case sites::ProductionProofSiteKind::EpisodeExtractChaCha:
+        return role == RCStage3RelationRole::EpisodeExtract &&
+            BuildProductionEpisodeExtractChaChaProgramTableV1(
+                program, nullptr, nullptr, why);
+    case sites::ProductionProofSiteKind::EpisodeScaleSha:
+    case sites::ProductionProofSiteKind::CoupledBankCounterXof:
+    case sites::ProductionProofSiteKind::CoupledBankCommitmentSha256d:
+    case sites::ProductionProofSiteKind::CoupledLobeInitCounterXof:
+    case sites::ProductionProofSiteKind::CoupledPageScheduleXof:
+    case sites::ProductionProofSiteKind::CoupledExchangeXof:
+    case sites::ProductionProofSiteKind::CoupledPermutationXof:
+    case sites::ProductionProofSiteKind::CoupledMixXof:
+    case sites::ProductionProofSiteKind::CoupledExtractScaleSha:
+        return BuildFixedProgramLocalFragment(role, program, why);
+    default:
+        return false;
+    }
+}
+
+std::vector<unsigned char> PartialFamilySchemaSuffix(
+    sites::ProductionProofSiteKind kind)
+{
+    // "P1", fragment class, fixed-program kind. The schema is an ABI
+    // description (not witness data) and is committed by the registry.
+    // Keeping SHA/XOF and ChaCha schedule classes distinct prevents two
+    // identical local opcode tables under one role from becoming an
+    // ambiguous verifying key.
+    constexpr unsigned char LOCAL_MEMORY = 1;
+    constexpr unsigned char LOCAL_RANGE = 2;
+    constexpr unsigned char LOCAL_CTL = 3;
+    constexpr unsigned char FIXED_PROGRAM = 4;
+    constexpr unsigned char NONE = 0;
+    constexpr unsigned char SHA256_COMPRESSION = 1;
+    constexpr unsigned char CHACHA20_BLOCK = 2;
+    switch (kind) {
+    case sites::ProductionProofSiteKind::EpisodeGemmOpenings:
+        return {'P', '1', LOCAL_MEMORY, NONE};
+    case sites::ProductionProofSiteKind::EpisodeSignedRange:
+        return {'P', '1', LOCAL_RANGE, NONE};
+    case sites::ProductionProofSiteKind::EpisodeRangeExtractCtl:
+        return {'P', '1', LOCAL_CTL, NONE};
+    case sites::ProductionProofSiteKind::EpisodeExtractChaCha:
+    case sites::ProductionProofSiteKind::CoupledExtractChaCha:
+        return {
+            'P', '1', FIXED_PROGRAM, CHACHA20_BLOCK};
+    case sites::ProductionProofSiteKind::EpisodeScaleSha:
+    case sites::ProductionProofSiteKind::CoupledBankCounterXof:
+    case sites::ProductionProofSiteKind::CoupledBankCommitmentSha256d:
+    case sites::ProductionProofSiteKind::CoupledLobeInitCounterXof:
+    case sites::ProductionProofSiteKind::CoupledPageScheduleXof:
+    case sites::ProductionProofSiteKind::CoupledExchangeXof:
+    case sites::ProductionProofSiteKind::CoupledPermutationXof:
+    case sites::ProductionProofSiteKind::CoupledMixXof:
+    case sites::ProductionProofSiteKind::CoupledExtractScaleSha:
+        return {
+            'P', '1', FIXED_PROGRAM, SHA256_COMPRESSION};
+    default:
+        return {};
+    }
+}
+
+uint32_t PartialResidualMask(
+    sites::ProductionProofSiteKind kind)
+{
+    constexpr uint32_t PARAM =
+        ProductionResidualPublicParameterOwnership;
+    constexpr uint32_t SOURCE =
+        ProductionResidualSourceRootProvenance;
+    constexpr uint32_t SCHEDULE =
+        ProductionResidualImmutableScheduleBinding;
+    constexpr uint32_t COPY =
+        ProductionResidualInternalCopyProvenance;
+    constexpr uint32_t ALL =
+        ProductionResidualExactAllInstanceAggregation;
+    constexpr uint32_t RECURSE =
+        ProductionResidualRecursiveConsumption;
+    switch (kind) {
+    case sites::ProductionProofSiteKind::EpisodeGemmOpenings:
+        // episode_gemm_openings_proof_owned executes canonical-root A/B/Y
+        // memory bundles. The owning GEMM/builder proofs do not yet export
+        // equality-constrained roots into those bundles. Exact production
+        // counts are manifest-derived there, but the production-size streamed
+        // proof and recursive SHA-child -> AlgHash-parent bridge also remain.
+        return SOURCE | ALL | RECURSE;
+    case sites::ProductionProofSiteKind::EpisodeSignedRange:
+        return PARAM | SOURCE | ALL | RECURSE;
+    case sites::ProductionProofSiteKind::EpisodeRangeExtractCtl:
+        return PARAM | SOURCE | SCHEDULE | ALL | RECURSE;
+    case sites::ProductionProofSiteKind::EpisodeScaleSha:
+    case sites::ProductionProofSiteKind::CoupledBankCounterXof:
+    case sites::ProductionProofSiteKind::CoupledBankCommitmentSha256d:
+    case sites::ProductionProofSiteKind::CoupledLobeInitCounterXof:
+    case sites::ProductionProofSiteKind::CoupledPageScheduleXof:
+    case sites::ProductionProofSiteKind::CoupledExchangeXof:
+    case sites::ProductionProofSiteKind::CoupledPermutationXof:
+    case sites::ProductionProofSiteKind::CoupledMixXof:
+    case sites::ProductionProofSiteKind::CoupledExtractScaleSha:
+        return PARAM | SOURCE | SCHEDULE | COPY | ALL | RECURSE;
+    case sites::ProductionProofSiteKind::EpisodeExtractChaCha:
+    case sites::ProductionProofSiteKind::CoupledExtractChaCha:
+        // The table now contains the complete local opcode, boundary, output
+        // mux and internal SSA relation.  The caller-owned source root, exact
+        // production instance schedule/set and recursive child receipt remain
+        // outside that table. V3's caller-local schedule is not the complete
+        // manifest-derived production instance schedule.
+        return SOURCE | SCHEDULE | ALL | RECURSE;
+    default:
+        return 0;
+    }
+}
+
+bool BuildCanonicalR0BaseColumns(
+    sites::ProductionProofSiteKind kind,
+    const cb::ProgramTable& program,
+    std::vector<uint32_t>& out)
+{
+    out.clear();
+    const auto append_range =
+        [&](uint32_t begin, uint32_t end) {
+            for (uint32_t column = begin;
+                 column < end; ++column) {
+                out.push_back(column);
+            }
+        };
+    switch (kind) {
+    case sites::ProductionProofSiteKind::
+        EpisodeRangeExtractCtl:
+        // [source,mask,address] and [tile,multiplicity,tile bits] are
+        // pre-challenge. [inverse1,inverse2,running1,running2] are Rdep.
+        if (program.current_width != 41 ||
+            program.challenge_width != 6) {
+            return false;
+        }
+        append_range(0, 3);
+        append_range(7, 41);
+        break;
+    case sites::ProductionProofSiteKind::EpisodeExtractCore:
+    case sites::ProductionProofSiteKind::CoupledExtractCore:
+        // RcSampler witness generation writes phi, challenge-derived table
+        // fingerprint, psi and running sum only after gamma/alpha.  The core
+        // 32 columns, multiplicity and challenge-independent table tuple are
+        // committed in R0.
+        if (program.current_width !=
+                aq::kRcSamplerNumCols ||
+            program.challenge_width != 2) {
+            return false;
+        }
+        append_range(0, aq::kRcSamplerBaseCols);
+        out.push_back(aq::kColM);
+        out.push_back(aq::kColTblA);
+        out.push_back(aq::kColTblB);
+        out.push_back(aq::kColTblC);
+        break;
+    case sites::ProductionProofSiteKind::EpisodeWiring:
+        // Direct product offsets are:
+        // copy[0,2), transpose[2,10), residual[10,14), order[14,16).
+        // The transpose's inverse/product quartet occupies aggregate 6..9.
+        if (program.current_width != 16 ||
+            program.challenge_width != 4) {
+            return false;
+        }
+        append_range(0, 6);
+        append_range(10, 16);
+        break;
+    case sites::ProductionProofSiteKind::CoupledExchange:
+        // Material transport ends with two (inverse, product) lane pairs.
+        if (program.current_width != 214 ||
+            program.challenge_width != 12) {
+            return false;
+        }
+        append_range(0, 210);
+        break;
+    case sites::ProductionProofSiteKind::CoupledPermutation:
+        // Pure permutation transport has the same four-lane suffix.
+        if (program.current_width != 14 ||
+            program.challenge_width != 12) {
+            return false;
+        }
+        append_range(0, 10);
+        break;
+    case sites::ProductionProofSiteKind::EpisodeExtractChaCha:
+    case sites::ProductionProofSiteKind::CoupledExtractChaCha:
+        // The fixed-program provenance manifest explicitly places all
+        // producer/consumer inverses and running sums after BaseColumns.
+        // Its selector-muxed output is pre-challenge; the following weighted
+        // output/input products are challenge-dependent.
+        if (program.current_width != fpb::kColumnsV1 ||
+            program.challenge_width !=
+                fpb::kChallengeWidthV1 ||
+            fpb::kOutputColumnV1 >=
+                program.current_width) {
+            return false;
+        }
+        append_range(
+            0,
+            stage3_hash_air::
+                kFixedProgramProvenanceBaseColumns);
+        out.push_back(fpb::kOutputColumnV1);
+        break;
+    default:
+        return false;
+    }
+    return
+        !out.empty() &&
+        out.size() < program.current_width &&
+        std::is_sorted(out.begin(), out.end()) &&
+        std::adjacent_find(
+            out.begin(), out.end()) == out.end();
+}
+
+bool BindCanonicalPhaseDescriptor(
+    ProductionFamilyProgramSourceV1& source,
+    std::string* why)
+{
+    source.phase = {};
+    source.phase.family_index = source.family_index;
+    source.phase.kind = source.kind;
+    source.phase.role = source.role;
+    source.phase.program_root =
+        cb::CommitProgramTable(source.program);
+    source.phase.current_width =
+        source.program.current_width;
+    source.phase.challenge_width =
+        source.program.challenge_width;
+    if (source.program.challenge_width == 0) {
+        source.phase.challenge_epoch =
+            ProductionChallengeEpochV1::None;
+        source.phase.producer_manifest_exported = true;
+        source.phase.r0_base_columns.resize(
+            source.program.current_width);
+        std::iota(
+            source.phase.r0_base_columns.begin(),
+            source.phase.r0_base_columns.end(), 0U);
+    } else {
+        source.phase.challenge_epoch =
+            ProductionChallengeEpochV1::
+                BytecodeP2AfterSafeR0;
+        source.phase.producer_manifest_exported =
+            BuildCanonicalR0BaseColumns(
+                source.kind, source.program,
+                source.phase.r0_base_columns);
+        if (!source.phase.producer_manifest_exported) {
+            // Do not infer unknown splits from equations: their LogUp
+            // identities contain both the source tuple (R0) and
+            // inverse/running-product lanes (Rdep).
+            source.phase.r0_base_columns.clear();
+        }
+    }
+    if (!ValidateProductionFamilyPhaseDescriptorV1(
+            source.program, source.phase,
+            /*require_producer_export=*/false, why)) {
+        return false;
+    }
+    std::vector<unsigned char> phase_bytes;
+    if (!SerializeProductionFamilyPhaseDescriptorV1(
+            source.phase, phase_bytes, why) ||
+        phase_bytes.size() >
+            std::numeric_limits<uint32_t>::max()) {
+        return false;
+    }
+    // The production registry already commits this ABI byte vector through
+    // both SHA256d and AlgHash.  Length-prefixing the phase descriptor makes
+    // omission and suffix re-interpretation impossible without changing both
+    // registry roots.
+    static constexpr char marker[] = "R0PH";
+    std::vector<unsigned char> framed;
+    framed.insert(
+        framed.end(),
+        marker, marker + sizeof(marker) - 1);
+    SchemaU32(
+        framed,
+        static_cast<uint32_t>(phase_bytes.size()));
+    framed.insert(
+        framed.end(),
+        phase_bytes.begin(), phase_bytes.end());
+    // Preserve every family-specific schema suffix at the end of the ABI:
+    // insert phase ownership immediately after the canonical
+    // (family_index, role) prefix emitted by StubSource.
+    const size_t phase_offset =
+        std::min<size_t>(
+            2, source.public_input_schema.size());
+    source.public_input_schema.insert(
+        source.public_input_schema.begin() +
+            phase_offset,
+        framed.begin(), framed.end());
+    return true;
+}
+
+bool SameSource(
+    const ProductionFamilyProgramSourceV1& lhs,
+    const ProductionFamilyProgramSourceV1& rhs)
+{
+    return lhs.family_index == rhs.family_index &&
+        lhs.kind == rhs.kind &&
+        lhs.role == rhs.role &&
+        lhs.program == rhs.program &&
+        lhs.public_input_schema == rhs.public_input_schema &&
+        lhs.phase == rhs.phase &&
+        lhs.semantic_endpoints == rhs.semantic_endpoints &&
+        lhs.semantic_relation_complete ==
+            rhs.semantic_relation_complete;
+}
+
+} // namespace
+
+bool BuildProductionSignedRangeLocalProgramTableV1(
+    cb::ProgramTable& out,
+    std::string* why)
+{
+    return BuildSignedRangeLocalFragment(
+        RCStage3RelationRole::EpisodeGemm, out, why);
+}
+
+bool BuildProductionFixedProgramOutputLocalProgramTableV1(
+    RCStage3RelationRole role,
+    cb::ProgramTable& out,
+    std::string* why)
+{
+    return BuildFixedProgramLocalFragment(role, out, why);
+}
+
+bool BuildProductionExtractChaChaProgramTableV1(
+    sites::ProductionProofSiteKind kind,
+    RCStage3RelationRole role,
+    RCStage3RelationEndpoint endpoint,
+    cb::ProgramTable& out,
+    fpb::ManifestV1* manifest,
+    std::vector<unsigned char>* schema_suffix,
+    std::string* why)
+{
+    out = {};
+    if (!((kind ==
+               sites::ProductionProofSiteKind::
+                   EpisodeExtractChaCha &&
+           role == RCStage3RelationRole::EpisodeExtract &&
+           endpoint ==
+               RCStage3RelationEndpoint::
+                   EpisodeExtractChaCha) ||
+          (kind ==
+               sites::ProductionProofSiteKind::
+                   CoupledExtractChaCha &&
+           role == RCStage3RelationRole::CoupledExtract &&
+           endpoint ==
+               RCStage3RelationEndpoint::
+                   CoupledExtractChaCha))) {
+        if (why != nullptr) {
+            *why =
+                "stage3:production_family_programs:"
+                "extract_chacha_role";
+        }
+        return false;
+    }
+    fpb::ManifestV1 local;
+    if (!fpb::BuildCanonicalProgramTableV1(
+            role,
+            stage3_hash_air::ProgramKind::ChaCha20Block,
+            out, &local, why) ||
+        !local.exact_native_constraint_order ||
+        !local.canonical_program_table ||
+        !local.immutable_schedule_reconstructed ||
+        !local.internal_ssa_provenance_complete ||
+        local.fixed_program_commitment.IsNull() ||
+        local.immutable_schedule_root.IsNull() ||
+        local.rows != 1024 ||
+        local.columns != fpb::kColumnsV1 ||
+        local.programs != fpb::kProgramsV1 ||
+        local.challenge_width !=
+            fpb::kChallengeWidthV1) {
+        out = {};
+        if (why != nullptr && why->empty()) {
+            *why =
+                "stage3:production_family_programs:"
+                "extract_chacha_program";
+        }
+        return false;
+    }
+    const auto suffix =
+        ExtractChaChaSchemaSuffix(
+            kind, role, endpoint, local);
+    if (suffix.empty()) {
+        out = {};
+        if (why != nullptr) {
+            *why =
+                "stage3:production_family_programs:"
+                "extract_chacha_schema";
+        }
+        return false;
+    }
+    if (manifest != nullptr) *manifest = local;
+    if (schema_suffix != nullptr) {
+        *schema_suffix = suffix;
+    }
+    return true;
+}
+
+bool BuildProductionCoupledExtractChaChaProgramTableV1(
+    cb::ProgramTable& out,
+    fpb::ManifestV1* manifest,
+    std::vector<unsigned char>* schema_suffix,
+    std::string* why)
+{
+    return BuildProductionExtractChaChaProgramTableV1(
+        sites::ProductionProofSiteKind::
+            CoupledExtractChaCha,
+        RCStage3RelationRole::CoupledExtract,
+        RCStage3RelationEndpoint::
+            CoupledExtractChaCha,
+        out, manifest, schema_suffix, why);
+}
+
+bool BuildProductionEpisodeExtractChaChaProgramTableV1(
+    cb::ProgramTable& out,
+    fpb::ManifestV1* manifest,
+    std::vector<unsigned char>* schema_suffix,
+    std::string* why)
+{
+    return BuildProductionExtractChaChaProgramTableV1(
+        sites::ProductionProofSiteKind::
+            EpisodeExtractChaCha,
+        RCStage3RelationRole::EpisodeExtract,
+        RCStage3RelationEndpoint::
+            EpisodeExtractChaCha,
+        out, manifest, schema_suffix, why);
+}
+
+bool BuildCanonicalProductionFamilyProgramTableV1(
+    sites::ProductionProofSiteKind kind,
+    RCStage3RelationRole role,
+    cb::ProgramTable& out,
+    std::string* why)
+{
+    RCStage3RelationEndpoint endpoint{};
+    if (RealFamilyFor(kind, role, out, endpoint, why)) {
+        return cb::ValidateProgramTable(out, why);
+    }
+    if (PartialFamilyFor(kind, role, out, why)) {
+        return cb::ValidateProgramTable(out, why);
+    }
+    out = {};
+    if (why != nullptr) {
+        *why =
+            "stage3:production_family_programs:"
+            "canonical_family_unavailable";
+    }
+    return false;
+}
+
+std::vector<ProductionFamilyProgramSourceV1>
+BuildProductionFamilyProgramSourcesV1(
+    const sites::ProductionProofSiteManifest& manifest)
+{
+    std::vector<ProductionFamilyProgramSourceV1> out;
+    out.reserve(manifest.entries.size());
+    for (size_t i = 0; i < manifest.entries.size(); ++i) {
+        const auto& site = manifest.entries[i];
+        ProductionFamilyProgramSourceV1 source =
+            StubSource(site, static_cast<uint32_t>(i));
+
+        cb::ProgramTable real;
+        RCStage3RelationEndpoint endpoint{};
+        std::string why;
+        if (RealFamilyFor(site.kind, site.role, real, endpoint, &why) &&
+            cb::ValidateProgramTable(real, &why)) {
+            source.program = std::move(real);
+            source.semantic_endpoints = {
+                static_cast<uint16_t>(endpoint)};
+            source.semantic_relation_complete = true;
+        } else if (
+            PartialFamilyFor(
+                site.kind, site.role, real, &why) &&
+            cb::ValidateProgramTable(real, &why)) {
+            source.program = std::move(real);
+            std::vector<unsigned char> suffix;
+            if (site.kind ==
+                    sites::ProductionProofSiteKind::
+                        CoupledExtractChaCha ||
+                site.kind ==
+                    sites::ProductionProofSiteKind::
+                        EpisodeExtractChaCha) {
+                cb::ProgramTable canonical;
+                const bool built =
+                    site.kind ==
+                        sites::ProductionProofSiteKind::
+                            CoupledExtractChaCha
+                    ? BuildProductionCoupledExtractChaChaProgramTableV1(
+                          canonical, nullptr,
+                          &suffix, &why)
+                    : BuildProductionEpisodeExtractChaChaProgramTableV1(
+                          canonical, nullptr,
+                          &suffix, &why);
+                if (!built ||
+                    canonical != source.program) {
+                    BindCanonicalPhaseDescriptor(
+                        source, nullptr);
+                    out.push_back(std::move(source));
+                    continue;
+                }
+            } else {
+                suffix =
+                    PartialFamilySchemaSuffix(site.kind);
+            }
+            source.public_input_schema.insert(
+                source.public_input_schema.end(),
+                suffix.begin(), suffix.end());
+            // A partial canonical kernel is materially different from the
+            // old structural placeholder, but still makes no endpoint-level
+            // completeness claim.
+            source.semantic_endpoints.clear();
+            source.semantic_relation_complete = false;
+        }
+        if (!BindCanonicalPhaseDescriptor(
+                source, &why)) {
+            // Preserve the exact family slot as a fail-closed structural
+            // source. Validation against a fresh canonical rebuild will still
+            // expose the missing/invalid phase descriptor.
+            source.phase = {};
+        }
+        out.push_back(std::move(source));
+    }
+    return out;
+}
+
+bool ValidateProductionFamilyProgramSourcesV1(
+    const sites::ProductionProofSiteManifest& manifest,
+    const std::vector<ProductionFamilyProgramSourceV1>& sources,
+    std::string* why)
+{
+    std::string manifest_why;
+    if (!sites::ValidateProductionProofSiteManifest(
+            manifest, &manifest_why)) {
+        if (why != nullptr) {
+            *why =
+                "stage3:production_family_programs:"
+                "manifest:" + manifest_why;
+        }
+        return false;
+    }
+    const std::vector<ProductionFamilyProgramSourceV1> expected =
+        BuildProductionFamilyProgramSourcesV1(manifest);
+    if (expected.size() != manifest.entries.size() ||
+        sources.size() != expected.size()) {
+        if (why != nullptr) {
+            *why =
+                "stage3:production_family_programs:"
+                "canonical_family_count";
+        }
+        return false;
+    }
+    for (size_t i = 0; i < expected.size(); ++i) {
+        if (!SameSource(sources[i], expected[i])) {
+            if (why != nullptr) {
+                *why =
+                    "stage3:production_family_programs:"
+                    "canonical_family_substitution:" +
+                    std::to_string(i);
+            }
+            return false;
+        }
+    }
+    if (why != nullptr) {
+        *why =
+            "stage3:production_family_programs:"
+            "canonical_sources";
+    }
+    return true;
+}
+
+ProductionFamilyProgramMigrationStatusV1
+AssessProductionFamilyProgramMigrationV1(
+    const std::vector<ProductionFamilyProgramSourceV1>& sources)
+{
+    ProductionFamilyProgramMigrationStatusV1 out;
+    out.families_total = static_cast<uint32_t>(sources.size());
+    std::set<RCStage3RelationRole> roles;
+    std::set<uint16_t> endpoints;
+    for (const auto& source : sources) {
+        const bool structural_stub =
+            !source.semantic_relation_complete &&
+            source.semantic_endpoints.empty() &&
+            source.program.current_width == 1 &&
+            source.program.next_width == 1 &&
+            source.program.programs.size() == 1 &&
+            source.program.programs[0].instructions.size() == 1 &&
+            source.program.programs[0].instructions[0].opcode ==
+                cb::Opcode::Current;
+        if (structural_stub) {
+            ++out.families_structural_stubs;
+        } else {
+            ++out.families_non_stub;
+            if (!source.semantic_relation_complete) {
+                ++out.families_partial;
+                out.partial_residuals.push_back({
+                    source.kind,
+                    PartialResidualMask(source.kind)});
+            }
+        }
+        if (!source.semantic_relation_complete ||
+            source.semantic_endpoints.empty()) {
+            continue;
+        }
+        ++out.families_real;
+        roles.insert(source.role);
+        endpoints.insert(
+            source.semantic_endpoints.begin(),
+            source.semantic_endpoints.end());
+    }
+    out.roles_with_real_program = static_cast<uint32_t>(roles.size());
+    out.real_roles.assign(roles.begin(), roles.end());
+    out.real_endpoints.assign(endpoints.begin(), endpoints.end());
+    return out;
+}
+
+} // namespace matmul::v4::rc::universal_topology

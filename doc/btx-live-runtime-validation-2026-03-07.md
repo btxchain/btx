@@ -36,7 +36,7 @@ Result:
 Artifacts:
 - `/tmp/btx-m15-full-lifecycle-matrix-20260307.json`
 - `/tmp/btx-m15-full-lifecycle-logs-20260307/mac-host-single-node-artifact.json`
-- `/Users/admin/Documents/btxchain/btx-node/.btx-validation/m15-centos-container-single-node-artifact.json`
+- `/path/to/Documents/example/staging-repo/.btx-validation/m15-centos-container-single-node-artifact.json`
 - `/tmp/btx-m15-full-lifecycle-logs-20260307/mac-centos-bridge-artifact.json`
 
 Notable runtime evidence from artifacts:
@@ -73,7 +73,7 @@ Result:
 
 ## New Live Harness (Real Node, Real Funds)
 Added script:
-- `/Users/admin/Documents/btxchain/btx-node/scripts/live_regtest_realworld_validation.py`
+- `/path/to/Documents/example/staging-repo/scripts/live_regtest_realworld_validation.py`
 
 Purpose:
 - mine across long regtest span (`--mine-blocks 430`)
@@ -146,8 +146,8 @@ Primary sources reviewed:
 - Runtime operability demonstrated across host/container/P2P bridge with real mined blocks and confirmed transfers.
 - Shielded and PQ multisig transaction paths remain functional under stress on this environment.
 - Production readiness remains contingent on unresolved design-level cryptographic hardening items tracked in:
-  - `/Users/admin/Documents/btxchain/btx-node/doc/btx-shielded-pool-critical-issues.md`
-  - `/Users/admin/Documents/btxchain/btx-node/doc/btx-design-assessment.md`
+  - `/path/to/Documents/example/staging-repo/doc/btx-shielded-pool-critical-issues.md`
+  - `/path/to/Documents/example/staging-repo/doc/btx-design-assessment.md`
 
 ## Addendum: Final Verification Gates (2026-03-07)
 
@@ -310,7 +310,7 @@ Result:
 
 ### New Script
 Added:
-- `/Users/admin/Documents/btxchain/btx-node/scripts/live_regtest_load_stress.py`
+- `/path/to/Documents/example/staging-repo/scripts/live_regtest_load_stress.py`
 
 Purpose:
 - run mixed real-node pressure on regtest with mined funds:
@@ -980,21 +980,21 @@ scripts/m14_fast_normal_transition_sim.sh \
 
 1) **Rebuild**
 ```bash
-cmake --build /Users/admin/Documents/btxchain/btx-node/build-btx -j8
+cmake --build /path/to/Documents/example/staging-repo/build-btx -j8
 ```
 - result: pass
 
 2) **Full CTest**
 ```bash
-ctest --test-dir /Users/admin/Documents/btxchain/btx-node/build-btx -j8 --output-on-failure
+ctest --test-dir /path/to/Documents/example/staging-repo/build-btx -j8 --output-on-failure
 ```
 - result: `204/204` passed
 - total real time: `133.02 sec`
 
 3) **Functional matrix (mining + shielded + multisig + p2p)**
 ```bash
-python3 /Users/admin/Documents/btxchain/btx-node/test/functional/test_runner.py \
-  --configfile /Users/admin/Documents/btxchain/btx-node/build-btx/test/config.ini \
+python3 /path/to/Documents/example/staging-repo/test/functional/test_runner.py \
+  --configfile /path/to/Documents/example/staging-repo/build-btx/test/config.ini \
   --jobs=6 \
   feature_btx_dgw_convergence.py feature_btx_fast_mining_phase.py mining_mainnet.py mining_matmul_basic.py \
   wallet_shielded_sendmany_stress.py wallet_shielded_mixed_stress.py wallet_shielded_topology_sim.py wallet_shielded_longhaul_sim.py \
@@ -1007,7 +1007,7 @@ python3 /Users/admin/Documents/btxchain/btx-node/test/functional/test_runner.py 
 4) **Extended single-node live lifecycle (4000 mined blocks)**
 ```bash
 scripts/live_regtest_realworld_validation.py \
-  --build-dir /Users/admin/Documents/btxchain/btx-node/build-btx \
+  --build-dir /path/to/Documents/example/staging-repo/build-btx \
   --mine-blocks 4000 \
   --artifact /tmp/btx-live-regtest-runtime-validation-20260307g.json
 ```
@@ -1075,7 +1075,7 @@ scripts/verify_btx_production_readiness.sh \
 - bounded stress verification run:
 ```bash
 PYTHONUNBUFFERED=1 scripts/live_regtest_load_stress.py \
-  --build-dir /Users/admin/Documents/btxchain/btx-node/build-btx \
+  --build-dir /path/to/Documents/example/staging-repo/build-btx \
   --initial-mine-blocks 200 \
   --rounds 150 \
   --seed 2026030722 \
@@ -1158,7 +1158,7 @@ Local runtime linkage snapshot during this round:
 1) **Deep live runtime lifecycle (5000 mined blocks)**
 ```bash
 PYTHONUNBUFFERED=1 scripts/live_regtest_realworld_validation.py \
-  --build-dir /Users/admin/Documents/btxchain/btx-node/build-btx \
+  --build-dir /path/to/Documents/example/staging-repo/build-btx \
   --mine-blocks 5000 \
   --artifact /tmp/btx-live-regtest-runtime-validation-20260307i.json
 ```
@@ -1178,7 +1178,7 @@ PYTHONUNBUFFERED=1 scripts/live_regtest_realworld_validation.py \
 2) **Long mixed-load stress (full completion, zero failures)**
 ```bash
 PYTHONUNBUFFERED=1 scripts/live_regtest_load_stress.py \
-  --build-dir /Users/admin/Documents/btxchain/btx-node/build-btx \
+  --build-dir /path/to/Documents/example/staging-repo/build-btx \
   --initial-mine-blocks 200 \
   --rounds 120 \
   --seed 2026030724 \

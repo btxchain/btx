@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <consensus/params.h>
+#include <primitives/block.h>
 #include <util/check.h>
 #include <versionbits.h>
 
@@ -253,6 +254,9 @@ int32_t VersionBitsCache::ComputeBlockVersion(const CBlockIndex* pindexPrev, con
             nVersion |= Mask(params, pos);
         }
     }
+
+    // Do NOT OR BTX_HEADER_POW_COMMIT_VERSION_BIT: bit 26 must not imply a
+    // different wire/GetHash (withdrawn self-describing HeaderPoW design).
 
     return nVersion;
 }

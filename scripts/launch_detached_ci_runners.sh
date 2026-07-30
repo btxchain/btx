@@ -7,13 +7,13 @@ usage() {
 Usage: scripts/launch_detached_ci_runners.sh [options]
 
 Launch one or more detached (screen-managed) ephemeral GitHub Actions runners
-for btxchain/btx-node. Each detached job executes
+for example/staging-repo Each detached job executes
 scripts/run_ci_self_hosted_runner_once.sh and exits after one CI job.
 
 Options:
   --count <n>             Number of detached runners to launch (default: 1)
   --token-file <path>     GitHub token file (default: ../github.key from repo root)
-  --repo <owner/name>     Repository slug (default: btxchain/btx-node)
+  --repo <owner/name>     Repository slug (default: example/staging-repo)
   --labels <csv>          Runner labels (default: btx-macos)
   --runner-base-dir <dir> Base directory for runner installs
                           (default: ~/.btxchain/actions-runner-btx-node-detached)
@@ -27,7 +27,7 @@ EOF
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TOKEN_FILE="${ROOT_DIR}/../github.key"
-REPO_SLUG="btxchain/btx-node"
+REPO_SLUG="example/staging-repo"
 RUNNER_LABELS="btx-macos"
 COUNT=1
 RUNNER_BASE_DIR="${HOME}/.btxchain/actions-runner-btx-node-detached"

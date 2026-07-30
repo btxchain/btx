@@ -118,7 +118,13 @@ std::shared_ptr<CBlock> MinerTestingSetup::FinalizeBlock(std::shared_ptr<CBlock>
     if (prev_block) {
         pblock->nBits = GetNextWorkRequired(prev_block, pblock.get(), consensus);
     }
-    BOOST_REQUIRE_MESSAGE(MineHeaderForConsensus(*pblock, block_height, consensus), "failed to mine test block for active consensus");
+    BOOST_REQUIRE_MESSAGE(MineHeaderForConsensus(
+                              *pblock,
+                              block_height,
+                              consensus,
+                              5'000'000,
+                              prev_block ? std::optional<int64_t>{prev_block->GetMedianTimePast()} : std::nullopt),
+                          "failed to mine test block for active consensus");
 
     // submit block header, so that miner can get the block height from the
     // global state and the node has the topology of the chain

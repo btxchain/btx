@@ -7,7 +7,7 @@ usage() {
 Usage: scripts/run_ci_self_hosted_runner_once.sh [options]
 
 Registers and runs an ephemeral GitHub Actions self-hosted runner for
-btxchain/btx-node. The runner exits after completing one job.
+example/staging-repo The runner exits after completing one job.
 
 Options:
   --token-file <path>   File containing GitHub API token
@@ -16,7 +16,7 @@ Options:
                         (default: ~/.btxchain/actions-runner-btx-node)
   --labels <csv>        Additional runner labels (default: btx-macos)
   --name <name>         Runner name (default: btx-macos-<host>-<epoch>)
-  --repo <owner/name>   GitHub repository slug (default: btxchain/btx-node)
+  --repo <owner/name>   GitHub repository slug (default: example/staging-repo)
   -h, --help            Show this message
 EOF
 }
@@ -25,7 +25,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TOKEN_FILE="${ROOT_DIR}/../github.key"
 RUNNER_DIR="${HOME}/.btxchain/actions-runner-btx-node"
 RUNNER_LABELS="btx-macos"
-REPO_SLUG="btxchain/btx-node"
+REPO_SLUG="example/staging-repo"
 HOST_SHORT="$(hostname | cut -d. -f1)"
 RUNNER_NAME="btx-macos-${HOST_SHORT}-$(date +%s)"
 

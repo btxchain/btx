@@ -2,7 +2,7 @@
 
 Source audit:
 
-- `/Users/admin/Documents/btxchain/docs/btx-security-fixes-20260328.rtf`
+- `/path/to/Documents/example/staging-repo/btx-security-fixes-20260328.rtf`
 
 Detailed tracker:
 

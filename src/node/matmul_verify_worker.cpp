@@ -1,0 +1,291 @@
+// Copyright (c) 2026 The BTX developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+
+#include <node/matmul_verify_worker.h>
+
+#include <arith_uint256.h>
+#include <consensus/params.h>
+#include <logging.h>
+#include <matmul/matmul_v4_rc.h>
+#include <matmul/matmul_v4_rc_stage3_consensus.h>
+#include <pow.h>
+#include <uint256.h>
+#include <util/check.h>
+#include <util/threadnames.h>
+
+#include <algorithm>
+#include <iterator>
+#include <utility>
+
+namespace node {
+
+MatMulVerifyWorker::MatMulVerifyWorker(const Consensus::Params& params, uint32_t max_threads,
+                                       std::function<bool(const CBlock&, int32_t, std::optional<int64_t>)> verify_for_test)
+    : m_params{params},
+      m_verify_override{std::move(verify_for_test)},
+      m_max_threads{max_threads > 0
+                        ? max_threads
+                        : 1}
+{
+}
+
+MatMulVerifyWorker::~MatMulVerifyWorker()
+{
+    Stop();
+}
+
+bool MatMulVerifyWorker::Enqueue(Job& job)
+{
+    Assume((job.block != nullptr) != (job.header != nullptr));
+    const uint256 hash{job.GetHeader().GetHash()};
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_stopped) return false;
+        if (const auto it{m_pending.find(hash)}; it != m_pending.end()) {
+            // A full body arriving behind a header-first job joins the same
+            // pure header verdict. Its completion still re-enters ordinary
+            // block validation, which alone can authenticate chainwork.
+            if (job.completion) {
+                it->second->followers.push_back(std::move(job.completion));
+            }
+            if (job.block) {
+                it->second->body_joined = true;
+            }
+            if (static_cast<uint8_t>(job.priority) >
+                static_cast<uint8_t>(it->second->job.priority)) {
+                it->second->job.priority = job.priority;
+            }
+            job = Job{};
+            return true;
+        }
+        if (!job.cancelled) {
+            job.cancelled = std::make_shared<std::atomic_bool>(false);
+        }
+        auto pending{std::make_shared<Pending>()};
+        pending->job = std::move(job);
+        pending->sequence = m_next_sequence++;
+        m_queue.push_back(pending);
+        m_pending.emplace(hash, pending);
+        // Lazily scale the pool: one thread per enqueue until the cap.
+        if (m_threads.size() < m_max_threads && m_threads.size() < m_queue.size()) {
+            m_threads.emplace_back([this] { WorkerLoop(); });
+        }
+    }
+    m_cv.notify_one();
+    return true;
+}
+
+bool MatMulVerifyWorker::Cancel(const uint256& hash)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    const auto it{m_pending.find(hash)};
+    if (it == m_pending.end()) return false;
+    const auto pending{it->second};
+    if (pending->body_joined) return false;
+    pending->job.cancelled->store(true, std::memory_order_relaxed);
+    if (!pending->running) {
+        std::erase(m_queue, pending);
+        m_pending.erase(it);
+    }
+    return true;
+}
+
+size_t MatMulVerifyWorker::CancelIf(
+    const std::function<bool(const CBlockHeader&, int32_t)>& predicate)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    size_t count{0};
+    for (auto it = m_pending.begin(); it != m_pending.end();) {
+        const auto pending{it->second};
+        if (pending->body_joined) {
+            ++it;
+            continue;
+        }
+        if (!predicate(pending->job.GetHeader(), pending->job.height)) {
+            ++it;
+            continue;
+        }
+        pending->job.cancelled->store(true, std::memory_order_relaxed);
+        ++count;
+        if (!pending->running) {
+            std::erase(m_queue, pending);
+            it = m_pending.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    return count;
+}
+
+bool MatMulVerifyWorker::Contains(const uint256& hash) const
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_pending.count(hash) != 0;
+}
+
+void MatMulVerifyWorker::Stop()
+{
+    std::vector<std::shared_ptr<Pending>> orphaned;
+    std::vector<std::thread> threads;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_stopped = true;
+        // Queued-not-started jobs are destroyed WITHOUT running their
+        // completions: the RAII state captured in the closures (verification
+        // slots) is released by destruction, and the un-processed blocks stay
+        // re-requestable — the same semantics as the existing global-budget
+        // "defer" path.
+        orphaned.swap(m_queue);
+        for (const auto& pending : orphaned) {
+            pending->job.cancelled->store(true, std::memory_order_relaxed);
+            m_pending.erase(pending->job.GetHeader().GetHash());
+        }
+        threads.swap(m_threads);
+    }
+    m_cv.notify_all();
+    for (std::thread& t : threads) {
+        if (t.joinable()) t.join();
+    }
+    // `orphaned` destroyed here, after the in-flight jobs joined.
+}
+
+size_t MatMulVerifyWorker::QueueDepthForTest() const
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_queue.size();
+}
+
+bool MatMulVerifyWorker::HigherPriority(const Pending& lhs, const Pending& rhs)
+{
+    const auto lp{static_cast<uint8_t>(lhs.job.priority)};
+    const auto rp{static_cast<uint8_t>(rhs.job.priority)};
+    if (lp != rp) return lp > rp;
+    return lhs.sequence < rhs.sequence;
+}
+
+void MatMulVerifyWorker::WorkerLoop()
+{
+    util::ThreadRename("mmverify");
+    for (;;) {
+        std::shared_ptr<Pending> pending;
+        {
+            std::unique_lock<std::mutex> lock(m_mutex);
+            m_cv.wait(lock, [this]() { return m_stopped || !m_queue.empty(); });
+            if (m_stopped) return; // remaining queued jobs are drained by Stop()
+            size_t best{0};
+            for (size_t i = 1; i < m_queue.size(); ++i) {
+                if (HigherPriority(*m_queue[i], *m_queue[best])) best = i;
+            }
+            pending = m_queue[best];
+            m_queue.erase(m_queue.begin() + best);
+            pending->running = true;
+        }
+
+        Job& job{pending->job};
+        const CBlockHeader& header{job.GetHeader()};
+        const uint256 hash{header.GetHash()};
+        bool ok{false};
+        if (job.cancelled->load(std::memory_order_relaxed)) {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_pending.erase(hash);
+            continue;
+        }
+        matmul::v4::rc::ScopedExactReplayCancellation cancellation_scope{
+            job.cancelled.get()};
+        if (m_verify_override) {
+            if (job.block) {
+                ok = m_verify_override(
+                    *job.block, job.height, job.parent_median_time_past);
+            } else {
+                CBlock synthetic{header};
+                ok = m_verify_override(
+                    synthetic, job.height, job.parent_median_time_past);
+            }
+        } else {
+            // A Stage-3 attachment is block-body data and is deliberately not
+            // committed by CBlockHeader::GetHash(). Therefore neither the
+            // header-keyed legacy single-flight nor its verdict memo may wrap
+            // this path: two deliveries can share a header while carrying
+            // different proof bodies. VerifyRCStage3ConsensusAttachment owns
+            // the proof-aware (header, registry, payload) cache/single-flight.
+            if constexpr (
+                matmul::v4::rc::kRCStage3SuccinctAuthorityReady) {
+                if (job.block && m_params.IsMatMulRCFamilyActive(job.height)) {
+                    const auto target =
+                        DeriveTarget(header.nBits, m_params.powLimit);
+                    ok = target.has_value() &&
+                         matmul::v4::rc::VerifyRCStage3ConsensusAttachment(
+                             *job.block, m_params, job.height,
+                             ArithToUint256(*target), nullptr) ==
+                             matmul::v4::rc::RCStage3AttachmentStatus::Valid;
+                    LogDebug(BCLog::NET,
+                             "matmul async Stage-3 verify: block %s height %d ok=%d\n",
+                             hash.ToString(), job.height, ok);
+                    goto complete;
+                }
+            }
+
+            bool carrier_missing{false};
+            const auto verify_pure = [&]() {
+                if (m_params.IsMatMulRCCoupledActive(
+                        job.height)) {
+                    return CheckMatMulProofOfWork_RCCoupled(
+                        header, m_params, job.height);
+                }
+                if (m_params.IsMatMulRCActive(job.height)) {
+                    return CheckMatMulProofOfWork_RC(
+                        header, m_params, job.height,
+                        &carrier_missing);
+                }
+                if (!job.block) return false;
+                return CheckMatMulProofOfWork_V4EncDr(
+                    *job.block, m_params, job.height,
+                    job.parent_median_time_past);
+            };
+            // Single-flight wiring (H5 primitive): duplicate deliveries of the
+            // same hash across worker threads collapse to ONE recompute; the
+            // followers reuse the leader's verdict (pure function of the
+            // header + parent MTP). NOTE for WP-9: this wraps the WHOLE
+            // predicate from the worker; when WP-9 wires the same primitive
+            // INSIDE the pow.cpp recompute branch for the remaining
+            // synchronous callers, drop this outer wrap (one-line change) so
+            // the guard is not taken re-entrantly with two different scopes.
+            // Datacenter profile-2: a false verdict caused solely by a
+            // not-yet-arrived sampled carrier is a transient availability
+            // miss and must not poison the header verdict memo.
+            MatMulRecomputeSingleFlight sf(hash);
+            if (sf.IsLeader()) {
+                ok = verify_pure();
+                sf.SetResult(ok); // publish before ~sf releases waiters
+            } else if (const auto leader_result{sf.LeaderResult()}) {
+                ok = *leader_result; // sketch already Put() on an accepted block
+            } else {
+                // Leader exited without publishing: decide ourselves.
+                ok = verify_pure();
+            }
+            if (!(carrier_missing && !ok)) {
+                CacheMatMulEncDrVerdict(hash, ok);
+            }
+            LogDebug(BCLog::NET, "matmul async verify: block %s height %d encdr_ok=%d carrier_missing=%d\n",
+                     hash.ToString(), job.height, ok, carrier_missing);
+        }
+complete:
+        std::vector<std::function<void(bool)>> completions;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_pending.erase(hash);
+            if (!job.cancelled->load(std::memory_order_relaxed)) {
+                if (job.completion) {
+                    completions.push_back(std::move(job.completion));
+                }
+                std::move(pending->followers.begin(),
+                          pending->followers.end(),
+                          std::back_inserter(completions));
+            }
+        }
+        for (auto& completion : completions) completion(ok);
+    }
+}
+
+} // namespace node

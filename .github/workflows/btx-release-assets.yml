@@ -180,7 +180,7 @@ jobs:
           grep -q 'guix-attestations-alice-noncodesigned.SHA256SUMS' "${bundle_dir}/SHA256SUMS"
 
           python3 scripts/release/publish_github_release.py \
-            --repo btxchain/btx-node \
+            --repo example/staging-repo \
             --tag v0.0.0-test \
             --bundle-dir "${bundle_dir}" \
             --dry-run
