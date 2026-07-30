@@ -59,6 +59,31 @@ bool MatMulVerifyWorker::Enqueue(Job& job)
             job = Job{};
             return true;
         }
+        if (job.priority == Priority::AuthenticatedTipChild &&
+            (!job.cancelled ||
+             !job.cancelled->load(std::memory_order_relaxed))) {
+            // A valid admission ticket buys a bounded verification attempt,
+            // not an uninterruptible claim on the only device submitter.
+            // Preempt lower-priority in-flight speculation as soon as an
+            // authenticated-tip child arrives. The canceled candidate gets
+            // no verdict or peer punishment and remains re-requestable; the
+            // queued competing-branch set is retained and its lower priority
+            // naturally places it behind the reserved tip lane.
+            //
+            // This also interrupts an inline portable device-mismatch retry:
+            // ScopedExactReplayCancellation covers the complete predicate,
+            // including that retry, and the replay checks cancellation at
+            // layer/round command-buffer boundaries.
+            for (const auto& [pending_hash, pending] : m_pending) {
+                if (pending_hash == hash || !pending->running) continue;
+                if (static_cast<uint8_t>(pending->job.priority) >=
+                    static_cast<uint8_t>(Priority::AuthenticatedTipChild)) {
+                    continue;
+                }
+                pending->job.cancelled->store(
+                    true, std::memory_order_relaxed);
+            }
+        }
         if (!job.cancelled) {
             job.cancelled = std::make_shared<std::atomic_bool>(false);
         }

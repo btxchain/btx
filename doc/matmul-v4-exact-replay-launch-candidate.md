@@ -72,10 +72,12 @@ All 100 digests were distinct and 51 met the easy campaign target. The exact
 `full_metal_pipeline=true`; CPU calls and fallbacks were zero.
 
 The actual consensus worker then accepted two valid golden winners queued with
-zero arrival gap in 56.439502250 seconds total. In a three-branch reorg, two
-stale jobs were canceled, the in-flight replay stopped in 0.023179917 seconds,
-and a distinct valid canonical winner completed 28.101862542 seconds after the
-tip change.
+zero arrival gap in 56.407940500 seconds total. A valid-ticket invalid-candidate
+flood was preempted in 1.528641959 seconds and the honest verdict completed
+30.207028375 seconds after the flood began, with no invalid completion or peer
+punishment. In a three-branch reorg, two stale jobs were canceled, the
+in-flight replay stopped in 1.566106083 seconds, and a distinct valid canonical
+winner completed 29.708123583 seconds after the tip change.
 
 Raw evidence and reproduction commands are in
 `doc/evidence/m4-max-profile1-loaded-2026-07-30/`.
@@ -173,6 +175,12 @@ Measured on this M4 Max:
 - [x] Profile 1 loaded p99 is within the 25–30 second target.
 - [x] Two zero-gap valid blocks drain inside one 90-second interval.
 - [x] Three-branch reorg and stale-job cancellation remain bounded.
+- [x] Cryptographically ticketed invalid competing candidates cannot starve
+  the authenticated-tip lane: preemption completed in 1.529 seconds and the
+  honest verdict completed in 30.207 seconds with zero invalid completions.
+- [x] Deterministic device mismatch retry is exercised with an explicitly
+  faulty exact-GEMM backend: repeated honest recovery is identical, and a
+  false claim remains rejected after the portable retry.
 - [x] Full-Metal telemetry covers every consensus MAC with no CPU fallback.
 - [x] Production headers bind `matmul_dim=4096`; the real consensus predicate,
   target check, verdict memo, and worker completion path accept the goldens.
@@ -190,10 +198,8 @@ Still required before activation:
 
 - [ ] portable and independent Metal machines match the corrected golden
   vectors;
-- [ ] invalid ticketed candidates cannot starve the authenticated-tip lane
-  under sustained admission load;
-- [ ] device mismatch retry is exercised and deterministic on a deliberately
-  faulted device result;
+- [ ] the final CUDA path and multi-peer testnet soak reproduce the local
+  ticketed-starvation and faulted-device results;
 - [ ] block/header serialization and `rcadmit` no-chain-byte invariants are
   rechecked in the final candidate build;
 - [ ] checkpoint and IBD trust-window disclosures are frozen;

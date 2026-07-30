@@ -68,14 +68,28 @@ BTX_RUN_PROFILE1_METAL_SCHEDULER_TESTS=1 \
 Results:
 
 - Two valid winners were queued with zero arrival gap. The first completed in
-  **28.308719584 seconds**, the second required **28.129786958 seconds**, and
-  both drained in **56.439502250 seconds** with ending queue depth zero.
+  **28.304562958 seconds**, the second required **28.102502667 seconds**, and
+  both drained in **56.407940500 seconds** with ending queue depth zero.
+- A cryptographically ticketed invalid competing candidate was already
+  replaying when two more ticketed invalid candidates and an authenticated-tip
+  winner arrived. The in-flight invalid replay was preempted in
+  **1.528641959 seconds**; the honest verdict completed
+  **30.207028375 seconds** after the flood began. No invalid completion or peer
+  punishment fired, and the remaining two invalid jobs were canceled after
+  the honest verdict.
 - In the three-branch reorg, one correctly claimed stale branch was already
   replaying and another was queued. `CancelIf` canceled both stale jobs. The
-  running replay exited **0.023179917 seconds** after cancellation, and the
-  distinct valid canonical winner completed **28.101862542 seconds** after the
+  running replay exited **1.566106083 seconds** after cancellation, and the
+  distinct valid canonical winner completed **29.708123583 seconds** after the
   reorg.
-- The complete worker suite passed all **310 assertions**.
+- The complete worker suite passed all **360 assertions**.
+
+The deterministic device-fault test supplies an explicitly faulty exact-GEMM
+backend to the first replay pass. Two repeated runs recovered the honest
+header through the unchanged portable oracle with identical telemetry; a
+genuinely false claim was rejected after the retry. The test uses no
+environment switch or mutable process-global fault flag and passed all
+**31 assertions**.
 
 The eight-header file `profile1-metal-consensus-goldens-8.json` preserves the
 dimension-bound corpus used to choose three under-target golden winners for
@@ -100,8 +114,9 @@ than the measured workload cost.
 
 ## Conclusion
 
-On this host, Profile 1 passes the loaded p99, immediate back-to-back, and
-three-branch reorg/cancellation performance gates for 90-second blocks.
-This does not by itself authorize activation: cross-machine golden parity,
-invalid-candidate admission starvation, device-mismatch recovery, and the IBD
-trust-window disclosures remain separate gates.
+On this host, Profile 1 passes the loaded p99, immediate back-to-back,
+three-branch reorg/cancellation, ticketed-invalid starvation, and deterministic
+device-mismatch recovery gates for 90-second blocks. This does not by itself
+authorize activation: cross-machine golden parity, repetition on the final
+CUDA path, multi-day testnet load, and the IBD trust-window disclosures remain
+separate gates.

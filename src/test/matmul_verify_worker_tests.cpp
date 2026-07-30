@@ -6,6 +6,7 @@
 // (node::MatMulVerifyWorker) and the bounded ENC-DR verdict memo (pow.h).
 
 #include <node/matmul_verify_worker.h>
+#include <node/matmul_rc_admission.h>
 
 #include <chainparams.h>
 #include <consensus/params.h>
@@ -133,6 +134,28 @@ bool ProductionMetalSchedulerTestsEnabled()
     return enabled != nullptr && std::string{enabled} == "1";
 }
 
+bool AdmitRCHeader(node::RCAdmissionStore& store,
+                   const CBlockHeader& header,
+                   uint64_t keyed_netgroup,
+                   const uint256& pow_limit)
+{
+    node::RCAdmissionTicket ticket;
+    uint64_t tries{2'000'000};
+    if (!node::GrindRCAdmissionTicket(
+            header, pow_limit, ticket, tries)) {
+        return false;
+    }
+    const auto now{std::chrono::steady_clock::now()};
+    if (store.Remember(ticket, keyed_netgroup, now) !=
+        node::RCAdmissionStore::RememberResult::Stored) {
+        return false;
+    }
+    node::RCAdmissionTicket accepted;
+    return store.Consume(
+               header, keyed_netgroup, pow_limit, now, &accepted) &&
+           accepted.block_hash == header.GetHash();
+}
+
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(matmul_verify_worker_tests, BasicTestingSetup)
@@ -215,6 +238,130 @@ BOOST_AUTO_TEST_CASE(priority_queue_reserves_authenticated_tip_lane)
     BOOST_CHECK_EQUAL(order[0], 1U);
     BOOST_CHECK_EQUAL(order[1], 3U);
     BOOST_CHECK_EQUAL(order[2], 2U);
+}
+
+BOOST_AUTO_TEST_CASE(ticketed_invalid_candidates_cannot_starve_authenticated_tip_lane)
+{
+    const Consensus::Params params{MakeProfile1ActiveParams()};
+    node::RCAdmissionStore admission{{
+        .max_entries = 32,
+        .max_entries_per_netgroup = 32,
+        .ttl = std::chrono::seconds{180},
+    }};
+    constexpr uint64_t kNetgroup{0x5141554f5441};
+    constexpr uint64_t kFirstInvalid{7000};
+    constexpr uint64_t kHonestTip{8000};
+    constexpr size_t kInvalidCandidates{8};
+
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool release_first{false};
+    std::atomic<int> calls{0};
+    std::atomic<int> completions{0};
+    std::atomic<int> invalid_completions{0};
+    std::atomic<int> honest_completions{0};
+    std::atomic<size_t> canceled_after_honest{0};
+    std::vector<uint64_t> execution_order;
+
+    MatMulVerifyWorker worker{
+        params, /*max_threads=*/1,
+        [&](const CBlock& block, int32_t, std::optional<int64_t>) {
+            const int call{++calls};
+            if (call == 1) {
+                std::unique_lock<std::mutex> lock(mutex);
+                cv.wait(lock, [&] { return release_first; });
+            }
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                execution_order.push_back(block.nNonce64);
+            }
+            return block.nNonce64 == kHonestTip;
+        }};
+
+    auto enqueue_ticketed =
+        [&](uint64_t nonce,
+            MatMulVerifyWorker::Priority priority,
+            bool honest,
+            std::shared_ptr<std::atomic_bool> cancelled = nullptr) {
+            uint256 claim;
+            claim.data()[0] = honest ? 0x34 : 0x7f;
+            claim.data()[1] =
+                static_cast<unsigned char>(nonce & 0xffU);
+            claim.data()[2] =
+                static_cast<unsigned char>((nonce >> 8) & 0xffU);
+            const CBlockHeader header{
+                MakeProfile1Header(nonce, claim)};
+            BOOST_REQUIRE(AdmitRCHeader(
+                admission, header, kNetgroup, params.powLimit));
+            MatMulVerifyWorker::Job job{
+                .block = std::make_shared<CBlock>(header),
+                .height = 100,
+                .completion = [&, honest](bool ok) {
+                    BOOST_CHECK_EQUAL(ok, honest);
+                    if (honest) {
+                        canceled_after_honest.store(
+                            worker.CancelIf(
+                                [](const CBlockHeader&, int32_t) {
+                                    return true;
+                                }),
+                            std::memory_order_relaxed);
+                        ++honest_completions;
+                    } else {
+                        ++invalid_completions;
+                    }
+                    ++completions;
+                },
+                .priority = priority,
+                .cancelled = std::move(cancelled),
+            };
+            BOOST_REQUIRE(worker.Enqueue(job));
+        };
+
+    auto first_cancelled{
+        std::make_shared<std::atomic_bool>(false)};
+    enqueue_ticketed(
+        kFirstInvalid,
+        MatMulVerifyWorker::Priority::CompetingBranch,
+        /*honest=*/false,
+        first_cancelled);
+    BOOST_REQUIRE(WaitFor([&] { return calls.load() == 1; }));
+
+    for (size_t i = 1; i < kInvalidCandidates; ++i) {
+        enqueue_ticketed(
+            kFirstInvalid + i,
+            MatMulVerifyWorker::Priority::CompetingBranch,
+            /*honest=*/false);
+    }
+    enqueue_ticketed(
+        kHonestTip,
+        MatMulVerifyWorker::Priority::AuthenticatedTipChild,
+        /*honest=*/true);
+
+    // The ticketed candidate already owns the single submitter, but the
+    // authenticated-tip arrival must revoke that speculative lease before
+    // the candidate can enter a long portable mismatch retry.
+    BOOST_CHECK(first_cancelled->load(std::memory_order_relaxed));
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        release_first = true;
+    }
+    cv.notify_all();
+
+    BOOST_REQUIRE(WaitFor([&] {
+        return honest_completions.load() == 1;
+    }));
+    worker.Stop();
+
+    BOOST_REQUIRE_GE(execution_order.size(), 2U);
+    BOOST_CHECK_EQUAL(execution_order[0], kFirstInvalid);
+    BOOST_CHECK_EQUAL(execution_order[1], kHonestTip);
+    BOOST_CHECK_EQUAL(honest_completions.load(), 1);
+    BOOST_CHECK_EQUAL(invalid_completions.load(), 0);
+    BOOST_CHECK_EQUAL(completions.load(), 1);
+    BOOST_CHECK_EQUAL(
+        canceled_after_honest.load(std::memory_order_relaxed),
+        kInvalidCandidates - 1);
+    BOOST_CHECK_EQUAL(worker.QueueDepthForTest(), 0U);
 }
 
 BOOST_AUTO_TEST_CASE(header_and_body_duplicates_join_one_verdict)
@@ -358,6 +505,154 @@ BOOST_AUTO_TEST_CASE(profile1_metal_back_to_back_blocks)
         "Profile-1 Metal back-to-back consensus: first=" << first_s
         << "s second=" << second_s << "s immediate_drain=" << drain_s
         << "s queue_depth_end=" << worker.QueueDepthForTest());
+}
+
+BOOST_AUTO_TEST_CASE(profile1_metal_ticketed_invalid_candidates_do_not_starve_tip)
+{
+    if (!ProductionMetalSchedulerTestsEnabled()) {
+        BOOST_TEST_MESSAGE(
+            "Set BTX_RUN_PROFILE1_METAL_SCHEDULER_TESTS=1 to run the off-CI "
+            "full-Metal production Profile-1 scheduler campaign.");
+        return;
+    }
+
+    const auto resolved = matmul_v4::accel::ResolveExactGemmBackendForRC();
+    BOOST_REQUIRE_MESSAGE(
+        resolved.self_qualified && resolved.backend.gemm_s8s8 != nullptr,
+        "Profile-1 scheduler campaign requires a self-qualified ExactReplay backend: "
+            << resolved.reason);
+    BOOST_REQUIRE_MESSAGE(
+        resolved.provider.rfind("metal_", 0) == 0,
+        "Profile-1 scheduler campaign requires Metal, resolved " << resolved.provider);
+
+    const Consensus::Params consensus{MakeProfile1ActiveParams()};
+    node::RCAdmissionStore admission{{
+        .max_entries = 16,
+        .max_entries_per_netgroup = 16,
+        .ttl = std::chrono::seconds{180},
+    }};
+    constexpr uint64_t kNetgroup{0x4d4554414c};
+    constexpr uint64_t kFirstInvalid{1000};
+    constexpr uint64_t kHonestTip{1002};
+    const uint256 invalid_claim{uint256::ONE};
+    const uint256 honest_claim{
+        "1f3cd6428314d9e47b73d8f2e547cf572b1706b6711b82e92fe6f528b2445a55"};
+
+    std::atomic<int> honest_completions{0};
+    std::atomic<int> invalid_completions{0};
+    std::atomic<size_t> canceled_after_honest{0};
+    std::mutex timing_mutex;
+    double honest_after_flood_s{0};
+    MatMulVerifyWorker worker{consensus, /*max_threads=*/1};
+    const auto flood_start{std::chrono::steady_clock::now()};
+
+    auto enqueue_ticketed =
+        [&](uint64_t nonce,
+            const uint256& digest,
+            MatMulVerifyWorker::Priority priority,
+            bool honest,
+            std::shared_ptr<std::atomic_bool> cancelled = nullptr) {
+            auto header{std::make_shared<CBlockHeader>(
+                MakeProfile1Header(nonce, digest))};
+            BOOST_REQUIRE(AdmitRCHeader(
+                admission, *header, kNetgroup, consensus.powLimit));
+            const uint256 hash{header->GetHash()};
+            MatMulVerifyWorker::Job job{
+                .height = 100,
+                .completion = [&, honest](bool ok) {
+                    if (honest) {
+                        BOOST_CHECK(ok);
+                        if (!ok) return;
+                        canceled_after_honest.store(
+                            worker.CancelIf(
+                                [](const CBlockHeader&, int32_t) {
+                                    return true;
+                                }),
+                            std::memory_order_relaxed);
+                        {
+                            std::lock_guard<std::mutex> lock(timing_mutex);
+                            honest_after_flood_s =
+                                std::chrono::duration<double>(
+                                    std::chrono::steady_clock::now() -
+                                    flood_start)
+                                    .count();
+                        }
+                        ++honest_completions;
+                    } else {
+                        BOOST_CHECK(!ok);
+                        ++invalid_completions;
+                    }
+                },
+                .header = std::move(header),
+                .priority = priority,
+                .cancelled = std::move(cancelled),
+            };
+            BOOST_REQUIRE(worker.Enqueue(job));
+            return hash;
+        };
+
+    auto first_cancelled{
+        std::make_shared<std::atomic_bool>(false)};
+    const uint256 first_hash{enqueue_ticketed(
+        kFirstInvalid,
+        invalid_claim,
+        MatMulVerifyWorker::Priority::CompetingBranch,
+        /*honest=*/false,
+        first_cancelled)};
+    BOOST_REQUIRE_MESSAGE(
+        WaitFor(
+            [&] {
+                return worker.Contains(first_hash) &&
+                       worker.QueueDepthForTest() == 0;
+            },
+            std::chrono::milliseconds{30000}),
+        "ticketed invalid candidate did not begin ExactReplay");
+    std::this_thread::sleep_for(std::chrono::milliseconds{500});
+
+    enqueue_ticketed(
+        1001,
+        invalid_claim,
+        MatMulVerifyWorker::Priority::CompetingBranch,
+        /*honest=*/false);
+    enqueue_ticketed(
+        1003,
+        invalid_claim,
+        MatMulVerifyWorker::Priority::CompetingBranch,
+        /*honest=*/false);
+    enqueue_ticketed(
+        kHonestTip,
+        honest_claim,
+        MatMulVerifyWorker::Priority::AuthenticatedTipChild,
+        /*honest=*/true);
+
+    BOOST_CHECK(first_cancelled->load(std::memory_order_relaxed));
+    const auto preempt_start{std::chrono::steady_clock::now()};
+    BOOST_REQUIRE_MESSAGE(
+        WaitFor(
+            [&] { return !worker.Contains(first_hash); },
+            std::chrono::milliseconds{30000}),
+        "authenticated-tip arrival did not preempt ticketed invalid replay");
+    const double preempt_s{std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - preempt_start).count()};
+
+    BOOST_REQUIRE_MESSAGE(
+        WaitFor(
+            [&] { return honest_completions.load() == 1; },
+            std::chrono::milliseconds{90000}),
+        "ticketed invalid candidates starved the authenticated-tip lane");
+    worker.Stop();
+
+    BOOST_CHECK_LT(preempt_s, 15.0);
+    BOOST_CHECK_LT(honest_after_flood_s, 90.0);
+    BOOST_CHECK_EQUAL(invalid_completions.load(), 0);
+    BOOST_CHECK_EQUAL(
+        canceled_after_honest.load(std::memory_order_relaxed), 2U);
+    BOOST_CHECK_EQUAL(worker.QueueDepthForTest(), 0U);
+    BOOST_TEST_MESSAGE(
+        "Profile-1 Metal ticketed-invalid starvation: preempt="
+        << preempt_s << "s honest_verdict_after_flood="
+        << honest_after_flood_s
+        << "s invalid_completions=" << invalid_completions.load());
 }
 
 BOOST_AUTO_TEST_CASE(profile1_metal_three_branch_reorg_cancels_stale_work)

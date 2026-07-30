@@ -1067,6 +1067,22 @@ struct RCProdVerifyResult {
     const arith_uint256* target = nullptr);
 
 /**
+ * Test-only dependency-injection seam for the first ExactReplay pass.
+ *
+ * A deliberately faulty device-like ExactGemm backend can be supplied here
+ * to exercise the production portable-retry logic without an environment
+ * switch or mutable process-global fault flag. The retry itself is unchanged:
+ * it always uses the portable oracle.
+ */
+[[nodiscard]] ExactReplayVerifyResult
+VerifyBoundedExactReplayWithAccelerationForTest(
+    const CBlockHeader& header,
+    const RCEpisodeParams& params,
+    int32_t height,
+    const RCExactReplayAcceleration& acceleration,
+    const arith_uint256* target = nullptr);
+
+/**
  * Dual-path helper. Shadow never fails consensus; arbiter OFF ⇒ ExactReplay
  * decides. Over-budget GKR invokes shrink-to-ExactReplay.
  */
