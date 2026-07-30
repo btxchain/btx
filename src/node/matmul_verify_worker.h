@@ -110,7 +110,10 @@ public:
     /** Try to enqueue a job. On success the job is moved-from and true is
      *  returned. On failure (worker stopped) the job is LEFT INTACT and false
      *  is returned — the caller must fall back to the synchronous path (e.g.
-     *  by invoking the completion itself). Threads are started lazily. */
+     *  by invoking the completion itself). An authenticated-tip child
+     *  preempts lower-priority in-flight speculation so a valid admission
+     *  ticket cannot reserve the sole device lane indefinitely. Threads are
+     *  started lazily. */
     bool Enqueue(Job& job);
 
     /** Cancel queued/running speculative work for one header hash. */

@@ -928,6 +928,78 @@ BOOST_AUTO_TEST_CASE(rc_exact_replay_strict_device_coverage_and_fallback_telemet
     BOOST_CHECK(!fallback_stats.first_failure.empty());
 }
 
+BOOST_AUTO_TEST_CASE(rc_device_mismatch_retry_is_deterministic_and_fail_closed)
+{
+    auto header{MakeRCHeader(0x4641554c54)};
+    const auto params{rc::MakeToyRCEpisodeParams()};
+    const uint256 honest_digest{
+        rc::RecomputeResidentCurriculumReference(
+            header, params, /*height=*/0)};
+    BOOST_REQUIRE(!honest_digest.IsNull());
+    header.matmul_digest = honest_digest;
+
+    // The backend reports successful device work but deterministically
+    // corrupts every contraction. This reaches the same mismatch branch as a
+    // transient accelerator/driver fault without a process-global fault flag.
+    lt::ExactGemmBackend faulty_backend;
+    faulty_backend.gemm_s8s8 = &WrongGemmS8S8;
+    const rc::RCExactReplayAcceleration faulty_acceleration{
+        .gemm = faulty_backend,
+        .backend = "test_faulty_exact_device",
+        .require_device = true,
+        .output_row_tile = 16,
+    };
+
+    const auto recovered_a{
+        rc::VerifyBoundedExactReplayWithAccelerationForTest(
+            header, params, /*height=*/0, faulty_acceleration)};
+    const auto recovered_b{
+        rc::VerifyBoundedExactReplayWithAccelerationForTest(
+            header, params, /*height=*/0, faulty_acceleration)};
+
+    for (const auto* recovered : {&recovered_a, &recovered_b}) {
+        BOOST_CHECK(recovered->ok);
+        BOOST_CHECK(recovered->device_mismatch_retried);
+        BOOST_CHECK(!recovered->device_mismatch_confirmed);
+        BOOST_CHECK(recovered->digest == honest_digest);
+        BOOST_CHECK_GT(recovered->device_gemm_calls, 0U);
+        BOOST_CHECK_GT(recovered->cpu_gemm_calls, 0U);
+        BOOST_CHECK(!recovered->fully_accelerated);
+        BOOST_CHECK(!recovered->full_metal_pipeline);
+        BOOST_CHECK_EQUAL(
+            recovered->acceleration_failure,
+            "device_digest_mismatch_cpu_recovered");
+        BOOST_CHECK(
+            recovered->note.find("portable CPU") !=
+            std::string::npos);
+    }
+    BOOST_CHECK(recovered_a.digest == recovered_b.digest);
+    BOOST_CHECK_EQUAL(recovered_a.note, recovered_b.note);
+    BOOST_CHECK_EQUAL(
+        recovered_a.device_gemm_calls,
+        recovered_b.device_gemm_calls);
+    BOOST_CHECK_EQUAL(
+        recovered_a.cpu_gemm_calls,
+        recovered_b.cpu_gemm_calls);
+
+    // A portable retry must not turn a genuinely false header claim into an
+    // acceptance merely because the first device pass was faulty.
+    CBlockHeader invalid_header{header};
+    invalid_header.matmul_digest = uint256::ONE;
+    BOOST_REQUIRE(invalid_header.matmul_digest != honest_digest);
+    const auto rejected{
+        rc::VerifyBoundedExactReplayWithAccelerationForTest(
+            invalid_header, params, /*height=*/0,
+            faulty_acceleration)};
+    BOOST_CHECK(!rejected.ok);
+    BOOST_CHECK(rejected.device_mismatch_retried);
+    BOOST_CHECK(rejected.device_mismatch_confirmed);
+    BOOST_CHECK(rejected.digest == honest_digest);
+    BOOST_CHECK_EQUAL(
+        rejected.note,
+        "ExactReplay: device mismatch confirmed by portable retry");
+}
+
 BOOST_AUTO_TEST_CASE(rc_f5_selfqual_cached_across_nonce_resolves)
 {
     // F5: GateExactGemmWithRCSelfQualCached must invoke ProbeRCSelfQual ≤1× per

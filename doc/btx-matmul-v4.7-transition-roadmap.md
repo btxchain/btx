@@ -126,8 +126,12 @@ The corrected Apple M4 Max Metal campaign used 100 distinct
 - loaded nearest-rank p99: **28.210448250 seconds**;
 - maximum replay: **28.362590458 seconds**;
 - worst adjacent pair: **56.495303916 seconds**;
-- actual two-winner zero-gap worker drain: **56.439502250 seconds**;
-- three-branch canonical verdict after reorg: **28.101862542 seconds**;
+- actual two-winner zero-gap worker drain: **56.407940500 seconds**;
+- ticketed-invalid preemption: **1.528641959 seconds**, with the honest verdict
+  **30.207028375 seconds** after the flood began and zero invalid completions;
+- three-branch canonical verdict after reorg: **29.708123583 seconds**;
+- deterministic injected-device mismatch: two identical portable recoveries
+  of an honest claim plus fail-closed confirmation of a false claim;
 - full Metal pipeline with zero CPU contraction calls or fallbacks.
 
 The reported RTX 5060 Ti CUDA campaign is additional cross-backend evidence:
@@ -150,8 +154,12 @@ Before an activation-height PR:
 3. Actual-consensus back-to-back and three-branch reorg tests must remain
    bounded with one device submitter.
 4. Invalid ticketed candidates must not starve the authenticated-tip lane.
+   The M4 Max production-shape test now passes; the final CUDA build and
+   multi-peer testnet soak must reproduce it.
 5. A deliberately faulted device result must exercise deterministic portable
-   retry without peer punishment or divergent validity.
+   retry without peer punishment or divergent validity. The dependency-injected
+   exact-GEMM test now passes for honest recovery and false-claim rejection;
+   the final accelerator builds must retain the same result.
 6. Header/body serialization and the no-chainwork-before-ExactReplay
    invariants must pass in the final candidate binary.
 7. A multi-day testnet soak must cover block relay, competing branches,
