@@ -1,9 +1,25 @@
 > **Note**: This document is from the original design phase. References to 150-second block times reflect the initial target; the current mainnet target is 90 seconds. See README.md for current parameters.
 
+> **Scope note (current guidance):** the numbers below benchmark the original
+> single dense-matmul PoW (`n` up to 512, Freivalds verification), which
+> remains live while every MatMul v4.7 activation height is disabled. They are
+> historical and are not comparable to the proposed transition.
+>
+> The Epoch-A launch candidate is `nMatMulRCProfile=1`: four sequential
+> Resident Curriculum rounds with epsilon-zero ExactReplay authority.
+> Succinct proofs are optional shadow data in Epoch A, mandatory alongside
+> ExactReplay in Epoch B, authoritative for Profile 1 in Epoch C, and only
+> then authoritative for the separate Profile 2 workload in Epoch D.
+> Benchmark Profile 1 with `matmul-v4-rc-harness --base-production`; Profile 2
+> measurements are Epoch-D research, not launch evidence. See
+> [`benchmarking.md`](benchmarking.md),
+> [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md),
+> and the preserved evidence under `doc/evidence/`.
+
 # BTX MatMul PoW Benchmarks
 
 Generated: 2026-02-19 23:24:24 JST
-Host: `cybook.local`
+Host: Apple-silicon benchmark host (local hostname redacted)
 Platform: `macOS-15.0-arm64-arm-64bit-Mach-O`
 CPU: `arm`
 Peak RSS (full benchmark run): `5.11 MiB`
@@ -76,5 +92,5 @@ Derived from measured Solve() attempt timings with `target = powLimit * solve_se
 
 ## Raw Artifacts
 
-- Raw benchmark output: `/Users/admin/Documents/btxchain/btx-node/.btx-production-readiness/matmul_phase2_bench.out`
-- Timing output: `/Users/admin/Documents/btxchain/btx-node/.btx-production-readiness/matmul_phase2_bench.time`
+- Raw benchmark output: `.btx-production-readiness/matmul_phase2_bench.out`
+- Timing output: `.btx-production-readiness/matmul_phase2_bench.time`

@@ -10,24 +10,33 @@
 #include <matmul/accelerated_solver.h>
 #include <matmul/freivalds.h>
 #include <matmul/matmul_pow.h>
+#include <matmul/matmul_sketch_cache.h>
+#include <matmul/matmul_v4_bmx4.h>
+#include <matmul/matmul_v4_rc_coupled.h>
 #include <matmul/matrix.h>
 #include <matmul/noise.h>
 #include <matmul/transcript.h>
 #include <metal/oracle_accel.h>
 #include <pow.h>
+#include <primitives/block.h>
+#include <streams.h>
 #include <test/util/mining.h>
 #include <test/util/random.h>
 #include <test/util/setup_common.h>
 #include <util/chaintype.h>
 #include <util/time.h>
 #include <validation.h>
+#include <versionbits.h>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <limits>
 #include <optional>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 
 #include <boost/test/unit_test.hpp>
@@ -1332,6 +1341,66 @@ BOOST_AUTO_TEST_CASE(ChainParams_REGTEST_matmul_activation_override_args)
     BOOST_CHECK(consensus.IsMatMulNonceSeedActive(9));
 }
 
+BOOST_AUTO_TEST_CASE(ChainParams_REGTEST_rc_coupled_activation_override_args)
+{
+    // F6: -regtestrc* / -regtestrccoupled* CLI overrides must reach consensus
+    // params (unit-level mirror of the functional activation rehearsal). Public
+    // nets are untouched — this only exercises CreateChainParams(REGTEST).
+    ArgsManager args;
+    args.ForceSetArg("-test", "matmulstrict");
+    args.ForceSetArg("-regtestmatmulv4height", "6");
+    args.ForceSetArg("-regtestbmx4cheight", "6");
+    args.ForceSetArg("-regtestdrltheight", "6");
+    args.ForceSetArg("-regtestmatmulltsealaspow", "0");
+    args.ForceSetArg("-regtestrcheight", "9");
+    args.ForceSetArg("-regtestrccoupledheight", "12");
+    args.ForceSetArg("-regtestrctoydims", "1");
+    args.ForceSetArg("-regtestrccoupledtoydims", "1");
+
+    const auto consensus = CreateChainParams(args, ChainType::REGTEST)->GetConsensus();
+    BOOST_CHECK_EQUAL(consensus.nMatMulV4Height, 6);
+    BOOST_CHECK_EQUAL(consensus.nMatMulBMX4CHeight, 6);
+    BOOST_CHECK_EQUAL(consensus.nMatMulDRLTHeight, 6);
+    BOOST_CHECK_EQUAL(consensus.nMatMulRCHeight, 9);
+    BOOST_CHECK_EQUAL(consensus.nMatMulRCCoupledHeight, 12);
+    BOOST_CHECK(consensus.fMatMulRCUseToyDims);
+    BOOST_CHECK(consensus.fMatMulRCCoupledUseToyDims);
+    BOOST_CHECK_EQUAL(consensus.nMatMulRCCoupledProfile, 3u); // default V3
+    BOOST_CHECK(!consensus.fSkipMatMulValidation);
+    BOOST_CHECK(!consensus.IsMatMulRCActive(8));
+    BOOST_CHECK(consensus.IsMatMulRCActive(9));
+    BOOST_CHECK(consensus.GetMatMulEncodingProfile(9) == Consensus::MatMulEncodingProfile::ENC_RC);
+    BOOST_CHECK(!consensus.IsMatMulRCCoupledActive(11));
+    BOOST_CHECK(consensus.IsMatMulRCCoupledActive(12));
+    BOOST_CHECK(consensus.GetMatMulEncodingProfile(12) ==
+                Consensus::MatMulEncodingProfile::ENC_RC_COUPLED);
+    // Live RC/coupled on regtest unthrottles tip-verify budgets.
+    BOOST_CHECK_EQUAL(consensus.nMatMulRCMaxPendingVerifications,
+                      std::numeric_limits<uint32_t>::max());
+}
+
+BOOST_AUTO_TEST_CASE(ChainParams_REGTEST_rc_coupled_profile_override_args)
+{
+    // F8: -regtestrccoupledprofile=3 × toydims reaches ResolveRCCoupParams.
+    ArgsManager args;
+    args.ForceSetArg("-test", "matmulstrict");
+    args.ForceSetArg("-regtestmatmulv4height", "6");
+    args.ForceSetArg("-regtestbmx4cheight", "6");
+    args.ForceSetArg("-regtestdrltheight", "6");
+    args.ForceSetArg("-regtestmatmulltsealaspow", "0");
+    args.ForceSetArg("-regtestrccoupledheight", "12");
+    args.ForceSetArg("-regtestrccoupledtoydims", "1");
+    args.ForceSetArg("-regtestrccoupledprofile", "3");
+
+    const auto consensus = CreateChainParams(args, ChainType::REGTEST)->GetConsensus();
+    BOOST_CHECK_EQUAL(consensus.nMatMulRCCoupledProfile, 3u);
+    BOOST_CHECK(consensus.fMatMulRCCoupledUseToyDims);
+    const auto resolved = matmul::v4::rc::ResolveRCCoupParams(consensus);
+    BOOST_CHECK_EQUAL(resolved.rows_per_lobe, 32u);
+    BOOST_CHECK_EQUAL(resolved.pages_per_barrier_lobe, 4u);
+    BOOST_CHECK(matmul::v4::rc::ValidateRCCoupParams(resolved));
+}
+
 BOOST_AUTO_TEST_CASE(MatMulPreHashEpsilonBits_resolve_upgrade_at_boundary)
 {
     Consensus::Params params{};
@@ -1444,6 +1513,47 @@ BOOST_AUTO_TEST_CASE(MatMulParentMtpSeed_activation_selects_v3_and_requires_pare
     BOOST_REQUIRE(SetDeterministicMatMulSeeds(alternate_parent, consensus, 3, parent_mtp + 1));
     BOOST_CHECK_NE(v3.seed_a, alternate_parent.seed_a);
     BOOST_CHECK_NE(v3.seed_b, alternate_parent.seed_b);
+}
+
+BOOST_AUTO_TEST_CASE(MatMulBMX4CSeed_field_pinning_is_v3_and_idempotent)
+{
+    // Audit W-1 regression (consensus-critical). At ENC-BMX4C heights the header
+    // seed FIELDS must be pinned by the self-reference-free V3 derivation, NOT by
+    // DeriveOperandSeedBMX4C -- whose operand-B preimage (ComputeMatMulHeaderHash)
+    // includes seed_b, so seed_b := f(H(..., seed_b)) has no fixed point and the
+    // verifier's recompute-and-compare (bad-matmul-seeds) would reject EVERY
+    // honestly-mined block. The pinning MUST therefore be idempotent.
+    auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
+    consensus.fMatMulPOW = true;
+    // This fixture targets BMX4C seed pinning, not the later LT profile.
+    consensus.nMatMulDRLTHeight = std::numeric_limits<int32_t>::max();
+    consensus.fMatMulLTSealAsPoW = false;
+    // Regtest activates v4 at 100 and ENC-BMX4C at 150 once LT is disabled.
+    BOOST_REQUIRE(consensus.GetMatMulEncodingProfile(150) ==
+                  Consensus::MatMulEncodingProfile::ENC_BMX4C);
+
+    CBlockHeader header{};
+    header.nVersion = 4;
+    header.hashPrevBlock = uint256{"0000000000000000000000000000000000000000000000000000000000000204"};
+    header.hashMerkleRoot = uint256{"0000000000000000000000000000000000000000000000000000000000000205"};
+    header.nTime = 1'780'000'020U;
+    header.nBits = 0x1d00ffff;
+    header.nNonce64 = 22;
+    header.matmul_dim = static_cast<uint16_t>(consensus.nMatMulV4Dimension);
+
+    constexpr int64_t parent_mtp{1'780'000'000};
+    CBlockHeader pinned{header};
+    BOOST_REQUIRE(SetDeterministicMatMulSeeds(pinned, consensus, 150, parent_mtp));
+    // Header fields are the self-reference-free V3 seeds.
+    BOOST_CHECK_EQUAL(pinned.seed_a, DeterministicMatMulSeedV3(header, 150, parent_mtp, 0));
+    BOOST_CHECK_EQUAL(pinned.seed_b, DeterministicMatMulSeedV3(header, 150, parent_mtp, 1));
+
+    // Idempotency: recomputing on the already-pinned header (what bad-matmul-seeds
+    // does) yields identical seeds. The buggy self-referential seed_b changed here.
+    CBlockHeader recompute{pinned};
+    BOOST_REQUIRE(SetDeterministicMatMulSeeds(recompute, consensus, 150, parent_mtp));
+    BOOST_CHECK_EQUAL(recompute.seed_a, pinned.seed_a);
+    BOOST_CHECK_EQUAL(recompute.seed_b, pinned.seed_b);
 }
 
 BOOST_AUTO_TEST_CASE(MatMulParentMtpSeed_solver_requires_parent_context_after_activation)
@@ -2959,6 +3069,14 @@ BOOST_AUTO_TEST_CASE(matmul_share_target_override_relaxes_only_digest_exit)
     consensus.nMatMulNoiseRank = 4;
     consensus.nMatMulPreHashEpsilonBits = 0;
     consensus.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+    // Cover the legacy pre-activation and V2 nonce-seeded solver paths (both still
+    // live on mainnet, where v4 is not activated). Pin a concrete nonce-seed height
+    // and neutralize the regtest v4/BMX4C activation (heights 100/150) so the test
+    // heights below stay on the legacy/V2 paths instead of landing in v4/BMX4C
+    // territory (regtest leaves nMatMulNonceSeedHeight == INT32_MAX by default).
+    consensus.nMatMulNonceSeedHeight = 125'000;
+    consensus.nMatMulV4Height = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulBMX4CHeight = std::numeric_limits<int32_t>::max();
 
     // Block target == 1 (set via nBits below) is effectively unsolvable in a handful of tries, while the
     // maximal share target accepts the first scanned nonce. The two together prove the override changed
@@ -3035,6 +3153,203 @@ BOOST_AUTO_TEST_CASE(matmul_share_target_override_relaxes_only_digest_exit)
                                 "block-target override unexpectedly solved at height " << height);
         }
     }
+}
+
+// H6 (WP-9): the pooled share_target_override must ALSO be honored at v4
+// heights, where SolveMatMul dispatches early to SolveMatMulV4 (the legacy path
+// at pow_tests.cpp above covers only pre-v4 solvers). Without threading the
+// override through the v4 dispatch, pool shares are silently dropped once v4 is
+// active. Exercised on the ENC-S8 CPU batched path (n=256, BMX4C disabled so the
+// profile is ENC_S8).
+BOOST_AUTO_TEST_CASE(matmul_v4_share_target_override_relaxes_only_digest_exit)
+{
+    auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
+    consensus.fMatMulPOW = true;
+    consensus.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+    // v4 active at height 100; keep BMX4C disabled so the live profile is ENC_S8
+    // (the path whose solver previously ignored the override).
+    consensus.nMatMulV4Height = 100;
+    consensus.nMatMulBMX4CHeight = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulV4Dimension = 256;
+    consensus.nMatMulV4MinDimension = 64;
+    consensus.nMatMulV4MaxDimension = 1024;
+    consensus.nMatMulV4TranscriptBlockSize = 4;
+    consensus.nMatMulV4FreivaldsRounds = 2;
+
+    const int32_t height = 100;
+    const int64_t parent_mtp = 1'700'000'000;
+    BOOST_REQUIRE(consensus.IsMatMulV4Active(height));
+    BOOST_REQUIRE(consensus.GetMatMulEncodingProfile(height) ==
+                  Consensus::MatMulEncodingProfile::ENC_S8);
+
+    auto make_candidate = [&]() {
+        CBlockHeader c{};
+        c.nVersion = 0x20000004;
+        c.hashPrevBlock = uint256{"0000000000000000000000000000000000000000000000000000000000000041"};
+        c.hashMerkleRoot = uint256{"0000000000000000000000000000000000000000000000000000000000000042"};
+        c.nTime = 1'700'000'900U;
+        c.nBits = arith_uint256{1}.GetCompact(); // block target == 1 (unsolvable in a few tries)
+        c.nNonce64 = 1;
+        c.nNonce = 1;
+        c.matmul_dim = static_cast<uint16_t>(consensus.nMatMulV4Dimension);
+        c.matmul_digest.SetNull();
+        return c;
+    };
+
+    // 1) Mining against the (tiny) block target finds nothing in a few tries.
+    {
+        CBlockHeader candidate = make_candidate();
+        uint64_t max_tries{8};
+        BOOST_CHECK(!SolveMatMul(candidate, consensus, max_tries, height,
+                                 /*abort_flag=*/nullptr, /*freivalds_payload_out=*/nullptr,
+                                 /*share_target_override=*/nullptr, parent_mtp));
+    }
+
+    // 2) The easy share target accepts the first scanned nonce as a share, and
+    //    the committed sketch payload is surfaced (H7 winner retention).
+    {
+        const uint256 easy_share_target{
+            uint256::FromHex("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff").value()};
+        CBlockHeader candidate = make_candidate();
+        std::vector<uint32_t> payload;
+        uint64_t max_tries{8};
+        const bool solved = SolveMatMul(candidate, consensus, max_tries, height,
+                                        /*abort_flag=*/nullptr, &payload,
+                                        &easy_share_target, parent_mtp);
+        BOOST_CHECK(solved);
+        BOOST_CHECK(!candidate.matmul_digest.IsNull());
+        BOOST_CHECK_LE(UintToArith256(candidate.matmul_digest), UintToArith256(easy_share_target));
+        BOOST_CHECK(!payload.empty()); // winner sketch retained by the two-phase miner
+        // The share digest does NOT meet the block target (== 1): override relaxed
+        // ONLY the digest early-exit, exactly as on the legacy path.
+        const auto block_target = DeriveTarget(candidate.nBits, consensus.powLimit);
+        BOOST_REQUIRE(block_target.has_value());
+        BOOST_CHECK_GT(UintToArith256(candidate.matmul_digest), *block_target);
+    }
+
+    // 3) A zero share target is rejected at v4 heights too.
+    {
+        CBlockHeader candidate = make_candidate();
+        uint64_t max_tries{8};
+        const uint256 zero_target{};
+        BOOST_CHECK(!SolveMatMul(candidate, consensus, max_tries, height,
+                                 nullptr, nullptr, &zero_target, parent_mtp));
+    }
+}
+
+// WP-2 / C3: FinalizeMatMulSolvedBlock is the central producer finalizer. At an
+// ENC-DR (DIGEST_RECOMPUTE) height it must offload the committed sketch to the
+// local cache and CLEAR the block body so the block serializes digest-only;
+// otherwise the validator rejects the non-empty body. This is the fix wired into
+// submitSolution (IPC) and the test mining helper.
+BOOST_AUTO_TEST_CASE(finalize_matmul_solved_block_offloads_at_enc_dr_height)
+{
+    auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
+    consensus.fMatMulPOW = true;
+    consensus.nMatMulV4Height = 100;
+    consensus.nMatMulBMX4CHeight = std::numeric_limits<int32_t>::max();
+    consensus.fMatMulV4FlatSketchReplay = false; // DIGEST_RECOMPUTE (default)
+
+    const int enc_dr_height = 100;
+    BOOST_REQUIRE(consensus.GetMatMulProfileParams(enc_dr_height).commitment ==
+                  Consensus::MatMulCommitmentScheme::DIGEST_RECOMPUTE);
+
+    auto make_block = [&]() {
+        CBlock block{};
+        block.nVersion = 0x20000004;
+        block.hashPrevBlock = uint256{"00000000000000000000000000000000000000000000000000000000000000a1"};
+        block.hashMerkleRoot = uint256{"00000000000000000000000000000000000000000000000000000000000000a2"};
+        block.nTime = 1'700'000'123U;
+        block.nBits = arith_uint256{1}.GetCompact();
+        block.nNonce64 = 7;
+        block.nNonce = 7;
+        block.matmul_dim = 256;
+        // Stand-in committed sketch payload (word-packed matrix_c_data).
+        block.matrix_c_data.assign({0x11111111U, 0x22222222U, 0x33333333U, 0x44444444U});
+        return block;
+    };
+
+    // ENC-DR height: offloads + clears the body, and the cache holds the sketch.
+    {
+        CBlock block = make_block();
+        const uint256 hash = block.GetHash();
+        matmul::GetMatMulSketchCache().Erase(hash); // clean slate
+        const bool offloaded = FinalizeMatMulSolvedBlock(block, consensus, enc_dr_height);
+        BOOST_CHECK(offloaded);
+        BOOST_CHECK(block.matrix_c_data.empty());          // empty-body rule satisfied
+        BOOST_CHECK(matmul::GetMatMulSketchCache().Have(hash)); // sketch cached for serving
+        matmul::GetMatMulSketchCache().Erase(hash);
+    }
+
+    // Below v4 activation: no offload, body left intact.
+    {
+        CBlock block = make_block();
+        const bool offloaded = FinalizeMatMulSolvedBlock(block, consensus, /*height=*/50);
+        BOOST_CHECK(!offloaded);
+        BOOST_CHECK(!block.matrix_c_data.empty());
+    }
+
+    // FLAT_SKETCH_INBLOCK (regtest replay only): body retained, no offload.
+    {
+        auto replay = consensus;
+        replay.fMatMulV4FlatSketchReplay = true;
+        BOOST_REQUIRE(replay.GetMatMulProfileParams(enc_dr_height).commitment ==
+                      Consensus::MatMulCommitmentScheme::FLAT_SKETCH_INBLOCK);
+        CBlock block = make_block();
+        const bool offloaded = FinalizeMatMulSolvedBlock(block, replay, enc_dr_height);
+        BOOST_CHECK(!offloaded);
+        BOOST_CHECK(!block.matrix_c_data.empty());
+    }
+}
+
+// H5 (WP-9): the process-wide single-flight collapses duplicate concurrent
+// recomputes of the SAME block hash. Two threads racing on one hash must elect
+// exactly one leader; the follower blocks until the leader finishes and then
+// reuses the leader's verdict instead of launching a second expensive recompute.
+BOOST_AUTO_TEST_CASE(matmul_recompute_single_flight_collapses_duplicates)
+{
+    const uint256 hash{uint256::FromHex(std::string(64, 'a')).value()};
+
+    std::atomic<int> recompute_count{0};
+    std::atomic<bool> leader_registered{false};
+    std::atomic<bool> follower_reached{false};
+    std::atomic<bool> follower_is_leader{true};
+    std::optional<bool> follower_result;
+
+    std::thread follower([&]() {
+        while (!leader_registered.load(std::memory_order_acquire)) std::this_thread::yield();
+        follower_reached.store(true, std::memory_order_release);
+        // Blocks in the constructor until the leader releases the guard.
+        MatMulRecomputeSingleFlight guard(hash);
+        follower_is_leader.store(guard.IsLeader(), std::memory_order_relaxed);
+        if (guard.IsLeader()) {
+            recompute_count.fetch_add(1, std::memory_order_relaxed); // would be a 2nd recompute
+        } else {
+            follower_result = guard.LeaderResult();
+            if (!follower_result.has_value()) {
+                recompute_count.fetch_add(1, std::memory_order_relaxed); // no verdict -> must recompute
+            }
+        }
+    });
+
+    {
+        MatMulRecomputeSingleFlight leader(hash);
+        BOOST_REQUIRE(leader.IsLeader());
+        leader_registered.store(true, std::memory_order_release);
+        // Wait until the follower has begun its (blocking) acquisition so it
+        // deterministically observes us as in-flight, then simulate the
+        // expensive recompute and publish the verdict.
+        while (!follower_reached.load(std::memory_order_acquire)) std::this_thread::yield();
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        recompute_count.fetch_add(1, std::memory_order_relaxed);
+        leader.SetResult(true);
+    } // leader guard destroyed -> follower released
+
+    follower.join();
+    BOOST_CHECK(!follower_is_leader.load());            // exactly one leader
+    BOOST_REQUIRE(follower_result.has_value());         // follower saw the leader's verdict
+    BOOST_CHECK_EQUAL(follower_result.value(), true);
+    BOOST_CHECK_EQUAL(recompute_count.load(), 1);       // ONE recompute for the shared hash
 }
 
 BOOST_AUTO_TEST_CASE(matmul_solve_prefetches_following_single_nonce_batches_when_async_enabled)
@@ -3132,6 +3447,11 @@ BOOST_AUTO_TEST_CASE(matmul_solve_uses_two_nonce_batches_for_metal_product_minin
     ScopedApplePerfLogicalCpuOverrideEnv perf_override_env("10");
 
     auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
+    // This case exercises the legacy shared-matrix batch policy, not the
+    // separately covered nonce-seeded solver (regtest activates that at 9).
+    consensus.nMatMulNonceSeedHeight = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulParentMtpSeedHeight = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulV4Height = std::numeric_limits<int32_t>::max();
     consensus.fMatMulPOW = true;
     consensus.nMatMulDimension = 512;
     consensus.nMatMulTranscriptBlockSize = 16;
@@ -3404,6 +3724,9 @@ BOOST_AUTO_TEST_CASE(matmul_solve_uses_two_nonce_batch_for_post_activation_mainn
     }
 
     auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
+    consensus.nMatMulNonceSeedHeight = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulParentMtpSeedHeight = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulV4Height = std::numeric_limits<int32_t>::max();
     consensus.fMatMulPOW = true;
     consensus.fMatMulFreivaldsEnabled = true;
     consensus.fMatMulRequireProductPayload = false;
@@ -3454,6 +3777,9 @@ BOOST_AUTO_TEST_CASE(matmul_solve_uses_high_perf_apple_metal_defaults_when_perf_
     }
 
     auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
+    consensus.nMatMulNonceSeedHeight = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulParentMtpSeedHeight = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulV4Height = std::numeric_limits<int32_t>::max();
     consensus.fMatMulPOW = true;
     consensus.fMatMulFreivaldsEnabled = true;
     consensus.fMatMulRequireProductPayload = false;
@@ -3504,6 +3830,9 @@ BOOST_AUTO_TEST_CASE(matmul_solve_uses_conservative_generic_apple_metal_prefetch
     }
 
     auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
+    consensus.nMatMulNonceSeedHeight = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulParentMtpSeedHeight = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulV4Height = std::numeric_limits<int32_t>::max();
     consensus.fMatMulPOW = true;
     consensus.fMatMulFreivaldsEnabled = true;
     consensus.fMatMulRequireProductPayload = false;
@@ -3932,6 +4261,13 @@ BOOST_AUTO_TEST_CASE(matmul_solve_crosses_60999_to_61000_with_product_digest_con
     consensus.nMatMulPreHashEpsilonBitsUpgradeHeight = std::numeric_limits<int32_t>::max();
     consensus.nMatMulPreHashEpsilonBitsUpgrade = 0;
     consensus.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+    // This exercises the v3 transcript->product-committed digest fork at 61'000,
+    // which is the live mechanic on mainnet (v4 is not activated there — see the
+    // sibling live_mainnet_61000 test, which uses MAIN consensus). Neutralize the
+    // regtest v4/BMX4C activation (heights 100/150) so heights 60'999/61'000 keep
+    // the v3 digest scheme instead of routing through the v4/BMX4C solver.
+    consensus.nMatMulV4Height = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulBMX4CHeight = std::numeric_limits<int32_t>::max();
 
     BOOST_CHECK(!consensus.IsMatMulProductDigestActive(60'999));
     BOOST_CHECK(consensus.IsMatMulProductDigestActive(61'000));
@@ -4369,6 +4705,12 @@ BOOST_AUTO_TEST_CASE(e1_v2_miner_produces_consensus_valid_nonce_bound_seeds_acro
     consensus.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
     constexpr int32_t kActivation = 125'000;
     consensus.nMatMulNonceSeedHeight = kActivation;
+    // This exercises the V2 nonce-seed fork, which is still the live mechanic on
+    // mainnet (mainnet leaves nMatMulV4Height/nMatMulBMX4CHeight unset). Neutralize
+    // the regtest v4/BMX4C activation (heights 100/150) so height 125'000 selects
+    // the V2 path rather than the v4 parent-MTP-bound (and BMX4C) seed rule.
+    consensus.nMatMulV4Height = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulBMX4CHeight = std::numeric_limits<int32_t>::max();
 
     auto make_candidate = [&]() {
         CBlockHeader c{};
@@ -4443,6 +4785,11 @@ BOOST_AUTO_TEST_CASE(e1_v2_parallel_solver_engages_and_stays_consensus_valid)
     consensus.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
     constexpr int32_t kActivation = 125'000;
     consensus.nMatMulNonceSeedHeight = kActivation;
+    // V2 nonce-seed fork (live on mainnet). Neutralize the regtest v4/BMX4C
+    // activation so height 125'000 selects the V2 path (see the sibling
+    // e1_v2_miner test for the rationale).
+    consensus.nMatMulV4Height = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulBMX4CHeight = std::numeric_limits<int32_t>::max();
 
     CBlockHeader candidate{};
     candidate.nVersion = 4;
@@ -4473,6 +4820,504 @@ BOOST_AUTO_TEST_CASE(e1_v2_parallel_solver_engages_and_stays_consensus_valid)
     BOOST_REQUIRE(SetDeterministicMatMulSeeds(expected, consensus, kActivation));
     BOOST_CHECK_EQUAL(expected.seed_a, candidate.seed_a);
     BOOST_CHECK_EQUAL(expected.seed_b, candidate.seed_b);
+}
+
+// Audit W-1 round-trip (adversarial): mine an ENC-BMX4C (MatMul v4.2) block on an
+// ENFORCING regtest config and drive it through BOTH consensus checkpoints the node
+// applies -- (a) ContextualCheckBlockHeader's "bad-matmul-seeds" recompute-and-compare
+// and (b) ContextualCheckBlock's CheckMatMulProofOfWork_V4ProductCommitted (which routes
+// to VerifySketchBMX4C). The pre-existing idempotency test only proved the seed pinning
+// is a fixed point; it NEVER mined+validated a real block. This closes that hole and
+// then tampers (seed field / digest / payload word) to prove rejection.
+BOOST_AUTO_TEST_CASE(MatMulBMX4C_mine_validate_round_trip_enforcing)
+{
+    auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
+    // ENFORCING config: do NOT skip matmul validation (regtest default skips it).
+    consensus.fMatMulPOW = true;
+    consensus.fSkipMatMulValidation = false;
+    // Keep this round trip on the profile named by the test. Regtest normally
+    // enables DR-LT at height 100 and would otherwise supersede BMX4C here.
+    consensus.nMatMulDRLTHeight = std::numeric_limits<int32_t>::max();
+    consensus.fMatMulLTSealAsPoW = false;
+    // Shrink the v4 dimension to the smallest legal ENC-BMX4C dim for a fast solve:
+    // 64 % 32 == 0 (E8M0 blocks), b=kTileB=4 | 64, within regtest [64,1024].
+    consensus.nMatMulV4Dimension = 64;
+    // Max target so the very first nonce's digest wins -> a single digest evaluation.
+    consensus.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+
+    constexpr int32_t kHeight = 150; // >= nMatMulBMX4CHeight (150) and >= nMatMulV4Height (100)
+    BOOST_REQUIRE(consensus.IsBMX4CActive(kHeight));
+    BOOST_REQUIRE(consensus.GetMatMulEncodingProfile(kHeight) ==
+                  Consensus::MatMulEncodingProfile::ENC_BMX4C);
+
+    constexpr int64_t parent_mtp{1'780'000'000};
+
+    CBlockHeader header{};
+    header.nVersion = 4;
+    header.hashPrevBlock = uint256{"0000000000000000000000000000000000000000000000000000000000000404"};
+    header.hashMerkleRoot = uint256{"0000000000000000000000000000000000000000000000000000000000000405"};
+    header.nTime = 1'780'000'020U;
+    header.nBits = UintToArith256(consensus.powLimit).GetCompact();
+    header.nNonce64 = 0;
+    header.matmul_dim = static_cast<uint16_t>(consensus.nMatMulV4Dimension);
+
+    // ---- MINE via the real BMX4C solver (SolveMatMul -> SolveMatMulV4 -> SolveMatMulV4BMX4C).
+    std::vector<uint32_t> payload;
+    uint64_t max_tries{8};
+    const bool solved = SolveMatMul(header, consensus, max_tries, kHeight,
+                                    /*abort_flag=*/nullptr, &payload,
+                                    /*share_target_override=*/nullptr, parent_mtp);
+    BOOST_REQUIRE_MESSAGE(solved, "BMX4C solver failed to produce a block at max target");
+    BOOST_REQUIRE(!payload.empty());
+    BOOST_REQUIRE(!header.matmul_digest.IsNull());
+
+    // The solver must have pinned the header seed fields to the self-reference-free V3 seeds
+    // (this is exactly what the bad-matmul-seeds verifier recomputes).
+    BOOST_CHECK_EQUAL(header.seed_a, DeterministicMatMulSeedV3(header, kHeight, parent_mtp, 0));
+    BOOST_CHECK_EQUAL(header.seed_b, DeterministicMatMulSeedV3(header, kHeight, parent_mtp, 1));
+
+    // Assemble the full block exactly as relayed: seed-derived operands, sketch payload
+    // in the trailing matrix_c_data channel, empty A/B channels.
+    CBlock good;
+    static_cast<CBlockHeader&>(good) = header;
+    good.matrix_c_data = payload;
+
+    // ==== CHECKPOINT (a): ContextualCheckBlockHeader "bad-matmul-seeds" recompute-and-compare
+    // (validation.cpp:10018-10028), replicated verbatim.
+    auto seeds_accept = [&](const CBlockHeader& h) -> bool {
+        CBlockHeader expected{h};
+        if (!SetDeterministicMatMulSeeds(expected, consensus, kHeight, parent_mtp)) return false;
+        return h.seed_a == expected.seed_a && h.seed_b == expected.seed_b;
+    };
+    BOOST_CHECK_MESSAGE(seeds_accept(good), "honest block REJECTED at bad-matmul-seeds recompute");
+
+    // ==== CHECKPOINT (b): full product-committed verify (ContextualCheckBlock path).
+    BOOST_CHECK_MESSAGE(IsMatMulV4PayloadSizeValid(good, consensus),
+                        "honest block payload shape rejected");
+    BOOST_CHECK_MESSAGE(CheckMatMulProofOfWork_V4ProductCommitted(good, consensus, kHeight),
+                        "honest block REJECTED by CheckMatMulProofOfWork_V4ProductCommitted");
+    BOOST_CHECK_MESSAGE(MatMulV4PayloadMatchesCommitment(good),
+                        "honest payload does not reconstruct committed digest");
+
+    // Independent confirmation that miner operand derivation == verifier operand derivation:
+    // re-run the single-nonce reference digest over the sealed header and compare.
+    {
+        uint256 ref_digest;
+        std::vector<unsigned char> ref_payload;
+        BOOST_REQUIRE(matmul::v4::bmx4::ComputeDigestBMX4C(good, consensus.nMatMulV4Dimension,
+                                                           ref_digest, ref_payload));
+        BOOST_CHECK_EQUAL(ref_digest, good.matmul_digest);
+    }
+
+    // ==== TAMPER 1: flip a seed field. Must be caught by bad-matmul-seeds AND by the
+    // full verify (operand-B seed binds seed_b via ComputeMatMulHeaderHash -> digest diverges).
+    {
+        CBlock bad = good;
+        bad.seed_b.data()[0] ^= 0xFF;
+        BOOST_CHECK_MESSAGE(!seeds_accept(bad), "TAMPER(seed_b) accepted at bad-matmul-seeds");
+        BOOST_CHECK_MESSAGE(!CheckMatMulProofOfWork_V4ProductCommitted(bad, consensus, kHeight),
+                            "TAMPER(seed_b) accepted by product-committed verify");
+    }
+
+    // ==== TAMPER 2: flip the committed digest in the header. Verify must reject
+    // (recomputed digest != committed digest, or committed digest > target when it isn't max).
+    {
+        CBlock bad = good;
+        bad.matmul_digest.data()[0] ^= 0xFF;
+        BOOST_CHECK_MESSAGE(!CheckMatMulProofOfWork_V4ProductCommitted(bad, consensus, kHeight),
+                            "TAMPER(matmul_digest) accepted by product-committed verify");
+    }
+
+    // ==== TAMPER 3: flip a payload word. Digest recomputation diverges; the block is a
+    // body mutation (payload no longer reconstructs the committed digest).
+    {
+        CBlock bad = good;
+        BOOST_REQUIRE(!bad.matrix_c_data.empty());
+        bad.matrix_c_data[0] ^= 0x1u;
+        BOOST_CHECK_MESSAGE(!CheckMatMulProofOfWork_V4ProductCommitted(bad, consensus, kHeight),
+                            "TAMPER(payload word) accepted by product-committed verify");
+        BOOST_CHECK_MESSAGE(!MatMulV4PayloadMatchesCommitment(bad),
+                            "TAMPER(payload word) still matches committed digest");
+    }
+}
+
+BOOST_AUTO_TEST_CASE(MatMulHeaderPoW_withdrawn_test_only_grind_is_decoupled)
+{
+    // Withdrawn/test-only mechanism: the header-PoW spam gate is (a) satisfiable by grinding the
+    // DECOUPLED nNonce (cheap, no matmul recompute), (b) height-gated + disabled
+    // by default, and (c) a real filter (most nNonces fail an easy-but-nonzero
+    // target). This tests the dormant gate logic only. nNonce is absent from the
+    // fixed 182-byte P2P header, so the mechanism cannot be activated publicly;
+    // the former bit-26 variable wire was withdrawn.
+    auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
+    consensus.fMatMulPOW = true;
+    consensus.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+    // SINGLE ACTIVATION: no gate height of its own. Default discount == UINT32_MAX
+    // => disabled (a no-op that always passes), and it rides the v4 fork otherwise.
+    BOOST_CHECK(consensus.nMatMulHeaderPoWDiscountBits == std::numeric_limits<uint32_t>::max());
+    BOOST_CHECK(!consensus.IsMatMulHeaderPoWEnabled());
+    {
+        CBlockHeader h{};
+        h.nBits = 0x1d00ffff;
+        BOOST_CHECK(CheckMatMulHeaderSpamGate(h, consensus));  // disabled => passes
+    }
+
+    // Enable, discount = 0 (strongest throttle: gate target == block target). Set a
+    // block nBits whose target has its top 12 bits zero (~1/4096 per hash) so
+    // grinding is fast yet most nonces fail.
+    consensus.nMatMulHeaderPoWDiscountBits = 0;
+    BOOST_CHECK(consensus.IsMatMulHeaderPoWEnabled());
+    const arith_uint256 easy_target{(~arith_uint256{0}) >> 12};
+
+    CBlockHeader header{};
+    header.nVersion = 4;
+    header.hashPrevBlock = uint256{"0000000000000000000000000000000000000000000000000000000000000606"};
+    header.hashMerkleRoot = uint256{"0000000000000000000000000000000000000000000000000000000000000607"};
+    header.nTime = 1'780'000'030U;
+    header.nBits = easy_target.GetCompact();  // the block's OWN target drives the gate
+    header.nNonce64 = 7;
+    header.matmul_digest.SetNull();  // an attacker's free "digest=0" forgery...
+
+    // ...still must pay real hash work at the gate: grind the DECOUPLED nNonce.
+    // Crucially, changing nNonce does NOT change GetHash() inputs used by the
+    // matmul (nNonce is not serialized into the header hash preimage of the
+    // operand derivation), so this grind is independent of any matmul work.
+    const uint256 hash_before = header.GetHash();
+    bool passed = false;
+    uint32_t winning_nonce = 0;
+    for (uint32_t n = 0; n < (1u << 22); ++n) {
+        header.nNonce = n;
+        if (CheckMatMulHeaderSpamGate(header, consensus)) { passed = true; winning_nonce = n; break; }
+    }
+    BOOST_REQUIRE_MESSAGE(passed, "header spam gate not satisfiable by grinding nNonce");
+    BOOST_CHECK(CheckMatMulHeaderSpamGate(header, consensus));
+    // nNonce is decoupled: grinding it never altered the (matmul-relevant) block hash.
+    BOOST_CHECK_EQUAL(header.GetHash(), hash_before);
+
+    // Enforcement: a header WITHOUT the required work (a different nNonce) is very
+    // likely rejected -- find one to prove the gate is not vacuous.
+    bool found_failing = false;
+    for (uint32_t n = winning_nonce + 1; n < winning_nonce + 1 + 4096; ++n) {
+        header.nNonce = n;
+        if (!CheckMatMulHeaderSpamGate(header, consensus)) { found_failing = true; break; }
+    }
+    BOOST_CHECK_MESSAGE(found_failing, "gate accepted every nonce -- target too loose to be a filter");
+
+    // Audit C2/H4 (bound to nBits): assert the DERIVED GATE TARGET directly via the
+    // pure helper, NOT by grinding across an nBits change. The earlier probabilistic
+    // check ("harder nBits => the winning nonce now fails") was ineffective because
+    // nBits is inside GetHash(), so changing it also changes the tested hash -- a
+    // fixed-target implementation could still pass it (audit H4). The pure helper
+    // isolates the target, so a fixed-target implementation is provably rejected.
+    const arith_uint256 harder_target{(~arith_uint256{0}) >> 60};
+    const uint32_t easy_bits{easy_target.GetCompact()};
+    const uint32_t harder_bits{harder_target.GetCompact()};
+    const auto t_easy{DeriveMatMulHeaderPoWGateTarget(easy_bits, /*discount=*/0, consensus.powLimit)};
+    const auto t_hard{DeriveMatMulHeaderPoWGateTarget(harder_bits, /*discount=*/0, consensus.powLimit)};
+    BOOST_REQUIRE(t_easy && t_hard);
+    // At discount 0 the gate target IS the block's own nBits target...
+    BOOST_CHECK_EQUAL(*t_easy, DecodeTarget(easy_bits));
+    BOOST_CHECK_EQUAL(*t_hard, DecodeTarget(harder_bits));
+    // ...so a harder-claimed nBits yields a strictly harder (smaller) gate target.
+    // This is the property a fixed-cost gate CANNOT satisfy (it would return the
+    // same target for both), so it fails under the former C2 weakness.
+    BOOST_CHECK(*t_hard < *t_easy);
+    // A large in-range discount re-opens the gate: shifting easier by 255 bits
+    // saturates to powLimit, so every hash passes (discount is the nBits-relative
+    // easing knob). Note: discount 256 is INVALID (audit H2), tested separately.
+    consensus.nMatMulHeaderPoWDiscountBits = Consensus::Params::MATMUL_HEADER_POW_MAX_DISCOUNT_BITS; // 255
+    header.nBits = harder_bits;
+    header.nNonce = winning_nonce;
+    BOOST_CHECK(CheckMatMulHeaderSpamGate(header, consensus));
+}
+
+BOOST_AUTO_TEST_CASE(MatMulHeaderPoWGateTarget_pure_fixed_vectors)
+{
+    // Audit H4: fixed, deterministic vectors for the PURE gate-target derivation.
+    // These pin the exact target for representative (nBits, discount) inputs and
+    // cover discounts 0, 1, 255, the invalid 256, the disabled sentinel, and the
+    // powLimit saturation edge -- values a fixed-target implementation cannot
+    // reproduce. No header, no hashing; the target is compared bit-for-bit.
+    const uint256 pow_limit{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+    const arith_uint256 limit{UintToArith256(pow_limit)};
+
+    // A mid-range base target: top 64 bits zero (well clear of the powLimit ceiling
+    // so small discounts do not immediately saturate).
+    const arith_uint256 base{(~arith_uint256{0}) >> 64};
+    const uint32_t base_bits{base.GetCompact()};
+    const arith_uint256 base_decoded{DecodeTarget(base_bits)}; // round-trips through compact
+
+    // discount 0 => exactly the nBits target.
+    {
+        const auto t{DeriveMatMulHeaderPoWGateTarget(base_bits, 0, pow_limit)};
+        BOOST_REQUIRE(t);
+        BOOST_CHECK_EQUAL(*t, base_decoded);
+    }
+    // discount 1 => target << 1 (still below powLimit, no saturation).
+    {
+        const auto t{DeriveMatMulHeaderPoWGateTarget(base_bits, 1, pow_limit)};
+        BOOST_REQUIRE(t);
+        BOOST_CHECK_EQUAL(*t, base_decoded << 1);
+        BOOST_CHECK(*t <= limit);
+    }
+    // discount 8 => target << 8, exact.
+    {
+        const auto t{DeriveMatMulHeaderPoWGateTarget(base_bits, 8, pow_limit)};
+        BOOST_REQUIRE(t);
+        BOOST_CHECK_EQUAL(*t, base_decoded << 8);
+    }
+    // discount 255 => far overflow => saturates to powLimit.
+    {
+        const auto t{DeriveMatMulHeaderPoWGateTarget(base_bits, 255, pow_limit)};
+        BOOST_REQUIRE(t);
+        BOOST_CHECK_EQUAL(*t, limit);
+    }
+    // discount 256 => INVALID (audit H2) => nullopt.
+    BOOST_CHECK(!DeriveMatMulHeaderPoWGateTarget(base_bits, 256, pow_limit).has_value());
+    // discount UINT32_MAX-1 => still invalid => nullopt.
+    BOOST_CHECK(!DeriveMatMulHeaderPoWGateTarget(base_bits, std::numeric_limits<uint32_t>::max() - 1, pow_limit).has_value());
+    // discount UINT32_MAX => DISABLED sentinel => nullopt.
+    BOOST_CHECK(!DeriveMatMulHeaderPoWGateTarget(base_bits, std::numeric_limits<uint32_t>::max(), pow_limit).has_value());
+
+    // nBits-binding: two different nBits give two different discount-0 targets,
+    // ordered the same way as their difficulties. A fixed-cost gate cannot do this.
+    const arith_uint256 easy{(~arith_uint256{0}) >> 16};
+    const arith_uint256 hard{(~arith_uint256{0}) >> 80};
+    const auto te{DeriveMatMulHeaderPoWGateTarget(easy.GetCompact(), 0, pow_limit)};
+    const auto th{DeriveMatMulHeaderPoWGateTarget(hard.GetCompact(), 0, pow_limit)};
+    BOOST_REQUIRE(te && th);
+    BOOST_CHECK(*th < *te);
+}
+
+BOOST_AUTO_TEST_CASE(MatMulHeaderPoW_wire_fixed_182_ignores_bit26_and_nonce)
+{
+    // WITHDRAWN: bit-26 self-describing 182↔186 wire. Bit 26 was previously
+    // legal; gating wire/GetHash on it forks pre-activation peers. Consensus
+    // wire + identity stay fixed 182 bytes; nNonce is never folded into GetHash.
+    BOOST_CHECK_EQUAL(CBlockHeader::BTX_HEADER_SIZE, 182U);
+    BOOST_CHECK_EQUAL(CBlockHeader::BTX_HEADER_WIRE_SIZE, 182U);
+    BOOST_CHECK_EQUAL(CBlockHeader::BTX_HEADER_POW_COMMIT_VERSION_BIT, (1 << 26));
+
+    CBlockHeader header{};
+    header.nVersion = 4;
+    header.hashPrevBlock = uint256{"0000000000000000000000000000000000000000000000000000000000000a01"};
+    header.hashMerkleRoot = uint256{"0000000000000000000000000000000000000000000000000000000000000a02"};
+    header.nTime = 1'780'000'040U;
+    header.nBits = 0x1d00ffff;
+    header.nNonce64 = 99;
+    header.matmul_digest = uint256{"0000000000000000000000000000000000000000000000000000000000000a03"};
+    header.matmul_dim = 256;
+    header.seed_a = uint256{"0000000000000000000000000000000000000000000000000000000000000a04"};
+    header.seed_b = uint256{"0000000000000000000000000000000000000000000000000000000000000a05"};
+    header.nNonce = 0xdeadbeef;
+
+    BOOST_CHECK_EQUAL(GetSerializeSize(header), CBlockHeader::BTX_HEADER_SIZE);
+    const uint256 h0 = header.GetHash();
+    header.nNonce = 1;
+    BOOST_CHECK_EQUAL(header.GetHash(), h0); // nNonce not in identity
+    header.nNonce = 0xdeadbeef;
+
+    // Setting bit 26 must NOT change wire length or deserialize framing.
+    header.SetHeaderPoWCommitment(true);
+    BOOST_CHECK(header.HasHeaderPoWCommitment());
+    BOOST_CHECK_EQUAL(GetSerializeSize(header), CBlockHeader::BTX_HEADER_SIZE);
+    {
+        DataStream ss{};
+        ss << header;
+        BOOST_CHECK_EQUAL(ss.size(), CBlockHeader::BTX_HEADER_SIZE);
+        CBlockHeader decoded{};
+        ss >> decoded;
+        BOOST_CHECK(decoded.HasHeaderPoWCommitment());
+        BOOST_CHECK_EQUAL(decoded.nNonce, 0U); // not on wire
+        // Version bit is part of nVersion → identity may change with the bit,
+        // but size stays 182 and nNonce stays out of GetHash.
+        BOOST_CHECK_EQUAL(decoded.GetHash(), header.GetHash());
+    }
+    const uint256 h_bit = header.GetHash();
+    header.nNonce ^= 0xffffffffU;
+    BOOST_CHECK_EQUAL(header.GetHash(), h_bit);
+
+    // TEST-ONLY SerializeWithNonce helper still round-trips a 186-byte image
+    // for benches; it is not consensus wire.
+    header.SetHeaderPoWCommitment(false);
+    header.nNonce = 0xdeadbeef;
+    {
+        DataStream ss{};
+        CBlockHeader::SerializeWithNonce(ss, header);
+        BOOST_CHECK_EQUAL(ss.size(), CBlockHeader::BTX_HEADER_SIZE_WITH_POW_COMMIT);
+        CBlockHeader decoded{};
+        CBlockHeader::UnserializeWithNonce(ss, decoded);
+        BOOST_CHECK_EQUAL(decoded.nNonce, 0xdeadbeefU);
+        BOOST_CHECK_EQUAL(GetSerializeSize(decoded), CBlockHeader::BTX_HEADER_SIZE);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(MatMulHeaderPoW_fixed_wire_has_no_bit26_activation_boundary)
+{
+    // Mixed peers always exchange 182-byte headers — bit 26 does not extend wire.
+    CBlockHeader legacy{};
+    legacy.nVersion = VERSIONBITS_TOP_BITS | 4;
+    legacy.nBits = 0x207fffff;
+    legacy.nNonce = 0x11111111;
+    BOOST_CHECK(!legacy.HasHeaderPoWCommitment());
+
+    CBlockHeader with_bit{legacy};
+    with_bit.SetHeaderPoWCommitment(true);
+    with_bit.nNonce = 0x22222222;
+
+    DataStream mixed{};
+    mixed << legacy << with_bit;
+    BOOST_CHECK_EQUAL(mixed.size(), 2 * CBlockHeader::BTX_HEADER_SIZE);
+
+    CBlockHeader out_a{}, out_b{};
+    mixed >> out_a >> out_b;
+    BOOST_CHECK(!out_a.HasHeaderPoWCommitment());
+    BOOST_CHECK_EQUAL(out_a.nNonce, 0U);
+    BOOST_CHECK(out_b.HasHeaderPoWCommitment());
+    BOOST_CHECK_EQUAL(out_b.nNonce, 0U); // stripped on deserialize
+
+    // This is only the independent MatMul v4 profile boundary. It does not
+    // activate a HeaderPoW wire; all headers remain the same fixed shape.
+    Consensus::Params p{};
+    p.fMatMulPOW = true;
+    p.nMatMulV4Height = 100;
+    p.nMatMulBMX4CHeight = 100;
+    BOOST_CHECK(!p.IsMatMulV4Active(99));
+    BOOST_CHECK(p.IsMatMulV4Active(100));
+}
+
+BOOST_AUTO_TEST_CASE(MatMulHeaderPoW_withdrawn_nonce_grind_leaves_gethash_stable)
+{
+    auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
+    consensus.fMatMulPOW = true;
+    consensus.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+    consensus.nMatMulHeaderPoWDiscountBits = 0;
+    const arith_uint256 easy_target{(~arith_uint256{0}) >> 12};
+
+    CBlockHeader header{};
+    header.nVersion = VERSIONBITS_TOP_BITS | 4;
+    header.hashPrevBlock = uint256{"0000000000000000000000000000000000000000000000000000000000000c01"};
+    header.hashMerkleRoot = uint256{"0000000000000000000000000000000000000000000000000000000000000c02"};
+    header.nTime = 1'780'000'060U;
+    header.nBits = easy_target.GetCompact();
+    header.nNonce64 = 5;
+    header.matmul_digest.SetNull();
+    header.nNonce = 0;
+
+    // Decoupled gate: grinding nNonce leaves GetHash stable.
+    const uint256 hash0 = header.GetHash();
+    uint64_t tries = 1u << 22;
+    BOOST_REQUIRE(GrindMatMulHeaderSpamNonce(header, consensus, tries));
+    BOOST_CHECK(CheckMatMulHeaderSpamGate(header, consensus));
+    BOOST_CHECK_EQUAL(header.GetHash(), hash0);
+    const uint32_t win_nonce = header.nNonce;
+    header.nNonce = win_nonce ^ 0x5a5a5a5aU;
+    BOOST_CHECK_EQUAL(header.GetHash(), hash0);
+    BOOST_CHECK(!CheckMatMulHeaderSpamGate(header, consensus) || win_nonce == (win_nonce ^ 0x5a5a5a5aU));
+}
+
+BOOST_AUTO_TEST_CASE(MatMulHeaderPoW_grind_helper_and_public_nets_disabled)
+{
+    // Public nets ship with the disabled sentinel; unit-test grind uses a
+    // Consensus::Params copy (construction assert only fires at chainparams build).
+    BOOST_CHECK_EQUAL(Params().GetConsensus().nMatMulHeaderPoWDiscountBits,
+                      std::numeric_limits<uint32_t>::max());
+    BOOST_CHECK(!Params().GetConsensus().IsMatMulHeaderPoWEnabled());
+
+    for (const ChainType chain : {ChainType::MAIN, ChainType::TESTNET, ChainType::REGTEST}) {
+        const auto params = CreateChainParams(*m_node.args, chain);
+        BOOST_CHECK_EQUAL(params->GetConsensus().nMatMulHeaderPoWDiscountBits,
+                          std::numeric_limits<uint32_t>::max());
+        BOOST_CHECK(!params->GetConsensus().IsMatMulHeaderPoWEnabled());
+        // Public activation heights stay inert.
+        if (chain != ChainType::REGTEST) {
+            BOOST_CHECK_EQUAL(params->GetConsensus().nMatMulV4Height,
+                              std::numeric_limits<int32_t>::max());
+        }
+    }
+
+    auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
+    consensus.fMatMulPOW = true;
+    consensus.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+    consensus.nMatMulHeaderPoWDiscountBits = 0;
+    BOOST_REQUIRE(consensus.IsMatMulHeaderPoWEnabled());
+
+    CBlockHeader header{};
+    header.nVersion = 4;
+    header.hashPrevBlock = uint256{"0000000000000000000000000000000000000000000000000000000000000b01"};
+    header.hashMerkleRoot = uint256{"0000000000000000000000000000000000000000000000000000000000000b02"};
+    header.nTime = 1'780'000'050U;
+    header.nBits = 0x207fffffU;
+    header.nNonce64 = 3;
+    header.nNonce = 0;
+    header.matmul_digest.SetNull();
+
+    // Legacy grind path (bit clear): GetHash stable.
+    const uint256 hash_before = header.GetHash();
+    uint64_t tries = 1u << 22;
+    const uint32_t nonce_before = header.nNonce;
+    BOOST_REQUIRE(GrindMatMulHeaderSpamNonce(header, consensus, tries));
+    BOOST_CHECK(CheckMatMulHeaderSpamGate(header, consensus));
+    BOOST_CHECK_EQUAL(header.GetHash(), hash_before);
+    BOOST_CHECK(tries < (1u << 22) || header.nNonce == nonce_before);
+
+    // Disabled => grind is a no-op success and does not burn tries.
+    consensus.nMatMulHeaderPoWDiscountBits = std::numeric_limits<uint32_t>::max();
+    header.nNonce = 0;
+    tries = 7;
+    BOOST_CHECK(GrindMatMulHeaderSpamNonce(header, consensus, tries));
+    BOOST_CHECK_EQUAL(tries, 7U);
+    BOOST_CHECK_EQUAL(header.nNonce, 0U);
+
+    // Invalid discount (not UINT32_MAX, >255) => gate fails closed; grind cannot satisfy.
+    consensus.nMatMulHeaderPoWDiscountBits = 256;
+    header.nNonce = 0;
+    tries = 64;
+    BOOST_CHECK(!CheckMatMulHeaderSpamGate(header, consensus));
+    BOOST_CHECK(!GrindMatMulHeaderSpamNonce(header, consensus, tries));
+}
+
+BOOST_AUTO_TEST_CASE(ReduceRescaleRatioToU32_exact_and_rejects)
+{
+    // Audit D3: the one-time ASERT rescale ratio must reduce to an EXACT 32-bit
+    // rational so ScaleTargetByTimespan's independent per-term uint32 clamp cannot
+    // distort it. These vectors pin the reduction and the rejection boundary.
+    uint32_t n{0}, d{0};
+
+    // The audit's canonical example: 2^40 / 2^39 must reduce to 2/1 (NOT the
+    // 1/1 that an independent-clamp implementation would produce).
+    BOOST_REQUIRE(ReduceRescaleRatioToU32(int64_t{1} << 40, int64_t{1} << 39, n, d));
+    BOOST_CHECK_EQUAL(n, 2u);
+    BOOST_CHECK_EQUAL(d, 1u);
+
+    // Symmetric: 2^39 / 2^40 => 1/2.
+    BOOST_REQUIRE(ReduceRescaleRatioToU32(int64_t{1} << 39, int64_t{1} << 40, n, d));
+    BOOST_CHECK_EQUAL(n, 1u);
+    BOOST_CHECK_EQUAL(d, 2u);
+
+    // Already lowest terms and in range.
+    BOOST_REQUIRE(ReduceRescaleRatioToU32(3, 5, n, d));
+    BOOST_CHECK_EQUAL(n, 3u);
+    BOOST_CHECK_EQUAL(d, 5u);
+
+    // A common factor reduces: 6/9 => 2/3.
+    BOOST_REQUIRE(ReduceRescaleRatioToU32(6, 9, n, d));
+    BOOST_CHECK_EQUAL(n, 2u);
+    BOOST_CHECK_EQUAL(d, 3u);
+
+    // Exactly UINT32_MAX / 1 reduces to itself (boundary, still valid).
+    BOOST_REQUIRE(ReduceRescaleRatioToU32(int64_t{std::numeric_limits<uint32_t>::max()}, 1, n, d));
+    BOOST_CHECK_EQUAL(n, std::numeric_limits<uint32_t>::max());
+    BOOST_CHECK_EQUAL(d, 1u);
+
+    // Rejections: non-positive, and irreducible ratios whose reduced terms exceed
+    // uint32 (not a usable difficulty calibration).
+    BOOST_CHECK(!ReduceRescaleRatioToU32(0, 1, n, d));
+    BOOST_CHECK(!ReduceRescaleRatioToU32(1, 0, n, d));
+    BOOST_CHECK(!ReduceRescaleRatioToU32(-2, 1, n, d));
+    BOOST_CHECK(!ReduceRescaleRatioToU32((int64_t{1} << 33) + 1, 1, n, d)); // > UINT32_MAX, odd => irreducible
+    // A coprime pair both above UINT32_MAX cannot reduce into range.
+    BOOST_CHECK(!ReduceRescaleRatioToU32(int64_t{4'294'967'311LL} /*prime>2^32*/, int64_t{4'294'967'357LL} /*prime>2^32*/, n, d));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

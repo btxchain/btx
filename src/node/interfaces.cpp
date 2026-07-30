@@ -1075,6 +1075,16 @@ public:
 	            // exactly one try, the submission will be silently rejected.
 	            // External miners targeting MatMul chains should use the
 	            // submitblock RPC with fully-formed block data instead.
+	            //
+	            // At product-committed-digest (v4) heights the block must carry the
+	            // exact product sketch C' the solver committed to. Capture it from
+	            // SolveMatMul directly (via freivalds_payload_out) rather than
+	            // recomputing it, mirroring the canonical generateblock RPC path.
+	            const bool include_freivalds_payload =
+	                ShouldIncludeMatMulFreivaldsPayloadForMining(next_height, consensus);
+	            block.matrix_c_data.clear();
+	            std::vector<uint32_t>* freivalds_payload_out =
+	                include_freivalds_payload ? &block.matrix_c_data : nullptr;
 	            uint64_t tries{1};
 	            if (!SolveMatMul(
 	                    block,
@@ -1082,17 +1092,41 @@ public:
 	                    tries,
 	                    next_height,
 	                    nullptr,
-	                    nullptr,
+	                    freivalds_payload_out,
 	                    nullptr,
 	                    parent_median_time_past)) {
 	                LogWarning("submitSolution: SolveMatMul failed for nonce=%llu; external miners should use submitblock for MatMul chains\n",
 	                           static_cast<unsigned long long>(block.nNonce64));
 	                return false;
 	            }
-	            if (ShouldIncludeMatMulFreivaldsPayloadForMining(next_height, consensus)) {
-	                PopulateFreivaldsPayload(block, consensus);
+	            if (include_freivalds_payload) {
+	                block.matrix_a_data.clear();
+	                block.matrix_b_data.clear();
+	                // Fall back to recomputation only if the solver backend did not
+	                // surface the sketch on the accepted candidate.
+	                if (block.matrix_c_data.empty()) {
+	                    PopulateFreivaldsPayload(block, consensus);
+	                }
 	            } else {
 	                block.matrix_c_data.clear();
+	            }
+	            // WP-2 / C3: route the solved block through the central producer
+	            // finalizer so an IPC-submitted ENC-DR block serializes digest-only.
+	            // At DIGEST_RECOMPUTE heights this offloads the just-committed sketch
+	            // to the local cache and clears matrix_c_data; without it the block
+	            // carries a non-empty body the validator rejects (validation.cpp
+	            // DIGEST_RECOMPUTE empty-body rule), so IPC-submitted ENC-DR blocks
+	            // would be self-rejecting. Mirrors the generateblock RPC path.
+	            // PR-89 item 5: the production finalizer additionally attaches the
+	            // mandatory Stage-3 succinct proof at RC-family heights once that
+	            // authority gate closes; a winner it cannot prove is abandoned
+	            // rather than submitted, because the validator would reject it as
+	            // missing-matmul-stage3-proof. Inert while the gate is false.
+	            std::string finalize_why;
+	            if (!FinalizeMatMulSolvedBlockForProduction(
+	                    block, consensus, next_height, &finalize_why)) {
+	                LogWarning("submitSolution: %s\n", finalize_why);
+	                return false;
 	            }
 	        }
 

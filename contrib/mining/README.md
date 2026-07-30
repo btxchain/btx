@@ -1,6 +1,14 @@
 Mining Operator Helpers
 -----------------------
 
+These helpers follow the active chain parameters; merely building the proposed
+MatMul v4.7 branch does not activate it. Epoch A will use Profile 1 with
+ExactReplay authority and optional shadow proofs. Epochs B/C introduce
+mandatory and then authoritative Profile 1 proofs, and Epoch D separately
+selects Profile 2. Do not configure Profile 2 as an interim ExactReplay
+default. See
+[`doc/btx-matmul-v4.7-transition-roadmap.md`](../../doc/btx-matmul-v4.7-transition-roadmap.md).
+
 This directory contains optional operator tooling for local solo-mining
 workflows. These scripts are not required for `getblocktemplate` / external
 miner setups, but they provide a safer starting point than ad-hoc shell loops
@@ -14,7 +22,7 @@ and the `issuematmulservicechallengeprofile` issuance path.
 Included scripts:
 - `start-live-mining.sh`: starts the health-aware local mining supervisor in the background after preflighting `jq`, and now auto-creates / loads the mining wallet plus address file when you do not pass `--address` or `--address-file`. Use `--foreground` when a service manager such as launchd, systemd, or tmux should supervise the loop process directly.
 - `live-mining-loop.sh`: continuously mines to a configured address while logging `getmininginfo.chain_guard` warnings and using those warnings to refresh peers instead of stopping nonce production. The optional local idleness gate can still be used when the operator explicitly wants workstation-idle mining only.
-- `live-mining-loop.py`: a leaner RPC-keepalive variant of `live-mining-loop.sh`. A single long-running Python process holds one HTTP connection to the JSON-RPC endpoint instead of forking `btx-cli` once per iteration. Use this when the per-spawn cost of the shell loop is the dominant operational concern — for example, on macOS hosts where every fork triggers `syspolicyd` and `XprotectService` malware checks, which at one-second cadence can keep those system services warm continuously and induce thermal throttling. It does not include the supervisor's chain-guard reaction, peer remediation, or daemon restart logic, so it expects a separately-monitored healthy node.
+- `live-mining-loop.py`: a leaner RPC-keepalive variant of `live-mining-loop.sh`. A single long-running Python process holds one HTTP connection to the JSON-RPC endpoint instead of forking `/path/to/btx-cli` once per iteration. Use this when the per-spawn cost of the shell loop is the dominant operational concern — for example, on macOS hosts where every fork triggers `syspolicyd` and `XprotectService` malware checks, which at one-second cadence can keep those system services warm continuously and induce thermal throttling. It does not include the supervisor's chain-guard reaction, peer remediation, or daemon restart logic, so it expects a separately-monitored healthy node.
 - `stop-live-mining.sh`: stops the supervisor and any lingering `generatetoaddress` worker.
 - `backup-wallet.sh`: wraps `backupwallet` and exports descriptors + wallet metadata with a checksum.
 - `test-live-mining-loop-health.sh`: deterministic self-test for the supervisor restart path.
@@ -30,7 +38,7 @@ Best practices:
   defaults only for controlled benchmarking or a host-specific workaround.
 - Avoid `connect=`-only islands for normal operation; prefer normal peer discovery plus optional `addnode=` hints.
 - Keep the mining reward wallet backed up with descriptors, not just the SQLite wallet file.
-- Prefer `btxd` / `btx-cli` in automation and service files.
+- Prefer `btxd` / `/path/to/btx-cli` in automation and service files.
 - For production-scale mining, use `getblocktemplate` / `submitblock` and external workers. The scripts here are mainly for solo mining and operator automation.
 - For first-run or fleet installs from a GitHub release, prefer
   `contrib/faststart/btx-agent-setup.py --preset miner` so the binary install,
@@ -52,7 +60,7 @@ Best practices:
   mining loop killing the others.
 - `stop-live-mining.sh` now only stops the supervised loop PID recorded in the
   results directory, so shutting down one helper instance does not kill
-  unrelated `btxd` or `btx-cli generatetoaddress` processes on the same host.
+  unrelated `btxd` or `/path/to/btx-cli generatetoaddress` processes on the same host.
 - When a process supervisor starts mining at boot or login, run
   `start-live-mining.sh --foreground` from a stable `WorkingDirectory` and let
   the supervisor restart that process. Detached mode is intended for interactive
@@ -167,10 +175,10 @@ instances. Daemon-side runtime controls are also available for pool and fleet
 automation:
 
 ```bash
-btx-cli getminingpeermesh
-btx-cli addminingpeermeshnode node.btx.tools:19335 true true
-btx-cli removeminingpeermeshnode node.btx.tools:19335 true
-btx-cli refreshminingpeermesh true true
+/path/to/btx-cli getminingpeermesh
+/path/to/btx-cli addminingpeermeshnode node.btx.tools:19335 true true
+/path/to/btx-cli removeminingpeermeshnode node.btx.tools:19335 true
+/path/to/btx-cli refreshminingpeermesh true true
 ```
 
 These RPCs manage the current process' runtime mesh. Use `addnode=` in

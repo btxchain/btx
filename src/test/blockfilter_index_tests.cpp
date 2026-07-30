@@ -90,7 +90,9 @@ CBlock BuildChainTestingSetup::CreateBlock(const CBlockIndex* prev,
 
     BOOST_REQUIRE(MineHeaderForConsensus(block,
                                          static_cast<uint32_t>(prev->nHeight + 1),
-                                         m_node.chainman->GetConsensus()));
+                                         m_node.chainman->GetConsensus(),
+                                         5'000'000,
+                                         prev ? std::optional<int64_t>{prev->GetMedianTimePast()} : std::nullopt));
 
     return block;
 }

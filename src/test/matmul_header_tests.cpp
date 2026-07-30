@@ -65,10 +65,23 @@ BOOST_AUTO_TEST_CASE(header_serialize_roundtrip)
     BOOST_CHECK_EQUAL(decoded.seed_b, header.seed_b);
 }
 
-BOOST_AUTO_TEST_CASE(header_size_is_182_bytes)
+BOOST_AUTO_TEST_CASE(header_size_is_182_bytes_even_with_bit26)
 {
     const CBlockHeader header = MakeHeader();
     BOOST_CHECK_EQUAL(GetSerializeSize(header), 182U);
+
+    CBlockHeader with_bit = header;
+    with_bit.SetHeaderPoWCommitment(true);
+    with_bit.nNonce = 42;
+    // Bit 26 must not extend the wire (withdrawn self-describing HeaderPoW).
+    BOOST_CHECK_EQUAL(GetSerializeSize(with_bit), 182U);
+    // nNonce is not in GetHash; only nVersion bit flip can change identity.
+    CBlockHeader bit_only = header;
+    bit_only.SetHeaderPoWCommitment(true);
+    bit_only.nNonce = 0;
+    BOOST_CHECK(bit_only.GetHash() != header.GetHash()); // version differs
+    with_bit.nNonce = 99;
+    BOOST_CHECK_EQUAL(with_bit.GetHash(), bit_only.GetHash());
 }
 
 // TEST: header_setNull_clears_all

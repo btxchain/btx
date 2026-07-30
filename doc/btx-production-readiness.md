@@ -3,6 +3,14 @@
 This runbook defines the executable verification checklist used before BTX
 production deployment.
 
+For MatMul v4.7, a green legacy production-readiness run is necessary but not
+sufficient. The implementation PR keeps all heights disabled. Epoch A alone
+uses Profile 1 ExactReplay with optional shadow proofs; Epoch B requires a
+durable proof and ExactReplay; Epoch C moves authority to the Profile 1 proof;
+Epoch D separately activates Profile 2 under proof authority. The complete
+activation gates and their required ordering are defined in
+[`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md).
+
 For shielded launch scope, this runbook must be read together with
 `doc/btx-shielded-production-status-2026-03-20.md` and
 `doc/btx-smile-v2-genesis-readiness-tracker-2026-03-20.md`, plus the stable
@@ -31,12 +39,12 @@ Reference analysis:
 
 1. Required BTX binaries and validation scripts are present.
 2. Lint checks pass.
-3. Parallel BTX gate passes (`pow_tests`, `kawpow_tests`, functional BTX
+3. Parallel BTX gate passes (`pow_tests`, MatMul suites, functional BTX
    consensus test, M7 script unit tests, M5 swarm harness test).
 4. Strict regtest M7 readiness checks pass.
 5. Strict regtest M7 pool submission path passes and emits an artifact.
 6. Benchmark/latency suite passes (`scripts/m9_btx_benchmark_suite.sh`).
-7. PoW scaling simulation suite passes (long-horizon DGW/KAWPOW checks).
+7. PoW scaling simulation suite passes (long-horizon difficulty/MatMul checks).
 8. M7 scripts pass while running concurrently (port-isolation anti-hang check).
 9. Swarm timeout guard catches and terminates hanging Codex worker processes.
 10. Live strict regtest mining flow succeeds:
@@ -363,7 +371,7 @@ for mainnet, testnet, and testnet4.
 BTX command aliases are live and should be used in operations docs:
 
 - `btxd`
-- `btx-cli`
+- `/path/to/btx-cli`
 - `btx-tx`
 - `btx-wallet`
 - `btx-util`

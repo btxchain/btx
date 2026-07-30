@@ -12,6 +12,16 @@ security index in `doc/security/README.md`. This matrix covers
 repeatable repo-side verification commands, but it does not override the later
 reset-chain launch sign-off in those March 20-23 source-of-truth documents.
 
+For MatMul v4.7, `Green` in this legacy matrix does **not** mean “safe to
+activate.” All heights remain disabled. Epoch-A approval additionally requires
+the corrected Profile 1 ExactReplay gates: cross-backend golden parity, at
+least 100 continuous dimension-bound samples per required accelerator,
+actual-consensus back-to-back and three-branch reorg coverage, admission-DoS
+isolation, deterministic portable retry, serialization/no-chainwork
+invariants, multi-day testnet soak, and IBD/checkpoint disclosure. Epochs B–D
+have separate proof-security and availability gates. See
+[`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md).
+
 **Legend**
 
 - `Green`: verification is repeatable with the commands shown.
@@ -20,6 +30,7 @@ reset-chain launch sign-off in those March 20-23 source-of-truth documents.
 
 | Checklist Item | Milestone | Current State | Verification Command | Remaining Blocker Notes |
 | --- | --- | --- | --- | --- |
+| MatMul v4.7 Profile 1 ExactReplay activation campaign | Epoch A | Yellow – M4 Max Metal has a corrected 100-run campaign and bounded two-winner/reorg evidence; reported RTX 5060 Ti CUDA evidence is promising but its 12-run tail is not a stable p99 | `build-metal/bin/matmul-v4-rc-harness --base-production --episodes 100 --backend metal --out profile1-metal-loaded-100.json` plus the production worker scenarios | Corrected 100-run CUDA campaign, frozen cross-machine digest corpus, admission/fault-retry stress, multi-day testnet soak, IBD disclosure, and a separate activation-height review |
 | MatMul PoW block-hash semantics (pow + matmul_pow unit suites) | M4 | Green – `scripts/test_btx_consensus.sh` wraps `pow_tests`/`matmul_pow_tests` and is already pulled into the default Codex test gate. All MatMul tests pass (273 test cases in 17 suites). | `scripts/test_btx_consensus.sh build-btx` | None; keep `build-btx` compiled with tests before running. |
 | Functional coverage for BTX header/RPC fields (`nonce64`, `mixhash`, live-style MatMul activation boundary) | M4 | Green – `feature_btx_matmul_consensus.py` runs in both `scripts/test_btx_consensus.sh` and `scripts/test_btx_parallel.sh`, exercising wallet mining, BTX-only RPC metadata, post-activation product-payload enforcement, and full-block relay fallback when compact blocks cannot carry the required payload. | `build-btx/test/functional/test_runner.py feature_btx_matmul_consensus.py --jobs=1 --tmpdirprefix="${TMPDIR:-/tmp}/btx-functional"` | Requires wallet-enabled builds; ensure `scripts/build_btx.sh` ran with wallet + functional tests enabled. |
 | Genesis search swarm harness + artifact capture | M5 | Green – helper (`scripts/m5_genesis_search_swarm.sh`) and regression test (`test/util/m5_genesis_search_swarm_test.sh`) are in tree, and canonical tuples are frozen in `doc/btx-genesis-tuples.json` with automated validation coverage. | `scripts/m5_genesis_search_swarm.sh --build-dir build-btx --network {main\|test} --workers <n> --chunk-tries <n> --state-file .codex-swarm/m5-<net>.state --artifact .codex-swarm/m5-<net>-found.txt`<br>`test/util/m5_genesis_search_swarm_test.sh` | None; update `doc/btx-genesis-tuples.json` only when intentionally rotating genesis constants. |

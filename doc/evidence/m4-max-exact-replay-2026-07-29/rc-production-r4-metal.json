@@ -1,0 +1,147 @@
+{
+  "tool": "rc-episode-harness",
+  "schema_version": 2,
+  "stub": false,
+  "device_id": "metal_int8_mpp_tensorops_fused_extract:<redacted-host>",
+  "backend": "metal_int8_mpp_tensorops_fused_extract",
+  "backend_requested": "metal",
+  "backend_resolution_reason": "rc_exactpanels_and_episode_self_qualified",
+  "profile": "episode",
+  "mem_cap_bytes": 0,
+  "toy": false,
+  "medium": false,
+  "production_dims": true,
+  "evidence_kind": "production_chrono_measured",
+  "wall_clock_provenance": "chrono_steady_clock",
+  "device_resident": false,
+  "all_consensus_macs_on_device": true,
+  "native_path_eligible": false,
+  "hardware": {
+    "metal_device_name": "Apple M4 Max",
+    "apple_silicon_identity": "m4_class",
+    "metal4_mpp_compile_ok": true
+  },
+  "native_mxfp4": {
+    "sm120a_kernel_linked": false,
+    "attempted": true,
+    "qualified": false,
+    "exact_panels_qualified": true,
+    "selected_backend": "Unqualified",
+    "arch_key": "",
+    "deficit_reason": "selfqual_failed",
+    "native_declined": false
+  },
+  "source_revision": "e440314d77e9535d194c8c9c09386836258123ae",
+  "git_tip": "e440314d77e9535d194c8c9c09386836258123ae",
+  "peak_rss_kib": 3792800,
+  "run_variance": {
+    "episode_cv": 0,
+    "n_runs": 1,
+    "note": "Coefficient of variation across episode walls in this process. Campaign harness aggregates cross-process variance separately."
+  },
+  "params": {
+    "rounds": 4,
+    "d_head": 128,
+    "n_q": 512,
+    "n_ctx": 786432,
+    "L_lyr": 16,
+    "d_model": 4096,
+    "b_seq": 16384,
+    "T_leaf": 1024
+  },
+  "working_set_bytes_est": 2818572288,
+  "episode_digests": [
+    "3099acef550dd8c3c0112fb7c19378269abee56a2828fac7283567a269bffe5c"
+  ],
+  "extractmx_self_qual": {
+    "status": "pass",
+    "episodes": 1,
+    "digests_stable": true,
+    "exact_gemm_backend_ok": true,
+    "mining_accelerator_ok": true,
+    "native_mxfp4_qualified": false,
+    "native_fp8_qualified": false,
+    "deficit_reason": "",
+    "boundary_vector_notes": "Production dimensions: strict device coverage forbids CPU GEMM fallback; resolver toy+medium byte-parity self-qual is binding."
+  },
+  "exact_replay_acceleration": {
+    "provider": "metal_int8_mpp_tensorops_fused_extract",
+    "resolution_reason": "rc_exactpanels_and_episode_self_qualified",
+    "device_backend_present": true,
+    "require_device": true,
+    "fully_accelerated": true,
+    "all_consensus_macs_on_device": true,
+    "output_row_tile": 256,
+    "expected_macs": 141149805215744,
+    "device_calls": 136,
+    "device_macs": 141149805215744,
+    "phase1_device_calls": 8,
+    "phase1_device_macs": 412316860416,
+    "phase2_device_calls": 128,
+    "phase2_device_macs": 140737488355328,
+    "device_fused_ffn_calls": 64,
+    "device_fused_phase1_calls": 4,
+    "device_extract_elements": 23085711360,
+    "phase2_extract_on_device": true,
+    "phase1_extract_on_device": true,
+    "cpu_calls": 0,
+    "cpu_macs": 0,
+    "cpu_fallbacks": 0,
+    "first_failure": "",
+    "device_resident": false,
+    "device_residency_note": "Every consensus matrix contraction and ExtractMX operation executes on the device; operand XOF, Merkle hashing, and final committed-output staging remain on the host."
+  },
+  "phase_wall_s": {
+    "phase1": 3.284514542,
+    "phase2": 56.829714541,
+    "phase3": 2.509247833,
+    "total": 62.623491208,
+    "provenance": "chrono_steady_clock",
+    "evidence_kind": "chrono_measured"
+  },
+  "k_curve": {
+    "measured": false,
+    "mode": "skipped",
+    "note": "Skipped at production dimensions to avoid two extra full episodes outside the requested measurement.",
+    "store_all_wall_s": 0,
+    "store_only_x0_wall_s": 0,
+    "k_estimate": 0,
+    "digests_match": false,
+    "points": [
+      {
+        "checkpoint": "StoreAll",
+        "wall_s": 0,
+        "recompute_ratio": 0
+      },
+      {
+        "checkpoint": "StoreOnlyX0",
+        "wall_s": 0,
+        "recompute_ratio": 0
+      }
+    ]
+  },
+  "residency_sweep": [
+    {
+      "working_set_bytes": 2818572288,
+      "wall_s": 62.623491208,
+      "dims": "production",
+      "note": "Single working-set point; not a 64→256 MB cliff sweep."
+    }
+  ],
+  "allocation_cap_verdicts": {
+    "512MiB": "skip",
+    "2GiB": "skip",
+    "8GiB": "skip",
+    "note": "Only an explicitly requested --mem-cap receives pass/fail evidence; ordinary runs and other named caps remain skip."
+  },
+  "verifier_floor": {
+    "measured": true,
+    "binding": true,
+    "evidence_kind": "production_exact_replay_chrono_measured",
+    "wall_s": 62.623491208,
+    "note": "Measured end-to-end production ExactReplay wall-clock with strict device contraction coverage; claim comparison is constant-time."
+  },
+  "gpu_campaign_present": true,
+  "nvlink_campaign_present": false,
+  "consensus_note": "nMatMulRCHeight remains INT32_MAX; ENC_RC activation is NO-GO. This harness never recommends raising consensus height. Projections/MAC estimates are NOT EVIDENCE for rc-gate GO. Cross-host Metal and datacenter campaigns remain Stage G blockers."
+}

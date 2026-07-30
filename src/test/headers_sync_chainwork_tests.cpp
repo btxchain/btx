@@ -19,7 +19,7 @@
 #include <limits>
 
 struct HeadersGeneratorSetup : public RegTestingSetup {
-    /** Search for a nonce to meet (regtest) proof of work */
+    /** Make @p starting_header pass the header-sync proof-of-work gate. */
     void FindProofOfWork(CBlockHeader& starting_header, uint32_t block_height);
     /**
      * Generate headers in a chain that build off a given starting hash, using
@@ -33,7 +33,36 @@ struct HeadersGeneratorSetup : public RegTestingSetup {
 
 void HeadersGeneratorSetup::FindProofOfWork(CBlockHeader& starting_header, uint32_t block_height)
 {
-    BOOST_REQUIRE(MineHeaderForConsensus(starting_header, block_height, Params().GetConsensus()));
+    const Consensus::Params& consensus = Params().GetConsensus();
+    if (consensus.fMatMulPOW) {
+        // Header-sync PoW validation (HasValidProofOfWork -> CheckMatMulProofOfWork_Phase1)
+        // checks ONLY that matmul_dim is valid for the height, both seeds are
+        // non-null, and matmul_digest <= target(nBits). It deliberately does NOT
+        // recompute the digest or the seeds: the expensive MatMul proof is the
+        // deferred full-block/contextual check, and the fact that a header alone
+        // is accepted on a self-declared digest is exactly the unauthenticated-
+        // header surface (audit C1) that this header-sync path sits above. So a
+        // header-sync-valid header is built in O(1) here rather than mining many
+        // thousands of dim-256 MatMul evaluations -- this test exercises the sync
+        // state machine and chainwork accounting, not the MatMul proof. Mirror the
+        // miner's height-dependent dimension (v4 dim at/above the v4 fork, else the
+        // legacy dimension) so Phase1's dimension check accepts every height in the
+        // synthetic chain, including across the regtest v3->v4->BMX4C transition.
+        starting_header.matmul_dim =
+            consensus.IsMatMulV4Active(static_cast<int32_t>(block_height))
+                ? static_cast<uint16_t>(consensus.nMatMulV4Dimension)
+                : static_cast<uint16_t>(consensus.nMatMulDimension);
+        // Non-null seeds; the value is irrelevant to header sync (not recomputed
+        // here -- the seed-vs-parent binding is a contextual check outside sync).
+        starting_header.seed_a = uint256::ONE;
+        starting_header.seed_b = uint256::ONE;
+        // digest 0 <= any target, so Phase1's <= target(nBits) check passes for
+        // regtest's easy powLimit-derived difficulty.
+        starting_header.matmul_digest.SetNull();
+        starting_header.mix_hash.SetNull();
+        return;
+    }
+    BOOST_REQUIRE(MineHeaderForConsensus(starting_header, block_height, consensus));
 }
 
 void HeadersGeneratorSetup::GenerateHeaders(std::vector<CBlockHeader>& headers,
