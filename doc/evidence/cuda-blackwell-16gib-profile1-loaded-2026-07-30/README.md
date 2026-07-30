@@ -2,7 +2,9 @@
 
 Status: corrected 100-run CUDA ExactReplay campaign for MatMul v4.7 Epoch A
 (Profile 1). Activation remains disabled. This does not clear Metal cross-check
-or ratification gates.
+or ratification gates. See the
+[canonical transition roadmap](../../btx-matmul-v4.7-transition-roadmap.md)
+for the complete activation contract and remaining gates.
 
 ## Hardware class (sanitized)
 

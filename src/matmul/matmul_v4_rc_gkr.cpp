@@ -4516,21 +4516,20 @@ WinnerGkrSolveReport SolveCoupledProveWinner(CBlockHeader header, int32_t height
     return rep;
 }
 
-ExactReplayVerifyResult VerifyBoundedExactReplay(const CBlockHeader& header,
-                                                 const RCEpisodeParams& params, int32_t height,
-                                                 const arith_uint256* target)
+namespace {
+
+ExactReplayVerifyResult VerifyBoundedExactReplayImpl(
+    const CBlockHeader& header,
+    const RCEpisodeParams& params,
+    int32_t height,
+    const arith_uint256* target,
+    RCExactReplayAcceleration acceleration)
 {
     g_exact_replay_invoke_count.fetch_add(1, std::memory_order_relaxed);
     ExactReplayVerifyResult out;
     const size_t rss0 = CurrentRssKiB();
     const auto t0 = std::chrono::steady_clock::now();
-    const auto resolved = matmul_v4::accel::ResolveExactGemmBackendForRC();
     RCExactReplayAccelerationStats acceleration_stats;
-    RCExactReplayAcceleration acceleration;
-    acceleration.gemm = resolved.backend;
-    acceleration.backend = resolved.provider;
-    acceleration.require_device = false; // consensus-neutral failover to CPU
-    acceleration.output_row_tile = 256;
     acceleration.stats = &acceleration_stats;
     out.digest = RecomputeResidentCurriculumAccelerated(
         header, params, height, {}, nullptr, nullptr, acceleration);
@@ -4617,6 +4616,38 @@ ExactReplayVerifyResult VerifyBoundedExactReplay(const CBlockHeader& header,
         ? "VerifyBoundedExactReplay eps=0 (qualified exact device contractions)"
         : "VerifyBoundedExactReplay eps=0 (portable CPU/fallback contractions)";
     return out;
+}
+
+} // namespace
+
+ExactReplayVerifyResult VerifyBoundedExactReplay(
+    const CBlockHeader& header,
+    const RCEpisodeParams& params,
+    int32_t height,
+    const arith_uint256* target)
+{
+    const auto resolved{
+        matmul_v4::accel::ResolveExactGemmBackendForRC()};
+    RCExactReplayAcceleration acceleration;
+    acceleration.gemm = resolved.backend;
+    acceleration.backend = resolved.provider;
+    // Consensus-neutral failover: an unavailable accelerator is not a
+    // consensus failure.
+    acceleration.require_device = false;
+    acceleration.output_row_tile = 256;
+    return VerifyBoundedExactReplayImpl(
+        header, params, height, target, std::move(acceleration));
+}
+
+ExactReplayVerifyResult VerifyBoundedExactReplayWithAccelerationForTest(
+    const CBlockHeader& header,
+    const RCEpisodeParams& params,
+    int32_t height,
+    const RCExactReplayAcceleration& acceleration,
+    const arith_uint256* target)
+{
+    return VerifyBoundedExactReplayImpl(
+        header, params, height, target, acceleration);
 }
 
 RCProdVerifyResult VerifyRCWinnerOrExactReplay(const CBlockHeader& header,

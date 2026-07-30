@@ -6,9 +6,9 @@ and vendored LevelDB/secp256k1 documentation.
 
 Inventory totals:
 
-- documentation-like files: **563**
-- MatMul/ExactReplay/proof-related files: **218**
-- MatMul-related files reviewed or explicitly classified: **218**
+- documentation-like files: **564**
+- MatMul/ExactReplay/proof-related files: **219**
+- MatMul-related files reviewed or explicitly classified: **219**
 - MatMul-related files still requiring review: **0**
 
 Current and superseded policy documents are considered reviewed when they
@@ -311,6 +311,7 @@ MatMul transition claim.
 | `doc/developer-notes.md` | General documentation; no MatMul transition claim found |
 | `doc/dnsseed-policy.md` | General documentation; no MatMul transition claim found |
 | `doc/ds3_snapshot_pin_runbook.md` | General documentation; no MatMul transition claim found |
+| `doc/evidence/cuda-blackwell-16gib-profile1-loaded-2026-07-30/README.md` | MatMul-related; reviewed against canonical roadmap |
 | `doc/evidence/lane-c-2026-07-21/README.md` | MatMul-related; reviewed against canonical roadmap |
 | `doc/evidence/m4-max-exact-replay-2026-07-29/README.md` | MatMul-related; reviewed against canonical roadmap |
 | `doc/evidence/m4-max-exact-replay-profile2-2026-07-30/README.md` | MatMul-related; reviewed against canonical roadmap |
