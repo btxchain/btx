@@ -19,6 +19,8 @@
 #include <matmul/matmul_v4_rc_selfqual.h>
 #include <matmul/matmul_v4_rc_gkr.h>
 #include <matmul/exact_gemm_resolve.h>
+#include <matmul/accel_v4.h>
+#include <cuda/matmul_v4_rc_exact_replay_cuda.h>
 #include <pow.h>
 #include <primitives/block.h>
 #include <span.h>
@@ -1332,6 +1334,55 @@ BOOST_AUTO_TEST_CASE(rc_p12_phase2_exactgemm_device_probe)
     const auto st = rc::ProbeRCSelfQual(matmul_v4::accel::MakeResolvedExactGemmBackendForRC());
     BOOST_CHECK_EQUAL(st.native_mxfp4_qualified, rc::IsRcOzakiMxfp4Qualified());
     BOOST_CHECK(!st.native_fp8_qualified);
+}
+
+BOOST_AUTO_TEST_CASE(rc_cuda_exact_replay_launch_abi_smoke)
+{
+    // Wires CUDA ExactReplay through ExactGemmBackend Launch* (Metal ABI parity)
+    // on a toy episode. Skips cleanly when no CUDA ExactReplay device is present.
+    if (!matmul_v4::cuda::IsRcExactReplayCudaAvailable()) {
+        BOOST_TEST_MESSAGE("CUDA ExactReplay unavailable; skip Launch* ABI smoke");
+        return;
+    }
+
+    matmul_v4::accel::ResetRCExactGemmResolveCacheForTest();
+#if defined(_WIN32)
+    _putenv_s("BTX_MATMUL_V4_BACKEND", "cuda");
+    _putenv_s("BTX_RC_ACCEL_POLICY", "portable");
+#else
+    setenv("BTX_MATMUL_V4_BACKEND", "cuda", /*overwrite=*/1);
+    setenv("BTX_RC_ACCEL_POLICY", "portable", /*overwrite=*/1);
+#endif
+
+    const auto resolved = matmul_v4::accel::ResolveExactGemmBackendForRC();
+    BOOST_REQUIRE(resolved.self_qualified);
+    BOOST_REQUIRE(resolved.backend.gemm_s8s8 != nullptr);
+    BOOST_REQUIRE(resolved.backend.rc_fused_ffn != nullptr);
+    BOOST_REQUIRE(resolved.backend.rc_fused_ffn_chain != nullptr);
+    BOOST_REQUIRE(resolved.backend.rc_phase1 != nullptr);
+    BOOST_TEST_MESSAGE("CUDA ExactReplay provider=" << resolved.provider);
+
+    const auto header = MakeRCHeader(0xC0DAE700ull);
+    const auto params = rc::MakeToyRCEpisodeParams();
+    const uint256 cpu = rc::RecomputeResidentCurriculumReference(header, params, 0);
+    BOOST_REQUIRE(!cpu.IsNull());
+
+    rc::RCExactReplayAccelerationStats stats;
+    const rc::RCExactReplayAcceleration acceleration{
+        .gemm = resolved.backend,
+        .backend = resolved.provider,
+        .require_device = true,
+        .stats = &stats,
+    };
+    const uint256 accelerated = rc::RecomputeResidentCurriculumAccelerated(
+        header, params, 0, {}, nullptr, nullptr, acceleration);
+    BOOST_CHECK(accelerated == cpu);
+    BOOST_CHECK_EQUAL(stats.cpu_fallbacks, 0u);
+    BOOST_CHECK(stats.resident_ffn_chain_on_device || stats.device_fused_ffn_chain_calls > 0 ||
+                stats.device_fused_phase1_calls > 0);
+    BOOST_TEST_MESSAGE("CUDA ExactReplay toy smoke ok fused_chain_calls="
+                       << stats.device_fused_ffn_chain_calls
+                       << " fused_phase1_calls=" << stats.device_fused_phase1_calls);
 }
 
 BOOST_AUTO_TEST_CASE(rc_dos_admission_separate_from_v4_lt)
