@@ -1518,6 +1518,104 @@ BOOST_AUTO_TEST_CASE(rc_dos_admission_separate_from_v4_lt)
     BOOST_CHECK_GT(wu_dc, wu);
 }
 
+BOOST_AUTO_TEST_CASE(rc_replay_budget_survives_address_rotation_within_keyed_netgroup)
+{
+    Consensus::Params p;
+    p.nMatMulV4Height = 1;
+    p.nMatMulRCHeight = 1;
+    p.fMatMulRCUseToyDims = true;
+    p.nMatMulRCPeerVerifyBudgetPerMin = 1;
+    constexpr int32_t kHeight{100};
+    BOOST_REQUIRE(p.IsMatMulRCFamilyActive(kHeight));
+
+    MatMulPeerVerificationBudget first_address;
+    MatMulPeerVerificationBudget rotated_address;
+    MatMulPeerVerificationBudget retained_netgroup;
+    const auto now{std::chrono::steady_clock::now()};
+
+    BOOST_REQUIRE(ConsumeMatMulRCSourceVerifyBudgets(
+        first_address, retained_netgroup, p, /*verification_count=*/1,
+        now, /*is_ibd=*/false, kHeight));
+    BOOST_CHECK_EQUAL(
+        first_address.expensive_rc_verifications_this_minute, 1U);
+    BOOST_CHECK_EQUAL(
+        retained_netgroup.expensive_rc_verifications_this_minute, 1U);
+
+    // A fresh address does not receive a fresh RC allowance when its keyed
+    // netgroup already spent the shared source budget. The failed compound
+    // debit restores the otherwise-unused address counter exactly.
+    BOOST_CHECK(!ConsumeMatMulRCSourceVerifyBudgets(
+        rotated_address, retained_netgroup, p,
+        /*verification_count=*/1, now, /*is_ibd=*/false, kHeight));
+    BOOST_CHECK_EQUAL(
+        rotated_address.expensive_rc_verifications_this_minute, 0U);
+    BOOST_CHECK_EQUAL(
+        retained_netgroup.expensive_rc_verifications_this_minute, 1U);
+
+    // The same new address can spend through a distinct keyed netgroup,
+    // proving that the retained group, not stale address state, rejected it.
+    MatMulPeerVerificationBudget independent_netgroup;
+    BOOST_CHECK(ConsumeMatMulRCSourceVerifyBudgets(
+        rotated_address, independent_netgroup, p,
+        /*verification_count=*/1, now, /*is_ibd=*/false, kHeight));
+}
+
+BOOST_AUTO_TEST_CASE(rc_enqueue_refund_receipt_rolls_source_counters_back_once)
+{
+    Consensus::Params p;
+    p.nMatMulV4Height = 1;
+    p.nMatMulRCHeight = 1;
+    p.fMatMulRCUseToyDims = true;
+    p.nMatMulRCPeerVerifyBudgetPerMin = 4;
+    constexpr int32_t kHeight{100};
+
+    MatMulPeerVerificationBudget address_budget;
+    MatMulPeerVerificationBudget netgroup_budget;
+    const auto charged_at{std::chrono::steady_clock::now()};
+    constexpr uint32_t kWorkUnits{2};
+    BOOST_REQUIRE(ConsumeMatMulRCSourceVerifyBudgets(
+        address_budget, netgroup_budget, p, kWorkUnits, charged_at,
+        /*is_ibd=*/false, kHeight));
+    BOOST_REQUIRE(ConsumeGlobalMatMulRCBudget(
+        /*max_global_per_minute=*/kWorkUnits, kWorkUnits, charged_at));
+    BOOST_CHECK_EQUAL(
+        address_budget.expensive_rc_verifications_this_minute, kWorkUnits);
+    BOOST_CHECK_EQUAL(
+        netgroup_budget.expensive_rc_verifications_this_minute, kWorkUnits);
+
+    MatMulRCVerificationBudgetDebit debit{
+        .verification_count = kWorkUnits,
+        .charged_at = charged_at,
+        .refundable = true,
+    };
+    const auto refund{TakeMatMulRCVerificationBudgetRefund(debit)};
+    BOOST_REQUIRE(refund);
+    RefundMatMulRCPeerVerifyBudget(
+        address_budget, refund->verification_count, refund->charged_at);
+    RefundMatMulRCPeerVerifyBudget(
+        netgroup_budget, refund->verification_count, refund->charged_at);
+    RefundGlobalMatMulRCBudget(
+        refund->verification_count, refund->charged_at);
+    BOOST_CHECK_EQUAL(
+        address_budget.expensive_rc_verifications_this_minute, 0U);
+    BOOST_CHECK_EQUAL(
+        netgroup_budget.expensive_rc_verifications_this_minute, 0U);
+
+    // net_processing gates its source and global refunds with this same
+    // receipt. A second enqueue-failure cleanup cannot decrement any counter.
+    BOOST_REQUIRE(ConsumeGlobalMatMulRCBudget(
+        /*max_global_per_minute=*/kWorkUnits, kWorkUnits, charged_at));
+    BOOST_CHECK(!TakeMatMulRCVerificationBudgetRefund(debit));
+    BOOST_CHECK(!ConsumeGlobalMatMulRCBudget(
+        /*max_global_per_minute=*/kWorkUnits, /*count=*/1, charged_at));
+    BOOST_CHECK_EQUAL(
+        address_budget.expensive_rc_verifications_this_minute, 0U);
+    BOOST_CHECK_EQUAL(
+        netgroup_budget.expensive_rc_verifications_this_minute, 0U);
+    // Do not leak this process-global test debit into later suites.
+    RefundGlobalMatMulRCBudget(kWorkUnits, charged_at);
+}
+
 // --- Stage H required-test scaffolding (final-form build spec) -------------
 
 BOOST_AUTO_TEST_CASE(rc_stage_h_v1_golden_preserved)
