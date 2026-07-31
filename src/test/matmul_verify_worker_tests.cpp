@@ -1525,4 +1525,129 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(!scheduler.GetStats().active);
 }
 
+BOOST_AUTO_TEST_CASE(
+    rc_accelerator_scheduler_release_identity_and_lifecycle_readiness)
+{
+    using Scheduler = matmul::v4::rc::RCAcceleratorScheduler;
+    auto& scheduler{matmul::v4::rc::GetRCAcceleratorScheduler()};
+    BOOST_REQUIRE(scheduler.ResetStatsForTest());
+
+    std::atomic_bool cancelled{false};
+    {
+        auto lease{scheduler.Acquire(
+            Scheduler::Priority::CandidateMining, &cancelled,
+            "candidate")};
+        BOOST_REQUIRE(lease);
+        BOOST_CHECK(!scheduler.TryMismatchedReleaseForTest(
+            Scheduler::Priority::WinnerReseal,
+            lease.TokenForTest() + 1));
+        BOOST_CHECK(scheduler.GetStats().active);
+        BOOST_CHECK_EQUAL(
+            scheduler.GetStats().release_invariant_violations, 1U);
+    }
+    {
+        auto lease{scheduler.Acquire(
+            Scheduler::Priority::WinnerReseal, &cancelled,
+            "winner")};
+        BOOST_REQUIRE(lease);
+    }
+    {
+        auto lease{scheduler.Acquire(
+            Scheduler::Priority::TipValidation, &cancelled,
+            "tip")};
+        BOOST_REQUIRE(lease);
+    }
+
+    auto assessment{scheduler.AssessLifecycle(90.0)};
+    BOOST_CHECK(assessment.candidate_measured);
+    BOOST_CHECK(assessment.winner_reseal_measured);
+    BOOST_CHECK(assessment.tip_validation_measured);
+    BOOST_CHECK(!assessment.authenticated_relay_measured);
+    BOOST_CHECK(!assessment.complete_sample_set);
+    BOOST_CHECK(!assessment.operationally_ready);
+
+    scheduler.RecordAuthenticatedRelaySample(0.25);
+    assessment = scheduler.AssessLifecycle(90.0);
+    BOOST_CHECK(assessment.complete_sample_set);
+    BOOST_CHECK(assessment.within_target_spacing);
+    BOOST_CHECK(!assessment.hardware_evidence_gates_passed);
+    BOOST_CHECK(!assessment.operationally_ready);
+    BOOST_CHECK_CLOSE(
+        assessment.authenticated_relay_s, 0.25, 0.001);
+    BOOST_CHECK_GT(assessment.complete_lifecycle_s, 0.0);
+}
+
+BOOST_AUTO_TEST_CASE(
+    rc_accelerator_scheduler_deterministic_contention_stress)
+{
+    using Scheduler = matmul::v4::rc::RCAcceleratorScheduler;
+    auto& scheduler{matmul::v4::rc::GetRCAcceleratorScheduler()};
+    BOOST_REQUIRE(scheduler.ResetStatsForTest());
+
+    // CI-scale contention rehearsal: repeatedly occupy the candidate lane,
+    // enqueue one request from every validation/reseal class, then verify
+    // priority handoff and exact ownership release. This is deterministic and
+    // complements the multi-daemon IBD/competing-tip functional campaign.
+    constexpr size_t rounds{12};
+    for (size_t round = 0; round < rounds; ++round) {
+        std::atomic_bool candidate_cancelled{false};
+        auto candidate{scheduler.Acquire(
+            Scheduler::Priority::CandidateMining,
+            &candidate_cancelled, "candidate-soak")};
+        BOOST_REQUIRE(candidate);
+
+        std::mutex order_mutex;
+        std::vector<Scheduler::Priority> order;
+        auto waiter = [&](Scheduler::Priority priority,
+                          std::atomic_bool& cancelled,
+                          const char* label) {
+            auto lease{
+                scheduler.Acquire(priority, &cancelled, label)};
+            if (!lease) return;
+            std::lock_guard<std::mutex> lock{order_mutex};
+            order.push_back(priority);
+        };
+        std::atomic_bool speculative_cancelled{false};
+        std::atomic_bool reseal_cancelled{false};
+        std::atomic_bool tip_cancelled{false};
+        std::thread speculative{
+            waiter, Scheduler::Priority::SpeculativeValidation,
+            std::ref(speculative_cancelled), "speculative-soak"};
+        BOOST_REQUIRE(WaitFor(
+            [&] { return scheduler.GetStats().queue_depth == 1; }));
+        std::thread reseal{
+            waiter, Scheduler::Priority::WinnerReseal,
+            std::ref(reseal_cancelled), "reseal-soak"};
+        BOOST_REQUIRE(WaitFor(
+            [&] { return scheduler.GetStats().queue_depth == 2; }));
+        std::thread tip{
+            waiter, Scheduler::Priority::TipValidation,
+            std::ref(tip_cancelled), "tip-soak"};
+        BOOST_REQUIRE(WaitFor([&] {
+            return scheduler.GetStats().queue_depth == 3 &&
+                candidate_cancelled.load(std::memory_order_relaxed);
+        }));
+        candidate = {};
+        tip.join();
+        reseal.join();
+        speculative.join();
+        BOOST_REQUIRE_EQUAL(order.size(), 3U);
+        BOOST_CHECK(
+            order[0] == Scheduler::Priority::TipValidation);
+        BOOST_CHECK(
+            order[1] == Scheduler::Priority::WinnerReseal);
+        BOOST_CHECK(
+            order[2] ==
+            Scheduler::Priority::SpeculativeValidation);
+        BOOST_CHECK(!scheduler.GetStats().active);
+    }
+
+    const auto stats{scheduler.GetStats()};
+    BOOST_CHECK_EQUAL(stats.requests, rounds * 4);
+    BOOST_CHECK_EQUAL(stats.acquisitions, rounds * 4);
+    BOOST_CHECK_EQUAL(stats.completions, rounds * 4);
+    BOOST_CHECK_EQUAL(stats.release_invariant_violations, 0U);
+    BOOST_CHECK_GE(stats.preemption_requests, rounds);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

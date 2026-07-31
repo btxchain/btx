@@ -2419,8 +2419,10 @@ uint256 MineRCEpisode(const CBlockHeader& header, const RCEpisodeParams& params,
                       std::vector<RCRoundTranscript>* out_rounds,
                       const lt::ExactGemmBackend& gemm)
 {
-    // Miner path reseals through the same oracle; optional ExactGemm inject
-    // (after RC self-qual) must still match CPU when verified per-GEMM.
+    // Generic portable/diagnostic episode entry. Production Profile 1
+    // candidate mining and winner reseal use the strict-device wrappers above;
+    // this function must not be cited as evidence that production reseals on
+    // CPU or tolerates a device fallback.
     return RecomputeResidentCurriculumReference(header, params, height, {}, out_rounds,
                                                 /*out_timing=*/nullptr, gemm);
 }

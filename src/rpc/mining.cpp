@@ -1411,7 +1411,9 @@ static UniValue ConsensusGuardAlerts(const CChain& active_chain, const Consensus
     return alerts;
 }
 
-static UniValue BuildBackendRuntimeProfile(bool include_rc_runtime = false)
+static UniValue BuildBackendRuntimeProfile(
+    bool include_rc_runtime = false,
+    double target_spacing_s = 0)
 {
     const auto stats = matmul::accelerated::ProbeMatMulBackendRuntimeStats();
     const auto prehash_stats = ProbeMatMulGpuPreHashScanStats();
@@ -1549,10 +1551,30 @@ static UniValue BuildBackendRuntimeProfile(bool include_rc_runtime = false)
                 "cpu_gemm_fallbacks", last_validation->cpu_gemm_fallbacks);
             validation.pushKV(
                 "acceleration_failure", last_validation->acceleration_failure);
+            validation.pushKV(
+                "provider_quarantined",
+                last_validation->provider_quarantined);
+            validation.pushKV(
+                "provider_health_reason",
+                last_validation->provider_health_reason);
+            validation.pushKV(
+                "operator_recovery",
+                last_validation->operator_recovery);
             validation.pushKV("wall_s", last_validation->verify_s);
             validation.pushKV("note", last_validation->note);
         }
         rc_exact_replay.pushKV("last_validation", std::move(validation));
+        const auto provider_health{
+            matmul::v4::rc::GetRCExactReplayProviderHealth()};
+        UniValue health(UniValue::VOBJ);
+        health.pushKV("quarantined", provider_health.quarantined);
+        health.pushKV(
+            "quarantine_events", provider_health.quarantine_events);
+        health.pushKV("provider", provider_health.provider);
+        health.pushKV("reason", provider_health.reason);
+        health.pushKV(
+            "operator_recovery", provider_health.operator_recovery);
+        rc_exact_replay.pushKV("provider_health", std::move(health));
         obj.pushKV("rc_exact_replay", std::move(rc_exact_replay));
 
         const auto scheduler{
@@ -1565,6 +1587,9 @@ static UniValue BuildBackendRuntimeProfile(bool include_rc_runtime = false)
             "cancelled_waits", scheduler.cancelled_waits);
         rc_scheduler.pushKV(
             "preemption_requests", scheduler.preemption_requests);
+        rc_scheduler.pushKV(
+            "release_invariant_violations",
+            scheduler.release_invariant_violations);
         rc_scheduler.pushKV("queue_depth", scheduler.queue_depth);
         rc_scheduler.pushKV(
             "queue_high_water", scheduler.queue_high_water);
@@ -1582,6 +1607,89 @@ static UniValue BuildBackendRuntimeProfile(bool include_rc_runtime = false)
             "last_execution_s", scheduler.last_execution_s);
         rc_scheduler.pushKV(
             "max_execution_s", scheduler.max_execution_s);
+        const auto lane_object = [](const auto& lane) {
+            UniValue out(UniValue::VOBJ);
+            out.pushKV("requests", lane.requests);
+            out.pushKV("acquisitions", lane.acquisitions);
+            out.pushKV("completions", lane.completions);
+            out.pushKV("cancelled_waits", lane.cancelled_waits);
+            out.pushKV(
+                "last_queue_wait_s", lane.last_queue_wait_s);
+            out.pushKV(
+                "max_queue_wait_s", lane.max_queue_wait_s);
+            out.pushKV(
+                "last_execution_s", lane.last_execution_s);
+            out.pushKV(
+                "max_execution_s", lane.max_execution_s);
+            return out;
+        };
+        using RCPriority =
+            matmul::v4::rc::RCAcceleratorScheduler::Priority;
+        UniValue lanes(UniValue::VOBJ);
+        lanes.pushKV(
+            "candidate_mining",
+            lane_object(scheduler.lanes[
+                static_cast<size_t>(RCPriority::CandidateMining)]));
+        lanes.pushKV(
+            "winner_reseal",
+            lane_object(scheduler.lanes[
+                static_cast<size_t>(RCPriority::WinnerReseal)]));
+        lanes.pushKV(
+            "tip_validation",
+            lane_object(scheduler.lanes[
+                static_cast<size_t>(RCPriority::TipValidation)]));
+        lanes.pushKV(
+            "speculative_validation",
+            lane_object(scheduler.lanes[
+                static_cast<size_t>(
+                    RCPriority::SpeculativeValidation)]));
+        rc_scheduler.pushKV("lanes", std::move(lanes));
+        const auto lifecycle{
+            matmul::v4::rc::GetRCAcceleratorScheduler()
+                .AssessLifecycle(target_spacing_s)};
+        UniValue readiness(UniValue::VOBJ);
+        readiness.pushKV(
+            "candidate_measured", lifecycle.candidate_measured);
+        readiness.pushKV(
+            "winner_reseal_measured",
+            lifecycle.winner_reseal_measured);
+        readiness.pushKV(
+            "authenticated_relay_measured",
+            lifecycle.authenticated_relay_measured);
+        readiness.pushKV(
+            "tip_validation_measured",
+            lifecycle.tip_validation_measured);
+        readiness.pushKV(
+            "complete_sample_set",
+            lifecycle.complete_sample_set);
+        readiness.pushKV(
+            "within_target_spacing",
+            lifecycle.within_target_spacing);
+        readiness.pushKV(
+            "hardware_evidence_gates_passed",
+            lifecycle.hardware_evidence_gates_passed);
+        readiness.pushKV(
+            "operationally_ready",
+            lifecycle.operationally_ready);
+        readiness.pushKV(
+            "target_spacing_s", lifecycle.target_spacing_s);
+        readiness.pushKV("candidate_s", lifecycle.candidate_s);
+        readiness.pushKV(
+            "winner_reseal_s", lifecycle.winner_reseal_s);
+        readiness.pushKV(
+            "authenticated_relay_s",
+            lifecycle.authenticated_relay_s);
+        readiness.pushKV(
+            "tip_validation_s", lifecycle.tip_validation_s);
+        readiness.pushKV(
+            "queue_wait_s", lifecycle.queue_wait_s);
+        readiness.pushKV(
+            "complete_lifecycle_s",
+            lifecycle.complete_lifecycle_s);
+        readiness.pushKV("reason", lifecycle.reason);
+        rc_scheduler.pushKV(
+            "complete_lifecycle_readiness",
+            std::move(readiness));
         obj.pushKV("rc_accelerator_scheduler", std::move(rc_scheduler));
     }
     return obj;
@@ -5671,8 +5779,19 @@ static RPCHelpMan getmininginfo()
                                     {RPCResult::Type::NUM, "cpu_gemm_calls", "CPU GEMM calls"},
                                     {RPCResult::Type::NUM, "cpu_gemm_fallbacks", "CPU fallback calls"},
                                     {RPCResult::Type::STR, "acceleration_failure", "First accelerator failure, if any"},
+                                    {RPCResult::Type::BOOL, "provider_quarantined", "Whether the local provider was quarantined after this attempt"},
+                                    {RPCResult::Type::STR, "provider_health_reason", "Reason for local provider quarantine, if any"},
+                                    {RPCResult::Type::STR, "operator_recovery", "Operator recovery action for a retryable provider failure"},
                                     {RPCResult::Type::NUM, "wall_s", "Replay wall time"},
                                     {RPCResult::Type::STR, "note", "Replay status detail"},
+                                }},
+                                {RPCResult::Type::OBJ, "provider_health", "Process-local strict-device provider health",
+                                {
+                                    {RPCResult::Type::BOOL, "quarantined", "Whether the provider is withheld from further strict work"},
+                                    {RPCResult::Type::NUM, "quarantine_events", "Provider quarantine events"},
+                                    {RPCResult::Type::STR, "provider", "Quarantined provider"},
+                                    {RPCResult::Type::STR, "reason", "Quarantine reason"},
+                                    {RPCResult::Type::STR, "operator_recovery", "Required operator recovery action"},
                                 }},
                             }},
                             {RPCResult::Type::OBJ, "rc_accelerator_scheduler", "Shared Profile-1 device-owner queue and execution telemetry",
@@ -5682,6 +5801,7 @@ static RPCHelpMan getmininginfo()
                                 {RPCResult::Type::NUM, "completions", "Completed ownership leases"},
                                 {RPCResult::Type::NUM, "cancelled_waits", "Requests cancelled before device admission"},
                                 {RPCResult::Type::NUM, "preemption_requests", "Higher-priority requests that asked the current owner to cancel"},
+                                {RPCResult::Type::NUM, "release_invariant_violations", "Invalid/double/mismatched lease release attempts; any nonzero value is a fatal integrity signal"},
                                 {RPCResult::Type::NUM, "queue_depth", "Current accelerator waiters"},
                                 {RPCResult::Type::NUM, "queue_high_water", "Maximum accelerator waiters"},
                                 {RPCResult::Type::BOOL, "active", "Whether the accelerator has an owner"},
@@ -5692,6 +5812,39 @@ static RPCHelpMan getmininginfo()
                                 {RPCResult::Type::NUM, "max_queue_wait_s", "Maximum observed queue wait"},
                                 {RPCResult::Type::NUM, "last_execution_s", "Most recent device-owner wall time"},
                                 {RPCResult::Type::NUM, "max_execution_s", "Maximum device-owner wall time"},
+                                {RPCResult::Type::OBJ_DYN, "lanes", "Per-priority candidate, reseal, tip-validation, and speculative queue/execution telemetry",
+                                {
+                                    {RPCResult::Type::OBJ, "lane", "One scheduler lane",
+                                    {
+                                        {RPCResult::Type::NUM, "requests", "Lane requests"},
+                                        {RPCResult::Type::NUM, "acquisitions", "Lane acquisitions"},
+                                        {RPCResult::Type::NUM, "completions", "Lane completions"},
+                                        {RPCResult::Type::NUM, "cancelled_waits", "Cancelled lane waits"},
+                                        {RPCResult::Type::NUM, "last_queue_wait_s", "Latest queue wait"},
+                                        {RPCResult::Type::NUM, "max_queue_wait_s", "Maximum queue wait"},
+                                        {RPCResult::Type::NUM, "last_execution_s", "Latest execution time"},
+                                        {RPCResult::Type::NUM, "max_execution_s", "Maximum execution time"},
+                                    }},
+                                }},
+                                {RPCResult::Type::OBJ, "complete_lifecycle_readiness", "Fail-closed candidate-to-authenticated-tip timing assessment; never an activation or consensus gate",
+                                {
+                                    {RPCResult::Type::BOOL, "candidate_measured", "Candidate execution sample available"},
+                                    {RPCResult::Type::BOOL, "winner_reseal_measured", "Winner reseal sample available"},
+                                    {RPCResult::Type::BOOL, "authenticated_relay_measured", "Authenticated relay sample available"},
+                                    {RPCResult::Type::BOOL, "tip_validation_measured", "Receiving tip-validation sample available"},
+                                    {RPCResult::Type::BOOL, "complete_sample_set", "All lifecycle components are measured"},
+                                    {RPCResult::Type::BOOL, "within_target_spacing", "Uncorrelated latest-component estimate is below target spacing"},
+                                    {RPCResult::Type::BOOL, "hardware_evidence_gates_passed", "Production goldens, startup canary, and GPU lifecycle ratification gates pass"},
+                                    {RPCResult::Type::BOOL, "operationally_ready", "Complete component estimate is below target spacing and hardware evidence gates pass; sustained correlated tail evidence is still separate"},
+                                    {RPCResult::Type::NUM, "target_spacing_s", "Configured target spacing"},
+                                    {RPCResult::Type::NUM, "candidate_s", "Candidate execution component"},
+                                    {RPCResult::Type::NUM, "winner_reseal_s", "Winner reseal component"},
+                                    {RPCResult::Type::NUM, "authenticated_relay_s", "Relay component"},
+                                    {RPCResult::Type::NUM, "tip_validation_s", "Receiving validation component"},
+                                    {RPCResult::Type::NUM, "queue_wait_s", "Combined queue waits"},
+                                    {RPCResult::Type::NUM, "complete_lifecycle_s", "Sum of the measured lifecycle components"},
+                                    {RPCResult::Type::STR, "reason", "Readiness or missing-evidence reason"},
+                                }},
                             }},
                             {RPCResult::Type::STR, "last_gpu_input_error", "Most recent GPU input-generation error"},
                         }},
@@ -5785,7 +5938,12 @@ static RPCHelpMan getmininginfo()
     }
     obj.pushKV("chain_guard", MiningChainGuardToJSON(chain_guard_status));
     obj.pushKV("fork_health", BuildForkHealthSummary(chainman));
-    obj.pushKV("backend_runtime", BuildBackendRuntimeProfile(/*include_rc_runtime=*/true));
+    obj.pushKV(
+        "backend_runtime",
+        BuildBackendRuntimeProfile(
+            /*include_rc_runtime=*/true,
+            static_cast<double>(
+                chainman.GetConsensus().nPowTargetSpacing)));
     int next_height_for_policy{0};
     if (!TryGetNextBlockHeight(&tip, next_height_for_policy)) {
         throw JSONRPCError(RPC_INTERNAL_ERROR, "next block height overflow");

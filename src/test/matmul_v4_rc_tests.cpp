@@ -1020,6 +1020,7 @@ BOOST_AUTO_TEST_CASE(rc_execution_policy_and_last_replay_telemetry)
 
 BOOST_AUTO_TEST_CASE(rc_device_mismatch_is_local_failure_in_strict_mode)
 {
+    rc::ResetRCExactReplayProviderHealthForTest();
     auto header{MakeRCHeader(0x4641554c54)};
     const auto params{rc::MakeToyRCEpisodeParams()};
     const uint256 honest_digest{
@@ -1047,33 +1048,68 @@ BOOST_AUTO_TEST_CASE(rc_device_mismatch_is_local_failure_in_strict_mode)
         rc::VerifyBoundedExactReplayWithAccelerationForTest(
             header, params, /*height=*/0, faulty_acceleration)};
 
-    for (const auto* failed : {&strict_a, &strict_b}) {
-        BOOST_CHECK(!failed->ok);
-        BOOST_CHECK(
-            failed->outcome ==
-            rc::ExactReplayVerifyOutcome::LocalAcceleratorFailure);
-        BOOST_CHECK(!failed->device_mismatch_retried);
-        BOOST_CHECK(!failed->device_mismatch_confirmed);
-        BOOST_CHECK(failed->digest != honest_digest);
-        BOOST_CHECK_GT(failed->device_gemm_calls, 0U);
-        BOOST_CHECK_EQUAL(failed->cpu_gemm_calls, 0U);
-        BOOST_CHECK(failed->fully_accelerated);
-        BOOST_CHECK(!failed->full_metal_pipeline);
-        BOOST_CHECK_EQUAL(
-            failed->acceleration_failure,
-            "device_digest_mismatch_unconfirmed");
-        BOOST_CHECK(
-            failed->note.find("portable retry disabled") !=
-            std::string::npos);
-    }
-    BOOST_CHECK(strict_a.digest == strict_b.digest);
-    BOOST_CHECK_EQUAL(strict_a.note, strict_b.note);
+    BOOST_CHECK(!strict_a.ok);
+    BOOST_CHECK(
+        strict_a.outcome ==
+        rc::ExactReplayVerifyOutcome::LocalAcceleratorFailure);
+    BOOST_CHECK(!strict_a.device_mismatch_retried);
+    BOOST_CHECK(!strict_a.device_mismatch_confirmed);
+    BOOST_CHECK(strict_a.digest != honest_digest);
+    BOOST_CHECK_GT(strict_a.device_gemm_calls, 0U);
+    BOOST_CHECK_EQUAL(strict_a.cpu_gemm_calls, 0U);
+    BOOST_CHECK(strict_a.fully_accelerated);
+    BOOST_CHECK(!strict_a.full_metal_pipeline);
     BOOST_CHECK_EQUAL(
-        strict_a.device_gemm_calls,
-        strict_b.device_gemm_calls);
+        strict_a.acceleration_failure,
+        "device_digest_mismatch_unconfirmed");
+    BOOST_CHECK(strict_a.provider_quarantined);
+    BOOST_CHECK(
+        strict_a.note.find("provider quarantined") !=
+        std::string::npos);
+
+    // Subsequent strict work on the same provider is refused locally before
+    // device submission. This is retryable and still cannot punish the peer.
+    BOOST_CHECK(!strict_b.ok);
+    BOOST_CHECK(
+        strict_b.outcome ==
+        rc::ExactReplayVerifyOutcome::LocalAcceleratorFailure);
+    BOOST_CHECK(strict_b.provider_quarantined);
     BOOST_CHECK_EQUAL(
-        strict_a.cpu_gemm_calls,
-        strict_b.cpu_gemm_calls);
+        strict_b.acceleration_failure,
+        "strict_device_provider_quarantined");
+    BOOST_CHECK_EQUAL(strict_b.device_gemm_calls, 0U);
+    BOOST_CHECK_EQUAL(strict_b.cpu_gemm_calls, 0U);
+    BOOST_CHECK(!strict_b.operator_recovery.empty());
+
+    const auto health{rc::GetRCExactReplayProviderHealth()};
+    BOOST_CHECK(health.quarantined);
+    BOOST_CHECK_EQUAL(health.provider, "test_faulty_exact_device");
+    BOOST_CHECK_EQUAL(health.quarantine_events, 1U);
+    BOOST_CHECK_EQUAL(
+        health.reason, "device_digest_mismatch_unconfirmed");
+
+    // Health is provider-scoped: an independently qualified alternate can
+    // retry the same pending block without clearing or reusing the failed
+    // provider. Production currently selects that alternate via an
+    // operator-controlled restart.
+    lt::ExactGemmBackend alternate_backend;
+    alternate_backend.gemm_s8s8 = &OracleGemmS8S8;
+    const rc::RCExactReplayAcceleration alternate_acceleration{
+        .gemm = alternate_backend,
+        .backend = "test_alternate_exact_device",
+        .require_device = true,
+        .output_row_tile = 16,
+    };
+    const auto alternate{
+        rc::VerifyBoundedExactReplayWithAccelerationForTest(
+            header, params, /*height=*/0,
+            alternate_acceleration)};
+    BOOST_CHECK(alternate.ok);
+    BOOST_CHECK(
+        alternate.outcome ==
+        rc::ExactReplayVerifyOutcome::Valid);
+    BOOST_CHECK(alternate.fully_accelerated);
+    BOOST_CHECK_EQUAL(alternate.cpu_gemm_calls, 0U);
 
     // The explicitly pre-activation/testing auto-fallback mode retains the
     // portable recovery path. It must recover the honest header but must not
@@ -1114,6 +1150,7 @@ BOOST_AUTO_TEST_CASE(rc_device_mismatch_is_local_failure_in_strict_mode)
     BOOST_CHECK_EQUAL(
         rejected.note,
         "ExactReplay: device mismatch confirmed by portable retry");
+    rc::ResetRCExactReplayProviderHealthForTest();
 }
 
 BOOST_AUTO_TEST_CASE(rc_f5_selfqual_cached_across_nonce_resolves)

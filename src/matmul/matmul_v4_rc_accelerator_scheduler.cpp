@@ -4,7 +4,13 @@
 
 #include <matmul/matmul_v4_rc_accelerator_scheduler.h>
 
+#include <consensus/params.h>
+#include <logging.h>
+#include <matmul/matmul_v4_rc_accel_policy.h>
+
 #include <algorithm>
+#include <cassert>
+#include <cmath>
 #include <utility>
 
 namespace matmul::v4::rc {
@@ -16,13 +22,20 @@ double Seconds(std::chrono::steady_clock::duration duration)
     return std::chrono::duration<double>(duration).count();
 }
 
+size_t LaneIndex(RCAcceleratorScheduler::Priority priority)
+{
+    return static_cast<size_t>(priority);
+}
+
 } // namespace
 
 RCAcceleratorScheduler::Lease::Lease(
     RCAcceleratorScheduler* owner, Priority priority,
-    double queue_wait_s, std::chrono::steady_clock::time_point started)
+    uint64_t token, double queue_wait_s,
+    std::chrono::steady_clock::time_point started)
     : m_owner{owner},
       m_priority{priority},
+      m_token{token},
       m_queue_wait_s{queue_wait_s},
       m_started{started}
 {
@@ -40,6 +53,7 @@ RCAcceleratorScheduler::Lease::operator=(Lease&& other) noexcept
     Release();
     m_owner = std::exchange(other.m_owner, nullptr);
     m_priority = other.m_priority;
+    m_token = other.m_token;
     m_queue_wait_s = other.m_queue_wait_s;
     m_started = other.m_started;
     return *this;
@@ -53,7 +67,7 @@ RCAcceleratorScheduler::Lease::~Lease()
 void RCAcceleratorScheduler::Lease::Release()
 {
     if (m_owner == nullptr) return;
-    m_owner->Release(m_priority, m_started);
+    m_owner->Release(m_priority, m_token, m_started);
     m_owner = nullptr;
 }
 
@@ -88,6 +102,7 @@ RCAcceleratorScheduler::Acquire(
     std::unique_lock<std::mutex> lock(m_mutex);
     waiter->sequence = m_next_sequence++;
     ++m_stats.requests;
+    ++m_stats.lanes[LaneIndex(priority)].requests;
     m_waiters.push_back(waiter);
     m_stats.queue_depth = m_waiters.size();
     m_stats.queue_high_water =
@@ -109,6 +124,7 @@ RCAcceleratorScheduler::Acquire(
              external_cancelled->load(std::memory_order_relaxed))) {
             std::erase(m_waiters, waiter);
             ++m_stats.cancelled_waits;
+            ++m_stats.lanes[LaneIndex(priority)].cancelled_waits;
             m_stats.queue_depth = m_waiters.size();
             lock.unlock();
             m_cv.notify_all();
@@ -120,10 +136,19 @@ RCAcceleratorScheduler::Acquire(
             const double wait_s{Seconds(started - queued)};
             m_active = true;
             m_active_priority = priority;
+            m_active_token = m_next_lease_token++;
+            if (m_active_token == 0) {
+                m_active_token = m_next_lease_token++;
+            }
             m_active_preempt_latch = preempt_latch;
             m_active_label = waiter->label;
             m_active_started = started;
             ++m_stats.acquisitions;
+            auto& lane{m_stats.lanes[LaneIndex(priority)]};
+            ++lane.acquisitions;
+            lane.last_queue_wait_s = wait_s;
+            lane.max_queue_wait_s =
+                std::max(lane.max_queue_wait_s, wait_s);
             m_stats.queue_depth = m_waiters.size();
             m_stats.active = true;
             m_stats.active_priority = priority;
@@ -131,7 +156,8 @@ RCAcceleratorScheduler::Acquire(
             m_stats.last_queue_wait_s = wait_s;
             m_stats.max_queue_wait_s =
                 std::max(m_stats.max_queue_wait_s, wait_s);
-            return Lease{this, priority, wait_s, started};
+            return Lease{
+                this, priority, m_active_token, wait_s, started};
         }
         // Cancellation flags are intentionally owned by callers, so poll at a
         // short interval in addition to explicit NotifyCancellation().
@@ -139,24 +165,57 @@ RCAcceleratorScheduler::Acquire(
     }
 }
 
-void RCAcceleratorScheduler::Release(
-    Priority priority, std::chrono::steady_clock::time_point started)
+bool RCAcceleratorScheduler::Release(
+    Priority priority, uint64_t token,
+    std::chrono::steady_clock::time_point started,
+    bool assert_on_mismatch)
 {
     const auto finished{std::chrono::steady_clock::now()};
-    std::lock_guard<std::mutex> lock(m_mutex);
-    if (!m_active || priority != m_active_priority) return;
+    std::unique_lock<std::mutex> lock(m_mutex);
+    if (!m_active || priority != m_active_priority ||
+        token == 0 || token != m_active_token ||
+        started != m_active_started) {
+        ++m_stats.release_invariant_violations;
+        const bool active{m_active};
+        const Priority active_priority{m_active_priority};
+        const uint64_t active_token{m_active_token};
+        // Never enter the logging subsystem while owning the scheduler mutex:
+        // shutdown/error logging can take unrelated locks and an invariant
+        // path must not turn a diagnosable bad release into a process wedge.
+        lock.unlock();
+        LogPrintf(
+            "MATMUL RC SCHEDULER INVARIANT: invalid lease release "
+            "(active=%d active_priority=%s release_priority=%s "
+            "active_token=%llu release_token=%llu)\n",
+            active, ToString(active_priority), ToString(priority),
+            static_cast<unsigned long long>(active_token),
+            static_cast<unsigned long long>(token));
+        if (assert_on_mismatch) {
+            assert(false &&
+                   "RC accelerator scheduler lease identity mismatch");
+        }
+        return false;
+    }
     const double execution_s{Seconds(finished - started)};
     ++m_stats.completions;
+    auto& lane{m_stats.lanes[LaneIndex(priority)]};
+    ++lane.completions;
+    lane.last_execution_s = execution_s;
+    lane.max_execution_s =
+        std::max(lane.max_execution_s, execution_s);
     m_stats.last_execution_s = execution_s;
     m_stats.max_execution_s =
         std::max(m_stats.max_execution_s, execution_s);
     m_active = false;
+    m_active_token = 0;
     m_active_preempt_latch = nullptr;
     m_active_label.clear();
     m_stats.active = false;
     m_stats.active_label.clear();
     m_stats.active_wall_s = 0;
+    lock.unlock();
     m_cv.notify_all();
+    return true;
 }
 
 void RCAcceleratorScheduler::NotifyCancellation()
@@ -180,12 +239,93 @@ RCAcceleratorScheduler::GetStats() const
     return out;
 }
 
+RCAcceleratorScheduler::LifecycleAssessment
+RCAcceleratorScheduler::AssessLifecycle(double target_spacing_s) const
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    LifecycleAssessment out;
+    out.target_spacing_s = target_spacing_s;
+    const auto& candidate{
+        m_stats.lanes[LaneIndex(Priority::CandidateMining)]};
+    const auto& reseal{
+        m_stats.lanes[LaneIndex(Priority::WinnerReseal)]};
+    const auto& tip{
+        m_stats.lanes[LaneIndex(Priority::TipValidation)]};
+    out.candidate_measured = candidate.completions != 0;
+    out.winner_reseal_measured = reseal.completions != 0;
+    out.authenticated_relay_measured =
+        m_stats.authenticated_relay_samples != 0;
+    out.tip_validation_measured = tip.completions != 0;
+    out.candidate_s = candidate.last_execution_s;
+    out.winner_reseal_s = reseal.last_execution_s;
+    out.authenticated_relay_s =
+        m_stats.last_authenticated_relay_s;
+    out.tip_validation_s = tip.last_execution_s;
+    out.queue_wait_s = candidate.last_queue_wait_s +
+        reseal.last_queue_wait_s + tip.last_queue_wait_s;
+    out.complete_lifecycle_s = out.candidate_s +
+        out.winner_reseal_s + out.authenticated_relay_s +
+        out.tip_validation_s + out.queue_wait_s;
+    out.complete_sample_set = out.candidate_measured &&
+        out.winner_reseal_measured &&
+        out.authenticated_relay_measured &&
+        out.tip_validation_measured;
+    out.within_target_spacing = out.complete_sample_set &&
+        std::isfinite(target_spacing_s) && target_spacing_s > 0 &&
+        out.complete_lifecycle_s < target_spacing_s;
+    out.hardware_evidence_gates_passed =
+        kRCProfile1ProductionGoldensAvailable &&
+        kRCProfile1StartupCanaryPassed &&
+        Consensus::BTX_MATMUL_V47_GPU_LIFECYCLE_GATE_RATIFIED;
+    out.operationally_ready = out.complete_sample_set &&
+        out.within_target_spacing &&
+        out.hardware_evidence_gates_passed;
+    if (!out.complete_sample_set) {
+        out.reason =
+            "missing candidate/reseal/relay/tip-validation lifecycle samples";
+    } else if (!out.within_target_spacing) {
+        out.reason =
+            "complete lifecycle is not below target spacing";
+    } else if (!out.hardware_evidence_gates_passed) {
+        out.reason =
+            "latest-component estimate is below target spacing but production goldens/startup canary remain unratified";
+    } else {
+        out.reason =
+            "latest-component estimate and hardware gates pass; sustained correlated tail-latency evidence still required";
+    }
+    return out;
+}
+
+void RCAcceleratorScheduler::RecordAuthenticatedRelaySample(double relay_s)
+{
+    if (!std::isfinite(relay_s) || relay_s < 0) return;
+    std::lock_guard<std::mutex> lock(m_mutex);
+    ++m_stats.authenticated_relay_samples;
+    m_stats.last_authenticated_relay_s = relay_s;
+    m_stats.max_authenticated_relay_s =
+        std::max(m_stats.max_authenticated_relay_s, relay_s);
+}
+
+bool RCAcceleratorScheduler::TryMismatchedReleaseForTest(
+    Priority priority, uint64_t token)
+{
+    std::chrono::steady_clock::time_point started;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (!m_active) return false;
+        started = m_active_started;
+    }
+    return Release(
+        priority, token, started, /*assert_on_mismatch=*/false);
+}
+
 bool RCAcceleratorScheduler::ResetStatsForTest()
 {
     std::lock_guard<std::mutex> lock(m_mutex);
     if (m_active || !m_waiters.empty()) return false;
     m_stats = {};
     m_next_sequence = 0;
+    m_next_lease_token = 1;
     return true;
 }
 
