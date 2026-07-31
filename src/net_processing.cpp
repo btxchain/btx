@@ -792,11 +792,13 @@ private:
      *  address discouraged. */
     void Misbehaving(Peer& peer, const std::string& message);
 
-    /** Expire stale reconnect-resistant MatMul budget entries. */
-    void MaybeExpireMatMulAddrBudgets(std::chrono::steady_clock::time_point now)
+    /** Expire stale reconnect-resistant MatMul source budget entries. */
+    void MaybeExpireMatMulSourceBudgets(std::chrono::steady_clock::time_point now)
         EXCLUSIVE_LOCKS_REQUIRED(m_matmul_addr_budget_mutex);
 
-    /** Consume per-address MatMul verification budget for an incoming peer.
+    /** Consume reconnect-resistant MatMul verification budget for an incoming
+     *  peer. RC replay charges both address and keyed netgroup; legacy
+     *  verification remains address-scoped.
      *
      * @param[out] global_exhausted  DoS-F2: set true iff the rejection was caused
      *   by the process-wide GLOBAL Phase-2 budget (a shared limit), rather than
@@ -807,6 +809,7 @@ private:
      */
     bool ConsumeMatMulVerificationBudgetForPeer(
         const Peer& peer,
+        uint64_t keyed_netgroup,
         const Consensus::Params& params,
         uint32_t verification_count,
         std::chrono::steady_clock::time_point now,
@@ -818,8 +821,8 @@ private:
      *  expensive work could start. Never used for cancellation/completion. */
     void RefundMatMulRCVerificationBudgetForPeer(
         const CNetAddr& address,
-        uint32_t verification_count,
-        std::chrono::steady_clock::time_point charged_at);
+        uint64_t keyed_netgroup,
+        MatMulRCVerificationBudgetDebit& debit);
 
     /** Register a MatMul phase2 failure against a reconnect-resistant address budget. */
     MatMulPhase2Punishment RegisterMatMulPhase2FailureForPeer(
@@ -1149,6 +1152,8 @@ private:
     };
     mutable Mutex m_matmul_addr_budget_mutex;
     std::map<CNetAddr, MatMulAddrBudgetState> m_matmul_addr_budgets GUARDED_BY(m_matmul_addr_budget_mutex);
+    std::map<uint64_t, MatMulAddrBudgetState> m_matmul_netgroup_budgets
+        GUARDED_BY(m_matmul_addr_budget_mutex);
     /** v4.4 ENC-DR node-wide getmmsketch egress budget (tension-resolution §4.3):
      *  a byte token bucket refilled at MATMUL_SKETCH_SERVE_GLOBAL_BYTES_PER_SEC,
      *  debited ALL-OR-NOTHING per served sketch (and allowed to go negative), so N
@@ -2830,7 +2835,7 @@ static bool ReserveMatMulRCVerificationSlot(std::atomic<uint32_t>& pending_verif
     }
 }
 
-void PeerManagerImpl::MaybeExpireMatMulAddrBudgets(std::chrono::steady_clock::time_point now)
+void PeerManagerImpl::MaybeExpireMatMulSourceBudgets(std::chrono::steady_clock::time_point now)
 {
     for (auto it = m_matmul_addr_budgets.begin(); it != m_matmul_addr_budgets.end();) {
         if (now - it->second.last_update >= MATMUL_ADDR_BUDGET_RETENTION) {
@@ -2839,10 +2844,19 @@ void PeerManagerImpl::MaybeExpireMatMulAddrBudgets(std::chrono::steady_clock::ti
         }
         ++it;
     }
+    for (auto it = m_matmul_netgroup_budgets.begin();
+         it != m_matmul_netgroup_budgets.end();) {
+        if (now - it->second.last_update >= MATMUL_ADDR_BUDGET_RETENTION) {
+            it = m_matmul_netgroup_budgets.erase(it);
+            continue;
+        }
+        ++it;
+    }
 }
 
 bool PeerManagerImpl::ConsumeMatMulVerificationBudgetForPeer(
     const Peer& peer,
+    uint64_t keyed_netgroup,
     const Consensus::Params& params,
     uint32_t verification_count,
     std::chrono::steady_clock::time_point now,
@@ -2855,26 +2869,25 @@ bool PeerManagerImpl::ConsumeMatMulVerificationBudgetForPeer(
     if (verification_count == 0) return true;
     {
         UniqueLock lock(m_matmul_addr_budget_mutex, "m_matmul_addr_budget_mutex", __FILE__, __LINE__);
-        MaybeExpireMatMulAddrBudgets(now);
+        MaybeExpireMatMulSourceBudgets(now);
         auto& budget_state = m_matmul_addr_budgets[peer.m_addr];
         budget_state.last_update = now;
         if (rc_recompute) {
-            const auto saved_rc_window = budget_state.budget.rc_window_start;
-            const uint32_t saved_rc_count =
-                budget_state.budget.expensive_rc_verifications_this_minute;
-            for (uint32_t i = 0; i < verification_count; ++i) {
-                if (!ConsumeMatMulRCPeerVerifyBudget(budget_state.budget, params, now, is_ibd,
-                                                     reference_height)) {
-                    budget_state.budget.rc_window_start = saved_rc_window;
-                    budget_state.budget.expensive_rc_verifications_this_minute = saved_rc_count;
-                    return false;
-                }
+            auto& netgroup_state{
+                m_matmul_netgroup_budgets[keyed_netgroup]};
+            netgroup_state.last_update = now;
+            if (!ConsumeMatMulRCSourceVerifyBudgets(
+                    budget_state.budget, netgroup_state.budget, params,
+                    verification_count, now, is_ibd, reference_height)) {
+                return false;
             }
             const uint32_t global_budget =
                 EffectiveMatMulRCGlobalVerifyBudgetPerMin(params, reference_height);
             if (!ConsumeGlobalMatMulRCBudget(global_budget, verification_count, now)) {
-                budget_state.budget.rc_window_start = saved_rc_window;
-                budget_state.budget.expensive_rc_verifications_this_minute = saved_rc_count;
+                RefundMatMulRCPeerVerifyBudget(
+                    budget_state.budget, verification_count, now);
+                RefundMatMulRCPeerVerifyBudget(
+                    netgroup_state.budget, verification_count, now);
                 global_exhausted = true;
                 LogDebug(BCLog::NET, "Global RC verify budget exhausted (%u/min), deferring peer %s\n",
                          global_budget, peer.m_addr.ToStringAddr());
@@ -2916,29 +2929,30 @@ bool PeerManagerImpl::ConsumeMatMulVerificationBudgetForPeer(
 
 void PeerManagerImpl::RefundMatMulRCVerificationBudgetForPeer(
     const CNetAddr& address,
-    uint32_t verification_count,
-    std::chrono::steady_clock::time_point charged_at)
+    uint64_t keyed_netgroup,
+    MatMulRCVerificationBudgetDebit& debit)
 {
-    if (verification_count == 0) return;
+    const auto refund{TakeMatMulRCVerificationBudgetRefund(debit)};
+    if (!refund) return;
     {
         UniqueLock lock(
             m_matmul_addr_budget_mutex, "m_matmul_addr_budget_mutex",
             __FILE__, __LINE__);
-        const auto it{m_matmul_addr_budgets.find(address)};
-        if (it != m_matmul_addr_budgets.end() &&
-            it->second.budget.rc_window_start !=
-                std::chrono::steady_clock::time_point{} &&
-            charged_at >= it->second.budget.rc_window_start &&
-            charged_at - it->second.budget.rc_window_start <
-                std::chrono::minutes{1}) {
-            auto& count{
-                it->second.budget.expensive_rc_verifications_this_minute};
-            if (verification_count <= count) {
-                count -= verification_count;
-            }
+        if (const auto it{m_matmul_addr_budgets.find(address)};
+            it != m_matmul_addr_budgets.end()) {
+            RefundMatMulRCPeerVerifyBudget(
+                it->second.budget, refund->verification_count,
+                refund->charged_at);
+        }
+        if (const auto it{m_matmul_netgroup_budgets.find(keyed_netgroup)};
+            it != m_matmul_netgroup_budgets.end()) {
+            RefundMatMulRCPeerVerifyBudget(
+                it->second.budget, refund->verification_count,
+                refund->charged_at);
         }
     }
-    RefundGlobalMatMulRCBudget(verification_count, charged_at);
+    RefundGlobalMatMulRCBudget(
+        refund->verification_count, refund->charged_at);
 }
 
 MatMulPhase2Punishment PeerManagerImpl::RegisterMatMulPhase2FailureForPeer(
@@ -2948,7 +2962,7 @@ MatMulPhase2Punishment PeerManagerImpl::RegisterMatMulPhase2FailureForPeer(
     uint32_t* failures_out)
 {
     UniqueLock lock(m_matmul_addr_budget_mutex, "m_matmul_addr_budget_mutex", __FILE__, __LINE__);
-    MaybeExpireMatMulAddrBudgets(now);
+    MaybeExpireMatMulSourceBudgets(now);
     auto& budget_state = m_matmul_addr_budgets[peer.m_addr];
     budget_state.last_update = now;
     return RegisterMatMulPhase2Failure(budget_state.budget, params, now, failures_out);
@@ -4683,12 +4697,13 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
             m_matmul_rc_pending_verifications, work)};
 
     const auto charged_at{std::chrono::steady_clock::now()};
-    bool budget_charged{false};
+    MatMulRCVerificationBudgetDebit budget_debit;
     CNetAddr charged_address;
+    uint64_t charged_netgroup{0};
     if (!node.HasPermission(NetPermissionFlags::NoBan)) {
         bool global_exhausted{false};
         if (!ConsumeMatMulVerificationBudgetForPeer(
-                peer, params, work, charged_at,
+                peer, node.nKeyedNetGroup, params, work, charged_at,
                 /*is_ibd=*/false, index.nHeight, global_exhausted,
                 /*rc_recompute=*/true)) {
             m_matmul_rc_speculative_pending.fetch_sub(
@@ -4703,8 +4718,13 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
                 header.GetHash().ToString(), node.GetId());
             return;
         }
-        budget_charged = true;
+        budget_debit = {
+            .verification_count = work,
+            .charged_at = charged_at,
+            .refundable = true,
+        };
         charged_address = peer.m_addr;
+        charged_netgroup = node.nKeyedNetGroup;
     }
 
     std::optional<node::RCAdmissionTicket> accepted_ticket;
@@ -4720,10 +4740,8 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
             // No replay work started. Preserve exact admission atomicity by
             // rolling back the just-consumed rate debit; the pending guard
             // releases its reservation as this scope exits.
-            if (budget_charged) {
-                RefundMatMulRCVerificationBudgetForPeer(
-                    charged_address, work, charged_at);
-            }
+            RefundMatMulRCVerificationBudgetForPeer(
+                charged_address, charged_netgroup, budget_debit);
             m_matmul_rc_speculative_pending.fetch_sub(
                 1, std::memory_order_relaxed);
             LogDebug(BCLog::NET,
@@ -4786,10 +4804,8 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
                 restored ==
                     node::RCAdmissionStore::RememberResult::Duplicate);
         }
-        if (budget_charged) {
-            RefundMatMulRCVerificationBudgetForPeer(
-                charged_address, work, charged_at);
-        }
+        RefundMatMulRCVerificationBudgetForPeer(
+            charged_address, charged_netgroup, budget_debit);
         return;
     }
 
@@ -5100,6 +5116,7 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
             bool global_exhausted{false};
             if (!pfrom.HasPermission(NetPermissionFlags::NoBan) && !ConsumeMatMulVerificationBudgetForPeer(
                     peer,
+                    pfrom.nKeyedNetGroup,
                     consensus_params,
                     phase2_checks,
                     std::chrono::steady_clock::now(),
@@ -5500,6 +5517,9 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                                    MatMulBlockAdmission matmul_admission)
 {
     const uint256 hash{block->GetHash()};
+    MatMulRCVerificationBudgetDebit body_budget_debit;
+    CNetAddr body_charged_address;
+    uint64_t body_charged_netgroup{0};
     const auto release_admission_marker = [&] {
         if (matmul_admission.owns_async_marker) {
             UnmarkMatMulAsyncVerification(hash);
@@ -5532,11 +5552,22 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
         PeerRef peer{GetPeerRef(node.GetId())};
         if (!peer || node.HasPermission(NetPermissionFlags::NoBan)) return true;
         bool global_exhausted{false};
+        const auto charged_at{std::chrono::steady_clock::now()};
         if (ConsumeMatMulVerificationBudgetForPeer(
-                *peer, m_chainparams.GetConsensus(), matmul_admission.work_units,
-                std::chrono::steady_clock::now(), matmul_admission.is_ibd,
+                *peer, node.nKeyedNetGroup,
+                m_chainparams.GetConsensus(), matmul_admission.work_units,
+                charged_at, matmul_admission.is_ibd,
                 matmul_admission.reference_height, global_exhausted,
                 matmul_admission.rc_profile)) {
+            if (matmul_admission.rc_profile) {
+                body_budget_debit = {
+                    .verification_count = matmul_admission.work_units,
+                    .charged_at = charged_at,
+                    .refundable = true,
+                };
+                body_charged_address = peer->m_addr;
+                body_charged_netgroup = node.nKeyedNetGroup;
+            }
             return true;
         }
         if (global_exhausted) {
@@ -5752,6 +5783,9 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                 // cancelled same-hash header job is not a shutdown signal and
                 // must never trigger Q*-scale synchronous replay on the P2P
                 // message thread. The body remains re-requestable.
+                RefundMatMulRCVerificationBudgetForPeer(
+                    body_charged_address, body_charged_netgroup,
+                    body_budget_debit);
                 UnmarkMatMulAsyncVerification(hash);
                 if (post_process) post_process();
                 return;

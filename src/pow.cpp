@@ -5039,6 +5039,72 @@ bool ConsumeMatMulRCPeerVerifyBudget(MatMulPeerVerificationBudget& budget,
     return true;
 }
 
+bool ConsumeMatMulRCSourceVerifyBudgets(
+    MatMulPeerVerificationBudget& address_budget,
+    MatMulPeerVerificationBudget& keyed_netgroup_budget,
+    const Consensus::Params& params,
+    uint32_t verification_count,
+    std::chrono::steady_clock::time_point now,
+    bool is_ibd,
+    int32_t reference_height)
+{
+    const auto saved_address_window{address_budget.rc_window_start};
+    const uint32_t saved_address_count{
+        address_budget.expensive_rc_verifications_this_minute};
+    const auto saved_netgroup_window{keyed_netgroup_budget.rc_window_start};
+    const uint32_t saved_netgroup_count{
+        keyed_netgroup_budget.expensive_rc_verifications_this_minute};
+
+    const auto restore = [&] {
+        address_budget.rc_window_start = saved_address_window;
+        address_budget.expensive_rc_verifications_this_minute =
+            saved_address_count;
+        keyed_netgroup_budget.rc_window_start = saved_netgroup_window;
+        keyed_netgroup_budget.expensive_rc_verifications_this_minute =
+            saved_netgroup_count;
+    };
+    for (uint32_t i = 0; i < verification_count; ++i) {
+        if (!ConsumeMatMulRCPeerVerifyBudget(
+                address_budget, params, now, is_ibd, reference_height) ||
+            !ConsumeMatMulRCPeerVerifyBudget(
+                keyed_netgroup_budget, params, now, is_ibd,
+                reference_height)) {
+            restore();
+            return false;
+        }
+    }
+    return true;
+}
+
+void RefundMatMulRCPeerVerifyBudget(
+    MatMulPeerVerificationBudget& budget,
+    uint32_t verification_count,
+    std::chrono::steady_clock::time_point charged_at)
+{
+    if (verification_count == 0 ||
+        budget.rc_window_start ==
+            std::chrono::steady_clock::time_point{} ||
+        charged_at < budget.rc_window_start ||
+        charged_at - budget.rc_window_start >= std::chrono::minutes{1}) {
+        return;
+    }
+    if (verification_count <=
+        budget.expensive_rc_verifications_this_minute) {
+        budget.expensive_rc_verifications_this_minute -= verification_count;
+    }
+}
+
+std::optional<MatMulRCVerificationBudgetDebit>
+TakeMatMulRCVerificationBudgetRefund(MatMulRCVerificationBudgetDebit& debit)
+{
+    if (!debit.refundable || debit.verification_count == 0) {
+        return std::nullopt;
+    }
+    MatMulRCVerificationBudgetDebit refund{debit};
+    debit.refundable = false;
+    return refund;
+}
+
 bool ConsumeGlobalMatMulRCBudget(uint32_t max_global_per_minute, uint32_t count,
                                  std::chrono::steady_clock::time_point now)
 {

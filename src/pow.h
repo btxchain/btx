@@ -46,6 +46,16 @@ struct MatMulPeerVerificationBudget {
     std::chrono::steady_clock::time_point phase2_first_failure_time{};
 };
 
+/** Receipt for an RC verification rate debit that may be rolled back only
+ *  before expensive work starts. TakeMatMulRCVerificationBudgetRefund consumes
+ *  the receipt so address, keyed-netgroup, and global counters are refunded
+ *  together at most once. */
+struct MatMulRCVerificationBudgetDebit {
+    uint32_t verification_count{0};
+    std::chrono::steady_clock::time_point charged_at{};
+    bool refundable{false};
+};
+
 enum class MatMulPhase2Punishment {
     DISCONNECT,
     DISCOURAGE,
@@ -555,6 +565,26 @@ bool ConsumeMatMulRCPeerVerifyBudget(
     std::chrono::steady_clock::time_point now,
     bool is_ibd = false,
     int32_t reference_height = std::numeric_limits<int32_t>::max());
+/** Atomically debit both reconnect-resistant RC source dimensions. A failure
+ *  restores both budgets to their exact pre-attempt windows and counts. */
+bool ConsumeMatMulRCSourceVerifyBudgets(
+    MatMulPeerVerificationBudget& address_budget,
+    MatMulPeerVerificationBudget& keyed_netgroup_budget,
+    const Consensus::Params& params,
+    uint32_t verification_count,
+    std::chrono::steady_clock::time_point now,
+    bool is_ibd = false,
+    int32_t reference_height = std::numeric_limits<int32_t>::max());
+/** Refund one source counter only when charged_at still belongs to its current
+ *  window. Used solely for admission/enqueue rollback before work starts. */
+void RefundMatMulRCPeerVerifyBudget(
+    MatMulPeerVerificationBudget& budget,
+    uint32_t verification_count,
+    std::chrono::steady_clock::time_point charged_at);
+/** Consume an RC refund receipt. A second call returns nullopt, preventing an
+ *  admission failure from decrementing any rate counter more than once. */
+std::optional<MatMulRCVerificationBudgetDebit>
+TakeMatMulRCVerificationBudgetRefund(MatMulRCVerificationBudgetDebit& debit);
 bool CanStartMatMulVerification(uint32_t pending_verifications, const Consensus::Params& params,
                                 int32_t reference_height = -1);
 bool CanStartMatMulVerification(uint32_t pending_verifications, uint32_t work_units,
