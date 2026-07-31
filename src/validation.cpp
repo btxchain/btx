@@ -31,6 +31,7 @@
 #include <logging.h>
 #include <logging/timer.h>
 #include <node/blockstorage.h>
+#include <node/matmul_trusted_attestations.h>
 #include <node/utxo_snapshot.h>
 #include <policy/coin_age_priority.h>
 #include <policy/ephemeral_policy.h>
@@ -10244,6 +10245,26 @@ bool ChainstateManager::PersistMatMulExactReplayVerdict(
     index->nStatus |= BLOCK_EXACT_REPLAY_VERIFIED;
     m_blockman.m_dirty_blockindex.insert(index);
     CacheMatMulEncDrVerdict(block_hash, true);
+    if (GetMatMulValidationMode() ==
+            kernel::MatMulValidationMode::CONSENSUS &&
+        GetConsensus().IsMatMulRCActive(index->nHeight) &&
+        !GetConsensus().IsMatMulRCCoupledActive(
+            index->nHeight) &&
+        node::matmul_trusted::HasLocalSigner()) {
+        const auto result{
+            node::matmul_trusted::SignAuthoritative(
+                block_hash, index->nHeight)};
+        if (result !=
+                matmul::trusted::AddResult::Accepted &&
+            result !=
+                matmul::trusted::AddResult::Duplicate) {
+            LogWarning(
+                "Unable to create local ExactReplay attestation "
+                "block=%s height=%d result=%s\n",
+                block_hash.ToString(), index->nHeight,
+                matmul::trusted::AddResultName(result));
+        }
+    }
     return true;
 }
 
@@ -10590,6 +10611,35 @@ static bool ContextualCheckBlock(const CBlock& block,
                 bool rc_local_execution_failure{false};
                 std::string rc_execution_detail;
                 const auto check_rc = [&]() {
+                    if (chainman.GetMatMulValidationMode() ==
+                        kernel::MatMulValidationMode::TRUSTED) {
+                        matmul::trusted::WaitResult wait{
+                            matmul::trusted::WaitResult::Timeout};
+                        if (may_release_cs_main) {
+                            wait =
+                                node::matmul_trusted::WaitForQuorum(
+                                    block.GetHash(), nHeight,
+                                    [] { return false; });
+                        } else if (
+                            node::matmul_trusted::HasQuorum(
+                                block.GetHash(), nHeight)) {
+                            wait =
+                                matmul::trusted::WaitResult::Quorum;
+                        }
+                        rc_local_execution_failure =
+                            wait !=
+                            matmul::trusted::WaitResult::Quorum;
+                        if (!rc_local_execution_failure) {
+                            CacheMatMulEncDrVerdict(
+                                block.GetHash(), true);
+                        } else {
+                            rc_execution_detail = strprintf(
+                                "trusted attestation quorum %s",
+                                matmul::trusted::WaitResultName(
+                                    wait));
+                        }
+                        return !rc_local_execution_failure;
+                    }
                     const auto outcome{
                         CheckMatMulProofOfWork_RCOutcome(
                             block, consensusParams, nHeight,
@@ -10718,7 +10768,10 @@ static bool ContextualCheckBlock(const CBlock& block,
                 nHeight,
                 best_known_height,
                 consensusParams,
-                chainman.GetMatMulValidationMode() == kernel::MatMulValidationMode::CONSENSUS,
+                chainman.GetMatMulValidationMode() ==
+                        kernel::MatMulValidationMode::CONSENSUS ||
+                    chainman.GetMatMulValidationMode() ==
+                        kernel::MatMulValidationMode::TRUSTED,
                 is_ibd);
         const bool should_run_matmul_validation =
             should_run_phase2 || consensusParams.IsMatMulProductDigestActive(nHeight);
@@ -11024,6 +11077,24 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
         }
         LogError("%s: %s\n", __func__, state.ToString());
         return false;
+    }
+
+    if (params.GetConsensus().IsMatMulRCActive(pindex->nHeight) &&
+        !params.GetConsensus().IsMatMulRCCoupledActive(
+            pindex->nHeight)) {
+        // ContextualCheckBlock just consumed either this process's exact
+        // authority or a current-config signed quorum. Keep those statuses
+        // distinct. The trusted bit is audit-only and never recreates a memo.
+        if (GetMatMulValidationMode() ==
+            kernel::MatMulValidationMode::CONSENSUS) {
+            (void)PersistMatMulExactReplayVerdict(
+                pindex->GetBlockHash());
+        } else if (
+            GetMatMulValidationMode() ==
+            kernel::MatMulValidationMode::TRUSTED) {
+            (void)PersistMatMulTrustedReplayAttestation(
+                pindex->GetBlockHash());
+        }
     }
 
     // G.1 duplicate-processing guard: ContextualCheckBlock may have RELEASED

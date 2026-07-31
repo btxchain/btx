@@ -1482,6 +1482,16 @@ bool AppInitParameterInteraction(const ArgsManager& args)
         } else {
             return InitError(strprintf(_("Invalid -matmulvalidation value (%s). Valid values: consensus, trusted, economic, spv"), matmul_validation_mode));
         }
+        if (serve_attestations &&
+            node::matmul_trusted::HasLocalSigner() &&
+            matmul_validation_mode == "consensus" &&
+            rc_strict_device_ready) {
+            services |= static_cast<uint64_t>(
+                NODE_MATMUL_ATTESTATION_ARCHIVE);
+        } else {
+            services &= ~static_cast<uint64_t>(
+                NODE_MATMUL_ATTESTATION_ARCHIVE);
+        }
         g_local_services = static_cast<ServiceFlags>(services);
     }
 
