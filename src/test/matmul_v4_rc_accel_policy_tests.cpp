@@ -7,6 +7,7 @@
 #include <matmul/matmul_v4_rc_coupled.h>
 #include <matmul/matmul_v4_rc_datacenter.h>
 #include <matmul/matmul_v4_rc_mx_ozaki.h>
+#include <matmul/matmul_v4_rc_production_canary.h>
 
 #include <test/util/setup_common.h>
 
@@ -147,7 +148,10 @@ BOOST_AUTO_TEST_CASE(rc_production_preferred_default_admits_device_like_portable
     BOOST_CHECK_EQUAL(def.backend.gemm_s8s8 == nullptr,
                       portable.backend.gemm_s8s8 == nullptr);
     BOOST_CHECK_EQUAL(def.provider, portable.provider);
-    BOOST_CHECK_EQUAL(def.production_eligible, def.self_qualified);
+    BOOST_CHECK_EQUAL(def.automatic_policy_eligible, def.self_qualified);
+    BOOST_CHECK(!portable.automatic_policy_eligible);
+    BOOST_CHECK(!def.production_eligible);
+    BOOST_CHECK(!portable.production_eligible);
     if (prev != nullptr) {
         setenv("BTX_RC_ACCEL_POLICY", prev, /*overwrite=*/1);
     } else {
@@ -272,8 +276,11 @@ BOOST_AUTO_TEST_CASE(rc_profile1_activation_readiness_fails_closed_without_golde
     // Small/medium exactness and automatic provider eligibility are not
     // sufficient activation evidence. PR #97 intentionally does not invent a
     // production CPU-oracle digest or claim a startup canary that was not run.
-    BOOST_CHECK(!rc::kRCProfile1ProductionGoldensAvailable);
-    BOOST_CHECK(!rc::kRCProfile1StartupCanaryPassed);
+    BOOST_CHECK(rc::CommittedRCProductionGoldenManifest().empty());
+    const auto canary{rc::GetLastRCProductionCanaryStatus()};
+    BOOST_CHECK(!canary.manifest_has_reviewed_goldens);
+    BOOST_CHECK(!canary.passed);
+    BOOST_CHECK(!canary.activation_ready);
 
     matmul_v4::accel::ResetRCExactGemmResolveCacheForTest();
     const auto unresolved{

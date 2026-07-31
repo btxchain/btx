@@ -27,8 +27,8 @@ nproc_detect() {
 
 have_core_binaries() {
   local build_dir="$1"
-  [[ -x "${build_dir}/bin/btxd" && -x "${build_dir}/bin/btx-cli" ]] || \
-  [[ -x "${build_dir}/bin/btxd" && -x "${build_dir}/bin/btx-cli" ]]
+  [[ -x "${build_dir}/bin/btxd" && -x "${build_dir}/bin//path/to/btx-cli" ]] || \
+  [[ -x "${build_dir}/bin/btxd" && -x "${build_dir}/bin//path/to/btx-cli" ]]
 }
 
 tmp_root_dir() {
@@ -344,6 +344,8 @@ run_launch_blockers() {
 }
 
 run_production_readiness() {
+  python3 contrib/matmul-v4/check-public-evidence.py
+  python3 test/util/matmul_v4_public_evidence_test.py
   if ! have_core_binaries "build-btx" || [[ ! -x "build-btx/bin/bench_btx" ]]; then
     scripts/build_btx.sh "build-btx" -DWERROR=ON -DWITH_ZMQ=ON -DBUILD_BENCH=ON
   fi
@@ -354,7 +356,7 @@ run_production_readiness() {
 
 run_bridge_viewgrants() {
   ensure_core_build "build-btx"
-  cmake --build build-btx --target btxd btx-cli test_btx -j"$(nproc_detect)"
+  cmake --build build-btx --target btxd /path/to/btx-cli test_btx -j"$(nproc_detect)"
   ulimit -n 10240 >/dev/null 2>&1 || true
   build-btx/bin/test_btx --run_test=bridge_wallet_tests
   test/functional/test_runner.py --configfile=build-btx/test/config.ini wallet_bridge_planin.py --descriptors

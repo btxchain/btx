@@ -34,6 +34,7 @@
 #include <matmul/matmul_v4_rc_accelerator_scheduler.h>
 #include <matmul/matmul_v4_bmx4.h>
 #include <matmul/matmul_v4_rc_gkr.h>
+#include <matmul/matmul_v4_rc_production_canary.h>
 #include <matmul/pow_v4.h>
 #include <net.h>
 #include <net_processing.h>
@@ -1510,7 +1511,9 @@ static UniValue BuildBackendRuntimeProfile(
             "self_qualified", rc_resolution.self_qualified);
         rc_exact_replay.pushKV(
             "automatic_policy_eligible",
-            rc_resolution.production_eligible);
+            rc_resolution.automatic_policy_eligible);
+        rc_exact_replay.pushKV(
+            "production_eligible", rc_resolution.production_eligible);
         rc_exact_replay.pushKV(
             "production_goldens_available",
             rc_resolution.production_goldens_available);
@@ -1519,6 +1522,58 @@ static UniValue BuildBackendRuntimeProfile(
             rc_resolution.startup_canary_passed);
         rc_exact_replay.pushKV(
             "activation_ready", rc_resolution.activation_ready);
+        const auto production_canary{
+            matmul::v4::rc::GetLastRCProductionCanaryStatus()};
+        UniValue canary(UniValue::VOBJ);
+        canary.pushKV(
+            "outcome",
+            matmul::v4::rc::RCProductionCanaryOutcomeName(
+                production_canary.outcome));
+        canary.pushKV("attempted", production_canary.attempted);
+        canary.pushKV("passed", production_canary.passed);
+        canary.pushKV(
+            "manifest_has_reviewed_goldens",
+            production_canary.manifest_has_reviewed_goldens);
+        canary.pushKV(
+            "exact_manifest_match",
+            production_canary.exact_manifest_match);
+        canary.pushKV(
+            "manifest_entries",
+            static_cast<uint64_t>(production_canary.manifest_entries));
+        canary.pushKV(
+            "manifest_entry_id", production_canary.manifest_entry_id);
+        canary.pushKV("provider", production_canary.provider);
+        canary.pushKV(
+            "provider_family",
+            production_canary.provider_identity.provider_family);
+        canary.pushKV(
+            "device_architecture",
+            production_canary.provider_identity.device_architecture);
+        canary.pushKV(
+            "driver_api_version",
+            production_canary.provider_identity.driver_api_version);
+        canary.pushKV(
+            "runtime_version",
+            production_canary.provider_identity.runtime_version);
+        canary.pushKV(
+            "epoch_activation_height",
+            production_canary.epoch.activation_height);
+        canary.pushKV("epoch_profile", production_canary.epoch.profile);
+        canary.pushKV(
+            "transcript_version",
+            production_canary.epoch.transcript_version);
+        canary.pushKV("wall_s", production_canary.wall_s);
+        canary.pushKV(
+            "expected_digest", production_canary.expected_digest.GetHex());
+        canary.pushKV(
+            "observed_digest", production_canary.observed_digest.GetHex());
+        canary.pushKV(
+            "device_macs", production_canary.acceleration.device_macs);
+        canary.pushKV(
+            "cpu_fallbacks",
+            production_canary.acceleration.cpu_fallbacks);
+        canary.pushKV("reason", production_canary.reason);
+        rc_exact_replay.pushKV("production_canary", std::move(canary));
         const auto last_validation =
             matmul::v4::rc::GetLastExactReplayVerifyResult();
         UniValue validation(UniValue::VOBJ);
@@ -1607,6 +1662,15 @@ static UniValue BuildBackendRuntimeProfile(
             "last_execution_s", scheduler.last_execution_s);
         rc_scheduler.pushKV(
             "max_execution_s", scheduler.max_execution_s);
+        rc_scheduler.pushKV(
+            "authenticated_relay_samples",
+            scheduler.authenticated_relay_samples);
+        rc_scheduler.pushKV(
+            "last_authenticated_relay_s",
+            scheduler.last_authenticated_relay_s);
+        rc_scheduler.pushKV(
+            "max_authenticated_relay_s",
+            scheduler.max_authenticated_relay_s);
         const auto lane_object = [](const auto& lane) {
             UniValue out(UniValue::VOBJ);
             out.pushKV("requests", lane.requests);
@@ -5761,9 +5825,34 @@ static RPCHelpMan getmininginfo()
                                 {RPCResult::Type::STR, "qualification_scope", "Largest exact replay scope covered by current self-qualification"},
                                 {RPCResult::Type::BOOL, "self_qualified", "Whether toy/scaled-medium exactness qualification passed"},
                                 {RPCResult::Type::BOOL, "automatic_policy_eligible", "Whether the provider is eligible for automatic selection"},
+                                {RPCResult::Type::BOOL, "production_eligible", "Whether the exact provider/runtime/epoch production canary passed"},
                                 {RPCResult::Type::BOOL, "production_goldens_available", "Whether independently reproduced production-shape goldens are committed"},
                                 {RPCResult::Type::BOOL, "startup_canary_passed", "Whether the production-shape startup/epoch canary passed"},
                                 {RPCResult::Type::BOOL, "activation_ready", "Whether all provider activation-readiness gates passed"},
+                                {RPCResult::Type::OBJ, "production_canary", "Provider/device/runtime/epoch-bound production canary status",
+                                {
+                                    {RPCResult::Type::STR, "outcome", "Canary outcome"},
+                                    {RPCResult::Type::BOOL, "attempted", "Whether a full production replay was attempted"},
+                                    {RPCResult::Type::BOOL, "passed", "Whether the strict replay exactly matched the reviewed golden"},
+                                    {RPCResult::Type::BOOL, "manifest_has_reviewed_goldens", "Whether any complete reviewed production golden is compiled in"},
+                                    {RPCResult::Type::BOOL, "exact_manifest_match", "Whether provider, architecture, runtime and epoch exactly matched a manifest entry"},
+                                    {RPCResult::Type::NUM, "manifest_entries", "Compiled manifest entry count"},
+                                    {RPCResult::Type::STR, "manifest_entry_id", "Matched public manifest entry identifier"},
+                                    {RPCResult::Type::STR, "provider", "Resolved provider label"},
+                                    {RPCResult::Type::STR, "provider_family", "Canonical provider family"},
+                                    {RPCResult::Type::STR, "device_architecture", "Public architecture class; never a device serial or host identifier"},
+                                    {RPCResult::Type::NUM, "driver_api_version", "Driver API version bound by the manifest"},
+                                    {RPCResult::Type::NUM, "runtime_version", "Runtime version bound by the manifest"},
+                                    {RPCResult::Type::NUM, "epoch_activation_height", "Activation height bound by the manifest"},
+                                    {RPCResult::Type::NUM, "epoch_profile", "RC profile bound by the manifest"},
+                                    {RPCResult::Type::NUM, "transcript_version", "RC transcript version bound by the manifest"},
+                                    {RPCResult::Type::NUM, "wall_s", "Full canary wall time"},
+                                    {RPCResult::Type::STR_HEX, "expected_digest", "Reviewed production golden digest, or zero when unavailable"},
+                                    {RPCResult::Type::STR_HEX, "observed_digest", "Strict-device canary digest, or zero when not completed"},
+                                    {RPCResult::Type::NUM, "device_macs", "Consensus GEMM MACs executed on device"},
+                                    {RPCResult::Type::NUM, "cpu_fallbacks", "CPU fallback count; must be zero"},
+                                    {RPCResult::Type::STR, "reason", "Fail-closed readiness reason"},
+                                }},
                                 {RPCResult::Type::OBJ, "last_validation", "Most recent completed production ExactReplay validation attempt",
                                 {
                                     {RPCResult::Type::BOOL, "available", "Whether a validation result has been recorded"},
@@ -5812,6 +5901,9 @@ static RPCHelpMan getmininginfo()
                                 {RPCResult::Type::NUM, "max_queue_wait_s", "Maximum observed queue wait"},
                                 {RPCResult::Type::NUM, "last_execution_s", "Most recent device-owner wall time"},
                                 {RPCResult::Type::NUM, "max_execution_s", "Maximum device-owner wall time"},
+                                {RPCResult::Type::NUM, "authenticated_relay_samples", "Locally ExactReplay-authenticated header-to-body transport samples"},
+                                {RPCResult::Type::NUM, "last_authenticated_relay_s", "Most recent authenticated header-to-body transport interval"},
+                                {RPCResult::Type::NUM, "max_authenticated_relay_s", "Maximum authenticated header-to-body transport interval"},
                                 {RPCResult::Type::OBJ_DYN, "lanes", "Per-priority candidate, reseal, tip-validation, and speculative queue/execution telemetry",
                                 {
                                     {RPCResult::Type::OBJ, "lane", "One scheduler lane",

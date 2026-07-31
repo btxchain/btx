@@ -36,6 +36,7 @@
 #include <policy/settings.h>
 #include <matmul/matmul_sketch_cache.h>
 #include <matmul/matmul_v4_rc.h>
+#include <matmul/matmul_v4_rc_accelerator_scheduler.h>
 #include <matmul/matmul_v4_rc_freivalds_sampled.h>
 #include <matmul/matmul_v4_rc_stage3.h>
 #include <matmul/pow_v4.h>
@@ -240,6 +241,10 @@ static constexpr uint32_t MATMUL_RC_SPECULATIVE_LIMIT{3};
 static constexpr int32_t MATMUL_RC_NEAR_TIP_DEPTH{3};
 static constexpr uint32_t MATMUL_RC_PROVISIONAL_RELAY_PEERS{2};
 static constexpr uint64_t MATMUL_RC_ADMISSION_MAX_GRIND_TRIES{4'000'000};
+/** Pending relay observations are untrusted until ExactReplay, so bound them
+ * independently from the verification/admission stores. */
+static constexpr size_t MATMUL_RC_RELAY_OBSERVATIONS_MAX{128};
+static constexpr auto MATMUL_RC_RELAY_OBSERVATION_TTL{10min};
 /** Average delay between feefilter broadcasts in seconds. */
 static constexpr auto AVG_FEEFILTER_BROADCAST_INTERVAL{10min};
 /** Maximum feefilter broadcast delay after significant change. */
@@ -1168,6 +1173,14 @@ private:
     std::set<uint256> m_matmul_rc_speculative_hashes
         GUARDED_BY(m_matmul_rc_admission_mutex);
     std::atomic<uint32_t> m_matmul_rc_speculative_pending{0};
+    mutable Mutex m_matmul_rc_relay_timing_mutex;
+    struct MatMulRCRelayTiming {
+        matmul::v4::rc::RCAcceleratorScheduler::
+            AuthenticatedRelayObservation observation;
+        std::chrono::steady_clock::time_point last_updated{};
+    };
+    std::map<uint256, MatMulRCRelayTiming> m_matmul_rc_relay_timings
+        GUARDED_BY(m_matmul_rc_relay_timing_mutex);
     /** Blocks whose pure ENC-DR/LT predicate is currently queued or running.
      *  The ordinary block-download in-flight entry is removed when a body is
      *  received, before the async predicate completes.  Keep this separate
@@ -1503,6 +1516,16 @@ private:
                                               const CBlockIndex& index,
                                               const CBlockHeader& header,
                                               bool is_ibd);
+    /** Stage announcement/body transport timing and promote it only after the
+     * corresponding block is accepted with local ExactReplay provenance. */
+    void BeginMatMulAuthenticatedRelayObservation(
+        const CBlockIndex& index, bool is_ibd)
+        NO_THREAD_SAFETY_ANALYSIS;
+    void MarkMatMulAuthenticatedRelayBodyReceived(const uint256& hash)
+        NO_THREAD_SAFETY_ANALYSIS;
+    void FinishMatMulAuthenticatedRelayObservation(
+        const uint256& hash, bool exact_replay_authenticated)
+        NO_THREAD_SAFETY_ANALYSIS;
     /** Request Profile-1 attestations only after the associated header/body
      *  has passed RC admission. This prevents ticketless siblings from
      *  monopolizing the bounded outstanding-request map. */
@@ -4857,6 +4880,81 @@ void PeerManagerImpl::RequestMatMulTrustedAttestations(
     });
 }
 
+void PeerManagerImpl::BeginMatMulAuthenticatedRelayObservation(
+    const CBlockIndex& index, bool is_ibd)
+{
+    if (is_ibd) return;
+    {
+        LOCK(cs_main);
+        const Consensus::Params& params{m_chainparams.GetConsensus()};
+        const CBlockIndex* active_tip{m_chainman.ActiveTip()};
+        if (m_chainman.GetMatMulValidationMode() !=
+                kernel::MatMulValidationMode::CONSENSUS ||
+            !params.IsMatMulRCProfile1Active(index.nHeight) ||
+            params.IsMatMulRCCoupledActive(index.nHeight) ||
+            index.pprev == nullptr || index.pprev != active_tip ||
+            index.pprev->nAuthenticatedChainWork !=
+                index.pprev->nChainWork ||
+            (index.nStatus & (BLOCK_HAVE_DATA | BLOCK_FAILED_MASK)) != 0) {
+            return;
+        }
+    }
+
+    auto observation{
+        matmul::v4::rc::GetRCAcceleratorScheduler()
+            .BeginAuthenticatedRelayObservation()};
+    const auto now{observation.announced};
+    LOCK(m_matmul_rc_relay_timing_mutex);
+    for (auto it{m_matmul_rc_relay_timings.begin()};
+         it != m_matmul_rc_relay_timings.end();) {
+        if (now - it->second.last_updated >
+            MATMUL_RC_RELAY_OBSERVATION_TTL) {
+            it = m_matmul_rc_relay_timings.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    if (m_matmul_rc_relay_timings.size() >=
+            MATMUL_RC_RELAY_OBSERVATIONS_MAX) {
+        return;
+    }
+    m_matmul_rc_relay_timings.try_emplace(
+        index.GetBlockHash(),
+        MatMulRCRelayTiming{
+            .observation = std::move(observation),
+            .last_updated = now});
+}
+
+void PeerManagerImpl::MarkMatMulAuthenticatedRelayBodyReceived(
+    const uint256& hash)
+{
+    LOCK(m_matmul_rc_relay_timing_mutex);
+    const auto it{m_matmul_rc_relay_timings.find(hash)};
+    if (it == m_matmul_rc_relay_timings.end()) return;
+    matmul::v4::rc::GetRCAcceleratorScheduler()
+        .MarkAuthenticatedRelayBodyReceived(
+            it->second.observation);
+    it->second.last_updated = std::chrono::steady_clock::now();
+}
+
+void PeerManagerImpl::FinishMatMulAuthenticatedRelayObservation(
+    const uint256& hash, bool exact_replay_authenticated)
+{
+    std::optional<matmul::v4::rc::RCAcceleratorScheduler::
+        AuthenticatedRelayObservation> observation;
+    {
+        LOCK(m_matmul_rc_relay_timing_mutex);
+        const auto it{m_matmul_rc_relay_timings.find(hash)};
+        if (it == m_matmul_rc_relay_timings.end()) return;
+        observation.emplace(std::move(it->second.observation));
+        m_matmul_rc_relay_timings.erase(it);
+    }
+    if (exact_replay_authenticated) {
+        (void)matmul::v4::rc::GetRCAcceleratorScheduler()
+            .CommitAuthenticatedRelayObservation(*observation);
+    }
+}
+
 void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
     CNode& node,
     const Peer& peer,
@@ -5534,6 +5632,8 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
     UpdatePeerStateForReceivedHeaders(pfrom, peer, *pindexLast, received_new_header, nCount == m_opts.max_headers_result);
 
     if (received_new_header) {
+        BeginMatMulAuthenticatedRelayObservation(
+            *pindexLast, header_first_is_ibd);
         MaybeStartMatMulRCHeaderVerification(
             pfrom, peer, *pindexLast, headers.back(),
             header_first_is_ibd);
@@ -5882,6 +5982,7 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                                    MatMulBlockAdmission matmul_admission)
 {
     const uint256 hash{block->GetHash()};
+    MarkMatMulAuthenticatedRelayBodyReceived(hash);
     MatMulRCVerificationBudgetDebit body_budget_debit;
     CNetAddr body_charged_address;
     uint64_t body_charged_netgroup{0};
@@ -6609,6 +6710,29 @@ void PeerManagerImpl::ProcessBlockSync(NodeId nodeid, CNode* node, const std::sh
 {
     bool new_block{false};
     m_chainman.ProcessNewBlock(block, force_processing, min_pow_checked, &new_block);
+    bool exact_replay_authenticated{false};
+    bool terminal_failure{false};
+    {
+        LOCK(cs_main);
+        const CBlockIndex* index{
+            m_chainman.m_blockman.LookupBlockIndex(block->GetHash())};
+        exact_replay_authenticated = index != nullptr &&
+            (index->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0 &&
+            (index->nStatus & BLOCK_HAVE_DATA) != 0 &&
+            (index->nStatus & BLOCK_FAILED_MASK) == 0 &&
+            index->IsValid(BLOCK_VALID_SCRIPTS);
+        terminal_failure = index != nullptr &&
+            (index->nStatus & BLOCK_FAILED_MASK) != 0;
+    }
+    // A duplicate/no-op ProcessNewBlock result is not necessarily terminal:
+    // another delivery can still own the asynchronous replay, and a local
+    // accelerator failure deliberately leaves the candidate retryable. Keep
+    // that bounded observation until exact local authority succeeds, the
+    // index is permanently failed, or its TTL expires.
+    if (exact_replay_authenticated || terminal_failure) {
+        FinishMatMulAuthenticatedRelayObservation(
+            block->GetHash(), exact_replay_authenticated);
+    }
     if (new_block) {
         if (m_chainman.GetMatMulValidationMode() ==
                 kernel::MatMulValidationMode::CONSENSUS &&
@@ -8314,6 +8438,8 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         if (received_new_header) {
             LogInfo("Saw new cmpctblock header hash=%s peer=%d\n",
                 blockhash.ToString(), pfrom.GetId());
+            BeginMatMulAuthenticatedRelayObservation(
+                *pindex, is_ibd);
         }
 
         // Compact blocks do not carry MatMul Freivalds product payloads.

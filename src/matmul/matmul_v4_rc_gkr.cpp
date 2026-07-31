@@ -4835,9 +4835,10 @@ ExactReplayVerifyResult VerifyBoundedExactReplay(
         policy == RCExactReplayExecutionPolicy::StrictDevice;
     if (acceleration.require_device &&
         !resolved.production_eligible) {
-        // Correctness-qualified experimental providers remain available via
-        // explicit measurement modes, but cannot silently satisfy strict
-        // production validation.
+        // The backend remains available to the startup canary and explicit
+        // diagnostic/measurement modes, but strict block validation is
+        // intentionally retryable until the exact provider/device/runtime/
+        // epoch manifest entry has passed its full production canary.
         acceleration.gemm = {};
         acceleration.backend = resolved.provider +
             "_not_production_eligible";

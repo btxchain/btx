@@ -51,6 +51,13 @@ latest-component screen, not a measurement of one block. The stronger
 canary gates; it therefore remains false in this PR. Neither field is an
 activation vote or a substitute for sustained correlated p99 evidence.
 
+The daemon's relay sample measures the monotonic interval from a newly accepted
+direct-tip header announcement to arrival of its complete body. It is published
+only if that body subsequently passes ordinary acceptance with local
+ExactReplay provenance. It intentionally excludes verification execution time,
+which is reported by the tip-validation scheduler lane, and it does not accept
+trusted-mirror authority as hardware lifecycle evidence.
+
 ## Device mismatch or provider failure
 
 A strict device digest mismatch is classified

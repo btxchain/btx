@@ -11,6 +11,8 @@ staged RC/coupled regression without treating that staging path as the public
 activation model.
 """
 
+from test_framework.messages import CBlock, from_hex, msg_block
+from test_framework.p2p import P2PInterface
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import assert_equal
 
@@ -73,6 +75,25 @@ class BTXMatMulV47EpochAActivation(BitcoinTestFramework):
             len(bytes.fromhex(node1.getblockheader(activation_hash, False))),
             FIXED_HEADER_BYTES,
         )
+        scheduler = node1.getmininginfo()["backend_runtime"]["rc_accelerator_scheduler"]
+        assert_equal(scheduler["authenticated_relay_samples"], 1)
+        assert scheduler["last_authenticated_relay_s"] >= 0
+        assert scheduler["max_authenticated_relay_s"] >= scheduler["last_authenticated_relay_s"]
+        assert_equal(
+            scheduler["complete_lifecycle_readiness"]["authenticated_relay_measured"],
+            True,
+        )
+
+        self.log.info("A redundant full-block delivery cannot double-count relay telemetry")
+        duplicate = from_hex(CBlock(), node0.getblock(activation_hash, 0))
+        duplicate.rehash()
+        duplicate_peer = node1.add_p2p_connection(P2PInterface())
+        duplicate_peer.send_and_ping(msg_block(duplicate))
+        duplicate_peer.peer_disconnect()
+        scheduler_after_duplicate = node1.getmininginfo()["backend_runtime"][
+            "rc_accelerator_scheduler"
+        ]
+        assert_equal(scheduler_after_duplicate["authenticated_relay_samples"], 1)
 
         self.log.info("Continue beyond Epoch A; the peer remains on ENC-RC")
         self.generate(node0, 2, sync_fun=self.no_op)

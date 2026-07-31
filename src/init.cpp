@@ -48,6 +48,7 @@
 #include <matmul/backend_capabilities.h>
 #include <matmul/exact_gemm_resolve.h>
 #include <matmul/matmul_v4_rc_gkr.h>
+#include <matmul/matmul_v4_rc_production_canary.h>
 #include <net.h>
 #include <net_permissions.h>
 #include <net_processing.h>
@@ -1450,10 +1451,22 @@ bool AppInitParameterInteraction(const ArgsManager& args)
         matmul_validation_mode == "consensus" &&
         rc_execution_policy ==
             matmul::v4::rc::RCExactReplayExecutionPolicy::StrictDevice) {
-        const auto resolved{
+        auto resolved{
             matmul_v4::accel::ResolveExactGemmBackendForRC()};
         rc_provider = resolved.provider;
         rc_resolution_reason = resolved.reason;
+        const auto canary{
+            matmul::v4::rc::RunRCProductionStartupCanary(
+                resolved.provider, resolved.backend,
+                resolved.automatic_policy_eligible,
+                chainparams.GetConsensus(),
+                chainparams.GetConsensus().nMatMulRCHeight)};
+        // Re-resolve from the process cache so the public resolver telemetry
+        // and every later mining/validation caller observe the canary-bound
+        // production eligibility decision.
+        resolved = matmul_v4::accel::ResolveExactGemmBackendForRC();
+        rc_resolution_reason = resolved.reason + ":canary=" +
+            matmul::v4::rc::RCProductionCanaryOutcomeName(canary.outcome);
         rc_strict_device_ready =
             resolved.self_qualified && resolved.production_eligible &&
             resolved.backend.gemm_s8s8 != nullptr &&

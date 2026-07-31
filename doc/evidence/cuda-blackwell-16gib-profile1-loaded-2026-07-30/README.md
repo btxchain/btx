@@ -33,14 +33,21 @@ No hostname, username, or personal filesystem paths are recorded.
 Versus the 90-second block interval: p99 uses ~23.8% of the interval
 (~68.6 s headroom).
 
-## Integration note
+## Integration note and evidence boundary
 
 Measured on the optimized ExactReplay CUDA kernels
 (`matmul_v4_rc_exact_replay_cuda.cu` md5 `66ed7c839df0c2ce264d6bec1591ffdf`).
-PR #97 wires those kernels through the same `ExactGemmBackend` Launch* ABI
+That recorded fingerprint does not match the CUDA translation unit at the
+current PR head, so this artifact is pre-final engineering evidence rather
+than exact-release-binary qualification. The final candidate must repeat the
+100-run campaign and record its source revision, complete binary/build
+fingerprint, provider, driver/runtime identity, and strict zero-fallback
+telemetry.
+
+PR #97 wires the CUDA kernels through the same `ExactGemmBackend` Launch* ABI
 Metal uses (`rc_fused_ffn`, `rc_fused_ffn_chain`, `rc_phase1`). ExpandMx and
-Merkle remain host-side on CUDA in this drop; parallel host Expand/Merkle
-paths are enabled when device lanes are absent.
+Merkle remain host-side on CUDA in this artifact's source snapshot; parallel
+host Expand/Merkle paths are enabled when device lanes are absent.
 
 ## Artifact
 

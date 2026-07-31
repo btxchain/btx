@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -98,6 +99,21 @@ public:
         std::string reason;
     };
 
+    /**
+     * One receiving-node measurement of the network transport component of
+     * an authenticated block lifecycle.  The observation starts only after a
+     * new direct-tip RC header passes ordinary header processing, stops when
+     * its complete body reaches the validation dispatcher, and is committed
+     * only after that body becomes an ExactReplay-authenticated block.
+     *
+     * Keeping the observation pending until authentication prevents forged
+     * headers or malformed bodies from manufacturing activation telemetry.
+     */
+    struct AuthenticatedRelayObservation {
+        std::chrono::steady_clock::time_point announced{};
+        std::optional<std::chrono::steady_clock::time_point> body_received;
+    };
+
     class Lease
     {
     public:
@@ -146,7 +162,22 @@ public:
     [[nodiscard]] LifecycleAssessment AssessLifecycle(
         double target_spacing_s) const;
 
-    /** Record announcement/body transport through the authenticated peer path. */
+    /** Start an untrusted announcement/body transport observation. */
+    [[nodiscard]] AuthenticatedRelayObservation
+    BeginAuthenticatedRelayObservation() const;
+
+    /** Stop transport timing when a complete body reaches the dispatcher. */
+    void MarkAuthenticatedRelayBodyReceived(
+        AuthenticatedRelayObservation& observation) const;
+
+    /**
+     * Commit a completed observation after full block acceptance and local
+     * ExactReplay authentication. Returns false for incomplete observations.
+     */
+    bool CommitAuthenticatedRelayObservation(
+        AuthenticatedRelayObservation& observation);
+
+    /** Record a controlled-harness sample; production P2P uses the staged API. */
     void RecordAuthenticatedRelaySample(double relay_s);
 
     /** Test-only; succeeds only while there is no owner or waiter. */

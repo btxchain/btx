@@ -26,8 +26,12 @@ struct ResolvedRCExactGemm {
     bool resolved{false};
     bool device_requested{false};
     bool self_qualified{false};
-    /** Separate from byte-exact self-qualification. True only for a device lane
-     *  admitted by the conservative automatic production policy. */
+    /** Correctness-qualified lane selected by the automatic provider-family
+     *  policy. This is necessary but not sufficient for production use. */
+    bool automatic_policy_eligible{false};
+    /** Separate from byte-exact self-qualification and family policy. True
+     *  only after an exact provider/device/runtime/epoch manifest match and a
+     *  strict full-production startup canary. */
     bool production_eligible{false};
     /** Activation-readiness gates. These deliberately remain false until
      *  independently reproduced production-shape goldens are committed and a

@@ -44,6 +44,10 @@ while IFS= read -r rel; do
         if [[ "$rel" == "doc/btx-matmul-v4.7-transition-roadmap.md" ]]; then
             disposition="Canonical v4.7 transition roadmap"
             reviewed=$((reviewed + 1))
+        elif [[ "$rel" == "doc/release-notes.md" ||
+                "$rel" == "doc/release-notes/release-notes-0.33.2.md" ]]; then
+            disposition="Release-candidate note; activation-disabled implementation release"
+            reviewed=$((reviewed + 1))
         elif rg -q 'btx-matmul-v4\.7-transition-roadmap' "$file"; then
             disposition="MatMul-related; reviewed against canonical roadmap"
             reviewed=$((reviewed + 1))

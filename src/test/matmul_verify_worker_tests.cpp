@@ -1491,6 +1491,54 @@ BOOST_AUTO_TEST_CASE(rc_accelerator_scheduler_cancelled_wait_is_retryable)
 }
 
 BOOST_AUTO_TEST_CASE(
+    rc_worker_cancelled_scheduler_wait_runs_delivery_cleanup)
+{
+    using Scheduler = matmul::v4::rc::RCAcceleratorScheduler;
+    auto& scheduler{matmul::v4::rc::GetRCAcceleratorScheduler()};
+    BOOST_REQUIRE(scheduler.ResetStatsForTest());
+
+    std::atomic_bool owner_cancelled{false};
+    auto owner{scheduler.Acquire(
+        Scheduler::Priority::TipValidation, &owner_cancelled,
+        "existing-tip-validation")};
+    BOOST_REQUIRE(owner);
+
+    Consensus::Params params{MakeProfile1ActiveParams()};
+    MatMulVerifyWorker worker{params, /*max_threads=*/1};
+    uint256 claim;
+    claim.data()[0] = 0x5a;
+    auto header{std::make_shared<CBlockHeader>(
+        MakeProfile1Header(0x5155, claim))};
+    const uint256 hash{header->GetHash()};
+    std::atomic<int> retryable_cleanups{0};
+    std::atomic<int> consensus_completions{0};
+    MatMulVerifyWorker::Job job{
+        .height = 100,
+        .completion = [&](bool) { ++consensus_completions; },
+        .retryable_failure = [&] { ++retryable_cleanups; },
+        .header = std::move(header),
+        .priority =
+            MatMulVerifyWorker::Priority::AuthenticatedTipChild,
+    };
+    BOOST_REQUIRE(
+        worker.Enqueue(job) ==
+        MatMulVerifyWorker::EnqueueResult::Enqueued);
+    BOOST_REQUIRE(WaitFor(
+        [&] { return scheduler.GetStats().queue_depth == 1; }));
+
+    BOOST_REQUIRE(worker.Cancel(hash));
+    BOOST_REQUIRE(WaitFor(
+        [&] { return retryable_cleanups.load() == 1; }));
+    BOOST_CHECK_EQUAL(consensus_completions.load(), 0);
+    BOOST_CHECK(!worker.Contains(hash));
+    BOOST_CHECK_EQUAL(scheduler.GetStats().cancelled_waits, 1U);
+
+    worker.Stop();
+    owner = {};
+    BOOST_CHECK(!scheduler.GetStats().active);
+}
+
+BOOST_AUTO_TEST_CASE(
     rc_accelerator_scheduler_observes_external_miner_abort)
 {
     using Scheduler = matmul::v4::rc::RCAcceleratorScheduler;
@@ -1648,6 +1696,51 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(stats.completions, rounds * 4);
     BOOST_CHECK_EQUAL(stats.release_invariant_violations, 0U);
     BOOST_CHECK_GE(stats.preemption_requests, rounds);
+}
+
+BOOST_AUTO_TEST_CASE(
+    rc_authenticated_relay_observation_is_staged_and_one_shot)
+{
+    auto& scheduler{
+        matmul::v4::rc::GetRCAcceleratorScheduler()};
+    BOOST_REQUIRE(scheduler.ResetStatsForTest());
+
+    auto observation{
+        scheduler.BeginAuthenticatedRelayObservation()};
+    BOOST_CHECK(
+        !scheduler.CommitAuthenticatedRelayObservation(
+            observation));
+    BOOST_CHECK_EQUAL(
+        scheduler.GetStats().authenticated_relay_samples, 0U);
+
+    scheduler.MarkAuthenticatedRelayBodyReceived(observation);
+    const auto first_body{observation.body_received};
+    BOOST_REQUIRE(first_body);
+    scheduler.MarkAuthenticatedRelayBodyReceived(observation);
+    BOOST_CHECK(observation.body_received == first_body);
+    BOOST_CHECK(
+        scheduler.CommitAuthenticatedRelayObservation(
+            observation));
+    BOOST_CHECK_EQUAL(
+        scheduler.GetStats().authenticated_relay_samples, 1U);
+
+    // A duplicate completion cannot count the same authenticated transport
+    // interval twice, even if a delivery callback is repeated.
+    BOOST_CHECK(
+        !scheduler.CommitAuthenticatedRelayObservation(
+            observation));
+    BOOST_CHECK_EQUAL(
+        scheduler.GetStats().authenticated_relay_samples, 1U);
+
+    matmul::v4::rc::RCAcceleratorScheduler::
+        AuthenticatedRelayObservation reversed{
+            .announced = std::chrono::steady_clock::now(),
+            .body_received = std::chrono::steady_clock::now() -
+                std::chrono::seconds{1}};
+    BOOST_CHECK(
+        !scheduler.CommitAuthenticatedRelayObservation(reversed));
+    BOOST_CHECK_EQUAL(
+        scheduler.GetStats().authenticated_relay_samples, 1U);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

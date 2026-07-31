@@ -49,9 +49,14 @@ The PR97 implementation has the following local controls:
   authenticated relay, tip validation, and queue-wait components against the
   configured target spacing. Missing even one component is fail-closed; a
   single replay can never report lifecycle readiness.
-  The ordinary daemon does not yet produce a defensibly correlated
-  authenticated-relay sample, so that component remains missing outside the
-  controlled two-node evidence harness and readiness stays false.
+  The production P2P path now stages an announcement-to-complete-body relay
+  observation for a new direct child of the authenticated tip. The bounded
+  observation is committed only after ordinary block acceptance records local
+  ExactReplay provenance; forged headers, malformed bodies, trusted-mirror
+  attestations, duplicates, and incomplete observations cannot create a
+  sample. This supplies the live transport component, but the latest-component
+  summary is still not a correlated percentile campaign and readiness remains
+  false until the hardware evidence gates pass.
 - The RC admission budgets, retained-address/netgroup accounting, pending-work
   reservation, same-hash sidecar hardening, and equal-priority handoff rules
   apply before scarce accelerator work starts. Local failure and cancellation
@@ -118,17 +123,33 @@ hardware soak.
 ## Evidence gates that remain false
 
 Correctness self-qualification and automatic-provider eligibility are distinct
-from activation readiness. The source therefore keeps all of these public
-activation records false:
+from activation readiness. The source therefore keeps both public
+ratification records false:
 
 - `BTX_MATMUL_NO_INVERSION_GATE_RATIFIED`;
-- `BTX_MATMUL_V47_GPU_LIFECYCLE_GATE_RATIFIED`;
-- `kRCProfile1ProductionGoldensAvailable`; and
-- `kRCProfile1StartupCanaryPassed`.
+- `BTX_MATMUL_V47_GPU_LIFECYCLE_GATE_RATIFIED`.
 
-The repository contains useful M4 Max production evidence, but it is not an
-independently reproduced CPU-oracle corpus for every supported provider.
-No missing production golden or canary value is invented by this change.
+Production-golden availability and startup-canary success are derived runtime
+states rather than manually flipped constants. Both remain false because the
+committed production manifest is empty and no matching canary can run.
+
+The startup/epoch canary mechanism itself is implemented. It binds a strict
+production replay to provider family, public device architecture class,
+driver/runtime ABI, activation height, profile, transcript, and complete
+episode parameters. Its committed production-golden manifest is intentionally
+empty, so no provider can become production-eligible. An identity-complete
+CUDA provider reports `missing_golden`; providers whose common resolver does
+not yet expose a stable driver/runtime fingerprint report
+`provider_identity_unavailable`. What remains is reviewed evidence, the
+remaining public identity probes, and completed provider passes—not invention
+of another canary mechanism.
+
+The repository contains useful 100-run M4 Max and sanitized Blackwell-class
+CUDA production evidence, but neither is an independently reproduced
+CPU-oracle corpus for every supported provider. The CUDA artifact's recorded
+source fingerprint also predates the current PR head, so the exact final binary
+still needs a corrected 100-run rerun. No missing production golden, canary,
+or final-binary qualification value is invented by this change.
 
 The 2026-07-31 GPU audit additionally reported a Blackwell-class 16 GiB discrete
 GPU three-episode mean of approximately 21.38 seconds and a production mining
@@ -143,8 +164,10 @@ The separate activation-height change must still provide:
 
 1. Complete production-shape CPU-oracle goldens with header inputs,
    intermediate checkpoints, provenance, and independent reproduction.
-2. A startup/epoch production canary keyed by binary revision, provider,
-   device architecture, driver/runtime, and epoch parameters.
+2. Reviewed manifest entries containing independently reproduced production
+   goldens, followed by successful startup/epoch canary passes on the exact
+   final binary for each provider/device architecture/driver/runtime and epoch
+   tuple.
 3. Strict zero-fallback two-node mining, winner-reseal, relay, and validation
    evidence on every supported provider family.
 4. Missing-device, allocation/kernel/driver failure, mismatch quarantine,
