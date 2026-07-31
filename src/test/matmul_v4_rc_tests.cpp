@@ -9,10 +9,12 @@
 #include <matmul/matmul_v4_lt.h>
 #include <matmul/matmul_v4_lt_mx_exact.h>
 #include <matmul/matmul_v4_rc.h>
+#include <matmul/matmul_v4_rc_accelerator_scheduler.h>
 #include <matmul/matmul_v4_rc_coupled.h>
 #include <matmul/matmul_v4_rc_extract.h>
 #include <matmul/matmul_v4_rc_mx_layout.h>
 #include <matmul/matmul_v4_rc_mx_ozaki.h>
+#include <matmul/matmul_v4_rc_production_canary.h>
 #include <cuda/matmul_v4_rc_mx_ozaki_native.h>
 #include <matmul/matmul_v4_rc_scale.h>
 #include <matmul/matmul_v4_rc_scale_axes.h>
@@ -37,6 +39,7 @@
 #include <cstdlib>
 #include <limits>
 #include <string>
+#include <thread>
 #include <vector>
 
 #if defined(__unix__) || defined(__APPLE__)
@@ -106,6 +109,68 @@ bool OracleGemmS8S8(const std::vector<int8_t>& L, const std::vector<int8_t>& R,
 {
     out = lt::ExactGemmS8S8(L, R, rows, inner, cols);
     return true;
+}
+
+/** Deliberately separate test entry point for the alternate-provider state
+ * machine. Production independence is canary-bound to actual backend entry
+ * points; two labels using OracleGemmS8S8 itself remain correlated. */
+bool IndependentOracleGemmS8S8(
+    const std::vector<int8_t>& L,
+    const std::vector<int8_t>& R,
+    uint32_t rows,
+    uint32_t inner,
+    uint32_t cols,
+    std::vector<int32_t>& out)
+{
+    out = lt::ExactGemmS8S8(L, R, rows, inner, cols);
+    return true;
+}
+
+rc::RCProductionEpochIdentity MakeReplayCapabilityEpoch(
+    const rc::RCEpisodeParams& params,
+    uint32_t matmul_dimension = 64)
+{
+    rc::RCProductionEpochIdentity epoch;
+    epoch.activation_height = 0;
+    epoch.profile = 1;
+    epoch.transcript_version = rc::kRCTranscriptVersion;
+    epoch.matmul_dimension = matmul_dimension;
+    epoch.params = params;
+    return epoch;
+}
+
+Consensus::Params MakeWinnerAuthorityConsensus(
+    uint32_t matmul_dimension = 4096,
+    int32_t activation_height = 100)
+{
+    Consensus::Params consensus;
+    Consensus::FillDefaultRCGrowthTables(consensus);
+    consensus.nMatMulV4Height = activation_height;
+    consensus.nMatMulRCHeight = activation_height;
+    consensus.nMatMulRCProfile = 1;
+    consensus.fMatMulRCUseToyDims = false;
+    consensus.nMatMulRCCoupledHeight =
+        std::numeric_limits<int32_t>::max();
+    consensus.nMatMulV4Dimension = matmul_dimension;
+    return consensus;
+}
+
+lt::ExactGemmBackend MakeWinnerAuthorityBackend()
+{
+    lt::ExactGemmBackend backend;
+    backend.gemm_s8s8 = &OracleGemmS8S8;
+    return backend;
+}
+
+rc::RCProductionProviderCapability MakeWinnerAuthorityCapability(
+    const std::string& provider,
+    const lt::ExactGemmBackend& backend,
+    const Consensus::Params& consensus,
+    int32_t activation_height = 100)
+{
+    return rc::IssueRCProductionProviderCapabilityForTest(
+        provider, backend,
+        rc::MakeRCProductionEpochIdentity(consensus, activation_height));
 }
 
 bool DecliningGemmS8S8(const std::vector<int8_t>& /*L*/, const std::vector<int8_t>& /*R*/,
@@ -987,6 +1052,8 @@ BOOST_AUTO_TEST_CASE(rc_exact_replay_cancellation_is_not_consensus_invalid)
 
 BOOST_AUTO_TEST_CASE(rc_execution_policy_and_last_replay_telemetry)
 {
+    auto& scheduler{rc::GetRCAcceleratorScheduler()};
+    BOOST_REQUIRE(scheduler.ResetStatsForTest());
     const auto saved_policy{rc::GetRCExactReplayExecutionPolicy()};
     rc::SetRCExactReplayExecutionPolicy(
         rc::RCExactReplayExecutionPolicy::CpuDiagnostic);
@@ -1009,6 +1076,19 @@ BOOST_AUTO_TEST_CASE(rc_execution_policy_and_last_replay_telemetry)
     BOOST_CHECK_EQUAL(result.acceleration_backend, "cpu_diagnostic");
     BOOST_CHECK_GT(result.cpu_gemm_calls, 0U);
 
+    // Direct/synchronous callers enter the process-wide device owner here;
+    // the networking worker's already-held lease is detected separately.
+    const auto scheduler_stats{scheduler.GetStats()};
+    BOOST_CHECK_EQUAL(scheduler_stats.requests, 1U);
+    BOOST_CHECK_EQUAL(scheduler_stats.acquisitions, 1U);
+    BOOST_CHECK_EQUAL(scheduler_stats.completions, 1U);
+    BOOST_CHECK_GT(scheduler_stats.workspace_requested_bytes, 0U);
+    BOOST_CHECK_EQUAL(
+        scheduler_stats.lanes[static_cast<size_t>(
+            rc::RCAcceleratorScheduler::Priority::TipValidation)]
+            .completions,
+        1U);
+
     const auto last{rc::GetLastExactReplayVerifyResult()};
     BOOST_REQUIRE(last.has_value());
     BOOST_CHECK(last->outcome == rc::ExactReplayVerifyOutcome::Valid);
@@ -1018,139 +1098,359 @@ BOOST_AUTO_TEST_CASE(rc_execution_policy_and_last_replay_telemetry)
     BOOST_CHECK_EQUAL(last->cpu_gemm_calls, result.cpu_gemm_calls);
 }
 
-BOOST_AUTO_TEST_CASE(rc_device_mismatch_is_local_failure_in_strict_mode)
+BOOST_AUTO_TEST_CASE(
+    rc_exact_replay_outer_lease_cannot_bypass_workspace_admission)
 {
+    auto& scheduler{rc::GetRCAcceleratorScheduler()};
+    scheduler.ConfigureWorkspaceCapacity("", 0);
+    BOOST_REQUIRE(scheduler.ResetStatsForTest());
+
+    CBlockHeader header{MakeRCHeader(0x574f524b53504143)};
+    const auto params{rc::MakeToyRCEpisodeParams()};
+    header.matmul_digest =
+        rc::RecomputeResidentCurriculumReference(
+            header, params, /*height=*/0);
+    BOOST_REQUIRE(!header.matmul_digest.IsNull());
+
+    std::atomic_bool cancelled{false};
+    auto outer{scheduler.Acquire(
+        rc::RCAcceleratorScheduler::Priority::TipValidation,
+        &cancelled, "test-zero-workspace-outer-lease")};
+    BOOST_REQUIRE(outer);
+    BOOST_CHECK(scheduler.CurrentThreadOwnsLease());
+    BOOST_CHECK(!scheduler.CurrentThreadLeaseCoversWorkspace(
+        rc::EstimateRCExactReplayWorkspaceBytes(params)));
+
+    const auto saved_policy{rc::GetRCExactReplayExecutionPolicy()};
+    rc::SetRCExactReplayExecutionPolicy(
+        rc::RCExactReplayExecutionPolicy::CpuDiagnostic);
+    const auto result{
+        rc::VerifyBoundedExactReplay(
+            header, params, /*height=*/0)};
+    rc::SetRCExactReplayExecutionPolicy(saved_policy);
+
+    BOOST_CHECK(!result.ok);
+    BOOST_CHECK(
+        result.outcome ==
+        rc::ExactReplayVerifyOutcome::LocalAcceleratorFailure);
+    BOOST_CHECK_EQUAL(
+        result.acceleration_failure,
+        "accelerator_scheduler_outer_lease_workspace_too_small");
+    BOOST_CHECK_EQUAL(scheduler.GetStats().requests, 1U);
+    BOOST_CHECK_EQUAL(scheduler.GetStats().acquisitions, 1U);
+    outer = {};
+}
+
+BOOST_AUTO_TEST_CASE(rc_strict_alternate_registry_requires_canary_capability)
+{
+    rc::ClearRCExactReplayAlternateProviders();
+    rc::ResetRCProductionCanaryForTest();
+    const auto params{rc::MakeToyRCEpisodeParams()};
+    const auto epoch{MakeReplayCapabilityEpoch(params)};
+    lt::ExactGemmBackend oracle;
+    oracle.gemm_s8s8 = &OracleGemmS8S8;
+    std::string reason;
+    BOOST_CHECK(!rc::RegisterRCExactReplayAlternateProvider({
+        .backend = oracle,
+        .provider = "test:unqualified",
+    }, &reason));
+    BOOST_CHECK_EQUAL(reason, "provider_has_no_production_capability");
+
+    const auto first{rc::IssueRCProductionProviderCapabilityForTest(
+        "test:registry-a", oracle, epoch)};
+    BOOST_REQUIRE(!first.IsNull());
+    BOOST_REQUIRE(rc::RegisterRCExactReplayAlternateProvider({
+        .backend = oracle,
+        .provider = "test:registry-a",
+        .capability = first,
+    }, &reason));
+
+    // A different label and a separately issued token cannot make the same
+    // execution callback an independent adjudicator.
+    const auto masquerade{rc::IssueRCProductionProviderCapabilityForTest(
+        "test:registry-b", oracle, epoch)};
+    BOOST_REQUIRE(!masquerade.IsNull());
+    BOOST_CHECK(!rc::RegisterRCExactReplayAlternateProvider({
+        .backend = oracle,
+        .provider = "test:registry-b",
+        .capability = masquerade,
+    }, &reason));
+    BOOST_CHECK_EQUAL(reason, "correlated_backend_entry_point");
+    BOOST_CHECK_EQUAL(rc::GetRCExactReplayAlternateProviders().size(), 1U);
+
+    rc::ResetRCProductionCanaryForTest();
+    BOOST_CHECK(!rc::RCProductionProviderCapabilityAuthorizesIdentity(
+        first, "test:registry-a", &oracle, &reason));
+    BOOST_CHECK_EQUAL(reason, "invalid_or_stale_capability");
+    rc::ClearRCExactReplayAlternateProviders();
+}
+
+BOOST_AUTO_TEST_CASE(rc_strict_wrong_header_without_alternate_is_degraded_not_quarantined)
+{
+    rc::ClearRCExactReplayAlternateProviders();
     rc::ResetRCExactReplayProviderHealthForTest();
-    auto header{MakeRCHeader(0x4641554c54)};
+    auto header{MakeRCHeader(0x46414c5345484452)};
     const auto params{rc::MakeToyRCEpisodeParams()};
     const uint256 honest_digest{
-        rc::RecomputeResidentCurriculumReference(
-            header, params, /*height=*/0)};
+        rc::RecomputeResidentCurriculumReference(header, params, 0)};
     BOOST_REQUIRE(!honest_digest.IsNull());
-    header.matmul_digest = honest_digest;
+    header.matmul_digest = uint256::ONE;
+    BOOST_REQUIRE(header.matmul_digest != honest_digest);
 
-    // The backend reports successful device work but deterministically
-    // corrupts every contraction. This reaches the same mismatch branch as a
-    // transient accelerator/driver fault without a process-global fault flag.
-    lt::ExactGemmBackend faulty_backend;
-    faulty_backend.gemm_s8s8 = &WrongGemmS8S8;
-    const rc::RCExactReplayAcceleration faulty_acceleration{
-        .gemm = faulty_backend,
-        .backend = "test_faulty_exact_device",
+    lt::ExactGemmBackend healthy_backend;
+    healthy_backend.gemm_s8s8 = &OracleGemmS8S8;
+    const rc::RCExactReplayAcceleration healthy{
+        .gemm = healthy_backend,
+        .backend = "test_sole_healthy_provider",
         .require_device = true,
         .output_row_tile = 16,
     };
-
-    const auto strict_a{
+    const auto degraded{
         rc::VerifyBoundedExactReplayWithAccelerationForTest(
-            header, params, /*height=*/0, faulty_acceleration)};
-    const auto strict_b{
+            header, params, 0, healthy)};
+    BOOST_CHECK(!degraded.ok);
+    BOOST_CHECK(degraded.outcome ==
+                rc::ExactReplayVerifyOutcome::LocalAcceleratorFailure);
+    BOOST_CHECK(degraded.failure_kind ==
+                rc::RCExactReplayFailureKind::UnconfirmedDigestMismatch);
+    BOOST_CHECK(degraded.adjudication ==
+                rc::RCExactReplayAdjudication::NoIndependentProvider);
+    BOOST_CHECK_EQUAL(degraded.provider_attempts, 1U);
+    BOOST_CHECK_EQUAL(degraded.independent_provider_attempts, 0U);
+    BOOST_CHECK(!degraded.provider_quarantined);
+    BOOST_CHECK(!rc::GetRCExactReplayProviderHealth().quarantined);
+
+    // The malicious commitment cannot take the healthy provider out of
+    // service. The next honest header validates in the same process.
+    header.matmul_digest = honest_digest;
+    const auto honest{
         rc::VerifyBoundedExactReplayWithAccelerationForTest(
-            header, params, /*height=*/0, faulty_acceleration)};
+            header, params, 0, healthy)};
+    BOOST_CHECK(honest.ok);
+    BOOST_CHECK(honest.outcome == rc::ExactReplayVerifyOutcome::Valid);
+    BOOST_CHECK(!rc::GetRCExactReplayProviderHealth().quarantined);
+    rc::ClearRCExactReplayAlternateProviders();
+    rc::ResetRCExactReplayProviderHealthForTest();
+}
 
-    BOOST_CHECK(!strict_a.ok);
-    BOOST_CHECK(
-        strict_a.outcome ==
-        rc::ExactReplayVerifyOutcome::LocalAcceleratorFailure);
-    BOOST_CHECK(!strict_a.device_mismatch_retried);
-    BOOST_CHECK(!strict_a.device_mismatch_confirmed);
-    BOOST_CHECK(strict_a.digest != honest_digest);
-    BOOST_CHECK_GT(strict_a.device_gemm_calls, 0U);
-    BOOST_CHECK_EQUAL(strict_a.cpu_gemm_calls, 0U);
-    BOOST_CHECK(strict_a.fully_accelerated);
-    BOOST_CHECK(!strict_a.full_metal_pipeline);
-    BOOST_CHECK_EQUAL(
-        strict_a.acceleration_failure,
-        "device_digest_mismatch_unconfirmed");
-    BOOST_CHECK(strict_a.provider_quarantined);
-    BOOST_CHECK(
-        strict_a.note.find("provider quarantined") !=
-        std::string::npos);
+BOOST_AUTO_TEST_CASE(rc_strict_independent_same_digest_rejects_false_header)
+{
+    rc::ClearRCExactReplayAlternateProviders();
+    rc::ResetRCProductionCanaryForTest();
+    rc::ResetRCExactReplayProviderHealthForTest();
+    auto header{MakeRCHeader(0x434f4e4649524d)};
+    header.matmul_dim = 64;
+    const auto params{rc::MakeToyRCEpisodeParams()};
+    const uint256 honest_digest{
+        rc::RecomputeResidentCurriculumReference(header, params, 0)};
+    header.matmul_digest = uint256::ONE;
+    BOOST_REQUIRE(header.matmul_digest != honest_digest);
 
-    // Subsequent strict work on the same provider is refused locally before
-    // device submission. This is retryable and still cannot punish the peer.
-    BOOST_CHECK(!strict_b.ok);
-    BOOST_CHECK(
-        strict_b.outcome ==
-        rc::ExactReplayVerifyOutcome::LocalAcceleratorFailure);
-    BOOST_CHECK(strict_b.provider_quarantined);
-    BOOST_CHECK_EQUAL(
-        strict_b.acceleration_failure,
-        "strict_device_provider_quarantined");
-    BOOST_CHECK_EQUAL(strict_b.device_gemm_calls, 0U);
-    BOOST_CHECK_EQUAL(strict_b.cpu_gemm_calls, 0U);
-    BOOST_CHECK(!strict_b.operator_recovery.empty());
+    const auto epoch{MakeReplayCapabilityEpoch(params, header.matmul_dim)};
+    lt::ExactGemmBackend primary_backend;
+    primary_backend.gemm_s8s8 = &OracleGemmS8S8;
+    const auto primary_capability{
+        rc::IssueRCProductionProviderCapabilityForTest(
+            "test:independent-oracle-a", primary_backend, epoch)};
+    BOOST_REQUIRE(!primary_capability.IsNull());
+    BOOST_REQUIRE(rc::RegisterRCExactReplayAlternateProvider({
+        .backend = primary_backend,
+        .provider = "test:independent-oracle-a",
+        .capability = primary_capability,
+    }));
+
+    lt::ExactGemmBackend alternate_backend;
+    alternate_backend.gemm_s8s8 = &IndependentOracleGemmS8S8;
+    const auto alternate_capability{
+        rc::IssueRCProductionProviderCapabilityForTest(
+            "test:independent-oracle-b", alternate_backend, epoch)};
+    BOOST_REQUIRE(!alternate_capability.IsNull());
+    BOOST_REQUIRE(rc::RegisterRCExactReplayAlternateProvider({
+        .backend = alternate_backend,
+        .provider = "test:independent-oracle-b",
+        .capability = alternate_capability,
+    }));
+    const rc::RCExactReplayAcceleration primary{
+        .gemm = primary_backend,
+        .backend = "test:independent-oracle-a",
+        .require_device = true,
+        .output_row_tile = 16,
+    };
+    const auto rejected{
+        rc::VerifyBoundedExactReplayWithAccelerationForTest(
+            header, params, 0, primary)};
+    BOOST_CHECK(!rejected.ok);
+    BOOST_CHECK(rejected.outcome ==
+                rc::ExactReplayVerifyOutcome::InvalidConsensus);
+    BOOST_CHECK(rejected.failure_kind ==
+                rc::RCExactReplayFailureKind::None);
+    BOOST_CHECK(rejected.adjudication ==
+                rc::RCExactReplayAdjudication::IndependentDigestConfirmed);
+    BOOST_CHECK(rejected.device_mismatch_confirmed);
+    BOOST_CHECK_EQUAL(rejected.provider_attempts, 2U);
+    BOOST_CHECK_EQUAL(rejected.independent_provider_attempts, 1U);
+    BOOST_CHECK(!rejected.provider_quarantined);
+    BOOST_CHECK(!rc::GetRCExactReplayProviderHealth().quarantined);
+    rc::ClearRCExactReplayAlternateProviders();
+    rc::ResetRCProductionCanaryForTest();
+    rc::ResetRCExactReplayProviderHealthForTest();
+}
+
+BOOST_AUTO_TEST_CASE(rc_strict_faulty_primary_recovers_on_independent_provider)
+{
+    rc::ClearRCExactReplayAlternateProviders();
+    rc::ResetRCProductionCanaryForTest();
+    rc::ResetRCExactReplayProviderHealthForTest();
+    auto header{MakeRCHeader(0x5245434f564552)};
+    header.matmul_dim = 64;
+    const auto params{rc::MakeToyRCEpisodeParams()};
+    header.matmul_digest =
+        rc::RecomputeResidentCurriculumReference(header, params, 0);
+    BOOST_REQUIRE(!header.matmul_digest.IsNull());
+
+    const auto epoch{MakeReplayCapabilityEpoch(params, header.matmul_dim)};
+    lt::ExactGemmBackend faulty_backend;
+    faulty_backend.gemm_s8s8 = &WrongGemmS8S8;
+    const auto faulty_capability{
+        rc::IssueRCProductionProviderCapabilityForTest(
+            "test:faulty-provider-a", faulty_backend, epoch)};
+    BOOST_REQUIRE(!faulty_capability.IsNull());
+    BOOST_REQUIRE(rc::RegisterRCExactReplayAlternateProvider({
+        .backend = faulty_backend,
+        .provider = "test:faulty-provider-a",
+        .capability = faulty_capability,
+    }));
+    lt::ExactGemmBackend alternate_backend;
+    alternate_backend.gemm_s8s8 = &OracleGemmS8S8;
+    const auto alternate_capability{
+        rc::IssueRCProductionProviderCapabilityForTest(
+            "test:recovery-provider-b", alternate_backend, epoch)};
+    BOOST_REQUIRE(!alternate_capability.IsNull());
+    BOOST_REQUIRE(rc::RegisterRCExactReplayAlternateProvider({
+        .backend = alternate_backend,
+        .provider = "test:recovery-provider-b",
+        .capability = alternate_capability,
+    }));
+    const rc::RCExactReplayAcceleration faulty_primary{
+        .gemm = faulty_backend,
+        .backend = "test:faulty-provider-a",
+        .require_device = true,
+        .output_row_tile = 16,
+    };
+    const auto recovered{
+        rc::VerifyBoundedExactReplayWithAccelerationForTest(
+            header, params, 0, faulty_primary)};
+    BOOST_CHECK(recovered.ok);
+    BOOST_CHECK(recovered.outcome == rc::ExactReplayVerifyOutcome::Valid);
+    BOOST_CHECK(recovered.adjudication ==
+                rc::RCExactReplayAdjudication::IndependentHeaderRecovered);
+    BOOST_CHECK_EQUAL(recovered.adjudicating_provider,
+                      "test:recovery-provider-b");
+    BOOST_CHECK_EQUAL(recovered.quarantined_provider,
+                      "test:faulty-provider-a");
+    BOOST_CHECK(recovered.provider_quarantined);
+    BOOST_CHECK_EQUAL(recovered.cpu_gemm_calls, 0U);
 
     const auto health{rc::GetRCExactReplayProviderHealth()};
     BOOST_CHECK(health.quarantined);
-    BOOST_CHECK_EQUAL(health.provider, "test_faulty_exact_device");
-    BOOST_CHECK_EQUAL(health.quarantine_events, 1U);
+    BOOST_CHECK_EQUAL(health.provider, "test:faulty-provider-a");
     BOOST_CHECK_EQUAL(
-        health.reason, "device_digest_mismatch_unconfirmed");
+        health.reason,
+        "digest_mismatch_confirmed_by_independent_provider");
 
-    // Health is provider-scoped: an independently qualified alternate can
-    // retry the same pending block without clearing or reusing the failed
-    // provider. Production currently selects that alternate via an
-    // operator-controlled restart.
-    lt::ExactGemmBackend alternate_backend;
-    alternate_backend.gemm_s8s8 = &OracleGemmS8S8;
-    const rc::RCExactReplayAcceleration alternate_acceleration{
-        .gemm = alternate_backend,
-        .backend = "test_alternate_exact_device",
+    // A later block skips the quarantined primary and remains available via
+    // the registered independent provider in the same process.
+    const auto subsequent{
+        rc::VerifyBoundedExactReplayWithAccelerationForTest(
+            header, params, 0, faulty_primary)};
+    BOOST_CHECK(subsequent.ok);
+    BOOST_CHECK_EQUAL(subsequent.adjudicating_provider,
+                      "test:recovery-provider-b");
+    rc::ClearRCExactReplayAlternateProviders();
+    rc::ResetRCProductionCanaryForTest();
+    rc::ResetRCExactReplayProviderHealthForTest();
+}
+
+BOOST_AUTO_TEST_CASE(rc_strict_same_callback_cannot_masquerade_as_independent)
+{
+    rc::ClearRCExactReplayAlternateProviders();
+    rc::ResetRCProductionCanaryForTest();
+    rc::ResetRCExactReplayProviderHealthForTest();
+    auto header{MakeRCHeader(0x53414d45444f4d)};
+    header.matmul_dim = 64;
+    const auto params{rc::MakeToyRCEpisodeParams()};
+    const uint256 honest_digest{
+        rc::RecomputeResidentCurriculumReference(header, params, 0)};
+    header.matmul_digest = uint256::ONE;
+    BOOST_REQUIRE(header.matmul_digest != honest_digest);
+
+    lt::ExactGemmBackend oracle;
+    oracle.gemm_s8s8 = &OracleGemmS8S8;
+    const auto epoch{MakeReplayCapabilityEpoch(params, header.matmul_dim)};
+    const auto primary_capability{
+        rc::IssueRCProductionProviderCapabilityForTest(
+            "test:correlated-provider-a", oracle, epoch)};
+    BOOST_REQUIRE(!primary_capability.IsNull());
+    BOOST_REQUIRE(rc::RegisterRCExactReplayAlternateProvider({
+        .backend = oracle,
+        .provider = "test:correlated-provider-a",
+        .capability = primary_capability,
+    }));
+    const auto masquerade_capability{
+        rc::IssueRCProductionProviderCapabilityForTest(
+            "test:correlated-provider-b", oracle, epoch)};
+    BOOST_REQUIRE(!masquerade_capability.IsNull());
+    std::string reason;
+    BOOST_CHECK(!rc::RegisterRCExactReplayAlternateProvider({
+        .backend = oracle,
+        .provider = "test:correlated-provider-b",
+        .capability = masquerade_capability,
+    }, &reason));
+    BOOST_CHECK_EQUAL(reason, "correlated_backend_entry_point");
+    const rc::RCExactReplayAcceleration primary{
+        .gemm = oracle,
+        .backend = "test:correlated-provider-a",
         .require_device = true,
         .output_row_tile = 16,
     };
-    const auto alternate{
+    const auto degraded{
         rc::VerifyBoundedExactReplayWithAccelerationForTest(
-            header, params, /*height=*/0,
-            alternate_acceleration)};
-    BOOST_CHECK(alternate.ok);
-    BOOST_CHECK(
-        alternate.outcome ==
-        rc::ExactReplayVerifyOutcome::Valid);
-    BOOST_CHECK(alternate.fully_accelerated);
-    BOOST_CHECK_EQUAL(alternate.cpu_gemm_calls, 0U);
+            header, params, 0, primary)};
+    BOOST_CHECK(!degraded.ok);
+    BOOST_CHECK(degraded.outcome ==
+                rc::ExactReplayVerifyOutcome::LocalAcceleratorFailure);
+    BOOST_CHECK(degraded.adjudication ==
+                rc::RCExactReplayAdjudication::NoIndependentProvider);
+    BOOST_CHECK_EQUAL(degraded.provider_attempts, 1U);
+    BOOST_CHECK_EQUAL(degraded.independent_provider_attempts, 0U);
+    BOOST_CHECK(!degraded.provider_quarantined);
+    rc::ClearRCExactReplayAlternateProviders();
+    rc::ResetRCProductionCanaryForTest();
+    rc::ResetRCExactReplayProviderHealthForTest();
+}
 
-    // The explicitly pre-activation/testing auto-fallback mode retains the
-    // portable recovery path. It must recover the honest header but must not
-    // be confused with strict production execution.
-    rc::RCExactReplayAcceleration fallback_acceleration{
-        faulty_acceleration};
-    fallback_acceleration.require_device = false;
+BOOST_AUTO_TEST_CASE(rc_device_mismatch_auto_fallback_remains_diagnostic_only)
+{
+    auto header{MakeRCHeader(0x4350555245545259)};
+    const auto params{rc::MakeToyRCEpisodeParams()};
+    const uint256 honest_digest{
+        rc::RecomputeResidentCurriculumReference(header, params, 0)};
+    header.matmul_digest = honest_digest;
+    lt::ExactGemmBackend faulty_backend;
+    faulty_backend.gemm_s8s8 = &WrongGemmS8S8;
+    const rc::RCExactReplayAcceleration fallback{
+        .gemm = faulty_backend,
+        .backend = "test_faulty_auto_fallback",
+        .require_device = false,
+        .output_row_tile = 16,
+    };
     const auto recovered{
         rc::VerifyBoundedExactReplayWithAccelerationForTest(
-            header, params, /*height=*/0, fallback_acceleration)};
+            header, params, 0, fallback)};
     BOOST_CHECK(recovered.ok);
-    BOOST_CHECK(
-        recovered.outcome == rc::ExactReplayVerifyOutcome::Valid);
     BOOST_CHECK(recovered.device_mismatch_retried);
-    BOOST_CHECK(!recovered.device_mismatch_confirmed);
     BOOST_CHECK(recovered.digest == honest_digest);
     BOOST_CHECK_GT(recovered.cpu_gemm_calls, 0U);
-    BOOST_CHECK_EQUAL(
-        recovered.acceleration_failure,
-        "device_digest_mismatch_cpu_recovered");
-
-    // A portable retry must not turn a genuinely false header claim into an
-    // acceptance merely because the first device pass was faulty.
-    CBlockHeader invalid_header{header};
-    invalid_header.matmul_digest = uint256::ONE;
-    BOOST_REQUIRE(invalid_header.matmul_digest != honest_digest);
-    const auto rejected{
-        rc::VerifyBoundedExactReplayWithAccelerationForTest(
-            invalid_header, params, /*height=*/0,
-            fallback_acceleration)};
-    BOOST_CHECK(!rejected.ok);
-    BOOST_CHECK(
-        rejected.outcome ==
-        rc::ExactReplayVerifyOutcome::InvalidConsensus);
-    BOOST_CHECK(rejected.device_mismatch_retried);
-    BOOST_CHECK(rejected.device_mismatch_confirmed);
-    BOOST_CHECK(rejected.digest == honest_digest);
-    BOOST_CHECK_EQUAL(
-        rejected.note,
-        "ExactReplay: device mismatch confirmed by portable retry");
-    rc::ResetRCExactReplayProviderHealthForTest();
 }
 
 BOOST_AUTO_TEST_CASE(rc_f5_selfqual_cached_across_nonce_resolves)
@@ -2569,6 +2869,171 @@ BOOST_AUTO_TEST_CASE(rc_wgrad_chunked_exact_matches_medium_shape)
     CBlockHeader hdr = MakeRCHeader(7);
     const uint256 cpu = rc::MineRCEpisode(hdr, med, /*height=*/0);
     BOOST_CHECK(!cpu.IsNull());
+}
+
+BOOST_AUTO_TEST_CASE(
+    rc_winner_reseal_authority_is_block_target_bound_and_single_use)
+{
+    ResetMatMulRCWinnerAuthorityForTest();
+    rc::ResetRCProductionCanaryForTest();
+    const auto consensus{MakeWinnerAuthorityConsensus()};
+    const auto backend{MakeWinnerAuthorityBackend()};
+    const std::string provider{"test:winner-device"};
+    const auto capability{MakeWinnerAuthorityCapability(
+        provider, backend, consensus)};
+    BOOST_REQUIRE(!capability.IsNull());
+    CBlockHeader header{MakeRCHeader(91)};
+    header.matmul_dim = 4096;
+    header.matmul_digest = uint256{1};
+    const arith_uint256 block_target{2};
+    const auto candidate_started{
+        std::chrono::steady_clock::now()};
+    const auto reseal_completed{
+        candidate_started + std::chrono::milliseconds{2}};
+
+    BOOST_REQUIRE(PublishMatMulRCWinnerResealAuthority(
+        header, /*block_height=*/100, block_target, provider,
+        capability, backend, consensus,
+        std::chrono::seconds{1}, candidate_started,
+        reseal_completed));
+
+    // Any fixed-header identity or contextual-height change misses without
+    // consuming the exact original record.
+    CBlockHeader different{header};
+    ++different.matmul_dim;
+    BOOST_CHECK(!ConsumeMatMulRCWinnerResealAuthority(
+        different, /*block_height=*/100, consensus));
+    BOOST_CHECK(!ConsumeMatMulRCWinnerResealAuthority(
+        header, /*block_height=*/101, consensus));
+
+    std::string consumed_provider;
+    BOOST_CHECK(ConsumeMatMulRCWinnerResealAuthority(
+        header, /*block_height=*/100, consensus, &consumed_provider));
+    BOOST_CHECK_EQUAL(consumed_provider, "test:winner-device");
+    BOOST_CHECK(!ConsumeMatMulRCWinnerResealAuthority(
+        header, /*block_height=*/100, consensus));
+
+    auto stats{GetMatMulRCWinnerAuthorityStats()};
+    BOOST_CHECK_EQUAL(stats.published, 1U);
+    BOOST_CHECK_EQUAL(stats.consumed, 1U);
+    BOOST_CHECK_EQUAL(stats.entries, 0U);
+    BOOST_CHECK_GE(stats.misses, 3U);
+    BOOST_CHECK_GT(stats.last_candidate_to_reseal_s, 0.0);
+
+    // An easier pool-share result must never authorize local block acceptance.
+    header.nNonce64 = 92;
+    header.matmul_digest = uint256{3};
+    BOOST_CHECK(!PublishMatMulRCWinnerResealAuthority(
+        header, /*block_height=*/100, block_target, "test:winner-device",
+        capability, backend, consensus,
+        std::chrono::seconds{1}, candidate_started,
+        reseal_completed));
+    stats = GetMatMulRCWinnerAuthorityStats();
+    BOOST_CHECK_EQUAL(stats.rejected_not_block_target, 1U);
+    BOOST_CHECK_EQUAL(stats.entries, 0U);
+
+    ResetMatMulRCWinnerAuthorityForTest();
+    rc::ResetRCProductionCanaryForTest();
+}
+
+BOOST_AUTO_TEST_CASE(
+    rc_winner_reseal_authority_requires_current_production_capability)
+{
+    ResetMatMulRCWinnerAuthorityForTest();
+    rc::ResetRCProductionCanaryForTest();
+    const auto consensus{MakeWinnerAuthorityConsensus()};
+    const auto backend{MakeWinnerAuthorityBackend()};
+    const auto capability{MakeWinnerAuthorityCapability(
+        "test:eligible", backend, consensus)};
+    BOOST_REQUIRE(!capability.IsNull());
+    CBlockHeader header{MakeRCHeader(101)};
+    header.matmul_dim = 4096;
+    header.matmul_digest = uint256{1};
+    const arith_uint256 block_target{2};
+    const auto started{std::chrono::steady_clock::now()};
+
+    // A default token, a caller-supplied provider label, a different backend,
+    // and a different epoch are all insufficient to publish an authority.
+    const rc::RCProductionProviderCapability empty_capability;
+    BOOST_CHECK(!PublishMatMulRCWinnerResealAuthority(
+        header, 100, block_target, "test:eligible", empty_capability,
+        backend, consensus, std::chrono::seconds{1}, started, started));
+    BOOST_CHECK(!PublishMatMulRCWinnerResealAuthority(
+        header, 100, block_target, "test:forged-label", capability,
+        backend, consensus, std::chrono::seconds{1}, started, started));
+    lt::ExactGemmBackend different_backend;
+    different_backend.gemm_s8s8 = &WrongGemmS8S8;
+    BOOST_CHECK(!PublishMatMulRCWinnerResealAuthority(
+        header, 100, block_target, "test:eligible", capability,
+        different_backend, consensus, std::chrono::seconds{1}, started,
+        started));
+    auto different_epoch{consensus};
+    different_epoch.nMatMulV4Dimension = 2048;
+    header.matmul_dim = 2048;
+    BOOST_CHECK(!PublishMatMulRCWinnerResealAuthority(
+        header, 100, block_target, "test:eligible", capability,
+        backend, different_epoch, std::chrono::seconds{1}, started,
+        started));
+    BOOST_CHECK_EQUAL(
+        GetMatMulRCWinnerAuthorityStats().rejected_not_production_ready,
+        4U);
+    BOOST_CHECK_EQUAL(GetMatMulRCWinnerAuthorityStats().entries, 0U);
+
+    // A once-valid authority cannot survive capability invalidation between
+    // the Solve and local-acceptance seams.
+    header.matmul_dim = 4096;
+    BOOST_REQUIRE(PublishMatMulRCWinnerResealAuthority(
+        header, 100, block_target, "test:eligible", capability,
+        backend, consensus, std::chrono::seconds{1}, started, started));
+    rc::ResetRCProductionCanaryForTest();
+    BOOST_CHECK(!ConsumeMatMulRCWinnerResealAuthority(
+        header, 100, consensus));
+    const auto stats{GetMatMulRCWinnerAuthorityStats()};
+    BOOST_CHECK_EQUAL(stats.consumed, 0U);
+    BOOST_CHECK_EQUAL(stats.invalidated_before_consume, 1U);
+    BOOST_CHECK_EQUAL(stats.entries, 0U);
+
+    ResetMatMulRCWinnerAuthorityForTest();
+    rc::ResetRCProductionCanaryForTest();
+}
+
+BOOST_AUTO_TEST_CASE(rc_winner_reseal_authority_expires_and_is_bounded)
+{
+    ResetMatMulRCWinnerAuthorityForTest();
+    rc::ResetRCProductionCanaryForTest();
+    const auto consensus{MakeWinnerAuthorityConsensus()};
+    const auto backend{MakeWinnerAuthorityBackend()};
+    const std::string provider{"test:bounded-device"};
+    const auto capability{MakeWinnerAuthorityCapability(
+        provider, backend, consensus)};
+    BOOST_REQUIRE(!capability.IsNull());
+    CBlockHeader header{MakeRCHeader(200)};
+    header.matmul_dim = 4096;
+    header.matmul_digest = uint256{1};
+    const arith_uint256 block_target{2};
+    const auto started{std::chrono::steady_clock::now()};
+
+    BOOST_REQUIRE(PublishMatMulRCWinnerResealAuthority(
+        header, 100, block_target, provider, capability, backend, consensus,
+        std::chrono::milliseconds{1}, started, started));
+    std::this_thread::sleep_for(std::chrono::milliseconds{5});
+    BOOST_CHECK(!ConsumeMatMulRCWinnerResealAuthority(
+        header, 100, consensus));
+    BOOST_CHECK_GE(GetMatMulRCWinnerAuthorityStats().expired, 1U);
+
+    ResetMatMulRCWinnerAuthorityForTest();
+    for (uint64_t nonce = 0; nonce < 17; ++nonce) {
+        header.nNonce64 = 300 + nonce;
+        BOOST_REQUIRE(PublishMatMulRCWinnerResealAuthority(
+            header, 100, block_target, provider, capability, backend,
+            consensus,
+            std::chrono::seconds{1}, started, started));
+    }
+    const auto stats{GetMatMulRCWinnerAuthorityStats()};
+    BOOST_CHECK_EQUAL(stats.entries, 16U);
+    BOOST_CHECK_EQUAL(stats.evicted, 1U);
+    ResetMatMulRCWinnerAuthorityForTest();
+    rc::ResetRCProductionCanaryForTest();
 }
 
 BOOST_AUTO_TEST_SUITE_END()

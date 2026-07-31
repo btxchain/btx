@@ -411,11 +411,22 @@ void MatMulVerifyWorker::WorkerLoop()
                           Priority::TipValidation
                     : matmul::v4::rc::RCAcceleratorScheduler::
                           Priority::SpeculativeValidation};
+            const auto episode_params{
+                matmul::v4::rc::ResolveRCEpisodeParams(
+                    m_params, job.height)};
+            const uint64_t workspace_bytes{
+                matmul::v4::rc::
+                    EstimateRCExactReplayWorkspaceBytes(
+                        episode_params)};
             accelerator_lease =
                 matmul::v4::rc::GetRCAcceleratorScheduler().Acquire(
                     device_priority, job.cancelled.get(),
                     strprintf("verify:%s:%d", hash.ToString(),
-                              job.height));
+                              job.height),
+                    /*external_cancelled=*/nullptr,
+                    matmul::v4::rc::RCAcceleratorScheduler::
+                        DEFAULT_MAX_QUEUE_WAIT,
+                    workspace_bytes);
             if (!accelerator_lease) {
                 // A scheduler cancellation is a local retryable outcome, not
                 // a consensus verdict. Run the same delivery-marker/source

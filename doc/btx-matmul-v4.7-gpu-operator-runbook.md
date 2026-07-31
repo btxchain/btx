@@ -39,17 +39,25 @@ Required healthy state includes:
 - selected provider is self-qualified and production eligible;
 - strict-device policy is active;
 - provider is not quarantined;
+- an unconfirmed mismatch reports `no-independent-provider` rather than
+  quarantining the sole healthy device;
 - the last validation is fully accelerated with zero CPU calls/fallbacks;
 - scheduler release-invariant violations are zero;
+- scheduler queue/capacity rejections and deadlines are understood; the
+  conservative request/reservation high-water remains within declared usable
+  capacity; provider-measured current/high-water values are treated as actual
+  allocation evidence only when `workspace_telemetry_samples` is nonzero;
 - candidate, winner-reseal, relay, and tip-validation lifecycle components
   have all been measured;
 - complete lifecycle tail latency, not one replay, fits the calibrated target.
 
 `complete_lifecycle_readiness.within_target_spacing` is an uncorrelated
 latest-component screen, not a measurement of one block. The stronger
-`operationally_ready` field also requires the production-golden and startup
-canary gates; it therefore remains false in this PR. Neither field is an
-activation vote or a substitute for sustained correlated p99 evidence.
+`operationally_ready` additionally requires one block-correlated end-to-end
+record, which the launch candidate does not manufacture from unrelated lane
+samples, so it remains false even if static hardware gates are later enabled.
+Neither field is an activation vote or a substitute for sustained correlated
+p99 evidence.
 
 The daemon's relay sample measures the monotonic interval from a newly accepted
 direct-tip header announcement to arrival of its complete body. It is published
@@ -60,30 +68,53 @@ trusted-mirror authority as hardware lifecycle evidence.
 
 ## Device mismatch or provider failure
 
-A strict device digest mismatch is classified
-`LocalAcceleratorFailure`. The node does not produce a consensus-invalid
-verdict, punish the peer, or cache a negative result. The provider is
-quarantined and further strict submissions to that provider are refused.
+A first strict device digest mismatch is classified
+`LocalAcceleratorFailure` / `unconfirmed-digest-mismatch`. The node does not
+produce a consensus-invalid verdict, punish the peer, cache a negative result,
+or quarantine the provider merely because it disagreed with an untrusted
+header commitment.
+
+If a different, independently canaried backend execution identity computes the
+same non-header digest, the header is `InvalidConsensus` and both healthy
+providers remain available. If the alternate reproduces the header, only the
+faulty provider is quarantined. If no independent provider exists, the block
+remains retryable in an explicit degraded state and the sole provider continues
+serving other headers.
 
 Recovery:
 
 1. Preserve the block as pending/retryable.
 2. Pause local mining and inspect the accelerator/driver.
 3. Repair or reset the device.
-4. Restart `btxd`, or restart with another qualified provider.
-5. Wait for qualification/canary completion and confirm clean telemetry before
+4. Retry on an independently canaried provider/device when registered. A
+   process restart by itself is not independent mismatch evidence.
+5. Restart only after repair/reset if the failed provider must be restored.
+6. Wait for qualification/canary completion and confirm clean telemetry before
    resuming service advertisement.
 
 Do not use automatic CPU replay as an inline remedy. CPU diagnostic replay is
-an operator-initiated dispute tool only. The current implementation does not
-claim same-process hot failover because the resolver owns one selected
-provider; a future multi-provider registry must preserve scheduler exclusivity,
-health isolation, and deterministic retry semantics.
+an operator-initiated dispute tool only. The bounded registry and deterministic
+adjudication are present, but production alternates are not registered until
+each independently addressable device/provider has its own exact production
+canary, opaque process capability, and resolver-bound physical-device execution
+identity. Until that binding exists, production independence returns false;
+free-form labels or thin callback wrappers cannot confirm a peer-invalid
+verdict.
+
+## Daemon lifecycle
+
+RC accelerator initialization occurs after Unix daemonization and before
+network service publication. `-daemon` and `-daemonwait` abort if resolver or
+canary state exists before `fork()`. Before deployment, run the opt-in real-CUDA
+functional lifecycle test in foreground, `-daemon`, and `-daemonwait` modes;
+the final activation evidence must additionally mine through the RC boundary
+and validate on a separately daemonized strict GPU node.
 
 ## Calibration and testing boundary
 
 Block-time and ASERT calibration must include winning candidate execution,
-winner reseal, relay, receiving-node validation, and every scheduler wait.
+winner reseal, the bounded local authority handoff (or any fallback local
+replay), relay, receiving-node validation, and every scheduler wait.
 Measure two-node p50/p95/p99/max under simultaneous mining, tip validation,
 speculation, IBD, and reorgs.
 

@@ -19,6 +19,8 @@
 #include <common/args.h>
 #include <common/system.h>
 #include <consensus/amount.h>
+#include <cuda/cuda_context.h>
+#include <cuda/matmul_v4_lt_tensor_gemm.h>
 #include <dandelion.h>
 #include <consensus/consensus.h>
 #include <dbwrapper.h>
@@ -47,6 +49,7 @@
 #include <matmul/accelerated_solver.h>
 #include <matmul/backend_capabilities.h>
 #include <matmul/exact_gemm_resolve.h>
+#include <matmul/matmul_v4_rc_accelerator_scheduler.h>
 #include <matmul/matmul_v4_rc_gkr.h>
 #include <matmul/matmul_v4_rc_production_canary.h>
 #include <net.h>
@@ -1295,6 +1298,14 @@ bool AppInitParameterInteraction(const ArgsManager& args)
         matmul_validation_mode != "trusted") {
         return InitError(_("MatMul validation mode on mainnet must be 'consensus' or explicitly configured 'trusted'. Economic/SPV modes skip MatMul authority and are unsafe."));
     }
+    if (matmul_validation_mode != "consensus" &&
+        matmul_validation_mode != "trusted" &&
+        matmul_validation_mode != "economic" &&
+        matmul_validation_mode != "spv") {
+        return InitError(strprintf(
+            _("Invalid -matmulvalidation value (%s). Valid values: consensus, trusted, economic, spv"),
+            matmul_validation_mode));
+    }
 
     const bool trusted_mirror_mode{matmul_validation_mode == "trusted"};
     if (trusted_mirror_mode &&
@@ -1429,111 +1440,12 @@ bool AppInitParameterInteraction(const ArgsManager& args)
     matmul::v4::rc::SetRCExactReplayExecutionPolicy(
         rc_execution_policy);
 
-    const bool rc_epoch_configured{
-        chainparams.GetConsensus().nMatMulRCHeight !=
-        std::numeric_limits<int32_t>::max()};
-    const bool production_rc_epoch_configured{
-        rc_epoch_configured &&
-        !chainparams.GetConsensus().fMatMulRCUseToyDims};
-    // Preserve the existing v3 consensus-tier service on networks where RC is
-    // disabled and on explicitly toy-dimension regtest epochs. Once a
-    // production-shape RC epoch is configured, the same unversioned bit is
-    // withheld unless this process is genuinely strict-device ready.
-    bool rc_strict_device_ready{!production_rc_epoch_configured};
-    std::string rc_provider{
-        production_rc_epoch_configured ? "not-probed" :
-        (rc_epoch_configured ? "toy-rc" : "rc-disabled")};
-    std::string rc_resolution_reason{
-        production_rc_epoch_configured ? "non-strict-mode" :
-        (rc_epoch_configured ? "toy-dimensions"
-                             : "current-network-v3-only")};
-    if (production_rc_epoch_configured &&
-        matmul_validation_mode == "consensus" &&
-        rc_execution_policy ==
-            matmul::v4::rc::RCExactReplayExecutionPolicy::StrictDevice) {
-        auto resolved{
-            matmul_v4::accel::ResolveExactGemmBackendForRC()};
-        rc_provider = resolved.provider;
-        rc_resolution_reason = resolved.reason;
-        const auto canary{
-            matmul::v4::rc::RunRCProductionStartupCanary(
-                resolved.provider, resolved.backend,
-                resolved.automatic_policy_eligible,
-                chainparams.GetConsensus(),
-                chainparams.GetConsensus().nMatMulRCHeight)};
-        // Re-resolve from the process cache so the public resolver telemetry
-        // and every later mining/validation caller observe the canary-bound
-        // production eligibility decision.
-        resolved = matmul_v4::accel::ResolveExactGemmBackendForRC();
-        rc_resolution_reason = resolved.reason + ":canary=" +
-            matmul::v4::rc::RCProductionCanaryOutcomeName(canary.outcome);
-        rc_strict_device_ready =
-            resolved.self_qualified && resolved.production_eligible &&
-            resolved.backend.gemm_s8s8 != nullptr &&
-            resolved.activation_ready;
-        if (!rc_strict_device_ready) {
-            InitWarning(strprintf(
-                _("MatMul RC strict-device provider is not ready "
-                  "(provider=%s, reason=%s, production_goldens=%d, "
-                  "startup_canary=%d). "
-                  "RC blocks will remain retryable "
-                  "on local execution failure and this node will not "
-                  "advertise MatMul consensus-validator service."),
-                rc_provider, rc_resolution_reason,
-                resolved.production_goldens_available,
-                resolved.startup_canary_passed));
-        }
-    }
-    LogPrintf(
-        "MatMul RC execution policy: %s provider=%s ready=%d reason=%s\n",
-        matmul::v4::rc::RCExactReplayExecutionPolicyName(
-            rc_execution_policy),
-        rc_provider, rc_strict_device_ready, rc_resolution_reason);
-
     // Validate invariant: nFastMineHeight must equal nMatMulAsertHeight on all
     // networks.  Misconfiguration silently breaks difficulty adjustment.
     if (chainparams.GetConsensus().fMatMulPOW &&
         chainparams.GetConsensus().nFastMineHeight != chainparams.GetConsensus().nMatMulAsertHeight) {
         return InitError(strprintf(_("CRITICAL: nFastMineHeight (%d) != nMatMulAsertHeight (%d). These MUST be equal for correct difficulty adjustment."),
             chainparams.GetConsensus().nFastMineHeight, chainparams.GetConsensus().nMatMulAsertHeight));
-    }
-
-    // Advertise MatMul validation tier services so peers can distinguish
-    // transcript-validating nodes from Phase-1-only economic nodes.
-    {
-        const auto clear_mask = static_cast<uint64_t>(NODE_MATMUL_CONSENSUS) |
-            static_cast<uint64_t>(NODE_MATMUL_TRUSTED_MIRROR) |
-            static_cast<uint64_t>(NODE_MATMUL_ECONOMIC);
-        uint64_t services = static_cast<uint64_t>(g_local_services) & ~clear_mask;
-        if (matmul_validation_mode == "consensus") {
-            if (rc_strict_device_ready) {
-                services |=
-                    static_cast<uint64_t>(NODE_MATMUL_CONSENSUS);
-            }
-        } else if (matmul_validation_mode == "trusted") {
-            // This is deliberately mutually exclusive with
-            // NODE_MATMUL_CONSENSUS. Service bits are only routing hints; the
-            // signed quorum remains the authority configured by the operator.
-            services |=
-                static_cast<uint64_t>(NODE_MATMUL_TRUSTED_MIRROR);
-        } else if (matmul_validation_mode == "economic") {
-            services |= static_cast<uint64_t>(NODE_MATMUL_ECONOMIC);
-        } else if (matmul_validation_mode == "spv") {
-            // Tier 3 SPV advertises neither consensus nor economic MatMul tier.
-        } else {
-            return InitError(strprintf(_("Invalid -matmulvalidation value (%s). Valid values: consensus, trusted, economic, spv"), matmul_validation_mode));
-        }
-        if (serve_attestations &&
-            has_local_attestation_signer &&
-            matmul_validation_mode == "consensus" &&
-            rc_strict_device_ready) {
-            services |= static_cast<uint64_t>(
-                NODE_MATMUL_ATTESTATION_ARCHIVE);
-        } else {
-            services &= ~static_cast<uint64_t>(
-                NODE_MATMUL_ATTESTATION_ARCHIVE);
-        }
-        g_local_services = static_cast<ServiceFlags>(services);
     }
 
     // Log the configured MatMul accelerator request at startup without
@@ -1777,6 +1689,27 @@ bool AppInitParameterInteraction(const ArgsManager& args)
     if (!CStats::parameterInteraction()) return false;
 
     return true;
+}
+
+bool CheckMatMulAcceleratorPreForkInvariant()
+{
+    const auto resolution{
+        matmul_v4::accel::ProbeLastRCExactGemmResolution()};
+    const auto canary{
+        matmul::v4::rc::GetLastRCProductionCanaryStatus()};
+    if (!resolution.resolved &&
+        canary.outcome ==
+            matmul::v4::rc::RCProductionCanaryOutcome::NotRun &&
+        !canary.attempted) {
+        return true;
+    }
+    return InitError(Untranslated(strprintf(
+        "MatMul accelerator pre-fork invariant failed "
+        "(resolver_ran=%d, canary=%s, canary_attempted=%d). "
+        "Accelerator readiness must run in the final daemon child.",
+        resolution.resolved,
+        matmul::v4::rc::RCProductionCanaryOutcomeName(canary.outcome),
+        canary.attempted)));
 }
 
 static bool LockDirectory(const fs::path& dir, bool probeOnly)
@@ -2068,6 +2001,186 @@ static ChainstateLoadResult InitAndLoadChainstate(
     return {status, error};
 };
 
+/** Resolve production RC accelerators only after Unix daemonization.
+ *
+ * CUDA, Metal, and other device runtimes are not fork-safe once initialized.
+ * AppInitParameterInteraction therefore limits itself to validating arguments
+ * and selecting the execution policy. This function performs the first
+ * provider probe, self-qualification, production canary, and readiness-bound
+ * service publication in the final daemon process.
+ */
+static bool InitializeMatMulRCReadinessPostDaemon(
+    const ArgsManager& args, const CChainParams& chainparams)
+{
+    // Only the final daemon process may hold canary-issued provider
+    // capabilities. Never retain a registry assembled before fork().
+    matmul::v4::rc::ClearRCExactReplayAlternateProviders();
+    const std::string matmul_validation_mode{
+        args.GetArg("-matmulvalidation", "consensus")};
+    const auto rc_execution_policy{
+        matmul::v4::rc::GetRCExactReplayExecutionPolicy()};
+    const bool rc_epoch_configured{
+        chainparams.GetConsensus().nMatMulRCHeight !=
+        std::numeric_limits<int32_t>::max()};
+    const bool production_rc_epoch_configured{
+        rc_epoch_configured &&
+        !chainparams.GetConsensus().fMatMulRCUseToyDims};
+
+    // Preserve the existing v3 consensus-tier service on networks where RC is
+    // disabled and on explicitly toy-dimension regtest epochs. Once a
+    // production-shape RC epoch is configured, the same unversioned bit is
+    // withheld unless this process is genuinely strict-device ready.
+    bool rc_strict_device_ready{!production_rc_epoch_configured};
+    std::string rc_provider{
+        production_rc_epoch_configured ? "not-probed" :
+        (rc_epoch_configured ? "toy-rc" : "rc-disabled")};
+    std::string rc_resolution_reason{
+        production_rc_epoch_configured ? "non-strict-mode" :
+        (rc_epoch_configured ? "toy-dimensions"
+                             : "current-network-v3-only")};
+    uint64_t rc_workspace_capacity_bytes{0};
+    uint64_t rc_workspace_required_bytes{0};
+    if (production_rc_epoch_configured &&
+        matmul_validation_mode == "consensus" &&
+        rc_execution_policy ==
+            matmul::v4::rc::RCExactReplayExecutionPolicy::StrictDevice) {
+        auto resolved{
+            matmul_v4::accel::ResolveExactGemmBackendForRC()};
+        rc_provider = resolved.provider;
+        rc_resolution_reason = resolved.reason;
+        const auto rc_episode_params{
+            matmul::v4::rc::ResolveRCEpisodeParams(
+                chainparams.GetConsensus(),
+                chainparams.GetConsensus().nMatMulRCHeight)};
+        rc_workspace_required_bytes =
+            matmul::v4::rc::EstimateRCExactReplayWorkspaceBytes(
+                rc_episode_params);
+        if (rc_provider.find("cuda") != std::string::npos) {
+            const auto probe{btx::cuda::ProbeCudaRuntime()};
+            if (probe.available) {
+                // Reserve 25% for the driver, concurrent non-RC allocations,
+                // allocator fragmentation, and backend-private scratch.
+                rc_workspace_capacity_bytes =
+                    probe.global_memory_bytes -
+                    probe.global_memory_bytes / 4;
+            }
+        } else if (rc_provider.find("metal") != std::string::npos) {
+            const auto probe{matmul_v4::metal::ProbeLtMetalArch()};
+            if (probe.available) {
+                rc_workspace_capacity_bytes =
+                    probe.recommended_working_set_bytes -
+                    probe.recommended_working_set_bytes / 4;
+            }
+        }
+        matmul::v4::rc::GetRCAcceleratorScheduler().
+            ConfigureWorkspaceCapacity(
+                rc_provider, rc_workspace_capacity_bytes);
+        const auto canary{
+            matmul::v4::rc::RunRCProductionStartupCanary(
+                resolved.provider, resolved.backend,
+                chainparams.GetConsensus(),
+                chainparams.GetConsensus().nMatMulRCHeight)};
+        // Re-resolve from the child process cache so public telemetry and
+        // every later mining/validation caller observe the canary-bound
+        // production eligibility decision.
+        resolved = matmul_v4::accel::ResolveExactGemmBackendForRC();
+        rc_resolution_reason = resolved.reason + ":canary=" +
+            matmul::v4::rc::RCProductionCanaryOutcomeName(canary.outcome);
+        rc_strict_device_ready =
+            resolved.self_qualified && resolved.production_eligible &&
+            resolved.backend.gemm_s8s8 != nullptr &&
+            resolved.activation_ready &&
+            matmul::v4::rc::RCExactReplayWorkspaceFits(
+                rc_episode_params,
+                rc_workspace_capacity_bytes);
+        if (rc_strict_device_ready) {
+            std::string capability_reason;
+            const auto capability{
+                matmul::v4::rc::GetRCProductionProviderCapability(
+                    resolved.provider, resolved.backend,
+                    chainparams.GetConsensus(),
+                    chainparams.GetConsensus().nMatMulRCHeight,
+                    &capability_reason)};
+            if (!capability.has_value() ||
+                !matmul::v4::rc::RegisterRCExactReplayAlternateProvider({
+                    .backend = resolved.backend,
+                    .provider = resolved.provider,
+                    .capability = capability.value_or(
+                        matmul::v4::rc::RCProductionProviderCapability{}),
+                }, &capability_reason)) {
+                rc_strict_device_ready = false;
+                rc_resolution_reason += ":capability=" +
+                    (capability_reason.empty()
+                         ? std::string{"unavailable"}
+                         : capability_reason);
+            }
+        }
+        if (!rc_strict_device_ready) {
+            InitWarning(strprintf(
+                _("MatMul RC strict-device provider is not ready "
+                  "(provider=%s, reason=%s, production_goldens=%d, "
+                  "startup_canary=%d, workspace_required=%llu, "
+                  "workspace_capacity=%llu). "
+                  "RC blocks will remain retryable "
+                  "on local execution failure and this node will not "
+                  "advertise MatMul consensus-validator service."),
+                rc_provider, rc_resolution_reason,
+                resolved.production_goldens_available,
+                resolved.startup_canary_passed,
+                static_cast<unsigned long long>(
+                    rc_workspace_required_bytes),
+                static_cast<unsigned long long>(
+                    rc_workspace_capacity_bytes)));
+        }
+    }
+    LogPrintf(
+        "MatMul RC execution policy: %s provider=%s ready=%d reason=%s "
+        "workspace_required=%llu workspace_capacity=%llu\n",
+        matmul::v4::rc::RCExactReplayExecutionPolicyName(
+            rc_execution_policy),
+        rc_provider, rc_strict_device_ready, rc_resolution_reason,
+        static_cast<unsigned long long>(
+            rc_workspace_required_bytes),
+        static_cast<unsigned long long>(
+            rc_workspace_capacity_bytes));
+
+    // Publish validation-tier services only after provider readiness is known.
+    // In particular, no parent process may advertise consensus or attestation
+    // archive service based on accelerator state inherited across fork().
+    const auto clear_mask =
+        static_cast<uint64_t>(NODE_MATMUL_CONSENSUS) |
+        static_cast<uint64_t>(NODE_MATMUL_TRUSTED_MIRROR) |
+        static_cast<uint64_t>(NODE_MATMUL_ECONOMIC) |
+        static_cast<uint64_t>(NODE_MATMUL_ATTESTATION_ARCHIVE);
+    uint64_t services{static_cast<uint64_t>(g_local_services) & ~clear_mask};
+    if (matmul_validation_mode == "consensus") {
+        if (rc_strict_device_ready) {
+            services |= static_cast<uint64_t>(NODE_MATMUL_CONSENSUS);
+        }
+    } else if (matmul_validation_mode == "trusted") {
+        services |= static_cast<uint64_t>(NODE_MATMUL_TRUSTED_MIRROR);
+    } else if (matmul_validation_mode == "economic") {
+        services |= static_cast<uint64_t>(NODE_MATMUL_ECONOMIC);
+    } else if (matmul_validation_mode != "spv") {
+        // Parameter interaction rejects this before daemonization; retain a
+        // defensive check so future callers cannot publish an undefined tier.
+        return InitError(strprintf(
+            _("Invalid -matmulvalidation value (%s). Valid values: consensus, trusted, economic, spv"),
+            matmul_validation_mode));
+    }
+
+    // FinalizeConfiguration has already derived and installed the signer in
+    // the child. Query that runtime state instead of copying sensitive key
+    // arguments again during service publication.
+    if (node::matmul_trusted::ServesAttestations() &&
+        node::matmul_trusted::HasLocalSigner() &&
+        matmul_validation_mode == "consensus" && rc_strict_device_ready) {
+        services |= static_cast<uint64_t>(NODE_MATMUL_ATTESTATION_ARCHIVE);
+    }
+    g_local_services = static_cast<ServiceFlags>(services);
+    return true;
+}
+
 bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
 {
     const ArgsManager& args = *Assert(node.args);
@@ -2104,6 +2217,9 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     }
     if (!init::StartLogging(args)) {
         // Detailed error printed inside StartLogging().
+        return false;
+    }
+    if (!InitializeMatMulRCReadinessPostDaemon(args, chainparams)) {
         return false;
     }
 

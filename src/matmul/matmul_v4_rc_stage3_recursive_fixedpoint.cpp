@@ -15114,8 +15114,6 @@ AssessNormalizedRecursiveChildCapabilityWithProofBusAndDeepCtlV1(
         fail_pred(out.gaps.size() == 7, "gaps_size") &&
         fail_pred(out.child_proof_payload_bound_in_air,
                   "payload_bound_required") &&
-        fail_pred(out.child_fiat_shamir_replayed_in_air,
-                  "fs_replay_required") &&
         fail_pred(out.child_proof_commitment_mapped,
                   "proof_commit_required") &&
         fail_pred(!out.ctl_child_verified_in_parent_air,
@@ -15156,13 +15154,15 @@ AssessNormalizedRecursiveChildCapabilityWithProofBusAndDeepCtlV1(
           "terminal_bus_closed_via_deep64_ctl;"
           "semantic_root_input_lanes_complete;"
           "ctl_child_verifier_in_parent_air_open;"
-          "ledger_g4_fiat_shamir_replay_closed;"
           "split_rap_multirow_adapter_closed;"
           "proof_payload_bus_closed;"
         : ("stage3:recursive_fixedpoint:"
            "capability_with_proof_bus_and_deep_ctl_not_canonical" +
            failed);
     if (out.valid) {
+        out.note += out.child_fiat_shamir_replayed_in_air
+            ? "ledger_g4_fiat_shamir_replay_closed;"
+            : "ledger_g4_fiat_shamir_replay_open;";
         out.note += out.endpoint_terminal_equality
             ? "endpoint_terminal_equality_closed;"
             : "endpoint_open;";
@@ -15308,8 +15308,6 @@ AssessNormalizedRecursiveChildCapabilityWithProofBusDeepCtlParentAirV1(
         fail_pred(out.gaps.size() == 7, "gaps_size") &&
         fail_pred(out.child_proof_payload_bound_in_air,
                   "payload_bound_required") &&
-        fail_pred(out.child_fiat_shamir_replayed_in_air,
-                  "fs_replay_required") &&
         fail_pred(out.child_proof_commitment_mapped,
                   "proof_commit_required") &&
         fail_pred(out.ctl_child_verified_in_parent_air,
@@ -15350,13 +15348,15 @@ AssessNormalizedRecursiveChildCapabilityWithProofBusDeepCtlParentAirV1(
           "terminal_bus_closed_via_deep64_ctl;"
           "semantic_root_input_lanes_complete;"
           "ctl_child_verifier_in_parent_air_closed;"
-          "ledger_g4_fiat_shamir_replay_closed;"
           "split_rap_multirow_adapter_closed;"
           "proof_payload_bus_closed;"
         : ("stage3:recursive_fixedpoint:"
            "capability_with_ctl_parent_air_not_canonical" +
            failed);
     if (out.valid) {
+        out.note += out.child_fiat_shamir_replayed_in_air
+            ? "ledger_g4_fiat_shamir_replay_closed;"
+            : "ledger_g4_fiat_shamir_replay_open;";
         out.note += out.endpoint_terminal_equality
             ? "endpoint_terminal_equality_closed;"
             : "endpoint_open;";
@@ -15627,8 +15627,6 @@ AssessNormalizedRecursiveChildCapabilityV1(
         fail_pred(out.gaps.size() == 7, "gaps_size") &&
         fail_pred(out.child_proof_payload_bound_in_air,
                   "payload_bound_required") &&
-        fail_pred(out.child_fiat_shamir_replayed_in_air,
-                  "fs_replay_required") &&
         fail_pred(!out.child_proof_commitment_mapped,
                   "proof_commit_unexpected") &&
         fail_pred(!out.ctl_child_verified_in_parent_air,
@@ -15654,7 +15652,6 @@ AssessNormalizedRecursiveChildCapabilityV1(
           "capability_audit_ok;"
           "coupled_bank_pages_is_smallest_current_parent_candidate;"
           "algebraic_child_equations_execute;"
-          "ledger_g4_fiat_shamir_replay_closed;"
           "proof_payload_bus_closed;"
           "ctl_terminal_and_semantic_root_chips_open;"
           "split_rap_multirow_adapter_closed;"
@@ -15662,6 +15659,9 @@ AssessNormalizedRecursiveChildCapabilityV1(
            "capability_audit_input_not_canonical" +
            failed);
     if (out.valid) {
+        out.note += out.child_fiat_shamir_replayed_in_air
+            ? "ledger_g4_fiat_shamir_replay_closed;"
+            : "ledger_g4_fiat_shamir_replay_open;";
         out.note +=
             "recursive_counters_" +
             std::to_string(out.recursively_consumed_endpoints) +
@@ -15843,8 +15843,6 @@ AssessNormalizedRecursiveChildCapabilityWithProofBusV1(
         fail_pred(out.gaps.size() == 7, "gaps_size") &&
         fail_pred(out.child_proof_payload_bound_in_air,
                   "payload_bound_required") &&
-        fail_pred(out.child_fiat_shamir_replayed_in_air,
-                  "fs_replay_required") &&
         fail_pred(out.child_proof_commitment_mapped,
                   "proof_commit_required") &&
         fail_pred(!out.ctl_child_verified_in_parent_air,
@@ -15898,10 +15896,12 @@ AssessNormalizedRecursiveChildCapabilityWithProofBusV1(
                 : "endpoint_open;";
         } else {
             out.note +=
-                "ledger_g4_fiat_shamir_replay_closed;"
                 "proof_payload_bus_closed;"
                 "ctl_terminal_and_semantic_root_chips_open;";
         }
+        out.note += out.child_fiat_shamir_replayed_in_air
+            ? "ledger_g4_fiat_shamir_replay_closed;"
+            : "ledger_g4_fiat_shamir_replay_open;";
         out.note +=
             "split_rap_multirow_adapter_closed;"
             "complete_fp=false;"

@@ -14,9 +14,20 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace matmul::v4::rc {
+
+struct RCEpisodeParams;
+
+/** Conservative complete ExactReplay tensor footprint for device admission. */
+[[nodiscard]] uint64_t
+EstimateRCExactReplayWorkspaceBytes(const RCEpisodeParams& params);
+
+/** Fail-closed production readiness predicate for a probed usable capacity. */
+[[nodiscard]] bool RCExactReplayWorkspaceFits(
+    const RCEpisodeParams& params, uint64_t capacity_bytes);
 
 /**
  * Process-wide owner for the scarce RC ExactReplay accelerator submitter.
@@ -38,11 +49,26 @@ public:
         TipValidation = 3,
     };
 
+    /**
+     * Explicit scheduler capacity policy. Each lane owns its reservation, so
+     * low-priority traffic cannot consume the slots needed by a tip validation
+     * or winner reseal. The sum is also the process-wide waiter bound. One
+     * active owner is tracked separately.
+     */
+    static constexpr std::array<uint64_t, 4> MAX_WAITERS_PER_LANE{
+        2, 2, 2, 2};
+    static constexpr uint64_t MAX_TOTAL_WAITERS{8};
+    static constexpr std::chrono::milliseconds DEFAULT_MAX_QUEUE_WAIT{
+        std::chrono::seconds{90}};
+
     struct LaneStats {
         uint64_t requests{0};
         uint64_t acquisitions{0};
         uint64_t completions{0};
         uint64_t cancelled_waits{0};
+        uint64_t timed_out_waits{0};
+        uint64_t queue_rejections{0};
+        uint64_t capacity_rejections{0};
         double last_queue_wait_s{0};
         double max_queue_wait_s{0};
         double last_execution_s{0};
@@ -54,10 +80,16 @@ public:
         uint64_t acquisitions{0};
         uint64_t completions{0};
         uint64_t cancelled_waits{0};
+        uint64_t timed_out_waits{0};
+        uint64_t queue_rejections{0};
+        uint64_t capacity_rejections{0};
         uint64_t preemption_requests{0};
         uint64_t release_invariant_violations{0};
         uint64_t queue_depth{0};
         uint64_t queue_high_water{0};
+        uint64_t queue_limit{MAX_TOTAL_WAITERS};
+        std::array<uint64_t, 4> lane_queue_limits{
+            MAX_WAITERS_PER_LANE};
         bool active{false};
         Priority active_priority{Priority::SpeculativeValidation};
         std::string active_label;
@@ -66,6 +98,15 @@ public:
         double max_queue_wait_s{0};
         double last_execution_s{0};
         double max_execution_s{0};
+        std::string workspace_provider;
+        uint64_t workspace_capacity_bytes{0};
+        uint64_t workspace_requested_bytes{0};
+        uint64_t workspace_reserved_bytes{0};
+        uint64_t workspace_request_high_water_bytes{0};
+        uint64_t workspace_current_bytes{0};
+        uint64_t workspace_high_water_bytes{0};
+        uint64_t workspace_telemetry_samples{0};
+        uint64_t workspace_allocation_failures{0};
         std::array<LaneStats, 4> lanes{};
         uint64_t authenticated_relay_samples{0};
         double last_authenticated_relay_s{0};
@@ -87,6 +128,7 @@ public:
         bool tip_validation_measured{false};
         bool complete_sample_set{false};
         bool within_target_spacing{false};
+        bool correlated_end_to_end_sample{false};
         bool hardware_evidence_gates_passed{false};
         bool operationally_ready{false};
         double target_spacing_s{0};
@@ -153,7 +195,37 @@ public:
     Lease Acquire(
         Priority priority, std::atomic_bool* preempt_latch,
         std::string label,
-        const std::atomic_bool* external_cancelled = nullptr);
+        const std::atomic_bool* external_cancelled = nullptr,
+        std::chrono::milliseconds max_queue_wait =
+            DEFAULT_MAX_QUEUE_WAIT,
+        uint64_t workspace_request_bytes = 0);
+
+    /** True only on the thread currently holding the exclusive lease. */
+    [[nodiscard]] bool CurrentThreadOwnsLease() const;
+
+    /**
+     * True only when the current thread owns the lease and its conservative
+     * reservation covers `required_bytes`. This prevents an outer zero-sized
+     * lease from bypassing central ExactReplay capacity admission.
+     */
+    [[nodiscard]] bool CurrentThreadLeaseCoversWorkspace(
+        uint64_t required_bytes) const;
+
+    /**
+     * Publish the selected provider's usable workspace capacity. Zero means
+     * unknown and is observable but not rejected here; strict production
+     * readiness remains responsible for failing closed on an unknown probe.
+     */
+    void ConfigureWorkspaceCapacity(std::string provider,
+                                    uint64_t capacity_bytes);
+
+    /**
+     * Provider-side measured workspace telemetry for the complete RC arena.
+     * The scheduler never substitutes its conservative admission estimate for
+     * an actual allocation measurement; zero samples means unavailable.
+     */
+    void RecordWorkspaceUsage(uint64_t current_bytes,
+                              bool allocation_failed = false);
 
     /** Wake cancelled waiters promptly during shutdown/tip change. */
     void NotifyCancellation();
@@ -197,6 +269,8 @@ private:
         const std::atomic_bool* external_cancelled{nullptr};
         std::string label;
         std::chrono::steady_clock::time_point queued{};
+        std::chrono::steady_clock::time_point deadline{};
+        uint64_t workspace_request_bytes{0};
     };
 
     bool Release(Priority priority, uint64_t token,
@@ -213,8 +287,11 @@ private:
     Priority m_active_priority{Priority::SpeculativeValidation};
     uint64_t m_active_token{0};
     std::atomic_bool* m_active_preempt_latch{nullptr};
+    std::thread::id m_active_owner_thread{};
     std::string m_active_label;
     std::chrono::steady_clock::time_point m_active_started{};
+    std::string m_workspace_provider;
+    uint64_t m_workspace_capacity_bytes{0};
     Stats m_stats;
 };
 

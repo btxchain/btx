@@ -582,13 +582,13 @@ BOOST_AUTO_TEST_CASE(
     const auto binary =
         rc::BuildRCStage3CoupledBankFullBinaryMirrorWitness(
             child_css, proofs, seeds, {58, 58});
-    BOOST_CHECK(!binary.valid);
+    BOOST_CHECK(binary.valid);
     BOOST_CHECK(binary.independent_child_seeds);
     BOOST_CHECK(binary.both_children_executed);
     BOOST_CHECK(binary.all_vcs_families_enabled);
     BOOST_CHECK(binary.lane_output_equality_same_trace);
     BOOST_CHECK(binary.bank_interval_join_same_trace);
-    BOOST_CHECK(!binary.under_column_cap);
+    BOOST_CHECK(binary.under_column_cap);
     BOOST_CHECK(!binary.parent_proof_emitted);
     BOOST_CHECK_EQUAL(binary.violations, 0U);
     BOOST_CHECK_EQUAL(binary.parent_output_words[0], 0U);
@@ -596,7 +596,7 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(
         binary.parent_cs.n_columns,
         binary.parent_output_column_base + 18);
-    BOOST_CHECK_GT(
+    BOOST_CHECK_LE(
         binary.parent_cs.n_columns,
         rc::kRCFri3AlgBatchMaxColumns);
     BOOST_TEST_MESSAGE(
@@ -606,9 +606,9 @@ BOOST_AUTO_TEST_CASE(
         << " constraints="
         << binary.parent_cs.constraints.size()
         << " violations=" << binary.violations
-        << " cap_excess="
-        << binary.parent_cs.n_columns -
-               rc::kRCFri3AlgBatchMaxColumns);
+        << " cap_headroom="
+        << static_cast<uint64_t>(rc::kRCFri3AlgBatchMaxColumns) -
+               binary.parent_cs.n_columns);
 
     auto changed_columns = binary.parent_columns;
     changed_columns[
@@ -729,7 +729,7 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(!narrow.parent_proof_emitted);
     BOOST_CHECK(!narrow.consensus_authority);
     BOOST_CHECK_EQUAL(narrow.reusable_hash_columns, 526U);
-    BOOST_CHECK_EQUAL(narrow.reusable_fold_bus_columns, 549U);
+    BOOST_CHECK_EQUAL(narrow.reusable_fold_bus_columns, 575U);
     BOOST_CHECK_EQUAL(narrow.terminal_bus_columns, 40U);
     BOOST_CHECK_EQUAL(narrow.scalar_rows, 512U);
     BOOST_CHECK_EQUAL(narrow.scalar_columns_count, 1044U);
@@ -817,19 +817,19 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(!unified.parent_proof_emitted);
     BOOST_CHECK(!unified.parent_proof_verified);
     BOOST_CHECK(!unified.consensus_authority);
-    BOOST_CHECK_EQUAL(unified.local_phase_columns, 1098U);
+    BOOST_CHECK_EQUAL(unified.local_phase_columns, 1150U);
     BOOST_CHECK_EQUAL(unified.fixed_columns, 662U);
     BOOST_CHECK_EQUAL(unified.selector_columns, 24U);
     BOOST_CHECK_EQUAL(unified.carry_columns, 18U);
-    BOOST_CHECK_EQUAL(unified.parent_columns_count, 1802U);
+    BOOST_CHECK_EQUAL(unified.parent_columns_count, 1854U);
     BOOST_CHECK_EQUAL(unified.parent_rows, 65536U);
-    BOOST_CHECK_EQUAL(unified.parent_constraints, 2624U);
-    BOOST_CHECK_EQUAL(unified.parent_max_degree, 3U);
-    BOOST_CHECK_EQUAL(unified.quotient_len, 131070U);
-    BOOST_CHECK_EQUAL(unified.proof_coefficients, 131072U);
-    BOOST_CHECK_EQUAL(unified.proof_lde, 2097152U);
+    BOOST_CHECK_EQUAL(unified.parent_constraints, 2760U);
+    BOOST_CHECK_EQUAL(unified.parent_max_degree, 4U);
+    BOOST_CHECK_EQUAL(unified.quotient_len, 196605U);
+    BOOST_CHECK_EQUAL(unified.proof_coefficients, 262144U);
+    BOOST_CHECK_EQUAL(unified.proof_lde, 4194304U);
     BOOST_CHECK_EQUAL(
-        unified.estimated_lde_cells, 3781165056ULL);
+        unified.estimated_lde_cells, 7780433920ULL);
     BOOST_CHECK_EQUAL(unified.violations, 0U);
     BOOST_CHECK_EQUAL(unified.parent_output_words[0], 0U);
     BOOST_CHECK_EQUAL(unified.parent_output_words[1], 8U);
@@ -846,11 +846,11 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(streaming.tile_rows, 4096U);
     BOOST_CHECK_EQUAL(streaming.passes, 5U);
     BOOST_CHECK_EQUAL(
-        streaming.dense_lde_cells, 3781165056ULL);
+        streaming.dense_lde_cells, 7780433920ULL);
     BOOST_CHECK_EQUAL(
-        streaming.peak_live_cells, 14786560ULL);
+        streaming.peak_live_cells, 15212544ULL);
     BOOST_CHECK_EQUAL(
-        streaming.external_work_cells, 11343495168ULL);
+        streaming.external_work_cells, 23341301760ULL);
     BOOST_CHECK(streaming.column_store_required);
     BOOST_CHECK(streaming.two_pass_row_merkle_required);
     BOOST_CHECK(!streaming.quotient_row_tiles_executable);

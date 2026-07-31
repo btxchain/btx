@@ -6,12 +6,14 @@
 
 #include <consensus/params.h>
 #include <logging.h>
+#include <matmul/matmul_v4_rc.h>
 #include <matmul/matmul_v4_rc_accel_policy.h>
 #include <matmul/matmul_v4_rc_production_canary.h>
 
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <limits>
 #include <utility>
 
 namespace matmul::v4::rc {
@@ -28,7 +30,63 @@ size_t LaneIndex(RCAcceleratorScheduler::Priority priority)
     return static_cast<size_t>(priority);
 }
 
+static_assert(
+    RCAcceleratorScheduler::MAX_WAITERS_PER_LANE[0] +
+            RCAcceleratorScheduler::MAX_WAITERS_PER_LANE[1] +
+            RCAcceleratorScheduler::MAX_WAITERS_PER_LANE[2] +
+            RCAcceleratorScheduler::MAX_WAITERS_PER_LANE[3] ==
+        RCAcceleratorScheduler::MAX_TOTAL_WAITERS,
+    "per-lane RC waiter reservations must equal the global bound");
+
+uint64_t SaturatingWorkspaceAdd(uint64_t a, uint64_t b)
+{
+    if (b > std::numeric_limits<uint64_t>::max() - a) {
+        return std::numeric_limits<uint64_t>::max();
+    }
+    return a + b;
+}
+
+uint64_t SaturatingWorkspaceMul(uint64_t a, uint64_t b)
+{
+    if (a != 0 && b > std::numeric_limits<uint64_t>::max() / a) {
+        return std::numeric_limits<uint64_t>::max();
+    }
+    return a * b;
+}
+
 } // namespace
+
+uint64_t EstimateRCExactReplayWorkspaceBytes(
+    const RCEpisodeParams& params)
+{
+    const uint64_t q{
+        SaturatingWorkspaceMul(params.n_q, params.d_head)};
+    const uint64_t context{
+        SaturatingWorkspaceMul(params.n_ctx, params.d_head)};
+    const uint64_t phase1{SaturatingWorkspaceAdd(
+        SaturatingWorkspaceAdd(q, SaturatingWorkspaceMul(2, context)), q)};
+
+    const uint64_t weight_matrix{
+        SaturatingWorkspaceMul(params.d_model, params.d_model)};
+    const uint64_t weights{SaturatingWorkspaceMul(
+        SaturatingWorkspaceMul(2, params.L_lyr), weight_matrix)};
+    const uint64_t activation{
+        SaturatingWorkspaceMul(params.b_seq, params.d_model)};
+    const uint64_t activations{SaturatingWorkspaceMul(
+        SaturatingWorkspaceMul(2, uint64_t{params.L_lyr} + 1),
+        activation)};
+    return std::max(
+        phase1, SaturatingWorkspaceAdd(weights, activations));
+}
+
+bool RCExactReplayWorkspaceFits(
+    const RCEpisodeParams& params, uint64_t capacity_bytes)
+{
+    const uint64_t required{
+        EstimateRCExactReplayWorkspaceBytes(params)};
+    return capacity_bytes != 0 && required != 0 &&
+        required <= capacity_bytes;
+}
 
 RCAcceleratorScheduler::Lease::Lease(
     RCAcceleratorScheduler* owner, Priority priority,
@@ -90,7 +148,9 @@ bool RCAcceleratorScheduler::IsFirst(
 RCAcceleratorScheduler::Lease
 RCAcceleratorScheduler::Acquire(
     Priority priority, std::atomic_bool* preempt_latch,
-    std::string label, const std::atomic_bool* external_cancelled)
+    std::string label, const std::atomic_bool* external_cancelled,
+    std::chrono::milliseconds max_queue_wait,
+    uint64_t workspace_request_bytes)
 {
     const auto queued{std::chrono::steady_clock::now()};
     auto waiter{std::make_shared<Waiter>()};
@@ -99,11 +159,38 @@ RCAcceleratorScheduler::Acquire(
     waiter->external_cancelled = external_cancelled;
     waiter->label = std::move(label);
     waiter->queued = queued;
+    waiter->deadline = queued +
+        std::max(max_queue_wait, std::chrono::milliseconds{0});
+    waiter->workspace_request_bytes = workspace_request_bytes;
 
     std::unique_lock<std::mutex> lock(m_mutex);
     waiter->sequence = m_next_sequence++;
     ++m_stats.requests;
-    ++m_stats.lanes[LaneIndex(priority)].requests;
+    auto& lane_stats{m_stats.lanes[LaneIndex(priority)]};
+    ++lane_stats.requests;
+    m_stats.workspace_requested_bytes = workspace_request_bytes;
+    m_stats.workspace_request_high_water_bytes =
+        std::max(m_stats.workspace_request_high_water_bytes,
+                 workspace_request_bytes);
+
+    const uint64_t lane_waiters{static_cast<uint64_t>(std::count_if(
+        m_waiters.begin(), m_waiters.end(),
+        [priority](const auto& queued_waiter) {
+            return queued_waiter->priority == priority;
+        }))};
+    if (m_waiters.size() >= MAX_TOTAL_WAITERS ||
+        lane_waiters >= MAX_WAITERS_PER_LANE[LaneIndex(priority)]) {
+        ++m_stats.queue_rejections;
+        ++lane_stats.queue_rejections;
+        return {};
+    }
+    if (workspace_request_bytes != 0 &&
+        m_workspace_capacity_bytes != 0 &&
+        workspace_request_bytes > m_workspace_capacity_bytes) {
+        ++m_stats.capacity_rejections;
+        ++lane_stats.capacity_rejections;
+        return {};
+    }
     m_waiters.push_back(waiter);
     m_stats.queue_depth = m_waiters.size();
     m_stats.queue_high_water =
@@ -142,8 +229,11 @@ RCAcceleratorScheduler::Acquire(
                 m_active_token = m_next_lease_token++;
             }
             m_active_preempt_latch = preempt_latch;
+            m_active_owner_thread = std::this_thread::get_id();
             m_active_label = waiter->label;
             m_active_started = started;
+            m_stats.workspace_reserved_bytes =
+                waiter->workspace_request_bytes;
             ++m_stats.acquisitions;
             auto& lane{m_stats.lanes[LaneIndex(priority)]};
             ++lane.acquisitions;
@@ -160,10 +250,62 @@ RCAcceleratorScheduler::Acquire(
             return Lease{
                 this, priority, m_active_token, wait_s, started};
         }
+        const auto now{std::chrono::steady_clock::now()};
+        if (now >= waiter->deadline) {
+            std::erase(m_waiters, waiter);
+            ++m_stats.timed_out_waits;
+            ++lane_stats.timed_out_waits;
+            m_stats.queue_depth = m_waiters.size();
+            lock.unlock();
+            m_cv.notify_all();
+            return {};
+        }
         // Cancellation flags are intentionally owned by callers, so poll at a
         // short interval in addition to explicit NotifyCancellation().
-        m_cv.wait_for(lock, std::chrono::milliseconds{25});
+        m_cv.wait_for(
+            lock,
+            std::min(
+                std::chrono::milliseconds{25},
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    waiter->deadline - now)));
     }
+}
+
+bool RCAcceleratorScheduler::CurrentThreadOwnsLease() const
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_active &&
+        m_active_owner_thread == std::this_thread::get_id();
+}
+
+bool RCAcceleratorScheduler::CurrentThreadLeaseCoversWorkspace(
+    uint64_t required_bytes) const
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return required_bytes != 0 && m_active &&
+        m_active_owner_thread == std::this_thread::get_id() &&
+        m_stats.workspace_reserved_bytes >= required_bytes;
+}
+
+void RCAcceleratorScheduler::ConfigureWorkspaceCapacity(
+    std::string provider, uint64_t capacity_bytes)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_workspace_provider = std::move(provider);
+    m_workspace_capacity_bytes = capacity_bytes;
+    m_stats.workspace_provider = m_workspace_provider;
+    m_stats.workspace_capacity_bytes = m_workspace_capacity_bytes;
+}
+
+void RCAcceleratorScheduler::RecordWorkspaceUsage(
+    uint64_t current_bytes, bool allocation_failed)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    ++m_stats.workspace_telemetry_samples;
+    m_stats.workspace_current_bytes = current_bytes;
+    m_stats.workspace_high_water_bytes =
+        std::max(m_stats.workspace_high_water_bytes, current_bytes);
+    if (allocation_failed) ++m_stats.workspace_allocation_failures;
 }
 
 bool RCAcceleratorScheduler::Release(
@@ -175,7 +317,8 @@ bool RCAcceleratorScheduler::Release(
     std::unique_lock<std::mutex> lock(m_mutex);
     if (!m_active || priority != m_active_priority ||
         token == 0 || token != m_active_token ||
-        started != m_active_started) {
+        started != m_active_started ||
+        m_active_owner_thread != std::this_thread::get_id()) {
         ++m_stats.release_invariant_violations;
         const bool active{m_active};
         const Priority active_priority{m_active_priority};
@@ -210,7 +353,9 @@ bool RCAcceleratorScheduler::Release(
     m_active = false;
     m_active_token = 0;
     m_active_preempt_latch = nullptr;
+    m_active_owner_thread = {};
     m_active_label.clear();
+    m_stats.workspace_reserved_bytes = 0;
     m_stats.active = false;
     m_stats.active_label.clear();
     m_stats.active_wall_s = 0;
@@ -233,6 +378,8 @@ RCAcceleratorScheduler::GetStats() const
     out.active = m_active;
     out.active_priority = m_active_priority;
     out.active_label = m_active_label;
+    out.workspace_provider = m_workspace_provider;
+    out.workspace_capacity_bytes = m_workspace_capacity_bytes;
     if (m_active) {
         out.active_wall_s =
             Seconds(std::chrono::steady_clock::now() - m_active_started);
@@ -279,7 +426,13 @@ RCAcceleratorScheduler::AssessLifecycle(double target_spacing_s) const
         production_canary.manifest_has_reviewed_goldens &&
         production_canary.activation_ready &&
         Consensus::BTX_MATMUL_V47_GPU_LIFECYCLE_GATE_RATIFIED;
-    out.operationally_ready = out.complete_sample_set &&
+    // Lane values are independent latest-component samples, not one
+    // block-correlated candidate-start-to-receiving-tip observation. Never
+    // convert them into an operational-readiness verdict. A future bounded
+    // record must bind every component to one exact header first.
+    out.correlated_end_to_end_sample = false;
+    out.operationally_ready = out.correlated_end_to_end_sample &&
+        out.complete_sample_set &&
         out.within_target_spacing &&
         out.hardware_evidence_gates_passed;
     if (!out.complete_sample_set) {
@@ -291,9 +444,11 @@ RCAcceleratorScheduler::AssessLifecycle(double target_spacing_s) const
     } else if (!out.hardware_evidence_gates_passed) {
         out.reason =
             "latest-component estimate is below target spacing but production goldens/startup canary remain unratified";
-    } else {
+    } else if (!out.correlated_end_to_end_sample) {
         out.reason =
-            "latest-component estimate and hardware gates pass; sustained correlated tail-latency evidence still required";
+            "latest-component estimate and hardware gates pass, but no block-correlated end-to-end sample exists";
+    } else {
+        out.reason = "correlated lifecycle and hardware evidence gates pass";
     }
     return out;
 }
@@ -358,6 +513,8 @@ bool RCAcceleratorScheduler::ResetStatsForTest()
     std::lock_guard<std::mutex> lock(m_mutex);
     if (m_active || !m_waiters.empty()) return false;
     m_stats = {};
+    m_stats.workspace_provider = m_workspace_provider;
+    m_stats.workspace_capacity_bytes = m_workspace_capacity_bytes;
     m_next_sequence = 0;
     m_next_lease_token = 1;
     return true;

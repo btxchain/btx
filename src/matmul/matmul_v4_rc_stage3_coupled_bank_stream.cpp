@@ -2218,11 +2218,11 @@ CurrentRCStage3CoupledBankStreamAudit()
     out.remaining =
         "the executable recursive V1 carries its full child tree and is not "
         "succinct; the bounded descendant-free proof step and full binary "
-        "bank-join witness are not one emitted artifact, and SHA "
-        "Fiat-Shamir/master-binding equations are outside AIR; the "
-        "two-child full mirror interval join is algebraically closed but "
-        "measures 70,974 columns and therefore exceeds the column cap; "
-        "four full-family children exceed the column cap; "
+        "bank-join witness are not one emitted and verified artifact; the "
+        "70,974-column two-child mirror now fits the backend cap, but proof "
+        "emission/verification, artifact integration, resource/performance "
+        "and equivalence evidence remain open; SHA Fiat-Shamir/master-binding "
+        "equations and full semantic closure remain outside AIR; "
         "CoupledBankPages must export the identical bank_page_byte_root";
     return out;
 }

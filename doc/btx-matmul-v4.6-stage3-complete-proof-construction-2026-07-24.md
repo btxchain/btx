@@ -2133,22 +2133,22 @@ and trace-root constraints with zero witness violations. A live heterogeneous
 binary construction now also executes both dual-Q128 children with independent
 seeds and equality-joins both lanes, contiguous interval endpoints and all
 eight SHA chaining words in the same trace. That join is correct but not
-proof-emittable: the real W=76 child relation produces 70,974 columns and
-67,471 constraints at 128 rows, exceeding the 16,384-column cap by 54,590
-columns. Row-time multiplexing alone still projects about 35.5K columns. The
-next fixed-point attempt must vertically stream reusable Merkle/verifier chips
-and compact the interval terminal bus; binary topology alone is insufficient.
-SHA Fiat--Shamir/master-binding also remains outside the AIR, so this step does
-not change the recursive or authority counts.
+yet proof-emittable: the real W=76 child relation produces 70,974 columns and
+67,471 constraints at 128 rows. That trace now fits the raised 1,048,576-column
+backend cap, but no parent proof artifact is emitted or verified and the
+resource/performance and equivalence campaigns remain open. Row-time
+multiplexing and the narrow fixed-point work below remain relevant to practical
+proving. SHA Fiat--Shamir/master-binding also remains outside the AIR, so this
+step does not change the recursive or authority counts.
 
 That vertical experiment now executes the expensive hash/fold families for all
 four ordered lanes through one reusable chip. It schedules 131,072 rows while
-holding physical width to 526 hash columns or 549 columns including the
+holding physical width to 526 hash columns or 575 columns including the
 fold-scalar dual-LogUp bus. A separate four-row, 40-column terminal AIR consumes
 proof-derived dual-OOD evaluations and enforces lane equality, interval
 contiguity, all eight SHA chaining words and the 18-word parent export with
 zero violations. The selected complete-parent planner is 2,184 columns, with
-1,639 columns reserved for DEEP/per-point/Fiat--Shamir. This demonstrates that
+1,140 columns reserved for unexecuted families. This demonstrates that
 vertical reuse solves the width problem for the landed families, but it is
 still two proof sites rather than one emitted recursive parent and therefore
 does not change authority.
@@ -2161,22 +2161,22 @@ materializes 1,520 consumer cells in 2,048 rows with zero violations. The
 combined schedule has 70,128 active rows inside a 131,072-row global trace and
 keeps 1,140 columns spare under the 2,184-column planner.
 
-Phase unification now packs two 549-column hash/fold lanes horizontally in each
-of two waves and closes as one constraint system: 65,536 rows, 1,802 columns,
-2,624 constraints, maximum degree three and zero witness violations. The
-layout uses 1,098 reusable phase columns, 662 dedicated public fixed columns,
+Phase unification now packs two 575-column hash/fold lanes horizontally in each
+of two waves and closes as one constraint system: 65,536 rows, 1,854 columns,
+2,760 constraints, maximum degree four and zero witness violations. The
+layout uses 1,150 reusable phase columns, 662 dedicated public fixed columns,
 24 scheduler selectors and 18 carried output words. Quadratic auxiliaries split
 the DEEP and per-point products, and a four-column selected-route auxiliary
 removes the cubic Merkle-routing residual. Every phase boundary and
 scalar/terminal output alias remains same-trace constrained, and the parent
 seed binds the child proofs, SHA public boundary, dimensions and output.
 
-The exact quotient length is 131,070, rounded to 131,072 coefficients and a
-2,097,152-point LDE. Dense materialization would still require
-3,781,165,056 extension-field cells, so the unchanged `2^28` screen correctly
+The exact quotient length is 196,605, rounded to 262,144 coefficients and a
+4,194,304-point LDE. Dense materialization would still require
+7,780,433,920 extension-field cells, so the unchanged `2^28` screen correctly
 prevents an unsafe prover launch. The executable streaming planner selects
-4,096-row tiles and five read/write passes. It estimates 14,786,560 peak live
-cells versus 11,343,495,168 externally read or written work cells. The plan
+4,096-row tiles and five read/write passes. It estimates 15,212,544 peak live
+cells versus 23,341,301,760 externally read or written work cells. The plan
 requires a disk-backed column store and two-pass row-Merkle construction.
 `quotient_row_tiles_executable`, `fri_fold_tiles_executable`, and
 `transcript_equivalence_proven` are all deliberately false: callback

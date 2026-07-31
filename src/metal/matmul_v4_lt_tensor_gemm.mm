@@ -337,6 +337,8 @@ LtMetalArchProbe ProbeLtMetalArch()
     }
     out.available = true;
     out.device_name = ctx.device_name;
+    out.recommended_working_set_bytes =
+        static_cast<uint64_t>(ctx.device.recommendedMaxWorkingSetSize);
     out.metal4_tensor_ops_compile_ok = ctx.compile_ok;
 
     // API/shader compilation is not silicon identity. Metal 4 MPP compiles and

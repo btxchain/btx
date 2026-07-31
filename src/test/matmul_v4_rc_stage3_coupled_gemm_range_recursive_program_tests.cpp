@@ -69,7 +69,10 @@ rc::RCStage3CoupledGemmDotPin DotPin()
     pin.logical_rows =
         pin.contraction_size * rc::kRCMxBlockLen;
     pin.n_rows = 64;
-    pin.n_coeffs = pin.n_rows;
+    // Match the production dot-product builders: the quotient domain carries
+    // two coefficients per trace row.  A half-sized fixture makes the pin
+    // commitment fail before the recursive-program constraints are tested.
+    pin.n_coeffs = 2 * pin.n_rows;
     pin.column_roots.resize(
         rc::kRCStage3CoupledGemmColumns);
     for (uint32_t i = 0;

@@ -1585,7 +1585,7 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(
         capability.child_proof_payload_bound_in_air);
     BOOST_CHECK(
-        capability.child_fiat_shamir_replayed_in_air);
+        !capability.child_fiat_shamir_replayed_in_air);
     BOOST_CHECK(
         !capability.child_proof_commitment_mapped);
     BOOST_CHECK(
@@ -1616,7 +1616,9 @@ BOOST_AUTO_TEST_CASE(
     BOOST_REQUIRE_EQUAL(capability.gaps.size(), 7U);
     {
         // Living AssessNormalizedRecursiveChildCapabilityV1 after
-        // ProofRows / ledger-g4 FS / Split-RAP local adapter close:
+        // ProofRows / Split-RAP local adapter close. Ledger G4 stays open
+        // while active V8 and the V10 ownership evidence use different
+        // Fiat-Shamir domains:
         // open = ChildProofCommitmentBus, CtlChildVerifierAndTerminalBus,
         // NormalizedSemanticRootAlgHash, EndpointTerminalEquality (4).
         // Closed chips stay present_in_parent_air without inventing authority.
@@ -1670,13 +1672,13 @@ BOOST_AUTO_TEST_CASE(
             }
         }
         BOOST_CHECK(payload_gap_present);
-        BOOST_CHECK(fs_gap_present);
+        BOOST_CHECK(!fs_gap_present);
         BOOST_CHECK(split_rap_gap_present);
         BOOST_CHECK(commit_gap_open);
         BOOST_CHECK(ctl_gap_open);
         BOOST_CHECK(semantic_gap_open);
         BOOST_CHECK(endpoint_gap_open);
-        BOOST_CHECK_EQUAL(open_gaps, 4U);
+        BOOST_CHECK_EQUAL(open_gaps, 5U);
     }
     BOOST_CHECK_EQUAL(
         capability.recursively_consumed_endpoints, 0U);
@@ -1714,7 +1716,7 @@ BOOST_AUTO_TEST_CASE(
             execution, reordered_gap, &why));
 
     auto invented_fs = capability;
-    invented_fs.child_fiat_shamir_replayed_in_air = false;
+    invented_fs.child_fiat_shamir_replayed_in_air = true;
     BOOST_CHECK(
         !fp::ValidateNormalizedRecursiveChildCapabilityV1(
             joined, interpreter, migrated.row_pin,
@@ -1740,7 +1742,7 @@ BOOST_AUTO_TEST_CASE(
         BOOST_CHECK(residuals.deep64_ctl_terminal_attachable);
         BOOST_CHECK(
             residuals.ctl_child_verifier_in_parent_air_attachable);
-        BOOST_CHECK(residuals.ledger_g4_child_fs_replay_closed);
+        BOOST_CHECK(!residuals.ledger_g4_child_fs_replay_closed);
         BOOST_CHECK(!residuals.child_proof_payload_bus_open);
         BOOST_CHECK(!residuals.split_rap_multirow_parent_adapter_open);
         BOOST_CHECK(!residuals.endpoint_terminal_equality_open);
@@ -1758,7 +1760,10 @@ BOOST_AUTO_TEST_CASE(
             residuals.note.find("recursive_counters_0_of_52") !=
             std::string::npos);
         BOOST_CHECK(
-            residuals.note.find("canary_only_blocks_fs_authority") !=
+            residuals.note.find("ledger_g4_child_fs_replay_open") !=
+            std::string::npos);
+        BOOST_CHECK(
+            residuals.note.find("canary_only_rejected_as_authority") !=
             std::string::npos);
         static_assert(fp::kNormalizedEndpointTerminalEqualityExecutable);
         BOOST_CHECK(
@@ -2615,7 +2620,8 @@ BOOST_AUTO_TEST_CASE(
     {
         // Living AssessNormalizedRecursiveChildCapabilityWithProofBusV1 after
         // ProofFieldBus + TerminalBusCommitmentBus: commit + semantic close.
-        // SplitRap / payload / FS already present. Remaining open codes:
+        // SplitRap / payload are present; ledger G4 FS replay stays open.
+        // Remaining open codes:
         // CtlChildVerifierAndTerminalBus (host-only CTL) and
         // EndpointTerminalEquality (attach exercised on a composition copy).
         uint32_t open_gaps = 0;
@@ -2668,13 +2674,13 @@ BOOST_AUTO_TEST_CASE(
             }
         }
         BOOST_CHECK(payload_gap_present);
-        BOOST_CHECK(fs_gap_present);
+        BOOST_CHECK(!fs_gap_present);
         BOOST_CHECK(split_rap_gap_present);
         BOOST_CHECK(commit_gap_present);
         BOOST_CHECK(semantic_gap_present);
         BOOST_CHECK(!ctl_gap_present);
         BOOST_CHECK(endpoint_gap_open);
-        BOOST_CHECK_EQUAL(open_gaps, 2U);
+        BOOST_CHECK_EQUAL(open_gaps, 3U);
     }
     BOOST_CHECK_MESSAGE(
         fp::ValidateNormalizedRecursiveChildCapabilityWithProofBusV1(
@@ -2690,7 +2696,8 @@ BOOST_AUTO_TEST_CASE(
 
     // Fullest living capability path on a dedicated composition copy:
     // ProofFieldBus + Deep64 CTL terminal + CTL-in-parent-AIR +
-    // EndpointTerminalEquality → open_gaps == 0. CompleteFP / Authority stay
+    // EndpointTerminalEquality closes all local attachment gaps; ledger G4
+    // remains open, so open_gaps == 1. CompleteFP / Authority stay
     // false (regression pins below).
     {
         fp::FoldBusComposition full_joined = joined;
@@ -2733,7 +2740,7 @@ BOOST_AUTO_TEST_CASE(
                     ++open_gaps;
                 }
             }
-            BOOST_CHECK_EQUAL(open_gaps, 0U);
+            BOOST_CHECK_EQUAL(open_gaps, 1U);
         }
         BOOST_CHECK(
             capability_full.note.find(
@@ -2756,8 +2763,8 @@ BOOST_AUTO_TEST_CASE(
             !rc::kRCStage3RelationClosureRecursiveChildrenExecutable);
         BOOST_TEST_MESSAGE(capability_full.note);
 
-        // Regression: CTL-in-parent without endpoint attach leaves exactly one
-        // living open gap (EndpointTerminalEquality).
+        // Regression: CTL-in-parent without endpoint attach leaves exactly two
+        // living open gaps (FiatShamirReplayAir and EndpointTerminalEquality).
         {
             fp::FoldBusComposition ctl_only = joined;
             const auto ctl_only_air =
@@ -2784,7 +2791,7 @@ BOOST_AUTO_TEST_CASE(
                     ++open_gaps;
                 }
             }
-            BOOST_CHECK_EQUAL(open_gaps, 1U);
+            BOOST_CHECK_EQUAL(open_gaps, 2U);
             BOOST_CHECK(
                 capability_ctl_only.note.find("endpoint_open") !=
                 std::string::npos);
@@ -4609,7 +4616,7 @@ BOOST_AUTO_TEST_CASE(
             fp::AssessNarrowBytecodePerPointJoinBudgetV1(
                 base, table);
         BOOST_REQUIRE_MESSAGE(budget.valid, budget.note);
-        BOOST_CHECK(budget.p2_fs_replay_closed);
+        BOOST_CHECK(!budget.p2_fs_replay_closed);
         BOOST_CHECK(budget.projected_columns_narrow);
         BOOST_CHECK_EQUAL(budget.rows_needed, rows_needed);
         BOOST_CHECK(!budget.rows_fit_without_pad);
@@ -4776,9 +4783,9 @@ BOOST_AUTO_TEST_CASE(
         kNarrowCols;
     BOOST_CHECK_LT(kNarrowCols + bytecode_cols, 1024U);
     BOOST_CHECK(
-        rc::recursive_parent_air::
-            AssessChildFsReplayClosureV1()
-                .closed);
+        !rc::recursive_parent_air::
+             AssessChildFsReplayClosureV1()
+                 .closed);
 
     const fp::NarrowBytecodeHierarchicalAttachPlanV1 hier =
         fp::PlanNarrowBytecodeHierarchicalAttachV1(
@@ -4898,7 +4905,7 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(scheduled.node_count, 6U);
     BOOST_CHECK(scheduled.all_nodes_representable);
     BOOST_CHECK(scheduled.all_composed_scheduled);
-    BOOST_CHECK(scheduled.p2_fs_replay_closed);
+    BOOST_CHECK(!scheduled.p2_fs_replay_closed);
     BOOST_CHECK(!scheduled.complete_verifier_mirror);
     BOOST_CHECK(!scheduled.all_l1_attached);
     BOOST_TEST_MESSAGE(scheduled.note);
@@ -4913,9 +4920,9 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(executed.l1_attached, executed.l1_count);
     BOOST_CHECK_GE(executed.l1_count, 2U);
     BOOST_CHECK(executed.all_composed_scheduled);
-    BOOST_CHECK(executed.p2_fs_replay_closed);
-    // complete_verifier_mirror earned below when absolute AIR-mirrored join
-    // closes; scheduled path (attach_l1=false) must stay false.
+    BOOST_CHECK(!executed.p2_fs_replay_closed);
+    // Absolute AIR-mirrored quotient joins are necessary but cannot earn a
+    // complete verifier mirror while ledger G4 replay remains open.
     BOOST_CHECK(!scheduled.complete_verifier_mirror);
 
     uint32_t free_l1 = 0;
@@ -4993,8 +5000,8 @@ BOOST_AUTO_TEST_CASE(
     BOOST_TEST_MESSAGE(executed.quotient_join.note);
     BOOST_TEST_MESSAGE(executed.quotient_join.air_mirror.note);
     BOOST_TEST_MESSAGE(executed.note);
-    // Absolute parent binding + AIR mirror earn runtime
-    // complete_verifier_mirror; Ready constexprs stay false.
+    // Absolute parent binding + AIR mirror close the quotient join, but G4
+    // keeps the complete verifier mirror and Ready constexprs false.
     BOOST_CHECK(!fp::kNarrowBytecodeShardQuotientJoinReady);
     if (executed.quotient_join.parent_extracted) {
         BOOST_TEST_MESSAGE(
@@ -5009,7 +5016,7 @@ BOOST_AUTO_TEST_CASE(
             BOOST_REQUIRE_MESSAGE(
                 executed.quotient_join.air_mirrored,
                 executed.quotient_join.air_mirror.note);
-            BOOST_CHECK(executed.complete_verifier_mirror);
+            BOOST_CHECK(!executed.complete_verifier_mirror);
             BOOST_CHECK(
                 executed.quotient_join.air_mirror
                     .absolute_parent_bound);

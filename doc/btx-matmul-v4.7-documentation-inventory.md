@@ -6,9 +6,9 @@ and vendored LevelDB/secp256k1 documentation.
 
 Inventory totals:
 
-- documentation-like files: **568**
-- MatMul/ExactReplay/proof-related files: **224**
-- MatMul-related files reviewed or explicitly classified: **224**
+- documentation-like files: **569**
+- MatMul/ExactReplay/proof-related files: **225**
+- MatMul-related files reviewed or explicitly classified: **225**
 - MatMul-related files still requiring review: **0**
 
 Current and superseded policy documents are considered reviewed when they
@@ -230,6 +230,7 @@ MatMul transition claim.
 | `doc/btx-matmul-v4.6-stage3-sha256d-hash-model-split-2026-07-25.md` | MatMul-related; reviewed against canonical roadmap |
 | `doc/btx-matmul-v4.6-stage3-threat-model-qstar-2026-07-26.md` | MatMul-related; reviewed against canonical roadmap |
 | `doc/btx-matmul-v4.6-stage3-v1-security-target-2026-07-27.md` | MatMul-related; reviewed against canonical roadmap |
+| `doc/btx-matmul-v4.7-code-readiness-resolution-2026-07-31.md` | MatMul-related; reviewed against canonical roadmap |
 | `doc/btx-matmul-v4.7-documentation-inventory.md` | MatMul-related; reviewed against canonical roadmap |
 | `doc/btx-matmul-v4.7-gpu-operator-runbook.md` | MatMul-related; reviewed against canonical roadmap |
 | `doc/btx-matmul-v4.7-gpu-readiness-gates-2026-07-31.md` | MatMul-related; reviewed against canonical roadmap |

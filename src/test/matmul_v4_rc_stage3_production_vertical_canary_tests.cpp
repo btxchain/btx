@@ -246,9 +246,12 @@ BOOST_AUTO_TEST_CASE(
         report.produce_status ==
             rc::RCStage3ProduceStatus::ProverFailed,
         why);
+    // The normalized builder now advances through semantic child intake and
+    // fails closed at the next real fixed-point boundary while committing the
+    // fold-bus columns.  Keep this canary pinned to that deepest reached gate.
     BOOST_CHECK_MESSAGE(
         why.find(
-            "recursive_semantic_child_consumption_open") !=
+            "fold_bus_precommit") !=
             std::string::npos,
         why);
     BOOST_CHECK(winner.block.matrix_c_data.empty());

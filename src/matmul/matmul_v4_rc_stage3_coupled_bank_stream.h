@@ -224,8 +224,9 @@ using RCStage3CoupledBankStreamDualIntervalAirProof =
  * preprocessed parent columns in the same trace.
  *
  * This object intentionally retains prover columns for measurement/mutation
- * tests. It is not yet a proof artifact: committing its ~16K-column trace is
- * the remaining memory/performance step.
+ * tests. Its 70,974-column trace fits the current backend cap, but it is not
+ * yet a proof artifact: proof emission/verification, artifact integration,
+ * resource evidence and semantic/transcript closure remain open.
  */
 struct RCStage3CoupledBankFullBinaryMirrorWitness {
     uint16_t version{kRCStage3CoupledBankStreamVersion};
