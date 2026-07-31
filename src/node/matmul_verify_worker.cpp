@@ -35,14 +35,20 @@ MatMulVerifyWorker::~MatMulVerifyWorker()
     Stop();
 }
 
-bool MatMulVerifyWorker::Enqueue(Job& job)
+MatMulVerifyWorker::EnqueueResult MatMulVerifyWorker::Enqueue(
+    Job& job,
+    EnqueueMode mode)
 {
     Assume((job.block != nullptr) != (job.header != nullptr));
     const uint256 hash{job.GetHeader().GetHash()};
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        if (m_stopped) return false;
+        if (m_stopped) return EnqueueResult::Stopped;
         if (const auto it{m_pending.find(hash)}; it != m_pending.end()) {
+            if (mode == EnqueueMode::NewOnly ||
+                it->second->job.cancelled->load(std::memory_order_relaxed)) {
+                return EnqueueResult::Deferred;
+            }
             // A full body arriving behind a header-first job joins the same
             // pure header verdict. Its completion still re-enters ordinary
             // block validation, which alone can authenticate chainwork.
@@ -57,8 +63,9 @@ bool MatMulVerifyWorker::Enqueue(Job& job)
                 it->second->job.priority = job.priority;
             }
             job = Job{};
-            return true;
+            return EnqueueResult::Joined;
         }
+        if (mode == EnqueueMode::JoinOnly) return EnqueueResult::Deferred;
         if (job.priority == Priority::AuthenticatedTipChild &&
             (!job.cancelled ||
              !job.cancelled->load(std::memory_order_relaxed))) {
@@ -75,9 +82,21 @@ bool MatMulVerifyWorker::Enqueue(Job& job)
             // including that retry, and the replay checks cancellation at
             // layer/round command-buffer boundaries.
             for (const auto& [pending_hash, pending] : m_pending) {
-                if (pending_hash == hash || !pending->running) continue;
-                if (static_cast<uint8_t>(pending->job.priority) >=
-                    static_cast<uint8_t>(Priority::AuthenticatedTipChild)) {
+                if (pending_hash == hash || !pending->running ||
+                    pending->body_joined) {
+                    continue;
+                }
+                const bool lower_priority{
+                    static_cast<uint8_t>(pending->job.priority) <
+                    static_cast<uint8_t>(
+                        Priority::AuthenticatedTipChild)};
+                const bool body_preempts_equal_speculation{
+                    job.block && pending->job.IsHeaderOnly() &&
+                    !pending->body_joined &&
+                    pending->job.priority ==
+                        Priority::AuthenticatedTipChild};
+                if (!lower_priority &&
+                    !body_preempts_equal_speculation) {
                     continue;
                 }
                 pending->job.cancelled->store(
@@ -89,6 +108,9 @@ bool MatMulVerifyWorker::Enqueue(Job& job)
         }
         auto pending{std::make_shared<Pending>()};
         pending->job = std::move(job);
+        // Full-body validation owns acceptance bookkeeping and must never be
+        // preempted as header-only speculation.
+        pending->body_joined = pending->job.block != nullptr;
         pending->sequence = m_next_sequence++;
         m_queue.push_back(pending);
         m_pending.emplace(hash, pending);
@@ -98,7 +120,7 @@ bool MatMulVerifyWorker::Enqueue(Job& job)
         }
     }
     m_cv.notify_one();
-    return true;
+    return EnqueueResult::Enqueued;
 }
 
 bool MatMulVerifyWorker::Cancel(const uint256& hash)
@@ -282,14 +304,21 @@ void MatMulVerifyWorker::WorkerLoop()
             MatMulRecomputeSingleFlight sf(hash);
             if (sf.IsLeader()) {
                 ok = verify_pure();
-                sf.SetResult(ok); // publish before ~sf releases waiters
+                // Cancellation means no verdict. Publishing the cancellation
+                // result would poison followers and the persistent header
+                // memo, especially when a valid replay reports false solely
+                // because the cancellation boundary fired.
+                if (!job.cancelled->load(std::memory_order_relaxed)) {
+                    sf.SetResult(ok); // publish before ~sf releases waiters
+                }
             } else if (const auto leader_result{sf.LeaderResult()}) {
                 ok = *leader_result; // sketch already Put() on an accepted block
             } else {
                 // Leader exited without publishing: decide ourselves.
                 ok = verify_pure();
             }
-            if (!(carrier_missing && !ok)) {
+            if (!job.cancelled->load(std::memory_order_relaxed) &&
+                !(carrier_missing && !ok)) {
                 CacheMatMulEncDrVerdict(hash, ok);
             }
             LogDebug(BCLog::NET, "matmul async verify: block %s height %d encdr_ok=%d carrier_missing=%d\n",

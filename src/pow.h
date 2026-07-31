@@ -563,6 +563,9 @@ bool CanStartMatMulRCVerification(uint32_t pending_verifications, uint32_t work_
                                   const Consensus::Params& params, int32_t reference_height = -1);
 bool ConsumeGlobalMatMulPhase2Budget(uint32_t max_global_per_minute, uint32_t count, std::chrono::steady_clock::time_point now);
 bool ConsumeGlobalMatMulRCBudget(uint32_t max_global_per_minute, uint32_t count, std::chrono::steady_clock::time_point now);
+/** Roll back an RC budget debit only when admission failed before work began.
+ *  `charged_at` prevents a delayed rollback from decrementing a later window. */
+void RefundGlobalMatMulRCBudget(uint32_t count, std::chrono::steady_clock::time_point charged_at);
 MatMulSolvePipelineStats ProbeMatMulSolvePipelineStats();
 void ResetMatMulSolvePipelineStats();
 MatMulGpuPreHashScanStats ProbeMatMulGpuPreHashScanStats();

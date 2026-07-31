@@ -66,6 +66,22 @@ public:
         AuthenticatedTipChild = 2,
     };
 
+    enum class EnqueueMode : uint8_t {
+        //! Add a new job, or join an existing non-cancelled same-hash job.
+        JoinOrEnqueue,
+        //! Header admission: never attach accounting to an existing job.
+        NewOnly,
+        //! Body join: never start unaccounted work if the header job vanished.
+        JoinOnly,
+    };
+
+    enum class EnqueueResult : uint8_t {
+        Enqueued,
+        Joined,
+        Deferred,
+        Stopped,
+    };
+
     struct Job {
         std::shared_ptr<const CBlock> block;
         //! Height the block validates at (= prev->nHeight + 1), resolved by the
@@ -107,14 +123,17 @@ public:
                                 std::function<bool(const CBlock&, int32_t, std::optional<int64_t>)> verify_for_test = nullptr);
     ~MatMulVerifyWorker(); // Stop() + join
 
-    /** Try to enqueue a job. On success the job is moved-from and true is
-     *  returned. On failure (worker stopped) the job is LEFT INTACT and false
-     *  is returned — the caller must fall back to the synchronous path (e.g.
-     *  by invoking the completion itself). An authenticated-tip child
+    /** Try to enqueue or join a job. On Enqueued/Joined the job is moved-from.
+     *  On Deferred/Stopped it is left intact. Deferred is deliberately
+     *  distinct from shutdown: callers must never interpret a cancelled
+     *  same-hash job or a failed JoinOnly as permission to run Q*-scale work
+     *  synchronously on the P2P message thread. An authenticated-tip child
      *  preempts lower-priority in-flight speculation so a valid admission
      *  ticket cannot reserve the sole device lane indefinitely. Threads are
      *  started lazily. */
-    bool Enqueue(Job& job);
+    EnqueueResult Enqueue(
+        Job& job,
+        EnqueueMode mode = EnqueueMode::JoinOrEnqueue);
 
     /** Cancel queued/running speculative work for one header hash. */
     bool Cancel(const uint256& hash);
