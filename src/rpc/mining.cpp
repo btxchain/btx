@@ -1550,11 +1550,11 @@ static UniValue BuildBackendRuntimeProfile(
             "device_architecture",
             production_canary.provider_identity.device_architecture);
         canary.pushKV(
-            "driver_api_version",
-            production_canary.provider_identity.driver_api_version);
+            "driver_identity",
+            production_canary.provider_identity.driver_identity);
         canary.pushKV(
-            "runtime_version",
-            production_canary.provider_identity.runtime_version);
+            "runtime_identity",
+            production_canary.provider_identity.runtime_identity);
         canary.pushKV(
             "epoch_activation_height",
             production_canary.epoch.activation_height);
@@ -5841,8 +5841,8 @@ static RPCHelpMan getmininginfo()
                                     {RPCResult::Type::STR, "provider", "Resolved provider label"},
                                     {RPCResult::Type::STR, "provider_family", "Canonical provider family"},
                                     {RPCResult::Type::STR, "device_architecture", "Public architecture class; never a device serial or host identifier"},
-                                    {RPCResult::Type::NUM, "driver_api_version", "Driver API version bound by the manifest"},
-                                    {RPCResult::Type::NUM, "runtime_version", "Runtime version bound by the manifest"},
+                                    {RPCResult::Type::STR, "driver_identity", "Public driver API or OS-build identity bound by the manifest"},
+                                    {RPCResult::Type::STR, "runtime_identity", "Public device-runtime or OS-release identity bound by the manifest"},
                                     {RPCResult::Type::NUM, "epoch_activation_height", "Activation height bound by the manifest"},
                                     {RPCResult::Type::NUM, "epoch_profile", "RC profile bound by the manifest"},
                                     {RPCResult::Type::NUM, "transcript_version", "RC transcript version bound by the manifest"},

@@ -26,8 +26,8 @@ rc::RCProductionProviderIdentity Provider()
     rc::RCProductionProviderIdentity out;
     out.provider_family = "cuda";
     out.device_architecture = "sm_test";
-    out.driver_api_version = 12080;
-    out.runtime_version = 12080;
+    out.driver_identity = "12080";
+    out.runtime_identity = "12080";
     out.complete = true;
     out.reason = "complete";
     return out;
@@ -65,13 +65,32 @@ BOOST_AUTO_TEST_CASE(committed_manifest_is_explicitly_fail_closed)
     BOOST_CHECK(rc::FindRCProductionGolden(Provider(), Epoch(), manifest) == nullptr);
 }
 
+BOOST_AUTO_TEST_CASE(provider_identity_probe_is_public_and_fail_closed)
+{
+    const auto unknown{rc::ProbeRCProductionProviderIdentity("unsupported_provider")};
+    BOOST_CHECK(!unknown.complete);
+    BOOST_CHECK_EQUAL(unknown.reason, "provider_runtime_identity_unavailable");
+
+    const auto metal{rc::ProbeRCProductionProviderIdentity("metal_int8_exact")};
+#if defined(__APPLE__)
+    BOOST_CHECK_MESSAGE(metal.complete, metal.reason);
+    BOOST_CHECK_EQUAL(metal.provider_family, "metal");
+    BOOST_CHECK(!metal.device_architecture.empty());
+    BOOST_CHECK(!metal.driver_identity.empty());
+    BOOST_CHECK(!metal.runtime_identity.empty());
+#else
+    BOOST_CHECK(!metal.complete);
+    BOOST_CHECK_EQUAL(metal.reason, "provider_runtime_identity_unavailable");
+#endif
+}
+
 BOOST_AUTO_TEST_CASE(manifest_match_binds_provider_runtime_and_epoch)
 {
     const std::vector<rc::RCProductionGoldenManifestEntry> manifest{Golden()};
     BOOST_REQUIRE(rc::FindRCProductionGolden(Provider(), Epoch(), manifest) != nullptr);
 
     auto provider{Provider()};
-    ++provider.runtime_version;
+    provider.runtime_identity = "12090";
     BOOST_CHECK(rc::FindRCProductionGolden(provider, Epoch(), manifest) == nullptr);
     provider = Provider();
     provider.device_architecture = "sm_other";

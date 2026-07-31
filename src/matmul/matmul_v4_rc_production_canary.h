@@ -31,8 +31,8 @@ namespace matmul::v4::rc {
 struct RCProductionProviderIdentity {
     std::string provider_family;
     std::string device_architecture;
-    uint32_t driver_api_version{0};
-    uint32_t runtime_version{0};
+    std::string driver_identity;
+    std::string runtime_identity;
     bool complete{false};
     std::string reason;
 };

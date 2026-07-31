@@ -136,13 +136,17 @@ committed production manifest is empty and no matching canary can run.
 The startup/epoch canary mechanism itself is implemented. It binds a strict
 production replay to provider family, public device architecture class,
 driver/runtime ABI, activation height, profile, transcript, and complete
-episode parameters. Its committed production-golden manifest is intentionally
-empty, so no provider can become production-eligible. An identity-complete
-CUDA provider reports `missing_golden`; providers whose common resolver does
-not yet expose a stable driver/runtime fingerprint report
-`provider_identity_unavailable`. What remains is reviewed evidence, the
-remaining public identity probes, and completed provider passes—not invention
-of another canary mechanism.
+episode parameters. CUDA binds its public compute-capability class and numeric
+driver/runtime API versions. Metal binds its public GPU architecture class and
+the OS build/release that distributes the Metal driver and runtime; it never
+records a device name, serial, hostname, or account identifier. The committed
+production-golden manifest is intentionally empty, so an identity-complete
+CUDA or Metal provider reports `missing_golden` and cannot become
+production-eligible. Provider families whose common resolver does not yet
+expose a stable public driver/runtime fingerprint report
+`provider_identity_unavailable`. What remains is reviewed evidence, any
+additional provider-family identity probes, and completed provider passes—not
+invention of another canary mechanism.
 
 The repository contains useful 100-run M4 Max and sanitized Blackwell-class
 CUDA production evidence, but neither is an independently reproduced

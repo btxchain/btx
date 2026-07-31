@@ -6,6 +6,7 @@
 
 #include <consensus/params.h>
 #include <cuda/cuda_context.h>
+#include <cuda/matmul_v4_lt_tensor_gemm.h>
 #include <logging.h>
 #include <matmul/matmul_v4_rc_scale.h>
 
@@ -13,6 +14,10 @@
 #include <limits>
 #include <mutex>
 #include <utility>
+
+#if defined(__APPLE__)
+#include <sys/sysctl.h>
+#endif
 
 namespace matmul::v4::rc {
 namespace {
@@ -34,8 +39,8 @@ bool ProviderEqual(const RCProductionProviderIdentity& a,
     return a.complete && b.complete &&
         a.provider_family == b.provider_family &&
         a.device_architecture == b.device_architecture &&
-        a.driver_api_version == b.driver_api_version &&
-        a.runtime_version == b.runtime_version;
+        a.driver_identity == b.driver_identity &&
+        a.runtime_identity == b.runtime_identity;
 }
 
 bool EpochEqual(const RCProductionEpochIdentity& a,
@@ -89,6 +94,21 @@ std::string ProviderFamily(const std::string& provider)
     return provider;
 }
 
+#if defined(__APPLE__)
+std::string ReadPublicSysctlString(const char* name)
+{
+    size_t size{0};
+    if (sysctlbyname(name, nullptr, &size, nullptr, 0) != 0 || size <= 1) {
+        return {};
+    }
+    std::string out(size, '\0');
+    if (sysctlbyname(name, out.data(), &size, nullptr, 0) != 0) return {};
+    out.resize(size);
+    while (!out.empty() && out.back() == '\0') out.pop_back();
+    return out;
+}
+#endif
+
 } // namespace
 
 const std::vector<RCProductionGoldenManifestEntry>&
@@ -117,16 +137,39 @@ ProbeRCProductionProviderIdentity(const std::string& resolved_provider)
         out.device_architecture = "sm_" +
             std::to_string(probe.compute_capability_major) +
             std::to_string(probe.compute_capability_minor);
-        out.driver_api_version = probe.driver_api_version;
-        out.runtime_version = probe.runtime_version;
+        out.driver_identity = std::to_string(probe.driver_api_version);
+        out.runtime_identity = std::to_string(probe.runtime_version);
         out.complete = !out.device_architecture.empty() &&
-            out.driver_api_version != 0 && out.runtime_version != 0;
+            probe.driver_api_version != 0 && probe.runtime_version != 0;
         out.reason = out.complete ? "complete"
                                   : "cuda_driver_or_runtime_version_missing";
         return out;
     }
 
-    // These provider boundaries do not yet expose a stable driver/runtime ABI
+#if defined(__APPLE__)
+    if (out.provider_family == "metal") {
+        const auto arch{matmul_v4::metal::ProbeLtMetalArch()};
+        if (!arch.available || arch.name_class_string.empty() ||
+            arch.name_class_string == "unknown") {
+            out.reason = "metal_architecture_class_unavailable";
+            return out;
+        }
+        out.device_architecture = arch.name_class_string;
+        // Apple distributes the Metal user runtime and GPU driver with the OS.
+        // These public build/release identifiers change across driver/runtime
+        // updates without exposing the device name, serial, host or account.
+        out.driver_identity = ReadPublicSysctlString("kern.osversion");
+        out.runtime_identity = ReadPublicSysctlString("kern.osrelease");
+        out.complete = !out.driver_identity.empty() &&
+            !out.runtime_identity.empty();
+        out.reason = out.complete ? "complete"
+                                  : "metal_driver_or_runtime_build_missing";
+        return out;
+    }
+#endif
+
+    // These remaining provider boundaries do not yet expose a stable
+    // architecture plus driver/runtime ABI
     // fingerprint to this common resolver. They remain usable for experiments
     // and ordinary self-qualification, but cannot become automatic production
     // providers until that public probe is implemented and a matching manifest
@@ -294,14 +337,14 @@ RCProductionCanaryStatus RunRCProductionStartupCanary(
 
     LogPrintf(
         "MatMul RC production canary: outcome=%s provider=%s family=%s "
-        "arch=%s driver=%u runtime=%u epoch_height=%d profile=%u "
+        "arch=%s driver=%s runtime=%s epoch_height=%d profile=%u "
         "transcript=%u manifest=%s wall=%.3fs device_macs=%llu "
         "cpu_fallbacks=%llu\n",
         RCProductionCanaryOutcomeName(out.outcome), out.provider,
         out.provider_identity.provider_family,
         out.provider_identity.device_architecture,
-        out.provider_identity.driver_api_version,
-        out.provider_identity.runtime_version,
+        out.provider_identity.driver_identity,
+        out.provider_identity.runtime_identity,
         out.epoch.activation_height, out.epoch.profile,
         out.epoch.transcript_version, out.manifest_entry_id, out.wall_s,
         static_cast<unsigned long long>(out.acceleration.device_macs),
