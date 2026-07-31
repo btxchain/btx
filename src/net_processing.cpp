@@ -162,6 +162,12 @@ static constexpr double MATMUL_SKETCH_RECV_BUCKET_MAX{8.0};
 static constexpr double MATMUL_CARRIER_SERVE_BUCKET_MAX{16.0};
 static constexpr size_t MATMUL_CARRIER_SERVE_GLOBAL_BYTES_PER_SEC{size_t{12} * 1024 * 1024};
 static constexpr double MATMUL_CARRIER_RECV_BUCKET_MAX{8.0};
+/** RC admission sidecars are tiny, but unknown-hash spam allocates quarantine
+ * state. Bound messages before store lookup; reconnect-resistant netgroup
+ * limiting is additionally enforced by RCAdmissionStore. Exhausting this
+ * bucket is explicit protocol abuse and discourages the peer. */
+static constexpr double MATMUL_RCADMIT_RECV_BUCKET_MAX{8.0};
+static constexpr auto MATMUL_RCADMIT_RECV_REFILL{15s};
 static_assert(MAX_RCCARRIER_PAYLOAD_SIZE >= matmul::v4::rc::kRCFreivaldsCarrierMaxSerializedBytes,
               "the rccarrier transport ceiling must admit any in-bounds carrier");
 /** Maximum depth of blocks we're willing to serve as compact blocks to peers
@@ -585,6 +591,10 @@ struct Peer {
     std::map<uint256, std::chrono::microseconds> m_matmul_carrier_served GUARDED_BY(NetEventsInterface::g_msgproc_mutex);
     double m_matmul_carrier_recv_tokens GUARDED_BY(NetEventsInterface::g_msgproc_mutex){MATMUL_CARRIER_RECV_BUCKET_MAX};
     std::chrono::microseconds m_matmul_carrier_recv_last_refill GUARDED_BY(NetEventsInterface::g_msgproc_mutex){0us};
+    /** Per-connection RCADMIT ingress limit. The store separately retains an
+     * unknown-ticket submission budget keyed by netgroup across reconnects. */
+    double m_matmul_rcadmit_recv_tokens GUARDED_BY(NetEventsInterface::g_msgproc_mutex){MATMUL_RCADMIT_RECV_BUCKET_MAX};
+    std::chrono::microseconds m_matmul_rcadmit_recv_last_refill GUARDED_BY(NetEventsInterface::g_msgproc_mutex){0us};
 
     explicit Peer(NodeId id, ServiceFlags our_services, bool is_inbound, const CNetAddr& addr)
         : m_id{id}
@@ -8069,15 +8079,113 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                        static_cast<int32_t>(next_height64));
         })};
         if (!rc_next_height_active) return;
+
+        // Bound arbitrary-hash messages before any header lookup or store
+        // mutation. Unlike large best-effort payloads, repeatedly exhausting
+        // this tiny-message bucket is unambiguous sidecar spam.
+        {
+            const auto now_bucket{GetTime<std::chrono::microseconds>()};
+            if (peer->m_matmul_rcadmit_recv_last_refill != 0us) {
+                const auto elapsed{
+                    now_bucket - peer->m_matmul_rcadmit_recv_last_refill};
+                if (elapsed > 0us) {
+                    const double refill{
+                        static_cast<double>(count_microseconds(elapsed)) /
+                        static_cast<double>(count_microseconds(
+                            std::chrono::microseconds{
+                                MATMUL_RCADMIT_RECV_REFILL}))};
+                    peer->m_matmul_rcadmit_recv_tokens =
+                        std::min<double>(
+                            MATMUL_RCADMIT_RECV_BUCKET_MAX,
+                            peer->m_matmul_rcadmit_recv_tokens + refill);
+                }
+            }
+            peer->m_matmul_rcadmit_recv_last_refill = now_bucket;
+            if (peer->m_matmul_rcadmit_recv_tokens < 1.0) {
+                Misbehaving(*peer, "rcadmit message rate exceeded");
+                return;
+            }
+            peer->m_matmul_rcadmit_recv_tokens -= 1.0;
+        }
+
+        // Authenticate before allocating the full admission capacity whenever
+        // the header is already indexed. Unknown hashes enter only the small,
+        // separately rate-limited quarantine. The height check prevents a
+        // known pre-RC header from being used to fill validated capacity.
+        std::optional<CBlockHeader> known_rc_header;
+        const CBlockIndex* known_rc_index{nullptr};
+        bool known_rc_is_ibd{false};
+        bool known_irrelevant_header{false};
+        {
+            LOCK(cs_main);
+            const CBlockIndex* pindex{
+                m_chainman.m_blockman.LookupBlockIndex(ticket.block_hash)};
+            if (pindex != nullptr) {
+                const CBlockIndex* active_tip{m_chainman.ActiveTip()};
+                const bool near_tip{
+                    active_tip != nullptr &&
+                    pindex->nHeight >= active_tip->nHeight - 2 &&
+                    pindex->nHeight <=
+                        active_tip->nHeight + MATMUL_RC_NEAR_TIP_DEPTH};
+                const bool eligible_parent{
+                    pindex->pprev != nullptr &&
+                    pindex->pprev->nAuthenticatedChainWork ==
+                        pindex->pprev->nChainWork};
+                const bool unverified{
+                    (pindex->nStatus &
+                     (BLOCK_FAILED_MASK | BLOCK_EXACT_REPLAY_VERIFIED)) == 0 &&
+                    !LookupMatMulEncDrVerdict(ticket.block_hash).has_value()};
+                if (m_chainparams.GetConsensus().IsMatMulRCFamilyActive(
+                        pindex->nHeight) &&
+                    near_tip && eligible_parent && unverified) {
+                    known_rc_header = pindex->GetBlockHeader();
+                    known_rc_index = pindex;
+                    known_rc_is_ibd =
+                        m_chainman.IsInitialBlockDownload();
+                } else {
+                    known_irrelevant_header = true;
+                }
+            }
+        }
+        if (known_irrelevant_header) return;
+        // A running single-flight job has already spent a ticket (possibly
+        // from another source). Additional known-header sidecars cannot make
+        // that job more admissible and must not accumulate one validated entry
+        // per Sybil netgroup for the same hash. A later full body joins the
+        // existing job without another admission charge.
+        if (known_rc_header && m_matmul_verify_worker &&
+            m_matmul_verify_worker->Contains(ticket.block_hash)) {
+            return;
+        }
+        const auto now{std::chrono::steady_clock::now()};
         const auto result{
             WITH_LOCK(m_matmul_rc_admission_mutex,
-                return m_matmul_rc_admission_store.Remember(
-                    ticket, pfrom.nKeyedNetGroup,
-                    std::chrono::steady_clock::now()))};
+                return known_rc_header
+                    ? m_matmul_rc_admission_store.RememberKnown(
+                          ticket, *known_rc_header, pfrom.nKeyedNetGroup,
+                          m_chainparams.GetConsensus().powLimit, now)
+                    : m_matmul_rc_admission_store.Remember(
+                          ticket, pfrom.nKeyedNetGroup, now))};
+        if (result == node::RCAdmissionStore::RememberResult::Invalid) {
+            Misbehaving(*peer, "invalid rcadmit ticket for known header");
+            return;
+        }
+        if (result == node::RCAdmissionStore::RememberResult::RateLimited) {
+            Misbehaving(*peer, "rcadmit netgroup rate exceeded");
+            return;
+        }
         LogDebug(BCLog::NET,
                  "matmul: rcadmit hash=%s peer=%d result=%u\n",
                  ticket.block_hash.ToString(), pfrom.GetId(),
                  static_cast<unsigned>(result));
+        // If the header preceded its valid sidecar, retry the same header-first
+        // admission path now. This is essential to let a later valid candidate
+        // supersede an invalid candidate planted for the hash.
+        if (result == node::RCAdmissionStore::RememberResult::Stored &&
+            known_rc_header && known_rc_index != nullptr) {
+            MaybeStartMatMulRCHeaderVerification(
+                pfrom, *known_rc_index, *known_rc_header, known_rc_is_ibd);
+        }
         return;
     }
 
