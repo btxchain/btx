@@ -7,6 +7,7 @@
 #include <hash.h>
 
 #include <algorithm>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -193,6 +194,13 @@ AttestationStore::AttestationStore(StoreConfig config)
         throw std::invalid_argument{
             "trusted ExactReplay store capacity is below quorum capacity"};
     }
+    if (m_config.max_blocks == std::numeric_limits<size_t>::max() ||
+        m_config.threshold - 1 >
+            std::numeric_limits<size_t>::max() -
+                m_config.max_attestations) {
+        throw std::invalid_argument{
+            "trusted ExactReplay store staging capacity overflows"};
+    }
     if (m_config.ttl <= std::chrono::milliseconds::zero()) {
         throw std::invalid_argument{
             "trusted ExactReplay store TTL must be positive"};
@@ -251,7 +259,14 @@ AddResult AttestationStore::Add(
             ++m_stats.duplicates;
             return AddResult::Duplicate;
         }
-        if (!MakeRoomLocked(key)) {
+        const size_t existing_signatures{
+            existing_bucket == m_buckets.end()
+                ? 0
+                : existing_bucket->second.attestations.size()};
+        const bool incoming_reaches_quorum{
+            existing_signatures < m_config.threshold &&
+            existing_signatures + 1 >= m_config.threshold};
+        if (!MakeRoomLocked(key, incoming_reaches_quorum)) {
             ++m_stats.rejected;
             ++m_stats.capacity_rejections;
             return AddResult::Capacity;
@@ -393,24 +408,90 @@ void AttestationStore::PruneExpiredLocked(Clock::time_point now)
     }
 }
 
-bool AttestationStore::MakeRoomLocked(const BlockKey& incoming)
+bool AttestationStore::MakeRoomLocked(
+    const BlockKey& incoming, bool incoming_reaches_quorum)
 {
-    const bool is_new_block{m_buckets.count(incoming) == 0};
-    while ((is_new_block && m_buckets.size() >= m_config.max_blocks) ||
-           m_attestation_count >= m_config.max_attestations) {
-        auto oldest{m_buckets.end()};
+    const auto would_exceed_base_capacity = [this, &incoming] {
+        const bool is_new_block{m_buckets.count(incoming) == 0};
+        return m_buckets.size() + (is_new_block ? 1 : 0) >
+                   m_config.max_blocks ||
+               m_attestation_count + 1 > m_config.max_attestations;
+    };
+
+    while (would_exceed_base_capacity()) {
+        // Partial buckets are best-effort. Evict them oldest-first before
+        // considering the durable completed-quorum set.
+        auto oldest_partial{m_buckets.end()};
         for (auto it = m_buckets.begin(); it != m_buckets.end(); ++it) {
-            if (it->first.height == incoming.height &&
-                it->first.hash == incoming.hash) {
+            if (!(it->first < incoming) && !(incoming < it->first)) continue;
+            if (it->second.attestations.size() >=
+                m_config.threshold) {
                 continue;
             }
-            if (oldest == m_buckets.end() ||
-                it->second.updated < oldest->second.updated) {
-                oldest = it;
+            if (oldest_partial == m_buckets.end() ||
+                it->second.updated < oldest_partial->second.updated) {
+                oldest_partial = it;
             }
         }
-        if (oldest == m_buckets.end()) return false;
-        EraseLocked(oldest, false);
+        if (oldest_partial != m_buckets.end()) {
+            EraseLocked(oldest_partial, false);
+            continue;
+        }
+
+        if (incoming_reaches_quorum) {
+            // A new completed quorum must be able to advance a long-running
+            // mirror after max_blocks sequential blocks. Replacement is
+            // permitted only on the vote that completes the incoming quorum;
+            // minority votes can never remove completed authority.
+            auto oldest_quorum{m_buckets.end()};
+            for (auto it = m_buckets.begin(); it != m_buckets.end(); ++it) {
+                if (!(it->first < incoming) && !(incoming < it->first)) {
+                    continue;
+                }
+                if (it->second.attestations.size() <
+                    m_config.threshold) {
+                    continue;
+                }
+                if (oldest_quorum == m_buckets.end() ||
+                    it->second.updated < oldest_quorum->second.updated) {
+                    oldest_quorum = it;
+                }
+            }
+            if (oldest_quorum == m_buckets.end()) return false;
+            EraseLocked(oldest_quorum, false);
+            continue;
+        }
+
+        // If completed quorums consume the base capacity, retain one bounded
+        // partial candidate so it can collect the remaining votes. A different
+        // partial arrival will replace this bucket above. The final vote must
+        // return the store to the configured base limits by evicting the
+        // oldest completed quorum.
+        const bool incoming_exists{m_buckets.count(incoming) != 0};
+        const size_t incoming_signatures{
+            incoming_exists
+                ? m_buckets.find(incoming)->second.attestations.size()
+                : 0};
+        const size_t partial_blocks{
+            static_cast<size_t>(std::count_if(
+                m_buckets.begin(), m_buckets.end(),
+                [this](const auto& entry) {
+                    return entry.second.attestations.size() <
+                           m_config.threshold;
+                })) +
+            (incoming_exists ? 0 : 1)};
+        const size_t staged_signatures{
+            incoming_signatures + 1};
+        const size_t attestation_staging_limit{
+            m_config.max_attestations + m_config.threshold - 1};
+        if (partial_blocks == 1 &&
+            staged_signatures < m_config.threshold &&
+            m_buckets.size() + (incoming_exists ? 0 : 1) <=
+                m_config.max_blocks + 1 &&
+            m_attestation_count + 1 <= attestation_staging_limit) {
+            return true;
+        }
+        return false;
     }
     return true;
 }

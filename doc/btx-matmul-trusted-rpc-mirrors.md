@@ -1,5 +1,8 @@
 # MatMul v4.7 trusted RPC/archive mirrors
 
+Canonical transition and activation policy:
+[`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md).
+
 ## Purpose and trust boundary
 
 MatMul Profile 1 ExactReplay is intentionally expensive. A deployment that
@@ -55,11 +58,16 @@ can arrive from any peer because only the configured signature matters.
 - `-matmulvalidation=trusted` performs the trusted-mirror policy, advertises
   `NODE_MATMUL_TRUSTED_MIRROR`, and never advertises
   `NODE_MATMUL_CONSENSUS`.
+- Signing keys and `-matmulattestationserve=1` are rejected at startup on
+  every non-`consensus` role. A mirror can relay/import statements but can
+  never become an authority from stale local metadata.
 - The archive-provider and trusted-consumer bits are deliberately different.
   Both are unauthenticated routing hints; signatures remain mandatory.
 
 Trusted mode is accepted on mainnet only with a valid nonempty signer set and
-threshold. `economic` and `spv` remain prohibited on mainnet.
+threshold, and only for RC Profile 1. Profile 2 statements cannot be produced
+or consumed by this protocol. `economic` and `spv` remain prohibited on
+mainnet.
 
 ## Example: one GPU archive and three HA RPC mirrors
 
@@ -75,6 +83,9 @@ matmulrcexecution=strict-device
 matmultrustedpubkey=02...compressed-public-key
 matmulattestationsignerkeyfile=/secure/btx/matmul-attestor.wif
 matmulattestationserve=1
+# Required when this archive must bootstrap mirrors at every RC height:
+# generic script assumevalid must not skip the archive's local ExactReplay.
+assumevalid=0
 prune=0
 ```
 
@@ -89,6 +100,9 @@ connect=<gpu-archive-address>
 server=1
 prune=0
 txindex=1
+# Optional: independently check buried ordinary scripts during initial sync.
+# The MatMul signer quorum is required with or without this setting.
+assumevalid=0
 ```
 
 Use `rpcbind`, `rpcallowip`, firewalling, authentication, and TLS/reverse-proxy
@@ -109,12 +123,15 @@ being compromised then does not independently decide a verdict.
 
 1. The archive runs authoritative local ExactReplay.
 2. Only a successful locally persisted ExactReplay status permits signing.
-3. A trusted mirror receiving a Profile-1 full block requests attestations
-   from archive-provider peers while the body enters bounded validation.
+3. Only after a Profile-1 header or full body passes the shared RC
+   ticket/rate/pending-work admission—or a body atomically inherits an already
+   admitted header job—does a trusted mirror reserve an outstanding sidecar
+   slot and request attestations from archive providers.
 4. The validation worker waits up to `-matmultrustedwaitms`.
 5. On quorum, the process-local replay memo is populated and ordinary
-   `ProcessNewBlock` runs all body, transaction, script, state, and chain
-   checks.
+   `ProcessNewBlock` runs body, transaction, state, chain, and normal script
+   validation. As with an ordinary node, the generic buried-script
+   `assumevalid` policy is separate; use `-assumevalid=0` to disable it.
 6. Authenticated chainwork is assigned only after both quorum and complete-body
    validation succeed.
 7. Timeout, cancellation, missing quorum, or local processing failure leaves
@@ -124,6 +141,13 @@ being compromised then does not independently decide a verdict.
 Near-tip and historical full-block downloads request the same signed sidecars.
 An archive can regenerate a historical attestation after restart only where its
 block index durably records its own successful ExactReplay.
+
+The generic buried MatMul recompute shortcut is deliberately disabled in
+trusted Profile-1 mode: even historical IBD blocks must present the currently
+configured signer quorum. Conversely, a consensus archive that elects to use a
+generic assumevalid recompute skip does not set the local ExactReplay bit and
+cannot sign that block. Exact and trusted status are written only from explicit
+validation provenance, never inferred from a successful contextual check.
 
 ## Persistence and key rotation
 
@@ -155,9 +179,17 @@ quorums, rejects, duplicates, and timeouts.
 `getmmattest` requests one hash. `mmattest` carries at most 16 attestations and
 has a 16 KiB payload cap before vector allocation. The receiver requires a
 locally known Profile-1 index entry and independently checks every signature.
-Per-peer request and inbound-object token buckets, a bounded outstanding-hash
+Per-peer request and inbound-object token buckets, reconnect-resistant keyed-
+netgroup and process-global verification buckets, a bounded outstanding-hash
 map, bounded core store, TTL eviction, and bounded unsolicited relay prevent
 the sidecar protocol from becoming an allocation or amplification path.
+Outstanding requests are inserted only after RC admission, so ticketless false
+siblings cannot consume the request map. Store eviction prefers incomplete
+buckets and never evicts a completed quorum to admit minority one-vote spam.
+When completed quorums fill the configured base capacity, one partial bucket
+(at most `threshold - 1` signatures) may be staged beyond it. Only the vote
+that completes that bucket may replace the oldest completed quorum, so a
+long-running mirror advances without granting minority votes eviction power.
 
 Malformed protocol objects are rejected. A cryptographically invalid
 attestation is not evidence that the relaying peer created it, so it is dropped

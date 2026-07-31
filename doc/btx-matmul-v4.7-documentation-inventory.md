@@ -6,9 +6,9 @@ and vendored LevelDB/secp256k1 documentation.
 
 Inventory totals:
 
-- documentation-like files: **564**
-- MatMul/ExactReplay/proof-related files: **219**
-- MatMul-related files reviewed or explicitly classified: **219**
+- documentation-like files: **567**
+- MatMul/ExactReplay/proof-related files: **222**
+- MatMul-related files reviewed or explicitly classified: **222**
 - MatMul-related files still requiring review: **0**
 
 Current and superseded policy documents are considered reviewed when they
@@ -120,6 +120,7 @@ MatMul transition claim.
 | `doc/btx-matmul-pow-spec-analysis.md` | MatMul-related; reviewed against canonical roadmap |
 | `doc/btx-matmul-pow-spec.md` | MatMul-related; reviewed against canonical roadmap |
 | `doc/btx-matmul-product-digest-mining-fix-2026-04-03.md` | MatMul-related; reviewed against canonical roadmap |
+| `doc/btx-matmul-trusted-rpc-mirrors.md` | MatMul-related; reviewed against canonical roadmap |
 | `doc/btx-matmul-v3-to-v4.4-production-comparison.md` | MatMul-related; reviewed against canonical roadmap |
 | `doc/btx-matmul-v3-v03211-edr.md` | MatMul-related; reviewed against canonical roadmap |
 | `doc/btx-matmul-v4-accumulator-eligibility.md` | MatMul-related; reviewed against canonical roadmap |
@@ -230,6 +231,8 @@ MatMul transition claim.
 | `doc/btx-matmul-v4.6-stage3-threat-model-qstar-2026-07-26.md` | MatMul-related; reviewed against canonical roadmap |
 | `doc/btx-matmul-v4.6-stage3-v1-security-target-2026-07-27.md` | MatMul-related; reviewed against canonical roadmap |
 | `doc/btx-matmul-v4.7-documentation-inventory.md` | MatMul-related; reviewed against canonical roadmap |
+| `doc/btx-matmul-v4.7-gpu-operator-runbook.md` | MatMul-related; reviewed against canonical roadmap |
+| `doc/btx-matmul-v4.7-gpu-readiness-gates-2026-07-31.md` | MatMul-related; reviewed against canonical roadmap |
 | `doc/btx-matmul-v4.7-transition-roadmap.md` | Canonical v4.7 transition roadmap |
 | `doc/btx-metal-mining-tuning.md` | MatMul-related; reviewed against canonical roadmap |
 | `doc/btx-metal-nonce-seed-mining-optimization-2026-06-08.md` | MatMul-related; reviewed against canonical roadmap |

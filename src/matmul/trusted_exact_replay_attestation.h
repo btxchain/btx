@@ -242,7 +242,17 @@ private:
 
     [[nodiscard]] static AddResult ToAddResult(VerifyResult result);
     void PruneExpiredLocked(Clock::time_point now);
-    [[nodiscard]] bool MakeRoomLocked(const BlockKey& incoming);
+    /**
+     * Make room for one additional signature.
+     *
+     * A partial bucket may never evict completed authority. When the completed
+     * buckets fill the configured capacity, one partial bucket may be staged
+     * beyond the base limits (at most threshold - 1 signatures). Only the
+     * signature that completes that staged bucket may replace the oldest
+     * completed quorum.
+     */
+    [[nodiscard]] bool MakeRoomLocked(
+        const BlockKey& incoming, bool incoming_reaches_quorum);
     void EraseLocked(std::map<BlockKey, Bucket>::iterator it, bool expired);
     [[nodiscard]] size_t QuorumBlockCountLocked() const;
     [[nodiscard]] std::vector<ExactReplayAttestation> GetAttestationsLocked(

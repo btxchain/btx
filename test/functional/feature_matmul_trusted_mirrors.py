@@ -5,12 +5,25 @@
 """One GPU-authority archive serving two trusted Profile-1 RPC mirrors."""
 
 from test_framework.test_framework import BitcoinTestFramework
+from test_framework.messages import msg_generic, ser_compact_size
+from test_framework.p2p import P2PInterface
 from test_framework.util import assert_equal
 from test_framework.wallet_util import generate_keypair
 
 
 ACTIVATION_HEIGHT = 6
 DISABLED_HEIGHT = 2_147_483_647
+TRUST_WARNING = (
+    "Warning: TRUSTED MATMUL MIRROR ACTIVE: this node delegates Profile-1 "
+    "ExactReplay to a configured threshold of {} signer(s). It validates "
+    "block bodies and scripts but is not an independent full consensus "
+    "validator."
+)
+INLINE_SIGNER_WARNING = (
+    "Warning: -matmulattestationsignerkey exposes an online signing key "
+    "through process/config surfaces; use a permission-restricted "
+    "-matmulattestationsignerkeyfile."
+)
 
 
 class MatMulTrustedMirrorsTest(BitcoinTestFramework):
@@ -19,6 +32,7 @@ class MatMulTrustedMirrorsTest(BitcoinTestFramework):
         self.setup_clean_chain = True
         signer_wif, signer_pub = generate_keypair(wif=True)
         _, unavailable_pub = generate_keypair(wif=True)
+        self.signer_wif = signer_wif
         self.signer_pub = signer_pub.hex()
         self.unavailable_pub = unavailable_pub.hex()
         common = [
@@ -65,6 +79,34 @@ class MatMulTrustedMirrorsTest(BitcoinTestFramework):
 
     def run_test(self):
         archive, mirror_a, mirror_b = self.nodes
+
+        self.log.info("Trusted mirrors fail closed if configured to sign or serve")
+        self.stop_node(2, expected_stderr=TRUST_WARNING.format(1))
+        mirror_b.assert_start_raises_init_error(
+            extra_args=self.mirror_args + [
+                f"-matmulattestationsignerkey={self.signer_wif}",
+            ],
+            expected_msg=(
+                INLINE_SIGNER_WARNING
+                + "\nError: Only an independent MatMul consensus validator can load an attestation signing key; remove -matmulattestationsignerkeyfile/-matmulattestationsignerkey from non-consensus nodes."
+            ),
+        )
+        mirror_b.assert_start_raises_init_error(
+            extra_args=[
+                arg for arg in self.mirror_args
+                if not arg.startswith("-matmulattestationserve=")
+            ] + ["-matmulattestationserve=1"],
+            expected_msg="Error: Only an independent MatMul consensus validator can serve authoritative attestations. Set -matmulattestationserve=0 on non-consensus nodes.",
+        )
+        mirror_b.assert_start_raises_init_error(
+            extra_args=[
+                arg for arg in self.mirror_args
+                if not arg.startswith("-regtestrcprofile=")
+            ] + ["-regtestrcprofile=2"],
+            expected_msg="Error: Trusted MatMul mirrors support only RC Profile 1 ExactReplay attestations; the configured network selects a different RC profile.",
+        )
+        self.start_node(2, self.mirror_args)
+
         self.connect_nodes(0, 2)
 
         archive_services = archive.getnetworkinfo()["localservicesnames"]
@@ -110,7 +152,8 @@ class MatMulTrustedMirrorsTest(BitcoinTestFramework):
 
         self.log.info("Insufficient quorum is retryable and non-punitive")
         old_height = mirror_b.getblockcount()
-        self.restart_node(2, self.insufficient_quorum_args)
+        self.stop_node(2, expected_stderr=TRUST_WARNING.format(1))
+        self.start_node(2, self.insufficient_quorum_args)
         self.connect_nodes(0, 2)
         self.generate(archive, 1, sync_fun=self.no_op)
         self.wait_until(
@@ -125,13 +168,73 @@ class MatMulTrustedMirrorsTest(BitcoinTestFramework):
         assert_equal(mirror_b.listbanned(), [])
 
         self.log.info("Restoring a satisfiable quorum retries the same block")
-        self.restart_node(2, self.mirror_args)
+        self.stop_node(2, expected_stderr=TRUST_WARNING.format(2))
+        self.start_node(2, self.mirror_args)
         self.connect_nodes(0, 2)
         self.wait_until(
             lambda: mirror_b.getbestblockhash()
             == archive.getbestblockhash(),
             timeout=180,
         )
+
+        self.log.info("Malformed and source-amplified attestation relay fails closed")
+        raw_attestation = bytes.fromhex(exported[0])
+        with mirror_a.assert_debug_log(["mmattest payload=16385 exceeds bound"]):
+            peer = mirror_a.add_p2p_connection(P2PInterface())
+            peer.send_message(
+                msg_generic(b"mmattest", bytes(16 * 1024 + 1))
+            )
+        if peer.is_connected:
+            peer.peer_disconnect()
+        with mirror_a.assert_debug_log(["mmattest count=17 exceeds bound"]):
+            peer = mirror_a.add_p2p_connection(P2PInterface())
+            peer.send_message(
+                msg_generic(b"mmattest", ser_compact_size(17))
+            )
+        if peer.is_connected:
+            peer.peer_disconnect()
+        with mirror_a.assert_debug_log(["mmattest trailing data"]):
+            peer = mirror_a.add_p2p_connection(P2PInterface())
+            peer.send_message(
+                msg_generic(
+                    b"mmattest",
+                    ser_compact_size(1) + raw_attestation + b"\x00",
+                )
+            )
+        if peer.is_connected:
+            peer.peer_disconnect()
+
+        unknown_attestation = bytearray(raw_attestation)
+        # V1 statement layout is version || chain_id || block_hash || ...
+        unknown_attestation[33:65] = b"\xff" * 32
+        with mirror_a.assert_debug_log(["unknown/non-Profile1"]):
+            peer = mirror_a.add_p2p_connection(P2PInterface())
+            peer.send_message(
+                msg_generic(
+                    b"mmattest",
+                    ser_compact_size(1) + bytes(unknown_attestation),
+                )
+            )
+        if peer.is_connected:
+            peer.peer_disconnect()
+
+        sixteen_attestations = (
+            ser_compact_size(16) + raw_attestation * 16
+        )
+        with mirror_a.assert_debug_log(
+            ["source/global rate-limited mmattest"]
+        ):
+            # New peer IDs do not reset the retained keyed-netgroup budget.
+            for _ in range(5):
+                peer = mirror_a.add_p2p_connection(P2PInterface())
+                peer.send_and_ping(
+                    msg_generic(b"mmattest", sixteen_attestations)
+                )
+                peer.peer_disconnect()
+
+        self.stop_node(0, expected_stderr=INLINE_SIGNER_WARNING)
+        self.stop_node(1, expected_stderr=TRUST_WARNING.format(1))
+        self.stop_node(2, expected_stderr=TRUST_WARNING.format(1))
 
 
 if __name__ == "__main__":

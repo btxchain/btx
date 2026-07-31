@@ -27,6 +27,22 @@ bool Configure(matmul::trusted::StoreConfig config,
                bool serve_attestations,
                std::chrono::milliseconds wait_timeout,
                std::string& error);
+/**
+ * Stage startup configuration before the process signing context exists.
+ *
+ * AppInitParameterInteraction runs before ECC_Context is constructed, so it
+ * must not derive the local signer's public key. FinalizeConfiguration must be
+ * called from AppInitMain after ECC initialization and before networking or
+ * validation starts.
+ */
+bool StageConfiguration(matmul::trusted::StoreConfig config,
+                        std::optional<std::string> local_signer_wif,
+                        bool trusted_mirror,
+                        bool serve_attestations,
+                        std::chrono::milliseconds wait_timeout,
+                        std::string& error);
+bool FinalizeConfiguration(std::string& error);
+void Reset();
 void ResetForTest();
 
 [[nodiscard]] bool IsConfigured();
