@@ -8,6 +8,7 @@
 #include <consensus/params.h>
 #include <logging.h>
 #include <matmul/matmul_v4_rc.h>
+#include <matmul/matmul_v4_rc_accelerator_scheduler.h>
 #include <matmul/matmul_v4_rc_stage3_consensus.h>
 #include <pow.h>
 #include <uint256.h>
@@ -253,6 +254,7 @@ bool MatMulVerifyWorker::Cancel(const uint256& hash)
         std::erase(m_queue, pending);
         m_pending.erase(it);
     }
+    matmul::v4::rc::GetRCAcceleratorScheduler().NotifyCancellation();
     return true;
 }
 
@@ -279,6 +281,10 @@ size_t MatMulVerifyWorker::CancelIf(
         } else {
             ++it;
         }
+    }
+    if (count != 0) {
+        matmul::v4::rc::GetRCAcceleratorScheduler().
+            NotifyCancellation();
     }
     return count;
 }
@@ -309,6 +315,7 @@ void MatMulVerifyWorker::Stop()
         threads.swap(m_threads);
     }
     m_cv.notify_all();
+    matmul::v4::rc::GetRCAcceleratorScheduler().NotifyCancellation();
     for (std::thread& t : threads) {
         if (t.joinable()) t.join();
     }
@@ -355,6 +362,35 @@ void MatMulVerifyWorker::WorkerLoop()
             std::lock_guard<std::mutex> lock(m_mutex);
             m_pending.erase(hash);
             continue;
+        }
+        matmul::v4::rc::RCAcceleratorScheduler::Lease
+            accelerator_lease;
+        if (!m_verify_override &&
+            m_params.IsMatMulRCFamilyActive(job.height)) {
+            const auto device_priority{
+                job.priority == Priority::AuthenticatedTipChild
+                    ? matmul::v4::rc::RCAcceleratorScheduler::
+                          Priority::TipValidation
+                    : matmul::v4::rc::RCAcceleratorScheduler::
+                          Priority::SpeculativeValidation};
+            accelerator_lease =
+                matmul::v4::rc::GetRCAcceleratorScheduler().Acquire(
+                    device_priority, job.cancelled.get(),
+                    strprintf("verify:%s:%d", hash.ToString(),
+                              job.height));
+            if (!accelerator_lease) {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                m_pending.erase(hash);
+                continue;
+            }
+            LogDebug(
+                BCLog::NET,
+                "matmul RC accelerator acquired: block=%s height=%d "
+                "priority=%s queue_wait=%.6fs\n",
+                hash.ToString(), job.height,
+                matmul::v4::rc::ToString(
+                    accelerator_lease.GetPriority()),
+                accelerator_lease.QueueWaitSeconds());
         }
         matmul::v4::rc::ScopedExactReplayCancellation cancellation_scope{
             job.cancelled.get()};

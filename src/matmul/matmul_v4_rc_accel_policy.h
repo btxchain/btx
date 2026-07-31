@@ -84,6 +84,16 @@ inline constexpr RCAccelerationPolicy kRCAccelerationPolicyDefault =
  *  reviewed hardware campaign; correctness self-qualification is insufficient. */
 inline constexpr bool kRcOzakiMxfp4ProductionEligible = false;
 
+/** Activation-readiness evidence gates. Do not flip these when merely adding a
+ *  new provider or a small-shape self-qualification. They require committed,
+ *  independently reproduced complete Profile-1 CPU-oracle goldens and a
+ *  production-shape device canary tied to provider/device/runtime identity.
+ *
+ *  PR #97 intentionally ships with public activation disabled and without
+ *  invented golden values, so both gates remain false. */
+inline constexpr bool kRCProfile1ProductionGoldensAvailable = false;
+inline constexpr bool kRCProfile1StartupCanaryPassed = false;
+
 /** Pure, hardware-independent backend-family policy decision. NativeRequired
  *  is an explicit experiment and therefore needs only
  *  correctness qualification. ProductionPreferred requires the separate native

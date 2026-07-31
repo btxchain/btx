@@ -7,6 +7,7 @@
 
 #include <node/matmul_verify_worker.h>
 #include <node/matmul_rc_admission.h>
+#include <matmul/matmul_v4_rc_accelerator_scheduler.h>
 
 #include <chainparams.h>
 #include <consensus/params.h>
@@ -29,6 +30,7 @@
 #include <mutex>
 #include <optional>
 #include <thread>
+#include <vector>
 
 using node::MatMulVerifyWorker;
 
@@ -1342,6 +1344,102 @@ BOOST_AUTO_TEST_CASE(lt_tip_verify_budget_knobs)
     params.nMatMulDRLTHeight = std::numeric_limits<int32_t>::max();
     BOOST_CHECK_EQUAL(EffectiveMatMulMaxPendingVerifications(params, 1'000'000), 16U);
     BOOST_CHECK_EQUAL(EffectiveMatMulGlobalVerifyBudgetPerMin(params, 1'000'000), 4U);
+}
+
+BOOST_AUTO_TEST_CASE(rc_accelerator_scheduler_prioritizes_and_preempts)
+{
+    using Scheduler = matmul::v4::rc::RCAcceleratorScheduler;
+    auto& scheduler{matmul::v4::rc::GetRCAcceleratorScheduler()};
+    BOOST_REQUIRE(scheduler.ResetStatsForTest());
+
+    std::atomic_bool candidate_cancelled{false};
+    auto candidate{scheduler.Acquire(
+        Scheduler::Priority::CandidateMining, &candidate_cancelled,
+        "candidate")};
+    BOOST_REQUIRE(candidate);
+
+    std::mutex order_mutex;
+    std::vector<Scheduler::Priority> order;
+    auto wait_for_device = [&](Scheduler::Priority priority,
+                               std::atomic_bool& cancelled,
+                               const char* label) {
+        auto lease{scheduler.Acquire(priority, &cancelled, label)};
+        if (lease) {
+            std::lock_guard<std::mutex> lock(order_mutex);
+            order.push_back(priority);
+        }
+    };
+
+    std::atomic_bool speculative_cancelled{false};
+    std::atomic_bool winner_cancelled{false};
+    std::atomic_bool tip_cancelled{false};
+    std::thread speculative{
+        wait_for_device, Scheduler::Priority::SpeculativeValidation,
+        std::ref(speculative_cancelled), "speculative"};
+    BOOST_REQUIRE(WaitFor(
+        [&] { return scheduler.GetStats().queue_depth == 1; }));
+    std::thread winner{
+        wait_for_device, Scheduler::Priority::WinnerReseal,
+        std::ref(winner_cancelled), "winner"};
+    BOOST_REQUIRE(WaitFor(
+        [&] { return scheduler.GetStats().queue_depth == 2; }));
+    std::thread tip{
+        wait_for_device, Scheduler::Priority::TipValidation,
+        std::ref(tip_cancelled), "tip"};
+    BOOST_REQUIRE(WaitFor([&] {
+        return scheduler.GetStats().queue_depth == 3 &&
+            candidate_cancelled.load(std::memory_order_relaxed);
+    }));
+
+    candidate = {};
+    tip.join();
+    winner.join();
+    speculative.join();
+
+    BOOST_REQUIRE_EQUAL(order.size(), 3U);
+    BOOST_CHECK(order[0] == Scheduler::Priority::TipValidation);
+    BOOST_CHECK(order[1] == Scheduler::Priority::WinnerReseal);
+    BOOST_CHECK(order[2] ==
+                Scheduler::Priority::SpeculativeValidation);
+    const auto stats{scheduler.GetStats()};
+    BOOST_CHECK_EQUAL(stats.requests, 4U);
+    BOOST_CHECK_EQUAL(stats.acquisitions, 4U);
+    BOOST_CHECK_EQUAL(stats.completions, 4U);
+    BOOST_CHECK_EQUAL(stats.preemption_requests, 1U);
+    BOOST_CHECK_GE(stats.queue_high_water, 3U);
+    BOOST_CHECK(!stats.active);
+}
+
+BOOST_AUTO_TEST_CASE(rc_accelerator_scheduler_cancelled_wait_is_retryable)
+{
+    using Scheduler = matmul::v4::rc::RCAcceleratorScheduler;
+    auto& scheduler{matmul::v4::rc::GetRCAcceleratorScheduler()};
+    BOOST_REQUIRE(scheduler.ResetStatsForTest());
+
+    std::atomic_bool tip_cancelled{false};
+    auto tip{scheduler.Acquire(
+        Scheduler::Priority::TipValidation, &tip_cancelled, "tip")};
+    BOOST_REQUIRE(tip);
+
+    std::atomic_bool speculative_cancelled{false};
+    std::atomic_bool acquired{false};
+    std::thread speculative{[&] {
+        auto lease{scheduler.Acquire(
+            Scheduler::Priority::SpeculativeValidation,
+            &speculative_cancelled, "speculative")};
+        acquired.store(static_cast<bool>(lease),
+                       std::memory_order_relaxed);
+    }};
+    BOOST_REQUIRE(WaitFor(
+        [&] { return scheduler.GetStats().queue_depth == 1; }));
+    speculative_cancelled.store(true, std::memory_order_relaxed);
+    scheduler.NotifyCancellation();
+    speculative.join();
+    BOOST_CHECK(!acquired.load(std::memory_order_relaxed));
+    BOOST_CHECK_EQUAL(scheduler.GetStats().cancelled_waits, 1U);
+
+    tip = {};
+    BOOST_CHECK(!scheduler.GetStats().active);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

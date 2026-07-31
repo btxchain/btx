@@ -27,9 +27,11 @@
 #include <matmul/accel_v4.h>
 #include <matmul/accelerated_solver.h>
 #include <matmul/backend_capabilities.h>
+#include <matmul/exact_gemm_resolve.h>
 #include <matmul/field.h>
 #include <matmul/int8_field.h>
 #include <matmul/matmul_pow.h>
+#include <matmul/matmul_v4_rc_accelerator_scheduler.h>
 #include <matmul/matmul_v4_bmx4.h>
 #include <matmul/pow_v4.h>
 #include <net.h>
@@ -1487,6 +1489,62 @@ static UniValue BuildBackendRuntimeProfile()
     obj.pushKV("last_metal_fallback_error", stats.last_metal_fallback_error);
     obj.pushKV("last_cuda_fallback_error", stats.last_cuda_fallback_error);
     obj.pushKV("last_gpu_input_error", stats.last_gpu_input_error);
+
+    // This is a non-triggering snapshot: an RPC call must not unexpectedly
+    // start a medium/production accelerator qualification.
+    const auto rc_resolution =
+        matmul_v4::accel::ProbeLastRCExactGemmResolution();
+    UniValue rc_exact_replay(UniValue::VOBJ);
+    rc_exact_replay.pushKV("resolved", rc_resolution.resolved);
+    rc_exact_replay.pushKV("requested_provider", rc_resolution.requested);
+    rc_exact_replay.pushKV("resolved_provider", rc_resolution.provider);
+    rc_exact_replay.pushKV("resolution_reason", rc_resolution.reason);
+    rc_exact_replay.pushKV("policy", rc_resolution.policy);
+    rc_exact_replay.pushKV(
+        "qualification_scope", rc_resolution.qualification_scope);
+    rc_exact_replay.pushKV(
+        "self_qualified", rc_resolution.self_qualified);
+    rc_exact_replay.pushKV(
+        "automatic_policy_eligible",
+        rc_resolution.production_eligible);
+    rc_exact_replay.pushKV(
+        "production_goldens_available",
+        rc_resolution.production_goldens_available);
+    rc_exact_replay.pushKV(
+        "startup_canary_passed",
+        rc_resolution.startup_canary_passed);
+    rc_exact_replay.pushKV(
+        "activation_ready", rc_resolution.activation_ready);
+    obj.pushKV("rc_exact_replay", std::move(rc_exact_replay));
+
+    const auto scheduler{
+        matmul::v4::rc::GetRCAcceleratorScheduler().GetStats()};
+    UniValue rc_scheduler(UniValue::VOBJ);
+    rc_scheduler.pushKV("requests", scheduler.requests);
+    rc_scheduler.pushKV("acquisitions", scheduler.acquisitions);
+    rc_scheduler.pushKV("completions", scheduler.completions);
+    rc_scheduler.pushKV(
+        "cancelled_waits", scheduler.cancelled_waits);
+    rc_scheduler.pushKV(
+        "preemption_requests", scheduler.preemption_requests);
+    rc_scheduler.pushKV("queue_depth", scheduler.queue_depth);
+    rc_scheduler.pushKV(
+        "queue_high_water", scheduler.queue_high_water);
+    rc_scheduler.pushKV("active", scheduler.active);
+    rc_scheduler.pushKV(
+        "active_priority",
+        matmul::v4::rc::ToString(scheduler.active_priority));
+    rc_scheduler.pushKV("active_label", scheduler.active_label);
+    rc_scheduler.pushKV("active_wall_s", scheduler.active_wall_s);
+    rc_scheduler.pushKV(
+        "last_queue_wait_s", scheduler.last_queue_wait_s);
+    rc_scheduler.pushKV(
+        "max_queue_wait_s", scheduler.max_queue_wait_s);
+    rc_scheduler.pushKV(
+        "last_execution_s", scheduler.last_execution_s);
+    rc_scheduler.pushKV(
+        "max_execution_s", scheduler.max_execution_s);
+    obj.pushKV("rc_accelerator_scheduler", std::move(rc_scheduler));
     return obj;
 }
 
@@ -5545,6 +5603,38 @@ static RPCHelpMan getmininginfo()
                                 {RPCResult::Type::NUM, "b", "Last CUDA digest pool MatMul block size"},
                                 {RPCResult::Type::NUM, "r", "Last CUDA digest pool MatMul rank"},
                                 {RPCResult::Type::STR, "reason", "CUDA buffer pool probe status"},
+                            }},
+                            {RPCResult::Type::OBJ, "rc_exact_replay", "Profile-1 ExactReplay provider and activation-readiness gates (snapshot only; does not trigger qualification)",
+                            {
+                                {RPCResult::Type::BOOL, "resolved", "Whether an RC caller has resolved a provider"},
+                                {RPCResult::Type::STR, "requested_provider", "Requested RC provider, or auto"},
+                                {RPCResult::Type::STR, "resolved_provider", "Last resolved RC provider"},
+                                {RPCResult::Type::STR, "resolution_reason", "Provider resolution reason"},
+                                {RPCResult::Type::STR, "policy", "RC provider policy"},
+                                {RPCResult::Type::STR, "qualification_scope", "Largest exact replay scope covered by current self-qualification"},
+                                {RPCResult::Type::BOOL, "self_qualified", "Whether toy/scaled-medium exactness qualification passed"},
+                                {RPCResult::Type::BOOL, "automatic_policy_eligible", "Whether the provider is eligible for automatic selection"},
+                                {RPCResult::Type::BOOL, "production_goldens_available", "Whether independently reproduced production-shape goldens are committed"},
+                                {RPCResult::Type::BOOL, "startup_canary_passed", "Whether the production-shape startup/epoch canary passed"},
+                                {RPCResult::Type::BOOL, "activation_ready", "Whether all provider activation-readiness gates passed"},
+                            }},
+                            {RPCResult::Type::OBJ, "rc_accelerator_scheduler", "Shared Profile-1 device-owner queue and execution telemetry",
+                            {
+                                {RPCResult::Type::NUM, "requests", "Accelerator ownership requests"},
+                                {RPCResult::Type::NUM, "acquisitions", "Ownership requests admitted"},
+                                {RPCResult::Type::NUM, "completions", "Completed ownership leases"},
+                                {RPCResult::Type::NUM, "cancelled_waits", "Requests cancelled before device admission"},
+                                {RPCResult::Type::NUM, "preemption_requests", "Higher-priority requests that asked the current owner to cancel"},
+                                {RPCResult::Type::NUM, "queue_depth", "Current accelerator waiters"},
+                                {RPCResult::Type::NUM, "queue_high_water", "Maximum accelerator waiters"},
+                                {RPCResult::Type::BOOL, "active", "Whether the accelerator has an owner"},
+                                {RPCResult::Type::STR, "active_priority", "Current owner priority"},
+                                {RPCResult::Type::STR, "active_label", "Current owner operation label"},
+                                {RPCResult::Type::NUM, "active_wall_s", "Current owner elapsed wall time"},
+                                {RPCResult::Type::NUM, "last_queue_wait_s", "Most recent queue wait"},
+                                {RPCResult::Type::NUM, "max_queue_wait_s", "Maximum observed queue wait"},
+                                {RPCResult::Type::NUM, "last_execution_s", "Most recent device-owner wall time"},
+                                {RPCResult::Type::NUM, "max_execution_s", "Maximum device-owner wall time"},
                             }},
                             {RPCResult::Type::STR, "last_gpu_input_error", "Most recent GPU input-generation error"},
                         }},
