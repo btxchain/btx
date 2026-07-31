@@ -94,6 +94,16 @@ struct SlotSentinel {
     ~SlotSentinel() { ++*released; }
 };
 
+struct ActiveLease {
+    std::atomic<int>* active;
+    explicit ActiveLease(std::atomic<int>* counter)
+        : active{counter}
+    {
+        ++*active;
+    }
+    ~ActiveLease() { --*active; }
+};
+
 std::shared_ptr<const CBlock> MakeBlock(uint32_t salt)
 {
     auto block{std::make_shared<CBlock>()};
@@ -474,6 +484,9 @@ BOOST_AUTO_TEST_CASE(complete_tip_body_preempts_equal_priority_speculation)
     const Consensus::Params& params = Params().GetConsensus();
     BlockingVerify gate;
     std::atomic<int> body_completions{0};
+    std::atomic<int> pending_leases{0};
+    std::atomic<int> speculative_leases{0};
+    std::atomic<int> permanent_rate_debits{1};
     auto speculative_cancelled{
         std::make_shared<std::atomic_bool>(false)};
     MatMulVerifyWorker worker{
@@ -492,11 +505,19 @@ BOOST_AUTO_TEST_CASE(complete_tip_body_preempts_equal_priority_speculation)
         .priority =
             MatMulVerifyWorker::Priority::AuthenticatedTipChild,
         .cancelled = speculative_cancelled,
+        .rc_pending_lease =
+            std::make_shared<ActiveLease>(&pending_leases),
+        .rc_speculative_lease =
+            std::make_shared<ActiveLease>(
+                &speculative_leases),
+        .equal_priority_handoff_available = true,
     };
     BOOST_REQUIRE(
         worker.Enqueue(header_job) ==
         MatMulVerifyWorker::EnqueueResult::Enqueued);
     BOOST_REQUIRE(WaitFor([&] { return gate.running.load() == 1; }));
+    BOOST_CHECK_EQUAL(pending_leases.load(), 1);
+    BOOST_CHECK_EQUAL(speculative_leases.load(), 1);
 
     MatMulVerifyWorker::Job body_job{
         .block = MakeBlock(91),
@@ -509,16 +530,133 @@ BOOST_AUTO_TEST_CASE(complete_tip_body_preempts_equal_priority_speculation)
             MatMulVerifyWorker::Priority::AuthenticatedTipChild,
     };
     BOOST_REQUIRE(
-        worker.Enqueue(body_job) ==
-        MatMulVerifyWorker::EnqueueResult::Enqueued);
+        worker.HandoffAuthenticatedTip(body_job) ==
+        MatMulVerifyWorker::HandoffResult::HandedOff);
     BOOST_CHECK(
         speculative_cancelled->load(std::memory_order_relaxed));
+    BOOST_CHECK_EQUAL(pending_leases.load(), 1);
+    BOOST_CHECK_EQUAL(speculative_leases.load(), 0);
+    BOOST_CHECK_EQUAL(permanent_rate_debits.load(), 1);
 
     gate.Release();
     BOOST_REQUIRE(
         WaitFor([&] { return body_completions.load() == 1; }));
     worker.Stop();
     BOOST_CHECK_EQUAL(gate.total_calls.load(), 1);
+    BOOST_CHECK_EQUAL(pending_leases.load(), 0);
+    BOOST_CHECK_EQUAL(speculative_leases.load(), 0);
+    BOOST_CHECK_EQUAL(permanent_rate_debits.load(), 1);
+}
+
+BOOST_AUTO_TEST_CASE(paid_cap_one_header_handoff_is_bounded_and_exact)
+{
+    Consensus::Params params{MakeProfile1ActiveParams()};
+    params.nMatMulRCMaxPendingVerifications = 1;
+    params.nMatMulRCGlobalVerifyBudgetPerMin = 1;
+    params.nMatMulRCPeerVerifyBudgetPerMin = 1;
+    node::RCAdmissionStore admission{{
+        .max_entries = 8,
+        .max_entries_per_netgroup = 4,
+        .ttl = std::chrono::seconds{180},
+    }};
+    constexpr uint64_t kAttackerNetgroup{0xaaa1};
+    constexpr uint64_t kHonestNetgroup{0xbbb2};
+    const uint256 false_claim{uint256::ONE};
+    uint256 honest_claim;
+    honest_claim.data()[0] = 2;
+    auto false_header{std::make_shared<CBlockHeader>(
+        MakeProfile1Header(94, false_claim))};
+    auto honest_header{std::make_shared<CBlockHeader>(
+        MakeProfile1Header(95, honest_claim))};
+    BOOST_REQUIRE(AdmitRCHeader(
+        admission, *false_header, kAttackerNetgroup,
+        params.powLimit));
+    BOOST_REQUIRE(AdmitRCHeader(
+        admission, *honest_header, kHonestNetgroup,
+        params.powLimit));
+
+    BlockingVerify gate;
+    std::atomic<int> honest_completions{0};
+    std::atomic<int> pending_leases{0};
+    std::atomic<int> speculative_leases{0};
+    std::atomic<int> permanent_rate_debits{1};
+    std::atomic<int> retargets{0};
+    auto false_cancelled{
+        std::make_shared<std::atomic_bool>(false)};
+    MatMulVerifyWorker worker{
+        params, /*max_threads=*/1,
+        [&](const CBlock& block, int32_t,
+            std::optional<int64_t>) {
+            if (block.nNonce64 == 94) return gate.Run();
+            return block.nNonce64 == 95;
+        }};
+
+    MatMulVerifyWorker::Job false_job{
+        .height = 100,
+        .header = false_header,
+        .priority =
+            MatMulVerifyWorker::Priority::AuthenticatedTipChild,
+        .cancelled = false_cancelled,
+        .rc_pending_lease =
+            std::make_shared<ActiveLease>(&pending_leases),
+        .rc_speculative_lease =
+            std::make_shared<ActiveLease>(
+                &speculative_leases),
+        .retarget_speculative_lease =
+            [&](const uint256& hash) {
+                BOOST_CHECK_EQUAL(hash, honest_header->GetHash());
+                ++retargets;
+            },
+        .equal_priority_handoff_available = true,
+    };
+    BOOST_REQUIRE(
+        worker.Enqueue(false_job) ==
+        MatMulVerifyWorker::EnqueueResult::Enqueued);
+    BOOST_REQUIRE(WaitFor([&] { return gate.running.load() == 1; }));
+
+    MatMulVerifyWorker::Job honest_job{
+        .height = 100,
+        .completion = [&](bool ok) {
+            BOOST_CHECK(ok);
+            ++honest_completions;
+        },
+        .header = honest_header,
+        .priority =
+            MatMulVerifyWorker::Priority::AuthenticatedTipChild,
+    };
+    BOOST_REQUIRE(
+        worker.CanHandoffAuthenticatedTip(*honest_header, 100));
+    BOOST_REQUIRE(
+        worker.HandoffAuthenticatedTip(honest_job) ==
+        MatMulVerifyWorker::HandoffResult::HandedOff);
+    BOOST_CHECK(false_cancelled->load(std::memory_order_relaxed));
+    BOOST_CHECK_EQUAL(pending_leases.load(), 1);
+    BOOST_CHECK_EQUAL(speculative_leases.load(), 1);
+    BOOST_CHECK_EQUAL(permanent_rate_debits.load(), 1);
+    BOOST_CHECK_EQUAL(retargets.load(), 1);
+
+    auto third_header{std::make_shared<CBlockHeader>(
+        MakeProfile1Header(96, false_claim))};
+    MatMulVerifyWorker::Job third_job{
+        .height = 100,
+        .header = third_header,
+        .priority =
+            MatMulVerifyWorker::Priority::AuthenticatedTipChild,
+    };
+    BOOST_CHECK(
+        !worker.CanHandoffAuthenticatedTip(*third_header, 100));
+    BOOST_CHECK(
+        worker.HandoffAuthenticatedTip(third_job) ==
+        MatMulVerifyWorker::HandoffResult::Deferred);
+
+    gate.Release();
+    BOOST_REQUIRE(WaitFor(
+        [&] { return honest_completions.load() == 1; }));
+    worker.Stop();
+    BOOST_CHECK_EQUAL(pending_leases.load(), 0);
+    BOOST_CHECK_EQUAL(speculative_leases.load(), 0);
+    BOOST_CHECK_EQUAL(permanent_rate_debits.load(), 1);
+    BOOST_CHECK_EQUAL(retargets.load(), 1);
 }
 
 BOOST_AUTO_TEST_CASE(cancel_stale_queued_job_suppresses_completion)
