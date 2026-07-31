@@ -346,6 +346,39 @@ struct RCExactReplayAcceleration {
     RCExactReplayAccelerationStats* stats{nullptr};
 };
 
+enum class RCStrictDeviceEpisodeOutcome : uint8_t {
+    Complete = 0,
+    LocalAcceleratorFailure = 1,
+    Cancelled = 2,
+};
+
+struct RCStrictDeviceEpisodeResult {
+    RCStrictDeviceEpisodeOutcome outcome{
+        RCStrictDeviceEpisodeOutcome::LocalAcceleratorFailure};
+    uint256 digest{};
+    RCExactReplayAccelerationStats acceleration{};
+};
+
+/** Miner-local outcome for the authoritative winner reseal.
+ *
+ * Local execution failure and cancellation are deliberately distinct from a
+ * completed, fully accelerated replay whose digest disagrees with the
+ * candidate. The miner publishes a winner only after Sealed.
+ */
+enum class RCWinnerResealOutcome : uint8_t {
+    Sealed = 0,
+    LocalAcceleratorFailure = 1,
+    Cancelled = 2,
+    CandidateDigestDivergence = 3,
+};
+
+struct RCWinnerResealResult {
+    RCWinnerResealOutcome outcome{
+        RCWinnerResealOutcome::LocalAcceleratorFailure};
+    uint256 digest{};
+    RCExactReplayAccelerationStats acceleration{};
+};
+
 struct RCRoundTranscript {
     uint256 round_root{};
     /** Round byte stream (R.4.1 + §3 segment leaves); filled when collected via
@@ -541,6 +574,40 @@ struct RCMerkleProof {
     std::vector<RCRoundTranscript>* out_rounds,
     RCEpisodeTiming* out_timing,
     const RCExactReplayAcceleration& acceleration);
+
+/** Strict Profile 1 candidate execution seam.
+ *
+ * Generic MineRCEpisode remains available for CPU diagnostics and
+ * pre-activation tests. Production Profile 1 mining uses this entry so an
+ * absent or declining qualified backend cannot silently begin a CPU episode.
+ * A caller-owned accelerator scheduler may hold its candidate-mining lease
+ * around this synchronous call and use `cancelled` for preemption.
+ */
+[[nodiscard]] RCStrictDeviceEpisodeResult MineRCEpisodeStrictDevice(
+    const CBlockHeader& header,
+    const RCEpisodeParams& params,
+    int32_t height,
+    const matmul::v4::lt::ExactGemmBackend& gemm,
+    const std::string& provider,
+    const std::atomic_bool* cancelled = nullptr);
+
+/** Strict winner reseal for Profile 1 mining.
+ *
+ * The supplied backend has already passed RC self-qualification. Every GEMM
+ * must execute through it: an absent/declining backend, any CPU GEMM fallback,
+ * or incomplete device-MAC coverage is a LocalAcceleratorFailure. The optional
+ * cancellation latch is checked before and throughout replay at canonical
+ * round/layer boundaries. A caller-owned scheduler may hold its winner-reseal
+ * lease around this synchronous call.
+ */
+[[nodiscard]] RCWinnerResealResult ResealRCWinnerStrict(
+    const CBlockHeader& header,
+    const RCEpisodeParams& params,
+    int32_t height,
+    const uint256& candidate_digest,
+    const matmul::v4::lt::ExactGemmBackend& gemm,
+    const std::string& provider,
+    const std::atomic_bool* cancelled = nullptr);
 
 /** Miner entry: same digest as the CPU reference. May inject ExactGemmBackend
  *  after RC self-qualification (fail-closed → empty backend = CPU). */

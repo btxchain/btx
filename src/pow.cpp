@@ -4095,9 +4095,10 @@ bool CheckMatMulProofOfWork_V4EncDr(const CBlock& block, const Consensus::Params
     // may recompute Chat on its accelerator exactly as mining does. A digest
     // MATCH accepts fast: the backend reproduced the committed preimage, and
     // eligibility (cross-vendor bit-identity vs the CPU reference on the
-    // golden vectors, backend_capabilities_v4) plus the miner-side CPU reseal
-    // (SolveMatMulV4* seals only reference-confirmed digests) pin that
-    // preimage to Chat_true. R1 CPU-REFERENCE-ANCHORED REJECTION: a mismatch
+    // golden vectors and backend_capabilities_v4 pin that preimage to
+    // Chat_true. Legacy profiles CPU-reseal winners; Profile 1 ExactReplay
+    // strictly reseals on a self-qualified exact device and refuses any CPU
+    // GEMM fallback. R1 CPU-REFERENCE-ANCHORED REJECTION: a mismatch
     // or device error NEVER rejects — it falls through to the CPU
     // pure-integer reference below, the SOLE arbiter of invalidity, so a
     // device-side divergence can cost this node a redundant recompute but can
@@ -6809,7 +6810,7 @@ bool TestRCStage3SuccinctAuthorityCoupledCandidate(
 }
 
 /** ENC_RC / Resident Curriculum miner: grind nonces through MineRCEpisode.
- *  P0.2: CPU-reseal WINNERS only (losers must not pay a second full episode). */
+ *  Winners pay one strict, self-qualified device reseal; losers do not replay. */
 static bool SolveMatMulV4RC(CBlockHeader& block,
                             const Consensus::Params& params,
                             uint64_t& max_tries,
@@ -6838,7 +6839,8 @@ static bool SolveMatMulV4RC(CBlockHeader& block,
 
     // F5: resolve + RC self-qual ONCE per solve (cached by provider/arch/epoch).
     // Per-nonce path must never re-enter ProbeRCSelfQual.
-    const auto gemm_rc = matmul_v4::accel::MakeResolvedExactGemmBackendForRC();
+    const auto resolved_rc =
+        matmul_v4::accel::ResolveExactGemmBackendForRC();
 
     while (max_tries > 0) {
         if (abort_flag != nullptr && abort_flag->load(std::memory_order_relaxed)) {
@@ -6888,13 +6890,64 @@ static bool SolveMatMulV4RC(CBlockHeader& block,
                 return false;
             }
         } else {
-            // P1.2: Phase-2 ExactGemm may run on CUDA/HIP
-            // LaunchGemmS8S8 when ProbeRCSelfQual admits the backend;
-            // losers skip CPU reseal (P0.2).
-            mined =
-                matmul::v4::rc::MineRCEpisode(
+            // Profile 1 production mining is strict-device from the first
+            // candidate attempt. Keep the explicitly toy-dimension regtest
+            // mode portable so CPU-only CI can exercise activation mechanics.
+            if (params.fMatMulRCUseToyDims) {
+                mined = matmul::v4::rc::MineRCEpisode(
                     block, params_rc, block_height,
-                    nullptr, gemm_rc);
+                    nullptr, resolved_rc.backend);
+            } else {
+                const auto candidate =
+                    matmul::v4::rc::MineRCEpisodeStrictDevice(
+                        block, params_rc, block_height,
+                        resolved_rc.backend, resolved_rc.provider,
+                        abort_flag);
+                switch (candidate.outcome) {
+                case matmul::v4::rc::RCStrictDeviceEpisodeOutcome::
+                    Complete:
+                    mined = candidate.digest;
+                    break;
+                case matmul::v4::rc::RCStrictDeviceEpisodeOutcome::
+                    Cancelled:
+                    LogPrintf(
+                        "SolveMatMulV4RC: candidate device episode "
+                        "cancelled at nonce=%llu\n",
+                        static_cast<unsigned long long>(
+                            block.nNonce64));
+                    RegisterMatMulSolveRuntimeSample(
+                        false,
+                        std::chrono::steady_clock::now() -
+                            start);
+                    return false;
+                case matmul::v4::rc::RCStrictDeviceEpisodeOutcome::
+                    LocalAcceleratorFailure:
+                    LogWarning(
+                        "SolveMatMulV4RC: strict candidate device "
+                        "episode failed at nonce=%llu "
+                        "(provider=%s device_calls=%llu "
+                        "device_macs=%llu cpu_calls=%llu "
+                        "cpu_fallbacks=%llu reason=%s); "
+                        "aborting solve\n",
+                        static_cast<unsigned long long>(
+                            block.nNonce64),
+                        resolved_rc.provider,
+                        static_cast<unsigned long long>(
+                            candidate.acceleration.device_calls),
+                        static_cast<unsigned long long>(
+                            candidate.acceleration.device_macs),
+                        static_cast<unsigned long long>(
+                            candidate.acceleration.cpu_calls),
+                        static_cast<unsigned long long>(
+                            candidate.acceleration.cpu_fallbacks),
+                        candidate.acceleration.first_failure);
+                    RegisterMatMulSolveRuntimeSample(
+                        false,
+                        std::chrono::steady_clock::now() -
+                            start);
+                    return false;
+                }
+            }
         }
         if (mined.IsNull()) {
             LogWarning("SolveMatMulV4RC: MineRCEpisode returned null at nonce=%llu; aborting\n",
@@ -6902,7 +6955,7 @@ static bool SolveMatMulV4RC(CBlockHeader& block,
             RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
             return false;
         }
-        // Losers: skip CPU reseal (P0.2).
+        // Losers skip the winner-only strict device reseal.
         if (UintToArith256(mined) > effective_target) {
             --max_tries;
             if (block.nNonce64 == std::numeric_limits<uint64_t>::max()) {
@@ -6941,8 +6994,10 @@ static bool SolveMatMulV4RC(CBlockHeader& block,
             return true;
         }
 
-        // Winner / share: CPU-reseal for consensus (empty ExactGemm — never
-        // accelerate REJECT / reseal); abort on miner/oracle mismatch.
+        // Winner / share: authoritative strict-device reseal. A local
+        // accelerator failure or mining-job cancellation aborts this attempt
+        // without publishing. Only a completed device replay can establish a
+        // true candidate/reseal divergence.
         std::shared_ptr<
             matmul::v4::rc::
                 RCStage3EpisodeWitnessCapture>
@@ -6980,15 +7035,83 @@ static bool SolveMatMulV4RC(CBlockHeader& block,
                 return false;
             }
         } else {
-            resealed =
-                matmul::v4::rc::
-                    RecomputeResidentCurriculumReference(
-                        block, params_rc,
-                        block_height);
+            if (params.fMatMulRCUseToyDims) {
+                resealed =
+                    matmul::v4::rc::
+                        RecomputeResidentCurriculumReference(
+                            block, params_rc, block_height);
+            } else {
+                const auto reseal =
+                    matmul::v4::rc::ResealRCWinnerStrict(
+                        block, params_rc, block_height,
+                        mined, resolved_rc.backend,
+                        resolved_rc.provider, abort_flag);
+                const auto& stats = reseal.acceleration;
+                LogPrintf(
+                    "SolveMatMulV4RC: winner reseal provider=%s "
+                    "device_calls=%llu device_macs=%llu cpu_calls=%llu "
+                    "cpu_fallbacks=%llu fully_accelerated=%d "
+                    "failure=%s\n",
+                    stats.backend,
+                    static_cast<unsigned long long>(
+                        stats.device_calls),
+                    static_cast<unsigned long long>(
+                        stats.device_macs),
+                    static_cast<unsigned long long>(
+                        stats.cpu_calls),
+                    static_cast<unsigned long long>(
+                        stats.cpu_fallbacks),
+                    stats.fully_accelerated,
+                    stats.first_failure);
+                switch (reseal.outcome) {
+                case matmul::v4::rc::RCWinnerResealOutcome::Sealed:
+                    resealed = reseal.digest;
+                    break;
+                case matmul::v4::rc::RCWinnerResealOutcome::Cancelled:
+                    LogPrintf(
+                        "SolveMatMulV4RC: winner reseal cancelled at "
+                        "nonce=%llu; discarding candidate\n",
+                        static_cast<unsigned long long>(
+                            block.nNonce64));
+                    RegisterMatMulSolveRuntimeSample(
+                        false,
+                        std::chrono::steady_clock::now() -
+                            start);
+                    return false;
+                case matmul::v4::rc::RCWinnerResealOutcome::
+                    LocalAcceleratorFailure:
+                    LogWarning(
+                        "SolveMatMulV4RC: strict winner reseal local "
+                        "accelerator failure at nonce=%llu "
+                        "(provider=%s reason=%s); discarding candidate\n",
+                        static_cast<unsigned long long>(
+                            block.nNonce64),
+                        resolved_rc.provider,
+                        stats.first_failure);
+                    RegisterMatMulSolveRuntimeSample(
+                        false,
+                        std::chrono::steady_clock::now() -
+                            start);
+                    return false;
+                case matmul::v4::rc::RCWinnerResealOutcome::
+                    CandidateDigestDivergence:
+                    LogWarning(
+                        "SolveMatMulV4RC: fully accelerated winner "
+                        "reseal diverged from candidate at nonce=%llu; "
+                        "aborting solve\n",
+                        static_cast<unsigned long long>(
+                            block.nNonce64));
+                    RegisterMatMulSolveRuntimeSample(
+                        false,
+                        std::chrono::steady_clock::now() -
+                            start);
+                    return false;
+                }
+            }
         }
         if (resealed != mined) {
             LogWarning("SolveMatMulV4RC: MineRCEpisode diverged from "
-                       "RecomputeResidentCurriculumReference at nonce=%llu; aborting solve\n",
+                       "strict device winner reseal at nonce=%llu; aborting solve\n",
                        static_cast<unsigned long long>(block.nNonce64));
             RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
             return false;

@@ -82,6 +82,24 @@ bool WrongGemmS32S8(const std::vector<int32_t>& /*L*/, const std::vector<int8_t>
     return true;
 }
 
+std::atomic_bool* g_cancel_on_oracle_gemm{nullptr};
+
+bool CancellingOracleGemmS8S8(
+    const std::vector<int8_t>& L,
+    const std::vector<int8_t>& R,
+    uint32_t rows,
+    uint32_t inner,
+    uint32_t cols,
+    std::vector<int32_t>& out)
+{
+    out = lt::ExactGemmS8S8(L, R, rows, inner, cols);
+    if (g_cancel_on_oracle_gemm != nullptr) {
+        g_cancel_on_oracle_gemm->store(
+            true, std::memory_order_relaxed);
+    }
+    return true;
+}
+
 bool OracleGemmS8S8(const std::vector<int8_t>& L, const std::vector<int8_t>& R,
                     uint32_t rows, uint32_t inner, uint32_t cols,
                     std::vector<int32_t>& out)
@@ -1958,8 +1976,8 @@ BOOST_AUTO_TEST_CASE(rc_stage_h_extract_extremes_int64)
 
 BOOST_AUTO_TEST_CASE(rc_stage_h_device_fault_reseal)
 {
-    // H: device-fault / corrupted ExactGemm → digest diverges; CPU reseal
-    // (empty backend) restores the reference oracle.
+    // H: winner reseal must complete through a strict qualified device. A
+    // fully executed divergent result is distinct from a local device decline.
     lt::ExactGemmBackend bad;
     bad.gemm_s8s8 = &WrongGemmS8S8;
     bad.gemm_s32s8 = &WrongGemmS32S8;
@@ -1974,11 +1992,97 @@ BOOST_AUTO_TEST_CASE(rc_stage_h_device_fault_reseal)
     const uint256 mined_bad = rc::MineRCEpisode(header, params, 0, nullptr, bad);
     BOOST_CHECK(mined_bad != cpu); // device fault / corruption visible
 
-    // Reseal path: empty backend recomputes the honest digest (miner must
-    // compare before sealing — see SolveMatMulV4RC).
-    const uint256 resealed = rc::RecomputeResidentCurriculumReference(header, params, 0);
-    BOOST_CHECK(resealed == cpu);
-    BOOST_CHECK(resealed != mined_bad);
+    lt::ExactGemmBackend good;
+    good.gemm_s8s8 = &OracleGemmS8S8;
+    const auto candidate = rc::MineRCEpisodeStrictDevice(
+        header, params, 0, good, "test_exact_device");
+    BOOST_CHECK(
+        candidate.outcome ==
+        rc::RCStrictDeviceEpisodeOutcome::Complete);
+    BOOST_CHECK(candidate.digest == cpu);
+    BOOST_CHECK(candidate.acceleration.fully_accelerated);
+    BOOST_CHECK_EQUAL(candidate.acceleration.cpu_calls, 0u);
+    BOOST_CHECK_EQUAL(candidate.acceleration.cpu_fallbacks, 0u);
+
+    const auto sealed = rc::ResealRCWinnerStrict(
+        header, params, 0, cpu, good, "test_exact_device");
+    BOOST_CHECK(
+        sealed.outcome == rc::RCWinnerResealOutcome::Sealed);
+    BOOST_CHECK(sealed.digest == cpu);
+    BOOST_CHECK(sealed.acceleration.require_device);
+    BOOST_CHECK(sealed.acceleration.fully_accelerated);
+    BOOST_CHECK_EQUAL(sealed.acceleration.cpu_calls, 0u);
+    BOOST_CHECK_EQUAL(sealed.acceleration.cpu_fallbacks, 0u);
+    BOOST_CHECK_EQUAL(
+        sealed.acceleration.device_macs,
+        rc::TotalRCEpisodeMacs(params));
+
+    const auto divergent = rc::ResealRCWinnerStrict(
+        header, params, 0, cpu, bad, "test_faulty_device");
+    BOOST_CHECK(
+        divergent.outcome ==
+        rc::RCWinnerResealOutcome::CandidateDigestDivergence);
+    BOOST_CHECK(!divergent.digest.IsNull());
+    BOOST_CHECK(divergent.digest != cpu);
+    BOOST_CHECK(divergent.acceleration.fully_accelerated);
+
+    lt::ExactGemmBackend declining;
+    declining.gemm_s8s8 = &DecliningGemmS8S8;
+    const auto candidate_failed = rc::MineRCEpisodeStrictDevice(
+        header, params, 0, declining, "test_declining_device");
+    BOOST_CHECK(
+        candidate_failed.outcome ==
+        rc::RCStrictDeviceEpisodeOutcome::LocalAcceleratorFailure);
+    BOOST_CHECK(candidate_failed.digest.IsNull());
+    BOOST_CHECK_EQUAL(
+        candidate_failed.acceleration.cpu_calls, 0u);
+    BOOST_CHECK_EQUAL(
+        candidate_failed.acceleration.cpu_fallbacks, 1u);
+
+    const auto failed = rc::ResealRCWinnerStrict(
+        header, params, 0, cpu, declining, "test_declining_device");
+    BOOST_CHECK(
+        failed.outcome ==
+        rc::RCWinnerResealOutcome::LocalAcceleratorFailure);
+    BOOST_CHECK(failed.digest.IsNull());
+    BOOST_CHECK_EQUAL(failed.acceleration.cpu_calls, 0u);
+    BOOST_CHECK_EQUAL(failed.acceleration.cpu_fallbacks, 1u);
+    BOOST_CHECK(!failed.acceleration.first_failure.empty());
+}
+
+BOOST_AUTO_TEST_CASE(rc_stage_h_winner_reseal_honors_miner_cancellation)
+{
+    const auto header = MakeRCHeader(4243);
+    const auto params = rc::MakeToyRCEpisodeParams();
+    const uint256 candidate =
+        rc::RecomputeResidentCurriculumReference(
+            header, params, 0);
+    BOOST_REQUIRE(!candidate.IsNull());
+
+    lt::ExactGemmBackend good;
+    good.gemm_s8s8 = &OracleGemmS8S8;
+    std::atomic_bool cancelled{true};
+    const auto before = rc::ResealRCWinnerStrict(
+        header, params, 0, candidate, good,
+        "test_exact_device", &cancelled);
+    BOOST_CHECK(
+        before.outcome == rc::RCWinnerResealOutcome::Cancelled);
+    BOOST_CHECK(before.digest.IsNull());
+    BOOST_CHECK_EQUAL(before.acceleration.device_calls, 0u);
+
+    cancelled.store(false, std::memory_order_relaxed);
+    lt::ExactGemmBackend cancelling;
+    cancelling.gemm_s8s8 = &CancellingOracleGemmS8S8;
+    g_cancel_on_oracle_gemm = &cancelled;
+    const auto during = rc::ResealRCWinnerStrict(
+        header, params, 0, candidate, cancelling,
+        "test_cancelling_device", &cancelled);
+    g_cancel_on_oracle_gemm = nullptr;
+    BOOST_CHECK(
+        during.outcome == rc::RCWinnerResealOutcome::Cancelled);
+    BOOST_CHECK(during.digest.IsNull());
+    BOOST_CHECK_GT(during.acceleration.device_calls, 0u);
+    BOOST_CHECK_EQUAL(during.acceleration.cpu_calls, 0u);
 }
 
 BOOST_AUTO_TEST_CASE(rc_stage_h_production_boundary_ci_safe)
