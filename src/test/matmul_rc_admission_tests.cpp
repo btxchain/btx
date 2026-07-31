@@ -275,6 +275,81 @@ BOOST_AUTO_TEST_CASE(known_valid_replaces_same_source_poison_and_cannot_be_evict
     BOOST_CHECK(accepted.nonce == valid.nonce);
 }
 
+BOOST_AUTO_TEST_CASE(validated_same_hash_replay_cannot_fill_global_capacity)
+{
+    node::RCAdmissionStore store{{
+        .max_entries = 4,
+        .max_entries_per_netgroup = 4,
+        .max_validated_candidates_per_hash = 2,
+        .ttl = std::chrono::seconds{10},
+    }};
+    const auto now{std::chrono::steady_clock::now()};
+    const uint256 pow_limit{RegtestPowLimit()};
+    const CBlockHeader replayed_header{Header()};
+    const auto replayed_ticket{ValidTicket(replayed_header, pow_limit)};
+
+    // The ticket is valid and source-bound once stored, but replaying the same
+    // bytes through 64 keyed netgroups must consume at most the per-hash fan-in
+    // rather than the entire validated global quota.
+    for (uint64_t group = 1; group <= 64; ++group) {
+        const auto result{store.RememberKnown(
+            replayed_ticket, replayed_header, group, pow_limit, now)};
+        if (group <= 2) {
+            BOOST_CHECK(
+                result == node::RCAdmissionStore::RememberResult::Stored);
+        } else {
+            BOOST_CHECK(
+                result == node::RCAdmissionStore::RememberResult::HashQuota);
+        }
+    }
+    BOOST_CHECK_EQUAL(store.ValidatedSize(), 2U);
+    BOOST_CHECK_EQUAL(
+        store.ValidatedCandidatesForHash(replayed_header.GetHash()), 2U);
+
+    // The replay cannot censor a different honest hash even though enough
+    // Sybil groups attempted to exceed the process-wide capacity.
+    CBlockHeader honest_header{Header()};
+    ++honest_header.nTime;
+    const auto honest_ticket{ValidTicket(honest_header, pow_limit)};
+    BOOST_REQUIRE(
+        store.RememberKnown(
+            honest_ticket, honest_header, 100, pow_limit, now) ==
+        node::RCAdmissionStore::RememberResult::Stored);
+    BOOST_CHECK_EQUAL(store.ValidatedSize(), 3U);
+    BOOST_CHECK_EQUAL(
+        store.ValidatedCandidatesForHash(honest_header.GetHash()), 1U);
+
+    // Consumption and hash-wide erasure update both aggregate dimensions
+    // exactly once.
+    BOOST_CHECK(store.Consume(
+        replayed_header, 1, pow_limit, now));
+    BOOST_CHECK_EQUAL(
+        store.ValidatedCandidatesForHash(replayed_header.GetHash()), 1U);
+    store.Erase(replayed_header.GetHash());
+    BOOST_CHECK_EQUAL(
+        store.ValidatedCandidatesForHash(replayed_header.GetHash()), 0U);
+    BOOST_CHECK_EQUAL(store.ValidatedSize(), 1U);
+
+    // Short bursts for distinct known hashes remain admissible.
+    CBlockHeader burst_header{honest_header};
+    ++burst_header.nTime;
+    const auto burst_ticket{ValidTicket(burst_header, pow_limit)};
+    BOOST_REQUIRE(
+        store.RememberKnown(
+            burst_ticket, burst_header, 100, pow_limit, now) ==
+        node::RCAdmissionStore::RememberResult::Stored);
+    BOOST_CHECK_EQUAL(store.ValidatedSize(), 2U);
+
+    // TTL pruning clears the per-hash counters as well as global/group state.
+    store.Prune(now + std::chrono::seconds{11});
+    BOOST_CHECK_EQUAL(store.ValidatedSize(), 0U);
+    BOOST_CHECK_EQUAL(store.NetgroupSize(100), 0U);
+    BOOST_CHECK_EQUAL(
+        store.ValidatedCandidatesForHash(honest_header.GetHash()), 0U);
+    BOOST_CHECK_EQUAL(
+        store.ValidatedCandidatesForHash(burst_header.GetHash()), 0U);
+}
+
 BOOST_AUTO_TEST_CASE(quarantine_rate_limits_and_counters_are_exact)
 {
     node::RCAdmissionStore store{{

@@ -114,6 +114,8 @@ RCAdmissionStore::RCAdmissionStore(Config config) : m_config{config}
     m_config.max_entries = std::max<size_t>(1, m_config.max_entries);
     m_config.max_entries_per_netgroup =
         std::max<size_t>(1, m_config.max_entries_per_netgroup);
+    m_config.max_validated_candidates_per_hash =
+        std::max<size_t>(1, m_config.max_validated_candidates_per_hash);
     m_config.max_unknown_entries =
         std::max<size_t>(1, m_config.max_unknown_entries);
     m_config.max_unknown_entries_per_netgroup =
@@ -178,6 +180,10 @@ RCAdmissionStore::RememberResult RCAdmissionStore::RememberKnown(
     if (m_validated_entries.count(key) != 0) {
         return RememberResult::Duplicate;
     }
+    if (ValidatedCandidatesForHash(header.GetHash()) >=
+        m_config.max_validated_candidates_per_hash) {
+        return RememberResult::HashQuota;
+    }
     if (m_validated_entries.size() >= m_config.max_entries) {
         return RememberResult::GlobalQuota;
     }
@@ -193,6 +199,7 @@ RCAdmissionStore::RememberResult RCAdmissionStore::RememberKnown(
     if (unknown != m_unknown_entries.end()) EraseUnknownIterator(unknown);
     m_validated_entries.emplace(key, Entry{ticket, now});
     ++m_validated_netgroup_counts[keyed_netgroup];
+    ++m_validated_hash_counts[header.GetHash()];
     return RememberResult::Stored;
 }
 
@@ -270,6 +277,13 @@ size_t RCAdmissionStore::NetgroupSize(uint64_t keyed_netgroup) const
     return it == m_validated_netgroup_counts.end() ? 0 : it->second;
 }
 
+size_t RCAdmissionStore::ValidatedCandidatesForHash(
+    const uint256& block_hash) const
+{
+    const auto it{m_validated_hash_counts.find(block_hash)};
+    return it == m_validated_hash_counts.end() ? 0 : it->second;
+}
+
 size_t RCAdmissionStore::UnknownNetgroupSize(uint64_t keyed_netgroup) const
 {
     const auto it{m_unknown_netgroup_counts.find(keyed_netgroup)};
@@ -286,14 +300,24 @@ size_t RCAdmissionStore::UnknownCandidatesForHash(
 void RCAdmissionStore::EraseValidatedIterator(
     std::map<EntryKey, Entry>::iterator it)
 {
+    const uint256 hash{it->first.first};
     const uint64_t group{it->first.second};
     m_validated_entries.erase(it);
     const auto count_it{m_validated_netgroup_counts.find(group)};
-    if (count_it == m_validated_netgroup_counts.end()) return;
-    if (count_it->second <= 1) {
-        m_validated_netgroup_counts.erase(count_it);
-    } else {
-        --count_it->second;
+    if (count_it != m_validated_netgroup_counts.end()) {
+        if (count_it->second <= 1) {
+            m_validated_netgroup_counts.erase(count_it);
+        } else {
+            --count_it->second;
+        }
+    }
+    const auto hash_count{m_validated_hash_counts.find(hash)};
+    if (hash_count != m_validated_hash_counts.end()) {
+        if (hash_count->second <= 1) {
+            m_validated_hash_counts.erase(hash_count);
+        } else {
+            --hash_count->second;
+        }
     }
 }
 
