@@ -130,11 +130,12 @@ The repository contains useful M4 Max production evidence, but it is not an
 independently reproduced CPU-oracle corpus for every supported provider.
 No missing production golden or canary value is invented by this change.
 
-The 2026-07-31 GPU audit additionally reported an RTX 5060 three-episode mean
-of approximately 21.38 seconds and a production mining run that remained in
-CPU winner reseal for more than 38 minutes. Those external artifacts were not
-present in this workspace and are not treated here as independently verified
-activation evidence.
+The 2026-07-31 GPU audit additionally reported a Blackwell-class 16 GiB discrete
+GPU three-episode mean of approximately 21.38 seconds and a production mining
+run that remained in CPU winner reseal for more than 38 minutes (that reseal
+path has since been replaced by strict-device reseal). Those external artifacts
+were not present in this workspace and are not treated here as independently
+verified activation evidence.
 
 ## Required activation review
 
