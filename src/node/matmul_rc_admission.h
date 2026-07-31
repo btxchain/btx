@@ -75,11 +75,11 @@ struct RCAdmissionTicket {
  *
  * Unknown-header tickets enter a deliberately small quarantine. They neither
  * consume the independently bounded validated-ticket capacity nor monopolize a
- * block hash: candidates are keyed by (block_hash, keyed_netgroup), with a
- * small per-hash fan-in bound. Once the header is known, RememberKnown()
- * authenticates before allocating validated capacity. Consume() may also
- * authenticate the matching quarantined candidate when a header arrives after
- * its sidecar.
+ * block hash: candidates are keyed by (block_hash, keyed_netgroup), with small
+ * per-hash fan-in bounds in both tiers. Once the header is known,
+ * RememberKnown() authenticates before allocating validated capacity.
+ * Consume() may also authenticate the matching quarantined candidate when a
+ * header arrives after its sidecar.
  *
  * Tickets remain bound to their source netgroup and are single-use locally.
  * An invalid candidate from one netgroup is never consulted or erased while
@@ -93,6 +93,8 @@ public:
         /** Cryptographically validated, known-header entries. */
         size_t max_entries{256};
         size_t max_entries_per_netgroup{4};
+        /** Limit valid sidecar replays for one hash across Sybil netgroups. */
+        size_t max_validated_candidates_per_hash{2};
         /** Unverified, unknown-header quarantine (separate capacity). */
         size_t max_unknown_entries{32};
         size_t max_unknown_entries_per_netgroup{2};
@@ -150,6 +152,8 @@ public:
     }
     [[nodiscard]] size_t UnknownSize() const { return m_unknown_entries.size(); }
     [[nodiscard]] size_t NetgroupSize(uint64_t keyed_netgroup) const;
+    [[nodiscard]] size_t ValidatedCandidatesForHash(
+        const uint256& block_hash) const;
     [[nodiscard]] size_t UnknownNetgroupSize(uint64_t keyed_netgroup) const;
     [[nodiscard]] size_t UnknownCandidatesForHash(
         const uint256& block_hash) const;
@@ -170,6 +174,7 @@ private:
     std::map<EntryKey, Entry> m_validated_entries;
     std::map<EntryKey, Entry> m_unknown_entries;
     std::map<uint64_t, size_t> m_validated_netgroup_counts;
+    std::map<uint256, size_t> m_validated_hash_counts;
     std::map<uint64_t, size_t> m_unknown_netgroup_counts;
     std::map<uint256, size_t> m_unknown_hash_counts;
     std::map<uint64_t, std::vector<std::chrono::steady_clock::time_point>>
