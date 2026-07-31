@@ -163,9 +163,10 @@ static constexpr double MATMUL_CARRIER_SERVE_BUCKET_MAX{16.0};
 static constexpr size_t MATMUL_CARRIER_SERVE_GLOBAL_BYTES_PER_SEC{size_t{12} * 1024 * 1024};
 static constexpr double MATMUL_CARRIER_RECV_BUCKET_MAX{8.0};
 /** RC admission sidecars are tiny, but unknown-hash spam allocates quarantine
- * state. Bound messages before store lookup; reconnect-resistant netgroup
- * limiting is additionally enforced by RCAdmissionStore. Exhausting this
- * bucket is explicit protocol abuse and discourages the peer. */
+ * state. Bound unknown-header messages before store mutation; known relevant
+ * headers instead receive immediate cryptographic validation. Reconnect-
+ * resistant netgroup limiting is additionally enforced by RCAdmissionStore.
+ * Exhausting this bucket is explicit protocol abuse and discourages the peer. */
 static constexpr double MATMUL_RCADMIT_RECV_BUCKET_MAX{8.0};
 static constexpr auto MATMUL_RCADMIT_RECV_REFILL{15s};
 static_assert(MAX_RCCARRIER_PAYLOAD_SIZE >= matmul::v4::rc::kRCFreivaldsCarrierMaxSerializedBytes,
@@ -8271,34 +8272,6 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         })};
         if (!rc_next_height_active) return;
 
-        // Bound arbitrary-hash messages before any header lookup or store
-        // mutation. Unlike large best-effort payloads, repeatedly exhausting
-        // this tiny-message bucket is unambiguous sidecar spam.
-        {
-            const auto now_bucket{GetTime<std::chrono::microseconds>()};
-            if (peer->m_matmul_rcadmit_recv_last_refill != 0us) {
-                const auto elapsed{
-                    now_bucket - peer->m_matmul_rcadmit_recv_last_refill};
-                if (elapsed > 0us) {
-                    const double refill{
-                        static_cast<double>(count_microseconds(elapsed)) /
-                        static_cast<double>(count_microseconds(
-                            std::chrono::microseconds{
-                                MATMUL_RCADMIT_RECV_REFILL}))};
-                    peer->m_matmul_rcadmit_recv_tokens =
-                        std::min<double>(
-                            MATMUL_RCADMIT_RECV_BUCKET_MAX,
-                            peer->m_matmul_rcadmit_recv_tokens + refill);
-                }
-            }
-            peer->m_matmul_rcadmit_recv_last_refill = now_bucket;
-            if (peer->m_matmul_rcadmit_recv_tokens < 1.0) {
-                Misbehaving(*peer, "rcadmit message rate exceeded");
-                return;
-            }
-            peer->m_matmul_rcadmit_recv_tokens -= 1.0;
-        }
-
         // Authenticate before allocating the full admission capacity whenever
         // the header is already indexed. Unknown hashes enter only the small,
         // separately rate-limited quarantine. The height check prevents a
@@ -8339,6 +8312,36 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             }
         }
         if (known_irrelevant_header) return;
+        // Only arbitrary unknown hashes consume the tiny-message bucket.
+        // Known relevant headers are cryptographically checked below, and one
+        // invalid ticket is itself discouragement-worthy. Charging valid
+        // known-header sidecars here would disconnect honest peers during a
+        // short reorg/header catch-up burst even though they allocate no
+        // quarantine state.
+        if (!known_rc_header) {
+            const auto now_bucket{GetTime<std::chrono::microseconds>()};
+            if (peer->m_matmul_rcadmit_recv_last_refill != 0us) {
+                const auto elapsed{
+                    now_bucket - peer->m_matmul_rcadmit_recv_last_refill};
+                if (elapsed > 0us) {
+                    const double refill{
+                        static_cast<double>(count_microseconds(elapsed)) /
+                        static_cast<double>(count_microseconds(
+                            std::chrono::microseconds{
+                                MATMUL_RCADMIT_RECV_REFILL}))};
+                    peer->m_matmul_rcadmit_recv_tokens =
+                        std::min<double>(
+                            MATMUL_RCADMIT_RECV_BUCKET_MAX,
+                            peer->m_matmul_rcadmit_recv_tokens + refill);
+                }
+            }
+            peer->m_matmul_rcadmit_recv_last_refill = now_bucket;
+            if (peer->m_matmul_rcadmit_recv_tokens < 1.0) {
+                Misbehaving(*peer, "unknown rcadmit message rate exceeded");
+                return;
+            }
+            peer->m_matmul_rcadmit_recv_tokens -= 1.0;
+        }
         // A running single-flight job has already spent a ticket (possibly
         // from another source). Additional known-header sidecars cannot make
         // that job more admissible and must not accumulate one validated entry
