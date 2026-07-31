@@ -1291,16 +1291,22 @@ bool AppInitParameterInteraction(const ArgsManager& args)
     const bool rc_epoch_configured{
         chainparams.GetConsensus().nMatMulRCHeight !=
         std::numeric_limits<int32_t>::max()};
+    const bool production_rc_epoch_configured{
+        rc_epoch_configured &&
+        !chainparams.GetConsensus().fMatMulRCUseToyDims};
     // Preserve the existing v3 consensus-tier service on networks where RC is
-    // disabled. Once an RC epoch is configured, the same unversioned bit is
+    // disabled and on explicitly toy-dimension regtest epochs. Once a
+    // production-shape RC epoch is configured, the same unversioned bit is
     // withheld unless this process is genuinely strict-device ready.
-    bool rc_strict_device_ready{!rc_epoch_configured};
+    bool rc_strict_device_ready{!production_rc_epoch_configured};
     std::string rc_provider{
-        rc_epoch_configured ? "not-probed" : "rc-disabled"};
+        production_rc_epoch_configured ? "not-probed" :
+        (rc_epoch_configured ? "toy-rc" : "rc-disabled")};
     std::string rc_resolution_reason{
-        rc_epoch_configured ? "non-strict-mode"
-                            : "current-network-v3-only"};
-    if (rc_epoch_configured &&
+        production_rc_epoch_configured ? "non-strict-mode" :
+        (rc_epoch_configured ? "toy-dimensions"
+                             : "current-network-v3-only")};
+    if (production_rc_epoch_configured &&
         matmul_validation_mode == "consensus" &&
         rc_execution_policy ==
             matmul::v4::rc::RCExactReplayExecutionPolicy::StrictDevice) {

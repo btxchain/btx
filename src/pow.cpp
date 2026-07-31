@@ -27,6 +27,7 @@
 #include <matmul/matmul_v4_bmx4_batch.h>
 #include <matmul/matmul_v4_lt.h>
 #include <matmul/matmul_v4_rc.h>
+#include <matmul/matmul_v4_rc_accelerator_scheduler.h>
 #include <matmul/matmul_v4_rc_batch.h>
 #include <matmul/matmul_v4_rc_coupled.h>
 #include <matmul/matmul_v4_rc_datacenter.h>
@@ -6898,11 +6899,33 @@ static bool SolveMatMulV4RC(CBlockHeader& block,
                     block, params_rc, block_height,
                     nullptr, resolved_rc.backend);
             } else {
+                std::atomic_bool accelerator_preempted{false};
+                auto accelerator_lease{
+                    matmul::v4::rc::GetRCAcceleratorScheduler().Acquire(
+                        matmul::v4::rc::RCAcceleratorScheduler::Priority::
+                            CandidateMining,
+                        &accelerator_preempted,
+                        strprintf(
+                            "candidate:%d:%llu", block_height,
+                            static_cast<unsigned long long>(
+                                block.nNonce64)),
+                        abort_flag)};
+                if (!accelerator_lease) {
+                    LogPrintf(
+                        "SolveMatMulV4RC: candidate accelerator wait "
+                        "cancelled at nonce=%llu\n",
+                        static_cast<unsigned long long>(
+                            block.nNonce64));
+                    RegisterMatMulSolveRuntimeSample(
+                        false,
+                        std::chrono::steady_clock::now() - start);
+                    return false;
+                }
                 const auto candidate =
                     matmul::v4::rc::MineRCEpisodeStrictDevice(
                         block, params_rc, block_height,
                         resolved_rc.backend, resolved_rc.provider,
-                        abort_flag);
+                        abort_flag, &accelerator_preempted);
                 switch (candidate.outcome) {
                 case matmul::v4::rc::RCStrictDeviceEpisodeOutcome::
                     Complete:
@@ -7041,11 +7064,35 @@ static bool SolveMatMulV4RC(CBlockHeader& block,
                         RecomputeResidentCurriculumReference(
                             block, params_rc, block_height);
             } else {
+                std::atomic_bool accelerator_preempted{false};
+                auto accelerator_lease{
+                    matmul::v4::rc::GetRCAcceleratorScheduler().Acquire(
+                        matmul::v4::rc::RCAcceleratorScheduler::Priority::
+                            WinnerReseal,
+                        &accelerator_preempted,
+                        strprintf(
+                            "winner-reseal:%d:%llu", block_height,
+                            static_cast<unsigned long long>(
+                                block.nNonce64)),
+                        abort_flag)};
+                if (!accelerator_lease) {
+                    LogPrintf(
+                        "SolveMatMulV4RC: winner reseal accelerator "
+                        "wait cancelled at nonce=%llu; discarding "
+                        "candidate\n",
+                        static_cast<unsigned long long>(
+                            block.nNonce64));
+                    RegisterMatMulSolveRuntimeSample(
+                        false,
+                        std::chrono::steady_clock::now() - start);
+                    return false;
+                }
                 const auto reseal =
                     matmul::v4::rc::ResealRCWinnerStrict(
                         block, params_rc, block_height,
                         mined, resolved_rc.backend,
-                        resolved_rc.provider, abort_flag);
+                        resolved_rc.provider, abort_flag,
+                        &accelerator_preempted);
                 const auto& stats = reseal.acceleration;
                 LogPrintf(
                     "SolveMatMulV4RC: winner reseal provider=%s "

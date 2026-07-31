@@ -83,11 +83,15 @@ public:
 
     /**
      * Wait for exclusive accelerator ownership. A higher-priority request asks
-     * the current lower-priority owner to cancel by setting its flag. Returns
-     * an empty lease when this request is cancelled before admission.
+     * the current lower-priority owner to cancel by setting `preempt_latch`.
+     * `external_cancelled` observes a separate owner (for example the miner's
+     * tip/template abort flag) without allowing the scheduler to mutate it.
+     * Returns an empty lease when either latch fires before admission.
      */
-    Lease Acquire(Priority priority, std::atomic_bool* cancelled,
-                  std::string label);
+    Lease Acquire(
+        Priority priority, std::atomic_bool* preempt_latch,
+        std::string label,
+        const std::atomic_bool* external_cancelled = nullptr);
 
     /** Wake cancelled waiters promptly during shutdown/tip change. */
     void NotifyCancellation();
@@ -101,7 +105,8 @@ private:
     struct Waiter {
         Priority priority{Priority::SpeculativeValidation};
         uint64_t sequence{0};
-        std::atomic_bool* cancelled{nullptr};
+        std::atomic_bool* preempt_latch{nullptr};
+        const std::atomic_bool* external_cancelled{nullptr};
         std::string label;
         std::chrono::steady_clock::time_point queued{};
     };
@@ -116,7 +121,7 @@ private:
     uint64_t m_next_sequence{0};
     bool m_active{false};
     Priority m_active_priority{Priority::SpeculativeValidation};
-    std::atomic_bool* m_active_cancelled{nullptr};
+    std::atomic_bool* m_active_preempt_latch{nullptr};
     std::string m_active_label;
     std::chrono::steady_clock::time_point m_active_started{};
     Stats m_stats;
