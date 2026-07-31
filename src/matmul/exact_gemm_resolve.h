@@ -16,13 +16,25 @@ namespace matmul_v4::accel {
 
 struct ResolvedRCExactGemm {
     matmul::v4::lt::ExactGemmBackend backend{};
+    /** Operator request ("auto" when no explicit backend was selected). */
+    std::string requested{"auto"};
     std::string provider{"cpu"};
     std::string reason{"cpu_reference"};
+    std::string policy{"ProductionPreferred"};
+    /** Current self-qualification covers toy + scaled-medium exact replay. */
+    std::string qualification_scope{"none"};
+    bool resolved{false};
     bool device_requested{false};
     bool self_qualified{false};
     /** Separate from byte-exact self-qualification. True only for a device lane
      *  admitted by the conservative automatic production policy. */
     bool production_eligible{false};
+    /** Activation-readiness gates. These deliberately remain false until
+     *  independently reproduced production-shape goldens are committed and a
+     *  full startup/epoch canary matches them. */
+    bool production_goldens_available{false};
+    bool startup_canary_passed{false};
+    bool activation_ready{false};
 };
 
 /** Build an injectable ExactGemmBackend for MatExpand / LT mining. An explicit
@@ -53,6 +65,13 @@ struct ResolvedRCExactGemm {
  * ExactReplay without claiming M4 is M5-class or that OCP MXFP4 is available.
  */
 [[nodiscard]] ResolvedRCExactGemm ResolveExactGemmBackendForRC();
+
+/**
+ * Last RC resolver status for operator telemetry. This probe never initiates a
+ * device qualification or production replay. `resolved=false` means no RC
+ * caller has resolved a backend since process start/reset.
+ */
+[[nodiscard]] ResolvedRCExactGemm ProbeLastRCExactGemmResolution();
 
 /** Apply RC self-qual gate to an already-resolved ExactGemm candidate.
  *  Cached by {provider_label, gemm_s8s8 fn ptr, epoch}. epoch=-1 is the

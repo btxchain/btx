@@ -666,6 +666,26 @@ struct RCExactGemmCacheKey {
 
 std::mutex g_rc_exact_gemm_cache_mu;
 std::map<RCExactGemmCacheKey, matmul::v4::lt::ExactGemmBackend> g_rc_exact_gemm_cache;
+std::mutex g_rc_resolution_status_mu;
+ResolvedRCExactGemm g_rc_resolution_status;
+
+ResolvedRCExactGemm RecordRCResolution(ResolvedRCExactGemm out)
+{
+    out.resolved = true;
+    out.production_goldens_available =
+        matmul::v4::rc::kRCProfile1ProductionGoldensAvailable;
+    out.startup_canary_passed =
+        matmul::v4::rc::kRCProfile1StartupCanaryPassed;
+    out.activation_ready =
+        out.production_eligible &&
+        out.production_goldens_available &&
+        out.startup_canary_passed;
+    {
+        std::lock_guard<std::mutex> lock(g_rc_resolution_status_mu);
+        g_rc_resolution_status = out;
+    }
+    return out;
+}
 
 matmul::v4::lt::ExactGemmBackend GateExactGemmWithRCSelfQualUncached(
     matmul::v4::lt::ExactGemmBackend backend, const char* provider_label)
@@ -717,9 +737,21 @@ matmul::v4::lt::ExactGemmBackend GateExactGemmWithRCSelfQualCached(
 
 void ResetRCExactGemmResolveCacheForTest()
 {
-    std::lock_guard<std::mutex> lock(g_rc_exact_gemm_cache_mu);
-    g_rc_exact_gemm_cache.clear();
+    {
+        std::lock_guard<std::mutex> lock(g_rc_exact_gemm_cache_mu);
+        g_rc_exact_gemm_cache.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_rc_resolution_status_mu);
+        g_rc_resolution_status = {};
+    }
     matmul::v4::rc::ResetRCSelfQualCacheForTest();
+}
+
+ResolvedRCExactGemm ProbeLastRCExactGemmResolution()
+{
+    std::lock_guard<std::mutex> lock(g_rc_resolution_status_mu);
+    return g_rc_resolution_status;
 }
 
 matmul::v4::lt::ExactGemmBackend MakeResolvedExactGemmBackend()
@@ -765,6 +797,8 @@ ResolvedRCExactGemm ResolveExactGemmBackendForRC()
     const char* requested_env = std::getenv("BTX_MATMUL_V4_BACKEND");
     const std::string requested =
         requested_env != nullptr ? std::string{requested_env} : std::string{};
+    out.requested = requested.empty() ? "auto" : requested;
+    out.policy = matmul::v4::rc::ToString(policy);
     // An unset request means the process default ("auto"), not CPU.
     out.device_requested = requested != "cpu";
 
@@ -792,7 +826,9 @@ ResolvedRCExactGemm ResolveExactGemmBackendForRC()
                 matmul::v4::rc::kRcOzakiMxfp4ProductionEligible;
             out.reason = out.self_qualified ? "native_rc_ozaki_self_qualified"
                                             : "native_rc_ozaki_self_qual_failed";
-            return out;
+            out.qualification_scope =
+                out.self_qualified ? "toy_and_scaled_medium" : "none";
+            return RecordRCResolution(std::move(out));
         }
     }
 
@@ -807,7 +843,7 @@ ResolvedRCExactGemm ResolveExactGemmBackendForRC()
                       "unqualified; declining device INT8 inject (CPU ExactGemm)\n");
         }
         out.reason = "native_required_but_unqualified";
-        return out;
+        return RecordRCResolution(std::move(out));
     }
 
     // RC ExactReplay is a narrower contract than generic v4 mining. The generic
@@ -857,10 +893,12 @@ ResolvedRCExactGemm ResolveExactGemmBackendForRC()
                 out.provider += "_fused_extract";
             }
             out.reason = "rc_exactpanels_and_episode_self_qualified";
+            out.production_eligible = true;
+            out.qualification_scope = "toy_and_scaled_medium";
         } else {
             out.reason = "metal_rc_episode_self_qual_failed";
         }
-        return out;
+        return RecordRCResolution(std::move(out));
     }
 
     // ProductionPreferred (default) or PortableExplicit: use the exact-gated
@@ -898,7 +936,9 @@ ResolvedRCExactGemm ResolveExactGemmBackendForRC()
     }
     out.reason = out.self_qualified ? "generic_exactgemm_and_rc_self_qualified"
                                     : "no_rc_self_qualified_device_backend";
-    return out;
+    out.qualification_scope =
+        out.self_qualified ? "toy_and_scaled_medium" : "none";
+    return RecordRCResolution(std::move(out));
 }
 
 matmul::v4::lt::ExactGemmBackend MakeResolvedExactGemmBackendForRC()

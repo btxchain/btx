@@ -267,4 +267,35 @@ BOOST_AUTO_TEST_CASE(rc_compute_lane_ids_distinct)
                       "DenseInt8Legacy");
 }
 
+BOOST_AUTO_TEST_CASE(rc_profile1_activation_readiness_fails_closed_without_goldens)
+{
+    // Small/medium exactness and automatic provider eligibility are not
+    // sufficient activation evidence. PR #97 intentionally does not invent a
+    // production CPU-oracle digest or claim a startup canary that was not run.
+    BOOST_CHECK(!rc::kRCProfile1ProductionGoldensAvailable);
+    BOOST_CHECK(!rc::kRCProfile1StartupCanaryPassed);
+
+    matmul_v4::accel::ResetRCExactGemmResolveCacheForTest();
+    const auto unresolved{
+        matmul_v4::accel::ProbeLastRCExactGemmResolution()};
+    BOOST_CHECK(!unresolved.resolved);
+    BOOST_CHECK(!unresolved.production_goldens_available);
+    BOOST_CHECK(!unresolved.startup_canary_passed);
+    BOOST_CHECK(!unresolved.activation_ready);
+
+    const auto resolved{
+        matmul_v4::accel::ResolveExactGemmBackendForRC()};
+    const auto snapshot{
+        matmul_v4::accel::ProbeLastRCExactGemmResolution()};
+    BOOST_CHECK(snapshot.resolved);
+    BOOST_CHECK_EQUAL(snapshot.requested, resolved.requested);
+    BOOST_CHECK_EQUAL(snapshot.provider, resolved.provider);
+    BOOST_CHECK_EQUAL(snapshot.reason, resolved.reason);
+    BOOST_CHECK_EQUAL(snapshot.self_qualified,
+                      resolved.self_qualified);
+    BOOST_CHECK(!snapshot.production_goldens_available);
+    BOOST_CHECK(!snapshot.startup_canary_passed);
+    BOOST_CHECK(!snapshot.activation_ready);
+}
+
 BOOST_AUTO_TEST_SUITE_END()
