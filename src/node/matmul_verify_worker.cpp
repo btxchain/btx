@@ -123,6 +123,124 @@ MatMulVerifyWorker::EnqueueResult MatMulVerifyWorker::Enqueue(
     return EnqueueResult::Enqueued;
 }
 
+MatMulVerifyWorker::HandoffResult
+MatMulVerifyWorker::HandoffAuthenticatedTip(Job& replacement)
+{
+    Assume((replacement.block != nullptr) !=
+           (replacement.header != nullptr));
+    if (replacement.priority != Priority::AuthenticatedTipChild) {
+        return HandoffResult::Deferred;
+    }
+    const CBlockHeader& replacement_header{replacement.GetHeader()};
+    const uint256 replacement_hash{replacement_header.GetHash()};
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_stopped) return HandoffResult::Stopped;
+        if (m_pending.count(replacement_hash) != 0) {
+            return HandoffResult::Deferred;
+        }
+
+        std::shared_ptr<Pending> source;
+        for (const auto& [hash, pending] : m_pending) {
+            if (hash == replacement_hash ||
+                pending->body_joined ||
+                !pending->job.IsHeaderOnly() ||
+                pending->job.priority !=
+                    Priority::AuthenticatedTipChild ||
+                !pending->job.equal_priority_handoff_available ||
+                !pending->job.rc_pending_lease ||
+                pending->job.cancelled->load(
+                    std::memory_order_relaxed) ||
+                pending->job.height != replacement.height ||
+                pending->job.GetHeader().hashPrevBlock !=
+                    replacement_header.hashPrevBlock) {
+                continue;
+            }
+            if (!source ||
+                pending->sequence < source->sequence) {
+                source = pending;
+            }
+        }
+        if (!source) return HandoffResult::Deferred;
+
+        source->job.cancelled->store(
+            true, std::memory_order_relaxed);
+        source->job.equal_priority_handoff_available = false;
+        replacement.rc_pending_lease =
+            std::move(source->job.rc_pending_lease);
+        if (replacement.IsHeaderOnly()) {
+            replacement.rc_speculative_lease =
+                std::move(source->job.rc_speculative_lease);
+            replacement.retarget_speculative_lease =
+                std::move(
+                    source->job.retarget_speculative_lease);
+            if (replacement.retarget_speculative_lease) {
+                replacement.retarget_speculative_lease(
+                    replacement_hash);
+            }
+        } else {
+            // A body is no longer speculative. Releasing this ownership
+            // decrements the header-only counter and removes the old hash,
+            // while the transferred RC pending lease remains held.
+            source->job.rc_speculative_lease.reset();
+            source->job.retarget_speculative_lease = {};
+        }
+        replacement.equal_priority_handoff_available = false;
+        if (!replacement.cancelled) {
+            replacement.cancelled =
+                std::make_shared<std::atomic_bool>(false);
+        }
+
+        auto next{std::make_shared<Pending>()};
+        next->job = std::move(replacement);
+        next->body_joined = next->job.block != nullptr;
+        next->sequence = m_next_sequence++;
+        m_queue.push_back(next);
+        m_pending.emplace(replacement_hash, next);
+
+        if (!source->running) {
+            std::erase(m_queue, source);
+            m_pending.erase(
+                source->job.GetHeader().GetHash());
+        }
+        if (m_threads.size() < m_max_threads &&
+            m_threads.size() < m_queue.size()) {
+            m_threads.emplace_back([this] { WorkerLoop(); });
+        }
+    }
+    m_cv.notify_one();
+    return HandoffResult::HandedOff;
+}
+
+bool MatMulVerifyWorker::CanHandoffAuthenticatedTip(
+    const CBlockHeader& replacement,
+    int32_t height) const
+{
+    const uint256 replacement_hash{replacement.GetHash()};
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (m_stopped ||
+        m_pending.count(replacement_hash) != 0) {
+        return false;
+    }
+    for (const auto& [hash, pending] : m_pending) {
+        if (hash != replacement_hash &&
+            !pending->body_joined &&
+            pending->job.IsHeaderOnly() &&
+            pending->job.priority ==
+                Priority::AuthenticatedTipChild &&
+            pending->job.equal_priority_handoff_available &&
+            pending->job.rc_pending_lease &&
+            !pending->job.cancelled->load(
+                std::memory_order_relaxed) &&
+            pending->job.height == height &&
+            pending->job.GetHeader().hashPrevBlock ==
+                replacement.hashPrevBlock) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool MatMulVerifyWorker::Cancel(const uint256& hash)
 {
     std::lock_guard<std::mutex> lock(m_mutex);

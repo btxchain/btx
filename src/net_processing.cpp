@@ -817,6 +817,20 @@ private:
         int32_t reference_height,
         bool& global_exhausted,
         bool rc_recompute = false);
+    /** Charge only the retained source's RC budget for a bounded handoff.
+     *  The inherited paid attempt already owns the one global debit. */
+    bool ConsumeMatMulRCPeerBudgetForHandoff(
+        const Peer& peer,
+        uint64_t keyed_netgroup,
+        const Consensus::Params& params,
+        uint32_t verification_count,
+        std::chrono::steady_clock::time_point now,
+        bool is_ibd,
+        int32_t reference_height);
+    void RefundMatMulRCPeerBudgetForHandoff(
+        const CNetAddr& address,
+        uint64_t keyed_netgroup,
+        MatMulRCVerificationBudgetDebit& debit);
     /** Roll back a just-consumed RC debit when enqueue failed before any
      *  expensive work could start. Never used for cancellation/completion. */
     void RefundMatMulRCVerificationBudgetForPeer(
@@ -1376,6 +1390,9 @@ private:
             //! A header-first job already owns the RC slot and rate debit.
             //! The body may join that exact job but must not create a new one.
             RECOMPUTE_HEADER_PRECHARGED,
+            //! A different paid direct-tip header owns the cap-one lane. This
+            //! admitted body may replace it through one bounded lease handoff.
+            RECOMPUTE_HEADER_HANDOFF,
         } state{State::NOT_PRECHECKED};
         bool is_ibd{false};
         bool encdr_profile{false};
@@ -1383,6 +1400,11 @@ private:
         bool owns_async_marker{false};
         bool owns_verdict_pin{false};
         bool owns_assumevalid_trust_pin{false};
+        MatMulRCVerificationBudgetDebit handoff_budget_debit;
+        CNetAddr handoff_charged_address;
+        uint64_t handoff_charged_netgroup{0};
+        std::optional<node::RCAdmissionTicket> handoff_ticket;
+        uint64_t handoff_ticket_netgroup{0};
         int32_t reference_height{std::numeric_limits<int32_t>::max()};
         uint32_t work_units{0};
     };
@@ -2925,6 +2947,53 @@ bool PeerManagerImpl::ConsumeMatMulVerificationBudgetForPeer(
         }
     }
     return true;
+}
+
+bool PeerManagerImpl::ConsumeMatMulRCPeerBudgetForHandoff(
+    const Peer& peer,
+    uint64_t keyed_netgroup,
+    const Consensus::Params& params,
+    uint32_t verification_count,
+    std::chrono::steady_clock::time_point now,
+    bool is_ibd,
+    int32_t reference_height)
+{
+    if (verification_count == 0) return true;
+    UniqueLock lock(
+        m_matmul_addr_budget_mutex, "m_matmul_addr_budget_mutex",
+        __FILE__, __LINE__);
+    MaybeExpireMatMulSourceBudgets(now);
+    auto& address_state{m_matmul_addr_budgets[peer.m_addr]};
+    auto& netgroup_state{m_matmul_netgroup_budgets[keyed_netgroup]};
+    address_state.last_update = now;
+    netgroup_state.last_update = now;
+    return ConsumeMatMulRCSourceVerifyBudgets(
+        address_state.budget, netgroup_state.budget, params,
+        verification_count, now, is_ibd, reference_height);
+}
+
+void PeerManagerImpl::RefundMatMulRCPeerBudgetForHandoff(
+    const CNetAddr& address,
+    uint64_t keyed_netgroup,
+    MatMulRCVerificationBudgetDebit& debit)
+{
+    const auto refund{TakeMatMulRCVerificationBudgetRefund(debit)};
+    if (!refund) return;
+    UniqueLock lock(
+        m_matmul_addr_budget_mutex, "m_matmul_addr_budget_mutex",
+        __FILE__, __LINE__);
+    if (const auto it{m_matmul_addr_budgets.find(address)};
+        it != m_matmul_addr_budgets.end()) {
+        RefundMatMulRCPeerVerifyBudget(
+            it->second.budget, refund->verification_count,
+            refund->charged_at);
+    }
+    if (const auto it{m_matmul_netgroup_budgets.find(keyed_netgroup)};
+        it != m_matmul_netgroup_budgets.end()) {
+        RefundMatMulRCPeerVerifyBudget(
+            it->second.budget, refund->verification_count,
+            refund->charged_at);
+    }
 }
 
 void PeerManagerImpl::RefundMatMulRCVerificationBudgetForPeer(
@@ -4675,6 +4744,7 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
     if (m_matmul_verify_worker->Contains(header.GetHash())) return;
 
     const uint32_t work{MatMulRCWorkUnits(params, index.nHeight)};
+    std::optional<node::RCAdmissionTicket> accepted_ticket;
     uint32_t pending{m_matmul_rc_speculative_pending.load(
         std::memory_order_relaxed)};
     do {
@@ -4686,6 +4756,98 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
             m_matmul_rc_pending_verifications, params, index.nHeight, work)) {
         m_matmul_rc_speculative_pending.fetch_sub(
             1, std::memory_order_relaxed);
+        // Cap one may be occupied by a false direct-tip header. A second
+        // admitted sibling gets one bounded handoff of the already-paid
+        // pending/rate lease instead of waiting for retransmission. The
+        // candidate must spend its own rcadmit ticket first, so this cannot be
+        // driven by ticketless header spam.
+        if (authenticated_tip_child) {
+            if (m_opts.matmul_rc_admission &&
+                !node.HasPermission(NetPermissionFlags::NoBan)) {
+                node::RCAdmissionTicket ticket;
+                const bool admitted{
+                    WITH_LOCK(
+                        m_matmul_rc_admission_mutex,
+                        return m_matmul_rc_admission_store.Consume(
+                            header, node.nKeyedNetGroup,
+                            params.powLimit,
+                            std::chrono::steady_clock::now(),
+                            &ticket))};
+                if (!admitted) return;
+                accepted_ticket = ticket;
+            }
+            const auto handoff_charged_at{
+                std::chrono::steady_clock::now()};
+            bool handoff_peer_charged{false};
+            MatMulRCVerificationBudgetDebit handoff_budget_debit;
+            if (!node.HasPermission(
+                    NetPermissionFlags::NoBan)) {
+                if (!ConsumeMatMulRCPeerBudgetForHandoff(
+                        peer, node.nKeyedNetGroup, params, work,
+                        handoff_charged_at,
+                        /*is_ibd=*/false, index.nHeight)) {
+                    if (accepted_ticket) {
+                        LOCK(m_matmul_rc_admission_mutex);
+                        (void)m_matmul_rc_admission_store
+                            .RememberKnown(
+                                *accepted_ticket, header,
+                                node.nKeyedNetGroup,
+                                params.powLimit,
+                                std::chrono::steady_clock::now());
+                    }
+                    node.fDisconnect = true;
+                    return;
+                }
+                handoff_peer_charged = true;
+                handoff_budget_debit = {
+                    .verification_count = work,
+                    .charged_at = handoff_charged_at,
+                    .refundable = true,
+                };
+            }
+            const uint256 hash{header.GetHash()};
+            node::MatMulVerifyWorker::Job replacement{
+                .height = index.nHeight,
+                .parent_median_time_past = parent_mtp,
+                .completion =
+                    [this, hash](bool ok) {
+                        if (!ok) return;
+                        LOCK(cs_main);
+                        (void)m_chainman
+                            .PersistMatMulExactReplayVerdict(hash);
+                    },
+                .header =
+                    std::make_shared<const CBlockHeader>(header),
+                .priority = node::MatMulVerifyWorker::Priority::
+                    AuthenticatedTipChild,
+            };
+            if (m_matmul_verify_worker
+                    ->HandoffAuthenticatedTip(replacement) ==
+                node::MatMulVerifyWorker::HandoffResult::
+                    HandedOff) {
+                if (accepted_ticket) {
+                    RememberMatMulRCOutboundTicket(
+                        *accepted_ticket);
+                }
+                LogDebug(
+                    BCLog::NET,
+                    "matmul: handed off paid header-first ExactReplay lane hash=%s height=%d peer=%d\n",
+                    hash.ToString(), index.nHeight, node.GetId());
+                return;
+            }
+            if (accepted_ticket) {
+                LOCK(m_matmul_rc_admission_mutex);
+                (void)m_matmul_rc_admission_store.RememberKnown(
+                    *accepted_ticket, header,
+                    node.nKeyedNetGroup, params.powLimit,
+                    std::chrono::steady_clock::now());
+            }
+            if (handoff_peer_charged) {
+                RefundMatMulRCPeerBudgetForHandoff(
+                    peer.m_addr, node.nKeyedNetGroup,
+                    handoff_budget_debit);
+            }
+        }
         LogDebug(
             BCLog::NET,
             "matmul: header-first ExactReplay deferred by RC pending-work cap hash=%s peer=%d\n",
@@ -4727,7 +4889,6 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
         charged_netgroup = node.nKeyedNetGroup;
     }
 
-    std::optional<node::RCAdmissionTicket> accepted_ticket;
     if (m_opts.matmul_rc_admission &&
         !node.HasPermission(NetPermissionFlags::NoBan)) {
         node::RCAdmissionTicket ticket;
@@ -4775,7 +4936,7 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
         .height = index.nHeight,
         .parent_median_time_past = parent_mtp,
         .completion =
-            [this, hash, speculative_slot, rc_pending_slot](bool ok) {
+            [this, hash](bool ok) {
                 if (!ok) return;
                 LOCK(cs_main);
                 (void)m_chainman.PersistMatMulExactReplayVerdict(hash);
@@ -4784,6 +4945,19 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
         .priority = authenticated_tip_child
             ? node::MatMulVerifyWorker::Priority::AuthenticatedTipChild
             : node::MatMulVerifyWorker::Priority::CompetingBranch,
+        .rc_pending_lease = rc_pending_slot,
+        .rc_speculative_lease = speculative_slot,
+        .retarget_speculative_lease =
+            [this, speculative_slot](const uint256& next_hash) {
+                LOCK(m_matmul_rc_admission_mutex);
+                m_matmul_rc_speculative_hashes.erase(
+                    *speculative_slot);
+                *speculative_slot = next_hash;
+                m_matmul_rc_speculative_hashes.insert(
+                    next_hash);
+            },
+        .equal_priority_handoff_available =
+            authenticated_tip_child,
     };
     const auto enqueue_result{m_matmul_verify_worker->Enqueue(
         job, node::MatMulVerifyWorker::EnqueueMode::NewOnly)};
@@ -5520,6 +5694,33 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
     MatMulRCVerificationBudgetDebit body_budget_debit;
     CNetAddr body_charged_address;
     uint64_t body_charged_netgroup{0};
+    const auto rollback_handoff_admission = [&] {
+        if (matmul_admission.handoff_ticket) {
+            LOCK(m_matmul_rc_admission_mutex);
+            (void)m_matmul_rc_admission_store.RememberKnown(
+                *matmul_admission.handoff_ticket,
+                block->GetBlockHeader(),
+                matmul_admission.handoff_ticket_netgroup,
+                m_chainparams.GetConsensus().powLimit,
+                std::chrono::steady_clock::now());
+            matmul_admission.handoff_ticket.reset();
+        }
+        RefundMatMulRCPeerBudgetForHandoff(
+            matmul_admission.handoff_charged_address,
+            matmul_admission.handoff_charged_netgroup,
+            matmul_admission.handoff_budget_debit);
+    };
+    const auto commit_handoff_admission = [&] {
+        if (matmul_admission.handoff_ticket) {
+            RememberMatMulRCOutboundTicket(
+                *matmul_admission.handoff_ticket);
+            matmul_admission.handoff_ticket.reset();
+        }
+        // The replacement source's retained-address debit is permanent once
+        // the inherited paid attempt starts. The old attempt's one global
+        // debit remains the sole process-wide charge.
+        matmul_admission.handoff_budget_debit.refundable = false;
+    };
     const auto release_admission_marker = [&] {
         if (matmul_admission.owns_async_marker) {
             UnmarkMatMulAsyncVerification(hash);
@@ -5659,6 +5860,22 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
         }
     }
 
+    if (matmul_admission.state ==
+            MatMulBlockAdmission::State::RECOMPUTE_HEADER_HANDOFF &&
+        !encdr) {
+        // The final classifier found no replay to run (for example a cached
+        // verdict or concurrently installed body). No paid attempt changed
+        // ownership, so restore the replacement source's sidecar/debit before
+        // ordinary zero-recompute processing.
+        rollback_handoff_admission();
+        release_admission_marker();
+        ProcessBlockSync(node.GetId(), &node, block, force_processing,
+                         min_pow_checked, post_process);
+        release_verdict_pin();
+        release_assumevalid_trust_pin();
+        return;
+    }
+
     if (m_matmul_verify_worker && encdr) {
             // Every async recompute must hold a pending-verification slot (the
             // message thread no longer serializes them). Network block-delivery
@@ -5688,7 +5905,11 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
             const bool joining_precharged_header{
                 matmul_admission.state ==
                 MatMulBlockAdmission::State::RECOMPUTE_HEADER_PRECHARGED};
-            if (matmul_slot || joining_precharged_header) {
+            const bool handing_off_header{
+                matmul_admission.state ==
+                MatMulBlockAdmission::State::RECOMPUTE_HEADER_HANDOFF};
+            if (matmul_slot || joining_precharged_header ||
+                handing_off_header) {
                 const NodeId nodeid{node.GetId()};
                 // A body can arrive through BLOCK, CMPCTBLOCK/BLOCKTXN, or as
                 // a redundant relay.  Collapse all of those delivery paths at
@@ -5768,24 +5989,43 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                     },
                     .priority = priority,
                 };
-                const auto enqueue_result{m_matmul_verify_worker->Enqueue(
-                    job,
-                    joining_precharged_header
-                        ? node::MatMulVerifyWorker::EnqueueMode::JoinOnly
-                        : node::MatMulVerifyWorker::EnqueueMode::JoinOrEnqueue)};
-                if (enqueue_result ==
-                        node::MatMulVerifyWorker::EnqueueResult::Enqueued ||
-                    enqueue_result ==
-                        node::MatMulVerifyWorker::EnqueueResult::Joined) {
-                    return; // message thread freed
+                if (handing_off_header) {
+                    if (m_matmul_verify_worker
+                            ->HandoffAuthenticatedTip(job) ==
+                        node::MatMulVerifyWorker::HandoffResult::
+                            HandedOff) {
+                        commit_handoff_admission();
+                        return;
+                    }
+                } else {
+                    const auto enqueue_result{
+                        m_matmul_verify_worker->Enqueue(
+                            job,
+                            joining_precharged_header
+                                ? node::MatMulVerifyWorker::
+                                      EnqueueMode::JoinOnly
+                                : node::MatMulVerifyWorker::
+                                      EnqueueMode::JoinOrEnqueue)};
+                    if (enqueue_result ==
+                            node::MatMulVerifyWorker::
+                                EnqueueResult::Enqueued ||
+                        enqueue_result ==
+                            node::MatMulVerifyWorker::
+                                EnqueueResult::Joined) {
+                        return; // message thread freed
+                    }
                 }
                 // STOPPED and DEFERRED both fail closed. In particular, a
                 // cancelled same-hash header job is not a shutdown signal and
                 // must never trigger Q*-scale synchronous replay on the P2P
                 // message thread. The body remains re-requestable.
-                RefundMatMulRCVerificationBudgetForPeer(
-                    body_charged_address, body_charged_netgroup,
-                    body_budget_debit);
+                if (handing_off_header) {
+                    rollback_handoff_admission();
+                } else {
+                    RefundMatMulRCVerificationBudgetForPeer(
+                        body_charged_address, body_charged_netgroup,
+                        body_budget_debit);
+                }
                 UnmarkMatMulAsyncVerification(hash);
                 if (post_process) post_process();
                 return;
@@ -5999,6 +6239,7 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
     // need a ticket, and requested bodies still consume the pending/global
     // work budgets and receive no chainwork credit until ExactReplay succeeds.
     const bool requested_ibd_body = is_ibd && force_processing;
+    std::optional<node::RCAdmissionTicket> accepted_ticket;
     if (rc_profile && m_opts.matmul_rc_admission &&
         !requested_ibd_body &&
         !node.HasPermission(NetPermissionFlags::NoBan) &&
@@ -6018,25 +6259,82 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
             admission.state = MatMulBlockAdmission::State::HEADER_ONLY;
             return true;
         }
-        RememberMatMulRCOutboundTicket(accepted);
+        accepted_ticket = accepted;
     }
-    if (direct_authenticated_tip_child) {
-        // A speculative false direct child must not retain the only verifier
-        // merely because an admitted complete direct child has equal
-        // scheduler priority. Do this only after the body passed rcadmit (or
-        // the explicit requested-IBD exception), so ticketless body spam
-        // cannot become a free cancellation primitive.
-        //
-        // A running job releases its slot at the next ExactReplay cancellation
-        // boundary; until then this body is deferred, never synchronously
-        // replayed or used to disconnect its source.
-        m_matmul_verify_worker->CancelIf(
-            [&block, &block_hash](
-                const CBlockHeader& pending_header, int32_t) {
-                return pending_header.GetHash() != block_hash &&
-                    pending_header.hashPrevBlock ==
-                        block.hashPrevBlock;
-            });
+    if (direct_authenticated_tip_child &&
+        m_matmul_verify_worker->CanHandoffAuthenticatedTip(
+            block.GetBlockHeader(), exact_reference_height)) {
+        // The inherited attempt already paid the one global rate debit. Charge
+        // this body's retained source separately before it can take ownership,
+        // then let ProcessBlock atomically transfer the cap-one pending lease.
+        const auto handoff_charged_at{
+            std::chrono::steady_clock::now()};
+        CNetAddr handoff_charged_address;
+        MatMulRCVerificationBudgetDebit handoff_budget_debit;
+        bool handoff_peer_charged{false};
+        if (!node.HasPermission(NetPermissionFlags::NoBan)) {
+            PeerRef peer{GetPeerRef(node.GetId())};
+            if (!peer ||
+                !ConsumeMatMulRCPeerBudgetForHandoff(
+                    *peer, node.nKeyedNetGroup, params, work,
+                    handoff_charged_at,
+                    is_ibd, exact_reference_height)) {
+                if (accepted_ticket) {
+                    LOCK(m_matmul_rc_admission_mutex);
+                    (void)m_matmul_rc_admission_store.RememberKnown(
+                        *accepted_ticket, block.GetBlockHeader(),
+                        node.nKeyedNetGroup, params.powLimit,
+                        std::chrono::steady_clock::now());
+                }
+                if (peer) node.fDisconnect = true;
+                admission.state =
+                    MatMulBlockAdmission::State::HEADER_ONLY;
+                return true;
+            }
+            handoff_peer_charged = true;
+            handoff_charged_address = peer->m_addr;
+            handoff_budget_debit = {
+                .verification_count = work,
+                .charged_at = handoff_charged_at,
+                .refundable = true,
+            };
+        }
+        if (!MarkMatMulAsyncVerification(block_hash)) {
+            if (accepted_ticket) {
+                LOCK(m_matmul_rc_admission_mutex);
+                (void)m_matmul_rc_admission_store.RememberKnown(
+                    *accepted_ticket, block.GetBlockHeader(),
+                    node.nKeyedNetGroup, params.powLimit,
+                    std::chrono::steady_clock::now());
+            }
+            if (handoff_peer_charged) {
+                RefundMatMulRCPeerBudgetForHandoff(
+                    handoff_charged_address, node.nKeyedNetGroup,
+                    handoff_budget_debit);
+            }
+            return false;
+        }
+        admission.state =
+            MatMulBlockAdmission::State::RECOMPUTE_HEADER_HANDOFF;
+        admission.is_ibd = is_ibd;
+        admission.encdr_profile = true;
+        admission.rc_profile = true;
+        admission.owns_async_marker = true;
+        admission.reference_height = exact_reference_height;
+        admission.work_units = work;
+        admission.handoff_budget_debit =
+            handoff_budget_debit;
+        admission.handoff_charged_address =
+            handoff_charged_address;
+        admission.handoff_charged_netgroup =
+            node.nKeyedNetGroup;
+        admission.handoff_ticket = accepted_ticket;
+        admission.handoff_ticket_netgroup =
+            node.nKeyedNetGroup;
+        return true;
+    }
+    if (accepted_ticket) {
+        RememberMatMulRCOutboundTicket(*accepted_ticket);
     }
     if (exact_encdr_profile && !MarkMatMulAsyncVerification(block_hash)) {
         LogDebug(BCLog::NET,

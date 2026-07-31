@@ -82,6 +82,12 @@ public:
         Stopped,
     };
 
+    enum class HandoffResult : uint8_t {
+        HandedOff,
+        Deferred,
+        Stopped,
+    };
+
     struct Job {
         std::shared_ptr<const CBlock> block;
         //! Height the block validates at (= prev->nHeight + 1), resolved by the
@@ -102,6 +108,19 @@ public:
         std::shared_ptr<const CBlockHeader> header;
         Priority priority{Priority::Background};
         std::shared_ptr<std::atomic_bool> cancelled;
+        //! One cap-one RC pending-work reservation. Header-first admission
+        //! stores it outside `completion` so one bounded equal-priority
+        //! handoff can transfer ownership without opening a second slot.
+        std::shared_ptr<void> rc_pending_lease;
+        //! Header-only speculative quota/set ownership. Transferred to another
+        //! header or released when the handoff target is a complete body.
+        std::shared_ptr<void> rc_speculative_lease;
+        //! Retarget the net-processing speculative-hash index on a
+        //! header-to-header handoff.
+        std::function<void(const uint256&)> retarget_speculative_lease;
+        //! At most one equal-priority sibling may inherit this job's paid
+        //! attempt. The replacement never receives another handoff.
+        bool equal_priority_handoff_available{false};
 
         [[nodiscard]] const CBlockHeader& GetHeader() const
         {
@@ -134,6 +153,16 @@ public:
     EnqueueResult Enqueue(
         Job& job,
         EnqueueMode mode = EnqueueMode::JoinOrEnqueue);
+
+    /** Atomically replace one paid authenticated-tip header-only attempt with
+     *  an equal-priority sibling. The RC pending lease is transferred, never
+     *  duplicated; a header replacement also inherits/retargets the
+     *  speculative lease, while a complete body releases that header-only
+     *  quota. Exactly one handoff is permitted for a paid attempt. */
+    HandoffResult HandoffAuthenticatedTip(Job& replacement);
+    [[nodiscard]] bool CanHandoffAuthenticatedTip(
+        const CBlockHeader& replacement,
+        int32_t height) const;
 
     /** Cancel queued/running speculative work for one header hash. */
     bool Cancel(const uint256& hash);
