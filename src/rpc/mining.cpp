@@ -33,6 +33,7 @@
 #include <matmul/matmul_pow.h>
 #include <matmul/matmul_v4_rc_accelerator_scheduler.h>
 #include <matmul/matmul_v4_bmx4.h>
+#include <matmul/matmul_v4_rc_gkr.h>
 #include <matmul/pow_v4.h>
 #include <net.h>
 #include <net_processing.h>
@@ -1410,7 +1411,7 @@ static UniValue ConsensusGuardAlerts(const CChain& active_chain, const Consensus
     return alerts;
 }
 
-static UniValue BuildBackendRuntimeProfile()
+static UniValue BuildBackendRuntimeProfile(bool include_rc_runtime = false)
 {
     const auto stats = matmul::accelerated::ProbeMatMulBackendRuntimeStats();
     const auto prehash_stats = ProbeMatMulGpuPreHashScanStats();
@@ -1490,61 +1491,99 @@ static UniValue BuildBackendRuntimeProfile()
     obj.pushKV("last_cuda_fallback_error", stats.last_cuda_fallback_error);
     obj.pushKV("last_gpu_input_error", stats.last_gpu_input_error);
 
-    // This is a non-triggering snapshot: an RPC call must not unexpectedly
-    // start a medium/production accelerator qualification.
-    const auto rc_resolution =
-        matmul_v4::accel::ProbeLastRCExactGemmResolution();
-    UniValue rc_exact_replay(UniValue::VOBJ);
-    rc_exact_replay.pushKV("resolved", rc_resolution.resolved);
-    rc_exact_replay.pushKV("requested_provider", rc_resolution.requested);
-    rc_exact_replay.pushKV("resolved_provider", rc_resolution.provider);
-    rc_exact_replay.pushKV("resolution_reason", rc_resolution.reason);
-    rc_exact_replay.pushKV("policy", rc_resolution.policy);
-    rc_exact_replay.pushKV(
-        "qualification_scope", rc_resolution.qualification_scope);
-    rc_exact_replay.pushKV(
-        "self_qualified", rc_resolution.self_qualified);
-    rc_exact_replay.pushKV(
-        "automatic_policy_eligible",
-        rc_resolution.production_eligible);
-    rc_exact_replay.pushKV(
-        "production_goldens_available",
-        rc_resolution.production_goldens_available);
-    rc_exact_replay.pushKV(
-        "startup_canary_passed",
-        rc_resolution.startup_canary_passed);
-    rc_exact_replay.pushKV(
-        "activation_ready", rc_resolution.activation_ready);
-    obj.pushKV("rc_exact_replay", std::move(rc_exact_replay));
+    if (include_rc_runtime) {
+        // This is a non-triggering snapshot: an RPC call must not unexpectedly
+        // start a medium/production accelerator qualification.
+        const auto rc_resolution =
+            matmul_v4::accel::ProbeLastRCExactGemmResolution();
+        UniValue rc_exact_replay(UniValue::VOBJ);
+        rc_exact_replay.pushKV("resolved", rc_resolution.resolved);
+        rc_exact_replay.pushKV("requested_provider", rc_resolution.requested);
+        rc_exact_replay.pushKV("resolved_provider", rc_resolution.provider);
+        rc_exact_replay.pushKV("resolution_reason", rc_resolution.reason);
+        rc_exact_replay.pushKV("policy", rc_resolution.policy);
+        rc_exact_replay.pushKV(
+            "qualification_scope", rc_resolution.qualification_scope);
+        rc_exact_replay.pushKV(
+            "self_qualified", rc_resolution.self_qualified);
+        rc_exact_replay.pushKV(
+            "automatic_policy_eligible",
+            rc_resolution.production_eligible);
+        rc_exact_replay.pushKV(
+            "production_goldens_available",
+            rc_resolution.production_goldens_available);
+        rc_exact_replay.pushKV(
+            "startup_canary_passed",
+            rc_resolution.startup_canary_passed);
+        rc_exact_replay.pushKV(
+            "activation_ready", rc_resolution.activation_ready);
+        const auto last_validation =
+            matmul::v4::rc::GetLastExactReplayVerifyResult();
+        UniValue validation(UniValue::VOBJ);
+        validation.pushKV("available", last_validation.has_value());
+        if (last_validation) {
+            validation.pushKV(
+                "outcome",
+                matmul::v4::rc::ExactReplayVerifyOutcomeName(
+                    last_validation->outcome));
+            validation.pushKV(
+                "execution_policy",
+                matmul::v4::rc::RCExactReplayExecutionPolicyName(
+                    last_validation->execution_policy));
+            validation.pushKV("require_device", last_validation->require_device);
+            validation.pushKV("provider", last_validation->acceleration_backend);
+            validation.pushKV(
+                "resolution_reason",
+                last_validation->acceleration_resolution_reason);
+            validation.pushKV(
+                "fully_accelerated", last_validation->fully_accelerated);
+            validation.pushKV(
+                "full_metal_pipeline", last_validation->full_metal_pipeline);
+            validation.pushKV(
+                "device_gemm_calls", last_validation->device_gemm_calls);
+            validation.pushKV(
+                "device_gemm_macs", last_validation->device_gemm_macs);
+            validation.pushKV(
+                "cpu_gemm_calls", last_validation->cpu_gemm_calls);
+            validation.pushKV(
+                "cpu_gemm_fallbacks", last_validation->cpu_gemm_fallbacks);
+            validation.pushKV(
+                "acceleration_failure", last_validation->acceleration_failure);
+            validation.pushKV("wall_s", last_validation->verify_s);
+            validation.pushKV("note", last_validation->note);
+        }
+        rc_exact_replay.pushKV("last_validation", std::move(validation));
+        obj.pushKV("rc_exact_replay", std::move(rc_exact_replay));
 
-    const auto scheduler{
-        matmul::v4::rc::GetRCAcceleratorScheduler().GetStats()};
-    UniValue rc_scheduler(UniValue::VOBJ);
-    rc_scheduler.pushKV("requests", scheduler.requests);
-    rc_scheduler.pushKV("acquisitions", scheduler.acquisitions);
-    rc_scheduler.pushKV("completions", scheduler.completions);
-    rc_scheduler.pushKV(
-        "cancelled_waits", scheduler.cancelled_waits);
-    rc_scheduler.pushKV(
-        "preemption_requests", scheduler.preemption_requests);
-    rc_scheduler.pushKV("queue_depth", scheduler.queue_depth);
-    rc_scheduler.pushKV(
-        "queue_high_water", scheduler.queue_high_water);
-    rc_scheduler.pushKV("active", scheduler.active);
-    rc_scheduler.pushKV(
-        "active_priority",
-        matmul::v4::rc::ToString(scheduler.active_priority));
-    rc_scheduler.pushKV("active_label", scheduler.active_label);
-    rc_scheduler.pushKV("active_wall_s", scheduler.active_wall_s);
-    rc_scheduler.pushKV(
-        "last_queue_wait_s", scheduler.last_queue_wait_s);
-    rc_scheduler.pushKV(
-        "max_queue_wait_s", scheduler.max_queue_wait_s);
-    rc_scheduler.pushKV(
-        "last_execution_s", scheduler.last_execution_s);
-    rc_scheduler.pushKV(
-        "max_execution_s", scheduler.max_execution_s);
-    obj.pushKV("rc_accelerator_scheduler", std::move(rc_scheduler));
+        const auto scheduler{
+            matmul::v4::rc::GetRCAcceleratorScheduler().GetStats()};
+        UniValue rc_scheduler(UniValue::VOBJ);
+        rc_scheduler.pushKV("requests", scheduler.requests);
+        rc_scheduler.pushKV("acquisitions", scheduler.acquisitions);
+        rc_scheduler.pushKV("completions", scheduler.completions);
+        rc_scheduler.pushKV(
+            "cancelled_waits", scheduler.cancelled_waits);
+        rc_scheduler.pushKV(
+            "preemption_requests", scheduler.preemption_requests);
+        rc_scheduler.pushKV("queue_depth", scheduler.queue_depth);
+        rc_scheduler.pushKV(
+            "queue_high_water", scheduler.queue_high_water);
+        rc_scheduler.pushKV("active", scheduler.active);
+        rc_scheduler.pushKV(
+            "active_priority",
+            matmul::v4::rc::ToString(scheduler.active_priority));
+        rc_scheduler.pushKV("active_label", scheduler.active_label);
+        rc_scheduler.pushKV("active_wall_s", scheduler.active_wall_s);
+        rc_scheduler.pushKV(
+            "last_queue_wait_s", scheduler.last_queue_wait_s);
+        rc_scheduler.pushKV(
+            "max_queue_wait_s", scheduler.max_queue_wait_s);
+        rc_scheduler.pushKV(
+            "last_execution_s", scheduler.last_execution_s);
+        rc_scheduler.pushKV(
+            "max_execution_s", scheduler.max_execution_s);
+        obj.pushKV("rc_accelerator_scheduler", std::move(rc_scheduler));
+    }
     return obj;
 }
 
@@ -5617,6 +5656,24 @@ static RPCHelpMan getmininginfo()
                                 {RPCResult::Type::BOOL, "production_goldens_available", "Whether independently reproduced production-shape goldens are committed"},
                                 {RPCResult::Type::BOOL, "startup_canary_passed", "Whether the production-shape startup/epoch canary passed"},
                                 {RPCResult::Type::BOOL, "activation_ready", "Whether all provider activation-readiness gates passed"},
+                                {RPCResult::Type::OBJ, "last_validation", "Most recent completed production ExactReplay validation attempt",
+                                {
+                                    {RPCResult::Type::BOOL, "available", "Whether a validation result has been recorded"},
+                                    {RPCResult::Type::STR, "outcome", "Consensus verdict, retryable local failure, or cancellation"},
+                                    {RPCResult::Type::STR, "execution_policy", "Configured RC execution policy"},
+                                    {RPCResult::Type::BOOL, "require_device", "Whether this replay prohibited CPU fallback"},
+                                    {RPCResult::Type::STR, "provider", "Provider used by the replay"},
+                                    {RPCResult::Type::STR, "resolution_reason", "Provider resolution reason"},
+                                    {RPCResult::Type::BOOL, "fully_accelerated", "Whether the complete replay ran on the accelerator"},
+                                    {RPCResult::Type::BOOL, "full_metal_pipeline", "Whether the full replay used the Metal pipeline"},
+                                    {RPCResult::Type::NUM, "device_gemm_calls", "Device GEMM calls"},
+                                    {RPCResult::Type::NUM, "device_gemm_macs", "Consensus GEMM MACs executed on device"},
+                                    {RPCResult::Type::NUM, "cpu_gemm_calls", "CPU GEMM calls"},
+                                    {RPCResult::Type::NUM, "cpu_gemm_fallbacks", "CPU fallback calls"},
+                                    {RPCResult::Type::STR, "acceleration_failure", "First accelerator failure, if any"},
+                                    {RPCResult::Type::NUM, "wall_s", "Replay wall time"},
+                                    {RPCResult::Type::STR, "note", "Replay status detail"},
+                                }},
                             }},
                             {RPCResult::Type::OBJ, "rc_accelerator_scheduler", "Shared Profile-1 device-owner queue and execution telemetry",
                             {
@@ -5728,7 +5785,7 @@ static RPCHelpMan getmininginfo()
     }
     obj.pushKV("chain_guard", MiningChainGuardToJSON(chain_guard_status));
     obj.pushKV("fork_health", BuildForkHealthSummary(chainman));
-    obj.pushKV("backend_runtime", BuildBackendRuntimeProfile());
+    obj.pushKV("backend_runtime", BuildBackendRuntimeProfile(/*include_rc_runtime=*/true));
     int next_height_for_policy{0};
     if (!TryGetNextBlockHeight(&tip, next_height_for_policy)) {
         throw JSONRPCError(RPC_INTERNAL_ERROR, "next block height overflow");

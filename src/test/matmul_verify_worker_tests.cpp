@@ -1490,4 +1490,39 @@ BOOST_AUTO_TEST_CASE(rc_accelerator_scheduler_cancelled_wait_is_retryable)
     BOOST_CHECK(!scheduler.GetStats().active);
 }
 
+BOOST_AUTO_TEST_CASE(
+    rc_accelerator_scheduler_observes_external_miner_abort)
+{
+    using Scheduler = matmul::v4::rc::RCAcceleratorScheduler;
+    auto& scheduler{matmul::v4::rc::GetRCAcceleratorScheduler()};
+    BOOST_REQUIRE(scheduler.ResetStatsForTest());
+
+    std::atomic_bool tip_preempted{false};
+    auto tip{scheduler.Acquire(
+        Scheduler::Priority::TipValidation, &tip_preempted, "tip")};
+    BOOST_REQUIRE(tip);
+
+    std::atomic_bool candidate_preempted{false};
+    std::atomic_bool miner_abort{false};
+    std::atomic_bool acquired{true};
+    std::thread candidate{[&] {
+        auto lease{scheduler.Acquire(
+            Scheduler::Priority::CandidateMining,
+            &candidate_preempted, "candidate", &miner_abort)};
+        acquired.store(static_cast<bool>(lease),
+                       std::memory_order_relaxed);
+    }};
+    BOOST_REQUIRE(WaitFor(
+        [&] { return scheduler.GetStats().queue_depth == 1; }));
+    miner_abort.store(true, std::memory_order_relaxed);
+    scheduler.NotifyCancellation();
+    candidate.join();
+
+    BOOST_CHECK(!acquired.load(std::memory_order_relaxed));
+    BOOST_CHECK(!candidate_preempted.load(std::memory_order_relaxed));
+    BOOST_CHECK_EQUAL(scheduler.GetStats().cancelled_waits, 1U);
+    tip = {};
+    BOOST_CHECK(!scheduler.GetStats().active);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

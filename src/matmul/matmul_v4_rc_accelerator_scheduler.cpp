@@ -74,12 +74,14 @@ bool RCAcceleratorScheduler::IsFirst(
 
 RCAcceleratorScheduler::Lease
 RCAcceleratorScheduler::Acquire(
-    Priority priority, std::atomic_bool* cancelled, std::string label)
+    Priority priority, std::atomic_bool* preempt_latch,
+    std::string label, const std::atomic_bool* external_cancelled)
 {
     const auto queued{std::chrono::steady_clock::now()};
     auto waiter{std::make_shared<Waiter>()};
     waiter->priority = priority;
-    waiter->cancelled = cancelled;
+    waiter->preempt_latch = preempt_latch;
+    waiter->external_cancelled = external_cancelled;
     waiter->label = std::move(label);
     waiter->queued = queued;
 
@@ -94,14 +96,17 @@ RCAcceleratorScheduler::Acquire(
     if (m_active &&
         static_cast<uint8_t>(priority) >
             static_cast<uint8_t>(m_active_priority) &&
-        m_active_cancelled != nullptr &&
-        !m_active_cancelled->exchange(true, std::memory_order_relaxed)) {
+        m_active_preempt_latch != nullptr &&
+        !m_active_preempt_latch->exchange(
+            true, std::memory_order_relaxed)) {
         ++m_stats.preemption_requests;
     }
 
     for (;;) {
-        if (cancelled != nullptr &&
-            cancelled->load(std::memory_order_relaxed)) {
+        if ((preempt_latch != nullptr &&
+             preempt_latch->load(std::memory_order_relaxed)) ||
+            (external_cancelled != nullptr &&
+             external_cancelled->load(std::memory_order_relaxed))) {
             std::erase(m_waiters, waiter);
             ++m_stats.cancelled_waits;
             m_stats.queue_depth = m_waiters.size();
@@ -115,7 +120,7 @@ RCAcceleratorScheduler::Acquire(
             const double wait_s{Seconds(started - queued)};
             m_active = true;
             m_active_priority = priority;
-            m_active_cancelled = cancelled;
+            m_active_preempt_latch = preempt_latch;
             m_active_label = waiter->label;
             m_active_started = started;
             ++m_stats.acquisitions;
@@ -146,7 +151,7 @@ void RCAcceleratorScheduler::Release(
     m_stats.max_execution_s =
         std::max(m_stats.max_execution_s, execution_s);
     m_active = false;
-    m_active_cancelled = nullptr;
+    m_active_preempt_latch = nullptr;
     m_active_label.clear();
     m_stats.active = false;
     m_stats.active_label.clear();

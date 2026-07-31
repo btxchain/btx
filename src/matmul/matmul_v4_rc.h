@@ -46,13 +46,16 @@ namespace matmul::v4::rc {
 class ScopedExactReplayCancellation
 {
 public:
-    explicit ScopedExactReplayCancellation(const std::atomic_bool* cancelled);
+    explicit ScopedExactReplayCancellation(
+        const std::atomic_bool* cancelled,
+        const std::atomic_bool* secondary_cancelled = nullptr);
     ~ScopedExactReplayCancellation();
     ScopedExactReplayCancellation(const ScopedExactReplayCancellation&) = delete;
     ScopedExactReplayCancellation& operator=(const ScopedExactReplayCancellation&) = delete;
 
 private:
     const std::atomic_bool* m_previous{nullptr};
+    const std::atomic_bool* m_previous_secondary{nullptr};
 };
 
 [[nodiscard]] bool ExactReplayCancellationRequested();
@@ -332,11 +335,12 @@ struct RCExactReplayAccelerationStats {
 
 /** Non-consensus execution controls for an accelerated exact replay.
  *
- * `require_device` is a benchmark/certification assertion, never a consensus
- * rule: a device decline makes the local run return a null digest instead of
- * silently timing CPU work. Normal validation leaves it false and falls back
- * to the portable CPU oracle. `output_row_tile` bounds int32/int64 scratch;
- * zero selects the implementation default (256 rows for a device backend).
+ * `require_device` is local execution policy, never a consensus rule: a device
+ * decline makes the local run return a null digest instead of silently timing
+ * CPU work. Strict production mining/validation sets it; pre-activation auto
+ * mode and explicit CPU diagnostics may leave it false. `output_row_tile`
+ * bounds int32/int64 scratch; zero selects the implementation default (256
+ * rows for a device backend).
  */
 struct RCExactReplayAcceleration {
     matmul::v4::lt::ExactGemmBackend gemm{};
@@ -589,7 +593,8 @@ struct RCMerkleProof {
     int32_t height,
     const matmul::v4::lt::ExactGemmBackend& gemm,
     const std::string& provider,
-    const std::atomic_bool* cancelled = nullptr);
+    const std::atomic_bool* cancelled = nullptr,
+    const std::atomic_bool* secondary_cancelled = nullptr);
 
 /** Strict winner reseal for Profile 1 mining.
  *
@@ -607,7 +612,8 @@ struct RCMerkleProof {
     const uint256& candidate_digest,
     const matmul::v4::lt::ExactGemmBackend& gemm,
     const std::string& provider,
-    const std::atomic_bool* cancelled = nullptr);
+    const std::atomic_bool* cancelled = nullptr,
+    const std::atomic_bool* secondary_cancelled = nullptr);
 
 /** Miner entry: same digest as the CPU reference. May inject ExactGemmBackend
  *  after RC self-qualification (fail-closed → empty backend = CPU). */

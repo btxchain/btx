@@ -2070,6 +2070,18 @@ BOOST_AUTO_TEST_CASE(rc_stage_h_winner_reseal_honors_miner_cancellation)
     BOOST_CHECK(before.digest.IsNull());
     BOOST_CHECK_EQUAL(before.acceleration.device_calls, 0u);
 
+    std::atomic_bool scheduler_preempted{true};
+    cancelled.store(false, std::memory_order_relaxed);
+    const auto preempted = rc::ResealRCWinnerStrict(
+        header, params, 0, candidate, good,
+        "test_exact_device", &cancelled, &scheduler_preempted);
+    BOOST_CHECK(
+        preempted.outcome ==
+        rc::RCWinnerResealOutcome::Cancelled);
+    BOOST_CHECK(preempted.digest.IsNull());
+    BOOST_CHECK_EQUAL(preempted.acceleration.device_calls, 0u);
+
+    scheduler_preempted.store(false, std::memory_order_relaxed);
     cancelled.store(false, std::memory_order_relaxed);
     lt::ExactGemmBackend cancelling;
     cancelling.gemm_s8s8 = &CancellingOracleGemmS8S8;

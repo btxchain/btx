@@ -33,6 +33,8 @@ namespace {
 namespace bx = matmul::v4::bmx4;
 namespace lt = matmul::v4::lt;
 thread_local const std::atomic_bool* g_exact_replay_cancelled{nullptr};
+thread_local const std::atomic_bool* g_exact_replay_secondary_cancelled{
+    nullptr};
 constexpr size_t kRCDeviceMerkleLeafBatch{65536};
 
 // --- tagged SHA helpers -----------------------------------------------------
@@ -1615,21 +1617,28 @@ std::vector<uint32_t> DeriveFSChallenges(const uint256& sigma, const uint256& cl
 } // namespace
 
 ScopedExactReplayCancellation::ScopedExactReplayCancellation(
-    const std::atomic_bool* cancelled)
-    : m_previous{g_exact_replay_cancelled}
+    const std::atomic_bool* cancelled,
+    const std::atomic_bool* secondary_cancelled)
+    : m_previous{g_exact_replay_cancelled},
+      m_previous_secondary{g_exact_replay_secondary_cancelled}
 {
     g_exact_replay_cancelled = cancelled;
+    g_exact_replay_secondary_cancelled = secondary_cancelled;
 }
 
 ScopedExactReplayCancellation::~ScopedExactReplayCancellation()
 {
     g_exact_replay_cancelled = m_previous;
+    g_exact_replay_secondary_cancelled = m_previous_secondary;
 }
 
 bool ExactReplayCancellationRequested()
 {
-    return g_exact_replay_cancelled != nullptr &&
-           g_exact_replay_cancelled->load(std::memory_order_relaxed);
+    return (g_exact_replay_cancelled != nullptr &&
+            g_exact_replay_cancelled->load(std::memory_order_relaxed)) ||
+           (g_exact_replay_secondary_cancelled != nullptr &&
+            g_exact_replay_secondary_cancelled->load(
+                std::memory_order_relaxed));
 }
 
 bool ComputeRCFfnRowShard(
@@ -2316,15 +2325,18 @@ RCStrictDeviceEpisodeResult MineRCEpisodeStrictDevice(
     int32_t height,
     const lt::ExactGemmBackend& gemm,
     const std::string& provider,
-    const std::atomic_bool* cancelled)
+    const std::atomic_bool* cancelled,
+    const std::atomic_bool* secondary_cancelled)
 {
     RCStrictDeviceEpisodeResult out;
     out.acceleration.backend = provider;
     out.acceleration.device_backend_present =
         gemm.gemm_s8s8 != nullptr;
     out.acceleration.require_device = true;
-    if (cancelled != nullptr &&
-        cancelled->load(std::memory_order_relaxed)) {
+    if ((cancelled != nullptr &&
+         cancelled->load(std::memory_order_relaxed)) ||
+        (secondary_cancelled != nullptr &&
+         secondary_cancelled->load(std::memory_order_relaxed))) {
         out.outcome = RCStrictDeviceEpisodeOutcome::Cancelled;
         return out;
     }
@@ -2336,7 +2348,8 @@ RCStrictDeviceEpisodeResult MineRCEpisodeStrictDevice(
     acceleration.output_row_tile = 256;
     acceleration.stats = &out.acceleration;
 
-    const ScopedExactReplayCancellation cancellation_scope{cancelled};
+    const ScopedExactReplayCancellation cancellation_scope{
+        cancelled, secondary_cancelled};
     out.digest = RecomputeResidentCurriculumAccelerated(
         header, params, height, {}, nullptr, nullptr, acceleration);
 
@@ -2373,11 +2386,13 @@ RCWinnerResealResult ResealRCWinnerStrict(
     const uint256& candidate_digest,
     const lt::ExactGemmBackend& gemm,
     const std::string& provider,
-    const std::atomic_bool* cancelled)
+    const std::atomic_bool* cancelled,
+    const std::atomic_bool* secondary_cancelled)
 {
     const RCStrictDeviceEpisodeResult replay{
         MineRCEpisodeStrictDevice(
-            header, params, height, gemm, provider, cancelled)};
+            header, params, height, gemm, provider, cancelled,
+            secondary_cancelled)};
     RCWinnerResealResult out;
     out.digest = replay.digest;
     out.acceleration = replay.acceleration;
