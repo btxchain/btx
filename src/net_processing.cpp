@@ -4668,27 +4668,6 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
     } while (!m_matmul_rc_speculative_pending.compare_exchange_weak(
         pending, pending + 1, std::memory_order_relaxed));
 
-    std::optional<node::RCAdmissionTicket> accepted_ticket;
-    if (m_opts.matmul_rc_admission &&
-        !node.HasPermission(NetPermissionFlags::NoBan)) {
-        node::RCAdmissionTicket ticket;
-        const bool admitted{
-            WITH_LOCK(m_matmul_rc_admission_mutex,
-                return m_matmul_rc_admission_store.Consume(
-                    header, node.nKeyedNetGroup, params.powLimit,
-                    std::chrono::steady_clock::now(), &ticket))};
-        if (!admitted) {
-            m_matmul_rc_speculative_pending.fetch_sub(
-                1, std::memory_order_relaxed);
-            LogDebug(BCLog::NET,
-                     "matmul: header-first ExactReplay denied without rcadmit hash=%s peer=%d\n",
-                     header.GetHash().ToString(), node.GetId());
-            return;
-        }
-        accepted_ticket = ticket;
-        RememberMatMulRCOutboundTicket(ticket);
-    }
-
     if (!ReserveMatMulRCVerificationSlot(
             m_matmul_rc_pending_verifications, params, index.nHeight, work)) {
         m_matmul_rc_speculative_pending.fetch_sub(
@@ -4728,6 +4707,34 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
         charged_address = peer.m_addr;
     }
 
+    std::optional<node::RCAdmissionTicket> accepted_ticket;
+    if (m_opts.matmul_rc_admission &&
+        !node.HasPermission(NetPermissionFlags::NoBan)) {
+        node::RCAdmissionTicket ticket;
+        const bool admitted{
+            WITH_LOCK(m_matmul_rc_admission_mutex,
+                return m_matmul_rc_admission_store.Consume(
+                    header, node.nKeyedNetGroup, params.powLimit,
+                    std::chrono::steady_clock::now(), &ticket))};
+        if (!admitted) {
+            // No replay work started. Preserve exact admission atomicity by
+            // rolling back the just-consumed rate debit; the pending guard
+            // releases its reservation as this scope exits.
+            if (budget_charged) {
+                RefundMatMulRCVerificationBudgetForPeer(
+                    charged_address, work, charged_at);
+            }
+            m_matmul_rc_speculative_pending.fetch_sub(
+                1, std::memory_order_relaxed);
+            LogDebug(BCLog::NET,
+                     "matmul: header-first ExactReplay denied without rcadmit hash=%s peer=%d\n",
+                     header.GetHash().ToString(), node.GetId());
+            return;
+        }
+        accepted_ticket = ticket;
+        RememberMatMulRCOutboundTicket(ticket);
+    }
+
     const uint256 hash{header.GetHash()};
     {
         LOCK(m_matmul_rc_admission_mutex);
@@ -4765,8 +4772,20 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
     if (enqueue_result !=
         node::MatMulVerifyWorker::EnqueueResult::Enqueued) {
         // NewOnly leaves the job and both pending-slot owners intact. No
-        // expensive work began, so this is the sole path that refunds the
-        // permanent peer/global rate debit.
+        // expensive work began, so restore the consumed source-bound sidecar
+        // and refund the permanent peer/global rate debit.
+        if (accepted_ticket) {
+            LOCK(m_matmul_rc_admission_mutex);
+            const auto restored{
+                m_matmul_rc_admission_store.RememberKnown(
+                    *accepted_ticket, header, node.nKeyedNetGroup,
+                    params.powLimit, std::chrono::steady_clock::now())};
+            Assume(
+                restored ==
+                    node::RCAdmissionStore::RememberResult::Stored ||
+                restored ==
+                    node::RCAdmissionStore::RememberResult::Duplicate);
+        }
         if (budget_charged) {
             RefundMatMulRCVerificationBudgetForPeer(
                 charged_address, work, charged_at);
