@@ -10573,6 +10573,23 @@ static bool ContextualCheckBlock(const CBlock& block,
                 // assumevalid-trust) is already made; only this bool crosses the
                 // release boundary.
                 bool encdr_ok;
+                bool rc_local_execution_failure{false};
+                std::string rc_execution_detail;
+                const auto check_rc = [&]() {
+                    const auto outcome{
+                        CheckMatMulProofOfWork_RCOutcome(
+                            block, consensusParams, nHeight,
+                            /*carrier_missing=*/nullptr,
+                            &rc_execution_detail)};
+                    rc_local_execution_failure =
+                        outcome ==
+                            MatMulRCValidationOutcome::
+                                LOCAL_ACCELERATOR_FAILURE ||
+                        outcome ==
+                            MatMulRCValidationOutcome::CANCELLED;
+                    return outcome ==
+                        MatMulRCValidationOutcome::VALID;
+                };
                 const CBlockIndex* exact_index{
                     chainman.m_blockman.LookupBlockIndex(block.GetHash())};
                 if (exact_index != nullptr &&
@@ -10606,7 +10623,7 @@ static bool ContextualCheckBlock(const CBlock& block,
                     if (consensusParams.IsMatMulRCCoupledActive(nHeight)) {
                         encdr_ok = CheckMatMulProofOfWork_RCCoupled(block, consensusParams, nHeight);
                     } else if (consensusParams.IsMatMulRCActive(nHeight)) {
-                        encdr_ok = CheckMatMulProofOfWork_RC(block, consensusParams, nHeight);
+                        encdr_ok = check_rc();
                     } else {
                         encdr_ok = CheckMatMulProofOfWork_V4EncDr(block, consensusParams, nHeight,
                                                                   parent_mtp);
@@ -10623,11 +10640,16 @@ static bool ContextualCheckBlock(const CBlock& block,
                     if (consensusParams.IsMatMulRCCoupledActive(nHeight)) {
                         encdr_ok = CheckMatMulProofOfWork_RCCoupled(block, consensusParams, nHeight);
                     } else if (consensusParams.IsMatMulRCActive(nHeight)) {
-                        encdr_ok = CheckMatMulProofOfWork_RC(block, consensusParams, nHeight);
+                        encdr_ok = check_rc();
                     } else {
                         encdr_ok = CheckMatMulProofOfWork_V4EncDr(block, consensusParams, nHeight,
                                                                   parent_mtp);
                     }
+                }
+                if (rc_local_execution_failure) {
+                    return state.Error(strprintf(
+                        "matmul RC ExactReplay local execution incomplete: %s",
+                        rc_execution_detail));
                 }
                 if (!encdr_ok) {
                     return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "high-hash",

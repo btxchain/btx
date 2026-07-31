@@ -4195,32 +4195,36 @@ bool CheckMatMulProofOfWork_V4EncDr(const CBlock& block, const Consensus::Params
     return finish(true, MatMulValidationPath::RECOMPUTE);
 }
 
-bool CheckMatMulProofOfWork_RC(const CBlockHeader& header, const Consensus::Params& params,
-                               int32_t block_height, bool* carrier_missing)
+MatMulRCValidationOutcome CheckMatMulProofOfWork_RCOutcome(
+    const CBlockHeader& header, const Consensus::Params& params,
+    int32_t block_height, bool* carrier_missing, std::string* detail)
 {
     if (carrier_missing != nullptr) *carrier_missing = false;
+    if (detail != nullptr) detail->clear();
     const auto start = std::chrono::steady_clock::now();
-    const auto finish = [&](bool passed) {
+    const auto finish = [&](MatMulRCValidationOutcome outcome) {
         RegisterMatMulValidationRuntimeSample(
             MatMulValidationPath::RECOMPUTE,
-            passed,
+            outcome == MatMulRCValidationOutcome::VALID,
             std::chrono::steady_clock::now() - start);
-        return passed;
+        return outcome;
     };
+    constexpr auto invalid{
+        MatMulRCValidationOutcome::INVALID_CONSENSUS};
 
-    if (!params.IsMatMulRCActive(block_height)) return finish(false);
-    if (header.matmul_dim != params.nMatMulV4Dimension) return finish(false);
-    if (header.seed_a.IsNull() || header.seed_b.IsNull()) return finish(false);
+    if (!params.IsMatMulRCActive(block_height)) return finish(invalid);
+    if (header.matmul_dim != params.nMatMulV4Dimension) return finish(invalid);
+    if (header.seed_a.IsNull() || header.seed_b.IsNull()) return finish(invalid);
 
     auto bnTarget{DeriveTarget(header.nBits, params.powLimit)};
-    if (!bnTarget) return finish(false);
+    if (!bnTarget) return finish(invalid);
 
     const matmul::v4::rc::RCEpisodeParams params_rc =
         matmul::v4::rc::ResolveRCEpisodeParams(params, block_height);
-    if (!matmul::v4::rc::ValidateRCEpisodeParams(params_rc)) return finish(false);
+    if (!matmul::v4::rc::ValidateRCEpisodeParams(params_rc)) return finish(invalid);
 
     // F4: reject null committed digest unconditionally (mirrors coupled Check*).
-    if (header.matmul_digest.IsNull()) return finish(false);
+    if (header.matmul_digest.IsNull()) return finish(invalid);
 
     // -----------------------------------------------------------------------
     // CONSENSUS AUTHORITY DISPATCH — profile-selected (design §6.1(A) / §5).
@@ -4289,7 +4293,25 @@ bool CheckMatMulProofOfWork_RC(const CBlockHeader& header, const Consensus::Para
     // datacenter profile 2 while Stage-3 succinct authority remains disabled.
     const auto replay = matmul::v4::rc::VerifyBoundedExactReplay(header, params_rc, block_height,
                                                                 &*bnTarget);
-    if (!replay.ok) return finish(false);
+    if (detail != nullptr) *detail = replay.note;
+    if (!replay.ok) {
+        switch (replay.outcome) {
+        case matmul::v4::rc::ExactReplayVerifyOutcome::InvalidConsensus:
+            return finish(invalid);
+        case matmul::v4::rc::ExactReplayVerifyOutcome::LocalAcceleratorFailure:
+            return finish(
+                MatMulRCValidationOutcome::LOCAL_ACCELERATOR_FAILURE);
+        case matmul::v4::rc::ExactReplayVerifyOutcome::Cancelled:
+            return finish(MatMulRCValidationOutcome::CANCELLED);
+        case matmul::v4::rc::ExactReplayVerifyOutcome::Valid:
+            // `ok` and outcome are kept redundant for old callers. Fail
+            // locally, rather than accusing a peer, if they ever disagree.
+            return finish(
+                MatMulRCValidationOutcome::LOCAL_ACCELERATOR_FAILURE);
+        }
+        return finish(
+            MatMulRCValidationOutcome::LOCAL_ACCELERATOR_FAILURE);
+    }
 
     // Section-2 shadow (BTX_RC_GKR_SHADOW default ON): generate+verify observe only;
     // mismatch logs; NEVER rejects consensus. Arbiter is compile-time hard-disabled
@@ -4327,7 +4349,16 @@ bool CheckMatMulProofOfWork_RC(const CBlockHeader& header, const Consensus::Para
                      "ExactReplay remains consensus\n");
         }
     }
-    return finish(true);
+    return finish(MatMulRCValidationOutcome::VALID);
+}
+
+bool CheckMatMulProofOfWork_RC(const CBlockHeader& header,
+                               const Consensus::Params& params,
+                               int32_t block_height, bool* carrier_missing)
+{
+    return CheckMatMulProofOfWork_RCOutcome(
+               header, params, block_height, carrier_missing) ==
+        MatMulRCValidationOutcome::VALID;
 }
 
 bool CheckMatMulProofOfWork_RCCoupled(const CBlockHeader& header, const Consensus::Params& params,

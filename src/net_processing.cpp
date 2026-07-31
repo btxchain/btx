@@ -5987,6 +5987,18 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                         source_pin.reset();
                         UnmarkMatMulAsyncVerification(hash);
                     },
+                    .retryable_failure =
+                    [this, hash, source_pin,
+                     post = post_process]() mutable {
+                        // No consensus verdict exists. Release all delivery
+                        // bookkeeping without re-entering validation, pinning
+                        // a false verdict, or invoking peer punishment. The
+                        // body may be requested and retried on a healthy
+                        // provider.
+                        if (post) post();
+                        source_pin.reset();
+                        UnmarkMatMulAsyncVerification(hash);
+                    },
                     .priority = priority,
                 };
                 if (handing_off_header) {

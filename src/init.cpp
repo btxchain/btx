@@ -45,6 +45,8 @@
 #include <mapport.h>
 #include <matmul/accelerated_solver.h>
 #include <matmul/backend_capabilities.h>
+#include <matmul/exact_gemm_resolve.h>
+#include <matmul/matmul_v4_rc_gkr.h>
 #include <net.h>
 #include <net_permissions.h>
 #include <net_processing.h>
@@ -111,6 +113,7 @@
 #include <cstdio>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <set>
 #include <string>
 #include <string_view>
@@ -524,6 +527,7 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
 #endif
     argsman.AddArg("-assumevalid=<hex>", strprintf("If this block is in the chain assume that it and its ancestors are valid and potentially skip script verification for their transactions while still checking other consensus rules (0 to verify all, default: %s, testnet3: %s, testnet4: %s, signet: %s, shieldedv2dev: %s)", defaultChainParams->GetConsensus().defaultAssumeValid.GetHex(), testnetChainParams->GetConsensus().defaultAssumeValid.GetHex(), testnet4ChainParams->GetConsensus().defaultAssumeValid.GetHex(), signetChainParams->GetConsensus().defaultAssumeValid.GetHex(), shieldedv2devChainParams->GetConsensus().defaultAssumeValid.GetHex()), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmulvalidation=<mode>", "Select MatMul transcript verification mode: consensus (default), economic, or spv. consensus runs Phase 2 checks within the validation window (full-node tier). economic runs Phase 1-only header checks and trusts full-node majority; it is not a full node. spv is header-only Phase 1.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-matmulrcexecution=<mode>", "Select local MatMul RC ExactReplay execution: strict-device requires a production-qualified device and forbids CPU fallback; auto-fallback permits device-to-CPU fallback for pre-activation/testing; cpu-diagnostic explicitly runs the portable oracle (default: auto-fallback while public RC activation is disabled). Only strict-device with a currently qualified production provider advertises NODE_MATMUL_CONSENSUS.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmulservicechallengefile=<file>", "Path to the persistent MatMul service challenge registry. Relative paths are resolved under the network datadir. Point multiple service nodes at the same shared file to let getmatmulservicechallenge issuance and redeemmatmulserviceproof redemption work across the cluster. (default: <netdir>/matmul_service_challenges.dat)", ArgsManager::ALLOW_ANY, OptionsCategory::RPC);
     argsman.AddArg("-matmulasyncverify", "Run the MatMul v4.4 ENC-DR reference recompute for P2P block deliveries on a bounded background worker pool instead of the network message thread (default: 1). Only effective on networks where the v4 fork height is set; verdicts are identical either way (the recompute is a pure function of the header) — this only changes WHICH thread computes them. Set to 0 to force the historical fully-synchronous path.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmulrcheaderfirst", "Begin admitted near-tip RC ExactReplay from the immutable block header while compact/full block transactions transfer and validate (default: 1). The early verdict grants no chainwork; complete block validation remains authoritative.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -1260,6 +1264,75 @@ bool AppInitParameterInteraction(const ArgsManager& args)
         return InitError(_("MatMul validation mode MUST be 'consensus' on mainnet. Non-consensus modes (economic, spv) skip Phase 2 PoW verification and are not safe for production use."));
     }
 
+    const std::string rc_execution_mode{
+        args.GetArg("-matmulrcexecution", "auto-fallback")};
+    matmul::v4::rc::RCExactReplayExecutionPolicy rc_execution_policy;
+    if (rc_execution_mode == "strict-device" ||
+        rc_execution_mode == "strict") {
+        rc_execution_policy =
+            matmul::v4::rc::RCExactReplayExecutionPolicy::StrictDevice;
+    } else if (rc_execution_mode == "auto-fallback" ||
+               rc_execution_mode == "auto") {
+        rc_execution_policy =
+            matmul::v4::rc::RCExactReplayExecutionPolicy::AutoFallback;
+    } else if (rc_execution_mode == "cpu-diagnostic" ||
+               rc_execution_mode == "cpu") {
+        rc_execution_policy =
+            matmul::v4::rc::RCExactReplayExecutionPolicy::CpuDiagnostic;
+    } else {
+        return InitError(strprintf(
+            _("Invalid -matmulrcexecution value (%s). Valid values: "
+              "strict-device, auto-fallback, cpu-diagnostic"),
+            rc_execution_mode));
+    }
+    matmul::v4::rc::SetRCExactReplayExecutionPolicy(
+        rc_execution_policy);
+
+    const bool rc_epoch_configured{
+        chainparams.GetConsensus().nMatMulRCHeight !=
+        std::numeric_limits<int32_t>::max()};
+    // Preserve the existing v3 consensus-tier service on networks where RC is
+    // disabled. Once an RC epoch is configured, the same unversioned bit is
+    // withheld unless this process is genuinely strict-device ready.
+    bool rc_strict_device_ready{!rc_epoch_configured};
+    std::string rc_provider{
+        rc_epoch_configured ? "not-probed" : "rc-disabled"};
+    std::string rc_resolution_reason{
+        rc_epoch_configured ? "non-strict-mode"
+                            : "current-network-v3-only"};
+    if (rc_epoch_configured &&
+        matmul_validation_mode == "consensus" &&
+        rc_execution_policy ==
+            matmul::v4::rc::RCExactReplayExecutionPolicy::StrictDevice) {
+        const auto resolved{
+            matmul_v4::accel::ResolveExactGemmBackendForRC()};
+        rc_provider = resolved.provider;
+        rc_resolution_reason = resolved.reason;
+        // Activation readiness is intentionally stricter than the current
+        // toy/medium self-qualification. Keep service advertisement withheld
+        // until the production-golden/startup-canary gate lands.
+        constexpr bool production_canary_ready{false};
+        rc_strict_device_ready =
+            resolved.self_qualified && resolved.production_eligible &&
+            resolved.backend.gemm_s8s8 != nullptr &&
+            production_canary_ready;
+        if (!rc_strict_device_ready) {
+            InitWarning(strprintf(
+                _("MatMul RC strict-device provider is not ready "
+                  "(provider=%s, reason=%s, production_canary=%d). "
+                  "RC blocks will remain retryable "
+                  "on local execution failure and this node will not "
+                  "advertise MatMul consensus-validator service."),
+                rc_provider, rc_resolution_reason,
+                production_canary_ready));
+        }
+    }
+    LogPrintf(
+        "MatMul RC execution policy: %s provider=%s ready=%d reason=%s\n",
+        matmul::v4::rc::RCExactReplayExecutionPolicyName(
+            rc_execution_policy),
+        rc_provider, rc_strict_device_ready, rc_resolution_reason);
+
     // Validate invariant: nFastMineHeight must equal nMatMulAsertHeight on all
     // networks.  Misconfiguration silently breaks difficulty adjustment.
     if (chainparams.GetConsensus().fMatMulPOW &&
@@ -1275,7 +1348,10 @@ bool AppInitParameterInteraction(const ArgsManager& args)
             static_cast<uint64_t>(NODE_MATMUL_ECONOMIC);
         uint64_t services = static_cast<uint64_t>(g_local_services) & ~clear_mask;
         if (matmul_validation_mode == "consensus") {
-            services |= static_cast<uint64_t>(NODE_MATMUL_CONSENSUS);
+            if (rc_strict_device_ready) {
+                services |=
+                    static_cast<uint64_t>(NODE_MATMUL_CONSENSUS);
+            }
         } else if (matmul_validation_mode == "economic") {
             services |= static_cast<uint64_t>(NODE_MATMUL_ECONOMIC);
         } else if (matmul_validation_mode == "spv") {
