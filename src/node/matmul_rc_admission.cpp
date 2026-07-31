@@ -114,6 +114,14 @@ RCAdmissionStore::RCAdmissionStore(Config config) : m_config{config}
     m_config.max_entries = std::max<size_t>(1, m_config.max_entries);
     m_config.max_entries_per_netgroup =
         std::max<size_t>(1, m_config.max_entries_per_netgroup);
+    m_config.max_unknown_entries =
+        std::max<size_t>(1, m_config.max_unknown_entries);
+    m_config.max_unknown_entries_per_netgroup =
+        std::max<size_t>(1, m_config.max_unknown_entries_per_netgroup);
+    m_config.max_unknown_candidates_per_hash =
+        std::max<size_t>(1, m_config.max_unknown_candidates_per_hash);
+    m_config.max_unknown_submissions_per_netgroup =
+        std::max<size_t>(1, m_config.max_unknown_submissions_per_netgroup);
 }
 
 RCAdmissionStore::RememberResult RCAdmissionStore::Remember(
@@ -122,18 +130,69 @@ RCAdmissionStore::RememberResult RCAdmissionStore::Remember(
     std::chrono::steady_clock::time_point now)
 {
     Prune(now);
-    if (m_entries.count(ticket.block_hash) != 0) {
-        return RememberResult::Duplicate;
-    }
-    if (m_entries.size() >= m_config.max_entries) {
+    const EntryKey key{ticket.block_hash, keyed_netgroup};
+    // Check process-wide/per-hash capacity before creating per-netgroup rate
+    // state. Otherwise a Sybil could grow the rate-history map without bound
+    // merely by submitting while quarantine is already full, or by targeting
+    // a hash whose candidate fan-in is full.
+    if (m_unknown_entries.size() >= m_config.max_unknown_entries) {
         return RememberResult::GlobalQuota;
     }
-    if (NetgroupSize(keyed_netgroup) >= m_config.max_entries_per_netgroup) {
+    if (UnknownCandidatesForHash(ticket.block_hash) >=
+            m_config.max_unknown_candidates_per_hash &&
+        m_unknown_entries.count(key) == 0) {
+        return RememberResult::HashQuota;
+    }
+    auto& submissions{m_unknown_submission_history[keyed_netgroup]};
+    if (submissions.size() >=
+        m_config.max_unknown_submissions_per_netgroup) {
+        return RememberResult::RateLimited;
+    }
+    submissions.push_back(now);
+    if (m_unknown_entries.count(key) != 0) {
+        return RememberResult::Duplicate;
+    }
+    if (UnknownNetgroupSize(keyed_netgroup) >=
+        m_config.max_unknown_entries_per_netgroup) {
         return RememberResult::NetgroupQuota;
     }
-    m_entries.emplace(ticket.block_hash,
-                      Entry{ticket, keyed_netgroup, now});
-    ++m_netgroup_counts[keyed_netgroup];
+    m_unknown_entries.emplace(key, Entry{ticket, now});
+    ++m_unknown_netgroup_counts[keyed_netgroup];
+    ++m_unknown_hash_counts[ticket.block_hash];
+    return RememberResult::Stored;
+}
+
+RCAdmissionStore::RememberResult RCAdmissionStore::RememberKnown(
+    const RCAdmissionTicket& ticket,
+    const CBlockHeader& header,
+    uint64_t keyed_netgroup,
+    const uint256& pow_limit,
+    std::chrono::steady_clock::time_point now)
+{
+    Prune(now);
+    const EntryKey key{header.GetHash(), keyed_netgroup};
+    if (ticket.block_hash != header.GetHash() ||
+        !CheckRCAdmissionTicket(ticket, header, pow_limit)) {
+        return RememberResult::Invalid;
+    }
+    if (m_validated_entries.count(key) != 0) {
+        return RememberResult::Duplicate;
+    }
+    if (m_validated_entries.size() >= m_config.max_entries) {
+        return RememberResult::GlobalQuota;
+    }
+    if (NetgroupSize(keyed_netgroup) >=
+        m_config.max_entries_per_netgroup) {
+        return RememberResult::NetgroupQuota;
+    }
+
+    // A now-authenticated sidecar supersedes only the quarantine candidate
+    // from its own netgroup. Candidates planted by other groups remain unable
+    // to spend this entry and unable to prevent it from being stored.
+    const auto unknown{m_unknown_entries.find(key)};
+    if (unknown != m_unknown_entries.end()) EraseUnknownIterator(unknown);
+    m_validated_entries.emplace(key, Entry{ticket, now});
+    ++m_validated_netgroup_counts[keyed_netgroup];
     return RememberResult::Stored;
 }
 
@@ -144,54 +203,144 @@ bool RCAdmissionStore::Consume(const CBlockHeader& header,
                                RCAdmissionTicket* accepted_ticket)
 {
     Prune(now);
-    const auto it{m_entries.find(header.GetHash())};
-    if (it == m_entries.end()) return false;
-    // A ticket cannot be planted through one netgroup and spent through
-    // another. Trusted/manual callers bypass this store at the caller.
-    if (it->second.keyed_netgroup != keyed_netgroup) return false;
-    const bool valid{
-        CheckRCAdmissionTicket(it->second.ticket, header, pow_limit)};
-    if (valid && accepted_ticket != nullptr) {
-        *accepted_ticket = it->second.ticket;
+    const EntryKey key{header.GetHash(), keyed_netgroup};
+
+    const auto validated{m_validated_entries.find(key)};
+    if (validated != m_validated_entries.end()) {
+        if (accepted_ticket != nullptr) {
+            *accepted_ticket = validated->second.ticket;
+        }
+        EraseValidatedIterator(validated);
+        return true;
     }
-    EraseIterator(it); // valid or invalid: one cryptographic attempt per sidecar
+
+    const auto unknown{m_unknown_entries.find(key)};
+    if (unknown == m_unknown_entries.end()) return false;
+    const bool valid{
+        CheckRCAdmissionTicket(unknown->second.ticket, header, pow_limit)};
+    if (valid && accepted_ticket != nullptr) {
+        *accepted_ticket = unknown->second.ticket;
+    }
+    // Valid or invalid: one cryptographic attempt per source-bound sidecar.
+    // Candidates belonging to other groups are deliberately untouched.
+    EraseUnknownIterator(unknown);
     return valid;
 }
 
 void RCAdmissionStore::Erase(const uint256& block_hash)
 {
-    const auto it{m_entries.find(block_hash)};
-    if (it != m_entries.end()) EraseIterator(it);
+    for (auto it = m_validated_entries.lower_bound({block_hash, 0});
+         it != m_validated_entries.end() && it->first.first == block_hash;) {
+        auto erase{it++};
+        EraseValidatedIterator(erase);
+    }
+    for (auto it = m_unknown_entries.lower_bound({block_hash, 0});
+         it != m_unknown_entries.end() && it->first.first == block_hash;) {
+        auto erase{it++};
+        EraseUnknownIterator(erase);
+    }
 }
 
 void RCAdmissionStore::Prune(std::chrono::steady_clock::time_point now)
 {
-    for (auto it = m_entries.begin(); it != m_entries.end();) {
+    for (auto it = m_validated_entries.begin();
+         it != m_validated_entries.end();) {
         if (now - it->second.received <= m_config.ttl) {
             ++it;
             continue;
         }
         auto stale{it++};
-        EraseIterator(stale);
+        EraseValidatedIterator(stale);
     }
+    for (auto it = m_unknown_entries.begin();
+         it != m_unknown_entries.end();) {
+        if (now - it->second.received <= m_config.ttl) {
+            ++it;
+            continue;
+        }
+        auto stale{it++};
+        EraseUnknownIterator(stale);
+    }
+    PruneSubmissionHistory(now);
 }
 
 size_t RCAdmissionStore::NetgroupSize(uint64_t keyed_netgroup) const
 {
-    const auto it{m_netgroup_counts.find(keyed_netgroup)};
-    return it == m_netgroup_counts.end() ? 0 : it->second;
+    const auto it{m_validated_netgroup_counts.find(keyed_netgroup)};
+    return it == m_validated_netgroup_counts.end() ? 0 : it->second;
 }
 
-void RCAdmissionStore::EraseIterator(std::map<uint256, Entry>::iterator it)
+size_t RCAdmissionStore::UnknownNetgroupSize(uint64_t keyed_netgroup) const
 {
-    const uint64_t group{it->second.keyed_netgroup};
-    m_entries.erase(it);
-    const auto count_it{m_netgroup_counts.find(group)};
-    if (count_it == m_netgroup_counts.end()) return;
+    const auto it{m_unknown_netgroup_counts.find(keyed_netgroup)};
+    return it == m_unknown_netgroup_counts.end() ? 0 : it->second;
+}
+
+size_t RCAdmissionStore::UnknownCandidatesForHash(
+    const uint256& block_hash) const
+{
+    const auto it{m_unknown_hash_counts.find(block_hash)};
+    return it == m_unknown_hash_counts.end() ? 0 : it->second;
+}
+
+void RCAdmissionStore::EraseValidatedIterator(
+    std::map<EntryKey, Entry>::iterator it)
+{
+    const uint64_t group{it->first.second};
+    m_validated_entries.erase(it);
+    const auto count_it{m_validated_netgroup_counts.find(group)};
+    if (count_it == m_validated_netgroup_counts.end()) return;
     if (count_it->second <= 1) {
-        m_netgroup_counts.erase(count_it);
+        m_validated_netgroup_counts.erase(count_it);
     } else {
         --count_it->second;
+    }
+}
+
+void RCAdmissionStore::EraseUnknownIterator(
+    std::map<EntryKey, Entry>::iterator it)
+{
+    const uint256 hash{it->first.first};
+    const uint64_t group{it->first.second};
+    m_unknown_entries.erase(it);
+
+    const auto group_count{m_unknown_netgroup_counts.find(group)};
+    if (group_count != m_unknown_netgroup_counts.end()) {
+        if (group_count->second <= 1) {
+            m_unknown_netgroup_counts.erase(group_count);
+        } else {
+            --group_count->second;
+        }
+    }
+    const auto hash_count{m_unknown_hash_counts.find(hash)};
+    if (hash_count != m_unknown_hash_counts.end()) {
+        if (hash_count->second <= 1) {
+            m_unknown_hash_counts.erase(hash_count);
+        } else {
+            --hash_count->second;
+        }
+    }
+}
+
+void RCAdmissionStore::PruneSubmissionHistory(
+    std::chrono::steady_clock::time_point now)
+{
+    for (auto it = m_unknown_submission_history.begin();
+         it != m_unknown_submission_history.end();) {
+        auto& times{it->second};
+        times.erase(
+            std::remove_if(
+                times.begin(), times.end(),
+                [&](const auto submitted) {
+                    return now - submitted >
+                           m_config.unknown_submission_window;
+                }),
+            times.end());
+        if (times.empty()) {
+            it = m_unknown_submission_history.erase(it);
+        } else {
+            ++it;
+        }
     }
 }
 

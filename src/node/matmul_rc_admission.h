@@ -15,6 +15,8 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <utility>
+#include <vector>
 
 namespace node {
 
@@ -71,26 +73,44 @@ struct RCAdmissionTicket {
 /**
  * Bounded, per-netgroup sidecar store and admission budget.
  *
- * Remember() is intentionally cheap and does not need a header. Consume()
- * performs the cryptographic check once the matching contextual header is
- * known. A valid ticket is single-use locally so replaying it cannot repeatedly
- * buy verifier slots. Netgroup quotas prevent a large peer fan-out in one
- * address group from filling the sidecar store.
+ * Unknown-header tickets enter a deliberately small quarantine. They neither
+ * consume the independently bounded validated-ticket capacity nor monopolize a
+ * block hash: candidates are keyed by (block_hash, keyed_netgroup), with a
+ * small per-hash fan-in bound. Once the header is known, RememberKnown()
+ * authenticates before allocating validated capacity. Consume() may also
+ * authenticate the matching quarantined candidate when a header arrives after
+ * its sidecar.
+ *
+ * Tickets remain bound to their source netgroup and are single-use locally.
+ * An invalid candidate from one netgroup is never consulted or erased while
+ * another netgroup consumes its own candidate, preventing cross-netgroup
+ * spending without allowing a planted candidate to censor the hash.
  */
 class RCAdmissionStore
 {
 public:
     struct Config {
+        /** Cryptographically validated, known-header entries. */
         size_t max_entries{256};
         size_t max_entries_per_netgroup{4};
+        /** Unverified, unknown-header quarantine (separate capacity). */
+        size_t max_unknown_entries{32};
+        size_t max_unknown_entries_per_netgroup{2};
+        size_t max_unknown_candidates_per_hash{2};
+        /** Reconnect-resistant unknown-ticket submission rate per netgroup. */
+        size_t max_unknown_submissions_per_netgroup{8};
+        std::chrono::seconds unknown_submission_window{60};
         std::chrono::seconds ttl{180};
     };
 
     enum class RememberResult : uint8_t {
         Stored,
         Duplicate,
+        Invalid,
         GlobalQuota,
         NetgroupQuota,
+        HashQuota,
+        RateLimited,
     };
 
     RCAdmissionStore();
@@ -100,6 +120,18 @@ public:
                                           uint64_t keyed_netgroup,
                                           std::chrono::steady_clock::time_point now);
 
+    /**
+     * Authenticate a ticket for a known header before storing it. A validated
+     * ticket replaces a quarantined candidate for the same hash/netgroup, but
+     * an invalid duplicate can never displace a validated ticket.
+     */
+    [[nodiscard]] RememberResult RememberKnown(
+        const RCAdmissionTicket& ticket,
+        const CBlockHeader& header,
+        uint64_t keyed_netgroup,
+        const uint256& pow_limit,
+        std::chrono::steady_clock::time_point now);
+
     [[nodiscard]] bool Consume(const CBlockHeader& header,
                                uint64_t keyed_netgroup,
                                const uint256& pow_limit,
@@ -108,21 +140,40 @@ public:
 
     void Erase(const uint256& block_hash);
     void Prune(std::chrono::steady_clock::time_point now);
-    [[nodiscard]] size_t Size() const { return m_entries.size(); }
+    [[nodiscard]] size_t Size() const
+    {
+        return m_validated_entries.size() + m_unknown_entries.size();
+    }
+    [[nodiscard]] size_t ValidatedSize() const
+    {
+        return m_validated_entries.size();
+    }
+    [[nodiscard]] size_t UnknownSize() const { return m_unknown_entries.size(); }
     [[nodiscard]] size_t NetgroupSize(uint64_t keyed_netgroup) const;
+    [[nodiscard]] size_t UnknownNetgroupSize(uint64_t keyed_netgroup) const;
+    [[nodiscard]] size_t UnknownCandidatesForHash(
+        const uint256& block_hash) const;
 
 private:
+    using EntryKey = std::pair<uint256, uint64_t>;
+
     struct Entry {
         RCAdmissionTicket ticket;
-        uint64_t keyed_netgroup{0};
         std::chrono::steady_clock::time_point received{};
     };
 
-    void EraseIterator(std::map<uint256, Entry>::iterator it);
+    void EraseValidatedIterator(std::map<EntryKey, Entry>::iterator it);
+    void EraseUnknownIterator(std::map<EntryKey, Entry>::iterator it);
+    void PruneSubmissionHistory(std::chrono::steady_clock::time_point now);
 
     Config m_config;
-    std::map<uint256, Entry> m_entries;
-    std::map<uint64_t, size_t> m_netgroup_counts;
+    std::map<EntryKey, Entry> m_validated_entries;
+    std::map<EntryKey, Entry> m_unknown_entries;
+    std::map<uint64_t, size_t> m_validated_netgroup_counts;
+    std::map<uint64_t, size_t> m_unknown_netgroup_counts;
+    std::map<uint256, size_t> m_unknown_hash_counts;
+    std::map<uint64_t, std::vector<std::chrono::steady_clock::time_point>>
+        m_unknown_submission_history;
 };
 
 } // namespace node
