@@ -813,6 +813,12 @@ private:
         int32_t reference_height,
         bool& global_exhausted,
         bool rc_recompute = false);
+    /** Roll back a just-consumed RC debit when enqueue failed before any
+     *  expensive work could start. Never used for cancellation/completion. */
+    void RefundMatMulRCVerificationBudgetForPeer(
+        const CNetAddr& address,
+        uint32_t verification_count,
+        std::chrono::steady_clock::time_point charged_at);
 
     /** Register a MatMul phase2 failure against a reconnect-resistant address budget. */
     MatMulPhase2Punishment RegisterMatMulPhase2FailureForPeer(
@@ -1361,6 +1367,9 @@ private:
             HEADER_ONLY,
             NO_RECOMPUTE,
             RECOMPUTE_RESERVED,
+            //! A header-first job already owns the RC slot and rate debit.
+            //! The body may join that exact job but must not create a new one.
+            RECOMPUTE_HEADER_PRECHARGED,
         } state{State::NOT_PRECHECKED};
         bool is_ibd{false};
         bool encdr_profile{false};
@@ -1422,6 +1431,7 @@ private:
      * lane. A successful verdict is persisted, but validity and chainwork are
      * promoted only after ordinary complete-block validation. */
     void MaybeStartMatMulRCHeaderVerification(CNode& node,
+                                              const Peer& peer,
                                               const CBlockIndex& index,
                                               const CBlockHeader& header,
                                               bool is_ibd);
@@ -2901,6 +2911,33 @@ bool PeerManagerImpl::ConsumeMatMulVerificationBudgetForPeer(
         }
     }
     return true;
+}
+
+void PeerManagerImpl::RefundMatMulRCVerificationBudgetForPeer(
+    const CNetAddr& address,
+    uint32_t verification_count,
+    std::chrono::steady_clock::time_point charged_at)
+{
+    if (verification_count == 0) return;
+    {
+        UniqueLock lock(
+            m_matmul_addr_budget_mutex, "m_matmul_addr_budget_mutex",
+            __FILE__, __LINE__);
+        const auto it{m_matmul_addr_budgets.find(address)};
+        if (it != m_matmul_addr_budgets.end() &&
+            it->second.budget.rc_window_start !=
+                std::chrono::steady_clock::time_point{} &&
+            charged_at >= it->second.budget.rc_window_start &&
+            charged_at - it->second.budget.rc_window_start <
+                std::chrono::minutes{1}) {
+            auto& count{
+                it->second.budget.expensive_rc_verifications_this_minute};
+            if (verification_count <= count) {
+                count -= verification_count;
+            }
+        }
+    }
+    RefundGlobalMatMulRCBudget(verification_count, charged_at);
 }
 
 MatMulPhase2Punishment PeerManagerImpl::RegisterMatMulPhase2FailureForPeer(
@@ -4577,6 +4614,7 @@ PeerManagerImpl::LookupMatMulRCOutboundTicket(const uint256& hash) const
 
 void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
     CNode& node,
+    const Peer& peer,
     const CBlockIndex& index,
     const CBlockHeader& header,
     bool is_ibd)
@@ -4621,6 +4659,7 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
     }
     if (m_matmul_verify_worker->Contains(header.GetHash())) return;
 
+    const uint32_t work{MatMulRCWorkUnits(params, index.nHeight)};
     uint32_t pending{m_matmul_rc_speculative_pending.load(
         std::memory_order_relaxed)};
     do {
@@ -4649,6 +4688,45 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
         RememberMatMulRCOutboundTicket(ticket);
     }
 
+    if (!ReserveMatMulRCVerificationSlot(
+            m_matmul_rc_pending_verifications, params, index.nHeight, work)) {
+        m_matmul_rc_speculative_pending.fetch_sub(
+            1, std::memory_order_relaxed);
+        LogDebug(
+            BCLog::NET,
+            "matmul: header-first ExactReplay deferred by RC pending-work cap hash=%s peer=%d\n",
+            header.GetHash().ToString(), node.GetId());
+        return;
+    }
+    auto rc_pending_slot{
+        std::make_shared<ScopedMatMulPendingVerification>(
+            m_matmul_rc_pending_verifications, work)};
+
+    const auto charged_at{std::chrono::steady_clock::now()};
+    bool budget_charged{false};
+    CNetAddr charged_address;
+    if (!node.HasPermission(NetPermissionFlags::NoBan)) {
+        bool global_exhausted{false};
+        if (!ConsumeMatMulVerificationBudgetForPeer(
+                peer, params, work, charged_at,
+                /*is_ibd=*/false, index.nHeight, global_exhausted,
+                /*rc_recompute=*/true)) {
+            m_matmul_rc_speculative_pending.fetch_sub(
+                1, std::memory_order_relaxed);
+            if (!global_exhausted) {
+                node.fDisconnect = true;
+            }
+            LogDebug(
+                BCLog::NET,
+                "matmul: header-first ExactReplay %s by RC rate budget hash=%s peer=%d\n",
+                global_exhausted ? "deferred" : "rejected",
+                header.GetHash().ToString(), node.GetId());
+            return;
+        }
+        budget_charged = true;
+        charged_address = peer.m_addr;
+    }
+
     const uint256 hash{header.GetHash()};
     {
         LOCK(m_matmul_rc_admission_mutex);
@@ -4671,7 +4749,7 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
         .height = index.nHeight,
         .parent_median_time_past = parent_mtp,
         .completion =
-            [this, hash, speculative_slot](bool ok) {
+            [this, hash, speculative_slot, rc_pending_slot](bool ok) {
                 if (!ok) return;
                 LOCK(cs_main);
                 (void)m_chainman.PersistMatMulExactReplayVerdict(hash);
@@ -4681,8 +4759,18 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
             ? node::MatMulVerifyWorker::Priority::AuthenticatedTipChild
             : node::MatMulVerifyWorker::Priority::CompetingBranch,
     };
-    if (!m_matmul_verify_worker->Enqueue(job)) {
-        return; // speculative_slot releases with the intact job
+    const auto enqueue_result{m_matmul_verify_worker->Enqueue(
+        job, node::MatMulVerifyWorker::EnqueueMode::NewOnly)};
+    if (enqueue_result !=
+        node::MatMulVerifyWorker::EnqueueResult::Enqueued) {
+        // NewOnly leaves the job and both pending-slot owners intact. No
+        // expensive work began, so this is the sole path that refunds the
+        // permanent peer/global rate debit.
+        if (budget_charged) {
+            RefundMatMulRCVerificationBudgetForPeer(
+                charged_address, work, charged_at);
+        }
+        return;
     }
 
     LogDebug(BCLog::NET,
@@ -5045,7 +5133,8 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
 
     if (received_new_header) {
         MaybeStartMatMulRCHeaderVerification(
-            pfrom, *pindexLast, headers.back(), header_first_is_ibd);
+            pfrom, peer, *pindexLast, headers.back(),
+            header_first_is_ibd);
     }
 
     // Consider immediately downloading blocks.
@@ -5545,7 +5634,10 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                     matmul_admission.work_units = work;
                 }
             }
-            if (matmul_slot) {
+            const bool joining_precharged_header{
+                matmul_admission.state ==
+                MatMulBlockAdmission::State::RECOMPUTE_HEADER_PRECHARGED};
+            if (matmul_slot || joining_precharged_header) {
                 const NodeId nodeid{node.GetId()};
                 // A body can arrive through BLOCK, CMPCTBLOCK/BLOCKTXN, or as
                 // a redundant relay.  Collapse all of those delivery paths at
@@ -5577,11 +5669,40 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                 // slot in a shared_ptr. It is released when the last closure
                 // copy is destroyed — i.e. after recompute AND re-entry, or on
                 // Stop() draining the queue without running completions.
-                auto slot{std::make_shared<ScopedMatMulPendingVerification>(std::move(*matmul_slot))};
+                std::shared_ptr<ScopedMatMulPendingVerification> slot;
+                if (matmul_slot) {
+                    slot = std::make_shared<ScopedMatMulPendingVerification>(
+                        std::move(*matmul_slot));
+                }
+                auto priority{
+                    node::MatMulVerifyWorker::Priority::Background};
+                if (matmul_admission.rc_profile) {
+                    LOCK(cs_main);
+                    const CBlockIndex* parent{
+                        m_chainman.m_blockman.LookupBlockIndex(
+                            block->hashPrevBlock)};
+                    const CBlockIndex* active_tip{
+                        m_chainman.ActiveTip()};
+                    if (parent != nullptr &&
+                        parent->nAuthenticatedChainWork ==
+                            parent->nChainWork) {
+                        priority = parent == active_tip
+                            ? node::MatMulVerifyWorker::Priority::
+                                  AuthenticatedTipChild
+                            : node::MatMulVerifyWorker::Priority::
+                                  CompetingBranch;
+                    }
+                }
                 node::MatMulVerifyWorker::Job job{
-                    block, encdr->height, encdr->parent_median_time_past,
-                    [this, nodeid, block, hash, force_processing, min_pow_checked, slot,
-                     source_pin = std::move(source_pin), post = post_process](bool encdr_ok) mutable {
+                    .block = block,
+                    .height = encdr->height,
+                    .parent_median_time_past =
+                        encdr->parent_median_time_past,
+                    .completion =
+                    [this, nodeid, block, hash, force_processing,
+                     min_pow_checked, slot,
+                     source_pin = std::move(source_pin),
+                     post = post_process](bool encdr_ok) mutable {
                         // The verdict reaches validation via the ENC-DR verdict
                         // memo consulted inside ContextualCheckBlock; re-enter
                         // through the ordinary acceptance machinery so the
@@ -5593,13 +5714,26 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                         UnpinMatMulEncDrVerdict(hash);
                         source_pin.reset();
                         UnmarkMatMulAsyncVerification(hash);
-                    }};
-                if (m_matmul_verify_worker->Enqueue(job)) return; // message thread freed
-                // Worker is stopping (shutdown race): no worker verdict exists,
-                // so run canonical validation inline without pinning the
-                // callback's false placeholder as if it were a real result.
-                ProcessBlockSync(nodeid, &node, block, force_processing, min_pow_checked, post_process);
+                    },
+                    .priority = priority,
+                };
+                const auto enqueue_result{m_matmul_verify_worker->Enqueue(
+                    job,
+                    joining_precharged_header
+                        ? node::MatMulVerifyWorker::EnqueueMode::JoinOnly
+                        : node::MatMulVerifyWorker::EnqueueMode::JoinOrEnqueue)};
+                if (enqueue_result ==
+                        node::MatMulVerifyWorker::EnqueueResult::Enqueued ||
+                    enqueue_result ==
+                        node::MatMulVerifyWorker::EnqueueResult::Joined) {
+                    return; // message thread freed
+                }
+                // STOPPED and DEFERRED both fail closed. In particular, a
+                // cancelled same-hash header job is not a shutdown signal and
+                // must never trigger Q*-scale synchronous replay on the P2P
+                // message thread. The body remains re-requestable.
                 UnmarkMatMulAsyncVerification(hash);
+                if (post_process) post_process();
                 return;
             }
             // Queue/slot saturated: NEVER fall through to ProcessBlockSync for
@@ -5771,6 +5905,39 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
     const uint32_t work = rc_profile
                               ? MatMulRCWorkUnits(params, exact_reference_height)
                               : MatMulEncDrWorkUnits(params, exact_reference_height);
+    if (rc_profile && exact_encdr_profile &&
+        m_matmul_verify_worker &&
+        m_matmul_verify_worker->Contains(block_hash)) {
+        // Header-first ExactReplay already paid the retained-source/global
+        // rate debit and owns the RC pending-work slot. The complete body may
+        // join that exact computation, but must neither double-charge nor
+        // start a replacement if cancellation/completion wins the race.
+        if (!MarkMatMulAsyncVerification(block_hash)) {
+            return false;
+        }
+        admission.state =
+            MatMulBlockAdmission::State::RECOMPUTE_HEADER_PRECHARGED;
+        admission.is_ibd = is_ibd;
+        admission.encdr_profile = true;
+        admission.rc_profile = true;
+        admission.owns_async_marker = true;
+        admission.reference_height = exact_reference_height;
+        admission.work_units = work;
+        return true;
+    }
+    bool direct_authenticated_tip_child{false};
+    if (rc_profile && exact_encdr_profile &&
+        m_matmul_verify_worker) {
+        {
+            LOCK(cs_main);
+            const CBlockIndex* active_tip{m_chainman.ActiveTip()};
+            direct_authenticated_tip_child =
+                active_tip != nullptr &&
+                block.hashPrevBlock == active_tip->GetBlockHash() &&
+                active_tip->nAuthenticatedChainWork ==
+                    active_tip->nChainWork;
+        }
+    }
     // RC admission tickets are an ephemeral near-tip anti-DoS policy, not
     // historical consensus data. A requested body during IBD cannot be
     // expected to arrive with the ticket that preceded its original relay.
@@ -5799,6 +5966,24 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
         }
         RememberMatMulRCOutboundTicket(accepted);
     }
+    if (direct_authenticated_tip_child) {
+        // A speculative false direct child must not retain the only verifier
+        // merely because an admitted complete direct child has equal
+        // scheduler priority. Do this only after the body passed rcadmit (or
+        // the explicit requested-IBD exception), so ticketless body spam
+        // cannot become a free cancellation primitive.
+        //
+        // A running job releases its slot at the next ExactReplay cancellation
+        // boundary; until then this body is deferred, never synchronously
+        // replayed or used to disconnect its source.
+        m_matmul_verify_worker->CancelIf(
+            [&block, &block_hash](
+                const CBlockHeader& pending_header, int32_t) {
+                return pending_header.GetHash() != block_hash &&
+                    pending_header.hashPrevBlock ==
+                        block.hashPrevBlock;
+            });
+    }
     if (exact_encdr_profile && !MarkMatMulAsyncVerification(block_hash)) {
         LogDebug(BCLog::NET,
                  "Ignoring duplicate %s hash=%s from peer=%d: MatMul verification already pending\n",
@@ -5812,10 +5997,16 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
                                         exact_reference_height, work);
     if (!reserved) {
         if (exact_encdr_profile) UnmarkMatMulAsyncVerification(block_hash);
-        LogDebug(BCLog::NET,
-                 "Disconnecting peer=%d: MatMul pending verification cap reached (%s)\n",
-                 node.GetId(), source);
-        node.fDisconnect = true;
+        LogDebug(
+            BCLog::NET,
+            "%s peer=%d: MatMul pending verification cap reached (%s)\n",
+            rc_profile ? "Deferring" : "Disconnecting",
+            node.GetId(), source);
+        // An admitted speculative RC header can occupy the complete RC cap.
+        // A later honest body is not evidence of abuse; leave it
+        // re-requestable after cancellation frees the lane. Legacy EncDr
+        // retains its historical disconnect policy.
+        if (!rc_profile) node.fDisconnect = true;
         admission.state = MatMulBlockAdmission::State::HEADER_ONLY;
         return true;
     }
@@ -8184,7 +8375,8 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         if (result == node::RCAdmissionStore::RememberResult::Stored &&
             known_rc_header && known_rc_index != nullptr) {
             MaybeStartMatMulRCHeaderVerification(
-                pfrom, *known_rc_index, *known_rc_header, known_rc_is_ibd);
+                pfrom, *peer, *known_rc_index, *known_rc_header,
+                known_rc_is_ibd);
         }
         return;
     }

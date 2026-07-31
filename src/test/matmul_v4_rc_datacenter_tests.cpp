@@ -3072,7 +3072,9 @@ BOOST_AUTO_TEST_CASE(rc_dc_worker_memoizes_exact_verdict_without_carrier)
         std::atomic<bool> verdict{false};
         node::MatMulVerifyWorker::Job job{block, kHeight, /*parent_mtp=*/std::nullopt,
                                           [&](bool ok) { verdict = ok; done = 1; }};
-        BOOST_REQUIRE(worker.Enqueue(job));
+        BOOST_REQUIRE(
+            worker.Enqueue(job) ==
+            node::MatMulVerifyWorker::EnqueueResult::Enqueued);
         wait_completion(done);
         BOOST_REQUIRE_EQUAL(done.load(), 1);
         BOOST_CHECK(verdict.load());
@@ -3096,7 +3098,9 @@ BOOST_AUTO_TEST_CASE(rc_dc_worker_memoizes_exact_verdict_without_carrier)
         std::atomic<bool> verdict{false};
         node::MatMulVerifyWorker::Job job{block, kHeight, /*parent_mtp=*/std::nullopt,
                                           [&](bool ok) { verdict = ok; done = 1; }};
-        BOOST_REQUIRE(worker.Enqueue(job));
+        BOOST_REQUIRE(
+            worker.Enqueue(job) ==
+            node::MatMulVerifyWorker::EnqueueResult::Enqueued);
         wait_completion(done);
         BOOST_REQUIRE_EQUAL(done.load(), 1);
         BOOST_CHECK(verdict.load());

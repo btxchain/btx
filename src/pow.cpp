@@ -5062,6 +5062,28 @@ bool ConsumeGlobalMatMulRCBudget(uint32_t max_global_per_minute, uint32_t count,
     return true;
 }
 
+void RefundGlobalMatMulRCBudget(
+    uint32_t count,
+    std::chrono::steady_clock::time_point charged_at)
+{
+    if (count == 0) return;
+    using namespace std::chrono;
+    const int64_t charged_sec =
+        duration_cast<seconds>(charged_at.time_since_epoch()).count();
+
+    LOCK(g_matmul_global_rc_mutex);
+    // A debit can be rolled back only in the exact window that accepted it.
+    // Once work starts callers never invoke this function, so invalid,
+    // cancelled, and completed replays retain their rate charge.
+    if (charged_sec < g_matmul_global_rc_window_start_sec ||
+        charged_sec - g_matmul_global_rc_window_start_sec >= 60) {
+        return;
+    }
+    if (count <= g_matmul_global_rc_this_minute) {
+        g_matmul_global_rc_this_minute -= count;
+    }
+}
+
 bool CanStartMatMulRCVerification(uint32_t pending_verifications, uint32_t work_units,
                                   const Consensus::Params& params, int32_t reference_height)
 {

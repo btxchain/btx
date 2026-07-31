@@ -34,6 +34,12 @@ using node::MatMulVerifyWorker;
 
 namespace {
 
+bool EnqueueAccepted(MatMulVerifyWorker::EnqueueResult result)
+{
+    return result == MatMulVerifyWorker::EnqueueResult::Enqueued ||
+        result == MatMulVerifyWorker::EnqueueResult::Joined;
+}
+
 //! Busy-wait until pred() or the deadline; returns pred()'s final value.
 template <typename Pred>
 bool WaitFor(Pred pred, std::chrono::milliseconds timeout = std::chrono::milliseconds{20000})
@@ -177,7 +183,7 @@ BOOST_AUTO_TEST_CASE(bounded_concurrency)
                                         BOOST_CHECK(ok);
                                         ++completions;
                                     }};
-        BOOST_CHECK(worker.Enqueue(job));
+        BOOST_CHECK(EnqueueAccepted(worker.Enqueue(job)));
     }
     // Both worker threads park inside the gate; the rest stays queued.
     BOOST_CHECK(WaitFor([&] { return gate.running.load() == 2; }));
@@ -221,7 +227,7 @@ BOOST_AUTO_TEST_CASE(priority_queue_reserves_authenticated_tip_lane)
             .height = 100,
             .priority = priority,
         };
-        BOOST_REQUIRE(worker.Enqueue(job));
+        BOOST_REQUIRE(EnqueueAccepted(worker.Enqueue(job)));
     };
     enqueue(1, MatMulVerifyWorker::Priority::Background);
     BOOST_REQUIRE(WaitFor([&] { return calls.load() == 1; }));
@@ -294,7 +300,6 @@ BOOST_AUTO_TEST_CASE(ticketed_invalid_candidates_cannot_starve_authenticated_tip
             BOOST_REQUIRE(AdmitRCHeader(
                 admission, header, kNetgroup, params.powLimit));
             MatMulVerifyWorker::Job job{
-                .block = std::make_shared<CBlock>(header),
                 .height = 100,
                 .completion = [&, honest](bool ok) {
                     BOOST_CHECK_EQUAL(ok, honest);
@@ -311,10 +316,12 @@ BOOST_AUTO_TEST_CASE(ticketed_invalid_candidates_cannot_starve_authenticated_tip
                     }
                     ++completions;
                 },
+                .header =
+                    std::make_shared<CBlockHeader>(header),
                 .priority = priority,
                 .cancelled = std::move(cancelled),
             };
-            BOOST_REQUIRE(worker.Enqueue(job));
+            BOOST_REQUIRE(EnqueueAccepted(worker.Enqueue(job)));
         };
 
     auto first_cancelled{
@@ -385,7 +392,9 @@ BOOST_AUTO_TEST_CASE(header_and_body_duplicates_join_one_verdict)
         .header = header,
         .priority = MatMulVerifyWorker::Priority::CompetingBranch,
     };
-    BOOST_REQUIRE(worker.Enqueue(header_job));
+    BOOST_REQUIRE(
+        worker.Enqueue(header_job) ==
+        MatMulVerifyWorker::EnqueueResult::Enqueued);
     BOOST_REQUIRE(WaitFor([&] { return gate.running.load() == 1; }));
 
     MatMulVerifyWorker::Job body_job{
@@ -397,12 +406,113 @@ BOOST_AUTO_TEST_CASE(header_and_body_duplicates_join_one_verdict)
         },
         .priority = MatMulVerifyWorker::Priority::AuthenticatedTipChild,
     };
-    BOOST_REQUIRE(worker.Enqueue(body_job));
+    BOOST_REQUIRE(
+        worker.Enqueue(
+            body_job, MatMulVerifyWorker::EnqueueMode::JoinOnly) ==
+        MatMulVerifyWorker::EnqueueResult::Joined);
     // A tip change may cancel pure speculation, but must not discard the
     // validation completion after a full body has joined that same replay.
     BOOST_CHECK(!worker.Cancel(block->GetHash()));
     gate.Release();
     BOOST_REQUIRE(WaitFor([&] { return completions.load() == 2; }));
+    BOOST_CHECK_EQUAL(gate.total_calls.load(), 1);
+}
+
+BOOST_AUTO_TEST_CASE(cancelled_header_rejects_body_join_without_sync_signal)
+{
+    const Consensus::Params& params = Params().GetConsensus();
+    BlockingVerify gate;
+    std::atomic<int> completions{0};
+    MatMulVerifyWorker worker{
+        params, /*max_threads=*/1,
+        [&](const CBlock&, int32_t, std::optional<int64_t>) {
+            return gate.Run();
+        }};
+    const auto block{MakeBlock(78)};
+    MatMulVerifyWorker::Job header_job{
+        .height = 100,
+        .completion = [&](bool) { ++completions; },
+        .header =
+            std::make_shared<CBlockHeader>(block->GetBlockHeader()),
+        .priority =
+            MatMulVerifyWorker::Priority::AuthenticatedTipChild,
+    };
+    BOOST_REQUIRE(
+        worker.Enqueue(
+            header_job, MatMulVerifyWorker::EnqueueMode::NewOnly) ==
+        MatMulVerifyWorker::EnqueueResult::Enqueued);
+    BOOST_REQUIRE(WaitFor([&] { return gate.running.load() == 1; }));
+    BOOST_REQUIRE(worker.Cancel(block->GetHash()));
+
+    MatMulVerifyWorker::Job body_job{
+        .block = block,
+        .height = 100,
+        .completion = [&](bool) { ++completions; },
+        .priority =
+            MatMulVerifyWorker::Priority::AuthenticatedTipChild,
+    };
+    BOOST_CHECK(
+        worker.Enqueue(
+            body_job, MatMulVerifyWorker::EnqueueMode::JoinOnly) ==
+        MatMulVerifyWorker::EnqueueResult::Deferred);
+    BOOST_CHECK(body_job.block != nullptr);
+    BOOST_CHECK(body_job.completion);
+
+    gate.Release();
+    worker.Stop();
+    BOOST_CHECK_EQUAL(completions.load(), 0);
+    BOOST_CHECK_EQUAL(gate.total_calls.load(), 1);
+}
+
+BOOST_AUTO_TEST_CASE(complete_tip_body_preempts_equal_priority_speculation)
+{
+    const Consensus::Params& params = Params().GetConsensus();
+    BlockingVerify gate;
+    std::atomic<int> body_completions{0};
+    auto speculative_cancelled{
+        std::make_shared<std::atomic_bool>(false)};
+    MatMulVerifyWorker worker{
+        params, /*max_threads=*/1,
+        [&](const CBlock& block, int32_t,
+            std::optional<int64_t>) {
+            if (block.nNonce64 == 90) return gate.Run();
+            return true;
+        }};
+
+    const auto speculative{MakeBlock(90)};
+    MatMulVerifyWorker::Job header_job{
+        .height = 100,
+        .header = std::make_shared<CBlockHeader>(
+            speculative->GetBlockHeader()),
+        .priority =
+            MatMulVerifyWorker::Priority::AuthenticatedTipChild,
+        .cancelled = speculative_cancelled,
+    };
+    BOOST_REQUIRE(
+        worker.Enqueue(header_job) ==
+        MatMulVerifyWorker::EnqueueResult::Enqueued);
+    BOOST_REQUIRE(WaitFor([&] { return gate.running.load() == 1; }));
+
+    MatMulVerifyWorker::Job body_job{
+        .block = MakeBlock(91),
+        .height = 100,
+        .completion = [&](bool ok) {
+            BOOST_CHECK(ok);
+            ++body_completions;
+        },
+        .priority =
+            MatMulVerifyWorker::Priority::AuthenticatedTipChild,
+    };
+    BOOST_REQUIRE(
+        worker.Enqueue(body_job) ==
+        MatMulVerifyWorker::EnqueueResult::Enqueued);
+    BOOST_CHECK(
+        speculative_cancelled->load(std::memory_order_relaxed));
+
+    gate.Release();
+    BOOST_REQUIRE(
+        WaitFor([&] { return body_completions.load() == 1; }));
+    worker.Stop();
     BOOST_CHECK_EQUAL(gate.total_calls.load(), 1);
 }
 
@@ -421,21 +531,67 @@ BOOST_AUTO_TEST_CASE(cancel_stale_queued_job_suppresses_completion)
         .height = 100,
         .completion = [&](bool) { ++completions; },
     };
-    BOOST_REQUIRE(worker.Enqueue(active));
+    BOOST_REQUIRE(EnqueueAccepted(worker.Enqueue(active)));
     BOOST_REQUIRE(WaitFor([&] { return gate.running.load() == 1; }));
 
-    const auto stale_block{MakeBlock(81)};
+    const auto stale_header{
+        std::make_shared<CBlockHeader>(
+            MakeBlock(81)->GetBlockHeader())};
     MatMulVerifyWorker::Job stale{
-        .block = stale_block,
         .height = 99,
         .completion = [&](bool) { ++completions; },
+        .header = stale_header,
     };
-    BOOST_REQUIRE(worker.Enqueue(stale));
-    BOOST_CHECK(worker.Cancel(stale_block->GetHash()));
+    BOOST_REQUIRE(EnqueueAccepted(worker.Enqueue(stale)));
+    BOOST_CHECK(worker.Cancel(stale_header->GetHash()));
     BOOST_CHECK_EQUAL(worker.QueueDepthForTest(), 0U);
     gate.Release();
     BOOST_REQUIRE(WaitFor([&] { return completions.load() == 1; }));
     BOOST_CHECK_EQUAL(gate.total_calls.load(), 1);
+}
+
+BOOST_AUTO_TEST_CASE(full_body_is_not_preempted_by_authenticated_tip)
+{
+    const Consensus::Params& params = Params().GetConsensus();
+    BlockingVerify gate;
+    std::atomic<int> body_completions{0};
+    auto body_cancelled{
+        std::make_shared<std::atomic_bool>(false)};
+    MatMulVerifyWorker worker{
+        params, /*max_threads=*/1,
+        [&](const CBlock&, int32_t, std::optional<int64_t>) {
+            return gate.Run();
+        }};
+
+    MatMulVerifyWorker::Job body_job{
+        .block = MakeBlock(89),
+        .height = 100,
+        .completion = [&](bool ok) {
+            BOOST_CHECK(ok);
+            ++body_completions;
+        },
+        .priority = MatMulVerifyWorker::Priority::Background,
+        .cancelled = body_cancelled,
+    };
+    BOOST_REQUIRE(EnqueueAccepted(worker.Enqueue(body_job)));
+    BOOST_REQUIRE(WaitFor([&] { return gate.running.load() == 1; }));
+
+    MatMulVerifyWorker::Job tip_job{
+        .height = 101,
+        .header = std::make_shared<CBlockHeader>(
+            MakeBlock(93)->GetBlockHeader()),
+        .priority =
+            MatMulVerifyWorker::Priority::AuthenticatedTipChild,
+    };
+    BOOST_REQUIRE(EnqueueAccepted(worker.Enqueue(tip_job)));
+    BOOST_CHECK(
+        !body_cancelled->load(std::memory_order_relaxed));
+
+    gate.Release();
+    BOOST_REQUIRE(
+        WaitFor([&] { return gate.total_calls.load() == 2; }));
+    BOOST_REQUIRE(
+        WaitFor([&] { return body_completions.load() == 1; }));
 }
 
 BOOST_AUTO_TEST_CASE(profile1_metal_back_to_back_blocks)
@@ -484,7 +640,7 @@ BOOST_AUTO_TEST_CASE(profile1_metal_back_to_back_blocks)
             .header = std::move(header),
             .priority = MatMulVerifyWorker::Priority::AuthenticatedTipChild,
         };
-        BOOST_REQUIRE(worker.Enqueue(job));
+        BOOST_REQUIRE(EnqueueAccepted(worker.Enqueue(job)));
     }
 
     BOOST_REQUIRE_MESSAGE(
@@ -587,7 +743,7 @@ BOOST_AUTO_TEST_CASE(profile1_metal_ticketed_invalid_candidates_do_not_starve_ti
                 .priority = priority,
                 .cancelled = std::move(cancelled),
             };
-            BOOST_REQUIRE(worker.Enqueue(job));
+            BOOST_REQUIRE(EnqueueAccepted(worker.Enqueue(job)));
             return hash;
         };
 
@@ -692,7 +848,7 @@ BOOST_AUTO_TEST_CASE(profile1_metal_three_branch_reorg_cancels_stale_work)
             .header = std::move(header),
             .priority = priority,
         };
-        BOOST_REQUIRE(worker.Enqueue(job));
+        BOOST_REQUIRE(EnqueueAccepted(worker.Enqueue(job)));
     };
 
     enqueue_header(
@@ -773,7 +929,7 @@ BOOST_AUTO_TEST_CASE(stop_drains_queue_without_completions)
         auto sentinel{std::make_shared<SlotSentinel>(&slots_released)};
         MatMulVerifyWorker::Job job{MakeBlock(i), /*height=*/100, /*parent_mtp=*/std::nullopt,
                                     [&completions, sentinel](bool) { ++completions; }};
-        BOOST_CHECK(worker.Enqueue(job));
+        BOOST_CHECK(EnqueueAccepted(worker.Enqueue(job)));
     }
     BOOST_CHECK(WaitFor([&] { return gate.running.load() == 1; }));
     BOOST_CHECK_EQUAL(worker.QueueDepthForTest(), kJobs - 1);
@@ -785,11 +941,14 @@ BOOST_AUTO_TEST_CASE(stop_drains_queue_without_completions)
     BOOST_CHECK_EQUAL(completions.load(), 1);       // only the in-flight job completed
     BOOST_CHECK_EQUAL(slots_released.load(), kJobs); // but every slot was released
 
-    // Enqueue after Stop() fails and leaves the job intact for the caller's
-    // synchronous fallback.
+    // Enqueue after Stop() is distinguishable from a policy deferral and
+    // leaves the job intact. Network callers still fail closed rather than
+    // running expensive validation synchronously.
     MatMulVerifyWorker::Job late{MakeBlock(99), /*height=*/100, /*parent_mtp=*/std::nullopt,
                                  [&](bool) { ++completions; }};
-    BOOST_CHECK(!worker.Enqueue(late));
+    BOOST_CHECK(
+        worker.Enqueue(late) ==
+        MatMulVerifyWorker::EnqueueResult::Stopped);
     BOOST_CHECK(late.block != nullptr);
     BOOST_CHECK(late.completion);
     late.completion(false);
@@ -913,7 +1072,7 @@ BOOST_AUTO_TEST_CASE(seal_async_forwards_parent_mtp)
                                          BOOST_CHECK(ok);
                                          ++completions;
                                      }};
-    BOOST_CHECK(worker.Enqueue(with_mtp));
+    BOOST_CHECK(EnqueueAccepted(worker.Enqueue(with_mtp)));
     BOOST_CHECK(WaitFor([&] { return completions.load() == 1; }));
     BOOST_CHECK_EQUAL(seen_mtp.load(), 1);
     BOOST_CHECK_EQUAL(seen_nullopt.load(), 0);
@@ -923,7 +1082,7 @@ BOOST_AUTO_TEST_CASE(seal_async_forwards_parent_mtp)
                                             BOOST_CHECK(!ok);
                                             ++completions;
                                         }};
-    BOOST_CHECK(worker.Enqueue(without_mtp));
+    BOOST_CHECK(EnqueueAccepted(worker.Enqueue(without_mtp)));
     BOOST_CHECK(WaitFor([&] { return completions.load() == 2; }));
     BOOST_CHECK_EQUAL(seen_nullopt.load(), 1);
 }
