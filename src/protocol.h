@@ -472,6 +472,11 @@ enum ServiceFlags : uint64_t {
 
     // NODE_DANDELION indicates support for Dandelion++ transaction relay (BIP 156).
     NODE_DANDELION = (1 << 30),
+
+    // Independently validating archive able to sign and serve historical
+    // trusted ExactReplay attestations. This provider hint is distinct from
+    // NODE_MATMUL_TRUSTED_MIRROR, the consumer/non-independent role.
+    NODE_MATMUL_ATTESTATION_ARCHIVE = (1ULL << 31),
 };
 
 /**

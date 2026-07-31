@@ -4124,6 +4124,7 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_args, BasicTestingSetup)
     // test -matmulvalidation
     BOOST_CHECK_EQUAL(get_valid_opts({}).matmul_validation_mode, kernel::MatMulValidationMode::CONSENSUS);
     BOOST_CHECK_EQUAL(get_valid_opts({"-matmulvalidation=consensus"}).matmul_validation_mode, kernel::MatMulValidationMode::CONSENSUS);
+    BOOST_CHECK_EQUAL(get_valid_opts({"-matmulvalidation=trusted"}).matmul_validation_mode, kernel::MatMulValidationMode::TRUSTED);
     BOOST_CHECK_EQUAL(get_valid_opts({"-matmulvalidation=economic"}).matmul_validation_mode, kernel::MatMulValidationMode::ECONOMIC);
     BOOST_CHECK_EQUAL(get_valid_opts({"-matmulvalidation=spv"}).matmul_validation_mode, kernel::MatMulValidationMode::SPV);
     BOOST_CHECK(!get_opts({"-matmulvalidation=invalid"}));

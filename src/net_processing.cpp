@@ -142,6 +142,7 @@ static constexpr size_t MATMUL_SKETCH_SERVE_GLOBAL_BYTES_PER_SEC{size_t{8} * 102
 static constexpr auto MATMUL_SKETCH_SERVE_DEDUP_WINDOW{10min};
 /** Signed trusted-attestation relay is intentionally small and bounded. */
 static constexpr uint64_t MATMUL_ATTESTATIONS_PER_MESSAGE{16};
+static constexpr size_t MATMUL_ATTESTATION_MESSAGE_MAX_BYTES{16 * 1024};
 static constexpr double MATMUL_ATTESTATION_REQUEST_BURST{16.0};
 static constexpr double MATMUL_ATTESTATION_INBOUND_BURST{64.0};
 static constexpr auto MATMUL_ATTESTATION_TOKEN_REFILL{1s};
@@ -2525,7 +2526,9 @@ void PeerManagerImpl::ResubmitMatMulCarrierDeferredBlock(CNode& carrier_delivere
                               static_cast<int64_t>(prev_block->nHeight) + 1, /*header_count=*/1,
                               best_known_height, consensus_params,
                               m_chainman.GetMatMulValidationMode() ==
-                                  kernel::MatMulValidationMode::CONSENSUS,
+                                      kernel::MatMulValidationMode::CONSENSUS ||
+                                  m_chainman.GetMatMulValidationMode() ==
+                                      kernel::MatMulValidationMode::TRUSTED,
                               is_ibd) > 0;
         matmul_reference_height =
             prev_block->nHeight == std::numeric_limits<int>::max()
@@ -2674,7 +2677,9 @@ bool PeerManagerImpl::RequireMatMulConsensusPeersForSync() const
 {
     const Consensus::Params& consensus = m_chainparams.GetConsensus();
     if (!consensus.fMatMulPOW) return false;
-    return m_chainman.GetMatMulValidationMode() == kernel::MatMulValidationMode::CONSENSUS;
+    const auto mode{m_chainman.GetMatMulValidationMode()};
+    return mode == kernel::MatMulValidationMode::CONSENSUS ||
+           mode == kernel::MatMulValidationMode::TRUSTED;
 }
 
 bool PeerManagerImpl::PeerAdvertisesMatMulConsensus(ServiceFlags services)
@@ -4765,6 +4770,55 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
     }
     if (m_matmul_verify_worker->Contains(header.GetHash())) return;
 
+    if (node::matmul_trusted::IsTrustedMirror() &&
+        params.IsMatMulRCActive(index.nHeight) &&
+        !params.IsMatMulRCCoupledActive(index.nHeight)) {
+        bool request{false};
+        {
+            LOCK(cs_main);
+            const auto now{GetTime<std::chrono::microseconds>()};
+            for (auto it =
+                     m_matmul_attestation_requested.begin();
+                 it != m_matmul_attestation_requested.end();) {
+                if (now - it->second >
+                    MATMUL_ATTESTATION_REQUEST_TTL) {
+                    it =
+                        m_matmul_attestation_requested.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+            if (m_matmul_attestation_requested.size() <
+                    MATMUL_ATTESTATION_OUTSTANDING_MAX &&
+                m_matmul_attestation_requested
+                    .try_emplace(header.GetHash(), now).second) {
+                request = true;
+            }
+        }
+        if (request) {
+            m_connman.ForEachNode([&](CNode* target) {
+                if (target->GetCommonVersion() < PROTOCOL_VERSION) {
+                    return;
+                }
+                const PeerRef target_peer{
+                    GetPeerRef(target->GetId())};
+                const ServiceFlags services{
+                    target_peer
+                        ? target_peer->m_their_services.load()
+                        : NODE_NONE};
+                if ((services &
+                     NODE_MATMUL_ATTESTATION_ARCHIVE) !=
+                        NODE_MATMUL_ATTESTATION_ARCHIVE &&
+                    target->GetId() != node.GetId()) {
+                    return;
+                }
+                MakeAndPushMessage(
+                    *target, NetMsgType::GETMMATTEST,
+                    header.GetHash());
+            });
+        }
+    }
+
     const uint32_t work{MatMulRCWorkUnits(params, index.nHeight)};
     std::optional<node::RCAdmissionTicket> accepted_ticket;
     uint32_t pending{m_matmul_rc_speculative_pending.load(
@@ -5289,7 +5343,10 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
                 }
             }
             header_first_is_ibd = is_ibd;
-            phase2_enabled = m_chainman.GetMatMulValidationMode() == kernel::MatMulValidationMode::CONSENSUS;
+            const auto mode{m_chainman.GetMatMulValidationMode()};
+            phase2_enabled =
+                mode == kernel::MatMulValidationMode::CONSENSUS ||
+                mode == kernel::MatMulValidationMode::TRUSTED;
         }
 
         const uint32_t phase2_checks = CountMatMulPhase2Checks(
@@ -6438,6 +6495,61 @@ void PeerManagerImpl::ProcessBlockSync(NodeId nodeid, CNode* node, const std::sh
     bool new_block{false};
     m_chainman.ProcessNewBlock(block, force_processing, min_pow_checked, &new_block);
     if (new_block) {
+        if (m_chainman.GetMatMulValidationMode() ==
+                kernel::MatMulValidationMode::CONSENSUS &&
+            node::matmul_trusted::ServesAttestations() &&
+            node::matmul_trusted::HasLocalSigner()) {
+            int32_t exact_height{-1};
+            {
+                LOCK(cs_main);
+                const CBlockIndex* index{
+                    m_chainman.m_blockman.LookupBlockIndex(
+                        block->GetHash())};
+                if (index != nullptr &&
+                    (index->nStatus &
+                     BLOCK_EXACT_REPLAY_VERIFIED) &&
+                    !(index->nStatus & BLOCK_FAILED_MASK) &&
+                    m_chainparams.GetConsensus()
+                        .IsMatMulRCActive(index->nHeight) &&
+                    !m_chainparams.GetConsensus()
+                         .IsMatMulRCCoupledActive(
+                             index->nHeight)) {
+                    exact_height = index->nHeight;
+                }
+            }
+            if (exact_height >= 0) {
+                matmul::trusted::ExactReplayAttestation
+                    produced;
+                const auto result{
+                    node::matmul_trusted::SignAuthoritative(
+                        block->GetHash(), exact_height,
+                        &produced)};
+                if (result ==
+                        matmul::trusted::AddResult::Accepted ||
+                    result ==
+                        matmul::trusted::AddResult::Duplicate) {
+                    std::vector<
+                        matmul::trusted::ExactReplayAttestation>
+                        message{std::move(produced)};
+                    m_connman.ForEachNode([&](CNode* target) {
+                        if (target->GetCommonVersion() >=
+                            PROTOCOL_VERSION) {
+                            MakeAndPushMessage(
+                                *target,
+                                NetMsgType::MMATTEST,
+                                message);
+                        }
+                    });
+                } else {
+                    LogWarning(
+                        "Failed to create MatMul ExactReplay "
+                        "attestation block=%s height=%d result=%s\n",
+                        block->GetHash().ToString(),
+                        exact_height,
+                        matmul::trusted::AddResultName(result));
+                }
+            }
+        }
         if (node != nullptr) {
             // Message-thread path: identical to the historical direct access.
             node->m_last_block_time = GetTime<std::chrono::seconds>();
@@ -6518,7 +6630,10 @@ void PeerManagerImpl::ProcessCompactBlockTxns(CNode& pfrom, Peer& peer, const Bl
             /*header_count=*/1,
             best_known_height,
             consensus_params,
-            m_chainman.GetMatMulValidationMode() == kernel::MatMulValidationMode::CONSENSUS,
+            m_chainman.GetMatMulValidationMode() ==
+                    kernel::MatMulValidationMode::CONSENSUS ||
+                m_chainman.GetMatMulValidationMode() ==
+                    kernel::MatMulValidationMode::TRUSTED,
             is_ibd) > 0;
         matmul_reference_height =
             prev_block->nHeight == std::numeric_limits<int>::max()
@@ -8029,7 +8144,10 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             /*header_count=*/1,
             best_known_height,
             consensus_params,
-            m_chainman.GetMatMulValidationMode() == kernel::MatMulValidationMode::CONSENSUS,
+            m_chainman.GetMatMulValidationMode() ==
+                    kernel::MatMulValidationMode::CONSENSUS ||
+                m_chainman.GetMatMulValidationMode() ==
+                    kernel::MatMulValidationMode::TRUSTED,
             is_ibd) > 0;
         matmul_reference_height =
             prev_block->nHeight == std::numeric_limits<int>::max()
@@ -8958,6 +9076,226 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         return;
     }
 
+    if (msg_type == NetMsgType::GETMMATTEST) {
+        if (pfrom.GetCommonVersion() < PROTOCOL_VERSION) {
+            pfrom.fDisconnect = true;
+            return;
+        }
+        uint256 block_hash;
+        vRecv >> block_hash;
+        if (!vRecv.empty()) {
+            Misbehaving(*peer, "getmmattest trailing data");
+            return;
+        }
+        const auto now{GetTime<std::chrono::microseconds>()};
+        if (peer->m_matmul_attestation_last_refill != 0us) {
+            const auto elapsed{
+                now - peer->m_matmul_attestation_last_refill};
+            const double refill{
+                static_cast<double>(elapsed.count()) /
+                static_cast<double>(
+                    std::chrono::duration_cast<
+                        std::chrono::microseconds>(
+                        MATMUL_ATTESTATION_TOKEN_REFILL).count())};
+            peer->m_matmul_attestation_request_tokens =
+                std::min(MATMUL_ATTESTATION_REQUEST_BURST,
+                         peer->m_matmul_attestation_request_tokens +
+                             refill);
+            peer->m_matmul_attestation_inbound_tokens =
+                std::min(MATMUL_ATTESTATION_INBOUND_BURST,
+                         peer->m_matmul_attestation_inbound_tokens +
+                             refill);
+        }
+        peer->m_matmul_attestation_last_refill = now;
+        if (peer->m_matmul_attestation_request_tokens < 1.0) {
+            LogDebug(BCLog::NET,
+                     "Ignoring rate-limited getmmattest from peer=%d\n",
+                     pfrom.GetId());
+            return;
+        }
+        peer->m_matmul_attestation_request_tokens -= 1.0;
+        if (!node::matmul_trusted::ServesAttestations()) return;
+
+        int32_t height{-1};
+        bool locally_exact{false};
+        {
+            LOCK(cs_main);
+            const CBlockIndex* index{
+                m_chainman.m_blockman.LookupBlockIndex(block_hash)};
+            if (index != nullptr &&
+                !(index->nStatus & BLOCK_FAILED_MASK) &&
+                (index->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) &&
+                m_chainparams.GetConsensus().IsMatMulRCActive(
+                    index->nHeight) &&
+                !m_chainparams.GetConsensus().IsMatMulRCCoupledActive(
+                    index->nHeight)) {
+                height = index->nHeight;
+                locally_exact = true;
+            }
+        }
+        if (!locally_exact) return;
+
+        // Regeneration after restart is permitted only because the durable
+        // exact bit records this node's own authoritative replay.
+        if (node::matmul_trusted::HasLocalSigner()) {
+            matmul::trusted::ExactReplayAttestation produced;
+            const auto result{
+                node::matmul_trusted::SignAuthoritative(
+                    block_hash, height, &produced)};
+            if (result != matmul::trusted::AddResult::Accepted &&
+                result != matmul::trusted::AddResult::Duplicate) {
+                LogWarning(
+                    "Unable to sign historical MatMul attestation "
+                    "block=%s height=%d result=%s\n",
+                    block_hash.ToString(), height,
+                    matmul::trusted::AddResultName(result));
+                return;
+            }
+        }
+        auto attestations{
+            node::matmul_trusted::Get(block_hash, height)};
+        if (attestations.size() >
+            MATMUL_ATTESTATIONS_PER_MESSAGE) {
+            attestations.resize(MATMUL_ATTESTATIONS_PER_MESSAGE);
+        }
+        if (!attestations.empty()) {
+            MakeAndPushMessage(
+                pfrom, NetMsgType::MMATTEST, attestations);
+        }
+        return;
+    }
+
+    if (msg_type == NetMsgType::MMATTEST) {
+        if (pfrom.GetCommonVersion() < PROTOCOL_VERSION) {
+            pfrom.fDisconnect = true;
+            return;
+        }
+        if (vRecv.size() >
+            MATMUL_ATTESTATION_MESSAGE_MAX_BYTES) {
+            Misbehaving(
+                *peer,
+                strprintf("mmattest payload=%u exceeds bound",
+                          vRecv.size()));
+            return;
+        }
+        const uint64_t count{ReadCompactSize(vRecv)};
+        if (count == 0 ||
+            count > MATMUL_ATTESTATIONS_PER_MESSAGE) {
+            Misbehaving(
+                *peer,
+                strprintf("mmattest count=%u exceeds bound",
+                          count));
+            return;
+        }
+        const auto now{GetTime<std::chrono::microseconds>()};
+        if (peer->m_matmul_attestation_last_refill != 0us) {
+            const auto elapsed{
+                now - peer->m_matmul_attestation_last_refill};
+            const double refill{
+                static_cast<double>(elapsed.count()) /
+                static_cast<double>(
+                    std::chrono::duration_cast<
+                        std::chrono::microseconds>(
+                        MATMUL_ATTESTATION_TOKEN_REFILL).count())};
+            peer->m_matmul_attestation_inbound_tokens =
+                std::min(MATMUL_ATTESTATION_INBOUND_BURST,
+                         peer->m_matmul_attestation_inbound_tokens +
+                             refill);
+        }
+        peer->m_matmul_attestation_last_refill = now;
+        if (peer->m_matmul_attestation_inbound_tokens <
+            static_cast<double>(count)) {
+            LogDebug(
+                BCLog::NET,
+                "Ignoring rate-limited mmattest count=%u peer=%d\n",
+                count, pfrom.GetId());
+            return;
+        }
+        peer->m_matmul_attestation_inbound_tokens -=
+            static_cast<double>(count);
+
+        std::vector<matmul::trusted::ExactReplayAttestation>
+            received;
+        received.reserve(count);
+        for (uint64_t i{0}; i < count; ++i) {
+            received.emplace_back();
+            vRecv >> received.back();
+        }
+        if (!vRecv.empty()) {
+            Misbehaving(*peer, "mmattest trailing data");
+            return;
+        }
+
+        std::vector<matmul::trusted::ExactReplayAttestation>
+            relay;
+        for (const auto& attestation : received) {
+            const uint256 hash{
+                attestation.statement.block_hash};
+            int32_t expected_height{-1};
+            bool known_profile1{false};
+            {
+                LOCK(cs_main);
+                const CBlockIndex* index{
+                    m_chainman.m_blockman.LookupBlockIndex(hash)};
+                if (index != nullptr &&
+                    !(index->nStatus & BLOCK_FAILED_MASK)) {
+                    expected_height = index->nHeight;
+                    known_profile1 =
+                        m_chainparams.GetConsensus()
+                            .IsMatMulRCActive(expected_height) &&
+                        !m_chainparams.GetConsensus()
+                             .IsMatMulRCCoupledActive(
+                                 expected_height);
+                }
+            }
+            if (!known_profile1) {
+                LogDebug(
+                    BCLog::NET,
+                    "Ignoring mmattest for unknown/non-Profile1 "
+                    "block=%s peer=%d\n",
+                    hash.ToString(), pfrom.GetId());
+                continue;
+            }
+            const auto result{
+                node::matmul_trusted::Add(
+                    attestation, hash, expected_height)};
+            if (result ==
+                matmul::trusted::AddResult::Accepted) {
+                relay.push_back(attestation);
+            } else if (result !=
+                       matmul::trusted::AddResult::Duplicate) {
+                // Relayers are untrusted and may not be the signer. Reject the
+                // object without attributing a false consensus statement to
+                // this network peer.
+                LogDebug(
+                    BCLog::NET,
+                    "Rejected mmattest block=%s peer=%d result=%s\n",
+                    hash.ToString(), pfrom.GetId(),
+                    matmul::trusted::AddResultName(result));
+            }
+            if (node::matmul_trusted::HasQuorum(
+                    hash, expected_height)) {
+                LOCK(cs_main);
+                m_matmul_attestation_requested.erase(hash);
+            }
+        }
+        if (!relay.empty() &&
+            node::matmul_trusted::ServesAttestations()) {
+            size_t relayed{0};
+            m_connman.ForEachNode([&](CNode* target) {
+                if (relayed >= MATMUL_ATTESTATION_RELAY_PEERS ||
+                    target->GetId() == pfrom.GetId() ||
+                    target->GetCommonVersion() < PROTOCOL_VERSION) {
+                    return;
+                }
+                MakeAndPushMessage(
+                    *target, NetMsgType::MMATTEST, relay);
+                ++relayed;
+            });
+        }
+        return;
+    }
+
     if (msg_type == NetMsgType::HEADERS)
     {
         // Ignore headers received while importing
@@ -9045,6 +9383,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         const Consensus::Params& consensus_params = m_chainparams.GetConsensus();
         std::optional<ScopedMatMulPendingVerification> pending_matmul_slot;
         MatMulBlockAdmission matmul_admission;
+        bool request_trusted_attestations{false};
         {
             LOCK(cs_main);
             // Always process the block if we requested it, since we may
@@ -9074,18 +9413,67 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                     /*header_count=*/1,
                     best_known_height,
                     consensus_params,
-                    m_chainman.GetMatMulValidationMode() == kernel::MatMulValidationMode::CONSENSUS,
+                    m_chainman.GetMatMulValidationMode() ==
+                            kernel::MatMulValidationMode::CONSENSUS ||
+                        m_chainman.GetMatMulValidationMode() ==
+                            kernel::MatMulValidationMode::TRUSTED,
                     is_ibd) > 0;
                 budget_reference_height =
                     prev_block->nHeight == std::numeric_limits<int>::max()
                         ? std::numeric_limits<int32_t>::max()
                         : prev_block->nHeight + 1;
+                if (node::matmul_trusted::IsTrustedMirror() &&
+                    consensus_params.IsMatMulRCActive(
+                        budget_reference_height) &&
+                    !consensus_params.IsMatMulRCCoupledActive(
+                        budget_reference_height)) {
+                    const auto now{GetTime<std::chrono::microseconds>()};
+                    for (auto it =
+                             m_matmul_attestation_requested.begin();
+                         it != m_matmul_attestation_requested.end();) {
+                        if (now - it->second >
+                            MATMUL_ATTESTATION_REQUEST_TTL) {
+                            it =
+                                m_matmul_attestation_requested.erase(it);
+                        } else {
+                            ++it;
+                        }
+                    }
+                    if (m_matmul_attestation_requested.size() <
+                            MATMUL_ATTESTATION_OUTSTANDING_MAX &&
+                        m_matmul_attestation_requested
+                            .try_emplace(hash, now).second) {
+                        request_trusted_attestations = true;
+                    }
+                }
             }
             // Do not publish a source entry until every early-return check
             // above has passed. In particular, a bad claimed-work block is
             // disconnected without reaching ProcessNewBlock/BlockChecked and
             // therefore has no later lifecycle hook that could erase it.
             mapBlockSource.emplace(hash, std::make_pair(pfrom.GetId(), true));
+        }
+
+        if (request_trusted_attestations) {
+            // Query every connected independently validating peer. Service
+            // flags are only routing hints; the configured signatures, not
+            // the relayer identity, decide authority.
+            m_connman.ForEachNode([&](CNode* target) {
+                if (target->GetCommonVersion() < PROTOCOL_VERSION) return;
+                const PeerRef target_peer{GetPeerRef(target->GetId())};
+                const ServiceFlags services{
+                    target_peer
+                        ? target_peer->m_their_services.load()
+                        : NODE_NONE};
+                if ((services &
+                     NODE_MATMUL_ATTESTATION_ARCHIVE) !=
+                        NODE_MATMUL_ATTESTATION_ARCHIVE &&
+                    target->GetId() != pfrom.GetId()) {
+                    return;
+                }
+                MakeAndPushMessage(
+                    *target, NetMsgType::GETMMATTEST, hash);
+            });
         }
 
         if (!AdmitMatMulBlockVerification(
