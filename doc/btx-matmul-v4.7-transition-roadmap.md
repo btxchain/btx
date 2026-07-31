@@ -130,15 +130,23 @@ The corrected Apple M4 Max Metal campaign used 100 distinct
 - ticketed-invalid preemption: **1.528641959 seconds**, with the honest verdict
   **30.207028375 seconds** after the flood began and zero invalid completions;
 - three-branch canonical verdict after reorg: **29.708123583 seconds**;
-- deterministic injected-device mismatch: two identical portable recoveries
-  of an honest claim plus fail-closed confirmation of a false claim;
+- deterministic injected-device mismatch under the pre-activation
+  `auto-fallback` policy: two identical portable recoveries of an honest claim
+  plus fail-closed confirmation of a false claim; the production
+  `strict-device` policy instead classifies the mismatch as local, quarantines
+  the provider, and leaves the block retryable;
 - full Metal pipeline with zero CPU contraction calls or fallbacks.
 
-The reported RTX 5060 Ti CUDA campaign is additional cross-backend evidence:
-its 12 loaded samples observed approximately 21.36 seconds at the tail and its
-four-block mine/verify cycle observed approximately 42.37 seconds. Because 12
-samples cannot substantiate a stable p99 estimate, the CUDA host must repeat
-the corrected 100-sample, dimension-bound campaign before activation review.
+The sanitized Blackwell-class CUDA campaign is additional cross-backend
+evidence. Its 100 distinct production headers recorded a nearest-rank p99 of
+21.385 seconds, a maximum of 21.402 seconds, and zero CPU GEMM fallbacks. The
+committed report records only a broad hardware class and contains no hostname,
+username, personal path, or device serial. This closes the previously reported
+12-sample-count gap. Its recorded CUDA source fingerprint does not match the
+current PR head, however, so the exact final binary still needs a corrected
+100-run rerun. The artifact also does not replace independent digest
+reproduction, the final-head two-node lifecycle campaign, fault/recovery
+evidence, or the multi-peer testnet soak.
 
 ## 4. Epoch-A activation gates
 
@@ -156,10 +164,12 @@ Before an activation-height PR:
 4. Invalid ticketed candidates must not starve the authenticated-tip lane.
    The M4 Max production-shape test now passes; the final CUDA build and
    multi-peer testnet soak must reproduce it.
-5. A deliberately faulted device result must exercise deterministic portable
-   retry without peer punishment or divergent validity. The dependency-injected
-   exact-GEMM test now passes for honest recovery and false-claim rejection;
-   the final accelerator builds must retain the same result.
+5. A deliberately faulted device result in `strict-device` mode must be
+   classified as `LocalAcceleratorFailure`, quarantine the provider, leave the
+   block retryable, and avoid peer punishment or a negative-verdict cache. The
+   explicit pre-activation `auto-fallback` test may retain portable recovery,
+   but that path is not production validation. Final accelerator builds must
+   reproduce quarantine, restart/alternate-provider recovery, and retry.
 6. Header/body serialization and the no-chainwork-before-ExactReplay
    invariants must pass in the final candidate binary.
 7. A multi-day testnet soak must cover block relay, competing branches,
@@ -187,8 +197,9 @@ Before an activation-height PR:
   receive this exception.
 - Poseidon2 admission work, per-peer/netgroup budgets, and global caps must be
   enforced together.
-- Device mismatch invokes the portable oracle before permanent rejection or
-  peer punishment.
+- In production `strict-device` mode, device mismatch is a local failure that
+  quarantines the provider and leaves the block retryable; it never triggers
+  inline portable replay, permanent rejection, or peer punishment.
 
 ## 6. Proof-security gates
 

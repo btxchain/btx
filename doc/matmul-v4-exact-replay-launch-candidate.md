@@ -102,6 +102,9 @@ Device path detail:
 `cuda_resident_ffn_chain+triple_stream+persistent_ws`. Versus a 90-second
 block interval the p99 occupies ~23.8% (~68.6 s headroom). Sanitized evidence:
 `doc/evidence/cuda-blackwell-16gib-profile1-loaded-2026-07-30/`.
+The artifact's recorded CUDA source fingerprint does not match the current PR
+head. Treat these numbers as pre-final engineering evidence; the exact final
+binary must repeat the 100-run strict-device campaign.
 
 ## Full-Metal requirement
 
@@ -118,10 +121,11 @@ telemetry establish all of the following:
    Metal; and
 6. no consensus MAC falls back to the CPU.
 
-Normal consensus validation remains deterministic on the portable oracle when
-an accelerator is unavailable. A device digest mismatch triggers a portable
-retry before permanent rejection or peer punishment. That retry is a safety
-path, not a viable routine validator path at production dimensions.
+The portable oracle remains available for explicit pre-activation testing and
+offline dispute diagnosis. Production `strict-device` validation does not
+invoke it inline: an unavailable accelerator or device digest mismatch is a
+local failure, the provider is quarantined, and the block remains retryable
+without peer punishment or a cached invalid verdict.
 
 ## Admission and near-tip policy
 
@@ -178,9 +182,10 @@ Measured on this M4 Max:
 - [x] Cryptographically ticketed invalid competing candidates cannot starve
   the authenticated-tip lane: preemption completed in 1.529 seconds and the
   honest verdict completed in 30.207 seconds with zero invalid completions.
-- [x] Deterministic device mismatch retry is exercised with an explicitly
-  faulty exact-GEMM backend: repeated honest recovery is identical, and a
-  false claim remains rejected after the portable retry.
+- [x] An explicitly faulty exact-GEMM backend is covered under both policies:
+  `strict-device` produces a retryable local failure and quarantines the
+  provider without an inline CPU replay; pre-activation `auto-fallback`
+  deterministically recovers an honest claim and still rejects a false claim.
 - [x] Full-Metal telemetry covers every consensus MAC with no CPU fallback.
 - [x] Production headers bind `matmul_dim=4096`; the real consensus predicate,
   target check, verdict memo, and worker completion path accept the goldens.
@@ -193,13 +198,15 @@ Independent CUDA class (sanitized; see
 - [x] 100 distinct `matmul_dim=4096` headers / digests; zero CPU GEMM fallbacks.
 - [x] CUDA ExactReplay attached via the Metal-parity `ExactGemmBackend`
   Launch* ABI (`rc_fused_ffn`, `rc_fused_ffn_chain`, `rc_phase1`).
+- [ ] Repeat the 100-run campaign on the exact final binary; the committed
+  artifact's recorded CUDA source fingerprint is from an earlier snapshot.
 
 Still required before activation:
 
-- [ ] portable and independent Metal machines match the corrected golden
-  vectors;
+- [ ] independent portable-oracle and accelerator implementations match a
+  frozen production golden corpus with intermediate checkpoints;
 - [ ] the final CUDA path and multi-peer testnet soak reproduce the local
-  ticketed-starvation and faulted-device results;
+  ticketed-starvation, strict quarantine, operator recovery, and retry results;
 - [ ] block/header serialization and `rcadmit` no-chain-byte invariants are
   rechecked in the final candidate build;
 - [ ] checkpoint and IBD trust-window disclosures are frozen;
@@ -209,8 +216,8 @@ Still required before activation:
   invariants: equal v4/BMX4C/RC heights, withdrawn paths off, HeaderPoW off,
   v4/BMX4C ASERT inert, and RC as the sole calibrated branch.
 
-Profile 1 now passes the three requested performance gates on the measured
-Metal host, with corroborating CUDA loaded p99 well inside the 90-second
-interval on a sanitized Blackwell-class validator class. Activation remains a
-no-go until the remaining consensus, cross-machine, DoS, and IBD gates are
-closed.
+Profile 1 now has 100-run loaded evidence on the measured Metal and sanitized
+Blackwell-class CUDA hosts, with both p99 values inside the 90-second interval.
+Activation remains a no-go until the independent golden, complete-lifecycle,
+fault/recovery, multi-peer DoS, IBD, sustained-soak, calibration, and
+ratification gates are closed.

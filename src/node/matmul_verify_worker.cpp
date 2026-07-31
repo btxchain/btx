@@ -370,11 +370,29 @@ void MatMulVerifyWorker::WorkerLoop()
         Job& job{pending->job};
         const CBlockHeader& header{job.GetHeader()};
         const uint256 hash{header.GetHash()};
+        const auto finish_retryable_without_verdict = [&] {
+            std::vector<std::function<void()>> callbacks;
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                if (job.retryable_failure) {
+                    callbacks.push_back(
+                        std::move(job.retryable_failure));
+                }
+                std::move(
+                    pending->follower_retryable_failures.begin(),
+                    pending->follower_retryable_failures.end(),
+                    std::back_inserter(callbacks));
+                // Move every callback while `pending` is unquestionably still
+                // registered, then erase ownership. The local shared_ptr also
+                // keeps the object alive through callback invocation.
+                m_pending.erase(hash);
+            }
+            for (auto& callback : callbacks) callback();
+        };
         bool ok{false};
         bool local_execution_failure{false};
         if (job.cancelled->load(std::memory_order_relaxed)) {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            m_pending.erase(hash);
+            finish_retryable_without_verdict();
             continue;
         }
         matmul::v4::rc::RCAcceleratorScheduler::Lease
@@ -399,8 +417,10 @@ void MatMulVerifyWorker::WorkerLoop()
                     strprintf("verify:%s:%d", hash.ToString(),
                               job.height));
             if (!accelerator_lease) {
-                std::lock_guard<std::mutex> lock(m_mutex);
-                m_pending.erase(hash);
+                // A scheduler cancellation is a local retryable outcome, not
+                // a consensus verdict. Run the same delivery-marker/source
+                // cleanup as an in-replay accelerator cancellation.
+                finish_retryable_without_verdict();
                 continue;
             }
             LogDebug(

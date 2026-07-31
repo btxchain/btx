@@ -7,6 +7,7 @@
 #include <consensus/params.h>
 #include <logging.h>
 #include <matmul/matmul_v4_rc_accel_policy.h>
+#include <matmul/matmul_v4_rc_production_canary.h>
 
 #include <algorithm>
 #include <cassert>
@@ -273,9 +274,10 @@ RCAcceleratorScheduler::AssessLifecycle(double target_spacing_s) const
     out.within_target_spacing = out.complete_sample_set &&
         std::isfinite(target_spacing_s) && target_spacing_s > 0 &&
         out.complete_lifecycle_s < target_spacing_s;
+    const auto production_canary{GetLastRCProductionCanaryStatus()};
     out.hardware_evidence_gates_passed =
-        kRCProfile1ProductionGoldensAvailable &&
-        kRCProfile1StartupCanaryPassed &&
+        production_canary.manifest_has_reviewed_goldens &&
+        production_canary.activation_ready &&
         Consensus::BTX_MATMUL_V47_GPU_LIFECYCLE_GATE_RATIFIED;
     out.operationally_ready = out.complete_sample_set &&
         out.within_target_spacing &&
@@ -304,6 +306,38 @@ void RCAcceleratorScheduler::RecordAuthenticatedRelaySample(double relay_s)
     m_stats.last_authenticated_relay_s = relay_s;
     m_stats.max_authenticated_relay_s =
         std::max(m_stats.max_authenticated_relay_s, relay_s);
+}
+
+RCAcceleratorScheduler::AuthenticatedRelayObservation
+RCAcceleratorScheduler::BeginAuthenticatedRelayObservation() const
+{
+    return {.announced = std::chrono::steady_clock::now()};
+}
+
+void RCAcceleratorScheduler::MarkAuthenticatedRelayBodyReceived(
+    AuthenticatedRelayObservation& observation) const
+{
+    // The first complete body wins. Duplicate BLOCK/BLOCKTXN deliveries must
+    // not change the measured network interval while validation is queued.
+    if (!observation.body_received) {
+        observation.body_received = std::chrono::steady_clock::now();
+    }
+}
+
+bool RCAcceleratorScheduler::CommitAuthenticatedRelayObservation(
+    AuthenticatedRelayObservation& observation)
+{
+    if (!observation.body_received ||
+        observation.announced.time_since_epoch().count() == 0 ||
+        *observation.body_received < observation.announced) {
+        return false;
+    }
+    const double relay_s{
+        Seconds(*observation.body_received - observation.announced)};
+    observation.announced = {};
+    observation.body_received.reset();
+    RecordAuthenticatedRelaySample(relay_s);
+    return true;
 }
 
 bool RCAcceleratorScheduler::TryMismatchedReleaseForTest(

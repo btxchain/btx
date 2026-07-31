@@ -212,9 +212,13 @@ productive computation.
 ### MatMul v4.7 — Profile 1 ExactReplay build and measurement
 
 The Epoch-A consensus oracle is full Profile 1 ExactReplay. Accelerated
-implementations must be byte-identical to the portable reference. A device
-mismatch retries through that oracle before permanent rejection or peer
-punishment.
+implementations must be byte-identical to the portable reference. In
+production `strict-device` mode, a device mismatch is a local accelerator
+failure: the provider is quarantined, the block remains retryable, and the
+announcing peer is neither punished nor given a cached invalid verdict. The
+portable oracle is available only through the explicit pre-activation
+`auto-fallback` or offline `cpu-diagnostic` policies; it is not an automatic
+inline production retry.
 
 **Build with full acceleration.** The portable CPU path remains the
 deterministic oracle, not the Epoch-A performance baseline:

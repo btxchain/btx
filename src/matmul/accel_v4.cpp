@@ -17,6 +17,7 @@
 #include <matmul/matmul_v4_lt.h>
 #include <matmul/matmul_v4_rc_accel_policy.h>
 #include <matmul/matmul_v4_rc_mx_ozaki.h>
+#include <matmul/matmul_v4_rc_production_canary.h>
 #include <matmul/matmul_v4_rc_selfqual.h>
 #include <matmul/pow_v4.h>
 #include <metal/matmul_v4_rc_ozaki_accel.h>
@@ -672,14 +673,27 @@ ResolvedRCExactGemm g_rc_resolution_status;
 ResolvedRCExactGemm RecordRCResolution(ResolvedRCExactGemm out)
 {
     out.resolved = true;
+    const auto canary{
+        matmul::v4::rc::GetLastRCProductionCanaryStatus()};
+    // Re-probe the non-secret architecture/runtime identity. A provider label
+    // alone is not sufficient: a driver update, runtime change, or device
+    // replacement invalidates the startup canary until it is rerun against an
+    // exact manifest entry.
+    const bool same_provider = canary.passed &&
+        canary.provider == out.provider &&
+        matmul::v4::rc::RCProductionProviderIdentityMatches(
+            canary.provider_identity,
+            matmul::v4::rc::ProbeRCProductionProviderIdentity(out.provider));
     out.production_goldens_available =
-        matmul::v4::rc::kRCProfile1ProductionGoldensAvailable;
-    out.startup_canary_passed =
-        matmul::v4::rc::kRCProfile1StartupCanaryPassed;
-    out.activation_ready =
-        out.production_eligible &&
-        out.production_goldens_available &&
-        out.startup_canary_passed;
+        canary.manifest_has_reviewed_goldens;
+    out.startup_canary_passed = same_provider && canary.passed;
+    out.production_eligible = out.automatic_policy_eligible &&
+        same_provider && canary.exact_manifest_match && canary.passed;
+    out.activation_ready = out.production_eligible &&
+        canary.activation_ready;
+    if (out.activation_ready) {
+        out.qualification_scope = "production_profile1_exact_epoch";
+    }
     {
         std::lock_guard<std::mutex> lock(g_rc_resolution_status_mu);
         g_rc_resolution_status = out;
@@ -746,6 +760,7 @@ void ResetRCExactGemmResolveCacheForTest()
         g_rc_resolution_status = {};
     }
     matmul::v4::rc::ResetRCSelfQualCacheForTest();
+    matmul::v4::rc::ResetRCProductionCanaryForTest();
 }
 
 ResolvedRCExactGemm ProbeLastRCExactGemmResolution()
@@ -820,7 +835,7 @@ ResolvedRCExactGemm ResolveExactGemmBackendForRC()
                 GateExactGemmWithRCSelfQualCached(native, "rc_ozaki_mxfp4", /*epoch=*/-1);
             out.provider = out.backend.gemm_s8s8 != nullptr ? "rc_ozaki_mxfp4" : "cpu";
             out.self_qualified = out.backend.gemm_s8s8 != nullptr;
-            out.production_eligible =
+            out.automatic_policy_eligible =
                 out.self_qualified &&
                 policy == RCAccelerationPolicy::ProductionPreferred &&
                 matmul::v4::rc::kRcOzakiMxfp4ProductionEligible;
@@ -893,7 +908,8 @@ ResolvedRCExactGemm ResolveExactGemmBackendForRC()
                 out.provider += "_fused_extract";
             }
             out.reason = "rc_exactpanels_and_episode_self_qualified";
-            out.production_eligible = true;
+            out.automatic_policy_eligible =
+                policy == RCAccelerationPolicy::ProductionPreferred;
             out.qualification_scope = "toy_and_scaled_medium";
         } else {
             out.reason = "metal_rc_episode_self_qual_failed";
@@ -929,7 +945,8 @@ ResolvedRCExactGemm ResolveExactGemmBackendForRC()
     out.backend =
         GateExactGemmWithRCSelfQualCached(backend, provider_label.c_str(), /*epoch=*/-1);
     out.self_qualified = out.backend.gemm_s8s8 != nullptr;
-    out.production_eligible = out.self_qualified;
+    out.automatic_policy_eligible = out.self_qualified &&
+        policy == RCAccelerationPolicy::ProductionPreferred;
     out.provider = out.self_qualified ? provider_label : "cpu";
     if (out.self_qualified && out.backend.rc_fused_ffn != nullptr) {
         out.provider += "_fused_extract";

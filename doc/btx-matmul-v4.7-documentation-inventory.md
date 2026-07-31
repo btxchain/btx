@@ -6,9 +6,9 @@ and vendored LevelDB/secp256k1 documentation.
 
 Inventory totals:
 
-- documentation-like files: **567**
-- MatMul/ExactReplay/proof-related files: **222**
-- MatMul-related files reviewed or explicitly classified: **222**
+- documentation-like files: **568**
+- MatMul/ExactReplay/proof-related files: **224**
+- MatMul-related files reviewed or explicitly classified: **224**
 - MatMul-related files still requiring review: **0**
 
 Current and superseded policy documents are considered reviewed when they
@@ -357,7 +357,7 @@ MatMul transition claim.
 | `doc/reduce-memory.md` | General documentation; no MatMul transition claim found |
 | `doc/reduce-traffic.md` | General documentation; no MatMul transition claim found |
 | `doc/release-manifests/v0.33.0/README.md` | General documentation; no MatMul transition claim found |
-| `doc/release-notes.md` | General documentation; no MatMul transition claim found |
+| `doc/release-notes.md` | Release-candidate note; activation-disabled implementation release |
 | `doc/release-notes/release-notes-0.10.0.md` | General documentation; no MatMul transition claim found |
 | `doc/release-notes/release-notes-0.10.1.md` | General documentation; no MatMul transition claim found |
 | `doc/release-notes/release-notes-0.10.2.md` | General documentation; no MatMul transition claim found |
@@ -432,6 +432,7 @@ MatMul transition claim.
 | `doc/release-notes/release-notes-0.32.8.md` | Reviewed immutable release record; historical behavior preserved |
 | `doc/release-notes/release-notes-0.32.9.md` | Reviewed immutable release record; historical behavior preserved |
 | `doc/release-notes/release-notes-0.33.0.md` | Reviewed immutable release record; historical behavior preserved |
+| `doc/release-notes/release-notes-0.33.2.md` | Release-candidate note; activation-disabled implementation release |
 | `doc/release-notes/release-notes-0.4.0.md` | General documentation; no MatMul transition claim found |
 | `doc/release-notes/release-notes-0.4.1.md` | General documentation; no MatMul transition claim found |
 | `doc/release-notes/release-notes-0.4.2.md` | General documentation; no MatMul transition claim found |
