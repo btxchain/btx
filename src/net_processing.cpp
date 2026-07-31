@@ -25,6 +25,7 @@
 #include <netmessagemaker.h>
 #include <node/blockstorage.h>
 #include <node/matmul_rc_admission.h>
+#include <node/matmul_trusted_attestations.h>
 #include <node/matmul_verify_worker.h>
 #include <node/timeoffsets.h>
 #include <node/txdownloadman.h>
@@ -139,6 +140,14 @@ static constexpr double MATMUL_SKETCH_SERVE_BUCKET_MAX{16.0};
 static constexpr auto MATMUL_SKETCH_SERVE_REFILL{1s};
 static constexpr size_t MATMUL_SKETCH_SERVE_GLOBAL_BYTES_PER_SEC{size_t{8} * 1024 * 1024};
 static constexpr auto MATMUL_SKETCH_SERVE_DEDUP_WINDOW{10min};
+/** Signed trusted-attestation relay is intentionally small and bounded. */
+static constexpr uint64_t MATMUL_ATTESTATIONS_PER_MESSAGE{16};
+static constexpr double MATMUL_ATTESTATION_REQUEST_BURST{16.0};
+static constexpr double MATMUL_ATTESTATION_INBOUND_BURST{64.0};
+static constexpr auto MATMUL_ATTESTATION_TOKEN_REFILL{1s};
+static constexpr auto MATMUL_ATTESTATION_REQUEST_TTL{60s};
+static constexpr size_t MATMUL_ATTESTATION_OUTSTANDING_MAX{1024};
+static constexpr size_t MATMUL_ATTESTATION_RELAY_PEERS{2};
 /** WP-8 / H9/H10: expiry for outstanding GETMMSKETCH prefetch requests. An
  *  entry that received no reply within the TTL frees its node-wide in-flight
  *  slot (the request side is strictly best-effort — nothing is ever awaited or
@@ -576,6 +585,14 @@ struct Peer {
     double m_matmul_serve_tokens GUARDED_BY(NetEventsInterface::g_msgproc_mutex){MATMUL_SKETCH_SERVE_BUCKET_MAX};
     std::chrono::microseconds m_matmul_serve_last_refill GUARDED_BY(NetEventsInterface::g_msgproc_mutex){0us};
     std::map<uint256, std::chrono::microseconds> m_matmul_served GUARDED_BY(NetEventsInterface::g_msgproc_mutex);
+    /** Per-peer request/message rate limits for signed trusted attestations.
+     * Invalid relayers are source-neutral: signatures are checked against the
+     * operator's keys, while these buckets bound their CPU/memory impact. */
+    double m_matmul_attestation_request_tokens GUARDED_BY(NetEventsInterface::g_msgproc_mutex){
+        MATMUL_ATTESTATION_REQUEST_BURST};
+    double m_matmul_attestation_inbound_tokens GUARDED_BY(NetEventsInterface::g_msgproc_mutex){
+        MATMUL_ATTESTATION_INBOUND_BURST};
+    std::chrono::microseconds m_matmul_attestation_last_refill GUARDED_BY(NetEventsInterface::g_msgproc_mutex){0us};
 
     /** WP-8 / H9/H10: per-peer MMSKETCH ingress token bucket (see
      *  MATMUL_SKETCH_RECV_BUCKET_MAX), same lazy-refill idiom as the serve
@@ -1185,6 +1202,11 @@ private:
      *  by an unanswered request to a peer that just left). Guarded by cs_main
      *  so FinalizeNode can reclaim slots without taking g_msgproc_mutex. */
     std::map<uint256, std::pair<NodeId, std::chrono::microseconds>> m_matmul_sketch_requested
+        GUARDED_BY(cs_main);
+    /** Trusted mirrors request signed attestations while the full block is
+     * queued for body validation. One hash is requested from multiple eligible
+     * peers, but occupies one bounded node-wide slot until quorum/expiry. */
+    std::map<uint256, std::chrono::microseconds> m_matmul_attestation_requested
         GUARDED_BY(cs_main);
 
     /** Datacenter-profile rccarrier node-wide egress byte budget + outstanding
@@ -4813,8 +4835,13 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
                     [this, hash](bool ok) {
                         if (!ok) return;
                         LOCK(cs_main);
-                        (void)m_chainman
-                            .PersistMatMulExactReplayVerdict(hash);
+                        if (node::matmul_trusted::IsTrustedMirror()) {
+                            (void)m_chainman
+                                .PersistMatMulTrustedReplayAttestation(hash);
+                        } else {
+                            (void)m_chainman
+                                .PersistMatMulExactReplayVerdict(hash);
+                        }
                     },
                 .header =
                     std::make_shared<const CBlockHeader>(header),
@@ -4939,7 +4966,12 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
             [this, hash](bool ok) {
                 if (!ok) return;
                 LOCK(cs_main);
-                (void)m_chainman.PersistMatMulExactReplayVerdict(hash);
+                if (node::matmul_trusted::IsTrustedMirror()) {
+                    (void)m_chainman
+                        .PersistMatMulTrustedReplayAttestation(hash);
+                } else {
+                    (void)m_chainman.PersistMatMulExactReplayVerdict(hash);
+                }
             },
         .header = std::make_shared<const CBlockHeader>(header),
         .priority = authenticated_tip_child
@@ -5981,6 +6013,16 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                         // existing BlockChecked -> MaybePunishNodeForBlock
                         // pipeline handles accept/reject identically to the
                         // synchronous path.
+                        if (encdr_ok) {
+                            LOCK(cs_main);
+                            if (node::matmul_trusted::IsTrustedMirror()) {
+                                (void)m_chainman
+                                    .PersistMatMulTrustedReplayAttestation(hash);
+                            } else {
+                                (void)m_chainman
+                                    .PersistMatMulExactReplayVerdict(hash);
+                            }
+                        }
                         PinMatMulEncDrVerdict(hash, encdr_ok);
                         ProcessBlockSync(nodeid, /*node=*/nullptr, block, force_processing, min_pow_checked, post);
                         UnpinMatMulEncDrVerdict(hash);

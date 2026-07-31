@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <node/matmul_verify_worker.h>
+#include <node/matmul_trusted_attestations.h>
 
 #include <arith_uint256.h>
 #include <consensus/params.h>
@@ -378,8 +379,14 @@ void MatMulVerifyWorker::WorkerLoop()
         }
         matmul::v4::rc::RCAcceleratorScheduler::Lease
             accelerator_lease;
+        const bool trusted_exact_replay{
+            !m_verify_override &&
+            node::matmul_trusted::IsTrustedMirror() &&
+            m_params.IsMatMulRCActive(job.height) &&
+            !m_params.IsMatMulRCCoupledActive(job.height)};
         if (!m_verify_override &&
-            m_params.IsMatMulRCFamilyActive(job.height)) {
+            m_params.IsMatMulRCFamilyActive(job.height) &&
+            !trusted_exact_replay) {
             const auto device_priority{
                 job.priority == Priority::AuthenticatedTipChild
                     ? matmul::v4::rc::RCAcceleratorScheduler::
@@ -415,6 +422,35 @@ void MatMulVerifyWorker::WorkerLoop()
                 CBlock synthetic{header};
                 ok = m_verify_override(
                     synthetic, job.height, job.parent_median_time_past);
+            }
+        } else if (trusted_exact_replay) {
+            const auto wait_result{
+                node::matmul_trusted::WaitForQuorum(
+                    hash, job.height,
+                    [&job] {
+                        return job.cancelled->load(
+                            std::memory_order_relaxed);
+                    })};
+            ok = wait_result ==
+                matmul::trusted::WaitResult::Quorum;
+            local_execution_failure = !ok;
+            if (ok) {
+                // Ephemeral only. The index's trusted-status bit is audit
+                // metadata and must never survive config rotation as
+                // authority; every restart rebuilds this memo from signatures
+                // verified against the current signer set and threshold.
+                CacheMatMulEncDrVerdict(hash, true);
+                LogPrintf(
+                    "matmul trusted mirror quorum accepted: block=%s "
+                    "height=%d threshold=%u\n",
+                    hash.ToString(), job.height,
+                    node::matmul_trusted::Threshold());
+            } else {
+                LogWarning(
+                    "matmul trusted mirror deferred: block=%s height=%d "
+                    "result=%s (retryable, peer not punished)\n",
+                    hash.ToString(), job.height,
+                    matmul::trusted::WaitResultName(wait_result));
             }
         } else {
             // A Stage-3 attachment is block-body data and is deliberately not

@@ -1201,6 +1201,12 @@ public:
     bool PersistMatMulExactReplayVerdict(const uint256& block_hash)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
+    /** Record that the current process observed a valid configured M-of-N
+     *  quorum. Persisted solely for operator audit; validation never consumes
+     *  this bit as authority after restart/config rotation. */
+    bool PersistMatMulTrustedReplayAttestation(const uint256& block_hash)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
     /** Cheap complete-block checks that must pass before P2P admission charges
      *  an expensive MatMul recomputation. This covers context-free body rules,
      *  contextual header rules, and contextual body rules, but deliberately
