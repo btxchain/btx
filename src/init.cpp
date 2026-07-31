@@ -1308,23 +1308,21 @@ bool AppInitParameterInteraction(const ArgsManager& args)
             matmul_v4::accel::ResolveExactGemmBackendForRC()};
         rc_provider = resolved.provider;
         rc_resolution_reason = resolved.reason;
-        // Activation readiness is intentionally stricter than the current
-        // toy/medium self-qualification. Keep service advertisement withheld
-        // until the production-golden/startup-canary gate lands.
-        constexpr bool production_canary_ready{false};
         rc_strict_device_ready =
             resolved.self_qualified && resolved.production_eligible &&
             resolved.backend.gemm_s8s8 != nullptr &&
-            production_canary_ready;
+            resolved.activation_ready;
         if (!rc_strict_device_ready) {
             InitWarning(strprintf(
                 _("MatMul RC strict-device provider is not ready "
-                  "(provider=%s, reason=%s, production_canary=%d). "
+                  "(provider=%s, reason=%s, production_goldens=%d, "
+                  "startup_canary=%d). "
                   "RC blocks will remain retryable "
                   "on local execution failure and this node will not "
                   "advertise MatMul consensus-validator service."),
                 rc_provider, rc_resolution_reason,
-                production_canary_ready));
+                resolved.production_goldens_available,
+                resolved.startup_canary_passed));
         }
     }
     LogPrintf(
