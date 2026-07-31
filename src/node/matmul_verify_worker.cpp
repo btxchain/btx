@@ -9,6 +9,7 @@
 #include <logging.h>
 #include <matmul/matmul_v4_rc.h>
 #include <matmul/matmul_v4_rc_accelerator_scheduler.h>
+#include <matmul/matmul_v4_rc_gkr.h>
 #include <matmul/matmul_v4_rc_stage3_consensus.h>
 #include <pow.h>
 #include <uint256.h>
@@ -55,6 +56,10 @@ MatMulVerifyWorker::EnqueueResult MatMulVerifyWorker::Enqueue(
             // block validation, which alone can authenticate chainwork.
             if (job.completion) {
                 it->second->followers.push_back(std::move(job.completion));
+            }
+            if (job.retryable_failure) {
+                it->second->follower_retryable_failures.push_back(
+                    std::move(job.retryable_failure));
             }
             if (job.block) {
                 it->second->body_joined = true;
@@ -302,11 +307,9 @@ void MatMulVerifyWorker::Stop()
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         m_stopped = true;
-        // Queued-not-started jobs are destroyed WITHOUT running their
-        // completions: the RAII state captured in the closures (verification
-        // slots) is released by destruction, and the un-processed blocks stay
-        // re-requestable — the same semantics as the existing global-budget
-        // "defer" path.
+        // Queued-not-started jobs receive no consensus completion. Their
+        // retryable-failure cleanup runs below so network async markers are
+        // released while the unprocessed blocks stay re-requestable.
         orphaned.swap(m_queue);
         for (const auto& pending : orphaned) {
             pending->job.cancelled->store(true, std::memory_order_relaxed);
@@ -318,6 +321,15 @@ void MatMulVerifyWorker::Stop()
     matmul::v4::rc::GetRCAcceleratorScheduler().NotifyCancellation();
     for (std::thread& t : threads) {
         if (t.joinable()) t.join();
+    }
+    for (auto& pending : orphaned) {
+        if (pending->job.retryable_failure) {
+            pending->job.retryable_failure();
+        }
+        for (auto& retryable_failure :
+             pending->follower_retryable_failures) {
+            retryable_failure();
+        }
     }
     // `orphaned` destroyed here, after the in-flight jobs joined.
 }
@@ -358,6 +370,7 @@ void MatMulVerifyWorker::WorkerLoop()
         const CBlockHeader& header{job.GetHeader()};
         const uint256 hash{header.GetHash()};
         bool ok{false};
+        bool local_execution_failure{false};
         if (job.cancelled->load(std::memory_order_relaxed)) {
             std::lock_guard<std::mutex> lock(m_mutex);
             m_pending.erase(hash);
@@ -435,9 +448,25 @@ void MatMulVerifyWorker::WorkerLoop()
                         header, m_params, job.height);
                 }
                 if (m_params.IsMatMulRCActive(job.height)) {
-                    return CheckMatMulProofOfWork_RC(
-                        header, m_params, job.height,
-                        &carrier_missing);
+                    std::string detail;
+                    const auto outcome{
+                        CheckMatMulProofOfWork_RCOutcome(
+                            header, m_params, job.height,
+                            &carrier_missing, &detail)};
+                    local_execution_failure =
+                        outcome ==
+                            MatMulRCValidationOutcome::
+                                LOCAL_ACCELERATOR_FAILURE ||
+                        outcome ==
+                            MatMulRCValidationOutcome::CANCELLED;
+                    if (local_execution_failure) {
+                        LogWarning(
+                            "matmul async RC replay deferred: block=%s height=%d outcome=%d detail=%s\n",
+                            hash.ToString(), job.height,
+                            static_cast<int>(outcome), detail);
+                    }
+                    return outcome ==
+                        MatMulRCValidationOutcome::VALID;
                 }
                 if (!job.block) return false;
                 return CheckMatMulProofOfWork_V4EncDr(
@@ -462,7 +491,8 @@ void MatMulVerifyWorker::WorkerLoop()
                 // result would poison followers and the persistent header
                 // memo, especially when a valid replay reports false solely
                 // because the cancellation boundary fired.
-                if (!job.cancelled->load(std::memory_order_relaxed)) {
+                if (!job.cancelled->load(std::memory_order_relaxed) &&
+                    !local_execution_failure) {
                     sf.SetResult(ok); // publish before ~sf releases waiters
                 }
             } else if (const auto leader_result{sf.LeaderResult()}) {
@@ -472,18 +502,33 @@ void MatMulVerifyWorker::WorkerLoop()
                 ok = verify_pure();
             }
             if (!job.cancelled->load(std::memory_order_relaxed) &&
+                !local_execution_failure &&
                 !(carrier_missing && !ok)) {
                 CacheMatMulEncDrVerdict(hash, ok);
             }
-            LogDebug(BCLog::NET, "matmul async verify: block %s height %d encdr_ok=%d carrier_missing=%d\n",
-                     hash.ToString(), job.height, ok, carrier_missing);
+            LogDebug(BCLog::NET, "matmul async verify: block %s height %d encdr_ok=%d carrier_missing=%d local_failure=%d\n",
+                     hash.ToString(), job.height, ok, carrier_missing,
+                     local_execution_failure);
         }
 complete:
         std::vector<std::function<void(bool)>> completions;
+        std::vector<std::function<void()>> retryable_failures;
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             m_pending.erase(hash);
-            if (!job.cancelled->load(std::memory_order_relaxed)) {
+            const bool retryable_without_verdict{
+                local_execution_failure ||
+                job.cancelled->load(std::memory_order_relaxed)};
+            if (retryable_without_verdict) {
+                if (job.retryable_failure) {
+                    retryable_failures.push_back(
+                        std::move(job.retryable_failure));
+                }
+                std::move(
+                    pending->follower_retryable_failures.begin(),
+                    pending->follower_retryable_failures.end(),
+                    std::back_inserter(retryable_failures));
+            } else if (!job.cancelled->load(std::memory_order_relaxed)) {
                 if (job.completion) {
                     completions.push_back(std::move(job.completion));
                 }
@@ -491,6 +536,9 @@ complete:
                           pending->followers.end(),
                           std::back_inserter(completions));
             }
+        }
+        for (auto& retryable_failure : retryable_failures) {
+            retryable_failure();
         }
         for (auto& completion : completions) completion(ok);
     }

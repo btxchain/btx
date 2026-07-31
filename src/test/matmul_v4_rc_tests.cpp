@@ -30,6 +30,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -910,6 +911,19 @@ BOOST_AUTO_TEST_CASE(rc_exact_replay_strict_device_coverage_and_fallback_telemet
     BOOST_CHECK_EQUAL(strict_stats.cpu_fallbacks, 1u);
     BOOST_CHECK(!strict_stats.first_failure.empty());
 
+    CBlockHeader committed{header};
+    committed.matmul_digest = cpu;
+    const auto strict_verdict{
+        rc::VerifyBoundedExactReplayWithAccelerationForTest(
+            committed, params, /*height=*/0,
+            strict_acceleration)};
+    BOOST_CHECK(!strict_verdict.ok);
+    BOOST_CHECK(
+        strict_verdict.outcome ==
+        rc::ExactReplayVerifyOutcome::LocalAcceleratorFailure);
+    BOOST_CHECK_EQUAL(strict_verdict.cpu_gemm_calls, 0U);
+    BOOST_CHECK_EQUAL(strict_verdict.cpu_gemm_fallbacks, 1U);
+
     rc::RCExactReplayAccelerationStats fallback_stats;
     const rc::RCExactReplayAcceleration fallback_acceleration{
         .gemm = declining,
@@ -928,7 +942,65 @@ BOOST_AUTO_TEST_CASE(rc_exact_replay_strict_device_coverage_and_fallback_telemet
     BOOST_CHECK(!fallback_stats.first_failure.empty());
 }
 
-BOOST_AUTO_TEST_CASE(rc_device_mismatch_retry_is_deterministic_and_fail_closed)
+BOOST_AUTO_TEST_CASE(rc_exact_replay_cancellation_is_not_consensus_invalid)
+{
+    CBlockHeader header{MakeRCHeader(0x43414e43454c)};
+    const auto params{rc::MakeToyRCEpisodeParams()};
+    header.matmul_digest =
+        rc::RecomputeResidentCurriculumReference(
+            header, params, /*height=*/0);
+    BOOST_REQUIRE(!header.matmul_digest.IsNull());
+
+    std::atomic_bool cancelled{true};
+    rc::ScopedExactReplayCancellation cancellation_scope{&cancelled};
+    const rc::RCExactReplayAcceleration cpu_diagnostic{
+        .backend = "test_cpu_diagnostic",
+        .require_device = false,
+        .output_row_tile = 16,
+    };
+    const auto result{
+        rc::VerifyBoundedExactReplayWithAccelerationForTest(
+            header, params, /*height=*/0, cpu_diagnostic)};
+    BOOST_CHECK(!result.ok);
+    BOOST_CHECK(
+        result.outcome == rc::ExactReplayVerifyOutcome::Cancelled);
+    BOOST_CHECK_EQUAL(result.note, "ExactReplay: cancelled");
+}
+
+BOOST_AUTO_TEST_CASE(rc_execution_policy_and_last_replay_telemetry)
+{
+    const auto saved_policy{rc::GetRCExactReplayExecutionPolicy()};
+    rc::SetRCExactReplayExecutionPolicy(
+        rc::RCExactReplayExecutionPolicy::CpuDiagnostic);
+    rc::ResetLastExactReplayVerifyResultForTest();
+
+    CBlockHeader header{MakeRCHeader(0x54454c454d)};
+    const auto params{rc::MakeToyRCEpisodeParams()};
+    header.matmul_digest =
+        rc::RecomputeResidentCurriculumReference(
+            header, params, /*height=*/0);
+    const auto result{
+        rc::VerifyBoundedExactReplay(
+            header, params, /*height=*/0)};
+    rc::SetRCExactReplayExecutionPolicy(saved_policy);
+    BOOST_REQUIRE(result.ok);
+    BOOST_CHECK(
+        result.execution_policy ==
+        rc::RCExactReplayExecutionPolicy::CpuDiagnostic);
+    BOOST_CHECK(!result.require_device);
+    BOOST_CHECK_EQUAL(result.acceleration_backend, "cpu_diagnostic");
+    BOOST_CHECK_GT(result.cpu_gemm_calls, 0U);
+
+    const auto last{rc::GetLastExactReplayVerifyResult()};
+    BOOST_REQUIRE(last.has_value());
+    BOOST_CHECK(last->outcome == rc::ExactReplayVerifyOutcome::Valid);
+    BOOST_CHECK_EQUAL(
+        rc::ExactReplayVerifyOutcomeName(last->outcome), "valid");
+    BOOST_CHECK_EQUAL(last->digest, result.digest);
+    BOOST_CHECK_EQUAL(last->cpu_gemm_calls, result.cpu_gemm_calls);
+}
+
+BOOST_AUTO_TEST_CASE(rc_device_mismatch_is_local_failure_in_strict_mode)
 {
     auto header{MakeRCHeader(0x4641554c54)};
     const auto params{rc::MakeToyRCEpisodeParams()};
@@ -950,37 +1022,60 @@ BOOST_AUTO_TEST_CASE(rc_device_mismatch_retry_is_deterministic_and_fail_closed)
         .output_row_tile = 16,
     };
 
-    const auto recovered_a{
+    const auto strict_a{
         rc::VerifyBoundedExactReplayWithAccelerationForTest(
             header, params, /*height=*/0, faulty_acceleration)};
-    const auto recovered_b{
+    const auto strict_b{
         rc::VerifyBoundedExactReplayWithAccelerationForTest(
             header, params, /*height=*/0, faulty_acceleration)};
 
-    for (const auto* recovered : {&recovered_a, &recovered_b}) {
-        BOOST_CHECK(recovered->ok);
-        BOOST_CHECK(recovered->device_mismatch_retried);
-        BOOST_CHECK(!recovered->device_mismatch_confirmed);
-        BOOST_CHECK(recovered->digest == honest_digest);
-        BOOST_CHECK_GT(recovered->device_gemm_calls, 0U);
-        BOOST_CHECK_GT(recovered->cpu_gemm_calls, 0U);
-        BOOST_CHECK(!recovered->fully_accelerated);
-        BOOST_CHECK(!recovered->full_metal_pipeline);
-        BOOST_CHECK_EQUAL(
-            recovered->acceleration_failure,
-            "device_digest_mismatch_cpu_recovered");
+    for (const auto* failed : {&strict_a, &strict_b}) {
+        BOOST_CHECK(!failed->ok);
         BOOST_CHECK(
-            recovered->note.find("portable CPU") !=
+            failed->outcome ==
+            rc::ExactReplayVerifyOutcome::LocalAcceleratorFailure);
+        BOOST_CHECK(!failed->device_mismatch_retried);
+        BOOST_CHECK(!failed->device_mismatch_confirmed);
+        BOOST_CHECK(failed->digest != honest_digest);
+        BOOST_CHECK_GT(failed->device_gemm_calls, 0U);
+        BOOST_CHECK_EQUAL(failed->cpu_gemm_calls, 0U);
+        BOOST_CHECK(failed->fully_accelerated);
+        BOOST_CHECK(!failed->full_metal_pipeline);
+        BOOST_CHECK_EQUAL(
+            failed->acceleration_failure,
+            "device_digest_mismatch_unconfirmed");
+        BOOST_CHECK(
+            failed->note.find("portable retry disabled") !=
             std::string::npos);
     }
-    BOOST_CHECK(recovered_a.digest == recovered_b.digest);
-    BOOST_CHECK_EQUAL(recovered_a.note, recovered_b.note);
+    BOOST_CHECK(strict_a.digest == strict_b.digest);
+    BOOST_CHECK_EQUAL(strict_a.note, strict_b.note);
     BOOST_CHECK_EQUAL(
-        recovered_a.device_gemm_calls,
-        recovered_b.device_gemm_calls);
+        strict_a.device_gemm_calls,
+        strict_b.device_gemm_calls);
     BOOST_CHECK_EQUAL(
-        recovered_a.cpu_gemm_calls,
-        recovered_b.cpu_gemm_calls);
+        strict_a.cpu_gemm_calls,
+        strict_b.cpu_gemm_calls);
+
+    // The explicitly pre-activation/testing auto-fallback mode retains the
+    // portable recovery path. It must recover the honest header but must not
+    // be confused with strict production execution.
+    rc::RCExactReplayAcceleration fallback_acceleration{
+        faulty_acceleration};
+    fallback_acceleration.require_device = false;
+    const auto recovered{
+        rc::VerifyBoundedExactReplayWithAccelerationForTest(
+            header, params, /*height=*/0, fallback_acceleration)};
+    BOOST_CHECK(recovered.ok);
+    BOOST_CHECK(
+        recovered.outcome == rc::ExactReplayVerifyOutcome::Valid);
+    BOOST_CHECK(recovered.device_mismatch_retried);
+    BOOST_CHECK(!recovered.device_mismatch_confirmed);
+    BOOST_CHECK(recovered.digest == honest_digest);
+    BOOST_CHECK_GT(recovered.cpu_gemm_calls, 0U);
+    BOOST_CHECK_EQUAL(
+        recovered.acceleration_failure,
+        "device_digest_mismatch_cpu_recovered");
 
     // A portable retry must not turn a genuinely false header claim into an
     // acceptance merely because the first device pass was faulty.
@@ -990,8 +1085,11 @@ BOOST_AUTO_TEST_CASE(rc_device_mismatch_retry_is_deterministic_and_fail_closed)
     const auto rejected{
         rc::VerifyBoundedExactReplayWithAccelerationForTest(
             invalid_header, params, /*height=*/0,
-            faulty_acceleration)};
+            fallback_acceleration)};
     BOOST_CHECK(!rejected.ok);
+    BOOST_CHECK(
+        rejected.outcome ==
+        rc::ExactReplayVerifyOutcome::InvalidConsensus);
     BOOST_CHECK(rejected.device_mismatch_retried);
     BOOST_CHECK(rejected.device_mismatch_confirmed);
     BOOST_CHECK(rejected.digest == honest_digest);

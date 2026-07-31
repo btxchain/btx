@@ -695,6 +695,46 @@ BOOST_AUTO_TEST_CASE(cancel_stale_queued_job_suppresses_completion)
     BOOST_CHECK_EQUAL(gate.total_calls.load(), 1);
 }
 
+BOOST_AUTO_TEST_CASE(cancelled_running_replay_runs_retryable_cleanup_only)
+{
+    const Consensus::Params& params = Params().GetConsensus();
+    BlockingVerify gate;
+    std::atomic<int> verdict_completions{0};
+    std::atomic<int> retryable_cleanups{0};
+    MatMulVerifyWorker worker{
+        params, /*max_threads=*/1,
+        [&](const CBlock&, int32_t, std::optional<int64_t>) {
+            return gate.Run();
+        }};
+
+    const auto speculative_header{
+        std::make_shared<CBlockHeader>(
+            MakeBlock(82)->GetBlockHeader())};
+    MatMulVerifyWorker::Job speculative{
+        .height = 100,
+        .completion = [&](bool) { ++verdict_completions; },
+        .retryable_failure = [&] { ++retryable_cleanups; },
+        .header = speculative_header,
+        .priority = MatMulVerifyWorker::Priority::CompetingBranch,
+    };
+    BOOST_REQUIRE(EnqueueAccepted(worker.Enqueue(speculative)));
+    BOOST_REQUIRE(WaitFor([&] { return gate.running.load() == 1; }));
+
+    MatMulVerifyWorker::Job authenticated_tip{
+        .height = 100,
+        .header = std::make_shared<CBlockHeader>(
+            MakeBlock(83)->GetBlockHeader()),
+        .priority =
+            MatMulVerifyWorker::Priority::AuthenticatedTipChild,
+    };
+    BOOST_REQUIRE(EnqueueAccepted(worker.Enqueue(authenticated_tip)));
+    gate.Release();
+    BOOST_REQUIRE(WaitFor(
+        [&] { return retryable_cleanups.load() == 1; }));
+    BOOST_CHECK_EQUAL(verdict_completions.load(), 0);
+    BOOST_REQUIRE(WaitFor([&] { return gate.total_calls.load() == 2; }));
+}
+
 BOOST_AUTO_TEST_CASE(full_body_is_not_preempted_by_authenticated_tip)
 {
     const Consensus::Params& params = Params().GetConsensus();
@@ -1058,13 +1098,14 @@ BOOST_AUTO_TEST_CASE(profile1_metal_three_branch_reorg_cancels_stale_work)
         << "s");
 }
 
-// Design test A.10 #3: Stop() with queued jobs runs NO queued completion, but
-// every job's captured RAII state (the verification slot) is still released.
+// Design test A.10 #3: Stop() with queued jobs runs no consensus completion;
+// it does run retryable cleanup and releases every captured slot.
 BOOST_AUTO_TEST_CASE(stop_drains_queue_without_completions)
 {
     const Consensus::Params& params = Params().GetConsensus();
     BlockingVerify gate;
     std::atomic<int> completions{0};
+    std::atomic<int> retryable_cleanups{0};
     std::atomic<int> slots_released{0};
     MatMulVerifyWorker worker{params, /*max_threads=*/1,
                               [&](const CBlock&, int32_t, std::optional<int64_t>) { return gate.Run(); }};
@@ -1072,18 +1113,25 @@ BOOST_AUTO_TEST_CASE(stop_drains_queue_without_completions)
     constexpr int kJobs{4};
     for (int i = 0; i < kJobs; ++i) {
         auto sentinel{std::make_shared<SlotSentinel>(&slots_released)};
-        MatMulVerifyWorker::Job job{MakeBlock(i), /*height=*/100, /*parent_mtp=*/std::nullopt,
-                                    [&completions, sentinel](bool) { ++completions; }};
+        MatMulVerifyWorker::Job job{
+            .block = MakeBlock(i),
+            .height = 100,
+            .completion =
+                [&completions, sentinel](bool) { ++completions; },
+            .retryable_failure =
+                [&retryable_cleanups] { ++retryable_cleanups; },
+        };
         BOOST_CHECK(EnqueueAccepted(worker.Enqueue(job)));
     }
     BOOST_CHECK(WaitFor([&] { return gate.running.load() == 1; }));
     BOOST_CHECK_EQUAL(worker.QueueDepthForTest(), kJobs - 1);
 
     // Let the in-flight job finish while Stop() joins; queued jobs must be
-    // destroyed without their completions running.
+    // released without a fabricated consensus verdict.
     gate.Release();
     worker.Stop();
     BOOST_CHECK_EQUAL(completions.load(), 1);       // only the in-flight job completed
+    BOOST_CHECK_EQUAL(retryable_cleanups.load(), kJobs - 1);
     BOOST_CHECK_EQUAL(slots_released.load(), kJobs); // but every slot was released
 
     // Enqueue after Stop() is distinguishable from a policy deferral and

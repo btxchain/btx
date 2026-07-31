@@ -954,8 +954,33 @@ enum class RCProdVerifyPath : uint8_t {
     ShadowGkr = 3,
 };
 
+/**
+ * Local execution policy for Profile-1 ExactReplay.
+ *
+ * This is deliberately not a consensus parameter: every backend computes the
+ * same deterministic predicate. It controls whether a node is prepared to
+ * issue a timely authoritative verdict, or is running an explicitly
+ * diagnostic/pre-activation fallback mode.
+ */
+enum class RCExactReplayExecutionPolicy : uint8_t {
+    StrictDevice = 0,
+    AutoFallback = 1,
+    CpuDiagnostic = 2,
+};
+
+enum class ExactReplayVerifyOutcome : uint8_t {
+    Valid = 0,
+    InvalidConsensus = 1,
+    LocalAcceleratorFailure = 2,
+    Cancelled = 3,
+};
+
 struct ExactReplayVerifyResult {
     bool ok{false};
+    ExactReplayVerifyOutcome outcome{ExactReplayVerifyOutcome::InvalidConsensus};
+    RCExactReplayExecutionPolicy execution_policy{
+        RCExactReplayExecutionPolicy::AutoFallback};
+    bool require_device{false};
     uint256 digest{};
     double verify_s{0};
     size_t rss_kib{0};
@@ -970,8 +995,21 @@ struct ExactReplayVerifyResult {
     uint64_t cpu_gemm_calls{0};
     uint64_t cpu_gemm_fallbacks{0};
     std::string acceleration_failure;
+    std::string acceleration_resolution_reason;
     std::string note;
 };
+
+/** Process startup configuration. Set before validation workers start. */
+void SetRCExactReplayExecutionPolicy(RCExactReplayExecutionPolicy policy);
+[[nodiscard]] RCExactReplayExecutionPolicy GetRCExactReplayExecutionPolicy();
+[[nodiscard]] const char* RCExactReplayExecutionPolicyName(
+    RCExactReplayExecutionPolicy policy);
+[[nodiscard]] const char* ExactReplayVerifyOutcomeName(
+    ExactReplayVerifyOutcome outcome);
+/** Last completed production verifier call, for operator RPC/log telemetry. */
+[[nodiscard]] std::optional<ExactReplayVerifyResult>
+GetLastExactReplayVerifyResult();
+void ResetLastExactReplayVerifyResultForTest();
 
 struct RCProdVerifyResult {
     bool ok{false};

@@ -300,6 +300,15 @@ bool CheckMatMulProofOfWork_V4EncDr(const CBlock& block, const Consensus::Params
                                     int32_t block_height,
                                     std::optional<int64_t> parent_median_time_past = std::nullopt);
 
+/** Typed RC replay verdict. Local execution failures and cancellation are not
+ * consensus-invalid and must never enter invalid-block/peer-punishment caches. */
+enum class MatMulRCValidationOutcome : uint8_t {
+    VALID = 0,
+    INVALID_CONSENSUS = 1,
+    LOCAL_ACCELERATOR_FAILURE = 2,
+    CANCELLED = 3,
+};
+
 /** ENC_RC / Resident Curriculum DIGEST_RECOMPUTE checker. Requires
  *  IsMatMulRCActive(block_height). Consensus path is ε=0
  *  VerifyBoundedExactReplay (RecomputeResidentCurriculumReference) checking
@@ -315,6 +324,11 @@ bool CheckMatMulProofOfWork_V4EncDr(const CBlock& block, const Consensus::Params
 bool CheckMatMulProofOfWork_RC(const CBlockHeader& header, const Consensus::Params& params,
                                int32_t block_height,
                                bool* carrier_missing = nullptr);
+
+[[nodiscard]] MatMulRCValidationOutcome CheckMatMulProofOfWork_RCOutcome(
+    const CBlockHeader& header, const Consensus::Params& params,
+    int32_t block_height, bool* carrier_missing = nullptr,
+    std::string* detail = nullptr);
 
 /** ENC_RC_COUPLED additive DIGEST_RECOMPUTE checker. Requires both RC and
  *  coupled activation. Before succinct authority it recomputes the resident

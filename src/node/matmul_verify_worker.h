@@ -102,6 +102,12 @@ public:
         //! NOT run for jobs still queued when Stop() destroys the queue (their
         //! captured RAII state releases resources on destruction).
         std::function<void(bool encdr_ok)> completion;
+        //! Runs only when RC verification produced no consensus verdict
+        //! because the local accelerator failed or the replay was cancelled.
+        //! Network callers use this to release async-delivery markers while
+        //! leaving the block retryable; it must not punish a peer or pin a
+        //! negative verdict.
+        std::function<void()> retryable_failure;
         //! Header-only jobs begin digest-only ExactReplay while the body is
         //! still transferring/reconstructing. Exactly one of block/header is
         //! populated.
@@ -171,9 +177,8 @@ public:
     size_t CancelIf(const std::function<bool(const CBlockHeader&, int32_t)>& predicate);
     [[nodiscard]] bool Contains(const uint256& hash) const;
 
-    /** Stop accepting jobs; DESTROY queued-not-started jobs WITHOUT running
-     *  their completions (RAII captured inside the closures releases slots);
-     *  join in-flight jobs. Idempotent. */
+    /** Stop accepting jobs; queued-not-started jobs receive retryable cleanup
+     *  but no consensus completion; join in-flight jobs. Idempotent. */
     void Stop();
 
     //! Test introspection: current queued (not yet started) job count.
@@ -183,6 +188,7 @@ private:
     struct Pending {
         Job job;
         std::vector<std::function<void(bool)>> followers;
+        std::vector<std::function<void()>> follower_retryable_failures;
         uint64_t sequence{0};
         bool running{false};
         //! Once a full block joins a header-first replay, tip churn may no

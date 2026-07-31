@@ -35,6 +35,67 @@
 #include <utility>
 
 namespace matmul::v4::rc {
+
+namespace {
+std::atomic<RCExactReplayExecutionPolicy> g_exact_replay_execution_policy{
+    RCExactReplayExecutionPolicy::AutoFallback};
+std::mutex g_last_exact_replay_mutex;
+std::optional<ExactReplayVerifyResult> g_last_exact_replay;
+} // namespace
+
+void SetRCExactReplayExecutionPolicy(RCExactReplayExecutionPolicy policy)
+{
+    g_exact_replay_execution_policy.store(policy, std::memory_order_release);
+}
+
+RCExactReplayExecutionPolicy GetRCExactReplayExecutionPolicy()
+{
+    return g_exact_replay_execution_policy.load(std::memory_order_acquire);
+}
+
+const char* RCExactReplayExecutionPolicyName(
+    RCExactReplayExecutionPolicy policy)
+{
+    switch (policy) {
+    case RCExactReplayExecutionPolicy::StrictDevice:
+        return "strict-device";
+    case RCExactReplayExecutionPolicy::AutoFallback:
+        return "auto-fallback";
+    case RCExactReplayExecutionPolicy::CpuDiagnostic:
+        return "cpu-diagnostic";
+    }
+    return "unknown";
+}
+
+const char* ExactReplayVerifyOutcomeName(
+    ExactReplayVerifyOutcome outcome)
+{
+    switch (outcome) {
+    case ExactReplayVerifyOutcome::Valid:
+        return "valid";
+    case ExactReplayVerifyOutcome::InvalidConsensus:
+        return "invalid-consensus";
+    case ExactReplayVerifyOutcome::LocalAcceleratorFailure:
+        return "local-accelerator-failure";
+    case ExactReplayVerifyOutcome::Cancelled:
+        return "cancelled";
+    }
+    return "unknown";
+}
+
+std::optional<ExactReplayVerifyResult>
+GetLastExactReplayVerifyResult()
+{
+    std::lock_guard<std::mutex> lock{g_last_exact_replay_mutex};
+    return g_last_exact_replay;
+}
+
+void ResetLastExactReplayVerifyResultForTest()
+{
+    std::lock_guard<std::mutex> lock{g_last_exact_replay_mutex};
+    g_last_exact_replay.reset();
+}
+
 namespace {
 
 using gkr_field::Add;
@@ -4527,6 +4588,10 @@ ExactReplayVerifyResult VerifyBoundedExactReplayImpl(
 {
     g_exact_replay_invoke_count.fetch_add(1, std::memory_order_relaxed);
     ExactReplayVerifyResult out;
+    out.require_device = acceleration.require_device;
+    out.execution_policy = acceleration.require_device
+        ? RCExactReplayExecutionPolicy::StrictDevice
+        : GetRCExactReplayExecutionPolicy();
     const size_t rss0 = CurrentRssKiB();
     const auto t0 = std::chrono::steady_clock::now();
     RCExactReplayAccelerationStats acceleration_stats;
@@ -4545,9 +4610,34 @@ ExactReplayVerifyResult VerifyBoundedExactReplayImpl(
     out.cpu_gemm_calls = acceleration_stats.cpu_calls;
     out.cpu_gemm_fallbacks = acceleration_stats.cpu_fallbacks;
     out.acceleration_failure = acceleration_stats.first_failure;
+    if (ExactReplayCancellationRequested()) {
+        out.ok = false;
+        out.outcome = ExactReplayVerifyOutcome::Cancelled;
+        out.note = "ExactReplay: cancelled";
+        return out;
+    }
     if (out.digest.IsNull()) {
         out.ok = false;
-        out.note = "ExactReplay: null digest";
+        out.outcome = ExactReplayVerifyOutcome::LocalAcceleratorFailure;
+        if (out.acceleration_failure.empty()) {
+            out.acceleration_failure = acceleration.require_device
+                ? "strict_device_replay_returned_null_digest"
+                : "local_replay_returned_null_digest";
+        }
+        out.note = "ExactReplay: local execution failed";
+        return out;
+    }
+    if (acceleration.require_device &&
+        (!out.fully_accelerated || out.cpu_gemm_calls != 0 ||
+         out.cpu_gemm_fallbacks != 0)) {
+        out.ok = false;
+        out.outcome = ExactReplayVerifyOutcome::LocalAcceleratorFailure;
+        if (out.acceleration_failure.empty()) {
+            out.acceleration_failure =
+                "strict_device_zero_fallback_coverage_failed";
+        }
+        out.note =
+            "ExactReplay: strict device coverage incomplete";
         return out;
     }
     // F4: mirror coupled path — null committed digest is an unconditional REJECT
@@ -4559,6 +4649,7 @@ ExactReplayVerifyResult VerifyBoundedExactReplayImpl(
         // already charged the candidate and the retry prevents a transient
         // GPU/driver fault from becoming a consensus split.
         if (!header.matmul_digest.IsNull() &&
+            !acceleration.require_device &&
             acceleration_stats.device_calls != 0) {
             out.device_mismatch_retried = true;
             RCExactReplayAccelerationStats retry_stats;
@@ -4596,20 +4687,39 @@ ExactReplayVerifyResult VerifyBoundedExactReplayImpl(
             out.digest == header.matmul_digest) {
             // Continue to the target check using the portable retry.
         } else {
-        out.ok = false;
-        out.note = header.matmul_digest.IsNull() ? "ExactReplay: null header.matmul_digest"
-            : (out.device_mismatch_confirmed
-                   ? "ExactReplay: device mismatch confirmed by portable retry"
-                   : "ExactReplay: digest mismatch vs header.matmul_digest");
-        return out;
+            out.ok = false;
+            if (!header.matmul_digest.IsNull() &&
+                acceleration.require_device &&
+                acceleration_stats.device_calls != 0) {
+                // A sole device disagreement cannot create a peer-invalid
+                // verdict. Strict production quarantines/repairs the local
+                // provider out of band and leaves this block retryable.
+                out.outcome =
+                    ExactReplayVerifyOutcome::LocalAcceleratorFailure;
+                out.acceleration_failure =
+                    "device_digest_mismatch_unconfirmed";
+                out.note =
+                    "ExactReplay: device digest mismatch; portable retry disabled in strict mode";
+            } else {
+                out.outcome =
+                    ExactReplayVerifyOutcome::InvalidConsensus;
+                out.note = header.matmul_digest.IsNull()
+                    ? "ExactReplay: null header.matmul_digest"
+                    : (out.device_mismatch_confirmed
+                           ? "ExactReplay: device mismatch confirmed by portable retry"
+                           : "ExactReplay: digest mismatch vs header.matmul_digest");
+            }
+            return out;
         }
     }
     if (target && UintToArith256(out.digest) > *target) {
         out.ok = false;
+        out.outcome = ExactReplayVerifyOutcome::InvalidConsensus;
         out.note = "ExactReplay: digest over target";
         return out;
     }
     out.ok = true;
+    out.outcome = ExactReplayVerifyOutcome::Valid;
     out.note = out.full_metal_pipeline
         ? "VerifyBoundedExactReplay eps=0 (self-qualified full Metal pipeline)"
         : out.fully_accelerated
@@ -4626,17 +4736,41 @@ ExactReplayVerifyResult VerifyBoundedExactReplay(
     int32_t height,
     const arith_uint256* target)
 {
-    const auto resolved{
+    const RCExactReplayExecutionPolicy policy{
+        GetRCExactReplayExecutionPolicy()};
+    auto resolved{
         matmul_v4::accel::ResolveExactGemmBackendForRC()};
     RCExactReplayAcceleration acceleration;
-    acceleration.gemm = resolved.backend;
-    acceleration.backend = resolved.provider;
-    // Consensus-neutral failover: an unavailable accelerator is not a
-    // consensus failure.
-    acceleration.require_device = false;
+    if (policy == RCExactReplayExecutionPolicy::CpuDiagnostic) {
+        acceleration.backend = "cpu_diagnostic";
+    } else {
+        acceleration.gemm = resolved.backend;
+        acceleration.backend = resolved.provider;
+    }
+    acceleration.require_device =
+        policy == RCExactReplayExecutionPolicy::StrictDevice;
+    if (acceleration.require_device &&
+        !resolved.production_eligible) {
+        // Correctness-qualified experimental providers remain available via
+        // explicit measurement modes, but cannot silently satisfy strict
+        // production validation.
+        acceleration.gemm = {};
+        acceleration.backend = resolved.provider +
+            "_not_production_eligible";
+    }
     acceleration.output_row_tile = 256;
-    return VerifyBoundedExactReplayImpl(
-        header, params, height, target, std::move(acceleration));
+    auto result{VerifyBoundedExactReplayImpl(
+        header, params, height, target, std::move(acceleration))};
+    result.execution_policy = policy;
+    result.require_device =
+        policy == RCExactReplayExecutionPolicy::StrictDevice;
+    result.acceleration_resolution_reason = resolved.reason;
+    {
+        std::lock_guard<std::mutex> lock{
+            g_last_exact_replay_mutex};
+        g_last_exact_replay = result;
+    }
+    return result;
 }
 
 ExactReplayVerifyResult VerifyBoundedExactReplayWithAccelerationForTest(
