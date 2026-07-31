@@ -23,12 +23,19 @@ contrib/matmul-v4/run-full-benchmark.py --shape production --episodes 100 \
 
 # historical Profile-2/proof-development measurement
 contrib/matmul-v4/run-full-benchmark.py --shape profile2-production \
-  --json profile2.json
+  --backend cuda --json profile2.json
 ```
 
 It auto-locates `matmul-v4-rc-harness` under `build*/`. Pass `--harness PATH` to
 point at a specific binary. Even with no binary built, it still prints the
 hardware analysis and the optimized/fallback backend map.
+
+Production shapes require an explicit backend. This prevents `auto` from
+silently starting a multi-hour serial-CPU campaign. Use `--backend cpu` for a
+deliberate reference measurement, or `--allow-production-cpu-auto` when testing
+automatic resolution itself. The wrapper exits nonzero for invocation errors,
+timeouts, harness failures, malformed/incomplete reports, or a failed
+self-qualification, and writes `--json` only after the report passes validation.
 
 ## What it tells you
 

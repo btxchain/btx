@@ -768,11 +768,14 @@ ResolvedRCExactGemm ResolveExactGemmBackendForRC()
     // An unset request means the process default ("auto"), not CPU.
     out.device_requested = requested != "cpu";
 
-    // Prefer the genuinely native tensor lane (Ozaki MXFP4/FP8) first, UNLESS the
-    // operator forced the portable dense-INT8 path. A5/F12: run once-only native
-    // qualification BEFORE consulting the latch so a fresh process can still select
-    // the qualified lane.
-    if (policy != RCAccelerationPolicy::PortableExplicit) {
+    // Native MXFP4/Ozaki is a correctness-qualified experimental measurement
+    // lane. Correctness alone does not make it production-viable for Profile 1:
+    // its exact base-4 reconstruction can be substantially slower than dense
+    // INT8 on the same device. Only the explicit NativeRequired policy selects
+    // it. The automatic production policy proceeds directly to dense INT8.
+    if (policy == RCAccelerationPolicy::NativeRequired ||
+        (policy == RCAccelerationPolicy::ProductionPreferred &&
+         matmul::v4::rc::kRcOzakiMxfp4ProductionEligible)) {
         (void)matmul::v4::rc::SelfQualifyRcOzakiMxfp4Once();
         if (matmul::v4::rc::IsRcOzakiMxfp4Qualified()) {
             matmul::v4::lt::ExactGemmBackend native;
@@ -783,6 +786,10 @@ ResolvedRCExactGemm ResolveExactGemmBackendForRC()
                 GateExactGemmWithRCSelfQualCached(native, "rc_ozaki_mxfp4", /*epoch=*/-1);
             out.provider = out.backend.gemm_s8s8 != nullptr ? "rc_ozaki_mxfp4" : "cpu";
             out.self_qualified = out.backend.gemm_s8s8 != nullptr;
+            out.production_eligible =
+                out.self_qualified &&
+                policy == RCAccelerationPolicy::ProductionPreferred &&
+                matmul::v4::rc::kRcOzakiMxfp4ProductionEligible;
             out.reason = out.self_qualified ? "native_rc_ozaki_self_qualified"
                                             : "native_rc_ozaki_self_qual_failed";
             return out;
@@ -856,8 +863,8 @@ ResolvedRCExactGemm ResolveExactGemmBackendForRC()
         return out;
     }
 
-    // NativePreferred (default) or PortableExplicit: use the best exact-gated dense
-    // device path (CUDA IMMA / HIP MFMA / Metal tensor / Ascend Cube). The
+    // ProductionPreferred (default) or PortableExplicit: use the exact-gated
+    // dense device path (CUDA IMMA / HIP MFMA / Metal tensor / Ascend Cube). The
     // GateExactGemmWithRCSelfQualCached wrapper is the bit-exact self-qual: a device
     // that is not byte-identical to the int64 oracle is declined here and falls
     // through to the CPU ExactGemm — so mining engages on any proven-exact device
@@ -884,6 +891,7 @@ ResolvedRCExactGemm ResolveExactGemmBackendForRC()
     out.backend =
         GateExactGemmWithRCSelfQualCached(backend, provider_label.c_str(), /*epoch=*/-1);
     out.self_qualified = out.backend.gemm_s8s8 != nullptr;
+    out.production_eligible = out.self_qualified;
     out.provider = out.self_qualified ? provider_label : "cpu";
     if (out.self_qualified && out.backend.rc_fused_ffn != nullptr) {
         out.provider += "_fused_extract";
