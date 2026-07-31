@@ -996,7 +996,24 @@ struct ExactReplayVerifyResult {
     uint64_t cpu_gemm_fallbacks{0};
     std::string acceleration_failure;
     std::string acceleration_resolution_reason;
+    bool provider_quarantined{false};
+    std::string provider_health_reason;
+    std::string operator_recovery;
     std::string note;
+};
+
+/** Runtime health of the strict ExactReplay provider.
+ *
+ * A device disagreement or in-flight provider failure is local, never a peer
+ * verdict. The affected provider is quarantined for the process lifetime;
+ * operators recover by selecting another qualified provider or restarting
+ * after repairing/resetting the device. */
+struct RCExactReplayProviderHealth {
+    bool quarantined{false};
+    uint64_t quarantine_events{0};
+    std::string provider;
+    std::string reason;
+    std::string operator_recovery;
 };
 
 /** Process startup configuration. Set before validation workers start. */
@@ -1010,6 +1027,9 @@ void SetRCExactReplayExecutionPolicy(RCExactReplayExecutionPolicy policy);
 [[nodiscard]] std::optional<ExactReplayVerifyResult>
 GetLastExactReplayVerifyResult();
 void ResetLastExactReplayVerifyResultForTest();
+[[nodiscard]] RCExactReplayProviderHealth
+GetRCExactReplayProviderHealth();
+void ResetRCExactReplayProviderHealthForTest();
 
 struct RCProdVerifyResult {
     bool ok{false};

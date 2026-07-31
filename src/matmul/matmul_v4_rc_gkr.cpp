@@ -41,6 +41,49 @@ std::atomic<RCExactReplayExecutionPolicy> g_exact_replay_execution_policy{
     RCExactReplayExecutionPolicy::AutoFallback};
 std::mutex g_last_exact_replay_mutex;
 std::optional<ExactReplayVerifyResult> g_last_exact_replay;
+std::mutex g_exact_replay_provider_health_mutex;
+RCExactReplayProviderHealth g_exact_replay_provider_health;
+std::map<std::string, RCExactReplayProviderHealth>
+    g_exact_replay_provider_quarantines;
+
+constexpr const char* PROVIDER_RECOVERY_ACTION{
+    "repair/reset the accelerator and restart btxd, or restart with a different qualified provider; never invalidate or punish the announcing peer"};
+
+bool IsProviderQuarantined(const std::string& provider,
+                           RCExactReplayProviderHealth* health = nullptr)
+{
+    std::lock_guard<std::mutex> lock{
+        g_exact_replay_provider_health_mutex};
+    const auto it{
+        g_exact_replay_provider_quarantines.find(provider)};
+    if (it == g_exact_replay_provider_quarantines.end()) {
+        return false;
+    }
+    if (health != nullptr) *health = it->second;
+    return it->second.quarantined;
+}
+
+void QuarantineProvider(const std::string& provider,
+                        const std::string& reason)
+{
+    {
+        std::lock_guard<std::mutex> lock{
+            g_exact_replay_provider_health_mutex};
+        auto& provider_health{
+            g_exact_replay_provider_quarantines[provider]};
+        ++provider_health.quarantine_events;
+        provider_health.quarantined = true;
+        provider_health.provider = provider;
+        provider_health.reason = reason;
+        provider_health.operator_recovery =
+            PROVIDER_RECOVERY_ACTION;
+        g_exact_replay_provider_health = provider_health;
+    }
+    LogWarning(
+        "MatMul Profile-1 provider quarantined: provider=%s "
+        "reason=%s; recovery=%s\n",
+        provider, reason, PROVIDER_RECOVERY_ACTION);
+}
 } // namespace
 
 void SetRCExactReplayExecutionPolicy(RCExactReplayExecutionPolicy policy)
@@ -94,6 +137,21 @@ void ResetLastExactReplayVerifyResultForTest()
 {
     std::lock_guard<std::mutex> lock{g_last_exact_replay_mutex};
     g_last_exact_replay.reset();
+}
+
+RCExactReplayProviderHealth GetRCExactReplayProviderHealth()
+{
+    std::lock_guard<std::mutex> lock{
+        g_exact_replay_provider_health_mutex};
+    return g_exact_replay_provider_health;
+}
+
+void ResetRCExactReplayProviderHealthForTest()
+{
+    std::lock_guard<std::mutex> lock{
+        g_exact_replay_provider_health_mutex};
+    g_exact_replay_provider_health = {};
+    g_exact_replay_provider_quarantines.clear();
 }
 
 namespace {
@@ -4740,6 +4798,32 @@ ExactReplayVerifyResult VerifyBoundedExactReplay(
         GetRCExactReplayExecutionPolicy()};
     auto resolved{
         matmul_v4::accel::ResolveExactGemmBackendForRC()};
+    if (policy == RCExactReplayExecutionPolicy::StrictDevice) {
+        RCExactReplayProviderHealth health;
+        if (IsProviderQuarantined(resolved.provider, &health)) {
+            ExactReplayVerifyResult result;
+            result.ok = false;
+            result.outcome =
+                ExactReplayVerifyOutcome::LocalAcceleratorFailure;
+            result.execution_policy = policy;
+            result.require_device = true;
+            result.acceleration_backend = resolved.provider;
+            result.acceleration_failure =
+                "strict_device_provider_quarantined";
+            result.acceleration_resolution_reason = resolved.reason;
+            result.provider_quarantined = true;
+            result.provider_health_reason = health.reason;
+            result.operator_recovery = health.operator_recovery;
+            result.note =
+                "ExactReplay: local provider quarantined; block remains retryable";
+            {
+                std::lock_guard<std::mutex> lock{
+                    g_last_exact_replay_mutex};
+                g_last_exact_replay = result;
+            }
+            return result;
+        }
+    }
     RCExactReplayAcceleration acceleration;
     if (policy == RCExactReplayExecutionPolicy::CpuDiagnostic) {
         acceleration.backend = "cpu_diagnostic";
@@ -4765,6 +4849,21 @@ ExactReplayVerifyResult VerifyBoundedExactReplay(
     result.require_device =
         policy == RCExactReplayExecutionPolicy::StrictDevice;
     result.acceleration_resolution_reason = resolved.reason;
+    if (policy == RCExactReplayExecutionPolicy::StrictDevice &&
+        result.outcome ==
+            ExactReplayVerifyOutcome::LocalAcceleratorFailure &&
+        result.device_gemm_calls != 0) {
+        const std::string reason{
+            result.acceleration_failure.empty()
+                ? "strict_device_inflight_failure"
+                : result.acceleration_failure};
+        QuarantineProvider(resolved.provider, reason);
+        result.provider_quarantined = true;
+        result.provider_health_reason = reason;
+        result.operator_recovery = PROVIDER_RECOVERY_ACTION;
+        result.note +=
+            "; provider quarantined, block remains retryable";
+    }
     {
         std::lock_guard<std::mutex> lock{
             g_last_exact_replay_mutex};
@@ -4780,8 +4879,45 @@ ExactReplayVerifyResult VerifyBoundedExactReplayWithAccelerationForTest(
     const RCExactReplayAcceleration& acceleration,
     const arith_uint256* target)
 {
-    return VerifyBoundedExactReplayImpl(
-        header, params, height, target, acceleration);
+    if (acceleration.require_device) {
+        RCExactReplayProviderHealth health;
+        if (IsProviderQuarantined(acceleration.backend, &health)) {
+            ExactReplayVerifyResult result;
+            result.ok = false;
+            result.outcome =
+                ExactReplayVerifyOutcome::LocalAcceleratorFailure;
+            result.execution_policy =
+                RCExactReplayExecutionPolicy::StrictDevice;
+            result.require_device = true;
+            result.acceleration_backend = acceleration.backend;
+            result.acceleration_failure =
+                "strict_device_provider_quarantined";
+            result.provider_quarantined = true;
+            result.provider_health_reason = health.reason;
+            result.operator_recovery = health.operator_recovery;
+            result.note =
+                "ExactReplay: local provider quarantined; block remains retryable";
+            return result;
+        }
+    }
+    auto result{VerifyBoundedExactReplayImpl(
+        header, params, height, target, acceleration)};
+    if (acceleration.require_device &&
+        result.outcome ==
+            ExactReplayVerifyOutcome::LocalAcceleratorFailure &&
+        result.device_gemm_calls != 0) {
+        const std::string reason{
+            result.acceleration_failure.empty()
+                ? "strict_device_inflight_failure"
+                : result.acceleration_failure};
+        QuarantineProvider(acceleration.backend, reason);
+        result.provider_quarantined = true;
+        result.provider_health_reason = reason;
+        result.operator_recovery = PROVIDER_RECOVERY_ACTION;
+        result.note +=
+            "; provider quarantined, block remains retryable";
+    }
+    return result;
 }
 
 RCProdVerifyResult VerifyRCWinnerOrExactReplay(const CBlockHeader& header,

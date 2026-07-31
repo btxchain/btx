@@ -615,8 +615,11 @@ struct RCMerkleProof {
     const std::atomic_bool* cancelled = nullptr,
     const std::atomic_bool* secondary_cancelled = nullptr);
 
-/** Miner entry: same digest as the CPU reference. May inject ExactGemmBackend
- *  after RC self-qualification (fail-closed → empty backend = CPU). */
+/** Portable/diagnostic miner entry: same digest as the CPU reference.
+ *  May inject ExactGemmBackend after RC self-qualification (fail-closed →
+ *  empty backend = CPU). Production Profile 1 candidate mining and winner
+ *  reseal do not use this fallback-capable entry; they use the strict-device
+ *  functions above. */
 [[nodiscard]] uint256 MineRCEpisode(const CBlockHeader& header, const RCEpisodeParams& params,
                                     int32_t height,
                                     std::vector<RCRoundTranscript>* out_rounds = nullptr,
