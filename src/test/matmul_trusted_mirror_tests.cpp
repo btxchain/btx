@@ -4,6 +4,7 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <key_io.h>
 #include <matmul/trusted_exact_replay_attestation.h>
 #include <node/matmul_trusted_attestations.h>
 #include <test/util/setup_common.h>
@@ -130,6 +131,31 @@ BOOST_AUTO_TEST_CASE(local_signer_and_expected_context)
     BOOST_CHECK(node::matmul_trusted::Add(
                     produced, Hex256('5'), 9) ==
                 matmul::trusted::AddResult::WrongBlock);
+}
+
+BOOST_AUTO_TEST_CASE(staged_signer_finalizes_after_ecc_and_resets_cleanly)
+{
+    RuntimeReset reset;
+    const CKey signer{NewKey()};
+    matmul::trusted::StoreConfig config;
+    config.chain_id = Hex256('6');
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    std::string error;
+
+    BOOST_REQUIRE(node::matmul_trusted::StageConfiguration(
+        std::move(config), EncodeSecret(signer),
+        /*trusted_mirror=*/false, /*serve=*/true,
+        std::chrono::milliseconds{10}, error));
+    BOOST_CHECK(!node::matmul_trusted::IsConfigured());
+    BOOST_REQUIRE(node::matmul_trusted::FinalizeConfiguration(error));
+    BOOST_CHECK(node::matmul_trusted::IsConfigured());
+    BOOST_CHECK(node::matmul_trusted::HasLocalSigner());
+    BOOST_CHECK(node::matmul_trusted::ServesAttestations());
+
+    node::matmul_trusted::ResetForTest();
+    BOOST_CHECK(!node::matmul_trusted::IsConfigured());
+    BOOST_CHECK(!node::matmul_trusted::HasLocalSigner());
 }
 
 BOOST_AUTO_TEST_SUITE_END()

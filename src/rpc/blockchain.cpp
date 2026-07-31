@@ -1896,7 +1896,7 @@ RPCHelpMan getblockchaininfo()
                 {RPCResult::Type::NUM_TIME, "mediantime", "The median block time expressed in " + UNIX_EPOCH_TIME},
                 {RPCResult::Type::NUM, "verificationprogress", "estimate of verification progress [0..1]"},
                 {RPCResult::Type::BOOL, "initialblockdownload", "(debug information) estimate of whether this node is in Initial Block Download mode"},
-                {RPCResult::Type::STR, "matmulvalidationmode", "MatMul validation tier mode: consensus (full node), economic (Phase 1 only), or spv"},
+                {RPCResult::Type::STR, "matmulvalidationmode", "MatMul validation tier mode: consensus (independent full node), trusted (operator-trusted signed-quorum mirror), economic (Phase 1 only), or spv"},
                 {RPCResult::Type::STR_HEX, "chainwork", "total amount of work in active chain, in hexadecimal"},
                 {RPCResult::Type::NUM, "size_on_disk", "the estimated size of the block and undo files on disk"},
                 {RPCResult::Type::BOOL, "pruned", "if the blocks are subject to pruning"},

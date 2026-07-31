@@ -10247,7 +10247,7 @@ bool ChainstateManager::PersistMatMulExactReplayVerdict(
     CacheMatMulEncDrVerdict(block_hash, true);
     if (GetMatMulValidationMode() ==
             kernel::MatMulValidationMode::CONSENSUS &&
-        GetConsensus().IsMatMulRCActive(index->nHeight) &&
+        GetConsensus().IsMatMulRCProfile1Active(index->nHeight) &&
         !GetConsensus().IsMatMulRCCoupledActive(
             index->nHeight) &&
         node::matmul_trusted::HasLocalSigner()) {
@@ -10331,8 +10331,17 @@ ChainstateManager::ClassifyMatMulEncDrRecompute(const CBlock& block,
         // a re-delivered bad block would be enqueued and fully re-recomputed on EVERY
         // delivery (DoS). Route it synchronous — it fails cheaply, no worker slot spent.
         if (existing->nStatus & BLOCK_FAILED_MASK) return std::nullopt;
-        // Assumevalid-buried: the seam skips the recompute entirely.
-        if (IsMatMulRecomputeAssumeValidTrusted(existing, nHeight)) {
+        // Assumevalid-buried: independent validators may use the historical
+        // recompute shortcut. A Profile-1 trusted mirror must still obtain its
+        // current configured signature quorum; generic assumevalid is not a
+        // substitute for that explicit operator trust policy.
+        const bool trusted_profile1{
+            GetMatMulValidationMode() ==
+                kernel::MatMulValidationMode::TRUSTED &&
+            params.IsMatMulRCProfile1Active(nHeight) &&
+            !params.IsMatMulRCCoupledActive(nHeight)};
+        if (!trusted_profile1 &&
+            IsMatMulRecomputeAssumeValidTrusted(existing, nHeight)) {
             if (assumevalid_trusted != nullptr) *assumevalid_trusted = true;
             return std::nullopt;
         }
@@ -10429,6 +10438,12 @@ bool ChainstateManager::CheckMatMulBlockAdmissionPreconditions(
     return true;
 }
 
+enum class MatMulRCAuthorityProvenance {
+    NONE,
+    LOCAL_EXACT_REPLAY,
+    TRUSTED_SIGNER_QUORUM,
+};
+
 /** NOTE: This function is not currently invoked by ConnectBlock(), so we
  *  should consider upgrade issues if we change which consensus rules are
  *  enforced in this function (eg by adding a new consensus rule). See comment
@@ -10450,9 +10465,13 @@ static bool ContextualCheckBlock(const CBlock& block,
                                  // concurrent thread must not be possible. Holding cs_main across
                                  // the recompute is harmless there (not the hot path, and its
                                  // fCheckPOW=true callers are single-threaded).
-                                 bool may_release_cs_main = true) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+                                 bool may_release_cs_main = true,
+                                 MatMulRCAuthorityProvenance* rc_authority = nullptr) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
 {
     AssertLockHeld(::cs_main);
+    if (rc_authority != nullptr) {
+        *rc_authority = MatMulRCAuthorityProvenance::NONE;
+    }
     if (pindexPrev != nullptr && pindexPrev->nHeight == std::numeric_limits<int>::max()) {
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-blk-height-overflow", "block height overflow");
     }
@@ -10581,8 +10600,14 @@ static bool ContextualCheckBlock(const CBlock& block,
             // (Predicate factored to ChainstateManager::IsMatMulRecomputeAssumeValidTrusted
             // so the WP-7 async-verify dispatcher and the WP-8 sketch-prefetch
             // guard share this single implementation; behavior unchanged.)
+            const bool trusted_profile1{
+                chainman.GetMatMulValidationMode() ==
+                    kernel::MatMulValidationMode::TRUSTED &&
+                consensusParams.IsMatMulRCProfile1Active(nHeight) &&
+                !consensusParams.IsMatMulRCCoupledActive(nHeight)};
             const bool recompute_assumevalid_trusted =
-                chainman.IsMatMulRecomputeAssumeValidTrusted(
+                !trusted_profile1 &&
+                (chainman.IsMatMulRecomputeAssumeValidTrusted(
                     chainman.m_blockman.LookupBlockIndex(block.GetHash()), nHeight) ||
                 // P2P admission may have made the same trust decision under
                 // cs_main immediately before this call. Keep that decision
@@ -10590,7 +10615,7 @@ static bool ContextualCheckBlock(const CBlock& block,
                 // branch change cannot turn the cheap path into an unbudgeted
                 // recomputation. The pin is not an exact-verdict memo and is
                 // released as soon as this validation re-entry completes.
-                IsMatMulEncDrAssumeValidTrustPinned(block.GetHash());
+                IsMatMulEncDrAssumeValidTrustPinned(block.GetHash()));
             // (3) Above assumevalid (or -assumevalid=0): decide the §4.1
             // predicate. Any failure is a header-level PERMANENT consensus
             // fault: with an empty body there are no proof bytes to mutate, so
@@ -10612,7 +10637,9 @@ static bool ContextualCheckBlock(const CBlock& block,
                 std::string rc_execution_detail;
                 const auto check_rc = [&]() {
                     if (chainman.GetMatMulValidationMode() ==
-                        kernel::MatMulValidationMode::TRUSTED) {
+                            kernel::MatMulValidationMode::TRUSTED &&
+                        consensusParams.IsMatMulRCProfile1Active(
+                            nHeight)) {
                         matmul::trusted::WaitResult wait{
                             matmul::trusted::WaitResult::Timeout};
                         if (may_release_cs_main) {
@@ -10632,6 +10659,11 @@ static bool ContextualCheckBlock(const CBlock& block,
                         if (!rc_local_execution_failure) {
                             CacheMatMulEncDrVerdict(
                                 block.GetHash(), true);
+                            if (rc_authority != nullptr) {
+                                *rc_authority =
+                                    MatMulRCAuthorityProvenance::
+                                        TRUSTED_SIGNER_QUORUM;
+                            }
                         } else {
                             rc_execution_detail = strprintf(
                                 "trusted attestation quorum %s",
@@ -10651,14 +10683,26 @@ static bool ContextualCheckBlock(const CBlock& block,
                                 LOCAL_ACCELERATOR_FAILURE ||
                         outcome ==
                             MatMulRCValidationOutcome::CANCELLED;
-                    return outcome ==
-                        MatMulRCValidationOutcome::VALID;
+                    const bool valid{
+                        outcome ==
+                        MatMulRCValidationOutcome::VALID};
+                    if (valid && rc_authority != nullptr) {
+                        *rc_authority =
+                            MatMulRCAuthorityProvenance::
+                                LOCAL_EXACT_REPLAY;
+                    }
+                    return valid;
                 };
                 const CBlockIndex* exact_index{
                     chainman.m_blockman.LookupBlockIndex(block.GetHash())};
                 if (exact_index != nullptr &&
                     (exact_index->nStatus & BLOCK_EXACT_REPLAY_VERIFIED)) {
                     encdr_ok = true;
+                    if (rc_authority != nullptr) {
+                        *rc_authority =
+                            MatMulRCAuthorityProvenance::
+                                LOCAL_EXACT_REPLAY;
+                    }
                 } else if (const auto memo{LookupMatMulEncDrVerdict(block.GetHash())}) {
                     // WP-7 / C5: the async verify worker (net_processing's
                     // node::MatMulVerifyWorker) already ran the pure ENC-DR
@@ -10671,6 +10715,16 @@ static bool ContextualCheckBlock(const CBlock& block,
                     // when the 8-entry sketch cache already evicted the entry
                     // or the block is INVALID (nothing was ever cached).
                     encdr_ok = *memo;
+                    if (encdr_ok && rc_authority != nullptr &&
+                        consensusParams.IsMatMulRCActive(nHeight) &&
+                        !consensusParams.IsMatMulRCCoupledActive(
+                            nHeight)) {
+                        *rc_authority = trusted_profile1
+                            ? MatMulRCAuthorityProvenance::
+                                  TRUSTED_SIGNER_QUORUM
+                            : MatMulRCAuthorityProvenance::
+                                  LOCAL_EXACT_REPLAY;
+                    }
                 } else if (may_release_cs_main) {
                     CsMainScopedRelease release_cs_main_for_recompute;
                     // DO NOT add cs_main-requiring code in this scope: TSA still
@@ -11068,9 +11122,14 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
     }
 
     const CChainParams& params{GetParams()};
+    MatMulRCAuthorityProvenance rc_authority{
+        MatMulRCAuthorityProvenance::NONE};
 
     if (!CheckBlock(block, state, params.GetConsensus()) ||
-        !ContextualCheckBlock(block, state, *this, pindex->pprev)) {
+        !ContextualCheckBlock(block, state, *this, pindex->pprev,
+                              /*fCheckPOW=*/true,
+                              /*may_release_cs_main=*/true,
+                              &rc_authority)) {
         if (state.IsInvalid() && state.GetResult() != BlockValidationResult::BLOCK_MUTATED) {
             pindex->nStatus |= BLOCK_FAILED_VALID;
             m_blockman.m_dirty_blockindex.insert(pindex);
@@ -11079,22 +11138,18 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
         return false;
     }
 
-    if (params.GetConsensus().IsMatMulRCActive(pindex->nHeight) &&
-        !params.GetConsensus().IsMatMulRCCoupledActive(
-            pindex->nHeight)) {
-        // ContextualCheckBlock just consumed either this process's exact
-        // authority or a current-config signed quorum. Keep those statuses
-        // distinct. The trusted bit is audit-only and never recreates a memo.
-        if (GetMatMulValidationMode() ==
-            kernel::MatMulValidationMode::CONSENSUS) {
-            (void)PersistMatMulExactReplayVerdict(
-                pindex->GetBlockHash());
-        } else if (
-            GetMatMulValidationMode() ==
-            kernel::MatMulValidationMode::TRUSTED) {
-            (void)PersistMatMulTrustedReplayAttestation(
-                pindex->GetBlockHash());
-        }
+    // Persist only explicit authority provenance. In particular, a generic
+    // assumevalid skip must never create an exact-replay bit, a trusted audit
+    // bit, or an archive signature.
+    if (rc_authority ==
+        MatMulRCAuthorityProvenance::LOCAL_EXACT_REPLAY) {
+        (void)PersistMatMulExactReplayVerdict(
+            pindex->GetBlockHash());
+    } else if (
+        rc_authority ==
+        MatMulRCAuthorityProvenance::TRUSTED_SIGNER_QUORUM) {
+        (void)PersistMatMulTrustedReplayAttestation(
+            pindex->GetBlockHash());
     }
 
     // G.1 duplicate-processing guard: ContextualCheckBlock may have RELEASED

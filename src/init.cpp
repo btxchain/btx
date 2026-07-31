@@ -83,6 +83,7 @@
 #include <scheduler.h>
 #include <script/sigcache.h>
 #include <stats/stats.h>
+#include <support/cleanse.h>
 #include <sync.h>
 #include <torcontrol.h>
 #include <txdb.h>
@@ -447,6 +448,9 @@ void Shutdown(NodeContext& node)
     node.chainman.reset();
     node.validation_signals.reset();
     node.scheduler.reset();
+    // Release and cleanse the online attestation signing key while the
+    // process ECC and locked-memory runtimes are still alive.
+    node::matmul_trusted::Reset();
     node.ecc_context.reset();
     node.kernel.reset();
 
@@ -1096,6 +1100,22 @@ ServiceFlags g_local_services = ServiceFlags(NODE_NETWORK_LIMITED | NODE_WITNESS
 int64_t peer_connect_timeout;
 std::set<BlockFilterType> g_enabled_filter_types;
 
+class CleanseStringOnExit
+{
+public:
+    explicit CleanseStringOnExit(std::string& value) : m_value{value} {}
+    ~CleanseStringOnExit()
+    {
+        memory_cleanse(m_value.data(), m_value.size());
+    }
+
+    CleanseStringOnExit(const CleanseStringOnExit&) = delete;
+    CleanseStringOnExit& operator=(const CleanseStringOnExit&) = delete;
+
+private:
+    std::string& m_value;
+};
+
 } // namespace
 
 [[noreturn]] static void new_handler_terminate()
@@ -1276,6 +1296,10 @@ bool AppInitParameterInteraction(const ArgsManager& args)
     }
 
     const bool trusted_mirror_mode{matmul_validation_mode == "trusted"};
+    if (trusted_mirror_mode &&
+        chainparams.GetConsensus().nMatMulRCProfile != 1) {
+        return InitError(_("Trusted MatMul mirrors support only RC Profile 1 ExactReplay attestations; the configured network selects a different RC profile."));
+    }
     const auto trusted_key_args{args.GetArgs("-matmultrustedpubkey")};
     const auto signer_keyfile{
         args.GetPathArg("-matmulattestationsignerkeyfile", {})};
@@ -1297,8 +1321,8 @@ bool AppInitParameterInteraction(const ArgsManager& args)
         trusted_signers.push_back(pubkey);
     }
 
-    std::optional<CKey> local_attestation_signer;
     std::string signer_text;
+    CleanseStringOnExit cleanse_signer_text{signer_text};
     if (!signer_keyfile.empty()) {
         const fs::path path{
             AbsPathForConfigVal(args, signer_keyfile)};
@@ -1318,21 +1342,11 @@ bool AppInitParameterInteraction(const ArgsManager& args)
         signer_text = inline_signer;
         InitWarning(_("-matmulattestationsignerkey exposes an online signing key through process/config surfaces; use a permission-restricted -matmulattestationsignerkeyfile."));
     }
-    if (!signer_text.empty()) {
-        CKey key{DecodeSecret(signer_text)};
-        if (!key.IsValid() || !key.IsCompressed()) {
-            return InitError(_("Invalid compressed WIF in MatMul attestation signer configuration."));
-        }
-        const CPubKey local_pubkey{key.GetPubKey()};
-        if (std::find(trusted_signers.begin(), trusted_signers.end(),
-                      local_pubkey) == trusted_signers.end()) {
-            trusted_signers.push_back(local_pubkey);
-        }
-        local_attestation_signer = std::move(key);
-    }
+    const bool has_local_attestation_signer{!signer_text.empty()};
 
     const bool attestation_config_requested{
         trusted_mirror_mode || !trusted_signers.empty() ||
+        has_local_attestation_signer ||
         args.IsArgSet("-matmulattestationserve")};
     const int64_t trusted_threshold{
         args.GetIntArg("-matmultrustedthreshold", 1)};
@@ -1340,26 +1354,40 @@ bool AppInitParameterInteraction(const ArgsManager& args)
         args.GetIntArg("-matmultrustedwaitms", 30'000)};
     const bool serve_attestations{
         args.GetBoolArg("-matmulattestationserve",
-                        local_attestation_signer.has_value())};
+                        has_local_attestation_signer)};
+    if (matmul_validation_mode != "consensus" &&
+        has_local_attestation_signer) {
+        return InitError(_("Only an independent MatMul consensus validator can load an attestation signing key; remove -matmulattestationsignerkeyfile/-matmulattestationsignerkey from non-consensus nodes."));
+    }
+    if (matmul_validation_mode != "consensus" &&
+        serve_attestations) {
+        return InitError(_("Only an independent MatMul consensus validator can serve authoritative attestations. Set -matmulattestationserve=0 on non-consensus nodes."));
+    }
     if (attestation_config_requested) {
-        if (trusted_signers.empty()) {
+        if (trusted_signers.empty() &&
+            !has_local_attestation_signer) {
             return InitError(_("Trusted MatMul attestation operation requires at least one -matmultrustedpubkey or a local signer key."));
         }
+        const size_t preliminary_signer_capacity{
+            trusted_signers.size() +
+            (has_local_attestation_signer ? 1 : 0)};
         if (trusted_threshold < 1 ||
             static_cast<size_t>(trusted_threshold) >
-                trusted_signers.size()) {
-            return InitError(strprintf(
-                _("-matmultrustedthreshold must be between 1 and the %u distinct configured keys."),
-                trusted_signers.size()));
+                preliminary_signer_capacity) {
+            return InitError(_("-matmultrustedthreshold must be between 1 and the number of configured signer keys."));
         }
         matmul::trusted::StoreConfig config;
         config.chain_id = chainparams.GenesisBlock().GetHash();
         config.trusted_signers = trusted_signers;
         config.threshold = static_cast<size_t>(trusted_threshold);
-        config.local_signer = std::move(local_attestation_signer);
         std::string configure_error;
-        if (!node::matmul_trusted::Configure(
-                std::move(config), trusted_mirror_mode,
+        if (!node::matmul_trusted::StageConfiguration(
+                std::move(config),
+                has_local_attestation_signer
+                    ? std::optional<std::string>{
+                          std::move(signer_text)}
+                    : std::nullopt,
+                trusted_mirror_mode,
                 serve_attestations,
                 std::chrono::milliseconds{trusted_wait_ms},
                 configure_error)) {
@@ -1368,12 +1396,12 @@ bool AppInitParameterInteraction(const ArgsManager& args)
                 configure_error));
         }
     } else {
-        node::matmul_trusted::ResetForTest();
+        node::matmul_trusted::Reset();
     }
     if (trusted_mirror_mode) {
         InitWarning(strprintf(
-            _("TRUSTED MATMUL MIRROR ACTIVE: this node delegates Profile-1 ExactReplay to a %d-of-%d configured signer quorum. It validates block bodies and scripts but is not an independent full consensus validator."),
-            trusted_threshold, trusted_signers.size()));
+            _("TRUSTED MATMUL MIRROR ACTIVE: this node delegates Profile-1 ExactReplay to a configured threshold of %d signer(s). It validates block bodies and scripts but is not an independent full consensus validator."),
+            trusted_threshold));
     }
 
     const std::string rc_execution_mode{
@@ -1483,7 +1511,7 @@ bool AppInitParameterInteraction(const ArgsManager& args)
             return InitError(strprintf(_("Invalid -matmulvalidation value (%s). Valid values: consensus, trusted, economic, spv"), matmul_validation_mode));
         }
         if (serve_attestations &&
-            node::matmul_trusted::HasLocalSigner() &&
+            has_local_attestation_signer &&
             matmul_validation_mode == "consensus" &&
             rc_strict_device_ready) {
             services |= static_cast<uint64_t>(
@@ -2031,6 +2059,14 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
 {
     const ArgsManager& args = *Assert(node.args);
     const CChainParams& chainparams = Params();
+
+    std::string trusted_attestation_error;
+    if (!node::matmul_trusted::FinalizeConfiguration(
+            trusted_attestation_error)) {
+        return InitError(strprintf(
+            _("Invalid MatMul trusted-attestation configuration: %s"),
+            trusted_attestation_error));
+    }
 
     auto opt_max_upload = ParseByteUnits(args.GetArg("-maxuploadtarget", DEFAULT_MAX_UPLOAD_TARGET), ByteUnit::M);
     if (!opt_max_upload) {

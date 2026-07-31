@@ -7,6 +7,7 @@
 #include <streams.h>
 #include <test/util/setup_common.h>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <stdexcept>
@@ -275,19 +276,108 @@ BOOST_AUTO_TEST_CASE(capacity_eviction_and_expiry)
     const auto second_statement{MakeStatement(chain, second_block, 101)};
     BOOST_CHECK(store.Add(MustSign(second_statement, keys[0]),
                           second_block, 101) == AddResult::Accepted);
-    BOOST_CHECK(store.GetAttestations(first_block, 100).empty());
-    BOOST_CHECK_EQUAL(store.GetStats().evicted_blocks, 1);
+    BOOST_CHECK(store.HasQuorum(first_block, 100));
+    BOOST_CHECK_EQUAL(store.GetStats().evicted_blocks, 0);
+    BOOST_CHECK_EQUAL(store.GetStats().stored_blocks, 2);
+    BOOST_CHECK_EQUAL(store.GetStats().stored_attestations, 3);
     BOOST_CHECK_EQUAL(store.GetStats().capacity_rejections, 1);
 
     store.Erase(second_block, 101);
-    BOOST_CHECK_EQUAL(store.GetStats().stored_blocks, 0);
+    BOOST_CHECK_EQUAL(store.GetStats().stored_blocks, 1);
 
     BOOST_REQUIRE(store.Add(MustSign(second_statement, keys[0]),
                             second_block, 101) == AddResult::Accepted);
     std::this_thread::sleep_for(10ms);
     store.PruneExpired();
     BOOST_CHECK_EQUAL(store.GetStats().stored_blocks, 0);
-    BOOST_CHECK_EQUAL(store.GetStats().expired_blocks, 1);
+    BOOST_CHECK_EQUAL(store.GetStats().expired_blocks, 2);
+}
+
+BOOST_AUTO_TEST_CASE(minority_votes_cannot_evict_quorum)
+{
+    const auto keys{MakeKeys(2)};
+    const uint256 chain{TestHash(0x71)};
+    auto config{MakeConfig(chain, keys, 2)};
+    config.max_blocks = 2;
+    config.max_attestations = 4;
+    AttestationStore store{config};
+
+    const uint256 quorum_block{TestHash(0x72)};
+    const auto quorum_statement{
+        MakeStatement(chain, quorum_block, 200)};
+    BOOST_REQUIRE(store.Add(
+        MustSign(quorum_statement, keys[0]),
+        quorum_block, 200) == AddResult::Accepted);
+    BOOST_REQUIRE(store.Add(
+        MustSign(quorum_statement, keys[1]),
+        quorum_block, 200) == AddResult::Accepted);
+
+    const uint256 minority_a{TestHash(0x73)};
+    const uint256 minority_b{TestHash(0x74)};
+    BOOST_REQUIRE(store.Add(
+        MustSign(MakeStatement(chain, minority_a, 201), keys[0]),
+        minority_a, 201) == AddResult::Accepted);
+    BOOST_REQUIRE(store.Add(
+        MustSign(MakeStatement(chain, minority_b, 202), keys[0]),
+        minority_b, 202) == AddResult::Accepted);
+
+    BOOST_CHECK(store.HasQuorum(quorum_block, 200));
+    BOOST_CHECK(store.GetAttestations(minority_a, 201).empty());
+    BOOST_CHECK_EQUAL(
+        store.GetAttestations(minority_b, 202).size(), 1);
+    BOOST_CHECK_EQUAL(store.GetStats().evicted_blocks, 1);
+}
+
+BOOST_AUTO_TEST_CASE(sequential_quorums_advance_beyond_capacity)
+{
+    const auto keys{MakeKeys(2)};
+    const uint256 chain{TestHash(0x81)};
+    auto config{MakeConfig(chain, keys, 2)};
+    config.max_blocks = 2;
+    config.max_attestations = 4;
+    AttestationStore store{config};
+
+    constexpr int BLOCK_COUNT{6};
+    std::array<uint256, BLOCK_COUNT> blocks;
+    for (int i = 0; i < BLOCK_COUNT; ++i) {
+        blocks[i] = TestHash(0x82 + i);
+        const int32_t height{300 + i};
+        const auto statement{MakeStatement(chain, blocks[i], height)};
+
+        BOOST_REQUIRE(store.Add(
+            MustSign(statement, keys[0]),
+            blocks[i], height) == AddResult::Accepted);
+        if (i >= 2) {
+            // One bounded partial staging bucket may temporarily sit beside
+            // the full completed-quorum set.
+            const auto staged_stats{store.GetStats()};
+            BOOST_CHECK_EQUAL(staged_stats.stored_blocks, 3);
+            BOOST_CHECK_EQUAL(staged_stats.stored_attestations, 5);
+            BOOST_CHECK_EQUAL(staged_stats.blocks_with_quorum, 2);
+            BOOST_CHECK(store.HasQuorum(blocks[i - 1], height - 1));
+        }
+
+        BOOST_REQUIRE(store.Add(
+            MustSign(statement, keys[1]),
+            blocks[i], height) == AddResult::Accepted);
+        const auto completed_stats{store.GetStats()};
+        BOOST_CHECK_EQUAL(completed_stats.stored_blocks,
+                          std::min(i + 1, 2));
+        BOOST_CHECK_EQUAL(completed_stats.stored_attestations,
+                          2 * std::min(i + 1, 2));
+        BOOST_CHECK_EQUAL(completed_stats.blocks_with_quorum,
+                          std::min(i + 1, 2));
+        BOOST_CHECK(store.HasQuorum(blocks[i], height));
+        if (i >= 2) {
+            BOOST_CHECK(store.GetAttestations(
+                            blocks[i - 2], height - 2).empty());
+        }
+    }
+
+    const auto stats{store.GetStats()};
+    BOOST_CHECK_EQUAL(stats.evicted_blocks, BLOCK_COUNT - 2);
+    BOOST_CHECK_EQUAL(stats.capacity_rejections, 0);
+    BOOST_CHECK_EQUAL(stats.quorum_transitions, BLOCK_COUNT);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

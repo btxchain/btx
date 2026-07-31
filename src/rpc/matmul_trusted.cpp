@@ -56,7 +56,7 @@ std::optional<KnownAttestationBlock> LookupAttestationBlock(
         chainman.m_blockman.LookupBlockIndex(hash)};
     if (index == nullptr ||
         (index->nStatus & BLOCK_FAILED_MASK) ||
-        !chainman.GetConsensus().IsMatMulRCActive(
+        !chainman.GetConsensus().IsMatMulRCProfile1Active(
             index->nHeight) ||
         chainman.GetConsensus().IsMatMulRCCoupledActive(
             index->nHeight)) {
@@ -90,6 +90,10 @@ RPCHelpMan getmatmultrustedstatus()
                 {RPCResult::Type::NUM, "accepted", ""},
                 {RPCResult::Type::NUM, "duplicates", ""},
                 {RPCResult::Type::NUM, "rejected", ""},
+                {RPCResult::Type::NUM, "capacity_rejections", ""},
+                {RPCResult::Type::NUM, "evicted_blocks", ""},
+                {RPCResult::Type::NUM, "expired_blocks", ""},
+                {RPCResult::Type::NUM, "quorum_transitions", ""},
                 {RPCResult::Type::NUM, "wait_timeouts", ""},
                 {RPCResult::Type::STR, "warning", ""},
             }},
@@ -132,6 +136,14 @@ RPCHelpMan getmatmultrustedstatus()
             result.pushKV("accepted", stats.accepted);
             result.pushKV("duplicates", stats.duplicates);
             result.pushKV("rejected", stats.rejected);
+            result.pushKV(
+                "capacity_rejections",
+                stats.capacity_rejections);
+            result.pushKV("evicted_blocks", stats.evicted_blocks);
+            result.pushKV("expired_blocks", stats.expired_blocks);
+            result.pushKV(
+                "quorum_transitions",
+                stats.quorum_transitions);
             result.pushKV(
                 "wait_timeouts", stats.wait_timeouts);
             result.pushKV(

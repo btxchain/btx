@@ -1008,7 +1008,7 @@ static RPCHelpMan getnetworkinfo()
                         {
                             {RPCResult::Type::STR, "SERVICE_NAME", "the service name"},
                         }},
-                        {RPCResult::Type::STR, "matmulvalidationmode", "MatMul validation tier mode: consensus (full-node tier), economic (Phase 1 only), or spv"},
+                        {RPCResult::Type::STR, "matmulvalidationmode", "MatMul validation tier mode: consensus (independent full-node tier), trusted (operator-trusted signed-quorum mirror), economic (Phase 1 only), or spv"},
                         {RPCResult::Type::BOOL, "localrelay", "true if transaction relay is requested from peers"},
                         {RPCResult::Type::NUM, "timeoffset", "the time offset"},
                         {RPCResult::Type::NUM, "connections", "the total number of connections"},

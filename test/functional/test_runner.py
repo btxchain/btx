@@ -608,6 +608,7 @@ BTX_BASE_SCRIPTS = [
     'feature_matmul_drlt_activation.py',
     'feature_matmul_drlt_sealaspow.py',
     'feature_matmul_v47_epoch_a_activation.py',
+    'feature_matmul_trusted_mirrors.py',
     'feature_matmul_rc_activation.py',
     'feature_btx_multinode_genesis.py',
     'feature_shielded_v2_multinode_validation.py',

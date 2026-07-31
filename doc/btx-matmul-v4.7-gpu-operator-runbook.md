@@ -2,6 +2,9 @@
 
 Status: pre-activation; public RC activation remains disabled
 
+Canonical transition and activation policy:
+[`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md).
+
 ## Roles and policy
 
 Production Profile 1 mining requires a qualified device for both candidate

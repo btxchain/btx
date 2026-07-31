@@ -985,6 +985,14 @@ struct Params {
             && nMatMulRCHeight != std::numeric_limits<int32_t>::max()
             && height >= nMatMulRCHeight;
     }
+    /** True only for the Profile-1 ExactReplay regime whose result may be
+     *  delegated through operator-configured signed attestations. Profile 2
+     *  has a different authority path and must never consume a Profile-1
+     *  statement. */
+    bool IsMatMulRCProfile1Active(int32_t height) const
+    {
+        return IsMatMulRCActive(height) && nMatMulRCProfile == 1;
+    }
     /** True at and above the additive episode+coupled
      *  (ENC_RC_COUPLED) height. Requires the resident episode to be active:
      *  the composed lottery proves both work legs and a coupled-only regime

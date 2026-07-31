@@ -4,6 +4,9 @@ Date: 2026-07-31
 
 Status: implementation-only; public activation disabled
 
+Canonical transition and activation policy:
+[`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md).
+
 ## Boundary
 
 Profile 1 validity remains backend-neutral. A validator derives the same exact
