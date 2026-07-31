@@ -20,6 +20,9 @@ struct ResolvedRCExactGemm {
     std::string reason{"cpu_reference"};
     bool device_requested{false};
     bool self_qualified{false};
+    /** Separate from byte-exact self-qualification. True only for a device lane
+     *  admitted by the conservative automatic production policy. */
+    bool production_eligible{false};
 };
 
 /** Build an injectable ExactGemmBackend for MatExpand / LT mining. An explicit

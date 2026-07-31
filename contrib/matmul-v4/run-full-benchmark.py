@@ -22,7 +22,7 @@ orchestrates, labels, and explains.
 
 Usage:
     contrib/matmul-v4/run-full-benchmark.py [--harness PATH] [--shape SHAPE]
-                                            [--episodes N] [--backend auto|cpu]
+                                            [--episodes N] [--backend auto|cpu|DEVICE]
                                             [--json OUT.json] [--quick]
 
     --shape   toy | medium | production | profile1-production |
@@ -31,13 +31,14 @@ Usage:
     --quick   run only the toy shape as a fast sanity pass
     --harness path to matmul-v4-rc-harness (else auto-located under build*/)
 
-Exit status is 0 on a completed run, 2 if the harness could not be found (the
-hardware analysis and backend map are still printed so the report is useful even
-before you have built the binary).
+Exit status is 0 only after a completed, schema-valid, passing run. Production
+shapes require an explicit backend; ``--allow-production-cpu-auto`` is the
+deliberate opt-in for an ``auto`` run that may resolve to CPU.
 """
 
 import argparse
 import json
+import math
 import os
 import platform
 import re
@@ -45,6 +46,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 # --------------------------------------------------------------------------- #
 # Small terminal helpers (no external deps; degrade to plain text when piped). #
@@ -259,9 +261,9 @@ def gpu_backend_note(gpus, large_profile):
     else:
         regime = "Profile-1 ExactReplay accelerator"
     return (f"{g['name']} — {gib(g['vram_total'])} VRAM",
-            f"{regime}; native FP4/INT8 tensor path is attempted by default and "
-            f"self-qualifies byte-exact on real silicon (else falls back to INT8, "
-            f"reported by the harness as native_declined).")
+            f"{regime}; production defaults to exact-gated dense INT8. Native "
+            f"FP4/Ozaki is correctness-qualified but remains an explicit "
+            f"measurement mode until separately production-eligible.")
 
 
 # --------------------------------------------------------------------------- #
@@ -290,8 +292,22 @@ SHAPE_FLAGS = {
     "coupled-production": ["--coupled-production-v2"],
 }
 
+PRODUCTION_SHAPES = {
+    "production",
+    "profile1-production",
+    "profile2-production",
+    "coupled-production",
+}
 
-def run_harness(harness, shape, episodes, backend, mem_cap):
+EXIT_HARNESS_NOT_FOUND = 2
+EXIT_INVOCATION_FAILED = 3
+EXIT_TIMEOUT = 4
+EXIT_HARNESS_FAILED = 5
+EXIT_INVALID_REPORT = 6
+EXIT_BACKEND_POLICY = 7
+
+
+def run_harness(harness, shape, episodes, backend, mem_cap, timeout_seconds=7200):
     # The harness writes its JSON report to the --out path (it treats "-" as a
     # literal filename, not stdout), so give it a real temp file and read it back.
     out_fd, out_path = tempfile.mkstemp(prefix="rc-bench-", suffix=".json")
@@ -300,31 +316,120 @@ def run_harness(harness, shape, episodes, backend, mem_cap):
         ["--episodes", str(episodes), "--backend", backend, "--out", out_path]
     if mem_cap:
         argv += ["--mem-cap", str(mem_cap)]
-    print(dim("  $ " + " ".join(argv)))
+    print(dim("  $ " + " ".join(argv)), flush=True)
+    print(cyan(f"  STARTED: backend={backend}; timeout={timeout_seconds:g}s; "
+               "progress is reported every 30s."), flush=True)
+    stdout_file = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
+    stderr_file = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
+    started = time.monotonic()
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=7200)
-    except (OSError, subprocess.TimeoutExpired) as e:
+        proc = subprocess.Popen(argv, stdout=stdout_file, stderr=stderr_file, text=True)
+    except OSError as e:
         print(red(f"  harness invocation failed: {e}"))
         _unlink_quiet(out_path)
-        return None, ""
+        stdout_file.close()
+        stderr_file.close()
+        return None, "", EXIT_INVOCATION_FAILED
+
+    timed_out = False
+    while proc.poll() is None:
+        elapsed = time.monotonic() - started
+        remaining = timeout_seconds - elapsed
+        if remaining <= 0:
+            timed_out = True
+            proc.kill()
+            proc.wait()
+            break
+        try:
+            proc.wait(timeout=min(30.0, remaining))
+        except subprocess.TimeoutExpired:
+            print(dim(f"  progress: harness still running "
+                      f"({time.monotonic() - started:.0f}s)"), flush=True)
+
+    stdout_file.seek(0)
+    stderr_file.seek(0)
+    stdout = stdout_file.read()
+    stderr = stderr_file.read()
+    stdout_file.close()
+    stderr_file.close()
+
     # The loud native/streamed banners go to stderr — surface them.
-    if proc.stderr.strip():
-        for ln in proc.stderr.strip().splitlines():
+    if stderr.strip():
+        for ln in stderr.strip().splitlines():
             print(yellow("  " + ln))
+    if timed_out:
+        print(red(f"  harness timed out after {timeout_seconds:g}s"))
+        _unlink_quiet(out_path)
+        return None, stdout, EXIT_TIMEOUT
+    if proc.returncode != 0:
+        print(red(f"  harness exited with status {proc.returncode}"))
+        if stdout.strip():
+            print(dim("  harness stdout:\n" + stdout.rstrip()))
+        _unlink_quiet(out_path)
+        return None, stdout, EXIT_HARNESS_FAILED
+
     blob = None
     try:
         with open(out_path) as f:
             blob = json.load(f)
     except (OSError, json.JSONDecodeError):
         # Fallback: some builds may still emit the JSON as the last {...} on stdout.
-        m = re.search(r"\{.*\}\s*$", proc.stdout, re.DOTALL)
+        m = re.search(r"\{.*\}\s*$", stdout, re.DOTALL)
         if m:
             try:
                 blob = json.loads(m.group(0))
             except json.JSONDecodeError:
                 blob = None
     _unlink_quiet(out_path)
-    return blob, proc.stdout
+    return blob, stdout, 0
+
+
+def validate_report(blob, shape, episodes, requested_backend):
+    """Return schema/correctness failures for a purported completed run."""
+    errors = []
+    if not isinstance(blob, dict):
+        return ["report root is not a JSON object"]
+    if blob.get("tool") != "rc-episode-harness":
+        errors.append("tool must be rc-episode-harness")
+    version = blob.get("schema_version")
+    if not isinstance(version, int) or isinstance(version, bool) or version < 2:
+        errors.append("schema_version must be an integer >= 2")
+    if blob.get("stub") is not False:
+        errors.append("stub must be false")
+    provider = blob.get("backend")
+    if not isinstance(provider, str) or not provider.strip():
+        errors.append("backend provider is missing")
+
+    qual = blob.get("extractmx_self_qual")
+    if not isinstance(qual, dict):
+        errors.append("extractmx_self_qual object is missing")
+    else:
+        if qual.get("status") != "pass":
+            errors.append("extractmx_self_qual.status is not pass")
+        measured_episodes = qual.get("episodes")
+        if (not isinstance(measured_episodes, int) or
+                isinstance(measured_episodes, bool) or
+                measured_episodes < episodes):
+            errors.append("extractmx_self_qual.episodes is incomplete")
+
+    walls = blob.get("phase_wall_s")
+    total = walls.get("total") if isinstance(walls, dict) else None
+    if (not isinstance(total, (int, float)) or isinstance(total, bool) or
+            total < 0 or total != total or
+            total in (float("inf"), float("-inf"))):
+        errors.append("phase_wall_s.total is missing or invalid")
+
+    if shape in PRODUCTION_SHAPES and blob.get("production_dims") is not True:
+        errors.append("production run did not report production_dims=true")
+
+    cpu_provider = isinstance(provider, str) and provider.lower() in {
+        "cpu", "cpu_reference", "serial_cpu", "reference",
+    }
+    if shape in PRODUCTION_SHAPES and requested_backend not in ("auto", "cpu"):
+        if cpu_provider:
+            errors.append(
+                f"explicit accelerator {requested_backend!r} resolved to CPU")
+    return errors
 
 
 # --------------------------------------------------------------------------- #
@@ -386,9 +491,30 @@ def main():
     ap.add_argument("--backend", default="auto")
     ap.add_argument("--json")
     ap.add_argument("--quick", action="store_true", help="toy shape, fast sanity pass")
+    ap.add_argument(
+        "--allow-production-cpu-auto",
+        action="store_true",
+        help="explicitly permit production --backend auto even if it resolves to CPU",
+    )
+    ap.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=7200,
+        help="harness timeout in seconds (default: 7200)",
+    )
     args = ap.parse_args()
     if args.quick:
         args.shape = "toy"
+    if not math.isfinite(args.timeout_seconds) or args.timeout_seconds <= 0:
+        ap.error("--timeout-seconds must be positive")
+    if (args.shape in PRODUCTION_SHAPES and args.backend == "auto" and
+            not args.allow_production_cpu_auto):
+        print(red(
+            "Refusing production --backend auto: select an explicit accelerated "
+            "backend (for example cuda, hip, metal, or ascend), use --backend cpu "
+            "for a deliberate reference run, or pass --allow-production-cpu-auto."
+        ))
+        return EXIT_BACKEND_POLICY
 
     hr("BTX MatMul v4.7 ENC_RC — full-workload benchmark")
     print(WORKLOAD_DOC)
@@ -457,15 +583,32 @@ def main():
         print(dim("      cmake --build build --target matmul-v4-rc-harness"))
         print("\n  The hardware analysis and backend map above are still valid and\n"
               "  tell you exactly which paths WILL run once the binary exists.")
-        return 2
+        return EXIT_HARNESS_NOT_FOUND
 
     print(dim(f"  harness: {harness}"))
-    blob, _ = run_harness(harness, args.shape, args.episodes, args.backend, mem_cap)
+    blob, _, run_status = run_harness(
+        harness,
+        args.shape,
+        args.episodes,
+        args.backend,
+        mem_cap,
+        timeout_seconds=args.timeout_seconds,
+    )
+    if run_status != 0:
+        return run_status
+
+    errors = validate_report(blob, args.shape, args.episodes, args.backend)
+    if errors:
+        hr("Results")
+        print(red("  invalid or failed harness report:"))
+        for error in errors:
+            print(red(f"    - {error}"))
+        return EXIT_INVALID_REPORT
 
     hr("Results")
     report_run(blob)
 
-    if args.json and blob is not None:
+    if args.json:
         with open(args.json, "w") as f:
             json.dump(blob, f, indent=2)
         print(dim(f"\n  full JSON written to {args.json}"))

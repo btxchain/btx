@@ -120,11 +120,12 @@ Epoch D and is never authorized by the sampled carrier.
 ### 3.1 Acceleration is default-on, gated byte-exact to the reference
 
 Mining is not required to run on CPU: the default acceleration policy
-(`kRCAccelerationPolicyDefault = RCAccelerationPolicy::NativePreferred`) prefers
-a native tensor lane (Ozaki MXFP4 / FP8), falls through to the exact-gated
-dense-INT8 device path (CUDA IMMA / HIP MFMA / Metal tensor / Ascend Cube) when
-native isn't available, and only falls back to the CPU oracle when no device
-path self-qualifies. On CPU, the fast paths are SHA-NI/SHA-ext, AVX2, AVX-512-
+(`kRCAccelerationPolicyDefault = RCAccelerationPolicy::ProductionPreferred`) prefers
+dense-INT8 device paths (CUDA IMMA / HIP MFMA / Metal tensor / Ascend Cube).
+Correctness-qualified native Ozaki MXFP4 / FP8 remains an explicit measurement
+mode until separately reviewed production-shape performance evidence makes it
+eligible for automatic validation. The CPU oracle is used when no production
+device path self-qualifies. On CPU, the fast paths are SHA-NI/SHA-ext, AVX2, AVX-512-
 VNNI, and ARM SMMLA/i8mm. None of this needs an experimental flag — it is
 **on by default**.
 

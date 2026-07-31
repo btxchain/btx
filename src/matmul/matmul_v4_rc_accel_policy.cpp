@@ -138,10 +138,27 @@ const char* ToString(RCAccelerationPolicy policy)
         return "NativeRequired";
     case RCAccelerationPolicy::PortableExplicit:
         return "PortableExplicit";
-    case RCAccelerationPolicy::NativePreferred:
-        return "NativePreferred";
+    case RCAccelerationPolicy::ProductionPreferred:
+        return "ProductionPreferred";
     }
     return "Unknown";
+}
+
+RCBackendFamily SelectRCBackendFamily(RCAccelerationPolicy policy,
+                                      bool native_correct,
+                                      bool native_production_eligible,
+                                      bool dense_int8_correct)
+{
+    if (policy == RCAccelerationPolicy::NativeRequired) {
+        return native_correct ? RCBackendFamily::NativeMxfp4
+                              : RCBackendFamily::CpuReference;
+    }
+    if (policy == RCAccelerationPolicy::ProductionPreferred &&
+        native_correct && native_production_eligible) {
+        return RCBackendFamily::NativeMxfp4;
+    }
+    if (dense_int8_correct) return RCBackendFamily::DenseInt8;
+    return RCBackendFamily::CpuReference;
 }
 
 const char* ToString(RCComputeLaneId lane)
@@ -187,8 +204,9 @@ RCAccelerationPolicy ResolveRCAccelerationPolicy()
         if (v == "native" || v == "NativeRequired" || v == "NATIVE") {
             return RCAccelerationPolicy::NativeRequired;
         }
-        if (v == "preferred" || v == "NativePreferred" || v == "auto") {
-            return RCAccelerationPolicy::NativePreferred;
+        if (v == "production" || v == "ProductionPreferred" ||
+            v == "preferred" || v == "NativePreferred" || v == "auto") {
+            return RCAccelerationPolicy::ProductionPreferred;
         }
     }
     return kRCAccelerationPolicyDefault;

@@ -36,13 +36,23 @@ enum class RCAccelerationPolicy : uint8_t {
     /** Opt-in portable/legacy: force the exact dense-INT8 device path (skip
      *  native selection entirely). BTX_RC_ACCEL_POLICY=portable. */
     PortableExplicit = 1,
-    /** DEFAULT — best available EXACT path. Prefer the native tensor lane when it
-     *  self-qualifies; otherwise fall through to the exact-gated dense-INT8 device
-     *  path (CUDA IMMA / HIP MFMA / Metal tensor / Ascend Cube); CPU only when no
-     *  device path passes the bit-exact self-qual. A device is used whenever ANY
-     *  path is proven byte-identical to the int64 oracle — mining is never blocked
-     *  merely because the *peak* lane is not yet qualified. */
-    NativePreferred = 2,
+    /** DEFAULT — production-safe exact Profile-1 path. Prefer the exact-gated
+     *  dense-INT8 device implementation (CUDA IMMA / HIP MFMA / Metal tensor /
+     *  Ascend Cube). A mathematically correct native MXFP4/Ozaki lane is not
+     *  automatically production-eligible: it may be selected only after a
+     *  separately reviewed production eligibility decision. */
+    ProductionPreferred = 2,
+    /** Source/configuration compatibility spelling. The old name no longer means
+     *  that a correctness-only native lane is selected automatically. */
+    NativePreferred = ProductionPreferred,
+};
+
+/** Backend families used by the pure policy decision. Correctness qualification
+ *  and production eligibility are deliberately separate inputs. */
+enum class RCBackendFamily : uint8_t {
+    CpuReference = 0,
+    DenseInt8 = 1,
+    NativeMxfp4 = 2,
 };
 
 /** Distinct compute-lane identifiers (native ≠ portable ≠ dense INT8 legacy). */
@@ -65,10 +75,22 @@ enum class RCAccelResidencyMode : uint8_t {
     Streamed = 2,
 };
 
-/** Default mining policy for accelerators: best available EXACT path (native
- *  preferred, exact-gated device INT8 otherwise, CPU last). */
+/** Default mining/verification policy: production-eligible dense INT8 first. */
 inline constexpr RCAccelerationPolicy kRCAccelerationPolicyDefault =
-    RCAccelerationPolicy::NativePreferred;
+    RCAccelerationPolicy::ProductionPreferred;
+
+/** No production-shape, end-to-end evidence currently admits exact MXFP4/Ozaki
+ *  for automatic Profile-1 validation. Changing this requires a separately
+ *  reviewed hardware campaign; correctness self-qualification is insufficient. */
+inline constexpr bool kRcOzakiMxfp4ProductionEligible = false;
+
+/** Pure, hardware-independent backend-family policy decision. NativeRequired
+ *  is an explicit experiment and therefore needs only
+ *  correctness qualification. ProductionPreferred requires the separate native
+ *  production-eligibility bit and otherwise selects exact dense INT8. */
+[[nodiscard]] RCBackendFamily SelectRCBackendFamily(
+    RCAccelerationPolicy policy, bool native_correct,
+    bool native_production_eligible, bool dense_int8_correct);
 
 /**
  * Execution result / provenance snapshot for a mining attempt.
@@ -212,13 +234,15 @@ struct RCCoupConsensusConfig {
 
 /**
  * Resolve mining acceleration policy.
- * Default: NativePreferred (kRCAccelerationPolicyDefault) — native tensor lane
- * preferred, else the exact-gated dense device INT8 path, else CPU. A device is
- * used whenever any path is byte-identical to the int64 oracle.
+ * Default: ProductionPreferred (kRCAccelerationPolicyDefault) — exact-gated
+ * dense device INT8 today. A separately reviewed production-eligibility
+ * decision may permit a competitive native lane to override it; otherwise the
+ * resolver falls back to CPU.
  * Opt-in overrides via BTX_RC_ACCEL_POLICY:
  *   - portable|PortableExplicit|PORTABLE → force the dense INT8 device path.
  *   - native|NativeRequired|NATIVE       → peak-only; decline device INT8 and use
  *     CPU when the native lane is unqualified (for pure peak measurement).
+ *   - production|auto|preferred          → production-safe automatic policy.
  * Under NativeRequired (only) the central ExactGemm resolver must NOT fall
  * through to dense device INT8 when native MX is unavailable.
  */

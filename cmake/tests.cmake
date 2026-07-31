@@ -12,6 +12,11 @@ if(PYTHON_COMMAND)
   add_test(NAME util_rpcauth_test
     COMMAND ${PYTHON_COMMAND} ${PROJECT_BINARY_DIR}/test/util/rpcauth-test.py
   )
+  if(UNIX)
+    add_test(NAME matmul_v4_full_benchmark_wrapper
+      COMMAND ${PYTHON_COMMAND} ${PROJECT_SOURCE_DIR}/contrib/matmul-v4/test_run_full_benchmark.py
+    )
+  endif()
 endif()
 
 # The parser suite is a POSIX shell test. Register it whenever the standalone

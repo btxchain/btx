@@ -16,7 +16,7 @@
 # a pointer to the RC tools.
 #
 # For historical Profile-2 full-workload measurement:
-#   contrib/matmul-v4/run-full-benchmark.py --shape production
+#   contrib/matmul-v4/run-full-benchmark.py --shape production --backend cuda
 # or the RC-only measurement wrapper:
 #   contrib/matmul-v4/measure-enc-rc-v46.sh …
 #
@@ -181,7 +181,7 @@ if [ "$RC_MODE" -ne 1 ]; then
   echo "  contrib/matmul-v4/measure-enc-rc-v46.sh …" >&2
   echo "  contrib/matmul-v4/measure-hardware.sh $BACKEND rc …" >&2
   echo "  contrib/matmul-v4/measure-hardware.sh $BACKEND --profile coupled" >&2
-  echo "  contrib/matmul-v4/run-full-benchmark.py --shape production" >&2
+  echo "  contrib/matmul-v4/run-full-benchmark.py --shape production --backend $BACKEND" >&2
   exit 2
 fi
 echo "== MatMul ENC_RC (Resident Curriculum) harness: $BACKEND =="

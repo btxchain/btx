@@ -22,31 +22,30 @@ namespace dc = matmul::v4::rc::dc;
 
 BOOST_FIXTURE_TEST_SUITE(matmul_v4_rc_accel_policy_tests, BasicTestingSetup)
 
-BOOST_AUTO_TEST_CASE(rc_accel_policy_default_is_native_preferred)
+BOOST_AUTO_TEST_CASE(rc_accel_policy_default_is_production_preferred)
 {
     BOOST_CHECK(rc::RCAccelerationPolicy::NativeRequired !=
                 rc::RCAccelerationPolicy::PortableExplicit);
-    BOOST_CHECK(rc::RCAccelerationPolicy::NativePreferred !=
+    BOOST_CHECK(rc::RCAccelerationPolicy::ProductionPreferred !=
                 rc::RCAccelerationPolicy::NativeRequired);
-    // Default is best-available-exact (native preferred, exact device INT8 else,
-    // CPU last) — mining is not blocked merely because the peak lane is unqualified.
+    // Default is the production-safe dense-INT8-first policy.
     BOOST_CHECK_EQUAL(static_cast<uint8_t>(rc::kRCAccelerationPolicyDefault),
-                      static_cast<uint8_t>(rc::RCAccelerationPolicy::NativePreferred));
+                      static_cast<uint8_t>(rc::RCAccelerationPolicy::ProductionPreferred));
     BOOST_CHECK_EQUAL(std::string{rc::ToString(rc::RCAccelerationPolicy::NativeRequired)},
                       "NativeRequired");
     BOOST_CHECK_EQUAL(std::string{rc::ToString(rc::RCAccelerationPolicy::PortableExplicit)},
                       "PortableExplicit");
-    BOOST_CHECK_EQUAL(std::string{rc::ToString(rc::RCAccelerationPolicy::NativePreferred)},
-                      "NativePreferred");
+    BOOST_CHECK_EQUAL(std::string{rc::ToString(rc::RCAccelerationPolicy::ProductionPreferred)},
+                      "ProductionPreferred");
 }
 
 BOOST_AUTO_TEST_CASE(rc_accel_policy_resolve_default_and_env_overrides)
 {
     const char* prev = std::getenv("BTX_RC_ACCEL_POLICY");
-    // Unset → NativePreferred (default).
+    // Unset → ProductionPreferred (default).
     unsetenv("BTX_RC_ACCEL_POLICY");
     BOOST_CHECK_EQUAL(static_cast<uint8_t>(rc::ResolveRCAccelerationPolicy()),
-                      static_cast<uint8_t>(rc::RCAccelerationPolicy::NativePreferred));
+                      static_cast<uint8_t>(rc::RCAccelerationPolicy::ProductionPreferred));
     // Explicit opt-in overrides both directions.
     setenv("BTX_RC_ACCEL_POLICY", "native", /*overwrite=*/1);
     BOOST_CHECK_EQUAL(static_cast<uint8_t>(rc::ResolveRCAccelerationPolicy()),
@@ -128,32 +127,66 @@ BOOST_AUTO_TEST_CASE(rc_native_required_empty_gemm_when_ozaki_unqualified)
     }
 }
 
-/** DEFAULT (NativePreferred): when the native lane is unqualified, admission goes
- *  through the SAME exact-gated device resolve as PortableExplicit — it does NOT
- *  hard-decline the device the way NativeRequired does. On a CPU-only host both
- *  yield an empty backend (→ CPU); on a GPU host both yield the exact device
- *  backend. The bit-exact self-qual (GateExactGemmWithRCSelfQualCached) still gates
- *  every device path, so a non-byte-identical device is never admitted. */
-BOOST_AUTO_TEST_CASE(rc_native_preferred_default_admits_device_like_portable)
+/** DEFAULT (ProductionPreferred) follows the same exact-gated dense resolver as
+ *  PortableExplicit and does not even qualify the correctness-only native lane.
+ *  This assertion is hardware-independent, including on an SM120a-linked build. */
+BOOST_AUTO_TEST_CASE(rc_production_preferred_default_admits_device_like_portable)
 {
     const char* prev = std::getenv("BTX_RC_ACCEL_POLICY");
     matmul_v4::accel::ResetRCExactGemmResolveCacheForTest();
     rc::ResetRcOzakiQualForTest();
-    (void)rc::SelfQualifyRcOzakiMxfp4Once();
-    if (!rc::IsRcOzakiMxfp4Qualified()) { // meaningful only when native is unqualified
-        unsetenv("BTX_RC_ACCEL_POLICY"); // NativePreferred (default)
-        matmul_v4::accel::ResetRCExactGemmResolveCacheForTest();
-        const auto def = matmul_v4::accel::MakeResolvedExactGemmBackendForRC();
-        setenv("BTX_RC_ACCEL_POLICY", "portable", /*overwrite=*/1); // PortableExplicit
-        matmul_v4::accel::ResetRCExactGemmResolveCacheForTest();
-        const auto portable = matmul_v4::accel::MakeResolvedExactGemmBackendForRC();
-        BOOST_CHECK_EQUAL(def.gemm_s8s8 == nullptr, portable.gemm_s8s8 == nullptr);
-    }
+    unsetenv("BTX_RC_ACCEL_POLICY"); // ProductionPreferred (default)
+    const auto def = matmul_v4::accel::ResolveExactGemmBackendForRC();
+    BOOST_CHECK_MESSAGE(
+        !rc::IsRcOzakiMxfp4Qualified(),
+        "automatic production resolution must not run correctness-only native qual");
+
+    setenv("BTX_RC_ACCEL_POLICY", "portable", /*overwrite=*/1); // PortableExplicit
+    matmul_v4::accel::ResetRCExactGemmResolveCacheForTest();
+    const auto portable = matmul_v4::accel::ResolveExactGemmBackendForRC();
+    BOOST_CHECK_EQUAL(def.backend.gemm_s8s8 == nullptr,
+                      portable.backend.gemm_s8s8 == nullptr);
+    BOOST_CHECK_EQUAL(def.provider, portable.provider);
+    BOOST_CHECK_EQUAL(def.production_eligible, def.self_qualified);
     if (prev != nullptr) {
         setenv("BTX_RC_ACCEL_POLICY", prev, /*overwrite=*/1);
     } else {
         unsetenv("BTX_RC_ACCEL_POLICY");
     }
+}
+
+BOOST_AUTO_TEST_CASE(rc_production_policy_separates_correctness_from_eligibility)
+{
+    using Family = rc::RCBackendFamily;
+    using Policy = rc::RCAccelerationPolicy;
+    BOOST_CHECK(!rc::kRcOzakiMxfp4ProductionEligible);
+
+    // Both implementations are mathematically correct. The automatic policy
+    // still selects dense INT8 while native lacks reviewed production evidence.
+    BOOST_CHECK(rc::SelectRCBackendFamily(
+                    Policy::ProductionPreferred,
+                    /*native_correct=*/true,
+                    /*native_production_eligible=*/false,
+                    /*dense_int8_correct=*/true) == Family::DenseInt8);
+
+    // NativeRequired remains an explicit experimental/measurement opt-in.
+    BOOST_CHECK(rc::SelectRCBackendFamily(
+                    Policy::NativeRequired, true, false, true) ==
+                Family::NativeMxfp4);
+
+    // PortableExplicit remains a dense diagnostic and never selects native.
+    BOOST_CHECK(rc::SelectRCBackendFamily(
+                    Policy::PortableExplicit, true, true, true) ==
+                Family::DenseInt8);
+    BOOST_CHECK(rc::SelectRCBackendFamily(
+                    Policy::PortableExplicit, true, true, false) ==
+                Family::CpuReference);
+
+    // A future reviewed eligibility decision is explicit in the policy input
+    // and may make the competitive native lane the automatic choice.
+    BOOST_CHECK(rc::SelectRCBackendFamily(
+                    Policy::ProductionPreferred, true, true, true) ==
+                Family::NativeMxfp4);
 }
 
 BOOST_AUTO_TEST_CASE(rc_coup_consensus_config_defaults_ai_production)
