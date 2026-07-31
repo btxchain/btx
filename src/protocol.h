@@ -302,6 +302,14 @@ inline constexpr const char* DANDELIONACC{"dandelionacc"};
  * @since MatMul v4.4 ENC-DR.
  */
 inline constexpr const char* GETMMSKETCH{"getmmsketch"};
+/** Request every retained signed Profile-1 ExactReplay attestation for one
+ * block hash. The response is MMATTEST; attestations are policy trust data,
+ * never consensus proofs. */
+inline constexpr const char* GETMMATTEST{"getmmattest"};
+/** Carries a bounded vector of signed Profile-1 ExactReplay attestations.
+ * Receivers validate the domain, chain, height, hash, configured signer set,
+ * signature, uniqueness, and M-of-N threshold before using a quorum. */
+inline constexpr const char* MMATTEST{"mmattest"};
 /**
  * mmsketch carries the full self-authenticating sketch-cache payload for one
  * block, in response to a `getmmsketch`. Payload:
@@ -398,6 +406,8 @@ inline const std::array ALL_NET_MESSAGE_TYPES{std::to_array<std::string>({
     NetMsgType::DANDELIONACC,
     NetMsgType::GETMMSKETCH,
     NetMsgType::MMSKETCH,
+    NetMsgType::GETMMATTEST,
+    NetMsgType::MMATTEST,
     NetMsgType::GETRCCARRIER,
     NetMsgType::RCCARRIER,
     NetMsgType::RCADMIT,
@@ -445,10 +455,10 @@ enum ServiceFlags : uint64_t {
 
     NODE_UTREEXO_TMP = (1 << 24),
 
-    // Bit 25 RESERVED (was NODE_MATMUL_PROOF_ARCHIVE, retired with the v4.4
-    // ENC-DR deletion of the segregated-proof subsystem; the best-effort
-    // sketch cache is deliberately NOT service-bit-advertised — serving
-    // sketches is not a trust role, tension-resolution §4.3).
+    // Operator-trusted RPC/archive mirror. This bit never means independent
+    // consensus validation: the node authenticates Profile-1 work through a
+    // configured M-of-N set of signed archive-validator attestations.
+    NODE_MATMUL_TRUSTED_MIRROR = (1 << 25),
 
     NODE_REPLACE_BY_FEE = (1 << 26),
     // NODE_MATMUL_CONSENSUS indicates the node validates MatMul transcripts

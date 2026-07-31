@@ -1744,6 +1744,7 @@ add_library(bitcoin_node STATIC EXCLUDE_FROM_ALL
   node/mining_guard.cpp
   node/mempool_args.cpp
   node/matmul_verify_worker.cpp
+  node/matmul_trusted_attestations.cpp
   node/matmul_rc_admission.cpp
   node/mempool_persist.cpp
   node/mempool_persist_args.cpp

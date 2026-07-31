@@ -10247,6 +10247,20 @@ bool ChainstateManager::PersistMatMulExactReplayVerdict(
     return true;
 }
 
+bool ChainstateManager::PersistMatMulTrustedReplayAttestation(
+    const uint256& block_hash)
+{
+    AssertLockHeld(::cs_main);
+    CBlockIndex* index{m_blockman.LookupBlockIndex(block_hash)};
+    if (index == nullptr || (index->nStatus & BLOCK_FAILED_MASK)) return false;
+    index->nStatus |= BLOCK_TRUSTED_REPLAY_ATTESTED;
+    m_blockman.m_dirty_blockindex.insert(index);
+    // Deliberately do not populate the replay memo here. The worker populated
+    // its process-local memo only after verifying current-config signatures;
+    // this persistent audit bit must never recreate that authority.
+    return true;
+}
+
 std::optional<ChainstateManager::MatMulEncDrClassifyResult>
 ChainstateManager::ClassifyMatMulEncDrRecompute(const CBlock& block,
                                                 bool* verdict_pinned,

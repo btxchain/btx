@@ -1866,6 +1866,8 @@ static std::string MatMulValidationModeToString(kernel::MatMulValidationMode mod
     switch (mode) {
     case kernel::MatMulValidationMode::CONSENSUS:
         return "consensus";
+    case kernel::MatMulValidationMode::TRUSTED:
+        return "trusted";
     case kernel::MatMulValidationMode::ECONOMIC:
         return "economic";
     case kernel::MatMulValidationMode::SPV:

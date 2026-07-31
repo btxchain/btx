@@ -33,6 +33,11 @@ namespace kernel {
 
 enum class MatMulValidationMode {
     CONSENSUS,
+    //! Operator-configured M-of-N trust in signed ExactReplay attestations.
+    //! This mode performs every ordinary block/body/script check but delegates
+    //! the expensive Profile-1 replay verdict to explicitly configured archive
+    //! validators. It is not independent consensus validation.
+    TRUSTED,
     ECONOMIC,
     SPV,
 };

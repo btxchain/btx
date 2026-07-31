@@ -81,13 +81,15 @@ util::Result<void> ApplyArgsManOptions(const ArgsManager& args, ChainstateManage
     if (auto value{args.GetArg("-matmulvalidation")}) {
         if (*value == "consensus") {
             opts.matmul_validation_mode = kernel::MatMulValidationMode::CONSENSUS;
+        } else if (*value == "trusted") {
+            opts.matmul_validation_mode = kernel::MatMulValidationMode::TRUSTED;
         } else if (*value == "economic") {
             opts.matmul_validation_mode = kernel::MatMulValidationMode::ECONOMIC;
         } else if (*value == "spv") {
             opts.matmul_validation_mode = kernel::MatMulValidationMode::SPV;
         } else {
             return util::Error{Untranslated(strprintf(
-                "Invalid -matmulvalidation value (%s). Valid values: consensus, economic, spv", *value))};
+                "Invalid -matmulvalidation value (%s). Valid values: consensus, trusted, economic, spv", *value))};
         }
     }
 

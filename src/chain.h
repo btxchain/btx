@@ -138,6 +138,12 @@ enum BlockStatus : uint32_t {
     //! digest-only validation across restarts/reorgs but grants no
     //! authenticated chainwork until the complete block is validated.
     BLOCK_EXACT_REPLAY_VERIFIED = 256,
+
+    //! An operator-configured M-of-N attestation quorum authorized this
+    //! Profile-1 replay on a trusted mirror. This is audit metadata only:
+    //! unlike BLOCK_EXACT_REPLAY_VERIFIED it MUST NOT short-circuit validation
+    //! after restart because the configured signer set/threshold may change.
+    BLOCK_TRUSTED_REPLAY_ATTESTED = 512,
 };
 
 /** The block chain is a tree shaped structure starting with the

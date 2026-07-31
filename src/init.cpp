@@ -41,6 +41,7 @@
 #include <kernel/context.h>
 #include <kernel/warning.h>
 #include <key.h>
+#include <key_io.h>
 #include <logging.h>
 #include <mapport.h>
 #include <matmul/accelerated_solver.h>
@@ -65,6 +66,7 @@
 #include <node/mempool_persist.h>
 #include <node/mempool_persist_args.h>
 #include <node/mining_guard.h>
+#include <node/matmul_trusted_attestations.h>
 #include <node/miner.h>
 #include <node/peerman_args.h>
 #include <node/protocol_version.h>
@@ -526,8 +528,14 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-alertnotify=<cmd>", "Execute command when an alert is raised (%s in cmd is replaced by message)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
 #endif
     argsman.AddArg("-assumevalid=<hex>", strprintf("If this block is in the chain assume that it and its ancestors are valid and potentially skip script verification for their transactions while still checking other consensus rules (0 to verify all, default: %s, testnet3: %s, testnet4: %s, signet: %s, shieldedv2dev: %s)", defaultChainParams->GetConsensus().defaultAssumeValid.GetHex(), testnetChainParams->GetConsensus().defaultAssumeValid.GetHex(), testnet4ChainParams->GetConsensus().defaultAssumeValid.GetHex(), signetChainParams->GetConsensus().defaultAssumeValid.GetHex(), shieldedv2devChainParams->GetConsensus().defaultAssumeValid.GetHex()), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-matmulvalidation=<mode>", "Select MatMul transcript verification mode: consensus (default), economic, or spv. consensus runs Phase 2 checks within the validation window (full-node tier). economic runs Phase 1-only header checks and trusts full-node majority; it is not a full node. spv is header-only Phase 1.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-matmulvalidation=<mode>", "Select MatMul transcript verification mode: consensus (default), trusted, economic, or spv. trusted performs ordinary block/body/script validation but replaces local Profile-1 ExactReplay with an explicitly configured M-of-N signed archive-validator quorum; it is an operator-trusted mirror, not an independently validating full node.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmulrcexecution=<mode>", "Select local MatMul RC ExactReplay execution: strict-device requires a production-qualified device and forbids CPU fallback; auto-fallback permits device-to-CPU fallback for pre-activation/testing; cpu-diagnostic explicitly runs the portable oracle (default: auto-fallback while public RC activation is disabled). Only strict-device with a currently qualified production provider advertises NODE_MATMUL_CONSENSUS.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-matmultrustedpubkey=<hex>", "Compressed secp256k1 public key trusted to attest successful Profile-1 ExactReplay. Repeat for N signers. Required with -matmulvalidation=trusted.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-matmultrustedthreshold=<n>", "Required distinct trusted signatures (M) for one block, 1..N (default: 1).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-matmultrustedwaitms=<n>", "Maximum worker wait for an attestation quorum before leaving the block retryable, in milliseconds (default: 30000, maximum: 600000).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-matmulattestationsignerkeyfile=<file>", "Archive-validator file containing exactly one WIF signing key. Relative paths resolve under the network datadir. The corresponding public key is added to the configured signer set. Protect this file as an online validation key.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-matmulattestationsignerkey=<wif>", "UNSAFE/deprecated convenience form for the archive-validator WIF key; command lines may leak through process listings. Prefer -matmulattestationsignerkeyfile.", ArgsManager::ALLOW_ANY | ArgsManager::SENSITIVE, OptionsCategory::OPTIONS);
+    argsman.AddArg("-matmulattestationserve", "Serve and relay bounded signed ExactReplay attestations (default: 1 when a local signing key is configured, otherwise 0). Historical responses are generated only for blocks carrying a persisted local ExactReplay-success bit.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmulservicechallengefile=<file>", "Path to the persistent MatMul service challenge registry. Relative paths are resolved under the network datadir. Point multiple service nodes at the same shared file to let getmatmulservicechallenge issuance and redeemmatmulserviceproof redemption work across the cluster. (default: <netdir>/matmul_service_challenges.dat)", ArgsManager::ALLOW_ANY, OptionsCategory::RPC);
     argsman.AddArg("-matmulasyncverify", "Run the MatMul v4.4 ENC-DR reference recompute for P2P block deliveries on a bounded background worker pool instead of the network message thread (default: 1). Only effective on networks where the v4 fork height is set; verdicts are identical either way (the recompute is a pure function of the header) — this only changes WHICH thread computes them. Set to 0 to force the historical fully-synchronous path.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmulrcheaderfirst", "Begin admitted near-tip RC ExactReplay from the immutable block header while compact/full block transactions transfer and validate (default: 1). The early verdict grants no chainwork; complete block validation remains authoritative.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -1257,11 +1265,115 @@ bool AppInitParameterInteraction(const ArgsManager& args)
         g_local_services = ServiceFlags(g_local_services | NODE_COMPACT_FILTERS);
     }
 
-    // Enforce CONSENSUS validation mode on mainnet -- non-consensus modes
-    // skip Phase 2 PoW verification and must not be used on the main network.
+    // Mainnet permits either independent consensus validation or the explicit
+    // operator-trusted mirror role. Economic/SPV still skip the required
+    // authority entirely and remain forbidden.
     const std::string matmul_validation_mode = args.GetArg("-matmulvalidation", "consensus");
-    if (chainparams.GetChainType() == ChainType::MAIN && matmul_validation_mode != "consensus") {
-        return InitError(_("MatMul validation mode MUST be 'consensus' on mainnet. Non-consensus modes (economic, spv) skip Phase 2 PoW verification and are not safe for production use."));
+    if (chainparams.GetChainType() == ChainType::MAIN &&
+        matmul_validation_mode != "consensus" &&
+        matmul_validation_mode != "trusted") {
+        return InitError(_("MatMul validation mode on mainnet must be 'consensus' or explicitly configured 'trusted'. Economic/SPV modes skip MatMul authority and are unsafe."));
+    }
+
+    const bool trusted_mirror_mode{matmul_validation_mode == "trusted"};
+    const auto trusted_key_args{args.GetArgs("-matmultrustedpubkey")};
+    const auto signer_keyfile{
+        args.GetPathArg("-matmulattestationsignerkeyfile", {})};
+    const std::string inline_signer{
+        args.GetArg("-matmulattestationsignerkey", "")};
+    if (!signer_keyfile.empty() && !inline_signer.empty()) {
+        return InitError(_("Use only one of -matmulattestationsignerkeyfile and -matmulattestationsignerkey."));
+    }
+
+    std::vector<CPubKey> trusted_signers;
+    trusted_signers.reserve(trusted_key_args.size() + 1);
+    for (const auto& encoded : trusted_key_args) {
+        const CPubKey pubkey{ParseHex(encoded)};
+        if (!pubkey.IsCompressed() || !pubkey.IsFullyValid()) {
+            return InitError(strprintf(
+                _("Invalid compressed public key in -matmultrustedpubkey: %s"),
+                encoded));
+        }
+        trusted_signers.push_back(pubkey);
+    }
+
+    std::optional<CKey> local_attestation_signer;
+    std::string signer_text;
+    if (!signer_keyfile.empty()) {
+        const fs::path path{
+            AbsPathForConfigVal(args, signer_keyfile)};
+        std::ifstream stream{path};
+        if (!stream.is_open() || !std::getline(stream, signer_text)) {
+            return InitError(strprintf(
+                _("Cannot read MatMul attestation signing key file %s"),
+                fs::PathToString(path)));
+        }
+        std::string unexpected;
+        if (std::getline(stream, unexpected) &&
+            !util::TrimString(unexpected).empty()) {
+            return InitError(_("-matmulattestationsignerkeyfile must contain exactly one WIF key."));
+        }
+        signer_text = util::TrimString(signer_text);
+    } else if (!inline_signer.empty()) {
+        signer_text = inline_signer;
+        InitWarning(_("-matmulattestationsignerkey exposes an online signing key through process/config surfaces; use a permission-restricted -matmulattestationsignerkeyfile."));
+    }
+    if (!signer_text.empty()) {
+        CKey key{DecodeSecret(signer_text)};
+        if (!key.IsValid() || !key.IsCompressed()) {
+            return InitError(_("Invalid compressed WIF in MatMul attestation signer configuration."));
+        }
+        const CPubKey local_pubkey{key.GetPubKey()};
+        if (std::find(trusted_signers.begin(), trusted_signers.end(),
+                      local_pubkey) == trusted_signers.end()) {
+            trusted_signers.push_back(local_pubkey);
+        }
+        local_attestation_signer = std::move(key);
+    }
+
+    const bool attestation_config_requested{
+        trusted_mirror_mode || !trusted_signers.empty() ||
+        args.IsArgSet("-matmulattestationserve")};
+    const int64_t trusted_threshold{
+        args.GetIntArg("-matmultrustedthreshold", 1)};
+    const int64_t trusted_wait_ms{
+        args.GetIntArg("-matmultrustedwaitms", 30'000)};
+    const bool serve_attestations{
+        args.GetBoolArg("-matmulattestationserve",
+                        local_attestation_signer.has_value())};
+    if (attestation_config_requested) {
+        if (trusted_signers.empty()) {
+            return InitError(_("Trusted MatMul attestation operation requires at least one -matmultrustedpubkey or a local signer key."));
+        }
+        if (trusted_threshold < 1 ||
+            static_cast<size_t>(trusted_threshold) >
+                trusted_signers.size()) {
+            return InitError(strprintf(
+                _("-matmultrustedthreshold must be between 1 and the %u distinct configured keys."),
+                trusted_signers.size()));
+        }
+        matmul::trusted::StoreConfig config;
+        config.chain_id = chainparams.GenesisBlock().GetHash();
+        config.trusted_signers = trusted_signers;
+        config.threshold = static_cast<size_t>(trusted_threshold);
+        config.local_signer = std::move(local_attestation_signer);
+        std::string configure_error;
+        if (!node::matmul_trusted::Configure(
+                std::move(config), trusted_mirror_mode,
+                serve_attestations,
+                std::chrono::milliseconds{trusted_wait_ms},
+                configure_error)) {
+            return InitError(strprintf(
+                _("Invalid MatMul trusted-attestation configuration: %s"),
+                configure_error));
+        }
+    } else {
+        node::matmul_trusted::ResetForTest();
+    }
+    if (trusted_mirror_mode) {
+        InitWarning(strprintf(
+            _("TRUSTED MATMUL MIRROR ACTIVE: this node delegates Profile-1 ExactReplay to a %d-of-%d configured signer quorum. It validates block bodies and scripts but is not an independent full consensus validator."),
+            trusted_threshold, trusted_signers.size()));
     }
 
     const std::string rc_execution_mode{
@@ -1349,6 +1461,7 @@ bool AppInitParameterInteraction(const ArgsManager& args)
     // transcript-validating nodes from Phase-1-only economic nodes.
     {
         const auto clear_mask = static_cast<uint64_t>(NODE_MATMUL_CONSENSUS) |
+            static_cast<uint64_t>(NODE_MATMUL_TRUSTED_MIRROR) |
             static_cast<uint64_t>(NODE_MATMUL_ECONOMIC);
         uint64_t services = static_cast<uint64_t>(g_local_services) & ~clear_mask;
         if (matmul_validation_mode == "consensus") {
@@ -1356,12 +1469,18 @@ bool AppInitParameterInteraction(const ArgsManager& args)
                 services |=
                     static_cast<uint64_t>(NODE_MATMUL_CONSENSUS);
             }
+        } else if (matmul_validation_mode == "trusted") {
+            // This is deliberately mutually exclusive with
+            // NODE_MATMUL_CONSENSUS. Service bits are only routing hints; the
+            // signed quorum remains the authority configured by the operator.
+            services |=
+                static_cast<uint64_t>(NODE_MATMUL_TRUSTED_MIRROR);
         } else if (matmul_validation_mode == "economic") {
             services |= static_cast<uint64_t>(NODE_MATMUL_ECONOMIC);
         } else if (matmul_validation_mode == "spv") {
             // Tier 3 SPV advertises neither consensus nor economic MatMul tier.
         } else {
-            return InitError(strprintf(_("Invalid -matmulvalidation value (%s). Valid values: consensus, economic, spv"), matmul_validation_mode));
+            return InitError(strprintf(_("Invalid -matmulvalidation value (%s). Valid values: consensus, trusted, economic, spv"), matmul_validation_mode));
         }
         g_local_services = static_cast<ServiceFlags>(services);
     }
@@ -1391,6 +1510,9 @@ bool AppInitParameterInteraction(const ArgsManager& args)
         if (g_wallet_init_interface.HasWalletSupport() && !args.GetBoolArg("-disablewallet", false)) {
             return InitError(_("SPV mode requires -disablewallet=1 to avoid serving wallet users from a non-fully-validating node."));
         }
+    }
+    if (matmul_validation_mode == "trusted") {
+        LogPrintf("WARNING: trusted MatMul mirror mode: exact replay authority is delegated to configured signed attestations; NODE_MATMUL_CONSENSUS is disabled.\n");
     }
 
     if (chainparams.GetConsensus().fMatMulPOW && args.GetBoolArg("-reindex-chainstate", false)) {
