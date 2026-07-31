@@ -2310,6 +2310,96 @@ uint256 RecomputeResidentCurriculumAccelerated(
     return digest;
 }
 
+RCStrictDeviceEpisodeResult MineRCEpisodeStrictDevice(
+    const CBlockHeader& header,
+    const RCEpisodeParams& params,
+    int32_t height,
+    const lt::ExactGemmBackend& gemm,
+    const std::string& provider,
+    const std::atomic_bool* cancelled)
+{
+    RCStrictDeviceEpisodeResult out;
+    out.acceleration.backend = provider;
+    out.acceleration.device_backend_present =
+        gemm.gemm_s8s8 != nullptr;
+    out.acceleration.require_device = true;
+    if (cancelled != nullptr &&
+        cancelled->load(std::memory_order_relaxed)) {
+        out.outcome = RCStrictDeviceEpisodeOutcome::Cancelled;
+        return out;
+    }
+
+    RCExactReplayAcceleration acceleration;
+    acceleration.gemm = gemm;
+    acceleration.backend = provider;
+    acceleration.require_device = true;
+    acceleration.output_row_tile = 256;
+    acceleration.stats = &out.acceleration;
+
+    const ScopedExactReplayCancellation cancellation_scope{cancelled};
+    out.digest = RecomputeResidentCurriculumAccelerated(
+        header, params, height, {}, nullptr, nullptr, acceleration);
+
+    // If the mining job was invalidated while a device submission was in
+    // flight, never publish its result even if that submission completed.
+    if (ExactReplayCancellationRequested()) {
+        out.outcome = RCStrictDeviceEpisodeOutcome::Cancelled;
+        out.digest.SetNull();
+        return out;
+    }
+
+    const bool complete_device_coverage =
+        !out.digest.IsNull() &&
+        out.acceleration.device_backend_present &&
+        out.acceleration.require_device &&
+        out.acceleration.fully_accelerated &&
+        out.acceleration.cpu_calls == 0 &&
+        out.acceleration.cpu_fallbacks == 0 &&
+        out.acceleration.device_macs == TotalRCEpisodeMacs(params);
+    if (!complete_device_coverage) {
+        out.outcome =
+            RCStrictDeviceEpisodeOutcome::LocalAcceleratorFailure;
+        out.digest.SetNull();
+        return out;
+    }
+    out.outcome = RCStrictDeviceEpisodeOutcome::Complete;
+    return out;
+}
+
+RCWinnerResealResult ResealRCWinnerStrict(
+    const CBlockHeader& header,
+    const RCEpisodeParams& params,
+    int32_t height,
+    const uint256& candidate_digest,
+    const lt::ExactGemmBackend& gemm,
+    const std::string& provider,
+    const std::atomic_bool* cancelled)
+{
+    const RCStrictDeviceEpisodeResult replay{
+        MineRCEpisodeStrictDevice(
+            header, params, height, gemm, provider, cancelled)};
+    RCWinnerResealResult out;
+    out.digest = replay.digest;
+    out.acceleration = replay.acceleration;
+    switch (replay.outcome) {
+    case RCStrictDeviceEpisodeOutcome::Cancelled:
+        out.outcome = RCWinnerResealOutcome::Cancelled;
+        return out;
+    case RCStrictDeviceEpisodeOutcome::LocalAcceleratorFailure:
+        out.outcome = RCWinnerResealOutcome::LocalAcceleratorFailure;
+        return out;
+    case RCStrictDeviceEpisodeOutcome::Complete:
+        break;
+    }
+    if (out.digest != candidate_digest) {
+        out.outcome =
+            RCWinnerResealOutcome::CandidateDigestDivergence;
+        return out;
+    }
+    out.outcome = RCWinnerResealOutcome::Sealed;
+    return out;
+}
+
 uint256 MineRCEpisode(const CBlockHeader& header, const RCEpisodeParams& params, int32_t height,
                       std::vector<RCRoundTranscript>* out_rounds,
                       const lt::ExactGemmBackend& gemm)

@@ -41,7 +41,8 @@ struct ResolvedRCExactGemm {
  *  BTX_MATMUL_LT_EXACT_BACKEND=tpu|trainium selects a registered, self-qualified
  *  bounded-exact cloud provider; otherwise ResolveBackend() wires CUDA, HIP,
  *  Metal, or Ascend. Null slots keep MatExpand on CPU ExactGemm*, and false
- *  provider returns fall back per call. Winners always CPU-reseal.
+ *  provider returns fall back per call. Profile 1 winners use a separate
+ *  strict-device reseal after this generic LT resolution path.
  *
  *  LT-only: does NOT run ProbeRCSelfQual / clear on RC deficit. RC self-qual
  *  must never corrupt a valid LT ExactGemm inject while RC is inactive. */
