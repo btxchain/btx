@@ -152,7 +152,12 @@ bool AdmitRCHeader(node::RCAdmissionStore& store,
         return false;
     }
     const auto now{std::chrono::steady_clock::now()};
-    if (store.Remember(ticket, keyed_netgroup, now) !=
+    // This scheduler-only helper already has the complete header, so exercise
+    // the authenticated tier. The unknown-header quarantine intentionally
+    // rate-limits repeated arbitrary hashes and is covered independently by
+    // matmul_rc_admission_tests.
+    if (store.RememberKnown(
+            ticket, header, keyed_netgroup, pow_limit, now) !=
         node::RCAdmissionStore::RememberResult::Stored) {
         return false;
     }

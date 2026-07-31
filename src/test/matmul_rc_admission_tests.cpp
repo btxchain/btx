@@ -291,7 +291,6 @@ BOOST_AUTO_TEST_CASE(quarantine_rate_limits_and_counters_are_exact)
     CBlockHeader a{Header()};
     CBlockHeader b{a};
     CBlockHeader c{a};
-    ++b.nTime;
     b.nTime += 2;
     c.nTime += 3;
 
