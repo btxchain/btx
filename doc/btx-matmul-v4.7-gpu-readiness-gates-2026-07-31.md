@@ -33,14 +33,38 @@ The PR97 implementation has the following local controls:
   `LocalAcceleratorFailure`, or `Cancelled`. Only a completed authoritative
   disagreement or over-target digest is consensus-invalid.
 - Strict validation never starts the automatic portable replay after a device
-  digest mismatch. The provider failure is local and the block remains
-  retryable. A provider that returns a mismatching digest or fails after device
-  submissions begin is quarantined for the rest of the process lifetime.
-  Further strict work on that provider fails locally before submission.
+  digest mismatch. A first mismatch is a block-scoped ambiguity, not evidence
+  that the provider failed: the block remains retryable and the provider stays
+  in service. A bounded registry can retry only on another opaque,
+  production-canary-authorized backend execution identity. Agreement on the
+  same non-header digest produces
+  `InvalidConsensus`; reproduction of the header quarantines only the faulty
+  provider. With no independent provider, the result is explicitly degraded
+  and retryable. Execution/coverage failures remain local and may quarantine
+  the provider that actually failed.
 - One process-wide accelerator owner schedules authenticated-tip validation,
   winner reseal, candidate mining, and speculative validation in that priority
-  order. Higher-priority work can request cancellation of a lower-priority
-  owner.
+  order. Direct/internal ExactReplay callers enter the same owner unless their
+  current worker thread already holds its lease. Higher-priority work can
+  request cancellation of a lower-priority owner. The owner has fixed global
+  and per-lane waiter bounds, a queue deadline, exact release ownership, and
+  observable workspace request/capacity/high-water accounting. Every mining,
+  reseal, worker, and direct replay lease carries the canonical nonzero
+  workspace estimate; strict readiness requires the post-daemon device probe
+  to report enough usable capacity. Request/reservation fields are explicitly
+  estimates. Actual-use fields remain zero with a zero sample count unless the
+  provider publishes a measured allocation value. The current generic backend
+  ABI does not yet publish that measurement, so actual-use fields remain
+  explicitly unavailable instead of echoing the admission estimate.
+- A completed strict Profile 1 winner reseal may publish one bounded,
+  expiring, exact-final-header and height-bound authority record. Local block
+  acceptance consumes it once to skip only the duplicate ExactReplay. Ordinary
+  block-body, transaction, script, chain-context, and connection checks still
+  run, and a pool share that misses the real block target cannot publish it.
+- Accelerator resolution, self-qualification, provider/runtime identity,
+  production canary execution, and readiness-dependent service bits run only
+  in the final daemon process. A pre-fork invariant aborts daemonization if an
+  RC resolver or canary was entered early.
 - Resolver and scheduler readiness, queue, cancellation, and timing state is
   exposed under `getmininginfo` backend-runtime telemetry.
 - Scheduler telemetry is split into candidate-mining, winner-reseal,
@@ -75,8 +99,10 @@ usable. Operators preparing for an activated RC epoch must explicitly select
 
 ## Local accelerator failure runbook
 
-`getmininginfo.backend_runtime.rc_exact_replay.provider_health` reports the
-quarantined provider, reason, event count, and recovery action. A quarantined
+`getmininginfo.backend_runtime.rc_exact_replay.last_validation` distinguishes
+execution failure from an unconfirmed digest mismatch and reports adjudication,
+attempt counts, and the participating providers. `provider_health` reports a
+provider proven faulty, its event count, and the recovery action. A quarantined
 provider is a local availability problem:
 
 1. Leave the candidate pending/retryable. Do not invalidate it, reduce its
@@ -93,10 +119,17 @@ provider is a local availability problem:
    inline recovery path and its result must not silently clear a device
    quarantine.
 
-The current resolver selects one qualified provider per process. Automatic
-same-process failover is therefore not claimed. Selecting a second provider
-requires an operator-controlled restart; adding hot multi-provider failover
-requires a separate device registry and scheduler ownership review.
+The bounded same-process registry and independent-adjudication state machine are
+implemented, but the launch candidate deliberately registers no production
+alternate by default. Registration requires an opaque capability issued by a
+successful current-process production canary and bound to the runtime/device,
+exact backend callbacks, transcript, MatMul dimension, and episode epoch.
+Moreover, production independence is fail-closed until the resolver binds each
+capability to a distinct physical-device execution identity; labels and thin
+callback wrappers are not sufficient. Per-device enumeration/binding and
+canary evidence must be completed for each supported multi-device deployment.
+Until then, a sole GPU remains available after an unconfirmed mismatch and the
+affected header remains retryable; restart alone is not independent evidence.
 
 ## Lifecycle calibration
 
@@ -107,6 +140,7 @@ candidate execution
 + candidate queue wait
 + winner reseal
 + reseal queue wait
++ one-shot local winner-authority handoff
 + authenticated relay
 + receiving tip validation
 + validation queue wait
@@ -135,8 +169,9 @@ committed production manifest is empty and no matching canary can run.
 
 The startup/epoch canary mechanism itself is implemented. It binds a strict
 production replay to provider family, public device architecture class,
-driver/runtime ABI, activation height, profile, transcript, and complete
-episode parameters. CUDA binds its public compute-capability class and numeric
+driver/runtime ABI, activation height, profile, transcript, the consensus
+MatMul dimension carried by the canonical canary header, and complete episode
+parameters. CUDA binds its public compute-capability class and numeric
 driver/runtime API versions. Metal binds its public GPU architecture class and
 the OS build/release that distributes the Metal driver and runtime; it never
 records a device name, serial, hostname, or account identifier. The committed
@@ -174,13 +209,15 @@ The separate activation-height change must still provide:
    tuple.
 3. Strict zero-fallback two-node mining, winner-reseal, relay, and validation
    evidence on every supported provider family.
-4. Missing-device, allocation/kernel/driver failure, mismatch quarantine,
-   recovery/alternate-provider retry, cancellation, restart, IBD, and reorg
-   campaigns showing that local failures never punish peers or poison verdict
-   caches.
-5. Sustained contention and tail-latency results, including simultaneous
+4. Foreground, `-daemon`, and `-daemonwait` CUDA lifecycle campaigns on the
+   exact final binary, including a two-daemon strict RC-boundary cycle.
+5. Missing-device, allocation/kernel/driver failure, independent mismatch
+   adjudication, degraded sole-provider operation, alternate-provider retry,
+   cancellation, restart, IBD, and reorg campaigns showing that local failures
+   never punish peers or poison verdict caches.
+6. Sustained contention and tail-latency results, including simultaneous
    mining, tip validation, and speculative work.
-6. ASERT and target-spacing calibration against the complete
+7. ASERT and target-spacing calibration against the complete
    candidate-to-authenticated-tip lifecycle rather than one replay in
    isolation.
 

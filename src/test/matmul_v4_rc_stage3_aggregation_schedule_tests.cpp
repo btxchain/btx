@@ -417,8 +417,14 @@ BOOST_AUTO_TEST_CASE(
         scenario.every_parent_child_count_at_most_two);
     BOOST_CHECK(!scenario.every_parent_full_wide_eligible);
     BOOST_CHECK(
-        scenario.numeric_exact_site_target_met);
-    BOOST_CHECK(scenario.numeric_cap_target_met);
+        !scenario.numeric_exact_site_target_met);
+    BOOST_CHECK(!scenario.numeric_cap_target_met);
+    BOOST_CHECK_LT(
+        scenario.exact_site_screen.all_query_work_bits,
+        100.0);
+    BOOST_CHECK_LT(
+        scenario.cap_screen.all_query_work_bits,
+        100.0);
     BOOST_CHECK(!scenario.all_node_execution_complete);
     BOOST_CHECK(!scenario.theorem_complete);
     BOOST_CHECK(!scenario.authority_eligible);

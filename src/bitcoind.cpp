@@ -201,6 +201,12 @@ static bool AppInit(NodeContext& node)
 
         if (args.GetBoolArg("-daemon", DEFAULT_DAEMON) || args.GetBoolArg("-daemonwait", DEFAULT_DAEMONWAIT)) {
 #if HAVE_DECL_FORK
+            // CUDA, Metal, and other accelerator state must be initialized in
+            // the daemon child. Refuse to fork if any early initialization
+            // path has already resolved or exercised the RC accelerator.
+            if (!CheckMatMulAcceleratorPreForkInvariant()) {
+                return false;
+            }
             tfm::format(std::cout, "BTX node starting\n");
 
             // Daemonize

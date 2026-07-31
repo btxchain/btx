@@ -136,6 +136,7 @@ enum class LtMetalArchNameClass : uint8_t {
 struct LtMetalArchProbe {
     bool available{false};
     std::string device_name;
+    uint64_t recommended_working_set_bytes{0};
     LtMetalArchNameClass name_class{LtMetalArchNameClass::Unknown};
     std::string name_class_string; // m4_class / m5_class / unknown / other
     bool metal4_tensor_ops_compile_ok{false};

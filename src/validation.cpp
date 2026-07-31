@@ -10693,9 +10693,34 @@ static bool ContextualCheckBlock(const CBlock& block,
                     }
                     return valid;
                 };
+                std::string winner_authority_provider;
+                const bool winner_reseal_authority{
+                    !trusted_profile1 &&
+                    consensusParams.IsMatMulRCProfile1Active(nHeight) &&
+                    !consensusParams.IsMatMulRCCoupledActive(nHeight) &&
+                    ConsumeMatMulRCWinnerResealAuthority(
+                        block, nHeight, consensusParams,
+                        &winner_authority_provider)};
                 const CBlockIndex* exact_index{
                     chainman.m_blockman.LookupBlockIndex(block.GetHash())};
-                if (exact_index != nullptr &&
+                if (winner_reseal_authority) {
+                    // This consumes exactly one process-local epsilon-zero
+                    // result produced by the strict winner reseal. It skips
+                    // only the duplicate replay: the function continues to
+                    // ContextualCheckBlockBodyOnly below, and ProcessNewBlock /
+                    // ConnectBlock retain all ordinary block and script checks.
+                    encdr_ok = true;
+                    if (rc_authority != nullptr) {
+                        *rc_authority =
+                            MatMulRCAuthorityProvenance::
+                                LOCAL_EXACT_REPLAY;
+                    }
+                    LogPrintf(
+                        "matmul RC local winner authority consumed: "
+                        "block=%s height=%d provider=%s\n",
+                        block.GetHash().ToString(), nHeight,
+                        winner_authority_provider);
+                } else if (exact_index != nullptr &&
                     (exact_index->nStatus & BLOCK_EXACT_REPLAY_VERIFIED)) {
                     encdr_ok = true;
                     if (rc_authority != nullptr) {

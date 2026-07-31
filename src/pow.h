@@ -23,6 +23,12 @@ class CBlock;
 class CBlockIndex;
 class uint256;
 class arith_uint256;
+namespace matmul::v4::rc {
+class RCProductionProviderCapability;
+}
+namespace matmul::v4::lt {
+struct ExactGemmBackend;
+}
 
 /**
  * Convert nBits value to target.
@@ -308,6 +314,49 @@ enum class MatMulRCValidationOutcome : uint8_t {
     LOCAL_ACCELERATOR_FAILURE = 2,
     CANCELLED = 3,
 };
+
+/**
+ * Process-local handoff from a completed strict winner reseal to ordinary
+ * local block acceptance. The handoff is exact-header-bound, bounded,
+ * expiring, and single-use. It authorizes only reuse of the already completed
+ * Profile-1 ExactReplay; it never bypasses block-body or script validation.
+ */
+struct MatMulRCWinnerAuthorityStats {
+    uint64_t published{0};
+    uint64_t consumed{0};
+    uint64_t rejected_not_block_target{0};
+    uint64_t rejected_not_production_ready{0};
+    uint64_t invalidated_before_consume{0};
+    uint64_t expired{0};
+    uint64_t evicted{0};
+    uint64_t misses{0};
+    uint64_t entries{0};
+    double last_candidate_to_reseal_s{0};
+    double last_reseal_to_consume_s{0};
+    double last_candidate_to_consume_s{0};
+    std::string last_provider;
+};
+
+bool PublishMatMulRCWinnerResealAuthority(
+    const CBlockHeader& header, int32_t block_height,
+    const arith_uint256& block_target, std::string provider,
+    const matmul::v4::rc::RCProductionProviderCapability& capability,
+    const matmul::v4::lt::ExactGemmBackend& backend,
+    const Consensus::Params& consensus,
+    std::chrono::milliseconds ttl,
+    std::chrono::steady_clock::time_point candidate_started,
+    std::chrono::steady_clock::time_point reseal_completed);
+
+bool ConsumeMatMulRCWinnerResealAuthority(
+    const CBlockHeader& header, int32_t block_height,
+    const Consensus::Params& consensus,
+    std::string* provider = nullptr);
+
+[[nodiscard]] MatMulRCWinnerAuthorityStats
+GetMatMulRCWinnerAuthorityStats();
+
+/** Test-only; clears every process-local authority record and counter. */
+void ResetMatMulRCWinnerAuthorityForTest();
 
 /** ENC_RC / Resident Curriculum DIGEST_RECOMPUTE checker. Requires
  *  IsMatMulRCActive(block_height). Consensus path is ε=0

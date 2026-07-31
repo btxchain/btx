@@ -33,6 +33,7 @@
 #include <matmul/matmul_v4_rc_datacenter.h>
 #include <matmul/matmul_v4_rc_freivalds_sampled.h>
 #include <matmul/matmul_v4_rc_gkr.h>
+#include <matmul/matmul_v4_rc_production_canary.h>
 #include <matmul/matmul_v4_rc_stage3.h>
 #include <matmul/matmul_v4_rc_stage3_consensus.h>
 #include <matmul/matmul_v4_rc_stage3_coupled_winner_capture.h>
@@ -4628,7 +4629,230 @@ std::map<uint256, bool> g_matmul_encdr_verdicts;
 std::deque<uint256> g_matmul_encdr_verdict_fifo;
 std::map<uint256, std::pair<bool, uint32_t>> g_matmul_encdr_verdict_pins;
 std::map<uint256, uint32_t> g_matmul_encdr_assumevalid_trust_pins;
+
+constexpr size_t MATMUL_RC_WINNER_AUTHORITY_MAX{16};
+struct MatMulRCWinnerAuthorityRecord {
+    uint256 block_hash;
+    uint256 prev_hash;
+    uint256 merkle_root;
+    uint256 digest;
+    uint256 seed_a;
+    uint256 seed_b;
+    int32_t height{0};
+    int32_t version{0};
+    uint32_t time{0};
+    uint32_t bits{0};
+    uint64_t nonce64{0};
+    uint16_t dimension{0};
+    std::string provider;
+    matmul::v4::rc::RCProductionProviderCapability production_capability;
+    std::string production_capability_id;
+    std::chrono::steady_clock::time_point candidate_started{};
+    std::chrono::steady_clock::time_point reseal_completed{};
+    std::chrono::steady_clock::time_point expires{};
+};
+std::mutex g_matmul_rc_winner_authority_mutex;
+std::map<uint256, MatMulRCWinnerAuthorityRecord>
+    g_matmul_rc_winner_authorities;
+std::deque<uint256> g_matmul_rc_winner_authority_fifo;
+MatMulRCWinnerAuthorityStats g_matmul_rc_winner_authority_stats;
+
+double MatMulAuthoritySeconds(
+    std::chrono::steady_clock::duration duration)
+{
+    return std::chrono::duration<double>(duration).count();
+}
+
+void PruneExpiredMatMulRCWinnerAuthorities(
+    std::chrono::steady_clock::time_point now)
+{
+    for (auto it{g_matmul_rc_winner_authorities.begin()};
+         it != g_matmul_rc_winner_authorities.end();) {
+        if (it->second.expires > now) {
+            ++it;
+            continue;
+        }
+        it = g_matmul_rc_winner_authorities.erase(it);
+        ++g_matmul_rc_winner_authority_stats.expired;
+    }
+    std::erase_if(
+        g_matmul_rc_winner_authority_fifo,
+        [](const uint256& hash) {
+            return !g_matmul_rc_winner_authorities.contains(hash);
+        });
+}
+
+bool MatMulRCWinnerAuthorityMatches(
+    const MatMulRCWinnerAuthorityRecord& record,
+    const CBlockHeader& header, int32_t height)
+{
+    return record.block_hash == header.GetHash() &&
+        record.prev_hash == header.hashPrevBlock &&
+        record.merkle_root == header.hashMerkleRoot &&
+        record.digest == header.matmul_digest &&
+        record.seed_a == header.seed_a && record.seed_b == header.seed_b &&
+        record.height == height && record.version == header.nVersion &&
+        record.time == header.nTime && record.bits == header.nBits &&
+        record.nonce64 == header.nNonce64 &&
+        record.dimension == header.matmul_dim;
+}
 } // namespace
+
+bool PublishMatMulRCWinnerResealAuthority(
+    const CBlockHeader& header, int32_t block_height,
+    const arith_uint256& block_target, std::string provider,
+    const matmul::v4::rc::RCProductionProviderCapability& capability,
+    const matmul::v4::lt::ExactGemmBackend& backend,
+    const Consensus::Params& consensus,
+    std::chrono::milliseconds ttl,
+    std::chrono::steady_clock::time_point candidate_started,
+    std::chrono::steady_clock::time_point reseal_completed)
+{
+    const auto now{std::chrono::steady_clock::now()};
+    std::lock_guard<std::mutex> lock{
+        g_matmul_rc_winner_authority_mutex};
+    PruneExpiredMatMulRCWinnerAuthorities(now);
+    std::string capability_reason;
+    if (!consensus.IsMatMulRCProfile1Active(block_height) ||
+        consensus.IsMatMulRCCoupledActive(block_height) ||
+        consensus.fMatMulRCUseToyDims ||
+        header.matmul_dim != consensus.nMatMulV4Dimension ||
+        !matmul::v4::rc::RCProductionProviderCapabilityAuthorizes(
+            capability, provider, &backend, consensus,
+            block_height, &capability_reason)) {
+        ++g_matmul_rc_winner_authority_stats.
+            rejected_not_production_ready;
+        LogPrintf(
+            "MatMul RC winner authority issuance declined: block=%s "
+            "height=%d provider=%s reason=%s\n",
+            header.GetHash().ToString(), block_height, provider,
+            capability_reason.empty() ? "epoch_or_profile_mismatch" :
+                                        capability_reason);
+        return false;
+    }
+    if (header.matmul_digest.IsNull() || block_target == 0 ||
+        UintToArith256(header.matmul_digest) > block_target ||
+        ttl <= std::chrono::milliseconds{0} ||
+        candidate_started.time_since_epoch().count() == 0 ||
+        reseal_completed < candidate_started) {
+        ++g_matmul_rc_winner_authority_stats.
+            rejected_not_block_target;
+        return false;
+    }
+
+    const uint256 hash{header.GetHash()};
+    MatMulRCWinnerAuthorityRecord record{
+        .block_hash = hash,
+        .prev_hash = header.hashPrevBlock,
+        .merkle_root = header.hashMerkleRoot,
+        .digest = header.matmul_digest,
+        .seed_a = header.seed_a,
+        .seed_b = header.seed_b,
+        .height = block_height,
+        .version = header.nVersion,
+        .time = header.nTime,
+        .bits = header.nBits,
+        .nonce64 = header.nNonce64,
+        .dimension = header.matmul_dim,
+        .provider = std::move(provider),
+        .production_capability = capability,
+        .production_capability_id =
+            matmul::v4::rc::RCProductionProviderCapabilityId(capability),
+        .candidate_started = candidate_started,
+        .reseal_completed = reseal_completed,
+        .expires = now + ttl,
+    };
+    const bool replacing{
+        g_matmul_rc_winner_authorities.contains(hash)};
+    while (!replacing &&
+           g_matmul_rc_winner_authorities.size() >=
+               MATMUL_RC_WINNER_AUTHORITY_MAX) {
+        const uint256 oldest{g_matmul_rc_winner_authority_fifo.front()};
+        g_matmul_rc_winner_authority_fifo.pop_front();
+        if (g_matmul_rc_winner_authorities.erase(oldest) != 0) {
+            ++g_matmul_rc_winner_authority_stats.evicted;
+        }
+    }
+    g_matmul_rc_winner_authorities.insert_or_assign(
+        hash, std::move(record));
+    if (!replacing) g_matmul_rc_winner_authority_fifo.push_back(hash);
+    ++g_matmul_rc_winner_authority_stats.published;
+    g_matmul_rc_winner_authority_stats.last_candidate_to_reseal_s =
+        MatMulAuthoritySeconds(reseal_completed - candidate_started);
+    g_matmul_rc_winner_authority_stats.entries =
+        g_matmul_rc_winner_authorities.size();
+    return true;
+}
+
+bool ConsumeMatMulRCWinnerResealAuthority(
+    const CBlockHeader& header, int32_t block_height,
+    const Consensus::Params& consensus,
+    std::string* provider)
+{
+    const auto now{std::chrono::steady_clock::now()};
+    std::lock_guard<std::mutex> lock{
+        g_matmul_rc_winner_authority_mutex};
+    PruneExpiredMatMulRCWinnerAuthorities(now);
+    const uint256 hash{header.GetHash()};
+    const auto it{g_matmul_rc_winner_authorities.find(hash)};
+    if (it == g_matmul_rc_winner_authorities.end() ||
+        !MatMulRCWinnerAuthorityMatches(it->second, header, block_height)) {
+        ++g_matmul_rc_winner_authority_stats.misses;
+        g_matmul_rc_winner_authority_stats.entries =
+            g_matmul_rc_winner_authorities.size();
+        return false;
+    }
+    std::string capability_reason;
+    if (!matmul::v4::rc::RCProductionProviderCapabilityAuthorizes(
+            it->second.production_capability, it->second.provider,
+            /*backend=*/nullptr, consensus, block_height,
+            &capability_reason)) {
+        g_matmul_rc_winner_authorities.erase(it);
+        std::erase(g_matmul_rc_winner_authority_fifo, hash);
+        ++g_matmul_rc_winner_authority_stats.misses;
+        ++g_matmul_rc_winner_authority_stats.invalidated_before_consume;
+        g_matmul_rc_winner_authority_stats.entries =
+            g_matmul_rc_winner_authorities.size();
+        LogPrintf(
+            "MatMul RC winner authority invalidated before consume: "
+            "block=%s height=%d reason=%s\n",
+            hash.ToString(), block_height, capability_reason);
+        return false;
+    }
+    const MatMulRCWinnerAuthorityRecord record{it->second};
+    g_matmul_rc_winner_authorities.erase(it);
+    std::erase(g_matmul_rc_winner_authority_fifo, hash);
+    ++g_matmul_rc_winner_authority_stats.consumed;
+    g_matmul_rc_winner_authority_stats.last_reseal_to_consume_s =
+        MatMulAuthoritySeconds(now - record.reseal_completed);
+    g_matmul_rc_winner_authority_stats.last_candidate_to_consume_s =
+        MatMulAuthoritySeconds(now - record.candidate_started);
+    g_matmul_rc_winner_authority_stats.last_provider = record.provider;
+    g_matmul_rc_winner_authority_stats.entries =
+        g_matmul_rc_winner_authorities.size();
+    if (provider != nullptr) *provider = record.provider;
+    return true;
+}
+
+MatMulRCWinnerAuthorityStats GetMatMulRCWinnerAuthorityStats()
+{
+    std::lock_guard<std::mutex> lock{
+        g_matmul_rc_winner_authority_mutex};
+    PruneExpiredMatMulRCWinnerAuthorities(
+        std::chrono::steady_clock::now());
+    g_matmul_rc_winner_authority_stats.entries =
+        g_matmul_rc_winner_authorities.size();
+    return g_matmul_rc_winner_authority_stats;
+}
+
+void ResetMatMulRCWinnerAuthorityForTest()
+{
+    std::lock_guard<std::mutex> lock{
+        g_matmul_rc_winner_authority_mutex};
+    g_matmul_rc_winner_authorities.clear();
+    g_matmul_rc_winner_authority_fifo.clear();
+    g_matmul_rc_winner_authority_stats = {};
+}
 
 void CacheMatMulEncDrVerdict(const uint256& block_hash, bool valid)
 {
@@ -6848,6 +7072,8 @@ static bool SolveMatMulV4RC(CBlockHeader& block,
             RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
             return false;
         }
+        const auto candidate_started{
+            std::chrono::steady_clock::now()};
         if (!SetDeterministicMatMulSeeds(block, params, block_height, parent_median_time_past)) {
             RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
             return false;
@@ -6909,7 +7135,12 @@ static bool SolveMatMulV4RC(CBlockHeader& block,
                             "candidate:%d:%llu", block_height,
                             static_cast<unsigned long long>(
                                 block.nNonce64)),
-                        abort_flag)};
+                        abort_flag,
+                        matmul::v4::rc::RCAcceleratorScheduler::
+                            DEFAULT_MAX_QUEUE_WAIT,
+                        matmul::v4::rc::
+                            EstimateRCExactReplayWorkspaceBytes(
+                                params_rc))};
                 if (!accelerator_lease) {
                     LogPrintf(
                         "SolveMatMulV4RC: candidate accelerator wait "
@@ -7074,7 +7305,12 @@ static bool SolveMatMulV4RC(CBlockHeader& block,
                             "winner-reseal:%d:%llu", block_height,
                             static_cast<unsigned long long>(
                                 block.nNonce64)),
-                        abort_flag)};
+                        abort_flag,
+                        matmul::v4::rc::RCAcceleratorScheduler::
+                            DEFAULT_MAX_QUEUE_WAIT,
+                        matmul::v4::rc::
+                            EstimateRCExactReplayWorkspaceBytes(
+                                params_rc))};
                 if (!accelerator_lease) {
                     LogPrintf(
                         "SolveMatMulV4RC: winner reseal accelerator "
@@ -7163,6 +7399,8 @@ static bool SolveMatMulV4RC(CBlockHeader& block,
             RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
             return false;
         }
+        const auto reseal_completed{
+            std::chrono::steady_clock::now()};
         if (UintToArith256(resealed) <= effective_target) {
             block.matmul_digest = resealed;
             if constexpr (
@@ -7247,6 +7485,55 @@ static bool SolveMatMulV4RC(CBlockHeader& block,
                 if (pr.timing.over_budget) {
                     LogWarning("SolveMatMulV4RC: problems arise — GKR prove over budget; "
                                "HBM-scale GKR PARKED; ExactReplay remains consensus\n");
+                }
+            }
+            // A completed strict Profile-1 winner reseal is the same epsilon-0
+            // computation local ContextualCheckBlock would otherwise repeat
+            // immediately before relay. Hand it off by the final fixed-header
+            // identity, for one bounded/expiring local use only. Never publish
+            // authority for a pool share that misses the real block target.
+            if constexpr (!matmul::v4::rc::kRCStage3SuccinctAuthorityReady) {
+                if (!params.fMatMulRCUseToyDims &&
+                    params.nMatMulRCProfile == 1 &&
+                    UintToArith256(resealed) <= block_target) {
+                    const auto ttl =
+                        std::chrono::duration_cast<
+                            std::chrono::milliseconds>(
+                            params.PowTargetSpacing() * 2);
+                    std::string capability_reason;
+                    const bool resolver_ready{
+                        resolved_rc.self_qualified &&
+                        resolved_rc.automatic_policy_eligible &&
+                        resolved_rc.production_goldens_available &&
+                        resolved_rc.startup_canary_passed &&
+                        resolved_rc.production_eligible &&
+                        resolved_rc.activation_ready &&
+                        resolved_rc.backend.gemm_s8s8 != nullptr};
+                    const auto capability{
+                        resolver_ready
+                            ? matmul::v4::rc::
+                                  GetRCProductionProviderCapability(
+                                      resolved_rc.provider,
+                                      resolved_rc.backend, params,
+                                      block_height, &capability_reason)
+                            : std::nullopt};
+                    if (!resolver_ready || !capability.has_value() ||
+                        !PublishMatMulRCWinnerResealAuthority(
+                            block, block_height, block_target,
+                            resolved_rc.provider, *capability,
+                            resolved_rc.backend, params, ttl,
+                            candidate_started, reseal_completed)) {
+                        LogWarning(
+                            "SolveMatMulV4RC: strict winner authority "
+                            "handoff declined for block=%s provider=%s "
+                            "resolver_ready=%d reason=%s; local acceptance "
+                            "will recompute\n",
+                            block.GetHash().ToString(), resolved_rc.provider,
+                            resolver_ready,
+                            capability_reason.empty()
+                                ? "production_capability_unavailable"
+                                : capability_reason);
+                    }
                 }
             }
             RegisterMatMulSolveRuntimeSample(true, std::chrono::steady_clock::now() - start);

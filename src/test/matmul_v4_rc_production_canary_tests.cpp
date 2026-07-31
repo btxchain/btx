@@ -4,9 +4,15 @@
 
 #include <matmul/matmul_v4_rc_production_canary.h>
 
+#include <chainparams.h>
+#include <consensus/params.h>
+#include <init.h>
+#include <matmul/exact_gemm_resolve.h>
 #include <test/util/setup_common.h>
 
 #include <boost/test/unit_test.hpp>
+
+#include <limits>
 
 namespace rc = matmul::v4::rc;
 
@@ -39,6 +45,7 @@ rc::RCProductionEpochIdentity Epoch()
     out.activation_height = 500'000;
     out.profile = 1;
     out.transcript_version = rc::kRCTranscriptVersion;
+    out.matmul_dimension = 4096;
     out.params = rc::MakeToyRCEpisodeParams();
     return out;
 }
@@ -63,6 +70,39 @@ BOOST_AUTO_TEST_CASE(committed_manifest_is_explicitly_fail_closed)
     const auto& manifest{rc::CommittedRCProductionGoldenManifest()};
     BOOST_CHECK(manifest.empty());
     BOOST_CHECK(rc::FindRCProductionGolden(Provider(), Epoch(), manifest) == nullptr);
+}
+
+BOOST_AUTO_TEST_CASE(parameter_interaction_is_accelerator_runtime_probe_free)
+{
+    matmul_v4::accel::ResetRCExactGemmResolveCacheForTest();
+    rc::ResetRCProductionCanaryForTest();
+    BOOST_REQUIRE(AppInitParameterInteraction(*m_node.args));
+
+    const auto resolution{
+        matmul_v4::accel::ProbeLastRCExactGemmResolution()};
+    const auto canary{rc::GetLastRCProductionCanaryStatus()};
+    BOOST_CHECK(!resolution.resolved);
+    BOOST_CHECK(canary.outcome == rc::RCProductionCanaryOutcome::NotRun);
+    BOOST_CHECK(!canary.attempted);
+    BOOST_CHECK(CheckMatMulAcceleratorPreForkInvariant());
+}
+
+BOOST_AUTO_TEST_CASE(prefork_guard_rejects_an_early_canary_attempt)
+{
+    rc::ResetRCProductionCanaryForTest();
+    Consensus::Params consensus{Params().GetConsensus()};
+    consensus.nMatMulRCHeight = 500'000;
+    consensus.nMatMulRCProfile = 1;
+    consensus.fMatMulRCUseToyDims = false;
+    consensus.nMatMulV4Dimension = 4096;
+
+    const auto status{rc::RunRCProductionStartupCanaryForTest(
+        "test:unsupported_provider", {},
+        consensus, consensus.nMatMulRCHeight)};
+    BOOST_CHECK(status.outcome != rc::RCProductionCanaryOutcome::NotRun);
+    BOOST_CHECK(!CheckMatMulAcceleratorPreForkInvariant());
+    rc::ResetRCProductionCanaryForTest();
+    BOOST_CHECK(CheckMatMulAcceleratorPreForkInvariant());
 }
 
 BOOST_AUTO_TEST_CASE(provider_identity_probe_is_public_and_fail_closed)
@@ -101,8 +141,33 @@ BOOST_AUTO_TEST_CASE(manifest_match_binds_provider_runtime_and_epoch)
     ++epoch.activation_height;
     BOOST_CHECK(rc::FindRCProductionGolden(Provider(), epoch, manifest) == nullptr);
     epoch = Epoch();
+    ++epoch.matmul_dimension;
+    BOOST_CHECK(rc::FindRCProductionGolden(Provider(), epoch, manifest) == nullptr);
+    epoch = Epoch();
     ++epoch.params.b_seq;
     BOOST_CHECK(rc::FindRCProductionGolden(Provider(), epoch, manifest) == nullptr);
+}
+
+BOOST_AUTO_TEST_CASE(epoch_identity_copies_and_validates_consensus_dimension)
+{
+    Consensus::Params consensus{Params().GetConsensus()};
+    consensus.nMatMulRCProfile = 1;
+    consensus.fMatMulRCUseToyDims = false;
+    consensus.nMatMulV4Dimension = 4096;
+    const auto epoch{rc::MakeRCProductionEpochIdentity(consensus, 500'000)};
+    BOOST_CHECK_EQUAL(epoch.matmul_dimension, 4096U);
+
+    consensus.nMatMulV4Dimension =
+        static_cast<uint32_t>(std::numeric_limits<uint16_t>::max()) + 1U;
+    const auto status{rc::RunRCProductionStartupCanaryForTest(
+        "test:unsupported_provider", {},
+        consensus, 500'000)};
+    BOOST_CHECK(status.outcome == rc::RCProductionCanaryOutcome::UnsupportedEpoch);
+    BOOST_CHECK_EQUAL(status.reason,
+                      "production_matmul_dimension_out_of_header_range");
+    BOOST_CHECK(!status.attempted);
+    BOOST_CHECK(!status.activation_ready);
+    rc::ResetRCProductionCanaryForTest();
 }
 
 BOOST_AUTO_TEST_CASE(pending_or_unreviewed_manifest_entries_never_authorize)
@@ -160,14 +225,29 @@ BOOST_AUTO_TEST_CASE(canary_result_requires_full_device_coverage_and_exact_diges
 
 BOOST_AUTO_TEST_CASE(canary_header_is_deterministic_and_nonce_bound)
 {
-    const CBlockHeader a{rc::MakeRCProductionCanaryHeader(11)};
-    const CBlockHeader b{rc::MakeRCProductionCanaryHeader(11)};
-    const CBlockHeader c{rc::MakeRCProductionCanaryHeader(12)};
+    const auto epoch{Epoch()};
+    const CBlockHeader a{rc::MakeRCProductionCanaryHeader(epoch, 11)};
+    const CBlockHeader b{rc::MakeRCProductionCanaryHeader(epoch, 11)};
+    const CBlockHeader c{rc::MakeRCProductionCanaryHeader(epoch, 12)};
+    auto other_dimension{epoch};
+    ++other_dimension.matmul_dimension;
+    const CBlockHeader d{
+        rc::MakeRCProductionCanaryHeader(other_dimension, 11)};
     BOOST_CHECK(a.GetHash() == b.GetHash());
     BOOST_CHECK(a.GetHash() != c.GetHash());
+    BOOST_CHECK(a.GetHash() != d.GetHash());
     BOOST_CHECK_EQUAL(a.nNonce64, 11U);
+    BOOST_CHECK_EQUAL(a.matmul_dim, epoch.matmul_dimension);
+    BOOST_CHECK_EQUAL(d.matmul_dim, other_dimension.matmul_dimension);
     BOOST_CHECK(!a.seed_a.IsNull());
     BOOST_CHECK(!a.seed_b.IsNull());
+
+    auto unsupported_epoch{epoch};
+    unsupported_epoch.matmul_dimension =
+        static_cast<uint32_t>(std::numeric_limits<uint16_t>::max()) + 1U;
+    const CBlockHeader unsupported{
+        rc::MakeRCProductionCanaryHeader(unsupported_epoch, 11)};
+    BOOST_CHECK_EQUAL(unsupported.matmul_dim, 0U);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

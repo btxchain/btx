@@ -8,11 +8,16 @@
 #include <cuda/cuda_context.h>
 #include <cuda/matmul_v4_lt_tensor_gemm.h>
 #include <logging.h>
+#include <matmul/exact_gemm_resolve.h>
 #include <matmul/matmul_v4_rc_scale.h>
+#include <random.h>
 
+#include <array>
 #include <chrono>
 #include <limits>
+#include <map>
 #include <mutex>
+#include <sstream>
 #include <utility>
 
 #if defined(__APPLE__)
@@ -20,10 +25,54 @@
 #endif
 
 namespace matmul::v4::rc {
+
+struct RCProductionProviderCapabilityAccess {
+    static RCProductionProviderCapability Make(uint64_t nonce,
+                                               uint64_t generation)
+    {
+        RCProductionProviderCapability out;
+        out.m_process_nonce = nonce;
+        out.m_generation = generation;
+        return out;
+    }
+
+    static uint64_t Nonce(const RCProductionProviderCapability& capability)
+    {
+        return capability.m_process_nonce;
+    }
+
+    static uint64_t Generation(
+        const RCProductionProviderCapability& capability)
+    {
+        return capability.m_generation;
+    }
+};
+
 namespace {
 
 std::mutex g_production_canary_mutex;
 RCProductionCanaryStatus g_last_production_canary;
+
+struct BackendIdentity {
+    std::array<uintptr_t, 8> callbacks{};
+
+    friend bool operator==(const BackendIdentity&, const BackendIdentity&) =
+        default;
+};
+
+struct CapabilityRecord {
+    RCProductionProviderCapability capability{};
+    std::string provider;
+    RCProductionProviderIdentity provider_identity{};
+    RCProductionEpochIdentity epoch{};
+    BackendIdentity backend{};
+    bool test_only{false};
+};
+
+std::map<std::string, CapabilityRecord> g_provider_capabilities;
+uint64_t g_capability_process_nonce{0};
+uint64_t g_next_capability_generation{1};
+constexpr size_t MAX_PROVIDER_CAPABILITIES{8};
 
 bool ParamsEqual(const RCEpisodeParams& a, const RCEpisodeParams& b)
 {
@@ -49,6 +98,7 @@ bool EpochEqual(const RCProductionEpochIdentity& a,
     return a.activation_height == b.activation_height &&
         a.profile == b.profile &&
         a.transcript_version == b.transcript_version &&
+        a.matmul_dimension == b.matmul_dimension &&
         ParamsEqual(a.params, b.params);
 }
 
@@ -64,10 +114,152 @@ bool PublicProvenanceValid(const std::string& value)
     return value.find("doc/") == 0 || value.find("https://") == 0;
 }
 
-void StoreStatus(const RCProductionCanaryStatus& status)
+BackendIdentity IdentifyBackend(
+    const matmul::v4::lt::ExactGemmBackend& backend)
+{
+    return {{
+        reinterpret_cast<uintptr_t>(backend.gemm_s8s8),
+        reinterpret_cast<uintptr_t>(backend.gemm_s32s8),
+        reinterpret_cast<uintptr_t>(backend.rc_fused_ffn),
+        reinterpret_cast<uintptr_t>(backend.rc_fused_ffn_chain),
+        reinterpret_cast<uintptr_t>(backend.rc_expand_mx),
+        reinterpret_cast<uintptr_t>(backend.rc_merkle_leaves),
+        reinterpret_cast<uintptr_t>(backend.rc_merkle_root),
+        reinterpret_cast<uintptr_t>(backend.rc_phase1),
+    }};
+}
+
+uint64_t CapabilityProcessNonceLocked()
+{
+    if (g_capability_process_nonce == 0) {
+        do {
+            g_capability_process_nonce = FastRandomContext{}.rand64();
+        } while (g_capability_process_nonce == 0);
+    }
+    return g_capability_process_nonce;
+}
+
+RCProductionProviderCapability IssueCapabilityLocked(
+    const std::string& provider,
+    const RCProductionProviderIdentity& provider_identity,
+    const RCProductionEpochIdentity& epoch,
+    const matmul::v4::lt::ExactGemmBackend& backend,
+    bool test_only)
+{
+    if (provider.empty() || backend.gemm_s8s8 == nullptr) return {};
+    const bool replacing{g_provider_capabilities.count(provider) != 0};
+    if (!replacing &&
+        g_provider_capabilities.size() >= MAX_PROVIDER_CAPABILITIES) {
+        return {};
+    }
+    if (g_next_capability_generation == 0) ++g_next_capability_generation;
+    const auto capability{RCProductionProviderCapabilityAccess::Make(
+        CapabilityProcessNonceLocked(), g_next_capability_generation++)};
+    g_provider_capabilities[provider] = {
+        .capability = capability,
+        .provider = provider,
+        .provider_identity = provider_identity,
+        .epoch = epoch,
+        .backend = IdentifyBackend(backend),
+        .test_only = test_only,
+    };
+    return capability;
+}
+
+const CapabilityRecord* FindCapabilityLocked(
+    const RCProductionProviderCapability& capability)
+{
+    if (capability.IsNull() ||
+        RCProductionProviderCapabilityAccess::Nonce(capability) !=
+            g_capability_process_nonce) {
+        return nullptr;
+    }
+    for (const auto& [_, record] : g_provider_capabilities) {
+        if (RCProductionProviderCapabilityAccess::Generation(
+                record.capability) ==
+            RCProductionProviderCapabilityAccess::Generation(capability) &&
+            RCProductionProviderCapabilityAccess::Nonce(record.capability) ==
+            RCProductionProviderCapabilityAccess::Nonce(capability)) {
+            return &record;
+        }
+    }
+    return nullptr;
+}
+
+const CapabilityRecord* AuthorizeIdentityLocked(
+    const RCProductionProviderCapability& capability,
+    const std::string& provider,
+    const matmul::v4::lt::ExactGemmBackend* backend,
+    std::string* reason)
+{
+    const auto fail = [&](const char* why) -> const CapabilityRecord* {
+        if (reason != nullptr) *reason = why;
+        return nullptr;
+    };
+    const auto* record{FindCapabilityLocked(capability)};
+    if (record == nullptr) return fail("invalid_or_stale_capability");
+    if (record->provider != provider) {
+        return fail("capability_provider_mismatch");
+    }
+    if (backend != nullptr && record->backend != IdentifyBackend(*backend)) {
+        return fail("capability_backend_mismatch");
+    }
+    if (!record->test_only) {
+        const auto current{ProbeRCProductionProviderIdentity(provider)};
+        if (!ProviderEqual(current, record->provider_identity)) {
+            return fail("capability_runtime_identity_changed");
+        }
+    }
+    if (reason != nullptr) reason->clear();
+    return record;
+}
+
+bool EpochAuthorizes(const CapabilityRecord& record,
+                     uint32_t profile,
+                     uint32_t transcript_version,
+                     uint32_t matmul_dimension,
+                     const RCEpisodeParams& params,
+                     int32_t height,
+                     std::string* reason)
+{
+    const auto fail = [&](const char* why) {
+        if (reason != nullptr) *reason = why;
+        return false;
+    };
+    if (height < record.epoch.activation_height) {
+        return fail("capability_before_qualified_epoch");
+    }
+    if (profile != record.epoch.profile ||
+        transcript_version != record.epoch.transcript_version ||
+        matmul_dimension != record.epoch.matmul_dimension ||
+        !ParamsEqual(params, record.epoch.params)) {
+        return fail("capability_epoch_mismatch");
+    }
+    if (reason != nullptr) reason->clear();
+    return true;
+}
+
+bool StoreStatus(
+    const RCProductionCanaryStatus& status,
+    const matmul::v4::lt::ExactGemmBackend* passed_backend = nullptr)
 {
     std::lock_guard<std::mutex> lock{g_production_canary_mutex};
     g_last_production_canary = status;
+    if (status.provider.empty()) {
+        g_provider_capabilities.clear();
+        return true;
+    }
+
+    // Every new canary outcome supersedes the prior authorization for this
+    // provider, including a failed or unsupported rerun.
+    g_provider_capabilities.erase(status.provider);
+    if (!status.passed || !status.activation_ready ||
+        passed_backend == nullptr) {
+        return true;
+    }
+    return !IssueCapabilityLocked(
+        status.provider, status.provider_identity, status.epoch,
+        *passed_backend, /*test_only=*/false).IsNull();
 }
 
 std::string ProviderFamily(const std::string& provider)
@@ -194,6 +386,7 @@ RCProductionEpochIdentity MakeRCProductionEpochIdentity(
     out.activation_height = activation_height;
     out.profile = consensus.nMatMulRCProfile;
     out.transcript_version = kRCTranscriptVersion;
+    out.matmul_dimension = consensus.nMatMulV4Dimension;
     if (activation_height >= 0 &&
         activation_height != std::numeric_limits<int32_t>::max()) {
         out.params = ConsensusRCEpisodeParamsForHeight(
@@ -224,7 +417,8 @@ const RCProductionGoldenManifestEntry* FindRCProductionGolden(
     return match;
 }
 
-CBlockHeader MakeRCProductionCanaryHeader(uint64_t nonce)
+CBlockHeader MakeRCProductionCanaryHeader(
+    const RCProductionEpochIdentity& epoch, uint64_t nonce)
 {
     // This input is public and deterministic. It is deliberately unrelated to
     // any live block, wallet, operator host, or deployment identifier.
@@ -234,6 +428,14 @@ CBlockHeader MakeRCProductionCanaryHeader(uint64_t nonce)
     header.nBits = 0x207fffff;
     header.nNonce64 = nonce;
     header.nNonce = static_cast<uint32_t>(nonce);
+    // The caller rejects unsupported epoch identities before reaching the
+    // canary. Keep this helper defensive as well so an out-of-range manifest
+    // dimension can never be silently truncated into the 16-bit header field.
+    if (epoch.matmul_dimension == 0 ||
+        epoch.matmul_dimension > std::numeric_limits<uint16_t>::max()) {
+        return header;
+    }
+    header.matmul_dim = static_cast<uint16_t>(epoch.matmul_dimension);
     for (int i = 0; i < 32; ++i) {
         header.hashPrevBlock.data()[i] = static_cast<unsigned char>(0x91);
         header.hashMerkleRoot.data()[i] = static_cast<unsigned char>(0x2d);
@@ -264,7 +466,7 @@ RCProductionCanaryOutcome EvaluateRCProductionCanaryResult(
         : RCProductionCanaryOutcome::DigestMismatch;
 }
 
-RCProductionCanaryStatus RunRCProductionStartupCanary(
+static RCProductionCanaryStatus RunRCProductionStartupCanaryImpl(
     const std::string& resolved_provider,
     const matmul::v4::lt::ExactGemmBackend& backend,
     bool automatic_policy_eligible,
@@ -285,6 +487,13 @@ RCProductionCanaryStatus RunRCProductionStartupCanary(
         }
     }
 
+    if (out.epoch.matmul_dimension == 0 ||
+        out.epoch.matmul_dimension > std::numeric_limits<uint16_t>::max()) {
+        out.outcome = RCProductionCanaryOutcome::UnsupportedEpoch;
+        out.reason = "production_matmul_dimension_out_of_header_range";
+        StoreStatus(out);
+        return out;
+    }
     if (activation_height < 0 ||
         activation_height == std::numeric_limits<int32_t>::max() ||
         consensus.nMatMulRCProfile != 1 ||
@@ -322,7 +531,7 @@ RCProductionCanaryStatus RunRCProductionStartupCanary(
 
     const auto started{std::chrono::steady_clock::now()};
     const RCStrictDeviceEpisodeResult replay{MineRCEpisodeStrictDevice(
-        MakeRCProductionCanaryHeader(golden->header_nonce),
+        MakeRCProductionCanaryHeader(golden->epoch, golden->header_nonce),
         golden->epoch.params, golden->epoch.activation_height, backend,
         resolved_provider)};
     out.wall_s = std::chrono::duration<double>(
@@ -333,12 +542,18 @@ RCProductionCanaryStatus RunRCProductionStartupCanary(
     out.passed = out.outcome == RCProductionCanaryOutcome::Passed;
     out.activation_ready = out.passed;
     out.reason = RCProductionCanaryOutcomeName(out.outcome);
-    StoreStatus(out);
+    if (!StoreStatus(out, &backend)) {
+        out.outcome = RCProductionCanaryOutcome::LocalAcceleratorFailure;
+        out.passed = false;
+        out.activation_ready = false;
+        out.reason = "production_capability_registry_full";
+        StoreStatus(out);
+    }
 
     LogPrintf(
         "MatMul RC production canary: outcome=%s provider=%s family=%s "
         "arch=%s driver=%s runtime=%s epoch_height=%d profile=%u "
-        "transcript=%u manifest=%s wall=%.3fs device_macs=%llu "
+        "transcript=%u matmul_dim=%u manifest=%s wall=%.3fs device_macs=%llu "
         "cpu_fallbacks=%llu\n",
         RCProductionCanaryOutcomeName(out.outcome), out.provider,
         out.provider_identity.provider_family,
@@ -346,10 +561,211 @@ RCProductionCanaryStatus RunRCProductionStartupCanary(
         out.provider_identity.driver_identity,
         out.provider_identity.runtime_identity,
         out.epoch.activation_height, out.epoch.profile,
-        out.epoch.transcript_version, out.manifest_entry_id, out.wall_s,
+        out.epoch.transcript_version, out.epoch.matmul_dimension,
+        out.manifest_entry_id, out.wall_s,
         static_cast<unsigned long long>(out.acceleration.device_macs),
         static_cast<unsigned long long>(out.acceleration.cpu_fallbacks));
     return out;
+}
+
+RCProductionCanaryStatus RunRCProductionStartupCanary(
+    const std::string& resolved_provider,
+    const matmul::v4::lt::ExactGemmBackend& backend,
+    const Consensus::Params& consensus,
+    int32_t activation_height)
+{
+    const auto resolved{
+        matmul_v4::accel::ProbeLastRCExactGemmResolution()};
+    const bool resolver_authorized{
+        resolved.resolved && resolved.self_qualified &&
+        resolved.automatic_policy_eligible &&
+        resolved.provider == resolved_provider &&
+        IdentifyBackend(resolved.backend) == IdentifyBackend(backend)};
+    return RunRCProductionStartupCanaryImpl(
+        resolved_provider, backend, resolver_authorized,
+        consensus, activation_height);
+}
+
+RCProductionCanaryStatus RunRCProductionStartupCanaryForTest(
+    const std::string& test_provider,
+    const matmul::v4::lt::ExactGemmBackend& backend,
+    const Consensus::Params& consensus,
+    int32_t activation_height)
+{
+    if (test_provider.rfind("test:", 0) != 0) {
+        RCProductionCanaryStatus out;
+        out.provider = test_provider;
+        out.outcome = RCProductionCanaryOutcome::ProviderNotPolicyEligible;
+        out.reason = "test_canary_provider_prefix_required";
+        StoreStatus(out);
+        return out;
+    }
+    // The committed manifest accepts no test provider, so this can exercise
+    // structural/negative guards but can never mint a production capability.
+    return RunRCProductionStartupCanaryImpl(
+        test_provider, backend, /*automatic_policy_eligible=*/true,
+        consensus, activation_height);
+}
+
+bool RCProductionProviderCapability::IsNull() const
+{
+    return m_process_nonce == 0 || m_generation == 0;
+}
+
+std::optional<RCProductionProviderCapability>
+GetRCProductionProviderCapability(
+    const std::string& provider,
+    const matmul::v4::lt::ExactGemmBackend& backend,
+    const Consensus::Params& consensus,
+    int32_t height,
+    std::string* reason)
+{
+    std::lock_guard<std::mutex> lock{g_production_canary_mutex};
+    const auto it{g_provider_capabilities.find(provider)};
+    if (it == g_provider_capabilities.end()) {
+        if (reason != nullptr) *reason = "provider_has_no_current_capability";
+        return std::nullopt;
+    }
+    const auto* record{AuthorizeIdentityLocked(
+        it->second.capability, provider, &backend, reason)};
+    if (record == nullptr) return std::nullopt;
+    const auto expected{MakeRCProductionEpochIdentity(consensus, height)};
+    if (!EpochAuthorizes(
+            *record, expected.profile, expected.transcript_version,
+            expected.matmul_dimension, expected.params, height, reason)) {
+        return std::nullopt;
+    }
+    return record->capability;
+}
+
+bool RCProductionProviderCapabilityAuthorizes(
+    const RCProductionProviderCapability& capability,
+    const std::string& provider,
+    const matmul::v4::lt::ExactGemmBackend* backend,
+    const Consensus::Params& consensus,
+    int32_t height,
+    std::string* reason)
+{
+    std::lock_guard<std::mutex> lock{g_production_canary_mutex};
+    const auto* record{
+        AuthorizeIdentityLocked(capability, provider, backend, reason)};
+    if (record == nullptr) return false;
+    const auto expected{MakeRCProductionEpochIdentity(consensus, height)};
+    return EpochAuthorizes(
+        *record, expected.profile, expected.transcript_version,
+        expected.matmul_dimension, expected.params, height, reason);
+}
+
+bool RCProductionProviderCapabilityAuthorizesReplay(
+    const RCProductionProviderCapability& capability,
+    const std::string& provider,
+    const matmul::v4::lt::ExactGemmBackend* backend,
+    uint32_t matmul_dimension,
+    const RCEpisodeParams& params,
+    int32_t height,
+    std::string* reason)
+{
+    std::lock_guard<std::mutex> lock{g_production_canary_mutex};
+    const auto* record{
+        AuthorizeIdentityLocked(capability, provider, backend, reason)};
+    if (record == nullptr) return false;
+    return EpochAuthorizes(
+        *record, /*profile=*/1, kRCTranscriptVersion, matmul_dimension,
+        params, height, reason);
+}
+
+bool RCProductionProviderCapabilityAuthorizesIdentity(
+    const RCProductionProviderCapability& capability,
+    const std::string& provider,
+    const matmul::v4::lt::ExactGemmBackend* backend,
+    std::string* reason)
+{
+    std::lock_guard<std::mutex> lock{g_production_canary_mutex};
+    return AuthorizeIdentityLocked(
+               capability, provider, backend, reason) != nullptr;
+}
+
+bool RCProductionProviderCapabilitiesIndependent(
+    const RCProductionProviderCapability& first,
+    const RCProductionProviderCapability& second,
+    std::string* reason)
+{
+    const auto fail = [&](const char* why) {
+        if (reason != nullptr) *reason = why;
+        return false;
+    };
+    std::lock_guard<std::mutex> lock{g_production_canary_mutex};
+    const auto* a{FindCapabilityLocked(first)};
+    const auto* b{FindCapabilityLocked(second)};
+    if (a == nullptr || b == nullptr) {
+        return fail("invalid_or_stale_capability");
+    }
+    if (!EpochEqual(a->epoch, b->epoch)) {
+        return fail("capability_epoch_mismatch");
+    }
+    if ((!a->test_only &&
+         !ProviderEqual(ProbeRCProductionProviderIdentity(a->provider),
+                        a->provider_identity)) ||
+        (!b->test_only &&
+         !ProviderEqual(ProbeRCProductionProviderIdentity(b->provider),
+                        b->provider_identity))) {
+        return fail("capability_runtime_identity_changed");
+    }
+    // The current production resolver binds one selected device per process,
+    // but does not yet issue a canary-bound physical-device execution identity
+    // for multiple devices. Different wrapper functions over that same device
+    // are correlated and must never turn a shared device fault into a permanent
+    // peer-invalid verdict. Keep production adjudication fail-closed until the
+    // resolver proves distinct device identities. The restricted test issuer
+    // below may still exercise the state machine with distinct callbacks.
+    if (!a->test_only || !b->test_only) {
+        return fail("independent_device_execution_identity_unavailable");
+    }
+    // Provider names and caller-supplied failure-domain labels are not
+    // execution identities. Even in tests, require a distinct exact GEMM
+    // entry point so two labels around the same callback remain correlated.
+    if (a->backend.callbacks[0] == 0 ||
+        a->backend.callbacks[0] == b->backend.callbacks[0]) {
+        return fail("correlated_backend_entry_point");
+    }
+    if (reason != nullptr) reason->clear();
+    return true;
+}
+
+std::string RCProductionProviderCapabilityId(
+    const RCProductionProviderCapability& capability)
+{
+    if (capability.IsNull()) return "none";
+    std::ostringstream out;
+    out << "rcpc-" << std::hex
+        << RCProductionProviderCapabilityAccess::Nonce(capability) << '-'
+        << RCProductionProviderCapabilityAccess::Generation(capability);
+    return out.str();
+}
+
+RCProductionProviderCapability
+IssueRCProductionProviderCapabilityForTest(
+    const std::string& provider,
+    const matmul::v4::lt::ExactGemmBackend& backend,
+    const RCProductionEpochIdentity& epoch)
+{
+    if (provider.rfind("test:", 0) != 0 || provider.size() > 128 ||
+        backend.gemm_s8s8 == nullptr || epoch.profile != 1 ||
+        epoch.transcript_version != kRCTranscriptVersion ||
+        epoch.matmul_dimension == 0 || epoch.activation_height < 0 ||
+        TotalRCEpisodeMacs(epoch.params) == 0) {
+        return {};
+    }
+    RCProductionProviderIdentity identity;
+    identity.provider_family = "test";
+    identity.device_architecture = "unit-test-backend";
+    identity.driver_identity = "unit-test";
+    identity.runtime_identity = "unit-test";
+    identity.complete = true;
+    identity.reason = "test-only";
+    std::lock_guard<std::mutex> lock{g_production_canary_mutex};
+    return IssueCapabilityLocked(
+        provider, identity, epoch, backend, /*test_only=*/true);
 }
 
 RCProductionCanaryStatus GetLastRCProductionCanaryStatus()

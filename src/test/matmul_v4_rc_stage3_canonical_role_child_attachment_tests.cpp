@@ -229,7 +229,7 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(
         !assessment.diagnostic_child_phase_commitment[1].IsNull());
 
-    // All seven challenge-bearing families export their exact witness-phase
+    // All eight challenge-bearing families export their exact witness-phase
     // split; challenge-free family schedules are earned mechanically.
     const auto sources =
         ut::BuildProductionFamilyProgramSourcesV1(
@@ -347,7 +347,7 @@ BOOST_AUTO_TEST_CASE(
                        source.phase.r0_base_columns.size());
         }
     }
-    BOOST_CHECK_EQUAL(challenge_bearing, 7U);
+    BOOST_CHECK_EQUAL(challenge_bearing, 8U);
     std::string why;
     BOOST_REQUIRE_MESSAGE(
         ut::ValidateProductionFamilyProgramSourcesV1(

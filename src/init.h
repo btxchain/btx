@@ -48,6 +48,11 @@ bool AppInitBasicSetup(const ArgsManager& args, std::atomic<int>& exit_status);
  * @pre Parameters should be parsed and config file should be read, AppInitBasicSetup should have been called.
  */
 bool AppInitParameterInteraction(const ArgsManager& args);
+
+/** Fail closed if RC accelerator resolution or its production canary ran
+ * before Unix daemonization. Device runtimes and their process-local caches
+ * are not safe to inherit across fork(). */
+bool CheckMatMulAcceleratorPreForkInvariant();
 /**
  * Initialization sanity checks.
  * @note This can be done before daemonization. Do not call Shutdown() if this function fails.

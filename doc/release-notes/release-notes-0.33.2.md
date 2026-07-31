@@ -61,12 +61,25 @@ the exact final binaries before activation review.
   device execution with complete accelerator coverage and zero CPU GEMM
   fallback.
 - Strict validator mode distinguishes consensus-invalid work from local
-  accelerator failure and cancellation. A device mismatch quarantines the
-  provider, leaves the block retryable, and does not punish the announcing
-  peer or populate a negative-verdict cache.
+  accelerator failure, an unconfirmed digest mismatch, and cancellation. A
+  first mismatch never lets an untrusted header quarantine a healthy provider;
+  bounded adjudication by a distinct, production-canary-authorized backend can
+  confirm the non-header digest or identify and quarantine only the faulty
+  provider. Qualification and independence cannot be asserted with labels.
+  Without an independent provider, the block remains retryable and service
+  continues for other work.
 - One accelerator owner coordinates authenticated-tip validation, winner
   reseal, candidate mining, and speculative validation with explicit
-  priorities, cancellation, and release accounting.
+  priorities, fixed global/per-lane queue limits, deadlines, workspace
+  admission telemetry, cancellation, and owner-bound release accounting. All
+  synchronous/internal ExactReplay callers enter the same owner.
+- A strict, block-target winner reseal can be handed to local block acceptance
+  through a bounded, expiring, exact-header-bound, single-use authority. It
+  skips only the duplicate local replay; body, transaction, script, context,
+  and chain-connection checks still run.
+- Accelerator resolution, qualification, canary execution, and readiness
+  service bits run after Unix daemonization. A pre-fork invariant rejects any
+  early resolver/canary lifecycle regression.
 - The automatic provider policy keeps experimental native MXFP4/Ozaki paths
   separate from production eligibility. The dense exact INT8 path remains the
   conservative default unless a provider has the required production
@@ -75,9 +88,16 @@ the exact final binaries before activation review.
   coverage, queue waits, cancellation, and candidate/reseal/validation timing.
 - A fail-closed startup/epoch canary mechanism binds production eligibility to
   provider family, public device architecture class, driver/runtime ABI,
-  activation height, profile, transcript, and episode parameters. Its
+  activation height, profile, transcript, consensus MatMul dimension, and
+  episode parameters. Its
   reviewed-golden manifest is deliberately empty in this release candidate,
   so no provider is represented as activation-ready.
+- Exhaustive Stage-3 regression coverage now matches the current fail-closed
+  construction: G4 remains open across the active-V8/V10-evidence domain
+  mismatch, the aggregation screen remains below its hard 100-bit target, the
+  eighth challenge-bearing family is inventoried, and coupled-bank capacity
+  telemetry reflects the 575-column layout and raised backend cap. No
+  Stage-3 proof or authority gate is enabled by these evidence corrections.
 
 ## ExactReplay admission and scheduling hardening
 
@@ -149,26 +169,38 @@ The implementation release does not claim completion of the following:
    production startup and epoch canary passes on the exact final binary (the
    fail-closed canary mechanism is implemented);
 3. final-binary strict-device campaigns on every supported accelerator family;
-4. correlated candidate-to-reseal-to-relay-to-validator p50/p95/p99/max
+4. foreground, `-daemon`, and `-daemonwait` CUDA lifecycle campaigns on the
+   exact final binary, including a two-daemon strict RC-boundary cycle;
+5. correlated candidate-to-reseal-to-relay-to-validator p50/p95/p99/max
    evidence, including contention, IBD, restart, cancellation, and reorgs;
-5. real-device allocation, kernel, driver-reset, mismatch quarantine, and
-   recovery or alternate-provider campaigns;
-6. sustained multi-peer testnet burn-in and externally reviewed networking
+6. real-device allocation, kernel, driver-reset, independent mismatch
+   adjudication, degraded sole-provider, and alternate-provider campaigns;
+7. sustained multi-peer testnet burn-in and externally reviewed networking
    admission evidence;
-7. measured v3-to-Profile-1 ASERT calibration against the complete
+8. measured v3-to-Profile-1 ASERT calibration against the complete
    authenticated-block lifecycle;
-8. independent consensus/security review, explicit ratification, signed final
+9. independent consensus/security review, explicit ratification, signed final
    artifacts, operator deployment readiness, and an emergency stop procedure;
    and
-9. a separately reviewed activation tuple and height with an adequate upgrade
+10. a separately reviewed activation tuple and height with an adequate upgrade
    window, calculated from the live chain only after every preceding gate is
    complete.
 
 # Known Limitations
 
-- Same-process hot failover between accelerator providers is not claimed. A
-  quarantined provider requires operator repair and restart, or restart with a
-  different independently qualified provider.
+- Bounded same-process alternate-provider adjudication is implemented, but the
+  launch candidate registers no production alternate until per-device binding
+  and exact production canary evidence exist. Production independence remains
+  fail-closed until the resolver binds a capability to a distinct physical
+  device; labels or callback wrappers cannot assert it. A sole provider
+  therefore leaves a mismatching header retryable without taking the healthy
+  provider offline.
+- Provider-measured full-workspace telemetry remains unavailable through the
+  generic backend ABI; RPC reports a zero sample count and never presents the
+  conservative admission estimate as measured use.
+- Latest lifecycle lane samples are explicitly uncorrelated.
+  `operationally_ready` remains false until one future observation binds every
+  lifecycle component to the same exact block/provider/epoch.
 - Trusted RPC/archive mirrors inherit the safety of their configured signer
   set. They should not be described or exposed as independent consensus
   validators.

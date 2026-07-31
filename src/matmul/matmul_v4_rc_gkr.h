@@ -16,6 +16,7 @@
 #include <matmul/matmul_v4_rc_gkr_field.h>
 #include <matmul/matmul_v4_rc_gkr_field_ext.h>
 #include <matmul/matmul_v4_rc_gkr_field_ext3.h>
+#include <matmul/matmul_v4_rc_production_canary.h>
 #include <matmul/matmul_v4_rc_verify_budget.h>
 #include <primitives/block.h>
 #include <uint256.h>
@@ -975,6 +976,28 @@ enum class ExactReplayVerifyOutcome : uint8_t {
     Cancelled = 3,
 };
 
+/** Typed local-execution classification. Digest disagreement is deliberately
+ * separate from an execution fault: a false committed digest supplied by a
+ * peer must not be able to quarantine a healthy accelerator. */
+enum class RCExactReplayFailureKind : uint8_t {
+    None = 0,
+    ExecutionFailure = 1,
+    UnconfirmedDigestMismatch = 2,
+    ProviderUnavailable = 3,
+    Cancelled = 4,
+};
+
+/** Local adjudication applied after a strict-device digest disagreement.
+ * These values are operational telemetry, not consensus parameters. */
+enum class RCExactReplayAdjudication : uint8_t {
+    NotRequired = 0,
+    NoIndependentProvider = 1,
+    IndependentDigestConfirmed = 2,
+    IndependentHeaderRecovered = 3,
+    IndependentProvidersInconclusive = 4,
+    ProvidersUnavailable = 5,
+};
+
 struct ExactReplayVerifyResult {
     bool ok{false};
     ExactReplayVerifyOutcome outcome{ExactReplayVerifyOutcome::InvalidConsensus};
@@ -996,18 +1019,27 @@ struct ExactReplayVerifyResult {
     uint64_t cpu_gemm_fallbacks{0};
     std::string acceleration_failure;
     std::string acceleration_resolution_reason;
+    RCExactReplayFailureKind failure_kind{
+        RCExactReplayFailureKind::None};
+    RCExactReplayAdjudication adjudication{
+        RCExactReplayAdjudication::NotRequired};
+    uint32_t provider_attempts{0};
+    uint32_t independent_provider_attempts{0};
+    std::string primary_provider;
+    std::string adjudicating_provider;
+    std::string quarantined_provider;
     bool provider_quarantined{false};
     std::string provider_health_reason;
     std::string operator_recovery;
     std::string note;
 };
 
-/** Runtime health of the strict ExactReplay provider.
+/** Runtime health of one strict ExactReplay provider.
  *
- * A device disagreement or in-flight provider failure is local, never a peer
- * verdict. The affected provider is quarantined for the process lifetime;
- * operators recover by selecting another qualified provider or restarting
- * after repairing/resetting the device. */
+ * An in-flight execution/coverage failure, or a digest proven faulty by an
+ * independent provider, quarantines the affected provider for the process
+ * lifetime. An unconfirmed digest disagreement never does: it remains a
+ * retryable block-scoped ambiguity and cannot let a peer disable validation. */
 struct RCExactReplayProviderHealth {
     bool quarantined{false};
     uint64_t quarantine_events{0};
@@ -1016,6 +1048,19 @@ struct RCExactReplayProviderHealth {
     std::string operator_recovery;
 };
 
+/** One process-local strict ExactReplay implementation authorized by the exact
+ * production canary that ran in this daemon. The opaque capability binds the
+ * provider/runtime identity, backend callbacks, and consensus epoch. No caller
+ * may assert qualification or an independent failure domain with strings. */
+struct RCExactReplayAlternateProvider {
+    matmul::v4::lt::ExactGemmBackend backend{};
+    std::string provider;
+    RCProductionProviderCapability capability{};
+};
+
+inline constexpr size_t kRCExactReplayMaxAlternateProviders{8};
+inline constexpr uint32_t kRCExactReplayMaxAdjudicationAttempts{2};
+
 /** Process startup configuration. Set before validation workers start. */
 void SetRCExactReplayExecutionPolicy(RCExactReplayExecutionPolicy policy);
 [[nodiscard]] RCExactReplayExecutionPolicy GetRCExactReplayExecutionPolicy();
@@ -1023,6 +1068,10 @@ void SetRCExactReplayExecutionPolicy(RCExactReplayExecutionPolicy policy);
     RCExactReplayExecutionPolicy policy);
 [[nodiscard]] const char* ExactReplayVerifyOutcomeName(
     ExactReplayVerifyOutcome outcome);
+[[nodiscard]] const char* RCExactReplayFailureKindName(
+    RCExactReplayFailureKind kind);
+[[nodiscard]] const char* RCExactReplayAdjudicationName(
+    RCExactReplayAdjudication adjudication);
 /** Last completed production verifier call, for operator RPC/log telemetry. */
 [[nodiscard]] std::optional<ExactReplayVerifyResult>
 GetLastExactReplayVerifyResult();
@@ -1030,6 +1079,16 @@ void ResetLastExactReplayVerifyResultForTest();
 [[nodiscard]] RCExactReplayProviderHealth
 GetRCExactReplayProviderHealth();
 void ResetRCExactReplayProviderHealthForTest();
+
+/** Register one bounded canary-authorized provider. Registration revalidates
+ * provider/runtime/backend identity immediately; each replay revalidates its
+ * epoch and token generation before use. */
+[[nodiscard]] bool RegisterRCExactReplayAlternateProvider(
+    const RCExactReplayAlternateProvider& provider,
+    std::string* reason = nullptr);
+void ClearRCExactReplayAlternateProviders();
+[[nodiscard]] std::vector<RCExactReplayAlternateProvider>
+GetRCExactReplayAlternateProviders();
 
 struct RCProdVerifyResult {
     bool ok{false};

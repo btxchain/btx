@@ -11,6 +11,7 @@
 #include <matmul/matmul_v4.h>
 #include <matmul/matmul_v4_lt.h>
 #include <matmul/matmul_v4_rc_air_recurse.h>
+#include <matmul/matmul_v4_rc_accelerator_scheduler.h>
 #include <matmul/matmul_v4_rc_extract.h>
 #include <matmul/matmul_v4_rc_gkr_air.h>
 #include <matmul/matmul_v4_rc_gkr_coupled.h>
@@ -45,6 +46,9 @@ std::mutex g_exact_replay_provider_health_mutex;
 RCExactReplayProviderHealth g_exact_replay_provider_health;
 std::map<std::string, RCExactReplayProviderHealth>
     g_exact_replay_provider_quarantines;
+std::mutex g_exact_replay_alternate_providers_mutex;
+std::vector<RCExactReplayAlternateProvider>
+    g_exact_replay_alternate_providers;
 
 constexpr const char* PROVIDER_RECOVERY_ACTION{
     "repair/reset the accelerator and restart btxd, or restart with a different qualified provider; never invalidate or punish the announcing peer"};
@@ -126,6 +130,44 @@ const char* ExactReplayVerifyOutcomeName(
     return "unknown";
 }
 
+const char* RCExactReplayFailureKindName(
+    RCExactReplayFailureKind kind)
+{
+    switch (kind) {
+    case RCExactReplayFailureKind::None:
+        return "none";
+    case RCExactReplayFailureKind::ExecutionFailure:
+        return "execution-failure";
+    case RCExactReplayFailureKind::UnconfirmedDigestMismatch:
+        return "unconfirmed-digest-mismatch";
+    case RCExactReplayFailureKind::ProviderUnavailable:
+        return "provider-unavailable";
+    case RCExactReplayFailureKind::Cancelled:
+        return "cancelled";
+    }
+    return "unknown";
+}
+
+const char* RCExactReplayAdjudicationName(
+    RCExactReplayAdjudication adjudication)
+{
+    switch (adjudication) {
+    case RCExactReplayAdjudication::NotRequired:
+        return "not-required";
+    case RCExactReplayAdjudication::NoIndependentProvider:
+        return "no-independent-provider";
+    case RCExactReplayAdjudication::IndependentDigestConfirmed:
+        return "independent-digest-confirmed";
+    case RCExactReplayAdjudication::IndependentHeaderRecovered:
+        return "independent-header-recovered";
+    case RCExactReplayAdjudication::IndependentProvidersInconclusive:
+        return "independent-providers-inconclusive";
+    case RCExactReplayAdjudication::ProvidersUnavailable:
+        return "providers-unavailable";
+    }
+    return "unknown";
+}
+
 std::optional<ExactReplayVerifyResult>
 GetLastExactReplayVerifyResult()
 {
@@ -152,6 +194,82 @@ void ResetRCExactReplayProviderHealthForTest()
         g_exact_replay_provider_health_mutex};
     g_exact_replay_provider_health = {};
     g_exact_replay_provider_quarantines.clear();
+}
+
+bool RegisterRCExactReplayAlternateProvider(
+    const RCExactReplayAlternateProvider& provider,
+    std::string* reason)
+{
+    const auto fail = [&](const char* why) {
+        if (reason != nullptr) *reason = why;
+        return false;
+    };
+    if (provider.provider.empty() || provider.provider.size() > 128) {
+        return fail("invalid_provider_id");
+    }
+    if (provider.backend.gemm_s8s8 == nullptr) {
+        return fail("provider_has_no_device_gemm");
+    }
+    if (provider.capability.IsNull()) {
+        return fail("provider_has_no_production_capability");
+    }
+    std::string authorization_reason;
+    if (!RCProductionProviderCapabilityAuthorizesIdentity(
+            provider.capability, provider.provider, &provider.backend,
+            &authorization_reason)) {
+        if (reason != nullptr) {
+            *reason = authorization_reason.empty()
+                ? "provider_capability_not_authorized"
+                : authorization_reason;
+        }
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock{
+        g_exact_replay_alternate_providers_mutex};
+    if (std::any_of(
+            g_exact_replay_alternate_providers.begin(),
+            g_exact_replay_alternate_providers.end(),
+            [&](const RCExactReplayAlternateProvider& existing) {
+                return existing.provider == provider.provider;
+            })) {
+        return fail("duplicate_provider_id");
+    }
+    for (const auto& existing : g_exact_replay_alternate_providers) {
+        std::string independence_reason;
+        if (!RCProductionProviderCapabilitiesIndependent(
+                existing.capability, provider.capability,
+                &independence_reason)) {
+            if (reason != nullptr) {
+                *reason = independence_reason.empty()
+                    ? "provider_not_independent"
+                    : independence_reason;
+            }
+            return false;
+        }
+    }
+    if (g_exact_replay_alternate_providers.size() >=
+        kRCExactReplayMaxAlternateProviders) {
+        return fail("alternate_provider_registry_full");
+    }
+    g_exact_replay_alternate_providers.push_back(provider);
+    if (reason != nullptr) reason->clear();
+    return true;
+}
+
+void ClearRCExactReplayAlternateProviders()
+{
+    std::lock_guard<std::mutex> lock{
+        g_exact_replay_alternate_providers_mutex};
+    g_exact_replay_alternate_providers.clear();
+}
+
+std::vector<RCExactReplayAlternateProvider>
+GetRCExactReplayAlternateProviders()
+{
+    std::lock_guard<std::mutex> lock{
+        g_exact_replay_alternate_providers_mutex};
+    return g_exact_replay_alternate_providers;
 }
 
 namespace {
@@ -4671,12 +4789,15 @@ ExactReplayVerifyResult VerifyBoundedExactReplayImpl(
     if (ExactReplayCancellationRequested()) {
         out.ok = false;
         out.outcome = ExactReplayVerifyOutcome::Cancelled;
+        out.failure_kind = RCExactReplayFailureKind::Cancelled;
         out.note = "ExactReplay: cancelled";
         return out;
     }
     if (out.digest.IsNull()) {
         out.ok = false;
         out.outcome = ExactReplayVerifyOutcome::LocalAcceleratorFailure;
+        out.failure_kind =
+            RCExactReplayFailureKind::ExecutionFailure;
         if (out.acceleration_failure.empty()) {
             out.acceleration_failure = acceleration.require_device
                 ? "strict_device_replay_returned_null_digest"
@@ -4690,6 +4811,8 @@ ExactReplayVerifyResult VerifyBoundedExactReplayImpl(
          out.cpu_gemm_fallbacks != 0)) {
         out.ok = false;
         out.outcome = ExactReplayVerifyOutcome::LocalAcceleratorFailure;
+        out.failure_kind =
+            RCExactReplayFailureKind::ExecutionFailure;
         if (out.acceleration_failure.empty()) {
             out.acceleration_failure =
                 "strict_device_zero_fallback_coverage_failed";
@@ -4750,10 +4873,15 @@ ExactReplayVerifyResult VerifyBoundedExactReplayImpl(
                 acceleration.require_device &&
                 acceleration_stats.device_calls != 0) {
                 // A sole device disagreement cannot create a peer-invalid
-                // verdict. Strict production quarantines/repairs the local
-                // provider out of band and leaves this block retryable.
+                // verdict or quarantine a healthy provider. The strict outer
+                // adjudicator may ask a different qualified failure domain;
+                // without one, this block remains retryable and the provider
+                // remains in service for other headers.
                 out.outcome =
                     ExactReplayVerifyOutcome::LocalAcceleratorFailure;
+                out.failure_kind =
+                    RCExactReplayFailureKind::
+                        UnconfirmedDigestMismatch;
                 out.acceleration_failure =
                     "device_digest_mismatch_unconfirmed";
                 out.note =
@@ -4788,6 +4916,339 @@ ExactReplayVerifyResult VerifyBoundedExactReplayImpl(
 
 } // namespace
 
+namespace {
+
+ExactReplayVerifyResult SchedulerAdmissionFailure(
+    RCExactReplayExecutionPolicy policy, uint64_t workspace_bytes)
+{
+    ExactReplayVerifyResult result;
+    result.ok = false;
+    result.outcome = ExactReplayVerifyOutcome::LocalAcceleratorFailure;
+    result.execution_policy = policy;
+    result.require_device =
+        policy == RCExactReplayExecutionPolicy::StrictDevice;
+    result.failure_kind = RCExactReplayFailureKind::ExecutionFailure;
+    result.acceleration_failure =
+        "accelerator_scheduler_admission_failed";
+    result.operator_recovery =
+        "retry after the bounded accelerator queue drains; inspect scheduler queue/capacity telemetry";
+    result.note = "ExactReplay: accelerator scheduler queue deadline or capacity limit reached (workspace=" +
+        std::to_string(workspace_bytes) + "B); block remains retryable";
+    return result;
+}
+
+struct StrictReplayCandidate {
+    RCExactReplayAcceleration acceleration{};
+    std::string provider;
+    RCProductionProviderCapability capability{};
+    bool alternate{false};
+};
+
+void SetProviderUnavailableResult(
+    ExactReplayVerifyResult& result,
+    const std::string& primary_provider,
+    const std::string& reason,
+    const RCExactReplayProviderHealth* health = nullptr)
+{
+    result.ok = false;
+    result.outcome = ExactReplayVerifyOutcome::LocalAcceleratorFailure;
+    result.execution_policy = RCExactReplayExecutionPolicy::StrictDevice;
+    result.require_device = true;
+    result.acceleration_backend = primary_provider;
+    result.primary_provider = primary_provider;
+    result.failure_kind = RCExactReplayFailureKind::ProviderUnavailable;
+    result.adjudication = RCExactReplayAdjudication::ProvidersUnavailable;
+    result.acceleration_failure = reason;
+    if (health != nullptr) {
+        result.provider_quarantined = health->quarantined;
+        result.provider_health_reason = health->reason;
+        result.operator_recovery = health->operator_recovery;
+    }
+    result.note =
+        "ExactReplay: no healthy independently qualified provider; block remains retryable";
+}
+
+bool IsUnconfirmedMismatch(const ExactReplayVerifyResult& result)
+{
+    return result.outcome == ExactReplayVerifyOutcome::LocalAcceleratorFailure &&
+        result.failure_kind == RCExactReplayFailureKind::UnconfirmedDigestMismatch &&
+        !result.digest.IsNull() && result.device_gemm_calls != 0 &&
+        result.fully_accelerated && result.cpu_gemm_calls == 0 &&
+        result.cpu_gemm_fallbacks == 0;
+}
+
+bool IsQuarantinableExecutionFailure(const ExactReplayVerifyResult& result)
+{
+    return result.outcome == ExactReplayVerifyOutcome::LocalAcceleratorFailure &&
+        result.failure_kind == RCExactReplayFailureKind::ExecutionFailure &&
+        result.device_gemm_calls != 0;
+}
+
+/** Run one preferred provider plus at most two explicitly registered
+ * alternates. A mismatch alone is never provider-fault evidence. */
+ExactReplayVerifyResult VerifyStrictWithAlternates(
+    const CBlockHeader& header,
+    const RCEpisodeParams& params,
+    int32_t height,
+    const arith_uint256* target,
+    RCExactReplayAcceleration primary,
+    const std::string& resolution_reason)
+{
+    primary.require_device = true;
+    primary.output_row_tile = primary.output_row_tile == 0 ? 256 : primary.output_row_tile;
+    const std::string primary_provider{primary.backend};
+    const auto registered{GetRCExactReplayAlternateProviders()};
+
+    RCProductionProviderCapability primary_capability;
+    for (const auto& provider : registered) {
+        if (provider.provider == primary_provider &&
+            RCProductionProviderCapabilityAuthorizesReplay(
+                provider.capability, provider.provider, &provider.backend,
+                header.matmul_dim, params, height)) {
+            primary_capability = provider.capability;
+            break;
+        }
+    }
+
+    std::vector<StrictReplayCandidate> candidates;
+    candidates.push_back({
+        .acceleration = std::move(primary),
+        .provider = primary_provider,
+        .capability = primary_capability,
+        .alternate = false,
+    });
+    for (const auto& provider : registered) {
+        if (provider.provider == primary_provider ||
+            !RCProductionProviderCapabilityAuthorizesReplay(
+                provider.capability, provider.provider, &provider.backend,
+                header.matmul_dim, params, height)) {
+            continue;
+        }
+        RCExactReplayAcceleration acceleration;
+        acceleration.gemm = provider.backend;
+        acceleration.backend = provider.provider;
+        acceleration.require_device = true;
+        acceleration.output_row_tile = 256;
+        candidates.push_back({
+            .acceleration = std::move(acceleration),
+            .provider = provider.provider,
+            .capability = provider.capability,
+            .alternate = true,
+        });
+    }
+
+    struct MismatchObservation {
+        ExactReplayVerifyResult result;
+        std::string provider;
+        RCProductionProviderCapability capability{};
+    };
+    std::vector<MismatchObservation> mismatches;
+    std::optional<ExactReplayVerifyResult> last_failure;
+    uint32_t provider_attempts{0};
+    uint32_t alternate_attempts{0};
+    uint32_t independent_attempts{0};
+    bool primary_was_unavailable{false};
+    double aggregate_verify_s{0.0};
+    size_t aggregate_rss_kib{0};
+    uint64_t aggregate_device_calls{0};
+    uint64_t aggregate_device_macs{0};
+    uint64_t aggregate_cpu_calls{0};
+    uint64_t aggregate_cpu_fallbacks{0};
+    bool every_attempt_fully_accelerated{true};
+    bool every_attempt_full_metal{true};
+    const auto record_attempt = [&](const ExactReplayVerifyResult& result) {
+        aggregate_verify_s += result.verify_s;
+        aggregate_rss_kib = std::max(aggregate_rss_kib, result.rss_kib);
+        aggregate_device_calls += result.device_gemm_calls;
+        aggregate_device_macs += result.device_gemm_macs;
+        aggregate_cpu_calls += result.cpu_gemm_calls;
+        aggregate_cpu_fallbacks += result.cpu_gemm_fallbacks;
+        every_attempt_fully_accelerated =
+            every_attempt_fully_accelerated && result.fully_accelerated;
+        every_attempt_full_metal =
+            every_attempt_full_metal && result.full_metal_pipeline;
+    };
+    const auto apply_aggregate = [&](ExactReplayVerifyResult& result) {
+        result.verify_s = aggregate_verify_s;
+        result.rss_kib = aggregate_rss_kib;
+        result.device_gemm_calls = aggregate_device_calls;
+        result.device_gemm_macs = aggregate_device_macs;
+        result.cpu_gemm_calls = aggregate_cpu_calls;
+        result.cpu_gemm_fallbacks = aggregate_cpu_fallbacks;
+        result.fully_accelerated =
+            provider_attempts != 0 && every_attempt_fully_accelerated;
+        result.full_metal_pipeline =
+            provider_attempts != 0 && every_attempt_full_metal;
+    };
+
+    for (auto& candidate : candidates) {
+        if (candidate.alternate &&
+            alternate_attempts >= kRCExactReplayMaxAdjudicationAttempts) break;
+        if (!mismatches.empty()) {
+            if (candidate.capability.IsNull() ||
+                std::none_of(
+                    mismatches.begin(), mismatches.end(),
+                    [&](const MismatchObservation& observation) {
+                        return RCProductionProviderCapabilitiesIndependent(
+                            observation.capability,
+                            candidate.capability);
+                    })) {
+                continue;
+            }
+        }
+
+        RCExactReplayProviderHealth health;
+        if (IsProviderQuarantined(candidate.provider, &health)) {
+            if (!candidate.alternate) primary_was_unavailable = true;
+            ExactReplayVerifyResult unavailable;
+            SetProviderUnavailableResult(unavailable, primary_provider,
+                                         "strict_device_provider_quarantined", &health);
+            last_failure = std::move(unavailable);
+            continue;
+        }
+
+        ++provider_attempts;
+        if (candidate.alternate) ++alternate_attempts;
+        if (!mismatches.empty() &&
+            std::any_of(
+                mismatches.begin(), mismatches.end(),
+                [&](const MismatchObservation& observation) {
+                    return RCProductionProviderCapabilitiesIndependent(
+                        observation.capability, candidate.capability);
+                })) {
+            ++independent_attempts;
+        }
+        auto result{VerifyBoundedExactReplayImpl(header, params, height, target,
+                                                 candidate.acceleration)};
+        record_attempt(result);
+        result.execution_policy = RCExactReplayExecutionPolicy::StrictDevice;
+        result.require_device = true;
+        result.primary_provider = primary_provider;
+        result.provider_attempts = provider_attempts;
+        result.independent_provider_attempts = independent_attempts;
+        result.acceleration_resolution_reason = resolution_reason;
+
+        if (result.outcome == ExactReplayVerifyOutcome::Cancelled) {
+            apply_aggregate(result);
+            return result;
+        }
+
+        if (result.ok ||
+            (result.outcome == ExactReplayVerifyOutcome::InvalidConsensus &&
+             result.digest == header.matmul_digest)) {
+            if (!mismatches.empty()) {
+                for (const auto& mismatch : mismatches) {
+                    if (!RCProductionProviderCapabilitiesIndependent(
+                            mismatch.capability,
+                            candidate.capability)) {
+                        continue;
+                    }
+                    const std::string reason{
+                        "digest_mismatch_confirmed_by_independent_provider"};
+                    QuarantineProvider(mismatch.provider, reason);
+                    if (result.quarantined_provider.empty()) {
+                        result.quarantined_provider = mismatch.provider;
+                        result.provider_health_reason = reason;
+                    }
+                }
+                result.provider_quarantined = !result.quarantined_provider.empty();
+                result.adjudication =
+                    RCExactReplayAdjudication::IndependentHeaderRecovered;
+                result.adjudicating_provider = candidate.provider;
+                result.device_mismatch_retried = true;
+                result.note +=
+                    "; header commitment reproduced by independent provider";
+            } else if (primary_was_unavailable && candidate.alternate) {
+                result.adjudication =
+                    RCExactReplayAdjudication::IndependentHeaderRecovered;
+                result.adjudicating_provider = candidate.provider;
+                result.note += "; used healthy independent provider";
+            }
+            apply_aggregate(result);
+            return result;
+        }
+
+        if (IsUnconfirmedMismatch(result)) {
+            for (const auto& previous : mismatches) {
+                if (RCProductionProviderCapabilitiesIndependent(
+                        previous.capability, candidate.capability) &&
+                    previous.result.digest == result.digest) {
+                    result.ok = false;
+                    result.outcome = ExactReplayVerifyOutcome::InvalidConsensus;
+                    result.failure_kind = RCExactReplayFailureKind::None;
+                    result.adjudication =
+                        RCExactReplayAdjudication::IndependentDigestConfirmed;
+                    result.adjudicating_provider = candidate.provider;
+                    result.device_mismatch_retried = true;
+                    result.device_mismatch_confirmed = true;
+                    result.acceleration_failure.clear();
+                    result.note =
+                        "ExactReplay: digest mismatch confirmed by independent provider";
+                    apply_aggregate(result);
+                    return result;
+                }
+            }
+            mismatches.push_back({
+                .result = result,
+                .provider = candidate.provider,
+                .capability = candidate.capability,
+            });
+            continue;
+        }
+
+        if (IsQuarantinableExecutionFailure(result)) {
+            const std::string reason{
+                result.acceleration_failure.empty()
+                    ? "strict_device_inflight_failure"
+                    : result.acceleration_failure};
+            QuarantineProvider(candidate.provider, reason);
+            result.provider_quarantined = true;
+            result.quarantined_provider = candidate.provider;
+            result.provider_health_reason = reason;
+            result.operator_recovery = PROVIDER_RECOVERY_ACTION;
+            result.note += "; execution-failed provider quarantined";
+        }
+        last_failure = std::move(result);
+    }
+
+    if (!mismatches.empty()) {
+        auto result{mismatches.front().result};
+        result.provider_attempts = provider_attempts;
+        result.independent_provider_attempts = independent_attempts;
+        result.primary_provider = primary_provider;
+        result.provider_quarantined = false;
+        result.quarantined_provider.clear();
+        result.provider_health_reason.clear();
+        result.operator_recovery =
+            "configure another independently qualified provider/device or repair the unavailable alternate; the current provider remains available";
+        result.adjudication = independent_attempts == 0
+            ? RCExactReplayAdjudication::NoIndependentProvider
+            : RCExactReplayAdjudication::IndependentProvidersInconclusive;
+        result.note = independent_attempts == 0
+            ? "ExactReplay: unconfirmed digest mismatch; no independent provider, block remains retryable"
+            : "ExactReplay: independent providers disagreed; block remains retryable";
+        apply_aggregate(result);
+        return result;
+    }
+
+    if (last_failure.has_value()) {
+        auto result{std::move(*last_failure)};
+        result.provider_attempts = provider_attempts;
+        result.independent_provider_attempts = independent_attempts;
+        result.primary_provider = primary_provider;
+        result.adjudication = RCExactReplayAdjudication::ProvidersUnavailable;
+        apply_aggregate(result);
+        return result;
+    }
+
+    ExactReplayVerifyResult result;
+    SetProviderUnavailableResult(result, primary_provider,
+                                 "strict_device_no_eligible_provider");
+    return result;
+}
+
+} // namespace
+
 ExactReplayVerifyResult VerifyBoundedExactReplay(
     const CBlockHeader& header,
     const RCEpisodeParams& params,
@@ -4796,26 +5257,47 @@ ExactReplayVerifyResult VerifyBoundedExactReplay(
 {
     const RCExactReplayExecutionPolicy policy{
         GetRCExactReplayExecutionPolicy()};
-    auto resolved{
-        matmul_v4::accel::ResolveExactGemmBackendForRC()};
-    if (policy == RCExactReplayExecutionPolicy::StrictDevice) {
-        RCExactReplayProviderHealth health;
-        if (IsProviderQuarantined(resolved.provider, &health)) {
-            ExactReplayVerifyResult result;
-            result.ok = false;
-            result.outcome =
-                ExactReplayVerifyOutcome::LocalAcceleratorFailure;
-            result.execution_policy = policy;
-            result.require_device = true;
-            result.acceleration_backend = resolved.provider;
-            result.acceleration_failure =
-                "strict_device_provider_quarantined";
-            result.acceleration_resolution_reason = resolved.reason;
-            result.provider_quarantined = true;
-            result.provider_health_reason = health.reason;
-            result.operator_recovery = health.operator_recovery;
-            result.note =
-                "ExactReplay: local provider quarantined; block remains retryable";
+
+    // The networking worker already owns an accurately prioritized lease.
+    // Synchronous validation entry points (local submit, RPC generation,
+    // reindex, and direct callers) enter through this central fallback, so no
+    // production ExactReplay can bypass the one-device owner. TipValidation is
+    // deliberately conservative for these authenticated block-body paths.
+    auto& scheduler{GetRCAcceleratorScheduler()};
+    RCAcceleratorScheduler::Lease scheduler_lease;
+    std::atomic_bool scheduler_preempted{false};
+    const uint64_t workspace_bytes{
+        EstimateRCExactReplayWorkspaceBytes(params)};
+    const bool current_thread_owns_lease{
+        scheduler.CurrentThreadOwnsLease()};
+    if (current_thread_owns_lease &&
+        !scheduler.CurrentThreadLeaseCoversWorkspace(
+            workspace_bytes)) {
+        auto result{
+            SchedulerAdmissionFailure(policy, workspace_bytes)};
+        result.acceleration_failure =
+            "accelerator_scheduler_outer_lease_workspace_too_small";
+        result.note =
+            "ExactReplay: existing accelerator lease does not cover the canonical workspace estimate; block remains retryable";
+        {
+            std::lock_guard<std::mutex> lock{
+                g_last_exact_replay_mutex};
+            g_last_exact_replay = result;
+        }
+        return result;
+    }
+    if (!current_thread_owns_lease) {
+        scheduler_lease = scheduler.Acquire(
+            RCAcceleratorScheduler::Priority::TipValidation,
+            &scheduler_preempted,
+            "exactreplay:" + header.GetHash().ToString() + ":" +
+                std::to_string(height),
+            /*external_cancelled=*/nullptr,
+            RCAcceleratorScheduler::DEFAULT_MAX_QUEUE_WAIT,
+            workspace_bytes);
+        if (!scheduler_lease) {
+            auto result{
+                SchedulerAdmissionFailure(policy, workspace_bytes)};
             {
                 std::lock_guard<std::mutex> lock{
                     g_last_exact_replay_mutex};
@@ -4824,6 +5306,9 @@ ExactReplayVerifyResult VerifyBoundedExactReplay(
             return result;
         }
     }
+
+    auto resolved{
+        matmul_v4::accel::ResolveExactGemmBackendForRC()};
     RCExactReplayAcceleration acceleration;
     if (policy == RCExactReplayExecutionPolicy::CpuDiagnostic) {
         acceleration.backend = "cpu_diagnostic";
@@ -4844,27 +5329,16 @@ ExactReplayVerifyResult VerifyBoundedExactReplay(
             "_not_production_eligible";
     }
     acceleration.output_row_tile = 256;
-    auto result{VerifyBoundedExactReplayImpl(
-        header, params, height, target, std::move(acceleration))};
+    auto result = policy == RCExactReplayExecutionPolicy::StrictDevice
+        ? VerifyStrictWithAlternates(
+              header, params, height, target, std::move(acceleration),
+              resolved.reason)
+        : VerifyBoundedExactReplayImpl(
+              header, params, height, target, std::move(acceleration));
     result.execution_policy = policy;
     result.require_device =
         policy == RCExactReplayExecutionPolicy::StrictDevice;
     result.acceleration_resolution_reason = resolved.reason;
-    if (policy == RCExactReplayExecutionPolicy::StrictDevice &&
-        result.outcome ==
-            ExactReplayVerifyOutcome::LocalAcceleratorFailure &&
-        result.device_gemm_calls != 0) {
-        const std::string reason{
-            result.acceleration_failure.empty()
-                ? "strict_device_inflight_failure"
-                : result.acceleration_failure};
-        QuarantineProvider(resolved.provider, reason);
-        result.provider_quarantined = true;
-        result.provider_health_reason = reason;
-        result.operator_recovery = PROVIDER_RECOVERY_ACTION;
-        result.note +=
-            "; provider quarantined, block remains retryable";
-    }
     {
         std::lock_guard<std::mutex> lock{
             g_last_exact_replay_mutex};
@@ -4881,44 +5355,12 @@ ExactReplayVerifyResult VerifyBoundedExactReplayWithAccelerationForTest(
     const arith_uint256* target)
 {
     if (acceleration.require_device) {
-        RCExactReplayProviderHealth health;
-        if (IsProviderQuarantined(acceleration.backend, &health)) {
-            ExactReplayVerifyResult result;
-            result.ok = false;
-            result.outcome =
-                ExactReplayVerifyOutcome::LocalAcceleratorFailure;
-            result.execution_policy =
-                RCExactReplayExecutionPolicy::StrictDevice;
-            result.require_device = true;
-            result.acceleration_backend = acceleration.backend;
-            result.acceleration_failure =
-                "strict_device_provider_quarantined";
-            result.provider_quarantined = true;
-            result.provider_health_reason = health.reason;
-            result.operator_recovery = health.operator_recovery;
-            result.note =
-                "ExactReplay: local provider quarantined; block remains retryable";
-            return result;
-        }
+        return VerifyStrictWithAlternates(
+            header, params, height, target, acceleration,
+            "test_injected_provider");
     }
-    auto result{VerifyBoundedExactReplayImpl(
-        header, params, height, target, acceleration)};
-    if (acceleration.require_device &&
-        result.outcome ==
-            ExactReplayVerifyOutcome::LocalAcceleratorFailure &&
-        result.device_gemm_calls != 0) {
-        const std::string reason{
-            result.acceleration_failure.empty()
-                ? "strict_device_inflight_failure"
-                : result.acceleration_failure};
-        QuarantineProvider(acceleration.backend, reason);
-        result.provider_quarantined = true;
-        result.provider_health_reason = reason;
-        result.operator_recovery = PROVIDER_RECOVERY_ACTION;
-        result.note +=
-            "; provider quarantined, block remains retryable";
-    }
-    return result;
+    return VerifyBoundedExactReplayImpl(
+        header, params, height, target, acceleration);
 }
 
 RCProdVerifyResult VerifyRCWinnerOrExactReplay(const CBlockHeader& header,

@@ -1539,6 +1539,66 @@ BOOST_AUTO_TEST_CASE(
 }
 
 BOOST_AUTO_TEST_CASE(
+    rc_worker_outer_lease_enforces_exact_replay_workspace_capacity)
+{
+    auto& scheduler{matmul::v4::rc::GetRCAcceleratorScheduler()};
+    scheduler.ConfigureWorkspaceCapacity(
+        "test-capacity-provider", /*capacity_bytes=*/1);
+    BOOST_REQUIRE(scheduler.ResetStatsForTest());
+
+    Consensus::Params params{MakeProfile1ActiveParams()};
+    const auto episode_params{
+        matmul::v4::rc::ResolveRCEpisodeParams(params, 100)};
+    const uint64_t required{
+        matmul::v4::rc::EstimateRCExactReplayWorkspaceBytes(
+            episode_params)};
+    BOOST_REQUIRE_GT(required, 1U);
+    BOOST_CHECK(!matmul::v4::rc::RCExactReplayWorkspaceFits(
+        episode_params, 0));
+    BOOST_CHECK(!matmul::v4::rc::RCExactReplayWorkspaceFits(
+        episode_params, required - 1));
+    BOOST_CHECK(matmul::v4::rc::RCExactReplayWorkspaceFits(
+        episode_params, required));
+    MatMulVerifyWorker worker{params, /*max_threads=*/1};
+    uint256 claim;
+    claim.data()[0] = 0x6b;
+    auto header{std::make_shared<CBlockHeader>(
+        MakeProfile1Header(0x57534, claim))};
+    std::atomic<int> retryable_cleanups{0};
+    std::atomic<int> consensus_completions{0};
+    MatMulVerifyWorker::Job job{
+        .height = 100,
+        .completion = [&](bool) { ++consensus_completions; },
+        .retryable_failure = [&] { ++retryable_cleanups; },
+        .header = std::move(header),
+        .priority =
+            MatMulVerifyWorker::Priority::AuthenticatedTipChild,
+    };
+    BOOST_REQUIRE(
+        worker.Enqueue(job) ==
+        MatMulVerifyWorker::EnqueueResult::Enqueued);
+    BOOST_REQUIRE(WaitFor(
+        [&] { return retryable_cleanups.load() == 1; }));
+    worker.Stop();
+
+    const auto stats{scheduler.GetStats()};
+    BOOST_CHECK_EQUAL(consensus_completions.load(), 0);
+    BOOST_CHECK_EQUAL(stats.requests, 1U);
+    BOOST_CHECK_EQUAL(stats.acquisitions, 0U);
+    BOOST_CHECK_EQUAL(stats.capacity_rejections, 1U);
+    BOOST_CHECK_EQUAL(stats.workspace_requested_bytes, required);
+    BOOST_CHECK_EQUAL(
+        stats.workspace_request_high_water_bytes, required);
+    // The requirement is a conservative estimate, not fabricated measured
+    // allocation telemetry. A provider must explicitly publish the latter.
+    BOOST_CHECK_EQUAL(stats.workspace_telemetry_samples, 0U);
+    BOOST_CHECK_EQUAL(stats.workspace_current_bytes, 0U);
+    BOOST_CHECK_EQUAL(stats.workspace_high_water_bytes, 0U);
+
+    scheduler.ConfigureWorkspaceCapacity("", 0);
+}
+
+BOOST_AUTO_TEST_CASE(
     rc_accelerator_scheduler_observes_external_miner_abort)
 {
     using Scheduler = matmul::v4::rc::RCAcceleratorScheduler;
@@ -1618,6 +1678,7 @@ BOOST_AUTO_TEST_CASE(
     assessment = scheduler.AssessLifecycle(90.0);
     BOOST_CHECK(assessment.complete_sample_set);
     BOOST_CHECK(assessment.within_target_spacing);
+    BOOST_CHECK(!assessment.correlated_end_to_end_sample);
     BOOST_CHECK(!assessment.hardware_evidence_gates_passed);
     BOOST_CHECK(!assessment.operationally_ready);
     BOOST_CHECK_CLOSE(
@@ -1741,6 +1802,136 @@ BOOST_AUTO_TEST_CASE(
         !scheduler.CommitAuthenticatedRelayObservation(reversed));
     BOOST_CHECK_EQUAL(
         scheduler.GetStats().authenticated_relay_samples, 1U);
+}
+
+BOOST_AUTO_TEST_CASE(
+    rc_accelerator_scheduler_enforces_reserved_lane_and_workspace_caps)
+{
+    using Scheduler = matmul::v4::rc::RCAcceleratorScheduler;
+    auto& scheduler{matmul::v4::rc::GetRCAcceleratorScheduler()};
+    scheduler.ConfigureWorkspaceCapacity("", 0);
+    BOOST_REQUIRE(scheduler.ResetStatsForTest());
+
+    std::atomic_bool owner_cancelled{false};
+    auto owner{scheduler.Acquire(
+        Scheduler::Priority::TipValidation, &owner_cancelled,
+        "capacity-owner")};
+    BOOST_REQUIRE(owner);
+    BOOST_CHECK(scheduler.CurrentThreadOwnsLease());
+
+    std::atomic_bool candidate_a_cancelled{false};
+    std::atomic_bool candidate_b_cancelled{false};
+    auto candidate_waiter = [&](std::atomic_bool& cancelled,
+                                const char* label) {
+        (void)scheduler.Acquire(
+            Scheduler::Priority::CandidateMining, &cancelled, label,
+            nullptr, std::chrono::seconds{1});
+    };
+    std::thread candidate_a{
+        candidate_waiter, std::ref(candidate_a_cancelled), "candidate-a"};
+    std::thread candidate_b{
+        candidate_waiter, std::ref(candidate_b_cancelled), "candidate-b"};
+    BOOST_REQUIRE(WaitFor(
+        [&] { return scheduler.GetStats().queue_depth == 2; }));
+
+    // CandidateMining owns two waiter slots. A third request fails immediately
+    // without consuming TipValidation's independent reservation.
+    std::atomic_bool candidate_c_cancelled{false};
+    auto rejected{scheduler.Acquire(
+        Scheduler::Priority::CandidateMining, &candidate_c_cancelled,
+        "candidate-c", nullptr, std::chrono::seconds{1})};
+    BOOST_CHECK(!rejected);
+
+    std::atomic_bool tip_waiter_cancelled{false};
+    std::atomic_bool tip_waiter_acquired{false};
+    std::thread tip_waiter{[&] {
+        auto lease{scheduler.Acquire(
+            Scheduler::Priority::TipValidation, &tip_waiter_cancelled,
+            "reserved-tip", nullptr, std::chrono::seconds{1})};
+        tip_waiter_acquired.store(
+            static_cast<bool>(lease), std::memory_order_relaxed);
+    }};
+    BOOST_REQUIRE(WaitFor(
+        [&] { return scheduler.GetStats().queue_depth == 3; }));
+
+    candidate_a_cancelled.store(true, std::memory_order_relaxed);
+    candidate_b_cancelled.store(true, std::memory_order_relaxed);
+    scheduler.NotifyCancellation();
+    candidate_a.join();
+    candidate_b.join();
+    owner = {};
+    tip_waiter.join();
+    BOOST_CHECK(tip_waiter_acquired.load(std::memory_order_relaxed));
+
+    auto stats{scheduler.GetStats()};
+    BOOST_CHECK_EQUAL(stats.queue_limit, 8U);
+    BOOST_CHECK_EQUAL(stats.queue_rejections, 1U);
+    BOOST_CHECK_EQUAL(
+        stats.lanes[static_cast<size_t>(
+            Scheduler::Priority::CandidateMining)].queue_rejections,
+        1U);
+
+    scheduler.ConfigureWorkspaceCapacity("test-provider", 1024);
+    std::atomic_bool workspace_cancelled{false};
+    auto too_large{scheduler.Acquire(
+        Scheduler::Priority::SpeculativeValidation,
+        &workspace_cancelled, "workspace-too-large", nullptr,
+        std::chrono::seconds{1}, 2048)};
+    BOOST_CHECK(!too_large);
+    auto fits{scheduler.Acquire(
+        Scheduler::Priority::SpeculativeValidation,
+        &workspace_cancelled, "workspace-fits", nullptr,
+        std::chrono::seconds{1}, 512)};
+    BOOST_REQUIRE(fits);
+    stats = scheduler.GetStats();
+    BOOST_CHECK_EQUAL(stats.workspace_capacity_bytes, 1024U);
+    BOOST_CHECK_EQUAL(stats.workspace_reserved_bytes, 512U);
+    BOOST_CHECK_EQUAL(stats.capacity_rejections, 1U);
+    scheduler.RecordWorkspaceUsage(768, /*allocation_failed=*/true);
+    stats = scheduler.GetStats();
+    BOOST_CHECK_EQUAL(stats.workspace_current_bytes, 768U);
+    BOOST_CHECK_EQUAL(stats.workspace_high_water_bytes, 768U);
+    BOOST_CHECK_EQUAL(stats.workspace_telemetry_samples, 1U);
+    BOOST_CHECK_EQUAL(stats.workspace_allocation_failures, 1U);
+    fits = {};
+    BOOST_CHECK_EQUAL(
+        scheduler.GetStats().workspace_reserved_bytes, 0U);
+    scheduler.ConfigureWorkspaceCapacity("", 0);
+}
+
+BOOST_AUTO_TEST_CASE(rc_accelerator_scheduler_queue_deadline_is_bounded)
+{
+    using Scheduler = matmul::v4::rc::RCAcceleratorScheduler;
+    auto& scheduler{matmul::v4::rc::GetRCAcceleratorScheduler()};
+    BOOST_REQUIRE(scheduler.ResetStatsForTest());
+
+    std::atomic_bool owner_cancelled{false};
+    auto owner{scheduler.Acquire(
+        Scheduler::Priority::TipValidation, &owner_cancelled,
+        "deadline-owner")};
+    BOOST_REQUIRE(owner);
+    std::atomic_bool waiter_cancelled{false};
+    std::atomic_bool acquired{true};
+    std::thread waiter{[&] {
+        auto lease{scheduler.Acquire(
+            Scheduler::Priority::SpeculativeValidation,
+            &waiter_cancelled, "deadline-waiter", nullptr,
+            std::chrono::milliseconds{25})};
+        acquired.store(static_cast<bool>(lease),
+                       std::memory_order_relaxed);
+    }};
+    BOOST_REQUIRE(WaitFor(
+        [&] { return scheduler.GetStats().queue_depth == 1; }));
+    waiter.join();
+    BOOST_CHECK(!acquired.load(std::memory_order_relaxed));
+    const auto stats{scheduler.GetStats()};
+    BOOST_CHECK_EQUAL(stats.timed_out_waits, 1U);
+    BOOST_CHECK_EQUAL(stats.queue_depth, 0U);
+    BOOST_CHECK_EQUAL(
+        stats.lanes[static_cast<size_t>(
+            Scheduler::Priority::SpeculativeValidation)].timed_out_waits,
+        1U);
+    owner = {};
 }
 
 BOOST_AUTO_TEST_SUITE_END()
