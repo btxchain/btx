@@ -208,6 +208,20 @@ static constexpr uint32_t BMX4C_FALLBACK_INT8_ACCUMULATOR_BITS{32}; //!< C-1 flo
 //! of the release that ships activation, AFTER gates (1)-(2) are recorded.
 static constexpr bool BTX_MATMUL_NO_INVERSION_GATE_RATIFIED{false};
 
+//! MatMul v4.7 GPU lifecycle FAIL-CLOSED ACTIVATION GATE.
+//!
+//! The no-inversion/L0 gate above does not establish that a production
+//! Profile-1 block can be mined, strictly resealed on a qualified device,
+//! relayed, and authoritatively replayed by another qualified device within
+//! the calibrated block interval.  A public Epoch-A activation additionally
+//! requires frozen production goldens, zero-fallback miner/validator
+//! campaigns, accelerator fault/cancellation tests, sustained tail-latency
+//! evidence, and ASERT calibration against that complete authenticated
+//! lifecycle.  Keep this false in implementation-only releases.  Flip it only
+//! in the separately reviewed activation-height change that records those
+//! artifacts; regtest remains exempt so the implementation can be exercised.
+static constexpr bool BTX_MATMUL_V47_GPU_LIFECYCLE_GATE_RATIFIED{false};
+
 /**
  * Per-profile MatMul v4 shape + carriage (consensus-normative; design §4.1 and
  * v4.4 tension-resolution §4.5). The single profile selector

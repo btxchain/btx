@@ -381,7 +381,8 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
             consensus.nMatMulRCHeight == disabled};
         const bool epoch_a_active{
             consensus.IsMatMulV47EpochAActivationTuple() &&
-            Consensus::BTX_MATMUL_NO_INVERSION_GATE_RATIFIED};
+            Consensus::BTX_MATMUL_NO_INVERSION_GATE_RATIFIED &&
+            Consensus::BTX_MATMUL_V47_GPU_LIFECYCLE_GATE_RATIFIED};
         assert(epoch_a_disabled || epoch_a_active);
         assert(consensus.nMatMulRCProfile == 1);
         assert(!consensus.fMatMulRCUseToyDims);
@@ -394,6 +395,8 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
         assert(consensus.nMatMulV4Height != std::numeric_limits<int32_t>::max());
         assert(consensus.nMatMulRCHeight >= consensus.nMatMulV4Height);
         assert(is_regtest || Consensus::BTX_MATMUL_NO_INVERSION_GATE_RATIFIED);
+        assert(is_regtest ||
+               Consensus::BTX_MATMUL_V47_GPU_LIFECYCLE_GATE_RATIFIED);
     }
     // ENC_RC_COUPLED (Stage C coupled puzzle): public nets stay fail-closed at
     // INT32_MAX. Regtest may set a finite height + toy dims for end-to-end CI.
