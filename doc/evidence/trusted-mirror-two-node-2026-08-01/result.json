@@ -1,0 +1,88 @@
+{
+  "evidence_kind": "trusted_mirror_two_node_rehearsal",
+  "ok": true,
+  "archive_host_class": "cuda_gpu_exactreplay_archive",
+  "mirror_host_class": "cpu_trusted_mirror",
+  "p2p_path": "ssh_local_forward",
+  "activation_height": 6,
+  "mirror_height": 8,
+  "archive_services": [
+    "NETWORK",
+    "WITNESS",
+    "SHIELDED",
+    "NETWORK_LIMITED",
+    "P2P_V2",
+    "MATMUL_CONSENSUS",
+    "MATMUL_ATTESTATION_ARCHIVE"
+  ],
+  "mirror_services": [
+    "NETWORK",
+    "WITNESS",
+    "SHIELDED",
+    "NETWORK_LIMITED",
+    "P2P_V2",
+    "MATMUL_TRUSTED_MIRROR"
+  ],
+  "mirror_mode": "trusted",
+  "trusted_status": {
+    "configured": true,
+    "trusted_mirror": true,
+    "serves_attestations": false,
+    "local_signer": false,
+    "threshold": 1,
+    "trusted_signers": 1,
+    "stored_blocks": 3,
+    "stored_attestations": 3,
+    "blocks_with_quorum": 3,
+    "accepted": 3,
+    "duplicates": 0,
+    "rejected": 0,
+    "capacity_rejections": 0,
+    "evicted_blocks": 0,
+    "expired_blocks": 0,
+    "quorum_transitions": 3,
+    "wait_timeouts": 0,
+    "warning": "operator_trusted_mirror"
+  },
+  "timings": [
+    {
+      "mined_height": 1,
+      "archive_generate_s": 0.638
+    },
+    {
+      "mined_height": 2,
+      "archive_generate_s": 0.633
+    },
+    {
+      "mined_height": 3,
+      "archive_generate_s": 0.641
+    },
+    {
+      "mined_height": 4,
+      "archive_generate_s": 0.641
+    },
+    {
+      "mined_height": 5,
+      "archive_generate_s": 0.635
+    },
+    {
+      "mined_height": 6,
+      "archive_generate_s": 1.609
+    },
+    {
+      "mined_height": 7,
+      "archive_generate_s": 0.677
+    },
+    {
+      "mined_height": 8,
+      "archive_generate_s": 0.718
+    }
+  ],
+  "activation_block_s": 1.609,
+  "notes": [
+    "GPU archive mined toy Profile-1 RC; CPU mirror followed tip via signed ExactReplay attestations (M=1).",
+    "LAN P2P was firewalled; rehearsal used SSH local-forward for P2P only (machine-class connectivity).",
+    "Mirror advertises MATMUL_TRUSTED_MIRROR and does not advertise MATMUL_CONSENSUS.",
+    "Activation block (height 6) ~1.6s on warm CUDA host with toy dims \u2014 not the 35s cloud cold-start class."
+  ]
+}
