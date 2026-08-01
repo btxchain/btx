@@ -195,6 +195,16 @@ is at `doc/evidence/cuda-blackwell-16gib-lifecycle-asert-2026-08-01/` (n=20 core
 ≈96.7 s; complete n=0 without goldens/authority). Public ratification gates
 remain false.
 
+The frozen production corpus now has an eight-header CUDA + Metal match. An
+Apple Silicon M4 Max-class Metal provider reproduced canary nonces 1 through 8
+at source revision `9dd88b8e54d92a848c4006aa9affca2ab3e0c91c`, with every
+consensus MAC on device, zero CPU GEMM calls/fallbacks, and byte-identical
+headers, dimensions, and digests relative to the committed CUDA set. See
+`doc/evidence/multi-gpu-profile1-goldens-2026-08-01/` and
+`doc/evidence/multi-gpu-profile1-goldens-metal-2026-08-01/`. HIP/ROCm remains
+missing, so `complete_multi_gpu_match` is false and the manifest/gates stay
+closed.
+
 The 2026-07-31 GPU audit additionally reported a Blackwell-class 16 GiB discrete
 GPU three-episode mean of approximately 21.38 seconds and a production mining
 run that remained in CPU winner reseal for more than 38 minutes (that reseal

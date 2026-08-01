@@ -200,11 +200,15 @@ Independent CUDA class (sanitized; see
   Launch* ABI (`rc_fused_ffn`, `rc_fused_ffn_chain`, `rc_phase1`).
 - [x] Tip-correlated 100-run campaign recorded (`c4ac2e43`, TU md5
   `ed1e9477432b1766f549c039b6779632`); L0 ratification remains false.
+- [x] Apple Silicon M4 Max-class Metal reproduced the same eight frozen
+  production canary headers/dimensions/digests as CUDA at source revision
+  `9dd88b8e54d92a848c4006aa9affca2ab3e0c91c`, with every consensus MAC on
+  device and zero CPU GEMM calls/fallbacks.
 
 Still required before activation:
 
-- [ ] independent portable-oracle and accelerator implementations match a
-  frozen production golden corpus with intermediate checkpoints;
+- [ ] HIP/ROCm ExactReplay reproduces the same frozen production golden corpus;
+  CPU ExactReplay is not an accepted independent Epoch-A golden backend;
 - [ ] the final CUDA path and multi-peer testnet soak reproduce the local
   ticketed-starvation, strict quarantine, operator recovery, and retry results;
 - [ ] block/header serialization and `rcadmit` no-chain-byte invariants are
@@ -216,8 +220,8 @@ Still required before activation:
   invariants: equal v4/BMX4C/RC heights, withdrawn paths off, HeaderPoW off,
   v4/BMX4C ASERT inert, and RC as the sole calibrated branch.
 
-Profile 1 now has 100-run loaded evidence on the measured Metal and sanitized
-Blackwell-class CUDA hosts, with both p99 values inside the 90-second interval.
-Activation remains a no-go until the independent golden, complete-lifecycle,
+Profile 1 now has 100-run loaded evidence on measured Metal and sanitized
+Blackwell-class CUDA hardware, plus an eight-header CUDA/Metal golden match.
+Activation remains a no-go until HIP parity, complete-lifecycle,
 fault/recovery, multi-peer DoS, IBD, sustained-soak, calibration, and
 ratification gates are closed.

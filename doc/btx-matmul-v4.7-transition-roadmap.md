@@ -154,6 +154,11 @@ evidence, multi-peer testnet soak, or L0 ratification (still false).
 Merging the implementation PR and activating Epoch A are separate decisions.
 The implementation PR keeps production activation heights disabled.
 
+Current golden status: CUDA and Apple Silicon M4 Max-class Metal match the
+same eight frozen production canary headers byte-for-byte with full device
+coverage and zero CPU fallbacks. HIP is still absent, therefore
+`complete_multi_gpu_match` remains false and no manifest entry is authorized.
+
 Before an activation-height PR:
 
 1. CUDA, Metal, and HIP ExactReplay must produce byte-identical golden digests
