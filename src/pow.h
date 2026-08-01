@@ -598,6 +598,11 @@ MatMulPhase2Punishment RegisterMatMulPhase2Failure(
 // preserving callers that do not supply a height.
 uint32_t EffectiveMatMulPeerVerifyBudgetPerMin(const Consensus::Params& params, bool is_ibd, int32_t reference_height = -1);
 uint32_t EffectiveMatMulGlobalVerifyBudgetPerMin(const Consensus::Params& params, int32_t reference_height = -1);
+/** Global Phase2 budget used for non-RC header/body accounting during IBD or
+ *  fast-phase catch-up. Raises the steady-state global floor to the peer IBD
+ *  floor so a full headers batch (~2000 Phase2-counted headers) is not rejected. */
+uint32_t EffectiveMatMulGlobalPhase2BudgetForCatchUp(
+    const Consensus::Params& params, bool is_ibd, bool in_fast_phase, int32_t reference_height = -1);
 /** Height-selected pending EncDr concurrency cap: LT tip-verify
  *  (nMatMulLTMaxPendingVerifications) when IsDRLTActive, else
  *  nMatMulMaxPendingVerifications. reference_height defaults to -1 (== non-LT).
