@@ -6,10 +6,10 @@ and vendored LevelDB/secp256k1 documentation.
 
 Inventory totals:
 
-- documentation-like files: **569**
-- MatMul/ExactReplay/proof-related files: **225**
-- MatMul-related files reviewed or explicitly classified: **225**
-- MatMul-related files still requiring review: **0**
+- documentation-like files: **576**
+- MatMul/ExactReplay/proof-related files: **232**
+- MatMul-related files reviewed or explicitly classified: **228**
+- MatMul-related files still requiring review: **4**
 
 Current and superseded policy documents are considered reviewed when they
 carry a status/precedence notice pointing to the canonical roadmap.
@@ -53,6 +53,7 @@ MatMul transition claim.
 | `contrib/matmul-v4/PR89-WS-F-ADVERSARIAL-CHECKLIST.md` | MatMul-related; reviewed against canonical roadmap |
 | `contrib/matmul-v4/README-benchmark.md` | MatMul-related; reviewed against canonical roadmap |
 | `contrib/matmul-v4/STREAMED-STRATEGIES.md` | MatMul-related; reviewed against canonical roadmap |
+| `contrib/matmul-v4/cuda-profile1-soak-checklist.md` | REVIEW REQUIRED: MatMul-related without canonical-roadmap notice |
 | `contrib/message-capture/message-capture-docs.md` | General documentation; no MatMul transition claim found |
 | `contrib/mining/README.md` | MatMul-related; reviewed against canonical roadmap |
 | `contrib/prebuilt/windows/README.md` | General documentation; no MatMul transition claim found |
@@ -315,11 +316,17 @@ MatMul transition claim.
 | `doc/developer-notes.md` | General documentation; no MatMul transition claim found |
 | `doc/dnsseed-policy.md` | General documentation; no MatMul transition claim found |
 | `doc/ds3_snapshot_pin_runbook.md` | General documentation; no MatMul transition claim found |
+| `doc/evidence/cuda-blackwell-16gib-daemon-lifecycle-2026-08-01/README.md` | MatMul-related; reviewed against canonical roadmap |
+| `doc/evidence/cuda-blackwell-16gib-lifecycle-asert-2026-08-01/README.md` | MatMul-related; reviewed against canonical roadmap |
+| `doc/evidence/cuda-blackwell-16gib-profile1-goldens-2026-08-01/README.md` | REVIEW REQUIRED: MatMul-related without canonical-roadmap notice |
 | `doc/evidence/cuda-blackwell-16gib-profile1-loaded-2026-07-30/README.md` | MatMul-related; reviewed against canonical roadmap |
+| `doc/evidence/cuda-blackwell-16gib-profile1-loaded-2026-08-01/README.md` | MatMul-related; reviewed against canonical roadmap |
 | `doc/evidence/lane-c-2026-07-21/README.md` | MatMul-related; reviewed against canonical roadmap |
 | `doc/evidence/m4-max-exact-replay-2026-07-29/README.md` | MatMul-related; reviewed against canonical roadmap |
 | `doc/evidence/m4-max-exact-replay-profile2-2026-07-30/README.md` | MatMul-related; reviewed against canonical roadmap |
 | `doc/evidence/m4-max-profile1-loaded-2026-07-30/README.md` | MatMul-related; reviewed against canonical roadmap |
+| `doc/evidence/multi-gpu-profile1-goldens-2026-08-01/README.md` | REVIEW REQUIRED: MatMul-related without canonical-roadmap notice |
+| `doc/evidence/multi-gpu-profile1-goldens-metal-2026-08-01/README.md` | REVIEW REQUIRED: MatMul-related without canonical-roadmap notice |
 | `doc/external-signer.md` | General documentation; no MatMul transition claim found |
 | `doc/falcon-softfork-readiness-analysis-2026-03-29.md` | General documentation; no MatMul transition claim found |
 | `doc/files.md` | General documentation; no MatMul transition claim found |
