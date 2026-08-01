@@ -41,10 +41,13 @@ BOOST_AUTO_TEST_CASE(connections_desirable_service_flags)
 {
     std::unique_ptr<PeerManager> peerman = PeerManager::make(*m_node.connman, *m_node.addrman, nullptr, *m_node.chainman, *m_node.mempool, *m_node.warnings, {});
     auto consensus = m_node.chainman->GetParams().GetConsensus();
+    // Pre-RC tip: do not require NODE_MATMUL_CONSENSUS (production canary may
+    // still be unpublished). After RC activation the MatMul-specific case
+    // below covers the consensus-tier preference.
     const ServiceFlags desirable_full{
-        ServiceFlags(NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS)};
+        ServiceFlags(NODE_NETWORK | NODE_WITNESS)};
     const ServiceFlags desirable_limited{
-        ServiceFlags(NODE_NETWORK_LIMITED | NODE_WITNESS | NODE_MATMUL_CONSENSUS)};
+        ServiceFlags(NODE_NETWORK_LIMITED | NODE_WITNESS)};
 
     // Check we start connecting to full nodes
     ServiceFlags peer_flags{NODE_WITNESS | NODE_NETWORK_LIMITED};
@@ -93,7 +96,39 @@ BOOST_AUTO_TEST_CASE(matmul_consensus_tier_desirable_service_flags)
     const ServiceFlags consensus_peer{ServiceFlags(base | NODE_MATMUL_CONSENSUS)};
     const ServiceFlags economic_peer{ServiceFlags(base | NODE_MATMUL_ECONOMIC)};
 
-    BOOST_CHECK(peerman->GetDesirableServiceFlags(base) == ServiceFlags(base | NODE_MATMUL_CONSENSUS));
+    // Default regtest tip is below nMatMulRCHeight, so consensus-mode sync must
+    // still treat ordinary NODE_NETWORK peers as desirable. Otherwise two
+    // self-qualified CUDA nodes with an empty production golden manifest can
+    // never sync the pre-activation parent chain.
+    BOOST_REQUIRE(!m_node.chainman->GetParams().GetConsensus().IsMatMulRCActive(
+        WITH_LOCK(::cs_main, return m_node.chainman->ActiveChain().Height())));
+    BOOST_CHECK(peerman->GetDesirableServiceFlags(base) == base);
+    BOOST_CHECK(peerman->HasAllDesirableServiceFlags(base));
+    BOOST_CHECK(peerman->HasAllDesirableServiceFlags(consensus_peer));
+    BOOST_CHECK(peerman->HasAllDesirableServiceFlags(economic_peer));
+
+    // Force RC-active height identity for the preference gate without mining a
+    // full activation window. Restore immediately so later tests stay hermetic.
+    Consensus::Params& consensus = const_cast<Consensus::Params&>(
+        m_node.chainman->GetParams().GetConsensus());
+    const int32_t saved_rc = consensus.nMatMulRCHeight;
+    const int32_t saved_v4 = consensus.nMatMulV4Height;
+    struct RestoreHeights {
+        Consensus::Params& params;
+        int32_t rc;
+        int32_t v4;
+        ~RestoreHeights()
+        {
+            params.nMatMulRCHeight = rc;
+            params.nMatMulV4Height = v4;
+        }
+    } restore{consensus, saved_rc, saved_v4};
+    consensus.nMatMulV4Height = 0;
+    consensus.nMatMulRCHeight = 0;
+    BOOST_REQUIRE(consensus.IsMatMulRCActive(
+        WITH_LOCK(::cs_main, return m_node.chainman->ActiveChain().Height())));
+    BOOST_CHECK(peerman->GetDesirableServiceFlags(base) ==
+                ServiceFlags(base | NODE_MATMUL_CONSENSUS));
     BOOST_CHECK(peerman->HasAllDesirableServiceFlags(consensus_peer));
     BOOST_CHECK(!peerman->HasAllDesirableServiceFlags(base));
     BOOST_CHECK(!peerman->HasAllDesirableServiceFlags(economic_peer));
