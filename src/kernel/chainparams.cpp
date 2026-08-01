@@ -712,12 +712,12 @@ public:
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].min_activation_height = 0;
 
-        // Mainnet anchor refreshed on 2026-07-10 at height 155'700 from a
-        // synced canonical node so stale history below the current public
+        // Mainnet anchor refreshed on 2026-08-01 at height 176'600 from a
+        // synced archival node so stale history below the current public
         // release floor is rejected quickly.
-        consensus.nMinimumChainWork = uint256{"0000000000000000000000000000000000000000000000000000d441262318ef"};
+        consensus.nMinimumChainWork = uint256{"00000000000000000000000000000000000000000000000000027958e367c643"};
         // Assume signatures valid up to the same anchored block to speed sync.
-        consensus.defaultAssumeValid = uint256{"b5ea1fb02d12e1cfa4bbc5ccc4946ca026ad4a5f270b99a0816aa95853306c3d"};
+        consensus.defaultAssumeValid = uint256{"d5ba7a35a8a61b89de1b0289a6655551909f0491193ddd7620aebbea37a3beaa"};
 
         /**
          * The message start string is designed to be unlikely to occur in normal data.
@@ -730,10 +730,10 @@ public:
         pchMessageStart[3] = 0x01;
         nDefaultPort = 19335;
         nPruneAfterHeight = 100000;
-        // Measured from the 2026-07-10 mainnet archive datadirs near height
-        // 155'870: ~104 GB of blocks plus chain/shielded state, rounded up so
-        // users see a conservative disk estimate before sync begins.
-        m_assumed_blockchain_size = 106;
+        // Measured from the 2026-08-01 mainnet archive near height 176'600:
+        // ~117 GB of blocks plus chain/shielded state, rounded up so users see
+        // a conservative disk estimate before sync begins.
+        m_assumed_blockchain_size = 120;
         m_assumed_chain_state_size = 1;
 
         genesis = CreateBTXGenesisBlock(
@@ -782,6 +782,7 @@ public:
             {
                 {0, uint256{"75a998a39d2d6e25a9ca7de2cc659309c4105839c06cd435ba2b1aabf0fa4601"}},
                 {155700, uint256{"b5ea1fb02d12e1cfa4bbc5ccc4946ca026ad4a5f270b99a0816aa95853306c3d"}},
+                {176600, uint256{"d5ba7a35a8a61b89de1b0289a6655551909f0491193ddd7620aebbea37a3beaa"}},
             }
         };
         m_assumeutxo_data = {
@@ -925,11 +926,19 @@ public:
                 .blockhash = consteval_ctor(uint256{"b5ea1fb02d12e1cfa4bbc5ccc4946ca026ad4a5f270b99a0816aa95853306c3d"}),
                 .shielded_state_commitment = uint256{"d8abf2d33319a2030c34c68dd50cfda10ececdd95f5a85bdbe05d44b334fbe9d"},
             },
+            {
+                // main assumeutxo snapshot at height 176'600 (snapshot v9)
+                .height = 176'600,
+                .hash_serialized = AssumeutxoHash{uint256{"d2bee157092f877553d0651d79922eb97293161d7515147421fe63102048ff93"}},
+                .m_chain_tx_count = 271'654,
+                .blockhash = consteval_ctor(uint256{"d5ba7a35a8a61b89de1b0289a6655551909f0491193ddd7620aebbea37a3beaa"}),
+                .shielded_state_commitment = uint256{"c0f3bde58e1138367a6cd2b0131975de8fad9c90a991f88a42e9397d742b77ce"},
+            },
         };
         chainTxData = ChainTxData{
-            .nTime = 1783686055,
-            .tx_count = 213654,
-            .dTxRate = 0.021856663125,
+            .nTime = 1785571483,
+            .tx_count = 271654,
+            .dTxRate = 0.023232,
         };
     }
 };
