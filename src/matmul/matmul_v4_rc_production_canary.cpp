@@ -306,10 +306,12 @@ std::string ReadPublicSysctlString(const char* name)
 const std::vector<RCProductionGoldenManifestEntry>&
 CommittedRCProductionGoldenManifest()
 {
-    // Intentionally empty. Do not add an entry until its complete production
-    // oracle output and public provenance have been independently reproduced
-    // and reviewed. In particular, toy/scaled-medium self-qualification data
-    // is not a production golden.
+    // Intentionally empty until CUDA+Metal+HIP ExactReplay digests match on the
+    // same frozen production canary headers and are reviewed. Do not add an
+    // entry from a single-backend campaign, and do not treat portable CPU
+    // ExactReplay as Epoch-A independent reproduction on this GPU-optimized
+    // chain. Toy/scaled-medium self-qualification data is not a production
+    // golden.
     static const std::vector<RCProductionGoldenManifestEntry> manifest{};
     return manifest;
 }

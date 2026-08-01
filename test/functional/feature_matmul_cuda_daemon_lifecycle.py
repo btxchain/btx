@@ -8,6 +8,13 @@ This test intentionally uses the real CUDA backend and the production-shape RC
 configuration.  It is opt-in because ordinary CI has no CUDA device.  A mock
 backend cannot detect inherited CUDA contexts, handles, allocations, once_flags,
 or qualification caches.
+
+Canonical CUDA-host invocation (explicit config avoids multi-build auto-select):
+
+  BTX_RUN_CUDA_DAEMON_LIFECYCLE_TESTS=1 \\
+    build-cuda/test/functional/test_runner.py \\
+    --configfile=build-cuda/test/config.ini \\
+    feature_matmul_cuda_daemon_lifecycle.py
 """
 
 import json
@@ -20,6 +27,10 @@ from pathlib import Path
 
 from test_framework.test_framework import BitcoinTestFramework, SkipTest
 from test_framework.util import assert_equal, rpc_port
+
+# Keep RC on the canonical regtest schedule (v4/BMX4C/DRLT default at 100).
+# A lone earlier -regtestrcheight trips ValidateMatMulAsertParams.
+RC_HEIGHT = 101
 
 
 class MatMulCudaDaemonLifecycleTest(BitcoinTestFramework):
@@ -59,6 +70,39 @@ class MatMulCudaDaemonLifecycleTest(BitcoinTestFramework):
         )
         return result.stdout.strip()
 
+    def _wait_rpc(self, datadir, port, process, timeout):
+        """Wait for RPC, failing immediately if a foreground child exits."""
+        deadline = time.monotonic() + timeout
+        last_err = ""
+        while time.monotonic() < deadline:
+            if process is not None:
+                exit_code = process.poll()
+                if exit_code is not None:
+                    console = datadir / "btxd.console.log"
+                    debug = datadir / "regtest" / "debug.log"
+                    chunks = [f"foreground btxd exited early with code {exit_code}"]
+                    for label, path in (("console", console), ("debug.log", debug)):
+                        if path.exists():
+                            text = path.read_text(encoding="utf-8", errors="replace")
+                            chunks.append(f"--- {label} (tail) ---\n{text[-4000:]}")
+                    raise AssertionError("\n".join(chunks))
+            try:
+                return self._cli(datadir, port, "getmininginfo", timeout=5)
+            except (subprocess.SubprocessError, OSError) as exc:
+                last_err = str(exc)
+                time.sleep(0.25)
+        raise AssertionError(
+            f"RPC not ready within {timeout}s for datadir={datadir}: {last_err}"
+        )
+
+    def _cuda_successes(self, info):
+        runtime = info.get("backend_runtime") or {}
+        if "cuda_successes" in runtime:
+            return int(runtime["cuda_successes"])
+        raise AssertionError(
+            "getmininginfo.backend_runtime missing cuda_successes counter"
+        )
+
     def _run_mode(self, mode, index):
         datadir = Path(self.options.tmpdir) / mode
         datadir.mkdir(parents=True)
@@ -76,12 +120,11 @@ class MatMulCudaDaemonLifecycleTest(BitcoinTestFramework):
             "-miningminsyncedoutboundpeers=0",
             "-matmulvalidation=consensus",
             "-matmulrcexecution=strict-device",
-            "-regtestrcheight=6",
+            f"-regtestrcheight={RC_HEIGHT}",
             "-regtestrctoydims=0",
             "-regtestrcprofile=1",
             "-regtestmatmulv4dimension=4096",
             "-regtestmatmulv4maxdimension=4096",
-            "-debug=matmul",
         ]
         if mode == "daemon":
             args.append("-daemon")
@@ -99,27 +142,46 @@ class MatMulCudaDaemonLifecycleTest(BitcoinTestFramework):
         timeout_factor = max(1.0, float(self.options.timeout_factor))
         startup_timeout = int(240 * timeout_factor)
         mining_timeout = int(300 * timeout_factor)
+        console_log = datadir / "btxd.console.log"
         try:
             if mode == "foreground":
+                console_fh = open(console_log, "w", encoding="utf-8")
                 process = subprocess.Popen(
                     args,
                     env=env,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
+                    stdout=console_fh,
+                    stderr=subprocess.STDOUT,
                 )
+                process._btx_console_fh = console_fh  # noqa: SLF001 — test-only
             else:
                 subprocess.run(
                     args, env=env, check=True, timeout=startup_timeout
                 )
 
-            info = json.loads(self._cli(datadir, port, "getmininginfo"))
-            rc = info["backend_runtime"]["rc_exact_replay"]
+            info = json.loads(self._wait_rpc(datadir, port, process, startup_timeout))
+            br = info.get("backend_runtime") or {}
+            if str(br.get("active_backend", "")).lower() != "cuda":
+                raise AssertionError(
+                    f"{mode}: active_backend is not cuda: {br.get('active_backend')}"
+                )
+            if not br.get("required_backend_satisfied", False):
+                raise AssertionError(
+                    f"{mode}: required CUDA backend not satisfied: "
+                    f"{br.get('backend_requirement_reason')}"
+                )
+
+            rc = br["rc_exact_replay"]
             provider = rc["resolved_provider"]
             canary = rc["production_canary"]
             if "cuda" not in provider.lower():
                 raise AssertionError(f"{mode}: non-CUDA RC provider: {provider}")
             if not canary.get("device_architecture", "").startswith("sm_"):
                 raise AssertionError(f"{mode}: missing CUDA architecture identity")
+            if int(canary.get("epoch_activation_height", -1)) != RC_HEIGHT:
+                raise AssertionError(
+                    f"{mode}: unexpected canary epoch_activation_height "
+                    f"{canary.get('epoch_activation_height')}"
+                )
             network = json.loads(self._cli(datadir, port, "getnetworkinfo"))
             services = network["localservicesnames"]
             if canary["outcome"] == "passed":
@@ -136,6 +198,8 @@ class MatMulCudaDaemonLifecycleTest(BitcoinTestFramework):
                     f"{mode}: archive service advertised without a configured signer"
                 )
 
+            successes_before = self._cuda_successes(info)
+
             # Mine real legacy CUDA work after RC self-qualification/canary ran
             # in the final process. This is the shortest regression for stale
             # post-fork CUDA state and failed before the initialization fix.
@@ -151,6 +215,30 @@ class MatMulCudaDaemonLifecycleTest(BitcoinTestFramework):
             )
             assert_equal(len(hashes), 1)
             assert_equal(int(self._cli(datadir, port, "getblockcount")), 1)
+
+            after = json.loads(self._cli(datadir, port, "getmininginfo"))
+            after_br = after.get("backend_runtime") or {}
+            successes_after = self._cuda_successes(after)
+            if successes_after <= successes_before:
+                raise AssertionError(
+                    f"{mode}: cuda_successes did not increase after mining "
+                    f"({successes_before} -> {successes_after})"
+                )
+            if str(after_br.get("active_backend", "")).lower() != "cuda":
+                raise AssertionError(
+                    f"{mode}: post-mine active_backend left cuda: "
+                    f"{after_br.get('active_backend')}"
+                )
+            if not after_br.get("required_backend_satisfied", False):
+                raise AssertionError(
+                    f"{mode}: post-mine required CUDA backend unsatisfied"
+                )
+            after_rc = after_br["rc_exact_replay"]
+            if "cuda" not in str(after_rc.get("resolved_provider", "")).lower():
+                raise AssertionError(
+                    f"{mode}: post-mine RC provider left CUDA path: "
+                    f"{after_rc.get('resolved_provider')}"
+                )
 
             log = (datadir / "regtest" / "debug.log").read_text(encoding="utf-8")
             forbidden = (
@@ -181,6 +269,9 @@ class MatMulCudaDaemonLifecycleTest(BitcoinTestFramework):
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait(timeout=10)
+                console_fh = getattr(process, "_btx_console_fh", None)
+                if console_fh is not None:
+                    console_fh.close()
             else:
                 # -daemon returns before the detached child exits. Do not reuse
                 # its directory until the pid file disappears.
@@ -210,6 +301,20 @@ class MatMulCudaDaemonLifecycleTest(BitcoinTestFramework):
                         pass
 
     def run_test(self):
+        # Fail early if the selected binary cannot satisfy a required CUDA backend.
+        bitcoind = Path(self.options.bitcoind)
+        help_text = subprocess.run(
+            [str(bitcoind), "-help-debug"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        ).stdout
+        if "matmulrcexecution" not in help_text:
+            raise AssertionError(
+                f"selected bitcoind lacks MatMul RC options: {bitcoind}"
+            )
+
         observations = [
             self._run_mode("foreground", 0),
             self._run_mode("daemon", 1),

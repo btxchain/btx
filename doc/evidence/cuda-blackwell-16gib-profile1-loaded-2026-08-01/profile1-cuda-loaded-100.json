@@ -1,0 +1,45 @@
+{
+  "profile": "Profile1_ExactReplay",
+  "matmul_dim": 4096,
+  "n_samples": 100,
+  "distinct_headers": 100,
+  "distinct_digests": 100,
+  "mean_s": 32.27320038933,
+  "p50_s": 32.310893796,
+  "p95_s": 32.526835689,
+  "p99_s": 32.705060405,
+  "nearest_rank_p99_s": 32.705060405,
+  "min_s": 31.837923278,
+  "max_s": 32.709447342,
+  "macs_per_episode": 141149805215744,
+  "cpu_gemm_fallbacks": 0,
+  "device_gemm_calls": 13600,
+  "device_extract_tiles": 2308571136000,
+  "detail": "cuda_resident_ffn_chain+triple_stream+persistent_ws",
+  "source_fingerprint": {
+    "matmul_v4_rc_exact_replay_cuda_cu_md5": "ed1e9477432b1766f549c039b6779632",
+    "git_tip_sha": "c4ac2e439ac496245f12dcbf8b42c9575247dbe9"
+  },
+  "hardware": {
+    "gpu_class": "NVIDIA consumer Blackwell-class discrete GPU (16 GiB VRAM, compute capability 12.0)",
+    "cpu_class": "Intel Xeon W-class workstation CPU",
+    "logical_cpus": 24,
+    "host_ram_gib": 76,
+    "os": "Linux x86_64",
+    "accel": "CUDA ExactReplay resident FFN chain + triple-stream + persistent workspace; device Phase-1 AssociativeRecall"
+  },
+  "notes": [
+    "Production headers bound matmul_dim=4096; 100 distinct dimension-bound headers (mine+verify each).",
+    "Kernel TU fingerprint matches ExactReplay CUDA source at the campaign tip; Launch* ExactGemmBackend adapters are ABI-only.",
+    "Sanitized evidence: no hostname, username, personal paths, SKU names, or machine inventory beyond CPU/GPU/memory class.",
+    "Activation and L0 ratification gates remain false; this artifact does not clear Metal cross-check or ratification."
+  ],
+  "back_to_back": {
+    "block_interval_s": 90,
+    "max_immediate_two_block_drain_s": 65.32154556399999,
+    "max_queue_wait_at_interval_s": 0,
+    "max_arrival_to_verdict_at_interval_s": 32.709447342,
+    "ending_queued_work_s": 0,
+    "no_expanding_queue": true
+  }
+}

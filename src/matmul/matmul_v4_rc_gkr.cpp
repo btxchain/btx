@@ -5320,13 +5320,21 @@ ExactReplayVerifyResult VerifyBoundedExactReplay(
         policy == RCExactReplayExecutionPolicy::StrictDevice;
     if (acceleration.require_device &&
         !resolved.production_eligible) {
-        // The backend remains available to the startup canary and explicit
-        // diagnostic/measurement modes, but strict block validation is
-        // intentionally retryable until the exact provider/device/runtime/
-        // epoch manifest entry has passed its full production canary.
-        acceleration.gemm = {};
-        acceleration.backend = resolved.provider +
-            "_not_production_eligible";
+        // Advertising, startup canary, and winner-authority capability remain
+        // fail-closed until a reviewed production golden exists. Clearing the
+        // self-qualified ExactGemm backend here, however, made every strict
+        // AcceptBlock/tip-validation path return LocalAcceleratorFailure even
+        // after a successful device reseal — which blocks two-node lifecycle
+        // measurement on an otherwise healthy CUDA host. Keep the backend for
+        // self-qualified providers so hardware campaigns can measure relay and
+        // tip-validation; refuse only when no self-qualified device backend is
+        // available.
+        if (!resolved.self_qualified ||
+            resolved.backend.gemm_s8s8 == nullptr) {
+            acceleration.gemm = {};
+            acceleration.backend = resolved.provider +
+                "_not_production_eligible";
+        }
     }
     acceleration.output_row_tile = 256;
     auto result = policy == RCExactReplayExecutionPolicy::StrictDevice

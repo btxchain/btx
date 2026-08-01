@@ -1,0 +1,118 @@
+{
+  "evidence_kind": "asert_work_ratio_proposal_profile1_vs_v3",
+  "date": "2026-08-01",
+  "status": "PROPOSAL_INSTALLED_HEIGHTS_STILL_DISABLED",
+  "tip_sha": "c4ac2e439ac496245f12dcbf8b42c9575247dbe9",
+  "ratification": false,
+  "mainnet_params_unchanged": false,
+  "mainnet_nMatMulRCAsertRescaleNum": 16893794,
+  "mainnet_nMatMulRCAsertRescaleDen": 1,
+  "machine_class": {
+    "os": "Linux x86_64",
+    "cpu_class": "Intel Xeon W-class workstation CPU",
+    "logical_cpus": 24,
+    "gpu_class": "NVIDIA consumer Blackwell-class discrete GPU",
+    "vram_gib": 16,
+    "compute_capability": "12.0",
+    "host_ram_gib": 76
+  },
+  "epoch_a_parent_definition": {
+    "atomic_tuple": "nMatMulV4Height = nMatMulBMX4CHeight = nMatMulRCHeight = H_A; DRLT/coupled INT32_MAX",
+    "live_pre_fork_workload": "MatMul v3 (mainnet today: n=512, b=16, r=8, prehash epsilon=18)",
+    "post_fork_workload": "Profile-1 ExactReplay (rounds=4, L=16, b_seq=16384, T_leaf=1024, matmul_dim=4096)",
+    "asert_owner": "nMatMulRCAsertRescaleNum/Den (RC branch); v4 and BMX4C stay 1/1",
+    "not_parent": "v4/BMX4C never activated on public nets; MAC fixture 16422/1027 is Profile-2/Profile-1 within RC, not v3->RC",
+    "refs": [
+      "doc/btx-matmul-v4.7-transition-roadmap.md \u00a71.1",
+      "src/pow.cpp MatMulAsert RC branch (Epoch A BMX4C==RC ownership)",
+      "src/test/matmul_unified_activation_tests.cpp epoch_a_fork_block_gets_rc_rescale"
+    ]
+  },
+  "identity": {
+    "formula": "Num/Den = R_parent / R_rc  (= Z); next_target = ScaleTargetByTimespan(parent_target, Num, Den)",
+    "direction": "Num>Den loosens target when post-fork work is heavier / throughput drops",
+    "calibration_doc": "doc/btx-matmul-v4.2-asert-calibration.md (throughput form; MAC form only when MFU-comparable)",
+    "reduce": "ReduceRescaleRatioToU32 / GCD; both terms must fit uint32"
+  },
+  "why_16422_1027_exists": {
+    "meaning": "Exact reduced episode-MAC ratio TotalRCEpisodeMacs(profile2)/TotalRCEpisodeMacs(profile1) = (2^37*16422)/(2^37*1027)",
+    "purpose": "Regtest/datacenter Profile-2 cutover loosen (~15.990x) when MFU comparable across RC profiles",
+    "code": [
+      "src/matmul/matmul_v4_rc.h MAC_dc/MAC_base comments",
+      "src/kernel/chainparams.cpp kRCDatacenterAsertRescaleNum/Den"
+    ],
+    "applicable_to_profile1_epoch_a": false,
+    "reason": "Epoch A Profile-1 forks from v3 SHA-gated n=512, not from Profile-1 base RC; work units are not MFU-comparable, so measured nonce/attempt throughput ratio is required"
+  },
+  "measurements": {
+    "parent_v3": {
+      "method": "CPU SolveMatMul mainnet-like (n=512,b=16,r=8,eps=18), hard nBits, 2e6 tries x 5 runs; no GPU",
+      "harness": "src/test/matmul_v3_asert_parent_ratio_measure.cpp via test_btx",
+      "artifact": "v3-parent-asert-measure-5.jsonl (measurement-host artifact; not committed)",
+      "attempts_per_s": {
+        "samples": [
+          523775,
+          520872,
+          523462,
+          509521,
+          528630
+        ],
+        "mean": 521252.0,
+        "median": 523462.0,
+        "pstdev": 6378.7972847551755,
+        "cv": 0.012237453831841749
+      },
+      "R_parent_nonce_or_attempt_per_s": 523462.0,
+      "note": "Measured under concurrent lifecycle CPU load on same host; CV~1.2%"
+    },
+    "rc_profile1_exactreplay": {
+      "method": "Production Profile-1 ExactReplay CUDA loaded campaign (100 distinct headers)",
+      "evidence": "doc/evidence/cuda-blackwell-16gib-profile1-loaded-2026-08-01/profile1-cuda-loaded-100.json",
+      "macs_per_episode": 141149805215744,
+      "wall_s": {
+        "mean": 32.27320038933,
+        "p50": 32.310893796,
+        "p99": 32.705060405
+      },
+      "R_rc_nonce_per_s_mean": 0.03098546124761196,
+      "cpu_gemm_fallbacks": 0
+    },
+    "live_network_context_not_used_in_ratio": {
+      "networkhashps": 168059425.2378283,
+      "difficulty": 3.531677073810059,
+      "height": 176445,
+      "note": "Network rate informs continuity planning; proposed Num/Den is per-device R_parent/R_rc on this GPU-class host"
+    }
+  },
+  "proposed": {
+    "nMatMulRCAsertRescaleNum": 16893794,
+    "nMatMulRCAsertRescaleDen": 1,
+    "decimal": 16893794.0,
+    "derived_as": "round(median(R_v3_attempts_per_s) / (1/mean_Profile1_episode_s))",
+    "reduce_rescale_ratio_to_u32_ok": true,
+    "sensitivity": {
+      "using_p50_rc": {
+        "num": 16913525,
+        "den": 1
+      },
+      "using_p99_rc": {
+        "num": 17119856,
+        "den": 1
+      },
+      "spread_vs_primary_pct": 1.34
+    }
+  },
+  "relation_to_lifecycle_spacing_gate": {
+    "does_this_fix_lifecycle_gt_90s": false,
+    "explanation": "ASERT work-ratio rescale only re-anchors PoW target for the v3->Profile-1 attempt-rate drop. It does not change nPowTargetSpacingNormal (90s) and cannot make a ~97s serial candidate+reseal+tip ExactReplay pipeline fit inside 90s.",
+    "sibling_clarification": "doc/evidence/cuda-blackwell-16gib-lifecycle-asert-2026-08-01/asert-vs-spacing-clarification.json",
+    "lifecycle_core_mean_s_observed": 96.6818442935
+  },
+  "gaps": [
+    "Parent measured on CPU while RC measured on GPU \u2014 correct for this host's mining mix (v3 is SHA/CPU; Profile-1 ExactReplay is device-bound), but multi-host hardware-mix shift not sampled",
+    "Parent runs overlapped lifecycle CPU contention (CV~1.2%)",
+    "Live difficulty continuity check at activation planning still required (getdifficulty/getmininginfo at H_A choice time)",
+    "Ratio installed on public params while heights remain INT32_MAX; ratification gates remain false",
+    "Production golden manifest still empty until CUDA+Metal+HIP digest match"
+  ]
+}

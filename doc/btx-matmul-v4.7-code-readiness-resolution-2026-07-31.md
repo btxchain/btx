@@ -32,7 +32,9 @@ rejects CUDA initialization or CPU-fallback markers. It is hardware-gated:
 
 ```text
 BTX_RUN_CUDA_DAEMON_LIFECYCLE_TESTS=1 \
-  test/functional/test_runner.py feature_matmul_cuda_daemon_lifecycle.py
+  build-cuda/test/functional/test_runner.py \
+  --configfile=build-cuda/test/config.ini \
+  feature_matmul_cuda_daemon_lifecycle.py
 ```
 
 The final two-daemon production RC-boundary campaign remains activation
@@ -171,7 +173,7 @@ proof into consensus authority.
 ## Activation boundary
 
 Before a separate activation-height change, the project still needs reviewed
-CPU-oracle goldens, final-binary provider canaries, real foreground/daemon CUDA
+multi-GPU (CUDA+Metal+HIP) ExactReplay goldens, final-binary provider canaries, real foreground/daemon CUDA
 campaigns, production per-device identity/enumeration for alternate-provider
 adjudication where supported, provider-measured workspace instrumentation,
 fault/recovery and sustained multi-peer soak, block-correlated lifecycle tails

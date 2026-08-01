@@ -43,8 +43,8 @@ must set the following tuple atomically:
 | Workload | `nMatMulRCProfile = 1`, production dimensions, four-round replay |
 | Authority | ExactReplay; Stage-3 proof authority remains disabled |
 | Header admission | HeaderPoW disabled; the fixed header remains 182 bytes |
-| ASERT | v4 and BMX4C ratios remain `1/1`; only the live RC branch receives the measured one-time calibration |
-| Ratification | explicit L0 ratification remains a separate reviewed decision |
+| ASERT | v4 and BMX4C ratios remain `1/1`; RC owns measured Epoch-A calibration (`16893794/1` staged on public params while heights stay `INT32_MAX`) |
+| Ratification | explicit L0 ratification remains a separate reviewed decision (both gates stay false until multi-GPU goldens + canary + complete lifecycle) |
 
 The equality of the three heights prevents any digest-only v4/BMX4C interval
 before ExactReplay authority. The ASERT assignment is deliberately
@@ -138,15 +138,16 @@ The corrected Apple M4 Max Metal campaign used 100 distinct
 - full Metal pipeline with zero CPU contraction calls or fallbacks.
 
 The sanitized Blackwell-class CUDA campaign is additional cross-backend
-evidence. Its 100 distinct production headers recorded a nearest-rank p99 of
-21.385 seconds, a maximum of 21.402 seconds, and zero CPU GEMM fallbacks. The
-committed report records only a broad hardware class and contains no hostname,
-username, personal path, or device serial. This closes the previously reported
-12-sample-count gap. Its recorded CUDA source fingerprint does not match the
-current PR head, however, so the exact final binary still needs a corrected
-100-run rerun. The artifact also does not replace independent digest
-reproduction, the final-head two-node lifecycle campaign, fault/recovery
-evidence, or the multi-peer testnet soak.
+evidence. The tip-correlated 2026-08-01 artifact
+(`doc/evidence/cuda-blackwell-16gib-profile1-loaded-2026-08-01/`) records 100
+distinct production headers with nearest-rank p99 32.705 seconds, maximum
+32.709 seconds, zero CPU GEMM fallbacks, and CUDA TU md5
+`ed1e9477432b1766f549c039b6779632` matching the campaign tip. The earlier
+2026-07-30 report remains historical (stale fingerprint vs current tip). The
+committed reports record only a broad hardware class and contain no hostname,
+username, personal path, or device serial. This does not replace independent
+digest reproduction, the final-head two-node lifecycle campaign, fault/recovery
+evidence, multi-peer testnet soak, or L0 ratification (still false).
 
 ## 4. Epoch-A activation gates
 
@@ -155,8 +156,11 @@ The implementation PR keeps production activation heights disabled.
 
 Before an activation-height PR:
 
-1. Metal, CUDA, and portable execution must produce byte-identical corrected
-   golden digests for the same frozen headers.
+1. CUDA, Metal, and HIP ExactReplay must produce byte-identical golden digests
+   for the same frozen production canary headers
+   (`contrib/matmul-v4/multi-gpu-golden-corpus.sh`); portable CPU oracle is not
+   required for Epoch-A goldens on this GPU-optimized chain. Do not populate
+   `CommittedRCProductionGoldenManifest()` until `complete_multi_gpu_match`.
 2. Every required accelerator campaign must contain at least 100 continuous
    dimension-bound runs with exact device-coverage telemetry.
 3. Actual-consensus back-to-back and three-branch reorg tests must remain

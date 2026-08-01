@@ -1,0 +1,1207 @@
+{
+  "evidence_kind": "cuda_complete_lifecycle_asert_calibration",
+  "date": "2026-08-01",
+  "machine_class": {
+    "os": "Linux x86_64",
+    "gpu_class": "NVIDIA consumer Blackwell-class discrete GPU, 16 GiB VRAM, CC 12.0",
+    "note": "Sanitized machine-class only; no hostname, account, or private path."
+  },
+  "source_revision": "c4ac2e439ac496245f12dcbf8b42c9575247dbe9",
+  "execution_policy": "strict-device",
+  "profile": 1,
+  "mode": "production",
+  "matmul_dim": 4096,
+  "activation_height_regtest": 6,
+  "nodes": 2,
+  "contention": {
+    "single_gpu_host": true,
+    "competing_tip_every_n_attempts": 0,
+    "phases_observed": [
+      "steady_mine_relay"
+    ]
+  },
+  "ratification": {
+    "BTX_MATMUL_NO_INVERSION_GATE_RATIFIED": false,
+    "BTX_MATMUL_V47_GPU_LIFECYCLE_GATE_RATIFIED": false,
+    "installs_rc_asert_ratio": false,
+    "operationally_ready_claim": false,
+    "note": "This campaign is calibration evidence only. Public ratification gates remain false; no RC ASERT ratio is installed."
+  },
+  "component_definition": [
+    "candidate_execution_s",
+    "candidate_queue_wait_s",
+    "winner_reseal_s",
+    "reseal_queue_wait_s",
+    "winner_authority_handoff_s",
+    "authenticated_relay_s",
+    "tip_validation_s",
+    "validation_queue_wait_s"
+  ],
+  "measurement_notes": [
+    "Complete samples require per-block counter advancement on miner candidate, reseal, authority consume, validator authenticated relay, and tip validation.",
+    "Core samples omit winner-authority handoff when the empty production-golden manifest prevents a production capability token; they are not treated as activation-ready complete lifecycle samples.",
+    "RPC complete_lifecycle_readiness sums latest lane components and omits winner-authority handoff; campaign complete sum includes handoff and is fail-closed.",
+    "correlated_end_to_end_sample remains false in RPC; campaign samples are counter-correlated across two nodes for one mined/synced tip.",
+    "Missing authenticated-relay observations are recorded as incomplete; none are invented."
+  ],
+  "gaps_vs_activation_gates": [
+    "winner_authority_handoff unavailable until reviewed production goldens + startup canary mint a process capability",
+    "BTX_MATMUL_V47_GPU_LIFECYCLE_GATE_RATIFIED remains false",
+    "BTX_MATMUL_NO_INVERSION_GATE_RATIFIED remains false",
+    "IBD multi-peer soak not claimed by this campaign"
+  ],
+  "identity": {
+    "resolved_provider": "cuda_rc_exact_fused_extract",
+    "device_architecture_class": "sm_120",
+    "driver_identity_class": "13020",
+    "runtime_identity_class": "13030",
+    "canary_outcome": "missing_golden",
+    "cpu_gemm_fallback_calls": null
+  },
+  "wall_clock_s": 2494.8,
+  "attempts": 20,
+  "complete_sample_count": 0,
+  "core_sample_count_without_authority": 20,
+  "incomplete_sample_count": 0,
+  "complete_lifecycle_summary_s": {
+    "n": 0,
+    "min": null,
+    "p50": null,
+    "p95": null,
+    "p99": null,
+    "max": null,
+    "mean": null
+  },
+  "core_lifecycle_summary_s": {
+    "n": 20,
+    "min": 96.25752747199999,
+    "p50": 96.673725817,
+    "p95": 96.98471223199999,
+    "p99": 97.317815106,
+    "max": 97.317815106,
+    "mean": 96.71682185845
+  },
+  "component_summaries_s": {
+    "candidate_execution_s": {
+      "n": 0,
+      "min": null,
+      "p50": null,
+      "p95": null,
+      "p99": null,
+      "max": null,
+      "mean": null
+    },
+    "candidate_queue_wait_s": {
+      "n": 0,
+      "min": null,
+      "p50": null,
+      "p95": null,
+      "p99": null,
+      "max": null,
+      "mean": null
+    },
+    "winner_reseal_s": {
+      "n": 0,
+      "min": null,
+      "p50": null,
+      "p95": null,
+      "p99": null,
+      "max": null,
+      "mean": null
+    },
+    "reseal_queue_wait_s": {
+      "n": 0,
+      "min": null,
+      "p50": null,
+      "p95": null,
+      "p99": null,
+      "max": null,
+      "mean": null
+    },
+    "winner_authority_handoff_s": {
+      "n": 0,
+      "min": null,
+      "p50": null,
+      "p95": null,
+      "p99": null,
+      "max": null,
+      "mean": null
+    },
+    "authenticated_relay_s": {
+      "n": 0,
+      "min": null,
+      "p50": null,
+      "p95": null,
+      "p99": null,
+      "max": null,
+      "mean": null
+    },
+    "tip_validation_s": {
+      "n": 0,
+      "min": null,
+      "p50": null,
+      "p95": null,
+      "p99": null,
+      "max": null,
+      "mean": null
+    },
+    "validation_queue_wait_s": {
+      "n": 0,
+      "min": null,
+      "p50": null,
+      "p95": null,
+      "p99": null,
+      "max": null,
+      "mean": null
+    }
+  },
+  "core_component_summaries_s": {
+    "candidate_execution_s": {
+      "n": 20,
+      "min": 32.117101723,
+      "p50": 32.337466584,
+      "p95": 32.590560986,
+      "p99": 32.597073685,
+      "max": 32.597073685,
+      "mean": 32.34158590335
+    },
+    "candidate_queue_wait_s": {
+      "n": 20,
+      "min": 6.09e-07,
+      "p50": 1.076e-06,
+      "p95": 1.213e-06,
+      "p99": 1.846e-06,
+      "max": 1.846e-06,
+      "mean": 9.789e-07
+    },
+    "winner_reseal_s": {
+      "n": 20,
+      "min": 31.996125657,
+      "p50": 32.202869231,
+      "p95": 32.342530887,
+      "p99": 32.365524654,
+      "max": 32.365524654,
+      "mean": 32.18870460785
+    },
+    "reseal_queue_wait_s": {
+      "n": 20,
+      "min": 5.7e-07,
+      "p50": 7.04e-07,
+      "p95": 8.63e-07,
+      "p99": 8.69e-07,
+      "max": 8.69e-07,
+      "mean": 7.062e-07
+    },
+    "authenticated_relay_s": {
+      "n": 20,
+      "min": 0.000308026,
+      "p50": 0.000472292,
+      "p95": 0.000545277,
+      "p99": 0.000569245,
+      "max": 0.000569245,
+      "mean": 0.000469592
+    },
+    "tip_validation_s": {
+      "n": 20,
+      "min": 31.836581407,
+      "p50": 32.167651871,
+      "p95": 32.391042618,
+      "p99": 32.475556253,
+      "max": 32.475556253,
+      "mean": 32.1860586626
+    },
+    "validation_queue_wait_s": {
+      "n": 20,
+      "min": 7.33e-07,
+      "p50": 1.341e-06,
+      "p95": 1.962e-06,
+      "p99": 2.05e-06,
+      "max": 2.05e-06,
+      "mean": 1.40755e-06
+    }
+  },
+  "samples": [],
+  "core_samples_without_authority": [
+    {
+      "attempt": 1,
+      "phase": "steady_mine_relay",
+      "height": 6,
+      "block_hash": "3d4f6c9c87cad0cc925b9ba527fc0764cd91fe4b85dd8427f109caa5be6941a0",
+      "counters_before": {
+        "miner_candidate": 0,
+        "miner_reseal": 0,
+        "miner_authority_consumed": 0,
+        "miner_authority_published": 0,
+        "validator_relay": 0,
+        "validator_tip": 0
+      },
+      "counters_after": {
+        "miner_candidate": 2,
+        "miner_reseal": 1,
+        "miner_authority_consumed": 0,
+        "miner_authority_published": 0,
+        "validator_relay": 1,
+        "validator_tip": 1
+      },
+      "counter_gaps": [
+        "miner_authority_consumed: 0 -> 0 (need +1)"
+      ],
+      "counter_gaps_core": [],
+      "complete": false,
+      "core_complete_without_authority": true,
+      "authority_measured": false,
+      "missing_fields": [],
+      "components": {
+        "candidate_execution_s": 32.117101723,
+        "candidate_queue_wait_s": 6.61e-07,
+        "winner_reseal_s": 32.145752524,
+        "reseal_queue_wait_s": 7.04e-07,
+        "winner_authority_handoff_s": 0.0,
+        "authenticated_relay_s": 0.000569245,
+        "tip_validation_s": 32.292523503,
+        "validation_queue_wait_s": 1.341e-06
+      },
+      "core_lifecycle_s": 96.555949701,
+      "complete_lifecycle_s": null,
+      "rpc_assess_lifecycle_s": 32.293094089,
+      "rpc_complete_sample_set": false,
+      "rpc_correlated_end_to_end_sample": false,
+      "rpc_operationally_ready": false,
+      "rpc_omits_winner_authority_handoff": true,
+      "miner_provider": "",
+      "reason": "authority_handoff_unavailable_without_production_canary"
+    },
+    {
+      "attempt": 2,
+      "phase": "steady_mine_relay",
+      "height": 7,
+      "block_hash": "6a3c52e855fb7a9d9e17f63c388e0f1f8e64676a9ba3321cac9bceca97f644bc",
+      "counters_before": {
+        "miner_candidate": 2,
+        "miner_reseal": 1,
+        "miner_authority_consumed": 0,
+        "miner_authority_published": 0,
+        "validator_relay": 1,
+        "validator_tip": 1
+      },
+      "counters_after": {
+        "miner_candidate": 7,
+        "miner_reseal": 2,
+        "miner_authority_consumed": 0,
+        "miner_authority_published": 0,
+        "validator_relay": 2,
+        "validator_tip": 2
+      },
+      "counter_gaps": [
+        "miner_authority_consumed: 0 -> 0 (need +1)"
+      ],
+      "counter_gaps_core": [],
+      "complete": false,
+      "core_complete_without_authority": true,
+      "authority_measured": false,
+      "missing_fields": [],
+      "components": {
+        "candidate_execution_s": 32.350482606,
+        "candidate_queue_wait_s": 6.18e-07,
+        "winner_reseal_s": 32.094419174,
+        "reseal_queue_wait_s": 8.63e-07,
+        "winner_authority_handoff_s": 0.0,
+        "authenticated_relay_s": 0.000480612,
+        "tip_validation_s": 32.337853312,
+        "validation_queue_wait_s": 1.85e-06
+      },
+      "core_lifecycle_s": 96.78323903500001,
+      "complete_lifecycle_s": null,
+      "rpc_assess_lifecycle_s": 32.33833577399999,
+      "rpc_complete_sample_set": false,
+      "rpc_correlated_end_to_end_sample": false,
+      "rpc_operationally_ready": false,
+      "rpc_omits_winner_authority_handoff": true,
+      "miner_provider": "",
+      "reason": "authority_handoff_unavailable_without_production_canary"
+    },
+    {
+      "attempt": 3,
+      "phase": "steady_mine_relay",
+      "height": 8,
+      "block_hash": "080c68bc04bee80688d812462ffb9cc30837b0b1aa2ce3e3c11f7d741d726201",
+      "counters_before": {
+        "miner_candidate": 7,
+        "miner_reseal": 2,
+        "miner_authority_consumed": 0,
+        "miner_authority_published": 0,
+        "validator_relay": 2,
+        "validator_tip": 2
+      },
+      "counters_after": {
+        "miner_candidate": 11,
+        "miner_reseal": 3,
+        "miner_authority_consumed": 0,
+        "miner_authority_published": 0,
+        "validator_relay": 3,
+        "validator_tip": 3
+      },
+      "counter_gaps": [
+        "miner_authority_consumed: 0 -> 0 (need +1)"
+      ],
+      "counter_gaps_core": [],
+      "complete": false,
+      "core_complete_without_authority": true,
+      "authority_measured": false,
+      "missing_fields": [],
+      "components": {
+        "candidate_execution_s": 32.476259231,
+        "candidate_queue_wait_s": 6.28e-07,
+        "winner_reseal_s": 32.365524654,
+        "reseal_queue_wait_s": 7.83e-07,
+        "winner_authority_handoff_s": 0.0,
+        "authenticated_relay_s": 0.000472292,
+        "tip_validation_s": 32.475556253,
+        "validation_queue_wait_s": 1.265e-06
+      },
+      "core_lifecycle_s": 97.317815106,
+      "complete_lifecycle_s": null,
+      "rpc_assess_lifecycle_s": 32.47602981,
+      "rpc_complete_sample_set": false,
+      "rpc_correlated_end_to_end_sample": false,
+      "rpc_operationally_ready": false,
+      "rpc_omits_winner_authority_handoff": true,
+      "miner_provider": "",
+      "reason": "authority_handoff_unavailable_without_production_canary"
+    },
+    {
+      "attempt": 4,
+      "phase": "steady_mine_relay",
+      "height": 9,
+      "block_hash": "4db9358d18588c7e6188b232446c9d7818e074d5952c46884c2a6b87318094f6",
+      "counters_before": {
+        "miner_candidate": 11,
+        "miner_reseal": 3,
+        "miner_authority_consumed": 0,
+        "miner_authority_published": 0,
+        "validator_relay": 3,
+        "validator_tip": 3
+      },
+      "counters_after": {
+        "miner_candidate": 13,
+        "miner_reseal": 4,
+        "miner_authority_consumed": 0,
+        "miner_authority_published": 0,
+        "validator_relay": 4,
+        "validator_tip": 4
+      },
+      "counter_gaps": [
+        "miner_authority_consumed: 0 -> 0 (need +1)"
+      ],
+      "counter_gaps_core": [],
+      "complete": false,
+      "core_complete_without_authority": true,
+      "authority_measured": false,
+      "missing_fields": [],
+      "components": {
+        "candidate_execution_s": 32.597073685,
+        "candidate_queue_wait_s": 6.1e-07,
+        "winner_reseal_s": 31.996125657,
+        "reseal_queue_wait_s": 5.7e-07,
+        "winner_authority_handoff_s": 0.0,
+        "authenticated_relay_s": 0.000467827,
+        "tip_validation_s": 32.391042618,
+        "validation_queue_wait_s": 1.265e-06
+      },
+      "core_lifecycle_s": 96.98471223199999,
+      "complete_lifecycle_s": null,
+      "rpc_assess_lifecycle_s": 32.39151171,
+      "rpc_complete_sample_set": false,
+      "rpc_correlated_end_to_end_sample": false,
+      "rpc_operationally_ready": false,
+      "rpc_omits_winner_authority_handoff": true,
+      "miner_provider": "",
+      "reason": "authority_handoff_unavailable_without_production_canary"
+    },
+    {
+      "attempt": 5,
+      "phase": "steady_mine_relay",
+      "height": 10,
+      "block_hash": "e4add316855c919dfe634c570a0bce1343f432d916b78170e06d9d2ebe0482fd",
+      "counters_before": {
+        "miner_candidate": 13,
+        "miner_reseal": 4,
+        "miner_authority_consumed": 0,
+        "miner_authority_published": 0,
+        "validator_relay": 4,
+        "validator_tip": 4
+      },
+      "counters_after": {
+        "miner_candidate": 14,
+        "miner_reseal": 5,
+        "miner_authority_consumed": 0,
+        "miner_authority_published": 0,
+        "validator_relay": 5,
+        "validator_tip": 5
+      },
+      "counter_gaps": [
+        "miner_authority_consumed: 0 -> 0 (need +1)"
+      ],
+      "counter_gaps_core": [],
+      "complete": false,
+      "core_complete_without_authority": true,
+      "authority_measured": false,
+      "missing_fields": [],
+      "components": {
+        "candidate_execution_s": 32.24741214,
+        "candidate_queue_wait_s": 1.213e-06,
+        "winner_reseal_s": 32.251067777,
+        "reseal_queue_wait_s": 6.86e-07,
+        "winner_authority_handoff_s": 0.0,
+        "authenticated_relay_s": 0.000431012,
+        "tip_validation_s": 32.012125088,
+        "validation_queue_wait_s": 1.361e-06
+      },
+      "core_lifecycle_s": 96.51103927700001,
+      "complete_lifecycle_s": null,
+      "rpc_assess_lifecycle_s": 32.012557461,
+      "rpc_complete_sample_set": false,
+      "rpc_correlated_end_to_end_sample": false,
+      "rpc_operationally_ready": false,
+      "rpc_omits_winner_authority_handoff": true,
+      "miner_provider": "",
+      "reason": "authority_handoff_unavailable_without_production_canary"
+    },
+    {
+      "attempt": 6,
+      "phase": "steady_mine_relay",
+      "height": 11,
+      "block_hash": "663b8e9e338a07e1c0158897bcdd7e0c506d67f06a0357a10567b60eadbf346a",
+      "counters_before": {
+        "miner_candidate": 14,
+        "miner_reseal": 5,
+        "miner_authority_consumed": 0,
+        "miner_authority_published": 0,
+        "validator_relay": 5,
+        "validator_tip": 5
+      },
+      "counters_after": {
+        "miner_candidate": 16,
+        "miner_reseal": 6,
+        "miner_authority_consumed": 0,
+        "miner_authority_published": 0,
+        "validator_relay": 6,
+        "validator_tip": 6
+      },
+      "counter_gaps": [
+        "miner_authority_consumed: 0 -> 0 (need +1)"
+      ],
+      "counter_gaps_core": [],
+      "complete": false,
+      "core_complete_without_authority": true,
+      "authority_measured": false,
+      "missing_fields": [],
+      "components": {
+        "candidate_execution_s": 32.347705075,
+        "candidate_queue_wait_s": 6.97e-07,
+        "winner_reseal_s": 32.329889113,
+        "reseal_queue_wait_s": 7.1e-07,
+        "winner_authority_handoff_s": 0.0,
+        "authenticated_relay_s": 0.000399517,
+        "tip_validation_s": 31.836581407,
+        "validation_queue_wait_s": 1.381e-06
+      },
+      "core_lifecycle_s": 96.5145779,
+      "complete_lifecycle_s": null,
+      "rpc_assess_lifecycle_s": 31.836982305,
+      "rpc_complete_sample_set": false,
+      "rpc_correlated_end_to_end_sample": false,
+      "rpc_operationally_ready": false,
+      "rpc_omits_winner_authority_handoff": true,
+      "miner_provider": "",
+      "reason": "authority_handoff_unavailable_without_production_canary"
+    },
+    {
+      "attempt": 7,
+      "phase": "steady_mine_relay",
+      "height": 12,
+      "block_hash": "4498feca05f52cde21933410f9e38fe837e6870e35043f6dd6d29df21bde2920",
+      "counters_before": {
+        "miner_candidate": 16,
+        "miner_reseal": 6,
+        "miner_authority_consumed": 0,
+        "miner_authority_published": 0,
+        "validator_relay": 6,
+        "validator_tip": 6
+      },
+      "counters_after": {
+        "miner_candidate": 17,
+        "miner_reseal": 7,
+        "miner_authority_consumed": 0,
+        "miner_authority_published": 0,
+        "validator_relay": 7,
+        "validator_tip": 7
+      },
+      "counter_gaps": [
+        "miner_authority_consumed: 0 -> 0 (need +1)"
+      ],
+      "counter_gaps_core": [],
+      "complete": false,
+      "core_complete_without_authority": true,
+      "authority_measured": false,
+      "missing_fields": [],
+      "components": {
+        "candidate_execution_s": 32.590560986,
+        "candidate_queue_wait_s": 1.13e-06,
+        "winner_reseal_s": 32.157928782,
+        "reseal_queue_wait_s": 7.05e-07,
+        "winner_authority_handoff_s": 0.0,
+        "authenticated_relay_s": 0.000465018,
+        "tip_validation_s": 32.224344979,
+        "validation_queue_wait_s": 1.421e-06
+      },
+      "core_lifecycle_s": 96.973303021,
+      "complete_lifecycle_s": null,
+      "rpc_assess_lifecycle_s": 32.224811418,
+      "rpc_complete_sample_set": false,
+      "rpc_correlated_end_to_end_sample": false,
+      "rpc_operationally_ready": false,
+      "rpc_omits_winner_authority_handoff": true,
+      "miner_provider": "",
+      "reason": "authority_handoff_unavailable_without_production_canary"
+    },
+    {
+      "attempt": 8,
+      "phase": "steady_mine_relay",
+      "height": 13,
+      "block_hash": "818f1749893d10908acb439d63a4127ddbb8a8df0c4ca263f338b06441115640",
+      "counters_before": {
+        "miner_candidate": 17,
+        "miner_reseal": 7,
+        "miner_authority_consumed": 0,
+        "miner_authority_published": 0,
+        "validator_relay": 7,
+        "validator_tip": 7
+      },
+      "counters_after": {
+        "miner_candidate": 18,
+        "miner_reseal": 8,
+        "miner_authority_consumed": 0,
+        "miner_authority_published": 0,
+        "validator_relay": 8,
+        "validator_tip": 8
+      },
+      "counter_gaps": [
+        "miner_authority_consumed: 0 -> 0 (need +1)"
+      ],
+      "counter_gaps_core": [],
+      "complete": false,
+      "core_complete_without_authority": true,
+      "authority_measured": false,
+      "missing_fields": [],
+      "components": {
+        "candidate_execution_s": 32.337682892,
+        "candidate_queue_wait_s": 1.046e-06,
+        "winner_reseal_s": 32.023903668,
+        "reseal_queue_wait_s": 6.01e-07,
+        "winner_authority_handoff_s": 0.0,
+        "authenticated_relay_s": 0.000483631,
+        "tip_validation_s": 31.895454329,
+        "validation_queue_wait_s": 1.305e-06
+      },
+      "core_lifecycle_s": 96.25752747199999,
+      "complete_lifecycle_s": null,
+      "rpc_assess_lifecycle_s": 31.895939265,
+      "rpc_complete_sample_set": false,
+      "rpc_correlated_end_to_end_sample": false,
+      "rpc_operationally_ready": false,
+      "rpc_omits_winner_authority_handoff": true,
+      "miner_provider": "",
+      "reason": "authority_handoff_unavailable_without_production_canary"
+    },
+    {
+      "attempt": 9,
+      "phase": "steady_mine_relay",
+      "height": 14,
+      "block_hash": "4bbaab44bcd8b489e7a7ae06e965779747c98edc2095feaaabb025c2c850bbf6",
+      "counters_before": {
+        "miner_candidate": 18,
+        "miner_reseal": 8,
+        "miner_authority_consumed": 0,
+        "miner_authority_published": 0,
+        "validator_relay": 8,
+        "validator_tip": 8
+      },
+      "counters_after": {
+        "miner_candidate": 23,
+        "miner_reseal": 9,
+        "miner_authority_consumed": 0,
+        "miner_authority_published": 0,
+        "validator_relay": 9,
+        "validator_tip": 9
+      },
+      "counter_gaps": [
+        "miner_authority_consumed: 0 -> 0 (need +1)"
+      ],
+      "counter_gaps_core": [],
+      "complete": false,
+      "core_complete_without_authority": true,
+      "authority_measured": false,
+      "missing_fields": [],
+      "components": {
+        "candidate_execution_s": 32.125557992,
+        "candidate_queue_wait_s": 6.09e-07,
+        "winner_reseal_s": 32.094725269,
+        "reseal_queue_wait_s": 6.19e-07,
+        "winner_authority_handoff_s": 0.0,
+        "authenticated_relay_s": 0.000525405,
+        "tip_validation_s": 32.071818007,
+        "validation_queue_wait_s": 1.122e-06
+      },
+      "core_lifecycle_s": 96.29262902299999,
+      "complete_lifecycle_s": null,
+      "rpc_assess_lifecycle_s": 32.072344534,
+      "rpc_complete_sample_set": false,
+      "rpc_correlated_end_to_end_sample": false,
+      "rpc_operationally_ready": false,
+      "rpc_omits_winner_authority_handoff": true,
+      "miner_provider": "",
+      "reason": "authority_handoff_unavailable_without_production_canary"
+    },
+    {
+      "attempt": 10,
+      "phase": "steady_mine_relay",
+      "height": 15,
+      "block_hash": "1ce44a6106a3162671c51ddf205ae17ac7a0a397c085759664960340ccd50ca4",
+      "counters_before": {
+        "miner_candidate": 23,
+        "miner_reseal": 9,
+        "miner_authority_consumed": 0,
+        "miner_authority_published": 0,
+        "validator_relay": 9,
+        "validator_tip": 9
+      },
+      "counters_after": {
+        "miner_candidate": 26,
+        "miner_reseal": 10,
+        "miner_authority_consumed": 0,
+        "miner_authority_published": 0,
+        "validator_relay": 10,
+        "validator_tip": 10
+      },
+      "counter_gaps": [
+        "miner_authority_consumed: 0 -> 0 (need +1)"
+      ],
+      "counter_gaps_core": [],
+      "complete": false,
+      "core_complete_without_authority": true,
+      "authority_measured": false,
+      "missing_fields": [],
+      "components": {
+        "candidate_execution_s": 32.241125893,
+        "candidate_queue_wait_s": 6.52e-07,
+        "winner_reseal_s": 32.202869231,
+        "reseal_queue_wait_s": 5.88e-07,
+        "winner_authority_handoff_s": 0.0,
+        "authenticated_relay_s": 0.000542823,
+        "tip_validation_s": 32.167651871,
+        "validation_queue_wait_s": 1.698e-06
+      },
+      "core_lifecycle_s": 96.612192756,
+      "complete_lifecycle_s": null,
+      "rpc_assess_lifecycle_s": 32.168196392,
+      "rpc_complete_sample_set": false,
+      "rpc_correlated_end_to_end_sample": false,
+      "rpc_operationally_ready": false,
+      "rpc_omits_winner_authority_handoff": true,
+      "miner_provider": "",
+      "reason": "authority_handoff_unavailable_without_production_canary"
+    },
+    {
+      "attempt": 11,
+      "phase": "steady_mine_relay",
+      "height": 16,
+      "block_hash": "801539c42ae8dc42618f627519b46d559bf7ca435fdbc6de8cc617e3a9feed84",
+      "counters_before": {
+        "miner_candidate": 26,
+        "miner_reseal": 10,
+        "miner_authority_consumed": 0,
+        "miner_authority_published": 0,
+        "validator_relay": 10,
+        "validator_tip": 10
+      },
+      "counters_after": {
+        "miner_candidate": 27,
+        "miner_reseal": 11,
+        "miner_authority_consumed": 0,
+        "miner_authority_published": 0,
+        "validator_relay": 11,
+        "validator_tip": 11
+      },
+      "counter_gaps": [
+        "miner_authority_consumed: 0 -> 0 (need +1)"
+      ],
+      "counter_gaps_core": [],
+      "complete": false,
+      "core_complete_without_authority": true,
+      "authority_measured": false,
+      "missing_fields": [],
+      "components": {
+        "candidate_execution_s": 32.337466584,
+        "candidate_queue_wait_s": 1.076e-06,
+        "winner_reseal_s": 32.238726112,
+        "reseal_queue_wait_s": 8.55e-07,
+        "winner_authority_handoff_s": 0.0,
+        "authenticated_relay_s": 0.000454425,
+        "tip_validation_s": 32.140606585,
+        "validation_queue_wait_s": 1.118e-06
+      },
+      "core_lifecycle_s": 96.717256755,
+      "complete_lifecycle_s": null,
+      "rpc_assess_lifecycle_s": 32.141062128,
+      "rpc_complete_sample_set": false,
+      "rpc_correlated_end_to_end_sample": false,
+      "rpc_operationally_ready": false,
+      "rpc_omits_winner_authority_handoff": true,
+      "miner_provider": "",
+      "reason": "authority_handoff_unavailable_without_production_canary"
+    },
+    {
+      "attempt": 12,
+      "phase": "steady_mine_relay",
+      "height": 17,
+      "block_hash": "4b905db3b1acd951bc996e1975b3f5de7f57c30ece14fc9b4e82fcd878b911d8",
+      "counters_before": {
+        "miner_candidate": 27,
+        "miner_reseal": 11,
+        "miner_authority_consumed": 0,
+        "miner_authority_published": 0,
+        "validator_relay": 11,
+        "validator_tip": 11
+      },
+      "counters_after": {
+        "miner_candidate": 28,
+        "miner_reseal": 12,
+        "miner_authority_consumed": 0,
+        "miner_authority_published": 0,
+        "validator_relay": 12,
+        "validator_tip": 12
+      },
+      "counter_gaps": [
+        "miner_authority_consumed: 0 -> 0 (need +1)"
+      ],
+      "counter_gaps_core": [],
+      "complete": false,
+      "core_complete_without_authority": true,
+      "authority_measured": false,
+      "missing_fields": [],
+      "components": {
+        "candidate_execution_s": 32.206919698,
+        "candidate_queue_wait_s": 1.117e-06,
+        "winner_reseal_s": 32.294533275,
+        "reseal_queue_wait_s": 5.92e-07,
+        "winner_authority_handoff_s": 0.0,
+        "authenticated_relay_s": 0.000490849,
+        "tip_validation_s": 32.111134223,
+        "validation_queue_wait_s": 1.018e-06
+      },
+      "core_lifecycle_s": 96.613080772,
+      "complete_lifecycle_s": null,
+      "rpc_assess_lifecycle_s": 32.11162609,
+      "rpc_complete_sample_set": false,
+      "rpc_correlated_end_to_end_sample": false,
+      "rpc_operationally_ready": false,
+      "rpc_omits_winner_authority_handoff": true,
+      "miner_provider": "",
+      "reason": "authority_handoff_unavailable_without_production_canary"
+    },
+    {
+      "attempt": 13,
+      "phase": "steady_mine_relay",
+      "height": 18,
+      "block_hash": "43ee0622a3b4e170cac0f77567f835ab52741ec37e454dbf10200380f6540098",
+      "counters_before": {
+        "miner_candidate": 28,
+        "miner_reseal": 12,
+        "miner_authority_consumed": 0,
+        "miner_authority_published": 0,
+        "validator_relay": 12,
+        "validator_tip": 12
+      },
+      "counters_after": {
+        "miner_candidate": 29,
+        "miner_reseal": 13,
+        "miner_authority_consumed": 0,
+        "miner_authority_published": 0,
+        "validator_relay": 13,
+        "validator_tip": 13
+      },
+      "counter_gaps": [
+        "miner_authority_consumed: 0 -> 0 (need +1)"
+      ],
+      "counter_gaps_core": [],
+      "complete": false,
+      "core_complete_without_authority": true,
+      "authority_measured": false,
+      "missing_fields": [],
+      "components": {
+        "candidate_execution_s": 32.328966818,
+        "candidate_queue_wait_s": 1.133e-06,
+        "winner_reseal_s": 32.22398013,
+        "reseal_queue_wait_s": 6.91e-07,
+        "winner_authority_handoff_s": 0.0,
+        "authenticated_relay_s": 0.000496735,
+        "tip_validation_s": 32.289016657,
+        "validation_queue_wait_s": 1.128e-06
+      },
+      "core_lifecycle_s": 96.84246329199999,
+      "complete_lifecycle_s": null,
+      "rpc_assess_lifecycle_s": 32.28951452,
+      "rpc_complete_sample_set": false,
+      "rpc_correlated_end_to_end_sample": false,
+      "rpc_operationally_ready": false,
+      "rpc_omits_winner_authority_handoff": true,
+      "miner_provider": "",
+      "reason": "authority_handoff_unavailable_without_production_canary"
+    },
+    {
+      "attempt": 14,
+      "phase": "steady_mine_relay",
+      "height": 19,
+      "block_hash": "b493d90b68a9070090f3f06dde8c0485f1e91f3a54671cb1fd88ae3884971c86",
+      "counters_before": {
+        "miner_candidate": 29,
+        "miner_reseal": 13,
+        "miner_authority_consumed": 0,
+        "miner_authority_published": 0,
+        "validator_relay": 13,
+        "validator_tip": 13
+      },
+      "counters_after": {
+        "miner_candidate": 30,
+        "miner_reseal": 14,
+        "miner_authority_consumed": 0,
+        "miner_authority_published": 0,
+        "validator_relay": 14,
+        "validator_tip": 14
+      },
+      "counter_gaps": [
+        "miner_authority_consumed: 0 -> 0 (need +1)"
+      ],
+      "counter_gaps_core": [],
+      "complete": false,
+      "core_complete_without_authority": true,
+      "authority_measured": false,
+      "missing_fields": [],
+      "components": {
+        "candidate_execution_s": 32.385673026,
+        "candidate_queue_wait_s": 1.846e-06,
+        "winner_reseal_s": 32.161940364,
+        "reseal_queue_wait_s": 5.88e-07,
+        "winner_authority_handoff_s": 0.0,
+        "authenticated_relay_s": 0.00042913,
+        "tip_validation_s": 32.324701523,
+        "validation_queue_wait_s": 1.054e-06
+      },
+      "core_lifecycle_s": 96.872747531,
+      "complete_lifecycle_s": null,
+      "rpc_assess_lifecycle_s": 32.325131707,
+      "rpc_complete_sample_set": false,
+      "rpc_correlated_end_to_end_sample": false,
+      "rpc_operationally_ready": false,
+      "rpc_omits_winner_authority_handoff": true,
+      "miner_provider": "",
+      "reason": "authority_handoff_unavailable_without_production_canary"
+    },
+    {
+      "attempt": 15,
+      "phase": "steady_mine_relay",
+      "height": 20,
+      "block_hash": "5cba4bc87fb4bed7139a0312f9fac4166accc9c49bc9d29d7f3d1096023cda2f",
+      "counters_before": {
+        "miner_candidate": 30,
+        "miner_reseal": 14,
+        "miner_authority_consumed": 0,
+        "miner_authority_published": 0,
+        "validator_relay": 14,
+        "validator_tip": 14
+      },
+      "counters_after": {
+        "miner_candidate": 32,
+        "miner_reseal": 15,
+        "miner_authority_consumed": 0,
+        "miner_authority_published": 0,
+        "validator_relay": 15,
+        "validator_tip": 15
+      },
+      "counter_gaps": [
+        "miner_authority_consumed: 0 -> 0 (need +1)"
+      ],
+      "counter_gaps_core": [],
+      "complete": false,
+      "core_complete_without_authority": true,
+      "authority_measured": false,
+      "missing_fields": [],
+      "components": {
+        "candidate_execution_s": 32.42319013,
+        "candidate_queue_wait_s": 8.86e-07,
+        "winner_reseal_s": 32.250551509,
+        "reseal_queue_wait_s": 8.24e-07,
+        "winner_authority_handoff_s": 0.0,
+        "authenticated_relay_s": 0.000446932,
+        "tip_validation_s": 32.203693908,
+        "validation_queue_wait_s": 1.689e-06
+      },
+      "core_lifecycle_s": 96.877885878,
+      "complete_lifecycle_s": null,
+      "rpc_assess_lifecycle_s": 32.204142529,
+      "rpc_complete_sample_set": false,
+      "rpc_correlated_end_to_end_sample": false,
+      "rpc_operationally_ready": false,
+      "rpc_omits_winner_authority_handoff": true,
+      "miner_provider": "",
+      "reason": "authority_handoff_unavailable_without_production_canary"
+    },
+    {
+      "attempt": 16,
+      "phase": "steady_mine_relay",
+      "height": 21,
+      "block_hash": "ff5f313563e36b6190fac6ce7438c3e5d62d75845ebeb7ce0be11e496394fab7",
+      "counters_before": {
+        "miner_candidate": 32,
+        "miner_reseal": 15,
+        "miner_authority_consumed": 0,
+        "miner_authority_published": 0,
+        "validator_relay": 15,
+        "validator_tip": 15
+      },
+      "counters_after": {
+        "miner_candidate": 33,
+        "miner_reseal": 16,
+        "miner_authority_consumed": 0,
+        "miner_authority_published": 0,
+        "validator_relay": 16,
+        "validator_tip": 16
+      },
+      "counter_gaps": [
+        "miner_authority_consumed: 0 -> 0 (need +1)"
+      ],
+      "counter_gaps_core": [],
+      "complete": false,
+      "core_complete_without_authority": true,
+      "authority_measured": false,
+      "missing_fields": [],
+      "components": {
+        "candidate_execution_s": 32.425801628,
+        "candidate_queue_wait_s": 1.174e-06,
+        "winner_reseal_s": 32.154584596,
+        "reseal_queue_wait_s": 7.67e-07,
+        "winner_authority_handoff_s": 0.0,
+        "authenticated_relay_s": 0.000501814,
+        "tip_validation_s": 32.092835105,
+        "validation_queue_wait_s": 7.33e-07
+      },
+      "core_lifecycle_s": 96.673725817,
+      "complete_lifecycle_s": null,
+      "rpc_assess_lifecycle_s": 32.093337652,
+      "rpc_complete_sample_set": false,
+      "rpc_correlated_end_to_end_sample": false,
+      "rpc_operationally_ready": false,
+      "rpc_omits_winner_authority_handoff": true,
+      "miner_provider": "",
+      "reason": "authority_handoff_unavailable_without_production_canary"
+    },
+    {
+      "attempt": 17,
+      "phase": "steady_mine_relay",
+      "height": 22,
+      "block_hash": "1a2ec9aed9c47acdf142248ff08467656002def438e3693a366205f929166678",
+      "counters_before": {
+        "miner_candidate": 33,
+        "miner_reseal": 16,
+        "miner_authority_consumed": 0,
+        "miner_authority_published": 0,
+        "validator_relay": 16,
+        "validator_tip": 16
+      },
+      "counters_after": {
+        "miner_candidate": 34,
+        "miner_reseal": 17,
+        "miner_authority_consumed": 0,
+        "miner_authority_published": 0,
+        "validator_relay": 17,
+        "validator_tip": 17
+      },
+      "counter_gaps": [
+        "miner_authority_consumed: 0 -> 0 (need +1)"
+      ],
+      "counter_gaps_core": [],
+      "complete": false,
+      "core_complete_without_authority": true,
+      "authority_measured": false,
+      "missing_fields": [],
+      "components": {
+        "candidate_execution_s": 32.296774355,
+        "candidate_queue_wait_s": 1.107e-06,
+        "winner_reseal_s": 32.342530887,
+        "reseal_queue_wait_s": 8.03e-07,
+        "winner_authority_handoff_s": 0.0,
+        "authenticated_relay_s": 0.000517008,
+        "tip_validation_s": 32.145563933,
+        "validation_queue_wait_s": 2.05e-06
+      },
+      "core_lifecycle_s": 96.785390143,
+      "complete_lifecycle_s": null,
+      "rpc_assess_lifecycle_s": 32.146082991,
+      "rpc_complete_sample_set": false,
+      "rpc_correlated_end_to_end_sample": false,
+      "rpc_operationally_ready": false,
+      "rpc_omits_winner_authority_handoff": true,
+      "miner_provider": "",
+      "reason": "authority_handoff_unavailable_without_production_canary"
+    },
+    {
+      "attempt": 18,
+      "phase": "steady_mine_relay",
+      "height": 23,
+      "block_hash": "22dfc049edf95758b60fab3d51c8aa2bec65dab864e4c5a20b25d09206d37150",
+      "counters_before": {
+        "miner_candidate": 34,
+        "miner_reseal": 17,
+        "miner_authority_consumed": 0,
+        "miner_authority_published": 0,
+        "validator_relay": 17,
+        "validator_tip": 17
+      },
+      "counters_after": {
+        "miner_candidate": 35,
+        "miner_reseal": 18,
+        "miner_authority_consumed": 0,
+        "miner_authority_published": 0,
+        "validator_relay": 18,
+        "validator_tip": 18
+      },
+      "counter_gaps": [
+        "miner_authority_consumed: 0 -> 0 (need +1)"
+      ],
+      "counter_gaps_core": [],
+      "complete": false,
+      "core_complete_without_authority": true,
+      "authority_measured": false,
+      "missing_fields": [],
+      "components": {
+        "candidate_execution_s": 32.487881143,
+        "candidate_queue_wait_s": 1.165e-06,
+        "winner_reseal_s": 32.204503131,
+        "reseal_queue_wait_s": 8.69e-07,
+        "winner_authority_handoff_s": 0.0,
+        "authenticated_relay_s": 0.000545277,
+        "tip_validation_s": 32.227035052,
+        "validation_queue_wait_s": 1.764e-06
+      },
+      "core_lifecycle_s": 96.919968401,
+      "complete_lifecycle_s": null,
+      "rpc_assess_lifecycle_s": 32.227582093,
+      "rpc_complete_sample_set": false,
+      "rpc_correlated_end_to_end_sample": false,
+      "rpc_operationally_ready": false,
+      "rpc_omits_winner_authority_handoff": true,
+      "miner_provider": "",
+      "reason": "authority_handoff_unavailable_without_production_canary"
+    },
+    {
+      "attempt": 19,
+      "phase": "steady_mine_relay",
+      "height": 24,
+      "block_hash": "b71d044f3c007993c7ae3db35ea808a095e4b9c529189b3f795eda24687bf5ce",
+      "counters_before": {
+        "miner_candidate": 35,
+        "miner_reseal": 18,
+        "miner_authority_consumed": 0,
+        "miner_authority_published": 0,
+        "validator_relay": 18,
+        "validator_tip": 18
+      },
+      "counters_after": {
+        "miner_candidate": 36,
+        "miner_reseal": 19,
+        "miner_authority_consumed": 0,
+        "miner_authority_published": 0,
+        "validator_relay": 19,
+        "validator_tip": 19
+      },
+      "counter_gaps": [
+        "miner_authority_consumed: 0 -> 0 (need +1)"
+      ],
+      "counter_gaps_core": [],
+      "complete": false,
+      "core_complete_without_authority": true,
+      "authority_measured": false,
+      "missing_fields": [],
+      "components": {
+        "candidate_execution_s": 32.250653885,
+        "candidate_queue_wait_s": 1.098e-06,
+        "winner_reseal_s": 32.214001633,
+        "reseal_queue_wait_s": 5.72e-07,
+        "winner_authority_handoff_s": 0.0,
+        "authenticated_relay_s": 0.000308026,
+        "tip_validation_s": 32.155114766,
+        "validation_queue_wait_s": 1.962e-06
+      },
+      "core_lifecycle_s": 96.620081942,
+      "complete_lifecycle_s": null,
+      "rpc_assess_lifecycle_s": 32.15542475399999,
+      "rpc_complete_sample_set": false,
+      "rpc_correlated_end_to_end_sample": false,
+      "rpc_operationally_ready": false,
+      "rpc_omits_winner_authority_handoff": true,
+      "miner_provider": "",
+      "reason": "authority_handoff_unavailable_without_production_canary"
+    },
+    {
+      "attempt": 20,
+      "phase": "steady_mine_relay",
+      "height": 25,
+      "block_hash": "443a0846722f029e09e1753be3af593fbc84f17c6bf707b8369ee809a4d3e0e6",
+      "counters_before": {
+        "miner_candidate": 36,
+        "miner_reseal": 19,
+        "miner_authority_consumed": 0,
+        "miner_authority_published": 0,
+        "validator_relay": 19,
+        "validator_tip": 19
+      },
+      "counters_after": {
+        "miner_candidate": 37,
+        "miner_reseal": 20,
+        "miner_authority_consumed": 0,
+        "miner_authority_published": 0,
+        "validator_relay": 20,
+        "validator_tip": 20
+      },
+      "counter_gaps": [
+        "miner_authority_consumed: 0 -> 0 (need +1)"
+      ],
+      "counter_gaps_core": [],
+      "complete": false,
+      "core_complete_without_authority": true,
+      "authority_measured": false,
+      "missing_fields": [],
+      "components": {
+        "candidate_execution_s": 32.257428577,
+        "candidate_queue_wait_s": 1.112e-06,
+        "winner_reseal_s": 32.026534671,
+        "reseal_queue_wait_s": 7.34e-07,
+        "winner_authority_handoff_s": 0.0,
+        "authenticated_relay_s": 0.000364262,
+        "tip_validation_s": 32.326520133,
+        "validation_queue_wait_s": 1.626e-06
+      },
+      "core_lifecycle_s": 96.610851115,
+      "complete_lifecycle_s": null,
+      "rpc_assess_lifecycle_s": 32.326886021,
+      "rpc_complete_sample_set": false,
+      "rpc_correlated_end_to_end_sample": false,
+      "rpc_operationally_ready": false,
+      "rpc_omits_winner_authority_handoff": true,
+      "miner_provider": "",
+      "reason": "authority_handoff_unavailable_without_production_canary"
+    }
+  ],
+  "incomplete_samples": []
+}

@@ -17,6 +17,7 @@
 #include <cuda/matmul_v4_lt_tensor_gemm.h>
 #include <matmul/exact_gemm_resolve.h>
 #include <matmul/matmul_v4_rc.h>
+#include <matmul/matmul_v4_rc_production_canary.h>
 #include <matmul/matmul_v4_rc_scale_axes.h>
 #include <matmul/matmul_v4_rc_coupled.h>
 #include <matmul/matmul_v4_rc_coupled_netcost.h>
@@ -25,7 +26,9 @@
 #include <matmul/matmul_v4_rc_selfqual.h>
 #include <matmul/matmul_v4_rc_transcript.h>
 #include <primitives/block.h>
+#include <streams.h>
 #include <uint256.h>
+#include <util/strencodings.h>
 #include <util/translation.h>
 
 #include <univalue.h>
@@ -76,6 +79,9 @@ struct Args {
     uint32_t episodes{3}; // default for toy
     uint32_t output_row_tile{256};
     uint64_t mem_cap{0};  // 0 = unlimited
+    bool canary_headers{false}; // production canary header family
+    bool emit_frozen_headers{false}; // structured header + digest records
+    uint64_t canary_nonce_start{1}; // first canary header nonce when canary_headers
     std::string backend{"cpu"};
     std::string out_path{"rc-report.json"};
     std::string source_revision; // optional tip provenance
@@ -105,6 +111,11 @@ void PrintUsage(std::ostream& os)
        << "                             any missing/declined contraction fails the run.\n"
        << "                             Toy/medium digests are resealed against CPU once.\n"
        << "  --mem-cap BYTES            soft RSS/peak budget; auto-Streamed if over (0=off)\n"
+       << "  --canary-headers           use MakeRCProductionCanaryHeader (nonce=start..)\n"
+       << "                             instead of the harness measurement header family\n"
+       << "  --canary-nonce-start N     first canary header nonce (default: 1)\n"
+       << "  --emit-frozen-headers      emit per-episode structured header fields, wire\n"
+       << "                             hex, digest, and acceleration coverage (goldens)\n"
        << "  --source-revision TIP      same-tip provenance for rc-gate\n"
        << "  --out PATH                 JSON output (default: rc-report.json)\n"
        << "  -h, --help                 this help\n";
@@ -271,6 +282,18 @@ bool ParseArgs(int argc, char** argv, Args& args, std::string& err)
             const char* v = need("--source-revision");
             if (!v) return false;
             args.source_revision = v;
+        } else if (a == "--canary-headers") {
+            args.canary_headers = true;
+        } else if (a == "--canary-nonce-start") {
+            const char* v = need("--canary-nonce-start");
+            uint64_t start = 0;
+            if (!v || !ParseUint64AllowZero(v, start) || start == 0) {
+                err = "invalid --canary-nonce-start";
+                return false;
+            }
+            args.canary_nonce_start = start;
+        } else if (a == "--emit-frozen-headers") {
+            args.emit_frozen_headers = true;
         } else if (a == "--out") {
             const char* v = need("--out");
             if (!v) return false;
@@ -279,6 +302,14 @@ bool ParseArgs(int argc, char** argv, Args& args, std::string& err)
             err = "unknown argument: " + a;
             return false;
         }
+    }
+    if (args.canary_headers && !args.production) {
+        err = "--canary-headers requires --base-production or --production";
+        return false;
+    }
+    if (args.emit_frozen_headers && !args.production) {
+        err = "--emit-frozen-headers requires --base-production or --production";
+        return false;
     }
     return true;
 }
@@ -338,6 +369,65 @@ CBlockHeader MakeHeader(uint64_t nonce)
         header.seed_b.data()[i] = static_cast<unsigned char>(0x22);
     }
     return header;
+}
+
+/** Measurement headers (nonce=1000+e) or production-canary headers. */
+CBlockHeader MakeEpisodeHeader(const Args& args, uint32_t episode_index)
+{
+    if (args.canary_headers) {
+        rc::RCProductionEpochIdentity epoch;
+        epoch.matmul_dimension = 4096;
+        return rc::MakeRCProductionCanaryHeader(
+            epoch,
+            args.canary_nonce_start + static_cast<uint64_t>(episode_index));
+    }
+    auto header = MakeHeader(1000 + episode_index);
+    if (args.production) {
+        header.matmul_dim = 4096;
+    }
+    return header;
+}
+
+UniValue FrozenHeaderJson(const CBlockHeader& header,
+                          uint32_t episode_index,
+                          uint64_t header_nonce,
+                          const uint256& digest,
+                          const rc::RCEpisodeTiming& timing,
+                          const rc::RCExactReplayAccelerationStats& stats,
+                          const char* header_family)
+{
+    DataStream wire{};
+    wire << header;
+    UniValue o(UniValue::VOBJ);
+    o.pushKV("index", static_cast<uint64_t>(episode_index));
+    o.pushKV("header_family", header_family);
+    o.pushKV("header_nonce", header_nonce);
+    o.pushKV("nVersion", header.nVersion);
+    o.pushKV("nTime", static_cast<uint64_t>(header.nTime));
+    o.pushKV("nBits", static_cast<uint64_t>(header.nBits));
+    o.pushKV("nNonce", static_cast<uint64_t>(header.nNonce));
+    o.pushKV("nNonce64", header.nNonce64);
+    o.pushKV("matmul_dim", static_cast<uint64_t>(header.matmul_dim));
+    o.pushKV("hashPrevBlock", header.hashPrevBlock.GetHex());
+    o.pushKV("hashMerkleRoot", header.hashMerkleRoot.GetHex());
+    o.pushKV("matmul_digest", header.matmul_digest.GetHex());
+    o.pushKV("seed_a", header.seed_a.GetHex());
+    o.pushKV("seed_b", header.seed_b.GetHex());
+    o.pushKV("header_wire_bytes", static_cast<uint64_t>(wire.size()));
+    o.pushKV("header_hex", HexStr(wire));
+    o.pushKV("exact_replay_digest", digest.GetHex());
+    o.pushKV("wall_s", timing.total_s);
+    o.pushKV("phase1_s", timing.phase1_s);
+    o.pushKV("phase2_s", timing.phase2_s);
+    o.pushKV("phase3_s", timing.phase3_s);
+    o.pushKV("fully_accelerated", stats.fully_accelerated);
+    o.pushKV("require_device", stats.require_device);
+    o.pushKV("device_macs", stats.device_macs);
+    o.pushKV("cpu_calls", stats.cpu_calls);
+    o.pushKV("cpu_macs", stats.cpu_macs);
+    o.pushKV("cpu_fallbacks", stats.cpu_fallbacks);
+    o.pushKV("first_failure", stats.first_failure);
+    return o;
 }
 
 UniValue CoupParamsJson(const rc::RCCoupParams& p)
@@ -1112,17 +1202,17 @@ int main(int argc, char* argv[])
     std::vector<double> episode_walls;
     episode_walls.reserve(args.episodes);
     UniValue episode_digests(UniValue::VARR);
+    UniValue frozen_headers(UniValue::VARR);
     const size_t rss_before = PeakRssKiB();
+    const char* header_family =
+        args.canary_headers ? "production_canary" : "harness_measurement";
 
     for (uint32_t e = 0; e < args.episodes; ++e) {
-        auto header = MakeHeader(1000 + e);
-        // Production evidence must use a header that can enter the actual
-        // consensus predicate. Leaving this field at CBlockHeader's zero
-        // default produces a representative workload but a digest that can
-        // never satisfy CheckMatMulProofOfWork_RC's dimension bind.
-        if (args.production) {
-            header.matmul_dim = 4096;
-        }
+        const auto header = MakeEpisodeHeader(args, e);
+        const uint64_t header_nonce =
+            args.canary_headers
+                ? (args.canary_nonce_start + static_cast<uint64_t>(e))
+                : (1000 + static_cast<uint64_t>(e));
         rc::RCEpisodeTiming t{};
         rc::RCExactReplayAccelerationStats run_stats{};
         rc::RCExactReplayAcceleration acceleration{
@@ -1135,6 +1225,10 @@ int main(int argc, char* argv[])
         const uint256 digest = rc::RecomputeResidentCurriculumAccelerated(
             header, params, /*height=*/0, {}, nullptr, &t, acceleration);
         episode_digests.push_back(digest.GetHex());
+        if (args.emit_frozen_headers || args.canary_headers) {
+            frozen_headers.push_back(FrozenHeaderJson(
+                header, e, header_nonce, digest, t, run_stats, header_family));
+        }
         if (digest.IsNull()) {
             digests_stable = false;
         }
@@ -1223,9 +1317,12 @@ int main(int argc, char* argv[])
     const size_t peak_rss_kib = std::max(PeakRssKiB(), rss_before);
 
     // --- G3: k-curve proxy — StoreAll vs StoreOnlyX0 wall ratio (toy) ---
-    auto k_header = MakeHeader(42);
-    if (args.production) {
-        k_header.matmul_dim = 4096;
+    auto k_header = MakeEpisodeHeader(args, /*episode_index=*/0);
+    if (!args.canary_headers) {
+        k_header = MakeHeader(42);
+        if (args.production) {
+            k_header.matmul_dim = 4096;
+        }
     }
     rc::RCEpisodeOptions opt_all;
     opt_all.checkpoint = rc::RCEpisodeOptions::Checkpoint::StoreAll;
@@ -1631,6 +1728,9 @@ int main(int argc, char* argv[])
     root.pushKV(
         "header_matmul_dim",
         static_cast<uint64_t>(args.production ? 4096 : 0));
+    root.pushKV(
+        "header_family",
+        args.canary_headers ? "production_canary" : "harness_measurement");
     root.pushKV("evidence_kind", args.toy ? "toy_chrono_measured"
                                : production_shape ? "production_chrono_measured"
                                                   : "chrono_measured");
@@ -1673,6 +1773,9 @@ int main(int argc, char* argv[])
     root.pushKV("params", ParamsJson(params));
     root.pushKV("working_set_bytes_est", footprint);
     root.pushKV("episode_digests", episode_digests);
+    if (!frozen_headers.empty()) {
+        root.pushKV("frozen_headers", frozen_headers);
+    }
     root.pushKV("extractmx_self_qual", qual);
     root.pushKV("exact_replay_acceleration", exact_replay_acceleration);
     root.pushKV("phase_wall_s", walls_out);

@@ -81,6 +81,7 @@ add_executable(test_btx
   matmul_trust_model_tests.cpp
   matmul_dgw_tests.cpp
   matmul_unified_activation_tests.cpp
+  matmul_v3_asert_parent_ratio_measure.cpp
   matmul_subsidy_tests.cpp
   matmul_mining_tests.cpp
   matmul_v4_batch_tests.cpp

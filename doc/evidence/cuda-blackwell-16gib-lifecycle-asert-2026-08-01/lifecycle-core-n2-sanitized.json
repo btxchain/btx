@@ -1,0 +1,88 @@
+{
+  "evidence_kind": "cuda_complete_lifecycle_asert_calibration_core_only",
+  "date": "2026-08-01",
+  "sanitized": true,
+  "tip_sha": "c4ac2e439ac496245f12dcbf8b42c9575247dbe9",
+  "machine_class": {
+    "os": "Linux x86_64",
+    "gpu_class": "NVIDIA consumer Blackwell-class discrete GPU, 16 GiB VRAM, CC 12.0",
+    "note": "Sanitized machine-class only; no hostname, account, IP, or private path."
+  },
+  "execution_policy": "strict-device",
+  "profile": 1,
+  "mode": "production",
+  "matmul_dim": 4096,
+  "nodes": 2,
+  "ratification": {
+    "BTX_MATMUL_NO_INVERSION_GATE_RATIFIED": false,
+    "BTX_MATMUL_V47_GPU_LIFECYCLE_GATE_RATIFIED": false,
+    "installs_rc_asert_ratio": false
+  },
+  "complete_sample_count": 0,
+  "core_sample_count_without_authority": 2,
+  "core_lifecycle_summary_s": {
+    "n": 2,
+    "min": 96.673988524,
+    "p50": 96.673988524,
+    "p95": 96.689700063,
+    "p99": 96.689700063,
+    "max": 96.689700063,
+    "mean": 96.6818442935
+  },
+  "core_component_summaries_s": {
+    "candidate_execution_s": {
+      "n": 2,
+      "mean": 32.2272026715,
+      "min": 32.169272429,
+      "max": 32.285132914
+    },
+    "winner_reseal_s": {
+      "n": 2,
+      "mean": 32.251942527,
+      "min": 32.239315601,
+      "max": 32.264569453
+    },
+    "tip_validation_s": {
+      "n": 2,
+      "mean": 32.2021051975,
+      "min": 32.148881894,
+      "max": 32.255328501
+    },
+    "authenticated_relay_s": {
+      "n": 2,
+      "mean": 0.000588017
+    }
+  },
+  "core_samples_without_authority": [
+    {
+      "attempt": 1,
+      "height": 6,
+      "core_lifecycle_s": 96.673988524,
+      "components": {
+        "candidate_execution_s": 32.285132914,
+        "winner_reseal_s": 32.239315601,
+        "authenticated_relay_s": 0.000649125,
+        "tip_validation_s": 32.148881894
+      },
+      "authority_measured": false,
+      "reason": "authority_handoff_unavailable_without_production_canary"
+    },
+    {
+      "attempt": 2,
+      "height": 7,
+      "core_lifecycle_s": 96.689700063,
+      "components": {
+        "candidate_execution_s": 32.169272429,
+        "winner_reseal_s": 32.264569453,
+        "authenticated_relay_s": 0.000526909,
+        "tip_validation_s": 32.255328501
+      },
+      "authority_measured": false,
+      "reason": "authority_handoff_unavailable_without_production_canary"
+    }
+  ],
+  "notes": [
+    "Derived from the prior 2-sample production rootcause campaign; host paths stripped.",
+    "Not activation-complete: authority handoff absent; ratification false."
+  ]
+}
