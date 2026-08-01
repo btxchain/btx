@@ -3023,16 +3023,13 @@ bool PeerManagerImpl::ConsumeMatMulVerificationBudgetForPeer(
                 return false;
             }
         }
-        const bool in_fast_phase =
-            params.fMatMulPOW &&
-            reference_height >= 0 &&
-            reference_height < params.nFastMineHeight;
         {
-            uint32_t global_budget =
-                EffectiveMatMulGlobalVerifyBudgetPerMin(params, reference_height);
-            if (is_ibd || in_fast_phase) {
-                global_budget = std::max<uint32_t>(global_budget, 256U);
-            }
+            const bool in_fast_phase =
+                params.fMatMulPOW &&
+                reference_height >= 0 &&
+                reference_height < params.nFastMineHeight;
+            const uint32_t global_budget = EffectiveMatMulGlobalPhase2BudgetForCatchUp(
+                params, is_ibd, in_fast_phase, reference_height);
             if (!ConsumeGlobalMatMulPhase2Budget(global_budget, verification_count, now)) {
                 budget_state.budget.window_start = saved_window_start;
                 budget_state.budget.expensive_verifications_this_minute = saved_count;
@@ -5548,7 +5545,6 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
     } else if (consensus_params.fMatMulPOW) {
         int32_t best_known_height{chain_start_header->nHeight};
         bool is_ibd{false};
-        bool phase2_enabled{false};
         {
             LOCK(cs_main);
             best_known_height = m_chainman.m_best_header != nullptr
@@ -5577,60 +5573,73 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
                 }
             }
             header_first_is_ibd = is_ibd;
-            const auto mode{m_chainman.GetMatMulValidationMode()};
-            phase2_enabled =
-                mode == kernel::MatMulValidationMode::CONSENSUS ||
-                mode == kernel::MatMulValidationMode::TRUSTED;
         }
 
-        const uint32_t phase2_checks = CountMatMulPhase2Checks(
-            static_cast<int64_t>(chain_start_header->nHeight) + 1,
-            headers.size(),
-            best_known_height,
-            consensus_params,
-            phase2_enabled,
-            is_ibd);
-        const int32_t budget_reference_height =
-            chain_start_header->nHeight == std::numeric_limits<int>::max()
-                ? std::numeric_limits<int32_t>::max()
-                : chain_start_header->nHeight + 1;
-
-        // DoS-F2: skip the budget/slot machinery entirely for a redundant relay
-        // of a block we already have with data — it will not re-trigger the
-        // expensive recompute, so charging for it would let a Sybil replaying the
-        // current tip drain the shared budget.
-        if (phase2_checks > 0 && !already_have_block_data) {
-            // Header-batch phase2 checks remain 1 unit each (cheap relative to
-            // EncDr). EncDr/seal work-unit weighting applies on BLOCK paths.
-            if (!ReserveMatMulVerificationSlot(m_matmul_pending_verifications, consensus_params,
-                                              budget_reference_height, /*work_units=*/1)) {
-                LogDebug(BCLog::NET, "Disconnecting peer=%d: MatMul pending verification cap reached\n", pfrom.GetId());
-                pfrom.fDisconnect = true;
-                return;
+        // During IBD/catch-up, AcceptBlockHeader only needs Phase-1 PoW (already
+        // checked above). Charging the shared Phase2 verify budget here counted
+        // every header (is_ibd ⇒ ShouldRunMatMulPhase2Validation=true) and let a
+        // full headers batch exhaust the tiny global floor, deferring honest
+        // catch-up after low-work REDOWNLOAD completed. Skip verify-budget
+        // accounting for IBD header acceptance; body/ExactReplay paths keep
+        // their own admission budgets.
+        if (!is_ibd) {
+            bool phase2_enabled{false};
+            {
+                LOCK(cs_main);
+                const auto mode{m_chainman.GetMatMulValidationMode()};
+                phase2_enabled =
+                    mode == kernel::MatMulValidationMode::CONSENSUS ||
+                    mode == kernel::MatMulValidationMode::TRUSTED;
             }
-            pending_matmul_slot.emplace(m_matmul_pending_verifications, /*work_units=*/1);
+            const uint32_t phase2_checks = CountMatMulPhase2Checks(
+                static_cast<int64_t>(chain_start_header->nHeight) + 1,
+                headers.size(),
+                best_known_height,
+                consensus_params,
+                phase2_enabled,
+                is_ibd);
+            const int32_t budget_reference_height =
+                chain_start_header->nHeight == std::numeric_limits<int>::max()
+                    ? std::numeric_limits<int32_t>::max()
+                    : chain_start_header->nHeight + 1;
 
-            bool global_exhausted{false};
-            if (!pfrom.HasPermission(NetPermissionFlags::NoBan) && !ConsumeMatMulVerificationBudgetForPeer(
-                    peer,
-                    pfrom.nKeyedNetGroup,
-                    consensus_params,
-                    phase2_checks,
-                    std::chrono::steady_clock::now(),
-                    is_ibd,
-                    budget_reference_height,
-                    global_exhausted)) {
-                if (global_exhausted) {
-                    // DoS-F2: the process-wide shared budget is exhausted; DEFER
-                    // this message instead of disconnecting an otherwise-honest
-                    // peer for others' spend. The reserved pending-verification
-                    // slot is released by pending_matmul_slot on return.
-                    LogDebug(BCLog::NET, "Deferring headers from peer=%d: global MatMul verification budget exhausted\n", pfrom.GetId());
+            // DoS-F2: skip the budget/slot machinery entirely for a redundant relay
+            // of a block we already have with data — it will not re-trigger the
+            // expensive recompute, so charging for it would let a Sybil replaying the
+            // current tip drain the shared budget.
+            if (phase2_checks > 0 && !already_have_block_data) {
+                // Header-batch phase2 checks remain 1 unit each (cheap relative to
+                // EncDr). EncDr/seal work-unit weighting applies on BLOCK paths.
+                if (!ReserveMatMulVerificationSlot(m_matmul_pending_verifications, consensus_params,
+                                                  budget_reference_height, /*work_units=*/1)) {
+                    LogDebug(BCLog::NET, "Disconnecting peer=%d: MatMul pending verification cap reached\n", pfrom.GetId());
+                    pfrom.fDisconnect = true;
                     return;
                 }
-                LogDebug(BCLog::NET, "Disconnecting peer=%d: MatMul per-peer verification budget exhausted\n", pfrom.GetId());
-                pfrom.fDisconnect = true;
-                return;
+                pending_matmul_slot.emplace(m_matmul_pending_verifications, /*work_units=*/1);
+
+                bool global_exhausted{false};
+                if (!pfrom.HasPermission(NetPermissionFlags::NoBan) && !ConsumeMatMulVerificationBudgetForPeer(
+                        peer,
+                        pfrom.nKeyedNetGroup,
+                        consensus_params,
+                        phase2_checks,
+                        std::chrono::steady_clock::now(),
+                        is_ibd,
+                        budget_reference_height,
+                        global_exhausted)) {
+                    if (global_exhausted) {
+                        // DoS-F2: the process-wide shared budget is exhausted; DEFER
+                        // this message instead of disconnecting an otherwise-honest
+                        // peer for others' spend. The reserved pending-verification
+                        // slot is released by pending_matmul_slot on return.
+                        LogDebug(BCLog::NET, "Deferring headers from peer=%d: global MatMul verification budget exhausted\n", pfrom.GetId());
+                        return;
+                    }
+                    LogDebug(BCLog::NET, "Disconnecting peer=%d: MatMul per-peer verification budget exhausted\n", pfrom.GetId());
+                    pfrom.fDisconnect = true;
+                    return;
+                }
             }
         }
     }
@@ -6100,6 +6109,13 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
         if (global_exhausted) {
             LogDebug(BCLog::NET,
                      "Deferring block from peer=%d: global MatMul verification budget exhausted\n",
+                     node.GetId());
+        } else if (matmul_admission.is_ibd) {
+            // During IBD, disconnecting the (often sole) download peer for a
+            // transient per-peer header/body verify burst stalls sync forever.
+            // Keep the header, drop this body attempt, and let download retry.
+            LogDebug(BCLog::NET,
+                     "Deferring block from peer=%d during IBD: MatMul per-peer verification budget exhausted\n",
                      node.GetId());
         } else {
             LogDebug(BCLog::NET,
@@ -6647,7 +6663,9 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
                         node.nKeyedNetGroup, params.powLimit,
                         std::chrono::steady_clock::now());
                 }
-                if (peer) node.fDisconnect = true;
+                // IBD: keep the peer and fall back to HEADER_ONLY rather than
+                // disconnecting the download source over a rate-limit miss.
+                if (peer && !is_ibd) node.fDisconnect = true;
                 admission.state =
                     MatMulBlockAdmission::State::HEADER_ONLY;
                 return true;

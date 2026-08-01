@@ -479,6 +479,33 @@ BOOST_AUTO_TEST_CASE(validation_rate_limit_ibd_budget_floor_supports_repeated_he
         200'000U);
 }
 
+BOOST_AUTO_TEST_CASE(validation_rate_limit_ibd_global_floor_admits_full_headers_batch)
+{
+    auto params = MainParams();
+    params.nMatMulGlobalVerifyBudgetPerMin = 512;
+    params.nMatMulPeerVerifyBudgetPerMin = 32;
+    params.nMatMulIbdPeerVerifyBudgetPerMin = 65536;
+
+    // Steady-state global floor alone cannot accept one MAX_HEADERS_RESULT-sized
+    // IBD batch when every header is Phase2-counted.
+    constexpr uint32_t kFullHeadersBatch{2000};
+    BOOST_CHECK_LT(EffectiveMatMulGlobalVerifyBudgetPerMin(params), kFullHeadersBatch);
+
+    const int32_t post_fast_height = static_cast<int32_t>(params.nFastMineHeight);
+    const uint32_t catch_up = EffectiveMatMulGlobalPhase2BudgetForCatchUp(
+        params, /*is_ibd=*/true, /*in_fast_phase=*/false, post_fast_height);
+    BOOST_CHECK_GE(catch_up, kFullHeadersBatch);
+    BOOST_CHECK_EQUAL(
+        catch_up,
+        EffectiveMatMulPeerVerifyBudgetPerMin(params, /*is_ibd=*/true, post_fast_height));
+
+    // Non-IBD / non-fast-phase keeps the steady-state global floor.
+    BOOST_CHECK_EQUAL(
+        EffectiveMatMulGlobalPhase2BudgetForCatchUp(
+            params, /*is_ibd=*/false, /*in_fast_phase=*/false, post_fast_height),
+        EffectiveMatMulGlobalVerifyBudgetPerMin(params, post_fast_height));
+}
+
 BOOST_AUTO_TEST_CASE(validation_rate_limit_fast_phase_budget_floor_outside_ibd)
 {
     auto params = MainParams();
