@@ -2354,27 +2354,32 @@ BOOST_AUTO_TEST_CASE(ChainParams_MAIN_hardening_anchor_consistency)
 
     BOOST_CHECK_EQUAL(
         consensus.nMinimumChainWork.GetHex(),
-        "0000000000000000000000000000000000000000000000000000d441262318ef");
+        "00000000000000000000000000000000000000000000000000027958e367c643");
     BOOST_CHECK_EQUAL(
         consensus.defaultAssumeValid.GetHex(),
-        "b5ea1fb02d12e1cfa4bbc5ccc4946ca026ad4a5f270b99a0816aa95853306c3d");
-    BOOST_CHECK_EQUAL(params->AssumedBlockchainSize(), 106U);
+        "d5ba7a35a8a61b89de1b0289a6655551909f0491193ddd7620aebbea37a3beaa");
+    BOOST_CHECK_EQUAL(params->AssumedBlockchainSize(), 120U);
     BOOST_CHECK_EQUAL(params->AssumedChainStateSize(), 1U);
-    BOOST_CHECK_EQUAL(params->TxData().nTime, 1783686055);
-    BOOST_CHECK_EQUAL(params->TxData().tx_count, 213654);
-    BOOST_CHECK_CLOSE(params->TxData().dTxRate, 0.021856663125, 0.000001);
+    BOOST_CHECK_EQUAL(params->TxData().nTime, 1785571483);
+    BOOST_CHECK_EQUAL(params->TxData().tx_count, 271654);
+    BOOST_CHECK_CLOSE(params->TxData().dTxRate, 0.023232, 0.000001);
 
     const auto& checkpoints = params->Checkpoints().mapCheckpoints;
-    BOOST_REQUIRE_GE(checkpoints.size(), 2U);
+    BOOST_REQUIRE_GE(checkpoints.size(), 3U);
     const auto it_0 = checkpoints.find(0);
     BOOST_REQUIRE(it_0 != checkpoints.end());
     BOOST_CHECK_EQUAL(
         it_0->second.GetHex(),
         "75a998a39d2d6e25a9ca7de2cc659309c4105839c06cd435ba2b1aabf0fa4601");
-    const auto it_anchor = checkpoints.find(155700);
+    const auto it_anchor = checkpoints.find(176600);
     BOOST_REQUIRE(it_anchor != checkpoints.end());
     BOOST_CHECK_EQUAL(
         it_anchor->second.GetHex(),
+        "d5ba7a35a8a61b89de1b0289a6655551909f0491193ddd7620aebbea37a3beaa");
+    const auto it_prev = checkpoints.find(155700);
+    BOOST_REQUIRE(it_prev != checkpoints.end());
+    BOOST_CHECK_EQUAL(
+        it_prev->second.GetHex(),
         "b5ea1fb02d12e1cfa4bbc5ccc4946ca026ad4a5f270b99a0816aa95853306c3d");
 
     const auto assumeutxo_55000 = params->AssumeutxoForHeight(55000);
@@ -2565,11 +2570,25 @@ BOOST_AUTO_TEST_CASE(ChainParams_MAIN_hardening_anchor_consistency)
         assumeutxo_155700->shielded_state_commitment.GetHex(),
         "d8abf2d33319a2030c34c68dd50cfda10ececdd95f5a85bdbe05d44b334fbe9d");
 
+    const auto assumeutxo_176600 = params->AssumeutxoForHeight(176600);
+    BOOST_REQUIRE(assumeutxo_176600.has_value());
+    BOOST_CHECK_EQUAL(assumeutxo_176600->height, 176600);
+    BOOST_CHECK_EQUAL(
+        assumeutxo_176600->hash_serialized.ToString(),
+        "d2bee157092f877553d0651d79922eb97293161d7515147421fe63102048ff93");
+    BOOST_CHECK_EQUAL(assumeutxo_176600->m_chain_tx_count, 271654U);
+    BOOST_CHECK_EQUAL(
+        assumeutxo_176600->blockhash.GetHex(),
+        "d5ba7a35a8a61b89de1b0289a6655551909f0491193ddd7620aebbea37a3beaa");
+    BOOST_CHECK_EQUAL(
+        assumeutxo_176600->shielded_state_commitment.GetHex(),
+        "c0f3bde58e1138367a6cd2b0131975de8fad9c90a991f88a42e9397d742b77ce");
+
     const auto snapshot_heights = params->GetAvailableSnapshotHeights();
-    BOOST_REQUIRE_EQUAL(snapshot_heights.size(), 19U);
+    BOOST_REQUIRE_EQUAL(snapshot_heights.size(), 20U);
     BOOST_CHECK(std::is_sorted(snapshot_heights.begin(), snapshot_heights.end()));
     BOOST_CHECK_EQUAL(snapshot_heights.front(), 55000);
-    BOOST_CHECK_EQUAL(snapshot_heights.back(), 155700);
+    BOOST_CHECK_EQUAL(snapshot_heights.back(), 176600);
     BOOST_CHECK_GE(snapshot_heights.back(), std::prev(checkpoints.end())->first);
 }
 

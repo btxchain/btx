@@ -11163,7 +11163,14 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
             // If a snapshot chainstate is in use, we want to find its next blocks
             // before the background chainstate to prioritize getting to network tip.
             FindNextBlocksToDownload(*peer, get_inflight_budget(), vToDownload, staller, pto->HasPermission(NetPermissionFlags::Download));
-            if (m_chainman.BackgroundSyncInProgress() && !IsLimitedPeer(*peer)) {
+            // Defer genesis→snapshot historical downloads while the active
+            // (snapshot) chain is still catching up to network tip. Sharing the
+            // per-peer inflight budget with background IBD starves tip catch-up
+            // when most peers are pruned / scarce block servers. Background
+            // integrity re-validation resumes once IsInitialBlockDownload()
+            // clears on the active chain.
+            if (m_chainman.BackgroundSyncInProgress() && !IsLimitedPeer(*peer) &&
+                !m_chainman.IsInitialBlockDownload()) {
                 // If the background tip is not an ancestor of the snapshot block,
                 // we need to start requesting blocks from their last common ancestor.
                 const CBlockIndex *from_tip = LastCommonAncestor(m_chainman.GetBackgroundSyncTip(), m_chainman.GetSnapshotBaseBlock());

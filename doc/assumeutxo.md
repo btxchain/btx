@@ -33,11 +33,27 @@ Once you've obtained the release bundle, verify the checksum and then use the
 RPC command `loadtxoutset` to load the snapshot.
 
 ```
-$ btx-cli -rpcclienttimeout=0 loadtxoutset /path/to/input
+$ /path/to/btx-cli -rpcclienttimeout=0 loadtxoutset /path/to/input
 ```
 
 After the snapshot has loaded, the syncing process of both the snapshot chain
 and the background IBD chain can be monitored with the `getchainstates` RPC.
+
+### Foreground tip catch-up vs background integrity re-sync
+
+`loadtxoutset` activates the snapshot chain immediately and also keeps a
+background chainstate that re-validates genesis→snapshot. Block download
+prioritizes the active (snapshot) chain to network tip first: while
+`IsInitialBlockDownload()` is still true on the active chain, `btxd` does
+**not** request genesis→snapshot historical blocks from peers. That keeps
+scarce / mostly-pruned block servers focused on `snapshot_height→tip`.
+
+Once the active chain leaves IBD (near tip), background historical downloads
+and integrity re-validation resume automatically. Letting the background seal
+is still required for full assumeutxo completion; it is just deferred until
+the node is tip-usable. A newer compiled snapshot height shrinks the
+foreground gap further — prefer the latest `m_assumeutxo_data` entry published
+for your binary.
 
 ### BTX fast-start workflow
 
@@ -58,7 +74,7 @@ The intended user flow is:
 5. write a mining or service `btx.conf`
 6. start `btxd`
 7. wait until the manifest's `blockhash` is known in the local header chain
-8. run `btx-cli -rpcclienttimeout=0 loadtxoutset /path/to/snapshot.dat`
+8. run `/path/to/btx-cli -rpcclienttimeout=0 loadtxoutset /path/to/snapshot.dat`
 9. monitor the snapshot and background validation chainstates with
    `getchainstates`
 
@@ -69,7 +85,7 @@ chain with the non-verbose form:
 
 ```bash
 SNAPSHOT_BLOCKHASH="$(jq -r .blockhash /path/to/snapshot.manifest.json)"
-btx-cli getblockheader "$SNAPSHOT_BLOCKHASH" false
+/path/to/btx-cli getblockheader "$SNAPSHOT_BLOCKHASH" false
 ```
 
 If that RPC returns "Block not found", keep the daemon connected to peers and
@@ -223,7 +239,7 @@ BTX includes a helper script for the release/update workflow:
 
 ```
 $ python3 contrib/devtools/generate_assumeutxo.py \
-    --btx-cli ./build-btx/bin/btx-cli \
+    --/path/to/btx-cli ./build-btx/bin//path/to/btx-cli \
     --chain main \
     --snapshot /tmp/mainnet-utxo-HEIGHT.dat \
     --snapshot-type rollback \
@@ -265,7 +281,7 @@ its manifest and SHA256 artifacts.
 Example usage:
 
 ```
-$ btx-cli -rpcclienttimeout=0 dumptxoutset /path/to/output rollback
+$ /path/to/btx-cli -rpcclienttimeout=0 dumptxoutset /path/to/output rollback
 ```
 
 For most of the duration of `dumptxoutset` running the node is in a temporary
