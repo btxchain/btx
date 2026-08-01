@@ -86,25 +86,25 @@ Raw evidence and reproduction commands are in
 
 An independent Linux CUDA campaign on a sanitized Blackwell-class 16 GiB
 consumer GPU (Xeon W-class host, 76 GiB RAM) measured 100 distinct
-`matmul_dim=4096` production headers:
+`matmul_dim=4096` production headers on tip `c4ac2e43` (TU md5
+`ed1e9477432b1766f549c039b6779632`):
 
 | Metric | Result |
 |---|---:|
-| Mean | 21.244 s |
-| p50 | 21.240 s |
-| p95 | 21.335 s |
-| p99 | **21.386 s** |
-| Maximum | 21.402 s |
+| Mean | 32.273 s |
+| p50 | 32.311 s |
+| p95 | 32.527 s |
+| p99 | **32.705 s** |
+| Maximum | 32.709 s |
 | MACs / episode | 141,149,805,215,744 |
 | CPU GEMM fallbacks | **0** |
 
 Device path detail:
 `cuda_resident_ffn_chain+triple_stream+persistent_ws`. Versus a 90-second
-block interval the p99 occupies ~23.8% (~68.6 s headroom). Sanitized evidence:
-`doc/evidence/cuda-blackwell-16gib-profile1-loaded-2026-07-30/`.
-The artifact's recorded CUDA source fingerprint does not match the current PR
-head. Treat these numbers as pre-final engineering evidence; the exact final
-binary must repeat the 100-run strict-device campaign.
+block interval the p99 occupies ~36.3% (~57.3 s headroom). Tip-correlated
+sanitized evidence:
+`doc/evidence/cuda-blackwell-16gib-profile1-loaded-2026-08-01/`
+(2026-07-30 retained as historical). L0 ratification remains false.
 
 ## Full-Metal requirement
 
@@ -191,15 +191,15 @@ Measured on this M4 Max:
   target check, verdict memo, and worker completion path accept the goldens.
 
 Independent CUDA class (sanitized; see
-[`doc/evidence/cuda-blackwell-16gib-profile1-loaded-2026-07-30/`](evidence/cuda-blackwell-16gib-profile1-loaded-2026-07-30/)):
+[`doc/evidence/cuda-blackwell-16gib-profile1-loaded-2026-08-01/`](evidence/cuda-blackwell-16gib-profile1-loaded-2026-08-01/)):
 
-- [x] Profile 1 loaded p99 **21.386 s** on a Blackwell-class 16 GiB NVIDIA
+- [x] Profile 1 loaded p99 **32.705 s** on a Blackwell-class 16 GiB NVIDIA
   discrete GPU (Linux x86_64, Xeon W-class host, 76 GiB RAM).
 - [x] 100 distinct `matmul_dim=4096` headers / digests; zero CPU GEMM fallbacks.
 - [x] CUDA ExactReplay attached via the Metal-parity `ExactGemmBackend`
   Launch* ABI (`rc_fused_ffn`, `rc_fused_ffn_chain`, `rc_phase1`).
-- [ ] Repeat the 100-run campaign on the exact final binary; the committed
-  artifact's recorded CUDA source fingerprint is from an earlier snapshot.
+- [x] Tip-correlated 100-run campaign recorded (`c4ac2e43`, TU md5
+  `ed1e9477432b1766f549c039b6779632`); L0 ratification remains false.
 
 Still required before activation:
 

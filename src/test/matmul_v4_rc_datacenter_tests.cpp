@@ -2909,11 +2909,11 @@ BOOST_AUTO_TEST_CASE(rc_dc_authority_invariant_accepts_aggressive_config)
     BOOST_CHECK_EQUAL(reg.nMatMulRCAsertRescaleDen, 1027);
 
     // Mainnet constructs with the MatMul v4.7 Epoch-A default (Profile 1)
-    // while staying gated (INT32_MAX height, ASERT 1/1).
+    // while staying gated (INT32_MAX height) with the measured RC ASERT staged.
     const auto main = CreateChainParams(ArgsManager{}, ChainType::MAIN)->GetConsensus();
     BOOST_CHECK_EQUAL(main.nMatMulRCProfile, 1u);
     BOOST_CHECK_EQUAL(main.nMatMulRCHeight, std::numeric_limits<int32_t>::max());
-    BOOST_CHECK_EQUAL(main.nMatMulRCAsertRescaleNum, 1);
+    BOOST_CHECK_EQUAL(main.nMatMulRCAsertRescaleNum, 16893794);
     BOOST_CHECK_EQUAL(main.nMatMulRCAsertRescaleDen, 1);
 }
 

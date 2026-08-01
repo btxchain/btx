@@ -1,0 +1,39 @@
+{
+  "campaign": "cuda_daemon_lifecycle",
+  "date": "2026-08-01",
+  "tip_sha": "c4ac2e439ac496245f12dcbf8b42c9575247dbe9",
+  "hardware_class": {
+    "os": "Linux x86_64",
+    "cpu_class": "Intel Xeon W-class",
+    "logical_cpus": 24,
+    "gpu_class": "NVIDIA consumer Blackwell-class discrete GPU",
+    "vram_gib": 16,
+    "compute_capability": "12.0",
+    "host_ram_gib": 76
+  },
+  "modes": {
+    "foreground": "pass",
+    "daemon": "pass",
+    "daemonwait": "pass"
+  },
+  "provider": {
+    "resolved_provider": "cuda_rc_exact_fused_extract",
+    "device_architecture": "sm_120",
+    "driver_identity": "13020",
+    "runtime_identity": "13030",
+    "canary_outcome": "missing_golden",
+    "manifest_has_reviewed_goldens": false,
+    "startup_canary_passed": false,
+    "production_eligible": false,
+    "epoch_profile": 1,
+    "epoch_matmul_dimension": 4096
+  },
+  "ratification": {
+    "BTX_MATMUL_NO_INVERSION_GATE_RATIFIED": false,
+    "BTX_MATMUL_V47_GPU_LIFECYCLE_GATE_RATIFIED": false
+  },
+  "notes": [
+    "Empty production golden manifest yields missing_golden; expected for this tip.",
+    "Does not invent production goldens or flip ratification constants."
+  ]
+}

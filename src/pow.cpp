@@ -7533,6 +7533,12 @@ static bool SolveMatMulV4RC(CBlockHeader& block,
                             capability_reason.empty()
                                 ? "production_capability_unavailable"
                                 : capability_reason);
+                        // Memoize the just-completed epsilon-0 reseal so local
+                        // AcceptBlock can skip a duplicate replay when the
+                        // production capability token is still unavailable.
+                        // This does not publish one-shot authority telemetry
+                        // and does not advertise consensus readiness.
+                        CacheMatMulEncDrVerdict(block.GetHash(), true);
                     }
                 }
             }

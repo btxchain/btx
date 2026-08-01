@@ -115,10 +115,12 @@ private:
 
 /** Reviewed production goldens compiled into this source revision.
  *
- * The launch-candidate branch intentionally returns an empty manifest until
- * independent full-production CPU-oracle evidence has been reviewed and
- * committed. Keeping the registry empty is a fail-closed readiness state, not
- * a skipped test or an implied qualification claim.
+ * Epoch-A production goldens require byte-identical ExactReplay digests on the
+ * same frozen canary headers across CUDA, Metal, and HIP. Portable CPU oracle
+ * reproduction is not required for this GPU-optimized chain. The launch-
+ * candidate branch returns an empty manifest until that multi-GPU corpus is
+ * reviewed and committed. Keeping the registry empty is a fail-closed readiness
+ * state, not a skipped test or an implied qualification claim.
  */
 [[nodiscard]] const std::vector<RCProductionGoldenManifestEntry>&
 CommittedRCProductionGoldenManifest();

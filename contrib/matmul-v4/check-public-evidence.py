@@ -14,6 +14,7 @@ from typing import Any, Iterable
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_PATHS = (
     REPO_ROOT / "doc/evidence/cuda-blackwell-16gib-profile1-loaded-2026-07-30",
+    REPO_ROOT / "doc/evidence/cuda-blackwell-16gib-profile1-loaded-2026-08-01",
     REPO_ROOT / "doc/evidence/m4-max-profile1-loaded-2026-07-30",
 )
 

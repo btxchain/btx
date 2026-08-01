@@ -1,8 +1,11 @@
 # CUDA Profile 1 loaded ExactReplay evidence
 
-Status: corrected 100-run CUDA ExactReplay campaign for MatMul v4.7 Epoch A
-(Profile 1). Activation remains disabled. This does not clear Metal cross-check
-or ratification gates. See the
+Status: historical 100-run CUDA ExactReplay campaign (2026-07-30). The
+recorded CUDA TU fingerprint (`66ed7c839df0c2ce264d6bec1591ffdf`) does not
+match the current PR tip. Prefer the tip-correlated replacement at
+[`../cuda-blackwell-16gib-profile1-loaded-2026-08-01/`](../cuda-blackwell-16gib-profile1-loaded-2026-08-01/).
+Activation remains disabled. This does not clear Metal cross-check or
+ratification gates. See the
 [canonical transition roadmap](../../btx-matmul-v4.7-transition-roadmap.md)
 for the complete activation contract and remaining gates.
 
