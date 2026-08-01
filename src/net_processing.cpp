@@ -2728,8 +2728,28 @@ bool PeerManagerImpl::RequireMatMulConsensusPeersForSync() const
     const Consensus::Params& consensus = m_chainparams.GetConsensus();
     if (!consensus.fMatMulPOW) return false;
     const auto mode{m_chainman.GetMatMulValidationMode()};
-    return mode == kernel::MatMulValidationMode::CONSENSUS ||
-           mode == kernel::MatMulValidationMode::TRUSTED;
+    if (mode != kernel::MatMulValidationMode::CONSENSUS &&
+        mode != kernel::MatMulValidationMode::TRUSTED) {
+        return false;
+    }
+    // Pre-activation parents are ordinary MatMul/PoW and must remain syncable
+    // between self-qualified lab nodes that have not yet passed the production
+    // golden canary (and therefore do not advertise NODE_MATMUL_CONSENSUS).
+    // Once a local tip/header has entered ENC_RC, prefer consensus-tier peers
+    // for further download. Operators still need an explicit noban whitelist
+    // (or a production-ready peer) to sync RC bodies before the canary passes.
+    // cs_main is RecursiveMutex; callers may already hold it.
+    int height = 0;
+    {
+        LOCK(cs_main);
+        if (const CBlockIndex* tip = m_chainman.ActiveChain().Tip()) {
+            height = std::max(height, tip->nHeight);
+        }
+        if (const CBlockIndex* best = m_chainman.m_best_header) {
+            height = std::max(height, best->nHeight);
+        }
+    }
+    return consensus.IsMatMulRCActive(height);
 }
 
 bool PeerManagerImpl::PeerAdvertisesMatMulConsensus(ServiceFlags services)
@@ -5511,7 +5531,21 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
     const Consensus::Params& consensus_params = m_chainparams.GetConsensus();
     std::optional<ScopedMatMulPendingVerification> pending_matmul_slot;
     bool header_first_is_ibd{false};
-    if (consensus_params.fMatMulPOW) {
+    // Low-work HeadersSyncState REDOWNLOAD already anti-DoS-checked the chain
+    // (PRESYNC commitments + sufficient claimed work). Those headers MUST be
+    // accepted into the block index immediately: HeadersSyncState advances its
+    // REDOWNLOAD cursor inside IsContinuationOfLowWorkHeadersSync before we
+    // reach this budget gate. Deferring/dropping the batch here desynchronizes
+    // the sync state from the index (presync races to ~minchainwork, commits a
+    // few headers, then restarts forever — observed as headers stuck near the
+    // first deferred batch). Skip MatMul verify-budget accounting for that
+    // path; Phase-1 header PoW was already checked above.
+    if (already_validated_work) {
+        LOCK(cs_main);
+        header_first_is_ibd = m_chainman.IsInitialBlockDownload() ||
+            (m_chainman.m_best_header != nullptr &&
+             m_chainman.ActiveHeight() + 10 < m_chainman.m_best_header->nHeight);
+    } else if (consensus_params.fMatMulPOW) {
         int32_t best_known_height{chain_start_header->nHeight};
         bool is_ibd{false};
         bool phase2_enabled{false};
@@ -7167,7 +7201,8 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             if (require_matmul_consensus && base_preferred && !state->fPreferredDownload) {
                 LogPrintf("MATMUL WARNING: peer=%d lacks NODE_MATMUL_CONSENSUS service bit; deprioritizing for sync in consensus mode\n", pfrom.GetId());
                 if (m_num_preferred_download_peers == 0) {
-                    LogPrintf("MATMUL WARNING: no preferred NODE_MATMUL_CONSENSUS sync peers currently connected\n");
+                    LogPrintf("MATMUL WARNING: no preferred NODE_MATMUL_CONSENSUS sync peers currently connected; "
+                              "RC block download will stall unless a consensus-tier peer connects or this peer is granted explicit noban whitelist permission\n");
                 }
             }
         }
