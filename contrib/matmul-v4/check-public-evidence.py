@@ -15,7 +15,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_PATHS = (
     REPO_ROOT / "doc/evidence/cuda-blackwell-16gib-profile1-loaded-2026-07-30",
     REPO_ROOT / "doc/evidence/cuda-blackwell-16gib-profile1-loaded-2026-08-01",
+    REPO_ROOT / "doc/evidence/cuda-blackwell-16gib-profile1-goldens-2026-08-01",
     REPO_ROOT / "doc/evidence/m4-max-profile1-loaded-2026-07-30",
+    REPO_ROOT / "doc/evidence/multi-gpu-profile1-goldens-2026-08-01",
+    REPO_ROOT / "doc/evidence/multi-gpu-profile1-goldens-metal-2026-08-01",
 )
 
 # Public evidence may name an OS and hardware *class*. It must not carry the
@@ -26,6 +29,7 @@ FORBIDDEN_TEXT = (
     ("macOS user path", re.compile(r"/Users/[^/\s]+/")),
     ("Unix home path", re.compile(r"/home/[^/\s]+/")),
     ("creator temporary path", re.compile(r"/(?:private/)?tmp/[^\s`\"']+")),
+    ("mDNS hostname", re.compile(r"\b[A-Z0-9][A-Z0-9._-]*\.local\b", re.IGNORECASE)),
     ("Windows user path", re.compile(r"[A-Za-z]:[\\/]+Users[\\/]+[^\\/\s]+[\\/]", re.IGNORECASE)),
     ("email address", re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)),
     ("private key filename", re.compile(r"\b(?:github|porkbun|digitalocean|api|secret)\.(?:key|token)\b", re.IGNORECASE)),
