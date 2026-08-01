@@ -81,6 +81,7 @@ struct Args {
     uint64_t mem_cap{0};  // 0 = unlimited
     bool canary_headers{false}; // production canary header family
     bool emit_frozen_headers{false}; // structured header + digest records
+    bool public_evidence{false}; // omit creator-machine identity from output
     uint64_t canary_nonce_start{1}; // first canary header nonce when canary_headers
     std::string backend{"cpu"};
     std::string out_path{"rc-report.json"};
@@ -116,6 +117,8 @@ void PrintUsage(std::ostream& os)
        << "  --canary-nonce-start N     first canary header nonce (default: 1)\n"
        << "  --emit-frozen-headers      emit per-episode structured header fields, wire\n"
        << "                             hex, digest, and acceleration coverage (goldens)\n"
+       << "  --public-evidence          replace host-derived device identifiers with a\n"
+       << "                             stable public-evidence label\n"
        << "  --source-revision TIP      same-tip provenance for rc-gate\n"
        << "  --out PATH                 JSON output (default: rc-report.json)\n"
        << "  -h, --help                 this help\n";
@@ -294,6 +297,8 @@ bool ParseArgs(int argc, char** argv, Args& args, std::string& err)
             args.canary_nonce_start = start;
         } else if (a == "--emit-frozen-headers") {
             args.emit_frozen_headers = true;
+        } else if (a == "--public-evidence") {
+            args.public_evidence = true;
         } else if (a == "--out") {
             const char* v = need("--out");
             if (!v) return false;
@@ -544,8 +549,10 @@ int RunCoupledHarness(const Args& args)
     }
     const auto device_probe = rc::ProbeRCCoupledDevice();
 
-    const std::string host = HostName();
-    const std::string device_id = backend_resolved + "-ref:" + host;
+    const std::string device_id =
+        args.public_evidence
+            ? backend_resolved + "-ref:public-evidence"
+            : backend_resolved + "-ref:" + HostName();
     const auto header = MakeHeader(42);
     const size_t rss_before = CurrentRssKiB();
 
@@ -801,6 +808,7 @@ int RunCoupledHarness(const Args& args)
     root.pushKV("schema_version", 2);
     root.pushKV("stub", false);
     root.pushKV("device_id", device_id);
+    root.pushKV("public_evidence", args.public_evidence);
     root.pushKV("backend", backend_resolved);
     root.pushKV("backend_requested", args.backend);
     root.pushKV("exact_gemm_inject", gemm.gemm_s8s8 != nullptr);
@@ -1117,8 +1125,10 @@ int main(int argc, char* argv[])
     }
     (void)episode_streamed_tiling;
 
-    const std::string host = HostName();
-    const std::string device_id = backend_resolved + ":" + host;
+    const std::string device_id =
+        args.public_evidence
+            ? backend_resolved + ":public-evidence"
+            : backend_resolved + ":" + HostName();
     const auto metal_arch = matmul_v4::metal::ProbeLtMetalArch();
 
     std::cout << "== MatMul ENC_RC harness (real episodes) ==\n";
@@ -1712,6 +1722,7 @@ int main(int argc, char* argv[])
     root.pushKV("schema_version", 2);
     root.pushKV("stub", false);
     root.pushKV("device_id", device_id);
+    root.pushKV("public_evidence", args.public_evidence);
     root.pushKV("backend", backend_resolved);
     root.pushKV("backend_requested", args.backend);
     root.pushKV("backend_resolution_reason", backend_reason);

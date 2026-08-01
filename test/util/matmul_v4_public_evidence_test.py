@@ -66,6 +66,19 @@ class PublicEvidencePrivacyTest(unittest.TestCase):
             self.assertTrue(any("email address" in failure for failure in failures))
             self.assertTrue(any("private key filename" in failure for failure in failures))
 
+    def test_mdns_hostname_hidden_inside_device_id_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write(
+                Path(directory),
+                "report.json",
+                {
+                    "device_id": "metal-provider:validator-workstation.local",
+                    "hardware": "Apple Silicon M4 Max-class Metal",
+                },
+            )
+            failures = MODULE.check_file(path)
+            self.assertTrue(any("mDNS hostname" in failure for failure in failures))
+
 
 if __name__ == "__main__":
     unittest.main()
