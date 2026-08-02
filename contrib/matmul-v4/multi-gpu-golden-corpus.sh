@@ -60,22 +60,77 @@ if [[ ${COMPARE_ONLY} -eq 0 ]]; then
   [[ -n "${HARNESS}" && -x "${HARNESS}" ]] || die "--harness executable required"
 fi
 
-if [[ -z "${SOURCE_REVISION}" ]]; then
-  SOURCE_REVISION="$(git -C "$(dirname "$0")/../.." rev-parse HEAD 2>/dev/null || echo unknown)"
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+
+# Portable SHA-256: coreutils exposes sha256sum, macOS/perl exposes shasum.
+sha256_stdin() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  else
+    shasum -a 256 | awk '{print $1}'
+  fi
+}
+
+sha256_file() {
+  sha256_stdin < "$1"
+}
+
+# PROVENANCE GUARD (fail-closed).
+#
+# source_revision and source_tree_fingerprint are both derived from the
+# COMMITTED tree at HEAD, while the harness is compiled from the WORKING tree.
+# Without this check a build made from locally modified sources is recorded
+# under a clean revision and a clean fingerprint, and the comparator — which
+# only ever sees those two strings — cannot detect the substitution. Since the
+# entire Epoch-A activation argument rests on that pair, a dirty build-relevant
+# tree is refused outright rather than annotated. Commit to a scratch branch and
+# pass --source-revision if you need evidence from work in progress.
+if [[ ${COMPARE_ONLY} -eq 0 ]]; then
+  if ! git -C "${REPO_ROOT}" rev-parse --git-dir >/dev/null 2>&1; then
+    die "not a git checkout: cannot establish source provenance"
+  fi
+  DIRTY="$(git -C "${REPO_ROOT}" status --porcelain -- \
+    CMakeLists.txt cmake src 2>/dev/null || true)"
+  if [[ -n "${DIRTY}" ]]; then
+    echo "multi-gpu-golden-corpus: build-relevant working tree is dirty:" >&2
+    echo "${DIRTY}" >&2
+    die "refusing to record a corpus whose fingerprint would not describe the built sources"
+  fi
 fi
+
+if [[ -z "${SOURCE_REVISION}" ]]; then
+  SOURCE_REVISION="$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)"
+fi
+[[ "${SOURCE_REVISION}" =~ ^[0-9a-fA-F]{40}$ ]] || \
+  die "--source-revision must be a 40-character commit id (got: ${SOURCE_REVISION})"
 TIP_SHA="${SOURCE_REVISION}"
 if [[ -z "${SOURCE_TREE_FINGERPRINT}" ]]; then
-  SOURCE_TREE_FINGERPRINT="$({
-    git -C "$(dirname "$0")/../.." ls-tree -r --full-tree HEAD -- \
-      CMakeLists.txt cmake src
-  } | shasum -a 256 | awk '{print $1}')"
+  SOURCE_TREE_FINGERPRINT="$(git -C "${REPO_ROOT}" ls-tree -r --full-tree HEAD -- \
+    CMakeLists.txt cmake src | sha256_stdin)"
 fi
 [[ "${SOURCE_TREE_FINGERPRINT}" =~ ^[0-9a-fA-F]{64}$ ]] || \
   die "--source-tree-fingerprint must be a 64-character SHA-256"
 
-sha256_file() {
-  shasum -a 256 "$1" | awk '{print $1}'
-}
+# An explicitly supplied revision/fingerprint pair is only admissible when it
+# actually describes this checkout; otherwise the operator is asserting
+# provenance the script cannot corroborate.
+if [[ ${COMPARE_ONLY} -eq 0 ]]; then
+  # A 40-hex string is not a revision. Evidence has been recorded in this tree
+  # under a well-formed but non-existent commit id, which every downstream
+  # consumer accepted because they only ever length-checked the hex.
+  git -C "${REPO_ROOT}" cat-file -e "${SOURCE_REVISION}^{commit}" 2>/dev/null || \
+    die "source revision ${SOURCE_REVISION} does not resolve to a commit in this repository"
+  ACTUAL_TREE_FINGERPRINT="$(git -C "${REPO_ROOT}" ls-tree -r --full-tree \
+    "${SOURCE_REVISION}" -- CMakeLists.txt cmake src 2>/dev/null | sha256_stdin)"
+  if [[ "${ACTUAL_TREE_FINGERPRINT}" != "${SOURCE_TREE_FINGERPRINT}" ]]; then
+    die "source-tree-fingerprint ${SOURCE_TREE_FINGERPRINT} does not match revision ${SOURCE_REVISION} (${ACTUAL_TREE_FINGERPRINT})"
+  fi
+  HEAD_TREE_FINGERPRINT="$(git -C "${REPO_ROOT}" ls-tree -r --full-tree HEAD -- \
+    CMakeLists.txt cmake src | sha256_stdin)"
+  if [[ "${HEAD_TREE_FINGERPRINT}" != "${SOURCE_TREE_FINGERPRINT}" ]]; then
+    die "checkout at HEAD does not carry the declared build-relevant tree; the harness was not built from ${SOURCE_REVISION}"
+  fi
+fi
 
 IFS=',' read -r -a BACKEND_LIST <<< "${BACKENDS}"
 declare -a OK_BACKENDS=()
