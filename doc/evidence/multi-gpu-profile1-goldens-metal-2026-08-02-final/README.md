@@ -1,14 +1,15 @@
-# Final-code-freeze Metal Profile-1 corpus
+# Exact-head Metal Profile-1 corpus
 
-Status: **Metal complete; CUDA reproduction pending**.
+Status: **Metal complete for the current code freeze; matching CUDA rerun
+pending.**
 
-This corpus was generated from code freeze
-`602a9d08facf1bcbb8e32834c6b74bfd92412040` using the strict
+This corpus was generated from revision
+`7508d67e99639e02408913348af863a996f07aa3` using the strict
 `metal_int8_mpp_tensorops_fused_extract` provider on Apple Silicon M4 Max-class
-Metal. The source-tree fingerprint is
-`4649ffd436459622ea2be55fa34c0ee4877ee8c69760db5f21d6f805f2e98483` and
+Metal. The build-relevant source-tree fingerprint is
+`e12212f9983ad93e054efb9e1c4e6fa90969e858bd2c12b44f287605173da2c3` and
 the provider-specific harness SHA-256 is
-`8bd1c7438a23b79f6aa05644390d6cb4e8d000f0fa214d1116d1b62f146dff7f`.
+`43a633900ca231be516814b8a6a8131eb1f90829d6be409c1465b9f3f5757c0d`.
 
 ## Result
 
@@ -18,36 +19,21 @@ the provider-specific harness SHA-256 is
 - 1,088 device calls and 1,129,198,441,725,952 device MACs.
 - Zero CPU GEMM calls, MACs, or fallbacks.
 - No provider, provenance, canonical-header, or acceleration coverage failure.
-- Mean production ExactReplay wall time approximately 28.08 seconds.
+- Mean production ExactReplay wall time 28.1694 seconds (eight samples; p50
+  28.1459 seconds, observed maximum 28.3494 seconds). This is not a p99 claim.
 
 The partial comparator intentionally reports `complete_multi_gpu_match=false`
-because this directory contains only the final-freeze Metal provider. It
-reports no mismatch and no coverage failure. A CUDA provider must reproduce
-the same revision, source-tree fingerprint, headers, and digests before the
-CUDA+Metal cohort may populate `CommittedRCProductionGoldenManifest()`.
+because this directory contains only the exact-head Metal provider. It reports
+zero mismatch and zero coverage failure. Independent comparison also confirms
+that all eight canonical header byte strings and digests remain byte-identical
+to the earlier CUDA corpus. That historical CUDA result cannot close the gate,
+however: the production policy requires CUDA to rerun from this same revision
+and source fingerprint after all build-relevant fixes.
 
-## Revision correction
-
-As first recorded, every artifact in this directory declared the code freeze as
-`602a9d08fa95d1e751e7814157a897ec499f83ed`. **That commit does not exist in this
-repository.** It shares only the first ten characters with the real freeze
-commit, so it passed the comparator's 40-character hex check while attesting to
-nothing.
-
-The identifier has been corrected to `602a9d08facf1bcbb8e32834c6b74bfd92412040`.
-The correction is not a guess: the recorded source-tree fingerprint
-`4649ffd4...e98483` is reproduced exactly by
-`git ls-tree -r --full-tree 602a9d08facf1bcbb8e32834c6b74bfd92412040 --
-CMakeLists.txt cmake src`, and by no other commit reachable here. The
-measurement itself is unaffected — only the identifier naming the code that
-produced it was wrong.
-
-Two mechanisms now prevent a recurrence:
-`contrib/matmul-v4/multi-gpu-golden-corpus.sh` resolves the revision, refuses a
-dirty build-relevant tree, and cross-checks the declared fingerprint against the
-declared revision before recording anything; and
-`contrib/matmul-v4/verify-evidence-provenance.py` re-checks every artifact under
-`doc/evidence` on demand.
+A successful exact-head CUDA reproduction can then be compared with this
+artifact. Only a reviewed comparison with `complete_multi_gpu_match=true` may
+populate `CommittedRCProductionGoldenManifest()`; the manifest and all public
+activation/ratification settings remain fail-closed in this branch.
 
 ## Artifacts
 
@@ -55,5 +41,5 @@ declared revision before recording anything; and
 - `multi-gpu-digest-compare.json` contains the fail-closed partial comparison.
 
 The artifacts expose machine-class and provider/runtime capability data only.
-They contain no hostname, account name, filesystem path, device serial, network
-address, credential, or deployment secret.
+They contain no hostname, account name, filesystem path, device serial or other
+unique hardware identifier, network address, credential, or deployment secret.

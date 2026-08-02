@@ -1,8 +1,8 @@
 # Historical CUDA + Metal Profile-1 golden corpus (`602a9d08…`)
 
 Status: **internally complete for source revision `602a9d08…`, but stale for
-the current activation candidate. CUDA and Metal must both be rerun from the
-eventual final build-relevant tree.** The recorded comparison remains
+the current activation candidate. Metal has since been rerun from the current
+code freeze; a matching CUDA rerun remains pending.** The recorded comparison remains
 `complete_multi_gpu_match: true` with 0 mismatches and 0 coverage failures for
 its historical source revision.
 

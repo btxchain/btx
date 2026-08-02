@@ -1,7 +1,7 @@
 {
   "evidence_kind": "multi_gpu_profile1_exactreplay_golden_compare",
-  "tip_sha": "602a9d08facf1bcbb8e32834c6b74bfd92412040",
-  "source_tree_fingerprint": "4649ffd436459622ea2be55fa34c0ee4877ee8c69760db5f21d6f805f2e98483",
+  "tip_sha": "7508d67e99639e02408913348af863a996f07aa3",
+  "source_tree_fingerprint": "e12212f9983ad93e054efb9e1c4e6fa90969e858bd2c12b44f287605173da2c3",
   "canary_nonce_start": 1,
   "backends_requested": [
     "metal"
@@ -24,9 +24,9 @@
       "raw": "profile1-metal-8.json",
       "all_consensus_macs_on_device": true,
       "cpu_gemm_fallbacks": 0,
-      "source_revision": "602a9d08facf1bcbb8e32834c6b74bfd92412040",
-      "source_tree_fingerprint": "4649ffd436459622ea2be55fa34c0ee4877ee8c69760db5f21d6f805f2e98483",
-      "harness_sha256": "8bd1c7438a23b79f6aa05644390d6cb4e8d000f0fa214d1116d1b62f146dff7f",
+      "source_revision": "7508d67e99639e02408913348af863a996f07aa3",
+      "source_tree_fingerprint": "e12212f9983ad93e054efb9e1c4e6fa90969e858bd2c12b44f287605173da2c3",
+      "harness_sha256": "43a633900ca231be516814b8a6a8131eb1f90829d6be409c1465b9f3f5757c0d",
       "provider": "metal_int8_mpp_tensorops_fused_extract",
       "backend_requested": "metal",
       "provider_identity": {
