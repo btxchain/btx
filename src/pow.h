@@ -220,12 +220,17 @@ bool ValidateMatMulAsertParams(const Consensus::Params& params, int32_t next_hei
  *  reduced terms fit in uint32. Prevents ScaleTargetByTimespan's independent
  *  per-term uint32 clamp from distorting a large-but-exact ratio (e.g. 2^40/2^39).*/
 bool ReduceRescaleRatioToU32(int64_t num, int64_t den, uint32_t& out_num, uint32_t& out_den);
+/** 64-bit reduction for paths that do exact wide arithmetic and are therefore
+ *  not bound by ScaleTargetByTimespan's UINT32_MAX per-argument clamp. */
+bool ReduceRescaleRatioToU64(int64_t num, int64_t den, uint64_t& out_num, uint64_t& out_den);
 /**
  * Derive the atomic v3 -> Epoch-A target from the live parent target.
  *
  * The v3 lottery requires both the digest target and the pre-hash target,
- * while Profile 1 keeps only the digest target. For measured throughput ratio
- * R_v3/R_rc = num/den, the exact continuity target is
+ * while Profile 1 keeps only the digest target. num/den is the PRE-GATE
+ * nonce-attempt-rate ratio N/M (v3 raw attempts per second over RC episodes
+ * per second) -- NOT the realized loosen and NOT a post-gate digest-trial
+ * ratio. The exact continuity target is
  *
  *   floor(parent * min(2^epsilon * parent, 2^256-1) * num /
  *         (2^256 * den)).
@@ -236,8 +241,8 @@ bool ReduceRescaleRatioToU32(int64_t num, int64_t den, uint32_t& out_num, uint32
 std::optional<arith_uint256> DeriveMatMulEpochATransitionTarget(
     const arith_uint256& parent_target,
     uint32_t pre_hash_epsilon_bits,
-    uint32_t throughput_num,
-    uint32_t throughput_den,
+    uint64_t attempt_rate_num,
+    uint64_t attempt_rate_den,
     const arith_uint256& pow_limit);
 /** AUDIT D1: the fail-CLOSED difficulty result (hardest representable target) used
  *  when a runtime ASERT invariant is breached, so an invalid config can never
