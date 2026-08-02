@@ -1,6 +1,6 @@
 {
   "evidence_kind": "multi_gpu_profile1_exactreplay_golden_compare",
-  "tip_sha": "bc5f5733867a704185b4f114bf24f56256ad09dd",
+  "tip_sha": "42b66394846caea8573e910e41fd9676838562db",
   "canary_nonce_start": 1,
   "backends_requested": [
     "cuda",
@@ -52,7 +52,7 @@
       "raw": "profile1-metal-8.json",
       "all_consensus_macs_on_device": true,
       "cpu_gemm_fallbacks": 0,
-      "source_revision": "bc5f5733867a704185b4f114bf24f56256ad09dd",
+      "source_revision": "42b66394846caea8573e910e41fd9676838562db",
       "provider": "metal_int8_mpp_tensorops_fused_extract",
       "backend_requested": "metal",
       "provider_identity": {

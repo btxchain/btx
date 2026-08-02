@@ -4,7 +4,7 @@ Status: **Metal complete for the current code freeze; matching CUDA rerun
 pending.**
 
 This corpus was generated from revision
-`7508d67e99639e02408913348af863a996f07aa3` using the strict
+`5ba47d59c65747b8acf7e56bd58918d0269949c2` using the strict
 `metal_int8_mpp_tensorops_fused_extract` provider on Apple Silicon M4 Max-class
 Metal. The build-relevant source-tree fingerprint is
 `e12212f9983ad93e054efb9e1c4e6fa90969e858bd2c12b44f287605173da2c3` and

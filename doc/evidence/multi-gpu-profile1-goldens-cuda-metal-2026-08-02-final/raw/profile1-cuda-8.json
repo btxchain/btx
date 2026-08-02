@@ -39,8 +39,8 @@
     "deficit_reason": "",
     "native_declined": false
   },
-  "source_revision": "602a9d08facf1bcbb8e32834c6b74bfd92412040",
-  "git_tip": "602a9d08facf1bcbb8e32834c6b74bfd92412040",
+  "source_revision": "a0d441e1f1ab5376cd98b0d7effe1506cf2cfed1",
+  "git_tip": "a0d441e1f1ab5376cd98b0d7effe1506cf2cfed1",
   "peak_rss_kib": 4528728,
   "run_variance": {
     "episode_cv": 0.004597303705189024,

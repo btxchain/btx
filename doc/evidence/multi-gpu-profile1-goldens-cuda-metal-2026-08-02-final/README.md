@@ -17,7 +17,7 @@ reproduction is not required for this GPU-optimized chain.
 
 Both providers are bound to the same reviewed code freeze:
 
-- `source_revision` `602a9d08facf1bcbb8e32834c6b74bfd92412040`
+- `source_revision` `a0d441e1f1ab5376cd98b0d7effe1506cf2cfed1`
 - `source_tree_fingerprint`
   `4649ffd436459622ea2be55fa34c0ee4877ee8c69760db5f21d6f805f2e98483`
   (`git ls-tree -r --full-tree <rev> -- CMakeLists.txt cmake src | sha256sum`)
@@ -87,7 +87,7 @@ contrib/matmul-v4/multi-gpu-golden-corpus.sh \
   --backends cuda \
   --episodes 8 --canary-nonce-start 1 \
   --out-dir <scratch> \
-  --source-revision 602a9d08facf1bcbb8e32834c6b74bfd92412040 \
+  --source-revision a0d441e1f1ab5376cd98b0d7effe1506cf2cfed1 \
   --source-tree-fingerprint 4649ffd436459622ea2be55fa34c0ee4877ee8c69760db5f21d6f805f2e98483
 ```
 
