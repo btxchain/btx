@@ -661,7 +661,15 @@ bool CanStartMatMulVerification(uint32_t pending_verifications, uint32_t work_un
                                 const Consensus::Params& params, int32_t reference_height = -1);
 bool CanStartMatMulRCVerification(uint32_t pending_verifications, uint32_t work_units,
                                   const Consensus::Params& params, int32_t reference_height = -1);
-bool ConsumeGlobalMatMulPhase2Budget(uint32_t max_global_per_minute, uint32_t count, std::chrono::steady_clock::time_point now);
+/** Which process-wide Phase-2 window a charge is drawn from. Header batches and
+ *  complete-block verification are metered separately because they are granted
+ *  different ceilings; sharing one counter lets the larger ceiling starve the
+ *  smaller one. */
+enum class MatMulPhase2BudgetLane : uint8_t {
+    ExpensiveVerification,
+    HeaderBatch,
+};
+bool ConsumeGlobalMatMulPhase2Budget(uint32_t max_global_per_minute, uint32_t count, std::chrono::steady_clock::time_point now, MatMulPhase2BudgetLane lane = MatMulPhase2BudgetLane::ExpensiveVerification);
 bool ConsumeGlobalMatMulRCBudget(uint32_t max_global_per_minute, uint32_t count, std::chrono::steady_clock::time_point now);
 /** Roll back an RC budget debit only when admission failed before work began.
  *  `charged_at` prevents a delayed rollback from decrementing a later window. */
