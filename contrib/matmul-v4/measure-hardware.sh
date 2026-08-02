@@ -199,7 +199,9 @@ if [ "$RC_MODE" -eq 1 ]; then
   echo "-- building matmul-v4-rc-harness"
   cmake --build "$BUILD" --target matmul-v4-rc-harness -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)" \
     || { echo "BUILD FAILED (matmul-v4-rc-harness)"; exit 2; }
-  BIN="$(find "$BUILD" -type f -name matmul-v4-rc-harness | head -1)"
+  # -print -quit, not `| head -1`: the pipe makes find die on SIGPIPE under
+  # `set -euo pipefail`, aborting immediately after a successful build.
+  BIN="$(find "$BUILD" -type f -name matmul-v4-rc-harness -print -quit)"
   if [ -z "$BIN" ]; then echo "could not locate matmul-v4-rc-harness binary"; exit 2; fi
 
   # Stage G campaign profiles → multi-run same-tip JSON for rc-gate.
