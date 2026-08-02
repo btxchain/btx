@@ -1,8 +1,8 @@
 # Profile-1 ExactReplay Metal golden corpus
 
-Status: **Metal reproduction complete; HIP pending globally**. Ratification
-gates remain false, the production golden manifest remains empty, and public
-Epoch-A heights remain disabled.
+Status: historical Metal-only intermediate artifact, superseded by the complete
+CUDA+Metal corpus in `../multi-gpu-profile1-goldens-2026-08-01/`. Public
+Epoch-A heights remain disabled for the separate activation-height change.
 
 ## Reproduction
 
@@ -29,11 +29,10 @@ account name, filesystem path, device serial, credential, or private deployment
 information.
 
 Portable CPU ExactReplay is not counted as an independent production-golden
-backend. HIP reproduction on an AMD/ROCm device is still required before
-`complete_multi_gpu_match` can become true or the manifest can be considered
-for population.
+backend. The launch policy requires CUDA+Metal; HIP is optional and any HIP
+corpus must match before that provider can be authorized.
 
 See `raw/profile1-metal-8.json` for the frozen Metal records. The local
 Metal-only comparison remains incomplete by design because it does not contain
-CUDA or HIP inputs; the canonical cross-backend comparison is in the sibling
-directory above.
+the required CUDA input; the completed cross-backend comparison is in the
+sibling directory above.

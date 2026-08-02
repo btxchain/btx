@@ -1,6 +1,6 @@
 {
   "evidence_kind": "multi_gpu_profile1_exactreplay_golden_compare",
-  "tip_sha": "9dd88b8e54d92a848c4006aa9affca2ab3e0c91c",
+  "tip_sha": "bc5f5733867a704185b4f114bf24f56256ad09dd",
   "canary_nonce_start": 1,
   "backends_requested": [
     "cuda",
@@ -12,12 +12,11 @@
   ],
   "required_for_manifest": [
     "cuda",
-    "hip",
     "metal"
   ],
-  "complete_multi_gpu_match": false,
+  "complete_multi_gpu_match": true,
   "cuda_metal_match": true,
-  "allow_partial": true,
+  "allow_partial": false,
   "mismatches": [],
   "coverage_failures": [],
   "by_backend": {
@@ -26,9 +25,17 @@
       "raw": "profile1-cuda-8.json",
       "all_consensus_macs_on_device": true,
       "cpu_gemm_fallbacks": 0,
-      "source_revision": "unknown",
+      "source_revision": "c4ac2e439ac496245f12dcbf8b42c9575247dbe9",
       "provider": "cuda_rc_exact_fused_extract",
       "backend_requested": "cuda",
+      "provider_identity": {
+        "provider_family": "cuda",
+        "device_architecture": "sm_120",
+        "driver_identity": "13020",
+        "runtime_identity": "13030",
+        "complete": true,
+        "reason": "cuda_runtime_identity_complete"
+      },
       "digests_by_nonce": {
         "1": "b4777985d4f2621d0b9c119f4188ac7d80158fc92560ade96cc7a3fd8cfae953",
         "2": "d5ca4a68a259c6494128993d752104e6ec4ddf9551e5bc1ee2aeb61dc60264aa",
@@ -45,9 +52,17 @@
       "raw": "profile1-metal-8.json",
       "all_consensus_macs_on_device": true,
       "cpu_gemm_fallbacks": 0,
-      "source_revision": "9dd88b8e54d92a848c4006aa9affca2ab3e0c91c",
+      "source_revision": "bc5f5733867a704185b4f114bf24f56256ad09dd",
       "provider": "metal_int8_mpp_tensorops_fused_extract",
       "backend_requested": "metal",
+      "provider_identity": {
+        "provider_family": "metal",
+        "device_architecture": "m4_class",
+        "driver_identity": "25F71",
+        "runtime_identity": "25.5.0",
+        "complete": true,
+        "reason": "complete"
+      },
       "digests_by_nonce": {
         "1": "b4777985d4f2621d0b9c119f4188ac7d80158fc92560ade96cc7a3fd8cfae953",
         "2": "d5ca4a68a259c6494128993d752104e6ec4ddf9551e5bc1ee2aeb61dc60264aa",
@@ -61,9 +76,10 @@
     }
   },
   "notes": [
-    "Production goldens require byte-identical ExactReplay digests across CUDA, Metal, and HIP for the same frozen canary headers.",
+    "Production goldens require byte-identical ExactReplay digests across CUDA and Metal for the same frozen canary headers.",
+    "HIP remains an optional provider; any supplied HIP corpus must match the required cohort exactly.",
     "CPU ExactReplay is not an accepted independent reproduction path for Epoch-A production goldens.",
-    "Do not populate CommittedRCProductionGoldenManifest until complete_multi_gpu_match is true.",
+    "CommittedRCProductionGoldenManifest may be populated only from a reviewed corpus where complete_multi_gpu_match is true.",
     "Public evidence must remain machine-class only (no hostname/SKU/path identifiers)."
   ],
   "ratification_gates": false

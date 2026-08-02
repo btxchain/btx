@@ -143,10 +143,10 @@ See `doc/btx-matmul-trusted-rpc-mirrors.md` and
 - Production runs cannot silently resolve to the serial CPU backend without an
   explicit diagnostic opt-in.
 - Repository 100-header Metal and sanitized CUDA measurements are included as
-  engineering evidence. The frozen eight-header corpus was rerun from the same
-  source revision on both providers with full device coverage, zero CPU
-  fallback, and byte-identical digests. The public ratification switch remains
-  deliberately coupled to the separate activation-height change.
+  engineering evidence. The current Metal rerun and the revision-bound CUDA
+  corpus use the same frozen headers and produced byte-identical digests with
+  full device coverage and zero CPU fallback. The public ratification switch
+  remains deliberately coupled to the separate activation-height change.
 
 ## Cumulative wallet and notification support
 

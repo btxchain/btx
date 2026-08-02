@@ -193,9 +193,11 @@ is at `doc/evidence/cuda-blackwell-16gib-lifecycle-asert-2026-08-01/` (n=20 core
 remain false.
 
 The frozen production corpus has a complete eight-header CUDA + Metal match.
-Both providers ran the same source revision with every consensus MAC on device,
-zero CPU GEMM calls/fallbacks, and byte-identical headers, dimensions, and
-digests. See
+The Metal provider was rerun at the manifest-closing source revision; the CUDA
+record is tied to its byte-identical companion summary and earlier reviewed PR
+revision. Both ran every consensus MAC on device with zero CPU GEMM
+calls/fallbacks and produced byte-identical headers, dimensions, and digests.
+See
 `doc/evidence/multi-gpu-profile1-goldens-2026-08-01/` and
 `doc/evidence/multi-gpu-profile1-goldens-metal-2026-08-01/`. The comparator's
 `complete_multi_gpu_match` is true for the required CUDA+Metal cohort and the
