@@ -6719,7 +6719,21 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
     // Bypass only that requested-historical case: unsolicited IBD bodies still
     // need a ticket, and requested bodies still consume the pending/global
     // work budgets and receive no chainwork credit until ExactReplay succeeds.
-    const bool requested_ibd_body = is_ibd && force_processing;
+    // Was `is_ibd && force_processing`. IsInitialBlockDownload latches false
+    // permanently, and the admission store only accepts tickets for headers
+    // within MATMUL_RC_NEAR_TIP_DEPTH of the tip -- so a node that finished IBD
+    // and later fell more than a few blocks behind (restart after a short
+    // outage, partition heal, or simply being throttled by the RC verify
+    // budget) could never satisfy the bypass, never obtain a ticket, and
+    // deferred every requested body forever. Reproduced between two honest
+    // regtest nodes: permanently wedged at the last pre-RC block.
+    //
+    // Requested bodies are already bounded by mapBlocksInFlight,
+    // MAX_BLOCKS_IN_TRANSIT_PER_PEER and BLOCK_DOWNLOAD_WINDOW, still consume
+    // the pending/global work budgets, and still earn no chainwork credit until
+    // ExactReplay succeeds. The ticket requirement is retained in full for
+    // UNSOLICITED bodies, which is the case it was designed for.
+    const bool requested_body = force_processing;
     std::optional<node::RCAdmissionTicket> accepted_ticket;
     const auto restore_accepted_ticket = [&] {
         if (!accepted_ticket) return;
@@ -6730,7 +6744,7 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
         accepted_ticket.reset();
     };
     if (rc_profile && m_opts.matmul_rc_admission &&
-        !requested_ibd_body &&
+        !requested_body &&
         !node.HasPermission(NetPermissionFlags::NoBan) &&
         (!m_matmul_verify_worker ||
          !m_matmul_verify_worker->Contains(block_hash))) {
