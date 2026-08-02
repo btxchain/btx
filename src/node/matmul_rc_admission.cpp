@@ -140,9 +140,11 @@ RCDeferredBodyCooldowns::RCDeferredBodyCooldowns(Config config)
 
 bool RCDeferredBodyCooldowns::Mark(
     const uint256& block_hash,
+    int64_t peer_id,
     std::chrono::steady_clock::time_point now)
 {
-    const auto existing{m_deadlines.find(block_hash)};
+    const auto key{std::make_pair(block_hash, peer_id)};
+    const auto existing{m_deadlines.find(key)};
     if (existing != m_deadlines.end()) {
         if (now < existing->second) {
             // Deliberately do not refresh. Otherwise one source can keep a
@@ -160,15 +162,16 @@ bool RCDeferredBodyCooldowns::Mark(
             })};
         if (oldest != m_deadlines.end()) m_deadlines.erase(oldest);
     }
-    m_deadlines.emplace(block_hash, now + m_config.cooldown);
+    m_deadlines.emplace(key, now + m_config.cooldown);
     return true;
 }
 
 bool RCDeferredBodyCooldowns::Contains(
     const uint256& block_hash,
+    int64_t peer_id,
     std::chrono::steady_clock::time_point now)
 {
-    const auto it{m_deadlines.find(block_hash)};
+    const auto it{m_deadlines.find(std::make_pair(block_hash, peer_id))};
     if (it == m_deadlines.end()) return false;
     // FindNextBlocks calls this once per candidate. Scanning the entire store
     // on every negative lookup would turn download selection into
@@ -184,7 +187,12 @@ bool RCDeferredBodyCooldowns::Contains(
 
 void RCDeferredBodyCooldowns::Erase(const uint256& block_hash)
 {
-    m_deadlines.erase(block_hash);
+    // Erase across all peers: admission succeeded or validation reached a
+    // terminal verdict for this block, so no source needs holding off.
+    for (auto it{m_deadlines.lower_bound(std::make_pair(block_hash, std::numeric_limits<int64_t>::min()))};
+         it != m_deadlines.end() && it->first.first == block_hash;) {
+        it = m_deadlines.erase(it);
+    }
 }
 
 void RCDeferredBodyCooldowns::Clear()

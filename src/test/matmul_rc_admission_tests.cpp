@@ -100,17 +100,17 @@ BOOST_AUTO_TEST_CASE(deferred_body_cooldown_is_non_refreshing_and_expires)
         std::chrono::seconds{1'000}}};
     const uint256 hash{1};
 
-    BOOST_CHECK(cooldowns.Mark(hash, start));
-    BOOST_CHECK(cooldowns.Contains(hash, start + std::chrono::seconds{59}));
+    BOOST_CHECK(cooldowns.Mark(hash, /*peer_id=*/1, start));
+    BOOST_CHECK(cooldowns.Contains(hash, /*peer_id=*/1, start + std::chrono::seconds{59}));
 
     // A malicious duplicate immediately before expiry cannot extend the
     // process-wide suppression window for an honest source.
-    BOOST_CHECK(!cooldowns.Mark(hash, start + std::chrono::seconds{59}));
-    BOOST_CHECK(!cooldowns.Contains(hash, start + std::chrono::seconds{60}));
+    BOOST_CHECK(!cooldowns.Mark(hash, /*peer_id=*/1, start + std::chrono::seconds{59}));
+    BOOST_CHECK(!cooldowns.Contains(hash, /*peer_id=*/1, start + std::chrono::seconds{60}));
     BOOST_CHECK_EQUAL(cooldowns.Size(start + std::chrono::seconds{60}), 0U);
 
     // Once expired, the same hash may acquire one fresh bounded cooldown.
-    BOOST_CHECK(cooldowns.Mark(hash, start + std::chrono::seconds{60}));
+    BOOST_CHECK(cooldowns.Mark(hash, /*peer_id=*/1, start + std::chrono::seconds{60}));
 }
 
 BOOST_AUTO_TEST_CASE(deferred_body_cooldown_is_bounded_and_explicitly_clearable)
@@ -125,20 +125,20 @@ BOOST_AUTO_TEST_CASE(deferred_body_cooldown_is_bounded_and_explicitly_clearable)
     const uint256 second{2};
     const uint256 third{3};
 
-    BOOST_REQUIRE(cooldowns.Mark(first, start));
-    BOOST_REQUIRE(cooldowns.Mark(second, start + std::chrono::seconds{1}));
+    BOOST_REQUIRE(cooldowns.Mark(first, /*peer_id=*/1, start));
+    BOOST_REQUIRE(cooldowns.Mark(second, /*peer_id=*/1, start + std::chrono::seconds{1}));
     BOOST_CHECK_EQUAL(cooldowns.Size(start + std::chrono::seconds{1}), 2U);
 
     // Capacity evicts the oldest deadline rather than growing on arbitrary
     // hashes. The newer entry and newly installed entry remain active.
-    BOOST_REQUIRE(cooldowns.Mark(third, start + std::chrono::seconds{2}));
-    BOOST_CHECK(!cooldowns.Contains(first, start + std::chrono::seconds{2}));
-    BOOST_CHECK(cooldowns.Contains(second, start + std::chrono::seconds{2}));
-    BOOST_CHECK(cooldowns.Contains(third, start + std::chrono::seconds{2}));
+    BOOST_REQUIRE(cooldowns.Mark(third, /*peer_id=*/1, start + std::chrono::seconds{2}));
+    BOOST_CHECK(!cooldowns.Contains(first, /*peer_id=*/1, start + std::chrono::seconds{2}));
+    BOOST_CHECK(cooldowns.Contains(second, /*peer_id=*/1, start + std::chrono::seconds{2}));
+    BOOST_CHECK(cooldowns.Contains(third, /*peer_id=*/1, start + std::chrono::seconds{2}));
 
     // Valid ticket/body admission and terminal verdicts use this erase path.
     cooldowns.Erase(second);
-    BOOST_CHECK(!cooldowns.Contains(second, start + std::chrono::seconds{2}));
+    BOOST_CHECK(!cooldowns.Contains(second, /*peer_id=*/1, start + std::chrono::seconds{2}));
     BOOST_CHECK_EQUAL(cooldowns.Size(start + std::chrono::seconds{2}), 1U);
     cooldowns.Clear();
     BOOST_CHECK_EQUAL(cooldowns.Size(start + std::chrono::seconds{2}), 0U);
@@ -508,6 +508,31 @@ BOOST_AUTO_TEST_CASE(quarantine_rate_limits_and_counters_are_exact)
     BOOST_CHECK_EQUAL(store.UnknownNetgroupSize(7), 0U);
     BOOST_CHECK_EQUAL(store.UnknownCandidatesForHash(b.GetHash()), 0U);
     BOOST_CHECK_EQUAL(store.UnknownCandidatesForHash(c.GetHash()), 0U);
+}
+
+
+BOOST_AUTO_TEST_CASE(deferred_cooldown_is_scoped_to_the_delivering_peer)
+{
+    // An unsolicited ticketless body reaches the deferral path with
+    // force_processing=false. Keyed by hash alone, that one delivery would gate
+    // FindNextBlocksToDownload for EVERY peer, turning "here is the block" into
+    // "you may not download this block" -- renewable once per cooldown. Scoping
+    // to the delivering peer keeps the anti-busy-loop property without letting
+    // one source censor a hash node-wide.
+    node::RCDeferredBodyCooldowns cooldowns;
+    const uint256 hash{uint256::ONE};
+    const auto start{std::chrono::steady_clock::now()};
+
+    BOOST_CHECK(cooldowns.Mark(hash, /*peer_id=*/1, start));
+    BOOST_CHECK(cooldowns.Contains(hash, /*peer_id=*/1, start));
+    // Every other peer stays immediately eligible for the same block.
+    BOOST_CHECK(!cooldowns.Contains(hash, /*peer_id=*/2, start));
+    BOOST_CHECK(cooldowns.Mark(hash, /*peer_id=*/2, start));
+
+    // A terminal verdict clears the hash for all peers, not just one.
+    cooldowns.Erase(hash);
+    BOOST_CHECK(!cooldowns.Contains(hash, /*peer_id=*/1, start));
+    BOOST_CHECK(!cooldowns.Contains(hash, /*peer_id=*/2, start));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

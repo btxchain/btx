@@ -1201,8 +1201,8 @@ private:
     mutable Mutex m_matmul_rc_deferred_mutex;
     mutable node::RCDeferredBodyCooldowns m_matmul_rc_deferred_bodies
         GUARDED_BY(m_matmul_rc_deferred_mutex);
-    void MarkMatMulRCBodyDeferred(const uint256& hash) NO_THREAD_SAFETY_ANALYSIS;
-    bool IsMatMulRCBodyDeferred(const uint256& hash) const NO_THREAD_SAFETY_ANALYSIS;
+    void MarkMatMulRCBodyDeferred(const uint256& hash, int64_t peer_id) NO_THREAD_SAFETY_ANALYSIS;
+    bool IsMatMulRCBodyDeferred(const uint256& hash, int64_t peer_id) const NO_THREAD_SAFETY_ANALYSIS;
     void ClearMatMulRCBodyDeferred(const uint256& hash) NO_THREAD_SAFETY_ANALYSIS;
     void PinMatMulBlockSource(const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     void UnpinMatMulBlockSource(const uint256& hash) NO_THREAD_SAFETY_ANALYSIS;
@@ -1821,18 +1821,18 @@ bool PeerManagerImpl::IsMatMulAsyncVerificationPending(const uint256& hash) cons
     return m_matmul_async_verifying.count(hash) != 0;
 }
 
-void PeerManagerImpl::MarkMatMulRCBodyDeferred(const uint256& hash)
+void PeerManagerImpl::MarkMatMulRCBodyDeferred(const uint256& hash, int64_t peer_id)
 {
     LOCK(m_matmul_rc_deferred_mutex);
     (void)m_matmul_rc_deferred_bodies.Mark(
-        hash, std::chrono::steady_clock::now());
+        hash, peer_id, std::chrono::steady_clock::now());
 }
 
-bool PeerManagerImpl::IsMatMulRCBodyDeferred(const uint256& hash) const
+bool PeerManagerImpl::IsMatMulRCBodyDeferred(const uint256& hash, int64_t peer_id) const
 {
     LOCK(m_matmul_rc_deferred_mutex);
     return m_matmul_rc_deferred_bodies.Contains(
-        hash, std::chrono::steady_clock::now());
+        hash, peer_id, std::chrono::steady_clock::now());
 }
 
 void PeerManagerImpl::ClearMatMulRCBodyDeferred(const uint256& hash)
@@ -2254,11 +2254,12 @@ void PeerManagerImpl::FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, c
                 continue;
             }
 
-            // Same reasoning for a body deferred for want of an RC admission
-            // ticket: the body was dropped and the single-use ticket consumed,
-            // so re-requesting it before the header-first replay resolves the
-            // deferral can only produce another deferral.
-            if (IsMatMulRCBodyDeferred(pindex->GetBlockHash())) {
+            // Same reasoning for a body THIS PEER deferred for want of an RC
+            // admission sidecar: asking the same source again before the
+            // deferral resolves can only produce another deferral. Scoped per
+            // peer so an unsolicited ticketless body from one source cannot
+            // suppress the block from every other source.
+            if (IsMatMulRCBodyDeferred(pindex->GetBlockHash(), peer.m_id)) {
                 continue;
             }
 
@@ -6763,7 +6764,7 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
             // Suppress the immediate re-request loop, but do not refresh an
             // existing deadline: repeated ticketless bodies must not censor a
             // valid ticket/body supplied by another source indefinitely.
-            MarkMatMulRCBodyDeferred(block_hash);
+            MarkMatMulRCBodyDeferred(block_hash, node.GetId());
             admission.state = MatMulBlockAdmission::State::HEADER_ONLY;
             return true;
         }
