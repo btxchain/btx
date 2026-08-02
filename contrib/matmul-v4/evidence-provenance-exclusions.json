@@ -6,6 +6,24 @@
       "revision": "unknown",
       "reason": "Historical non-authorizing lifecycle summary emitted before revision capture; its directory README records that the source revision cannot be recovered",
       "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/m4-max-exact-replay-2026-07-29/rc-production-r4-metal.json",
+      "revision": "e440314d77e9535d194c8c9c09386836258123ae",
+      "reason": "Historical M4 Max ExactReplay baseline predating the provenance rules; the recorded revision does not resolve after the history scrub and cannot be recovered. Its directory README records this. Retained as a diagnostic measurement only.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/m4-max-exact-replay-2026-07-29/rc-production-r4-full-metal.json",
+      "revision": "903b74985d",
+      "reason": "Same campaign as rc-production-r4-metal.json; abbreviated revision does not resolve after the history scrub. Diagnostic only.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/m4-max-profile1-loaded-2026-07-30/profile1-metal-loaded-100-pre-dimension-bind.json",
+      "revision": "ca6e351f8d",
+      "reason": "Superseded pre-dimension-bind artifact retained for comparison against the corrected corpus in the same directory; its abbreviated revision does not resolve. Diagnostic only.",
+      "production_admissible": false
     }
   ]
 }

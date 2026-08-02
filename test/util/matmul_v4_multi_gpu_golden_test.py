@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import tempfile
@@ -12,10 +13,33 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "contrib/matmul-v4/multi-gpu-golden-corpus.sh"
-REVISION = "1" * 40
+
+
+def _head_revision() -> str:
+    return subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+
+def _head_tree_fingerprint() -> str:
+    tree = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "ls-tree", "-r", "--full-tree", "HEAD",
+         "--", "CMakeLists.txt", "cmake", "src"],
+        capture_output=True, check=True,
+    ).stdout
+    return hashlib.sha256(tree).hexdigest()
+
+
+# The comparator now resolves the declared revision and cross-checks the
+# declared fingerprint against it, so these can no longer be arbitrary hex --
+# a synthetic "1"*40 is exactly the fabricated provenance the guard exists to
+# reject. Bind the fixtures to this checkout instead, which also means the
+# happy-path case exercises the real resolution path rather than bypassing it.
+REVISION = _head_revision()
+SOURCE_FINGERPRINT = _head_tree_fingerprint()
 DIGEST = "2" * 64
 HEADER = "3" * (182 * 2)
-SOURCE_FINGERPRINT = "5" * 64
 HARNESS_SHA256 = "6" * 64
 
 
