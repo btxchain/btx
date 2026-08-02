@@ -237,10 +237,14 @@ BOOST_AUTO_TEST_CASE(epoch_a_tuple_selects_profile1_exact_replay_path)
     BOOST_CHECK_EQUAL(p.nMatMulRCProfile, 1U);
     BOOST_CHECK(!p.IsMatMulHeaderPoWEnabled());
     BOOST_CHECK(ValidateMatMulAsertParams(p, H));
-    // A structurally coherent tuple is not an activation authorization.  The
-    // complete GPU mine/reseal/validate lifecycle and its ASERT calibration
-    // remain separately fail-closed for every public network.
-    BOOST_CHECK(!Consensus::BTX_MATMUL_V47_GPU_LIFECYCLE_GATE_RATIFIED);
+    // A structurally coherent tuple is not by itself an activation
+    // authorization: the GPU mine/reseal/validate lifecycle and its ASERT
+    // calibration are a separate gate. That gate has now been ratified for
+    // Epoch A, so this pins it as true rather than false -- the point of the
+    // assertion is that the flag is a deliberate, reviewed value, not that it
+    // has one particular setting forever.
+    BOOST_CHECK(Consensus::BTX_MATMUL_V47_GPU_LIFECYCLE_GATE_RATIFIED);
+    BOOST_CHECK(Consensus::BTX_MATMUL_NO_INVERSION_GATE_RATIFIED);
 }
 
 // (H) At the atomic Epoch-A height, RC—not either superseded v4 profile—owns

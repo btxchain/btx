@@ -88,8 +88,34 @@ static constexpr int64_t kRCDatacenterAsertRescaleDen{1027};
 // actual target from this measured ratio, the live parent nBits, and epsilon;
 // it is not a static target multiplier. Historical 16893794/1 evidence remains
 // a proposal, not a parameter.
-static constexpr int64_t kRCEpochAProvisionalAsertRescaleNum{1};
-static constexpr int64_t kRCEpochAProvisionalAsertRescaleDen{1};
+// EPOCH-A PROFILE-1 ONE-TIME ASERT RESCALE — INSTALLED.
+//
+// The runtime derivation is p' = 2^eps * p^2 * (num/den), so the realized
+// one-time loosen is k = 2^eps * p(H_A) * (num/den) and floats with the parent
+// target at the activation height, which is why this is a coefficient rather
+// than a target multiplier.
+//
+// Measured two-rig, two-vendor, same-silicon (doc/evidence/
+// asert-two-rig-calibration-2026-08-03): k = 121,581 on Blackwell-class
+// sm_120 and k = 19,892 on M4-class Metal, both sigma-bound, geometric mean
+// 49,178. The 6.1x spread is a hardware-mix property, not measurement error.
+//
+// THE MECHANISM, NOT THE MEASUREMENT, IS THE BINDING CONSTRAINT HERE.
+// num is uint32, so num/den <= 4,294,967,295 and therefore
+// k <= 2^eps * p * 4.29e9 = ~74,225 at the difficulty observed when this was
+// set. The larger measured value is not expressible. This installs the
+// ceiling, which is the closest the shipped mechanism can come to the
+// measured high end.
+//
+// Direction of the residual error is deliberate. Under-loosening costs
+// linearly in the error (a factor F too tight is ~F*90 s to the first block,
+// then an ASERT climb capped at 1.103x per block by the MTP rule); over-
+// loosening costs only logarithmically. Saturating the ceiling minimizes the
+// under-loosen, which at ~1.6x below the CUDA-rig figure is minutes-to-hours,
+// not days. Widening num to uint64 would remove the cap and allow the measured
+// value to be installed directly; that is the recommended follow-up.
+static constexpr int64_t kRCEpochAAsertRescaleNum{4294967295};
+static constexpr int64_t kRCEpochAAsertRescaleDen{1};
 
 // MatMul v4.2 / ENC-BMX4C construction invariants (spec §8.1/§8.2). No-op when
 // the profile is unset (nMatMulBMX4CHeight == INT32_MAX = disabled, e.g.
@@ -452,9 +478,9 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
         // Profile-1 Epoch A owns the measured v3→RC work-ratio whether heights
         // are still disabled (staged calibration) or the atomic tuple is live.
         assert(consensus.nMatMulRCAsertRescaleNum ==
-               kRCEpochAProvisionalAsertRescaleNum);
+               kRCEpochAAsertRescaleNum);
         assert(consensus.nMatMulRCAsertRescaleDen ==
-               kRCEpochAProvisionalAsertRescaleDen);
+               kRCEpochAAsertRescaleDen);
     }
     if (consensus.nMatMulRCHeight != std::numeric_limits<int32_t>::max()) {
         assert(consensus.nMatMulV4Height != std::numeric_limits<int32_t>::max());
@@ -661,9 +687,22 @@ public:
         // is deliberately non-authorizing; a later activation patch must set
         // the finite height and reviewed final-binary calibration atomically.
         // Profile 2 and Stage-3 proof authority remain separate transitions.
-        consensus.nMatMulRCHeight = std::numeric_limits<int32_t>::max();
-        consensus.nMatMulRCAsertRescaleNum = kRCEpochAProvisionalAsertRescaleNum;
-        consensus.nMatMulRCAsertRescaleDen = kRCEpochAProvisionalAsertRescaleDen;
+        // MatMul v4.7 EPOCH A — ACTIVATION HEIGHT INSTALLED.
+        //
+        // H_A = 181'894. Chosen as the mainnet tip at the time this was set
+        // (177'894) plus 4'000 blocks; at the 90 s target spacing that is
+        // 360'000 s = 100 hours of deployment runway.
+        //
+        // IsMatMulV47EpochAActivationTuple() requires v4, BMX4C and RC to share
+        // one height, with DRLT and the coupled height disabled and profile 1,
+        // so all three are set together here. AssertBMX4CConstructionInvariants
+        // additionally refuses a neutral rescale at a live Profile-1 height,
+        // which is why the calibration above is installed in this same commit.
+        consensus.nMatMulV4Height = 181'894;
+        consensus.nMatMulBMX4CHeight = 181'894;
+        consensus.nMatMulRCHeight = 181'894;
+        consensus.nMatMulRCAsertRescaleNum = kRCEpochAAsertRescaleNum;
+        consensus.nMatMulRCAsertRescaleDen = kRCEpochAAsertRescaleDen;
         consensus.nMaxReorgDepth = 12;
         consensus.nReorgProtectionStartHeight = 61'000;
         consensus.nEmptyBlockSubsidyPenaltyHeight = BTX_EMPTY_BLOCK_SUBSIDY_PENALTY_HEIGHT;
@@ -1106,8 +1145,8 @@ public:
         // disabled (same calibration as mainnet).
         consensus.nMatMulRCHeight = std::numeric_limits<int32_t>::max();
         consensus.nMatMulRCProfile = 1;
-        consensus.nMatMulRCAsertRescaleNum = kRCEpochAProvisionalAsertRescaleNum;
-        consensus.nMatMulRCAsertRescaleDen = kRCEpochAProvisionalAsertRescaleDen;
+        consensus.nMatMulRCAsertRescaleNum = kRCEpochAAsertRescaleNum;
+        consensus.nMatMulRCAsertRescaleDen = kRCEpochAAsertRescaleDen;
         consensus.nMaxReorgDepth = 12;
         consensus.nReorgProtectionStartHeight = 61'000;
         consensus.nEmptyBlockSubsidyPenaltyHeight = BTX_EMPTY_BLOCK_SUBSIDY_PENALTY_HEIGHT;
@@ -1396,8 +1435,8 @@ public:
         // Audit W-2 / ASERT-F1: BMX4C construction invariants (no-op while unset).
         consensus.nMatMulRCHeight = std::numeric_limits<int32_t>::max();
         consensus.nMatMulRCProfile = 1;
-        consensus.nMatMulRCAsertRescaleNum = kRCEpochAProvisionalAsertRescaleNum;
-        consensus.nMatMulRCAsertRescaleDen = kRCEpochAProvisionalAsertRescaleDen;
+        consensus.nMatMulRCAsertRescaleNum = kRCEpochAAsertRescaleNum;
+        consensus.nMatMulRCAsertRescaleDen = kRCEpochAAsertRescaleDen;
         Consensus::FillDefaultRCGrowthTables(consensus);
         AssertBMX4CConstructionInvariants(consensus, /*is_regtest=*/false);
 
@@ -1630,8 +1669,8 @@ public:
         // v4/bmx4c disabled and the discount at the UINT32_MAX default.)
         consensus.nMatMulRCHeight = std::numeric_limits<int32_t>::max();
         consensus.nMatMulRCProfile = 1;
-        consensus.nMatMulRCAsertRescaleNum = kRCEpochAProvisionalAsertRescaleNum;
-        consensus.nMatMulRCAsertRescaleDen = kRCEpochAProvisionalAsertRescaleDen;
+        consensus.nMatMulRCAsertRescaleNum = kRCEpochAAsertRescaleNum;
+        consensus.nMatMulRCAsertRescaleDen = kRCEpochAAsertRescaleDen;
         Consensus::FillDefaultRCGrowthTables(consensus);
         AssertBMX4CConstructionInvariants(consensus, /*is_regtest=*/false);
     }
@@ -2381,8 +2420,8 @@ public:
         // networks. No-op today (v4/bmx4c disabled, discount at default).
         consensus.nMatMulRCHeight = std::numeric_limits<int32_t>::max();
         consensus.nMatMulRCProfile = 1;
-        consensus.nMatMulRCAsertRescaleNum = kRCEpochAProvisionalAsertRescaleNum;
-        consensus.nMatMulRCAsertRescaleDen = kRCEpochAProvisionalAsertRescaleDen;
+        consensus.nMatMulRCAsertRescaleNum = kRCEpochAAsertRescaleNum;
+        consensus.nMatMulRCAsertRescaleDen = kRCEpochAAsertRescaleDen;
         Consensus::FillDefaultRCGrowthTables(consensus);
         AssertBMX4CConstructionInvariants(consensus, /*is_regtest=*/false);
     }

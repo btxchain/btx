@@ -717,9 +717,12 @@ BOOST_AUTO_TEST_CASE(rc_coup_asert_unsafe_ordering_rejected_at_construction)
     p.nMatMulRCCoupledAsertRescaleDen = 1;
     BOOST_CHECK(ValidateMatMulAsertParams(p, p.nMatMulAsertHeight));
 
-    // Public mainnet heights stay unreachable (guardrail).
+    // Mainnet RC is live at the Epoch-A height; the COUPLED height is the one
+    // that must stay unreachable. Epoch A is Profile-1 ExactReplay only --
+    // coupled/Profile-2 is a separate, later transition, and
+    // IsMatMulV47EpochAActivationTuple() requires the coupled height disabled.
     const auto main = CreateChainParams(ArgsManager{}, ChainType::MAIN)->GetConsensus();
-    BOOST_CHECK_EQUAL(main.nMatMulRCHeight, std::numeric_limits<int32_t>::max());
+    BOOST_CHECK_EQUAL(main.nMatMulRCHeight, 181'894);
     BOOST_CHECK_EQUAL(main.nMatMulRCCoupledHeight, std::numeric_limits<int32_t>::max());
     BOOST_CHECK_EQUAL(main.nMatMulRCCoupledAsertRescaleNum, 1);
     BOOST_CHECK_EQUAL(main.nMatMulRCCoupledAsertRescaleDen, 1);
@@ -765,8 +768,8 @@ BOOST_AUTO_TEST_CASE(rc_coup_unified_height_switch_activates_family_together)
                       std::numeric_limits<int32_t>::max());
     const auto main_default =
         CreateChainParams(ArgsManager{}, ChainType::MAIN)->GetConsensus();
-    BOOST_CHECK_EQUAL(main_default.nMatMulRCHeight,
-                      std::numeric_limits<int32_t>::max());
+    // RC live at Epoch A; coupled still disabled (separate later transition).
+    BOOST_CHECK_EQUAL(main_default.nMatMulRCHeight, 181'894);
     BOOST_CHECK_EQUAL(main_default.nMatMulRCCoupledHeight,
                       std::numeric_limits<int32_t>::max());
 }

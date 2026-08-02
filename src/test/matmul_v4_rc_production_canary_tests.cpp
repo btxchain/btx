@@ -83,12 +83,34 @@ std::vector<rc::RCProductionGoldenManifestEntry> GoldenCohort()
 
 } // namespace
 
-BOOST_AUTO_TEST_CASE(committed_manifest_stays_empty_until_final_revision_goldens)
+BOOST_AUTO_TEST_CASE(committed_manifest_is_a_valid_single_freeze_cohort)
 {
+    // This case previously pinned the manifest as EMPTY, which was the correct
+    // guard while no CUDA+Metal cohort existed at one code freeze. The Epoch-A
+    // activation populated it, so the guard now pins the property that made
+    // populating it legitimate: a structurally valid cohort whose two entries
+    // agree on workload and provenance and differ only in provider.
     const auto& manifest{rc::CommittedRCProductionGoldenManifest()};
-    BOOST_CHECK(manifest.empty());
-    BOOST_CHECK(!rc::RCProductionGoldenManifestCohortValid(manifest));
-    BOOST_CHECK(rc::FindRCProductionGolden(Provider(), Epoch(), manifest) == nullptr);
+    BOOST_REQUIRE_EQUAL(manifest.size(), 2U);
+    BOOST_CHECK(rc::RCProductionGoldenManifestCohortValid(manifest));
+
+    const auto& a{manifest.front()};
+    const auto& b{manifest.back()};
+    // One cuda entry and one metal entry -- the two-provider requirement cannot
+    // be satisfied by naming one vendor's silicon twice.
+    BOOST_CHECK(a.provider_class.provider_family != b.provider_class.provider_family);
+    // Same freeze on both halves. This is the equivalence rule that every
+    // earlier corpus in this branch failed; digest equality alone never was it.
+    BOOST_CHECK_EQUAL(a.source_revision, b.source_revision);
+    BOOST_CHECK_EQUAL(a.source_tree_fingerprint, b.source_tree_fingerprint);
+    // Same workload...
+    BOOST_CHECK_EQUAL(a.header_nonce, b.header_nonce);
+    BOOST_CHECK(a.expected_digest == b.expected_digest);
+    // ...but genuinely distinct binaries, one per architecture.
+    BOOST_CHECK(a.harness_sha256 != b.harness_sha256);
+    for (const auto& entry : manifest) {
+        BOOST_CHECK(entry.independently_reproduced);
+    }
 }
 
 BOOST_AUTO_TEST_CASE(parameter_interaction_is_accelerator_runtime_probe_free)

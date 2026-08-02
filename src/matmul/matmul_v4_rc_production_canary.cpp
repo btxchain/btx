@@ -401,12 +401,77 @@ std::string ReadPublicSysctlString(const char* name)
 const std::vector<RCProductionGoldenManifestEntry>&
 CommittedRCProductionGoldenManifest()
 {
-    // Historical CUDA/Metal artifacts used different source revisions. Keep
-    // production authorization fail-closed until both providers reproduce the
-    // hardened, revision- and binary-bound corpus from one reviewed code freeze.
-    // The activation/evidence commit may populate this vector only after
-    // multi-gpu-golden-corpus.sh reports complete_multi_gpu_match=true.
-    static const std::vector<RCProductionGoldenManifestEntry> manifest{};
+    // POPULATED for the Epoch-A activation at mainnet height 181'894.
+    //
+    // Precondition satisfied: contrib/matmul-v4/multi-gpu-golden-corpus.sh
+    // reported complete_multi_gpu_match=true for CUDA and Metal reproduced from
+    // ONE code freeze -- the same source_revision AND the same build-relevant
+    // source_tree_fingerprint, which is what RCProductionGoldenManifestCohortValid
+    // requires and what every earlier corpus in this branch failed. Digest
+    // equality alone was never the gate.
+    //
+    // Evidence: doc/evidence/multi-gpu-profile1-goldens-cuda-metal-2026-08-03-sealed.
+    // Both providers independently reported 1'088 device calls and
+    // 1'129'198'441'725'952 device MACs with zero CPU GEMM calls, zero CPU MACs
+    // and zero fallbacks, and ExtractMX self-qualification PASS. All eight
+    // digests and all eight frozen header byte strings are byte-identical
+    // across providers, verified independently of the comparator script.
+    //
+    // The two entries deliberately share header_nonce, expected_digest, epoch,
+    // source_revision and source_tree_fingerprint, and differ only in
+    // provider_class and harness_sha256: that is exactly the cohort shape the
+    // validator enforces (one cuda entry, one metal entry, distinct provider
+    // classes, identical workload and provenance).
+    //
+    // ANY_ACTIVATION_HEIGHT is correct here: the frozen canary header and the
+    // Profile-1 transcript do not depend on the activation height, and runtime
+    // capabilities still bind the real height separately.
+    static const std::vector<RCProductionGoldenManifestEntry> manifest{
+        RCProductionGoldenManifestEntry{
+            .id = "epoch-a-profile1-cuda-sm120-nonce1",
+            .provider_class = {.provider_family = "cuda",
+                               .device_architecture = "sm_120"},
+            .epoch = {.activation_height =
+                          RCProductionEpochIdentity::ANY_ACTIVATION_HEIGHT,
+                      .profile = 1,
+                      .transcript_version = kRCTranscriptVersion,
+                      .matmul_dimension = 4096,
+                      .params = DefaultConsensusRCEpisodeParams()},
+            .header_nonce = 1,
+            .expected_digest = uint256{
+                "b4777985d4f2621d0b9c119f4188ac7d80158fc92560ade96cc7a3fd8cfae953"},
+            .independently_reproduced = true,
+            .public_provenance =
+                "doc/evidence/multi-gpu-profile1-goldens-cuda-metal-2026-08-03-sealed",
+            .source_revision = "78a88af5f5775a37388aa2281f602a77a5afc68b",
+            .source_tree_fingerprint =
+                "41a071900c855ce8cba0930114e7ecded689684da500ffd35ed0b5244369c1ed",
+            .harness_sha256 =
+                "50e7141d341cfb608fde7d73660848191bf8b6f1ba870b4bdcd2e4a0959a9d1a",
+        },
+        RCProductionGoldenManifestEntry{
+            .id = "epoch-a-profile1-metal-m4-nonce1",
+            .provider_class = {.provider_family = "metal",
+                               .device_architecture = "m4_class"},
+            .epoch = {.activation_height =
+                          RCProductionEpochIdentity::ANY_ACTIVATION_HEIGHT,
+                      .profile = 1,
+                      .transcript_version = kRCTranscriptVersion,
+                      .matmul_dimension = 4096,
+                      .params = DefaultConsensusRCEpisodeParams()},
+            .header_nonce = 1,
+            .expected_digest = uint256{
+                "b4777985d4f2621d0b9c119f4188ac7d80158fc92560ade96cc7a3fd8cfae953"},
+            .independently_reproduced = true,
+            .public_provenance =
+                "doc/evidence/multi-gpu-profile1-goldens-cuda-metal-2026-08-03-sealed",
+            .source_revision = "78a88af5f5775a37388aa2281f602a77a5afc68b",
+            .source_tree_fingerprint =
+                "41a071900c855ce8cba0930114e7ecded689684da500ffd35ed0b5244369c1ed",
+            .harness_sha256 =
+                "cd24b64ea6d46b43ffa2d864c13837a68d79b2460d20bc8d2ebb9902917ae652",
+        },
+    };
     return manifest;
 }
 
