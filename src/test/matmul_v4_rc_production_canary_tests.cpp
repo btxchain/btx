@@ -31,7 +31,7 @@ rc::RCProductionProviderIdentity Provider()
 {
     rc::RCProductionProviderIdentity out;
     out.provider_family = "cuda";
-    out.device_architecture = "sm_test";
+    out.device_architecture = "sm_120";
     out.driver_identity = "12080";
     out.runtime_identity = "12080";
     out.complete = true;
@@ -56,7 +56,7 @@ rc::RCProductionGoldenManifestEntry Golden()
     out.id = "unit-test-only";
     out.provider_class = {
         .provider_family = "cuda",
-        .device_architecture = "sm_test",
+        .device_architecture = "sm_120",
     };
     out.epoch = Epoch();
     out.header_nonce = 17;
@@ -76,7 +76,7 @@ std::vector<rc::RCProductionGoldenManifestEntry> GoldenCohort()
     metal.id = "unit-test-metal";
     metal.provider_class = {
         .provider_family = "metal",
-        .device_architecture = "m4_test",
+        .device_architecture = "m4_class",
     };
     return {cuda, metal};
 }
