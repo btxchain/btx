@@ -1,6 +1,6 @@
 {
   "evidence_kind": "multi_gpu_profile1_exactreplay_golden_compare",
-  "tip_sha": "602a9d08facf1bcbb8e32834c6b74bfd92412040",
+  "tip_sha": "a0d441e1f1ab5376cd98b0d7effe1506cf2cfed1",
   "source_tree_fingerprint": "4649ffd436459622ea2be55fa34c0ee4877ee8c69760db5f21d6f805f2e98483",
   "canary_nonce_start": 1,
   "backends_requested": [
@@ -26,7 +26,7 @@
       "raw": "profile1-cuda-8.json",
       "all_consensus_macs_on_device": true,
       "cpu_gemm_fallbacks": 0,
-      "source_revision": "602a9d08facf1bcbb8e32834c6b74bfd92412040",
+      "source_revision": "a0d441e1f1ab5376cd98b0d7effe1506cf2cfed1",
       "source_tree_fingerprint": "4649ffd436459622ea2be55fa34c0ee4877ee8c69760db5f21d6f805f2e98483",
       "harness_sha256": "e50e08ca1e19e539063250d28e9b563163f9e4656926f9961b824f535ad28df4",
       "provider": "cuda_rc_exact_fused_extract",
@@ -55,7 +55,7 @@
       "raw": "profile1-metal-8.json",
       "all_consensus_macs_on_device": true,
       "cpu_gemm_fallbacks": 0,
-      "source_revision": "602a9d08facf1bcbb8e32834c6b74bfd92412040",
+      "source_revision": "a0d441e1f1ab5376cd98b0d7effe1506cf2cfed1",
       "source_tree_fingerprint": "4649ffd436459622ea2be55fa34c0ee4877ee8c69760db5f21d6f805f2e98483",
       "harness_sha256": "8bd1c7438a23b79f6aa05644390d6cb4e8d000f0fa214d1116d1b62f146dff7f",
       "provider": "metal_int8_mpp_tensorops_fused_extract",

@@ -19,7 +19,7 @@ coverage, and zero CPU GEMM fallbacks.
 | HIP | AMD/ROCm | 0 | unavailable | unavailable | optional/not authorized |
 
 The Metal corpus was rerun from source revision
-`bc5f5733867a704185b4f114bf24f56256ad09dd` with provider
+`42b66394846caea8573e910e41fd9676838562db` with provider
 `metal_int8_mpp_tensorops_fused_extract`. Its mean wall time was approximately
 28.19 seconds per production ExactReplay across the eight headers.
 
