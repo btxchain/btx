@@ -2,6 +2,19 @@
 # PR #89 consumer-Blackwell CUDA architecture matrix (plain sm_120 vs sm_120a).
 # Historical build matrix only; not MatMul v4.7 Epoch-A performance evidence.
 set -euo pipefail
+
+# A help request must never mutate repository state. This script takes no
+# arguments and previously ignored --help entirely, proceeding straight to
+# `git fetch` / `git worktree add` / `git checkout --detach` and a full build.
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  sed -n '2,30p' "$0"
+  exit 0
+fi
+if [[ $# -gt 0 ]]; then
+  echo "run-sm120-cuda-matrix.sh: takes no arguments (got: $*)" >&2
+  exit 2
+fi
+
 export PATH=/usr/local/cuda/bin:/usr/bin:${PATH:-}
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SRC="${BTX_SRC:-$(git -C "$SCRIPT_DIR/../.." rev-parse --show-toplevel)}"

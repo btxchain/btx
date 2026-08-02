@@ -7,6 +7,14 @@
 # Does NOT raise activation heights. Does NOT claim peak_ready.
 set -euo pipefail
 
+# Without this, `--help` is taken as the output path and the script writes a
+# JSON file literally named "--help" into the working directory.
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  echo "Usage: v45-v3-campaign-sample.sh [OUT_JSON]" >&2
+  exit 0
+fi
+
+
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT="${1:-/tmp/btx-v45-v3-sample.json}"
 COMMIT="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"

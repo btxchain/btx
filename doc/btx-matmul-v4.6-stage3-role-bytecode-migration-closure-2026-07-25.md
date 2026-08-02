@@ -31,7 +31,7 @@ Source files (mirror, read-only study basis):
   value + 32 bit columns).
 - `src/matmul/matmul_v4_rc_stage3_coupled_air.h` — challenge inputs
   (γ, α ∈ Fp3) of the coupled kernels.
-- Caps: `kRCFri3AlgBatchMaxColumns = 2^14`, `kConstraintBytecodeMaxInstructions
+- Caps: `kRCFri3AlgBatchMaxColumns = 2^20`, `kConstraintBytecodeMaxInstructions
   = 2^20`, `kRCFriBlowup = 16`, `kRCFriMaxLdeLog2 = 24`, |Fp| = 2^64−2^32+1
   (Goldilocks), |Fp3| ≈ 2^191.99.
 

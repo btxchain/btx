@@ -163,7 +163,7 @@ def mirror_rpc(*args: str, timeout: int = 120):
 
 def archive_rpc(*args: str, timeout: int = 120):
     # Escape for remote shell
-    joined = " ".join(json.dumps(a) for a in args)
+    joined = " ".join(shlex.quote(a) for a in args)
     cmd = (
         f"{shlex.quote(ARCHIVE_CLI)} -datadir={shlex.quote(ARCHIVE_DD)} "
         f"-rpcport={ARCHIVE_RPC} "

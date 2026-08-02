@@ -599,7 +599,13 @@ cleanup() {
   release_gpu_lock
   event "cleanup end"
 }
-trap cleanup EXIT
+
+# The trap is installed only AFTER the GPU lock is held. Installed before, a
+# losing invocation -- one that exits because ANOTHER campaign already holds the
+# lock -- would run cleanup against that campaign's shared state: stop its two
+# nodes, rm -rf its runtime dir, and overwrite its status JSON with "failed".
+# The contended case is precisely the case that must be harmless.
+install_cleanup_trap() { trap cleanup EXIT; }
 
 PORT_A="${BASE_PORT}"
 PORT_B="$((BASE_PORT + 1))"
@@ -610,6 +616,7 @@ SOAK_START_EPOCH="$(now_epoch)"
 END_EPOCH=$(( SOAK_START_EPOCH + DURATION_SECS ))
 
 acquire_gpu_lock
+install_cleanup_trap
 write_status "running" "acquired gpu.lock; starting two-node Profile-1 soak"
 event "soak start duration_secs=${DURATION_SECS} rc_height=${RC_HEIGHT} v4_dim=${V4_DIM}"
 
