@@ -9316,7 +9316,28 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             }
             peer->m_matmul_rcadmit_recv_last_refill = now_bucket;
             if (peer->m_matmul_rcadmit_recv_tokens < 1.0) {
-                Misbehaving(*peer, "unknown rcadmit message rate exceeded");
+                // DROP, do not discourage. This bucket refills at one token per
+                // MATMUL_RCADMIT_RECV_REFILL with a maximum of
+                // MATMUL_RCADMIT_RECV_BUCKET_MAX, and a sidecar counts as
+                // "unknown" whenever the header has not reached our index yet
+                // -- which is the ORDINARY relay ordering, not an attack. Any
+                // honest peer producing or forwarding blocks faster than the
+                // refill rate therefore exhausted it and was discouraged and
+                // disconnected. Reproduced between honest regtest nodes: the
+                // miner was disconnected by its own peer mid-relay, which then
+                // could not sync at all.
+                //
+                // Dropping is sufficient because the resource this protects is
+                // already bounded independently by the admission store's own
+                // caps (max_unknown_entries, max_unknown_entries_per_netgroup,
+                // max_unknown_candidates_per_hash,
+                // max_unknown_submissions_per_netgroup). Refusing to STORE the
+                // excess sidecar bounds memory exactly as before; the only
+                // behaviour removed is punishing the sender for it.
+                LogDebug(BCLog::NET,
+                         "dropping unknown rcadmit from peer=%d: recv bucket "
+                         "empty (store caps still bound memory)\n",
+                         pfrom.GetId());
                 return;
             }
             peer->m_matmul_rcadmit_recv_tokens -= 1.0;
@@ -9345,7 +9366,23 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             return;
         }
         if (result == node::RCAdmissionStore::RememberResult::RateLimited) {
-            Misbehaving(*peer, "rcadmit netgroup rate exceeded");
+            // DROP, do not discourage -- same reasoning as the recv bucket
+            // above. RateLimited means the store declined to allocate another
+            // entry for this netgroup, which is exactly the memory bound doing
+            // its job; the sidecar is already not stored. Punishing the sender
+            // on top of that disconnects honest miners and relayers whenever
+            // blocks arrive faster than the per-netgroup allowance, which is
+            // ordinary behaviour during a mining burst, a reorg, or catch-up
+            // relay. Reproduced between honest regtest nodes: the miner was
+            // discouraged by its own peer and the topology fell apart.
+            //
+            // Genuinely abusive sidecars are still punished: an INVALID ticket
+            // for a known header is Misbehaving immediately above, and that is
+            // the case that cannot be produced by an honest peer.
+            LogDebug(BCLog::NET,
+                     "dropping rcadmit from peer=%d: netgroup allowance "
+                     "reached (store caps still bound memory)\n",
+                     pfrom.GetId());
             return;
         }
         LogDebug(BCLog::NET,
