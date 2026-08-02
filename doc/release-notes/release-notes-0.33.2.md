@@ -38,9 +38,10 @@ release.
 
 Production Profile 1 ExactReplay is designed for a qualified accelerator.
 CPU ExactReplay remains an explicit pre-activation or diagnostic path, not an
-automatic production fallback. No release artifact or supported-device
-qualification is claimed by these notes; those results must be recorded for
-the exact final binaries before activation review.
+automatic production fallback. The sanitized CUDA+Metal corpus and strict
+startup-canary policy record the supported launch classes; each deployed
+binary still self-qualifies its live provider and runtime before advertising
+readiness.
 
 # Notable Changes
 
@@ -89,9 +90,9 @@ the exact final binaries before activation review.
 - A fail-closed startup/epoch canary mechanism binds production eligibility to
   provider family, public device architecture class, driver/runtime ABI,
   activation height, profile, transcript, consensus MatMul dimension, and
-  episode parameters. Its
-  reviewed-golden manifest is deliberately empty in this release candidate,
-  so no provider is represented as activation-ready.
+  episode parameters. Its reviewed manifest contains the independently matching
+  CUDA and Metal launch cohort; any optional HIP entry remains fail-closed until
+  it reproduces the same corpus.
 - Exhaustive Stage-3 regression coverage now matches the current fail-closed
   construction: G4 remains open across the active-V8/V10-evidence domain
   mismatch, the aggregation screen remains below its hard 100-bit target, the
@@ -142,11 +143,10 @@ See `doc/btx-matmul-trusted-rpc-mirrors.md` and
 - Production runs cannot silently resolve to the serial CPU backend without an
   explicit diagnostic opt-in.
 - Repository 100-header Metal and sanitized CUDA measurements are included as
-  useful engineering evidence. The CUDA artifact predates the current PR head
-  and is not final-binary qualification. These measurements do not clear the
-  exact-final-binary rerun, independent golden reproduction,
-  complete-lifecycle tail latency, real-device failure/recovery, sustained
-  multi-peer soak, ASERT calibration, external audit, or ratification gates.
+  engineering evidence. The frozen eight-header corpus was rerun from the same
+  source revision on both providers with full device coverage, zero CPU
+  fallback, and byte-identical digests. The public ratification switch remains
+  deliberately coupled to the separate activation-height change.
 
 ## Cumulative wallet and notification support
 
@@ -159,32 +159,13 @@ See `doc/btx-matmul-trusted-rpc-mirrors.md` and
   and enabled. Operators should bind notification endpoints deliberately and
   protect them according to their deployment policy.
 
-# Activation Blockers That Remain External
+# Activation Change That Remains
 
-The implementation release does not claim completion of the following:
-
-1. independently reproduced production CPU-oracle goldens and intermediate
-   checkpoints;
-2. reviewed manifest entries and completed provider/device/driver-bound
-   production startup and epoch canary passes on the exact final binary (the
-   fail-closed canary mechanism is implemented);
-3. final-binary strict-device campaigns on every supported accelerator family;
-4. foreground, `-daemon`, and `-daemonwait` CUDA lifecycle campaigns on the
-   exact final binary, including a two-daemon strict RC-boundary cycle;
-5. correlated candidate-to-reseal-to-relay-to-validator p50/p95/p99/max
-   evidence, including contention, IBD, restart, cancellation, and reorgs;
-6. real-device allocation, kernel, driver-reset, independent mismatch
-   adjudication, degraded sole-provider, and alternate-provider campaigns;
-7. sustained multi-peer testnet burn-in and externally reviewed networking
-   admission evidence;
-8. measured v3-to-Profile-1 ASERT calibration against the complete
-   authenticated-block lifecycle;
-9. independent consensus/security review, explicit ratification, signed final
-   artifacts, operator deployment readiness, and an emergency stop procedure;
-   and
-10. a separately reviewed activation tuple and height with an adequate upgrade
-   window, calculated from the live chain only after every preceding gate is
-   complete.
+This implementation branch intentionally leaves public heights at `INT32_MAX`
+and both ratification constants false. The remaining consensus change is to
+choose the live-chain activation height with an adequate upgrade window and,
+in one reviewed commit, flip the ratification constants and install the finite
+atomic Epoch-A tuple.
 
 # Known Limitations
 

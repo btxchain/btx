@@ -125,8 +125,8 @@ class Node:
             "-bind=127.0.0.1",
             # noban must be explicit (implicit whitelist omits it). Without it,
             # consensus-mode sync refuses block download from peers that do not
-            # advertise NODE_MATMUL_CONSENSUS — and that bit stays off while the
-            # production golden manifest is empty (canary=missing_golden).
+            # advertise NODE_MATMUL_CONSENSUS. Keeping noban explicit also lets
+            # pre-manifest and negative-canary builds exercise relay behavior.
             "-whitelist=noban,in,out@127.0.0.1",
             "-peertimeout=30",
             "-miningminoutboundpeers=0",

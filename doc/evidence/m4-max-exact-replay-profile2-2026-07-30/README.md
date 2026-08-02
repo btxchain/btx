@@ -28,7 +28,7 @@ The harness command was:
   --production \
   --backend metal \
   --episodes 1 \
-  --out /tmp/matmul-v4-profile2-r8.json
+  --out profile2-result.json
 ```
 
 `--production` now selects Profile 2. The explicitly named

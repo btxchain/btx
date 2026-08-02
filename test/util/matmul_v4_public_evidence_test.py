@@ -79,6 +79,16 @@ class PublicEvidencePrivacyTest(unittest.TestCase):
             failures = MODULE.check_file(path)
             self.assertTrue(any("mDNS hostname" in failure for failure in failures))
 
+    def test_complete_committed_publication_set_is_clean(self) -> None:
+        files = list(MODULE.evidence_files(MODULE.DEFAULT_PATHS))
+        self.assertGreater(len(files), 50)
+        failures = [
+            failure
+            for path in files
+            for failure in MODULE.check_file(path)
+        ]
+        self.assertEqual(failures, [])
+
 
 if __name__ == "__main__":
     unittest.main()

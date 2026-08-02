@@ -54,7 +54,10 @@ rc::RCProductionGoldenManifestEntry Golden()
 {
     rc::RCProductionGoldenManifestEntry out;
     out.id = "unit-test-only";
-    out.provider = Provider();
+    out.provider_class = {
+        .provider_family = "cuda",
+        .device_architecture = "sm_test",
+    };
     out.epoch = Epoch();
     out.header_nonce = 17;
     out.expected_digest = NonNullDigest(0x42);
@@ -63,12 +66,31 @@ rc::RCProductionGoldenManifestEntry Golden()
     return out;
 }
 
+std::vector<rc::RCProductionGoldenManifestEntry> GoldenCohort()
+{
+    auto cuda{Golden()};
+    auto metal{Golden()};
+    metal.id = "unit-test-metal";
+    metal.provider_class = {
+        .provider_family = "metal",
+        .device_architecture = "m4_test",
+    };
+    return {cuda, metal};
+}
+
 } // namespace
 
-BOOST_AUTO_TEST_CASE(committed_manifest_is_explicitly_fail_closed)
+BOOST_AUTO_TEST_CASE(committed_manifest_contains_reviewed_cuda_metal_goldens)
 {
     const auto& manifest{rc::CommittedRCProductionGoldenManifest()};
-    BOOST_CHECK(manifest.empty());
+    BOOST_REQUIRE_EQUAL(manifest.size(), 2U);
+    BOOST_CHECK_EQUAL(manifest[0].provider_class.provider_family, "cuda");
+    BOOST_CHECK_EQUAL(manifest[1].provider_class.provider_family, "metal");
+    BOOST_CHECK_EQUAL(manifest[0].expected_digest.GetHex(),
+                      manifest[1].expected_digest.GetHex());
+    BOOST_CHECK(manifest[0].independently_reproduced);
+    BOOST_CHECK(manifest[1].independently_reproduced);
+    BOOST_CHECK(rc::RCProductionGoldenManifestCohortValid(manifest));
     BOOST_CHECK(rc::FindRCProductionGolden(Provider(), Epoch(), manifest) == nullptr);
 }
 
@@ -124,14 +146,15 @@ BOOST_AUTO_TEST_CASE(provider_identity_probe_is_public_and_fail_closed)
 #endif
 }
 
-BOOST_AUTO_TEST_CASE(manifest_match_binds_provider_runtime_and_epoch)
+BOOST_AUTO_TEST_CASE(manifest_match_binds_provider_class_and_workload)
 {
-    const std::vector<rc::RCProductionGoldenManifestEntry> manifest{Golden()};
+    const auto manifest{GoldenCohort()};
     BOOST_REQUIRE(rc::FindRCProductionGolden(Provider(), Epoch(), manifest) != nullptr);
 
     auto provider{Provider()};
     provider.runtime_identity = "12090";
-    BOOST_CHECK(rc::FindRCProductionGolden(provider, Epoch(), manifest) == nullptr);
+    BOOST_CHECK(rc::FindRCProductionGolden(provider, Epoch(), manifest) != nullptr);
+    BOOST_CHECK(!rc::RCProductionProviderIdentityMatches(Provider(), provider));
     provider = Provider();
     provider.device_architecture = "sm_other";
     BOOST_CHECK(!rc::RCProductionProviderIdentityMatches(Provider(), provider));
@@ -140,6 +163,13 @@ BOOST_AUTO_TEST_CASE(manifest_match_binds_provider_runtime_and_epoch)
     auto epoch{Epoch()};
     ++epoch.activation_height;
     BOOST_CHECK(rc::FindRCProductionGolden(Provider(), epoch, manifest) == nullptr);
+    auto height_independent{GoldenCohort()};
+    for (auto& entry : height_independent) {
+        entry.epoch.activation_height =
+            rc::RCProductionEpochIdentity::ANY_ACTIVATION_HEIGHT;
+    }
+    BOOST_CHECK(rc::FindRCProductionGolden(
+        Provider(), epoch, height_independent) != nullptr);
     epoch = Epoch();
     ++epoch.matmul_dimension;
     BOOST_CHECK(rc::FindRCProductionGolden(Provider(), epoch, manifest) == nullptr);
@@ -199,6 +229,26 @@ BOOST_AUTO_TEST_CASE(duplicate_exact_manifest_authority_fails_closed)
     const std::vector<rc::RCProductionGoldenManifestEntry> manifest{
         golden, golden};
     BOOST_CHECK(rc::FindRCProductionGolden(Provider(), Epoch(), manifest) == nullptr);
+}
+
+BOOST_AUTO_TEST_CASE(golden_cohort_rejects_missing_or_divergent_backend)
+{
+    auto cohort{GoldenCohort()};
+    BOOST_CHECK(rc::RCProductionGoldenManifestCohortValid(cohort));
+    BOOST_CHECK(!rc::RCProductionGoldenManifestCohortValid({cohort[0]}));
+
+    auto divergent{cohort};
+    divergent[1].expected_digest = NonNullDigest(0x43);
+    BOOST_CHECK(!rc::RCProductionGoldenManifestCohortValid(divergent));
+    divergent = cohort;
+    ++divergent[1].header_nonce;
+    BOOST_CHECK(!rc::RCProductionGoldenManifestCohortValid(divergent));
+    divergent = cohort;
+    ++divergent[1].epoch.params.b_seq;
+    BOOST_CHECK(!rc::RCProductionGoldenManifestCohortValid(divergent));
+    divergent = cohort;
+    divergent[1].provider_class = divergent[0].provider_class;
+    BOOST_CHECK(!rc::RCProductionGoldenManifestCohortValid(divergent));
 }
 
 BOOST_AUTO_TEST_CASE(canary_result_requires_full_device_coverage_and_exact_digest)

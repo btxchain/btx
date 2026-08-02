@@ -47,6 +47,21 @@ static constexpr size_t MAX_SHIELDED_TX_RELAY_BYTES_PER_SECOND{500'000};
 /** Maximum getshieldeddata requests accepted per peer each second. */
 static constexpr size_t MAX_SHIELDEDDATA_REQUESTS_PER_SECOND{8};
 
+/** Whether scarce per-peer block-download capacity may be assigned to the
+ * assumeutxo background chain. The active snapshot chain must first be out of
+ * IBD and within one block of the best known header; the IBD latch alone can
+ * clear based on chainwork and tip age while a fresh snapshot is still behind. */
+constexpr bool ShouldFetchBackgroundSnapshotBlocks(
+    bool background_sync,
+    bool limited_peer,
+    bool initial_block_download,
+    int active_height,
+    int best_header_height)
+{
+    return background_sync && !limited_peer && !initial_block_download &&
+        best_header_height >= 0 && active_height >= best_header_height - 1;
+}
+
 struct CNodeStateStats {
     int nSyncHeight = -1;
     int nCommonHeight = -1;

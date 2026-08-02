@@ -13,12 +13,8 @@ from typing import Any, Iterable
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_PATHS = (
-    REPO_ROOT / "doc/evidence/cuda-blackwell-16gib-profile1-loaded-2026-07-30",
-    REPO_ROOT / "doc/evidence/cuda-blackwell-16gib-profile1-loaded-2026-08-01",
-    REPO_ROOT / "doc/evidence/cuda-blackwell-16gib-profile1-goldens-2026-08-01",
-    REPO_ROOT / "doc/evidence/m4-max-profile1-loaded-2026-07-30",
-    REPO_ROOT / "doc/evidence/multi-gpu-profile1-goldens-2026-08-01",
-    REPO_ROOT / "doc/evidence/multi-gpu-profile1-goldens-metal-2026-08-01",
+    REPO_ROOT / "doc/evidence",
+    REPO_ROOT / "contrib/matmul-v4/two-node-trusted-mirror-rehearsal.py",
 )
 
 # Public evidence may name an OS and hardware *class*. It must not carry the
@@ -105,7 +101,7 @@ def main() -> int:
         "paths",
         nargs="*",
         type=Path,
-        help="Evidence files or directories (defaults to the committed Profile-1 campaigns)",
+        help="Evidence files or directories (defaults to every committed evidence artifact and publication helper)",
     )
     args = parser.parse_args()
 

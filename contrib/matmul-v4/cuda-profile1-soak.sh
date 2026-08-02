@@ -522,7 +522,7 @@ counts_json() {
   "restart": int(os.environ.get("C_RESTART","0")),
   "cache_persist": int(os.environ.get("C_CACHE","0")),
   "ibd_boundary": int(os.environ.get("C_IBD","0")),
-}))' 
+}))'
 }
 
 # Wrapper that exports counts for counts_json

@@ -3,7 +3,7 @@
   "snapshot_type": "rollback",
   "cli_path": "/path/to/btx-cli",
   "rpc_args": [
-    "-datadir=/path/to/btx-data"
+    "-datadir=<redacted>"
   ],
   "snapshot": {
     "height": 176600,
