@@ -1,8 +1,8 @@
 # Multi-GPU Profile-1 ExactReplay golden compare
 
-Status: **CUDA + Metal match; HIP pending**. Ratification gates remain false,
-the production golden manifest remains empty, and public Epoch-A heights remain
-disabled.
+Status: **complete required CUDA + Metal match**. The reviewed production
+golden manifest is populated. Public ratification remains deliberately coupled
+to the separate activation-height commit, so Epoch-A heights remain disabled.
 
 ## Result
 
@@ -15,27 +15,32 @@ coverage, and zero CPU GEMM fallbacks.
 | --- | --- | ---: | --- | ---: | --- |
 | CUDA | Blackwell-class discrete GPU, 16 GiB | 8 | true | 0 | matches |
 | Metal | Apple Silicon M4 Max-class | 8 | true | 0 | matches |
-| HIP | AMD/ROCm | 0 | unavailable | unavailable | blocking |
+| HIP | AMD/ROCm | 0 | unavailable | unavailable | optional/not authorized |
 
-The Metal corpus was produced from source revision
-`9dd88b8e54d92a848c4006aa9affca2ab3e0c91c` with provider
+The Metal corpus was rerun from source revision
+`bc5f5733867a704185b4f114bf24f56256ad09dd` with provider
 `metal_int8_mpp_tensorops_fused_extract`. Its mean wall time was approximately
-28.08 seconds per production ExactReplay across the eight headers.
+28.19 seconds per production ExactReplay across the eight headers.
 
-The original CUDA raw artifact did not embed a source revision. Its companion
-CUDA corpus records the matching digest set at the earlier reviewed PR tip.
-Consequently this result clears the Metal cross-provider reproduction item but
-does not replace the exact-final-binary campaign required before activation.
+The original CUDA raw artifact's missing revision field was recovered from its
+byte-identical companion summary, which records revision
+`c4ac2e439ac496245f12dcbf8b42c9575247dbe9`. Public provider identity is bound
+to CUDA architecture class `sm_120`; runtime readiness still reruns the full
+canary and binds the live driver/runtime. The comparator requires non-unknown
+provenance, complete public provider identities, full device coverage, and zero
+fallback for both entries.
 
 ## Policy
 
-Epoch-A production goldens require cross-GPU-backend CUDA, Metal, and HIP
-ExactReplay on identical frozen canary headers. Portable CPU ExactReplay is not
-accepted as an independent production-golden backend.
+Epoch-A production goldens require the two independent launch implementations,
+CUDA and Metal, to run ExactReplay on identical frozen canary headers. Portable
+CPU ExactReplay is not accepted as an independent production-golden backend.
+HIP is optional; any HIP entry must match this corpus before it is authorized.
 
-`complete_multi_gpu_match` remains false until a qualifying HIP run matches the
-same corpus. Do not populate `CommittedRCProductionGoldenManifest()` before the
-complete three-backend result and final-binary review.
+`complete_multi_gpu_match` is true for the required cohort, with no header,
+dimension, nonce, digest, provider-identity, or coverage mismatch. The manifest
+uses nonce 1 for the startup replay while this artifact retains all eight
+cross-provider records.
 
 ## Artifacts
 

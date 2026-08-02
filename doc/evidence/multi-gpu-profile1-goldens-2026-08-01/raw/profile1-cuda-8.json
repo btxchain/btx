@@ -30,8 +30,8 @@
     "deficit_reason": "",
     "native_declined": false
   },
-  "source_revision": "unknown",
-  "git_tip": "unknown",
+  "source_revision": "c4ac2e439ac496245f12dcbf8b42c9575247dbe9",
+  "git_tip": "c4ac2e439ac496245f12dcbf8b42c9575247dbe9",
   "peak_rss_kib": 4529388,
   "run_variance": {
     "episode_cv": 0.002809842176786805,
@@ -425,5 +425,13 @@
   },
   "gpu_campaign_present": true,
   "nvlink_campaign_present": false,
-  "consensus_note": "nMatMulRCHeight remains INT32_MAX; ENC_RC activation is NO-GO. This harness never recommends raising consensus height. Projections/MAC estimates are NOT EVIDENCE for rc-gate GO. Cross-host Metal and datacenter campaigns remain Stage G blockers."
+  "consensus_note": "nMatMulRCHeight remains INT32_MAX; ENC_RC activation is NO-GO. This harness never recommends raising consensus height. Projections/MAC estimates are NOT EVIDENCE for rc-gate GO. Cross-host Metal and datacenter campaigns remain Stage G blockers.",
+  "production_provider_identity": {
+    "provider_family": "cuda",
+    "device_architecture": "sm_120",
+    "driver_identity": "13020",
+    "runtime_identity": "13030",
+    "complete": true,
+    "reason": "cuda_runtime_identity_complete"
+  }
 }
