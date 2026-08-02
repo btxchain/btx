@@ -22,8 +22,8 @@
 #
 # --- ENC_RC episode harness ---
 #
-#   contrib/matmul-v4/measure-hardware.sh cpu rc --toy --out <redacted-temporary-path>
-#   contrib/matmul-v4/rc-gate.py <redacted-temporary-path> --out <redacted-temporary-path>
+#   contrib/matmul-v4/measure-hardware.sh cpu rc --toy --out <report.json>
+#   contrib/matmul-v4/rc-gate.py <report.json> --out <summary.json>
 #
 # --- Stage G campaign profiles (same-tip, multi-run, rc-gate schema) ---
 #
@@ -218,7 +218,7 @@ if [ "$RC_MODE" -eq 1 ]; then
       prev="$a"
     done
     if [ -z "$OUT_ARG" ]; then
-      OUT_ARG="<redacted-temporary-path>"
+      OUT_ARG="${TMPDIR:-/tmp}/stage-g-campaign-${STAGE_G_PROFILE}.json"
     fi
     set +e
     python3 "$ROOT/contrib/matmul-v4/rc-stage-g-campaign.py" \

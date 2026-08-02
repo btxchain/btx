@@ -15,6 +15,14 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_PATHS = (
     REPO_ROOT / "doc/evidence",
     REPO_ROOT / "contrib/matmul-v4/two-node-trusted-mirror-rehearsal.py",
+    REPO_ROOT / "contrib/matmul-v4/cuda-profile1-soak.sh",
+    REPO_ROOT / "contrib/matmul-v4/evidence-provenance-exclusions.json",
+    REPO_ROOT / "contrib/matmul-v4/measure-hardware.sh",
+    REPO_ROOT / "contrib/matmul-v4/measure-cuda-lifecycle-campaign.py",
+    REPO_ROOT / "contrib/matmul-v4/multi-gpu-golden-corpus.sh",
+    REPO_ROOT / "contrib/matmul-v4/sanitize-public-evidence.py",
+    REPO_ROOT / "contrib/matmul-v4/verify-evidence-provenance.py",
+    REPO_ROOT / "contrib/devtools/update-matmul-v47-doc-inventory.sh",
 )
 
 # Public evidence may name an OS and hardware *class*. It must not carry the

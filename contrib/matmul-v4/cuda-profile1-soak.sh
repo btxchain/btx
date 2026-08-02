@@ -12,16 +12,16 @@
 # flip ratification constants.
 #
 # Typical resume (after higher-priority campaign agents release the GPU):
-#   mkdir -p <redacted-temporary-path>
+#   mkdir -p <temporary-dir>/logs/soak
 #   nohup env \
 #     BTX_SOAK_DURATION_SECS=14400 \
-#     BTX_SOAK_LOG_DIR=<redacted-temporary-path> \
-#     BTX_SOAK_STATUS_JSON=<redacted-temporary-path> \
-#     BTX_SOAK_GPU_LOCK=<redacted-temporary-path> \
+#     BTX_SOAK_LOG_DIR=<temporary-dir>/logs/soak \
+#     BTX_SOAK_STATUS_JSON=<temporary-dir>/status/soak.json \
+#     BTX_SOAK_GPU_LOCK=<temporary-dir>/locks/gpu.lock \
 #     BTX_BUILD_DIR="$PWD/build-cuda" \
 #     ./contrib/matmul-v4/cuda-profile1-soak.sh \
-#     > <redacted-temporary-path> 2>&1 &
-#   echo $! > <redacted-temporary-path>
+#     > <temporary-dir>/logs/soak/nohup.out 2>&1 &
+#   echo $! > <temporary-dir>/logs/soak/soak.pid
 #
 # Logs destined for public evidence must stay sanitized: no hostname, username,
 # or home-directory paths. Runtime status under /tmp may include local paths.
@@ -33,6 +33,7 @@ export LC_ALL=C
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+PUBLIC_EVIDENCE_SANITIZER="${ROOT}/contrib/matmul-v4/sanitize-public-evidence.py"
 BUILD_DIR="${BTX_BUILD_DIR:-${ROOT}/build-cuda}"
 BTXD="${BTX_BTXD:-${BUILD_DIR}/bin/btxd}"
 BTXCLI="${BTX_BTXCLI:-${BUILD_DIR}/bin/btx-cli}"
@@ -65,10 +66,11 @@ V3_BINDING_HEIGHT=2
 RPC_USER="${BTX_SOAK_RPC_USER:-soak_cuda}"
 RPC_PASS="${BTX_SOAK_RPC_PASS:-soak_cuda_password}"
 BASE_PORT="${BTX_SOAK_BASE_PORT:-18440}"
-WORKDIR="${BTX_SOAK_WORKDIR:-<redacted-temporary-path>"
-LOG_DIR="${BTX_SOAK_LOG_DIR:-<redacted-temporary-path>"
-STATUS_JSON="${BTX_SOAK_STATUS_JSON:-<redacted-temporary-path>"
-GPU_LOCK="${BTX_SOAK_GPU_LOCK:-<redacted-temporary-path>"
+CAMPAIGN_ROOT="${BTX_SOAK_CAMPAIGN_ROOT:-${TMPDIR:-/tmp}/btx-pr97-campaigns}"
+WORKDIR="${BTX_SOAK_WORKDIR:-${CAMPAIGN_ROOT}/logs/soak/runtime}"
+LOG_DIR="${BTX_SOAK_LOG_DIR:-${CAMPAIGN_ROOT}/logs/soak}"
+STATUS_JSON="${BTX_SOAK_STATUS_JSON:-${CAMPAIGN_ROOT}/status/soak.json}"
+GPU_LOCK="${BTX_SOAK_GPU_LOCK:-${CAMPAIGN_ROOT}/locks/gpu.lock}"
 REQUIRE_EXCLUSIVE="${BTX_SOAK_REQUIRE_EXCLUSIVE:-1}"
 KEEP_RUNTIME="${BTX_SOAK_KEEP_RUNTIME:-1}"
 
@@ -92,9 +94,9 @@ Env knobs (defaults shown):
   BTX_SOAK_MODE                 toy          # or production (dim 4096)
   BTX_SOAK_V4_DIM               128/4096 by mode
   BTX_SOAK_RC_HEIGHT            6
-  BTX_SOAK_LOG_DIR              <redacted-temporary-path>
-  BTX_SOAK_STATUS_JSON          <redacted-temporary-path>
-  BTX_SOAK_GPU_LOCK             <redacted-temporary-path>
+  BTX_SOAK_LOG_DIR              <temporary-dir>/logs/soak
+  BTX_SOAK_STATUS_JSON          <temporary-dir>/status/soak.json
+  BTX_SOAK_GPU_LOCK             <temporary-dir>/locks/gpu.lock
   BTX_SOAK_REQUIRE_EXCLUSIVE    1   # flock exclusive gpu.lock or refuse
   BTX_SOAK_KEEP_RUNTIME         1
 
@@ -152,34 +154,11 @@ release_gpu_lock() {
 now_iso() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 now_epoch() { date -u +%s; }
 
-# Held in a variable and passed with `python3 -c`, NOT as `python3 - <<PY`.
-# With `python3 -`, the interpreter reads its PROGRAM from stdin, so the piped
-# input this function is supposed to sanitize was consumed by the interpreter
-# and sys.stdin.read() always returned "". Every "sanitized" evidence file
-# (events.sanitized.log, metrics.sanitized.jsonl) was therefore written empty
-# while the gate appeared to pass.
-read -r -d '' SANITIZE_PY <<'PY' || true
-import os, re, sys
-line = sys.stdin.read() if not sys.argv[1:] else open(sys.argv[1], encoding="utf-8").read()
-home = os.path.expanduser("~")
-user = os.environ.get("USER") or os.environ.get("LOGNAME") or ""
-host = os.uname().nodename if hasattr(os, "uname") else ""
-for token in filter(None, [home, user, host]):
-    line = line.replace(token, "<redacted>")
-line = re.sub("/" + "ho" + r"me/[^/\s]+", "<redacted-home>", line)
-line = re.sub("/" + "Us" + r"ers/[^/\s]+", "<redacted-home>", line)
-# Additional hostnames to scrub, supplied by the operator at run time as a
-# comma-separated list. Deliberately NOT hard-coded: a redaction list that
-# names real machines publishes exactly what it exists to hide, which is what
-# the previous literal pattern here did.
-for extra in filter(None, (h.strip() for h in os.environ.get("BTX_SANITIZE_EXTRA_HOSTS", "").split(","))):
-    line = re.sub(re.escape(extra), "<host>", line, flags=re.I)
-sys.stdout.write(line)
-PY
-
 sanitize_line() {
-  # Strip home paths, usernames, and hostnames from lines copied into evidence.
-  python3 -c "${SANITIZE_PY}" "$@"
+  # Keep this independently testable. An earlier inline `python3 - <<PY`
+  # implementation consumed the piped evidence as interpreter input and
+  # silently emitted empty "sanitized" files.
+  python3 "${PUBLIC_EVIDENCE_SANITIZER}" "$@"
 }
 
 event() {

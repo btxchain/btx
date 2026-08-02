@@ -1,8 +1,10 @@
-# Final-code-freeze CUDA + Metal Profile-1 golden corpus
+# Historical CUDA + Metal Profile-1 golden corpus (`602a9d08…`)
 
-Status: **complete cohort — `complete_multi_gpu_match: true`, 0 mismatches,
-0 coverage failures.** This is the CUDA reproduction that the Metal-only corpus
-in `../multi-gpu-profile1-goldens-metal-2026-08-02-final/` was waiting on.
+Status: **internally complete for source revision `602a9d08…`, but stale for
+the current activation candidate. CUDA and Metal must both be rerun from the
+eventual final build-relevant tree.** The recorded comparison remains
+`complete_multi_gpu_match: true` with 0 mismatches and 0 coverage failures for
+its historical source revision.
 
 ## Policy
 
@@ -21,10 +23,13 @@ Both providers are bound to the same reviewed code freeze:
   (`git ls-tree -r --full-tree <rev> -- CMakeLists.txt cmake src | sha256sum`)
 
 The fingerprint was recomputed independently on the CUDA host and on a second
-machine before the run. It is unchanged at the branch tip, which is an
-evidence-only descendant — it touches nothing under `src/`, `cmake/`, or the
-root `CMakeLists.txt` — and is therefore equivalent under the rule in
-`doc/btx-matmul-v4.7-production-golden-policy.md`.
+machine before the run. Subsequent commits changed build-relevant files under
+`src/` (including consensus parameters, production-canary gating, networking,
+and validation). The branch tip therefore no longer has this fingerprint and
+is not equivalent under the rule in
+`doc/btx-matmul-v4.7-production-golden-policy.md`. Later fixes may be
+digest-neutral, but the policy intentionally does not infer that from a code
+review: changing any covered build-relevant file requires new provider runs.
 
 Harness binaries differ per provider, as expected:
 
@@ -33,7 +38,7 @@ Harness binaries differ per provider, as expected:
 | cuda | `e50e08ca1e19e539063250d28e9b563163f9e4656926f9961b824f535ad28df4` |
 | metal | `8bd1c7438a23b79f6aa05644390d6cb4e8d000f0fa214d1116d1b62f146dff7f` |
 
-## Result
+## Historical result
 
 Eight canonical 182-byte production canary headers, nonces 1 through 8,
 `matmul_dim=4096`. All eight ExactReplay digests are byte-identical across the
@@ -59,19 +64,22 @@ Apple silicon (mean 28.08 s).
 
 ## What this does and does not establish
 
-It closes the "matching CUDA and Metal corpora from one reviewed code freeze"
-requirement of the production-golden policy. It does **not** authorize
-activation, and it does not by itself populate
+It demonstrates a matching CUDA and Metal corpus for revision `602a9d08…`.
+It does **not** close the exact-final-tree production-golden requirement, does
+not authorize activation, and must not populate
 `CommittedRCProductionGoldenManifest()` — that vector is deliberately still
-empty. Populating it additionally requires the provider-bound ASERT calibration
-and the complete lifecycle campaigns to be reviewed, and remains a separate
-consensus-visible commit. Public RC heights stay `INT32_MAX`, and both
-ratification gates stay false.
+empty. After all build-relevant fixes settle, the same eight canonical headers
+must be rerun on strict CUDA and strict Metal builds from one exact final
+revision/fingerprint, compared with zero coverage failures, and passed through
+the strict provenance and privacy gates. Populating the manifest additionally
+requires the provider-bound ASERT calibration and complete lifecycle campaigns
+to be reviewed, and remains a separate consensus-visible commit. Public RC
+heights stay `INT32_MAX`, and both ratification gates stay false.
 
 Two providers agreeing also does not prove the absence of a common
 specification bug; the portable oracle remains the dispute tool.
 
-## Reproducing
+## Reproducing the historical result
 
 ```
 contrib/matmul-v4/multi-gpu-golden-corpus.sh \

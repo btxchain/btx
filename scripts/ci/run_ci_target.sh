@@ -345,7 +345,9 @@ run_launch_blockers() {
 
 run_production_readiness() {
   python3 contrib/matmul-v4/check-public-evidence.py
+  python3 contrib/matmul-v4/verify-evidence-provenance.py --strict
   python3 test/util/matmul_v4_public_evidence_test.py
+  python3 test/util/matmul_v4_evidence_provenance_test.py
   if ! have_core_binaries "build-btx" || [[ ! -x "build-btx/bin/bench_btx" ]]; then
     scripts/build_btx.sh "build-btx" -DWERROR=ON -DWITH_ZMQ=ON -DBUILD_BENCH=ON
   fi
