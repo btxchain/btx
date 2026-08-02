@@ -676,6 +676,12 @@ struct Params {
     // All knobs below are owner-set / monetary-adjacent placeholders. Do NOT treat as final.
     // RCScaleForHeight (separate change) reads these; zero-filled tables must be replaced via
     // FillDefaultRCGrowthTables before any network that might ever activate ENC_RC.
+    // CONSENSUS-CRITICAL: these select the replay episode SHAPE, i.e. the PoW
+    // predicate. Any knob added to this group MUST also be hashed into
+    // node::ComputeMatMulReplayAuthorityContext (and its SCHEMA_VERSION bumped),
+    // or persisted BLOCK_EXACT_REPLAY_VERIFIED verdicts would survive a retune
+    // that changed the predicate. See blockmanager_tests
+    // matmul_replay_authority_context_binds_rc_scale_schedule.
     /** Blocks per scale epoch. ~90d at 144 blk/day (90s spacing). PROVISIONAL. */
     int32_t nRCScaleEpochBlocks{12960};
     /** ~10yr of quarterly epochs. Table length is consensus-pinned. */

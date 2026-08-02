@@ -16,6 +16,9 @@
 #include <kernel/messagestartchars.h>
 #include <kernel/notifications_interface.h>
 #include <logging.h>
+#include <matmul/matmul_v4_rc.h>
+#include <matmul/matmul_v4_rc_coupled.h>
+#include <matmul/matmul_v4_rc_scale.h>
 #include <pow.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
@@ -232,12 +235,96 @@ bool BlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, s
 
 namespace node {
 
+namespace {
+
+/** Serialize one resolved ENC_RC episode shape into the context hash. */
+void HashRCEpisodeShape(HashWriter& hasher, const matmul::v4::rc::RCEpisodeParams& e)
+{
+    hasher << e.rounds << e.d_head << e.n_q << e.n_ctx << e.L_lyr << e.d_model
+           << e.d_ff << e.b_seq << e.T_leaf;
+}
+
+/** Serialize the resolved ENC_RC_COUPLED shape + digest-affecting options. */
+void HashRCCoupShape(HashWriter& hasher, const matmul::v4::rc::RCCoupParams& c,
+                     const matmul::v4::rc::RCCoupOptions& o)
+{
+    hasher << c.barriers << c.lobes << c.lobe_width << c.bank_pages
+           << c.rows_per_lobe << c.pages_per_barrier_lobe
+           << o.transcript_version << o.full_bank_schedule << o.material_exchange
+           << o.exchange_rows << o.exchange_rounds;
+    // Test-only shortcut hooks are NOT part of the consensus predicate and are
+    // deliberately excluded (ResolveRCCoupOptions never sets them).
+}
+
+/**
+ * Fixed probe ladder for the derived-shape fingerprint.
+ *
+ * Epoch indices relative to nMatMulRCHeight. The ladder straddles the ENC_RC
+ * activation edge and both ends of the consensus-pinned growth table
+ * (Consensus::Params::kRCGrowthTableLen == 40), so the derived episode shape is
+ * sampled where the schedule can actually change it.
+ *
+ * Cost bound: ConsensusRCEpisodeParamsForHeight iterates e = 0..epoch and each
+ * step is memoized, so the ladder is O(max_epoch^2) Q16 multiplies at worst.
+ * Height clamping can only LOWER the resulting epoch index below the requested
+ * one (clamping means INT32_MAX - nMatMulRCHeight < e * nRCScaleEpochBlocks, so
+ * the realized epoch is < e), hence max_epoch <= 41 for every reachable
+ * parameterization -- including nMatMulRCHeight == INT32_MAX, where every probe
+ * collapses to epoch 0.
+ */
+constexpr int64_t kRCShapeProbeEpochs[]{0, 1, 2, 3, 5, 10, 20, 39, 40, 41};
+
+} // namespace
+
+uint256 ComputeMatMulReplayEpisodeShapeFingerprint(const CChainParams& params)
+{
+    const Consensus::Params& consensus{params.GetConsensus()};
+    HashWriter hasher;
+    hasher << std::string{"BTX_MATMUL_REPLAY_EPISODE_SHAPE"};
+
+    const auto clamp_height = [](int64_t h) -> int32_t {
+        if (h < 0) return 0;
+        if (h > std::numeric_limits<int32_t>::max()) {
+            return std::numeric_limits<int32_t>::max();
+        }
+        return static_cast<int32_t>(h);
+    };
+    const int64_t rc_height{consensus.nMatMulRCHeight};
+    // A non-positive epoch length disables growth in RCScaleForHeight; use 1
+    // here only so the probe ladder stays well-defined (the raw knob is hashed
+    // separately, so the misconfiguration is still bound).
+    const int64_t epoch_blocks{
+        consensus.nRCScaleEpochBlocks > 0 ? int64_t{consensus.nRCScaleEpochBlocks} : 1};
+
+    // Pre-activation probes: bind the "RC not yet live" shape too.
+    for (const int64_t h : {int64_t{0}, int64_t{1}, rc_height - 1}) {
+        const int32_t probe{clamp_height(h)};
+        hasher << probe;
+        HashRCEpisodeShape(hasher, matmul::v4::rc::ResolveRCEpisodeParams(consensus, probe));
+    }
+    for (const int64_t e : kRCShapeProbeEpochs) {
+        const int32_t probe{clamp_height(rc_height + e * epoch_blocks)};
+        hasher << probe;
+        HashRCEpisodeShape(hasher, matmul::v4::rc::ResolveRCEpisodeParams(consensus, probe));
+    }
+
+    // ENC_RC_COUPLED shape is height-independent (profile x toydims only), so a
+    // single resolution binds it. Included here so a change to the Make*RCCoup*
+    // shape constructors is caught, not just a change to the selector knobs.
+    HashRCCoupShape(hasher, matmul::v4::rc::ResolveRCCoupParams(consensus),
+                    matmul::v4::rc::ResolveRCCoupOptions(consensus));
+    return hasher.GetHash();
+}
+
 uint256 ComputeMatMulReplayAuthorityContext(const CChainParams& params)
 {
     // This schema domain covers consensus-code changes that do not alter an
     // explicit parameter. Bump it whenever the selected replay predicate or
     // statement semantics change.
-    static constexpr uint32_t SCHEMA_VERSION{2};
+    //   v2 -> v3: bound the ENC_RC §R.7 scheduled-scaling knobs that feed
+    //             ConsensusRCEpisodeParamsForHeight, plus a derived
+    //             episode-shape fingerprint (see below).
+    static constexpr uint32_t SCHEMA_VERSION{3};
     const Consensus::Params& consensus{params.GetConsensus()};
     HashWriter hasher;
     hasher << std::string{"BTX_MATMUL_REPLAY_AUTHORITY_CONTEXT"}
@@ -326,6 +413,43 @@ uint256 ComputeMatMulReplayAuthorityContext(const CChainParams& params)
            << consensus.hashMatMulRCStage3ProgramRegistryAlgRoot
            << consensus.hashMatMulRCStage3ProgramRegistryShaAuditRoot
            << consensus.hashMatMulRCStage3ProgramRegistryBinding;
+
+    // --- ENC_RC §R.7 scheduled scaling (raw knobs) ---
+    // These select the replay episode SHAPE via
+    // ConsensusRCEpisodeParamsForHeight -> RCScaleForHeight, i.e. they are part
+    // of the PoW predicate. They are inert today (kRCGrowthScheduleEnabled is
+    // compile-time false, and public nets keep nMatMulRCHeight == INT32_MAX),
+    // but an unhashed predicate input is a latent silent-skip: a node that
+    // retuned them after the flag flipped would keep trusting persisted
+    // BLOCK_EXACT_REPLAY_VERIFIED verdicts computed under the old shape.
+    //
+    // nRCBrakeDeltaPct is NOT read by any current derivation -- the chainwork
+    // brake is OMITTED (A3 / F6: BrakeAllowsStep ignores params, and
+    // ResolveRCEpisodeParams takes the empty-brake overload). It is bound here
+    // anyway so that reintroducing the brake cannot silently become a predicate
+    // change that this context misses.
+    hasher << static_cast<uint64_t>(Consensus::Params::kRCGrowthTableLen)
+           << consensus.nRCScaleEpochBlocks
+           << consensus.nRCScaleHardCapResBytes
+           << consensus.nRCScaleHardCapCapBytes
+           << consensus.nRCBrakeDeltaPct;
+    // std::array<int64_t, N> has no Serialize overload (only byte arrays), so
+    // the tables are hashed element-wise.
+    for (size_t i = 0; i < Consensus::Params::kRCGrowthTableLen; ++i) {
+        hasher << consensus.nRCGrowthResTableQ16[i]
+               << consensus.nRCGrowthCapTableQ16[i];
+    }
+
+    // --- Derived episode shape ---
+    // The raw knobs above bind the schedule's INPUTS. This binds its OUTPUT at a
+    // fixed probe ladder, which additionally covers inputs that are not in
+    // Consensus::Params at all: kRCGrowthScheduleEnabled, kRCW0Res / kRCW0Cap,
+    // kRCQueryPerHead, the frozen kRC{Rounds,HeadDim,Layers,ModelDim,
+    // TileLeafBytes} dims, the epoch-invariant fallback rules, and the coupled
+    // Make*RCCoup* shapes. Neither alone is sufficient: the ladder samples
+    // heights (a mid-table growth entry can be masked by the hard-cap ratchet),
+    // and the knobs cannot see a change to the derivation code.
+    hasher << ComputeMatMulReplayEpisodeShapeFingerprint(params);
     return hasher.GetHash();
 }
 

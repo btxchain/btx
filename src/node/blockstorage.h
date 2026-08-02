@@ -141,6 +141,22 @@ extern uint256 g_tiebreak_seed;
 [[nodiscard]] uint256 ComputeMatMulReplayAuthorityContext(
     const CChainParams& params);
 
+/**
+ * Fingerprint of the DERIVED MatMul replay episode shape, sampled at a fixed
+ * probe ladder of heights (pre-activation, ENC_RC activation, and epoch
+ * boundaries spanning the consensus-pinned growth table), plus the resolved
+ * ENC_RC_COUPLED shape.
+ *
+ * Mixed into ComputeMatMulReplayAuthorityContext. Unlike the raw schedule
+ * knobs, this also binds derivation inputs that live in code rather than in
+ * Consensus::Params (kRCGrowthScheduleEnabled, the epoch-0 dials, the frozen
+ * dim ratios, the epoch-invariant fallback rules, the coupled shape
+ * constructors), so a change to the derivation itself invalidates cached
+ * BLOCK_EXACT_REPLAY_VERIFIED verdicts. Exposed for tests.
+ */
+[[nodiscard]] uint256 ComputeMatMulReplayEpisodeShapeFingerprint(
+    const CChainParams& params);
+
 enum class MatMulReplayContextDisposition : uint8_t {
     MATCHED,
     MIGRATED,
