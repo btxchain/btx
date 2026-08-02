@@ -389,6 +389,47 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
         assert(static_cast<uint64_t>(kRCDatacenterAsertRescaleNum) == mac_dc / g);
         assert(static_cast<uint64_t>(kRCDatacenterAsertRescaleDen) == mac_base / g);
     }
+    // PROFILE-1 WORK ANCHOR, DERIVED NOT TRUSTED (the same pattern, applied to
+    // Epoch A). The per-block MAC ratio between the RC Profile-1 episode and the
+    // v3 parent is a closed-form function of consensus params, so recompute it
+    // rather than trusting a literal: it then cannot silently go stale when
+    // nMatMulDimension, nMatMulNoiseRank or the RC episode dims are retuned,
+    // which is exactly how a bad calibration would slip through.
+    //
+    // v3 per-nonce MACs = the n^3 GEMM plus the rank-r noise outer products.
+    // This is the ANCHOR, not the rescale: the runtime derivation additionally
+    // needs the same-silicon MFU ratio between the two workloads (still
+    // unmeasured -- see nMatMulRCAsertRescaleNum) and is reduced by the
+    // two-stage 1/(1+gamma) factor. Neither is checkable here; what IS checkable
+    // is that the ratio stays representable after reduction, since an
+    // unrepresentable one cannot be applied at all.
+    //
+    // Only meaningful on a public network at production dimensions: regtest and
+    // toy-dim builds deliberately shrink the v3 GEMM, which makes the ratio
+    // enormous and unrepresentable without saying anything about the mainnet
+    // activation path this guards.
+    if (!is_regtest && !consensus.fMatMulRCUseToyDims) {
+        const uint64_t mac_rc_p1 = matmul::v4::rc::TotalRCEpisodeMacs(
+            matmul::v4::rc::DefaultConsensusRCEpisodeParams());
+        const uint64_t n = consensus.nMatMulDimension;
+        const uint64_t r = consensus.nMatMulNoiseRank;
+        const uint64_t mac_v3 = 2 * n * n * n + 4 * n * n * r;
+        assert(mac_rc_p1 != 0 && mac_v3 != 0);
+        const uint64_t g1 = std::gcd(mac_rc_p1, mac_v3);
+        assert(g1 != 0);
+        assert((mac_rc_p1 / g1) <= std::numeric_limits<uint32_t>::max());
+        assert((mac_v3 / g1) <= std::numeric_limits<uint32_t>::max());
+    }
+    // EPSILON BINDING. A Profile-1 calibration is only meaningful at the
+    // pre-hash epsilon that will actually be live at the activation height. If
+    // nMatMulPreHashEpsilonBitsUpgradeHeight moves, any staged ratio is stale.
+    // Inert while the height is INT32_MAX; asserted the moment it is not.
+    if (consensus.nMatMulRCHeight != std::numeric_limits<int32_t>::max() &&
+        !is_regtest) {
+        assert(consensus.GetMatMulPreHashEpsilonBitsForHeight(
+                   consensus.nMatMulRCHeight) ==
+               consensus.nMatMulPreHashEpsilonBitsUpgrade);
+    }
     if (!is_regtest) {
         // A public build is valid in exactly one of two states:
         //   (a) v4/BMX4C/RC all disabled (this implementation PR), or

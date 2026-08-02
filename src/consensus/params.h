@@ -519,12 +519,39 @@ struct Params {
      *  pre-hash gate (sigma <= target << epsilon; epsilon = 18 on mainnet from
      *  height 50'000) AND the digest gate, so P(block per nonce) = 2^epsilon *
      *  p^2 with p = target/2^256. At v4 heights the pre-hash gate is retired
-     *  (see validation.cpp), leaving P = p. The one-time loosen is therefore
-     *      k = 2^epsilon * p(H_A-1) * (R_v3 / R_rc)
-     *  and NOT the bare per-nonce throughput ratio R_v3/R_rc, which omits the
-     *  2^epsilon * p factor. Note k depends on nBits at the activation height,
-     *  so it is derived from the actual parent nBits at consensus runtime,
-     *  rather than committed as a static target multiplier.
+     *  (see validation.cpp), leaving P = p. k therefore depends on nBits at the
+     *  activation height, which is why it is derived from the actual parent
+     *  nBits at consensus runtime rather than committed as a static multiplier.
+     *
+     *  BUT THE THROUGHPUT TERM IS NOT R_sigma. v3 is a two-STAGE pipeline, not
+     *  a uniform per-nonce cost: sigma is computed for every nonce (cost
+     *  c_sigma) and the matmul digest runs only for the survivors (cost c_M).
+     *  Equating expected cost per block gives
+     *
+     *      k = (c_RC / c_M) / (1 + gamma),  gamma = c_sigma / (2^epsilon*p*c_M)
+     *
+     *  i.e. 1/R_eff = 1/R_M + 1/(2^epsilon * p * R_sigma), the harmonic
+     *  combination of the matmul rate and the sigma-fed eligible-nonce rate.
+     *  Its two limits are the two wrong answers people reach for:
+     *    gamma -> 0 (matmul-bound): k = R_M / R_rc, the bare throughput ratio;
+     *    gamma -> inf (sigma-bound): k = 2^epsilon * p * R_sigma / R_rc, which
+     *      is the "obvious" correction and assumes the matmul is FREE.
+     *  Measured gamma ~ 0.19 at D ~ 3.53, so v3 is MATMUL-bound: the pre-hash
+     *  gate is only ~16% of its cost, and the 2^epsilon*p term is a one-sided
+     *  correction of at most ~20% (gamma ~ 0.054*D) that always shrinks k.
+     *
+     *  So the R_v3 fed into this must be the v3 MATMUL rate R_M, not the SHA
+     *  header-grind rate R_sigma. The discarded 16893794/1 was worse than a
+     *  wrong correction: its harness ran at target == 1, so the matmul stage
+     *  never executed at all and the figure is a SHA grind rate divided by an
+     *  episode rate. See src/test/matmul_v3_asert_parent_ratio_measure.cpp,
+     *  which now pins digest_requests == 0 for exactly that reason.
+     *
+     *  The dominant remaining unknown is NOT p but the same-silicon MFU ratio
+     *  between the v3 GEMM and the RC episode: every measurement in doc/evidence
+     *  pairs a CPU v3 run with a GPU RC run, a gap of ~1.2e4x, and that is the
+     *  whole difference between k ~ 36 and k ~ 4.4e5. It must be closed by
+     *  measuring both sides on one rig at one code freeze.
      *
      *  NOTE: the future datacenter profile (nMatMulRCProfile==2)
      *  raises per-nonce work ~16× (F_ep 5.32e13 → 8.45e14 MAC), so a datacenter
