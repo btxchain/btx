@@ -50,6 +50,24 @@ build-relevant source-tree fingerprint remains identical. Any change under
 `src/`, `cmake/`, or the root `CMakeLists.txt` invalidates that equivalence and
 requires new CUDA and Metal artifacts.
 
+The C++ comparator can only length-check these strings; it has no repository to
+resolve them against. A 40-character hex string that names no commit therefore
+satisfies every in-process check while attesting to nothing, and the first
+final-freeze corpus recorded in this tree did exactly that. Two out-of-process
+mechanisms are consequently mandatory, not advisory:
+
+- `contrib/matmul-v4/multi-gpu-golden-corpus.sh` refuses to record a corpus when
+  the build-relevant working tree is dirty, when the declared revision does not
+  resolve to a commit, or when the declared fingerprint does not match the tree
+  of the declared revision. There is no override; work in progress must be
+  committed to a scratch branch first.
+- `contrib/matmul-v4/verify-evidence-provenance.py` re-checks every artifact
+  under `doc/evidence`. **It must pass on the CUDA and Metal corpora before
+  `CommittedRCProductionGoldenManifest()` may be populated, and the run must be
+  recorded in the activation review.** Historical artifacts that predate this
+  rule and cannot be resolved are annotated in their own directory READMEs and
+  are not admissible as production goldens.
+
 ## Activation boundary
 
 This policy does not close hardware campaigns by itself. Activation remains
