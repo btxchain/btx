@@ -214,8 +214,11 @@ productive computation.
 The Epoch-A consensus oracle is full Profile 1 ExactReplay. Accelerated
 implementations must be byte-identical to the portable reference. In
 production `strict-device` mode, a device mismatch is a local accelerator
-failure: the provider is quarantined, the block remains retryable, and the
-announcing peer is neither punished nor given a cached invalid verdict. The
+failure: the block remains retryable and the announcing peer is neither
+punished nor given a cached invalid verdict. It does NOT quarantine the
+provider -- a sole device disagreement cannot take a healthy provider out of
+service (`IsUnconfirmedMismatch`); only an `ExecutionFailure` is quarantinable
+(`IsQuarantinableExecutionFailure`, src/matmul/matmul_v4_rc_gkr.cpp). The
 portable oracle is available only through the explicit pre-activation
 `auto-fallback` or offline `cpu-diagnostic` policies; it is not an automatic
 inline production retry.

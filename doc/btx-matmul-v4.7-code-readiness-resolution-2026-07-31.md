@@ -10,7 +10,8 @@ Canonical transition and activation policy:
 
 This note records the disposition of PR97-CODE-F01 through F05 and the related
 Unix daemon CUDA lifecycle audit. It is not an activation approval. The
-production canary and manifest mechanism is populated with historical entries,
+production canary and manifest mechanism is implemented but the committed
+manifest is intentionally EMPTY,
 but the hardened comparator requires those entries to be replaced by one
 final-code-freeze CUDA+Metal corpus. Public ratification gates remain false and
 public RC activation heights remain disabled.
