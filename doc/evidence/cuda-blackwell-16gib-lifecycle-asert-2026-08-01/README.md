@@ -180,3 +180,13 @@ vs core; does not invent missing relay or authority observations.
 | `rc-asert-rescale-proposal.json` | Draft Num/Den proposals (non-install) |
 | `lifecycle-contention-supplement.json` | Competing-tip supplement (core n=6, incomplete n=5) |
 | `asert-work-ratio-proposal.json` | Work-ratio notes (non-install) |
+
+## Provenance status
+
+`lifecycle-remeasure-post-settings-summary.json` records `source_revision:
+"unknown"` — the corpus tool's former fallback when it could not read a commit
+id. That artifact therefore attests to no specific code state and is not
+admissible as production-golden evidence. The generator now refuses to emit a
+non-resolvable revision, and
+`contrib/matmul-v4/verify-evidence-provenance.py` fails on this file until it is
+regenerated. Retained as a historical measurement only.

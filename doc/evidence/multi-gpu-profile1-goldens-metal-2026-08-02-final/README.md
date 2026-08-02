@@ -3,7 +3,7 @@
 Status: **Metal complete; CUDA reproduction pending**.
 
 This corpus was generated from code freeze
-`602a9d08fa95d1e751e7814157a897ec499f83ed` using the strict
+`602a9d08facf1bcbb8e32834c6b74bfd92412040` using the strict
 `metal_int8_mpp_tensorops_fused_extract` provider on Apple Silicon M4 Max-class
 Metal. The source-tree fingerprint is
 `4649ffd436459622ea2be55fa34c0ee4877ee8c69760db5f21d6f805f2e98483` and
@@ -25,6 +25,29 @@ because this directory contains only the final-freeze Metal provider. It
 reports no mismatch and no coverage failure. A CUDA provider must reproduce
 the same revision, source-tree fingerprint, headers, and digests before the
 CUDA+Metal cohort may populate `CommittedRCProductionGoldenManifest()`.
+
+## Revision correction
+
+As first recorded, every artifact in this directory declared the code freeze as
+`602a9d08fa95d1e751e7814157a897ec499f83ed`. **That commit does not exist in this
+repository.** It shares only the first ten characters with the real freeze
+commit, so it passed the comparator's 40-character hex check while attesting to
+nothing.
+
+The identifier has been corrected to `602a9d08facf1bcbb8e32834c6b74bfd92412040`.
+The correction is not a guess: the recorded source-tree fingerprint
+`4649ffd4...e98483` is reproduced exactly by
+`git ls-tree -r --full-tree 602a9d08facf1bcbb8e32834c6b74bfd92412040 --
+CMakeLists.txt cmake src`, and by no other commit reachable here. The
+measurement itself is unaffected — only the identifier naming the code that
+produced it was wrong.
+
+Two mechanisms now prevent a recurrence:
+`contrib/matmul-v4/multi-gpu-golden-corpus.sh` resolves the revision, refuses a
+dirty build-relevant tree, and cross-checks the declared fingerprint against the
+declared revision before recording anything; and
+`contrib/matmul-v4/verify-evidence-provenance.py` re-checks every artifact under
+`doc/evidence` on demand.
 
 ## Artifacts
 
