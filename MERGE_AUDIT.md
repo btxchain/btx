@@ -1,8 +1,19 @@
 # v4.6 Fold — Merge & Loss/Revert Audit
 
 > **Historical merge audit.** The branch names, selector defaults, and
-> activation discussion below describe the audited fold at that date. They do
-> not override the proposed MatMul v4.7 transition: Profile 1 ExactReplay is
+> activation discussion below describe the audited fold at that date. Two of
+> those descriptions no longer match this tree (updated 2026-08-02):
+> **(a)** the coupled default/assert moved from profile 2 to profile 3 — the
+> default is `nMatMulRCCoupledProfile{3}` (`src/consensus/params.h:646`),
+> mainnet asserts `nMatMulRCCoupledProfile == 3`
+> (`src/kernel/chainparams.cpp:479`), and `rc_coup_inactive_and_constants`
+> asserts the default is `3u`
+> (`src/test/matmul_v4_rc_coupled_tests.cpp:295`); **(b)** the Fp3 challenge
+> cutover has since shipped, so the composed separation bound is now ≈ 76.8
+> bits, FRI-query-dominated (`src/matmul/matmul_v4_rc_gkr.cpp:2959-2968`,
+> `kRCGkrFriProximityBitsV5 = 76.80` at `src/matmul/matmul_v4_rc_gkr.h:899`)
+> — the ≈ 71.9 Fp2 figure below is the historical state at the audit date.
+> They do not override the proposed MatMul v4.7 transition: Profile 1 ExactReplay is
 > Epoch A; proof carriage becomes mandatory while ExactReplay remains required
 > in Epoch B; proof authority moves to Profile 1 in Epoch C; Profile 2 follows
 > only at a separate Epoch-D height. All heights remain disabled. See
@@ -30,7 +41,7 @@ PR-side warning fixes (`42ded4c`) are shared ancestry that the v4.6 hardening wa
 | File | Conflict | Resolution |
 |------|----------|------------|
 | `src/pow.cpp` | 3 hunks + 1 duplicate decl | Both sides thread coupled options into `RecomputeCoupledPuzzleReference`/`TryMineRCCoupledBatch`. Standardized on the already-declared `options_coup`; removed the v46 duplicate `opts_coup` declaration (would have been an unused-variable warning). Kept v46's "Profile-selected domains (F7)" comment. |
-| `src/matmul/matmul_v4_rc_coupled.cpp` | `ResolveRCCoupParams`, `ResolveRCCoupOptions` | Took the **v46 profile-based resolver** (`nMatMulRCCoupledProfile` switch: 2→V2, 3→V3, else fail-closed). It is a strict superset of 9c1fa6d's hard-wired `toy?…:V3` — profile 3 yields byte-identical V3 params/options. Forced: the auto-merged v46 `coupled_tests`/`pow_tests` depend on this selector and the `profile==2` default. Result = v46 parent verbatim. |
+| `src/matmul/matmul_v4_rc_coupled.cpp` | `ResolveRCCoupParams`, `ResolveRCCoupOptions` | Took the **v46 profile-based resolver** (`nMatMulRCCoupledProfile` switch: 2→V2, 3→V3, else fail-closed). It is a strict superset of 9c1fa6d's hard-wired `toy?…:V3` — profile 3 yields byte-identical V3 params/options. Forced: the auto-merged v46 `coupled_tests`/`pow_tests` depend on this selector and (at the audit date) the `profile==2` default — the default has SINCE moved to `3` (V3; `params.h:646`). Result = v46 parent verbatim. |
 | `src/matmul/matmul_v4_rc_coupled.h` | 2 doc comments | Took v46's profile-matrix docs (match the resolver kept), appended the "public activation heights are not raised" note from the PR side. |
 | `src/matmul/matmul_v4_rc_accel_policy.h` | struct doc comment | V3-default descriptor (9c1fa6d) + v46's projection/selector note. Struct body auto-merged to `v3_profile_enabled` + V3 defaults (base==v46 for the struct, only 9c1fa6d changed it). |
 | `src/matmul/matmul_v4_rc_accel_policy.cpp` | `MakeLegacyV1…` tail + v46-unique `MakeProductionV3RCCoupConsensusConfig` + `RCCoupParamsFromConsensusConfig` comment | Kept the v2→v3 field rename (9c1fa6d) **and** grafted in v46's `MakeProductionV3RCCoupConsensusConfig`, adapted to `v3_` naming (`v3_profile_enabled=true`, `material_exchange_rounds=4`). Kept v46's explicit `transcript_version=ENC_RC_V1` in the legacy config (== struct default, harmless). |
@@ -42,12 +53,15 @@ PR-side warning fixes (`42ded4c`) are shared ancestry that the v4.6 hardening wa
 test `rc_coup_public_activation_resolves_v3_production_profile` builds a default `Consensus::Params`
 (profile field absent in 9c1fa6d's world) and asserts a non-toy activated node resolves to **V3
 production**, including `resolved.bank_pages != medium.bank_pages`. Under the v46 resolver a default
-`Params` has `nMatMulRCCoupledProfile == 2` → `MakeMediumRCCoupParams` (V2), so the test would FAIL.
-This directly contradicts v46's `rc_coup_inactive_and_constants` (asserts default profile == 2) and the
-mainnet `assert(nMatMulRCCoupledProfile == 2)`.
+`Params` had `nMatMulRCCoupledProfile == 2` → `MakeMediumRCCoupParams` (V2), so the test would FAIL.
+At the audit date this directly contradicted v46's `rc_coup_inactive_and_constants` (then asserting
+default profile == 2) and the then-current mainnet `assert(nMatMulRCCoupledProfile == 2)`.
 **Fix:** added `p.nMatMulRCCoupledProfile = 3;` to that test so it explicitly selects the V3 family.
-This preserves BOTH v46's deliberate default (V2 = CI-safe stand-in, mainnet-asserted) AND 9c1fa6d's
+This preserved BOTH v46's then-deliberate default (V2 = CI-safe stand-in) AND 9c1fa6d's
 full V3-production coverage (51 GiB / 96 GiB / 12 TiMAC / 4 GiB exchange, `exchange_rounds=4`).
+**Since superseded:** the default is now `nMatMulRCCoupledProfile{3}` (`src/consensus/params.h:646`),
+mainnet asserts `== 3` (`src/kernel/chainparams.cpp:479`), and `rc_coup_inactive_and_constants`
+asserts the default is `3u` (`src/test/matmul_v4_rc_coupled_tests.cpp:295`).
 
 ---
 
@@ -80,14 +94,17 @@ full V3-production coverage (51 GiB / 96 GiB / 12 TiMAC / 4 GiB exchange, `excha
   grounding), `G2` (layer claim), `G3` (Construction III LogUp membership), `G4` (Construction IV
   chained wiring), `G5` (residual). Failure strings carry the `v7:g<N>:<detail>` prefix.
 
-### ☑ Composed separation ~71.9 (Fp2, honest — NOT phantom 76.8) — PRESENT/OK
-- `RCGkrComposedSeparationBits()` — `gkr.cpp:2299` — returns
-  `RCGkrComposedSeparationBits(kRCGkrFriProximityBitsV5)`, FS-subtotal-dominated at ≈ 71.9 bits.
-  The 76.8 figure is documented in-code as the **FRI proximity floor** that needs the DEFERRED Fp3
-  challenge cutover — it is NOT returned as the current composed value.
+### ☑ Composed separation ~71.9 (Fp2, honest — NOT phantom 76.8 at the audit date) — PRESENT/OK
+- At the audit date `RCGkrComposedSeparationBits()` returned the Fp2 FS-subtotal-dominated
+  ≈ 71.9-bit value, and 76.8 was only the FRI proximity floor pending the then-DEFERRED Fp3
+  challenge cutover.
+- **Since superseded:** the Fp3 cutover shipped; `RCGkrComposedSeparationBits()`
+  (`src/matmul/matmul_v4_rc_gkr.cpp:2959-2968`) now composes at
+  `kRCGkrFriProximityBitsV5 = 76.80` with the Fp3 FS subtotal 135.5
+  (`src/matmul/matmul_v4_rc_gkr.h:888,899`) — FRI-query-dominated at ≈ 76.8 bits, margin ≈ 12.8.
 - Integration test `gkr_integration_composed_separation_bound` —
-  `src/test/matmul_v4_rc_gkr_integration_tests.cpp:177`: asserts `composed_bits > 64` (:211),
-  `> 71.0` (:212, actual ≈ 71.94), `< 72.0` (:213), and `!inadequate_margin` (:216, margin ≈ 7.9).
+  `src/test/matmul_v4_rc_gkr_integration_tests.cpp:177`: now asserts `composed_bits > 64` (:210),
+  `> 76.7` (:211, actual ≈ 76.80), `< 76.81` (:212), and `!inadequate_margin` (:215, margin ≈ 12.8).
 
 ### ☑ V3 coupled resolver — PRESENT/OK (one test fixed, see above)
 - `ResolveRCCoupOptions` present — `coupled.cpp:729` (profile switch).
@@ -105,10 +122,12 @@ full V3-production coverage (51 GiB / 96 GiB / 12 TiMAC / 4 GiB exchange, `excha
   int64-recombine in `Phase2MicroTraining`), which is int64-exact and is NOT the reference function.
 
 ### ☑ Heights INT32_MAX / golden gate / warning fixes — PRESENT/OK
-- Heights: `nMatMulV4Height{INT32_MAX}` (`params.h:402`), `nMatMulRCHeight{INT32_MAX}` (:495),
-  `nMatMulRCCoupledHeight{INT32_MAX}` (:512). Mainnet asserts
-  `nMatMulRCCoupledHeight == INT32_MAX` and `nMatMulRCCoupledProfile == 2`
-  (`src/kernel/chainparams.cpp:326,328`) — consistent with the resolver kept.
+- Heights: `nMatMulV4Height{INT32_MAX}` (`params.h:416`), `nMatMulRCHeight{INT32_MAX}` (:509),
+  `nMatMulRCCoupledHeight{INT32_MAX}` (:624). Mainnet asserts
+  `nMatMulRCCoupledHeight == INT32_MAX` and (since the default moved to V3)
+  `nMatMulRCCoupledProfile == 3`
+  (`src/kernel/chainparams.cpp:474,479`) — consistent with the resolver kept
+  (profile 3 → V3 production; at the audit date the assert read `== 2`).
 - Golden gate V1/V2/V3: `coupled.{h,cpp}` == v46 parent; `BTX_RC_COUP_*_V1/_V2/_V3` domain tags and
   the V1/V2/V3 param makers are unchanged. Neither lineage altered a golden constant.
 - Warning fixes (`42ded4c`) intact: `-Wswitch` — the five coupled-only kinds (`OmittedPages`,

@@ -159,6 +159,16 @@ constant-codeword check), `Q = 128` queries.
 
 ### Soundness (composed separation bound)
 
+> **Update (2026-08-02):** the Fp3 Fiat–Shamir cutover described below as a
+> follow-on has since SHIPPED (episode-v7 Fp3 challenges + Fp3-codeword FRI,
+> `src/matmul/matmul_v4_rc_fri_ext3.{h,cpp}`). The current composed bound is
+> **≈ 76.8 bits, FRI-query-dominated, margin ≈ 12.8** —
+> `RCGkrComposedSeparationBits()` (`src/matmul/matmul_v4_rc_gkr.cpp:2959-2968`)
+> with FS subtotal 135.5 / wiring 147.19/288 / Construction I 76
+> (`src/matmul/matmul_v4_rc_gkr.h:876-899`), pinned by
+> `gkr_integration_composed_separation_bound`. The ≈ 71.9 Q=128/Fp2 figures
+> below are the v4.6 state at this document's date.
+
 Computed in `RCGkrComposedSeparation` (`matmul_v4_rc_gkr.cpp`), the per-term
 error budget composes (log-sum-exp of `2^-term`) to:
 
