@@ -1,7 +1,7 @@
-# Exact-head Metal Profile-1 corpus
+# Historical Metal Profile-1 corpus
 
-Status: **Metal complete for the current code freeze; matching CUDA rerun
-pending.**
+Status: **superseded by the post-regression-closure Metal corpus at
+`../multi-gpu-profile1-goldens-metal-2026-08-02-regression-closure/`.**
 
 This corpus was generated from revision
 `5ba47d59c65747b8acf7e56bd58918d0269949c2` using the strict
@@ -10,6 +10,10 @@ Metal. The build-relevant source-tree fingerprint is
 `e12212f9983ad93e054efb9e1c4e6fa90969e858bd2c12b44f287605173da2c3` and
 the provider-specific harness SHA-256 is
 `43a633900ca231be516814b8a6a8131eb1f90829d6be409c1465b9f3f5757c0d`.
+
+Subsequent build-relevant persistence and networking fixes changed the accepted
+source freeze. This corpus remains useful diagnostic evidence but cannot
+populate the production manifest.
 
 ## Result
 

@@ -173,9 +173,9 @@ accepted independent Epoch-A golden. Use
 `contrib/matmul-v4/multi-gpu-golden-corpus.sh` to reproduce the gate.
 
 The startup/epoch canary mechanism is implemented and the production manifest
-is intentionally empty. The exact-head Metal corpus is complete at
-`doc/evidence/multi-gpu-profile1-goldens-metal-2026-08-02-final/`; a matching
-strict CUDA rerun from that source revision/fingerprint is pending. A
+is intentionally empty. The exact-freeze Metal corpus is complete at
+`doc/evidence/multi-gpu-profile1-goldens-metal-2026-08-02-regression-closure/`;
+a matching strict CUDA rerun from that source revision/fingerprint is pending. A
 stable golden binds provider family, public device
 architecture class, profile, transcript, the consensus
 MatMul dimension carried by the canonical canary header, and complete episode
