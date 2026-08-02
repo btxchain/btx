@@ -298,4 +298,64 @@ BOOST_AUTO_TEST_CASE(epoch_a_target_derivation_uses_live_parent_lottery)
         parent, 18, 1, 0, pow_limit).has_value());
 }
 
+
+// FIXED VECTOR at the published calibration difficulty. Everything else in
+// this suite tests the helper against synthetic inputs, i.e. against itself.
+// This case pins the SHIPPED constant against an externally computed
+// expectation so a future value of the wrong KIND fails here rather than on
+// mainnet.
+BOOST_AUTO_TEST_CASE(epoch_a_installed_coefficient_realizes_expected_loosen)
+{
+    // Mainnet nBits at the calibration sample, epsilon = 18.
+    arith_uint256 parent{};
+    parent.SetCompact(0x1c487c56);
+    BOOST_REQUIRE(parent > 0);
+
+    const auto main{CreateChainParams(ArgsManager{}, ChainType::MAIN)};
+    const auto& p{main->GetConsensus()};
+    const uint32_t eps{p.GetMatMulPreHashEpsilonBitsForHeight(p.nMatMulRCHeight - 1)};
+    BOOST_CHECK_EQUAL(eps, 18u);
+
+    uint64_t an{0}, ad{0};
+    BOOST_REQUIRE(ReduceRescaleRatioToU64(p.nMatMulRCAsertRescaleNum,
+                                          p.nMatMulRCAsertRescaleDen, an, ad));
+    // The measured coefficient exceeds uint32; the Epoch-A path must not clip it.
+    BOOST_CHECK_GT(an, static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()));
+
+    const auto derived{DeriveMatMulEpochATransitionTarget(
+        parent, eps, an, ad, UintToArith256(p.powLimit))};
+    BOOST_REQUIRE(derived.has_value());
+
+    // k = p_rc / p, computed from the targets rather than from the model, so
+    // this is an independent check of the helper's output.
+    const arith_uint256 k_ratio = *derived / parent;
+    // Measured endpoints: Metal ~19'900, CUDA ~119'800. Installed at the CUDA
+    // figure. A value of the WRONG KIND lands far outside this band: supplying
+    // the realized loosen k instead of the attempt-rate ratio C yields ~2,
+    // which is the 1/q under-loosen that would stall the chain for weeks.
+    BOOST_CHECK(k_ratio > arith_uint256{50'000});
+    BOOST_CHECK(k_ratio < arith_uint256{200'000});
+
+    // The transition must loosen, never tighten, and must respect powLimit.
+    BOOST_CHECK(*derived > parent);
+    BOOST_CHECK(*derived <= UintToArith256(p.powLimit));
+}
+
+// A coefficient of the wrong KIND must be visibly wrong, not subtly wrong.
+BOOST_AUTO_TEST_CASE(epoch_a_supplying_the_realized_loosen_is_catastrophic)
+{
+    arith_uint256 parent{};
+    parent.SetCompact(0x1c487c56);
+    const auto main{CreateChainParams(ArgsManager{}, ChainType::MAIN)};
+    const auto& p{main->GetConsensus()};
+
+    // Someone installs k (~121'581) where C (~6.93e9) belongs.
+    const auto wrong{DeriveMatMulEpochATransitionTarget(
+        parent, 18, 121'581, 1, UintToArith256(p.powLimit))};
+    BOOST_REQUIRE(wrong.has_value());
+    const arith_uint256 wrong_ratio = *wrong / parent;
+    // Realized loosen collapses to single digits instead of ~1.2e5.
+    BOOST_CHECK(wrong_ratio < arith_uint256{100});
+}
+
 BOOST_AUTO_TEST_SUITE_END()

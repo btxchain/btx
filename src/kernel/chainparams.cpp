@@ -88,33 +88,48 @@ static constexpr int64_t kRCDatacenterAsertRescaleDen{1027};
 // actual target from this measured ratio, the live parent nBits, and epsilon;
 // it is not a static target multiplier. Historical 16893794/1 evidence remains
 // a proposal, not a parameter.
-// EPOCH-A PROFILE-1 ONE-TIME ASERT RESCALE — INSTALLED.
+// EPOCH-A PROFILE-1 ONE-TIME ASERT COEFFICIENT — INSTALLED.
 //
-// The runtime derivation is p' = 2^eps * p^2 * (num/den), so the realized
-// one-time loosen is k = 2^eps * p(H_A) * (num/den) and floats with the parent
-// target at the activation height, which is why this is a coefficient rather
-// than a target multiplier.
+// WHAT THIS NUMBER IS. It is the PRE-GATE NONCE-ATTEMPT-RATE RATIO
+//     C = N / M
+// where N is the v3 miner's raw nonce attempts per second (sigma is computed
+// for EVERY nonce) and M is the Profile-1 RC episode rate per second.
 //
-// Measured two-rig, two-vendor, same-silicon (doc/evidence/
-// asert-two-rig-calibration-2026-08-03): k = 121,581 on Blackwell-class
-// sm_120 and k = 19,892 on M4-class Metal, both sigma-bound, geometric mean
-// 49,178. The 6.1x spread is a hardware-mix property, not measurement error.
+// It is NOT the realized difficulty loosen k, NOT the post-gate digest-trial
+// rate ratio R_eff/R_rc, and NOT the v3 matmul-only rate R_M. Those are
+// different quantities and substituting one for another is not a rounding
+// error -- see the hazard note below.
 //
-// THE MECHANISM, NOT THE MEASUREMENT, IS THE BINDING CONSTRAINT HERE.
-// num is uint32, so num/den <= 4,294,967,295 and therefore
-// k <= 2^eps * p * 4.29e9 = ~74,225 at the difficulty observed when this was
-// set. The larger measured value is not expressible. This installs the
-// ceiling, which is the closest the shipped mechanism can come to the
-// measured high end.
+// DERIVATION. v3 needs both gates, Profile 1 keeps only the digest gate:
+//     lambda_v3 = N * q * p        with q = 2^epsilon * p
+//     lambda_rc = M * p_rc
+// Continuity (lambda_rc = lambda_v3) gives p_rc = p * q * (N/M), which is
+// exactly what DeriveMatMulEpochATransitionTarget computes. The realized
+// loosen is the OUTCOME k = p_rc/p = q * C, not an input.
 //
-// Direction of the residual error is deliberate. Under-loosening costs
-// linearly in the error (a factor F too tight is ~F*90 s to the first block,
-// then an ASERT climb capped at 1.103x per block by the MTP rule); over-
-// loosening costs only logarithmically. Saturating the ceiling minimizes the
-// under-loosen, which at ~1.6x below the CUDA-rig figure is minutes-to-hours,
-// not days. Widening num to uint64 would remove the cap and allow the measured
-// value to be installed directly; that is the recommended follow-up.
-static constexpr int64_t kRCEpochAAsertRescaleNum{4294967295};
+// MEASURED, same-silicon, two vendors
+// (doc/evidence/asert-two-rig-calibration-2026-08-03):
+//     CUDA sm_120 : N/M = 6.93e9  -> k ~ 119'800
+//     Metal m4    : N/M = 1.15e9  -> k ~  19'900
+// The 5.8x spread is a hardware-mix property. Installed at the CUDA figure
+// because the loss function is asymmetric: under-loosening costs linearly in
+// the error while over-loosening costs only logarithmically, so biasing toward
+// the faster observed miner is the cheap direction.
+//
+// HAZARD, and the reason this comment is long. An earlier revision of this
+// file installed a SATURATED uint32 value and described the field as a
+// "throughput ratio", while the calibration evidence recommended installing k.
+// Installing k (about 1.2e5) as C would yield a realized loosen of q*k ~ 2.1
+// instead of the intended ~1.2e5 -- under-loosening by 1/q ~ 57'864x, which at
+// a 90 s target is a first block expected in roughly 60 DAYS. The uint32
+// saturation is also gone: the Epoch-A path does exact wide arithmetic and now
+// reduces through ReduceRescaleRatioToU64, so the measured value is installed
+// directly rather than clipped.
+//
+// matmul_unified_activation_tests pins a fixed vector at the calibration nBits
+// asserting the realized k, so a future value of the wrong KIND fails a test
+// rather than the chain.
+static constexpr int64_t kRCEpochAAsertRescaleNum{6931159304};
 static constexpr int64_t kRCEpochAAsertRescaleDen{1};
 
 // MatMul v4.2 / ENC-BMX4C construction invariants (spec §8.1/§8.2). No-op when
@@ -475,12 +490,21 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
         assert(epoch_a_disabled || epoch_a_active);
         assert(consensus.nMatMulRCProfile == 1);
         assert(!consensus.fMatMulRCUseToyDims);
-        // Profile-1 Epoch A owns the measured v3→RC work-ratio whether heights
-        // are still disabled (staged calibration) or the atomic tuple is live.
-        assert(consensus.nMatMulRCAsertRescaleNum ==
-               kRCEpochAAsertRescaleNum);
-        assert(consensus.nMatMulRCAsertRescaleDen ==
-               kRCEpochAAsertRescaleDen);
+        // The calibrated Epoch-A coefficient belongs to a network whose
+        // Profile-1 height is LIVE. A public network whose RC height is still
+        // disabled must stay neutral: its rescale is inert, and the calibrated
+        // value is deliberately larger than uint32, which
+        // ValidateMatMulAsertParams only accepts through the wide Epoch-A path
+        // that a disabled network does not take. Pinning every public net to
+        // the calibrated constant therefore made testnet and signet
+        // unconstructible.
+        if (epoch_a_active) {
+            assert(consensus.nMatMulRCAsertRescaleNum == kRCEpochAAsertRescaleNum);
+            assert(consensus.nMatMulRCAsertRescaleDen == kRCEpochAAsertRescaleDen);
+        } else {
+            assert(consensus.nMatMulRCAsertRescaleNum ==
+                   consensus.nMatMulRCAsertRescaleDen);
+        }
     }
     if (consensus.nMatMulRCHeight != std::numeric_limits<int32_t>::max()) {
         assert(consensus.nMatMulV4Height != std::numeric_limits<int32_t>::max());
@@ -1145,8 +1169,8 @@ public:
         // disabled (same calibration as mainnet).
         consensus.nMatMulRCHeight = std::numeric_limits<int32_t>::max();
         consensus.nMatMulRCProfile = 1;
-        consensus.nMatMulRCAsertRescaleNum = kRCEpochAAsertRescaleNum;
-        consensus.nMatMulRCAsertRescaleDen = kRCEpochAAsertRescaleDen;
+        consensus.nMatMulRCAsertRescaleNum = 1;  // inert: RC height disabled on this network
+        consensus.nMatMulRCAsertRescaleDen = 1;
         consensus.nMaxReorgDepth = 12;
         consensus.nReorgProtectionStartHeight = 61'000;
         consensus.nEmptyBlockSubsidyPenaltyHeight = BTX_EMPTY_BLOCK_SUBSIDY_PENALTY_HEIGHT;
@@ -1435,8 +1459,8 @@ public:
         // Audit W-2 / ASERT-F1: BMX4C construction invariants (no-op while unset).
         consensus.nMatMulRCHeight = std::numeric_limits<int32_t>::max();
         consensus.nMatMulRCProfile = 1;
-        consensus.nMatMulRCAsertRescaleNum = kRCEpochAAsertRescaleNum;
-        consensus.nMatMulRCAsertRescaleDen = kRCEpochAAsertRescaleDen;
+        consensus.nMatMulRCAsertRescaleNum = 1;  // inert: RC height disabled on this network
+        consensus.nMatMulRCAsertRescaleDen = 1;
         Consensus::FillDefaultRCGrowthTables(consensus);
         AssertBMX4CConstructionInvariants(consensus, /*is_regtest=*/false);
 
@@ -1669,8 +1693,8 @@ public:
         // v4/bmx4c disabled and the discount at the UINT32_MAX default.)
         consensus.nMatMulRCHeight = std::numeric_limits<int32_t>::max();
         consensus.nMatMulRCProfile = 1;
-        consensus.nMatMulRCAsertRescaleNum = kRCEpochAAsertRescaleNum;
-        consensus.nMatMulRCAsertRescaleDen = kRCEpochAAsertRescaleDen;
+        consensus.nMatMulRCAsertRescaleNum = 1;  // inert: RC height disabled on this network
+        consensus.nMatMulRCAsertRescaleDen = 1;
         Consensus::FillDefaultRCGrowthTables(consensus);
         AssertBMX4CConstructionInvariants(consensus, /*is_regtest=*/false);
     }
@@ -2420,8 +2444,8 @@ public:
         // networks. No-op today (v4/bmx4c disabled, discount at default).
         consensus.nMatMulRCHeight = std::numeric_limits<int32_t>::max();
         consensus.nMatMulRCProfile = 1;
-        consensus.nMatMulRCAsertRescaleNum = kRCEpochAAsertRescaleNum;
-        consensus.nMatMulRCAsertRescaleDen = kRCEpochAAsertRescaleDen;
+        consensus.nMatMulRCAsertRescaleNum = 1;  // inert: RC height disabled on this network
+        consensus.nMatMulRCAsertRescaleDen = 1;
         Consensus::FillDefaultRCGrowthTables(consensus);
         AssertBMX4CConstructionInvariants(consensus, /*is_regtest=*/false);
     }

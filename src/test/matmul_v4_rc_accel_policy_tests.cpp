@@ -273,10 +273,17 @@ BOOST_AUTO_TEST_CASE(rc_compute_lane_ids_distinct)
 
 BOOST_AUTO_TEST_CASE(rc_profile1_activation_readiness_requires_runtime_canary)
 {
-    // No provider is ready until one final-revision CUDA+Metal corpus is
-    // committed and the exact runtime identity passes its startup canary.
-    BOOST_CHECK(rc::CommittedRCProductionGoldenManifest().empty());
+    // The committed corpus is now present, which is the point of this case:
+    // a populated manifest is NECESSARY but NOT SUFFICIENT. No provider becomes
+    // ready until the exact runtime identity also passes its startup canary on
+    // the actual device. Previously this asserted the manifest was empty, which
+    // made the case pass for the wrong reason -- readiness was false because
+    // there were no goldens at all, not because the canary gates it.
+    BOOST_CHECK(!rc::CommittedRCProductionGoldenManifest().empty());
+    BOOST_CHECK(rc::RCProductionGoldenManifestCohortValid(
+        rc::CommittedRCProductionGoldenManifest()));
     const auto canary{rc::GetLastRCProductionCanaryStatus()};
+    // No canary has run in this process, so nothing is authorized regardless.
     BOOST_CHECK(!canary.manifest_has_reviewed_goldens);
     BOOST_CHECK(!canary.passed);
     BOOST_CHECK(!canary.activation_ready);

@@ -988,6 +988,23 @@ arith_uint256 ScaleTargetByTimespan(const arith_uint256& target, int64_t actual_
 // translation units (chainparams.cpp for construction-time validation, unit
 // tests), so they must have EXTERNAL linkage -- keep them OUTSIDE the anonymous
 // namespace that wraps the rest of pow.cpp's internals.
+bool ReduceRescaleRatioToU64(int64_t num, int64_t den, uint64_t& out_num, uint64_t& out_den)
+{
+    // The uint32 ceiling in ReduceRescaleRatioToU32 exists because
+    // ScaleTargetByTimespan clamps each of its two scale arguments to UINT32_MAX
+    // independently. The Epoch-A transition does NOT go through that function --
+    // DeriveMatMulEpochATransitionTarget does exact wide arithmetic -- so the
+    // ceiling is an artificial limit there, and a real one: the measured
+    // pre-gate attempt-rate ratio for the fastest available accelerator is about
+    // 6.93e9, which does not fit in uint32 and previously had to be saturated.
+    // The consensus fields are already int64_t, so no serialization changes.
+    if (num <= 0 || den <= 0) return false;
+    const int64_t g{std::gcd(num, den)};
+    out_num = static_cast<uint64_t>(num / g);
+    out_den = static_cast<uint64_t>(den / g);
+    return true;
+}
+
 bool ReduceRescaleRatioToU32(int64_t num, int64_t den, uint32_t& out_num, uint32_t& out_den)
 {
     // AUDIT D3: reduce a one-time ASERT rescale ratio num/den to lowest terms and
@@ -1014,12 +1031,12 @@ bool ReduceRescaleRatioToU32(int64_t num, int64_t den, uint32_t& out_num, uint32
 std::optional<arith_uint256> DeriveMatMulEpochATransitionTarget(
     const arith_uint256& parent_target,
     uint32_t pre_hash_epsilon_bits,
-    uint32_t throughput_num,
-    uint32_t throughput_den,
+    uint64_t attempt_rate_num,
+    uint64_t attempt_rate_den,
     const arith_uint256& pow_limit)
 {
-    if (parent_target == 0 || throughput_num == 0 ||
-        throughput_den == 0 || pow_limit == 0) {
+    if (parent_target == 0 || attempt_rate_num == 0 ||
+        attempt_rate_den == 0 || pow_limit == 0) {
         return std::nullopt;
     }
 
@@ -1047,8 +1064,8 @@ std::optional<arith_uint256> DeriveMatMulEpochATransitionTarget(
     const arith_uint256 pre_hash_target{
         SaturatingLeftShift256(parent_target, pre_hash_epsilon_bits)};
     const cpp_int numerator{
-        to_wide(parent_target) * to_wide(pre_hash_target) * throughput_num};
-    const cpp_int denominator{cpp_int{throughput_den} << 256};
+        to_wide(parent_target) * to_wide(pre_hash_target) * attempt_rate_num};
+    const cpp_int denominator{cpp_int{attempt_rate_den} << 256};
     cpp_int target{numerator / denominator};
     const cpp_int wide_limit{to_wide(pow_limit)};
     if (target > wide_limit) target = wide_limit;
@@ -1335,9 +1352,27 @@ bool ValidateMatMulAsertParams(const Consensus::Params& params, int32_t next_hei
     // at/above ASERT. When DRLT is also configured, RC must be at or above it
     // (GetMatMulEncodingProfile prefers ENC_RC; a lower RC height would shadow).
     {
-        uint32_t rc_rn, rc_rd;
-        if (!ReduceRescaleRatioToU32(params.nMatMulRCAsertRescaleNum, params.nMatMulRCAsertRescaleDen, rc_rn, rc_rd)) {
-            LogWarning("MatMulAsert: RC rescale ratio is invalid (num=%lld den=%lld; must be positive and reduce to a 32-bit rational) at height %d, failing closed\n",
+        // Epoch A applies the ratio through DeriveMatMulEpochATransitionTarget,
+        // which does exact wide arithmetic and is therefore not bound by
+        // ScaleTargetByTimespan's UINT32_MAX per-argument clamp. Validating it
+        // against the 32-bit ceiling would reject the measured attempt-rate
+        // coefficient (~6.9e9) that this transition legitimately needs. Later
+        // RC profile transitions do go through ScaleTargetByTimespan and keep
+        // the 32-bit requirement.
+        bool reduced{false};
+        if (params.IsMatMulV47EpochAActivationTuple()) {
+            uint64_t rc_an, rc_ad;
+            reduced = ReduceRescaleRatioToU64(params.nMatMulRCAsertRescaleNum,
+                                              params.nMatMulRCAsertRescaleDen,
+                                              rc_an, rc_ad);
+        } else {
+            uint32_t rc_rn, rc_rd;
+            reduced = ReduceRescaleRatioToU32(params.nMatMulRCAsertRescaleNum,
+                                              params.nMatMulRCAsertRescaleDen,
+                                              rc_rn, rc_rd);
+        }
+        if (!reduced) {
+            LogWarning("MatMulAsert: RC rescale ratio is invalid (num=%lld den=%lld) at height %d, failing closed\n",
                        static_cast<long long>(params.nMatMulRCAsertRescaleNum),
                        static_cast<long long>(params.nMatMulRCAsertRescaleDen), next_height);
             return false;
@@ -2850,20 +2885,26 @@ unsigned int MatMulAsert(const CBlockIndex* pindexLast, const Consensus::Params&
     if (next_height == params.nMatMulRCHeight) {
         arith_uint256 parent_target{};
         parent_target.SetCompact(pindexLast->nBits);
-        uint32_t rc_rn, rc_rd;
-        if (!ReduceRescaleRatioToU32(params.nMatMulRCAsertRescaleNum, params.nMatMulRCAsertRescaleDen, rc_rn, rc_rd)) {
-            return MatMulAsertFailClosedBits();
-        }
         arith_uint256 rc_target;
         if (params.IsMatMulV47EpochAActivationTuple()) {
             // Atomic Epoch A removes the independent v3 pre-hash lottery.
             // Continuity therefore depends on the live parent nBits as well as
-            // measured throughput; a static target multiplier is dimensionally
-            // wrong for this specific two-gate -> one-gate transition.
+            // the measured rate ratio; a static target multiplier is
+            // dimensionally wrong for this two-gate -> one-gate transition.
+            //
+            // Uses the 64-bit reducer: this path does exact wide arithmetic and
+            // is not subject to ScaleTargetByTimespan's UINT32_MAX clamp, and
+            // the measured coefficient exceeds uint32.
+            uint64_t rc_an, rc_ad;
+            if (!ReduceRescaleRatioToU64(params.nMatMulRCAsertRescaleNum,
+                                         params.nMatMulRCAsertRescaleDen,
+                                         rc_an, rc_ad)) {
+                return MatMulAsertFailClosedBits();
+            }
             const auto derived{DeriveMatMulEpochATransitionTarget(
                 parent_target,
                 params.GetMatMulPreHashEpsilonBitsForHeight(next_height - 1),
-                rc_rn, rc_rd, pow_limit)};
+                rc_an, rc_ad, pow_limit)};
             if (!derived.has_value()) {
                 return MatMulAsertFailClosedBits();
             }
@@ -2871,7 +2912,14 @@ unsigned int MatMulAsert(const CBlockIndex* pindexLast, const Consensus::Params&
         } else {
             // Later RC profile transitions retain one digest gate on both
             // sides, so their calibrated throughput ratio remains a direct
-            // target scale.
+            // target scale -- and that path DOES go through
+            // ScaleTargetByTimespan, so the 32-bit reduction still applies.
+            uint32_t rc_rn, rc_rd;
+            if (!ReduceRescaleRatioToU32(params.nMatMulRCAsertRescaleNum,
+                                         params.nMatMulRCAsertRescaleDen,
+                                         rc_rn, rc_rd)) {
+                return MatMulAsertFailClosedBits();
+            }
             rc_target = ScaleTargetByTimespan(parent_target, rc_rn, rc_rd);
         }
         rc_target = ClampRetargetResult(rc_target, pow_limit);

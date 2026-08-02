@@ -542,44 +542,27 @@ struct Params {
      *  atomic Epoch-A tuple, MatMulAsert combines this ratio with the live
      *  parent target and the pre-hash epsilon using wide exact arithmetic.
      *
-     *  A THROUGHPUT RATIO IS NOT THE RESCALE. Epoch A changes the shape of the
-     *  lottery, not just its cost. Before the fork a block requires BOTH the
-     *  pre-hash gate (sigma <= target << epsilon; epsilon = 18 on mainnet from
-     *  height 50'000) AND the digest gate, so P(block per nonce) = 2^epsilon *
-     *  p^2 with p = target/2^256. At v4 heights the pre-hash gate is retired
-     *  (see validation.cpp), leaving P = p. k therefore depends on nBits at the
-     *  activation height, which is why it is derived from the actual parent
-     *  nBits at consensus runtime rather than committed as a static multiplier.
+     *  THIS FIELD IS THE PRE-GATE NONCE-ATTEMPT-RATE RATIO C = N/M, where N
+     *  is the v3 miner's raw nonce attempts per second (sigma is computed for
+     *  EVERY nonce) and M is the Profile-1 RC episode rate per second. It is
+     *  NOT the realized loosen k, NOT the post-gate digest-trial ratio
+     *  R_eff/R_rc, and NOT the v3 matmul-only rate R_M.
      *
-     *  BUT THE THROUGHPUT TERM IS NOT R_sigma. v3 is a two-STAGE pipeline, not
-     *  a uniform per-nonce cost: sigma is computed for every nonce (cost
-     *  c_sigma) and the matmul digest runs only for the survivors (cost c_M).
-     *  Equating expected cost per block gives
+     *  v3 needs both gates; Profile 1 keeps only the digest gate:
+     *      lambda_v3 = N * q * p,   q = 2^epsilon * p
+     *      lambda_rc = M * p_rc
+     *  Continuity gives p_rc = p * q * (N/M), which is what
+     *  DeriveMatMulEpochATransitionTarget computes. The realized loosen
+     *  k = p_rc/p = q * C is an OUTCOME, not an input, and depends on the live
+     *  parent nBits -- which is why the derivation reads the parent target at
+     *  runtime instead of committing a static multiplier.
      *
-     *      k = (c_RC / c_M) / (1 + gamma),  gamma = c_sigma / (2^epsilon*p*c_M)
-     *
-     *  i.e. 1/R_eff = 1/R_M + 1/(2^epsilon * p * R_sigma), the harmonic
-     *  combination of the matmul rate and the sigma-fed eligible-nonce rate.
-     *  Its two limits are the two wrong answers people reach for:
-     *    gamma -> 0 (matmul-bound): k = R_M / R_rc, the bare throughput ratio;
-     *    gamma -> inf (sigma-bound): k = 2^epsilon * p * R_sigma / R_rc, which
-     *      is the "obvious" correction and assumes the matmul is FREE.
-     *  Measured gamma ~ 0.19 at D ~ 3.53, so v3 is MATMUL-bound: the pre-hash
-     *  gate is only ~16% of its cost, and the 2^epsilon*p term is a one-sided
-     *  correction of at most ~20% (gamma ~ 0.054*D) that always shrinks k.
-     *
-     *  So the R_v3 fed into this must be the v3 MATMUL rate R_M, not the SHA
-     *  header-grind rate R_sigma. The discarded 16893794/1 was worse than a
-     *  wrong correction: its harness ran at target == 1, so the matmul stage
-     *  never executed at all and the figure is a SHA grind rate divided by an
-     *  episode rate. See src/test/matmul_v3_asert_parent_ratio_measure.cpp,
-     *  which now pins digest_requests == 0 for exactly that reason.
-     *
-     *  The dominant remaining unknown is NOT p but the same-silicon MFU ratio
-     *  between the v3 GEMM and the RC episode: every measurement in doc/evidence
-     *  pairs a CPU v3 run with a GPU RC run, a gap of ~1.2e4x, and that is the
-     *  whole difference between k ~ 36 and k ~ 4.4e5. It must be closed by
-     *  measuring both sides on one rig at one code freeze.
+     *  Substituting k for C under-loosens by 1/q (about 5.8e4 at the
+     *  calibration difficulty), which at a 90 s target is a first block
+     *  expected in roughly 60 days. An earlier revision of this comment said
+     *  the supplied v3 term should be R_M; that was wrong and is corrected
+     *  here. matmul_unified_activation_tests pins a fixed vector so a value of
+     *  the wrong kind fails a test rather than the chain.
      *
      *  NOTE: the future datacenter profile (nMatMulRCProfile==2)
      *  raises per-nonce work ~16× (F_ep 5.32e13 → 8.45e14 MAC), so a datacenter
