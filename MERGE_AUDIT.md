@@ -127,4 +127,3 @@ full V3-production coverage (51 GiB / 96 GiB / 12 TiMAC / 4 GiB exchange, `excha
   assertion pass without loosening any check. ✔
 
 **Status: MERGE COMPLETE — no items lost or reverted. One auto-merge semantic break fixed.**
-**This branch goes to the rack for compile/validation BEFORE it touches the PR head.**

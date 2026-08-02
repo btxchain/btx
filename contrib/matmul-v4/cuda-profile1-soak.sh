@@ -152,9 +152,13 @@ release_gpu_lock() {
 now_iso() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 now_epoch() { date -u +%s; }
 
-sanitize_line() {
-  # Strip home paths, usernames, and hostnames from lines copied into evidence.
-  python3 - "$@" <<'PY'
+# Held in a variable and passed with `python3 -c`, NOT as `python3 - <<PY`.
+# With `python3 -`, the interpreter reads its PROGRAM from stdin, so the piped
+# input this function is supposed to sanitize was consumed by the interpreter
+# and sys.stdin.read() always returned "". Every "sanitized" evidence file
+# (events.sanitized.log, metrics.sanitized.jsonl) was therefore written empty
+# while the gate appeared to pass.
+read -r -d '' SANITIZE_PY <<'PY' || true
 import os, re, sys
 line = sys.stdin.read() if not sys.argv[1:] else open(sys.argv[1], encoding="utf-8").read()
 home = os.path.expanduser("~")
@@ -163,9 +167,19 @@ host = os.uname().nodename if hasattr(os, "uname") else ""
 for token in filter(None, [home, user, host]):
     line = line.replace(token, "<redacted>")
 line = re.sub(r"/home/[^/\s]+", "/home/<redacted>", line)
-line = re.sub(r"\b(?:[A-Za-z0-9._-]*workstation[A-Za-z0-9._-]*)\b", "<host>", line, flags=re.I)
+line = re.sub(r"/Users/[^/\s]+", "/Users/<redacted>", line)
+# Additional hostnames to scrub, supplied by the operator at run time as a
+# comma-separated list. Deliberately NOT hard-coded: a redaction list that
+# names real machines publishes exactly what it exists to hide, which is what
+# the previous literal pattern here did.
+for extra in filter(None, (h.strip() for h in os.environ.get("BTX_SANITIZE_EXTRA_HOSTS", "").split(","))):
+    line = re.sub(re.escape(extra), "<host>", line, flags=re.I)
 sys.stdout.write(line)
 PY
+
+sanitize_line() {
+  # Strip home paths, usernames, and hostnames from lines copied into evidence.
+  python3 -c "${SANITIZE_PY}" "$@"
 }
 
 event() {
@@ -220,6 +234,12 @@ cli_b() {
     -rpcuser="${RPC_USER}" -rpcpassword="${RPC_PASS}" -rpcwait -rpcwaittimeout=180 "$@"
 }
 
+# NOTE: this heredoc is expanded straight into btxd's argv -- every line is an
+# argument. Do NOT put shell comments inside it; `# noban must be explicit...`
+# previously reached the daemon as `Invalid command '# noban...'` and the soak
+# could never start a node. Rationale for -whitelist=noban below: consensus-mode
+# sync stalls when NODE_MATMUL_CONSENSUS is unpublished (empty production golden
+# canary), so noban must be explicit.
 node_common_args() {
   local datadir="$1" rpcport="$2" p2pport="$3"
   # Epoch-A height package mirrors measure-cuda-lifecycle-campaign.py so
@@ -241,8 +261,6 @@ node_common_args() {
 -natpmp=0
 -externalip=127.0.0.1
 -bind=127.0.0.1
-# noban must be explicit; otherwise consensus-mode sync stalls when
-# NODE_MATMUL_CONSENSUS is unpublished (empty production golden canary).
 -whitelist=noban,in,out@127.0.0.1
 -miningminoutboundpeers=0
 -miningminsyncedoutboundpeers=0
