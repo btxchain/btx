@@ -114,7 +114,17 @@ fi
 # An explicitly supplied revision/fingerprint pair is only admissible when it
 # actually describes this checkout; otherwise the operator is asserting
 # provenance the script cannot corroborate.
-if [[ ${COMPARE_ONLY} -eq 0 ]]; then
+#
+# These checks deliberately run in --compare-only mode too. They need only git,
+# not a harness or a device, and compare-only still stamps tip_sha and
+# source_tree_fingerprint into multi-gpu-digest-compare.json -- the file every
+# downstream consumer reads. Gating them on the execution path left a mode in
+# which an operator-supplied revision naming no commit produced
+# complete_multi_gpu_match=true with exit 0, from a directory that need not even
+# be a git checkout.
+if true; then
+  git -C "${REPO_ROOT}" rev-parse --git-dir >/dev/null 2>&1 || \
+    die "not a git checkout: cannot corroborate the declared provenance"
   # A 40-hex string is not a revision. Evidence has been recorded in this tree
   # under a well-formed but non-existent commit id, which every downstream
   # consumer accepted because they only ever length-checked the hex.
