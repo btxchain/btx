@@ -507,10 +507,12 @@ struct Params {
      *  disabled on every public network until a deliberate clean cutover.
      *  When live, GetMatMulEncodingProfile prefers ENC_RC over DRLT/BMX4C. */
     int32_t nMatMulRCHeight{std::numeric_limits<int32_t>::max()};
-    /** One-time ASERT rescale at nMatMulRCHeight (calibrate from silicon).
+    /** RC transition throughput ratio at nMatMulRCHeight (calibrate from silicon).
      *  Public nets keep the disabled implementation branch at neutral 1/1.
      *  The activation patch must install a final-binary, provider-bound
-     *  Profile-1 work-ratio together with the finite height.
+     *  Profile-1 throughput ratio together with the finite height. For the
+     *  atomic Epoch-A tuple, MatMulAsert combines this ratio with the live
+     *  parent target and the pre-hash epsilon using wide exact arithmetic.
      *
      *  A THROUGHPUT RATIO IS NOT THE RESCALE. Epoch A changes the shape of the
      *  lottery, not just its cost. Before the fork a block requires BOTH the
@@ -518,12 +520,11 @@ struct Params {
      *  height 50'000) AND the digest gate, so P(block per nonce) = 2^epsilon *
      *  p^2 with p = target/2^256. At v4 heights the pre-hash gate is retired
      *  (see validation.cpp), leaving P = p. The one-time loosen is therefore
-     *      k = 2^epsilon * p(H_A) * (R_v3 / R_rc)
+     *      k = 2^epsilon * p(H_A-1) * (R_v3 / R_rc)
      *  and NOT the bare per-nonce throughput ratio R_v3/R_rc, which omits the
      *  2^epsilon * p factor. Note k depends on nBits at the activation height,
-     *  so it must be re-derived if H_A moves. An earlier staged value here was
-     *  the bare throughput ratio; it has been reverted to neutral pending a
-     *  correct derivation.
+     *  so it is derived from the actual parent nBits at consensus runtime,
+     *  rather than committed as a static target multiplier.
      *
      *  NOTE: the future datacenter profile (nMatMulRCProfile==2)
      *  raises per-nonce work ~16× (F_ep 5.32e13 → 8.45e14 MAC), so a datacenter
@@ -534,8 +535,8 @@ struct Params {
      *  itself remains gated on BTX_MATMUL_NO_INVERSION_GATE_RATIFIED and the
      *  GPU lifecycle ratification flag (separate external gates).
      *
-     *  Construction-time guardrail: chainparams.cpp rejects a neutral rescale
-     *  at a live public Profile-1 height. It cannot check the magnitude. */
+     *  Construction-time validation still requires a positive reducible
+     *  throughput ratio; final-binary measurement remains an activation gate. */
     int64_t nMatMulRCAsertRescaleNum{1};
     int64_t nMatMulRCAsertRescaleDen{1};
     /**

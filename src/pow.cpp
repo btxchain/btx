@@ -70,6 +70,8 @@
 #include <thread>
 #include <vector>
 
+#include <boost/multiprecision/cpp_int.hpp>
+
 #if defined(__APPLE__)
 #include <sys/sysctl.h>
 #endif
@@ -341,12 +343,10 @@ std::mutex g_matmul_gpu_prehash_scan_mutex;
 std::string g_matmul_gpu_prehash_scan_last_backend;
 std::string g_matmul_gpu_prehash_scan_last_error;
 GlobalMutex g_matmul_global_phase2_mutex;
-uint32_t g_matmul_global_phase2_this_minute GUARDED_BY(g_matmul_global_phase2_mutex){0};
-int64_t g_matmul_global_phase2_window_start_sec GUARDED_BY(g_matmul_global_phase2_mutex){0};
 // Cheap header-batch Phase-2 accounting keeps its own window so it can never
 // consume the bounded allowance reserved for expensive complete-block work.
-uint32_t g_matmul_global_header_phase2_this_minute GUARDED_BY(g_matmul_global_phase2_mutex){0};
-int64_t g_matmul_global_header_phase2_window_start_sec GUARDED_BY(g_matmul_global_phase2_mutex){0};
+MatMulPhase2BudgetTracker g_matmul_global_phase2_budget
+    GUARDED_BY(g_matmul_global_phase2_mutex);
 // P0.4: RC admission uses a separate global window so EncDr/LT traffic cannot
 // share (or be throttled by) the catastrophic RC recompute budget.
 GlobalMutex g_matmul_global_rc_mutex;
@@ -1009,6 +1009,51 @@ bool ReduceRescaleRatioToU32(int64_t num, int64_t den, uint32_t& out_num, uint32
     out_num = static_cast<uint32_t>(rn);
     out_den = static_cast<uint32_t>(rd);
     return true;
+}
+
+std::optional<arith_uint256> DeriveMatMulEpochATransitionTarget(
+    const arith_uint256& parent_target,
+    uint32_t pre_hash_epsilon_bits,
+    uint32_t throughput_num,
+    uint32_t throughput_den,
+    const arith_uint256& pow_limit)
+{
+    if (parent_target == 0 || throughput_num == 0 ||
+        throughput_den == 0 || pow_limit == 0) {
+        return std::nullopt;
+    }
+
+    using boost::multiprecision::cpp_int;
+    const auto to_wide = [](const arith_uint256& value) {
+        const uint256 encoded{ArithToUint256(value)};
+        cpp_int wide{0};
+        for (int limb = 3; limb >= 0; --limb) {
+            wide <<= 64;
+            wide += encoded.GetUint64(limb);
+        }
+        return wide;
+    };
+    const auto from_wide = [](cpp_int value) {
+        arith_uint256 narrowed{0};
+        const cpp_int mask{std::numeric_limits<uint32_t>::max()};
+        for (unsigned int limb = 0; limb < 8; ++limb) {
+            const uint32_t word{(value & mask).convert_to<uint32_t>()};
+            narrowed |= arith_uint256{word} << (limb * 32);
+            value >>= 32;
+        }
+        return narrowed;
+    };
+
+    const arith_uint256 pre_hash_target{
+        SaturatingLeftShift256(parent_target, pre_hash_epsilon_bits)};
+    const cpp_int numerator{
+        to_wide(parent_target) * to_wide(pre_hash_target) * throughput_num};
+    const cpp_int denominator{cpp_int{throughput_den} << 256};
+    cpp_int target{numerator / denominator};
+    const cpp_int wide_limit{to_wide(pow_limit)};
+    if (target > wide_limit) target = wide_limit;
+    if (target == 0) target = 1;
+    return from_wide(target);
 }
 
 unsigned int MatMulAsertFailClosedBits()
@@ -2809,7 +2854,26 @@ unsigned int MatMulAsert(const CBlockIndex* pindexLast, const Consensus::Params&
         if (!ReduceRescaleRatioToU32(params.nMatMulRCAsertRescaleNum, params.nMatMulRCAsertRescaleDen, rc_rn, rc_rd)) {
             return MatMulAsertFailClosedBits();
         }
-        arith_uint256 rc_target = ScaleTargetByTimespan(parent_target, rc_rn, rc_rd);
+        arith_uint256 rc_target;
+        if (params.IsMatMulV47EpochAActivationTuple()) {
+            // Atomic Epoch A removes the independent v3 pre-hash lottery.
+            // Continuity therefore depends on the live parent nBits as well as
+            // measured throughput; a static target multiplier is dimensionally
+            // wrong for this specific two-gate -> one-gate transition.
+            const auto derived{DeriveMatMulEpochATransitionTarget(
+                parent_target,
+                params.GetMatMulPreHashEpsilonBitsForHeight(next_height - 1),
+                rc_rn, rc_rd, pow_limit)};
+            if (!derived.has_value()) {
+                return MatMulAsertFailClosedBits();
+            }
+            rc_target = *derived;
+        } else {
+            // Later RC profile transitions retain one digest gate on both
+            // sides, so their calibrated throughput ratio remains a direct
+            // target scale.
+            rc_target = ScaleTargetByTimespan(parent_target, rc_rn, rc_rd);
+        }
         rc_target = ClampRetargetResult(rc_target, pow_limit);
         return rc_target.GetCompact();
     }
@@ -5543,7 +5607,7 @@ bool ConsumeMatMulPeerVerifyBudget(
     return true;
 }
 
-bool ConsumeGlobalMatMulPhase2Budget(
+bool MatMulPhase2BudgetTracker::Consume(
     uint32_t max_global_per_minute,
     uint32_t count,
     std::chrono::steady_clock::time_point now,
@@ -5552,8 +5616,6 @@ bool ConsumeGlobalMatMulPhase2Budget(
     if (count == 0) return true;
     using namespace std::chrono;
     const int64_t now_sec = duration_cast<seconds>(now.time_since_epoch()).count();
-
-    LOCK(g_matmul_global_phase2_mutex);
 
     // SEPARATE LANES. Cheap header-batch accounting and expensive complete-block
     // recompute must not share a counter, because they do not share a ceiling:
@@ -5564,24 +5626,32 @@ bool ConsumeGlobalMatMulPhase2Budget(
     // and every honest block's Phase-2 charge is then deferred for the rest of
     // the window. That is a cheap liveness attack on block verification, and it
     // is created by, not inherited into, the split of the two ceilings.
-    uint32_t& counter = lane == MatMulPhase2BudgetLane::HeaderBatch
-        ? g_matmul_global_header_phase2_this_minute
-        : g_matmul_global_phase2_this_minute;
-    int64_t& window_start = lane == MatMulPhase2BudgetLane::HeaderBatch
-        ? g_matmul_global_header_phase2_window_start_sec
-        : g_matmul_global_phase2_window_start_sec;
+    Window& window = lane == MatMulPhase2BudgetLane::HeaderBatch
+        ? m_headers
+        : m_expensive;
 
-    if (now_sec - window_start >= 60) {
-        window_start = now_sec;
-        counter = 0;
+    if (now_sec - window.start_sec >= 60) {
+        window.start_sec = now_sec;
+        window.count = 0;
     }
 
-    if (counter > max_global_per_minute ||
-        count > max_global_per_minute - counter) {
+    if (window.count > max_global_per_minute ||
+        count > max_global_per_minute - window.count) {
         return false;
     }
-    counter += count;
+    window.count += count;
     return true;
+}
+
+bool ConsumeGlobalMatMulPhase2Budget(
+    uint32_t max_global_per_minute,
+    uint32_t count,
+    std::chrono::steady_clock::time_point now,
+    MatMulPhase2BudgetLane lane)
+{
+    LOCK(g_matmul_global_phase2_mutex);
+    return g_matmul_global_phase2_budget.Consume(
+        max_global_per_minute, count, now, lane);
 }
 
 bool CanStartMatMulVerification(uint32_t pending_verifications, const Consensus::Params& params,

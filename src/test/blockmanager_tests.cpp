@@ -20,6 +20,8 @@
 #include <test/util/logging.h>
 #include <test/util/setup_common.h>
 
+#include <array>
+
 using node::BLOCK_SERIALIZATION_HEADER_SIZE;
 using node::BlockManager;
 using node::KernelNotifications;
@@ -27,6 +29,55 @@ using node::MAX_BLOCKFILE_SIZE;
 
 // use BasicTestingSetup here for the data directory configuration, setup, and cleanup
 BOOST_FIXTURE_TEST_SUITE(blockmanager_tests, BasicTestingSetup)
+
+BOOST_AUTO_TEST_CASE(matmul_replay_authority_context_migration)
+{
+    LOCK(cs_main);
+    CBlockIndex exact;
+    CBlockIndex trusted;
+    exact.nStatus = BLOCK_VALID_TREE | BLOCK_EXACT_REPLAY_VERIFIED;
+    trusted.nStatus = BLOCK_VALID_TREE | BLOCK_TRUSTED_REPLAY_ATTESTED;
+    std::array<CBlockIndex*, 2> indices{&exact, &trusted};
+    std::set<CBlockIndex*> dirty;
+    const uint256 context{1};
+
+    BOOST_CHECK_EQUAL(node::ClearStaleMatMulReplayAuthority(
+                          indices, context, context, dirty),
+                      1U);
+    BOOST_CHECK(exact.nStatus & BLOCK_EXACT_REPLAY_VERIFIED);
+    BOOST_CHECK(!(trusted.nStatus & BLOCK_TRUSTED_REPLAY_ATTESTED));
+    BOOST_CHECK_EQUAL(dirty.size(), 1U);
+    BOOST_CHECK(dirty.count(&trusted));
+
+    trusted.nStatus |= BLOCK_TRUSTED_REPLAY_ATTESTED;
+    dirty.clear();
+    BOOST_CHECK_EQUAL(node::ClearStaleMatMulReplayAuthority(
+                          indices, uint256{2}, context, dirty),
+                      2U);
+    BOOST_CHECK(!(exact.nStatus & BLOCK_EXACT_REPLAY_VERIFIED));
+    BOOST_CHECK(!(trusted.nStatus & BLOCK_TRUSTED_REPLAY_ATTESTED));
+    BOOST_CHECK_EQUAL(dirty.size(), 2U);
+    BOOST_CHECK(exact.nStatus & BLOCK_VALID_TREE);
+    BOOST_CHECK(trusted.nStatus & BLOCK_VALID_TREE);
+}
+
+BOOST_AUTO_TEST_CASE(matmul_replay_authority_context_binds_profile_and_height)
+{
+    auto params{CreateChainParams(ArgsManager{}, ChainType::REGTEST)};
+    auto& consensus{const_cast<Consensus::Params&>(params->GetConsensus())};
+    const uint256 baseline{node::ComputeMatMulReplayAuthorityContext(*params)};
+
+    ++consensus.nMatMulRCProfile;
+    const uint256 changed_profile{
+        node::ComputeMatMulReplayAuthorityContext(*params)};
+    BOOST_CHECK(changed_profile != baseline);
+
+    --consensus.nMatMulRCProfile;
+    --consensus.nMatMulRCHeight;
+    const uint256 changed_height{
+        node::ComputeMatMulReplayAuthorityContext(*params)};
+    BOOST_CHECK(changed_height != baseline);
+}
 
 BOOST_AUTO_TEST_CASE(blockmanager_find_block_pos)
 {

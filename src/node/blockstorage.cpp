@@ -55,6 +55,7 @@ static constexpr uint8_t DB_REINDEX_FLAG{'R'};
 static constexpr uint8_t DB_LAST_BLOCK{'l'};
 static constexpr uint8_t DB_PRUNE_LOCK{'L'};
 static constexpr uint8_t DB_PARKED_REORG_BRANCHES{'g'};
+static constexpr uint8_t DB_MATMUL_REPLAY_CONTEXT{'M'};
 // Keys used in previous version that might still be found in the DB:
 // BlockTreeDB::DB_TXINDEX_BLOCK{'T'};
 // BlockTreeDB::DB_TXINDEX{'t'}
@@ -84,7 +85,7 @@ bool BlockTreeDB::ReadLastBlockFile(int& nFile)
     return Read(DB_LAST_BLOCK, nFile);
 }
 
-bool BlockTreeDB::WriteBatchSync(const std::vector<std::pair<int, const CBlockFileInfo*>>& fileInfo, int nLastFile, const std::vector<const CBlockIndex*>& blockinfo, const std::unordered_map<std::string, node::PruneLockInfo>& prune_locks)
+bool BlockTreeDB::WriteBatchSync(const std::vector<std::pair<int, const CBlockFileInfo*>>& fileInfo, int nLastFile, const std::vector<const CBlockIndex*>& blockinfo, const std::unordered_map<std::string, node::PruneLockInfo>& prune_locks, const std::optional<uint256>& matmul_replay_context)
 {
     CDBBatch batch(*this);
     for (const auto& [file, info] : fileInfo) {
@@ -97,6 +98,9 @@ bool BlockTreeDB::WriteBatchSync(const std::vector<std::pair<int, const CBlockFi
     for (const auto& prune_lock : prune_locks) {
         if (prune_lock.second.temporary) continue;
         batch.Write(std::make_pair(DB_PRUNE_LOCK, prune_lock.first), prune_lock.second);
+    }
+    if (matmul_replay_context.has_value()) {
+        batch.Write(DB_MATMUL_REPLAY_CONTEXT, *matmul_replay_context);
     }
     return WriteBatch(batch, true);
 }
@@ -127,6 +131,11 @@ bool BlockTreeDB::ReadParkedReorgBranches(std::set<uint256>& roots)
     }
     roots = {persisted_roots.begin(), persisted_roots.end()};
     return true;
+}
+
+bool BlockTreeDB::ReadMatMulReplayContext(uint256& context)
+{
+    return Read(DB_MATMUL_REPLAY_CONTEXT, context);
 }
 
 bool BlockTreeDB::LoadPruneLocks(std::unordered_map<std::string, node::PruneLockInfo>& prune_locks, const util::SignalInterrupt& interrupt) {
@@ -222,6 +231,81 @@ bool BlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, s
 } // namespace kernel
 
 namespace node {
+
+uint256 ComputeMatMulReplayAuthorityContext(const CChainParams& params)
+{
+    // This schema domain covers consensus-code changes that do not alter an
+    // explicit parameter. Bump it whenever the selected replay predicate or
+    // statement semantics change.
+    static constexpr uint32_t SCHEMA_VERSION{1};
+    const Consensus::Params& consensus{params.GetConsensus()};
+    HashWriter hasher;
+    hasher << std::string{"BTX_MATMUL_REPLAY_AUTHORITY_CONTEXT"}
+           << SCHEMA_VERSION
+           << params.GenesisBlock().GetHash()
+           << consensus.fMatMulPOW
+           << consensus.nMatMulNonceSeedHeight
+           << consensus.nMatMulParentMtpSeedHeight
+           << consensus.nMatMulPreHashEpsilonBits
+           << consensus.nMatMulPreHashEpsilonBitsUpgradeHeight
+           << consensus.nMatMulPreHashEpsilonBitsUpgrade
+           << consensus.nMatMulV4Height
+           << consensus.nMatMulV4MinDimension
+           << consensus.nMatMulV4MaxDimension
+           << consensus.nMatMulV4Dimension
+           << consensus.nMatMulV4FreivaldsRounds
+           << consensus.nMatMulV4TranscriptBlockSize
+           << consensus.fMatMulV4FlatSketchReplay
+           << consensus.nMatMulBMX4CHeight
+           << consensus.nMatMulDRLTHeight
+           << consensus.nMatMulConsensusQStar
+           << consensus.nMatMulLTTranscriptBlockSize
+           << consensus.fMatMulLTSealAsPoW
+           << consensus.nMatMulRCHeight
+           << consensus.nMatMulRCProfile
+           << consensus.nMatMulRCProfile2FullyVerifyTerminalRound
+           << consensus.fMatMulRCUseToyDims
+           << consensus.nMatMulRCCoupledHeight
+           << consensus.nMatMulRCCoupledProfile
+           << consensus.fMatMulRCCoupledUseToyDims
+           << consensus.nMatMulHeaderPoWDiscountBits
+           << consensus.hashMatMulRCStage3ProgramRegistryAlgRoot
+           << consensus.hashMatMulRCStage3ProgramRegistryShaAuditRoot
+           << consensus.hashMatMulRCStage3ProgramRegistryBinding;
+    return hasher.GetHash();
+}
+
+size_t ClearStaleMatMulReplayAuthority(
+    std::span<CBlockIndex* const> indices,
+    const std::optional<uint256>& persisted_context,
+    const uint256& current_context,
+    std::set<CBlockIndex*>& dirty_indices)
+{
+    AssertLockHeld(::cs_main);
+    const bool exact_context_matches{
+        persisted_context.has_value() && *persisted_context == current_context};
+    size_t cleared{0};
+    for (CBlockIndex* index : indices) {
+        if (index == nullptr) {
+            continue;
+        }
+        // Trusted attestations are local-policy authority and are never safe
+        // to preserve across startup: the signer set and threshold are not
+        // consensus parameters. ExactReplay may survive only under an exact
+        // versioned consensus-context match.
+        uint32_t clear_mask{BLOCK_TRUSTED_REPLAY_ATTESTED};
+        if (!exact_context_matches) {
+            clear_mask |= BLOCK_EXACT_REPLAY_VERIFIED;
+        }
+        if ((index->nStatus & clear_mask) == 0) {
+            continue;
+        }
+        index->nStatus &= ~clear_mask;
+        dirty_indices.insert(index);
+        ++cleared;
+    }
+    return cleared;
+}
 
 // Randomized equal-work tie-breaking state (see blockstorage.h). Default ON
 // through startup argument handling, with explicit opt-out for legacy behavior.
@@ -720,9 +804,12 @@ bool BlockManager::WriteBlockIndexDB()
         m_dirty_blockindex.erase(it++);
     }
     int max_blockfile = WITH_LOCK(cs_LastBlockFile, return this->MaxBlockfileNum());
-    if (!m_block_tree_db->WriteBatchSync(vFiles, max_blockfile, vBlocks, m_prune_locks)) {
+    if (!m_block_tree_db->WriteBatchSync(
+            vFiles, max_blockfile, vBlocks, m_prune_locks,
+            m_pending_matmul_replay_context)) {
         return false;
     }
+    m_pending_matmul_replay_context.reset();
     return true;
 }
 
@@ -730,6 +817,26 @@ bool BlockManager::LoadBlockIndexDB(const std::optional<uint256>& snapshot_block
 {
     if (!LoadBlockIndex(snapshot_blockhash)) {
         return false;
+    }
+    const uint256 current_replay_context{
+        ComputeMatMulReplayAuthorityContext(GetParams())};
+    uint256 stored_replay_context;
+    const std::optional<uint256> persisted_replay_context{
+        m_block_tree_db->ReadMatMulReplayContext(stored_replay_context)
+            ? std::optional<uint256>{stored_replay_context}
+            : std::nullopt};
+    std::vector<CBlockIndex*> all_indices{GetAllBlockIndices()};
+    const size_t cleared_replay_status{
+        ClearStaleMatMulReplayAuthority(
+            all_indices, persisted_replay_context,
+            current_replay_context, m_dirty_blockindex)};
+    if (!persisted_replay_context.has_value() ||
+        *persisted_replay_context != current_replay_context) {
+        m_pending_matmul_replay_context = current_replay_context;
+        LogPrintf(
+            "MatMul replay authority context initialized/changed; "
+            "cleared %u stale block-index replay status entries\n",
+            static_cast<unsigned>(cleared_replay_status));
     }
     int max_blockfile_num{0};
 
@@ -784,6 +891,15 @@ bool BlockManager::LoadBlockIndexDB(const std::optional<uint256>& snapshot_block
     bool fReindexing = false;
     m_block_tree_db->ReadReindexing(fReindexing);
     if (fReindexing) m_blockfiles_indexed = false;
+
+    // Commit the new context and every cleared status bit in one LevelDB batch.
+    // A crash before this point leaves the old/missing context, so the next
+    // startup repeats the migration instead of trusting partially cleared data.
+    if ((m_pending_matmul_replay_context.has_value() ||
+         cleared_replay_status != 0) &&
+        !WriteBlockIndexDB()) {
+        return false;
+    }
 
     return true;
 }
