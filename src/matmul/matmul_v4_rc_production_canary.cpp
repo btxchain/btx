@@ -180,6 +180,12 @@ bool GoldenArchitectureMatchesFamily(const std::string& family,
     if (family == "hip") return architecture.rfind("gfx", 0) == 0;
     if (family == "metal") {
         // Apple silicon is recorded as a generation class, e.g. "m4_class".
+        // "other" is also legitimate: LtMetalArchNameClass emits it for any
+        // device it does not recognise, which is every future Apple generation
+        // until someone teaches it the name. Rejecting it would silently make
+        // the next generation's golden un-committable. Only "unknown" (probe
+        // failed) is refused, and the identity probe already rejects that.
+        if (architecture == "other") return true;
         return architecture.size() > 6 &&
             architecture.compare(architecture.size() - 6, 6, "_class") == 0 &&
             architecture.front() == 'm';

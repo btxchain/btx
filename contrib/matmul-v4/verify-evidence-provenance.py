@@ -33,7 +33,9 @@ from pathlib import Path
 # Must stay in sync with multi-gpu-golden-corpus.sh and the production-golden
 # policy. Any change in these paths invalidates evidence equivalence.
 BUILD_RELEVANT = ("CMakeLists.txt", "cmake", "src")
-REVISION_KEYS = ("source_revision", "git_tip", "tip_sha")
+# git_tip_sha is used by doc/evidence/cuda-blackwell-16gib-profile1-loaded-*/;
+# omitting it meant that artifact's revision was never resolved at all.
+REVISION_KEYS = ("source_revision", "git_tip", "git_tip_sha", "tip_sha")
 FINGERPRINT_KEY = "source_tree_fingerprint"
 DEFAULT_EXCLUSIONS = "contrib/matmul-v4/evidence-provenance-exclusions.json"
 
