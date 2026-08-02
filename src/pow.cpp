@@ -343,6 +343,10 @@ std::string g_matmul_gpu_prehash_scan_last_error;
 GlobalMutex g_matmul_global_phase2_mutex;
 uint32_t g_matmul_global_phase2_this_minute GUARDED_BY(g_matmul_global_phase2_mutex){0};
 int64_t g_matmul_global_phase2_window_start_sec GUARDED_BY(g_matmul_global_phase2_mutex){0};
+// Cheap header-batch Phase-2 accounting keeps its own window so it can never
+// consume the bounded allowance reserved for expensive complete-block work.
+uint32_t g_matmul_global_header_phase2_this_minute GUARDED_BY(g_matmul_global_phase2_mutex){0};
+int64_t g_matmul_global_header_phase2_window_start_sec GUARDED_BY(g_matmul_global_phase2_mutex){0};
 // P0.4: RC admission uses a separate global window so EncDr/LT traffic cannot
 // share (or be throttled by) the catastrophic RC recompute budget.
 GlobalMutex g_matmul_global_rc_mutex;
@@ -5542,7 +5546,8 @@ bool ConsumeMatMulPeerVerifyBudget(
 bool ConsumeGlobalMatMulPhase2Budget(
     uint32_t max_global_per_minute,
     uint32_t count,
-    std::chrono::steady_clock::time_point now)
+    std::chrono::steady_clock::time_point now,
+    MatMulPhase2BudgetLane lane)
 {
     if (count == 0) return true;
     using namespace std::chrono;
@@ -5550,16 +5555,32 @@ bool ConsumeGlobalMatMulPhase2Budget(
 
     LOCK(g_matmul_global_phase2_mutex);
 
-    if (now_sec - g_matmul_global_phase2_window_start_sec >= 60) {
-        g_matmul_global_phase2_window_start_sec = now_sec;
-        g_matmul_global_phase2_this_minute = 0;
+    // SEPARATE LANES. Cheap header-batch accounting and expensive complete-block
+    // recompute must not share a counter, because they do not share a ceiling:
+    // header batches may be granted the enlarged catch-up allowance while block
+    // verification is deliberately held to the bounded steady-state cap. With a
+    // single counter the larger ceiling wins -- one ~2000-header batch charged
+    // under the catch-up allowance pushes the shared count past the block cap
+    // and every honest block's Phase-2 charge is then deferred for the rest of
+    // the window. That is a cheap liveness attack on block verification, and it
+    // is created by, not inherited into, the split of the two ceilings.
+    uint32_t& counter = lane == MatMulPhase2BudgetLane::HeaderBatch
+        ? g_matmul_global_header_phase2_this_minute
+        : g_matmul_global_phase2_this_minute;
+    int64_t& window_start = lane == MatMulPhase2BudgetLane::HeaderBatch
+        ? g_matmul_global_header_phase2_window_start_sec
+        : g_matmul_global_phase2_window_start_sec;
+
+    if (now_sec - window_start >= 60) {
+        window_start = now_sec;
+        counter = 0;
     }
 
-    if (g_matmul_global_phase2_this_minute > max_global_per_minute ||
-        count > max_global_per_minute - g_matmul_global_phase2_this_minute) {
+    if (counter > max_global_per_minute ||
+        count > max_global_per_minute - counter) {
         return false;
     }
-    g_matmul_global_phase2_this_minute += count;
+    counter += count;
     return true;
 }
 
