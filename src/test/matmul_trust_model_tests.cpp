@@ -515,6 +515,47 @@ BOOST_AUTO_TEST_CASE(validation_rate_limit_ibd_global_floor_admits_full_headers_
         catch_up);
 }
 
+BOOST_AUTO_TEST_CASE(validation_rate_limit_header_and_expensive_lanes_are_independent)
+{
+    MatMulPhase2BudgetTracker tracker;
+    const auto start{std::chrono::steady_clock::time_point{
+        std::chrono::seconds{1'000}}};
+
+    // A full catch-up headers message exhausts only the enlarged cheap lane.
+    BOOST_REQUIRE(tracker.Consume(
+        /*max_per_minute=*/2'000, /*count=*/2'000, start,
+        MatMulPhase2BudgetLane::HeaderBatch));
+    BOOST_CHECK(!tracker.Consume(
+        /*max_per_minute=*/2'000, /*count=*/1, start,
+        MatMulPhase2BudgetLane::HeaderBatch));
+
+    // Expensive complete-block verification retains its independent bounded
+    // capacity in the same process-wide minute.
+    BOOST_REQUIRE(tracker.Consume(
+        /*max_per_minute=*/2, /*count=*/2,
+        start + std::chrono::seconds{30},
+        MatMulPhase2BudgetLane::ExpensiveVerification));
+    BOOST_CHECK(!tracker.Consume(
+        /*max_per_minute=*/2, /*count=*/1,
+        start + std::chrono::seconds{30},
+        MatMulPhase2BudgetLane::ExpensiveVerification));
+
+    // The two windows reset relative to their own first charge, not to the
+    // other lane's catch-up traffic.
+    BOOST_CHECK(tracker.Consume(
+        /*max_per_minute=*/2'000, /*count=*/1,
+        start + std::chrono::seconds{60},
+        MatMulPhase2BudgetLane::HeaderBatch));
+    BOOST_CHECK(!tracker.Consume(
+        /*max_per_minute=*/2, /*count=*/1,
+        start + std::chrono::seconds{60},
+        MatMulPhase2BudgetLane::ExpensiveVerification));
+    BOOST_CHECK(tracker.Consume(
+        /*max_per_minute=*/2, /*count=*/1,
+        start + std::chrono::seconds{90},
+        MatMulPhase2BudgetLane::ExpensiveVerification));
+}
+
 BOOST_AUTO_TEST_CASE(validation_rate_limit_fast_phase_budget_floor_outside_ibd)
 {
     auto params = MainParams();

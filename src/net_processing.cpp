@@ -1194,21 +1194,16 @@ private:
     void UnmarkMatMulAsyncVerification(const uint256& hash) NO_THREAD_SAFETY_ANALYSIS;
     bool IsMatMulAsyncVerificationPending(const uint256& hash) const NO_THREAD_SAFETY_ANALYSIS;
     /** Bodies deferred to HEADER_ONLY because no RC admission ticket could be
-     *  consumed. The deferral drops the body and removes the ordinary
-     *  download-in-flight entry, but the ticket is single-use and was destroyed
-     *  by the failed Consume(), so every re-delivery defers again. Without a
-     *  cooldown FindNextBlocksToDownload re-requests the same body on every
-     *  message-handler pass -- the same unbounded getdata/block busy loop the
-     *  async-verification marker above exists to prevent, measured at ~14,800
-     *  re-downloads/sec and ~2,400x traffic amplification between two honest
-     *  nodes at the RC boundary. Suppress re-request until the header-first
-     *  replay that will resolve the deferral has had time to finish. */
-    static constexpr std::chrono::seconds MATMUL_RC_DEFERRED_BODY_COOLDOWN{60};
+     *  consumed. A bounded, non-refreshing cooldown prevents a ticketless
+     *  sender from creating an unbounded getdata/block loop without letting it
+     *  indefinitely extend suppression of an honest source. Valid admission
+     *  and terminal verdict paths explicitly clear the hash. */
     mutable Mutex m_matmul_rc_deferred_mutex;
-    std::map<uint256, std::chrono::steady_clock::time_point>
-        m_matmul_rc_deferred_bodies GUARDED_BY(m_matmul_rc_deferred_mutex);
+    mutable node::RCDeferredBodyCooldowns m_matmul_rc_deferred_bodies
+        GUARDED_BY(m_matmul_rc_deferred_mutex);
     void MarkMatMulRCBodyDeferred(const uint256& hash) NO_THREAD_SAFETY_ANALYSIS;
     bool IsMatMulRCBodyDeferred(const uint256& hash) const NO_THREAD_SAFETY_ANALYSIS;
+    void ClearMatMulRCBodyDeferred(const uint256& hash) NO_THREAD_SAFETY_ANALYSIS;
     void PinMatMulBlockSource(const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     void UnpinMatMulBlockSource(const uint256& hash) NO_THREAD_SAFETY_ANALYSIS;
     void EraseMatMulBlockSourceIfUnpinned(const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
@@ -1822,25 +1817,22 @@ bool PeerManagerImpl::IsMatMulAsyncVerificationPending(const uint256& hash) cons
 
 void PeerManagerImpl::MarkMatMulRCBodyDeferred(const uint256& hash)
 {
-    const auto now{std::chrono::steady_clock::now()};
     LOCK(m_matmul_rc_deferred_mutex);
-    // Opportunistic prune; the map only ever holds near-tip hashes.
-    for (auto it{m_matmul_rc_deferred_bodies.begin()};
-         it != m_matmul_rc_deferred_bodies.end();) {
-        it = (now - it->second >= MATMUL_RC_DEFERRED_BODY_COOLDOWN)
-            ? m_matmul_rc_deferred_bodies.erase(it)
-            : std::next(it);
-    }
-    m_matmul_rc_deferred_bodies[hash] = now;
+    (void)m_matmul_rc_deferred_bodies.Mark(
+        hash, std::chrono::steady_clock::now());
 }
 
 bool PeerManagerImpl::IsMatMulRCBodyDeferred(const uint256& hash) const
 {
     LOCK(m_matmul_rc_deferred_mutex);
-    const auto it{m_matmul_rc_deferred_bodies.find(hash)};
-    if (it == m_matmul_rc_deferred_bodies.end()) return false;
-    return std::chrono::steady_clock::now() - it->second <
-        MATMUL_RC_DEFERRED_BODY_COOLDOWN;
+    return m_matmul_rc_deferred_bodies.Contains(
+        hash, std::chrono::steady_clock::now());
+}
+
+void PeerManagerImpl::ClearMatMulRCBodyDeferred(const uint256& hash)
+{
+    LOCK(m_matmul_rc_deferred_mutex);
+    m_matmul_rc_deferred_bodies.Erase(hash);
 }
 
 void PeerManagerImpl::PinMatMulBlockSource(const uint256& hash)
@@ -3583,6 +3575,7 @@ void PeerManagerImpl::ActiveTipChange(const CBlockIndex& new_tip, bool is_ibd)
         }
         for (const uint256& hash : stale) {
             (void)m_matmul_verify_worker->Cancel(hash);
+            ClearMatMulRCBodyDeferred(hash);
         }
     }
 }
@@ -5139,6 +5132,7 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
                 .parent_median_time_past = parent_mtp,
                 .completion =
                     [this, hash, height = index.nHeight](bool ok) {
+                        ClearMatMulRCBodyDeferred(hash);
                         if (!ok) return;
                         LOCK(cs_main);
                         if (node::matmul_trusted::IsTrustedMirror() &&
@@ -5151,6 +5145,9 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
                                 .PersistMatMulExactReplayVerdict(hash);
                         }
                     },
+                .retryable_failure = [this, hash] {
+                    ClearMatMulRCBodyDeferred(hash);
+                },
                 .header =
                     std::make_shared<const CBlockHeader>(header),
                 .priority = node::MatMulVerifyWorker::Priority::
@@ -5160,6 +5157,7 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
                     ->HandoffAuthenticatedTip(replacement) ==
                 node::MatMulVerifyWorker::HandoffResult::
                     HandedOff) {
+                ClearMatMulRCBodyDeferred(hash);
                 if (accepted_ticket) {
                     RememberMatMulRCOutboundTicket(
                         *accepted_ticket);
@@ -5279,6 +5277,7 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
         .parent_median_time_past = parent_mtp,
         .completion =
             [this, hash, height = index.nHeight](bool ok) {
+                ClearMatMulRCBodyDeferred(hash);
                 if (!ok) return;
                 LOCK(cs_main);
                 if (node::matmul_trusted::IsTrustedMirror() &&
@@ -5290,6 +5289,9 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
                     (void)m_chainman.PersistMatMulExactReplayVerdict(hash);
                 }
             },
+        .retryable_failure = [this, hash] {
+            ClearMatMulRCBodyDeferred(hash);
+        },
         .header = std::make_shared<const CBlockHeader>(header),
         .priority = authenticated_tip_child
             ? node::MatMulVerifyWorker::Priority::AuthenticatedTipChild
@@ -5331,6 +5333,8 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
             charged_address, charged_netgroup, budget_debit);
         return;
     }
+
+    ClearMatMulRCBodyDeferred(hash);
 
     if (params.IsMatMulRCProfile1Active(index.nHeight) &&
         !params.IsMatMulRCCoupledActive(index.nHeight)) {
@@ -6372,6 +6376,7 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                      authority_height = encdr->height,
                      source_pin = std::move(source_pin),
                      post = post_process](bool encdr_ok) mutable {
+                        ClearMatMulRCBodyDeferred(hash);
                         // The verdict reaches validation via the ENC-DR verdict
                         // memo consulted inside ContextualCheckBlock; re-enter
                         // through the ordinary acceptance machinery so the
@@ -6400,6 +6405,7 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                     .retryable_failure =
                     [this, hash, source_pin,
                      post = post_process]() mutable {
+                        ClearMatMulRCBodyDeferred(hash);
                         // No consensus verdict exists. Release all delivery
                         // bookkeeping without re-entering validation, pinning
                         // a false verdict, or invoking peer punishment. The
@@ -6498,6 +6504,7 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
     // from attaching a malformed non-hashed body to another peer's header and
     // causing punishment to be charged to the job owner.
     if (IsMatMulAsyncVerificationPending(block_hash)) {
+        ClearMatMulRCBodyDeferred(block_hash);
         LogDebug(BCLog::NET,
                  "Ignoring duplicate %s hash=%s from peer=%d: MatMul verification already pending\n",
                  source, block_hash.ToString(), node.GetId());
@@ -6605,6 +6612,7 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
     }
     if (!exact_recompute_required) {
         if (exact_encdr_profile) {
+            ClearMatMulRCBodyDeferred(block_hash);
             LogDebug(BCLog::NET,
                      "Skipping MatMul verification admission for %s hash=%s from peer=%d: validated block does not require recomputation\n",
                      source, block_hash.ToString(), node.GetId());
@@ -6619,6 +6627,7 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
     // CMPCTBLOCK, or BLOCKTXN completions before charging either admission
     // capacity or the peer/global verification budgets.
     if (exact_encdr_profile && IsMatMulAsyncVerificationPending(block_hash)) {
+        ClearMatMulRCBodyDeferred(block_hash);
         LogDebug(BCLog::NET,
                  "Ignoring duplicate %s hash=%s from peer=%d: MatMul verification already pending\n",
                  source, block_hash.ToString(), node.GetId());
@@ -6648,6 +6657,7 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
         admission.owns_async_marker = true;
         admission.reference_height = exact_reference_height;
         admission.work_units = work;
+        ClearMatMulRCBodyDeferred(block_hash);
         return true;
     }
     bool direct_authenticated_tip_child{false};
@@ -6687,10 +6697,10 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
             LogDebug(BCLog::NET,
                      "Deferring %s hash=%s from peer=%d: RC ExactReplay requires rcadmit\n",
                      source, block_hash.ToString(), node.GetId());
-            // Consume() is single-use and erased the ticket even on failure, so
-            // re-delivering this body cannot succeed until the header-first
-            // replay resolves it. Suppress re-request meanwhile; otherwise the
-            // dropped body is re-fetched on every SendMessages tick.
+            // There is no usable source-bound sidecar for this delivery.
+            // Suppress the immediate re-request loop, but do not refresh an
+            // existing deadline: repeated ticketless bodies must not censor a
+            // valid ticket/body supplied by another source indefinitely.
             MarkMatMulRCBodyDeferred(block_hash);
             admission.state = MatMulBlockAdmission::State::HEADER_ONLY;
             return true;
@@ -6769,6 +6779,7 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
         admission.handoff_ticket = accepted_ticket;
         admission.handoff_ticket_netgroup =
             node.nKeyedNetGroup;
+        ClearMatMulRCBodyDeferred(block_hash);
         return true;
     }
     if (accepted_ticket) {
@@ -6812,6 +6823,7 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
     admission.owns_async_marker = exact_encdr_profile;
     admission.reference_height = exact_reference_height;
     admission.work_units = work;
+    if (rc_profile) ClearMatMulRCBodyDeferred(block_hash);
     return true;
 }
 
@@ -6841,6 +6853,7 @@ void PeerManagerImpl::ProcessBlockSync(NodeId nodeid, CNode* node, const std::sh
     // that bounded observation until exact local authority succeeds, the
     // index is permanently failed, or its TTL expires.
     if (exact_replay_authenticated || terminal_failure) {
+        ClearMatMulRCBodyDeferred(block->GetHash());
         FinishMatMulAuthenticatedRelayObservation(
             block->GetHash(), exact_replay_authenticated);
     }
@@ -9248,6 +9261,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         // existing job without another admission charge.
         if (known_rc_header && m_matmul_verify_worker &&
             m_matmul_verify_worker->Contains(ticket.block_hash)) {
+            ClearMatMulRCBodyDeferred(ticket.block_hash);
             return;
         }
         const auto now{std::chrono::steady_clock::now()};
@@ -9274,6 +9288,14 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         // If the header preceded its valid sidecar, retry the same header-first
         // admission path now. This is essential to let a later valid candidate
         // supersede an invalid candidate planted for the hash.
+        if ((result == node::RCAdmissionStore::RememberResult::Stored ||
+             result == node::RCAdmissionStore::RememberResult::Duplicate) &&
+            known_rc_header) {
+            // A cryptographically valid source-bound sidecar now makes a
+            // fresh body request useful. Release any earlier ticketless-body
+            // cooldown before starting (or joining) header-first replay.
+            ClearMatMulRCBodyDeferred(ticket.block_hash);
+        }
         if (result == node::RCAdmissionStore::RememberResult::Stored &&
             known_rc_header && known_rc_index != nullptr) {
             MaybeStartMatMulRCHeaderVerification(

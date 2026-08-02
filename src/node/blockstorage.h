@@ -55,7 +55,7 @@ class BlockTreeDB : public CDBWrapper
 {
 public:
     using CDBWrapper::CDBWrapper;
-    bool WriteBatchSync(const std::vector<std::pair<int, const CBlockFileInfo*>>& fileInfo, int nLastFile, const std::vector<const CBlockIndex*>& blockinfo, const std::unordered_map<std::string, node::PruneLockInfo>& prune_locks);
+    bool WriteBatchSync(const std::vector<std::pair<int, const CBlockFileInfo*>>& fileInfo, int nLastFile, const std::vector<const CBlockIndex*>& blockinfo, const std::unordered_map<std::string, node::PruneLockInfo>& prune_locks, const std::optional<uint256>& matmul_replay_context = std::nullopt);
     bool ReadBlockFileInfo(int nFile, CBlockFileInfo& info);
     bool ReadLastBlockFile(int& nFile);
     bool WriteReindexing(bool fReindexing);
@@ -64,6 +64,7 @@ public:
     bool DeletePruneLock(const std::string& name);
     bool WriteParkedReorgBranches(const std::set<uint256>& roots);
     bool ReadParkedReorgBranches(std::set<uint256>& roots);
+    bool ReadMatMulReplayContext(uint256& context);
     bool WriteFlag(const std::string& name, bool fValue);
     bool ReadFlag(const std::string& name, bool& fValue);
     bool LoadBlockIndexGuts(const Consensus::Params& consensusParams, std::function<CBlockIndex*(const uint256&)> insertBlockIndex, const util::SignalInterrupt& interrupt)
@@ -130,6 +131,27 @@ using BlockMap = std::unordered_map<uint256, CBlockIndex, BlockHasher>;
  */
 extern bool g_random_tiebreak_enabled;
 extern uint256 g_tiebreak_seed;
+
+/**
+ * Versioned identity of every consensus/configuration input that selects the
+ * MatMul predicate whose ExactReplay result may be cached in CBlockIndex.
+ * Increment the internal schema domain whenever code changes that predicate
+ * without changing one of the serialized parameters below.
+ */
+[[nodiscard]] uint256 ComputeMatMulReplayAuthorityContext(
+    const CChainParams& params);
+
+/**
+ * Clear ExactReplay status unless the persisted context is current, and clear
+ * trusted-attestation status on every startup because its signer policy is not
+ * consensus-bound.
+ */
+[[nodiscard]] size_t ClearStaleMatMulReplayAuthority(
+    std::span<CBlockIndex* const> indices,
+    const std::optional<uint256>& persisted_context,
+    const uint256& current_context,
+    std::set<CBlockIndex*>& dirty_indices)
+    EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
 //! Enable/disable randomized equal-work tie-breaking and (re)seed it. Call once
 //! at startup before the block index is populated. A zero/absent seed argument
@@ -364,6 +386,10 @@ public:
     std::multimap<CBlockIndex*, CBlockIndex*> m_blocks_unlinked;
 
     std::unique_ptr<BlockTreeDB> m_block_tree_db GUARDED_BY(::cs_main);
+
+    /** Written atomically with any replay-bit migration. */
+    std::optional<uint256> m_pending_matmul_replay_context
+        GUARDED_BY(::cs_main);
 
     bool WriteBlockIndexDB() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool LoadBlockIndexDB(const std::optional<uint256>& snapshot_blockhash)

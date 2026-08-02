@@ -10725,20 +10725,11 @@ static bool ContextualCheckBlock(const CBlock& block,
                     (exact_index->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) &&
                     // A durable bit must never outrank a recorded failure.
                     !(exact_index->nStatus & BLOCK_FAILED_MASK)) {
-                    // CAUTION: this bit is persisted in the block index and is
-                    // never cleared by anything in this tree. It records that
-                    // THIS node completed an ExactReplay, but it is not bound
-                    // to the consensus parameters that were live when it was
-                    // written. If nMatMulRCProfile, nMatMulRCHeight or the
-                    // coupled height change for a datadir that already carries
-                    // the bit -- e.g. the published Profile 1 -> Profile 2
-                    // roadmap -- these heights resolve to a different PoW
-                    // predicate and this branch skips evaluating it. Before any
-                    // activation the block-index DB version must be bumped with
-                    // a one-time pass that clears bits 256/512, and the bit
-                    // must carry a profile tag so a stale verdict cannot be
-                    // replayed against a different predicate. See
-                    // doc/btx-matmul-v4.7-production-golden-policy.md.
+                    // Block-index startup accepts persisted authority only
+                    // when its versioned MatMul activation/profile context
+                    // matches the current immutable consensus parameters. A
+                    // mismatch atomically clears local and trusted replay bits
+                    // before validation begins.
                     encdr_ok = true;
                     if (rc_authority != nullptr) {
                         *rc_authority =

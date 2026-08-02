@@ -74,6 +74,7 @@ Consensus::Params EpochAParams(int32_t fork_height)
     p.nMatMulRCHeight = fork_height;
     p.nMatMulRCAsertRescaleNum = 5; // distinguishable Epoch-A sentinel
     p.nMatMulRCAsertRescaleDen = 11;
+    p.nMatMulPreHashEpsilonBits = 18;
     p.nMatMulDRLTHeight = disabled;
     p.nMatMulRCCoupledHeight = disabled;
     p.nMatMulRCProfile = 1;
@@ -257,12 +258,40 @@ BOOST_AUTO_TEST_CASE(epoch_a_fork_block_gets_rc_rescale)
 
     arith_uint256 parent_target{};
     parent_target.SetCompact(parent_bits);
-    arith_uint256 want = parent_target * 5 / 11;
     const arith_uint256 pow_limit{UintToArith256(p.powLimit)};
-    if (want > pow_limit) want = pow_limit;
+    const auto want{DeriveMatMulEpochATransitionTarget(
+        parent_target, p.nMatMulPreHashEpsilonBits, 5, 11, pow_limit)};
 
-    BOOST_CHECK_EQUAL(got, want.GetCompact());
+    BOOST_REQUIRE(want.has_value());
+    BOOST_CHECK_EQUAL(got, want->GetCompact());
     BOOST_CHECK(got != parent_bits);
+}
+
+BOOST_AUTO_TEST_CASE(epoch_a_target_derivation_uses_live_parent_lottery)
+{
+    const arith_uint256 pow_limit{~arith_uint256{0}};
+    const arith_uint256 parent{arith_uint256{1} << 200};
+    const auto exact{DeriveMatMulEpochATransitionTarget(
+        parent, 18, 1, 1, pow_limit)};
+    BOOST_REQUIRE(exact.has_value());
+    BOOST_CHECK(*exact == (arith_uint256{1} << 162));
+
+    const auto different_parent{DeriveMatMulEpochATransitionTarget(
+        arith_uint256{1} << 199, 18, 1, 1, pow_limit)};
+    BOOST_REQUIRE(different_parent.has_value());
+    BOOST_CHECK(*different_parent == (arith_uint256{1} << 160));
+    BOOST_CHECK(*different_parent != *exact);
+
+    // Saturating the retired pre-hash gate is still handled exactly.
+    const auto saturated{DeriveMatMulEpochATransitionTarget(
+        arith_uint256{1} << 255, 18, 1, 1, pow_limit)};
+    BOOST_REQUIRE(saturated.has_value());
+    BOOST_CHECK(*saturated == ((arith_uint256{1} << 255) - 1));
+
+    BOOST_CHECK(!DeriveMatMulEpochATransitionTarget(
+        parent, 18, 0, 1, pow_limit).has_value());
+    BOOST_CHECK(!DeriveMatMulEpochATransitionTarget(
+        parent, 18, 1, 0, pow_limit).has_value());
 }
 
 BOOST_AUTO_TEST_SUITE_END()

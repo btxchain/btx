@@ -136,7 +136,10 @@ enum BlockStatus : uint32_t {
     //! Header-derived ε=0 ExactReplay succeeded. This is deliberately
     //! independent of BLOCK_VALID_TRANSACTIONS/BLOCK_HAVE_DATA: it warms
     //! digest-only validation across restarts/reorgs but grants no
-    //! authenticated chainwork until the complete block is validated.
+    //! authenticated chainwork until the complete block is validated. The
+    //! block-index database binds persisted instances to a versioned hash of
+    //! the complete MatMul activation/profile tuple and clears them atomically
+    //! whenever that context changes.
     BLOCK_EXACT_REPLAY_VERIFIED = 256,
 
     //! An operator-configured M-of-N attestation quorum authorized this

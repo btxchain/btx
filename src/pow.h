@@ -206,6 +206,25 @@ bool ValidateMatMulAsertParams(const Consensus::Params& params, int32_t next_hei
  *  reduced terms fit in uint32. Prevents ScaleTargetByTimespan's independent
  *  per-term uint32 clamp from distorting a large-but-exact ratio (e.g. 2^40/2^39).*/
 bool ReduceRescaleRatioToU32(int64_t num, int64_t den, uint32_t& out_num, uint32_t& out_den);
+/**
+ * Derive the atomic v3 -> Epoch-A target from the live parent target.
+ *
+ * The v3 lottery requires both the digest target and the pre-hash target,
+ * while Profile 1 keeps only the digest target. For measured throughput ratio
+ * R_v3/R_rc = num/den, the exact continuity target is
+ *
+ *   floor(parent * min(2^epsilon * parent, 2^256-1) * num /
+ *         (2^256 * den)).
+ *
+ * Wide arithmetic is mandatory: a precommitted constant multiplier cannot
+ * represent the parent-target-dependent transition.
+ */
+std::optional<arith_uint256> DeriveMatMulEpochATransitionTarget(
+    const arith_uint256& parent_target,
+    uint32_t pre_hash_epsilon_bits,
+    uint32_t throughput_num,
+    uint32_t throughput_den,
+    const arith_uint256& pow_limit);
 /** AUDIT D1: the fail-CLOSED difficulty result (hardest representable target) used
  *  when a runtime ASERT invariant is breached, so an invalid config can never
  *  weaken (fail open to powLimit) current difficulty. */
@@ -669,6 +688,26 @@ enum class MatMulPhase2BudgetLane : uint8_t {
     ExpensiveVerification,
     HeaderBatch,
 };
+
+/** Clock-injected accounting for the independent process-wide Phase-2 lanes.
+ *  External synchronization is required; the production singleton is guarded
+ *  by its global mutex, while tests instantiate a local tracker. */
+class MatMulPhase2BudgetTracker
+{
+public:
+    bool Consume(uint32_t max_per_minute, uint32_t count,
+                 std::chrono::steady_clock::time_point now,
+                 MatMulPhase2BudgetLane lane);
+
+private:
+    struct Window {
+        uint32_t count{0};
+        int64_t start_sec{0};
+    };
+    Window m_expensive;
+    Window m_headers;
+};
+
 bool ConsumeGlobalMatMulPhase2Budget(uint32_t max_global_per_minute, uint32_t count, std::chrono::steady_clock::time_point now, MatMulPhase2BudgetLane lane = MatMulPhase2BudgetLane::ExpensiveVerification);
 bool ConsumeGlobalMatMulRCBudget(uint32_t max_global_per_minute, uint32_t count, std::chrono::steady_clock::time_point now);
 /** Roll back an RC budget debit only when admission failed before work began.

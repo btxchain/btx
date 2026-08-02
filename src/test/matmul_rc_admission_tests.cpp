@@ -90,6 +90,60 @@ BOOST_AUTO_TEST_CASE(target_scaling_is_frozen_and_bounded)
     BOOST_CHECK(*hardest == WorkTarget(20));
 }
 
+BOOST_AUTO_TEST_CASE(deferred_body_cooldown_is_non_refreshing_and_expires)
+{
+    node::RCDeferredBodyCooldowns cooldowns{{
+        .max_entries = 4,
+        .cooldown = std::chrono::seconds{60},
+    }};
+    const auto start{std::chrono::steady_clock::time_point{
+        std::chrono::seconds{1'000}}};
+    const uint256 hash{1};
+
+    BOOST_CHECK(cooldowns.Mark(hash, start));
+    BOOST_CHECK(cooldowns.Contains(hash, start + std::chrono::seconds{59}));
+
+    // A malicious duplicate immediately before expiry cannot extend the
+    // process-wide suppression window for an honest source.
+    BOOST_CHECK(!cooldowns.Mark(hash, start + std::chrono::seconds{59}));
+    BOOST_CHECK(!cooldowns.Contains(hash, start + std::chrono::seconds{60}));
+    BOOST_CHECK_EQUAL(cooldowns.Size(start + std::chrono::seconds{60}), 0U);
+
+    // Once expired, the same hash may acquire one fresh bounded cooldown.
+    BOOST_CHECK(cooldowns.Mark(hash, start + std::chrono::seconds{60}));
+}
+
+BOOST_AUTO_TEST_CASE(deferred_body_cooldown_is_bounded_and_explicitly_clearable)
+{
+    node::RCDeferredBodyCooldowns cooldowns{{
+        .max_entries = 2,
+        .cooldown = std::chrono::seconds{60},
+    }};
+    const auto start{std::chrono::steady_clock::time_point{
+        std::chrono::seconds{2'000}}};
+    const uint256 first{1};
+    const uint256 second{2};
+    const uint256 third{3};
+
+    BOOST_REQUIRE(cooldowns.Mark(first, start));
+    BOOST_REQUIRE(cooldowns.Mark(second, start + std::chrono::seconds{1}));
+    BOOST_CHECK_EQUAL(cooldowns.Size(start + std::chrono::seconds{1}), 2U);
+
+    // Capacity evicts the oldest deadline rather than growing on arbitrary
+    // hashes. The newer entry and newly installed entry remain active.
+    BOOST_REQUIRE(cooldowns.Mark(third, start + std::chrono::seconds{2}));
+    BOOST_CHECK(!cooldowns.Contains(first, start + std::chrono::seconds{2}));
+    BOOST_CHECK(cooldowns.Contains(second, start + std::chrono::seconds{2}));
+    BOOST_CHECK(cooldowns.Contains(third, start + std::chrono::seconds{2}));
+
+    // Valid ticket/body admission and terminal verdicts use this erase path.
+    cooldowns.Erase(second);
+    BOOST_CHECK(!cooldowns.Contains(second, start + std::chrono::seconds{2}));
+    BOOST_CHECK_EQUAL(cooldowns.Size(start + std::chrono::seconds{2}), 1U);
+    cooldowns.Clear();
+    BOOST_CHECK_EQUAL(cooldowns.Size(start + std::chrono::seconds{2}), 0U);
+}
+
 BOOST_AUTO_TEST_CASE(ticket_is_sidecar_bound_and_grindable)
 {
     const CBlockHeader header{Header()};

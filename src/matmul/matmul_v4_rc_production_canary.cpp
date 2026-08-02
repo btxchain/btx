@@ -184,9 +184,11 @@ bool GoldenArchitectureMatchesFamily(const std::string& family,
             architecture.compare(architecture.size() - 6, 6, "_class") == 0 &&
             architecture.front() == 'm';
     }
-    // Unknown families are not eligible for the production cohort; the cohort
-    // check below independently requires one cuda and one metal entry.
-    return true;
+    // Unknown families are not eligible for the production cohort. Requiring
+    // CUDA plus Metal is not enough by itself: otherwise an arbitrary third
+    // entry can acquire manifest authority without a defined architecture
+    // binding or a production identity probe.
+    return false;
 }
 
 BackendIdentity IdentifyBackend(
@@ -351,18 +353,18 @@ std::string ProviderFamily(const std::string& provider)
         provider.find("rocm") != std::string::npos) {
         return "hip";
     }
-    // The Ozaki MXFP4 lane has CUDA, HIP and Metal natives that all surface as
-    // `rc_ozaki_mxfp4`. This fallback must stay BELOW the explicit family
+    // The Ozaki MXFP4 lane has CUDA, HIP and Metal natives. This check must stay
+    // BELOW the explicit family
     // markers above: when it sat at the top, `metal_ozaki_mxfp4` and
     // `hip_ozaki_mxfp4` were both classified "cuda", and because
     // ProbeRCProductionProviderIdentity derives architecture/driver/runtime
     // from the family string alone, work executed on one vendor's device would
-    // have been identity-bound to another's. Latent today only because
-    // kRcOzakiMxfp4ProductionEligible is false. An unqualified `rc_ozaki_mxfp4`
-    // remains ambiguous and must not be made production eligible until the
-    // family is derived from the resolver's Kind rather than this label.
+    // have been identity-bound to another's. An unqualified
+    // `rc_ozaki_mxfp4` remains ambiguous: do not guess CUDA from the shared
+    // implementation label. It can become production eligible only after the
+    // family is derived from the resolver's typed Kind.
     if (provider.find("ozaki_mxfp4") != std::string::npos) {
-        return "cuda";
+        return {};
     }
     if (provider.find("ascend") != std::string::npos ||
         provider.find("cann") != std::string::npos) {

@@ -1730,7 +1730,7 @@ RCEpisodeParams MakeDatacenterRCEpisodeParams()
     p.rounds = kRCRoundsDC;         // 8  (2× base)
     p.L_lyr = kRCLayersDC;          // 24 (fused-FFN depth; rounds=8 ⇒ 15.88× MAC)
     p.d_ff = kRCFfnDimDC;           // 16384 (transformer 4× expansion; margin 2·d_ff)
-    p.b_seq = kRCBatchSeqDC;        // 32768 (2× base)
+    p.b_seq = kRCBatchSeqDC;        // 87552 (2736·32; ~5.34× base)
     p.T_leaf = kRCTileLeafBytesDC;  // 4096 (compute/hash margin lever, §4)
     // HARD GUARDRAIL (aicompute-alignment-review.md §4, the weakest link): the
     // datacenter profile MUST NOT grow n_ctx above the epoch-0 base. Attention has

@@ -126,6 +126,80 @@ RCAdmissionStore::RCAdmissionStore(Config config) : m_config{config}
         std::max<size_t>(1, m_config.max_unknown_submissions_per_netgroup);
 }
 
+RCDeferredBodyCooldowns::RCDeferredBodyCooldowns()
+    : RCDeferredBodyCooldowns(Config{})
+{
+}
+
+RCDeferredBodyCooldowns::RCDeferredBodyCooldowns(Config config)
+    : m_config{config}
+{
+    m_config.max_entries = std::max<size_t>(1, m_config.max_entries);
+    m_config.cooldown = std::max(std::chrono::seconds{1}, m_config.cooldown);
+}
+
+bool RCDeferredBodyCooldowns::Mark(
+    const uint256& block_hash,
+    std::chrono::steady_clock::time_point now)
+{
+    Prune(now);
+    if (m_deadlines.count(block_hash) != 0) {
+        // Deliberately do not refresh. Otherwise one source can keep a hash
+        // globally suppressed by redelivering a ticketless body just before
+        // every deadline.
+        return false;
+    }
+    if (m_deadlines.size() >= m_config.max_entries) {
+        const auto oldest{std::min_element(
+            m_deadlines.begin(), m_deadlines.end(),
+            [](const auto& lhs, const auto& rhs) {
+                return lhs.second < rhs.second;
+            })};
+        if (oldest != m_deadlines.end()) m_deadlines.erase(oldest);
+    }
+    m_deadlines.emplace(block_hash, now + m_config.cooldown);
+    return true;
+}
+
+bool RCDeferredBodyCooldowns::Contains(
+    const uint256& block_hash,
+    std::chrono::steady_clock::time_point now)
+{
+    Prune(now);
+    const auto it{m_deadlines.find(block_hash)};
+    if (it == m_deadlines.end()) return false;
+    return true;
+}
+
+void RCDeferredBodyCooldowns::Erase(const uint256& block_hash)
+{
+    m_deadlines.erase(block_hash);
+}
+
+void RCDeferredBodyCooldowns::Clear()
+{
+    m_deadlines.clear();
+}
+
+size_t RCDeferredBodyCooldowns::Size(
+    std::chrono::steady_clock::time_point now)
+{
+    Prune(now);
+    return m_deadlines.size();
+}
+
+void RCDeferredBodyCooldowns::Prune(
+    std::chrono::steady_clock::time_point now)
+{
+    for (auto it{m_deadlines.begin()}; it != m_deadlines.end();) {
+        if (now >= it->second) {
+            it = m_deadlines.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
 RCAdmissionStore::RememberResult RCAdmissionStore::Remember(
     const RCAdmissionTicket& ticket,
     uint64_t keyed_netgroup,

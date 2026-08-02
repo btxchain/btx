@@ -83,10 +83,11 @@ static constexpr CAmount BTX_SHIELDED_UNSHIELD_VELOCITY_MIN_CAP{10'000 * COIN};
 static constexpr int64_t kRCDatacenterAsertRescaleNum{16422};
 static constexpr int64_t kRCDatacenterAsertRescaleDen{1027};
 
-// MatMul v4.7 Epoch-A Profile-1 keeps a neutral one-time RC ASERT rescale in
-// the disabled implementation branch. The activation patch must install a
-// final-binary, provider-bound v3→RC calibration together with the finite
-// height. Historical 16893794/1 evidence remains a proposal, not a parameter.
+// MatMul v4.7 Epoch-A Profile-1 keeps a neutral provisional THROUGHPUT ratio in
+// the disabled implementation branch. At activation MatMulAsert derives the
+// actual target from this measured ratio, the live parent nBits, and epsilon;
+// it is not a static target multiplier. Historical 16893794/1 evidence remains
+// a proposal, not a parameter.
 static constexpr int64_t kRCEpochAProvisionalAsertRescaleNum{1};
 static constexpr int64_t kRCEpochAProvisionalAsertRescaleDen{1};
 
@@ -220,7 +221,8 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
     assert((consensus.nMatMulV4Dimension % Consensus::BMX4C_SCALE_BLOCK_LENGTH) == 0);
     // Audit ASERT-F1: the one-time ASERT rescale ratio must be strictly positive.
     // ValidateMatMulAsertParams enforces this at runtime (failing closed to
-    // powLimit), but that only surfaces AT the fork height; assert it at startup
+    // the hardest representable target), but that only surfaces AT the fork
+    // height; assert it at startup
     // too so a non-positive misconfiguration aborts the node immediately. Only
     // positivity is checked -- a LARGE ratio can be a legitimate calibration
     // (Num/Den is the GPU-vs-CPU throughput ratio, which can be large), and ASERT
@@ -357,16 +359,7 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
         assert(consensus.nMatMulRCAsertRescaleNum == kRCDatacenterAsertRescaleNum);
         assert(consensus.nMatMulRCAsertRescaleDen == kRCDatacenterAsertRescaleDen);
     }
-    // COUPLED PAIR (Profile 1) — the mirror of the guardrail above, which was
-    // missing. Profile 1 had the opposite asymmetry: the datacenter profile
-    // could not go live WITHOUT its rescale, but Profile 1 could, and the
-    // Epoch-A tuple predicate (IsMatMulV47EpochAActivationTuple) deliberately
-    // does not include nMatMulRCAsertRescale*. An activation patch that set a
-    // finite height and forgot the ratio therefore produced a structurally
-    // valid, assert-passing configuration whose difficulty is not re-anchored
-    // at all.
-    //
-    // That is not a small error. Epoch A does not merely make each nonce more
+    // Profile 1 changes the lottery shape. Epoch A does not merely make each nonce more
     // expensive, it changes the SHAPE of the lottery: pre-fork a block needs
     // BOTH the pre-hash gate (sigma <= target << epsilon, epsilon = 18 on
     // mainnet from height 50'000) AND the digest gate, so P(block per nonce)
@@ -375,20 +368,9 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
     // leaving P = p. A rescale derived only from per-nonce THROUGHPUT
     // (attempts/s before over attempts/s after) omits the 2^epsilon * p factor
     // entirely and is wrong by that factor. The correct one-time loosen is
-    //     k = 2^epsilon * p(H_A) * (R_v3 / R_rc)
-    // which depends on nBits at the activation height and must be re-derived if
-    // H_A slips.
-    //
-    // This assert cannot encode the calibrated magnitude — that needs silicon
-    // measurement on the final binary. It encodes the one thing that is certain:
-    // a neutral rescale at a live Profile-1 height is always wrong. Inert while
-    // heights remain INT32_MAX.
-    if (consensus.nMatMulRCProfile == 1 &&
-        consensus.nMatMulRCHeight != std::numeric_limits<int32_t>::max() &&
-        !is_regtest) {
-        assert(consensus.nMatMulRCAsertRescaleNum !=
-               consensus.nMatMulRCAsertRescaleDen);
-    }
+    //     k = 2^epsilon * p(H_A-1) * (R_v3 / R_rc).
+    // MatMulAsert now derives that factor from live parent nBits with a 512-bit
+    // intermediate. These fields carry only the measured throughput ratio.
     // ASERT-RATIO CONSISTENCY guardrail: the datacenter one-time ASERT rescale
     // constant MUST equal the EXACT reduced datacenter/base episode-MAC ratio, so
     // it can never silently drift from the real per-block work uplift when the

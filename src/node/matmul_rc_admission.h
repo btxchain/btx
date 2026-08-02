@@ -181,6 +181,47 @@ private:
         m_unknown_submission_history;
 };
 
+/**
+ * Bounded cooldown for RC bodies that arrived before a usable admission
+ * sidecar. The first deferral owns the deadline: duplicate deliveries cannot
+ * refresh it and thereby suppress an honest source indefinitely.
+ *
+ * Callers explicitly erase an entry when a valid sidecar/body is admitted or
+ * validation reaches a terminal verdict. Expired entries are removed on every
+ * lookup/insert, and the oldest deadline is evicted at the hard capacity bound.
+ * This class is intentionally clock-injected and lock-free; PeerManager owns
+ * the mutex, while unit tests use deterministic time points.
+ */
+class RCDeferredBodyCooldowns
+{
+public:
+    struct Config {
+        size_t max_entries{1024};
+        std::chrono::seconds cooldown{60};
+    };
+
+    RCDeferredBodyCooldowns();
+    explicit RCDeferredBodyCooldowns(Config config);
+
+    /** Returns true only when a new deadline was installed. */
+    [[nodiscard]] bool Mark(
+        const uint256& block_hash,
+        std::chrono::steady_clock::time_point now);
+    [[nodiscard]] bool Contains(
+        const uint256& block_hash,
+        std::chrono::steady_clock::time_point now);
+    void Erase(const uint256& block_hash);
+    void Clear();
+    [[nodiscard]] size_t Size(
+        std::chrono::steady_clock::time_point now);
+
+private:
+    void Prune(std::chrono::steady_clock::time_point now);
+
+    Config m_config;
+    std::map<uint256, std::chrono::steady_clock::time_point> m_deadlines;
+};
+
 } // namespace node
 
 #endif // BTX_NODE_MATMUL_RC_ADMISSION_H

@@ -141,6 +141,52 @@ BOOST_AUTO_TEST_CASE(provider_identity_probe_is_public_and_fail_closed)
     BOOST_CHECK(!metal.complete);
     BOOST_CHECK_EQUAL(metal.reason, "provider_runtime_identity_unavailable");
 #endif
+
+    // Family classification must prefer an explicit provider prefix over the
+    // shared Ozaki implementation suffix. An unqualified Ozaki label is
+    // ambiguous and must remain ineligible until the resolver carries a typed
+    // family.
+    BOOST_CHECK_EQUAL(
+        rc::ProbeRCProductionProviderIdentity("metal_ozaki_mxfp4").provider_family,
+        "metal");
+    BOOST_CHECK_EQUAL(
+        rc::ProbeRCProductionProviderIdentity("hip_ozaki_mxfp4").provider_family,
+        "hip");
+    const auto unqualified_ozaki{
+        rc::ProbeRCProductionProviderIdentity("rc_ozaki_mxfp4")};
+    BOOST_CHECK(unqualified_ozaki.provider_family.empty());
+    BOOST_CHECK(!unqualified_ozaki.complete);
+    BOOST_CHECK_EQUAL(unqualified_ozaki.reason, "no_device_provider");
+}
+
+BOOST_AUTO_TEST_CASE(test_canary_cannot_impersonate_a_production_family)
+{
+    rc::ResetRCProductionCanaryForTest();
+    Consensus::Params consensus{Params().GetConsensus()};
+    consensus.nMatMulRCHeight = 500'000;
+    consensus.nMatMulRCProfile = 1;
+    consensus.fMatMulRCUseToyDims = false;
+    consensus.nMatMulV4Dimension = 4096;
+
+    for (const std::string provider : {
+             "test:cuda", "test:cuda_shim", "test:metal_shim",
+             "test:hip_shim"}) {
+        const auto status{rc::RunRCProductionStartupCanaryForTest(
+            provider, {}, consensus, consensus.nMatMulRCHeight)};
+        BOOST_CHECK(status.outcome ==
+                    rc::RCProductionCanaryOutcome::ProviderNotPolicyEligible);
+        BOOST_CHECK_EQUAL(
+            status.reason, "test_canary_provider_resolves_to_real_family");
+        BOOST_CHECK(!status.attempted);
+        BOOST_CHECK(!status.activation_ready);
+        std::string capability_reason;
+        BOOST_CHECK(!rc::GetRCProductionProviderCapability(
+            provider, {}, consensus, consensus.nMatMulRCHeight,
+            &capability_reason).has_value());
+        BOOST_CHECK_EQUAL(
+            capability_reason, "provider_has_no_current_capability");
+    }
+    rc::ResetRCProductionCanaryForTest();
 }
 
 BOOST_AUTO_TEST_CASE(manifest_match_binds_provider_class_and_workload)
@@ -259,6 +305,24 @@ BOOST_AUTO_TEST_CASE(golden_cohort_rejects_missing_or_divergent_backend)
     BOOST_CHECK(!rc::RCProductionGoldenManifestCohortValid(divergent));
     divergent = cohort;
     divergent[1].harness_sha256.clear();
+    BOOST_CHECK(!rc::RCProductionGoldenManifestCohortValid(divergent));
+    divergent = cohort;
+    divergent[1].provider_class.device_architecture = "sm_120";
+    BOOST_CHECK(!rc::RCProductionGoldenManifestCohortValid(divergent));
+    divergent = cohort;
+    divergent[0].provider_class.device_architecture = "m4_class";
+    BOOST_CHECK(!rc::RCProductionGoldenManifestCohortValid(divergent));
+
+    // A valid CUDA+Metal pair must not make an undefined extra family
+    // production-authoritative merely because its metadata is nonempty.
+    divergent = cohort;
+    auto unknown{Golden()};
+    unknown.id = "unit-test-unknown-family";
+    unknown.provider_class = {
+        .provider_family = "future_accelerator",
+        .device_architecture = "future_v1",
+    };
+    divergent.push_back(unknown);
     BOOST_CHECK(!rc::RCProductionGoldenManifestCohortValid(divergent));
 }
 
