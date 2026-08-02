@@ -64,18 +64,30 @@ can arrive from any peer because only the configured signature matters.
 - The archive-provider and trusted-consumer bits are deliberately different.
   Both are unauthenticated routing hints; signatures remain mandatory.
 
-Trusted mode is accepted on mainnet only with a valid nonempty signer set and
-threshold, and only for RC Profile 1. Profile 2 statements cannot be produced
-or consumed by this protocol. `economic` and `spv` remain prohibited on
-mainnet.
+Trusted mode is accepted on mainnet only with a valid signer set and threshold,
+and only for RC Profile 1. Profile 2 statements cannot be produced or consumed
+by this protocol. `economic` and `spv` remain prohibited on mainnet.
 
-## Example: one GPU archive and three HA RPC mirrors
+**Mainnet requires at least 2 distinct `-matmultrustedpubkey` signers and
+`-matmultrustedthreshold=2` or higher.** Above the Profile-1 activation height
+the quorum does not accelerate the MatMul proof-of-work check, it replaces it,
+so a 1-of-1 mirror would make one key that node's sole proof-of-work authority:
+whoever holds or steals it could make the node accept MatMul-invalid blocks,
+with no second signer able to disagree. Repeating the same public key is
+rejected on every chain, since a repeated key raises N without adding an
+independent authority. Test networks (testnet/signet/regtest) still permit
+1-of-1 for rehearsals and functional tests.
 
-Generate a dedicated online attestation key. Put its WIF on the GPU archive in
-a permission-restricted file. Distribute only its compressed public key to the
-mirrors.
+## Example: two GPU archives and three HA RPC mirrors
 
-GPU archive:
+Two independent archives is the smallest topology mainnet accepts, because a
+single-key quorum would be a single point of proof-of-work authority.
+
+Generate a dedicated online attestation key per archive. Put each WIF on its
+own GPU archive in a permission-restricted file. Distribute only the compressed
+public keys to the mirrors.
+
+Each GPU archive (with its own key):
 
 ```ini
 matmulvalidation=consensus
@@ -93,10 +105,13 @@ Each VPS RPC mirror:
 
 ```ini
 matmulvalidation=trusted
-matmultrustedpubkey=02...compressed-public-key
-matmultrustedthreshold=1
+matmultrustedpubkey=02...archive-a-public-key
+matmultrustedpubkey=02...archive-b-public-key
+# Mainnet minimum. Both keys must be distinct; a repeated key is refused.
+matmultrustedthreshold=2
 matmultrustedwaitms=30000
-connect=<gpu-archive-address>
+connect=<gpu-archive-a-address>
+connect=<gpu-archive-b-address>
 server=1
 prune=0
 txindex=1
@@ -109,15 +124,11 @@ Use `rpcbind`, `rpcallowip`, firewalling, authentication, and TLS/reverse-proxy
 policy appropriate to the deployment. Trusted MatMul mode does not relax RPC
 security.
 
-For better fault and compromise tolerance, deploy three independent archive
-signers and configure the mirrors with all three public keys plus:
-
-```ini
-matmultrustedthreshold=2
-```
-
-The mirrors can connect to all providers. One provider being offline or one key
-being compromised then does not independently decide a verdict.
+For fault tolerance on top of the compromise floor, deploy three independent
+archive signers and configure the mirrors with all three public keys, keeping
+`matmultrustedthreshold=2`. The mirrors can connect to all providers; with
+2-of-3 one provider being offline no longer stalls the mirrors, and one key
+being compromised still does not independently decide a verdict.
 
 ## Lifecycle
 
@@ -205,7 +216,9 @@ without treating the referenced block as invalid.
   required. Such a machine is an archive of block/RPC data, not an independent
   MatMul validator.
 - Back up the archive's blocks/index and protect the online signing key.
-- Prefer M-of-N independent keys for a production fleet.
+- Use M-of-N independent keys for a production fleet. Mainnet enforces a floor
+  of 2 distinct signers with M >= 2; prefer 2-of-3 so one offline provider does
+  not stall the mirrors.
 - If a GPU/provider is unhealthy, stop archive attestation service until the
   validator again completes authoritative ExactReplay. Never sign from a
   trusted mirror or from a device failure.

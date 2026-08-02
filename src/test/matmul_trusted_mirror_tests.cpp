@@ -2,13 +2,25 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://opensource.org/license/mit/.
 
+#include <boost/signals2/connection.hpp>
 #include <boost/test/unit_test.hpp>
 
+#include <chainparams.h>
+#include <common/args.h>
+#include <init.h>
 #include <key_io.h>
 #include <matmul/trusted_exact_replay_attestation.h>
+#include <node/interface_ui.h>
 #include <node/matmul_trusted_attestations.h>
 #include <test/util/setup_common.h>
 #include <uint256.h>
+#include <univalue.h>
+#include <util/chaintype.h>
+#include <util/strencodings.h>
+#include <util/translation.h>
+
+#include <string>
+#include <vector>
 
 namespace {
 
@@ -31,6 +43,68 @@ struct RuntimeReset {
     {
         node::matmul_trusted::ResetForTest();
     }
+};
+
+//! Capture the message text passed to the last InitError() so a startup
+//! refusal can be asserted on its reason, not merely on the false return.
+class InitErrorCapture
+{
+public:
+    InitErrorCapture()
+        : m_connection{uiInterface.ThreadSafeMessageBox_connect(
+              [this](const bilingual_str& message, const std::string&,
+                     unsigned int style) {
+                  if ((style & CClientUIInterface::MSG_ERROR) ==
+                      CClientUIInterface::MSG_ERROR) {
+                      m_last_error = message.original;
+                  }
+                  return true; // Handled: keep the message off the test log.
+              })}
+    {
+    }
+    const std::string& LastError() const { return m_last_error; }
+
+private:
+    std::string m_last_error;
+    boost::signals2::scoped_connection m_connection;
+};
+
+std::string HexPubKey(const CKey& key)
+{
+    const CPubKey pubkey{key.GetPubKey()};
+    return HexStr(pubkey);
+}
+
+//! Run the real startup parameter interaction with a trusted-mirror signer
+//! configuration, on whatever chain the enclosing fixture selected.
+bool TrustedMirrorStartupAccepted(ArgsManager& args,
+                                  const std::vector<std::string>& pubkeys,
+                                  int64_t threshold,
+                                  std::string& error)
+{
+    node::matmul_trusted::ResetForTest();
+    args.ForceSetArg("-matmulvalidation", "trusted");
+    UniValue keys{UniValue::VARR};
+    for (const auto& hex : pubkeys) keys.push_back(hex);
+    args.ForceSetArgV("-matmultrustedpubkey", keys);
+    args.ForceSetArg("-matmultrustedthreshold", threshold);
+    InitErrorCapture capture;
+    const bool ok{AppInitParameterInteraction(args)};
+    error = capture.LastError();
+    return ok;
+}
+
+//! AppInitParameterInteraction only STAGES the signer configuration; the store
+//! is built later in AppInitMain. Complete that step the same way and report
+//! whether a live trusted-mirror quorum was actually installed.
+bool FinalizedTrustedMirrorInstalled(std::string& error)
+{
+    if (!node::matmul_trusted::FinalizeConfiguration(error)) return false;
+    return node::matmul_trusted::IsTrustedMirror();
+}
+
+struct RegtestParamSetup : public BasicTestingSetup {
+    RegtestParamSetup() : BasicTestingSetup{ChainType::REGTEST} {}
 };
 
 } // namespace
@@ -156,6 +230,119 @@ BOOST_AUTO_TEST_CASE(staged_signer_finalizes_after_ecc_and_resets_cleanly)
     node::matmul_trusted::ResetForTest();
     BOOST_CHECK(!node::matmul_trusted::IsConfigured());
     BOOST_CHECK(!node::matmul_trusted::HasLocalSigner());
+}
+
+// A trusted mirror does not merely accelerate the Profile-1 MatMul check, it
+// replaces it: above the Profile-1 height the local ExactReplay is skipped and
+// the attestation quorum is the node's only MatMul proof-of-work authority. A
+// 1-of-1 quorum therefore hands one key the power to make the node accept
+// MatMul-invalid blocks, so mainnet requires 2 distinct signers with M >= 2.
+BOOST_AUTO_TEST_CASE(mainnet_trusted_mirror_refuses_a_single_key_quorum)
+{
+    RuntimeReset reset;
+    BOOST_REQUIRE(Params().GetChainType() == ChainType::MAIN);
+    const std::string key_a{HexPubKey(NewKey())};
+    const std::string key_b{HexPubKey(NewKey())};
+    std::string error;
+    std::string finalize_error;
+
+    // 1-of-1: one key is the whole proof-of-work authority.
+    BOOST_CHECK(!TrustedMirrorStartupAccepted(
+        *m_node.args, {key_a}, /*threshold=*/1, error));
+    BOOST_CHECK_MESSAGE(
+        error.find("at least 2 distinct -matmultrustedpubkey signers") !=
+            std::string::npos,
+        error);
+    BOOST_CHECK(!FinalizedTrustedMirrorInstalled(finalize_error));
+    BOOST_CHECK(!node::matmul_trusted::IsConfigured());
+
+    // 2-of-N with M == 1 is the same single-key authority: any one of the two
+    // keys alone still carries a block.
+    BOOST_CHECK(!TrustedMirrorStartupAccepted(
+        *m_node.args, {key_a, key_b}, /*threshold=*/1, error));
+    BOOST_CHECK_MESSAGE(
+        error.find("threshold 1") != std::string::npos, error);
+    BOOST_CHECK(!FinalizedTrustedMirrorInstalled(finalize_error));
+    BOOST_CHECK(!node::matmul_trusted::IsConfigured());
+}
+
+BOOST_AUTO_TEST_CASE(mainnet_trusted_mirror_accepts_two_of_two)
+{
+    RuntimeReset reset;
+    BOOST_REQUIRE(Params().GetChainType() == ChainType::MAIN);
+    const std::string key_a{HexPubKey(NewKey())};
+    const std::string key_b{HexPubKey(NewKey())};
+    std::string error;
+
+    BOOST_CHECK_MESSAGE(
+        TrustedMirrorStartupAccepted(
+            *m_node.args, {key_a, key_b}, /*threshold=*/2, error),
+        error);
+    std::string finalize_error;
+    BOOST_CHECK_MESSAGE(FinalizedTrustedMirrorInstalled(finalize_error),
+                        finalize_error);
+    BOOST_CHECK_EQUAL(node::matmul_trusted::Threshold(), 2U);
+    BOOST_CHECK_EQUAL(node::matmul_trusted::TrustedSigners().size(), 2U);
+    BOOST_CHECK_EQUAL(node::matmul_trusted::WaitTimeout().count(), 30'000);
+}
+
+// Without this, "-matmultrustedpubkey=X -matmultrustedpubkey=X
+// -matmultrustedthreshold=2" would pass the mainnet 2-of-2 minimum while the
+// quorum still rests on one private key.
+BOOST_AUTO_TEST_CASE(duplicate_trusted_pubkeys_are_refused)
+{
+    RuntimeReset reset;
+    const std::string key_a{HexPubKey(NewKey())};
+    const std::string key_b{HexPubKey(NewKey())};
+    std::string error;
+    std::string finalize_error;
+
+    BOOST_CHECK(!TrustedMirrorStartupAccepted(
+        *m_node.args, {key_a, key_a}, /*threshold=*/2, error));
+    BOOST_CHECK_MESSAGE(
+        error.find("Duplicate -matmultrustedpubkey") != std::string::npos,
+        error);
+    BOOST_CHECK(!FinalizedTrustedMirrorInstalled(finalize_error));
+    BOOST_CHECK(!node::matmul_trusted::IsConfigured());
+
+    // Also refused when the duplicate is not adjacent and N would otherwise be
+    // large enough on its own.
+    BOOST_CHECK(!TrustedMirrorStartupAccepted(
+        *m_node.args, {key_a, key_b, key_a}, /*threshold=*/2, error));
+    BOOST_CHECK_MESSAGE(
+        error.find("Duplicate -matmultrustedpubkey") != std::string::npos,
+        error);
+    BOOST_CHECK(!FinalizedTrustedMirrorInstalled(finalize_error));
+    BOOST_CHECK(!node::matmul_trusted::IsConfigured());
+}
+
+// Test networks are unaffected: the functional/rehearsal harnesses run
+// single-signer mirrors and must keep working.
+BOOST_FIXTURE_TEST_CASE(non_mainnet_trusted_mirror_keeps_one_of_one,
+                        RegtestParamSetup)
+{
+    RuntimeReset reset;
+    BOOST_REQUIRE(Params().GetChainType() == ChainType::REGTEST);
+    const std::string key_a{HexPubKey(NewKey())};
+    std::string error;
+
+    BOOST_CHECK_MESSAGE(
+        TrustedMirrorStartupAccepted(
+            *m_node.args, {key_a}, /*threshold=*/1, error),
+        error);
+    std::string finalize_error;
+    BOOST_CHECK_MESSAGE(FinalizedTrustedMirrorInstalled(finalize_error),
+                        finalize_error);
+    BOOST_CHECK_EQUAL(node::matmul_trusted::Threshold(), 1U);
+
+    // The duplicate rejection is chain-independent.
+    BOOST_CHECK(!TrustedMirrorStartupAccepted(
+        *m_node.args, {key_a, key_a}, /*threshold=*/2, error));
+    BOOST_CHECK_MESSAGE(
+        error.find("Duplicate -matmultrustedpubkey") != std::string::npos,
+        error);
+    BOOST_CHECK(!FinalizedTrustedMirrorInstalled(finalize_error));
+    BOOST_CHECK(!node::matmul_trusted::IsConfigured());
 }
 
 BOOST_AUTO_TEST_SUITE_END()

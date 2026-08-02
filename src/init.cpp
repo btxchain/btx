@@ -538,8 +538,8 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-assumevalid=<hex>", strprintf("If this block is in the chain assume that it and its ancestors are valid and potentially skip script verification for their transactions while still checking other consensus rules (0 to verify all, default: %s, testnet3: %s, testnet4: %s, signet: %s, shieldedv2dev: %s)", defaultChainParams->GetConsensus().defaultAssumeValid.GetHex(), testnetChainParams->GetConsensus().defaultAssumeValid.GetHex(), testnet4ChainParams->GetConsensus().defaultAssumeValid.GetHex(), signetChainParams->GetConsensus().defaultAssumeValid.GetHex(), shieldedv2devChainParams->GetConsensus().defaultAssumeValid.GetHex()), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmulvalidation=<mode>", "Select MatMul transcript verification mode: consensus (default), trusted, economic, or spv. trusted performs ordinary block/body/script validation but replaces local Profile-1 ExactReplay with an explicitly configured M-of-N signed archive-validator quorum; it is an operator-trusted mirror, not an independently validating full node.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmulrcexecution=<mode>", "Select local MatMul RC ExactReplay execution: strict-device requires a production-qualified device and forbids CPU fallback; auto-fallback permits device-to-CPU fallback for pre-activation/testing; cpu-diagnostic explicitly runs the portable oracle (default: auto-fallback while public RC activation is disabled). Only strict-device with a currently qualified production provider advertises NODE_MATMUL_CONSENSUS.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-matmultrustedpubkey=<hex>", "Compressed secp256k1 public key trusted to attest successful Profile-1 ExactReplay. Repeat for N signers. Required with -matmulvalidation=trusted.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-matmultrustedthreshold=<n>", "Required distinct trusted signatures (M) for one block, 1..N (default: 1).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-matmultrustedpubkey=<hex>", "Compressed secp256k1 public key trusted to attest successful Profile-1 ExactReplay. Repeat for N signers; each must be distinct. Required with -matmulvalidation=trusted. On mainnet a trusted mirror needs at least 2 distinct signers.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-matmultrustedthreshold=<n>", "Required distinct trusted signatures (M) for one block, 1..N (default: 1). On mainnet a trusted mirror requires at least 2, because the quorum replaces the Profile-1 MatMul proof-of-work check and a 1-of-1 quorum would make one key the node's sole proof-of-work authority.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmultrustedwaitms=<n>", "Maximum worker wait for an attestation quorum before leaving the block retryable, in milliseconds (default: 30000, maximum: 600000).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmulattestationsignerkeyfile=<file>", "Archive-validator file containing exactly one WIF signing key. Relative paths resolve under the network datadir. The corresponding public key is added to the configured signer set. Protect this file as an online validation key.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmulattestationsignerkey=<wif>", "UNSAFE/deprecated convenience form for the archive-validator WIF key; command lines may leak through process listings. Prefer -matmulattestationsignerkeyfile.", ArgsManager::ALLOW_ANY | ArgsManager::SENSITIVE, OptionsCategory::OPTIONS);
@@ -1330,6 +1330,20 @@ bool AppInitParameterInteraction(const ArgsManager& args)
                 _("Invalid compressed public key in -matmultrustedpubkey: %s"),
                 encoded));
         }
+        // N must count INDEPENDENT attesting parties. A repeated key inflates
+        // N without adding an independent signer, which would let
+        // "-matmultrustedpubkey=X -matmultrustedpubkey=X
+        // -matmultrustedthreshold=2" pass every M-of-N minimum while the
+        // quorum still rests on a single private key. The store constructor
+        // also rejects duplicates, but only in AppInitMain, after
+        // daemonization; reject here so the operator sees the reason on the
+        // terminal that started the node.
+        if (std::find(trusted_signers.begin(), trusted_signers.end(),
+                      pubkey) != trusted_signers.end()) {
+            return InitError(strprintf(
+                _("Duplicate -matmultrustedpubkey: %s. Every trusted signer must be a distinct key; a repeated key raises N without adding an independent attestation authority."),
+                encoded));
+        }
         trusted_signers.push_back(pubkey);
     }
 
@@ -1387,6 +1401,24 @@ bool AppInitParameterInteraction(const ArgsManager& args)
             static_cast<size_t>(trusted_threshold) >
                 preliminary_signer_capacity) {
             return InitError(_("-matmultrustedthreshold must be between 1 and the number of configured signer keys."));
+        }
+        // Mainnet floor: no single key may be a node's whole Profile-1 PoW
+        // authority. Above the Profile-1 activation height TRUSTED mode does
+        // not merely accelerate the MatMul check, it REPLACES it: the local
+        // ExactReplay is skipped entirely and the block's MatMul PoW is
+        // accepted on the attestation quorum alone (see validation.cpp
+        // `trusted_profile1` / WaitForQuorum). With a 1-of-1 quorum the holder
+        // of that one key -- or anyone who steals it -- can make this node
+        // accept MatMul-invalid blocks, with no second signer to disagree.
+        // Requiring 2 distinct keys AND M >= 2 means a single compromise or a
+        // single lost key can no longer forge acceptance. Test networks keep
+        // 1-of-1 so the functional/rehearsal harnesses stay single-signer.
+        if (trusted_mirror_mode &&
+            chainparams.GetChainType() == ChainType::MAIN &&
+            (trusted_signers.size() < 2 || trusted_threshold < 2)) {
+            return InitError(strprintf(
+                _("A trusted MatMul mirror on mainnet requires at least 2 distinct -matmultrustedpubkey signers and -matmultrustedthreshold of at least 2 (configured: %u signer(s), threshold %d). In trusted mode the signer quorum REPLACES the Profile-1 MatMul proof-of-work check, so a single-key quorum makes that one key this node's sole proof-of-work authority and its compromise would make the node accept MatMul-invalid blocks. Configure a second independent signer, or run -matmulvalidation=consensus to validate MatMul independently."),
+                trusted_signers.size(), trusted_threshold));
         }
         matmul::trusted::StoreConfig config;
         config.chain_id = chainparams.GenesisBlock().GetHash();
