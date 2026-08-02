@@ -429,7 +429,16 @@ payload = {
         "CommittedRCProductionGoldenManifest may be populated only from a reviewed corpus where complete_multi_gpu_match is true.",
         "Public evidence must remain machine-class only (no hostname/SKU/path identifiers).",
     ],
-    "ratification_gates": False,
+    # This comparator measures digest agreement between providers. It has no
+    # visibility into consensus parameters or the ratification constants, so it
+    # cannot report their state -- and a hard-coded False said "not ratified"
+    # even in artifacts produced from a tree where those flags are true.
+    # Renamed and restated so the field describes what this tool actually
+    # establishes: agreement here does not by itself authorize activation.
+    "authorizes_activation": False,
+    "authorizes_activation_reason":
+        "digest agreement across providers only; this tool does not read "
+        "consensus parameters, ratification flags, or the committed manifest",
 }
 out_path.write_text(json.dumps(payload, indent=2) + "\n")
 print(json.dumps({"wrote": str(out_path), "cuda_metal_match": cuda_metal_match, "complete_multi_gpu_match": complete_match, "mismatches": len(mismatches), "coverage_failures": len(coverage_failures)}, indent=2))
