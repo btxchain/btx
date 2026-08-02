@@ -219,13 +219,27 @@ public:
     RCDeferredBodyCooldowns();
     explicit RCDeferredBodyCooldowns(Config config);
 
-    /** Returns true only when a new deadline was installed. */
+    /** Returns true only when a new deadline was installed.
+     *
+     *  Keyed by (block hash, keyed netgroup), NOT by hash alone. With a
+     *  hash-only key an unsolicited valid body from one source suppressed that
+     *  block's download from EVERY peer: the delivery path sets
+     *  force_processing=false, no ticket is consumed, and the mark then gates
+     *  FindNextBlocksToDownload for all sources. Non-refresh bounds a single
+     *  window but not renewal, so re-sending once per cooldown approximated
+     *  continuous suppression of a specific near-tip hash. Scoping the key to
+     *  the delivering peer keeps the anti-busy-loop property while leaving
+     *  every other source immediately eligible. */
     [[nodiscard]] bool Mark(
         const uint256& block_hash,
+        int64_t peer_id,
         std::chrono::steady_clock::time_point now);
     [[nodiscard]] bool Contains(
         const uint256& block_hash,
+        int64_t peer_id,
         std::chrono::steady_clock::time_point now);
+    /** Erase every peer's cooldown for this hash (admission succeeded or
+     *  validation reached a terminal verdict, so no source needs holding off). */
     void Erase(const uint256& block_hash);
     void Clear();
     [[nodiscard]] size_t Size(
@@ -235,7 +249,7 @@ private:
     void Prune(std::chrono::steady_clock::time_point now);
 
     Config m_config;
-    std::map<uint256, std::chrono::steady_clock::time_point> m_deadlines;
+    std::map<std::pair<uint256, int64_t>, std::chrono::steady_clock::time_point> m_deadlines;
 };
 
 } // namespace node
