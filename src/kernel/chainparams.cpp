@@ -357,6 +357,38 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
         assert(consensus.nMatMulRCAsertRescaleNum == kRCDatacenterAsertRescaleNum);
         assert(consensus.nMatMulRCAsertRescaleDen == kRCDatacenterAsertRescaleDen);
     }
+    // COUPLED PAIR (Profile 1) — the mirror of the guardrail above, which was
+    // missing. Profile 1 had the opposite asymmetry: the datacenter profile
+    // could not go live WITHOUT its rescale, but Profile 1 could, and the
+    // Epoch-A tuple predicate (IsMatMulV47EpochAActivationTuple) deliberately
+    // does not include nMatMulRCAsertRescale*. An activation patch that set a
+    // finite height and forgot the ratio therefore produced a structurally
+    // valid, assert-passing configuration whose difficulty is not re-anchored
+    // at all.
+    //
+    // That is not a small error. Epoch A does not merely make each nonce more
+    // expensive, it changes the SHAPE of the lottery: pre-fork a block needs
+    // BOTH the pre-hash gate (sigma <= target << epsilon, epsilon = 18 on
+    // mainnet from height 50'000) AND the digest gate, so P(block per nonce)
+    // = 2^epsilon * p^2. At v4 heights the pre-hash gate is retired outright
+    // (validation.cpp, "the pre-hash lottery gate is retired at v4 heights"),
+    // leaving P = p. A rescale derived only from per-nonce THROUGHPUT
+    // (attempts/s before over attempts/s after) omits the 2^epsilon * p factor
+    // entirely and is wrong by that factor. The correct one-time loosen is
+    //     k = 2^epsilon * p(H_A) * (R_v3 / R_rc)
+    // which depends on nBits at the activation height and must be re-derived if
+    // H_A slips.
+    //
+    // This assert cannot encode the calibrated magnitude — that needs silicon
+    // measurement on the final binary. It encodes the one thing that is certain:
+    // a neutral rescale at a live Profile-1 height is always wrong. Inert while
+    // heights remain INT32_MAX.
+    if (consensus.nMatMulRCProfile == 1 &&
+        consensus.nMatMulRCHeight != std::numeric_limits<int32_t>::max() &&
+        !is_regtest) {
+        assert(consensus.nMatMulRCAsertRescaleNum !=
+               consensus.nMatMulRCAsertRescaleDen);
+    }
     // ASERT-RATIO CONSISTENCY guardrail: the datacenter one-time ASERT rescale
     // constant MUST equal the EXACT reduced datacenter/base episode-MAC ratio, so
     // it can never silently drift from the real per-block work uplift when the
