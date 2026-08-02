@@ -30,7 +30,7 @@ import argparse
 ROUNDS   = 8
 L_LYR    = 24
 D_FF     = 16384
-B_SEQ    = 32768
+B_SEQ    = 87552  # = kRCBatchSeqDC (src/matmul/matmul_v4_rc.h); was 32768
 N_CTX    = 786432
 # d_model / d_head / n_q are not pinned in the task; use representative values.
 # Only ratios (round vs episode, tile coverage) matter for the conclusions.

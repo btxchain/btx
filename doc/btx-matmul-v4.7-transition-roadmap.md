@@ -133,8 +133,10 @@ The corrected Apple M4 Max Metal campaign used 100 distinct
 - deterministic injected-device mismatch under the pre-activation
   `auto-fallback` policy: two identical portable recoveries of an honest claim
   plus fail-closed confirmation of a false claim; the production
-  `strict-device` policy instead classifies the mismatch as local, quarantines
-  the provider, and leaves the block retryable;
+  `strict-device` policy instead classifies the mismatch as local and leaves
+  the block retryable, without quarantining the provider (a sole device
+  disagreement is `UnconfirmedDigestMismatch`, which is deliberately not
+  quarantinable);
 - full Metal pipeline with zero CPU contraction calls or fallbacks.
 
 The sanitized Blackwell-class CUDA campaign is additional cross-backend
@@ -211,8 +213,9 @@ Before an activation-height PR:
 - Poseidon2 admission work, per-peer/netgroup budgets, and global caps must be
   enforced together.
 - In production `strict-device` mode, device mismatch is a local failure that
-  quarantines the provider and leaves the block retryable; it never triggers
-  inline portable replay, permanent rejection, or peer punishment.
+  leaves the block retryable; it never triggers inline portable replay,
+  permanent rejection, peer punishment, or provider quarantine. Quarantine is
+  reserved for `ExecutionFailure`.
 
 ## 6. Proof-security gates
 
