@@ -206,7 +206,16 @@ static constexpr uint32_t BMX4C_FALLBACK_INT8_ACCUMULATOR_BITS{32}; //!< C-1 flo
 //! retargeted to the correct object (measured no-inversion + ratification, not
 //! relay readiness). Flip to true ONLY in the deliberate, reviewed source change
 //! of the release that ships activation, AFTER gates (1)-(2) are recorded.
-static constexpr bool BTX_MATMUL_NO_INVERSION_GATE_RATIFIED{false};
+//!
+//! FLIPPED TRUE for the Epoch-A activation at mainnet height 181'894. Recorded
+//! basis: the seed-grinding advantage is exactly 1.0 and the Profile-1
+//! ExactReplay predicate is byte-reproducible across two independent
+//! accelerator vendors at one code freeze (doc/evidence/
+//! multi-gpu-profile1-goldens-cuda-metal-2026-08-03-sealed, complete_multi_gpu_
+//! match=true). This flag records the operator's ratification decision; it is
+//! not itself a measurement, and flipping it is the deliberate reviewed source
+//! change this comment always required.
+static constexpr bool BTX_MATMUL_NO_INVERSION_GATE_RATIFIED{true};
 
 //! MatMul v4.7 GPU lifecycle FAIL-CLOSED ACTIVATION GATE.
 //!
@@ -220,7 +229,26 @@ static constexpr bool BTX_MATMUL_NO_INVERSION_GATE_RATIFIED{false};
 //! lifecycle.  Keep this false in implementation-only releases.  Flip it only
 //! in the separately reviewed activation-height change that records those
 //! artifacts; regtest remains exempt so the implementation can be exercised.
-static constexpr bool BTX_MATMUL_V47_GPU_LIFECYCLE_GATE_RATIFIED{false};
+//!
+//! FLIPPED TRUE for the Epoch-A activation at mainnet height 181'894. Recorded
+//! artifacts, each committed under doc/evidence/ and bound to a resolvable
+//! revision and build-relevant tree fingerprint:
+//!   - frozen production goldens, CUDA + Metal, sealed at one code freeze
+//!     (multi-gpu-profile1-goldens-cuda-metal-2026-08-03-sealed): all eight
+//!     digests and frozen header byte strings identical, 1'088 device calls and
+//!     1'129'198'441'725'952 device MACs on each provider, zero CPU GEMM calls,
+//!     zero CPU MACs, zero fallbacks, ExtractMX self-qualification PASS;
+//!   - zero-fallback lifecycle/soak campaign across the RC boundary
+//!     (cuda-profile1-soak-2026-08-02): 38 scenarios including restart and
+//!     cache-persist, which cross a process boundary and therefore exercise the
+//!     durable replay verdict and its consensus-context binding, zero failures;
+//!   - ASERT calibration measured same-silicon on two vendors
+//!     (asert-two-rig-calibration-2026-08-03).
+//!
+//! NOT established by those artifacts, and accepted as residual risk by the
+//! operator in flipping this: multi-day wall-clock soak, multi-peer public
+//! testnet topology, and upgrade behaviour across released binaries.
+static constexpr bool BTX_MATMUL_V47_GPU_LIFECYCLE_GATE_RATIFIED{true};
 
 /**
  * Per-profile MatMul v4 shape + carriage (consensus-normative; design §4.1 and

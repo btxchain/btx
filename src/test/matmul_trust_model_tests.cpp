@@ -424,6 +424,11 @@ BOOST_AUTO_TEST_CASE(validation_rate_limit_per_peer_and_max_concurrent_verificat
 {
     auto params = MainParams();
     params.nMatMulPeerVerifyBudgetPerMin = 8;
+    // Mainnet v4 is live at the Epoch-A height, and these cases use the
+    // INT32_MAX default reference height, so SelectMatMulPeerVerifyBudgetBase
+    // reads the v4 field. Mirror the limit so the case still exercises the
+    // per-peer limiter rather than an unrelated production budget.
+    params.nMatMulV4PeerVerifyBudgetPerMin = 8;
     params.nMatMulMaxPendingVerifications = 4;
 
     MatMulPeerVerificationBudget budget;
@@ -442,6 +447,11 @@ BOOST_AUTO_TEST_CASE(validation_rate_limit_ibd_budget_floor_supports_repeated_he
 {
     auto params = MainParams();
     params.nMatMulPeerVerifyBudgetPerMin = 32;
+    // Mainnet v4 is live at the Epoch-A height, and these cases use the
+    // INT32_MAX default reference height, so SelectMatMulPeerVerifyBudgetBase
+    // reads the v4 field. Mirror the limit so the case still exercises the
+    // per-peer limiter rather than an unrelated production budget.
+    params.nMatMulV4PeerVerifyBudgetPerMin = 32;
 
     BOOST_CHECK_EQUAL(EffectiveMatMulPeerVerifyBudgetPerMin(params, /*is_ibd=*/false), 32U);
     // WP-10 / C2 residual: the IBD floor is now a TWO-REGIME function of the
@@ -484,6 +494,11 @@ BOOST_AUTO_TEST_CASE(validation_rate_limit_ibd_global_floor_admits_full_headers_
     auto params = MainParams();
     params.nMatMulGlobalVerifyBudgetPerMin = 512;
     params.nMatMulPeerVerifyBudgetPerMin = 32;
+    // Mainnet v4 is live at the Epoch-A height, and these cases use the
+    // INT32_MAX default reference height, so SelectMatMulPeerVerifyBudgetBase
+    // reads the v4 field. Mirror the limit so the case still exercises the
+    // per-peer limiter rather than an unrelated production budget.
+    params.nMatMulV4PeerVerifyBudgetPerMin = 32;
     params.nMatMulIbdPeerVerifyBudgetPerMin = 65536;
 
     // Steady-state global floor alone cannot accept one MAX_HEADERS_RESULT-sized
@@ -588,6 +603,11 @@ BOOST_AUTO_TEST_CASE(validation_rate_limit_fast_phase_budget_floor_outside_ibd)
 {
     auto params = MainParams();
     params.nMatMulPeerVerifyBudgetPerMin = 32;
+    // Mainnet v4 is live at the Epoch-A height, and these cases use the
+    // INT32_MAX default reference height, so SelectMatMulPeerVerifyBudgetBase
+    // reads the v4 field. Mirror the limit so the case still exercises the
+    // per-peer limiter rather than an unrelated production budget.
+    params.nMatMulV4PeerVerifyBudgetPerMin = 32;
     params.fMatMulPOW = true;
     params.nFastMineHeight = 50'000;
 
@@ -608,6 +628,11 @@ BOOST_AUTO_TEST_CASE(validation_rate_limit_allows_rapid_regtest_bursts)
 {
     auto params = RegtestParams();
     params.nMatMulPeerVerifyBudgetPerMin = 8;
+    // Mainnet v4 is live at the Epoch-A height, and these cases use the
+    // INT32_MAX default reference height, so SelectMatMulPeerVerifyBudgetBase
+    // reads the v4 field. Mirror the limit so the case still exercises the
+    // per-peer limiter rather than an unrelated production budget.
+    params.nMatMulV4PeerVerifyBudgetPerMin = 8;
     params.fMatMulPOW = true;
     params.fPowAllowMinDifficultyBlocks = true;
     params.fPowNoRetargeting = true;
@@ -656,6 +681,11 @@ BOOST_AUTO_TEST_CASE(peer_budget_rollback_must_restore_window_start_on_minute_bo
 {
     auto params = MainParams();
     params.nMatMulPeerVerifyBudgetPerMin = 8;
+    // Mainnet v4 is live at the Epoch-A height, and these cases use the
+    // INT32_MAX default reference height, so SelectMatMulPeerVerifyBudgetBase
+    // reads the v4 field. Mirror the limit so the case still exercises the
+    // per-peer limiter rather than an unrelated production budget.
+    params.nMatMulV4PeerVerifyBudgetPerMin = 8;
 
     MatMulPeerVerificationBudget budget;
     const auto now = std::chrono::steady_clock::now();
@@ -706,6 +736,11 @@ BOOST_AUTO_TEST_CASE(peer_budget_counter_only_rollback_causes_premature_throttle
 {
     auto params = MainParams();
     params.nMatMulPeerVerifyBudgetPerMin = 8;
+    // Mainnet v4 is live at the Epoch-A height, and these cases use the
+    // INT32_MAX default reference height, so SelectMatMulPeerVerifyBudgetBase
+    // reads the v4 field. Mirror the limit so the case still exercises the
+    // per-peer limiter rather than an unrelated production budget.
+    params.nMatMulV4PeerVerifyBudgetPerMin = 8;
 
     MatMulPeerVerificationBudget budget;
     const auto now = std::chrono::steady_clock::now();
