@@ -105,6 +105,25 @@ class MatMulTrustedMirrorsTest(BitcoinTestFramework):
             ] + ["-regtestrcprofile=2"],
             expected_msg="Error: Trusted MatMul mirrors support only RC Profile 1 ExactReplay attestations; the configured network selects a different RC profile.",
         )
+        # A repeated key would otherwise inflate N and satisfy any M-of-N
+        # minimum while the quorum still rests on one private key. Rejected on
+        # every chain, and before daemonization so the operator sees why.
+        mirror_b.assert_start_raises_init_error(
+            extra_args=[
+                arg for arg in self.mirror_args
+                if not arg.startswith("-matmultrustedthreshold=")
+            ] + [
+                f"-matmultrustedpubkey={self.signer_pub}",
+                "-matmultrustedthreshold=2",
+            ],
+            expected_msg=(
+                f"Error: Duplicate -matmultrustedpubkey: {self.signer_pub}. "
+                "Every trusted signer must be a distinct key; a repeated key "
+                "raises N without adding an independent attestation authority."
+            ),
+        )
+        # Regtest keeps 1-of-1 mirrors: the mainnet 2-of-2 floor must not leak
+        # onto test networks (this whole test is a single-signer mirror).
         self.start_node(2, self.mirror_args)
 
         self.connect_nodes(0, 2)
