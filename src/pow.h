@@ -43,6 +43,12 @@ std::optional<arith_uint256> DeriveTarget(unsigned int nBits, const uint256 pow_
 
 struct MatMulPeerVerificationBudget {
     // Access is externally synchronized in net_processing by peer-specific locks.
+    // Cheap header-batch work and expensive complete-block work intentionally
+    // use independent windows. Their ceilings can differ by orders of
+    // magnitude during bootstrap/fast phase, so sharing a counter lets a cheap
+    // batch strand later body verification until the minute rolls over.
+    uint32_t header_verifications_this_minute{0};
+    std::chrono::steady_clock::time_point header_window_start{};
     uint32_t expensive_verifications_this_minute{0};
     std::chrono::steady_clock::time_point window_start{};
     /** ENC_RC recompute units -- independent window/counter from EncDr/LT. */
@@ -50,6 +56,14 @@ struct MatMulPeerVerificationBudget {
     std::chrono::steady_clock::time_point rc_window_start{};
     uint32_t phase2_failures{0};
     std::chrono::steady_clock::time_point phase2_first_failure_time{};
+};
+
+/** Which Phase-2 budget window a charge is drawn from. Cheap header batches
+ *  and expensive complete-block verification are metered independently at
+ *  both the retained-source and process-wide levels. */
+enum class MatMulPhase2BudgetLane : uint8_t {
+    ExpensiveVerification,
+    HeaderBatch,
 };
 
 /** Receipt for an RC verification rate debit that may be rolled back only
@@ -647,7 +661,9 @@ bool ConsumeMatMulPeerVerifyBudget(
     const Consensus::Params& params,
     std::chrono::steady_clock::time_point now,
     bool is_ibd = false,
-    int32_t reference_height = std::numeric_limits<int32_t>::max());
+    int32_t reference_height = std::numeric_limits<int32_t>::max(),
+    MatMulPhase2BudgetLane lane =
+        MatMulPhase2BudgetLane::ExpensiveVerification);
 bool ConsumeMatMulRCPeerVerifyBudget(
     MatMulPeerVerificationBudget& budget,
     const Consensus::Params& params,
@@ -680,15 +696,6 @@ bool CanStartMatMulVerification(uint32_t pending_verifications, uint32_t work_un
                                 const Consensus::Params& params, int32_t reference_height = -1);
 bool CanStartMatMulRCVerification(uint32_t pending_verifications, uint32_t work_units,
                                   const Consensus::Params& params, int32_t reference_height = -1);
-/** Which process-wide Phase-2 window a charge is drawn from. Header batches and
- *  complete-block verification are metered separately because they are granted
- *  different ceilings; sharing one counter lets the larger ceiling starve the
- *  smaller one. */
-enum class MatMulPhase2BudgetLane : uint8_t {
-    ExpensiveVerification,
-    HeaderBatch,
-};
-
 /** Clock-injected accounting for the independent process-wide Phase-2 lanes.
  *  External synchronization is required; the production singleton is guarded
  *  by its global mutex, while tests instantiate a local tracker. */

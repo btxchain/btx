@@ -164,6 +164,60 @@ BOOST_AUTO_TEST_CASE(ticket_is_sidecar_bound_and_grindable)
     BOOST_CHECK_EQUAL(::GetSerializeSize(ticket), 40U);
 }
 
+BOOST_AUTO_TEST_CASE(consumed_known_ticket_can_be_restored_before_work_starts)
+{
+    const CBlockHeader header{Header()};
+    CBlockHeader competing_header{header};
+    ++competing_header.nTime;
+    const uint256 pow_limit{RegtestPowLimit()};
+    const node::RCAdmissionTicket ticket{ValidTicket(header, pow_limit)};
+    const node::RCAdmissionTicket competing_ticket{
+        ValidTicket(competing_header, pow_limit)};
+
+    node::RCAdmissionStore store{{
+        .max_entries = 1,
+        .max_entries_per_netgroup = 1,
+        .max_validated_candidates_per_hash = 1,
+    }};
+    const auto now{std::chrono::steady_clock::now()};
+    constexpr uint64_t netgroup{17};
+    constexpr uint64_t competing_netgroup{29};
+    BOOST_REQUIRE(store.RememberKnown(
+        ticket, header, netgroup, pow_limit, now) ==
+        node::RCAdmissionStore::RememberResult::Stored);
+
+    node::RCAdmissionTicket accepted;
+    BOOST_REQUIRE(store.Consume(
+        header, netgroup, pow_limit, now, &accepted));
+    BOOST_CHECK_EQUAL(store.ValidatedSize(), 0U);
+
+    // Model the race in which another valid candidate occupies the exact
+    // global slot released by Consume() before pending/rate/worker admission
+    // fails. Ordinary RememberKnown() would now reject the paid ticket.
+    BOOST_REQUIRE(store.RememberKnown(
+        competing_ticket, competing_header, competing_netgroup, pow_limit,
+        now + std::chrono::seconds{1}) ==
+        node::RCAdmissionStore::RememberResult::Stored);
+    BOOST_CHECK_EQUAL(store.ValidatedSize(), 1U);
+
+    // Rollback is guaranteed and cap-preserving: it deterministically reclaims
+    // a conflicting slot, restores the source-bound attempt, and leaves all
+    // counters exact.
+    BOOST_REQUIRE(store.RestoreConsumed(
+        accepted, header, netgroup, pow_limit,
+        now + std::chrono::seconds{2}));
+    BOOST_CHECK_EQUAL(store.ValidatedSize(), 1U);
+    BOOST_CHECK_EQUAL(store.NetgroupSize(netgroup), 1U);
+    BOOST_CHECK_EQUAL(store.NetgroupSize(competing_netgroup), 0U);
+    BOOST_CHECK_EQUAL(store.ValidatedCandidatesForHash(header.GetHash()), 1U);
+    BOOST_CHECK_EQUAL(
+        store.ValidatedCandidatesForHash(competing_header.GetHash()), 0U);
+    BOOST_CHECK(store.Consume(
+        header, netgroup, pow_limit,
+        now + std::chrono::seconds{2}));
+    BOOST_CHECK_EQUAL(store.ValidatedSize(), 0U);
+}
+
 BOOST_AUTO_TEST_CASE(store_enforces_netgroup_quota_ttl_and_single_use)
 {
     node::RCAdmissionStore store{{

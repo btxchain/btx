@@ -140,6 +140,21 @@ public:
                                std::chrono::steady_clock::time_point now,
                                RCAdmissionTicket* accepted_ticket = nullptr);
 
+    /**
+     * Roll back a ticket returned by Consume() when admission failed before
+     * expensive work started. This is stronger than RememberKnown(): rollback
+     * cannot fail merely because another candidate occupied the capacity freed
+     * by Consume(). It evicts the oldest conflicting validated candidate as
+     * necessary, preserving every global/per-netgroup/per-hash hard bound while
+     * restoring the earlier paid attempt.
+     */
+    [[nodiscard]] bool RestoreConsumed(
+        const RCAdmissionTicket& ticket,
+        const CBlockHeader& header,
+        uint64_t keyed_netgroup,
+        const uint256& pow_limit,
+        std::chrono::steady_clock::time_point now);
+
     void Erase(const uint256& block_hash);
     void Prune(std::chrono::steady_clock::time_point now);
     [[nodiscard]] size_t Size() const
@@ -187,8 +202,9 @@ private:
  * refresh it and thereby suppress an honest source indefinitely.
  *
  * Callers explicitly erase an entry when a valid sidecar/body is admitted or
- * validation reaches a terminal verdict. Expired entries are removed on every
- * lookup/insert, and the oldest deadline is evicted at the hard capacity bound.
+ * validation reaches a terminal verdict. Lookup and duplicate marking expire
+ * only the queried key in O(log n); size queries prune all expired entries,
+ * and the oldest deadline is evicted at the hard capacity bound.
  * This class is intentionally clock-injected and lock-free; PeerManager owns
  * the mutex, while unit tests use deterministic time points.
  */

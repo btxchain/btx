@@ -554,6 +554,34 @@ BOOST_AUTO_TEST_CASE(validation_rate_limit_header_and_expensive_lanes_are_indepe
         /*max_per_minute=*/2, /*count=*/1,
         start + std::chrono::seconds{90},
         MatMulPhase2BudgetLane::ExpensiveVerification));
+
+    // Retained-source accounting has the same separation. Model a cheap
+    // fast-phase batch at its 200k ceiling, then cross the fast/steady boundary
+    // inside the same minute. The body lane must start at zero rather than
+    // inheriting the header count and rejecting the honest source.
+    auto params{MainParams()};
+    params.fMatMulPOW = true;
+    params.nFastMineHeight = 50'000;
+    MatMulPeerVerificationBudget source;
+    source.header_window_start = start;
+    source.header_verifications_this_minute = 199'999;
+    BOOST_REQUIRE(ConsumeMatMulPeerVerifyBudget(
+        source, params, start, /*is_ibd=*/false,
+        /*reference_height=*/4'000,
+        MatMulPhase2BudgetLane::HeaderBatch));
+    BOOST_CHECK(!ConsumeMatMulPeerVerifyBudget(
+        source, params, start, /*is_ibd=*/false,
+        /*reference_height=*/4'000,
+        MatMulPhase2BudgetLane::HeaderBatch));
+    BOOST_CHECK_EQUAL(source.header_verifications_this_minute, 200'000U);
+
+    BOOST_REQUIRE(ConsumeMatMulPeerVerifyBudget(
+        source, params, start + std::chrono::seconds{30},
+        /*is_ibd=*/false,
+        /*reference_height=*/50'000,
+        MatMulPhase2BudgetLane::ExpensiveVerification));
+    BOOST_CHECK_EQUAL(source.expensive_verifications_this_minute, 1U);
+    BOOST_CHECK_EQUAL(source.header_verifications_this_minute, 200'000U);
 }
 
 BOOST_AUTO_TEST_CASE(validation_rate_limit_fast_phase_budget_floor_outside_ibd)

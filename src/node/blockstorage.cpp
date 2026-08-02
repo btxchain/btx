@@ -237,13 +237,57 @@ uint256 ComputeMatMulReplayAuthorityContext(const CChainParams& params)
     // This schema domain covers consensus-code changes that do not alter an
     // explicit parameter. Bump it whenever the selected replay predicate or
     // statement semantics change.
-    static constexpr uint32_t SCHEMA_VERSION{1};
+    static constexpr uint32_t SCHEMA_VERSION{2};
     const Consensus::Params& consensus{params.GetConsensus()};
     HashWriter hasher;
     hasher << std::string{"BTX_MATMUL_REPLAY_AUTHORITY_CONTEXT"}
            << SCHEMA_VERSION
            << params.GenesisBlock().GetHash()
+           // Header target/range and difficulty-schedule authority. Known
+           // headers are not contextually rechecked on duplicate delivery, so
+           // these must be bound alongside the expensive replay predicate.
+           << consensus.powLimit
+           << consensus.fPowAllowMinDifficultyBlocks
+           << consensus.enforce_BIP94
+           << consensus.fPowNoRetargeting
+           << consensus.nPowTargetSpacing
+           << consensus.nPowTargetTimespan
+           << consensus.nPowTargetSpacingNormal
+           << consensus.nPowTargetSpacingFastMs
+           << consensus.nFastMineDifficultyScale
+           << consensus.nFastMineHeight
+           << consensus.nDgwAsymmetricClampHeight
+           << consensus.nDgwEasingBoostHeight
+           << consensus.nDgwWindowAlignmentHeight
+           << consensus.nDgwSlewGuardHeight
+           << consensus.nMatMulAsertHeight
+           << consensus.nMatMulAsertHalfLife
+           << consensus.nMatMulAsertBootstrapFactor
+           << consensus.nMatMulAsertRetuneHeight
+           << consensus.nMatMulAsertRetuneHardeningFactor
+           << consensus.nMatMulAsertRetune2Height
+           << consensus.nMatMulAsertRetune2TargetNum
+           << consensus.nMatMulAsertRetune2TargetDen
+           << consensus.nMatMulAsertHalfLifeUpgradeHeight
+           << consensus.nMatMulAsertHalfLifeUpgrade
+           << consensus.nMatMulMaxFutureMtpDriftHeight
+           << consensus.nMatMulMaxFutureMtpDrift
+           << consensus.nMatMulTimewarpReconcileHeight
            << consensus.fMatMulPOW
+           << consensus.fSkipMatMulValidation
+           << consensus.nMatMulDimension
+           << consensus.nMatMulTranscriptBlockSize
+           << consensus.nMatMulNoiseRank
+           << consensus.nMatMulMinDimension
+           << consensus.nMatMulMaxDimension
+           << consensus.nMatMulFieldModulus
+           << consensus.nMatMulValidationWindow
+           << consensus.nMatMulProofAssumeValidMinAge
+           << consensus.fMatMulFreivaldsEnabled
+           << consensus.nMatMulFreivaldsRounds
+           << consensus.fMatMulRequireProductPayload
+           << consensus.nMatMulFreivaldsBindingHeight
+           << consensus.nMatMulProductDigestHeight
            << consensus.nMatMulNonceSeedHeight
            << consensus.nMatMulParentMtpSeedHeight
            << consensus.nMatMulPreHashEpsilonBits
@@ -255,17 +299,27 @@ uint256 ComputeMatMulReplayAuthorityContext(const CChainParams& params)
            << consensus.nMatMulV4Dimension
            << consensus.nMatMulV4FreivaldsRounds
            << consensus.nMatMulV4TranscriptBlockSize
+           << consensus.nMatMulV4AsertRescaleNum
+           << consensus.nMatMulV4AsertRescaleDen
            << consensus.fMatMulV4FlatSketchReplay
            << consensus.nMatMulBMX4CHeight
+           << consensus.nMatMulBMX4CAsertRescaleNum
+           << consensus.nMatMulBMX4CAsertRescaleDen
            << consensus.nMatMulDRLTHeight
            << consensus.nMatMulConsensusQStar
            << consensus.nMatMulLTTranscriptBlockSize
+           << consensus.nMatMulDRLTAsertRescaleNum
+           << consensus.nMatMulDRLTAsertRescaleDen
            << consensus.fMatMulLTSealAsPoW
            << consensus.nMatMulRCHeight
+           << consensus.nMatMulRCAsertRescaleNum
+           << consensus.nMatMulRCAsertRescaleDen
            << consensus.nMatMulRCProfile
            << consensus.nMatMulRCProfile2FullyVerifyTerminalRound
            << consensus.fMatMulRCUseToyDims
            << consensus.nMatMulRCCoupledHeight
+           << consensus.nMatMulRCCoupledAsertRescaleNum
+           << consensus.nMatMulRCCoupledAsertRescaleDen
            << consensus.nMatMulRCCoupledProfile
            << consensus.fMatMulRCCoupledUseToyDims
            << consensus.nMatMulHeaderPoWDiscountBits
@@ -275,16 +329,33 @@ uint256 ComputeMatMulReplayAuthorityContext(const CChainParams& params)
     return hasher.GetHash();
 }
 
-size_t ClearStaleMatMulReplayAuthority(
+MatMulReplayContextMigration ReconcileMatMulReplayAuthorityContext(
     std::span<CBlockIndex* const> indices,
     const std::optional<uint256>& persisted_context,
     const uint256& current_context,
     std::set<CBlockIndex*>& dirty_indices)
 {
     AssertLockHeld(::cs_main);
-    const bool exact_context_matches{
+    const bool context_matches{
         persisted_context.has_value() && *persisted_context == current_context};
-    size_t cleared{0};
+    if (!context_matches) {
+        // First scan only. Returning REINDEX_REQUIRED must leave both the
+        // in-memory index and dirty set untouched so startup cannot partially
+        // migrate a datadir it is about to reject.
+        for (const CBlockIndex* index : indices) {
+            if (index != nullptr &&
+                (index->nStatus &
+                 (BLOCK_EXACT_REPLAY_VERIFIED |
+                  BLOCK_TRUSTED_REPLAY_ATTESTED)) != 0) {
+                return {
+                    MatMulReplayContextDisposition::REINDEX_REQUIRED,
+                    0};
+            }
+        }
+        return {MatMulReplayContextDisposition::MIGRATED, 0};
+    }
+
+    size_t cleared_trusted{0};
     for (CBlockIndex* index : indices) {
         if (index == nullptr) {
             continue;
@@ -293,18 +364,16 @@ size_t ClearStaleMatMulReplayAuthority(
         // to preserve across startup: the signer set and threshold are not
         // consensus parameters. ExactReplay may survive only under an exact
         // versioned consensus-context match.
-        uint32_t clear_mask{BLOCK_TRUSTED_REPLAY_ATTESTED};
-        if (!exact_context_matches) {
-            clear_mask |= BLOCK_EXACT_REPLAY_VERIFIED;
-        }
-        if ((index->nStatus & clear_mask) == 0) {
+        if ((index->nStatus & BLOCK_TRUSTED_REPLAY_ATTESTED) == 0) {
             continue;
         }
-        index->nStatus &= ~clear_mask;
+        index->nStatus &= ~BLOCK_TRUSTED_REPLAY_ATTESTED;
         dirty_indices.insert(index);
-        ++cleared;
+        ++cleared_trusted;
     }
-    return cleared;
+    return {
+        MatMulReplayContextDisposition::MATCHED,
+        cleared_trusted};
 }
 
 // Randomized equal-work tie-breaking state (see blockstorage.h). Default ON
@@ -826,17 +895,24 @@ bool BlockManager::LoadBlockIndexDB(const std::optional<uint256>& snapshot_block
             ? std::optional<uint256>{stored_replay_context}
             : std::nullopt};
     std::vector<CBlockIndex*> all_indices{GetAllBlockIndices()};
-    const size_t cleared_replay_status{
-        ClearStaleMatMulReplayAuthority(
+    const MatMulReplayContextMigration replay_migration{
+        ReconcileMatMulReplayAuthorityContext(
             all_indices, persisted_replay_context,
             current_replay_context, m_dirty_blockindex)};
-    if (!persisted_replay_context.has_value() ||
-        *persisted_replay_context != current_replay_context) {
+    if (replay_migration.disposition ==
+        MatMulReplayContextDisposition::REINDEX_REQUIRED) {
+        LogError(
+            "MatMul replay authority context changed while persisted replay "
+            "authority exists; restart with -reindex to revalidate blocks "
+            "under the current consensus predicate\n");
+        return false;
+    }
+    if (replay_migration.disposition ==
+        MatMulReplayContextDisposition::MIGRATED) {
         m_pending_matmul_replay_context = current_replay_context;
         LogPrintf(
             "MatMul replay authority context initialized/changed; "
-            "cleared %u stale block-index replay status entries\n",
-            static_cast<unsigned>(cleared_replay_status));
+            "no persisted replay authority required revalidation\n");
     }
     int max_blockfile_num{0};
 
@@ -896,7 +972,7 @@ bool BlockManager::LoadBlockIndexDB(const std::optional<uint256>& snapshot_block
     // A crash before this point leaves the old/missing context, so the next
     // startup repeats the migration instead of trusting partially cleared data.
     if ((m_pending_matmul_replay_context.has_value() ||
-         cleared_replay_status != 0) &&
+         replay_migration.cleared_trusted_status != 0) &&
         !WriteBlockIndexDB()) {
         return false;
     }

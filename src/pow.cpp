@@ -5575,12 +5575,19 @@ bool ConsumeMatMulPeerVerifyBudget(
     const Consensus::Params& params,
     std::chrono::steady_clock::time_point now,
     bool is_ibd,
-    int32_t reference_height)
+    int32_t reference_height,
+    MatMulPhase2BudgetLane lane)
 {
-    if (budget.window_start == std::chrono::steady_clock::time_point{} ||
-        now - budget.window_start >= std::chrono::minutes{1}) {
-        budget.window_start = now;
-        budget.expensive_verifications_this_minute = 0;
+    auto& window_start = lane == MatMulPhase2BudgetLane::HeaderBatch
+        ? budget.header_window_start
+        : budget.window_start;
+    auto& count = lane == MatMulPhase2BudgetLane::HeaderBatch
+        ? budget.header_verifications_this_minute
+        : budget.expensive_verifications_this_minute;
+    if (window_start == std::chrono::steady_clock::time_point{} ||
+        now - window_start >= std::chrono::minutes{1}) {
+        window_start = now;
+        count = 0;
     }
 
     uint32_t effective_budget = EffectiveMatMulPeerVerifyBudgetPerMin(params, is_ibd, reference_height);
@@ -5600,10 +5607,10 @@ bool ConsumeMatMulPeerVerifyBudget(
         }
     }
 
-    if (budget.expensive_verifications_this_minute >= effective_budget) {
+    if (count >= effective_budget) {
         return false;
     }
-    ++budget.expensive_verifications_this_minute;
+    ++count;
     return true;
 }
 
