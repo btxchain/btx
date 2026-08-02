@@ -92,6 +92,17 @@ BOOST_AUTO_TEST_CASE(measure_v3_parent_attempts_per_s_mainnet_like)
     header.hashMerkleRoot = uint256{"00000000000000000000000000000000000000000000000000000000000000a2"};
     header.nTime = 1780000000U;
     // Hard target so SolveMatMul burns attempts without finishing early.
+    //
+    // WARNING -- READ BEFORE USING THIS NUMBER FOR ANYTHING. target == 1 makes
+    // the pre-hash target 1 << 18, so P(sigma passes) = 2^-238 and the matmul
+    // digest stage is NEVER reached. What this harness measures is therefore
+    // the v3 SHA header-grind rate R_sigma, with ZERO matmuls executed -- not a
+    // v3 matmul rate and not, under any composition, an ASERT work ratio.
+    // Dividing it by an RC episode rate yields a hash-rate-over-episode-rate
+    // quantity with no operational meaning; that is how the discarded
+    // 16893794/1 Epoch-A rescale was produced. The assertion at the bottom of
+    // this test pins digest_requests == 0 so the limitation cannot be
+    // rediscovered the hard way.
     header.nBits = arith_uint256{1}.GetCompact();
     header.nNonce64 = 0;
     header.matmul_dim = static_cast<uint16_t>(consensus.nMatMulDimension);
@@ -99,7 +110,8 @@ BOOST_AUTO_TEST_CASE(measure_v3_parent_attempts_per_s_mainnet_like)
 
     constexpr int32_t kHeight = 200000;
     constexpr int64_t kParentMtp = 1779999910;
-    constexpr uint64_t kTries = 2'000'000; // ~ε=18 ⇒ expect ~few matmul hits
+    // NOT "a few matmul hits": at target == 1 the expected count is 2e6 * 2^-238.
+    constexpr uint64_t kTries = 2'000'000;
     uint64_t max_tries = kTries;
     const auto backend_selection =
         matmul::accelerated::ResolveMiningBackendFromEnvironment();
@@ -151,6 +163,11 @@ BOOST_AUTO_TEST_CASE(measure_v3_parent_attempts_per_s_mainnet_like)
                       ? "true"
                       : "false")
               << ","
+              << "\"measures\":\"v3_sha_prehash_grind_rate_only\","
+              << "\"usable_as_asert_work_ratio\":false,"
+              << "\"usable_as_asert_work_ratio_reason\":"
+                 "\"target==1 gates out the matmul stage; digest_requests is 0, "
+                 "so attempts_per_s is a SHA grind rate, not a v3 block rate\","
               << "\"requested_tries\":" << kTries << ","
               << "\"attempts_done\":" << attempts_done << ","
               << "\"solved\":" << (solved ? "true" : "false") << ","
@@ -173,6 +190,11 @@ BOOST_AUTO_TEST_CASE(measure_v3_parent_attempts_per_s_mainnet_like)
     BOOST_CHECK_GT(attempts_done, 0u);
     BOOST_CHECK_GT(wall_s, 0.0);
     BOOST_CHECK_GT(attempts_per_s, 0.0);
+    // Pin the regime. If a future edit lowers the difficulty so the matmul
+    // stage actually runs, this fires and forces the author to also fix the
+    // "measures"/"usable_as_asert_work_ratio" fields above, rather than
+    // silently emitting a number that looks like, but is not, a work ratio.
+    BOOST_CHECK_EQUAL(backend_stats.digest_requests, 0u);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
