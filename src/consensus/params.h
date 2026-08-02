@@ -510,13 +510,32 @@ struct Params {
     /** One-time ASERT rescale at nMatMulRCHeight (calibrate from silicon).
      *  Public nets keep the disabled implementation branch at neutral 1/1.
      *  The activation patch must install a final-binary, provider-bound
-     *  Profile-1 work-ratio together with the finite height. NOTE: the future
-     *  datacenter profile (nMatMulRCProfile==2)
+     *  Profile-1 work-ratio together with the finite height.
+     *
+     *  A THROUGHPUT RATIO IS NOT THE RESCALE. Epoch A changes the shape of the
+     *  lottery, not just its cost. Before the fork a block requires BOTH the
+     *  pre-hash gate (sigma <= target << epsilon; epsilon = 18 on mainnet from
+     *  height 50'000) AND the digest gate, so P(block per nonce) = 2^epsilon *
+     *  p^2 with p = target/2^256. At v4 heights the pre-hash gate is retired
+     *  (see validation.cpp), leaving P = p. The one-time loosen is therefore
+     *      k = 2^epsilon * p(H_A) * (R_v3 / R_rc)
+     *  and NOT the bare per-nonce throughput ratio R_v3/R_rc, which omits the
+     *  2^epsilon * p factor. Note k depends on nBits at the activation height,
+     *  so it must be re-derived if H_A moves. An earlier staged value here was
+     *  the bare throughput ratio; it has been reverted to neutral pending a
+     *  correct derivation.
+     *
+     *  NOTE: the future datacenter profile (nMatMulRCProfile==2)
      *  raises per-nonce work ~16× (F_ep 5.32e13 → 8.45e14 MAC), so a datacenter
-     *  cutover needs a silicon-calibrated ≈16× loosen here (16422/1027). Do NOT
+     *  cutover needs a silicon-calibrated ≈16× loosen here (16422/1027). That
+     *  transition is one-stage to one-stage, so the MAC-ratio form is correct
+     *  there; Epoch A is the transition where it is not. Do NOT
      *  set the Profile-1 ratio without re-measurement. A finite public height
      *  itself remains gated on BTX_MATMUL_NO_INVERSION_GATE_RATIFIED and the
-     *  GPU lifecycle ratification flag (separate external gates). */
+     *  GPU lifecycle ratification flag (separate external gates).
+     *
+     *  Construction-time guardrail: chainparams.cpp rejects a neutral rescale
+     *  at a live public Profile-1 height. It cannot check the magnitude. */
     int64_t nMatMulRCAsertRescaleNum{1};
     int64_t nMatMulRCAsertRescaleDen{1};
     /**
