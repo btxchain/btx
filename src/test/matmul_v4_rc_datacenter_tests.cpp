@@ -1033,7 +1033,7 @@ BOOST_AUTO_TEST_CASE(rc_dc_episode_profile1_byte_identical_guard)
 }
 
 // (d) The profile selector is 1|2; MatMul v4.7 defaults to Profile 1
-//     ExactReplay. Mainnet keeps the activation height at INT32_MAX.
+//     ExactReplay. Mainnet is live at the Epoch-A height 181'894.
 BOOST_AUTO_TEST_CASE(rc_dc_episode_profile_selector_default_and_mainnet)
 {
     Consensus::Params def;
@@ -1042,9 +1042,13 @@ BOOST_AUTO_TEST_CASE(rc_dc_episode_profile_selector_default_and_mainnet)
     const auto main =
         CreateChainParams(ArgsManager{}, ChainType::MAIN)->GetConsensus();
     BOOST_CHECK_EQUAL(main.nMatMulRCProfile, 1u);
-    // Height stays INT32_MAX: the Epoch-A profile is selected but not active.
-    BOOST_CHECK_EQUAL(main.nMatMulRCHeight, std::numeric_limits<int32_t>::max());
+    // Epoch A is live at 181'894. The selector is still Profile 1, and RC is
+    // inactive BELOW the height -- which is the property this case exists to
+    // pin, and which an activation height must not change.
+    BOOST_CHECK_EQUAL(main.nMatMulRCHeight, 181'894);
     BOOST_CHECK(!main.IsMatMulRCActive(0));
+    BOOST_CHECK(!main.IsMatMulRCActive(181'893));
+    BOOST_CHECK(main.IsMatMulRCActive(181'894));
     BOOST_CHECK(RCEpisodeParamsEqual(rc::ResolveRCEpisodeParams(main, 0),
                                      rc::DefaultConsensusRCEpisodeParams()));
 
@@ -2908,12 +2912,15 @@ BOOST_AUTO_TEST_CASE(rc_dc_authority_invariant_accepts_aggressive_config)
     BOOST_CHECK_EQUAL(reg.nMatMulRCAsertRescaleNum, 16422);
     BOOST_CHECK_EQUAL(reg.nMatMulRCAsertRescaleDen, 1027);
 
-    // Mainnet constructs with the MatMul v4.7 Epoch-A default (Profile 1)
-    // while staying gated (INT32_MAX height) with a neutral RC ASERT ratio.
+    // Mainnet constructs with the MatMul v4.7 Epoch-A shape (Profile 1) at the
+    // live activation height with its installed, NON-neutral RC ASERT
+    // coefficient. AssertBMX4CConstructionInvariants refuses a neutral rescale
+    // at a live Profile-1 height, so a clean construct here is the positive
+    // assertion that the height and the coefficient are coupled correctly.
     const auto main = CreateChainParams(ArgsManager{}, ChainType::MAIN)->GetConsensus();
     BOOST_CHECK_EQUAL(main.nMatMulRCProfile, 1u);
-    BOOST_CHECK_EQUAL(main.nMatMulRCHeight, std::numeric_limits<int32_t>::max());
-    BOOST_CHECK_EQUAL(main.nMatMulRCAsertRescaleNum, 1);
+    BOOST_CHECK_EQUAL(main.nMatMulRCHeight, 181'894);
+    BOOST_CHECK(main.nMatMulRCAsertRescaleNum != main.nMatMulRCAsertRescaleDen);
     BOOST_CHECK_EQUAL(main.nMatMulRCAsertRescaleDen, 1);
 }
 

@@ -13,6 +13,9 @@
 //   matmul-v4-rc-harness --help
 
 #include <arith_uint256.h>
+#include <chainparams.h>
+#include <common/args.h>
+#include <util/chaintype.h>
 #include <crypto/sha256.h>
 #include <cuda/matmul_v4_lt_tensor_gemm.h>
 #include <matmul/exact_gemm_resolve.h>
@@ -879,7 +882,23 @@ int RunCoupledHarness(const Args& args)
     std::cout << "  sim_factor: " << net.exchange_slowdown_factor
               << " (SIMULATED / NOT Stage-I gate 4 evidence)\n";
     std::cout << "  wrote:      " << args.out_path << "\n";
-    std::cout << "  consensus:  nMatMulRCHeight=INT32_MAX (NO-GO activation)\n";
+    {
+        // Report the ACTUAL mainnet parameters rather than a hard-coded
+        // sentence. This line is copied verbatim into evidence artifacts, and
+        // while it was hard-coded those artifacts asserted that activation was
+        // disabled even when produced from a tree where it is live.
+        ArgsManager harness_args;
+        const auto mainnet{CreateChainParams(harness_args, ChainType::MAIN)};
+        const int32_t rc_height{mainnet->GetConsensus().nMatMulRCHeight};
+        if (rc_height == std::numeric_limits<int32_t>::max()) {
+            std::cout << "  consensus:  mainnet nMatMulRCHeight=INT32_MAX "
+                         "(ENC_RC not activated)\n";
+        } else {
+            std::cout << "  consensus:  mainnet nMatMulRCHeight=" << rc_height
+                      << " (ENC_RC activation height is SET; this harness does "
+                         "not authorize it)\n";
+        }
+    }
     const bool ok = digests_match && mine_matches;
     std::cout << (ok ? "RESULT: coupled modes PASS\n" : "RESULT: coupled modes FAIL\n");
     return ok ? 0 : 1;
@@ -1833,7 +1852,23 @@ int main(int argc, char* argv[])
     std::cout << "  caps:       512MiB=" << cap512 << " 2GiB=" << cap2g
               << " 8GiB=" << cap8g << "\n";
     std::cout << "  wrote:      " << args.out_path << "\n";
-    std::cout << "  consensus:  nMatMulRCHeight=INT32_MAX (NO-GO activation)\n";
+    {
+        // Report the ACTUAL mainnet parameters rather than a hard-coded
+        // sentence. This line is copied verbatim into evidence artifacts, and
+        // while it was hard-coded those artifacts asserted that activation was
+        // disabled even when produced from a tree where it is live.
+        ArgsManager harness_args;
+        const auto mainnet{CreateChainParams(harness_args, ChainType::MAIN)};
+        const int32_t rc_height{mainnet->GetConsensus().nMatMulRCHeight};
+        if (rc_height == std::numeric_limits<int32_t>::max()) {
+            std::cout << "  consensus:  mainnet nMatMulRCHeight=INT32_MAX "
+                         "(ENC_RC not activated)\n";
+        } else {
+            std::cout << "  consensus:  mainnet nMatMulRCHeight=" << rc_height
+                      << " (ENC_RC activation height is SET; this harness does "
+                         "not authorize it)\n";
+        }
+    }
     std::cout << (g1_pass ? "RESULT: ExtractMX self-qual PASS\n"
                           : "RESULT: ExtractMX self-qual FAIL\n");
 
