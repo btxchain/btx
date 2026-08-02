@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Two-node trusted-mirror rehearsal: GPU archive (gpu-archive) + CPU mirror (local).
+"""Two-node trusted-mirror rehearsal: GPU archive + CPU mirror.
 
 Archive runs matmulvalidation=consensus with attestation signing/serving.
 Mirror runs matmulvalidation=trusted and accepts Profile-1 ExactReplay via
@@ -8,42 +8,56 @@ signed quorum from the archive — no local GPU required.
 Usage (run on the non-GPU host):
 
   ARCHIVE_HOST=gpu-archive.example.invalid \\
-  ARCHIVE_BTXD=/path/to/gpu-build/build-cuda/bin/btxd \\
-  ARCHIVE_CLI=/path/to/gpu-build/build-cuda/bin//path/to/btx-cli \\
-  MIRROR_BTXD=/path/to/gpu-build/build-cpu-mirror/bin/btxd \\
-  MIRROR_CLI=/path/to/gpu-build/build-cpu-mirror/bin//path/to/btx-cli \\
-  SIGNER_WIF_FILE=<redacted-temporary-path> \\
-  SIGNER_PUB_FILE=<redacted-temporary-path> \\
+  ARCHIVE_USER=operator \\
+  ARCHIVE_BTXD=/path/to/gpu-build/bin/btxd \\
+  ARCHIVE_CLI=/path/to/gpu-build/bin//path/to/btx-cli \\
+  MIRROR_BTXD=/path/to/cpu-build/bin/btxd \\
+  MIRROR_CLI=/path/to/cpu-build/bin//path/to/btx-cli \\
+  SIGNER_WIF_FILE=/secure/path/to/signer.wif \\
+  SIGNER_PUB_FILE=/secure/path/to/signer.pub \\
   python3 -u contrib/matmul-v4/two-node-trusted-mirror-rehearsal.py
 """
 from __future__ import annotations
 
+import atexit
 import json
 import os
+import shlex
 import shutil
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 
 ACTIVATION = 6
 DISABLED = 2_147_483_647
 
-ARCHIVE_HOST = os.environ.get("ARCHIVE_HOST", "gpu-archive.example.invalid")
+ARCHIVE_HOST = os.environ["ARCHIVE_HOST"]
 ARCHIVE_USER = os.environ["ARCHIVE_USER"]
 ARCHIVE_BTXD = os.environ["ARCHIVE_BTXD"]
 ARCHIVE_CLI = os.environ["ARCHIVE_CLI"]
 MIRROR_BTXD = Path(os.environ["MIRROR_BTXD"])
 MIRROR_CLI = Path(os.environ["MIRROR_CLI"])
-SIGNER_WIF = Path(os.environ["SIGNER_WIF_FILE"]).read_text().strip()
+SIGNER_WIF_FILE = Path(os.environ["SIGNER_WIF_FILE"])
 SIGNER_PUB = Path(os.environ["SIGNER_PUB_FILE"]).read_text().strip()
 
-ARCHIVE_DD = "<redacted-temporary-path>"
-MIRROR_DD = Path("<redacted-temporary-path>")
+RUNTIME_ROOT = Path(os.environ.get("BTX_TRUSTED_MIRROR_TMPDIR", tempfile.gettempdir()))
+ARCHIVE_DD = ""
+MIRROR_DD = Path(tempfile.mkdtemp(prefix="btx-trusted-mirror-", dir=RUNTIME_ROOT))
 ARCHIVE_RPC = 19821
 ARCHIVE_P2P = 19822
 MIRROR_RPC = 19831
 MIRROR_P2P = 19832
-OUT = Path("<redacted-temporary-path>")
+OUT = Path(os.environ.get("BTX_TRUSTED_MIRROR_OUT", "trusted-mirror-result.json"))
+KEEP_ARTIFACTS = os.environ.get("BTX_TRUSTED_MIRROR_KEEP_ARTIFACTS") == "1"
+
+
+def cleanup_local_artifacts() -> None:
+    if not KEEP_ARTIFACTS:
+        shutil.rmtree(MIRROR_DD, ignore_errors=True)
+
+
+atexit.register(cleanup_local_artifacts)
 
 
 def sh_local(cmd: list[str], timeout: int = 120) -> str:
@@ -51,12 +65,13 @@ def sh_local(cmd: list[str], timeout: int = 120) -> str:
     return r.stdout.strip()
 
 
-def sh_remote(remote_cmd: str, timeout: int = 120) -> str:
+def sh_remote(remote_cmd: str, timeout: int = 120, input_text: str | None = None) -> str:
     r = subprocess.run(
         ["ssh", "-o", "BatchMode=yes", f"{ARCHIVE_USER}@{ARCHIVE_HOST}", remote_cmd],
         check=True,
         capture_output=True,
         text=True,
+        input=input_text,
         timeout=timeout,
     )
     return r.stdout.strip()
@@ -87,7 +102,8 @@ def archive_rpc(*args: str, timeout: int = 120):
     # Escape for remote shell
     joined = " ".join(json.dumps(a) for a in args)
     cmd = (
-        f"{ARCHIVE_CLI} -datadir={ARCHIVE_DD} -rpcport={ARCHIVE_RPC} "
+        f"{shlex.quote(ARCHIVE_CLI)} -datadir={shlex.quote(ARCHIVE_DD)} "
+        f"-rpcport={ARCHIVE_RPC} "
         f"-rpcuser=u -rpcpassword=p -rpcclienttimeout=0 {joined}"
     )
     out = sh_remote(cmd, timeout=timeout)
@@ -112,16 +128,41 @@ def wait_rpc(fn, label: str, timeout: float = 120) -> None:
     raise RuntimeError(f"{label} RPC not ready: {last}")
 
 
+def cleanup_remote_archive() -> None:
+    if not ARCHIVE_DD:
+        return
+    try:
+        sh_remote(
+            f"kill $(cat {shlex.quote(ARCHIVE_DD + '/regtest/btxd.pid')} "
+            "2>/dev/null) 2>/dev/null || true"
+        )
+    except Exception:
+        pass
+    try:
+        sh_remote(f"rm -f -- {shlex.quote(ARCHIVE_DD + '/regtest/signer.wif')}")
+    except Exception:
+        pass
+    if not KEEP_ARTIFACTS:
+        try:
+            sh_remote(f"rm -rf -- {shlex.quote(ARCHIVE_DD)}")
+        except Exception:
+            pass
+
+
 def main() -> None:
-    # Cleanup
+    global ARCHIVE_DD
+    ARCHIVE_DD = sh_remote("mktemp -d \"${TMPDIR:-/tmp}/btx-trusted-archive.XXXXXX\"")
+    if not ARCHIVE_DD.startswith("/") or ARCHIVE_DD in {"/", "/tmp"}:
+        raise RuntimeError("remote mktemp returned an unsafe archive datadir")
+    atexit.register(cleanup_remote_archive)
+    archive_regtest = f"{ARCHIVE_DD}/regtest"
+    sh_remote(f"umask 077; mkdir -p {shlex.quote(archive_regtest)}")
+    signer_wif = SIGNER_WIF_FILE.read_text().strip() + "\n"
     sh_remote(
-        f"rm -rf {ARCHIVE_DD}; mkdir -p {ARCHIVE_DD}/regtest; "
-        f"printf '%s\\n' '{SIGNER_WIF}' > {ARCHIVE_DD}/regtest/signer.wif; "
-        f"chmod 600 {ARCHIVE_DD}/regtest/signer.wif"
+        f"umask 077; cat > {shlex.quote(archive_regtest + '/signer.wif')}",
+        input_text=signer_wif,
     )
-    if MIRROR_DD.exists():
-        shutil.rmtree(MIRROR_DD)
-    MIRROR_DD.mkdir(parents=True)
+    del signer_wif
 
     common_regtest = f"""
 regtest=1
@@ -145,10 +186,11 @@ regtestdrltheight={DISABLED}
 regtestrcheight={ACTIVATION}
 regtestrccoupledheight={DISABLED}
 regtestrcprofile=1
-regtestrctoydims=1
+regtestrctoydims=0
 regtestrccoupledtoydims=0
 regtestmatmulltsealaspow=0
-regtestmatmulv4dimension=128
+regtestmatmulv4dimension=4096
+regtestmatmulv4maxdimension=4096
 matmultrustedpubkey={SIGNER_PUB}
 matmultrustedthreshold=1
 matmultrustedwaitms=60000
@@ -156,7 +198,7 @@ matmultrustedwaitms=60000
 
     archive_conf = common_regtest + f"""
 matmulvalidation=consensus
-matmulrcexecution=auto-fallback
+matmulrcexecution=strict-device
 matmulattestationsignerkeyfile=signer.wif
 matmulattestationserve=1
 listenonion=0
@@ -171,7 +213,8 @@ rpcallowip=127.0.0.1
 """
     # Write archive conf remotely
     sh_remote(
-        f"cat > {ARCHIVE_DD}/btx.conf <<'EOF'\n{archive_conf}\nEOF"
+        f"umask 077; cat > {shlex.quote(ARCHIVE_DD + '/btx.conf')}",
+        input_text=archive_conf,
     )
 
     # SSH local forward so this host reaches archive P2P on loopback
@@ -187,11 +230,12 @@ rpcallowip=127.0.0.1
             f"{ARCHIVE_USER}@{ARCHIVE_HOST}",
         ]
     )
+    atexit.register(tunnel.terminate)
     time.sleep(1)
 
     mirror_conf = common_regtest + f"""
 matmulvalidation=trusted
-matmulrcexecution=auto-fallback
+matmulrcexecution=strict-device
 matmulattestationserve=0
 listenonion=0
 [regtest]
@@ -203,8 +247,10 @@ connect=127.0.0.1:{ARCHIVE_P2P}
 
     # Start archive on GPU host
     sh_remote(
-        f"CUDA_VISIBLE_DEVICES=0 nohup {ARCHIVE_BTXD} -datadir={ARCHIVE_DD} "
-        f"-conf={ARCHIVE_DD}/btx.conf ><redacted-temporary-path> 2>&1 & echo $!"
+        f"CUDA_VISIBLE_DEVICES=0 nohup {shlex.quote(ARCHIVE_BTXD)} "
+        f"-datadir={shlex.quote(ARCHIVE_DD)} "
+        f"-conf={shlex.quote(ARCHIVE_DD + '/btx.conf')} "
+        f">{shlex.quote(ARCHIVE_DD + '/stdout.log')} 2>&1 & echo $!"
     )
     wait_rpc(archive_rpc, "archive")
     archive_rpc("createwallet", "miner")
@@ -216,6 +262,7 @@ connect=127.0.0.1:{ARCHIVE_P2P}
         stdout=mirror_log,
         stderr=subprocess.STDOUT,
     )
+    atexit.register(mirror_proc.terminate)
     try:
         wait_rpc(mirror_rpc, "mirror")
         # Wait until P2P link is up through the tunnel
@@ -259,6 +306,16 @@ connect=127.0.0.1:{ARCHIVE_P2P}
             )
 
         trusted = mirror_rpc("getmatmultrustedstatus")
+        archive_rc = archive_rpc("getmininginfo").get("rc_exact_replay", {})
+        canary = archive_rc.get("production_canary", {})
+        validation = archive_rc.get("last_validation", {})
+        if not (
+            canary.get("passed")
+            and validation.get("fully_accelerated")
+            and validation.get("cpu_gemm_calls") == 0
+            and validation.get("cpu_gemm_fallbacks") == 0
+        ):
+            raise RuntimeError("archive did not prove strict zero-fallback ExactReplay")
         result = {
             "ok": True,
             "archive_host_class": "cuda_gpu_exactreplay_archive",
@@ -272,6 +329,8 @@ connect=127.0.0.1:{ARCHIVE_P2P}
             "mirror_services": m_services,
             "mirror_mode": mirror_rpc("getblockchaininfo").get("matmulvalidationmode"),
             "trusted_status": trusted,
+            "archive_production_canary": canary,
+            "archive_last_validation": validation,
             "timings": timings,
             "activation_block_s": next(
                 (t["archive_generate_s"] for t in timings if t["mined_height"] == ACTIVATION),
@@ -287,18 +346,17 @@ connect=127.0.0.1:{ARCHIVE_P2P}
             mirror_proc.wait(timeout=30)
         except Exception:
             mirror_proc.kill()
+        atexit.unregister(mirror_proc.terminate)
         tunnel.terminate()
         try:
             tunnel.wait(timeout=10)
         except Exception:
             tunnel.kill()
-        try:
-            sh_remote(
-                f"kill $(cat {ARCHIVE_DD}/regtest/btxd.pid 2>/dev/null) 2>/dev/null || "
-                f"fuser -k {ARCHIVE_RPC}/tcp {ARCHIVE_P2P}/tcp 2>/dev/null || true"
-            )
-        except Exception:
-            pass
+        atexit.unregister(tunnel.terminate)
+        cleanup_remote_archive()
+        atexit.unregister(cleanup_remote_archive)
+        cleanup_local_artifacts()
+        atexit.unregister(cleanup_local_artifacts)
 
 
 if __name__ == "__main__":

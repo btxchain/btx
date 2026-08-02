@@ -38,8 +38,24 @@ struct RCProductionProviderIdentity {
     std::string reason;
 };
 
+/** Stable public provider class covered by a cross-backend golden.
+ *
+ * Driver/runtime versions deliberately do not live here: a golden proves the
+ * deterministic workload for an implementation family and architecture,
+ * while each startup canary and its process capability bind the exact live
+ * driver/runtime identity and must be rerun after that identity changes.
+ */
+struct RCProductionGoldenProviderClass {
+    std::string provider_family;
+    std::string device_architecture;
+};
+
 /** Consensus epoch identity covered by one production-shape golden. */
 struct RCProductionEpochIdentity {
+    /** A reviewed golden may use this value because the frozen canary header
+     * and current Profile-1 transcript do not depend on the eventual public
+     * activation height. Runtime capabilities still bind the real height. */
+    static constexpr int32_t ANY_ACTIVATION_HEIGHT{-1};
     int32_t activation_height{-1};
     uint32_t profile{0};
     uint32_t transcript_version{0};
@@ -56,7 +72,7 @@ struct RCProductionEpochIdentity {
  */
 struct RCProductionGoldenManifestEntry {
     std::string id;
-    RCProductionProviderIdentity provider{};
+    RCProductionGoldenProviderClass provider_class{};
     RCProductionEpochIdentity epoch{};
     uint64_t header_nonce{0};
     uint256 expected_digest{};
@@ -116,14 +132,17 @@ private:
 /** Reviewed production goldens compiled into this source revision.
  *
  * Epoch-A production goldens require byte-identical ExactReplay digests on the
- * same frozen canary headers across CUDA, Metal, and HIP. Portable CPU oracle
- * reproduction is not required for this GPU-optimized chain. The launch-
- * candidate branch returns an empty manifest until that multi-GPU corpus is
- * reviewed and committed. Keeping the registry empty is a fail-closed readiness
- * state, not a skipped test or an implied qualification claim.
+ * same frozen canary headers across the two independently implemented launch
+ * providers, CUDA and Metal. Portable CPU is not an accepted independent
+ * reproduction path. HIP remains supported, but is not required to authorize
+ * the reviewed CUDA/Metal launch corpus.
  */
 [[nodiscard]] const std::vector<RCProductionGoldenManifestEntry>&
 CommittedRCProductionGoldenManifest();
+
+/** Require one coherent independently reproduced CUDA+Metal cohort. */
+[[nodiscard]] bool RCProductionGoldenManifestCohortValid(
+    const std::vector<RCProductionGoldenManifestEntry>& manifest);
 
 [[nodiscard]] RCProductionProviderIdentity
 ProbeRCProductionProviderIdentity(const std::string& resolved_provider);

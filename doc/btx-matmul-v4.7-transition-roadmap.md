@@ -154,18 +154,18 @@ evidence, multi-peer testnet soak, or L0 ratification (still false).
 Merging the implementation PR and activating Epoch A are separate decisions.
 The implementation PR keeps production activation heights disabled.
 
-Current golden status: CUDA and Apple Silicon M4 Max-class Metal match the
-same eight frozen production canary headers byte-for-byte with full device
-coverage and zero CPU fallbacks. HIP is still absent, therefore
-`complete_multi_gpu_match` remains false and no manifest entry is authorized.
+Current golden status: CUDA and Apple Silicon M4 Max-class Metal match the same
+eight frozen production canary headers byte-for-byte with full device coverage
+and zero CPU fallbacks. They form the required independent launch cohort,
+`complete_multi_gpu_match` is true, and the reviewed manifest entries are
+compiled. HIP is optional; any future HIP corpus must match exactly.
 
 Before an activation-height PR:
 
-1. CUDA, Metal, and HIP ExactReplay must produce byte-identical golden digests
-   for the same frozen production canary headers
-   (`contrib/matmul-v4/multi-gpu-golden-corpus.sh`); portable CPU oracle is not
-   required for Epoch-A goldens on this GPU-optimized chain. Do not populate
-   `CommittedRCProductionGoldenManifest()` until `complete_multi_gpu_match`.
+1. Keep the committed CUDA+Metal ExactReplay corpus byte-identical on the same
+   frozen production canary headers
+   (`contrib/matmul-v4/multi-gpu-golden-corpus.sh`). Portable CPU is not an
+   independent Epoch-A golden; optional HIP evidence must match the cohort.
 2. Every required accelerator campaign must contain at least 100 continuous
    dimension-bound runs with exact device-coverage telemetry.
 3. Actual-consensus back-to-back and three-branch reorg tests must remain

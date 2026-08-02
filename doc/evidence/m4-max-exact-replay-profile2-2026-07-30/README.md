@@ -28,7 +28,7 @@ The harness command was:
   --production \
   --backend metal \
   --episodes 1 \
-  --out <redacted-temporary-path>
+  --out profile2-result.json
 ```
 
 `--production` now selects Profile 2. The explicitly named

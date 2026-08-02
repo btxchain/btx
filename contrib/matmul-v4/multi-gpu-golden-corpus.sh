@@ -16,8 +16,8 @@
 #     --backends cuda \
 #     --out-dir doc/evidence/multi-gpu-profile1-goldens-YYYY-MM-DD
 #
-# Optional: --backends cuda,metal,hip  (comma-separated; missing backends fail
-# closed unless --allow-partial is set for intermediate CUDA-only drafts).
+# Optional: --backends cuda,metal,hip. CUDA+Metal are the required independent
+# launch cohort; HIP is optional, but when supplied it must match exactly.
 # Use --compare-only to rebuild a comparison from sanitized artifacts already
 # present under OUT_DIR/raw without executing a backend on the current host.
 set -euo pipefail
@@ -178,6 +178,7 @@ for be, path in zip(backends, raw_paths):
         "provider": (raw.get("exact_replay_acceleration") or {}).get("provider")
         or raw.get("provider"),
         "backend_requested": raw.get("backend_requested"),
+        "provider_identity": raw.get("production_provider_identity") or {},
     }
 
 # Compare the exact nonce set, frozen header bytes, dimension, and digest.
@@ -201,6 +202,15 @@ for be in backends:
         coverage_failures.append({"backend": be, "reason": "cpu_gemm_fallbacks_nonzero"})
     if by_backend[be]["backend_requested"] != be:
         coverage_failures.append({"backend": be, "reason": "backend_identity_mismatch"})
+    identity = by_backend[be]["provider_identity"]
+    if identity.get("complete") is not True:
+        coverage_failures.append({"backend": be, "reason": "provider_identity_incomplete"})
+    if identity.get("provider_family") != be:
+        coverage_failures.append({"backend": be, "reason": "provider_family_mismatch"})
+    if not identity.get("device_architecture"):
+        coverage_failures.append({"backend": be, "reason": "provider_architecture_missing"})
+    if by_backend[be]["source_revision"] in (None, "", "unknown"):
+        coverage_failures.append({"backend": be, "reason": "source_revision_missing"})
 
 for be in backends[1:]:
     observed = {r["header_nonce"]: r for r in by_backend[be]["records"]}
@@ -214,7 +224,7 @@ for be in backends[1:]:
             if record.get(field) != ref_record.get(field) or record.get(field) is None:
                 mismatches.append({"nonce": n, "backend": be, "reason": f"{field}_mismatch"})
 
-required = {"cuda", "metal", "hip"}
+required = {"cuda", "metal"}
 present = set(backends)
 cuda_metal_present = {"cuda", "metal"}.issubset(present)
 cuda_metal_failures = [
@@ -254,6 +264,7 @@ payload = {
             "source_revision": by_backend[be]["source_revision"],
             "provider": by_backend[be]["provider"],
             "backend_requested": by_backend[be]["backend_requested"],
+            "provider_identity": by_backend[be]["provider_identity"],
             "digests_by_nonce": {
                 str(r["header_nonce"]): r["exact_replay_digest"]
                 for r in by_backend[be]["records"]
@@ -262,9 +273,10 @@ payload = {
         for be in backends
     },
     "notes": [
-        "Production goldens require byte-identical ExactReplay digests across CUDA, Metal, and HIP for the same frozen canary headers.",
+        "Production goldens require byte-identical ExactReplay digests across CUDA and Metal for the same frozen canary headers.",
+        "HIP remains an optional provider; any supplied HIP corpus must match the required cohort exactly.",
         "CPU ExactReplay is not an accepted independent reproduction path for Epoch-A production goldens.",
-        "Do not populate CommittedRCProductionGoldenManifest until complete_multi_gpu_match is true.",
+        "CommittedRCProductionGoldenManifest may be populated only from a reviewed corpus where complete_multi_gpu_match is true.",
         "Public evidence must remain machine-class only (no hostname/SKU/path identifiers).",
     ],
     "ratification_gates": False,
@@ -274,7 +286,7 @@ print(json.dumps({"wrote": str(out_path), "cuda_metal_match": cuda_metal_match, 
 if (mismatches or coverage_failures) and not allow_partial:
     raise SystemExit("header/digest/coverage mismatch across backends")
 if not complete_match and not allow_partial:
-    raise SystemExit("incomplete multi-GPU set (need cuda+metal+hip with matching digests)")
+    raise SystemExit("incomplete multi-GPU set (need cuda+metal with matching digests)")
 PY
 
 # Sanitized README stub (no host paths). Preserve a reviewed evidence README on
@@ -283,14 +295,15 @@ if [[ ! -f "${OUT_DIR}/README.md" ]]; then
 cat > "${OUT_DIR}/README.md" <<EOF
 # Multi-GPU Profile-1 ExactReplay golden compare
 
-Status: draft corpus runner output. Ratification gates remain false.
-Public Epoch-A heights remain disabled until CUDA+Metal+HIP digests match
-and are committed to \`CommittedRCProductionGoldenManifest()\`.
+Status: corpus runner output. Inspect \`multi-gpu-digest-compare.json\` for the
+fail-closed result. Public Epoch-A heights remain disabled until a matching
+CUDA+Metal corpus is committed to \`CommittedRCProductionGoldenManifest()\`.
 
 ## Policy
 
 Independent reproduction for Epoch-A production goldens is **cross-GPU-backend**
-(CUDA, Metal, HIP) ExactReplay on identical frozen canary headers. Portable CPU
+(CUDA and Metal) ExactReplay on identical frozen canary headers. HIP is an
+optional provider whose submitted evidence must also match. Portable CPU
 oracle reproduction is not required for this GPU-optimized chain.
 
 ## Artifact

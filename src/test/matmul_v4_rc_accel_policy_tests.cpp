@@ -271,12 +271,11 @@ BOOST_AUTO_TEST_CASE(rc_compute_lane_ids_distinct)
                       "DenseInt8Legacy");
 }
 
-BOOST_AUTO_TEST_CASE(rc_profile1_activation_readiness_fails_closed_without_goldens)
+BOOST_AUTO_TEST_CASE(rc_profile1_activation_readiness_requires_runtime_canary)
 {
-    // Small/medium exactness and automatic provider eligibility are not
-    // sufficient activation evidence. PR #97 intentionally does not invent a
-    // production CPU-oracle digest or claim a startup canary that was not run.
-    BOOST_CHECK(rc::CommittedRCProductionGoldenManifest().empty());
+    // Committed CUDA+Metal goldens do not make an unresolved provider ready.
+    // The exact runtime identity must still pass its strict startup canary.
+    BOOST_CHECK_EQUAL(rc::CommittedRCProductionGoldenManifest().size(), 2U);
     const auto canary{rc::GetLastRCProductionCanaryStatus()};
     BOOST_CHECK(!canary.manifest_has_reviewed_goldens);
     BOOST_CHECK(!canary.passed);

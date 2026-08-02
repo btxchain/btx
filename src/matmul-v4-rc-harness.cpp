@@ -1709,7 +1709,7 @@ int main(int argc, char* argv[])
     run_variance.pushKV("note",
                         "Continuous in-process samples with no cooldown. Percentiles use "
                         "the nearest-rank estimator; p99 is claimable only at n>=100. "
-                        "Back-to-back queue metrics use the measured single-Metal-device "
+                        "Back-to-back queue metrics use the measured selected-provider device "
                         "service times at a 90-second block cadence.");
 
     std::string tip = args.source_revision;
@@ -1742,6 +1742,19 @@ int main(int argc, char* argv[])
     root.pushKV(
         "header_family",
         args.canary_headers ? "production_canary" : "harness_measurement");
+    if (args.canary_headers) {
+        const auto identity{
+            rc::ProbeRCProductionProviderIdentity(backend_resolved)};
+        UniValue provider_identity(UniValue::VOBJ);
+        provider_identity.pushKV("provider_family", identity.provider_family);
+        provider_identity.pushKV(
+            "device_architecture", identity.device_architecture);
+        provider_identity.pushKV("driver_identity", identity.driver_identity);
+        provider_identity.pushKV("runtime_identity", identity.runtime_identity);
+        provider_identity.pushKV("complete", identity.complete);
+        provider_identity.pushKV("reason", identity.reason);
+        root.pushKV("production_provider_identity", provider_identity);
+    }
     root.pushKV("evidence_kind", args.toy ? "toy_chrono_measured"
                                : production_shape ? "production_chrono_measured"
                                                   : "chrono_measured");

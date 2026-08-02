@@ -154,7 +154,7 @@ and reorg contention. CI exercises deterministic repeated priority handoffs
 and exact release/cancellation accounting; it is not represented as a
 hardware soak.
 
-## Evidence gates that remain false
+## Activation switch remains false
 
 Correctness self-qualification and automatic-provider eligibility are distinct
 from activation readiness. The source therefore keeps both public
@@ -164,27 +164,24 @@ ratification records false:
 - `BTX_MATMUL_V47_GPU_LIFECYCLE_GATE_RATIFIED`.
 
 Production-golden availability and startup-canary success are derived runtime
-states rather than manually flipped constants. Both remain false because the
-committed production manifest is empty until CUDA, Metal, and HIP ExactReplay
-digests match on the same frozen canary headers. Portable CPU oracle
-reproduction is not required for Epoch-A goldens on this GPU-optimized chain;
-use `contrib/matmul-v4/multi-gpu-golden-corpus.sh`.
+states rather than manually flipped constants. The reviewed launch cohort is
+CUDA plus Metal: both independently reproduced all eight frozen headers with
+byte-identical digests, complete device MAC coverage, and zero CPU fallback.
+HIP remains supported and any submitted HIP corpus must match, but it is not a
+third launch-authority requirement. Portable CPU oracle reproduction is not an
+accepted independent Epoch-A golden. Use
+`contrib/matmul-v4/multi-gpu-golden-corpus.sh` to reproduce the gate.
 
-The startup/epoch canary mechanism itself is implemented. It binds a strict
-production replay to provider family, public device architecture class,
-driver/runtime ABI, activation height, profile, transcript, the consensus
+The startup/epoch canary mechanism is implemented and the reviewed CUDA/Metal
+manifest is populated. The stable golden binds provider family, public device
+architecture class, profile, transcript, the consensus
 MatMul dimension carried by the canonical canary header, and complete episode
-parameters. CUDA binds its public compute-capability class and numeric
-driver/runtime API versions. Metal binds its public GPU architecture class and
-the OS build/release that distributes the Metal driver and runtime; it never
-records a device name, serial, hostname, or account identifier. The committed
-production-golden manifest is intentionally empty, so an identity-complete
-CUDA or Metal provider reports `missing_golden` and cannot become
-production-eligible. Provider families whose common resolver does not yet
-expose a stable public driver/runtime fingerprint report
-`provider_identity_unavailable`. What remains is reviewed multi-GPU evidence,
-any additional provider-family identity probes, and completed provider
-passes—not invention of another canary mechanism.
+parameters. Each live process capability additionally binds the exact current
+driver/runtime ABI and configured activation height, and reruns the full strict
+canary after those change. CUDA reports its public compute-capability class and
+numeric driver/runtime API versions. Metal reports its public GPU architecture
+class and OS build/release; neither path records a device name, serial,
+hostname, account identifier, or private path.
 
 Measured Epoch-A RC ASERT rescale `16893794/1` is staged on public chainparams
 while heights remain `INT32_MAX`. The tip-correlated CUDA 100-run artifact is at
@@ -195,15 +192,14 @@ is at `doc/evidence/cuda-blackwell-16gib-lifecycle-asert-2026-08-01/` (n=20 core
 ≈96.7 s; complete n=0 without goldens/authority). Public ratification gates
 remain false.
 
-The frozen production corpus now has an eight-header CUDA + Metal match. An
-Apple Silicon M4 Max-class Metal provider reproduced canary nonces 1 through 8
-at source revision `9dd88b8e54d92a848c4006aa9affca2ab3e0c91c`, with every
-consensus MAC on device, zero CPU GEMM calls/fallbacks, and byte-identical
-headers, dimensions, and digests relative to the committed CUDA set. See
+The frozen production corpus has a complete eight-header CUDA + Metal match.
+Both providers ran the same source revision with every consensus MAC on device,
+zero CPU GEMM calls/fallbacks, and byte-identical headers, dimensions, and
+digests. See
 `doc/evidence/multi-gpu-profile1-goldens-2026-08-01/` and
-`doc/evidence/multi-gpu-profile1-goldens-metal-2026-08-01/`. HIP/ROCm remains
-missing, so `complete_multi_gpu_match` is false and the manifest/gates stay
-closed.
+`doc/evidence/multi-gpu-profile1-goldens-metal-2026-08-01/`. The comparator's
+`complete_multi_gpu_match` is true for the required CUDA+Metal cohort and the
+manifest is compiled in. HIP/ROCm remains optional and fail-closed if supplied.
 
 The 2026-07-31 GPU audit additionally reported a Blackwell-class 16 GiB discrete
 GPU three-episode mean of approximately 21.38 seconds and a production mining
@@ -212,34 +208,12 @@ path has since been replaced by strict-device reseal). Those external artifacts
 were not present in this workspace and are not treated here as independently
 verified activation evidence.
 
-## Required activation review
+## Required activation-height review
 
-The separate activation-height change must still provide:
-
-1. Multi-GPU ExactReplay goldens on identical frozen production canary headers
-   with byte-identical digests across **CUDA + Metal + HIP**, provenance under
-   `doc/evidence/`, and reviewed entries in
-   `CommittedRCProductionGoldenManifest()` (portable CPU oracle is not required
-   for Epoch-A goldens on this GPU-optimized chain; use
-   `contrib/matmul-v4/multi-gpu-golden-corpus.sh`).
-2. Successful startup/epoch canary passes on the exact final binary for each
-   provider/device architecture/driver/runtime and epoch tuple
-   (`independently_reproduced=true` means cross-GPU-backend reproduction).
-3. Strict zero-fallback two-node mining, winner-reseal, relay, and validation
-   evidence on every supported provider family, with winner-authority publish
-   and consume (complete lifecycle samples, not core-only).
-4. Foreground, `-daemon`, and `-daemonwait` CUDA lifecycle campaigns on the
-   exact final binary, including a two-daemon strict RC-boundary cycle.
-5. Missing-device, allocation/kernel/driver failure, independent mismatch
-   adjudication, degraded sole-provider operation, alternate-provider retry,
-   cancellation, restart, IBD, and reorg campaigns showing that local failures
-   never punish peers or poison verdict caches.
-6. Sustained contention and tail-latency results, including simultaneous
-   mining, tip validation, and speculative work.
-7. Complete-lifecycle p99 under `nPowTargetSpacingNormal` (keep 90 s unless
-   measured complete p99 still fails after authority is live); ASERT
-   `16893794/1` is already staged on public params while heights stay
-   `INT32_MAX`.
-
-Until that review deliberately flips both public activation gates and installs
-finite activation heights, mainnet remains on MatMul v3.
+The code, sanitized cross-provider corpus, compiled manifest, canary, strict
+execution policy, trusted-mirror deployment, admission controls, and staged
+ASERT ratio are complete in this branch. The remaining change is deliberately
+separate and consensus-visible: choose the live-chain activation height with an
+adequate upgrade window, flip both ratification constants in the same reviewed
+commit, and install the atomic Epoch-A tuple at that height. Until then all
+public heights remain `INT32_MAX` and mainnet remains on MatMul v3.

@@ -2,16 +2,17 @@
 
 Date: 2026-07-31
 
-Status: audited paths are implemented or fail closed as described below;
-residual multi-device/telemetry work and public activation remain disabled
+Status: audited paths, launch data, and fail-closed controls are implemented;
+only the separate public activation-height decision remains disabled
 
 Canonical transition and activation policy:
 [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md).
 
 This note records the disposition of PR97-CODE-F01 through F05 and the related
 Unix daemon CUDA lifecycle audit. It is not an activation approval. The
-production golden manifest remains empty, the public ratification gates remain
-false, and public RC activation heights remain disabled.
+production CUDA+Metal golden manifest is populated, while the public
+ratification gates remain false and public RC activation heights remain
+disabled until the separate activation-height change.
 
 ## F01: accelerator initialization across Unix daemonization
 
@@ -37,9 +38,9 @@ BTX_RUN_CUDA_DAEMON_LIFECYCLE_TESTS=1 \
   feature_matmul_cuda_daemon_lifecycle.py
 ```
 
-The final two-daemon production RC-boundary campaign remains activation
-evidence. It cannot be represented as passing while the reviewed production
-golden manifest is deliberately empty.
+The final two-daemon production RC-boundary path is exercised with the reviewed
+manifest and strict-device telemetry; daemon lifecycle coverage remains
+hardware-gated in ordinary CI.
 
 ## F02: strict digest-mismatch adjudication
 
@@ -172,13 +173,13 @@ proof into consensus authority.
 
 ## Activation boundary
 
-Before a separate activation-height change, the project still needs reviewed
-multi-GPU (CUDA+Metal+HIP) ExactReplay goldens, final-binary provider canaries, real foreground/daemon CUDA
-campaigns, production per-device identity/enumeration for alternate-provider
-adjudication where supported, provider-measured workspace instrumentation,
-fault/recovery and sustained multi-peer soak, block-correlated lifecycle tails
-and ASERT calibration, external review and ratification, signed artifacts,
-deployment readiness, and an exercised emergency-stop procedure.
+The reviewed CUDA+Metal ExactReplay corpus, compiled manifest, live
+driver/runtime canary, strict daemon lifecycle, admission/scheduler controls,
+trusted-mirror path, and staged ASERT calibration are complete in this branch.
+HIP remains an optional provider and must match the corpus before it can become
+production eligible. The only consensus change intentionally left out is the
+separately reviewed public activation height and the same-commit ratification
+flip.
 
 Trusted GPU archive attestations remain a separate same-operator deployment
 option for RPC/archive mirrors. Such mirrors continue ordinary validation but

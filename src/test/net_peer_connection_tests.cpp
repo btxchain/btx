@@ -170,4 +170,32 @@ BOOST_FIXTURE_TEST_CASE(test_addnode_getaddednodeinfo_and_connection_detection, 
     connman->ClearTestNodes();
 }
 
+BOOST_AUTO_TEST_CASE(snapshot_background_download_waits_for_tip_catchup)
+{
+    BOOST_CHECK(!ShouldFetchBackgroundSnapshotBlocks(
+        /*background_sync=*/false, /*limited_peer=*/false,
+        /*initial_block_download=*/false, /*active_height=*/200,
+        /*best_header_height=*/200));
+    BOOST_CHECK(!ShouldFetchBackgroundSnapshotBlocks(
+        /*background_sync=*/true, /*limited_peer=*/true,
+        /*initial_block_download=*/false, /*active_height=*/200,
+        /*best_header_height=*/200));
+    BOOST_CHECK(!ShouldFetchBackgroundSnapshotBlocks(
+        /*background_sync=*/true, /*limited_peer=*/false,
+        /*initial_block_download=*/true, /*active_height=*/200,
+        /*best_header_height=*/200));
+    BOOST_CHECK(!ShouldFetchBackgroundSnapshotBlocks(
+        /*background_sync=*/true, /*limited_peer=*/false,
+        /*initial_block_download=*/false, /*active_height=*/150,
+        /*best_header_height=*/200));
+    BOOST_CHECK(ShouldFetchBackgroundSnapshotBlocks(
+        /*background_sync=*/true, /*limited_peer=*/false,
+        /*initial_block_download=*/false, /*active_height=*/199,
+        /*best_header_height=*/200));
+    BOOST_CHECK(ShouldFetchBackgroundSnapshotBlocks(
+        /*background_sync=*/true, /*limited_peer=*/false,
+        /*initial_block_download=*/false, /*active_height=*/200,
+        /*best_header_height=*/200));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

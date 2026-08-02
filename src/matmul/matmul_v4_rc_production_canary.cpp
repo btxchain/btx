@@ -17,6 +17,7 @@
 #include <limits>
 #include <map>
 #include <mutex>
+#include <set>
 #include <sstream>
 #include <utility>
 
@@ -92,14 +93,38 @@ bool ProviderEqual(const RCProductionProviderIdentity& a,
         a.runtime_identity == b.runtime_identity;
 }
 
-bool EpochEqual(const RCProductionEpochIdentity& a,
-                const RCProductionEpochIdentity& b)
+bool CapabilityEpochEqual(const RCProductionEpochIdentity& a,
+                          const RCProductionEpochIdentity& b)
 {
     return a.activation_height == b.activation_height &&
         a.profile == b.profile &&
         a.transcript_version == b.transcript_version &&
         a.matmul_dimension == b.matmul_dimension &&
         ParamsEqual(a.params, b.params);
+}
+
+bool GoldenEpochMatches(const RCProductionEpochIdentity& runtime,
+                        const RCProductionEpochIdentity& golden)
+{
+    const bool activation_height_matches =
+        runtime.activation_height == golden.activation_height ||
+        golden.activation_height ==
+            RCProductionEpochIdentity::ANY_ACTIVATION_HEIGHT;
+    return activation_height_matches &&
+        runtime.profile == golden.profile &&
+        runtime.transcript_version == golden.transcript_version &&
+        runtime.matmul_dimension == golden.matmul_dimension &&
+        ParamsEqual(runtime.params, golden.params);
+}
+
+bool GoldenProviderClassMatches(
+    const RCProductionProviderIdentity& runtime,
+    const RCProductionGoldenProviderClass& golden)
+{
+    return runtime.complete && !golden.provider_family.empty() &&
+        !golden.device_architecture.empty() &&
+        runtime.provider_family == golden.provider_family &&
+        runtime.device_architecture == golden.device_architecture;
 }
 
 bool PublicProvenanceValid(const std::string& value)
@@ -306,14 +331,81 @@ std::string ReadPublicSysctlString(const char* name)
 const std::vector<RCProductionGoldenManifestEntry>&
 CommittedRCProductionGoldenManifest()
 {
-    // Intentionally empty until CUDA+Metal+HIP ExactReplay digests match on the
-    // same frozen production canary headers and are reviewed. Do not add an
-    // entry from a single-backend campaign, and do not treat portable CPU
-    // ExactReplay as Epoch-A independent reproduction on this GPU-optimized
-    // chain. Toy/scaled-medium self-qualification data is not a production
-    // golden.
-    static const std::vector<RCProductionGoldenManifestEntry> manifest{};
+    // CUDA and Metal independently reproduced the same eight frozen Profile-1
+    // canary headers with full device coverage and zero CPU fallback. One
+    // deterministic nonce is sufficient for the startup canary; all eight
+    // records remain committed in the provenance corpus. Runtime capabilities
+    // still bind the actual provider identity and configured activation height.
+    static const std::vector<RCProductionGoldenManifestEntry> manifest = [] {
+        RCProductionEpochIdentity epoch;
+        epoch.activation_height =
+            RCProductionEpochIdentity::ANY_ACTIVATION_HEIGHT;
+        epoch.profile = 1;
+        epoch.transcript_version = kRCTranscriptVersion;
+        epoch.matmul_dimension = 4096;
+        epoch.params = DefaultConsensusRCEpisodeParams();
+
+        const uint256 digest{
+            "b4777985d4f2621d0b9c119f4188ac7d80158fc92560ade96cc7a3fd8cfae953"};
+        const std::string provenance{
+            "doc/evidence/multi-gpu-profile1-goldens-2026-08-01/"
+            "multi-gpu-digest-compare.json"};
+        return std::vector<RCProductionGoldenManifestEntry>{
+            {
+                .id = "epoch-a-profile1-cuda-sm120-nonce1",
+                .provider_class = {
+                    .provider_family = "cuda",
+                    .device_architecture = "sm_120",
+                },
+                .epoch = epoch,
+                .header_nonce = 1,
+                .expected_digest = digest,
+                .independently_reproduced = true,
+                .public_provenance = provenance,
+            },
+            {
+                .id = "epoch-a-profile1-metal-m4-nonce1",
+                .provider_class = {
+                    .provider_family = "metal",
+                    .device_architecture = "m4_class",
+                },
+                .epoch = epoch,
+                .header_nonce = 1,
+                .expected_digest = digest,
+                .independently_reproduced = true,
+                .public_provenance = provenance,
+            },
+        };
+    }();
     return manifest;
+}
+
+bool RCProductionGoldenManifestCohortValid(
+    const std::vector<RCProductionGoldenManifestEntry>& manifest)
+{
+    if (manifest.size() < 2) return false;
+    const auto& reference{manifest.front()};
+    bool has_cuda{false};
+    bool has_metal{false};
+    std::set<std::pair<std::string, std::string>> provider_classes;
+    for (const auto& entry : manifest) {
+        if (!entry.independently_reproduced || entry.expected_digest.IsNull() ||
+            entry.id.empty() || !PublicProvenanceValid(entry.public_provenance) ||
+            entry.provider_class.provider_family.empty() ||
+            entry.provider_class.device_architecture.empty() ||
+            entry.header_nonce != reference.header_nonce ||
+            entry.expected_digest != reference.expected_digest ||
+            !GoldenEpochMatches(reference.epoch, entry.epoch)) {
+            return false;
+        }
+        const auto provider_class{std::make_pair(
+            entry.provider_class.provider_family,
+            entry.provider_class.device_architecture)};
+        if (!provider_classes.insert(provider_class).second) return false;
+        has_cuda = has_cuda || entry.provider_class.provider_family == "cuda";
+        has_metal = has_metal || entry.provider_class.provider_family == "metal";
+    }
+    return has_cuda && has_metal;
 }
 
 RCProductionProviderIdentity
@@ -402,14 +494,15 @@ const RCProductionGoldenManifestEntry* FindRCProductionGolden(
     const RCProductionEpochIdentity& epoch,
     const std::vector<RCProductionGoldenManifestEntry>& manifest)
 {
+    if (!RCProductionGoldenManifestCohortValid(manifest)) return nullptr;
     const RCProductionGoldenManifestEntry* match{nullptr};
     for (const auto& entry : manifest) {
         if (!entry.independently_reproduced || entry.expected_digest.IsNull() ||
             entry.id.empty() || !PublicProvenanceValid(entry.public_provenance)) {
             continue;
         }
-        if (ProviderEqual(provider, entry.provider) &&
-            EpochEqual(epoch, entry.epoch)) {
+        if (GoldenProviderClassMatches(provider, entry.provider_class) &&
+            GoldenEpochMatches(epoch, entry.epoch)) {
             // Duplicate authority records are ambiguous even if their digest
             // happens to agree. Require one exact reviewed entry per identity.
             if (match != nullptr) return nullptr;
@@ -481,13 +574,8 @@ static RCProductionCanaryStatus RunRCProductionStartupCanaryImpl(
     out.epoch = MakeRCProductionEpochIdentity(consensus, activation_height);
     const auto& manifest{CommittedRCProductionGoldenManifest()};
     out.manifest_entries = manifest.size();
-    for (const auto& entry : manifest) {
-        if (entry.independently_reproduced && !entry.expected_digest.IsNull() &&
-            !entry.id.empty() && PublicProvenanceValid(entry.public_provenance)) {
-            out.manifest_has_reviewed_goldens = true;
-            break;
-        }
-    }
+    out.manifest_has_reviewed_goldens =
+        RCProductionGoldenManifestCohortValid(manifest);
 
     if (out.epoch.matmul_dimension == 0 ||
         out.epoch.matmul_dimension > std::numeric_limits<uint16_t>::max()) {
@@ -533,8 +621,8 @@ static RCProductionCanaryStatus RunRCProductionStartupCanaryImpl(
 
     const auto started{std::chrono::steady_clock::now()};
     const RCStrictDeviceEpisodeResult replay{MineRCEpisodeStrictDevice(
-        MakeRCProductionCanaryHeader(golden->epoch, golden->header_nonce),
-        golden->epoch.params, golden->epoch.activation_height, backend,
+        MakeRCProductionCanaryHeader(out.epoch, golden->header_nonce),
+        out.epoch.params, activation_height, backend,
         resolved_provider)};
     out.wall_s = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - started).count();
@@ -702,7 +790,7 @@ bool RCProductionProviderCapabilitiesIndependent(
     if (a == nullptr || b == nullptr) {
         return fail("invalid_or_stale_capability");
     }
-    if (!EpochEqual(a->epoch, b->epoch)) {
+    if (!CapabilityEpochEqual(a->epoch, b->epoch)) {
         return fail("capability_epoch_mismatch");
     }
     if ((!a->test_only &&

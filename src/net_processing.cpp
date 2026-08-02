@@ -11167,10 +11167,15 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
             // (snapshot) chain is still catching up to network tip. Sharing the
             // per-peer inflight budget with background IBD starves tip catch-up
             // when most peers are pruned / scarce block servers. Background
-            // integrity re-validation resumes once IsInitialBlockDownload()
-            // clears on the active chain.
-            if (m_chainman.BackgroundSyncInProgress() && !IsLimitedPeer(*peer) &&
-                !m_chainman.IsInitialBlockDownload()) {
+            // integrity re-validation resumes only once the active chain is
+            // actually near the best known header. IsInitialBlockDownload()
+            // can latch false based on work and tip age before that condition.
+            if (ShouldFetchBackgroundSnapshotBlocks(
+                    m_chainman.BackgroundSyncInProgress(), IsLimitedPeer(*peer),
+                    m_chainman.IsInitialBlockDownload(), m_chainman.ActiveHeight(),
+                    m_chainman.m_best_header != nullptr
+                        ? m_chainman.m_best_header->nHeight
+                        : -1)) {
                 // If the background tip is not an ancestor of the snapshot block,
                 // we need to start requesting blocks from their last common ancestor.
                 const CBlockIndex *from_tip = LastCommonAncestor(m_chainman.GetBackgroundSyncTip(), m_chainman.GetSnapshotBaseBlock());
