@@ -13,7 +13,7 @@
 
 # IN-AIR CHILD VERIFIER — Implementable Construction Spec
 
-**Scope.** One child verified inside its parent AIR, root emitted as a *constrained* output, and the arity‑4 tree induction. Parameters are the **shipped** ones (`kRCFri3AlgNumQueries==192`, `kRCFriBlowup=16`, `kRCFri3AlgBatchMaxColumns=16384`, `kRCFriMaxLdeLog2=24`), not the Q=144 figures the source constructions used. Nothing here is CLOSED; every flag flip is gated and stated as such.
+**Scope.** One child verified inside its parent AIR, root emitted as a *constrained* output, and the arity‑4 tree induction. Parameters are the **shipped** ones (`kRCFri3AlgNumQueries==192`, `kRCFriBlowup=16`, `kRCFri3AlgBatchMaxColumns=1048576 (1u<<20)`, `kRCFriMaxLdeLog2=24`), not the Q=144 figures the source constructions used. Nothing here is CLOSED; every flag flip is gated and stated as such.
 
 ---
 

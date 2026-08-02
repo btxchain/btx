@@ -412,6 +412,13 @@ def main() -> int:
     )
     ap.add_argument("--status-json", type=Path, default=None)
     ap.add_argument("--source-revision", default=os.environ.get("BTX_SOURCE_REVISION", ""))
+    ap.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help="exit 0 even when fewer than --samples complete samples were collected "
+             "(without this a partial campaign exits 3, so a caller gating on the "
+             "exit code cannot green-light an incomplete run)",
+    )
     args = ap.parse_args()
 
     if not args.btxd.is_file():
@@ -773,7 +780,14 @@ def main() -> int:
                 indent=2,
             )
         )
-        return 0 if (samples or core_samples) else 1
+        # A partial campaign is not a passing campaign: returning 0 here let
+        # any caller gating on the exit code green-light a run that collected
+        # fewer complete samples than requested, or never reached authority.
+        if len(samples) >= args.samples:
+            return 0
+        if args.allow_partial:
+            return 0
+        return 3
     except Exception as exc:
         # Persist whatever was collected before a hard failure.
         try:
