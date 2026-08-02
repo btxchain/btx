@@ -43,7 +43,7 @@ must set the following tuple atomically:
 | Workload | `nMatMulRCProfile = 1`, production dimensions, four-round replay |
 | Authority | ExactReplay; Stage-3 proof authority remains disabled |
 | Header admission | HeaderPoW disabled; the fixed header remains 182 bytes |
-| ASERT | v4 and BMX4C ratios remain `1/1`; RC owns measured Epoch-A calibration (`16893794/1` staged on public params while heights stay `INT32_MAX`) |
+| ASERT | v4 and BMX4C ratios remain `1/1`; disabled RC parameters also remain neutral `1/1` until the activation change installs a reviewed final-binary calibration |
 | Ratification | explicit L0 ratification remains a separate reviewed decision (both gates stay false until multi-GPU goldens + canary + complete lifecycle) |
 
 The equality of the three heights prevents any digest-only v4/BMX4C interval
@@ -154,18 +154,22 @@ evidence, multi-peer testnet soak, or L0 ratification (still false).
 Merging the implementation PR and activating Epoch A are separate decisions.
 The implementation PR keeps production activation heights disabled.
 
-Current golden status: CUDA and Apple Silicon M4 Max-class Metal match the same
-eight frozen production canary headers byte-for-byte with full device coverage
-and zero CPU fallbacks. They form the required independent launch cohort,
-`complete_multi_gpu_match` is true, and the reviewed manifest entries are
-compiled. HIP is optional; any future HIP corpus must match exactly.
+Current golden status: historical CUDA and Apple Silicon Metal artifacts match
+the same eight frozen production canary headers byte-for-byte with full device
+coverage and zero CPU fallbacks. The hardened comparator deliberately does not
+accept those cross-revision artifacts as final activation evidence. The launch
+cohort must be rerun from one reviewed code freeze and must bind the raw provider,
+source-tree fingerprint, and harness binary identity. See
+`btx-matmul-v4.7-production-golden-policy.md`. HIP is optional; any future HIP
+corpus must match exactly before that provider is authorized.
 
 Before an activation-height PR:
 
-1. Keep the committed CUDA+Metal ExactReplay corpus byte-identical on the same
+1. Reproduce the CUDA+Metal ExactReplay corpus byte-identically on the same
    frozen production canary headers
-   (`contrib/matmul-v4/multi-gpu-golden-corpus.sh`). Portable CPU is not an
-   independent Epoch-A golden; optional HIP evidence must match the cohort.
+   (`contrib/matmul-v4/multi-gpu-golden-corpus.sh`) from the exact code freeze.
+   Portable CPU is the diagnostic oracle, not an independently viable launch
+   provider; optional HIP evidence must match the cohort.
 2. Every required accelerator campaign must contain at least 100 continuous
    dimension-bound runs with exact device-coverage telemetry.
 3. Actual-consensus back-to-back and three-branch reorg tests must remain

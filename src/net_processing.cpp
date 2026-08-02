@@ -832,6 +832,9 @@ private:
      *   exhaustion — an honest peer must not be punished for others' spend; they
      *   should defer processing this message instead. Left false on success and
      *   on per-peer exhaustion (that peer is the abuser and may be disconnected).
+     * @param[in] header_batch  True only for cheap header-batch Phase-2
+     *   accounting. Catch-up may enlarge that global allowance; complete-block
+     *   verification must leave this false and retain the bounded global cap.
      */
     bool ConsumeMatMulVerificationBudgetForPeer(
         const Peer& peer,
@@ -842,7 +845,8 @@ private:
         bool is_ibd,
         int32_t reference_height,
         bool& global_exhausted,
-        bool rc_recompute = false);
+        bool rc_recompute = false,
+        bool header_batch = false);
     /** Charge only the retained source's RC budget for a bounded handoff.
      *  The inherited paid attempt already owns the one global debit. */
     bool ConsumeMatMulRCPeerBudgetForHandoff(
@@ -949,8 +953,6 @@ private:
     arith_uint256 GetAntiDoSWorkThreshold();
     /** Whether this node should prioritize MatMul consensus-tier peers for block sync. */
     bool RequireMatMulConsensusPeersForSync() const;
-    /** Whether a peer advertises MatMul consensus-tier validation. */
-    static bool PeerAdvertisesMatMulConsensus(ServiceFlags services);
     /** Deal with state tracking and headers sync for peers that send
      * non-connecting headers (this can happen due to BIP 130 headers
      * announcements for blocks interacting with the 2hr (MAX_FUTURE_BLOCK_TIME) rule). */
@@ -2752,11 +2754,6 @@ bool PeerManagerImpl::RequireMatMulConsensusPeersForSync() const
     return consensus.IsMatMulRCActive(height);
 }
 
-bool PeerManagerImpl::PeerAdvertisesMatMulConsensus(ServiceFlags services)
-{
-    return (services & NODE_MATMUL_CONSENSUS) == NODE_MATMUL_CONSENSUS;
-}
-
 ServiceFlags PeerManagerImpl::GetDesirableServiceFlags(ServiceFlags services) const
 {
     const bool require_matmul_consensus = RequireMatMulConsensusPeersForSync();
@@ -2982,7 +2979,8 @@ bool PeerManagerImpl::ConsumeMatMulVerificationBudgetForPeer(
     bool is_ibd,
     int32_t reference_height,
     bool& global_exhausted,
-    bool rc_recompute)
+    bool rc_recompute,
+    bool header_batch)
 {
     global_exhausted = false;
     if (verification_count == 0) return true;
@@ -3024,12 +3022,16 @@ bool PeerManagerImpl::ConsumeMatMulVerificationBudgetForPeer(
             }
         }
         {
-            const bool in_fast_phase =
-                params.fMatMulPOW &&
-                reference_height >= 0 &&
-                reference_height < params.nFastMineHeight;
-            const uint32_t global_budget = EffectiveMatMulGlobalPhase2BudgetForCatchUp(
-                params, is_ibd, in_fast_phase, reference_height);
+            uint32_t global_budget =
+                EffectiveMatMulGlobalVerifyBudgetPerMin(params, reference_height);
+            if (header_batch) {
+                const bool in_fast_phase =
+                    params.fMatMulPOW &&
+                    reference_height >= 0 &&
+                    reference_height < params.nFastMineHeight;
+                global_budget = EffectiveMatMulGlobalHeaderBudgetForCatchUp(
+                    params, is_ibd, in_fast_phase, reference_height);
+            }
             if (!ConsumeGlobalMatMulPhase2Budget(global_budget, verification_count, now)) {
                 budget_state.budget.window_start = saved_window_start;
                 budget_state.budget.expensive_verifications_this_minute = saved_count;
@@ -5627,7 +5629,9 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
                         std::chrono::steady_clock::now(),
                         is_ibd,
                         budget_reference_height,
-                        global_exhausted)) {
+                        global_exhausted,
+                        /*rc_recompute=*/false,
+                        /*header_batch=*/true)) {
                     if (global_exhausted) {
                         // DoS-F2: the process-wide shared budget is exhausted; DEFER
                         // this message instead of disconnecting an otherwise-honest
@@ -7211,9 +7215,10 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 !pfrom.IsAddrFetchConn() &&
                 CanServeBlocks(*peer);
             const bool require_matmul_consensus = RequireMatMulConsensusPeersForSync();
-            const bool has_consensus_tier = PeerAdvertisesMatMulConsensus(nServices);
             state->fPreferredDownload = base_preferred &&
-                (!require_matmul_consensus || has_consensus_tier || pfrom.HasPermission(NetPermissionFlags::NoBan));
+                IsMatMulPeerEligibleForSync(
+                    require_matmul_consensus, nServices,
+                    pfrom.HasPermission(NetPermissionFlags::NoBan));
             m_num_preferred_download_peers += state->fPreferredDownload;
 
             if (require_matmul_consensus && base_preferred && !state->fPreferredDownload) {
@@ -10693,7 +10698,19 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
         // in IBD (once out of IBD, we sync from all peers).
         bool sync_blocks_and_headers_from_peer = false;
         const bool require_matmul_consensus = RequireMatMulConsensusPeersForSync();
-        if (state.fPreferredDownload) {
+        const bool consensus_ok = IsMatMulPeerEligibleForSync(
+            require_matmul_consensus, peer->m_their_services,
+            pto->HasPermission(NetPermissionFlags::NoBan));
+        if (state.fPreferredDownload && !consensus_ok) {
+            // VERSION-time preference predates the activation boundary. Keep
+            // the stored state and aggregate counter consistent as soon as
+            // this peer is reconsidered; subsequent timeout logic must not
+            // count an ineligible pre-activation peer as an alternative.
+            state.fPreferredDownload = false;
+            assert(m_num_preferred_download_peers > 0);
+            --m_num_preferred_download_peers;
+        }
+        if (state.fPreferredDownload && consensus_ok) {
             sync_blocks_and_headers_from_peer = true;
         } else if (CanServeBlocks(*peer) && !pto->IsAddrFetchConn()) {
             // Typically this is an inbound peer. If we don't have any outbound
@@ -10713,9 +10730,6 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
             // gate above so that a node whose only source of blocks is an
             // inbound consensus-tier peer does not stall forever (which would
             // also suppress the low-work anti-DoS headers path for that peer).
-            const bool consensus_ok = !require_matmul_consensus ||
-                PeerAdvertisesMatMulConsensus(peer->m_their_services) ||
-                pto->HasPermission(NetPermissionFlags::NoBan);
             if (consensus_ok &&
                 (m_num_preferred_download_peers == 0 || mapBlocksInFlight.empty())) {
                 sync_blocks_and_headers_from_peer = true;

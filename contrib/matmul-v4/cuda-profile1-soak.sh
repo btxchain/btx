@@ -35,7 +35,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BUILD_DIR="${BTX_BUILD_DIR:-${ROOT}/build-cuda}"
 BTXD="${BTX_BTXD:-${BUILD_DIR}/bin/btxd}"
-BTXCLI="${BTX_BTXCLI:-${BUILD_DIR}/bin//path/to/btx-cli}"
+BTXCLI="${BTX_BTXCLI:-${BUILD_DIR}/bin/btx-cli}"
 
 DURATION_SECS="${BTX_SOAK_DURATION_SECS:-14400}"   # default 4h
 MINE_INTERVAL_SECS="${BTX_SOAK_MINE_INTERVAL_SECS:-90}"
@@ -117,7 +117,7 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
 fi
 
 if [[ ! -x "${BTXD}" || ! -x "${BTXCLI}" ]]; then
-  echo "error: missing binaries under ${BUILD_DIR}/bin (need btxd + /path/to/btx-cli)" >&2
+  echo "error: missing binaries under ${BUILD_DIR}/bin (need btxd + btx-cli)" >&2
   exit 2
 fi
 

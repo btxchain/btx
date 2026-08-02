@@ -30,8 +30,8 @@ in git. Distribute it with the release bundle.
 ## Operator load
 
 ```bash
-/path/to/btx-cli -rpcclienttimeout=0 loadtxoutset /path/to/snapshot.dat
-/path/to/btx-cli getchainstates
+btx-cli -rpcclienttimeout=0 loadtxoutset /path/to/snapshot.dat
+btx-cli getchainstates
 ```
 
 Machine-class evidence only (no host identifiers).

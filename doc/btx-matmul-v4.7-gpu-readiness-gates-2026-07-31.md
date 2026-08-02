@@ -172,8 +172,9 @@ third launch-authority requirement. Portable CPU oracle reproduction is not an
 accepted independent Epoch-A golden. Use
 `contrib/matmul-v4/multi-gpu-golden-corpus.sh` to reproduce the gate.
 
-The startup/epoch canary mechanism is implemented and the reviewed CUDA/Metal
-manifest is populated. The stable golden binds provider family, public device
+The startup/epoch canary mechanism is implemented and the production manifest
+is intentionally empty pending the corrected code-freeze CUDA/Metal rerun. A
+stable golden binds provider family, public device
 architecture class, profile, transcript, the consensus
 MatMul dimension carried by the canonical canary header, and complete episode
 parameters. Each live process capability additionally binds the exact current
@@ -183,8 +184,9 @@ numeric driver/runtime API versions. Metal reports its public GPU architecture
 class and OS build/release; neither path records a device name, serial,
 hostname, account identifier, or private path.
 
-Measured Epoch-A RC ASERT rescale `16893794/1` is staged on public chainparams
-while heights remain `INT32_MAX`. The tip-correlated CUDA 100-run artifact is at
+The historical Epoch-A RC ASERT proposal `16893794/1` is retained as
+engineering evidence but is not installed. Public chainparams remain neutral
+`1/1` while heights remain `INT32_MAX`. The tip-correlated CUDA 100-run artifact is at
 `doc/evidence/cuda-blackwell-16gib-profile1-loaded-2026-08-01/` (p99 32.705 s,
 zero CPU GEMM fallbacks, TU md5 `ed1e9477432b1766f549c039b6779632`); the
 2026-07-30 CUDA report is retained as historical. Core lifecycle ASERT evidence
@@ -192,16 +194,19 @@ is at `doc/evidence/cuda-blackwell-16gib-lifecycle-asert-2026-08-01/` (n=20 core
 ≈96.7 s; complete n=0 without goldens/authority). Public ratification gates
 remain false.
 
-The frozen production corpus has a complete eight-header CUDA + Metal match.
-The Metal provider was rerun at the manifest-closing source revision; the CUDA
-record is tied to its byte-identical companion summary and earlier reviewed PR
-revision. Both ran every consensus MAC on device with zero CPU GEMM
-calls/fallbacks and produced byte-identical headers, dimensions, and digests.
+The historical production corpus has an eight-header CUDA + Metal digest match.
+Because the artifacts came from different source revisions, it no longer closes
+the hardened production gate. The corrected comparator requires one code-freeze
+revision, an unchanged build-relevant source fingerprint, coherent raw provider
+metadata, and harness binary hashes. Both providers must be rerun before
+activation. The retained artifacts ran every consensus MAC on device with zero
+CPU GEMM calls/fallbacks and produced byte-identical headers, dimensions, and digests.
 See
 `doc/evidence/multi-gpu-profile1-goldens-2026-08-01/` and
 `doc/evidence/multi-gpu-profile1-goldens-metal-2026-08-01/`. The comparator's
-`complete_multi_gpu_match` is true for the required CUDA+Metal cohort and the
-manifest is compiled in. HIP/ROCm remains optional and fail-closed if supplied.
+Their historical comparison reported `complete_multi_gpu_match`; it is not a
+final-code-freeze result under the corrected comparator. HIP/ROCm remains
+optional and fail-closed if supplied.
 
 The 2026-07-31 GPU audit additionally reported a Blackwell-class 16 GiB discrete
 GPU three-episode mean of approximately 21.38 seconds and a production mining
@@ -212,10 +217,12 @@ verified activation evidence.
 
 ## Required activation-height review
 
-The code, sanitized cross-provider corpus, compiled manifest, canary, strict
-execution policy, trusted-mirror deployment, admission controls, and staged
-ASERT ratio are complete in this branch. The remaining change is deliberately
-separate and consensus-visible: choose the live-chain activation height with an
-adequate upgrade window, flip both ratification constants in the same reviewed
-commit, and install the atomic Epoch-A tuple at that height. Until then all
-public heights remain `INT32_MAX` and mainnet remains on MatMul v3.
+The code-side canary, strict execution policy, trusted-mirror deployment, and
+admission controls are implemented. Final-revision CUDA corpus, lifecycle,
+fault/recovery, and provider-bound ASERT evidence remain hardware-gated; the
+historical cross-provider corpus is not accepted by the hardened comparator.
+After those gates close, the remaining consensus-visible change is to choose
+the live-chain activation height with an adequate upgrade window, flip both
+ratification constants, and install the reviewed ASERT value plus atomic
+Epoch-A tuple in the same commit. Until then all public heights remain
+`INT32_MAX`, RC ASERT remains `1/1`, and mainnet remains on MatMul v3.

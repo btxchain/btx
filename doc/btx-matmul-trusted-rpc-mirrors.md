@@ -166,8 +166,8 @@ revalidation cannot use the old audit bit as authority. Operators can transfer
 a current-policy signed bundle with:
 
 ```bash
-/path/to/btx-cli getmatmulattestations <blockhash>
-/path/to/btx-cli submitmatmulattestations '["<serialized-attestation>", ...]'
+btx-cli getmatmulattestations <blockhash>
+btx-cli submitmatmulattestations '["<serialized-attestation>", ...]'
 ```
 
 `exportmatmulattestations` and `importmatmulattestations` are aliases for those

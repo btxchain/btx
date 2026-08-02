@@ -28,13 +28,13 @@ DATADIR=/tmp/btx-memtest-<tag>
 $BIN/btxd -datadir="$DATADIR" -daemon -daemonwait
 
 # Wallet path
-$BIN//path/to/btx-cli -datadir="$DATADIR" createwallet memtest
-ADDR=$($BIN//path/to/btx-cli -datadir="$DATADIR" -rpcwallet=memtest getnewaddress)
+$BIN/btx-cli -datadir="$DATADIR" createwallet memtest
+ADDR=$($BIN/btx-cli -datadir="$DATADIR" -rpcwallet=memtest getnewaddress)
 
 # 10 iterations x 25 blocks each
 for i in $(seq 1 10); do
   RSS_BEFORE=$(ps -o rss= -p "$(pgrep -f "btxd -datadir=$DATADIR" | head -n1)")
-  $BIN//path/to/btx-cli -datadir="$DATADIR" -rpcwallet=memtest generatetoaddress 25 "$ADDR" >/dev/null
+  $BIN/btx-cli -datadir="$DATADIR" -rpcwallet=memtest generatetoaddress 25 "$ADDR" >/dev/null
   RSS_AFTER=$(ps -o rss= -p "$(pgrep -f "btxd -datadir=$DATADIR" | head -n1)")
   echo "$i $RSS_BEFORE $RSS_AFTER"
 done

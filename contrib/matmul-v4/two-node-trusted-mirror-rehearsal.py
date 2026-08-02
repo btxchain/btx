@@ -7,19 +7,22 @@ signed quorum from the archive — no local GPU required.
 
 Usage (run on the non-GPU host):
 
-  ARCHIVE_HOST=gpu-archive.example.invalid \\
-  ARCHIVE_USER=operator \\
-  ARCHIVE_BTXD=/path/to/gpu-build/bin/btxd \\
-  ARCHIVE_CLI=/path/to/gpu-build/bin//path/to/btx-cli \\
-  MIRROR_BTXD=/path/to/cpu-build/bin/btxd \\
-  MIRROR_CLI=/path/to/cpu-build/bin//path/to/btx-cli \\
-  SIGNER_WIF_FILE=/secure/path/to/signer.wif \\
-  SIGNER_PUB_FILE=/secure/path/to/signer.pub \\
-  python3 -u contrib/matmul-v4/two-node-trusted-mirror-rehearsal.py
+  python3 -u contrib/matmul-v4/two-node-trusted-mirror-rehearsal.py \\
+    --archive-host gpu-archive.example.invalid \\
+    --archive-user operator \\
+    --archive-btxd /path/to/gpu-build/bin/btxd \\
+    --archive-cli /path/to/gpu-build/bin/btx-cli \\
+    --mirror-btxd /path/to/cpu-build/bin/btxd \\
+    --mirror-cli /path/to/cpu-build/bin/btx-cli \\
+    --signer-wif-file /secure/path/to/signer.wif \\
+    --signer-pub-file /secure/path/to/signer.pub
+
+The matching uppercase environment variables remain supported as defaults.
 """
 from __future__ import annotations
 
 import atexit
+import argparse
 import json
 import os
 import shlex
@@ -32,32 +35,90 @@ from pathlib import Path
 ACTIVATION = 6
 DISABLED = 2_147_483_647
 
-ARCHIVE_HOST = os.environ["ARCHIVE_HOST"]
-ARCHIVE_USER = os.environ["ARCHIVE_USER"]
-ARCHIVE_BTXD = os.environ["ARCHIVE_BTXD"]
-ARCHIVE_CLI = os.environ["ARCHIVE_CLI"]
-MIRROR_BTXD = Path(os.environ["MIRROR_BTXD"])
-MIRROR_CLI = Path(os.environ["MIRROR_CLI"])
-SIGNER_WIF_FILE = Path(os.environ["SIGNER_WIF_FILE"])
-SIGNER_PUB = Path(os.environ["SIGNER_PUB_FILE"]).read_text().strip()
-
-RUNTIME_ROOT = Path(os.environ.get("BTX_TRUSTED_MIRROR_TMPDIR", tempfile.gettempdir()))
+ARCHIVE_HOST = ""
+ARCHIVE_USER = ""
+ARCHIVE_BTXD = ""
+ARCHIVE_CLI = ""
+MIRROR_BTXD = Path()
+MIRROR_CLI = Path()
+SIGNER_WIF_FILE = Path()
+SIGNER_PUB = ""
+RUNTIME_ROOT = Path(tempfile.gettempdir())
 ARCHIVE_DD = ""
-MIRROR_DD = Path(tempfile.mkdtemp(prefix="btx-trusted-mirror-", dir=RUNTIME_ROOT))
+MIRROR_DD: Path | None = None
 ARCHIVE_RPC = 19821
 ARCHIVE_P2P = 19822
 MIRROR_RPC = 19831
 MIRROR_P2P = 19832
-OUT = Path(os.environ.get("BTX_TRUSTED_MIRROR_OUT", "trusted-mirror-result.json"))
-KEEP_ARTIFACTS = os.environ.get("BTX_TRUSTED_MIRROR_KEEP_ARTIFACTS") == "1"
+OUT = Path("trusted-mirror-result.json")
+KEEP_ARTIFACTS = False
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--archive-host", default=os.environ.get("ARCHIVE_HOST"))
+    parser.add_argument("--archive-user", default=os.environ.get("ARCHIVE_USER"))
+    parser.add_argument("--archive-btxd", default=os.environ.get("ARCHIVE_BTXD"))
+    parser.add_argument("--archive-cli", default=os.environ.get("ARCHIVE_CLI"))
+    parser.add_argument("--mirror-btxd", type=Path, default=os.environ.get("MIRROR_BTXD"))
+    parser.add_argument("--mirror-cli", type=Path, default=os.environ.get("MIRROR_CLI"))
+    parser.add_argument(
+        "--signer-wif-file", type=Path, default=os.environ.get("SIGNER_WIF_FILE")
+    )
+    parser.add_argument(
+        "--signer-pub-file", type=Path, default=os.environ.get("SIGNER_PUB_FILE")
+    )
+    parser.add_argument(
+        "--runtime-root",
+        type=Path,
+        default=Path(os.environ.get("BTX_TRUSTED_MIRROR_TMPDIR", tempfile.gettempdir())),
+    )
+    parser.add_argument(
+        "--out",
+        type=Path,
+        default=Path(os.environ.get("BTX_TRUSTED_MIRROR_OUT", "trusted-mirror-result.json")),
+    )
+    parser.add_argument(
+        "--keep-artifacts",
+        action="store_true",
+        default=os.environ.get("BTX_TRUSTED_MIRROR_KEEP_ARTIFACTS") == "1",
+    )
+    return parser
+
+
+def validate_args(
+    parser: argparse.ArgumentParser, args: argparse.Namespace
+) -> argparse.Namespace:
+    required = (
+        ("archive_host", "--archive-host", "ARCHIVE_HOST"),
+        ("archive_user", "--archive-user", "ARCHIVE_USER"),
+        ("archive_btxd", "--archive-btxd", "ARCHIVE_BTXD"),
+        ("archive_cli", "--archive-cli", "ARCHIVE_CLI"),
+        ("mirror_btxd", "--mirror-btxd", "MIRROR_BTXD"),
+        ("mirror_cli", "--mirror-cli", "MIRROR_CLI"),
+        ("signer_wif_file", "--signer-wif-file", "SIGNER_WIF_FILE"),
+        ("signer_pub_file", "--signer-pub-file", "SIGNER_PUB_FILE"),
+    )
+    for name, option, env_name in required:
+        if getattr(args, name) in (None, ""):
+            parser.error(f"{option} is required (or set {env_name})")
+    for name, option in (
+        ("mirror_btxd", "--mirror-btxd"),
+        ("mirror_cli", "--mirror-cli"),
+        ("signer_wif_file", "--signer-wif-file"),
+        ("signer_pub_file", "--signer-pub-file"),
+    ):
+        path = getattr(args, name)
+        if not path.is_file():
+            parser.error(f"{option} is not a file: {path}")
+    if not args.runtime_root.is_dir():
+        parser.error(f"--runtime-root is not a directory: {args.runtime_root}")
+    return args
 
 
 def cleanup_local_artifacts() -> None:
-    if not KEEP_ARTIFACTS:
+    if MIRROR_DD is not None and not KEEP_ARTIFACTS:
         shutil.rmtree(MIRROR_DD, ignore_errors=True)
-
-
-atexit.register(cleanup_local_artifacts)
 
 
 def sh_local(cmd: list[str], timeout: int = 120) -> str:
@@ -78,6 +139,8 @@ def sh_remote(remote_cmd: str, timeout: int = 120, input_text: str | None = None
 
 
 def mirror_rpc(*args: str, timeout: int = 120):
+    if MIRROR_DD is None:
+        raise RuntimeError("mirror datadir is not initialized")
     out = sh_local(
         [
             str(MIRROR_CLI),
@@ -149,8 +212,73 @@ def cleanup_remote_archive() -> None:
             pass
 
 
-def main() -> None:
-    global ARCHIVE_DD
+def _require_object(parent: dict, key: str, path: str) -> dict:
+    value = parent.get(key)
+    if not isinstance(value, dict):
+        raise RuntimeError(f"getmininginfo schema error: {path} must be an object")
+    return value
+
+
+def extract_strict_replay_evidence(mining_info: object) -> tuple[dict, dict, dict]:
+    """Return and validate the strict-replay evidence exposed by getmininginfo."""
+    if not isinstance(mining_info, dict):
+        raise RuntimeError("getmininginfo schema error: response must be an object")
+    runtime = _require_object(mining_info, "backend_runtime", "backend_runtime")
+    rc = _require_object(runtime, "rc_exact_replay", "backend_runtime.rc_exact_replay")
+    canary = _require_object(
+        rc, "production_canary", "backend_runtime.rc_exact_replay.production_canary"
+    )
+    validation = _require_object(
+        rc, "last_validation", "backend_runtime.rc_exact_replay.last_validation"
+    )
+    for obj, key, expected, path in (
+        (canary, "passed", bool, "production_canary.passed"),
+        (canary, "device_macs", int, "production_canary.device_macs"),
+        (canary, "cpu_fallbacks", int, "production_canary.cpu_fallbacks"),
+        (validation, "available", bool, "last_validation.available"),
+        (validation, "require_device", bool, "last_validation.require_device"),
+        (validation, "fully_accelerated", bool, "last_validation.fully_accelerated"),
+        (validation, "cpu_gemm_calls", int, "last_validation.cpu_gemm_calls"),
+        (validation, "cpu_gemm_fallbacks", int, "last_validation.cpu_gemm_fallbacks"),
+    ):
+        value = obj.get(key)
+        if not isinstance(value, expected) or (
+            expected is int and (isinstance(value, bool) or value < 0)
+        ):
+            typename = "a non-negative integer" if expected is int else "a boolean"
+            raise RuntimeError(f"getmininginfo schema error: {path} must be {typename}")
+    if not isinstance(validation.get("provider"), str) or not validation["provider"]:
+        raise RuntimeError(
+            "getmininginfo schema error: last_validation.provider must be a non-empty string"
+        )
+    return rc, canary, validation
+
+
+def main(argv: list[str] | None = None) -> None:
+    global ARCHIVE_DD, ARCHIVE_HOST, ARCHIVE_USER, ARCHIVE_BTXD, ARCHIVE_CLI
+    global MIRROR_BTXD, MIRROR_CLI, SIGNER_WIF_FILE, SIGNER_PUB
+    global RUNTIME_ROOT, MIRROR_DD, OUT, KEEP_ARTIFACTS
+
+    parser = build_arg_parser()
+    args = validate_args(parser, parser.parse_args(argv))
+    ARCHIVE_HOST = args.archive_host
+    ARCHIVE_USER = args.archive_user
+    ARCHIVE_BTXD = args.archive_btxd
+    ARCHIVE_CLI = args.archive_cli
+    MIRROR_BTXD = args.mirror_btxd
+    MIRROR_CLI = args.mirror_cli
+    SIGNER_WIF_FILE = args.signer_wif_file
+    SIGNER_PUB = args.signer_pub_file.read_text(encoding="utf-8").strip()
+    if not SIGNER_PUB:
+        parser.error("--signer-pub-file is empty")
+    RUNTIME_ROOT = args.runtime_root
+    OUT = args.out
+    KEEP_ARTIFACTS = args.keep_artifacts
+    MIRROR_DD = Path(
+        tempfile.mkdtemp(prefix="btx-trusted-mirror-", dir=RUNTIME_ROOT)
+    )
+    atexit.register(cleanup_local_artifacts)
+
     ARCHIVE_DD = sh_remote("mktemp -d \"${TMPDIR:-/tmp}/btx-trusted-archive.XXXXXX\"")
     if not ARCHIVE_DD.startswith("/") or ARCHIVE_DD in {"/", "/tmp"}:
         raise RuntimeError("remote mktemp returned an unsafe archive datadir")
@@ -306,11 +434,15 @@ connect=127.0.0.1:{ARCHIVE_P2P}
             )
 
         trusted = mirror_rpc("getmatmultrustedstatus")
-        archive_rc = archive_rpc("getmininginfo").get("rc_exact_replay", {})
-        canary = archive_rc.get("production_canary", {})
-        validation = archive_rc.get("last_validation", {})
+        archive_rc, canary, validation = extract_strict_replay_evidence(
+            archive_rpc("getmininginfo")
+        )
         if not (
             canary.get("passed")
+            and canary.get("device_macs", 0) > 0
+            and canary.get("cpu_fallbacks") == 0
+            and validation.get("available")
+            and validation.get("require_device")
             and validation.get("fully_accelerated")
             and validation.get("cpu_gemm_calls") == 0
             and validation.get("cpu_gemm_fallbacks") == 0

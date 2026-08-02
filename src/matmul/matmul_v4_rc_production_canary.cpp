@@ -14,6 +14,7 @@
 
 #include <array>
 #include <chrono>
+#include <cctype>
 #include <limits>
 #include <map>
 #include <mutex>
@@ -137,6 +138,23 @@ bool PublicProvenanceValid(const std::string& value)
     // Accept a repository-relative evidence path or a public HTTPS reference;
     // reject host-local absolute/file paths at the authorization boundary.
     return value.find("doc/") == 0 || value.find("https://") == 0;
+}
+
+bool IsHexIdentity(const std::string& value, size_t expected_size)
+{
+    if (value.size() != expected_size) return false;
+    for (const unsigned char ch : value) {
+        if (!std::isxdigit(ch)) return false;
+    }
+    return true;
+}
+
+bool GoldenEvidenceIdentityValid(
+    const RCProductionGoldenManifestEntry& entry)
+{
+    return IsHexIdentity(entry.source_revision, 40) &&
+        IsHexIdentity(entry.source_tree_fingerprint, 64) &&
+        IsHexIdentity(entry.harness_sha256, 64);
 }
 
 BackendIdentity IdentifyBackend(
@@ -331,52 +349,12 @@ std::string ReadPublicSysctlString(const char* name)
 const std::vector<RCProductionGoldenManifestEntry>&
 CommittedRCProductionGoldenManifest()
 {
-    // CUDA and Metal independently reproduced the same eight frozen Profile-1
-    // canary headers with full device coverage and zero CPU fallback. One
-    // deterministic nonce is sufficient for the startup canary; all eight
-    // records remain committed in the provenance corpus. Runtime capabilities
-    // still bind the actual provider identity and configured activation height.
-    static const std::vector<RCProductionGoldenManifestEntry> manifest = [] {
-        RCProductionEpochIdentity epoch;
-        epoch.activation_height =
-            RCProductionEpochIdentity::ANY_ACTIVATION_HEIGHT;
-        epoch.profile = 1;
-        epoch.transcript_version = kRCTranscriptVersion;
-        epoch.matmul_dimension = 4096;
-        epoch.params = DefaultConsensusRCEpisodeParams();
-
-        const uint256 digest{
-            "b4777985d4f2621d0b9c119f4188ac7d80158fc92560ade96cc7a3fd8cfae953"};
-        const std::string provenance{
-            "doc/evidence/multi-gpu-profile1-goldens-2026-08-01/"
-            "multi-gpu-digest-compare.json"};
-        return std::vector<RCProductionGoldenManifestEntry>{
-            {
-                .id = "epoch-a-profile1-cuda-sm120-nonce1",
-                .provider_class = {
-                    .provider_family = "cuda",
-                    .device_architecture = "sm_120",
-                },
-                .epoch = epoch,
-                .header_nonce = 1,
-                .expected_digest = digest,
-                .independently_reproduced = true,
-                .public_provenance = provenance,
-            },
-            {
-                .id = "epoch-a-profile1-metal-m4-nonce1",
-                .provider_class = {
-                    .provider_family = "metal",
-                    .device_architecture = "m4_class",
-                },
-                .epoch = epoch,
-                .header_nonce = 1,
-                .expected_digest = digest,
-                .independently_reproduced = true,
-                .public_provenance = provenance,
-            },
-        };
-    }();
+    // Historical CUDA/Metal artifacts used different source revisions. Keep
+    // production authorization fail-closed until both providers reproduce the
+    // hardened, revision- and binary-bound corpus from one reviewed code freeze.
+    // The activation/evidence commit may populate this vector only after
+    // multi-gpu-golden-corpus.sh reports complete_multi_gpu_match=true.
+    static const std::vector<RCProductionGoldenManifestEntry> manifest{};
     return manifest;
 }
 
@@ -391,11 +369,16 @@ bool RCProductionGoldenManifestCohortValid(
     for (const auto& entry : manifest) {
         if (!entry.independently_reproduced || entry.expected_digest.IsNull() ||
             entry.id.empty() || !PublicProvenanceValid(entry.public_provenance) ||
+            !GoldenEvidenceIdentityValid(entry) ||
             entry.provider_class.provider_family.empty() ||
             entry.provider_class.device_architecture.empty() ||
             entry.header_nonce != reference.header_nonce ||
             entry.expected_digest != reference.expected_digest ||
             !GoldenEpochMatches(reference.epoch, entry.epoch)) {
+            return false;
+        }
+        if (entry.source_revision != reference.source_revision ||
+            entry.source_tree_fingerprint != reference.source_tree_fingerprint) {
             return false;
         }
         const auto provider_class{std::make_pair(
@@ -498,7 +481,8 @@ const RCProductionGoldenManifestEntry* FindRCProductionGolden(
     const RCProductionGoldenManifestEntry* match{nullptr};
     for (const auto& entry : manifest) {
         if (!entry.independently_reproduced || entry.expected_digest.IsNull() ||
-            entry.id.empty() || !PublicProvenanceValid(entry.public_provenance)) {
+            entry.id.empty() || !PublicProvenanceValid(entry.public_provenance) ||
+            !GoldenEvidenceIdentityValid(entry)) {
             continue;
         }
         if (GoldenProviderClassMatches(provider, entry.provider_class) &&
@@ -545,7 +529,8 @@ RCProductionCanaryOutcome EvaluateRCProductionCanaryResult(
     const RCStrictDeviceEpisodeResult& replay)
 {
     if (!golden.independently_reproduced || golden.expected_digest.IsNull() ||
-        golden.id.empty() || !PublicProvenanceValid(golden.public_provenance)) {
+        golden.id.empty() || !PublicProvenanceValid(golden.public_provenance) ||
+        !GoldenEvidenceIdentityValid(golden)) {
         return RCProductionCanaryOutcome::MissingGolden;
     }
     if (replay.outcome != RCStrictDeviceEpisodeOutcome::Complete ||

@@ -5444,15 +5444,16 @@ uint32_t EffectiveMatMulGlobalVerifyBudgetPerMin(const Consensus::Params& params
     return params.nMatMulGlobalVerifyBudgetPerMin;
 }
 
-uint32_t EffectiveMatMulGlobalPhase2BudgetForCatchUp(
+uint32_t EffectiveMatMulGlobalHeaderBudgetForCatchUp(
     const Consensus::Params& params, bool is_ibd, bool in_fast_phase, int32_t reference_height)
 {
     uint32_t global_budget =
         EffectiveMatMulGlobalVerifyBudgetPerMin(params, reference_height);
     if (is_ibd || in_fast_phase) {
-        // See ConsumeMatMulVerificationBudgetForPeer: IBD counts every header
-        // as a Phase2 check, so the steady-state global floor (~512) must not
-        // reject a full headers batch (~2000).
+        // This helper is reserved for cheap header-batch accounting. IBD can
+        // count every header as a Phase2 check, so the steady-state global
+        // floor (~512) must not reject a full headers batch (~2000). Expensive
+        // complete-block work never receives this catch-up enlargement.
         global_budget = std::max<uint32_t>(
             global_budget,
             EffectiveMatMulPeerVerifyBudgetPerMin(

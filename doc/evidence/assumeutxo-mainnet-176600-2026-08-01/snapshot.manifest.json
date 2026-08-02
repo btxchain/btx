@@ -14,7 +14,7 @@
   "snapshot_size_bytes": 452166486,
   "shielded_state_pin": "c0f3bde58e1138367a6cd2b0131975de8fad9c90a991f88a42e9397d742b77ce",
   "verification": {
-    "loadtxoutset": "/path/to/btx-cli -rpcclienttimeout=0 loadtxoutset snapshot.dat",
+    "loadtxoutset": "btx-cli -rpcclienttimeout=0 loadtxoutset snapshot.dat",
     "sha256sum": "26bbaed88b2250566795d0ecdb124f9d8d92438eea88265a3d1283dfcef5b44f  snapshot.dat"
   }
 }

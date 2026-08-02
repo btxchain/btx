@@ -19,7 +19,7 @@ To receive release and update notifications, please subscribe to:
 # How to Upgrade
 
 After an official v0.33.2 release is published, shut down the previous node
-cleanly, wait for it to exit, and replace its `btxd`, `/path/to/btx-cli`, and related
+cleanly, wait for it to exit, and replace its `btxd`, `btx-cli`, and related
 binaries with signed final release artifacts. Back up wallets and
 configuration before upgrading. Do not install unpublished candidate assets.
 
@@ -90,9 +90,9 @@ readiness.
 - A fail-closed startup/epoch canary mechanism binds production eligibility to
   provider family, public device architecture class, driver/runtime ABI,
   activation height, profile, transcript, consensus MatMul dimension, and
-  episode parameters. Its reviewed manifest contains the independently matching
-  CUDA and Metal launch cohort; any optional HIP entry remains fail-closed until
-  it reproduces the same corpus.
+  episode parameters. The manifest is intentionally empty until the corrected
+  code-freeze CUDA and Metal cohort passes the hardened provenance comparator;
+  any optional HIP entry remains fail-closed until it reproduces that corpus.
 - Exhaustive Stage-3 regression coverage now matches the current fail-closed
   construction: G4 remains open across the active-V8/V10-evidence domain
   mismatch, the aggregation screen remains below its hard 100-bit target, the
@@ -142,11 +142,12 @@ See `doc/btx-matmul-trusted-rpc-mirrors.md` and
   missing or malformed JSON, and incomplete result status.
 - Production runs cannot silently resolve to the serial CPU backend without an
   explicit diagnostic opt-in.
-- Repository 100-header Metal and sanitized CUDA measurements are included as
-  engineering evidence. The current Metal rerun and the revision-bound CUDA
-  corpus use the same frozen headers and produced byte-identical digests with
-  full device coverage and zero CPU fallback. The public ratification switch
-  remains deliberately coupled to the separate activation-height change.
+- Repository Metal and sanitized CUDA measurements are retained as historical
+  engineering evidence. The hardened comparator now requires an exact
+  code-freeze revision, source-tree fingerprint, harness-binary identity, and
+  coherent raw provider metadata. Final CUDA+Metal artifacts must be rerun
+  before ratification; historical cross-revision equality is not activation
+  evidence.
 
 ## Cumulative wallet and notification support
 
@@ -161,10 +162,11 @@ See `doc/btx-matmul-trusted-rpc-mirrors.md` and
 
 # Activation Change That Remains
 
-This implementation branch intentionally leaves public heights at `INT32_MAX`
-and both ratification constants false. The remaining consensus change is to
-choose the live-chain activation height with an adequate upgrade window and,
-in one reviewed commit, flip the ratification constants and install the finite
+This implementation branch intentionally leaves public heights at `INT32_MAX`,
+RC ASERT at neutral `1/1`, and both ratification constants false. Final
+revision-bound CUDA evidence, provider-bound calibration, and complete lifecycle
+evidence remain hardware-gated. After those pass, one reviewed activation change
+must choose the height, flip ratification, and install the calibrated finite
 atomic Epoch-A tuple.
 
 # Known Limitations

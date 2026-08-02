@@ -8,7 +8,7 @@ Does not clear roadmap §4 gate 7.
 - [ ] `rebuild.done` present on GPU host (or binaries current)
 - [ ] Status `daemon` / `goldens` / `hwcampaign` / `lifecycle` all `done`
 - [ ] `flock` can acquire `/tmp/btx-pr97-campaigns/locks/gpu.lock`
-- [ ] `build-cuda/bin/btxd` and `/path/to/btx-cli` executable
+- [ ] `build-cuda/bin/btxd` and `btx-cli` executable
 - [ ] Evidence stub exists: `doc/evidence/cuda-blackwell-16gib-soak-2026-08-01/README.md`
 - [ ] Log dir created: `/tmp/btx-pr97-campaigns/logs/soak/`
 

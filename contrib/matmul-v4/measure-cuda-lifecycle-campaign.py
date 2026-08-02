@@ -24,7 +24,7 @@ false; this script never flips them or installs an RC ASERT ratio.
 Usage (GPU host, under flock):
 
   contrib/matmul-v4/measure-cuda-lifecycle-campaign.py \\
-    --btxd build-cuda/bin/btxd --/path/to/btx-cli build-cuda/bin//path/to/btx-cli \\
+    --btxd build-cuda/bin/btxd --btx-cli build-cuda/bin/btx-cli \\
     --samples 20 --max-wall-s 5400 --mode production \\
     --out-dir doc/evidence/cuda-blackwell-16gib-lifecycle-asert-2026-08-01
 """
@@ -394,7 +394,7 @@ def write_status(path: Path | None, payload: dict[str, Any]) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--btxd", type=Path, required=True)
-    ap.add_argument("--/path/to/btx-cli", type=Path, required=True)
+    ap.add_argument("--btx-cli", type=Path, required=True)
     ap.add_argument("--workdir", type=Path, required=True)
     ap.add_argument("--out-json", type=Path, required=True)
     ap.add_argument("--samples", type=int, default=20)
@@ -417,7 +417,7 @@ def main() -> int:
     if not args.btxd.is_file():
         die(f"btxd not found: {args.btxd}")
     if not args.btx_cli.is_file():
-        die(f"/path/to/btx-cli not found: {args.btx_cli}")
+        die(f"btx-cli not found: {args.btx_cli}")
 
     env = dict(os.environ)
     env.update(

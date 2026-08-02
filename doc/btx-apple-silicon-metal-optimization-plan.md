@@ -680,7 +680,7 @@ superlinear scaling with more GPU cores.
 
 **Out of scope for this phase:**
 - Consensus math (satoshis, `COIN`, `MAX_MONEY`, chain format)
-- Executable/package names (`btxd`, `/path/to/btx-cli`, `btx-qt`) to avoid release/package churn
+- Executable/package names (`btxd`, `btx-cli`, `btx-qt`) to avoid release/package churn
 - Historical release notes text that is intentionally archival
 
 ### 8B. Required Code Changes (deep scan results)

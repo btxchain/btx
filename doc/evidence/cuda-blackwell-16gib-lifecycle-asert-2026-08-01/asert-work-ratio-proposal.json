@@ -1,11 +1,11 @@
 {
   "evidence_kind": "asert_work_ratio_proposal_profile1_vs_v3",
   "date": "2026-08-01",
-  "status": "PROPOSAL_INSTALLED_HEIGHTS_STILL_DISABLED",
+  "status": "HISTORICAL_PROPOSAL_NOT_INSTALLED",
   "tip_sha": "c4ac2e439ac496245f12dcbf8b42c9575247dbe9",
   "ratification": false,
-  "mainnet_params_unchanged": false,
-  "mainnet_nMatMulRCAsertRescaleNum": 16893794,
+  "mainnet_params_unchanged": true,
+  "mainnet_nMatMulRCAsertRescaleNum": 1,
   "mainnet_nMatMulRCAsertRescaleDen": 1,
   "machine_class": {
     "os": "Linux x86_64",
@@ -112,7 +112,7 @@
     "Parent measured on CPU while RC measured on GPU \u2014 correct for this host's mining mix (v3 is SHA/CPU; Profile-1 ExactReplay is device-bound), but multi-host hardware-mix shift not sampled",
     "Parent runs overlapped lifecycle CPU contention (CV~1.2%)",
     "Live difficulty continuity check at activation planning still required (getdifficulty/getmininginfo at H_A choice time)",
-    "Ratio installed on public params while heights remain INT32_MAX; ratification gates remain false",
-    "Production golden manifest still empty until CUDA+Metal+HIP digest match"
+    "Ratio is not installed; public RC ASERT remains neutral 1/1 until final-binary provider-bound calibration is reviewed",
+    "Historical CUDA and Metal artifacts must be regenerated from one code freeze under the hardened provenance comparator"
   ]
 }

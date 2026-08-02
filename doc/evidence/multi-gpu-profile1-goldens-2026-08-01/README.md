@@ -1,8 +1,9 @@
 # Multi-GPU Profile-1 ExactReplay golden compare
 
-Status: **complete required CUDA + Metal match**. The reviewed production
-golden manifest is populated. Public ratification remains deliberately coupled
-to the separate activation-height commit, so Epoch-A heights remain disabled.
+Status: **historical CUDA + Metal digest match**. The production manifest is
+now intentionally empty until both providers rerun from one corrected code
+freeze under the hardened provenance comparator. Public ratification and
+Epoch-A heights remain disabled.
 
 ## Result
 
@@ -25,10 +26,9 @@ The Metal corpus was rerun from source revision
 The original CUDA raw artifact's missing revision field was recovered from its
 byte-identical companion summary, which records revision
 `c4ac2e439ac496245f12dcbf8b42c9575247dbe9`. Public provider identity is bound
-to CUDA architecture class `sm_120`; runtime readiness still reruns the full
-canary and binds the live driver/runtime. The comparator requires non-unknown
-provenance, complete public provider identities, full device coverage, and zero
-fallback for both entries.
+to CUDA architecture class `sm_120`. This historical comparison predates the
+current exact-revision, source-tree-fingerprint, raw-provider, and harness-binary
+checks and therefore cannot authorize runtime readiness.
 
 ## Policy
 
@@ -37,10 +37,9 @@ CUDA and Metal, to run ExactReplay on identical frozen canary headers. Portable
 CPU ExactReplay is not accepted as an independent production-golden backend.
 HIP is optional; any HIP entry must match this corpus before it is authorized.
 
-`complete_multi_gpu_match` is true for the required cohort, with no header,
-dimension, nonce, digest, provider-identity, or coverage mismatch. The manifest
-uses nonce 1 for the startup replay while this artifact retains all eight
-cross-provider records.
+`complete_multi_gpu_match` was true under the historical comparator, with no
+header, dimension, nonce, digest, provider-identity, or coverage mismatch. The
+current manifest deliberately does not consume this artifact.
 
 ## Artifacts
 

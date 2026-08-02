@@ -540,7 +540,7 @@ consensus will reject.
 btxd
 
 # Historical/pre-sunset compatibility only.
-/path/to/btx-cli z_shieldcoinbase
+btx-cli z_shieldcoinbase
 ```
 
 ### Shielded RPCs
@@ -695,7 +695,7 @@ branch, use the files in `contrib/prebuilt/windows/`.
 | Option | Default | Description |
 |---|---|---|
 | `BUILD_DAEMON` | ON | Build `btxd` |
-| `BUILD_CLI` | ON | Build `/path/to/btx-cli` |
+| `BUILD_CLI` | ON | Build `btx-cli` |
 | `BUILD_GUI` | OFF | Build `btx-qt` (requires Qt) |
 | `BUILD_WALLET_TOOL` | auto | Build `btx-wallet` |
 | `BUILD_TESTS` | ON | Build unit test suite |
@@ -758,7 +758,7 @@ run `solvematmulservicechallenge` with explicit `time_budget_ms` /
 flag on `verifymatmulserviceproof` / `verifymatmulserviceproofs` when they need
 pure verification without local registry lookups. In `--json` mode, the
 installer now keeps bootstrap progress on stderr and returns a machine-readable
-summary that includes the installed `btxd` / `/path/to/btx-cli` paths, the generated
+summary that includes the installed `btxd` / `btx-cli` paths, the generated
 fast-start config, and miner-preset handoff commands for
 `contrib/mining/start-live-mining.sh`. For private GitHub releases, export one
 of `BTX_GITHUB_TOKEN`, `GITHUB_TOKEN`, or `GH_TOKEN` first so the installer can
@@ -834,10 +834,10 @@ intentionally want the slower externalized-retention posture.
 ### Checking Status
 
 ```bash
-/path/to/btx-cli getblockchaininfo     # Chain state, sync progress
-/path/to/btx-cli getpeerinfo           # Connected peers
-/path/to/btx-cli getmininginfo         # Mining parameters
-/path/to/btx-cli getmempoolinfo        # Memory pool status
+btx-cli getblockchaininfo     # Chain state, sync progress
+btx-cli getpeerinfo           # Connected peers
+btx-cli getmininginfo         # Mining parameters
+btx-cli getmempoolinfo        # Memory pool status
 ```
 
 ### Data Directory
@@ -856,7 +856,7 @@ intentionally want the slower externalized-retention posture.
 
 ```bash
 # Create a new descriptor wallet
-/path/to/btx-cli createwallet "mywallet"
+btx-cli createwallet "mywallet"
 ```
 
 Descriptor wallets are required. Default address type is `p2mr`
@@ -871,58 +871,58 @@ must remain private; browser code never receives RPC credentials.
 
 ```bash
 # Get a new receiving address
-/path/to/btx-cli -rpcwallet=mywallet getnewaddress
+btx-cli -rpcwallet=mywallet getnewaddress
 # Returns: btx1z...
 
 # Check balance
-/path/to/btx-cli -rpcwallet=mywallet getbalance
+btx-cli -rpcwallet=mywallet getbalance
 
 # Send BTX
-/path/to/btx-cli -rpcwallet=mywallet sendtoaddress "btx1z..." 1.5
+btx-cli -rpcwallet=mywallet sendtoaddress "btx1z..." 1.5
 
 # Shielded balance
-/path/to/btx-cli -rpcwallet=mywallet z_gettotalbalance
+btx-cli -rpcwallet=mywallet z_gettotalbalance
 
 # Send to shielded address
-/path/to/btx-cli -rpcwallet=mywallet z_sendmany '[{"address":"btxs1...","amount":1.0}]'
+btx-cli -rpcwallet=mywallet z_sendmany '[{"address":"btxs1...","amount":1.0}]'
 ```
 
 ### Backup
 
 ```bash
 # Verify integrity before taking a production backup
-/path/to/btx-cli -rpcwallet=mywallet z_verifywalletintegrity
+btx-cli -rpcwallet=mywallet z_verifywalletintegrity
 
 # Backup wallet file
-/path/to/btx-cli -rpcwallet=mywallet backupwallet "/path/to/backup.dat"
+btx-cli -rpcwallet=mywallet backupwallet "/path/to/backup.dat"
 
 # Preferred: full encrypted bundle archive
-/path/to/btx-cli -rpcwallet=mywallet \
+btx-cli -rpcwallet=mywallet \
   -stdinwalletpassphrase \
   -stdinbundlepassphrase \
   backupwalletbundlearchive "/path/to/mywallet.bundle.btx"
 
 # Restore from archive
-/path/to/btx-cli -stdinbundlepassphrase \
+btx-cli -stdinbundlepassphrase \
   restorewalletbundlearchive "restored" "/path/to/mywallet.bundle.btx"
 
 # Restore a browser self-custody .btxwallet JSON bundle
-/path/to/btx-cli restorewalletbundle "webwallet" "/path/to/btx-wallet.btxwallet.json"
+btx-cli restorewalletbundle "webwallet" "/path/to/btx-wallet.btxwallet.json"
 
 # Or import that browser bundle into an existing blank descriptor wallet
-/path/to/btx-cli -rpcwallet=webwallet importwalletbundle "/path/to/btx-wallet.btxwallet.json"
+btx-cli -rpcwallet=webwallet importwalletbundle "/path/to/btx-wallet.btxwallet.json"
 
 # Export a native descriptor wallet as a browser-compatible .btxwallet file
 # This file contains plaintext PQ master seed material.
-/path/to/btx-cli -rpcwallet=mywallet exportwalletbundle "/path/to/mywallet.btxwallet.json"
+btx-cli -rpcwallet=mywallet exportwalletbundle "/path/to/mywallet.btxwallet.json"
 ```
 
 ### Wallet Encryption
 
 ```bash
-/path/to/btx-cli -rpcwallet=mywallet encryptwallet "your_passphrase"
-/path/to/btx-cli -rpcwallet=mywallet walletpassphrase "your_passphrase" 60
-/path/to/btx-cli -rpcwallet=mywallet walletlock
+btx-cli -rpcwallet=mywallet encryptwallet "your_passphrase"
+btx-cli -rpcwallet=mywallet walletpassphrase "your_passphrase" 60
+btx-cli -rpcwallet=mywallet walletlock
 ```
 
 For BTX-native treasury, multisig, timelocked recovery, backup, restore, and
@@ -1017,17 +1017,17 @@ for regtest/testnet mining. For production mainnet mining, use
 
 ```bash
 ./build/bin/btxd -regtest -daemon
-./build/bin//path/to/btx-cli -regtest createwallet "miner"
-ADDR=$(./build/bin//path/to/btx-cli -regtest -rpcwallet=miner getnewaddress)
-./build/bin//path/to/btx-cli -regtest generatetoaddress 10 "$ADDR"
-./build/bin//path/to/btx-cli -regtest -rpcwallet=miner getbalance
+./build/bin/btx-cli -regtest createwallet "miner"
+ADDR=$(./build/bin/btx-cli -regtest -rpcwallet=miner getnewaddress)
+./build/bin/btx-cli -regtest generatetoaddress 10 "$ADDR"
+./build/bin/btx-cli -regtest -rpcwallet=miner getbalance
 # -> 200.00000000 (10 blocks x 20 BTX)
 ```
 
 ### Production Mining (getblocktemplate)
 
 ```bash
-./build/bin//path/to/btx-cli getblocktemplate '{"rules": ["segwit"]}'
+./build/bin/btx-cli getblocktemplate '{"rules": ["segwit"]}'
 ```
 
 The template includes MatMul-specific fields (`matmul_dim`, `seed_a`,
@@ -1054,7 +1054,7 @@ The template includes MatMul-specific fields (`matmul_dim`, `seed_a`,
   `-maxconnections=32` by default instead of a tiny connection budget.
 - Back up the mining reward wallet together with its descriptors, not just the
   wallet database file.
-- Prefer `btxd` / `/path/to/btx-cli` in scripts and service files.
+- Prefer `btxd` / `btx-cli` in scripts and service files.
 - If you intentionally drive local solo mining through `generatetoaddress`,
   use a health-aware supervisor instead of a blind shell loop so the miner can
   react to repeated RPC failures or prolonged `chain_guard` warnings.
@@ -1191,7 +1191,7 @@ make fuzz-smoke
 ## RPC Interface
 
 BTX exposes a JSON-RPC interface compatible with Bitcoin Core. Connect using
-`/path/to/btx-cli` or any Bitcoin RPC client library.
+`btx-cli` or any Bitcoin RPC client library.
 
 | Category | Description |
 |---|---|

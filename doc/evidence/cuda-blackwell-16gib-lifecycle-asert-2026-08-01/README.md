@@ -1,8 +1,9 @@
 # CUDA Blackwell 16 GiB — candidate→authenticated-tip lifecycle (ASERT / spacing)
 
-Status: **engineering calibration evidence only**. Ratification gates remain
-false. Public RC ASERT rescale `16893794/1` is **staged** on chainparams while
-heights remain `INT32_MAX`. This directory does **not** invent authenticated
+Status: **historical engineering calibration evidence only**. Ratification
+gates remain false. Public RC ASERT remains neutral `1/1`; the measured
+`16893794/1` value is a proposal requiring final-binary provider-bound rerun.
+Heights remain `INT32_MAX`. This directory does **not** invent authenticated
 complete-lifecycle samples or flip
 `BTX_MATMUL_NO_INVERSION_GATE_RATIFIED` /
 `BTX_MATMUL_V47_GPU_LIFECYCLE_GATE_RATIFIED`.
@@ -35,7 +36,7 @@ Primary artifact: `lifecycle-campaign.json`.
 
 ### Post-settings rememeasure (same day)
 
-After AcceptBlock/sync/harness fixes and staged ASERT: short production
+After AcceptBlock/sync/harness fixes and the historical ASERT proposal: short production
 remeasure (`lifecycle-remeasure-post-settings-summary.json`) still reports
 **complete n=0**, **core n=3**, core p99 ≈ **96.92 s**. Spacing stays **90 s**
 until multi-GPU goldens unlock authority and complete samples exist.

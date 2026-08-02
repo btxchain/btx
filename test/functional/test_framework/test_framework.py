@@ -194,7 +194,7 @@ class BitcoinTestFramework(metaclass=BitcoinTestMetaClass):
         parser.add_argument("--pdbonfailure", dest="pdbonfailure", default=False, action="store_true",
                             help="Attach a python debugger if test fails")
         parser.add_argument("--usecli", dest="usecli", default=False, action="store_true",
-                            help="use /path/to/btx-cli instead of RPC for all commands")
+                            help="use btx-cli instead of RPC for all commands")
         parser.add_argument("--perf", dest="perf", default=False, action="store_true",
                             help="profile running nodes with perf for the duration of the test")
         parser.add_argument("--valgrind", dest="valgrind", default=False, action="store_true",
@@ -257,7 +257,7 @@ class BitcoinTestFramework(metaclass=BitcoinTestMetaClass):
 
         binaries = {
             "btxd": ("bitcoind", ("BTXD", "BITCOIND"), "bitcoind"),
-            "/path/to/btx-cli": ("bitcoincli", ("BTXCLI", "BITCOINCLI"), "bitcoin-cli"),
+            "btx-cli": ("bitcoincli", ("BTXCLI", "BITCOINCLI"), "bitcoin-cli"),
             "btx-util": ("bitcoinutil", ("BTXUTIL", "BITCOINUTIL"), "bitcoin-util"),
             "btx-wallet": ("bitcoinwallet", ("BTXWALLET", "BITCOINWALLET"), "bitcoin-wallet"),
         }

@@ -32,11 +32,11 @@
   },
   "within_target_spacing_at_90s": false,
   "spacing_gate_decision": "KEEP_nPowTargetSpacingNormal_90_until_complete_lifecycle_with_authority",
-  "canary_blocker": "CommittedRCProductionGoldenManifest empty until CUDA+Metal+HIP digest match",
+  "canary_blocker": "CommittedRCProductionGoldenManifest empty until final-code-freeze CUDA+Metal digest and provenance match",
   "authority_expected": false,
   "ratification": false,
   "notes": [
-    "Remeasure after AcceptBlock/sync/harness fixes and staged RC ASERT 16893794/1.",
+    "Historical remeasure after AcceptBlock/sync/harness fixes using the then-proposed RC ASERT 16893794/1; current disabled parameters are neutral 1/1.",
     "Winner authority remains unavailable (missing_golden); complete samples remain 0.",
     "Core p99 still ~96.9s > 90s; expected until canary unlocks authority tip skip."
   ]

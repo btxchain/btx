@@ -273,9 +273,9 @@ BOOST_AUTO_TEST_CASE(rc_compute_lane_ids_distinct)
 
 BOOST_AUTO_TEST_CASE(rc_profile1_activation_readiness_requires_runtime_canary)
 {
-    // Committed CUDA+Metal goldens do not make an unresolved provider ready.
-    // The exact runtime identity must still pass its strict startup canary.
-    BOOST_CHECK_EQUAL(rc::CommittedRCProductionGoldenManifest().size(), 2U);
+    // No provider is ready until one final-revision CUDA+Metal corpus is
+    // committed and the exact runtime identity passes its startup canary.
+    BOOST_CHECK(rc::CommittedRCProductionGoldenManifest().empty());
     const auto canary{rc::GetLastRCProductionCanaryStatus()};
     BOOST_CHECK(!canary.manifest_has_reviewed_goldens);
     BOOST_CHECK(!canary.passed);
