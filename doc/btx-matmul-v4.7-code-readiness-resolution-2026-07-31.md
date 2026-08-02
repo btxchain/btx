@@ -10,11 +10,10 @@ Canonical transition and activation policy:
 
 This note records the disposition of PR97-CODE-F01 through F05 and the related
 Unix daemon CUDA lifecycle audit. It is not an activation approval. The
-production canary and manifest mechanism is implemented but the committed
-manifest is intentionally EMPTY,
-but the hardened comparator requires those entries to be replaced by one
-final-code-freeze CUDA+Metal corpus. Public ratification gates remain false and
-public RC activation heights remain disabled.
+production canary and manifest mechanism is implemented, but the committed
+manifest is intentionally EMPTY. The hardened comparator requires its entries
+to come from one final-code-freeze CUDA+Metal corpus. Public ratification gates
+remain false and public RC activation heights remain disabled.
 
 ## F01: accelerator initialization across Unix daemonization
 
@@ -175,15 +174,19 @@ proof into consensus authority.
 
 ## Activation boundary
 
-Admission/scheduler controls, strict daemon lifecycle, trusted mirrors, and the
-fail-closed canary/comparator implementation are complete in code. Historical
-CUDA+Metal artifacts remain useful but must be regenerated from the corrected
-code freeze under the hardened provenance checks. Public RC ASERT is neutral
-`1/1`; the final provider-bound ratio and complete lifecycle evidence remain
-CUDA hardware work. HIP is optional and must match before that provider becomes
-production eligible. After those hardware gates close, the remaining consensus
-change is the separately reviewed activation height plus same-commit ASERT and
-ratification tuple.
+Admission/scheduler controls, strict daemon lifecycle, trusted-mirror
+attestation plumbing, and the fail-closed canary/comparator implementation are
+implemented in code. A production strict-device trusted-mirror rehearsal is
+deliberately unable to cross the RC boundary while the production-golden
+manifest is empty: the archive withholds validator service and cannot produce
+the required attestation. Historical CUDA+Metal artifacts remain useful but
+must be regenerated from the corrected code freeze under the hardened
+provenance checks. Public RC ASERT is neutral `1/1`; the final provider-bound
+ratio and complete lifecycle evidence remain CUDA hardware work. HIP is
+optional and must match before that provider becomes production eligible.
+After those hardware gates close, the remaining consensus change is the
+separately reviewed activation height plus same-commit ASERT and ratification
+tuple.
 
 Trusted GPU archive attestations remain a separate same-operator deployment
 option for RPC/archive mirrors. Such mirrors continue ordinary validation but

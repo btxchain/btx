@@ -184,8 +184,11 @@ numeric driver/runtime API versions. Metal reports its public GPU architecture
 class and OS build/release; neither path records a device name, serial,
 hostname, account identifier, or private path.
 
-The historical Epoch-A RC ASERT proposal `16893794/1` is retained as
-engineering evidence but is not installed. Public chainparams remain neutral
+The historical Epoch-A throughput proposal `16893794/1` is retained as
+engineering evidence but is not installed. Epoch A no longer treats that value
+as a static target multiplier: consensus derives the transition target from the
+live parent `nBits`, the retired pre-hash epsilon, and the measured throughput
+ratio with a wide exact intermediate. Public chainparams retain provisional
 `1/1` while heights remain `INT32_MAX`. The tip-correlated CUDA 100-run artifact is at
 `doc/evidence/cuda-blackwell-16gib-profile1-loaded-2026-08-01/` (p99 32.705 s,
 zero CPU GEMM fallbacks, TU md5 `ed1e9477432b1766f549c039b6779632`); the
@@ -194,19 +197,19 @@ is at `doc/evidence/cuda-blackwell-16gib-lifecycle-asert-2026-08-01/` (n=20 core
 ≈96.7 s; complete n=0 without goldens/authority). Public ratification gates
 remain false.
 
-The historical production corpus has an eight-header CUDA + Metal digest match.
-Because the artifacts came from different source revisions, it no longer closes
-the hardened production gate. The corrected comparator requires one code-freeze
+The historical production corpus has an eight-header CUDA + Metal digest match
+from one internally coherent source revision. Later build-relevant source
+changes make it stale for the activation candidate, so it no longer closes the
+hardened production gate. The corrected comparator requires one code-freeze
 revision, an unchanged build-relevant source fingerprint, coherent raw provider
 metadata, and harness binary hashes. Both providers must be rerun before
 activation. The retained artifacts ran every consensus MAC on device with zero
-CPU GEMM calls/fallbacks and produced byte-identical headers, dimensions, and digests.
-See
-`doc/evidence/multi-gpu-profile1-goldens-2026-08-01/` and
-`doc/evidence/multi-gpu-profile1-goldens-metal-2026-08-01/`. The comparator's
-Their historical comparison reported `complete_multi_gpu_match`; it is not a
-final-code-freeze result under the corrected comparator. HIP/ROCm remains
-optional and fail-closed if supplied.
+CPU GEMM calls/fallbacks and produced byte-identical headers, dimensions, and
+digests. See
+`doc/evidence/multi-gpu-profile1-goldens-cuda-metal-2026-08-02-final/`.
+Its historical comparison reported `complete_multi_gpu_match`; it is not a
+final-code-freeze result under the corrected policy. HIP/ROCm remains optional
+and fail-closed if supplied.
 
 The 2026-07-31 GPU audit additionally reported a Blackwell-class 16 GiB discrete
 GPU three-episode mean of approximately 21.38 seconds and a production mining
@@ -217,8 +220,11 @@ verified activation evidence.
 
 ## Required activation-height review
 
-The code-side canary, strict execution policy, trusted-mirror deployment, and
-admission controls are implemented. Final-revision CUDA corpus, lifecycle,
+The code-side canary, strict execution policy, trusted-mirror attestation
+plumbing, and admission controls are implemented. A production strict-device
+trusted-mirror rehearsal remains fail-closed until the reviewed manifest is
+populated; an empty manifest withholds the archive's validator service and no
+post-RC attestation can be produced. Final-revision CUDA corpus, lifecycle,
 fault/recovery, and provider-bound ASERT evidence remain hardware-gated; the
 historical cross-provider corpus is not accepted by the hardened comparator.
 After those gates close, the remaining consensus-visible change is to choose

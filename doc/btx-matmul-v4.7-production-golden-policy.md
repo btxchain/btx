@@ -68,6 +68,14 @@ mechanisms are consequently mandatory, not advisory:
   rule and cannot be resolved are annotated in their own directory READMEs and
   are not admissible as production goldens.
 
+The verifier runs with `--strict` in the production-readiness target. A
+historical artifact with an unrecoverable revision may pass only through an
+exact file-and-revision entry in
+`contrib/matmul-v4/evidence-provenance-exclusions.json`. Every such entry must
+carry a public reason and `production_admissible=false`; the verifier prints
+each use and fails on stale exclusions. An exclusion can preserve historical
+diagnostic material, but can never satisfy a production-golden gate.
+
 ## Activation boundary
 
 This policy does not close hardware campaigns by itself. Activation remains
@@ -75,4 +83,3 @@ fail-closed until the exact final code freeze has matching CUDA and Metal
 corpora, the provider-bound ASERT and complete lifecycle campaigns are reviewed,
 and the separate activation commit installs the finite tuple and ratification
 flags. Public heights remain disabled in this implementation branch.
-

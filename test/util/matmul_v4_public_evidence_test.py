@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,6 +14,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "contrib/matmul-v4/check-public-evidence.py"
+SANITIZER = REPO_ROOT / "contrib/matmul-v4/sanitize-public-evidence.py"
 SPEC = importlib.util.spec_from_file_location("check_public_evidence", SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
 MODULE = importlib.util.module_from_spec(SPEC)
@@ -78,6 +81,33 @@ class PublicEvidencePrivacyTest(unittest.TestCase):
             )
             failures = MODULE.check_file(path)
             self.assertTrue(any("mDNS hostname" in failure for failure in failures))
+
+    def test_soak_sanitizer_emits_nonempty_valid_redacted_json(self) -> None:
+        payload = {
+            "event": "validation",
+            "linux_log": "/" + "home" + "/creator/private/run.log",
+            "mac_log": "/" + "Users" + "/creator/private/run.log",
+            "host": "private-validator.example",
+        }
+        environment = os.environ.copy()
+        environment["BTX_SANITIZE_EXTRA_HOSTS"] = "private-validator.example"
+        result = subprocess.run(
+            ["python3", str(SANITIZER)],
+            input=json.dumps(payload) + "\n",
+            capture_output=True,
+            text=True,
+            env=environment,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(result.stdout.strip())
+        sanitized = json.loads(result.stdout)
+        self.assertEqual(sanitized["event"], "validation")
+        self.assertNotIn("creator", result.stdout)
+        self.assertNotIn("private-validator.example", result.stdout)
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write(Path(directory), "sanitized.json", sanitized)
+            self.assertEqual(MODULE.check_file(path), [])
 
     def test_complete_committed_publication_set_is_clean(self) -> None:
         files = list(MODULE.evidence_files(MODULE.DEFAULT_PATHS))

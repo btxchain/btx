@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "exclusions": [
+    {
+      "evidence_path": "doc/evidence/cuda-blackwell-16gib-lifecycle-asert-2026-08-01/lifecycle-remeasure-post-settings-summary.json",
+      "revision": "unknown",
+      "reason": "Historical non-authorizing lifecycle summary emitted before revision capture; its directory README records that the source revision cannot be recovered",
+      "production_admissible": false
+    }
+  ]
+}

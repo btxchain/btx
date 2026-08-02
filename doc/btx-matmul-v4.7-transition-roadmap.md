@@ -179,12 +179,15 @@ Before an activation-height PR:
 4. Invalid ticketed candidates must not starve the authenticated-tip lane.
    The M4 Max production-shape test now passes; the final CUDA build and
    multi-peer testnet soak must reproduce it.
-5. A deliberately faulted device result in `strict-device` mode must be
-   classified as `LocalAcceleratorFailure`, quarantine the provider, leave the
-   block retryable, and avoid peer punishment or a negative-verdict cache. The
-   explicit pre-activation `auto-fallback` test may retain portable recovery,
-   but that path is not production validation. Final accelerator builds must
-   reproduce quarantine, restart/alternate-provider recovery, and retry.
+5. A first device/header digest disagreement in `strict-device` mode must be
+   classified as `LocalAcceleratorFailure`, leave the block retryable, and
+   avoid peer punishment, a negative-verdict cache, or provider quarantine.
+   Quarantine is reserved for a confirmed execution/coverage failure or for a
+   provider proven faulty by independent adjudication. The explicit
+   pre-activation `auto-fallback` test may retain portable recovery, but that
+   path is not production validation. Final accelerator builds must reproduce
+   mismatch retry, execution-failure quarantine, restart/alternate-provider
+   recovery, and retry.
 6. Header/body serialization and the no-chainwork-before-ExactReplay
    invariants must pass in the final candidate binary.
 7. A multi-day testnet soak must cover block relay, competing branches,
