@@ -30,7 +30,25 @@ using node::MAX_BLOCKFILE_SIZE;
 // use BasicTestingSetup here for the data directory configuration, setup, and cleanup
 BOOST_FIXTURE_TEST_SUITE(blockmanager_tests, BasicTestingSetup)
 
-BOOST_AUTO_TEST_CASE(matmul_replay_authority_context_migration)
+BOOST_AUTO_TEST_CASE(matmul_replay_authority_context_clean_migration)
+{
+    LOCK(cs_main);
+    CBlockIndex clean;
+    clean.nStatus = BLOCK_VALID_TREE;
+    std::array<CBlockIndex*, 1> indices{&clean};
+    std::set<CBlockIndex*> dirty;
+    const uint256 context{1};
+
+    const auto migration{node::ReconcileMatMulReplayAuthorityContext(
+        indices, std::nullopt, context, dirty)};
+    BOOST_CHECK(migration.disposition ==
+                node::MatMulReplayContextDisposition::MIGRATED);
+    BOOST_CHECK_EQUAL(migration.cleared_trusted_status, 0U);
+    BOOST_CHECK(dirty.empty());
+    BOOST_CHECK(clean.nStatus & BLOCK_VALID_TREE);
+}
+
+BOOST_AUTO_TEST_CASE(matmul_replay_authority_context_matching_preserves_exact)
 {
     LOCK(cs_main);
     CBlockIndex exact;
@@ -41,24 +59,52 @@ BOOST_AUTO_TEST_CASE(matmul_replay_authority_context_migration)
     std::set<CBlockIndex*> dirty;
     const uint256 context{1};
 
-    BOOST_CHECK_EQUAL(node::ClearStaleMatMulReplayAuthority(
-                          indices, context, context, dirty),
-                      1U);
+    const auto migration{node::ReconcileMatMulReplayAuthorityContext(
+        indices, context, context, dirty)};
+    BOOST_CHECK(migration.disposition ==
+                node::MatMulReplayContextDisposition::MATCHED);
+    BOOST_CHECK_EQUAL(migration.cleared_trusted_status, 1U);
     BOOST_CHECK(exact.nStatus & BLOCK_EXACT_REPLAY_VERIFIED);
     BOOST_CHECK(!(trusted.nStatus & BLOCK_TRUSTED_REPLAY_ATTESTED));
     BOOST_CHECK_EQUAL(dirty.size(), 1U);
     BOOST_CHECK(dirty.count(&trusted));
+}
 
-    trusted.nStatus |= BLOCK_TRUSTED_REPLAY_ATTESTED;
-    dirty.clear();
-    BOOST_CHECK_EQUAL(node::ClearStaleMatMulReplayAuthority(
-                          indices, uint256{2}, context, dirty),
-                      2U);
-    BOOST_CHECK(!(exact.nStatus & BLOCK_EXACT_REPLAY_VERIFIED));
-    BOOST_CHECK(!(trusted.nStatus & BLOCK_TRUSTED_REPLAY_ATTESTED));
-    BOOST_CHECK_EQUAL(dirty.size(), 2U);
-    BOOST_CHECK(exact.nStatus & BLOCK_VALID_TREE);
-    BOOST_CHECK(trusted.nStatus & BLOCK_VALID_TREE);
+BOOST_AUTO_TEST_CASE(matmul_replay_authority_context_mismatch_requires_reindex)
+{
+    LOCK(cs_main);
+    CBlockIndex exact;
+    CBlockIndex trusted;
+    exact.nStatus = BLOCK_VALID_SCRIPTS | BLOCK_EXACT_REPLAY_VERIFIED;
+    trusted.nStatus = BLOCK_VALID_SCRIPTS | BLOCK_TRUSTED_REPLAY_ATTESTED;
+    std::array<CBlockIndex*, 2> indices{&exact, &trusted};
+    std::set<CBlockIndex*> dirty;
+
+    const auto migration{node::ReconcileMatMulReplayAuthorityContext(
+        indices, uint256{2}, uint256{1}, dirty)};
+    BOOST_CHECK(migration.disposition ==
+                node::MatMulReplayContextDisposition::REINDEX_REQUIRED);
+    BOOST_CHECK_EQUAL(migration.cleared_trusted_status, 0U);
+    BOOST_CHECK(exact.nStatus & BLOCK_EXACT_REPLAY_VERIFIED);
+    BOOST_CHECK(trusted.nStatus & BLOCK_TRUSTED_REPLAY_ATTESTED);
+    BOOST_CHECK(dirty.empty());
+}
+
+BOOST_AUTO_TEST_CASE(matmul_replay_authority_context_mismatch_without_authority_migrates)
+{
+    LOCK(cs_main);
+    CBlockIndex clean;
+    clean.nStatus = BLOCK_VALID_SCRIPTS;
+    std::array<CBlockIndex*, 1> indices{&clean};
+    std::set<CBlockIndex*> dirty;
+
+    const auto migration{node::ReconcileMatMulReplayAuthorityContext(
+        indices, uint256{2}, uint256{1}, dirty)};
+    BOOST_CHECK(migration.disposition ==
+                node::MatMulReplayContextDisposition::MIGRATED);
+    BOOST_CHECK_EQUAL(migration.cleared_trusted_status, 0U);
+    BOOST_CHECK_EQUAL(clean.nStatus, BLOCK_VALID_SCRIPTS);
+    BOOST_CHECK(dirty.empty());
 }
 
 BOOST_AUTO_TEST_CASE(matmul_replay_authority_context_binds_profile_and_height)
@@ -77,6 +123,24 @@ BOOST_AUTO_TEST_CASE(matmul_replay_authority_context_binds_profile_and_height)
     const uint256 changed_height{
         node::ComputeMatMulReplayAuthorityContext(*params)};
     BOOST_CHECK(changed_height != baseline);
+
+    ++consensus.nMatMulRCHeight;
+    ++consensus.nMatMulRCAsertRescaleNum;
+    const uint256 changed_rc_asert{
+        node::ComputeMatMulReplayAuthorityContext(*params)};
+    BOOST_CHECK(changed_rc_asert != baseline);
+
+    --consensus.nMatMulRCAsertRescaleNum;
+    --consensus.nMatMulAsertHeight;
+    const uint256 changed_asert_activation{
+        node::ComputeMatMulReplayAuthorityContext(*params)};
+    BOOST_CHECK(changed_asert_activation != baseline);
+
+    ++consensus.nMatMulAsertHeight;
+    ++consensus.nMatMulProductDigestHeight;
+    const uint256 changed_legacy_digest_activation{
+        node::ComputeMatMulReplayAuthorityContext(*params)};
+    BOOST_CHECK(changed_legacy_digest_activation != baseline);
 }
 
 BOOST_AUTO_TEST_CASE(blockmanager_find_block_pos)

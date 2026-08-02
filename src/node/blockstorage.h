@@ -141,12 +141,32 @@ extern uint256 g_tiebreak_seed;
 [[nodiscard]] uint256 ComputeMatMulReplayAuthorityContext(
     const CChainParams& params);
 
+enum class MatMulReplayContextDisposition : uint8_t {
+    MATCHED,
+    MIGRATED,
+    REINDEX_REQUIRED,
+};
+
+struct MatMulReplayContextMigration {
+    MatMulReplayContextDisposition disposition{
+        MatMulReplayContextDisposition::MATCHED};
+    size_t cleared_trusted_status{0};
+};
+
 /**
- * Clear ExactReplay status unless the persisted context is current, and clear
- * trusted-attestation status on every startup because its signer policy is not
- * consensus-bound.
+ * Reconcile persisted replay authority with the current consensus context.
+ *
+ * A missing/mismatched context may be adopted only when no persisted replay
+ * authority exists. Once an authority bit has been written, the block may also
+ * have been promoted to BLOCK_VALID_TRANSACTIONS/SCRIPTS and contributed
+ * authenticated chainwork under the old predicate; clearing only the authority
+ * bit cannot undo that state safely. Such a datadir must be reindexed.
+ *
+ * With a matching context, ExactReplay authority is preserved and local-policy
+ * trusted-attestation status is cleared on every startup. The reindex-required
+ * result is detected before any index or dirty-set mutation.
  */
-[[nodiscard]] size_t ClearStaleMatMulReplayAuthority(
+[[nodiscard]] MatMulReplayContextMigration ReconcileMatMulReplayAuthorityContext(
     std::span<CBlockIndex* const> indices,
     const std::optional<uint256>& persisted_context,
     const uint256& current_context,

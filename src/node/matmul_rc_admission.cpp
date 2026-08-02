@@ -142,12 +142,15 @@ bool RCDeferredBodyCooldowns::Mark(
     const uint256& block_hash,
     std::chrono::steady_clock::time_point now)
 {
-    Prune(now);
-    if (m_deadlines.count(block_hash) != 0) {
-        // Deliberately do not refresh. Otherwise one source can keep a hash
-        // globally suppressed by redelivering a ticketless body just before
-        // every deadline.
-        return false;
+    const auto existing{m_deadlines.find(block_hash)};
+    if (existing != m_deadlines.end()) {
+        if (now < existing->second) {
+            // Deliberately do not refresh. Otherwise one source can keep a
+            // hash globally suppressed by redelivering a ticketless body just
+            // before every deadline. This hot duplicate path is O(log n).
+            return false;
+        }
+        m_deadlines.erase(existing);
     }
     if (m_deadlines.size() >= m_config.max_entries) {
         const auto oldest{std::min_element(
@@ -165,9 +168,17 @@ bool RCDeferredBodyCooldowns::Contains(
     const uint256& block_hash,
     std::chrono::steady_clock::time_point now)
 {
-    Prune(now);
     const auto it{m_deadlines.find(block_hash)};
     if (it == m_deadlines.end()) return false;
+    // FindNextBlocks calls this once per candidate. Scanning the entire store
+    // on every negative lookup would turn download selection into
+    // O(candidates * cooldowns) work after a ticketless-body flood. Expire only
+    // the queried key here; Mark()/Size() retain global pruning, and capacity
+    // eviction still chooses the oldest deadline.
+    if (now >= it->second) {
+        m_deadlines.erase(it);
+        return false;
+    }
     return true;
 }
 
@@ -306,6 +317,73 @@ bool RCAdmissionStore::Consume(const CBlockHeader& header,
     // Candidates belonging to other groups are deliberately untouched.
     EraseUnknownIterator(unknown);
     return valid;
+}
+
+bool RCAdmissionStore::RestoreConsumed(
+    const RCAdmissionTicket& ticket,
+    const CBlockHeader& header,
+    uint64_t keyed_netgroup,
+    const uint256& pow_limit,
+    std::chrono::steady_clock::time_point now)
+{
+    Prune(now);
+    const uint256 hash{header.GetHash()};
+    const EntryKey key{hash, keyed_netgroup};
+    if (ticket.block_hash != hash ||
+        !CheckRCAdmissionTicket(ticket, header, pow_limit)) {
+        return false;
+    }
+    if (m_validated_entries.count(key) != 0) return true;
+
+    // Consume() created room for this paid attempt. If another candidate used
+    // that room before the caller could roll back, reclaim it deterministically
+    // without ever exceeding a configured bound. Prefer the oldest entry in
+    // the specific conflicting dimension, then the oldest global entry.
+    const auto erase_oldest_matching = [&](const auto& predicate) {
+        auto victim{m_validated_entries.end()};
+        for (auto it{m_validated_entries.begin()};
+             it != m_validated_entries.end(); ++it) {
+            if (!predicate(it->first)) continue;
+            if (victim == m_validated_entries.end() ||
+                it->second.received < victim->second.received ||
+                (it->second.received == victim->second.received &&
+                 it->first < victim->first)) {
+                victim = it;
+            }
+        }
+        if (victim == m_validated_entries.end()) return false;
+        EraseValidatedIterator(victim);
+        return true;
+    };
+
+    while (ValidatedCandidatesForHash(hash) >=
+           m_config.max_validated_candidates_per_hash) {
+        if (!erase_oldest_matching(
+                [&](const EntryKey& candidate) {
+                    return candidate.first == hash;
+                })) {
+            return false;
+        }
+    }
+    while (NetgroupSize(keyed_netgroup) >=
+           m_config.max_entries_per_netgroup) {
+        if (!erase_oldest_matching(
+                [&](const EntryKey& candidate) {
+                    return candidate.second == keyed_netgroup;
+                })) {
+            return false;
+        }
+    }
+    while (m_validated_entries.size() >= m_config.max_entries) {
+        if (!erase_oldest_matching([](const EntryKey&) { return true; })) {
+            return false;
+        }
+    }
+
+    m_validated_entries.emplace(key, Entry{ticket, now});
+    ++m_validated_netgroup_counts[keyed_netgroup];
+    ++m_validated_hash_counts[hash];
+    return true;
 }
 
 void RCAdmissionStore::Erase(const uint256& block_hash)

@@ -1471,6 +1471,12 @@ private:
         uint64_t handoff_charged_netgroup{0};
         std::optional<node::RCAdmissionTicket> handoff_ticket;
         uint64_t handoff_ticket_netgroup{0};
+        //! A full-body delivery consumed this source-bound sidecar before its
+        //! pending/rate/worker admission became final. Restore it on every path
+        //! that returns without starting or joining replay work; clear it once
+        //! work owns the paid attempt.
+        std::optional<node::RCAdmissionTicket> body_ticket;
+        uint64_t body_ticket_netgroup{0};
         int32_t reference_height{std::numeric_limits<int32_t>::max()};
         uint32_t work_units{0};
     };
@@ -3051,12 +3057,23 @@ bool PeerManagerImpl::ConsumeMatMulVerificationBudgetForPeer(
             }
             return true;
         }
-        const auto saved_window_start = budget_state.budget.window_start;
-        const uint32_t saved_count = budget_state.budget.expensive_verifications_this_minute;
+        auto& source_window_start = header_batch
+            ? budget_state.budget.header_window_start
+            : budget_state.budget.window_start;
+        auto& source_count = header_batch
+            ? budget_state.budget.header_verifications_this_minute
+            : budget_state.budget.expensive_verifications_this_minute;
+        const auto saved_window_start = source_window_start;
+        const uint32_t saved_count = source_count;
+        const auto lane = header_batch
+            ? MatMulPhase2BudgetLane::HeaderBatch
+            : MatMulPhase2BudgetLane::ExpensiveVerification;
         for (uint32_t i = 0; i < verification_count; ++i) {
-            if (!ConsumeMatMulPeerVerifyBudget(budget_state.budget, params, now, is_ibd, reference_height)) {
-                budget_state.budget.window_start = saved_window_start;
-                budget_state.budget.expensive_verifications_this_minute = saved_count;
+            if (!ConsumeMatMulPeerVerifyBudget(
+                    budget_state.budget, params, now, is_ibd,
+                    reference_height, lane)) {
+                source_window_start = saved_window_start;
+                source_count = saved_count;
                 return false;
             }
         }
@@ -3071,12 +3088,9 @@ bool PeerManagerImpl::ConsumeMatMulVerificationBudgetForPeer(
                 global_budget = EffectiveMatMulGlobalHeaderBudgetForCatchUp(
                     params, is_ibd, in_fast_phase, reference_height);
             }
-            const auto lane = header_batch
-                ? MatMulPhase2BudgetLane::HeaderBatch
-                : MatMulPhase2BudgetLane::ExpensiveVerification;
             if (!ConsumeGlobalMatMulPhase2Budget(global_budget, verification_count, now, lane)) {
-                budget_state.budget.window_start = saved_window_start;
-                budget_state.budget.expensive_verifications_this_minute = saved_count;
+                source_window_start = saved_window_start;
+                source_count = saved_count;
                 global_exhausted = true;
                 LogDebug(BCLog::NET, "Global Phase2 budget exhausted (%u/min), deferring peer %s\n",
                          global_budget, peer.m_addr.ToStringAddr());
@@ -5109,12 +5123,12 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
                         /*is_ibd=*/false, index.nHeight)) {
                     if (accepted_ticket) {
                         LOCK(m_matmul_rc_admission_mutex);
-                        (void)m_matmul_rc_admission_store
-                            .RememberKnown(
+                        Assume(m_matmul_rc_admission_store
+                            .RestoreConsumed(
                                 *accepted_ticket, header,
                                 node.nKeyedNetGroup,
                                 params.powLimit,
-                                std::chrono::steady_clock::now());
+                                std::chrono::steady_clock::now()));
                     }
                     node.fDisconnect = true;
                     return;
@@ -5177,10 +5191,10 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
             }
             if (accepted_ticket) {
                 LOCK(m_matmul_rc_admission_mutex);
-                (void)m_matmul_rc_admission_store.RememberKnown(
+                Assume(m_matmul_rc_admission_store.RestoreConsumed(
                     *accepted_ticket, header,
                     node.nKeyedNetGroup, params.powLimit,
-                    std::chrono::steady_clock::now());
+                    std::chrono::steady_clock::now()));
             }
             if (handoff_peer_charged) {
                 RefundMatMulRCPeerBudgetForHandoff(
@@ -5319,15 +5333,9 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
         // and refund the permanent peer/global rate debit.
         if (accepted_ticket) {
             LOCK(m_matmul_rc_admission_mutex);
-            const auto restored{
-                m_matmul_rc_admission_store.RememberKnown(
-                    *accepted_ticket, header, node.nKeyedNetGroup,
-                    params.powLimit, std::chrono::steady_clock::now())};
-            Assume(
-                restored ==
-                    node::RCAdmissionStore::RememberResult::Stored ||
-                restored ==
-                    node::RCAdmissionStore::RememberResult::Duplicate);
+            Assume(m_matmul_rc_admission_store.RestoreConsumed(
+                *accepted_ticket, header, node.nKeyedNetGroup,
+                params.powLimit, std::chrono::steady_clock::now()));
         }
         RefundMatMulRCVerificationBudgetForPeer(
             charged_address, charged_netgroup, budget_debit);
@@ -6090,12 +6098,12 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
     const auto rollback_handoff_admission = [&] {
         if (matmul_admission.handoff_ticket) {
             LOCK(m_matmul_rc_admission_mutex);
-            (void)m_matmul_rc_admission_store.RememberKnown(
+            Assume(m_matmul_rc_admission_store.RestoreConsumed(
                 *matmul_admission.handoff_ticket,
                 block->GetBlockHeader(),
                 matmul_admission.handoff_ticket_netgroup,
                 m_chainparams.GetConsensus().powLimit,
-                std::chrono::steady_clock::now());
+                std::chrono::steady_clock::now()));
             matmul_admission.handoff_ticket.reset();
         }
         RefundMatMulRCPeerBudgetForHandoff(
@@ -6113,6 +6121,22 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
         // the inherited paid attempt starts. The old attempt's one global
         // debit remains the sole process-wide charge.
         matmul_admission.handoff_budget_debit.refundable = false;
+    };
+    const auto rollback_body_ticket = [&] {
+        if (!matmul_admission.body_ticket) return;
+        LOCK(m_matmul_rc_admission_mutex);
+        Assume(m_matmul_rc_admission_store.RestoreConsumed(
+            *matmul_admission.body_ticket, block->GetBlockHeader(),
+            matmul_admission.body_ticket_netgroup,
+            m_chainparams.GetConsensus().powLimit,
+            std::chrono::steady_clock::now()));
+        matmul_admission.body_ticket.reset();
+    };
+    const auto commit_body_ticket = [&] {
+        // AdmitMatMulBlockVerification already retained the ticket for
+        // provisional/outbound relay. Dropping this rollback receipt commits
+        // its one local admission spend exactly once.
+        matmul_admission.body_ticket.reset();
     };
     const auto release_admission_marker = [&] {
         if (matmul_admission.owns_async_marker) {
@@ -6230,6 +6254,7 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
         // admission; in that case no recomputation will run, so release the
         // temporary slot/single-flight marker without charging either budget.
         if (matmul_admission.encdr_profile && !encdr) {
+            rollback_body_ticket();
             release_admission_marker();
             matmul_slot.reset();
             ProcessBlockSync(node.GetId(), &node, block, force_processing, min_pow_checked, post_process);
@@ -6238,6 +6263,7 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
             return;
         }
         if (!consume_reserved_budget()) {
+            rollback_body_ticket();
             release_admission_marker();
             matmul_slot.reset();
             finalize_header_only();
@@ -6249,11 +6275,13 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
         // coarse admission is still charged here, immediately before ordinary
         // validation performs the expensive check.
         if (!matmul_admission.encdr_profile) {
+            commit_body_ticket();
             ProcessBlockSync(node.GetId(), &node, block, force_processing, min_pow_checked, post_process);
             release_admission_marker();
             return;
         }
         if (!m_matmul_verify_worker) {
+            commit_body_ticket();
             ProcessBlockSync(node.GetId(), &node, block, force_processing, min_pow_checked, post_process);
             release_admission_marker();
             return;
@@ -6319,6 +6347,10 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                 // entry does not cause immediate redelivery while this job is
                 // still queued/running.
                 if (!matmul_admission.owns_async_marker && !MarkMatMulAsyncVerification(hash)) {
+                    RefundMatMulRCVerificationBudgetForPeer(
+                        body_charged_address, body_charged_netgroup,
+                        body_budget_debit);
+                    rollback_body_ticket();
                     if (post_process) post_process();
                     return;
                 }
@@ -6449,6 +6481,7 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                         enqueue_result ==
                             node::MatMulVerifyWorker::
                                 EnqueueResult::Joined) {
+                        commit_body_ticket();
                         return; // message thread freed
                     }
                 }
@@ -6462,6 +6495,7 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                     RefundMatMulRCVerificationBudgetForPeer(
                         body_charged_address, body_charged_netgroup,
                         body_budget_debit);
+                    rollback_body_ticket();
                 }
                 UnmarkMatMulAsyncVerification(hash);
                 if (post_process) post_process();
@@ -6475,9 +6509,15 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
             LogDebug(BCLog::NET,
                      "Deferring MatMul EncDr block hash=%s from peer=%d: verification queue saturated\n",
                      block->GetHash().ToString(), node.GetId());
+            RefundMatMulRCVerificationBudgetForPeer(
+                body_charged_address, body_charged_netgroup,
+                body_budget_debit);
+            rollback_body_ticket();
+            release_admission_marker();
             if (post_process) post_process();
             return;
     }
+    commit_body_ticket();
     release_admission_marker();
     ProcessBlockSync(node.GetId(), &node, block, force_processing, min_pow_checked, post_process);
     release_verdict_pin();
@@ -6681,6 +6721,14 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
     // work budgets and receive no chainwork credit until ExactReplay succeeds.
     const bool requested_ibd_body = is_ibd && force_processing;
     std::optional<node::RCAdmissionTicket> accepted_ticket;
+    const auto restore_accepted_ticket = [&] {
+        if (!accepted_ticket) return;
+        LOCK(m_matmul_rc_admission_mutex);
+        Assume(m_matmul_rc_admission_store.RestoreConsumed(
+            *accepted_ticket, block.GetBlockHeader(), node.nKeyedNetGroup,
+            params.powLimit, std::chrono::steady_clock::now()));
+        accepted_ticket.reset();
+    };
     if (rc_profile && m_opts.matmul_rc_admission &&
         !requested_ibd_body &&
         !node.HasPermission(NetPermissionFlags::NoBan) &&
@@ -6727,10 +6775,10 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
                     is_ibd, exact_reference_height)) {
                 if (accepted_ticket) {
                     LOCK(m_matmul_rc_admission_mutex);
-                    (void)m_matmul_rc_admission_store.RememberKnown(
+                    Assume(m_matmul_rc_admission_store.RestoreConsumed(
                         *accepted_ticket, block.GetBlockHeader(),
                         node.nKeyedNetGroup, params.powLimit,
-                        std::chrono::steady_clock::now());
+                        std::chrono::steady_clock::now()));
                 }
                 // IBD: keep the peer and fall back to HEADER_ONLY rather than
                 // disconnecting the download source over a rate-limit miss.
@@ -6750,10 +6798,10 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
         if (!MarkMatMulAsyncVerification(block_hash)) {
             if (accepted_ticket) {
                 LOCK(m_matmul_rc_admission_mutex);
-                (void)m_matmul_rc_admission_store.RememberKnown(
+                Assume(m_matmul_rc_admission_store.RestoreConsumed(
                     *accepted_ticket, block.GetBlockHeader(),
                     node.nKeyedNetGroup, params.powLimit,
-                    std::chrono::steady_clock::now());
+                    std::chrono::steady_clock::now()));
             }
             if (handoff_peer_charged) {
                 RefundMatMulRCPeerBudgetForHandoff(
@@ -6786,6 +6834,7 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
         RememberMatMulRCOutboundTicket(*accepted_ticket);
     }
     if (exact_encdr_profile && !MarkMatMulAsyncVerification(block_hash)) {
+        restore_accepted_ticket();
         LogDebug(BCLog::NET,
                  "Ignoring duplicate %s hash=%s from peer=%d: MatMul verification already pending\n",
                  source, block_hash.ToString(), node.GetId());
@@ -6798,6 +6847,7 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
                                         exact_reference_height, work);
     if (!reserved) {
         if (exact_encdr_profile) UnmarkMatMulAsyncVerification(block_hash);
+        restore_accepted_ticket();
         LogDebug(
             BCLog::NET,
             "%s peer=%d: MatMul pending verification cap reached (%s)\n",
@@ -6823,6 +6873,8 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
     admission.owns_async_marker = exact_encdr_profile;
     admission.reference_height = exact_reference_height;
     admission.work_units = work;
+    admission.body_ticket = accepted_ticket;
+    admission.body_ticket_netgroup = node.nKeyedNetGroup;
     if (rc_profile) ClearMatMulRCBodyDeferred(block_hash);
     return true;
 }
