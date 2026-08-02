@@ -10353,7 +10353,8 @@ ChainstateManager::ClassifyMatMulEncDrRecompute(const CBlock& block,
         if (const CBlockIndex* existing{
                 m_blockman.LookupBlockIndex(block.GetHash())};
             existing != nullptr &&
-            (existing->nStatus & BLOCK_EXACT_REPLAY_VERIFIED)) {
+            (existing->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) &&
+            !(existing->nStatus & BLOCK_FAILED_MASK)) {
             CacheMatMulEncDrVerdict(block.GetHash(), true);
             return std::nullopt;
         }
@@ -10721,7 +10722,23 @@ static bool ContextualCheckBlock(const CBlock& block,
                         block.GetHash().ToString(), nHeight,
                         winner_authority_provider);
                 } else if (exact_index != nullptr &&
-                    (exact_index->nStatus & BLOCK_EXACT_REPLAY_VERIFIED)) {
+                    (exact_index->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) &&
+                    // A durable bit must never outrank a recorded failure.
+                    !(exact_index->nStatus & BLOCK_FAILED_MASK)) {
+                    // CAUTION: this bit is persisted in the block index and is
+                    // never cleared by anything in this tree. It records that
+                    // THIS node completed an ExactReplay, but it is not bound
+                    // to the consensus parameters that were live when it was
+                    // written. If nMatMulRCProfile, nMatMulRCHeight or the
+                    // coupled height change for a datadir that already carries
+                    // the bit -- e.g. the published Profile 1 -> Profile 2
+                    // roadmap -- these heights resolve to a different PoW
+                    // predicate and this branch skips evaluating it. Before any
+                    // activation the block-index DB version must be bumped with
+                    // a one-time pass that clears bits 256/512, and the bit
+                    // must carry a profile tag so a stale verdict cannot be
+                    // replayed against a different predicate. See
+                    // doc/btx-matmul-v4.7-production-golden-policy.md.
                     encdr_ok = true;
                     if (rc_authority != nullptr) {
                         *rc_authority =
