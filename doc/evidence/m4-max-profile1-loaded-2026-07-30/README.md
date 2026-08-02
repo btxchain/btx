@@ -120,3 +120,12 @@ device-mismatch recovery gates for 90-second blocks. This does not by itself
 authorize activation: cross-machine golden parity, repetition on the final
 CUDA path, multi-day testnet load, and the IBD trust-window disclosures remain
 separate gates.
+
+## Provenance status
+
+`profile1-metal-loaded-100-pre-dimension-bind.json` declares `source_revision
+ca6e351f8d`, which does not resolve to a commit in this repository. It is the
+superseded pre-dimension-bind artifact and is retained for comparison only; it
+is not admissible as production-golden evidence.
+`contrib/matmul-v4/verify-evidence-provenance.py` fails on it until it is
+regenerated under the current provenance rules.

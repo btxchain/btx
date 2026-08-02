@@ -103,3 +103,13 @@ report deliberately records `device_resident: false`.
 Consensus activation remains disabled (`nMatMulRCHeight=INT32_MAX`). The
 evidence establishes local launch viability, not permission to activate without
 the remaining cross-host campaign.
+
+## Provenance status
+
+`rc-production-r4-metal.json` declares `source_revision
+e440314d77e9535d194c8c9c09386836258123ae` and `rc-production-r4-full-metal.json`
+declares `903b74985d`; neither resolves to a commit in this repository, so the
+code state that produced these numbers cannot be established here. They are
+retained as historical measurements and are not admissible as production-golden
+evidence. `contrib/matmul-v4/verify-evidence-provenance.py` fails on both until
+they are regenerated under the current provenance rules.
