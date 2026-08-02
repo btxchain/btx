@@ -115,7 +115,7 @@ miningmaxheaderlag=8
 
 ```bash
 SNAPSHOT_BLOCKHASH="$(jq -r .blockhash /path/to/snapshot.manifest.json)"
-/path/to/btx-cli getblockheader "$SNAPSHOT_BLOCKHASH" false
+btx-cli getblockheader "$SNAPSHOT_BLOCKHASH" false
 ```
 
 The full snapshot base block does not need to be downloaded before loading the
@@ -125,13 +125,13 @@ retry after header sync advances.
 8. Load the snapshot:
 
 ```bash
-/path/to/btx-cli -rpcclienttimeout=0 loadtxoutset /path/to/snapshot.dat
+btx-cli -rpcclienttimeout=0 loadtxoutset /path/to/snapshot.dat
 ```
 
 9. Monitor background validation:
 
 ```bash
-/path/to/btx-cli getchainstates
+btx-cli getchainstates
 ```
 
 Once the snapshot chainstate is active, wallet and mining RPCs become usable
@@ -143,7 +143,7 @@ and monitor `getmininginfo.chain_guard` while miners keep requesting work.
 When checking readiness manually, pass a BIP 9 template-request object:
 
 ```bash
-/path/to/btx-cli getblocktemplate '{"rules":["segwit"]}'
+btx-cli getblocktemplate '{"rules":["segwit"]}'
 ```
 
 If you prefer a one-command bootstrap flow, the scripts under
@@ -163,15 +163,15 @@ historical shielded-block replay before wallet/service RPCs become usable.
 Transparent and combined balances:
 
 ```bash
-/path/to/btx-cli getbalances
-/path/to/btx-cli z_gettotalbalance
+btx-cli getbalances
+btx-cli z_gettotalbalance
 ```
 
 Historical/pre-sunset transparent-to-shielded compatibility flows:
 
 ```bash
-/path/to/btx-cli -rpcwallet=mywallet z_planshieldfunds 25.0 "btxs1..."
-/path/to/btx-cli -rpcwallet=mywallet z_shieldfunds 25.0 "btxs1..."
+btx-cli -rpcwallet=mywallet z_planshieldfunds 25.0 "btxs1..."
+btx-cli -rpcwallet=mywallet z_shieldfunds 25.0 "btxs1..."
 ```
 
 Do not use these as current production ingress after the v0.32 sunset: new
@@ -183,7 +183,7 @@ for historical chunking, fees, and stuck-transaction recovery.
 
 For idle-time solo mining after a `--preset miner` install, hand the installed
 binary paths and generated config directly into the helper scripts instead of
-assuming `btxd` / `/path/to/btx-cli` are already on `PATH`:
+assuming `btxd` / `btx-cli` are already on `PATH`:
 
 ```bash
 contrib/mining/start-live-mining.sh \
@@ -214,17 +214,17 @@ available flags dynamically.
 Current challenge and service profile:
 
 ```bash
-/path/to/btx-cli getmatmulchallenge
-/path/to/btx-cli getmatmulchallengeprofile 1 0.25 0.75 2 35
-/path/to/btx-cli listmatmulservicechallengeprofiles 0.25 0.75 0.25 6 1 adaptive_window 24 4 35
-/path/to/btx-cli getmatmulservicechallengeprofile balanced 0.25 0.75 0.25 6 1 adaptive_window 24 4 35
-/path/to/btx-cli getmatmulservicechallengeplan solves_per_hour 600 0.25 0.75 adaptive_window 24 0.25 6 4 35
+btx-cli getmatmulchallenge
+btx-cli getmatmulchallengeprofile 1 0.25 0.75 2 35
+btx-cli listmatmulservicechallengeprofiles 0.25 0.75 0.25 6 1 adaptive_window 24 4 35
+btx-cli getmatmulservicechallengeprofile balanced 0.25 0.75 0.25 6 1 adaptive_window 24 4 35
+btx-cli getmatmulservicechallengeplan solves_per_hour 600 0.25 0.75 adaptive_window 24 0.25 6 4 35
 ```
 
 Profile-based application challenge / verification flow:
 
 ```bash
-/path/to/btx-cli issuematmulservicechallengeprofile \
+btx-cli issuematmulservicechallengeprofile \
   rate_limit \
   "signup:/v1/messages" \
   "user:alice@example.com" \
@@ -239,14 +239,14 @@ Profile-based application challenge / verification flow:
   24 \
   4 \
   35
-/path/to/btx-cli solvematmulservicechallenge '{...}' 250000
-/path/to/btx-cli redeemmatmulserviceproof '{...}'
+btx-cli solvematmulservicechallenge '{...}' 250000
+btx-cli redeemmatmulserviceproof '{...}'
 ```
 
 Raw target-based application challenge / verification flow:
 
 ```bash
-/path/to/btx-cli getmatmulservicechallenge \
+btx-cli getmatmulservicechallenge \
   rate_limit \
   "signup:/v1/messages" \
   "user:alice@example.com" \
@@ -260,16 +260,16 @@ Raw target-based application challenge / verification flow:
   3.0 \
   4 \
   35
-/path/to/btx-cli solvematmulservicechallenge '{...}' 250000 1500 2
-/path/to/btx-cli verifymatmulserviceproof '{...}'
-/path/to/btx-cli redeemmatmulserviceproof '{...}'
+btx-cli solvematmulservicechallenge '{...}' 250000 1500 2
+btx-cli verifymatmulserviceproof '{...}'
+btx-cli redeemmatmulserviceproof '{...}'
 ```
 
 Batch verification / redemption:
 
 ```bash
-/path/to/btx-cli verifymatmulserviceproofs '[{...},{...}]'
-/path/to/btx-cli redeemmatmulserviceproofs '[{...},{...}]'
+btx-cli verifymatmulserviceproofs '[{...},{...}]'
+btx-cli redeemmatmulserviceproofs '[{...},{...}]'
 ```
 
 These RPCs are intended for:

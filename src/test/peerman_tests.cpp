@@ -134,6 +134,28 @@ BOOST_AUTO_TEST_CASE(matmul_consensus_tier_desirable_service_flags)
     BOOST_CHECK(!peerman->HasAllDesirableServiceFlags(economic_peer));
 }
 
+BOOST_AUTO_TEST_CASE(matmul_consensus_tier_sync_eligibility_tracks_activation)
+{
+    const ServiceFlags base{ServiceFlags(NODE_NETWORK | NODE_WITNESS)};
+    const ServiceFlags consensus_peer{
+        ServiceFlags(base | NODE_MATMUL_CONSENSUS)};
+
+    // A peer selected before activation remains eligible while the tier is
+    // optional, but is dynamically disqualified once the tier is required.
+    BOOST_CHECK(IsMatMulPeerEligibleForSync(
+        /*require_matmul_consensus=*/false, base,
+        /*has_noban_permission=*/false));
+    BOOST_CHECK(!IsMatMulPeerEligibleForSync(
+        /*require_matmul_consensus=*/true, base,
+        /*has_noban_permission=*/false));
+    BOOST_CHECK(IsMatMulPeerEligibleForSync(
+        /*require_matmul_consensus=*/true, consensus_peer,
+        /*has_noban_permission=*/false));
+    BOOST_CHECK(IsMatMulPeerEligibleForSync(
+        /*require_matmul_consensus=*/true, base,
+        /*has_noban_permission=*/true));
+}
+
 BOOST_AUTO_TEST_CASE(broadcast_transaction_fails_closed_without_peerman)
 {
     std::unique_ptr<PeerManager> saved_peerman = std::move(m_node.peerman);

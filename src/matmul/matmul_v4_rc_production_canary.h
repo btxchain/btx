@@ -78,6 +78,12 @@ struct RCProductionGoldenManifestEntry {
     uint256 expected_digest{};
     bool independently_reproduced{false};
     std::string public_provenance;
+    /** Exact reviewed code-freeze commit (40 hexadecimal characters). */
+    std::string source_revision;
+    /** SHA-256 over root CMakeLists.txt, cmake/, and src/ at the code freeze. */
+    std::string source_tree_fingerprint;
+    /** SHA-256 of the provider-specific harness binary used for this record. */
+    std::string harness_sha256;
 };
 
 enum class RCProductionCanaryOutcome : uint8_t {

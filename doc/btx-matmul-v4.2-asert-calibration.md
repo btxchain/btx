@@ -89,8 +89,8 @@ price/peer/leaderboard telemetry but not raw difficulty at a stable API path, an
 value scraped today is stale by activation):
 
 ```
-/path/to/btx-cli getdifficulty          # or getmininginfo / getblockchaininfo -> difficulty
-/path/to/btx-cli getmininginfo          # networkhashps, blocks (height)
+btx-cli getdifficulty          # or getmininginfo / getblockchaininfo -> difficulty
+btx-cli getmininginfo          # networkhashps, blocks (height)
 ```
 
 Sanity check at activation planning: with the chosen `Num/Den` and the live `D_v3`,

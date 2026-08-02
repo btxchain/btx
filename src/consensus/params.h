@@ -508,12 +508,13 @@ struct Params {
      *  When live, GetMatMulEncodingProfile prefers ENC_RC over DRLT/BMX4C. */
     int32_t nMatMulRCHeight{std::numeric_limits<int32_t>::max()};
     /** One-time ASERT rescale at nMatMulRCHeight (calibrate from silicon).
-     *  Public nets stage the measured Epoch-A Profile-1 work-ratio
-     *  (16893794/1) while activation heights remain INT32_MAX. NOTE: the future
+     *  Public nets keep the disabled implementation branch at neutral 1/1.
+     *  The activation patch must install a final-binary, provider-bound
+     *  Profile-1 work-ratio together with the finite height. NOTE: the future
      *  datacenter profile (nMatMulRCProfile==2)
      *  raises per-nonce work ~16× (F_ep 5.32e13 → 8.45e14 MAC), so a datacenter
      *  cutover needs a silicon-calibrated ≈16× loosen here (16422/1027). Do NOT
-     *  change the Profile-1 ratio without re-measurement. A finite public height
+     *  set the Profile-1 ratio without re-measurement. A finite public height
      *  itself remains gated on BTX_MATMUL_NO_INVERSION_GATE_RATIFIED and the
      *  GPU lifecycle ratification flag (separate external gates). */
     int64_t nMatMulRCAsertRescaleNum{1};

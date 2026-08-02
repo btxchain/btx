@@ -62,6 +62,20 @@ constexpr bool ShouldFetchBackgroundSnapshotBlocks(
         best_header_height >= 0 && active_height >= best_header_height - 1;
 }
 
+/** Whether a connected peer remains eligible for block/header synchronization
+ * once RC consensus-tier preference becomes active. This is evaluated at each
+ * selection, rather than only at VERSION time, so a pre-activation preferred
+ * peer cannot remain sticky across the activation boundary. */
+constexpr bool IsMatMulPeerEligibleForSync(
+    bool require_matmul_consensus,
+    ServiceFlags services,
+    bool has_noban_permission)
+{
+    return !require_matmul_consensus ||
+        (services & NODE_MATMUL_CONSENSUS) == NODE_MATMUL_CONSENSUS ||
+        has_noban_permission;
+}
+
 struct CNodeStateStats {
     int nSyncHeight = -1;
     int nCommonHeight = -1;

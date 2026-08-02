@@ -1901,19 +1901,19 @@ target_link_libraries(bitcoin_cli
 
 # Bitcoin Core RPC client
 if(BUILD_CLI)
-  add_executable(/path/to/btx-cli bitcoin-cli.cpp)
-  set_target_properties(/path/to/btx-cli PROPERTIES OUTPUT_NAME /path/to/btx-cli)
-  add_windows_resources(/path/to/btx-cli bitcoin-cli-res.rc)
-  target_link_libraries(/path/to/btx-cli
+  add_executable(btx-cli bitcoin-cli.cpp)
+  set_target_properties(btx-cli PROPERTIES OUTPUT_NAME btx-cli)
+  add_windows_resources(btx-cli bitcoin-cli-res.rc)
+  target_link_libraries(btx-cli
     core_interface
     bitcoin_cli
     bitcoin_common
     libevent::core
     libevent::extra
   )
-  install_binary_component(/path/to/btx-cli HAS_MANPAGE)
-  add_legacy_binary_alias(/path/to/btx-cli bitcoin-cli)
-  add_legacy_target_alias(bitcoin-cli /path/to/btx-cli)
+  install_binary_component(btx-cli HAS_MANPAGE)
+  add_legacy_binary_alias(btx-cli bitcoin-cli)
+  add_legacy_target_alias(bitcoin-cli btx-cli)
 endif()
 
 

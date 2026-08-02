@@ -63,6 +63,9 @@ rc::RCProductionGoldenManifestEntry Golden()
     out.expected_digest = NonNullDigest(0x42);
     out.independently_reproduced = true;
     out.public_provenance = "doc/unit-test-fixture";
+    out.source_revision = std::string(40, '1');
+    out.source_tree_fingerprint = std::string(64, '2');
+    out.harness_sha256 = std::string(64, '3');
     return out;
 }
 
@@ -80,17 +83,11 @@ std::vector<rc::RCProductionGoldenManifestEntry> GoldenCohort()
 
 } // namespace
 
-BOOST_AUTO_TEST_CASE(committed_manifest_contains_reviewed_cuda_metal_goldens)
+BOOST_AUTO_TEST_CASE(committed_manifest_stays_empty_until_final_revision_goldens)
 {
     const auto& manifest{rc::CommittedRCProductionGoldenManifest()};
-    BOOST_REQUIRE_EQUAL(manifest.size(), 2U);
-    BOOST_CHECK_EQUAL(manifest[0].provider_class.provider_family, "cuda");
-    BOOST_CHECK_EQUAL(manifest[1].provider_class.provider_family, "metal");
-    BOOST_CHECK_EQUAL(manifest[0].expected_digest.GetHex(),
-                      manifest[1].expected_digest.GetHex());
-    BOOST_CHECK(manifest[0].independently_reproduced);
-    BOOST_CHECK(manifest[1].independently_reproduced);
-    BOOST_CHECK(rc::RCProductionGoldenManifestCohortValid(manifest));
+    BOOST_CHECK(manifest.empty());
+    BOOST_CHECK(!rc::RCProductionGoldenManifestCohortValid(manifest));
     BOOST_CHECK(rc::FindRCProductionGolden(Provider(), Epoch(), manifest) == nullptr);
 }
 
@@ -221,6 +218,11 @@ BOOST_AUTO_TEST_CASE(pending_or_unreviewed_manifest_entries_never_authorize)
     pending.public_provenance = "/local-only/private-result.json";
     manifest = {pending};
     BOOST_CHECK(rc::FindRCProductionGolden(Provider(), Epoch(), manifest) == nullptr);
+
+    pending = Golden();
+    pending.source_revision.clear();
+    manifest = {pending};
+    BOOST_CHECK(rc::FindRCProductionGolden(Provider(), Epoch(), manifest) == nullptr);
 }
 
 BOOST_AUTO_TEST_CASE(duplicate_exact_manifest_authority_fails_closed)
@@ -248,6 +250,15 @@ BOOST_AUTO_TEST_CASE(golden_cohort_rejects_missing_or_divergent_backend)
     BOOST_CHECK(!rc::RCProductionGoldenManifestCohortValid(divergent));
     divergent = cohort;
     divergent[1].provider_class = divergent[0].provider_class;
+    BOOST_CHECK(!rc::RCProductionGoldenManifestCohortValid(divergent));
+    divergent = cohort;
+    divergent[1].source_revision = std::string(40, '4');
+    BOOST_CHECK(!rc::RCProductionGoldenManifestCohortValid(divergent));
+    divergent = cohort;
+    divergent[1].source_tree_fingerprint = std::string(64, '5');
+    BOOST_CHECK(!rc::RCProductionGoldenManifestCohortValid(divergent));
+    divergent = cohort;
+    divergent[1].harness_sha256.clear();
     BOOST_CHECK(!rc::RCProductionGoldenManifestCohortValid(divergent));
 }
 

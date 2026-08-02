@@ -371,7 +371,7 @@ for mainnet, testnet, and testnet4.
 BTX command aliases are live and should be used in operations docs:
 
 - `btxd`
-- `/path/to/btx-cli`
+- `btx-cli`
 - `btx-tx`
 - `btx-wallet`
 - `btx-util`

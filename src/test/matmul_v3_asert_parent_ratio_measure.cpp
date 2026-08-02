@@ -12,6 +12,7 @@
 #include <arith_uint256.h>
 #include <chainparams.h>
 #include <consensus/params.h>
+#include <matmul/accelerated_solver.h>
 #include <pow.h>
 #include <primitives/block.h>
 #include <test/util/setup_common.h>
@@ -19,10 +20,47 @@
 #include <util/chaintype.h>
 
 #include <chrono>
+#include <cctype>
+#include <cstdlib>
 #include <cstdint>
 #include <iostream>
 #include <limits>
 #include <optional>
+#include <string>
+#include <string_view>
+
+namespace {
+
+std::string JsonEscape(std::string_view input)
+{
+    std::string out;
+    out.reserve(input.size());
+    for (const char ch : input) {
+        switch (ch) {
+        case '\\': out += "\\\\"; break;
+        case '"': out += "\\\""; break;
+        case '\n': out += "\\n"; break;
+        case '\r': out += "\\r"; break;
+        case '\t': out += "\\t"; break;
+        default: out += ch; break;
+        }
+    }
+    return out;
+}
+
+std::string PublicSourceRevision()
+{
+    const char* value{std::getenv("BTX_SOURCE_REVISION")};
+    if (value == nullptr) return "unknown";
+    const std::string revision{value};
+    if (revision.size() != 40) return "unknown";
+    for (const unsigned char ch : revision) {
+        if (!std::isxdigit(ch)) return "unknown";
+    }
+    return revision;
+}
+
+} // namespace
 
 BOOST_FIXTURE_TEST_SUITE(matmul_v3_asert_parent_ratio_measure, BasicTestingSetup)
 
@@ -63,6 +101,16 @@ BOOST_AUTO_TEST_CASE(measure_v3_parent_attempts_per_s_mainnet_like)
     constexpr int64_t kParentMtp = 1779999910;
     constexpr uint64_t kTries = 2'000'000; // ~ε=18 ⇒ expect ~few matmul hits
     uint64_t max_tries = kTries;
+    const auto backend_selection =
+        matmul::accelerated::ResolveMiningBackendFromEnvironment();
+    const auto backend_requirement =
+        matmul::accelerated::ResolveBackendRequirementFromEnvironment();
+    BOOST_REQUIRE(backend_requirement.valid);
+    if (backend_requirement.enabled) {
+        BOOST_REQUIRE(matmul::accelerated::IsBackendRequirementSatisfied(
+            backend_requirement, backend_selection));
+    }
+    matmul::accelerated::ResetMatMulBackendRuntimeStats();
     ResetMatMulSolveRuntimeStats();
     const auto t0 = std::chrono::steady_clock::now();
     const bool solved = SolveMatMul(header, consensus, max_tries, kHeight,
@@ -74,6 +122,8 @@ BOOST_AUTO_TEST_CASE(measure_v3_parent_attempts_per_s_mainnet_like)
     const double wall_s =
         std::chrono::duration_cast<std::chrono::duration<double>>(t1 - t0).count();
     const MatMulSolveRuntimeStats st = ProbeMatMulSolveRuntimeStats();
+    const auto backend_stats =
+        matmul::accelerated::ProbeMatMulBackendRuntimeStats();
 
     const uint64_t attempts_done = kTries - max_tries;
     const double attempts_per_s =
@@ -86,6 +136,21 @@ BOOST_AUTO_TEST_CASE(measure_v3_parent_attempts_per_s_mainnet_like)
               << "\"b\":" << consensus.nMatMulTranscriptBlockSize << ","
               << "\"r\":" << consensus.nMatMulNoiseRank << ","
               << "\"prehash_epsilon_bits\":" << consensus.nMatMulPreHashEpsilonBits << ","
+              << "\"requested_backend\":\""
+              << matmul::backend::ToString(backend_selection.requested) << "\","
+              << "\"active_backend\":\""
+              << matmul::backend::ToString(backend_selection.active) << "\","
+              << "\"backend_selection_reason\":\""
+              << JsonEscape(backend_selection.reason) << "\","
+              << "\"source_revision\":\"" << PublicSourceRevision() << "\","
+              << "\"required_backend_enabled\":"
+              << (backend_requirement.enabled ? "true" : "false") << ","
+              << "\"required_backend_satisfied\":"
+              << (matmul::accelerated::IsBackendRequirementSatisfied(
+                      backend_requirement, backend_selection)
+                      ? "true"
+                      : "false")
+              << ","
               << "\"requested_tries\":" << kTries << ","
               << "\"attempts_done\":" << attempts_done << ","
               << "\"solved\":" << (solved ? "true" : "false") << ","
@@ -93,6 +158,16 @@ BOOST_AUTO_TEST_CASE(measure_v3_parent_attempts_per_s_mainnet_like)
               << "\"attempts_per_s\":" << attempts_per_s << ","
               << "\"runtime_stats_attempts\":" << st.attempts << ","
               << "\"runtime_stats_total_elapsed_us\":" << st.total_elapsed_us
+              << ",\"backend_digest_requests\":" << backend_stats.digest_requests
+              << ",\"backend_requested_cpu\":" << backend_stats.requested_cpu
+              << ",\"backend_requested_metal\":" << backend_stats.requested_metal
+              << ",\"backend_requested_cuda\":" << backend_stats.requested_cuda
+              << ",\"backend_metal_successes\":" << backend_stats.metal_successes
+              << ",\"backend_cuda_successes\":" << backend_stats.cuda_successes
+              << ",\"backend_metal_fallbacks_to_cpu\":"
+              << backend_stats.metal_fallbacks_to_cpu
+              << ",\"backend_cuda_fallbacks_to_cpu\":"
+              << backend_stats.cuda_fallbacks_to_cpu
               << "}" << std::endl;
 
     BOOST_CHECK_GT(attempts_done, 0u);

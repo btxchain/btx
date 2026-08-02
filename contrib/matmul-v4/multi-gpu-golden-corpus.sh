@@ -28,6 +28,7 @@ EPISODES=8
 NONCE_START=1
 OUT_DIR=""
 SOURCE_REVISION=""
+SOURCE_TREE_FINGERPRINT=""
 ALLOW_PARTIAL=0
 COMPARE_ONLY=0
 TIP_SHA=""
@@ -42,6 +43,7 @@ while [[ $# -gt 0 ]]; do
     --canary-nonce-start) NONCE_START="${2:-}"; shift 2 ;;
     --out-dir) OUT_DIR="${2:-}"; shift 2 ;;
     --source-revision) SOURCE_REVISION="${2:-}"; shift 2 ;;
+    --source-tree-fingerprint) SOURCE_TREE_FINGERPRINT="${2:-}"; shift 2 ;;
     --allow-partial) ALLOW_PARTIAL=1; shift ;;
     --compare-only) COMPARE_ONLY=1; shift ;;
     -h|--help)
@@ -62,6 +64,18 @@ if [[ -z "${SOURCE_REVISION}" ]]; then
   SOURCE_REVISION="$(git -C "$(dirname "$0")/../.." rev-parse HEAD 2>/dev/null || echo unknown)"
 fi
 TIP_SHA="${SOURCE_REVISION}"
+if [[ -z "${SOURCE_TREE_FINGERPRINT}" ]]; then
+  SOURCE_TREE_FINGERPRINT="$({
+    git -C "$(dirname "$0")/../.." ls-tree -r --full-tree HEAD -- \
+      CMakeLists.txt cmake src
+  } | shasum -a 256 | awk '{print $1}')"
+fi
+[[ "${SOURCE_TREE_FINGERPRINT}" =~ ^[0-9a-fA-F]{64}$ ]] || \
+  die "--source-tree-fingerprint must be a 64-character SHA-256"
+
+sha256_file() {
+  shasum -a 256 "$1" | awk '{print $1}'
+}
 
 IFS=',' read -r -a BACKEND_LIST <<< "${BACKENDS}"
 declare -a OK_BACKENDS=()
@@ -107,6 +121,18 @@ else
       fi
       continue
     fi
+    harness_sha256="$(sha256_file "${HARNESS}")"
+    python3 - "${out_json}" "${SOURCE_TREE_FINGERPRINT}" "${harness_sha256}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+payload = json.loads(path.read_text())
+payload["source_tree_fingerprint"] = sys.argv[2]
+payload["harness_sha256"] = sys.argv[3]
+path.write_text(json.dumps(payload, indent=2) + "\n")
+PY
     OK_BACKENDS+=("${be}")
     RAW_JSONS+=("${out_json}")
   done
@@ -115,17 +141,19 @@ fi
 [[ ${#OK_BACKENDS[@]} -ge 1 ]] || die "no backend succeeded"
 
 MERGE_OUT="${OUT_DIR}/multi-gpu-digest-compare.json"
-python3 - "${MERGE_OUT}" "${TIP_SHA}" "${NONCE_START}" "${EPISODES}" "${ALLOW_PARTIAL}" "${OK_BACKENDS[@]}" -- "${RAW_JSONS[@]}" <<'PY'
+python3 - "${MERGE_OUT}" "${TIP_SHA}" "${SOURCE_TREE_FINGERPRINT}" "${NONCE_START}" "${EPISODES}" "${ALLOW_PARTIAL}" "${OK_BACKENDS[@]}" -- "${RAW_JSONS[@]}" <<'PY'
 import json, sys
+import re
 from pathlib import Path
 
 out_path = Path(sys.argv[1])
 tip_sha = sys.argv[2]
-nonce_start = int(sys.argv[3])
-episodes = int(sys.argv[4])
-allow_partial = int(sys.argv[5])
+source_tree_fingerprint = sys.argv[3]
+nonce_start = int(sys.argv[4])
+episodes = int(sys.argv[5])
+allow_partial = int(sys.argv[6])
 sep = sys.argv.index("--")
-backends = sys.argv[6:sep]
+backends = sys.argv[7:sep]
 raw_paths = [Path(p) for p in sys.argv[sep + 1:]]
 
 def load_frozen(path: Path):
@@ -175,10 +203,13 @@ for be, path in zip(backends, raw_paths):
             "cpu_fallbacks", raw.get("cpu_gemm_fallbacks")
         ),
         "source_revision": raw.get("source_revision") or raw.get("git_tip") or "unknown",
+        "source_tree_fingerprint": raw.get("source_tree_fingerprint"),
+        "harness_sha256": raw.get("harness_sha256"),
         "provider": (raw.get("exact_replay_acceleration") or {}).get("provider")
         or raw.get("provider"),
         "backend_requested": raw.get("backend_requested"),
         "provider_identity": raw.get("production_provider_identity") or {},
+        "acceleration": raw.get("exact_replay_acceleration") or {},
     }
 
 # Compare the exact nonce set, frozen header bytes, dimension, and digest.
@@ -187,6 +218,11 @@ ref_map = {r["header_nonce"]: r for r in by_backend[ref]["records"]}
 mismatches = []
 coverage_failures = []
 expected_nonces = set(range(nonce_start, nonce_start + episodes))
+provider_prefixes = {
+    "cuda": ("cuda_",),
+    "metal": ("metal_",),
+    "hip": ("hip_",),
+}
 for be in backends:
     records = by_backend[be]["records"]
     observed_nonces = {r["header_nonce"] for r in records}
@@ -202,6 +238,9 @@ for be in backends:
         coverage_failures.append({"backend": be, "reason": "cpu_gemm_fallbacks_nonzero"})
     if by_backend[be]["backend_requested"] != be:
         coverage_failures.append({"backend": be, "reason": "backend_identity_mismatch"})
+    provider = by_backend[be]["provider"]
+    if not isinstance(provider, str) or not provider.startswith(provider_prefixes[be]):
+        coverage_failures.append({"backend": be, "reason": "raw_provider_family_mismatch"})
     identity = by_backend[be]["provider_identity"]
     if identity.get("complete") is not True:
         coverage_failures.append({"backend": be, "reason": "provider_identity_incomplete"})
@@ -209,8 +248,50 @@ for be in backends:
         coverage_failures.append({"backend": be, "reason": "provider_family_mismatch"})
     if not identity.get("device_architecture"):
         coverage_failures.append({"backend": be, "reason": "provider_architecture_missing"})
-    if by_backend[be]["source_revision"] in (None, "", "unknown"):
-        coverage_failures.append({"backend": be, "reason": "source_revision_missing"})
+    for field in ("driver_identity", "runtime_identity", "reason"):
+        if not isinstance(identity.get(field), str) or not identity.get(field).strip():
+            coverage_failures.append({"backend": be, "reason": f"provider_{field}_missing"})
+    source_revision = by_backend[be]["source_revision"]
+    if not isinstance(source_revision, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", source_revision):
+        coverage_failures.append({"backend": be, "reason": "source_revision_invalid"})
+    elif source_revision.lower() != tip_sha.lower():
+        coverage_failures.append({"backend": be, "reason": "source_revision_mismatch"})
+    if by_backend[be]["source_tree_fingerprint"] != source_tree_fingerprint:
+        coverage_failures.append({"backend": be, "reason": "source_tree_fingerprint_mismatch"})
+    if not isinstance(by_backend[be]["harness_sha256"], str) or not re.fullmatch(
+        r"[0-9a-fA-F]{64}", by_backend[be]["harness_sha256"]
+    ):
+        coverage_failures.append({"backend": be, "reason": "harness_sha256_invalid"})
+    acceleration = by_backend[be]["acceleration"]
+    required_true = (
+        "device_backend_present",
+        "require_device",
+        "fully_accelerated",
+        "all_consensus_macs_on_device",
+    )
+    for field in required_true:
+        if acceleration.get(field) is not True:
+            coverage_failures.append({"backend": be, "reason": f"acceleration_{field}_not_true"})
+    if not isinstance(acceleration.get("resolution_reason"), str) or not acceleration.get("resolution_reason").strip():
+        coverage_failures.append({"backend": be, "reason": "acceleration_resolution_reason_missing"})
+    expected_macs = acceleration.get("expected_macs")
+    if not isinstance(expected_macs, int) or expected_macs <= 0:
+        coverage_failures.append({"backend": be, "reason": "acceleration_expected_macs_invalid"})
+    if acceleration.get("device_macs") != expected_macs:
+        coverage_failures.append({"backend": be, "reason": "acceleration_device_macs_mismatch"})
+    if not isinstance(acceleration.get("device_calls"), int) or acceleration.get("device_calls", 0) <= 0:
+        coverage_failures.append({"backend": be, "reason": "acceleration_device_calls_invalid"})
+    for field in ("cpu_calls", "cpu_macs", "cpu_fallbacks"):
+        if acceleration.get(field) != 0:
+            coverage_failures.append({"backend": be, "reason": f"acceleration_{field}_nonzero"})
+    if acceleration.get("first_failure") not in (None, ""):
+        coverage_failures.append({"backend": be, "reason": "acceleration_first_failure_present"})
+    for record in records:
+        header_hex = record.get("header_hex")
+        if not isinstance(header_hex, str) or not re.fullmatch(r"[0-9a-fA-F]{364}", header_hex):
+            coverage_failures.append({"backend": be, "nonce": record["header_nonce"], "reason": "canonical_header_hex_invalid"})
+        if record.get("provider") != provider:
+            coverage_failures.append({"backend": be, "nonce": record["header_nonce"], "reason": "record_provider_mismatch"})
 
 for be in backends[1:]:
     observed = {r["header_nonce"]: r for r in by_backend[be]["records"]}
@@ -246,6 +327,7 @@ complete_match = (
 payload = {
     "evidence_kind": "multi_gpu_profile1_exactreplay_golden_compare",
     "tip_sha": tip_sha,
+    "source_tree_fingerprint": source_tree_fingerprint,
     "canary_nonce_start": nonce_start,
     "backends_requested": backends,
     "backends_succeeded": backends,
@@ -262,6 +344,8 @@ payload = {
             "all_consensus_macs_on_device": by_backend[be]["all_consensus_macs_on_device"],
             "cpu_gemm_fallbacks": by_backend[be]["cpu_gemm_fallbacks"],
             "source_revision": by_backend[be]["source_revision"],
+            "source_tree_fingerprint": by_backend[be]["source_tree_fingerprint"],
+            "harness_sha256": by_backend[be]["harness_sha256"],
             "provider": by_backend[be]["provider"],
             "backend_requested": by_backend[be]["backend_requested"],
             "provider_identity": by_backend[be]["provider_identity"],
@@ -276,6 +360,7 @@ payload = {
         "Production goldens require byte-identical ExactReplay digests across CUDA and Metal for the same frozen canary headers.",
         "HIP remains an optional provider; any supplied HIP corpus must match the required cohort exactly.",
         "CPU ExactReplay is not an accepted independent reproduction path for Epoch-A production goldens.",
+        "Every required artifact is bound to the exact requested source revision and a raw provider implementation consistent with its declared backend family.",
         "CommittedRCProductionGoldenManifest may be populated only from a reviewed corpus where complete_multi_gpu_match is true.",
         "Public evidence must remain machine-class only (no hostname/SKU/path identifiers).",
     ],

@@ -30,7 +30,7 @@ Install or copy the already-built binaries:
 
 ```bash
 sudo install -o root -g root -m 0755 /path/to/btxd /var/btx/bin/btxd
-sudo install -o root -g root -m 0755 /path/to/btx-cli /var/btx/bin/btx-cli
+sudo install -o root -g root -m 0755 btx-cli /var/btx/bin/btx-cli
 ```
 
 Confirm the binaries are available:

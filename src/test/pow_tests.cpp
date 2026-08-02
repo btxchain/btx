@@ -1388,6 +1388,7 @@ BOOST_AUTO_TEST_CASE(ChainParams_REGTEST_rc_coupled_profile_override_args)
     args.ForceSetArg("-regtestbmx4cheight", "6");
     args.ForceSetArg("-regtestdrltheight", "6");
     args.ForceSetArg("-regtestmatmulltsealaspow", "0");
+    args.ForceSetArg("-regtestrcheight", "9");
     args.ForceSetArg("-regtestrccoupledheight", "12");
     args.ForceSetArg("-regtestrccoupledtoydims", "1");
     args.ForceSetArg("-regtestrccoupledprofile", "3");

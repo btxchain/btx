@@ -97,9 +97,9 @@ Notes:
 
 ```bash
 ./build/bin/btxd -conf="$HOME/.btx/btx.conf" -allowignoredconf=1 -daemon
-./build/bin//path/to/btx-cli -conf="$HOME/.btx/btx.conf" getnetworkinfo
-./build/bin//path/to/btx-cli -conf="$HOME/.btx/btx.conf" getpeerinfo
-./build/bin//path/to/btx-cli -conf="$HOME/.btx/btx.conf" getblockchaininfo
+./build/bin/btx-cli -conf="$HOME/.btx/btx.conf" getnetworkinfo
+./build/bin/btx-cli -conf="$HOME/.btx/btx.conf" getpeerinfo
+./build/bin/btx-cli -conf="$HOME/.btx/btx.conf" getblockchaininfo
 ```
 
 Expected:
@@ -127,7 +127,7 @@ Troubleshooting:
 
 ```bash
 cmake --build build -j$(nproc)
-./build/bin//path/to/btx-cli -conf="$HOME/.btx/btx.conf" stop
+./build/bin/btx-cli -conf="$HOME/.btx/btx.conf" stop
 ./build/bin/btxd -conf="$HOME/.btx/btx.conf" -allowignoredconf=1 -daemon
 ```
 
@@ -139,8 +139,8 @@ cmake --build build -j$(nproc)
 ## 4. Archival Check (Historical Block Body)
 
 ```bash
-H=$(./build/bin//path/to/btx-cli -conf="$HOME/.btx/btx.conf" getblockhash 1)
-./build/bin//path/to/btx-cli -conf="$HOME/.btx/btx.conf" getblock "$H" 0 > /dev/null
+H=$(./build/bin/btx-cli -conf="$HOME/.btx/btx.conf" getblockhash 1)
+./build/bin/btx-cli -conf="$HOME/.btx/btx.conf" getblock "$H" 0 > /dev/null
 ```
 
 If this succeeds (and `pruned: false`), the node has historical block body
@@ -151,7 +151,7 @@ access and is operating as archival.
 For built-in test mining, always pass your chosen payout address explicitly:
 
 ```bash
-./build/bin//path/to/btx-cli -conf="$HOME/.btx/btx.conf" generatetoaddress 1 "btx1z..."
+./build/bin/btx-cli -conf="$HOME/.btx/btx.conf" generatetoaddress 1 "btx1z..."
 ```
 
 Recommended public-only host artifacts (create these during provisioning):
@@ -165,13 +165,13 @@ echo "mr(sortedmulti_pq(...))#...." | sudo tee /opt/btx-runtime/artifacts/mainne
 Optional watch-only wallet import (public descriptor only, no private keys):
 
 ```bash
-./build/bin//path/to/btx-cli -conf="$HOME/.btx/btx.conf" -named createwallet \
+./build/bin/btx-cli -conf="$HOME/.btx/btx.conf" -named createwallet \
   wallet_name=main_msig_watch \
   disable_private_keys=true blank=true descriptors=true load_on_startup=true
 
 DESC="$(cat /opt/btx-runtime/artifacts/mainnet_multisig_descriptor.txt)"
 REQ="$(jq -nc --arg d "$DESC" '[{desc:$d, timestamp:"now", active:false}]')"
-./build/bin//path/to/btx-cli -conf="$HOME/.btx/btx.conf" -rpcwallet=main_msig_watch importdescriptors "$REQ"
+./build/bin/btx-cli -conf="$HOME/.btx/btx.conf" -rpcwallet=main_msig_watch importdescriptors "$REQ"
 ```
 
 For external/mainnet mining (`getblocktemplate` + `submitblock`), configure the
