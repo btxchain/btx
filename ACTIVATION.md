@@ -64,30 +64,40 @@ not as the authority for the current epoch sequence.
 
 ### One-command hardware report (feeds B1 + B2b + B2g)
 
+> **Tooling update:** the legacy `matmul-v4-report` tool and its bare
+> `measure-hardware.sh cpu|cuda|metal|hip` invocation were RETIRED (commit
+> `a645c3b4` — fully superseded by ENC_RC). `measure-hardware.sh` now only
+> drives the ENC_RC harness (`rc` sub-mode or a `--profile rc-*`/`coupled*`
+> campaign); a bare-backend invocation exits with a pointer to the RC tools.
+
 Anyone can run **one command** on their machine and send back a single JSON:
 
 ```
-contrib/matmul-v4/measure-hardware.sh cpu     # any host (baseline)
-contrib/matmul-v4/measure-hardware.sh cuda    # NVIDIA sm>=75
-contrib/matmul-v4/measure-hardware.sh metal   # Apple M5-class
-contrib/matmul-v4/measure-hardware.sh hip     # AMD CDNA
-# forward tool flags, e.g. real-hardware calibration run:
-contrib/matmul-v4/measure-hardware.sh cuda --n 4096 --window 32 \
-    --device-peak-int8-tops 1979 --v3-hashrate 1200000
+# ENC_RC episode harness (any backend: cpu | cuda | metal | hip):
+contrib/matmul-v4/measure-hardware.sh cpu rc --toy --out report.json
+contrib/matmul-v4/rc-gate.py report.json --out summary.json
+
+# Stage G campaign profiles (same-tip, multi-run, rc-gate schema):
+contrib/matmul-v4/measure-hardware.sh cpu --profile rc-toy
+contrib/matmul-v4/measure-hardware.sh cpu --profile rc-medium
+contrib/matmul-v4/measure-hardware.sh cpu --profile coupled
+
+# Full production-shaped workload measurement:
+contrib/matmul-v4/run-full-benchmark.py --shape production --backend cuda
+# RC-only measurement wrapper:
+contrib/matmul-v4/measure-enc-rc-v46.sh
 ```
 
-It builds only the `matmul-v4-report` target, resolves the backend + device
-identity, and emits `matmul-v4-report-<hostname>.json` plus a human summary
-carrying: **B1** bit-exactness (resolved backend's batched digests vs the CPU
-reference, PASS/FAIL — a FAIL is a hard consensus-split signal); **B2b**
-sustained MARGINAL nonce/s (+ an `nMatMulV4AsertRescaleNum/Den` suggestion when
-`--v3-hashrate` is given); **B2g** the §K.2a-WT per-stage wall-time breakdown on
-the STACKED window shapes, the tensor-stage share, and an implied INT8
-tensor-utilization estimate (with `--device-peak-int8-tops`). The tool alone
-cannot decide the datacenter-favoring **ordering** (that needs multiple
-machines) — it prints each machine's inputs; aggregate the JSON across a
-datacenter part, a consumer part, and an Apple M5 to settle §K.2b(c). This is
-the shared measurement instrument named in B2g / B4′.
+The gates the retired report used to serve now live in the RC path:
+**B1** bit-exact backend determinism → `ProbeRCSelfQual` (byte-exact vs the
+int64 CPU oracle) via the `matmul-v4-rc-harness` target the script builds;
+**B2b** ASERT throughput calibration →
+`contrib/matmul-v4/rc-stage-g-campaign.py` + `contrib/matmul-v4/rc-gate.py`;
+**B2g** datacenter-vs-consumer go/no-go →
+`contrib/matmul-v4/run-full-benchmark.py`. A single machine alone cannot
+decide the datacenter-favoring **ordering** (that needs multiple machines) —
+aggregate the JSON across a datacenter part, a consumer part, and an Apple M5
+to settle §K.2b(c).
 
 ---
 
@@ -112,7 +122,7 @@ enable proof authority or Profile 2 by default.
 | A11 | Pooled-mining / challenge-header RPC paths made v4-aware | ✅ done |
 | A12 | Optimal-miner `(U·A)(B·V)` path in CPU `ComputeDigest` (byte-identical to full-C; enforced by equivalence test) | ✅ done |
 | A13 | Public code review of design spec + implementation | ☐ todo (PR #89) |
-| A14 | **v4.1 batched-sketch profile (spec §A.2 v4.1 / §C I1′ / §K.2b, PR #89 wall-time fix):** b = 8 → 4; A/U/V template-scoped (template hash zeroes nNonce64 + §H.4 seed fields), B/σ nonce-fresh; CPU batched miner (`matmul_v4_batch.{h,cpp}`, one stacked combine GEMM per window) wired into `SolveMatMulV4` (window Q via `BTX_MATMUL_V4_BATCH`, default 8) with the winner re-derived through the single-nonce reference before sealing; C-13 limb-tensor combine CPU reference; per-stage bench (`matmul_v4_stage_bench`); golden vectors re-pinned; verifier UNCHANGED (O(n²), one nonce). All 6 v4 suites + regtest activation functional test green | ✅ done (code) — ⚠ security review B4′ + measurement B2g outstanding |
+| A14 | **v4.1 batched-sketch profile (spec §A.2 v4.1 / §C I1′ / §K.2b, PR #89 wall-time fix):** b = 8 → 4; A/U/V template-scoped (template hash zeroes nNonce64 + §H.4 seed fields), B/σ nonce-fresh; CPU batched miner (`matmul_v4_batch.{h,cpp}`, one stacked combine GEMM per window) wired into `SolveMatMulV4` (window Q via `BTX_MATMUL_V4_BATCH`, default 8) with the winner re-derived through the single-nonce reference before sealing; C-13 limb-tensor combine CPU reference; per-stage bench (`matmul_v4_stage_bench` — since REMOVED as a superseded-workload bench, commit `7c76afa2`; use `contrib/matmul-v4/run-full-benchmark.py`); golden vectors re-pinned; verifier UNCHANGED (O(n²), one nonce). All 6 v4 suites + regtest activation functional test green | ✅ done (code) — ⚠ security review B4′ + measurement B2g outstanding |
 
 Exit criterion: A1–A11 done, CPU suite green, reviewed → merge to `main` with
 the complete Epoch-A height tuple disabled and ratification false.
@@ -165,17 +175,25 @@ The kernels are written bit-exact-by-construction and compile behind their
 toolchain guards, but **cannot be run in this repo's CI environment** (no CUDA
 toolkit, no macOS/Metal, no ROCm). On real hardware, run:
 
+> (`verify-backend.sh` was RETIRED in commit `a645c3b4`; the determinism
+> harness itself is a test suite in `test_btx` — build with the backend
+> enabled and run it directly, per `doc/matmul-v4-gpu-backends.md`.)
+
 ```
-contrib/matmul-v4/verify-backend.sh cuda    # NVIDIA sm>=75 host  -> PASS/FAIL
-contrib/matmul-v4/verify-backend.sh metal   # Apple M5-class host -> PASS/FAIL
-contrib/matmul-v4/verify-backend.sh hip     # AMD CDNA host (optional coverage)
+# after a backend-enabled build (see doc/matmul-v4-gpu-backends.md for flags):
+build/bin/test_btx --run_test=matmul_v4_backend_determinism_tests \
+  --log_level=warning
+# plus the pinned golden vectors:
+build/bin/test_btx \
+  --run_test=matmul_v4_backend_determinism_tests,matmul_v4_determinism_vectors \
+  --log_level=warning
 ```
 
-It builds the backend, runs `matmul_v4_backend_determinism_tests`, and returns
-PASS only if the digest is **bit-for-bit identical to the CPU reference** (a
-one-bit divergence is a chain split → hard FAIL). Record results here:
+The suite (`src/test/matmul_v4_backend_determinism_tests.cpp`) passes only if
+the digest is **bit-for-bit identical to the CPU reference** (a one-bit
+divergence is a chain split → hard FAIL). Record results here:
 
-| Backend | Gate | Verify (`verify-backend.sh`) | Result |
+| Backend | Gate | Verify (determinism harness) | Result |
 |---|---|---|---|
 | **CUDA** (Turing→Blackwell, sm≥75) | **GATING** | H100 / B200 / RTX 5090 / 4090 / sm_75 | ☐ pending |
 | **Metal** (Apple M5-class) | **GATING** | M5 / M5 Max | ☐ pending |
@@ -192,7 +210,7 @@ Details + per-backend build flags: `doc/matmul-v4-gpu-backends.md`.
 | B2d | Operand XOF regen timing envelope (15–35 ms); s8 operand + U/V sampling vectors. **Note (PR #89 review): the 15–35 ms envelope is the VERIFIER's once-per-block cost — the MINER pays expansion on every nonce**, so the XOF is also gated by the §K.2a-WT wall-time check. The per-element-hash XOF (~38.5M SHA-256/nonce at n=4096, 62.9% of per-nonce time on a 5090) is replaced by the wide counter-mode XOF (~1.2M, ~32× fewer; spec §A.2/C-12); operand values and all digests changed | CPU/GPU |
 | B2e | n=4096 verify-budget confirmation on reference CPUs (<1 s single-thread) | CPU |
 | B2f | **Mod-q combine on tensor cores + batched-sketch device port (spec Appendix C-13, §K.2b)** — CPU reference LANDED (4-limb balanced base-2⁷, valid for n ≤ 8589, byte-identical to the direct combine, incl. the stacked cross-nonce form). Device port now LANDED on **all three backends**: `ComputeDigestsBatchedAccel` (template-amortized P=U·A, stacked B·V, one large dense limb-tensor combine) in CUDA (cuBLASLt IMMA), HIP (MFMA), Metal (pre-M5 integer-ALU tile + M5 `tensor_ops::matmul2d`), all bit-exact-by-construction (on-device `DecomposeLimbPlanes` ported statement-for-statement) and wired through the verify+fallback dispatcher (`ComputeDigestsBatchedDispatched`). Compile behind their toolchain guards; CPU-only tree links via stubs. REMAINING: build + re-measure on real GPUs (see B2g) | real-GPU build + re-measure |
-| B2g | **v4.1 batched-sketch GO/NO-GO (spec §K.2b)** — run `contrib/matmul-v4/measure-hardware.sh <backend>` (the `matmul-v4-report` tool; same stage boundaries as `matmul_v4_stage_bench`, one-command + JSON) on physical H100/B200 (+ 5090 anchor) at n=4096, b=4, window Q ≥ 32: (a) tensor stages (S2+S3b) strict majority of MARGINAL per-nonce wall-time; (b) batched tensor utilization ≥ ~60% of peak INT8; (c) nonce/s ordering actually datacenter-favoring; (d) b=4 verify (8 MiB payload) inside the CPU budget. **The datacenter claim is a hypothesis until this passes — two prior model estimates were falsified.** Also feeds B2b (ASERT rescale must use the MARGINAL per-nonce unit, since U·A is template-amortized) | **real GPUs** |
+| B2g | **v4.1 batched-sketch GO/NO-GO (spec §K.2b)** — run `contrib/matmul-v4/run-full-benchmark.py --shape production --backend <backend>` (the retired `matmul-v4-report` / `matmul_v4_stage_bench` tools' designated successor, commit `a645c3b4`; one-command + JSON) on physical H100/B200 (+ 5090 anchor) at n=4096, b=4, window Q ≥ 32: (a) tensor stages (S2+S3b) strict majority of MARGINAL per-nonce wall-time; (b) batched tensor utilization ≥ ~60% of peak INT8; (c) nonce/s ordering actually datacenter-favoring; (d) b=4 verify (8 MiB payload) inside the CPU budget. **The datacenter claim is a hypothesis until this passes — two prior model estimates were falsified.** Also feeds B2b (ASERT rescale must use the MARGINAL per-nonce unit, since U·A is template-amortized) | **real GPUs** |
 
 ### B3. Security audit
 External consensus/security audit. Focus: verifier DoS surface (payload
@@ -206,7 +224,7 @@ amortizes and per-nonce combines batch into one dense GEMM (spec §C I1′,
 across miners; difficulty prices the marginal unit) is written in §C I1′ but
 is **needs-review, not proven-safe** — specifically the marginal-work floor
 assumption and the reopened projector-cache channel. Solicit adversarial
-review (the PR #89 reviewer is invited; the stage-bench harness is the shared
+review (the PR #89 reviewer is invited; `run-full-benchmark.py` is the shared
 measurement tool). Mainnet activation MUST NOT proceed without this review.
 
 > **Lineage note — this re-treads the exact ground the v2 "e1" fix closed.**
@@ -329,7 +347,7 @@ profiles — Gate C is "new operands into the same machine".
 | C1c | CPU consensus reference (`src/matmul/matmul_v4_bmx4.*`): §1.2 nibble sampler (identity-on-E2M1 bijection), §1.3 scale planes, exact-shift dequant, base-2⁶ remainder-top limb combine + `CheckCombineLimbBound` successor (pins 288·n ≤ 2²³−1) | ☐ foundation agent |
 | C1d | Validation/pow wiring per spec §8.2 (profile-dispatched seeds `"BTX_MATMUL_SEED_V42"`/sketch tags, expander profile arg, full-C word bound 2304·n, ASERT rescale at the profile height); chainparams assignment + construction asserts (`nMatMulBMX4CHeight > nMatMulV4Height` when set) | ☐ later integration wave (design pinned in spec §8.2 — do NOT wire ahead of it) |
 | C1e | ENC-BMX4C golden vectors + regenerated C-1′ adversarial vectors (spec §5.3 families 1–5: t-discrimination, boundary-pin, scale-exactness, alphabet-hole, promotion-cadence). **A replayed s8-era vector set is VOID** — the old HM-A/HM-B/HM-C regimes are unreachable under BMX4-C operands | ☐ after C1c |
-| C1f | Backend kernels (CUDA mxf4/IMMA, Metal, HIP, + first FP4/FP8-path device) + `verify-backend.sh` / `measure-hardware.sh` profile support | ☐ after C1c/C1e |
+| C1f | Backend kernels (CUDA mxf4/IMMA, Metal, HIP, + first FP4/FP8-path device) + determinism-harness (`matmul_v4_backend_determinism_tests`) / `measure-hardware.sh` (ENC_RC `rc` mode) profile support | ☐ after C1c/C1e |
 | C1g | Spec-text debts due at fork time: §A.6 Strassen rewrite (one INT8-path level at E_max = 48, zero frontier levels); §S.2.2 ASIC-residual re-disclosure (halved t-cliff ≈ 3–5× under the 1-GEMM INT8 fallback); C-1 → C-1′ codification in code comments; ρ re-measured on FP4 rental centrals (disclosure only) | ☐ at fork time |
 
 ### C2. M-t24 — THE gating measurement (runnable NOW, in parallel with Gate B)

@@ -176,7 +176,9 @@ proof backfill, and sync verification of those proofs.
 
 Measured on this M4 Max:
 
-- [x] Profile 1 loaded p99 is within the 25–30 second target.
+- [x] Profile 1 loaded p99 is within the 25–30 second target on this M4 Max
+  (28.210 s). The independent CUDA-class result below does NOT meet this
+  target (32.705 s); see that checklist for its verdict.
 - [x] Two zero-gap valid blocks drain inside one 90-second interval.
 - [x] Three-branch reorg and stale-job cancellation remain bounded.
 - [x] Cryptographically ticketed invalid competing candidates cannot starve
@@ -193,8 +195,13 @@ Measured on this M4 Max:
 Independent CUDA class (sanitized; see
 [`doc/evidence/cuda-blackwell-16gib-profile1-loaded-2026-08-01/`](evidence/cuda-blackwell-16gib-profile1-loaded-2026-08-01/)):
 
-- [x] Profile 1 loaded p99 **32.705 s** on a Blackwell-class 16 GiB NVIDIA
-  discrete GPU (Linux x86_64, Xeon W-class host, 76 GiB RAM).
+- [x] Profile 1 loaded p99 **32.705 s** measured on a Blackwell-class 16 GiB
+  NVIDIA discrete GPU (Linux x86_64, Xeon W-class host, 76 GiB RAM).
+  **This EXCEEDS the 25–30 s p99 target by 2.705 s** — the CUDA class does
+  not pass that gate on this hardware; it stays within the 90-second block
+  interval (p99 ≈ 36.3% of the interval, ~57.3 s headroom), which is the only
+  bound this campaign clears. A CUDA-class within-target p99 remains
+  unmet/open.
 - [x] 100 distinct `matmul_dim=4096` headers / digests; zero CPU GEMM fallbacks.
 - [x] CUDA ExactReplay attached via the Metal-parity `ExactGemmBackend`
   Launch* ABI (`rc_fused_ffn`, `rc_fused_ffn_chain`, `rc_phase1`).

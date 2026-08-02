@@ -127,5 +127,8 @@ done <<< "$files"
 } > "$tmp"
 
 mv "$tmp" "$out"
+# mktemp creates the file 0600 and mv preserves that mode; make the generated
+# doc world-readable like any other tracked file.
+chmod 0644 "$out"
 trap 'rm -f "$rows"' EXIT
 echo "wrote $out ($total files; $required MatMul reviews outstanding)"
