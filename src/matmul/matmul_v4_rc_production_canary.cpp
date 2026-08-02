@@ -152,9 +152,41 @@ bool IsHexIdentity(const std::string& value, size_t expected_size)
 bool GoldenEvidenceIdentityValid(
     const RCProductionGoldenManifestEntry& entry)
 {
+    // NOTE: these are shape checks only. This process has no repository to
+    // resolve a revision against and no way to hash the harness that produced
+    // the corpus, so a well-formed string that names nothing passes here. That
+    // is not hypothetical: the first final-freeze corpus recorded in this tree
+    // carried a 40-hex source_revision that resolved to no commit. The
+    // out-of-process guards in contrib/matmul-v4/multi-gpu-golden-corpus.sh and
+    // contrib/matmul-v4/verify-evidence-provenance.py are what actually bind
+    // these fields to real objects, and per
+    // doc/btx-matmul-v4.7-production-golden-policy.md they MUST pass before
+    // this manifest is populated.
     return IsHexIdentity(entry.source_revision, 40) &&
         IsHexIdentity(entry.source_tree_fingerprint, 64) &&
         IsHexIdentity(entry.harness_sha256, 64);
+}
+
+// A provider family and a device architecture that cannot describe the same
+// hardware are a data-entry error at best. Reject the combination outright so a
+// hand-written manifest entry cannot claim, say, {family:"metal", arch:"sm_120"}
+// and thereby satisfy the two-provider cohort requirement with one vendor's
+// silicon named twice.
+bool GoldenArchitectureMatchesFamily(const std::string& family,
+                                     const std::string& architecture)
+{
+    if (family.empty() || architecture.empty()) return false;
+    if (family == "cuda") return architecture.rfind("sm_", 0) == 0;
+    if (family == "hip") return architecture.rfind("gfx", 0) == 0;
+    if (family == "metal") {
+        // Apple silicon is recorded as a generation class, e.g. "m4_class".
+        return architecture.size() > 6 &&
+            architecture.compare(architecture.size() - 6, 6, "_class") == 0 &&
+            architecture.front() == 'm';
+    }
+    // Unknown families are not eligible for the production cohort; the cohort
+    // check below independently requires one cuda and one metal entry.
+    return true;
 }
 
 BackendIdentity IdentifyBackend(
@@ -308,8 +340,7 @@ bool StoreStatus(
 std::string ProviderFamily(const std::string& provider)
 {
     if (provider.find("cuda") != std::string::npos ||
-        provider.find("nvidia") != std::string::npos ||
-        provider.find("ozaki_mxfp4") != std::string::npos) {
+        provider.find("nvidia") != std::string::npos) {
         return "cuda";
     }
     if (provider.find("metal") != std::string::npos ||
@@ -319,6 +350,19 @@ std::string ProviderFamily(const std::string& provider)
     if (provider.find("hip") != std::string::npos ||
         provider.find("rocm") != std::string::npos) {
         return "hip";
+    }
+    // The Ozaki MXFP4 lane has CUDA, HIP and Metal natives that all surface as
+    // `rc_ozaki_mxfp4`. This fallback must stay BELOW the explicit family
+    // markers above: when it sat at the top, `metal_ozaki_mxfp4` and
+    // `hip_ozaki_mxfp4` were both classified "cuda", and because
+    // ProbeRCProductionProviderIdentity derives architecture/driver/runtime
+    // from the family string alone, work executed on one vendor's device would
+    // have been identity-bound to another's. Latent today only because
+    // kRcOzakiMxfp4ProductionEligible is false. An unqualified `rc_ozaki_mxfp4`
+    // remains ambiguous and must not be made production eligible until the
+    // family is derived from the resolver's Kind rather than this label.
+    if (provider.find("ozaki_mxfp4") != std::string::npos) {
+        return "cuda";
     }
     if (provider.find("ascend") != std::string::npos ||
         provider.find("cann") != std::string::npos) {
@@ -372,9 +416,18 @@ bool RCProductionGoldenManifestCohortValid(
             !GoldenEvidenceIdentityValid(entry) ||
             entry.provider_class.provider_family.empty() ||
             entry.provider_class.device_architecture.empty() ||
+            !GoldenArchitectureMatchesFamily(
+                entry.provider_class.provider_family,
+                entry.provider_class.device_architecture) ||
             entry.header_nonce != reference.header_nonce ||
             entry.expected_digest != reference.expected_digest ||
-            !GoldenEpochMatches(reference.epoch, entry.epoch)) {
+            // Symmetric, not GoldenEpochMatches(). That helper treats its first
+            // argument as "runtime" and its second as "golden", so the
+            // ANY_ACTIVATION_HEIGHT wildcard absorbs in one direction only and
+            // the cohort verdict flipped when the manifest literal was
+            // reordered. Within a cohort every entry must describe the same
+            // epoch, so require exact equality.
+            !CapabilityEpochEqual(reference.epoch, entry.epoch)) {
             return false;
         }
         if (entry.source_revision != reference.source_revision ||
@@ -675,8 +728,25 @@ RCProductionCanaryStatus RunRCProductionStartupCanaryForTest(
         StoreStatus(out);
         return out;
     }
-    // The committed manifest accepts no test provider, so this can exercise
-    // structural/negative guards but can never mint a production capability.
+    // The claim that this seam "can never mint a production capability" held
+    // only because CommittedRCProductionGoldenManifest() is empty. ProviderFamily
+    // classifies by substring, so "test:cuda_shim" resolves to family "cuda" and
+    // would match a real cuda manifest entry the moment one is committed --
+    // and Impl reaches StoreStatus -> IssueCapabilityLocked(test_only=false),
+    // minting a genuine production capability for a caller-supplied backend
+    // while bypassing the resolver binding that the production entry point
+    // applies. Refuse any test provider that resolves to a real accelerator
+    // family so the guarantee is structural rather than incidental.
+    const std::string family{ProviderFamily(test_provider)};
+    if (family == "cuda" || family == "metal" || family == "hip" ||
+        family == "ascend" || family == "tpu" || family == "trainium") {
+        RCProductionCanaryStatus out;
+        out.provider = test_provider;
+        out.outcome = RCProductionCanaryOutcome::ProviderNotPolicyEligible;
+        out.reason = "test_canary_provider_resolves_to_real_family";
+        StoreStatus(out);
+        return out;
+    }
     return RunRCProductionStartupCanaryImpl(
         test_provider, backend, /*automatic_policy_eligible=*/true,
         consensus, activation_height);
