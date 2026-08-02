@@ -1,0 +1,30 @@
+{
+  "title": "CUDA Profile-1 bounded soak (pre-ratification)",
+  "ratification": false,
+  "gate7_multi_day_multi_peer_claim": false,
+  "status": "done",
+  "planned_duration_secs": 2700,
+  "elapsed_secs": 2701,
+  "hardware_class": {
+    "os": "Linux x86_64",
+    "gpu": "NVIDIA consumer Blackwell-class discrete GPU, 16 GiB VRAM, CC 12.0",
+    "note": "hostname/username redacted from evidence copies"
+  },
+  "scenarios": {
+    "relay": 31,
+    "competing_branch": 2,
+    "restart": 2,
+    "cache_persist": 2,
+    "ibd_boundary": 1
+  },
+  "not_covered": [
+    "multi-day wall-clock soak",
+    "multi-peer public/testnet topology",
+    "upgrade-behavior across release binaries",
+    "ratification / activation readiness"
+  ],
+  "updated_at": "2026-08-02T13:37:20Z",
+  "source_revision": "c7e7711e655859d5b17ab3c79666399df07f7ef2",
+  "source_tree_fingerprint": "174436c75da89fb8b7ee6a2c1a9045ff32cbeeb623f72defce82336b24b2be62",
+  "public_evidence": true
+}
