@@ -1,8 +1,10 @@
 # MatMul v4.7 Profile 1 ExactReplay launch candidate
 
-Status: local implementation and measurement candidate. This document is not
-an activation recommendation. The canonical four-epoch transition and naming
-rules are defined in
+Status: launch-candidate gate record for Epoch A. **Epoch A has since been
+activated on mainnet at block height 181'894** (`src/kernel/chainparams.cpp`);
+the gate checklists below are annotated with what the committed activation
+evidence closed and what was accepted as residual risk. The canonical
+four-epoch transition and naming rules are defined in
 [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md).
 
 ## Architecture decision
@@ -23,19 +25,22 @@ ExactReplay launch candidate. Profile 2 should become authoritative only with
 a completed succinct proof system (or separately proven multi-host verifier),
 not by silently requiring every validator to own a large Metal fleet.
 
-The current source selects Profile 1 as the pre-activation default while every
-public activation height remains disabled. Profile 2 stays explicitly
-selectable for later-epoch regression measurements; it is not inherited into
-Epoch A.
+The current source selects Profile 1 and sets the mainnet activation tuple:
+`nMatMulV4Height = nMatMulBMX4CHeight = nMatMulRCHeight = 181'894`. Testnet
+and signet heights remain disabled. Profile 2 stays explicitly selectable for
+later-epoch regression measurements; it is not inherited into Epoch A.
 
-Merging this implementation activates nothing. A later activation PR must set
-`nMatMulV4Height`, `nMatMulBMX4CHeight`, and `nMatMulRCHeight` to one identical
-`H_A`. DRLT and coupled RC remain disabled; Profile 1 and production dimensions
-remain selected; unfinished Stage-3 proof authority and HeaderPoW remain off.
-The v4 and BMX4C ASERT ratios remain inert at `1/1`, while the live RC branch
-owns the independently measured one-time v3-to-Epoch-A calibration. Explicit
-L0 ratification is a separate requirement and is not implied by merging,
-benchmarking, or setting a height.
+The activation satisfied the atomic-tuple contract this document required:
+one identical `H_A` (181'894) across the three heights; DRLT and coupled RC
+disabled; Profile 1 and production dimensions selected; unfinished Stage-3
+proof authority and HeaderPoW off. The v4 and BMX4C ASERT ratios remain
+inert at `1/1`, while the live RC branch owns the installed one-time
+v3-to-Epoch-A calibration (`4294967295/1`, the saturated uint32 ceiling of
+the measured two-rig ratio — see `kRCEpochAAsertRescaleNum` in
+`src/kernel/chainparams.cpp`). Explicit L0 ratification was recorded as the
+flip of `BTX_MATMUL_NO_INVERSION_GATE_RATIFIED` and
+`BTX_MATMUL_V47_GPU_LIFECYCLE_GATE_RATIFIED` to true, with the basis and the
+accepted residual risk documented at those flags (`src/consensus/params.h`).
 
 Round `r` is derived from round `r-1`'s root, so rounds are not sampled or run
 concurrently. The serialized block header remains 182 bytes and commits only
@@ -104,7 +109,9 @@ Device path detail:
 block interval the p99 occupies ~36.3% (~57.3 s headroom). Tip-correlated
 sanitized evidence:
 `doc/evidence/cuda-blackwell-16gib-profile1-loaded-2026-08-01/`
-(2026-07-30 retained as historical). L0 ratification remains false.
+(2026-07-30 retained as historical). L0 ratification was still false at the
+date of this campaign; it has since been recorded for the height-181'894
+activation.
 
 ## Full-Metal requirement
 
@@ -124,8 +131,11 @@ telemetry establish all of the following:
 The portable oracle remains available for explicit pre-activation testing and
 offline dispute diagnosis. Production `strict-device` validation does not
 invoke it inline: an unavailable accelerator or device digest mismatch is a
-local failure, the provider is quarantined, and the block remains retryable
-without peer punishment or a cached invalid verdict.
+local failure and the block remains retryable without peer punishment or a
+cached invalid verdict. A sole device disagreement does not quarantine the
+provider (`IsUnconfirmedMismatch`); quarantine is reserved for a confirmed
+execution/coverage failure (`IsQuarantinableExecutionFailure`,
+`src/matmul/matmul_v4_rc_gkr.cpp`).
 
 ## Admission and near-tip policy
 
@@ -206,29 +216,46 @@ Independent CUDA class (sanitized; see
 - [x] CUDA ExactReplay attached via the Metal-parity `ExactGemmBackend`
   Launch* ABI (`rc_fused_ffn`, `rc_fused_ffn_chain`, `rc_phase1`).
 - [x] Tip-correlated 100-run campaign recorded (`c4ac2e43`, TU md5
-  `ed1e9477432b1766f549c039b6779632`); L0 ratification remains false.
+  `ed1e9477432b1766f549c039b6779632`); L0 ratification was still false at the
+  campaign date (since recorded for the 181'894 activation).
 - [x] Apple Silicon M4 Max-class Metal reproduced the same eight frozen
   production canary headers/dimensions/digests as CUDA at source revision
   `9dd88b8e54d92a848c4006aa9affca2ab3e0c91c`, with every consensus MAC on
   device and zero CPU GEMM calls/fallbacks.
 
-Still required before activation:
+Gate status at the shipped 181'894 activation:
 
-- [ ] HIP/ROCm ExactReplay reproduces the same frozen production golden corpus;
-  CPU ExactReplay is not an accepted independent Epoch-A golden backend;
-- [ ] the final CUDA path and multi-peer testnet soak reproduce the local
-  ticketed-starvation, strict quarantine, operator recovery, and retry results;
-- [ ] block/header serialization and `rcadmit` no-chain-byte invariants are
-  rechecked in the final candidate build;
-- [ ] checkpoint and IBD trust-window disclosures are frozen;
-- [x] the disabled pre-activation consensus selector is Profile 1, with a
-  construction invariant and regression coverage.
-- [x] the disabled merge state and atomic Epoch-A tuple are construction
-  invariants: equal v4/BMX4C/RC heights, withdrawn paths off, HeaderPoW off,
-  v4/BMX4C ASERT inert, and RC as the sole calibrated branch.
+- [ ] HIP/ROCm ExactReplay reproduction of the frozen production golden
+  corpus: NOT done. Per the production-golden policy HIP is optional; it
+  remains fail-closed and not production-authorized, and the committed
+  manifest is CUDA+Metal only. The activation shipped without it.
+- [ ] Multi-peer public testnet soak: NOT done — explicitly accepted as
+  residual risk. The bounded two-peer regtest soak
+  (`doc/evidence/cuda-profile1-soak-2026-08-02`, 45 minutes, 38 scenarios,
+  zero failures) covered relay, competing branches, restart, cache
+  persistence, and an IBD boundary on the final CUDA path, and its own
+  summary refuses to claim the multi-day/multi-peer gate.
+- [ ] Multi-day wall-clock soak and upgrade behavior across released
+  binaries: NOT done — explicitly accepted as residual risk (recorded at
+  `BTX_MATMUL_V47_GPU_LIFECYCLE_GATE_RATIFIED`, `src/consensus/params.h`).
+- [ ] Checkpoint and IBD trust-window disclosures frozen as a standalone
+  artifact: not recorded in the committed activation evidence.
+- [x] CUDA+Metal golden cohort reproduced byte-identically at ONE code
+  freeze and committed as the production golden manifest
+  (`doc/evidence/multi-gpu-profile1-goldens-cuda-metal-2026-08-03-sealed`;
+  `CommittedRCProductionGoldenManifest()`).
+- [x] One-time RC ASERT calibration measured same-silicon on two vendors and
+  installed as `4294967295/1` (`asert-two-rig-calibration-2026-08-03`).
+- [x] The consensus selector is Profile 1, with a construction invariant and
+  regression coverage.
+- [x] The atomic Epoch-A tuple is a construction invariant and is now
+  INSTALLED on mainnet: equal v4/BMX4C/RC heights (181'894), withdrawn paths
+  off, HeaderPoW off, v4/BMX4C ASERT inert, and RC as the sole calibrated
+  branch.
 
-Profile 1 now has 100-run loaded evidence on measured Metal and sanitized
-Blackwell-class CUDA hardware, plus an eight-header CUDA/Metal golden match.
-Activation remains a no-go until HIP parity, complete-lifecycle,
-fault/recovery, multi-peer DoS, IBD, sustained-soak, calibration, and
-ratification gates are closed.
+Historical verdict: while the gates above were open, this document's verdict
+was NO-GO. The operator activated Epoch A at mainnet height 181'894 on the
+strength of the sealed one-freeze CUDA+Metal cohort, the zero-fallback
+lifecycle soak, and the two-rig ASERT calibration, and explicitly accepted
+the unmet gates listed above as residual risk. This document records that
+decision; it does not retroactively claim those gates were closed.

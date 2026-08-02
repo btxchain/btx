@@ -16,7 +16,7 @@ fork-choice influence, or mining eligibility until ExactReplay succeeds.
 Production operators therefore need a qualified full-acceleration replay
 device, one submitter per saturated device, bounded candidate admission, and
 monitoring for queue depth, cancellation, backend fallback, and cached
-verdicts. Merging the implementation PR is not activation. See
+verdicts. Mainnet activates Epoch A at block height 181'894. See
 [the canonical roadmap](btx-matmul-v4.7-transition-roadmap.md).
 
 ## Current State

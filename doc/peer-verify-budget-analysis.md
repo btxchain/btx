@@ -6,7 +6,8 @@
 > cancellation. They must not be copied into v4.7 policy. The current
 > authority and admission invariants are defined by
 > [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md);
-> all production transition heights remain disabled.
+> mainnet Epoch A now activates at height 181'894 and all other production
+> transition heights remain disabled.
 
 ## Parameter Definition
 

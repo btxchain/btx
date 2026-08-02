@@ -4,8 +4,7 @@
 > `doc/btx-matmul-v4.7-transition-roadmap.md`: Epoch A uses Profile 1 with
 > ExactReplay authority and optional shadow proofs; Epoch B requires both a durable
 > Profile-1 proof and ExactReplay; Epoch C makes the Profile-1 proof authoritative;
-> and Epoch D separately moves to Profile 2 under proof authority. All production
-> heights remain disabled. Any older “production,” “default,” “shipping,” direct-fork,
+> and Epoch D separately moves to Profile 2 under proof authority. Mainnet Epoch A (v4 = BMX4C = RC) now activates at height 181'894; all other transition heights remain disabled. Any older “production,” “default,” “shipping,” direct-fork,
 > sampled-verifier, or coupled-profile recommendation below is historical unless the
 > canonical roadmap expressly carries it forward.
 
@@ -47,7 +46,7 @@ Hardness (C-15 / `HonestMAC` MAC count) vs efficiency (ASERT / Strassen–Winogr
 | **Tournament baseline** | **Fastest known exact** identity-PASS path (CPU combine tournament + measured ExactGemm / device lanes) — **not** naive schoolbook GEMM / invented `n³` |
 | **Row 6 (≥4×)** | Measure vs that fastest-exact baseline; invent **no** silicon nonce/s in docs |
 | **Row 7 / G5** | External C-15 packet game — **orthogonal to FMM** efficiency; tournament speedup ≠ C-15 PASS |
-| **C-15 status** | **OPEN**; public heights remain `INT32_MAX` |
+| **C-15 status** | **OPEN**; public DRLT/LT heights remain `INT32_MAX` (the mainnet 181'894 Epoch-A activation does not include LT) |
 | **Non-reduction** | LT-C15 does **not** follow from SETH/OV/APSP/3SUM/BMM/ω/KW/PRF/Freivalds — packet §0.3 + fold `doc/btx-matmul-v4.4-lt-c15-reduction-research-synthesis-2026-07-19.md` |
 
 > **C-15 prices shortcuts in MAC count; ASERT prices the fastest honest exact

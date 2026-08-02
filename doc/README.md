@@ -50,13 +50,13 @@ service-profile, or release-publication workflow:
 - [Mining Operator Helpers](../contrib/mining/README.md)
 - [Fast-Start Validating Node Helpers](../contrib/faststart/README.md)
 
-The MatMul v4.7 implementation in this branch is pre-activation. Operators
-must not interpret a binary containing it as an activated network change.
-Epoch A uses Profile 1 with ExactReplay authority and optional shadow proofs;
-Epoch B requires both a durable proof and ExactReplay; Epoch C makes the
-Profile 1 proof authoritative; and only Epoch D selects Profile 2 with proof
-authority. Each height requires a separate review and remains disabled in this
-documentation PR.
+The MatMul v4.7 branch activates Epoch A on mainnet: a binary built from it
+crosses the Epoch-A hard fork at block height 181'894
+(`src/kernel/chainparams.cpp`). Epoch A uses Profile 1 with ExactReplay
+authority and optional shadow proofs; Epoch B requires both a durable proof
+and ExactReplay; Epoch C makes the Profile 1 proof authoritative; and only
+Epoch D selects Profile 2 with proof authority. Epochs B–D each require a
+separate review and remain disabled, as do the testnet/signet heights.
 
 The release automation docs above now cover both the one-command local release
 cut (`scripts/release/cut_release.py`) and the self-hosted GitHub Actions

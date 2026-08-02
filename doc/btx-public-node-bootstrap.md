@@ -1,8 +1,9 @@
 # BTX Public Node Bootstrap (Archival)
 
 > **MatMul v4.7 note:** this bootstrap procedure does not opt a node into an
-> inactive consensus epoch. All transition heights remain disabled until a
-> separately reviewed activation release. Epochs A/B require Profile 1
+> consensus epoch beyond the compiled chain parameters: mainnet activates
+> Epoch A at height 181'894, and all other transition heights remain
+> disabled. Epochs A/B require Profile 1
 > ExactReplay for every claimed block, so future validating-node release notes
 > must state accelerator requirements and IBD/checkpoint assumptions. Profile 2
 > is not an Epoch-A validator requirement. See

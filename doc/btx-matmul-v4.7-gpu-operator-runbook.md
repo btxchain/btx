@@ -1,6 +1,7 @@
 # MatMul v4.7 GPU validator operator runbook
 
-Status: pre-activation; public RC activation remains disabled
+Status: mainnet RC activation is set at block height 181'894 (Epoch A);
+testnet/signet remain disabled
 
 Canonical transition and activation policy:
 [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md).

@@ -2,11 +2,12 @@ BTX version 0.33.2 is being prepared for release from:
 
   <https://github.com/btxchain/btx/releases>
 
-This release carries the disabled MatMul v4.7 Profile 1 ExactReplay
-implementation, its resource-admission and GPU-lifecycle hardening, and an
-explicit trusted-attestation topology for same-operator RPC/archive mirrors.
-It does not set a public activation height, change the currently active
-mainnet MatMul v3 rules, or represent activation approval.
+This release carries the MatMul v4.7 Profile 1 ExactReplay implementation,
+its resource-admission and GPU-lifecycle hardening, an explicit
+trusted-attestation topology for same-operator RPC/archive mirrors, and the
+Epoch-A activation: mainnet activates MatMul v4.7 Epoch A (v4 = BMX4C =
+Resident Curriculum) at block height 181'894. This is a hard fork. Nodes
+that do not upgrade before height 181'894 will reject the post-fork chain.
 
 Please report bugs using the issue tracker at GitHub:
 
@@ -23,18 +24,19 @@ cleanly, wait for it to exit, and replace its `btxd`, `btx-cli`, and related
 binaries with signed final release artifacts. Back up wallets and
 configuration before upgrading. Do not install unpublished candidate assets.
 
-Upgrading to v0.33.2 alone does not activate MatMul v4.7. All public v4,
-BMX4C, and Resident Curriculum activation heights remain disabled. A future
-activation requires a separate narrow change after the documented hardware,
-network, calibration, audit, ratification, and deployment gates close.
-See `doc/btx-matmul-v4.7-transition-roadmap.md` for the canonical activation
-contract and evidence requirements.
+Upgrading to v0.33.2 activates MatMul v4.7 Epoch A on mainnet at block
+height 181'894. The v4, BMX4C, and Resident Curriculum heights are set to
+181'894 as one atomic tuple, both ratification constants are true, and a
+one-time RC ASERT rescale of `4294967295/1` is installed
+(`src/kernel/chainparams.cpp`). Testnet and signet heights remain disabled.
+See `doc/btx-matmul-v4.7-transition-roadmap.md` for the activation contract,
+the committed closing evidence, and the gates that remain explicitly unmet.
 
 # Compatibility
 
-BTX is supported on Linux, macOS 13+, and Windows 10+. The currently active
-MatMul v3 validation behavior is unchanged by this disabled implementation
-release.
+BTX is supported on Linux, macOS 13+, and Windows 10+. Mainnet MatMul v3
+validation is unchanged below height 181'894; at and above that height the
+Epoch-A Profile 1 ExactReplay rules apply.
 
 Production Profile 1 ExactReplay is designed for a qualified accelerator.
 CPU ExactReplay remains an explicit pre-activation or diagnostic path, not an
@@ -45,16 +47,22 @@ readiness.
 
 # Notable Changes
 
-## Disabled MatMul v4.7 Profile 1 implementation
+## MatMul v4.7 Profile 1 implementation and Epoch-A activation
 
 - Epoch A uses the full deterministic Profile 1 episode as ExactReplay
   authority while retaining the fixed, digest-only block header.
-- Newly introduced public-network consensus heights remain `INT32_MAX`, the
-  ratification gates remain false, and unfinished proof machinery cannot
-  become authority through this release.
-- A future Epoch-A activation must set the v4, BMX4C, and Resident Curriculum
-  heights as one reviewed tuple and install a measured one-time ASERT
-  calibration. This release does neither.
+- Mainnet sets `nMatMulV4Height = nMatMulBMX4CHeight = nMatMulRCHeight =
+  181'894`, and `BTX_MATMUL_NO_INVERSION_GATE_RATIFIED` and
+  `BTX_MATMUL_V47_GPU_LIFECYCLE_GATE_RATIFIED` are true. Testnet and signet
+  heights remain `INT32_MAX`. Unfinished Stage-3 proof machinery still cannot
+  become authority: Epoch A is ExactReplay-only.
+- The activation installs the reviewed atomic tuple together with the one-time
+  RC ASERT rescale `4294967295/1` — the saturated uint32 ceiling of the
+  two-rig, two-vendor calibration
+  (`doc/evidence/asert-two-rig-calibration-2026-08-03`). The larger measured
+  CUDA-rig loosen is not expressible in the uint32 field, so the residual
+  error is a deliberate under-loosen (see the comment above
+  `kRCEpochAAsertRescaleNum` in `src/kernel/chainparams.cpp`).
 
 ## GPU execution and lifecycle hardening
 
@@ -90,8 +98,9 @@ readiness.
 - A fail-closed startup/epoch canary mechanism binds production eligibility to
   provider family, public device architecture class, driver/runtime ABI,
   activation height, profile, transcript, consensus MatMul dimension, and
-  episode parameters. The manifest is intentionally empty until the corrected
-  code-freeze CUDA and Metal cohort passes the hardened provenance comparator;
+  episode parameters. The committed manifest now carries the sealed CUDA and
+  Metal cohort reproduced at one code freeze
+  (`doc/evidence/multi-gpu-profile1-goldens-cuda-metal-2026-08-03-sealed`);
   any optional HIP entry remains fail-closed until it reproduces that corpus.
 - Exhaustive Stage-3 regression coverage now matches the current fail-closed
   construction: G4 remains open across the active-V8/V10-evidence domain
@@ -143,11 +152,11 @@ See `doc/btx-matmul-trusted-rpc-mirrors.md` and
 - Production runs cannot silently resolve to the serial CPU backend without an
   explicit diagnostic opt-in.
 - Repository Metal and sanitized CUDA measurements are retained as historical
-  engineering evidence. The hardened comparator now requires an exact
-  code-freeze revision, source-tree fingerprint, harness-binary identity, and
-  coherent raw provider metadata. Final CUDA+Metal artifacts must be rerun
-  before ratification; historical cross-revision equality is not activation
-  evidence.
+  engineering evidence. The hardened comparator requires an exact code-freeze
+  revision, source-tree fingerprint, harness-binary identity, and coherent raw
+  provider metadata. The final CUDA+Metal cohort passed it at one code freeze
+  (`78a88af5…`, see the committed production golden manifest); historical
+  cross-revision equality remains non-evidence.
 
 ## Cumulative wallet and notification support
 
@@ -160,14 +169,19 @@ See `doc/btx-matmul-trusted-rpc-mirrors.md` and
   and enabled. Operators should bind notification endpoints deliberately and
   protect them according to their deployment policy.
 
-# Activation Change That Remains
+# Activation State and Residual Risk
 
-This implementation branch intentionally leaves public heights at `INT32_MAX`,
-RC ASERT at neutral `1/1`, and both ratification constants false. Final
-revision-bound CUDA evidence, provider-bound calibration, and complete lifecycle
-evidence remain hardware-gated. After those pass, one reviewed activation change
-must choose the height, flip ratification, and install the calibrated finite
-atomic Epoch-A tuple.
+This release sets the mainnet public heights to 181'894, installs the RC ASERT
+rescale `4294967295/1`, populates the CUDA+Metal production golden manifest,
+and flips both ratification constants true. Gates closed by committed evidence
+(all under `doc/evidence/`): the sealed CUDA+Metal golden cohort reproduced at
+one code freeze (`multi-gpu-profile1-goldens-cuda-metal-2026-08-03-sealed`),
+the zero-fallback lifecycle/soak campaign across the RC boundary
+(`cuda-profile1-soak-2026-08-02`, 38 scenarios, zero failures), and the
+two-rig, two-vendor ASERT calibration
+(`asert-two-rig-calibration-2026-08-03`). Gates explicitly NOT met, accepted
+as residual risk in this activation: multi-day wall-clock soak, multi-peer
+public testnet topology, and upgrade behavior across released binaries.
 
 # Known Limitations
 
@@ -187,8 +201,9 @@ atomic Epoch-A tuple.
 - Trusted RPC/archive mirrors inherit the safety of their configured signer
   set. They should not be described or exposed as independent consensus
   validators.
-- Public activation remains disabled. A height must not be inferred from
-  repository measurements, wall-clock estimates, or these release notes.
+- Mainnet Epoch A activates at block height 181'894. The multi-day soak,
+  multi-peer public-testnet, and released-binary upgrade gates were not met
+  before activation and stand as accepted residual risk.
 
 # Credits
 

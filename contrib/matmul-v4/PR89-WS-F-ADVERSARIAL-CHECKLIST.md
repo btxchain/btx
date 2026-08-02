@@ -3,12 +3,15 @@
 Bundled with substantive test/gate changes on `pr89-ws-F-tests`.
 Historical PR89 checklist, retained for provenance. The MatMul v4.7 roadmap is
 `doc/btx-matmul-v4.7-transition-roadmap.md`. This is not an activation
-decision; every epoch height remains disabled and unfinished proof arbiters are
-OFF.
+decision; unfinished proof arbiters are OFF. (Since this checklist was
+written, mainnet Epoch A was activated at height 181'894; the first item
+below reflects the pre-activation state it audited.)
 
 ## Consensus safety
 
 - [ ] `nMatMulRCHeight` / `nMatMulRCCoupledHeight` still `INT32_MAX` on public params
+  (historical: mainnet `nMatMulRCHeight` is now 181'894; the coupled height
+  remains `INT32_MAX` on all public nets)
 - [ ] Epoch A selects Profile 1; complete ExactReplay is sole consensus accept
 - [ ] Epoch B–D heights remain disabled; no proof or Profile-2 authority leaks
 - [ ] Mandatory proof carriage is canonical/durable, never sidecar-only

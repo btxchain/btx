@@ -1,8 +1,8 @@
 Mining Operator Helpers
 -----------------------
 
-These helpers follow the active chain parameters; merely building the proposed
-MatMul v4.7 branch does not activate it. Epoch A will use Profile 1 with
+These helpers follow the active chain parameters. The MatMul v4.7 branch
+activates Epoch A on mainnet at block height 181'894. Epoch A uses Profile 1 with
 ExactReplay authority and optional shadow proofs. Epochs B/C introduce
 mandatory and then authoritative Profile 1 proofs, and Epoch D separately
 selects Profile 2. Do not configure Profile 2 as an interim ExactReplay

@@ -4,7 +4,7 @@ This guide primarily describes the legacy product-digest CUDA path. For
 MatMul v4.7 Epoch A, CUDA qualification additionally requires full Profile 1
 ExactReplay, strict no-fallback telemetry, a corrected 100-run loaded campaign,
 and cross-machine golden parity. A legacy digest backend appearing active is
-not sufficient, and Profile 2 is not the interim replay requirement. All
+not sufficient, and Profile 2 is not the interim replay requirement. Mainnet Epoch A now activates at height 181'894; all other
 transition heights remain disabled. See
 [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md).
 

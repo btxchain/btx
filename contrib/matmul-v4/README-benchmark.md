@@ -65,5 +65,6 @@ v4.7 Epoch-A candidate, so `bench_btx -filter=MatMul*` was actively misleading.
 They were deleted.
 
 Nothing here changes consensus or activation. Optional shadow proofs,
-sampled/Freivalds carriers, and local evidence cannot authorize blocks; every
-public epoch height remains disabled.
+sampled/Freivalds carriers, and local evidence cannot authorize blocks.
+Mainnet Epoch A activates at height 181'894; every other public epoch height
+remains disabled.

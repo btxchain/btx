@@ -4,8 +4,7 @@
 > `doc/btx-matmul-v4.7-transition-roadmap.md`: Epoch A uses Profile 1 with
 > ExactReplay authority and optional shadow proofs; Epoch B requires both a durable
 > Profile-1 proof and ExactReplay; Epoch C makes the Profile-1 proof authoritative;
-> and Epoch D separately moves to Profile 2 under proof authority. All production
-> heights remain disabled. Any older “production,” “default,” “shipping,” direct-fork,
+> and Epoch D separately moves to Profile 2 under proof authority. Mainnet Epoch A (v4 = BMX4C = RC) now activates at height 181'894; all other transition heights remain disabled. Any older “production,” “default,” “shipping,” direct-fork,
 > sampled-verifier, or coupled-profile recommendation below is historical unless the
 > canonical roadmap expressly carries it forward.
 
