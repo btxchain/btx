@@ -5,14 +5,20 @@
 > governed by
 > [`doc/btx-matmul-v4.7-transition-roadmap.md`](doc/btx-matmul-v4.7-transition-roadmap.md).
 > Profile 1 ExactReplay is the Epoch-A launch candidate. Profile 2 is reserved
-> for a later, separately activated proof-authoritative workload. All public
-> activation heights remain `INT32_MAX`; accepting or merging the
-> implementation PR does not activate any epoch.
+> for a later, separately activated proof-authoritative workload.
+>
+> **Update — Epoch A ACTIVATED:** mainnet now sets `nMatMulV4Height =
+> nMatMulBMX4CHeight = nMatMulRCHeight = 181'894` with both ratification
+> constants true and the RC ASERT rescale `4294967295/1` installed
+> (`src/kernel/chainparams.cpp`, `src/consensus/params.h`). Testnet and
+> signet heights remain `INT32_MAX`, as do Epochs B–D everywhere.
 
-This file tracks the path from the current reference implementation to a
-mainnet hard-fork activation. **Every MatMul v4.7 epoch height is
-deliberately UNSET on mainnet.** Implementation review and activation review
-are separate gates.
+This file tracks the path from the reference implementation to a mainnet
+hard-fork activation. **Mainnet Epoch A is SET at height 181'894; every
+Epoch B–D height remains unset on every network.** Implementation review and
+activation review were separate gates; the activation decision and its
+accepted residual risk are recorded at the ratification flags in
+`src/consensus/params.h`.
 
 The required order is:
 
@@ -26,12 +32,14 @@ The required order is:
 Do not collapse these epochs or infer one activation height from another.
 Epoch A is the only epoch eligible for the first activation-height PR.
 
-Merging this implementation PR activates nothing. In the merged-but-disabled
-state, `nMatMulV4Height`, `nMatMulBMX4CHeight`, and `nMatMulRCHeight` all remain
-`INT32_MAX`, and the public-network ratification constant remains false.
+HISTORY: merging the implementation PR activated nothing — through the
+implementation-only releases `nMatMulV4Height`, `nMatMulBMX4CHeight`, and
+`nMatMulRCHeight` all stayed `INT32_MAX` and the public-network ratification
+constants stayed false. The activation commit has since set the atomic tuple
+on mainnet at `H_A = 181'894` and flipped both constants true.
 
-The later Epoch-A activation PR must set one atomic tuple at a single height
-`H_A`; it is not a one-field flip:
+The Epoch-A activation set one atomic tuple at a single height `H_A`; it was
+never a one-field flip:
 
 | Parameter family | Required Epoch-A value |
 |---|---|
@@ -131,14 +139,26 @@ the complete Epoch-A height tuple disabled and ratification false.
 
 ## Gate B — Epoch-A mainnet activation
 
-### ⛳ Activation trigger (current verdict: NO-GO)
+### ⛳ Activation trigger (historical verdict: NO-GO — superseded by the shipped 181'894 activation)
 
-**Mainnet activation is not ready.** The former “CUDA + Metal PASS ⇒ GO” rule is
-superseded: backend determinism is necessary, but it does not close the
-economic, batching, verification-budget, admission-DoS, or external-review
-gates.
-All public activation heights remain `INT32_MAX`, and
-`BTX_MATMUL_NO_INVERSION_GATE_RATIFIED` remains false.
+**Historical analysis (pre-activation).** The former “CUDA + Metal PASS ⇒ GO”
+rule was superseded: backend determinism is necessary, but it does not close
+the economic, batching, verification-budget, admission-DoS, or
+external-review gates. At the time this verdict was written, all public
+activation heights were `INT32_MAX` and
+`BTX_MATMUL_NO_INVERSION_GATE_RATIFIED` was false.
+
+**What actually happened:** the operator activated Epoch A at mainnet height
+181'894 with three committed evidence artifacts recorded as the closing
+basis (the sealed one-freeze CUDA+Metal golden cohort, the zero-fallback
+lifecycle soak, and the two-rig ASERT calibration — see
+`doc/btx-matmul-v4.7-transition-roadmap.md` §4), and with multi-day
+wall-clock soak, multi-peer public testnet topology, and released-binary
+upgrade behavior explicitly accepted as residual risk. Items in the list
+below that are not covered by those artifacts (for example AMD-path
+qualification and a B200-class measurement) were likewise not met at
+activation. This section is retained as the gate analysis of record, not as
+a description of the shipped state.
 
 At minimum, a future GO requires all of the following evidence in one reviewed
 release:

@@ -2,8 +2,11 @@
 
 Date: 2026-08-02
 
-Status: project policy for the disabled Epoch-A implementation; not an
-activation approval
+Status: project policy for Epoch-A production goldens. The policy's
+requirements were satisfied by the sealed one-freeze CUDA+Metal cohort
+(`doc/evidence/multi-gpu-profile1-goldens-cuda-metal-2026-08-03-sealed`),
+which is committed as the production golden manifest for the mainnet
+height-181'894 activation.
 
 ## Decision
 
@@ -78,8 +81,12 @@ diagnostic material, but can never satisfy a production-golden gate.
 
 ## Activation boundary
 
-This policy does not close hardware campaigns by itself. Activation remains
-fail-closed until the exact final code freeze has matching CUDA and Metal
-corpora, the provider-bound ASERT and complete lifecycle campaigns are reviewed,
-and the separate activation commit installs the finite tuple and ratification
-flags. Public heights remain disabled in this implementation branch.
+This policy does not close hardware campaigns by itself. Its fail-closed
+preconditions were met for Epoch A: the exact final code freeze (`78a88af5`)
+has matching CUDA and Metal corpora, the two-rig ASERT calibration and the
+bounded lifecycle soak are committed under `doc/evidence/`, and the
+activation commit installs the finite mainnet tuple (181'894) and both
+ratification flags. The gates that were NOT met before activation (multi-day
+soak, multi-peer public testnet, released-binary upgrade behavior) are
+recorded as accepted residual risk at the flags in `src/consensus/params.h`.
+Testnet and signet heights remain disabled.

@@ -3,9 +3,9 @@
 
 This Dockerfile builds and runs a **BTX** full node from source.
 
-The image does not activate proposed MatMul v4.7 rules by itself; activation
-is determined only by reviewed network parameters, and all transition heights
-in the implementation PR remain disabled. A CPU-only container is not an
+Activation is determined only by the reviewed network parameters compiled
+into the node: mainnet activates MatMul v4.7 Epoch A at block height 181'894
+(testnet/signet heights and Epochs B–D remain disabled). A CPU-only container is not an
 Epoch-A Profile 1 ExactReplay performance qualification. Operators preparing
 accelerated validation must expose and certify the intended backend on the
 physical host. See

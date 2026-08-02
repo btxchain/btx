@@ -87,8 +87,11 @@ inline constexpr bool kRcOzakiMxfp4ProductionEligible = false;
 /** Activation readiness is intentionally not a compile-time boolean in this
  *  policy header. It is derived at runtime from the reviewed manifest and the
  *  provider/device/runtime/epoch-bound strict production canary in
- *  matmul_v4_rc_production_canary.h. The launch-candidate manifest is empty,
- *  so the derived readiness state remains fail-closed. */
+ *  matmul_v4_rc_production_canary.h. The committed manifest now carries the
+ *  sealed one-freeze CUDA+Metal Epoch-A cohort
+ *  (matmul_v4_rc_production_canary.cpp); readiness still requires the strict
+ *  runtime canary to pass on the live provider, and stays fail-closed for
+ *  any provider outside that cohort. */
 
 /** Pure, hardware-independent backend-family policy decision. NativeRequired
  *  is an explicit experiment and therefore needs only

@@ -375,7 +375,7 @@ MatMul transition claim.
 | `doc/reduce-memory.md` | General documentation; no MatMul transition claim found |
 | `doc/reduce-traffic.md` | General documentation; no MatMul transition claim found |
 | `doc/release-manifests/v0.33.0/README.md` | General documentation; no MatMul transition claim found |
-| `doc/release-notes.md` | Release-candidate note; activation-disabled implementation release |
+| `doc/release-notes.md` | Release note; Epoch-A activation release (mainnet height 181'894) |
 | `doc/release-notes/release-notes-0.10.0.md` | General documentation; no MatMul transition claim found |
 | `doc/release-notes/release-notes-0.10.1.md` | General documentation; no MatMul transition claim found |
 | `doc/release-notes/release-notes-0.10.2.md` | General documentation; no MatMul transition claim found |
@@ -450,7 +450,7 @@ MatMul transition claim.
 | `doc/release-notes/release-notes-0.32.8.md` | Reviewed immutable release record; historical behavior preserved |
 | `doc/release-notes/release-notes-0.32.9.md` | Reviewed immutable release record; historical behavior preserved |
 | `doc/release-notes/release-notes-0.33.0.md` | Reviewed immutable release record; historical behavior preserved |
-| `doc/release-notes/release-notes-0.33.2.md` | Release-candidate note; activation-disabled implementation release |
+| `doc/release-notes/release-notes-0.33.2.md` | Release note; Epoch-A activation release (mainnet height 181'894) |
 | `doc/release-notes/release-notes-0.4.0.md` | General documentation; no MatMul transition claim found |
 | `doc/release-notes/release-notes-0.4.1.md` | General documentation; no MatMul transition claim found |
 | `doc/release-notes/release-notes-0.4.2.md` | General documentation; no MatMul transition claim found |
