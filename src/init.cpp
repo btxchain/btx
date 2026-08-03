@@ -1416,8 +1416,15 @@ bool AppInitParameterInteraction(const ArgsManager& args)
         if (trusted_mirror_mode &&
             chainparams.GetChainType() == ChainType::MAIN &&
             (trusted_signers.size() < 2 || trusted_threshold < 2)) {
-            return InitError(strprintf(
-                _("A trusted MatMul mirror on mainnet requires at least 2 distinct -matmultrustedpubkey signers and -matmultrustedthreshold of at least 2 (configured: %u signer(s), threshold %d). In trusted mode the signer quorum REPLACES the Profile-1 MatMul proof-of-work check, so a single-key quorum makes that one key this node's sole proof-of-work authority and its compromise would make the node accept MatMul-invalid blocks. Configure a second independent signer, or run -matmulvalidation=consensus to validate MatMul independently."),
+            // WARN, do not refuse. An earlier revision made this a hard
+            // InitError, which broke already-deployed single-signer mainnet
+            // mirrors on upgrade. Operators running 1-of-1 today configured it
+            // against the documented behaviour, and a node that refuses to
+            // start is a worse outcome for them than one that starts and says
+            // clearly what the exposure is. The risk description below is
+            // unchanged and accurate; the decision is the operator's.
+            InitWarning(strprintf(
+                _("This node is a single-key trusted MatMul mirror on mainnet (%u signer(s), threshold %d). Above the Profile-1 activation height, trusted mode does not merely accelerate the MatMul check -- the attestation quorum REPLACES it, and the local ExactReplay is skipped. With a 1-of-1 quorum the holder of that key, or anyone who steals it, can make this node accept MatMul-invalid blocks, with no second signer to disagree. Configuring a second independent signer with -matmultrustedthreshold=2 removes that single point of failure; -matmulvalidation=consensus validates MatMul independently instead."),
                 trusted_signers.size(), trusted_threshold));
         }
         matmul::trusted::StoreConfig config;

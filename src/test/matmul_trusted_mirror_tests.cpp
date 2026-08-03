@@ -237,33 +237,35 @@ BOOST_AUTO_TEST_CASE(staged_signer_finalizes_after_ecc_and_resets_cleanly)
 // the attestation quorum is the node's only MatMul proof-of-work authority. A
 // 1-of-1 quorum therefore hands one key the power to make the node accept
 // MatMul-invalid blocks, so mainnet requires 2 distinct signers with M >= 2.
-BOOST_AUTO_TEST_CASE(mainnet_trusted_mirror_refuses_a_single_key_quorum)
+BOOST_AUTO_TEST_CASE(mainnet_trusted_mirror_allows_but_warns_on_single_key_quorum)
 {
+    // A single-key mainnet mirror is a real exposure -- above the Profile-1
+    // height the quorum REPLACES the MatMul proof-of-work check -- but it is a
+    // supported, already-deployed configuration. Refusing to start would break
+    // existing operators on upgrade, so this must WARN and continue. This case
+    // pins that it starts; the warning text is asserted by the functional test,
+    // which can read the node's actual stderr.
     RuntimeReset reset;
     BOOST_REQUIRE(Params().GetChainType() == ChainType::MAIN);
     const std::string key_a{HexPubKey(NewKey())};
     const std::string key_b{HexPubKey(NewKey())};
     std::string error;
-    std::string finalize_error;
 
-    // 1-of-1: one key is the whole proof-of-work authority.
-    BOOST_CHECK(!TrustedMirrorStartupAccepted(
-        *m_node.args, {key_a}, /*threshold=*/1, error));
-    BOOST_CHECK_MESSAGE(
-        error.find("at least 2 distinct -matmultrustedpubkey signers") !=
-            std::string::npos,
-        error);
-    BOOST_CHECK(!FinalizedTrustedMirrorInstalled(finalize_error));
-    BOOST_CHECK(!node::matmul_trusted::IsConfigured());
+    // 1-of-1 starts.
+    BOOST_CHECK_MESSAGE(TrustedMirrorStartupAccepted(
+        *m_node.args, {key_a}, /*threshold=*/1, error), error);
 
-    // 2-of-N with M == 1 is the same single-key authority: any one of the two
-    // keys alone still carries a block.
+    // 2-of-N with M == 1 is the same single-key authority, and also starts.
+    RuntimeReset reset_again;
+    BOOST_CHECK_MESSAGE(TrustedMirrorStartupAccepted(
+        *m_node.args, {key_a, key_b}, /*threshold=*/1, error), error);
+
+    // What must STILL be refused is a threshold that cannot be met, and
+    // duplicate keys inflating the signer count -- neither is a deployed
+    // configuration and both are simply invalid.
+    RuntimeReset reset_third;
     BOOST_CHECK(!TrustedMirrorStartupAccepted(
-        *m_node.args, {key_a, key_b}, /*threshold=*/1, error));
-    BOOST_CHECK_MESSAGE(
-        error.find("threshold 1") != std::string::npos, error);
-    BOOST_CHECK(!FinalizedTrustedMirrorInstalled(finalize_error));
-    BOOST_CHECK(!node::matmul_trusted::IsConfigured());
+        *m_node.args, {key_a}, /*threshold=*/2, error));
 }
 
 BOOST_AUTO_TEST_CASE(mainnet_trusted_mirror_accepts_two_of_two)
