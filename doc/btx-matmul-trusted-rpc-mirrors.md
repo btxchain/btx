@@ -68,8 +68,9 @@ Trusted mode is accepted on mainnet only with a valid signer set and threshold,
 and only for RC Profile 1. Profile 2 statements cannot be produced or consumed
 by this protocol. `economic` and `spv` remain prohibited on mainnet.
 
-**Mainnet requires at least 2 distinct `-matmultrustedpubkey` signers and
-`-matmultrustedthreshold=2` or higher.** Above the Profile-1 activation height
+**A single-key (1-of-1) mainnet mirror is supported and starts, but the node
+warns loudly at startup. Two or more distinct signers with
+`-matmultrustedthreshold=2` is strongly recommended.** Above the Profile-1 activation height
 the quorum does not accelerate the MatMul proof-of-work check, it replaces it,
 so a 1-of-1 mirror would make one key that node's sole proof-of-work authority:
 whoever holds or steals it could make the node accept MatMul-invalid blocks,
@@ -81,7 +82,11 @@ independent authority. Test networks (testnet/signet/regtest) still permit
 ## Example: two GPU archives and three HA RPC mirrors
 
 Two independent archives is the smallest topology mainnet accepts, because a
-single-key quorum would be a single point of proof-of-work authority.
+single-key quorum is a single point of proof-of-work authority: whoever holds
+that key, or steals it, can make the node accept MatMul-invalid blocks with no
+second signer to disagree. That is the operator's risk to take knowingly, which
+is why the node warns rather than refusing to start -- refusing would break
+already-deployed single-signer mirrors on upgrade.
 
 Generate a dedicated online attestation key per archive. Put each WIF on its
 own GPU archive in a permission-restricted file. Distribute only the compressed
@@ -107,7 +112,8 @@ Each VPS RPC mirror:
 matmulvalidation=trusted
 matmultrustedpubkey=02...archive-a-public-key
 matmultrustedpubkey=02...archive-b-public-key
-# Mainnet minimum. Both keys must be distinct; a repeated key is refused.
+# Recommended, not required. Both keys must be distinct; a repeated key IS
+# refused, because a duplicate silently inflates the signer count.
 matmultrustedthreshold=2
 matmultrustedwaitms=30000
 connect=<gpu-archive-a-address>
@@ -217,7 +223,7 @@ without treating the referenced block as invalid.
   MatMul validator.
 - Back up the archive's blocks/index and protect the online signing key.
 - Use M-of-N independent keys for a production fleet. Mainnet enforces a floor
-  of 2 distinct signers with M >= 2; prefer 2-of-3 so one offline provider does
+  of 2 distinct signers with M >= 2 (recommended, not enforced); prefer 2-of-3 so one offline provider does
   not stall the mirrors.
 - If a GPU/provider is unhealthy, stop archive attestation service until the
   validator again completes authoritative ExactReplay. Never sign from a
