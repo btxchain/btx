@@ -791,6 +791,48 @@ BOOST_AUTO_TEST_CASE(submitheader_rejects_matmul_header_only_work)
         });
 }
 
+BOOST_AUTO_TEST_CASE(difficulty_health_reports_nonzero_best_header_lag)
+{
+    SetMiningChainGuard(false);
+    const auto generated =
+        CallRPC("generateblock", GenerateBlockParams(/*submit=*/true)).get_obj();
+    BOOST_REQUIRE(!generated.find_value("hash").get_str().empty());
+
+    UniValue health;
+    {
+        LOCK(cs_main);
+        CBlockIndex* const original_best_header{
+            m_node.chainman->m_best_header};
+        BOOST_REQUIRE(original_best_header != nullptr);
+        CBlockIndex synthetic_best_header;
+        synthetic_best_header.nHeight =
+            m_node.chainman->ActiveHeight() + 4;
+        synthetic_best_header.pprev = original_best_header;
+        m_node.chainman->m_best_header = &synthetic_best_header;
+        struct BestHeaderRestore {
+            ChainstateManager& chainman;
+            CBlockIndex* original;
+            ~BestHeaderRestore() { chainman.m_best_header = original; }
+        } restore{*m_node.chainman, original_best_header};
+
+        // Keep cs_main held until the RPC has consumed the synthetic height.
+        // Its recursive acquisition is on this thread, while every background
+        // reader remains excluded from the stack-backed test index.
+        health = CallRPC("getdifficultyhealth").get_obj();
+        // Regtest's configured maximum is zero. A hard header-lag gate would
+        // reject this request; the current policy must remain diagnostic-only.
+        BOOST_CHECK_NO_THROW(CallRPC("getblocktemplate", GBTParams()));
+    }
+    const auto network = health.find_value("network").get_obj();
+    BOOST_CHECK_EQUAL(
+        network.find_value("validated_tip_height").getInt<int>(),
+        ActiveHeight());
+    BOOST_CHECK_EQUAL(
+        network.find_value("best_header_height").getInt<int>(),
+        ActiveHeight() + 4);
+    BOOST_CHECK_EQUAL(network.find_value("header_lag").getInt<int>(), 4);
+}
+
 // TEST: rpc_matmul_service_profile_runtime_observability
 BOOST_AUTO_TEST_CASE(matmul_service_profile_reports_measured_runtime_and_network_proxy)
 {

@@ -2070,6 +2070,32 @@ class msg_mmsketch:
         return "msg_mmsketch(block_hash=%064x, sketch_len=%d)" % (self.block_hash, len(self.sketch))
 
 
+class msg_rcadmit:
+    """Carry the P2P-only admission ticket for an imminent RC block.
+
+    The sidecar is policy, not consensus: a 32-byte block hash followed by a
+    little-endian uint64 nonce. Generic test peers still need to decode it so a
+    valid sidecar sent before an automatically requested block does not tear
+    down the connection.
+    """
+    __slots__ = ("block_hash", "nonce")
+    msgtype = b"rcadmit"
+
+    def __init__(self, block_hash=0, nonce=0):
+        self.block_hash = block_hash
+        self.nonce = nonce
+
+    def deserialize(self, f):
+        self.block_hash = deser_uint256(f)
+        self.nonce = int.from_bytes(f.read(8), "little")
+
+    def serialize(self):
+        return ser_uint256(self.block_hash) + self.nonce.to_bytes(8, "little")
+
+    def __repr__(self):
+        return "msg_rcadmit(block_hash=%064x nonce=%d)" % (self.block_hash, self.nonce)
+
+
 class msg_getcfilters:
     __slots__ = ("filter_type", "start_height", "stop_hash")
     msgtype =  b"getcfilters"
@@ -2243,6 +2269,18 @@ class msg_sendtxrcncl:
             (self.version, self.salt)
 
 class TestFrameworkScript(unittest.TestCase):
+    def test_rcadmit_encode_decode(self):
+        expected = msg_rcadmit(
+            block_hash=int("0123456789abcdef" * 4, 16),
+            nonce=0xFEDCBA9876543210,
+        )
+        encoded = expected.serialize()
+        self.assertEqual(len(encoded), 40)
+        actual = msg_rcadmit()
+        actual.deserialize(BytesIO(encoded))
+        self.assertEqual(actual.block_hash, expected.block_hash)
+        self.assertEqual(actual.nonce, expected.nonce)
+
     def test_addrv2_encode_decode(self):
         def check_addrv2(ip, net):
             addr = CAddress()

@@ -80,7 +80,8 @@ inline constexpr const char* kRCGkrRealityGuardrail =
     "verify + formal <=2^{-64}-after-grinding bound (see soundness note). "
     "Soft over_budget → VerifyBoundedExactReplay is shrink-to-replayable for "
     "shipping (M4), not shrink-to-toy arithmetization. "
-    "NOT production-complete. nMatMulRCHeight=INT32_MAX.";
+    "NOT production-complete and never Epoch-A authority; ExactReplay remains "
+    "the sole Profile-1 consensus verdict.";
 
 inline constexpr const char* kRCGkrSoundnessBoundStatement =
     "Winner-only GKR/sumcheck+FRI SCAFFOLD (COMPUTATIONAL aspirational target): "
@@ -105,7 +106,7 @@ inline constexpr const char* kRCGkrSoundnessBoundStatement =
     "bindings incomplete. External crypto audit MANDATORY before arbiter. "
     "Merkle q=8 is DoS PREFILTER ONLY. ExactReplay remains consensus arbiter "
     "(kRCGkrFormalSoundnessReady=false ⇒ EnvRCGkrArbiterEnabled ignores "
-    "BTX_RC_GKR_ARBITER). nMatMulRCHeight=INT32_MAX.";
+    "BTX_RC_GKR_ARBITER), including after the Profile-1 activation height.";
 
 inline constexpr const char* kRCGkrSoundnessStatement = kRCGkrSoundnessBoundStatement;
 inline constexpr const char* kRCGkrSoundnessNote = kRCGkrSoundnessBoundStatement;
@@ -518,8 +519,8 @@ struct RCGkrProveResult {
 // witness columns are materialized (carried + FRI-bound); the residual toward
 // verifier-sublinearity is the DEEP/quotient opening of the AIR constraint
 // polynomial (open at Q points instead of every row) — at consensus dims the
-// LogUp is ≈2^43 rows and stays PARKED (§11). Arbiter stays OFF,
-// nMatMulRCHeight=INT32_MAX, ExactReplay remains sole authority.
+// LogUp is ≈2^43 rows and stays PARKED (§11). Arbiter stays OFF and
+// ExactReplay remains sole authority before and after Profile-1 activation.
 // ============================================================================
 
 /** One layer's v7 sumcheck block. NO (kind,round,dims) — those are Λ outputs.
@@ -639,7 +640,7 @@ struct RCGkrProveResultV7 {
 //     FRI, per-layer sumcheck, eval argument, FS bindings.
 // ADDITIVE: GroundEpisodeInCircuit and VerifyWinnerProofV7 are unchanged;
 // both paths must agree on accept/reject (asserted by the red-team tests).
-// Arbiter stays OFF; nMatMulRCHeight = INT32_MAX; never consensus.
+// Arbiter stays OFF; this proof scaffold is never Epoch-A consensus authority.
 // ============================================================================
 
 /** Wall-clock decomposition of the compact verify (shadow measurement). */
@@ -1043,6 +1044,8 @@ struct ExactReplayVerifyResult {
  * retryable block-scoped ambiguity and cannot let a peer disable validation. */
 struct RCExactReplayProviderHealth {
     bool quarantined{false};
+    /** True only when adjudication exhausted every eligible provider. */
+    bool validator_readiness_lost{false};
     uint64_t quarantine_events{0};
     std::string provider;
     std::string reason;
@@ -1081,22 +1084,32 @@ void ResetLastExactReplayVerifyResultForTest();
 GetRCExactReplayProviderHealth();
 void ResetRCExactReplayProviderHealthForTest();
 
-/** Observer invoked when a production provider is quarantined.
+/** Observer invoked when strict validation exhausts all eligible providers.
  *
- * Quarantine is terminal for the life of the process -- the recovery action is
- * to repair the accelerator and restart -- so this fires at most once per
- * provider and never reverses. The node layer uses it to withdraw the
- * validation-tier service bits it published at startup on the strength of that
- * provider: a node that can no longer run strict-device ExactReplay must stop
- * telling the network it validates MatMul consensus, rather than keeping a bit
- * that was true only at init time.
+ * Individual provider quarantine is terminal for the life of the process, but
+ * a healthy independent provider may preserve validator readiness. Concurrent
+ * detection and late-registration reconciliation can deliver a terminal
+ * readiness-loss state more than once, so observers must be idempotent. The
+ * node layer uses it to withdraw the validation-tier service bits it published
+ * at startup on the strength of that provider: a node that can no longer run
+ * strict-device ExactReplay must stop telling the network it validates MatMul
+ * consensus, rather than keeping a bit that was true only at init time.
  *
- * Called with no internal lock held. Must not re-enter this module. */
-using RCProviderQuarantineNotifier =
+ * Called with the notifier lifetime lock held, but with no provider-health
+ * lock held. Must not re-enter this module. Clear waits for any active callback
+ * to finish, so observers may safely capture node-layer state until Clear
+ * returns during shutdown. */
+using RCValidatorReadinessLossNotifier =
     std::function<void(const std::string& provider,
                        const std::string& reason)>;
-void SetRCProviderQuarantineNotifier(RCProviderQuarantineNotifier notifier);
-void ClearRCProviderQuarantineNotifier();
+void SetRCValidatorReadinessLossNotifier(
+    RCValidatorReadinessLossNotifier notifier);
+void ClearRCValidatorReadinessLossNotifier();
+
+/** Toy regtest episodes exercise strict device execution without authorizing a
+ * public production provider. Every non-toy shape remains golden-gated. */
+[[nodiscard]] bool RCExactReplayRequiresProductionEligibility(
+    const RCEpisodeParams& params);
 
 /** Register one bounded canary-authorized provider. Registration revalidates
  * provider/runtime/backend identity immediately; each replay revalidates its
@@ -1215,6 +1228,16 @@ VerifyBoundedExactReplayWithAccelerationForTest(
     const RCEpisodeParams& params,
     int32_t height,
     const RCExactReplayAcceleration& acceleration,
+    const arith_uint256* target = nullptr);
+
+/** Test-only seam for the strict resolver's production-eligibility gate. */
+[[nodiscard]] ExactReplayVerifyResult
+VerifyBoundedExactReplayWithProductionEligibilityForTest(
+    const CBlockHeader& header,
+    const RCEpisodeParams& params,
+    int32_t height,
+    RCExactReplayAcceleration acceleration,
+    bool production_eligible,
     const arith_uint256* target = nullptr);
 
 /**

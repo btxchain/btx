@@ -49,8 +49,8 @@ std::map<std::string, RCExactReplayProviderHealth>
 std::mutex g_exact_replay_alternate_providers_mutex;
 std::vector<RCExactReplayAlternateProvider>
     g_exact_replay_alternate_providers;
-std::mutex g_provider_quarantine_notifier_mutex;
-RCProviderQuarantineNotifier g_provider_quarantine_notifier;
+std::mutex g_validator_readiness_notifier_mutex;
+RCValidatorReadinessLossNotifier g_validator_readiness_notifier;
 
 constexpr const char* PROVIDER_RECOVERY_ACTION{
     "repair/reset the accelerator and restart btxd, or restart with a different qualified provider; never invalidate or punish the announcing peer"};
@@ -75,6 +75,8 @@ void QuarantineProvider(const std::string& provider,
     {
         std::lock_guard<std::mutex> lock{
             g_exact_replay_provider_health_mutex};
+        const bool validator_readiness_lost{
+            g_exact_replay_provider_health.validator_readiness_lost};
         auto& provider_health{
             g_exact_replay_provider_quarantines[provider]};
         ++provider_health.quarantine_events;
@@ -84,37 +86,97 @@ void QuarantineProvider(const std::string& provider,
         provider_health.operator_recovery =
             PROVIDER_RECOVERY_ACTION;
         g_exact_replay_provider_health = provider_health;
+        // Provider quarantine and aggregate validator readiness are separate:
+        // a healthy independent provider may preserve readiness, while a
+        // terminal exhaustion already reported by an earlier attempt must
+        // never be cleared by recording another per-provider quarantine.
+        g_exact_replay_provider_health.validator_readiness_lost =
+            validator_readiness_lost;
     }
     LogWarning(
         "MatMul Profile-1 provider quarantined: provider=%s "
         "reason=%s; recovery=%s\n",
         provider, reason, PROVIDER_RECOVERY_ACTION);
-    // Copy under the notifier lock and invoke outside every lock this module
-    // holds: the observer reaches into the net layer, which must never be
-    // called with a matmul health lock held.
-    RCProviderQuarantineNotifier notifier;
+}
+
+void NotifyValidatorReadinessLost(const std::string& provider,
+                                  const std::string& reason)
+{
     {
         std::lock_guard<std::mutex> lock{
-            g_provider_quarantine_notifier_mutex};
-        notifier = g_provider_quarantine_notifier;
+            g_exact_replay_provider_health_mutex};
+        g_exact_replay_provider_health.validator_readiness_lost = true;
+        // The aggregate record describes the event that actually exhausted
+        // validator readiness. Per-provider quarantine details remain in the
+        // provider map and must not mask this terminal reason in RPC/logs or a
+        // late notifier-registration reconciliation.
+        g_exact_replay_provider_health.provider = provider;
+        g_exact_replay_provider_health.reason = reason;
+        g_exact_replay_provider_health.operator_recovery =
+            PROVIDER_RECOVERY_ACTION;
     }
-    if (notifier) notifier(provider, reason);
+    // Invoke while holding the notifier lifetime lock. Clear() is the shutdown
+    // barrier for an observer that captures NodeContext: after it returns no
+    // callback can still be running against objects being torn down.
+    std::lock_guard<std::mutex> lock{
+        g_validator_readiness_notifier_mutex};
+    if (g_validator_readiness_notifier) {
+        g_validator_readiness_notifier(provider, reason);
+    }
 }
+void EnforceStrictProductionEligibility(
+    RCExactReplayAcceleration& acceleration,
+    const bool production_eligible,
+    const bool production_gate_required)
+{
+    if (!acceleration.require_device || production_eligible ||
+        !production_gate_required) {
+        return;
+    }
+    acceleration.gemm = {};
+}
+
 } // namespace
 
-void SetRCProviderQuarantineNotifier(
-    RCProviderQuarantineNotifier notifier)
+bool RCExactReplayRequiresProductionEligibility(
+    const RCEpisodeParams& params)
 {
-    std::lock_guard<std::mutex> lock{
-        g_provider_quarantine_notifier_mutex};
-    g_provider_quarantine_notifier = std::move(notifier);
+    const auto toy{MakeToyRCEpisodeParams()};
+    return params.rounds != toy.rounds ||
+           params.d_head != toy.d_head ||
+           params.n_q != toy.n_q ||
+           params.n_ctx != toy.n_ctx ||
+           params.L_lyr != toy.L_lyr ||
+           params.d_model != toy.d_model ||
+           params.d_ff != toy.d_ff ||
+           params.b_seq != toy.b_seq ||
+           params.T_leaf != toy.T_leaf;
 }
 
-void ClearRCProviderQuarantineNotifier()
+void SetRCValidatorReadinessLossNotifier(
+    RCValidatorReadinessLossNotifier notifier)
 {
     std::lock_guard<std::mutex> lock{
-        g_provider_quarantine_notifier_mutex};
-    g_provider_quarantine_notifier = nullptr;
+        g_validator_readiness_notifier_mutex};
+    g_validator_readiness_notifier = std::move(notifier);
+
+    // Import/ActivateBestChain can exhaust provider readiness before networking
+    // installs its readiness observer. Reconcile while holding the same
+    // lifetime lock used by the notifier and Clear. A concurrent readiness
+    // loss may produce an idempotent second withdrawal, but the state
+    // transition cannot be missed and the callback cannot outlive Clear().
+    const auto health{GetRCExactReplayProviderHealth()};
+    if (g_validator_readiness_notifier &&
+        health.validator_readiness_lost) {
+        g_validator_readiness_notifier(health.provider, health.reason);
+    }
+}
+
+void ClearRCValidatorReadinessLossNotifier()
+{
+    std::lock_guard<std::mutex> lock{
+        g_validator_readiness_notifier_mutex};
+    g_validator_readiness_notifier = nullptr;
 }
 
 void SetRCExactReplayExecutionPolicy(RCExactReplayExecutionPolicy policy)
@@ -1690,7 +1752,7 @@ size_t RCGkrExpectedCoupledLayerCount(const RCCoupParams& p, bool full_bank_sche
 // §6.3 tile-tree round-root binding. SOUND but not succinct (grounding is
 // native re-derivation against the immutable int64 reference; the in-circuit
 // ChaCha/SHA/tile-tree AIRs of §5.7/§6.2/§6.3 are the parked succinctness gap).
-// Arbiter OFF; nMatMulRCHeight=INT32_MAX; ExactReplay remains sole authority.
+// Arbiter OFF; ExactReplay remains sole authority at an active Profile-1 epoch.
 // ============================================================================
 namespace {
 
@@ -5004,11 +5066,13 @@ bool IsUnconfirmedMismatch(const ExactReplayVerifyResult& result)
         result.cpu_gemm_fallbacks == 0;
 }
 
-bool IsQuarantinableExecutionFailure(const ExactReplayVerifyResult& result)
+bool IsQuarantinableExecutionFailure(
+    const ExactReplayVerifyResult& result,
+    const bool declared_device_backend)
 {
     return result.outcome == ExactReplayVerifyOutcome::LocalAcceleratorFailure &&
         result.failure_kind == RCExactReplayFailureKind::ExecutionFailure &&
-        result.device_gemm_calls != 0;
+        declared_device_backend;
 }
 
 /** Run one preferred provider plus at most two explicitly registered
@@ -5074,6 +5138,7 @@ ExactReplayVerifyResult VerifyStrictWithAlternates(
     uint32_t provider_attempts{0};
     uint32_t alternate_attempts{0};
     uint32_t independent_attempts{0};
+    std::vector<std::string> attempted_provider_ids;
     bool primary_was_unavailable{false};
     double aggregate_verify_s{0.0};
     size_t aggregate_rss_kib{0};
@@ -5134,6 +5199,7 @@ ExactReplayVerifyResult VerifyStrictWithAlternates(
             continue;
         }
 
+        attempted_provider_ids.push_back(candidate.provider);
         ++provider_attempts;
         if (candidate.alternate) ++alternate_attempts;
         if (!mismatches.empty() &&
@@ -5156,6 +5222,16 @@ ExactReplayVerifyResult VerifyStrictWithAlternates(
         result.acceleration_resolution_reason = resolution_reason;
 
         if (result.outcome == ExactReplayVerifyOutcome::Cancelled) {
+            apply_aggregate(result);
+            return result;
+        }
+
+        // A null commitment and other definitive consensus failures do not
+        // implicate a healthy provider. In particular, an attacker must not
+        // be able to exhaust the candidate loop and withdraw validator service
+        // merely by sending a header whose committed digest is null.
+        if (result.outcome == ExactReplayVerifyOutcome::InvalidConsensus &&
+            result.digest != header.matmul_digest) {
             apply_aggregate(result);
             return result;
         }
@@ -5223,7 +5299,9 @@ ExactReplayVerifyResult VerifyStrictWithAlternates(
             continue;
         }
 
-        if (IsQuarantinableExecutionFailure(result)) {
+        if (IsQuarantinableExecutionFailure(
+                result,
+                candidate.acceleration.gemm.gemm_s8s8 != nullptr)) {
             const std::string reason{
                 result.acceleration_failure.empty()
                     ? "strict_device_inflight_failure"
@@ -5263,14 +5341,45 @@ ExactReplayVerifyResult VerifyStrictWithAlternates(
         result.provider_attempts = provider_attempts;
         result.independent_provider_attempts = independent_attempts;
         result.primary_provider = primary_provider;
-        result.adjudication = RCExactReplayAdjudication::ProvidersUnavailable;
         apply_aggregate(result);
+        const bool unattempted_provider_remains{std::any_of(
+            candidates.begin(), candidates.end(),
+            [&](const StrictReplayCandidate& candidate) {
+                return candidate.acceleration.gemm.gemm_s8s8 != nullptr &&
+                    std::find(attempted_provider_ids.begin(),
+                              attempted_provider_ids.end(),
+                              candidate.provider) ==
+                        attempted_provider_ids.end() &&
+                    !IsProviderQuarantined(candidate.provider);
+            })};
+        if (unattempted_provider_remains) {
+            // The per-block adjudication cap is a DoS bound, not proof that
+            // aggregate validator readiness is gone. Quarantined providers are
+            // skipped on the next attempt, allowing another registered provider
+            // to take service without an unbounded replay fan-out here.
+            result.adjudication = RCExactReplayAdjudication::NotRequired;
+            result.note +=
+                "; bounded provider-attempt limit reached; another qualified provider remains retryable";
+            return result;
+        }
+        result.adjudication = RCExactReplayAdjudication::ProvidersUnavailable;
+        const std::string exhausted_provider{
+            result.acceleration_backend.empty()
+                ? result.primary_provider
+                : result.acceleration_backend};
+        NotifyValidatorReadinessLost(
+            exhausted_provider,
+            result.acceleration_failure.empty()
+                ? "strict_device_providers_unavailable"
+                : result.acceleration_failure);
         return result;
     }
 
     ExactReplayVerifyResult result;
     SetProviderUnavailableResult(result, primary_provider,
                                  "strict_device_no_eligible_provider");
+    NotifyValidatorReadinessLost(
+        primary_provider, "strict_device_no_eligible_provider");
     return result;
 }
 
@@ -5345,35 +5454,34 @@ ExactReplayVerifyResult VerifyBoundedExactReplay(
     }
     acceleration.require_device =
         policy == RCExactReplayExecutionPolicy::StrictDevice;
-    if (acceleration.require_device &&
-        !resolved.production_eligible) {
-        // Advertising, startup canary, and winner-authority capability remain
-        // fail-closed until a reviewed production golden exists. Clearing the
-        // self-qualified ExactGemm backend here, however, made every strict
-        // AcceptBlock/tip-validation path return LocalAcceleratorFailure even
-        // after a successful device reseal — which blocks two-node lifecycle
-        // measurement on an otherwise healthy CUDA host. Keep the backend for
-        // self-qualified providers so hardware campaigns can measure relay and
-        // tip-validation; refuse only when no self-qualified device backend is
-        // available.
-        if (!resolved.self_qualified ||
-            resolved.backend.gemm_s8s8 == nullptr) {
-            acceleration.gemm = {};
-            acceleration.backend = resolved.provider +
-                "_not_production_eligible";
-        }
+    std::string resolution_reason{resolved.reason};
+    const bool production_gate_required{
+        RCExactReplayRequiresProductionEligibility(params)};
+    if (acceleration.require_device && !resolved.production_eligible &&
+        production_gate_required) {
+        // Strict consensus acceptance is the enforcement boundary, not merely
+        // a service-advertisement hint. A self-qualified device that did not
+        // match the committed production golden/startup canary must therefore
+        // remain retryable and must not authenticate chainwork. Hardware and
+        // relay campaigns use the explicit pre-activation AutoFallback mode or
+        // the injected test/harness entry point; they cannot weaken mainnet's
+        // strict path.
+        EnforceStrictProductionEligibility(
+            acceleration, resolved.production_eligible,
+            production_gate_required);
+        resolution_reason += ":not_production_eligible";
     }
     acceleration.output_row_tile = 256;
     auto result = policy == RCExactReplayExecutionPolicy::StrictDevice
         ? VerifyStrictWithAlternates(
               header, params, height, target, std::move(acceleration),
-              resolved.reason)
+              resolution_reason)
         : VerifyBoundedExactReplayImpl(
               header, params, height, target, std::move(acceleration));
     result.execution_policy = policy;
     result.require_device =
         policy == RCExactReplayExecutionPolicy::StrictDevice;
-    result.acceleration_resolution_reason = resolved.reason;
+    result.acceleration_resolution_reason = resolution_reason;
     {
         std::lock_guard<std::mutex> lock{
             g_last_exact_replay_mutex};
@@ -5396,6 +5504,25 @@ ExactReplayVerifyResult VerifyBoundedExactReplayWithAccelerationForTest(
     }
     return VerifyBoundedExactReplayImpl(
         header, params, height, target, acceleration);
+}
+
+ExactReplayVerifyResult
+VerifyBoundedExactReplayWithProductionEligibilityForTest(
+    const CBlockHeader& header,
+    const RCEpisodeParams& params,
+    int32_t height,
+    RCExactReplayAcceleration acceleration,
+    bool production_eligible,
+    const arith_uint256* target)
+{
+    EnforceStrictProductionEligibility(
+        acceleration, production_eligible,
+        /*production_gate_required=*/true);
+    return VerifyStrictWithAlternates(
+        header, params, height, target, std::move(acceleration),
+        production_eligible
+            ? "test_resolved_backend"
+            : "test_resolved_backend:not_production_eligible");
 }
 
 RCProdVerifyResult VerifyRCWinnerOrExactReplay(const CBlockHeader& header,

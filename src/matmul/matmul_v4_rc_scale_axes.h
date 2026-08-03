@@ -34,9 +34,9 @@ namespace matmul::v4::rc {
  * Growth-table ratios remain PROVISIONAL (F2) until multi-vendor silicon
  * freezes them. F6: chainwork brake OMITTED.
  *
- * Master enable ON: epoch-0 dials are the live configured defaults. Public
- * nets still inert while nMatMulRCHeight=INT32_MAX. Independent of
- * kRCGrowthScheduleEnabled (§R.7 two-dial).
+ * Master enable ON: epoch-0 dials are the live configured defaults. Scheduled
+ * growth remains inert while kRCGrowthScheduleEnabled is false, independently
+ * of the §R.7 two-dial plumbing.
  */
 
 /** Master enable for the three-axis schedule (epoch-0 live; growth height-gated). */

@@ -3091,8 +3091,8 @@ BOOST_AUTO_TEST_CASE(matmul_share_target_override_relaxes_only_digest_exit)
     consensus.nMatMulNoiseRank = 4;
     consensus.nMatMulPreHashEpsilonBits = 0;
     consensus.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
-    // Cover the legacy pre-activation and V2 nonce-seeded solver paths (both still
-    // live on mainnet, where v4 is not activated). Pin a concrete nonce-seed height
+    // Cover the historical legacy and V2 nonce-seeded solver paths below the
+    // release-selected v4 boundary. Pin a concrete nonce-seed height
     // and neutralize the regtest v4/BMX4C activation (heights 100/150) so the test
     // heights below stay on the legacy/V2 paths instead of landing in v4/BMX4C
     // territory (regtest leaves nMatMulNonceSeedHeight == INT32_MAX by default).
@@ -4283,9 +4283,9 @@ BOOST_AUTO_TEST_CASE(matmul_solve_crosses_60999_to_61000_with_product_digest_con
     consensus.nMatMulPreHashEpsilonBitsUpgradeHeight = std::numeric_limits<int32_t>::max();
     consensus.nMatMulPreHashEpsilonBitsUpgrade = 0;
     consensus.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
-    // This exercises the v3 transcript->product-committed digest fork at 61'000,
-    // which is the live mechanic on mainnet (v4 is not activated there — see the
-    // sibling live_mainnet_61000 test, which uses MAIN consensus). Neutralize the
+    // This exercises the historical v3 transcript->product-committed digest fork
+    // at 61'000. The sibling live_mainnet_61000 test uses MAIN consensus for that
+    // historical boundary. Neutralize the
     // regtest v4/BMX4C activation (heights 100/150) so heights 60'999/61'000 keep
     // the v3 digest scheme instead of routing through the v4/BMX4C solver.
     consensus.nMatMulV4Height = std::numeric_limits<int32_t>::max();
@@ -5253,11 +5253,18 @@ BOOST_AUTO_TEST_CASE(MatMulHeaderPoW_grind_helper_and_public_nets_disabled)
         BOOST_CHECK_EQUAL(params->GetConsensus().nMatMulHeaderPoWDiscountBits,
                           std::numeric_limits<uint32_t>::max());
         BOOST_CHECK(!params->GetConsensus().IsMatMulHeaderPoWEnabled());
-        // Epoch A is live on MAINNET at 182'600; TESTNET has no activation
-        // height yet. The subject of this case is that header-PoW stays
-        // disabled either way -- an activation height must not switch it on.
+        // The mainnet release candidate carries a finite atomic Epoch-A tuple;
+        // TESTNET has no activation height. The subject of this case is that
+        // header-PoW stays disabled either way -- an activation height must not
+        // switch it on.
         if (chain == ChainType::MAIN) {
-            BOOST_CHECK_EQUAL(params->GetConsensus().nMatMulV4Height, 182'600);
+            const auto& consensus{params->GetConsensus()};
+            BOOST_CHECK(consensus.nMatMulV4Height !=
+                        std::numeric_limits<int32_t>::max());
+            BOOST_CHECK_EQUAL(consensus.nMatMulV4Height,
+                              consensus.nMatMulBMX4CHeight);
+            BOOST_CHECK_EQUAL(consensus.nMatMulV4Height,
+                              consensus.nMatMulRCHeight);
         } else if (chain != ChainType::REGTEST) {
             BOOST_CHECK_EQUAL(params->GetConsensus().nMatMulV4Height,
                               std::numeric_limits<int32_t>::max());

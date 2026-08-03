@@ -1775,8 +1775,8 @@ RCEpisodeParams MakeMediumRCEpisodeParams()
 
 RCEpisodeParams MakeProductionRCEpisodeParams()
 {
-    // PROVISIONAL frozen episode = epoch-0 consensus shape (DefaultConsensus…).
-    // Freezing ≠ activation; nMatMulRCHeight remains INT32_MAX.
+    // Frozen Epoch-A episode = Profile-1 consensus shape (DefaultConsensus…).
+    // The shape is independent of any network's activation height.
     return DefaultConsensusRCEpisodeParams();
 }
 

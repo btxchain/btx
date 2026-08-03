@@ -32,6 +32,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
@@ -40,6 +41,7 @@
 #include <limits>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #if defined(__unix__) || defined(__APPLE__)
@@ -179,6 +181,30 @@ bool DecliningGemmS8S8(const std::vector<int8_t>& /*L*/, const std::vector<int8_
 {
     out.clear();
     return false;
+}
+
+bool DecliningGemmS8S8B(const std::vector<int8_t>& L,
+                        const std::vector<int8_t>& R,
+                        uint32_t rows, uint32_t inner, uint32_t cols,
+                        std::vector<int32_t>& out)
+{
+    return DecliningGemmS8S8(L, R, rows, inner, cols, out);
+}
+
+bool DecliningGemmS8S8C(const std::vector<int8_t>& L,
+                        const std::vector<int8_t>& R,
+                        uint32_t rows, uint32_t inner, uint32_t cols,
+                        std::vector<int32_t>& out)
+{
+    return DecliningGemmS8S8(L, R, rows, inner, cols, out);
+}
+
+bool DecliningGemmS8S8D(const std::vector<int8_t>& L,
+                        const std::vector<int8_t>& R,
+                        uint32_t rows, uint32_t inner, uint32_t cols,
+                        std::vector<int32_t>& out)
+{
+    return DecliningGemmS8S8(L, R, rows, inner, cols, out);
 }
 
 struct ProofWitnessCapture final : rc::RCEpisodeProofWitnessSink {
@@ -1050,6 +1076,91 @@ BOOST_AUTO_TEST_CASE(rc_exact_replay_cancellation_is_not_consensus_invalid)
     BOOST_CHECK_EQUAL(result.note, "ExactReplay: cancelled");
 }
 
+BOOST_AUTO_TEST_CASE(rc_strict_resolver_rejects_self_qualified_nonproduction_backend)
+{
+    rc::ClearRCExactReplayAlternateProviders();
+    rc::ResetRCExactReplayProviderHealthForTest();
+    CBlockHeader header{MakeRCHeader(0x50524f4447415445)};
+    header.matmul_dim = 64;
+    const auto params{rc::MakeToyRCEpisodeParams()};
+    BOOST_CHECK(!rc::RCExactReplayRequiresProductionEligibility(params));
+    BOOST_CHECK(rc::RCExactReplayRequiresProductionEligibility(
+        rc::MakeProductionRCEpisodeParams()));
+    header.matmul_digest =
+        rc::RecomputeResidentCurriculumReference(
+            header, params, /*height=*/0);
+
+    lt::ExactGemmBackend exact_backend;
+    exact_backend.gemm_s8s8 = &OracleGemmS8S8;
+    const rc::RCExactReplayAcceleration acceleration{
+        .gemm = exact_backend,
+        .backend = "test:self-qualified",
+        .require_device = true,
+        .output_row_tile = 16,
+    };
+
+    const auto rejected{
+        rc::VerifyBoundedExactReplayWithProductionEligibilityForTest(
+            header, params, /*height=*/0, acceleration,
+            /*production_eligible=*/false)};
+    BOOST_CHECK(!rejected.ok);
+    BOOST_CHECK(
+        rejected.outcome ==
+        rc::ExactReplayVerifyOutcome::LocalAcceleratorFailure);
+    BOOST_CHECK_EQUAL(rejected.device_gemm_calls, 0U);
+    BOOST_CHECK_EQUAL(rejected.cpu_gemm_calls, 0U);
+    BOOST_CHECK_EQUAL(
+        rejected.acceleration_backend,
+        "test:self-qualified");
+    BOOST_CHECK_EQUAL(
+        rejected.acceleration_resolution_reason,
+        "test_resolved_backend:not_production_eligible");
+    BOOST_CHECK(
+        rc::GetRCExactReplayProviderHealth().validator_readiness_lost);
+
+    bool late_readiness_notifier_called{false};
+    rc::SetRCValidatorReadinessLossNotifier(
+        [&](const std::string& provider, const std::string& reason) {
+            late_readiness_notifier_called = true;
+            BOOST_CHECK_EQUAL(provider, "test:self-qualified");
+            BOOST_CHECK_EQUAL(reason, "required_device_backend_absent");
+        });
+    BOOST_CHECK(late_readiness_notifier_called);
+    rc::ClearRCValidatorReadinessLossNotifier();
+
+    // The startup registry can contain the same callback under the resolved
+    // provider name. Clearing the primary GEMM must not rename it: otherwise
+    // the identical registered provider is mistaken for an alternate and
+    // bypasses the production-eligibility failure.
+    const auto same_capability{
+        rc::IssueRCProductionProviderCapabilityForTest(
+            "test:self-qualified", exact_backend,
+            MakeReplayCapabilityEpoch(params, header.matmul_dim))};
+    BOOST_REQUIRE(!same_capability.IsNull());
+    BOOST_REQUIRE(rc::RegisterRCExactReplayAlternateProvider({
+        .backend = exact_backend,
+        .provider = "test:self-qualified",
+        .capability = same_capability,
+    }));
+    const auto still_rejected{
+        rc::VerifyBoundedExactReplayWithProductionEligibilityForTest(
+            header, params, /*height=*/0, acceleration,
+            /*production_eligible=*/false)};
+    BOOST_CHECK(!still_rejected.ok);
+    BOOST_CHECK_EQUAL(still_rejected.device_gemm_calls, 0U);
+    BOOST_CHECK_EQUAL(still_rejected.provider_attempts, 1U);
+    rc::ClearRCExactReplayAlternateProviders();
+
+    const auto accepted{
+        rc::VerifyBoundedExactReplayWithProductionEligibilityForTest(
+            header, params, /*height=*/0, acceleration,
+            /*production_eligible=*/true)};
+    BOOST_REQUIRE(accepted.ok);
+    BOOST_CHECK_GT(accepted.device_gemm_calls, 0U);
+    BOOST_CHECK_EQUAL(accepted.cpu_gemm_calls, 0U);
+    rc::ResetRCExactReplayProviderHealthForTest();
+}
+
 BOOST_AUTO_TEST_CASE(rc_execution_policy_and_last_replay_telemetry)
 {
     auto& scheduler{rc::GetRCAcceleratorScheduler()};
@@ -1353,10 +1464,21 @@ BOOST_AUTO_TEST_CASE(rc_strict_faulty_primary_recovers_on_independent_provider)
 
     const auto health{rc::GetRCExactReplayProviderHealth()};
     BOOST_CHECK(health.quarantined);
+    BOOST_CHECK(!health.validator_readiness_lost);
     BOOST_CHECK_EQUAL(health.provider, "test:faulty-provider-a");
     BOOST_CHECK_EQUAL(
         health.reason,
         "digest_mismatch_confirmed_by_independent_provider");
+
+    // The healthy independent provider preserved aggregate validator
+    // readiness, so quarantining the faulty primary must not withdraw service.
+    bool late_notifier_called{false};
+    rc::SetRCValidatorReadinessLossNotifier(
+        [&](const std::string&, const std::string&) {
+            late_notifier_called = true;
+        });
+    BOOST_CHECK(!late_notifier_called);
+    rc::ClearRCValidatorReadinessLossNotifier();
 
     // A later block skips the quarantined primary and remains available via
     // the registered independent provider in the same process.
@@ -1424,6 +1546,85 @@ BOOST_AUTO_TEST_CASE(rc_strict_same_callback_cannot_masquerade_as_independent)
     BOOST_CHECK_EQUAL(degraded.provider_attempts, 1U);
     BOOST_CHECK_EQUAL(degraded.independent_provider_attempts, 0U);
     BOOST_CHECK(!degraded.provider_quarantined);
+    rc::ClearRCExactReplayAlternateProviders();
+    rc::ResetRCProductionCanaryForTest();
+    rc::ResetRCExactReplayProviderHealthForTest();
+}
+
+BOOST_AUTO_TEST_CASE(
+    rc_strict_bounded_attempts_do_not_exhaust_untried_provider_readiness)
+{
+    rc::ClearRCExactReplayAlternateProviders();
+    rc::ResetRCProductionCanaryForTest();
+    rc::ResetRCExactReplayProviderHealthForTest();
+
+    auto header{MakeRCHeader(0x424f554e444544)};
+    header.matmul_dim = 64;
+    const auto params{rc::MakeToyRCEpisodeParams()};
+    header.matmul_digest =
+        rc::RecomputeResidentCurriculumReference(header, params, 0);
+    BOOST_REQUIRE(!header.matmul_digest.IsNull());
+    const auto epoch{MakeReplayCapabilityEpoch(params, header.matmul_dim)};
+
+    const std::array<std::pair<const char*, lt::ExactGemmBackend::S8S8Fn>, 4>
+        providers{{
+            {"test:declining-a", &DecliningGemmS8S8},
+            {"test:declining-b", &DecliningGemmS8S8B},
+            {"test:declining-c", &DecliningGemmS8S8C},
+            {"test:declining-d", &DecliningGemmS8S8D},
+        }};
+    for (const auto& [name, fn] : providers) {
+        lt::ExactGemmBackend backend;
+        backend.gemm_s8s8 = fn;
+        const auto capability{
+            rc::IssueRCProductionProviderCapabilityForTest(
+                name, backend, epoch)};
+        BOOST_REQUIRE(!capability.IsNull());
+        BOOST_REQUIRE(rc::RegisterRCExactReplayAlternateProvider({
+            .backend = backend,
+            .provider = name,
+            .capability = capability,
+        }));
+    }
+
+    bool readiness_lost{false};
+    rc::SetRCValidatorReadinessLossNotifier(
+        [&](const std::string&, const std::string&) {
+            readiness_lost = true;
+        });
+    lt::ExactGemmBackend primary_backend;
+    primary_backend.gemm_s8s8 = &DecliningGemmS8S8;
+    const rc::RCExactReplayAcceleration primary{
+        .gemm = primary_backend,
+        .backend = "test:declining-a",
+        .require_device = true,
+        .output_row_tile = 16,
+    };
+
+    const auto first{rc::VerifyBoundedExactReplayWithAccelerationForTest(
+        header, params, 0, primary)};
+    BOOST_CHECK(!first.ok);
+    BOOST_CHECK_EQUAL(first.provider_attempts, 3U);
+    BOOST_CHECK(!readiness_lost);
+    BOOST_CHECK(!rc::GetRCExactReplayProviderHealth()
+                     .validator_readiness_lost);
+    BOOST_CHECK(first.note.find("another qualified provider remains") !=
+                std::string::npos);
+
+    // Quarantined entries are skipped on the next bounded attempt, so the last
+    // registered provider is tried without allowing one block to fan out into
+    // an unbounded number of device replays.
+    const auto second{rc::VerifyBoundedExactReplayWithAccelerationForTest(
+        header, params, 0, primary)};
+    BOOST_CHECK(!second.ok);
+    BOOST_CHECK(readiness_lost);
+    BOOST_CHECK(rc::GetRCExactReplayProviderHealth()
+                    .validator_readiness_lost);
+    BOOST_CHECK_EQUAL(
+        rc::GetRCExactReplayProviderHealth().provider,
+        "test:declining-d");
+
+    rc::ClearRCValidatorReadinessLossNotifier();
     rc::ClearRCExactReplayAlternateProviders();
     rc::ResetRCProductionCanaryForTest();
     rc::ResetRCExactReplayProviderHealthForTest();
@@ -1570,6 +1771,35 @@ BOOST_AUTO_TEST_CASE(rc_f4_null_committed_digest_rejected)
     const auto replay = rc::VerifyBoundedExactReplay(header, params_rc, kHeight, &bn);
     BOOST_CHECK(!replay.ok);
     BOOST_CHECK(replay.note.find("null header.matmul_digest") != std::string::npos);
+
+    // Strict adjudication must preserve the same consensus-invalid verdict.
+    // A malformed peer header cannot masquerade as aggregate accelerator
+    // failure and make this node withdraw its validation service flags.
+    rc::ClearRCExactReplayAlternateProviders();
+    rc::ResetRCExactReplayProviderHealthForTest();
+    bool readiness_lost{false};
+    rc::SetRCValidatorReadinessLossNotifier(
+        [&](const std::string&, const std::string&) {
+            readiness_lost = true;
+        });
+    lt::ExactGemmBackend exact_backend;
+    exact_backend.gemm_s8s8 = &OracleGemmS8S8;
+    const rc::RCExactReplayAcceleration strict_acceleration{
+        .gemm = exact_backend,
+        .backend = "test:null-digest-provider",
+        .require_device = true,
+        .output_row_tile = 16,
+    };
+    const auto strict{rc::VerifyBoundedExactReplayWithAccelerationForTest(
+        header, params_rc, kHeight, strict_acceleration, &bn)};
+    BOOST_CHECK(!strict.ok);
+    BOOST_CHECK(strict.outcome ==
+                rc::ExactReplayVerifyOutcome::InvalidConsensus);
+    BOOST_CHECK(!readiness_lost);
+    BOOST_CHECK(!rc::GetRCExactReplayProviderHealth()
+                     .validator_readiness_lost);
+    rc::ClearRCValidatorReadinessLossNotifier();
+    rc::ResetRCExactReplayProviderHealthForTest();
 }
 
 BOOST_AUTO_TEST_CASE(rc_tfp4_segmentation_exactness)

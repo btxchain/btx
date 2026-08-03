@@ -263,7 +263,7 @@ void ExpandOperandBMatExpandMxComponents(const CBlockHeader& header, uint32_t n,
  *  Optional device inject: ExactMxProjectionBackend + ComputeProjectedRightMxDispatched
  *  (matmul_v4_lt_mx_exact.h). This is exact-integer MX semantics — NOT a claim
  *  that a native MXFP4 tensor instruction executed. C-15 remains OPEN;
- *  public heights stay INT32_MAX. */
+ *  public LT/DRLT heights stay disabled. */
 [[nodiscard]] std::vector<int32_t> ComputeProjectedRightMxBlockScaleLT(
     const std::vector<int8_t>& mu, const std::vector<uint8_t>& scales,
     const std::vector<int8_t>& V, uint32_t n, uint32_t m);

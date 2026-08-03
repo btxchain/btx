@@ -38,7 +38,7 @@
 //
 // IMPORTANT: the int64 reference (ExtractMXTileInt64) is the sole oracle. This
 // AIR is validated byte-for-byte AGAINST it; the AIR never redefines Extract.
-// Everything here is behind the OFF arbiter; nMatMulRCHeight stays INT32_MAX.
+// Everything here is behind the OFF arbiter and remains non-authoritative.
 
 namespace matmul::v4::rc::gkr_air {
 

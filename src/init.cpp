@@ -361,7 +361,7 @@ void Shutdown(NodeContext& node)
     // using the other before destroying them.
     if (node.peerman && node.validation_signals) node.validation_signals->UnregisterValidationInterface(node.peerman.get());
     // The observer captures &node; drop it before connman is torn down.
-    matmul::v4::rc::ClearRCProviderQuarantineNotifier();
+    matmul::v4::rc::ClearRCValidatorReadinessLossNotifier();
     if (node.connman) node.connman->Stop();
 
     StopTorControl();
@@ -3209,49 +3209,85 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
 
     connOptions.m_i2p_accept_incoming = args.GetBoolArg("-i2pacceptincoming", DEFAULT_I2P_ACCEPT_INCOMING);
 
-    if (!node.connman->Start(scheduler, connOptions)) {
-        return false;
-    }
-
-    // Advertised validation tier must track provider health, not just the state
-    // at init. NODE_MATMUL_CONSENSUS (and the attestation-archive bit that is
-    // gated on the same strict-device readiness) was published once during
-    // startup and then never revisited, so a node whose accelerator was
-    // quarantined mid-run kept advertising that it validates MatMul consensus
-    // and kept being preferred as a sync peer for exactly the check it could no
-    // longer perform. Quarantine is terminal until restart, so this only ever
-    // withdraws.
-    matmul::v4::rc::SetRCProviderQuarantineNotifier(
+    // Advertised validation tier must track aggregate validator readiness, not
+    // merely the startup result or the health of one provider. A quarantined
+    // provider may be recovered by an independent qualified alternate; service
+    // withdrawal occurs only after all eligible strict providers are exhausted.
+    const ServiceFlags withdrawn{static_cast<ServiceFlags>(
+        static_cast<uint64_t>(NODE_MATMUL_CONSENSUS) |
+        static_cast<uint64_t>(NODE_MATMUL_ATTESTATION_ARCHIVE))};
+    const ServiceFlags ready_services{static_cast<ServiceFlags>(
+        connOptions.m_local_services & withdrawn)};
+    const auto withdraw_validator_readiness =
         [&node](const std::string& provider, const std::string& reason) {
             if (!node.connman) return;
             const ServiceFlags withdrawn{static_cast<ServiceFlags>(
                 static_cast<uint64_t>(NODE_MATMUL_CONSENSUS) |
                 static_cast<uint64_t>(NODE_MATMUL_ATTESTATION_ARCHIVE))};
-            if ((node.connman->GetLocalServices() & withdrawn) == 0) return;
+            const bool was_advertised{
+                (node.connman->GetLocalServices() & withdrawn) != 0};
             node.connman->RemoveLocalServices(withdrawn);
+            if (!was_advertised) return;
             // RemoveLocalServices only changes what we send in FUTURE VERSION
-            // messages. Every peer already connected holds the service flags we
-            // advertised at handshake time, and the P2P protocol has no way to
-            // amend them mid-connection -- so without this those peers keep
-            // treating us as a MatMul-capable validator, and keep preferring us
-            // for exactly the sync we can no longer serve. Drop them so each one
-            // re-handshakes and learns the corrected flags. Quarantine is
-            // terminal for the process, so this churn happens at most once and
-            // is strictly better than continuing to answer under a stale claim.
-            size_t dropped{0};
-            node.connman->ForEachNode([&](CNode* peer_node) {
-                peer_node->fDisconnect = true;
-                ++dropped;
-            });
+            // messages. Every peer, including one still handshaking, may have
+            // captured the old value. Drop all of them so the next handshake
+            // learns the fail-closed service set.
+            const size_t dropped{node.connman->DisconnectAllNodes()};
             LogWarning(
                 "Withdrawing NODE_MATMUL_CONSENSUS and "
-                "NODE_MATMUL_ATTESTATION_ARCHIVE: provider=%s quarantined "
-                "(%s). Disconnected %u peer(s) so they re-handshake without the "
-                "stale service flags. This node no longer advertises MatMul "
-                "consensus validation; restart with a qualified provider to "
-                "restore it.\n",
+                "NODE_MATMUL_ATTESTATION_ARCHIVE: all strict providers are "
+                "unavailable (last_provider=%s, reason=%s). Disconnected %u "
+                "peer(s) so they re-handshake without stale service flags. "
+                "This node no longer advertises MatMul consensus validation; "
+                "restart with a qualified provider to restore it.\n",
                 provider, reason, dropped);
-        });
+        };
+
+    // Start fail-closed with readiness-dependent bits withheld. This removes
+    // the otherwise unavoidable window between CConnman initialization and a
+    // post-Start health check. If startup remains healthy, publish the bits
+    // below and reconnect any peer that initialized during this brief gap.
+    connOptions.m_local_services = static_cast<ServiceFlags>(
+        connOptions.m_local_services & ~withdrawn);
+
+    // Install before network threads start. Set() also reconciles any terminal
+    // readiness loss caused by pre-network import or ActivateBestChain work.
+    matmul::v4::rc::SetRCValidatorReadinessLossNotifier(
+        withdraw_validator_readiness);
+
+    if (!node.connman->Start(scheduler, connOptions)) {
+        matmul::v4::rc::ClearRCValidatorReadinessLossNotifier();
+        return false;
+    }
+
+    if (ready_services != NODE_NONE) {
+        const auto health{
+            matmul::v4::rc::GetRCExactReplayProviderHealth()};
+        if (!health.validator_readiness_lost) {
+            node.connman->AddLocalServices(ready_services);
+
+            // A readiness loss may race the Add. Re-read after publication;
+            // the idempotent observer closes that ordering in either direction.
+            const auto published_health{
+                matmul::v4::rc::GetRCExactReplayProviderHealth()};
+            if (published_health.validator_readiness_lost) {
+                withdraw_validator_readiness(
+                    published_health.provider, published_health.reason);
+            } else {
+                // Peers created by Start saw the intentionally withheld bits.
+                // Reconnect all (including incomplete handshakes) so every peer
+                // observes the now-authoritative healthy service set.
+                const size_t reconnect{node.connman->DisconnectAllNodes()};
+                if (reconnect != 0) {
+                    LogPrintf(
+                        "MatMul strict-provider readiness published; "
+                        "reconnecting %u startup peer(s) with the validated "
+                        "service flags\n",
+                        reconnect);
+                }
+            }
+        }
+    }
 
     // ********************************************************* Step 13: finished
 

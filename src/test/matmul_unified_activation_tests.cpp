@@ -20,6 +20,8 @@
 #include <chain.h>
 #include <chainparams.h>
 #include <consensus/params.h>
+#include <matmul/matmul_v4_rc_gkr.h>
+#include <matmul/matmul_v4_rc_stage3.h>
 #include <pow.h>
 #include <primitives/block.h>
 #include <test/util/setup_common.h>
@@ -326,9 +328,20 @@ BOOST_AUTO_TEST_CASE(epoch_a_installed_coefficient_realizes_expected_loosen)
         parent, eps, an, ad, UintToArith256(p.powLimit))};
     BOOST_REQUIRE(derived.has_value());
 
+    // Independently calculated integer vector for parent 0x1c487c56,
+    // epsilon=18 and provisional C=6'931'159'304. Pin both the full target and its compact
+    // encoding; a broad order-of-magnitude band would accept a materially
+    // different consensus difficulty.
+    static constexpr uint32_t EXPECTED_COMPACT{0x1f00847c};
+    static constexpr const char* EXPECTED_TARGET{
+        "0000847c761329b56486ac800000000000000000000000000000000000000000"};
+    BOOST_CHECK_EQUAL(derived->GetHex(), EXPECTED_TARGET);
+    BOOST_CHECK_EQUAL(derived->GetCompact(), EXPECTED_COMPACT);
+
     // k = p_rc / p, computed from the targets rather than from the model, so
     // this is an independent check of the helper's output.
     const arith_uint256 k_ratio = *derived / parent;
+    BOOST_CHECK_EQUAL(k_ratio.GetLow64(), 119'783U);
     // Measured endpoints: Metal ~19'900, CUDA ~119'800. Installed at the CUDA
     // figure. A value of the WRONG KIND lands far outside this band: supplying
     // the realized loosen k instead of the attempt-rate ratio C yields ~2,
@@ -339,6 +352,19 @@ BOOST_AUTO_TEST_CASE(epoch_a_installed_coefficient_realizes_expected_loosen)
     // The transition must loosen, never tighten, and must respect powLimit.
     BOOST_CHECK(*derived > parent);
     BOOST_CHECK(*derived <= UintToArith256(p.powLimit));
+
+    // Exercise the real fork dispatcher with the published mainnet tuple. The
+    // transition branch depends only on the live parent's height/nBits, so a
+    // single synthetic parent is sufficient and avoids a 182k-entry fixture.
+    CBlockIndex parent_index;
+    parent_index.nHeight = p.nMatMulRCHeight - 1;
+    parent_index.nBits = 0x1c487c56;
+    parent_index.nTime = 1'700'000'000;
+    CBlockHeader next;
+    next.nTime = parent_index.nTime + p.nPowTargetSpacing;
+    BOOST_CHECK_EQUAL(
+        GetNextWorkRequired(&parent_index, &next, p),
+        EXPECTED_COMPACT);
 }
 
 // A coefficient of the wrong KIND must be visibly wrong, not subtly wrong.
@@ -420,6 +446,92 @@ BOOST_AUTO_TEST_CASE(epoch_a_tuple_selects_the_wide_transition_on_regtest)
     BOOST_REQUIRE(derived.has_value());
     BOOST_CHECK(*derived <= UintToArith256(p.powLimit));
     BOOST_CHECK(*derived > 0);
+}
+
+// Pin the complete public Epoch-A contract from the real mainnet parameters.
+// The activation height itself is intentionally not duplicated here: release
+// preparation may move it forward to preserve deployment runway, but it must
+// remain one finite atomic height for v4, BMX4C, and RC. Everything else below
+// is the consensus shape that may not drift when that scheduling-only value is
+// updated.
+BOOST_AUTO_TEST_CASE(mainnet_epoch_a_complete_consensus_tuple)
+{
+    const auto main{CreateChainParams(ArgsManager{}, ChainType::MAIN)};
+    const auto& p{main->GetConsensus()};
+    const int32_t disabled{std::numeric_limits<int32_t>::max()};
+    const int32_t height{p.nMatMulRCHeight};
+
+    BOOST_REQUIRE_NE(height, disabled);
+    BOOST_CHECK_EQUAL(p.nMatMulV4Height, height);
+    BOOST_CHECK_EQUAL(p.nMatMulBMX4CHeight, height);
+    BOOST_CHECK_EQUAL(p.nMatMulRCHeight, height);
+    BOOST_CHECK_EQUAL(p.nMatMulDRLTHeight, disabled);
+    BOOST_CHECK_EQUAL(p.nMatMulRCCoupledHeight, disabled);
+
+    BOOST_CHECK_EQUAL(p.nMatMulV4Dimension, 4096U);
+    BOOST_CHECK_EQUAL(p.nMatMulRCProfile, 1U);
+    BOOST_CHECK(!p.fMatMulRCUseToyDims);
+    BOOST_CHECK(!p.fMatMulRCCoupledUseToyDims);
+    BOOST_CHECK(!p.fMatMulLTSealAsPoW);
+    BOOST_CHECK(!p.IsMatMulHeaderPoWEnabled());
+    BOOST_CHECK_EQUAL(p.nMatMulHeaderPoWDiscountBits,
+                      std::numeric_limits<uint32_t>::max());
+
+    BOOST_CHECK_EQUAL(p.nMatMulV4AsertRescaleNum, 1);
+    BOOST_CHECK_EQUAL(p.nMatMulV4AsertRescaleDen, 1);
+    BOOST_CHECK_EQUAL(p.nMatMulBMX4CAsertRescaleNum, 1);
+    BOOST_CHECK_EQUAL(p.nMatMulBMX4CAsertRescaleDen, 1);
+    BOOST_CHECK_EQUAL(p.nMatMulRCAsertRescaleNum, 6'931'159'304LL);
+    BOOST_CHECK_EQUAL(p.nMatMulRCAsertRescaleDen, 1);
+    BOOST_CHECK_EQUAL(
+        p.GetMatMulPreHashEpsilonBitsForHeight(height - 1), 18U);
+
+    BOOST_CHECK(!p.IsMatMulV4Active(height - 1));
+    BOOST_CHECK(!p.IsMatMulRCFamilyActive(height - 1));
+    BOOST_CHECK(p.IsMatMulV4Active(height));
+    BOOST_CHECK(p.IsBMX4CActive(height));
+    BOOST_CHECK(p.IsMatMulRCFamilyActive(height));
+    BOOST_CHECK_EQUAL(p.GetMatMulEncodingProfile(height),
+                      Consensus::MatMulEncodingProfile::ENC_RC);
+    BOOST_CHECK(p.IsMatMulV47EpochAActivationTuple());
+    BOOST_CHECK(ValidateMatMulAsertParams(p, height));
+
+    BOOST_CHECK(Consensus::BTX_MATMUL_NO_INVERSION_GATE_RATIFIED);
+    BOOST_CHECK(Consensus::BTX_MATMUL_V47_GPU_LIFECYCLE_GATE_RATIFIED);
+    BOOST_CHECK(!matmul::v4::rc::kRCGkrFormalSoundnessReady);
+    BOOST_CHECK(!matmul::v4::rc::kRCStage3ProductionProgramRegistryReady);
+    BOOST_CHECK(!matmul::v4::rc::kRCStage3SuccinctAuthorityReady);
+}
+
+// Mainnet's Epoch-A tuple must not leak into public test networks. They remain
+// neutral and disabled until each network receives its own deliberate height,
+// calibration, and ratification change.
+BOOST_AUTO_TEST_CASE(public_test_networks_remain_epoch_a_neutral)
+{
+    const int32_t disabled{std::numeric_limits<int32_t>::max()};
+    for (const ChainType chain :
+         {ChainType::TESTNET, ChainType::TESTNET4, ChainType::SIGNET}) {
+        const auto params{CreateChainParams(ArgsManager{}, chain)};
+        const auto& p{params->GetConsensus()};
+
+        BOOST_CHECK_EQUAL(p.nMatMulV4Height, disabled);
+        BOOST_CHECK_EQUAL(p.nMatMulBMX4CHeight, disabled);
+        BOOST_CHECK_EQUAL(p.nMatMulDRLTHeight, disabled);
+        BOOST_CHECK_EQUAL(p.nMatMulRCHeight, disabled);
+        BOOST_CHECK_EQUAL(p.nMatMulRCCoupledHeight, disabled);
+        BOOST_CHECK_EQUAL(p.nMatMulV4AsertRescaleNum, 1);
+        BOOST_CHECK_EQUAL(p.nMatMulV4AsertRescaleDen, 1);
+        BOOST_CHECK_EQUAL(p.nMatMulBMX4CAsertRescaleNum, 1);
+        BOOST_CHECK_EQUAL(p.nMatMulBMX4CAsertRescaleDen, 1);
+        BOOST_CHECK_EQUAL(p.nMatMulRCAsertRescaleNum, 1);
+        BOOST_CHECK_EQUAL(p.nMatMulRCAsertRescaleDen, 1);
+        BOOST_CHECK_EQUAL(p.nMatMulRCProfile, 1U);
+        BOOST_CHECK(!p.fMatMulRCUseToyDims);
+        BOOST_CHECK(!p.fMatMulRCCoupledUseToyDims);
+        BOOST_CHECK(!p.fMatMulLTSealAsPoW);
+        BOOST_CHECK(!p.IsMatMulHeaderPoWEnabled());
+        BOOST_CHECK(!p.IsMatMulV47EpochAActivationTuple());
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

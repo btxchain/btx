@@ -417,8 +417,8 @@ uint256 ComputeMatMulReplayAuthorityContext(const CChainParams& params)
     // --- ENC_RC §R.7 scheduled scaling (raw knobs) ---
     // These select the replay episode SHAPE via
     // ConsensusRCEpisodeParamsForHeight -> RCScaleForHeight, i.e. they are part
-    // of the PoW predicate. They are inert today (kRCGrowthScheduleEnabled is
-    // compile-time false, and public nets keep nMatMulRCHeight == INT32_MAX),
+    // of the PoW predicate. They are inert today because
+    // kRCGrowthScheduleEnabled is compile-time false,
     // but an unhashed predicate input is a latent silent-skip: a node that
     // retuned them after the flag flipped would keep trusting persisted
     // BLOCK_EXACT_REPLAY_VERIFIED verdicts computed under the old shape.

@@ -1386,6 +1386,9 @@ public:
     bool DisconnectNode(const CSubNet& subnet);
     bool DisconnectNode(const CNetAddr& addr);
     bool DisconnectNode(NodeId id);
+    /** Mark every node for disconnect, including peers that have not completed
+     * the VERSION handshake. Returns the number of nodes marked. */
+    size_t DisconnectAllNodes();
 
     //! Used to convey which local services we are offering peers during node
     //! connection.
@@ -1397,8 +1400,8 @@ public:
 
     //! Updates the local services that this node advertises to other peers
     //! during connection handshake.
-    void AddLocalServices(ServiceFlags services) { m_local_services = ServiceFlags(m_local_services | services); };
-    void RemoveLocalServices(ServiceFlags services) { m_local_services = ServiceFlags(m_local_services & ~services); }
+    void AddLocalServices(ServiceFlags services);
+    void RemoveLocalServices(ServiceFlags services);
 
     //! set the max outbound target in bytes
     void SetMaxOutboundTarget(uint64_t limit) EXCLUSIVE_LOCKS_REQUIRED(!m_total_bytes_sent_mutex);
@@ -1645,17 +1648,18 @@ private:
      */
     std::map<uint64_t, CachedAddrResponse> m_addr_response_caches;
 
-    /**
-     * Services this node offers.
+    /** Serializes advertised-service snapshots with their final insertion into
+     * m_nodes. Peer initialization happens without this mutex; insertion
+     * compares the current value with its snapshot and disconnects a stale
+     * Peer. Runtime service changes plus a node sweep therefore cannot miss a
+     * handshaking peer. Lock order is this mutex before m_nodes_mutex. */
+    RecursiveMutex m_local_services_mutex;
+
+    /** Services this node offers. This data is replicated in every Peer.
+     * Runtime changes are synchronized for AssumeUTXO service transitions and
+     * fail-closed MatMul validator-readiness publication/withdrawal.
      *
-     * This data is replicated in each Peer instance we create.
-     *
-     * This data is not marked const, but after being set it should not
-     * change. Unless AssumeUTXO is started, in which case, the peer
-     * will be limited until the background chain sync finishes.
-     *
-     * \sa Peer::our_services
-     */
+     * \sa Peer::our_services */
     std::atomic<ServiceFlags> m_local_services;
 
     std::unique_ptr<CSemaphore> semOutbound;

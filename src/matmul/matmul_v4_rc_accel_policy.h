@@ -192,7 +192,8 @@ struct RCCoupConsensusConfig {
     bool full_bank_schedule_enabled{dc::kRCCoupFullBankScheduleEnabled};
     uint32_t v2_pages_per_barrier_lobe{dc::kRCCoupPagesPerBarrierLobe};
 
-    // V3 profile selected; activation height stays INT32_MAX (public inert).
+    // Coupled V3 profile selected; its separate activation height stays
+    // disabled during Epoch-A Profile 1.
     bool v3_profile_enabled{true};
     int32_t v3_activation_height{std::numeric_limits<int32_t>::max()};
 };

@@ -93,7 +93,7 @@
 //     this AIR's witness columns to the v7 batched-FRI roots: byte-compare /
 //     deterministic-builder in the compact SHADOW path (a permutation-argument
 //     lift is the production step). This module is a measurement scaffold —
-//     arbiter stays OFF, nMatMulRCHeight = INT32_MAX, never consensus.
+//     arbiter stays OFF; this proof path is never Epoch-A consensus authority.
 //
 // STAGE A — COMMITTED PREPROCESSED ROOT (P_root). The dominant verifier cost
 // used to be BuildEpisodePublicData: Θ(total) SHA invocations regenerating

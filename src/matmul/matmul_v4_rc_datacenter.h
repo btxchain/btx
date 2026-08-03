@@ -17,8 +17,9 @@
 //
 // Correct default levers therefore push HBM + full-bank traffic + fabric
 // exchange so Resident LLM-class nodes win economically while Streamed
-// cheap cards remain consensus-valid but uneconomic. Heights stay INT32_MAX;
-// GKR arbiter stays OFF. Env must never flip these (digest purity).
+// cheap cards remain consensus-valid but uneconomic. Coupled/Profile-2 growth
+// heights stay disabled during Epoch-A Profile 1; the GKR arbiter stays OFF.
+// Env must never flip these (digest purity).
 
 namespace matmul::v4::rc::dc {
 
@@ -36,8 +37,8 @@ inline constexpr bool kRCCoupMaterialExchangeEnabled = true;
 /** Row tile for material exchange (sweep 64 / 128 / 256). */
 inline constexpr uint32_t kRCCoupExchangeRowsDefault = 128;
 
-/** Wire Stage F three-axis dials as the live scale surface (epoch-0 until
- *  nMatMulRCHeight; public height remains INT32_MAX). */
+/** Wire Stage F three-axis dials as the live scale surface. Epoch-A Profile 1
+ *  uses the frozen epoch-0 values; later growth remains separately gated. */
 inline constexpr bool kRCThreeAxisScheduleWireEnabled = true;
 
 inline constexpr uint32_t kRCMinerBatchQDefault = 32;

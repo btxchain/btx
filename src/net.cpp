@@ -2031,6 +2031,7 @@ void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
                                             const CService& addr_bind,
                                             const CService& addr)
 {
+    AssertLockNotHeld(m_local_services_mutex);
     int nInbound = 0;
 
     const bool inbound_onion = [this, &addr, &addr_bind]{
@@ -2117,16 +2118,19 @@ void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
     NodeId id = GetNewNodeId();
     uint64_t nonce = GetDeterministicRandomizer(RANDOMIZER_ID_LOCALHOSTNONCE).Write(id).Finalize();
 
-    // The V2Transport transparently falls back to V1 behavior when an incoming V1 connection is
-    // detected, so use it whenever we signal NODE_P2P_V2.
-    ServiceFlags local_services = GetLocalServices();
-    const bool use_v2transport(local_services & NODE_P2P_V2);
-
     uint64_t network_id = GetDeterministicRandomizer(RANDOMIZER_ID_NETWORKKEY)
                         .Write(inbound_onion ? NET_ONION : addr.GetNetClass())
                         .Write(addr_bind.GetAddrBytes())
                         .Write(addr_bind.GetPort()) // inbound connections use bind port
                         .Finalize();
+    ServiceFlags local_services;
+    {
+        LOCK(m_local_services_mutex);
+        local_services = GetLocalServices();
+    }
+    // The V2Transport transparently falls back to V1 behavior for an incoming
+    // V1 connection. Bind its choice and Peer::our_services to one snapshot.
+    const bool use_v2transport{bool(local_services & NODE_P2P_V2)};
     CNode* pnode = new CNode(id,
                              std::move(sock),
                              CAddress{addr, NODE_NONE},
@@ -2147,8 +2151,13 @@ void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
     pnode->AddRef();
     m_msgproc->InitializeNode(*pnode, local_services);
     {
-        LOCK(m_nodes_mutex);
-        m_nodes.push_back(pnode);
+        LOCK(m_local_services_mutex);
+        const bool stale_services{GetLocalServices() != local_services};
+        {
+            LOCK(m_nodes_mutex);
+            m_nodes.push_back(pnode);
+            if (stale_services) pnode->fDisconnect = true;
+        }
     }
     LogDebug(BCLog::NET, "connection from %s accepted\n", addr.ToStringAddrPort());
     TRACEPOINT(net, inbound_connection,
@@ -3310,6 +3319,7 @@ void CConnman::ThreadOpenAddedConnections()
 void CConnman::OpenNetworkConnection(const CAddress& addrConnect, bool fCountFailure, CSemaphoreGrant&& grant_outbound, const char *pszDest, ConnectionType conn_type, bool use_v2transport)
 {
     AssertLockNotHeld(m_unused_i2p_sessions_mutex);
+    AssertLockNotHeld(m_local_services_mutex);
     assert(conn_type != ConnectionType::INBOUND);
 
     //
@@ -3335,13 +3345,25 @@ void CConnman::OpenNetworkConnection(const CAddress& addrConnect, bool fCountFai
         return;
     pnode->grantOutbound = std::move(grant_outbound);
 
-    m_msgproc->InitializeNode(*pnode, m_local_services);
+    ServiceFlags local_services;
     {
-        LOCK(m_nodes_mutex);
-        m_nodes.push_back(pnode);
+        LOCK(m_local_services_mutex);
+        local_services = GetLocalServices();
+    }
+    m_msgproc->InitializeNode(*pnode, local_services);
+    {
+        LOCK(m_local_services_mutex);
+        const bool stale_services{GetLocalServices() != local_services};
+        {
+            LOCK(m_nodes_mutex);
+            m_nodes.push_back(pnode);
+            if (stale_services) pnode->fDisconnect = true;
 
-        // update connection count by network
-        if (pnode->IsManualOrFullOutboundConn()) ++m_network_conn_counts[pnode->addr.GetNetwork()];
+            // update connection count by network
+            if (pnode->IsManualOrFullOutboundConn()) {
+                ++m_network_conn_counts[pnode->addr.GetNetwork()];
+            }
+        }
     }
 
     TRACEPOINT(net, outbound_connection,
@@ -4024,6 +4046,15 @@ bool CConnman::DisconnectNode(NodeId id)
     return false;
 }
 
+size_t CConnman::DisconnectAllNodes()
+{
+    AssertLockNotHeld(m_local_services_mutex);
+    LOCK(m_local_services_mutex);
+    LOCK(m_nodes_mutex);
+    for (CNode* node : m_nodes) node->fDisconnect = true;
+    return m_nodes.size();
+}
+
 void CConnman::RecordBytesRecv(uint64_t bytes)
 {
     nTotalBytesRecv += bytes;
@@ -4133,7 +4164,27 @@ uint64_t CConnman::GetTotalBytesSent() const
 
 ServiceFlags CConnman::GetLocalServices() const
 {
-    return m_local_services;
+    return m_local_services.load(std::memory_order_relaxed);
+}
+
+void CConnman::AddLocalServices(ServiceFlags services)
+{
+    AssertLockNotHeld(m_local_services_mutex);
+    LOCK(m_local_services_mutex);
+    ServiceFlags current{m_local_services.load(std::memory_order_relaxed)};
+    while (!m_local_services.compare_exchange_weak(
+        current, ServiceFlags(current | services),
+        std::memory_order_relaxed, std::memory_order_relaxed)) {}
+}
+
+void CConnman::RemoveLocalServices(ServiceFlags services)
+{
+    AssertLockNotHeld(m_local_services_mutex);
+    LOCK(m_local_services_mutex);
+    ServiceFlags current{m_local_services.load(std::memory_order_relaxed)};
+    while (!m_local_services.compare_exchange_weak(
+        current, ServiceFlags(current & ~services),
+        std::memory_order_relaxed, std::memory_order_relaxed)) {}
 }
 
 static std::unique_ptr<Transport> MakeTransport(NodeId id, bool use_v2transport, bool inbound) noexcept

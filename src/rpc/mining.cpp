@@ -243,28 +243,9 @@ static OutboundPeerDiagnosticsSummary CollectOutboundPeerDiagnostics(
     return summary;
 }
 
-static void EnforceMiningTemplateReadiness(
-    const ChainstateManager& chainman,
-    const CConnman& connman,
-    const PeerManager* peerman,
-    Mining& miner,
-    const bool enforce_connectivity,
-    const int64_t min_outbound_peers,
-    const int64_t min_synced_outbound_peers,
-    const int64_t max_peer_sync_height_lag,
-    const bool enforce_header_lag,
-    const int64_t max_header_lag) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+static void EnsureMiningTemplateHasActiveTip(
+    const ChainstateManager& chainman) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
-    (void)connman;
-    (void)peerman;
-    (void)enforce_connectivity;
-    (void)min_outbound_peers;
-    (void)min_synced_outbound_peers;
-    (void)max_peer_sync_height_lag;
-    (void)enforce_header_lag;
-    (void)max_header_lag;
-    (void)miner;
-
     if (chainman.ActiveChain().Tip() == nullptr) {
         throw JSONRPCError(RPC_CLIENT_IN_INITIAL_DOWNLOAD, CLIENT_NAME " has no active tip yet");
     }
@@ -1535,6 +1516,18 @@ static UniValue BuildBackendRuntimeProfile(
             "manifest_has_reviewed_goldens",
             production_canary.manifest_has_reviewed_goldens);
         canary.pushKV(
+            "build_provenance_matches",
+            production_canary.build_provenance_matches);
+        canary.pushKV(
+            "build_source_dirty",
+            production_canary.build_source_dirty);
+        canary.pushKV(
+            "build_source_revision",
+            production_canary.build_source_revision);
+        canary.pushKV(
+            "build_source_tree_fingerprint",
+            production_canary.build_source_tree_fingerprint);
+        canary.pushKV(
             "exact_manifest_match",
             production_canary.exact_manifest_match);
         canary.pushKV(
@@ -1653,6 +1646,9 @@ static UniValue BuildBackendRuntimeProfile(
             matmul::v4::rc::GetRCExactReplayProviderHealth()};
         UniValue health(UniValue::VOBJ);
         health.pushKV("quarantined", provider_health.quarantined);
+        health.pushKV(
+            "validator_readiness_lost",
+            provider_health.validator_readiness_lost);
         health.pushKV(
             "quarantine_events", provider_health.quarantine_events);
         health.pushKV("provider", provider_health.provider);
@@ -5942,6 +5938,10 @@ static RPCHelpMan getmininginfo()
                                     {RPCResult::Type::BOOL, "attempted", "Whether a full production replay was attempted"},
                                     {RPCResult::Type::BOOL, "passed", "Whether the strict replay exactly matched the reviewed golden"},
                                     {RPCResult::Type::BOOL, "manifest_has_reviewed_goldens", "Whether any complete reviewed production golden is compiled in"},
+                                    {RPCResult::Type::BOOL, "build_provenance_matches", "Whether the running binary's clean implementation fingerprint matches the reviewed manifest cohort"},
+                                    {RPCResult::Type::BOOL, "build_source_dirty", "Whether the running binary was built from build-relevant local changes; dirty builds cannot authorize production"},
+                                    {RPCResult::Type::STR_HEX, "build_source_revision", "Full source revision embedded in the running binary"},
+                                    {RPCResult::Type::STR_HEX, "build_source_tree_fingerprint", "Build-relevant implementation fingerprint embedded in the running binary"},
                                     {RPCResult::Type::BOOL, "exact_manifest_match", "Whether the provider class and production workload matched a reviewed manifest entry; the live capability separately binds runtime and activation height"},
                                     {RPCResult::Type::NUM, "manifest_entries", "Compiled manifest entry count"},
                                     {RPCResult::Type::STR, "manifest_entry_id", "Matched public manifest entry identifier"},
@@ -5994,6 +5994,7 @@ static RPCHelpMan getmininginfo()
                                 {RPCResult::Type::OBJ, "provider_health", "Process-local strict-device provider health",
                                 {
                                     {RPCResult::Type::BOOL, "quarantined", "Whether the provider is withheld from further strict work"},
+                                    {RPCResult::Type::BOOL, "validator_readiness_lost", "Whether strict validation exhausted every eligible provider"},
                                     {RPCResult::Type::NUM, "quarantine_events", "Provider quarantine events"},
                                     {RPCResult::Type::STR, "provider", "Quarantined provider"},
                                     {RPCResult::Type::STR, "reason", "Quarantine reason"},
@@ -6270,10 +6271,10 @@ static RPCHelpMan getdifficultyhealth()
                             {RPCResult::Type::NUM, "validated_tip_height", "Current validated tip height"},
                             {RPCResult::Type::NUM, "best_header_height", "Best known header height"},
                             {RPCResult::Type::NUM, "header_lag", "Best header height minus validated tip height"},
-                            {RPCResult::Type::NUM, "required_outbound_peers", "Configured outbound peer guard for mining readiness"},
-                            {RPCResult::Type::NUM, "required_synced_outbound_peers", "Configured synced outbound peer guard for mining readiness"},
-                            {RPCResult::Type::NUM, "max_peer_sync_height_lag", "Configured peer sync-height lag guard"},
-                            {RPCResult::Type::NUM, "max_header_lag", "Configured validated-tip header lag guard"},
+                            {RPCResult::Type::NUM, "required_outbound_peers", "Configured outbound peer advisory threshold"},
+                            {RPCResult::Type::NUM, "required_synced_outbound_peers", "Configured synced outbound peer advisory threshold"},
+                            {RPCResult::Type::NUM, "max_peer_sync_height_lag", "Configured peer sync-height lag advisory threshold"},
+                            {RPCResult::Type::NUM, "max_header_lag", "Configured validated-tip header lag advisory threshold"},
                             {RPCResult::Type::ARR, "outbound_peer_diagnostics", "Per-peer outbound readiness diagnostics", {
                                 {RPCResult::Type::OBJ, "", "", {
                                     {RPCResult::Type::STR, "addr", "Peer address or label"},
@@ -6720,10 +6721,10 @@ static RPCHelpMan getmatmulchallenge()
                                     {RPCResult::Type::NUM, "validated_tip_height", "Current validated tip height"},
                                     {RPCResult::Type::NUM, "best_header_height", "Best known header height"},
                                     {RPCResult::Type::NUM, "header_lag", "Best header height minus validated tip height"},
-                                    {RPCResult::Type::NUM, "required_outbound_peers", "Configured outbound peer guard for mining readiness"},
-                                    {RPCResult::Type::NUM, "required_synced_outbound_peers", "Configured synced outbound peer guard for mining readiness"},
-                                    {RPCResult::Type::NUM, "max_peer_sync_height_lag", "Configured peer sync-height lag guard"},
-                                    {RPCResult::Type::NUM, "max_header_lag", "Configured validated-tip header lag guard"},
+                                    {RPCResult::Type::NUM, "required_outbound_peers", "Configured outbound peer advisory threshold"},
+                                    {RPCResult::Type::NUM, "required_synced_outbound_peers", "Configured synced outbound peer advisory threshold"},
+                                    {RPCResult::Type::NUM, "max_peer_sync_height_lag", "Configured peer sync-height lag advisory threshold"},
+                                    {RPCResult::Type::NUM, "max_header_lag", "Configured validated-tip header lag advisory threshold"},
                                     {RPCResult::Type::ARR, "outbound_peer_diagnostics", "Per-peer outbound readiness diagnostics", {
                                         {RPCResult::Type::OBJ, "", "", {
                                             {RPCResult::Type::STR, "addr", "Peer address or label"},
@@ -7102,10 +7103,10 @@ static RPCHelpMan getmatmulchallengeprofile()
                                     {RPCResult::Type::NUM, "validated_tip_height", "Current validated tip height"},
                                     {RPCResult::Type::NUM, "best_header_height", "Best known header height"},
                                     {RPCResult::Type::NUM, "header_lag", "Best header height minus validated tip height"},
-                                    {RPCResult::Type::NUM, "required_outbound_peers", "Configured outbound peer guard for mining readiness"},
-                                    {RPCResult::Type::NUM, "required_synced_outbound_peers", "Configured synced outbound peer guard for mining readiness"},
-                                    {RPCResult::Type::NUM, "max_peer_sync_height_lag", "Configured peer sync-height lag guard"},
-                                    {RPCResult::Type::NUM, "max_header_lag", "Configured validated-tip header lag guard"},
+                                    {RPCResult::Type::NUM, "required_outbound_peers", "Configured outbound peer advisory threshold"},
+                                    {RPCResult::Type::NUM, "required_synced_outbound_peers", "Configured synced outbound peer advisory threshold"},
+                                    {RPCResult::Type::NUM, "max_peer_sync_height_lag", "Configured peer sync-height lag advisory threshold"},
+                                    {RPCResult::Type::NUM, "max_header_lag", "Configured validated-tip header lag advisory threshold"},
                                     {RPCResult::Type::ARR, "outbound_peer_diagnostics", "Per-peer outbound readiness diagnostics", {
                                         {RPCResult::Type::OBJ, "", "", {
                                             {RPCResult::Type::STR, "addr", "Peer address or label"},
@@ -8759,38 +8760,7 @@ static RPCHelpMan getblocktemplate()
     if (strMode != "template")
         throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid mode");
 
-    const CConnman& connman = EnsureConnman(node);
-    const CChainParams& chainparams = chainman.GetParams();
-    const ArgsManager& args = EnsureArgsman(node);
-    const PeerManager* const peerman = node.peerman.get();
-    const int64_t min_outbound_peers = std::max<int64_t>(
-        0,
-        args.GetIntArg("-miningminoutboundpeers", DefaultMinOutboundPeersForMiningTemplate(chainparams)));
-    const int64_t min_synced_outbound_peers = std::max<int64_t>(
-        0,
-        args.GetIntArg("-miningminsyncedoutboundpeers", DefaultMinSyncedOutboundPeersForMiningTemplate(chainparams)));
-    const int64_t max_peer_sync_height_lag = std::max<int64_t>(
-        0,
-        args.GetIntArg("-miningmaxpeersyncheightlag", DefaultMaxPeerSyncHeightLagForMiningTemplate(chainparams)));
-    const int64_t max_header_lag = std::max<int64_t>(
-        0,
-        args.GetIntArg("-miningmaxheaderlag", DefaultMaxHeaderLagForMiningTemplate(chainparams)));
-    const bool enforce_connectivity =
-        !miner.isTestChain() || min_outbound_peers > 0 || min_synced_outbound_peers > 0;
-    const bool enforce_header_lag =
-        !miner.isTestChain() || max_header_lag > 0;
-
-    EnforceMiningTemplateReadiness(
-        chainman,
-        connman,
-        peerman,
-        miner,
-        enforce_connectivity,
-        min_outbound_peers,
-        min_synced_outbound_peers,
-        max_peer_sync_height_lag,
-        enforce_header_lag,
-        max_header_lag);
+    EnsureMiningTemplateHasActiveTip(chainman);
 
     static unsigned int nTransactionsUpdatedLast;
     const CTxMemPool& mempool = EnsureMemPool(node);
@@ -8838,19 +8808,9 @@ static RPCHelpMan getblocktemplate()
 
         if (!IsRPCRunning())
             throw JSONRPCError(RPC_CLIENT_NOT_CONNECTED, "Shutting down");
-        // Re-check readiness after longpoll wakeup; connectivity/header-lag
-        // may have degraded while waiting.
-        EnforceMiningTemplateReadiness(
-            chainman,
-            connman,
-            peerman,
-            miner,
-            enforce_connectivity,
-            min_outbound_peers,
-            min_synced_outbound_peers,
-            max_peer_sync_height_lag,
-            enforce_header_lag,
-            max_header_lag);
+        // The active tip can disappear during shutdown/reinitialization, but
+        // peer and header-lag thresholds remain advisory after wakeup.
+        EnsureMiningTemplateHasActiveTip(chainman);
     }
 
     const Consensus::Params& consensusParams = chainman.GetParams().GetConsensus();

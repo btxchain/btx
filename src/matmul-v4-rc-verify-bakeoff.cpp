@@ -51,6 +51,6 @@ int main(int argc, char** argv)
     std::cout << "# E2: " << matmul::v4::rc::kBakeoffE2Statement << "\n";
     std::cout << "# E5: " << matmul::v4::rc::kRCGkrE5Decision << "\n";
     std::cout << "# " << matmul::v4::rc::kRCGkrSoundnessStatement << "\n";
-    std::cout << "# nMatMulRCHeight remains INT32_MAX (NO-GO)\n";
+    std::cout << "# measurement only; this tool never changes an RC activation height\n";
     return 0;
 }

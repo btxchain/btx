@@ -179,19 +179,17 @@ class MiningTest(BitcoinTestFramework):
                 assert tx_with_min_feerate['txid'] in block_txids
                 assert tx_below_min_feerate['txid'] not in block_txids
 
-    def test_getblocktemplate_outbound_peer_guard(self):
-        self.log.info("getblocktemplate: Test -miningminoutboundpeers guard")
+    def test_getblocktemplate_outbound_peer_advisory(self):
+        self.log.info("getblocktemplate: Test -miningminoutboundpeers advisory")
         self.restart_node_allow_nonstd(0, extra_args=['-miningminoutboundpeers=2'])
         self.connect_nodes(0, 1)
         tip_time = self.nodes[0].getblockheader(self.nodes[0].getbestblockhash())["time"]
         self.nodes[0].setmocktime(tip_time)
         assert_equal(self.nodes[0].getconnectioncount(), 1)
-        assert_raises_rpc_error(
-            -9,
-            "requires at least 2 for getblocktemplate",
-            self.nodes[0].getblocktemplate,
-            NORMAL_GBT_REQUEST_PARAMS,
-        )
+        self.nodes[0].getblocktemplate(NORMAL_GBT_REQUEST_PARAMS)
+        network = self.nodes[0].getdifficultyhealth()["network"]
+        assert_equal(network["outbound_peers"], 1)
+        assert_equal(network["required_outbound_peers"], 2)
         self.restart_node_allow_nonstd(0, extra_args=['-miningminoutboundpeers=1'])
         self.connect_nodes(0, 1)
         tip_time = self.nodes[0].getblockheader(self.nodes[0].getbestblockhash())["time"]
@@ -200,37 +198,29 @@ class MiningTest(BitcoinTestFramework):
         self.restart_node_allow_nonstd(0)
         self.connect_nodes(0, 1)
 
-    def test_getblocktemplate_header_lag_guard(self):
-        self.log.info("getblocktemplate: Test -miningmaxheaderlag guard")
-        self.restart_node_allow_nonstd(0, extra_args=['-miningmaxheaderlag=2'])
+    def test_getblocktemplate_header_lag_advisory(self):
+        self.log.info("getblocktemplate: Test -miningmaxheaderlag advisory")
+        # RC header-only candidates intentionally receive no operational best-
+        # header credit until ExactReplay/body authority completes, so this
+        # functional suite cannot manufacture a trustworthy best-header gap by
+        # withholding bodies. Verify the configuration is exposed as an
+        # advisory and never blocks template construction; the nonzero-lag
+        # diagnostic arithmetic is covered by the mining RPC unit tests.
+        self.restart_node_allow_nonstd(0, extra_args=["-miningmaxheaderlag=0"])
         self.connect_nodes(0, 1)
 
-        # Build a deterministic header-only gap on node0.
-        self.disconnect_nodes(0, 1)
-        delayed_hashes = self.generate(self.nodes[1], 4, sync_fun=self.no_op)
-        for block_hash in delayed_hashes:
-            header_hex = self.nodes[1].getblockheader(block_hash, False)
-            self.nodes[0].submitheader(header_hex)
-
-        tip_time = self.nodes[0].getblockheader(self.nodes[0].getbestblockhash())["time"]
-        self.nodes[0].setmocktime(tip_time)
-        assert_raises_rpc_error(
-            -10,
-            "validated tip is 4 blocks behind best header",
-            self.nodes[0].getblocktemplate,
-            NORMAL_GBT_REQUEST_PARAMS,
-        )
-
-        self.connect_nodes(0, 1)
-        self.sync_blocks([self.nodes[0], self.nodes[1]])
         tip_time = self.nodes[0].getblockheader(self.nodes[0].getbestblockhash())["time"]
         self.nodes[0].setmocktime(tip_time)
         self.nodes[0].getblocktemplate(NORMAL_GBT_REQUEST_PARAMS)
+        network = self.nodes[0].getdifficultyhealth()["network"]
+        assert_equal(network["header_lag"], 0)
+        assert_equal(network["max_header_lag"], 0)
+
         self.restart_node_allow_nonstd(0)
         self.connect_nodes(0, 1)
 
-    def test_getblocktemplate_longpoll_rechecks_guards(self):
-        self.log.info("getblocktemplate: Test longpoll re-checks connectivity guards")
+    def test_getblocktemplate_longpoll_preserves_advisory_policy(self):
+        self.log.info("getblocktemplate: Test longpoll preserves advisory peer policy")
         self.restart_node_allow_nonstd(0, extra_args=['-miningminoutboundpeers=1', '-miningmaxheaderlag=0'])
         for peer in (1, 2):
             self.disconnect_nodes(0, peer)
@@ -250,26 +240,30 @@ class MiningTest(BitcoinTestFramework):
         result = {}
 
         def _longpoll():
-            try:
-                lp_node.getblocktemplate({"rules": ["segwit"], "longpollid": lpid})
-                result["ok"] = True
-            except JSONRPCException as e:
-                result["error"] = e.error
+            result["template"] = lp_node.getblocktemplate({"rules": ["segwit"], "longpollid": lpid})
 
         t = threading.Thread(target=_longpoll, daemon=True)
         t.start()
         time.sleep(0.5)
 
+        previous_tip = self.nodes[0].getbestblockhash()
         self.disconnect_nodes(0, 1)
         assert_equal(self.nodes[0].getconnectioncount(), 0)
         self.generate(self.wallet, 1, sync_fun=self.no_op)
 
         t.join(timeout=20)
         assert_equal(t.is_alive(), False)
-        assert "error" in result
-        assert_equal(result["error"]["code"], -9)
-        assert "not connected" in result["error"]["message"]
+        assert "template" in result
+        network = self.nodes[0].getdifficultyhealth()["network"]
+        assert_equal(network["outbound_peers"], 0)
+        assert_equal(network["required_outbound_peers"], 1)
 
+        # The disconnected block exists only to wake longpoll. Drop that local
+        # test block so reconnecting does not depend on header-announcement
+        # direction or race the advisory-policy assertion above.
+        self.nodes[0].invalidateblock(self.nodes[0].getbestblockhash())
+        assert_equal(self.nodes[0].getbestblockhash(), previous_tip)
+        self.wallet.rescan_utxos()
         self.connect_nodes(0, 1)
         self.sync_blocks([self.nodes[0], self.nodes[1]])
         tip_time = self.nodes[0].getblockheader(self.nodes[0].getbestblockhash())["time"]
@@ -279,8 +273,8 @@ class MiningTest(BitcoinTestFramework):
         self.restart_node_allow_nonstd(0)
         self.connect_nodes(0, 1)
 
-    def test_getblocktemplate_synced_outbound_guard(self):
-        self.log.info("getblocktemplate: Test -miningminsyncedoutboundpeers guard")
+    def test_getblocktemplate_synced_outbound_advisory(self):
+        self.log.info("getblocktemplate: Test -miningminsyncedoutboundpeers advisory")
         self.restart_node_allow_nonstd(
             0,
             extra_args=[
@@ -299,12 +293,11 @@ class MiningTest(BitcoinTestFramework):
         assert_equal(self.nodes[0].getconnectioncount(), 1)
         tip_time = self.nodes[0].getblockheader(self.nodes[0].getbestblockhash())["time"]
         self.nodes[0].setmocktime(tip_time)
-        assert_raises_rpc_error(
-            -9,
-            "synced outbound peers",
-            self.nodes[0].getblocktemplate,
-            NORMAL_GBT_REQUEST_PARAMS,
-        )
+        self.nodes[0].getblocktemplate(NORMAL_GBT_REQUEST_PARAMS)
+        network = self.nodes[0].getdifficultyhealth()["network"]
+        assert_equal(network["outbound_peers"], 0)
+        assert_equal(network["synced_outbound_peers"], 0)
+        assert_equal(network["required_synced_outbound_peers"], 1)
 
         self.disconnect_nodes(1, 0)
         self.connect_nodes(0, 1)
@@ -426,7 +419,10 @@ class MiningTest(BitcoinTestFramework):
     def test_timewarp(self):
         self.log.info("Test timewarp attack mitigation (BIP94)")
         node = self.nodes[0]
-        self.restart_node_allow_nonstd(0, extra_args=['-test=bip94'])
+        # -test=bip94 changes the effective consensus profile. Persisted exact-
+        # replay authority is intentionally bound to that profile, so switching
+        # an existing datadir must explicitly rebuild the block index.
+        self.restart_node_allow_nonstd(0, extra_args=['-test=bip94', '-reindex'])
 
         # BIP94 retarget-boundary expectations are specific to legacy PoW spacing.
         # Under KAWPOW, validate baseline template time invariants and skip the
@@ -626,10 +622,10 @@ class MiningTest(BitcoinTestFramework):
         node = self.nodes[0]
         self.wallet = MiniWallet(node)
         self.mine_chain()
-        self.test_getblocktemplate_outbound_peer_guard()
-        self.test_getblocktemplate_synced_outbound_guard()
-        self.test_getblocktemplate_header_lag_guard()
-        self.test_getblocktemplate_longpoll_rechecks_guards()
+        self.test_getblocktemplate_outbound_peer_advisory()
+        self.test_getblocktemplate_synced_outbound_advisory()
+        self.test_getblocktemplate_header_lag_advisory()
+        self.test_getblocktemplate_longpoll_preserves_advisory_policy()
         pow_short_circuit = [False]
 
         def assert_submitblock(block, result_str_1, result_str_2=None, *, allow_decode_error=False):
@@ -647,7 +643,9 @@ class MiningTest(BitcoinTestFramework):
                 raise
             if result == 'high-hash':
                 pow_short_circuit[0] = True
-                assert_equal('high-hash', node.submitblock(hexdata=serialized_block))
+                # A header-level MatMul PoW failure is permanent and therefore
+                # enters the invalid-block index on first submission.
+                assert_equal('duplicate-invalid', node.submitblock(hexdata=serialized_block))
                 return
             assert_equal(result_str_1, result)
             assert_equal(result_str_2, node.submitblock(hexdata=serialized_block))
@@ -725,7 +723,10 @@ class MiningTest(BitcoinTestFramework):
         assert_raises_rpc_error(-8, "getblocktemplate must be called with the segwit rule set", node.getblocktemplate, {})
 
         self.log.info("getblocktemplate: Test valid block")
-        assert_template(node, block, 'missing-product-payload' if pow_short_circuit[0] else None)
+        # BIP22 proposal mode deliberately calls TestBlockValidity with PoW
+        # checks disabled. MatMul payload/replay requirements are PoW checks,
+        # so a structurally valid proposal is accepted without that payload.
+        assert_template(node, block, None)
 
         self.log.info("submitblock: Test block decode failure")
         assert_raises_rpc_error(-22, "Block decode failed", node.submitblock, block.serialize()[:-15].hex())
@@ -785,14 +786,14 @@ class MiningTest(BitcoinTestFramework):
         bad_tx.vin[0].prevout.hash = 255
         bad_tx.rehash()
         bad_block.vtx.append(bad_tx)
-        assert_template(node, bad_block, 'missing-product-payload' if pow_short_circuit[0] else 'bad-txns-inputs-missingorspent')
+        assert_template(node, bad_block, 'bad-txns-inputs-missingorspent')
         assert_submitblock(bad_block, 'missing-product-payload' if pow_short_circuit[0] else 'bad-txns-inputs-missingorspent')
 
         self.log.info("getblocktemplate: Test nonfinal transaction")
         bad_block = copy.deepcopy(block)
         bad_block.vtx[0].nLockTime = 2**32 - 1
         bad_block.vtx[0].rehash()
-        assert_template(node, bad_block, 'missing-product-payload' if pow_short_circuit[0] else 'bad-txns-nonfinal')
+        assert_template(node, bad_block, 'bad-txns-nonfinal')
         assert_submitblock(bad_block, 'missing-product-payload' if pow_short_circuit[0] else 'bad-txns-nonfinal')
 
         self.log.info("getblocktemplate: Test bad tx count")

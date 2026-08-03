@@ -213,6 +213,8 @@ BASE_SCRIPTS = [
     'p2p_matmul_inbound_punishment.py',
     'p2p_matmul_ibd_budget_enforcement.py',
     'p2p_matmul_budget_reconnect.py',
+    'p2p_matmul_provisional_body_relay.py',
+    'p2p_matmul_provisional_body_relay.py --product-payload',
     'p2p_matmul_compact_admission.py',
     'p2p_matmul_admission_precheck.py',
     'rpc_packages.py',

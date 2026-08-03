@@ -118,11 +118,11 @@ enum class MatMulEncodingProfile : uint8_t {
     //! consensus-bound Q* window. STAGED: nMatMulDRLTHeight defaults to
     //! INT32_MAX on every public network.
     ENC_BMX4C_LT = 4,
-    //! Resident Curriculum (3-phase episode). STAGED: nMatMulRCHeight defaults
-    //! to INT32_MAX on every public network (clean cutover later).
+    //! Resident Curriculum (3-phase episode). nMatMulRCHeight defaults to the
+    //! disabled sentinel; a network must opt in with an explicit cutover.
     ENC_RC = 5,
     //! FINAL-FORM Stage C coupled puzzle (matmul_v4_rc_coupled.*). STAGED:
-    //! nMatMulRCCoupledHeight defaults to INT32_MAX on every public network.
+    //! nMatMulRCCoupledHeight defaults to the disabled sentinel.
     //! Regtest may set a finite height + fMatMulRCCoupledUseToyDims to exercise
     //! CheckMatMulProofOfWork_RCCoupled / SolveMatMulV4RCCoupled end-to-end.
     //! When live, GetMatMulEncodingProfile prefers ENC_RC_COUPLED over ENC_RC.
@@ -207,7 +207,8 @@ static constexpr uint32_t BMX4C_FALLBACK_INT8_ACCUMULATOR_BITS{32}; //!< C-1 flo
 //! relay readiness). Flip to true ONLY in the deliberate, reviewed source change
 //! of the release that ships activation, AFTER gates (1)-(2) are recorded.
 //!
-//! FLIPPED TRUE for the Epoch-A activation at mainnet height 182'600. Recorded
+//! Selected TRUE for the Epoch-A release candidate. The final mainnet height is
+//! installed atomically with the exact-final evidence-bound v0.33.2 tuple. Recorded
 //! basis: the seed-grinding advantage is exactly 1.0 and the Profile-1
 //! ExactReplay predicate is byte-reproducible across two independent
 //! accelerator vendors at one code freeze (doc/evidence/
@@ -230,7 +231,8 @@ static constexpr bool BTX_MATMUL_NO_INVERSION_GATE_RATIFIED{true};
 //! in the separately reviewed activation-height change that records those
 //! artifacts; regtest remains exempt so the implementation can be exercised.
 //!
-//! FLIPPED TRUE for the Epoch-A activation at mainnet height 182'600. Recorded
+//! Selected TRUE for the Epoch-A release candidate. The final mainnet height is
+//! installed atomically with the exact-final evidence-bound v0.33.2 tuple. Recorded
 //! artifacts, each committed under doc/evidence/ and bound to a resolvable
 //! revision and build-relevant tree fingerprint:
 //!   - frozen production goldens, CUDA + Metal, sealed at one code freeze
@@ -532,12 +534,12 @@ struct Params {
     int64_t nMatMulDRLTAsertRescaleNum{1};
     int64_t nMatMulDRLTAsertRescaleDen{1};
     /** Resident Curriculum (ENC_RC) activation height. DEFAULT = INT32_MAX =
-     *  disabled on every public network until a deliberate clean cutover.
+     *  disabled until a network installs a deliberate clean cutover.
      *  When live, GetMatMulEncodingProfile prefers ENC_RC over DRLT/BMX4C. */
     int32_t nMatMulRCHeight{std::numeric_limits<int32_t>::max()};
     /** RC transition throughput ratio at nMatMulRCHeight (calibrate from silicon).
-     *  Public nets keep the disabled implementation branch at neutral 1/1.
-     *  The activation patch must install a final-binary, provider-bound
+     *  The disabled default is neutral 1/1. A finite network activation must
+     *  install a final-binary, provider-bound
      *  Profile-1 throughput ratio together with the finite height. For the
      *  atomic Epoch-A tuple, MatMulAsert combines this ratio with the live
      *  parent target and the pre-hash epsilon using wide exact arithmetic.
@@ -591,8 +593,8 @@ struct Params {
      * too expensive for routine 90-second validation). The profile
      * selects WHICH dims activate at nMatMulRCHeight, not WHETHER — a public net
      * still only runs ENC_RC once nMatMulRCHeight is finite (and that finite
-     * public height itself remains gated on BTX_MATMUL_NO_INVERSION_GATE_RATIFIED,
-     * unflipped here). The coupled ~16× ASERT rescale takes effect together with a
+     * public height itself remains gated on BTX_MATMUL_NO_INVERSION_GATE_RATIFIED).
+     * The coupled ~16× ASERT rescale takes effect together with a
      * finite profile-2 activation height. Values other than {1,2} are rejected at
      * construction (AssertBMX4CConstructionInvariants). */
     uint32_t nMatMulRCProfile{1};
@@ -1044,8 +1046,8 @@ struct Params {
     }
     /** True at and above the Resident Curriculum (ENC_RC) height. Requires the
      *  MatMul v4 PoW path (IsMatMulV4Active) so RC only runs inside the MatMul
-     *  cascade. Self-guards the INT32_MAX disabled sentinel. Public nets keep
-     *  nMatMulRCHeight = INT32_MAX until a deliberate clean cutover. */
+     *  cascade. Self-guards the INT32_MAX disabled sentinel; each network must
+     *  install any cutover explicitly. */
     bool IsMatMulRCActive(int32_t height) const
     {
         return IsMatMulV4Active(height)
@@ -1153,7 +1155,8 @@ struct Params {
     MatMulEncodingProfile GetMatMulEncodingProfile(int32_t height) const
     {
         // ENC_RC_COUPLED takes precedence over ENC_RC (structural successor).
-        // Public nets keep both heights at INT32_MAX.
+        // Public Epoch A may enable RC Profile 1 while the coupled/Profile-2
+        // height remains disabled.
         if (IsMatMulRCCoupledActive(height)) return MatMulEncodingProfile::ENC_RC_COUPLED;
         // ENC_RC takes precedence over DRLT/BMX4C when live.
         if (IsMatMulRCActive(height)) return MatMulEncodingProfile::ENC_RC;
@@ -1393,7 +1396,7 @@ struct Params {
  * (Q16 = round(g_annual^(1/4) * 65536)). Band-0 values ≈71300 / ≈69300.
  *
  * Must be called from every CChainParams constructor so tables are never left
- * zero-filled. Inert while nMatMulRCHeight==INT32_MAX (public nets keep that).
+ * zero-filled. Inert for any network whose nMatMulRCHeight is disabled.
  */
 inline void FillDefaultRCGrowthTables(Params& p)
 {

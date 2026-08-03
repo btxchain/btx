@@ -75,7 +75,7 @@
 // ω_H·z and check C(z) = Q(z)·Z_H(z) at the FS z ∉ D) is the production
 // hardening step and needs a batched-FRI extension that opens shifted OOD
 // points; it is deliberately NOT faked here. COMPUTATIONAL — not ε=0.
-// Arbiter OFF; nMatMulRCHeight stays INT32_MAX.
+// Arbiter OFF; this quotient scaffold is not Profile-1 consensus authority.
 //
 // ============================================================================
 // WHAT ARITHMETIZES CLEANLY — AND WHAT DOES NOT (per-rule honesty).

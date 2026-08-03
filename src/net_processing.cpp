@@ -3754,16 +3754,53 @@ void PeerManagerImpl::NewPoWValidBlock(const CBlockIndex *pindex, const std::sha
         // If the peer has, or we announced to them the previous block already,
         // but we don't think they have this one, go ahead and announce it
         if (state.m_requested_hb_cmpctblocks && !PeerHasHeader(&state, pindex) && PeerHasHeader(&state, pindex->pprev)) {
-            if (rc_admission_ticket) {
-                MakeAndPushMessage(
-                    *pnode, NetMsgType::RCADMIT, *rc_admission_ticket);
-            }
             if (requires_product_payload) {
-                LogDebug(BCLog::NET, "%s sending headers %s to peer=%d because product payload is required\n",
+                // A paid RC tip child may already have been provisionally
+                // relayed as a header.  If the peer requested its body before
+                // this node finished ExactReplay, ProcessGetBlockData could
+                // not serve it yet and the request remains in-flight.  A
+                // second headers announcement alone does not trigger another
+                // request, leaving the peer stuck until its block-download
+                // timeout. High-bandwidth relay normally pushes a compact
+                // block here; payload-bearing MatMul blocks cannot use that
+                // encoding, so push the validated full block instead.
+                //
+                // Announce the header before its ticket. Otherwise a rapid
+                // sequence of honest blocks places every sidecar in the small
+                // unknown-hash quarantine and eventually exhausts its
+                // per-netgroup cap. Once the header is indexed, RCADMIT is
+                // verified directly and does not consume quarantine capacity.
+                std::vector<CBlock> relay_headers{
+                    CBlock{pblock->GetBlockHeader()}};
+                MakeAndPushMessage(
+                    *pnode, NetMsgType::HEADERS,
+                    TX_WITH_WITNESS(relay_headers));
+                if (rc_admission_ticket) {
+                    MakeAndPushMessage(
+                        *pnode, NetMsgType::RCADMIT,
+                        *rc_admission_ticket);
+                }
+                LogDebug(BCLog::NET, "%s sending full block %s to peer=%d because product payload is required\n",
                     "PeerManager::NewPoWValidBlock", hashBlock.ToString(), pnode->GetId());
-                std::vector<CBlock> vHeaders{pblock->GetBlockHeader()};
-                MakeAndPushMessage(*pnode, NetMsgType::HEADERS, TX_WITH_WITNESS(vHeaders));
+                MakeAndPushMessage(
+                    *pnode, NetMsgType::BLOCK,
+                    TX_WITH_WITNESS(*pblock));
             } else {
+                // A compact block carries its header, but RCADMIT processing
+                // deliberately quarantines tickets for unknown hashes. Send a
+                // standalone header first so the ticket is verified against a
+                // known candidate instead of consuming the small unknown-hash
+                // allowance during a rapid honest block burst.
+                std::vector<CBlock> relay_headers{
+                    CBlock{pblock->GetBlockHeader()}};
+                MakeAndPushMessage(
+                    *pnode, NetMsgType::HEADERS,
+                    TX_WITH_WITNESS(relay_headers));
+                if (rc_admission_ticket) {
+                    MakeAndPushMessage(
+                        *pnode, NetMsgType::RCADMIT,
+                        *rc_admission_ticket);
+                }
                 LogDebug(BCLog::NET, "%s sending header-and-ids %s to peer=%d\n", "PeerManager::NewPoWValidBlock",
                         hashBlock.ToString(), pnode->GetId());
 
@@ -5423,7 +5460,7 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
              authenticated_tip_child ? "tip-child" : "branch", node.GetId());
 
     // Only a paid direct child is provisionally relayed. This is an ordered
-    // rcadmit+headers hint, never a validity notification: fork choice and
+    // headers+rcadmit hint, never a validity notification: fork choice and
     // mining continue to use authenticated chainwork.
     if (!m_opts.matmul_rc_provisional_relay || !authenticated_tip_child ||
         !accepted_ticket) {
@@ -5451,15 +5488,22 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
                 }
             }
             if (!high_bandwidth) return;
-            MakeAndPushMessage(
-                *peer_node, NetMsgType::RCADMIT, *accepted_ticket);
             std::vector<CBlock> relay_headers{
                 CBlock{header}};
             MakeAndPushMessage(
                 *peer_node, NetMsgType::HEADERS,
                 TX_WITH_WITNESS(relay_headers));
+            // Index the header before the sidecar so an honest rapid relay
+            // does not consume the bounded unknown-hash quarantine.
+            MakeAndPushMessage(
+                *peer_node, NetMsgType::RCADMIT, *accepted_ticket);
             ++relayed;
         });
+    if (relayed != 0) {
+        LogDebug(BCLog::NET,
+                 "matmul: provisionally relayed paid header hash=%s peers=%u; ExactReplay remains pending\n",
+                 hash.ToString(), relayed);
+    }
 }
 
 void PeerManagerImpl::MaybeRelayProvisionalMatMulRCCompactBlock(
@@ -5513,6 +5557,13 @@ void PeerManagerImpl::MaybeRelayProvisionalMatMulRCCompactBlock(
                 }
             }
             if (!high_bandwidth) return;
+            std::vector<CBlock> relay_headers{
+                CBlock{block.GetBlockHeader()}};
+            MakeAndPushMessage(
+                *peer_node, NetMsgType::HEADERS,
+                TX_WITH_WITNESS(relay_headers));
+            // The known-header path authenticates the ticket without using
+            // the small unknown-hash quarantine.
             MakeAndPushMessage(
                 *peer_node, NetMsgType::RCADMIT, *ticket);
             MakeAndPushMessage(
@@ -11141,14 +11192,6 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                 }
             }
             if (!fRevertToInv && !vHeaders.empty()) {
-                if (vHeaders.size() == 1) {
-                    if (const auto ticket{
-                            LookupMatMulRCOutboundTicket(
-                                vHeaders.front().GetHash())}) {
-                        MakeAndPushMessage(
-                            *pto, NetMsgType::RCADMIT, *ticket);
-                    }
-                }
                 if (vHeaders.size() == 1 && state.m_requested_hb_cmpctblocks) {
                     const bool requires_product_payload =
                         m_chainparams.GetConsensus().fMatMulPOW &&
@@ -11156,12 +11199,30 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                         m_chainparams.GetConsensus().IsMatMulProductPayloadRequired(pBestIndex->nHeight);
                     if (requires_product_payload) {
                         MakeAndPushMessage(*pto, NetMsgType::HEADERS, TX_WITH_WITNESS(vHeaders));
+                        if (const auto ticket{
+                                LookupMatMulRCOutboundTicket(
+                                    vHeaders.front().GetHash())}) {
+                            MakeAndPushMessage(
+                                *pto, NetMsgType::RCADMIT, *ticket);
+                        }
                         state.pindexBestHeaderSent = pBestIndex;
                     } else {
                         // We only send up to 1 block as header-and-ids, as otherwise
                         // probably means we're doing an initial-ish-sync or they're slow
                         LogDebug(BCLog::NET, "%s sending header-and-ids %s to peer=%d\n", __func__,
                                 vHeaders.front().GetHash().ToString(), pto->GetId());
+
+                        // RC admission tickets for unknown hashes enter a
+                        // deliberately small quarantine. Index the header
+                        // before sending its sidecar, then send the compact
+                        // body only after the ticket has been authenticated.
+                        MakeAndPushMessage(*pto, NetMsgType::HEADERS, TX_WITH_WITNESS(vHeaders));
+                        if (const auto ticket{
+                                LookupMatMulRCOutboundTicket(
+                                    vHeaders.front().GetHash())}) {
+                            MakeAndPushMessage(
+                                *pto, NetMsgType::RCADMIT, *ticket);
+                        }
 
                         std::optional<CSerializedNetMsg> cached_cmpctblock_msg;
                         {
@@ -11192,6 +11253,14 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                                 vHeaders.front().GetHash().ToString(), pto->GetId());
                     }
                     MakeAndPushMessage(*pto, NetMsgType::HEADERS, TX_WITH_WITNESS(vHeaders));
+                    if (vHeaders.size() == 1) {
+                        if (const auto ticket{
+                                LookupMatMulRCOutboundTicket(
+                                    vHeaders.front().GetHash())}) {
+                            MakeAndPushMessage(
+                                *pto, NetMsgType::RCADMIT, *ticket);
+                        }
+                    }
                     state.pindexBestHeaderSent = pBestIndex;
                 } else
                     fRevertToInv = true;

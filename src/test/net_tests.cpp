@@ -19,6 +19,7 @@
 #include <span.h>
 #include <streams.h>
 #include <test/util/random.h>
+#include <test/util/net.h>
 #include <test/util/setup_common.h>
 #include <test/util/validation.h>
 #include <util/strencodings.h>
@@ -32,6 +33,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <thread>
 
 using namespace std::literals;
 using namespace util::hex_literals;
@@ -136,6 +138,52 @@ BOOST_AUTO_TEST_CASE(cnode_simple_test)
     BOOST_CHECK(pnode4->IsInboundConn() == true);
     BOOST_CHECK(pnode4->m_inbound_onion == true);
     BOOST_CHECK_EQUAL(pnode4->ConnectedThroughNetwork(), Network::NET_ONION);
+}
+
+BOOST_AUTO_TEST_CASE(connman_runtime_service_updates_and_disconnect_all)
+{
+    auto& connman{static_cast<ConnmanTestMsg&>(*m_node.connman)};
+    const ServiceFlags matmul_services{static_cast<ServiceFlags>(
+        static_cast<uint64_t>(NODE_MATMUL_CONSENSUS) |
+        static_cast<uint64_t>(NODE_MATMUL_ATTESTATION_ARCHIVE))};
+
+    connman.RemoveLocalServices(static_cast<ServiceFlags>(~uint64_t{0}));
+    connman.AddLocalServices(matmul_services);
+
+    // Snapshot completion and runtime readiness loss update this atomic from
+    // independent threads. Repeatedly race the two disjoint modifications and
+    // require neither update to be lost.
+    for (int round{0}; round < 128; ++round) {
+        connman.RemoveLocalServices(NODE_NETWORK);
+        connman.AddLocalServices(matmul_services);
+        std::thread add_network{[&] { connman.AddLocalServices(NODE_NETWORK); }};
+        std::thread remove_matmul{[&] {
+            connman.RemoveLocalServices(matmul_services);
+        }};
+        add_network.join();
+        remove_matmul.join();
+        const ServiceFlags services{connman.GetLocalServices()};
+        BOOST_CHECK((services & NODE_NETWORK) != 0);
+        BOOST_CHECK((services & matmul_services) == 0);
+    }
+
+    in_addr loopback;
+    loopback.s_addr = htonl(0x7f000001);
+    CAddress address{CService{loopback, 18444}, NODE_NONE};
+    auto* handshaking = new CNode{
+        9001, nullptr, address, 0, 0, CAddress{}, "",
+        ConnectionType::INBOUND, false, 0};
+    auto* connected = new CNode{
+        9002, nullptr, address, 0, 0, CAddress{}, "",
+        ConnectionType::INBOUND, false, 0};
+    connected->fSuccessfullyConnected = true;
+    connman.AddTestNode(*handshaking);
+    connman.AddTestNode(*connected);
+
+    BOOST_CHECK_EQUAL(connman.DisconnectAllNodes(), 2U);
+    BOOST_CHECK(handshaking->fDisconnect);
+    BOOST_CHECK(connected->fDisconnect);
+    connman.ClearTestNodes();
 }
 
 BOOST_AUTO_TEST_CASE(cnetaddr_basic)

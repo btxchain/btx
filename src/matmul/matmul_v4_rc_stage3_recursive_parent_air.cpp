@@ -6714,7 +6714,7 @@ AssessChildFsReplayClosureV1()
     // to validation, mining or P2P is cut by `if constexpr
     // (kRCStage3SuccinctAuthorityReady)` with that constant false
     // (matmul_v4_rc_stage3.h:214), so the branch is a discarded statement and is
-    // not emitted; mainnet/testnet nMatMulRCHeight is INT32_MAX and hard-
+    // not emitted; Stage-3 authority is disabled on public networks and hard-
     // asserted on mainnet.  So a memo would be ARCHITECTURALLY acceptable --
     // computed, no artifact, no cross-version staleness.  It fails on COST, not
     // principle: memoized or not, the first reader in each process pays the

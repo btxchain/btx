@@ -17,7 +17,7 @@
 //
 // SOUNDNESS HONESTY: computational under SHA256d FS + Fp2 (ROM/SZ-style
 // bounds deg/|F| per round). NOT ε=0. Full STREAMED replay remains available
-// as dispute/oracle until Stage I cutover. nMatMulRCHeight stays INT32_MAX.
+// as dispute/oracle only; ExactReplay remains the active Profile-1 authority.
 
 namespace matmul::v4::rc::gkr_field {
 

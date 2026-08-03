@@ -16,7 +16,7 @@
 // Types MxLaneProvenance / ExactMxProjectionBackend live in matmul_v4_lt.h.
 // Consensus oracle remains ComputeProjectedRightMxBlockScaleLT.
 // Native MXFP4/FP8 may be attempted only behind self-qual; fail-closed otherwise.
-// Public activation heights remain INT32_MAX. C-15 remains OPEN.
+// Public LT/DRLT activation heights remain disabled. C-15 remains OPEN.
 //
 // FP32-exact window (eligibility math, not silicon proof):
 //   M11 = {0,±1,±2,±3,±4,±6} → max |μ| = max |V| = 6 (11 symbols, not |x|≤11).
