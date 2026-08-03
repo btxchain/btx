@@ -4,6 +4,7 @@
 
 #include <matmul/matmul_v4_rc_production_canary.h>
 
+#include <bitcoin-build-info.h>
 #include <consensus/params.h>
 #include <cuda/cuda_context.h>
 #include <cuda/matmul_v4_lt_tensor_gemm.h>
@@ -75,6 +76,34 @@ std::map<std::string, CapabilityRecord> g_provider_capabilities;
 uint64_t g_capability_process_nonce{0};
 uint64_t g_next_capability_generation{1};
 constexpr size_t MAX_PROVIDER_CAPABILITIES{8};
+
+std::string EmbeddedBuildRevision()
+{
+#ifdef BUILD_GIT_FULL_COMMIT
+    return BUILD_GIT_FULL_COMMIT;
+#else
+    return {};
+#endif
+}
+
+std::string EmbeddedBuildSourceTreeFingerprint()
+{
+#ifdef BUILD_GIT_SOURCE_TREE_FINGERPRINT
+    return BUILD_GIT_SOURCE_TREE_FINGERPRINT;
+#else
+    return {};
+#endif
+}
+
+bool EmbeddedBuildIsDirty()
+{
+#ifdef BUILD_GIT_DIRTY
+    return BUILD_GIT_DIRTY != 0;
+#else
+    // A build that cannot prove cleanliness is not activation-authorizing.
+    return true;
+#endif
+}
 
 bool ParamsEqual(const RCEpisodeParams& a, const RCEpisodeParams& b)
 {
@@ -398,11 +427,10 @@ std::string ReadPublicSysctlString(const char* name)
 
 } // namespace
 
-// CommittedRCProductionGoldenManifest() lives in
-// matmul_v4_rc_production_golden_manifest.cpp. It is a pure data literal and
-// is deliberately excluded from the build-relevant source_tree_fingerprint it
-// carries -- see that file for why a self-describing seal is otherwise
-// impossible. Keep behaviour here, where the freeze still binds it.
+// CommittedRCProductionGoldenManifest() lives in a fully fingerprinted C++
+// parser. Only its inert input data is excluded from the implementation
+// fingerprint so a self-describing seal is possible without leaving executable
+// code outside the freeze.
 bool RCProductionGoldenManifestCohortValid(
     const std::vector<RCProductionGoldenManifestEntry>& manifest)
 {
@@ -443,6 +471,18 @@ bool RCProductionGoldenManifestCohortValid(
         has_metal = has_metal || entry.provider_class.provider_family == "metal";
     }
     return has_cuda && has_metal;
+}
+
+bool RCProductionGoldenManifestMatchesBuild(
+    const std::vector<RCProductionGoldenManifestEntry>& manifest,
+    const std::string& build_source_tree_fingerprint,
+    const bool build_source_dirty)
+{
+    return !build_source_dirty &&
+        IsHexIdentity(build_source_tree_fingerprint, 64) &&
+        RCProductionGoldenManifestCohortValid(manifest) &&
+        manifest.front().source_tree_fingerprint ==
+            build_source_tree_fingerprint;
 }
 
 RCProductionProviderIdentity
@@ -615,6 +655,14 @@ static RCProductionCanaryStatus RunRCProductionStartupCanaryImpl(
     out.manifest_entries = manifest.size();
     out.manifest_has_reviewed_goldens =
         RCProductionGoldenManifestCohortValid(manifest);
+    out.build_source_revision = EmbeddedBuildRevision();
+    out.build_source_tree_fingerprint =
+        EmbeddedBuildSourceTreeFingerprint();
+    out.build_source_dirty = EmbeddedBuildIsDirty();
+    out.build_provenance_matches =
+        RCProductionGoldenManifestMatchesBuild(
+            manifest, out.build_source_tree_fingerprint,
+            out.build_source_dirty);
 
     if (out.epoch.matmul_dimension == 0 ||
         out.epoch.matmul_dimension > std::numeric_limits<uint16_t>::max()) {
@@ -629,6 +677,15 @@ static RCProductionCanaryStatus RunRCProductionStartupCanaryImpl(
         consensus.fMatMulRCUseToyDims) {
         out.outcome = RCProductionCanaryOutcome::UnsupportedEpoch;
         out.reason = "production_profile1_epoch_not_configured";
+        StoreStatus(out);
+        return out;
+    }
+
+    if (!out.build_provenance_matches) {
+        out.outcome = RCProductionCanaryOutcome::BuildProvenanceMismatch;
+        out.reason = out.build_source_dirty
+            ? "running_binary_built_from_dirty_source"
+            : "production_manifest_does_not_match_running_binary";
         StoreStatus(out);
         return out;
     }
@@ -934,6 +991,8 @@ const char* RCProductionCanaryOutcomeName(RCProductionCanaryOutcome outcome)
         return "local_accelerator_failure";
     case RCProductionCanaryOutcome::DigestMismatch: return "digest_mismatch";
     case RCProductionCanaryOutcome::UnsupportedEpoch: return "unsupported_epoch";
+    case RCProductionCanaryOutcome::BuildProvenanceMismatch:
+        return "build_provenance_mismatch";
     }
     return "unknown";
 }

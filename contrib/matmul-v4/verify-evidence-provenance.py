@@ -32,21 +32,23 @@ from pathlib import Path
 
 # Must stay in sync with multi-gpu-golden-corpus.sh and the production-golden
 # policy. Any change in these paths invalidates evidence equivalence.
-BUILD_RELEVANT = ("CMakeLists.txt", "cmake", "src")
+BUILD_RELEVANT = ("CMakeLists.txt", "cmake", "src", "contrib/matmul-v4")
 
-# The data-only TU that HOLDS the fingerprint is excluded from it. Sealing is
-# otherwise a fixed point -- writing the hash into the tree changes the tree --
-# so a manifest could only ever cite its own parent commit. Must stay identical
-# to FINGERPRINT_EXCLUDE in multi-gpu-golden-corpus.sh, byte for byte, or the
-# two tools will disagree about what a valid seal is.
+# The inert manifest data file that holds the fingerprint is excluded from it.
+# Its bytes are converted to a C++ byte array by fingerprinted CMake logic and
+# parsed by fingerprinted C++, so the excluded surface cannot inject code.
+# Sealing is otherwise a fixed point. Keep this identical to the shell helper.
 EXCLUDED_FROM_FINGERPRINT = (
-    b"src/matmul/matmul_v4_rc_production_golden_manifest.cpp",
+    b"src/matmul/matmul_v4_rc_production_golden_manifest.data",
 )
 # git_tip_sha is used by doc/evidence/cuda-blackwell-16gib-profile1-loaded-*/;
 # omitting it meant that artifact's revision was never resolved at all.
 REVISION_KEYS = ("source_revision", "git_tip", "git_tip_sha", "tip_sha")
 FINGERPRINT_KEY = "source_tree_fingerprint"
 DEFAULT_EXCLUSIONS = "contrib/matmul-v4/evidence-provenance-exclusions.json"
+PRODUCTION_MANIFEST = Path(
+    "src/matmul/matmul_v4_rc_production_golden_manifest.data"
+)
 
 
 def repo_root(start: Path) -> Path:
@@ -261,6 +263,37 @@ def main() -> int:
             failures.append(
                 f"unused historical exclusion: {evidence_path} revision {revision!r}"
             )
+
+        # A populated production manifest is more than another provenance
+        # string.  It is a release seal over an exact CUDA+Metal corpus and a
+        # freeze commit.  Validate the raw artifacts, canonical headers,
+        # provider metadata, harness identities, and freeze -> seal ancestry as
+        # one atomic gate.  Historical fixture repositories without the
+        # manifest are intentionally unaffected.
+        production_manifest = root / PRODUCTION_MANIFEST
+        if production_manifest.is_file():
+            seal_script = Path(__file__).with_name(
+                "verify-production-golden-seal.py"
+            )
+            seal = subprocess.run(
+                [
+                    sys.executable,
+                    str(seal_script),
+                    "seal",
+                    "--root",
+                    str(root),
+                    "--manifest",
+                    PRODUCTION_MANIFEST.as_posix(),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if seal.returncode:
+                detail = (seal.stderr or seal.stdout).strip()
+                failures.append(f"production golden seal failed: {detail}")
+            elif seal.stdout.strip():
+                print(seal.stdout.strip())
 
     for warning in warnings:
         print(f"WARN  {warning}")

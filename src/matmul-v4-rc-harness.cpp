@@ -13,6 +13,7 @@
 //   matmul-v4-rc-harness --help
 
 #include <arith_uint256.h>
+#include <bitcoin-build-info.h>
 #include <chainparams.h>
 #include <common/args.h>
 #include <util/chaintype.h>
@@ -63,6 +64,45 @@ std::string g_sha256_implementation{"uninitialized"};
 namespace rc = matmul::v4::rc;
 
 namespace {
+
+std::string EmbeddedSourceRevision()
+{
+#ifdef BUILD_GIT_FULL_COMMIT
+    return BUILD_GIT_FULL_COMMIT;
+#else
+    return {};
+#endif
+}
+
+bool EmbeddedSourceDirty()
+{
+#ifdef BUILD_GIT_DIRTY
+    return BUILD_GIT_DIRTY != 0;
+#else
+    // Missing immutable build metadata is not admissible as a clean binary.
+    return true;
+#endif
+}
+
+void PushBuildProvenance(UniValue& root)
+{
+    root.pushKV("embedded_source_revision", EmbeddedSourceRevision());
+    root.pushKV("embedded_source_dirty", EmbeddedSourceDirty());
+}
+
+std::string MainnetRCConsensusNote()
+{
+    ArgsManager harness_args;
+    const auto mainnet{CreateChainParams(harness_args, ChainType::MAIN)};
+    const int32_t height{mainnet->GetConsensus().nMatMulRCHeight};
+    if (height == std::numeric_limits<int32_t>::max()) {
+        return "mainnet nMatMulRCHeight=INT32_MAX (ENC_RC not activated); "
+               "this harness never authorizes an activation";
+    }
+    return "mainnet nMatMulRCHeight=" + std::to_string(height) +
+           " (ENC_RC activation height is set); this harness reports evidence "
+           "but does not authorize or change consensus parameters";
+}
 
 struct Args {
     bool toy{true};
@@ -870,6 +910,7 @@ int RunCoupledHarness(const Args& args)
         root.pushKV("source_revision", tip);
         root.pushKV("git_tip", tip);
     }
+    PushBuildProvenance(root);
 
     std::ofstream ofs(args.out_path, std::ios::trunc);
     if (!ofs) {
@@ -887,17 +928,7 @@ int RunCoupledHarness(const Args& args)
         // sentence. This line is copied verbatim into evidence artifacts, and
         // while it was hard-coded those artifacts asserted that activation was
         // disabled even when produced from a tree where it is live.
-        ArgsManager harness_args;
-        const auto mainnet{CreateChainParams(harness_args, ChainType::MAIN)};
-        const int32_t rc_height{mainnet->GetConsensus().nMatMulRCHeight};
-        if (rc_height == std::numeric_limits<int32_t>::max()) {
-            std::cout << "  consensus:  mainnet nMatMulRCHeight=INT32_MAX "
-                         "(ENC_RC not activated)\n";
-        } else {
-            std::cout << "  consensus:  mainnet nMatMulRCHeight=" << rc_height
-                      << " (ENC_RC activation height is SET; this harness does "
-                         "not authorize it)\n";
-        }
+        std::cout << "  consensus:  " << MainnetRCConsensusNote() << "\n";
     }
     const bool ok = digests_match && mine_matches;
     std::cout << (ok ? "RESULT: coupled modes PASS\n" : "RESULT: coupled modes FAIL\n");
@@ -933,6 +964,7 @@ UniValue ParamsJson(const rc::RCEpisodeParams& p)
     o.pushKV("n_ctx", static_cast<uint64_t>(p.n_ctx));
     o.pushKV("L_lyr", static_cast<uint64_t>(p.L_lyr));
     o.pushKV("d_model", static_cast<uint64_t>(p.d_model));
+    o.pushKV("d_ff", static_cast<uint64_t>(p.d_ff));
     o.pushKV("b_seq", static_cast<uint64_t>(p.b_seq));
     o.pushKV("T_leaf", static_cast<uint64_t>(p.T_leaf));
     return o;
@@ -962,7 +994,10 @@ int RunProveWinnerGkrHarness(const Args& args)
     root.pushKV("e5_direction", "DECIDED");
     root.pushKV("e5_path", "winner_only_gkr_sumcheck");
     root.pushKV("soundness", "computational_not_eps0");
-    root.pushKV("consensus_note", "nMatMulRCHeight remains INT32_MAX");
+    root.pushKV(
+        "consensus_note",
+        "Winner-only GKR remains non-authoritative; Profile-1 consensus uses "
+        "ExactReplay whenever its network activation height is reached.");
 
     if (args.coupled) {
         const rc::RCCoupParams params = args.coupled_v3_ci ? rc::MakeMediumV3RCCoupParams()
@@ -1811,6 +1846,7 @@ int main(int argc, char* argv[])
         root.pushKV("source_revision", tip);
         root.pushKV("git_tip", tip);
     }
+    PushBuildProvenance(root);
     root.pushKV("peak_rss_kib", static_cast<uint64_t>(peak_rss_kib));
     root.pushKV("run_variance", run_variance);
     root.pushKV("params", ParamsJson(params));
@@ -1831,8 +1867,8 @@ int main(int argc, char* argv[])
                 device_run && acceleration_totals.fully_accelerated);
     root.pushKV("nvlink_campaign_present", false);
     root.pushKV("consensus_note",
-                "nMatMulRCHeight remains INT32_MAX; ENC_RC activation is NO-GO. "
-                "This harness never recommends raising consensus height. "
+                MainnetRCConsensusNote() + ". "
+                "This harness never recommends changing consensus height. "
                 "Projections/MAC estimates are NOT EVIDENCE for rc-gate GO. "
                 "Cross-host Metal and datacenter campaigns remain Stage G blockers.");
 
@@ -1857,17 +1893,7 @@ int main(int argc, char* argv[])
         // sentence. This line is copied verbatim into evidence artifacts, and
         // while it was hard-coded those artifacts asserted that activation was
         // disabled even when produced from a tree where it is live.
-        ArgsManager harness_args;
-        const auto mainnet{CreateChainParams(harness_args, ChainType::MAIN)};
-        const int32_t rc_height{mainnet->GetConsensus().nMatMulRCHeight};
-        if (rc_height == std::numeric_limits<int32_t>::max()) {
-            std::cout << "  consensus:  mainnet nMatMulRCHeight=INT32_MAX "
-                         "(ENC_RC not activated)\n";
-        } else {
-            std::cout << "  consensus:  mainnet nMatMulRCHeight=" << rc_height
-                      << " (ENC_RC activation height is SET; this harness does "
-                         "not authorize it)\n";
-        }
+        std::cout << "  consensus:  " << MainnetRCConsensusNote() << "\n";
     }
     std::cout << (g1_pass ? "RESULT: ExtractMX self-qual PASS\n"
                           : "RESULT: ExtractMX self-qual FAIL\n");

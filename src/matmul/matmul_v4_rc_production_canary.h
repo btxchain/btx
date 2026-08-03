@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace Consensus {
@@ -65,10 +66,14 @@ struct RCProductionEpochIdentity {
 
 /** One independently reproduced, reviewable production-shape golden.
  *
- * Entries are exact: provider family, device architecture, runtime/driver,
- * activation height, transcript version, consensus MatMul dimension, and every
- * episode dimension must all match. A pending/null/unreviewed entry can never
- * authorize a provider.
+ * Entries exactly bind provider family and architecture, transcript version,
+ * consensus MatMul dimension, every episode dimension, header nonce/digest,
+ * source fingerprint, and harness binary. The epoch height may use the
+ * explicitly documented ANY_ACTIVATION_HEIGHT sentinel because it is not a
+ * canary-header input; the live capability separately binds the configured
+ * height. Runtime/driver identity is probed and reported at qualification time,
+ * not stored as a manifest-field wildcard. A pending/null/unreviewed entry can
+ * never authorize a provider.
  */
 struct RCProductionGoldenManifestEntry {
     std::string id;
@@ -95,17 +100,22 @@ enum class RCProductionCanaryOutcome : uint8_t {
     LocalAcceleratorFailure = 5,
     DigestMismatch = 6,
     UnsupportedEpoch = 7,
+    BuildProvenanceMismatch = 8,
 };
 
 struct RCProductionCanaryStatus {
     RCProductionCanaryOutcome outcome{RCProductionCanaryOutcome::NotRun};
     bool manifest_has_reviewed_goldens{false};
+    bool build_provenance_matches{false};
+    bool build_source_dirty{true};
     bool exact_manifest_match{false};
     bool attempted{false};
     bool passed{false};
     bool activation_ready{false};
     size_t manifest_entries{0};
     std::string manifest_entry_id;
+    std::string build_source_revision;
+    std::string build_source_tree_fingerprint;
     std::string provider;
     RCProductionProviderIdentity provider_identity{};
     RCProductionEpochIdentity epoch{};
@@ -146,9 +156,23 @@ private:
 [[nodiscard]] const std::vector<RCProductionGoldenManifestEntry>&
 CommittedRCProductionGoldenManifest();
 
+/** Parse the strictly data-only production seal. This is public for fail-closed
+ * parser tests; production callers use CommittedRCProductionGoldenManifest(). */
+[[nodiscard]] std::vector<RCProductionGoldenManifestEntry>
+ParseRCProductionGoldenManifestData(std::string_view encoded);
+
 /** Require one coherent independently reproduced CUDA+Metal cohort. */
 [[nodiscard]] bool RCProductionGoldenManifestCohortValid(
     const std::vector<RCProductionGoldenManifestEntry>& manifest);
+
+/** Bind a structurally valid cohort to the implementation fingerprint embedded
+ * in the running binary. The data-only manifest seal is excluded from that
+ * fingerprint, so the reviewed code-freeze and its later seal can agree
+ * without a circular hash. Dirty builds never match. */
+[[nodiscard]] bool RCProductionGoldenManifestMatchesBuild(
+    const std::vector<RCProductionGoldenManifestEntry>& manifest,
+    const std::string& build_source_tree_fingerprint,
+    bool build_source_dirty);
 
 [[nodiscard]] RCProductionProviderIdentity
 ProbeRCProductionProviderIdentity(const std::string& resolved_provider);

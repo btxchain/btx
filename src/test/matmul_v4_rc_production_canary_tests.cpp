@@ -113,6 +113,35 @@ BOOST_AUTO_TEST_CASE(committed_manifest_is_a_valid_single_freeze_cohort)
     }
 }
 
+BOOST_AUTO_TEST_CASE(data_only_manifest_parser_is_strict_and_inert)
+{
+    const std::string valid{
+        "BTX_RC_PRODUCTION_GOLDEN_V1\n"
+        "cuda-entry|cuda|sm_120|1|" + std::string(64, '1') +
+        "|1|doc/evidence/corpus|" + std::string(40, '2') + "|" +
+        std::string(64, '3') + "|" + std::string(64, '4') + "\n"
+        "metal-entry|metal|m4_class|1|" + std::string(64, '1') +
+        "|1|doc/evidence/corpus|" + std::string(40, '2') + "|" +
+        std::string(64, '3') + "|" + std::string(64, '5') + "\n"};
+    const auto parsed{rc::ParseRCProductionGoldenManifestData(valid)};
+    BOOST_REQUIRE_EQUAL(parsed.size(), 2U);
+    BOOST_CHECK(rc::RCProductionGoldenManifestCohortValid(parsed));
+
+    // The excluded file is converted to byte literals before this parser sees
+    // it. Code-like text, extra fields, and malformed hex must only produce an
+    // empty fail-closed manifest; they can never become generated C++ syntax.
+    BOOST_CHECK(rc::ParseRCProductionGoldenManifestData(
+        valid + "}; std::abort(); //").empty());
+    std::string extra_field{valid};
+    extra_field.replace(extra_field.find("|1|doc/evidence"),
+                        std::string{"|1|doc/evidence"}.size(),
+                        "|1|unexpected|doc/evidence");
+    BOOST_CHECK(rc::ParseRCProductionGoldenManifestData(extra_field).empty());
+    std::string malformed_hex{valid};
+    malformed_hex[malformed_hex.find(std::string(64, '1'))] = 'z';
+    BOOST_CHECK(rc::ParseRCProductionGoldenManifestData(malformed_hex).empty());
+}
+
 BOOST_AUTO_TEST_CASE(parameter_interaction_is_accelerator_runtime_probe_free)
 {
     matmul_v4::accel::ResetRCExactGemmResolveCacheForTest();
@@ -346,6 +375,20 @@ BOOST_AUTO_TEST_CASE(golden_cohort_rejects_missing_or_divergent_backend)
     };
     divergent.push_back(unknown);
     BOOST_CHECK(!rc::RCProductionGoldenManifestCohortValid(divergent));
+}
+
+BOOST_AUTO_TEST_CASE(golden_cohort_must_match_clean_running_implementation)
+{
+    const auto cohort{GoldenCohort()};
+    BOOST_REQUIRE(rc::RCProductionGoldenManifestCohortValid(cohort));
+    BOOST_CHECK(rc::RCProductionGoldenManifestMatchesBuild(
+        cohort, std::string(64, '2'), /*build_source_dirty=*/false));
+    BOOST_CHECK(!rc::RCProductionGoldenManifestMatchesBuild(
+        cohort, std::string(64, '2'), /*build_source_dirty=*/true));
+    BOOST_CHECK(!rc::RCProductionGoldenManifestMatchesBuild(
+        cohort, std::string(64, '4'), /*build_source_dirty=*/false));
+    BOOST_CHECK(!rc::RCProductionGoldenManifestMatchesBuild(
+        cohort, "not-a-fingerprint", /*build_source_dirty=*/false));
 }
 
 BOOST_AUTO_TEST_CASE(canary_result_requires_full_device_coverage_and_exact_digest)

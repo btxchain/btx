@@ -75,17 +75,17 @@ sha256_file() {
   sha256_stdin < "$1"
 }
 
-# The one path excluded from the build-relevant fingerprint: the data-only TU
-# that HOLDS the fingerprint. Without this exclusion sealing is a fixed-point
-# problem -- writing the hash into the tree changes the tree -- so a manifest
-# could only ever cite its own parent commit. The excluded file is a pure data
-# literal by construction; see its header comment. Keep this list identical to
-# EXCLUDED_FROM_FINGERPRINT in verify-evidence-provenance.py.
-FINGERPRINT_EXCLUDE='src/matmul/matmul_v4_rc_production_golden_manifest.cpp'
+# The one path excluded from the build-relevant fingerprint is inert manifest
+# data. CMake converts every input byte to a numeric byte-array literal, and
+# fingerprinted C++ parses a strict schema, so this exclusion cannot inject
+# executable code. Without it, writing the fingerprint into the manifest would
+# be a fixed-point problem. Keep this identical to the Python verifier.
+FINGERPRINT_EXCLUDE='src/matmul/matmul_v4_rc_production_golden_manifest.data'
 
 build_relevant_tree() {
   git -C "${REPO_ROOT}" ls-tree -r --full-tree "$1" -- \
-    CMakeLists.txt cmake src | grep -v "	${FINGERPRINT_EXCLUDE}\$"
+    CMakeLists.txt cmake src contrib/matmul-v4 | \
+    grep -v "	${FINGERPRINT_EXCLUDE}\$"
 }
 
 build_relevant_fingerprint() {
@@ -107,7 +107,7 @@ if [[ ${COMPARE_ONLY} -eq 0 ]]; then
     die "not a git checkout: cannot establish source provenance"
   fi
   DIRTY="$(git -C "${REPO_ROOT}" status --porcelain -- \
-    CMakeLists.txt cmake src 2>/dev/null || true)"
+    CMakeLists.txt cmake src contrib/matmul-v4 2>/dev/null || true)"
   if [[ -n "${DIRTY}" ]]; then
     echo "multi-gpu-golden-corpus: build-relevant working tree is dirty:" >&2
     echo "${DIRTY}" >&2
@@ -282,6 +282,8 @@ for be, path in zip(backends, raw_paths):
             "cpu_fallbacks", raw.get("cpu_gemm_fallbacks")
         ),
         "source_revision": raw.get("source_revision") or raw.get("git_tip") or "unknown",
+        "embedded_source_revision": raw.get("embedded_source_revision"),
+        "embedded_source_dirty": raw.get("embedded_source_dirty"),
         "source_tree_fingerprint": raw.get("source_tree_fingerprint"),
         "harness_sha256": raw.get("harness_sha256"),
         "provider": (raw.get("exact_replay_acceleration") or {}).get("provider")
@@ -335,6 +337,15 @@ for be in backends:
         coverage_failures.append({"backend": be, "reason": "source_revision_invalid"})
     elif source_revision.lower() != tip_sha.lower():
         coverage_failures.append({"backend": be, "reason": "source_revision_mismatch"})
+    embedded_revision = by_backend[be]["embedded_source_revision"]
+    if not isinstance(embedded_revision, str) or not re.fullmatch(
+        r"[0-9a-fA-F]{40}", embedded_revision
+    ):
+        coverage_failures.append({"backend": be, "reason": "embedded_source_revision_invalid"})
+    elif embedded_revision.lower() != tip_sha.lower():
+        coverage_failures.append({"backend": be, "reason": "embedded_source_revision_mismatch"})
+    if by_backend[be]["embedded_source_dirty"] is not False:
+        coverage_failures.append({"backend": be, "reason": "embedded_source_dirty"})
     if by_backend[be]["source_tree_fingerprint"] != source_tree_fingerprint:
         coverage_failures.append({"backend": be, "reason": "source_tree_fingerprint_mismatch"})
     if not isinstance(by_backend[be]["harness_sha256"], str) or not re.fullmatch(
@@ -423,6 +434,8 @@ payload = {
             "all_consensus_macs_on_device": by_backend[be]["all_consensus_macs_on_device"],
             "cpu_gemm_fallbacks": by_backend[be]["cpu_gemm_fallbacks"],
             "source_revision": by_backend[be]["source_revision"],
+            "embedded_source_revision": by_backend[be]["embedded_source_revision"],
+            "embedded_source_dirty": by_backend[be]["embedded_source_dirty"],
             "source_tree_fingerprint": by_backend[be]["source_tree_fingerprint"],
             "harness_sha256": by_backend[be]["harness_sha256"],
             "provider": by_backend[be]["provider"],
@@ -439,7 +452,7 @@ payload = {
         "Production goldens require byte-identical ExactReplay digests across CUDA and Metal for the same frozen canary headers.",
         "HIP remains an optional provider; any supplied HIP corpus must match the required cohort exactly.",
         "CPU ExactReplay is not an accepted independent reproduction path for Epoch-A production goldens.",
-        "Every required artifact is bound to the exact requested source revision and a raw provider implementation consistent with its declared backend family.",
+        "Every required artifact is bound to the exact clean revision embedded in its harness binary and a raw provider implementation consistent with its declared backend family.",
         "CommittedRCProductionGoldenManifest may be populated only from a reviewed corpus where complete_multi_gpu_match is true.",
         "Public evidence must remain machine-class only (no hostname/SKU/path identifiers).",
     ],
@@ -456,11 +469,33 @@ payload = {
 }
 out_path.write_text(json.dumps(payload, indent=2) + "\n")
 print(json.dumps({"wrote": str(out_path), "cuda_metal_match": cuda_metal_match, "complete_multi_gpu_match": complete_match, "mismatches": len(mismatches), "coverage_failures": len(coverage_failures)}, indent=2))
-if (mismatches or coverage_failures) and not allow_partial:
+if mismatches or coverage_failures:
     raise SystemExit("header/digest/coverage mismatch across backends")
 if not complete_match and not allow_partial:
     raise SystemExit("incomplete multi-GPU set (need cuda+metal with matching digests)")
 PY
+
+# Re-parse the raw artifacts through the release-grade validator.  The legacy
+# inline comparison above is retained only to keep the human-readable mismatch
+# output stable; this verifier is the authoritative gate and rewrites the
+# comparison with raw-artifact hashes, canonical-header hashes, exact
+# production-shape/MAC checks, and immutable binary provenance.
+VERIFY_ARGS=(
+  compare
+  --out "${MERGE_OUT}"
+  --revision "${TIP_SHA}"
+  --fingerprint "${SOURCE_TREE_FINGERPRINT}"
+  --nonce-start "${NONCE_START}"
+  --episodes "${EPISODES}"
+)
+if [[ ${ALLOW_PARTIAL} -eq 1 ]]; then
+  VERIFY_ARGS+=(--allow-partial)
+fi
+for ((i = 0; i < ${#OK_BACKENDS[@]}; ++i)); do
+  VERIFY_ARGS+=(--artifact "${OK_BACKENDS[$i]}=${RAW_JSONS[$i]}")
+done
+python3 "${REPO_ROOT}/contrib/matmul-v4/verify-production-golden-seal.py" \
+  "${VERIFY_ARGS[@]}"
 
 # Sanitized README stub (no host paths). Preserve a reviewed evidence README on
 # compare-only or repeat runs instead of replacing it with generic text.
@@ -468,9 +503,12 @@ if [[ ! -f "${OUT_DIR}/README.md" ]]; then
 cat > "${OUT_DIR}/README.md" <<EOF
 # Multi-GPU Profile-1 ExactReplay golden compare
 
-Status: corpus runner output. Inspect \`multi-gpu-digest-compare.json\` for the
-fail-closed result. Public Epoch-A heights remain disabled until a matching
-CUDA+Metal corpus is committed to \`CommittedRCProductionGoldenManifest()\`.
+Status: **non-authorizing corpus-runner output**. Inspect
+\`multi-gpu-digest-compare.json\` for the fail-closed comparison result. This
+artifact does not change consensus parameters, ratification flags, or the
+committed production manifest. The release gate closes only after CUDA and
+Metal reproduce the exact final clean code freeze and the reviewed seal is
+committed through \`CommittedRCProductionGoldenManifest()\`.
 
 ## Policy
 

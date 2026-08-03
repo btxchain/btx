@@ -146,8 +146,9 @@ def main() -> int:
         errors.append(f"missing {COUPLED_H}")
 
     # Stage F: three-axis schedule ON with AI HBM/fabric epoch-0 dials.
-    # Public activation still NO-GO (nMatMulRCHeight=INT32_MAX). Growth ratios
-    # remain PROVISIONAL; episode n_ctx is capped so toy V1 golden stays stable.
+    # The Params type remains fail-closed by default; each network schedule is
+    # installed separately in chainparams. Growth ratios remain provisional;
+    # episode n_ctx is capped so the toy V1 golden stays stable.
     if SCALE_AXES_H.is_file():
         axes = SCALE_AXES_H.read_text(encoding="utf-8")
         if not re.search(
@@ -156,7 +157,7 @@ def main() -> int:
         ):
             errors.append(
                 "kRCThreeAxisScheduleEnabled must be true (AI datacenter levers configured; "
-                "public height remains INT32_MAX)"
+                "network activation is selected only in chainparams)"
             )
         if not re.search(
             r"kRCAxisW0State\s*=\s*48ull\s*<<\s*30",
@@ -166,7 +167,7 @@ def main() -> int:
     else:
         errors.append(f"missing {SCALE_AXES_H}")
 
-    # Activation sentinel: nMatMulRCHeight stays INT32_MAX on the Params default.
+    # Construction sentinel: nMatMulRCHeight stays INT32_MAX on bare Params.
     if PARAMS_H.is_file():
         params = PARAMS_H.read_text(encoding="utf-8")
         if not re.search(
@@ -175,7 +176,7 @@ def main() -> int:
         ):
             errors.append(
                 "nMatMulRCHeight must default to std::numeric_limits<int32_t>::max() "
-                "(activation NO-GO)"
+                "(network schedules must opt in explicitly)"
             )
     else:
         errors.append(f"missing {PARAMS_H}")
@@ -238,7 +239,7 @@ def main() -> int:
             "Silent golden replacement forbidden. V2 requires new domain tags "
             "+ BOTH goldens kept. Coupled toy golden is a separate frozen digest. "
             "kRCThreeAxisScheduleEnabled=true with 48 GiB W0 / 4 GiB X0 "
-            "(AI datacenter levers); nMatMulRCHeight stays INT32_MAX."
+            "(AI datacenter levers); bare Params stays fail-closed."
         ),
     }
 

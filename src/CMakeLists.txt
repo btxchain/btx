@@ -479,6 +479,24 @@ add_custom_target(generate_build_info
   COMMENT "Generating bitcoin-build-info.h"
   VERBATIM
 )
+
+# The production-golden seal contains its own implementation fingerprint, so
+# the inert data file cannot participate in that fingerprint. Keep the excluded
+# surface non-executable: convert every byte to a numeric C++ array literal at
+# configure time, then let fingerprinted C++ parse a strict schema. Arbitrary
+# data-file contents can therefore never escape into generated C++ syntax.
+set(RC_PRODUCTION_GOLDEN_DATA
+  ${PROJECT_SOURCE_DIR}/src/matmul/matmul_v4_rc_production_golden_manifest.data
+)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+  ${RC_PRODUCTION_GOLDEN_DATA}
+)
+file(READ ${RC_PRODUCTION_GOLDEN_DATA} RC_PRODUCTION_GOLDEN_HEX HEX)
+string(REGEX REPLACE "([0-9a-fA-F][0-9a-fA-F])" "0x\\1," RC_PRODUCTION_GOLDEN_BYTES "${RC_PRODUCTION_GOLDEN_HEX}")
+file(WRITE ${PROJECT_BINARY_DIR}/src/matmul-rc-production-golden-manifest-data.h
+  "#pragma once\ninline constexpr unsigned char kRCProductionGoldenManifestData[] = {${RC_PRODUCTION_GOLDEN_BYTES}0x00};\n"
+)
+
 add_library(bitcoin_clientversion STATIC EXCLUDE_FROM_ALL
   clientversion.cpp
 )
@@ -1987,7 +2005,9 @@ if(BUILD_UTIL)
   # ENC_RC (Resident Curriculum) real CPU measurement harness — feeds rc-gate.py.
   # Toy dims by default; never raises nMatMulRCHeight.
   add_executable(matmul-v4-rc-harness matmul-v4-rc-harness.cpp)
+  add_dependencies(matmul-v4-rc-harness generate_build_info)
   target_include_directories(matmul-v4-rc-harness PRIVATE
+    ${PROJECT_BINARY_DIR}/src
     $<TARGET_PROPERTY:univalue,INTERFACE_INCLUDE_DIRECTORIES>
   )
   target_link_libraries(matmul-v4-rc-harness
@@ -2001,6 +2021,26 @@ if(BUILD_UTIL)
     )
   endif()
   install_binary_component(matmul-v4-rc-harness)
+
+  # Exact-revision MatMul-v3 parent-rate half of the Epoch-A ASERT campaign.
+  # This used to be an out-of-tree source snippet, which could silently rot and
+  # made binary provenance operator-asserted. Build and install it alongside the
+  # RC harness so both halves embed the same immutable revision/fingerprint.
+  add_executable(matmul-v3-asert-calibration
+    ${PROJECT_SOURCE_DIR}/contrib/matmul-v4/measure-v3-regimes.cpp
+  )
+  add_dependencies(matmul-v3-asert-calibration generate_build_info)
+  target_include_directories(matmul-v3-asert-calibration PRIVATE
+    ${PROJECT_BINARY_DIR}/src
+    $<TARGET_PROPERTY:univalue,INTERFACE_INCLUDE_DIRECTORIES>
+  )
+  target_link_libraries(matmul-v3-asert-calibration core_interface)
+  if(UNIX AND NOT APPLE)
+    target_link_btx_linux_archive_group(matmul-v3-asert-calibration ${BTX_BASE_ARCHIVES})
+  else()
+    target_link_libraries(matmul-v3-asert-calibration bitcoin_shielded)
+  endif()
+  install_binary_component(matmul-v3-asert-calibration)
 
   # ENC_RC Stage E verification bake-off (toy prototypes only; not consensus).
   add_executable(matmul-v4-rc-verify-bakeoff matmul-v4-rc-verify-bakeoff.cpp)
