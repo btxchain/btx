@@ -49,6 +49,8 @@ std::map<std::string, RCExactReplayProviderHealth>
 std::mutex g_exact_replay_alternate_providers_mutex;
 std::vector<RCExactReplayAlternateProvider>
     g_exact_replay_alternate_providers;
+std::mutex g_provider_quarantine_notifier_mutex;
+RCProviderQuarantineNotifier g_provider_quarantine_notifier;
 
 constexpr const char* PROVIDER_RECOVERY_ACTION{
     "repair/reset the accelerator and restart btxd, or restart with a different qualified provider; never invalidate or punish the announcing peer"};
@@ -87,8 +89,33 @@ void QuarantineProvider(const std::string& provider,
         "MatMul Profile-1 provider quarantined: provider=%s "
         "reason=%s; recovery=%s\n",
         provider, reason, PROVIDER_RECOVERY_ACTION);
+    // Copy under the notifier lock and invoke outside every lock this module
+    // holds: the observer reaches into the net layer, which must never be
+    // called with a matmul health lock held.
+    RCProviderQuarantineNotifier notifier;
+    {
+        std::lock_guard<std::mutex> lock{
+            g_provider_quarantine_notifier_mutex};
+        notifier = g_provider_quarantine_notifier;
+    }
+    if (notifier) notifier(provider, reason);
 }
 } // namespace
+
+void SetRCProviderQuarantineNotifier(
+    RCProviderQuarantineNotifier notifier)
+{
+    std::lock_guard<std::mutex> lock{
+        g_provider_quarantine_notifier_mutex};
+    g_provider_quarantine_notifier = std::move(notifier);
+}
+
+void ClearRCProviderQuarantineNotifier()
+{
+    std::lock_guard<std::mutex> lock{
+        g_provider_quarantine_notifier_mutex};
+    g_provider_quarantine_notifier = nullptr;
+}
 
 void SetRCExactReplayExecutionPolicy(RCExactReplayExecutionPolicy policy)
 {

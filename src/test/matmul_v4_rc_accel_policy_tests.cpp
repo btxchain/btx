@@ -9,6 +9,10 @@
 #include <matmul/matmul_v4_rc_mx_ozaki.h>
 #include <matmul/matmul_v4_rc_production_canary.h>
 
+#include <chainparams.h>
+#include <init.h>
+#include <util/chaintype.h>
+
 #include <test/util/setup_common.h>
 
 #include <boost/test/unit_test.hpp>
@@ -309,6 +313,36 @@ BOOST_AUTO_TEST_CASE(rc_profile1_activation_readiness_requires_runtime_canary)
     BOOST_CHECK(!snapshot.production_goldens_available);
     BOOST_CHECK(!snapshot.startup_canary_passed);
     BOOST_CHECK(!snapshot.activation_ready);
+}
+
+// The -matmulrcexecution default decides whether a node will quietly accept an
+// unusable CPU ExactReplay path on an activated network. It is resolved inside
+// AppInitParameterInteraction, which the unit and functional harnesses execute
+// too, so an over-broad rule here is a process-wide policy change rather than a
+// node policy change -- exactly how a first attempt at this turned every
+// ExactReplay in the suite into a local-execution failure. Pin the table.
+BOOST_AUTO_TEST_CASE(rc_execution_default_is_activation_aware_and_test_safe)
+{
+    ArgsManager empty;
+
+    // Mainnet carries a finite RC activation height, so the default fails
+    // closed: no silent CPU replay behind a live consensus rule.
+    const auto main{CreateChainParams(empty, ChainType::MAIN)};
+    BOOST_REQUIRE(main->GetConsensus().nMatMulRCHeight !=
+                  std::numeric_limits<int32_t>::max());
+    BOOST_CHECK_EQUAL(DefaultMatMulRCExecutionMode(*main), "strict-device");
+
+    // Regtest is exempt even though it routinely sets a finite RC height: it
+    // runs toy dimensions on hosts with no qualified accelerator, so strict
+    // there fails closed against the harness, not against a real risk.
+    const auto regtest{CreateChainParams(empty, ChainType::REGTEST)};
+    BOOST_CHECK_EQUAL(DefaultMatMulRCExecutionMode(*regtest), "auto-fallback");
+
+    // Chains with no RC activation keep the portable oracle.
+    const auto testnet{CreateChainParams(empty, ChainType::TESTNET)};
+    BOOST_REQUIRE_EQUAL(testnet->GetConsensus().nMatMulRCHeight,
+                        std::numeric_limits<int32_t>::max());
+    BOOST_CHECK_EQUAL(DefaultMatMulRCExecutionMode(*testnet), "auto-fallback");
 }
 
 BOOST_AUTO_TEST_SUITE_END()

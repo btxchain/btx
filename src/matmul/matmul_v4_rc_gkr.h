@@ -22,6 +22,7 @@
 #include <uint256.h>
 
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
@@ -1079,6 +1080,23 @@ void ResetLastExactReplayVerifyResultForTest();
 [[nodiscard]] RCExactReplayProviderHealth
 GetRCExactReplayProviderHealth();
 void ResetRCExactReplayProviderHealthForTest();
+
+/** Observer invoked when a production provider is quarantined.
+ *
+ * Quarantine is terminal for the life of the process -- the recovery action is
+ * to repair the accelerator and restart -- so this fires at most once per
+ * provider and never reverses. The node layer uses it to withdraw the
+ * validation-tier service bits it published at startup on the strength of that
+ * provider: a node that can no longer run strict-device ExactReplay must stop
+ * telling the network it validates MatMul consensus, rather than keeping a bit
+ * that was true only at init time.
+ *
+ * Called with no internal lock held. Must not re-enter this module. */
+using RCProviderQuarantineNotifier =
+    std::function<void(const std::string& provider,
+                       const std::string& reason)>;
+void SetRCProviderQuarantineNotifier(RCProviderQuarantineNotifier notifier);
+void ClearRCProviderQuarantineNotifier();
 
 /** Register one bounded canary-authorized provider. Registration revalidates
  * provider/runtime/backend identity immediately; each replay revalidates its
