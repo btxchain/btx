@@ -9715,16 +9715,19 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         }
         peer->m_matmul_attestation_inbound_tokens -=
             static_cast<double>(count);
-        if (!ConsumeMatMulAttestationInboundBudget(
-                pfrom.nKeyedNetGroup, count, now)) {
-            LogDebug(
-                BCLog::NET,
-                "Ignoring source/global rate-limited mmattest "
-                "count=%u peer=%d netgroup=%u\n",
-                count, pfrom.GetId(),
-                pfrom.nKeyedNetGroup);
-            return;
-        }
+        // The shared (global + per-source) buckets are deliberately NOT charged
+        // here. They used to be, from the DECLARED count, before a single
+        // attestation had been deserialized -- let alone signature-checked. So
+        // any peer could drain MATMUL_ATTESTATION_GLOBAL_INBOUND_BURST with
+        // bytes that were never valid attestations, and that global bucket is
+        // the same one every honest quorum message must draw from: a handful of
+        // sources in distinct netgroups could starve quorum node-wide while
+        // spending nothing but garbage.
+        //
+        // The declared count is bounded here by this peer's OWN bucket, which
+        // is what bounds its deserialization and signature-verification work
+        // and cannot reach any other peer's budget. The shared buckets are
+        // charged after validation, below, for genuine attestations only.
 
         std::vector<matmul::trusted::ExactReplayAttestation>
             received;
@@ -9740,6 +9743,10 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
 
         std::vector<matmul::trusted::ExactReplayAttestation>
             relay;
+        // Attestations that survived signature, signer, chain, block and height
+        // validation -- Duplicate included, since a duplicate is by definition a
+        // genuine attestation we already hold. Only these charge shared budget.
+        uint64_t admissible{0};
         for (const auto& attestation : received) {
             const uint256 hash{
                 attestation.statement.block_hash};
@@ -9774,9 +9781,12 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                     attestation, hash, expected_height)};
             if (result ==
                 matmul::trusted::AddResult::Accepted) {
+                ++admissible;
                 relay.push_back(attestation);
-            } else if (result !=
+            } else if (result ==
                        matmul::trusted::AddResult::Duplicate) {
+                ++admissible;
+            } else {
                 // Relayers are untrusted and may not be the signer. Reject the
                 // object without attributing a false consensus statement to
                 // this network peer.
@@ -9792,6 +9802,23 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 m_matmul_attestation_requested.erase(hash);
             }
         }
+        // Charge the shared buckets now, for validated attestations only, and
+        // let them gate relay -- relay is the amplifying, node-wide resource
+        // these budgets exist to bound. Local acceptance is already bounded
+        // independently by the store's own capacity (AddResult::Capacity), so
+        // declining here costs us nothing we have not already kept.
+        if (admissible > 0 &&
+            !ConsumeMatMulAttestationInboundBudget(
+                pfrom.nKeyedNetGroup, admissible, now)) {
+            LogDebug(
+                BCLog::NET,
+                "Not relaying source/global rate-limited mmattest "
+                "admissible=%u peer=%d netgroup=%u\n",
+                admissible, pfrom.GetId(),
+                pfrom.nKeyedNetGroup);
+            return;
+        }
+
         if (!relay.empty() &&
             node::matmul_trusted::ServesAttestations()) {
             size_t relayed{0};
