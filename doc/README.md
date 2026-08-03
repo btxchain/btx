@@ -51,7 +51,7 @@ service-profile, or release-publication workflow:
 - [Fast-Start Validating Node Helpers](../contrib/faststart/README.md)
 
 The MatMul v4.7 branch activates Epoch A on mainnet: a binary built from it
-crosses the Epoch-A hard fork at block height 182'283
+crosses the Epoch-A hard fork at block height 182'600
 (`src/kernel/chainparams.cpp`). Epoch A uses Profile 1 with ExactReplay
 authority and optional shadow proofs; Epoch B requires both a durable proof
 and ExactReplay; Epoch C makes the Profile 1 proof authoritative; and only

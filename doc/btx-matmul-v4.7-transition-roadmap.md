@@ -1,8 +1,8 @@
 # MatMul v4.7 consensus transition roadmap
 
 Status: **canonical documentation for the MatMul v4.7 transition. Epoch A is
-ACTIVATED on mainnet at block height 182'283** (`nMatMulV4Height =
-nMatMulBMX4CHeight = nMatMulRCHeight = 182'283` in
+ACTIVATED on mainnet at block height 182'600** (`nMatMulV4Height =
+nMatMulBMX4CHeight = nMatMulRCHeight = 182'600` in
 `src/kernel/chainparams.cpp`, both ratification constants true in
 `src/consensus/params.h`, RC ASERT rescale `4294967295/1` installed).
 Testnet and signet heights remain disabled, as do Epochs B–D everywhere.
@@ -40,11 +40,11 @@ was the inert pre-activation selector; and
 `BTX_MATMUL_NO_INVERSION_GATE_RATIFIED` stayed false.
 
 The activation commit set the tuple atomically on mainnet at
-`H_A = 182'283`, satisfying the contract as follows:
+`H_A = 182'600`, satisfying the contract as follows:
 
 | Component | Contract at Epoch A | Installed mainnet value |
 |---|---|---|
-| Heights | `nMatMulV4Height = nMatMulBMX4CHeight = nMatMulRCHeight = H_A` | all three `182'283` |
+| Heights | `nMatMulV4Height = nMatMulBMX4CHeight = nMatMulRCHeight = H_A` | all three `182'600` |
 | Withdrawn/intermediate paths | `nMatMulDRLTHeight = nMatMulRCCoupledHeight = INT32_MAX` | both `INT32_MAX` (disabled) |
 | Workload | `nMatMulRCProfile = 1`, production dimensions, four-round replay | Profile 1, `matmul_dim = 4096` |
 | Authority | ExactReplay; Stage-3 proof authority remains disabled | ExactReplay only |
@@ -159,7 +159,7 @@ sealed cohort, soak, and calibration artifacts closed, and which were never
 met. L0 ratification has since been recorded (both flags true,
 `src/consensus/params.h`).
 
-## 4. Epoch-A activation gates — status at the 182'283 activation
+## 4. Epoch-A activation gates — status at the 182'600 activation
 
 The activation shipped. This section records what closed and what did not.
 
@@ -283,11 +283,11 @@ also retains Profile 2 and unfinished Stage-3 proof machinery for continued
 development.
 
 The branch selects Profile 1 and installs the complete mainnet Epoch-A tuple:
-`nMatMulV4Height = nMatMulBMX4CHeight = nMatMulRCHeight = 182'283`, the RC
+`nMatMulV4Height = nMatMulBMX4CHeight = nMatMulRCHeight = 182'600`, the RC
 ASERT rescale `4294967295/1`, both ratification flags true, and the populated
 CUDA+Metal production golden manifest. Epochs B–D remain unreachable (no
 height-versioned proof selectors exist), and testnet/signet remain on v3
-with all transition heights disabled. Mainnet leaves v3 at height 182'283.
+with all transition heights disabled. Mainnet leaves v3 at height 182'600.
 
 ## 8. Documentation precedence
 

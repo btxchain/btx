@@ -6,7 +6,7 @@
 > Epoch A uses Profile-1 ExactReplay with optional shadow proofs; Epoch B
 > requires a durable Profile-1 proof plus ExactReplay; Epoch C makes that proof
 > authoritative; and Epoch D separately moves to Profile 2 under proof
-> authority. Mainnet Epoch A (v4 = BMX4C = RC) now activates at height 182'283; all other transition heights remain disabled.
+> authority. Mainnet Epoch A (v4 = BMX4C = RC) now activates at height 182'600; all other transition heights remain disabled.
 
 # MatMul External Miner Backend Tracking (Metal + CUDA Scaffold)
 

@@ -2,7 +2,7 @@
 > record is retained for provenance. It is not Profile 1 ExactReplay launch
 > evidence and its default-policy language is not current. Epoch A uses
 > Profile 1 ExactReplay; Epochs B/C transition proofs on Profile 1; Epoch D
-> separately selects Profile 2. Mainnet Epoch A (v4 = BMX4C = RC) now activates at height 182'283; all other transition heights remain disabled. See
+> separately selects Profile 2. Mainnet Epoch A (v4 = BMX4C = RC) now activates at height 182'600; all other transition heights remain disabled. See
 > [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md).
 
 # BTX CUDA MatMul Optimization Notes (2026-04-13)
