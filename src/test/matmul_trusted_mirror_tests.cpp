@@ -77,12 +77,40 @@ std::string HexPubKey(const CKey& key)
 
 //! Run the real startup parameter interaction with a trusted-mirror signer
 //! configuration, on whatever chain the enclosing fixture selected.
+//! Restores every argument this helper forces, on every exit path.
+//!
+//! Without it these cases leaked -matmultrustedpubkey into the shared
+//! ArgsManager, so any LATER test in the same test_btx process hit parameter
+//! interaction with a stale (and, across two cases, duplicated) signer set.
+//! matmul_v4_rc_production_canary_tests then failed when run after this suite
+//! while passing in isolation -- order-dependent global state, which is the
+//! hardest kind of failure to diagnose from a combined run.
+class ScopedForcedArgs
+{
+public:
+    explicit ScopedForcedArgs(ArgsManager& args) : m_args{args} {}
+    ~ScopedForcedArgs()
+    {
+        // Restore VALID defaults, not empty strings: an empty
+        // -matmulvalidation is not a recognised mode, so clearing it that way
+        // made every later AppInitParameterInteraction in the process fail.
+        m_args.ForceSetArgV("-matmultrustedpubkey", UniValue{UniValue::VARR});
+        m_args.ForceSetArg("-matmultrustedthreshold", int64_t{1});
+        m_args.ForceSetArg("-matmulvalidation", "consensus");
+        // Deliberately does NOT reset the trusted-mirror runtime: the accept
+        // cases inspect the installed quorum after this helper returns.
+    }
+private:
+    ArgsManager& m_args;
+};
+
 bool TrustedMirrorStartupAccepted(ArgsManager& args,
                                   const std::vector<std::string>& pubkeys,
                                   int64_t threshold,
                                   std::string& error)
 {
     node::matmul_trusted::ResetForTest();
+    ScopedForcedArgs restore{args};
     args.ForceSetArg("-matmulvalidation", "trusted");
     UniValue keys{UniValue::VARR};
     for (const auto& hex : pubkeys) keys.push_back(hex);
