@@ -2,7 +2,7 @@
 
 > **MatMul v4.7 note:** this bootstrap procedure does not opt a node into an
 > consensus epoch beyond the compiled chain parameters: mainnet activates
-> Epoch A at height 181'894, and all other transition heights remain
+> Epoch A at height 182'283, and all other transition heights remain
 > disabled. Epochs A/B require Profile 1
 > ExactReplay for every claimed block, so future validating-node release notes
 > must state accelerator requirements and IBD/checkpoint assumptions. Profile 2

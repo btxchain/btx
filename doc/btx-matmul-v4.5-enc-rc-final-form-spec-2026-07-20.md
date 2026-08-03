@@ -7,7 +7,7 @@ The proposed transition is defined by
 ExactReplay authority and optional shadow proofs; Epoch B requires both a
 durable Profile-1 proof and ExactReplay; Epoch C makes the Profile-1 proof
 authoritative; and Epoch D separately moves to Profile 2 under proof authority.
-Mainnet Epoch A (v4 = BMX4C = RC) now activates at height 181'894; all other transition heights remain disabled. Statements below calling Profile 2,
+Mainnet Epoch A (v4 = BMX4C = RC) now activates at height 182'283; all other transition heights remain disabled. Statements below calling Profile 2,
 the coupled V3 puzzle, GKR, a sampled carrier, or a direct cutover “production,”
 “default,” “decided,” or “shipping” are version-local history and do not
 override that roadmap.

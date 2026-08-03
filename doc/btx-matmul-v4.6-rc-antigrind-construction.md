@@ -442,7 +442,7 @@ honest carrier's terminal round always recomputes identically (byte-identical to
 streaming path the miner itself used), so no honest carrier is newly rejected, and no
 digest/wire-format/carrier-version/golden vector changed. The FVT gate applies
 only to the profile-2 accept path; no public network selects profile 2 (the
-mainnet height-181'894 activation is profile 1) and the coupled heights remain
+mainnet height-182'283 activation is profile 1) and the coupled heights remain
 `INT32_MAX`.
 
 **Code locations.**

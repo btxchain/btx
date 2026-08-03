@@ -713,18 +713,20 @@ public:
         // Profile 2 and Stage-3 proof authority remain separate transitions.
         // MatMul v4.7 EPOCH A — ACTIVATION HEIGHT INSTALLED.
         //
-        // H_A = 181'894. Chosen as the mainnet tip at the time this was set
-        // (177'894) plus 4'000 blocks; at the 90 s target spacing that is
-        // 360'000 s = 100 hours of deployment runway.
+        // H_A = 182'283. Chosen as the mainnet tip when this was set
+        // (178'283) plus 4'000 blocks; at the 90 s target spacing that is
+        // 360'000 s = 100 hours of deployment runway. Recompute this against
+        // the live tip if the merge slips -- the runway is measured from the
+        // tip at the moment the constant is chosen, not from the merge.
         //
         // IsMatMulV47EpochAActivationTuple() requires v4, BMX4C and RC to share
         // one height, with DRLT and the coupled height disabled and profile 1,
         // so all three are set together here. AssertBMX4CConstructionInvariants
         // additionally refuses a neutral rescale at a live Profile-1 height,
         // which is why the calibration above is installed in this same commit.
-        consensus.nMatMulV4Height = 181'894;
-        consensus.nMatMulBMX4CHeight = 181'894;
-        consensus.nMatMulRCHeight = 181'894;
+        consensus.nMatMulV4Height = 182'283;
+        consensus.nMatMulBMX4CHeight = 182'283;
+        consensus.nMatMulRCHeight = 182'283;
         consensus.nMatMulRCAsertRescaleNum = kRCEpochAAsertRescaleNum;
         consensus.nMatMulRCAsertRescaleDen = kRCEpochAAsertRescaleDen;
         consensus.nMaxReorgDepth = 12;

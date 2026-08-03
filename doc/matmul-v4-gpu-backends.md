@@ -2,7 +2,7 @@
 > backend contract below remains useful for the old workload, but it is not the
 > Epoch-A certification procedure. MatMul v4.7 launches with Profile 1
 > ExactReplay; proof authority and Profile 2 occur only in later, separately
-> activated epochs. Mainnet Epoch A (v4 = BMX4C = RC) now activates at height 181'894; all other transition heights remain disabled. See
+> activated epochs. Mainnet Epoch A (v4 = BMX4C = RC) now activates at height 182'283; all other transition heights remain disabled. See
 > [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md)
 > and [`benchmarking.md`](benchmarking.md).
 
