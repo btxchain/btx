@@ -1,7 +1,7 @@
 {
   "evidence_kind": "multi_gpu_profile1_exactreplay_golden_compare",
-  "tip_sha": "807cd19bd1ee78a415e5e23aa8c049780dce2616",
-  "source_tree_fingerprint": "f12b05195d2a9f1a9a1ce8f575e0cb102d339b31e02144167b9105c01ae51256",
+  "tip_sha": "7dc60146a14c136ec1cb59f383a5b2eb5361c5ac",
+  "source_tree_fingerprint": "886cd74666ba18379e67e4be5b558222e6522cdebe12cdc3453e550200b3b493",
   "canary_nonce_start": 1,
   "backends_requested": [
     "cuda",
@@ -26,9 +26,9 @@
       "raw": "profile1-cuda-8.json",
       "all_consensus_macs_on_device": true,
       "cpu_gemm_fallbacks": 0,
-      "source_revision": "807cd19bd1ee78a415e5e23aa8c049780dce2616",
-      "source_tree_fingerprint": "f12b05195d2a9f1a9a1ce8f575e0cb102d339b31e02144167b9105c01ae51256",
-      "harness_sha256": "497e4b7fc1ad0f3b9c43ea1123fcec6386b211784cf9e740784b2b0897563502",
+      "source_revision": "7dc60146a14c136ec1cb59f383a5b2eb5361c5ac",
+      "source_tree_fingerprint": "886cd74666ba18379e67e4be5b558222e6522cdebe12cdc3453e550200b3b493",
+      "harness_sha256": "0aea3575119fe8d13628ec63e137d2d9f1280edbaa1aeeda3b1b17d0c4ead977",
       "provider": "cuda_rc_exact_fused_extract",
       "backend_requested": "cuda",
       "provider_identity": {
@@ -55,9 +55,9 @@
       "raw": "profile1-metal-8.json",
       "all_consensus_macs_on_device": true,
       "cpu_gemm_fallbacks": 0,
-      "source_revision": "807cd19bd1ee78a415e5e23aa8c049780dce2616",
-      "source_tree_fingerprint": "f12b05195d2a9f1a9a1ce8f575e0cb102d339b31e02144167b9105c01ae51256",
-      "harness_sha256": "b301d2cd65727554f1d12e2b43aa309726c88eac48368dc635b37cee1c78cf0a",
+      "source_revision": "7dc60146a14c136ec1cb59f383a5b2eb5361c5ac",
+      "source_tree_fingerprint": "886cd74666ba18379e67e4be5b558222e6522cdebe12cdc3453e550200b3b493",
+      "harness_sha256": "c3eb3801b5682617e0f391855647e6c1bdef62297a87668ad3f5612df00af5d1",
       "provider": "metal_int8_mpp_tensorops_fused_extract",
       "backend_requested": "metal",
       "provider_identity": {

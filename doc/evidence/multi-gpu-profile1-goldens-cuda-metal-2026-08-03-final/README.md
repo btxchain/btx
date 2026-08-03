@@ -2,14 +2,14 @@
 
 Status: **`complete_multi_gpu_match: true` at the final pre-merge freeze.**
 This supersedes `../multi-gpu-profile1-goldens-cuda-metal-2026-08-03-sealed`,
-which was sealed at `78a88af5` and invalidated by design when six later commits
-touched `src/`.
+which was sealed at `78a88af5` and invalidated by design when seven later
+commits touched `src/`.
 
 ## Provenance — identical on both halves
 
-- `source_revision` `807cd19bd1ee78a415e5e23aa8c049780dce2616`
+- `source_revision` `7dc60146a14c136ec1cb59f383a5b2eb5361c5ac`
 - `source_tree_fingerprint`
-  `f12b05195d2a9f1a9a1ce8f575e0cb102d339b31e02144167b9105c01ae51256`
+  `886cd74666ba18379e67e4be5b558222e6522cdebe12cdc3453e550200b3b493`
 
 Both providers checked out that revision from a clean tree and computed the
 build-relevant fingerprint independently; the two agree, which is what
@@ -21,8 +21,8 @@ necessarily differ:
 
 | provider | backend | `harness_sha256` (prefix) |
 | --- | --- | --- |
-| cuda | `cuda_rc_exact_fused_extract` | `497e4b7fc1ad0f3b…` |
-| metal | `metal_int8_mpp_tensorops_fused_extract` | `b301d2cd65727554…` |
+| cuda | `cuda_rc_exact_fused_extract` | `0aea3575119fe8d1…` |
+| metal | `metal_int8_mpp_tensorops_fused_extract` | `c3eb3801b5682617…` |
 
 ## Result
 
@@ -42,11 +42,16 @@ nonce 8  5a9041c96f0adeb5bba90d01ae88f4919fd708d41613361b3d3e12d9aea8415a
 ```
 
 **These are the same digests the `78a88af5` cohort produced.** That is the
-useful result, not a formality: the six commits in between changed the
+useful result, not a formality: the seven commits in between changed the
 accelerator workspace estimator, the transcript byte estimator, chainparams,
-init and net_processing, and none of them moved the consensus predicate. The
-cohort re-seal proves predicate-neutrality by measurement instead of asserting
-it from code reading.
+init, net_processing and the activation height itself, and none of them moved
+the consensus predicate. The cohort re-seal proves predicate-neutrality by
+measurement instead of asserting it from code reading.
+
+It was sealed twice: once at `807cd19b`, then again here after the activation
+height was resized against the live tip. Resizing the height changes `src/`,
+so it invalidates a cohort by the same freeze rule the cohort exists to
+enforce -- re-running is the rule working, not churn.
 
 Both providers independently report **1,088 device calls** and
 **1,129,198,441,725,952 device MACs**, with zero CPU GEMM calls, zero CPU MACs
@@ -59,7 +64,7 @@ implementation divergence that makes digest agreement worth having.
 
 ## Freeze discipline
 
-Valid **only** for `807cd19b`. The commit that installs this manifest is
+Valid **only** for `7dc60146`. The commit that installs this manifest is
 necessarily later than the freeze it cites — a manifest cannot name the commit
 containing itself — and the cohort validator compares the two entries against
 each other, not against HEAD. Any subsequent change to `src/`, `cmake/` or the
