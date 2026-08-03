@@ -75,6 +75,23 @@ sha256_file() {
   sha256_stdin < "$1"
 }
 
+# The one path excluded from the build-relevant fingerprint: the data-only TU
+# that HOLDS the fingerprint. Without this exclusion sealing is a fixed-point
+# problem -- writing the hash into the tree changes the tree -- so a manifest
+# could only ever cite its own parent commit. The excluded file is a pure data
+# literal by construction; see its header comment. Keep this list identical to
+# EXCLUDED_FROM_FINGERPRINT in verify-evidence-provenance.py.
+FINGERPRINT_EXCLUDE='src/matmul/matmul_v4_rc_production_golden_manifest.cpp'
+
+build_relevant_tree() {
+  git -C "${REPO_ROOT}" ls-tree -r --full-tree "$1" -- \
+    CMakeLists.txt cmake src | grep -v "	${FINGERPRINT_EXCLUDE}\$"
+}
+
+build_relevant_fingerprint() {
+  build_relevant_tree "$1" | sha256_stdin
+}
+
 # PROVENANCE GUARD (fail-closed).
 #
 # source_revision and source_tree_fingerprint are both derived from the
@@ -105,8 +122,7 @@ fi
   die "--source-revision must be a 40-character commit id (got: ${SOURCE_REVISION})"
 TIP_SHA="${SOURCE_REVISION}"
 if [[ -z "${SOURCE_TREE_FINGERPRINT}" ]]; then
-  SOURCE_TREE_FINGERPRINT="$(git -C "${REPO_ROOT}" ls-tree -r --full-tree HEAD -- \
-    CMakeLists.txt cmake src | sha256_stdin)"
+  SOURCE_TREE_FINGERPRINT="$(build_relevant_fingerprint HEAD)"
 fi
 [[ "${SOURCE_TREE_FINGERPRINT}" =~ ^[0-9a-fA-F]{64}$ ]] || \
   die "--source-tree-fingerprint must be a 64-character SHA-256"
@@ -130,13 +146,11 @@ if true; then
   # consumer accepted because they only ever length-checked the hex.
   git -C "${REPO_ROOT}" cat-file -e "${SOURCE_REVISION}^{commit}" 2>/dev/null || \
     die "source revision ${SOURCE_REVISION} does not resolve to a commit in this repository"
-  ACTUAL_TREE_FINGERPRINT="$(git -C "${REPO_ROOT}" ls-tree -r --full-tree \
-    "${SOURCE_REVISION}" -- CMakeLists.txt cmake src 2>/dev/null | sha256_stdin)"
+  ACTUAL_TREE_FINGERPRINT="$(build_relevant_fingerprint "${SOURCE_REVISION}" 2>/dev/null)"
   if [[ "${ACTUAL_TREE_FINGERPRINT}" != "${SOURCE_TREE_FINGERPRINT}" ]]; then
     die "source-tree-fingerprint ${SOURCE_TREE_FINGERPRINT} does not match revision ${SOURCE_REVISION} (${ACTUAL_TREE_FINGERPRINT})"
   fi
-  HEAD_TREE_FINGERPRINT="$(git -C "${REPO_ROOT}" ls-tree -r --full-tree HEAD -- \
-    CMakeLists.txt cmake src | sha256_stdin)"
+  HEAD_TREE_FINGERPRINT="$(build_relevant_fingerprint HEAD)"
   if [[ "${HEAD_TREE_FINGERPRINT}" != "${SOURCE_TREE_FINGERPRINT}" ]]; then
     die "checkout at HEAD does not carry the declared build-relevant tree; the harness was not built from ${SOURCE_REVISION}"
   fi

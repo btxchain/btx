@@ -398,87 +398,11 @@ std::string ReadPublicSysctlString(const char* name)
 
 } // namespace
 
-const std::vector<RCProductionGoldenManifestEntry>&
-CommittedRCProductionGoldenManifest()
-{
-    // POPULATED for the Epoch-A activation at mainnet height 182'600.
-    //
-    // Precondition satisfied: contrib/matmul-v4/multi-gpu-golden-corpus.sh
-    // reported complete_multi_gpu_match=true for CUDA and Metal reproduced from
-    // ONE code freeze -- the same source_revision AND the same build-relevant
-    // source_tree_fingerprint, which is what RCProductionGoldenManifestCohortValid
-    // requires and what every earlier corpus in this branch failed. Digest
-    // equality alone was never the gate.
-    //
-    // Evidence: doc/evidence/multi-gpu-profile1-goldens-cuda-metal-2026-08-03-final,
-    // regenerated on both providers at the FINAL pre-merge freeze 7dc60146.
-    // The digests are bit-identical to the earlier 78a88af5 cohort, so the six
-    // commits in between -- and the activation-height resize after them -- are
-    // demonstrably predicate-neutral rather than merely asserted to be.
-    // Both providers independently reported 1'088 device calls and
-    // 1'129'198'441'725'952 device MACs with zero CPU GEMM calls, zero CPU MACs
-    // and zero fallbacks, and ExtractMX self-qualification PASS. All eight
-    // digests and all eight frozen header byte strings are byte-identical
-    // across providers, verified independently of the comparator script.
-    //
-    // The two entries deliberately share header_nonce, expected_digest, epoch,
-    // source_revision and source_tree_fingerprint, and differ only in
-    // provider_class and harness_sha256: that is exactly the cohort shape the
-    // validator enforces (one cuda entry, one metal entry, distinct provider
-    // classes, identical workload and provenance).
-    //
-    // ANY_ACTIVATION_HEIGHT is correct here: the frozen canary header and the
-    // Profile-1 transcript do not depend on the activation height, and runtime
-    // capabilities still bind the real height separately.
-    static const std::vector<RCProductionGoldenManifestEntry> manifest{
-        RCProductionGoldenManifestEntry{
-            .id = "epoch-a-profile1-cuda-sm120-nonce1",
-            .provider_class = {.provider_family = "cuda",
-                               .device_architecture = "sm_120"},
-            .epoch = {.activation_height =
-                          RCProductionEpochIdentity::ANY_ACTIVATION_HEIGHT,
-                      .profile = 1,
-                      .transcript_version = kRCTranscriptVersion,
-                      .matmul_dimension = 4096,
-                      .params = DefaultConsensusRCEpisodeParams()},
-            .header_nonce = 1,
-            .expected_digest = uint256{
-                "b4777985d4f2621d0b9c119f4188ac7d80158fc92560ade96cc7a3fd8cfae953"},
-            .independently_reproduced = true,
-            .public_provenance =
-                "doc/evidence/multi-gpu-profile1-goldens-cuda-metal-2026-08-03-final",
-            .source_revision = "7dc60146a14c136ec1cb59f383a5b2eb5361c5ac",
-            .source_tree_fingerprint =
-                "886cd74666ba18379e67e4be5b558222e6522cdebe12cdc3453e550200b3b493",
-            .harness_sha256 =
-                "0aea3575119fe8d13628ec63e137d2d9f1280edbaa1aeeda3b1b17d0c4ead977",
-        },
-        RCProductionGoldenManifestEntry{
-            .id = "epoch-a-profile1-metal-m4-nonce1",
-            .provider_class = {.provider_family = "metal",
-                               .device_architecture = "m4_class"},
-            .epoch = {.activation_height =
-                          RCProductionEpochIdentity::ANY_ACTIVATION_HEIGHT,
-                      .profile = 1,
-                      .transcript_version = kRCTranscriptVersion,
-                      .matmul_dimension = 4096,
-                      .params = DefaultConsensusRCEpisodeParams()},
-            .header_nonce = 1,
-            .expected_digest = uint256{
-                "b4777985d4f2621d0b9c119f4188ac7d80158fc92560ade96cc7a3fd8cfae953"},
-            .independently_reproduced = true,
-            .public_provenance =
-                "doc/evidence/multi-gpu-profile1-goldens-cuda-metal-2026-08-03-final",
-            .source_revision = "7dc60146a14c136ec1cb59f383a5b2eb5361c5ac",
-            .source_tree_fingerprint =
-                "886cd74666ba18379e67e4be5b558222e6522cdebe12cdc3453e550200b3b493",
-            .harness_sha256 =
-                "c3eb3801b5682617e0f391855647e6c1bdef62297a87668ad3f5612df00af5d1",
-        },
-    };
-    return manifest;
-}
-
+// CommittedRCProductionGoldenManifest() lives in
+// matmul_v4_rc_production_golden_manifest.cpp. It is a pure data literal and
+// is deliberately excluded from the build-relevant source_tree_fingerprint it
+// carries -- see that file for why a self-describing seal is otherwise
+// impossible. Keep behaviour here, where the freeze still binds it.
 bool RCProductionGoldenManifestCohortValid(
     const std::vector<RCProductionGoldenManifestEntry>& manifest)
 {

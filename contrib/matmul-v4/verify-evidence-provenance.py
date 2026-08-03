@@ -33,6 +33,15 @@ from pathlib import Path
 # Must stay in sync with multi-gpu-golden-corpus.sh and the production-golden
 # policy. Any change in these paths invalidates evidence equivalence.
 BUILD_RELEVANT = ("CMakeLists.txt", "cmake", "src")
+
+# The data-only TU that HOLDS the fingerprint is excluded from it. Sealing is
+# otherwise a fixed point -- writing the hash into the tree changes the tree --
+# so a manifest could only ever cite its own parent commit. Must stay identical
+# to FINGERPRINT_EXCLUDE in multi-gpu-golden-corpus.sh, byte for byte, or the
+# two tools will disagree about what a valid seal is.
+EXCLUDED_FROM_FINGERPRINT = (
+    b"src/matmul/matmul_v4_rc_production_golden_manifest.cpp",
+)
 # git_tip_sha is used by doc/evidence/cuda-blackwell-16gib-profile1-loaded-*/;
 # omitting it meant that artifact's revision was never resolved at all.
 REVISION_KEYS = ("source_revision", "git_tip", "git_tip_sha", "tip_sha")
@@ -68,7 +77,18 @@ def tree_fingerprint(root: Path, revision: str) -> str | None:
     )
     if out.returncode != 0 or not out.stdout:
         return None
-    return hashlib.sha256(out.stdout).hexdigest()
+    # git ls-tree emits "<mode> <type> <sha>\t<path>\n"; drop whole lines whose
+    # path is excluded, preserving the trailing newline of every kept line so
+    # this hashes exactly what the shell helper hashes.
+    kept = [
+        line
+        for line in out.stdout.splitlines(keepends=True)
+        if not any(
+            line.rstrip(b"\n").endswith(b"\t" + excluded)
+            for excluded in EXCLUDED_FROM_FINGERPRINT
+        )
+    ]
+    return hashlib.sha256(b"".join(kept)).hexdigest()
 
 
 def walk_objects(node, location: str = "$"):
