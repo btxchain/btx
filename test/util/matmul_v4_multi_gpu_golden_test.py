@@ -22,13 +22,30 @@ def _head_revision() -> str:
     ).stdout.strip()
 
 
+# Must stay in sync with FINGERPRINT_EXCLUDE in multi-gpu-golden-corpus.sh and
+# EXCLUDED_FROM_FINGERPRINT in verify-evidence-provenance.py. This file holds
+# the committed golden manifest literal and nothing else; it is excluded so a
+# seal can describe the tree it ships in rather than its own parent commit.
+EXCLUDED_FROM_FINGERPRINT = (
+    b"src/matmul/matmul_v4_rc_production_golden_manifest.cpp",
+)
+
+
 def _head_tree_fingerprint() -> str:
     tree = subprocess.run(
         ["git", "-C", str(REPO_ROOT), "ls-tree", "-r", "--full-tree", "HEAD",
          "--", "CMakeLists.txt", "cmake", "src"],
         capture_output=True, check=True,
     ).stdout
-    return hashlib.sha256(tree).hexdigest()
+    kept = [
+        line
+        for line in tree.splitlines(keepends=True)
+        if not any(
+            line.rstrip(b"\n").endswith(b"\t" + excluded)
+            for excluded in EXCLUDED_FROM_FINGERPRINT
+        )
+    ]
+    return hashlib.sha256(b"".join(kept)).hexdigest()
 
 
 # The comparator now resolves the declared revision and cross-checks the

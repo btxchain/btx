@@ -148,6 +148,10 @@ static constexpr double MATMUL_ATTESTATION_REQUEST_BURST{16.0};
 static constexpr double MATMUL_ATTESTATION_INBOUND_BURST{64.0};
 static constexpr double MATMUL_ATTESTATION_GLOBAL_INBOUND_BURST{256.0};
 static constexpr double MATMUL_ATTESTATION_NETGROUP_INBOUND_BURST{64.0};
+/** Per-source ceiling on attestation signature-verification work accepted
+ *  before validity is known. Bounds aggregate CPU without a global choke point
+ *  that one flooding netgroup could exhaust for everybody. */
+static constexpr double MATMUL_ATTESTATION_NETGROUP_VERIFY_BURST{256.0};
 static constexpr auto MATMUL_ATTESTATION_TOKEN_REFILL{1s};
 static constexpr auto MATMUL_ATTESTATION_SOURCE_BUDGET_TTL{10min};
 static constexpr auto MATMUL_ATTESTATION_REQUEST_TTL{60s};
@@ -1238,10 +1242,25 @@ private:
      * peers, but occupies one bounded node-wide slot until quorum/expiry. */
     std::map<uint256, std::chrono::microseconds> m_matmul_attestation_requested
         GUARDED_BY(cs_main);
-    /** Sybil/reconnect-resistant inbound signature-verification budgets. */
+    /** Sybil/reconnect-resistant inbound signature-verification budgets.
+     *
+     * Two independent pools per source, because they bound different things and
+     * must not be able to exhaust each other:
+     *
+     *  - verify_tokens gates the EXPENSIVE work (deserialize + signature check)
+     *    and is charged up front from the declared count, before validity is
+     *    known. Garbage necessarily consumes it. It is deliberately per-source
+     *    only -- never global -- so one netgroup flooding invalid attestations
+     *    cannot stop another netgroup's messages from being verified at all.
+     *  - tokens gates quorum admission and relay, and is charged only AFTER
+     *    validation, so invalid traffic cannot spend it. That is what keeps a
+     *    flood of garbage from starving the honest quorum it competes with.
+     */
     struct MatMulAttestationSourceBudget {
         double tokens{MATMUL_ATTESTATION_NETGROUP_INBOUND_BURST};
         std::chrono::microseconds last_refill{0us};
+        double verify_tokens{MATMUL_ATTESTATION_NETGROUP_VERIFY_BURST};
+        std::chrono::microseconds verify_last_refill{0us};
         std::chrono::microseconds last_seen{0us};
     };
     double m_matmul_attestation_global_tokens
@@ -1551,6 +1570,14 @@ private:
     void RequestMatMulTrustedAttestations(const uint256& hash,
                                           NodeId source);
     bool ConsumeMatMulAttestationInboundBudget(
+        uint64_t keyed_netgroup,
+        uint64_t count,
+        std::chrono::microseconds now)
+        EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex);
+    /** Charge the per-source pre-verification work budget from the DECLARED
+     *  count, before validity is known. Bounds aggregate signature-verification
+     *  CPU. Per-source only by design -- see MatMulAttestationSourceBudget. */
+    bool ConsumeMatMulAttestationVerifyBudget(
         uint64_t keyed_netgroup,
         uint64_t count,
         std::chrono::microseconds now)
@@ -4906,6 +4933,45 @@ bool PeerManagerImpl::ConsumeMatMulAttestationInboundBudget(
     m_matmul_attestation_global_tokens -=
         static_cast<double>(count);
     source.tokens -= static_cast<double>(count);
+    return true;
+}
+
+bool PeerManagerImpl::ConsumeMatMulAttestationVerifyBudget(
+    uint64_t keyed_netgroup,
+    uint64_t count,
+    std::chrono::microseconds now)
+{
+    AssertLockHeld(NetEventsInterface::g_msgproc_mutex);
+    for (auto it = m_matmul_attestation_netgroup_budgets.begin();
+         it != m_matmul_attestation_netgroup_budgets.end();) {
+        if (now - it->second.last_seen >
+            MATMUL_ATTESTATION_SOURCE_BUDGET_TTL) {
+            it = m_matmul_attestation_netgroup_budgets.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    auto [source_it, inserted]{
+        m_matmul_attestation_netgroup_budgets.try_emplace(
+            keyed_netgroup)};
+    (void)inserted;
+    MatMulAttestationSourceBudget& source{source_it->second};
+    if (source.verify_last_refill != 0us) {
+        const auto elapsed{now - source.verify_last_refill};
+        const double added{
+            static_cast<double>(elapsed.count()) /
+            static_cast<double>(
+                std::chrono::duration_cast<
+                    std::chrono::microseconds>(
+                    MATMUL_ATTESTATION_TOKEN_REFILL).count())};
+        source.verify_tokens = std::min(
+            MATMUL_ATTESTATION_NETGROUP_VERIFY_BURST,
+            source.verify_tokens + added);
+    }
+    source.verify_last_refill = now;
+    source.last_seen = now;
+    if (source.verify_tokens < static_cast<double>(count)) return false;
+    source.verify_tokens -= static_cast<double>(count);
     return true;
 }
 
@@ -9724,10 +9790,28 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         // sources in distinct netgroups could starve quorum node-wide while
         // spending nothing but garbage.
         //
-        // The declared count is bounded here by this peer's OWN bucket, which
-        // is what bounds its deserialization and signature-verification work
-        // and cannot reach any other peer's budget. The shared buckets are
-        // charged after validation, below, for genuine attestations only.
+        // The declared count is bounded here by this peer's OWN bucket, and by
+        // the per-source verification budget below. The shared quorum buckets
+        // are charged after validation, further down, for genuine attestations
+        // only.
+        //
+        // The per-peer bucket alone is not enough: it bounds one connection,
+        // so aggregate signature-verification CPU would still scale with the
+        // number of connections an attacker can open. The per-SOURCE budget
+        // below bounds that work by keyed netgroup, before validity is known,
+        // which is the dimension a Sybil actually has to pay for. It is
+        // deliberately not global -- a global pre-verification pool would
+        // reintroduce exactly the cross-source starvation this message handler
+        // was just fixed to avoid, only against verification instead of quorum.
+        if (!ConsumeMatMulAttestationVerifyBudget(
+                pfrom.nKeyedNetGroup, count, now)) {
+            LogDebug(
+                BCLog::NET,
+                "Ignoring mmattest over source verify budget count=%u "
+                "peer=%d netgroup=%u\n",
+                count, pfrom.GetId(), pfrom.nKeyedNetGroup);
+            return;
+        }
 
         std::vector<matmul::trusted::ExactReplayAttestation>
             received;
