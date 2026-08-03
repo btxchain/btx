@@ -401,7 +401,7 @@ std::string ReadPublicSysctlString(const char* name)
 const std::vector<RCProductionGoldenManifestEntry>&
 CommittedRCProductionGoldenManifest()
 {
-    // POPULATED for the Epoch-A activation at mainnet height 181'894.
+    // POPULATED for the Epoch-A activation at mainnet height 182'283.
     //
     // Precondition satisfied: contrib/matmul-v4/multi-gpu-golden-corpus.sh
     // reported complete_multi_gpu_match=true for CUDA and Metal reproduced from

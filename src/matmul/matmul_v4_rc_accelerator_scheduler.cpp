@@ -66,8 +66,13 @@ uint64_t EstimateRCExactReplayWorkspaceBytes(
     const uint64_t phase1{SaturatingWorkspaceAdd(
         SaturatingWorkspaceAdd(q, SaturatingWorkspaceMul(2, context)), q)};
 
+    // Fused-FFN weights are NOT square. W_up is d_model x d_ff and W_down is
+    // d_ff x d_model (see the ExpandMxDispatched calls in RunEpisode), so each
+    // matrix is d_model*d_ff elements. This used d_model*d_model, understating
+    // every weight matrix by d_ff/d_model -- a factor of 4 at the shipped 4x
+    // transformer expansion.
     const uint64_t weight_matrix{
-        SaturatingWorkspaceMul(params.d_model, params.d_model)};
+        SaturatingWorkspaceMul(params.d_model, params.d_ff)};
     const uint64_t weights{SaturatingWorkspaceMul(
         SaturatingWorkspaceMul(2, params.L_lyr), weight_matrix)};
     const uint64_t activation{
@@ -75,8 +80,19 @@ uint64_t EstimateRCExactReplayWorkspaceBytes(
     const uint64_t activations{SaturatingWorkspaceMul(
         SaturatingWorkspaceMul(2, uint64_t{params.L_lyr} + 1),
         activation)};
+    // The fused-FFN intermediate H is b_seq x d_ff and was omitted entirely.
+    // It is live across the up and down GEMMs, so it must be counted.
+    const uint64_t ffn_intermediate{
+        SaturatingWorkspaceMul(params.b_seq, params.d_ff)};
+    // At the shipped Profile-1 dimensions this moves the estimate from
+    // 2.625 GiB to 4.375 GiB against roughly 4.95 GiB actually allocated per
+    // device. The old figure was low enough to admit a provider that then
+    // cannot hold the episode -- an OOM on a validating node at production
+    // dimensions, which is why this is an admission gate and not a report.
     return std::max(
-        phase1, SaturatingWorkspaceAdd(weights, activations));
+        phase1,
+        SaturatingWorkspaceAdd(SaturatingWorkspaceAdd(weights, activations),
+                               ffn_intermediate));
 }
 
 bool RCExactReplayWorkspaceFits(

@@ -4,7 +4,7 @@
 > predates MatMul v4.7 and is not an activation verdict for this branch.
 > Profile 1 ExactReplay is the proposed Epoch-A authority; mandatory and then
 > authoritative Profile 1 proofs are Epochs B/C; Profile 2 proof authority is
-> a separate Epoch D. Mainnet Epoch A (v4 = BMX4C = RC) now activates at height 181'894; all other transition heights remain disabled. See
+> a separate Epoch D. Mainnet Epoch A (v4 = BMX4C = RC) now activates at height 182'283; all other transition heights remain disabled. See
 > [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md).
 
 **Date**: 2026-02-17

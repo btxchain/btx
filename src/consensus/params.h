@@ -207,7 +207,7 @@ static constexpr uint32_t BMX4C_FALLBACK_INT8_ACCUMULATOR_BITS{32}; //!< C-1 flo
 //! relay readiness). Flip to true ONLY in the deliberate, reviewed source change
 //! of the release that ships activation, AFTER gates (1)-(2) are recorded.
 //!
-//! FLIPPED TRUE for the Epoch-A activation at mainnet height 181'894. Recorded
+//! FLIPPED TRUE for the Epoch-A activation at mainnet height 182'283. Recorded
 //! basis: the seed-grinding advantage is exactly 1.0 and the Profile-1
 //! ExactReplay predicate is byte-reproducible across two independent
 //! accelerator vendors at one code freeze (doc/evidence/
@@ -230,7 +230,7 @@ static constexpr bool BTX_MATMUL_NO_INVERSION_GATE_RATIFIED{true};
 //! in the separately reviewed activation-height change that records those
 //! artifacts; regtest remains exempt so the implementation can be exercised.
 //!
-//! FLIPPED TRUE for the Epoch-A activation at mainnet height 181'894. Recorded
+//! FLIPPED TRUE for the Epoch-A activation at mainnet height 182'283. Recorded
 //! artifacts, each committed under doc/evidence/ and bound to a resolvable
 //! revision and build-relevant tree fingerprint:
 //!   - frozen production goldens, CUDA + Metal, sealed at one code freeze

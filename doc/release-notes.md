@@ -6,8 +6,8 @@ This release carries the MatMul v4.7 Profile 1 ExactReplay implementation,
 its resource-admission and GPU-lifecycle hardening, an explicit
 trusted-attestation topology for same-operator RPC/archive mirrors, and the
 Epoch-A activation: mainnet activates MatMul v4.7 Epoch A (v4 = BMX4C =
-Resident Curriculum) at block height 181'894. This is a hard fork. Nodes
-that do not upgrade before height 181'894 will reject the post-fork chain.
+Resident Curriculum) at block height 182'283. This is a hard fork. Nodes
+that do not upgrade before height 182'283 will reject the post-fork chain.
 
 Please report bugs using the issue tracker at GitHub:
 
@@ -25,8 +25,8 @@ binaries with signed final release artifacts. Back up wallets and
 configuration before upgrading. Do not install unpublished candidate assets.
 
 Upgrading to v0.33.2 activates MatMul v4.7 Epoch A on mainnet at block
-height 181'894. The v4, BMX4C, and Resident Curriculum heights are set to
-181'894 as one atomic tuple, both ratification constants are true, and a
+height 182'283. The v4, BMX4C, and Resident Curriculum heights are set to
+182'283 as one atomic tuple, both ratification constants are true, and a
 one-time RC ASERT rescale of `4294967295/1` is installed
 (`src/kernel/chainparams.cpp`). Testnet and signet heights remain disabled.
 See `doc/btx-matmul-v4.7-transition-roadmap.md` for the activation contract,
@@ -35,7 +35,7 @@ the committed closing evidence, and the gates that remain explicitly unmet.
 # Compatibility
 
 BTX is supported on Linux, macOS 13+, and Windows 10+. Mainnet MatMul v3
-validation is unchanged below height 181'894; at and above that height the
+validation is unchanged below height 182'283; at and above that height the
 Epoch-A Profile 1 ExactReplay rules apply.
 
 Production Profile 1 ExactReplay is designed for a qualified accelerator.
@@ -52,7 +52,7 @@ readiness.
 - Epoch A uses the full deterministic Profile 1 episode as ExactReplay
   authority while retaining the fixed, digest-only block header.
 - Mainnet sets `nMatMulV4Height = nMatMulBMX4CHeight = nMatMulRCHeight =
-  181'894`, and `BTX_MATMUL_NO_INVERSION_GATE_RATIFIED` and
+  182'283`, and `BTX_MATMUL_NO_INVERSION_GATE_RATIFIED` and
   `BTX_MATMUL_V47_GPU_LIFECYCLE_GATE_RATIFIED` are true. Testnet and signet
   heights remain `INT32_MAX`. Unfinished Stage-3 proof machinery still cannot
   become authority: Epoch A is ExactReplay-only.
@@ -171,7 +171,7 @@ See `doc/btx-matmul-trusted-rpc-mirrors.md` and
 
 # Activation State and Residual Risk
 
-This release sets the mainnet public heights to 181'894, installs the RC ASERT
+This release sets the mainnet public heights to 182'283, installs the RC ASERT
 rescale `4294967295/1`, populates the CUDA+Metal production golden manifest,
 and flips both ratification constants true. Gates closed by committed evidence
 (all under `doc/evidence/`): the sealed CUDA+Metal golden cohort reproduced at
@@ -201,7 +201,7 @@ public testnet topology, and upgrade behavior across released binaries.
 - Trusted RPC/archive mirrors inherit the safety of their configured signer
   set. They should not be described or exposed as independent consensus
   validators.
-- Mainnet Epoch A activates at block height 181'894. The multi-day soak,
+- Mainnet Epoch A activates at block height 182'283. The multi-day soak,
   multi-peer public-testnet, and released-binary upgrade gates were not met
   before activation and stand as accepted residual risk.
 

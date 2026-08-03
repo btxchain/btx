@@ -6,7 +6,7 @@
 > [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md):
 > Profile-1 ExactReplay in Epoch A, Profile-1 proof plus ExactReplay in Epoch B,
 > Profile-1 proof authority in Epoch C, then Profile-2 proof authority in
-> Epoch D. Mainnet Epoch A (v4 = BMX4C = RC) now activates at height 181'894; all other transition heights remain disabled.
+> Epoch D. Mainnet Epoch A (v4 = BMX4C = RC) now activates at height 182'283; all other transition heights remain disabled.
 
 ## Overview
 

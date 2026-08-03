@@ -5253,11 +5253,11 @@ BOOST_AUTO_TEST_CASE(MatMulHeaderPoW_grind_helper_and_public_nets_disabled)
         BOOST_CHECK_EQUAL(params->GetConsensus().nMatMulHeaderPoWDiscountBits,
                           std::numeric_limits<uint32_t>::max());
         BOOST_CHECK(!params->GetConsensus().IsMatMulHeaderPoWEnabled());
-        // Epoch A is live on MAINNET at 181'894; TESTNET has no activation
+        // Epoch A is live on MAINNET at 182'283; TESTNET has no activation
         // height yet. The subject of this case is that header-PoW stays
         // disabled either way -- an activation height must not switch it on.
         if (chain == ChainType::MAIN) {
-            BOOST_CHECK_EQUAL(params->GetConsensus().nMatMulV4Height, 181'894);
+            BOOST_CHECK_EQUAL(params->GetConsensus().nMatMulV4Height, 182'283);
         } else if (chain != ChainType::REGTEST) {
             BOOST_CHECK_EQUAL(params->GetConsensus().nMatMulV4Height,
                               std::numeric_limits<int32_t>::max());

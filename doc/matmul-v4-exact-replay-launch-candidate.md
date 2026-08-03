@@ -1,7 +1,7 @@
 # MatMul v4.7 Profile 1 ExactReplay launch candidate
 
 Status: launch-candidate gate record for Epoch A. **Epoch A has since been
-activated on mainnet at block height 181'894** (`src/kernel/chainparams.cpp`);
+activated on mainnet at block height 182'283** (`src/kernel/chainparams.cpp`);
 the gate checklists below are annotated with what the committed activation
 evidence closed and what was accepted as residual risk. The canonical
 four-epoch transition and naming rules are defined in
@@ -26,12 +26,12 @@ a completed succinct proof system (or separately proven multi-host verifier),
 not by silently requiring every validator to own a large Metal fleet.
 
 The current source selects Profile 1 and sets the mainnet activation tuple:
-`nMatMulV4Height = nMatMulBMX4CHeight = nMatMulRCHeight = 181'894`. Testnet
+`nMatMulV4Height = nMatMulBMX4CHeight = nMatMulRCHeight = 182'283`. Testnet
 and signet heights remain disabled. Profile 2 stays explicitly selectable for
 later-epoch regression measurements; it is not inherited into Epoch A.
 
 The activation satisfied the atomic-tuple contract this document required:
-one identical `H_A` (181'894) across the three heights; DRLT and coupled RC
+one identical `H_A` (182'283) across the three heights; DRLT and coupled RC
 disabled; Profile 1 and production dimensions selected; unfinished Stage-3
 proof authority and HeaderPoW off. The v4 and BMX4C ASERT ratios remain
 inert at `1/1`, while the live RC branch owns the installed one-time
@@ -110,7 +110,7 @@ block interval the p99 occupies ~36.3% (~57.3 s headroom). Tip-correlated
 sanitized evidence:
 `doc/evidence/cuda-blackwell-16gib-profile1-loaded-2026-08-01/`
 (2026-07-30 retained as historical). L0 ratification was still false at the
-date of this campaign; it has since been recorded for the height-181'894
+date of this campaign; it has since been recorded for the height-182'283
 activation.
 
 ## Full-Metal requirement
@@ -217,13 +217,13 @@ Independent CUDA class (sanitized; see
   Launch* ABI (`rc_fused_ffn`, `rc_fused_ffn_chain`, `rc_phase1`).
 - [x] Tip-correlated 100-run campaign recorded (`c4ac2e43`, TU md5
   `ed1e9477432b1766f549c039b6779632`); L0 ratification was still false at the
-  campaign date (since recorded for the 181'894 activation).
+  campaign date (since recorded for the 182'283 activation).
 - [x] Apple Silicon M4 Max-class Metal reproduced the same eight frozen
   production canary headers/dimensions/digests as CUDA at source revision
   `9dd88b8e54d92a848c4006aa9affca2ab3e0c91c`, with every consensus MAC on
   device and zero CPU GEMM calls/fallbacks.
 
-Gate status at the shipped 181'894 activation:
+Gate status at the shipped 182'283 activation:
 
 - [ ] HIP/ROCm ExactReplay reproduction of the frozen production golden
   corpus: NOT done. Per the production-golden policy HIP is optional; it
@@ -249,12 +249,12 @@ Gate status at the shipped 181'894 activation:
 - [x] The consensus selector is Profile 1, with a construction invariant and
   regression coverage.
 - [x] The atomic Epoch-A tuple is a construction invariant and is now
-  INSTALLED on mainnet: equal v4/BMX4C/RC heights (181'894), withdrawn paths
+  INSTALLED on mainnet: equal v4/BMX4C/RC heights (182'283), withdrawn paths
   off, HeaderPoW off, v4/BMX4C ASERT inert, and RC as the sole calibrated
   branch.
 
 Historical verdict: while the gates above were open, this document's verdict
-was NO-GO. The operator activated Epoch A at mainnet height 181'894 on the
+was NO-GO. The operator activated Epoch A at mainnet height 182'283 on the
 strength of the sealed one-freeze CUDA+Metal cohort, the zero-fallback
 lifecycle soak, and the two-rig ASERT calibration, and explicitly accepted
 the unmet gates listed above as residual risk. This document records that
