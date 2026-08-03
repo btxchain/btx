@@ -264,10 +264,14 @@ BOOST_AUTO_TEST_CASE(
         rc::kRCFri3AlgP2Q192K2ProofVersionV10);
 
     std::vector<unsigned char> encoded;
-    BOOST_REQUIRE_EQUAL(
-        rc::SerializeFri3AlgBatchProof(
-            fixture.proof, encoded),
-        encoded.size());
+    // Sequence the serialize call before reading encoded.size(): the order in
+    // which BOOST_REQUIRE_EQUAL evaluates its two arguments is unspecified, and
+    // SerializeFri3AlgBatchProof clears the output vector before filling it. On
+    // this toolchain size() is evaluated first, so the check compared the real
+    // byte count against 0 and the case was red in the default suite.
+    const size_t written{
+        rc::SerializeFri3AlgBatchProof(fixture.proof, encoded)};
+    BOOST_REQUIRE_EQUAL(written, encoded.size());
     BOOST_CHECK_MESSAGE(
         fp::ValidateNormalizedAlgAirBatchCodecBytesV1(
             fixture.proof, encoded, &why),

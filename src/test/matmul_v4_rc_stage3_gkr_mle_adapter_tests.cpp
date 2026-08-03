@@ -335,9 +335,11 @@ BOOST_AUTO_TEST_CASE(
         honest.receipt.fri_proof.row_commit.root);
 
     std::vector<unsigned char> encoded;
-    BOOST_REQUIRE_EQUAL(
-        adapter::SerializeProofV1(proof, encoded),
-        encoded.size());
+    // Sequenced deliberately: BOOST_REQUIRE_EQUAL does not order its argument
+    // evaluations, and SerializeProofV1 clears the vector before filling it,
+    // so reading encoded.size() first compares the byte count against 0.
+    const size_t written{adapter::SerializeProofV1(proof, encoded)};
+    BOOST_REQUIRE_EQUAL(written, encoded.size());
     const auto decoded =
         adapter::DeserializeProofV1(encoded);
     BOOST_REQUIRE(decoded.has_value());
