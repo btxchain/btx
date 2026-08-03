@@ -80,11 +80,11 @@ CommittedRCProductionGoldenManifest()
             .independently_reproduced = true,
             .public_provenance =
                 "doc/evidence/multi-gpu-profile1-goldens-cuda-metal-2026-08-03-review-closure",
-            .source_revision = "8b40a79f43e4b5d947574a3c2040f2936c524195",
+            .source_revision = "75a6571b209527966a1ff2910fda573a1b009ba4",
             .source_tree_fingerprint =
-                "62074ec43fcaf22fb7d77c164e280c5c5b85fcb8f826d4eb0360406f8570e0b6",
+                "b4a47c3d7647f5ed4e2bf8639bb871bded18c21809b95ebc4a232d22232501c1",
             .harness_sha256 =
-                "97858b30384927f05222c8277de947d480ccab1898fac5b462cbb0fcc2b9195e",
+                "b48526ad9756e2361b94db8dfd5654f9135c0f2f3cba58b5a95e96a144e3fef0",
         },
         RCProductionGoldenManifestEntry{
             .id = "epoch-a-profile1-metal-m4-nonce1",
@@ -102,11 +102,11 @@ CommittedRCProductionGoldenManifest()
             .independently_reproduced = true,
             .public_provenance =
                 "doc/evidence/multi-gpu-profile1-goldens-cuda-metal-2026-08-03-review-closure",
-            .source_revision = "8b40a79f43e4b5d947574a3c2040f2936c524195",
+            .source_revision = "75a6571b209527966a1ff2910fda573a1b009ba4",
             .source_tree_fingerprint =
-                "62074ec43fcaf22fb7d77c164e280c5c5b85fcb8f826d4eb0360406f8570e0b6",
+                "b4a47c3d7647f5ed4e2bf8639bb871bded18c21809b95ebc4a232d22232501c1",
             .harness_sha256 =
-                "e5fd22e408d7e0ad7a655fadfc57318562cff72bf48042f795ef2dcd14203902",
+                "407284a7ba46e2b90ed03572d7acfa472a0852aace9bc63a79a4a02850569ae8",
         },
     };
     return manifest;
