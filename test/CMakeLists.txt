@@ -36,7 +36,23 @@ file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/functional)
 file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/fuzz)
 file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/util)
 
-file(GLOB_RECURSE functional_tests CONFIGURE_DEPENDS RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} functional/*)
+# Keep the build-tree links in sync with tracked functional-test sources and
+# fixtures without teaching CMake about interpreter caches. A broad
+# `functional/*` glob observes `__pycache__/*.pyc` created while the suite is
+# running; a helper build from a functional test then emits a spurious GLOB
+# mismatch/reconfigure on stderr and the test runner reports an otherwise
+# successful test as failed.
+file(GLOB_RECURSE functional_tests CONFIGURE_DEPENDS RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}
+  functional/*.py
+  functional/*.json
+  functional/*.csv
+  functional/*.md
+  functional/*.html
+  functional/*.hex
+  functional/*.gitignore
+  functional/*.bash-completion
+  functional/*.zsh-completion
+)
 foreach(script ${functional_tests} fuzz/test_runner.py util/rpcauth-test.py util/test_runner.py)
   if(CMAKE_HOST_WIN32)
     set(symlink)

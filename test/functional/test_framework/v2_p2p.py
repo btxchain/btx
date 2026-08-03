@@ -216,9 +216,11 @@ class EncryptedP2PState:
             processed_length += length
             self.received_garbage = b""
             # decoy packets have contents = None. v2 handshake is complete only when version packet
-            # (can be empty with contents = b"") with contents != None is received.
+            # (which may carry an authenticated transport extension) with
+            # contents != None is received. BIP324 peers ignore unknown
+            # version contents; BTX uses them to advertise the optional PQ
+            # hybrid handshake material.
             if contents is not None:
-                assert contents == b""  # currently TestNode sends an empty version packet
                 self.tried_v2_handshake = True
                 return processed_length, True
             response = response[length:]

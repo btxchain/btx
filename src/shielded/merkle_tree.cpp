@@ -282,6 +282,12 @@ const uint256& EmptyRoot(size_t depth)
 ShieldedMerkleTree::ShieldedMerkleTree(IndexStorageMode mode)
     : m_index_storage_mode_(mode)
 {
+    if (mode == IndexStorageMode::NO_INDEX) {
+        commitment_index_enabled_ = false;
+        commitment_index_mem_.reset();
+        frontier_checkpoints_.reset();
+        return;
+    }
     if (mode == IndexStorageMode::MEMORY_ONLY) {
         return;
     }
@@ -824,6 +830,15 @@ ShieldedMerkleWitness::ShieldedMerkleWitness(const ShieldedMerkleTree& tree)
     if (tree.IsEmpty()) {
         throw std::runtime_error("ShieldedMerkleWitness: cannot witness empty tree");
     }
+    // A witness needs only the frozen frontier. Retaining the global position
+    // index here provides no proof functionality and, for an in-memory tree,
+    // would multiply the full leaf vector by the number of wallet witnesses.
+    tree_.m_index_storage_mode_ =
+        ShieldedMerkleTree::IndexStorageMode::NO_INDEX;
+    tree_.commitment_index_enabled_ = false;
+    tree_.commitment_index_mem_.reset();
+    tree_.commitment_index_store_.reset();
+    tree_.frontier_checkpoints_.reset();
 }
 
 ShieldedMerkleWitness ShieldedMerkleWitness::FromAuthPath(
@@ -836,7 +851,7 @@ ShieldedMerkleWitness ShieldedMerkleWitness::FromAuthPath(
     }
 
     ShieldedMerkleWitness witness;
-    witness.tree_ = ShieldedMerkleTree{ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY};
+    witness.tree_ = ShieldedMerkleTree{ShieldedMerkleTree::IndexStorageMode::NO_INDEX};
     witness.tree_.size_ = position + 1;
     witness.tree_.commitment_index_enabled_ = false;
     witness.tree_.commitment_index_mem_.reset();
@@ -1029,7 +1044,13 @@ void ShieldedMerkleWitness::IncrementalUpdate(const uint256& new_leaf)
             filled_.push_back(new_leaf);
         } else {
             // Start a new cursor subtree at the required depth.
-            cursor_ = ShieldedMerkleTree(tree_.GetIndexStorageMode());
+            // A witness cursor is a private scratch subtree. Reusing the
+            // witnessed tree's AUTO mode here attaches the process-wide
+            // commitment-index store; appending the cursor's first leaf then
+            // overwrites canonical position zero (and later low positions).
+            // That corrupts ring-member lookups while leaving the canonical
+            // frontier/root unchanged. Witness cursors never need persistence.
+            cursor_ = ShieldedMerkleTree(ShieldedMerkleTree::IndexStorageMode::NO_INDEX);
             cursor_depth_ = depth;
             cursor_->Append(new_leaf);
         }
