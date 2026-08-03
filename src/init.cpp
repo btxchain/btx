@@ -360,6 +360,8 @@ void Shutdown(NodeContext& node)
     // Because these depend on each-other, we make sure that neither can be
     // using the other before destroying them.
     if (node.peerman && node.validation_signals) node.validation_signals->UnregisterValidationInterface(node.peerman.get());
+    // The observer captures &node; drop it before connman is torn down.
+    matmul::v4::rc::ClearRCProviderQuarantineNotifier();
     if (node.connman) node.connman->Stop();
 
     StopTorControl();
@@ -537,9 +539,9 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
 #endif
     argsman.AddArg("-assumevalid=<hex>", strprintf("If this block is in the chain assume that it and its ancestors are valid and potentially skip script verification for their transactions while still checking other consensus rules (0 to verify all, default: %s, testnet3: %s, testnet4: %s, signet: %s, shieldedv2dev: %s)", defaultChainParams->GetConsensus().defaultAssumeValid.GetHex(), testnetChainParams->GetConsensus().defaultAssumeValid.GetHex(), testnet4ChainParams->GetConsensus().defaultAssumeValid.GetHex(), signetChainParams->GetConsensus().defaultAssumeValid.GetHex(), shieldedv2devChainParams->GetConsensus().defaultAssumeValid.GetHex()), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmulvalidation=<mode>", "Select MatMul transcript verification mode: consensus (default), trusted, economic, or spv. trusted performs ordinary block/body/script validation but replaces local Profile-1 ExactReplay with an explicitly configured M-of-N signed archive-validator quorum; it is an operator-trusted mirror, not an independently validating full node.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-matmulrcexecution=<mode>", "Select local MatMul RC ExactReplay execution: strict-device requires a production-qualified device and forbids CPU fallback; auto-fallback permits device-to-CPU fallback for pre-activation/testing; cpu-diagnostic explicitly runs the portable oracle (default: auto-fallback while public RC activation is disabled). Only strict-device with a currently qualified production provider advertises NODE_MATMUL_CONSENSUS.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-matmulrcexecution=<mode>", "Select local MatMul RC ExactReplay execution: strict-device requires a production-qualified device and forbids CPU fallback; auto-fallback permits device-to-CPU fallback for pre-activation/testing; cpu-diagnostic explicitly runs the portable oracle (default: strict-device on a chain with a finite RC activation height, auto-fallback while RC activation is disabled). Only strict-device with a currently qualified production provider advertises NODE_MATMUL_CONSENSUS.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmultrustedpubkey=<hex>", "Compressed secp256k1 public key trusted to attest successful Profile-1 ExactReplay. Repeat for N signers; each must be distinct. Required with -matmulvalidation=trusted. On mainnet a trusted mirror needs at least 2 distinct signers.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-matmultrustedthreshold=<n>", "Required distinct trusted signatures (M) for one block, 1..N (default: 1). On mainnet a trusted mirror requires at least 2, because the quorum replaces the Profile-1 MatMul proof-of-work check and a 1-of-1 quorum would make one key the node's sole proof-of-work authority.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-matmultrustedthreshold=<n>", "Required distinct trusted signatures (M) for one block, 1..N (default: 1). On mainnet a trusted mirror below 2 distinct signers with M>=2 starts with a prominent warning rather than being refused: above the Profile-1 activation height the quorum replaces the MatMul proof-of-work check, so a 1-of-1 quorum makes one key the node's sole proof-of-work authority. Configure 2 independent signers to remove that single point of failure.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmultrustedwaitms=<n>", "Maximum worker wait for an attestation quorum before leaving the block retryable, in milliseconds (default: 30000, maximum: 600000).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmulattestationsignerkeyfile=<file>", "Archive-validator file containing exactly one WIF signing key. Relative paths resolve under the network datadir. The corresponding public key is added to the configured signer set. Protect this file as an online validation key.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmulattestationsignerkey=<wif>", "UNSAFE/deprecated convenience form for the archive-validator WIF key; command lines may leak through process listings. Prefer -matmulattestationsignerkeyfile.", ArgsManager::ALLOW_ANY | ArgsManager::SENSITIVE, OptionsCategory::OPTIONS);
@@ -1172,6 +1174,29 @@ bool AppInitBasicSetup(const ArgsManager& args, std::atomic<int>& exit_status)
     return true;
 }
 
+std::string DefaultMatMulRCExecutionMode(const CChainParams& chainparams)
+{
+    // Activation-aware, not a constant. auto-fallback was correct only while
+    // every public net pinned nMatMulRCHeight to INT32_MAX: it let
+    // pre-activation and CI nodes run the portable oracle. Once a chain carries
+    // a finite RC height, that same default silently leaves the CPU ExactReplay
+    // path reachable on an activated network, where a full-round host replay
+    // does not fit the relay budget -- so a node would appear to validate while
+    // falling arbitrarily far behind. Above a configured activation the default
+    // fails closed; an operator who genuinely wants fallback must say so.
+    //
+    // Regtest is deliberately exempt. It sets finite RC heights as a matter of
+    // course -- that is how the activation boundary is exercised at all -- and
+    // runs toy dimensions on hosts with no qualified accelerator, so a strict
+    // default there fails closed against the harness rather than against a real
+    // risk. Regtest asks for strict-device explicitly when that is under test.
+    if (chainparams.GetChainType() == ChainType::REGTEST) return "auto-fallback";
+    return chainparams.GetConsensus().nMatMulRCHeight !=
+                   std::numeric_limits<int32_t>::max()
+               ? "strict-device"
+               : "auto-fallback";
+}
+
 bool AppInitParameterInteraction(const ArgsManager& args)
 {
     const CChainParams& chainparams = Params();
@@ -1456,7 +1481,8 @@ bool AppInitParameterInteraction(const ArgsManager& args)
     }
 
     const std::string rc_execution_mode{
-        args.GetArg("-matmulrcexecution", "auto-fallback")};
+        args.GetArg("-matmulrcexecution",
+                    DefaultMatMulRCExecutionMode(chainparams))};
     matmul::v4::rc::RCExactReplayExecutionPolicy rc_execution_policy;
     if (rc_execution_mode == "strict-device" ||
         rc_execution_mode == "strict") {
@@ -3186,6 +3212,30 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     if (!node.connman->Start(scheduler, connOptions)) {
         return false;
     }
+
+    // Advertised validation tier must track provider health, not just the state
+    // at init. NODE_MATMUL_CONSENSUS (and the attestation-archive bit that is
+    // gated on the same strict-device readiness) was published once during
+    // startup and then never revisited, so a node whose accelerator was
+    // quarantined mid-run kept advertising that it validates MatMul consensus
+    // and kept being preferred as a sync peer for exactly the check it could no
+    // longer perform. Quarantine is terminal until restart, so this only ever
+    // withdraws.
+    matmul::v4::rc::SetRCProviderQuarantineNotifier(
+        [&node](const std::string& provider, const std::string& reason) {
+            if (!node.connman) return;
+            const ServiceFlags withdrawn{static_cast<ServiceFlags>(
+                static_cast<uint64_t>(NODE_MATMUL_CONSENSUS) |
+                static_cast<uint64_t>(NODE_MATMUL_ATTESTATION_ARCHIVE))};
+            if ((node.connman->GetLocalServices() & withdrawn) == 0) return;
+            node.connman->RemoveLocalServices(withdrawn);
+            LogWarning(
+                "Withdrawing NODE_MATMUL_CONSENSUS and "
+                "NODE_MATMUL_ATTESTATION_ARCHIVE: provider=%s quarantined "
+                "(%s). This node no longer advertises MatMul consensus "
+                "validation; restart with a qualified provider to restore it.\n",
+                provider, reason);
+        });
 
     // ********************************************************* Step 13: finished
 
