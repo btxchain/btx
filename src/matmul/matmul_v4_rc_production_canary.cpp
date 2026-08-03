@@ -411,10 +411,10 @@ CommittedRCProductionGoldenManifest()
     // equality alone was never the gate.
     //
     // Evidence: doc/evidence/multi-gpu-profile1-goldens-cuda-metal-2026-08-03-final,
-    // regenerated on both providers at the FINAL pre-merge freeze 807cd19b.
+    // regenerated on both providers at the FINAL pre-merge freeze 7dc60146.
     // The digests are bit-identical to the earlier 78a88af5 cohort, so the six
-    // commits in between are demonstrably predicate-neutral rather than merely
-    // asserted to be.
+    // commits in between -- and the activation-height resize after them -- are
+    // demonstrably predicate-neutral rather than merely asserted to be.
     // Both providers independently reported 1'088 device calls and
     // 1'129'198'441'725'952 device MACs with zero CPU GEMM calls, zero CPU MACs
     // and zero fallbacks, and ExtractMX self-qualification PASS. All eight
@@ -447,11 +447,11 @@ CommittedRCProductionGoldenManifest()
             .independently_reproduced = true,
             .public_provenance =
                 "doc/evidence/multi-gpu-profile1-goldens-cuda-metal-2026-08-03-final",
-            .source_revision = "807cd19bd1ee78a415e5e23aa8c049780dce2616",
+            .source_revision = "7dc60146a14c136ec1cb59f383a5b2eb5361c5ac",
             .source_tree_fingerprint =
-                "f12b05195d2a9f1a9a1ce8f575e0cb102d339b31e02144167b9105c01ae51256",
+                "886cd74666ba18379e67e4be5b558222e6522cdebe12cdc3453e550200b3b493",
             .harness_sha256 =
-                "497e4b7fc1ad0f3b9c43ea1123fcec6386b211784cf9e740784b2b0897563502",
+                "0aea3575119fe8d13628ec63e137d2d9f1280edbaa1aeeda3b1b17d0c4ead977",
         },
         RCProductionGoldenManifestEntry{
             .id = "epoch-a-profile1-metal-m4-nonce1",
@@ -469,11 +469,11 @@ CommittedRCProductionGoldenManifest()
             .independently_reproduced = true,
             .public_provenance =
                 "doc/evidence/multi-gpu-profile1-goldens-cuda-metal-2026-08-03-final",
-            .source_revision = "807cd19bd1ee78a415e5e23aa8c049780dce2616",
+            .source_revision = "7dc60146a14c136ec1cb59f383a5b2eb5361c5ac",
             .source_tree_fingerprint =
-                "f12b05195d2a9f1a9a1ce8f575e0cb102d339b31e02144167b9105c01ae51256",
+                "886cd74666ba18379e67e4be5b558222e6522cdebe12cdc3453e550200b3b493",
             .harness_sha256 =
-                "b301d2cd65727554f1d12e2b43aa309726c88eac48368dc635b37cee1c78cf0a",
+                "c3eb3801b5682617e0f391855647e6c1bdef62297a87668ad3f5612df00af5d1",
         },
     };
     return manifest;
