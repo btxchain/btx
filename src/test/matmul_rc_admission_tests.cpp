@@ -557,9 +557,14 @@ BOOST_AUTO_TEST_CASE(rate_limited_is_a_refusal_to_store_not_an_invalid_ticket)
     // from one source looks like.
     size_t rate_limited{0};
     size_t invalid{0};
-    for (uint32_t i = 0; i < cfg.max_unknown_submissions_per_netgroup + 8; ++i) {
+    for (size_t i = 0; i < cfg.max_unknown_submissions_per_netgroup + 8; ++i) {
         node::RCAdmissionTicket ticket{};
-        ticket.block_hash = uint256{i + 1};
+        // Not uint256{i + 1}: base_blob's only integral constructor takes
+        // uint8_t, so a non-constant wider operand is a narrowing conversion in
+        // a braced-init-list. GCC accepts it with a pedwarn, Clang rejects it
+        // outright, so the case built here and failed on Apple Clang. Going
+        // through arith_uint256 also keeps the hashes distinct past 255.
+        ticket.block_hash = ArithToUint256(arith_uint256{i + 1});
         const auto result{store.Remember(ticket, netgroup, now)};
         if (result == node::RCAdmissionStore::RememberResult::RateLimited) ++rate_limited;
         if (result == node::RCAdmissionStore::RememberResult::Invalid) ++invalid;
