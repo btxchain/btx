@@ -410,7 +410,11 @@ CommittedRCProductionGoldenManifest()
     // requires and what every earlier corpus in this branch failed. Digest
     // equality alone was never the gate.
     //
-    // Evidence: doc/evidence/multi-gpu-profile1-goldens-cuda-metal-2026-08-03-sealed.
+    // Evidence: doc/evidence/multi-gpu-profile1-goldens-cuda-metal-2026-08-03-final,
+    // regenerated on both providers at the FINAL pre-merge freeze 807cd19b.
+    // The digests are bit-identical to the earlier 78a88af5 cohort, so the six
+    // commits in between are demonstrably predicate-neutral rather than merely
+    // asserted to be.
     // Both providers independently reported 1'088 device calls and
     // 1'129'198'441'725'952 device MACs with zero CPU GEMM calls, zero CPU MACs
     // and zero fallbacks, and ExtractMX self-qualification PASS. All eight
@@ -442,12 +446,12 @@ CommittedRCProductionGoldenManifest()
                 "b4777985d4f2621d0b9c119f4188ac7d80158fc92560ade96cc7a3fd8cfae953"},
             .independently_reproduced = true,
             .public_provenance =
-                "doc/evidence/multi-gpu-profile1-goldens-cuda-metal-2026-08-03-sealed",
-            .source_revision = "78a88af5f5775a37388aa2281f602a77a5afc68b",
+                "doc/evidence/multi-gpu-profile1-goldens-cuda-metal-2026-08-03-final",
+            .source_revision = "807cd19bd1ee78a415e5e23aa8c049780dce2616",
             .source_tree_fingerprint =
-                "41a071900c855ce8cba0930114e7ecded689684da500ffd35ed0b5244369c1ed",
+                "f12b05195d2a9f1a9a1ce8f575e0cb102d339b31e02144167b9105c01ae51256",
             .harness_sha256 =
-                "50e7141d341cfb608fde7d73660848191bf8b6f1ba870b4bdcd2e4a0959a9d1a",
+                "497e4b7fc1ad0f3b9c43ea1123fcec6386b211784cf9e740784b2b0897563502",
         },
         RCProductionGoldenManifestEntry{
             .id = "epoch-a-profile1-metal-m4-nonce1",
@@ -464,12 +468,12 @@ CommittedRCProductionGoldenManifest()
                 "b4777985d4f2621d0b9c119f4188ac7d80158fc92560ade96cc7a3fd8cfae953"},
             .independently_reproduced = true,
             .public_provenance =
-                "doc/evidence/multi-gpu-profile1-goldens-cuda-metal-2026-08-03-sealed",
-            .source_revision = "78a88af5f5775a37388aa2281f602a77a5afc68b",
+                "doc/evidence/multi-gpu-profile1-goldens-cuda-metal-2026-08-03-final",
+            .source_revision = "807cd19bd1ee78a415e5e23aa8c049780dce2616",
             .source_tree_fingerprint =
-                "41a071900c855ce8cba0930114e7ecded689684da500ffd35ed0b5244369c1ed",
+                "f12b05195d2a9f1a9a1ce8f575e0cb102d339b31e02144167b9105c01ae51256",
             .harness_sha256 =
-                "cd24b64ea6d46b43ffa2d864c13837a68d79b2460d20bc8d2ebb9902917ae652",
+                "b301d2cd65727554f1d12e2b43aa309726c88eac48368dc635b37cee1c78cf0a",
         },
     };
     return manifest;
