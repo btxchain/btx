@@ -706,11 +706,9 @@ public:
         // Q* Phase B seal-as-PoW: implemented but OFF (and inert regardless,
         // since DRLT is INT32_MAX above).
         consensus.fMatMulLTSealAsPoW = false;
-        // MatMul v4.7 Epoch A selects Profile 1 from Consensus::Params and leaves
-        // the public activation height disabled. The neutral RC ASERT rescale
-        // is deliberately non-authorizing; a later activation patch must set
-        // the finite height and reviewed final-binary calibration atomically.
+        // MatMul v4.7 Epoch A selects Profile 1 from Consensus::Params.
         // Profile 2 and Stage-3 proof authority remain separate transitions.
+        //
         // MatMul v4.7 EPOCH A — ACTIVATION HEIGHT INSTALLED.
         //
         // H_A = 182'600. Chosen against the live mainnet tip 178'349, i.e.
@@ -720,7 +718,7 @@ public:
         // is the conservative direction here -- it makes the runway AT LEAST
         // 100 hours (100.4 h at 85 s, 105.1 h at 89 s) rather than at most.
         //
-        // The previous constant 182'600 was sized against tip 178'283 and had
+        // The previous constant 182'283 was sized against tip 178'283 and had
         // decayed to ~93 h of runway by the time the tree was ready. Recompute
         // this against the live tip if the merge slips again -- the runway is
         // measured from the tip when the constant is chosen, not from the

@@ -222,9 +222,10 @@ without treating the referenced block as invalid.
   required. Such a machine is an archive of block/RPC data, not an independent
   MatMul validator.
 - Back up the archive's blocks/index and protect the online signing key.
-- Use M-of-N independent keys for a production fleet. Mainnet enforces a floor
-  of 2 distinct signers with M >= 2 (recommended, not enforced); prefer 2-of-3 so one offline provider does
-  not stall the mirrors.
+- Use M-of-N independent keys for a production fleet. Mainnet does **not**
+  enforce a signer floor: a 1-of-1 mirror starts, with a loud startup warning.
+  2 distinct signers with `M >= 2` is strongly recommended, and 2-of-3 is
+  preferred so one offline provider does not stall the mirrors.
 - If a GPU/provider is unhealthy, stop archive attestation service until the
   validator again completes authoritative ExactReplay. Never sign from a
   trusted mirror or from a device failure.

@@ -3229,12 +3229,28 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                 static_cast<uint64_t>(NODE_MATMUL_ATTESTATION_ARCHIVE))};
             if ((node.connman->GetLocalServices() & withdrawn) == 0) return;
             node.connman->RemoveLocalServices(withdrawn);
+            // RemoveLocalServices only changes what we send in FUTURE VERSION
+            // messages. Every peer already connected holds the service flags we
+            // advertised at handshake time, and the P2P protocol has no way to
+            // amend them mid-connection -- so without this those peers keep
+            // treating us as a MatMul-capable validator, and keep preferring us
+            // for exactly the sync we can no longer serve. Drop them so each one
+            // re-handshakes and learns the corrected flags. Quarantine is
+            // terminal for the process, so this churn happens at most once and
+            // is strictly better than continuing to answer under a stale claim.
+            size_t dropped{0};
+            node.connman->ForEachNode([&](CNode* peer_node) {
+                peer_node->fDisconnect = true;
+                ++dropped;
+            });
             LogWarning(
                 "Withdrawing NODE_MATMUL_CONSENSUS and "
                 "NODE_MATMUL_ATTESTATION_ARCHIVE: provider=%s quarantined "
-                "(%s). This node no longer advertises MatMul consensus "
-                "validation; restart with a qualified provider to restore it.\n",
-                provider, reason);
+                "(%s). Disconnected %u peer(s) so they re-handshake without the "
+                "stale service flags. This node no longer advertises MatMul "
+                "consensus validation; restart with a qualified provider to "
+                "restore it.\n",
+                provider, reason, dropped);
         });
 
     // ********************************************************* Step 13: finished
