@@ -40,7 +40,14 @@ CommittedRCProductionGoldenManifest()
     // requires and what every earlier corpus in this branch failed. Digest
     // equality alone was never the gate.
     //
-    // Evidence: doc/evidence/multi-gpu-profile1-goldens-cuda-metal-2026-08-03-final.
+    // This is also the first seal in this branch that describes its OWN tree
+    // rather than its parent: the fingerprint below was recomputed by both rigs
+    // from clean checkouts of this revision and is unchanged by the act of
+    // writing it here, because this file is excluded from it. See the header
+    // comment for why that exclusion is what makes a self-consistent seal
+    // possible at all.
+    //
+    // Evidence: doc/evidence/multi-gpu-profile1-goldens-cuda-metal-2026-08-03-review-closure.
     // Both providers independently reported 1'088 device calls and
     // 1'129'198'441'725'952 device MACs with zero CPU GEMM calls, zero CPU MACs
     // and zero fallbacks, and ExtractMX self-qualification PASS. All eight
@@ -72,12 +79,12 @@ CommittedRCProductionGoldenManifest()
                 "b4777985d4f2621d0b9c119f4188ac7d80158fc92560ade96cc7a3fd8cfae953"},
             .independently_reproduced = true,
             .public_provenance =
-                "doc/evidence/multi-gpu-profile1-goldens-cuda-metal-2026-08-03-final",
-            .source_revision = "7dc60146a14c136ec1cb59f383a5b2eb5361c5ac",
+                "doc/evidence/multi-gpu-profile1-goldens-cuda-metal-2026-08-03-review-closure",
+            .source_revision = "8b40a79f43e4b5d947574a3c2040f2936c524195",
             .source_tree_fingerprint =
-                "886cd74666ba18379e67e4be5b558222e6522cdebe12cdc3453e550200b3b493",
+                "62074ec43fcaf22fb7d77c164e280c5c5b85fcb8f826d4eb0360406f8570e0b6",
             .harness_sha256 =
-                "0aea3575119fe8d13628ec63e137d2d9f1280edbaa1aeeda3b1b17d0c4ead977",
+                "97858b30384927f05222c8277de947d480ccab1898fac5b462cbb0fcc2b9195e",
         },
         RCProductionGoldenManifestEntry{
             .id = "epoch-a-profile1-metal-m4-nonce1",
@@ -94,12 +101,12 @@ CommittedRCProductionGoldenManifest()
                 "b4777985d4f2621d0b9c119f4188ac7d80158fc92560ade96cc7a3fd8cfae953"},
             .independently_reproduced = true,
             .public_provenance =
-                "doc/evidence/multi-gpu-profile1-goldens-cuda-metal-2026-08-03-final",
-            .source_revision = "7dc60146a14c136ec1cb59f383a5b2eb5361c5ac",
+                "doc/evidence/multi-gpu-profile1-goldens-cuda-metal-2026-08-03-review-closure",
+            .source_revision = "8b40a79f43e4b5d947574a3c2040f2936c524195",
             .source_tree_fingerprint =
-                "886cd74666ba18379e67e4be5b558222e6522cdebe12cdc3453e550200b3b493",
+                "62074ec43fcaf22fb7d77c164e280c5c5b85fcb8f826d4eb0360406f8570e0b6",
             .harness_sha256 =
-                "c3eb3801b5682617e0f391855647e6c1bdef62297a87668ad3f5612df00af5d1",
+                "e5fd22e408d7e0ad7a655fadfc57318562cff72bf48042f795ef2dcd14203902",
         },
     };
     return manifest;
