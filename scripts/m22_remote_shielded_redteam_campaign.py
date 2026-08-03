@@ -51,10 +51,6 @@ REMOTE_SOURCE_ARCHIVE = "/root/btx-remote-redteam-source.tar.gz"
 REMOTE_ARTIFACT_BUNDLE = "/root/btx-remote-redteam-artifacts.tar.gz"
 
 
-def default_do_token_file() -> Path:
-    return (REPO_ROOT.parent / "infra" / "digitalocean_api.key").resolve()
-
-
 def utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -286,7 +282,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--region", default="sfo3", help="DigitalOcean region slug")
     parser.add_argument("--size", default="s-2vcpu-4gb-amd", help="DigitalOcean droplet size slug")
     parser.add_argument("--image", default="ubuntu-24-04-x64", help="DigitalOcean image slug")
-    parser.add_argument("--ssh-key-id", type=int, default=54710021, help="DigitalOcean SSH key id")
+    parser.add_argument(
+        "--ssh-key-id",
+        type=int,
+        default=os.environ.get("BTX_DO_SSH_KEY_ID"),
+        help="DigitalOcean SSH key id (or set BTX_DO_SSH_KEY_ID)",
+    )
     parser.add_argument(
         "--ssh-private-key",
         default=str(Path.home() / ".ssh" / "id_ed25519"),
@@ -306,12 +307,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--portseed", type=int, default=35200)
     parser.add_argument(
         "--do-token-file",
-        default=str(default_do_token_file()),
-        help="DigitalOcean API token file; defaults to the repo-adjacent infra key path when present",
+        default=os.environ.get("BTX_DO_TOKEN_FILE"),
+        help="DigitalOcean API token file (or set BTX_DO_TOKEN_FILE)",
     )
     parser.add_argument("--keep-droplet", action="store_true", help="Do not delete the droplet/firewall on exit")
     parser.add_argument("--dry-run", action="store_true", help="Emit the planned configuration without creating resources")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.ssh_key_id is None:
+        parser.error("DigitalOcean SSH key id is required via --ssh-key-id or BTX_DO_SSH_KEY_ID")
+    if not args.do_token_file:
+        parser.error("DigitalOcean API token file is required via --do-token-file or BTX_DO_TOKEN_FILE")
+    return args
 
 
 def main() -> int:
@@ -329,7 +335,7 @@ def main() -> int:
             "region": args.region,
             "size": args.size,
             "image": args.image,
-            "ssh_key_id": args.ssh_key_id,
+            "ssh_key_configured": True,
             "build_jobs": args.build_jobs,
             "portseed": args.portseed,
             "keep_droplet": args.keep_droplet,

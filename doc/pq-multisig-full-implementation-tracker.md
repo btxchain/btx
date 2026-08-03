@@ -2147,7 +2147,7 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
 | `env -i HOME="$HOME" PATH="$PATH" USER="$USER" SHELL=/bin/bash TERM=xterm-256color LANG=C.UTF-8 LC_ALL=C.UTF-8 bash -c 'FILE_ENV="./ci/test/00_setup_env_native_centos_functional_override.sh" MAKEJOBS=-j1 GOAL=test_btx CTEST_REGEX="(miniscript_tests|pq_multisig_tests|pq_multisig_descriptor_tests|pq_multisig_wallet_tests|pq_consensus_tests|pq_policy_tests|pq_phase4_tests|pq_descriptor_tests|pq_wallet_tests)" ./ci/test_run_all.sh'` | PASS (`9/9` targeted ctest + functional: `feature_pq_multisig.py --descriptors`, `rpc_pq_multisig.py`, `rpc_pq_wallet.py`) |
 
 ### CI delta (authenticated GitHub API)
-- Authenticated polling (using `/path/to/Documents/example/staging-repo`) succeeded.
+- Authenticated polling (using `/path/to/Documents/example/github.key`) succeeded.
 - Branch head observed: `ef340ab1c239bb8462e6ae3074cd6ca951201940`.
 - Current/previous run status snapshot:
   - `22253513321` (`CI`) completed `failure`.
@@ -2670,7 +2670,7 @@ The critical path is **Phase 1 → Phase 3 → Phase 4 → Phase 5**. Phases 2, 
 
 #### Open blockers
 - Repo-wide literal marker debt remains (`297` TODO/FIXME/XXX matches excluding `depends/*` and `src/leveldb/*`).
-- CI monitoring still pending authenticated API poll in this cycle (to run after commit/push using `/path/to/Documents/example/staging-repo`).
+- CI monitoring still pending authenticated API poll in this cycle (to run after commit/push using `/path/to/Documents/example/github.key`).
 
 ### Cycle 15 (User-Reported Gap Closure + CI Failure Reproduction + Local Mac Gates)
 - Completed tasks:

@@ -7,18 +7,18 @@
 > Profile 1 ExactReplay is the Epoch-A launch candidate. Profile 2 is reserved
 > for a later, separately activated proof-authoritative workload.
 >
-> **Update — Epoch A ACTIVATED:** mainnet now sets `nMatMulV4Height =
-> nMatMulBMX4CHeight = nMatMulRCHeight = 181'894` with both ratification
-> constants true and the RC ASERT rescale `4294967295/1` installed
-> (`src/kernel/chainparams.cpp`, `src/consensus/params.h`). Testnet and
-> signet heights remain `INT32_MAX`, as do Epochs B–D everywhere.
+> **Update — Epoch A release candidate:** mainnet stages one atomic
+> `nMatMulV4Height = nMatMulBMX4CHeight = nMatMulRCHeight = H_A` tuple with
+> both ratification constants. The numeric height and RC ASERT coefficient are
+> release-final only after exact-final-binary CUDA+Metal evidence and a live-tip
+> runway calculation. Testnet/signet and Epochs B–D remain disabled.
 
 This file tracks the path from the reference implementation to a mainnet
-hard-fork activation. **Mainnet Epoch A is SET at height 181'894; every
-Epoch B–D height remains unset on every network.** Implementation review and
-activation review were separate gates; the activation decision and its
-accepted residual risk are recorded at the ratification flags in
-`src/consensus/params.h`.
+hard-fork activation. **Mainnet Epoch A is a scheduled candidate; every Epoch
+B–D height remains unset on every network.** Implementation review and
+activation review are separate gates. The source flags are staged for candidate
+testing, but the activation decision and any explicit risk disposition remain
+open until the exact-final evidence is reviewed.
 
 The required order is:
 
@@ -35,11 +35,12 @@ Epoch A is the only epoch eligible for the first activation-height PR.
 HISTORY: merging the implementation PR activated nothing — through the
 implementation-only releases `nMatMulV4Height`, `nMatMulBMX4CHeight`, and
 `nMatMulRCHeight` all stayed `INT32_MAX` and the public-network ratification
-constants stayed false. The activation commit has since set the atomic tuple
-on mainnet at `H_A = 181'894` and flipped both constants true.
+constants stayed false. This branch may stage candidate values, but no finite
+tuple or ratification flag is release-authorizing until exact-final evidence
+passes and the activation review selects `H_A` from the live tip.
 
-The Epoch-A activation set one atomic tuple at a single height `H_A`; it was
-never a one-field flip:
+The eventual Epoch-A activation must set one atomic tuple at a single height
+`H_A`; it must never be a one-field flip:
 
 | Parameter family | Required Epoch-A value |
 |---|---|
@@ -48,20 +49,22 @@ never a one-field flip:
 | Workload/authority | Profile 1, production dimensions, ExactReplay authority |
 | Header admission | HeaderPoW remains disabled; Poseidon2 `rcadmit` is P2P policy |
 | ASERT | v4 and BMX4C ratios remain inert `1/1`; the live RC branch owns the measured one-time calibration |
-| Authorization | `BTX_MATMUL_NO_INVERSION_GATE_RATIFIED` is a separate, explicit L0 ratification decision |
+| Authorization | `BTX_MATMUL_NO_INVERSION_GATE_RATIFIED` and `BTX_MATMUL_V47_GPU_LIFECYCLE_GATE_RATIFIED` are separate, explicit reviewed decisions |
 
 Epochs B–D require new height-versioned proof-required, proof-authority, and
 Profile-2 selectors. They must not be implemented by flipping the current
 global Stage-3 readiness value or `nMatMulRCProfile`, because doing so would
 reinterpret historical Epoch-A blocks under a later rule.
 
-The older tracker below describes two broad gates:
+The older, pre-v4.7 tracker below describes two historical broad gates. Its
+"disabled" wording describes the implementation-only state at that time, not
+the finite-but-provisional values staged in the current release candidate:
 
-- **Gate A — merge to `main` (after public review).** The fork lands
-  *disabled*; inert until a height is set. Near-term.
+- **Historical Gate A — merge to `main` (after public review).** The fork was
+  to land *disabled* and remain inert until a later activation change.
 - **Gate B — activate on mainnet.** Gated on calibration + audit + testnet +
-  coordinated upgrade. Weeks–months; some items require real GPU hardware
-  this repo cannot provide.
+  coordinated upgrade. Some items require real GPU hardware this repo cannot
+  provide.
 
 Transition source of truth:
 `doc/btx-matmul-v4.7-transition-roadmap.md`. Epoch-A measurements and
@@ -109,17 +112,20 @@ to settle §K.2b(c).
 
 ---
 
-## Gate A — merge implementation to main (disabled)
+## Historical Gate A — implementation-only merge with activation disabled
 
-Gate A means code and documentation may be reviewed and merged with all
-heights unreachable. It is not authorization to select Epoch A, and it cannot
-enable proof authority or Profile 2 by default.
+This section records the superseded implementation-only merge plan, under
+which code and documentation could be merged with all activation heights
+unreachable. It does not describe the current release candidate, which stages
+a finite provisional tuple but remains non-authorizing pending exact-final
+evidence and release review. Neither state enables proof authority or Profile
+2 by default.
 
 | # | Item | Status |
 |---|---|---|
 | A1 | CPU consensus core (`int8_field`, `matmul_v4`, `pow_v4`) — compiles | ✅ done |
 | A2 | Height-gated dispatch + one-time ASERT rescale (`pow.cpp`, `validation.cpp`) | ✅ done |
-| A3 | Chainparams: regtest/testnet v4 params; **mainnet unset** | ✅ done |
+| A3 | Historical chainparams plan: regtest/testnet v4 params; **mainnet unset** | ✅ done at that stage |
 | A4 | GPU backends (CUDA/Metal/HIP) + dispatch + capabilities — host side compiles | ✅ done |
 | A5 | Dispatch verifies every full-payload accelerated result; ENC-DR-LT returns digest-only losing slots and CPU-reconstructs/verifies/reseals every potential winner; any device/winner failure falls back | ✅ done |
 | A6 | Miner seals `header.matmul_digest` (mining-flow correctness) | ✅ done |
@@ -132,14 +138,17 @@ enable proof authority or Profile 2 by default.
 | A13 | Public code review of design spec + implementation | ☐ todo (PR #89) |
 | A14 | **v4.1 batched-sketch profile (spec §A.2 v4.1 / §C I1′ / §K.2b, PR #89 wall-time fix):** b = 8 → 4; A/U/V template-scoped (template hash zeroes nNonce64 + §H.4 seed fields), B/σ nonce-fresh; CPU batched miner (`matmul_v4_batch.{h,cpp}`, one stacked combine GEMM per window) wired into `SolveMatMulV4` (window Q via `BTX_MATMUL_V4_BATCH`, default 8) with the winner re-derived through the single-nonce reference before sealing; C-13 limb-tensor combine CPU reference; per-stage bench (`matmul_v4_stage_bench` — since REMOVED as a superseded-workload bench, commit `7c76afa2`; use `contrib/matmul-v4/run-full-benchmark.py`); golden vectors re-pinned; verifier UNCHANGED (O(n²), one nonce). All 6 v4 suites + regtest activation functional test green | ✅ done (code) — ⚠ security review B4′ + measurement B2g outstanding |
 
-Exit criterion: A1–A11 done, CPU suite green, reviewed → merge to `main` with
-the complete Epoch-A height tuple disabled and ratification false.
+Historical exit criterion: A1–A11 done, CPU suite green, reviewed → merge the
+implementation with the complete Epoch-A height tuple disabled and
+ratification false. The current release candidate instead follows the
+exact-final requirements at the top of this document and in the canonical
+transition roadmap.
 
 ---
 
 ## Gate B — Epoch-A mainnet activation
 
-### ⛳ Activation trigger (historical verdict: NO-GO — superseded by the shipped 181'894 activation)
+### ⛳ Activation trigger (candidate remains fail-closed until final evidence)
 
 **Historical analysis (pre-activation).** The former “CUDA + Metal PASS ⇒ GO”
 rule was superseded: backend determinism is necessary, but it does not close
@@ -148,17 +157,18 @@ external-review gates. At the time this verdict was written, all public
 activation heights were `INT32_MAX` and
 `BTX_MATMUL_NO_INVERSION_GATE_RATIFIED` was false.
 
-**What actually happened:** the operator activated Epoch A at mainnet height
-181'894 with three committed evidence artifacts recorded as the closing
-basis (the sealed one-freeze CUDA+Metal golden cohort, the zero-fallback
-lifecycle soak, and the two-rig ASERT calibration — see
+**Required closing basis:** the operator may finalize Epoch A only after three
+revision-bound evidence sets pass on the exact final implementation: a
+CUDA+Metal golden cohort, zero-fallback lifecycle soak, and two-vendor ASERT
+calibration (see
 `doc/btx-matmul-v4.7-transition-roadmap.md` §4), and with multi-day
 wall-clock soak, multi-peer public testnet topology, and released-binary
-upgrade behavior explicitly accepted as residual risk. Items in the list
-below that are not covered by those artifacts (for example AMD-path
-qualification and a B200-class measurement) were likewise not met at
-activation. This section is retained as the gate analysis of record, not as
-a description of the shipped state.
+upgrade behavior either completed or explicitly dispositioned in the reviewed
+activation decision. Historical artifacts cannot substitute for this
+exact-final evidence. Items in the list below that are not covered by those
+artifacts (for example AMD-path qualification and a B200-class measurement)
+remain open unless that decision expressly waives them. This section is the
+gate analysis of record, not a description of shipped state.
 
 At minimum, a future GO requires all of the following evidence in one reviewed
 release:
@@ -287,7 +297,9 @@ confirm zero splits over a sustained window. This is where determinism
 problems surface in the wild.
 
 ### B5. Coordinated activation
-- Choose a mainnet height with **weeks** of lead time (not days).
+- Select the release-final mainnet height from the live tip only after the
+  exact-final code and evidence freeze, with **at least 96 hours of runway**;
+  prefer a longer runway when release coordination permits.
 - Prefer a miner/version **signaling/readiness gate** so activation only
   proceeds once a supermajority has upgraded — a flag-day with no adoption
   check risks a split.
@@ -303,14 +315,18 @@ supermajority upgraded → activate.
 
 ### B6. Staged mainnet activation — atomic Epoch-A tuple
 
-Mainnet's complete Epoch-A tuple is **UNSET** (disabled) in
-`src/kernel/chainparams.cpp`. Once every exit criterion above is GO (with CUDA
-and Metal PASSes only two of the required inputs), a separate narrow
-activation PR must make one reviewed, atomic source change:
+The current source stages a finite Epoch-A tuple and ratification flags for
+release-candidate testing. Those values are provisional and non-authorizing:
+they must not ship unless the exact-final evidence and activation review pass.
+Once every required exit criterion is GO (with CUDA and Metal PASSes only two
+of the required inputs), a narrow release-final change must replace or
+re-affirm the complete tuple, measured coefficient, and ratification decision
+atomically:
 
-1. **Pick the height with lead time.** `H_activate = current_mainnet_height +
-   Δ`, where `Δ` gives **≥ 2 weeks** of blocks at 90 s spacing
-   (`Δ ≥ 2·7·24·40 = 13,440` blocks). Longer is safer.
+1. **Pick the height from the live tip at source freeze.**
+   `H_activate = current_mainnet_height + Δ`, where `Δ` gives **at least
+   96 hours** of blocks at the measured live spacing. Prefer additional runway
+   when release coordination permits; never reuse a decayed candidate height.
 2. **Set all three Epoch-A heights to exactly the same value** in
    `CMainParams`:
    ```
@@ -327,30 +343,34 @@ activation PR must make one reviewed, atomic source change:
    `nMatMulRCAsertRescaleNum/Den` to the independently reviewed, measured
    v3-to-Epoch-A calibration. The RC dispatch branch is live at the unified
    height and owns that one-time rescale.
-5. **Ratify separately.** The activation release must record the explicit L0
-   decision and set `BTX_MATMUL_NO_INVERSION_GATE_RATIFIED`; a height,
-   benchmark, merge, or backend PASS does not imply ratification.
+5. **Re-affirm ratification explicitly.** The activation release must record
+   the reviewed L0 decision and set both required source constants as part of
+   the same release-final change. Candidate values, a height, benchmark,
+   merge, or backend PASS do not imply ratification.
 6. **Release** a tagged build with the tuple set; publish node/miner/pool/
    exchange upgrade notices; rewrite mining guides + pool software (§N.2).
 7. **Prefer a signaling/readiness gate** (miner/version signaling) so activation
    only proceeds once a supermajority has upgraded — a flag-day with no adoption
    check risks a split.
 
-Until the complete tuple and ratification are committed and released, the
-network stays on v3. A partial tuple is invalid by construction.
+Until the exact-final tuple, coefficient, and ratification decision are
+committed in a reviewed release and that release reaches its selected height,
+the public network stays on v3. The finite values in this development branch
+are not deployment authorization. A partial tuple is invalid by construction.
 
 ---
 
 ## Gate C — historical ENC-BMX4C research tracker
 
-> **v4.7 precedence:** Epoch A now activates BMX4C atomically with v4 and
+> **v4.7 precedence:** The Epoch-A candidate activates BMX4C atomically with v4 and
 > Profile-1 ExactReplay at `H_A`. It is not a later standalone mainnet fork.
 > The material below is retained as design and measurement provenance; its old
 > ordering and independent-height recommendations do not govern v4.7.
 
-**`nMatMulBMX4CHeight` is deliberately UNSET (disabled) on every network.**
-That remains true in this implementation merge. A future, separately reviewed
-Epoch-A activation PR sets it to the same height as v4 and RC. Design source
+**Historical note:** before the Epoch-A candidate,
+`nMatMulBMX4CHeight` was deliberately unset on every network. The candidate
+stages it at the same release-selected height as v4 and RC, but the tuple is
+not final or shipped until the current activation gates close. Design source
 of truth for the historical encoding work:
 `doc/btx-matmul-v4.2-consolidated-design.md`; normative encoding spec + profile
 machinery: `doc/btx-matmul-v4.2-bmx4c-spec.md`; governance framework:
@@ -475,5 +495,6 @@ frozen; L2 needs no governance):
   TPU v7) for the Gate C M-t24 measurement (C2) and the ENC-BMX4C vector set
   (C1e/C4-b).
 
-Everything else (Gate A, the code for B1, the calibration harnesses) is in
-this branch.
+The historical Gate-A implementation, the code for B1, and the calibration
+harnesses are in this branch. Exact-final CUDA+Metal and ASERT evidence,
+full-suite closeout, and live-tip height selection remain open release gates.

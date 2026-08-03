@@ -1,5 +1,11 @@
 # Multi-GPU Profile-1 golden corpus — review-closure freeze
 
+Status: **superseded and non-admissible for activation.** This historical
+corpus used an older fingerprint design that excluded executable manifest
+logic. The current design fingerprints the parser and CMake conversion and
+excludes only an inert manifest `.data` seal. A fresh exact-final corpus must
+pass the current release-seal verifier.
+
 CUDA and Metal reproductions of the eight canonical Profile-1 production canaries
 (nonces 1–8, `matmul_dim=4096`), recorded at the freeze that closes the
 nine-finding review round.
@@ -26,12 +32,15 @@ Both providers ran from a clean checkout of that revision. The corpus script's
 fail-closed dirty-tree guard was active on both, so neither reading can describe
 a locally modified build.
 
-The fingerprint is
+The historical fingerprint was
 `sha256(git ls-tree -r --full-tree <rev> -- CMakeLists.txt cmake src)` with
-`src/matmul/matmul_v4_rc_production_golden_manifest.cpp` excluded. That file
-holds the manifest literal and nothing else; excluding it is what allows a seal
-to describe the tree it ships in rather than its parent commit. Both rigs
-computed the fingerprint independently and agreed.
+`src/matmul/matmul_v4_rc_production_golden_manifest.cpp` excluded. That
+exclusion is no longer accepted: the translation unit contained executable
+parsing/policy logic. The replacement design fingerprints that code and
+excludes only `src/matmul/matmul_v4_rc_production_golden_manifest.data`, whose
+bytes are converted to a numeric array by fingerprinted CMake and parsed under
+a strict schema by fingerprinted C++. Both historical rigs agreed on their old
+fingerprint, but this directory does not satisfy the current seal policy.
 
 ## Result
 

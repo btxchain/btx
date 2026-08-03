@@ -16,7 +16,7 @@
 > They do not override the proposed MatMul v4.7 transition: Profile 1 ExactReplay is
 > Epoch A; proof carriage becomes mandatory while ExactReplay remains required
 > in Epoch B; proof authority moves to Profile 1 in Epoch C; Profile 2 follows
-> only at a separate Epoch-D height. Mainnet Epoch A (v4 = BMX4C = RC) now activates at height 181'894; all other transition heights remain disabled. See
+> only at a separate Epoch-D height. Mainnet Epoch A (v4 = BMX4C = RC) is scheduled at one release-selected atomic `H_A`; all other transition heights remain disabled. See
 > [`doc/btx-matmul-v4.7-transition-roadmap.md`](doc/btx-matmul-v4.7-transition-roadmap.md).
 
 **Branch:** `wip/v46-fold`

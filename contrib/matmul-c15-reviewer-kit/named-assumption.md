@@ -4,7 +4,7 @@
 > research provenance, not a current activation or proof-authority condition.
 > The four-epoch MatMul v4.7 plan is defined in
 > [`doc/btx-matmul-v4.7-transition-roadmap.md`](../../doc/btx-matmul-v4.7-transition-roadmap.md);
-> mainnet Epoch A (v4 = BMX4C = RC) now activates at height 181'894 and all other transition heights remain disabled.
+> mainnet Epoch A (v4 = BMX4C = RC) is scheduled at the release-selected atomic `H_A` and all other transition heights remain disabled.
 
 **C-15 remains OPEN.** Do not treat this kit, green goldens, or low toy R² as
 cryptographic closure or permission to raise `nMatMulDRLTHeight`.

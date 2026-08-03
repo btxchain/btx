@@ -1,8 +1,9 @@
 # Epoch-A ASERT: single-rig v3-vs-RC work ratio
 
-Status: **first same-silicon measurement of the Epoch-A work ratio.** Nothing is
-installed. `nMatMulRCAsertRescaleNum/Den` stay neutral and
-`nMatMulRCHeight` stays `INT32_MAX`.
+Status: **historical first same-silicon measurement of the Epoch-A work
+ratio.** At measurement time nothing was installed and the RC schedule was
+neutral/disabled. The current release candidate stages a static height and
+coefficient, but this artifact does not authorize them.
 
 ## Why this exists
 
@@ -89,8 +90,9 @@ read as vindication.
   undercount under the parallel solver; the headline `k` does not depend on it
   (`R_eff` is a direct count), but the quoted `gamma` does.
 - Difficulty is taken as 3.531677073810059 (height 176,445). `k` is only weakly
-  and one-sidedly dependent on it, and the shipped code now derives the rescale
-  from the live parent nBits at runtime rather than from a static multiplier.
+  and one-sidedly dependent on it. This was a measurement-time proposal; the
+  current candidate instead installs a statically reviewed chain-parameter
+  coefficient whose transition target is derived from the live parent nBits.
 
 ## Before anything is installed
 

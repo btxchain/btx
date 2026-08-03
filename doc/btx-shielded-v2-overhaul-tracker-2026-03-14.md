@@ -95,12 +95,11 @@ Current status:
 ### 2026-03-16 23:15:59 JST
 
 - pass preflight: verified readable, non-empty
-  `/path/to/Documents/example/staging-repo`,
-  `/path/to/Documents/example/staging-repo/credential-file`,
-  `/path/to/Documents/example/staging-repo/credential-file`, and
-  `/path/to/Documents/example/staging-repo/credential-file` before any new
-  remote or GitHub operation in this pass, with byte counts `94`, `72`, `69`,
-  and `69`;
+  `/path/to/credentials/release-token`,
+  `/path/to/credentials/cloud-api-token`,
+  `/path/to/credentials/dns-api-token`, and
+  `/path/to/credentials/dns-api-secret` before any new
+  remote or GitHub operation in this pass, with credential sizes redacted;
 - current focus for this pass: run the required fetch / switch / pull / status
   / log loop, then inspect the post-`m26` readiness / handoff surfaces for the
   next honest repo-side DoD 8 gap instead of treating the remaining external
@@ -149,21 +148,21 @@ Current status:
   - `python3 -m py_compile /path/to/Documents/example/staging-repo/scripts/m23_shielded_external_redteam_packet.py /path/to/Documents/example/staging-repo/scripts/m24_shielded_external_findings_intake.py`
   - `bash /path/to/Documents/example/staging-repo/test/util/m23_shielded_external_redteam_packet_test.sh`
   - `bash /path/to/Documents/example/staging-repo/test/util/m24_shielded_external_findings_intake_test.sh`
-  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/scripts/m23_shielded_external_redteam_packet.py --output-dir <redacted-temporary-path> --audit-bundle <redacted-temporary-path> --hosted-run-dir <redacted-temporary-path> --hosted-validation-dir <redacted-temporary-path>`
-  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/scripts/m24_shielded_external_findings_intake.py --output-dir <redacted-temporary-path> --source-packet <redacted-temporary-path> --audit-bundle <redacted-temporary-path> --hosted-run-dir <redacted-temporary-path> --hosted-validation-dir <redacted-temporary-path>`
-  - `python3 - <<'PY' ... manifest inspection for <redacted-temporary-path> and <redacted-temporary-path> ... PY`
-  - `python3 - <<'PY' ... local-path scan of <redacted-temporary-path> and <redacted-temporary-path> ... PY`
-  - `shasum -a 256 <redacted-temporary-path> <redacted-temporary-path>`
+  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/scripts/m23_shielded_external_redteam_packet.py --output-dir /tmp/btx-m23-external-redteam-packet-m26 --audit-bundle /tmp/btx-m20-audit-handoff-bundle-m26 --hosted-run-dir /tmp/btx-m22-remote-redteam-run9 --hosted-validation-dir /tmp/btx-m26-remote-validation-run2`
+  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/scripts/m24_shielded_external_findings_intake.py --output-dir /tmp/btx-m24-external-findings-intake-m26 --source-packet /tmp/btx-m23-external-redteam-packet-m26 --audit-bundle /tmp/btx-m20-audit-handoff-bundle-m26 --hosted-run-dir /tmp/btx-m22-remote-redteam-run9 --hosted-validation-dir /tmp/btx-m26-remote-validation-run2`
+  - `python3 - <<'PY' ... manifest inspection for /tmp/btx-m23-external-redteam-packet-m26/manifest.json and /tmp/btx-m24-external-findings-intake-m26/manifest.json ... PY`
+  - `python3 - <<'PY' ... local-path scan of /tmp/btx-m23-external-redteam-packet-m26/artifacts/hosted_validation/manifest.json and /tmp/btx-m24-external-findings-intake-m26/source_refs/m26_hosted_validation/manifest.json ... PY`
+  - `shasum -a 256 /tmp/btx-m23-external-redteam-packet-m26.tar.gz /tmp/btx-m24-external-findings-intake-m26.tar.gz`
   - `git diff --check`
 - validation findings and pivots:
   - both strengthened synthetic regressions passed cleanly after the `m26`
     propagation changes;
   - the real packet rebuild completed in `real 5.94`, `user 5.66`,
-    `sys 0.18`, and `<redacted-temporary-path>`
+    `sys 0.18`, and `/tmp/btx-m23-external-redteam-packet-m26/manifest.json`
     confirms both `scripts/m26_remote_shielded_validation_suite.py` and the
     optional `hosted_validation_dir` baseline are present;
   - the real intake rebuild completed in `real 8.27`, `user 8.01`,
-    `sys 0.19`, and `<redacted-temporary-path>`
+    `sys 0.19`, and `/tmp/btx-m24-external-findings-intake-m26/manifest.json`
     confirms both the bundled `m26` helper and the optional
     `m26_hosted_validation` reference are present;
   - direct inspection of the copied hosted-validation manifests confirmed zero
@@ -189,12 +188,11 @@ Current status:
 ### 2026-03-16 22:47:09 JST
 
 - pass preflight: verified readable, non-empty
-  `/path/to/Documents/example/staging-repo`,
-  `/path/to/Documents/example/staging-repo/credential-file`,
-  `/path/to/Documents/example/staging-repo/credential-file`, and
-  `/path/to/Documents/example/staging-repo/credential-file` before any new
-  remote or GitHub operation in this pass, with byte counts `94`, `72`, `69`,
-  and `69`;
+  `/path/to/credentials/release-token`,
+  `/path/to/credentials/cloud-api-token`,
+  `/path/to/credentials/dns-api-token`, and
+  `/path/to/credentials/dns-api-secret` before any new
+  remote or GitHub operation in this pass, with credential sizes redacted;
 - current focus for this pass: inspect the remaining repo-side DoD 8 bundle
   and packet surfaces for any last honest artifact-portability mismatch after
   the `m23` / `m24` hosted-manifest sanitization fix, before starting the
@@ -260,16 +258,16 @@ Current status:
   - `bash /path/to/Documents/example/staging-repo/test/util/m24_shielded_external_findings_intake_test.sh`
   - `bash /path/to/Documents/example/staging-repo/test/util/m26_remote_shielded_validation_suite_test.sh`
   - `bash -n /path/to/Documents/example/staging-repo/scripts/m19_reset_launch_rehearsal.sh`
-  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/scripts/m20_shielded_audit_handoff_bundle.py --build-dir /path/to/Documents/example/staging-repo/build-btx --output-dir <redacted-temporary-path> --skip-build --samples=2`
+  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/scripts/m20_shielded_audit_handoff_bundle.py --build-dir /path/to/Documents/example/staging-repo/build-btx --output-dir /tmp/btx-m20-audit-handoff-bundle-m26 --skip-build --samples=2`
   - local generator shape sampling:
-    - `/path/to/Documents/example/staging-repo/build-btx/bin/gen_shielded_v2_send_runtime_report --samples=1 --warmup=0 --scenarios=1x2,2x2,2x4 --output=<redacted-temporary-path>`
-    - `/path/to/Documents/example/staging-repo/build-btx/bin/gen_shielded_ingress_proof_runtime_report --backend=receipt --samples=1 --warmup=0 --leaf-counts=100,1000,5000,10000 --output=<redacted-temporary-path>`
-    - `/path/to/Documents/example/staging-repo/build-btx/bin/gen_shielded_v2_egress_runtime_report --samples=1 --warmup=0 --scenarios=32x32,1300x32,5000x32 --output=<redacted-temporary-path>`
-    - `/path/to/Documents/example/staging-repo/build-btx/bin/gen_shielded_v2_netting_capacity_report --samples=1 --warmup=0 --scenarios=2x50,8x80,32x95,64x99 --output=<redacted-temporary-path>`
-    - `/path/to/Documents/example/staging-repo/build-btx/bin/gen_shielded_v2_chain_growth_projection_report --block-sizes-mb=12,24,32 --output=<redacted-temporary-path>`
-- hosted disposable validation run 1 (`<redacted-temporary-path>`):
+    - `/path/to/Documents/example/staging-repo/build-btx/bin/gen_shielded_v2_send_runtime_report --samples=1 --warmup=0 --scenarios=1x2,2x2,2x4 --output=/tmp/btx-m26-local-send.json`
+    - `/path/to/Documents/example/staging-repo/build-btx/bin/gen_shielded_ingress_proof_runtime_report --backend=receipt --samples=1 --warmup=0 --leaf-counts=100,1000,5000,10000 --output=/tmp/btx-m26-local-ingress.json`
+    - `/path/to/Documents/example/staging-repo/build-btx/bin/gen_shielded_v2_egress_runtime_report --samples=1 --warmup=0 --scenarios=32x32,1300x32,5000x32 --output=/tmp/btx-m26-local-egress.json`
+    - `/path/to/Documents/example/staging-repo/build-btx/bin/gen_shielded_v2_netting_capacity_report --samples=1 --warmup=0 --scenarios=2x50,8x80,32x95,64x99 --output=/tmp/btx-m26-local-netting.json`
+    - `/path/to/Documents/example/staging-repo/build-btx/bin/gen_shielded_v2_chain_growth_projection_report --block-sizes-mb=12,24,32 --output=/tmp/btx-m26-local-chain-growth.json`
+- hosted disposable validation run 1 (`/tmp/btx-m26-remote-validation-run1`):
   - command:
-    - `python3 /path/to/Documents/example/staging-repo/scripts/m26_remote_shielded_validation_suite.py --output-dir <redacted-temporary-path> --admin-cidr 0.0.0.0/0 --size s-4vcpu-8gb-amd --build-jobs 4`
+    - `python3 /path/to/Documents/example/staging-repo/scripts/m26_remote_shielded_validation_suite.py --output-dir /tmp/btx-m26-remote-validation-run1 --admin-cidr 0.0.0.0/0 --size s-4vcpu-8gb-amd --build-jobs 4`
   - cloud resources:
     - droplet `558685516` / `btx-shielded-suite-20260316-132524`
     - firewall `0b91a82b-77f2-4543-8b98-16f239b075ad`
@@ -294,9 +292,9 @@ Current status:
   - cost / teardown:
     - estimated cost `0.0235`
     - droplet and firewall deletion both confirmed
-- hosted disposable validation run 2 (`<redacted-temporary-path>`) after the `m19 --config-file` fix:
+- hosted disposable validation run 2 (`/tmp/btx-m26-remote-validation-run2`) after the `m19 --config-file` fix:
   - command:
-    - `python3 /path/to/Documents/example/staging-repo/scripts/m26_remote_shielded_validation_suite.py --output-dir <redacted-temporary-path> --admin-cidr 0.0.0.0/0 --size s-4vcpu-8gb-amd --build-jobs 4`
+    - `python3 /path/to/Documents/example/staging-repo/scripts/m26_remote_shielded_validation_suite.py --output-dir /tmp/btx-m26-remote-validation-run2 --admin-cidr 0.0.0.0/0 --size s-4vcpu-8gb-amd --build-jobs 4`
   - cloud resources:
     - droplet `558688768` / `btx-shielded-suite-20260316-134242`
     - firewall `469f8a50-59d9-41c8-8340-df4d036c0073`
@@ -356,7 +354,7 @@ Current status:
     - aggregate hosted cost for the fail-first run plus the clean rerun:
       `0.0513`
 - documentation and operator-memory updates landed in this pass:
-  - updated `/path/to/Documents/example/staging-repo/btx-seed-server-spec.md`
+  - updated `/path/to/Documents/example/infra/btx-seed-server-spec.md`
     with the canonical hosted validation command, a mandatory future-session
     task list, and the recorded fail-first / clean-rerun evidence;
   - updated `/path/to/Documents/example/staging-repo/doc/btx-production-readiness-matrix.md`
@@ -368,7 +366,7 @@ Current status:
     `m26`;
   - refreshed real `m20` handoff bundle generation completed in
     `real 241.55`, `user 226.61`, `sys 2.37`, and the emitted manifest at
-    `<redacted-temporary-path>` records
+    `/tmp/btx-m20-audit-handoff-bundle-m26/manifest.json` records
     `source_file_count=30` with both
     `scripts/m26_remote_shielded_validation_suite.py` and
     `test/util/m26_remote_shielded_validation_suite_test.sh` present; the
@@ -385,12 +383,11 @@ Current status:
 ### 2026-03-16 22:38:17 JST
 
 - pass preflight: verified readable, non-empty
-  `/path/to/Documents/example/staging-repo`,
-  `/path/to/Documents/example/staging-repo/credential-file`,
-  `/path/to/Documents/example/staging-repo/credential-file`, and
-  `/path/to/Documents/example/staging-repo/credential-file` before any new
-  remote or GitHub operation in this pass, with byte counts `94`, `72`, `69`,
-  and `69`;
+  `/path/to/credentials/release-token`,
+  `/path/to/credentials/cloud-api-token`,
+  `/path/to/credentials/dns-api-token`, and
+  `/path/to/credentials/dns-api-secret` before any new
+  remote or GitHub operation in this pass, with credential sizes redacted;
 - current focus for this pass: inspect the remaining repo-side DoD 8 handoff
   and hosted-redteam artifact surfaces for another honest portability gap
   after the `m22` manifest-sanitizer fix, before starting the required
@@ -432,7 +429,7 @@ Current status:
   - local HEAD and `origin/codex/shielded-v2-overhaul-plan` were aligned at
     `c0f9c6e1f1` before this pass began;
   - the targeted inspection of the live stale packet artifact at
-    `<redacted-temporary-path>`
+    `/tmp/btx-m23-external-redteam-packet-v2.wfpqPI/artifacts/hosted_run/manifest.json`
     confirmed a real downstream gap remained after the `m22` serializer fix:
     the copied hosted-run manifest still contained `10` absolute local path
     leaks because `m23` / `m24` were copying older hosted-run directories
@@ -444,32 +441,32 @@ Current status:
   - `git status --short`
   - `git log --oneline -5`
   - `rg -n 'manifest\\.json|copy2\\(|shutil\\.copy2|copytree|hosted-run-dir|remote-redteam|m22' /path/to/Documents/example/staging-repo/scripts/m20_shielded_audit_handoff_bundle.py /path/to/Documents/example/staging-repo/scripts/m23_shielded_external_redteam_packet.py /path/to/Documents/example/staging-repo/scripts/m24_shielded_external_findings_intake.py`
-  - `python3 - <<'PY' ... leak scan of <redacted-temporary-path> ... PY`
+  - `python3 - <<'PY' ... leak scan of /tmp/btx-m23-external-redteam-packet-v2.wfpqPI/artifacts/hosted_run/manifest.json ... PY`
   - `bash /path/to/Documents/example/staging-repo/test/util/m23_shielded_external_redteam_packet_test.sh`
   - `bash /path/to/Documents/example/staging-repo/test/util/m24_shielded_external_findings_intake_test.sh`
   - `python3 -m py_compile /path/to/Documents/example/staging-repo/scripts/m23_shielded_external_redteam_packet.py /path/to/Documents/example/staging-repo/scripts/m24_shielded_external_findings_intake.py`
-  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/scripts/m23_shielded_external_redteam_packet.py --output-dir <redacted-temporary-path> --hosted-run-dir <redacted-temporary-path>`
-  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/scripts/m24_shielded_external_findings_intake.py --output-dir <redacted-temporary-path> --source-packet <redacted-temporary-path> --hosted-run-dir <redacted-temporary-path>`
-  - `python3 - <<'PY' ... zero-hit local-path scan over <redacted-temporary-path> <redacted-temporary-path> and <redacted-temporary-path> ... PY`
+  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/scripts/m23_shielded_external_redteam_packet.py --output-dir /tmp/btx-m23-hosted-manifest-sanitized --hosted-run-dir /tmp/btx-m22-remote-redteam-run9`
+  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/scripts/m24_shielded_external_findings_intake.py --output-dir /tmp/btx-m24-hosted-manifest-sanitized --source-packet /tmp/btx-m23-hosted-manifest-sanitized --hosted-run-dir /tmp/btx-m22-remote-redteam-run9`
+  - `python3 - <<'PY' ... zero-hit local-path scan over /tmp/btx-m23-hosted-manifest-sanitized/artifacts/hosted_run/manifest.json, /tmp/btx-m24-hosted-manifest-sanitized/source_refs/m23_packet/artifacts/hosted_run/manifest.json, and /tmp/btx-m24-hosted-manifest-sanitized/source_refs/m22_hosted_run/manifest.json ... PY`
   - `git diff --check`
 - validation findings and pivots:
   - the live stale packet artifact replay showed the real downstream problem
     clearly: the copied hosted-run manifest still exposed `10` absolute local
-    path hits before this pass, including `/path/to/.ssh/ssh-key-file`,
+    path hits before this pass, including `/path/to/.ssh/id_ed25519`,
     `/path/to/Documents/example/staging-repo`, and
-    `<redacted-temporary-path>`;
+    `/private/tmp/btx-m22-remote-redteam-run9/...`;
   - both strengthened regressions passed with stale synthetic hosted-run
     manifests and now guard against future verbatim-copy regressions in `m23`
     and `m24`;
   - `py_compile` passed cleanly for both packet builders;
   - the real stale-artifact replay passed:
-    - `m23` rebuilt from `<redacted-temporary-path>` in `real 1.79`,
+    - `m23` rebuilt from `/tmp/btx-m22-remote-redteam-run9` in `real 1.79`,
       `user 1.66`, `sys 0.10`;
     - `m24` rebuilt from that `m23` packet plus the same stale hosted run in
       `real 3.42`, `user 3.27`, `sys 0.13`;
   - direct inspection of the emitted copied hosted-run manifests confirmed the
     local-path hit count dropped to `0` in all three output locations, with
-    representative rewritten values of `~/.ssh/ssh-key-file` and
+    representative rewritten values of `~/.ssh/id_ed25519` and
     `logs/remote_install.log`;
 - blocker conclusion for this pass:
   - this closes another honest repo-side DoD 8 packaging gap by ensuring older
@@ -488,12 +485,11 @@ Current status:
 ### 2026-03-16 22:25:48 JST
 
 - pass preflight: verified readable, non-empty
-  `/path/to/Documents/example/staging-repo`,
-  `/path/to/Documents/example/staging-repo/credential-file`,
-  `/path/to/Documents/example/staging-repo/credential-file`, and
-  `/path/to/Documents/example/staging-repo/credential-file` before any new
-  remote or GitHub operation in this pass, with byte counts `94`, `72`, `69`,
-  and `69`;
+  `/path/to/credentials/release-token`,
+  `/path/to/credentials/cloud-api-token`,
+  `/path/to/credentials/dns-api-token`, and
+  `/path/to/credentials/dns-api-secret` before any new
+  remote or GitHub operation in this pass, with credential sizes redacted;
 - current focus for this pass: inspect the remaining repo-side DoD 8 handoff
   and hosted red-team surfaces for another honest portability or packaging
   mismatch after the `m22` default-token-path fix, before starting the
@@ -529,7 +525,7 @@ Current status:
     `94faadbd68` before this pass began;
   - the remaining targeted portability scan over the DoD 8 hosted-red-team
     surface found a broader honest metadata leak in practice: the real hosted
-    `m22` artifact at `<redacted-temporary-path>` still
+    `m22` artifact at `/tmp/btx-m22-remote-redteam-run9/manifest.json` still
     serialized absolute local SSH-key, `cwd`, `log`, and archive-path values,
     which would leak creator-machine home and workspace details into the
     hosted run artifact bundled for external review;
@@ -539,30 +535,30 @@ Current status:
   - `git pull --ff-only origin codex/shielded-v2-overhaul-plan`
   - `git status --short`
   - `git log --oneline -5`
-  - `rg -n '/path/to/Documents/btxchain|/path/to/Documents/example/staging-repo|/path/to/Documents/example/staging-repo' /path/to/Documents/example/staging-repo/doc/btx-shielded-cryptographic-audit-handoff.md /path/to/Documents/example/staging-repo/doc/btx-shielded-external-redteam-window.md /path/to/Documents/example/staging-repo/doc/btx-shielded-external-review-closeout.md /path/to/Documents/example/staging-repo/doc/btx-production-readiness-matrix.md /path/to/Documents/example/staging-repo/scripts/m20_shielded_audit_handoff_bundle.py /path/to/Documents/example/staging-repo/scripts/m22_remote_shielded_redteam_campaign.py /path/to/Documents/example/staging-repo/scripts/m23_shielded_external_redteam_packet.py /path/to/Documents/example/staging-repo/scripts/m24_shielded_external_findings_intake.py /path/to/Documents/example/staging-repo/scripts/m25_shielded_external_closeout_check.py /path/to/Documents/example/staging-repo/test/util/m20_shielded_audit_handoff_bundle_test.sh /path/to/Documents/example/staging-repo/test/util/m22_remote_shielded_redteam_campaign_test.sh /path/to/Documents/example/staging-repo/test/util/m23_shielded_external_redteam_packet_test.sh /path/to/Documents/example/staging-repo/test/util/m24_shielded_external_findings_intake_test.sh /path/to/Documents/example/staging-repo/test/util/m25_shielded_external_closeout_check_test.sh`
-  - `rg -n 'docs/participant_brief.md|docs/operator_checklist.md|docs/m24_shielded_external_findings_intake.py|docs/m25_shielded_external_closeout_check.py|source_snapshot/infra/btx-seed-server-spec.md|\\.\\./infra/btx-seed-server-spec.md|credential-file|ssh_private_key|ssh-key-file' /path/to/Documents/example/staging-repo/doc /path/to/Documents/example/staging-repo/scripts /path/to/Documents/example/staging-repo/test/util`
-  - `python3 - <<'PY' ... historical <redacted-temporary-path> leak scan ... PY`
+  - `rg -n '/path/to/Documents/btxchain|/path/to/Documents/example/infra|/path/to/Documents/example/staging-repo' /path/to/Documents/example/staging-repo/doc/btx-shielded-cryptographic-audit-handoff.md /path/to/Documents/example/staging-repo/doc/btx-shielded-external-redteam-window.md /path/to/Documents/example/staging-repo/doc/btx-shielded-external-review-closeout.md /path/to/Documents/example/staging-repo/doc/btx-production-readiness-matrix.md /path/to/Documents/example/staging-repo/scripts/m20_shielded_audit_handoff_bundle.py /path/to/Documents/example/staging-repo/scripts/m22_remote_shielded_redteam_campaign.py /path/to/Documents/example/staging-repo/scripts/m23_shielded_external_redteam_packet.py /path/to/Documents/example/staging-repo/scripts/m24_shielded_external_findings_intake.py /path/to/Documents/example/staging-repo/scripts/m25_shielded_external_closeout_check.py /path/to/Documents/example/staging-repo/test/util/m20_shielded_audit_handoff_bundle_test.sh /path/to/Documents/example/staging-repo/test/util/m22_remote_shielded_redteam_campaign_test.sh /path/to/Documents/example/staging-repo/test/util/m23_shielded_external_redteam_packet_test.sh /path/to/Documents/example/staging-repo/test/util/m24_shielded_external_findings_intake_test.sh /path/to/Documents/example/staging-repo/test/util/m25_shielded_external_closeout_check_test.sh`
+  - `rg -n 'docs/participant_brief.md|docs/operator_checklist.md|docs/m24_shielded_external_findings_intake.py|docs/m25_shielded_external_closeout_check.py|source_snapshot/infra/btx-seed-server-spec.md|\\.\\./infra/btx-seed-server-spec.md|cloud-api-token|ssh_private_key|id_ed25519' /path/to/Documents/example/staging-repo/doc /path/to/Documents/example/staging-repo/scripts /path/to/Documents/example/staging-repo/test/util`
+  - `python3 - <<'PY' ... historical /tmp/btx-m22-remote-redteam-run9/manifest.json leak scan ... PY`
   - `bash /path/to/Documents/example/staging-repo/test/util/m22_remote_shielded_redteam_campaign_test.sh`
   - `python3 -m py_compile /path/to/Documents/example/staging-repo/scripts/m22_remote_shielded_redteam_campaign.py`
-  - `python3 - <<'PY' ... sanitize historical <redacted-temporary-path> with sanitize_manifest_value(...) ... PY`
+  - `python3 - <<'PY' ... sanitize historical /tmp/btx-m22-remote-redteam-run9/manifest.json with sanitize_manifest_value(...) ... PY`
   - `git diff --check`
 - validation findings and pivots:
   - the targeted scan showed no remaining creator-machine path leak in the
     shipped docs/scripts themselves, but the real hosted `run9` manifest still
     exposed `10` absolute local path hits before this fix, including
-    `/path/to/.ssh/ssh-key-file`, `/path/to/Documents/example/staging-repo`,
-    and `<redacted-temporary-path>` log/archive paths;
+    `/path/to/.ssh/id_ed25519`, `/path/to/Documents/example/staging-repo`,
+    and `/private/tmp/...` log/archive paths;
   - the strengthened `m22` regression passed after the sanitizer landed and
     now blocks future reintroduction of unsanitized local `cwd`, `log`,
     artifact-path, and SSH-key-command fields;
   - `py_compile` passed cleanly;
-  - the sample-manifest regression now proves `scp -i ~/.ssh/ssh-key-file`,
+  - the sample-manifest regression now proves `scp -i ~/.ssh/id_ed25519`,
     `cwd=<repo>`, `log=logs/remote.log`, and output-dir-relative artifact
     paths are emitted instead of absolute local paths;
   - replaying `sanitize_manifest_value(...)` against the real hosted
-    `<redacted-temporary-path>` reduced the local-path
+    `/tmp/btx-m22-remote-redteam-run9/manifest.json` reduced the local-path
     hit count to `0` and produced representative redactions of
-    `~/.ssh/ssh-key-file`, `logs/remote_install.log`, and `<repo>`;
+    `~/.ssh/id_ed25519`, `logs/remote_install.log`, and `<repo>`;
 - blocker conclusion for this pass:
   - this closes another honest repo-side DoD 8 artifact-portability gap by
     removing creator-machine home/workspace/output-dir path leakage from the
@@ -580,12 +576,11 @@ Current status:
 ### 2026-03-16 22:17:43 JST
 
 - pass preflight: verified readable, non-empty
-  `/path/to/Documents/example/staging-repo`,
-  `/path/to/Documents/example/staging-repo/credential-file`,
-  `/path/to/Documents/example/staging-repo/credential-file`, and
-  `/path/to/Documents/example/staging-repo/credential-file` before any new
-  remote or GitHub operation in this pass, with byte counts `94`, `72`, `69`,
-  and `69`;
+  `/path/to/credentials/release-token`,
+  `/path/to/credentials/cloud-api-token`,
+  `/path/to/credentials/dns-api-token`, and
+  `/path/to/credentials/dns-api-secret` before any new
+  remote or GitHub operation in this pass, with credential sizes redacted;
 - current focus for this pass: inspect the remaining repo-side DoD 8 hosted
   red-team surfaces for another honest portability mismatch before starting the
   required fetch / pull / push sequence, with particular attention to any
@@ -602,12 +597,12 @@ Current status:
     `/path/to/Documents/example/staging-repo/scripts/m22_remote_shielded_redteam_campaign.py`
     so the hosted red-team harness no longer hard-codes the
     creator-machine-only default DigitalOcean token path and instead resolves
-    the repo-adjacent `../infra/credential-file` path from `REPO_ROOT`
+    the repo-adjacent `../infra/cloud-api-token` path from `REPO_ROOT`
     dynamically;
   - updated
     `/path/to/Documents/example/staging-repo/test/util/m22_remote_shielded_redteam_campaign_test.sh`
     so the structural regression now explicitly fails if the old
-    `/path/to/Documents/example/staging-repo/credential-file` literal ever
+    `/path/to/credentials/cloud-api-token` literal ever
     returns and asserts the new repo-relative default path logic is present;
   - updated
     `/path/to/Documents/example/staging-repo/doc/btx-shielded-cryptographic-audit-handoff.md`
@@ -628,10 +623,10 @@ Current status:
   - `git pull --ff-only origin codex/shielded-v2-overhaul-plan`
   - `git status --short`
   - `git log --oneline -5`
-  - `rg -n '/path/to/Documents/btxchain|/path/to/Documents/example/staging-repo|/path/to/Documents/example/staging-repo|/private/tmp|<redacted-temporary-path>' /path/to/Documents/example/staging-repo/doc/btx-shielded-cryptographic-audit-handoff.md /path/to/Documents/example/staging-repo/doc/btx-shielded-external-redteam-window.md /path/to/Documents/example/staging-repo/doc/btx-shielded-external-review-closeout.md /path/to/Documents/example/staging-repo/doc/btx-production-readiness-matrix.md /path/to/Documents/example/staging-repo/scripts/m20_shielded_audit_handoff_bundle.py /path/to/Documents/example/staging-repo/scripts/m22_remote_shielded_redteam_campaign.py /path/to/Documents/example/staging-repo/scripts/m23_shielded_external_redteam_packet.py /path/to/Documents/example/staging-repo/scripts/m24_shielded_external_findings_intake.py /path/to/Documents/example/staging-repo/scripts/m25_shielded_external_closeout_check.py /path/to/Documents/example/staging-repo/test/util/m20_shielded_audit_handoff_bundle_test.sh /path/to/Documents/example/staging-repo/test/util/m22_remote_shielded_redteam_campaign_test.sh /path/to/Documents/example/staging-repo/test/util/m23_shielded_external_redteam_packet_test.sh /path/to/Documents/example/staging-repo/test/util/m24_shielded_external_findings_intake_test.sh /path/to/Documents/example/staging-repo/test/util/m25_shielded_external_closeout_check_test.sh`
+  - `rg -n '/path/to/Documents/btxchain|/path/to/Documents/example/infra|/path/to/Documents/example/staging-repo|/private/tmp|/tmp/btx-' /path/to/Documents/example/staging-repo/doc/btx-shielded-cryptographic-audit-handoff.md /path/to/Documents/example/staging-repo/doc/btx-shielded-external-redteam-window.md /path/to/Documents/example/staging-repo/doc/btx-shielded-external-review-closeout.md /path/to/Documents/example/staging-repo/doc/btx-production-readiness-matrix.md /path/to/Documents/example/staging-repo/scripts/m20_shielded_audit_handoff_bundle.py /path/to/Documents/example/staging-repo/scripts/m22_remote_shielded_redteam_campaign.py /path/to/Documents/example/staging-repo/scripts/m23_shielded_external_redteam_packet.py /path/to/Documents/example/staging-repo/scripts/m24_shielded_external_findings_intake.py /path/to/Documents/example/staging-repo/scripts/m25_shielded_external_closeout_check.py /path/to/Documents/example/staging-repo/test/util/m20_shielded_audit_handoff_bundle_test.sh /path/to/Documents/example/staging-repo/test/util/m22_remote_shielded_redteam_campaign_test.sh /path/to/Documents/example/staging-repo/test/util/m23_shielded_external_redteam_packet_test.sh /path/to/Documents/example/staging-repo/test/util/m24_shielded_external_findings_intake_test.sh /path/to/Documents/example/staging-repo/test/util/m25_shielded_external_closeout_check_test.sh`
   - `bash /path/to/Documents/example/staging-repo/test/util/m22_remote_shielded_redteam_campaign_test.sh`
   - `python3 -m py_compile /path/to/Documents/example/staging-repo/scripts/m22_remote_shielded_redteam_campaign.py`
-  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/scripts/m22_remote_shielded_redteam_campaign.py --output-dir <redacted-temporary-path> --admin-cidr 0.0.0.0/0 --dry-run`
+  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/scripts/m22_remote_shielded_redteam_campaign.py --output-dir /tmp/btx-m22-remote-redteam-default-token-pass --admin-cidr 0.0.0.0/0 --dry-run`
   - `git diff --check`
 - validation findings and pivots:
   - the creator-path scan isolated the remaining leak cleanly to the `m22`
@@ -644,7 +639,7 @@ Current status:
     and no explicit `--do-token-file`, confirming the new repo-relative
     default token path is actually exercised; runtime was `real 0.80`,
     `user 0.08`, `sys 0.02`, and the dry-run manifest landed under
-    `<redacted-temporary-path>`;
+    `/private/tmp/btx-m22-remote-redteam-default-token-pass`;
 - blocker conclusion for this pass:
   - this closes another honest repo-side DoD 8 portability gap by removing the
     last creator-machine default path from the hosted red-team harness that is
@@ -661,12 +656,11 @@ Current status:
 ### 2026-03-16 21:39:53 JST
 
 - pass preflight: verified readable, non-empty
-  `/path/to/Documents/example/staging-repo`,
-  `/path/to/Documents/example/staging-repo/credential-file`,
-  `/path/to/Documents/example/staging-repo/credential-file`, and
-  `/path/to/Documents/example/staging-repo/credential-file` before any new
-  remote or GitHub operation in this pass, with byte counts `94`, `72`, `69`,
-  and `69`;
+  `/path/to/credentials/release-token`,
+  `/path/to/credentials/cloud-api-token`,
+  `/path/to/credentials/dns-api-token`, and
+  `/path/to/credentials/dns-api-secret` before any new
+  remote or GitHub operation in this pass, with credential sizes redacted;
 - current focus for this pass: inspect the remaining repo-side DoD 8 handoff,
   packet, and closeout surfaces for another honest portability or packaging
   mismatch before starting the required fetch / pull / push sequence;
@@ -695,7 +689,7 @@ Current status:
   - `git status --short`
   - `git log --oneline -5`
   - `ps -axo pid=,ppid=,command= | rg '/path/to/Documents/example/staging-repo| git '`
-  - `rg -n '/path/to/Documents/btxchain|/path/to/Documents/example/staging-repo|/path/to/Documents/example/staging-repo' /path/to/Documents/example/staging-repo/doc/btx-shielded-cryptographic-audit-handoff.md /path/to/Documents/example/staging-repo/doc/btx-shielded-external-redteam-window.md /path/to/Documents/example/staging-repo/doc/btx-shielded-external-review-closeout.md /path/to/Documents/example/staging-repo/doc/btx-production-readiness-matrix.md /path/to/Documents/example/staging-repo/scripts/m20_shielded_audit_handoff_bundle.py /path/to/Documents/example/staging-repo/scripts/m23_shielded_external_redteam_packet.py /path/to/Documents/example/staging-repo/scripts/m24_shielded_external_findings_intake.py /path/to/Documents/example/staging-repo/scripts/m25_shielded_external_closeout_check.py /path/to/Documents/example/staging-repo/test/util/m20_shielded_audit_handoff_bundle_test.sh /path/to/Documents/example/staging-repo/test/util/m23_shielded_external_redteam_packet_test.sh /path/to/Documents/example/staging-repo/test/util/m24_shielded_external_findings_intake_test.sh /path/to/Documents/example/staging-repo/test/util/m25_shielded_external_closeout_check_test.sh`
+  - `rg -n '/path/to/Documents/btxchain|/path/to/Documents/example/infra|/path/to/Documents/example/staging-repo' /path/to/Documents/example/staging-repo/doc/btx-shielded-cryptographic-audit-handoff.md /path/to/Documents/example/staging-repo/doc/btx-shielded-external-redteam-window.md /path/to/Documents/example/staging-repo/doc/btx-shielded-external-review-closeout.md /path/to/Documents/example/staging-repo/doc/btx-production-readiness-matrix.md /path/to/Documents/example/staging-repo/scripts/m20_shielded_audit_handoff_bundle.py /path/to/Documents/example/staging-repo/scripts/m23_shielded_external_redteam_packet.py /path/to/Documents/example/staging-repo/scripts/m24_shielded_external_findings_intake.py /path/to/Documents/example/staging-repo/scripts/m25_shielded_external_closeout_check.py /path/to/Documents/example/staging-repo/test/util/m20_shielded_audit_handoff_bundle_test.sh /path/to/Documents/example/staging-repo/test/util/m23_shielded_external_redteam_packet_test.sh /path/to/Documents/example/staging-repo/test/util/m24_shielded_external_findings_intake_test.sh /path/to/Documents/example/staging-repo/test/util/m25_shielded_external_closeout_check_test.sh`
   - `rg -n 'docs/m24_shielded_external_findings_intake.py|docs/m25_shielded_external_closeout_check.py|docs/participant_brief.md|docs/operator_checklist.md|source_snapshot/infra/btx-seed-server-spec.md|\\.\\./infra/btx-seed-server-spec.md' /path/to/Documents/example/staging-repo/doc /path/to/Documents/example/staging-repo/scripts /path/to/Documents/example/staging-repo/test/util`
   - `git diff --check`
 - validation findings and pivots:
@@ -722,12 +716,11 @@ Current status:
 ### 2026-03-16 21:30:34 JST
 
 - pass preflight: verified readable, non-empty
-  `/path/to/Documents/example/staging-repo`,
-  `/path/to/Documents/example/staging-repo/credential-file`,
-  `/path/to/Documents/example/staging-repo/credential-file`, and
-  `/path/to/Documents/example/staging-repo/credential-file` before any new
-  remote or GitHub operation in this pass, with byte counts `94`, `72`, `69`,
-  and `69`;
+  `/path/to/credentials/release-token`,
+  `/path/to/credentials/cloud-api-token`,
+  `/path/to/credentials/dns-api-token`, and
+  `/path/to/credentials/dns-api-secret` before any new
+  remote or GitHub operation in this pass, with credential sizes redacted;
 - current focus for this pass: inspect the remaining repo-side DoD 8 handoff
   and closeout surfaces for another honest gap after the `m23` source-doc
   portability fix;
@@ -765,18 +758,18 @@ Current status:
 - local validation for this pass:
   - `bash /path/to/Documents/example/staging-repo/test/util/m20_shielded_audit_handoff_bundle_test.sh`
   - `python3 -m py_compile /path/to/Documents/example/staging-repo/scripts/m20_shielded_audit_handoff_bundle.py`
-  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/scripts/m20_shielded_audit_handoff_bundle.py --build-dir /path/to/Documents/example/staging-repo/build-btx --output-dir <redacted-temporary-path> --skip-build --samples=2`
-  - `test -f <redacted-temporary-path>`
+  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/scripts/m20_shielded_audit_handoff_bundle.py --build-dir /path/to/Documents/example/staging-repo/build-btx --output-dir /private/tmp/btx-m20-audit-handoff-bundle-v3.g0PgXt --skip-build --samples=2`
+  - `test -f /private/tmp/btx-m20-audit-handoff-bundle-v3.g0PgXt/source_snapshot/infra/btx-seed-server-spec.md`
   - `python3 - <<'PY' ... manifest source-file inspection ... PY`
-  - `shasum -a 256 <redacted-temporary-path>`
+  - `shasum -a 256 /private/tmp/btx-m20-audit-handoff-bundle-v3.g0PgXt.tar.gz`
   - `git diff --check`
 - validation findings and pivots:
   - the cheap `m20` structural regression and `py_compile` checks both passed
     immediately after the source-resolver change;
   - the refreshed real `m20` bundle run passed in `real 240.72`,
     `user 226.61`, `sys 2.33`, writing
-    `<redacted-temporary-path>` plus sibling tarball
-    `<redacted-temporary-path>`;
+    `/private/tmp/btx-m20-audit-handoff-bundle-v3.g0PgXt` plus sibling tarball
+    `/private/tmp/btx-m20-audit-handoff-bundle-v3.g0PgXt.tar.gz`;
   - direct bundle inspection confirmed
     `source_snapshot/infra/btx-seed-server-spec.md` is present in the emitted
     handoff bundle;
@@ -801,12 +794,11 @@ Current status:
 ### 2026-03-16 21:25:59 JST
 
 - pass preflight: verified readable, non-empty
-  `/path/to/Documents/example/staging-repo`,
-  `/path/to/Documents/example/staging-repo/credential-file`,
-  `/path/to/Documents/example/staging-repo/credential-file`, and
-  `/path/to/Documents/example/staging-repo/credential-file` before any new
-  remote or GitHub operation in this pass, with byte counts `94`, `72`, `69`,
-  and `69`;
+  `/path/to/credentials/release-token`,
+  `/path/to/credentials/cloud-api-token`,
+  `/path/to/credentials/dns-api-token`, and
+  `/path/to/credentials/dns-api-secret` before any new
+  remote or GitHub operation in this pass, with credential sizes redacted;
 - current focus for this pass: inspect the remaining repo-side DoD 8 handoff
   and closeout surfaces adjacent to `m23` for another honest portability or
   packet-replay mismatch before starting the required fetch / pull / push
@@ -836,14 +828,14 @@ Current status:
   - the inspection found a real second-order portability mismatch adjacent to
     the previous `m23` fix: the generated participant docs were clean, but the
     copied source doc `doc/btx-shielded-external-redteam-window.md` still
-    carried `/path/to/Documents/example/staging-repo/btx-seed-server-spec.md`,
+    carried `/path/to/Documents/example/infra/btx-seed-server-spec.md`,
     so the packet source snapshot still leaked the creator-machine path;
 - local validation for this pass:
   - `bash /path/to/Documents/example/staging-repo/test/util/m23_shielded_external_redteam_packet_test.sh`
-  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/scripts/m23_shielded_external_redteam_packet.py --output-dir <redacted-temporary-path> --audit-bundle <redacted-temporary-path> --hosted-run-dir <redacted-temporary-path>`
-  - `sed -n '1,80p' <redacted-temporary-path>`
-  - `rg -n '/path/to/Documents/example/staging-repo/|\\.\\./infra/btx-seed-server-spec.md' <redacted-temporary-path>`
-  - `shasum -a 256 <redacted-temporary-path>`
+  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/scripts/m23_shielded_external_redteam_packet.py --output-dir /private/tmp/btx-m23-external-redteam-packet-v6.cybFtT --audit-bundle /private/tmp/btx-m20-audit-handoff-bundle-v2.SywV0q --hosted-run-dir /tmp/btx-m22-remote-redteam-run9`
+  - `sed -n '1,80p' /private/tmp/btx-m23-external-redteam-packet-v6.cybFtT/doc/btx-shielded-external-redteam-window.md`
+  - `rg -n '/path/to/Documents/example/infra/|\\.\\./infra/btx-seed-server-spec.md' /private/tmp/btx-m23-external-redteam-packet-v6.cybFtT/doc/btx-shielded-external-redteam-window.md`
+  - `shasum -a 256 /private/tmp/btx-m23-external-redteam-packet-v6.cybFtT.tar.gz`
   - `git diff --check`
 - validation findings and pivots:
   - the strengthened `m23` regression initially failed with
@@ -853,9 +845,9 @@ Current status:
     `../infra/btx-seed-server-spec.md` fixed the issue cleanly;
   - the final `m23_shielded_external_redteam_packet_test.sh` rerun passed;
   - the refreshed real packet build passed in `real 4.09`, `user 3.96`,
-    `sys 0.12`, writing `<redacted-temporary-path>`
+    `sys 0.12`, writing `/private/tmp/btx-m23-external-redteam-packet-v6.cybFtT`
     plus sibling tarball
-    `<redacted-temporary-path>`;
+    `/private/tmp/btx-m23-external-redteam-packet-v6.cybFtT.tar.gz`;
   - direct inspection of the copied packet guide confirmed the only remaining
     infra reference is the packet-safe sibling path
     `../infra/btx-seed-server-spec.md`, and the creator-machine absolute path
@@ -879,12 +871,11 @@ Current status:
 ### 2026-03-16 21:19:01 JST
 
 - pass preflight: verified readable, non-empty
-  `/path/to/Documents/example/staging-repo`,
-  `/path/to/Documents/example/staging-repo/credential-file`,
-  `/path/to/Documents/example/staging-repo/credential-file`, and
-  `/path/to/Documents/example/staging-repo/credential-file` before any new
-  remote or GitHub operation in this pass, with byte counts `94`, `72`, `69`,
-  and `69`;
+  `/path/to/credentials/release-token`,
+  `/path/to/credentials/cloud-api-token`,
+  `/path/to/credentials/dns-api-token`, and
+  `/path/to/credentials/dns-api-secret` before any new
+  remote or GitHub operation in this pass, with credential sizes redacted;
 - current focus for this pass: close the remaining repo-side `m23`
   participant-packet portability gap by removing creator-machine absolute-path
   references from generated participant docs and proving the refreshed packet
@@ -921,25 +912,25 @@ Current status:
 - local validation for this pass:
   - `python3 -m py_compile /path/to/Documents/example/staging-repo/scripts/m23_shielded_external_redteam_packet.py /path/to/Documents/example/staging-repo/scripts/m24_shielded_external_findings_intake.py /path/to/Documents/example/staging-repo/scripts/m25_shielded_external_closeout_check.py`
   - `bash /path/to/Documents/example/staging-repo/test/util/m23_shielded_external_redteam_packet_test.sh`
-  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/scripts/m23_shielded_external_redteam_packet.py --output-dir <redacted-temporary-path> --audit-bundle <redacted-temporary-path> --hosted-run-dir <redacted-temporary-path>`
-  - `/usr/bin/time -p python3 <redacted-temporary-path> --output-dir <redacted-temporary-path> --source-packet <redacted-temporary-path> --audit-bundle <redacted-temporary-path> --hosted-run-dir <redacted-temporary-path>`
-  - `/usr/bin/time -p python3 <redacted-temporary-path> --intake-dir <redacted-temporary-path> --output <redacted-temporary-path>`
+  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/scripts/m23_shielded_external_redteam_packet.py --output-dir /private/tmp/btx-m23-external-redteam-packet-v4.w7AplP --audit-bundle /private/tmp/btx-m20-audit-handoff-bundle-v2.SywV0q --hosted-run-dir /tmp/btx-m22-remote-redteam-run9`
+  - `/usr/bin/time -p python3 /private/tmp/btx-m23-external-redteam-packet-v4.w7AplP/scripts/m24_shielded_external_findings_intake.py --output-dir /private/tmp/btx-m23-derived-intake-v2.mrBgn4 --source-packet /private/tmp/btx-m23-external-redteam-packet-v4.w7AplP --audit-bundle /private/tmp/btx-m23-external-redteam-packet-v4.w7AplP/artifacts/audit_bundle --hosted-run-dir /private/tmp/btx-m23-external-redteam-packet-v4.w7AplP/artifacts/hosted_run`
+  - `/usr/bin/time -p python3 /private/tmp/btx-m23-derived-intake-v2.mrBgn4/scripts/m25_shielded_external_closeout_check.py --intake-dir /private/tmp/btx-m23-derived-intake-v2.mrBgn4 --output /private/tmp/btx-m23-derived-intake-v2.mrBgn4/closeout/closeout_summary_from_packet.json`
   - `git diff --check`
 - validation findings and pivots:
   - the strengthened `m23_shielded_external_redteam_packet_test.sh` passed
     after generating a real packet with fixture artifacts, deriving an intake
     packet from it, and replaying packet-local `m25`;
   - the refreshed `m23` packet passed in `real 4.09`, `user 3.96`, `sys 0.11`,
-    writing `<redacted-temporary-path>` plus
+    writing `/private/tmp/btx-m23-external-redteam-packet-v4.w7AplP` plus
     sibling tarball
-    `<redacted-temporary-path>`;
+    `/private/tmp/btx-m23-external-redteam-packet-v4.w7AplP.tar.gz`;
   - direct inspection of the refreshed participant docs confirmed the stale
     absolute-path leak is gone and only the intended packet-relative
     references remain:
     `artifacts/audit_bundle/`, `artifacts/hosted_run/`, and
     `infra/btx-seed-server-spec.md`;
   - the derived packet-local intake replay passed in `real 8.06`, `user 7.86`,
-    `sys 0.14`, writing `<redacted-temporary-path>`;
+    `sys 0.14`, writing `/private/tmp/btx-m23-derived-intake-v2.mrBgn4`;
   - the packet-local `m25` replay then ran in `real 0.03`, `user 0.03`,
     `sys 0.00`, returning `STATUS 1` only because the generated derived intake
     still contains the expected placeholder external inputs and unresolved
@@ -970,12 +961,11 @@ Current status:
 ### 2026-03-16 21:11:56 JST
 
 - pass preflight: verified readable, non-empty
-  `/path/to/Documents/example/staging-repo`,
-  `/path/to/Documents/example/staging-repo/credential-file`,
-  `/path/to/Documents/example/staging-repo/credential-file`, and
-  `/path/to/Documents/example/staging-repo/credential-file` before any new
-  remote or GitHub operation in this pass, with byte counts `94`, `72`, `69`,
-  and `69`;
+  `/path/to/credentials/release-token`,
+  `/path/to/credentials/cloud-api-token`,
+  `/path/to/credentials/dns-api-token`, and
+  `/path/to/credentials/dns-api-secret` before any new
+  remote or GitHub operation in this pass, with credential sizes redacted;
 - current focus for this pass: execute the required sync/status loop on top of
   `931509447a`, then inspect the adjacent `m23` / `m20` repo-side external
   packet and bundle generators for the same packet-layout/path-preservation
@@ -1020,20 +1010,20 @@ Current status:
 - local validation for this pass:
   - `python3 -m py_compile /path/to/Documents/example/staging-repo/scripts/m23_shielded_external_redteam_packet.py /path/to/Documents/example/staging-repo/scripts/m24_shielded_external_findings_intake.py /path/to/Documents/example/staging-repo/scripts/m25_shielded_external_closeout_check.py`
   - `bash /path/to/Documents/example/staging-repo/test/util/m23_shielded_external_redteam_packet_test.sh`
-  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/scripts/m23_shielded_external_redteam_packet.py --output-dir <redacted-temporary-path> --audit-bundle <redacted-temporary-path> --hosted-run-dir <redacted-temporary-path>`
-  - `/usr/bin/time -p python3 <redacted-temporary-path> --output-dir <redacted-temporary-path> --source-packet <redacted-temporary-path> --audit-bundle <redacted-temporary-path> --hosted-run-dir <redacted-temporary-path>`
-  - `/usr/bin/time -p python3 <redacted-temporary-path> --intake-dir <redacted-temporary-path> --output <redacted-temporary-path>`
+  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/scripts/m23_shielded_external_redteam_packet.py --output-dir /private/tmp/btx-m23-external-redteam-packet-v3.sdNgB1 --audit-bundle /private/tmp/btx-m20-audit-handoff-bundle-v2.SywV0q --hosted-run-dir /tmp/btx-m22-remote-redteam-run9`
+  - `/usr/bin/time -p python3 /private/tmp/btx-m23-external-redteam-packet-v3.sdNgB1/scripts/m24_shielded_external_findings_intake.py --output-dir /private/tmp/btx-m23-derived-intake-v1.8X0lKE --source-packet /private/tmp/btx-m23-external-redteam-packet-v3.sdNgB1 --audit-bundle /private/tmp/btx-m23-external-redteam-packet-v3.sdNgB1/artifacts/audit_bundle --hosted-run-dir /private/tmp/btx-m23-external-redteam-packet-v3.sdNgB1/artifacts/hosted_run`
+  - `/usr/bin/time -p python3 /private/tmp/btx-m23-derived-intake-v1.8X0lKE/scripts/m25_shielded_external_closeout_check.py --intake-dir /private/tmp/btx-m23-derived-intake-v1.8X0lKE --output /private/tmp/btx-m23-derived-intake-v1.8X0lKE/closeout/closeout_summary_from_packet.json`
   - `git diff --check`
 - validation findings and pivots:
   - the strengthened `m23_shielded_external_redteam_packet_test.sh` passed
     after generating a real packet, deriving an intake packet from it, and
     replaying packet-local `m25`;
   - the refreshed `m23` packet passed in `real 4.09`, `user 3.97`, `sys 0.11`,
-    writing `<redacted-temporary-path>` plus
+    writing `/private/tmp/btx-m23-external-redteam-packet-v3.sdNgB1` plus
     sibling tarball
-    `<redacted-temporary-path>`;
+    `/private/tmp/btx-m23-external-redteam-packet-v3.sdNgB1.tar.gz`;
   - the derived packet-local intake replay passed in `real 8.09`, `user 7.88`,
-    `sys 0.14`, writing `<redacted-temporary-path>`;
+    `sys 0.14`, writing `/private/tmp/btx-m23-derived-intake-v1.8X0lKE`;
   - the packet-local `m25` replay then ran in `real 0.03`, `user 0.02`,
     `sys 0.00`, returning `STATUS 1` only because the generated derived intake
     still contains the expected placeholder external inputs;
@@ -1070,12 +1060,11 @@ Current status:
 ### 2026-03-16 21:05:36 JST
 
 - pass preflight: verified readable, non-empty
-  `/path/to/Documents/example/staging-repo`,
-  `/path/to/Documents/example/staging-repo/credential-file`,
-  `/path/to/Documents/example/staging-repo/credential-file`, and
-  `/path/to/Documents/example/staging-repo/credential-file` before any new
-  remote or GitHub operation in this pass, with byte counts `94`, `72`, `69`,
-  and `69`;
+  `/path/to/credentials/release-token`,
+  `/path/to/credentials/cloud-api-token`,
+  `/path/to/credentials/dns-api-token`, and
+  `/path/to/credentials/dns-api-secret` before any new
+  remote or GitHub operation in this pass, with credential sizes redacted;
 - current focus for this pass: execute the required sync/status loop on top of
   `b50c4aad95`, then fix the remaining repo-side `m24` packet-layout mismatch
   where the packet-local closeout command still points at
@@ -1115,18 +1104,18 @@ Current status:
 - local validation for this pass:
   - `python3 -m py_compile /path/to/Documents/example/staging-repo/scripts/m24_shielded_external_findings_intake.py /path/to/Documents/example/staging-repo/scripts/m25_shielded_external_closeout_check.py`
   - `bash /path/to/Documents/example/staging-repo/test/util/m24_shielded_external_findings_intake_test.sh`
-  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/scripts/m24_shielded_external_findings_intake.py --output-dir <redacted-temporary-path> --source-packet <redacted-temporary-path> --audit-bundle <redacted-temporary-path> --hosted-run-dir <redacted-temporary-path>`
-  - `/usr/bin/time -p python3 <redacted-temporary-path> --intake-dir <redacted-temporary-path> --output <redacted-temporary-path>`
+  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/scripts/m24_shielded_external_findings_intake.py --output-dir /private/tmp/btx-m24-external-findings-intake-v4.G2adIf --source-packet /private/tmp/btx-m23-external-redteam-packet-v2.wfpqPI --audit-bundle /private/tmp/btx-m20-audit-handoff-bundle-v2.SywV0q --hosted-run-dir /tmp/btx-m22-remote-redteam-run9`
+  - `/usr/bin/time -p python3 /private/tmp/btx-m24-external-findings-intake-v4.G2adIf/scripts/m25_shielded_external_closeout_check.py --intake-dir /private/tmp/btx-m24-external-findings-intake-v4.G2adIf --output /private/tmp/btx-m24-external-findings-intake-v4.G2adIf/closeout/closeout_summary_from_packet.json`
   - `git diff --check`
 - validation findings and pivots:
   - `m24_shielded_external_findings_intake_test.sh` now generates a real packet,
     asserts the preserved `doc/`, `scripts/`, and `infra/` paths, and passed;
   - the refreshed `m24` packet passed in `real 8.10`, `user 7.87`, `sys 0.18`,
-    writing `<redacted-temporary-path>` plus
+    writing `/private/tmp/btx-m24-external-findings-intake-v4.G2adIf` plus
     sibling tarball
-    `<redacted-temporary-path>`;
+    `/private/tmp/btx-m24-external-findings-intake-v4.G2adIf.tar.gz`;
   - executing the unpacked packet-local validator at
-    `<redacted-temporary-path>`
+    `/private/tmp/btx-m24-external-findings-intake-v4.G2adIf/scripts/m25_shielded_external_closeout_check.py`
     now works exactly as documented, returning `STATUS 1` in `real 0.03` only
     because the generated packet still contains the expected placeholder
     external inputs;
@@ -1154,12 +1143,11 @@ Current status:
 ### 2026-03-16 21:00:36 JST
 
 - pass preflight: verified readable, non-empty
-  `/path/to/Documents/example/staging-repo`,
-  `/path/to/Documents/example/staging-repo/credential-file`,
-  `/path/to/Documents/example/staging-repo/credential-file`, and
-  `/path/to/Documents/example/staging-repo/credential-file` before any new
-  remote or GitHub operation in this pass, with byte counts `94`, `72`, `69`,
-  and `69`;
+  `/path/to/credentials/release-token`,
+  `/path/to/credentials/cloud-api-token`,
+  `/path/to/credentials/dns-api-token`, and
+  `/path/to/credentials/dns-api-secret` before any new
+  remote or GitHub operation in this pass, with credential sizes redacted;
 - current focus for this pass: execute the required sync/status loop on top of
   `4b9e365ebb`, then inspect whether the external findings intake packet
   (`m24`) actually carries the current `m25` closeout validator and related
@@ -1195,15 +1183,15 @@ Current status:
 - local validation for this pass:
   - `python3 -m py_compile /path/to/Documents/example/staging-repo/scripts/m24_shielded_external_findings_intake.py`
   - `bash /path/to/Documents/example/staging-repo/test/util/m24_shielded_external_findings_intake_test.sh`
-  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/scripts/m24_shielded_external_findings_intake.py --output-dir <redacted-temporary-path> --source-packet <redacted-temporary-path> --audit-bundle <redacted-temporary-path> --hosted-run-dir <redacted-temporary-path>`
+  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/scripts/m24_shielded_external_findings_intake.py --output-dir /private/tmp/btx-m24-external-findings-intake-v3.IZ4VMM --source-packet /private/tmp/btx-m23-external-redteam-packet-v2.wfpqPI --audit-bundle /private/tmp/btx-m20-audit-handoff-bundle-v2.SywV0q --hosted-run-dir /tmp/btx-m22-remote-redteam-run9`
   - `git diff --check`
 - validation findings and pivots:
   - `m24_shielded_external_findings_intake_test.sh` passed after the intake
     packet source list and structural expectations were updated;
   - the refreshed `m24` packet passed in `real 8.10`, `user 7.88`, `sys 0.17`,
-    writing `<redacted-temporary-path>` plus
+    writing `/private/tmp/btx-m24-external-findings-intake-v3.IZ4VMM` plus
     sibling tarball
-    `<redacted-temporary-path>`;
+    `/private/tmp/btx-m24-external-findings-intake-v3.IZ4VMM.tar.gz`;
   - manifest inspection confirmed `included_source_count=11`, that
     `m25_shielded_external_closeout_check.py` is present in
     `docs/`, and that the tarball SHA-256 is
@@ -1224,12 +1212,11 @@ Current status:
 ### 2026-03-16 20:58:44 JST
 
 - pass preflight: verified readable, non-empty
-  `/path/to/Documents/example/staging-repo`,
-  `/path/to/Documents/example/staging-repo/credential-file`,
-  `/path/to/Documents/example/staging-repo/credential-file`, and
-  `/path/to/Documents/example/staging-repo/credential-file` before any new
-  remote or GitHub operation in this pass, with byte counts `94`, `72`, `69`,
-  and `69`;
+  `/path/to/credentials/release-token`,
+  `/path/to/credentials/cloud-api-token`,
+  `/path/to/credentials/dns-api-token`, and
+  `/path/to/credentials/dns-api-secret` before any new
+  remote or GitHub operation in this pass, with credential sizes redacted;
 - current focus for this pass: execute the required sync/status loop on top of
   `e727efd93c`, then inspect whether the external participant packet (`m23`)
   actually includes the later intake and closeout materials now required by
@@ -1265,15 +1252,15 @@ Current status:
 - local validation for this pass:
   - `bash /path/to/Documents/example/staging-repo/test/util/m23_shielded_external_redteam_packet_test.sh`
   - `python3 -m py_compile /path/to/Documents/example/staging-repo/scripts/m23_shielded_external_redteam_packet.py`
-  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/scripts/m23_shielded_external_redteam_packet.py --output-dir <redacted-temporary-path> --audit-bundle <redacted-temporary-path> --hosted-run-dir <redacted-temporary-path>`
+  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/scripts/m23_shielded_external_redteam_packet.py --output-dir /private/tmp/btx-m23-external-redteam-packet-v2.wfpqPI --audit-bundle /private/tmp/btx-m20-audit-handoff-bundle-v2.SywV0q --hosted-run-dir /tmp/btx-m22-remote-redteam-run9`
   - `git diff --check`
 - validation findings and pivots:
   - `m23_shielded_external_redteam_packet_test.sh` passed after the packet
     source list and brief/checklist text were updated;
   - the refreshed `m23` packet passed in `real 4.09`, `user 3.96`, `sys 0.11`,
-    writing `<redacted-temporary-path>` plus
+    writing `/private/tmp/btx-m23-external-redteam-packet-v2.wfpqPI` plus
     sibling tarball
-    `<redacted-temporary-path>`;
+    `/private/tmp/btx-m23-external-redteam-packet-v2.wfpqPI.tar.gz`;
   - manifest inspection confirmed `included_source_count=12` and that
     `doc/btx-shielded-external-review-closeout.md`,
     `scripts/m24_shielded_external_findings_intake.py`, and
@@ -1297,12 +1284,11 @@ Current status:
 ### 2026-03-16 20:54:17 JST
 
 - pass preflight: verified readable, non-empty
-  `/path/to/Documents/example/staging-repo`,
-  `/path/to/Documents/example/staging-repo/credential-file`,
-  `/path/to/Documents/example/staging-repo/credential-file`, and
-  `/path/to/Documents/example/staging-repo/credential-file` before any new
-  remote or GitHub operation in this pass, with byte counts `94`, `72`, `69`,
-  and `69`;
+  `/path/to/credentials/release-token`,
+  `/path/to/credentials/cloud-api-token`,
+  `/path/to/credentials/dns-api-token`, and
+  `/path/to/credentials/dns-api-secret` before any new
+  remote or GitHub operation in this pass, with credential sizes redacted;
 - current focus for this pass: execute the required sync/status loop on top of
   `e5dd34f137`, then inspect whether the `m20` audit handoff bundle actually
   ships the later `m22` / `m23` / `m24` / `m25` external-window and closeout
@@ -1338,15 +1324,15 @@ Current status:
 - local validation for this pass:
   - `bash /path/to/Documents/example/staging-repo/test/util/m20_shielded_audit_handoff_bundle_test.sh`
   - `python3 -m py_compile /path/to/Documents/example/staging-repo/scripts/m20_shielded_audit_handoff_bundle.py`
-  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/scripts/m20_shielded_audit_handoff_bundle.py --build-dir /path/to/Documents/example/staging-repo/build-btx --output-dir <redacted-temporary-path> --skip-build --samples=2`
+  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/scripts/m20_shielded_audit_handoff_bundle.py --build-dir /path/to/Documents/example/staging-repo/build-btx --output-dir /private/tmp/btx-m20-audit-handoff-bundle-v2.SywV0q --skip-build --samples=2`
   - `git diff --check`
 - validation findings and pivots:
   - `m20_shielded_audit_handoff_bundle_test.sh` passed after the source list
     and docs were updated;
   - the refreshed `m20` handoff bundle passed in `real 240.82`, `user 226.51`,
     `sys 2.34`, writing
-    `<redacted-temporary-path>` plus sibling tarball
-    `<redacted-temporary-path>`;
+    `/private/tmp/btx-m20-audit-handoff-bundle-v2.SywV0q` plus sibling tarball
+    `/private/tmp/btx-m20-audit-handoff-bundle-v2.SywV0q.tar.gz`;
   - the refreshed manifest reports `overall_status=pass`, `command_count=4`,
     and `source_file_count=27`;
   - manifest inspection confirmed that
@@ -1376,12 +1362,11 @@ Current status:
 ### 2026-03-16 20:36:01 JST
 
 - pass preflight: verified readable, non-empty
-  `/path/to/Documents/example/staging-repo`,
-  `/path/to/Documents/example/staging-repo/credential-file`,
-  `/path/to/Documents/example/staging-repo/credential-file`, and
-  `/path/to/Documents/example/staging-repo/credential-file` before any new
-  remote or GitHub operation in this pass, with byte counts `94`, `72`, `69`,
-  and `69`;
+  `/path/to/credentials/release-token`,
+  `/path/to/credentials/cloud-api-token`,
+  `/path/to/credentials/dns-api-token`, and
+  `/path/to/credentials/dns-api-secret` before any new
+  remote or GitHub operation in this pass, with credential sizes redacted;
 - current focus for this pass: execute the required sync/status loop on top of
   `ef63df3334`, then inspect whether the new `m24` intake path still leaves a
   real repo-side DoD 8 closeout-validation gap;
@@ -1415,15 +1400,15 @@ Current status:
   - `bash /path/to/Documents/example/staging-repo/test/util/m24_shielded_external_findings_intake_test.sh`
   - `bash /path/to/Documents/example/staging-repo/test/util/m25_shielded_external_closeout_check_test.sh`
   - `python3 -m py_compile /path/to/Documents/example/staging-repo/scripts/m24_shielded_external_findings_intake.py /path/to/Documents/example/staging-repo/scripts/m25_shielded_external_closeout_check.py`
-  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/scripts/m24_shielded_external_findings_intake.py --output-dir <redacted-temporary-path> --source-packet <redacted-temporary-path> --audit-bundle <redacted-temporary-path> --hosted-run-dir <redacted-temporary-path>`
-  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/scripts/m25_shielded_external_closeout_check.py --intake-dir <redacted-temporary-path> --output <redacted-temporary-path>`
-  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/scripts/m25_shielded_external_closeout_check.py --intake-dir <redacted-temporary-path> --output <redacted-temporary-path>`
+  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/scripts/m24_shielded_external_findings_intake.py --output-dir /private/tmp/btx-m24-external-findings-intake-v2.E2vKaT --source-packet /tmp/btx-m23-external-redteam-packet --audit-bundle /tmp/btx-m20-audit-handoff-bundle --hosted-run-dir /tmp/btx-m22-remote-redteam-run9`
+  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/scripts/m25_shielded_external_closeout_check.py --intake-dir /private/tmp/btx-m25-fail-intake.Zj7i1K --output /tmp/btx-m25-fail-output.json`
+  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/scripts/m25_shielded_external_closeout_check.py --intake-dir /private/tmp/btx-m25-pass-intake.nYhFL1 --output /tmp/btx-m25-pass-output.json`
   - `git diff --check`
 - validation findings and pivots:
   - refreshed `m24` packet generation completed in `real 6.58`, `user 6.39`,
     `sys 0.15`, writing
-    `<redacted-temporary-path>` plus sibling
-    tarball `<redacted-temporary-path>`;
+    `/private/tmp/btx-m24-external-findings-intake-v2.E2vKaT` plus sibling
+    tarball `/private/tmp/btx-m24-external-findings-intake-v2.E2vKaT.tar.gz`;
   - the refreshed `m24` manifest now records `12` generated templates and `3`
     copied reference inputs, reflecting the new machine-readable intake /
     sign-off placeholders;
@@ -1454,12 +1439,11 @@ Current status:
 ### 2026-03-16 20:28:53 JST
 
 - pass preflight: verified readable, non-empty
-  `/path/to/Documents/example/staging-repo`,
-  `/path/to/Documents/example/staging-repo/credential-file`,
-  `/path/to/Documents/example/staging-repo/credential-file`, and
-  `/path/to/Documents/example/staging-repo/credential-file` before any new
-  remote or GitHub operation in this pass, with byte counts `94`, `72`, `69`,
-  and `69`;
+  `/path/to/credentials/release-token`,
+  `/path/to/credentials/cloud-api-token`,
+  `/path/to/credentials/dns-api-token`, and
+  `/path/to/credentials/dns-api-secret` before any new
+  remote or GitHub operation in this pass, with credential sizes redacted;
 - current focus for this pass: execute the required sync/status loop on top of
   `11437bac25`, then inspect the remaining Definition-of-Done item 8 language
   for any repo-side evidence intake or closeout artifact that is still missing
@@ -1495,14 +1479,14 @@ Current status:
 - local validation for this pass:
   - `python3 -m py_compile /path/to/Documents/example/staging-repo/scripts/m24_shielded_external_findings_intake.py`
   - `bash /path/to/Documents/example/staging-repo/test/util/m24_shielded_external_findings_intake_test.sh`
-  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/scripts/m24_shielded_external_findings_intake.py --output-dir <redacted-temporary-path> --source-packet <redacted-temporary-path> --audit-bundle <redacted-temporary-path> --hosted-run-dir <redacted-temporary-path>`
+  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/scripts/m24_shielded_external_findings_intake.py --output-dir /tmp/btx-m24-external-findings-intake --source-packet /tmp/btx-m23-external-redteam-packet --audit-bundle /tmp/btx-m20-audit-handoff-bundle --hosted-run-dir /tmp/btx-m22-remote-redteam-run9`
   - `git diff --check`
 - `m24` packet output and findings:
-  - `<redacted-temporary-path>` records
+  - `/private/tmp/btx-m24-external-findings-intake/manifest.json` records
     `7` generated templates and `3` copied reference inputs
     (`source_packet_dir`, `audit_bundle_dir`, `hosted_run_dir`);
   - the sibling tarball is
-    `<redacted-temporary-path>`;
+    `/private/tmp/btx-m24-external-findings-intake.tar.gz`;
   - SHA-256 for the tarball is
     `8387754f045fc50b19223d1189e2e163cf523ac588f9fae0b7c96658979e5ce1`;
   - full packet generation completed in `real 6.57`, `user 6.38`, `sys 0.15`;
@@ -1516,12 +1500,11 @@ Current status:
 ### 2026-03-16 20:25:31 JST
 
 - pass preflight: verified readable, non-empty
-  `/path/to/Documents/example/staging-repo`,
-  `/path/to/Documents/example/staging-repo/credential-file`,
-  `/path/to/Documents/example/staging-repo/credential-file`, and
-  `/path/to/Documents/example/staging-repo/credential-file` before any new
-  remote or GitHub operation in this pass, with byte counts `94`, `72`, `69`,
-  and `69`;
+  `/path/to/credentials/release-token`,
+  `/path/to/credentials/cloud-api-token`,
+  `/path/to/credentials/dns-api-token`, and
+  `/path/to/credentials/dns-api-secret` before any new
+  remote or GitHub operation in this pass, with credential sizes redacted;
 - current focus for this pass: execute the required sync/status loop after the
   fresh key preflight, then determine whether any remaining honest in-repo
   launch-critical work exists beyond the already documented external
@@ -1561,12 +1544,11 @@ Current status:
 ### 2026-03-16 20:23:49 JST
 
 - pass preflight: re-verified readable, non-empty
-  `/path/to/Documents/example/staging-repo`,
-  `/path/to/Documents/example/staging-repo/credential-file`,
-  `/path/to/Documents/example/staging-repo/credential-file`, and
-  `/path/to/Documents/example/staging-repo/credential-file` before the next
-  remote validation or GitHub operation in this pass, with byte counts `94`,
-  `72`, `69`, and `69`;
+  `/path/to/credentials/release-token`,
+  `/path/to/credentials/cloud-api-token`,
+  `/path/to/credentials/dns-api-token`, and
+  `/path/to/credentials/dns-api-secret` before the next
+  remote validation or GitHub operation in this pass, with credential sizes redacted;
 - current focus for this pass: run the required start-of-pass sync/status loop
   after the `m23` external-window packet landed, then confirm whether any
   additional repo-side implementation, validation, or packaging slice remains
@@ -1602,12 +1584,11 @@ Current status:
 ### 2026-03-16 20:14:47 JST
 
 - pass preflight: re-verified readable, non-empty
-  `/path/to/Documents/example/staging-repo`,
-  `/path/to/Documents/example/staging-repo/credential-file`,
-  `/path/to/Documents/example/staging-repo/credential-file`, and
-  `/path/to/Documents/example/staging-repo/credential-file` before the next
-  remote validation or GitHub operation in this pass, with byte counts `94`,
-  `72`, `69`, and `69`;
+  `/path/to/credentials/release-token`,
+  `/path/to/credentials/cloud-api-token`,
+  `/path/to/credentials/dns-api-token`, and
+  `/path/to/credentials/dns-api-secret` before the next
+  remote validation or GitHub operation in this pass, with credential sizes redacted;
 - current focus for this pass: repeat the required start-of-pass sync/status
   loop on the freshly clean branch and verify whether any new in-repo work
   appeared after the prior blocker-confirmation push, versus the still-open
@@ -1649,13 +1630,13 @@ Current status:
 - local validation completed for the new packet path:
   - `python3 -m py_compile /path/to/Documents/example/staging-repo/scripts/m23_shielded_external_redteam_packet.py`
   - `bash /path/to/Documents/example/staging-repo/test/util/m23_shielded_external_redteam_packet_test.sh`
-  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/scripts/m23_shielded_external_redteam_packet.py --output-dir <redacted-temporary-path> --audit-bundle <redacted-temporary-path> --hosted-run-dir <redacted-temporary-path>`
+  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/scripts/m23_shielded_external_redteam_packet.py --output-dir /tmp/btx-m23-external-redteam-packet --audit-bundle /tmp/btx-m20-audit-handoff-bundle --hosted-run-dir /tmp/btx-m22-remote-redteam-run9`
 - packet output and findings:
-  - `<redacted-temporary-path>` records the copied
+  - `/tmp/btx-m23-external-redteam-packet/manifest.json` records the copied
     handoff docs, the seed-server spec, the participant brief, the operator
     checklist, and the included `m20` / `m22` baseline artifacts;
   - the packet tarball is emitted as
-    `<redacted-temporary-path>`;
+    `/tmp/btx-m23-external-redteam-packet.tar.gz`;
   - this closes another repo-side coordination gap for the external campaign,
     but it still does not satisfy the required independent review or the
     externally observed adversarial proof-focused testnet itself.
@@ -1663,12 +1644,11 @@ Current status:
 ### 2026-03-16 20:11:56 JST
 
 - pass preflight: re-verified readable, non-empty
-  `/path/to/Documents/example/staging-repo`,
-  `/path/to/Documents/example/staging-repo/credential-file`,
-  `/path/to/Documents/example/staging-repo/credential-file`, and
-  `/path/to/Documents/example/staging-repo/credential-file` before the next
-  remote validation or GitHub operation in this pass, with byte counts `94`,
-  `72`, `69`, and `69`;
+  `/path/to/credentials/release-token`,
+  `/path/to/credentials/cloud-api-token`,
+  `/path/to/credentials/dns-api-token`, and
+  `/path/to/credentials/dns-api-secret` before the next
+  remote validation or GitHub operation in this pass, with credential sizes redacted;
 - current focus for this pass: run the required branch sync/status inspection
   again after the hosted red-team closure and verify whether any launch-critical
   in-repo work remains, versus the already-documented external
@@ -1701,12 +1681,11 @@ Current status:
 ### 2026-03-16 20:06:55 JST
 
 - pass preflight: re-verified readable, non-empty
-  `/path/to/Documents/example/staging-repo`,
-  `/path/to/Documents/example/staging-repo/credential-file`,
-  `/path/to/Documents/example/staging-repo/credential-file`, and
-  `/path/to/Documents/example/staging-repo/credential-file` before the next
-  remote validation or GitHub operation in this pass, with byte counts `94`,
-  `72`, `69`, and `69`;
+  `/path/to/credentials/release-token`,
+  `/path/to/credentials/cloud-api-token`,
+  `/path/to/credentials/dns-api-token`, and
+  `/path/to/credentials/dns-api-secret` before the next
+  remote validation or GitHub operation in this pass, with credential sizes redacted;
 - current focus for this pass: close the remaining repo-side Definition-of-Done
   item 8 evidence gap by getting the hosted disposable malformed-proof
   campaign to run end to end on ephemeral DigitalOcean infrastructure, collect
@@ -1736,9 +1715,9 @@ Current status:
 - hosted validation pivots and findings from this pass:
   - first hosted rerun after the artifact-collection change failed with
     `overall_status=fail`, but the new `m22` collection path still recovered
-    `<redacted-temporary-path>`
+    `/tmp/btx-m22-remote-redteam-run8/artifacts/remote_artifacts/m21-remote-redteam.json`
     and the inner functional log
-    `<redacted-temporary-path>`,
+    `/tmp/btx-m22-remote-redteam-run8/artifacts/remote_artifacts/m21-logs/feature_shielded_v2_proof_redteam_campaign.log`,
     which exposed the real blocker:
     `Binary not found: /root/btx-remote-redteam/build-redteam/bin/bitcoin-cli`;
   - the root cause was remote configure/build using `-DBUILD_CLI=OFF` and not
@@ -1747,15 +1726,15 @@ Current status:
   - `m22` now enables `-DBUILD_CLI=ON` and explicitly builds `bitcoin-cli`
     alongside `btxd` and `gen_shielded_v2_adversarial_proof_corpus`;
   - the next hosted rerun passed end to end:
-    `<redacted-temporary-path>` reports
+    `/tmp/btx-m22-remote-redteam-run9/manifest.json` reports
     `overall_status=pass`, droplet id `558652969`, firewall id
     `5ee82b90-fbc4-4617-9a08-8e64413e9f67`, estimated cost `0.015`, and
     teardown with `droplet_deleted=true` / `firewall_deleted=true`;
   - the inner wrapper artifact
-    `<redacted-temporary-path>`
+    `/tmp/btx-m22-remote-redteam-run9/artifacts/remote_artifacts/m21-remote-redteam.json`
     passed with `overall_status=pass` and `teardown_confirmed=true`;
   - the inner campaign artifact
-    `<redacted-temporary-path>`
+    `/tmp/btx-m22-remote-redteam-run9/artifacts/remote_artifacts/m21-logs/feature_shielded_v2_proof_redteam_campaign.artifact.json`
     passed with `overall_status=pass`, `runtime_seconds=99.593`, clean
     malformed-proof rejection, late-joiner restart coverage, and a mined valid
     follow-up transfer at final height `134`;
@@ -1763,8 +1742,8 @@ Current status:
   - `cmake --build /path/to/Documents/example/staging-repo/build-btx --target test_btx generate_shielded_matrict_plus_transcript_corpus generate_shielded_v2_adversarial_proof_corpus -j8`
   - `python3 -m py_compile /path/to/Documents/example/staging-repo/scripts/m22_remote_shielded_redteam_campaign.py`
   - `bash /path/to/Documents/example/staging-repo/test/util/m22_remote_shielded_redteam_campaign_test.sh`
-  - `python3 /path/to/Documents/example/staging-repo/scripts/m22_remote_shielded_redteam_campaign.py --output-dir <redacted-temporary-path> --dry-run`
-  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/scripts/m22_remote_shielded_redteam_campaign.py --output-dir <redacted-temporary-path> --admin-cidr 0.0.0.0/0`
+  - `python3 /path/to/Documents/example/staging-repo/scripts/m22_remote_shielded_redteam_campaign.py --output-dir /tmp/btx-m22-remote-redteam-dryrun4 --dry-run`
+  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/scripts/m22_remote_shielded_redteam_campaign.py --output-dir /tmp/btx-m22-remote-redteam-run9 --admin-cidr 0.0.0.0/0`
 - timing and cost evidence from the successful hosted pass:
   - top-level hosted wrapper runtime `real 1299.44`;
   - remote install `64.003s`, source upload `9.104s`, prepare `3.923s`,
@@ -1780,12 +1759,11 @@ Current status:
 
 ### 2026-03-16 18:16:51 JST
 
-- pass preflight: verified readable, non-empty `/path/to/Documents/example/staging-repo`,
-  `/path/to/Documents/example/staging-repo/credential-file`,
-  `/path/to/Documents/example/staging-repo/credential-file`, and
-  `/path/to/Documents/example/staging-repo/credential-file` before any new
-  remote validation or GitHub operation in this pass, with byte counts `94`,
-  `72`, `69`, and `69`;
+- pass preflight: verified readable, non-empty `/path/to/credentials/release-token`,
+  `/path/to/credentials/cloud-api-token`,
+  `/path/to/credentials/dns-api-token`, and
+  `/path/to/credentials/dns-api-secret` before any new
+  remote validation or GitHub operation in this pass, with credential sizes redacted;
 - current focus for this pass: continue the still-open Definition-of-Done item
   8 external-launch blocker from the branch side by proving the hosted
   disposable red-team harness can run end to end on ephemeral DigitalOcean
@@ -1804,7 +1782,7 @@ Current status:
 - local validation completed before the next hosted run:
   - `python3 -m py_compile /path/to/Documents/example/staging-repo/scripts/m22_remote_shielded_redteam_campaign.py`
   - `bash /path/to/Documents/example/staging-repo/test/util/m22_remote_shielded_redteam_campaign_test.sh`
-  - `python3 /path/to/Documents/example/staging-repo/scripts/m22_remote_shielded_redteam_campaign.py --output-dir <redacted-temporary-path> --dry-run`
+  - `python3 /path/to/Documents/example/staging-repo/scripts/m22_remote_shielded_redteam_campaign.py --output-dir /tmp/btx-m22-remote-redteam-dryrun2 --dry-run`
   - a local staged-source configure smoke using the exact `m22`
     `create_source_archive(...)` path now passes cleanly, confirming the
     extracted snapshot contains `doc/` and reaches `CMake` generation with no
@@ -1812,12 +1790,11 @@ Current status:
 
 ### 2026-03-16 17:43:07 JST
 
-- pass preflight: verified readable, non-empty `/path/to/Documents/example/staging-repo`,
-  `/path/to/Documents/example/staging-repo/credential-file`,
-  `/path/to/Documents/example/staging-repo/credential-file`, and
-  `/path/to/Documents/example/staging-repo/credential-file` before any remote
-  or GitHub operation in this pass, with byte counts `94`, `72`, `69`, and
-  `69`;
+- pass preflight: verified readable, non-empty `/path/to/credentials/release-token`,
+  `/path/to/credentials/cloud-api-token`,
+  `/path/to/credentials/dns-api-token`, and
+  `/path/to/credentials/dns-api-secret` before any remote
+  or GitHub operation in this pass, with credential sizes redacted;
 - current focus for this pass: continue the remaining Definition-of-Done item 8
   launch blocker from the branch side by identifying and closing the next
   highest-leverage repo-side or ephemeral-testnet validation gap that still
@@ -1870,11 +1847,11 @@ Current status:
   - `./build-btx/bin/test_btx --run_test=shielded_v2_adversarial_proof_corpus_tests --catch_system_error=no --log_level=test_suite`
   - `./build-btx/bin/test_btx --run_test=shielded_proof_adversarial_tests --catch_system_error=no --log_level=test_suite`
   - `python3 -m py_compile /path/to/Documents/example/staging-repo/test/functional/feature_shielded_v2_proof_redteam_campaign.py /path/to/Documents/example/staging-repo/test/functional/test_runner.py`
-  - `python3 /path/to/Documents/example/staging-repo/test/functional/feature_shielded_v2_proof_redteam_campaign.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32261 --artifact=<redacted-temporary-path> --corpus=<redacted-temporary-path>`
-  - `bash /path/to/Documents/example/staging-repo/scripts/m21_shielded_redteam_campaign.sh --build-dir /path/to/Documents/example/staging-repo/build-btx --artifact <redacted-temporary-path> --log-dir <redacted-temporary-path> --cachedir <redacted-temporary-path> --portseed 32262`
+  - `python3 /path/to/Documents/example/staging-repo/test/functional/feature_shielded_v2_proof_redteam_campaign.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/feature-shielded-v2-proof-redteam-20260316d --portseed=32261 --artifact=/tmp/btx-functional-manual/feature-shielded-v2-proof-redteam-20260316d.artifact.json --corpus=/tmp/btx-functional-manual/feature-shielded-v2-proof-redteam-20260316d.corpus.json`
+  - `bash /path/to/Documents/example/staging-repo/scripts/m21_shielded_redteam_campaign.sh --build-dir /path/to/Documents/example/staging-repo/build-btx --artifact /tmp/btx-m21-redteam-campaign.json --log-dir /tmp/btx-m21-redteam-logs --cachedir /tmp/btx-functional-manual/cache --portseed 32262`
   - `python3 -m py_compile /path/to/Documents/example/staging-repo/scripts/m20_shielded_audit_handoff_bundle.py`
   - `bash /path/to/Documents/example/staging-repo/test/util/m20_shielded_audit_handoff_bundle_test.sh`
-  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/scripts/m20_shielded_audit_handoff_bundle.py --build-dir /path/to/Documents/example/staging-repo/build-btx --output-dir <redacted-temporary-path> --skip-build --samples=2`
+  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/scripts/m20_shielded_audit_handoff_bundle.py --build-dir /path/to/Documents/example/staging-repo/build-btx --output-dir /tmp/btx-m20-audit-handoff-bundle-redteam --skip-build --samples=2`
 - measured local results:
   - `shielded_v2_adversarial_proof_corpus_tests` passed with no errors in
     `15861019us`, split as `7920484us` and `7940505us`;
@@ -1889,7 +1866,7 @@ Current status:
   - the full audit handoff bundle now includes the red-team artifact/log set in
     addition to the transcript corpus; the updated bundle passed locally in
     `real 239.15`, `user 226.63`, `sys 2.30`, emitted
-    `<redacted-temporary-path>` plus its `.tar.gz` sibling,
+    `/tmp/btx-m20-audit-handoff-bundle-redteam3` plus its `.tar.gz` sibling,
     and recorded manifest step runtimes `150.623s` (proof suites), `35.205s`
     (transcript corpus), `0.062s` (independent checker), and `50.771s`
     (embedded red-team wrapper);
@@ -1914,12 +1891,11 @@ Current status:
 
 ### 2026-03-16 16:54:26 JST
 
-- pass preflight: verified readable, non-empty `/path/to/Documents/example/staging-repo`,
-  `/path/to/Documents/example/staging-repo/credential-file`,
-  `/path/to/Documents/example/staging-repo/credential-file`, and
-  `/path/to/Documents/example/staging-repo/credential-file` before any remote
-  or GitHub operation in this pass, with byte counts `94`, `72`, `69`, and
-  `69`;
+- pass preflight: verified readable, non-empty `/path/to/credentials/release-token`,
+  `/path/to/credentials/cloud-api-token`,
+  `/path/to/credentials/dns-api-token`, and
+  `/path/to/credentials/dns-api-secret` before any remote
+  or GitHub operation in this pass, with credential sizes redacted;
 - current focus for this pass: continue the remaining Definition-of-Done item 8
   launch blocker from the repo side by landing the next highest-leverage
   adversarial proof-focused testnet / red-team campaign artifact or harness
@@ -1953,14 +1929,14 @@ Current status:
 - validation for this pass:
   - `python3 -m py_compile /path/to/Documents/example/staging-repo/scripts/m20_shielded_audit_handoff_bundle.py`
   - `bash /path/to/Documents/example/staging-repo/test/util/m20_shielded_audit_handoff_bundle_test.sh`
-  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/scripts/m20_shielded_audit_handoff_bundle.py --build-dir /path/to/Documents/example/staging-repo/build-btx --output-dir <redacted-temporary-path> --skip-build --samples=2`
+  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/scripts/m20_shielded_audit_handoff_bundle.py --build-dir /path/to/Documents/example/staging-repo/build-btx --output-dir /tmp/btx-m20-audit-handoff-bundle --skip-build --samples=2`
 - measured local results:
   - bundle smoke/regression test passed with no failures;
   - full handoff bundle generation completed in `real 187.51`, `user 186.91`,
     `sys 0.54`;
   - emitted artifact directory
-    `<redacted-temporary-path>` and tarball
-    `<redacted-temporary-path>`;
+    `/private/tmp/btx-m20-audit-handoff-bundle` and tarball
+    `/private/tmp/btx-m20-audit-handoff-bundle.tar.gz`;
   - `manifest.json` recorded proof-suite runtime `150.521s`, transcript-corpus
     generation runtime `35.213s`, and independent checker runtime `0.067s`;
 - launch-readiness interpretation after this pass:
@@ -1973,12 +1949,11 @@ Current status:
 
 ### 2026-03-16 16:39:26 JST
 
-- pass preflight: verified readable, non-empty `/path/to/Documents/example/staging-repo`,
-  `/path/to/Documents/example/staging-repo/credential-file`,
-  `/path/to/Documents/example/staging-repo/credential-file`, and
-  `/path/to/Documents/example/staging-repo/credential-file` before any remote
-  or GitHub operation in this pass, with byte counts `94`, `72`, `69`, and
-  `69`;
+- pass preflight: verified readable, non-empty `/path/to/credentials/release-token`,
+  `/path/to/credentials/cloud-api-token`,
+  `/path/to/credentials/dns-api-token`, and
+  `/path/to/credentials/dns-api-secret` before any remote
+  or GitHub operation in this pass, with credential sizes redacted;
 - current focus for this pass: continue closing the remaining
   Definition-of-Done item 8 launch blocker from the repo side by implementing
   the next highest-leverage artifact for external cryptographic review or the
@@ -2021,8 +1996,8 @@ Current status:
   - `cmake --build /path/to/Documents/example/staging-repo/build-btx --target generate_shielded_matrict_plus_transcript_corpus -j8`
   - `python3 -m py_compile /path/to/Documents/example/staging-repo/test/reference/check_shielded_matrict_plus_transcripts.py`
   - `./build-btx/bin/test_btx --run_test=shielded_matrict_plus_tests --catch_system_error=no --log_level=test_suite`
-  - `/usr/bin/time -p ./build-btx/bin/gen_shielded_matrict_plus_transcript_corpus --samples=2 --output=<redacted-temporary-path>`
-  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/test/reference/check_shielded_matrict_plus_transcripts.py <redacted-temporary-path>`
+  - `/usr/bin/time -p ./build-btx/bin/gen_shielded_matrict_plus_transcript_corpus --samples=2 --output=/tmp/btx-matrict-plus-transcript-corpus.json`
+  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/test/reference/check_shielded_matrict_plus_transcripts.py /tmp/btx-matrict-plus-transcript-corpus.json`
 - measured results:
   - `shielded_matrict_plus_tests` passed with no errors in `30912362us`,
     including the new seeded-fixture case at `23123195us`;
@@ -2039,12 +2014,11 @@ Current status:
 
 ### 2026-03-16 16:18:59 JST
 
-- pass preflight: verified readable, non-empty `/path/to/Documents/example/staging-repo`,
-  `/path/to/Documents/example/staging-repo/credential-file`,
-  `/path/to/Documents/example/staging-repo/credential-file`, and
-  `/path/to/Documents/example/staging-repo/credential-file` before any remote
-  or GitHub operation in this pass, with byte counts `94`, `72`, `69`, and
-  `69`;
+- pass preflight: verified readable, non-empty `/path/to/credentials/release-token`,
+  `/path/to/credentials/cloud-api-token`,
+  `/path/to/credentials/dns-api-token`, and
+  `/path/to/credentials/dns-api-secret` before any remote
+  or GitHub operation in this pass, with credential sizes redacted;
 - current focus for this pass: close as much of the remaining
   Definition-of-Done item 8 launch gate as can be evidenced directly from this
   repository, then sync `codex/shielded-v2-overhaul-plan` and continue from the
@@ -2054,12 +2028,11 @@ Current status:
 
 ### 2026-03-16 16:14:54 JST
 
-- pass preflight: verified readable, non-empty `/path/to/Documents/example/staging-repo`,
-  `/path/to/Documents/example/staging-repo/credential-file`,
-  `/path/to/Documents/example/staging-repo/credential-file`, and
-  `/path/to/Documents/example/staging-repo/credential-file` before any remote
-  or GitHub operation in this pass, with byte counts `94`, `72`, `69`, and
-  `69`;
+- pass preflight: verified readable, non-empty `/path/to/credentials/release-token`,
+  `/path/to/credentials/cloud-api-token`,
+  `/path/to/credentials/dns-api-token`, and
+  `/path/to/credentials/dns-api-secret` before any remote
+  or GitHub operation in this pass, with credential sizes redacted;
 - Slice 19 disposable reset-network launch rehearsal is now implemented and
   validated:
   - refactored
@@ -2088,12 +2061,12 @@ Current status:
   - `python3 -m py_compile /path/to/Documents/example/staging-repo/test/functional/feature_shielded_v2_multinode_validation.py /path/to/Documents/example/staging-repo/test/functional/feature_shieldedv2dev_launch_rehearsal.py`
   - `bash -n /path/to/Documents/example/staging-repo/scripts/m19_reset_launch_rehearsal.sh`
   - `cmake --build /path/to/Documents/example/staging-repo/build-btx --target btxd generate_shielded_relay_fixture_tx -j8`
-  - `/usr/bin/time -p /path/to/Documents/example/staging-repo/scripts/m19_reset_launch_rehearsal.sh --build-dir /path/to/Documents/example/staging-repo/build-btx --artifact <redacted-temporary-path> --log-dir <redacted-temporary-path> --portseed 34020`
+  - `/usr/bin/time -p /path/to/Documents/example/staging-repo/scripts/m19_reset_launch_rehearsal.sh --build-dir /path/to/Documents/example/staging-repo/build-btx --artifact /tmp/btx-m19-reset-launch-rehearsal.json --log-dir /tmp/btx-m19-reset-launch-logs --portseed 34020`
 - measured local runtimes:
   - `feature_shieldedv2dev_datadir_isolation = 1.854s`
   - `feature_shieldedv2dev_launch_rehearsal = 138.561s`
   - wrapper wall clock `real 140.57`, `user 104.11`, `sys 4.20`;
-- evidence highlights from `<redacted-temporary-path>`:
+- evidence highlights from `/tmp/btx-m19-reset-launch-rehearsal.json`:
   - `overall_status=pass`
   - `teardown_confirmed=true`
   - `chain=shieldedv2dev`
@@ -2131,12 +2104,11 @@ Current status:
 
 ### 2026-03-16 15:54:02 JST
 
-- pass preflight: verified readable, non-empty `/path/to/Documents/example/staging-repo`,
-  `/path/to/Documents/example/staging-repo/credential-file`,
-  `/path/to/Documents/example/staging-repo/credential-file`, and
-  `/path/to/Documents/example/staging-repo/credential-file` before any remote
-  or GitHub operation in this pass, with byte counts `94`, `72`, `69`, and
-  `69`;
+- pass preflight: verified readable, non-empty `/path/to/credentials/release-token`,
+  `/path/to/credentials/cloud-api-token`,
+  `/path/to/credentials/dns-api-token`, and
+  `/path/to/credentials/dns-api-secret` before any remote
+  or GitHub operation in this pass, with credential sizes redacted;
 - Slice 18 ephemeral multi-node distributed validation and recovery rehearsal
   evidence is now implemented and validated:
   - added `/path/to/Documents/example/staging-repo/test/functional/feature_shielded_v2_multinode_validation.py`
@@ -2157,7 +2129,7 @@ Current status:
 - validation for this sub-slice:
   - `python3 -m py_compile /path/to/Documents/example/staging-repo/test/functional/feature_shielded_v2_multinode_validation.py /path/to/Documents/example/staging-repo/test/functional/test_runner.py`
   - `cmake --build /path/to/Documents/example/staging-repo/build-btx --target btxd generate_shielded_relay_fixture_tx -j8`
-  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/test/functional/feature_shielded_v2_multinode_validation.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32274`
+  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/test/functional/feature_shielded_v2_multinode_validation.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/feature-shielded-v2-multinode-validation-20260316e --portseed=32274`
 - measured local runtime:
   - `feature_shielded_v2_multinode_validation.py = real 101.93, user 71.83, sys 3.66`;
 - pivots:
@@ -2182,12 +2154,11 @@ Current status:
 
 ### 2026-03-16 15:07:10 JST
 
-- pass preflight: verified readable, non-empty `/path/to/Documents/example/staging-repo`,
-  `/path/to/Documents/example/staging-repo/credential-file`,
-  `/path/to/Documents/example/staging-repo/credential-file`, and
-  `/path/to/Documents/example/staging-repo/credential-file` before any remote
-  or GitHub operation in this pass, with byte counts `94`, `72`, `69`, and
-  `69`;
+- pass preflight: verified readable, non-empty `/path/to/credentials/release-token`,
+  `/path/to/credentials/cloud-api-token`,
+  `/path/to/credentials/dns-api-token`, and
+  `/path/to/credentials/dns-api-secret` before any remote
+  or GitHub operation in this pass, with credential sizes redacted;
 - Slice 18 relay / mempool / mining mixed-workload benches are now implemented
   and validated on the live miner path:
   - extended `/path/to/Documents/example/staging-repo/src/test/miner_tests.cpp`
@@ -2235,12 +2206,11 @@ Current status:
 
 ### 2026-03-16 15:32:44 JST
 
-- pass preflight: verified readable, non-empty `/path/to/Documents/example/staging-repo`,
-  `/path/to/Documents/example/staging-repo/credential-file`,
-  `/path/to/Documents/example/staging-repo/credential-file`, and
-  `/path/to/Documents/example/staging-repo/credential-file` before any remote
-  or GitHub operation in this pass, with byte counts `94`, `72`, `69`, and
-  `69`;
+- pass preflight: verified readable, non-empty `/path/to/credentials/release-token`,
+  `/path/to/credentials/cloud-api-token`,
+  `/path/to/credentials/dns-api-token`, and
+  `/path/to/credentials/dns-api-secret` before any remote
+  or GitHub operation in this pass, with credential sizes redacted;
 - Slice 18 chain-growth projections at `12 MB`, `24 MB`, and a candidate
   larger `32 MB` limit are now implemented and validated:
   - added `/path/to/Documents/example/staging-repo/src/test/shielded_v2_chain_growth_projection_report.h`
@@ -2266,9 +2236,9 @@ Current status:
   - `./build-btx/bin/test_btx --run_test=shielded_ingress_proof_runtime_report_tests --catch_system_error=no --log_level=test_suite`
   - `./build-btx/bin/test_btx --run_test=shielded_v2_egress_runtime_report_tests --catch_system_error=no --log_level=test_suite`
   - `./build-btx/bin/test_btx --run_test=shielded_v2_netting_capacity_report_tests --catch_system_error=no --log_level=test_suite`
-  - `/usr/bin/time -p ./build-btx/bin/gen_shielded_v2_chain_growth_projection_report --block-sizes-mb=12,24,32 --output=<redacted-temporary-path>`
+  - `/usr/bin/time -p ./build-btx/bin/gen_shielded_v2_chain_growth_projection_report --block-sizes-mb=12,24,32 --output=/tmp/btx-v2-chain-growth-projection-slice18a.json`
 - measured chain-growth findings from
-  `<redacted-temporary-path>`:
+  `/tmp/btx-v2-chain-growth-projection-slice18a.json`:
   - `1b_year_1pct_boundary` (`27,400` boundary actions / day) remains
     infeasible at `12 MB` because the mixed workload is weight-bound and still
     needs `975` blocks / day, but becomes feasible at both `24 MB` and
@@ -2313,12 +2283,11 @@ Current status:
 
 ### 2026-03-16 14:38:01 JST
 
-- pass preflight: verified readable, non-empty `/path/to/Documents/example/staging-repo`,
-  `/path/to/Documents/example/staging-repo/credential-file`,
-  `/path/to/Documents/example/staging-repo/credential-file`, and
-  `/path/to/Documents/example/staging-repo/credential-file` before any remote
-  or GitHub operation in this pass, with byte counts `94`, `72`, `69`, and
-  `69`;
+- pass preflight: verified readable, non-empty `/path/to/credentials/release-token`,
+  `/path/to/credentials/cloud-api-token`,
+  `/path/to/credentials/dns-api-token`, and
+  `/path/to/credentials/dns-api-secret` before any remote
+  or GitHub operation in this pass, with credential sizes redacted;
 - Slice 18 cross-L2 netting-efficiency simulations and multi-domain
   reserve-settlement benches are now implemented and validated:
   - added `/path/to/Documents/example/staging-repo/src/test/shielded_v2_netting_capacity_report.h`
@@ -2337,7 +2306,7 @@ Current status:
     `/path/to/Documents/example/staging-repo/src/test/CMakeLists.txt` with a
     bounded default scenario sweep of `2x50`, `8x80`, `32x95`, and `64x99`;
 - measured netting / reserve-settlement findings from
-  `<redacted-temporary-path>`:
+  `/tmp/btx-v2-netting-capacity-report-slice18a.json`:
   - `2x50` achieved the expected `5000` bps median netting ratio, a
     `2000` milli effective-capacity multiplier, `2` manifest domains, and
     `1` reserve output; the representative `v2_rebalance` serialized to
@@ -2367,7 +2336,7 @@ Current status:
 - validation for this sub-slice:
   - `cmake --build /path/to/Documents/example/staging-repo/build-btx --target test_btx generate_shielded_v2_netting_capacity_report -j8`
   - `./build-btx/bin/test_btx --run_test=shielded_v2_netting_capacity_report_tests --catch_system_error=no --log_level=test_suite`
-  - `/usr/bin/time -p ./build-btx/bin/gen_shielded_v2_netting_capacity_report --samples=4 --warmup=0 --scenarios=2x50,8x80,32x95,64x99 --output=<redacted-temporary-path>`
+  - `/usr/bin/time -p ./build-btx/bin/gen_shielded_v2_netting_capacity_report --samples=4 --warmup=0 --scenarios=2x50,8x80,32x95,64x99 --output=/tmp/btx-v2-netting-capacity-report-slice18a.json`
 - measured local runtimes:
   - `gen_shielded_v2_netting_capacity_report(2x50,8x80,32x95,64x99) = real 0.54, user 0.01, sys 0.00`
 - pivots:
@@ -2389,12 +2358,11 @@ Current status:
 
 ### 2026-03-16 14:07:43 JST
 
-- pass preflight: verified readable, non-empty `/path/to/Documents/example/staging-repo`,
-  `/path/to/Documents/example/staging-repo/credential-file`,
-  `/path/to/Documents/example/staging-repo/credential-file`, and
-  `/path/to/Documents/example/staging-repo/credential-file` before any remote
-  or GitHub operation in this pass, with byte counts `94`, `72`, `69`, and
-  `69`;
+- pass preflight: verified readable, non-empty `/path/to/credentials/release-token`,
+  `/path/to/credentials/cloud-api-token`,
+  `/path/to/credentials/dns-api-token`, and
+  `/path/to/credentials/dns-api-secret` before any remote
+  or GitHub operation in this pass, with credential sizes redacted;
 - next step: sync `codex/shielded-v2-overhaul-plan`, re-read the tracker /
   control docs, and continue the highest-priority remaining Slice 18 work.
 
@@ -2417,7 +2385,7 @@ Current status:
     `/path/to/Documents/example/staging-repo/src/test/CMakeLists.txt` with a
     bounded default scenario sweep;
 - measured egress-capacity findings from the generated artifacts:
-  - `<redacted-temporary-path>`:
+  - `/tmp/btx-v2-egress-runtime-report-slice18a.json`:
     - `32x32` stayed standard at `44024` bytes, `176096` tx weight,
       `120000` shielded-policy weight, `verify=760`, `scan=33`,
       `tree_update=32`, and remained weight-bound at `136` txs /
@@ -2430,8 +2398,8 @@ Current status:
       transaction no longer fits under the current `24 MWU` block weight cap
       (`max_transactions_by_weight=0`) and the full measured pipeline was
       `1.29 s`;
-  - `<redacted-temporary-path>` and
-    `<redacted-temporary-path>` tightened the live relay
+  - `/tmp/btx-v2-egress-runtime-report-boundary.json` and
+    `/tmp/btx-v2-egress-runtime-report-refine.json` tightened the live relay
     boundary:
     - `256x32` and `512x32` are still standard even though both already exceed
       legacy `MAX_STANDARD_TX_WEIGHT`, because they remain within the extended
@@ -2448,9 +2416,9 @@ Current status:
   - `cmake --build /path/to/Documents/example/staging-repo/build-btx --target test_btx generate_shielded_v2_egress_runtime_report -j8`
   - `./build-btx/bin/test_btx --run_test=shielded_v2_egress_runtime_report_tests --catch_system_error=no --log_level=test_suite`
   - `./build-btx/bin/test_btx --run_test=shielded_v2_egress_tests --catch_system_error=no --log_level=test_suite`
-  - `/usr/bin/time -p ./build-btx/bin/gen_shielded_v2_egress_runtime_report --samples=1 --warmup=0 --scenarios=32x32,1300x32,5000x32 --output=<redacted-temporary-path>`
-  - `/usr/bin/time -p ./build-btx/bin/gen_shielded_v2_egress_runtime_report --samples=1 --warmup=0 --scenarios=256x32,512x32,768x32,1024x32 --output=<redacted-temporary-path>`
-  - `./build-btx/bin/gen_shielded_v2_egress_runtime_report --samples=1 --warmup=0 --scenarios=896x32,960x32 --output=<redacted-temporary-path>`
+  - `/usr/bin/time -p ./build-btx/bin/gen_shielded_v2_egress_runtime_report --samples=1 --warmup=0 --scenarios=32x32,1300x32,5000x32 --output=/tmp/btx-v2-egress-runtime-report-slice18a.json`
+  - `/usr/bin/time -p ./build-btx/bin/gen_shielded_v2_egress_runtime_report --samples=1 --warmup=0 --scenarios=256x32,512x32,768x32,1024x32 --output=/tmp/btx-v2-egress-runtime-report-boundary.json`
+  - `./build-btx/bin/gen_shielded_v2_egress_runtime_report --samples=1 --warmup=0 --scenarios=896x32,960x32 --output=/tmp/btx-v2-egress-runtime-report-refine.json`
 - measured local runtimes:
   - `shielded_v2_egress_runtime_report_tests = 3231 us`
   - `shielded_v2_egress_tests = 16859 us`
@@ -2487,13 +2455,13 @@ Current status:
     per-block limit and over-limit standard-policy headroom no longer
     underflows;
 - measured ingress-capacity findings from the generated artifacts:
-  - native MatRiCT+ sample `<redacted-temporary-path>` at
+  - native MatRiCT+ sample `/tmp/btx-ingress-proof-native-slice18a.json` at
     `4` leaves produced a `2492641` byte tx with `9970564` tx weight,
     `4985282` shielded-policy weight, `2489850` proof bytes,
     `verify=760`, `scan=0`, `tree_update=2`, and is weight-bound at
     `2` txs / `8` ingress leaves per `24 MWU` block while already outside
     standard relay policy;
-  - receipt-backed sweep `<redacted-temporary-path>`
+  - receipt-backed sweep `/tmp/btx-ingress-proof-receipt-slice18a.json`
     stayed weight-bound across the measured bands with:
     - `100` leaves: `41009` bytes, `164036` weight, `120000`
       shielded-policy weight, `2` shards, `146` txs / `14600` leaves per
@@ -2511,8 +2479,8 @@ Current status:
   - `cmake --build /path/to/Documents/example/staging-repo/build-btx --target test_btx generate_shielded_ingress_proof_runtime_report generate_shielded_v2_send_runtime_report -j8`
   - `/usr/bin/time -p ./build-btx/bin/test_btx --run_test=shielded_ingress_proof_runtime_report_tests --catch_system_error=no --log_level=test_suite`
   - `/usr/bin/time -p ./build-btx/bin/test_btx --run_test=shielded_v2_send_runtime_report_tests --catch_system_error=no --log_level=test_suite`
-  - `/usr/bin/time -p ./build-btx/bin/gen_shielded_ingress_proof_runtime_report --samples=1 --warmup=0 --leaf-counts=4 --reserve-outputs=1 --output=<redacted-temporary-path>`
-  - `/usr/bin/time -p ./build-btx/bin/gen_shielded_ingress_proof_runtime_report --backend=receipt --samples=1 --warmup=0 --leaf-counts=100,1000,5000,10000 --reserve-outputs=1 --output=<redacted-temporary-path>`
+  - `/usr/bin/time -p ./build-btx/bin/gen_shielded_ingress_proof_runtime_report --samples=1 --warmup=0 --leaf-counts=4 --reserve-outputs=1 --output=/tmp/btx-ingress-proof-native-slice18a.json`
+  - `/usr/bin/time -p ./build-btx/bin/gen_shielded_ingress_proof_runtime_report --backend=receipt --samples=1 --warmup=0 --leaf-counts=100,1000,5000,10000 --reserve-outputs=1 --output=/tmp/btx-ingress-proof-receipt-slice18a.json`
 - measured local runtimes:
   - `shielded_ingress_proof_runtime_report_tests = real 130.46, user 128.47, sys 0.95`
   - `shielded_v2_send_runtime_report_tests = real 24.36, user 23.72, sys 0.11`
@@ -2529,21 +2497,19 @@ Current status:
     already-landed direct-send runtime report and corrected it immediately so
     Slice 18 reporting stays internally consistent;
 - push / PR gate re-verified before the validated branch publish: readable,
-  non-empty `credential-file`, `credential-file`, `credential-file`, and
-  `credential-file` confirmed again locally with byte counts `94`, `72`,
-  `69`, and `69`;
+  non-empty `release-token`, `cloud-api-token`, `dns-api-token`, and
+  `dns-api-secret` confirmed again locally with credential sizes redacted;
 - cloud resources used: none;
 - cost: `0`;
 - next step: continue Slice 18 with batch egress scan and validation benches.
 
 ### 2026-03-16 13:46:57 JST
 
-- pass preflight: verified readable, non-empty `/path/to/Documents/example/staging-repo`,
-  `/path/to/Documents/example/staging-repo/credential-file`,
-  `/path/to/Documents/example/staging-repo/credential-file`, and
-  `/path/to/Documents/example/staging-repo/credential-file` before any remote
-  or GitHub operation in this pass, with byte counts `94`, `72`, `69`, and
-  `69`;
+- pass preflight: verified readable, non-empty `/path/to/credentials/release-token`,
+  `/path/to/credentials/cloud-api-token`,
+  `/path/to/credentials/dns-api-token`, and
+  `/path/to/credentials/dns-api-secret` before any remote
+  or GitHub operation in this pass, with credential sizes redacted;
 - next step: sync `codex/shielded-v2-overhaul-plan`, re-read the tracker /
   control docs, and continue the highest-priority remaining Slice 18 work.
 
@@ -2564,7 +2530,7 @@ Current status:
     with a focused contract test over the real wallet-shaped `1x2` path plus
     invalid-config rejection coverage;
 - measured direct-send findings from
-  `<redacted-temporary-path>`:
+  `/tmp/btx-v2-send-runtime-report-slice18a.json`:
   - `1x2` remained standard at `1063865` serialized bytes,
     `2127730` shielded-policy weight, `964` verify units, `2` scan units,
     `3` tree-update units, and stayed weight-bound at `5` txs / `10` outputs
@@ -2584,7 +2550,7 @@ Current status:
   - `cmake --build /path/to/Documents/example/staging-repo/build-btx --target test_btx generate_shielded_v2_send_runtime_report -j8`
   - `/usr/bin/time -p ./build-btx/bin/test_btx --run_test=shielded_v2_send_runtime_report_tests --catch_system_error=no --log_level=test_suite`
   - `/usr/bin/time -p ./build-btx/bin/test_btx --run_test=shielded_v2_send_tests --catch_system_error=no --log_level=test_suite`
-  - `/usr/bin/time -p ./build-btx/bin/gen_shielded_v2_send_runtime_report --samples=1 --warmup=0 --scenarios=1x2,2x2,2x4 --output=<redacted-temporary-path>`
+  - `/usr/bin/time -p ./build-btx/bin/gen_shielded_v2_send_runtime_report --samples=1 --warmup=0 --scenarios=1x2,2x2,2x4 --output=/tmp/btx-v2-send-runtime-report-slice18a.json`
 - measured local runtimes:
   - `shielded_v2_send_runtime_report_tests = real 23.40, user 22.89, sys 0.07`
   - `shielded_v2_send_tests = real 30.67, user 30.58, sys 0.08`
@@ -2602,12 +2568,11 @@ Current status:
 
 ### 2026-03-16 13:23:55 JST
 
-- pass preflight: verified readable, non-empty `/path/to/Documents/example/staging-repo`,
-  `/path/to/Documents/example/staging-repo/credential-file`,
-  `/path/to/Documents/example/staging-repo/credential-file`, and
-  `/path/to/Documents/example/staging-repo/credential-file` before any remote
-  or GitHub operation in this pass, with byte counts `94`, `72`, `69`, and
-  `69`;
+- pass preflight: verified readable, non-empty `/path/to/credentials/release-token`,
+  `/path/to/credentials/cloud-api-token`,
+  `/path/to/credentials/dns-api-token`, and
+  `/path/to/credentials/dns-api-secret` before any remote
+  or GitHub operation in this pass, with credential sizes redacted;
 - next step: sync `codex/shielded-v2-overhaul-plan`, re-read the tracker /
   control docs, and continue the highest-priority remaining Slice 18 work.
 
@@ -2645,11 +2610,11 @@ Current status:
 - validated with:
   - `python3 -m py_compile /path/to/Documents/example/staging-repo/test/functional/wallet_shielded_encrypted_persistence.py /path/to/Documents/example/staging-repo/test/functional/wallet_shielded_restart_persistence.py /path/to/Documents/example/staging-repo/test/functional/wallet_backupbundle.py /path/to/Documents/example/staging-repo/test/functional/wallet_bundlearchive.py /path/to/Documents/example/staging-repo/test/functional/wallet_verifywalletintegrity.py`
   - `cmake --build /path/to/Documents/example/staging-repo/build-btx --target btxd -j8`
-  - `python3 /path/to/Documents/example/staging-repo/test/functional/wallet_shielded_encrypted_persistence.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32260`
-  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/test/functional/wallet_shielded_restart_persistence.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32261`
-  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/test/functional/wallet_backupbundle.py --descriptors --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32262`
-  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/test/functional/wallet_bundlearchive.py --descriptors --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32263`
-  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/test/functional/wallet_verifywalletintegrity.py --descriptors --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32264`
+  - `python3 /path/to/Documents/example/staging-repo/test/functional/wallet_shielded_encrypted_persistence.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/wallet-shielded-encrypted-persistence-20260316c --portseed=32260`
+  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/test/functional/wallet_shielded_restart_persistence.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/wallet-shielded-restart-persistence-20260316a --portseed=32261`
+  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/test/functional/wallet_backupbundle.py --descriptors --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/wallet-backupbundle-20260316a --portseed=32262`
+  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/test/functional/wallet_bundlearchive.py --descriptors --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/wallet-bundlearchive-20260316a --portseed=32263`
+  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/test/functional/wallet_verifywalletintegrity.py --descriptors --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/wallet-verifywalletintegrity-20260316a --portseed=32264`
 - measured local runtimes:
   - `wallet_shielded_encrypted_persistence.py ~= 50.84s` from test-framework
     start to successful cleanup
@@ -2673,9 +2638,8 @@ Current status:
     which is the evidence needed to close Slice 17 rather than open another
     implementation slice;
 - push / PR gate re-verified before the validated branch publish: readable,
-  non-empty `credential-file`, `credential-file`, `credential-file`, and
-  `credential-file` confirmed again locally with byte counts `94`, `72`,
-  `69`, and `69`;
+  non-empty `release-token`, `cloud-api-token`, `dns-api-token`, and
+  `dns-api-secret` confirmed again locally with credential sizes redacted;
 - cloud resources used: none;
 - cost: `0`;
 - teardown confirmation:
@@ -2686,20 +2650,19 @@ Current status:
     `wallet-bundlearchive-20260316a`, and
     `wallet-verifywalletintegrity-20260316a`;
   - failed intermediate tmpdirs
-    `<redacted-temporary-path>`
-    and `<redacted-temporary-path>`
+    `/tmp/btx-functional-manual/wallet-shielded-encrypted-persistence-20260316a`
+    and `/tmp/btx-functional-manual/wallet-shielded-encrypted-persistence-20260316b`
     remain local-only evidence of the stale test setup and require no remote
     teardown;
 - next slice: start `Slice 18: Prove The Capacity Targets And Distributed Behavior`.
 
 ### 2026-03-16 13:12:44 JST
 
-- pass preflight: verified readable, non-empty `/path/to/Documents/example/staging-repo`,
-  `/path/to/Documents/example/staging-repo/credential-file`,
-  `/path/to/Documents/example/staging-repo/credential-file`, and
-  `/path/to/Documents/example/staging-repo/credential-file` before any remote
-  or GitHub operation in this pass, with byte counts `94`, `72`, `69`, and
-  `69`;
+- pass preflight: verified readable, non-empty `/path/to/credentials/release-token`,
+  `/path/to/credentials/cloud-api-token`,
+  `/path/to/credentials/dns-api-token`, and
+  `/path/to/credentials/dns-api-secret` before any remote
+  or GitHub operation in this pass, with credential sizes redacted;
 - next step: sync `codex/shielded-v2-overhaul-plan`, re-read the tracker /
   control docs, and continue the highest-priority remaining Slice 17 work.
 
@@ -2747,7 +2710,7 @@ Current status:
   - `cmake --build /path/to/Documents/example/staging-repo/build-btx --target test_btx btxd -j8`
   - `./build-btx/bin/test_btx --run_test=shielded_v2_bundle_tests --catch_system_error=no --log_level=test_suite`
   - `python3 -m py_compile /path/to/Documents/example/staging-repo/test/functional/test_runner.py /path/to/Documents/example/staging-repo/test/functional/wallet_bridge_rebalance.py`
-  - `python3 /path/to/Documents/example/staging-repo/test/functional/wallet_bridge_rebalance.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32257`
+  - `python3 /path/to/Documents/example/staging-repo/test/functional/wallet_bridge_rebalance.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/wallet-bridge-rebalance-20260316c --portseed=32257`
 - measured local runtimes:
   - `shielded_v2_bundle_tests = real 0.58, user 0.12, sys 0.02`
   - `wallet_bridge_rebalance.py = real 9.41, user 2.67, sys 0.37`
@@ -2761,16 +2724,15 @@ Current status:
     passed standalone but was absent from `test_runner.py`, so the matrix was
     updated before closeout rather than leaving the new RPC on an ad hoc path;
 - push / PR gate re-verified before the validated branch publish: readable,
-  non-empty `credential-file`, `credential-file`, `credential-file`, and
-  `credential-file` confirmed again locally with byte counts `94`, `72`,
-  `69`, and `69`;
+  non-empty `release-token`, `cloud-api-token`, `dns-api-token`, and
+  `dns-api-secret` confirmed again locally with credential sizes redacted;
 - cloud resources used: none;
 - cost: `0`;
 - teardown confirmation:
   - successful tmpdir `wallet-bridge-rebalance-20260316c` was cleaned by the
     functional harness on exit;
   - the failed intermediate tmpdir
-    `<redacted-temporary-path>` was removed
+    `/tmp/btx-functional-manual/wallet-bridge-rebalance-20260316b` was removed
     locally after the passing rerun;
 - next slice: continue Slice 17 with the remaining wallet durability / recovery
   closeout, unless that final PR #80 / PR #81 baseline is already fully
@@ -2778,10 +2740,10 @@ Current status:
 
 ### 2026-03-16 12:31:12 JST
 
-- pass preflight: verified readable, non-empty `/path/to/Documents/example/staging-repo`,
-  `/path/to/Documents/example/staging-repo/credential-file`,
-  `/path/to/Documents/example/staging-repo/credential-file`, and
-  `/path/to/Documents/example/staging-repo/credential-file` before any remote
+- pass preflight: verified readable, non-empty `/path/to/credentials/release-token`,
+  `/path/to/credentials/cloud-api-token`,
+  `/path/to/credentials/dns-api-token`, and
+  `/path/to/credentials/dns-api-secret` before any remote
   or GitHub operation in this pass;
 - next step: sync `codex/shielded-v2-overhaul-plan`, re-read the tracker / control
   docs, and continue the highest-priority remaining Slice 17 wallet / RPC work.
@@ -2818,8 +2780,8 @@ Current status:
 - validated with:
   - `python3 -m py_compile /path/to/Documents/example/staging-repo/test/functional/wallet_shielded_rpc_surface.py /path/to/Documents/example/staging-repo/test/functional/feature_btx_block_capacity.py`
   - `cmake --build /path/to/Documents/example/staging-repo/build-btx --target btxd generate_shielded_relay_fixture_tx -j8`
-  - `python3 /path/to/Documents/example/staging-repo/test/functional/wallet_shielded_rpc_surface.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32276`
-  - `python3 /path/to/Documents/example/staging-repo/test/functional/feature_btx_block_capacity.py --descriptors --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32272`
+  - `python3 /path/to/Documents/example/staging-repo/test/functional/wallet_shielded_rpc_surface.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/wallet-shielded-rpc-surface-slice17-rawtx-20260316e --portseed=32276`
+  - `python3 /path/to/Documents/example/staging-repo/test/functional/feature_btx_block_capacity.py --descriptors --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/feature-btx-block-capacity-shielded-rawtx-20260316a --portseed=32272`
 - measured local runtimes:
   - `wallet_shielded_rpc_surface.py = 313.44s`
   - `feature_btx_block_capacity.py = 10.48s`
@@ -2840,8 +2802,8 @@ Current status:
     so the raw decode assertion now matches the actual wire contract already
     exercised by lower-level ingress tests;
 - push / PR gate re-verified before the validated branch publish: readable,
-  non-empty `credential-file`, `credential-file`, `credential-file`, and
-  `credential-file` confirmed again locally;
+  non-empty `release-token`, `cloud-api-token`, `dns-api-token`, and
+  `dns-api-secret` confirmed again locally;
 - cloud resources used: none;
 - incremental cost: `0`;
 - teardown: functional tmpdirs cleaned by the harness on the successful
@@ -2881,7 +2843,7 @@ Current status:
   - `./build-btx/bin/test_btx --run_test=shielded_wallet_chunk_discovery_tests --catch_system_error=no --log_level=test_suite`
   - `cmake --build /path/to/Documents/example/staging-repo/build-btx --target btxd test_btx -j8`
   - `python3 -m py_compile /path/to/Documents/example/staging-repo/test/functional/wallet_shielded_viewingkey_rescan.py`
-  - `python3 /path/to/Documents/example/staging-repo/test/functional/wallet_shielded_viewingkey_rescan.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32270`
+  - `python3 /path/to/Documents/example/staging-repo/test/functional/wallet_shielded_viewingkey_rescan.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/wallet-shielded-viewingkey-rescan-slice17-20260316i --portseed=32270`
 - measured local runtimes:
   - `shielded_wallet_chunk_discovery_tests = 18,201,064us`
   - `wallet_shielded_viewingkey_rescan.py ~= 82.14s` from test-framework start
@@ -2896,8 +2858,8 @@ Current status:
     in the same block, so exact total-balance equality was replaced with a
     baseline-relative increase tied to the imported live note itself;
 - push / PR gate re-verified before the validated branch publish: readable,
-  non-empty `credential-file`, `credential-file`, `credential-file`, and
-  `credential-file` confirmed again locally;
+  non-empty `release-token`, `cloud-api-token`, `dns-api-token`, and
+  `dns-api-secret` confirmed again locally;
 - cloud resources used: none;
 - cost: `0`;
 - teardown confirmation:
@@ -2914,10 +2876,10 @@ Current status:
 - start-of-pass remote / GitHub preflight repeated before the next fetch / pull /
   push / PR cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - the next remote sync, later push to
   `origin/codex/shielded-v2-overhaul-plan`, and the follow-up PR #82 update are
   unblocked for this pass.
@@ -2956,9 +2918,9 @@ Current status:
 - validated with:
   - `python3 -m py_compile /path/to/Documents/example/staging-repo/test/functional/wallet_bridge_attested_unshield.py /path/to/Documents/example/staging-repo/test/functional/wallet_bridge_batch_commitment.py /path/to/Documents/example/staging-repo/test/functional/wallet_bridge_psbt.py`
   - `cmake --build /path/to/Documents/example/staging-repo/build-btx --target btxd -j8`
-  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/test/functional/wallet_bridge_attested_unshield.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32259`
-  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/test/functional/wallet_bridge_batch_commitment.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32260`
-  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/test/functional/wallet_bridge_psbt.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32261`
+  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/test/functional/wallet_bridge_attested_unshield.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/wallet-bridge-attested-unshield-slice17-20260316a --portseed=32259`
+  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/test/functional/wallet_bridge_batch_commitment.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/wallet-bridge-batch-commitment-slice17-20260316a --portseed=32260`
+  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/test/functional/wallet_bridge_psbt.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/wallet-bridge-psbt-slice17-20260316b --portseed=32261`
 - measured local runtimes:
   - `wallet_bridge_attested_unshield.py = real 10.35, user 3.43, sys 0.39`
   - `wallet_bridge_batch_commitment.py = real 10.23, user 3.65, sys 0.36`
@@ -2990,10 +2952,10 @@ Current status:
 - start-of-pass remote / GitHub preflight repeated before the next fetch / pull /
   push / PR cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - the next remote sync, later push to
   `origin/codex/shielded-v2-overhaul-plan`, and the follow-up PR #82 update are
   unblocked for this pass.
@@ -3003,10 +2965,10 @@ Current status:
 - start-of-pass remote / GitHub preflight repeated before the next fetch / pull /
   push / PR cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - the next remote sync, later push to
   `origin/codex/shielded-v2-overhaul-plan`, and the follow-up PR #82 update are
   unblocked for this pass.
@@ -3043,9 +3005,9 @@ Current status:
 - validated with:
   - `python3 -m py_compile /path/to/Documents/example/staging-repo/test/functional/wallet_bridge_happy_path.py /path/to/Documents/example/staging-repo/test/functional/wallet_bridge_batch_in.py /path/to/Documents/example/staging-repo/test/functional/wallet_bridge_psbt.py`
   - `cmake --build /path/to/Documents/example/staging-repo/build-btx --target btxd -j8`
-  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/test/functional/wallet_bridge_happy_path.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32256`
-  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/test/functional/wallet_bridge_batch_in.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32257`
-  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/test/functional/wallet_bridge_psbt.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32258`
+  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/test/functional/wallet_bridge_happy_path.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/wallet-bridge-happy-slice17-20260316a --portseed=32256`
+  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/test/functional/wallet_bridge_batch_in.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/wallet-bridge-batch-in-slice17-20260316a --portseed=32257`
+  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/test/functional/wallet_bridge_psbt.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/wallet-bridge-psbt-slice17-20260316a --portseed=32258`
 - measured local runtimes:
   - `wallet_bridge_happy_path.py = real 10.24, user 3.44, sys 0.39`
   - `wallet_bridge_batch_in.py = real 9.90, user 3.55, sys 0.37`
@@ -3095,7 +3057,7 @@ Current status:
 - validated with:
   - `python3 -m py_compile /path/to/Documents/example/staging-repo/test/functional/wallet_shielded_rpc_surface.py`
   - `cmake --build /path/to/Documents/example/staging-repo/build-btx --target btxd -j8`
-  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/test/functional/wallet_shielded_rpc_surface.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32255`
+  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/test/functional/wallet_shielded_rpc_surface.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/wallet-shielded-rpc-surface-slice17-20260316b --portseed=32255`
 - measured local runtime:
   - `wallet_shielded_rpc_surface.py = real 312.86, user 274.79, sys 3.80`
 - pivots:
@@ -3119,10 +3081,10 @@ Current status:
 - start-of-pass remote / GitHub preflight repeated before the next fetch / pull /
   push / PR cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - the next remote sync, later push to
   `origin/codex/shielded-v2-overhaul-plan`, and the follow-up PR #82 update are
   unblocked for this pass.
@@ -3143,7 +3105,7 @@ Current status:
 - validated with:
   - `python3 -m py_compile /path/to/Documents/example/staging-repo/test/functional/feature_btx_block_capacity.py`
   - `cmake --build /path/to/Documents/example/staging-repo/build-btx --target btxd generate_shielded_relay_fixture_tx -j8`
-  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/test/functional/feature_btx_block_capacity.py --descriptors --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32253`
+  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/test/functional/feature_btx_block_capacity.py --descriptors --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/feature-btx-block-capacity-shielded-20260316d --portseed=32253`
 - measured local runtime:
   - `feature_btx_block_capacity.py = real 10.05, user 2.72, sys 0.42`
 - pivots:
@@ -3168,10 +3130,10 @@ Current status:
 - start-of-pass remote / GitHub preflight repeated before the next fetch / pull /
   push / PR cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - the next remote sync, later push to
   `origin/codex/shielded-v2-overhaul-plan`, and the follow-up PR #82 update are
   unblocked for this pass.
@@ -3218,10 +3180,10 @@ Current status:
 - start-of-pass remote / GitHub preflight repeated before any new fetch / pull /
   push / PR cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - the next remote sync, later push to
   `origin/codex/shielded-v2-overhaul-plan`, and the follow-up PR #82 update are
   unblocked for this pass.
@@ -3262,7 +3224,7 @@ Current status:
   - `./build-btx/bin/gen_shielded_relay_fixture_tx --family=egress_receipt`
   - `cmake --build /path/to/Documents/example/staging-repo/build-btx --target btxd -j8`
   - `python3 -m py_compile /path/to/Documents/example/staging-repo/test/functional/p2p_shielded_relay.py`
-  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/test/functional/p2p_shielded_relay.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32248`
+  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/test/functional/p2p_shielded_relay.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/p2p-shielded-relay-v2-egress-20260316d --portseed=32248`
 - findings:
   - the final live relay functional passed in `real 159.33`, `user 141.60`,
     `sys 1.02`, and now covers mixed `v2_send` + `v2_ingress_batch` relay,
@@ -3285,10 +3247,10 @@ Current status:
 - start-of-pass remote / GitHub preflight repeated before any new fetch / pull /
   push / PR cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - the next remote sync, later push to
   `origin/codex/shielded-v2-overhaul-plan`, and the follow-up PR #82 update are
   unblocked for this pass.
@@ -3329,7 +3291,7 @@ Current status:
   - `./build-btx/bin/test_btx --run_test=shielded_relay_fixture_builder_tests --catch_system_error=no --log_level=test_suite`
   - `./build-btx/bin/gen_shielded_relay_fixture_tx --family=rebalance --input-txid=0100000000000000000000000000000000000000000000000000000000000000 --input-vout=0 --input-value-sats=100000000 --change-script=5220afa45d6891836c7314dded4dbd0e7aacde3de0d7fa9a12aeac06e2296c794226 --fee-sats=40000`
   - `python3 -m py_compile /path/to/Documents/example/staging-repo/test/functional/p2p_shielded_relay.py`
-  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/test/functional/p2p_shielded_relay.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32244`
+  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/test/functional/p2p_shielded_relay.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/p2p-shielded-relay-v2-manifest-20260316o --portseed=32244`
 - findings:
   - `shielded_relay_fixture_builder_tests` passed in `4273us`, with the three
     targeted cases exercising rebalance wrapping, reserve-bound settlement
@@ -3354,10 +3316,10 @@ Current status:
 - start-of-pass remote / GitHub preflight repeated before any new fetch / pull /
   push / PR cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - the next remote sync, later push to
   `origin/codex/shielded-v2-overhaul-plan`, and the follow-up PR #82 update are
   unblocked for this pass.
@@ -3407,10 +3369,10 @@ Current status:
 - start-of-pass remote / GitHub preflight repeated before any new fetch / pull /
   push / PR cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - the next remote sync, later push to
   `origin/codex/shielded-v2-overhaul-plan`, and the follow-up PR #82 update are
   unblocked for this pass.
@@ -3431,8 +3393,8 @@ Current status:
 - validation:
   - `python3 -m py_compile /path/to/Documents/example/staging-repo/test/functional/p2p_shielded_relay.py`
   - `cmake --build /path/to/Documents/example/staging-repo/build-btx --target btxd -j8`
-  - `python3 /path/to/Documents/example/staging-repo/test/functional/p2p_shielded_relay.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32240`
-  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/test/functional/p2p_shielded_relay.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32241`
+  - `python3 /path/to/Documents/example/staging-repo/test/functional/p2p_shielded_relay.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/p2p-shielded-relay-v2-mempool-20260316a --portseed=32240`
+  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/test/functional/p2p_shielded_relay.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/p2p-shielded-relay-v2-mempool-20260316b --portseed=32241`
 - findings:
   - both fresh-peer `mempool` request coverage and the existing mixed-family
     mine / reorg reannouncement path passed end to end with deterministic
@@ -3450,10 +3412,10 @@ Current status:
 - start-of-pass remote / GitHub preflight repeated before any new fetch / pull /
   push / PR cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - the next remote sync, later push to
   `origin/codex/shielded-v2-overhaul-plan`, and the follow-up PR #82 update are
   unblocked for this pass.
@@ -3489,10 +3451,10 @@ Current status:
 - start-of-pass remote / GitHub preflight repeated before any new fetch / pull /
   push / PR cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - the next remote sync, later push to
   `origin/codex/shielded-v2-overhaul-plan`, and the follow-up PR #82 update are
   unblocked for this pass.
@@ -3509,8 +3471,8 @@ Current status:
 - validated with:
   - `cmake --build /path/to/Documents/example/staging-repo/build-btx --target btxd -j8`
   - `python3 -m py_compile /path/to/Documents/example/staging-repo/test/functional/p2p_shielded_relay.py`
-  - `python3 /path/to/Documents/example/staging-repo/test/functional/p2p_shielded_relay.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32236`
-  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/test/functional/p2p_shielded_relay.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32237`
+  - `python3 /path/to/Documents/example/staging-repo/test/functional/p2p_shielded_relay.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/p2p-shielded-relay-v2-mixed-20260316k --portseed=32236`
+  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/test/functional/p2p_shielded_relay.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/p2p-shielded-relay-v2-mixed-20260316l --portseed=32237`
 - findings / pivots:
   - the first outbound-peer regression shape remained nondeterministic even
     after restoring unbroadcast membership; the stable final regression now
@@ -3531,10 +3493,10 @@ Current status:
 - start-of-pass remote / GitHub preflight repeated before any new fetch / pull /
   push / PR cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - the next remote sync, later push to
   `origin/codex/shielded-v2-overhaul-plan`, and the follow-up PR #82 update are
   unblocked for this pass.
@@ -3544,10 +3506,10 @@ Current status:
 - start-of-pass remote / GitHub preflight repeated before any new fetch / pull /
   push / PR cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - the next remote sync, later push to
   `origin/codex/shielded-v2-overhaul-plan`, and the follow-up PR #82 update are
   unblocked for this pass.
@@ -3557,10 +3519,10 @@ Current status:
 - remote / GitHub preflight repeated immediately before the next validated
   push / PR #82 update cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - the upcoming push to `origin/codex/shielded-v2-overhaul-plan` and the
   follow-up PR #82 update are unblocked for this pass.
 
@@ -3590,8 +3552,8 @@ Current status:
 - exact validation commands:
   - `cmake --build /path/to/Documents/example/staging-repo/build-btx --target btxd -j8`
   - `python3 -m py_compile /path/to/Documents/example/staging-repo/test/functional/p2p_shielded_relay.py`
-  - `python3 /path/to/Documents/example/staging-repo/test/functional/p2p_shielded_relay.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32225`
-  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/test/functional/p2p_shielded_relay.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32226`
+  - `python3 /path/to/Documents/example/staging-repo/test/functional/p2p_shielded_relay.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/p2p-shielded-relay-v2-20260316u --portseed=32225`
+  - `/usr/bin/time -p python3 /path/to/Documents/example/staging-repo/test/functional/p2p_shielded_relay.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/p2p-shielded-relay-v2-20260316v --portseed=32226`
 - validation findings:
   - `p2p_shielded_relay.py` now passes end to end on the no-probe build,
     including the new `shielded_v2` ingress announcement path, shielded-only
@@ -3620,11 +3582,11 @@ Current status:
 - estimated cost: `0`
 - teardown confirmation:
   - the functional harness cleaned up
-    `<redacted-temporary-path>` on exit
+    `/tmp/btx-functional-manual/p2p-shielded-relay-v2-20260316u` on exit
   - the functional harness cleaned up
-    `<redacted-temporary-path>` on exit
+    `/tmp/btx-functional-manual/p2p-shielded-relay-v2-20260316v` on exit
   - the intermediate failed tmpdir
-    `<redacted-temporary-path>` was removed
+    `/tmp/btx-functional-manual/p2p-shielded-relay-v2-20260316t` was removed
     manually after diagnosis
   - no DigitalOcean, Porkbun, or Tailscale resources were created
 - slice status:
@@ -3640,10 +3602,10 @@ Current status:
 - remote / GitHub preflight repeated immediately before the upcoming
   `codex/shielded-v2-overhaul-plan` push / PR #82 update cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - continued `Slice 14: Implement Default Externalized Retention, Weekly
   Snapshots, And Recovery Semantics` with the node-visible weekly cadence and
   snapshot lifecycle closeout sub-slice in
@@ -3668,8 +3630,8 @@ Current status:
 - exact validation commands:
   - `cmake --build /path/to/Documents/example/staging-repo/build-btx --target test_btx btxd -j8`
   - `./build-btx/bin/test_btx --run_test=validation_chainstatemanager_tests --catch_system_error=no --log_level=test_suite`
-  - `python3 ./test/functional/feature_shielded_snapshot_retention_profile.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32221`
-  - `python3 ./test/functional/feature_assumeutxo.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32222`
+  - `python3 ./test/functional/feature_shielded_snapshot_retention_profile.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/shielded-snapshot-retention-profile-20260316g --portseed=32221`
+  - `python3 ./test/functional/feature_assumeutxo.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/feature-assumeutxo-retention-20260316c --portseed=32222`
 - validation findings:
   - `validation_chainstatemanager_tests` passed in `29,028,157us`, confirming
     the prior externalized-retention / snapshot reload behavior was not
@@ -3698,10 +3660,10 @@ Current status:
 - estimated cost: `0`
 - teardown confirmation:
   - the functional harness cleaned up
-    `<redacted-temporary-path>`
+    `/tmp/btx-functional-manual/shielded-snapshot-retention-profile-20260316g`
     on exit
   - the functional harness cleaned up
-    `<redacted-temporary-path>` on
+    `/tmp/btx-functional-manual/feature-assumeutxo-retention-20260316c` on
     exit
 - Slice 14 is now complete; the next highest-priority unfinished slice is
   `Slice 15: Implement Network Relay, Orphan Handling, And Announcement
@@ -3712,10 +3674,10 @@ Current status:
 - start-of-pass remote / GitHub preflight repeated before any new fetch / pull /
   push / PR cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - the next remote sync, later push to
   `origin/codex/shielded-v2-overhaul-plan`, and the follow-up PR #82 update are
   unblocked for this pass.
@@ -3746,7 +3708,7 @@ Current status:
 - exact validation commands:
   - `cmake --build /path/to/Documents/example/staging-repo/build-btx --target test_btx btxd -j8`
   - `./build-btx/bin/test_btx --run_test=shielded_bridge_tests --catch_system_error=no --log_level=test_suite`
-  - `python3 ./test/functional/wallet_bridge_state_retention.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32220`
+  - `python3 ./test/functional/wallet_bridge_state_retention.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/wallet-bridge-state-retention-20260316a --portseed=32220`
 - validation findings:
   - `shielded_bridge_tests` passed in `498,878us`, including the new default
     policy constant regression and the updated full-vs-externalized retention
@@ -3771,7 +3733,7 @@ Current status:
 - estimated cost: `0`
 - teardown confirmation:
   - the functional harness cleaned up
-    `<redacted-temporary-path>` on
+    `/tmp/btx-functional-manual/wallet-bridge-state-retention-20260316a` on
     exit
 - Slice 14 remains open; the default policy surface now matches the production
   externalized weekly-snapshot posture, while the remaining node-visible weekly
@@ -3782,10 +3744,10 @@ Current status:
 - start-of-pass remote / GitHub preflight repeated before any new fetch / pull /
   push / PR cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - the next remote sync, later push to
   `origin/codex/shielded-v2-overhaul-plan`, and the follow-up PR #82 update are
   unblocked for this pass.
@@ -3795,10 +3757,10 @@ Current status:
 - remote / GitHub preflight repeated immediately before the upcoming
   `codex/shielded-v2-overhaul-plan` push / PR #82 update cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - continued `Slice 14: Implement Default Externalized Retention, Weekly
   Snapshots, And Recovery Semantics` with the pruned-node / assumeutxo recovery
   sub-slice in `/path/to/Documents/example/staging-repo`:
@@ -3832,8 +3794,8 @@ Current status:
   - `./build-btx/bin/test_btx --run_test=validation_chainstatemanager_tests --catch_system_error=no --log_level=test_suite`
   - `./build-btx/bin/test_btx --run_test=shielded_tx_check_tests --catch_system_error=no --log_level=test_suite`
   - `./build-btx/bin/test_btx --run_test=shielded_validation_checks_tests --catch_system_error=no --log_level=test_suite`
-  - `python3 ./test/functional/feature_shielded_snapshot_retention_profile.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32219`
-  - `python3 ./test/functional/feature_assumeutxo.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32218`
+  - `python3 ./test/functional/feature_shielded_snapshot_retention_profile.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/shielded-snapshot-retention-profile-20260316f --portseed=32219`
+  - `python3 ./test/functional/feature_assumeutxo.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/feature-assumeutxo-retention-20260316b --portseed=32218`
 - validation findings:
   - `validation_chainstatemanager_tests` passed in `29,124,329us`, including
     the new `chainstatemanager_reloads_version4_snapshot_settlement_anchor_state`
@@ -3866,10 +3828,10 @@ Current status:
 - estimated cost: `0`
 - teardown confirmation:
   - the functional harness cleaned up
-    `<redacted-temporary-path>`
+    `/tmp/btx-functional-manual/shielded-snapshot-retention-profile-20260316f`
     on exit
   - the functional harness cleaned up
-    `<redacted-temporary-path>` on exit
+    `/tmp/btx-functional-manual/feature-assumeutxo-retention-20260316b` on exit
 - Slice 14 remains open; default externalized retention now survives pruned
   assumeutxo activation and restart, but weekly snapshot cadence and the
   remaining recovery / policy surfaces still need to be closed
@@ -3908,7 +3870,7 @@ Current status:
   - `cmake --build /path/to/Documents/example/staging-repo/build-btx --target test_btx -j8`
   - `./build-btx/bin/test_btx --run_test=validation_chainstatemanager_tests --catch_system_error=no --log_level=test_suite`
   - `./build-btx/bin/test_btx --run_test=shielded_tx_check_tests --catch_system_error=no --log_level=test_suite`
-  - `python3 ./test/functional/feature_shielded_snapshot_retention_profile.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32212`
+  - `python3 ./test/functional/feature_shielded_snapshot_retention_profile.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/shielded-snapshot-retention-profile-20260316a --portseed=32212`
 - validation findings:
   - `validation_chainstatemanager_tests` passed with the new
     retained-index restart coverage, and the focused suite runtime remained
@@ -3936,7 +3898,7 @@ Current status:
 - cloud resources used: none
 - estimated cost: `0`
 - teardown confirmation: the focused functional harness cleaned up
-  `<redacted-temporary-path>`
+  `/tmp/btx-functional-manual/shielded-snapshot-retention-profile-20260316a`
   on exit
 - Slice 14 remains open; the runtime retention-profile switch and snapshot RPC
   reporting are now implemented, while weekly snapshot cadence, pruned-node
@@ -3948,10 +3910,10 @@ Current status:
 - start-of-pass remote / GitHub preflight repeated before any new fetch / pull /
   push / PR cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - the next remote sync, later push to
   `origin/codex/shielded-v2-overhaul-plan`, and the follow-up PR #82 update are
   unblocked for this pass.
@@ -4032,10 +3994,10 @@ Current status:
 - start-of-pass remote / GitHub preflight repeated before any new fetch / pull /
   push / PR cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - the next remote sync, later push to
   `origin/codex/shielded-v2-overhaul-plan`, and the follow-up PR #82 update are
   unblocked for this pass.
@@ -4107,10 +4069,10 @@ Current status:
 - start-of-pass remote / GitHub preflight repeated before any new fetch / pull /
   push / PR cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - the next remote sync, later push to
   `origin/codex/shielded-v2-overhaul-plan`, and the follow-up PR #82 update are
   unblocked for this pass.
@@ -4120,10 +4082,10 @@ Current status:
 - remote / GitHub preflight repeated immediately before the current Slice 13
   push / PR #82 update cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - push to `origin/codex/shielded-v2-overhaul-plan`, and the follow-up PR #82
   update are unblocked for this pass.
 
@@ -4210,10 +4172,10 @@ Current status:
 - remote / GitHub preflight repeated immediately before the current Slice 12
   push / PR #82 update cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - push to `origin/codex/shielded-v2-overhaul-plan` and the follow-up PR #82
   update are unblocked for this pass.
 
@@ -4295,10 +4257,10 @@ Current status:
 - remote / GitHub preflight repeated immediately before the current Slice 12
   push / PR #82 update cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - push to `origin/codex/shielded-v2-overhaul-plan` and the follow-up PR #82
   update are unblocked for this pass.
 
@@ -4367,10 +4329,10 @@ Current status:
 - remote / GitHub preflight repeated immediately before the Slice 12
   backend-decision push / PR #82 update cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - push to `origin/codex/shielded-v2-overhaul-plan` and the follow-up PR #82
   update are unblocked for this pass.
 
@@ -4396,7 +4358,7 @@ Current status:
 - exact validation commands:
   - `cmake --build /path/to/Documents/example/staging-repo/build-btx --target test_btx generate_shielded_ingress_proof_runtime_report -j8`
   - `./build-btx/bin/test_btx --run_test=shielded_ingress_proof_runtime_report_tests --catch_system_error=no --log_level=test_suite`
-  - `./build-btx/bin/gen_shielded_ingress_proof_runtime_report --samples=1 --reserve-outputs=1 --leaf-counts=8,10,11,12 --target-leaf-counts=100,1000,5000,10000 --output=<redacted-temporary-path>`
+  - `./build-btx/bin/gen_shielded_ingress_proof_runtime_report --samples=1 --reserve-outputs=1 --leaf-counts=8,10,11,12 --target-leaf-counts=100,1000,5000,10000 --output=/tmp/btx-shielded-ingress-proof-backend-decision.json`
 - validation findings:
   - the focused `shielded_ingress_proof_runtime_report_tests` suite passed
     with `7` active test cases in `133,654,020us`
@@ -4459,10 +4421,10 @@ Current status:
 - remote / GitHub preflight repeated at the start of the current Slice 12
   fetch / pull / push / PR #82 cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - remote sync, later push to `origin/codex/shielded-v2-overhaul-plan`, and the
   PR #82 update are unblocked for this pass.
 
@@ -4471,10 +4433,10 @@ Current status:
 - remote / GitHub preflight repeated immediately before the Slice 12
   proof-capacity sweep push / PR #82 update cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - push to `origin/codex/shielded-v2-overhaul-plan` and the follow-up PR #82
   update are unblocked for this pass.
 
@@ -4501,7 +4463,7 @@ Current status:
 - exact validation commands:
   - `cmake --build /path/to/Documents/example/staging-repo/build-btx --target test_btx generate_shielded_ingress_proof_runtime_report -j8`
   - `./build-btx/bin/test_btx --run_test=shielded_ingress_proof_runtime_report_tests --catch_system_error=no --log_level=test_suite`
-  - `./build-btx/bin/gen_shielded_ingress_proof_runtime_report --samples=1 --reserve-outputs=1 --leaf-counts=8,10,11,12 --output=<redacted-temporary-path>`
+  - `./build-btx/bin/gen_shielded_ingress_proof_runtime_report --samples=1 --reserve-outputs=1 --leaf-counts=8,10,11,12 --output=/tmp/btx-shielded-ingress-proof-capacity-sweep.json`
 - validation findings:
   - the focused `shielded_ingress_proof_runtime_report_tests` suite passed
     after the harness update, with the main real-proof case completing in
@@ -4567,10 +4529,10 @@ Current status:
 - remote / GitHub preflight repeated before the next Slice 12 fetch / pull /
   push / PR #82 cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - remote sync, later push to `origin/codex/shielded-v2-overhaul-plan`, and the
   PR #82 update are unblocked for this pass.
 
@@ -4579,10 +4541,10 @@ Current status:
 - remote / GitHub preflight repeated immediately before the Slice 12 proof
   runtime push / PR #82 update cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - push to `origin/codex/shielded-v2-overhaul-plan` and the follow-up PR #82
   update are unblocked for this pass.
 
@@ -4607,8 +4569,8 @@ Current status:
 - exact validation commands:
   - `cmake --build /path/to/Documents/example/staging-repo/build-btx --target test_btx generate_shielded_ingress_proof_runtime_report -j8`
   - `./build-btx/bin/test_btx --run_test=shielded_ingress_proof_runtime_report_tests --catch_system_error=no --log_level=test_suite`
-  - `./build-btx/bin/gen_shielded_ingress_proof_runtime_report --samples=1 --leaf-count=8 --reserve-outputs=1 --output=<redacted-temporary-path>`
-  - `./build-btx/bin/gen_shielded_ingress_proof_runtime_report --samples=1 --leaf-count=100 --reserve-outputs=1 --output=<redacted-temporary-path>`
+  - `./build-btx/bin/gen_shielded_ingress_proof_runtime_report --samples=1 --leaf-count=8 --reserve-outputs=1 --output=/tmp/btx-shielded-ingress-proof-runtime-report-8.json`
+  - `./build-btx/bin/gen_shielded_ingress_proof_runtime_report --samples=1 --leaf-count=100 --reserve-outputs=1 --output=/tmp/btx-shielded-ingress-proof-runtime-report-100.json`
 - validation findings:
   - the focused `shielded_ingress_proof_runtime_report_tests` suite passed in
     `28,337,160us`, proving that the harness can build and proof-check a real
@@ -4668,10 +4630,10 @@ Current status:
 - remote / GitHub preflight repeated before the next fetch / pull / push / PR
   cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - remote sync, later push to `origin/codex/shielded-v2-overhaul-plan`, and the
   PR #82 update are unblocked for this pass.
 
@@ -4680,10 +4642,10 @@ Current status:
 - remote / GitHub preflight repeated immediately before the Slice 12 push / PR
   #82 update cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - push to `origin/codex/shielded-v2-overhaul-plan` and the follow-up PR #82
   update are unblocked for this pass.
 
@@ -4719,7 +4681,7 @@ Current status:
   - `./build-btx/bin/test_btx --run_test=shielded_ingress_runtime_report_tests --catch_system_error=no --log_level=test_suite`
   - `./build-btx/bin/test_btx --run_test=shielded_v2_ingress_tests --catch_system_error=no --log_level=test_suite`
   - `./build-btx/bin/test_btx --run_test=shielded_validation_checks_tests --catch_system_error=no --log_level=test_suite`
-  - `./build-btx/bin/gen_shielded_ingress_runtime_report --samples=1 --output=<redacted-temporary-path>`
+  - `./build-btx/bin/gen_shielded_ingress_runtime_report --samples=1 --output=/tmp/btx-shielded-ingress-runtime-report.json`
 - validation findings:
   - the new `shielded_ingress_runtime_report_tests` suite passed and locked the
     current band behavior against the real planner, including explicit failure
@@ -4733,7 +4695,7 @@ Current status:
     disturb the existing proof-binding, ring-position, or spend-auth reject
     surfaces
   - the generated bounded report in
-    `<redacted-temporary-path>` now provides the first
+    `/tmp/btx-shielded-ingress-runtime-report.json` now provides the first
     concrete Slice 12 evidence that the current MatRiCT+-backed bounded-shard
     ingress design comfortably fits `100` and `1000` private deposits but does
     not fit `5000` or `10000` deposits under the present `256` proof-shard
@@ -4793,10 +4755,10 @@ Current status:
 - remote / GitHub preflight repeated before the next fetch / pull / push / PR
   cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - remote sync, future push to `origin/codex/shielded-v2-overhaul-plan`, and
   the PR #82 update are unblocked for this pass.
 
@@ -4805,10 +4767,10 @@ Current status:
 - remote / GitHub preflight repeated before the next push / PR #82 update
   cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - push to `origin/codex/shielded-v2-overhaul-plan` and the follow-up PR #82
   update are unblocked for this pass.
 
@@ -4880,10 +4842,10 @@ Current status:
 - remote / GitHub preflight repeated before the next fetch / pull / push / PR
   cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - remote sync, future push to `origin/codex/shielded-v2-overhaul-plan`, and
   the PR #82 update are unblocked for this pass.
 
@@ -4926,7 +4888,7 @@ Current status:
   - `./build-btx/bin/test_btx --run_test='shielded_wallet_chunk_discovery_tests/wallet_caches_reserve_outputs_from_built_ingress_batch' --catch_system_error=no --log_level=test_suite`
   - `./build-btx/bin/test_btx --run_test=shielded_validation_checks_tests --catch_system_error=no --log_level=test_suite`
   - `./build-btx/bin/test_btx --run_test=shielded_tx_check_tests --catch_system_error=no --log_level=test_suite`
-  - `python3 ./build-btx/test/functional/wallet_shielded_rpc_surface.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32190`
+  - `python3 ./build-btx/test/functional/wallet_shielded_rpc_surface.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/rpc-surface-20260315-ingress-consensus1 --portseed=32190`
 - validation findings:
   - the first accepted settlement-backed ingress state-transition path is now
     covered end-to-end: builder, consensus proof check, mempool admission,
@@ -4962,7 +4924,7 @@ Current status:
 - teardown confirmation:
   - no DigitalOcean, Porkbun, or Tailscale resources were created
   - the functional tmpdir
-    `<redacted-temporary-path>`
+    `/tmp/btx-functional-manual/rpc-surface-20260315-ingress-consensus1`
     was cleaned up by the harness on success
 - slice status:
   - Slice 11 remains open: settlement witness material is now carried and
@@ -4979,10 +4941,10 @@ Current status:
 - remote / GitHub preflight repeated before the next fetch / pull / push / PR
   cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - remote sync, future push to `origin/codex/shielded-v2-overhaul-plan`, and
   the PR #82 update are unblocked for this pass.
 
@@ -4991,10 +4953,10 @@ Current status:
 - remote / GitHub preflight repeated before the next fetch / pull / push / PR
   cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - remote sync, future push to `origin/codex/shielded-v2-overhaul-plan`, and
   the PR #82 update are unblocked for this pass.
 
@@ -5014,7 +4976,7 @@ Current status:
     hybrid ingress previews by rejecting statements that omit either
     `options.receipts` or `options.proof_receipts`
 - exact validation commands:
-  - `python3 ./build-btx/test/functional/wallet_shielded_rpc_surface.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32183`
+  - `python3 ./build-btx/test/functional/wallet_shielded_rpc_surface.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/rpc-surface-20260315-ingress-hybrid1 --portseed=32183`
 - validation findings:
   - the already-plumbed ingress settlement helper in `src/wallet/shielded_rpc.cpp`
     correctly accepted hybrid signed-receipt + proof-receipt witness sets
@@ -5036,7 +4998,7 @@ Current status:
 - cost: `0`
 - teardown confirmation:
   - no DigitalOcean, Porkbun, or Tailscale resources were created
-  - the successful functional tmpdir under `<redacted-temporary-path>` was
+  - the successful functional tmpdir under `/tmp/btx-functional-manual/` was
     cleaned up automatically on exit
 - slice status:
   - Slice 11 remains open: both proof-only and hybrid settlement-backed
@@ -5072,8 +5034,8 @@ Current status:
   - `cmake --build /path/to/Documents/example/staging-repo/build-btx --target btxd test_btx -j8`
   - `./build-btx/bin/test_btx --run_test=shielded_v2_ingress_tests --catch_system_error=no --log_level=test_suite`
   - `./build-btx/bin/test_btx --run_test=shielded_wallet_chunk_discovery_tests/wallet_caches_reserve_outputs_from_built_ingress_batch --catch_system_error=no --log_level=test_suite`
-  - `python3 ./build-btx/test/functional/wallet_shielded_rpc_surface.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32181`
-  - `python3 ./build-btx/test/functional/wallet_shielded_rpc_surface.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32182`
+  - `python3 ./build-btx/test/functional/wallet_shielded_rpc_surface.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/rpc-surface-20260315-ingress-settlement1 --portseed=32181`
+  - `python3 ./build-btx/test/functional/wallet_shielded_rpc_surface.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/rpc-surface-20260315-ingress-settlement2 --portseed=32182`
 - validation findings:
   - the new ingress settlement-witness path now hard-fails proof-policy-bound
     statements that omit `options.proof_receipts`, which is the intended RPC
@@ -5103,7 +5065,7 @@ Current status:
 - cost: `0`
 - teardown confirmation:
   - no DigitalOcean, Porkbun, or Tailscale resources were created
-  - the successful functional tmpdir under `<redacted-temporary-path>` was
+  - the successful functional tmpdir under `/tmp/btx-functional-manual/` was
     cleaned up automatically on exit; the failed first tmpdir was left in place
     for local log inspection
 - slice status:
@@ -5121,10 +5083,10 @@ Current status:
 - remote / GitHub preflight repeated before the next fetch / pull / push / PR
   cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - remote sync, future push to `origin/codex/shielded-v2-overhaul-plan`, and
   the PR #82 update are unblocked for this pass.
 
@@ -5162,7 +5124,7 @@ Current status:
   - `./build-btx/bin/test_btx --run_test=txvalidation_tests/tx_mempool_accepts_multishard_v2_ingress_and_rewinds_state_after_reorg --catch_system_error=no --log_level=test_suite`
   - `./build-btx/bin/test_btx --run_test=shielded_validation_checks_tests --catch_system_error=no --log_level=test_suite`
   - `./build-btx/bin/test_btx --run_test=shielded_tx_check_tests --catch_system_error=no --log_level=test_suite`
-  - `python3 ./build-btx/test/functional/wallet_shielded_rpc_surface.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32175`
+  - `python3 ./build-btx/test/functional/wallet_shielded_rpc_surface.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/rpc-surface-20260315-ingress-shardband-pass1 --portseed=32175`
 - validation findings:
   - the original wallet-side multishard retry logic was structurally correct,
     but the functional fixture was still generating two `0.50` notes to two
@@ -5190,7 +5152,7 @@ Current status:
 - cost: `0`
 - teardown confirmation:
   - no DigitalOcean, Porkbun, or Tailscale resources were created
-  - the successful functional tmpdir under `<redacted-temporary-path>` was
+  - the successful functional tmpdir under `/tmp/btx-functional-manual/` was
     cleaned up automatically on exit
 - slice status:
   - Slice 11 remains open: multishard ingress scheduling now lands through the
@@ -5205,10 +5167,10 @@ Current status:
 - remote / GitHub preflight repeated before the next fetch / pull / push / PR
   cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - remote sync, future push to `origin/codex/shielded-v2-overhaul-plan`, and
   the PR #82 update are unblocked for this pass.
 
@@ -5217,10 +5179,10 @@ Current status:
 - remote / GitHub preflight repeated before the next fetch / pull / push / PR
   cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - remote sync, future push to `origin/codex/shielded-v2-overhaul-plan`, and
   the PR #82 update are unblocked for this pass.
 
@@ -5383,10 +5345,10 @@ Current status:
 - remote / GitHub preflight repeated before the next fetch / pull / push / PR
   cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - remote sync, future push to `origin/codex/shielded-v2-overhaul-plan`, and
   the PR #82 update are unblocked for this pass.
 
@@ -5395,10 +5357,10 @@ Current status:
 - remote / GitHub preflight repeated before the validated Slice 11 push / PR
   update cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - remote sync, push to `origin/codex/shielded-v2-overhaul-plan`, and the PR
   #82 update are unblocked for this pass.
 
@@ -5433,9 +5395,9 @@ Current status:
   - `./build-btx/bin/test_btx --run_test=shielded_tx_check_tests --catch_system_error=no --log_level=test_suite`
   - `./build-btx/bin/test_btx --run_test=shielded_wallet_chunk_discovery_tests/wallet_caches_reserve_outputs_from_built_ingress_batch --catch_system_error=no --log_level=test_suite`
   - `./build-btx/bin/test_btx --run_test=shielded_transaction_tests/v2_egress_standardness_tracks_scan_pressure --catch_system_error=no --log_level=test_suite`
-  - `python3 ./build-btx/test/functional/wallet_shielded_rpc_surface.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32163`
-  - `python3 ./build-btx/test/functional/wallet_shielded_send_flow.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32164`
-  - `python3 ./build-btx/test/functional/wallet_shielded_restart_persistence.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32165`
+  - `python3 ./build-btx/test/functional/wallet_shielded_rpc_surface.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/rpc-surface-20260315-ingress4 --portseed=32163`
+  - `python3 ./build-btx/test/functional/wallet_shielded_send_flow.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/send-flow-20260315-ingress1 --portseed=32164`
+  - `python3 ./build-btx/test/functional/wallet_shielded_restart_persistence.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/restart-persistence-20260315-ingress1 --portseed=32165`
 - validation findings:
   - the original functional blocker was a real policy bug: the wallet-shaped
     one-input / two-output `v2_send` fixture serialized to `1,063,865` bytes
@@ -5468,7 +5430,7 @@ Current status:
 - cost: `0`
 - teardown confirmation:
   - no DigitalOcean, Porkbun, or Tailscale resources were created
-  - the functional tmpdirs under `<redacted-temporary-path>` were cleaned up
+  - the functional tmpdirs under `/tmp/btx-functional-manual/` were cleaned up
     on successful runs
 - slice status:
   - Slice 11 remains open: wallet / RPC ingress construction now exists and is
@@ -5485,10 +5447,10 @@ Current status:
 - remote / GitHub preflight repeated before the next Slice 11 fetch / pull /
   push cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - remote sync, future push to `origin/codex/shielded-v2-overhaul-plan`, and
   the PR #82 update remain unblocked for this pass.
 
@@ -5558,10 +5520,10 @@ Current status:
 - remote / GitHub preflight repeated before the next Slice 11 fetch / pull /
   push cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - remote sync, future push to `origin/codex/shielded-v2-overhaul-plan`, and
   the PR #82 update remain unblocked for this pass.
 
@@ -5570,10 +5532,10 @@ Current status:
 - remote / GitHub preflight repeated before the validated Slice 10 push / PR
   update cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - push to `origin/codex/shielded-v2-overhaul-plan` and the PR #82 update
   remain unblocked for this pass.
 
@@ -5604,9 +5566,9 @@ Current status:
 - exact validation commands:
   - `cmake --build /path/to/Documents/example/staging-repo/build-btx --target test_btx btxd -j8`
   - `./build-btx/bin/test_btx --run_test=matmul_mining_tests --catch_system_error=no --log_level=test_suite`
-  - `python3 ./build-btx/test/functional/feature_btx_block_capacity.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32153`
-  - `python3 ./build-btx/test/functional/mining_matmul_basic.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32154`
-  - `python3 ./build-btx/test/functional/mining_basic.py --timeout-factor=0 --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32156`
+  - `python3 ./build-btx/test/functional/feature_btx_block_capacity.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/block-capacity-20260315c --portseed=32153`
+  - `python3 ./build-btx/test/functional/mining_matmul_basic.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/mining-matmul-basic-20260315c --portseed=32154`
+  - `python3 ./build-btx/test/functional/mining_basic.py --timeout-factor=0 --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/mining-basic-20260315c --portseed=32156`
 - validation findings:
   - the first functional pass surfaced incorrect expectations, not a node bug:
     the frozen consensus shielded limits are `152000` verify units and `24576`
@@ -5635,10 +5597,10 @@ Current status:
 - remote / GitHub preflight completed before the next fetch / pull / push / PR
   update cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - remote and GitHub steps are unblocked for this pass.
 
 ### 2026-03-15 12:41:48 JST
@@ -5646,10 +5608,10 @@ Current status:
 - remote / GitHub preflight repeated before the validated Slice 10 push / PR
   update cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - push to `origin/codex/shielded-v2-overhaul-plan` and the PR #82 update
   remain unblocked for this pass.
 
@@ -5736,20 +5698,20 @@ Current status:
 - remote / GitHub preflight completed before the next fetch / pull / push / PR
   update cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - remote and GitHub steps are unblocked for this pass.
 
 ### 2026-03-15 01:00:50 JST
 
 - remote / GitHub preflight completed before any network operation;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - remote and GitHub steps are unblocked for this pass.
 
 ### 2026-03-15 01:21:26 JST
@@ -5782,8 +5744,8 @@ Current status:
   - `./build-btx/bin/test_btx --run_test=argsman_tests/util_GetChainTypeString --catch_system_error=no --log_level=test_suite`
   - `./build-btx/bin/test_btx --run_test=matmul_params_tests/matmul_params_shieldedv2dev --catch_system_error=no --log_level=test_suite`
   - `./build-btx/bin/test_btx --run_test=key_io_tests --catch_system_error=no --log_level=test_suite`
-  - `./build-btx/test/functional/test_runner.py feature_shieldedv2dev_datadir_isolation.py --jobs=1 --tmpdirprefix=<redacted-temporary-path> --descriptors`
-  - `tmpdir=$(mktemp -d <redacted-temporary-path> && ./build-btx/bin/btxd -chain=shieldedv2dev ... && ./build-btx/bin/btx-cli ... getblockchaininfo`
+  - `./build-btx/test/functional/test_runner.py feature_shieldedv2dev_datadir_isolation.py --jobs=1 --tmpdirprefix=/tmp/btx-functional --descriptors`
+  - `tmpdir=$(mktemp -d /tmp/btx-shieldedv2dev-XXXXXX) && ./build-btx/bin/btxd -chain=shieldedv2dev ... && ./build-btx/bin/btx-cli ... getblockchaininfo`
 - validation findings:
   - targeted unit tests passed
   - functional isolation test passed after enabling wallet options in the test
@@ -5798,7 +5760,7 @@ Current status:
 - cloud resources used: none
 - cost: `0`
 - teardown confirmation:
-  - temporary local probe node started in `<redacted-temporary-path>` and
+  - temporary local probe node started in `/tmp/btx-shieldedv2dev-AhoLWu` and
     was stopped cleanly with `btx-cli stop`
   - no DigitalOcean, Porkbun, or Tailscale resources were created
 - next slice:
@@ -5809,10 +5771,10 @@ Current status:
 - remote / GitHub preflight repeated at start of pass before any new network
   operation;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - remote and GitHub steps remain unblocked for this pass.
 
 ### 2026-03-15 01:40:51 JST
@@ -5851,9 +5813,9 @@ Current status:
   - `./build-btx/bin/test_btx --run_test=shielded_note_tests/serialization_roundtrip --catch_system_error=no --log_level=test_suite`
   - `cmake -S /path/to/Documents/example/staging-repo -B /path/to/Documents/example/staging-repo/build-fuzz-smoke -G Ninja -DBUILD_FOR_FUZZING=ON -DBUILD_FUZZ_BINARY=ON -DBUILD_TESTS=OFF -DBUILD_BENCH=OFF -DBUILD_GUI=OFF -DWITH_ZMQ=OFF -DENABLE_WALLET=OFF -DWITH_BDB=OFF`
   - `cmake --build /path/to/Documents/example/staging-repo/build-fuzz-smoke --target fuzz -j8`
-  - `FUZZ=shielded_v2_note_deserialize /path/to/Documents/example/staging-repo/build-fuzz-smoke/bin/fuzz <redacted-temporary-path>`
-  - `FUZZ=shielded_v2_netting_manifest_deserialize /path/to/Documents/example/staging-repo/build-fuzz-smoke/bin/fuzz <redacted-temporary-path>`
-  - `FUZZ=shielded_v2_transaction_header_deserialize /path/to/Documents/example/staging-repo/build-fuzz-smoke/bin/fuzz <redacted-temporary-path>`
+  - `FUZZ=shielded_v2_note_deserialize /path/to/Documents/example/staging-repo/build-fuzz-smoke/bin/fuzz /tmp/btx-v2-fuzz-smoke`
+  - `FUZZ=shielded_v2_netting_manifest_deserialize /path/to/Documents/example/staging-repo/build-fuzz-smoke/bin/fuzz /tmp/btx-v2-fuzz-smoke`
+  - `FUZZ=shielded_v2_transaction_header_deserialize /path/to/Documents/example/staging-repo/build-fuzz-smoke/bin/fuzz /tmp/btx-v2-fuzz-smoke`
 - validation findings:
   - `test_btx` rebuilt cleanly with the new wire types and test suite
   - the new `shielded_v2_wire_tests` suite passed end to end, including
@@ -5882,7 +5844,7 @@ Current status:
 - cost: `0`
 - teardown confirmation:
   - no DigitalOcean, Porkbun, or Tailscale resources were created
-  - temporary local fuzz seed corpus remained at `<redacted-temporary-path>`
+  - temporary local fuzz seed corpus remained at `/tmp/btx-v2-fuzz-smoke`
     because desktop safety policy blocked deletion during this pass
   - local `build-fuzz-smoke` was retained intentionally for follow-on Slice 3
     fuzz iterations
@@ -5895,10 +5857,10 @@ Current status:
 - remote / GitHub preflight repeated before pushing the validated Slice 3
   sub-slice and before posting the PR #82 update;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - remote push and GitHub comment steps remain unblocked for this pass.
 
 ### 2026-03-15 02:01:03 JST
@@ -5930,9 +5892,9 @@ Current status:
   - `./build-btx/bin/test_btx --run_test=shielded_v2_bundle_tests --catch_system_error=no --log_level=test_suite`
   - `./build-btx/bin/test_btx --run_test=shielded_v2_wire_tests --catch_system_error=no --log_level=test_suite`
   - `cmake --build /path/to/Documents/example/staging-repo/build-fuzz-smoke --target fuzz -j8`
-  - `FUZZ=shielded_v2_transaction_bundle_deserialize ./build-fuzz-smoke/bin/fuzz <redacted-temporary-path>`
-  - `FUZZ=shielded_v2_netting_manifest_deserialize ./build-fuzz-smoke/bin/fuzz <redacted-temporary-path>`
-  - `FUZZ=shielded_v2_transaction_header_deserialize ./build-fuzz-smoke/bin/fuzz <redacted-temporary-path>`
+  - `FUZZ=shielded_v2_transaction_bundle_deserialize ./build-fuzz-smoke/bin/fuzz /tmp/btx-v2-fuzz-smoke`
+  - `FUZZ=shielded_v2_netting_manifest_deserialize ./build-fuzz-smoke/bin/fuzz /tmp/btx-v2-fuzz-smoke`
+  - `FUZZ=shielded_v2_transaction_header_deserialize ./build-fuzz-smoke/bin/fuzz /tmp/btx-v2-fuzz-smoke`
 - validation findings:
   - `test_btx` rebuilt cleanly with the new family-level bundle types
   - the new `shielded_v2_bundle_tests` suite passed end to end, covering
@@ -5968,7 +5930,7 @@ Current status:
   - no DigitalOcean, Porkbun, or Tailscale resources were created
   - local `build-fuzz-smoke` was retained intentionally for follow-on fuzz
     passes
-  - temporary local fuzz seed corpus remained at `<redacted-temporary-path>`
+  - temporary local fuzz seed corpus remained at `/tmp/btx-v2-fuzz-smoke`
 - next slice:
   - `Slice 4: Build The Proof Abstraction Layer`
 
@@ -5977,10 +5939,10 @@ Current status:
 - remote / GitHub preflight repeated before pushing the validated Slice 3
   closure and before posting the PR #82 update;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - remote push and GitHub comment steps remain unblocked for this pass.
 
 ### 2026-03-15 02:04:29 JST
@@ -5988,10 +5950,10 @@ Current status:
 - remote / GitHub preflight repeated at start of the next pass before any new
   network operation;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - remote and GitHub steps remain unblocked for this pass.
 
 ### 2026-03-15 02:23:46 JST
@@ -6023,7 +5985,7 @@ Current status:
   - `cmake --build /path/to/Documents/example/staging-repo/build-btx --target bench_btx -j8`
   - `./build-btx/bin/bench_btx -list | rg 'MatRiCT|shielded'`
   - `./build-btx/bin/bench_btx -filter=MatRiCT -min-time=100`
-  - `script -q <redacted-temporary-path> ./build-btx/bin/bench_btx -filter=MatRiCT -min-time=100`
+  - `script -q /tmp/btx-matrict-bench.typescript ./build-btx/bin/bench_btx -filter=MatRiCT -min-time=100`
 - validation findings:
   - `test_btx` rebuilt cleanly after moving direct-proof parsing and
     descriptor binding into the new abstraction module
@@ -6067,10 +6029,10 @@ Current status:
 - remote / GitHub preflight repeated before pushing the validated Slice 4
   sub-slice and before posting the PR #82 update;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - remote push and GitHub comment steps remain unblocked for this pass.
 
 ### 2026-03-15 02:27:11 JST
@@ -6078,10 +6040,10 @@ Current status:
 - remote / GitHub preflight repeated at start of the next pass before any new
   network operation;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - remote and GitHub steps remain unblocked for this pass.
 
 ### 2026-03-15 02:40:27 JST
@@ -6157,10 +6119,10 @@ Current status:
 - remote / GitHub preflight repeated before pushing the validated Slice 4
   settlement-witness sub-slice and before posting the PR #82 update;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - remote push and GitHub comment steps remain unblocked for this pass.
 
 ### 2026-03-15 02:43:18 JST
@@ -6168,10 +6130,10 @@ Current status:
 - remote / GitHub preflight repeated at start of the next pass before any new
   network operation;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - remote and GitHub steps remain unblocked for this pass.
 
 ### 2026-03-15 02:57:19 JST
@@ -6216,7 +6178,7 @@ Current status:
   - `./build-btx/bin/test_btx --run_test=shielded_v2_wire_tests --catch_system_error=no --log_level=test_suite`
   - `./build-btx/bin/test_btx --run_test=shielded_validation_checks_tests --catch_system_error=no --log_level=test_suite`
   - `cmake --build /path/to/Documents/example/staging-repo/build-fuzz-smoke --target fuzz -j8`
-  - `mkdir -p <redacted-temporary-path> && FUZZ=shielded_v2_transaction_bundle_deserialize ./build-fuzz-smoke/bin/fuzz <redacted-temporary-path>`
+  - `mkdir -p /tmp/btx-v2-fuzz-smoke && FUZZ=shielded_v2_transaction_bundle_deserialize ./build-fuzz-smoke/bin/fuzz /tmp/btx-v2-fuzz-smoke`
 - validation findings:
   - the new `shielded_v2_bundle_tests` cases passed, confirming that batch
     bundles now reject detached proof envelopes, detached proof-shard
@@ -6252,7 +6214,7 @@ Current status:
 - teardown confirmation:
   - no DigitalOcean, Porkbun, or Tailscale resources were created
   - no disposable testnet, seed host, or remote validation node was started
-  - the local fuzz corpus at `<redacted-temporary-path>` was reused and left in
+  - the local fuzz corpus at `/tmp/btx-v2-fuzz-smoke` was reused and left in
     place for subsequent serializer smoke runs
 - next slice:
   - move to `Slice 5: Import And Sandbox MatRiCT+`
@@ -6262,10 +6224,10 @@ Current status:
 - remote / GitHub preflight repeated before pushing the validated Slice 4
   batch-bundle proof-binding sub-slice and before posting the PR #82 update;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - remote push and GitHub comment steps remain unblocked for this pass.
 
 ### 2026-03-15 03:01:13 JST
@@ -6273,10 +6235,10 @@ Current status:
 - remote / GitHub preflight repeated at start of the next pass before any new
   network operation;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - remote and GitHub steps remain unblocked for this pass.
 
 ### 2026-03-15 03:23:25 JST
@@ -6306,7 +6268,7 @@ Current status:
     `MatRiCTProof::GetSerializedSize()`): `1,163,433` bytes
   - deterministic MatRiCT+ KAT proof hash:
     `27d52be1f4c79d64e6f155b66afd8bcb194313fc92f315fd2436531b19fb1d28`
-  - the full `bench_btx -filter='.*MatRiCT.*' -min-time=50 -output-json=<redacted-temporary-path>`
+  - the full `bench_btx -filter='.*MatRiCT.*' -min-time=50 -output-json=/tmp/btx-matrict-bench.json`
     run was attempted on this host but had to be terminated after `07:14`
     wall-clock because the bench itself intentionally enforces
     `minEpochIterations(10)` for creation and `minEpochIterations(5)` for
@@ -6324,10 +6286,10 @@ Current status:
 - remote / GitHub preflight repeated before pushing the validated Slice 5
   portable MatRiCT+ backend sub-slice and before posting the PR #82 update;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - remote push and GitHub comment steps remain unblocked for this pass.
 
 ### 2026-03-15 03:26:37 JST
@@ -6335,10 +6297,10 @@ Current status:
 - remote / GitHub preflight repeated at start of the next pass before any new
   network operation;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - remote and GitHub steps remain unblocked for this pass.
 
 ### 2026-03-15 03:41:39 JST
@@ -6397,10 +6359,10 @@ Current status:
 - remote / GitHub preflight repeated before pushing the validated Slice 5
   reference-vector packaging sub-slice;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - remote and GitHub steps remain unblocked for this push.
 
 ### 2026-03-15 03:59:12 JST
@@ -6426,7 +6388,7 @@ Current status:
   - `cmake --build /path/to/Documents/example/staging-repo/build-btx --target test_btx generate_shielded_matrict_plus_runtime_report -j8`
   - `./build-btx/bin/test_btx --run_test=shielded_matrict_runtime_report_tests --catch_system_error=no --log_level=test_suite`
   - `./build-btx/bin/test_btx --run_test=shielded_matrict_plus_tests --catch_system_error=no --log_level=test_suite`
-  - `./build-btx/bin/gen_shielded_matrict_plus_runtime_report --samples=1 --output=<redacted-temporary-path>`
+  - `./build-btx/bin/gen_shielded_matrict_plus_runtime_report --samples=1 --output=/tmp/btx-matrict-runtime-report.json`
 - measured findings:
   - the bounded runtime report completed with a single deterministic sample
     instead of requiring the longer nanobench epoch schedule;
@@ -6449,10 +6411,10 @@ Current status:
 - remote / GitHub preflight repeated before pushing the validated Slice 5
   runtime-report capture sub-slice;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - remote and GitHub steps remain unblocked for this push.
 
 ### 2026-03-15 04:14:49 JST
@@ -6532,10 +6494,10 @@ Current status:
 - remote / GitHub preflight repeated before pushing the validated Slice 6
   transaction-family scaffold sub-slice;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - remote push and GitHub comment steps remain unblocked for this pass.
 
 ### 2026-03-15 04:17:35 JST
@@ -6543,10 +6505,10 @@ Current status:
 - start-of-pass remote / GitHub preflight completed before the next fetch /
   pull cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - remote fetch / pull, later push, and PR update steps remain unblocked for
   this pass.
 
@@ -6628,10 +6590,10 @@ Current status:
 - remote / GitHub preflight repeated before pushing the validated Slice 6
   state-routing / mempool sub-slice;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - remote push and GitHub comment steps remain unblocked for this pass.
 
 ### 2026-03-15 04:40:24 JST
@@ -6639,10 +6601,10 @@ Current status:
 - start-of-pass remote / GitHub preflight completed before the next fetch /
   pull cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - remote fetch / pull, later push, and PR update steps remain unblocked for
   this pass.
 
@@ -6720,10 +6682,10 @@ Current status:
   - the next implementation slice is `Slice 7: Implement v2_send`;
 - remote / GitHub preflight repeated before the validated push and PR update;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - remote push and GitHub comment steps remain unblocked for this pass.
 
 ### 2026-03-15 05:16:48 JST
@@ -6731,10 +6693,10 @@ Current status:
 - remote / GitHub preflight repeated before this pass's validated push and PR
   update;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - remote push and GitHub comment steps remain unblocked for this pass.
 
 ### 2026-03-15 05:17:00 JST
@@ -6805,10 +6767,10 @@ Current status:
 - start-of-pass remote / GitHub preflight completed before the next fetch /
   pull;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - remote fetch / pull, later push, and PR update steps remain unblocked for
   this pass.
 
@@ -6883,10 +6845,10 @@ Current status:
 - start-of-pass remote / GitHub preflight completed before the next fetch /
   pull;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - remote fetch / pull, later push, and PR update steps remain unblocked for
   this pass.
 
@@ -6895,10 +6857,10 @@ Current status:
 - start-of-pass remote / GitHub preflight repeated before any later fetch /
   push / PR update operation in this pass;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - later remote fetch / pull, push, and PR update steps remain unblocked for
   this pass.
 
@@ -6945,11 +6907,11 @@ Current status:
   - `./build-btx/bin/test_btx --run_test=shielded_merkle_serialization_tests --catch_system_error=no --log_level=test_suite`
   - `./build-btx/bin/test_btx --run_test=validation_chainstatemanager_tests/chainstatemanager_rebuilds_shielded_state_when_commitment_index_missing --catch_system_error=no --log_level=test_suite`
   - `./build-btx/bin/test_btx --run_test=shielded_v2_send_tests --catch_system_error=no --log_level=test_suite`
-  - `python3 ./build-btx/test/functional/wallet_shielded_send_flow.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32111`
-  - `python3 ./build-btx/test/functional/wallet_shielded_rpc_surface.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32112`
-  - `python3 ./build-btx/test/functional/wallet_shielded_restart_persistence.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32113`
+  - `python3 ./build-btx/test/functional/wallet_shielded_send_flow.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/send-flow-20260315c --portseed=32111`
+  - `python3 ./build-btx/test/functional/wallet_shielded_rpc_surface.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/rpc-surface-20260315c --portseed=32112`
+  - `python3 ./build-btx/test/functional/wallet_shielded_restart_persistence.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/restart-persistence-20260315c --portseed=32113`
   - `./build-btx/bin/test_btx --run_test=shielded_v2_send_tests --catch_system_error=no --log_level=test_suite`
-  - `python3 ./build-btx/test/functional/wallet_shielded_send_flow.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32114`
+  - `python3 ./build-btx/test/functional/wallet_shielded_send_flow.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/send-flow-20260315d --portseed=32114`
 - validation findings:
   - all targeted unit and functional runs finished with success after the
     wallet / restart changes above
@@ -6982,7 +6944,7 @@ Current status:
 - cloud resources used: none
 - cost: `0`
 - teardown confirmation:
-  - all validation ran locally in disposable `<redacted-temporary-path>`
+  - all validation ran locally in disposable `/tmp/btx-functional-manual/...`
     directories that were removed by the functional harness on success
   - no DigitalOcean, Porkbun, or Tailscale resources were created
 - Slice 7 remains open:
@@ -6999,10 +6961,10 @@ Current status:
 - start-of-pass remote / GitHub preflight repeated before any new fetch /
   pull / push / PR update operation in this pass;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - later remote fetch / pull, push, and PR update steps remain unblocked for
   this pass.
 
@@ -7034,9 +6996,9 @@ Current status:
   - `test/functional/wallet_shielded_rpc_surface.py`
 - exact validation commands completed successfully:
   - `cmake --build /path/to/Documents/example/staging-repo/build-btx --target test_btx btxd -j8`
-  - `python3 ./build-btx/test/functional/wallet_shielded_rpc_surface.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32124`
-  - `python3 ./build-btx/test/functional/wallet_shielded_send_flow.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32125`
-  - `python3 ./build-btx/test/functional/wallet_shielded_restart_persistence.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32126`
+  - `python3 ./build-btx/test/functional/wallet_shielded_rpc_surface.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/rpc-surface-20260315f --portseed=32124`
+  - `python3 ./build-btx/test/functional/wallet_shielded_send_flow.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/send-flow-20260315d --portseed=32125`
+  - `python3 ./build-btx/test/functional/wallet_shielded_restart_persistence.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/restart-persistence-20260315d --portseed=32126`
   - `./build-btx/bin/test_btx --run_test=shielded_v2_send_tests --catch_system_error=no --log_level=test_suite`
 - validation findings:
   - the first fallback regression attempt exposed a real test-harness issue:
@@ -7068,7 +7030,7 @@ Current status:
 - cloud resources used: none
 - cost: `0`
 - teardown confirmation:
-  - all validation ran locally in disposable `<redacted-temporary-path>`
+  - all validation ran locally in disposable `/tmp/btx-functional-manual/...`
     directories and the successful functional runs cleaned up after themselves
   - no DigitalOcean, Porkbun, or Tailscale resources were created
 - Slice 7 is now complete:
@@ -7085,10 +7047,10 @@ Current status:
 - start-of-pass remote / GitHub preflight repeated before any new fetch /
   pull / push / PR update operation in this pass;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - later remote fetch / pull, push, and PR update steps remain unblocked for
   this pass.
 
@@ -7121,9 +7083,9 @@ Current status:
   - `./build-btx/bin/test_btx --run_test=shielded_v2_send_tests --catch_system_error=no --log_level=test_suite`
   - `./build-btx/bin/test_btx --run_test=shielded_scan_hint_runtime_report_tests --catch_system_error=no --log_level=test_suite`
   - `./build-btx/bin/test_btx --run_test=shielded_v2_wire_tests --catch_system_error=no --log_level=test_suite`
-  - `./build-btx/bin/gen_shielded_scan_hint_runtime_report --samples=1 --candidates=1024 --output=<redacted-temporary-path>`
-  - `python3 ./build-btx/test/functional/wallet_shielded_send_flow.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32131`
-  - `python3 ./build-btx/test/functional/wallet_shielded_restart_persistence.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32132`
+  - `./build-btx/bin/gen_shielded_scan_hint_runtime_report --samples=1 --candidates=1024 --output=/tmp/btx-shielded-scan-hint-runtime-report.json`
+  - `python3 ./build-btx/test/functional/wallet_shielded_send_flow.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/send-flow-scanhint-20260315a --portseed=32131`
+  - `python3 ./build-btx/test/functional/wallet_shielded_restart_persistence.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/restart-persistence-scanhint-20260315a --portseed=32132`
 - validation findings:
   - targeted `shielded_v2_send_tests` passed with the new recipient-bound scan
     hint and payload-domain checks
@@ -7160,11 +7122,11 @@ Current status:
 - cloud resources used: none
 - cost: `0`
 - teardown confirmation:
-  - `<redacted-temporary-path>` was kept as the local
+  - `/tmp/btx-shielded-scan-hint-runtime-report.json` was kept as the local
     bounded report artifact for this pass
   - functional-test nodes under
-    `<redacted-temporary-path>` and
-    `<redacted-temporary-path>` were
+    `/tmp/btx-functional-manual/send-flow-scanhint-20260315a` and
+    `/tmp/btx-functional-manual/restart-persistence-scanhint-20260315a` were
     stopped cleanly and removed by the harness
   - no DigitalOcean, Porkbun, or Tailscale resources were created
 - next slice:
@@ -7177,10 +7139,10 @@ Current status:
 - start-of-pass remote / GitHub preflight repeated before any new fetch /
   pull / push / PR update operation in this pass;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - later remote fetch / pull, push, and PR update steps remain unblocked for
   this pass.
 
@@ -7248,10 +7210,10 @@ Current status:
 - start-of-pass remote / GitHub preflight repeated before any new fetch /
   pull / push / PR update operation in this pass;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - later remote fetch / pull, push, and PR update steps remain unblocked for
   this pass.
 
@@ -7281,8 +7243,8 @@ Current status:
   - `./build-btx/bin/test_btx --run_test=shielded_scan_hint_runtime_report_tests --catch_system_error=no --log_level=test_suite`
   - `./build-btx/bin/test_btx --run_test=shielded_v2_send_tests --catch_system_error=no --log_level=test_suite`
   - `./build-btx/bin/test_btx --run_test=shielded_wallet_chunk_discovery_tests --catch_system_error=no --log_level=test_suite`
-  - `python3 ./build-btx/test/functional/wallet_shielded_send_flow.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32131`
-  - `python3 ./build-btx/test/functional/wallet_shielded_restart_persistence.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32132`
+  - `python3 ./build-btx/test/functional/wallet_shielded_send_flow.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/send-flow-20260315g --portseed=32131`
+  - `python3 ./build-btx/test/functional/wallet_shielded_restart_persistence.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/restart-persistence-20260315g --portseed=32132`
 - validation findings:
   - the new wallet chunk-discovery unit coverage passed after switching the
     fixture from `BasicTestingSetup` to `TestChain100Setup`, which was
@@ -7325,10 +7287,10 @@ Current status:
 - remote / GitHub preflight repeated before the next push / PR update
   operation in this pass;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - push and PR update remain unblocked for this pass.
 
 ### 2026-03-15 09:23:21 JST
@@ -7336,10 +7298,10 @@ Current status:
 - start-of-pass remote / GitHub preflight repeated before any new fetch /
   pull / push / PR update operation in this pass;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - later remote fetch / pull, push, and PR update steps remain unblocked for
   this pass.
 
@@ -7369,7 +7331,7 @@ Current status:
   - `./build-btx/bin/test_btx --run_test=shielded_wallet_chunk_discovery_tests --catch_system_error=no --log_level=test_suite`
   - `./build-btx/bin/test_btx --run_test=shielded_v2_bundle_tests --catch_system_error=no --log_level=test_suite`
   - `./build-btx/bin/test_btx --run_test=shielded_v2_send_tests --catch_system_error=no --log_level=test_suite`
-  - `python3 ./build-btx/test/functional/wallet_shielded_rpc_surface.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32133`
+  - `python3 ./build-btx/test/functional/wallet_shielded_rpc_surface.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/rpc-surface-20260315h --portseed=32133`
 - validation findings:
   - the new wallet chunk-discovery suite passed with the added canonical
     mempool summary case, and the existing block/tamper cases still passed
@@ -7396,7 +7358,7 @@ Current status:
 - cloud resources used: none
 - cost: `0`
 - teardown confirmation:
-  - `<redacted-temporary-path>` was removed by the
+  - `/tmp/btx-functional-manual/rpc-surface-20260315h` was removed by the
     functional harness on success
   - no DigitalOcean, Porkbun, or Tailscale resources were created
 - next slice:
@@ -7410,10 +7372,10 @@ Current status:
 - remote / GitHub preflight repeated before the next push / PR update
   operation in this pass;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - push and PR update remain unblocked for this pass.
 
 ### 2026-03-15 09:37:32 JST
@@ -7421,10 +7383,10 @@ Current status:
 - start-of-pass remote / GitHub preflight repeated before any new fetch /
   pull / push / PR update operation in this pass;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - later remote fetch / pull, push, and PR update steps remain unblocked for
   this pass.
 
@@ -7454,7 +7416,7 @@ Current status:
   - `./build-btx/bin/test_btx --run_test=shielded_wallet_chunk_discovery_tests --catch_system_error=no --log_level=test_suite`
   - `./build-btx/bin/test_btx --run_test=shielded_scan_hint_runtime_report_tests --catch_system_error=no --log_level=test_suite`
   - `./build-btx/bin/test_btx --run_test=shielded_v2_bundle_tests --catch_system_error=no --log_level=test_suite`
-  - `./build-btx/bin/gen_shielded_chunk_runtime_report --samples=1 --outputs=1024 --outputs-per-chunk=32 --output=<redacted-temporary-path>`
+  - `./build-btx/bin/gen_shielded_chunk_runtime_report --samples=1 --outputs=1024 --outputs-per-chunk=32 --output=/tmp/btx-shielded-chunk-runtime-report.json`
 - validation findings:
   - the new runtime-report suite passed with a `256`-output / `8`-chunk
     fixture, proving the deterministic fanout model, owned-output accounting,
@@ -7472,7 +7434,7 @@ Current status:
     ciphertext bytes, `1,016` decrypt attempts avoided by scan-hint gating,
     and `0` false-positive hint matches
   - measured timings from
-    `<redacted-temporary-path>` on this host were
+    `/tmp/btx-shielded-chunk-runtime-report.json` on this host were
     `5,714,834ns` for canonical chunk validation, `15,555,500ns` for output
     discovery, `1,333ns` for chunk-summary aggregation alone, and
     `20,814,917ns` for the full discovery pipeline
@@ -7493,7 +7455,7 @@ Current status:
 - cost: `0`
 - teardown confirmation:
   - no DigitalOcean, Porkbun, or Tailscale resources were created
-  - `<redacted-temporary-path>` was kept locally as the
+  - `/tmp/btx-shielded-chunk-runtime-report.json` was kept locally as the
     measured report artifact for this pass
 - next slice:
   - `Slice 9: Implement v2_egress_batch`
@@ -7503,10 +7465,10 @@ Current status:
 - remote / GitHub preflight repeated before the push and PR update for this
   pass;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - push and PR update remain unblocked for this pass.
 
 ### 2026-03-15 09:50:22 JST
@@ -7514,10 +7476,10 @@ Current status:
 - start-of-pass remote / GitHub preflight repeated before any new fetch /
   pull / push / PR update operation in this pass;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - later remote fetch / pull, push, and PR update steps remain unblocked for
   this pass.
 
@@ -7600,10 +7562,10 @@ Current status:
 - remote / GitHub preflight repeated before the upcoming push and PR update
   for this Slice 9 sub-slice;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - push and PR update remain unblocked for this pass.
 
 ### 2026-03-15 10:21:55 JST
@@ -7611,10 +7573,10 @@ Current status:
 - start-of-pass remote / GitHub preflight repeated before any new fetch /
   pull / push / PR update operation in this pass;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - later remote fetch / pull, push, and PR update steps remain unblocked for
   this pass.
 
@@ -7623,10 +7585,10 @@ Current status:
 - remote / GitHub preflight repeated before the upcoming push and PR update
   for the current Slice 9 settlement-anchor sub-slice;
 - verified readable and non-empty credentials:
-  - `/path/to/Documents/example/staging-repo`
-  - `/path/to/Documents/example/staging-repo/credential-file`
-  - `/path/to/Documents/example/staging-repo/credential-file`
-  - `/path/to/Documents/example/staging-repo/credential-file`
+  - `/path/to/credentials/release-token`
+  - `/path/to/credentials/cloud-api-token`
+  - `/path/to/credentials/dns-api-token`
+  - `/path/to/credentials/dns-api-secret`
 - push and PR update remain unblocked for this pass.
 
 ### 2026-03-15 11:05:52 JST
@@ -7705,10 +7667,10 @@ Current status:
 - start-of-pass remote / GitHub preflight repeated before the fetch / pull
   cycle for the next Slice 9 sub-slice;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - fetch / pull, later push, and the next PR update remain unblocked for this
   pass.
 
@@ -7718,10 +7680,10 @@ Current status:
   update cycle for the current Slice 9 `v2_egress_batch` construction
   sub-slice;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - fetch / pull, later push, and the next PR update remain unblocked for this
   pass.
 
@@ -7807,10 +7769,10 @@ Current status:
   update cycle for the current Slice 9 wallet-facing `v2_egress_batch`
   sub-slice;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - fetch / pull, later push, and the next PR update remain unblocked for this
   pass.
 
@@ -7849,8 +7811,8 @@ Current status:
   - `./build-btx/bin/test_btx --run_test=shielded_wallet_chunk_discovery_tests --catch_system_error=no --log_level=test_suite`
   - `./build-btx/bin/test_btx --run_test=shielded_tx_check_tests --catch_system_error=no --log_level=test_suite`
   - `./build-btx/bin/test_btx --run_test=shielded_validation_checks_tests --catch_system_error=no --log_level=test_suite`
-  - `python3 ./build-btx/test/functional/wallet_shielded_rpc_surface.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32141`
-  - `python3 ./build-btx/test/functional/wallet_shielded_rpc_surface.py --cachedir=<redacted-temporary-path> --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=<redacted-temporary-path> --portseed=32142`
+  - `python3 ./build-btx/test/functional/wallet_shielded_rpc_surface.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/rpc-surface-20260315i --portseed=32141`
+  - `python3 ./build-btx/test/functional/wallet_shielded_rpc_surface.py --cachedir=/tmp/btx-functional-manual/cache --configfile=/path/to/Documents/example/staging-repo/test/config.ini --tmpdir=/tmp/btx-functional-manual/rpc-surface-20260315j --portseed=32142`
 - validation findings:
   - the deterministic statement / output test passed, confirming that the
     wallet-visible `v2_egress_batch` statement path commits to the same output
@@ -7892,10 +7854,10 @@ Current status:
 - remote / GitHub preflight repeated before the validated Slice 9 push / PR
   update cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - push to `origin/codex/shielded-v2-overhaul-plan` and the PR #82 update
   remain unblocked for this pass.
 
@@ -7904,10 +7866,10 @@ Current status:
 - remote / GitHub preflight repeated before the validated Slice 12 push / PR
   update cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - push to `origin/codex/shielded-v2-overhaul-plan` and the PR #82 update
   remain unblocked for this pass.
 
@@ -7944,7 +7906,7 @@ Current status:
   - `./build-btx/bin/test_btx --run_test=shielded_ingress_proof_runtime_report_tests --catch_system_error=no --log_level=test_suite`
   - `./build-btx/bin/test_btx --run_test=shielded_v2_ingress_tests --catch_system_error=no --log_level=test_suite`
   - `./build-btx/bin/test_btx --run_test=shielded_validation_checks_tests --catch_system_error=no --log_level=test_suite`
-  - `./build-btx/bin/gen_shielded_ingress_proof_runtime_report --backend=receipt --samples=1 --reserve-outputs=1 --leaf-counts=100,1000,2047,2048 --target-leaf-counts=5000,10000 --output=<redacted-temporary-path>`
+  - `./build-btx/bin/gen_shielded_ingress_proof_runtime_report --backend=receipt --samples=1 --reserve-outputs=1 --leaf-counts=100,1000,2047,2048 --target-leaf-counts=5000,10000 --output=/tmp/btx-shielded-ingress-proof-receipt-decision.json`
 - validation findings:
   - the receipt-backed prototype reaches the current one-reserve chain ceiling
     at `2047` ingress leaves with `256` proof shards, `452704` proof-payload
@@ -7978,7 +7940,7 @@ Current status:
 - teardown confirmation:
   - no DigitalOcean, Porkbun, or Tailscale resources were created
   - the receipt-backed runtime artifact was written to
-    `<redacted-temporary-path>` and no disposable
+    `/tmp/btx-shielded-ingress-proof-receipt-decision.json` and no disposable
     remote state was left behind
 - slice status:
   - Slice 12 remains open: the alternative receipt-backed ingress backend now
@@ -7996,10 +7958,10 @@ Current status:
 - remote / GitHub preflight repeated before the next fetch / pull / push / PR
   cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - remote sync, future push to `origin/codex/shielded-v2-overhaul-plan`, and
   the PR #82 update are unblocked for this pass.
 
@@ -8083,10 +8045,10 @@ Current status:
 - remote / GitHub preflight repeated immediately before the next validated
   Slice 13 push / PR #82 update cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - continued `Slice 13: Integrate PR #79 Settlement Anchors Into shielded_v2`
   with the first validated hybrid verification-root settlement sub-slice in
   `/path/to/Documents/example/staging-repo`:
@@ -8164,10 +8126,10 @@ Current status:
 - remote / GitHub preflight repeated immediately before the next validated
   Slice 13 push / PR #82 update cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - continued `Slice 13: Integrate PR #79 Settlement Anchors Into shielded_v2`
   with the first validated imported-proof-adapter settlement-anchor sub-slice
   in `/path/to/Documents/example/staging-repo`:
@@ -8231,10 +8193,10 @@ Current status:
 - remote / GitHub preflight repeated immediately before the next validated
   Slice 13 push / PR #82 update cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - continued `Slice 13: Integrate PR #79 Settlement Anchors Into shielded_v2`
   with the validated receipt-backed imported-proof-adapter settlement-anchor
   sub-slice in `/path/to/Documents/example/staging-repo`:
@@ -8299,10 +8261,10 @@ Current status:
 - remote / GitHub preflight repeated immediately before the next validated
   Slice 13 push / PR #82 update cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - continued `Slice 13: Integrate PR #79 Settlement Anchors Into shielded_v2`
   with the validated multi-proof-receipt settlement-threshold binding
   sub-slice in `/path/to/Documents/example/staging-repo`:
@@ -8386,10 +8348,10 @@ Current status:
 - start-of-pass remote / GitHub preflight repeated before any new fetch / pull /
   push / PR cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - the next remote sync, later push to
   `origin/codex/shielded-v2-overhaul-plan`, and the follow-up PR #82 update are
   unblocked for this pass.
@@ -8399,10 +8361,10 @@ Current status:
 - start-of-pass remote / GitHub preflight repeated before any new fetch / pull /
   push / PR cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - the next remote sync, later push to
   `origin/codex/shielded-v2-overhaul-plan`, and the follow-up PR #82 update are
   unblocked for this pass.
@@ -8412,10 +8374,10 @@ Current status:
 - start-of-pass remote / GitHub preflight repeated before any new fetch / pull /
   push / PR cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - the next remote sync, later push to
   `origin/codex/shielded-v2-overhaul-plan`, and the follow-up PR #82 update are
   unblocked for this pass.
@@ -8559,10 +8521,10 @@ Current status:
 - start-of-pass remote / GitHub preflight repeated before any new fetch / pull /
   push / PR cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - executed the required sync loop in `/path/to/Documents/example/staging-repo`:
   - `git fetch --all --prune`
   - `git switch codex/shielded-v2-overhaul-plan`
@@ -8577,10 +8539,10 @@ Current status:
 - remote / GitHub preflight repeated immediately before the validated Slice 13
   push / PR #82 update cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - push to `origin/codex/shielded-v2-overhaul-plan` and the PR #82 update are
   unblocked for this pass.
 
@@ -8589,10 +8551,10 @@ Current status:
 - remote / GitHub preflight repeated before the next fetch / pull / push / PR
   cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - remote sync, future push to `origin/codex/shielded-v2-overhaul-plan`, and
   the PR #82 update are unblocked for this pass.
 
@@ -8601,10 +8563,10 @@ Current status:
 - remote / GitHub preflight repeated immediately before the validated Slice 12
   push / PR update cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - push to `origin/codex/shielded-v2-overhaul-plan` and the PR #82 update
   remain unblocked for this pass.
 
@@ -8631,7 +8593,7 @@ Current status:
   - `./build-btx/bin/test_btx --run_test=shielded_ingress_proof_runtime_report_tests --catch_system_error=no --log_level=test_suite`
   - `./build-btx/bin/test_btx --run_test=shielded_v2_ingress_tests --catch_system_error=no --log_level=test_suite`
   - `./build-btx/bin/test_btx --run_test=shielded_validation_checks_tests --catch_system_error=no --log_level=test_suite`
-  - `./build-btx/bin/gen_shielded_ingress_proof_runtime_report --backend=receipt --samples=1 --reserve-outputs=1 --leaf-counts=5000,10000,16383,16384 --output=<redacted-temporary-path>`
+  - `./build-btx/bin/gen_shielded_ingress_proof_runtime_report --backend=receipt --samples=1 --reserve-outputs=1 --leaf-counts=5000,10000,16383,16384 --output=/tmp/btx-shielded-ingress-proof-receipt-scale-sweep.json`
 - validation findings:
   - receipt-backed `5000` leaves now build and proof-check with `79` proof
     shards, `917446` proof-payload bytes, `1938470` serialized transaction
@@ -8670,7 +8632,7 @@ Current status:
 - teardown confirmation:
   - no DigitalOcean, Porkbun, or Tailscale resources were created
   - the local receipt-backed runtime artifact was written to
-    `<redacted-temporary-path>` and no
+    `/tmp/btx-shielded-ingress-proof-receipt-scale-sweep.json` and no
     disposable remote state remains
 - slice status:
   - Slice 12 is now complete: BTX has a validated alternative high-scale
@@ -8685,10 +8647,10 @@ Current status:
 - remote / GitHub preflight repeated before the next fetch / pull / push / PR
   cycle;
 - verified readable, non-empty credentials:
-  - `/path/to/Documents/example/staging-repo` (`94` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`72` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
-  - `/path/to/Documents/example/staging-repo/credential-file` (`69` bytes)
+  - `/path/to/credentials/release-token` (size redacted)
+  - `/path/to/credentials/cloud-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-token` (size redacted)
+  - `/path/to/credentials/dns-api-secret` (size redacted)
 - remote sync, future push to `origin/codex/shielded-v2-overhaul-plan`, and
   the PR #82 update are unblocked for this pass.
 
@@ -10365,7 +10327,7 @@ immediately:
 15. define the `shielded_v2` blockfilter and light-client acceptance matrix
     early, not after wallet scan code lands;
 16. define ephemeral testnet orchestration around the existing operational
-    stack in `/path/to/Documents/example/staging-repo` so large-scale validation
+    stack in `/path/to/Documents/example/infra` so large-scale validation
     does not depend on manual long-lived infrastructure.
 17. design the independent verifier / transcript-checking harness for the
     native proof plane before consensus integration is too deep to isolate;
@@ -10434,10 +10396,10 @@ Required workflow:
    - pick the highest-priority unfinished slice.
 2. Preflight automation and remote-test credentials before any GitHub API or
    cloud action:
-   - verify that `/path/to/Documents/example/staging-repo` exists, is
+   - verify that `/path/to/credentials/release-token` exists, is
      readable, and is non-empty before any PR creation or PR commentary step;
    - verify that the required infra keys under
-     `/path/to/Documents/example/staging-repo/` exist, are readable, and are
+     `/path/to/Documents/example/infra/` exist, are readable, and are
      non-empty before any DigitalOcean, Porkbun, or Tailscale step;
    - record the preflight result in the tracker;
    - if a required key is missing, record the blocker immediately and do not
@@ -10470,11 +10432,11 @@ Required workflow:
      - what remains next,
      - and any blockers or design pivots;
    - post those updates through the GitHub API with `curl`, using the token
-     stored at `/path/to/Documents/example/staging-repo`;
+     stored at `/path/to/credentials/release-token`;
    - link to benchmark artifacts, logs, or testnet run outputs when relevant.
 9. When distributed validation is needed:
    - use ephemeral testnets backed by
-     `/path/to/Documents/example/staging-repo`;
+     `/path/to/Documents/example/infra`;
    - verify the required infra keys before provisioning;
    - record provisioned resources, DNS changes, runtime duration, and cost;
    - destroy all temporary infrastructure immediately after the test;
@@ -10497,20 +10459,20 @@ local development machine from the current post-PR79 baseline:
 > Local workspace paths are authoritative:
 > - node repo: `/path/to/Documents/example/staging-repo`
 > - parent workspace: `/path/to/Documents/btxchain`
-> - GitHub token: `/path/to/Documents/example/staging-repo`
+> - GitHub token: `/path/to/credentials/release-token`
 > - infra keys:
->   - `/path/to/Documents/example/staging-repo/credential-file`
->   - `/path/to/Documents/example/staging-repo/credential-file`
->   - `/path/to/Documents/example/staging-repo/credential-file`
->   - `/path/to/Documents/example/staging-repo/tailscale_api.key`
->   - `/path/to/Documents/example/staging-repo/tailscale_auth.key`
+>   - `/path/to/credentials/cloud-api-token`
+>   - `/path/to/credentials/dns-api-token`
+>   - `/path/to/credentials/dns-api-secret`
+>   - `/path/to/Documents/example/infra/tailscale_api.key`
+>   - `/path/to/Documents/example/infra/tailscale_auth.key`
 >
 > Control documents:
 > - read this tracker at the start of every pass
 > - also read:
 >   - `/path/to/Documents/example/staging-repo/doc/btx-production-readiness-matrix.md`
 >   - `/path/to/Documents/example/staging-repo/doc/btx-realworld-validation-2026-03-07.md`
->   - `/path/to/Documents/example/staging-repo/btx-seed-server-spec.md`
+>   - `/path/to/Documents/example/infra/btx-seed-server-spec.md`
 >
 > Mission:
 > Deliver the full BTX genesis-reset launch program end to end. This is the new
@@ -10531,10 +10493,10 @@ local development machine from the current post-PR79 baseline:
 >
 > Before any remote or GitHub operation:
 > 1. verify these files exist, are readable, and are non-empty:
->    - `/path/to/Documents/example/staging-repo`
->    - `/path/to/Documents/example/staging-repo/credential-file`
->    - `/path/to/Documents/example/staging-repo/credential-file`
->    - `/path/to/Documents/example/staging-repo/credential-file`
+>    - `/path/to/credentials/release-token`
+>    - `/path/to/credentials/cloud-api-token`
+>    - `/path/to/credentials/dns-api-token`
+>    - `/path/to/credentials/dns-api-secret`
 > 2. record that verification in the tracker
 > 3. if a required key is missing, treat the affected remote step as blocked;
 >    do not silently skip it
@@ -10542,7 +10504,7 @@ local development machine from the current post-PR79 baseline:
 > First pass requirements:
 > - start from current `origin/main`
 > - create a dedicated implementation branch and PR for the code work; create
->   the PR with `curl` using `/path/to/Documents/example/staging-repo` if it
+>   the PR with `curl` using `/path/to/credentials/release-token` if it
 >   does not already exist
 > - create the isolated `shieldedv2dev` development network with its own
 >   chainparams, genesis, message-start bytes, ports, HRPs, seeds, peer
@@ -10550,8 +10512,8 @@ local development machine from the current post-PR79 baseline:
 > - ensure wallets and datadirs cannot cross-load between current BTX networks
 >   and `shieldedv2dev`
 > - if ephemeral multi-node orchestration does not already exist under
->   `/path/to/Documents/example/staging-repo` or
->   `/path/to/Documents/example/staging-repo`, build it as an early blocking
+>   `/path/to/Documents/example/infra` or
+>   `/path/to/Documents/example/scripts`, build it as an early blocking
 >   sub-slice
 >
 > Loop for every pass:
@@ -10574,7 +10536,7 @@ local development machine from the current post-PR79 baseline:
 >    artifact paths, blockers, pivots, retired risks, next steps, cloud cost,
 >    and teardown evidence where applicable
 > 10. after each push, post a PR update with `curl` using
->     `/path/to/Documents/example/staging-repo`
+>     `/path/to/credentials/release-token`
 > 11. keep code history in normal `git` commits and pushes; use the GitHub API
 >     only for PR creation and PR commentary automation
 >
@@ -10740,7 +10702,7 @@ one final late-stage benchmark.
 ### Track 8: Ephemeral Testnet Operations
 
 Large-scale validation should use the existing infrastructure stack in
-`/path/to/Documents/example/staging-repo`, including the Porkbun DNS and
+`/path/to/Documents/example/infra`, including the Porkbun DNS and
 DigitalOcean API-backed operational setup, to create and destroy disposable
 testnets as needed.
 

@@ -27,7 +27,7 @@
 | 7b | **Full Phase 4 execution-readiness pass + flag infrastructure fix**: (1) `SCRIPT_VERIFY_END_MARKER` bump requirement added (Section 3.3): new flags must be inserted before the sentinel in the enum (`interpreter.h:149`); the marker is used by `txvalidationcache_tests.cpp:137` to generate random flag combinations for exhaustive testing. (2) Phase 4 (Sections 4.0-4.4) rewritten with full reconciliation against actual codebase: `mr()` descriptor grammar reconciled with existing `MRLeafSpec`/`BuildP2MRScript()` (`descriptor.cpp`), `SignP2MR()`/`ExtractP2MRLeafPubKey()`/`CreatePQSig()` (`sign.cpp:96-471`), and PSBT infrastructure (`psbt.h:34-62`). Concrete changes: `MRLeafSpec` struct extension with `MRLeafType` enum; `ExtractP2MRLeafPubKey()` → `ExtractP2MRLeafInfo()` returning full leaf metadata; per-leaf-type `SignP2MR()` dispatch; PSBT key type numbers assigned (`0x19`-`0x1F` input, `0x08`-`0x09` output) with serialization formats; CSFS multi-party signing workflow (creator → oracle → spender → finalizer). 28 new Phase 4 tests (T-DESC-*, T-SIGN-*, T-PSBT-*, T-INT-*). Verification checklist 6.13 added. Total tests: 136. |
 | 7c | **Residual CPU-DoS hardening — P2MR consensus leaf-script size cap (Section 1.5)**: `MAX_P2MR_ELEMENT_SIZE` (Section 1.4) fixed memory amplification but not CPU amplification: with no consensus leaf-script size limit, `OP_DUP OP_SHA256 OP_DROP` loops on 10 KB elements drive worst-case block validation to ~10.4x tapscript baseline (hash opcodes on P2MR's 10 KB elements are ~19x more expensive per invocation than tapscript's 520-byte elements). Fix: `MAX_P2MR_SCRIPT_SIZE` (10,000 bytes) — re-imposes legacy `MAX_SCRIPT_SIZE` that BIP-342 removed for tapscript. Enforced in P2MR dispatch path immediately after `SpanPopBack()` and before `ComputeP2MRLeafHash()`, reusing existing `SCRIPT_ERR_SCRIPT_SIZE`. Reduces worst-case ratio to ~5.2x at consensus (10,000-byte scripts) and ~2.0x at policy (`g_script_size_policy_limit` = 1,650 bytes). Strict 1.2x parity for hash-maximizing workloads would require validation-weight charging for non-sig opcodes (deferred). Design Principle #5 updated. 4 new tests (S-PQ-1..4). Total tests: 140. |
 | 7d | **Six execution-readiness fixes**: (1) **Section 1.5 enforcement point moved before `ComputeP2MRLeafHash()`**: oversized scripts now rejected immediately after `SpanPopBack()` (line 2085), before any hashing or copying. (2) **Design Principle #5 internal inconsistency resolved**: split into "signature-dominated blocks ≤ 1.2x" (what validation weight controls) and "hash-dominated blocks ~5.2x at consensus / ~2.0x at policy" (accepted trade-off with documented future mitigation). Appendix C.2 updated with separate sig-dominated and hash-dominated tables. (3) **Phase 4 signing architecture blocker fixed (Section 4.2)**: `SignP2MR()` now accepts `SignatureData&` (mirroring `SignTaproot()`), new `CreateP2MRScriptSig()` helper checks sigdata for existing PQ sigs before falling back to `CreatePQSig()`, `SignatureData` extended with P2MR fields (`p2mr_script_sigs`, `p2mr_csfs_sigs`, `p2mr_csfs_msgs`), `FillSignatureData()`/`FromSignatureData()` extended for bidirectional PSBT↔sigdata flow. (4) **PSBT key format collisions fixed (Section 4.3)**: `PSBT_IN_P2MR_LEAF_SCRIPT` now keyed by `{control_block_bytes}` (matching BIP-371 pattern); `PSBT_IN_P2MR_PQ_SIG` keyed by `{leaf_hash\|\|pubkey}`; CSFS keys include `leaf_hash` disambiguator; `PSBT_IN_P2MR_CONTROL` (0x1A) removed (control block is in leaf_script key). Single-selected-leaf constraint explicitly documented. (5) **`g_script_size_policy_limit` location corrected**: declared in `policy/settings.h` (not `policy/policy.h`); descriptor.cpp must `#include <policy/settings.h>`. (6) **Minor spec cleanups**: 5-key multisig example corrected to "5-of-5 sequential CHECKSIG" (P2MR rejects OP_CHECKMULTISIG at line 1163); ML-DSA performance numbers unified to defer exact ratios to Appendix C benchmarks. 5 new tests (T-SIGN-9..12, T-PSBT-8). Total tests: 144. |
-| 6a | **Hardening pass**: (1) Design Principle #5 added: Mining-load neutral — CTV/CSFS must not increase worst-case block validation beyond 1.2x tapscript baseline; no new per-block scanning or data structures. (2) Appendix C rewritten: two-tier benchmark model — Tier 1 CI smoke tests (GitHub-hosted, regression detection, no hard threshold) and Tier 2 release-gating benchmarks (self-hosted reference machine or manual pre-release sign-off). Specific reference hardware documented. New Section C.4 on mining load constraint. (3) Appendix D hardened: explicit `--allow-op-success` per-invocation override for intentional OP_SUCCESS testing; hard-error by default (not warning); L2 catastrophic risk callout added; negative test requirement for L2 script compilers. |
+| 6a | **Hardening pass**: (1) Design Principle #5 added: Mining-load neutral — CTV/CSFS must not increase worst-case block validation beyond 1.2x tapscript baseline; no new per-block scanning or data structures. (2) Appendix C rewritten: two-tier benchmark model — Tier 1 local smoke tests (regression detection, no hard threshold) and Tier 2 release-gating benchmarks (dedicated reference machine or manual pre-release sign-off). Specific reference hardware documented. New Section C.4 on mining load constraint. (3) Appendix D hardened: explicit `--allow-op-success` per-invocation override for intentional OP_SUCCESS testing; hard-error by default (not warning); L2 catastrophic risk callout added; negative test requirement for L2 script compilers. |
 | 6 | **Six completeness additions**: (1) Appendix C: PQ Benchmark Gate — formal release criteria with per-algorithm verification time targets, worst-case block validation thresholds, CI integration requirements, and fail-closed rule. (2) Appendix D: CSFS OP_SUCCESS Range Safety Policy — wallet/compiler ban for P2MR opcodes in tapscript, descriptor validation, CI lint, rationale for not using alternative opcode. (3) Appendix E: L2/Lightning Integration Profile — supported constructions (CTV vaults, payment trees, delegated closes, factory trees), unsupported (eltoo/APO, recursive covenants), fee-bumping/CPFP/package-relay requirements. (4) Appendix F: Mempool Policy Extensibility Roadmap — three-phase graduation from strict templates to resource-bounded acceptance. (5) Appendix G: Operator Guidance for non-standard transactions — miner submission paths, `-maxscriptsize` configuration, propagation impact. (6) Appendix H: ScriptError Compatibility Governance — stability rules, numeric value assignment, downstream consumer guidance. |
 
 ---
@@ -3050,17 +3050,17 @@ metric with a documented future mitigation path.
 
 ### C.3 Benchmark Execution Model
 
-Benchmark results on shared/virtualized CI runners (GitHub Actions, etc.) are
+Benchmark results on shared/virtualized hosted runners are
 too noisy for performance gating — variance from co-tenancy and CPU throttling
 makes pass/fail thresholds flaky. The benchmark suite uses a two-tier model:
 
-**Tier 1 — CI smoke tests** (GitHub-hosted runners, every PR):
+**Tier 1 — local smoke tests** (the local validation matrix, for every change):
 - Run `bench_mldsa_verify` and `bench_slhdsa_verify` as regression detectors.
 - No hard pass/fail threshold. Flag >2x regression vs baseline as a warning.
 - Purpose: catch accidental performance regressions (e.g., debug logging left
   in hot path), not enforce absolute targets.
 
-**Tier 2 — Release-gating benchmarks** (self-hosted perf runner OR manual
+**Tier 2 — Release-gating benchmarks** (dedicated local perf host OR manual
 pre-release checklist):
 - Run on a **dedicated reference machine** with:
   - Isolated cores (no co-tenancy), CPU governor set to `performance`
@@ -3074,10 +3074,10 @@ pre-release checklist):
   ID, and raw timing data.
 - **Gate**: release is blocked if any threshold is exceeded.
 
-If a self-hosted runner is available, Tier 2 runs automatically on release
-branches. Otherwise, it runs as a manual pre-release checklist item — a
-designated engineer executes the suite on the reference machine and signs off
-on the results before tagging.
+Tier 2 is an explicit local pre-release checklist item. A designated engineer
+executes the suite on the reference machine and signs off on the results before
+tagging. GitHub Actions and repository self-hosted runners remain intentionally
+disabled; neither tier depends on hosted workflow execution.
 
 ### C.4 Mining Load Constraint
 
@@ -3114,7 +3114,7 @@ If any benchmark target is not met:
 
 ### C.6 Verification Checklist
 
-- [ ] Tier 1 CI smoke tests exist and run on every PR.
+- [ ] Tier 1 smoke tests exist and run through the local validation matrix for every change.
 - [ ] Tier 2 release-gating benchmarks run on dedicated reference machine
       (or manual pre-release checklist is in place).
 - [ ] Reference machine hardware is documented.

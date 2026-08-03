@@ -2,11 +2,11 @@
 
 Date: 2026-08-02
 
-Status: project policy for Epoch-A production goldens. The policy's
-requirements were satisfied by the sealed one-freeze CUDA+Metal cohort
-(`doc/evidence/multi-gpu-profile1-goldens-cuda-metal-2026-08-03-sealed`),
-which is committed as the production golden manifest for the mainnet
-height-182'600 activation.
+Status: project policy for Epoch-A production goldens. The earlier CUDA+Metal
+cohort is retained as historical evidence, but it does not authorize
+activation. The production manifest must be resealed from exact-final,
+revision-bound CUDA and Metal artifacts before ratification or selection of a
+live mainnet `H_A`.
 
 ## Decision
 
@@ -49,14 +49,17 @@ frozen headers, and offline replay remain available to investigate divergence.
 The corpus `source_revision` is the reviewed code-freeze commit used to build
 the harness. An evidence-only descendant may add sanitized artifacts and
 documentation without rebuilding; it is equivalent only when the comparator's
-build-relevant source-tree fingerprint remains identical. Any change under
-`src/`, `cmake/`, or the root `CMakeLists.txt` invalidates that equivalence and
-requires new CUDA and Metal artifacts.
+build-relevant source-tree fingerprint remains identical. The fingerprint
+scope is `CMakeLists.txt`, `cmake/`, `src/`, and `contrib/matmul-v4/`. The sole
+exception is the inert manifest `.data` seal: fingerprinted CMake converts it
+to a numeric byte array and fingerprinted C++ parses its strict schema. Any
+other change in that scope invalidates equivalence and requires new CUDA and
+Metal artifacts.
 
-The C++ comparator can only length-check these strings; it has no repository to
-resolve them against. A 40-character hex string that names no commit therefore
-satisfies every in-process check while attesting to nothing, and the first
-final-freeze corpus recorded in this tree did exactly that. Two out-of-process
+The in-process C++ parser strictly checks the manifest schema, field shapes,
+and cohort consistency, but it has no repository in which to resolve a commit
+or recompute a Git tree. A well-formed nonexistent revision could therefore
+remain structurally valid while attesting to nothing. Two out-of-process
 mechanisms are consequently mandatory, not advisory:
 
 - `contrib/matmul-v4/multi-gpu-golden-corpus.sh` refuses to record a corpus when
@@ -81,12 +84,11 @@ diagnostic material, but can never satisfy a production-golden gate.
 
 ## Activation boundary
 
-This policy does not close hardware campaigns by itself. Its fail-closed
-preconditions were met for Epoch A: the exact final code freeze (`78a88af5`)
-has matching CUDA and Metal corpora, the two-rig ASERT calibration and the
-bounded lifecycle soak are committed under `doc/evidence/`, and the
-activation commit installs the finite mainnet tuple (182'600) and both
-ratification flags. The gates that were NOT met before activation (multi-day
-soak, multi-peer public testnet, released-binary upgrade behavior) are
-recorded as accepted residual risk at the flags in `src/consensus/params.h`.
-Testnet and signet heights remain disabled.
+This policy does not close hardware campaigns by itself. Matching historical
+CUDA and Metal digests demonstrate useful cross-provider consistency, but the
+activation gate remains open until the exact final revision reproduces the
+corpus, the revision-bound ASERT calibration is independently reviewed, and
+the activation review records the disposition of lifecycle soak, multi-peer
+public testnet, fault/recovery, and released-binary upgrade evidence. Only
+then may one atomic change install the live mainnet tuple and flip both
+ratification flags. Testnet and signet heights remain disabled.

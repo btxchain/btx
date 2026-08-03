@@ -1,14 +1,14 @@
 # MatMul v4.7 consensus transition roadmap
 
-Status: **canonical documentation for the MatMul v4.7 transition. Epoch A is
-ACTIVATED on mainnet at block height 182'600** (`nMatMulV4Height =
-nMatMulBMX4CHeight = nMatMulRCHeight = 182'600` in
-`src/kernel/chainparams.cpp`, both ratification constants true in
-`src/consensus/params.h`, RC ASERT rescale `4294967295/1` installed).
+Status: **canonical documentation for the MatMul v4.7 transition. Epoch A is a
+release candidate, not a shipped activation.** The atomic `H_A` tuple in
+`src/kernel/chainparams.cpp`, ratification flags, and RC ASERT coefficient are
+release-final only after exact-final-binary evidence and a live-tip runway
+calculation.
 Testnet and signet heights remain disabled, as do Epochs B–D everywhere.
-This document records the transition contract, the evidence that closed the
-Epoch-A gates, and the gates that were explicitly accepted as residual risk
-(§4). The activation itself lives in the consensus source, not here.
+This document records the transition contract and the evidence still required
+to close the Epoch-A gates (§4). Consensus source schedules the transition;
+documentation does not authorize it.
 
 ## 1. Naming and scope
 
@@ -31,7 +31,7 @@ separately specified durable proof object to consensus data, so its exact byte
 budget, commitment, relay, pruning, and IBD rules must be reviewed before that
 epoch can activate.
 
-### 1.1 Atomic Epoch-A contract — now installed on mainnet
+### 1.1 Atomic Epoch-A contract — candidate shape
 
 Historical contract: through every implementation-only release, all public
 v4, BMX4C, and RC heights stayed `INT32_MAX`; DRLT, coupled RC, HeaderPoW,
@@ -39,18 +39,18 @@ unfinished Stage-3 authority, and toy dimensions stayed disabled; Profile 1
 was the inert pre-activation selector; and
 `BTX_MATMUL_NO_INVERSION_GATE_RATIFIED` stayed false.
 
-The activation commit set the tuple atomically on mainnet at
-`H_A = 182'600`, satisfying the contract as follows:
+The candidate sets the tuple atomically on mainnet at one release-selected
+`H_A`, satisfying the structural contract as follows:
 
-| Component | Contract at Epoch A | Installed mainnet value |
+| Component | Contract at Epoch A | Release-candidate value |
 |---|---|---|
-| Heights | `nMatMulV4Height = nMatMulBMX4CHeight = nMatMulRCHeight = H_A` | all three `182'600` |
+| Heights | `nMatMulV4Height = nMatMulBMX4CHeight = nMatMulRCHeight = H_A` | one finite candidate height; recomputed before release |
 | Withdrawn/intermediate paths | `nMatMulDRLTHeight = nMatMulRCCoupledHeight = INT32_MAX` | both `INT32_MAX` (disabled) |
 | Workload | `nMatMulRCProfile = 1`, production dimensions, four-round replay | Profile 1, `matmul_dim = 4096` |
 | Authority | ExactReplay; Stage-3 proof authority remains disabled | ExactReplay only |
 | Header admission | HeaderPoW disabled; the fixed header remains 182 bytes | disabled; 182 bytes |
-| ASERT | v4 and BMX4C ratios remain `1/1`; RC owns the reviewed final-binary calibration | v4/BMX4C `1/1`; RC `4294967295/1` — the saturated uint32 ceiling of the measured two-rig calibration (the larger measured CUDA-rig value is not expressible in the uint32 field; see `kRCEpochAAsertRescaleNum` in `src/kernel/chainparams.cpp`) |
-| Ratification | explicit L0 ratification is a separate reviewed decision | `BTX_MATMUL_NO_INVERSION_GATE_RATIFIED` and `BTX_MATMUL_V47_GPU_LIFECYCLE_GATE_RATIFIED` flipped true, with the recorded basis and the accepted residual risk documented at the flags (`src/consensus/params.h`) |
+| ASERT | v4 and BMX4C ratios remain `1/1`; RC owns the reviewed final-binary calibration | v4/BMX4C `1/1`; RC candidate is provisional pending the schema-2 exact-final-binary rerun |
+| Ratification | explicit L0 ratification is a separate reviewed decision | the source constants are staged true in this candidate, but are non-authorizing until exact-final evidence and the activation review re-affirm them |
 
 The equality of the three heights prevents any digest-only v4/BMX4C interval
 before ExactReplay authority. The ASERT assignment is deliberately
@@ -155,24 +155,27 @@ distinct production headers with nearest-rank p99 32.705 seconds, maximum
 committed reports record only a broad hardware class and contain no hostname,
 username, personal path, or device serial. This 2026-08-01 campaign did not
 by itself constitute activation evidence; see §4 for which gates the later
-sealed cohort, soak, and calibration artifacts closed, and which were never
-met. L0 ratification has since been recorded (both flags true,
-`src/consensus/params.h`).
+sealed cohort, soak, and calibration artifacts closed, and which remain open.
+The candidate currently stages both source flags true, but that state does not
+authorize activation and must be re-affirmed against the exact-final evidence
+during the release review.
 
-## 4. Epoch-A activation gates — status at the 182'600 activation
+## 4. Epoch-A activation gates — current candidate status
 
-The activation shipped. This section records what closed and what did not.
+The activation has not shipped. This section separates historical evidence
+from the exact-final-revision evidence still required.
 
-**Closed by committed evidence** (all under `doc/evidence/`):
+**Historical evidence retained for diagnostics** (all under `doc/evidence/`):
 
 - **Sealed CUDA+Metal golden cohort at one code freeze**
   (`multi-gpu-profile1-goldens-cuda-metal-2026-08-03-sealed`): both providers
   reproduced from the same `source_revision` and build-relevant
   `source_tree_fingerprint`, all eight digests and frozen header byte strings
   byte-identical, zero CPU GEMM calls/MACs/fallbacks; passed the hardened
-  provenance comparator and is committed as the production golden manifest
+  provenance comparator and was committed as an earlier production manifest
   (`CommittedRCProductionGoldenManifest()` in
-  `src/matmul/matmul_v4_rc_production_canary.cpp`). This closes gate 1 below.
+  `src/matmul/matmul_v4_rc_production_canary.cpp`). It must be regenerated from
+  the final clean revision and does not close gate 1 for the current tree.
 - **Zero-fallback lifecycle/soak campaign across the RC boundary**
   (`cuda-profile1-soak-2026-08-02`): 45 minutes, 38 scenarios (relay,
   competing branches, restart, cache persistence, IBD boundary) on two local
@@ -181,15 +184,16 @@ The activation shipped. This section records what closed and what did not.
   (`gate7_multi_day_multi_peer_claim = false` in its summary).
 - **Two-rig, two-vendor ASERT calibration**
   (`asert-two-rig-calibration-2026-08-03`): both halves of the v3-vs-RC ratio
-  measured on the same silicon on two vendors; the installed
-  `4294967295/1` rescale is the saturated uint32 ceiling of that
-  measurement. This closes the calibration half of gate 9; the activation
-  commit itself closed the atomic-tuple and ratification half.
+  measured on the same silicon on two vendors. It predates strict schema-2
+  provenance and raw-RC-sample derivation, so it does not close the current
+  calibration gate.
 
-**Explicitly NOT met, accepted as residual risk by the operator in flipping
-the ratification flags** (recorded at
-`BTX_MATMUL_V47_GPU_LIFECYCLE_GATE_RATIFIED`, `src/consensus/params.h`):
+**Still open before release-final activation:**
 
+- exact-final-revision CUDA+Metal corpus and manifest seal;
+- schema-2, zero-fallback ASERT rerun on both required providers;
+- full unit and functional suite closeout on the final tree;
+- a live-tip activation height with at least 96 hours of runway;
 - multi-day wall-clock soak;
 - multi-peer public testnet topology (gate 7 as written below);
 - upgrade behavior across released binaries.
@@ -197,9 +201,9 @@ the ratification flags** (recorded at
 Other items below (HIP reproduction — optional per the golden policy and
 still fail-closed with no committed corpus; a final-binary re-run of the
 dated 100-run loaded campaigns; frozen checkpoint/IBD disclosures) were not
-recorded as closed in the activation evidence and should be read
-accordingly. Do not cite this section as claiming more than the three
-closed artifacts above.
+recorded as closed for the current tree and should be read accordingly. Do not
+cite this section as claiming that the historical artifacts authorize the
+release candidate.
 
 The pre-activation contract required:
 
@@ -282,12 +286,15 @@ acceleration, near-tip scheduler, admission policy, and local evidence. It
 also retains Profile 2 and unfinished Stage-3 proof machinery for continued
 development.
 
-The branch selects Profile 1 and installs the complete mainnet Epoch-A tuple:
-`nMatMulV4Height = nMatMulBMX4CHeight = nMatMulRCHeight = 182'600`, the RC
-ASERT rescale `4294967295/1`, both ratification flags true, and the populated
-CUDA+Metal production golden manifest. Epochs B–D remain unreachable (no
-height-versioned proof selectors exist), and testnet/signet remain on v3
-with all transition heights disabled. Mainnet leaves v3 at height 182'600.
+The branch selects Profile 1 and contains the Epoch-A implementation, but its
+activation posture remains **NO-GO**. Exact-final CUDA+Metal evidence and a
+revision-bound ASERT calibration must first freeze the production manifest and
+rescale. A subsequent reviewed change must then select one live `H_A`, set
+`nMatMulV4Height = nMatMulBMX4CHeight = nMatMulRCHeight = H_A`, and flip both
+ratification flags atomically. Any finite tuple or coefficient present before
+that freeze is provisional and non-authorizing. Epochs B–D remain unreachable
+(no height-versioned proof selectors exist), while testnet and signet remain
+on v3 with all transition heights disabled.
 
 ## 8. Documentation precedence
 

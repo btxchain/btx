@@ -1,6 +1,9 @@
-# Sealed CUDA + Metal Profile-1 golden cohort
+# Historical sealed CUDA + Metal Profile-1 golden cohort
 
-Status: **`complete_multi_gpu_match: true` at a single code freeze.** Both
+Status: **historical and non-authorizing.** At its original freeze this corpus
+recorded `complete_multi_gpu_match: true`. Later build-relevant changes
+invalidate it under the same freeze rule it was designed to enforce. A new
+exact-final CUDA+Metal corpus and manifest seal are required. Both
 providers reproduced the frozen canary corpus from the *same* revision and the
 *same* build-relevant source tree. This is the first cohort in this branch's
 history that satisfies the equivalence rule rather than merely agreeing on
@@ -58,11 +61,11 @@ Apple silicon.
 
 ## What this closes, and what it does not
 
-It closes the production-golden policy's requirement for *matching CUDA and
-Metal corpora from one reviewed code freeze* — the last structurally blocked
-item in that gate. Everything else in the gate (provenance binding, the hardened
-comparator, the strict provenance verifier, the public-evidence privacy checker)
-already passed.
+At its historical revision it closed the production-golden policy's requirement
+for matching CUDA and Metal corpora from one reviewed code freeze. It does not
+close that requirement for the current source tree. The hardened comparator,
+strict provenance verifier, public-evidence privacy checker, and both providers
+must pass again at the exact final freeze.
 
 It does **not** by itself authorize populating
 `CommittedRCProductionGoldenManifest()`. The policy additionally requires the

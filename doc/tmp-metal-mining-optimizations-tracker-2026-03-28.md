@@ -251,7 +251,7 @@ Scope: Verified backend behavior and performance notes that now accompany the Ma
     - parallel solve rounds with `pool-slots=1/2/4`
     - parallel solve rounds with explicit `prepare_workers=4`
 - Baseline comparison completed against:
-  - `/path/to/Documents/GitHub/btx-node-base-metal`
+  - `/path/to/Documents/GitHub/btx-base-metal-worktree`
   - `./build-metal-opt-base/bin/bench_btx -filter=MatMulSolveBatchThroughputMainnetLiveLike -min-time=1000`
 - Metal backend info confirms runtime availability on this machine via inline-source fallback:
   - `active_backend=metal`
@@ -269,7 +269,7 @@ Scope: Verified backend behavior and performance notes that now accompany the Ma
   - `git format-patch origin/main..codex/local-metal-mining-optimizations`
 - Local helpers already in place:
   - `git config rerere.enabled true`
-  - a separate base worktree at `/path/to/Documents/GitHub/btx-node-base-metal` for before/after performance comparisons
+  - a separate base worktree at `/path/to/Documents/GitHub/btx-base-metal-worktree` for before/after performance comparisons
 
 ## Decisions
 

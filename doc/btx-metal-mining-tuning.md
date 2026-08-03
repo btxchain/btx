@@ -6,7 +6,7 @@ resident FFN, ExtractMX, and Merkle pipeline on Metal with zero unintended
 CPU fallback, and must pass the loaded/back-to-back/reorg campaigns. Use
 `BTX_MATMUL_V4_BACKEND=metal` with the Profile 1 production harness for that
 evidence; a legacy `BTX_MATMUL_BACKEND=metal` solve result alone is not
-sufficient. Profile 2 is a later proof-authoritative workload. Mainnet Epoch A (v4 = BMX4C = RC) now activates at height 182'600; all other transition heights remain disabled. See
+sufficient. Profile 2 is a later proof-authoritative workload. Mainnet Epoch A (v4 = BMX4C = RC) remains a release candidate pending exact-final CUDA+Metal evidence, reviewed ASERT calibration, ratification, and selection of a live activation height; all other transition heights remain disabled. See
 [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md).
 
 This document describes the current Apple Metal mining defaults and the

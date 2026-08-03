@@ -1,7 +1,9 @@
 # MatMul v4.7 GPU validator operator runbook
 
-Status: mainnet RC activation is set at block height 182'600 (Epoch A);
-testnet/signet remain disabled
+Status: Epoch A is a mainnet release candidate with no final activation height;
+testnet and signet remain disabled. Operators must not advertise production
+readiness until the exact-final golden, ASERT, ratification, and live-height
+gates close.
 
 Canonical transition and activation policy:
 [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md).

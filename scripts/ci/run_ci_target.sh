@@ -174,7 +174,7 @@ run_platform_ci_env() {
     ensure_platform_tmp_space
     unset DANGER_RUN_CI_ON_HOST
     export DANGER_CI_ON_HOST_FOLDERS=1
-    ci_suffix="${target}-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}-$$"
+    ci_suffix="${target}-${BTX_LOCAL_RUN_ID:-${GITHUB_RUN_ID:-local}}-${GITHUB_RUN_ATTEMPT:-0}-$$"
     ci_suffix="$(printf '%s' "${ci_suffix}" | tr -cd 'A-Za-z0-9_.-')"
     export BASE_ROOT_DIR="${TMPDIR:-/tmp}/btx-ci-root-${ci_suffix}"
     rm -rf "${BASE_ROOT_DIR}"
@@ -237,6 +237,8 @@ run_lint() {
   python3 test/lint/lint-shell.py
   python3 test/lint/lint-ci-base-install.py
   python3 test/lint/lint-spelling.py
+  python3 test/util/local_mac_matrix_test.py
+  python3 test/util/matmul_v4_asert_calibration_test.py
 }
 
 run_tidy() {
@@ -348,6 +350,7 @@ run_production_readiness() {
   python3 contrib/matmul-v4/verify-evidence-provenance.py --strict
   python3 test/util/matmul_v4_public_evidence_test.py
   python3 test/util/matmul_v4_evidence_provenance_test.py
+  python3 test/util/matmul_v4_multi_gpu_golden_test.py
   if ! have_core_binaries "build-btx" || [[ ! -x "build-btx/bin/bench_btx" ]]; then
     scripts/build_btx.sh "build-btx" -DWERROR=ON -DWITH_ZMQ=ON -DBUILD_BENCH=ON
   fi

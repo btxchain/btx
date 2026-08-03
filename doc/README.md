@@ -50,19 +50,21 @@ service-profile, or release-publication workflow:
 - [Mining Operator Helpers](../contrib/mining/README.md)
 - [Fast-Start Validating Node Helpers](../contrib/faststart/README.md)
 
-The MatMul v4.7 branch activates Epoch A on mainnet: a binary built from it
-crosses the Epoch-A hard fork at block height 182'600
-(`src/kernel/chainparams.cpp`). Epoch A uses Profile 1 with ExactReplay
-authority and optional shadow proofs; Epoch B requires both a durable proof
-and ExactReplay; Epoch C makes the Profile 1 proof authoritative; and only
-Epoch D selects Profile 2 with proof authority. Epochs B–D each require a
-separate review and remain disabled, as do the testnet/signet heights.
+The MatMul v4.7 branch is an Epoch-A implementation candidate, not an
+activation authorization. The exact-final golden and ASERT evidence must be
+reviewed before a live mainnet `H_A` is selected and ratified. Epoch A uses
+Profile 1 with ExactReplay authority and optional shadow proofs; Epoch B
+requires both a durable proof and ExactReplay; Epoch C makes the Profile 1
+proof authoritative; and only Epoch D selects Profile 2 with proof authority.
+Epochs B–D each require a separate review and remain disabled, as do the
+testnet/signet heights.
 
-The release automation docs above now cover both the one-command local release
-cut (`scripts/release/cut_release.py`) and the self-hosted GitHub Actions
-workflow used to stage or publish major-architecture bundles. They also cover
-the native subset release path (`scripts/release/cut_local_release.py`) for
-CLI-only macOS/Linux publishing when Guix artifacts are not yet available.
+The release automation docs above cover the one-command local release cut
+(`scripts/release/cut_release.py`) and the local validation matrix used before
+staging or publishing major-architecture bundles. GitHub Actions remain
+disabled. The docs also cover the native subset release path
+(`scripts/release/cut_local_release.py`) for CLI-only macOS/Linux publishing
+when Guix artifacts are not yet available.
 
 Historical BTX analysis notes
 -----------------------------

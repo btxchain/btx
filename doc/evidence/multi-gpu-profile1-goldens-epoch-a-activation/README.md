@@ -1,9 +1,10 @@
-# Epoch-A activation cohort — goldens reproduced at the shipped commit
+# Historical Epoch-A cohort — superseded and non-authorizing
 
-Status: **`complete_multi_gpu_match: true` at `6cfd2097`**, the commit that
-carries the activation height, the installed ASERT rescale, both ratification
-flags and the populated manifest. This is the evidence that matches the binary
-a node will actually run.
+Status: **historical only.** This directory recorded
+`complete_multi_gpu_match: true` at `6cfd2097`, but that revision predates the
+current build-relevant implementation and evidence-policy changes. It is not a
+shipped-commit record, does not describe the final v0.33.2 binary, and cannot
+authorize activation. A fresh exact-final CUDA+Metal seal is required.
 
 ## Provenance
 
@@ -43,10 +44,10 @@ claims and what an auditor should be able to check.
 
 ## Standing constraint
 
-This is valid for `6cfd2097`. Any later commit touching `src/`, `cmake/` or the
-root `CMakeLists.txt` changes the fingerprint; regeneration costs roughly five
-minutes per provider on warm build trees, and must be done on **both** against
-the same commit.
+This was valid only for `6cfd2097`. Any later build-relevant change invalidates
+it; the current fingerprint scope is `CMakeLists.txt`, `cmake/`, `src/`, and
+`contrib/matmul-v4/`, excluding only the inert manifest `.data` seal. Both
+required providers must rerun against the same final source revision.
 
 ## Artifacts
 

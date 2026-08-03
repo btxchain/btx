@@ -4,7 +4,7 @@
 > the named C-15 game, not the activation gate or proof-authority specification
 > for MatMul v4.7. See the canonical
 > [four-epoch transition roadmap](../../doc/btx-matmul-v4.7-transition-roadmap.md);
-> mainnet Epoch A (v4 = BMX4C = RC) now activates at height 181'894 and all other transition heights remain disabled.
+> mainnet Epoch A (v4 = BMX4C = RC) is scheduled at the release-selected atomic `H_A` and all other transition heights remain disabled.
 
 **Status: C-15 OPEN.** This is a step-by-step attack menu for independent
 cryptanalysts. Completing it with only negative evidence is **not** a theorem

@@ -66,5 +66,5 @@ They were deleted.
 
 Nothing here changes consensus or activation. Optional shadow proofs,
 sampled/Freivalds carriers, and local evidence cannot authorize blocks.
-Mainnet Epoch A activates at height 181'894; every other public epoch height
-remains disabled.
+Mainnet Epoch A is scheduled at the release-selected atomic `H_A`; every other
+public epoch height remains disabled.

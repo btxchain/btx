@@ -1,9 +1,9 @@
-# Final pre-merge CUDA + Metal Profile-1 golden cohort
+# Historical CUDA + Metal Profile-1 golden cohort
 
-Status: **`complete_multi_gpu_match: true` at the final pre-merge freeze.**
-This supersedes `../multi-gpu-profile1-goldens-cuda-metal-2026-08-03-sealed`,
-which was sealed at `78a88af5` and invalidated by design when seven later
-commits touched `src/`.
+Status: **historical and non-authorizing.** This corpus recorded
+`complete_multi_gpu_match: true` at `7dc60146`, but later build-relevant
+changes invalidate its former “final pre-merge” designation. A new exact-final
+CUDA+Metal run and manifest seal are required.
 
 ## Provenance — identical on both halves
 
@@ -64,11 +64,13 @@ implementation divergence that makes digest agreement worth having.
 
 ## Freeze discipline
 
-Valid **only** for `7dc60146`. The commit that installs this manifest is
+This corpus was valid **only** for `7dc60146`. The commit that installs a manifest is
 necessarily later than the freeze it cites — a manifest cannot name the commit
 containing itself — and the cohort validator compares the two entries against
-each other, not against HEAD. Any subsequent change to `src/`, `cmake/` or the
-root `CMakeLists.txt` needs both providers re-run against that new commit.
+each other, not against HEAD. Any subsequent change in the current
+build-relevant scope (`CMakeLists.txt`, `cmake/`, `src/`, or
+`contrib/matmul-v4/`, excluding only the inert manifest `.data` seal) needs
+both providers re-run against that new commit.
 
 ## Artifacts
 

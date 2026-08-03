@@ -6,7 +6,7 @@ MatMul/oracle `.metallib` loading path and uses embedded runtime source compilat
 
 Its completed phases concern the legacy MatMul path and do not qualify MatMul
 v4.7 Epoch A. The current launch candidate is Profile 1 ExactReplay; Profile 2
-is a later proof-authoritative workload. Mainnet Epoch A (v4 = BMX4C = RC) now activates at height 182'600; all other transition heights remain disabled. See
+is a later proof-authoritative workload. Mainnet Epoch A (v4 = BMX4C = RC) remains a release candidate pending exact-final CUDA+Metal evidence, reviewed ASERT calibration, ratification, and selection of a live activation height; all other transition heights remain disabled. See
 [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md).
 
 Last updated: 2026-02-20

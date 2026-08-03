@@ -5,7 +5,7 @@
 > default-profile authority for the proposed MatMul v4.7 PR. The current
 > sequence is Profile 1 ExactReplay with optional shadow proofs (Epoch A),
 > Profile 1 mandatory proof plus ExactReplay (B), Profile 1 proof authority
-> (C), then a separate Profile 2 proof-authority workload fork (D). Mainnet Epoch A (v4 = BMX4C = RC) now activates at height 181'894; all other transition heights remain disabled. See
+> (C), then a separate Profile 2 proof-authority workload fork (D). Mainnet Epoch A (v4 = BMX4C = RC) is scheduled at one release-selected atomic `H_A`; all other transition heights remain disabled. See
 > [`doc/btx-matmul-v4.7-transition-roadmap.md`](doc/btx-matmul-v4.7-transition-roadmap.md).
 
 > **SOUNDNESS-NUMBER UPDATE (2026-08-02): the Fp3 challenge cutover described

@@ -6,7 +6,7 @@
 > Epoch B Profile-1 proof plus ExactReplay, Epoch C Profile-1 proof authority,
 > then Epoch D Profile-2 proof authority; see
 > [`doc/btx-matmul-v4.7-transition-roadmap.md`](../../doc/btx-matmul-v4.7-transition-roadmap.md).
-> Mainnet Epoch A (v4 = BMX4C = RC) now activates at height 181'894; all other transition heights remain disabled.
+> Mainnet Epoch A (v4 = BMX4C = RC) is scheduled at the release-selected atomic `H_A`; all other transition heights remain disabled.
 
 **Status: C-15 OPEN.** Lever-B MX-block MatExpand Extract is a *candidate* with
 frozen CPU goldens. This kit lets an external cryptanalyst reproduce Extract

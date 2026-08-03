@@ -13,16 +13,18 @@ active from genesis, enforces reduced-data transaction constraints (BIP
 This repository contains the full node implementation, wallet, mining
 infrastructure, and test suites.
 
-## MatMul v4.7 transition — Epoch A activated on mainnet
+## MatMul v4.7 transition — Epoch A release candidate
 
-This branch carries the staged MatMul v4.7 transition **and the Epoch-A
-activation**: mainnet sets `nMatMulV4Height = nMatMulBMX4CHeight =
-nMatMulRCHeight = 181'894` as one atomic tuple, flips both ratification
-constants true, and installs the one-time RC ASERT rescale `4294967295/1`
-(`src/kernel/chainparams.cpp`, `src/consensus/params.h`). **A node built from
-this branch will cross the Epoch-A hard fork at mainnet block height
-181'894.** Testnet and signet heights remain disabled; Epochs B–D, DRLT, and
-the coupled-RC path remain disabled on every network.
+This branch carries the staged MatMul v4.7 transition and an **Epoch-A release
+candidate**. The candidate stages one atomic `nMatMulV4Height = nMatMulBMX4CHeight =
+nMatMulRCHeight = H_A` tuple and both ratification constants; testnet and
+signet heights remain disabled, as do Epochs B–D, DRLT, and coupled RC. The
+numeric `H_A` and one-time RC ASERT coefficient in `src/kernel/chainparams.cpp`
+are not release-final until the exact-final-binary CUDA+Metal campaign passes
+and release preparation recomputes at least 96 hours of runway from the live
+tip. Those staged constants are non-authorizing until the exact-final evidence
+and activation review pass. This draft PR must not be described as already
+activated or shipped.
 
 The transition deliberately separates verification authority from workload
 size:
@@ -191,8 +193,7 @@ multiplication — is the same operation that dominates GPU and TPU workloads fo
 AI/ML training and inference, making the mining hardware directly reusable for
 productive computation.
 
-> **MatMul v4.7 Resident Curriculum transition — Epoch A activated on
-> mainnet at height 181'894.**
+> **MatMul v4.7 Resident Curriculum transition — Epoch A release candidate.**
 > The implementation preserves the 182-byte digest-only header and a
 > header-derived work statement, but divides the consensus change into four
 > separately activated epochs:
@@ -209,8 +210,8 @@ productive computation.
 > `T_leaf=1,024`. Profile 2 is approximately 16 times heavier and is not a
 > routine validator requirement at launch. Sampled/Freivalds carriers and
 > unfinished GKR/FRI machinery are never allowed to silently become
-> authority. Mainnet activates Epoch A at block height 181'894 (v4 = BMX4C =
-> RC as one atomic tuple, with the one-time RC ASERT rescale installed);
+> authority. Mainnet schedules Epoch A at the release-selected atomic `H_A`
+> (v4 = BMX4C = RC, with a final-binary RC ASERT rescale);
 > testnet and signet heights remain disabled, and Epochs B–D require
 > separate future activation heights. See the
 > [canonical roadmap](doc/btx-matmul-v4.7-transition-roadmap.md) and

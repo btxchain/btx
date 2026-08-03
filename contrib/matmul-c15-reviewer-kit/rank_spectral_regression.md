@@ -3,7 +3,7 @@
 > **Historical v4.4-LT research note.** These regressions do not define the
 > Profile-1/ExactReplay launch or later proof authority. See the canonical
 > [MatMul v4.7 transition roadmap](../../doc/btx-matmul-v4.7-transition-roadmap.md);
-> mainnet Epoch A (v4 = BMX4C = RC) now activates at height 181'894 and all other transition heights remain disabled.
+> mainnet Epoch A (v4 = BMX4C = RC) is scheduled at the release-selected atomic `H_A` and all other transition heights remain disabled.
 
 **Status: C-15 OPEN** — documentation aid, not a security proof.
 

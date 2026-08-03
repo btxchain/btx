@@ -22,12 +22,11 @@ Use `scripts/release/cut_release.py` when you want one operator command to:
 - validate the bundle against the GitHub publisher contract
 - optionally publish the bundle to GitHub Releases
 
-The staging repository is `example/staging-repo`, while public release assets are
-published from `btxchain/btx`. The manual workflow therefore exposes a
-`release_repository` input that defaults to `btxchain/btx`; keep `publish`
-disabled while validating a private staging branch. A public publish is
-deliberately impossible from the staging checkout: the exact source repository
-and commit recorded in the bundle must exist in and match `btxchain/btx`.
+Release candidates may be validated in any access-controlled staging checkout,
+while public release assets are published from `btxchain/btx`. Keep `publish`
+disabled while validating a staging branch. A public publish is deliberately
+impossible from a different source identity: the exact source repository and
+commit recorded in the bundle must exist in and match `btxchain/btx`.
 
 Example:
 
@@ -159,36 +158,20 @@ not provide `SHA256SUMS.asc`, unless the operator explicitly passes
 authenticate the manifest and archive downloads while following GitHub's
 browser-download redirects.
 
-## Workflow validation
+## Local release validation
 
-The `BTX Release Assets` workflow now has two roles:
+GitHub Actions is intentionally disabled in this repository. Validate release
+helpers locally with a synthetic bundle, then run
+`scripts/release/cut_release.py` on a provisioned release host. Snapshot reports,
+manifests, Guix outputs, and signing material remain runner-local until the
+reviewed bundle is ready to publish.
 
-- a GitHub-hosted validation job that smoke-tests the release helpers with a
-  synthetic bundle, including guix attestation staging
-- a manual self-hosted `cut release bundle` job that can run
-  `scripts/release/cut_release.py` on a provisioned release runner and upload
-  the resulting bundle as a workflow artifact before or during publication
-
-When snapshot generation is enabled, that self-hosted workflow also uploads the
-generated `snapshot.report.json` and `snapshot.manifest.json` as a separate
-artifact. That gives maintainers the ready-to-apply assumeutxo report needed to
-update `src/kernel/chainparams.cpp` from a runner that already has access to
-the trusted synced node and release inputs.
-
-The self-hosted job is intentionally parameterized around runner-local paths for
-Guix outputs, snapshot artifacts, and guix.sigs state, because those release
-inputs are too large or too sensitive to manufacture inside the workflow
-itself.
-
-Dispatch values are mapped into environment variables and passed as data,
-never interpolated into shell source. The job checks out only protected `main`,
-runs behind the protected `btx-release` GitHub Environment, pins third-party
-Actions by commit, does not print its assembled command, and rejects inline RPC
-credentials. Build/collect receives no release secrets; the GPG passphrase is
-available only to `sign_release_bundle.py`, and the release PAT only to the
-final publisher step. The authorized fingerprint comes from the protected
-environment variable `BTX_RELEASE_SIGNING_FINGERPRINT`, not from a dispatch
-input.
+Pass paths and identifiers as command arguments or environment data, never as
+generated shell source. Do not print assembled commands containing credentials.
+Build and collection steps receive no release secrets; provide a GPG passphrase
+only to `sign_release_bundle.py` and a release token only to the final publisher.
+Pin the authorized signing fingerprint independently of the bundle being
+validated.
 
 When reproducing this separation locally, first collect the unsigned bundle,
 then run:

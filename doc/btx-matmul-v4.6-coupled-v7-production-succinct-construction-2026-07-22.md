@@ -3,7 +3,7 @@
 > Epoch A uses Profile-1 ExactReplay with optional shadow proof; Epoch B
 > requires durable proof plus replay; Epoch C retains Profile 1 under proof
 > authority; Profile 2 is reserved for Epoch D. See
-> `doc/btx-matmul-v4.7-transition-roadmap.md`. Mainnet Epoch A (v4 = BMX4C = RC) now activates at height 182'600; all other transition heights remain disabled.
+> `doc/btx-matmul-v4.7-transition-roadmap.md`. Mainnet Epoch A (v4 = BMX4C = RC) remains a release candidate pending exact-final CUDA+Metal evidence, reviewed ASERT calibration, ratification, and selection of a live activation height; all other transition heights remain disabled.
 
 # BTX MatMul v4.6 — coupled v7 production-succinct construction
 

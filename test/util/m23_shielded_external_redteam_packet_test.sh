@@ -16,37 +16,39 @@ mkdir -p "${AUX_AUDIT_DIR}" "${AUX_HOSTED_DIR}" "${AUX_HOSTED_VALIDATION_DIR}"
 printf 'audit bundle fixture\n' > "${AUX_AUDIT_DIR}/README.txt"
 printf 'hosted run fixture\n' > "${AUX_HOSTED_DIR}/README.txt"
 printf 'hosted validation fixture\n' > "${AUX_HOSTED_VALIDATION_DIR}/README.txt"
-python3 - "${AUX_HOSTED_DIR}/manifest.json" "${AUX_HOSTED_VALIDATION_DIR}/manifest.json" <<'PY'
+python3 - "${ROOT_DIR}" "${AUX_HOSTED_DIR}/manifest.json" "${AUX_HOSTED_VALIDATION_DIR}/manifest.json" <<'PY'
 import json
 import pathlib
 import sys
 
+creator_home = pathlib.Path.home()
+creator_repo = pathlib.Path(sys.argv[1]).resolve()
 payload = {
     "overall_status": "pass",
     "configuration": {
-        "ssh_private_key_name": "ssh-key-file",
+        "ssh_private_key_name": "id_ed25519",
     },
     "steps": [
         {
             "command": [
                 "scp",
                 "-i",
-                "/path/to/.ssh/ssh-key-file",
-                "<redacted-temporary-path>",
+                str(creator_home / ".ssh" / "id_ed25519"),
+                "/private/tmp/btx-m22-old/source.tar.gz",
                 "root@198.51.100.8:/root/upload.tar.gz",
             ],
-            "cwd": "/path/to/Documents/example/staging-repo",
-            "log": "<redacted-temporary-path>",
+            "cwd": str(creator_repo),
+            "log": "/private/tmp/btx-m22-old/logs/source_upload.log",
         }
     ],
     "artifacts": {
         "source_archive": {
-            "path": "<redacted-temporary-path>",
+            "path": "/private/tmp/btx-m22-old/source.tar.gz",
         },
-        "remote_extract_dir": "<redacted-temporary-path>",
+        "remote_extract_dir": "/private/tmp/btx-m22-old/artifacts/remote_artifacts",
     },
 }
-for target in sys.argv[1:]:
+for target in sys.argv[2:]:
     pathlib.Path(target).write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 PY
 
@@ -105,6 +107,7 @@ window_guide = pathlib.Path(sys.argv[6]).read_text(encoding="utf-8")
 hosted_manifest = json.loads(pathlib.Path(sys.argv[7]).read_text(encoding="utf-8"))
 hosted_validation_manifest = json.loads(pathlib.Path(sys.argv[8]).read_text(encoding="utf-8"))
 tmp_root = sys.argv[9]
+creator_home = str(pathlib.Path.home())
 
 packet_paths = {entry["packet_path"] for entry in packet_manifest["included_sources"]}
 required_packet_paths = {
@@ -134,7 +137,7 @@ if summary["overall_status"] != "fail":
     raise SystemExit("expected placeholder derived intake summary to fail")
 
 rendered_packet_manifest = json.dumps(packet_manifest)
-if "<redacted-home>" in rendered_packet_manifest or tmp_root in rendered_packet_manifest:
+if creator_home in rendered_packet_manifest or tmp_root in rendered_packet_manifest:
     raise SystemExit("packet manifest still leaks creator-machine local paths")
 
 packet_entry = next(
@@ -159,14 +162,14 @@ for ref in required_refs:
         raise SystemExit(f"missing expected relative packet reference: {ref}")
 
 for text in [participant_brief, operator_checklist, window_guide]:
-    if tmp_root in text or "/path/to/Documents/example/staging-repo/" in text:
+    if tmp_root in text or creator_home in text:
         raise SystemExit("creator-machine absolute path leaked into packet docs")
 
 if "infra/btx-seed-server-spec.md" not in window_guide:
     raise SystemExit("packet window guide no longer points at bundled infra spec")
 
 step = hosted_manifest["steps"][0]
-if step["command"][2] != "~/.ssh/ssh-key-file":
+if step["command"][2] != "~/.ssh/id_ed25519":
     raise SystemExit(f"unexpected sanitized ssh key token: {step['command'][2]!r}")
 if step["command"][3] != "source.tar.gz":
     raise SystemExit(f"unexpected sanitized source token: {step['command'][3]!r}")
@@ -178,17 +181,17 @@ if hosted_manifest["artifacts"]["source_archive"]["path"] != "source.tar.gz":
     raise SystemExit("hosted manifest source_archive path was not sanitized")
 if hosted_manifest["artifacts"]["remote_extract_dir"] != "artifacts/remote_artifacts":
     raise SystemExit("hosted manifest remote_extract_dir was not sanitized")
-if "<redacted-home>" in json.dumps(hosted_manifest) or "<redacted-temporary-path>" in json.dumps(hosted_manifest):
+if creator_home in json.dumps(hosted_manifest) or "/private/tmp/btx-m22-old" in json.dumps(hosted_manifest):
     raise SystemExit("hosted manifest still leaks creator-machine local paths")
 
 validation_step = hosted_validation_manifest["steps"][0]
-if validation_step["command"][2] != "~/.ssh/ssh-key-file":
+if validation_step["command"][2] != "~/.ssh/id_ed25519":
     raise SystemExit(f"unexpected sanitized validation ssh key token: {validation_step['command'][2]!r}")
 if hosted_validation_manifest["artifacts"]["source_archive"]["path"] != "source.tar.gz":
     raise SystemExit("hosted validation manifest source_archive path was not sanitized")
 if hosted_validation_manifest["artifacts"]["remote_extract_dir"] != "artifacts/remote_artifacts":
     raise SystemExit("hosted validation manifest remote_extract_dir was not sanitized")
-if "<redacted-home>" in json.dumps(hosted_validation_manifest) or "<redacted-temporary-path>" in json.dumps(hosted_validation_manifest):
+if creator_home in json.dumps(hosted_validation_manifest) or "/private/tmp/btx-m22-old" in json.dumps(hosted_validation_manifest):
     raise SystemExit("hosted validation manifest still leaks creator-machine local paths")
 PY
 

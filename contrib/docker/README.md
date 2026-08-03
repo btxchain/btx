@@ -4,7 +4,7 @@
 This Dockerfile builds and runs a **BTX** full node from source.
 
 Activation is determined only by the reviewed network parameters compiled
-into the node: mainnet activates MatMul v4.7 Epoch A at block height 181'894
+into the node: mainnet schedules MatMul v4.7 Epoch A at the release-selected `H_A`
 (testnet/signet heights and Epochs B–D remain disabled). A CPU-only container is not an
 Epoch-A Profile 1 ExactReplay performance qualification. Operators preparing
 accelerated validation must expose and certify the intended backend on the

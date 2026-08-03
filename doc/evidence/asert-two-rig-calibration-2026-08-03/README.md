@@ -1,11 +1,13 @@
 # Epoch-A ASERT: two-rig, two-vendor work-ratio calibration
 
-Status: **the measurement gap is closed as far as available hardware allows.**
-Both halves of the v3-vs-RC ratio are now measured on the *same silicon*, on
-*two independent accelerator vendors*, and the one previously unexplained
-discrepancy is resolved. Nothing is installed —
-`nMatMulRCAsertRescaleNum/Den` stay neutral and `nMatMulRCHeight` stays
-`INT32_MAX`.
+Status: **historical, non-authorizing measurement corpus.** Both halves of the
+v3-vs-RC ratio were measured on the *same
+silicon*, on *two independent accelerator vendors*, and the previously
+unexplained discrepancy is resolved. The raw artifact records the disabled
+chain-parameter state and source revision at measurement time. It predates the
+strict schema-2 provenance/fallback checks and is intentionally rejected by the
+current derivation tool. It is not an activation authorization and must not be
+used as exact-final-binary evidence.
 
 ## What was blocking this
 
@@ -31,8 +33,9 @@ ExtractMX work rose **15.2×** while GEMM calls halved. That is an episode-shape
 change from a correctness fix, not drift — and the 07-30 directory's own README
 already records a CUDA TU fingerprint that does not match tip and points at the
 08-01 replacement. **The 21.2 s figure measured less work than consensus
-requires and must not be used for calibration.** The current-code figure is
-32.0–32.6 s, and five independent canary corpora agree within 0.6 s.
+requires and must not be used for calibration.** At the historical measurement
+revision the corrected figure was 32.0–32.6 s, and five canary corpora agreed
+within 0.6 s.
 
 ## Method
 
@@ -55,6 +58,8 @@ the same machines at the same code freeze.
 | **γ = R_M / A** | **2.09** | **1.46** |
 | regime | sigma-bound | sigma-bound |
 | **k = R_eff / R_rc** | **121,581** | **19,892** |
+| aggregate raw v3 attempts/s | 215,360,362.49 | 41,251,017.97 |
+| **C = raw attempts/s ÷ RC episodes/s** | **6,898,853,852.15** | **1,155,482,264.41** |
 
 Cross-vendor spread **6.11×**; geometric mean **49,178**.
 
@@ -81,24 +86,46 @@ capped at 1.103× per block by the MTP rule), while over-loosening is
 logarithmic (even 10⁶× too loose costs ~4.4 h and a few hundred early blocks).
 **Bias high.**
 
-Given that, a defensible install sits at or above the larger measured value —
-`k ≳ 1.2e5` — with headroom for the fact that neither rig accelerates v3's sigma
-stage the way a dedicated miner would (raising `R_sigma` raises `k`). The
+The consensus field is the pre-gate coefficient `C`, not the realized loosen
+`k`. The historical arithmetic rule was: aggregate
+each provider's raw parent throughput as `sum(attempts) / sum(wall time)`,
+multiply by mean RC episode seconds, round half-up to an integer, and choose the
+larger required-provider result because under-loosening is the asymmetric
+liveness risk. On this historical corpus that yields **`6898853852/1`** from CUDA; the
+corresponding Metal result is `1155482264/1`.
+
+The current tool additionally requires schema-2 raw samples from clean binaries
+that embed one exact revision/fingerprint, explicit required-backend selection,
+and zero CPU fallbacks. It derives RC mean wall time from individual runs rather
+than trusting a supplied mean. The release coefficient remains provisional
+until both vendors rerun that campaign at the final code freeze.
+
+This selection retains headroom for the fact that neither rig accelerates v3's
+sigma stage the way a dedicated miner would (raising `R_sigma` raises `C`). The
 MAC-ratio anchor `2^14·1027 = 16,826,368` is **342× above** the geometric mean:
 still inside the survivable band and on the safe side, but it would mint a few
 hundred blocks early.
 
 What this campaign **cannot** settle, and no further measurement here will:
 the network's hardware mix at the fork, and the behaviour of a miner that
-accelerates the sigma stage. Both push `k` up, never down, which is the safe
-direction. Choosing the final constant is therefore a governance decision
-informed by these bounds, not a measurement result — and it must be installed in
-the same commit as the activation height, since `chainparams.cpp` deliberately
-refuses a neutral rescale at a live Profile-1 height.
+accelerates the sigma stage. Both push `C` up, never down, which is the safe
+direction. Choosing the provider-selection policy remains a governance
+decision informed by these bounds. The arithmetic is now reproducible and must
+be rerun against the exact final binaries before the activation-height commit.
 
 ## Artifacts
 
 - `raw/two-rig-v3-vs-rc.json` — raw samples and derived values for both rigs.
+- A final schema-2 corpus will produce `derived/asert-coefficient.json` with:
+
+  ```bash
+  python3 contrib/matmul-v4/derive-epoch-a-asert.py \
+    --source-revision <exact-final-40-character-revision> \
+    --expected-coefficient <candidate-coefficient>
+  ```
+
+The legacy schema-1 file in `raw/` is retained only to document the earlier
+measurement and is expected to fail this command.
 
 Machine-class and provider capability data only: no hostname, account name,
 filesystem path, device serial, network address, or credential.

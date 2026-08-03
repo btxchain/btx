@@ -4,7 +4,7 @@
 > activated epochs require dual validation, Profile 1 proof authority, and only
 > then Profile 2 proof authority. See
 > [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md).
-> Mainnet Epoch A (v4 = BMX4C = RC) now activates at height 182'600; all other transition heights remain disabled.
+> Mainnet Epoch A (v4 = BMX4C = RC) remains a release candidate pending exact-final CUDA+Metal evidence, reviewed ASERT calibration, ratification, and selection of a live activation height; all other transition heights remain disabled.
 
 # BTX MatMul — Deterministic Next-Generation Committed Object: Design Memo
 

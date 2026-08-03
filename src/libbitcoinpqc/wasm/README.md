@@ -76,9 +76,9 @@ node test/test-wasm.mjs            # sizes, determinism, sign/verify roundtrips
 node test/print-wasm-vectors.mjs   # parity vectors (CI diffs vs test/native_parity.c)
 ```
 
-CI: `.github/workflows/libbitcoinpqc-wasm.yml` builds the module, runs the
-functional tests, builds the native library, and asserts native and WASM
-keygen produce identical output for identical entropy.
+Local validation builds the module, runs the functional tests, builds the
+native library, and asserts native and WASM keygen produce identical output
+for identical entropy. GitHub Actions is intentionally disabled.
 
 ## JS usage sketch
 

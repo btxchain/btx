@@ -1,7 +1,10 @@
-# Sealed CUDA + Metal Profile-1 golden cohort (final freeze)
+# Sealed CUDA + Metal Profile-1 golden cohort (historical freeze)
 
-Status: **`complete_multi_gpu_match: true` at freeze `78a88af5`** — the tree that
-carries every launch-blocker fix in this branch.
+Status: **historical, non-authorizing evidence.** The artifacts recorded
+`complete_multi_gpu_match: true` at freeze `78a88af5`, but later
+build-relevant changes invalidate that freeze for activation. The digests are
+preserved as evidence of cross-provider agreement at that revision; they are
+not the exact-final production manifest.
 
 ## Policy
 
@@ -43,13 +46,12 @@ actually carries those fixes.
 
 ## What it closes, and what it does not
 
-It closes the production-golden policy's matching-corpora requirement at the
-final code freeze. Combined with `../asert-two-rig-calibration-2026-08-03/`,
-which closes the calibration measurement gap, the remaining barrier to
-populating `CommittedRCProductionGoldenManifest()` is a governance decision on
-the ASERT constant — not a missing measurement. Public heights remain
-`INT32_MAX`, both ratification flags remain false, and the manifest remains
-empty.
+At `78a88af5` this closed the comparator's matching-corpora requirement for
+that tree. It does not close the current production-golden gate: the exact
+final build-relevant revision must be rerun on CUDA and Metal, and the ASERT
+campaign must satisfy the current schema-2 provenance and fallback checks.
+Only those new artifacts may populate
+`CommittedRCProductionGoldenManifest()` or support ratification.
 
 Two providers agreeing does not prove the absence of a common specification bug;
 the portable oracle remains the dispute tool.
