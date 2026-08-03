@@ -109,8 +109,18 @@ RCScale ComputeScaleForEpoch(int32_t epoch, const Consensus::Params& p, const RC
 
 /**
  * Committed round-stream byte count for one episode (all rounds).
- * Layout matches RunEpisode / RoundMerkleStream (R.4.1):
- *   per round: Z_int8 ‖ Σ_layer (X ‖ G ‖ D_int8)
+ *
+ * Layout matches what RoundMerkleStream actually absorbs in RunEpisode:
+ *   per round: Z_int8 ‖ for each layer l: X[l+1]
+ *
+ * The fused-FFN change stopped committing the per-layer G and D matrices --
+ * only the layer OUTPUT X[l+1] goes into the stream, and H is recomputed by the
+ * verifier. This estimator still added a g_bytes (b_seq*d_model) and a d_bytes
+ * (d_model^2) term per layer, so it over-stated the transcript by roughly a
+ * factor of three at production dimensions. That fed CheckF3Bound, making the
+ * structural growth gate reject episode shapes that are in fact well inside the
+ * Merkle-vs-MAC budget.
+ *
  * plus, only when kRCSegmentLeavesEnabled, the LE int64 Z/D segment partials.
  * STOP-AND-STABILIZE parks segment leaves OFF — this estimate respects that.
  */
@@ -118,10 +128,8 @@ uint64_t EstimateRCTranscriptStreamBytes(const RCEpisodeParams& p)
 {
     const uint64_t z_bytes = static_cast<uint64_t>(p.n_q) * p.d_head;
     const uint64_t x_bytes = static_cast<uint64_t>(p.b_seq) * p.d_model;
-    const uint64_t g_bytes = static_cast<uint64_t>(p.b_seq) * p.d_model;
-    const uint64_t d_bytes = static_cast<uint64_t>(p.d_model) * p.d_model;
     uint64_t per_round =
-        z_bytes + static_cast<uint64_t>(p.L_lyr) * (x_bytes + g_bytes + d_bytes);
+        z_bytes + static_cast<uint64_t>(p.L_lyr) * x_bytes;
 
     if constexpr (kRCSegmentLeavesEnabled) {
         const uint64_t z_seg_bytes =

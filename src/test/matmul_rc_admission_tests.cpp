@@ -535,4 +535,44 @@ BOOST_AUTO_TEST_CASE(deferred_cooldown_is_scoped_to_the_delivering_peer)
     BOOST_CHECK(!cooldowns.Contains(hash, /*peer_id=*/2, start));
 }
 
+
+// A bounded store declining to allocate is NOT peer misbehaviour.
+//
+// Two limiters on the RCADMIT path used to punish the sender: the per-peer recv
+// bucket (charged whenever the sidecar's header has not reached our index yet,
+// which is the ORDINARY relay ordering) and RememberResult::RateLimited. Both
+// disconnected honest miners and relayers producing blocks faster than the
+// allowance. This pins the store's half of that contract: RateLimited is a
+// refusal to store, reached by ordinary volume, and it is distinct from the
+// Invalid verdict that genuinely indicates abuse.
+BOOST_AUTO_TEST_CASE(rate_limited_is_a_refusal_to_store_not_an_invalid_ticket)
+{
+    node::RCAdmissionStore::Config cfg;
+    node::RCAdmissionStore store{cfg};
+    const auto now{std::chrono::steady_clock::now()};
+    const uint64_t netgroup{7};
+
+    // Push well past the per-netgroup unknown allowance with well-formed
+    // tickets for distinct hashes -- exactly what a burst of ordinary relay
+    // from one source looks like.
+    size_t rate_limited{0};
+    size_t invalid{0};
+    for (uint32_t i = 0; i < cfg.max_unknown_submissions_per_netgroup + 8; ++i) {
+        node::RCAdmissionTicket ticket{};
+        ticket.block_hash = uint256{i + 1};
+        const auto result{store.Remember(ticket, netgroup, now)};
+        if (result == node::RCAdmissionStore::RememberResult::RateLimited) ++rate_limited;
+        if (result == node::RCAdmissionStore::RememberResult::Invalid) ++invalid;
+    }
+
+    // The allowance is reached...
+    BOOST_CHECK_GT(rate_limited, 0U);
+    // ...and reaching it never masquerades as an invalid ticket, which is the
+    // verdict callers are still entitled to treat as misbehaviour.
+    BOOST_CHECK_EQUAL(invalid, 0U);
+    // Memory stays bounded by the store itself, which is why the caller can
+    // safely drop instead of disconnecting.
+    BOOST_CHECK_LE(store.UnknownSize(), cfg.max_unknown_entries);
+}
+
 BOOST_AUTO_TEST_SUITE_END()
