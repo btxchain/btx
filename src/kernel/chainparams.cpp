@@ -713,20 +713,27 @@ public:
         // Profile 2 and Stage-3 proof authority remain separate transitions.
         // MatMul v4.7 EPOCH A — ACTIVATION HEIGHT INSTALLED.
         //
-        // H_A = 182'283. Chosen as the mainnet tip when this was set
-        // (178'283) plus 4'000 blocks; at the 90 s target spacing that is
-        // 360'000 s = 100 hours of deployment runway. Recompute this against
-        // the live tip if the merge slips -- the runway is measured from the
-        // tip at the moment the constant is chosen, not from the merge.
+        // H_A = 182'600. Chosen against the live mainnet tip 178'349, i.e.
+        // 4'251 blocks of runway. Sized on MEASURED spacing rather than the
+        // 90 s target: the realized interval is 89 s over the last 4'032
+        // blocks and 85 s over the last 144. Using the faster recent figure
+        // is the conservative direction here -- it makes the runway AT LEAST
+        // 100 hours (100.4 h at 85 s, 105.1 h at 89 s) rather than at most.
+        //
+        // The previous constant 182'600 was sized against tip 178'283 and had
+        // decayed to ~93 h of runway by the time the tree was ready. Recompute
+        // this against the live tip if the merge slips again -- the runway is
+        // measured from the tip when the constant is chosen, not from the
+        // merge, and it only shrinks while the PR sits.
         //
         // IsMatMulV47EpochAActivationTuple() requires v4, BMX4C and RC to share
         // one height, with DRLT and the coupled height disabled and profile 1,
         // so all three are set together here. AssertBMX4CConstructionInvariants
         // additionally refuses a neutral rescale at a live Profile-1 height,
         // which is why the calibration above is installed in this same commit.
-        consensus.nMatMulV4Height = 182'283;
-        consensus.nMatMulBMX4CHeight = 182'283;
-        consensus.nMatMulRCHeight = 182'283;
+        consensus.nMatMulV4Height = 182'600;
+        consensus.nMatMulBMX4CHeight = 182'600;
+        consensus.nMatMulRCHeight = 182'600;
         consensus.nMatMulRCAsertRescaleNum = kRCEpochAAsertRescaleNum;
         consensus.nMatMulRCAsertRescaleDen = kRCEpochAAsertRescaleDen;
         consensus.nMaxReorgDepth = 12;

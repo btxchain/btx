@@ -4,13 +4,13 @@
 > `doc/btx-matmul-v4.7-transition-roadmap.md`: Epoch A uses Profile 1 with
 > ExactReplay authority and optional shadow proofs; Epoch B requires both a durable
 > Profile-1 proof and ExactReplay; Epoch C makes the Profile-1 proof authoritative;
-> and Epoch D separately moves to Profile 2 under proof authority. Mainnet Epoch A (v4 = BMX4C = RC) now activates at height 182'283; all other transition heights remain disabled. Any older “production,” “default,” “shipping,” direct-fork,
+> and Epoch D separately moves to Profile 2 under proof authority. Mainnet Epoch A (v4 = BMX4C = RC) now activates at height 182'600; all other transition heights remain disabled. Any older “production,” “default,” “shipping,” direct-fork,
 > sampled-verifier, or coupled-profile recommendation below is historical unless the
 > canonical roadmap expressly carries it forward.
 
 # BTX MatMul v4.5 — ENC_RC / ENC_RC_COUPLED V3 production consensus specification
 
-**Status:** INTEGRATED — V3 production is the default coupled profile (`nMatMulRCCoupledProfile` defaults to `3`; the aggregate `RCCoupConsensusConfig{}` default `transcript_version` is `ENC_RC_V3`). Public COUPLED activation heights remain `INT32_MAX` (the mainnet height-182'283 Epoch-A activation is the uncoupled Profile-1 episode, not this coupled profile). GKR arbiter OFF. No hardware attestation.
+**Status:** INTEGRATED — V3 production is the default coupled profile (`nMatMulRCCoupledProfile` defaults to `3`; the aggregate `RCCoupConsensusConfig{}` default `transcript_version` is `ENC_RC_V3`). Public COUPLED activation heights remain `INT32_MAX` (the mainnet height-182'600 Epoch-A activation is the uncoupled Profile-1 episode, not this coupled profile). GKR arbiter OFF. No hardware attestation.
 
 **Base tip:** `f861bd5` → integration `wip/v45-production-coupled`.
 

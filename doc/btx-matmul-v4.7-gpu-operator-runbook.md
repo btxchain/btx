@@ -1,6 +1,6 @@
 # MatMul v4.7 GPU validator operator runbook
 
-Status: mainnet RC activation is set at block height 182'283 (Epoch A);
+Status: mainnet RC activation is set at block height 182'600 (Epoch A);
 testnet/signet remain disabled
 
 Canonical transition and activation policy:

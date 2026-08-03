@@ -1033,7 +1033,7 @@ BOOST_AUTO_TEST_CASE(rc_dc_episode_profile1_byte_identical_guard)
 }
 
 // (d) The profile selector is 1|2; MatMul v4.7 defaults to Profile 1
-//     ExactReplay. Mainnet is live at the Epoch-A height 182'283.
+//     ExactReplay. Mainnet is live at the Epoch-A height 182'600.
 BOOST_AUTO_TEST_CASE(rc_dc_episode_profile_selector_default_and_mainnet)
 {
     Consensus::Params def;
@@ -1042,13 +1042,13 @@ BOOST_AUTO_TEST_CASE(rc_dc_episode_profile_selector_default_and_mainnet)
     const auto main =
         CreateChainParams(ArgsManager{}, ChainType::MAIN)->GetConsensus();
     BOOST_CHECK_EQUAL(main.nMatMulRCProfile, 1u);
-    // Epoch A is live at 182'283. The selector is still Profile 1, and RC is
+    // Epoch A is live at 182'600. The selector is still Profile 1, and RC is
     // inactive BELOW the height -- which is the property this case exists to
     // pin, and which an activation height must not change.
-    BOOST_CHECK_EQUAL(main.nMatMulRCHeight, 182'283);
+    BOOST_CHECK_EQUAL(main.nMatMulRCHeight, 182'600);
     BOOST_CHECK(!main.IsMatMulRCActive(0));
     BOOST_CHECK(!main.IsMatMulRCActive(181'893));
-    BOOST_CHECK(main.IsMatMulRCActive(182'283));
+    BOOST_CHECK(main.IsMatMulRCActive(182'600));
     BOOST_CHECK(RCEpisodeParamsEqual(rc::ResolveRCEpisodeParams(main, 0),
                                      rc::DefaultConsensusRCEpisodeParams()));
 
@@ -2919,7 +2919,7 @@ BOOST_AUTO_TEST_CASE(rc_dc_authority_invariant_accepts_aggressive_config)
     // assertion that the height and the coefficient are coupled correctly.
     const auto main = CreateChainParams(ArgsManager{}, ChainType::MAIN)->GetConsensus();
     BOOST_CHECK_EQUAL(main.nMatMulRCProfile, 1u);
-    BOOST_CHECK_EQUAL(main.nMatMulRCHeight, 182'283);
+    BOOST_CHECK_EQUAL(main.nMatMulRCHeight, 182'600);
     BOOST_CHECK(main.nMatMulRCAsertRescaleNum != main.nMatMulRCAsertRescaleDen);
     BOOST_CHECK_EQUAL(main.nMatMulRCAsertRescaleDen, 1);
 }

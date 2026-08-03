@@ -722,7 +722,7 @@ BOOST_AUTO_TEST_CASE(rc_coup_asert_unsafe_ordering_rejected_at_construction)
     // coupled/Profile-2 is a separate, later transition, and
     // IsMatMulV47EpochAActivationTuple() requires the coupled height disabled.
     const auto main = CreateChainParams(ArgsManager{}, ChainType::MAIN)->GetConsensus();
-    BOOST_CHECK_EQUAL(main.nMatMulRCHeight, 182'283);
+    BOOST_CHECK_EQUAL(main.nMatMulRCHeight, 182'600);
     BOOST_CHECK_EQUAL(main.nMatMulRCCoupledHeight, std::numeric_limits<int32_t>::max());
     BOOST_CHECK_EQUAL(main.nMatMulRCCoupledAsertRescaleNum, 1);
     BOOST_CHECK_EQUAL(main.nMatMulRCCoupledAsertRescaleDen, 1);
@@ -769,7 +769,7 @@ BOOST_AUTO_TEST_CASE(rc_coup_unified_height_switch_activates_family_together)
     const auto main_default =
         CreateChainParams(ArgsManager{}, ChainType::MAIN)->GetConsensus();
     // RC live at Epoch A; coupled still disabled (separate later transition).
-    BOOST_CHECK_EQUAL(main_default.nMatMulRCHeight, 182'283);
+    BOOST_CHECK_EQUAL(main_default.nMatMulRCHeight, 182'600);
     BOOST_CHECK_EQUAL(main_default.nMatMulRCCoupledHeight,
                       std::numeric_limits<int32_t>::max());
 }
