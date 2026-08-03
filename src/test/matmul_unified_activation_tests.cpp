@@ -358,4 +358,68 @@ BOOST_AUTO_TEST_CASE(epoch_a_supplying_the_realized_loosen_is_catastrophic)
     BOOST_CHECK(wrong_ratio < arith_uint256{100});
 }
 
+
+// The Epoch-A wide derivation is selected by IsMatMulV47EpochAActivationTuple,
+// and NOTHING outside this file exercises that selection. Regtest defaults are
+// v4=100, BMX4C=100, RC=101 -- not equal, so the tuple is false and MatMulAsert
+// takes the ScaleTargetByTimespan branch instead. Every functional test that
+// crosses the RC boundary also runs -regtestrctoydims=1, which falsifies the
+// tuple as well. Without this case the branch that will run on mainnet at the
+// activation height is chosen by no test at all.
+BOOST_AUTO_TEST_CASE(epoch_a_tuple_selects_the_wide_transition_on_regtest)
+{
+    ArgsManager args;
+    // NOT -regtestrcunifiedheight: that sets RC *and the COUPLED height*, and
+    // the Epoch-A tuple requires the coupled height DISABLED, so the "unified"
+    // option actively prevents the shape it sounds like it produces. The three
+    // heights have to be set individually.
+    args.ForceSetArg("-regtestmatmulltsealaspow", "0");
+    args.ForceSetArg("-regtestdrltheight", "2147483647");
+    args.ForceSetArg("-regtestmatmulv4height", "200");
+    args.ForceSetArg("-regtestbmx4cheight", "200");
+    args.ForceSetArg("-regtestrcheight", "200");
+    args.ForceSetArg("-regtestrctoydims", "0");
+    // Inert on its own (the coupled height is disabled) but still a conjunct of
+    // the tuple, and regtest defaults it true.
+    args.ForceSetArg("-regtestrccoupledtoydims", "0");
+    args.ForceSetArg("-regtestrcprofile", "1");
+    const auto params{CreateChainParams(args, ChainType::REGTEST)};
+    const auto& p{params->GetConsensus()};
+
+    BOOST_REQUIRE_EQUAL(p.nMatMulV4Height, 200);
+    BOOST_REQUIRE_EQUAL(p.nMatMulBMX4CHeight, 200);
+    BOOST_REQUIRE_EQUAL(p.nMatMulRCHeight, 200);
+    // Check each conjunct individually: a bare check on the compound predicate
+    // reports only "false" and leaves the operator guessing which knob a future
+    // regtest default change broke.
+    const int32_t disabled{std::numeric_limits<int32_t>::max()};
+    BOOST_CHECK_EQUAL(p.nMatMulDRLTHeight, disabled);
+    BOOST_CHECK_EQUAL(p.nMatMulRCCoupledHeight, disabled);
+    BOOST_CHECK_EQUAL(p.nMatMulRCProfile, 1);
+    BOOST_CHECK(!p.fMatMulRCUseToyDims);
+    BOOST_CHECK(!p.fMatMulRCCoupledUseToyDims);
+    BOOST_CHECK(!p.fMatMulLTSealAsPoW);
+    BOOST_CHECK(!p.IsMatMulHeaderPoWEnabled());
+    BOOST_CHECK_EQUAL(p.nMatMulV4AsertRescaleNum, p.nMatMulV4AsertRescaleDen);
+    BOOST_CHECK_EQUAL(p.nMatMulBMX4CAsertRescaleNum,
+                      p.nMatMulBMX4CAsertRescaleDen);
+    // This is the assertion that matters: the wide Epoch-A path is reachable
+    // from a real chainparams object, not only from hand-built params.
+    BOOST_CHECK(p.IsMatMulV47EpochAActivationTuple());
+
+    // And the derivation itself produces a loosened, clamped target from a
+    // realistic parent rather than failing closed.
+    arith_uint256 parent{};
+    parent.SetCompact(0x1d00ffff);
+    uint64_t an{0}, ad{0};
+    BOOST_REQUIRE(ReduceRescaleRatioToU64(p.nMatMulRCAsertRescaleNum,
+                                          p.nMatMulRCAsertRescaleDen, an, ad));
+    const auto derived{DeriveMatMulEpochATransitionTarget(
+        parent, p.GetMatMulPreHashEpsilonBitsForHeight(199), an, ad,
+        UintToArith256(p.powLimit))};
+    BOOST_REQUIRE(derived.has_value());
+    BOOST_CHECK(*derived <= UintToArith256(p.powLimit));
+    BOOST_CHECK(*derived > 0);
+}
+
 BOOST_AUTO_TEST_SUITE_END()
