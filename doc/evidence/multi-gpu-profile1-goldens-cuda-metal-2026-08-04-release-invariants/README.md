@@ -1,11 +1,13 @@
 # Multi-GPU Profile-1 ExactReplay golden compare
 
-Status: **non-authorizing corpus-runner output**. Inspect
-`multi-gpu-digest-compare.json` for the fail-closed comparison result. This
-artifact does not change consensus parameters, ratification flags, or the
-committed production manifest. The release gate closes only after CUDA and
-Metal reproduce the exact final clean code freeze and the reviewed seal is
-committed through `CommittedRCProductionGoldenManifest()`.
+Status: **valid PR-97-only seal, superseded for the combined release**. Inspect
+`multi-gpu-digest-compare.json` for the fail-closed comparison result. CUDA and
+Metal validly reproduced the exact `0a1769cdff` build-relevant freeze, and
+`df075c5184` populated `CommittedRCProductionGoldenManifest()` from this
+cohort. Later build-relevant PR changes and the combined v0.33.2 tree are not
+covered by that seal. They require a new exact-final CUDA+Metal corpus and
+manifest update before merge or release. This README clarification does not
+alter the sealed raw artifacts.
 
 ## Policy
 

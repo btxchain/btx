@@ -194,28 +194,26 @@ static constexpr uint32_t BMX4C_NATIVE_PATH_PROVEN_T{24};   //!< proven exact FP
 static constexpr uint32_t BMX4C_FALLBACK_INT8_ACCUMULATOR_BITS{32}; //!< C-1 floor for the INT8 fallback path (true two's-complement int32)
 
 //! DR-34 FAIL-CLOSED ACTIVATION GATE (v4.4 ENC-DR normative spec §5, DR-34).
-//! A public network (main/testnet/signet — regtest exempt) MUST NOT configure a
-//! LIVE (non-INT32_MAX) `nMatMulV4Height` until BOTH activation gates are
-//! recorded as passed IN THIS RELEASE:
+//! Shipping a public network (main/testnet/signet — regtest exempt) with a LIVE
+//! (non-INT32_MAX) `nMatMulV4Height` requires BOTH release gates:
 //!   (1) the §K.2b silicon no-inversion measurement (GO/NO-GO), and
 //!   (2) hard-fork ratification via the L0 amendment process.
-//! This flag is the code-enforced record of that: it defaults to FALSE, and
-//! `AssertBMX4CConstructionInvariants` aborts node startup if any public network
-//! is built with a live v4 height while it is false. It is the same fail-closed
+//! This flag is the source authorization bit for that decision: FALSE makes
+//! `AssertBMX4CConstructionInvariants` abort node startup if any public network
+//! is built with a live v4 height. TRUE permits the tuple but cannot prove that
+//! the external measurements or governance record exist. It is the same fail-closed
 //! MECHANISM as the retired `BTX_MATMUL_SEGREGATED_PROOF_RELAY_READY` flag,
 //! retargeted to the correct object (measured no-inversion + ratification, not
-//! relay readiness). Flip to true ONLY in the deliberate, reviewed source change
-//! of the release that ships activation, AFTER gates (1)-(2) are recorded.
+//! relay readiness). A shipping release may set it true only in a deliberate,
+//! reviewed source change after gates (1)-(2) are recorded. A candidate that
+//! stages TRUE earlier is armed and must remain unmerged until that review.
 //!
-//! Selected TRUE for the Epoch-A release candidate. The final mainnet height is
-//! installed atomically with the exact-final evidence-bound v0.33.2 tuple. Recorded
-//! basis: the seed-grinding advantage is exactly 1.0 and the Profile-1
-//! ExactReplay predicate is byte-reproducible across two independent
-//! accelerator vendors at one code freeze (doc/evidence/
-//! multi-gpu-profile1-goldens-cuda-metal-2026-08-03-sealed, complete_multi_gpu_
-//! match=true). This flag records the operator's ratification decision; it is
-//! not itself a measurement, and flipping it is the deliberate reviewed source
-//! change this comment always required.
+//! A TRUE value plus a finite mainnet height is technically live: a binary
+//! merged unchanged passes this guard and enforces Epoch A at that compiled
+//! height. This constant records a reviewed source decision; it does not
+//! self-verify the external evidence or make a finite tuple inert while review
+//! is pending. The release checklist must bind the exact final source,
+//! CUDA+Metal corpus, ratification record, and live-height runway before merge.
 static constexpr bool BTX_MATMUL_NO_INVERSION_GATE_RATIFIED{true};
 
 //! MatMul v4.7 GPU lifecycle FAIL-CLOSED ACTIVATION GATE.
@@ -227,29 +225,19 @@ static constexpr bool BTX_MATMUL_NO_INVERSION_GATE_RATIFIED{true};
 //! requires frozen production goldens, zero-fallback miner/validator
 //! campaigns, accelerator fault/cancellation tests, sustained tail-latency
 //! evidence, and ASERT calibration against that complete authenticated
-//! lifecycle.  Keep this false in implementation-only releases.  Flip it only
-//! in the separately reviewed activation-height change that records those
-//! artifacts; regtest remains exempt so the implementation can be exercised.
+//! lifecycle. It must remain false in implementation-only releases. A candidate
+//! that stages TRUE with a finite height before those artifacts are recorded is
+//! armed and must remain unmerged until the separately reviewed activation
+//! decision closes them; regtest remains exempt for implementation exercises.
 //!
-//! Selected TRUE for the Epoch-A release candidate. The final mainnet height is
-//! installed atomically with the exact-final evidence-bound v0.33.2 tuple. Recorded
-//! artifacts, each committed under doc/evidence/ and bound to a resolvable
-//! revision and build-relevant tree fingerprint:
-//!   - frozen production goldens, CUDA + Metal, sealed at one code freeze
-//!     (multi-gpu-profile1-goldens-cuda-metal-2026-08-03-sealed): all eight
-//!     digests and frozen header byte strings identical, 1'088 device calls and
-//!     1'129'198'441'725'952 device MACs on each provider, zero CPU GEMM calls,
-//!     zero CPU MACs, zero fallbacks, ExtractMX self-qualification PASS;
-//!   - zero-fallback lifecycle/soak campaign across the RC boundary
-//!     (cuda-profile1-soak-2026-08-02): 38 scenarios including restart and
-//!     cache-persist, which cross a process boundary and therefore exercise the
-//!     durable replay verdict and its consensus-context binding, zero failures;
-//!   - ASERT calibration measured same-silicon on two vendors
-//!     (asert-two-rig-calibration-2026-08-03).
-//!
-//! NOT established by those artifacts, and accepted as residual risk by the
-//! operator in flipping this: multi-day wall-clock soak, multi-peer public
-//! testnet topology, and upgrade behaviour across released binaries.
+//! A TRUE value plus a finite mainnet tuple is technically live: it satisfies
+//! this startup guard and does not wait for a document, runtime vote, or later
+//! flag flip. The constant is only the source-level decision record; it does
+//! not self-verify the required exact-final CUDA+Metal seal, schema-4 ASERT
+//! campaign, strict-device trusted-mirror rehearsal, full-suite closeout, or
+//! the reviewed disposition of soak, multi-peer testnet, fault/recovery, and
+//! released-binary upgrade evidence. Those remain external release gates and
+//! must describe the exact source that is merged.
 static constexpr bool BTX_MATMUL_V47_GPU_LIFECYCLE_GATE_RATIFIED{true};
 
 /**
@@ -593,7 +581,9 @@ struct Params {
      * too expensive for routine 90-second validation). The profile
      * selects WHICH dims activate at nMatMulRCHeight, not WHETHER — a public net
      * still only runs ENC_RC once nMatMulRCHeight is finite (and that finite
-     * public height itself remains gated on BTX_MATMUL_NO_INVERSION_GATE_RATIFIED).
+     * public height itself remains gated on
+     * BTX_MATMUL_NO_INVERSION_GATE_RATIFIED and
+     * BTX_MATMUL_V47_GPU_LIFECYCLE_GATE_RATIFIED).
      * The coupled ~16× ASERT rescale takes effect together with a
      * finite profile-2 activation height. Values other than {1,2} are rejected at
      * construction (AssertBMX4CConstructionInvariants). */
@@ -1120,9 +1110,10 @@ struct Params {
      *  disabled. ASERT's RC branch owns the one-time calibration at this
      *  unified height, so the superseded v4/BMX4C ratios must be inert.
      *
-     *  This predicate deliberately does not include external ratification:
-     *  AssertBMX4CConstructionInvariants combines it with
-     *  BTX_MATMUL_NO_INVERSION_GATE_RATIFIED for public networks. */
+     *  This predicate deliberately does not include source authorization:
+     *  AssertBMX4CConstructionInvariants combines it with both
+     *  BTX_MATMUL_NO_INVERSION_GATE_RATIFIED and
+     *  BTX_MATMUL_V47_GPU_LIFECYCLE_GATE_RATIFIED for public networks. */
     bool IsMatMulV47EpochAActivationTuple() const
     {
         const int32_t disabled{std::numeric_limits<int32_t>::max()};

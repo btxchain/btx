@@ -19,15 +19,19 @@ is `6931159304/1`; and both public ratification records are `true`. These are
 candidate source values, not evidence that the release is ready or that the
 currently deployed network has activated them.
 
-Deployment remains **NO-GO**. The committed manifest and its supporting
-evidence are stale relative to the exact-final combined v0.33.2 source tree.
-Before release, that exact tree must close at least the revision-bound CUDA and
-Metal production-golden corpus, provider-bound ASERT and complete-lifecycle
-calibration, and production strict-device trusted-mirror rehearsal gates. The
-tuple must also be rechecked against the live mainnet tip immediately before
-the final source freeze so its upgrade runway remains adequate. Until those
-gates pass on the exact final tree, do not merge, ship, or rely on the armed
-height and ratification values.
+Deployment remains **NO-GO**. The CUDA+Metal seal committed at PR #97 commit
+`df075c5184` is valid for its exact PR-97-only freeze: both providers reproduced
+the frozen headers and digests under the hardened provenance checks. It is not
+an exact-final seal for later build-relevant PR changes or for the combined
+v0.33.2 source tree. Before release, that exact combined tree must close the
+revision-bound CUDA+Metal corpus, provider-bound schema-4 ASERT and
+complete-lifecycle calibration, production strict-device trusted-mirror
+rehearsal, and full unit and functional-suite closeout. The review must also
+record the disposition of the required soak, multi-peer testnet,
+fault/recovery, and released-binary campaigns. The tuple must be rechecked
+against the live mainnet tip immediately before the final source freeze so its
+upgrade runway remains adequate. Until then, do not merge or ship: the armed
+height and true flags would take effect if this source were released.
 
 For shielded launch scope, this runbook must be read together with
 `doc/btx-shielded-production-status-2026-03-20.md` and

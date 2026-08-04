@@ -4,7 +4,11 @@ This guide primarily describes the legacy product-digest CUDA path. For
 MatMul v4.7 Epoch A, CUDA qualification additionally requires full Profile 1
 ExactReplay, strict no-fallback telemetry, a corrected 100-run loaded campaign,
 and cross-machine golden parity. A legacy digest backend appearing active is
-not sufficient, and Profile 2 is not the interim replay requirement. Mainnet Epoch A remains a release candidate pending exact-final CUDA+Metal evidence, reviewed ASERT calibration, ratification, and selection of a live activation height; all other
+not sufficient, and Profile 2 is not the interim replay requirement. Mainnet
+Epoch A has a finite compiled candidate height and true flags, so it would
+activate if merged unchanged; release remains NO-GO pending exact-final
+combined-tree CUDA+Metal evidence, schema-4 ASERT review, full closeout, and
+live-tip runway validation; all other
 transition heights remain disabled. See
 [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md).
 

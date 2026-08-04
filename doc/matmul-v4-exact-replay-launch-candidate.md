@@ -2,8 +2,11 @@
 
 Status: launch-candidate gate record for Epoch A. **Epoch A is not yet a
 shipped public-network transition.** The candidate tuple in
-`src/kernel/chainparams.cpp` must receive a release-final height and ASERT
-coefficient only after exact-final-binary evidence passes. The canonical
+`src/kernel/chainparams.cpp` already has a finite height, ASERT coefficient,
+and true ratification flags; those are technically live if merged unchanged.
+They remain release candidates that must be reviewed or replaced before the
+final source freeze. The exact-final-binary evidence must then confirm that
+unchanged tuple; any later change repeats the freeze and evidence. The canonical
 four-epoch transition and naming rules are defined in
 [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md).
 
@@ -36,12 +39,15 @@ disabled; Profile 1 and production dimensions selected; unfinished Stage-3
 proof authority and HeaderPoW off. The v4 and BMX4C ASERT ratios remain inert
 at `1/1`, while the RC branch owns one provisional one-time v3-to-Epoch-A
 calibration. The candidate coefficient and its realized target change are
-deliberately non-authorizing until they are re-derived from an exact-final
+technically effective at the compiled height; calling them provisional does
+not make them inert. Candidate calibration must derive and review the proposed
+coefficient first; after it is installed in the final freeze, an exact-final
 schema-4 merged two-provider corpus assembled from schema-3 parent samples and
-schema-2 CUDA+Metal RC artifacts. The two L0 source flags are staged true for
-candidate testing, but the activation review must re-affirm them against that
-final evidence; the source flags alone do not constitute ratification or a
-merge decision.
+schema-2 CUDA+Metal RC artifacts must confirm it without a source change. The two L0 source
+flags are true and satisfy the code gate, but the activation review must
+re-affirm them against that final evidence before merge; a source constant is
+not, by itself, evidence that the required operational and governance review
+occurred.
 
 Round `r` is derived from round `r-1`'s root, so rounds are not sampled or run
 concurrently. The serialized block header remains 182 bytes and commits only
@@ -252,7 +258,8 @@ Current candidate status before a release-final height:
   v4/BMX4C/RC heights, withdrawn paths off, HeaderPoW off, v4/BMX4C ASERT
   inert, and RC as the sole calibrated branch.
 
-Current verdict: **NO-GO for merge or activation while the revision-bound
-CUDA+Metal corpus, schema-4 ASERT rerun, full-suite closeout, and live-tip
-runway selection remain open.** Historical artifacts remain useful diagnostics
-but do not authorize the final source tree.
+Current verdict: **NO-GO for merge or activation while release gates remain
+open, including the revision-bound CUDA+Metal corpus, schema-4 ASERT rerun,
+strict-device trusted-mirror rehearsal, full-suite closeout, reviewed
+operational-campaign dispositions, and live-tip runway selection.** Historical
+artifacts remain useful diagnostics but do not authorize the final source tree.

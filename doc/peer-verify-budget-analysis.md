@@ -6,7 +6,10 @@
 > cancellation. They must not be copied into v4.7 policy. The current
 > authority and admission invariants are defined by
 > [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md);
-> mainnet Epoch A remains a release candidate pending exact-final CUDA+Metal evidence, reviewed ASERT calibration, ratification, and selection of a live activation height; all other production
+> mainnet Epoch A has a finite compiled candidate height and true flags, so it
+> would activate if merged unchanged; release remains NO-GO pending exact-final
+> combined-tree CUDA+Metal evidence, schema-4 ASERT review, full closeout, and
+> live-tip runway validation; all other production
 > transition heights remain disabled.
 
 ## Parameter Definition

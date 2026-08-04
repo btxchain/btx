@@ -15,16 +15,19 @@ infrastructure, and test suites.
 
 ## MatMul v4.7 transition — Epoch A release candidate
 
-This branch carries the staged MatMul v4.7 transition and an **Epoch-A release
-candidate**. The candidate stages one atomic `nMatMulV4Height = nMatMulBMX4CHeight =
+This branch carries the MatMul v4.7 transition and an **Epoch-A release
+candidate**. The candidate contains one atomic `nMatMulV4Height = nMatMulBMX4CHeight =
 nMatMulRCHeight = H_A` tuple and both ratification constants; testnet and
 signet heights remain disabled, as do Epochs B–D, DRLT, and coupled RC. The
 numeric `H_A` and one-time RC ASERT coefficient in `src/kernel/chainparams.cpp`
-are not release-final until the exact-final-binary CUDA+Metal campaign passes
-and release preparation recomputes at least 96 hours of runway from the live
-tip. Those staged constants are non-authorizing until the exact-final evidence
-and activation review pass. This draft PR must not be described as already
-activated or shipped.
+are candidate values. Release preparation must first settle the tuple and
+recompute at least 96 hours of runway from the live tip, freeze that source,
+and then run the exact-final-binary CUDA+Metal and ASERT confirmation campaigns
+without changing it. The finite height and true flags are technically live if this source is
+merged unchanged; review status does not make them inert. This draft remains
+NO-GO for merge or release until the exact-final evidence and activation review
+pass; any tuple change repeats the freeze and evidence. It must not be described
+as already deployed or shipped.
 
 The transition deliberately separates verification authority from workload
 size:

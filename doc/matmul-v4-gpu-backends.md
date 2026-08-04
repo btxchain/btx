@@ -2,7 +2,7 @@
 > backend contract below remains useful for the old workload, but it is not the
 > Epoch-A certification procedure. MatMul v4.7 launches with Profile 1
 > ExactReplay; proof authority and Profile 2 occur only in later, separately
-> activated epochs. Mainnet Epoch A (v4 = BMX4C = RC) remains a release candidate pending exact-final CUDA+Metal evidence, reviewed ASERT calibration, ratification, and selection of a live activation height; all other transition heights remain disabled. See
+> activated epochs. Mainnet Epoch A (v4 = BMX4C = RC) has a finite compiled candidate height and true source flags, so it would activate if merged unchanged; the release remains NO-GO pending exact-final combined-tree CUDA+Metal evidence, reviewed schema-4 ASERT calibration, ratification re-affirmation, full closeout, and live-tip runway validation. All other transition heights remain disabled. See
 > [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md)
 > and [`benchmarking.md`](benchmarking.md).
 
@@ -18,9 +18,10 @@ cross-vendor test vectors). **No GPU backend may be flagged mining-capable —
 and v4 must not activate on mainnet — until every backend intended to mine has
 passed the checklist below on real hardware.**
 
-For Epoch A, the additional non-negotiable contract is byte-identical full
-Profile 1 replay for the same frozen, dimension-bound headers across the
-portable oracle, Metal, and CUDA. A certification report must show all
+For Epoch A, the additional non-negotiable launch contract is byte-identical
+full Profile 1 replay for the same frozen, dimension-bound headers on Metal and
+CUDA. The portable implementation remains the backend-neutral diagnostic and
+dispute oracle, but it is not counted as a production launch provider. A certification report must show all
 consensus contractions and device-side pipeline stages on the intended
 accelerator with zero unintended fallback, plus a continuous 100-sample
 campaign, back-to-back drain, and three-branch reorg behavior. A Profile 2

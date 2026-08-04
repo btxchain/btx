@@ -3,8 +3,10 @@
 Status: **canonical documentation for the MatMul v4.7 transition. Epoch A is a
 release candidate, not a shipped activation.** The atomic `H_A` tuple in
 `src/kernel/chainparams.cpp`, ratification flags, and RC ASERT coefficient are
-release-final only after exact-final-binary evidence and a live-tip runway
-calculation.
+candidate values. The release must settle them with a live-tip runway
+calculation before the final source freeze, then confirm that unchanged freeze
+with exact-final-binary evidence. Any tuple change repeats the freeze and
+evidence.
 Testnet and signet heights remain disabled, as do Epochs B–D everywhere.
 This document records the transition contract and the evidence still required
 to close the Epoch-A gates (§4). Consensus source schedules the transition;
@@ -50,7 +52,7 @@ The candidate sets the tuple atomically on mainnet at one release-selected
 | Authority | ExactReplay; Stage-3 proof authority remains disabled | ExactReplay only |
 | Header admission | HeaderPoW disabled; the fixed header remains 182 bytes | disabled; 182 bytes |
 | ASERT | v4 and BMX4C ratios remain `1/1`; RC owns the reviewed final-binary calibration | v4/BMX4C `1/1`; RC candidate is provisional pending the schema-4 exact-final-binary rerun |
-| Ratification | explicit L0 ratification is a separate reviewed decision | the source constants are staged true in this candidate, but are non-authorizing until exact-final evidence and the activation review re-affirm them |
+| Ratification | explicit L0 ratification is a separate reviewed decision | the source constants are true and technically satisfy the startup gate; merging unchanged arms the candidate, so release remains blocked until exact-final evidence and the activation review re-affirm them |
 
 The equality of the three heights prevents any digest-only v4/BMX4C interval
 before ExactReplay authority. The ASERT assignment is deliberately
@@ -84,7 +86,8 @@ proof may be produced, relayed, and shadow-verified, but it cannot:
 - replace replay; or
 - create a dependency on process-local proof availability.
 
-This is the only epoch proposed for the first activation-height PR.
+This is the only epoch proposed for the first 0.33.2 release/activation
+review. Later epochs require their own explicit activation changes.
 
 ### Epoch B — Profile 1 mandatory proof plus ExactReplay
 
@@ -156,9 +159,10 @@ committed reports record only a broad hardware class and contain no hostname,
 username, personal path, or device serial. This 2026-08-01 campaign did not
 by itself constitute activation evidence; see §4 for which gates the later
 sealed cohort, soak, and calibration artifacts closed, and which remain open.
-The candidate currently stages both source flags true, but that state does not
-authorize activation and must be re-affirmed against the exact-final evidence
-during the release review.
+The candidate currently sets both source flags true. Together with the finite
+height, that state technically passes the construction guard and will activate
+Epoch A if merged unchanged. It is not evidence of governance or operational
+closure, so the release review must re-affirm it against exact-final evidence.
 
 ## 4. Epoch-A activation gates — current candidate status
 
@@ -167,15 +171,17 @@ from the exact-final-revision evidence still required.
 
 **Historical evidence retained for diagnostics** (all under `doc/evidence/`):
 
-- **Sealed CUDA+Metal golden cohort at one code freeze**
-  (`multi-gpu-profile1-goldens-cuda-metal-2026-08-03-sealed`): both providers
+- **Sealed CUDA+Metal golden cohort at one PR #97 code freeze**
+  (`multi-gpu-profile1-goldens-cuda-metal-2026-08-04-release-invariants`,
+  sealed by `df075c5184` from the `0a1769cdff` build-relevant freeze): both providers
   reproduced from the same `source_revision` and build-relevant
   `source_tree_fingerprint`, all eight digests and frozen header byte strings
   byte-identical, zero CPU GEMM calls/MACs/fallbacks; passed the hardened
-  provenance comparator and was committed as an earlier production manifest
+  provenance comparator and was committed as the valid PR-97-only production manifest
   (`CommittedRCProductionGoldenManifest()` in
   `src/matmul/matmul_v4_rc_production_canary.cpp`). It must be regenerated from
-  the final clean revision and does not close gate 1 for the current tree.
+  the final combined v0.33.2 clean revision. Later build-relevant PR changes
+  also supersede it, so it does not close gate 1 for the current tree.
 - **Zero-fallback lifecycle/soak campaign across the RC boundary**
   (`cuda-profile1-soak-2026-08-02`): 45 minutes, 38 scenarios (relay,
   competing branches, restart, cache persistence, IBD boundary) on two local
@@ -193,9 +199,11 @@ from the exact-final-revision evidence still required.
 - exact-final-revision CUDA+Metal corpus and manifest seal;
 - schema-4, zero-fallback ASERT rerun on both required providers;
 - full unit and functional suite closeout on the final tree;
+- production strict-device trusted-mirror rehearsal on the final tree;
 - a live-tip activation height with at least 96 hours of runway;
 - multi-day wall-clock soak;
 - multi-peer public testnet topology (gate 7 as written below);
+- fault/recovery and cancellation campaign disposition;
 - upgrade behavior across released binaries.
 
 Other items below (HIP reproduction — optional per the golden policy and
@@ -233,9 +241,10 @@ The pre-activation contract required:
 7. A multi-day testnet soak must cover block relay, competing branches,
    restarts, cache persistence, IBD boundaries, and upgrade behavior.
 8. Checkpoint and historical-sync trust assumptions must be disclosed.
-9. The atomic tuple, measured RC ASERT ratio, and explicit L0 ratification must
-   be a separate, narrow review with an operator upgrade window and a
-   pre-activation stop procedure. A partial tuple must fail construction.
+9. The atomic tuple, measured RC ASERT ratio, and explicit L0 source
+   authorization must receive a focused release/activation review within the
+   combined 0.33.2 change, with an operator upgrade window and a pre-activation
+   stop procedure. A partial tuple must fail construction.
 
 ## 5. Near-tip and admission invariants
 
@@ -290,13 +299,14 @@ The branch selects Profile 1 and contains a finite candidate Epoch-A tuple:
 `nMatMulV4Height = nMatMulBMX4CHeight = nMatMulRCHeight = H_A`, with the
 candidate RC rescale and both ratification flags set. That tuple is a real
 consensus instruction if merged; it is not made inert by calling it a release
-candidate. The branch therefore remains **NO-GO** until exact-final CUDA+Metal
-evidence and a revision-bound ASERT calibration validate the same source,
-height, coefficient, and flags, and the live-tip runway is rechecked. Any
-change to that fingerprinted freeze requires regenerating the corpus and
-production manifest. Epochs B–D remain unreachable (no height-versioned proof
-selectors exist), while testnet and signet remain on v3 with all transition
-heights disabled.
+candidate. The branch therefore remains **NO-GO** until all release gates close,
+including exact-final CUDA+Metal evidence, a revision-bound ASERT calibration
+of the same source/height/coefficient/flags, the strict-device trusted-mirror
+rehearsal, full-suite closeout, reviewed operational-campaign dispositions, and
+a live-tip runway recheck. Any change to that fingerprinted freeze requires
+regenerating the corpus and production manifest. Epochs B–D remain unreachable
+(no height-versioned proof selectors exist), while testnet and signet remain on
+v3 with all transition heights disabled.
 
 ## 8. Documentation precedence
 

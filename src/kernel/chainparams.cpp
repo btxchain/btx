@@ -129,16 +129,17 @@ static constexpr int64_t kRCDatacenterAsertRescaleDen{1027};
 static constexpr int64_t kRCEpochAAsertRescaleNum{6931159304};
 static constexpr int64_t kRCEpochAAsertRescaleDen{1};
 
-// Release-candidate value only. The consolidated v0.33.2 activation commit
-// must recompute this once, against the live mainnet tip, before the exact
-// final CUDA+Metal evidence build is frozen. Keep all three Epoch-A heights
-// bound to this single constant so that a later update cannot create a
-// digest-only v4/BMX4C interval.
+// Release-candidate value, but a technically live consensus instruction if
+// this source is merged: mainnet will enforce Epoch A at this height. The
+// consolidated v0.33.2 activation review must recompute it once against the
+// live mainnet tip before the exact-final CUDA+Metal evidence build is frozen.
+// Keep all three Epoch-A heights bound to this single constant so that a later
+// update cannot create a digest-only v4/BMX4C interval.
 static constexpr int32_t BTX_MATMUL_V47_EPOCH_A_HEIGHT{185'000};
 
 // MatMul v4.2 / ENC-BMX4C construction invariants (spec §8.1/§8.2). No-op when
-// the profile is unset (nMatMulBMX4CHeight == INT32_MAX = disabled, e.g.
-// mainnet); when a network sets a BMX4C activation height these MUST hold, so a
+// the profile is unset (nMatMulBMX4CHeight == INT32_MAX = disabled); when a
+// network sets a BMX4C activation height these MUST hold, so a
 // misconfiguration fails loudly at node startup rather than at the fork.
 //
 // These use Assert() to express that every failure is fatal and to retain the
@@ -277,7 +278,8 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
     // height; assert it at startup
     // too so a non-positive misconfiguration aborts the node immediately. Only
     // positivity is checked -- a LARGE ratio can be a legitimate calibration
-    // (Num/Den is the GPU-vs-CPU throughput ratio, which can be large), and ASERT
+    // (Num/Den is the measured v3 parent nonce-attempt rate divided by the
+    // Profile-1 episode rate, which can be large), and ASERT
     // self-corrects any residual within one half-life, so no arbitrary range cap.
     Assert(consensus.nMatMulBMX4CAsertRescaleNum > 0);
     Assert(consensus.nMatMulBMX4CAsertRescaleDen > 0);
@@ -290,14 +292,12 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
     Assert(!consensus.fMatMulV4FlatSketchReplay || is_regtest);
 
     // v4.4 ENC-DR DR-34 FAIL-CLOSED ACTIVATION GATE (normative spec §5, DR-34).
-    // A public network (regtest exempt) MUST NOT be constructible with a LIVE
-    // (non-INT32_MAX) v4 activation height until the §K.2b silicon no-inversion
-    // measurement (GO) and L0 ratification are recorded as passed in this
-    // release via Consensus::BTX_MATMUL_NO_INVERSION_GATE_RATIFIED. That flag
-    // defaults false, so shipping a public-network activation height without
-    // flipping it (i.e. without recording the gates) aborts the node at startup
-    // — the same fail-closed mechanism as the retired relay-ready flag,
-    // retargeted to measured no-inversion + ratification. (Reachable here only
+    // A public network (regtest exempt) with a LIVE (non-INT32_MAX) v4 height
+    // requires the no-inversion/L0 source authorization bit. FALSE aborts node
+    // startup; TRUE permits the tuple but does not itself prove the external
+    // measurement or ratification record. This is the same fail-closed
+    // mechanism as the retired relay-ready flag, retargeted to the release
+    // decision. (Reachable here only
     // when v4 is live — we are past the bmx4c==INT32_MAX early return above — but
     // the height clause keeps the assert correct independent of placement.)
     Assert(is_regtest ||
@@ -383,7 +383,7 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
     // never consensus authority. The three coupled pieces (profile 2 +
     // finite height + ~16× (16422/1027) ASERT) must activate TOGETHER. Epoch A
     // instead installs the independently calibrated Profile-1 tuple and both
-    // ratification gates. Public test networks remain fail-closed at the
+    // source authorization bits. Public test networks remain fail-closed at the
     // disabled sentinel. Regtest may set a finite height + toy dims for CI,
     // where the coupled ASERT is asserted.
     Assert(!consensus.fMatMulRCUseToyDims || is_regtest);
@@ -489,7 +489,7 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
     if (!is_regtest) {
         // A public build is valid in exactly one of two states:
         //   (a) v4/BMX4C/RC all disabled, or
-        //   (b) the separately ratified atomic Epoch-A tuple.
+        //   (b) the source-authorized, activation-armed atomic Epoch-A tuple.
         // This prevents a vulnerable digest-only v4 interval before
         // ExactReplay, keeps the withdrawn HeaderPoW path off, and prevents
         // Profile 2 or unfinished proof authority from inheriting Epoch A.
