@@ -278,14 +278,22 @@ is required before enabling pinned-buffer or device-Merkle optimizations.
   conservative admission estimate as measured use.
 - Latest lifecycle lane samples remain explicitly uncorrelated and
   `operationally_ready` remains false. A separate bounded exact-block telemetry
-  surface now lets the schema-3 campaign bind strict winner authority,
+  surface now lets the schema-4 campaign bind strict winner authority,
   authenticated relay, and receiving ExactReplay to one block hash while an
   observer measures solve-RPC dispatch through that exact authenticated tip.
   The schema binds a monotonic nanosecond interval to those external start/stop
   events and rejects a sum of component counters as the observer wall.
-  The winner record covers all nonce attempts and queue waits; contention
-  samples also bind the distinct losing block and converged reorg tip before
-  measuring a direct-tip child.
+  The winner record covers all nonce attempts and queue waits. Contention
+  samples begin before concurrent sibling solve submissions, checkpoint both
+  local accepts, branch extension and reorg convergence, and finish only when
+  the exact direct-tip child is authenticated. Post-convergence child-only
+  timing is rejected. The activation gate's schema-2 policy records independent
+  exact revisions and binary hashes for pre-manifest ASERT/goldens and the later
+  manifest-bearing lifecycle daemon. Every role must remain on one reachable
+  chronology, reproduce its own exact full source fingerprint, and match one
+  authorization-normalized immutable implementation fingerprint. Only the
+  final height/coefficient literals, ratification booleans, and sealed manifest
+  are excluded from that cross-role implementation identity.
 - Trusted RPC/archive mirrors inherit the safety of their configured signer
   set. They should not be described or exposed as independent consensus
   validators.

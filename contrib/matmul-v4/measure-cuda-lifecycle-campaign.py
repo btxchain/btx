@@ -13,11 +13,14 @@ records these exact-block diagnostic components without summing them:
   authenticated relay
   receiving tip validation and its queue wait
 
-Schema-3 samples use an observer wall clock from immediately before the winning
-solve RPC through the receiving node reporting that exact authenticated
-tip. The observer result is accepted only when bounded daemon telemetry binds
-the same block hash to the miner's strict winner reseal/local-authority handoff,
-the receiving node's authenticated relay, and its strict ExactReplay result.
+Schema-4 steady samples use an observer wall clock from immediately before the
+winning solve RPC through the receiving node reporting that exact authenticated
+tip. Contention samples start before two concurrent sibling solve RPCs and end
+only after their fork has converged and a direct child reaches that same exact
+authenticated-tip condition. The observer result is accepted only when bounded
+daemon telemetry binds the same block hash to the miner's strict winner
+reseal/local-authority handoff, the receiving node's authenticated relay, and
+its strict ExactReplay result.
 Missing or cross-block stage data makes the attempt incomplete. Ratification
 gates stay false; this script never flips them or installs an RC ASERT ratio.
 
@@ -35,6 +38,7 @@ Usage (GPU host, under flock):
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import math
 import os
@@ -54,7 +58,7 @@ V3_BINDING_HEIGHT = 2
 DISABLED_HEIGHT = 2_147_483_647
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TOOL = "btx_cuda_complete_lifecycle_campaign"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def execution_policy_for_mode(mode: str) -> str:
@@ -342,6 +346,7 @@ def _finite_nonnegative(value: object, label: str) -> float:
 def extract_exact_block_lifecycle(
     miner_info: object, validator_info: object, *, block_hash: str,
     block_height: int, observer_wall_s: float, observer_elapsed_ns: int,
+    observer_start_event: str = "before_generatetodescriptor_rpc",
 ) -> dict[str, Any]:
     """Bind production stage telemetry to one exact accepted block hash."""
     if not isinstance(miner_info, dict) or not isinstance(validator_info, dict):
@@ -398,6 +403,11 @@ def extract_exact_block_lifecycle(
         raise RuntimeError("observer elapsed_ns must be a non-negative integer")
     if abs(observer - observer_elapsed_ns / 1_000_000_000.0) > 1e-9:
         raise RuntimeError("observer elapsed_ns does not reproduce observer wall")
+    if observer_start_event not in {
+        "before_generatetodescriptor_rpc",
+        "before_concurrent_competing_sibling_rpc_submission",
+    }:
+        raise RuntimeError("observer start event is not recognized")
     if max(solve_to_consume, relay_s, validation_s) > observer + 1e-6:
         raise RuntimeError("stage timing exceeds solve-to-authenticated-tip observer wall")
     for field, expected in (
@@ -430,7 +440,7 @@ def extract_exact_block_lifecycle(
         "observer_solve_rpc_to_authenticated_tip_s": observer,
         "observer_measurement": {
             "clock": "monotonic_ns",
-            "start_event": "before_generatetodescriptor_rpc",
+            "start_event": observer_start_event,
             "stop_event": "both_nodes_exact_authenticated_tip",
             "elapsed_ns": observer_elapsed_ns,
         },
@@ -451,6 +461,7 @@ def extract_exact_block_lifecycle(
 def extract_exact_block_core_lifecycle(
     validator_info: object, *, block_hash: str, block_height: int,
     observer_wall_s: float, observer_elapsed_ns: int,
+    observer_start_event: str = "before_generatetodescriptor_rpc",
 ) -> dict[str, Any]:
     """Retain a non-authorizing exact-block toy/core rehearsal sample."""
     if not isinstance(validator_info, dict):
@@ -482,6 +493,11 @@ def extract_exact_block_core_lifecycle(
         raise RuntimeError("observer elapsed_ns must be a non-negative integer")
     if abs(observer - observer_elapsed_ns / 1_000_000_000.0) > 1e-9:
         raise RuntimeError("observer elapsed_ns does not reproduce observer wall")
+    if observer_start_event not in {
+        "before_generatetodescriptor_rpc",
+        "before_concurrent_competing_sibling_rpc_submission",
+    }:
+        raise RuntimeError("observer start event is not recognized")
     if max(relay_s, validation_s) > observer + 1e-6:
         raise RuntimeError("core stage timing exceeds observer wall")
     return {
@@ -492,7 +508,7 @@ def extract_exact_block_core_lifecycle(
         "observer_solve_rpc_to_authenticated_tip_s": observer,
         "observer_measurement": {
             "clock": "monotonic_ns",
-            "start_event": "before_generatetodescriptor_rpc",
+            "start_event": observer_start_event,
             "stop_event": "both_nodes_exact_authenticated_tip",
             "elapsed_ns": observer_elapsed_ns,
         },
@@ -786,6 +802,8 @@ def main() -> int:
             phase = "steady_mine_relay"
             competing_block_hashes: list[str] = []
             contention_trace = None
+            contention_timing = None
+            observer_start_event = "before_generatetodescriptor_rpc"
             try:
                 if contention:
                     phase = "competing_tip"
@@ -807,8 +825,35 @@ def main() -> int:
                             continue
                     disconnect_peers(miner)
                     disconnect_peers(validator)
-                    miner_parent_child = mine_one(miner, args.mine_timeout_s)
-                    competing_hash = mine_one(validator, args.mine_timeout_s)
+                    # Start the external contention clock before submitting
+                    # either sibling solve. Both nodes mine concurrently while
+                    # disconnected, so this interval includes competing GPU
+                    # service, both local accepts, branch extension, reorg
+                    # convergence, and the exact measured child below.
+                    observer_start_event = (
+                        "before_concurrent_competing_sibling_rpc_submission"
+                    )
+                    observer_started_ns = time.monotonic_ns()
+
+                    def observed_mine(node: Node) -> tuple[str, int]:
+                        sibling_hash = mine_one(node, args.mine_timeout_s)
+                        return (
+                            sibling_hash,
+                            time.monotonic_ns() - observer_started_ns,
+                        )
+
+                    with concurrent.futures.ThreadPoolExecutor(
+                        max_workers=2,
+                        thread_name_prefix="btx-rc-contention",
+                    ) as executor:
+                        winning_future = executor.submit(observed_mine, miner)
+                        losing_future = executor.submit(observed_mine, validator)
+                        miner_parent_child, winning_accept_elapsed_ns = (
+                            winning_future.result()
+                        )
+                        competing_hash, losing_accept_elapsed_ns = (
+                            losing_future.result()
+                        )
                     if competing_hash == miner_parent_child:
                         incomplete.append({
                             "attempt": attempt,
@@ -838,12 +883,16 @@ def main() -> int:
                         connect_peers(miner, validator)
                         continue
                     # Extend the miner branch while disconnected to force a
-                    # deterministic reorg, then wait for that contention to
-                    # converge before measuring one exact direct-tip child.
-                    # This preserves ordinary direct-tip relay accounting and
-                    # separately binds the preceding reorg precondition.
+                    # deterministic reorg, wait for that contention to
+                    # converge, then extend the same observer interval through
+                    # one exact direct-tip child. This preserves ordinary
+                    # direct-tip relay accounting without hiding the preceding
+                    # competing work or reorg convergence from the sample.
                     contention_reorg_tip_hash = mine_one(
                         miner, args.mine_timeout_s)
+                    winning_extension_elapsed_ns = (
+                        time.monotonic_ns() - observer_started_ns
+                    )
                     reorg_tip_parent = miner.cli(
                         "getblockheader", contention_reorg_tip_hash
                     ).get("previousblockhash")
@@ -874,7 +923,9 @@ def main() -> int:
                         })
                         status(f"incomplete attempt {attempt}: reorg sync failed")
                         continue
-                    observer_started_ns = time.monotonic_ns()
+                    reorg_convergence_elapsed_ns = (
+                        time.monotonic_ns() - observer_started_ns
+                    )
                     block_hash = mine_one(miner, args.mine_timeout_s)
                     measured_parent = miner.cli(
                         "getblockheader", block_hash
@@ -916,6 +967,28 @@ def main() -> int:
                             "post-reorg child sync failed"
                         )
                         continue
+                    measured_child_authenticated_elapsed_ns = (
+                        time.monotonic_ns() - observer_started_ns
+                    )
+                    contention_timing = {
+                        "clock": "monotonic_ns",
+                        "start_mode": "concurrent_sibling_rpc_submission",
+                        "winning_sibling_local_accept_elapsed_ns": (
+                            winning_accept_elapsed_ns
+                        ),
+                        "losing_sibling_local_accept_elapsed_ns": (
+                            losing_accept_elapsed_ns
+                        ),
+                        "winning_extension_local_accept_elapsed_ns": (
+                            winning_extension_elapsed_ns
+                        ),
+                        "reorg_convergence_elapsed_ns": (
+                            reorg_convergence_elapsed_ns
+                        ),
+                        "measured_child_authenticated_elapsed_ns": (
+                            measured_child_authenticated_elapsed_ns
+                        ),
+                    }
                 else:
                     contention_reorg_tip_hash = None
                     observer_started_ns = time.monotonic_ns()
@@ -934,7 +1007,13 @@ def main() -> int:
                         status(f"incomplete attempt {attempt}: sync timeout")
                         continue
 
-                observer_elapsed_ns = time.monotonic_ns() - observer_started_ns
+                observer_elapsed_ns = (
+                    contention_timing[
+                        "measured_child_authenticated_elapsed_ns"
+                    ]
+                    if contention_timing is not None
+                    else time.monotonic_ns() - observer_started_ns
+                )
                 observer_wall_s = observer_elapsed_ns / 1_000_000_000.0
                 height = int(miner.cli("getblockcount"))
                 miner_info = miner.cli("getmininginfo")
@@ -945,6 +1024,7 @@ def main() -> int:
                         block_hash=block_hash, block_height=height,
                         observer_wall_s=observer_wall_s,
                         observer_elapsed_ns=observer_elapsed_ns,
+                        observer_start_event=observer_start_event,
                     )
                 else:
                     extracted = extract_exact_block_core_lifecycle(
@@ -952,6 +1032,7 @@ def main() -> int:
                         block_hash=block_hash, block_height=height,
                         observer_wall_s=observer_wall_s,
                         observer_elapsed_ns=observer_elapsed_ns,
+                        observer_start_event=observer_start_event,
                     )
                 record = {
                     "attempt": attempt,
@@ -961,6 +1042,7 @@ def main() -> int:
                     "competing_block_hashes": competing_block_hashes,
                     "contention_reorg_tip_hash": contention_reorg_tip_hash,
                     "contention_trace": contention_trace,
+                    "contention_timing": contention_timing,
                     **extracted,
                 }
                 if args.mode == "production":
@@ -1077,7 +1159,7 @@ def main() -> int:
             "activation_height_regtest": ACTIVATION_HEIGHT,
             "nodes": 2,
             "correlation": {
-                "model": "exact_per_block_v1",
+                "model": "exact_per_block_v2_concurrent_contention",
                 "activation_eligible": args.mode == "production",
             },
             "contention": {

@@ -144,6 +144,18 @@ class TrustedMirrorToolsTest(unittest.TestCase):
         self.assertTrue(actual["rpc_correlated_end_to_end_sample"])
         self.assertEqual(actual["correlation_block_hash"], block_hash)
         self.assertEqual(actual["miner_authority"]["solve_attempts"], 3)
+        contention_actual = module.extract_exact_block_lifecycle(
+            miner, validator, block_hash=block_hash,
+            block_height=6, observer_wall_s=50.0,
+            observer_elapsed_ns=50_000_000_000,
+            observer_start_event=(
+                "before_concurrent_competing_sibling_rpc_submission"
+            ),
+        )
+        self.assertEqual(
+            contention_actual["observer_measurement"]["start_event"],
+            "before_concurrent_competing_sibling_rpc_submission",
+        )
         core = module.extract_exact_block_core_lifecycle(
             validator, block_hash=block_hash, block_height=6,
             observer_wall_s=50.0,

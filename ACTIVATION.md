@@ -358,25 +358,42 @@ atomically:
    check risks a split.
 
 The release-final review must run
-`contrib/matmul-v4/verify-epoch-a-activation-gate.py` with a reviewed schema-1
-policy record and the exact five binaries it names. The verifier fails closed
-unless one source revision/fingerprint binds the compiled height/coefficient,
-both source ratification flags, a re-derived CUDA-only ASERT corpus, the
-separate sealed CUDA+Metal correctness cohort, and a correlated strict-device
-two-node CUDA lifecycle campaign. The lifecycle policy explicitly records its
+`contrib/matmul-v4/verify-epoch-a-activation-gate.py` with a reviewed schema-2
+policy record and the exact six role-specific binaries it names. The ASERT and
+golden CUDA harnesses are deliberately separate inputs; equal source does not
+imply byte-identical builds across evidence hosts or build configurations. The
+verifier binds the
+release source separately from the ASERT, golden, and lifecycle source commits.
+Each artifact commit must resolve exactly, be a reachable ancestor in the
+golden/ASERT-to-lifecycle-to-release chronology, and reproduce its own declared
+full build-relevant tree fingerprint. A second immutable implementation
+fingerprint must match every role and the release; it normalizes only the three
+release-final height/coefficient literals and two ratification booleans, and
+excludes only the sealed production manifest. Per-role binary hashes are
+explicit; the manifest-bearing lifecycle daemon and CLI must exactly match the
+lifecycle artifact. This permits evidence, manifest, and final authorization
+commits after pre-manifest goldens without accepting any other source-code
+change or an arbitrary ancestor. The verifier also binds the compiled
+height/coefficient, both source
+ratification flags, a re-derived CUDA-only ASERT corpus, the separate sealed
+CUDA+Metal correctness cohort, and a correlated strict-device two-node CUDA
+lifecycle campaign. The lifecycle policy explicitly records its
 minimum complete/contention samples and p99/max bounds; the tool does not
 invent those values. The campaign itself never self-ratifies a source flag.
-The lifecycle campaign emits schema 3 only after its observer measures from
-immediately before the solve RPC through the receiving node reporting
-that exact authenticated tip. The artifact binds the elapsed nanoseconds to
-explicit monotonic-clock start/stop events; sums of component counters are not
-accepted as the observer wall. Bounded daemon telemetry must bind the same block
-hash to strict winner reseal/local-authority consumption, authenticated relay,
-and receiving strict ExactReplay. Missing, cancelled, or cross-block stage data
+The lifecycle campaign emits schema 4. A steady observer measures from
+immediately before the solve RPC through the receiving node reporting that
+exact authenticated tip. A contention observer starts before concurrently
+submitting sibling solve RPCs to disconnected nodes and stops only after both
+local sibling accepts, winning-branch extension, reorg convergence, and the
+next exact direct-tip child's authentication. Monotonic checkpoints prove that
+ordering and reproduce the full observer endpoint. Sums of component counters
+are not accepted as the observer wall. Bounded daemon telemetry must bind the
+same measured-child hash to strict winner reseal/local-authority consumption,
+authenticated relay, and receiving strict ExactReplay. Missing, cancelled,
+cross-block, post-convergence-only, or sequentially mislabeled contention data
 is incomplete. The winner record starts at the solve RPC dispatch, counts every
-nonce attempt, and includes all solve/reseal scheduler waits. Contention samples
-must bind a distinct losing block and the converged reorg tip before timing the
-next exact direct-tip child. The scheduler's independent latest-component summary remains
+nonce attempt, and includes all solve/reseal scheduler waits. The scheduler's
+independent latest-component summary remains
 diagnostic and cannot substitute for these exact-block records.
 Changing source, a binary, evidence bytes, the height, a flag, a provider
 cohort, or a lifecycle bound requires a new exact-final campaign and policy
