@@ -89,6 +89,65 @@ class TrustedMirrorToolsTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unsupported lifecycle mode"):
             module.execution_policy_for_mode("unknown")
 
+    def test_lifecycle_exports_both_runtime_build_and_validation_facts(self):
+        module = load_lifecycle()
+        revision = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        fingerprint = module.EVIDENCE_IDENTITY.tree_fingerprint(REPO_ROOT, revision)
+        canary = {
+            "outcome": "passed",
+            "attempted": True,
+            "passed": True,
+            "manifest_has_reviewed_goldens": True,
+            "build_provenance_matches": True,
+            "build_source_dirty": False,
+            "build_source_revision": revision,
+            "build_source_tree_fingerprint": fingerprint,
+            "exact_manifest_match": True,
+            "provider": "cuda_rc_exact_test",
+            "provider_family": "cuda",
+            "device_architecture": "sm_120",
+            "epoch_activation_height": 6,
+            "epoch_profile": 1,
+            "epoch_matmul_dimension": 4096,
+            "device_macs": 1,
+            "device_xof_fallbacks": 0,
+            "host_xof_calls": 0,
+            "cpu_fallbacks": 0,
+            "reason": "passed",
+        }
+        response = {
+            "backend_runtime": {
+                "rc_exact_replay": {
+                    "resolved_provider": "cuda_rc_exact_test",
+                    "production_canary": canary,
+                    "last_validation": {
+                        "available": True,
+                        "outcome": "valid",
+                        "execution_policy": "strict-device",
+                        "require_device": True,
+                        "provider": "cuda_rc_exact_test",
+                        "fully_accelerated": True,
+                        "cpu_gemm_calls": 0,
+                        "cpu_gemm_fallbacks": 0,
+                    },
+                    "provider_health": {
+                        "quarantined": False,
+                        "validator_readiness_lost": False,
+                    },
+                }
+            }
+        }
+        evidence = module.extract_public_runtime_evidence(
+            response, revision=revision, fingerprint=fingerprint,
+            label="validator",
+        )
+        self.assertEqual(evidence["resolved_provider"], "cuda_rc_exact_test")
+        self.assertTrue(evidence["production_canary"]["exact_manifest_match"])
+        self.assertEqual(evidence["last_validation"]["execution_policy"], "strict-device")
+
     def test_rehearsal_parses_explicit_local_deployment_arguments(self):
         module = load_rehearsal()
         with tempfile.TemporaryDirectory() as tmp:

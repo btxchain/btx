@@ -53,6 +53,8 @@ ACTIVATION_HEIGHT = 6
 V3_BINDING_HEIGHT = 2
 DISABLED_HEIGHT = 2_147_483_647
 REPO_ROOT = Path(__file__).resolve().parents[2]
+TOOL = "btx_cuda_complete_lifecycle_campaign"
+SCHEMA_VERSION = 2
 
 
 def execution_policy_for_mode(mode: str) -> str:
@@ -349,6 +351,10 @@ def extract_components(miner: Node, validator: Node) -> dict[str, Any]:
     rpc_lifecycle = vs.get("complete_lifecycle_readiness") or ms.get(
         "complete_lifecycle_readiness"
     )
+    validator_rc = validator.cli("getmininginfo")["backend_runtime"][
+        "rc_exact_replay"
+    ]
+    validator_last = validator_rc.get("last_validation") or {}
     return {
         "complete": complete,
         "core_complete_without_authority": core_complete and not authority_measured,
@@ -365,6 +371,11 @@ def extract_components(miner: Node, validator: Node) -> dict[str, Any]:
         "rpc_operationally_ready": (rpc_lifecycle or {}).get("operationally_ready"),
         "rpc_omits_winner_authority_handoff": True,
         "miner_provider": (ms.get("winner_reseal_authority") or {}).get("last_provider"),
+        "validator_provider": validator_last.get("provider"),
+        "validator_execution_policy": validator_last.get("execution_policy"),
+        "validator_fully_accelerated": validator_last.get("fully_accelerated"),
+        "validator_cpu_gemm_calls": validator_last.get("cpu_gemm_calls"),
+        "validator_cpu_gemm_fallbacks": validator_last.get("cpu_gemm_fallbacks"),
     }
 
 
@@ -433,6 +444,70 @@ def validate_runtime_build_identity(
         require_manifest_match=False,
     )
     return canary
+
+
+def extract_public_runtime_evidence(
+    mining_info: object, *, revision: str, fingerprint: str, label: str,
+) -> dict[str, Any]:
+    """Extract the fail-closed, machine-public runtime facts used by release review."""
+    if not isinstance(mining_info, dict):
+        raise EVIDENCE_IDENTITY.EvidenceIdentityError(
+            f"{label} getmininginfo response must be an object"
+        )
+    runtime = mining_info.get("backend_runtime")
+    rc = runtime.get("rc_exact_replay") if isinstance(runtime, dict) else None
+    if not isinstance(rc, dict):
+        raise EVIDENCE_IDENTITY.EvidenceIdentityError(
+            f"{label}.backend_runtime.rc_exact_replay must be an object"
+        )
+    canary = rc.get("production_canary")
+    if not isinstance(canary, dict):
+        raise EVIDENCE_IDENTITY.EvidenceIdentityError(
+            f"{label}.production_canary must be an object"
+        )
+    EVIDENCE_IDENTITY.validate_canary_build_identity(
+        canary, revision=revision, fingerprint=fingerprint,
+        prefix=f"{label}.production_canary", require_manifest_match=True,
+    )
+    validation = rc.get("last_validation")
+    if not isinstance(validation, dict):
+        validation = {}
+    health = rc.get("provider_health")
+    if not isinstance(health, dict):
+        health = {}
+    return {
+        "resolved_provider": rc.get("resolved_provider"),
+        "production_canary": {
+            key: canary.get(key)
+            for key in (
+                "outcome", "attempted", "passed",
+                "manifest_has_reviewed_goldens", "build_provenance_matches",
+                "build_source_dirty", "build_source_revision",
+                "build_source_tree_fingerprint", "exact_manifest_match",
+                "provider", "provider_family", "device_architecture",
+                "epoch_activation_height", "epoch_profile",
+                "epoch_matmul_dimension", "device_macs",
+                "device_xof_fallbacks", "host_xof_calls", "cpu_fallbacks",
+                "reason",
+            )
+        },
+        "last_validation": {
+            key: validation.get(key)
+            for key in (
+                "available", "outcome", "execution_policy", "require_device",
+                "provider", "fully_accelerated", "device_gemm_calls",
+                "device_gemm_macs", "device_xof_fallbacks", "host_xof_calls",
+                "cpu_gemm_calls", "cpu_gemm_fallbacks", "acceleration_failure",
+                "failure_kind", "adjudication", "wall_s",
+            )
+        },
+        "provider_health": {
+            key: health.get(key)
+            for key in (
+                "quarantined", "validator_readiness_lost", "provider", "reason"
+            )
+        },
+    }
 
 
 def main() -> int:
@@ -723,6 +798,22 @@ def main() -> int:
 
         # Identity/canary snapshot (machine-class only; strip host specifics later).
         mining = miner.cli("getmininginfo")
+        validating = validator.cli("getmininginfo")
+        runtime_builds = {}
+        # Complete authority samples imply a reviewed manifest/canary and must
+        # export both exact runtime identities. Pre-manifest production runs may
+        # still emit explicitly non-authorizing core samples for diagnosis.
+        if args.mode == "production" and samples:
+            runtime_builds = {
+                "miner": extract_public_runtime_evidence(
+                    mining, revision=args.source_revision,
+                    fingerprint=source_tree_fingerprint, label="miner",
+                ),
+                "validator": extract_public_runtime_evidence(
+                    validating, revision=args.source_revision,
+                    fingerprint=source_tree_fingerprint, label="validator",
+                ),
+            }
         rc = mining["backend_runtime"]["rc_exact_replay"]
         canary = rc.get("production_canary") or {}
         identity = {
@@ -763,6 +854,8 @@ def main() -> int:
         core_lifecycle_vals = [float(s["core_lifecycle_s"]) for s in core_samples]
 
         payload = {
+            "tool": TOOL,
+            "schema_version": SCHEMA_VERSION,
             "evidence_kind": (
                 "cuda_lifecycle_toy_rehearsal"
                 if args.mode == "toy"
@@ -796,13 +889,13 @@ def main() -> int:
                 ),
             },
             "ratification": {
-                "BTX_MATMUL_NO_INVERSION_GATE_RATIFIED": False,
-                "BTX_MATMUL_V47_GPU_LIFECYCLE_GATE_RATIFIED": False,
+                "campaign_authorizes_no_inversion_gate": False,
+                "campaign_authorizes_gpu_lifecycle_gate": False,
                 "installs_rc_asert_ratio": False,
                 "operationally_ready_claim": False,
                 "note": (
-                    "This campaign is calibration evidence only. Public ratification "
-                    "gates remain false; no RC ASERT ratio is installed."
+                    "This campaign is evidence input only. It neither reads nor "
+                    "changes source ratification flags and installs no RC ASERT ratio."
                 ),
             },
             "component_definition": [
@@ -824,11 +917,11 @@ def main() -> int:
             ],
             "gaps_vs_activation_gates": [
                 "winner_authority_handoff unavailable until reviewed production goldens + startup canary mint a process capability",
-                "BTX_MATMUL_V47_GPU_LIFECYCLE_GATE_RATIFIED remains false",
-                "BTX_MATMUL_NO_INVERSION_GATE_RATIFIED remains false",
+                "source ratification decisions are outside this measurement tool",
                 "IBD multi-peer soak not claimed by this campaign",
             ],
             "identity": identity,
+            "runtime_builds": runtime_builds,
             "wall_clock_s": round(time.time() - started, 1),
             "attempts": attempt,
             "complete_sample_count": len(samples),
@@ -903,8 +996,8 @@ def main() -> int:
                     else [],
                     "incomplete_samples": incomplete if "incomplete" in locals() else [],
                     "ratification": {
-                        "BTX_MATMUL_NO_INVERSION_GATE_RATIFIED": False,
-                        "BTX_MATMUL_V47_GPU_LIFECYCLE_GATE_RATIFIED": False,
+                        "campaign_authorizes_no_inversion_gate": False,
+                        "campaign_authorizes_gpu_lifecycle_gate": False,
                         "installs_rc_asert_ratio": False,
                     },
                 }

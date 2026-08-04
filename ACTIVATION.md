@@ -48,7 +48,7 @@ The eventual Epoch-A activation must set one atomic tuple at a single height
 | Withdrawn/intermediate paths | DRLT and coupled-RC heights remain `INT32_MAX` |
 | Workload/authority | Profile 1, production dimensions, ExactReplay authority |
 | Header admission | HeaderPoW remains disabled; Poseidon2 `rcadmit` is P2P policy |
-| ASERT | v4 and BMX4C ratios remain inert `1/1`; the live RC branch owns the measured one-time calibration |
+| ASERT | v4 and BMX4C ratios remain inert `1/1`; the live RC branch owns the reviewed one-time policy coefficient, which must be reproduced by exact-final CUDA launch-cohort evidence |
 | Authorization | `BTX_MATMUL_NO_INVERSION_GATE_RATIFIED` and `BTX_MATMUL_V47_GPU_LIFECYCLE_GATE_RATIFIED` are separate, explicit reviewed decisions |
 
 Epochs B–D require new height-versioned proof-required, proof-authority, and
@@ -159,8 +159,8 @@ activation heights were `INT32_MAX` and
 
 **Required closing basis:** the operator may finalize Epoch A only after three
 revision-bound evidence sets pass on the exact final implementation: a
-CUDA+Metal golden cohort, zero-fallback lifecycle soak, and two-vendor ASERT
-calibration (see
+CUDA+Metal correctness-golden cohort, zero-fallback CUDA lifecycle soak, and
+CUDA launch-cohort ASERT calibration (see
 `doc/btx-matmul-v4.7-transition-roadmap.md` §4), and with multi-day
 wall-clock soak, multi-peer public testnet topology, and released-binary
 upgrade behavior either completed or explicitly dispositioned in the reviewed
@@ -323,7 +323,7 @@ release-candidate testing. Those values are provisional and non-authorizing:
 they must not ship unless the exact-final evidence and activation review pass.
 Once every required exit criterion is GO (with CUDA and Metal PASSes only two
 of the required inputs), a narrow release-final change must replace or
-re-affirm the complete tuple, measured coefficient, and ratification decision
+re-affirm the complete tuple, evidence-bound policy coefficient, and ratification decision
 atomically:
 
 1. **Pick the height from the live tip at source freeze.**
@@ -343,9 +343,10 @@ atomically:
 4. **Assign ASERT ownership once.** Keep both
    `nMatMulV4AsertRescaleNum/Den` and
    `nMatMulBMX4CAsertRescaleNum/Den` at `1/1`; set only
-   `nMatMulRCAsertRescaleNum/Den` to the independently reviewed, measured
-   v3-to-Epoch-A calibration. The RC dispatch branch is live at the unified
-   height and owns that one-time rescale.
+   `nMatMulRCAsertRescaleNum/Den` to the independently reviewed policy
+   coefficient reproduced by the exact-final v3-to-Epoch-A CUDA calibration.
+   The RC dispatch branch is live at the unified height and owns that one-time
+   rescale. The signed consensus fields cap each term at `INT64_MAX`.
 5. **Re-affirm ratification explicitly.** The activation release must record
    the reviewed L0 decision and set both required source constants as part of
    the same release-final change. Candidate values, a height, benchmark,
@@ -355,6 +356,19 @@ atomically:
 7. **Prefer a signaling/readiness gate** (miner/version signaling) so activation
    only proceeds once a supermajority has upgraded — a flag-day with no adoption
    check risks a split.
+
+The release-final review must run
+`contrib/matmul-v4/verify-epoch-a-activation-gate.py` with a reviewed schema-1
+policy record and the exact five binaries it names. The verifier fails closed
+unless one source revision/fingerprint binds the compiled height/coefficient,
+both source ratification flags, a re-derived CUDA-only ASERT corpus, the
+separate sealed CUDA+Metal correctness cohort, and a correlated strict-device
+two-node CUDA lifecycle campaign. The lifecycle policy explicitly records its
+minimum complete/contention samples and p99/max bounds; the tool does not
+invent those values. The campaign itself never self-ratifies a source flag.
+Changing source, a binary, evidence bytes, the height, a flag, a provider
+cohort, or a lifecycle bound requires a new exact-final campaign and policy
+record.
 
 Until the exact-final tuple, coefficient, and ratification decision are
 committed in a reviewed release and that release reaches its selected height,

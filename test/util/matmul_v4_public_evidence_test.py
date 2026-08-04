@@ -245,6 +245,7 @@ class PublicEvidencePrivacyTest(unittest.TestCase):
             "test/util/example.py",
             "contrib/matmul-v4/derive-epoch-a-asert.py",
             "contrib/matmul-v4/measure-v3-regimes.cpp",
+            "contrib/matmul-v4/verify-epoch-a-activation-gate.py",
         ):
             self.assertTrue(
                 MODULE.is_btx_publication_path(REPO_ROOT / relative),
