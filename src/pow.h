@@ -362,6 +362,18 @@ enum class MatMulRCValidationOutcome : uint8_t {
  * expiring, and single-use. It authorizes only reuse of the already completed
  * Profile-1 ExactReplay; it never bypasses block-body or script validation.
  */
+struct MatMulRCWinnerAuthoritySample {
+    std::string block_hash;
+    int32_t height{0};
+    uint64_t solve_attempts{0};
+    double solve_to_reseal_s{0};
+    double reseal_to_consume_s{0};
+    double solve_to_consume_s{0};
+    std::string provider;
+};
+
+inline constexpr size_t MATMUL_RC_WINNER_AUTHORITY_SAMPLE_MAX{32};
+
 struct MatMulRCWinnerAuthorityStats {
     uint64_t published{0};
     uint64_t consumed{0};
@@ -372,14 +384,15 @@ struct MatMulRCWinnerAuthorityStats {
     uint64_t evicted{0};
     uint64_t misses{0};
     uint64_t entries{0};
-    double last_candidate_to_reseal_s{0};
+    double last_solve_to_reseal_s{0};
     double last_reseal_to_consume_s{0};
-    double last_candidate_to_consume_s{0};
+    double last_solve_to_consume_s{0};
     std::string last_provider;
     /** Authorities consumed by provider since process start. This is bounded by
      *  the process-qualified provider registry and lets evidence tooling prove
      *  that every handoff in a rehearsal came from the canary-bound provider. */
     std::map<std::string, uint64_t> consumed_by_provider;
+    std::vector<MatMulRCWinnerAuthoritySample> recent_consumed;
 };
 
 bool PublishMatMulRCWinnerResealAuthority(
@@ -389,8 +402,9 @@ bool PublishMatMulRCWinnerResealAuthority(
     const matmul::v4::lt::ExactGemmBackend& backend,
     const Consensus::Params& consensus,
     std::chrono::milliseconds ttl,
-    std::chrono::steady_clock::time_point candidate_started,
-    std::chrono::steady_clock::time_point reseal_completed);
+    std::chrono::steady_clock::time_point solve_started,
+    std::chrono::steady_clock::time_point reseal_completed,
+    uint64_t solve_attempts);
 
 bool ConsumeMatMulRCWinnerResealAuthority(
     const CBlockHeader& header, int32_t block_height,

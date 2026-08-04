@@ -25,9 +25,9 @@ TOOL = "btx_epoch_a_activation_gate"
 SCHEMA_VERSION = 1
 LIFECYCLE_TOOL = "btx_cuda_complete_lifecycle_campaign"
 # Schema 2 is deliberately non-authorizing: it contains independent latest
-# component counters, not a candidate-start-to-receiving-tip record bound to
-# one exact block.  Schema 3 is reserved for the future exact-block telemetry
-# contract validated below.  The current campaign therefore fails closed.
+# component counters, not a solve-RPC-to-receiving-tip record bound to
+# one exact block. Schema 3 is the exact-block telemetry contract validated
+# below; missing any required keyed record makes an attempt incomplete.
 LIFECYCLE_SCHEMA_VERSION = 3
 INT64_MAX = (1 << 63) - 1
 HEX40 = re.compile(r"[0-9a-f]{40}")
@@ -606,9 +606,9 @@ def validate_lifecycle(
     block_hashes: set[str] = set()
     component_definition = artifact.get("component_definition")
     expected_components = [
-        "candidate_execution_s", "candidate_queue_wait_s", "winner_reseal_s",
-        "reseal_queue_wait_s", "winner_authority_handoff_s",
-        "authenticated_relay_s", "tip_validation_s", "validation_queue_wait_s",
+        "observer_solve_rpc_to_authenticated_tip_s",
+        "solve_to_reseal_s", "reseal_to_consume_s",
+        "authenticated_relay_s", "tip_validation_s",
     ]
     require(component_definition == expected_components,
             "lifecycle component definition mismatch")
@@ -618,19 +618,35 @@ def validate_lifecycle(
         wall = exact_number(sample.get("complete_lifecycle_s"),
                             f"lifecycle samples[{index}].complete_lifecycle_s")
         lifecycle_values.append(wall)
-        components = sample.get("components")
-        require(isinstance(components, dict) and set(components) == set(expected_components),
-                f"lifecycle samples[{index}] component set mismatch")
-        component_sum = sum(
-            exact_number(components[field], f"lifecycle samples[{index}].{field}")
-            for field in expected_components
+        observer_wall = exact_number(
+            sample.get("observer_solve_rpc_to_authenticated_tip_s"),
+            f"lifecycle samples[{index}].observer wall",
         )
-        require(abs(component_sum - wall) <= 1e-9,
-                f"lifecycle samples[{index}] component sum mismatch")
+        require(abs(observer_wall - wall) <= 1e-9,
+                f"lifecycle samples[{index}] observer wall mismatch")
+        observer_measurement = sample.get("observer_measurement")
+        require(
+            isinstance(observer_measurement, dict)
+            and set(observer_measurement) == {
+                "clock", "start_event", "stop_event", "elapsed_ns",
+            }
+            and observer_measurement.get("clock") == "monotonic_ns"
+            and observer_measurement.get("start_event") ==
+                "before_generatetodescriptor_rpc"
+            and observer_measurement.get("stop_event") ==
+                "both_nodes_exact_authenticated_tip",
+            f"lifecycle samples[{index}] observer measurement schema mismatch",
+        )
+        observer_elapsed_ns = exact_int(
+            observer_measurement.get("elapsed_ns"),
+            f"lifecycle samples[{index}].observer elapsed_ns",
+        )
+        require(
+            abs(observer_elapsed_ns / 1_000_000_000.0 - wall) <= 1e-9,
+            f"lifecycle samples[{index}] observer elapsed_ns mismatch",
+        )
         require(sample.get("authority_measured") is True,
                 f"lifecycle samples[{index}] lacks winner-authority handoff")
-        require(sample.get("counter_gaps") == [],
-                f"lifecycle samples[{index}] has counter gaps")
         block_hash = exact_hex(
             sample.get("block_hash"), HEX64, f"lifecycle samples[{index}].block_hash"
         )
@@ -641,13 +657,136 @@ def validate_lifecycle(
                 f"lifecycle samples[{index}] is not RPC block-correlated")
         require(sample.get("correlation_block_hash") == block_hash,
                 f"lifecycle samples[{index}] correlation block hash mismatch")
-        component_hashes = sample.get("component_block_hashes")
-        require(
-            isinstance(component_hashes, dict)
-            and set(component_hashes) == set(expected_components)
-            and all(value == block_hash for value in component_hashes.values()),
-            f"lifecycle samples[{index}] components are not bound to one block",
+        block_height = exact_int(
+            sample.get("height"), f"lifecycle samples[{index}].height",
+            minimum=1, maximum=(1 << 31) - 2,
         )
+        authority = sample.get("miner_authority")
+        authority_keys = {
+            "block_hash", "block_height", "solve_attempts",
+            "solve_to_reseal_s", "reseal_to_consume_s",
+            "solve_to_consume_s", "provider",
+        }
+        require(
+            isinstance(authority, dict) and set(authority) == authority_keys,
+            f"lifecycle samples[{index}] authority schema mismatch",
+        )
+        require(authority.get("block_hash") == block_hash
+                and authority.get("block_height") == block_height,
+                f"lifecycle samples[{index}] authority block mismatch")
+        exact_int(
+            authority.get("solve_attempts"),
+            f"lifecycle samples[{index}].solve_attempts", minimum=1,
+        )
+        solve_to_reseal = exact_number(
+            authority.get("solve_to_reseal_s"),
+            f"lifecycle samples[{index}].solve_to_reseal_s")
+        reseal_to_consume = exact_number(
+            authority.get("reseal_to_consume_s"),
+            f"lifecycle samples[{index}].reseal_to_consume_s")
+        solve_to_consume = exact_number(
+            authority.get("solve_to_consume_s"),
+            f"lifecycle samples[{index}].solve_to_consume_s")
+        require(
+            abs(solve_to_reseal + reseal_to_consume -
+                solve_to_consume) <= 1e-6,
+            f"lifecycle samples[{index}] authority timings do not reconcile",
+        )
+
+        relay = sample.get("authenticated_relay")
+        require(
+            isinstance(relay, dict) and set(relay) == {"block_hash", "relay_s"}
+            and relay.get("block_hash") == block_hash,
+            f"lifecycle samples[{index}] relay block mismatch",
+        )
+        relay_s = exact_number(
+            relay.get("relay_s"), f"lifecycle samples[{index}].relay_s")
+
+        validation = sample.get("validator_exact_replay")
+        validation_keys = {
+            "block_hash", "block_height", "outcome", "execution_policy",
+            "require_device", "provider", "fully_accelerated",
+            "device_gemm_calls", "device_gemm_macs",
+            "device_xof_fallbacks", "host_xof_calls", "cpu_gemm_calls",
+            "cpu_gemm_fallbacks", "wall_s",
+        }
+        require(
+            isinstance(validation, dict) and set(validation) == validation_keys,
+            f"lifecycle samples[{index}] validation schema mismatch",
+        )
+        require(validation.get("block_hash") == block_hash
+                and validation.get("block_height") == block_height,
+                f"lifecycle samples[{index}] validation block mismatch")
+        validation_s = exact_number(
+            validation.get("wall_s"),
+            f"lifecycle samples[{index}].validation wall_s")
+        require(max(solve_to_consume, relay_s, validation_s) <= wall + 1e-6,
+                f"lifecycle samples[{index}] stage exceeds observer wall")
+        require(
+            abs(wall - (solve_to_consume + relay_s + validation_s)) > 1e-6,
+            f"lifecycle samples[{index}] substitutes summed stages for observer wall",
+        )
+
+        competing = sample.get("competing_block_hashes")
+        require(isinstance(competing, list),
+                f"lifecycle samples[{index}] competing hashes must be an array")
+        require(
+            all(
+                exact_hex(value, HEX64,
+                          f"lifecycle samples[{index}].competing hash") != block_hash
+                for value in competing
+            ) and len(set(competing)) == len(competing),
+            f"lifecycle samples[{index}] competing hashes are invalid",
+        )
+        if sample.get("phase") == "competing_tip":
+            require(competing,
+                    f"lifecycle samples[{index}] lacks a distinct competing block")
+            reorg_tip = exact_hex(
+                sample.get("contention_reorg_tip_hash"), HEX64,
+                f"lifecycle samples[{index}].contention reorg tip",
+            )
+            require(
+                reorg_tip != block_hash and reorg_tip not in competing,
+                f"lifecycle samples[{index}] contention reorg tip is not distinct",
+            )
+            trace = sample.get("contention_trace")
+            trace_keys = {
+                "common_parent_hash", "winning_branch_hash",
+                "winning_branch_parent_hash", "losing_branch_hash",
+                "losing_branch_parent_hash", "reorg_tip_hash",
+                "reorg_tip_parent_hash", "measured_block_parent_hash",
+            }
+            require(
+                isinstance(trace, dict) and set(trace) == trace_keys,
+                f"lifecycle samples[{index}] contention trace schema mismatch",
+            )
+            for key in trace_keys:
+                exact_hex(
+                    trace.get(key), HEX64,
+                    f"lifecycle samples[{index}].contention trace {key}",
+                )
+            require(
+                trace["winning_branch_parent_hash"] == trace["common_parent_hash"]
+                and trace["losing_branch_parent_hash"] == trace["common_parent_hash"]
+                and trace["reorg_tip_parent_hash"] == trace["winning_branch_hash"]
+                and trace["measured_block_parent_hash"] == trace["reorg_tip_hash"]
+                and trace["losing_branch_hash"] in competing
+                and trace["reorg_tip_hash"] == reorg_tip,
+                f"lifecycle samples[{index}] contention ancestry mismatch",
+            )
+            require(
+                len({trace["common_parent_hash"], trace["winning_branch_hash"],
+                     trace["losing_branch_hash"], trace["reorg_tip_hash"],
+                     block_hash}) == 5,
+                f"lifecycle samples[{index}] contention blocks are not distinct",
+            )
+        else:
+            require(not competing,
+                    f"lifecycle samples[{index}] steady sample claims contention")
+            require(sample.get("contention_reorg_tip_hash") is None,
+                    f"lifecycle samples[{index}] steady sample claims a reorg tip")
+            require(sample.get("contention_trace") is None,
+                    f"lifecycle samples[{index}] steady sample claims a contention trace")
         require(isinstance(sample.get("miner_provider"), str)
                 and sample["miner_provider"].startswith("cuda_"),
                 f"lifecycle samples[{index}] miner provider is not CUDA")
@@ -662,6 +801,24 @@ def validate_lifecycle(
         ):
             require(sample.get(field) == expected,
                     f"lifecycle samples[{index}].{field} mismatch")
+        for field, expected in (
+            ("outcome", "valid"), ("execution_policy", "strict-device"),
+            ("require_device", True), ("fully_accelerated", True),
+            ("device_xof_fallbacks", 0), ("host_xof_calls", 0),
+            ("cpu_gemm_calls", 0), ("cpu_gemm_fallbacks", 0),
+        ):
+            require(validation.get(field) == expected,
+                    f"lifecycle samples[{index}].validation.{field} mismatch")
+        require(
+            exact_int(
+                validation.get("device_gemm_calls"),
+                f"lifecycle samples[{index}].device_gemm_calls", minimum=1,
+            ) >= 1,
+            f"lifecycle samples[{index}] validation has no device GEMM",
+        )
+        require(validation.get("provider") == sample.get("validator_provider")
+                and authority.get("provider") == sample.get("miner_provider"),
+                f"lifecycle samples[{index}] provider binding mismatch")
     summary = artifact.get("complete_lifecycle_summary_s")
     require(isinstance(summary, dict) and summary.get("n") == count,
             "lifecycle summary count mismatch")

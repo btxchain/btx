@@ -1594,6 +1594,10 @@ static UniValue BuildBackendRuntimeProfile(
         validation.pushKV("available", last_validation.has_value());
         if (last_validation) {
             validation.pushKV(
+                "block_hash", last_validation->block_hash.GetHex());
+            validation.pushKV(
+                "block_height", last_validation->block_height);
+            validation.pushKV(
                 "outcome",
                 matmul::v4::rc::ExactReplayVerifyOutcomeName(
                     last_validation->outcome));
@@ -1670,6 +1674,39 @@ static UniValue BuildBackendRuntimeProfile(
             validation.pushKV("note", last_validation->note);
         }
         rc_exact_replay.pushKV("last_validation", std::move(validation));
+        UniValue recent_validations(UniValue::VARR);
+        for (const auto& replay :
+             matmul::v4::rc::GetRecentExactReplayVerifyResults()) {
+            UniValue item(UniValue::VOBJ);
+            item.pushKV("block_hash", replay.block_hash.GetHex());
+            item.pushKV("block_height", replay.block_height);
+            item.pushKV(
+                "outcome",
+                matmul::v4::rc::ExactReplayVerifyOutcomeName(
+                    replay.outcome));
+            item.pushKV(
+                "execution_policy",
+                matmul::v4::rc::RCExactReplayExecutionPolicyName(
+                    replay.execution_policy));
+            item.pushKV("require_device", replay.require_device);
+            item.pushKV("provider", replay.acceleration_backend);
+            item.pushKV(
+                "fully_accelerated", replay.fully_accelerated);
+            item.pushKV(
+                "device_gemm_calls", replay.device_gemm_calls);
+            item.pushKV(
+                "device_gemm_macs", replay.device_gemm_macs);
+            item.pushKV(
+                "device_xof_fallbacks", replay.device_xof_fallbacks);
+            item.pushKV("host_xof_calls", replay.host_xof_calls);
+            item.pushKV("cpu_gemm_calls", replay.cpu_gemm_calls);
+            item.pushKV(
+                "cpu_gemm_fallbacks", replay.cpu_gemm_fallbacks);
+            item.pushKV("wall_s", replay.verify_s);
+            recent_validations.push_back(std::move(item));
+        }
+        rc_exact_replay.pushKV(
+            "recent_validations", std::move(recent_validations));
         const auto provider_health{
             matmul::v4::rc::GetRCExactReplayProviderHealth()};
         UniValue health(UniValue::VOBJ);
@@ -1761,6 +1798,17 @@ static UniValue BuildBackendRuntimeProfile(
         rc_scheduler.pushKV(
             "max_authenticated_relay_s",
             scheduler.max_authenticated_relay_s);
+        UniValue authenticated_relays(UniValue::VARR);
+        for (const auto& relay :
+             scheduler.recent_authenticated_relays) {
+            UniValue item(UniValue::VOBJ);
+            item.pushKV("block_hash", relay.block_hash.GetHex());
+            item.pushKV("relay_s", relay.relay_s);
+            authenticated_relays.push_back(std::move(item));
+        }
+        rc_scheduler.pushKV(
+            "recent_authenticated_relays",
+            std::move(authenticated_relays));
         const auto lane_object = [](const auto& lane, uint64_t queue_limit) {
             UniValue out(UniValue::VOBJ);
             out.pushKV("queue_limit", queue_limit);
@@ -1831,14 +1879,14 @@ static UniValue BuildBackendRuntimeProfile(
         authority.pushKV("misses", winner_authority.misses);
         authority.pushKV("entries", winner_authority.entries);
         authority.pushKV(
-            "last_candidate_to_reseal_s",
-            winner_authority.last_candidate_to_reseal_s);
+            "last_solve_to_reseal_s",
+            winner_authority.last_solve_to_reseal_s);
         authority.pushKV(
             "last_reseal_to_consume_s",
             winner_authority.last_reseal_to_consume_s);
         authority.pushKV(
-            "last_candidate_to_consume_s",
-            winner_authority.last_candidate_to_consume_s);
+            "last_solve_to_consume_s",
+            winner_authority.last_solve_to_consume_s);
         authority.pushKV("last_provider", winner_authority.last_provider);
         UniValue consumed_by_provider(UniValue::VOBJ);
         for (const auto& [provider, count] :
@@ -1847,6 +1895,26 @@ static UniValue BuildBackendRuntimeProfile(
         }
         authority.pushKV(
             "consumed_by_provider", std::move(consumed_by_provider));
+        UniValue consumed_authorities(UniValue::VARR);
+        for (const auto& sample : winner_authority.recent_consumed) {
+            UniValue item(UniValue::VOBJ);
+            item.pushKV("block_hash", sample.block_hash);
+            item.pushKV("block_height", sample.height);
+            item.pushKV("solve_attempts", sample.solve_attempts);
+            item.pushKV(
+                "solve_to_reseal_s",
+                sample.solve_to_reseal_s);
+            item.pushKV(
+                "reseal_to_consume_s",
+                sample.reseal_to_consume_s);
+            item.pushKV(
+                "solve_to_consume_s",
+                sample.solve_to_consume_s);
+            item.pushKV("provider", sample.provider);
+            consumed_authorities.push_back(std::move(item));
+        }
+        authority.pushKV(
+            "recent_consumed", std::move(consumed_authorities));
         rc_scheduler.pushKV(
             "winner_reseal_authority", std::move(authority));
         const auto lifecycle{
@@ -6330,6 +6398,8 @@ static RPCHelpMan getmininginfo()
                                 {RPCResult::Type::OBJ, "last_validation", "Most recent completed production ExactReplay validation attempt",
                                 {
                                     {RPCResult::Type::BOOL, "available", "Whether a validation result has been recorded"},
+                                    {RPCResult::Type::STR_HEX, "block_hash", /*optional=*/true, "Exact header hash validated"},
+                                    {RPCResult::Type::NUM, "block_height", /*optional=*/true, "Contextual height validated"},
                                     {RPCResult::Type::STR, "outcome", /*optional=*/true, "Consensus verdict, retryable local failure, or cancellation"},
                                     {RPCResult::Type::STR, "execution_policy", /*optional=*/true, "Configured RC execution policy"},
                                     {RPCResult::Type::BOOL, "require_device", /*optional=*/true, "Whether this replay prohibited CPU fallback"},
@@ -6361,6 +6431,24 @@ static RPCHelpMan getmininginfo()
                                     {RPCResult::Type::STR, "operator_recovery", /*optional=*/true, "Operator recovery action for a retryable provider failure"},
                                     {RPCResult::Type::NUM, "wall_s", /*optional=*/true, "Replay wall time"},
                                     {RPCResult::Type::STR, "note", /*optional=*/true, "Replay status detail"},
+                                }},
+                                {RPCResult::Type::ARR, "recent_validations", "Bounded exact-header validation telemetry for lifecycle correlation", {
+                                    {RPCResult::Type::OBJ, "", "One ExactReplay result", {
+                                        {RPCResult::Type::STR_HEX, "block_hash", "Exact header hash"},
+                                        {RPCResult::Type::NUM, "block_height", "Contextual height"},
+                                        {RPCResult::Type::STR, "outcome", "Typed verification outcome"},
+                                        {RPCResult::Type::STR, "execution_policy", "RC execution policy"},
+                                        {RPCResult::Type::BOOL, "require_device", "Whether CPU fallback was prohibited"},
+                                        {RPCResult::Type::STR, "provider", "Resolved provider"},
+                                        {RPCResult::Type::BOOL, "fully_accelerated", "Whether the replay was fully accelerated"},
+                                        {RPCResult::Type::NUM, "device_gemm_calls", "Device GEMM calls"},
+                                        {RPCResult::Type::NUM, "device_gemm_macs", "Device GEMM MACs"},
+                                        {RPCResult::Type::NUM, "device_xof_fallbacks", "Device XOF fallbacks"},
+                                        {RPCResult::Type::NUM, "host_xof_calls", "Host XOF calls"},
+                                        {RPCResult::Type::NUM, "cpu_gemm_calls", "CPU GEMM calls"},
+                                        {RPCResult::Type::NUM, "cpu_gemm_fallbacks", "CPU GEMM fallbacks"},
+                                        {RPCResult::Type::NUM, "wall_s", "ExactReplay wall time"},
+                                    }},
                                 }},
                                 {RPCResult::Type::OBJ, "provider_health", "Process-local strict-device provider health",
                                 {
@@ -6407,6 +6495,12 @@ static RPCHelpMan getmininginfo()
                                 {RPCResult::Type::NUM, "authenticated_relay_samples", "Locally ExactReplay-authenticated header-to-body transport samples"},
                                 {RPCResult::Type::NUM, "last_authenticated_relay_s", "Most recent authenticated header-to-body transport interval"},
                                 {RPCResult::Type::NUM, "max_authenticated_relay_s", "Maximum authenticated header-to-body transport interval"},
+                                {RPCResult::Type::ARR, "recent_authenticated_relays", "Bounded exact-block authenticated transport records", {
+                                    {RPCResult::Type::OBJ, "", "One authenticated relay record", {
+                                        {RPCResult::Type::STR_HEX, "block_hash", "Exact accepted block hash"},
+                                        {RPCResult::Type::NUM, "relay_s", "Header announcement to complete-body transport interval"},
+                                    }},
+                                }},
                                 {RPCResult::Type::OBJ_DYN, "lanes", "Per-priority candidate, reseal, tip-validation, and speculative queue/execution telemetry",
                                 {
                                     {RPCResult::Type::OBJ, "lane", "One scheduler lane",
@@ -6436,16 +6530,27 @@ static RPCHelpMan getmininginfo()
                                     {RPCResult::Type::NUM, "evicted", "Authorities evicted by the fixed store bound"},
                                     {RPCResult::Type::NUM, "misses", "Local acceptance lookups without an exact authority"},
                                     {RPCResult::Type::NUM, "entries", "Current bounded authority entries"},
-                                    {RPCResult::Type::NUM, "last_candidate_to_reseal_s", "Latest candidate start through strict reseal"},
+                                    {RPCResult::Type::NUM, "last_solve_to_reseal_s", "Latest solve invocation start through strict reseal, including all nonce attempts and queue waits"},
                                     {RPCResult::Type::NUM, "last_reseal_to_consume_s", "Latest reseal-to-local-acceptance handoff"},
-                                    {RPCResult::Type::NUM, "last_candidate_to_consume_s", "Latest candidate start through local authority consumption"},
+                                    {RPCResult::Type::NUM, "last_solve_to_consume_s", "Latest solve invocation start through local authority consumption"},
                                     {RPCResult::Type::STR, "last_provider", "Provider recorded by the most recently consumed authority"},
                                     {RPCResult::Type::OBJ_DYN, "consumed_by_provider", "Process-lifetime consumed-authority counts by exact provider",
                                     {
                                         {RPCResult::Type::NUM, "provider", "Consumed authorities for this provider"},
                                     }},
+                                    {RPCResult::Type::ARR, "recent_consumed", "Bounded exact-block strict winner-authority handoffs", {
+                                        {RPCResult::Type::OBJ, "", "One consumed winner authority", {
+                                            {RPCResult::Type::STR_HEX, "block_hash", "Exact locally accepted block hash"},
+                                            {RPCResult::Type::NUM, "block_height", "Contextual height"},
+                                            {RPCResult::Type::NUM, "solve_attempts", "Nonce attempts in the solve invocation that found this winner"},
+                                            {RPCResult::Type::NUM, "solve_to_reseal_s", "Solve invocation start through strict winner reseal"},
+                                            {RPCResult::Type::NUM, "reseal_to_consume_s", "Strict reseal through local authority consumption"},
+                                            {RPCResult::Type::NUM, "solve_to_consume_s", "Solve invocation start through local authority consumption"},
+                                            {RPCResult::Type::STR, "provider", "Qualified strict provider"},
+                                        }},
+                                    }},
                                 }},
-                                {RPCResult::Type::OBJ, "complete_lifecycle_readiness", "Fail-closed candidate-to-authenticated-tip timing assessment; never an activation or consensus gate",
+                                {RPCResult::Type::OBJ, "complete_lifecycle_readiness", "Fail-closed uncorrelated latest-component timing assessment; never an activation or consensus gate",
                                 {
                                     {RPCResult::Type::BOOL, "candidate_measured", "Candidate execution sample available"},
                                     {RPCResult::Type::BOOL, "winner_reseal_measured", "Winner reseal sample available"},

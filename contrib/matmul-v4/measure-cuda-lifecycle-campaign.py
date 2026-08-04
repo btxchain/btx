@@ -4,23 +4,22 @@
 # file COPYING or https://opensource.org/license/mit/.
 """Two-node CUDA lifecycle campaign: toy rehearsal or production strict-device.
 
-Measures the readiness-gate sum (not a single ExactReplay):
+Measures one external solve-RPC-to-authenticated-tip wall-clock envelope and
+records these exact-block diagnostic components without summing them:
 
-  candidate execution
-  + candidate queue wait
-  + winner reseal
-  + reseal queue wait
-  + one-shot local winner-authority handoff
-  + authenticated relay
-  + receiving tip validation
-  + validation queue wait
+  all nonce attempts and their accelerator queue waits
+  strict winner reseal and its queue wait
+  one-shot local winner-authority handoff
+  authenticated relay
+  receiving tip validation and its queue wait
 
-Samples are diagnostic latest-component estimates: missing any component, or a
-counter that did not advance during the attempt, drops the observation from the
-complete set. The scheduler does not yet bind every component to one exact
-block, so neither these samples nor the RPC `complete_lifecycle_readiness`
-record are correlated activation evidence. Ratification gates stay false; this
-script never flips them or installs an RC ASERT ratio.
+Schema-3 samples use an observer wall clock from immediately before the winning
+solve RPC through the receiving node reporting that exact authenticated
+tip. The observer result is accepted only when bounded daemon telemetry binds
+the same block hash to the miner's strict winner reseal/local-authority handoff,
+the receiving node's authenticated relay, and its strict ExactReplay result.
+Missing or cross-block stage data makes the attempt incomplete. Ratification
+gates stay false; this script never flips them or installs an RC ASERT ratio.
 
 Usage (GPU host, under flock):
 
@@ -55,7 +54,7 @@ V3_BINDING_HEIGHT = 2
 DISABLED_HEIGHT = 2_147_483_647
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TOOL = "btx_cuda_complete_lifecycle_campaign"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def execution_policy_for_mode(mode: str) -> str:
@@ -302,105 +301,207 @@ def wait_equal_tips(a: Node, b: Node, timeout: float) -> bool:
     return False
 
 
+def wait_exact_tips(a: Node, b: Node, block_hash: str, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if (a.cli("getbestblockhash") == block_hash and
+                b.cli("getbestblockhash") == block_hash):
+            return True
+        time.sleep(0.5)
+    return False
+
+
 def scheduler(node: Node) -> dict[str, Any]:
     info = node.cli("getmininginfo")
     return info["backend_runtime"]["rc_accelerator_scheduler"]
 
 
-def snapshot_counters(miner: Node, validator: Node) -> dict[str, Any]:
-    ms = scheduler(miner)
-    vs = scheduler(validator)
-    return {
-        "miner_candidate": ms["lanes"]["candidate_mining"]["completions"],
-        "miner_reseal": ms["lanes"]["winner_reseal"]["completions"],
-        "miner_authority_consumed": ms["winner_reseal_authority"]["consumed"],
-        "miner_authority_published": ms["winner_reseal_authority"]["published"],
-        "validator_relay": vs["authenticated_relay_samples"],
-        "validator_tip": vs["lanes"]["tip_validation"]["completions"],
-    }
-
-
-def extract_components(miner: Node, validator: Node) -> dict[str, Any]:
-    ms = scheduler(miner)
-    vs = scheduler(validator)
-    m_cand = ms["lanes"]["candidate_mining"]
-    m_reseal = ms["lanes"]["winner_reseal"]
-    m_auth = ms["winner_reseal_authority"]
-    v_tip = vs["lanes"]["tip_validation"]
-    components = {
-        "candidate_execution_s": float(m_cand["last_execution_s"]),
-        "candidate_queue_wait_s": float(m_cand["last_queue_wait_s"]),
-        "winner_reseal_s": float(m_reseal["last_execution_s"]),
-        "reseal_queue_wait_s": float(m_reseal["last_queue_wait_s"]),
-        "winner_authority_handoff_s": float(m_auth["last_reseal_to_consume_s"]),
-        "authenticated_relay_s": float(vs["last_authenticated_relay_s"]),
-        "tip_validation_s": float(v_tip["last_execution_s"]),
-        "validation_queue_wait_s": float(v_tip["last_queue_wait_s"]),
-    }
-    missing = [k for k, v in components.items() if not math.isfinite(v) or v < 0]
-    authority_measured = m_auth["consumed"] > 0 and m_auth["published"] > 0
-    core_complete = (
-        not missing
-        and m_cand["completions"] > 0
-        and m_reseal["completions"] > 0
-        and vs["authenticated_relay_samples"] > 0
-        and v_tip["completions"] > 0
-    )
-    # Fail-closed for the readiness-gate sum: authority handoff is required.
-    complete = core_complete and authority_measured
-    core_lifecycle_s = None
-    if core_complete:
-        core_lifecycle_s = sum(
-            v for k, v in components.items() if k != "winner_authority_handoff_s"
+def _record_for_hash(records: object, block_hash: str, label: str) -> dict[str, Any]:
+    if not isinstance(records, list):
+        raise RuntimeError(f"{label} must be an array")
+    matches = [
+        record for record in records
+        if isinstance(record, dict) and record.get("block_hash") == block_hash
+    ]
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"{label} has {len(matches)} records for exact block hash"
         )
-    complete_lifecycle_s = sum(components.values()) if complete else None
-    rpc_lifecycle = vs.get("complete_lifecycle_readiness") or ms.get(
-        "complete_lifecycle_readiness"
+    return matches[0]
+
+
+def _finite_nonnegative(value: object, label: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise RuntimeError(f"{label} must be numeric")
+    result = float(value)
+    if not math.isfinite(result) or result < 0:
+        raise RuntimeError(f"{label} must be finite and non-negative")
+    return result
+
+
+def extract_exact_block_lifecycle(
+    miner_info: object, validator_info: object, *, block_hash: str,
+    block_height: int, observer_wall_s: float, observer_elapsed_ns: int,
+) -> dict[str, Any]:
+    """Bind production stage telemetry to one exact accepted block hash."""
+    if not isinstance(miner_info, dict) or not isinstance(validator_info, dict):
+        raise RuntimeError("getmininginfo lifecycle responses must be objects")
+    miner_runtime = miner_info.get("backend_runtime")
+    validator_runtime = validator_info.get("backend_runtime")
+    if not isinstance(miner_runtime, dict) or not isinstance(validator_runtime, dict):
+        raise RuntimeError("backend_runtime lifecycle objects are missing")
+    miner_scheduler = miner_runtime.get("rc_accelerator_scheduler")
+    validator_scheduler = validator_runtime.get("rc_accelerator_scheduler")
+    validator_rc = validator_runtime.get("rc_exact_replay")
+    if not isinstance(miner_scheduler, dict) or not isinstance(validator_scheduler, dict):
+        raise RuntimeError("RC scheduler lifecycle objects are missing")
+    if not isinstance(validator_rc, dict):
+        raise RuntimeError("validator RC ExactReplay object is missing")
+
+    authority_parent = miner_scheduler.get("winner_reseal_authority")
+    if not isinstance(authority_parent, dict):
+        raise RuntimeError("miner winner authority telemetry is missing")
+    authority = _record_for_hash(
+        authority_parent.get("recent_consumed"), block_hash,
+        "miner recent_consumed authority",
     )
-    validator_rc = validator.cli("getmininginfo")["backend_runtime"][
-        "rc_exact_replay"
-    ]
-    validator_last = validator_rc.get("last_validation") or {}
+    relay = _record_for_hash(
+        validator_scheduler.get("recent_authenticated_relays"), block_hash,
+        "validator recent_authenticated_relays",
+    )
+    validation = _record_for_hash(
+        validator_rc.get("recent_validations"), block_hash,
+        "validator recent_validations",
+    )
+
+    if authority.get("block_height") != block_height:
+        raise RuntimeError("winner authority height mismatch")
+    if validation.get("block_height") != block_height:
+        raise RuntimeError("validator ExactReplay height mismatch")
+    solve_attempts = authority.get("solve_attempts")
+    if not isinstance(solve_attempts, int) or isinstance(solve_attempts, bool) or \
+            solve_attempts <= 0:
+        raise RuntimeError("solve_attempts must be a positive integer")
+    solve_to_reseal = _finite_nonnegative(
+        authority.get("solve_to_reseal_s"), "solve_to_reseal_s")
+    reseal_to_consume = _finite_nonnegative(
+        authority.get("reseal_to_consume_s"), "reseal_to_consume_s")
+    solve_to_consume = _finite_nonnegative(
+        authority.get("solve_to_consume_s"), "solve_to_consume_s")
+    if abs(solve_to_reseal + reseal_to_consume - solve_to_consume) > 1e-6:
+        raise RuntimeError("winner authority stage timings do not reconcile")
+    relay_s = _finite_nonnegative(relay.get("relay_s"), "relay_s")
+    validation_s = _finite_nonnegative(validation.get("wall_s"), "validation wall_s")
+    observer = _finite_nonnegative(observer_wall_s, "observer wall_s")
+    if not isinstance(observer_elapsed_ns, int) or \
+            isinstance(observer_elapsed_ns, bool) or observer_elapsed_ns < 0:
+        raise RuntimeError("observer elapsed_ns must be a non-negative integer")
+    if abs(observer - observer_elapsed_ns / 1_000_000_000.0) > 1e-9:
+        raise RuntimeError("observer elapsed_ns does not reproduce observer wall")
+    if max(solve_to_consume, relay_s, validation_s) > observer + 1e-6:
+        raise RuntimeError("stage timing exceeds solve-to-authenticated-tip observer wall")
+    for field, expected in (
+        ("outcome", "valid"),
+        ("execution_policy", "strict-device"),
+        ("require_device", True),
+        ("fully_accelerated", True),
+        ("device_xof_fallbacks", 0),
+        ("host_xof_calls", 0),
+        ("cpu_gemm_calls", 0),
+        ("cpu_gemm_fallbacks", 0),
+    ):
+        if validation.get(field) != expected:
+            raise RuntimeError(f"validator ExactReplay {field} mismatch")
+    if not isinstance(validation.get("device_gemm_calls"), int) or \
+            isinstance(validation.get("device_gemm_calls"), bool) or \
+            validation["device_gemm_calls"] <= 0:
+        raise RuntimeError("validator ExactReplay recorded no device GEMM")
+    for label, provider in (
+        ("miner", authority.get("provider")),
+        ("validator", validation.get("provider")),
+    ):
+        if not isinstance(provider, str) or not provider.startswith("cuda_"):
+            raise RuntimeError(f"{label} exact-block provider is not CUDA")
+
     return {
-        "complete": complete,
-        "core_complete_without_authority": core_complete and not authority_measured,
-        "authority_measured": authority_measured,
-        "missing_fields": missing,
-        "components": components,
-        "core_lifecycle_s": core_lifecycle_s,
-        "complete_lifecycle_s": complete_lifecycle_s,
-        "rpc_assess_lifecycle_s": (rpc_lifecycle or {}).get("complete_lifecycle_s"),
-        "rpc_complete_sample_set": (rpc_lifecycle or {}).get("complete_sample_set"),
-        "rpc_correlated_end_to_end_sample": (rpc_lifecycle or {}).get(
-            "correlated_end_to_end_sample"
-        ),
-        "rpc_operationally_ready": (rpc_lifecycle or {}).get("operationally_ready"),
-        "rpc_omits_winner_authority_handoff": True,
-        "miner_provider": (ms.get("winner_reseal_authority") or {}).get("last_provider"),
-        "validator_provider": validator_last.get("provider"),
-        "validator_execution_policy": validator_last.get("execution_policy"),
-        "validator_fully_accelerated": validator_last.get("fully_accelerated"),
-        "validator_cpu_gemm_calls": validator_last.get("cpu_gemm_calls"),
-        "validator_cpu_gemm_fallbacks": validator_last.get("cpu_gemm_fallbacks"),
+        "complete": True,
+        "authority_measured": True,
+        "complete_lifecycle_s": observer,
+        "observer_solve_rpc_to_authenticated_tip_s": observer,
+        "observer_measurement": {
+            "clock": "monotonic_ns",
+            "start_event": "before_generatetodescriptor_rpc",
+            "stop_event": "both_nodes_exact_authenticated_tip",
+            "elapsed_ns": observer_elapsed_ns,
+        },
+        "rpc_correlated_end_to_end_sample": True,
+        "correlation_block_hash": block_hash,
+        "miner_authority": authority,
+        "authenticated_relay": relay,
+        "validator_exact_replay": validation,
+        "miner_provider": authority["provider"],
+        "validator_provider": validation["provider"],
+        "validator_execution_policy": validation["execution_policy"],
+        "validator_fully_accelerated": validation["fully_accelerated"],
+        "validator_cpu_gemm_calls": validation["cpu_gemm_calls"],
+        "validator_cpu_gemm_fallbacks": validation["cpu_gemm_fallbacks"],
     }
 
 
-def counters_advanced(
-    before: dict[str, Any], after: dict[str, Any], *, require_authority: bool
-) -> tuple[bool, list[str]]:
-    required = [
-        ("miner_candidate", 1),
-        ("miner_reseal", 1),
-        ("validator_relay", 1),
-        ("validator_tip", 1),
-    ]
-    if require_authority:
-        required.append(("miner_authority_consumed", 1))
-    gaps = []
-    for key, need in required:
-        if after[key] < before[key] + need:
-            gaps.append(f"{key}: {before[key]} -> {after[key]} (need +{need})")
-    return (not gaps, gaps)
+def extract_exact_block_core_lifecycle(
+    validator_info: object, *, block_hash: str, block_height: int,
+    observer_wall_s: float, observer_elapsed_ns: int,
+) -> dict[str, Any]:
+    """Retain a non-authorizing exact-block toy/core rehearsal sample."""
+    if not isinstance(validator_info, dict):
+        raise RuntimeError("validator getmininginfo response must be an object")
+    runtime = validator_info.get("backend_runtime")
+    if not isinstance(runtime, dict):
+        raise RuntimeError("validator backend_runtime object is missing")
+    scheduler_info = runtime.get("rc_accelerator_scheduler")
+    validator_rc = runtime.get("rc_exact_replay")
+    if not isinstance(scheduler_info, dict) or not isinstance(validator_rc, dict):
+        raise RuntimeError("validator exact-block telemetry is missing")
+    relay = _record_for_hash(
+        scheduler_info.get("recent_authenticated_relays"), block_hash,
+        "validator recent_authenticated_relays",
+    )
+    validation = _record_for_hash(
+        validator_rc.get("recent_validations"), block_hash,
+        "validator recent_validations",
+    )
+    if validation.get("block_height") != block_height:
+        raise RuntimeError("validator ExactReplay height mismatch")
+    if validation.get("outcome") != "valid":
+        raise RuntimeError("validator ExactReplay outcome mismatch")
+    relay_s = _finite_nonnegative(relay.get("relay_s"), "relay_s")
+    validation_s = _finite_nonnegative(validation.get("wall_s"), "validation wall_s")
+    observer = _finite_nonnegative(observer_wall_s, "observer wall_s")
+    if not isinstance(observer_elapsed_ns, int) or \
+            isinstance(observer_elapsed_ns, bool) or observer_elapsed_ns < 0:
+        raise RuntimeError("observer elapsed_ns must be a non-negative integer")
+    if abs(observer - observer_elapsed_ns / 1_000_000_000.0) > 1e-9:
+        raise RuntimeError("observer elapsed_ns does not reproduce observer wall")
+    if max(relay_s, validation_s) > observer + 1e-6:
+        raise RuntimeError("core stage timing exceeds observer wall")
+    return {
+        "complete": False,
+        "core_complete_without_authority": True,
+        "authority_measured": False,
+        "core_lifecycle_s": observer,
+        "observer_solve_rpc_to_authenticated_tip_s": observer,
+        "observer_measurement": {
+            "clock": "monotonic_ns",
+            "start_event": "before_generatetodescriptor_rpc",
+            "stop_event": "both_nodes_exact_authenticated_tip",
+            "elapsed_ns": observer_elapsed_ns,
+        },
+        "rpc_correlated_end_to_end_sample": True,
+        "correlation_block_hash": block_hash,
+        "authenticated_relay": relay,
+        "validator_exact_replay": validation,
+        "reason": "production winner authority unavailable in toy/core mode",
+    }
 
 
 def mine_one(miner: Node, timeout: int) -> str:
@@ -681,9 +782,10 @@ def main() -> int:
             contention = (
                 args.contention_every > 0 and attempt % args.contention_every == 0
             )
-            before = snapshot_counters(miner, validator)
             block_hash = None
             phase = "steady_mine_relay"
+            competing_block_hashes: list[str] = []
+            contention_trace = None
             try:
                 if contention:
                     phase = "competing_tip"
@@ -705,30 +807,122 @@ def main() -> int:
                             continue
                     disconnect_peers(miner)
                     disconnect_peers(validator)
-                    h0 = mine_one(miner, args.mine_timeout_s)
-                    h1 = mine_one(validator, args.mine_timeout_s)
+                    miner_parent_child = mine_one(miner, args.mine_timeout_s)
+                    competing_hash = mine_one(validator, args.mine_timeout_s)
+                    if competing_hash == miner_parent_child:
+                        incomplete.append({
+                            "attempt": attempt,
+                            "phase": phase,
+                            "reason": "competing_headers_identical",
+                            "block_hash": competing_hash,
+                        })
+                        status(f"incomplete attempt {attempt}: no distinct competing tip")
+                        connect_peers(miner, validator)
+                        continue
+                    miner_parent = miner.cli(
+                        "getblockheader", miner_parent_child
+                    ).get("previousblockhash")
+                    competing_parent = validator.cli(
+                        "getblockheader", competing_hash
+                    ).get("previousblockhash")
+                    if miner_parent != parent or competing_parent != parent:
+                        incomplete.append({
+                            "attempt": attempt,
+                            "phase": phase,
+                            "reason": "contention_not_from_common_parent",
+                        })
+                        status(
+                            f"incomplete attempt {attempt}: "
+                            "contention parent mismatch"
+                        )
+                        connect_peers(miner, validator)
+                        continue
+                    # Extend the miner branch while disconnected to force a
+                    # deterministic reorg, then wait for that contention to
+                    # converge before measuring one exact direct-tip child.
+                    # This preserves ordinary direct-tip relay accounting and
+                    # separately binds the preceding reorg precondition.
+                    contention_reorg_tip_hash = mine_one(
+                        miner, args.mine_timeout_s)
+                    reorg_tip_parent = miner.cli(
+                        "getblockheader", contention_reorg_tip_hash
+                    ).get("previousblockhash")
+                    if reorg_tip_parent != miner_parent_child:
+                        incomplete.append({
+                            "attempt": attempt,
+                            "phase": phase,
+                            "reason": "reorg_tip_not_on_winning_branch",
+                        })
+                        status(
+                            f"incomplete attempt {attempt}: "
+                            "reorg tip parent mismatch"
+                        )
+                        connect_peers(miner, validator)
+                        continue
+                    competing_block_hashes = [competing_hash]
                     connect_peers(miner, validator)
-                    # Prefer miner tip; force reconnect/sync. Reorg may drop one.
-                    if not wait_equal_tips(miner, validator, args.sync_timeout_s):
-                        # Ask validator to reorg toward miner if miner is ahead in work.
-                        # Fallback: mine another block on miner and sync.
-                        mine_one(miner, args.mine_timeout_s)
-                        if not wait_equal_tips(miner, validator, args.sync_timeout_s):
-                            incomplete.append(
-                                {
-                                    "attempt": attempt,
-                                    "phase": phase,
-                                    "reason": "reorg_sync_failed",
-                                    "miner_block": h0,
-                                    "validator_block": h1,
-                                }
-                            )
-                            status(f"incomplete attempt {attempt}: reorg sync failed")
-                            continue
-                    block_hash = miner.cli("getbestblockhash")
-                else:
+                    if not wait_exact_tips(
+                        miner, validator, contention_reorg_tip_hash,
+                        args.sync_timeout_s,
+                    ):
+                        incomplete.append({
+                            "attempt": attempt,
+                            "phase": phase,
+                            "reason": "reorg_sync_failed",
+                            "contention_reorg_tip_hash": contention_reorg_tip_hash,
+                            "competing_block_hashes": competing_block_hashes,
+                        })
+                        status(f"incomplete attempt {attempt}: reorg sync failed")
+                        continue
+                    observer_started_ns = time.monotonic_ns()
                     block_hash = mine_one(miner, args.mine_timeout_s)
-                    if not wait_equal_tips(miner, validator, args.sync_timeout_s):
+                    measured_parent = miner.cli(
+                        "getblockheader", block_hash
+                    ).get("previousblockhash")
+                    if measured_parent != contention_reorg_tip_hash:
+                        incomplete.append({
+                            "attempt": attempt,
+                            "phase": phase,
+                            "reason": "measured_child_not_after_reorg",
+                        })
+                        status(
+                            f"incomplete attempt {attempt}: "
+                            "measured child parent mismatch"
+                        )
+                        continue
+                    contention_trace = {
+                        "common_parent_hash": parent,
+                        "winning_branch_hash": miner_parent_child,
+                        "winning_branch_parent_hash": miner_parent,
+                        "losing_branch_hash": competing_hash,
+                        "losing_branch_parent_hash": competing_parent,
+                        "reorg_tip_hash": contention_reorg_tip_hash,
+                        "reorg_tip_parent_hash": reorg_tip_parent,
+                        "measured_block_parent_hash": measured_parent,
+                    }
+                    if not wait_exact_tips(
+                        miner, validator, block_hash, args.sync_timeout_s
+                    ):
+                        incomplete.append({
+                            "attempt": attempt,
+                            "phase": phase,
+                            "reason": "post_reorg_child_sync_failed",
+                            "block_hash": block_hash,
+                            "contention_reorg_tip_hash": contention_reorg_tip_hash,
+                            "competing_block_hashes": competing_block_hashes,
+                        })
+                        status(
+                            f"incomplete attempt {attempt}: "
+                            "post-reorg child sync failed"
+                        )
+                        continue
+                else:
+                    contention_reorg_tip_hash = None
+                    observer_started_ns = time.monotonic_ns()
+                    block_hash = mine_one(miner, args.mine_timeout_s)
+                    if not wait_exact_tips(
+                        miner, validator, block_hash, args.sync_timeout_s
+                    ):
                         incomplete.append(
                             {
                                 "attempt": attempt,
@@ -740,56 +934,46 @@ def main() -> int:
                         status(f"incomplete attempt {attempt}: sync timeout")
                         continue
 
-                after = snapshot_counters(miner, validator)
-                advanced_full, gaps_full = counters_advanced(
-                    before, after, require_authority=True
-                )
-                advanced_core, gaps_core = counters_advanced(
-                    before, after, require_authority=False
-                )
-                extracted = extract_components(miner, validator)
+                observer_elapsed_ns = time.monotonic_ns() - observer_started_ns
+                observer_wall_s = observer_elapsed_ns / 1_000_000_000.0
+                height = int(miner.cli("getblockcount"))
+                miner_info = miner.cli("getmininginfo")
+                validator_info = validator.cli("getmininginfo")
+                if args.mode == "production":
+                    extracted = extract_exact_block_lifecycle(
+                        miner_info, validator_info,
+                        block_hash=block_hash, block_height=height,
+                        observer_wall_s=observer_wall_s,
+                        observer_elapsed_ns=observer_elapsed_ns,
+                    )
+                else:
+                    extracted = extract_exact_block_core_lifecycle(
+                        validator_info,
+                        block_hash=block_hash, block_height=height,
+                        observer_wall_s=observer_wall_s,
+                        observer_elapsed_ns=observer_elapsed_ns,
+                    )
                 record = {
                     "attempt": attempt,
                     "phase": phase,
-                    "height": miner.cli("getblockcount"),
+                    "height": height,
                     "block_hash": block_hash,
-                    "counters_before": before,
-                    "counters_after": after,
-                    "counter_gaps": gaps_full if not advanced_full else [],
-                    "counter_gaps_core": gaps_core if not advanced_core else [],
+                    "competing_block_hashes": competing_block_hashes,
+                    "contention_reorg_tip_hash": contention_reorg_tip_hash,
+                    "contention_trace": contention_trace,
                     **extracted,
                 }
-                if (
-                    advanced_full
-                    and extracted["complete"]
-                    and extracted["complete_lifecycle_s"] is not None
-                ):
+                if args.mode == "production":
                     samples.append(record)
                     status(
-                        f"complete sample {len(samples)}/{args.samples} "
+                        f"complete exact-block sample {len(samples)}/{args.samples} "
                         f"lifecycle_s={extracted['complete_lifecycle_s']:.3f}"
                     )
-                elif (
-                    advanced_core
-                    and extracted.get("core_complete_without_authority")
-                    and extracted.get("core_lifecycle_s") is not None
-                ):
-                    record["reason"] = "authority_handoff_unavailable_without_production_canary"
+                else:
                     core_samples.append(record)
                     status(
-                        f"core sample {len(core_samples)}/{args.samples} "
-                        f"(no authority) core_s={extracted['core_lifecycle_s']:.3f}"
-                    )
-                else:
-                    record["reason"] = "missing_component_or_counter"
-                    incomplete.append(record)
-                    status(
-                        f"incomplete attempt {attempt}: "
-                        + (
-                            ", ".join(gaps_core)
-                            if gaps_core
-                            else "component gate"
-                        )
+                        f"core exact-block sample {len(core_samples)}/{args.samples} "
+                        f"lifecycle_s={extracted['core_lifecycle_s']:.3f}"
                     )
             except (subprocess.SubprocessError, OSError, RuntimeError) as exc:
                 incomplete.append(
@@ -831,32 +1015,38 @@ def main() -> int:
         }
 
         component_series = {
-            key: [s["components"][key] for s in samples]
-            for key in (
-                "candidate_execution_s",
-                "candidate_queue_wait_s",
-                "winner_reseal_s",
-                "reseal_queue_wait_s",
-                "winner_authority_handoff_s",
-                "authenticated_relay_s",
-                "tip_validation_s",
-                "validation_queue_wait_s",
-            )
-        }
-        core_component_series = {
-            key: [s["components"][key] for s in core_samples]
-            for key in (
-                "candidate_execution_s",
-                "candidate_queue_wait_s",
-                "winner_reseal_s",
-                "reseal_queue_wait_s",
-                "authenticated_relay_s",
-                "tip_validation_s",
-                "validation_queue_wait_s",
-            )
+            "observer_solve_rpc_to_authenticated_tip_s": [
+                s["observer_solve_rpc_to_authenticated_tip_s"] for s in samples
+            ],
+            "solve_to_reseal_s": [
+                s["miner_authority"]["solve_to_reseal_s"] for s in samples
+            ],
+            "reseal_to_consume_s": [
+                s["miner_authority"]["reseal_to_consume_s"] for s in samples
+            ],
+            "authenticated_relay_s": [
+                s["authenticated_relay"]["relay_s"] for s in samples
+            ],
+            "tip_validation_s": [
+                s["validator_exact_replay"]["wall_s"] for s in samples
+            ],
         }
         lifecycle_vals = [float(s["complete_lifecycle_s"]) for s in samples]
-        core_lifecycle_vals = [float(s["core_lifecycle_s"]) for s in core_samples]
+        core_lifecycle_vals = [
+            float(s["core_lifecycle_s"]) for s in core_samples
+        ]
+        core_component_series = {
+            "observer_solve_rpc_to_authenticated_tip_s": [
+                s["observer_solve_rpc_to_authenticated_tip_s"]
+                for s in core_samples
+            ],
+            "authenticated_relay_s": [
+                s["authenticated_relay"]["relay_s"] for s in core_samples
+            ],
+            "tip_validation_s": [
+                s["validator_exact_replay"]["wall_s"] for s in core_samples
+            ],
+        }
 
         payload = {
             "tool": TOOL,
@@ -887,8 +1077,8 @@ def main() -> int:
             "activation_height_regtest": ACTIVATION_HEIGHT,
             "nodes": 2,
             "correlation": {
-                "model": "independent_latest_components",
-                "activation_eligible": False,
+                "model": "exact_per_block_v1",
+                "activation_eligible": args.mode == "production",
             },
             "contention": {
                 "single_gpu_host": True,
@@ -908,24 +1098,20 @@ def main() -> int:
                 ),
             },
             "component_definition": [
-                "candidate_execution_s",
-                "candidate_queue_wait_s",
-                "winner_reseal_s",
-                "reseal_queue_wait_s",
-                "winner_authority_handoff_s",
+                "observer_solve_rpc_to_authenticated_tip_s",
+                "solve_to_reseal_s",
+                "reseal_to_consume_s",
                 "authenticated_relay_s",
                 "tip_validation_s",
-                "validation_queue_wait_s",
             ],
             "measurement_notes": [
-                "Complete diagnostic samples require counter advancement during an attempt on miner candidate, reseal, authority consume, validator authenticated relay, and tip validation.",
-                "Core samples omit winner-authority handoff when the empty production-golden manifest prevents a production capability token; they are not treated as activation-ready complete lifecycle samples.",
-                "RPC complete_lifecycle_readiness sums latest lane components and omits winner-authority handoff; campaign complete sum includes handoff and is fail-closed.",
-                "correlated_end_to_end_sample remains false in RPC; counters and latest component values are not bound to one exact block and cannot authorize activation.",
+                "The authoritative lifecycle value is an observer monotonic wall clock started immediately before the solve RPC and stopped only after both nodes report that exact block as authenticated tip.",
+                "Bounded daemon records independently bind the same block hash to strict winner reseal/local-authority consumption, authenticated relay, and receiving strict ExactReplay.",
+                "Stage durations are diagnostic containment checks and are not summed or substituted for the observer end-to-end wall time.",
+                "Competing-tip samples mine a distinct losing branch, force and verify convergence on the designated branch, then measure one exact direct-tip child after that reorg.",
                 "Missing authenticated-relay observations are recorded as incomplete; none are invented.",
             ],
             "gaps_vs_activation_gates": [
-                "winner_authority_handoff unavailable until reviewed production goldens + startup canary mint a process capability",
                 "source ratification decisions are outside this measurement tool",
                 "IBD multi-peer soak not claimed by this campaign",
             ],

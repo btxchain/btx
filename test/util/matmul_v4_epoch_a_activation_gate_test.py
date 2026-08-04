@@ -114,29 +114,68 @@ def runtime_node(*, validation: bool) -> dict:
 def lifecycle() -> dict:
     samples = []
     for phase, wall in (("steady_mine_relay", 80), ("competing_tip", 85)):
-        components = {
-            "candidate_execution_s": wall - 7,
-            "candidate_queue_wait_s": 1,
-            "winner_reseal_s": 1,
-            "reseal_queue_wait_s": 1,
-            "winner_authority_handoff_s": 1,
-            "authenticated_relay_s": 1,
-            "tip_validation_s": 1,
-            "validation_queue_wait_s": 1,
-        }
+        block_hash = f"{len(samples) + 1:064x}"
         samples.append({
             "complete": True,
             "phase": phase,
+            "height": 6 + len(samples),
             "complete_lifecycle_s": wall,
-            "components": components,
-            "authority_measured": True,
-            "counter_gaps": [],
-            "block_hash": f"{len(samples) + 1:064x}",
-            "rpc_correlated_end_to_end_sample": True,
-            "correlation_block_hash": f"{len(samples) + 1:064x}",
-            "component_block_hashes": {
-                field: f"{len(samples) + 1:064x}" for field in components
+            "observer_solve_rpc_to_authenticated_tip_s": wall,
+            "observer_measurement": {
+                "clock": "monotonic_ns",
+                "start_event": "before_generatetodescriptor_rpc",
+                "stop_event": "both_nodes_exact_authenticated_tip",
+                "elapsed_ns": wall * 1_000_000_000,
             },
+            "authority_measured": True,
+            "block_hash": block_hash,
+            "rpc_correlated_end_to_end_sample": True,
+            "correlation_block_hash": block_hash,
+            "miner_authority": {
+                "block_hash": block_hash,
+                "block_height": 6 + len(samples),
+                "solve_attempts": 3 if phase == "competing_tip" else 1,
+                "solve_to_reseal_s": 60,
+                "reseal_to_consume_s": 1,
+                "solve_to_consume_s": 61,
+                "provider": "cuda_rc_exact_test",
+            },
+            "authenticated_relay": {
+                "block_hash": block_hash,
+                "relay_s": 1,
+            },
+            "validator_exact_replay": {
+                "block_hash": block_hash,
+                "block_height": 6 + len(samples),
+                "outcome": "valid",
+                "execution_policy": "strict-device",
+                "require_device": True,
+                "provider": "cuda_rc_exact_test",
+                "fully_accelerated": True,
+                "device_gemm_calls": 136,
+                "device_gemm_macs": 141149805215744,
+                "device_xof_fallbacks": 0,
+                "host_xof_calls": 0,
+                "cpu_gemm_calls": 0,
+                "cpu_gemm_fallbacks": 0,
+                "wall_s": 20,
+            },
+            "competing_block_hashes": (
+                ["f" * 64] if phase == "competing_tip" else []
+            ),
+            "contention_reorg_tip_hash": (
+                "e" * 64 if phase == "competing_tip" else None
+            ),
+            "contention_trace": ({
+                "common_parent_hash": "a" * 64,
+                "winning_branch_hash": "b" * 64,
+                "winning_branch_parent_hash": "a" * 64,
+                "losing_branch_hash": "f" * 64,
+                "losing_branch_parent_hash": "a" * 64,
+                "reorg_tip_hash": "e" * 64,
+                "reorg_tip_parent_hash": "b" * 64,
+                "measured_block_parent_hash": "e" * 64,
+            } if phase == "competing_tip" else None),
             "miner_provider": "cuda_rc_exact_test",
             "validator_provider": "cuda_rc_exact_test",
             "validator_execution_policy": "strict-device",
@@ -171,10 +210,9 @@ def lifecycle() -> dict:
             "operationally_ready_claim": False,
         },
         "component_definition": [
-            "candidate_execution_s", "candidate_queue_wait_s",
-            "winner_reseal_s", "reseal_queue_wait_s",
-            "winner_authority_handoff_s", "authenticated_relay_s",
-            "tip_validation_s", "validation_queue_wait_s",
+            "observer_solve_rpc_to_authenticated_tip_s",
+            "solve_to_reseal_s", "reseal_to_consume_s",
+            "authenticated_relay_s", "tip_validation_s",
         ],
         "complete_sample_count": 2,
         "core_sample_count_without_authority": 0,
@@ -333,6 +371,9 @@ class EpochAActivationGateTest(unittest.TestCase):
             self.write_lifecycle(lifecycle()), policy(), REVISION, FINGERPRINT,
             BINARY_HASHES,
         )
+        self.assertEqual(
+            lifecycle()["samples"][1]["miner_authority"]["solve_attempts"], 3
+        )
         changed = lifecycle()
         changed["runtime_builds"]["validator"]["production_canary"][
             "build_source_tree_fingerprint"
@@ -345,7 +386,8 @@ class EpochAActivationGateTest(unittest.TestCase):
     def test_lifecycle_thresholds_and_contention_fail_closed(self) -> None:
         changed = lifecycle()
         changed["samples"][1]["complete_lifecycle_s"] = 91
-        changed["samples"][1]["components"]["candidate_execution_s"] += 6
+        changed["samples"][1]["observer_solve_rpc_to_authenticated_tip_s"] = 91
+        changed["samples"][1]["observer_measurement"]["elapsed_ns"] = 91_000_000_000
         changed["complete_lifecycle_summary_s"].update({
             "p95": 91, "p99": 91, "max": 91, "mean": 85.5,
         })
@@ -364,7 +406,6 @@ class EpochAActivationGateTest(unittest.TestCase):
         for sample in changed["samples"]:
             sample["rpc_correlated_end_to_end_sample"] = False
             sample.pop("correlation_block_hash")
-            sample.pop("component_block_hashes")
         self.assert_lifecycle_rejected(changed, "lacks exact per-block correlation")
 
     def test_lifecycle_incomplete_accounting_is_canonical_and_reconciled(self) -> None:
@@ -380,12 +421,64 @@ class EpochAActivationGateTest(unittest.TestCase):
         changed["attempts"] = 3
         self.assert_lifecycle_rejected(changed, "attempts do not reconcile")
 
-    def test_lifecycle_component_hashes_must_match_exact_block(self) -> None:
+    def test_lifecycle_stage_hashes_must_match_exact_block(self) -> None:
         changed = lifecycle()
-        changed["samples"][0]["component_block_hashes"][
-            "tip_validation_s"
-        ] = "f" * 64
-        self.assert_lifecycle_rejected(changed, "components are not bound")
+        changed["samples"][0]["miner_authority"]["block_hash"] = "f" * 64
+        self.assert_lifecycle_rejected(changed, "authority block mismatch")
+        changed = lifecycle()
+        changed["samples"][0]["authenticated_relay"]["block_hash"] = "f" * 64
+        self.assert_lifecycle_rejected(changed, "relay block mismatch")
+        changed = lifecycle()
+        changed["samples"][0]["validator_exact_replay"]["block_hash"] = "f" * 64
+        self.assert_lifecycle_rejected(changed, "validation block mismatch")
+
+    def test_lifecycle_multi_attempt_authority_and_observer_fail_closed(self) -> None:
+        changed = lifecycle()
+        changed["samples"][1]["miner_authority"].pop("solve_attempts")
+        self.assert_lifecycle_rejected(changed, "authority schema mismatch")
+        changed = lifecycle()
+        changed["samples"][1]["miner_authority"]["solve_attempts"] = 0
+        self.assert_lifecycle_rejected(changed, "solve_attempts must be an integer")
+        changed = lifecycle()
+        changed["samples"][1]["miner_authority"]["solve_to_consume_s"] = 62
+        self.assert_lifecycle_rejected(changed, "authority timings do not reconcile")
+        changed = lifecycle()
+        changed["samples"][0]["observer_measurement"]["elapsed_ns"] += 1_000_000_000
+        self.assert_lifecycle_rejected(changed, "observer elapsed_ns mismatch")
+        changed = lifecycle()
+        sample = changed["samples"][0]
+        summed = (
+            sample["miner_authority"]["solve_to_consume_s"]
+            + sample["authenticated_relay"]["relay_s"]
+            + sample["validator_exact_replay"]["wall_s"]
+        )
+        sample["complete_lifecycle_s"] = summed
+        sample["observer_solve_rpc_to_authenticated_tip_s"] = summed
+        sample["observer_measurement"]["elapsed_ns"] = int(summed * 1_000_000_000)
+        changed["complete_lifecycle_summary_s"].update({
+            "min": summed, "p50": summed, "mean": (summed + 85) / 2,
+        })
+        self.assert_lifecycle_rejected(changed, "substitutes summed stages")
+
+    def test_lifecycle_missing_cancelled_and_fake_contention_fail_closed(self) -> None:
+        changed = lifecycle()
+        changed["samples"][0].pop("authenticated_relay")
+        self.assert_lifecycle_rejected(changed, "relay block mismatch")
+        changed = lifecycle()
+        changed["samples"][0]["validator_exact_replay"]["outcome"] = "cancelled"
+        self.assert_lifecycle_rejected(changed, "validation.outcome mismatch")
+        changed = lifecycle()
+        changed["samples"][1]["competing_block_hashes"] = []
+        self.assert_lifecycle_rejected(changed, "lacks a distinct competing block")
+        changed = lifecycle()
+        changed["samples"][1]["contention_reorg_tip_hash"] = None
+        self.assert_lifecycle_rejected(changed, "contention reorg tip")
+        changed = lifecycle()
+        changed["samples"][1]["contention_reorg_tip_hash"] = changed["samples"][1]["block_hash"]
+        self.assert_lifecycle_rejected(changed, "reorg tip is not distinct")
+        changed = lifecycle()
+        changed["samples"][1]["contention_trace"]["reorg_tip_parent_hash"] = "c" * 64
+        self.assert_lifecycle_rejected(changed, "contention ancestry mismatch")
 
     def test_measurement_artifact_cannot_self_ratify(self) -> None:
         changed = lifecycle()

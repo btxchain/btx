@@ -465,7 +465,7 @@ RCAcceleratorScheduler::AssessLifecycle(double target_spacing_s) const
         production_canary.activation_ready &&
         Consensus::BTX_MATMUL_V47_GPU_LIFECYCLE_GATE_RATIFIED;
     // Lane values are independent latest-component samples, not one
-    // block-correlated candidate-start-to-receiving-tip observation. Never
+    // block-correlated solve-RPC-to-receiving-tip observation. Never
     // convert them into an operational-readiness verdict. A future bounded
     // record must bind every component to one exact header first.
     out.correlated_end_to_end_sample = false;
@@ -502,9 +502,12 @@ void RCAcceleratorScheduler::RecordAuthenticatedRelaySample(double relay_s)
 }
 
 RCAcceleratorScheduler::AuthenticatedRelayObservation
-RCAcceleratorScheduler::BeginAuthenticatedRelayObservation() const
+RCAcceleratorScheduler::BeginAuthenticatedRelayObservation(
+    const uint256& block_hash) const
 {
-    return {.announced = std::chrono::steady_clock::now()};
+    return {
+        .block_hash = block_hash,
+        .announced = std::chrono::steady_clock::now()};
 }
 
 void RCAcceleratorScheduler::MarkAuthenticatedRelayBodyReceived(
@@ -520,16 +523,36 @@ void RCAcceleratorScheduler::MarkAuthenticatedRelayBodyReceived(
 bool RCAcceleratorScheduler::CommitAuthenticatedRelayObservation(
     AuthenticatedRelayObservation& observation)
 {
-    if (!observation.body_received ||
+    if (observation.block_hash.IsNull() || !observation.body_received ||
         observation.announced.time_since_epoch().count() == 0 ||
         *observation.body_received < observation.announced) {
         return false;
     }
     const double relay_s{
         Seconds(*observation.body_received - observation.announced)};
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        ++m_stats.authenticated_relay_samples;
+        m_stats.last_authenticated_relay_s = relay_s;
+        m_stats.max_authenticated_relay_s =
+            std::max(m_stats.max_authenticated_relay_s, relay_s);
+        std::erase_if(
+            m_stats.recent_authenticated_relays,
+            [&](const AuthenticatedRelaySample& sample) {
+                return sample.block_hash == observation.block_hash;
+            });
+        m_stats.recent_authenticated_relays.push_back({
+            .block_hash = observation.block_hash,
+            .relay_s = relay_s});
+        if (m_stats.recent_authenticated_relays.size() >
+            MAX_AUTHENTICATED_RELAY_SAMPLES) {
+            m_stats.recent_authenticated_relays.erase(
+                m_stats.recent_authenticated_relays.begin());
+        }
+    }
+    observation.block_hash.SetNull();
     observation.announced = {};
     observation.body_received.reset();
-    RecordAuthenticatedRelaySample(relay_s);
     return true;
 }
 

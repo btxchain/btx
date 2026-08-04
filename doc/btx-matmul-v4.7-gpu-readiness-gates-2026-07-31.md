@@ -89,9 +89,13 @@ The PR97 implementation has the following local controls:
   attestations, duplicates, and incomplete observations cannot create a
   sample. This supplies the live transport component, but the latest-component
   summary is still not a correlated percentile campaign and readiness remains
-  false until both exact-block lifecycle telemetry and the hardware evidence
-  gates pass. Schema-2 campaign output remains diagnostic and is rejected by
-  the release-final activation gate.
+  false. The schema-3 lifecycle campaign instead measures one observer wall
+  clock and requires bounded miner-authority, authenticated-relay, and strict
+  receiving-ExactReplay records to carry the same exact block hash. Its output
+  remains evidence input, not a consensus verdict or self-ratification action.
+  The miner authority spans the complete solve invocation, counts every nonce
+  attempt, and includes queue waits. Contention evidence binds the losing block
+  and converged reorg tip, then times an exact direct-tip child after convergence.
 - The RC admission budgets, retained-address/netgroup accounting, pending-work
   reservation, same-hash sidecar hardening, and equal-priority handoff rules
   apply before scarce accelerator work starts. Local failure and cancellation

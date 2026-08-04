@@ -366,12 +366,18 @@ separate sealed CUDA+Metal correctness cohort, and a correlated strict-device
 two-node CUDA lifecycle campaign. The lifecycle policy explicitly records its
 minimum complete/contention samples and p99/max bounds; the tool does not
 invent those values. The campaign itself never self-ratifies a source flag.
-The current lifecycle campaign emits schema 2 diagnostic estimates assembled
-from independent latest-component counters. Those records are explicitly
-non-authorizing and the verifier rejects them. Activation requires a future
-schema 3 record in which every component is bound by production telemetry to
-the same exact block; changing the schema label or a correlation boolean in an
-artifact is not a substitute for implementing that telemetry.
+The lifecycle campaign emits schema 3 only after its observer measures from
+immediately before the solve RPC through the receiving node reporting
+that exact authenticated tip. The artifact binds the elapsed nanoseconds to
+explicit monotonic-clock start/stop events; sums of component counters are not
+accepted as the observer wall. Bounded daemon telemetry must bind the same block
+hash to strict winner reseal/local-authority consumption, authenticated relay,
+and receiving strict ExactReplay. Missing, cancelled, or cross-block stage data
+is incomplete. The winner record starts at the solve RPC dispatch, counts every
+nonce attempt, and includes all solve/reseal scheduler waits. Contention samples
+must bind a distinct losing block and the converged reorg tip before timing the
+next exact direct-tip child. The scheduler's independent latest-component summary remains
+diagnostic and cannot substitute for these exact-block records.
 Changing source, a binary, evidence bytes, the height, a flag, a provider
 cohort, or a lifecycle bound requires a new exact-final campaign and policy
 record.

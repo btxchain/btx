@@ -27,6 +27,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <fstream>
 #include <list>
 #include <map>
@@ -42,6 +43,7 @@ std::atomic<RCExactReplayExecutionPolicy> g_exact_replay_execution_policy{
     RCExactReplayExecutionPolicy::AutoFallback};
 std::mutex g_last_exact_replay_mutex;
 std::optional<ExactReplayVerifyResult> g_last_exact_replay;
+std::deque<ExactReplayVerifyResult> g_recent_exact_replays;
 std::mutex g_exact_replay_provider_health_mutex;
 RCExactReplayProviderHealth g_exact_replay_provider_health;
 std::map<std::string, RCExactReplayProviderHealth>
@@ -51,6 +53,26 @@ std::vector<RCExactReplayAlternateProvider>
     g_exact_replay_alternate_providers;
 std::mutex g_validator_readiness_notifier_mutex;
 RCValidatorReadinessLossNotifier g_validator_readiness_notifier;
+
+void RecordExactReplayTelemetry(
+    const CBlockHeader& header, int32_t height,
+    ExactReplayVerifyResult& result)
+{
+    result.block_hash = header.GetHash();
+    result.block_height = height;
+    std::lock_guard<std::mutex> lock{g_last_exact_replay_mutex};
+    g_last_exact_replay = result;
+    std::erase_if(
+        g_recent_exact_replays,
+        [&](const ExactReplayVerifyResult& prior) {
+            return prior.block_hash == result.block_hash;
+        });
+    g_recent_exact_replays.push_back(result);
+    while (g_recent_exact_replays.size() >
+           kRCExactReplayRecentResultsMax) {
+        g_recent_exact_replays.pop_front();
+    }
+}
 
 constexpr const char* PROVIDER_RECOVERY_ACTION{
     "repair/reset the accelerator and restart btxd, or restart with a different qualified provider; never invalidate or punish the announcing peer"};
@@ -264,10 +286,20 @@ GetLastExactReplayVerifyResult()
     return g_last_exact_replay;
 }
 
+std::vector<ExactReplayVerifyResult>
+GetRecentExactReplayVerifyResults()
+{
+    std::lock_guard<std::mutex> lock{g_last_exact_replay_mutex};
+    return {
+        g_recent_exact_replays.begin(),
+        g_recent_exact_replays.end()};
+}
+
 void ResetLastExactReplayVerifyResultForTest()
 {
     std::lock_guard<std::mutex> lock{g_last_exact_replay_mutex};
     g_last_exact_replay.reset();
+    g_recent_exact_replays.clear();
 }
 
 RCExactReplayProviderHealth GetRCExactReplayProviderHealth()
@@ -5443,11 +5475,7 @@ ExactReplayVerifyResult VerifyBoundedExactReplay(
             "accelerator_scheduler_outer_lease_workspace_too_small";
         result.note =
             "ExactReplay: existing accelerator lease does not cover the canonical workspace estimate; block remains retryable";
-        {
-            std::lock_guard<std::mutex> lock{
-                g_last_exact_replay_mutex};
-            g_last_exact_replay = result;
-        }
+        RecordExactReplayTelemetry(header, height, result);
         return result;
     }
     if (!current_thread_owns_lease) {
@@ -5462,11 +5490,7 @@ ExactReplayVerifyResult VerifyBoundedExactReplay(
         if (!scheduler_lease) {
             auto result{
                 SchedulerAdmissionFailure(policy, workspace_bytes)};
-            {
-                std::lock_guard<std::mutex> lock{
-                    g_last_exact_replay_mutex};
-                g_last_exact_replay = result;
-            }
+            RecordExactReplayTelemetry(header, height, result);
             return result;
         }
     }
@@ -5511,11 +5535,7 @@ ExactReplayVerifyResult VerifyBoundedExactReplay(
     result.require_device =
         policy == RCExactReplayExecutionPolicy::StrictDevice;
     result.acceleration_resolution_reason = resolution_reason;
-    {
-        std::lock_guard<std::mutex> lock{
-            g_last_exact_replay_mutex};
-        g_last_exact_replay = result;
-    }
+    RecordExactReplayTelemetry(header, height, result);
     return result;
 }
 

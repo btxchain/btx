@@ -276,8 +276,16 @@ is required before enabling pinned-buffer or device-Merkle optimizations.
 - Provider-measured full-workspace telemetry remains unavailable through the
   generic backend ABI; RPC reports a zero sample count and never presents the
   conservative admission estimate as measured use.
-- Some historical lifecycle lane samples are explicitly uncorrelated and
-  remain diagnostic rather than release-authorizing evidence.
+- Latest lifecycle lane samples remain explicitly uncorrelated and
+  `operationally_ready` remains false. A separate bounded exact-block telemetry
+  surface now lets the schema-3 campaign bind strict winner authority,
+  authenticated relay, and receiving ExactReplay to one block hash while an
+  observer measures solve-RPC dispatch through that exact authenticated tip.
+  The schema binds a monotonic nanosecond interval to those external start/stop
+  events and rejects a sum of component counters as the observer wall.
+  The winner record covers all nonce attempts and queue waits; contention
+  samples also bind the distinct losing block and converged reorg tip before
+  measuring a direct-tip child.
 - Trusted RPC/archive mirrors inherit the safety of their configured signer
   set. They should not be described or exposed as independent consensus
   validators.

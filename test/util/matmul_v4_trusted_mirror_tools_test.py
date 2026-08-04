@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Focused tests for MatMul lifecycle and trusted-mirror command-line tools."""
 
+import copy
 import importlib.util
 import copy
 import os
@@ -96,6 +97,130 @@ class TrustedMirrorToolsTest(unittest.TestCase):
         self.assertEqual(public, "RuntimeError")
         self.assertNotIn("fixture-operator", public)
         self.assertNotIn("/Users/", public)
+
+    def test_lifecycle_exact_block_records_cannot_mix_or_cancel(self):
+        module = load_lifecycle()
+        block_hash = "1" * 64
+        authority = {
+            "block_hash": block_hash,
+            "block_height": 6,
+            "solve_attempts": 3,
+            "solve_to_reseal_s": 40.0,
+            "reseal_to_consume_s": 1.0,
+            "solve_to_consume_s": 41.0,
+            "provider": "cuda_rc_exact_test",
+        }
+        relay = {"block_hash": block_hash, "relay_s": 0.5}
+        validation = {
+            "block_hash": block_hash,
+            "block_height": 6,
+            "outcome": "valid",
+            "execution_policy": "strict-device",
+            "require_device": True,
+            "provider": "cuda_rc_exact_test",
+            "fully_accelerated": True,
+            "device_gemm_calls": 136,
+            "device_gemm_macs": 1,
+            "device_xof_fallbacks": 0,
+            "host_xof_calls": 0,
+            "cpu_gemm_calls": 0,
+            "cpu_gemm_fallbacks": 0,
+            "wall_s": 20.0,
+        }
+        miner = {"backend_runtime": {"rc_accelerator_scheduler": {
+            "winner_reseal_authority": {"recent_consumed": [authority]},
+        }}}
+        validator = {"backend_runtime": {
+            "rc_accelerator_scheduler": {
+                "recent_authenticated_relays": [relay],
+            },
+            "rc_exact_replay": {"recent_validations": [validation]},
+        }}
+        actual = module.extract_exact_block_lifecycle(
+            miner, validator, block_hash=block_hash,
+            block_height=6, observer_wall_s=50.0,
+            observer_elapsed_ns=50_000_000_000,
+        )
+        self.assertTrue(actual["rpc_correlated_end_to_end_sample"])
+        self.assertEqual(actual["correlation_block_hash"], block_hash)
+        self.assertEqual(actual["miner_authority"]["solve_attempts"], 3)
+        core = module.extract_exact_block_core_lifecycle(
+            validator, block_hash=block_hash, block_height=6,
+            observer_wall_s=50.0,
+            observer_elapsed_ns=50_000_000_000,
+        )
+        self.assertTrue(core["core_complete_without_authority"])
+        self.assertFalse(core["authority_measured"])
+
+        stale = copy.deepcopy(validator)
+        stale_relay = copy.deepcopy(relay)
+        stale_relay["block_hash"] = "9" * 64
+        stale["backend_runtime"]["rc_accelerator_scheduler"][
+            "recent_authenticated_relays"
+        ].insert(0, stale_relay)
+        selected = module.extract_exact_block_lifecycle(
+            miner, stale, block_hash=block_hash,
+            block_height=6, observer_wall_s=50.0,
+            observer_elapsed_ns=50_000_000_000,
+        )
+        self.assertEqual(
+            selected["authenticated_relay"]["block_hash"], block_hash
+        )
+
+        duplicate = copy.deepcopy(validator)
+        duplicate["backend_runtime"]["rc_accelerator_scheduler"][
+            "recent_authenticated_relays"
+        ].append(copy.deepcopy(relay))
+        with self.assertRaisesRegex(RuntimeError, "2 records for exact block hash"):
+            module.extract_exact_block_lifecycle(
+                miner, duplicate, block_hash=block_hash,
+                block_height=6, observer_wall_s=50.0,
+                observer_elapsed_ns=50_000_000_000,
+            )
+
+        mixed = copy.deepcopy(validator)
+        mixed["backend_runtime"]["rc_accelerator_scheduler"][
+            "recent_authenticated_relays"
+        ][0]["block_hash"] = "2" * 64
+        with self.assertRaisesRegex(RuntimeError, "0 records for exact block hash"):
+            module.extract_exact_block_lifecycle(
+                miner, mixed, block_hash=block_hash,
+                block_height=6, observer_wall_s=50.0,
+                observer_elapsed_ns=50_000_000_000,
+            )
+
+        missing_attempts = copy.deepcopy(miner)
+        missing_attempts["backend_runtime"]["rc_accelerator_scheduler"][
+            "winner_reseal_authority"
+        ]["recent_consumed"][0].pop("solve_attempts")
+        with self.assertRaisesRegex(RuntimeError, "solve_attempts"):
+            module.extract_exact_block_lifecycle(
+                missing_attempts, validator, block_hash=block_hash,
+                block_height=6, observer_wall_s=50.0,
+                observer_elapsed_ns=50_000_000_000,
+            )
+
+        cancelled = copy.deepcopy(validator)
+        cancelled["backend_runtime"]["rc_exact_replay"][
+            "recent_validations"
+        ][0]["outcome"] = "cancelled"
+        with self.assertRaisesRegex(RuntimeError, "outcome mismatch"):
+            module.extract_exact_block_lifecycle(
+                miner, cancelled, block_hash=block_hash,
+                block_height=6, observer_wall_s=50.0,
+                observer_elapsed_ns=50_000_000_000,
+            )
+
+        missing = copy.deepcopy(miner)
+        missing["backend_runtime"]["rc_accelerator_scheduler"][
+            "winner_reseal_authority"
+        ]["recent_consumed"] = []
+        with self.assertRaisesRegex(RuntimeError, "0 records for exact block hash"):
+            module.extract_exact_block_lifecycle(
+                missing, validator, block_hash=block_hash,
+                block_height=6, observer_wall_s=50.0,
+                observer_elapsed_ns=50_000_000_000,
+            )
 
     def test_lifecycle_exports_both_runtime_build_and_validation_facts(self):
         module = load_lifecycle()
