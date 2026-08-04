@@ -51,6 +51,7 @@ import atexit
 import argparse
 import ipaddress
 import json
+import math
 import os
 import re
 import shlex
@@ -379,7 +380,10 @@ def validate_ssh_destination(user: str, host: str) -> str:
                          (char.isalnum() or char in "_-")) for char in label)
                 for label in labels)):
             raise RuntimeError("--archive-host is not a valid DNS/IP host")
-    return f"{user}@{host}"
+    # OpenSSH accepts an unbracketed IPv6 literal as its destination operand,
+    # but treats brackets as literal hostname characters (unlike scp/URI
+    # syntax). Normalize a validated bracketed literal before building argv.
+    return f"{user}@{literal if host.startswith('[') else host}"
 
 
 def remote_ssh_argv(remote_cmd: str) -> list[str]:
@@ -735,6 +739,23 @@ def _require_nonnegative_int(parent: dict, key: str, path: str) -> int:
     return value
 
 
+def _require_positive_number(parent: dict, key: str, path: str) -> float:
+    value = parent.get(key)
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise RuntimeError(
+            f"getmininginfo schema error: {path} must be a positive finite number"
+        )
+    try:
+        valid = math.isfinite(value) and value > 0
+    except OverflowError:
+        valid = False
+    if not valid:
+        raise RuntimeError(
+            f"getmininginfo schema error: {path} must be a positive finite number"
+        )
+    return float(value)
+
+
 def _require_public_string(parent: dict, key: str, path: str) -> str:
     value = parent.get(key)
     if (not isinstance(value, str) or not value or
@@ -919,12 +940,46 @@ def extract_scheduler_evidence(mining_info: object) -> dict:
                 "getmininginfo schema error: winner_reseal_authority."
                 "consumed_by_provider values must be non-negative integers"
             )
+    recent_consumed = authority.get("recent_consumed")
+    if not isinstance(recent_consumed, list):
+        raise RuntimeError(
+            "getmininginfo schema error: winner_reseal_authority."
+            "recent_consumed must be an array"
+        )
+    for index, sample in enumerate(recent_consumed):
+        path = f"winner_reseal_authority.recent_consumed[{index}]"
+        if not isinstance(sample, dict):
+            raise RuntimeError(f"getmininginfo schema error: {path} must be an object")
+        try:
+            EVIDENCE_IDENTITY.require_hex(
+                sample.get("block_hash"), EVIDENCE_IDENTITY.HEX64,
+                f"{path}.block_hash",
+            )
+        except EVIDENCE_IDENTITY.EvidenceIdentityError as error:
+            raise RuntimeError(f"getmininginfo schema error: {error}") from error
+        _require_nonnegative_int(sample, "block_height", f"{path}.block_height")
+        if _require_nonnegative_int(
+                sample, "solve_attempts", f"{path}.solve_attempts") == 0:
+            raise RuntimeError(
+                f"getmininginfo schema error: {path}.solve_attempts must be positive"
+            )
+        provider = sample.get("provider")
+        if (not isinstance(provider, str) or not provider or
+                PUBLIC_CLASS.fullmatch(provider) is None):
+            raise RuntimeError(
+                f"getmininginfo schema error: {path}.provider must be a "
+                "public provider token"
+            )
+        for field in (
+            "solve_to_reseal_s", "reseal_to_consume_s", "solve_to_consume_s",
+        ):
+            _require_positive_number(sample, field, f"{path}.{field}")
     return scheduler
 
 
 def validate_archive_strict_proof(
     *, mode: str, baseline_mining_info: object, final_mining_info: object,
-    expected_provider: str,
+    expected_provider: str, expected_blocks: list[tuple[int, str]],
 ) -> dict:
     """Close this self-mining runner's exact winner-reseal proof, fail closed."""
     if mode != "winner-reseal-authority":
@@ -1009,6 +1064,62 @@ def validate_archive_strict_proof(
             "winner-reseal consumed-provider deltas do not bind all three "
             "authorities to the canary provider"
         )
+    if len(expected_blocks) != PRODUCTION_BLOCKS:
+        raise RuntimeError(
+            f"strict proof expected-block set has {len(expected_blocks)} records; "
+            f"expected exactly {PRODUCTION_BLOCKS}"
+        )
+    normalized_expected: set[tuple[int, str]] = set()
+    for height, block_hash in expected_blocks:
+        if (not isinstance(height, int) or isinstance(height, bool) or height < 0):
+            raise RuntimeError("strict proof expected block height is invalid")
+        try:
+            canonical_hash = EVIDENCE_IDENTITY.require_hex(
+                block_hash, EVIDENCE_IDENTITY.HEX64,
+                "strict_proof.expected_block_hash",
+            )
+        except EVIDENCE_IDENTITY.EvidenceIdentityError as error:
+            raise RuntimeError(f"strict proof expected block is invalid: {error}") from error
+        if (height, canonical_hash) in normalized_expected:
+            raise RuntimeError("strict proof expected-block set contains a duplicate")
+        normalized_expected.add((height, canonical_hash))
+
+    baseline_samples = baseline_authority["recent_consumed"]
+    final_samples = final_authority["recent_consumed"]
+    if baseline_samples:
+        raise RuntimeError(
+            "winner-reseal recent-consumed history must be empty before proof"
+        )
+    if len(final_samples) != PRODUCTION_BLOCKS:
+        raise RuntimeError(
+            f"winner-reseal recent-consumed history has {len(final_samples)} "
+            f"records; expected exactly {PRODUCTION_BLOCKS}"
+        )
+    observed: dict[tuple[int, str], dict] = {}
+    for sample in final_samples:
+        key = (sample["block_height"], sample["block_hash"])
+        if key in observed:
+            raise RuntimeError(
+                "winner-reseal recent-consumed history contains a duplicate "
+                "exact block"
+            )
+        if sample["provider"] != expected_provider:
+            raise RuntimeError(
+                "winner-reseal exact-block provider differs from canary provider"
+            )
+        observed[key] = sample
+    observed_blocks = set(observed)
+    if observed_blocks != normalized_expected:
+        missing = sorted(normalized_expected - observed_blocks)
+        unexpected = sorted(observed_blocks - normalized_expected)
+        raise RuntimeError(
+            "winner-reseal recent-consumed history does not match the exact "
+            f"mined blocks (missing={missing}, unexpected={unexpected})"
+        )
+    exact_authorities = [
+        observed[(height, block_hash)]
+        for height, block_hash in expected_blocks
+    ]
     return {
         "mode": mode,
         "provider": final_authority["last_provider"],
@@ -1017,6 +1128,7 @@ def validate_archive_strict_proof(
         "winner_reseal_last_execution_s": final_lanes["winner_reseal"]["last_execution_s"],
         "release_invariant_violations": final["release_invariant_violations"],
         "consumed_by_provider": provider_deltas,
+        "exact_consumed_authorities": exact_authorities,
     }
 
 
@@ -1332,15 +1444,35 @@ rpcallowip=127.0.0.1
         # Mine through activation+2 on archive. This yields exactly three
         # production Profile-1 winners (heights 6, 7, and 8).
         timings = []
+        production_blocks = []
         for _ in range(ACTIVATION + 2):
             t0 = time.perf_counter()
-            archive_rpc(
+            generated = archive_rpc(
                 "generatetoaddress", "1", archive_rpc("getnewaddress"),
                 timeout=args.mine_timeout,
             )
             dt = time.perf_counter() - t0
             ah = archive_rpc("getblockcount")
-            timings.append({"mined_height": ah, "archive_generate_s": round(dt, 3)})
+            if (not isinstance(generated, list) or len(generated) != 1):
+                raise RuntimeError(
+                    "generatetoaddress did not return exactly one block hash"
+                )
+            try:
+                generated_hash = EVIDENCE_IDENTITY.require_hex(
+                    generated[0], EVIDENCE_IDENTITY.HEX64,
+                    "generatetoaddress.block_hash",
+                )
+            except EVIDENCE_IDENTITY.EvidenceIdentityError as error:
+                raise RuntimeError(
+                    f"generatetoaddress returned an invalid block hash: {error}"
+                ) from error
+            timings.append({
+                "mined_height": ah,
+                "block_hash": generated_hash,
+                "archive_generate_s": round(dt, 3),
+            })
+            if ah >= ACTIVATION:
+                production_blocks.append((ah, generated_hash))
             print(f"archive mined h={ah} in {dt:.3f}s", flush=True)
 
         tip = archive_rpc("getbestblockhash")
@@ -1377,6 +1509,7 @@ rpcallowip=127.0.0.1
             baseline_mining_info=baseline_mining_info,
             final_mining_info=final_mining_info,
             expected_provider=canary["provider"],
+            expected_blocks=production_blocks,
         )
         result = {
             "ok": True,

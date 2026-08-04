@@ -472,8 +472,26 @@ class TrustedMirrorToolsTest(unittest.TestCase):
 
     def test_winner_reseal_authority_proof_is_fresh_and_header_bound(self):
         module = load_rehearsal()
+        expected_blocks = [
+            (6, "1" * 64),
+            (7, "2" * 64),
+            (8, "3" * 64),
+        ]
 
-        def mining_info(*, candidate, reseal, published, consumed, provider):
+        def authority_sample(height, block_hash, provider):
+            return {
+                "block_hash": block_hash,
+                "block_height": height,
+                "solve_attempts": 4,
+                "solve_to_reseal_s": 20.0,
+                "reseal_to_consume_s": 0.5,
+                "solve_to_consume_s": 20.5,
+                "provider": provider,
+            }
+
+        def mining_info(
+            *, candidate, reseal, published, consumed, provider, samples,
+        ):
             return {
                 "backend_runtime": {
                     "rc_accelerator_scheduler": {
@@ -502,26 +520,38 @@ class TrustedMirrorToolsTest(unittest.TestCase):
                             "consumed_by_provider": (
                                 {provider: consumed} if provider else {}
                             ),
+                            "recent_consumed": samples,
                         },
                     }
                 }
             }
 
         baseline = mining_info(
-            candidate=0, reseal=0, published=0, consumed=0, provider=""
+            candidate=0, reseal=0, published=0, consumed=0, provider="",
+            samples=[],
         )
         final = mining_info(
             candidate=5, reseal=3, published=3, consumed=3,
             provider="metal_rc_exact",
+            samples=[
+                authority_sample(height, block_hash, "metal_rc_exact")
+                for height, block_hash in expected_blocks
+            ],
         )
         proof = module.validate_archive_strict_proof(
             mode="winner-reseal-authority",
             baseline_mining_info=baseline,
             final_mining_info=final,
             expected_provider="metal_rc_exact",
+            expected_blocks=expected_blocks,
         )
         self.assertEqual(proof["authority_consumed"], 3)
         self.assertEqual(proof["winner_reseal_completions"], 3)
+        self.assertEqual(
+            [(entry["block_height"], entry["block_hash"])
+             for entry in proof["exact_consumed_authorities"]],
+            expected_blocks,
+        )
 
         cases = []
         too_few = copy.deepcopy(final)
@@ -552,6 +582,26 @@ class TrustedMirrorToolsTest(unittest.TestCase):
         invalidated = copy.deepcopy(final)
         invalidated["backend_runtime"]["rc_accelerator_scheduler"]["winner_reseal_authority"]["invalidated_before_consume"] = 1
         cases.append(("invalidated_before_consume changed", invalidated))
+        missing_exact = copy.deepcopy(final)
+        missing_exact["backend_runtime"]["rc_accelerator_scheduler"]["winner_reseal_authority"]["recent_consumed"].pop()
+        cases.append(("expected exactly 3", missing_exact))
+        wrong_exact = copy.deepcopy(final)
+        wrong_exact["backend_runtime"]["rc_accelerator_scheduler"]["winner_reseal_authority"]["recent_consumed"][0]["block_hash"] = "4" * 64
+        cases.append(("does not match the exact mined blocks", wrong_exact))
+        duplicate_exact = copy.deepcopy(final)
+        duplicate_exact["backend_runtime"]["rc_accelerator_scheduler"]["winner_reseal_authority"]["recent_consumed"][2] = copy.deepcopy(
+            duplicate_exact["backend_runtime"]["rc_accelerator_scheduler"]["winner_reseal_authority"]["recent_consumed"][1]
+        )
+        cases.append(("duplicate exact block", duplicate_exact))
+        wrong_exact_provider = copy.deepcopy(final)
+        wrong_exact_provider["backend_runtime"]["rc_accelerator_scheduler"]["winner_reseal_authority"]["recent_consumed"][0]["provider"] = "cuda_rc_exact_fused_extract"
+        cases.append(("exact-block provider differs", wrong_exact_provider))
+        zero_attempts = copy.deepcopy(final)
+        zero_attempts["backend_runtime"]["rc_accelerator_scheduler"]["winner_reseal_authority"]["recent_consumed"][0]["solve_attempts"] = 0
+        cases.append(("solve_attempts must be positive", zero_attempts))
+        zero_timing = copy.deepcopy(final)
+        zero_timing["backend_runtime"]["rc_accelerator_scheduler"]["winner_reseal_authority"]["recent_consumed"][0]["solve_to_reseal_s"] = 0.0
+        cases.append(("must be a positive finite number", zero_timing))
         for error, changed in cases:
             with self.subTest(error=error):
                 with self.assertRaisesRegex(RuntimeError, error):
@@ -560,6 +610,7 @@ class TrustedMirrorToolsTest(unittest.TestCase):
                         baseline_mining_info=baseline,
                         final_mining_info=changed,
                         expected_provider="metal_rc_exact",
+                        expected_blocks=expected_blocks,
                     )
 
     def test_self_mining_runner_rejects_receiving_validation_mode(self):
@@ -570,6 +621,7 @@ class TrustedMirrorToolsTest(unittest.TestCase):
                 baseline_mining_info={},
                 final_mining_info={},
                 expected_provider="metal_rc_exact",
+                expected_blocks=[],
             )
 
     def test_rehearsal_requires_proven_archive_mirror_trust_boundary(self):
@@ -766,17 +818,17 @@ class TrustedMirrorToolsTest(unittest.TestCase):
 
     def test_ssh_destination_and_argv_reject_option_injection(self):
         module = load_rehearsal()
-        for user, host in (
-            ("operator", "gpu-archive.example.invalid"),
-            ("user.name", "127.0.0.1"),
-            ("u_1", "2001:db8::1"),
-            ("u+1", "[2001:db8::1]"),
-            ("u", "fe80::1%en0"),
+        for user, host, expected_host in (
+            ("operator", "gpu-archive.example.invalid", "gpu-archive.example.invalid"),
+            ("user.name", "127.0.0.1", "127.0.0.1"),
+            ("u_1", "2001:db8::1", "2001:db8::1"),
+            ("u+1", "[2001:db8::1]", "2001:db8::1"),
+            ("u", "fe80::1%en0", "fe80::1%en0"),
         ):
             with self.subTest(user=user, host=host):
                 self.assertEqual(
                     module.validate_ssh_destination(user, host),
-                    f"{user}@{host}",
+                    f"{user}@{expected_host}",
                 )
         for user, host in (
             ("-F/tmp/config", "example.invalid"),
@@ -809,6 +861,13 @@ class TrustedMirrorToolsTest(unittest.TestCase):
             )
             self.assertFalse(any(arg.startswith("-oProxyCommand")
                                  for arg in argv[delimiter + 1:]))
+
+        module.ARCHIVE_HOST = "[2001:db8::1]"
+        for argv in (
+            module.remote_ssh_argv("true"), module.tunnel_ssh_argv(),
+        ):
+            delimiter = argv.index("--")
+            self.assertEqual(argv[delimiter + 1], "operator@2001:db8::1")
 
     def test_remote_stop_shell_terminates_and_refuses_changed_identity(self):
         module = load_rehearsal()
