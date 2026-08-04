@@ -109,26 +109,39 @@ class WalletShieldedTransferBuilderLocksTest(BitcoinTestFramework):
         })
         self.generatetoaddress(node, 1, mine_addr, sync_fun=self.no_op)
 
-        self.log.info("Create a shared 3-of-3 PQ multisig wallet view")
+        self.log.info("Create a watch-only coordinator for the shared 3-of-3 PQ multisig")
         pq_keys = [
             signer1.exportpqkey(signer1_addr)["key"],
             signer2.exportpqkey(signer2_addr)["key"],
             signer3.exportpqkey(signer3_addr)["key"],
         ]
-        msig_info = signer1.addpqmultisigaddress(3, pq_keys, "lock-test-3of3", True)
-        signer2.addpqmultisigaddress(3, pq_keys, "lock-test-3of3", True)
-        signer3.addpqmultisigaddress(3, pq_keys, "lock-test-3of3", True)
+        node.createwallet(
+            wallet_name="builder_locks_watch",
+            blank=True,
+            descriptors=True,
+            disable_private_keys=True,
+        )
+        descriptor_wallet = node.get_wallet_rpc("builder_locks_watch")
+        msig_info = descriptor_wallet.addpqmultisigaddress(3, pq_keys, "lock-test-3of3", True)
         multisig_address = msig_info["address"]
+
+        node.createwallet(wallet_name="builder_locks_source", descriptors=True)
+        multisig = node.get_wallet_rpc("builder_locks_source")
+        [import_result] = multisig.importdescriptors([{
+            "desc": msig_info["descriptor"],
+            "timestamp": "now",
+        }])
+        assert_equal(import_result["success"], True)
 
         self.log.info("Fund the multisig wallet with multiple 20 BTX outputs")
         fund_same_address_many(node, miner, mine_addr, multisig_address, Decimal("20.0"), 6)
         self.generatetoaddress(node, 1, mine_addr, sync_fun=self.no_op)
-        multisig_utxos = [u for u in signer1.listunspent() if u["address"] == multisig_address]
+        multisig_utxos = [u for u in multisig.listunspent() if u["address"] == multisig_address]
         assert_equal(len(multisig_utxos), 6)
 
         self.log.info("Pre-lock one UTXO and ensure no-lock planning excludes it")
         prelocked = {"txid": multisig_utxos[0]["txid"], "vout": multisig_utxos[0]["vout"]}
-        assert_equal(signer1.lockunspent(False, [prelocked]), True)
+        assert_equal(multisig.lockunspent(False, [prelocked]), True)
 
         bundle_path = node.datadir_path / "builder-locks-bundle.json"
         z_dest = signer1.z_getnewaddress()
@@ -140,7 +153,7 @@ class WalletShieldedTransferBuilderLocksTest(BitcoinTestFramework):
             f"--datadir={datadir}",
             "--chain=regtest",
             f"--rpcport={rpcport}",
-            "--rpcwallet=signer1",
+            "--rpcwallet=builder_locks_source",
             "--signer-wallet=signer1",
             "--signer-wallet=signer2",
             "--signer-wallet=signer3",
@@ -156,12 +169,12 @@ class WalletShieldedTransferBuilderLocksTest(BitcoinTestFramework):
         for tx in bundle["transactions"]:
             assert prelocked not in tx["selected_inputs"], tx["selected_inputs"]
 
-        locked_after = signer1.listlockunspent()
+        locked_after = multisig.listlockunspent()
         assert_equal(len(locked_after), 1)
         assert_equal(locked_after[0]["txid"], prelocked["txid"])
         assert_equal(locked_after[0]["vout"], prelocked["vout"])
 
-        assert_equal(signer1.lockunspent(True, [prelocked]), True)
+        assert_equal(multisig.lockunspent(True, [prelocked]), True)
 
 
 if __name__ == "__main__":

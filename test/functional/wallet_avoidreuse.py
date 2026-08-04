@@ -359,31 +359,38 @@ class AvoidReuseTest(BitcoinTestFramework):
 
     def test_all_destination_groups_are_used(self):
         '''
-        Test the case where [1] only has 202 outputs of 1 BTC in the same reused
-        address and must combine several weight-bounded destination groups.
-        Size the payment from the full-group size observed above so it cannot be
-        funded by a single group, without assuming that 100 native P2MR inputs
-        fit in one standard transaction.
+        Test that two complete reused-address groups are combined while the
+        resulting native P2MR transaction remains within standard weight.
         '''
         self.log.info("Test that multiple destination groups are combined")
 
         # Node under test should be empty
         assert_equal(self.nodes[1].getbalance(avoid_reuse=False), 0)
 
-        new_addr = self.nodes[1].getnewaddress()
-        ret_addr = self.nodes[0].getnewaddress()
+        inputs_per_group = self.full_destination_group_size // 2
+        assert inputs_per_group > 1
+        group_addrs = [self.nodes[1].getnewaddress() for _ in range(2)]
+        for addr in group_addrs:
+            for _ in range(inputs_per_group):
+                self.nodes[0].sendtoaddress(addr, 1)
 
-        # Send 202 outputs of 1 BTC to the same, reused address in the wallet.
-        for _ in range(202):
-            self.nodes[0].sendtoaddress(new_addr, 1)
+        while self.nodes[0].getrawmempool():
+            self.generate(self.nodes[0], 1)
 
-        self.generate(self.nodes[0], 1)
+        utxos = self.nodes[1].listunspent()
+        groups = [
+            {(utxo["txid"], utxo["vout"]) for utxo in utxos if utxo["address"] == addr}
+            for addr in group_addrs
+        ]
+        for group in groups:
+            assert_equal(len(group), inputs_per_group)
 
-        group_size = self.full_destination_group_size
-        amount = Decimal(group_size) + Decimal("0.5")
-        txid = self.nodes[1].sendtoaddress(address=ret_addr, amount=amount)
+        amount = Decimal(inputs_per_group) + Decimal("0.5")
+        txid = self.nodes[1].sendtoaddress(address=self.nodes[0].getnewaddress(), amount=amount)
         transaction = self.nodes[1].getrawtransaction(txid, 1)
-        assert group_size < len(transaction["vin"]) < 202
+        spent = {(vin["txid"], vin["vout"]) for vin in transaction["vin"]}
+        assert_equal(spent, groups[0] | groups[1])
+        assert_equal(len(transaction["vin"]), 2 * inputs_per_group)
         assert transaction["weight"] <= MAX_STANDARD_TX_WEIGHT
 
 
