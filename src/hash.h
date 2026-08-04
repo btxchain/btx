@@ -13,12 +13,21 @@
 #include <prevector.h>
 #include <serialize.h>
 #include <span.h>
+#include <support/cleanse.h>
 #include <uint256.h>
 
 #include <string>
 #include <vector>
 
-typedef uint256 ChainCode;
+/** A BIP32 chain code. Cleansed when it leaves scope. */
+class ChainCode : public base_blob<256>
+{
+public:
+    constexpr ChainCode() = default;
+    constexpr explicit ChainCode(Span<const unsigned char> bytes) : base_blob<256>(bytes) {}
+    constexpr explicit ChainCode(const base_blob<256>& blob) : base_blob<256>(blob) {}
+    ~ChainCode() { memory_cleanse(data(), size()); }
+};
 
 /** A hasher class for Bitcoin's 256-bit hash (double SHA-256). */
 class CHash256 {

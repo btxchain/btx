@@ -104,16 +104,19 @@ ReadStatus PartiallyDownloadedBlock::InitData(const CBlockHeaderAndShortTxIDs& c
     if (shorttxids.size() != cmpctblock.shorttxids.size())
         return READ_STATUS_FAILED; // Short ID collision
 
-    std::vector<bool> have_txn(txn_available.size());
+    enum class TxSource : uint8_t { NONE, MEMPOOL, EXTRA };
+    // Remember which source populated each slot so a later short-id collision
+    // only decrements extra_count when the collided entry came from extra_txn.
+    std::vector<TxSource> tx_source(txn_available.size(), TxSource::NONE);
     {
     LOCK(pool->cs);
     for (const auto& tx : pool->txns_randomized) {
         uint64_t shortid = cmpctblock.GetShortID(tx->GetWitnessHash());
         std::unordered_map<uint64_t, uint16_t>::iterator idit = shorttxids.find(shortid);
         if (idit != shorttxids.end()) {
-            if (!have_txn[idit->second]) {
+            if (tx_source[idit->second] == TxSource::NONE) {
                 txn_available[idit->second] = tx;
-                have_txn[idit->second]  = true;
+                tx_source[idit->second] = TxSource::MEMPOOL;
                 mempool_count++;
             } else {
                 // If we find two mempool txn that match the short id, just request it.
@@ -140,9 +143,9 @@ ReadStatus PartiallyDownloadedBlock::InitData(const CBlockHeaderAndShortTxIDs& c
         uint64_t shortid = cmpctblock.GetShortID(extra_txn[i]->GetWitnessHash());
         std::unordered_map<uint64_t, uint16_t>::iterator idit = shorttxids.find(shortid);
         if (idit != shorttxids.end()) {
-            if (!have_txn[idit->second]) {
+            if (tx_source[idit->second] == TxSource::NONE) {
                 txn_available[idit->second] = extra_txn[i];
-                have_txn[idit->second]  = true;
+                tx_source[idit->second] = TxSource::EXTRA;
                 mempool_count++;
                 extra_count++;
             } else {
@@ -156,7 +159,7 @@ ReadStatus PartiallyDownloadedBlock::InitData(const CBlockHeaderAndShortTxIDs& c
                         txn_available[idit->second]->GetWitnessHash() != extra_txn[i]->GetWitnessHash()) {
                     txn_available[idit->second].reset();
                     mempool_count--;
-                    extra_count--;
+                    if (tx_source[idit->second] == TxSource::EXTRA) extra_count--;
                 }
             }
         }

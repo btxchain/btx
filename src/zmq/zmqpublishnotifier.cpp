@@ -23,6 +23,7 @@
 
 #include <zmq.h>
 
+#include <cerrno>
 #include <cassert>
 #include <cstdarg>
 #include <cstddef>
@@ -109,6 +110,7 @@ static bool IsZMQAddressIPV6(const std::string &zmq_address)
 bool CZMQAbstractPublishNotifier::Initialize(void *pcontext)
 {
     assert(!psocket);
+    m_fatal_error.clear();
 
     // check if address is being used by other publish notifier
     std::multimap<std::string, CZMQAbstractPublishNotifier*>::iterator i = mapPublishNotifiers.find(address);
@@ -152,7 +154,11 @@ bool CZMQAbstractPublishNotifier::Initialize(void *pcontext)
         rc = zmq_bind(psocket, address.c_str());
         if (rc != 0)
         {
+            const int zmq_errno_value{zmq_errno()};
             zmqError("Failed to bind address");
+            if (zmq_errno_value == EADDRINUSE) {
+                m_fatal_error = "Unable to bind ZMQ address " + address + ": " + zmq_strerror(zmq_errno_value);
+            }
             zmq_close(psocket);
             return false;
         }

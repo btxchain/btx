@@ -137,6 +137,19 @@ BOOST_AUTO_TEST_CASE(ToStringTest)
     BOOST_CHECK_EQUAL(feeRate.ToString(), "0.00000001 BTX/kvB");
     BOOST_CHECK_EQUAL(feeRate.ToString(FeeEstimateMode::BTC_KVB), "0.00000001 BTX/kvB");
     BOOST_CHECK_EQUAL(feeRate.ToString(FeeEstimateMode::SAT_VB), "0.001 sat/vB");
+
+    feeRate = CFeeRate(-1);
+    BOOST_CHECK_EQUAL(feeRate.ToString(), "-0.00000001 BTX/kvB");
+    BOOST_CHECK_EQUAL(feeRate.ToString(FeeEstimateMode::BTC_KVB), "-0.00000001 BTX/kvB");
+    BOOST_CHECK_EQUAL(feeRate.ToString(FeeEstimateMode::SAT_VB), "-0.001 sat/vB");
+
+    feeRate = CFeeRate(-1000);
+    BOOST_CHECK_EQUAL(feeRate.ToString(), "-0.00001000 BTX/kvB");
+    BOOST_CHECK_EQUAL(feeRate.ToString(FeeEstimateMode::SAT_VB), "-1.000 sat/vB");
+
+    feeRate = CFeeRate(-COIN - 1);
+    BOOST_CHECK_EQUAL(feeRate.ToString(), "-1.00000001 BTX/kvB");
+    BOOST_CHECK_EQUAL(feeRate.ToString(FeeEstimateMode::SAT_VB), "-100000.001 sat/vB");
 }
 
 BOOST_AUTO_TEST_CASE(SatsToStringTest)
@@ -145,6 +158,8 @@ BOOST_AUTO_TEST_CASE(SatsToStringTest)
     BOOST_CHECK_EQUAL(CFeeRate(70).SatsToString(), "0.070");
     BOOST_CHECK_EQUAL(CFeeRate(3141).SatsToString(), "3.141");
     BOOST_CHECK_EQUAL(CFeeRate(10002).SatsToString(), "10.002");
+    BOOST_CHECK_EQUAL(CFeeRate(-1).SatsToString(), "-0.001");
+    BOOST_CHECK_EQUAL(CFeeRate(-1001).SatsToString(), "-1.001");
 }
 
 BOOST_AUTO_TEST_SUITE_END()

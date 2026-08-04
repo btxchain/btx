@@ -9,8 +9,8 @@ from test_framework.blocktools import (
     COINBASE_MATURITY,
     create_block,
     MAX_BLOCK_SIGOPS_WEIGHT,
+    REGTEST_GENERIC_P2P_MATMUL_ARGS,
 )
-from test_framework.authproxy import JSONRPCException
 from test_framework.messages import (
     COutPoint,
     CTransaction,
@@ -858,8 +858,16 @@ def spenders_taproot_active():
                     add_spender(spenders, "applic/keypath", p2sh=p2sh, spk_mutate_pre_p2sh=mutate, tap=tap, key=secs[1], **SIGHASH_BITFLIP, **ERR_SIG_SCHNORR)
                     add_spender(spenders, "applic/scriptpath", p2sh=p2sh, leaf="s0", spk_mutate_pre_p2sh=mutate, tap=tap, key=secs[0], **SINGLE_SIG, failure={"leaf": "dummy"}, **ERR_OP_RETURN)
                 else:
-                    add_spender(spenders, "applic/keypath", p2sh=p2sh, spk_mutate_pre_p2sh=mutate, tap=tap, key=secs[1], standard=False)
-                    add_spender(spenders, "applic/scriptpath", p2sh=p2sh, leaf="s0", spk_mutate_pre_p2sh=mutate, tap=tap, key=secs[0], **SINGLE_SIG, standard=False)
+                    # Native witness-v2/32-byte programs are P2MR in BTX, not
+                    # Bitcoin's anyone-can-spend unknown witness version. Give
+                    # that single semantic collision an explicit identity so
+                    # the BTX fixture can exclude it without weakening any
+                    # genuine Taproot-valid or negative vector.
+                    collision = not p2sh and witver == 2 and witlen == 32
+                    keypath_comment = "applic/p2mr_collision_keypath" if collision else "applic/keypath"
+                    scriptpath_comment = "applic/p2mr_collision_scriptpath" if collision else "applic/scriptpath"
+                    add_spender(spenders, keypath_comment, p2sh=p2sh, spk_mutate_pre_p2sh=mutate, tap=tap, key=secs[1], standard=False)
+                    add_spender(spenders, scriptpath_comment, p2sh=p2sh, leaf="s0", spk_mutate_pre_p2sh=mutate, tap=tap, key=secs[0], **SINGLE_SIG, standard=False)
 
     # == Test various aspects of BIP341 spending paths ==
 
@@ -1377,7 +1385,7 @@ class TaprootTest(BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 1
         self.setup_clean_chain = True
-        self.extra_args = [["-datacarrierfullcount"]]
+        self.extra_args = [["-datacarrierfullcount", *REGTEST_GENERIC_P2P_MATMUL_ARGS]]
 
     def block_submit(self, node, txs, msg, err_msg, cb_pubkey=None, fees=0, sigops_weight=0, witness=False, accept=False):
         _ = witness
@@ -1448,11 +1456,15 @@ class TaprootTest(BitcoinTestFramework):
         host_spks = []
         host_pubkeys = []
         for i in range(16):
-            addr = node.getnewaddress(address_type=random.choice(["legacy", "p2sh-segwit", "bech32"]))
+            # BTX wallets intentionally expose P2MR destinations only. The
+            # host outputs are unrelated to the Taproot spend path under test,
+            # so return change to canonical P2MR scripts while retaining
+            # independent EC keys for the optional raw coinbase scripts.
+            addr = node.getnewaddress(address_type="p2mr")
             info = node.getaddressinfo(addr)
             spk = bytes.fromhex(info['scriptPubKey'])
             host_spks.append(spk)
-            host_pubkeys.append(bytes.fromhex(info['pubkey']))
+            host_pubkeys.append(generate_keypair()[1])
 
         self.init_blockinfo(node)
 
@@ -1462,6 +1474,15 @@ class TaprootTest(BitcoinTestFramework):
             if skipped:
                 self.log.info(f"- Skipping {skipped} spenders with scriptPubKey > {BTX_MAX_TXOUT_SCRIPT_SIZE} bytes (BTX reduced-data limits)")
             spenders = filtered
+
+        p2mr_collisions = {
+            "applic/p2mr_collision_keypath",
+            "applic/p2mr_collision_scriptpath",
+        }
+        filtered = [spender for spender in spenders if spender.comment not in p2mr_collisions]
+        if len(filtered) != len(spenders):
+            self.log.info("- Excluding %d native witness-v2/P2MR semantic-collision vectors", len(spenders) - len(filtered))
+        spenders = filtered
 
         # Create transactions spending up to 50 of the wallet's inputs, with one output for each spender, and
         # one change output at the end. The transaction is constructed on the Python side to enable
@@ -1629,19 +1650,7 @@ class TaprootTest(BitcoinTestFramework):
                 else:
                     assert_raises_rpc_error(-26, None, node.sendrawtransaction, tx.serialize().hex(), 0)
                 # Submit in a block
-                try:
-                    self.block_submit(node, [tx], msg, witness=True, accept=fail_input is None, cb_pubkey=cb_pubkey, fees=fee, sigops_weight=sigops_weight, err_msg=expected_fail_msg)
-                except JSONRPCException as exc:
-                    # BTX regtest may pre-validate generateblock() inputs before block assembly.
-                    error_message = exc.error.get("message", str(exc))
-                    if fail_input is None:
-                        # Some upstream taproot vectors become invalid under BTX reduced-data/script rules.
-                        # Keep deterministic execution by skipping these vectors in BTX mode.
-                        self.log.debug("Skipping BTX-incompatible success vector (%s): %s", error_message, msg)
-                        break
-                    if expected_fail_msg is not None and expected_fail_msg not in error_message:
-                        # BTX may surface a different (stricter) rejection reason than upstream.
-                        self.log.debug("Accepting alternate BTX failure reason (%s) instead of '%s': %s", error_message, expected_fail_msg, msg)
+                self.block_submit(node, [tx], msg, witness=True, accept=fail_input is None, cb_pubkey=cb_pubkey, fees=fee, sigops_weight=sigops_weight, err_msg=expected_fail_msg)
 
             if (len(spenders) - left) // 200 > (len(spenders) - left - len(input_utxos)) // 200:
                 self.log.info("  - %i tests done" % (len(spenders) - left))
@@ -1661,10 +1670,10 @@ class TaprootTest(BitcoinTestFramework):
         coinbase = CTransaction()
         coinbase.version = 1
         coinbase.vin = [CTxIn(COutPoint(0, 0xffffffff), CScript([OP_1, OP_1]), SEQUENCE_FINAL)]
-        coinbase.vout = [CTxOut(5000000000, CScript([OP_1]))]
+        coinbase.vout = [CTxOut(2000000000, CScript([OP_1]))]
         coinbase.nLockTime = 0
         coinbase.rehash()
-        assert coinbase.hash == "f60c73405d499a956d3162e3483c395526ef78286458a4cb17b125aa92e49b20"
+        assert coinbase.hash == "56c8001cb9ab0a6e9c7b1c74eab60bc38ba9932fee53d63585efcb8181e9ce1b"
         # Mine it
         block = create_block(hashprev=int(self.nodes[0].getbestblockhash(), 16), coinbase=coinbase)
         block.rehash()
@@ -1747,9 +1756,9 @@ class TaprootTest(BitcoinTestFramework):
         # come from distinct txids).
         txn = []
         lasttxid = coinbase.sha256
-        amount = 5000000000
+        amount = 2000000000
         for i, spk in enumerate(old_spks + tap_spks):
-            val = 42000000 * (i + 7)
+            val = 10000000 * (i + 7)
             tx = CTransaction()
             tx.version = 1
             tx.vin = [CTxIn(COutPoint(lasttxid, i & 1), CScript([]), SEQUENCE_FINAL)]
@@ -1817,8 +1826,8 @@ class TaprootTest(BitcoinTestFramework):
         for i, spk in enumerate(input_spks):
             tx.vin.append(CTxIn(spend_info[spk]['prevout'], CScript(), sequences[i]))
             inputs.append(spend_info[spk]['utxo'])
-        tx.vout.append(CTxOut(1000000000, old_spks[1]))
-        tx.vout.append(CTxOut(3410000000, pubs[98]))
+        tx.vout.append(CTxOut(250000000, old_spks[1]))
+        tx.vout.append(CTxOut(800000000, pubs[98]))
         tx.nLockTime = 500000000
         precomputed = {
             "hashAmounts": BIP341_sha_amounts(inputs),
@@ -1875,7 +1884,7 @@ class TaprootTest(BitcoinTestFramework):
         aux = tx_test.setdefault("auxiliary", {})
         aux['fullySignedTx'] = tx.serialize().hex()
         keypath_tests.append(tx_test)
-        assert_equal(hashlib.sha256(tx.serialize()).hexdigest(), "24bab662cb55a7f3bae29b559f651674c62bcc1cd442d44715c0133939107b38")
+        assert_equal(hashlib.sha256(tx.serialize()).hexdigest(), "45b860a31af0d9be7897ccbcf99034decdeeb42d55a0c8bbfb3bd44716f57c60")
         # Mine the spending transaction
         self.block_submit(self.nodes[0], [tx], "Spending txn", None, sigops_weight=10000, accept=True, witness=True)
 
@@ -1883,6 +1892,8 @@ class TaprootTest(BitcoinTestFramework):
             print(json.dumps(tests, indent=4, sort_keys=False))
 
     def run_test(self):
+        # Preserve the deterministic BIP341 scenario with BTX's 20-coin
+        # height-1 subsidy and frozen BTX transaction identifiers.
         self.gen_test_vectors()
 
         self.log.info("Post-activation tests...")

@@ -29,8 +29,9 @@ class MempoolCoinbaseTest(BitcoinTestFramework):
         self.extra_args = [
             [
                 '-whitelist=noban@127.0.0.1',  # immediate tx relay
+                '-acceptnonstdtxn=1',
             ],
-            []
+            ['-acceptnonstdtxn=1']
         ]
 
     def test_reorg_relay(self):

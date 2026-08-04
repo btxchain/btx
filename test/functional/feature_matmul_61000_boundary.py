@@ -61,9 +61,12 @@ class BTXMatMul61000BoundaryTest(BitcoinTestFramework):
         self.log.info("Asserting that the activation block rejects payloadless blocks and accepts the full block")
         tip_hash = rejecting_node.getbestblockhash()
         invalid_candidate = rejecting_node.generateblock("raw(51)", [], False, called_by_framework=True)
-        payloadless_hex = from_hex(CBlock(), invalid_candidate["hex"]).serialize().hex()
+        payloadless = from_hex(CBlock(), invalid_candidate["hex"])
+        assert payloadless.matrix_c_data
+        payloadless.matrix_c_data = []
+        payloadless_hex = payloadless.serialize().hex()
 
-        assert len(invalid_candidate["hex"]) >= len(payloadless_hex)
+        assert len(invalid_candidate["hex"]) > len(payloadless_hex)
         assert_equal(rejecting_node.submitblock(payloadless_hex), "missing-product-payload")
         assert_equal(rejecting_node.getbestblockhash(), tip_hash)
 

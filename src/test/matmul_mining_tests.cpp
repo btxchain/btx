@@ -9,9 +9,11 @@
 #include <interfaces/mining.h>
 #include <kernel/chainstatemanager_opts.h>
 #include <matmul/matmul_pow.h>
+#include <net.h>
 #include <node/miner.h>
 #include <pow.h>
 #include <rpc/server.h>
+#include <serialize.h>
 #include <streams.h>
 #include <test/util/mining.h>
 #include <test/util/setup_common.h>
@@ -789,6 +791,48 @@ BOOST_AUTO_TEST_CASE(submitheader_rejects_matmul_header_only_work)
         [](const std::runtime_error& e) {
             return RuntimeErrorContains(e, "submitheader is not supported on MatMul");
         });
+}
+
+BOOST_AUTO_TEST_CASE(difficulty_health_reports_nonzero_best_header_lag)
+{
+    SetMiningChainGuard(false);
+    const auto generated =
+        CallRPC("generateblock", GenerateBlockParams(/*submit=*/true)).get_obj();
+    BOOST_REQUIRE(!generated.find_value("hash").get_str().empty());
+
+    UniValue health;
+    {
+        LOCK(cs_main);
+        CBlockIndex* const original_best_header{
+            m_node.chainman->m_best_header};
+        BOOST_REQUIRE(original_best_header != nullptr);
+        CBlockIndex synthetic_best_header;
+        synthetic_best_header.nHeight =
+            m_node.chainman->ActiveHeight() + 4;
+        synthetic_best_header.pprev = original_best_header;
+        m_node.chainman->m_best_header = &synthetic_best_header;
+        struct BestHeaderRestore {
+            ChainstateManager& chainman;
+            CBlockIndex* original;
+            ~BestHeaderRestore() { chainman.m_best_header = original; }
+        } restore{*m_node.chainman, original_best_header};
+
+        // Keep cs_main held until the RPC has consumed the synthetic height.
+        // Its recursive acquisition is on this thread, while every background
+        // reader remains excluded from the stack-backed test index.
+        health = CallRPC("getdifficultyhealth").get_obj();
+        // Regtest's configured maximum is zero. A hard header-lag gate would
+        // reject this request; the current policy must remain diagnostic-only.
+        BOOST_CHECK_NO_THROW(CallRPC("getblocktemplate", GBTParams()));
+    }
+    const auto network = health.find_value("network").get_obj();
+    BOOST_CHECK_EQUAL(
+        network.find_value("validated_tip_height").getInt<int>(),
+        ActiveHeight());
+    BOOST_CHECK_EQUAL(
+        network.find_value("best_header_height").getInt<int>(),
+        ActiveHeight() + 4);
+    BOOST_CHECK_EQUAL(network.find_value("header_lag").getInt<int>(), 4);
 }
 
 // TEST: rpc_matmul_service_profile_runtime_observability
@@ -2294,6 +2338,129 @@ BOOST_AUTO_TEST_CASE(redeemmatmulserviceproofs_marks_duplicate_entry_already_red
     BOOST_CHECK_EQUAL(results[1].get_obj().find_value("reason").get_str(), "already_redeemed");
     BOOST_CHECK(results[1].get_obj().find_value("redeemed").get_bool());
     BOOST_CHECK(!results[1].get_obj().find_value("redeemable").get_bool());
+}
+
+BOOST_AUTO_TEST_SUITE_END()
+
+namespace {
+
+class MatMulBMX4ServiceTestingSetup : public TestingSetup {
+public:
+    static TestOpts BuildOpts()
+    {
+        TestOpts opts;
+        opts.extra_args = {
+            "-test=matmulstrict",
+            "-regtestmatmulv4height=0",
+            "-regtestmatmulv4dimension=128",
+            "-regtestbmx4cheight=0",
+        };
+        return opts;
+    }
+
+    MatMulBMX4ServiceTestingSetup()
+        : TestingSetup{ChainType::REGTEST, BuildOpts()}
+    {
+        m_node.mining = interfaces::MakeMining(m_node);
+    }
+
+    UniValue CallRPC(const std::string& method, UniValue params)
+    {
+        JSONRPCRequest request;
+        request.context = &m_node;
+        request.strMethod = method;
+        request.params = std::move(params);
+        if (RPCIsInWarmup(nullptr)) SetRPCWarmupFinished();
+        try {
+            return tableRPC.execute(request);
+        } catch (const UniValue& obj_error) {
+            throw std::runtime_error{obj_error.find_value("message").get_str()};
+        }
+    }
+};
+
+} // namespace
+
+BOOST_FIXTURE_TEST_SUITE(matmul_bmx4_service_tests, MatMulBMX4ServiceTestingSetup)
+
+BOOST_AUTO_TEST_CASE(v4_template_advertises_digest_only_relay_safe_limits)
+{
+    UniValue rules{UniValue::VARR};
+    rules.push_back("segwit");
+    UniValue request{UniValue::VOBJ};
+    request.pushKV("rules", std::move(rules));
+    UniValue params{UniValue::VARR};
+    params.push_back(std::move(request));
+
+    const auto tmpl = CallRPC("getblocktemplate", std::move(params)).get_obj();
+    const auto& consensus = m_node.chainman->GetConsensus();
+    BOOST_REQUIRE(consensus.GetMatMulProfileParams(/*height=*/1).commitment ==
+                  Consensus::MatMulCommitmentScheme::DIGEST_RECOMPUTE);
+
+    const auto capacity = tmpl.find_value("block_capacity").get_obj();
+    BOOST_CHECK_EQUAL(capacity.find_value("matmul_proof_reserved_bytes").getInt<uint64_t>(), 0U);
+    BOOST_CHECK_EQUAL(capacity.find_value("max_protocol_message_length").getInt<uint64_t>(), MAX_PROTOCOL_MESSAGE_LENGTH);
+    BOOST_CHECK_EQUAL(capacity.find_value("relay_serialized_limit").getInt<uint64_t>(), MAX_BLOCK_MESSAGE_LENGTH);
+    BOOST_CHECK_EQUAL(tmpl.find_value("sizelimit").getInt<uint64_t>(), MAX_BLOCK_MESSAGE_LENGTH);
+    BOOST_REQUIRE(node::BlockAssembler::m_last_block_size.has_value());
+    BOOST_CHECK_GE(*node::BlockAssembler::m_last_block_size,
+                   static_cast<int64_t>(node::BlockAssembler::Options{}.block_reserved_size));
+
+    const auto matmul = tmpl.find_value("matmul").get_obj();
+    BOOST_CHECK_EQUAL(matmul.find_value("b").getInt<uint64_t>(), consensus.nMatMulV4TranscriptBlockSize);
+    BOOST_CHECK_EQUAL(matmul.find_value("r").getInt<uint64_t>(), consensus.nMatMulV4FreivaldsRounds);
+    BOOST_CHECK_LE(matmul.find_value("min_dimension").getInt<uint64_t>(), matmul.find_value("n").getInt<uint64_t>());
+    BOOST_CHECK_GE(matmul.find_value("max_dimension").getInt<uint64_t>(), matmul.find_value("n").getInt<uint64_t>());
+}
+
+BOOST_AUTO_TEST_CASE(issue_solve_verify_and_profile_tamper)
+{
+    const auto service = CallRPC(
+        "getmatmulservicechallenge",
+        GetMatMulServiceChallengeParams(
+            "rate_limit", "bmx4:/v1/solve", "user:bmx4@example.com",
+            0.001, 300, 0.0, 0.0, "fixed", 24, 0.001, 0.001)).get_obj();
+    const auto matmul = service.find_value("challenge").get_obj().find_value("matmul").get_obj();
+    BOOST_CHECK_EQUAL(matmul.find_value("encoding_profile").get_str(), "ENC-BMX4C");
+    BOOST_CHECK_EQUAL(matmul.find_value("n").getInt<int>(), 128);
+
+    const auto solved = CallRPC(
+        "solvematmulservicechallenge",
+        SolveMatMulServiceChallengeParams(service, 256)).get_obj();
+    BOOST_REQUIRE(solved.find_value("solved").get_bool());
+    BOOST_REQUIRE(solved.find_value("matrix_c_data").isStr());
+
+    UniValue verify_params{UniValue::VARR};
+    verify_params.push_back(service);
+    verify_params.push_back(solved.find_value("nonce64_hex").get_str());
+    verify_params.push_back(solved.find_value("digest_hex").get_str());
+    verify_params.push_back(true);
+    verify_params.push_back(solved.find_value("matrix_c_data").get_str());
+    const auto verified = CallRPC("verifymatmulserviceproof", std::move(verify_params)).get_obj();
+    BOOST_CHECK(verified.find_value("valid").get_bool());
+    BOOST_CHECK_EQUAL(
+        verified.find_value("proof").get_obj().find_value("encoding_profile").get_str(),
+        "ENC-BMX4C");
+
+    std::string tampered_json = service.write();
+    const size_t profile_pos = tampered_json.find("\"encoding_profile\":\"ENC-BMX4C\"");
+    BOOST_REQUIRE(profile_pos != std::string::npos);
+    tampered_json.replace(profile_pos,
+                          std::string{"\"encoding_profile\":\"ENC-BMX4C\""}.size(),
+                          "\"encoding_profile\":\"ENC-S8\"");
+    UniValue tampered;
+    BOOST_REQUIRE(tampered.read(tampered_json));
+
+    UniValue tampered_params{UniValue::VARR};
+    tampered_params.push_back(tampered);
+    tampered_params.push_back(solved.find_value("nonce64_hex").get_str());
+    tampered_params.push_back(solved.find_value("digest_hex").get_str());
+    tampered_params.push_back(true);
+    tampered_params.push_back(solved.find_value("matrix_c_data").get_str());
+    const auto rejected = CallRPC("verifymatmulserviceproof", std::move(tampered_params)).get_obj();
+    BOOST_CHECK(!rejected.find_value("valid").get_bool());
+    BOOST_CHECK_EQUAL(rejected.find_value("reason").get_str(), "challenge_mismatch");
+    BOOST_CHECK_EQUAL(rejected.find_value("mismatch_field").get_str(), "challenge.matmul.encoding_profile");
 }
 
 BOOST_AUTO_TEST_SUITE_END()

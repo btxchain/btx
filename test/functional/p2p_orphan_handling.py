@@ -42,7 +42,10 @@ from test_framework.wallet import (
 # for one peer and y seconds for another, use specific values instead.
 TXREQUEST_TIME_SKIP = NONPREF_PEER_TX_DELAY + TXID_RELAY_DELAY + OVERLOADED_PEER_TX_DELAY + 1
 
-DEFAULT_MAX_ORPHAN_TRANSACTIONS = 100
+# Keep this synchronized with src/net_processing.h. BTX raises the default
+# orphan bound to 200; the test must actually reach that configured boundary
+# before asserting eviction.
+DEFAULT_MAX_ORPHAN_TRANSACTIONS = 200
 
 def cleanup(func):
     # Time to fastfoward (using setmocktime) in between subtests to ensure they do not interfere with
@@ -56,6 +59,8 @@ def cleanup(func):
         finally:
             # Clear mempool
             self.generate(self.nodes[0], 1)
+            while self.nodes[0].getrawmempool():
+                self.generate(self.nodes[0], 1)
             self.nodes[0].disconnect_p2ps()
             self.nodes[0].bumpmocktime(LONG_TIME_SKIP)
             # Check that mempool and orphanage have been cleared
@@ -121,7 +126,7 @@ class PeerTxRelayer(P2PTxInvStore):
 class OrphanHandlingTest(BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 1
-        self.extra_args = [[]]
+        self.extra_args = [["-acceptnonstdtxn=1"]]
 
     def create_parent_and_child(self):
         """Create package with 1 parent and 1 child, normal fees (no cpfp)."""
@@ -807,7 +812,7 @@ class OrphanHandlingTest(BitcoinTestFramework):
         self.wallet_nonsegwit = MiniWallet(self.nodes[0], mode=MiniWalletMode.RAW_P2PKH)
         self.generate(self.wallet_nonsegwit, 10)
         self.wallet = MiniWallet(self.nodes[0])
-        self.generate(self.wallet, 160)
+        self.generate(self.wallet, DEFAULT_MAX_ORPHAN_TRANSACTIONS + 60)
 
         self.test_arrival_timing_orphan()
         self.test_orphan_rejected_parents_exceptions()

@@ -210,7 +210,19 @@ class ValidateAddressMainTest(BitcoinTestFramework):
         for (addr, spk) in VALID_DATA:
             if custom_mainnet_hrp:
                 addr = self.nodes[0].decodescript(spk)["address"]
-            self.check_valid(addr, spk)
+            # BTX assigns witness version 2 exclusively to P2MR and requires a
+            # 32-byte Merkle root. BIP350's generic v2/16-byte vector is valid
+            # Bech32m but intentionally not a valid BTX destination.
+            if spk.startswith("52") and not spk.startswith("5220"):
+                result = self.nodes[0].validateaddress(addr)
+                assert_equal(result["isvalid"], False)
+                assert "error" in result
+            else:
+                self.check_valid(addr, spk)
+
+        p2mr_spk = "5220" + "11" * 32
+        p2mr_addr = self.nodes[0].decodescript(p2mr_spk)["address"]
+        self.check_valid(p2mr_addr, p2mr_spk)
 
         if custom_mainnet_hrp:
             sample_valid = self.nodes[0].decodescript(VALID_DATA[0][1])["address"]

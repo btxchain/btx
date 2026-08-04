@@ -5,10 +5,12 @@
 #include <chainparams.h>
 #include <common/args.h>
 #include <pow.h>
+#include <primitives/block.h>
 #include <test/util/setup_common.h>
 #include <util/chaintype.h>
 
 #include <boost/test/unit_test.hpp>
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <limits>
@@ -159,6 +161,69 @@ BOOST_AUTO_TEST_CASE(product_digest_activation_disables_phase2_even_in_ibd)
         params,
         /*phase2_enabled=*/true,
         /*is_ibd=*/true));
+}
+
+BOOST_AUTO_TEST_CASE(v4_expensive_count_matches_mandatory_contextual_validation)
+{
+    auto params = MainParams();
+    params.nMatMulV4Height = 100;
+    params.fSkipMatMulValidation = true;
+
+    // Legacy phase2 policy is disabled, but ContextualCheckBlock's v4
+    // exclusive cascade still performs the profile's verification/recompute.
+    // The admission count must therefore remain nonzero at v4 heights.
+    BOOST_CHECK(ShouldRunMatMulExpensiveVerification(
+        /*block_height=*/100, /*best_known_height=*/100, params,
+        /*phase2_enabled=*/false, /*is_ibd=*/false));
+    BOOST_CHECK_EQUAL(CountMatMulExpensiveVerifyChecks(
+        /*first_height=*/99, /*header_count=*/3, /*best_known_height=*/101,
+        params, /*phase2_enabled=*/false, /*is_ibd=*/false), 2U);
+}
+
+BOOST_AUTO_TEST_CASE(expensive_body_admission_excludes_cheap_payload_rejects)
+{
+    auto params = MainParams();
+    params.nMatMulV4Height = 100;
+    params.nMatMulDRLTHeight = std::numeric_limits<int32_t>::max();
+    params.nMatMulBMX4CHeight = std::numeric_limits<int32_t>::max();
+    params.nMatMulV4Dimension = 64;
+    params.nMatMulV4MinDimension = 64;
+    params.nMatMulV4MaxDimension = 64;
+
+    CBlock block;
+    block.matmul_dim = 64;
+
+    // Production ENC-DR reaches its predicate only with an empty A/B/C body.
+    BOOST_CHECK(MatMulBodyReachesExpensiveVerification(block, params, 100));
+    block.matrix_c_data.assign(1, 0);
+    BOOST_CHECK(!MatMulBodyReachesExpensiveVerification(block, params, 100));
+    block.matrix_c_data.clear();
+    block.matrix_a_data.assign(1, 0);
+    BOOST_CHECK(!MatMulBodyReachesExpensiveVerification(block, params, 100));
+
+    // Regtest flat-sketch replay rejects missing/oversized payloads before
+    // its verifier, while a bounded non-empty sketch reaches that predicate.
+    block.matrix_a_data.clear();
+    params.fMatMulV4FlatSketchReplay = true;
+    BOOST_CHECK(!MatMulBodyReachesExpensiveVerification(block, params, 100));
+    block.matrix_c_data.assign(1, 0);
+    BOOST_CHECK(MatMulBodyReachesExpensiveVerification(block, params, 100));
+    const uint64_t m{params.nMatMulV4Dimension / params.nMatMulV4TranscriptBlockSize};
+    block.matrix_c_data.assign(2 * m * m + 1, 0);
+    BOOST_CHECK(!MatMulBodyReachesExpensiveVerification(block, params, 100));
+
+    // Legacy required-product and malformed-product branches likewise return
+    // before Freivalds/full-transcript work.
+    params.nMatMulV4Height = std::numeric_limits<int32_t>::max();
+    params.fMatMulV4FlatSketchReplay = false;
+    params.fMatMulFreivaldsEnabled = true;
+    params.fMatMulRequireProductPayload = true;
+    block.matrix_c_data.clear();
+    BOOST_CHECK(!MatMulBodyReachesExpensiveVerification(block, params, 99));
+    block.matrix_c_data.assign(1, 0);
+    BOOST_CHECK(!MatMulBodyReachesExpensiveVerification(block, params, 99));
+    block.matrix_c_data.assign(static_cast<size_t>(block.matmul_dim) * block.matmul_dim, 0);
+    BOOST_CHECK(MatMulBodyReachesExpensiveVerification(block, params, 99));
 }
 
 BOOST_AUTO_TEST_CASE(phase2_ibd_batch_count_enforces_budgeting)
@@ -359,6 +424,11 @@ BOOST_AUTO_TEST_CASE(validation_rate_limit_per_peer_and_max_concurrent_verificat
 {
     auto params = MainParams();
     params.nMatMulPeerVerifyBudgetPerMin = 8;
+    // Mainnet v4 is live at the Epoch-A height, and these cases use the
+    // INT32_MAX default reference height, so SelectMatMulPeerVerifyBudgetBase
+    // reads the v4 field. Mirror the limit so the case still exercises the
+    // per-peer limiter rather than an unrelated production budget.
+    params.nMatMulV4PeerVerifyBudgetPerMin = 8;
     params.nMatMulMaxPendingVerifications = 4;
 
     MatMulPeerVerificationBudget budget;
@@ -377,15 +447,167 @@ BOOST_AUTO_TEST_CASE(validation_rate_limit_ibd_budget_floor_supports_repeated_he
 {
     auto params = MainParams();
     params.nMatMulPeerVerifyBudgetPerMin = 32;
+    // Mainnet v4 is live at the Epoch-A height, and these cases use the
+    // INT32_MAX default reference height, so SelectMatMulPeerVerifyBudgetBase
+    // reads the v4 field. Mirror the limit so the case still exercises the
+    // per-peer limiter rather than an unrelated production budget.
+    params.nMatMulV4PeerVerifyBudgetPerMin = 32;
 
     BOOST_CHECK_EQUAL(EffectiveMatMulPeerVerifyBudgetPerMin(params, /*is_ibd=*/false), 32U);
+    // WP-10 / C2 residual: the IBD floor is now a TWO-REGIME function of the
+    // reference height (see EffectiveMatMulPeerVerifyBudgetPerMin in pow.cpp).
+    //
+    // (a) Fast-phase bootstrap regime — the default reference_height=-1 sentinel
+    //     (and any height < nFastMineHeight) retains the full 200000 floor, since
+    //     every fast-phase header is phase-2-relevant. This preserves the old
+    //     honest-bootstrap contract, so the original assertion still holds as-is.
     BOOST_CHECK_GE(EffectiveMatMulPeerVerifyBudgetPerMin(params, /*is_ibd=*/true), 200'000U);
+    BOOST_CHECK_EQUAL(
+        EffectiveMatMulPeerVerifyBudgetPerMin(params, /*is_ibd=*/true, /*reference_height=*/-1),
+        200'000U);
+
+    // (b) Post-fast-phase IBD regime — with a concrete reference_height at/above
+    //     nFastMineHeight the floor is BOUNDED to
+    //     max(base, global, nMatMulIbdPeerVerifyBudgetPerMin) instead of the old
+    //     unconditional 200000, restoring concrete per-peer accountability during
+    //     near-tip catch-up. Compute the expected bound from the public budget
+    //     accessors (base == the non-IBD value at that height) so this locks the
+    //     new two-regime contract without hard-coding the arithmetic.
+    const int32_t post_fast_height = static_cast<int32_t>(params.nFastMineHeight);
+    const uint32_t base_at_height =
+        EffectiveMatMulPeerVerifyBudgetPerMin(params, /*is_ibd=*/false, post_fast_height);
+    const uint32_t global_at_height =
+        EffectiveMatMulGlobalVerifyBudgetPerMin(params, post_fast_height);
+    const uint32_t expected_bounded =
+        std::max({base_at_height, global_at_height, params.nMatMulIbdPeerVerifyBudgetPerMin});
+    BOOST_CHECK_EQUAL(
+        EffectiveMatMulPeerVerifyBudgetPerMin(params, /*is_ibd=*/true, post_fast_height),
+        expected_bounded);
+    // The post-fast-phase bound is a strict tightening of the old 200000 floor.
+    BOOST_CHECK_LT(
+        EffectiveMatMulPeerVerifyBudgetPerMin(params, /*is_ibd=*/true, post_fast_height),
+        200'000U);
+}
+
+BOOST_AUTO_TEST_CASE(validation_rate_limit_ibd_global_floor_admits_full_headers_batch)
+{
+    auto params = MainParams();
+    params.nMatMulGlobalVerifyBudgetPerMin = 512;
+    params.nMatMulPeerVerifyBudgetPerMin = 32;
+    // Mainnet v4 is live at the Epoch-A height, and these cases use the
+    // INT32_MAX default reference height, so SelectMatMulPeerVerifyBudgetBase
+    // reads the v4 field. Mirror the limit so the case still exercises the
+    // per-peer limiter rather than an unrelated production budget.
+    params.nMatMulV4PeerVerifyBudgetPerMin = 32;
+    params.nMatMulIbdPeerVerifyBudgetPerMin = 65536;
+
+    // Steady-state global floor alone cannot accept one MAX_HEADERS_RESULT-sized
+    // IBD batch when every header is Phase2-counted.
+    constexpr uint32_t kFullHeadersBatch{2000};
+    BOOST_CHECK_LT(EffectiveMatMulGlobalVerifyBudgetPerMin(params), kFullHeadersBatch);
+
+    const int32_t post_fast_height = static_cast<int32_t>(params.nFastMineHeight);
+    const uint32_t catch_up = EffectiveMatMulGlobalHeaderBudgetForCatchUp(
+        params, /*is_ibd=*/true, /*in_fast_phase=*/false, post_fast_height);
+    BOOST_CHECK_GE(catch_up, kFullHeadersBatch);
+    BOOST_CHECK_EQUAL(
+        catch_up,
+        EffectiveMatMulPeerVerifyBudgetPerMin(params, /*is_ibd=*/true, post_fast_height));
+
+    // Non-IBD / non-fast-phase keeps the steady-state global floor.
+    BOOST_CHECK_EQUAL(
+        EffectiveMatMulGlobalHeaderBudgetForCatchUp(
+            params, /*is_ibd=*/false, /*in_fast_phase=*/false, post_fast_height),
+        EffectiveMatMulGlobalVerifyBudgetPerMin(params, post_fast_height));
+
+    // The enlarged allowance is header-only. Complete-block callers retain
+    // the ordinary bounded global budget during IBD/catch-up.
+    BOOST_CHECK_EQUAL(
+        EffectiveMatMulGlobalVerifyBudgetPerMin(params, post_fast_height),
+        512U);
+    BOOST_CHECK_LT(
+        EffectiveMatMulGlobalVerifyBudgetPerMin(params, post_fast_height),
+        catch_up);
+}
+
+BOOST_AUTO_TEST_CASE(validation_rate_limit_header_and_expensive_lanes_are_independent)
+{
+    MatMulPhase2BudgetTracker tracker;
+    const auto start{std::chrono::steady_clock::time_point{
+        std::chrono::seconds{1'000}}};
+
+    // A full catch-up headers message exhausts only the enlarged cheap lane.
+    BOOST_REQUIRE(tracker.Consume(
+        /*max_per_minute=*/2'000, /*count=*/2'000, start,
+        MatMulPhase2BudgetLane::HeaderBatch));
+    BOOST_CHECK(!tracker.Consume(
+        /*max_per_minute=*/2'000, /*count=*/1, start,
+        MatMulPhase2BudgetLane::HeaderBatch));
+
+    // Expensive complete-block verification retains its independent bounded
+    // capacity in the same process-wide minute.
+    BOOST_REQUIRE(tracker.Consume(
+        /*max_per_minute=*/2, /*count=*/2,
+        start + std::chrono::seconds{30},
+        MatMulPhase2BudgetLane::ExpensiveVerification));
+    BOOST_CHECK(!tracker.Consume(
+        /*max_per_minute=*/2, /*count=*/1,
+        start + std::chrono::seconds{30},
+        MatMulPhase2BudgetLane::ExpensiveVerification));
+
+    // The two windows reset relative to their own first charge, not to the
+    // other lane's catch-up traffic.
+    BOOST_CHECK(tracker.Consume(
+        /*max_per_minute=*/2'000, /*count=*/1,
+        start + std::chrono::seconds{60},
+        MatMulPhase2BudgetLane::HeaderBatch));
+    BOOST_CHECK(!tracker.Consume(
+        /*max_per_minute=*/2, /*count=*/1,
+        start + std::chrono::seconds{60},
+        MatMulPhase2BudgetLane::ExpensiveVerification));
+    BOOST_CHECK(tracker.Consume(
+        /*max_per_minute=*/2, /*count=*/1,
+        start + std::chrono::seconds{90},
+        MatMulPhase2BudgetLane::ExpensiveVerification));
+
+    // Retained-source accounting has the same separation. Model a cheap
+    // fast-phase batch at its 200k ceiling, then cross the fast/steady boundary
+    // inside the same minute. The body lane must start at zero rather than
+    // inheriting the header count and rejecting the honest source.
+    auto params{MainParams()};
+    params.fMatMulPOW = true;
+    params.nFastMineHeight = 50'000;
+    MatMulPeerVerificationBudget source;
+    source.header_window_start = start;
+    source.header_verifications_this_minute = 199'999;
+    BOOST_REQUIRE(ConsumeMatMulPeerVerifyBudget(
+        source, params, start, /*is_ibd=*/false,
+        /*reference_height=*/4'000,
+        MatMulPhase2BudgetLane::HeaderBatch));
+    BOOST_CHECK(!ConsumeMatMulPeerVerifyBudget(
+        source, params, start, /*is_ibd=*/false,
+        /*reference_height=*/4'000,
+        MatMulPhase2BudgetLane::HeaderBatch));
+    BOOST_CHECK_EQUAL(source.header_verifications_this_minute, 200'000U);
+
+    BOOST_REQUIRE(ConsumeMatMulPeerVerifyBudget(
+        source, params, start + std::chrono::seconds{30},
+        /*is_ibd=*/false,
+        /*reference_height=*/50'000,
+        MatMulPhase2BudgetLane::ExpensiveVerification));
+    BOOST_CHECK_EQUAL(source.expensive_verifications_this_minute, 1U);
+    BOOST_CHECK_EQUAL(source.header_verifications_this_minute, 200'000U);
 }
 
 BOOST_AUTO_TEST_CASE(validation_rate_limit_fast_phase_budget_floor_outside_ibd)
 {
     auto params = MainParams();
     params.nMatMulPeerVerifyBudgetPerMin = 32;
+    // Mainnet v4 is live at the Epoch-A height, and these cases use the
+    // INT32_MAX default reference height, so SelectMatMulPeerVerifyBudgetBase
+    // reads the v4 field. Mirror the limit so the case still exercises the
+    // per-peer limiter rather than an unrelated production budget.
+    params.nMatMulV4PeerVerifyBudgetPerMin = 32;
     params.fMatMulPOW = true;
     params.nFastMineHeight = 50'000;
 
@@ -406,6 +628,11 @@ BOOST_AUTO_TEST_CASE(validation_rate_limit_allows_rapid_regtest_bursts)
 {
     auto params = RegtestParams();
     params.nMatMulPeerVerifyBudgetPerMin = 8;
+    // Mainnet v4 is live at the Epoch-A height, and these cases use the
+    // INT32_MAX default reference height, so SelectMatMulPeerVerifyBudgetBase
+    // reads the v4 field. Mirror the limit so the case still exercises the
+    // per-peer limiter rather than an unrelated production budget.
+    params.nMatMulV4PeerVerifyBudgetPerMin = 8;
     params.fMatMulPOW = true;
     params.fPowAllowMinDifficultyBlocks = true;
     params.fPowNoRetargeting = true;
@@ -454,6 +681,11 @@ BOOST_AUTO_TEST_CASE(peer_budget_rollback_must_restore_window_start_on_minute_bo
 {
     auto params = MainParams();
     params.nMatMulPeerVerifyBudgetPerMin = 8;
+    // Mainnet v4 is live at the Epoch-A height, and these cases use the
+    // INT32_MAX default reference height, so SelectMatMulPeerVerifyBudgetBase
+    // reads the v4 field. Mirror the limit so the case still exercises the
+    // per-peer limiter rather than an unrelated production budget.
+    params.nMatMulV4PeerVerifyBudgetPerMin = 8;
 
     MatMulPeerVerificationBudget budget;
     const auto now = std::chrono::steady_clock::now();
@@ -504,6 +736,11 @@ BOOST_AUTO_TEST_CASE(peer_budget_counter_only_rollback_causes_premature_throttle
 {
     auto params = MainParams();
     params.nMatMulPeerVerifyBudgetPerMin = 8;
+    // Mainnet v4 is live at the Epoch-A height, and these cases use the
+    // INT32_MAX default reference height, so SelectMatMulPeerVerifyBudgetBase
+    // reads the v4 field. Mirror the limit so the case still exercises the
+    // per-peer limiter rather than an unrelated production budget.
+    params.nMatMulV4PeerVerifyBudgetPerMin = 8;
 
     MatMulPeerVerificationBudget budget;
     const auto now = std::chrono::steady_clock::now();

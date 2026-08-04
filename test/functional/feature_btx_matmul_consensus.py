@@ -87,9 +87,10 @@ class BTXMatMulConsensusTest(BitcoinTestFramework):
         payload_candidate = node0.generateblock("raw(51)", [], False, called_by_framework=True)
         payload_full_hex = payload_candidate["hex"]
         parsed_block = from_hex(CBlock(), payload_full_hex)
-        # test_framework CBlock serializes header+tx only.
+        assert parsed_block.matrix_c_data
+        parsed_block.matrix_c_data = []
         payloadless_hex = parsed_block.serialize().hex()
-        assert len(payload_full_hex) >= len(payloadless_hex)
+        assert len(payload_full_hex) > len(payloadless_hex)
         assert_equal(node1.submitblock(payloadless_hex), "missing-product-payload")
         assert_equal(node1.getbestblockhash(), tip_hash)
 

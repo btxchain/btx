@@ -9,7 +9,11 @@
 #include <wallet/test/util.h>
 #include <wallet/wallet.h>
 
+#include <policy/policy.h>
+
 #include <boost/test/unit_test.hpp>
+
+#include <algorithm>
 
 namespace wallet {
 BOOST_FIXTURE_TEST_SUITE(group_outputs_tests, TestingSetup)
@@ -205,7 +209,7 @@ BOOST_AUTO_TEST_CASE(outputs_grouping_tests)
             /*positive_only=*/ false);
 
     // ###########################################################################################
-    // 7) Surpass the OUTPUT_GROUP_MAX_ENTRIES and verify that a second partial group gets created
+    // 7) Surpass the OUTPUT_GROUP_MAX_ENTRIES and verify that a second partial group gets created.
     // ###########################################################################################
 
     const CTxDestination dest7 = *Assert(wallet->GetNewDestination(OutputType::P2MR, ""));
@@ -214,7 +218,7 @@ BOOST_AUTO_TEST_CASE(outputs_grouping_tests)
         addCoin(group_verifier.coins_pool, *wallet, dest7, 9 * COIN, /*is_from_me=*/true);
     }
 
-    // Exclude partial groups only adds one more group to the previous test case (point 6)
+    // Exclude partial groups only adds one more group to the previous test case (point 6).
     int PREVIOUS_ROUND_COUNT = GROUP_SIZE * 2 + 1;
     group_verifier.GroupAndVerify(OutputType::P2MR,
             BASIC_FILTER,
@@ -222,13 +226,64 @@ BOOST_AUTO_TEST_CASE(outputs_grouping_tests)
             /*expected_without_partial_spends_size=*/ 4,
             /*positive_only=*/ false);
 
-    // Include partial groups should add one more group inside the "avoid partial spends" count
-    const CoinEligibilityFilter& avoid_partial_groups_filter{1, 6, 0, 0, /*include_partial=*/ true};
+    // Include partial groups should add one more group inside the avoid-partial-spends count.
+    const CoinEligibilityFilter include_partial_filter{1, 6, 0, 0, /*include_partial=*/true};
     group_verifier.GroupAndVerify(OutputType::P2MR,
-            avoid_partial_groups_filter,
+            include_partial_filter,
             /*expected_with_partial_spends_size=*/ PREVIOUS_ROUND_COUNT + NUM_SINGLE_ENTRIES,
             /*expected_without_partial_spends_size=*/ 5,
             /*positive_only=*/ false);
+
+    // Weight-descending first-fit must fill earlier residual capacity instead of exposing an
+    // arbitrary underfilled group. Include 40 first to exercise ordering independently of input
+    // insertion order; the 40/70/30 case must become [70+30], [40].
+    const auto verify_adversarial_packing = [&](const std::vector<int>& input_weights,
+                                                const std::vector<size_t>& expected_all_sizes,
+                                                const std::vector<size_t>& expected_full_sizes) {
+        CoinsResult adversarial_coins;
+        const CTxDestination destination = *Assert(wallet->GetNewDestination(OutputType::P2MR, ""));
+        for (const int input_weight : input_weights) {
+            addCoin(adversarial_coins, *wallet, destination, 9 * COIN, /*is_from_me=*/true);
+            adversarial_coins.coins[OutputType::P2MR].back().input_bytes = input_weight;
+        }
+
+        FastRandomContext adversarial_rand;
+        CoinSelectionParams adversarial_params{makeSelectionParams(adversarial_rand, /*avoid_partial_spends=*/true)};
+        adversarial_params.m_max_tx_weight = 140;
+        adversarial_params.tx_noinputs_size = 40;
+        const CoinEligibilityFilter exclude_partial_filter{1, 6, 0, 0, /*include_partial=*/false};
+        const FilteredOutputGroups packed{GroupOutputs(
+            *wallet,
+            adversarial_coins,
+            adversarial_params,
+            {{exclude_partial_filter}, {include_partial_filter}})};
+
+        const auto collect_sizes = [&](const CoinEligibilityFilter& filter) {
+            std::vector<size_t> sizes;
+            const auto& groups = packed.at(filter).groups_by_type.at(OutputType::P2MR).mixed_group;
+            for (const OutputGroup& group : groups) {
+                sizes.push_back(group.m_outputs.size());
+                BOOST_CHECK_LE(group.m_weight + adversarial_params.tx_noinputs_size * WITNESS_SCALE_FACTOR,
+                               *adversarial_params.m_max_tx_weight);
+            }
+            std::sort(sizes.begin(), sizes.end());
+            return sizes;
+        };
+
+        const std::vector<size_t> all_sizes{collect_sizes(include_partial_filter)};
+        BOOST_CHECK_EQUAL_COLLECTIONS(all_sizes.begin(), all_sizes.end(),
+                                      expected_all_sizes.begin(), expected_all_sizes.end());
+        const std::vector<size_t> full_sizes{collect_sizes(exclude_partial_filter)};
+        BOOST_CHECK_EQUAL_COLLECTIONS(full_sizes.begin(), full_sizes.end(),
+                                      expected_full_sizes.begin(), expected_full_sizes.end());
+    };
+
+    verify_adversarial_packing(/*input_weights=*/{70, 70, 30, 30},
+                               /*expected_all_sizes=*/{2, 2},
+                               /*expected_full_sizes=*/{2, 2});
+    verify_adversarial_packing(/*input_weights=*/{40, 70, 30},
+                               /*expected_all_sizes=*/{1, 2},
+                               /*expected_full_sizes=*/{2});
 }
 
 BOOST_AUTO_TEST_SUITE_END()

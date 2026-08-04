@@ -12,14 +12,16 @@ import os
 
 from test_framework.blocktools import (
     MIN_BLOCKS_TO_KEEP,
+    REGTEST_GENERIC_P2P_MATMUL_ARGS,
     create_block,
     create_coinbase,
 )
+from test_framework.messages import CTxOut
 from test_framework.script import (
     CScript,
-    OP_NOP,
     OP_RETURN,
 )
+from test_framework.test_node import ErrorMatch
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     assert_equal,
@@ -34,9 +36,9 @@ from test_framework.util import (
 TIMESTAMP_WINDOW = 2 * 60 * 60
 
 def mine_large_blocks(node, n):
-    # Make a large scriptPubKey for the coinbase transaction. This is OP_RETURN
-    # followed by 950k of OP_NOP. This would be non-standard in a non-coinbase
-    # transaction but is consensus valid.
+    # BTX consensus bounds each OP_RETURN script to 83 bytes, including in a
+    # coinbase. Fill the block with many zero-valued, consensus-valid outputs
+    # so pruning still exercises real on-disk block data without growing UTXO.
 
     # Set the nTime if this is the first time this function has been called.
     # A static variable ensures that time is monotonicly increasing and is therefore
@@ -45,18 +47,21 @@ def mine_large_blocks(node, n):
         mine_large_blocks.nTime = 0
 
     # Get the block parameters for the first block
-    big_script = CScript([OP_RETURN] + [OP_NOP] * 950000)
+    filler_script = CScript([OP_RETURN, bytes(80)])
     best_block = node.getblock(node.getbestblockhash())
     height = int(best_block["height"]) + 1
     mine_large_blocks.nTime = max(mine_large_blocks.nTime, int(best_block["time"])) + 1
     previousblockhash = int(best_block["hash"], 16)
 
     for _ in range(n):
-        block = create_block(hashprev=previousblockhash, ntime=mine_large_blocks.nTime, coinbase=create_coinbase(height, script_pubkey=big_script))
+        coinbase = create_coinbase(height, script_pubkey=filler_script)
+        coinbase.vout.extend(CTxOut(0, filler_script) for _ in range(10299))
+        coinbase.rehash()
+        block = create_block(hashprev=previousblockhash, ntime=mine_large_blocks.nTime, coinbase=coinbase)
         block.solve()
 
         # Submit to the node
-        node.submitblock(block.serialize().hex())
+        assert node.submitblock(block.serialize().hex()) is None
 
         previousblockhash = block.sha256
         height += 1
@@ -76,16 +81,16 @@ class PruneTest(BitcoinTestFramework):
 
         # Create nodes 0 and 1 to mine.
         # Create node 2 to test pruning.
-        self.full_node_default_args = ["-maxreceivebuffer=20000", "-checkblocks=5"]
+        self.full_node_default_args = [*REGTEST_GENERIC_P2P_MATMUL_ARGS, "-maxreceivebuffer=20000", "-checkblocks=5"]
         # Create nodes 3 and 4 to test manual pruning (they will be re-started with manual pruning later)
         # Create nodes 5 to test wallet in prune mode, but do not connect
         self.extra_args = [
             self.full_node_default_args,
             self.full_node_default_args,
-            ["-maxreceivebuffer=20000", "-prune=550"],
-            ["-maxreceivebuffer=20000"],
-            ["-maxreceivebuffer=20000"],
-            ["-prune=550", "-blockfilterindex=1"],
+            [*REGTEST_GENERIC_P2P_MATMUL_ARGS, "-maxreceivebuffer=20000", "-prune=550"],
+            [*REGTEST_GENERIC_P2P_MATMUL_ARGS, "-maxreceivebuffer=20000"],
+            [*REGTEST_GENERIC_P2P_MATMUL_ARGS, "-maxreceivebuffer=20000"],
+            [*REGTEST_GENERIC_P2P_MATMUL_ARGS, "-prune=550", "-blockfilterindex=1"],
         ]
         self.rpc_timeout = 120
 
@@ -121,23 +126,24 @@ class PruneTest(BitcoinTestFramework):
         self.stop_node(0)
         self.nodes[0].assert_start_raises_init_error(
             expected_msg='Error: Prune cannot be configured with a negative value.',
-            extra_args=['-prune=-1'],
+            extra_args=[*REGTEST_GENERIC_P2P_MATMUL_ARGS, '-prune=-1'],
         )
         self.nodes[0].assert_start_raises_init_error(
             expected_msg='Error: Prune configured below the minimum of 550 MiB.  Please use a higher number.',
-            extra_args=['-prune=549'],
+            extra_args=[*REGTEST_GENERIC_P2P_MATMUL_ARGS, '-prune=549'],
         )
         self.nodes[0].assert_start_raises_init_error(
             expected_msg='Error: Prune mode is incompatible with -txindex.',
-            extra_args=['-prune=550', '-txindex'],
+            extra_args=[*REGTEST_GENERIC_P2P_MATMUL_ARGS, '-prune=550', '-txindex'],
         )
         self.nodes[0].assert_start_raises_init_error(
             expected_msg='Error: Prune mode is incompatible with -reindex-chainstate. Use full -reindex instead.',
-            extra_args=['-prune=550', '-reindex-chainstate'],
+            extra_args=[*REGTEST_GENERIC_P2P_MATMUL_ARGS, '-prune=550', '-reindex-chainstate'],
+            match=ErrorMatch.PARTIAL_REGEX,
         )
 
     def test_rescan_blockchain(self):
-        self.restart_node(0, ["-prune=550"])
+        self.restart_node(0, [*REGTEST_GENERIC_P2P_MATMUL_ARGS, "-prune=550"])
         assert_raises_rpc_error(-1, "Can't rescan beyond pruned data. Use RPC call getblockchaininfo to determine your pruned height.", self.nodes[0].rescanblockchain)
 
     def test_height_min(self):
@@ -276,7 +282,7 @@ class PruneTest(BitcoinTestFramework):
         assert_raises_rpc_error(-1, "Cannot prune blocks because node is not in prune mode", node.pruneblockchain, 500)
 
         # now re-start in manual pruning mode
-        self.restart_node(node_number, extra_args=["-prune=1"])
+        self.restart_node(node_number, extra_args=[*REGTEST_GENERIC_P2P_MATMUL_ARGS, "-prune=1"])
         node = self.nodes[node_number]
         assert_equal(node.getblockcount(), 995)
 
@@ -330,11 +336,12 @@ class PruneTest(BitcoinTestFramework):
             "desc": "Testing",
             "height": [2, 2],
         })
-        assert_equal(node.listprunelocks(), {'prune_locks': [{'id': 'test', 'desc': 'Testing', 'height': [2, 2], 'temporary': False}]})
+        persistent_locks = [lock for lock in node.listprunelocks()['prune_locks'] if not lock['temporary']]
+        assert_equal(persistent_locks, [{'id': 'test', 'desc': 'Testing', 'height': [2, 2], 'temporary': False}])
         prune(500)
         assert has_block(0), "blk00000.dat is missing when should still be there"
         node.setprunelock("test", {})  # delete prune lock
-        assert_equal(node.listprunelocks(), {'prune_locks': []})
+        assert_equal([lock for lock in node.listprunelocks()['prune_locks'] if not lock['temporary']], [])
 
         # height=500 should prune first file
         prune(500)
@@ -356,14 +363,14 @@ class PruneTest(BitcoinTestFramework):
         assert not has_block(3), "blk00003.dat is still there, should be pruned by now"
 
         # stop node, start back up with auto-prune at 550 MiB, make sure still runs
-        self.restart_node(node_number, extra_args=["-prune=550"])
+        self.restart_node(node_number, extra_args=[*REGTEST_GENERIC_P2P_MATMUL_ARGS, "-prune=550"])
 
         self.log.info("Success")
 
     def wallet_test(self):
         # check that the pruning node's wallet is still in good shape
         self.log.info("Stop and start pruning node to trigger wallet rescan")
-        self.restart_node(2, extra_args=["-prune=550"])
+        self.restart_node(2, extra_args=[*REGTEST_GENERIC_P2P_MATMUL_ARGS, "-prune=550"])
         self.log.info("Success")
 
         # check that wallet loads successfully when restarting a pruned node after IBD.
@@ -372,7 +379,7 @@ class PruneTest(BitcoinTestFramework):
         self.connect_nodes(0, 5)
         nds = [self.nodes[0], self.nodes[5]]
         self.sync_blocks(nds, wait=5, timeout=300)
-        self.restart_node(5, extra_args=["-prune=550", "-blockfilterindex=1"]) # restart to trigger rescan
+        self.restart_node(5, extra_args=[*REGTEST_GENERIC_P2P_MATMUL_ARGS, "-prune=550", "-blockfilterindex=1"]) # restart to trigger rescan
         self.log.info("Success")
 
     def run_test(self):
@@ -502,7 +509,8 @@ class PruneTest(BitcoinTestFramework):
     def test_scanblocks_pruned(self):
         node = self.nodes[5]
         genesis_blockhash = node.getblockhash(0)
-        false_positive_spk = bytes.fromhex("001400000000000000000000000000000000000cadcb")
+        # Precomputed BIP158 collision for the BTX regtest genesis block.
+        false_positive_spk = bytes.fromhex("001400000000000000000000000000000000000bc25f")
 
         assert genesis_blockhash in node.scanblocks(
             "start", [{"desc": f"raw({false_positive_spk.hex()})"}], 0, 0)['relevant_blocks']

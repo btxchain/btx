@@ -98,12 +98,14 @@ static fs::path GetAuthCookieFile(bool temp=false)
 
 static std::optional<std::string> g_generated_cookie;
 
-bool GenerateAuthCookie(std::string* cookie_out, const std::pair<std::optional<fs::perms>, bool>& cookie_perms)
+AuthCookieResult GenerateAuthCookie(const std::pair<std::optional<fs::perms>, bool>& cookie_perms,
+                                    std::string& user,
+                                    std::string& pass)
 {
     const size_t COOKIE_SIZE = 32;
     unsigned char rand_pwd[COOKIE_SIZE];
     GetRandBytes(rand_pwd);
-    std::string cookie = COOKIEAUTH_USER + ":" + HexStr(rand_pwd);
+    const std::string rand_pwd_hex{HexStr(rand_pwd)};
 
     /** the umask determines what permissions are used to create this file -
      * these are set to 0077 in common/system.cpp.
@@ -111,7 +113,7 @@ bool GenerateAuthCookie(std::string* cookie_out, const std::pair<std::optional<f
     std::ofstream file;
     fs::path filepath_tmp = GetAuthCookieFile(true);
     if (filepath_tmp.empty()) {
-        return true; // -norpccookiefile
+        return AuthCookieResult::Disabled; // -norpccookiefile
     }
     try {
         fs::remove(filepath_tmp);
@@ -121,7 +123,7 @@ bool GenerateAuthCookie(std::string* cookie_out, const std::pair<std::optional<f
     file.open(filepath_tmp);
     if (!file.is_open()) {
         LogWarning("Unable to open cookie authentication file %s for writing", fs::PathToString(filepath_tmp));
-        return false;
+        return AuthCookieResult::Error;
     }
 
     if (cookie_perms.first) {
@@ -129,11 +131,11 @@ bool GenerateAuthCookie(std::string* cookie_out, const std::pair<std::optional<f
         fs::permissions(filepath_tmp, cookie_perms.first.value(), fs::perm_options::replace, code);
         if (code) {
             LogWarning("Unable to set permissions on cookie authentication file %s", fs::PathToString(filepath_tmp));
-            return false;
+            return AuthCookieResult::Error;
         }
     }
 
-    file << cookie;
+    file << COOKIEAUTH_USER << ":" << rand_pwd_hex;
     file.close();
 
     fs::path filepath = GetAuthCookieFile(false);
@@ -144,18 +146,18 @@ bool GenerateAuthCookie(std::string* cookie_out, const std::pair<std::optional<f
     }
     if (!RenameOver(filepath_tmp, filepath)) {
         LogWarning("Unable to rename cookie authentication file %s to %s", fs::PathToString(filepath_tmp), fs::PathToString(filepath));
-        return false;
+        return AuthCookieResult::Error;
     }
 
-    g_generated_cookie = cookie;
+    g_generated_cookie = COOKIEAUTH_USER + ":" + rand_pwd_hex;
     LogInfo("Generated RPC authentication cookie %s\n", fs::PathToString(filepath));
     LogInfo("Permissions used for cookie%s: %s\n",
               (cookie_perms.first && cookie_perms.second) ? " (set by -rpccookieperms)" : "",
               PermsToSymbolicString(fs::status(filepath).permissions()));
 
-    if (cookie_out)
-        *cookie_out = cookie;
-    return true;
+    user = COOKIEAUTH_USER;
+    pass = rand_pwd_hex;
+    return AuthCookieResult::Ok;
 }
 
 bool GetAuthCookie(std::string *cookie_out)

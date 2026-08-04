@@ -95,8 +95,16 @@ def check_raw_estimates(node, fees_seen):
     """Call estimaterawfee and verify that the estimates meet certain invariants."""
 
     delta = 1.0e-6  # account for rounding error
+    populated = 0
     for i in range(1, 26):
         for _, e in node.estimaterawfee(i).items():
+            if "feerate" not in e:
+                # A horizon can legitimately remain statistically
+                # under-populated on BTX's larger/faster regtest blocks. It
+                # must fail explicitly, never masquerade as an estimate.
+                assert "errors" in e and e["errors"]
+                continue
+            populated += 1
             feerate = float(e["feerate"])
             assert_greater_than(feerate, 0)
 
@@ -104,6 +112,7 @@ def check_raw_estimates(node, fees_seen):
                 raise AssertionError(
                     f"Estimated fee ({feerate}) out of range ({min(fees_seen)},{max(fees_seen)})"
                 )
+    assert_greater_than(populated, 0)
 
 
 def check_smart_estimates(node, fees_seen):
@@ -182,9 +191,9 @@ class EstimateFeeTest(BitcoinTestFramework):
         # whitelist peers to speed up tx relay / mempool sync
         self.noban_tx_relay = True
         self.extra_args = [
-            ['-rest'],
-            ["-blockmaxweight=72000", "-rest"],
-            ["-blockmaxweight=36000"],
+            ['-rest', '-acceptnonstdtxn=1'],
+            ["-blockmaxweight=72000", "-rest", '-acceptnonstdtxn=1'],
+            ["-blockmaxweight=36000", '-acceptnonstdtxn=1'],
         ]
 
     def setup_network(self):

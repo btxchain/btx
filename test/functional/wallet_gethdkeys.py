@@ -25,11 +25,56 @@ class WalletGetHDKeyTest(BitcoinTestFramework):
         self.skip_if_no_wallet()
 
     def run_test(self):
-        self.test_basic_gethdkeys()
-        self.test_ranged_imports()
-        self.test_lone_key_imports()
-        self.test_ranged_multisig()
-        self.test_mixed_multisig()
+        node = self.nodes[0]
+        native = node.get_wallet_rpc(self.default_wallet_name)
+
+        # Native BTX wallets use pqhd() providers, so the BIP32-specific RPC
+        # correctly has no entries for the active P2MR descriptors.
+        assert_equal(native.gethdkeys(), [])
+
+        self.log.info("BIP32 keys in explicitly imported secp descriptors remain queryable")
+        node.createwallet("secp-imports", blank=True, descriptors=True)
+        wallet = node.get_wallet_rpc("secp-imports")
+        xprv = "tprv8ZgxMBicQKsPeuVhWwi6wuMQGfPKi9Li5GtX35jVNknACgqe3CY4g5xgkfDDJcmtF7o1QnxWDRYw4H5P26PXq7sbcUkEqeR4fg3Kxp2tigg"
+        hardened_path = "/84h/1h/0h"
+        private_desc = descsum_create(f"wpkh({xprv}{hardened_path}/0/*)")
+        imported = wallet.importdescriptors([{
+            "desc": private_desc,
+            "timestamp": "now",
+            "active": False,
+            "range": [0, 2],
+        }])
+        assert_equal(imported[0]["success"], True)
+
+        keys = wallet.gethdkeys()
+        assert_equal(len(keys), 1)
+        assert keys[0]["xpub"].startswith("tpub")
+        assert_equal(keys[0]["has_private"], True)
+        assert_equal(len(keys[0]["descriptors"]), 1)
+        assert_equal(keys[0]["descriptors"][0]["active"], False)
+        assert "xprv" not in keys[0]
+
+        private_keys = wallet.gethdkeys(private=True)
+        assert_equal(len(private_keys), 1)
+        assert private_keys[0]["xprv"].startswith("tprv")
+        assert xprv in wallet.listdescriptors(True)["descriptors"][0]["desc"]
+
+        wallet.encryptwallet("pass")
+        assert_equal(len(wallet.gethdkeys()), 1)
+        assert_raises_rpc_error(-13, "wallet passphrase", wallet.gethdkeys, private=True)
+        with WalletUnlock(wallet, "pass"):
+            assert_equal(len(wallet.gethdkeys(private=True)), 1)
+
+        self.log.info("Public-only BIP32 imports report no private material")
+        node.createwallet("secp-watch", disable_private_keys=True, blank=True, descriptors=True)
+        watch = node.get_wallet_rpc("secp-watch")
+        public_desc = keys[0]["descriptors"][0]["desc"]
+        imported = watch.importdescriptors([{"desc": public_desc, "timestamp": "now", "active": False, "range": [0, 2]}])
+        assert_equal(imported[0]["success"], True)
+        watch_keys = watch.gethdkeys()
+        assert_equal(len(watch_keys), 1)
+        assert watch_keys[0]["xpub"] in public_desc
+        assert_equal(watch_keys[0]["has_private"], False)
 
     def test_basic_gethdkeys(self):
         self.log.info("Test gethdkeys basics")

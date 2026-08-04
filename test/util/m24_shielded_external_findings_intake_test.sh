@@ -16,11 +16,13 @@ printf 'source packet fixture\n' > "${SOURCE_PACKET_DIR}/README.txt"
 printf 'hosted run fixture\n' > "${HOSTED_RUN_DIR}/README.txt"
 printf 'hosted validation fixture\n' > "${HOSTED_VALIDATION_DIR}/README.txt"
 
-python3 - "${SOURCE_PACKET_DIR}/artifacts/hosted_run/manifest.json" "${HOSTED_RUN_DIR}/manifest.json" "${SOURCE_PACKET_DIR}/artifacts/hosted_validation/manifest.json" "${HOSTED_VALIDATION_DIR}/manifest.json" <<'PY'
+python3 - "${ROOT_DIR}" "${SOURCE_PACKET_DIR}/artifacts/hosted_run/manifest.json" "${HOSTED_RUN_DIR}/manifest.json" "${SOURCE_PACKET_DIR}/artifacts/hosted_validation/manifest.json" "${HOSTED_VALIDATION_DIR}/manifest.json" <<'PY'
 import json
 import pathlib
 import sys
 
+creator_home = pathlib.Path.home()
+creator_repo = pathlib.Path(sys.argv[1]).resolve()
 payload = {
     "overall_status": "pass",
     "configuration": {
@@ -31,11 +33,11 @@ payload = {
             "command": [
                 "scp",
                 "-i",
-                "/Users/admin/.ssh/id_ed25519",
+                str(creator_home / ".ssh" / "id_ed25519"),
                 "/private/tmp/btx-m22-old/source.tar.gz",
                 "root@198.51.100.8:/root/upload.tar.gz",
             ],
-            "cwd": "/Users/admin/Documents/btxchain/btx-node",
+            "cwd": str(creator_repo),
             "log": "/private/tmp/btx-m22-old/logs/source_upload.log",
         }
     ],
@@ -46,7 +48,7 @@ payload = {
         "remote_extract_dir": "/private/tmp/btx-m22-old/artifacts/remote_artifacts",
     },
 }
-for target in sys.argv[1:]:
+for target in sys.argv[2:]:
     pathlib.Path(target).write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 PY
 
@@ -92,6 +94,7 @@ source_packet_hosted = json.loads(pathlib.Path(sys.argv[3]).read_text(encoding="
 direct_hosted = json.loads(pathlib.Path(sys.argv[4]).read_text(encoding="utf-8"))
 source_packet_validation = json.loads(pathlib.Path(sys.argv[5]).read_text(encoding="utf-8"))
 direct_validation = json.loads(pathlib.Path(sys.argv[6]).read_text(encoding="utf-8"))
+creator_home = str(pathlib.Path.home())
 
 packet_paths = {entry["packet_path"] for entry in manifest["included_sources"]}
 required_paths = {
@@ -111,7 +114,7 @@ if not any("pending external input" in blocker for blocker in summary["blockers"
     raise SystemExit("expected placeholder blockers in packet-local m25 output")
 
 rendered_manifest = json.dumps(manifest)
-if "/Users/admin" in rendered_manifest or "/private/tmp/" in rendered_manifest:
+if creator_home in rendered_manifest or "/private/tmp/" in rendered_manifest:
     raise SystemExit("intake manifest still leaks creator-machine local paths")
 
 packet_entry = next(
@@ -140,7 +143,7 @@ for hosted_manifest in [source_packet_hosted, direct_hosted]:
     if hosted_manifest["artifacts"]["remote_extract_dir"] != "artifacts/remote_artifacts":
         raise SystemExit("hosted manifest remote_extract_dir was not sanitized")
     rendered = json.dumps(hosted_manifest)
-    if "/Users/admin" in rendered or "/private/tmp/btx-m22-old" in rendered:
+    if creator_home in rendered or "/private/tmp/btx-m22-old" in rendered:
         raise SystemExit("hosted manifest still leaks creator-machine local paths")
 
 for hosted_manifest in [source_packet_validation, direct_validation]:
@@ -152,7 +155,7 @@ for hosted_manifest in [source_packet_validation, direct_validation]:
     if hosted_manifest["artifacts"]["remote_extract_dir"] != "artifacts/remote_artifacts":
         raise SystemExit("hosted validation manifest remote_extract_dir was not sanitized")
     rendered = json.dumps(hosted_manifest)
-    if "/Users/admin" in rendered or "/private/tmp/btx-m22-old" in rendered:
+    if creator_home in rendered or "/private/tmp/btx-m22-old" in rendered:
         raise SystemExit("hosted validation manifest still leaks creator-machine local paths")
 PY
 

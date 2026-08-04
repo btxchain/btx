@@ -5,7 +5,7 @@
 """Full HTLC atomic-swap lifecycle on the BTX leg (wBTX Model B).
 
 Exercises the post-quantum P2MR HTLC descriptor
-    mr(<internal>, {htlc(<H160>, <claimerPubkey>), refund(<locktime>, <senderPubkey>)})
+    mr(htlc_tx(<H160>, <claimerPubkey>), refund(<locktime>, <senderPubkey>))
 where H160 = RIPEMD160(SHA256(preimage)) (byte-identical to BTX OP_HASH160 and to the
 EVM WBTXAtomicSwapHTLC hashlock), using ONLY node RPCs:
 
@@ -21,9 +21,11 @@ Scenarios:
      destination receives funds.
 """
 
+import copy
 import hashlib
 from decimal import Decimal
 
+from test_framework.messages import tx_from_hex
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import assert_equal, assert_greater_than, assert_raises_rpc_error
 from test_framework.bridge_utils import create_bridge_wallet, find_output, mine_block
@@ -54,12 +56,10 @@ class WalletHtlcAtomicSwapTest(BitcoinTestFramework):
         addr = wallet.getnewaddress(address_type="p2mr")
         return wallet.exportpqkey(addr)["pubkey"]
 
-    def build_htlc_descriptor(self, node, internal_pk, h160_hex, claimer_pk,
-                              locktime, sender_pk):
+    def build_htlc_descriptor(self, node, h160_hex, claimer_pk, locktime, sender_pk):
         """Assemble the mr() HTLC descriptor and return (desc_with_checksum, address)."""
-        desc = (f"mr({internal_pk},"
-                f"{{htlc({h160_hex},{claimer_pk}),"
-                f"refund({locktime},{sender_pk})}})")
+        desc = (f"mr(htlc_tx({h160_hex},{claimer_pk}),"
+                f"refund({locktime},{sender_pk}))")
         info = node.getdescriptorinfo(desc)
         desc_ck = f"{desc}#{info['checksum']}"
         # Round-trip: the canonical descriptor the node echoes back must checksum-match.
@@ -87,7 +87,6 @@ class WalletHtlcAtomicSwapTest(BitcoinTestFramework):
         node.createwallet(wallet_name="htlc_claimer", descriptors=True)
         claimer = node.get_wallet_rpc("htlc_claimer")
 
-        internal_pk = self.pq_pubkey(sender)     # key-path internal key
         claimer_pk = self.pq_pubkey(claimer)     # claims with preimage + their sig
         sender_pk = self.pq_pubkey(sender)       # refunds after locktime
 
@@ -101,7 +100,7 @@ class WalletHtlcAtomicSwapTest(BitcoinTestFramework):
 
         claim_locktime = node.getblockcount() + 100  # far in the future; claim ignores it
         claim_desc, claim_addr = self.build_htlc_descriptor(
-            node, internal_pk, h160_hex, claimer_pk, claim_locktime, sender_pk)
+            node, h160_hex, claimer_pk, claim_locktime, sender_pk)
 
         # Both wallets watch the lock so each side can see / spend the deposit.
         for w in (sender, claimer):
@@ -113,6 +112,39 @@ class WalletHtlcAtomicSwapTest(BitcoinTestFramework):
         c_txid, c_vout, c_value = self.fund_lock(sender, node, mine_addr, claim_addr, claim_amount)
 
         dest_addr = claimer.getnewaddress(address_type="p2mr")
+
+        # Atomic-swap RPCs fail closed on any additional spend path.
+        extra_desc = (f"mr({sender_pk},{{htlc_tx({h160_hex},{claimer_pk}),"
+                      f"refund({claim_locktime},{sender_pk})}})")
+        extra_info = node.getdescriptorinfo(extra_desc)
+        extra_desc_ck = f"{extra_desc}#{extra_info['checksum']}"
+        assert_raises_rpc_error(
+            -8,
+            "exactly one htlc_tx() leaf and one refund() leaf",
+            claimer.buildhtlcclaim,
+            extra_desc_ck,
+            {"txid": c_txid, "vout": c_vout},
+            preimage.hex(),
+            dest_addr,
+            fee,
+        )
+
+        # Legacy CSFS-only descriptors remain parseable for recovery tooling but
+        # the safe claim RPC refuses to create their replayable witness.
+        legacy_desc = (f"mr(htlc({h160_hex},{claimer_pk}),"
+                       f"refund({claim_locktime},{sender_pk}))")
+        legacy_info = node.getdescriptorinfo(legacy_desc)
+        legacy_desc_ck = f"{legacy_desc}#{legacy_info['checksum']}"
+        assert_raises_rpc_error(
+            -8,
+            "Legacy htlc() claim leaves are replayable",
+            claimer.buildhtlcclaim,
+            legacy_desc_ck,
+            {"txid": c_txid, "vout": c_vout},
+            preimage.hex(),
+            dest_addr,
+            fee,
+        )
 
         # Negative: a wrong preimage must not produce a valid/complete claim.
         self.log.info("HTLC CLAIM negative: wrong preimage must fail")
@@ -134,6 +166,19 @@ class WalletHtlcAtomicSwapTest(BitcoinTestFramework):
             claim_desc, {"txid": c_txid, "vout": c_vout},
             preimage.hex(), dest_addr, fee)
         assert_equal(built["complete"], True)
+
+        # A witness revealed for one payout must not authorize a conflicting
+        # transaction that redirects the same HTLC input.
+        redirected_dest = claimer.getnewaddress(address_type="p2mr")
+        redirected = claimer.buildhtlcclaim(
+            claim_desc, {"txid": c_txid, "vout": c_vout},
+            preimage.hex(), redirected_dest, fee)
+        original_tx = tx_from_hex(built["hex"])
+        redirected_tx = tx_from_hex(redirected["hex"])
+        redirected_tx.wit.vtxinwit[0] = copy.deepcopy(original_tx.wit.vtxinwit[0])
+        assert_raises_rpc_error(
+            -26, None, node.sendrawtransaction, redirected_tx.serialize().hex())
+
         claim_txid = node.sendrawtransaction(built["hex"])
         mine_block(self, node, mine_addr)
 
@@ -144,7 +189,8 @@ class WalletHtlcAtomicSwapTest(BitcoinTestFramework):
 
         # The preimage is now revealed on-chain in the claim witness (so the EVM leg
         # can be claimed). Scan the witness stack for the matching item.
-        claim_tx = node.getrawtransaction(claim_txid, True)
+        # No -txindex on this node: scope the lookup to the block that confirmed it.
+        claim_tx = node.getrawtransaction(claim_txid, True, node.getbestblockhash())
         revealed = False
         want = hash160(preimage)
         for vin in claim_tx["vin"]:
@@ -163,7 +209,7 @@ class WalletHtlcAtomicSwapTest(BitcoinTestFramework):
 
         refund_locktime = node.getblockcount() + 6
         refund_desc, refund_addr = self.build_htlc_descriptor(
-            node, internal_pk, refund_h160_hex, claimer_pk, refund_locktime, sender_pk)
+            node, refund_h160_hex, claimer_pk, refund_locktime, sender_pk)
         sender.importdescriptors([
             {"desc": refund_desc, "timestamp": "now", "internal": False}
         ])

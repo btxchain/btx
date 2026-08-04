@@ -54,7 +54,10 @@ class WalletShieldedPsbt3of3Test(BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 1
         self.setup_clean_chain = True
-        self.extra_args = [["-noautoshieldcoinbase"]]
+        # This compatibility test exercises the legacy transparent-input PSBT
+        # construction path. Keep the post-fork mature-coinbase-only direct
+        # shielding policy outside the test's height window.
+        self.extra_args = [["-noautoshieldcoinbase", "-regtestshieldedmatrictdisableheight=500"]]
         self.rpc_timeout = 300
 
     def skip_test_if_missing_module(self):
@@ -197,7 +200,10 @@ class WalletShieldedPsbt3of3Test(BitcoinTestFramework):
             stress_utxo_count,
         )
         fund_same_address_many(node, miner, mine_addr, stress_address, per_utxo, stress_utxo_count)
-        self.generatetoaddress(node, 1, mine_addr, sync_fun=self.no_op)
+        # A single block cannot include all 26 PQ-signed funding transactions
+        # under the block sigop-cost limit. Mine the spillover as well so the
+        # intended 26-input fixture is fully confirmed before planning.
+        self.generatetoaddress(node, 2, mine_addr, sync_fun=self.no_op)
 
         stress_utxos = [u for u in multisig_stress.listunspent() if u["address"] == stress_address]
         assert len(stress_utxos) >= stress_utxo_count, f"Expected at least {stress_utxo_count} stress UTXOs"
@@ -309,7 +315,7 @@ class WalletShieldedPsbt3of3Test(BitcoinTestFramework):
         large_utxo_count = 50
         large_utxo_value = Decimal("0.80000000")
         large_total_value = large_utxo_count * large_utxo_value
-        low_fee = Decimal("0.00100000")
+        low_fee = Decimal("0.00005000")
         accepted_fee = Decimal("0.00110000")
         accepted_amount = large_total_value - accepted_fee
 
@@ -325,6 +331,7 @@ class WalletShieldedPsbt3of3Test(BitcoinTestFramework):
             {"max_inputs_per_chunk": large_utxo_count},
         )
         assert_equal(underpriced["transparent_inputs"], large_utxo_count)
+        assert Decimal(str(underpriced["required_mempool_fee"])) > low_fee
         underpriced_signed1 = signer1.walletprocesspsbt(underpriced["psbt"])
         assert_equal(underpriced_signed1["complete"], False)
         underpriced_signed2 = signer2.walletprocesspsbt(underpriced_signed1["psbt"])

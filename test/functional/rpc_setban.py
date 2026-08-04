@@ -41,7 +41,8 @@ class SetBanTests(BitcoinTestFramework):
             self.nodes[0].addnode("127.0.0.1:" + str(p2p_port(1)), "onetry")
 
         # However, node 0 should be able to reconnect if it has noban permission
-        self.restart_node(1, ['-whitelist=127.0.0.1'])
+        # BTX requires the security-sensitive noban permission to be explicit.
+        self.restart_node(1, ['-whitelist=noban@127.0.0.1'])
         self.connect_nodes(0, 1)
         peerinfo = self.nodes[1].getpeerinfo()[0]
         assert "noban" in peerinfo["permissions"]

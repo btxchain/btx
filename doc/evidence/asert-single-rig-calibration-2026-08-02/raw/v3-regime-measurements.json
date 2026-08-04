@@ -1,0 +1,58 @@
+{
+  "tool": "measure_v3_regimes",
+  "schema_version": 1,
+  "public_evidence": true,
+  "source_revision": "c7e7711e655859d5b17ab3c79666399df07f7ef2",
+  "source_tree_fingerprint": "174436c75da89fb8b7ee6a2c1a9045ff32cbeeb623f72defce82336b24b2be62",
+  "purpose": "single-rig v3-vs-RC work ratio for the Epoch-A ASERT rescale",
+  "provider_family": "cuda",
+  "device_architecture": "sm_120",
+  "backend_env": "BTX_MATMUL_V4_BACKEND=cuda",
+  "consensus_context": {
+    "matmul_dimension": 512,
+    "transcript_block_size": 16,
+    "noise_rank": 8,
+    "prehash_epsilon_bits": 18,
+    "assumed_difficulty": 3.531677073810059,
+    "assumed_nbits": "1c487c56",
+    "two_pow_eps_times_p": 1.728193e-05
+  },
+  "sigma_mode": {
+    "note": "eps=18, target=1 -> pre-hash gate never passes; measures SHA grind only",
+    "digest_requests": 0
+  },
+  "matmul_mode": {
+    "note": "eps=255, target=1 -> gate always passes; every attempt runs a v3 digest",
+    "attempts": 20000,
+    "wall_s": 1.288235,
+    "digest_requests": 10061,
+    "r_matmul_per_s": 7810.0
+  },
+  "mixed_mode": {
+    "note": "eps=18 at live mainnet nBits -> the real two-stage v3 loop",
+    "samples": [
+      {"tries": 100000000, "wall_s": 0.519563, "digest_requests": 1703},
+      {"tries": 100000000, "wall_s": 0.443907, "digest_requests": 1709},
+      {"tries": 100000000, "wall_s": 0.456367, "digest_requests": 1803},
+      {"tries": 100000000, "wall_s": 0.459067, "digest_requests": 1795},
+      {"tries": 100000000, "wall_s": 0.442786, "digest_requests": 1766}
+    ],
+    "r_eff_per_s_mean": 3795.4,
+    "r_eff_per_s_sd": 262.9,
+    "r_eff_cv_percent": 6.9
+  },
+  "rc_profile1": {
+    "source": "doc/evidence/multi-gpu-profile1-goldens-cuda-2026-08-02-freeze",
+    "episodes": 8,
+    "mean_wall_s": 32.1816,
+    "r_rc_per_s": 0.031074
+  },
+  "derived": {
+    "gamma": 2.09,
+    "regime": "sigma_bound",
+    "k_single_rig": 122140,
+    "k_range_over_samples": [105482, 128351]
+  },
+  "installed": false,
+  "consensus_note": "nMatMulRCHeight remains INT32_MAX; no rescale value is installed by this artifact."
+}

@@ -19,12 +19,13 @@ BOOST_FIXTURE_TEST_CASE(txindex_initial_sync, TestChain100Setup)
     TxIndex txindex(interfaces::MakeChain(m_node), 1 << 20, true);
     BOOST_REQUIRE(txindex.Init());
 
-    CTransactionRef tx_disk;
     uint256 block_hash;
 
     // Transaction should not be found in the index before it is started.
     for (const auto& txn : m_coinbase_txns) {
-        BOOST_CHECK(!txindex.FindTx(txn->GetHash(), block_hash, tx_disk));
+        const auto result{txindex.FindTx(txn->GetHash(), block_hash)};
+        BOOST_REQUIRE(result);
+        BOOST_CHECK(!*result);
     }
 
     // BlockUntilSyncedToCurrentChain should return false before txindex is started.
@@ -38,16 +39,18 @@ BOOST_FIXTURE_TEST_CASE(txindex_initial_sync, TestChain100Setup)
     // Check that txindex excludes genesis block transactions.
     const CBlock& genesis_block = Params().GenesisBlock();
     for (const auto& txn : genesis_block.vtx) {
-        BOOST_CHECK(!txindex.FindTx(txn->GetHash(), block_hash, tx_disk));
+        const auto result{txindex.FindTx(txn->GetHash(), block_hash)};
+        BOOST_REQUIRE(result);
+        BOOST_CHECK(!*result);
     }
 
     // Check that txindex has all txs that were in the chain before it started.
     for (const auto& txn : m_coinbase_txns) {
-        if (!txindex.FindTx(txn->GetHash(), block_hash, tx_disk)) {
-            BOOST_ERROR("FindTx failed");
-        } else if (tx_disk->GetHash() != txn->GetHash()) {
-            BOOST_ERROR("Read incorrect tx");
-        }
+        const auto result{txindex.FindTx(txn->GetHash(), block_hash)};
+        BOOST_REQUIRE(result);
+        const CTransactionRef& tx_disk{*result};
+        BOOST_REQUIRE(tx_disk);
+        BOOST_REQUIRE_EQUAL(tx_disk->GetHash(), txn->GetHash());
     }
 
     // Check that new transactions in new blocks make it into the index.
@@ -58,11 +61,11 @@ BOOST_FIXTURE_TEST_CASE(txindex_initial_sync, TestChain100Setup)
         const CTransaction& txn = *block.vtx[0];
 
         BOOST_CHECK(txindex.BlockUntilSyncedToCurrentChain());
-        if (!txindex.FindTx(txn.GetHash(), block_hash, tx_disk)) {
-            BOOST_ERROR("FindTx failed");
-        } else if (tx_disk->GetHash() != txn.GetHash()) {
-            BOOST_ERROR("Read incorrect tx");
-        }
+        const auto result{txindex.FindTx(txn.GetHash(), block_hash)};
+        BOOST_REQUIRE(result);
+        const CTransactionRef& tx_disk{*result};
+        BOOST_REQUIRE(tx_disk);
+        BOOST_REQUIRE_EQUAL(tx_disk->GetHash(), txn.GetHash());
     }
 
     // It is not safe to stop and destroy the index until it finishes handling

@@ -1,0 +1,311 @@
+{
+  "schema_version": 1,
+  "exclusions": [
+    {
+      "evidence_path": "doc/evidence/cuda-blackwell-16gib-lifecycle-asert-2026-08-01/lifecycle-remeasure-post-settings-summary.json",
+      "revision": "unknown",
+      "reason": "Historical non-authorizing lifecycle summary emitted before revision capture; its directory README records that the source revision cannot be recovered",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/m4-max-exact-replay-2026-07-29/rc-production-r4-metal.json",
+      "revision": "e440314d77e9535d194c8c9c09386836258123ae",
+      "reason": "Historical M4 Max ExactReplay baseline predating the provenance rules; the recorded revision does not resolve after the history scrub and cannot be recovered. Its directory README records this. Retained as a diagnostic measurement only.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/m4-max-exact-replay-2026-07-29/rc-production-r4-full-metal.json",
+      "revision": "903b74985d",
+      "reason": "Same campaign as rc-production-r4-metal.json; abbreviated revision does not resolve after the history scrub. Diagnostic only.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/m4-max-profile1-loaded-2026-07-30/profile1-metal-loaded-100-pre-dimension-bind.json",
+      "revision": "ca6e351f8d",
+      "reason": "Superseded pre-dimension-bind artifact retained for comparison against the corrected corpus in the same directory; its abbreviated revision does not resolve. Diagnostic only.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/asert-single-rig-calibration-2026-08-02/raw/v3-regime-measurements.json",
+      "revision": "c7e7711e655859d5b17ab3c79666399df07f7ef2",
+      "reason": "Historical pre-final-freeze calibration retained for diagnostic comparison; its recorded fingerprint predates the final provenance definition and is not production-authorizing.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/asert-two-rig-calibration-2026-08-03/raw/two-rig-v3-vs-rc.json",
+      "revision": "76704a391acac79914e95a3d723e0f1c8c51eb98",
+      "reason": "Historical schema-1 calibration retained for diagnostic comparison; it cannot satisfy the schema-4 exact-final activation gate.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/cuda-profile1-soak-2026-08-02/soak-summary.json",
+      "revision": "c7e7711e655859d5b17ab3c79666399df07f7ef2",
+      "reason": "Historical pre-final-freeze soak retained for diagnostic comparison; its recorded fingerprint predates the final provenance definition and is not production-authorizing.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/multi-gpu-profile1-goldens-cuda-2026-08-02-freeze/raw/profile1-cuda-8.json",
+      "revision": "c7e7711e655859d5b17ab3c79666399df07f7ef2",
+      "reason": "Historical CUDA-only corpus retained to show digest continuity; it predates the exact combined release freeze and is not production-authorizing.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/multi-gpu-profile1-goldens-2026-08-01/multi-gpu-digest-compare.json",
+      "revision": "42b66394846caea8573e910e41fd9676838562db",
+      "reason": "Historical Metal-only comparison from an unreachable pre-publication source state; retained for diagnostic digest continuity only and not production-authorizing.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/multi-gpu-profile1-goldens-2026-08-01/raw/profile1-metal-8.json",
+      "revision": "42b66394846caea8573e910e41fd9676838562db",
+      "reason": "Historical Metal corpus from an unreachable pre-publication source state; retained for diagnostic digest continuity only and not production-authorizing.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/multi-gpu-profile1-goldens-cuda-metal-2026-08-02-final/multi-gpu-digest-compare.json",
+      "revision": "a0d441e1f1ab5376cd98b0d7effe1506cf2cfed1",
+      "reason": "Superseded CUDA/Metal comparison from an earlier source freeze; retained for diagnostic digest continuity only.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/multi-gpu-profile1-goldens-cuda-metal-2026-08-02-final/raw/profile1-cuda-8.json",
+      "revision": "a0d441e1f1ab5376cd98b0d7effe1506cf2cfed1",
+      "reason": "Superseded CUDA corpus from an earlier source freeze; retained for diagnostic digest continuity only.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/multi-gpu-profile1-goldens-cuda-metal-2026-08-02-final/raw/profile1-metal-8.json",
+      "revision": "a0d441e1f1ab5376cd98b0d7effe1506cf2cfed1",
+      "reason": "Superseded Metal corpus from an earlier source freeze; retained for diagnostic digest continuity only.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/multi-gpu-profile1-goldens-cuda-metal-2026-08-02-sealed/multi-gpu-digest-compare.json",
+      "revision": "d1aad85bf831979a1c094f98ef09be3b41d7b162",
+      "reason": "Superseded seal rehearsal from an earlier source freeze; retained for diagnostic digest continuity only.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/multi-gpu-profile1-goldens-cuda-metal-2026-08-02-sealed/raw/profile1-cuda-8.json",
+      "revision": "d1aad85bf831979a1c094f98ef09be3b41d7b162",
+      "reason": "Superseded CUDA seal-rehearsal corpus from an earlier source freeze; retained for diagnostic digest continuity only.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/multi-gpu-profile1-goldens-cuda-metal-2026-08-02-sealed/raw/profile1-metal-8.json",
+      "revision": "d1aad85bf831979a1c094f98ef09be3b41d7b162",
+      "reason": "Superseded Metal seal-rehearsal corpus from an earlier source freeze; retained for diagnostic digest continuity only.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/multi-gpu-profile1-goldens-cuda-metal-2026-08-03-final/multi-gpu-digest-compare.json",
+      "revision": "7dc60146a14c136ec1cb59f383a5b2eb5361c5ac",
+      "reason": "Superseded CUDA/Metal comparison from an earlier source freeze; retained for diagnostic digest continuity only.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/multi-gpu-profile1-goldens-cuda-metal-2026-08-03-final/raw/profile1-cuda-8.json",
+      "revision": "7dc60146a14c136ec1cb59f383a5b2eb5361c5ac",
+      "reason": "Superseded CUDA corpus from an earlier source freeze; retained for diagnostic digest continuity only.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/multi-gpu-profile1-goldens-cuda-metal-2026-08-03-final/raw/profile1-metal-8.json",
+      "revision": "7dc60146a14c136ec1cb59f383a5b2eb5361c5ac",
+      "reason": "Superseded Metal corpus from an earlier source freeze; retained for diagnostic digest continuity only.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/multi-gpu-profile1-goldens-cuda-metal-2026-08-03-review-closure/multi-gpu-digest-compare.json",
+      "revision": "75a6571b209527966a1ff2910fda573a1b009ba4",
+      "reason": "Historical review-closure comparison predating the combined release freeze; retained for diagnostic digest continuity only.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/multi-gpu-profile1-goldens-cuda-metal-2026-08-03-review-closure/raw/profile1-cuda-8.json",
+      "revision": "75a6571b209527966a1ff2910fda573a1b009ba4",
+      "reason": "Historical review-closure CUDA corpus predating the combined release freeze; retained for diagnostic digest continuity only.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/multi-gpu-profile1-goldens-cuda-metal-2026-08-03-review-closure/raw/profile1-metal-8.json",
+      "revision": "75a6571b209527966a1ff2910fda573a1b009ba4",
+      "reason": "Historical review-closure Metal corpus predating the combined release freeze; retained for diagnostic digest continuity only.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/multi-gpu-profile1-goldens-cuda-metal-2026-08-03-sealed/multi-gpu-digest-compare.json",
+      "revision": "78a88af5f5775a37388aa2281f602a77a5afc68b",
+      "reason": "Superseded seal rehearsal from an earlier source freeze; retained for diagnostic digest continuity only.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/multi-gpu-profile1-goldens-cuda-metal-2026-08-03-sealed/raw/profile1-cuda-8.json",
+      "revision": "78a88af5f5775a37388aa2281f602a77a5afc68b",
+      "reason": "Superseded CUDA seal-rehearsal corpus from an earlier source freeze; retained for diagnostic digest continuity only.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/multi-gpu-profile1-goldens-cuda-metal-2026-08-03-sealed/raw/profile1-metal-8.json",
+      "revision": "78a88af5f5775a37388aa2281f602a77a5afc68b",
+      "reason": "Superseded Metal seal-rehearsal corpus from an earlier source freeze; retained for diagnostic digest continuity only.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/multi-gpu-profile1-goldens-epoch-a-activation/multi-gpu-digest-compare.json",
+      "revision": "6cfd20977ff52d7d0c632a0e41871438a9dfe664",
+      "reason": "Superseded activation rehearsal from an earlier source freeze; the final activation gate requires a new exact combined-release corpus.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/multi-gpu-profile1-goldens-epoch-a-activation/raw/profile1-cuda-8.json",
+      "revision": "6cfd20977ff52d7d0c632a0e41871438a9dfe664",
+      "reason": "Superseded CUDA activation rehearsal from an earlier source freeze; retained for diagnostic digest continuity only.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/multi-gpu-profile1-goldens-epoch-a-activation/raw/profile1-metal-8.json",
+      "revision": "6cfd20977ff52d7d0c632a0e41871438a9dfe664",
+      "reason": "Superseded Metal activation rehearsal from an earlier source freeze; retained for diagnostic digest continuity only.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/multi-gpu-profile1-goldens-metal-2026-08-02-final/multi-gpu-digest-compare.json",
+      "revision": "5ba47d59c65747b8acf7e56bd58918d0269949c2",
+      "reason": "Historical Metal-only comparison predating the exact combined release freeze; retained for diagnostics only.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/multi-gpu-profile1-goldens-metal-2026-08-02-final/raw/profile1-metal-8.json",
+      "revision": "5ba47d59c65747b8acf7e56bd58918d0269949c2",
+      "reason": "Historical Metal-only corpus predating the exact combined release freeze; retained for diagnostics only.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/multi-gpu-profile1-goldens-metal-2026-08-02-regression-closure/multi-gpu-digest-compare.json",
+      "revision": "0d89a930ea3745aeb1cfecffa069dae93d87a560",
+      "reason": "Historical Metal regression-closure comparison predating the exact combined release freeze; retained for diagnostics only.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/multi-gpu-profile1-goldens-metal-2026-08-02-regression-closure/raw/profile1-metal-8.json",
+      "revision": "0d89a930ea3745aeb1cfecffa069dae93d87a560",
+      "reason": "Historical Metal regression-closure corpus predating the exact combined release freeze; retained for diagnostics only.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/cuda-blackwell-16gib-daemon-lifecycle-2026-08-01/summary.json",
+      "revision": "c4ac2e439ac496245f12dcbf8b42c9575247dbe9",
+      "reason": "Historical pre-final-freeze CUDA evidence whose source revision is outside the published branch ancestry; retained for diagnostic comparison only and not production-authorizing.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/cuda-blackwell-16gib-lifecycle-asert-2026-08-01/asert-vs-spacing-clarification.json",
+      "revision": "c4ac2e439ac496245f12dcbf8b42c9575247dbe9",
+      "reason": "Historical pre-final-freeze CUDA evidence whose source revision is outside the published branch ancestry; retained for diagnostic comparison only and not production-authorizing.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/cuda-blackwell-16gib-lifecycle-asert-2026-08-01/asert-work-ratio-proposal.json",
+      "revision": "c4ac2e439ac496245f12dcbf8b42c9575247dbe9",
+      "reason": "Historical pre-final-freeze CUDA evidence whose source revision is outside the published branch ancestry; retained for diagnostic comparison only and not production-authorizing.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/cuda-blackwell-16gib-lifecycle-asert-2026-08-01/lifecycle-campaign.json",
+      "revision": "c4ac2e439ac496245f12dcbf8b42c9575247dbe9",
+      "reason": "Historical pre-final-freeze CUDA evidence whose source revision is outside the published branch ancestry; retained for diagnostic comparison only and not production-authorizing.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/cuda-blackwell-16gib-lifecycle-asert-2026-08-01/lifecycle-contention-supplement.json",
+      "revision": "c4ac2e439ac496245f12dcbf8b42c9575247dbe9",
+      "reason": "Historical pre-final-freeze CUDA evidence whose source revision is outside the published branch ancestry; retained for diagnostic comparison only and not production-authorizing.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/cuda-blackwell-16gib-lifecycle-asert-2026-08-01/lifecycle-core-n2-sanitized.json",
+      "revision": "c4ac2e439ac496245f12dcbf8b42c9575247dbe9",
+      "reason": "Historical pre-final-freeze CUDA evidence whose source revision is outside the published branch ancestry; retained for diagnostic comparison only and not production-authorizing.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/cuda-blackwell-16gib-lifecycle-asert-2026-08-01/rc-asert-rescale-proposal.json",
+      "revision": "c4ac2e439ac496245f12dcbf8b42c9575247dbe9",
+      "reason": "Historical pre-final-freeze CUDA evidence whose source revision is outside the published branch ancestry; retained for diagnostic comparison only and not production-authorizing.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/cuda-blackwell-16gib-profile1-goldens-2026-08-01/profile1-cuda-digests-8.json",
+      "revision": "c4ac2e439ac496245f12dcbf8b42c9575247dbe9",
+      "reason": "Historical pre-final-freeze CUDA evidence whose source revision is outside the published branch ancestry; retained for diagnostic comparison only and not production-authorizing.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/cuda-blackwell-16gib-profile1-loaded-2026-08-01/profile1-cuda-loaded-100.json",
+      "revision": "c4ac2e439ac496245f12dcbf8b42c9575247dbe9",
+      "reason": "Historical pre-final-freeze CUDA evidence whose source revision is outside the published branch ancestry; retained for diagnostic comparison only and not production-authorizing.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/multi-gpu-profile1-goldens-2026-08-01/multi-gpu-digest-compare.json",
+      "revision": "c4ac2e439ac496245f12dcbf8b42c9575247dbe9",
+      "reason": "Historical pre-final-freeze CUDA evidence whose source revision is outside the published branch ancestry; retained for diagnostic comparison only and not production-authorizing.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/multi-gpu-profile1-goldens-2026-08-01/raw/profile1-cuda-8.json",
+      "revision": "c4ac2e439ac496245f12dcbf8b42c9575247dbe9",
+      "reason": "Historical pre-final-freeze CUDA evidence whose source revision is outside the published branch ancestry; retained for diagnostic comparison only and not production-authorizing.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/lane-c-2026-07-21/c0/failclosed-no-gpu.json",
+      "revision": "bf36b7d6d95fcb049d7aa5c8aebee614c58a607a",
+      "reason": "Historical Lane-C research evidence whose source revision is outside the published branch ancestry; retained for diagnostic comparison only and not production-authorizing.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/lane-c-2026-07-21/c3/c3-coupled-2GiB.json",
+      "revision": "bf36b7d6d95fcb049d7aa5c8aebee614c58a607a",
+      "reason": "Historical Lane-C research evidence whose source revision is outside the published branch ancestry; retained for diagnostic comparison only and not production-authorizing.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/lane-c-2026-07-21/c3/c3-coupled-512MiB.json",
+      "revision": "bf36b7d6d95fcb049d7aa5c8aebee614c58a607a",
+      "reason": "Historical Lane-C research evidence whose source revision is outside the published branch ancestry; retained for diagnostic comparison only and not production-authorizing.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/lane-c-2026-07-21/c3/c3-coupled-8GiB.json",
+      "revision": "bf36b7d6d95fcb049d7aa5c8aebee614c58a607a",
+      "reason": "Historical Lane-C research evidence whose source revision is outside the published branch ancestry; retained for diagnostic comparison only and not production-authorizing.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/lane-c-2026-07-21/c3/c3-coupled-uncapped16G.json",
+      "revision": "bf36b7d6d95fcb049d7aa5c8aebee614c58a607a",
+      "reason": "Historical Lane-C research evidence whose source revision is outside the published branch ancestry; retained for diagnostic comparison only and not production-authorizing.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/m4-max-profile1-loaded-2026-07-30/profile1-metal-loaded-100.json",
+      "revision": "718775a8302c449604d4d6c4f0d447c9e716e5a2",
+      "reason": "Historical pre-final-freeze Metal load evidence whose source revision is outside the published branch ancestry; retained for diagnostic comparison only and not production-authorizing.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/multi-gpu-profile1-goldens-metal-2026-08-01/multi-gpu-digest-compare.json",
+      "revision": "9dd88b8e54d92a848c4006aa9affca2ab3e0c91c",
+      "reason": "Historical Metal-only corpus whose source revision is outside the published branch ancestry; retained for diagnostic digest continuity only and not production-authorizing.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/multi-gpu-profile1-goldens-metal-2026-08-01/raw/profile1-metal-8.json",
+      "revision": "9dd88b8e54d92a848c4006aa9affca2ab3e0c91c",
+      "reason": "Historical Metal-only corpus whose source revision is outside the published branch ancestry; retained for diagnostic digest continuity only and not production-authorizing.",
+      "production_admissible": false
+    }
+  ]
+}

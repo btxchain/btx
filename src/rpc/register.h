@@ -15,6 +15,7 @@ void RegisterBlockchainRPCCommands(CRPCTable &tableRPC);
 void RegisterFeeRPCCommands(CRPCTable&);
 void RegisterMempoolRPCCommands(CRPCTable&);
 void RegisterMiningRPCCommands(CRPCTable &tableRPC);
+void RegisterMatMulTrustedRPCCommands(CRPCTable&);
 void RegisterNodeRPCCommands(CRPCTable&);
 void RegisterNetRPCCommands(CRPCTable&);
 void RegisterOutputScriptRPCCommands(CRPCTable&);
@@ -30,6 +31,7 @@ static inline void RegisterAllCoreRPCCommands(CRPCTable &t)
     RegisterFeeRPCCommands(t);
     RegisterMempoolRPCCommands(t);
     RegisterMiningRPCCommands(t);
+    RegisterMatMulTrustedRPCCommands(t);
     RegisterNodeRPCCommands(t);
     RegisterNetRPCCommands(t);
     RegisterOutputScriptRPCCommands(t);

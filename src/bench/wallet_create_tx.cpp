@@ -20,6 +20,7 @@
 #include <sync.h>
 #include <test/util/setup_common.h>
 #include <uint256.h>
+#include <util/check.h>
 #include <util/result.h>
 #include <util/time.h>
 #include <validation.h>
@@ -128,7 +129,7 @@ static void WalletCreateTx(benchmark::Bench& bench, const OutputType output_type
     }
 
     // Check available balance
-    auto bal = WITH_LOCK(wallet.cs_wallet, return wallet::AvailableCoins(wallet).GetTotalAmount()); // Cache
+    auto bal = WITH_LOCK(wallet.cs_wallet, return Assert(wallet::AvailableCoins(wallet))->GetTotalAmount()); // Cache
     assert(bal == 50 * COIN * (chain_size - COINBASE_MATURITY));
 
     wallet::CCoinControl coin_control;
@@ -139,8 +140,11 @@ static void WalletCreateTx(benchmark::Bench& bench, const OutputType output_type
         // Select inputs, each has 49 BTC
         wallet::CoinFilterParams filter_coins;
         filter_coins.max_count = preset_inputs->num_of_internal_inputs;
-        const auto& res = WITH_LOCK(wallet.cs_wallet,
-                                    return wallet::AvailableCoins(wallet, /*coinControl=*/nullptr, /*feerate=*/std::nullopt, filter_coins));
+        const auto res = WITH_LOCK(wallet.cs_wallet, {
+            auto available_coins{wallet::AvailableCoins(wallet, /*coinControl=*/nullptr, /*feerate=*/std::nullopt, filter_coins)};
+            Assert(available_coins);
+            return wallet::CoinsResult{*available_coins};
+        });
         for (int i=0; i < preset_inputs->num_of_internal_inputs; i++) {
             const auto& coin{res.coins.at(output_type)[i]};
             target += coin.txout.nValue;
@@ -188,13 +192,12 @@ static void AvailableCoins(benchmark::Bench& bench, const std::vector<OutputType
     }
 
     // Check available balance
-    auto bal = WITH_LOCK(wallet.cs_wallet, return wallet::AvailableCoins(wallet).GetTotalAmount()); // Cache
+    auto bal = WITH_LOCK(wallet.cs_wallet, return Assert(wallet::AvailableCoins(wallet))->GetTotalAmount()); // Cache
     assert(bal == 50 * COIN * (chain_size - COINBASE_MATURITY));
 
     bench.epochIterations(2).run([&] {
         LOCK(wallet.cs_wallet);
-        const auto& res = wallet::AvailableCoins(wallet);
-        assert(res.All().size() == (chain_size - COINBASE_MATURITY) * 2);
+        assert(Assert(wallet::AvailableCoins(wallet))->All().size() == (chain_size - COINBASE_MATURITY) * 2);
     });
 }
 

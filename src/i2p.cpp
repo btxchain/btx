@@ -319,7 +319,7 @@ Session::Reply Session::SendRequestAndGetReply(const Sock& sock,
 
     if (check_result_ok && reply.Get("RESULT") != "OK") {
         throw std::runtime_error(
-            strprintf("Unexpected reply to \"%s\": \"%s\"", request, reply.full));
+            strprintf("Unexpected reply to \"%s\": \"%s\"", reply.request, reply.full));
     }
 
     return reply;
@@ -424,7 +424,7 @@ void Session::CreateIfNotCreatedAlready()
         const Reply& reply = SendRequestAndGetReply(
             *sock,
             strprintf("SESSION CREATE STYLE=STREAM ID=%s DESTINATION=TRANSIENT SIGNATURE_TYPE=7 "
-                      "i2cp.leaseSetEncType=4,0 inbound.quantity=1 outbound.quantity=1",
+                      "i2cp.leaseSetEncType=6,4 inbound.quantity=1 outbound.quantity=1",
                       session_id));
 
         m_private_key = DecodeI2PBase64(reply.Get("DESTINATION"));
@@ -442,7 +442,7 @@ void Session::CreateIfNotCreatedAlready()
 
         SendRequestAndGetReply(*sock,
                                strprintf("SESSION CREATE STYLE=STREAM ID=%s DESTINATION=%s "
-                                         "i2cp.leaseSetEncType=4,0 inbound.quantity=3 outbound.quantity=3",
+                                         "i2cp.leaseSetEncType=6,4 inbound.quantity=3 outbound.quantity=3",
                                          session_id,
                                          private_key_b64));
     }

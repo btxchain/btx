@@ -7,6 +7,8 @@
 #include <policy/feerate.h>
 #include <tinyformat.h>
 
+#include <cstdlib>
+
 #include <cmath>
 
 CFeeRate::CFeeRate(const CAmount& nFeePaid, uint32_t num_bytes)
@@ -38,12 +40,24 @@ CAmount CFeeRate::GetFee(uint32_t num_bytes) const
 
 std::string CFeeRate::ToString(const FeeEstimateMode& fee_estimate_mode) const
 {
+    const auto format_feerate = [](const CAmount fee_rate, const CAmount divisor,
+                                   const int decimals, const std::string& currency_unit,
+                                   const std::string& size_unit) {
+        assert(divisor > 0);
+        const char* sign{fee_rate < 0 ? "-" : ""};
+        const CAmount quotient{std::abs(fee_rate / divisor)};
+        const CAmount remainder{std::abs(fee_rate % divisor)};
+        return strprintf("%s%d.%0*d %s/%s", sign, quotient, decimals, remainder,
+                         currency_unit, size_unit);
+    };
     switch (fee_estimate_mode) {
-    case FeeEstimateMode::SAT_VB: return strprintf("%d.%03d %s/vB", nSatoshisPerK / 1000, nSatoshisPerK % 1000, CURRENCY_ATOM);
-    default:                      return strprintf("%d.%08d %s/kvB", nSatoshisPerK / COIN, nSatoshisPerK % COIN, CURRENCY_UNIT);
+    case FeeEstimateMode::SAT_VB: return format_feerate(nSatoshisPerK, 1000, 3, CURRENCY_ATOM, "vB");
+    default:                      return format_feerate(nSatoshisPerK, COIN, 8, CURRENCY_UNIT, "kvB");
     }
 }
 
 std::string CFeeRate::SatsToString() const {
-    return strprintf("%d.%03d", nSatoshisPerK / 1000, nSatoshisPerK % 1000);
+    const char* sign{nSatoshisPerK < 0 ? "-" : ""};
+    return strprintf("%s%d.%03d", sign, std::abs(nSatoshisPerK / 1000),
+                     std::abs(nSatoshisPerK % 1000));
 }

@@ -3,6 +3,14 @@
 
 This Dockerfile builds and runs a **BTX** full node from source.
 
+Activation is determined only by the reviewed network parameters compiled
+into the node: mainnet schedules MatMul v4.7 Epoch A at the release-selected `H_A`
+(testnet/signet heights and Epochs B–D remain disabled). A CPU-only container is not an
+Epoch-A Profile 1 ExactReplay performance qualification. Operators preparing
+accelerated validation must expose and certify the intended backend on the
+physical host. See
+[`doc/btx-matmul-v4.7-transition-roadmap.md`](../../doc/btx-matmul-v4.7-transition-roadmap.md).
+
 ## Features
 
 * Post-quantum blockchain with MatMul PoW and shielded pool

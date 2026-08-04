@@ -179,9 +179,12 @@ class ReceivedByTest(BitcoinTestFramework):
         label = "label"
         address = self.nodes[0].getnewaddress(label)
 
-        reward = Decimal("25")
         self.generatetoaddress(self.nodes[0], 1, address)
         hash = self.nodes[0].getbestblockhash()
+        # BTX regtest starts at a 20 BTX subsidy and may cross a halving in
+        # this test.  Read the actual coinbase value instead of assuming the
+        # Bitcoin regtest subsidy schedule.
+        reward = self.nodes[0].getblock(hash, 2)["tx"][0]["vout"][0]["value"]
 
         self.log.info("getreceivedbyaddress returns nothing with defaults")
         balance = self.nodes[0].getreceivedbyaddress(address)

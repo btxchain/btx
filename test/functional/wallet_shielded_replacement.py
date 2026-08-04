@@ -23,7 +23,12 @@ class WalletShieldedReplacementTest(BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 1
         self.setup_clean_chain = True
-        self.extra_args = [["-autoshieldcoinbase=0"]]
+        # Replacement semantics are independent of the post-fork RPC family
+        # redaction, which has dedicated coverage elsewhere.
+        self.extra_args = [[
+            "-autoshieldcoinbase=0",
+            "-regtestshieldedmatrictdisableheight=500",
+        ]]
         self.rpc_timeout = 600
 
     def skip_test_if_missing_module(self):

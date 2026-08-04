@@ -10,6 +10,7 @@
 #include <interfaces/types.h>
 #include <util/string.h>
 #include <util/threadinterrupt.h>
+#include <util/translation.h>
 #include <validationinterface.h>
 
 #include <string>
@@ -81,14 +82,10 @@ private:
     CThreadInterrupt m_interrupt;
 
     /// Write the current index state (eg. chain block locator and subclass-specific items) to disk.
-    ///
-    /// Recommendations for error handling:
-    /// If called on a successor of the previous committed best block in the index, the index can
-    /// continue processing without risk of corruption, though the index state will need to catch up
-    /// from further behind on reboot. If the new state is not a successor of the previous state (due
-    /// to a chain reorganization), the index must halt until Commit succeeds or else it could end up
-    /// getting corrupted.
-    bool Commit();
+    /// Will skip the commit if no block has been indexed yet or if the index's best block is
+    /// ahead of the chainstate's last flushed block. This avoids persisting state an unclean shutdown
+    /// could not roll back from. A later call commits when the chainstate has flushed far enough.
+    void Commit();
 
     /// Loop over disconnected blocks and call CustomRewind.
     bool Rewind(const CBlockIndex* current_tip, const CBlockIndex* new_tip);
@@ -126,6 +123,14 @@ protected:
     /// Update the internal best block index as well as the prune lock.
     void SetBestBlockIndex(const CBlockIndex* block);
 
+    /**
+     * Drain the validation-interface queue once if target is no more than
+     * max_ahead blocks ahead of the last block processed by this index.
+     * Returns true when the caller should retry its database lookup.
+     */
+    bool WaitForRacingWrite(const CBlockIndex* target, int max_ahead) const
+        LOCKS_EXCLUDED(::cs_main);
+
 public:
     BaseIndex(std::unique_ptr<interfaces::Chain> chain, std::string name);
     /// Destructor interrupts sync thread if running and blocks until it exits.
@@ -133,6 +138,9 @@ public:
 
     /// Get the name of the index for display in logs.
     const std::string& GetName() const LIFETIMEBOUND { return m_name; }
+
+    /// Return the command-line action that disables this index.
+    virtual bilingual_str GetDisableAction() const = 0;
 
     /// Blocks the current thread until the index is caught up to the current
     /// state of the block chain. This only blocks if the index has gotten in

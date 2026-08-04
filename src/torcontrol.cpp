@@ -77,6 +77,8 @@ static const float RECONNECT_TIMEOUT_MAX = 600.0;
  * this is belt-and-suspenders sanity limit to prevent memory exhaustion.
  */
 static const int MAX_LINE_LENGTH = 100000;
+/** Maximum number of lines per reply to bound aggregate reply memory. */
+static const int MAX_LINE_COUNT = 1000;
 static const uint16_t DEFAULT_TOR_SOCKS_PORT = 9050;
 
 /****** Low-level TorControlConnection ********/
@@ -106,10 +108,23 @@ void TorControlConnection::readcb(struct bufferevent *bev, void *ctx)
     //  If there is not a whole line to read, evbuffer_readln returns nullptr
     while((line = evbuffer_readln(input, &n_read_out, EVBUFFER_EOL_CRLF)) != nullptr)
     {
+        if (n_read_out >= MAX_LINE_LENGTH) {
+            free(line);
+            LogPrintf("tor: Disconnecting because MAX_LINE_LENGTH exceeded\n");
+            self->Disconnect();
+            self->disconnected(*self);
+            return;
+        }
         std::string s(line, n_read_out);
         free(line);
         if (s.size() < 4) // Short line
             continue;
+        if (self->message.lines.size() == MAX_LINE_COUNT) {
+            LogPrintf("tor: Disconnecting because MAX_LINE_COUNT exceeded\n");
+            self->Disconnect();
+            self->disconnected(*self);
+            return;
+        }
         // <status>(-|+| )<data><CRLF>
         self->message.code = ToIntegral<int>(s.substr(0, 3)).value_or(0);
         self->message.lines.push_back(s.substr(4));
@@ -135,9 +150,10 @@ void TorControlConnection::readcb(struct bufferevent *bev, void *ctx)
     //  Check for size of buffer - protect against memory exhaustion with very long lines
     //  Do this after evbuffer_readln to make sure all full lines have been
     //  removed from the buffer. Everything left is an incomplete line.
-    if (evbuffer_get_length(input) > MAX_LINE_LENGTH) {
+    if (evbuffer_get_length(input) + 1 >= MAX_LINE_LENGTH) {
         LogPrintf("tor: Disconnecting because MAX_LINE_LENGTH exceeded\n");
         self->Disconnect();
+        self->disconnected(*self);
     }
 }
 
@@ -441,10 +457,21 @@ void TorController::get_socks_cb(TorControlConnection& _conn, const TorControlRe
     }
 }
 
-void TorController::add_onion_cb(TorControlConnection& _conn, const TorControlReply& reply)
+static std::string MakeAddOnionCmd(const std::string& private_key, const std::string& target, bool enable_pow)
+{
+    // Keep the virtual port at the network default to avoid decloaking nodes
+    // that listen on a non-default local port.
+    return strprintf("ADD_ONION %s%s Port=%i,%s",
+                     private_key,
+                     enable_pow ? " PoWDefensesEnabled=1" : "",
+                     Params().GetDefaultPort(),
+                     target);
+}
+
+void TorController::add_onion_cb(TorControlConnection& _conn, const TorControlReply& reply, bool pow_was_enabled)
 {
     if (reply.code == 250) {
-        LogDebug(BCLog::TOR, "ADD_ONION successful\n");
+        LogDebug(BCLog::TOR, "ADD_ONION successful (PoW defenses %s)\n", pow_was_enabled ? "enabled" : "disabled");
         for (const std::string &s : reply.lines) {
             std::map<std::string,std::string> m = ParseTorReplyMapping(s);
             std::map<std::string,std::string>::iterator i;
@@ -471,6 +498,12 @@ void TorController::add_onion_cb(TorControlConnection& _conn, const TorControlRe
         // ... onion requested - keep connection open
     } else if (reply.code == 510) { // 510 Unrecognized command
         LogPrintf("tor: Add onion failed with unrecognized command (You probably need to upgrade Tor)\n");
+    } else if (pow_was_enabled && reply.code == TOR_REPLY_SYNTAX_ERROR) {
+        LogDebug(BCLog::TOR, "ADD_ONION failed with PoW defenses, retrying without\n");
+        _conn.Command(MakeAddOnionCmd(private_key, m_target.ToStringAddrPort(), /*enable_pow=*/false),
+                      [this](TorControlConnection& conn, const TorControlReply& retry_reply) {
+                          add_onion_cb(conn, retry_reply, /*pow_was_enabled=*/false);
+                      });
     } else {
         LogPrintf("tor: Add onion failed; error code %d\n", reply.code);
     }
@@ -502,10 +535,10 @@ void TorController::auth_cb(TorControlConnection& _conn, const TorControlReply& 
         if (private_key.empty()) { // No private key, generate one
             private_key = "NEW:ED25519-V3"; // Explicitly request key type - see issue #9214
         }
-        // Request onion service, redirect port.
-        // Note that the 'virtual' port is always the default port to avoid decloaking nodes using other ports.
-        _conn.Command(strprintf("ADD_ONION %s Port=%i,%s", private_key, Params().GetDefaultPort(), m_target.ToStringAddrPort()),
-            std::bind(&TorController::add_onion_cb, this, std::placeholders::_1, std::placeholders::_2));
+        _conn.Command(MakeAddOnionCmd(private_key, m_target.ToStringAddrPort(), /*enable_pow=*/true),
+                      [this](TorControlConnection& conn, const TorControlReply& onion_reply) {
+                          add_onion_cb(conn, onion_reply, /*pow_was_enabled=*/true);
+                      });
     } else {
         LogPrintf("tor: Authentication failed\n");
     }

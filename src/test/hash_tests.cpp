@@ -148,4 +148,30 @@ BOOST_AUTO_TEST_CASE(siphash)
     }
 }
 
+BOOST_AUTO_TEST_CASE(siphash13uj_fixed_vectors)
+{
+    constexpr uint64_t k0{0x0706050403020100ULL};
+    constexpr uint64_t k1{0x0F0E0D0C0B0A0908ULL};
+    const SipHasher13UJ hasher{k0, k1};
+
+    BOOST_CHECK_EQUAL(hasher.Hash(uint256{}), 0x6a74cba00ddbfebaULL);
+    BOOST_CHECK_EQUAL(
+        hasher.Hash(uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}),
+        0x7f745a471ec7c2f6ULL);
+    BOOST_CHECK_EQUAL(
+        hasher.Hash(uint256{"1f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020100"}),
+        0xc67d87b08ca4b5c6ULL);
+    BOOST_CHECK_EQUAL(
+        hasher.Hash(uint256{}, uint64_t{0}),
+        0x71c3a354a6b56058ULL);
+    BOOST_CHECK_EQUAL(
+        hasher.Hash(uint256{"41403f3e3d3c3b3a393837363534333231302f2e2d2c2b2a2928272625242322"},
+                    0x1817161514131211ULL),
+        0x6f62e14ce40a8928ULL);
+
+    // The extra integer is part of the domain and must affect the result.
+    BOOST_CHECK_NE(hasher.Hash(uint256{}, uint64_t{0}),
+                   hasher.Hash(uint256{}, uint64_t{1}));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

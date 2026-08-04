@@ -1,0 +1,92 @@
+{
+  "evidence_kind": "multi_gpu_profile1_exactreplay_golden_compare",
+  "tip_sha": "a0d441e1f1ab5376cd98b0d7effe1506cf2cfed1",
+  "source_tree_fingerprint": "4649ffd436459622ea2be55fa34c0ee4877ee8c69760db5f21d6f805f2e98483",
+  "canary_nonce_start": 1,
+  "backends_requested": [
+    "cuda",
+    "metal"
+  ],
+  "backends_succeeded": [
+    "cuda",
+    "metal"
+  ],
+  "required_for_manifest": [
+    "cuda",
+    "metal"
+  ],
+  "complete_multi_gpu_match": true,
+  "cuda_metal_match": true,
+  "allow_partial": false,
+  "mismatches": [],
+  "coverage_failures": [],
+  "by_backend": {
+    "cuda": {
+      "n": 8,
+      "raw": "profile1-cuda-8.json",
+      "all_consensus_macs_on_device": true,
+      "cpu_gemm_fallbacks": 0,
+      "source_revision": "a0d441e1f1ab5376cd98b0d7effe1506cf2cfed1",
+      "source_tree_fingerprint": "4649ffd436459622ea2be55fa34c0ee4877ee8c69760db5f21d6f805f2e98483",
+      "harness_sha256": "e50e08ca1e19e539063250d28e9b563163f9e4656926f9961b824f535ad28df4",
+      "provider": "cuda_rc_exact_fused_extract",
+      "backend_requested": "cuda",
+      "provider_identity": {
+        "provider_family": "cuda",
+        "device_architecture": "sm_120",
+        "driver_identity": "13020",
+        "runtime_identity": "13030",
+        "complete": true,
+        "reason": "complete"
+      },
+      "digests_by_nonce": {
+        "1": "b4777985d4f2621d0b9c119f4188ac7d80158fc92560ade96cc7a3fd8cfae953",
+        "2": "d5ca4a68a259c6494128993d752104e6ec4ddf9551e5bc1ee2aeb61dc60264aa",
+        "3": "d95d122ad36c749e4a71e6aa449e566c2e0cd5c6d59105b7324d2aaeb063bf7f",
+        "4": "0fd1b4a52c59fabf035b6c47f4c87be01f2eaa7b4834eb9e8bd7dd93b28766c7",
+        "5": "197d83c30a8090be3ad881c3baf423790c7dffeb529470e384f4712fc1c7853f",
+        "6": "dd73fd8532f72659dc75fe38a6623fbde07f7dcfb24c02a32837b67885402698",
+        "7": "b85b555946eaa351666044aed7a57724b8e3a694d7e27f50f21d44f6f566140b",
+        "8": "5a9041c96f0adeb5bba90d01ae88f4919fd708d41613361b3d3e12d9aea8415a"
+      }
+    },
+    "metal": {
+      "n": 8,
+      "raw": "profile1-metal-8.json",
+      "all_consensus_macs_on_device": true,
+      "cpu_gemm_fallbacks": 0,
+      "source_revision": "a0d441e1f1ab5376cd98b0d7effe1506cf2cfed1",
+      "source_tree_fingerprint": "4649ffd436459622ea2be55fa34c0ee4877ee8c69760db5f21d6f805f2e98483",
+      "harness_sha256": "8bd1c7438a23b79f6aa05644390d6cb4e8d000f0fa214d1116d1b62f146dff7f",
+      "provider": "metal_int8_mpp_tensorops_fused_extract",
+      "backend_requested": "metal",
+      "provider_identity": {
+        "provider_family": "metal",
+        "device_architecture": "m4_class",
+        "driver_identity": "25F71",
+        "runtime_identity": "25.5.0",
+        "complete": true,
+        "reason": "complete"
+      },
+      "digests_by_nonce": {
+        "1": "b4777985d4f2621d0b9c119f4188ac7d80158fc92560ade96cc7a3fd8cfae953",
+        "2": "d5ca4a68a259c6494128993d752104e6ec4ddf9551e5bc1ee2aeb61dc60264aa",
+        "3": "d95d122ad36c749e4a71e6aa449e566c2e0cd5c6d59105b7324d2aaeb063bf7f",
+        "4": "0fd1b4a52c59fabf035b6c47f4c87be01f2eaa7b4834eb9e8bd7dd93b28766c7",
+        "5": "197d83c30a8090be3ad881c3baf423790c7dffeb529470e384f4712fc1c7853f",
+        "6": "dd73fd8532f72659dc75fe38a6623fbde07f7dcfb24c02a32837b67885402698",
+        "7": "b85b555946eaa351666044aed7a57724b8e3a694d7e27f50f21d44f6f566140b",
+        "8": "5a9041c96f0adeb5bba90d01ae88f4919fd708d41613361b3d3e12d9aea8415a"
+      }
+    }
+  },
+  "notes": [
+    "Production goldens require byte-identical ExactReplay digests across CUDA and Metal for the same frozen canary headers.",
+    "HIP remains an optional provider; any supplied HIP corpus must match the required cohort exactly.",
+    "CPU ExactReplay is not an accepted independent reproduction path for Epoch-A production goldens.",
+    "Every required artifact is bound to the exact requested source revision and a raw provider implementation consistent with its declared backend family.",
+    "CommittedRCProductionGoldenManifest may be populated only from a reviewed corpus where complete_multi_gpu_match is true.",
+    "Public evidence must remain machine-class only (no hostname/SKU/path identifiers)."
+  ],
+  "ratification_gates": false
+}

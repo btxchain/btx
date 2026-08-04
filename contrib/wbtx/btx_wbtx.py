@@ -13,7 +13,7 @@ preimage on both chains.
 
 The pure helpers (hashing, descriptor construction, address derivation, deposit scan, preimage
 extraction) work against any stock btxd. The funds-critical *spend* builders call the node's
-buildhtlc{claim,refund} wallet RPCs, which encapsulate control-block + CSFS-message + preimage +
+buildhtlc{claim,refund} wallet RPCs, which encapsulate control-block + preimage +
 PSBT-field construction and signing in audited C++ and return a fully-signed raw tx; a clearly
 marked NotImplementedError is raised on older nodes that lack the RPCs (graceful degradation).
 
@@ -26,16 +26,15 @@ End-to-end swap flow (BTX leg of a trustless BTX<->EVM atomic swap)::
     secret = new_preimage()                      # 32-byte swap secret (keep private until claim)
     h160   = btx_hash160_hex(secret)             # == RIPEMD160(SHA256(secret)); use on BOTH chains
 
-    leg = HtlcLeg(internal_pubkey=internal_pk, claimer_pubkey=recipient_pk,
-                  sender_pubkey=funder_pk, preimage_hash160_hex=h160,
+    leg = HtlcLeg(claimer_pubkey=recipient_pk, sender_pubkey=funder_pk, preimage_hash160_hex=h160,
                   refund_locktime=btx_refund_height)   # BTX timeout STRICTLY > EVM timeout
-    desc = add_checksum(rpc, leg.descriptor())   # mr(internal,{htlc(h160,claimer),refund(lt,sender)})
+    desc = add_checksum(rpc, leg.descriptor())   # mr(htlc_tx(h160,claimer),refund(lt,sender))
     addr = swap_address(rpc, desc)               # the single P2MR lock address
     import_watch(rpc_wallet, desc)               # so the wallet indexes deposits to it
     # ... funder pays `addr`; counterparty opens the EVM leg under the SAME hashlock h160 ...
 
     dep = find_deposits(rpc_wallet, addr)[0]
-    # Recipient claims, REVEALING the preimage on-chain (CSFS sig added by the wallet):
+    # Recipient claims, revealing the preimage with a transaction-bound wallet signature:
     raw = build_claim(rpc_wallet, desc, dep, secret, recipient_dest_addr, fee_sat=1000)
     rpc("sendrawtransaction", raw)               # preimage now public -> claim the EVM leg
 
@@ -74,7 +73,6 @@ def btx_hash160_hex(preimage: bytes) -> str:
 @dataclass
 class HtlcLeg:
     """Parameters of the BTX HTLC leg of a swap."""
-    internal_pubkey: str   # ML-DSA hex (or pk_slh(<slh hex>)) — the key-path internal key
     claimer_pubkey: str    # recipient's ML-DSA hex (or pk_slh(...)): claims with preimage + their sig
     sender_pubkey: str     # funder's ML-DSA hex (or pk_slh(...)): refunds after locktime
     preimage_hash160_hex: str
@@ -82,9 +80,8 @@ class HtlcLeg:
 
     def descriptor(self) -> str:
         """The (checksum-less) mr() descriptor; add a checksum via add_checksum(rpc, ...)."""
-        return (f"mr({self.internal_pubkey},"
-                f"{{htlc({self.preimage_hash160_hex},{self.claimer_pubkey}),"
-                f"refund({self.refund_locktime},{self.sender_pubkey})}})")
+        return (f"mr(htlc_tx({self.preimage_hash160_hex},{self.claimer_pubkey}),"
+                f"refund({self.refund_locktime},{self.sender_pubkey}))")
 
 
 def add_checksum(rpc: Rpc, descriptor: str) -> str:
@@ -158,7 +155,7 @@ def build_claim(rpc_wallet: Rpc, descriptor_with_checksum: str, deposit: Deposit
 
     Calls the node wallet RPC
         buildhtlcclaim "<desc#cksum>" {"txid","vout"} "<preimage_hex>" "<dest_address>" <fee_sat>
-    which performs the audited control-block + CSFS-message + preimage witness assembly and signing.
+    which performs the audited control-block + preimage witness assembly and transaction signing.
     Returns the fully-signed raw tx hex ready for sendrawtransaction; the broadcast publishes the
     preimage on-chain so the counterparty can claim the EVM leg.
     """
@@ -170,8 +167,8 @@ def build_claim(rpc_wallet: Rpc, descriptor_with_checksum: str, deposit: Deposit
         if _is_unknown_method(e):
             raise NotImplementedError(
                 "buildhtlcclaim RPC unavailable on this node. The HTLC claim witness "
-                "(<0x01> <csfs_sig> <preimage> <leaf_script> <control_block>) requires injecting the "
-                "hash160 preimage and the P2MR CSFS message into the input PSBT, then walletprocesspsbt "
+                "(<tx_sig> <preimage> <leaf_script> <control_block>) requires injecting the "
+                "hash160 preimage into the input PSBT, then walletprocesspsbt "
                 "+ finalizepsbt. Use a btxd build that includes the buildhtlcclaim/buildhtlcrefund "
                 "bridging RPCs, or construct the PSBT fields manually (see contrib/wbtx/README.md)."
             ) from e

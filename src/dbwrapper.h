@@ -14,6 +14,7 @@
 #include <util/result.h>
 
 #include <cstddef>
+#include <cstdlib>
 #include <exception>
 #include <memory>
 #include <optional>
@@ -225,24 +226,70 @@ public:
     CDBWrapper(const CDBWrapper&) = delete;
     CDBWrapper& operator=(const CDBWrapper&) = delete;
 
+    struct ReadStatus {
+        enum class Code {
+            OK,                      //!< Key found and value deserialized successfully.
+            NOT_FOUND,               //!< Key does not exist in the database.
+            DESERIALIZATION_ERROR,   //!< Key exists but value could not be deserialized.
+            DB_INTERNAL_ERROR,       //!< Unexpected internal database error.
+        };
+
+        const Code status;
+        const std::optional<std::string> op_error{std::nullopt};
+
+        explicit ReadStatus(Code status) : status(status) {}
+        ReadStatus(Code status, const std::string& error) : status(status), op_error(error) {}
+    };
+
+    /**
+     * Read and deserialize a value while distinguishing a missing key from
+     * corrupt data and an internal database error.
+     *
+     * Key serialization is intentionally outside the exception handlers:
+     * callers are expected to provide well-formed keys.
+     */
     template <typename K, typename V>
-    bool Read(const K& key, V& value) const
+    [[nodiscard]] ReadStatus TryRead(const K& key, V& value) const
     {
         DataStream ssKey{};
         ssKey.reserve(DBWRAPPER_PREALLOC_KEY_SIZE);
         ssKey << key;
-        std::optional<std::string> strValue{ReadImpl(ssKey)};
-        if (!strValue) {
-            return false;
+
+        std::optional<std::string> strValue;
+        try {
+            strValue = ReadImpl(ssKey);
+            if (!strValue) {
+                return ReadStatus{ReadStatus::Code::NOT_FOUND};
+            }
+        } catch (const std::exception& e) {
+            return ReadStatus{ReadStatus::Code::DB_INTERNAL_ERROR, e.what()};
         }
+
         try {
             DataStream ssValue{MakeByteSpan(*strValue)};
             ssValue.Xor(obfuscate_key);
             ssValue >> value;
-        } catch (const std::exception&) {
-            return false;
+        } catch (const std::exception& e) {
+            return ReadStatus{ReadStatus::Code::DESERIALIZATION_ERROR, e.what()};
         }
-        return true;
+        return ReadStatus{ReadStatus::Code::OK};
+    }
+
+    /** Preserve Read()'s existing missing/corrupt-value behavior. */
+    template <typename K, typename V>
+    bool Read(const K& key, V& value) const
+    {
+        const ReadStatus read_status{TryRead(key, value)};
+        switch (read_status.status) {
+        case ReadStatus::Code::OK:
+            return true;
+        case ReadStatus::Code::NOT_FOUND:
+        case ReadStatus::Code::DESERIALIZATION_ERROR:
+            return false;
+        case ReadStatus::Code::DB_INTERNAL_ERROR:
+            throw dbwrapper_error(read_status.op_error.value_or("unknown database error"));
+        }
+        std::abort();
     }
 
     template <typename K, typename V>

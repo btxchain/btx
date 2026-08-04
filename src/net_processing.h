@@ -47,6 +47,78 @@ static constexpr size_t MAX_SHIELDED_TX_RELAY_BYTES_PER_SECOND{500'000};
 /** Maximum getshieldeddata requests accepted per peer each second. */
 static constexpr size_t MAX_SHIELDEDDATA_REQUESTS_PER_SECOND{8};
 
+/** Whether scarce per-peer block-download capacity may be assigned to the
+ * assumeutxo background chain. The active snapshot chain must first be out of
+ * IBD and within one block of the best known header; the IBD latch alone can
+ * clear based on chainwork and tip age while a fresh snapshot is still behind. */
+constexpr bool ShouldFetchBackgroundSnapshotBlocks(
+    bool background_sync,
+    bool limited_peer,
+    bool initial_block_download,
+    int active_height,
+    int best_header_height)
+{
+    return background_sync && !limited_peer && !initial_block_download &&
+        best_header_height >= 0 && active_height >= best_header_height - 1;
+}
+
+/** Whether a connected peer remains eligible for block/header synchronization
+ * once RC consensus-tier preference becomes active. This is evaluated at each
+ * selection, rather than only at VERSION time, so a pre-activation preferred
+ * peer cannot remain sticky across the activation boundary. */
+constexpr bool IsMatMulPeerEligibleForSync(
+    bool require_matmul_consensus,
+    ServiceFlags services,
+    bool has_noban_permission)
+{
+    return !require_matmul_consensus ||
+        (services & NODE_MATMUL_CONSENSUS) == NODE_MATMUL_CONSENSUS ||
+        has_noban_permission;
+}
+
+/** Whether this SendMessages pass may allocate block-download work to a peer.
+ * The dynamic MatMul eligibility input is part of both the IBD and near-tip
+ * paths, so an ordinary peer cannot bypass the activated tier requirement. */
+constexpr bool ShouldRequestBlocksFromMatMulPeer(
+    bool can_serve_blocks,
+    bool peer_is_eligible,
+    bool request_window_open,
+    bool sync_blocks_and_headers_from_peer,
+    bool limited_peer,
+    bool initial_block_download,
+    size_t blocks_in_flight,
+    size_t max_blocks_in_flight)
+{
+    return can_serve_blocks && peer_is_eligible && request_window_open &&
+        ((sync_blocks_and_headers_from_peer && !limited_peer) ||
+         !initial_block_download) &&
+        blocks_in_flight < max_blocks_in_flight;
+}
+
+struct MatMulPreferredDownloadReconcileResult {
+    bool removed{false};
+    bool counter_inconsistent{false};
+};
+
+/** Reconcile VERSION-time preferred-download state with the current dynamic
+ * MatMul consensus-tier requirement. A non-positive aggregate counter is
+ * clamped for the caller to recompute from peer state under cs_main. */
+constexpr MatMulPreferredDownloadReconcileResult
+ReconcileMatMulPreferredDownloadForSync(
+    bool& preferred_download,
+    int& preferred_download_count,
+    bool peer_is_eligible)
+{
+    if (!preferred_download || peer_is_eligible) return {};
+    preferred_download = false;
+    if (preferred_download_count > 0) {
+        --preferred_download_count;
+        return {.removed = true};
+    }
+    preferred_download_count = 0;
+    return {.removed = true, .counter_inconsistent = true};
+}
+
 struct CNodeStateStats {
     int nSyncHeight = -1;
     int nCommonHeight = -1;
@@ -65,6 +137,13 @@ struct CNodeStateStats {
     std::chrono::seconds time_offset{0};
     NodeSeconds m_last_block_announcement;
     int m_misbehavior_score{0};
+    /** Internal synchronization-selection snapshots used by regression tests. */
+    bool m_preferred_download{false};
+    int m_total_preferred_download_peer_count{0};
+    bool m_headers_sync_started{false};
+    int m_total_headers_sync_peer_count{0};
+    bool m_chain_sync_protected{false};
+    int m_total_chain_sync_protected_peer_count{0};
 };
 
 struct PeerManagerInfo {
@@ -102,6 +181,20 @@ public:
         int min_smile_v2_version{MIN_SMILE_V2_PROTOCOL_VERSION};
         //! Chain height at which SMILE v2 protocol version enforcement activates.
         int smile_v2_enforcement_height{SMILE_V2_ENFORCEMENT_HEIGHT};
+        //! WP-7 / C5: whether the v4.4 ENC-DR reference recompute for P2P block
+        //! deliveries may run on a bounded off-thread worker pool instead of the
+        //! message-handler thread. Only effective when the MatMul v4 fork height
+        //! is finite (nMatMulV4Height != INT32_MAX); kill-switch:
+        //! -matmulasyncverify=0.
+        bool matmul_async_verify{true};
+        //! Start digest-only RC ExactReplay from an admitted near-tip header.
+        bool matmul_rc_header_first{true};
+        //! Require the Poseidon2 rcadmit sidecar before an untrusted P2P peer
+        //! can consume an RC ExactReplay slot.
+        bool matmul_rc_admission{true};
+        //! Relay at most a small authenticated-tip-child candidate set while
+        //! ExactReplay is pending; never grants chainwork or mining eligibility.
+        bool matmul_rc_provisional_relay{true};
     };
 
     static std::unique_ptr<PeerManager> make(CConnman& connman, AddrMan& addrman,

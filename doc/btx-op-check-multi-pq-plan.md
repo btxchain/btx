@@ -1,6 +1,6 @@
 # OP_CHECK_MULTI_PQ — research findings & deterministic execution plan
 
-Tracking issue: **btxchain/btx-node#248**. Status: research complete; recommendation below.
+Tracking issue: **historical internal issue 248**. Status: research complete; recommendation below.
 
 > **Headline:** BTX almost certainly needs **no new consensus opcode**. A k-of-n ML-DSA-44 (or
 > SLH-DSA) covenant is **already expressible today** via the existing `OP_CHECKSIGADD_MLDSA` /

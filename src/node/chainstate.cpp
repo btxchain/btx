@@ -126,6 +126,14 @@ static ChainstateLoadResult CompleteChainstateInitialization(
         }
     }
 
+    // Populate candidate sets only after every LoadChainTip() call has finished
+    // modifying nSequenceId. CBlockIndex objects are shared by all chainstates
+    // and nSequenceId participates in the candidate-set comparator, so changing
+    // it while any candidate set is populated is undefined behavior.
+    for (Chainstate* chainstate : chainman.GetAll()) {
+        chainstate->PopulateBlockIndexCandidates();
+    }
+
     auto chainstates{chainman.GetAll()};
     if (std::any_of(chainstates.begin(), chainstates.end(),
                     [](const Chainstate* cs) EXCLUSIVE_LOCKS_REQUIRED(cs_main) { return cs->NeedsRedownload(); })) {

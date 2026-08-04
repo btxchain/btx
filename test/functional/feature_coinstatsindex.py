@@ -9,6 +9,7 @@ between a node running the coinstatsindex and a node without
 the index.
 """
 
+from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 
 from test_framework.blocktools import (
@@ -29,6 +30,7 @@ from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     assert_equal,
     assert_raises_rpc_error,
+    get_rpc_proxy,
 )
 from test_framework.wallet import (
     MiniWallet,
@@ -49,6 +51,7 @@ class CoinStatsIndexTest(BitcoinTestFramework):
     def run_test(self):
         self.wallet = MiniWallet(self.nodes[0])
         self._test_coin_stats_index()
+        self._test_gettxoutsetinfo_tip_consistency()
         self._test_use_index_option()
         self._test_reorg_index()
         self._test_index_rejects_hash_serialized()
@@ -63,6 +66,41 @@ class CoinStatsIndexTest(BitcoinTestFramework):
 
     def sync_index_node(self):
         self.wait_until(lambda: self.nodes[1].getindexinfo()['coinstatsindex']['synced'] is True)
+
+    def _test_gettxoutsetinfo_tip_consistency(self):
+        def check_concurrent_queries(node, use_index):
+            mining_rpc = get_rpc_proxy(node.url, node.index, timeout=self.rpc_timeout)
+            flush_rpc = get_rpc_proxy(node.url, node.index, timeout=self.rpc_timeout)
+            stats_rpc = get_rpc_proxy(node.url, node.index, timeout=self.rpc_timeout)
+            address = getnewdestination()[2]
+
+            def mine_and_flush_blocks():
+                for _ in range(25):
+                    mining_rpc.generatetoaddress(1, address)
+                    if use_index:
+                        # Advance CoinsDB independently of the indexed query.
+                        # This covers the window after its index sync wait and
+                        # before the stats lookup of its stable target.
+                        flush_rpc.gettxoutsetinfo(hash_type='none', use_index=False)
+
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                mining = executor.submit(mine_and_flush_blocks)
+                observations = 0
+                while not mining.done() or observations == 0:
+                    stats = stats_rpc.gettxoutsetinfo(hash_type='none', use_index=use_index)
+                    assert_equal(stats['bestblock'], stats_rpc.getblockhash(stats['height']))
+                    observations += 1
+                mining.result()
+
+        self.log.info("Test a concurrent non-index UTXO cursor reports its own tip")
+        check_concurrent_queries(self.nodes[0], use_index=False)
+        self.sync_all()
+        self.sync_index_node()
+
+        self.log.info("Test a concurrent indexed query retains a stable lookup target")
+        check_concurrent_queries(self.nodes[1], use_index=True)
+        self.sync_all()
+        self.sync_index_node()
 
     def _test_coin_stats_index(self):
         node = self.nodes[0]

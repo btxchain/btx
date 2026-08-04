@@ -1,0 +1,203 @@
+#!/usr/bin/env python3
+"""Fail-closed source and binary identity helpers for MatMul evidence tools."""
+
+from __future__ import annotations
+
+import hashlib
+import platform
+import re
+import subprocess
+from pathlib import Path
+from typing import Any
+
+
+HEX40 = re.compile(r"[0-9a-f]{40}")
+HEX64 = re.compile(r"[0-9a-f]{64}")
+FINGERPRINT_PATHS = ("CMakeLists.txt", "cmake", "src", "contrib/matmul-v4")
+FINGERPRINT_EXCLUDE = (
+    b"src/matmul/matmul_v4_rc_production_golden_manifest.data",
+)
+SAFE_PUBLIC_CLASS = re.compile(r"[A-Za-z0-9_.+-]+")
+
+
+class EvidenceIdentityError(ValueError):
+    pass
+
+
+def require_hex(value: Any, pattern: re.Pattern[str], field: str) -> str:
+    if not isinstance(value, str) or pattern.fullmatch(value) is None:
+        raise EvidenceIdentityError(f"{field} is not canonical lowercase hex")
+    return value
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError as error:
+        raise EvidenceIdentityError(f"cannot hash {path.name}: {error}") from error
+    return digest.hexdigest()
+
+
+def resolve_commit(root: Path, revision: str) -> str:
+    revision = require_hex(revision, HEX40, "source_revision")
+    proc = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--verify", f"{revision}^{{commit}}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0 or proc.stdout.strip().lower() != revision:
+        raise EvidenceIdentityError(
+            f"source revision is not the exact commit {revision}"
+        )
+    return revision
+
+
+def tree_fingerprint(root: Path, revision: str) -> str:
+    revision = resolve_commit(root, revision)
+    proc = subprocess.run(
+        [
+            "git", "-C", str(root), "ls-tree", "-r", "--full-tree", revision,
+            "--", *FINGERPRINT_PATHS,
+        ],
+        capture_output=True,
+        check=False,
+    )
+    if proc.returncode != 0 or not proc.stdout:
+        raise EvidenceIdentityError(
+            f"cannot fingerprint source revision: {revision}"
+        )
+    kept = [
+        line for line in proc.stdout.splitlines(keepends=True)
+        if not any(
+            line.rstrip(b"\n").endswith(b"\t" + excluded)
+            for excluded in FINGERPRINT_EXCLUDE
+        )
+    ]
+    return hashlib.sha256(b"".join(kept)).hexdigest()
+
+
+def verify_binary(path: Path, expected_sha256: str, field: str) -> str:
+    expected = require_hex(expected_sha256, HEX64, field)
+    if not path.is_file():
+        raise EvidenceIdentityError(f"{field} binary is not a file: {path}")
+    actual = sha256_file(path)
+    if actual != expected:
+        raise EvidenceIdentityError(
+            f"{field} SHA256 mismatch: expected {expected}, got {actual}"
+        )
+    return actual
+
+
+def validate_canary_build_identity(
+    canary: dict[str, Any], *, revision: str, fingerprint: str, prefix: str,
+    require_manifest_match: bool = True,
+) -> None:
+    revision = require_hex(revision, HEX40, "source_revision")
+    fingerprint = require_hex(fingerprint, HEX64, "source_tree_fingerprint")
+    if require_hex(
+        canary.get("build_source_revision"), HEX40,
+        f"{prefix}.build_source_revision",
+    ) != revision:
+        raise EvidenceIdentityError(
+            f"{prefix}.build_source_revision does not match requested revision"
+        )
+    if require_hex(
+        canary.get("build_source_tree_fingerprint"), HEX64,
+        f"{prefix}.build_source_tree_fingerprint",
+    ) != fingerprint:
+        raise EvidenceIdentityError(
+            f"{prefix}.build_source_tree_fingerprint mismatch"
+        )
+    if canary.get("build_source_dirty") is not False:
+        raise EvidenceIdentityError(f"{prefix}.build_source_dirty must be false")
+    if (require_manifest_match and
+            canary.get("build_provenance_matches") is not True):
+        raise EvidenceIdentityError(
+            f"{prefix}.build_provenance_matches must be true"
+        )
+
+
+def validate_cuda_soak_metric(
+    metric: dict[str, Any], *, mode: str, revision: str, fingerprint: str,
+) -> None:
+    """Validate one public CUDA-soak metric without breaking toy rehearsals."""
+    if mode not in {"toy", "production"}:
+        raise EvidenceIdentityError(f"unsupported soak mode: {mode}")
+    node = metric.get("node")
+    if str(metric.get("active_backend") or "").lower() != "cuda":
+        raise EvidenceIdentityError(
+            f"active_backend is not cuda on node {node}: "
+            f"{metric.get('active_backend')}"
+        )
+    if metric.get("required_backend_satisfied") is not True:
+        raise EvidenceIdentityError(
+            f"required CUDA backend unsatisfied on node {node}"
+        )
+    fallback_count = metric.get("cuda_fallbacks_to_cpu")
+    if (fallback_count is not None and
+            (not isinstance(fallback_count, int) or
+             isinstance(fallback_count, bool) or fallback_count != 0)):
+        raise EvidenceIdentityError(
+            f"cuda_fallbacks_to_cpu={fallback_count} "
+            f"on node {node}"
+        )
+    if mode == "toy":
+        return
+    if (not isinstance(fallback_count, int) or
+            isinstance(fallback_count, bool) or fallback_count != 0):
+        raise EvidenceIdentityError(
+            f"production cuda_fallbacks_to_cpu must be integer zero on node {node}"
+        )
+    if not str(metric.get("resolved_provider") or "").lower().startswith("cuda_"):
+        raise EvidenceIdentityError(
+            f"non-CUDA ExactReplay provider on node {node}: "
+            f"{metric.get('resolved_provider')}"
+        )
+    validate_canary_build_identity(
+        metric,
+        revision=revision,
+        fingerprint=fingerprint,
+        prefix=f"soak node {node}",
+    )
+
+
+def public_machine_class(
+    *, provider_family: str, resolved_providers: list[str],
+    device_architectures: list[str], system: str | None = None,
+    machine: str | None = None,
+) -> dict[str, Any]:
+    """Return accurate machine-class-only metadata without host identity."""
+    values = {
+        "provider_family": provider_family,
+        "system": system if system is not None else platform.system(),
+        "machine": machine if machine is not None else platform.machine(),
+    }
+    for field, value in values.items():
+        if not isinstance(value, str) or SAFE_PUBLIC_CLASS.fullmatch(value) is None:
+            raise EvidenceIdentityError(f"{field} is not a public machine class")
+
+    def classes(items: list[str], field: str) -> list[str]:
+        result = sorted(set(items))
+        for value in result:
+            if (not isinstance(value, str) or
+                    SAFE_PUBLIC_CLASS.fullmatch(value) is None):
+                raise EvidenceIdentityError(
+                    f"{field} is not a public machine class"
+                )
+        return result
+
+    return {
+        "os_class": f"{values['system']} {values['machine']}",
+        "provider_family": values["provider_family"],
+        "resolved_provider_classes": classes(
+            resolved_providers, "resolved_provider"
+        ),
+        "device_architecture_classes": classes(
+            device_architectures, "device_architecture"
+        ),
+        "note": "Machine-class only; no hostname, account, or private path.",
+    }

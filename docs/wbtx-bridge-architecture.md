@@ -2,6 +2,11 @@
 
 Status: design / planning. Companion to the canonical token spec [`wBTX.md`](wBTX.md).
 
+Consensus references in this bridge plan follow the
+[MatMul v4.7 transition roadmap](../doc/btx-matmul-v4.7-transition-roadmap.md).
+The bridge does not infer chain finality from unauthenticated MatMul chainwork:
+Epoch-A block work is authenticated only after Profile 1 ExactReplay.
+
 This document inventories what BTX **already** provides for bridging BTX to a wrapped, EVM-native
 representation (wBTX), defines the trust/security models, and lays out the work to make wBTX↔BTX
 bridging robust, scalable, and secure — the BTX side, the EVM side, and the developer surface.
@@ -25,9 +30,10 @@ What already exists on the BTX side:
 - **Federation/attestor settlement** — verifier sets, batch receipts, proof receipts, settlement
   witnesses, with **FIPS-205 SLH-DSA** (or ML-DSA) attestor signatures (hardened in v0.31; height-
   gated at C-002/123000). RPCs: `bridge_buildverifierset`, `bridge_buildrefund`, `bridge_build*`.
-- **Trustless-swap primitives** — `BuildP2MRHTLCLeaf` (hashlock + oracle CSFS), `BuildP2MRRefundLeaf`
+- **Trustless-swap primitives** — `BuildP2MRHTLCTxLeaf` (hashlock + transaction-bound claimant signature), `BuildP2MRRefundLeaf`
   (CLTV timeout + PQ-sig), `BuildP2MRAtomicSwapLeaf` (CTV covenant + PQ-sig), `OP_CHECKSIGFROMSTACK`
-  (`CSFS/btx` tagged hash), CTV. Descriptors express them: `mr(KEY,{htlc(H160,PK),refund(T,PK)})`.
+  (`CSFS/btx` tagged hash), CTV. Safe swaps use exactly two leaves:
+  `mr(htlc_tx(H160,CLAIM_PK),refund(T,REFUND_PK))`.
 - **PSBT** carries everything needed to *spend* these end-to-end: hash preimage fields
   (`hash160_preimages`/`sha256_preimages`), and P2MR fields (`m_p2mr_leaf_script`,
   `m_p2mr_control_block`, `m_p2mr_merkle_root`, `m_p2mr_csfs_msgs/sigs`, `m_p2mr_pq_sigs`). The

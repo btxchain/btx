@@ -50,7 +50,7 @@ bool EvalP2MRScript(const CScript& script, std::vector<std::vector<unsigned char
 
 BOOST_FIXTURE_TEST_SUITE(script_htlc_templates_tests, BasicTestingSetup)
 
-BOOST_AUTO_TEST_CASE(htlc_leaf_valid_build)
+BOOST_AUTO_TEST_CASE(legacy_htlc_leaf_valid_build)
 {
     const std::vector<unsigned char> preimage_hash(20, 0x11);
     const std::vector<unsigned char> oracle_pubkey(MLDSA44_PUBKEY_SIZE, 0x22);
@@ -60,6 +60,20 @@ BOOST_AUTO_TEST_CASE(htlc_leaf_valid_build)
     CScript expected;
     expected << preimage_hash << OP_OVER << OP_HASH160 << OP_EQUALVERIFY
              << oracle_pubkey << OP_CHECKSIGFROMSTACK;
+    BOOST_CHECK_EQUAL_COLLECTIONS(script.begin(), script.end(), expected.begin(), expected.end());
+}
+
+BOOST_AUTO_TEST_CASE(htlc_tx_leaf_valid_build)
+{
+    const std::vector<unsigned char> preimage_hash(20, 0x31);
+    const std::vector<unsigned char> claimant_pubkey(MLDSA44_PUBKEY_SIZE, 0x32);
+    const std::vector<unsigned char> script =
+        BuildP2MRHTLCTxLeaf(preimage_hash, PQAlgorithm::ML_DSA_44, claimant_pubkey);
+    BOOST_REQUIRE(!script.empty());
+
+    CScript expected;
+    expected << preimage_hash << OP_OVER << OP_HASH160 << OP_EQUALVERIFY << OP_DROP
+             << claimant_pubkey << OP_CHECKSIG_MLDSA;
     BOOST_CHECK_EQUAL_COLLECTIONS(script.begin(), script.end(), expected.begin(), expected.end());
 }
 
@@ -85,7 +99,8 @@ BOOST_AUTO_TEST_CASE(htlc_leaf_size_within_policy)
 {
     const std::vector<unsigned char> preimage_hash(20, 0x44);
     const std::vector<unsigned char> oracle_pubkey(MLDSA44_PUBKEY_SIZE, 0x55);
-    const std::vector<unsigned char> script = BuildP2MRHTLCLeaf(preimage_hash, PQAlgorithm::ML_DSA_44, oracle_pubkey);
+    const std::vector<unsigned char> script = BuildP2MRHTLCTxLeaf(
+        preimage_hash, PQAlgorithm::ML_DSA_44, oracle_pubkey);
     BOOST_REQUIRE(!script.empty());
     BOOST_CHECK_LT(script.size(), 1650U);
 }
@@ -98,19 +113,15 @@ BOOST_AUTO_TEST_CASE(htlc_correct_preimage_succeeds)
 
     const std::vector<unsigned char> preimage(32, 0x66);
     const std::vector<unsigned char> preimage_hash = Hash160Bytes(preimage);
-    const std::vector<unsigned char> script_bytes = BuildP2MRHTLCLeaf(preimage_hash, PQAlgorithm::ML_DSA_44, oracle_key.GetPubKey());
+    const std::vector<unsigned char> script_bytes = BuildP2MRHTLCTxLeaf(
+        preimage_hash, PQAlgorithm::ML_DSA_44, oracle_key.GetPubKey());
     BOOST_REQUIRE(!script_bytes.empty());
     const CScript script{script_bytes.begin(), script_bytes.end()};
 
-    HashWriter hasher = HASHER_CSFS;
-    hasher.write(MakeByteSpan(preimage));
-    const uint256 msg_hash = hasher.GetSHA256();
-    std::vector<unsigned char> oracle_sig;
-    BOOST_REQUIRE(oracle_key.Sign(msg_hash, oracle_sig));
-
-    // Claim witness (bottom->top): <oracle_sig> <preimage>.
+    // The template checker accepts a correctly-sized transaction signature; full
+    // transaction binding is exercised by wallet_htlc_atomicswap.py.
     std::vector<std::vector<unsigned char>> stack;
-    stack.push_back(oracle_sig);
+    stack.push_back(std::vector<unsigned char>(MLDSA44_SIGNATURE_SIZE, 0x01));
     stack.push_back(preimage);
 
     ScriptExecutionData execdata;
@@ -120,8 +131,7 @@ BOOST_AUTO_TEST_CASE(htlc_correct_preimage_succeeds)
     const P2MRTemplateChecker checker{/*locktime_ok=*/true};
     BOOST_REQUIRE(EvalP2MRScript(script, stack, checker, execdata, serror));
     BOOST_CHECK_EQUAL(serror, SCRIPT_ERR_OK);
-    // Consensus (ExecuteWitnessScript) requires EXACTLY ONE truthy element left (cleanstack). The
-    // CSFS result must be that element — proving the leaf is actually spendable, not just logically OK.
+    // Consensus (ExecuteWitnessScript) requires exactly one truthy cleanstack item.
     BOOST_REQUIRE_EQUAL(stack.size(), 1U);
     BOOST_CHECK_EQUAL(CScriptNum(stack.back(), /*fRequireMinimal=*/true).GetInt64(), 1);
 }
@@ -135,18 +145,13 @@ BOOST_AUTO_TEST_CASE(htlc_wrong_preimage_fails)
     const std::vector<unsigned char> correct_preimage(32, 0x77);
     const std::vector<unsigned char> wrong_preimage(32, 0x88);
     const std::vector<unsigned char> preimage_hash = Hash160Bytes(correct_preimage);
-    const std::vector<unsigned char> script_bytes = BuildP2MRHTLCLeaf(preimage_hash, PQAlgorithm::ML_DSA_44, oracle_key.GetPubKey());
+    const std::vector<unsigned char> script_bytes = BuildP2MRHTLCTxLeaf(
+        preimage_hash, PQAlgorithm::ML_DSA_44, oracle_key.GetPubKey());
     BOOST_REQUIRE(!script_bytes.empty());
     const CScript script{script_bytes.begin(), script_bytes.end()};
 
-    HashWriter hasher = HASHER_CSFS;
-    hasher.write(MakeByteSpan(correct_preimage));
-    const uint256 msg_hash = hasher.GetSHA256();
-    std::vector<unsigned char> oracle_sig;
-    BOOST_REQUIRE(oracle_key.Sign(msg_hash, oracle_sig));
-
     std::vector<std::vector<unsigned char>> stack;
-    stack.push_back(oracle_sig);
+    stack.push_back(std::vector<unsigned char>(MLDSA44_SIGNATURE_SIZE, 0x01));
     stack.push_back(wrong_preimage);
 
     ScriptExecutionData execdata;
@@ -206,7 +211,8 @@ BOOST_AUTO_TEST_CASE(two_leaf_merkle_htlc)
 
     const std::vector<unsigned char> preimage_hash(20, 0xbb);
     const std::vector<unsigned char> sender_pubkey(MLDSA44_PUBKEY_SIZE, 0xcc);
-    const std::vector<unsigned char> htlc_leaf = BuildP2MRHTLCLeaf(preimage_hash, PQAlgorithm::ML_DSA_44, oracle_key.GetPubKey());
+    const std::vector<unsigned char> htlc_leaf = BuildP2MRHTLCTxLeaf(
+        preimage_hash, PQAlgorithm::ML_DSA_44, oracle_key.GetPubKey());
     const std::vector<unsigned char> refund_leaf = BuildP2MRRefundLeaf(/*timeout=*/1024, PQAlgorithm::ML_DSA_44, sender_pubkey);
     BOOST_REQUIRE(!htlc_leaf.empty());
     BOOST_REQUIRE(!refund_leaf.empty());

@@ -6,6 +6,7 @@
 #ifndef BITCOIN_COINS_H
 #define BITCOIN_COINS_H
 
+#include <attributes.h>
 #include <compressor.h>
 #include <core_memusage.h>
 #include <memusage.h>
@@ -16,11 +17,20 @@
 #include <util/check.h>
 #include <util/hasher.h>
 
-#include <assert.h>
-#include <stdint.h>
+#include <cassert>
+#include <cstdint>
 
+#include <atomic>
 #include <functional>
+#include <future>
+#include <memory>
+#include <optional>
 #include <unordered_map>
+#include <utility>
+#include <vector>
+
+class CBlock;
+class ThreadPool;
 
 /**
  * A UTXO entry.
@@ -213,6 +223,36 @@ public:
     }
 };
 
+/** Process-salted hasher specialized for the in-memory UTXO cache. */
+class SaltedCoinsCacheHasher
+{
+private:
+    const SipHasher13UJ m_hasher;
+
+public:
+    explicit SaltedCoinsCacheHasher(bool deterministic = false);
+
+    /** Hash a transaction ID, itself a cryptographic hash, as one jumbo block. */
+    size_t operator()(const Txid& id) const noexcept
+    {
+        return m_hasher.Hash(id.ToUint256());
+    }
+
+    /**
+     * Retained cache entries identify real outputs, so their transaction IDs
+     * are cryptographic hashes. Cache misses with arbitrary claimed prevouts
+     * are erased immediately by FetchCoin(). Hash values are process-local and
+     * must never be persisted or compared between processes.
+     *
+     * `noexcept` intentionally lets libstdc++ recompute this inexpensive hash
+     * during rehash instead of storing another size_t in every UTXO node.
+     */
+    size_t operator()(const COutPoint& id) const noexcept
+    {
+        return m_hasher.Hash(id.hash.ToUint256(), uint64_t{id.n});
+    }
+};
+
 /**
  * PoolAllocator's MAX_BLOCK_SIZE_BYTES parameter here uses sizeof the data, and adds the size
  * of 4 pointers. We do not know the exact node size used in the std::unordered_node implementation
@@ -223,7 +263,7 @@ public:
  */
 using CCoinsMap = std::unordered_map<COutPoint,
                                      CCoinsCacheEntry,
-                                     SaltedOutpointHasher,
+                                     SaltedCoinsCacheHasher,
                                      std::equal_to<COutPoint>,
                                      PoolAllocator<CoinsCachePair,
                                                    sizeof(CoinsCachePair) + sizeof(void*) * 4>>;
@@ -272,10 +312,11 @@ struct CoinsViewCacheCursor
     //! Calling CCoinsMap::clear() afterwards is faster because a CoinsCachePair cannot be coerced back into a
     //! CCoinsMap::iterator to be erased, and must therefore be looked up again by key in the CCoinsMap before being erased.
     CoinsViewCacheCursor(size_t& usage LIFETIMEBOUND,
-                        CoinsCachePair& sentinel LIFETIMEBOUND,
-                        CCoinsMap& map LIFETIMEBOUND,
-                        bool will_erase) noexcept
-        : m_usage(usage), m_sentinel(sentinel), m_map(map), m_will_erase(will_erase) {}
+                         size_t& dirty_count LIFETIMEBOUND,
+                         CoinsCachePair& sentinel LIFETIMEBOUND,
+                         CCoinsMap& map LIFETIMEBOUND,
+                         bool will_erase) noexcept
+        : m_usage(usage), m_dirty_count(dirty_count), m_sentinel(sentinel), m_map(map), m_will_erase(will_erase) {}
 
     inline CoinsCachePair* Begin() const noexcept { return m_sentinel.second.Next(); }
     inline CoinsCachePair* End() const noexcept { return &m_sentinel; }
@@ -284,6 +325,7 @@ struct CoinsViewCacheCursor
     inline CoinsCachePair* NextAndMaybeErase(CoinsCachePair& current) noexcept
     {
         const auto next_entry{current.second.Next()};
+        m_dirty_count -= current.second.IsDirty();
         // If we are not going to erase the cache, we must still erase spent entries.
         // Otherwise, clear the state of the entry.
         if (!m_will_erase) {
@@ -298,8 +340,11 @@ struct CoinsViewCacheCursor
     }
 
     inline bool WillErase(CoinsCachePair& current) const noexcept { return m_will_erase || current.second.coin.IsSpent(); }
+    size_t GetDirtyCount() const noexcept { return m_dirty_count; }
+    size_t GetTotalCount() const noexcept { return m_map.size(); }
 private:
     size_t& m_usage;
+    size_t& m_dirty_count;
     CoinsCachePair& m_sentinel;
     CCoinsMap& m_map;
     bool m_will_erase;
@@ -310,7 +355,11 @@ class CCoinsView
 {
 public:
     //! Retrieve the Coin (unspent transaction output) for a given outpoint.
+    //! May populate cache layers. Use PeekCoin() for a non-caching lookup.
     virtual std::optional<Coin> GetCoin(const COutPoint& outpoint) const;
+
+    //! Retrieve a coin without populating any cache layer traversed by the lookup.
+    virtual std::optional<Coin> PeekCoin(const COutPoint& outpoint) const;
 
     //! Just check whether a given outpoint is unspent.
     virtual bool HaveCoin(const COutPoint &outpoint) const;
@@ -348,6 +397,7 @@ protected:
 public:
     CCoinsViewBacked(CCoinsView *viewIn);
     std::optional<Coin> GetCoin(const COutPoint& outpoint) const override;
+    std::optional<Coin> PeekCoin(const COutPoint& outpoint) const override;
     bool HaveCoin(const COutPoint &outpoint) const override;
     uint256 GetBestBlock() const override;
     std::vector<uint256> GetHeadBlocks() const override;
@@ -377,6 +427,14 @@ protected:
 
     /* Cached dynamic memory usage for the inner Coin objects. */
     mutable size_t cachedCoinsUsage{0};
+    /* Running count of dirty Coin cache entries. */
+    mutable size_t m_dirty_count{0};
+
+    /** Discard all local modifications without flushing to the base view. */
+    virtual void Reset() noexcept;
+
+    /** Fetch a cache miss from the base view. */
+    virtual std::optional<Coin> FetchCoinFromBase(const COutPoint& outpoint) const;
 
 public:
     CCoinsViewCache(CCoinsView *baseIn, bool deterministic = false);
@@ -388,6 +446,7 @@ public:
 
     // Standard CCoinsView methods
     std::optional<Coin> GetCoin(const COutPoint& outpoint) const override;
+    std::optional<Coin> PeekCoin(const COutPoint& outpoint) const override;
     bool HaveCoin(const COutPoint &outpoint) const override;
     uint256 GetBestBlock() const override;
     void SetBestBlock(const uint256 &hashBlock);
@@ -443,7 +502,7 @@ public:
      * to be forgotten.
      * If false is returned, the state of this cache (and its backing view) will be undefined.
      */
-    bool Flush();
+    virtual bool Flush();
 
     /**
      * Push the modifications applied to this cache to its base while retaining
@@ -460,8 +519,11 @@ public:
      */
     void Uncache(const COutPoint &outpoint);
 
-    //! Calculate the size of the cache (in number of transaction outputs)
+    //! Size of the cache (in number of transaction outputs)
     unsigned int GetCacheSize() const;
+
+    //! Number of dirty cache entries (transaction outputs)
+    size_t GetDirtyCount() const noexcept { return m_dirty_count; }
 
     //! Calculate the size of the cache (in bytes)
     size_t DynamicMemoryUsage() const;
@@ -479,12 +541,83 @@ public:
     //! Run an internal sanity check on the cache data structure. */
     void SanityCheck() const;
 
+    class ResetGuard
+    {
+    private:
+        friend CCoinsViewCache;
+        CCoinsViewCache& m_cache;
+        explicit ResetGuard(CCoinsViewCache& cache LIFETIMEBOUND) noexcept : m_cache{cache} {}
+
+    public:
+        ResetGuard(const ResetGuard&) = delete;
+        ResetGuard& operator=(const ResetGuard&) = delete;
+        ResetGuard(ResetGuard&&) = delete;
+        ResetGuard& operator=(ResetGuard&&) = delete;
+        ~ResetGuard() { m_cache.Reset(); }
+    };
+
+    [[nodiscard]] ResetGuard CreateResetGuard() noexcept { return ResetGuard{*this}; }
+
 private:
     /**
      * @note this is marked const, but may actually append to `cacheCoins`, increasing
      * memory usage.
      */
     CCoinsMap::iterator FetchCoin(const COutPoint &outpoint) const;
+};
+
+/**
+ * Ephemeral cache overlay that prefetches block input prevouts concurrently
+ * without mutating its parent cache on read misses.
+ *
+ * Externally, methods must be called only by the validation thread. Worker
+ * threads only claim InputToFetch entries and call base->PeekCoin(). The ready
+ * flag publishes each optional Coin to the validation thread with
+ * release/acquire ordering. StopFetching() joins all tasks before references to
+ * the block's input outpoints can expire.
+ */
+class CoinsViewOverlay : public CCoinsViewCache
+{
+private:
+    std::atomic_uint32_t m_input_head{0};
+    mutable uint32_t m_input_tail{0};
+
+    struct InputToFetch {
+        std::atomic_flag ready{};
+        const COutPoint& outpoint;
+        mutable std::optional<Coin> coin{std::nullopt};
+
+        explicit InputToFetch(const COutPoint& o LIFETIMEBOUND) noexcept : outpoint{o} {}
+        InputToFetch(InputToFetch&& other) noexcept : outpoint{other.outpoint}
+        {
+            Assert(!other.coin);
+            Assert(!other.ready.test(std::memory_order_relaxed));
+        }
+    };
+
+    std::vector<InputToFetch> m_inputs{};
+    std::shared_ptr<ThreadPool> m_thread_pool;
+    std::vector<std::future<void>> m_futures{};
+
+    bool ProcessInput() noexcept;
+    void StopFetching() noexcept;
+    std::optional<Coin> FetchCoinFromBase(const COutPoint& outpoint) const override;
+
+protected:
+    void Reset() noexcept override;
+
+public:
+    explicit CoinsViewOverlay(CCoinsView* in_base, std::shared_ptr<ThreadPool> thread_pool,
+                              bool deterministic = false) noexcept;
+    ~CoinsViewOverlay() noexcept override;
+
+    [[nodiscard]] ResetGuard StartFetching(const CBlock& block LIFETIMEBOUND) noexcept;
+    bool Flush() override;
+
+    void SetBackend(CCoinsView&) = delete;
+    void Sync() = delete;
+
+    bool AllInputsConsumed() const noexcept { return m_input_tail == m_inputs.size(); }
 };
 
 //! Utility function to add all of a transaction's outputs to a cache.
@@ -519,6 +652,7 @@ public:
 
     std::optional<Coin> GetCoin(const COutPoint& outpoint) const override;
     bool HaveCoin(const COutPoint &outpoint) const override;
+    std::optional<Coin> PeekCoin(const COutPoint& outpoint) const override;
 
 private:
     /** A list of callbacks to execute upon leveldb read error. */

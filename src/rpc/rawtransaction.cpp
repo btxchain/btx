@@ -223,8 +223,8 @@ static std::vector<RPCArg> CreateTxDoc()
             },
         },
         {"outputs", RPCArg::Type::ARR, RPCArg::Optional::NO, "The outputs specified as key-value pairs.\n"
-                "Each key may only appear once, i.e. there can only be one 'data' output, and no address may be duplicated.\n"
-                "At least one output of either type must be specified.\n"
+                "Each key may only appear once, and no address may be duplicated. The 'data' (OP_RETURN) output type is disabled on BTX (financial-only chain).\n"
+                "At least one address output must be specified.\n"
                 "For compatibility reasons, a dictionary, which holds the key-value pairs directly, is also\n"
                 "                             accepted as second parameter.",
             {
@@ -235,7 +235,7 @@ static std::vector<RPCArg> CreateTxDoc()
                 },
                 {"", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED, "",
                     {
-                        {"data", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "A key-value pair. The key must be \"data\", the value is hex-encoded data that becomes a part of an OP_RETURN output"},
+                        {"data", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "DISABLED on BTX (financial-only chain): OP_RETURN \"data\" outputs are not supported and this key is rejected with an error."},
                     },
                 },
             },
@@ -302,7 +302,11 @@ PartiallySignedTransaction ProcessPSBT(const std::string& psbt_string, const std
         // Then look in the txindex
         if (!tx && g_txindex) {
             uint256 block_hash;
-            g_txindex->FindTx(tx_in.prevout.hash, block_hash, tx);
+            const auto tx_res{g_txindex->FindTx(tx_in.prevout.hash, block_hash)};
+            if (!tx_res) {
+                throw JSONRPCError(RPC_INTERNAL_ERROR, tx_res.error());
+            }
+            tx = *tx_res;
         }
         // If we still don't have it look in the mempool
         if (!tx) {
@@ -454,7 +458,11 @@ static RPCHelpMan getrawtransaction()
     }
 
     uint256 hash_block;
-    const CTransactionRef tx = GetTransaction(blockindex, node.mempool.get(), hash, hash_block, chainman.m_blockman);
+    const auto tx_res{GetTransaction(blockindex, node.mempool.get(), hash, hash_block, chainman.m_blockman)};
+    if (!tx_res) {
+        throw JSONRPCError(RPC_INTERNAL_ERROR, tx_res.error());
+    }
+    const CTransactionRef& tx{*tx_res};
     if (!tx) {
         std::string errmsg;
         if (blockindex) {
@@ -522,7 +530,7 @@ static RPCHelpMan createrawtransaction()
 {
     return RPCHelpMan{"createrawtransaction",
                 "\nCreate a transaction spending the given inputs and creating new outputs.\n"
-                "Outputs can be addresses or data.\n"
+                "Outputs are addresses. OP_RETURN \"data\" outputs are disabled on BTX (financial-only chain).\n"
                 "Returns hex-encoded raw transaction.\n"
                 "Note that the transaction's inputs are not signed, and\n"
                 "it is not stored in the wallet or transmitted to the network.\n",
@@ -532,9 +540,7 @@ static RPCHelpMan createrawtransaction()
                 },
                 RPCExamples{
                     HelpExampleCli("createrawtransaction", "\"[{\\\"txid\\\":\\\"myid\\\",\\\"vout\\\":0}]\" \"[{\\\"address\\\":0.01}]\"")
-            + HelpExampleCli("createrawtransaction", "\"[{\\\"txid\\\":\\\"myid\\\",\\\"vout\\\":0}]\" \"[{\\\"data\\\":\\\"00010203\\\"}]\"")
             + HelpExampleRpc("createrawtransaction", "[{\"txid\":\"myid\",\"vout\":0}], [{\"address\":0.01}]")
-            + HelpExampleRpc("createrawtransaction", "[{\"txid\":\"myid\",\"vout\":0}], [{\"data\":\"00010203\"}]")
                 },
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
@@ -772,6 +778,9 @@ static RPCHelpMan combinerawtransaction()
 {
 
     UniValue txs = request.params[0].get_array();
+    if (txs.size() < 2) {
+        throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "Missing transactions. At least two transactions required.");
+    }
     std::vector<CMutableTransaction> txVariants(txs.size());
 
     for (unsigned int idx = 0; idx < txs.size(); idx++) {
@@ -780,8 +789,21 @@ static RPCHelpMan combinerawtransaction()
         }
     }
 
-    if (txVariants.empty()) {
-        throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "Missing transactions");
+    {
+        std::vector<CMutableTransaction> tx_variants_copy{txVariants};
+        Txid first_txid{};
+        for (size_t index{0}; index < tx_variants_copy.size(); ++index) {
+            for (CTxIn& input : tx_variants_copy[index].vin) {
+                input.scriptSig.clear();
+                input.scriptWitness.SetNull();
+            }
+            if (index == 0) {
+                first_txid = tx_variants_copy[index].GetHash();
+            } else if (first_txid != tx_variants_copy[index].GetHash()) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER,
+                                   strprintf("Transaction number %u not compatible with first transaction", static_cast<unsigned>(index + 1)));
+            }
+        }
     }
 
     // mergedTx will end up with all the signatures; it
@@ -942,7 +964,9 @@ static RPCHelpMan signrawtransactionwithkey()
     };
 }
 
-const RPCResult decodepsbt_inputs{
+const RPCResult& DecodePSBTInputs()
+{
+    static const RPCResult decodepsbt_inputs{
     RPCResult::Type::ARR, "inputs", "",
     {
         {RPCResult::Type::OBJ, "", "",
@@ -1109,9 +1133,13 @@ const RPCResult decodepsbt_inputs{
             }},
         }},
     }
-};
+    };
+    return decodepsbt_inputs;
+}
 
-const RPCResult decodepsbt_outputs{
+const RPCResult& DecodePSBTOutputs()
+{
+    static const RPCResult decodepsbt_outputs{
     RPCResult::Type::ARR, "outputs", "",
     {
         {RPCResult::Type::OBJ, "", "",
@@ -1176,7 +1204,9 @@ const RPCResult decodepsbt_outputs{
             }},
         }},
     }
-};
+    };
+    return decodepsbt_outputs;
+}
 
 static RPCHelpMan decodepsbt()
 {
@@ -1217,8 +1247,8 @@ static RPCHelpMan decodepsbt()
                         {
                              {RPCResult::Type::STR_HEX, "key", "(key-value pair) An unknown key-value pair"},
                         }},
-                        decodepsbt_inputs,
-                        decodepsbt_outputs,
+                        DecodePSBTInputs(),
+                        DecodePSBTOutputs(),
                         {RPCResult::Type::STR_AMOUNT, "fee", /*optional=*/true, "The transaction fee paid if all UTXOs slots in the PSBT have been filled."},
                     }
                 },
@@ -1853,7 +1883,7 @@ static RPCHelpMan converttopsbt()
                 },
                 RPCExamples{
                             "\nCreate a transaction\n"
-                            + HelpExampleCli("createrawtransaction", "\"[{\\\"txid\\\":\\\"myid\\\",\\\"vout\\\":0}]\" \"[{\\\"data\\\":\\\"00010203\\\"}]\"") +
+                            + HelpExampleCli("createrawtransaction", "\"[{\\\"txid\\\":\\\"myid\\\",\\\"vout\\\":0}]\" \"[{\\\"address\\\":0.01}]\"") +
                             "\nConvert the transaction to a PSBT\n"
                             + HelpExampleCli("converttopsbt", "\"rawtransaction\"")
                 },
@@ -2015,13 +2045,7 @@ static RPCHelpMan joinpsbts()
         for (unsigned int i = 0; i < psbt.tx->vout.size(); ++i) {
             merged_psbt.AddOutput(psbt.tx->vout[i], psbt.outputs[i]);
         }
-        for (auto& xpub_pair : psbt.m_xpubs) {
-            if (merged_psbt.m_xpubs.count(xpub_pair.first) == 0) {
-                merged_psbt.m_xpubs[xpub_pair.first] = xpub_pair.second;
-            } else {
-                merged_psbt.m_xpubs[xpub_pair.first].insert(xpub_pair.second.begin(), xpub_pair.second.end());
-            }
-        }
+        merged_psbt.MergeGlobalXPubs(psbt);
         merged_psbt.unknown.insert(psbt.unknown.begin(), psbt.unknown.end());
     }
 

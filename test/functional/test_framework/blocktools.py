@@ -91,6 +91,21 @@ BTX_MAX_TXOUT_SCRIPT_SIZE = 34
 # Keep historical constant name for callers that still import it.
 REGTEST_N_BITS = REGTEST_GENESIS_N_BITS
 REGTEST_TARGET = 0x7fffff0000000000000000000000000000000000000000000000000000000000
+
+# Generic (non-matmul-focused) P2P tests that build blocks with create_block()
+# cannot attach Freivalds product-matrix payloads. Keep the body-payload /
+# product-digest / v4 requirements inactive via regtest-only height overrides
+# so those tests exercise BIP152/etc. without weakening consensus code.
+# fMatMulPOW stays on: CBlock.solve() still fills header seeds/digest.
+# Same approach as p2p_headers_sync_with_minchainwork.py (task #78).
+REGTEST_GENERIC_P2P_MATMUL_ARGS = [
+    "-regtestmatmulv4height=2147483647",
+    "-regtestrcheight=2147483647",
+    "-regtestrccoupledheight=2147483647",
+    "-regtestmatmulproductdigestheight=2147483647",
+    "-regtestmatmulbindingheight=2147483647",
+    "-regtestmatmulrequireproductpayload=0",
+]
 assert_equal(uint256_from_compact(REGTEST_N_BITS), REGTEST_TARGET)
 
 DIFF_1_N_BITS = 0x1d00ffff
@@ -152,9 +167,13 @@ def _btx_regtest_next_work_required(prev_hash):
     target_timespan = REGTEST_MATMUL_DGW_WINDOW * REGTEST_MATMUL_TARGET_SPACING
     actual_timespan = max(target_timespan // 3, min(actual_timespan, target_timespan * 3))
 
-    # arith_uint256 multiplication overflows modulo 2^256 before division.
-    new_target = (avg_target * actual_timespan) & UINT256_MASK
-    new_target //= target_timespan
+    # pow.cpp::ScaleTargetByTimespan divides before multiplying so the final
+    # retarget cannot wrap a 256-bit intermediate. The DGW averaging above
+    # intentionally retains arith_uint256's fixed-width behavior.
+    quotient, remainder = divmod(avg_target, target_timespan)
+    new_target = quotient * actual_timespan
+    new_target += (remainder * actual_timespan) // target_timespan
+    new_target = min(new_target, UINT256_MASK)
     new_target = min(new_target, REGTEST_POW_LIMIT)
     return uint256_to_compact(new_target)
 
@@ -374,9 +393,10 @@ class TestFrameworkBlockTools(unittest.TestCase):
         assert next_bits != REGTEST_POW_LIMIT_N_BITS
         assert uint256_from_compact(next_bits) < REGTEST_POW_LIMIT
 
-    def test_regtest_dgw_first_retarget_matches_consensus_overflow_math(self):
-        # With regtest's 2100ffff pre-DGW bits and 1-second spacing, fixed-width
-        # 256-bit overflow in DGW averaging yields this known first retarget.
+    def test_regtest_dgw_first_retarget_matches_consensus_scaling(self):
+        # With regtest's 2100ffff pre-DGW bits and 1-second spacing, preserve
+        # fixed-width DGW averaging but mirror consensus's overflow-safe final
+        # timespan scaling.
         base_hash = (1 << 255) + 0xABCDEF
         seed_solved_block_index(
             block_hash=base_hash,
@@ -398,7 +418,7 @@ class TestFrameworkBlockTools(unittest.TestCase):
             )
             prev_hash = block_hash
 
-        assert_equal(_btx_regtest_next_work_required(prev_hash), 0x1F016C64)
+        assert_equal(_btx_regtest_next_work_required(prev_hash), 0x1F785BEF)
 
     def test_create_coinbase_pubkey_falls_back_to_p2pkh_under_btx_limits(self):
         pubkey = bytes.fromhex("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")

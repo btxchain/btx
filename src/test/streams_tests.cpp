@@ -124,12 +124,7 @@ BOOST_AUTO_TEST_CASE(xor_file)
         BOOST_CHECK_EXCEPTION(xor_file.ignore(1), std::ios_base::failure, HasReason{"AutoFile::ignore: file handle is nullptr"});
     }
     {
-#ifdef __MINGW64__
-        // Temporary workaround for https://github.com/bitcoin/bitcoin/issues/30210
-        const char* mode = "wb";
-#else
         const char* mode = "wbx";
-#endif
         AutoFile xor_file{raw_file(mode), xor_pat};
         xor_file << test1 << test2;
         BOOST_REQUIRE_EQUAL(xor_file.fclose(), 0);
@@ -277,6 +272,25 @@ BOOST_AUTO_TEST_CASE(streams_vector_reader_rvalue)
     reader >> VARINT(varint);
     BOOST_CHECK_EQUAL(varint, 54321U);
     BOOST_CHECK(reader.empty());
+}
+
+BOOST_AUTO_TEST_CASE(streams_vector_reader_ignore)
+{
+    const std::vector<uint8_t> data{1, 2, 3};
+    SpanReader reader{data};
+
+    reader.ignore(2);
+    BOOST_CHECK_EQUAL(reader.size(), 1U);
+    BOOST_CHECK_EQUAL(reader.GetPos(), 2U);
+
+    // Ignoring beyond the remaining input must throw without advancing.
+    BOOST_CHECK_THROW(reader.ignore(2), std::ios_base::failure);
+    BOOST_CHECK_EQUAL(reader.size(), 1U);
+    BOOST_CHECK_EQUAL(reader.GetPos(), 2U);
+
+    reader.ignore(1);
+    BOOST_CHECK(reader.empty());
+    BOOST_CHECK_THROW(reader.ignore(1), std::ios_base::failure);
 }
 
 BOOST_AUTO_TEST_CASE(bitstream_reader_writer)

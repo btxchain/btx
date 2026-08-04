@@ -111,6 +111,7 @@ public:
     enum class IndexStorageMode : uint8_t {
         AUTO = 0,
         MEMORY_ONLY = 1,
+        NO_INDEX = 2,
     };
 
     explicit ShieldedMerkleTree(IndexStorageMode mode = IndexStorageMode::AUTO);
@@ -262,6 +263,12 @@ public:
         }
 
         commitment_index_store_.reset();
+        if (m_index_storage_mode_ == IndexStorageMode::NO_INDEX) {
+            commitment_index_enabled_ = false;
+            commitment_index_mem_.reset();
+            frontier_checkpoints_.reset();
+            return;
+        }
         if (m_index_storage_mode_ != IndexStorageMode::MEMORY_ONLY) {
             std::lock_guard<std::mutex> lock(s_commitment_store_mutex);
             commitment_index_store_ = s_commitment_store;
@@ -408,6 +415,13 @@ public:
      */
     void IncrementalUpdate(const uint256& new_leaf);
 
+    /** Witness frontiers/cursors never retain a commitment-position index. */
+    [[nodiscard]] bool HasCommitmentIndexState() const
+    {
+        return tree_.HasCommitmentIndex() ||
+               (cursor_.has_value() && cursor_->HasCommitmentIndex());
+    }
+
     // --- Serialization -------------------------------------------------------
     template <typename Stream>
     void Serialize(Stream& s) const
@@ -432,6 +446,10 @@ public:
     template <typename Stream>
     void Unserialize(Stream& s)
     {
+        // Witness frontiers and cursors are private proof state. They never
+        // need the node-wide persistent commitment-position index and must
+        // not attach it while being hydrated from a wallet record.
+        tree_ = ShieldedMerkleTree{ShieldedMerkleTree::IndexStorageMode::NO_INDEX};
         ::Unserialize(s, tree_);
         uint64_t fc{0};
         ::Unserialize(s, COMPACTSIZE(fc));
@@ -448,7 +466,7 @@ public:
             throw std::ios_base::failure("ShieldedMerkleWitness: invalid cursor flag");
         }
         if (has_cursor) {
-            cursor_.emplace();
+            cursor_.emplace(ShieldedMerkleTree::IndexStorageMode::NO_INDEX);
             ::Unserialize(s, *cursor_);
             uint64_t cd{0};
             ::Unserialize(s, COMPACTSIZE(cd));

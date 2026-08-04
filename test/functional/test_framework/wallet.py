@@ -438,8 +438,12 @@ class MiniWallet:
         assert fee_rate >= 0
         assert fee >= 0
         # calculate fee
-        if self._mode in (MiniWalletMode.RAW_OP_TRUE, MiniWalletMode.ADDRESS_OP_TRUE):
-            vsize = Decimal(104)  # anyone-can-spend
+        if self._mode == MiniWalletMode.RAW_OP_TRUE:
+            vsize = Decimal(104)  # raw anyone-can-spend
+        elif self._mode == MiniWalletMode.ADDRESS_OP_TRUE:
+            # BTX has no witness discount (WITNESS_SCALE_FACTOR=1), so the
+            # two witness framing bytes plus the 27-byte witness are counted.
+            vsize = Decimal(133)
         elif self._mode == MiniWalletMode.RAW_P2PK:
             vsize = Decimal(168)  # P2PK (73 bytes scriptSig + 35 bytes scriptPubKey + 60 bytes other)
         elif self._mode == MiniWalletMode.RAW_P2PKH:

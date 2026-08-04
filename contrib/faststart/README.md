@@ -1,5 +1,14 @@
 # BTX Fast-Start Validating Nodes
 
+Fast-start changes sync mechanics, not consensus activation or verification
+authority. The proposed MatMul v4.7 implementation keeps all heights disabled.
+At future Epochs A/B, a near-tip claimed block still requires Profile 1
+ExactReplay even when historical state was bootstrapped from a snapshot;
+checkpoint/assumeutxo trust must be disclosed rather than described as replay
+of all history. Profile 2 is reserved for a later proof-authoritative epoch.
+See
+[`doc/btx-matmul-v4.7-transition-roadmap.md`](../../doc/btx-matmul-v4.7-transition-roadmap.md).
+
 This directory contains the first-run bootstrap wrapper for operators who want
 to:
 
@@ -138,6 +147,41 @@ python3 contrib/faststart/btx-agent-setup.py \
   --preset service \
   --datadir="$HOME/.btx-service"
 ```
+
+For a self-custody miner, installation, verified snapshot bootstrap, wallet
+provisioning, and live-mining supervisor startup can be handed off in one
+command:
+
+```bash
+python3 contrib/faststart/btx-agent-setup.py \
+  --repo btxchain/btx \
+  --release-tag v0.33.2 \
+  --preset miner \
+  --datadir="$HOME/.btx" \
+  --start-mining
+```
+
+`--start-mining` is accepted only with `--preset=miner`. It starts the bundled
+`contrib/mining/start-live-mining.sh` after fast-start succeeds, so the same
+wallet provisioning, backend enforcement, peer recovery, PID files, and logs
+used by the standalone helper remain authoritative. Use
+`--mining-wallet=NAME`, `--mining-results-dir=PATH`, or repeated approved
+`--mining-arg=VALUE` options for operator overrides. Values beginning with
+`--` must use the `--mining-arg=--option=value` form. The allowlist covers RPC
+port, peer, sleep/idle-gate, node PID-file, and mining-backend controls. Treat
+an idle-gate command as trusted local code. Core handoff arguments, payout
+addresses, credentials, foreground/help modes, and unknown options are rejected.
+Filesystem paths are normalized before detaching so the generated start and
+stop commands remain consistent across working directories.
+
+The installer rejects `--start-mining` together with `--no-start-daemon` or
+`--follow`: the supervisor requires the daemon, and a followed bootstrap does
+not return to perform the mining handoff. After bootstrap returns, the installer
+also waits until block validation has caught up to known headers and the daemon
+has left initial block download; a timeout fails closed before the supervisor
+starts. In `--json` mode, bootstrap and supervisor output stay on stderr while
+the final summary reports `"mining_sync_ready": true`,
+`"mining_started": true`, and the exact start/stop command arrays.
 
 That flow:
 

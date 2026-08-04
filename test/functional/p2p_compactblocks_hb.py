@@ -4,6 +4,7 @@
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test compact blocks HB selection logic."""
 
+from test_framework.blocktools import REGTEST_GENERIC_P2P_MATMUL_ARGS
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import assert_equal
 
@@ -14,6 +15,10 @@ class CompactBlocksConnectionTest(BitcoinTestFramework):
     def set_test_params(self):
         self.setup_clean_chain = True
         self.num_nodes = 6
+        # Keep v4 / product-payload inactive (regtest-only) so HB selection is
+        # measured without MatMul ENC-DR cost at height >= 100.
+        matmul = REGTEST_GENERIC_P2P_MATMUL_ARGS
+        self.extra_args = [list(matmul) for _ in range(self.num_nodes)]
 
     def peer_info(self, from_node, to_node):
         """Query from_node for its getpeerinfo about to_node."""

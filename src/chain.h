@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <string>
 #include <vector>
@@ -132,8 +133,20 @@ enum BlockStatus : uint32_t {
 
     BLOCK_OPT_WITNESS        =   128, //!< block data in blk*.dat was received with a witness-enforcing client
 
-    BLOCK_STATUS_RESERVED    =   256, //!< Unused flag that was previously set on assumeutxo snapshot blocks and their
-                                      //!< ancestors before they were validated, and unset when they were validated.
+    //! Header-derived ε=0 ExactReplay succeeded. This is deliberately
+    //! independent of BLOCK_VALID_TRANSACTIONS/BLOCK_HAVE_DATA: it warms
+    //! digest-only validation across restarts/reorgs but grants no
+    //! authenticated chainwork until the complete block is validated. The
+    //! block-index database binds persisted instances to a versioned hash of
+    //! the complete MatMul activation/profile tuple and refuses startup on a
+    //! mismatch until -reindex rebuilds both the context and local verdicts.
+    BLOCK_EXACT_REPLAY_VERIFIED = 256,
+
+    //! An operator-configured M-of-N attestation quorum authorized this
+    //! Profile-1 replay on a trusted mirror. This is audit metadata only:
+    //! unlike BLOCK_EXACT_REPLAY_VERIFIED it MUST NOT short-circuit validation
+    //! after restart because the configured signer set/threshold may change.
+    BLOCK_TRUSTED_REPLAY_ATTESTED = 512,
 };
 
 /** The block chain is a tree shaped structure starting with the
@@ -167,6 +180,20 @@ public:
 
     //! (memory only) Total amount of work (expected number of hashes) in the chain up to and including this block
     arith_uint256 nChainWork{};
+
+    //! (memory only) AUTHENTICATED chainwork (audit P0.1/C1). Identical to
+    //! nChainWork for any block whose entire ancestry has verified block bodies,
+    //! and for every block at a pre-MatMul (v3) height. At MatMul (v4/v4.2)
+    //! heights a header contributes work here ONLY once its full block body has
+    //! arrived and the height-selected MatMul authority has passed (Profile-1
+    //! RC uses ExactReplay), i.e. the index reached BLOCK_VALID_TRANSACTIONS and
+    //! is not BLOCK_FAILED. A forged
+    //! `matmul_digest`-only header chain (no bodies) therefore contributes ZERO
+    //! authenticated work even though it accrues full provisional nChainWork.
+    //! Like nChainWork this is derived, never serialized; it is deterministically
+    //! recomputed from persisted nStatus on restart/reindex.
+    //! @sa GetBlockAuthenticatedProof, UpdateAuthenticatedChainWork
+    arith_uint256 nAuthenticatedChainWork{};
 
     //! Number of transactions in this block. This will be nonzero if the block
     //! reached the VALID_TRANSACTIONS level, and zero otherwise.
@@ -318,7 +345,7 @@ public:
     std::string ToString() const;
 
     //! Check whether this block index entry is valid up to the passed validity level.
-    bool IsValid(enum BlockStatus nUpTo = BLOCK_VALID_TRANSACTIONS) const
+    bool IsValid(enum BlockStatus nUpTo) const
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
     {
         AssertLockHeld(::cs_main);
@@ -370,6 +397,70 @@ protected:
 };
 
 arith_uint256 GetBlockProof(const CBlockIndex& block);
+
+/** Audit P0.1/C1 — authenticated-chainwork accounting.
+ *
+ *  IsBlockAuthenticated: whether `block`'s own PoW work may be credited as
+ *  AUTHENTICATED. At heights below the MatMul v4 fork this is always true (v3
+ *  header work is unforgeable-on-sight and credited immediately, byte-identical
+ *  to legacy behavior). At MatMul heights it is true iff the block's body has
+ *  been received and the height-selected MatMul authority passed (ExactReplay
+ *  in v4.7 Epoch A) -- i.e. the index reached BLOCK_VALID_TRANSACTIONS and
+ *  carries no BLOCK_FAILED bit. A self-declared `matmul_digest` header with no
+ *  valid body is never authenticated.
+ *
+ *  GetBlockAuthenticatedProof: GetBlockProof(block) when authenticated, else 0.
+ *
+ *  UpdateAuthenticatedChainWork: (re)derive block.nAuthenticatedChainWork as
+ *  pprev->nAuthenticatedChainWork + GetBlockAuthenticatedProof(block). This is the
+ *  single source of truth used by every maintenance site (AddToBlockIndex,
+ *  ReceivedBlockTransactions, LoadBlockIndex) and by the unit tests.
+ *
+ *  Callers hold cs_main (nStatus is cs_main-guarded). */
+bool IsBlockAuthenticated(const CBlockIndex& block, const Consensus::Params& params);
+arith_uint256 GetBlockAuthenticatedProof(const CBlockIndex& block, const Consensus::Params& params);
+void UpdateAuthenticatedChainWork(CBlockIndex& block, const Consensus::Params& params);
+
+/** WP-8 / C1/H2: claimed chain work clamped for peer-selection / anti-DoS use.
+ *  Returns nAuthenticatedChainWork plus min(unauthenticated suffix work,
+ *  unauth_allowance_blocks * GetBlockProof(block)). Production passes a zero
+ *  allowance: an unverified MatMul suffix receives no work-based preference,
+ *  even when it is only one header deep. Pre-fork (and for any fully
+ *  body-validated chain) nAuthenticatedChainWork == nChainWork, so this returns
+ *  EXACTLY nChainWork — call sites routed through it are behavior-identical
+ *  while the MatMul v4 fork is disabled. The explicit parameter remains for
+ *  deterministic policy-unit coverage; production callers use the constant
+ *  below. */
+arith_uint256 GetTrustAdjustedChainWork(const CBlockIndex& block, unsigned int unauth_allowance_blocks);
+
+/** Production unauthenticated-work allowance used for best-header selection
+ *  and peer trust decisions. Zero is deliberate: header download may continue,
+ *  but no claimed MatMul work affects preference before body verification.
+ *  Kept here so validation, blockstorage, and net_processing share the same
+ *  fail-closed policy. */
+inline constexpr unsigned int TRUST_ADJUSTED_WORK_ALLOWANCE_BLOCKS = 0;
+
+/** True iff `candidate` should replace `current` as best header under the
+ *  trust-adjusted work metric. With the production zero allowance this is
+ *  authenticated work only. Tied unauthenticated branches prefer more
+ *  authenticated work and then the shallowest suffix, so even one unverified
+ *  header cannot displace its authenticated parent on claimed work.
+ *  Pre-MatMul-fork/full-body ties retain legacy behavior. */
+[[nodiscard]] bool PreferTrustAdjustedHeader(const CBlockIndex& current,
+                                             const CBlockIndex& candidate,
+                                             unsigned int unauth_allowance_blocks = TRUST_ADJUSTED_WORK_ALLOWANCE_BLOCKS);
+
+/** After an ancestor's authenticated work changes, re-derive
+ *  nAuthenticatedChainWork for every known descendant in parent-first order.
+ *  Header-only children contribute zero authenticated proof but must inherit
+ *  the updated parent authenticated base; without this walk a forged long
+ *  header branch can keep a stale (too-low) authenticated sum after a
+ *  genuine body promotion lower in the tree. */
+void PropagateAuthenticatedChainWorkDescendants(
+    CBlockIndex& root,
+    const Consensus::Params& params,
+    std::function<void(std::function<void(CBlockIndex&)>)> for_each_index);
+
 /** Return the time it would take to redo the work difference between from and to, assuming the current hashrate corresponds to the difficulty at tip, in seconds. */
 int64_t GetBlockProofEquivalentTime(const CBlockIndex& to, const CBlockIndex& from, const CBlockIndex& tip, const Consensus::Params&);
 /** Find the forking point between two chain tips. */

@@ -1,3 +1,10 @@
+> **HISTORICAL — superseded by MatMul v4.7.** This dated legacy-workload CUDA
+> record is retained for provenance. It is not Profile 1 ExactReplay launch
+> evidence and its default-policy language is not current. Epoch A uses
+> Profile 1 ExactReplay; Epochs B/C transition proofs on Profile 1; Epoch D
+> separately selects Profile 2. Mainnet Epoch A (v4 = BMX4C = RC) has a finite compiled candidate height and true source flags, so it would activate if merged unchanged; release remains NO-GO pending exact-final combined-tree CUDA+Metal evidence, reviewed schema-4 ASERT calibration, ratification re-affirmation, full closeout, and live-tip runway validation; all other transition heights remain disabled. See
+> [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md).
+
 ## BTX CUDA MatMul Follow-Up Notes (2026-04-13)
 
 This note records the second CUDA optimization pass taken from

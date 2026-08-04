@@ -559,13 +559,13 @@ BOOST_AUTO_TEST_CASE(test_regtest_assumeutxo)
             110,
             "c35580bfd4f6c2ab69a8b1ac446962e5aacb164dc13e237867bd2170b91d7c98",
             111,
-            "9e3817054fd9df2c2a27f647a3b9f55f8bc91f05168753543a902074a8f21700",
+            "b610281aaeb8d64d4739e848a47c0a6ae226a0e26e29e5a3d735825e34cc2e65",
         },
         {
             299,
             "2e5dcf9f04328141c721b5615a32dc265da783050ba7bd3e436a48b5a2013ae1",
             300,
-            "78e6ea382d4d5466b1d8421c1b8789e9c7cde9de8b6da4042be00ca2948a4860",
+            "7202d1341554184806cfb25c74ee0aa41f680c42ea9fdb965685962b8e8e148b",
         },
         {
             61'010,
@@ -613,6 +613,90 @@ BOOST_AUTO_TEST_CASE(test_regtest_assumeutxo)
     BOOST_CHECK(!params->AssumeutxoForBlockhash(uint256{1}));
 }
 
+BOOST_AUTO_TEST_CASE(assumeutxo_snapshot_header_compatibility)
+{
+    CBlockIndex base;
+    base.nHeight = 0;
+    base.nChainWork = 1;
+    base.nAuthenticatedChainWork = 1;
+
+    CBlockIndex snapshot;
+    snapshot.pprev = &base;
+    snapshot.nHeight = 1;
+    snapshot.nChainWork = 3;
+    snapshot.nAuthenticatedChainWork = 3;
+    snapshot.BuildSkip();
+
+    CBlockIndex descendant;
+    descendant.pprev = &snapshot;
+    descendant.nHeight = 2;
+    descendant.nChainWork = 4;
+    descendant.nAuthenticatedChainWork = 4;
+    descendant.BuildSkip();
+
+    CBlockIndex lower_work_fork;
+    lower_work_fork.nHeight = 1;
+    lower_work_fork.nChainWork = 2;
+    lower_work_fork.nAuthenticatedChainWork = 2;
+
+    CBlockIndex equal_work_fork;
+    equal_work_fork.nHeight = 1;
+    equal_work_fork.nChainWork = snapshot.nChainWork;
+    equal_work_fork.nAuthenticatedChainWork = snapshot.nChainWork;
+
+    CBlockIndex higher_work_fork;
+    higher_work_fork.nHeight = 2;
+    higher_work_fork.nChainWork = 4;
+    higher_work_fork.nAuthenticatedChainWork = 4;
+
+    BOOST_CHECK(IsAssumeUtxoSnapshotHeaderCompatible(
+        &snapshot, &snapshot, false));
+    BOOST_CHECK(IsAssumeUtxoSnapshotHeaderCompatible(
+        &descendant, &snapshot, false));
+    BOOST_CHECK(!IsAssumeUtxoSnapshotHeaderCompatible(
+        &base, &snapshot, false));
+    BOOST_CHECK(IsAssumeUtxoSnapshotHeaderCompatible(
+        &base, &snapshot, true));
+    BOOST_CHECK(IsAssumeUtxoSnapshotHeaderCompatible(
+        &lower_work_fork, &snapshot, true));
+    BOOST_CHECK(!IsAssumeUtxoSnapshotHeaderCompatible(
+        &equal_work_fork, &snapshot, true));
+    BOOST_CHECK(!IsAssumeUtxoSnapshotHeaderCompatible(
+        &higher_work_fork, &snapshot, true));
+    BOOST_CHECK(!IsAssumeUtxoSnapshotHeaderCompatible(
+        nullptr, &snapshot, true));
+}
+
+BOOST_AUTO_TEST_CASE(test_regtest_assumeutxo_functional_harness_override)
+{
+    ArgsManager harness_args;
+    harness_args.ForceSetArg("-regtestmatmulltsealaspow", "0");
+    const auto harness_params = CreateChainParams(harness_args, ChainType::REGTEST);
+
+    // Phase A keeps only its deterministic height-299 fixture and the
+    // explicitly mockable height-61,010 fast-start fixture. The height-110
+    // snapshot is committed to the default Phase-B chain and must not leak
+    // across this consensus override.
+    BOOST_CHECK(!harness_params->AssumeutxoForHeight(110));
+    BOOST_REQUIRE(harness_params->AssumeutxoForHeight(299));
+    BOOST_REQUIRE(harness_params->AssumeutxoForHeight(61'010));
+    const std::vector<int> expected_harness_heights{299, 61'010};
+    const auto harness_heights = harness_params->GetAvailableSnapshotHeights();
+    BOOST_CHECK_EQUAL_COLLECTIONS(
+        harness_heights.begin(), harness_heights.end(),
+        expected_harness_heights.begin(), expected_harness_heights.end());
+
+    ArgsManager custom_args;
+    custom_args.ForceSetArg("-regtestmatmulltsealaspow", "0");
+    custom_args.ForceSetArg("-regtestmatmulv4dimension", "128");
+    const auto custom_params = CreateChainParams(custom_args, ChainType::REGTEST);
+
+    // Combining the harness seal choice with any other consensus override
+    // invalidates the canned chain and must still fail closed.
+    BOOST_CHECK(custom_params->GetAvailableSnapshotHeights().empty());
+    BOOST_CHECK(!custom_params->AssumeutxoForHeight(299));
+}
+
 BOOST_AUTO_TEST_CASE(test_mainnet_assumeutxo_snapshot_metadata)
 {
     // Mainnet snapshots are anchored again; verify the published heights and a
@@ -639,6 +723,7 @@ BOOST_AUTO_TEST_CASE(test_mainnet_assumeutxo_snapshot_metadata)
         132'173,
         132'209,
         155'700,
+        176'600,
     };
 
     BOOST_REQUIRE_EQUAL(snapshot_heights.size(), expected_snapshot_heights.size());
@@ -666,6 +751,7 @@ BOOST_AUTO_TEST_CASE(test_mainnet_assumeutxo_snapshot_metadata)
     BOOST_CHECK(params->AssumeutxoForHeight(132'173));
     BOOST_CHECK(params->AssumeutxoForHeight(132'209));
     BOOST_CHECK(params->AssumeutxoForHeight(155'700));
+    BOOST_CHECK(params->AssumeutxoForHeight(176'600));
     BOOST_CHECK(!params->AssumeutxoForHeight(50'000));
     BOOST_CHECK(!params->AssumeutxoForHeight(0));
 }

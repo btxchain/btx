@@ -1,6 +1,16 @@
 # BTX Spec Traceability Manifest
 
 This manifest maps spec `TEST:` IDs to concrete unit/functional checks and readiness scripts.
+MatMul transition terminology and activation precedence follow the
+[v4.7 roadmap](../../doc/btx-matmul-v4.7-transition-roadmap.md):
+Profile 1 ExactReplay first, mandatory dual validation second, Profile 1 proof
+authority third, and Profile 2 proof authority only at a separate later height.
+Mainnet Epoch A is scheduled at the release-selected atomic `H_A`; Epoch B–D heights remain disabled.
+
+TEST: rc_profile1_loaded_p99_full_metal — `src/matmul-v4-rc-harness.cpp`
+TEST: rc_profile1_back_to_back_consensus — `src/test/matmul_verify_worker_tests.cpp`
+TEST: rc_profile1_three_branch_reorg_cancel — `src/test/matmul_verify_worker_tests.cpp`
+TEST: rc_no_chainwork_before_exact_replay — `src/test/matmul_chainwork_auth_tests.cpp`
 
 TEST: benchmark_compression_overhead — `scripts/matmul_pow_benchmark.sh`, `test/benchmark/matmul_phase2_bench.cpp`
 TEST: benchmark_host_sha256 — `scripts/matmul_pow_benchmark.sh`

@@ -7,22 +7,30 @@
 
 #include <chainparamsseeds.h>
 #include <consensus/amount.h>
+#include <consensus/consensus.h>
 #include <consensus/merkle.h>
 #include <consensus/params.h>
 #include <hash.h>
 #include <kernel/messagestartchars.h>
 #include <logging.h>
+#include <matmul/matmul_v4.h>
+#include <matmul/matmul_v4_bmx4.h>
+#include <matmul/matmul_v4_rc.h> // RCEpisodeParams factories (n_ctx hash-bound guardrail)
+#include <pow.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
 #include <script/interpreter.h>
 #include <script/script.h>
+#include <serialize.h>
 #include <uint256.h>
 #include <util/chaintype.h>
+#include <util/check.h>
 #include <util/strencodings.h>
 
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
+#include <numeric>
 #include <cstring>
 #include <iterator>
 
@@ -53,6 +61,541 @@ static constexpr int32_t BTX_V03210_HARDENING_HEIGHT{130'500};
 static constexpr int32_t BTX_V03211_HARDENING_HEIGHT{132'000};
 static constexpr int32_t BTX_SHIELDED_UNSHIELD_VELOCITY_END_HEIGHT{135'000};
 static constexpr CAmount BTX_SHIELDED_UNSHIELD_VELOCITY_MIN_CAP{10'000 * COIN};
+// Content-elimination hard fork (inscription/NFT/token meta-protocol removal).
+// Keep the 0.33.2 consensus changes on one coordinated release flag day.
+// PR #88 is integrated for review and regtest exercise only. Its historical
+// spend/UTXO compatibility and remaining content channels are not yet cleared
+// for a production flag day.
+static constexpr int32_t BTX_CONTENT_ELIMINATION_HEIGHT{std::numeric_limits<int32_t>::max()};
+
+// Future ENC_RC Profile-2 ASERT constants (design §5/§6). Epoch A activates
+// Profile 1 only; every Profile-2/DRLT/coupled public height remains disabled.
+// A later proof-authoritative Profile-2 release must provide its own
+// independently reviewed height and activate this rescale atomically.
+// Per-nonce work rises
+// by the EXACT episode-MAC ratio datacenter/base, so the difficulty target must
+// LOOSEN by that ratio at the activation height to hold the 90 s interval. After
+// the fused-FFN redesign BOTH profiles use the fused FFN, so the base grew too.
+// The datacenter b_seq is then raised (the free compute lever — see matmul_v4_rc.h)
+// to restore the intended ~16× differential against the heavier fused base; the
+// MAC counts factor exactly as 2^37·k:
+//   datacenter = 2^37·16422 = 2 257 022 493 917 184  (b_seq=87552, L=24, rounds=8)
+//   base       = 2^37·1027   =   141 149 805 215 744
+// so the ratio is EXACTLY 16422/1027 = 15.990… (1027=13·79, 16422=2·3·7·17·23, coprime).
+// Exact, not modeled — block interval is continuous across the cutover, and the
+// ASERT-ratio guardrail below recomputes reduce(MAC_dc,MAC_base) and asserts it
+// equals this constant, so the two can never drift when dims are retuned.
+// On-silicon confirmation still wanted (effective value is the datacenter miner's
+// real nonce/s, MFU-dependent, not the raw FLOP ratio). Takes effect together with
+// a finite profile-2 activation height (coupled trio asserted below).
+static constexpr int64_t kRCDatacenterAsertRescaleNum{16422};
+static constexpr int64_t kRCDatacenterAsertRescaleDen{1027};
+
+// EPOCH-A PROFILE-1 ONE-TIME ASERT POLICY COEFFICIENT — RECONFIRM THE
+// LAUNCH-COHORT ENVELOPE ON THE EXACT FINAL BINARY BEFORE RELEASE.
+//
+// WHAT THIS NUMBER IS. It is the PRE-GATE NONCE-ATTEMPT-RATE RATIO
+//     C = N / M
+// where N is the v3 miner's raw nonce attempts per second (sigma is computed
+// for EVERY nonce) and M is the Profile-1 RC episode rate per second.
+//
+// It is NOT the realized difficulty loosen k, NOT the post-gate digest-trial
+// rate ratio R_eff/R_rc, and NOT the v3 matmul-only rate R_M. Those are
+// different quantities and substituting one for another is not a rounding
+// error -- see the hazard note below.
+//
+// DERIVATION. v3 needs both gates, Profile 1 keeps only the digest gate:
+//     lambda_v3 = N * q * p        with q = 2^epsilon * p
+//     lambda_rc = M * p_rc
+// Continuity (lambda_rc = lambda_v3) gives p_rc = p * q * (N/M), which is
+// exactly what DeriveMatMulEpochATransitionTarget computes. The realized
+// loosen is the OUTCOME k = p_rc/p = q * C, not an input.
+//
+// MEASURED, same-silicon, two vendors
+// (doc/evidence/asert-two-rig-calibration-2026-08-03):
+//     CUDA sm_120 : N/M = 6.93e9  -> k ~ 119'783
+//     Metal m4    : N/M = 1.15e9  -> k ~  19'900
+// The 5.8x spread is a hardware-mix property. Installed at the CUDA figure
+// because the loss function is asymmetric: under-loosening costs linearly in
+// the error while over-loosening costs only logarithmically, so biasing toward
+// the faster observed miner is the cheap direction.
+//
+// HAZARD, and the reason this comment is long. An earlier revision of this
+// file installed a SATURATED uint32 value and described the field as a
+// "throughput ratio", while the calibration evidence recommended installing k.
+// Installing k (about 1.2e5) as C would yield a realized loosen of q*k ~ 2.1
+// instead of the intended ~1.2e5 -- under-loosening by 1/q ~ 57'864x, which at
+// a 90 s target is a first block expected in roughly 60 DAYS. The uint32
+// saturation is also gone: the Epoch-A path does exact wide arithmetic and now
+// reduces through ReduceRescaleRatioToU64, so the measured value is installed
+// directly rather than clipped.
+//
+// matmul_unified_activation_tests pins a fixed vector at the calibration nBits
+// asserting the realized k, so a future value of the wrong KIND fails a test
+// rather than the chain.
+// RATIFIED POLICY COEFFICIENT, not a reproduced measurement. Say so plainly here,
+// because the previous comment implied this number came out of a campaign.
+//
+// The first assembled schema-4 corpus now exists:
+// doc/evidence/epoch-a-asert-schema4-cuda-2026-08-04. Measured on the CUDA
+// launch cohort at this freeze it derives 4'007'014'530 -- parent 331'891'937
+// attempts/s over 5 samples, RC 12.073250614 s over 8 episodes, bound to exact
+// binaries and revision. The value installed here is 1.730x that envelope.
+//
+// It is installed deliberately high because the error is asymmetric: too low
+// risks slow or stalled blocks at the fork, too high yields temporarily fast
+// blocks that ASERT corrects within an epoch. Two further reasons not to lower
+// it to the measured figure:
+//
+//  - the historical campaign behind this constant measured ~215.36M attempts/s
+//    and ~32.18 s per RC episode on a different device class, and this cohort's
+//    own RC timing has appeared in two clusters (~12 s and ~32 s) across builds
+//    on the same GPU with no resolved explanation. The installed value lies
+//    between the coefficients those clusters imply;
+//  - this exact constant is NOT reproducible from the retained historical
+//    artifacts, which yield 6'898'853'852, and those artifacts are classified
+//    historical and non-authorizing.
+//
+// So: the corpus establishes a measured lower bound and binds it to real
+// evidence; this separate ratified coefficient deliberately sits above it.
+// Recalibrate if the representative launch cohort changes.
+static constexpr int64_t kRCEpochAAsertRescaleNum{6931159304};
+static constexpr int64_t kRCEpochAAsertRescaleDen{1};
+
+// Release-candidate value, but a technically live consensus instruction if
+// this source is merged: mainnet will enforce Epoch A at this height. The
+// consolidated v0.33.2 activation review must recompute it once against the
+// live mainnet tip before the exact-final CUDA+Metal evidence build is frozen.
+// Keep all three Epoch-A heights bound to this single constant so that a later
+// update cannot create a digest-only v4/BMX4C interval.
+static constexpr int32_t BTX_MATMUL_V47_EPOCH_A_HEIGHT{185'000};
+
+// MatMul v4.2 / ENC-BMX4C construction invariants (spec §8.1/§8.2). No-op when
+// the profile is unset (nMatMulBMX4CHeight == INT32_MAX = disabled); when a
+// network sets a BMX4C activation height these MUST hold, so a
+// misconfiguration fails loudly at node startup rather than at the fork.
+//
+// These use Assert() to express that every failure is fatal and to retain the
+// project's structured internal-error diagnostic. Supported CMake builds
+// already remove -DNDEBUG, and util/check.h rejects C++ builds that define it,
+// so the earlier lowercase assert() expressions were evaluated in supported
+// Release builds too. This conversion makes the intended primitive explicit;
+// it does not imply that supported releases previously skipped these checks.
+static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus, bool is_regtest)
+{
+    // Audit P1-1 (per-network relay invariant): the enforced block-size ceiling
+    // is the per-network consensus value nMaxBlockSerializedSize, but the P2P
+    // layer sizes its block-message buffer from the compile-time
+    // MAX_BLOCK_SERIALIZED_SIZE (see net.cpp's MAX_BLOCK_MESSAGE_LENGTH
+    // static_assert). If any network raised its consensus block ceiling above
+    // that compile-time bound, a consensus-valid block on that network would
+    // exceed MAX_BLOCK_MESSAGE_LENGTH and become un-relayable -- reintroducing the
+    // P0.5 split/eclipse surface at the per-network level. Pin every network's
+    // block ceiling to the compile-time bound here so a mismatch aborts startup
+    // rather than surfacing as an un-downloadable block in production. (This runs
+    // unconditionally, before the MatMul-specific checks, so it covers networks
+    // with the MatMul upgrade disabled too.)
+    Assert(consensus.nMaxBlockSerializedSize <= MAX_BLOCK_SERIALIZED_SIZE);
+
+    // Audit F1 / v4.4 §4: HeaderPoW grind field is nNonce, but the bit-26
+    // self-describing 182↔186 wire was WITHDRAWN (pre-activation peer split).
+    // Wire stays 182, so public networks categorically keep HeaderPoW disabled;
+    // Epoch A uses rcadmit policy plus authenticated chainwork instead.
+
+    // Audit H2: the header-PoW discount is valid ONLY in 0..255 (or the
+    // UINT32_MAX "disabled" sentinel). A value in [256, UINT32_MAX-1] would push
+    // the throttle target to powLimit regardless of nBits, recreating the
+    // fixed-cost C2 gate; reject it fatally here rather than clamp it silently.
+    Assert(consensus.IsMatMulHeaderPoWDiscountValid());
+
+    // Audit D1: the immutable MatMul-ASERT schedule parameters (rescale ratios,
+    // branch ordering, collision-freedom) are validated HERE, at construction, so
+    // a malformed set aborts node startup. Previously they were only checked
+    // per-block inside MatMulAsert, which -- because it evaluates EVERY configured
+    // fork's parameters on every ASERT block and failed OPEN to powLimit -- meant a
+    // malformed even future-dated parameter set could weaken CURRENT difficulty the
+    // moment the binary started. ValidateMatMulAsertParams is a pure function of
+    // the params (the height argument is log context only), so validity here
+    // implies validity at every height; the per-block call now fails CLOSED as a
+    // pure defence-in-depth backstop.
+    if (consensus.fMatMulPOW) {
+        Assert(ValidateMatMulAsertParams(consensus, consensus.nMatMulAsertHeight));
+    }
+
+    // Audit DoS-F3: correct MatMul difficulty adjustment requires the MatMul-ASERT
+    // activation height to EQUAL the fast-mine boundary -- ASERT must take over the
+    // instant the fixed-difficulty fast-mining phase ends, with no gap or overlap
+    // (pow.cpp treats nFastMineHeight as the anchor and nMatMulAsertHeight as the
+    // ASERT epoch; a mismatch silently corrupts targeting at the transition). This
+    // is enforced at runtime in init.cpp, but assert it at construction too so a
+    // misconfigured network aborts at startup rather than at the fast->normal
+    // boundary. Every shipped network sets both equal (50'000 on mainnet, 61'000 on
+    // the public test nets, 0/2 on the mockable chains).
+    Assert(consensus.nFastMineHeight == consensus.nMatMulAsertHeight);
+
+    // Audit I1: the miner and verifier use the compile-time tile size
+    // matmul::v4::kTileB (b); a consensus nMatMulV4TranscriptBlockSize that differs
+    // from it would make EVERY v4 block invalid at the fork. Pin them equal
+    // wherever v4 is configured (nMatMulV4TranscriptBlockSize is not yet a truly
+    // parameterizable value -- the b=8/n=8192 profile is a future consensus change,
+    // not a live parameter).
+    // §0.3 / §4.3 PER-PROFILE dimension-invariant guard: for each configured
+    // profile P live at some height, nMatMulV4Dimension at PRODUCTION scale MUST
+    // reduce to exactly P.sketch_rank_m under P.tile_b (tile_b·m == n), and the
+    // per-profile sketch byte count SketchCacheBytes() MUST equal 8·m². The
+    // committed sketch rank, its 8·m² byte count, and the O(n²) verify DoS budget
+    // are calibrated PER PROFILE for that rank at the PRODUCTION dimension.
+    // (Under v4.4 ENC-DR those 8·m² bytes live only in the non-consensus sketch
+    // cache, never in the block; the pin still fixes the recompute/verify shape.)
+    // Nothing else pins the dimension
+    // to the compile-time tile, so raising nMatMulV4Dimension (allowed by the
+    // 4096..8192 accept window) without a lockstep per-profile tile_b change
+    // would SILENTLY yield a different-shaped committed object with no profile
+    // bump / golden regeneration. §0.3 requires m to STAY FIXED with b tracking
+    // n (b -> 8 at n -> 8192 for C; b -> 4 for D). Small test dimensions (regtest
+    // n=256, -regtestmatmulv4dimension overrides) are below production scale and
+    // exempt: their committed object is fixed by the exact-match check, not
+    // calibrated against mainnet goldens. Expressed via the per-profile
+    // MatMulProfileParams (design §4.1/§4.2) so C pins (b=4 -> m=1024 -> 8 MiB)
+    // and D pins (b=2 -> m=2048 -> 32 MiB) INDEPENDENTLY.
+    const auto assert_profile_dimension_pin =
+        [&consensus](const Consensus::MatMulProfileParams& p) {
+            Assert(p.tile_b > 0);
+            // (Note: no assert on SketchCacheBytes()==8·m² — that merely restates
+            // the method's own definition. The meaningful pins are the dimension
+            // ties below, which tie the byte count to n transitively via m.)
+            Assert(consensus.nMatMulV4Dimension % p.tile_b == 0);
+            if (consensus.nMatMulV4Dimension >= p.tile_b * p.sketch_rank_m) {
+                Assert(consensus.nMatMulV4Dimension / p.tile_b == p.sketch_rank_m);
+            }
+        };
+
+    if (consensus.nMatMulV4Height != std::numeric_limits<int32_t>::max()) {
+        Assert(consensus.nMatMulV4TranscriptBlockSize == matmul::v4::kTileB);
+        // Base profile (ENC-S8 / ENC-BMX4C): pin its own (b=4, m=1024, 8 MiB)
+        // triple via the per-profile params. At nMatMulV4Height the live profile
+        // is S8 or C (both the base shape) in every valid config; a v4-only
+        // misconfig is caught by the strict-unified invariant below.
+        assert_profile_dimension_pin(
+            consensus.GetMatMulProfileParams(consensus.nMatMulV4Height));
+    }
+
+    // AUDIT P0.2 (STRICT UNIFIED ACTIVATION): the MatMul upgrade activates on ONE
+    // flag day, v3 -> v4.2/ENC-BMX4C directly, with NO reachable ENC-S8 interval on
+    // ANY network. So the ONLY valid configs are (i) the whole upgrade disabled, or
+    // (ii) v4 and ENC-BMX4C at the SAME height. A v4-only config (bmx4c disabled
+    // while v4 is set) would open a permanent ENC-S8 window, and a staged bmx4c > v4
+    // config would open a transient one -- both forbidden. Checked BEFORE the
+    // disabled-early-return so a v4-only config cannot slip through.
+    Assert((consensus.nMatMulV4Height == std::numeric_limits<int32_t>::max() &&
+            consensus.nMatMulBMX4CHeight == std::numeric_limits<int32_t>::max()) ||
+           (consensus.nMatMulV4Height == consensus.nMatMulBMX4CHeight));
+
+    if (consensus.nMatMulBMX4CHeight == std::numeric_limits<int32_t>::max()) return;
+    // At this point ENC-BMX4C is enabled, so (by the strict-unified invariant above)
+    // v4 and ENC-BMX4C share one height: the single-activation flag day. ENC-S8 is
+    // never live; the live profile at and above the fork is ENC-BMX4C. Exactly one
+    // profile is live at any height -- no dual-profile window, no ENC-S8 interval.
+    Assert(consensus.nMatMulBMX4CHeight == consensus.nMatMulV4Height);
+    // The base-2^6 remainder-top combine must totally decompose every P/Q entry
+    // across the whole accepted-dimension window: 288 * MaxDim <= 2^23 - 1.
+    Assert(static_cast<int64_t>(Consensus::BMX4C_PROJECTION_BOUND_PER_N) *
+               consensus.nMatMulV4MaxDimension <=
+           Consensus::BMX4C_COMBINE_INPUT_BOUND);
+    // The accepted (exact) dimension must be a multiple of the E8M0 block length
+    // (block scales run along the contraction dim in blocks of 32).
+    Assert((consensus.nMatMulV4Dimension % Consensus::BMX4C_SCALE_BLOCK_LENGTH) == 0);
+    // Audit ASERT-F1: the one-time ASERT rescale ratio must be strictly positive.
+    // ValidateMatMulAsertParams enforces this at runtime (failing closed to
+    // the hardest representable target), but that only surfaces AT the fork
+    // height; assert it at startup
+    // too so a non-positive misconfiguration aborts the node immediately. Only
+    // positivity is checked -- a LARGE ratio can be a legitimate calibration
+    // (Num/Den is the measured v3 parent nonce-attempt rate divided by the
+    // Profile-1 episode rate, which can be large), and ASERT
+    // self-corrects any residual within one half-life, so no arbitrary range cap.
+    Assert(consensus.nMatMulBMX4CAsertRescaleNum > 0);
+    Assert(consensus.nMatMulBMX4CAsertRescaleDen > 0);
+
+    // v4.4 ENC-DR carriage fail-close (tension-resolution §4.5): the legacy
+    // FLAT_SKETCH_INBLOCK carriage survives ONLY as a regtest differential-
+    // testing switch. A public network must never be constructible with the
+    // replay carriage selected — the ENC-DR digest-only rule is the single live
+    // consensus carriage everywhere v4 activates.
+    Assert(!consensus.fMatMulV4FlatSketchReplay || is_regtest);
+
+    // v4.4 ENC-DR DR-34 FAIL-CLOSED ACTIVATION GATE (normative spec §5, DR-34).
+    // A public network (regtest exempt) with a LIVE (non-INT32_MAX) v4 height
+    // requires the no-inversion/L0 source authorization bit. FALSE aborts node
+    // startup; TRUE permits the tuple but does not itself prove the external
+    // measurement or ratification record. This is the same fail-closed
+    // mechanism as the retired relay-ready flag, retargeted to the release
+    // decision. (Reachable here only
+    // when v4 is live — we are past the bmx4c==INT32_MAX early return above — but
+    // the height clause keeps the assert correct independent of placement.)
+    Assert(is_regtest ||
+           consensus.nMatMulV4Height == std::numeric_limits<int32_t>::max() ||
+           Consensus::BTX_MATMUL_NO_INVERSION_GATE_RATIFIED);
+
+    // HeaderPoW's grind nonce is not serialized in the fixed 182-byte header.
+    // Enabling it on a public network would make a locally mined header depend
+    // on state that peers deserialize as zero. Keep it categorically disabled
+    // on public networks. Epoch A instead requires the exact atomic
+    // v4==BMX4C==RC Profile-1 tuple below and zero unauthenticated chainwork
+    // credit before ExactReplay; Poseidon2 rcadmit supplies the P2P admission
+    // policy around that consensus rule.
+    Assert(is_regtest || !consensus.IsMatMulHeaderPoWEnabled());
+
+    // v4.4-LT Rank-1 (ENC-DR-LT, doc/btx-matmul-v4.4-lt-normative-spec.md).
+    // No-op while nMatMulDRLTHeight == INT32_MAX (every public network today).
+    // When a network ever sets it live, public nets must activate as ONE
+    // unified v4.4-LT profile (v4 == BMX4C == DRLT, seal-as-PoW on). Staged
+    // heights (DRLT later than BMX4C, or seal off) remain allowed only on
+    // explicitly isolated regtest fixtures.
+    if (consensus.nMatMulDRLTHeight != std::numeric_limits<int32_t>::max()) {
+        Assert(consensus.nMatMulBMX4CHeight != std::numeric_limits<int32_t>::max());
+        Assert(consensus.nMatMulDRLTHeight >= consensus.nMatMulBMX4CHeight);
+        if (!is_regtest) {
+            // Public-network launch contract: one immutable ENC_BMX4C_LT profile.
+            Assert(consensus.nMatMulV4Height == consensus.nMatMulBMX4CHeight);
+            Assert(consensus.nMatMulBMX4CHeight == consensus.nMatMulDRLTHeight);
+            Assert(consensus.fMatMulLTSealAsPoW);
+        }
+        // Miner-local MatExpand window Q* is restricted to {128,256,512} (Rank-1
+        // Phase A schedule; seal-as-PoW is Phase B). The deep-m tile is fixed
+        // at b=2 for Phase A (m = n/2, storage-free under ENC-DR). A
+        // misconfigured value here would silently commit a different
+        // (unspecified) object, so fail loud at startup rather than at the fork.
+        Assert(consensus.nMatMulConsensusQStar == 128 ||
+               consensus.nMatMulConsensusQStar == 256 ||
+               consensus.nMatMulConsensusQStar == 512);
+        Assert(consensus.nMatMulLTTranscriptBlockSize == 2);
+        Assert(consensus.nMatMulDRLTAsertRescaleNum > 0);
+        Assert(consensus.nMatMulDRLTAsertRescaleDen > 0);
+        // Pin the live profile shape (same assert_profile_dimension_pin used for
+        // ENC-BMX4C): deep-m tile b=2 and sketch rank m = n/b at production n.
+        // Raising nMatMulV4Dimension without a lockstep LT rank bump would
+        // silently commit a different ENC-DR object.
+        {
+            const Consensus::MatMulProfileParams lt_profile =
+                consensus.GetMatMulProfileParams(consensus.nMatMulDRLTHeight);
+            Assert(lt_profile.profile == Consensus::MatMulEncodingProfile::ENC_BMX4C_LT);
+            Assert(lt_profile.tile_b == consensus.nMatMulLTTranscriptBlockSize);
+            assert_profile_dimension_pin(lt_profile);
+        }
+        // Same DR-34-style fail-closed activation coupling as the v4/BMX4C
+        // gates above: a public network must not carry a live LT height
+        // without the same recorded no-inversion + ratification gate (LT is a
+        // deepening of the same hardness floor, not an independent one).
+        Assert(is_regtest || Consensus::BTX_MATMUL_NO_INVERSION_GATE_RATIFIED);
+    }
+    // v4.4-LT Q* Phase B (seal-as-PoW). The mode toggle is only meaningful when
+    // the LT profile is itself live; a network that flips it without a live LT
+    // height is misconfigured (the toggle would be silently inert, masking an
+    // ops error). On public networks it additionally rides the SAME
+    // no-inversion + ratification gate as LT activation -- seal-as-PoW is a
+    // consensus-object redefinition, not a free knob.
+    if (consensus.fMatMulLTSealAsPoW) {
+        Assert(consensus.nMatMulDRLTHeight != std::numeric_limits<int32_t>::max());
+        Assert(consensus.nMatMulConsensusQStar == 128 ||
+               consensus.nMatMulConsensusQStar == 256 ||
+               consensus.nMatMulConsensusQStar == 512);
+        Assert(is_regtest || Consensus::BTX_MATMUL_NO_INVERSION_GATE_RATIFIED);
+        // Seal-as-PoW carries the lottery object in the DIGEST_RECOMPUTE profile;
+        // flat-sketch-replay forces the legacy FLAT_SKETCH_INBLOCK profile. With both
+        // set the miner produces a window-seal digest while the validator takes the
+        // in-block product-commitment branch and rejects every seal block
+        // (reject-all). They are mutually exclusive even on regtest.
+        Assert(!consensus.fMatMulV4FlatSketchReplay);
+    }
+
+    // ENC_RC / Resident Curriculum (doc/btx-matmul-v4.7-transition-roadmap.md).
+    // MatMul v4.7 Epoch A selects Profile 1 with ExactReplay as consensus
+    // authority. Profile 2 remains a future proof-authoritative datacenter
+    // shape; its Freivalds sampled carrier is optional relay/precheck state,
+    // never consensus authority. The three coupled pieces (profile 2 +
+    // finite height + ~16× (16422/1027) ASERT) must activate TOGETHER. Epoch A
+    // instead installs the independently calibrated Profile-1 tuple and both
+    // source authorization bits. Public test networks remain fail-closed at the
+    // disabled sentinel. Regtest may set a finite height + toy dims for CI,
+    // where the coupled ASERT is asserted.
+    Assert(!consensus.fMatMulRCUseToyDims || is_regtest);
+    Assert(consensus.nMatMulRCAsertRescaleNum > 0);
+    Assert(consensus.nMatMulRCAsertRescaleDen > 0);
+    // ENC_RC episode profile selector (design §6.1(A)): 1 = epoch-0 base,
+    // 2 = datacenter. Any other value is a misconfiguration — fail closed.
+    Assert(consensus.nMatMulRCProfile == 1 || consensus.nMatMulRCProfile == 2);
+    // HARDWARE-ALIGNMENT GUARDRAIL (aicompute-alignment-review.md §4, the weakest
+    // link): the datacenter profile must NEVER grow the attention context n_ctx
+    // above the epoch-0 base. Attention arithmetic intensity is d_head (≈48× below
+    // the FFN's 1.5·d_model), so a larger n_ctx tips the episode HASH-BOUND and
+    // favors SHA-ASICs over AI accelerators. Fail closed (defense-in-depth beside
+    // the factory-level assert in MakeDatacenterRCEpisodeParams).
+    Assert(matmul::v4::rc::MakeDatacenterRCEpisodeParams().n_ctx <=
+           matmul::v4::rc::DefaultConsensusRCEpisodeParams().n_ctx);
+    // COUPLED TRIO: whenever the datacenter profile is ACTIVE (profile 2 AND a
+    // finite RC height) the one-time ASERT rescale MUST be the EXACT datacenter/base
+    // episode-MAC ratio 16422/1027 (~16× loosen) — the difficulty re-anchor cannot
+    // be silently omitted when the ~16×-heavier episode goes live, and cannot be
+    // applied without the datacenter dims.
+    if (consensus.nMatMulRCProfile == 2 &&
+        consensus.nMatMulRCHeight != std::numeric_limits<int32_t>::max()) {
+        Assert(consensus.nMatMulRCAsertRescaleNum == kRCDatacenterAsertRescaleNum);
+        Assert(consensus.nMatMulRCAsertRescaleDen == kRCDatacenterAsertRescaleDen);
+    }
+    // Profile 1 changes the lottery shape. Epoch A does not merely make each nonce more
+    // expensive, it changes the SHAPE of the lottery: pre-fork a block needs
+    // BOTH the pre-hash gate (sigma <= target << epsilon, epsilon = 18 on
+    // mainnet from height 50'000) AND the digest gate, so P(block per nonce)
+    // = 2^epsilon * p^2. At v4 heights the pre-hash gate is retired outright
+    // (validation.cpp, "the pre-hash lottery gate is retired at v4 heights"),
+    // leaving P = p. A rescale derived only from per-nonce THROUGHPUT
+    // (attempts/s before over attempts/s after) omits the 2^epsilon * p factor
+    // entirely and is wrong by that factor. The correct one-time loosen is
+    //     k = 2^epsilon * p(H_A-1) * (R_v3 / R_rc).
+    // MatMulAsert now derives that factor from live parent nBits with a 512-bit
+    // intermediate. These fields carry only the measured throughput ratio.
+    // ASERT-RATIO CONSISTENCY guardrail: the datacenter one-time ASERT rescale
+    // constant MUST equal the EXACT reduced datacenter/base episode-MAC ratio, so
+    // it can never silently drift from the real per-block work uplift when the
+    // episode dims are retuned (e.g. scaling b_seq/d_ff up for a larger datacenter
+    // differential). DERIVED, not trusted: recompute the ratio from the canonical
+    // params and fail construction on any mismatch. TotalRCEpisodeMacs is the O(1)
+    // MAC-count formula (not an actual episode run), so this is cheap at startup.
+    {
+        const uint64_t mac_dc = matmul::v4::rc::TotalRCEpisodeMacs(
+            matmul::v4::rc::MakeDatacenterRCEpisodeParams());
+        const uint64_t mac_base = matmul::v4::rc::TotalRCEpisodeMacs(
+            matmul::v4::rc::DefaultConsensusRCEpisodeParams());
+        Assert(mac_base != 0 && mac_dc != 0);
+        const uint64_t g = std::gcd(mac_dc, mac_base);
+        Assert(g != 0);
+        Assert(static_cast<uint64_t>(kRCDatacenterAsertRescaleNum) == mac_dc / g);
+        Assert(static_cast<uint64_t>(kRCDatacenterAsertRescaleDen) == mac_base / g);
+    }
+    // PROFILE-1 WORK ANCHOR, DERIVED NOT TRUSTED (the same pattern, applied to
+    // Epoch A). The per-block MAC ratio between the RC Profile-1 episode and the
+    // v3 parent is a closed-form function of consensus params, so recompute it
+    // rather than trusting a literal: it then cannot silently go stale when
+    // nMatMulDimension, nMatMulNoiseRank or the RC episode dims are retuned,
+    // which is exactly how a bad calibration would slip through.
+    //
+    // v3 per-nonce MACs = the n^3 GEMM plus the rank-r noise outer products.
+    // This is the ANCHOR, not the rescale: the runtime derivation additionally
+    // needs the same-silicon MFU ratio between the two workloads (still
+    // unmeasured -- see nMatMulRCAsertRescaleNum) and is reduced by the
+    // two-stage 1/(1+gamma) factor. Neither is checkable here; what IS checkable
+    // is that the ratio stays representable after reduction, since an
+    // unrepresentable one cannot be applied at all.
+    //
+    // Only meaningful on a public network at production dimensions: regtest and
+    // toy-dim builds deliberately shrink the v3 GEMM, which makes the ratio
+    // enormous and unrepresentable without saying anything about the mainnet
+    // activation path this guards.
+    if (!is_regtest && !consensus.fMatMulRCUseToyDims) {
+        const uint64_t mac_rc_p1 = matmul::v4::rc::TotalRCEpisodeMacs(
+            matmul::v4::rc::DefaultConsensusRCEpisodeParams());
+        const uint64_t n = consensus.nMatMulDimension;
+        const uint64_t r = consensus.nMatMulNoiseRank;
+        const uint64_t mac_v3 = 2 * n * n * n + 4 * n * n * r;
+        Assert(mac_rc_p1 != 0 && mac_v3 != 0);
+        const uint64_t g1 = std::gcd(mac_rc_p1, mac_v3);
+        Assert(g1 != 0);
+        Assert((mac_rc_p1 / g1) <= std::numeric_limits<uint32_t>::max());
+        Assert((mac_v3 / g1) <= std::numeric_limits<uint32_t>::max());
+    }
+    // EPSILON BINDING. A Profile-1 calibration is only meaningful at the
+    // pre-hash epsilon that will actually be live at the activation height. If
+    // nMatMulPreHashEpsilonBitsUpgradeHeight moves, any staged ratio is stale.
+    // Inert while the height is INT32_MAX; asserted the moment it is not.
+    if (consensus.nMatMulRCHeight != std::numeric_limits<int32_t>::max() &&
+        !is_regtest) {
+        // Epoch A derives its transition target from the parent block, so bind
+        // the calibration to the epsilon live at H_A-1 rather than H_A. An
+        // epsilon transition at H_A itself would otherwise pass construction
+        // while using evidence measured for a different parent predicate.
+        Assert(consensus.nMatMulRCHeight > 0);
+        Assert(consensus.GetMatMulPreHashEpsilonBitsForHeight(
+                   consensus.nMatMulRCHeight - 1) ==
+               consensus.nMatMulPreHashEpsilonBitsUpgrade);
+    }
+    if (!is_regtest) {
+        // A public build is valid in exactly one of two states:
+        //   (a) v4/BMX4C/RC all disabled, or
+        //   (b) the source-authorized, activation-armed atomic Epoch-A tuple.
+        // This prevents a vulnerable digest-only v4 interval before
+        // ExactReplay, keeps the withdrawn HeaderPoW path off, and prevents
+        // Profile 2 or unfinished proof authority from inheriting Epoch A.
+        const int32_t disabled{std::numeric_limits<int32_t>::max()};
+        const bool epoch_a_disabled{
+            consensus.nMatMulV4Height == disabled &&
+            consensus.nMatMulBMX4CHeight == disabled &&
+            consensus.nMatMulRCHeight == disabled};
+        const bool epoch_a_active{
+            consensus.IsMatMulV47EpochAActivationTuple() &&
+            Consensus::BTX_MATMUL_NO_INVERSION_GATE_RATIFIED &&
+            Consensus::BTX_MATMUL_V47_GPU_LIFECYCLE_GATE_RATIFIED};
+        Assert(epoch_a_disabled || epoch_a_active);
+        Assert(consensus.nMatMulRCProfile == 1);
+        Assert(!consensus.fMatMulRCUseToyDims);
+        // The calibrated Epoch-A coefficient belongs to a network whose
+        // Profile-1 height is LIVE. A public network whose RC height is still
+        // disabled must stay neutral: its rescale is inert, and the calibrated
+        // value is deliberately larger than uint32, which
+        // ValidateMatMulAsertParams only accepts through the wide Epoch-A path
+        // that a disabled network does not take. Pinning every public net to
+        // the calibrated constant therefore made testnet and signet
+        // unconstructible.
+        if (epoch_a_active) {
+            Assert(consensus.nMatMulRCAsertRescaleNum == kRCEpochAAsertRescaleNum);
+            Assert(consensus.nMatMulRCAsertRescaleDen == kRCEpochAAsertRescaleDen);
+        } else {
+            Assert(consensus.nMatMulRCAsertRescaleNum ==
+                   consensus.nMatMulRCAsertRescaleDen);
+        }
+    }
+    if (consensus.nMatMulRCHeight != std::numeric_limits<int32_t>::max()) {
+        Assert(consensus.nMatMulV4Height != std::numeric_limits<int32_t>::max());
+        Assert(consensus.nMatMulRCHeight >= consensus.nMatMulV4Height);
+        Assert(is_regtest || Consensus::BTX_MATMUL_NO_INVERSION_GATE_RATIFIED);
+        Assert(is_regtest ||
+               Consensus::BTX_MATMUL_V47_GPU_LIFECYCLE_GATE_RATIFIED);
+    }
+    // ENC_RC_COUPLED (Stage C coupled puzzle): public nets stay fail-closed at
+    // INT32_MAX. Regtest may set a finite height + toy dims for end-to-end CI.
+    // Ordering: when RC is also configured, Coupled must follow RC (>=) so the
+    // profile succession matches ASERT re-anchor order. Public rescale stays 1/1.
+    Assert(!consensus.fMatMulRCCoupledUseToyDims || is_regtest);
+    Assert(consensus.nMatMulRCCoupledAsertRescaleNum > 0);
+    Assert(consensus.nMatMulRCCoupledAsertRescaleDen > 0);
+    if (!is_regtest) {
+        Assert(consensus.nMatMulRCCoupledHeight == std::numeric_limits<int32_t>::max());
+        Assert(!consensus.fMatMulRCCoupledUseToyDims);
+        // V3 production is the public / coupled default: a finite coupled height
+        // alone selects V3 (no hidden override). Height stays INT32_MAX above, so
+        // this only fixes WHAT would activate, not that anything activates now.
+        Assert(consensus.nMatMulRCCoupledProfile == 3);
+        Assert(consensus.nMatMulRCCoupledAsertRescaleNum == 1);
+        Assert(consensus.nMatMulRCCoupledAsertRescaleDen == 1);
+    }
+    if (consensus.nMatMulRCCoupledHeight != std::numeric_limits<int32_t>::max()) {
+        Assert(consensus.nMatMulV4Height != std::numeric_limits<int32_t>::max());
+        Assert(consensus.nMatMulRCHeight != std::numeric_limits<int32_t>::max());
+        Assert(consensus.nMatMulRCCoupledHeight >= consensus.nMatMulV4Height);
+        // The coupled successor is additive, not a standalone workload: its
+        // lottery and Stage-3 statement bind a genuine episode leg too.
+        Assert(consensus.nMatMulRCCoupledHeight >= consensus.nMatMulRCHeight);
+        Assert(is_regtest || Consensus::BTX_MATMUL_NO_INVERSION_GATE_RATIFIED);
+    }
+    // §R.7 scheduled-scaling tables must be non-zero once filled by constructors.
+    // (FillDefaultRCGrowthTables is called before this assert on every network.)
+    Assert(consensus.nRCScaleEpochBlocks > 0);
+    Assert(consensus.nRCBrakeDeltaPct >= 0 && consensus.nRCBrakeDeltaPct <= 100);
+    Assert(consensus.nRCScaleHardCapResBytes > 0);
+    Assert(consensus.nRCScaleHardCapCapBytes > 0);
+    Assert(consensus.nRCGrowthResTableQ16[0] > 0);
+    Assert(consensus.nRCGrowthCapTableQ16[0] > 0);
+}
 
 static CBlock CreateGenesisBlock(const char* pszTimestamp,
                                  const CScript& genesisOutputScript,
@@ -169,7 +712,6 @@ public:
         consensus.nMatMulPhase2FailBanThreshold = 1;
         consensus.fMatMulStrictPunishment = false;
         consensus.nMatMulSnapshotInterval = 10'000;
-        consensus.nMatMulProofPruneDepth = 10'000;
         // Freivalds' O(n^2) probabilistic verification (k=2 rounds, error < 2^-62).
         consensus.fMatMulFreivaldsEnabled = true;
         consensus.nMatMulFreivaldsRounds = 2;
@@ -181,11 +723,53 @@ public:
         // cannot carry, compact-block serving is intentionally disabled for blocks at
         // these heights (a reconstructed payload-less block would fail validation) --
         // see ProcessGetBlockData in net_processing.cpp. There is no scheduled upgrade
-        // that re-enables compact serving; that would require a payload-carrying P2P
-        // extension (getmatmulproof/matmulproof, btx-matmul-pow-spec.md S13.3).
+        // that re-enables compact serving for these v3 heights. (v4.4 ENC-DR blocks
+        // carry no payload at all, so this constraint is a v3-history artifact.)
         consensus.fMatMulRequireProductPayload = false;
         consensus.nMatMulFreivaldsBindingHeight = 61'000;
         consensus.nMatMulProductDigestHeight = 61'000;
+        // Epoch A performs one atomic v4 = BMX4C = RC Profile-1 transition at
+        // the finite height installed below. DRLT/LT and coupled Profile-2 are
+        // later, separately reviewed transitions and remain disabled here.
+        // Keeping their heights at INT32_MAX is consensus-significant: neither
+        // the LT seal nor Stage-3/proof authority may leak into Epoch A.
+        consensus.nMatMulDRLTHeight = std::numeric_limits<int32_t>::max();
+        consensus.nMatMulConsensusQStar = 256;
+        consensus.nMatMulLTTranscriptBlockSize = 2;
+        consensus.nMatMulDRLTAsertRescaleNum = 1;
+        consensus.nMatMulDRLTAsertRescaleDen = 1;
+        // Q* Phase B seal-as-PoW: implemented but OFF and inert because DRLT
+        // remains disabled above.
+        consensus.fMatMulLTSealAsPoW = false;
+        // MatMul v4.7 Epoch A selects Profile 1 from Consensus::Params.
+        // Profile 2 and Stage-3 proof authority remain separate transitions.
+        //
+        // MatMul v4.7 Epoch-A release-candidate activation height.
+        //
+        // H_A = 185'000. Chosen against the live mainnet tip 178'841, i.e.
+        // 6'159 blocks of runway (about 154 hours at the 90-second target).
+        // Sized on measured spacing rather than the
+        // 90 s target: the realized interval is 89 s over the last 4'032
+        // blocks and 85 s over the last 144. Using the faster recent figure
+        // is the conservative direction here -- it makes the initial runway
+        // about 145.4 h at 85 s and 152.3 h at 89 s, safely above 96 hours.
+        //
+        // The previous constant 182'283 was sized against tip 178'283 and had
+        // decayed to ~93 h of runway by the time the tree was ready. Recompute
+        // this against the live tip if the merge slips again -- the runway is
+        // measured from the tip when the constant is chosen, not from the
+        // merge, and it only shrinks while the PR sits.
+        //
+        // IsMatMulV47EpochAActivationTuple() requires v4, BMX4C and RC to share
+        // one height, with DRLT and the coupled height disabled and profile 1,
+        // so all three are set together here. AssertBMX4CConstructionInvariants
+        // additionally refuses a neutral rescale at a live Profile-1 height,
+        // which is why the calibration above is installed in this same commit.
+        consensus.nMatMulV4Height = BTX_MATMUL_V47_EPOCH_A_HEIGHT;
+        consensus.nMatMulBMX4CHeight = BTX_MATMUL_V47_EPOCH_A_HEIGHT;
+        consensus.nMatMulRCHeight = BTX_MATMUL_V47_EPOCH_A_HEIGHT;
+        consensus.nMatMulRCAsertRescaleNum = kRCEpochAAsertRescaleNum;
+        consensus.nMatMulRCAsertRescaleDen = kRCEpochAAsertRescaleDen;
         consensus.nMaxReorgDepth = 12;
         consensus.nReorgProtectionStartHeight = 61'000;
         consensus.nEmptyBlockSubsidyPenaltyHeight = BTX_EMPTY_BLOCK_SUBSIDY_PENALTY_HEIGHT;
@@ -262,6 +846,7 @@ public:
         consensus.nShieldedPoolCreditDisableHeight = BTX_SHIELDED_POOL_CREDIT_DISABLE_HEIGHT;
         consensus.nShieldedSunsetHeight = BTX_SHIELDED_SUNSET_HEIGHT;
         consensus.nShieldedDirectSendPublicFlowDisableHeight = BTX_SHIELDED_DIRECT_SEND_PUBLIC_FLOW_DISABLE_HEIGHT;
+        consensus.nContentEliminationHeight = BTX_CONTENT_ELIMINATION_HEIGHT;
         consensus.nShieldedV2SendZeroOutputExitActivationHeight =
             BTX_SHIELDED_V2_SEND_ZERO_OUTPUT_EXIT_ACTIVATION_HEIGHT;
         consensus.nShieldedRecoveryExitActivationHeight = BTX_SHIELDED_SUNSET_HEIGHT;
@@ -288,12 +873,12 @@ public:
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].min_activation_height = 0;
 
-        // Mainnet anchor refreshed on 2026-07-10 at height 155'700 from a
-        // synced canonical node so stale history below the current public
+        // Mainnet anchor refreshed on 2026-08-01 at height 176'600 from a
+        // synced archival node so stale history below the current public
         // release floor is rejected quickly.
-        consensus.nMinimumChainWork = uint256{"0000000000000000000000000000000000000000000000000000d441262318ef"};
+        consensus.nMinimumChainWork = uint256{"00000000000000000000000000000000000000000000000000027958e367c643"};
         // Assume signatures valid up to the same anchored block to speed sync.
-        consensus.defaultAssumeValid = uint256{"b5ea1fb02d12e1cfa4bbc5ccc4946ca026ad4a5f270b99a0816aa95853306c3d"};
+        consensus.defaultAssumeValid = uint256{"d5ba7a35a8a61b89de1b0289a6655551909f0491193ddd7620aebbea37a3beaa"};
 
         /**
          * The message start string is designed to be unlikely to occur in normal data.
@@ -306,10 +891,10 @@ public:
         pchMessageStart[3] = 0x01;
         nDefaultPort = 19335;
         nPruneAfterHeight = 100000;
-        // Measured from the 2026-07-10 mainnet archive datadirs near height
-        // 155'870: ~104 GB of blocks plus chain/shielded state, rounded up so
-        // users see a conservative disk estimate before sync begins.
-        m_assumed_blockchain_size = 106;
+        // Measured from the 2026-08-01 mainnet archive near height 176'600:
+        // ~117 GB of blocks plus chain/shielded state, rounded up so users see
+        // a conservative disk estimate before sync begins.
+        m_assumed_blockchain_size = 120;
         m_assumed_chain_state_size = 1;
 
         genesis = CreateBTXGenesisBlock(
@@ -324,6 +909,12 @@ public:
         consensus.hashGenesisBlock = genesis.GetHash();
         assert(consensus.hashGenesisBlock == uint256{"75a998a39d2d6e25a9ca7de2cc659309c4105839c06cd435ba2b1aabf0fa4601"});
         assert(genesis.hashMerkleRoot == uint256{"94ae75cb0cd5f08b9447306ae914635d1c36d1a43d330daf596957e91cee002a"});
+        // Audit W-2 / ASERT-F1: run the ENC-BMX4C construction invariants on every
+        // network (no-op while BMX4C is unset here -- nMatMulBMX4CHeight ==
+        // INT32_MAX -- so any future activation on this network cannot set only
+        // the height without the fork-ordering/dimension/rescale guards).
+        Consensus::FillDefaultRCGrowthTables(consensus);
+        AssertBMX4CConstructionInvariants(consensus, /*is_regtest=*/false);
 
         base58Prefixes[PUBKEY_ADDRESS] = std::vector<unsigned char>(1,25);
         base58Prefixes[SCRIPT_ADDRESS] = std::vector<unsigned char>(1,50);
@@ -352,6 +943,7 @@ public:
             {
                 {0, uint256{"75a998a39d2d6e25a9ca7de2cc659309c4105839c06cd435ba2b1aabf0fa4601"}},
                 {155700, uint256{"b5ea1fb02d12e1cfa4bbc5ccc4946ca026ad4a5f270b99a0816aa95853306c3d"}},
+                {176600, uint256{"d5ba7a35a8a61b89de1b0289a6655551909f0491193ddd7620aebbea37a3beaa"}},
             }
         };
         m_assumeutxo_data = {
@@ -495,11 +1087,19 @@ public:
                 .blockhash = consteval_ctor(uint256{"b5ea1fb02d12e1cfa4bbc5ccc4946ca026ad4a5f270b99a0816aa95853306c3d"}),
                 .shielded_state_commitment = uint256{"d8abf2d33319a2030c34c68dd50cfda10ececdd95f5a85bdbe05d44b334fbe9d"},
             },
+            {
+                // main assumeutxo snapshot at height 176'600 (snapshot v9)
+                .height = 176'600,
+                .hash_serialized = AssumeutxoHash{uint256{"d2bee157092f877553d0651d79922eb97293161d7515147421fe63102048ff93"}},
+                .m_chain_tx_count = 271'654,
+                .blockhash = consteval_ctor(uint256{"d5ba7a35a8a61b89de1b0289a6655551909f0491193ddd7620aebbea37a3beaa"}),
+                .shielded_state_commitment = uint256{"c0f3bde58e1138367a6cd2b0131975de8fad9c90a991f88a42e9397d742b77ce"},
+            },
         };
         chainTxData = ChainTxData{
-            .nTime = 1783686055,
-            .tx_count = 213654,
-            .dTxRate = 0.021856663125,
+            .nTime = 1785571483,
+            .tx_count = 271654,
+            .dTxRate = 0.023232,
         };
     }
 };
@@ -542,12 +1142,79 @@ public:
         consensus.nMatMulPhase2FailBanThreshold = std::numeric_limits<uint32_t>::max();
         consensus.fMatMulStrictPunishment = false;
         consensus.nMatMulSnapshotInterval = 10'000;
-        consensus.nMatMulProofPruneDepth = 10'000;
         consensus.fMatMulFreivaldsEnabled = true;
         consensus.nMatMulFreivaldsRounds = 2;
         consensus.fMatMulRequireProductPayload = true;
         consensus.nMatMulFreivaldsBindingHeight = 61'000;
         consensus.nMatMulProductDigestHeight = 61'000;
+        // MatMul v4 (doc/btx-matmul-v4-design-spec.md): enabled on testnet only,
+        // for testing.
+        //
+        // AUDIT UA-1 (activation policy): the MatMul upgrade is a UNIFIED direct
+        // v3 -> v4.2/ENC-BMX4C transition -- there is NO public ENC-S8 (v4.1)
+        // interval, so nMatMulV4Height and nMatMulBMX4CHeight must be EQUAL on
+        // every activated public network. The prior staged 200,000 -> 250,000
+        // testnet schedule is WITHDRAWN. Until every activation gate passes
+        // (C1 authenticated chainwork, safe header nonce/wire, calibrated
+        // v3->v4.2 rescale, size coherence, proof relay/storage, per-device
+        // backend qualification, cross-platform evidence), public testnet stays
+        // DISABLED. When testnet activation is eventually approved, assign the
+        // SAME height to both fields (nMatMulV4Height == nMatMulBMX4CHeight ==
+        // H_TESTNET) and re-derive the single BMX4-C ASERT rescale from measured
+        // marginal nonce/s (spec §8.4, ACTIVATION Gate C); do NOT reinstate a
+        // staged v4.1 phase. The v4 rescale stays inert 1/1 (the BMX4-C rescale
+        // carries the whole calibrated transition).
+        consensus.nMatMulV4Height = std::numeric_limits<int32_t>::max();
+        consensus.nMatMulV4Dimension = 4096;
+        // Accepted-dimension bounds (spec §G.2): production testnet uses the
+        // 4096..8192 window; the exact dimension (4096) is still enforced
+        // separately in ContextualCheckBlockHeader.
+        consensus.nMatMulV4MinDimension = 4096;
+        consensus.nMatMulV4MaxDimension = 8192;
+        consensus.nMatMulV4FreivaldsRounds = 3;
+        consensus.nMatMulV4TranscriptBlockSize = 4; // v4.1 batched-sketch profile (spec §K.2b): m = n/4, 8 MiB payload at n=4096
+        // DoS verify budgets above the v4 fork (spec §I.5). Audit DoS re-pricing:
+        // the original 16/4 caps were sized for the O(n^2) Freivalds check, but
+        // v4.4 ENC-DR now admits the O(n^3) sketch RECOMPUTE (~seconds per verify),
+        // so lower them CONSERVATIVELY to 4/min global and 2/min per peer pending
+        // the release-blocking bench. Honest block production is << 1/min, so even
+        // 4/min leaves ample headroom; a future benchmark may raise these.
+        consensus.nMatMulV4GlobalVerifyBudgetPerMin = 4;
+        consensus.nMatMulV4PeerVerifyBudgetPerMin = 2;
+        // No empirical v3->v4 throughput benchmark exists yet for testnet
+        // reference hardware, so leave the one-time ASERT rescale at 1/1
+        // ("no rescale"); testnet is fPowAllowMinDifficultyBlocks, so a
+        // miscalibrated rescale does not risk a liveness stall the way it
+        // would on mainnet (spec §I.4).
+        consensus.nMatMulV4AsertRescaleNum = 1;
+        consensus.nMatMulV4AsertRescaleDen = 1;
+        // MatMul v4.2 / ENC-BMX4C encoding-profile hard fork
+        // (doc/btx-matmul-v4.2-bmx4c-spec.md §7-§8). AUDIT UA-1: DISABLED on
+        // public testnet (== nMatMulV4Height above), withdrawing the staged
+        // 250,000 placeholder. At the eventual unified activation height this
+        // MUST equal nMatMulV4Height, and the single calibrated v3->ENC-BMX4C
+        // work-unit transition is applied HERE (via the BMX4-C rescale below),
+        // not at any separate v4.1 date. The ENC-BMX4C marginal unit differs
+        // from v3's, so on a network with pre-fork history the rescale MUST be
+        // re-derived from measurement before it is set to anything other than
+        // 1/1 -- which is why activation stays disabled until Gate C completes.
+        consensus.nMatMulBMX4CHeight = std::numeric_limits<int32_t>::max();
+        consensus.nMatMulBMX4CAsertRescaleNum = 1;
+        consensus.nMatMulBMX4CAsertRescaleDen = 1;
+        // v4.4-LT Rank-1 (MatExpand + deep-m + Q*): STAGED / inert until GO/NO-GO.
+        consensus.nMatMulDRLTHeight = std::numeric_limits<int32_t>::max();
+        consensus.nMatMulConsensusQStar = 256;
+        consensus.nMatMulLTTranscriptBlockSize = 2;
+        consensus.nMatMulDRLTAsertRescaleNum = 1;
+        consensus.nMatMulDRLTAsertRescaleDen = 1;
+        // Q* Phase B seal-as-PoW: implemented but OFF (inert; DRLT is INT32_MAX).
+        consensus.fMatMulLTSealAsPoW = false;
+        // Stage measured Epoch-A Profile-1 RC ASERT while public RC height stays
+        // disabled (same calibration as mainnet).
+        consensus.nMatMulRCHeight = std::numeric_limits<int32_t>::max();
+        consensus.nMatMulRCProfile = 1;
+        consensus.nMatMulRCAsertRescaleNum = 1;  // inert: RC height disabled on this network
+        consensus.nMatMulRCAsertRescaleDen = 1;
         consensus.nMaxReorgDepth = 12;
         consensus.nReorgProtectionStartHeight = 61'000;
         consensus.nEmptyBlockSubsidyPenaltyHeight = BTX_EMPTY_BLOCK_SUBSIDY_PENALTY_HEIGHT;
@@ -598,6 +1265,7 @@ public:
         consensus.nShieldedPoolCreditDisableHeight = BTX_SHIELDED_POOL_CREDIT_DISABLE_HEIGHT;
         consensus.nShieldedSunsetHeight = BTX_SHIELDED_SUNSET_HEIGHT;
         consensus.nShieldedDirectSendPublicFlowDisableHeight = BTX_SHIELDED_DIRECT_SEND_PUBLIC_FLOW_DISABLE_HEIGHT;
+        consensus.nContentEliminationHeight = BTX_CONTENT_ELIMINATION_HEIGHT;
         consensus.nShieldedV2SendZeroOutputExitActivationHeight =
             BTX_SHIELDED_V2_SEND_ZERO_OUTPUT_EXIT_ACTIVATION_HEIGHT;
         consensus.nShieldedRecoveryExitActivationHeight = BTX_SHIELDED_SUNSET_HEIGHT;
@@ -651,6 +1319,8 @@ public:
         consensus.hashGenesisBlock = genesis.GetHash();
         assert(consensus.hashGenesisBlock == uint256{"f2bc3fb2eca6aa6059c4d0178b56efe038d46aa440d406905ef752179aa0e1a4"});
         assert(genesis.hashMerkleRoot == uint256{"94ae75cb0cd5f08b9447306ae914635d1c36d1a43d330daf596957e91cee002a"});
+        Consensus::FillDefaultRCGrowthTables(consensus);
+        AssertBMX4CConstructionInvariants(consensus, /*is_regtest=*/false);
 
         // Testnet DNS seeds mirror mainnet domains; fixed seeds provide fallback.
         vSeeds.clear();
@@ -724,7 +1394,6 @@ public:
         consensus.nMatMulPhase2FailBanThreshold = std::numeric_limits<uint32_t>::max();
         consensus.fMatMulStrictPunishment = false;
         consensus.nMatMulSnapshotInterval = 10'000;
-        consensus.nMatMulProofPruneDepth = 10'000;
         consensus.fMatMulFreivaldsEnabled = true;
         consensus.nMatMulFreivaldsRounds = 2;
         consensus.fMatMulRequireProductPayload = true;
@@ -780,6 +1449,7 @@ public:
         consensus.nShieldedPoolCreditDisableHeight = BTX_SHIELDED_POOL_CREDIT_DISABLE_HEIGHT;
         consensus.nShieldedSunsetHeight = BTX_SHIELDED_SUNSET_HEIGHT;
         consensus.nShieldedDirectSendPublicFlowDisableHeight = BTX_SHIELDED_DIRECT_SEND_PUBLIC_FLOW_DISABLE_HEIGHT;
+        consensus.nContentEliminationHeight = BTX_CONTENT_ELIMINATION_HEIGHT;
         consensus.nShieldedV2SendZeroOutputExitActivationHeight =
             BTX_SHIELDED_V2_SEND_ZERO_OUTPUT_EXIT_ACTIVATION_HEIGHT;
         consensus.nShieldedRecoveryExitActivationHeight = BTX_SHIELDED_SUNSET_HEIGHT;
@@ -832,6 +1502,13 @@ public:
         consensus.hashGenesisBlock = genesis.GetHash();
         assert(consensus.hashGenesisBlock == uint256{"f2bc3fb2eca6aa6059c4d0178b56efe038d46aa440d406905ef752179aa0e1a4"});
         assert(genesis.hashMerkleRoot == uint256{"94ae75cb0cd5f08b9447306ae914635d1c36d1a43d330daf596957e91cee002a"});
+        // Audit W-2 / ASERT-F1: BMX4C construction invariants (no-op while unset).
+        consensus.nMatMulRCHeight = std::numeric_limits<int32_t>::max();
+        consensus.nMatMulRCProfile = 1;
+        consensus.nMatMulRCAsertRescaleNum = 1;  // inert: RC height disabled on this network
+        consensus.nMatMulRCAsertRescaleDen = 1;
+        Consensus::FillDefaultRCGrowthTables(consensus);
+        AssertBMX4CConstructionInvariants(consensus, /*is_regtest=*/false);
 
         vSeeds.clear();
         vSeeds.emplace_back("testnet4.btxchain.org.");
@@ -936,7 +1613,6 @@ public:
         consensus.nMatMulPhase2FailBanThreshold = std::numeric_limits<uint32_t>::max();
         consensus.fMatMulStrictPunishment = false;
         consensus.nMatMulSnapshotInterval = 10'000;
-        consensus.nMatMulProofPruneDepth = 10'000;
         consensus.fMatMulFreivaldsEnabled = true;
         consensus.nMatMulFreivaldsRounds = 2;
         consensus.fMatMulRequireProductPayload = true;
@@ -992,6 +1668,7 @@ public:
         consensus.nShieldedPoolCreditDisableHeight = BTX_SHIELDED_POOL_CREDIT_DISABLE_HEIGHT;
         consensus.nShieldedSunsetHeight = BTX_SHIELDED_SUNSET_HEIGHT;
         consensus.nShieldedDirectSendPublicFlowDisableHeight = BTX_SHIELDED_DIRECT_SEND_PUBLIC_FLOW_DISABLE_HEIGHT;
+        consensus.nContentEliminationHeight = BTX_CONTENT_ELIMINATION_HEIGHT;
         consensus.nShieldedV2SendZeroOutputExitActivationHeight =
             BTX_SHIELDED_V2_SEND_ZERO_OUTPUT_EXIT_ACTIVATION_HEIGHT;
         consensus.nShieldedRecoveryExitActivationHeight = BTX_SHIELDED_SUNSET_HEIGHT;
@@ -1055,6 +1732,18 @@ public:
 
         fDefaultConsistencyChecks = false;
         m_is_mockable_chain = false;
+
+        // Audit review Finding 2: signet enables MatMul PoW (fMatMulPOW = true),
+        // so it must enforce the same construction invariants as the other MatMul
+        // networks -- H2 header-PoW discount range, D1 ASERT-schedule validity,
+        // I1 tile size, and the BMX4C profile checks. (No-op today: signet leaves
+        // v4/bmx4c disabled and the discount at the UINT32_MAX default.)
+        consensus.nMatMulRCHeight = std::numeric_limits<int32_t>::max();
+        consensus.nMatMulRCProfile = 1;
+        consensus.nMatMulRCAsertRescaleNum = 1;  // inert: RC height disabled on this network
+        consensus.nMatMulRCAsertRescaleDen = 1;
+        Consensus::FillDefaultRCGrowthTables(consensus);
+        AssertBMX4CConstructionInvariants(consensus, /*is_regtest=*/false);
     }
 };
 
@@ -1098,7 +1787,6 @@ public:
         consensus.nMatMulPhase2FailBanThreshold = std::numeric_limits<uint32_t>::max();
         consensus.fMatMulStrictPunishment = false;
         consensus.nMatMulSnapshotInterval = 10'000;
-        consensus.nMatMulProofPruneDepth = 10'000;
         consensus.fMatMulFreivaldsEnabled = true;
         consensus.nMatMulFreivaldsRounds = 2;
         consensus.fMatMulRequireProductPayload = true;
@@ -1107,6 +1795,73 @@ public:
         consensus.nMatMulPreHashEpsilonBits = 0; // Disable pre-hash filter for fast regtest mining
         consensus.nMatMulPreHashEpsilonBitsUpgrade = consensus.nMatMulPreHashEpsilonBits;
         consensus.nMatMulGlobalVerifyBudgetPerMin = std::numeric_limits<uint32_t>::max(); // No global budget limit in regtest
+        // MatMul v4 (doc/btx-matmul-v4-design-spec.md): enabled on regtest at a
+        // low, non-genesis height so tests can mine both sides of the fork
+        // (matches the spec's own regtest recommendation, §G.2, which also
+        // gives regtest n=256). n is kept small relative to the production
+        // default of 4096 (a real dense INT8 GEMM at n=4096 is ~6.9e10
+        // ops/attempt, far too slow for a nonce-search loop on regtest/CI
+        // reference hardware), and deliberately DIFFERENT from the v3
+        // regtest dimension (64, set above) rather than reusing it: Phase1
+        // (CheckMatMulProofOfWork_Phase1) is context-free and cannot see
+        // height, so it accepts either the v3 or the v4 dimension whenever
+        // both are configured. Keeping them numerically distinct means a
+        // pre-fork block can never be Phase1-ambiguous with a post-fork
+        // dimension; the exact height-gated dimension is still authoritative
+        // at ContextualCheckBlockHeader/ContextualCheckBlock. R=2 (below the
+        // R=3 production normative) is reserved for regtest per spec §0.7/§G.2.
+        consensus.nMatMulV4Height = 100;
+        consensus.nMatMulV4Dimension = 256;
+        // Accepted-dimension bounds (spec §G.2): regtest uses the wide 64..1024
+        // window (n=256 sits inside it) so bounds-rejection paths can be
+        // exercised without recompiling; the exact dimension (256) is still
+        // enforced separately in ContextualCheckBlockHeader.
+        consensus.nMatMulV4MinDimension = 64;
+        consensus.nMatMulV4MaxDimension = 1024;
+        consensus.nMatMulV4FreivaldsRounds = 2;
+        consensus.nMatMulV4TranscriptBlockSize = 4; // v4.1 batched-sketch profile (spec §K.2b): m = n/4, 8 MiB payload at n=4096
+        // Regtest must mine both fork sides fast; do not throttle v4 verify
+        // (mirrors the v3 "no global budget limit in regtest" choice above).
+        consensus.nMatMulV4GlobalVerifyBudgetPerMin = std::numeric_limits<uint32_t>::max();
+        consensus.nMatMulV4PeerVerifyBudgetPerMin = std::numeric_limits<uint32_t>::max();
+        consensus.nMatMulV4AsertRescaleNum = 1;
+        consensus.nMatMulV4AsertRescaleDen = 1;
+        // MatMul v4.2 / ENC-BMX4C (spec §7-§8): STRICT UNIFIED ACTIVATION (audit
+        // P0.2) -- ENC-BMX4C activates at the SAME height as v4 (100), so regtest
+        // mirrors production's single flag day (v3 -> v4.2/ENC-BMX4C directly) with
+        // NO reachable ENC-S8 interval. The former staged 150 (an ENC-S8 window in
+        // [100,150)) is withdrawn; -regtestbmx4cheight now sets BOTH heights
+        // atomically (see below). The one-time ASERT rescale stays at 1/1 (regtest
+        // has no pre-fork throughput history; fPowNoRetargeting /
+        // fPowAllowMinDifficultyBlocks make a placeholder ratio safe here).
+        consensus.nMatMulBMX4CHeight = 100;
+        consensus.nMatMulBMX4CAsertRescaleNum = 1;
+        consensus.nMatMulBMX4CAsertRescaleDen = 1;
+        // Rank-1 LT + Phase B seal-as-PoW: LIVE on regtest at the unified v4/BMX4C
+        // height (100) so functional tests exercise fat Q* seals immediately.
+        // Override still available via -regtestdrltheight / -regtestmatmulltsealaspow.
+        consensus.nMatMulDRLTHeight = 100;
+        consensus.nMatMulConsensusQStar = 256;
+        consensus.nMatMulLTTranscriptBlockSize = 2;
+        consensus.nMatMulDRLTAsertRescaleNum = 1;
+        consensus.nMatMulDRLTAsertRescaleDen = 1;
+        consensus.fMatMulLTSealAsPoW = true;
+        // LT tip-verify budgets: unthrottled on regtest (mirrors v4), so
+        // -regtestdrltheight / seal-as-PoW functional tests are not paced.
+        consensus.nMatMulLTMaxPendingVerifications = std::numeric_limits<uint32_t>::max();
+        consensus.nMatMulLTGlobalVerifyBudgetPerMin = std::numeric_limits<uint32_t>::max();
+        consensus.nMatMulLTPeerVerifyBudgetPerMin = std::numeric_limits<uint32_t>::max();
+        // MatMul v4.7 Epoch A is the default regtest transition: Profile 1
+        // ExactReplay activates at 101, one height after the v4/BMX4C/DRLT
+        // fixture. Toy dimensions keep ordinary CI practical while exercising
+        // the same authority switch. The unfinished ENC_RC_COUPLED/Stage-3 path
+        // remains disabled by default and can still be activated explicitly by
+        // -regtestrccoupledheight or -regtestrcunifiedheight for proof regression
+        // tests. Public RC and coupled heights both remain INT32_MAX.
+        consensus.nMatMulRCHeight = 101;
+        consensus.nMatMulRCCoupledHeight = std::numeric_limits<int32_t>::max();
+        consensus.fMatMulRCUseToyDims = true;
+        consensus.fMatMulRCCoupledUseToyDims = true;
         consensus.nPowTargetSpacingFastMs = 250;
         consensus.nFastMineDifficultyScale = 4;
         consensus.nPowTargetSpacingNormal = 90;
@@ -1139,6 +1894,160 @@ public:
         if (opts.matmul_dimension.has_value()) {
             consensus.nMatMulDimension = *opts.matmul_dimension;
         }
+        if (opts.matmul_v4_height.has_value()) {
+            consensus.nMatMulV4Height = *opts.matmul_v4_height;
+        }
+        if (opts.matmul_v4_dimension.has_value()) {
+            consensus.nMatMulV4Dimension = *opts.matmul_v4_dimension;
+        }
+        // Regtest-only: raise the accepted-dimension ceiling so a functional test can
+        // exercise a PRODUCTION-scale dimension (e.g. 4096 ⇒ D m=2048 ⇒ a real 32 MiB
+        // segregated proof, the Stage-2d chunking/v2 path). 4096 is a legitimate MAINNET
+        // dimension (CMainParams sets nMatMulV4MaxDimension = 8192), so this only lifts
+        // regtest's default 1024 cap; the §8.1 combine-input bound
+        // (BMX4C_PROJECTION_BOUND_PER_N * MaxDimension <= BMX4C_COMBINE_INPUT_BOUND) is
+        // re-asserted in AssertBMX4CConstructionInvariants and still holds well past 4096.
+        if (opts.matmul_v4_max_dimension.has_value()) {
+            consensus.nMatMulV4MaxDimension = *opts.matmul_v4_max_dimension;
+        }
+        if (opts.matmul_bmx4c_height.has_value()) {
+            consensus.nMatMulBMX4CHeight = *opts.matmul_bmx4c_height;
+        }
+        // AUDIT P0.2 (strict unified): the v4 and ENC-BMX4C heights must be equal.
+        // A LONE -regtestmatmulv4height / -regtestbmx4cheight sets the OTHER to the
+        // same height so a single override stays unified; supplying BOTH with
+        // DIFFERENT values falls through to the strict-unified startup assert in
+        // AssertBMX4CConstructionInvariants and fails loud (no staged ENC-S8 window).
+        if (opts.matmul_v4_height.has_value() && !opts.matmul_bmx4c_height.has_value()) {
+            consensus.nMatMulBMX4CHeight = consensus.nMatMulV4Height;
+        }
+        if (opts.matmul_bmx4c_height.has_value() && !opts.matmul_v4_height.has_value()) {
+            consensus.nMatMulV4Height = consensus.nMatMulBMX4CHeight;
+        }
+        // v4.4-LT Rank-1: regtest-only height override so functional tests can
+        // move the default height while public-network activation stays inert.
+        // Applied AFTER the BMX4C unification above so a LONE -regtestdrltheight
+        // (no explicit -regtestbmx4cheight) lands on top of whichever BMX4C
+        // height is already final (100 by default, or the overridden value).
+        if (opts.matmul_drlt_height.has_value()) {
+            consensus.nMatMulDRLTHeight = *opts.matmul_drlt_height;
+        }
+        // ENC_RC / ENC_RC_COUPLED: regtest-only height + toy-dim overrides so
+        // functional tests can exercise mine → relay → ExactReplay without
+        // changing any public-network schedule. Applied AFTER
+        // DRLT so a lone -regtestrcheight lands on top of the unified
+        // v4/BMX4C/DRLT schedule. Toy dims are REQUIRED for CI-scale mining
+        // (consensus n_ctx is not runnable in functional tests).
+        // Legacy PR89 single-switch regression control: one height turns on
+        // episode + coupled together. Applied FIRST so the granular
+        // per-component overrides below can still refine a single component in a
+        // regression test. The coupled profile default is already 3 (V3), so the
+        // unified switch needs no profile override. This argument never changes
+        // public parameters; Epoch-A mainnet uses its separately fixed Profile-1
+        // height and keeps the coupled/Profile-2 height disabled.
+        if (opts.matmul_rc_unified_height.has_value()) {
+            consensus.nMatMulRCHeight = *opts.matmul_rc_unified_height;
+            consensus.nMatMulRCCoupledHeight = *opts.matmul_rc_unified_height;
+        }
+        if (opts.matmul_rc_height.has_value()) {
+            consensus.nMatMulRCHeight = *opts.matmul_rc_height;
+        }
+        if (opts.matmul_rc_coupled_height.has_value()) {
+            consensus.nMatMulRCCoupledHeight = *opts.matmul_rc_coupled_height;
+        }
+        if (opts.matmul_rc_use_toy_dims.has_value()) {
+            consensus.fMatMulRCUseToyDims = *opts.matmul_rc_use_toy_dims;
+        }
+        if (opts.matmul_rc_coupled_use_toy_dims.has_value()) {
+            consensus.fMatMulRCCoupledUseToyDims = *opts.matmul_rc_coupled_use_toy_dims;
+        }
+        if (opts.matmul_rc_coupled_profile.has_value()) {
+            consensus.nMatMulRCCoupledProfile = *opts.matmul_rc_coupled_profile;
+        }
+        // ENC_RC episode profile selector: regtest defaults to the MatMul v4.7
+        // Epoch-A Profile 1 workload and may explicitly select the future
+        // datacenter Profile 2 for regression testing. Stage-3 succinct authority
+        // remains independently compile-time disabled. Invalid values fail closed.
+        if (opts.matmul_rc_profile.has_value()) {
+            consensus.nMatMulRCProfile = *opts.matmul_rc_profile;
+        }
+        // COUPLED ASERT: when the datacenter profile (2) is live at a finite RC
+        // height on regtest, apply the exact 16422/1027 (~16×) one-time loosen together with
+        // it (design §5) — mirrors the mainnet deploy where profile 2 + finite
+        // height + 16422/1027 ASERT activate as one. Satisfies the coupled-trio invariant
+        // in AssertBMX4CConstructionInvariants. (Behaviorally moot on CI toy dims
+        // but keeps the activation shape faithful.)
+        if (consensus.nMatMulRCProfile == 2 &&
+            consensus.nMatMulRCHeight != std::numeric_limits<int32_t>::max()) {
+            consensus.nMatMulRCAsertRescaleNum = kRCDatacenterAsertRescaleNum;
+            consensus.nMatMulRCAsertRescaleDen = kRCDatacenterAsertRescaleDen;
+        }
+        // When RC (or coupled) is live on regtest, unthrottle tip-verify budgets
+        // so -regtestrc* functional tests are not paced (mirrors LT above).
+        if (consensus.nMatMulRCHeight != std::numeric_limits<int32_t>::max() ||
+            consensus.nMatMulRCCoupledHeight != std::numeric_limits<int32_t>::max()) {
+            consensus.nMatMulRCMaxPendingVerifications = std::numeric_limits<uint32_t>::max();
+            consensus.nMatMulRCGlobalVerifyBudgetPerMin = std::numeric_limits<uint32_t>::max();
+            consensus.nMatMulRCPeerVerifyBudgetPerMin = std::numeric_limits<uint32_t>::max();
+        }
+        // v4.4-LT Q* Phase B: explicit regtest override in either direction.
+        // Regtest defaults to seal mode, while =0 retains a Phase-A fixture.
+        // Enabling remains meaningful only together with a live DRLT height.
+        if (opts.matmul_lt_seal_as_pow.has_value()) {
+            consensus.fMatMulLTSealAsPoW = *opts.matmul_lt_seal_as_pow;
+        }
+        if (opts.matmul_lt_max_pending_verifications.has_value()) {
+            consensus.nMatMulLTMaxPendingVerifications =
+                *opts.matmul_lt_max_pending_verifications;
+        }
+        if (opts.matmul_flat_sketch_replay) {
+            // v4.4 ENC-DR regtest-only differential switch: re-select the legacy
+            // FLAT_SKETCH_INBLOCK carriage so golden-vector replay tests can
+            // exercise the retired in-block path against the recompute path
+            // (tension-resolution §5-2). Permitted here because this is the
+            // REGTEST chain; public networks fail closed in
+            // AssertBMX4CConstructionInvariants.
+            consensus.fMatMulV4FlatSketchReplay = true;
+        }
+        // Audit dead-code deletion: the nMatMulProofPruneDepth field and its
+        // -regtestmatmulproofprunedepth apply block were removed (dead since v4.4
+        // ENC-DR -- no consensus/validation reader; the deleted segregated-proof
+        // store left it inert). The arg registration in chainparamsbase.cpp
+        // survives as a harmless unread no-op for arg compatibility.
+        // MatMul v4.2-D assumevalid buried-proof trust min-age (design §3.5-2). The
+        // production default is the 2-week equivalent-time DoS guard; at regtest's
+        // 90 s spacing that is ~13 000 blocks, so the override lets a functional test
+        // exercise the trust boundary after burying a D block by only a few blocks.
+        // The trust still requires an assumed-valid ancestor with >= MinimumChainWork
+        // of AUTHENTICATED work, so this regtest knob never weakens a real network.
+        if (opts.matmul_proof_assumevalid_min_age.has_value()) {
+            consensus.nMatMulProofAssumeValidMinAge = *opts.matmul_proof_assumevalid_min_age;
+        }
+        // Spec §G.2/§G.4: the v4 dimension must divide evenly by the sketch
+        // tile size and stay within the accepted-dimension bounds enforced in
+        // ContextualCheckBlockHeader, so a bad -regtestmatmulv4dimension fails
+        // loudly at startup rather than silently rejecting every mined block.
+        if (consensus.nMatMulV4TranscriptBlockSize == 0 ||
+            consensus.nMatMulV4Dimension % consensus.nMatMulV4TranscriptBlockSize != 0) {
+            throw std::runtime_error(strprintf(
+                "Invalid regtest MatMul v4 shape: dimension %u must be divisible by tile size %u.",
+                consensus.nMatMulV4Dimension,
+                consensus.nMatMulV4TranscriptBlockSize));
+        }
+        if (consensus.nMatMulV4Dimension < consensus.nMatMulV4MinDimension ||
+            consensus.nMatMulV4Dimension > consensus.nMatMulV4MaxDimension) {
+            throw std::runtime_error(strprintf(
+                "Invalid regtest MatMul v4 dimension %u: outside [%u, %u].",
+                consensus.nMatMulV4Dimension,
+                consensus.nMatMulV4MinDimension,
+                consensus.nMatMulV4MaxDimension));
+        }
+        // MatMul v4.2 / ENC-BMX4C construction invariants, re-checked after the
+        // regtest -regtest* overrides (v4 height/dim and BMX4C height) so a bad
+        // combination (e.g. a BMX4C height at/below the overridden v4 height)
+        // fails loudly at startup. No-op when BMX4C is disabled.
+        Consensus::FillDefaultRCGrowthTables(consensus);
+        AssertBMX4CConstructionInvariants(consensus, /*is_regtest=*/true);
         if (opts.matmul_transcript_block_size.has_value()) {
             consensus.nMatMulTranscriptBlockSize = *opts.matmul_transcript_block_size;
         }
@@ -1169,6 +2078,15 @@ public:
         if (opts.matmul_parent_mtp_seed_height.has_value()) {
             consensus.nMatMulParentMtpSeedHeight = *opts.matmul_parent_mtp_seed_height;
         }
+        // AUDIT D1 (review Finding 1): the -regtestmatmulaserthalflife* overrides
+        // above are applied AFTER AssertBMX4CConstructionInvariants ran at line
+        // ~1357, so the immutable ASERT schedule must be RE-validated here against
+        // its now-final values. Without this a regtest node launched with e.g.
+        // -regtestmatmulaserthalflifeupgradeheight=0 would pass construction yet
+        // fail-closed (halt) at every block at runtime -- exactly the "fails at
+        // runtime, not startup" hole D1 is meant to eliminate.
+        assert(!consensus.fMatMulPOW ||
+               ValidateMatMulAsertParams(consensus, consensus.nMatMulAsertHeight));
         consensus.nMaxBlockWeight = 24'000'000;
         consensus.nMaxBlockSerializedSize = 24'000'000;
         consensus.nMaxBlockSigOpsCost = 480'000;
@@ -1208,6 +2126,8 @@ public:
             opts.shielded_sunset_height.value_or(std::numeric_limits<int32_t>::max());
         consensus.nShieldedDirectSendPublicFlowDisableHeight =
             opts.shielded_direct_send_public_flow_disable_height.value_or(std::numeric_limits<int32_t>::max());
+        consensus.nContentEliminationHeight =
+            opts.content_elimination_height.value_or(std::numeric_limits<int32_t>::max());
         consensus.nShieldedV2SendZeroOutputExitActivationHeight =
             opts.shielded_v2_send_zero_output_exit_activation_height.value_or(std::numeric_limits<int32_t>::max());
         consensus.nShieldedRecoveryExitActivationHeight =
@@ -1265,6 +2185,16 @@ public:
             opts.genesis_nonce.has_value() ||
             opts.genesis_bits.has_value() ||
             opts.genesis_version.has_value();
+        // The functional harness always selects the Phase-A seal with
+        // -regtestmatmulltsealaspow=0. The checked-in height-299 snapshot was
+        // generated for that deterministic harness chain, and the height-61,010
+        // fast-start fixture is explicitly mockable/height-bound. The default
+        // height-110 snapshot belongs to the Phase-B chain and is removed below.
+        // Any additional consensus override still makes custom_consensus true
+        // and clears all canned metadata; snapshot content hashes remain fully
+        // validated.
+        const bool functional_harness_seal_override =
+            opts.matmul_lt_seal_as_pow.has_value() && !*opts.matmul_lt_seal_as_pow;
         const bool custom_consensus =
             custom_genesis ||
             !opts.activation_heights.empty() ||
@@ -1279,20 +2209,48 @@ public:
             opts.matmul_noise_rank.has_value() ||
             opts.matmul_asert_half_life.has_value() ||
             opts.matmul_asert_half_life_upgrade_height.has_value() ||
+            opts.matmul_asert_half_life_upgrade.has_value() ||
+            opts.matmul_pre_hash_epsilon_bits_upgrade_height.has_value() ||
+            opts.matmul_pre_hash_epsilon_bits_upgrade.has_value() ||
             opts.matmul_nonce_seed_height.has_value() ||
             opts.matmul_parent_mtp_seed_height.has_value() ||
+            opts.matmul_v4_height.has_value() ||
+            opts.matmul_v4_dimension.has_value() ||
+            opts.matmul_v4_max_dimension.has_value() ||
+            opts.matmul_bmx4c_height.has_value() ||
+            opts.matmul_drlt_height.has_value() ||
+            opts.matmul_rc_unified_height.has_value() ||
+            opts.matmul_rc_height.has_value() ||
+            opts.matmul_rc_coupled_height.has_value() ||
+            opts.matmul_rc_use_toy_dims.has_value() ||
+            opts.matmul_rc_coupled_use_toy_dims.has_value() ||
+            opts.matmul_rc_coupled_profile.has_value() ||
+            opts.matmul_rc_profile.has_value() ||
+            (opts.matmul_lt_seal_as_pow.has_value() && !functional_harness_seal_override) ||
+            opts.matmul_lt_max_pending_verifications.has_value() ||
+            opts.matmul_flat_sketch_replay ||
+            opts.matmul_proof_assumevalid_min_age.has_value() ||
             opts.shielded_tx_binding_activation_height.has_value() ||
             opts.shielded_bridge_tag_activation_height.has_value() ||
             opts.shielded_smile_rice_codec_disable_height.has_value() ||
             opts.shielded_matrict_disable_height.has_value() ||
             opts.shielded_spend_path_recovery_activation_height.has_value() ||
+            opts.shielded_c002_activation_height.has_value() ||
+            opts.shielded_unshield_velocity_activation_height.has_value() ||
+            opts.shielded_unshield_velocity_end_height.has_value() ||
+            opts.shielded_unshield_velocity_min_cap_height.has_value() ||
+            opts.shielded_unshield_velocity_min_cap.has_value() ||
             opts.shielded_pq128_upgrade_height.has_value() ||
             opts.shielded_pool_credit_disable_height.has_value() ||
             opts.shielded_sunset_height.has_value() ||
             opts.shielded_direct_send_public_flow_disable_height.has_value() ||
             opts.shielded_v2_send_zero_output_exit_activation_height.has_value() ||
+            opts.content_elimination_height.has_value() ||
+            opts.shielded_recovery_exit_activation_height.has_value() ||
+            opts.shielded_recovery_exit_frozen_root.has_value() ||
             opts.reorg_protection_start_height.has_value() ||
             opts.empty_block_subsidy_penalty_height.has_value() ||
+            opts.empty_block_subsidy_penalty_end_height.has_value() ||
             opts.mldsa_disable_height.has_value();
 
         for (const auto& [dep, height] : opts.activation_heights) {
@@ -1354,19 +2312,21 @@ public:
         if (!custom_consensus) {
             m_assumeutxo_data = {
                 {
-                    // Deterministic TestChain100Setup (regtest) snapshot metadata at height 110.
+                    // Deterministic TestChain100Setup Phase-A functional-harness
+                    // snapshot metadata at height 110.
                     .height = 110,
                     .hash_serialized = AssumeutxoHash{uint256{"c35580bfd4f6c2ab69a8b1ac446962e5aacb164dc13e237867bd2170b91d7c98"}},
                     .m_chain_tx_count = 111,
-                    .blockhash = consteval_ctor(uint256{"9e3817054fd9df2c2a27f647a3b9f55f8bc91f05168753543a902074a8f21700"}),
+                    .blockhash = consteval_ctor(uint256{"b610281aaeb8d64d4739e848a47c0a6ae226a0e26e29e5a3d735825e34cc2e65"}),
                 },
                 {
                     // Deterministic TestChain100Setup + BTX-compatible
-                    // feature_assumeutxo extension using RAW_P2PKH wallet flows.
+                    // Phase-A feature_assumeutxo extension using RAW_P2PKH
+                    // wallet flows.
                     .height = 299,
                     .hash_serialized = AssumeutxoHash{uint256{"2e5dcf9f04328141c721b5615a32dc265da783050ba7bd3e436a48b5a2013ae1"}},
                     .m_chain_tx_count = 300,
-                    .blockhash = consteval_ctor(uint256{"78e6ea382d4d5466b1d8421c1b8789e9c7cde9de8b6da4042be00ca2948a4860"}),
+                    .blockhash = consteval_ctor(uint256{"7202d1341554184806cfb25c74ee0aa41f680c42ea9fdb965685962b8e8e148b"}),
                 },
                 {
                     // Post-shielded-activation regtest snapshot for btx-p2p
@@ -1380,6 +2340,11 @@ public:
                     .blockhash = consteval_ctor(uint256{"0000000000000000000000000000000000000000000000000000000000000000"}),
                 },
             };
+            if (functional_harness_seal_override) {
+                std::erase_if(m_assumeutxo_data, [](const auto& snapshot) {
+                    return snapshot.height == 110;
+                });
+            }
         } else {
             // Consensus-altering regtest overrides invalidate canned snapshot metadata.
             m_assumeutxo_data.clear();
@@ -1437,7 +2402,6 @@ public:
         consensus.nMatMulPhase2FailBanThreshold = std::numeric_limits<uint32_t>::max();
         consensus.fMatMulStrictPunishment = false;
         consensus.nMatMulSnapshotInterval = 10'000;
-        consensus.nMatMulProofPruneDepth = 10'000;
         consensus.fMatMulFreivaldsEnabled = true;
         consensus.nMatMulFreivaldsRounds = 2;
         consensus.fMatMulRequireProductPayload = true;
@@ -1474,6 +2438,7 @@ public:
         consensus.nShieldedPoolCreditDisableHeight = BTX_SHIELDED_POOL_CREDIT_DISABLE_HEIGHT;
         consensus.nShieldedSunsetHeight = BTX_SHIELDED_SUNSET_HEIGHT;
         consensus.nShieldedDirectSendPublicFlowDisableHeight = BTX_SHIELDED_DIRECT_SEND_PUBLIC_FLOW_DISABLE_HEIGHT;
+        consensus.nContentEliminationHeight = BTX_CONTENT_ELIMINATION_HEIGHT;
         consensus.nShieldedV2SendZeroOutputExitActivationHeight =
             BTX_SHIELDED_V2_SEND_ZERO_OUTPUT_EXIT_ACTIVATION_HEIGHT;
         consensus.nShieldedRecoveryExitActivationHeight = BTX_SHIELDED_SUNSET_HEIGHT;
@@ -1555,6 +2520,17 @@ public:
         base58Prefixes[EXT_SECRET_KEY] = {0x04, 0x35, 0x83, 0x94};
 
         bech32_hrp = "btxv2";
+
+        // Audit review Finding 2: the shielded-v2 dev network enables MatMul PoW,
+        // so enforce the same construction invariants (H2 discount range, D1 ASERT
+        // schedule validity, I1 tile size, BMX4C profile) as the other MatMul
+        // networks. No-op today (v4/bmx4c disabled, discount at default).
+        consensus.nMatMulRCHeight = std::numeric_limits<int32_t>::max();
+        consensus.nMatMulRCProfile = 1;
+        consensus.nMatMulRCAsertRescaleNum = 1;  // inert: RC height disabled on this network
+        consensus.nMatMulRCAsertRescaleDen = 1;
+        Consensus::FillDefaultRCGrowthTables(consensus);
+        AssertBMX4CConstructionInvariants(consensus, /*is_regtest=*/false);
     }
 };
 

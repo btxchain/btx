@@ -1,0 +1,33 @@
+> **HISTORICAL DESIGN / AUDIT EVIDENCE — MatMul v4.7 roadmap takes precedence.**
+> This document preserves version-local findings, names, and measurements; it is not
+> the current activation plan. The proposed transition is defined by
+> `doc/btx-matmul-v4.7-transition-roadmap.md`: Epoch A uses Profile 1 with
+> ExactReplay authority and optional shadow proofs; Epoch B requires both a durable
+> Profile-1 proof and ExactReplay; Epoch C makes the Profile-1 proof authoritative;
+> and Epoch D separately moves to Profile 2 under proof authority. Mainnet Epoch A (v4 = BMX4C = RC) has a finite compiled candidate height and true source flags, so it would activate if merged unchanged; release remains NO-GO pending exact-final combined-tree CUDA+Metal evidence, reviewed schema-4 ASERT calibration, ratification re-affirmation, full closeout, and live-tip runway validation; all other transition heights remain disabled. Any older “production,” “default,” “shipping,” direct-fork,
+> sampled-verifier, or coupled-profile recommendation below is historical unless the
+> canonical roadmap expressly carries it forward.
+
+# V3 adversarial miner analysis (attack-first)
+
+## Architectural blunt answer
+
+A **static template-scoped bank** alone cannot *guarantee* B200 ≻ RTX 5090 on $/block when miners may batch unlimited nonces and regenerate/cache pages. Batching amortizes bank load; regeneration bypasses capacity. Any GO claim requires matched device-timed measurements with the **best legal Streamed strategy** on 5090, not the reference miner.
+
+## Attack surface (status)
+
+| Attack | Status |
+|--------|--------|
+| Strassen / fast matmul | OPEN — exact int path must remain oracle |
+| Shared-B batching across Q | OPEN — Q is miner-opt; consensus M=128 fixed |
+| Seed-only regeneration | OPEN — primary TMTO threat |
+| Partial 32 GiB cache | OPEN — erodes V2; challenges V3 |
+| Multi-GPU consumer sharding | OPEN |
+| Exchange algebraic collapse | OPEN — X_exchange still largely decorative |
+| Accumulator overflow / UB | MITIGATING — checked MAC helpers; butterfly bounds required |
+| CPU/GPU divergence | IN PROGRESS — medium digest fix (full page accumulate) |
+| Proof forgery | GKR G1–G5 constructions integrated & validated in-tree (external audit pending); arbiter OFF |
+
+## Nonce-conditioned transforms
+
+Diagonal signs/scales/permutations that push into A or Y do not prevent batching. Resistance must be demonstrated, not assumed.

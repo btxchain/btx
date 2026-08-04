@@ -7,6 +7,7 @@
 #define BITCOIN_RPC_REQUEST_H
 
 #include <any>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <utility>
@@ -24,8 +25,20 @@ UniValue JSONRPCRequestObj(const std::string& strMethod, const UniValue& params,
 UniValue JSONRPCReplyObj(UniValue result, UniValue error, std::optional<UniValue> id, JSONRPCVersion jsonrpc_version);
 UniValue JSONRPCError(int code, const std::string& message);
 
-/** Generate a new RPC authentication cookie and write it to disk */
-bool GenerateAuthCookie(std::string* cookie_out, const std::pair<std::optional<fs::perms>, bool>& cookie_perms);
+enum class AuthCookieResult : uint8_t {
+    Disabled, // -norpccookiefile
+    Error,
+    Ok,
+};
+
+/**
+ * Generate a new RPC authentication cookie and write it to disk.
+ * The bool in cookie_perms records whether -rpccookieperms was explicit,
+ * preserving the corresponding Knots log message.
+ */
+AuthCookieResult GenerateAuthCookie(const std::pair<std::optional<fs::perms>, bool>& cookie_perms,
+                                    std::string& user,
+                                    std::string& pass);
 /** Read the RPC authentication cookie from disk */
 bool GetAuthCookie(std::string *cookie_out);
 /** Delete RPC authentication cookie from disk */

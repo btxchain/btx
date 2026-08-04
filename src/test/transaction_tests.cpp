@@ -442,6 +442,57 @@ BOOST_AUTO_TEST_CASE(basic_transaction_tests)
     BOOST_CHECK_MESSAGE(!CheckTransaction(CTransaction(tx), state) || !state.IsValid(), "Transaction with duplicate txins should be invalid.");
 }
 
+BOOST_AUTO_TEST_CASE(checktransaction_specialized_transparent_inputs)
+{
+    auto make_tx = [](size_t inputs) {
+        CMutableTransaction tx;
+        tx.vout.emplace_back(1, CScript{});
+        for (size_t i{0}; i < inputs; ++i) {
+            tx.vin.emplace_back(Txid::FromUint256(uint256{static_cast<uint8_t>(i + 1)}),
+                                 static_cast<uint32_t>(i));
+        }
+        return tx;
+    };
+    auto check = [](const CMutableTransaction& tx, const std::string& reject_reason = {}) {
+        TxValidationState state;
+        const bool valid{CheckTransaction(CTransaction{tx}, state)};
+        BOOST_CHECK_EQUAL(valid, reject_reason.empty());
+        if (!reject_reason.empty()) BOOST_CHECK_EQUAL(state.GetRejectReason(), reject_reason);
+    };
+
+    check(make_tx(1));
+    check(make_tx(2));
+    check(make_tx(5));
+
+    auto duplicate_two{make_tx(2)};
+    duplicate_two.vin[1].prevout = duplicate_two.vin[0].prevout;
+    check(duplicate_two, "bad-txns-inputs-duplicate");
+
+    auto null_two{make_tx(2)};
+    null_two.vin[1].prevout.SetNull();
+    check(null_two, "bad-txns-prevout-null");
+
+    auto duplicate_many{make_tx(5)};
+    duplicate_many.vin[4].prevout = duplicate_many.vin[1].prevout;
+    check(duplicate_many, "bad-txns-inputs-duplicate");
+
+    auto null_many{make_tx(5)};
+    null_many.vin[3].prevout.SetNull();
+    check(null_many, "bad-txns-prevout-null");
+
+    // A zero hash with a non-null index is not the coinbase sentinel.
+    auto zero_hash_non_null{make_tx(3)};
+    zero_hash_non_null.vin[1].prevout = COutPoint{Txid::FromUint256(uint256{}), 0};
+    check(zero_hash_non_null);
+
+    CMutableTransaction coinbase;
+    coinbase.vin.resize(1);
+    coinbase.vin[0].prevout.SetNull();
+    coinbase.vin[0].scriptSig = CScript{} << OP_0 << OP_0;
+    coinbase.vout.emplace_back(1, CScript{});
+    check(coinbase);
+}
+
 BOOST_AUTO_TEST_CASE(test_Get)
 {
     FillableSigningProvider keystore;

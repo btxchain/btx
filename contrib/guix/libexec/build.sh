@@ -321,6 +321,12 @@ set_cuda_config_for_flavor() {
             )
             CUDA_SYMBOL_CHECK_ENV=("BTX_SYMBOL_CHECK_ALLOW_LIBRT=1")
             export LD_LIBRARY_PATH="$CUDA_TOOL_LIBRARY_PATH"
+            # Plain sm_120 packaging only (120-real / 120-virtual). Do NOT add
+            # 120a here — CMake may reject feature-qualified arches, and native
+            # block_scale MXFP4 MMA is opt-in via BTX_CUDA_SM120_MXFP4_NATIVE=ON
+            # (dedicated object TU with -gencode=arch=compute_120a,code=sm_120a;
+            # see cmake/BTXCudaSm120a.cmake). Guix releases keep native OFF so
+            # the fatbin builds without sm_120a toolkit requirements.
             CUDA_CONFIGFLAGS="-DBTX_ENABLE_CUDA_EXPERIMENTAL=ON -DBTX_CUDA_ARCHITECTURES=80-real;86-real;89-real;90-real;100-real;101-real;103-real;120-real;121-real;80-virtual;100-virtual;120-virtual -DCMAKE_CUDA_ARCHITECTURES=80-real;86-real;89-real;90-real;100-real;101-real;103-real;120-real;121-real;80-virtual;100-virtual;120-virtual -DCUDAToolkit_ROOT=$cuda_root -DCMAKE_CUDA_COMPILER=$CUDA_COMPILER_FOR_CMAKE -DCMAKE_CUDA_HOST_COMPILER=$CUDA_HOST_COMPILER_FOR_CMAKE $CUDA_LIBRARY_CONFIGFLAGS -DCMAKE_CUDA_RUNTIME_LIBRARY=Static -DBTX_CUDA_RUNTIME_LIBRARY=Static"
             ;;
         x86_64-linux-gnu:cuda13)
@@ -350,6 +356,8 @@ set_cuda_config_for_flavor() {
             )
             CUDA_SYMBOL_CHECK_ENV=("BTX_SYMBOL_CHECK_ALLOW_LIBRT=1")
             export LD_LIBRARY_PATH="$CUDA_TOOL_LIBRARY_PATH"
+            # Plain sm_120 packaging only (see cuda12 comment). Native SM120_MMA
+            # stays OFF for Guix; rack builds pass -DBTX_CUDA_SM120_MXFP4_NATIVE=ON.
             CUDA_CONFIGFLAGS="-DBTX_ENABLE_CUDA_EXPERIMENTAL=ON -DBTX_CUDA_ARCHITECTURES=100-real;103-real;110-real;120-real;121-real;100-virtual;120-virtual -DCMAKE_CUDA_ARCHITECTURES=100-real;103-real;110-real;120-real;121-real;100-virtual;120-virtual -DCUDAToolkit_ROOT=$cuda_root -DCMAKE_CUDA_COMPILER=$CUDA_COMPILER_FOR_CMAKE -DCMAKE_CUDA_HOST_COMPILER=$CUDA_HOST_COMPILER_FOR_CMAKE $CUDA_LIBRARY_CONFIGFLAGS -DCMAKE_CUDA_RUNTIME_LIBRARY=Static -DBTX_CUDA_RUNTIME_LIBRARY=Static"
             ;;
         *)

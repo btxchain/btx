@@ -65,7 +65,10 @@ class WalletShieldedTransferBuilderTest(BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 1
         self.setup_clean_chain = True
-        self.extra_args = [["-noautoshieldcoinbase"]]
+        # The builder fixture deliberately plans legacy transparent-input
+        # shielding. Keep the post-fork mature-coinbase-only policy outside
+        # this compatibility test's height window.
+        self.extra_args = [["-noautoshieldcoinbase", "-regtestshieldedmatrictdisableheight=500"]]
         self.rpc_timeout = 300
 
     def skip_test_if_missing_module(self):
@@ -110,20 +113,33 @@ class WalletShieldedTransferBuilderTest(BitcoinTestFramework):
         })
         self.generatetoaddress(node, 1, mine_addr, sync_fun=self.no_op)
 
-        self.log.info("Import the same 3-of-3 PQ multisig descriptor into all signer wallets")
+        self.log.info("Create a watch-only coordinator for the shared 3-of-3 PQ multisig")
         pq_keys = [
             signer1.exportpqkey(signer1_addr)["key"],
             signer2.exportpqkey(signer2_addr)["key"],
             signer3.exportpqkey(signer3_addr)["key"],
         ]
-        msig_info = signer1.addpqmultisigaddress(3, pq_keys, "builder-3of3", True)
-        signer2_info = signer2.addpqmultisigaddress(3, pq_keys, "builder-3of3", True)
-        signer3_info = signer3.addpqmultisigaddress(3, pq_keys, "builder-3of3", True)
-        multisig = signer1
+        node.createwallet(
+            wallet_name="builder_watch",
+            blank=True,
+            descriptors=True,
+            disable_private_keys=True,
+        )
+        descriptor_wallet = node.get_wallet_rpc("builder_watch")
+        msig_info = descriptor_wallet.addpqmultisigaddress(3, pq_keys, "builder-3of3", True)
         multisig_address = msig_info["address"]
-        assert_equal(signer2_info["address"], multisig_address)
-        assert_equal(signer3_info["address"], multisig_address)
         assert "sortedmulti_pq(" in msig_info["descriptor"]
+
+        # The multisig path remains watch-only, while an unrelated local
+        # descriptor keypool supplies transparent change when shielding an
+        # amount smaller than the selected inputs.
+        node.createwallet(wallet_name="builder_source", descriptors=True)
+        multisig = node.get_wallet_rpc("builder_source")
+        [import_result] = multisig.importdescriptors([{
+            "desc": msig_info["descriptor"],
+            "timestamp": "now",
+        }])
+        assert_equal(import_result["success"], True)
 
         self.log.info("Fund the multisig wallet with many 20 BTX outputs")
         fund_same_address_many(node, miner, mine_addr, multisig_address, Decimal("20.0"), 12)
@@ -168,7 +184,7 @@ class WalletShieldedTransferBuilderTest(BitcoinTestFramework):
             f"--datadir={datadir}",
             "--chain=regtest",
             f"--rpcport={rpcport}",
-            "--rpcwallet=signer1",
+            "--rpcwallet=builder_source",
             "--signer-wallet=signer1",
             "--signer-wallet=signer2",
             "--signer-wallet=signer3",
@@ -194,7 +210,7 @@ class WalletShieldedTransferBuilderTest(BitcoinTestFramework):
             f"--datadir={datadir}",
             "--chain=regtest",
             f"--rpcport={rpcport}",
-            "--rpcwallet=signer1",
+            "--rpcwallet=builder_source",
             "--signer-wallet=signer1",
             "--signer-wallet=signer2",
             "--signer-wallet=signer3",

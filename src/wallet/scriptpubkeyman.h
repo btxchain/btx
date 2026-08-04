@@ -705,6 +705,10 @@ public:
     // Fetch the SigningProvider for the given script and optionally include private keys.
     std::unique_ptr<FlatSigningProvider> GetSigningProvider(const CScript& script, bool include_private = false) const;
 
+    // Fetch public solving data plus metadata describing which PQ keys can be
+    // signed by this wallet. This never derives or materializes a private PQ key.
+    std::unique_ptr<FlatSigningProvider> GetP2MRSizingProvider(const CScript& script) const;
+
     // Fetch the SigningProvider for the given pubkey and always include private keys. This should only be called by signing code.
     std::unique_ptr<FlatSigningProvider> GetSigningProvider(const CPubKey& pubkey) const;
     // Fetch the SigningProvider for the given PQ pubkey and always include private keys. This should only be called by signing code.

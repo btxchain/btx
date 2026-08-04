@@ -121,6 +121,16 @@ void BIP324Cipher::Encrypt(Span<const std::byte> contents, Span<const std::byte>
 {
     assert(output.size() == contents.size() + EXPANSION);
 
+    // Defense-in-depth: the contents length is serialized into a LENGTH_LEN (3) byte field below, so
+    // any value above (1 << 24) - 1 == 0xFFFFFF cannot be represented and its high bits would be
+    // SILENTLY TRUNCATED, corrupting the wire length and desyncing the encrypted stream. The
+    // V2Transport send-side guard (V2_MAX_CONTENTS_LEN in net.cpp) already guarantees this never
+    // happens, but assert it here so a future caller that forgets that higher-level guard fails
+    // closed instead of corrupting the stream. assert() (not Assume()) is used deliberately: it is
+    // live in every BTX build -- NDEBUG is a hard compile error (see util/check.h) -- and matches
+    // how the rest of this file signals its internal invariants.
+    assert(contents.size() <= (size_t{1} << (8 * LENGTH_LEN)) - 1);
+
     // Encrypt length.
     std::byte len[LENGTH_LEN];
     len[0] = std::byte{(uint8_t)(contents.size() & 0xFF)};

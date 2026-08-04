@@ -1,5 +1,13 @@
 # BTX CUDA Multi-Device Mining
 
+This document describes legacy digest-batch scheduling. MatMul v4.7 Profile 1
+ExactReplay uses its own full-pipeline qualification and one submitter per
+saturated device. Do not infer that enabling more legacy CUDA mining devices
+qualifies consensus replay or that Profile 2 should be replayed at launch.
+Epoch A is Profile 1 ExactReplay; proof authority and Profile 2 are separately
+activated later. See
+[`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md).
+
 This document covers Linux CUDA operation when a CUDA-enabled BTX build runs
 on a host with one or more NVIDIA GPUs.
 

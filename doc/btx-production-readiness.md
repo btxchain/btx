@@ -3,6 +3,46 @@
 This runbook defines the executable verification checklist used before BTX
 production deployment.
 
+For MatMul v4.7, a green legacy production-readiness run is necessary but not
+sufficient. Epoch A alone uses Profile 1 ExactReplay with optional shadow
+proofs; Epoch B requires a durable proof and ExactReplay; Epoch C moves
+authority to the Profile 1 proof; Epoch D separately activates Profile 2 under
+proof authority. The complete activation gates and their required ordering are
+defined in
+[`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md).
+
+## Current MatMul v4.7 candidate status: NO-GO
+
+The current candidate source is activation-armed: the mainnet Epoch-A v4,
+BMX4C, and RC heights are atomically set to `185000`; the RC ASERT ratio is
+`6931159304/1`; and both public ratification records are `true`. These are
+candidate source values, not evidence that the release is ready or that the
+currently deployed network has activated them.
+
+The ASERT ratio is a **ratified policy coefficient**, not a reproduced
+measurement. The first assembled schema-4 corpus
+(`doc/evidence/epoch-a-asert-schema4-cuda-2026-08-04`) derives `4007014530` on
+the CUDA launch cohort at the implementation freeze; the installed value is
+1.730x that envelope, chosen because the error is asymmetric — too low risks
+stalled blocks at the fork, too high yields temporarily fast blocks that ASERT
+corrects. See the rationale in `src/kernel/chainparams.cpp`.
+
+Deployment remains **NO-GO**. The CUDA+Metal corpus measured from PR #97 freeze
+`2174cdedb0` is internally coherent: both providers reproduced the frozen
+headers and digests under the hardened comparator. The later `cebb14499f`
+test-fixture commit is outside the repository seal verifier's deliberately
+strict freeze-to-seal ordering, so current-head strict provenance remains red.
+It is also not an exact-final seal for the combined v0.33.2 source tree. Before
+release, that exact combined tree must close the
+revision-bound CUDA+Metal corpus, provider-bound schema-4 ASERT and
+complete-lifecycle calibration, production strict-device trusted-mirror
+rehearsal, and full unit and functional-suite closeout. The review must also
+record the disposition of the required soak, multi-peer testnet,
+fault/recovery, and released-binary campaigns. The tuple must be rechecked
+against the live mainnet tip immediately before the final source freeze so its
+upgrade runway remains adequate. Until then, do not merge or ship: the armed
+height and true flags would take effect if this source were released.
+
 For shielded launch scope, this runbook must be read together with
 `doc/btx-shielded-production-status-2026-03-20.md` and
 `doc/btx-smile-v2-genesis-readiness-tracker-2026-03-20.md`, plus the stable
@@ -31,12 +71,12 @@ Reference analysis:
 
 1. Required BTX binaries and validation scripts are present.
 2. Lint checks pass.
-3. Parallel BTX gate passes (`pow_tests`, `kawpow_tests`, functional BTX
+3. Parallel BTX gate passes (`pow_tests`, MatMul suites, functional BTX
    consensus test, M7 script unit tests, M5 swarm harness test).
 4. Strict regtest M7 readiness checks pass.
 5. Strict regtest M7 pool submission path passes and emits an artifact.
 6. Benchmark/latency suite passes (`scripts/m9_btx_benchmark_suite.sh`).
-7. PoW scaling simulation suite passes (long-horizon DGW/KAWPOW checks).
+7. PoW scaling simulation suite passes (long-horizon difficulty/MatMul checks).
 8. M7 scripts pass while running concurrently (port-isolation anti-hang check).
 9. Swarm timeout guard catches and terminates hanging Codex worker processes.
 10. Live strict regtest mining flow succeeds:

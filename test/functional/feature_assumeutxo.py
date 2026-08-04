@@ -99,9 +99,25 @@ def assert_snapshot_sync(blockchaininfo, active, background_validation_in_progre
 
 class AssumeutxoTest(BitcoinTestFramework):
 
+    def start_node(self, i, *args, **kwargs):
+        # The framework records TestNode.mocktime but a restarted daemon otherwise
+        # begins startup with wall time. This test's cached chain is dated in 2011;
+        # pass the clock on the command line so startup IBD/service decisions and
+        # later background-snapshot download policy see the same deterministic time.
+        saved_mocktime = self.nodes[i].mocktime
+        if saved_mocktime is not None:
+            mocktime_arg = f"-mocktime={saved_mocktime}"
+            if args:
+                positional = list(args)
+                positional[0] = [*(positional[0] or []), mocktime_arg]
+                args = tuple(positional)
+            else:
+                kwargs["extra_args"] = [*(kwargs.get("extra_args") or []), mocktime_arg]
+        super().start_node(i, *args, **kwargs)
+
     def set_test_params(self):
         """Use the pregenerated, deterministic chain up to height 199."""
-        self.num_nodes = 4
+        self.num_nodes = 5
         self.rpc_timeout = 120
         # Keep explicit externalized nodes in this test so both retention
         # surfaces stay covered after the default switched to retained
@@ -110,13 +126,14 @@ class AssumeutxoTest(BitcoinTestFramework):
             ["-retainshieldedcommitmentindex=0", "-allowunpinnedshieldedsnapshot=1"],
             ["-fastprune", "-prune=1", "-blockfilterindex=1", "-coinstatsindex=1", "-retainshieldedcommitmentindex=0", "-allowunpinnedshieldedsnapshot=1"],
             ["-persistmempool=0","-txindex=1", "-blockfilterindex=1", "-coinstatsindex=1", "-retainshieldedcommitmentindex=1", "-allowunpinnedshieldedsnapshot=1"],
-            ["-retainshieldedcommitmentindex=0", "-allowunpinnedshieldedsnapshot=1"]
+            ["-retainshieldedcommitmentindex=0", "-allowunpinnedshieldedsnapshot=1"],
+            ["-retainshieldedcommitmentindex=0", "-allowunpinnedshieldedsnapshot=1", "-checkblocks=20", "-checklevel=4"],
         ]
 
     def setup_network(self):
         """Start with the nodes disconnected so that one can generate a snapshot
         including blocks the other hasn't yet seen."""
-        self.add_nodes(4)
+        self.add_nodes(self.num_nodes)
         self.start_nodes(extra_args=self.extra_args)
 
     def test_invalid_snapshot_scenarios(self, valid_snapshot_path, expected_txoutset_hash):
@@ -261,7 +278,16 @@ class AssumeutxoTest(BitcoinTestFramework):
         for height in range(1, end_height + 1):
             msg.headers.append(from_hex(CBlockHeader(), source.getblockheader(source.getblockhash(height), verbose=False)))
         peer.send_message(msg)
-        self.wait_until(lambda: target.getblockchaininfo()["headers"] == end_height)
+        # RC deliberately keeps the public best-header counter pinned to
+        # authenticated work. For snapshot bootstrap, the exact assumeutxo
+        # block hash only needs to be accepted into the header index.
+        end_hash = source.getblockhash(end_height)
+        def has_end_header():
+            return any(
+                tip["hash"] == end_hash and tip["height"] == end_height
+                for tip in target.getchaintips()
+            )
+        self.wait_until(has_end_header)
         peer.peer_disconnect()
 
     def test_invalid_chainstate_scenarios(self):
@@ -298,7 +324,19 @@ class AssumeutxoTest(BitcoinTestFramework):
             "vout": 0,
             "scriptPubKey": coinbase_tx["vout"][0]["scriptPubKey"]["hex"],
         }
-        raw_tx = node.createrawtransaction([prevout], [{"data": "00" * 40}])
+        descriptor = f"mr({'11' * 1312})"
+        descriptor_info = node.getdescriptorinfo(descriptor)
+        destination = node.deriveaddresses(
+            f"{descriptor}#{descriptor_info['checksum']}"
+        )[0]
+        output_value = int(
+            (Decimal(str(coinbase_tx["vout"][0]["value"])) - Decimal("0.001")) *
+            Decimal("100000000")
+        )
+        raw_tx = node.createrawtransaction(
+            [prevout],
+            [{destination: Decimal(output_value) / Decimal("100000000")}],
+        )
         tx = node.signrawtransactionwithkey(
             raw_tx,
             [node.get_deterministic_priv_key().key],
@@ -326,6 +364,73 @@ class AssumeutxoTest(BitcoinTestFramework):
         msg = "Unable to load UTXO snapshot: Population failed: Work does not exceed active chainstate."
         assert_raises_rpc_error(-32603, msg, node.loadtxoutset, dump_output_path)
 
+    def test_snapshot_base_block_already_on_disk(self, dump_output):
+        self.log.info("Test snapshot base stored before activation, including restart and BTX shielded state")
+        source = self.nodes[0]
+        node = self.nodes[4]
+        snapshot_hash = source.getblockhash(SNAPSHOT_BASE_HEIGHT)
+        snapshot_block = source.getblock(snapshot_hash, 0)
+        expected_shielded = source.getshieldedstateinfo()
+
+        # Store the base before loadtxoutset() sets BlockManager::m_snapshot_height.
+        # Its missing historical parents keep it unlinked for the background
+        # chainstate, while the snapshot chainstate starts at this same block.
+        submit_result = node.submitblock(snapshot_block)
+        assert submit_result in (None, "inconclusive"), submit_result
+        assert_equal(node.getblock(snapshot_hash)["height"], SNAPSHOT_BASE_HEIGHT)
+
+        loaded = node.loadtxoutset(dump_output["path"])
+        assert_equal(loaded["base_height"], SNAPSHOT_BASE_HEIGHT)
+        assert_equal(loaded["shielded_retention_profile"], "externalized")
+        assert_equal(loaded["retain_shielded_commitment_index"], False)
+        assert_snapshot_sync(
+            node.getblockchaininfo(),
+            active=True,
+            background_validation_in_progress=True,
+            base_height=SNAPSHOT_BASE_HEIGHT,
+            base_blockhash=snapshot_hash,
+        )
+
+        # This level-4 restart exercises VerifyDB at the snapshot base, where
+        # the snapshot UTXO database intentionally has no ancestor state.
+        self.restart_node(4, extra_args=self.extra_args[4])
+
+        # Feed only the historical blocks that remain missing. The base itself
+        # must be recovered from m_blocks_unlinked after restart and connected
+        # when its last parent becomes available.
+        for height in range(START_HEIGHT + 1, SNAPSHOT_BASE_HEIGHT):
+            block_hash = source.getblockhash(height)
+            submit_result = node.submitblock(source.getblock(block_hash, 0))
+            assert submit_result in (None, "inconclusive"), submit_result
+
+        self.wait_until(lambda: len(node.getchainstates()["chainstates"]) == 1)
+        assert_equal(node.getblockcount(), SNAPSHOT_BASE_HEIGHT)
+        assert_snapshot_sync(
+            node.getblockchaininfo(),
+            active=True,
+            background_validation_in_progress=False,
+            base_height=SNAPSHOT_BASE_HEIGHT,
+            base_blockhash=snapshot_hash,
+        )
+
+        # Restart performs validated-snapshot cleanup. Re-exporting the same
+        # height verifies both the UTXO contents and BTX shielded state pin
+        # survived activation, background validation, and cleanup unchanged.
+        self.restart_node(4, extra_args=self.extra_args[4])
+        assert_snapshot_sync(node.getblockchaininfo(), active=False, background_validation_in_progress=False)
+        actual_shielded = node.getshieldedstateinfo()
+        for field in (
+            "height",
+            "bestblockhash",
+            "shielded_state_initialized",
+            "pool_balance_sat",
+            "velocity_window_egress_sat",
+        ):
+            assert_equal(actual_shielded[field], expected_shielded[field])
+        exported = node.dumptxoutset("snapshot-base-already-stored.dat", "latest")
+        assert_equal(exported["txoutset_hash"], dump_output["txoutset_hash"])
+        assert_equal(exported["shielded_state_pin"], dump_output["shielded_state_pin"])
+
     def test_snapshot_block_invalidated(self, dump_output_path, snapshot_base_hash):
         self.log.info("Test snapshot is not loaded when base block is invalid.")
         node = self.nodes[0]
@@ -348,6 +453,22 @@ class AssumeutxoTest(BitcoinTestFramework):
         self.log.info("Check importing a snapshot where current chain-tip is not an ancestor of the snapshot block but has less work")
         # Generate a divergent chain in n3 up to 298
         self.generate(n3, nblocks=99, sync_fun=self.no_op)
+        assert_equal(n3.getblockcount(), SNAPSHOT_BASE_HEIGHT - 1)
+
+        self.log.info("Reject the snapshot when an authenticated divergent MatMul chain has more work")
+        divergent_blocks = self.generate(n3, nblocks=2, sync_fun=self.no_op)
+        assert_equal(n3.getblockcount(), SNAPSHOT_BASE_HEIGHT + 1)
+        msg = "A forked headers-chain with more work than the chain with the snapshot base block header exists. Please proceed to sync without AssumeUtxo."
+        assert_raises_rpc_error(
+            -32603,
+            msg,
+            n3.loadtxoutset,
+            dump_output_path,
+        )
+
+        # Return to the lower-work divergent tip. The exact chainparam-pinned
+        # snapshot has more work than this chain and remains safe to activate.
+        n3.invalidateblock(divergent_blocks[0])
         assert_equal(n3.getblockcount(), SNAPSHOT_BASE_HEIGHT - 1)
 
         # Try importing the snapshot and assert its success
@@ -414,6 +535,14 @@ class AssumeutxoTest(BitcoinTestFramework):
         for node in (snapshot_node, ibd_node):
             self.stop_node(node.index)
             rmtree(node.chain_path)
+            # The IBD peer is deliberately fresh. Do not restore the cached
+            # chain's 2011 mock clock for that node: with only genesis it would
+            # appear current and permit historical requests from the
+            # NETWORK_LIMITED snapshot peer. The snapshot node does retain
+            # mocktime; BTX's background MatMul download policy uses it to make
+            # deterministic forward progress through this cached chain.
+            if node is ibd_node:
+                node.mocktime = None
             self.start_node(node.index, extra_args=self.extra_args[node.index])
 
         # Sync-up headers chain on snapshot_node to load snapshot
@@ -530,10 +659,16 @@ class AssumeutxoTest(BitcoinTestFramework):
         for node in self.nodes[1:]:
             self.sync_headers_via_p2p(n0, node, SNAPSHOT_BASE_HEIGHT)
 
-        # Ensure everyone is seeing the same headers.
+        # Ensure everyone indexed the exact snapshot-base header. Under RC the
+        # authenticated best-header counter may remain at the validated tip.
+        snapshot_base_hash = n0.getblockhash(SNAPSHOT_BASE_HEIGHT)
         for n in self.nodes:
             blockchaininfo = n.getblockchaininfo()
-            assert_equal(blockchaininfo["headers"], SNAPSHOT_BASE_HEIGHT)
+            assert any(
+                tip["hash"] == snapshot_base_hash
+                and tip["height"] == SNAPSHOT_BASE_HEIGHT
+                for tip in n.getchaintips()
+            )
             expected_profile = "full_commitment_index" if n.index == 2 else "externalized"
             expected_retain = (n.index == 2)
             assert_shielded_retention(blockchaininfo, expected_profile, expected_retain)
@@ -549,6 +684,8 @@ class AssumeutxoTest(BitcoinTestFramework):
             assert_equal(output["retain_shielded_commitment_index"], False)
 
         check_dump_output(dump_output)
+
+        self.test_snapshot_base_block_already_on_disk(dump_output)
 
         # Mine more blocks on top of the snapshot that n1 hasn't yet seen. This
         # will allow us to test n1's sync-to-tip on top of a snapshot while
@@ -739,7 +876,13 @@ class AssumeutxoTest(BitcoinTestFramework):
         assert_raises_rpc_error(-1, "Block not available (not fully downloaded)", n1.getblock, spend_coin_blockhash)
         prev_tx = n0.getblock(spend_coin_blockhash, 3)['tx'][0]
         prevout = {"txid": prev_tx["txid"], "vout": 0, "scriptPubKey": prev_tx["vout"][0]["scriptPubKey"]["hex"]}
-        raw_tx = n1.createrawtransaction([prevout], [{"data": "00" * 40}])
+        descriptor = f"mr({'22' * 1312})"
+        descriptor_info = n1.getdescriptorinfo(descriptor)
+        destination = n1.deriveaddresses(
+            f"{descriptor}#{descriptor_info['checksum']}"
+        )[0]
+        output_value = Decimal(str(prev_tx["vout"][0]["value"])) - Decimal("0.001")
+        raw_tx = n1.createrawtransaction([prevout], [{destination: output_value}])
         signed_tx = n1.signrawtransactionwithkey(
             raw_tx,
             [bytes_to_wif(self.mini_wallet._priv_key.get_bytes())],

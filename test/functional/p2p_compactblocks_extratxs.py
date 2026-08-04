@@ -7,14 +7,17 @@
 from test_framework.blocktools import (
     COINBASE_MATURITY,
     NORMAL_GBT_REQUEST_PARAMS,
+    REGTEST_GENERIC_P2P_MATMUL_ARGS,
     create_block,
     add_witness_commitment,
 )
 from test_framework.messages import (
+    CBlockHeader,
     CTxOut,
     HeaderAndShortIDs,
     MSG_BLOCK,
     msg_cmpctblock,
+    msg_headers,
     msg_sendcmpct,
     msg_tx,
     tx_from_hex,
@@ -96,6 +99,7 @@ class CompactBlocksBlockReconstructionLimitTest(BitcoinTestFramework):
             "-acceptnonstdtxn=0",
             "-incrementalrelayfee=0.00001",
             "-debug=net",
+            *REGTEST_GENERIC_P2P_MATMUL_ARGS,
         ]]
         self.utxos = []
 
@@ -211,6 +215,13 @@ class CompactBlocksBlockReconstructionLimitTest(BitcoinTestFramework):
         # Send as compact block
         cmpct_block = HeaderAndShortIDs()
         cmpct_block.initialize_from_block(block, use_witness=True)
+        # The node only accepts unsolicited compact blocks from peers it
+        # selected for high-bandwidth relay. Announce the header first so this
+        # test uses the ordinary requested-block path.
+        self.segwit_node.send_message(
+            msg_headers(headers=[CBlockHeader(block)])
+        )
+        self.segwit_node.wait_for_getdata([block.sha256])
         self.segwit_node.send_and_ping(msg_cmpctblock(cmpct_block.to_p2p()))
 
         # Check if node requested missing transactions

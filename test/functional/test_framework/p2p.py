@@ -54,6 +54,9 @@ from test_framework.messages import (
     msg_getcfilters,
     msg_getdata,
     msg_getheaders,
+    msg_getmmsketch,
+    msg_generic,
+    msg_mmsketch,
     msg_headers,
     msg_inv,
     msg_mempool,
@@ -61,6 +64,7 @@ from test_framework.messages import (
     msg_notfound,
     msg_ping,
     msg_pong,
+    msg_rcadmit,
     msg_sendaddrv2,
     msg_sendcmpct,
     msg_sendheaders,
@@ -134,13 +138,16 @@ MESSAGEMAP = {
     b"getcfilters": msg_getcfilters,
     b"getdata": msg_getdata,
     b"getheaders": msg_getheaders,
+    b"getmmsketch": msg_getmmsketch,
     b"headers": msg_headers,
     b"inv": msg_inv,
+    b"mmsketch": msg_mmsketch,
     b"mempool": msg_mempool,
     b"merkleblock": msg_merkleblock,
     b"notfound": msg_notfound,
     b"ping": msg_ping,
     b"pong": msg_pong,
+    b"rcadmit": msg_rcadmit,
     b"sendaddrv2": msg_sendaddrv2,
     b"sendcmpct": msg_sendcmpct,
     b"sendheaders": msg_sendheaders,
@@ -545,11 +552,14 @@ class P2PInterface(P2PConnection):
     def on_getblocktxn(self, message): pass
     def on_getdata(self, message): pass
     def on_getheaders(self, message): pass
+    def on_getmmsketch(self, message): pass
     def on_headers(self, message): pass
+    def on_mmsketch(self, message): pass
     def on_mempool(self, message): pass
     def on_merkleblock(self, message): pass
     def on_notfound(self, message): pass
     def on_pong(self, message): pass
+    def on_rcadmit(self, message): pass
     def on_sendaddrv2(self, message): pass
     def on_sendcmpct(self, message): pass
     def on_sendheaders(self, message): pass
@@ -856,30 +866,51 @@ class P2PDataStore(P2PInterface):
         if response is not None:
             self.send_message(response)
 
-    def send_blocks_and_test(self, blocks, node, *, success=True, force_send=False, reject_reason=None, expect_disconnect=False, timeout=60, is_decoy=False):
+    def send_blocks_and_test(self, blocks, node, *, success=True, force_send=False, announce_before_force_send=False, reject_reason=None, expect_disconnect=False, timeout=60, is_decoy=False):
         """Send blocks to test node and test whether the tip advances.
 
-         - add all blocks to our block_store
+         - add blocks to our block_store; for announce_before_force_send,
+           delay publication of accepted blocks until the cached payload has
+           been sent and checked, and do not retain rejected transport payloads
          - send a headers message for the final block
          - the on_getheaders handler will ensure that any getheaders are responded to
          - if force_send is False: wait for getdata for each of the blocks. The on_getdata handler will
            ensure that any getdata messages are responded to. Otherwise send the full block unsolicited.
+         - if announce_before_force_send is True: serialize the forced block before announcing its
+           header, then send the cached payload immediately. This preserves header state without
+           letting slow local serialization race the peer's block-download timeout.
          - if success is True: assert that the node's tip advances to the most recent block
          - if success is False: assert that the node's tip doesn't advance
          - if reject_reason is set: assert that the correct reject message is logged"""
 
-        with p2p_lock:
-            for block in blocks:
-                self.block_store[block.sha256] = block
-                self.last_block_hash = block.sha256
+        serialized_blocks = None
+        if force_send and announce_before_force_send:
+            # Do not expose these blocks through block_store/last_block_hash
+            # until their expensive payload serialization has completed.
+            # Otherwise an unsolicited getdata could make on_getdata
+            # serialize the same oversized block concurrently.
+            serialized_blocks = [block.serialize() for block in blocks]
+
+        delayed_store = serialized_blocks is not None and not is_decoy
+        if not delayed_store:
+            with p2p_lock:
+                for block in blocks:
+                    self.block_store[block.sha256] = block
+                    self.last_block_hash = block.sha256
 
         reject_reason = [reject_reason] if reject_reason else []
         with node.assert_debug_log(expected_msgs=reject_reason):
             if is_decoy:  # since decoy messages are ignored by the recipient - no need to wait for response
                 force_send = True
+                announce_before_force_send = False
             if force_send:
-                for b in blocks:
-                    self.send_message(msg_block(block=b), is_decoy)
+                if announce_before_force_send:
+                    self.send_message(msg_headers([CBlockHeader(block) for block in blocks]))
+                    for raw_block in serialized_blocks:
+                        self.send_message(msg_generic(b"block", raw_block))
+                else:
+                    for b in blocks:
+                        self.send_message(msg_block(block=b), is_decoy)
             else:
                 self.send_message(msg_headers([CBlockHeader(block) for block in blocks]))
                 self.wait_until(
@@ -897,6 +928,17 @@ class P2PDataStore(P2PInterface):
                 self.wait_until(lambda: node.getbestblockhash() == blocks[-1].hash, timeout=timeout)
             else:
                 assert node.getbestblockhash() != blocks[-1].hash
+
+        if delayed_store and success:
+            # Keep the cached block unavailable to on_getdata until the test
+            # result is known. A getdata racing the forced send must not cause
+            # a second serialization or duplicate multi-megabyte response.
+            # Rejected oversized payloads must remain unavailable after a
+            # reconnect, or a later descendant request could resend them.
+            with p2p_lock:
+                for block in blocks:
+                    self.block_store[block.sha256] = block
+                    self.last_block_hash = block.sha256
 
     def send_txs_and_test(self, txs, node, *, success=True, reject_reason=None):
         """Send txs to test node and test whether they're accepted to the mempool.

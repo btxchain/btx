@@ -369,7 +369,10 @@ class P2PShieldedRelayTest(BitcoinTestFramework):
             # v2 transport has materially higher per-message overhead. Send in
             # bounded batches and stop once the counter increments.
             batch_size = 4 if self.options.v2transport else 64
-            max_batches = 48 if self.options.v2transport else 40
+            # The bucket permits one full 16 MB protocol burst. This fixture is
+            # about 60 KB, so the old 192/256-message ceilings could never
+            # exhaust it even with mocktime holding refill at zero.
+            max_batches = 80
             for _ in range(max_batches):
                 for _ in range(batch_size):
                     peer.send_message(send_message_factory())

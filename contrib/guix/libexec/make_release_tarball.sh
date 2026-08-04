@@ -25,7 +25,9 @@ git archive --prefix="${DISTNAME}/" HEAD |
 
 # Generate correct build info file from git, before we lose git
 GIT_BUILD_INFO="$(cmake -P cmake/script/GenerateBuildInfo.cmake)"
-sed 's/\/\/ No build information available/'"${GIT_BUILD_INFO}"'/' -i "${DISTNAME}/cmake/script/GenerateBuildInfo.cmake"
+GIT_BUILD_INFO="${GIT_BUILD_INFO}" perl -0777 -pi -e \
+  's{// No build information available}{$ENV{GIT_BUILD_INFO}}' \
+  "${DISTNAME}/cmake/script/GenerateBuildInfo.cmake"
 
 tar \
   --format=ustar \

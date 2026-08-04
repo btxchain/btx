@@ -1,14 +1,12 @@
 # libbitcoinpqc fuzz harness — local pre-merge smoke check
 #
-# Mirrors the recipe in .github/workflows/libbitcoinpqc-fuzz.yml so the
-# same checks can be run locally before merging. Targets pin the same
-# Rust nightly and cargo-fuzz version the workflow pins, so
-# `make fuzz-smoke` locally mirrors the versioned workflow recipe.
+# Provides the versioned local recipe used before merging. Targets pin the
+# Rust nightly and cargo-fuzz version so `make fuzz-smoke` is reproducible.
 #
 # Usage from this directory:
 #
 #   make help          - show available targets and pinned versions
-#   make fuzz-smoke    - full smoke check (matches CI workflow recipe)
+#   make fuzz-smoke    - full local pre-merge smoke check
 #   make fuzz-build    - cargo +nightly fuzz build only
 #
 # Requirements (one-time setup):
@@ -18,7 +16,7 @@
 #         make fuzz-toolchain
 #
 # Linux developers: `make fuzz-deps-linux` installs the apt packages the
-# CI workflow installs (cmake, clang, libclang-dev, libssl-dev,
+# local Linux lane installs (cmake, clang, libclang-dev, libssl-dev,
 # pkg-config, build-essential).
 #
 # macOS developers: cmake + clang via your normal build environment
@@ -28,8 +26,7 @@ RUST_NIGHTLY        ?= nightly-2026-05-01
 CARGO_FUZZ_VERSION  ?= 0.13.1
 SMOKE_TIME          ?= 1
 
-# Same target list and order as the workflow's smoke loop in
-# .github/workflows/libbitcoinpqc-fuzz.yml. Keep these in sync.
+# Pinned target list and order for the local smoke loop.
 SMOKE_TARGETS := keypair_generation key_parsing signature_parsing \
                  sign_verify cross_algorithm determinism \
                  sig_substitution structured_parsing

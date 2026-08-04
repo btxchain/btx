@@ -53,6 +53,8 @@ class BackwardsCompatibilityTest(BitcoinTestFramework):
     def skip_test_if_missing_module(self):
         self.skip_if_no_wallet()
         self.skip_if_no_previous_releases()
+        if not self.options.descriptors:
+            self.skip_if_no_bdb()
 
     def setup_nodes(self):
         self.add_nodes(self.num_nodes, extra_args=self.extra_args, versions=[
@@ -70,7 +72,8 @@ class BackwardsCompatibilityTest(BitcoinTestFramework):
         ])
 
         self.start_nodes()
-        self.import_deterministic_coinbase_privkeys()
+        if self.options.descriptors:
+            self.import_deterministic_coinbase_privkeys()
 
     def split_version(self, node):
         major = node.version // 10000
@@ -129,6 +132,10 @@ class BackwardsCompatibilityTest(BitcoinTestFramework):
         assert wallet.getaddressinfo(address_18075)["solvable"]
 
     def run_test(self):
+        if not self.options.descriptors:
+            self.run_legacy_load_compatibility()
+            return
+
         node_miner = self.nodes[0]
         node_master = self.nodes[1]
         node_v21 = self.nodes[self.num_nodes - 5]
@@ -383,6 +390,60 @@ class BackwardsCompatibilityTest(BitcoinTestFramework):
                 wallet_res = node.get_wallet_rpc(down_wallet_name)
                 info = wallet_res.getaddressinfo(address)
                 assert_equal(info, addr_info)
+
+    def run_legacy_load_compatibility(self):
+        """Round-trip old-release BDB wallets through the current loader.
+
+        BTX no longer creates legacy wallets or destinations in btxd, so the
+        legacy runner concentrates on the compatibility contract that remains:
+        existing wallets load without mutation and can be reopened by the
+        release that created them.
+        """
+        node_master = self.nodes[1]
+        node_v25 = self.nodes[2]
+
+        node_v25.rpc.createwallet(wallet_name="w1", descriptors=False)
+        node_v25.rpc.createwallet(wallet_name="w2", disable_private_keys=True, descriptors=False)
+        node_v25.rpc.createwallet(wallet_name="w3", blank=True, descriptors=False)
+
+        expected = {
+            "w1": (True, False),
+            "w2": (False, False),
+            "w3": (True, True),
+        }
+        for wallet_name, (private_keys_enabled, blank) in expected.items():
+            old_wallet = node_v25.get_wallet_rpc(wallet_name)
+            old_info = old_wallet.getwalletinfo()
+            assert_equal(old_info["private_keys_enabled"], private_keys_enabled)
+            assert_equal(old_info["blank"], blank)
+            old_wallet.unloadwallet()
+
+            shutil.copytree(
+                node_v25.wallets_path / wallet_name,
+                node_master.wallets_path / wallet_name,
+            )
+            node_master.loadwallet(wallet_name)
+            current_wallet = node_master.get_wallet_rpc(wallet_name)
+            current_info = current_wallet.getwalletinfo()
+            assert not current_info["descriptors"]
+            assert_equal(current_info["private_keys_enabled"], private_keys_enabled)
+            assert_equal(current_info["blank"], blank)
+            if private_keys_enabled and not blank:
+                assert_raises_rpc_error(-4, "no available keys", current_wallet.getnewaddress)
+            current_wallet.unloadwallet()
+
+            shutil.rmtree(node_v25.wallets_path / wallet_name)
+            shutil.copytree(
+                node_master.wallets_path / wallet_name,
+                node_v25.wallets_path / wallet_name,
+            )
+            node_v25.loadwallet(wallet_name)
+            reopened = node_v25.get_wallet_rpc(wallet_name).getwalletinfo()
+            assert_equal(reopened["private_keys_enabled"], private_keys_enabled)
+            assert_equal(reopened["blank"], blank)
+            node_v25.unloadwallet(wallet_name)
+
+        self.test_v19_addmultisigaddress()
 
 if __name__ == '__main__':
     BackwardsCompatibilityTest(__file__).main()

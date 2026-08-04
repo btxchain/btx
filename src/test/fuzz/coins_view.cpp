@@ -124,8 +124,9 @@ FUZZ_TARGET(coins_view, .init = initialize_coins_view)
                 CoinsCachePair sentinel{};
                 sentinel.second.SelfRef(sentinel);
                 size_t usage{0};
+                size_t dirty_count{0};
                 CCoinsMapMemoryResource resource;
-                CCoinsMap coins_map{0, SaltedOutpointHasher{/*deterministic=*/true}, CCoinsMap::key_equal{}, &resource};
+                CCoinsMap coins_map{0, SaltedCoinsCacheHasher{/*deterministic=*/true}, CCoinsMap::key_equal{}, &resource};
                 LIMITED_WHILE(good_data && fuzzed_data_provider.ConsumeBool(), 10'000)
                 {
                     CCoinsCacheEntry coins_cache_entry;
@@ -142,13 +143,16 @@ FUZZ_TARGET(coins_view, .init = initialize_coins_view)
                         coins_cache_entry.coin = *opt_coin;
                     }
                     auto it{coins_map.emplace(random_out_point, std::move(coins_cache_entry)).first};
-                    if (dirty) CCoinsCacheEntry::SetDirty(*it, sentinel);
+                    if (dirty) {
+                        dirty_count += !it->second.IsDirty();
+                        CCoinsCacheEntry::SetDirty(*it, sentinel);
+                    }
                     if (fresh) CCoinsCacheEntry::SetFresh(*it, sentinel);
                     usage += it->second.coin.DynamicMemoryUsage();
                 }
                 bool expected_code_path = false;
                 try {
-                    auto cursor{CoinsViewCacheCursor(usage, sentinel, coins_map, /*will_erase=*/true)};
+                    auto cursor{CoinsViewCacheCursor(usage, dirty_count, sentinel, coins_map, /*will_erase=*/true)};
                     coins_view_cache.BatchWrite(cursor, fuzzed_data_provider.ConsumeBool() ? ConsumeUInt256(fuzzed_data_provider) : coins_view_cache.GetBestBlock());
                     expected_code_path = true;
                 } catch (const std::logic_error& e) {

@@ -151,6 +151,12 @@ class TestNode():
                 "-softwareexpiry=0",
                 "-walletimplicitsegwit",
             ]
+            if self.chain == "regtest":
+                # The product's regtest profile intentionally defaults to the
+                # expensive Q*=256 Phase-B seal. Keep the general functional
+                # harness and its 199-block cache on Phase A; the dedicated
+                # seal test opts back in with a later command-line argument.
+                self.args.append("-regtestmatmulltsealaspow=0")
 
         if self.version_is_at_least(190000):
             self.args.append("-logthreadnames")
@@ -925,6 +931,29 @@ class TestNode():
                 p2p_conn.wait_for_verack()
                 p2p_conn.sync_with_ping()
 
+        return p2p_conn
+
+    def add_manual_p2p_connection(self, p2p_conn, *, p2p_idx, **kwargs):
+        """Add a manual (addnode onetry) P2P connection to the node."""
+        use_v2 = self.use_v2transport
+
+        def addnode_callback(address, port):
+            self.addnode(f'{address}:{port}', "onetry", v2transport=use_v2)
+
+        if use_v2:
+            kwargs['services'] = kwargs.get('services', P2P_SERVICES) | NODE_P2P_V2
+
+        p2p_conn.peer_accept_connection(
+            connect_cb=addnode_callback, connect_id=p2p_idx + 1,
+            net=self.chain, timeout_factor=self.timeout_factor,
+            supports_v2_p2p=use_v2, reconnect=False, **kwargs)()
+        p2p_conn.wait_for_connect()
+        self.p2ps.append(p2p_conn)
+        if use_v2:
+            p2p_conn.wait_until(lambda: p2p_conn.v2_state.tried_v2_handshake)
+        p2p_conn.wait_until(lambda: not p2p_conn.on_connection_send_msg)
+        p2p_conn.wait_for_verack()
+        p2p_conn.sync_with_ping()
         return p2p_conn
 
     def num_test_p2p_connections(self):

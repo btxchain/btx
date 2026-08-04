@@ -19,7 +19,7 @@
 #include <limits>
 
 struct HeadersGeneratorSetup : public RegTestingSetup {
-    /** Search for a nonce to meet (regtest) proof of work */
+    /** Make @p starting_header pass the header-sync proof-of-work gate. */
     void FindProofOfWork(CBlockHeader& starting_header, uint32_t block_height);
     /**
      * Generate headers in a chain that build off a given starting hash, using
@@ -33,7 +33,36 @@ struct HeadersGeneratorSetup : public RegTestingSetup {
 
 void HeadersGeneratorSetup::FindProofOfWork(CBlockHeader& starting_header, uint32_t block_height)
 {
-    BOOST_REQUIRE(MineHeaderForConsensus(starting_header, block_height, Params().GetConsensus()));
+    const Consensus::Params& consensus = Params().GetConsensus();
+    if (consensus.fMatMulPOW) {
+        // Header-sync PoW validation (HasValidProofOfWork -> CheckMatMulProofOfWork_Phase1)
+        // checks ONLY that matmul_dim is valid for the height, both seeds are
+        // non-null, and matmul_digest <= target(nBits). It deliberately does NOT
+        // recompute the digest or the seeds: the expensive MatMul proof is the
+        // deferred full-block/contextual check, and the fact that a header alone
+        // is accepted on a self-declared digest is exactly the unauthenticated-
+        // header surface (audit C1) that this header-sync path sits above. So a
+        // header-sync-valid header is built in O(1) here rather than mining many
+        // thousands of dim-256 MatMul evaluations -- this test exercises the sync
+        // state machine and chainwork accounting, not the MatMul proof. Mirror the
+        // miner's height-dependent dimension (v4 dim at/above the v4 fork, else the
+        // legacy dimension) so Phase1's dimension check accepts every height in the
+        // synthetic chain, including across the regtest v3->v4->BMX4C transition.
+        starting_header.matmul_dim =
+            consensus.IsMatMulV4Active(static_cast<int32_t>(block_height))
+                ? static_cast<uint16_t>(consensus.nMatMulV4Dimension)
+                : static_cast<uint16_t>(consensus.nMatMulDimension);
+        // Non-null seeds; the value is irrelevant to header sync (not recomputed
+        // here -- the seed-vs-parent binding is a contextual check outside sync).
+        starting_header.seed_a = uint256::ONE;
+        starting_header.seed_b = uint256::ONE;
+        // digest 0 <= any target, so Phase1's <= target(nBits) check passes for
+        // regtest's easy powLimit-derived difficulty.
+        starting_header.matmul_digest.SetNull();
+        starting_header.mix_hash.SetNull();
+        return;
+    }
+    BOOST_REQUIRE(MineHeaderForConsensus(starting_header, block_height, consensus));
 }
 
 void HeadersGeneratorSetup::GenerateHeaders(std::vector<CBlockHeader>& headers,
@@ -488,6 +517,84 @@ BOOST_AUTO_TEST_CASE(headers_sync_state_presync_survives_anchor_retune_rollovers
         static_cast<int64_t>(synthetic_chain_start.nHeight + static_cast<int>(HEADER_COUNT)));
 }
 
+BOOST_AUTO_TEST_CASE(headers_sync_state_presync_survives_v4_bmx4c_and_half_life_anchors)
+{
+    if (!Params().GetConsensus().fMatMulPOW) return;
+
+    const CBlockHeader genesis_header{Params().GenesisBlock()};
+    CBlockIndex synthetic_chain_start{genesis_header};
+    const uint256 synthetic_chain_start_hash{genesis_header.GetHash()};
+    synthetic_chain_start.phashBlock = &synthetic_chain_start_hash;
+    synthetic_chain_start.nChainWork = arith_uint256{};
+    synthetic_chain_start.nHeight = 50'000;
+
+    Consensus::Params consensus = Params().GetConsensus();
+    consensus.fPowNoRetargeting = false;
+    consensus.fPowAllowMinDifficultyBlocks = false;
+    consensus.nFastMineHeight = 50'000;
+    consensus.nMatMulAsertHeight = 50'000;
+    consensus.nMatMulAsertRetuneHeight = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulAsertRetune2Height = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulAsertHalfLifeUpgradeHeight = 50'040;
+    consensus.nMatMulAsertHalfLifeUpgrade = consensus.nMatMulAsertHalfLife * 2;
+    consensus.nMatMulV4Height = 50'080;
+    consensus.nMatMulV4AsertRescaleNum = 1;
+    consensus.nMatMulV4AsertRescaleDen = 1;
+    consensus.nMatMulBMX4CHeight = 50'120;
+    consensus.nMatMulBMX4CAsertRescaleNum = 1;
+    consensus.nMatMulBMX4CAsertRescaleDen = 1;
+
+    // Continue more than the 180-header synthetic window beyond every new
+    // anchor. The full reference chain and HeadersSyncState must produce the
+    // same nBits while retaining the active replay ancestry.
+    static constexpr size_t HEADER_COUNT{340};
+    std::vector<CBlockHeader> headers;
+    headers.reserve(HEADER_COUNT);
+    std::list<CBlockIndex> synthetic_indices;
+
+    CBlockIndex* previous_index = &synthetic_chain_start;
+    uint256 prev_hash = synthetic_chain_start_hash;
+    uint32_t prev_time = synthetic_chain_start.GetBlockTime();
+    int32_t next_height = synthetic_chain_start.nHeight + 1;
+    for (size_t i = 0; i < HEADER_COUNT; ++i) {
+        CBlockHeader header;
+        header.nVersion = genesis_header.nVersion;
+        header.hashPrevBlock = prev_hash;
+        header.hashMerkleRoot = ArithToUint256(0x56789);
+        header.nTime = prev_time + 1;
+        header.nBits = GetNextWorkRequired(previous_index, &header, consensus);
+        header.nNonce = static_cast<uint32_t>(i + 200);
+        header.nNonce64 = static_cast<uint64_t>(i + 200);
+        header.matmul_digest = genesis_header.matmul_digest;
+        header.matmul_dim = genesis_header.matmul_dim;
+        header.seed_a = genesis_header.seed_a;
+        header.seed_b = genesis_header.seed_b;
+
+        headers.push_back(header);
+        prev_hash = header.GetHash();
+        prev_time = header.nTime;
+
+        synthetic_indices.emplace_back(header);
+        CBlockIndex& synthesized = synthetic_indices.back();
+        synthesized.nHeight = next_height;
+        synthesized.pprev = previous_index;
+        previous_index = &synthesized;
+        ++next_height;
+    }
+
+    const arith_uint256 unreachable_work{~arith_uint256{}};
+    HeadersSyncState hss(/*id=*/0, consensus, &synthetic_chain_start, unreachable_work);
+    const auto result = hss.ProcessNextHeaders(headers, /*full_headers_message=*/true);
+
+    BOOST_CHECK(result.success);
+    BOOST_CHECK(result.request_more);
+    BOOST_CHECK(result.pow_validated_headers.empty());
+    BOOST_CHECK(hss.GetState() == HeadersSyncState::State::PRESYNC);
+    BOOST_CHECK_EQUAL(
+        hss.GetPresyncHeight(),
+        static_cast<int64_t>(synthetic_chain_start.nHeight + static_cast<int>(HEADER_COUNT)));
+}
+
 BOOST_AUTO_TEST_CASE(headers_sync_state_rejects_invalid_matmul_schedule_nbits)
 {
     if (!Params().GetConsensus().fMatMulPOW) return;
@@ -505,6 +612,38 @@ BOOST_AUTO_TEST_CASE(headers_sync_state_rejects_invalid_matmul_schedule_nbits)
     const arith_uint256 min_work = chain_start->nChainWork + 1;
     HeadersSyncState hss(/*id=*/0, Params().GetConsensus(), chain_start, min_work);
     const auto result = hss.ProcessNextHeaders(headers, /*full_headers_message=*/true);
+    BOOST_CHECK(!result.success);
+    BOOST_CHECK(result.pow_validated_headers.empty());
+    BOOST_CHECK(hss.GetState() == HeadersSyncState::State::FINAL);
+}
+
+BOOST_AUTO_TEST_CASE(headers_sync_state_enforces_active_matmul_header_spam_gate)
+{
+    if (!Params().GetConsensus().fMatMulPOW) return;
+
+    std::vector<CBlockHeader> headers;
+    GenerateHeaders(headers, /*count=*/1, Params().GenesisBlock().GetHash(),
+                    Params().GenesisBlock().nVersion, Params().GenesisBlock().nTime,
+                    ArithToUint256(0x6789a), Params().GenesisBlock().nBits);
+
+    const CBlockIndex* chain_start = WITH_LOCK(
+        ::cs_main,
+        return m_node.chainman->m_blockman.LookupBlockIndex(Params().GenesisBlock().GetHash()));
+    BOOST_REQUIRE(chain_start != nullptr);
+
+    Consensus::Params consensus = Params().GetConsensus();
+    consensus.nMatMulV4Height = 1;
+    consensus.nMatMulHeaderPoWDiscountBits = 0;
+    for (uint32_t nonce = 0; nonce < 10'000 &&
+         CheckMatMulHeaderSpamGate(headers.front(), consensus); ++nonce) {
+        headers.front().nNonce = nonce + 1;
+    }
+    BOOST_REQUIRE(!CheckMatMulHeaderSpamGate(headers.front(), consensus));
+
+    const arith_uint256 unreachable_work{~arith_uint256{}};
+    HeadersSyncState hss(/*id=*/0, consensus, chain_start, unreachable_work);
+    const auto result = hss.ProcessNextHeaders(headers, /*full_headers_message=*/true);
+
     BOOST_CHECK(!result.success);
     BOOST_CHECK(result.pow_validated_headers.empty());
     BOOST_CHECK(hss.GetState() == HeadersSyncState::State::FINAL);

@@ -2,11 +2,15 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <node/blockstorage.h>
 #include <test/util/setup_common.h>
+#include <util/fs.h>
 #include <validation.h>
 #include <validationinterface.h>
 
 #include <boost/test/unit_test.hpp>
+
+#include <cstdlib>
 
 // Taken from validation.cpp
 static constexpr auto DATABASE_WRITE_INTERVAL_MIN{50min};
@@ -80,7 +84,8 @@ BOOST_FIXTURE_TEST_CASE(write_during_multiblock_activation, TestChain100Setup)
     BOOST_CHECK_EQUAL(second_from_tip->pprev, chainstate.m_chain.Tip());
 
     // Set m_next_write to current time
-    chainstate.FlushStateToDisk(state_dummy, FlushStateMode::ALWAYS);
+    chainstate.FlushStateToDisk(state_dummy, FlushStateMode::FORCE_FLUSH);
+    BOOST_CHECK_EQUAL(WITH_LOCK(::cs_main, return chainstate.GetLastFlushedBlock()), second_from_tip->pprev);
     m_node.validation_signals->SyncWithValidationInterfaceQueue();
     // The periodic flush interval is between 50 and 70 minutes (inclusive)
     // The next call to a PERIODIC write will flush
@@ -97,6 +102,50 @@ BOOST_FIXTURE_TEST_CASE(write_during_multiblock_activation, TestChain100Setup)
     // inside the outer loop.
     m_node.validation_signals->SyncWithValidationInterfaceQueue();
     BOOST_CHECK_EQUAL(sub->m_flushed_at_block, second_from_tip);
+    BOOST_CHECK_EQUAL(WITH_LOCK(::cs_main, return chainstate.GetLastFlushedBlock()), second_from_tip);
+}
+
+BOOST_FIXTURE_TEST_CASE(chainstate_stops_after_block_flush_failure, TestChain100Setup)
+{
+    auto& chainstate{Assert(m_node.chainman)->ActiveChainstate()};
+    BlockValidationState state;
+    BOOST_REQUIRE(chainstate.FlushStateToDisk(state, FlushStateMode::FORCE_FLUSH));
+
+    mineBlocks(1);
+    const CBlockIndex* tip{WITH_LOCK(::cs_main, return chainstate.m_chain.Tip())};
+    const fs::path block_file{WITH_LOCK(::cs_main, return chainstate.m_blockman.GetBlockPosFilename(tip->GetBlockPos()))};
+
+    // Replacing the block file with a directory makes the file flush fail.
+    BOOST_REQUIRE(fs::remove(block_file));
+    BOOST_REQUIRE(fs::create_directory(block_file));
+
+    state = BlockValidationState{};
+    BOOST_CHECK(!chainstate.FlushStateToDisk(state, FlushStateMode::FORCE_FLUSH));
+    BOOST_CHECK(state.IsError());
+    BOOST_CHECK_EQUAL(m_node.exit_status.load(), EXIT_FAILURE);
+}
+
+BOOST_FIXTURE_TEST_CASE(force_sync_retains_utxo_cache, TestChain100Setup)
+{
+    auto& chainstate{Assert(m_node.chainman)->ActiveChainstate()};
+    BlockValidationState state;
+
+    BOOST_REQUIRE(chainstate.FlushStateToDisk(state, FlushStateMode::FORCE_FLUSH));
+    BOOST_CHECK_EQUAL(WITH_LOCK(::cs_main, return chainstate.CoinsTip().GetCacheSize()), 0U);
+
+    mineBlocks(1);
+    const size_t cache_size{WITH_LOCK(::cs_main, return chainstate.CoinsTip().GetCacheSize())};
+    BOOST_REQUIRE_GT(cache_size, 0U);
+    BOOST_REQUIRE_GT(WITH_LOCK(::cs_main, return chainstate.CoinsTip().GetDirtyCount()), 0U);
+
+    state = BlockValidationState{};
+    BOOST_REQUIRE(chainstate.FlushStateToDisk(state, FlushStateMode::FORCE_SYNC));
+    BOOST_CHECK_EQUAL(WITH_LOCK(::cs_main, return chainstate.CoinsTip().GetCacheSize()), cache_size);
+    BOOST_CHECK_EQUAL(WITH_LOCK(::cs_main, return chainstate.CoinsTip().GetDirtyCount()), 0U);
+
+    state = BlockValidationState{};
+    BOOST_REQUIRE(chainstate.FlushStateToDisk(state, FlushStateMode::FORCE_FLUSH));
+    BOOST_CHECK_EQUAL(WITH_LOCK(::cs_main, return chainstate.CoinsTip().GetCacheSize()), 0U);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

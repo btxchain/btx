@@ -180,9 +180,9 @@ std::optional<AdversarialProofCorpus> BuildV2SendAdversarialProofCorpus(
             corpus,
             base_tx,
             "witness_real_index_oob",
-            "Force the spend witness real_index past the ring bound so proof verification rejects it.",
+            "Force the canonical wire spend-witness real_index past the ring bound so decoding rejects it.",
             "bad-shielded-proof",
-            "proof_verify",
+            "witness_parse",
             [base_witness](CMutableTransaction&,
                            ::shielded::v2::TransactionBundle& bundle,
                            std::string& out_reject) {
@@ -191,9 +191,24 @@ std::optional<AdversarialProofCorpus> BuildV2SendAdversarialProofCorpus(
                     out_reject = "missing-v2-send-spend-witness";
                     return false;
                 }
-                witness.spends[0].real_index =
-                    static_cast<uint32_t>(witness.spends[0].ring_positions.size());
                 bundle.proof_payload = SerializeWitness(witness);
+                // V2SendSpendWitness::Serialize intentionally redacts the
+                // wallet-only real index to zero. Mutate the canonical wire
+                // bytes directly so this adversarial corpus actually carries
+                // a non-zero real_index instead of silently reproducing the
+                // valid base transaction.
+                const size_t real_index_offset =
+                    sizeof(uint8_t) + GetSizeOfCompactSize(witness.spends.size()) + sizeof(uint8_t);
+                if (bundle.proof_payload.size() < real_index_offset + sizeof(uint32_t)) {
+                    out_reject = "v2-send-witness-too-short";
+                    return false;
+                }
+                const uint32_t invalid_index =
+                    static_cast<uint32_t>(witness.spends[0].ring_positions.size());
+                for (size_t i = 0; i < sizeof(invalid_index); ++i) {
+                    bundle.proof_payload[real_index_offset + i] =
+                        static_cast<uint8_t>(invalid_index >> (8 * i));
+                }
                 return true;
             },
             reject_reason)) {

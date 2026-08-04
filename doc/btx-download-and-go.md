@@ -1,5 +1,12 @@
 # BTX Download-and-Go Guide
 
+> **Release/activation boundary:** a build that contains MatMul v4.7 code has
+> not activated it. Use only a published release whose network parameters and
+> release notes explicitly name an activation height. The implementation PR
+> keeps all heights disabled. Epoch A is Profile 1 ExactReplay; Profile 2 and
+> proof authority occur only in later, separately reviewed epochs. See
+> [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md).
+
 This guide is the shortest path from a precompiled BTX binary to:
 
 - wallet balance access
@@ -28,6 +35,29 @@ python3 contrib/faststart/btx-agent-setup.py \
   --preset miner \
   --datadir="$HOME/.btx"
 ```
+
+Add `--start-mining` when the same command should also provision the mining
+wallet/address and start the bundled live-mining supervisor after the verified
+fast-start bootstrap succeeds:
+
+```bash
+python3 contrib/faststart/btx-agent-setup.py \
+  --repo btxchain/btx \
+  --release-tag v0.33.2 \
+  --preset miner \
+  --datadir="$HOME/.btx" \
+  --start-mining
+```
+
+The handoff remains fail-closed: an installer or supervisor error makes the
+one-shot command fail. The supervisor starts only after validated blocks catch
+up to known headers and initial block download ends, avoiding stale work during
+post-snapshot catch-up. Apple Silicon keeps the supervisor's strict Metal
+backend and zero-fallback defaults unless explicitly changed with an approved
+backend control. Paths are made absolute before the supervisor detaches, and
+credential, payout, help/foreground, and unknown pass-through options are
+rejected. Omit `--start-mining` when an external service manager should consume
+the generated command arrays instead.
 
 That one command installs the correct platform archive from the published
 `btx-release-manifest.json`, verifies the manifest/archive/snapshot-manifest

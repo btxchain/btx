@@ -542,7 +542,8 @@ public:
         if (!batch[ID_NETWORKINFO]["error"].isNull()) return batch[ID_NETWORKINFO];
 
         const UniValue& networkinfo{batch[ID_NETWORKINFO]["result"]};
-        if (networkinfo["version"].getInt<int>() < 209900) {
+        // BTX encodes v0.21.0 as 2100 (rather than Core's 209900).
+        if (networkinfo["version"].getInt<int>() < 2100) {
             throw std::runtime_error("-netinfo requires btxd server to be running v0.21.0 and up");
         }
         const int64_t time_now{TicksSinceEpoch<std::chrono::seconds>(CliClock::now())};

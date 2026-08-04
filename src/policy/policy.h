@@ -84,8 +84,10 @@ static constexpr unsigned int DEFAULT_BYTES_PER_SIGOP{20};
 static constexpr unsigned int DEFAULT_BYTES_PER_SIGOP_STRICT{20};
 /** Default for -datacarriercost (multiplied by WITNESS_SCALE_FACTOR) */
 static constexpr unsigned int DEFAULT_WEIGHT_PER_DATA_BYTE{4};
-/** Default for -rejecttokens */
-static constexpr bool DEFAULT_REJECT_TOKENS{false};
+/** Default for -rejecttokens.
+ * BTX is a financial-only chain: runes/OLGA-style token overlays are rejected at
+ * relay by default (see the inscription-elimination plan, Pillar 6). */
+static constexpr bool DEFAULT_REJECT_TOKENS{true};
 
 // NOTE: Changes to these three require manually adjusting doc in init.cpp
 /** Default for -permitephemeral=send */
@@ -141,8 +143,14 @@ static constexpr unsigned int DEFAULT_ANCESTOR_SIZE_LIMIT_KVB{1024};
 static constexpr unsigned int DEFAULT_DESCENDANT_LIMIT{100};
 /** Default for -limitdescendantsize, maximum kilobytes of in-mempool descendants */
 static constexpr unsigned int DEFAULT_DESCENDANT_SIZE_LIMIT_KVB{1024};
-/** Default for -datacarrier */
-static const bool DEFAULT_ACCEPT_DATACARRIER = true;
+/** Default for -datacarrier.
+ * BTX is a financial-only chain: non-coinbase OP_RETURN data-carrier outputs are
+ * non-standard at relay by default (see the inscription-elimination plan, Pillar
+ * 6), ahead of the consensus rule. With this off, max_datacarrier_bytes defaults
+ * to nullopt so any OP_RETURN output is non-standard. The coinbase witness
+ * commitment is produced by the miner and never relayed as a standalone tx, so
+ * this does not affect block production. */
+static const bool DEFAULT_ACCEPT_DATACARRIER = false;
 /**
  * Default setting for -datacarriersize. 80 bytes of data, +1 for OP_RETURN,
  * +2 for the pushdata opcodes.
@@ -246,6 +254,14 @@ bool AreInputsStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs,
 * Also enforce a maximum stack item size limit and no annexes for tapscript spends.
 */
 bool IsWitnessStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs, const std::string& reason_prefix, std::string& out_reason, const ignore_rejects_type& ignore_rejects=empty_ignore_rejects);
+
+/**
+ * Consensus-stable P2MR financial-witness allowlist used by the
+ * content-elimination hard fork. Unlike IsWitnessStandard(), this must not
+ * depend on mutable node policy such as -maxscriptsize. Any semantic change to
+ * this function requires an explicitly coordinated consensus upgrade.
+ */
+bool IsFinancialP2MRWitness(const CTransaction& tx, const CCoinsViewCache& mapInputs, const std::string& reason_prefix, std::string& out_reason);
 /**
  * Check whether this transaction spends any witness program but P2A, including not-yet-defined ones.
  * May return `false` early for consensus-invalid transactions.

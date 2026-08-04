@@ -273,7 +273,11 @@ void SQLiteDatabase::Open()
 
     if (m_db == nullptr) {
         if (!m_mock) {
-            TryCreateDirectories(fs::PathFromString(m_dir_path));
+            const fs::path dir_path{fs::PathFromString(m_dir_path)};
+            TryCreateDirectories(dir_path);
+            if (!IsDirWritable(dir_path)) {
+                throw std::runtime_error(strprintf("SQLiteDatabase: Failed to open database in directory '%s': directory is not writable", m_dir_path));
+            }
         }
         int ret = sqlite3_open_v2(m_file_path.c_str(), &m_db, flags, nullptr);
         if (ret != SQLITE_OK) {

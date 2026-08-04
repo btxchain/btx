@@ -4,7 +4,7 @@ Date: 2026-03-21
 Purpose
 - Plain-text, grep-friendly mirror for the BTX SMILE rewrite.
 - Keeps only the figure/equation surfaces currently needed by the code review.
-- Source PDF is /Users/admin/Downloads/2021-564.pdf.
+- Source PDF is /path/to/Downloads/2021-564.pdf.
 - Companion notes live in doc/research/smile-2021-564-working-mirror.md.
 
 Figure 7 main protocol

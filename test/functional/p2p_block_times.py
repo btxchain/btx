@@ -27,6 +27,7 @@ This test verifies that this timestamp is being set correctly.
 
 import time
 from test_framework.blocktools import (
+    REGTEST_GENERIC_P2P_MATMUL_ARGS,
     create_block,
     create_coinbase,
 )
@@ -43,6 +44,7 @@ class P2PBlockTimes(BitcoinTestFramework):
         self.setup_clean_chain = True
         self.num_nodes = 1
         self.disable_autoconnect = False
+        self.extra_args = [[*REGTEST_GENERIC_P2P_MATMUL_ARGS]]
 
     def run_test(self):
         node = self.nodes[0]

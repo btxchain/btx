@@ -16,14 +16,19 @@
 #include <consensus/tx_verify.h>
 #include <consensus/validation.h>
 #include <deploymentstatus.h>
+#include <matmul/matmul_v4.h>
+#include <matmul/matmul_v4_rc_stage3.h>
+#include <matmul/matmul_v4_rc_stage3_producer.h>
 #include <logging.h>
 #include <matmul/matrix.h>
+#include <net.h>
 #include <node/context.h>
 #include <policy/feerate.h>
 #include <policy/policy.h>
 #include <pow.h>
 #include <primitives/transaction.h>
 #include <random.h>
+#include <serialize.h>
 #include <shielded/bundle.h>
 #include <shielded/unshield_velocity.h>
 #include <shielded/validation.h>
@@ -926,6 +931,7 @@ void BlockAssembler::resetBlock()
     // Reserve space for fixed-size block header, txs count, and coinbase tx.
     nBlockSize = m_options.block_reserved_size;
     nBlockWeight = m_options.block_reserved_weight;
+    m_block_max_size = m_options.nBlockMaxSize;
     nBlockSigOpsCost = m_options.coinbase_output_max_additional_sigops;
 
     // These counters do not include coinbase tx
@@ -983,6 +989,46 @@ std::shared_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
         LogWarning("CreateNewBlock(): block height overflow at prev height %d\n", pindexPrev->nHeight);
         throw std::runtime_error("CreateNewBlock(): block height overflow");
     }
+    if (chainparams.GetConsensus().IsMatMulV4Active(nHeight)) {
+        const auto& consensus = chainparams.GetConsensus();
+        const auto profile = consensus.GetMatMulProfileParams(nHeight);
+        if (profile.commitment == Consensus::MatMulCommitmentScheme::FLAT_SKETCH_INBLOCK) {
+        const uint64_t b = profile.tile_b;
+        if (b == 0 || consensus.nMatMulV4Dimension % b != 0) {
+            throw std::runtime_error("CreateNewBlock(): invalid MatMul v4 proof shape");
+        }
+        const uint64_t m = consensus.nMatMulV4Dimension / b;
+        if (m != 0 && m > std::numeric_limits<uint64_t>::max() / m) {
+            throw std::runtime_error("CreateNewBlock(): MatMul v4 proof size overflow");
+        }
+        const uint64_t cells = m * m;
+        if (cells > std::numeric_limits<uint64_t>::max() / 2) {
+            throw std::runtime_error("CreateNewBlock(): MatMul v4 proof size overflow");
+        }
+        const uint64_t words = 2 * cells;
+        if (words > (std::numeric_limits<uint64_t>::max() - GetSizeOfCompactSize(words)) / sizeof(uint32_t)) {
+            throw std::runtime_error("CreateNewBlock(): MatMul v4 proof size overflow");
+        }
+        const uint64_t proof_bytes = GetSizeOfCompactSize(words) + words * sizeof(uint32_t);
+        if (proof_bytes > std::numeric_limits<uint64_t>::max() / WITNESS_SCALE_FACTOR) {
+            throw std::runtime_error("CreateNewBlock(): MatMul v4 proof weight overflow");
+        }
+        const uint64_t proof_weight = proof_bytes * WITNESS_SCALE_FACTOR;
+
+        // matrix_c_data is empty while transactions are selected and is filled
+        // only after a nonce wins. Reserve its exact serialized size now, and
+        // constrain the solved block to the smaller of policy and P2P message
+        // ceilings so miners cannot create valid-but-unrelayable templates.
+        m_block_max_size = std::min<uint64_t>(m_block_max_size, MAX_BLOCK_MESSAGE_LENGTH);
+        if (proof_bytes >= m_block_max_size || nBlockSize >= m_block_max_size - proof_bytes ||
+            proof_weight >= m_options.nBlockMaxWeight ||
+            nBlockWeight >= m_options.nBlockMaxWeight - proof_weight) {
+            throw std::runtime_error("CreateNewBlock(): MatMul v4 proof does not fit template limits");
+        }
+        nBlockSize += proof_bytes;
+        nBlockWeight += proof_weight;
+        }
+    }
     const CAmount base_shielded_pool_balance{m_chainstate.m_chainman.GetShieldedPoolBalance()};
     if (!m_blockShieldedPoolBalance.SetBalance(base_shielded_pool_balance)) {
         LogWarning("CreateNewBlock(): invalid shielded pool balance at tip height %d\n", pindexPrev->nHeight);
@@ -992,12 +1038,77 @@ std::shared_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
     LogDebug(BCLog::MINING, "CreateNewBlock(): building on tip height=%d hash=%s\n",
              pindexPrev->nHeight, pindexPrev->GetBlockHash().GetHex());
 
-    pblock->nVersion = m_chainstate.m_chainman.m_versionbitscache.ComputeBlockVersion(pindexPrev, chainparams.GetConsensus());
+    // Audit P1: at legacy in-block v4 heights the solved block carries a MANDATORY
+    // product-sketch payload (matrix_c_data, ~8 MiB at n=4096) that is attached
+    // AFTER transaction selection but still counts toward the consensus block
+    // size/weight limits (WITNESS_SCALE_FACTOR == 1, so the payload is in
+    // GetBlockWeight and the serialized size). Reserve its EXACT serialized size
+    // up front so the assembler cannot pack transactions that, once the payload is
+    // appended, push the block over nMaxBlockSerializedSize / nMaxBlockWeight --
+    // which would make the miner's OWN solved block invalid (a self-DoS / mining
+    // halt under a full mempool).
+    // v4.4 ENC-DR (DIGEST_RECOMPUTE, the production carriage): the sketch is NOT
+    // carried in-block (the miner offloads it to the non-consensus sketch cache
+    // and emits a digest-only body, see rpc/mining.cpp GenerateBlock), so there is
+    // nothing to reserve. Reserve ONLY on the regtest FLAT_SKETCH_INBLOCK replay
+    // path.
+    if (chainparams.GetConsensus().IsMatMulV4Active(nHeight) &&
+        chainparams.GetConsensus().GetMatMulProfileParams(nHeight).commitment ==
+            Consensus::MatMulCommitmentScheme::FLAT_SKETCH_INBLOCK) {
+        const uint64_t m{static_cast<uint64_t>(chainparams.GetConsensus().nMatMulV4Dimension) / matmul::v4::kTileB};
+        const uint64_t words{2 * m * m};  // 2 uint32 words per F_q sketch element, m*m elements
+        const size_t payload_bytes{GetSizeOfCompactSize(words) + static_cast<size_t>(words) * sizeof(uint32_t)};
+        nBlockSize += payload_bytes;
+        nBlockWeight += payload_bytes * WITNESS_SCALE_FACTOR;
+    }
+
+    // PR-89 item 5: the SAME self-DoS applies to the Stage-3 succinct proof.
+    // Once the authority gate closes, every RC-family winner carries a proof in
+    // matrix_c_data, which is non-witness block data (WITNESS_SCALE_FACTOR == 1)
+    // and therefore counts 1:1 against nMaxBlockSerializedSize (validation.cpp
+    // CheckBlock) and nMaxBlockWeight (ContextualCheckBlockBodyOnly). The
+    // assembler must subtract it BEFORE selecting transactions or the miner
+    // packs a block that its own attachment step pushes over the limit.
+    //
+    // RCStage3PlannedReservation reserves the maximum artifact the codec can
+    // accept, including the exact two-word envelope, word padding, and
+    // CompactSize framing. SerializeRCStage3Proof enforces the byte ceiling, so
+    // this is a true upper bound for every accepted attachment. The obsolete
+    // 35,363,636-byte flat-section experiment cannot pass the codec and is not a
+    // valid reservation basis for the normalized production proof.
+    //
+    // The 16 MiB codec maximum fits under the shipped 24 MB block caps. If a
+    // network config cannot carry it, the miner must refuse to build the
+    // template rather than mine a block it could never legally complete.
+    if constexpr (matmul::v4::rc::kRCStage3SuccinctAuthorityReady) {
+        const auto reservation = matmul::v4::rc::RCStage3PlannedReservation(
+            chainparams.GetConsensus(), nHeight);
+        if (reservation.envelope_bytes != 0) {
+            if (!reservation.Usable()) {
+                LogWarning(
+                    "CreateNewBlock(): Stage-3 proof reservation does not fit at "
+                    "height %d: envelope=%u B delta=%u B codec_ok=%d block_ok=%d "
+                    "basis=%s\n",
+                    nHeight, reservation.envelope_bytes,
+                    reservation.block_serialized_delta,
+                    reservation.fits_codec_cap, reservation.fits_block_cap,
+                    reservation.basis);
+                throw std::runtime_error(
+                    "CreateNewBlock(): Stage-3 proof cannot fit in a block at "
+                    "this height");
+            }
+            nBlockSize += reservation.block_serialized_delta;
+            nBlockWeight += reservation.block_serialized_delta * WITNESS_SCALE_FACTOR;
+        }
+    }
+
+    pblock->nVersion =m_chainstate.m_chainman.m_versionbitscache.ComputeBlockVersion(pindexPrev, chainparams.GetConsensus());
     // -regtest only: allow overriding block.nVersion with
     // -blockversion=N to test forking scenarios
     if (chainparams.MineBlocksOnDemand()) {
         pblock->nVersion = gArgs.GetIntArg("-blockversion", pblock->nVersion);
     }
+    // HeaderPoW bit-26 commitment wire is withdrawn — do not force the bit.
 
     pblock->nTime = TicksSinceEpoch<std::chrono::seconds>(NodeClock::now());
     m_lock_time_cutoff = pindexPrev->GetMedianTimePast();
@@ -1095,7 +1206,13 @@ std::shared_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
     pblock->nNonce64       = 0;
     pblock->mix_hash.SetNull();
     if (chainparams.GetConsensus().fMatMulPOW) {
-        pblock->matmul_dim = static_cast<uint16_t>(chainparams.GetConsensus().nMatMulDimension);
+        // MatMul v4 (spec §I.3, §J#9): at and above nMatMulV4Height the
+        // template carries the v4 dimension; SetDeterministicMatMulSeeds
+        // below already dispatches to the v4 (unconditionally nonce/parent-
+        // MTP-bound) seed derivation internally via IsMatMulV4Active.
+        pblock->matmul_dim = chainparams.GetConsensus().IsMatMulV4Active(nHeight)
+            ? static_cast<uint16_t>(chainparams.GetConsensus().nMatMulV4Dimension)
+            : static_cast<uint16_t>(chainparams.GetConsensus().nMatMulDimension);
         if (!SetDeterministicMatMulSeeds(
                 *pblock,
                 chainparams.GetConsensus(),
@@ -1105,10 +1222,12 @@ std::shared_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
         }
         pblock->matmul_digest.SetNull();
         // v1 uses seed-derived matrices; do not store full matrices in block body.
-        // Validators regenerate A and B from seed_a/seed_b on demand.
+        // Validators regenerate A and B from seed_a/seed_b on demand. v4 blocks
+        // are likewise seed-derived only (spec §H.2: A/B payload forbidden).
         pblock->matrix_a_data.clear();
         pblock->matrix_b_data.clear();
-        // C' payload is populated after mining solves the block (see PopulateFreivaldsPayload)
+        // C' / sketch payload is populated after mining solves the block (see
+        // PopulateFreivaldsPayload for v3, SolveMatMul's v4 dispatch for v4).
         pblock->matrix_c_data.clear();
     } else {
         pblock->matmul_dim = 0;
@@ -1271,6 +1390,16 @@ bool BlockAssembler::TestPackageTransactions(const CTxMemPool& mempool,
         if (!PassesReducedDataOutputLimits(it->GetTx(), chainparams.GetConsensus())) {
             return false;
         }
+        // BTX content-elimination hard fork (Pillar 1): once active, non-coinbase
+        // OP_RETURN outputs are consensus-invalid, so never select such a tx into
+        // a template. doc/btx-inscription-elimination-plan.md.
+        if (chainparams.GetConsensus().IsContentEliminationActive(nHeight)) {
+            for (const auto& txout : it->GetTx().vout) {
+                if (!txout.scriptPubKey.empty() && txout.scriptPubKey[0] == OP_RETURN) {
+                    return false;
+                }
+            }
+        }
         for (const auto& txin : it->GetTx().vin) {
             if (txin.prevout.IsNull() || !spent_outpoints.insert(txin.prevout).second) {
                 return false;
@@ -1305,7 +1434,7 @@ bool BlockAssembler::TestPackageTransactions(const CTxMemPool& mempool,
         }
         if (fNeedSizeAccounting) {
             uint64_t nTxSize = ::GetSerializeSize(TX_WITH_WITNESS(it->GetTx()));
-            if (nPotentialBlockSize + nTxSize >= m_options.nBlockMaxSize) {
+            if (nPotentialBlockSize + nTxSize >= m_block_max_size) {
                 return false;
             }
             nPotentialBlockSize += nTxSize;
@@ -1577,7 +1706,7 @@ void BlockAssembler::addPackageTxs(const CTxMemPool& mempool, int& nPackagesSele
                 if (fNeedSizeAccounting) {
                     nConsecutiveFailed += static_cast<int64_t>(package_invalid_candidates);
                     if (nConsecutiveFailed > MAX_CONSECUTIVE_FAILURES &&
-                        IsNearLimit(nBlockSize, m_options.nBlockMaxSize,
+                        IsNearLimit(nBlockSize, m_block_max_size,
                                     static_cast<uint64_t>(BLOCK_FULL_ENOUGH_SIZE_DELTA))) {
                         break;
                     }
@@ -1607,7 +1736,7 @@ void BlockAssembler::addPackageTxs(const CTxMemPool& mempool, int& nPackagesSele
 
         RemainingBlockResources remaining_resources;
         remaining_resources.serialized_bytes =
-            nBlockSize < m_options.nBlockMaxSize ? m_options.nBlockMaxSize - nBlockSize : 0;
+            nBlockSize < m_block_max_size ? m_block_max_size - nBlockSize : 0;
         remaining_resources.verify_units =
             nBlockShieldedVerifyCost < chainparams.GetConsensus().nMaxBlockShieldedVerifyCost ?
                 chainparams.GetConsensus().nMaxBlockShieldedVerifyCost - nBlockShieldedVerifyCost : 0;
@@ -1617,7 +1746,7 @@ void BlockAssembler::addPackageTxs(const CTxMemPool& mempool, int& nPackagesSele
         remaining_resources.tree_update_units =
             nBlockShieldedTreeUpdateUnits < chainparams.GetConsensus().nMaxBlockShieldedTreeUpdateUnits ?
                 chainparams.GetConsensus().nMaxBlockShieldedTreeUpdateUnits - nBlockShieldedTreeUpdateUnits : 0;
-        remaining_resources.max_serialized_bytes = m_options.nBlockMaxSize;
+        remaining_resources.max_serialized_bytes = m_block_max_size;
         remaining_resources.max_verify_units = chainparams.GetConsensus().nMaxBlockShieldedVerifyCost;
         remaining_resources.max_scan_units = chainparams.GetConsensus().nMaxBlockShieldedScanUnits;
         remaining_resources.max_tree_update_units = chainparams.GetConsensus().nMaxBlockShieldedTreeUpdateUnits;
@@ -1737,7 +1866,7 @@ void BlockAssembler::addPackageTxs(const CTxMemPool& mempool, int& nPackagesSele
                 ++nConsecutiveFailed;
 
                 if (nConsecutiveFailed > MAX_CONSECUTIVE_FAILURES &&
-                    IsNearLimit(nBlockSize, m_options.nBlockMaxSize,
+                    IsNearLimit(nBlockSize, m_block_max_size,
                                 static_cast<uint64_t>(BLOCK_FULL_ENOUGH_SIZE_DELTA))) {
                     // Give up if we're close to full and haven't succeeded in a while
                     break;

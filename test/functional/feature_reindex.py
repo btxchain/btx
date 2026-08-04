@@ -22,13 +22,33 @@ class ReindexTest(BitcoinTestFramework):
     def set_test_params(self):
         self.setup_clean_chain = True
         self.num_nodes = 1
+        # Whether the currently-running node was started with -reindex-chainstate,
+        # which makes it emit MATMUL_REINDEX_CHAINSTATE_WARNING on shutdown.
+        self.started_with_reindex_chainstate = False
+
+    # BTX emits a MatMul-specific warning on -reindex-chainstate (init.cpp):
+    # that mode does not rerun the contextual Phase-2 checks, which matters on a
+    # chain whose PoW is re-executed rather than re-hashed. stop_nodes() asserts
+    # stderr is empty, so the expectation has to be declared or this test fails
+    # on every BTX build.
+    MATMUL_REINDEX_CHAINSTATE_WARNING = (
+        "Warning: Using -reindex-chainstate on MatMul chains does not rerun all "
+        "contextual Phase 2 checks. Use -reindex for full historical re-validation."
+    )
+
+    def stop_expecting_matmul_warning(self):
+        self.stop_node(0, expected_stderr=(
+            self.MATMUL_REINDEX_CHAINSTATE_WARNING
+            if self.started_with_reindex_chainstate else ''))
+        self.started_with_reindex_chainstate = False
 
     def reindex(self, justchainstate=False):
         self.generatetoaddress(self.nodes[0], 3, self.nodes[0].get_deterministic_priv_key().address)
         blockcount = self.nodes[0].getblockcount()
-        self.stop_nodes()
+        self.stop_expecting_matmul_warning()
         extra_args = [["-reindex-chainstate" if justchainstate else "-reindex"]]
         self.start_nodes(extra_args)
+        self.started_with_reindex_chainstate = justchainstate
         assert_equal(self.nodes[0].getblockcount(), blockcount)  # start_node is blocking on reindex
         self.log.info("Success")
 
@@ -36,7 +56,7 @@ class ReindexTest(BitcoinTestFramework):
     def out_of_order(self):
         # The previous test created 12 blocks
         assert_equal(self.nodes[0].getblockcount(), 12)
-        self.stop_nodes()
+        self.stop_expecting_matmul_warning()
 
         # In this test environment, blocks will always be in order (since
         # we're generating them rather than getting them from peers), so to
@@ -45,8 +65,15 @@ class ReindexTest(BitcoinTestFramework):
         xor_dat = self.nodes[0].read_xor_key()
 
         with open(blk0, 'r+b') as bf:
-            # Read at least the first few blocks (including genesis)
-            b = util_xor(bf.read(2000), xor_dat, offset=0)
+            # Read at least the first few blocks (including genesis).
+            #
+            # Upstream reads 2000 bytes, which covers genesis plus three blocks
+            # on a Bitcoin regtest chain (~350 bytes each). A BTX regtest block
+            # is ~16.75 KB because the header carries the MatMul fields, so 2000
+            # bytes holds only genesis and part of block 2: find_block then
+            # returned -1 for blocks 3 and 4 and the swap silently operated on a
+            # 355-byte slice. Read enough to span genesis + 4 blocks.
+            b = util_xor(bf.read(256 * 1024), xor_dat, offset=0)
 
             # Find the offsets of blocks 2, 3, and 4 (the first 3 blocks beyond genesis)
             # by searching for the regtest marker bytes (see pchMessageStart).
@@ -59,13 +86,15 @@ class ReindexTest(BitcoinTestFramework):
             b3_start = find_block(b, b2_start)
             b4_start = find_block(b, b3_start)
 
-            # Blocks 2 and 3 should be the same size.
-            assert_equal(b3_start - b2_start, b4_start - b3_start)
-
             # Swap the second and third blocks (don't disturb the genesis block).
+            # Rebuild the whole [b2_start, b4_start) span rather than assuming
+            # the two blocks are equal-sized: the concatenation occupies exactly
+            # the same extent either way, and the XOR pad is positional so the
+            # destination offset is what matters.
+            swapped = b[b3_start:b4_start] + b[b2_start:b3_start]
+            assert_equal(len(swapped), b4_start - b2_start)
             bf.seek(b2_start)
-            bf.write(util_xor(b[b3_start:b4_start], xor_dat, offset=b2_start))
-            bf.write(util_xor(b[b2_start:b3_start], xor_dat, offset=b3_start))
+            bf.write(util_xor(swapped, xor_dat, offset=b2_start))
 
         # The reindexing code should detect and accommodate out of order blocks.
         with self.nodes[0].assert_debug_log([

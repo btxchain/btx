@@ -4,6 +4,8 @@
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test the sweepprivkeys RPC."""
 
+from decimal import Decimal
+
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import assert_equal, assert_fee_amount
 
@@ -13,14 +15,22 @@ class SweepPrivKeysTest(BitcoinTestFramework):
 
     def set_test_params(self):
         self.num_nodes = 2
+        # sweepprivkeys is a compatibility RPC for legacy WIF/P2PKH funds.
+        # Permit its nonstandard fixture on regtest without changing BTX's
+        # production P2MR-only relay policy.
+        self.extra_args = [["-acceptnonstdtxn=1"], ["-acceptnonstdtxn=1"]]
 
     def check_balance(self, delta, txid):
         node = self.nodes[0]
         new_balances = node.getbalances()['mine']
         new_balance = new_balances['trusted'] + new_balances['untrusted_pending']
         balance_change = new_balance - self.balance
-        actual_fee = delta - balance_change
-        tx_vsize = node.getrawtransaction(txid, True)['vsize']
+        wallet_tx = node.gettransaction(txid)
+        actual_fee = node.getmempoolentry(txid)['fees']['base']
+        assert_equal(balance_change, Decimal(delta) - actual_fee)
+        # Once mined, getrawtransaction requires -txindex.  The wallet keeps
+        # the raw transaction needed for an exact vsize calculation.
+        tx_vsize = node.decoderawtransaction(wallet_tx['hex'])['vsize']
         assert_fee_amount(actual_fee, tx_vsize, self.tx_feerate)
         self.balance = new_balance
 

@@ -35,8 +35,23 @@ FILE* FlatFileSeq::Open(const FlatFilePos& pos, bool read_only) const
     if (pos.IsNull()) {
         return nullptr;
     }
-    fs::path path = FileName(pos);
-    fs::create_directories(path.parent_path());
+    const fs::path path = FileName(pos);
+    // Reads must not mutate the filesystem. For writes, report parent-path
+    // creation failures through the normal nullptr return instead of throwing.
+    if (!read_only) {
+        std::error_code ec;
+        const fs::path parent{path.parent_path()};
+        // BTX's fs wrapper deliberately deletes the error_code overload; use
+        // the standard-library base path explicitly because this call must not
+        // throw on an I/O failure.
+        std::filesystem::create_directories(
+            static_cast<const std::filesystem::path&>(parent), ec);
+        if (ec) {
+            LogError("Unable to open file '%s'. Error creating parent directories: %s",
+                     fs::PathToString(path), ec.message());
+            return nullptr;
+        }
+    }
     FILE* file = fsbridge::fopen(path, read_only ? "rb": "rb+");
     if (!file && !read_only)
         file = fsbridge::fopen(path, "wb+");

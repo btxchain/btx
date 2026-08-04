@@ -170,6 +170,9 @@ public:
     /** Return path to main database file for logs and error messages. */
     virtual std::string Filename() = 0;
 
+    /** Return paths to all files created for this database. */
+    virtual std::vector<fs::path> Files() { return {fs::PathFromString(Filename())}; }
+
     virtual std::string Format() = 0;
 
     std::atomic<unsigned int> nUpdateCounter;

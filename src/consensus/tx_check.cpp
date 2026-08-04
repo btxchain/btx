@@ -8,7 +8,10 @@
 #include <primitives/transaction.h>
 #include <consensus/validation.h>
 
+#include <algorithm>
+#include <ranges>
 #include <set>
+#include <vector>
 
 bool CheckTransaction(const CTransaction& tx, TxValidationState& state)
 {
@@ -63,25 +66,42 @@ bool CheckTransaction(const CTransaction& tx, TxValidationState& state)
     // of a tx as spent, it does not check if the tx has duplicate inputs.
     // Failure to run this check will result in either a crash or an inflation bug, depending on the implementation of
     // the underlying coins database.
-    std::set<COutPoint> vInOutPoints;
-    for (const auto& txin : tx.vin) {
-        if (!vInOutPoints.insert(txin.prevout).second)
-            return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-txns-inputs-duplicate");
-    }
-
-    if (tx.IsCoinBase())
-    {
-        if (tx.HasShieldedBundle()) {
-            return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-cb-shielded");
+    // Fully shielded/v2 state transitions may intentionally have no
+    // transparent inputs, so specialize only the non-empty transparent side.
+    if (tx.vin.size() == 1) {
+        if (tx.IsCoinBase()) {
+            if (tx.HasShieldedBundle()) {
+                return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-cb-shielded");
+            }
+            if (tx.vin[0].scriptSig.size() < 2 || tx.vin[0].scriptSig.size() > 100) {
+                return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-cb-length");
+            }
         }
-        if (tx.vin[0].scriptSig.size() < 2 || tx.vin[0].scriptSig.size() > 100)
-            return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-cb-length");
-    }
-    else
-    {
-        for (const auto& txin : tx.vin)
-            if (txin.prevout.IsNull())
+    } else if (tx.vin.size() == 2) {
+        if (tx.vin[0].prevout == tx.vin[1].prevout) {
+            return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-txns-inputs-duplicate");
+        }
+        if (tx.vin[0].prevout.IsNull() || tx.vin[1].prevout.IsNull()) {
+            return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-txns-prevout-null");
+        }
+    } else if (!tx.vin.empty()) {
+        std::vector<COutPoint> sorted_prevouts;
+        sorted_prevouts.reserve(tx.vin.size());
+        for (const auto& txin : tx.vin) sorted_prevouts.push_back(txin.prevout);
+        std::sort(sorted_prevouts.begin(), sorted_prevouts.end());
+
+        if (std::ranges::adjacent_find(sorted_prevouts) != sorted_prevouts.end()) {
+            return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-txns-inputs-duplicate");
+        }
+
+        // Null hashes sort first. Once a non-null hash is reached, no later
+        // outpoint can be the all-null coinbase sentinel.
+        for (const auto& prevout : sorted_prevouts) {
+            if (!prevout.hash.IsNull()) break;
+            if (prevout.IsNull()) {
                 return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-txns-prevout-null");
+            }
+        }
     }
 
     return true;

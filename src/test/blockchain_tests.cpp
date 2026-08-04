@@ -5,11 +5,13 @@
 #include <boost/test/unit_test.hpp>
 
 #include <chain.h>
+#include <consensus/validation.h>
 #include <node/blockstorage.h>
 #include <rpc/blockchain.h>
 #include <sync.h>
 #include <test/util/setup_common.h>
 #include <util/string.h>
+#include <validation.h>
 
 #include <cstdlib>
 
@@ -115,6 +117,44 @@ BOOST_AUTO_TEST_CASE(num_chain_tx_max)
     CBlockIndex block_index{};
     block_index.m_chain_tx_count = std::numeric_limits<uint64_t>::max();
     BOOST_CHECK_EQUAL(block_index.m_chain_tx_count, std::numeric_limits<uint64_t>::max());
+}
+
+BOOST_FIXTURE_TEST_CASE(invalidate_block_marks_only_descendants_failed_child, TestChain100Setup)
+{
+    Chainstate& chainstate{Assert(m_node.chainman)->ActiveChainstate()};
+    CBlockIndex* original_tip;
+    CBlockIndex* invalidate_at;
+    {
+        LOCK(::cs_main);
+        original_tip = chainstate.m_chain.Tip();
+        BOOST_REQUIRE(original_tip != nullptr);
+        invalidate_at = chainstate.m_chain[original_tip->nHeight - 10];
+        BOOST_REQUIRE(invalidate_at != nullptr);
+    }
+
+    BlockValidationState state;
+    BOOST_REQUIRE(chainstate.InvalidateBlock(state, invalidate_at));
+
+    LOCK(::cs_main);
+    BOOST_CHECK(invalidate_at->nStatus & BLOCK_FAILED_VALID);
+    BOOST_CHECK_EQUAL(invalidate_at->nStatus & BLOCK_FAILED_CHILD, 0U);
+
+    for (CBlockIndex* ancestor{invalidate_at->pprev}; ancestor; ancestor = ancestor->pprev) {
+        BOOST_CHECK(ancestor->IsValid(BLOCK_VALID_TRANSACTIONS));
+        BOOST_CHECK_EQUAL(ancestor->nStatus & BLOCK_FAILED_MASK, 0U);
+    }
+
+    for (CBlockIndex* descendant{original_tip}; descendant != invalidate_at; descendant = descendant->pprev) {
+        BOOST_REQUIRE(descendant != nullptr);
+        BOOST_CHECK_EQUAL(descendant->nStatus & BLOCK_FAILED_VALID, 0U);
+        BOOST_CHECK(descendant->nStatus & BLOCK_FAILED_CHILD);
+    }
+
+    chainstate.ResetBlockFailureFlags(invalidate_at);
+    BOOST_CHECK_EQUAL(invalidate_at->nStatus & BLOCK_FAILED_MASK, 0U);
+    for (CBlockIndex* descendant{original_tip}; descendant != invalidate_at; descendant = descendant->pprev) {
+        BOOST_CHECK_EQUAL(descendant->nStatus & BLOCK_FAILED_MASK, 0U);
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -936,6 +936,73 @@ BOOST_AUTO_TEST_CASE(p2mr_transaction_accepted_by_mempool)
                                       << " state=" << result.m_state.ToString());
 }
 
+BOOST_AUTO_TEST_CASE(p2mr_htlc_tx_witness_is_standard)
+{
+    CPQKey claimant_key;
+    claimant_key.MakeNewKey(PQAlgorithm::ML_DSA_44);
+    BOOST_REQUIRE(claimant_key.IsValid());
+
+    const std::vector<unsigned char> preimage(32, 0x42);
+    const uint160 hash160 = Hash160(preimage);
+    const std::vector<unsigned char> hash160_bytes(hash160.begin(), hash160.end());
+    const std::vector<unsigned char> leaf_script = BuildP2MRHTLCTxLeaf(
+        hash160_bytes, PQAlgorithm::ML_DSA_44, claimant_key.GetPubKey());
+    const uint256 leaf_hash = ComputeP2MRLeafHash(P2MR_LEAF_VERSION, leaf_script);
+    const uint256 merkle_root = ComputeP2MRMerkleRoot({leaf_hash});
+
+    const CMutableTransaction tx_credit =
+        BuildCreditingTransaction(BuildP2MROutput(merkle_root), /*nValue=*/50'000);
+    CMutableTransaction tx_spend =
+        BuildSpendingTransaction(CScript{}, CScriptWitness{}, CTransaction{tx_credit});
+    const auto witness =
+        BuildSignedSingleLeafP2MRWitness(tx_spend, tx_credit.vout.at(0), claimant_key, leaf_script);
+    BOOST_REQUIRE(witness.has_value());
+    tx_spend.vin.at(0).scriptWitness = *witness;
+    tx_spend.vin.at(0).scriptWitness.stack.insert(
+        tx_spend.vin.at(0).scriptWitness.stack.begin() + 1, preimage);
+
+    CCoinsView coins_view;
+    CCoinsViewCache coins_cache(&coins_view);
+    AddCoins(coins_cache, CTransaction{tx_credit}, /*nHeight=*/0);
+
+    std::string reason;
+    BOOST_CHECK(IsWitnessStandard(CTransaction{tx_spend}, coins_cache, "", reason));
+}
+
+BOOST_AUTO_TEST_CASE(p2mr_legacy_htlc_witness_is_nonstandard)
+{
+    CPQKey claimant_key;
+    claimant_key.MakeNewKey(PQAlgorithm::ML_DSA_44);
+    BOOST_REQUIRE(claimant_key.IsValid());
+
+    const std::vector<unsigned char> preimage(32, 0x43);
+    const uint160 hash160 = Hash160(preimage);
+    const std::vector<unsigned char> hash160_bytes(hash160.begin(), hash160.end());
+    const std::vector<unsigned char> leaf_script = BuildP2MRHTLCLeaf(
+        hash160_bytes, PQAlgorithm::ML_DSA_44, claimant_key.GetPubKey());
+    const uint256 leaf_hash = ComputeP2MRLeafHash(P2MR_LEAF_VERSION, leaf_script);
+    const uint256 merkle_root = ComputeP2MRMerkleRoot({leaf_hash});
+
+    const CMutableTransaction tx_credit =
+        BuildCreditingTransaction(BuildP2MROutput(merkle_root), /*nValue=*/50'000);
+    CMutableTransaction tx_spend =
+        BuildSpendingTransaction(CScript{}, CScriptWitness{}, CTransaction{tx_credit});
+    tx_spend.vin.at(0).scriptWitness.stack = {
+        std::vector<unsigned char>(MLDSA44_SIGNATURE_SIZE, 0x01),
+        preimage,
+        leaf_script,
+        {P2MR_LEAF_VERSION},
+    };
+
+    CCoinsView coins_view;
+    CCoinsViewCache coins_cache(&coins_view);
+    AddCoins(coins_cache, CTransaction{tx_credit}, /*nHeight=*/0);
+
+    std::string reason;
+    BOOST_CHECK(!IsWitnessStandard(CTransaction{tx_spend}, coins_cache, "", reason));
+    BOOST_CHECK_EQUAL(reason, "p2mr-leaf-script");
+}
+
 BOOST_AUTO_TEST_CASE(p2mr_csfs_witness_rejects_oversized_message_policy)
 {
     CPQKey oracle_key;
@@ -1101,6 +1168,13 @@ BOOST_AUTO_TEST_CASE(p2mr_two_mldsa_delegation_leaf_rejected_by_policy_limit)
     std::string reason;
     BOOST_CHECK(!IsWitnessStandard(CTransaction{tx_spend}, coins_cache, "", reason));
     BOOST_CHECK_EQUAL(reason, "p2mr-script-size");
+
+    // The content-elimination consensus rule must not inherit the mutable
+    // -maxscriptsize relay setting. This is a recognized financial delegation
+    // leaf and remains consensus-eligible up to MAX_P2MR_SCRIPT_SIZE even when
+    // a node's local relay policy declines to forward it.
+    std::string consensus_reason;
+    BOOST_CHECK(IsFinancialP2MRWitness(CTransaction{tx_spend}, coins_cache, "", consensus_reason));
 }
 
 BOOST_AUTO_TEST_CASE(p2mr_policy_stack_size_six_and_one_rejected)

@@ -8,14 +8,19 @@
 #include <coins.h>
 #include <dbwrapper.h>
 #include <logging.h>
+#include <logging/timer.h>
 #include <primitives/transaction.h>
 #include <random.h>
 #include <serialize.h>
 #include <uint256.h>
+#include <util/threadnames.h>
 #include <util/vector.h>
 
 #include <cassert>
+#include <chrono>
 #include <cstdlib>
+#include <exception>
+#include <future>
 #include <iterator>
 #include <utility>
 
@@ -24,6 +29,9 @@ static constexpr uint8_t DB_BEST_BLOCK{'B'};
 static constexpr uint8_t DB_HEAD_BLOCKS{'H'};
 // Keys used in previous version that might still be found in the DB:
 static constexpr uint8_t DB_COINS{'c'};
+
+// Threshold for warning when writing this many dirty cache entries to disk.
+static constexpr size_t WARN_FLUSH_COINS_COUNT{10'000'000};
 
 bool CCoinsViewDB::NeedsUpgrade()
 {
@@ -51,11 +59,22 @@ CCoinsViewDB::CCoinsViewDB(DBParams db_params, CoinsViewOptions options) :
     m_options{std::move(options)},
     m_db{std::make_unique<CDBWrapper>(m_db_params)} { }
 
+CCoinsViewDB::~CCoinsViewDB()
+{
+    if (m_compaction.valid()) {
+        if (m_compaction.wait_for(std::chrono::seconds{0}) != std::future_status::ready) {
+            LogPrintf("Waiting for background chainstate compaction of %s\n", fs::PathToString(m_db_params.path));
+        }
+        m_compaction.wait();
+    }
+}
+
 void CCoinsViewDB::ResizeCache(size_t new_cache_size)
 {
     // We can't do this operation with an in-memory DB since we'll lose all the coins upon
     // reset.
     if (!m_db_params.memory_only) {
+        LOCK(m_db_mutex);
         // Have to do a reset first to get the original `m_db` state to release its
         // filesystem lock.
         m_db.reset();
@@ -67,12 +86,24 @@ void CCoinsViewDB::ResizeCache(size_t new_cache_size)
 
 std::optional<Coin> CCoinsViewDB::GetCoin(const COutPoint& outpoint) const
 {
-    if (Coin coin; m_db->Read(CoinEntry(&outpoint), coin)) return coin;
-    return std::nullopt;
+    Coin coin;
+    const CDBWrapper::ReadStatus read_status{m_db->TryRead(CoinEntry(&outpoint), coin)};
+    switch (read_status.status) {
+    case CDBWrapper::ReadStatus::Code::OK:
+        Assert(!coin.IsSpent());
+        return coin;
+    case CDBWrapper::ReadStatus::Code::NOT_FOUND:
+        return std::nullopt;
+    case CDBWrapper::ReadStatus::Code::DESERIALIZATION_ERROR:
+        throw dbwrapper_error{strprintf("Coin deserialization failure: %s", read_status.op_error.value_or("unknown"))};
+    case CDBWrapper::ReadStatus::Code::DB_INTERNAL_ERROR:
+        throw dbwrapper_error{strprintf("Coin DB read failure: %s", read_status.op_error.value_or("unknown"))};
+    }
+    std::abort();
 }
 
 bool CCoinsViewDB::HaveCoin(const COutPoint &outpoint) const {
-    return m_db->Exists(CoinEntry(&outpoint));
+    return GetCoin(outpoint).has_value();
 }
 
 uint256 CCoinsViewDB::GetBestBlock() const {
@@ -93,7 +124,7 @@ std::vector<uint256> CCoinsViewDB::GetHeadBlocks() const {
 bool CCoinsViewDB::BatchWrite(CoinsViewCacheCursor& cursor, const uint256 &hashBlock) {
     CDBBatch batch(*m_db);
     size_t count = 0;
-    size_t changed = 0;
+    const size_t dirty_count{cursor.GetDirtyCount()};
     assert(!hashBlock.IsNull());
 
     uint256 old_tip = GetBestBlock();
@@ -109,6 +140,12 @@ bool CCoinsViewDB::BatchWrite(CoinsViewCacheCursor& cursor, const uint256 &hashB
         }
     }
 
+    if (dirty_count > WARN_FLUSH_COINS_COUNT) {
+        LogWarning("Flushing large (%d entries) UTXO set to disk, it may take several minutes", dirty_count);
+    }
+    LOG_TIME_MILLIS_WITH_CATEGORY(strprintf("write coins cache to disk (%d out of %d cached coins)",
+        dirty_count, cursor.GetTotalCount()), BCLog::BENCH);
+
     // In the first batch, mark the database as being in the middle of a
     // transition from old_tip to hashBlock.
     // A vector is used for future extensibility, as we may want to support
@@ -123,7 +160,6 @@ bool CCoinsViewDB::BatchWrite(CoinsViewCacheCursor& cursor, const uint256 &hashB
                 batch.Erase(entry);
             else
                 batch.Write(entry, it->second.coin);
-            changed++;
         }
         count++;
         it = cursor.NextAndMaybeErase(*it);
@@ -147,13 +183,33 @@ bool CCoinsViewDB::BatchWrite(CoinsViewCacheCursor& cursor, const uint256 &hashB
 
     LogDebug(BCLog::COINDB, "Writing final batch of %.2f MiB\n", batch.SizeEstimate() * (1.0 / 1048576.0));
     bool ret = m_db->WriteBatch(batch);
-    LogDebug(BCLog::COINDB, "Committed %u changed transaction outputs (out of %u) to coin database...\n", (unsigned int)changed, (unsigned int)count);
+    LogDebug(BCLog::COINDB, "Committed %u changed transaction outputs (out of %u) to coin database...\n", (unsigned int)dirty_count, (unsigned int)count);
     return ret;
 }
 
 size_t CCoinsViewDB::EstimateSize() const
 {
     return m_db->EstimateSize(DB_COIN, uint8_t(DB_COIN + 1));
+}
+
+std::shared_future<void> CCoinsViewDB::CompactFull()
+{
+    AssertLockHeld(::cs_main);
+    if (m_compaction.valid() && m_compaction.wait_for(std::chrono::seconds{0}) != std::future_status::ready) {
+        return m_compaction;
+    }
+    m_compaction = std::async(std::launch::async, [this] {
+        try {
+            util::ThreadRename("utxocompact");
+            LOCK(m_db_mutex);
+            LogDebug(BCLog::COINDB, "Starting chainstate compaction of %s\n", fs::PathToString(m_db_params.path));
+            m_db->Compact();
+            LogDebug(BCLog::COINDB, "Finished chainstate compaction of %s\n", fs::PathToString(m_db_params.path));
+        } catch (const std::exception& e) {
+            LogWarning("Failed chainstate compaction (%s)\n", e.what());
+        }
+    }).share();
+    return m_compaction;
 }
 
 /** Specialization of CCoinsViewCursor to iterate over a CCoinsViewDB */
@@ -187,13 +243,13 @@ std::unique_ptr<CCoinsViewCursor> CCoinsViewDB::Cursor() const
        only need read operations on it, use a const-cast to get around
        that restriction.  */
     i->pcursor->Seek(DB_COIN);
-    // Cache key of first record
+    // Cache key of first record, matching Next() for undecodable keys.
+    i->keyTmp.first = 0;
     if (i->pcursor->Valid()) {
         CoinEntry entry(&i->keyTmp.second);
-        i->pcursor->GetKey(entry);
-        i->keyTmp.first = entry.key;
-    } else {
-        i->keyTmp.first = 0; // Make sure Valid() and GetKey() return false
+        if (i->pcursor->GetKey(entry)) {
+            i->keyTmp.first = entry.key;
+        }
     }
     return i;
 }

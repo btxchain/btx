@@ -21,7 +21,14 @@ class WalletShieldedRingSizePolicyTest(BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 1
         self.setup_clean_chain = True
-        self.extra_args = [["-autoshieldcoinbase=0", "-shieldedringsize=16"]]
+        # Keep the legacy verbose send result in scope so the configured ring
+        # policy can be asserted directly; post-fork RPC redaction has separate
+        # functional coverage.
+        self.extra_args = [[
+            "-autoshieldcoinbase=0",
+            "-shieldedringsize=16",
+            "-regtestshieldedmatrictdisableheight=500",
+        ]]
         self.rpc_timeout = 600
 
     def skip_test_if_missing_module(self):
@@ -40,7 +47,10 @@ class WalletShieldedRingSizePolicyTest(BitcoinTestFramework):
 
         self.log.info("Fund and shield on a node configured for 16-member rings")
         fund_trusted_transparent_balance(
-            self, node, sender, mine_addr, Decimal("8.0"), sync_fun=self.no_op
+            # Initial 3 BTX shield plus 23 diversity top-ups at 0.25 BTX needs
+            # more than 8 BTX before fees. Keep a deterministic margin so the
+            # helper cannot stop early at the transparent balance boundary.
+            self, node, sender, mine_addr, Decimal("12.0"), sync_fun=self.no_op
         )
         sender.z_shieldfunds(Decimal("3.0"), z_sender)
         self.generatetoaddress(node, 1, mine_addr, sync_fun=self.no_op)
@@ -58,7 +68,11 @@ class WalletShieldedRingSizePolicyTest(BitcoinTestFramework):
         self.log.info("Reject unsupported ring sizes at init time")
         node.stop_node()
         node.assert_start_raises_init_error(
-            extra_args=["-autoshieldcoinbase=0", "-shieldedringsize=7"],
+            extra_args=[
+                "-autoshieldcoinbase=0",
+                "-shieldedringsize=7",
+                "-regtestshieldedmatrictdisableheight=500",
+            ],
             expected_msg="Error: Unsupported -shieldedringsize=7 (supported: 8..32)",
         )
 

@@ -393,6 +393,44 @@ BOOST_AUTO_TEST_CASE(mr_descriptor_parses_ctv_leaf)
     BOOST_CHECK(scripts[0] == BuildP2MROutput(root));
 }
 
+BOOST_AUTO_TEST_CASE(mr_descriptor_parses_unspendable_commitment_leaf)
+{
+    const std::vector<unsigned char> spender = MakePattern(MLDSA44_PUBKEY_SIZE, 0x88);
+    const uint256 commitment_hash{MakePattern(32, 0x89)};
+    const std::string no_checksum =
+        "mr(" + HexStr(spender) + ",commit(" + HexStr(commitment_hash) + "))";
+    const auto desc = ParseSingleDescriptor(AddChecksum(no_checksum));
+
+    std::vector<CScript> scripts;
+    FlatSigningProvider out;
+    BOOST_REQUIRE(desc->Expand(/*pos=*/0, DUMMY_SIGNING_PROVIDER, scripts, out));
+    BOOST_REQUIRE_EQUAL(scripts.size(), 1U);
+    BOOST_CHECK_EQUAL(desc->ToString(), AddChecksum(no_checksum));
+
+    const auto spend_leaf = BuildP2MRScript(PQAlgorithm::ML_DSA_44, spender);
+    CScript commitment_leaf;
+    commitment_leaf << OP_RETURN << ToByteVector(commitment_hash);
+    const uint256 root = ComputeP2MRMerkleRoot({
+        ComputeP2MRLeafHash(P2MR_LEAF_VERSION, spend_leaf),
+        ComputeP2MRLeafHash(P2MR_LEAF_VERSION, commitment_leaf),
+    });
+    BOOST_CHECK(scripts[0] == BuildP2MROutput(root));
+}
+
+BOOST_AUTO_TEST_CASE(mr_descriptor_rejects_commitment_wrong_hash_length)
+{
+    const std::string bad_hash = HexStr(MakePattern(31, 0x8A));
+    FlatSigningProvider provider;
+    std::string error;
+    const auto parsed = Parse(
+        AddChecksum("mr(commit(" + bad_hash + "))"),
+        provider,
+        error,
+        /*require_checksum=*/true);
+    BOOST_CHECK(parsed.empty());
+    BOOST_CHECK(error.find("commitment hash must be 32-byte hex") != std::string::npos);
+}
+
 BOOST_AUTO_TEST_CASE(mr_descriptor_parses_ctv_checksig_leaf)
 {
     const std::vector<unsigned char> signer = MakePattern(MLDSA44_PUBKEY_SIZE, 0x91);
@@ -486,6 +524,26 @@ BOOST_AUTO_TEST_CASE(mr_descriptor_parses_htlc_leaf)
     BOOST_CHECK(scripts[0] == BuildP2MROutput(root));
 }
 
+BOOST_AUTO_TEST_CASE(mr_descriptor_parses_transaction_bound_htlc_leaf)
+{
+    const std::vector<unsigned char> hash160 = MakePattern(uint160::size(), 0x46);
+    const std::vector<unsigned char> claimant = MakePattern(MLDSA44_PUBKEY_SIZE, 0x47);
+    const std::string desc_str =
+        AddChecksum("mr(htlc_tx(" + HexStr(hash160) + "," + HexStr(claimant) + "))");
+    const auto desc = ParseSingleDescriptor(desc_str);
+
+    std::vector<CScript> scripts;
+    FlatSigningProvider out;
+    BOOST_REQUIRE(desc->Expand(/*pos=*/0, DUMMY_SIGNING_PROVIDER, scripts, out));
+    BOOST_REQUIRE_EQUAL(scripts.size(), 1U);
+
+    const auto leaf_script =
+        BuildP2MRHTLCTxLeaf(hash160, PQAlgorithm::ML_DSA_44, claimant);
+    const uint256 root =
+        ComputeP2MRMerkleRoot({ComputeP2MRLeafHash(P2MR_LEAF_VERSION, leaf_script)});
+    BOOST_CHECK(scripts[0] == BuildP2MROutput(root));
+}
+
 BOOST_AUTO_TEST_CASE(mr_descriptor_parses_refund_leaf)
 {
     const std::vector<unsigned char> spender = MakePattern(MLDSA44_PUBKEY_SIZE, 0x46);
@@ -562,7 +620,7 @@ BOOST_AUTO_TEST_CASE(mr_descriptor_parses_two_leaf_htlc_refund_tree)
     const std::vector<unsigned char> oracle = MakePattern(MLDSA44_PUBKEY_SIZE, 0x48);
     const std::vector<unsigned char> spender = MakePattern(MLDSA44_PUBKEY_SIZE, 0x49);
     const std::string desc_str = AddChecksum(
-        "mr(htlc(" + HexStr(hash160) + "," + HexStr(oracle) + "),refund(1024," + HexStr(spender) + "))");
+        "mr(htlc_tx(" + HexStr(hash160) + "," + HexStr(oracle) + "),refund(1024," + HexStr(spender) + "))");
     const auto desc = ParseSingleDescriptor(desc_str);
 
     std::vector<CScript> scripts;
@@ -570,7 +628,7 @@ BOOST_AUTO_TEST_CASE(mr_descriptor_parses_two_leaf_htlc_refund_tree)
     BOOST_REQUIRE(desc->Expand(/*pos=*/0, DUMMY_SIGNING_PROVIDER, scripts, out));
     BOOST_REQUIRE_EQUAL(scripts.size(), 1U);
 
-    const auto htlc_leaf = BuildP2MRHTLCLeaf(hash160, PQAlgorithm::ML_DSA_44, oracle);
+    const auto htlc_leaf = BuildP2MRHTLCTxLeaf(hash160, PQAlgorithm::ML_DSA_44, oracle);
     const auto refund_leaf = BuildP2MRRefundLeaf(/*timeout=*/1024, PQAlgorithm::ML_DSA_44, spender);
     const uint256 root = ComputeP2MRMerkleRoot({
         ComputeP2MRLeafHash(P2MR_LEAF_VERSION, htlc_leaf),
@@ -595,6 +653,20 @@ BOOST_AUTO_TEST_CASE(mr_descriptor_rejects_htlc_wrong_hash_length)
     FlatSigningProvider provider;
     std::string error;
     const auto parsed = Parse(AddChecksum("mr(htlc(" + bad_hash + "," + oracle + "))"), provider, error, /*require_checksum=*/true);
+    BOOST_CHECK(parsed.empty());
+}
+
+BOOST_AUTO_TEST_CASE(mr_descriptor_rejects_htlc_tx_wrong_hash_length)
+{
+    const std::string bad_hash = HexStr(MakePattern(uint160::size() - 1, 0x53));
+    const std::string claimant = HexStr(MakePattern(MLDSA44_PUBKEY_SIZE, 0x54));
+    FlatSigningProvider provider;
+    std::string error;
+    const auto parsed = Parse(
+        AddChecksum("mr(htlc_tx(" + bad_hash + "," + claimant + "))"),
+        provider,
+        error,
+        /*require_checksum=*/true);
     BOOST_CHECK(parsed.empty());
 }
 

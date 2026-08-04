@@ -363,6 +363,78 @@ std::vector<unsigned char> BuildP2MRHTLCLeaf(
     return std::vector<unsigned char>(script.begin(), script.end());
 }
 
+std::vector<unsigned char> BuildP2MRHTLCTxLeaf(
+    Span<const unsigned char> preimage_hash160,
+    PQAlgorithm claimant_algo,
+    Span<const unsigned char> claimant_pubkey)
+{
+    if (preimage_hash160.size() != uint160::size()) return {};
+
+    CScript script;
+    script << std::vector<unsigned char>(preimage_hash160.begin(), preimage_hash160.end())
+           << OP_OVER << OP_HASH160 << OP_EQUALVERIFY << OP_DROP;
+
+    const std::vector<unsigned char> checksig_script = BuildP2MRScript(claimant_algo, claimant_pubkey);
+    if (checksig_script.empty()) return {};
+    script.insert(script.end(), checksig_script.begin(), checksig_script.end());
+    return std::vector<unsigned char>(script.begin(), script.end());
+}
+
+namespace {
+
+bool ParseP2MRHTLCLeafCommon(
+    Span<const unsigned char> script,
+    bool transaction_bound,
+    std::vector<unsigned char>& preimage_hash160,
+    PQAlgorithm& claimant_algo,
+    std::vector<unsigned char>& claimant_pubkey)
+{
+    const size_t key_offset = transaction_bound ? 25 : 24;
+    if (script.size() <= key_offset) return false;
+    if (script[0] != 0x14 ||
+        script[21] != OP_OVER ||
+        script[22] != OP_HASH160 ||
+        script[23] != OP_EQUALVERIFY) {
+        return false;
+    }
+    if (transaction_bound && script[24] != OP_DROP) return false;
+
+    Span<const unsigned char> pubkey;
+    size_t push_consumed{0};
+    if (!ParseP2MRAnyPubkeyPush(script, key_offset, claimant_algo, pubkey, push_consumed)) return false;
+    const size_t tail = key_offset + push_consumed;
+    if (script.size() != tail + 1) return false;
+    const opcodetype expected = transaction_bound ? GetP2MRChecksigOpcode(claimant_algo)
+                                                  : OP_CHECKSIGFROMSTACK;
+    if (script[tail] != expected) return false;
+
+    preimage_hash160.assign(script.begin() + 1, script.begin() + 21);
+    claimant_pubkey.assign(pubkey.begin(), pubkey.end());
+    return true;
+}
+
+} // namespace
+
+bool ParseP2MRLegacyHTLCLeaf(
+    Span<const unsigned char> script,
+    std::vector<unsigned char>& preimage_hash160,
+    PQAlgorithm& claimant_algo,
+    std::vector<unsigned char>& claimant_pubkey)
+{
+    return ParseP2MRHTLCLeafCommon(
+        script, /*transaction_bound=*/false, preimage_hash160, claimant_algo, claimant_pubkey);
+}
+
+bool ParseP2MRHTLCTxLeaf(
+    Span<const unsigned char> script,
+    std::vector<unsigned char>& preimage_hash160,
+    PQAlgorithm& claimant_algo,
+    std::vector<unsigned char>& claimant_pubkey)
+{
+    return ParseP2MRHTLCLeafCommon(
+        script, /*transaction_bound=*/true, preimage_hash160, claimant_algo, claimant_pubkey);
+}
+
 std::vector<unsigned char> BuildP2MRRefundLeaf(
     int64_t timeout,
     PQAlgorithm sender_algo,

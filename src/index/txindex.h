@@ -6,6 +6,10 @@
 #define BITCOIN_INDEX_TXINDEX_H
 
 #include <index/base.h>
+#include <primitives/transaction.h>
+#include <util/expected.h>
+
+#include <string>
 
 static constexpr bool DEFAULT_TXINDEX{false};
 
@@ -23,6 +27,7 @@ private:
     const std::unique_ptr<DB> m_db;
 
     bool AllowPrune() const override { return false; }
+    bilingual_str GetDisableAction() const override { return _("set -txindex=0"); }
 
 protected:
     bool CustomAppend(const interfaces::BlockInfo& block) override;
@@ -40,9 +45,8 @@ public:
     ///
     /// @param[in]   tx_hash  The hash of the transaction to be returned.
     /// @param[out]  block_hash  The hash of the block the transaction is found in.
-    /// @param[out]  tx  The transaction itself.
-    /// @return  true if transaction is found, false otherwise
-    bool FindTx(const uint256& tx_hash, uint256& block_hash, CTransactionRef& tx) const;
+    /// @return  The tx if found, nullptr if not found, or an error string for I/O issues.
+    util::Expected<CTransactionRef, std::string> FindTx(const uint256& tx_hash, uint256& block_hash) const;
 };
 
 /// The global transaction index, used in GetTransaction. May be null.

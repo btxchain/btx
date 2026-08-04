@@ -4,6 +4,11 @@ Current note: this file is a historical tracker. The active audit branch has rem
 MatMul/oracle `.metallib` loading path and uses embedded runtime source compilation instead. See
 `doc/btx-metal-mining-tuning.md` for current operator guidance.
 
+Its completed phases concern the legacy MatMul path and do not qualify MatMul
+v4.7 Epoch A. The current launch candidate is Profile 1 ExactReplay; Profile 2
+is a later proof-authoritative workload. Mainnet Epoch A (v4 = BMX4C = RC) has a finite compiled candidate height and true source flags, so it would activate if merged unchanged; release remains NO-GO pending exact-final combined-tree CUDA+Metal evidence, reviewed schema-4 ASERT calibration, ratification re-affirmation, full closeout, and live-tip runway validation; all other transition heights remain disabled. See
+[`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md).
+
 Last updated: 2026-02-20
 Branch: codex/apple-metal-strict-readiness-fix-20260220
 Plan source: `doc/btx-apple-silicon-metal-optimization-plan.md`

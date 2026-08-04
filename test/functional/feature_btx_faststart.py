@@ -258,6 +258,7 @@ class BTXFaststartFunctionalTest(BitcoinTestFramework):
             "--rpc-wait-secs=60",
             "--header-wait-secs=60",
             f"--daemon-arg=-addnode=127.0.0.1:{p2p_port(0)}",
+            "--daemon-arg=-regtestmatmulltsealaspow=0",
             "--daemon-arg=-listen=0",
             f"--daemon-arg=-rpcport={wrapper_rpc_port}",
         ]
@@ -309,6 +310,7 @@ class BTXFaststartFunctionalTest(BitcoinTestFramework):
             "--chain=regtest",
             f"--datadir={datadir}",
             f"--daemon-arg=-addnode=127.0.0.1:{p2p_port(0)}",
+            "--daemon-arg=-regtestmatmulltsealaspow=0",
             "--daemon-arg=-listen=0",
             f"--daemon-arg=-rpcport={agent_rpc_port}",
         ]
@@ -364,6 +366,7 @@ class BTXFaststartFunctionalTest(BitcoinTestFramework):
             "--chain=regtest",
             f"--datadir={datadir}",
             f"--daemon-arg=-addnode=127.0.0.1:{p2p_port(0)}",
+            "--daemon-arg=-regtestmatmulltsealaspow=0",
             "--daemon-arg=-listen=0",
             f"--daemon-arg=-rpcport={agent_rpc_port}",
             "--daemon-arg=-miningminoutboundpeers=0",
@@ -405,6 +408,15 @@ class BTXFaststartFunctionalTest(BitcoinTestFramework):
         env["BTX_MINING_RPC_RESTART_THRESHOLD"] = "2"
         env["BTX_MINING_RESTART_COOLDOWN_SECS"] = "0"
         env["BTX_MINING_STARTUP_GRACE_SECS"] = "0"
+        # The supervisor must restart the daemon with the same consensus and
+        # test-network policy used for the initial bootstrap. Otherwise the
+        # replay-authority context changes and the daemon correctly fails
+        # closed on its persisted exact-replay status.
+        env["BTX_MINING_DAEMON_ARGS"] = (
+            "-regtestmatmulltsealaspow=0 -listen=0 "
+            "-miningminoutboundpeers=0 -miningminsyncedoutboundpeers=0"
+        )
+        env["BTX_MINING_USE_DEFAULT_BOOTSTRAP_PEERS"] = "0"
         start_result = subprocess.run(
             [
                 str(self.src_dir() / "contrib" / "mining" / "start-live-mining.sh"),

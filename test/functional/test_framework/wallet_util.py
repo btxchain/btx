@@ -4,6 +4,12 @@
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Useful util functions for testing the wallet"""
 from collections import namedtuple
+import hashlib
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
 import unittest
 
 from test_framework.address import (
@@ -48,6 +54,129 @@ Multisig = namedtuple('Multisig', ['privkeys',
                                    'p2wsh_addr',
                                    'p2sh_p2wsh_script',
                                    'p2sh_p2wsh_addr'])
+
+
+def create_legacy_wallet_with_tool(test, node, wallet_name, *, blank=False, disable_private_keys=False, force_bdb=False, swap_bdb_endian=False):
+    """Create a legacy wallet offline, without using the disabled createwallet path.
+
+    Current BTX daemons deliberately reject ``createwallet(descriptors=false)``.
+    Compatibility tests still need existing legacy wallets to exercise loading,
+    importing, migration, and the offline wallet tool.  Build the fixture with
+    btx-wallet while the target node is stopped, then let btxd load it normally.
+
+    The tool's native legacy format is preserved unless ``force_bdb`` is
+    requested by a test that specifically exercises Berkeley DB
+    compatibility. This is SQLite when Berkeley DB support is unavailable.
+    ``swap_bdb_endian`` selects the opposite-endian BDB format and verifies
+    the resulting file header. ``blank`` and ``disable_private_keys`` are
+    produced by filtering the
+    tool-generated dump before restoring it.  This keeps all fixture material
+    ephemeral and avoids checking private keys into the source tree.
+    """
+    assert not node.running
+    assert not disable_private_keys or blank
+    assert not swap_bdb_endian or force_bdb
+    if wallet_name and (
+        wallet_name in {".", ".."}
+        or "/" in wallet_name
+        or "\\" in wallet_name
+        or wallet_name.startswith("__legacy_source_")
+    ):
+        raise AssertionError("legacy fixture wallet name must be one safe path component")
+
+    wallet_dir = node.wallets_path
+    wallet_dir.mkdir(parents=True, exist_ok=True)
+
+    def run_tool(*args):
+        command = [
+            test.options.bitcoinwallet,
+            f"-datadir={node.datadir_path}",
+            f"-chain={test.chain}",
+        ]
+        command.extend(args)
+        result = subprocess.run(command, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise AssertionError(
+                f"btx-wallet failed ({result.returncode}): {' '.join(command[1:])}\n"
+                f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+            )
+
+    # btx-wallet requires a nonempty wallet name. An unnamed legacy wallet is
+    # restored under a temporary name and moved to the wallet-directory root.
+    final_tool_name = wallet_name or "__legacy_unnamed_wallet"
+    source_name = f"__legacy_source_{final_tool_name}"
+    source_path = wallet_dir / source_name
+    final_path = wallet_dir / final_tool_name
+    unnamed_wallet_file = wallet_dir / "wallet.dat"
+    assert not source_path.exists()
+    assert not final_path.exists()
+    if not wallet_name:
+        assert not unnamed_wallet_file.exists()
+
+    run_tool(f"-wallet={source_name}", "-legacy", "create")
+
+    keypool_pubkeys = []
+    with tempfile.TemporaryDirectory(dir=node.datadir_path, prefix="legacy-wallet-dump-") as temp_dir:
+        dump_path = Path(temp_dir) / "wallet.dump"
+        run_tool(f"-wallet={source_name}", f"-dumpfile={dump_path}", "dump")
+
+        with open(dump_path, encoding="utf8") as dump_file:
+            lines = dump_file.readlines()
+        for line in lines:
+            key, separator, value_hex = line.strip().partition(',')
+            if not separator or not key.startswith("04706f6f6c"):  # "pool" + int64 index
+                continue
+            value = bytes.fromhex(value_hex)
+            # CKeyPool: int32 version, int64 timestamp, compact-size pubkey.
+            pubkey_size = value[12]
+            if pubkey_size in (33, 65):
+                keypool_pubkeys.append(value[13:13 + pubkey_size].hex())
+
+        if blank:
+            # A minimal blank wallet needs only its format/version records and
+            # mandatory wallet flags. The dump checksum covers every preceding
+            # byte and is recomputed after filtering.
+            flags_key = "05666c616773"
+            preserved_keys = {
+                "0776657273696f6e",      # version
+                "0a6d696e76657273696f6e",  # minversion
+                flags_key,
+            }
+            body = lines[:2]
+            for line in lines[2:]:
+                key = line.partition(',')[0]
+                if key in preserved_keys and key != "checksum":
+                    body.append(line)
+
+            flags = (1 << 33) | ((1 << 32) if disable_private_keys else 0)
+            flags_line = f"{flags_key},{flags.to_bytes(8, 'little').hex()}\n"
+            body = [line for line in body if not line.startswith(f"{flags_key},")]
+            body.append(flags_line)
+            checksum = hashlib.sha256(hashlib.sha256(''.join(body).encode()).digest()).hexdigest()
+            with open(dump_path, 'w', encoding="utf8") as dump_file:
+                dump_file.writelines(body)
+                dump_file.write(f"checksum,{checksum}\n")
+
+        shutil.rmtree(source_path)
+        restore_args = [f"-wallet={final_tool_name}", f"-dumpfile={dump_path}"]
+        if force_bdb:
+            restore_args.append(f"-format={'bdb_swap' if swap_bdb_endian else 'bdb'}")
+        run_tool(*restore_args, "createfromdump")
+
+    if swap_bdb_endian:
+        with open(final_path / "wallet.dat", "rb") as wallet_file:
+            wallet_file.seek(12)
+            magic = wallet_file.read(4)
+        assert magic == (0x62310500).to_bytes(4, byteorder=sys.byteorder)
+
+    if not wallet_name:
+        shutil.move(final_path / "wallet.dat", unnamed_wallet_file)
+        # Berkeley DB leaves its environment log and lock alongside wallet.dat.
+        # They belong to the temporary named restore, not to the unnamed wallet
+        # fixture, and make a plain rmdir() fail even after wallet.dat is moved.
+        shutil.rmtree(final_path)
+
+    return keypool_pubkeys
 
 def get_key(node):
     """Generate a fresh key on node

@@ -1,0 +1,604 @@
+// Copyright (c) 2026 The BTX developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://opensource.org/license/mit/.
+
+#include <matmul/backend_capabilities_v4.h>
+
+#include <ascend/matmul_v4_lt_accel.h>
+#include <cuda/matmul_accel.h>
+#include <cuda/matmul_v4_lt_tensor_gemm.h>
+#include <metal/matmul_accel.h>
+
+#if defined(BTX_ENABLE_HIP)
+#include <hip/hip_runtime.h>
+#endif
+
+#include <algorithm>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+namespace matmul_v4::backend {
+namespace {
+
+char ToLowerAscii(char c)
+{
+    if (c >= 'A' && c <= 'Z') {
+        return static_cast<char>(c + ('a' - 'A'));
+    }
+    return c;
+}
+
+std::string ToLower(std::string value)
+{
+    std::transform(value.begin(), value.end(), value.begin(), [](char c) {
+        return ToLowerAscii(c);
+    });
+    return value;
+}
+
+Eligibility DisabledByBuild()
+{
+    return Eligibility{
+        .compiled = false,
+        .available = false,
+        .admissible = false,
+        .self_test_required = true,
+        .reason = "disabled_by_build",
+    };
+}
+
+Eligibility CpuEligibility()
+{
+    // The pure-integer CPU implementation (matmul_v4::ComputeDigest) is the
+    // consensus definition (§N.3-v); it does not self-test against itself.
+    return Eligibility{
+        .compiled = true,
+        .available = true,
+        .admissible = true,
+        .self_test_required = false,
+        .reason = "consensus_reference_always_available",
+    };
+}
+
+Eligibility CudaEligibility()
+{
+#if defined(BTX_ENABLE_CUDA_EXPERIMENTAL)
+    const auto probe = btx::cuda::ProbeMatMulDigestAcceleration();
+    if (!probe.available) {
+        return Eligibility{
+            .compiled = true,
+            .available = false,
+            .admissible = false,
+            .self_test_required = true,
+            .reason = probe.reason,
+        };
+    }
+    // §S.1: availability of the v3 CUDA path is not enough for v4 mining.
+    // Compute capability is only a coarse candidate filter (some sm_75
+    // products have no usable Tensor Core path). Require cuBLASLt to select an
+    // algorithm that declares native IMMA + INT8 input + INT32 accumulation
+    // and then pass the multi-shape exactness self-test.
+    Eligibility eligibility = ClassifyCudaDevice(probe.compute_capability_major,
+                                                  probe.compute_capability_minor);
+    if (eligibility.admissible && !matmul_v4::cuda::IsLtImmaGemmAvailable()) {
+        eligibility.admissible = false;
+        eligibility.reason = "cuda_native_imma_self_qual_failed:" + eligibility.reason;
+    }
+    return eligibility;
+#else
+    return DisabledByBuild();
+#endif
+}
+
+Eligibility MetalEligibility()
+{
+#if defined(BTX_ENABLE_METAL)
+    const auto probe = btx::metal::ProbeMatMulDigestAcceleration();
+    if (!probe.available) {
+        return Eligibility{
+            .compiled = true,
+            .available = false,
+            .admissible = false,
+            .self_test_required = true,
+            .reason = probe.reason,
+        };
+    }
+    // §O.1: only M5-class devices expose Metal 4 INT8 TensorOps (s8xs8->s32).
+    // IsLtTensorOpsGemmAvailable is true ONLY after ExactGemmS8S8 self-qual
+    // (never from ALU shaders alone). M4-class stays verification-only.
+    const auto arch = matmul_v4::metal::ProbeLtMetalArch();
+    const bool has_metal4_int8_tensor_ops =
+        arch.name_class == matmul_v4::metal::LtMetalArchNameClass::M5Class &&
+        matmul_v4::metal::IsLtTensorOpsGemmAvailable();
+    Eligibility eligibility = ClassifyMetalDevice(has_metal4_int8_tensor_ops);
+    eligibility.reason = std::string{eligibility.reason} + ":arch=" + arch.name_class_string;
+    return eligibility;
+#else
+    return DisabledByBuild();
+#endif
+}
+
+Eligibility HipEligibility()
+{
+#if defined(BTX_ENABLE_HIP)
+    // Real device probe: read the gfx target (hipDeviceProp_t::gcnArchName)
+    // and route it through ClassifyHipDevice(). Only CDNA MFMA parts are
+    // admissible (§S.1); a missing or unqueryable device reports unavailable
+    // so a BTX_ENABLE_HIP build can never silently mine on a device without a
+    // qualified exact INT8->INT32 matrix path.
+    int device_count = 0;
+    if (hipGetDeviceCount(&device_count) != hipSuccess || device_count <= 0) {
+        return Eligibility{
+            .compiled = true,
+            .available = false,
+            .admissible = false,
+            .self_test_required = true,
+            .reason = "hip_no_device",
+        };
+    }
+
+    int device = 0;
+    hipDeviceProp_t props{};
+    if (hipGetDevice(&device) != hipSuccess ||
+        hipGetDeviceProperties(&props, device) != hipSuccess) {
+        return Eligibility{
+            .compiled = true,
+            .available = false,
+            .admissible = false,
+            .self_test_required = true,
+            .reason = "hip_device_query_failed",
+        };
+    }
+
+    // Architecture is only a candidate filter. Require a library path that
+    // actually executed I8×I8→I32 on this device and matched the CPU oracle;
+    // scalar HIP ALU kernels must never make the registry claim MFMA.
+    Eligibility eligibility = ClassifyHipDevice(props.gcnArchName);
+    if (eligibility.admissible && !matmul_v4::hip::IsLtMfmaGemmAvailable()) {
+        eligibility.admissible = false;
+        eligibility.reason = "hip_native_mfma_self_qual_failed:" + eligibility.reason;
+    }
+    return eligibility;
+#else
+    return DisabledByBuild();
+#endif
+}
+
+
+Eligibility AscendEligibility()
+{
+#if defined(BTX_ENABLE_ASCEND)
+#if defined(BTX_HAVE_CANN)
+    // Use the Ascend backend's shared one-time runtime initialization before
+    // querying device state. Do not call aclInit independently here.
+    std::string soc;
+    if (!matmul_v4::ascend::GetAscendRuntimeSocName(soc)) {
+        return Eligibility{
+            .compiled = true,
+            .available = false,
+            .admissible = false,
+            .self_test_required = true,
+            .reason = "ascend_runtime_or_soc_query_failed",
+        };
+    }
+
+    // Capability admission must use the device reported by AscendCL. An
+    // environment override (and especially the previous dav-3510 default)
+    // could label an unrelated or unknown NPU as an Ascend 950-class device.
+    Eligibility eligibility = ClassifyAscendDevice(soc);
+    if (!eligibility.admissible) {
+        return eligibility;
+    }
+    if (!matmul_v4::ascend::IsAscendExactGemmAvailable()) {
+        eligibility.admissible = false;
+        eligibility.reason =
+            "ascend_exactgemm_self_qual_failed_or_unavailable:" + eligibility.reason;
+        return eligibility;
+    }
+    eligibility.reason = "cube_s8s8s32_exactgemm_self_qual:" + eligibility.reason;
+    return eligibility;
+#else
+    return Eligibility{
+        .compiled = true,
+        .available = false,
+        .admissible = false,
+        .self_test_required = true,
+        .reason = "cann_sdk_not_found",
+    };
+#endif
+#else
+    return DisabledByBuild();
+#endif
+}
+
+Kind ParseKind(const std::string& requested, bool& known)
+{
+    const std::string normalized = ToLower(requested);
+    if (normalized == "cpu") {
+        known = true;
+        return Kind::CPU;
+    }
+    if (normalized == "cuda" || normalized == "nvidia") {
+        known = true;
+        return Kind::CUDA;
+    }
+    if (normalized == "metal" || normalized == "mlx" || normalized == "apple") {
+        known = true;
+        return Kind::METAL;
+    }
+    if (normalized == "hip" || normalized == "rocm" || normalized == "amd") {
+        known = true;
+        return Kind::HIP;
+    }
+    if (normalized == "ascend" || normalized == "huawei" || normalized == "npu") {
+        known = true;
+        return Kind::ASCEND;
+    }
+
+    known = false;
+    return Kind::CPU;
+}
+
+//! Strip ROCm feature suffixes: "gfx90a:sramecc+:xnack-" -> "gfx90a".
+std::string_view GfxBaseArch(std::string_view gcn_arch_name)
+{
+    const auto colon = gcn_arch_name.find(':');
+    if (colon != std::string_view::npos) {
+        gcn_arch_name = gcn_arch_name.substr(0, colon);
+    }
+    return gcn_arch_name;
+}
+
+} // namespace
+
+std::string ToString(Kind kind)
+{
+    switch (kind) {
+    case Kind::CPU:
+        return "cpu";
+    case Kind::CUDA:
+        return "cuda";
+    case Kind::METAL:
+        return "metal";
+    case Kind::HIP:
+        return "hip";
+    case Kind::ASCEND:
+        return "ascend";
+    }
+
+    return "cpu";
+}
+
+Eligibility EligibilityFor(Kind kind)
+{
+    switch (kind) {
+    case Kind::CPU:
+        return CpuEligibility();
+    case Kind::CUDA:
+        return CudaEligibility();
+    case Kind::METAL:
+        return MetalEligibility();
+    case Kind::HIP:
+        return HipEligibility();
+    case Kind::ASCEND:
+        return AscendEligibility();
+    }
+
+    return CpuEligibility();
+}
+
+std::vector<std::pair<Kind, Eligibility>> AllEligibility()
+{
+    return {
+        {Kind::CPU, EligibilityFor(Kind::CPU)},
+        {Kind::CUDA, EligibilityFor(Kind::CUDA)},
+        {Kind::METAL, EligibilityFor(Kind::METAL)},
+        {Kind::HIP, EligibilityFor(Kind::HIP)},
+        {Kind::ASCEND, EligibilityFor(Kind::ASCEND)},
+    };
+}
+
+bool HasPassedDeterminismSelfTest(Kind kind)
+{
+    if (kind == Kind::CPU) {
+        return true; // consensus reference — no self-test against itself
+    }
+    // Device ExactGemm self-qualification is folded into EligibilityFor
+    // (CUDA IMMA / HIP MFMA / Metal TensorOps / Ascend Cube). A kind that
+    // claims admissible without that probe would fail this gate.
+    const Eligibility eligibility = EligibilityFor(kind);
+    return eligibility.available && eligibility.admissible;
+}
+
+namespace {
+
+//! True when `kind` is compiled, present, §S.1-admissible, and (if required)
+//! has passed the ExactGemm / determinism self-test. Shared by explicit resolve
+//! and by the "auto" preference walk.
+bool KindReadyToMine(Kind kind, Eligibility* out_elig = nullptr)
+{
+    const Eligibility eligibility = EligibilityFor(kind);
+    if (out_elig) {
+        *out_elig = eligibility;
+    }
+    if (!(eligibility.available && eligibility.admissible)) {
+        return false;
+    }
+    if (eligibility.self_test_required && !HasPassedDeterminismSelfTest(kind)) {
+        return false;
+    }
+    return true;
+}
+
+//! Platform preference for BTX_MATMUL_V4_BACKEND=auto / DefaultBackendRequest().
+//! Apple prefers Metal (unified-memory Neural Accelerators); everywhere else
+//! prefers CUDA, then HIP/ROCm, then Ascend, then Metal (rare on non-Apple).
+//! CPU is never in the preference list — it is the universal fallback.
+const Kind* AutoPreferenceOrder(size_t& count)
+{
+#if defined(__APPLE__)
+    static constexpr Kind kOrder[] = {
+        Kind::METAL, Kind::CUDA, Kind::HIP, Kind::ASCEND,
+    };
+#else
+    static constexpr Kind kOrder[] = {
+        Kind::CUDA, Kind::HIP, Kind::ASCEND, Kind::METAL,
+    };
+#endif
+    count = sizeof(kOrder) / sizeof(kOrder[0]);
+    return kOrder;
+}
+
+Selection ResolveAutoBackend(const std::string& requested_input)
+{
+    Selection selection;
+    selection.requested_input = requested_input;
+    selection.requested_known = true;
+
+    size_t n = 0;
+    const Kind* order = AutoPreferenceOrder(n);
+    for (size_t i = 0; i < n; ++i) {
+        Eligibility eligibility;
+        if (!KindReadyToMine(order[i], &eligibility)) {
+            continue;
+        }
+        // Record the *selected* device as both requested and active so the
+        // accel one-shot log line reports a clean match (requested=auto,
+        // active=cuda|hip|metal|…) without the WARNING fallback path.
+        selection.requested = order[i];
+        selection.active = order[i];
+        selection.reason = std::string("auto_selected_") + ToString(order[i]) + ":" + eligibility.reason;
+        return selection;
+    }
+
+    selection.requested = Kind::CPU;
+    selection.active = Kind::CPU;
+    selection.reason = "auto_no_admissible_device_fallback_to_cpu";
+    return selection;
+}
+
+} // namespace
+
+Selection ResolveBackend(const std::string& requested)
+{
+    Selection selection;
+    selection.requested_input = requested;
+
+    const std::string normalized = ToLower(requested);
+    if (normalized == "auto" || normalized.empty()) {
+        // Empty string: treat like auto (DefaultBackendRequest / unset-adjacent).
+        return ResolveAutoBackend(requested.empty() ? "auto" : requested);
+    }
+
+    bool known{false};
+    selection.requested = ParseKind(requested, known);
+    selection.requested_known = known;
+
+    if (!known) {
+        selection.active = Kind::CPU;
+        selection.reason = "unknown_backend_fallback_to_cpu";
+        return selection;
+    }
+
+    Eligibility eligibility;
+    if (!KindReadyToMine(selection.requested, &eligibility)) {
+        selection.active = Kind::CPU;
+        if (!eligibility.available) {
+            selection.reason = ToString(selection.requested) + "_unavailable_fallback_to_cpu:" + eligibility.reason;
+        } else if (!eligibility.admissible) {
+            // §S.1: runtime present but no bit-exact INT8 tensor path — the
+            // device is verification-only and MUST NOT mine (a device without an
+            // exact s8xs8->s32 path cannot reproduce the consensus digest).
+            selection.reason = ToString(selection.requested) + "_inadmissible_fallback_to_cpu:" + eligibility.reason;
+        } else {
+            // §N.3-v fail-closed: self_test_required backends must have passed.
+            selection.reason = ToString(selection.requested) +
+                               "_self_test_required_not_passed_fallback_to_cpu:" + eligibility.reason;
+        }
+        return selection;
+    }
+
+    selection.active = selection.requested;
+    selection.reason = "requested_backend_admissible";
+    return selection;
+}
+
+Eligibility ClassifyCudaDevice(uint32_t cc_major, uint32_t cc_minor)
+{
+    Eligibility eligibility{
+        .compiled = true,
+        .available = true,
+        .admissible = false,
+        .self_test_required = true,
+        .reason = "",
+    };
+
+    const std::string sm = "sm_" + std::to_string(cc_major) + std::to_string(cc_minor);
+    if (cc_major < 7) {
+        // Pascal and older: no tensor cores. DP4A is integer but is not the
+        // tensor path. Tensor-less sm_75 products are rejected later by the
+        // native-IMMA algorithm attestation rather than by this ISA filter.
+        eligibility.reason = "pre_tensor_no_int8_mma:" + sm;
+        return eligibility;
+    }
+    if (cc_major == 7 && cc_minor < 5) {
+        // Volta (sm_70/72): first-generation tensor cores are FP16-multiply
+        // only — non-deterministic accumulate, inadmissible (§S.4.2).
+        eligibility.reason = "volta_fp16_tensor_only_inadmissible:" + sm;
+        return eligibility;
+    }
+
+    // The sm_75 ISA introduced IMMA s8xs8->s32; later architectures retain
+    // it. This is a candidate classification only: CudaEligibility additionally
+    // requires cuBLASLt to attest and self-qualify an actual native IMMA algo.
+    eligibility.admissible = true;
+    eligibility.reason = "imma_s8s8s32_tensor_path:" + sm;
+    return eligibility;
+}
+
+Eligibility ClassifyHipDevice(std::string_view gcn_arch_name)
+{
+    Eligibility eligibility{
+        .compiled = true,
+        .available = true,
+        .admissible = false,
+        .self_test_required = true,
+        .reason = "",
+    };
+
+    const std::string arch{GfxBaseArch(gcn_arch_name)};
+
+    // CDNA MFMA generations with exact INT8->INT32 matrix ops
+    // (v_mfma_i32_*i8): CDNA1 MI100, CDNA2 MI200, CDNA3 MI300, CDNA4 MI350.
+    static constexpr std::string_view kCdnaMfmaArchs[] = {
+        "gfx908", // CDNA1  (MI100)
+        "gfx90a", // CDNA2  (MI210/MI250/MI250X)
+        "gfx940", // CDNA3  (MI300 early)
+        "gfx941", // CDNA3  (MI300 early)
+        "gfx942", // CDNA3  (MI300A/MI300X/MI325X)
+        "gfx950", // CDNA4  (MI350 series)
+    };
+    for (const auto& cdna : kCdnaMfmaArchs) {
+        if (arch == cdna) {
+            eligibility.admissible = true;
+            eligibility.reason = "mfma_i8i8i32_tensor_path:" + arch;
+            return eligibility;
+        }
+    }
+
+    // RDNA (gfx10xx/gfx11xx/gfx12xx): consumer parts. RDNA3+ WMMA has an
+    // iu8 mode, but it is not the CDNA MFMA path the §S.1 rule admits;
+    // verification-only until cross-vendor golden vectors qualify it
+    // (§B.6, Appendix C-3).
+    if (arch.rfind("gfx10", 0) == 0 || arch.rfind("gfx11", 0) == 0 ||
+        arch.rfind("gfx12", 0) == 0) {
+        eligibility.reason = "rdna_wmma_not_qualified_verification_only:" + arch;
+        return eligibility;
+    }
+
+    // GCN/Vega (gfx900/gfx902/gfx906...): no matrix cores.
+    if (arch.rfind("gfx9", 0) == 0) {
+        eligibility.reason = "gcn_no_matrix_cores:" + arch;
+        return eligibility;
+    }
+
+    eligibility.reason = "unknown_or_non_cdna_arch:" + (arch.empty() ? std::string{"(empty)"} : arch);
+    return eligibility;
+}
+
+Eligibility ClassifyMetalDevice(bool has_metal4_int8_tensor_ops)
+{
+    Eligibility eligibility{
+        .compiled = true,
+        .available = true,
+        .admissible = false,
+        .self_test_required = true,
+        .reason = "",
+    };
+
+    if (!has_metal4_int8_tensor_ops) {
+        // Pre-M5 GPUs have no matrix units; the ANE's "INT8" dequantizes to
+        // FP16 internally — no exact integer accumulate (§K.1, §O.1).
+        eligibility.reason = "no_integer_tensor_path_verification_only";
+        return eligibility;
+    }
+
+    // M5-class GPU Neural Accelerator, Metal 4 INT8 TensorOps (s8xs8->s32,
+    // OS 26.4+). Admissible pending the mandatory §N.3-v self-test.
+    eligibility.admissible = true;
+    eligibility.reason = "metal4_int8_tensorops_m5_class";
+    return eligibility;
+}
+
+Eligibility ClassifyAscendDevice(std::string_view soc_name)
+{
+    Eligibility eligibility{
+        .compiled = true,
+        .available = true,
+        .admissible = false,
+        .self_test_required = true,
+        .reason = "",
+    };
+
+    std::string soc{soc_name};
+    for (char& c : soc) {
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + ('a' - 'A'));
+    }
+
+    // Ascend 950PR/DT (dav-3510) and related Cube INT8 NPU ids from CANN docs.
+    const bool is_950_class =
+        soc.find("dav-3510") != std::string::npos ||
+        soc.find("3510") != std::string::npos ||
+        soc.find("950pr") != std::string::npos ||
+        soc.find("950dt") != std::string::npos ||
+        soc.find("ascend950") != std::string::npos ||
+        soc.find("ascend-950") != std::string::npos ||
+        soc.find("ascend910") != std::string::npos ||
+        soc.find("ascend-910") != std::string::npos;
+
+    if (!is_950_class) {
+        eligibility.reason =
+            "non_ascend950_cube_verification_only:" +
+            (soc.empty() ? std::string{"(empty)"} : soc);
+        return eligibility;
+    }
+
+    eligibility.admissible = true;
+    eligibility.reason = "ascend_cube_int8_candidate:" + soc;
+    return eligibility;
+}
+
+CudaComputePreference PreferCudaNativeMxfp4OverImma(const Eligibility& imma_eligibility,
+                                                    bool native_mxfp4_qualified)
+{
+    CudaComputePreference pref;
+    pref.imma_admissible = imma_eligibility.admissible;
+    pref.native_mxfp4_qualified = native_mxfp4_qualified;
+
+    if (!imma_eligibility.admissible) {
+        // Not even IMMA-admissible: native MXFP4 cannot rescue a non-tensor
+        // device, and we never advertise native on an inadmissible base.
+        pref.prefer_native = false;
+        pref.lane = "inadmissible";
+        pref.reason = "inadmissible_base:" + imma_eligibility.reason;
+        return pref;
+    }
+
+    // Fail-closed: prefer the peak native MXFP4 lane ONLY when it has passed its
+    // own on-silicon self-qualification. Otherwise keep the correct, admissible,
+    // sub-peak IMMA lane — the miner stays admissible either way.
+    if (native_mxfp4_qualified) {
+        pref.prefer_native = true;
+        pref.lane = "native_mxfp4";
+        pref.reason = "native_mxfp4_qualified_preferred_over_imma";
+    } else {
+        pref.prefer_native = false;
+        pref.lane = "imma_s8s8s32";
+        pref.reason = "native_mxfp4_unqualified_imma_baseline";
+    }
+    return pref;
+}
+
+} // namespace matmul_v4::backend

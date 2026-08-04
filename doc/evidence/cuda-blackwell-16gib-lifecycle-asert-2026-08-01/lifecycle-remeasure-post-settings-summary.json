@@ -1,0 +1,43 @@
+{
+  "evidence_kind": "lifecycle_remeasure_post_production_settings",
+  "date": "2026-08-01",
+  "machine_class": {
+    "os": "Linux x86_64",
+    "gpu_class": "NVIDIA consumer Blackwell-class discrete GPU, 16 GiB VRAM, CC 12.0",
+    "note": "Sanitized machine-class only; no hostname, account, or private path."
+  },
+  "mode": "production",
+  "execution_policy": "strict-device",
+  "source_revision": "unknown",
+  "complete_sample_count": 0,
+  "core_sample_count_without_authority": 3,
+  "incomplete_sample_count": 0,
+  "core_lifecycle_summary_s": {
+    "n": 3,
+    "min": 96.490919272,
+    "p50": 96.60083083,
+    "p95": 96.91681799,
+    "p99": 96.91681799,
+    "max": 96.91681799,
+    "mean": 96.66952269733333
+  },
+  "complete_lifecycle_summary_s": {
+    "n": 0,
+    "min": null,
+    "p50": null,
+    "p95": null,
+    "p99": null,
+    "max": null,
+    "mean": null
+  },
+  "within_target_spacing_at_90s": false,
+  "spacing_gate_decision": "KEEP_nPowTargetSpacingNormal_90_until_complete_lifecycle_with_authority",
+  "canary_blocker": "CommittedRCProductionGoldenManifest empty until final-code-freeze CUDA+Metal digest and provenance match",
+  "authority_expected": false,
+  "ratification": false,
+  "notes": [
+    "Historical remeasure after AcceptBlock/sync/harness fixes using the then-proposed RC ASERT 16893794/1; current disabled parameters are neutral 1/1.",
+    "Winner authority remains unavailable (missing_golden); complete samples remain 0.",
+    "Core p99 still ~96.9s > 90s; expected until canary unlocks authority tip skip."
+  ]
+}
