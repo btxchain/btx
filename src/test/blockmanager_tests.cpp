@@ -114,6 +114,49 @@ BOOST_AUTO_TEST_CASE(matmul_replay_authority_context_mismatch_without_authority_
     BOOST_CHECK(dirty.empty());
 }
 
+BOOST_AUTO_TEST_CASE(matmul_replay_authority_context_mismatch_clears_trusted_only)
+{
+    LOCK(cs_main);
+    CBlockIndex trusted;
+    trusted.nStatus = BLOCK_VALID_SCRIPTS | BLOCK_TRUSTED_REPLAY_ATTESTED;
+    std::array<CBlockIndex*, 1> indices{&trusted};
+    std::set<CBlockIndex*> dirty;
+
+    const auto migration{node::ReconcileMatMulReplayAuthorityContext(
+        indices, uint256{2}, uint256{1}, dirty)};
+    BOOST_CHECK(migration.disposition ==
+                node::MatMulReplayContextDisposition::MIGRATED);
+    BOOST_CHECK_EQUAL(migration.cleared_trusted_status, 1U);
+    BOOST_CHECK(!(trusted.nStatus & BLOCK_TRUSTED_REPLAY_ATTESTED));
+    BOOST_CHECK(trusted.nStatus & BLOCK_VALID_SCRIPTS);
+    BOOST_CHECK_EQUAL(dirty.size(), 1U);
+    BOOST_CHECK(dirty.count(&trusted));
+}
+
+BOOST_AUTO_TEST_CASE(matmul_replay_authority_context_full_reindex_seeds_database)
+{
+    KernelNotifications notifications{
+        Assert(m_node.shutdown_request), m_node.exit_status,
+        *Assert(m_node.warnings)};
+    const BlockManager::Options blockman_opts{
+        .chainparams = Params(),
+        .blocks_dir = m_args.GetBlocksDirPath(),
+        .notifications = notifications,
+        .block_tree_db_params = DBParams{
+            .path = m_args.GetDataDirNet() / "blocks" / "index",
+            .cache_bytes = 0,
+            .wipe_data = true,
+        },
+    };
+    BlockManager blockman{*Assert(m_node.shutdown_signal), blockman_opts};
+    const uint256 expected{node::ComputeMatMulReplayAuthorityContext(Params())};
+
+    LOCK(cs_main);
+    uint256 persisted;
+    BOOST_REQUIRE(blockman.m_block_tree_db->ReadMatMulReplayContext(persisted));
+    BOOST_CHECK(persisted == expected);
+}
+
 BOOST_AUTO_TEST_CASE(matmul_replay_authority_context_binds_profile_and_height)
 {
     auto params{CreateChainParams(ArgsManager{}, ChainType::REGTEST)};

@@ -69,10 +69,17 @@ bool BlockTreeDB::ReadBlockFileInfo(int nFile, CBlockFileInfo& info)
     return Read(std::make_pair(DB_BLOCK_FILES, nFile), info);
 }
 
-bool BlockTreeDB::WriteReindexing(bool fReindexing)
+bool BlockTreeDB::WriteReindexing(
+    bool fReindexing,
+    const std::optional<uint256>& matmul_replay_context)
 {
     if (fReindexing) {
-        return Write(DB_REINDEX_FLAG, uint8_t{'1'});
+        CDBBatch batch(*this);
+        batch.Write(DB_REINDEX_FLAG, uint8_t{'1'});
+        if (matmul_replay_context.has_value()) {
+            batch.Write(DB_MATMUL_REPLAY_CONTEXT, *matmul_replay_context);
+        }
+        return WriteBatch(batch, true);
     } else {
         return Erase(DB_REINDEX_FLAG);
     }
@@ -465,18 +472,18 @@ MatMulReplayContextMigration ReconcileMatMulReplayAuthorityContext(
     if (!context_matches) {
         // First scan only. Returning REINDEX_REQUIRED must leave both the
         // in-memory index and dirty set untouched so startup cannot partially
-        // migrate a datadir it is about to reject.
+        // migrate a datadir it is about to reject. Only a locally completed
+        // ExactReplay verdict can make historical chainwork depend on the old
+        // authority context. Trusted-attestation bits are audit metadata and
+        // are safe (and required) to clear below.
         for (const CBlockIndex* index : indices) {
             if (index != nullptr &&
-                (index->nStatus &
-                 (BLOCK_EXACT_REPLAY_VERIFIED |
-                  BLOCK_TRUSTED_REPLAY_ATTESTED)) != 0) {
+                (index->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0) {
                 return {
                     MatMulReplayContextDisposition::REINDEX_REQUIRED,
                     0};
             }
         }
-        return {MatMulReplayContextDisposition::MIGRATED, 0};
     }
 
     size_t cleared_trusted{0};
@@ -496,7 +503,9 @@ MatMulReplayContextMigration ReconcileMatMulReplayAuthorityContext(
         ++cleared_trusted;
     }
     return {
-        MatMulReplayContextDisposition::MATCHED,
+        context_matches
+            ? MatMulReplayContextDisposition::MATCHED
+            : MatMulReplayContextDisposition::MIGRATED,
         cleared_trusted};
 }
 
@@ -1793,7 +1802,16 @@ BlockManager::BlockManager(const util::SignalInterrupt& interrupt, Options opts)
     m_block_tree_db = std::make_unique<BlockTreeDB>(m_opts.block_tree_db_params);
 
     if (m_opts.block_tree_db_params.wipe_data) {
-        m_block_tree_db->WriteReindexing(true);
+        // The reindex marker and replay-authority context describe one fresh
+        // database generation and must survive or fail together. Persist them
+        // in one synchronous batch before any revalidated authority bit can be
+        // written, including across an interrupted/resumed reindex.
+        const uint256 replay_context{
+            ComputeMatMulReplayAuthorityContext(GetParams())};
+        if (!m_block_tree_db->WriteReindexing(true, replay_context)) {
+            throw std::runtime_error{
+                "Failed to initialize block database reindex authority context"};
+        }
         m_blockfiles_indexed = false;
         // If we're reindexing in prune mode, wipe away unusable block files and all undo data files
         if (m_prune_mode) {

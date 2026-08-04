@@ -58,7 +58,9 @@ public:
     bool WriteBatchSync(const std::vector<std::pair<int, const CBlockFileInfo*>>& fileInfo, int nLastFile, const std::vector<const CBlockIndex*>& blockinfo, const std::unordered_map<std::string, node::PruneLockInfo>& prune_locks, const std::optional<uint256>& matmul_replay_context = std::nullopt);
     bool ReadBlockFileInfo(int nFile, CBlockFileInfo& info);
     bool ReadLastBlockFile(int& nFile);
-    bool WriteReindexing(bool fReindexing);
+    bool WriteReindexing(
+        bool fReindexing,
+        const std::optional<uint256>& matmul_replay_context = std::nullopt);
     void ReadReindexing(bool& fReindexing);
     bool WritePruneLock(const std::string& name, const node::PruneLockInfo&);
     bool DeletePruneLock(const std::string& name);

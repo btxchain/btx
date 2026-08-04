@@ -1454,6 +1454,8 @@ bool AppInitParameterInteraction(const ArgsManager& args)
         }
         matmul::trusted::StoreConfig config;
         config.chain_id = chainparams.GenesisBlock().GetHash();
+        config.replay_authority_context =
+            node::ComputeMatMulReplayAuthorityContext(chainparams);
         config.trusted_signers = trusted_signers;
         config.threshold = static_cast<size_t>(trusted_threshold);
         std::string configure_error;

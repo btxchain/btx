@@ -400,8 +400,7 @@ void MatMulVerifyWorker::WorkerLoop()
         const bool trusted_exact_replay{
             !m_verify_override &&
             node::matmul_trusted::IsTrustedMirror() &&
-            m_params.IsMatMulRCProfile1Active(job.height) &&
-            !m_params.IsMatMulRCCoupledActive(job.height)};
+            m_params.IsMatMulTrustedReplayAttestationActive(job.height)};
         if (!m_verify_override &&
             m_params.IsMatMulRCFamilyActive(job.height) &&
             !trusted_exact_replay) {

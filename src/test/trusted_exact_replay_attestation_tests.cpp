@@ -10,6 +10,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <stdexcept>
 #include <thread>
 #include <vector>
@@ -20,6 +21,8 @@ namespace {
 
 using namespace matmul::trusted;
 using namespace std::chrono_literals;
+
+const uint256 REPLAY_AUTHORITY_CONTEXT{uint256::ONE};
 
 uint256 TestHash(uint8_t marker)
 {
@@ -43,6 +46,7 @@ ExactReplayStatement MakeStatement(const uint256& chain,
     statement.chain_id = chain;
     statement.block_hash = block;
     statement.block_height = height;
+    statement.replay_authority_context = REPLAY_AUTHORITY_CONTEXT;
     return statement;
 }
 
@@ -52,6 +56,7 @@ StoreConfig MakeConfig(const uint256& chain,
 {
     StoreConfig config;
     config.chain_id = chain;
+    config.replay_authority_context = REPLAY_AUTHORITY_CONTEXT;
     config.threshold = threshold;
     for (const auto& key : keys) {
         config.trusted_signers.push_back(key.GetPubKey());
@@ -83,9 +88,33 @@ BOOST_AUTO_TEST_CASE(statement_signature_serialization_and_context)
 
     BOOST_CHECK(CPubKey::CheckLowS(attestation.signature));
     BOOST_CHECK_EQUAL(
-        VerifyResultName(VerifyAttestation(attestation, chain, block, 123,
-                                           trusted)),
+        VerifyResultName(VerifyAttestation(
+            attestation, chain, REPLAY_AUTHORITY_CONTEXT, block, 123,
+            trusted)),
         "valid");
+
+    DataStream statement_stream;
+    statement_stream << statement;
+    BOOST_CHECK_EQUAL(statement_stream.size(), 103U);
+    BOOST_CHECK_EQUAL(std::to_integer<uint8_t>(statement_stream[0]),
+                      ExactReplayStatement::CURRENT_VERSION);
+    // V2 appends authority context after the legacy fields, preserving the
+    // V1 block-hash offset used by bounded relay inspection.
+    BOOST_CHECK_EQUAL(std::to_integer<uint8_t>(statement_stream[33]),
+                      block.data()[0]);
+    BOOST_CHECK_EQUAL(std::to_integer<uint8_t>(statement_stream[71]),
+                      REPLAY_AUTHORITY_CONTEXT.data()[0]);
+
+    auto v1_statement{statement};
+    v1_statement.version = 1;
+    DataStream v1_statement_stream;
+    v1_statement_stream << v1_statement;
+    BOOST_CHECK_EQUAL(v1_statement_stream.size(), 71U);
+    ExactReplayStatement decoded_v1;
+    decoded_v1.replay_authority_context = REPLAY_AUTHORITY_CONTEXT;
+    v1_statement_stream >> decoded_v1;
+    BOOST_CHECK_EQUAL(decoded_v1.version, 1U);
+    BOOST_CHECK(decoded_v1.replay_authority_context.IsNull());
 
     DataStream stream;
     stream << attestation;
@@ -93,48 +122,80 @@ BOOST_AUTO_TEST_CASE(statement_signature_serialization_and_context)
     stream >> decoded;
     BOOST_CHECK(decoded == attestation);
     BOOST_CHECK(StatementHash(decoded.statement) == StatementHash(statement));
+    auto other_context_statement{statement};
+    other_context_statement.replay_authority_context = TestHash(0x10);
+    BOOST_CHECK(StatementHash(other_context_statement) !=
+                StatementHash(statement));
 
-    BOOST_CHECK(VerifyAttestation(attestation, TestHash(0x12), block, 123,
-                                  trusted) == VerifyResult::WrongChain);
-    BOOST_CHECK(VerifyAttestation(attestation, chain, TestHash(0x23), 123,
-                                  trusted) == VerifyResult::WrongBlock);
-    BOOST_CHECK(VerifyAttestation(attestation, chain, block, 124, trusted) ==
+    BOOST_CHECK(VerifyAttestation(
+                    attestation, TestHash(0x12),
+                    REPLAY_AUTHORITY_CONTEXT, block, 123, trusted) ==
+                VerifyResult::WrongChain);
+    BOOST_CHECK(VerifyAttestation(
+                    attestation, chain, REPLAY_AUTHORITY_CONTEXT,
+                    TestHash(0x23), 123, trusted) ==
+                VerifyResult::WrongBlock);
+    BOOST_CHECK(VerifyAttestation(
+                    attestation, chain, REPLAY_AUTHORITY_CONTEXT,
+                    block, 124, trusted) ==
                 VerifyResult::WrongHeight);
+    BOOST_CHECK(VerifyAttestation(
+                    attestation, chain, TestHash(0x24), block, 123,
+                    trusted) ==
+                VerifyResult::WrongReplayAuthorityContext);
 
     auto altered{attestation};
-    altered.statement.version++;
-    BOOST_CHECK(VerifyAttestation(altered, chain, block, 123, trusted) ==
-                VerifyResult::UnsupportedVersion);
+    altered.statement.version = 1;
+    BOOST_CHECK(VerifyAttestation(
+                    altered, chain, REPLAY_AUTHORITY_CONTEXT, block, 123,
+                    trusted) == VerifyResult::UnsupportedVersion);
     altered = attestation;
     altered.statement.profile++;
-    BOOST_CHECK(VerifyAttestation(altered, chain, block, 123, trusted) ==
-                VerifyResult::WrongMatMulContext);
+    BOOST_CHECK(VerifyAttestation(
+                    altered, chain, REPLAY_AUTHORITY_CONTEXT, block, 123,
+                    trusted) == VerifyResult::WrongMatMulContext);
+    altered = attestation;
+    altered.statement.replay_authority_context = TestHash(0x25);
+    BOOST_CHECK(VerifyAttestation(
+                    altered, chain, REPLAY_AUTHORITY_CONTEXT, block, 123,
+                    trusted) ==
+                VerifyResult::WrongReplayAuthorityContext);
+    // Even a verifier configured for the altered context rejects the original
+    // signature: the V2 domain signs the context bytes themselves.
+    BOOST_CHECK(VerifyAttestation(
+                    altered, chain, TestHash(0x25), block, 123,
+                    trusted) == VerifyResult::InvalidSignature);
 
     const std::set<CPubKey> other_trust{keys[1].GetPubKey()};
-    BOOST_CHECK(VerifyAttestation(attestation, chain, block, 123,
-                                  other_trust) ==
+    BOOST_CHECK(VerifyAttestation(
+                    attestation, chain, REPLAY_AUTHORITY_CONTEXT, block, 123,
+                    other_trust) ==
                 VerifyResult::UntrustedSigner);
 
     altered = attestation;
     altered.signature.back() ^= 1;
-    BOOST_CHECK(VerifyAttestation(altered, chain, block, 123, trusted) ==
-                VerifyResult::InvalidSignature);
+    BOOST_CHECK(VerifyAttestation(
+                    altered, chain, REPLAY_AUTHORITY_CONTEXT, block, 123,
+                    trusted) == VerifyResult::InvalidSignature);
     // Add a redundant R padding byte while keeping the lax-DER value intact.
     // The attestation layer must reject this malleable encoding itself.
     altered = attestation;
     altered.signature.insert(altered.signature.begin() + 4, 0);
     ++altered.signature[1];
     ++altered.signature[3];
-    BOOST_CHECK(VerifyAttestation(altered, chain, block, 123, trusted) ==
-                VerifyResult::InvalidSignature);
+    BOOST_CHECK(VerifyAttestation(
+                    altered, chain, REPLAY_AUTHORITY_CONTEXT, block, 123,
+                    trusted) == VerifyResult::InvalidSignature);
     altered = attestation;
     altered.signature.assign(CPubKey::SIGNATURE_SIZE + 1, 0);
-    BOOST_CHECK(VerifyAttestation(altered, chain, block, 123, trusted) ==
-                VerifyResult::InvalidSignature);
+    BOOST_CHECK(VerifyAttestation(
+                    altered, chain, REPLAY_AUTHORITY_CONTEXT, block, 123,
+                    trusted) == VerifyResult::InvalidSignature);
     altered = attestation;
     altered.signer = CPubKey{};
-    BOOST_CHECK(VerifyAttestation(altered, chain, block, 123, trusted) ==
-                VerifyResult::InvalidSigner);
+    BOOST_CHECK(VerifyAttestation(
+                    altered, chain, REPLAY_AUTHORITY_CONTEXT, block, 123,
+                    trusted) == VerifyResult::InvalidSigner);
 }
 
 BOOST_AUTO_TEST_CASE(config_validation_and_local_signer)
@@ -149,6 +210,8 @@ BOOST_AUTO_TEST_CASE(config_validation_and_local_signer)
     BOOST_CHECK(store.SignLocal(TestHash(0x32), 7, &produced) ==
                 AddResult::Accepted);
     BOOST_CHECK(produced.signer == keys[0].GetPubKey());
+    BOOST_CHECK(produced.statement.replay_authority_context ==
+                REPLAY_AUTHORITY_CONTEXT);
     BOOST_CHECK(store.LocalSignerPubKey() == keys[0].GetPubKey());
     BOOST_CHECK(!store.HasQuorum(TestHash(0x32), 7));
 
@@ -166,6 +229,9 @@ BOOST_AUTO_TEST_CASE(config_validation_and_local_signer)
     BOOST_CHECK_THROW(AttestationStore{bad}, std::invalid_argument);
     bad = MakeConfig(chain, keys, 1);
     bad.local_signer = MakeKeys(1)[0];
+    BOOST_CHECK_THROW(AttestationStore{bad}, std::invalid_argument);
+    bad = MakeConfig(chain, keys, 1);
+    bad.replay_authority_context.SetNull();
     BOOST_CHECK_THROW(AttestationStore{bad}, std::invalid_argument);
 }
 
@@ -197,11 +263,15 @@ BOOST_AUTO_TEST_CASE(unique_signer_quorum_and_rejections)
     auto wrong_chain{MakeStatement(TestHash(0x44), block, 51)};
     BOOST_CHECK(store.Add(MustSign(wrong_chain, keys[2]), block, 51) ==
                 AddResult::WrongChain);
+    auto wrong_context{statement};
+    wrong_context.replay_authority_context = TestHash(0x45);
+    BOOST_CHECK(store.Add(MustSign(wrong_context, keys[2]), block, 51) ==
+                AddResult::WrongReplayAuthorityContext);
 
     const StoreStats stats{store.GetStats()};
     BOOST_CHECK_EQUAL(stats.accepted, 2);
     BOOST_CHECK_EQUAL(stats.duplicates, 1);
-    BOOST_CHECK_EQUAL(stats.rejected, 4);
+    BOOST_CHECK_EQUAL(stats.rejected, 5);
     BOOST_CHECK_EQUAL(stats.quorum_transitions, 1);
     BOOST_CHECK_EQUAL(stats.stored_attestations, 2);
     BOOST_CHECK_EQUAL(stats.blocks_with_quorum, 1);

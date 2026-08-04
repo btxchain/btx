@@ -56,9 +56,7 @@ std::optional<KnownAttestationBlock> LookupAttestationBlock(
         chainman.m_blockman.LookupBlockIndex(hash)};
     if (index == nullptr ||
         (index->nStatus & BLOCK_FAILED_MASK) ||
-        !chainman.GetConsensus().IsMatMulRCProfile1Active(
-            index->nHeight) ||
-        chainman.GetConsensus().IsMatMulRCCoupledActive(
+        !chainman.GetConsensus().IsMatMulTrustedReplayAttestationActive(
             index->nHeight)) {
         return std::nullopt;
     }
@@ -82,6 +80,8 @@ RPCHelpMan getmatmultrustedstatus()
                 {RPCResult::Type::BOOL, "trusted_mirror", ""},
                 {RPCResult::Type::BOOL, "serves_attestations", ""},
                 {RPCResult::Type::BOOL, "local_signer", ""},
+                {RPCResult::Type::NUM, "attestation_version", ""},
+                {RPCResult::Type::STR_HEX, "replay_authority_context", /*optional=*/true, "Versioned ExactReplay authority context for this configuration"},
                 {RPCResult::Type::NUM, "threshold", ""},
                 {RPCResult::Type::NUM, "trusted_signers", ""},
                 {RPCResult::Type::NUM, "stored_blocks", ""},
@@ -114,6 +114,14 @@ RPCHelpMan getmatmultrustedstatus()
             result.pushKV(
                 "local_signer",
                 node::matmul_trusted::HasLocalSigner());
+            result.pushKV(
+                "attestation_version",
+                matmul::trusted::ExactReplayStatement::CURRENT_VERSION);
+            if (const auto context{
+                    node::matmul_trusted::ReplayAuthorityContext()}) {
+                result.pushKV(
+                    "replay_authority_context", context->GetHex());
+            }
             result.pushKV(
                 "threshold",
                 static_cast<uint64_t>(
@@ -218,7 +226,8 @@ RPCHelpMan submitmatmulattestations()
         "submitmatmulattestations",
         "Submit/import a bounded batch of signed ExactReplay attestations. "
         "Each statement is checked against the local block index and current "
-        "configured chain, signer set, and threshold.",
+        "configured chain, replay authority context, signer set, and "
+        "threshold.",
         {
             {"attestations", RPCArg::Type::ARR,
              RPCArg::Optional::NO, "Serialized attestations (maximum 16)",

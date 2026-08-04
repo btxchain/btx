@@ -53,6 +53,7 @@ void ResetForTest();
 [[nodiscard]] size_t Threshold();
 [[nodiscard]] std::vector<CPubKey> TrustedSigners();
 [[nodiscard]] std::optional<CPubKey> LocalSigner();
+[[nodiscard]] std::optional<uint256> ReplayAuthorityContext();
 
 [[nodiscard]] matmul::trusted::AddResult Add(
     const matmul::trusted::ExactReplayAttestation& attestation,

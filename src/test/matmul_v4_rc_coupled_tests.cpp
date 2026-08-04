@@ -920,6 +920,26 @@ BOOST_AUTO_TEST_CASE(rc_coup_check_pow_regtest_gate)
     BOOST_CHECK(!pub.IsMatMulRCCoupledActive(std::numeric_limits<int32_t>::max() - 1));
 }
 
+BOOST_AUTO_TEST_CASE(trusted_replay_authority_stops_at_coupled_boundary)
+{
+    Consensus::Params p;
+    p.fMatMulPOW = true;
+    p.nMatMulV4Height = 1;
+    p.nMatMulRCHeight = 10;
+    p.nMatMulRCProfile = 1;
+    p.nMatMulRCCoupledHeight = 20;
+
+    BOOST_CHECK(!p.IsMatMulTrustedReplayAttestationActive(9));
+    BOOST_CHECK(p.IsMatMulTrustedReplayAttestationActive(10));
+    BOOST_CHECK(p.IsMatMulTrustedReplayAttestationActive(19));
+    BOOST_CHECK(!p.IsMatMulTrustedReplayAttestationActive(20));
+
+    p.nMatMulRCCoupledHeight = std::numeric_limits<int32_t>::max();
+    BOOST_CHECK(p.IsMatMulTrustedReplayAttestationActive(20));
+    p.nMatMulRCProfile = 2;
+    BOOST_CHECK(!p.IsMatMulTrustedReplayAttestationActive(20));
+}
+
 BOOST_AUTO_TEST_CASE(rc_coup_solver_mines_the_additive_composed_digest)
 {
     Consensus::Params p;

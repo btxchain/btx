@@ -202,6 +202,13 @@ std::optional<CPubKey> LocalSigner()
     return store ? store->LocalSignerPubKey() : std::nullopt;
 }
 
+std::optional<uint256> ReplayAuthorityContext()
+{
+    auto store{Store()};
+    if (!store) return std::nullopt;
+    return store->ReplayAuthorityContext();
+}
+
 matmul::trusted::AddResult Add(
     const matmul::trusted::ExactReplayAttestation& attestation,
     const uint256& expected_hash,

@@ -10247,8 +10247,7 @@ bool ChainstateManager::PersistMatMulExactReplayVerdict(
     CacheMatMulEncDrVerdict(block_hash, true);
     if (GetMatMulValidationMode() ==
             kernel::MatMulValidationMode::CONSENSUS &&
-        GetConsensus().IsMatMulRCProfile1Active(index->nHeight) &&
-        !GetConsensus().IsMatMulRCCoupledActive(
+        GetConsensus().IsMatMulTrustedReplayAttestationActive(
             index->nHeight) &&
         node::matmul_trusted::HasLocalSigner()) {
         const auto result{
@@ -10273,7 +10272,13 @@ bool ChainstateManager::PersistMatMulTrustedReplayAttestation(
 {
     AssertLockHeld(::cs_main);
     CBlockIndex* index{m_blockman.LookupBlockIndex(block_hash)};
-    if (index == nullptr || (index->nStatus & BLOCK_FAILED_MASK)) return false;
+    if (index == nullptr || (index->nStatus & BLOCK_FAILED_MASK) ||
+        GetMatMulValidationMode() !=
+            kernel::MatMulValidationMode::TRUSTED ||
+        !GetConsensus().IsMatMulTrustedReplayAttestationActive(
+            index->nHeight)) {
+        return false;
+    }
     index->nStatus |= BLOCK_TRUSTED_REPLAY_ATTESTED;
     m_blockman.m_dirty_blockindex.insert(index);
     // Deliberately do not populate the replay memo here. The worker populated
@@ -10338,8 +10343,7 @@ ChainstateManager::ClassifyMatMulEncDrRecompute(const CBlock& block,
         const bool trusted_profile1{
             GetMatMulValidationMode() ==
                 kernel::MatMulValidationMode::TRUSTED &&
-            params.IsMatMulRCProfile1Active(nHeight) &&
-            !params.IsMatMulRCCoupledActive(nHeight)};
+            params.IsMatMulTrustedReplayAttestationActive(nHeight)};
         if (!trusted_profile1 &&
             IsMatMulRecomputeAssumeValidTrusted(existing, nHeight)) {
             if (assumevalid_trusted != nullptr) *assumevalid_trusted = true;
@@ -10604,8 +10608,8 @@ static bool ContextualCheckBlock(const CBlock& block,
             const bool trusted_profile1{
                 chainman.GetMatMulValidationMode() ==
                     kernel::MatMulValidationMode::TRUSTED &&
-                consensusParams.IsMatMulRCProfile1Active(nHeight) &&
-                !consensusParams.IsMatMulRCCoupledActive(nHeight)};
+                consensusParams.IsMatMulTrustedReplayAttestationActive(
+                    nHeight)};
             const bool recompute_assumevalid_trusted =
                 !trusted_profile1 &&
                 (chainman.IsMatMulRecomputeAssumeValidTrusted(
@@ -10637,10 +10641,7 @@ static bool ContextualCheckBlock(const CBlock& block,
                 bool rc_local_execution_failure{false};
                 std::string rc_execution_detail;
                 const auto check_rc = [&]() {
-                    if (chainman.GetMatMulValidationMode() ==
-                            kernel::MatMulValidationMode::TRUSTED &&
-                        consensusParams.IsMatMulRCProfile1Active(
-                            nHeight)) {
+                    if (trusted_profile1) {
                         matmul::trusted::WaitResult wait{
                             matmul::trusted::WaitResult::Timeout};
                         if (may_release_cs_main) {
@@ -12601,6 +12602,16 @@ util::Result<CBlockIndex*> ChainstateManager::ActivateSnapshot(
     }
 
     CBlockIndex* snapshot_start_block{};
+    const auto snapshot_base_outworks_authenticated_headers{[&]() EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+        AssertLockHeld(::cs_main);
+        if (!snapshot_start_block || !m_best_header) return false;
+        const bool same_header_chain{
+            m_best_header->nHeight >= snapshot_start_block->nHeight
+                ? m_best_header->GetAncestor(snapshot_start_block->nHeight) == snapshot_start_block
+                : snapshot_start_block->GetAncestor(m_best_header->nHeight) == m_best_header};
+        return same_header_chain ||
+               m_best_header->nAuthenticatedChainWork < snapshot_start_block->nChainWork;
+    }};
 
     {
         LOCK(::cs_main);
@@ -12637,7 +12648,14 @@ util::Result<CBlockIndex*> ChainstateManager::ActivateSnapshot(
             return util::Error{Untranslated(strprintf("The base block header (%s) is part of an invalid chain", base_blockhash.ToString()))};
         }
 
-        if (!m_best_header || m_best_header->GetAncestor(snapshot_start_block->nHeight) != snapshot_start_block) {
+        // MatMul headers contribute no authenticated chainwork until their bodies pass ExactReplay.
+        // Consequently a valid header-only suffix ending at a compiled-in AssumeUTXO base does not
+        // displace the last authenticated header. On production networks the compiled-in exact base
+        // hash pins its header, ancestry, nBits, and therefore claimed nChainWork (height-only matching
+        // is confined to mockable test chains). Allow that trusted base while it still outworks every
+        // divergent body-authenticated branch. Forged header-only MatMul work remains powerless here
+        // and in fork choice.
+        if (!snapshot_base_outworks_authenticated_headers()) {
             return util::Error{Untranslated("A forked headers-chain with more work than the chain with the snapshot base block header exists. Please proceed to sync without AssumeUtxo.")};
         }
 
@@ -12755,6 +12773,14 @@ util::Result<CBlockIndex*> ChainstateManager::ActivateSnapshot(
     }
 
     LOCK(::cs_main);  // cs_main required for rest of snapshot activation.
+
+    // Snapshot deserialization can be lengthy. Recheck the authenticated-header predicate under the
+    // final activation lock so a competing branch that completed body validation while the file was
+    // being loaded cannot race the initial check. RecalculateBestHeader publishes such work even if
+    // ActivateBestChain has not yet made that branch ActiveTip().
+    if (!snapshot_base_outworks_authenticated_headers()) {
+        return cleanup_bad_snapshot(Untranslated("A forked headers-chain with more work than the chain with the snapshot base block header exists. Please proceed to sync without AssumeUtxo."));
+    }
 
     // Do a final check to ensure that the snapshot chainstate is actually a more
     // work chain than the active chainstate; a user could have loaded a snapshot

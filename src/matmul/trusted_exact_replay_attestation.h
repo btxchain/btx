@@ -32,7 +32,7 @@ namespace matmul::trusted {
  * M-of-N signer set. The chain identifier MUST be that chain's genesis hash.
  */
 struct ExactReplayStatement {
-    static constexpr uint8_t CURRENT_VERSION{1};
+    static constexpr uint8_t CURRENT_VERSION{2};
     static constexpr uint8_t MATMUL_V4{4};
     static constexpr uint8_t PROFILE_1{1};
 
@@ -42,6 +42,7 @@ struct ExactReplayStatement {
     int32_t block_height{-1};
     uint8_t matmul_major{MATMUL_V4};
     uint8_t profile{PROFILE_1};
+    uint256 replay_authority_context{};
 
     SERIALIZE_METHODS(ExactReplayStatement, obj)
     {
@@ -51,6 +52,11 @@ struct ExactReplayStatement {
                   obj.block_height,
                   obj.matmul_major,
                   obj.profile);
+        if (obj.version >= 2) {
+            READWRITE(obj.replay_authority_context);
+        } else {
+            SER_READ(obj, obj.replay_authority_context.SetNull());
+        }
     }
 
     friend bool operator==(const ExactReplayStatement&,
@@ -71,7 +77,7 @@ struct ExactReplayAttestation {
                            const ExactReplayAttestation&) = default;
 };
 
-/** Double-SHA256 of a domain separator and the canonical V1 statement. */
+/** Double-SHA256 of a domain separator and the canonical V2 statement. */
 [[nodiscard]] uint256 StatementHash(const ExactReplayStatement& statement);
 
 /** Create a canonical compressed-secp256k1 ECDSA attestation. */
@@ -85,6 +91,7 @@ enum class VerifyResult : uint8_t {
     WrongBlock,
     WrongHeight,
     WrongMatMulContext,
+    WrongReplayAuthorityContext,
     InvalidSigner,
     UntrustedSigner,
     InvalidSignature,
@@ -102,12 +109,14 @@ enum class VerifyResult : uint8_t {
 [[nodiscard]] VerifyResult VerifyAttestation(
     const ExactReplayAttestation& attestation,
     const uint256& expected_chain_id,
+    const uint256& expected_replay_authority_context,
     const uint256& expected_hash,
     int32_t expected_height,
     const std::set<CPubKey>& trusted_signers);
 
 struct StoreConfig {
     uint256 chain_id{};
+    uint256 replay_authority_context{};
     std::vector<CPubKey> trusted_signers{};
     size_t threshold{1};
     size_t max_blocks{4096};
@@ -125,6 +134,7 @@ enum class AddResult : uint8_t {
     WrongBlock,
     WrongHeight,
     WrongMatMulContext,
+    WrongReplayAuthorityContext,
     InvalidSigner,
     UntrustedSigner,
     InvalidSignature,
@@ -213,6 +223,10 @@ public:
 
     [[nodiscard]] StoreStats GetStats() const;
     [[nodiscard]] const uint256& ChainId() const { return m_config.chain_id; }
+    [[nodiscard]] const uint256& ReplayAuthorityContext() const
+    {
+        return m_config.replay_authority_context;
+    }
     [[nodiscard]] size_t Threshold() const { return m_config.threshold; }
     [[nodiscard]] const std::set<CPubKey>& TrustedSigners() const
     {

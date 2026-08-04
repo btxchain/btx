@@ -15,7 +15,7 @@
 namespace matmul::trusted {
 namespace {
 
-constexpr char HASH_DOMAIN[] = "BTX_TRUSTED_EXACT_REPLAY_ATTESTATION_V1";
+constexpr char HASH_DOMAIN[] = "BTX_TRUSTED_EXACT_REPLAY_ATTESTATION_V2";
 constexpr auto WAIT_POLL_INTERVAL = std::chrono::milliseconds{25};
 
 bool IsCanonicalSigner(const CPubKey& pubkey)
@@ -85,6 +85,7 @@ std::optional<ExactReplayAttestation> SignStatement(
 VerifyResult VerifyAttestation(
     const ExactReplayAttestation& attestation,
     const uint256& expected_chain_id,
+    const uint256& expected_replay_authority_context,
     const uint256& expected_hash,
     int32_t expected_height,
     const std::set<CPubKey>& trusted_signers)
@@ -102,6 +103,10 @@ VerifyResult VerifyAttestation(
     if (statement.matmul_major != ExactReplayStatement::MATMUL_V4 ||
         statement.profile != ExactReplayStatement::PROFILE_1) {
         return VerifyResult::WrongMatMulContext;
+    }
+    if (statement.replay_authority_context !=
+        expected_replay_authority_context) {
+        return VerifyResult::WrongReplayAuthorityContext;
     }
     if (!IsCanonicalSigner(attestation.signer)) {
         return VerifyResult::InvalidSigner;
@@ -127,6 +132,8 @@ std::string_view VerifyResultName(VerifyResult result)
     case VerifyResult::WrongBlock: return "wrong-block";
     case VerifyResult::WrongHeight: return "wrong-height";
     case VerifyResult::WrongMatMulContext: return "wrong-matmul-context";
+    case VerifyResult::WrongReplayAuthorityContext:
+        return "wrong-replay-authority-context";
     case VerifyResult::InvalidSigner: return "invalid-signer";
     case VerifyResult::UntrustedSigner: return "untrusted-signer";
     case VerifyResult::InvalidSignature: return "invalid-signature";
@@ -145,6 +152,8 @@ std::string_view AddResultName(AddResult result)
     case AddResult::WrongBlock: return "wrong-block";
     case AddResult::WrongHeight: return "wrong-height";
     case AddResult::WrongMatMulContext: return "wrong-matmul-context";
+    case AddResult::WrongReplayAuthorityContext:
+        return "wrong-replay-authority-context";
     case AddResult::InvalidSigner: return "invalid-signer";
     case AddResult::UntrustedSigner: return "untrusted-signer";
     case AddResult::InvalidSignature: return "invalid-signature";
@@ -169,6 +178,10 @@ AttestationStore::AttestationStore(StoreConfig config)
     if (m_config.chain_id.IsNull()) {
         throw std::invalid_argument{
             "trusted ExactReplay chain identifier must be non-null"};
+    }
+    if (m_config.replay_authority_context.IsNull()) {
+        throw std::invalid_argument{
+            "trusted ExactReplay replay authority context must be non-null"};
     }
     if (m_config.trusted_signers.empty()) {
         throw std::invalid_argument{
@@ -226,6 +239,8 @@ AddResult AttestationStore::ToAddResult(VerifyResult result)
     case VerifyResult::WrongHeight: return AddResult::WrongHeight;
     case VerifyResult::WrongMatMulContext:
         return AddResult::WrongMatMulContext;
+    case VerifyResult::WrongReplayAuthorityContext:
+        return AddResult::WrongReplayAuthorityContext;
     case VerifyResult::InvalidSigner: return AddResult::InvalidSigner;
     case VerifyResult::UntrustedSigner: return AddResult::UntrustedSigner;
     case VerifyResult::InvalidSignature: return AddResult::InvalidSignature;
@@ -239,8 +254,8 @@ AddResult AttestationStore::Add(
     int32_t expected_height)
 {
     const VerifyResult verified{VerifyAttestation(
-        attestation, m_config.chain_id, expected_hash, expected_height,
-        m_trusted_signers)};
+        attestation, m_config.chain_id, m_config.replay_authority_context,
+        expected_hash, expected_height, m_trusted_signers)};
     if (verified != VerifyResult::Valid) {
         std::lock_guard lock{m_mutex};
         ++m_stats.rejected;
@@ -304,6 +319,8 @@ AddResult AttestationStore::SignLocal(
     statement.chain_id = m_config.chain_id;
     statement.block_hash = block_hash;
     statement.block_height = block_height;
+    statement.replay_authority_context =
+        m_config.replay_authority_context;
     auto attestation{SignStatement(statement, *m_config.local_signer)};
     if (!attestation.has_value()) {
         std::lock_guard lock{m_mutex};

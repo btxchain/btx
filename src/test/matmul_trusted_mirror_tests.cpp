@@ -150,6 +150,7 @@ BOOST_AUTO_TEST_CASE(valid_quorum_and_config_rotation_fail_closed)
 
     matmul::trusted::StoreConfig config;
     config.chain_id = chain;
+    config.replay_authority_context = Hex256('a');
     config.trusted_signers = {
         a.GetPubKey(), b.GetPubKey(), c.GetPubKey()};
     config.threshold = 2;
@@ -160,11 +161,14 @@ BOOST_AUTO_TEST_CASE(valid_quorum_and_config_rotation_fail_closed)
         error));
     BOOST_CHECK(node::matmul_trusted::IsTrustedMirror());
     BOOST_CHECK_EQUAL(node::matmul_trusted::Threshold(), 2U);
+    BOOST_REQUIRE(node::matmul_trusted::ReplayAuthorityContext());
+    BOOST_CHECK(*node::matmul_trusted::ReplayAuthorityContext() == Hex256('a'));
 
     matmul::trusted::ExactReplayStatement statement;
     statement.chain_id = chain;
     statement.block_hash = block;
     statement.block_height = 77;
+    statement.replay_authority_context = Hex256('a');
     const auto att_a{
         matmul::trusted::SignStatement(statement, a)};
     const auto att_b{
@@ -191,6 +195,7 @@ BOOST_AUTO_TEST_CASE(valid_quorum_and_config_rotation_fail_closed)
     node::matmul_trusted::ResetForTest();
     matmul::trusted::StoreConfig rotated;
     rotated.chain_id = chain;
+    rotated.replay_authority_context = Hex256('a');
     rotated.trusted_signers = {c.GetPubKey()};
     rotated.threshold = 1;
     BOOST_REQUIRE(node::matmul_trusted::Configure(
@@ -214,6 +219,7 @@ BOOST_AUTO_TEST_CASE(local_signer_and_expected_context)
     const uint256 block{Hex256('4')};
     matmul::trusted::StoreConfig config;
     config.chain_id = chain;
+    config.replay_authority_context = Hex256('b');
     config.trusted_signers = {signer.GetPubKey()};
     config.threshold = 1;
     config.local_signer = signer;
@@ -226,6 +232,7 @@ BOOST_AUTO_TEST_CASE(local_signer_and_expected_context)
     BOOST_CHECK(node::matmul_trusted::SignAuthoritative(
                     block, 9, &produced) ==
                 matmul::trusted::AddResult::Accepted);
+    BOOST_CHECK(produced.statement.replay_authority_context == Hex256('b'));
     BOOST_CHECK(node::matmul_trusted::HasQuorum(block, 9));
     BOOST_CHECK(node::matmul_trusted::Add(
                     produced, block, 10) ==
@@ -241,6 +248,7 @@ BOOST_AUTO_TEST_CASE(staged_signer_finalizes_after_ecc_and_resets_cleanly)
     const CKey signer{NewKey()};
     matmul::trusted::StoreConfig config;
     config.chain_id = Hex256('6');
+    config.replay_authority_context = Hex256('c');
     config.trusted_signers = {signer.GetPubKey()};
     config.threshold = 1;
     std::string error;
@@ -258,6 +266,7 @@ BOOST_AUTO_TEST_CASE(staged_signer_finalizes_after_ecc_and_resets_cleanly)
     node::matmul_trusted::ResetForTest();
     BOOST_CHECK(!node::matmul_trusted::IsConfigured());
     BOOST_CHECK(!node::matmul_trusted::HasLocalSigner());
+    BOOST_CHECK(!node::matmul_trusted::ReplayAuthorityContext());
 }
 
 // A trusted mirror does not merely accelerate the Profile-1 MatMul check, it

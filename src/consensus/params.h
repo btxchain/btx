@@ -1075,6 +1075,15 @@ struct Params {
             && nMatMulRCCoupledHeight != std::numeric_limits<int32_t>::max()
             && height >= nMatMulRCCoupledHeight;
     }
+    /** True only while a Profile-1 ExactReplay attestation is the complete
+     *  MatMul authority. The additive coupled successor requires local
+     *  verification of its second work leg, so a Profile-1 attestation must
+     *  never replace or describe that verdict. */
+    bool IsMatMulTrustedReplayAttestationActive(int32_t height) const
+    {
+        return IsMatMulRCProfile1Active(height) &&
+            !IsMatMulRCCoupledActive(height);
+    }
     /** True when tip-verify must use the RC admission pool (pending / peer /
      *  global RC budgets) rather than EncDr/v4/LT: either ENC_RC or
      *  the additive ENC_RC_COUPLED successor is live. */

@@ -131,11 +131,19 @@ class MatMulTrustedMirrorsTest(BitcoinTestFramework):
         archive_services = archive.getnetworkinfo()["localservicesnames"]
         assert "MATMUL_ATTESTATION_ARCHIVE" in archive_services
         assert "MATMUL_CONSENSUS" in archive_services
+        archive_status = archive.getmatmultrustedstatus()
+        assert_equal(archive_status["attestation_version"], 2)
+        assert_equal(len(archive_status["replay_authority_context"]), 64)
         for mirror in (mirror_a, mirror_b):
             services = mirror.getnetworkinfo()["localservicesnames"]
             assert "MATMUL_TRUSTED_MIRROR" in services
             assert "MATMUL_CONSENSUS" not in services
             status = mirror.getmatmultrustedstatus()
+            assert_equal(status["attestation_version"], 2)
+            assert_equal(
+                status["replay_authority_context"],
+                archive_status["replay_authority_context"],
+            )
             assert_equal(status["trusted_mirror"], True)
             assert_equal(status["local_signer"], False)
             assert_equal(status["threshold"], 1)
@@ -164,10 +172,34 @@ class MatMulTrustedMirrorsTest(BitcoinTestFramework):
         activation_hash = archive.getblockhash(ACTIVATION_HEIGHT)
         exported = archive.getmatmulattestations(activation_hash)
         assert_equal(len(exported), 1)
+        raw_attestation = bytes.fromhex(exported[0])
         for mirror in (mirror_a, mirror_b):
             imported = mirror.submitmatmulattestations(exported)
             assert_equal(imported[0]["result"], "duplicate")
             assert_equal(imported[0]["quorum"], True)
+
+        self.log.info("Attestations are bound to the replay authority context")
+        wrong_context = bytearray(raw_attestation)
+        # V2 appends replay_authority_context after the legacy statement
+        # fields. The legacy block-hash field remains at bytes [33:65].
+        wrong_context[71:103] = b"\xff" * 32
+        rejected = mirror_a.submitmatmulattestations(
+            [wrong_context.hex()]
+        )
+        assert_equal(
+            rejected[0]["result"],
+            "wrong-replay-authority-context",
+        )
+        assert_equal(rejected[0]["quorum"], True)
+
+        legacy_version = bytearray(raw_attestation)
+        legacy_version[0] = 1
+        del legacy_version[71:103]
+        rejected = mirror_a.submitmatmulattestations(
+            [legacy_version.hex()]
+        )
+        assert_equal(rejected[0]["result"], "unsupported-version")
+        assert_equal(rejected[0]["quorum"], True)
 
         self.log.info("Insufficient quorum is retryable and non-punitive")
         old_height = mirror_b.getblockcount()
@@ -197,7 +229,6 @@ class MatMulTrustedMirrorsTest(BitcoinTestFramework):
         )
 
         self.log.info("Malformed and source-amplified attestation relay fails closed")
-        raw_attestation = bytes.fromhex(exported[0])
         with mirror_a.assert_debug_log(["mmattest payload=16385 exceeds bound"]):
             peer = mirror_a.add_p2p_connection(P2PInterface())
             peer.send_message(
@@ -224,7 +255,7 @@ class MatMulTrustedMirrorsTest(BitcoinTestFramework):
             peer.peer_disconnect()
 
         unknown_attestation = bytearray(raw_attestation)
-        # V1 statement layout is version || chain_id || block_hash || ...
+        # V2 preserves the legacy version || chain_id || block_hash prefix.
         unknown_attestation[33:65] = b"\xff" * 32
         with mirror_a.assert_debug_log(["unknown/non-Profile1"]):
             peer = mirror_a.add_p2p_connection(P2PInterface())
@@ -240,11 +271,14 @@ class MatMulTrustedMirrorsTest(BitcoinTestFramework):
         sixteen_attestations = (
             ser_compact_size(16) + raw_attestation * 16
         )
+        # Replaying a valid public attestation must not drain the shared relay
+        # budget: duplicates do not amplify into outbound messages. They still
+        # consume the retained keyed-netgroup signature-verification budget,
+        # so rotating peer IDs cannot obtain unbounded verification work.
         with mirror_a.assert_debug_log(
-            ["source/global rate-limited mmattest"]
+            ["mmattest over source verify budget"]
         ):
-            # New peer IDs do not reset the retained keyed-netgroup budget.
-            for _ in range(5):
+            for _ in range(16):
                 peer = mirror_a.add_p2p_connection(P2PInterface())
                 peer.send_and_ping(
                     msg_generic(b"mmattest", sixteen_attestations)
