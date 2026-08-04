@@ -76,6 +76,49 @@ constexpr bool IsMatMulPeerEligibleForSync(
         has_noban_permission;
 }
 
+/** Whether this SendMessages pass may allocate block-download work to a peer.
+ * The dynamic MatMul eligibility input is part of both the IBD and near-tip
+ * paths, so an ordinary peer cannot bypass the activated tier requirement. */
+constexpr bool ShouldRequestBlocksFromMatMulPeer(
+    bool can_serve_blocks,
+    bool peer_is_eligible,
+    bool request_window_open,
+    bool sync_blocks_and_headers_from_peer,
+    bool limited_peer,
+    bool initial_block_download,
+    size_t blocks_in_flight,
+    size_t max_blocks_in_flight)
+{
+    return can_serve_blocks && peer_is_eligible && request_window_open &&
+        ((sync_blocks_and_headers_from_peer && !limited_peer) ||
+         !initial_block_download) &&
+        blocks_in_flight < max_blocks_in_flight;
+}
+
+struct MatMulPreferredDownloadReconcileResult {
+    bool removed{false};
+    bool counter_inconsistent{false};
+};
+
+/** Reconcile VERSION-time preferred-download state with the current dynamic
+ * MatMul consensus-tier requirement. A non-positive aggregate counter is
+ * clamped for the caller to recompute from peer state under cs_main. */
+constexpr MatMulPreferredDownloadReconcileResult
+ReconcileMatMulPreferredDownloadForSync(
+    bool& preferred_download,
+    int& preferred_download_count,
+    bool peer_is_eligible)
+{
+    if (!preferred_download || peer_is_eligible) return {};
+    preferred_download = false;
+    if (preferred_download_count > 0) {
+        --preferred_download_count;
+        return {.removed = true};
+    }
+    preferred_download_count = 0;
+    return {.removed = true, .counter_inconsistent = true};
+}
+
 struct CNodeStateStats {
     int nSyncHeight = -1;
     int nCommonHeight = -1;
@@ -94,6 +137,13 @@ struct CNodeStateStats {
     std::chrono::seconds time_offset{0};
     NodeSeconds m_last_block_announcement;
     int m_misbehavior_score{0};
+    /** Internal synchronization-selection snapshots used by regression tests. */
+    bool m_preferred_download{false};
+    int m_total_preferred_download_peer_count{0};
+    bool m_headers_sync_started{false};
+    int m_total_headers_sync_peer_count{0};
+    bool m_chain_sync_protected{false};
+    int m_total_chain_sync_protected_peer_count{0};
 };
 
 struct PeerManagerInfo {

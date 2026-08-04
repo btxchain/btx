@@ -957,6 +957,8 @@ private:
     arith_uint256 GetAntiDoSWorkThreshold();
     /** Whether this node should prioritize MatMul consensus-tier peers for block sync. */
     bool RequireMatMulConsensusPeersForSync() const;
+    /** Apply the current activation-aware MatMul sync tier to one peer. */
+    bool IsPeerEligibleForMatMulSync(const CNode& node, const Peer& peer) const;
     /** Deal with state tracking and headers sync for peers that send
      * non-connecting headers (this can happen due to BIP 130 headers
      * announcements for blocks interacting with the 2hr (MAX_FUTURE_BLOCK_TIME) rule). */
@@ -997,7 +999,8 @@ private:
      */
     bool TryLowWorkHeadersSync(Peer& peer, CNode& pfrom,
                                   const CBlockIndex* chain_start_header,
-                                  std::vector<CBlockHeader>& headers)
+                                  std::vector<CBlockHeader>& headers,
+                                  bool peer_sync_eligible)
         EXCLUSIVE_LOCKS_REQUIRED(!peer.m_headers_sync_mutex, !m_peer_mutex, !m_headers_presync_mutex, g_msgproc_mutex);
 
     /** Return true if the given header is an ancestor of
@@ -2827,6 +2830,14 @@ bool PeerManagerImpl::RequireMatMulConsensusPeersForSync() const
     return consensus.IsMatMulRCActive(height);
 }
 
+bool PeerManagerImpl::IsPeerEligibleForMatMulSync(
+    const CNode& node, const Peer& peer) const
+{
+    return IsMatMulPeerEligibleForSync(
+        RequireMatMulConsensusPeersForSync(), peer.m_their_services,
+        node.HasPermission(NetPermissionFlags::NoBan));
+}
+
 ServiceFlags PeerManagerImpl::GetDesirableServiceFlags(ServiceFlags services) const
 {
     const bool require_matmul_consensus = RequireMatMulConsensusPeersForSync();
@@ -2882,6 +2893,13 @@ bool PeerManagerImpl::GetNodeStateStats(NodeId nodeid, CNodeStateStats& stats) c
                 stats.vHeightInFlight.push_back(queue.pindex->nHeight);
         }
         stats.m_last_block_announcement = NodeSeconds{std::chrono::seconds{state->m_last_block_announcement}};
+        stats.m_preferred_download = state->fPreferredDownload;
+        stats.m_total_preferred_download_peer_count = m_num_preferred_download_peers;
+        stats.m_headers_sync_started = state->fSyncStarted;
+        stats.m_total_headers_sync_peer_count = nSyncStarted;
+        stats.m_chain_sync_protected = state->m_chain_sync.m_protect;
+        stats.m_total_chain_sync_protected_peer_count =
+            m_outbound_peers_with_protect_from_disconnect;
     }
 
     PeerRef peer = GetPeerRef(nodeid);
@@ -4603,10 +4621,10 @@ bool PeerManagerImpl::IsContinuationOfLowWorkHeadersSync(Peer& peer, CNode& pfro
             if (!locator.vHave.empty()) {
                 // It should be impossible for the getheaders request to fail,
                 // because we just cleared the last getheaders timestamp.
-                bool sent_getheaders = MaybeSendGetHeaders(pfrom, locator, peer);
-                Assume(sent_getheaders);
-                LogDebug(BCLog::NET, "more getheaders (from %s) to peer=%d\n",
-                    locator.vHave.front().ToString(), pfrom.GetId());
+                if (MaybeSendGetHeaders(pfrom, locator, peer)) {
+                    LogDebug(BCLog::NET, "more getheaders (from %s) to peer=%d\n",
+                        locator.vHave.front().ToString(), pfrom.GetId());
+                }
             }
         }
 
@@ -4670,7 +4688,9 @@ bool PeerManagerImpl::IsContinuationOfLowWorkHeadersSync(Peer& peer, CNode& pfro
     return false;
 }
 
-bool PeerManagerImpl::TryLowWorkHeadersSync(Peer& peer, CNode& pfrom, const CBlockIndex* chain_start_header, std::vector<CBlockHeader>& headers)
+bool PeerManagerImpl::TryLowWorkHeadersSync(
+    Peer& peer, CNode& pfrom, const CBlockIndex* chain_start_header,
+    std::vector<CBlockHeader>& headers, bool peer_sync_eligible)
 {
     const Consensus::Params& consensus_params = m_chainparams.GetConsensus();
     const auto claimed_work = CalculateClaimedHeadersWork(*chain_start_header, headers, consensus_params);
@@ -4694,7 +4714,7 @@ bool PeerManagerImpl::TryLowWorkHeadersSync(Peer& peer, CNode& pfrom, const CBlo
         // Only try to sync with this peer if their headers message was full;
         // otherwise they don't have more headers after this so no point in
         // trying to sync their too-little-work chain.
-        if (headers.size() == m_opts.max_headers_result) {
+        if (headers.size() == m_opts.max_headers_result && peer_sync_eligible) {
             // Note: we could advance to the last header in this set that is
             // known to us, rather than starting at the first header (which we
             // may already have); however this is unlikely to matter much since
@@ -4739,6 +4759,8 @@ bool PeerManagerImpl::IsAncestorOfBestHeaderOrTip(const CBlockIndex* header)
 
 bool PeerManagerImpl::MaybeSendGetHeaders(CNode& pfrom, const CBlockLocator& locator, Peer& peer)
 {
+    if (!IsPeerEligibleForMatMulSync(pfrom, peer)) return false;
+
     const auto current_time = NodeClock::now();
 
     // Only allow a new getheaders message to go out if we don't have a recent
@@ -4759,6 +4781,8 @@ bool PeerManagerImpl::MaybeSendGetHeaders(CNode& pfrom, const CBlockLocator& loc
 void PeerManagerImpl::HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, const CBlockIndex& last_header)
 {
     LOCK(cs_main);
+    if (!IsPeerEligibleForMatMulSync(pfrom, peer)) return;
+
     CNodeState *nodestate = State(pfrom.GetId());
 
     // WP-8 site 1: gate the direct fetch on TRUST-ADJUSTED work (== nChainWork
@@ -5582,6 +5606,7 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
                                             bool via_compact_block)
 {
     size_t nCount = headers.size();
+    const bool peer_sync_eligible{IsPeerEligibleForMatMulSync(pfrom, peer)};
 
     if (nCount == 0) {
         // Nothing interesting. Stop asking this peers for more headers.
@@ -5625,8 +5650,14 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
     bool have_headers_sync = false;
     {
         LOCK(peer.m_headers_sync_mutex);
-
-        already_validated_work = IsContinuationOfLowWorkHeadersSync(peer, pfrom, headers);
+        if (!peer_sync_eligible && peer.m_headers_sync) {
+            peer.m_headers_sync.reset(nullptr);
+            peer.m_last_getheaders_timestamp = {};
+            LOCK(m_headers_presync_mutex);
+            m_headers_presync_stats.erase(pfrom.GetId());
+        } else {
+            already_validated_work = IsContinuationOfLowWorkHeadersSync(peer, pfrom, headers);
+        }
 
         // The headers we passed in may have been:
         // - untouched, perhaps if no headers-sync was in progress, or some
@@ -5691,8 +5722,8 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
     // At this point, the headers connect to something in our block index.
     // Do anti-DoS checks to determine if we should process or store for later
     // processing.
-    if (!already_validated_work && TryLowWorkHeadersSync(peer, pfrom,
-                chain_start_header, headers)) {
+    if (!already_validated_work && TryLowWorkHeadersSync(
+            peer, pfrom, chain_start_header, headers, peer_sync_eligible)) {
         // If we successfully started a low-work headers sync, then there
         // should be no headers to process any further.
         Assume(headers.empty());
@@ -7990,12 +8021,14 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             // use if we turned on sync with all peers).
             CNodeState& state{*Assert(State(pfrom.GetId()))};
             if (state.fSyncStarted || (!peer->m_inv_triggered_getheaders_before_sync && *best_block != m_last_block_inv_triggering_headers_sync)) {
-                if (MaybeSendGetHeaders(pfrom, GetLocator(m_chainman.m_best_header), *peer)) {
+                const bool sent_getheaders{
+                    MaybeSendGetHeaders(pfrom, GetLocator(m_chainman.m_best_header), *peer)};
+                if (sent_getheaders) {
                     LogDebug(BCLog::NET, "getheaders (%d) %s to peer=%d\n",
                             m_chainman.m_best_header->nHeight, best_block->ToString(),
                             pfrom.GetId());
                 }
-                if (!state.fSyncStarted) {
+                if (sent_getheaders && !state.fSyncStarted) {
                     peer->m_inv_triggered_getheaders_before_sync = true;
                     // Update the last block hash that triggered a new headers
                     // sync, so that we don't turn on headers sync with more
@@ -8654,6 +8687,15 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             return;
         }
 
+        // An ordinary peer connected before the RC tier became mandatory may
+        // still announce compact blocks, but it must not allocate compact/full
+        // block download work after the boundary. Preserve the header signal.
+        if (!IsPeerEligibleForMatMulSync(pfrom, *peer)) {
+            return ProcessHeadersMessage(
+                pfrom, *peer, {cmpctblock.header},
+                /*via_compact_block=*/true);
+        }
+
         bool received_new_header = false;
         const auto blockhash = cmpctblock.header.GetHash();
         const Consensus::Params& consensus_params = m_chainparams.GetConsensus();
@@ -8745,6 +8787,13 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             BeginMatMulAuthenticatedRelayObservation(
                 *pindex, is_ibd);
         }
+
+        // A first-RC header does not by itself change global sync-tier policy:
+        // unauthenticated MatMul headers intentionally cannot rotate peers.
+        // The announcing ordinary peer may provide that boundary block, which
+        // is accepted only after local ExactReplay authenticates it. Once the
+        // active tip crosses RC, the entry gate above prevents further compact
+        // or full-block download allocation to ordinary peers.
 
         // Compact blocks do not carry MatMul Freivalds product payloads.
         // If payloads are consensus-required for this header, fetch the full
@@ -11027,24 +11076,71 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
         const bool consensus_ok = IsMatMulPeerEligibleForSync(
             require_matmul_consensus, peer->m_their_services,
             pto->HasPermission(NetPermissionFlags::NoBan));
-        if (state.fPreferredDownload && !consensus_ok) {
+        const auto preferred_reconcile{
+            ReconcileMatMulPreferredDownloadForSync(
+                state.fPreferredDownload,
+                m_num_preferred_download_peers,
+                consensus_ok)};
+        if (preferred_reconcile.removed) {
             // VERSION-time preference predates the activation boundary. Keep
             // the stored state and aggregate counter consistent as soon as
             // this peer is reconsidered; subsequent timeout logic must not
             // count an ineligible pre-activation peer as an alternative.
-            state.fPreferredDownload = false;
-            // Saturating, not asserting. The invariant
-            // (m_num_preferred_download_peers == sum of fPreferredDownload) is
-            // maintained across three sites on two threads, and `assert` stays
-            // live in release builds here, so asserting it on a message-driven
-            // path turns any future divergence -- a services snapshot skew, a
-            // new fPreferredDownload writer, a runtime permission change --
-            // directly into a remotely triggerable abort. Degrade instead.
-            if (m_num_preferred_download_peers > 0) {
-                --m_num_preferred_download_peers;
+            const int adjusted_count{m_num_preferred_download_peers};
+            int recomputed_count{0};
+            for (const auto& entry : m_node_states) {
+                recomputed_count += entry.second.fPreferredDownload;
+            }
+            m_num_preferred_download_peers = recomputed_count;
+            if (preferred_reconcile.counter_inconsistent ||
+                adjusted_count != recomputed_count) {
+                LogPrintf("Warning: preferred-download peer accounting inconsistency "
+                          "for peer=%d; adjusted=%d recomputed=%d\n", pto->GetId(),
+                          adjusted_count, recomputed_count);
+            }
+        }
+        if (!consensus_ok && state.fSyncStarted) {
+            // A peer selected before activation must also relinquish the
+            // initial-header-sync slot. Otherwise an ineligible peer can keep
+            // the sole slot indefinitely even after losing preferred status.
+            state.fSyncStarted = false;
+            peer->m_headers_sync_timeout = 0us;
+            const bool counter_inconsistent{nSyncStarted <= 0};
+            if (!counter_inconsistent) {
+                --nSyncStarted;
             } else {
-                LogPrintf("Warning: preferred-download peer accounting underflow "
-                          "for peer=%d; counter already zero\n", pto->GetId());
+                nSyncStarted = 0;
+            }
+            const int adjusted_count{nSyncStarted};
+            int recomputed_count{0};
+            for (const auto& entry : m_node_states) {
+                recomputed_count += entry.second.fSyncStarted;
+            }
+            nSyncStarted = recomputed_count;
+            if (counter_inconsistent || adjusted_count != recomputed_count) {
+                LogPrintf("Warning: header-sync peer accounting inconsistency "
+                          "for peer=%d; adjusted=%d recomputed=%d\n", pto->GetId(),
+                          adjusted_count, recomputed_count);
+            }
+        }
+        if (!consensus_ok) {
+            state.m_chain_sync.m_timeout = 0s;
+            state.m_chain_sync.m_work_header = nullptr;
+            state.m_chain_sync.m_sent_getheaders = false;
+            if (state.m_chain_sync.m_protect) {
+                state.m_chain_sync.m_protect = false;
+                int recomputed_count{0};
+                for (const auto& entry : m_node_states) {
+                    recomputed_count += entry.second.m_chain_sync.m_protect;
+                }
+                m_outbound_peers_with_protect_from_disconnect = recomputed_count;
+            }
+            if (pto->IsOutboundOrBlockRelayConn() &&
+                !pto->HasPermission(NetPermissionFlags::NoBan)) {
+                LogPrintf("MATMUL: rotating ineligible pre-activation outbound "
+                          "peer=%d for a consensus-tier replacement\n", pto->GetId());
+                pto->fDisconnect = true;
+                return true;
             }
         }
         if (state.fPreferredDownload && consensus_ok) {
@@ -11073,7 +11169,7 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
             }
         }
 
-        if (!state.fSyncStarted && CanServeBlocks(*peer) && !m_chainman.m_blockman.LoadingBlocks()) {
+        if (!state.fSyncStarted && consensus_ok && CanServeBlocks(*peer) && !m_chainman.m_blockman.LoadingBlocks()) {
             // Only actively request headers from a single peer, unless we're close to today.
             if ((nSyncStarted == 0 && sync_blocks_and_headers_from_peer) || m_chainman.m_best_header->Time() > NodeClock::now() - 24h) {
                 const CBlockIndex* pindexStart = m_chainman.m_best_header;
@@ -11522,7 +11618,14 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
         // Message: getdata (blocks)
         //
         std::vector<CInv> vGetData;
-        if (CanServeBlocks(*peer) && ((sync_blocks_and_headers_from_peer && !IsLimitedPeer(*peer)) || !m_chainman.IsInitialBlockDownload()) && state.vBlocksInFlight.size() < MAX_BLOCKS_IN_TRANSIT_PER_PEER) {
+        const bool should_request_blocks_from_peer{
+            CanServeBlocks(*peer) && ShouldRequestBlocksFromMatMulPeer(
+                /*can_serve_blocks=*/true, consensus_ok,
+                /*request_window_open=*/true,
+                sync_blocks_and_headers_from_peer, IsLimitedPeer(*peer),
+                m_chainman.IsInitialBlockDownload(), state.vBlocksInFlight.size(),
+                MAX_BLOCKS_IN_TRANSIT_PER_PEER)};
+        if (should_request_blocks_from_peer) {
             std::vector<const CBlockIndex*> vToDownload;
             NodeId staller = -1;
             auto get_inflight_budget = [&state]() {
