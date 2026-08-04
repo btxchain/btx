@@ -14,12 +14,12 @@ defined in
 ## Current MatMul v4.7 candidate status: NO-GO
 
 The current candidate source is activation-armed: the mainnet Epoch-A v4,
-BMX4C, and RC heights are atomically set to `182600`; the RC ASERT ratio is
+BMX4C, and RC heights are atomically set to `185000`; the RC ASERT ratio is
 `6931159304/1`; and both public ratification records are `true`. These are
 candidate source values, not evidence that the release is ready or that the
 currently deployed network has activated them.
 
-The ASERT ratio is a **ratified conservative policy floor**, not a reproduced
+The ASERT ratio is a **ratified policy coefficient**, not a reproduced
 measurement. The first assembled schema-4 corpus
 (`doc/evidence/epoch-a-asert-schema4-cuda-2026-08-04`) derives `4007014530` on
 the CUDA launch cohort at the implementation freeze; the installed value is
@@ -27,11 +27,13 @@ the CUDA launch cohort at the implementation freeze; the installed value is
 stalled blocks at the fork, too high yields temporarily fast blocks that ASERT
 corrects. See the rationale in `src/kernel/chainparams.cpp`.
 
-Deployment remains **NO-GO**. The CUDA+Metal seal committed at PR #97 commit
-`df075c5184` is valid for its exact PR-97-only freeze: both providers reproduced
-the frozen headers and digests under the hardened provenance checks. It is not
-an exact-final seal for later build-relevant PR changes or for the combined
-v0.33.2 source tree. Before release, that exact combined tree must close the
+Deployment remains **NO-GO**. The CUDA+Metal corpus measured from PR #97 freeze
+`2174cdedb0` is internally coherent: both providers reproduced the frozen
+headers and digests under the hardened comparator. The later `cebb14499f`
+test-fixture commit is outside the repository seal verifier's deliberately
+strict freeze-to-seal ordering, so current-head strict provenance remains red.
+It is also not an exact-final seal for the combined v0.33.2 source tree. Before
+release, that exact combined tree must close the
 revision-bound CUDA+Metal corpus, provider-bound schema-4 ASERT and
 complete-lifecycle calibration, production strict-device trusted-mirror
 rehearsal, and full unit and functional-suite closeout. The review must also

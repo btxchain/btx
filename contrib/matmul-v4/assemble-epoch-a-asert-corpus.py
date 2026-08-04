@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Assemble exact-build CUDA+Metal Epoch-A ASERT calibration evidence."""
+"""Assemble exact-build Epoch-A ASERT launch-cohort calibration evidence."""
 
 from __future__ import annotations
 
@@ -310,7 +310,7 @@ def merge_rigs(
     expected_fingerprint: str, safety_margin_bps: int,
     coefficient_quantum: int,
 ) -> dict[str, Any]:
-    """Revalidate exactly one CUDA and one Metal rig and emit derive input."""
+    """Revalidate exactly one rig per calibration provider and emit input."""
     # Bound to the calibration policy rather than a literal 2, so the required
     # cohort is stated in exactly one place (DERIVE.REQUIRED_PROVIDERS) and this
     # check cannot silently disagree with the one below that validates which
@@ -332,7 +332,9 @@ def merge_rigs(
             raise AssemblyError(f"rigs[{index}] is not a canonical ASERT rig")
         provider = rig.get("provider_family")
         if provider not in DERIVE.REQUIRED_PROVIDERS or provider in canonical:
-            raise AssemblyError("merge requires exactly one CUDA and one Metal rig")
+            raise AssemblyError(
+                "merge requires exactly one rig for each required provider"
+            )
         rebuilt = assemble_rig(
             provider,
             rig.get("mixed_mode_samples", []),
@@ -344,7 +346,9 @@ def merge_rigs(
             raise AssemblyError(f"{provider} rig is not canonical sanitized output")
         canonical[provider] = rebuilt
     if set(canonical) != set(DERIVE.REQUIRED_PROVIDERS):
-        raise AssemblyError("merge requires exactly one CUDA and one Metal rig")
+        raise AssemblyError(
+            "merge requires exactly one rig for each required provider"
+        )
 
     ordered = [canonical[provider] for provider in DERIVE.REQUIRED_PROVIDERS]
     seed_sets = {
@@ -352,7 +356,9 @@ def merge_rigs(
         for rig in ordered
     }
     if len(seed_sets) != 1:
-        raise AssemblyError("CUDA and Metal rigs do not share the same parent seed set")
+        raise AssemblyError(
+            "required-provider rigs do not share the same parent seed set"
+        )
     nonce_sets = {
         tuple(sorted(
             header["header_nonce"]
@@ -362,7 +368,9 @@ def merge_rigs(
         for rig in ordered
     }
     if len(nonce_sets) != 1:
-        raise AssemblyError("CUDA and Metal rigs do not share the same RC nonce set")
+        raise AssemblyError(
+            "required-provider rigs do not share the same RC nonce set"
+        )
     digest_maps = {
         tuple(sorted(
             (header["header_nonce"], header["exact_replay_digest"])
@@ -373,7 +381,7 @@ def merge_rigs(
     }
     if len(digest_maps) != 1:
         raise AssemblyError(
-            "CUDA and Metal rigs do not share byte-identical RC digests"
+            "required-provider rigs do not share byte-identical RC digests"
         )
 
     root = {
@@ -431,7 +439,9 @@ def main() -> int:
     rig_parser.add_argument("--rc-artifact", action="append", type=Path, required=True)
     rig_parser.add_argument("--output", type=Path, required=True)
 
-    merge_parser = subparsers.add_parser("merge", help="merge exact CUDA+Metal rigs")
+    merge_parser = subparsers.add_parser(
+        "merge", help="merge the exact calibration-provider cohort"
+    )
     merge_parser.add_argument("--source-revision", required=True)
     merge_parser.add_argument(
         "--safety-margin-bps", type=DERIVE.parse_uint64, required=True,

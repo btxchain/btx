@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Derive Epoch-A ASERT from exact-build, strict CUDA and Metal evidence."""
+"""Derive Epoch-A ASERT from the exact-build strict launch-miner cohort."""
 
 from __future__ import annotations
 
