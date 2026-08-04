@@ -2340,6 +2340,337 @@ BOOST_AUTO_TEST_CASE(redeemmatmulserviceproofs_marks_duplicate_entry_already_red
     BOOST_CHECK(!results[1].get_obj().find_value("redeemable").get_bool());
 }
 
+BOOST_AUTO_TEST_CASE(pre_v4_service_challenge_omits_and_rejects_added_encoding_profile)
+{
+    const auto service = CallRPC(
+        "getmatmulservicechallenge",
+        GetMatMulServiceChallengeParams(
+            "rate_limit", "legacy:/v1/solve", "user:legacy@example.com",
+            0.001, 300, 0.0, 0.0, "fixed", 24, 0.001, 0.001)).get_obj();
+    const auto matmul =
+        service.find_value("challenge").get_obj().find_value("matmul").get_obj();
+    BOOST_CHECK(matmul.find_value("encoding_profile").isNull());
+
+    UniValue verify_params{UniValue::VARR};
+    verify_params.push_back(service);
+    verify_params.push_back("0000000000000000");
+    verify_params.push_back(std::string(64, '0'));
+    const auto ordinary_invalid =
+        CallRPC("verifymatmulserviceproof", std::move(verify_params)).get_obj();
+    BOOST_CHECK_EQUAL(ordinary_invalid.find_value("reason").get_str(), "invalid_proof");
+
+    std::string added_json = service.write();
+    const std::string matmul_marker{"\"matmul\":{"};
+    const size_t matmul_pos = added_json.find(matmul_marker);
+    BOOST_REQUIRE(matmul_pos != std::string::npos);
+    added_json.insert(
+        matmul_pos + matmul_marker.size(),
+        "\"encoding_profile\":\"ENC-S8\",");
+    UniValue added;
+    BOOST_REQUIRE(added.read(added_json));
+
+    UniValue added_params{UniValue::VARR};
+    added_params.push_back(added);
+    added_params.push_back("0000000000000000");
+    added_params.push_back(std::string(64, '0'));
+    const auto rejected =
+        CallRPC("verifymatmulserviceproof", std::move(added_params)).get_obj();
+    BOOST_CHECK(!rejected.find_value("valid").get_bool());
+    BOOST_CHECK_EQUAL(rejected.find_value("reason").get_str(), "challenge_mismatch");
+    BOOST_CHECK_EQUAL(
+        rejected.find_value("mismatch_field").get_str(),
+        "challenge.matmul.encoding_profile");
+}
+
+BOOST_AUTO_TEST_SUITE_END()
+
+namespace {
+
+class MatMulLTServiceTestingSetup : public TestingSetup {
+public:
+    static TestOpts BuildOpts()
+    {
+        TestOpts opts;
+        opts.extra_args = {
+            "-test=matmulstrict",
+            "-regtestmatmulv4height=0",
+            "-regtestmatmulv4dimension=128",
+            "-regtestbmx4cheight=0",
+            "-regtestdrltheight=0",
+            "-regtestmatmulltsealaspow=0",
+        };
+        return opts;
+    }
+
+    MatMulLTServiceTestingSetup()
+        : TestingSetup{ChainType::REGTEST, BuildOpts()}
+    {
+        m_node.mining = interfaces::MakeMining(m_node);
+    }
+
+    UniValue CallRPC(const std::string& method, UniValue params)
+    {
+        JSONRPCRequest request;
+        request.context = &m_node;
+        request.strMethod = method;
+        request.params = std::move(params);
+        if (RPCIsInWarmup(nullptr)) SetRPCWarmupFinished();
+        try {
+            return tableRPC.execute(request);
+        } catch (const UniValue& obj_error) {
+            throw std::runtime_error{obj_error.find_value("message").get_str()};
+        }
+    }
+};
+
+class MatMulRCServiceTestingSetup : public TestingSetup {
+public:
+    static TestOpts BuildOpts()
+    {
+        TestOpts opts;
+        opts.extra_args = {
+            "-test=matmulstrict",
+            "-regtestmatmulv4height=0",
+            "-regtestmatmulv4dimension=128",
+            "-regtestbmx4cheight=0",
+            "-regtestdrltheight=2147483647",
+            "-regtestmatmulltsealaspow=0",
+            "-regtestrcheight=0",
+            "-regtestrccoupledheight=2147483647",
+            "-regtestrctoydims=1",
+        };
+        return opts;
+    }
+
+    MatMulRCServiceTestingSetup()
+        : TestingSetup{ChainType::REGTEST, BuildOpts()}
+    {
+        m_node.mining = interfaces::MakeMining(m_node);
+    }
+
+    UniValue CallRPC(const std::string& method, UniValue params)
+    {
+        JSONRPCRequest request;
+        request.context = &m_node;
+        request.strMethod = method;
+        request.params = std::move(params);
+        if (RPCIsInWarmup(nullptr)) SetRPCWarmupFinished();
+        try {
+            return tableRPC.execute(request);
+        } catch (const UniValue& obj_error) {
+            throw std::runtime_error{obj_error.find_value("message").get_str()};
+        }
+    }
+};
+
+class MatMulRCCoupledServiceTestingSetup : public TestingSetup {
+public:
+    static TestOpts BuildOpts()
+    {
+        TestOpts opts;
+        opts.extra_args = {
+            "-test=matmulstrict",
+            "-regtestmatmulv4height=0",
+            "-regtestmatmulv4dimension=128",
+            "-regtestbmx4cheight=0",
+            "-regtestdrltheight=2147483647",
+            "-regtestmatmulltsealaspow=0",
+            "-regtestrcheight=0",
+            "-regtestrccoupledheight=0",
+            "-regtestrctoydims=1",
+            "-regtestrccoupledtoydims=1",
+        };
+        return opts;
+    }
+
+    MatMulRCCoupledServiceTestingSetup()
+        : TestingSetup{ChainType::REGTEST, BuildOpts()}
+    {
+        m_node.mining = interfaces::MakeMining(m_node);
+    }
+
+    UniValue CallRPC(const std::string& method, UniValue params)
+    {
+        JSONRPCRequest request;
+        request.context = &m_node;
+        request.strMethod = method;
+        request.params = std::move(params);
+        if (RPCIsInWarmup(nullptr)) SetRPCWarmupFinished();
+        try {
+            return tableRPC.execute(request);
+        } catch (const UniValue& obj_error) {
+            throw std::runtime_error{obj_error.find_value("message").get_str()};
+        }
+    }
+};
+
+class MatMulLTSealServiceTestingSetup : public TestingSetup {
+public:
+    static TestOpts BuildOpts()
+    {
+        TestOpts opts;
+        opts.extra_args = {
+            "-test=matmulstrict",
+            "-regtestmatmulv4height=0",
+            "-regtestmatmulv4dimension=128",
+            "-regtestbmx4cheight=0",
+            "-regtestdrltheight=0",
+            "-regtestmatmulltsealaspow=1",
+        };
+        return opts;
+    }
+
+    MatMulLTSealServiceTestingSetup()
+        : TestingSetup{ChainType::REGTEST, BuildOpts()}
+    {
+        m_node.mining = interfaces::MakeMining(m_node);
+    }
+
+    UniValue CallRPC(const std::string& method, UniValue params)
+    {
+        JSONRPCRequest request;
+        request.context = &m_node;
+        request.strMethod = method;
+        request.params = std::move(params);
+        if (RPCIsInWarmup(nullptr)) SetRPCWarmupFinished();
+        try {
+            return tableRPC.execute(request);
+        } catch (const UniValue& obj_error) {
+            throw std::runtime_error{obj_error.find_value("message").get_str()};
+        }
+    }
+};
+
+UniValue MakeUnsupportedMatMulServiceChallengeSkeleton()
+{
+    UniValue binding{UniValue::VOBJ};
+    binding.pushKV("purpose", "rate_limit");
+    binding.pushKV("resource", "unsupported:/v1/solve");
+    binding.pushKV("subject", "user:unsupported@example.com");
+    binding.pushKV("salt", std::string(64, '1'));
+    binding.pushKV("anchor_height", 0);
+    binding.pushKV("anchor_hash", std::string(64, '0'));
+
+    UniValue service_profile{UniValue::VOBJ};
+    service_profile.pushKV("solve_time_target_s", 1.0);
+    service_profile.pushKV("validation_overhead_s", 0.0);
+    service_profile.pushKV("propagation_overhead_s", 0.0);
+
+    UniValue challenge_body{UniValue::VOBJ};
+    challenge_body.pushKV("header_context", UniValue{UniValue::VOBJ});
+    challenge_body.pushKV("matmul", UniValue{UniValue::VOBJ});
+    challenge_body.pushKV("service_profile", std::move(service_profile));
+
+    UniValue envelope{UniValue::VOBJ};
+    envelope.pushKV("kind", "matmul_service_challenge_v1");
+    envelope.pushKV("binding", std::move(binding));
+    envelope.pushKV("issued_at", 1);
+    envelope.pushKV("expires_at", 2);
+    envelope.pushKV("challenge", std::move(challenge_body));
+    return envelope;
+}
+
+template <typename Setup>
+void CheckUnsupportedProfileFailsClosed(Setup& setup, const std::string& profile_name)
+{
+    const auto matches_profile = [&](const std::exception& e) {
+        return RuntimeErrorContains(e, "do not support") &&
+            RuntimeErrorContains(e, profile_name);
+    };
+
+    BOOST_CHECK_EXCEPTION(
+        setup.CallRPC(
+            "getmatmulservicechallenge",
+            GetMatMulServiceChallengeParams(
+                "rate_limit", "unsupported:/v1/issue",
+                "user:unsupported@example.com", 1.0, 300, 0.0, 0.0)),
+        std::runtime_error,
+        matches_profile);
+
+    const UniValue skeleton = MakeUnsupportedMatMulServiceChallengeSkeleton();
+    BOOST_CHECK_EXCEPTION(
+        setup.CallRPC(
+            "solvematmulservicechallenge",
+            SolveMatMulServiceChallengeParams(skeleton, 1)),
+        std::runtime_error,
+        matches_profile);
+    BOOST_CHECK_EXCEPTION(
+        setup.CallRPC(
+            "verifymatmulserviceproof",
+            VerifyMatMulServiceProofParams(
+                skeleton, "0000000000000000", std::string(64, '0'))),
+        std::runtime_error,
+        matches_profile);
+}
+
+} // namespace
+
+BOOST_FIXTURE_TEST_SUITE(matmul_lt_service_tests, MatMulLTServiceTestingSetup)
+
+BOOST_AUTO_TEST_CASE(issue_solve_and_verify_use_lt_profile)
+{
+    const auto service = CallRPC(
+        "getmatmulservicechallenge",
+        GetMatMulServiceChallengeParams(
+            "rate_limit", "lt:/v1/solve", "user:lt@example.com",
+            0.001, 300, 0.0, 0.0, "fixed", 24, 0.001, 0.001)).get_obj();
+    const auto matmul =
+        service.find_value("challenge").get_obj().find_value("matmul").get_obj();
+    BOOST_CHECK_EQUAL(
+        matmul.find_value("encoding_profile").get_str(), "ENC-BMX4C-LT");
+    BOOST_CHECK_EQUAL(
+        matmul.find_value("b").getInt<uint64_t>(),
+        m_node.chainman->GetConsensus().nMatMulLTTranscriptBlockSize);
+
+    const auto solved = CallRPC(
+        "solvematmulservicechallenge",
+        SolveMatMulServiceChallengeParams(service, 256)).get_obj();
+    BOOST_REQUIRE(solved.find_value("solved").get_bool());
+    BOOST_REQUIRE(solved.find_value("matrix_c_data").isStr());
+
+    UniValue verify_params{UniValue::VARR};
+    verify_params.push_back(service);
+    verify_params.push_back(solved.find_value("nonce64_hex").get_str());
+    verify_params.push_back(solved.find_value("digest_hex").get_str());
+    verify_params.push_back(true);
+    verify_params.push_back(solved.find_value("matrix_c_data").get_str());
+    const auto verified =
+        CallRPC("verifymatmulserviceproof", std::move(verify_params)).get_obj();
+    BOOST_CHECK(verified.find_value("valid").get_bool());
+    BOOST_CHECK_EQUAL(
+        verified.find_value("proof").get_obj().find_value("encoding_profile").get_str(),
+        "ENC-BMX4C-LT");
+}
+
+BOOST_AUTO_TEST_SUITE_END()
+
+BOOST_FIXTURE_TEST_SUITE(matmul_rc_service_tests, MatMulRCServiceTestingSetup)
+
+BOOST_AUTO_TEST_CASE(issue_solve_and_verify_fail_closed)
+{
+    CheckUnsupportedProfileFailsClosed(*this, "ENC-RC");
+}
+
+BOOST_AUTO_TEST_SUITE_END()
+
+BOOST_FIXTURE_TEST_SUITE(
+    matmul_rc_coupled_service_tests,
+    MatMulRCCoupledServiceTestingSetup)
+
+BOOST_AUTO_TEST_CASE(issue_solve_and_verify_fail_closed)
+{
+    CheckUnsupportedProfileFailsClosed(*this, "ENC-RC-COUPLED");
+}
+
+BOOST_AUTO_TEST_SUITE_END()
+
+BOOST_FIXTURE_TEST_SUITE(matmul_lt_seal_service_tests, MatMulLTSealServiceTestingSetup)
+
+BOOST_AUTO_TEST_CASE(issue_solve_and_verify_fail_closed)
+{
+    CheckUnsupportedProfileFailsClosed(*this, "ENC-BMX4C-LT");
+}
+
 BOOST_AUTO_TEST_SUITE_END()
 
 namespace {
@@ -2442,25 +2773,55 @@ BOOST_AUTO_TEST_CASE(issue_solve_verify_and_profile_tamper)
         verified.find_value("proof").get_obj().find_value("encoding_profile").get_str(),
         "ENC-BMX4C");
 
-    std::string tampered_json = service.write();
-    const size_t profile_pos = tampered_json.find("\"encoding_profile\":\"ENC-BMX4C\"");
-    BOOST_REQUIRE(profile_pos != std::string::npos);
-    tampered_json.replace(profile_pos,
-                          std::string{"\"encoding_profile\":\"ENC-BMX4C\""}.size(),
-                          "\"encoding_profile\":\"ENC-S8\"");
-    UniValue tampered;
-    BOOST_REQUIRE(tampered.read(tampered_json));
+    const auto verify_profile_variant = [&](const std::string& replacement) {
+        std::string tampered_json = service.write();
+        const std::string profile_field{
+            "\"encoding_profile\":\"ENC-BMX4C\""};
+        const size_t profile_pos = tampered_json.find(profile_field);
+        BOOST_REQUIRE(profile_pos != std::string::npos);
+        tampered_json.replace(profile_pos, profile_field.size(), replacement);
+        UniValue tampered;
+        BOOST_REQUIRE(tampered.read(tampered_json));
 
-    UniValue tampered_params{UniValue::VARR};
-    tampered_params.push_back(tampered);
-    tampered_params.push_back(solved.find_value("nonce64_hex").get_str());
-    tampered_params.push_back(solved.find_value("digest_hex").get_str());
-    tampered_params.push_back(true);
-    tampered_params.push_back(solved.find_value("matrix_c_data").get_str());
-    const auto rejected = CallRPC("verifymatmulserviceproof", std::move(tampered_params)).get_obj();
-    BOOST_CHECK(!rejected.find_value("valid").get_bool());
-    BOOST_CHECK_EQUAL(rejected.find_value("reason").get_str(), "challenge_mismatch");
-    BOOST_CHECK_EQUAL(rejected.find_value("mismatch_field").get_str(), "challenge.matmul.encoding_profile");
+        UniValue tampered_params{UniValue::VARR};
+        tampered_params.push_back(tampered);
+        tampered_params.push_back(solved.find_value("nonce64_hex").get_str());
+        tampered_params.push_back(solved.find_value("digest_hex").get_str());
+        tampered_params.push_back(true);
+        tampered_params.push_back(solved.find_value("matrix_c_data").get_str());
+        const auto rejected =
+            CallRPC("verifymatmulserviceproof", std::move(tampered_params)).get_obj();
+        BOOST_CHECK(!rejected.find_value("valid").get_bool());
+        BOOST_CHECK_EQUAL(rejected.find_value("reason").get_str(), "challenge_mismatch");
+        BOOST_CHECK_EQUAL(
+            rejected.find_value("mismatch_field").get_str(),
+            "challenge.matmul.encoding_profile");
+    };
+
+    verify_profile_variant("\"encoding_profile\":\"ENC-S8\"");
+    verify_profile_variant("\"encoding_profile\":17");
+    verify_profile_variant("\"encoding_profile\":null");
+
+    std::string missing_json = service.write();
+    const std::string profile_with_comma{
+        ",\"encoding_profile\":\"ENC-BMX4C\""};
+    const size_t missing_pos = missing_json.find(profile_with_comma);
+    BOOST_REQUIRE(missing_pos != std::string::npos);
+    missing_json.erase(missing_pos, profile_with_comma.size());
+    UniValue missing;
+    BOOST_REQUIRE(missing.read(missing_json));
+    UniValue missing_params{UniValue::VARR};
+    missing_params.push_back(missing);
+    missing_params.push_back(solved.find_value("nonce64_hex").get_str());
+    missing_params.push_back(solved.find_value("digest_hex").get_str());
+    missing_params.push_back(true);
+    missing_params.push_back(solved.find_value("matrix_c_data").get_str());
+    const auto missing_rejected =
+        CallRPC("verifymatmulserviceproof", std::move(missing_params)).get_obj();
+    BOOST_CHECK_EQUAL(missing_rejected.find_value("reason").get_str(), "challenge_mismatch");
+    BOOST_CHECK_EQUAL(
+        missing_rejected.find_value("mismatch_field").get_str(),
+        "challenge.matmul.encoding_profile");
 }
 
 BOOST_AUTO_TEST_SUITE_END()

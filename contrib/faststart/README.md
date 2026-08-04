@@ -353,6 +353,14 @@ High-volume verification services can keep proof checking stateless by passing
 `verifymatmulserviceproofs`, which skips the local/shared issued-challenge
 registry lookup and omits the local issuance/redeem fields from the result.
 
+Service challenges follow the encoding profile at their anchored proof height.
+The RPC supports the carried-sketch ENC-S8, ENC-BMX4C, and Phase-A
+ENC-BMX4C-LT profiles. It fails closed for ENC-RC, ENC-RC-COUPLED, and LT
+seal-as-PoW rather than silently accepting a different workload or starting an
+unbudgeted ExactReplay. Operators at those profiles should use a separate
+admission mechanism until a budgeted, cheaply verifiable service-proof format
+is defined.
+
 Operators can watch `getdifficultyhealth` for
 `service_challenge_registry.status`, `healthy`, `path`, and `quarantine_path`.
 If a shared registry file is unreadable or on an unsupported version, the node
