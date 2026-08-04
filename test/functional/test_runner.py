@@ -606,8 +606,11 @@ BTX_BASE_SCRIPTS = [
     'mempool_package_limits.py',
 ]
 
-# Place EXTENDED_SCRIPTS first since it has the 3 longest running tests
-ALL_SCRIPTS = EXTENDED_SCRIPTS + BASE_SCRIPTS + BTX_BASE_SCRIPTS
+# Place EXTENDED_SCRIPTS first since it has the 3 longest running tests. The
+# BTX matrix intentionally overlaps upstream coverage, so preserve first-seen
+# ordering while ensuring --extended and explicit-name selection run each
+# exact test variant only once.
+ALL_SCRIPTS = list(dict.fromkeys(EXTENDED_SCRIPTS + BASE_SCRIPTS + BTX_BASE_SCRIPTS))
 
 NON_SCRIPTS = [
     # These are python files that live in the functional tests directory, but are not test scripts.
