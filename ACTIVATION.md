@@ -195,8 +195,11 @@ For the current Epoch-A decision, the blocking evidence is the complete set in
 the canonical roadmap §4: corrected cross-backend golden parity, at least 100
 continuous dimension-bound runs per required accelerator, bounded
 back-to-back/reorg behavior, admission-starvation resistance, faulted-device
-portable retry, final serialization/no-chainwork invariants, multi-day testnet
-soak, IBD/checkpoint disclosure, and an independently reviewed height change.
+recovery through an alternate qualified provider or operator restart, final
+serialization/no-chainwork invariants, multi-day testnet soak, IBD/checkpoint
+disclosure, and an independently reviewed height change. Portable replay
+remains an explicit pre-activation or diagnostic path, not an inline strict-
+device retry.
 The legacy B1–B6 and C sections below remain useful evidence provenance, but
 any conflicting workload/default recommendation is superseded.
 

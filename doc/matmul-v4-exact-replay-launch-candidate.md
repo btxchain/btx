@@ -36,8 +36,9 @@ disabled; Profile 1 and production dimensions selected; unfinished Stage-3
 proof authority and HeaderPoW off. The v4 and BMX4C ASERT ratios remain inert
 at `1/1`, while the RC branch owns one provisional one-time v3-to-Epoch-A
 calibration. The candidate coefficient and its realized target change are
-deliberately non-authorizing until they are re-derived from exact-final
-schema-2 CUDA+Metal measurements. The two L0 source flags are staged true for
+deliberately non-authorizing until they are re-derived from an exact-final
+schema-4 merged two-provider corpus assembled from schema-3 parent samples and
+schema-2 CUDA+Metal RC artifacts. The two L0 source flags are staged true for
 candidate testing, but the activation review must re-affirm them against that
 final evidence; the source flags alone do not constitute ratification or a
 merge decision.
