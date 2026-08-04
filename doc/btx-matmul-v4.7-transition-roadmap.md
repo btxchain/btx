@@ -188,7 +188,7 @@ from the exact-final-revision evidence still required.
   regtest peers, zero failures. This covers the restart/cache/IBD mechanics
   of gate 7 but explicitly does not claim gate 7 itself
   (`gate7_multi_day_multi_peer_claim = false` in its summary).
-- **Two-rig, two-vendor ASERT calibration**
+- **Historical two-rig, two-vendor ASERT calibration**
   (`asert-two-rig-calibration-2026-08-03`): both halves of the v3-vs-RC ratio
   measured on the same silicon on two vendors. It predates the strict
   schema-4 campaign envelope (schema-3 parent samples plus schema-2 raw RC
@@ -197,7 +197,9 @@ from the exact-final-revision evidence still required.
 **Still open before release-final activation:**
 
 - exact-final-revision CUDA+Metal corpus and manifest seal;
-- schema-4, zero-fallback ASERT rerun on both required providers;
+- schema-4, zero-fallback ASERT rerun on the reviewed CUDA launch-miner
+  calibration cohort (CUDA+Metal remain separately required for the
+  byte-identical production-golden gate);
 - full unit and functional suite closeout on the final tree;
 - production strict-device trusted-mirror rehearsal on the final tree;
 - a live-tip activation height with at least 96 hours of runway;
@@ -241,7 +243,8 @@ The pre-activation contract required:
 7. A multi-day testnet soak must cover block relay, competing branches,
    restarts, cache persistence, IBD boundaries, and upgrade behavior.
 8. Checkpoint and historical-sync trust assumptions must be disclosed.
-9. The atomic tuple, measured RC ASERT ratio, and explicit L0 source
+9. The atomic tuple, measured RC ASERT envelope, ratified policy coefficient,
+   and explicit L0 source
    authorization must receive a focused release/activation review within the
    combined 0.33.2 change, with an operator upgrade window and a pre-activation
    stop procedure. A partial tuple must fail construction.

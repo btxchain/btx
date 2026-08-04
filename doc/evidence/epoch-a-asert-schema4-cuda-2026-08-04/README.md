@@ -44,7 +44,7 @@ demands both families. Do not conflate the two.
 
 The installed `kRCEpochAAsertRescaleNum` is **6,931,159,304**, which is 1.730x
 this measured envelope. It is installed as a deliberately conservative ratified
-policy floor, not as a reproduction of this measurement, because:
+policy coefficient, not as a reproduction of this measurement, because:
 
 - the error is asymmetric. Too low risks slow or stalled blocks at the fork; too
   high yields temporarily fast blocks that ASERT corrects within an epoch;
@@ -58,9 +58,10 @@ policy floor, not as a reproduction of this measurement, because:
   historical and non-authorizing.
 
 This corpus therefore establishes a measured lower bound and binds it to exact
-binaries, revision, backend and raw samples. It does not by itself justify
-lowering the installed coefficient. Recalibrate if the representative launch
-cohort changes.
+binaries, revision, backend and raw samples. It neither reproduces nor, by
+itself, ratifies the installed override, and it is not bound to the final
+activation height/source tuple. Recalibrate and record the reviewed coefficient
+decision on the exact final tree if the representative launch cohort changes.
 
 ## Contents
 

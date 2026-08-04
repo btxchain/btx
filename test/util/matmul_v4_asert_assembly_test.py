@@ -341,6 +341,16 @@ class EpochAAsertAssemblyTest(unittest.TestCase):
             ),
             "one rig JSON object per required provider",
         )
+        metal = copy.deepcopy(cuda)
+        metal["provider_family"] = "metal"
+        self.assert_rejected(
+            lambda: MODULE.merge_rigs(
+                [cuda, metal], expected_revision=REVISION,
+                expected_fingerprint=FINGERPRINT,
+                **POLICY_KW,
+            ),
+            "one rig JSON object per required provider",
+        )
         with mock.patch.object(DERIVE, "REQUIRED_PROVIDERS", ("cuda", "metal")):
             self.assert_rejected(
                 lambda: MODULE.merge_rigs(
@@ -348,7 +358,7 @@ class EpochAAsertAssemblyTest(unittest.TestCase):
                     expected_fingerprint=FINGERPRINT,
                     **POLICY_KW,
                 ),
-                "exactly one CUDA and one Metal",
+                "exactly one rig for each required provider",
             )
 
 

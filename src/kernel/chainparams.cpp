@@ -91,8 +91,8 @@ static constexpr int32_t BTX_CONTENT_ELIMINATION_HEIGHT{std::numeric_limits<int3
 static constexpr int64_t kRCDatacenterAsertRescaleNum{16422};
 static constexpr int64_t kRCDatacenterAsertRescaleDen{1027};
 
-// EPOCH-A PROFILE-1 ONE-TIME ASERT COEFFICIENT — PROVISIONAL UNTIL THE
-// EXACT-FINAL-BINARY CUDA+METAL CAMPAIGN RECONFIRMS IT.
+// EPOCH-A PROFILE-1 ONE-TIME ASERT POLICY COEFFICIENT — RECONFIRM THE
+// LAUNCH-COHORT ENVELOPE ON THE EXACT FINAL BINARY BEFORE RELEASE.
 //
 // WHAT THIS NUMBER IS. It is the PRE-GATE NONCE-ATTEMPT-RATE RATIO
 //     C = N / M
@@ -133,7 +133,7 @@ static constexpr int64_t kRCDatacenterAsertRescaleDen{1027};
 // matmul_unified_activation_tests pins a fixed vector at the calibration nBits
 // asserting the realized k, so a future value of the wrong KIND fails a test
 // rather than the chain.
-// RATIFIED POLICY FLOOR, not a reproduced measurement. Say so plainly here,
+// RATIFIED POLICY COEFFICIENT, not a reproduced measurement. Say so plainly here,
 // because the previous comment implied this number came out of a campaign.
 //
 // The first assembled schema-4 corpus now exists:
@@ -157,7 +157,7 @@ static constexpr int64_t kRCDatacenterAsertRescaleDen{1027};
 //    historical and non-authorizing.
 //
 // So: the corpus establishes a measured lower bound and binds it to real
-// evidence; this constant remains a conservative ratified ceiling above it.
+// evidence; this separate ratified coefficient deliberately sits above it.
 // Recalibrate if the representative launch cohort changes.
 static constexpr int64_t kRCEpochAAsertRescaleNum{6931159304};
 static constexpr int64_t kRCEpochAAsertRescaleDen{1};
