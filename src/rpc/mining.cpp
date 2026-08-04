@@ -2659,6 +2659,7 @@ struct MatMulServiceChallengeContext {
     // matmul_v4::VerifySketch / ComputeDigestDispatched. Selected by the SAME
     // height-gated profile selector the consensus block path uses.
     bool is_bmx4c{false};
+    std::string encoding_profile;
     int32_t challenge_height{0};
     uint32_t v4_rounds{0};
     CBlockHeader header;
@@ -4740,6 +4741,10 @@ static MatMulServiceChallengeContext ParseMatMulServiceChallenge(
         ctx.is_v4 = consensus.IsMatMulV4Active(ctx.challenge_height);
         ctx.is_bmx4c = consensus.IsBMX4CActive(ctx.challenge_height);
         if (ctx.is_v4) {
+            ctx.encoding_profile = ResolveMatMulEncodingProfileName(
+                consensus, ctx.challenge_height);
+        }
+        if (ctx.is_v4) {
             ctx.n = static_cast<uint32_t>(consensus.nMatMulV4Dimension);
             ctx.b = static_cast<uint32_t>(matmul_v4::kTileB);
             ctx.r = static_cast<uint32_t>(consensus.nMatMulV4FreivaldsRounds);
@@ -4907,6 +4912,14 @@ static std::optional<std::string> GetMatMulServiceChallengeMismatch(
     if (ParseIntegralServiceField<uint64_t>(matmul.find_value("q"), "challenge.matmul.q") != expected_q) return "challenge.matmul.q";
     if (matmul.find_value("seed_a").get_str() != ctx.header.seed_a.GetHex()) return "challenge.matmul.seed_a";
     if (matmul.find_value("seed_b").get_str() != ctx.header.seed_b.GetHex()) return "challenge.matmul.seed_b";
+    const UniValue& encoding_profile = matmul.find_value("encoding_profile");
+    if (ctx.is_v4) {
+        if (!encoding_profile.isStr() || encoding_profile.get_str() != ctx.encoding_profile) {
+            return "challenge.matmul.encoding_profile";
+        }
+    } else if (!encoding_profile.isNull()) {
+        return "challenge.matmul.encoding_profile";
+    }
 
     const UniValue& service_profile = challenge.find_value("service_profile").get_obj();
     if (ParseNumericServiceField(service_profile.find_value("solve_time_target_s"), "challenge.service_profile.solve_time_target_s") != ctx.solve_time_target_s) return "challenge.service_profile.solve_time_target_s";
