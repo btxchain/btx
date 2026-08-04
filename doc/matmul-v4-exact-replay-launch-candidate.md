@@ -242,7 +242,7 @@ Current candidate status before a release-final height:
   artifact: not recorded in the committed activation evidence.
 - [ ] CUDA+Metal golden cohort reproduced byte-identically at the exact final
   clean code freeze and committed as the production golden manifest.
-- [ ] One-time RC ASERT calibration rerun as a schema-3 corpus assembled from
+- [ ] One-time RC ASERT calibration rerun as a schema-4 corpus assembled from
   schema-3 parent samples and schema-2 RC artifacts on the exact final clean
   binaries, with zero fallback on both vendors.
 - [x] The consensus selector is Profile 1, with a construction invariant and
@@ -252,6 +252,6 @@ Current candidate status before a release-final height:
   inert, and RC as the sole calibrated branch.
 
 Current verdict: **NO-GO for merge or activation while the revision-bound
-CUDA+Metal corpus, schema-3 ASERT rerun, full-suite closeout, and live-tip
+CUDA+Metal corpus, schema-4 ASERT rerun, full-suite closeout, and live-tip
 runway selection remain open.** Historical artifacts remain useful diagnostics
 but do not authorize the final source tree.

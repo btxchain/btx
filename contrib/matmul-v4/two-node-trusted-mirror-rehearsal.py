@@ -30,13 +30,14 @@ import atexit
 import argparse
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import evidence_source_identity as EVIDENCE_IDENTITY  # noqa: E402
@@ -68,6 +69,8 @@ ARCHIVE_BTXD_SHA256 = ""
 ARCHIVE_CLI_SHA256 = ""
 MIRROR_BTXD_SHA256 = ""
 MIRROR_CLI_SHA256 = ""
+REMOTE_ARCHIVE_NAME = re.compile(r"btx-trusted-archive\.[A-Za-z0-9]{6}")
+COMPRESSED_PUBKEY = re.compile(r"(?:02|03)[0-9a-fA-F]{64}")
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -204,6 +207,28 @@ def remote_sha256(path: str) -> str:
     return EVIDENCE_IDENTITY.require_hex(
         digest, EVIDENCE_IDENTITY.HEX64, "remote_binary_sha256"
     )
+
+
+def validate_remote_archive_dir(value: str) -> str:
+    """Accept only the exact private mktemp directory shape we requested."""
+    if not isinstance(value, str) or "\x00" in value or "\n" in value:
+        raise RuntimeError("remote mktemp returned an unsafe archive datadir")
+    path = PurePosixPath(value)
+    if (not path.is_absolute() or ".." in path.parts or
+            path.parent == PurePosixPath("/") or
+            REMOTE_ARCHIVE_NAME.fullmatch(path.name) is None):
+        raise RuntimeError("remote mktemp returned an unsafe archive datadir")
+    return str(path)
+
+
+def validate_signer_pubkey(value: str) -> str:
+    """Reject config injection before btxd performs full curve validation."""
+    value = value.strip()
+    if COMPRESSED_PUBKEY.fullmatch(value) is None:
+        raise RuntimeError(
+            "--signer-pub-file must contain one compressed secp256k1 public key"
+        )
+    return value.lower()
 
 
 def mirror_rpc(*args: str, timeout: int = 120):
@@ -354,9 +379,12 @@ def main(argv: list[str] | None = None) -> None:
     MIRROR_BTXD = args.mirror_btxd
     MIRROR_CLI = args.mirror_cli
     SIGNER_WIF_FILE = args.signer_wif_file
-    SIGNER_PUB = args.signer_pub_file.read_text(encoding="utf-8").strip()
-    if not SIGNER_PUB:
-        parser.error("--signer-pub-file is empty")
+    try:
+        SIGNER_PUB = validate_signer_pubkey(
+            args.signer_pub_file.read_text(encoding="utf-8")
+        )
+    except RuntimeError as error:
+        parser.error(str(error))
     RUNTIME_ROOT = args.runtime_root
     OUT = args.out
     KEEP_ARTIFACTS = args.keep_artifacts
@@ -378,9 +406,9 @@ def main(argv: list[str] | None = None) -> None:
     )
     atexit.register(cleanup_local_artifacts)
 
-    ARCHIVE_DD = sh_remote("mktemp -d \"${TMPDIR:-/tmp}/btx-trusted-archive.XXXXXX\"")
-    if not ARCHIVE_DD.startswith("/") or ARCHIVE_DD in {"/", "/tmp"}:
-        raise RuntimeError("remote mktemp returned an unsafe archive datadir")
+    ARCHIVE_DD = validate_remote_archive_dir(
+        sh_remote("mktemp -d \"${TMPDIR:-/tmp}/btx-trusted-archive.XXXXXX\"")
+    )
     atexit.register(cleanup_remote_archive)
     archive_regtest = f"{ARCHIVE_DD}/regtest"
     sh_remote(f"umask 077; mkdir -p {shlex.quote(archive_regtest)}")

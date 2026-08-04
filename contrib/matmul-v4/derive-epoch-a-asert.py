@@ -20,7 +20,7 @@ DEFAULT_INPUT = (
     / "doc/evidence/asert-two-rig-calibration-2026-08-03/raw/two-rig-v3-vs-rc.json"
 )
 ROOT_TOOL = "btx_epoch_a_asert_calibration"
-ROOT_SCHEMA_VERSION = 3
+ROOT_SCHEMA_VERSION = 4
 PARENT_TOOL = "matmul-v3-asert-calibration"
 PARENT_SCHEMA_VERSION = 3
 RC_TOOL = "rc-episode-harness"

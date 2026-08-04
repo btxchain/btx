@@ -13,6 +13,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "contrib/matmul-v4/derive-epoch-a-asert.py"
+IDENTITY_SCRIPT = REPO_ROOT / "contrib/matmul-v4/evidence_source_identity.py"
 LEGACY_EVIDENCE = (
     REPO_ROOT
     / "doc/evidence/asert-two-rig-calibration-2026-08-03/raw/two-rig-v3-vs-rc.json"
@@ -21,6 +22,12 @@ SPEC = importlib.util.spec_from_file_location("derive_epoch_a_asert", SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
+IDENTITY_SPEC = importlib.util.spec_from_file_location(
+    "evidence_source_identity_for_asert_test", IDENTITY_SCRIPT
+)
+assert IDENTITY_SPEC is not None and IDENTITY_SPEC.loader is not None
+IDENTITY_MODULE = importlib.util.module_from_spec(IDENTITY_SPEC)
+IDENTITY_SPEC.loader.exec_module(IDENTITY_MODULE)
 REVISION = subprocess.run(
     ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"],
     capture_output=True, text=True, check=True,
@@ -253,9 +260,25 @@ class EpochAAsertCalibrationTest(unittest.TestCase):
         sample["run_variance"]["episode_wall_samples_s"][2] = 13
         self.assertEqual(self.derive(value)["nMatMulRCAsertRescaleNum"], 800)
 
+    def test_exact_quantum_boundary_does_not_add_an_extra_quantum(self) -> None:
+        value = payload()
+        value["coefficient_policy"]["safety_margin_bps"] = 0
+        value["coefficient_policy"]["coefficient_quantum"] = 50
+        self.assertEqual(self.derive(value)["nMatMulRCAsertRescaleNum"], 550)
+
+    def test_equal_provider_coefficients_have_stable_selection(self) -> None:
+        value = payload()
+        value["rigs"][1] = rig("metal", "m4_class", parent_wall=2)
+        result = self.derive(value)
+        self.assertEqual(
+            result["providers"][0]["coefficient_quantized_up"],
+            result["providers"][1]["coefficient_quantized_up"],
+        )
+        self.assertEqual(result["selected_provider_family"], "cuda")
+
     def test_legacy_self_asserted_evidence_fails_closed(self) -> None:
         legacy = json.loads(LEGACY_EVIDENCE.read_text(encoding="utf-8"))
-        self.assert_rejected(legacy, "schema_version=3")
+        self.assert_rejected(legacy, "schema_version=4")
 
     def test_missing_required_provider_fails_closed(self) -> None:
         value = payload()
@@ -430,6 +453,12 @@ class EpochAAsertCalibrationTest(unittest.TestCase):
         ).stdout.strip()
         with self.assertRaisesRegex(MODULE.CalibrationError, "exact commit"):
             MODULE.resolve_commit(REPO_ROOT, tree)
+
+    def test_shared_and_asert_fingerprint_policies_match(self) -> None:
+        self.assertEqual(
+            MODULE.tree_fingerprint(REPO_ROOT, REVISION),
+            IDENTITY_MODULE.tree_fingerprint(REPO_ROOT, REVISION),
+        )
 
     def test_uint64_cli_parser_is_strict(self) -> None:
         self.assertEqual(MODULE.parse_uint64("0"), 0)

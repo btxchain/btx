@@ -92,6 +92,7 @@ def verify_binary(path: Path, expected_sha256: str, field: str) -> str:
 
 def validate_canary_build_identity(
     canary: dict[str, Any], *, revision: str, fingerprint: str, prefix: str,
+    require_manifest_match: bool = True,
 ) -> None:
     revision = require_hex(revision, HEX40, "source_revision")
     fingerprint = require_hex(fingerprint, HEX64, "source_tree_fingerprint")
@@ -111,7 +112,44 @@ def validate_canary_build_identity(
         )
     if canary.get("build_source_dirty") is not False:
         raise EvidenceIdentityError(f"{prefix}.build_source_dirty must be false")
-    if canary.get("build_provenance_matches") is not True:
+    if (require_manifest_match and
+            canary.get("build_provenance_matches") is not True):
         raise EvidenceIdentityError(
             f"{prefix}.build_provenance_matches must be true"
         )
+
+
+def validate_cuda_soak_metric(
+    metric: dict[str, Any], *, mode: str, revision: str, fingerprint: str,
+) -> None:
+    """Validate one public CUDA-soak metric without breaking toy rehearsals."""
+    if mode not in {"toy", "production"}:
+        raise EvidenceIdentityError(f"unsupported soak mode: {mode}")
+    node = metric.get("node")
+    if str(metric.get("active_backend") or "").lower() != "cuda":
+        raise EvidenceIdentityError(
+            f"active_backend is not cuda on node {node}: "
+            f"{metric.get('active_backend')}"
+        )
+    if metric.get("required_backend_satisfied") is not True:
+        raise EvidenceIdentityError(
+            f"required CUDA backend unsatisfied on node {node}"
+        )
+    if metric.get("cuda_fallbacks_to_cpu") not in (None, 0):
+        raise EvidenceIdentityError(
+            f"cuda_fallbacks_to_cpu={metric.get('cuda_fallbacks_to_cpu')} "
+            f"on node {node}"
+        )
+    if mode == "toy":
+        return
+    if "cuda" not in str(metric.get("resolved_provider") or "").lower():
+        raise EvidenceIdentityError(
+            f"non-CUDA ExactReplay provider on node {node}: "
+            f"{metric.get('resolved_provider')}"
+        )
+    validate_canary_build_identity(
+        metric,
+        revision=revision,
+        fingerprint=fingerprint,
+        prefix=f"soak node {node}",
+    )

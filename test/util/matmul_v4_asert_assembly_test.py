@@ -209,7 +209,7 @@ class EpochAAsertAssemblyTest(unittest.TestCase):
             **POLICY_KW,
         )
         self.assertEqual(root["tool"], DERIVE.ROOT_TOOL)
-        self.assertEqual(root["schema_version"], 3)
+        self.assertEqual(root["schema_version"], DERIVE.ROOT_SCHEMA_VERSION)
         self.assertEqual(root["consensus_context"], DERIVE.EXPECTED_CONTEXT)
         self.assertEqual(
             [rig["provider_family"] for rig in root["rigs"]], ["cuda", "metal"]

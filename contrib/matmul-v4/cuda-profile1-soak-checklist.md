@@ -18,7 +18,7 @@ Does not clear roadmap §4 gate 7.
 
 - [ ] Cross RC height once; both nodes share tip
 - [ ] Periodic relay mines; tips match; `getmininginfo` CUDA provider
-- [ ] Both canaries report the required clean embedded revision/fingerprint
+- [ ] Production mode only: both canaries report the required clean embedded revision/fingerprint
 - [ ] Competing branch: disconnect → divergent tips → reconnect → converge
 - [ ] Restart node B; CUDA canary/provider still CUDA; tip catch-up
 - [ ] Cache persistence: mine after restart without CPU GEMM fallback

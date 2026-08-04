@@ -49,7 +49,7 @@ The candidate sets the tuple atomically on mainnet at one release-selected
 | Workload | `nMatMulRCProfile = 1`, production dimensions, four-round replay | Profile 1, `matmul_dim = 4096` |
 | Authority | ExactReplay; Stage-3 proof authority remains disabled | ExactReplay only |
 | Header admission | HeaderPoW disabled; the fixed header remains 182 bytes | disabled; 182 bytes |
-| ASERT | v4 and BMX4C ratios remain `1/1`; RC owns the reviewed final-binary calibration | v4/BMX4C `1/1`; RC candidate is provisional pending the schema-3 exact-final-binary rerun |
+| ASERT | v4 and BMX4C ratios remain `1/1`; RC owns the reviewed final-binary calibration | v4/BMX4C `1/1`; RC candidate is provisional pending the schema-4 exact-final-binary rerun |
 | Ratification | explicit L0 ratification is a separate reviewed decision | the source constants are staged true in this candidate, but are non-authorizing until exact-final evidence and the activation review re-affirm them |
 
 The equality of the three heights prevents any digest-only v4/BMX4C interval
@@ -185,13 +185,13 @@ from the exact-final-revision evidence still required.
 - **Two-rig, two-vendor ASERT calibration**
   (`asert-two-rig-calibration-2026-08-03`): both halves of the v3-vs-RC ratio
   measured on the same silicon on two vendors. It predates the strict
-  schema-3 campaign envelope (schema-3 parent samples plus schema-2 raw RC
+  schema-4 campaign envelope (schema-3 parent samples plus schema-2 raw RC
   artifacts), so it does not close the current calibration gate.
 
 **Still open before release-final activation:**
 
 - exact-final-revision CUDA+Metal corpus and manifest seal;
-- schema-3, zero-fallback ASERT rerun on both required providers;
+- schema-4, zero-fallback ASERT rerun on both required providers;
 - full unit and functional suite closeout on the final tree;
 - a live-tip activation height with at least 96 hours of runway;
 - multi-day wall-clock soak;

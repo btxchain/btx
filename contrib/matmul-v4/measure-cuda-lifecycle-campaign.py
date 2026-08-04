@@ -399,7 +399,13 @@ def write_status(path: Path | None, payload: dict[str, Any]) -> None:
 
 def validate_runtime_build_identity(
     mining_info: object, *, revision: str, fingerprint: str, label: str,
+    require_production_canary: bool = True,
 ) -> dict[str, Any]:
+    # Toy campaigns intentionally do not run the production startup canary.
+    # They remain useful scheduler/relay rehearsals, but they cannot provide
+    # production-canary provenance evidence.
+    if not require_production_canary:
+        return {}
     if not isinstance(mining_info, dict):
         raise EVIDENCE_IDENTITY.EvidenceIdentityError(
             f"{label} getmininginfo response must be an object"
@@ -414,6 +420,9 @@ def validate_runtime_build_identity(
     EVIDENCE_IDENTITY.validate_canary_build_identity(
         canary, revision=revision, fingerprint=fingerprint,
         prefix=f"{label}.production_canary",
+        # The lifecycle campaign intentionally supports a pre-manifest mode
+        # that records core timing without claiming activation authority.
+        require_manifest_match=False,
     )
     return canary
 
@@ -546,10 +555,12 @@ def main() -> int:
             validate_runtime_build_identity(
                 miner.cli("getmininginfo"), revision=args.source_revision,
                 fingerprint=source_tree_fingerprint, label="miner",
+                require_production_canary=args.mode == "production",
             )
             validate_runtime_build_identity(
                 validator.cli("getmininginfo"), revision=args.source_revision,
                 fingerprint=source_tree_fingerprint, label="validator",
+                require_production_canary=args.mode == "production",
             )
         except EVIDENCE_IDENTITY.EvidenceIdentityError as error:
             die(str(error))

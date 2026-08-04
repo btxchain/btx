@@ -145,7 +145,7 @@ be rerun against the exact final binaries before the activation-height commit.
   ```
 
   Repeat for CUDA with the same parent seed set and RC nonce set. Then assemble
-  the strict schema-3 two-provider corpus and derive the coefficient:
+  the strict schema-4 two-provider corpus and derive the coefficient:
 
   ```bash
   python3 contrib/matmul-v4/assemble-epoch-a-asert-corpus.py merge \
@@ -154,10 +154,10 @@ be rerun against the exact final binaries before the activation-height commit.
     --coefficient-quantum <reviewed-positive-quantum> \
     --rig <cuda-rig.json> \
     --rig <metal-rig.json> \
-    --output <two-rig-v3-vs-rc-schema3.json>
+    --output <two-rig-v3-vs-rc-schema4.json>
 
   python3 contrib/matmul-v4/derive-epoch-a-asert.py \
-    --input <two-rig-v3-vs-rc-schema3.json> \
+    --input <two-rig-v3-vs-rc-schema4.json> \
     --source-revision <exact-final-40-character-revision> \
     --output <asert-coefficient.json> \
     --expected-coefficient <candidate-coefficient>
@@ -166,7 +166,7 @@ be rerun against the exact final binaries before the activation-height commit.
 The legacy schema-1 file in `raw/` is retained only to document the earlier
 measurement and is expected to fail this command.
 
-Changing either reviewed policy input changes the canonical schema-3 corpus.
+Changing either reviewed policy input changes the canonical schema-4 corpus.
 The selected inputs and the resulting coefficient must therefore be reviewed
 with the activation tuple; they must not be silently inferred from one run.
 

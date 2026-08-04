@@ -34,7 +34,7 @@
     {
       "evidence_path": "doc/evidence/asert-two-rig-calibration-2026-08-03/raw/two-rig-v3-vs-rc.json",
       "revision": "76704a391acac79914e95a3d723e0f1c8c51eb98",
-      "reason": "Historical schema-1 calibration retained for diagnostic comparison; it cannot satisfy the schema-3 exact-final activation gate.",
+      "reason": "Historical schema-1 calibration retained for diagnostic comparison; it cannot satisfy the schema-4 exact-final activation gate.",
       "production_admissible": false
     },
     {

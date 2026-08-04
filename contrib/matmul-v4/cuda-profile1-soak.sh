@@ -434,29 +434,26 @@ PY
   # Production-dim soaks additionally require a CUDA ExactReplay provider.
   METRIC_LINE="${line}" SOAK_MODE="${SOAK_MODE}" \
     EXPECTED_REVISION="${SOURCE_REVISION}" \
-    EXPECTED_FINGERPRINT="${SOURCE_TREE_FINGERPRINT}" python3 <<'PY'
+    EXPECTED_FINGERPRINT="${SOURCE_TREE_FINGERPRINT}" \
+    REPO_ROOT="${ROOT}" python3 <<'PY'
 import json, os, sys
+from pathlib import Path
+
+root = Path(os.environ["REPO_ROOT"])
+sys.path.insert(0, str(root / "contrib/matmul-v4"))
+import evidence_source_identity as identity
+
 m = json.loads(os.environ["METRIC_LINE"])
 mode = os.environ.get("SOAK_MODE", "toy")
-active = (m.get("active_backend") or "").lower()
-if active != "cuda":
-    sys.exit(f"active_backend is not cuda on node {m.get('node')}: {m.get('active_backend')}")
-if not m.get("required_backend_satisfied", False):
-    sys.exit(f"required CUDA backend unsatisfied on node {m.get('node')}")
-prov = (m.get("resolved_provider") or "").lower()
-if mode == "production" and "cuda" not in prov:
-    sys.exit(f"non-CUDA ExactReplay provider on node {m.get('node')}: {m.get('resolved_provider')}")
-fb = m.get("cuda_fallbacks_to_cpu")
-if fb not in (None, 0):
-    sys.exit(f"cuda_fallbacks_to_cpu={fb} on node {m.get('node')}")
-if m.get("build_source_revision") != os.environ["EXPECTED_REVISION"]:
-    sys.exit(f"embedded source revision mismatch on node {m.get('node')}")
-if m.get("build_source_tree_fingerprint") != os.environ["EXPECTED_FINGERPRINT"]:
-    sys.exit(f"embedded source fingerprint mismatch on node {m.get('node')}")
-if m.get("build_source_dirty") is not False:
-    sys.exit(f"embedded source is dirty on node {m.get('node')}")
-if m.get("build_provenance_matches") is not True:
-    sys.exit(f"embedded source provenance mismatch on node {m.get('node')}")
+try:
+    identity.validate_cuda_soak_metric(
+        m,
+        mode=mode,
+        revision=os.environ["EXPECTED_REVISION"],
+        fingerprint=os.environ["EXPECTED_FINGERPRINT"],
+    )
+except identity.EvidenceIdentityError as error:
+    sys.exit(str(error))
 PY
 }
 

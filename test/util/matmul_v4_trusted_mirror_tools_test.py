@@ -204,6 +204,80 @@ class TrustedMirrorToolsTest(unittest.TestCase):
                     binary, "0" * 64, "btxd_sha256"
                 )
 
+    def test_remote_sha256_quotes_the_exact_path(self):
+        module = load_rehearsal()
+        seen = []
+        module.sh_remote = lambda command: seen.append(command) or ("a" * 64 + "  file")
+        self.assertEqual(
+            module.remote_sha256("/tmp/bin; touch /tmp/not-run"), "a" * 64
+        )
+        self.assertIn(
+            "sha256sum -- '/tmp/bin; touch /tmp/not-run'", seen[0]
+        )
+        self.assertIn(
+            "shasum -a 256 -- '/tmp/bin; touch /tmp/not-run'", seen[0]
+        )
+
+    def test_remote_cleanup_directory_shape_is_fail_closed(self):
+        module = load_rehearsal()
+        self.assertEqual(
+            module.validate_remote_archive_dir(
+                "/tmp/btx-trusted-archive.A1b2C3"
+            ),
+            "/tmp/btx-trusted-archive.A1b2C3",
+        )
+        for value in (
+            "/", "/tmp", "/tmp/unrelated.A1b2C3",
+            "/btx-trusted-archive.A1b2C3", "/tmp/btx-trusted-archive.bad/name",
+            "/tmp/../var/btx-trusted-archive.A1b2C3",
+            "/tmp/btx-trusted-archive.A1b2C3\n/tmp/other",
+        ):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(RuntimeError, "unsafe archive datadir"):
+                    module.validate_remote_archive_dir(value)
+
+    def test_signer_pubkey_rejects_config_injection(self):
+        module = load_rehearsal()
+        valid = "02" + "A1" * 32
+        self.assertEqual(module.validate_signer_pubkey(valid), valid.lower())
+        for value in ("", "04" + "11" * 64, valid + "\nserver=0", "02zz"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(RuntimeError, "compressed secp256k1"):
+                    module.validate_signer_pubkey(value)
+
+    def test_cuda_soak_identity_preserves_toy_mode_and_binds_production(self):
+        module = load_rehearsal()
+        identity = module.EVIDENCE_IDENTITY
+        revision = "1" * 40
+        fingerprint = "2" * 64
+        toy = {
+            "node": "A",
+            "active_backend": "cuda",
+            "required_backend_satisfied": True,
+            "resolved_provider": "cpu_reference",
+            "cuda_fallbacks_to_cpu": 0,
+        }
+        identity.validate_cuda_soak_metric(
+            toy, mode="toy", revision=revision, fingerprint=fingerprint
+        )
+        with self.assertRaisesRegex(Exception, "non-CUDA ExactReplay"):
+            identity.validate_cuda_soak_metric(
+                toy, mode="production", revision=revision,
+                fingerprint=fingerprint,
+            )
+        production = {
+            **toy,
+            "resolved_provider": "cuda_rc_exact_fused_extract",
+            "build_source_revision": revision,
+            "build_source_tree_fingerprint": fingerprint,
+            "build_source_dirty": False,
+            "build_provenance_matches": True,
+        }
+        identity.validate_cuda_soak_metric(
+            production, mode="production", revision=revision,
+            fingerprint=fingerprint,
+        )
+
     def test_rejects_incomplete_validation_schema(self):
         module = load_rehearsal()
         with self.assertRaisesRegex(RuntimeError, "cpu_gemm_fallbacks"):
@@ -249,13 +323,43 @@ class TrustedMirrorToolsTest(unittest.TestCase):
         )
         self.assertIs(actual, canary)
         canary["build_provenance_matches"] = False
+        # A pre-manifest production build may collect explicitly non-authority
+        # core samples as long as its clean source identity is exact.
+        self.assertIs(
+            module.validate_runtime_build_identity(
+                {"backend_runtime": {"rc_exact_replay": {"production_canary": canary}}},
+                revision=revision,
+                fingerprint=fingerprint,
+                label="miner",
+            ),
+            canary,
+        )
         with self.assertRaisesRegex(Exception, "build_provenance_matches"):
+            module.EVIDENCE_IDENTITY.validate_canary_build_identity(
+                canary, revision=revision, fingerprint=fingerprint,
+                prefix="final_campaign",
+            )
+        canary["build_source_dirty"] = True
+        with self.assertRaisesRegex(Exception, "build_source_dirty"):
             module.validate_runtime_build_identity(
                 {"backend_runtime": {"rc_exact_replay": {"production_canary": canary}}},
                 revision=revision,
                 fingerprint=fingerprint,
                 label="miner",
             )
+
+    def test_lifecycle_toy_mode_does_not_require_production_canary(self):
+        module = load_lifecycle()
+        self.assertEqual(
+            module.validate_runtime_build_identity(
+                {},
+                revision="0" * 40,
+                fingerprint="0" * 64,
+                label="miner",
+                require_production_canary=False,
+            ),
+            {},
+        )
 
 
 if __name__ == "__main__":
