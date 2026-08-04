@@ -1,17 +1,16 @@
-BTX version 0.33.2 release status:
+Public BTX version 0.33.2 release status:
 
   <https://github.com/btxchain/btx/releases>
 
-The current signed annotated `v0.33.2` tag identifies a source tree containing
-a finite Epoch-A tuple at height 185000. The tag was recreated during
-pre-release work. No GitHub v0.33.2 release, assets, or release binaries were
-published. The tag is not corrective; any further disposition requires an
-explicit release decision.
+The public `btxchain/btx` `v0.33.2` tag and GitHub release identify a source
+tree containing a finite Epoch-A tuple at height 185000. The public release
+includes binary archives, signed checksums, and height-179000 snapshot assets;
+it does not contain the corrective deferral.
 
-Current source is later than the tag and is not a published v0.33.2 release. It
-disables the tuple (`INT32_MAX`, live RC ratio `1/1`, GPU-lifecycle
-ratification false). The tagged tree must not be represented as containing
-that deferral.
+Current corrective source is later than that public tag and remains untagged.
+It disables the tuple (`INT32_MAX`, live RC ratio `1/1`, GPU-lifecycle
+ratification false). Publishing it requires an explicit public
+release/tag/version disposition and regenerated artifacts.
 
 Please report bugs using the issue tracker at GitHub:
 
@@ -23,10 +22,11 @@ To receive release and update notifications, please subscribe to:
 
 # How to Upgrade
 
-There is no published v0.33.2 binary upgrade at this time. Do not build or
-deploy the tagged height-185000 tree as though it contained the corrective
-deferral, and do not install unpublished candidates. A future release decision
-must explicitly resolve the current tag before any assets are published.
+The public v0.33.2 binary upgrade was built from the tagged height-185000 tree;
+it does not contain the corrective deferral. Do not deploy it as though it did,
+and do not install untagged corrective candidates as release binaries. A
+replacement must explicitly resolve the public release/tag/version disposition
+before corrective assets are published.
 
 Current source keeps the v4, BMX4C, and Resident Curriculum heights disabled.
 A later activation-only change must set one fresh `H_A`, install the
