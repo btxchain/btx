@@ -2007,49 +2007,156 @@ static const char* ResolveMatMulEncodingProfileName(
     }
 }
 
+struct MatMulServiceEncodingSupport {
+    int32_t height{0};
+    std::string profile;
+    bool supported{false};
+    std::string status;
+    std::string reason;
+    std::string detail;
+};
+
 /**
  * Service proofs are designed for cheap verification at an application
- * admission boundary. ENC-S8, ENC-BMX4C, and Phase-A ENC-BMX4C-LT all have a
- * carried sketch which this RPC can verify under the exact profile-specific
- * consensus primitive. ENC-RC has no such cheap proof: its authority is a
- * complete ExactReplay, and ENC-RC-COUPLED additionally requires both work
- * legs. Running either from an unaudited application RPC would bypass the
- * network verifier's admission/scheduler controls. Fail closed until a
- * separately budgeted service-proof design exists instead of silently
- * evaluating the cheaper BMX4C workload.
+ * admission boundary and must fit the ordinary HTTP JSON-RPC transport.
+ * Only legacy v3, ENC-S8, and ENC-BMX4C meet both constraints. Phase-A LT has
+ * a mathematically checkable sketch, but its production proof cannot fit this
+ * RPC transport. ENC-RC has no cheap proof at all: its authority is complete
+ * ExactReplay, and ENC-RC-COUPLED additionally requires both work legs.
  *
- * LT seal-as-PoW is also a distinct Q*-slot lottery rather than the Phase-A
- * single-slot sketch carried by this API, so it must not be represented by the
- * same envelope.
+ * Return an explicit status object for planners and catalogs, and make every
+ * issue/solve/verify/redeem path use the same decision. This prevents a future
+ * profile from silently falling through to a cheaper workload.
  */
+static MatMulServiceEncodingSupport GetMatMulServiceEncodingSupport(
+    const Consensus::Params& consensus, int32_t height)
+{
+    MatMulServiceEncodingSupport support;
+    support.height = height;
+    support.profile = consensus.IsMatMulV4Active(height)
+        ? ResolveMatMulEncodingProfileName(consensus, height)
+        : "legacy-v3";
+
+    if (!consensus.IsMatMulV4Active(height)) {
+        support.supported = true;
+        support.status = "supported";
+        support.reason = "legacy_v3_exact_transcript";
+        support.detail = "legacy v3 service transcript verification is supported";
+        return support;
+    }
+
+    switch (consensus.GetMatMulEncodingProfile(height)) {
+    case Consensus::MatMulEncodingProfile::ENC_S8:
+        support.supported = true;
+        support.status = "supported";
+        support.reason = "exact_s8_sketch";
+        support.detail = "ENC-S8 service sketches are issued, solved, verified, and redeemed exactly";
+        return support;
+    case Consensus::MatMulEncodingProfile::ENC_BMX4C:
+        support.supported = true;
+        support.status = "supported";
+        support.reason = "exact_bmx4c_sketch";
+        support.detail = "ENC-BMX4C service sketches are issued, solved, verified, and redeemed exactly";
+        return support;
+    case Consensus::MatMulEncodingProfile::ENC_BMX4CD:
+        support.status = "unsupported";
+        support.reason = "retired_encoding_profile";
+        support.detail = "retired encoding profile ENC-BMX4C-D is not supported";
+        return support;
+    case Consensus::MatMulEncodingProfile::ENC_BMX4C_LT:
+        support.status = "unsupported";
+        support.reason = "lt_proof_exceeds_rpc_transport";
+        support.detail = "ENC-BMX4C-LT production proofs cannot be carried safely by the service JSON-RPC envelope";
+        return support;
+    case Consensus::MatMulEncodingProfile::ENC_RC:
+        support.status = "unsupported";
+        support.reason = "exact_replay_not_service_bounded";
+        support.detail = "ENC-RC requires ExactReplay outside the service verifier admission and scheduler budgets";
+        return support;
+    case Consensus::MatMulEncodingProfile::ENC_RC_COUPLED:
+        support.status = "unsupported";
+        support.reason = "coupled_exact_replay_not_service_bounded";
+        support.detail = "ENC-RC-COUPLED requires coupled ExactReplay outside the service verifier admission and scheduler budgets";
+        return support;
+    }
+    support.status = "unsupported";
+    support.reason = "unknown_encoding_profile";
+    support.detail = "unknown MatMul service challenge encoding profile";
+    return support;
+}
+
+static UniValue BuildMatMulServiceEncodingSupport(
+    const Consensus::Params& consensus, int32_t height)
+{
+    const auto support = GetMatMulServiceEncodingSupport(consensus, height);
+    UniValue result{UniValue::VOBJ};
+    result.pushKV("height", support.height);
+    result.pushKV("encoding_profile", support.profile);
+    result.pushKV("supported", support.supported);
+    result.pushKV("status", support.status);
+    result.pushKV("reason", support.reason);
+    result.pushKV("detail", support.detail);
+    result.pushKV("issuance_supported", support.supported);
+    result.pushKV("local_solve_supported", support.supported);
+    result.pushKV("verification_supported", support.supported);
+    result.pushKV("redemption_supported", support.supported);
+    UniValue supported_profiles{UniValue::VARR};
+    supported_profiles.push_back("legacy-v3");
+    supported_profiles.push_back("ENC-S8");
+    supported_profiles.push_back("ENC-BMX4C");
+    result.pushKV("supported_encoding_profiles", std::move(supported_profiles));
+    return result;
+}
+
+static RPCResult MatMulServiceEncodingSupportRPCResult()
+{
+    return RPCResult{
+        RPCResult::Type::OBJ,
+        "service_proof_support",
+        "Exact profile support for service proof issuance, local solving, verification, and redemption at the reported next height",
+        {
+            {RPCResult::Type::NUM, "height", "Height evaluated for service-proof support"},
+            {RPCResult::Type::STR, "encoding_profile", "Height-selected encoding profile"},
+            {RPCResult::Type::BOOL, "supported", "Whether all service-proof operations are supported"},
+            {RPCResult::Type::STR, "status", "supported or unsupported"},
+            {RPCResult::Type::STR, "reason", "Stable machine-readable support decision code"},
+            {RPCResult::Type::STR, "detail", "Human-readable support decision"},
+            {RPCResult::Type::BOOL, "issuance_supported", "Whether challenge issuance is supported"},
+            {RPCResult::Type::BOOL, "local_solve_supported", "Whether local service solving is supported"},
+            {RPCResult::Type::BOOL, "verification_supported", "Whether proof verification is supported"},
+            {RPCResult::Type::BOOL, "redemption_supported", "Whether proof redemption is supported"},
+            {RPCResult::Type::ARR, "supported_encoding_profiles", "Profiles supported by this RPC family", {
+                {RPCResult::Type::STR, "", "Supported profile name"},
+            }},
+        }};
+}
+
+static int32_t GetMatMulServiceNextHeight(ChainstateManager& chainman)
+{
+    LOCK(cs_main);
+    const CBlockIndex* tip = chainman.ActiveChain().Tip();
+    if (tip == nullptr) {
+        throw JSONRPCError(RPC_INTERNAL_ERROR, "active chain tip is unavailable");
+    }
+    int next_height{0};
+    if (!TryGetNextBlockHeight(tip, next_height)) {
+        throw JSONRPCError(RPC_INTERNAL_ERROR, "next block height overflow");
+    }
+    return next_height;
+}
+
 static void EnsureMatMulServiceEncodingProfileSupported(
     const Consensus::Params& consensus, int32_t height, int rpc_error_code)
 {
-    if (!consensus.IsMatMulV4Active(height)) return;
-
-    const auto profile = consensus.GetMatMulEncodingProfile(height);
-    switch (profile) {
-    case Consensus::MatMulEncodingProfile::ENC_S8:
-    case Consensus::MatMulEncodingProfile::ENC_BMX4C:
-        return;
-    case Consensus::MatMulEncodingProfile::ENC_BMX4CD:
-        throw JSONRPCError(
-            rpc_error_code,
-            "MatMul service challenges do not support retired encoding profile ENC-BMX4C-D");
-    case Consensus::MatMulEncodingProfile::ENC_BMX4C_LT:
-        if (!consensus.IsMatMulLTSealAsPoWActive(height)) return;
-        throw JSONRPCError(
-            rpc_error_code,
-            "MatMul service challenges do not support ENC-BMX4C-LT seal-as-PoW mode");
-    case Consensus::MatMulEncodingProfile::ENC_RC:
-    case Consensus::MatMulEncodingProfile::ENC_RC_COUPLED:
-        throw JSONRPCError(
-            rpc_error_code,
-            strprintf(
-                "MatMul service challenges do not support active encoding profile %s",
-                ResolveMatMulEncodingProfileName(consensus, height)));
-    }
-    throw JSONRPCError(rpc_error_code, "MatMul service challenge encoding profile is unknown");
+    const auto support = GetMatMulServiceEncodingSupport(consensus, height);
+    if (support.supported) return;
+    throw JSONRPCError(
+        rpc_error_code,
+        strprintf(
+            "MatMul service challenges do not support active encoding profile %s (%s): %s",
+            support.profile,
+            support.reason,
+            support.detail));
 }
 
 /** Sketch/transcript tile b for the live profile at `height` (v4: per-profile
@@ -2714,8 +2821,9 @@ struct MatMulServiceChallengeContext {
     // Below the fork these stay false/0 and every v3 field/path is unchanged.
     bool is_v4{false};
     // Full height-selected profile. Supported sketch profiles dispatch to
-    // their exact ENC-S8, ENC-BMX4C, or Phase-A ENC-BMX4C-LT primitive; RC and
-    // coupled profiles are rejected before reaching solve/verify.
+    // their exact ENC-S8 or ENC-BMX4C primitive. LT cannot fit the service
+    // transport; RC and coupled profiles cannot use this admission budget, so
+    // all three are rejected before reaching solve/verify.
     Consensus::MatMulEncodingProfile encoding_profile{
         Consensus::MatMulEncodingProfile::ENC_S8};
     // Canonical public name of the height-selected v4 encoding profile. This
@@ -3981,6 +4089,15 @@ static UniValue BuildMatMulServiceChallengeResponse(
     const ArgsManager& args = EnsureArgsman(node);
     const std::string chain_name = chainman.GetParams().GetChainTypeString();
     const Consensus::Params& consensus = chainman.GetConsensus();
+
+    // Reject a known-unsupported next-height profile before asking the miner
+    // to assemble a block template. Template assembly can be expensive and
+    // must never become an accidental admission path for ExactReplay or a
+    // proof that cannot fit the service transport.
+    const int32_t predicted_next_height = GetMatMulServiceNextHeight(chainman);
+    EnsureMatMulServiceEncodingProfileSupported(
+        consensus, predicted_next_height, RPC_MISC_ERROR);
+
     Mining& miner = EnsureMining(node);
     std::unique_ptr<BlockTemplate> block_template = miner.createNewBlock();
     CHECK_NONFATAL(block_template);
@@ -3996,6 +4113,9 @@ static UniValue BuildMatMulServiceChallengeResponse(
             throw JSONRPCError(RPC_INTERNAL_ERROR, "next block height overflow");
         }
     }
+    // The active tip may have changed while the template was assembled. Bind
+    // the final decision to the template's actual parent and fail closed if it
+    // crossed a profile boundary.
     EnsureMatMulServiceEncodingProfileSupported(consensus, next_height, RPC_MISC_ERROR);
 
     const auto difficulty_resolution = ResolveMatMulServiceDifficultyPolicy(
@@ -4162,6 +4282,9 @@ static UniValue BuildMatMulServiceChallengeResponse(
     obj.pushKV("expires_in_s", expires_in_s);
     obj.pushKV("binding", std::move(binding));
     obj.pushKV("proof_policy", BuildMatMulServiceProofPolicy(args));
+    obj.pushKV(
+        "service_proof_support",
+        BuildMatMulServiceEncodingSupport(consensus, next_height));
     obj.pushKV("challenge", std::move(challenge));
     RememberIssuedMatMulServiceChallenge(args, challenge_id, issued_at, expires_at);
     return obj;
@@ -4181,6 +4304,7 @@ static UniValue BuildMatMulServiceChallengeProfileResponse(
     int solver_parallelism,
     double solver_duty_cycle_pct)
 {
+    const int32_t next_height = GetMatMulServiceNextHeight(chainman);
     const auto resolved_profile = ResolveMatMulServiceDifficultyProfile(
         chainman,
         profile_name,
@@ -4191,6 +4315,9 @@ static UniValue BuildMatMulServiceChallengeProfileResponse(
         difficulty_window_blocks);
 
     UniValue result(UniValue::VOBJ);
+    result.pushKV(
+        "service_proof_support",
+        BuildMatMulServiceEncodingSupport(chainman.GetConsensus(), next_height));
     result.pushKV(
         "profile",
         BuildMatMulServiceDifficultyRecommendation(
@@ -4226,9 +4353,13 @@ static UniValue BuildMatMulServiceChallengeProfilesResponse(
     int solver_parallelism,
     double solver_duty_cycle_pct)
 {
+    const int32_t next_height = GetMatMulServiceNextHeight(chainman);
     UniValue result(UniValue::VOBJ);
     result.pushKV("default_profile", "balanced");
     result.pushKV("default_difficulty_label", "normal");
+    result.pushKV(
+        "service_proof_support",
+        BuildMatMulServiceEncodingSupport(chainman.GetConsensus(), next_height));
 
     UniValue profiles(UniValue::VARR);
     for (const auto& spec : MATMUL_SERVICE_DIFFICULTY_PROFILE_SPECS) {
@@ -4280,7 +4411,27 @@ static UniValue BuildIssuedMatMulServiceChallengeProfileResponse(
         difficulty_policy,
         difficulty_window_blocks);
 
+    UniValue service_challenge = BuildMatMulServiceChallengeResponse(
+        chainman,
+        node,
+        std::string{purpose},
+        std::string{resource},
+        std::string{subject},
+        resolved_profile.recommendation.recommended_solve_time_s,
+        expires_in_s,
+        validation_overhead_s,
+        propagation_overhead_s,
+        difficulty_policy,
+        difficulty_window_blocks,
+        min_solve_time_s,
+        max_solve_time_s,
+        solver_parallelism,
+        solver_duty_cycle_pct);
+
     UniValue result(UniValue::VOBJ);
+    result.pushKV(
+        "service_proof_support",
+        service_challenge.find_value("service_proof_support"));
     result.pushKV(
         "profile",
         BuildMatMulServiceDifficultyRecommendation(
@@ -4290,24 +4441,7 @@ static UniValue BuildIssuedMatMulServiceChallengeProfileResponse(
             propagation_overhead_s,
             solver_parallelism,
             solver_duty_cycle_pct));
-    result.pushKV(
-        "service_challenge",
-        BuildMatMulServiceChallengeResponse(
-            chainman,
-            node,
-            std::string{purpose},
-            std::string{resource},
-            std::string{subject},
-            resolved_profile.recommendation.recommended_solve_time_s,
-            expires_in_s,
-            validation_overhead_s,
-            propagation_overhead_s,
-            difficulty_policy,
-            difficulty_window_blocks,
-            min_solve_time_s,
-            max_solve_time_s,
-            solver_parallelism,
-            solver_duty_cycle_pct));
+    result.pushKV("service_challenge", std::move(service_challenge));
     return result;
 }
 
@@ -4452,6 +4586,7 @@ static UniValue BuildMatMulServiceChallengePlanResponse(
     int solver_parallelism,
     double solver_duty_cycle_pct)
 {
+    const int32_t next_height = GetMatMulServiceNextHeight(chainman);
     const auto objective = ResolveMatMulServicePlanningObjective(
         objective_mode,
         objective_value,
@@ -4527,6 +4662,9 @@ static UniValue BuildMatMulServiceChallengePlanResponse(
         });
 
     UniValue result(UniValue::VOBJ);
+    result.pushKV(
+        "service_proof_support",
+        BuildMatMulServiceEncodingSupport(consensus, next_height));
     result.pushKV("objective", BuildMatMulServicePlanningObjective(objective));
 
     UniValue plan(UniValue::VOBJ);
@@ -5115,10 +5253,9 @@ static UniValue EvaluateMatMulServiceProof(
                 RPC_INVALID_PARAMETER,
                 "MatMul service challenges do not support retired encoding profile ENC-BMX4C-D");
         case Consensus::MatMulEncodingProfile::ENC_BMX4C_LT:
-            transcript_valid = meets_target &&
-                matmul::v4::lt::VerifySketchBMX4CLT(
-                    header, ctx.n, ctx.v4_rounds, sketch_payload, recomputed);
-            break;
+            throw JSONRPCError(
+                RPC_INVALID_PARAMETER,
+                "MatMul service challenges do not support ENC-BMX4C-LT: production proofs exceed the service JSON-RPC transport");
         case Consensus::MatMulEncodingProfile::ENC_RC:
         case Consensus::MatMulEncodingProfile::ENC_RC_COUPLED:
             throw JSONRPCError(
@@ -7608,6 +7745,7 @@ static RPCHelpMan getmatmulservicechallenge()
                         {RPCResult::Type::NUM, "expires_in_s", "Challenge lifetime in seconds"},
                         {RPCResult::Type::ANY, "binding", "Application binding plus anchor metadata"},
                         {RPCResult::Type::ANY, "proof_policy", "Verification policy for the service proof"},
+                        MatMulServiceEncodingSupportRPCResult(),
                         {RPCResult::Type::ANY, "challenge", "MatMul challenge payload and service profile"},
                     },
                 },
@@ -7700,6 +7838,7 @@ static RPCHelpMan getmatmulservicechallengeplan()
                 RPCResult{
                     RPCResult::Type::OBJ, "", "",
                     {
+                        MatMulServiceEncodingSupportRPCResult(),
                         {RPCResult::Type::OBJ, "objective", "Canonicalized planning objective", {
                             {RPCResult::Type::STR, "mode", "Canonical planning objective name"},
                             {RPCResult::Type::NUM, "requested_value", "Requested value for the selected objective"},
@@ -7816,6 +7955,7 @@ static RPCHelpMan getmatmulservicechallengeprofile()
                 RPCResult{
                     RPCResult::Type::OBJ, "", "",
                     {
+                        MatMulServiceEncodingSupportRPCResult(),
                         {RPCResult::Type::OBJ, "profile", "Resolved service-difficulty recommendation and ready-to-issue defaults", {
                             {RPCResult::Type::STR, "name", "Resolved profile name"},
                             {RPCResult::Type::STR, "difficulty_label", "Short operator-facing difficulty alias: easy, normal, hard, or idle"},
@@ -7969,6 +8109,7 @@ static RPCHelpMan listmatmulservicechallengeprofiles()
                     {
                         {RPCResult::Type::STR, "default_profile", "Default canonical profile name"},
                         {RPCResult::Type::STR, "default_difficulty_label", "Default short difficulty alias"},
+                        MatMulServiceEncodingSupportRPCResult(),
                         {RPCResult::Type::ARR, "profiles", "Current profile catalog", {
                             {RPCResult::Type::ANY, "", "Profile entry shaped like getmatmulservicechallengeprofile.profile"},
                         }},
@@ -8049,6 +8190,7 @@ static RPCHelpMan issuematmulservicechallengeprofile()
                 RPCResult{
                     RPCResult::Type::OBJ, "", "",
                     {
+                        MatMulServiceEncodingSupportRPCResult(),
                         {RPCResult::Type::ANY, "profile", "Resolved profile recommendation shaped like getmatmulservicechallengeprofile.profile"},
                         {RPCResult::Type::ANY, "service_challenge", "Issued challenge envelope shaped like getmatmulservicechallenge"},
                     },
@@ -8127,8 +8269,8 @@ static RPCHelpMan solvematmulservicechallenge()
                 {
                     {"challenge", RPCArg::Type::OBJ, RPCArg::Optional::NO, "Challenge envelope returned by getmatmulservicechallenge", std::vector<RPCArg>{}},
                     {"max_tries", RPCArg::Type::NUM, RPCArg::Default{500000}, "Maximum nonce attempts before giving up"},
-                    {"time_budget_ms", RPCArg::Type::NUM, RPCArg::Default{0}, "Optional wall-clock solve budget in milliseconds; 0 disables time-budget stopping"},
-                    {"solver_threads", RPCArg::Type::NUM, RPCArg::Default{0}, "Optional maximum worker threads for the local solver; 0 keeps the normal automatic policy"},
+                    {"time_budget_ms", RPCArg::Type::NUM, RPCArg::Default{0}, "Optional cooperative wall-clock solve budget in milliseconds; 0 disables stopping. For v4 this is checked only between complete nonce attempts and is not a hard deadline."},
+                    {"solver_threads", RPCArg::Type::NUM, RPCArg::Default{0}, "Optional maximum worker threads for the legacy v3 solver; 0 keeps its automatic policy. The exact v4 S8/BMX4C single-nonce dispatch does not apply this hint."},
                 },
                 RPCResult{
                     RPCResult::Type::OBJ, "", "",
@@ -8140,6 +8282,10 @@ static RPCHelpMan solvematmulservicechallenge()
                         {RPCResult::Type::NUM, "elapsed_ms", "Wall-clock solve time in milliseconds"},
                         {RPCResult::Type::NUM, "time_budget_ms", "Requested wall-clock solve budget in milliseconds, or 0 when disabled"},
                         {RPCResult::Type::NUM, "solver_threads", "Requested maximum worker threads, or 0 when the automatic runtime policy is used"},
+                        {RPCResult::Type::BOOL, "time_budget_hard_cap", "Always false: stopping is cooperative and v4 checks the budget only between complete nonce attempts"},
+                        {RPCResult::Type::STR, "time_budget_check_scope", "v4_between_complete_nonce_attempts or legacy_solver_cooperative"},
+                        {RPCResult::Type::BOOL, "solver_threads_applied", "Whether solver_threads was applied by the selected solver path"},
+                        {RPCResult::Type::STR, "solver_threads_scope", "v4_single_nonce_dispatch or legacy_solver_workers"},
                         {RPCResult::Type::STR, "reason", "Result code: ok, max_tries_exhausted, or time_budget_exhausted"},
                         {RPCResult::Type::STR_HEX, "nonce64_hex", /*optional=*/true, "Solved nonce when solved=true"},
                         {RPCResult::Type::STR_HEX, "digest_hex", /*optional=*/true, "Solved transcript digest when solved=true"},
@@ -8211,9 +8357,9 @@ static RPCHelpMan solvematmulservicechallenge()
                     RPC_INVALID_PARAMETER,
                     "MatMul service challenges do not support retired encoding profile ENC-BMX4C-D");
             case Consensus::MatMulEncodingProfile::ENC_BMX4C_LT:
-                ok = matmul::v4::lt::ComputeDigestBMX4CLT(
-                    header, ctx.n, digest, payload);
-                break;
+                throw JSONRPCError(
+                    RPC_INVALID_PARAMETER,
+                    "MatMul service challenges do not support ENC-BMX4C-LT: production proofs exceed the service JSON-RPC transport");
             case Consensus::MatMulEncodingProfile::ENC_RC:
             case Consensus::MatMulEncodingProfile::ENC_RC_COUPLED:
                 throw JSONRPCError(
@@ -8262,6 +8408,14 @@ static RPCHelpMan solvematmulservicechallenge()
     result.pushKV("elapsed_ms", elapsed_ms);
     result.pushKV("time_budget_ms", time_budget_ms);
     result.pushKV("solver_threads", solver_threads);
+    result.pushKV("time_budget_hard_cap", false);
+    result.pushKV(
+        "time_budget_check_scope",
+        ctx.is_v4 ? "v4_between_complete_nonce_attempts" : "legacy_solver_cooperative");
+    result.pushKV("solver_threads_applied", !ctx.is_v4 && solver_threads > 0);
+    result.pushKV(
+        "solver_threads_scope",
+        ctx.is_v4 ? "v4_single_nonce_dispatch" : "legacy_solver_workers");
     if (!solved) {
         result.pushKV(
             "reason",
