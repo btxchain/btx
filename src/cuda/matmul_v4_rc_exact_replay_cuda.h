@@ -41,11 +41,35 @@ struct RcExactReplayCudaStats {
     std::string detail;
 };
 
+/** Result of the CUDA-only, test-invoked weight-slot ordering interlock.
+ *
+ * The implementation holds the layer-0 compute stream behind a synthetic
+ * event, then observes whether the H2D stream can pass the production
+ * layer_done[slot] wait before that event is released.  It is deliberately a
+ * separate template instantiation from the production entry point, so the
+ * probe cannot alter miner or validator execution. */
+struct RcExactReplaySlotReuseOrderingTestResult {
+    bool device_available{false};
+    bool interlock_supported{false};
+    bool chain_completed{false};
+    bool slot_wait_enqueued{false};
+    bool wait_site_reached{false};
+    bool overwrite_blocked_before_release{false};
+    bool overwrite_resumed_after_release{false};
+    bool watchdog_expired{false};
+    std::string detail;
+};
+
 [[nodiscard]] bool IsRcExactReplayCudaAvailable();
 
 /** Reset / snapshot process-local stats (measure harness). */
 void ResetRcExactReplayCudaStats();
 [[nodiscard]] RcExactReplayCudaStats GetRcExactReplayCudaStats();
+
+/** CUDA-test seam for the resident FFN ping-pong weight dependency.
+ * Returns device_available=false on non-CUDA builds/hosts. */
+[[nodiscard]] RcExactReplaySlotReuseOrderingTestResult
+RunRcExactReplaySlotReuseOrderingTest();
 
 /**
  * Phase-1 AssociativeRecall on device:

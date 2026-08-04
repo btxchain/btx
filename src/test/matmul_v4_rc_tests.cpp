@@ -2313,6 +2313,31 @@ BOOST_AUTO_TEST_CASE(rc_p12_phase2_exactgemm_device_probe)
     BOOST_CHECK(!st.native_fp8_qualified);
 }
 
+BOOST_AUTO_TEST_CASE(rc_cuda_exact_replay_slot_reuse_ordering)
+{
+    // The CUDA implementation inserts a synthetic event before the layer-0
+    // consumer and verifies that the real per-slot H2D wait prevents the
+    // layer-2 overwrite from crossing it. Removing the wait, or waiting on the
+    // unrecorded wrong slot, makes this fail deterministically.
+    if (!matmul_v4::cuda::IsRcExactReplayCudaAvailable()) {
+        BOOST_TEST_MESSAGE("CUDA ExactReplay unavailable; skip slot ordering test");
+        return;
+    }
+    const auto result{
+        matmul_v4::cuda::RunRcExactReplaySlotReuseOrderingTest()};
+    BOOST_REQUIRE_MESSAGE(result.device_available, result.detail);
+    if (!result.interlock_supported) {
+        BOOST_TEST_MESSAGE(result.detail << "; skip slot ordering interlock");
+        return;
+    }
+    BOOST_REQUIRE_MESSAGE(result.chain_completed, result.detail);
+    BOOST_REQUIRE_MESSAGE(result.slot_wait_enqueued, result.detail);
+    BOOST_REQUIRE_MESSAGE(result.wait_site_reached, result.detail);
+    BOOST_CHECK_MESSAGE(result.overwrite_blocked_before_release, result.detail);
+    BOOST_CHECK_MESSAGE(result.overwrite_resumed_after_release, result.detail);
+    BOOST_CHECK_MESSAGE(!result.watchdog_expired, result.detail);
+}
+
 BOOST_AUTO_TEST_CASE(rc_cuda_exact_replay_launch_abi_smoke)
 {
     // Wires CUDA ExactReplay through ExactGemmBackend Launch* (Metal ABI parity)

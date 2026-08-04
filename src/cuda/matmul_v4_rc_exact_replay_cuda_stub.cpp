@@ -13,6 +13,15 @@ void ResetRcExactReplayCudaStats() {}
 
 RcExactReplayCudaStats GetRcExactReplayCudaStats() { return {}; }
 
+RcExactReplaySlotReuseOrderingTestResult
+RunRcExactReplaySlotReuseOrderingTest()
+{
+    RcExactReplaySlotReuseOrderingTestResult result;
+    result.interlock_supported = false;
+    result.detail = "CUDA ExactReplay unavailable";
+    return result;
+}
+
 bool TryCudaRcPhase1AssociativeRecall(const std::vector<int8_t>&, const std::vector<int8_t>&,
                                       const std::vector<int8_t>&, const uint256&, const uint256&,
                                       uint32_t, uint32_t, uint32_t, std::vector<int8_t>&,
