@@ -254,6 +254,10 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
         options.shielded_direct_send_public_flow_disable_height =
             ParseRegTestNonNegativeInt32Arg(args, "-regtestshieldeddirectsendpublicflowdisableheight");
     }
+    if (args.IsArgSet("-regtestcontenteliminationheight")) {
+        options.content_elimination_height =
+            ParseRegTestNonNegativeInt32Arg(args, "-regtestcontenteliminationheight");
+    }
     if (args.IsArgSet("-regtestshieldedv2sendzerooutputexitactivationheight")) {
         options.shielded_v2_send_zero_output_exit_activation_height =
             ParseRegTestNonNegativeInt32Arg(args, "-regtestshieldedv2sendzerooutputexitactivationheight");

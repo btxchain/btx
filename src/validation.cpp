@@ -7660,6 +7660,25 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
                               "accumulated fee in the block out of range");
                 break;
             }
+
+            // BTX content-elimination hard fork (Pillars 2 & 3,
+            // doc/btx-inscription-elimination-plan.md): once active, promote the
+            // P2MR witness leaf-type allowlist and the CSFS/HTLC message bound
+            // from relay policy to consensus, so a cooperating miner can no
+            // longer smuggle inscription data through a non-financial witness
+            // leaf. Reuse the exact IsWitnessStandard classifier so consensus
+            // and relay cannot diverge; it validates only financial leaf shapes
+            // (CHECKSIG/MULTISIG/CTV/CLTV/CSV/CSFS/HTLC), whitelisting the large
+            // PQ signature/pubkey operands by structure rather than size.
+            if (params.GetConsensus().IsContentEliminationActive(pindex->nHeight)) {
+                std::string witness_reject;
+                if (!IsWitnessStandard(tx, view, "bad-txns-witness-", witness_reject)) {
+                    state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                                  "bad-txns-nonfinancial-witness",
+                                  witness_reject + " in transaction " + tx.GetHash().ToString());
+                    break;
+                }
+            }
             if (tx.HasShieldedBundle()) {
                 const auto& bundle = tx.GetShieldedBundle();
                 if (bundle.HasV2Bundle() &&
@@ -10092,6 +10111,60 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block,
  *  in ConnectBlock().
  *  Note that -reindex-chainstate skips the validation that happens here!
  */
+/** Maximum coinbase scriptSig size once the content-elimination fork is active.
+ *  Enough for the BIP34 serialized-height push plus a modest extranonce, but far
+ *  below the 100-byte consensus limit that a miner could otherwise use as a data
+ *  channel. See doc/btx-inscription-elimination-plan.md Pillar 5. */
+static constexpr size_t MAX_CONTENT_COINBASE_SCRIPTSIG{40};
+
+/** BTX content-elimination hard fork (doc/btx-inscription-elimination-plan.md).
+ *  Height-gated block rules that remove the data-carriage channels that
+ *  inscription/NFT/token meta-protocols depend on, while preserving every
+ *  financial surface. Enforced here (context-aware) so the rules are flag-day
+ *  gated on nContentEliminationHeight and legacy history is untouched. */
+static bool CheckContentEliminationRules(const CBlock& block, int nHeight,
+                                         const Consensus::Params& consensus_params,
+                                         BlockValidationState& state)
+{
+    if (!consensus_params.IsContentEliminationActive(nHeight)) return true;
+    if (block.vtx.empty()) return true;
+
+    // Pillar 1: no OP_RETURN data channel. The coinbase may carry only the
+    // mandatory witness-commitment OP_RETURN; every other OP_RETURN output --
+    // coinbase or not -- is forbidden. This removes the <=83-byte marker lane
+    // that off-chain content/token meta-protocols anchor on.
+    const int commitpos = GetWitnessCommitmentIndex(block);
+    for (size_t i = 0; i < block.vtx.size(); ++i) {
+        const CTransaction& tx = *block.vtx[i];
+        const bool is_coinbase = (i == 0);
+        for (size_t o = 0; o < tx.vout.size(); ++o) {
+            const CScript& spk = tx.vout[o].scriptPubKey;
+            if (spk.empty() || spk[0] != OP_RETURN) continue;
+            if (is_coinbase && commitpos != NO_WITNESS_COMMITMENT &&
+                static_cast<int>(o) == commitpos) {
+                continue; // the witness commitment is the only permitted OP_RETURN
+            }
+            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                                 is_coinbase ? "bad-cb-opreturn" : "bad-txns-opreturn-forbidden",
+                                 "OP_RETURN data outputs are disabled on BTX");
+        }
+    }
+
+    // Pillar 5: bound the coinbase scriptSig to the BIP34 height push plus a
+    // small extranonce, removing the residual ~100-byte miner data channel. The
+    // BIP34 height prefix itself is verified separately below in
+    // ContextualCheckBlock; here we only cap the total size.
+    const size_t cb_scriptsig{block.vtx[0]->vin[0].scriptSig.size()};
+    if (cb_scriptsig > MAX_CONTENT_COINBASE_SCRIPTSIG) {
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-cb-scriptsig-content",
+                             strprintf("coinbase scriptSig size %u exceeds content-elimination max %u",
+                                       static_cast<unsigned>(cb_scriptsig),
+                                       static_cast<unsigned>(MAX_CONTENT_COINBASE_SCRIPTSIG)));
+    }
+
+    return true;
+}
+
 static bool ContextualCheckBlock(const CBlock& block,
                                  BlockValidationState& state,
                                  const ChainstateManager& chainman,
@@ -10223,6 +10296,12 @@ static bool ContextualCheckBlock(const CBlock& block,
             !std::equal(expect.begin(), expect.end(), block.vtx[0]->vin[0].scriptSig.begin())) {
             return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-cb-height", "block height mismatch in coinbase");
         }
+    }
+
+    // BTX content-elimination hard fork: forbid OP_RETURN data outputs and bound
+    // the coinbase scriptSig once active (flag-day gated on nHeight).
+    if (!CheckContentEliminationRules(block, nHeight, consensusParams, state)) {
+        return false;
     }
 
     // Validation for witness commitments.
