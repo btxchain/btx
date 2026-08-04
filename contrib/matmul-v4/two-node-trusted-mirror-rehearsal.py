@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import atexit
 import argparse
+import ipaddress
 import json
 import os
 import re
@@ -76,7 +77,9 @@ ARCHIVE_LOCAL = False
 ARCHIVE_PROC: subprocess.Popen | None = None
 ARCHIVE_LOG = None
 ARCHIVE_REMOTE_PID = ""
+ARCHIVE_REMOTE_START_IDENTITY = ""
 ARCHIVE_REMOTE_LAUNCH_ATTEMPTED = False
+ARCHIVE_REMOTE_STARTUP_COMPLETED = False
 MIRROR_BTXD = Path()
 MIRROR_CLI = Path()
 SIGNER_WIF_FILE = Path()
@@ -101,8 +104,11 @@ MIRROR_BTXD_SHA256 = ""
 MIRROR_CLI_SHA256 = ""
 REMOTE_ARCHIVE_NAME = re.compile(r"btx-trusted-archive\.[A-Za-z0-9]{6}")
 REMOTE_PID = re.compile(r"[1-9][0-9]{0,9}")
+REMOTE_START_IDENTITY = re.compile(r"[A-Za-z0-9: +_-]{8,128}")
 COMPRESSED_PUBKEY = re.compile(r"(?:02|03)[0-9a-fA-F]{64}")
 PUBLIC_CLASS = re.compile(r"[A-Za-z0-9_.+-]+")
+SSH_USER_COMPONENT = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.+-]{0,63}")
+SSH_SCOPE_COMPONENT = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}")
 PRODUCTION_BLOCKS = 3
 REMOTE_TERM_WAIT_SECONDS = 30
 REMOTE_KILL_WAIT_SECONDS = 10
@@ -244,6 +250,7 @@ def validate_args(
                 "pre-provision --archive-signer-wif-file on the archive"
             )
         try:
+            validate_ssh_destination(args.archive_user, args.archive_host)
             args.archive_signer_wif_file = validate_remote_file_path(
                 args.archive_signer_wif_file,
                 "--archive-signer-wif-file",
@@ -334,9 +341,67 @@ def sh_local(cmd: list[str], timeout: int = 120) -> str:
     return r.stdout.strip()
 
 
+def validate_ssh_destination(user: str, host: str) -> str:
+    """Return one option-safe SSH destination for a user and DNS/IP host."""
+    if (not isinstance(user, str) or
+            SSH_USER_COMPONENT.fullmatch(user) is None):
+        raise RuntimeError("--archive-user is not a safe SSH user component")
+    if (not isinstance(host, str) or not host or len(host) > 255 or
+            any(ord(char) <= 0x20 or ord(char) == 0x7f for char in host) or
+            host.startswith("-") or "@" in host):
+        raise RuntimeError("--archive-host is not a safe SSH host component")
+
+    literal = host
+    if host.startswith("[") or host.endswith("]"):
+        if not (host.startswith("[") and host.endswith("]")):
+            raise RuntimeError("--archive-host has malformed IP brackets")
+        literal = host[1:-1]
+    address = literal
+    if "%" in literal:
+        address, scope = literal.rsplit("%", 1)
+        if SSH_SCOPE_COMPONENT.fullmatch(scope) is None:
+            raise RuntimeError("--archive-host has an unsafe IPv6 scope")
+    try:
+        ipaddress.ip_address(address)
+    except ValueError:
+        # DNS names and ordinary SSH config aliases use the same conservative
+        # label grammar here. Wildcards and option/config metacharacters are
+        # intentionally not accepted by an evidence-producing runner.
+        dns = host[:-1] if host.endswith(".") else host
+        labels = dns.split(".")
+        if (not dns or any(
+                not label or len(label) > 63 or
+                not (label[0].isascii() and
+                     (label[0].isalnum() or label[0] == "_")) or
+                not (label[-1].isascii() and
+                     (label[-1].isalnum() or label[-1] == "_")) or
+                any(not (char.isascii() and
+                         (char.isalnum() or char in "_-")) for char in label)
+                for label in labels)):
+            raise RuntimeError("--archive-host is not a valid DNS/IP host")
+    return f"{user}@{host}"
+
+
+def remote_ssh_argv(remote_cmd: str) -> list[str]:
+    """Build an SSH command with an explicit end to option processing."""
+    return [
+        "ssh", "-o", "BatchMode=yes", "--",
+        validate_ssh_destination(ARCHIVE_USER, ARCHIVE_HOST), remote_cmd,
+    ]
+
+
+def tunnel_ssh_argv() -> list[str]:
+    """Build the loopback P2P tunnel command without destination ambiguity."""
+    return [
+        "ssh", "-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes",
+        "-N", "-L", f"127.0.0.1:{ARCHIVE_P2P}:127.0.0.1:{ARCHIVE_P2P}",
+        "--", validate_ssh_destination(ARCHIVE_USER, ARCHIVE_HOST),
+    ]
+
+
 def sh_remote(remote_cmd: str, timeout: int = 120, input_text: str | None = None) -> str:
     r = subprocess.run(
-        ["ssh", "-o", "BatchMode=yes", f"{ARCHIVE_USER}@{ARCHIVE_HOST}", remote_cmd],
+        remote_ssh_argv(remote_cmd),
         check=True,
         capture_output=True,
         text=True,
@@ -411,30 +476,84 @@ def validate_remote_pid(value: str, label: str = "remote archive PID") -> str:
     return value
 
 
-def remote_stop_archive_command(pid: str, datadir: str) -> str:
+def validate_remote_start_identity(
+    value: str, label: str = "remote archive start identity",
+) -> str:
+    """Accept one printable, locale-stabilized `ps lstart` identity."""
+    if not isinstance(value, str):
+        raise RuntimeError(f"{label} is not valid")
+    value = value.strip()
+    if REMOTE_START_IDENTITY.fullmatch(value) is None:
+        raise RuntimeError(f"{label} is not valid")
+    return value
+
+
+def validate_remote_launch_output(value: str) -> tuple[str, str]:
+    """Parse the exact PID/start tuple emitted atomically by the launcher."""
+    if not isinstance(value, str):
+        raise RuntimeError("remote archive launch identity is not valid")
+    lines = value.splitlines()
+    if len(lines) != 2:
+        raise RuntimeError("remote archive launch identity is not valid")
+    return (
+        validate_remote_pid(lines[0], "remote archive launcher PID"),
+        validate_remote_start_identity(
+            lines[1], "remote archive launcher start identity"
+        ),
+    )
+
+
+def remote_stop_archive_command(
+    pid: str, datadir: str, *, expected_start_identity: str,
+    require_pidfile: bool = False,
+) -> str:
     """Build a bounded, identity-checked TERM/KILL shutdown command."""
     pid = validate_remote_pid(pid)
     datadir = validate_remote_archive_dir(datadir)
     quoted_datadir = shlex.quote(datadir)
     quoted_pidfile = shlex.quote(f"{datadir}/regtest/btxd.pid")
+    expected_start = shlex.quote(validate_remote_start_identity(
+        expected_start_identity
+    ))
+    required = "1" if require_pidfile else "0"
     return (
         f"pid={pid}; datadir={quoted_datadir}; pidfile={quoted_pidfile}; "
-        "if kill -0 \"$pid\" 2>/dev/null; then "
-        "cmd=$(ps -p \"$pid\" -o command= 2>/dev/null) || exit 16; "
-        "case \"$cmd\" in *\"$datadir\"*) ;; *) exit 16 ;; esac; "
-        "if test -r \"$pidfile\"; then "
+        f"expected_started={expected_start}; "
+        f"pidfile_required={required}; "
+        "is_live() { state=$(ps -p \"$pid\" -o stat= 2>/dev/null) || "
+        "return 1; case \"$state\" in *Z*) return 1 ;; *) return 0 ;; esac; }; "
+        "verify_pidfile() { test -r \"$pidfile\" || return 1; "
         "recorded=$(tr -d '[:space:]' < \"$pidfile\"); "
-        "test \"$recorded\" = \"$pid\" || exit 15; fi; "
+        "test \"$recorded\" = \"$pid\"; }; "
+        "verify_identity() { "
+        "current_cmd=$(ps -p \"$pid\" -o command= 2>/dev/null) || return 1; "
+        "current_started=$(LC_ALL=C ps -p \"$pid\" -o lstart= 2>/dev/null | "
+        "sed 's/^[[:space:]]*//;s/[[:space:]]*$//') || return 1; "
+        "test \"$current_cmd\" = \"$cmd\" && "
+        "test \"$current_started\" = \"$expected_started\"; }; "
+        "if is_live; then "
+        "cmd=$(ps -p \"$pid\" -o command= 2>/dev/null) || exit 16; "
+        "started=$(LC_ALL=C ps -p \"$pid\" -o lstart= 2>/dev/null | "
+        "sed 's/^[[:space:]]*//;s/[[:space:]]*$//') || exit 16; "
+        "test -n \"$cmd\" && test -n \"$started\" || exit 16; "
+        "test \"$started\" = \"$expected_started\" || exit 18; "
+        "case \"$cmd\" in *\"$datadir\"*) ;; *) exit 16 ;; esac; "
+        "if test -r \"$pidfile\"; then verify_pidfile || exit 15; "
+        "pidfile_required=1; "
+        "elif test \"$pidfile_required\" = 1; then exit 17; fi; "
         "kill -TERM \"$pid\" 2>/dev/null || true; "
-        "i=0; while kill -0 \"$pid\" 2>/dev/null && "
+        "i=0; while is_live && "
         f"test \"$i\" -lt {REMOTE_TERM_WAIT_SECONDS}; do "
         "sleep 1; i=$((i + 1)); done; fi; "
-        "if kill -0 \"$pid\" 2>/dev/null; then "
+        "if is_live; then "
+        "verify_identity || { is_live && exit 18; }; "
+        "if is_live; then "
+        "test \"$pidfile_required\" = 0 || verify_pidfile || exit 15; "
         "kill -KILL \"$pid\" 2>/dev/null || true; "
-        "i=0; while kill -0 \"$pid\" 2>/dev/null && "
+        "i=0; while is_live && "
         f"test \"$i\" -lt {REMOTE_KILL_WAIT_SECONDS}; do "
-        "sleep 1; i=$((i + 1)); done; fi; "
-        "if kill -0 \"$pid\" 2>/dev/null; then exit 14; fi"
+        "sleep 1; i=$((i + 1)); done; fi; fi; "
+        "if is_live; then exit 14; fi"
     )
 
 
@@ -521,7 +640,9 @@ def wait_rpc(fn, label: str, timeout: float = 120) -> None:
 
 
 def cleanup_archive() -> None:
-    global ARCHIVE_PROC, ARCHIVE_REMOTE_PID, ARCHIVE_REMOTE_LAUNCH_ATTEMPTED
+    global ARCHIVE_PROC, ARCHIVE_REMOTE_PID, ARCHIVE_REMOTE_START_IDENTITY
+    global ARCHIVE_REMOTE_LAUNCH_ATTEMPTED
+    global ARCHIVE_REMOTE_STARTUP_COMPLETED
     if not ARCHIVE_DD:
         return
     if ARCHIVE_LOCAL:
@@ -538,6 +659,7 @@ def cleanup_archive() -> None:
         return
     if ARCHIVE_REMOTE_LAUNCH_ATTEMPTED:
         pid = ARCHIVE_REMOTE_PID
+        started = ARCHIVE_REMOTE_START_IDENTITY
         if not pid:
             launcher_pid_file = shlex.quote(
                 f"{ARCHIVE_DD}/rehearsal-launch.pid"
@@ -552,9 +674,27 @@ def cleanup_archive() -> None:
                     "cannot establish the remote archive PID; refusing to "
                     "remove its datadir"
                 ) from error
+        if not started:
+            launcher_start_file = shlex.quote(
+                f"{ARCHIVE_DD}/rehearsal-launch.start"
+            )
+            try:
+                started = validate_remote_start_identity(
+                    sh_remote(f"cat {launcher_start_file}"),
+                    "remote archive launcher start identity",
+                )
+            except Exception as error:
+                raise RuntimeError(
+                    "cannot establish the remote archive start identity; "
+                    "refusing to remove its datadir"
+                ) from error
         try:
             sh_remote(
-                remote_stop_archive_command(pid, ARCHIVE_DD),
+                remote_stop_archive_command(
+                    pid, ARCHIVE_DD,
+                    expected_start_identity=started,
+                    require_pidfile=ARCHIVE_REMOTE_STARTUP_COMPLETED,
+                ),
                 timeout=(
                     REMOTE_TERM_WAIT_SECONDS + REMOTE_KILL_WAIT_SECONDS + 10
                 ),
@@ -565,7 +705,9 @@ def cleanup_archive() -> None:
                 "refusing to remove its datadir"
             ) from error
         ARCHIVE_REMOTE_PID = ""
+        ARCHIVE_REMOTE_START_IDENTITY = ""
         ARCHIVE_REMOTE_LAUNCH_ATTEMPTED = False
+        ARCHIVE_REMOTE_STARTUP_COMPLETED = False
     if not KEEP_ARTIFACTS:
         sh_remote(f"rm -rf -- {shlex.quote(ARCHIVE_DD)}")
 
@@ -951,7 +1093,9 @@ def validate_trusted_mirror_rehearsal(
 def main(argv: list[str] | None = None) -> None:
     global ARCHIVE_DD, ARCHIVE_HOST, ARCHIVE_USER, ARCHIVE_BTXD, ARCHIVE_CLI
     global ARCHIVE_BACKEND, ARCHIVE_LOCAL, ARCHIVE_PROC, ARCHIVE_LOG
-    global ARCHIVE_REMOTE_PID, ARCHIVE_REMOTE_LAUNCH_ATTEMPTED
+    global ARCHIVE_REMOTE_PID, ARCHIVE_REMOTE_START_IDENTITY
+    global ARCHIVE_REMOTE_LAUNCH_ATTEMPTED
+    global ARCHIVE_REMOTE_STARTUP_COMPLETED
     global ARCHIVE_SIGNER_WIF_FILE, STRICT_PROOF_MODE
     global MIRROR_BTXD, MIRROR_CLI, SIGNER_WIF_FILE, SIGNER_PUB
     global RUNTIME_ROOT, MIRROR_DD, OUT, KEEP_ARTIFACTS
@@ -1082,12 +1226,7 @@ rpcallowip=127.0.0.1
     tunnel = None
     if not ARCHIVE_LOCAL:
         tunnel = subprocess.Popen(
-            [
-                "ssh", "-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes",
-                "-N", "-L",
-                f"127.0.0.1:{ARCHIVE_P2P}:127.0.0.1:{ARCHIVE_P2P}",
-                f"{ARCHIVE_USER}@{ARCHIVE_HOST}",
-            ],
+            tunnel_ssh_argv(),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -1132,6 +1271,9 @@ rpcallowip=127.0.0.1
         launcher_pid_file = shlex.quote(
             f"{ARCHIVE_DD}/rehearsal-launch.pid"
         )
+        launcher_start_file = shlex.quote(
+            f"{ARCHIVE_DD}/rehearsal-launch.start"
+        )
         launch_output = sh_remote(
             "umask 077; "
             f"export BTX_MATMUL_V4_BACKEND={shlex.quote(ARCHIVE_BACKEND)} "
@@ -1140,13 +1282,22 @@ rpcallowip=127.0.0.1
             f"-datadir={shlex.quote(ARCHIVE_DD)} "
             f"-conf={shlex.quote(ARCHIVE_DD + '/btx.conf')} "
             f">{shlex.quote(ARCHIVE_DD + '/stdout.log')} 2>&1 & "
-            f"pid=$!; printf \"%s\\n\" \"$pid\" > {launcher_pid_file}; "
-            "printf \"%s\\n\" \"$pid\""
+            "pid=$!; started=$(LC_ALL=C ps -p \"$pid\" -o lstart= "
+            "2>/dev/null | sed "
+            "'s/^[[:space:]]*//;s/[[:space:]]*$//') || "
+            "{ kill -TERM \"$pid\" 2>/dev/null || true; exit 19; }; "
+            "test -n \"$started\" || "
+            "{ kill -TERM \"$pid\" 2>/dev/null || true; exit 19; }; "
+            f"printf \"%s\\n\" \"$pid\" > {launcher_pid_file}; "
+            f"printf \"%s\\n\" \"$started\" > {launcher_start_file}; "
+            "printf \"%s\\n%s\\n\" \"$pid\" \"$started\""
         )
-        ARCHIVE_REMOTE_PID = validate_remote_pid(
-            launch_output, "remote archive launcher PID"
+        ARCHIVE_REMOTE_PID, ARCHIVE_REMOTE_START_IDENTITY = (
+            validate_remote_launch_output(launch_output)
         )
     wait_rpc(archive_rpc, "archive", timeout=args.archive_startup_timeout)
+    if not ARCHIVE_LOCAL:
+        ARCHIVE_REMOTE_STARTUP_COMPLETED = True
     archive_rpc("createwallet", "miner")
 
     # Start local mirror

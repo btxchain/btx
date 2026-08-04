@@ -537,18 +537,181 @@ class TrustedMirrorToolsTest(unittest.TestCase):
     def test_remote_pid_and_bounded_stop_command_are_fail_closed(self):
         module = load_rehearsal()
         self.assertEqual(module.validate_remote_pid("12345\n"), "12345")
+        start = "Tue Aug 4 00:00:00 2026"
+        self.assertEqual(
+            module.validate_remote_launch_output(f"12345\n{start}\n"),
+            ("12345", start),
+        )
         for value in ("", "0", "-1", "1 2", "1; touch /tmp/no", "12\n13"):
             with self.subTest(value=value):
                 with self.assertRaisesRegex(RuntimeError, "valid process ID"):
                     module.validate_remote_pid(value)
+        for value in ("12345", "12345\n", "12345\nbad\n", "1\nstart\nextra\n"):
+            with self.subTest(launch_output=value):
+                with self.assertRaisesRegex(RuntimeError, "launch identity|not valid"):
+                    module.validate_remote_launch_output(value)
         command = module.remote_stop_archive_command(
-            "12345", "/tmp/btx-trusted-archive.A1b2C3"
+            "12345", "/tmp/btx-trusted-archive.A1b2C3",
+            expected_start_identity=start,
         )
         self.assertIn('ps -p "$pid" -o command=', command)
         self.assertIn('kill -TERM "$pid"', command)
         self.assertIn('kill -KILL "$pid"', command)
         self.assertIn("exit 14", command)
         self.assertLess(command.index("kill -TERM"), command.index("kill -KILL"))
+
+    def test_ssh_destination_and_argv_reject_option_injection(self):
+        module = load_rehearsal()
+        for user, host in (
+            ("operator", "gpu-archive.example.invalid"),
+            ("user.name", "127.0.0.1"),
+            ("u_1", "2001:db8::1"),
+            ("u+1", "[2001:db8::1]"),
+            ("u", "fe80::1%en0"),
+        ):
+            with self.subTest(user=user, host=host):
+                self.assertEqual(
+                    module.validate_ssh_destination(user, host),
+                    f"{user}@{host}",
+                )
+        for user, host in (
+            ("-F/tmp/config", "example.invalid"),
+            ("-oProxyCommand=touch /tmp/no", "example.invalid"),
+            ("user name", "example.invalid"),
+            ("user@other", "example.invalid"),
+            ("operator", "-oProxyCommand=touch"),
+            ("operator", "host name"),
+            ("operator", "host@example.invalid"),
+            ("operator", "example..invalid"),
+            ("operator", "bad/host"),
+            ("operator", "[::1"),
+            ("operator", "::1]"),
+            ("operator", "$(touch-no)"),
+            ("operator", "\N{SNOWMAN}.invalid"),
+            ("operator", "\N{LATIN SMALL LETTER E WITH ACUTE}xample.invalid"),
+        ):
+            with self.subTest(user=user, host=host):
+                with self.assertRaisesRegex(RuntimeError, "safe|valid|malformed"):
+                    module.validate_ssh_destination(user, host)
+
+        module.ARCHIVE_USER = "operator"
+        module.ARCHIVE_HOST = "gpu-archive.example.invalid"
+        for argv in (
+            module.remote_ssh_argv("true"), module.tunnel_ssh_argv(),
+        ):
+            delimiter = argv.index("--")
+            self.assertEqual(
+                argv[delimiter + 1], "operator@gpu-archive.example.invalid"
+            )
+            self.assertFalse(any(arg.startswith("-oProxyCommand")
+                                 for arg in argv[delimiter + 1:]))
+
+    def test_remote_stop_shell_terminates_and_refuses_changed_identity(self):
+        module = load_rehearsal()
+        original_term = module.REMOTE_TERM_WAIT_SECONDS
+        original_kill = module.REMOTE_KILL_WAIT_SECONDS
+        module.REMOTE_TERM_WAIT_SECONDS = 1
+        module.REMOTE_KILL_WAIT_SECONDS = 1
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                datadir = Path(tmp) / "btx-trusted-archive.A1b2C3"
+                regtest = datadir / "regtest"
+                regtest.mkdir(parents=True)
+                pidfile = regtest / "btxd.pid"
+
+                def launch(ignore_term):
+                    handler = (
+                        "signal.signal(signal.SIGTERM, signal.SIG_IGN);"
+                        if ignore_term else ""
+                    )
+                    process = subprocess.Popen(
+                        [
+                            sys.executable, "-c",
+                            "import signal,sys,time;" + handler +
+                            "print('ready', flush=True);time.sleep(60)",
+                            str(datadir),
+                        ],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.DEVNULL,
+                        text=True,
+                    )
+                    self.assertEqual(process.stdout.readline().strip(), "ready")
+                    process.stdout.close()
+                    pidfile.write_text(f"{process.pid}\n", encoding="utf-8")
+                    return process
+
+                def start_identity(process):
+                    return subprocess.run(
+                        ["ps", "-p", str(process.pid), "-o", "lstart="],
+                        check=True, capture_output=True, text=True,
+                    ).stdout.strip()
+
+                process = launch(False)
+                command = module.remote_stop_archive_command(
+                    str(process.pid), str(datadir),
+                    expected_start_identity=start_identity(process),
+                    require_pidfile=True,
+                )
+                result = subprocess.run(
+                    ["/bin/sh", "-c", command], capture_output=True,
+                    text=True, check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                process.wait(timeout=5)
+
+                process = launch(True)
+                pidfile.unlink()
+                command = module.remote_stop_archive_command(
+                    str(process.pid), str(datadir),
+                    expected_start_identity=start_identity(process),
+                    require_pidfile=True,
+                )
+                result = subprocess.run(
+                    ["/bin/sh", "-c", command], capture_output=True,
+                    text=True, check=False,
+                )
+                self.assertEqual(result.returncode, 17, result.stderr)
+                self.assertIsNone(process.poll())
+                process.kill()
+                process.wait(timeout=5)
+
+                process = launch(True)
+                fake_bin = Path(tmp) / "fake-bin"
+                fake_bin.mkdir()
+                counter = Path(tmp) / "lstart-count"
+                fake_ps = fake_bin / "ps"
+                fake_ps.write_text(
+                    "#!/bin/sh\n"
+                    "case \" $* \" in\n"
+                    "  *' lstart='*)\n"
+                    "    n=$(cat \"$PS_COUNTER\" 2>/dev/null || echo 0)\n"
+                    "    n=$((n + 1)); printf '%s\\n' \"$n\" > \"$PS_COUNTER\"\n"
+                    "    if test \"$n\" -gt 1; then echo changed-identity; exit 0; fi\n"
+                    "    ;;\n"
+                    "esac\n"
+                    "exec /bin/ps \"$@\"\n",
+                    encoding="utf-8",
+                )
+                fake_ps.chmod(0o700)
+                command = module.remote_stop_archive_command(
+                    str(process.pid), str(datadir),
+                    expected_start_identity=start_identity(process),
+                    require_pidfile=True,
+                )
+                env = dict(os.environ)
+                env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+                env["PS_COUNTER"] = str(counter)
+                result = subprocess.run(
+                    ["/bin/sh", "-c", command], capture_output=True,
+                    text=True, check=False, env=env,
+                )
+                self.assertEqual(result.returncode, 18, result.stderr)
+                self.assertIsNone(process.poll())
+                process.kill()
+                process.wait(timeout=5)
+        finally:
+            module.REMOTE_TERM_WAIT_SECONDS = original_term
+            module.REMOTE_KILL_WAIT_SECONDS = original_kill
 
     def test_remote_cleanup_stops_before_removing_datadir(self):
         module = load_rehearsal()
@@ -557,6 +720,7 @@ class TrustedMirrorToolsTest(unittest.TestCase):
             name: getattr(module, name)
             for name in (
                 "ARCHIVE_DD", "ARCHIVE_LOCAL", "ARCHIVE_REMOTE_PID",
+                "ARCHIVE_REMOTE_START_IDENTITY",
                 "ARCHIVE_REMOTE_LAUNCH_ATTEMPTED", "KEEP_ARTIFACTS",
                 "sh_remote",
             )
@@ -565,6 +729,7 @@ class TrustedMirrorToolsTest(unittest.TestCase):
             module.ARCHIVE_DD = "/tmp/btx-trusted-archive.A1b2C3"
             module.ARCHIVE_LOCAL = False
             module.ARCHIVE_REMOTE_PID = "12345"
+            module.ARCHIVE_REMOTE_START_IDENTITY = "Tue Aug 4 00:00:00 2026"
             module.ARCHIVE_REMOTE_LAUNCH_ATTEMPTED = True
             module.KEEP_ARTIFACTS = False
             module.sh_remote = (
@@ -586,6 +751,7 @@ class TrustedMirrorToolsTest(unittest.TestCase):
             name: getattr(module, name)
             for name in (
                 "ARCHIVE_DD", "ARCHIVE_LOCAL", "ARCHIVE_REMOTE_PID",
+                "ARCHIVE_REMOTE_START_IDENTITY",
                 "ARCHIVE_REMOTE_LAUNCH_ATTEMPTED", "KEEP_ARTIFACTS",
                 "sh_remote",
             )
@@ -594,6 +760,7 @@ class TrustedMirrorToolsTest(unittest.TestCase):
             module.ARCHIVE_DD = "/tmp/btx-trusted-archive.A1b2C3"
             module.ARCHIVE_LOCAL = False
             module.ARCHIVE_REMOTE_PID = "12345"
+            module.ARCHIVE_REMOTE_START_IDENTITY = "Tue Aug 4 00:00:00 2026"
             module.ARCHIVE_REMOTE_LAUNCH_ATTEMPTED = True
             module.KEEP_ARTIFACTS = False
 

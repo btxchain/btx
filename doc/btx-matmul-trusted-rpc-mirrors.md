@@ -199,11 +199,14 @@ never reads or copies the archive WIF through the mirror host. Only the public
 key file belongs on the mirror host. The result contains public provider and
 architecture classes, source identity, binary hashes, and counters; it never
 contains deployment hostnames, usernames, paths, or private keys.
-Remote cleanup records the exact launched daemon PID, verifies its command and
-pidfile identity, waits a bounded interval after `TERM`, escalates to `KILL` if
-needed, and refuses to delete the remote datadir unless process exit is
-confirmed. The pre-provisioned remote signer remains operator-owned and is
-never deleted by the runner.
+Remote cleanup records the exact launched daemon PID plus its command and start
+identity. After RPC startup, the daemon pidfile is mandatory and must agree.
+The runner waits a bounded interval after `TERM`, revalidates process identity
+and pidfile agreement before any `KILL`, and refuses to delete the remote
+datadir unless process exit is confirmed. Before RPC startup, a missing pidfile
+is tolerated only so an identity-matched early-launch failure can be stopped;
+if the PID cannot be established, the datadir is retained. The pre-provisioned
+remote signer remains operator-owned and is never deleted by the runner.
 
 The checked-in 2026-08-01 two-node artifact is historical toy-dimension
 coverage. It is not production closure evidence and must not be relabeled as
