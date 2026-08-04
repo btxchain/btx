@@ -28,7 +28,7 @@ The v0.33.2 source freeze sets the v4, BMX4C, and Resident Curriculum heights
 to 185000, installs the reviewed RC ASERT policy coefficient, and sets both
 ratification constants in the same tuple. This is a live consensus instruction,
 not an inert placeholder. The sealed build-relevant fingerprint is
-`a2dd123a9468ae14afe5d5a5b35ae61572b9e1fdd664446acfd9f6aab22536c1`;
+`26d8be9eff7307928f70a7c13d88ba57cef222a6f77dfcfa3c12d14c618dcd10`;
 changing the height, coefficient, gate flags, or fingerprinted source requires
 a new CUDA+Metal corpus and startup-canary manifest. Testnet and signet heights
 remain disabled. See `doc/btx-matmul-v4.7-transition-roadmap.md` for the
@@ -46,6 +46,12 @@ automatic production fallback. The sanitized CUDA+Metal corpus and strict
 startup-canary policy record the supported launch classes; each deployed
 binary still self-qualifies its live provider and runtime before advertising
 readiness.
+
+The release assets include a mainnet AssumeUTXO snapshot at height 179000.
+Verify the signed release checksums, then load `snapshot.dat` with
+`btx-cli -rpcclienttimeout=0 loadtxoutset /path/to/snapshot.dat` to reduce
+foreground catch-up to the remaining blocks after that height. The node keeps
+validating the historical chain in the background.
 
 # Notable Changes
 
@@ -223,10 +229,10 @@ See `doc/btx-matmul-trusted-rpc-mirrors.md` and
   engineering evidence. The hardened comparator requires an exact code-freeze
   revision, source-tree fingerprint, harness-binary identity, and coherent raw
   provider metadata. The final CUDA+Metal nonce 1-8 cohort was generated from
-  exact clean freeze `6d115a67ddda46e764efe7f0ee68d4a52927142e`, fingerprint
-  `a2dd123a9468ae14afe5d5a5b35ae61572b9e1fdd664446acfd9f6aab22536c1`,
-  and sealed at `0828f03699235a202eaeeb6f25153a1b8373ceea`. Both providers
-  produced byte-identical headers and digests with zero CPU fallback.
+  exact clean freeze `540ce328776e24dc4cf97592e239a125ab8b2c0f`, fingerprint
+  `26d8be9eff7307928f70a7c13d88ba57cef222a6f77dfcfa3c12d14c618dcd10`.
+  Both providers produced byte-identical headers and digests with zero CPU
+  fallback; the evidence-only seal is the direct descendant of that freeze.
   Cross-revision equality remains non-evidence.
 
 ## Cumulative wallet and notification support

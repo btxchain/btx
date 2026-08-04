@@ -17,8 +17,8 @@ change consensus parameters, or alter ratification flags.
 
 | | |
 |---|---|
-| Source revision | `6d115a67ddda46e764efe7f0ee68d4a52927142e` |
-| Build-relevant tree fingerprint | `a2dd123a9468ae14afe5d5a5b35ae61572b9e1fdd664446acfd9f6aab22536c1` |
+| Source revision | `540ce328776e24dc4cf97592e239a125ab8b2c0f` |
+| Build-relevant tree fingerprint | `26d8be9eff7307928f70a7c13d88ba57cef222a6f77dfcfa3c12d14c618dcd10` |
 | Episode profile | 1 (Epoch-A consensus shape) |
 | Episodes | 8 |
 
@@ -53,7 +53,7 @@ previously accepted cohort.
 | CPU GEMM calls / MACs / fallbacks | 0 / 0 / 0 | 0 / 0 / 0 |
 | `fully_accelerated` | true | true |
 | ExtractMX self-qualification | PASS | PASS |
-| Harness SHA-256 | `73e5b16a599666fa774d5e2dcf619034cf15d5ac84f9fb7118b3453c18c69e0e` | `0f402914cf75fdce22bbf70166381f3134127fb12b15c5c5f44f64ebdb921e53` |
+| Harness SHA-256 | `fba686a97ed5537de23d455965e39b5ff62483c722fd97c8db10b5c3270d9b18` | `9371b03d7123eec651be124b82d0e8a8d6feab121795ad96335af535d47c0b1a` |
 
 Per-phase wall times differ between providers, as they must — they are different
 machines. Nothing consensus-bearing differs.
