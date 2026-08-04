@@ -502,10 +502,10 @@ BOOST_AUTO_TEST_CASE(matmul_consensus_tier_compact_block_boundary_policy)
     BOOST_REQUIRE_EQUAL(peerman.GetDesirableServiceFlags(base), base);
 
     // The first RC child is not yet authenticated chainwork, so an ordinary
-    // peer remains able to deliver its body. Only local ExactReplay can move
-    // the active chain across the boundary. RC is digest-recompute and compact
-    // blocks do not carry its full body, so the production BIP152 path must ask
-    // the announcing peer for that block with GETDATA.
+    // peer remains able to announce its header and deliver its body. Only local
+    // ExactReplay can move the active chain across the boundary. In particular,
+    // indexing an unauthenticated boundary header must not rotate away the only
+    // available body source.
     CBlock boundary_candidate = node::BlockAssembler{
         m_node.chainman->ActiveChainstate(), nullptr, {}, m_node}
                                     .CreateNewBlock()
@@ -519,22 +519,52 @@ BOOST_AUTO_TEST_CASE(matmul_consensus_tier_compact_block_boundary_policy)
                         boundary_merkle_root);
     BOOST_REQUIRE_EQUAL(BlockMerkleRoot(boundary_candidate),
                         boundary_merkle_root);
-    CBlockHeaderAndShortTxIDs pre_boundary_compact{boundary_candidate, 1};
+    std::vector<CBlock> boundary_headers{
+        CBlock{boundary_candidate.GetBlockHeader()}};
     auto pre_boundary_msg{NetMsg::Make(
-        NetMsgType::CMPCTBLOCK, TX_WITH_WITNESS(pre_boundary_compact))};
+        NetMsgType::HEADERS, TX_WITH_WITNESS(boundary_headers))};
     BOOST_REQUIRE(connman.ReceiveMsgFrom(pre_boundary_peer,
                                          std::move(pre_boundary_msg)));
     pre_boundary_peer.fPauseSend = false;
     (void)connman.ProcessMessagesOnce(pre_boundary_peer);
 
+    const CBlockIndex* boundary_index{WITH_LOCK(
+        ::cs_main,
+        return m_node.chainman->m_blockman.LookupBlockIndex(
+            boundary_candidate.GetHash()))};
+    BOOST_REQUIRE(boundary_index != nullptr);
+    BOOST_CHECK(!WITH_LOCK(
+        ::cs_main,
+        return (boundary_index->nStatus & BLOCK_HAVE_DATA) != 0));
+    BOOST_CHECK_EQUAL(
+        WITH_LOCK(::cs_main,
+                  return boundary_index->nAuthenticatedChainWork.GetHex()),
+        tip->nAuthenticatedChainWork.GetHex());
+    BOOST_CHECK(WITH_LOCK(
+        ::cs_main, return boundary_index->nChainWork >
+                               boundary_index->nAuthenticatedChainWork));
+    BOOST_CHECK_EQUAL(
+        WITH_LOCK(::cs_main,
+                  return m_node.chainman->ActiveChain().Tip()->GetBlockHash()),
+        tip->GetBlockHash());
+    BOOST_CHECK_EQUAL(
+        WITH_LOCK(::cs_main,
+                  return m_node.chainman->m_best_header->GetBlockHash()),
+        tip->GetBlockHash());
+
     CNodeStateStats pre_boundary_stats;
     BOOST_REQUIRE(peerman.GetNodeStateStats(pre_boundary_peer.GetId(),
                                              pre_boundary_stats));
-    BOOST_CHECK(pre_boundary_stats.vHeightInFlight.empty());
+    BOOST_REQUIRE_EQUAL(pre_boundary_stats.vHeightInFlight.size(), 1U);
+    BOOST_CHECK_EQUAL(pre_boundary_stats.vHeightInFlight.front(),
+                      boundary_height);
     BOOST_CHECK(HasQueuedMessageType(pre_boundary_peer, NetMsgType::GETDATA));
     BOOST_CHECK(!HasQueuedMessageType(pre_boundary_peer,
                                       NetMsgType::GETBLOCKTXN));
     BOOST_CHECK_EQUAL(peerman.GetDesirableServiceFlags(base), base);
+    BOOST_CHECK(pre_boundary_stats.m_preferred_download);
+    BOOST_CHECK(peerman.SendMessages(&pre_boundary_peer));
+    BOOST_CHECK(!pre_boundary_peer.fDisconnect);
     BOOST_REQUIRE_EQUAL(boundary_candidate.hashMerkleRoot,
                         boundary_merkle_root);
     BOOST_REQUIRE_EQUAL(BlockMerkleRoot(boundary_candidate),
@@ -552,6 +582,11 @@ BOOST_AUTO_TEST_CASE(matmul_consensus_tier_compact_block_boundary_policy)
         WITH_LOCK(::cs_main,
                   return m_node.chainman->ActiveChain().Tip()->GetBlockHash()),
         boundary_candidate.GetHash());
+    BOOST_CHECK_EQUAL(
+        peerman.GetDesirableServiceFlags(base),
+        ServiceFlags(base | NODE_MATMUL_CONSENSUS));
+    BOOST_CHECK(peerman.SendMessages(&pre_boundary_peer));
+    BOOST_CHECK(pre_boundary_peer.fDisconnect);
 
     // After the local authenticated tip is RC-active, the same class of peer
     // may still relay a header but must not allocate any compact/full block

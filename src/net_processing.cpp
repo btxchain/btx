@@ -2813,21 +2813,15 @@ bool PeerManagerImpl::RequireMatMulConsensusPeersForSync() const
     // Pre-activation parents are ordinary MatMul/PoW and must remain syncable
     // between self-qualified lab nodes that have not yet passed the production
     // golden canary (and therefore do not advertise NODE_MATMUL_CONSENSUS).
-    // Once a local tip/header has entered ENC_RC, prefer consensus-tier peers
-    // for further download. Operators still need an explicit noban whitelist
-    // (or a production-ready peer) to sync RC bodies before the canary passes.
-    // cs_main is RecursiveMutex; callers may already hold it.
-    int height = 0;
-    {
-        LOCK(cs_main);
-        if (const CBlockIndex* tip = m_chainman.ActiveChain().Tip()) {
-            height = std::max(height, tip->nHeight);
-        }
-        if (const CBlockIndex* best = m_chainman.m_best_header) {
-            height = std::max(height, best->nHeight);
-        }
-    }
-    return consensus.IsMatMulRCActive(height);
+    // Rotate to consensus-tier peers only after local body validation and the
+    // selected MatMul authority have advanced the authenticated active tip.
+    // A header-only first RC child has no authenticated chainwork yet; using a
+    // merely best-known header here could disconnect the ordinary peer before
+    // its body is fetched. cs_main is RecursiveMutex; callers may already hold
+    // it.
+    LOCK(cs_main);
+    const CBlockIndex* tip = m_chainman.ActiveChain().Tip();
+    return tip != nullptr && consensus.IsMatMulRCActive(tip->nHeight);
 }
 
 bool PeerManagerImpl::IsPeerEligibleForMatMulSync(
