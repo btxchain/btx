@@ -1,11 +1,15 @@
 # BTX Deployment Readiness Assessment (Rev 2)
 
-> **Historical assessment (2026-02-17).** Its “near production-ready” verdict
-> predates MatMul v4.7 and is not an activation verdict for this branch.
-> Profile 1 ExactReplay is the proposed Epoch-A authority; mandatory and then
-> authoritative Profile 1 proofs are Epochs B/C; Profile 2 proof authority is
-> a separate Epoch D. Mainnet Epoch A (v4 = BMX4C = RC) has a finite compiled candidate height and true source flags, so it would activate if merged unchanged; release remains NO-GO pending exact-final combined-tree CUDA+Metal evidence, reviewed schema-4 ASERT calibration, ratification re-affirmation, full closeout, and live-tip runway validation; all other transition heights remain disabled. See
-> [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md).
+> **Historical provenance / current deferral.** This document preserves a dated
+> design, audit, or measurement record; its body is not the current activation
+> plan. This later, untagged corrective source keeps public-network Epoch A
+> (`v4 = BMX4C = RC`) disabled at `INT32_MAX`, with RC ASERT `1/1` and
+> GPU-lifecycle ratification false. The public `btxchain/btx` signed annotated
+> `v0.33.2` tag, GitHub release, binaries, checksums, and height-179000 snapshot
+> assets identify the earlier `H=185000` source tree, not this corrective tree.
+> Publishing the correction requires an explicit public release/tag/version
+> disposition and regenerated artifacts. See the
+> [canonical transition roadmap](btx-matmul-v4.7-transition-roadmap.md).
 
 **Date**: 2026-02-17
 **Reviewer**: Claude (static code analysis against actual source)

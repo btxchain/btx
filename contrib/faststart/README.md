@@ -346,20 +346,29 @@ solves/hour with this worker budget”; it returns the direct issuance defaults
 plus the closest built-in profile matches for the current network state.
 
 For agentic clients that do solve locally, `solvematmulservicechallenge` now
-accepts optional `time_budget_ms` and `solver_threads` arguments so a client
-can cap how long or how wide the local solver runs in the background.
+accepts optional `time_budget_ms` and `solver_threads` arguments. These are
+cooperative controls, not a v4 hard cap: S8/BMX4C check the time budget only
+between complete nonce attempts, and their exact single-nonce dispatch does
+not apply the legacy solver-thread hint. The result reports
+`time_budget_hard_cap`, `time_budget_check_scope`, `solver_threads_applied`,
+and `solver_threads_scope` so automation cannot mistake the hint for a hard
+resource guarantee.
 High-volume verification services can keep proof checking stateless by passing
 `false` as the final argument to `verifymatmulserviceproof` or
 `verifymatmulserviceproofs`, which skips the local/shared issued-challenge
 registry lookup and omits the local issuance/redeem fields from the result.
 
 Service challenges follow the encoding profile at their anchored proof height.
-The RPC supports the carried-sketch ENC-S8, ENC-BMX4C, and Phase-A
-ENC-BMX4C-LT profiles. It fails closed for ENC-RC, ENC-RC-COUPLED, and LT
-seal-as-PoW rather than silently accepting a different workload or starting an
-unbudgeted ExactReplay. Operators at those profiles should use a separate
-admission mechanism until a budgeted, cheaply verifiable service-proof format
-is defined.
+The RPC supports only legacy v3, ENC-S8, and ENC-BMX4C. It fails closed for
+every ENC-BMX4C-LT mode because the production LT proof cannot fit the ordinary
+HTTP JSON-RPC envelope, and for ENC-RC / ENC-RC-COUPLED because those profiles
+require replay work outside the network verifier's admission and scheduler
+budgets. Unsupported next-height profiles are rejected before block-template
+assembly and rechecked against the assembled template's parent. Profile,
+catalog, planner, and issuance responses expose `service_proof_support` with a
+stable `status` / `reason` and operation-specific support booleans. Operators
+at unsupported profiles should use a separate admission mechanism until an
+appropriately transported and budgeted service-proof format is defined.
 
 Operators can watch `getdifficultyhealth` for
 `service_challenge_registry.status`, `healthy`, `path`, and `quarantine_path`.

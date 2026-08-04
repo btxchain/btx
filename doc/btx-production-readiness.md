@@ -13,16 +13,15 @@ defined in
 
 ## Current MatMul v4.7 candidate status: NO-GO
 
-The current candidate source is activation-armed: the mainnet Epoch-A v4,
-BMX4C, and RC heights are atomically set to `185000`; the RC ASERT ratio is
-`6931159304/1`; and both public ratification records are `true`. These are
-candidate source values, not evidence that the release is ready or that the
-currently deployed network has activated them.
+The corrective source is fail-closed: mainnet Epoch-A v4, BMX4C, and RC heights
+are `INT32_MAX`; the live RC ASERT ratio is `1/1`; and the GPU-lifecycle
+ratification record is false. The Profile-1 implementation and a staged ASERT
+coefficient remain available for review, but they cannot activate the network.
 
-The ASERT ratio is a **ratified policy coefficient**, not a reproduced
-measurement. The first assembled schema-4 corpus
+The staged ASERT ratio is a **policy candidate**, not live consensus or a
+reproduced final measurement. The first assembled schema-4 corpus
 (`doc/evidence/epoch-a-asert-schema4-cuda-2026-08-04`) derives `4007014530` on
-the CUDA launch cohort at the implementation freeze; the installed value is
+the CUDA launch cohort at the implementation freeze; the staged value is
 1.730x that envelope, chosen because the error is asymmetric — too low risks
 stalled blocks at the fork, too high yields temporarily fast blocks that ASERT
 corrects. See the rationale in `src/kernel/chainparams.cpp`.
@@ -40,8 +39,8 @@ rehearsal, and full unit and functional-suite closeout. The review must also
 record the disposition of the required soak, multi-peer testnet,
 fault/recovery, and released-binary campaigns. The tuple must be rechecked
 against the live mainnet tip immediately before the final source freeze so its
-upgrade runway remains adequate. Until then, do not merge or ship: the armed
-height and true flags would take effect if this source were released.
+upgrade runway remains adequate. Until then, do not set a finite height or
+claim activation readiness.
 
 For shielded launch scope, this runbook must be read together with
 `doc/btx-shielded-production-status-2026-03-20.md` and

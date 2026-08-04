@@ -1032,8 +1032,8 @@ BOOST_AUTO_TEST_CASE(rc_dc_episode_profile1_byte_identical_guard)
     BOOST_CHECK(!RCEpisodeParamsEqual(dc, base));
 }
 
-// (d) The profile selector is 1|2; MatMul v4.7 defaults to Profile 1
-//     ExactReplay. Mainnet uses one release-selected atomic Epoch-A height.
+// (d) The profile selector is 1|2; MatMul v4.7 stages Profile 1 ExactReplay
+//     while mainnet keeps its atomic Epoch-A tuple disabled.
 BOOST_AUTO_TEST_CASE(rc_dc_episode_profile_selector_default_and_mainnet)
 {
     Consensus::Params def;
@@ -1042,15 +1042,11 @@ BOOST_AUTO_TEST_CASE(rc_dc_episode_profile_selector_default_and_mainnet)
     const auto main =
         CreateChainParams(ArgsManager{}, ChainType::MAIN)->GetConsensus();
     BOOST_CHECK_EQUAL(main.nMatMulRCProfile, 1u);
-    // RC is inactive below the release-selected height. This case deliberately
-    // avoids pinning a decaying calendar value while still pinning the atomic
-    // v4/BMX4C/RC relationship.
-    BOOST_CHECK(main.nMatMulRCHeight != std::numeric_limits<int32_t>::max());
+    BOOST_CHECK_EQUAL(main.nMatMulRCHeight, std::numeric_limits<int32_t>::max());
     BOOST_CHECK_EQUAL(main.nMatMulRCHeight, main.nMatMulV4Height);
     BOOST_CHECK_EQUAL(main.nMatMulRCHeight, main.nMatMulBMX4CHeight);
     BOOST_CHECK(!main.IsMatMulRCActive(0));
-    BOOST_CHECK(!main.IsMatMulRCActive(main.nMatMulRCHeight - 1));
-    BOOST_CHECK(main.IsMatMulRCActive(main.nMatMulRCHeight));
+    BOOST_CHECK(!main.IsMatMulRCActive(185'000));
     BOOST_CHECK(RCEpisodeParamsEqual(rc::ResolveRCEpisodeParams(main, 0),
                                      rc::DefaultConsensusRCEpisodeParams()));
 
@@ -2914,17 +2910,14 @@ BOOST_AUTO_TEST_CASE(rc_dc_authority_invariant_accepts_aggressive_config)
     BOOST_CHECK_EQUAL(reg.nMatMulRCAsertRescaleNum, 16422);
     BOOST_CHECK_EQUAL(reg.nMatMulRCAsertRescaleDen, 1027);
 
-    // Mainnet constructs with the MatMul v4.7 Epoch-A shape (Profile 1) at its
-    // release-candidate height with an installed, NON-neutral RC ASERT
-    // coefficient. AssertBMX4CConstructionInvariants refuses a neutral rescale
-    // at a live Profile-1 height, so a clean construct here is the positive
-    // assertion that the height and the coefficient are coupled correctly.
+    // Mainnet stages the Profile-1 implementation but keeps the transition and
+    // its live ASERT coefficient disabled.
     const auto main = CreateChainParams(ArgsManager{}, ChainType::MAIN)->GetConsensus();
     BOOST_CHECK_EQUAL(main.nMatMulRCProfile, 1u);
-    BOOST_CHECK(main.nMatMulRCHeight != std::numeric_limits<int32_t>::max());
+    BOOST_CHECK_EQUAL(main.nMatMulRCHeight, std::numeric_limits<int32_t>::max());
     BOOST_CHECK_EQUAL(main.nMatMulRCHeight, main.nMatMulV4Height);
     BOOST_CHECK_EQUAL(main.nMatMulRCHeight, main.nMatMulBMX4CHeight);
-    BOOST_CHECK(main.nMatMulRCAsertRescaleNum != main.nMatMulRCAsertRescaleDen);
+    BOOST_CHECK_EQUAL(main.nMatMulRCAsertRescaleNum, 1);
     BOOST_CHECK_EQUAL(main.nMatMulRCAsertRescaleDen, 1);
 }
 

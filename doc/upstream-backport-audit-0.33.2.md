@@ -1,3 +1,16 @@
+> **Historical provenance / current deferral.** This document preserves a dated
+> design, audit, or measurement record; its body is not the current activation
+> plan. This later, untagged corrective source keeps public-network Epoch A
+> (`v4 = BMX4C = RC`) disabled at `INT32_MAX`, with RC ASERT `1/1` and
+> GPU-lifecycle ratification false. The public `btxchain/btx` signed annotated
+> `v0.33.2` tag, GitHub release, binaries, checksums, and height-179000 snapshot
+> assets identify the earlier `H=185000` source tree, not this corrective tree.
+> Publishing the correction requires an explicit public release/tag/version
+> disposition and regenerated artifacts. See the
+> [canonical transition roadmap](btx-matmul-v4.7-transition-roadmap.md).
+
+---
+
 # Bitcoin Core and Bitcoin Knots catch-up audit for BTX 0.33.2
 
 ## Decision
@@ -8,12 +21,12 @@ from the supplied screenshot, and a second pass over merged and open upstream
 work for release-relevant correctness, storage, wallet, networking, and
 performance changes.
 
-The result is recommended for review and CI as a release candidate, not as an
-already-approved public release. BTX still has no published `v0.33.2` tag. The
-integration baseline is the BTX 0.33.2 release candidate, whose release notes
-still describe 0.33.2 as being prepared. Platform validation,
-reproducible builds, the production activation gates, and final integration
-with BTX-local work remain required before cutting the tag.
+At the audit cutoff, the result was recommended for review as a release
+candidate, not as an already-approved public release, and no `v0.33.2` tag yet
+existed. Platform validation, reproducible builds, production activation gates,
+and final integration with BTX-local work were still required before a tag
+could be considered. The banner above records the later tag and corrective
+state; this historical audit does not authorize either tree for release.
 
 The parallel work also remains independently reviewable through its historical
 focused compatibility-boundary review. The aggregate branch does not replace

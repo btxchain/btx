@@ -1,9 +1,13 @@
-> **HISTORICAL v4.6 PROOF WORKPLAN.** Retained for provenance; it does not
-> describe the MatMul v4.7 launch candidate or grant consensus authority.
-> Epoch A uses Profile-1 ExactReplay with optional shadow proof; Epoch B
-> requires durable proof plus replay; Epoch C retains Profile 1 under proof
-> authority; Profile 2 is reserved for Epoch D. See
-> `doc/btx-matmul-v4.7-transition-roadmap.md`. Mainnet Epoch A (v4 = BMX4C = RC) has a finite compiled candidate height and true source flags, so it would activate if merged unchanged; release remains NO-GO pending exact-final combined-tree CUDA+Metal evidence, reviewed schema-4 ASERT calibration, ratification re-affirmation, full closeout, and live-tip runway validation; all other transition heights remain disabled.
+> **Historical provenance / current deferral.** This document preserves a dated
+> design, audit, or measurement record; its body is not the current activation
+> plan. This later, untagged corrective source keeps public-network Epoch A
+> (`v4 = BMX4C = RC`) disabled at `INT32_MAX`, with RC ASERT `1/1` and
+> GPU-lifecycle ratification false. The public `btxchain/btx` signed annotated
+> `v0.33.2` tag, GitHub release, binaries, checksums, and height-179000 snapshot
+> assets identify the earlier `H=185000` source tree, not this corrective tree.
+> Publishing the correction requires an explicit public release/tag/version
+> disposition and regenerated artifacts. See the
+> [canonical transition roadmap](btx-matmul-v4.7-transition-roadmap.md).
 
 # BTX MatMul v4.6 — coupled v7 production-succinct workplan
 

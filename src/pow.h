@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cstddef>
 #include <limits>
+#include <map>
 #include <memory>
 #include <optional>
 #include <stdint.h>
@@ -220,8 +221,10 @@ bool ValidateMatMulAsertParams(const Consensus::Params& params, int32_t next_hei
  *  reduced terms fit in uint32. Prevents ScaleTargetByTimespan's independent
  *  per-term uint32 clamp from distorting a large-but-exact ratio (e.g. 2^40/2^39).*/
 bool ReduceRescaleRatioToU32(int64_t num, int64_t den, uint32_t& out_num, uint32_t& out_den);
-/** 64-bit reduction for paths that do exact wide arithmetic and are therefore
- *  not bound by ScaleTargetByTimespan's UINT32_MAX per-argument clamp. */
+/** Signed-consensus-field reduction for paths that do exact wide arithmetic
+ *  and are therefore not bound by ScaleTargetByTimespan's UINT32_MAX clamp.
+ *  Inputs are int64_t consensus parameters; outputs are uint64_t solely for
+ *  the subsequent non-negative wide arithmetic. */
 bool ReduceRescaleRatioToU64(int64_t num, int64_t den, uint64_t& out_num, uint64_t& out_den);
 /**
  * Derive the atomic v3 -> Epoch-A target from the live parent target.
@@ -359,6 +362,18 @@ enum class MatMulRCValidationOutcome : uint8_t {
  * expiring, and single-use. It authorizes only reuse of the already completed
  * Profile-1 ExactReplay; it never bypasses block-body or script validation.
  */
+struct MatMulRCWinnerAuthoritySample {
+    std::string block_hash;
+    int32_t height{0};
+    uint64_t solve_attempts{0};
+    double solve_to_reseal_s{0};
+    double reseal_to_consume_s{0};
+    double solve_to_consume_s{0};
+    std::string provider;
+};
+
+inline constexpr size_t MATMUL_RC_WINNER_AUTHORITY_SAMPLE_MAX{32};
+
 struct MatMulRCWinnerAuthorityStats {
     uint64_t published{0};
     uint64_t consumed{0};
@@ -369,10 +384,15 @@ struct MatMulRCWinnerAuthorityStats {
     uint64_t evicted{0};
     uint64_t misses{0};
     uint64_t entries{0};
-    double last_candidate_to_reseal_s{0};
+    double last_solve_to_reseal_s{0};
     double last_reseal_to_consume_s{0};
-    double last_candidate_to_consume_s{0};
+    double last_solve_to_consume_s{0};
     std::string last_provider;
+    /** Authorities consumed by provider since process start. This is bounded by
+     *  the process-qualified provider registry and lets evidence tooling prove
+     *  that every handoff in a rehearsal came from the canary-bound provider. */
+    std::map<std::string, uint64_t> consumed_by_provider;
+    std::vector<MatMulRCWinnerAuthoritySample> recent_consumed;
 };
 
 bool PublishMatMulRCWinnerResealAuthority(
@@ -382,8 +402,9 @@ bool PublishMatMulRCWinnerResealAuthority(
     const matmul::v4::lt::ExactGemmBackend& backend,
     const Consensus::Params& consensus,
     std::chrono::milliseconds ttl,
-    std::chrono::steady_clock::time_point candidate_started,
-    std::chrono::steady_clock::time_point reseal_completed);
+    std::chrono::steady_clock::time_point solve_started,
+    std::chrono::steady_clock::time_point reseal_completed,
+    uint64_t solve_attempts);
 
 bool ConsumeMatMulRCWinnerResealAuthority(
     const CBlockHeader& header, int32_t block_height,

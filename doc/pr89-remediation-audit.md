@@ -1,5 +1,12 @@
 # PR #89 integration audit and remediation plan
 
+> **Historical release-state notice.** Release observations in the body below
+> are preserved as of this audit's 2026-07-16 status date. The public
+> `btxchain/btx` v0.33.2 tag and GitHub release were subsequently published from
+> the earlier `H=185000` source tree with binaries, checksums, and snapshot
+> assets. The later untagged corrective source disables Epoch A; publishing it
+> requires an explicit public release/tag/version disposition.
+
 Status date: 2026-07-16
 Upstream PR: `btxchain/btx#89`
 Audited upstream head: `c324361bedc801607a133269109b22901a121d93`
@@ -158,9 +165,11 @@ At the 2026-07-16 10:44 UTC planning snapshot, btxprice reported:
 - v0.32.12: `152/213` observed peers (`71.36%`);
 - v0.33.2: no observed peers.
 
-There is no published v0.33.2 GitHub release/tag. A flag-day fork on this
-schedule would split the overwhelming majority of the observed network even if
-the implementation were otherwise safe.
+At this audit's 2026-07-16 snapshot there was no published v0.33.2 GitHub
+release/tag. A flag-day fork on that schedule would have split the overwhelming
+majority of the observed network even if the implementation were otherwise
+safe. The later public release state is recorded in the historical notice
+above.
 
 Required fix:
 

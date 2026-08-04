@@ -440,16 +440,16 @@ class EpochAAsertCalibrationTest(unittest.TestCase):
         sample["exact_replay_acceleration"]["device_macs"] = MACS * 2
         self.assert_rejected(value, "at least three RC episode runs")
 
-    def test_coefficient_must_fit_uint64(self) -> None:
+    def test_coefficient_must_fit_consensus_int64(self) -> None:
         value = payload()
         for sample in value["rigs"][0]["mixed_mode_samples"]:
-            sample["tries"] = MODULE.UINT64_MAX
-            sample["attempts_done"] = MODULE.UINT64_MAX
-            sample["wall_s"] = "0.000000000000000001"
+            sample["tries"] = MODULE.INT64_MAX
+            sample["attempts_done"] = MODULE.INT64_MAX
+            sample["wall_s"] = "0.5"
             sample["attempts_per_s"] = str(
-                MODULE.Decimal(MODULE.UINT64_MAX) / MODULE.Decimal("0.000000000000000001")
+                MODULE.Decimal(MODULE.INT64_MAX) / MODULE.Decimal("0.5")
             )
-        self.assert_rejected(value, "outside uint64 range")
+        self.assert_rejected(value, "outside int64 range")
 
     def test_revision_must_resolve_to_that_exact_commit(self) -> None:
         tree = subprocess.run(
@@ -472,6 +472,14 @@ class EpochAAsertCalibrationTest(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaises(Exception):
                     MODULE.parse_uint64(value)
+
+    def test_consensus_coefficient_cli_parser_is_int64_bounded(self) -> None:
+        self.assertEqual(MODULE.parse_int64("0"), 0)
+        self.assertEqual(MODULE.parse_int64(str(MODULE.INT64_MAX)), MODULE.INT64_MAX)
+        for value in (str(MODULE.INT64_MAX + 1), str(MODULE.UINT64_MAX)):
+            with self.subTest(value=value):
+                with self.assertRaises(Exception):
+                    MODULE.parse_int64(value)
 
 
 if __name__ == "__main__":

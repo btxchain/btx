@@ -338,19 +338,25 @@ Operational note:
   user-visible solve target into an acceptable UX envelope
 - `solvematmulservicechallenge` is useful for local automation, smoke tests,
   and agent-controlled clients that want the node to solve a challenge directly
-- local solvers can now pass `time_budget_ms` and `solver_threads` to keep
-  challenge work inside an idle-time or background-execution budget
+- local solvers can pass `time_budget_ms` and `solver_threads` as cooperative
+  controls. They are not a v4 hard cap: S8/BMX4C check elapsed time only
+  between complete nonce attempts and do not apply the legacy solver-thread
+  hint. Inspect the returned `time_budget_hard_cap`,
+  `time_budget_check_scope`, `solver_threads_applied`, and
+  `solver_threads_scope` fields before enforcing an operator budget
 - `verifymatmulserviceproof` and `verifymatmulserviceproofs` accept an optional
   final boolean, `include_local_registry_status`; set it to `false` for
   stateless high-volume verification when you do not need local
   issued/redeemed/redeemable flags
 - service challenges use the encoding profile selected at their anchored
-  proof height. ENC-S8, ENC-BMX4C, and Phase-A ENC-BMX4C-LT challenges use
-  their matching sketch implementation. Issuance, solving, and verification
-  fail closed while ENC-RC, ENC-RC-COUPLED, or LT seal-as-PoW is selected:
-  those regimes do not have the cheap carried-sketch proof this application
-  RPC promises, and the RPC must not silently substitute BMX4C work or launch
-  an unbudgeted ExactReplay
+  proof height. Only legacy v3, ENC-S8, and ENC-BMX4C are supported. All
+  ENC-BMX4C-LT modes fail closed because the production LT proof cannot fit
+  the service JSON-RPC transport; ENC-RC and ENC-RC-COUPLED fail closed because
+  they require replay work outside the network verifier's budgets. Issuance
+  checks the predicted next height before template assembly and rechecks the
+  assembled template's anchored height. Profile, catalog, planner, and issued
+  challenge responses expose `service_proof_support.status`, `reason`, and
+  per-operation support booleans for machine-readable gating
 
 ## 4. What release maintainers need to publish
 

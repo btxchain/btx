@@ -1418,6 +1418,44 @@ BOOST_AUTO_TEST_CASE(rc_execution_policy_and_last_replay_telemetry)
         rc::ExactReplayVerifyOutcomeName(last->outcome), "valid");
     BOOST_CHECK_EQUAL(last->digest, result.digest);
     BOOST_CHECK_EQUAL(last->cpu_gemm_calls, result.cpu_gemm_calls);
+    BOOST_CHECK_EQUAL(last->block_hash, header.GetHash());
+    BOOST_CHECK_EQUAL(last->block_height, 0);
+    const auto recent{rc::GetRecentExactReplayVerifyResults()};
+    BOOST_REQUIRE_EQUAL(recent.size(), 1U);
+    BOOST_CHECK_EQUAL(recent[0].block_hash, header.GetHash());
+    BOOST_CHECK_EQUAL(recent[0].block_height, 0);
+
+    CBlockHeader cancelled_header{header};
+    ++cancelled_header.nNonce64;
+    cancelled_header.nNonce =
+        static_cast<uint32_t>(cancelled_header.nNonce64);
+    cancelled_header.matmul_digest =
+        rc::RecomputeResidentCurriculumReference(
+            cancelled_header, params, /*height=*/0);
+    std::atomic_bool cancelled{true};
+    {
+        rc::ScopedExactReplayCancellation cancellation_scope{&cancelled};
+        rc::SetRCExactReplayExecutionPolicy(
+            rc::RCExactReplayExecutionPolicy::CpuDiagnostic);
+        const auto cancelled_result{rc::VerifyBoundedExactReplay(
+            cancelled_header, params, /*height=*/0)};
+        rc::SetRCExactReplayExecutionPolicy(saved_policy);
+        BOOST_CHECK(
+            cancelled_result.outcome ==
+            rc::ExactReplayVerifyOutcome::Cancelled);
+        BOOST_CHECK_EQUAL(
+            cancelled_result.block_hash,
+            cancelled_header.GetHash());
+    }
+    const auto with_cancelled{
+        rc::GetRecentExactReplayVerifyResults()};
+    BOOST_REQUIRE_EQUAL(with_cancelled.size(), 2U);
+    BOOST_CHECK_EQUAL(
+        with_cancelled.back().block_hash,
+        cancelled_header.GetHash());
+    BOOST_CHECK(
+        with_cancelled.back().outcome ==
+        rc::ExactReplayVerifyOutcome::Cancelled);
 }
 
 BOOST_AUTO_TEST_CASE(
@@ -3461,16 +3499,16 @@ BOOST_AUTO_TEST_CASE(
     header.matmul_dim = 4096;
     header.matmul_digest = uint256{1};
     const arith_uint256 block_target{2};
-    const auto candidate_started{
-        std::chrono::steady_clock::now()};
     const auto reseal_completed{
-        candidate_started + std::chrono::milliseconds{2}};
+        std::chrono::steady_clock::now()};
+    const auto solve_started{
+        reseal_completed - std::chrono::milliseconds{2}};
 
     BOOST_REQUIRE(PublishMatMulRCWinnerResealAuthority(
         header, /*block_height=*/100, block_target, provider,
         capability, backend, consensus,
-        std::chrono::seconds{1}, candidate_started,
-        reseal_completed));
+        std::chrono::seconds{1}, solve_started,
+        reseal_completed, /*solve_attempts=*/3));
 
     // Any fixed-header identity or contextual-height change misses without
     // consuming the exact original record.
@@ -3493,19 +3531,49 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(stats.consumed, 1U);
     BOOST_CHECK_EQUAL(stats.entries, 0U);
     BOOST_CHECK_GE(stats.misses, 3U);
-    BOOST_CHECK_GT(stats.last_candidate_to_reseal_s, 0.0);
+    BOOST_CHECK_GT(stats.last_solve_to_reseal_s, 0.0);
+    BOOST_REQUIRE_EQUAL(stats.consumed_by_provider.size(), 1U);
+    BOOST_CHECK_EQUAL(
+        stats.consumed_by_provider.at("test:winner-device"), 1U);
+    BOOST_REQUIRE_EQUAL(stats.recent_consumed.size(), 1U);
+    BOOST_CHECK_EQUAL(
+        stats.recent_consumed[0].block_hash,
+        header.GetHash().ToString());
+    BOOST_CHECK_EQUAL(stats.recent_consumed[0].height, 100);
+    BOOST_CHECK_EQUAL(
+        stats.recent_consumed[0].provider, "test:winner-device");
+    BOOST_CHECK_EQUAL(stats.recent_consumed[0].solve_attempts, 3U);
+    BOOST_CHECK_GT(
+        stats.recent_consumed[0].solve_to_reseal_s, 0.0);
+    BOOST_CHECK_CLOSE(
+        stats.recent_consumed[0].solve_to_consume_s,
+        stats.recent_consumed[0].solve_to_reseal_s +
+            stats.recent_consumed[0].reseal_to_consume_s,
+        0.001);
+
+    // Callers cannot manufacture a negative reseal-to-consume interval with
+    // a completion timestamp that has not happened yet.
+    header.nNonce64 = 92;
+    header.matmul_digest = uint256{1};
+    const auto future_started{std::chrono::steady_clock::now()};
+    BOOST_CHECK(!PublishMatMulRCWinnerResealAuthority(
+        header, /*block_height=*/100, block_target, "test:winner-device",
+        capability, backend, consensus, std::chrono::seconds{1},
+        future_started, future_started + std::chrono::seconds{1},
+        /*solve_attempts=*/1));
 
     // An easier pool-share result must never authorize local block acceptance.
-    header.nNonce64 = 92;
+    header.nNonce64 = 93;
     header.matmul_digest = uint256{3};
     BOOST_CHECK(!PublishMatMulRCWinnerResealAuthority(
         header, /*block_height=*/100, block_target, "test:winner-device",
         capability, backend, consensus,
-        std::chrono::seconds{1}, candidate_started,
-        reseal_completed));
+        std::chrono::seconds{1}, solve_started,
+        reseal_completed, /*solve_attempts=*/1));
     stats = GetMatMulRCWinnerAuthorityStats();
-    BOOST_CHECK_EQUAL(stats.rejected_not_block_target, 1U);
+    BOOST_CHECK_EQUAL(stats.rejected_not_block_target, 2U);
     BOOST_CHECK_EQUAL(stats.entries, 0U);
+    BOOST_CHECK_EQUAL(stats.recent_consumed.size(), 1U);
 
     ResetMatMulRCWinnerAuthorityForTest();
     rc::ResetRCProductionCanaryForTest();
@@ -3532,23 +3600,25 @@ BOOST_AUTO_TEST_CASE(
     const rc::RCProductionProviderCapability empty_capability;
     BOOST_CHECK(!PublishMatMulRCWinnerResealAuthority(
         header, 100, block_target, "test:eligible", empty_capability,
-        backend, consensus, std::chrono::seconds{1}, started, started));
+        backend, consensus, std::chrono::seconds{1}, started, started,
+        /*solve_attempts=*/1));
     BOOST_CHECK(!PublishMatMulRCWinnerResealAuthority(
         header, 100, block_target, "test:forged-label", capability,
-        backend, consensus, std::chrono::seconds{1}, started, started));
+        backend, consensus, std::chrono::seconds{1}, started, started,
+        /*solve_attempts=*/1));
     lt::ExactGemmBackend different_backend;
     different_backend.gemm_s8s8 = &WrongGemmS8S8;
     BOOST_CHECK(!PublishMatMulRCWinnerResealAuthority(
         header, 100, block_target, "test:eligible", capability,
         different_backend, consensus, std::chrono::seconds{1}, started,
-        started));
+        started, /*solve_attempts=*/1));
     auto different_epoch{consensus};
     different_epoch.nMatMulV4Dimension = 2048;
     header.matmul_dim = 2048;
     BOOST_CHECK(!PublishMatMulRCWinnerResealAuthority(
         header, 100, block_target, "test:eligible", capability,
         backend, different_epoch, std::chrono::seconds{1}, started,
-        started));
+        started, /*solve_attempts=*/1));
     BOOST_CHECK_EQUAL(
         GetMatMulRCWinnerAuthorityStats().rejected_not_production_ready,
         4U);
@@ -3559,7 +3629,8 @@ BOOST_AUTO_TEST_CASE(
     header.matmul_dim = 4096;
     BOOST_REQUIRE(PublishMatMulRCWinnerResealAuthority(
         header, 100, block_target, "test:eligible", capability,
-        backend, consensus, std::chrono::seconds{1}, started, started));
+        backend, consensus, std::chrono::seconds{1}, started, started,
+        /*solve_attempts=*/1));
     rc::ResetRCProductionCanaryForTest();
     BOOST_CHECK(!ConsumeMatMulRCWinnerResealAuthority(
         header, 100, consensus));
@@ -3567,6 +3638,7 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(stats.consumed, 0U);
     BOOST_CHECK_EQUAL(stats.invalidated_before_consume, 1U);
     BOOST_CHECK_EQUAL(stats.entries, 0U);
+    BOOST_CHECK(stats.recent_consumed.empty());
 
     ResetMatMulRCWinnerAuthorityForTest();
     rc::ResetRCProductionCanaryForTest();
@@ -3590,7 +3662,8 @@ BOOST_AUTO_TEST_CASE(rc_winner_reseal_authority_expires_and_is_bounded)
 
     BOOST_REQUIRE(PublishMatMulRCWinnerResealAuthority(
         header, 100, block_target, provider, capability, backend, consensus,
-        std::chrono::milliseconds{1}, started, started));
+        std::chrono::milliseconds{1}, started, started,
+        /*solve_attempts=*/1));
     std::this_thread::sleep_for(std::chrono::milliseconds{5});
     BOOST_CHECK(!ConsumeMatMulRCWinnerResealAuthority(
         header, 100, consensus));
@@ -3602,11 +3675,41 @@ BOOST_AUTO_TEST_CASE(rc_winner_reseal_authority_expires_and_is_bounded)
         BOOST_REQUIRE(PublishMatMulRCWinnerResealAuthority(
             header, 100, block_target, provider, capability, backend,
             consensus,
-            std::chrono::seconds{1}, started, started));
+            std::chrono::seconds{1}, started, started,
+            /*solve_attempts=*/1));
     }
     const auto stats{GetMatMulRCWinnerAuthorityStats()};
     BOOST_CHECK_EQUAL(stats.entries, 16U);
     BOOST_CHECK_EQUAL(stats.evicted, 1U);
+
+    ResetMatMulRCWinnerAuthorityForTest();
+    std::vector<std::string> consumed_hashes;
+    for (uint64_t nonce = 0;
+         nonce < MATMUL_RC_WINNER_AUTHORITY_SAMPLE_MAX + 2;
+         ++nonce) {
+        header.nNonce64 = 400 + nonce;
+        header.nNonce = static_cast<uint32_t>(header.nNonce64);
+        consumed_hashes.push_back(header.GetHash().ToString());
+        BOOST_REQUIRE(PublishMatMulRCWinnerResealAuthority(
+            header, 100, block_target, provider, capability, backend,
+            consensus, std::chrono::seconds{1}, started, started,
+            /*solve_attempts=*/nonce + 1));
+        BOOST_REQUIRE(ConsumeMatMulRCWinnerResealAuthority(
+            header, 100, consensus));
+    }
+    const auto consumed_stats{GetMatMulRCWinnerAuthorityStats()};
+    BOOST_REQUIRE_EQUAL(
+        consumed_stats.recent_consumed.size(),
+        MATMUL_RC_WINNER_AUTHORITY_SAMPLE_MAX);
+    BOOST_CHECK_EQUAL(
+        consumed_stats.recent_consumed.front().block_hash,
+        consumed_hashes[2]);
+    BOOST_CHECK_EQUAL(
+        consumed_stats.recent_consumed.back().block_hash,
+        consumed_hashes.back());
+    BOOST_CHECK_EQUAL(
+        consumed_stats.recent_consumed.back().solve_attempts,
+        MATMUL_RC_WINNER_AUTHORITY_SAMPLE_MAX + 2);
     ResetMatMulRCWinnerAuthorityForTest();
     rc::ResetRCProductionCanaryForTest();
 }

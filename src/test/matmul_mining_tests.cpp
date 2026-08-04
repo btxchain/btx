@@ -2386,6 +2386,197 @@ BOOST_AUTO_TEST_SUITE_END()
 
 namespace {
 
+class MatMulS8BoundaryServiceTestingSetup : public TestingSetup {
+public:
+    MatMulS8BoundaryServiceTestingSetup()
+        : TestingSetup{ChainType::REGTEST, MatMulMiningTestingSetup::BuildOpts()},
+          m_consensus{const_cast<Consensus::Params&>(m_node.chainman->GetConsensus())},
+          m_saved_v4_height{m_consensus.nMatMulV4Height},
+          m_saved_bmx4c_height{m_consensus.nMatMulBMX4CHeight},
+          m_saved_drlt_height{m_consensus.nMatMulDRLTHeight},
+          m_saved_rc_height{m_consensus.nMatMulRCHeight},
+          m_saved_rc_coupled_height{m_consensus.nMatMulRCCoupledHeight},
+          m_saved_v4_dimension{m_consensus.nMatMulV4Dimension},
+          m_saved_lt_seal_as_pow{m_consensus.fMatMulLTSealAsPoW}
+    {
+        // A purpose-built service-RPC fixture for the withdrawn staged ENC-S8
+        // profile. Production/regtest schedules remain unified; this local
+        // mutation lets the exact S8 service primitive and fork boundary stay
+        // covered without weakening the startup invariants.
+        m_consensus.nMatMulV4Height = 2;
+        m_consensus.nMatMulBMX4CHeight = std::numeric_limits<int32_t>::max();
+        m_consensus.nMatMulDRLTHeight = std::numeric_limits<int32_t>::max();
+        m_consensus.nMatMulRCHeight = std::numeric_limits<int32_t>::max();
+        m_consensus.nMatMulRCCoupledHeight = std::numeric_limits<int32_t>::max();
+        m_consensus.nMatMulV4Dimension = 128;
+        m_consensus.fMatMulLTSealAsPoW = false;
+        m_node.mining = interfaces::MakeMining(m_node);
+    }
+
+    ~MatMulS8BoundaryServiceTestingSetup()
+    {
+        m_consensus.nMatMulV4Height = m_saved_v4_height;
+        m_consensus.nMatMulBMX4CHeight = m_saved_bmx4c_height;
+        m_consensus.nMatMulDRLTHeight = m_saved_drlt_height;
+        m_consensus.nMatMulRCHeight = m_saved_rc_height;
+        m_consensus.nMatMulRCCoupledHeight = m_saved_rc_coupled_height;
+        m_consensus.nMatMulV4Dimension = m_saved_v4_dimension;
+        m_consensus.fMatMulLTSealAsPoW = m_saved_lt_seal_as_pow;
+    }
+
+    UniValue CallRPC(const std::string& method, UniValue params)
+    {
+        JSONRPCRequest request;
+        request.context = &m_node;
+        request.strMethod = method;
+        request.params = std::move(params);
+        if (RPCIsInWarmup(nullptr)) SetRPCWarmupFinished();
+        try {
+            return tableRPC.execute(request);
+        } catch (const UniValue& obj_error) {
+            throw std::runtime_error{obj_error.find_value("message").get_str()};
+        }
+    }
+
+private:
+    Consensus::Params& m_consensus;
+    const int32_t m_saved_v4_height;
+    const int32_t m_saved_bmx4c_height;
+    const int32_t m_saved_drlt_height;
+    const int32_t m_saved_rc_height;
+    const int32_t m_saved_rc_coupled_height;
+    const uint32_t m_saved_v4_dimension;
+    const bool m_saved_lt_seal_as_pow;
+};
+
+UniValue MatMulV4ServiceProofParams(const UniValue& service, const UniValue& solved)
+{
+    UniValue params{UniValue::VARR};
+    params.push_back(service);
+    params.push_back(solved.find_value("nonce64_hex").get_str());
+    params.push_back(solved.find_value("digest_hex").get_str());
+    params.push_back(true);
+    params.push_back(solved.find_value("matrix_c_data").get_str());
+    return params;
+}
+
+UniValue MatMulV4ServiceProofBatchEntry(const UniValue& service, const UniValue& solved)
+{
+    UniValue entry{UniValue::VOBJ};
+    entry.pushKV("challenge", service);
+    entry.pushKV("nonce64_hex", solved.find_value("nonce64_hex").get_str());
+    entry.pushKV("digest_hex", solved.find_value("digest_hex").get_str());
+    entry.pushKV("matrix_c_data", solved.find_value("matrix_c_data").get_str());
+    return entry;
+}
+
+} // namespace
+
+BOOST_FIXTURE_TEST_SUITE(
+    matmul_s8_service_tests,
+    MatMulS8BoundaryServiceTestingSetup)
+
+BOOST_AUTO_TEST_CASE(pre_transition_and_boundary_issue_solve_verify_redeem_batches)
+{
+    const auto pre_profile = CallRPC(
+        "getmatmulservicechallengeprofile",
+        GetMatMulServiceChallengeProfileParams(
+            "balanced", 0.0, 0.0, 0.25, 30.0, 1.0)).get_obj();
+    const auto pre_support = pre_profile.find_value("service_proof_support").get_obj();
+    BOOST_CHECK(pre_support.find_value("supported").get_bool());
+    BOOST_CHECK_EQUAL(pre_support.find_value("encoding_profile").get_str(), "legacy-v3");
+
+    const auto legacy_service = CallRPC(
+        "getmatmulservicechallenge",
+        GetMatMulServiceChallengeParams(
+            "rate_limit", "legacy-boundary:/v1/solve", "user:s8@example.com",
+            30.0, 300, 0.0, 0.0, "fixed", 24, 30.0, 30.0)).get_obj();
+    BOOST_CHECK(
+        legacy_service.find_value("challenge").get_obj()
+            .find_value("matmul").get_obj()
+            .find_value("encoding_profile").isNull());
+
+    auto block = PrepareBlock(m_node, node::BlockAssembler::Options{});
+    BOOST_REQUIRE(!MineBlock(m_node, block).IsNull());
+    BOOST_REQUIRE_EQUAL(
+        WITH_LOCK(cs_main, return m_node.chainman->ActiveHeight()), 1);
+
+    const auto profile = CallRPC(
+        "getmatmulservicechallengeprofile",
+        GetMatMulServiceChallengeProfileParams(
+            "balanced", 0.0, 0.0, 0.25, 30.0, 1.0)).get_obj();
+    const auto support = profile.find_value("service_proof_support").get_obj();
+    BOOST_CHECK(support.find_value("supported").get_bool());
+    BOOST_CHECK_EQUAL(support.find_value("status").get_str(), "supported");
+    BOOST_CHECK_EQUAL(support.find_value("reason").get_str(), "exact_s8_sketch");
+    BOOST_CHECK_EQUAL(support.find_value("encoding_profile").get_str(), "ENC-S8");
+
+    const auto service = CallRPC(
+        "getmatmulservicechallenge",
+        GetMatMulServiceChallengeParams(
+            "rate_limit", "s8:/v1/solve", "user:s8@example.com",
+            0.001, 300, 0.0, 0.0, "fixed", 24, 0.001, 0.001)).get_obj();
+    BOOST_CHECK_EQUAL(
+        service.find_value("challenge").get_obj()
+            .find_value("matmul").get_obj()
+            .find_value("encoding_profile").get_str(),
+        "ENC-S8");
+    const auto solved = CallRPC(
+        "solvematmulservicechallenge",
+        SolveMatMulServiceChallengeParams(service, 256, 0, 2)).get_obj();
+    BOOST_REQUIRE(solved.find_value("solved").get_bool());
+    BOOST_CHECK(!solved.find_value("time_budget_hard_cap").get_bool());
+    BOOST_CHECK_EQUAL(
+        solved.find_value("time_budget_check_scope").get_str(),
+        "v4_between_complete_nonce_attempts");
+    BOOST_CHECK(!solved.find_value("solver_threads_applied").get_bool());
+    BOOST_CHECK_EQUAL(
+        solved.find_value("solver_threads_scope").get_str(),
+        "v4_single_nonce_dispatch");
+
+    const auto verified = CallRPC(
+        "verifymatmulserviceproof",
+        MatMulV4ServiceProofParams(service, solved)).get_obj();
+    BOOST_CHECK(verified.find_value("valid").get_bool());
+
+    UniValue redeem_params{UniValue::VARR};
+    redeem_params.push_back(service);
+    redeem_params.push_back(solved.find_value("nonce64_hex").get_str());
+    redeem_params.push_back(solved.find_value("digest_hex").get_str());
+    redeem_params.push_back(solved.find_value("matrix_c_data").get_str());
+    const auto redeemed =
+        CallRPC("redeemmatmulserviceproof", std::move(redeem_params)).get_obj();
+    BOOST_CHECK(redeemed.find_value("valid").get_bool());
+    BOOST_CHECK(redeemed.find_value("redeemed").get_bool());
+
+    const auto issued_profile = CallRPC(
+        "issuematmulservicechallengeprofile",
+        IssueMatMulServiceChallengeProfileParams(
+            "rate_limit", "s8:/v1/batch", "user:s8@example.com",
+            "balanced", 300, 0.0, 0.0, 0.001, 0.001, 1.0)).get_obj();
+    BOOST_CHECK(
+        issued_profile.find_value("service_proof_support").get_obj()
+            .find_value("supported").get_bool());
+    const auto service_batch = issued_profile.find_value("service_challenge").get_obj();
+    const auto solved_batch = CallRPC(
+        "solvematmulservicechallenge",
+        SolveMatMulServiceChallengeParams(service_batch, 256)).get_obj();
+    BOOST_REQUIRE(solved_batch.find_value("solved").get_bool());
+    const UniValue entry = MatMulV4ServiceProofBatchEntry(service_batch, solved_batch);
+    const auto verified_batch = CallRPC(
+        "verifymatmulserviceproofs",
+        MatMulServiceProofBatchParams({entry})).get_obj();
+    BOOST_CHECK_EQUAL(verified_batch.find_value("valid").getInt<int>(), 1);
+    const auto redeemed_batch = CallRPC(
+        "redeemmatmulserviceproofs",
+        MatMulServiceProofBatchParams({entry})).get_obj();
+    BOOST_CHECK_EQUAL(redeemed_batch.find_value("valid").getInt<int>(), 1);
+}
+
+BOOST_AUTO_TEST_SUITE_END()
+
+namespace {
+
 class MatMulLTServiceTestingSetup : public TestingSetup {
 public:
     static TestOpts BuildOpts()
@@ -2587,6 +2778,16 @@ void CheckUnsupportedProfileFailsClosed(Setup& setup, const std::string& profile
         std::runtime_error,
         matches_profile);
 
+    BOOST_CHECK_EXCEPTION(
+        setup.CallRPC(
+            "issuematmulservicechallengeprofile",
+            IssueMatMulServiceChallengeProfileParams(
+                "rate_limit", "unsupported:/v1/profile-issue",
+                "user:unsupported@example.com", "balanced", 300,
+                0.0, 0.0, 0.25, 30.0, 1.0)),
+        std::runtime_error,
+        matches_profile);
+
     const UniValue skeleton = MakeUnsupportedMatMulServiceChallengeSkeleton();
     BOOST_CHECK_EXCEPTION(
         setup.CallRPC(
@@ -2601,45 +2802,74 @@ void CheckUnsupportedProfileFailsClosed(Setup& setup, const std::string& profile
                 skeleton, "0000000000000000", std::string(64, '0'))),
         std::runtime_error,
         matches_profile);
+    BOOST_CHECK_EXCEPTION(
+        setup.CallRPC(
+            "redeemmatmulserviceproof",
+            VerifyMatMulServiceProofParams(
+                skeleton, "0000000000000000", std::string(64, '0'))),
+        std::runtime_error,
+        matches_profile);
+
+    const UniValue batch_params = MatMulServiceProofBatchParams({
+        MatMulServiceProofBatchEntry(
+            skeleton, "0000000000000000", std::string(64, '0')),
+    });
+    BOOST_CHECK_EXCEPTION(
+        setup.CallRPC("verifymatmulserviceproofs", batch_params),
+        std::runtime_error,
+        matches_profile);
+    BOOST_CHECK_EXCEPTION(
+        setup.CallRPC("redeemmatmulserviceproofs", batch_params),
+        std::runtime_error,
+        matches_profile);
+
+    const auto assert_support = [&](const UniValue& response) {
+        const auto support = response.find_value("service_proof_support").get_obj();
+        BOOST_CHECK(!support.find_value("supported").get_bool());
+        BOOST_CHECK_EQUAL(support.find_value("status").get_str(), "unsupported");
+        BOOST_CHECK_EQUAL(support.find_value("encoding_profile").get_str(), profile_name);
+        BOOST_CHECK(!support.find_value("reason").get_str().empty());
+        BOOST_CHECK(!support.find_value("issuance_supported").get_bool());
+        BOOST_CHECK(!support.find_value("local_solve_supported").get_bool());
+        BOOST_CHECK(!support.find_value("verification_supported").get_bool());
+        BOOST_CHECK(!support.find_value("redemption_supported").get_bool());
+    };
+    assert_support(setup.CallRPC(
+        "getmatmulservicechallengeprofile",
+        GetMatMulServiceChallengeProfileParams(
+            "balanced", 0.0, 0.0, 0.25, 30.0, 1.0)).get_obj());
+    assert_support(setup.CallRPC(
+        "listmatmulservicechallengeprofiles",
+        ListMatMulServiceChallengeProfilesParams(
+            0.0, 0.0, 0.25, 30.0, 1.0)).get_obj());
+    assert_support(setup.CallRPC(
+        "getmatmulservicechallengeplan",
+        GetMatMulServiceChallengePlanParams("solves_per_hour", 60.0)).get_obj());
 }
 
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(matmul_lt_service_tests, MatMulLTServiceTestingSetup)
 
-BOOST_AUTO_TEST_CASE(issue_solve_and_verify_use_lt_profile)
+BOOST_AUTO_TEST_CASE(issue_solve_verify_redeem_and_planners_fail_closed)
 {
-    const auto service = CallRPC(
-        "getmatmulservicechallenge",
-        GetMatMulServiceChallengeParams(
-            "rate_limit", "lt:/v1/solve", "user:lt@example.com",
-            0.001, 300, 0.0, 0.0, "fixed", 24, 0.001, 0.001)).get_obj();
-    const auto matmul =
-        service.find_value("challenge").get_obj().find_value("matmul").get_obj();
-    BOOST_CHECK_EQUAL(
-        matmul.find_value("encoding_profile").get_str(), "ENC-BMX4C-LT");
-    BOOST_CHECK_EQUAL(
-        matmul.find_value("b").getInt<uint64_t>(),
-        m_node.chainman->GetConsensus().nMatMulLTTranscriptBlockSize);
+    CheckUnsupportedProfileFailsClosed(*this, "ENC-BMX4C-LT");
+}
 
-    const auto solved = CallRPC(
-        "solvematmulservicechallenge",
-        SolveMatMulServiceChallengeParams(service, 256)).get_obj();
-    BOOST_REQUIRE(solved.find_value("solved").get_bool());
-    BOOST_REQUIRE(solved.find_value("matrix_c_data").isStr());
-
-    UniValue verify_params{UniValue::VARR};
-    verify_params.push_back(service);
-    verify_params.push_back(solved.find_value("nonce64_hex").get_str());
-    verify_params.push_back(solved.find_value("digest_hex").get_str());
-    verify_params.push_back(true);
-    verify_params.push_back(solved.find_value("matrix_c_data").get_str());
-    const auto verified =
-        CallRPC("verifymatmulserviceproof", std::move(verify_params)).get_obj();
-    BOOST_CHECK(verified.find_value("valid").get_bool());
-    BOOST_CHECK_EQUAL(
-        verified.find_value("proof").get_obj().find_value("encoding_profile").get_str(),
-        "ENC-BMX4C-LT");
+BOOST_AUTO_TEST_CASE(unsupported_profile_is_rejected_before_miner_lookup)
+{
+    m_node.mining.reset();
+    BOOST_CHECK_EXCEPTION(
+        CallRPC(
+            "getmatmulservicechallenge",
+            GetMatMulServiceChallengeParams(
+                "rate_limit", "lt:/v1/pre-template", "user:lt@example.com",
+                1.0, 300, 0.0, 0.0)),
+        std::runtime_error,
+        [](const std::exception& e) {
+            return RuntimeErrorContains(e, "ENC-BMX4C-LT") &&
+                !RuntimeErrorContains(e, "mining interface");
+        });
 }
 
 BOOST_AUTO_TEST_SUITE_END()
@@ -2775,9 +3005,11 @@ BOOST_AUTO_TEST_CASE(issue_solve_verify_and_profile_tamper)
 
     const auto verify_profile_variant = [&](const std::string& replacement) {
         std::string tampered_json = service.write();
+        const size_t challenge_pos = tampered_json.find("\"challenge\":{");
+        BOOST_REQUIRE(challenge_pos != std::string::npos);
         const std::string profile_field{
             "\"encoding_profile\":\"ENC-BMX4C\""};
-        const size_t profile_pos = tampered_json.find(profile_field);
+        const size_t profile_pos = tampered_json.find(profile_field, challenge_pos);
         BOOST_REQUIRE(profile_pos != std::string::npos);
         tampered_json.replace(profile_pos, profile_field.size(), replacement);
         UniValue tampered;
@@ -2803,9 +3035,11 @@ BOOST_AUTO_TEST_CASE(issue_solve_verify_and_profile_tamper)
     verify_profile_variant("\"encoding_profile\":null");
 
     std::string missing_json = service.write();
+    const size_t challenge_pos = missing_json.find("\"challenge\":{");
+    BOOST_REQUIRE(challenge_pos != std::string::npos);
     const std::string profile_with_comma{
         ",\"encoding_profile\":\"ENC-BMX4C\""};
-    const size_t missing_pos = missing_json.find(profile_with_comma);
+    const size_t missing_pos = missing_json.find(profile_with_comma, challenge_pos);
     BOOST_REQUIRE(missing_pos != std::string::npos);
     missing_json.erase(missing_pos, profile_with_comma.size());
     UniValue missing;

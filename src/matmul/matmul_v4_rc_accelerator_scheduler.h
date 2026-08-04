@@ -9,6 +9,7 @@
 #include <array>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -16,6 +17,8 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+#include <uint256.h>
 
 namespace matmul::v4::rc {
 
@@ -75,6 +78,13 @@ public:
         double max_execution_s{0};
     };
 
+    struct AuthenticatedRelaySample {
+        uint256 block_hash{};
+        double relay_s{0};
+    };
+
+    static constexpr size_t MAX_AUTHENTICATED_RELAY_SAMPLES{32};
+
     struct Stats {
         uint64_t requests{0};
         uint64_t acquisitions{0};
@@ -111,6 +121,8 @@ public:
         uint64_t authenticated_relay_samples{0};
         double last_authenticated_relay_s{0};
         double max_authenticated_relay_s{0};
+        std::vector<AuthenticatedRelaySample>
+            recent_authenticated_relays;
     };
 
     /**
@@ -152,6 +164,7 @@ public:
      * headers or malformed bodies from manufacturing activation telemetry.
      */
     struct AuthenticatedRelayObservation {
+        uint256 block_hash{};
         std::chrono::steady_clock::time_point announced{};
         std::optional<std::chrono::steady_clock::time_point> body_received;
     };
@@ -236,7 +249,7 @@ public:
 
     /** Start an untrusted announcement/body transport observation. */
     [[nodiscard]] AuthenticatedRelayObservation
-    BeginAuthenticatedRelayObservation() const;
+    BeginAuthenticatedRelayObservation(const uint256& block_hash) const;
 
     /** Stop transport timing when a complete body reaches the dispatcher. */
     void MarkAuthenticatedRelayBodyReceived(

@@ -1,12 +1,13 @@
-> **HISTORICAL DESIGN / AUDIT EVIDENCE — MatMul v4.7 roadmap takes precedence.**
-> This document preserves version-local findings, names, and measurements; it is not
-> the current activation plan. The proposed transition is defined by
-> `doc/btx-matmul-v4.7-transition-roadmap.md`: Epoch A uses Profile 1 with
-> ExactReplay authority and optional shadow proofs; Epoch B requires both a durable
-> Profile-1 proof and ExactReplay; Epoch C makes the Profile-1 proof authoritative;
-> and Epoch D separately moves to Profile 2 under proof authority. Mainnet Epoch A (v4 = BMX4C = RC) has a finite compiled candidate height and true source flags, so it would activate if merged unchanged; release remains NO-GO pending exact-final combined-tree CUDA+Metal evidence, reviewed schema-4 ASERT calibration, ratification re-affirmation, full closeout, and live-tip runway validation; all other transition heights remain disabled. Any older “production,” “default,” “shipping,” direct-fork,
-> sampled-verifier, or coupled-profile recommendation below is historical unless the
-> canonical roadmap expressly carries it forward.
+> **Historical provenance / current deferral.** This document preserves a dated
+> design, audit, or measurement record; its body is not the current activation
+> plan. This later, untagged corrective source keeps public-network Epoch A
+> (`v4 = BMX4C = RC`) disabled at `INT32_MAX`, with RC ASERT `1/1` and
+> GPU-lifecycle ratification false. The public `btxchain/btx` signed annotated
+> `v0.33.2` tag, GitHub release, binaries, checksums, and height-179000 snapshot
+> assets identify the earlier `H=185000` source tree, not this corrective tree.
+> Publishing the correction requires an explicit public release/tag/version
+> disposition and regenerated artifacts. See the
+> [canonical transition roadmap](btx-matmul-v4.7-transition-roadmap.md).
 
 # V3 B200 ↔ RTX 5090 measurement protocol
 

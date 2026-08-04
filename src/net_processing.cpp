@@ -5136,7 +5136,7 @@ void PeerManagerImpl::BeginMatMulAuthenticatedRelayObservation(
 
     auto observation{
         matmul::v4::rc::GetRCAcceleratorScheduler()
-            .BeginAuthenticatedRelayObservation()};
+            .BeginAuthenticatedRelayObservation(index.GetBlockHash())};
     const auto now{observation.announced};
     LOCK(m_matmul_rc_relay_timing_mutex);
     for (auto it{m_matmul_rc_relay_timings.begin()};

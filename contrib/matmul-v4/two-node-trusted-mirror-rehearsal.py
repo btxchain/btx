@@ -49,11 +49,14 @@ from __future__ import annotations
 
 import atexit
 import argparse
+import ipaddress
 import json
+import math
 import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -74,6 +77,10 @@ ARCHIVE_BACKEND = ""
 ARCHIVE_LOCAL = False
 ARCHIVE_PROC: subprocess.Popen | None = None
 ARCHIVE_LOG = None
+ARCHIVE_REMOTE_PID = ""
+ARCHIVE_REMOTE_START_IDENTITY = ""
+ARCHIVE_REMOTE_LAUNCH_ATTEMPTED = False
+ARCHIVE_REMOTE_STARTUP_COMPLETED = False
 MIRROR_BTXD = Path()
 MIRROR_CLI = Path()
 SIGNER_WIF_FILE = Path()
@@ -97,9 +104,15 @@ ARCHIVE_CLI_SHA256 = ""
 MIRROR_BTXD_SHA256 = ""
 MIRROR_CLI_SHA256 = ""
 REMOTE_ARCHIVE_NAME = re.compile(r"btx-trusted-archive\.[A-Za-z0-9]{6}")
+REMOTE_PID = re.compile(r"[1-9][0-9]{0,9}")
+REMOTE_START_IDENTITY = re.compile(r"[A-Za-z0-9: +_-]{8,128}")
 COMPRESSED_PUBKEY = re.compile(r"(?:02|03)[0-9a-fA-F]{64}")
 PUBLIC_CLASS = re.compile(r"[A-Za-z0-9_.+-]+")
+SSH_USER_COMPONENT = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.+-]{0,63}")
+SSH_SCOPE_COMPONENT = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}")
 PRODUCTION_BLOCKS = 3
+REMOTE_TERM_WAIT_SECONDS = 30
+REMOTE_KILL_WAIT_SECONDS = 10
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -122,9 +135,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--strict-proof-mode",
-        choices=("winner-reseal-authority", "receiving-validation"),
+        choices=("winner-reseal-authority",),
         default=os.environ.get("BTX_TRUSTED_MIRROR_STRICT_PROOF_MODE"),
-        help="exact archive evidence that must close before ok=true",
+        help=(
+            "required self-mining archive proof mode; this two-node runner "
+            "supports only winner-reseal-authority"
+        ),
     )
     parser.add_argument("--mirror-btxd", type=Path, default=os.environ.get("MIRROR_BTXD"))
     parser.add_argument("--mirror-cli", type=Path, default=os.environ.get("MIRROR_CLI"))
@@ -202,6 +218,11 @@ def validate_args(
     for name, option, env_name in required:
         if getattr(args, name) in (None, ""):
             parser.error(f"{option} is required (or set {env_name})")
+    if args.strict_proof_mode != "winner-reseal-authority":
+        parser.error(
+            "--strict-proof-mode must be winner-reseal-authority for this "
+            "two-node self-mining rehearsal"
+        )
     if args.archive_local:
         if args.signer_wif_file in (None, ""):
             parser.error(
@@ -230,6 +251,7 @@ def validate_args(
                 "pre-provision --archive-signer-wif-file on the archive"
             )
         try:
+            validate_ssh_destination(args.archive_user, args.archive_host)
             args.archive_signer_wif_file = validate_remote_file_path(
                 args.archive_signer_wif_file,
                 "--archive-signer-wif-file",
@@ -256,6 +278,14 @@ def validate_args(
             if not path.is_file():
                 parser.error(f"{option} is not a file: {path}")
         args.signer_wif_file = args.signer_wif_file.resolve()
+        if "\n" in str(args.signer_wif_file) or "\r" in str(args.signer_wif_file):
+            parser.error("--signer-wif-file is not safe for a configuration value")
+        try:
+            require_private_local_file(
+                args.signer_wif_file, "--signer-wif-file"
+            )
+        except RuntimeError as error:
+            parser.error(str(error))
     if not args.runtime_root.is_dir():
         parser.error(f"--runtime-root is not a directory: {args.runtime_root}")
     for name, option in (
@@ -312,9 +342,70 @@ def sh_local(cmd: list[str], timeout: int = 120) -> str:
     return r.stdout.strip()
 
 
+def validate_ssh_destination(user: str, host: str) -> str:
+    """Return one option-safe SSH destination for a user and DNS/IP host."""
+    if (not isinstance(user, str) or
+            SSH_USER_COMPONENT.fullmatch(user) is None):
+        raise RuntimeError("--archive-user is not a safe SSH user component")
+    if (not isinstance(host, str) or not host or len(host) > 255 or
+            any(ord(char) <= 0x20 or ord(char) == 0x7f for char in host) or
+            host.startswith("-") or "@" in host):
+        raise RuntimeError("--archive-host is not a safe SSH host component")
+
+    literal = host
+    if host.startswith("[") or host.endswith("]"):
+        if not (host.startswith("[") and host.endswith("]")):
+            raise RuntimeError("--archive-host has malformed IP brackets")
+        literal = host[1:-1]
+    address = literal
+    if "%" in literal:
+        address, scope = literal.rsplit("%", 1)
+        if SSH_SCOPE_COMPONENT.fullmatch(scope) is None:
+            raise RuntimeError("--archive-host has an unsafe IPv6 scope")
+    try:
+        ipaddress.ip_address(address)
+    except ValueError:
+        # DNS names and ordinary SSH config aliases use the same conservative
+        # label grammar here. Wildcards and option/config metacharacters are
+        # intentionally not accepted by an evidence-producing runner.
+        dns = host[:-1] if host.endswith(".") else host
+        labels = dns.split(".")
+        if (not dns or any(
+                not label or len(label) > 63 or
+                not (label[0].isascii() and
+                     (label[0].isalnum() or label[0] == "_")) or
+                not (label[-1].isascii() and
+                     (label[-1].isalnum() or label[-1] == "_")) or
+                any(not (char.isascii() and
+                         (char.isalnum() or char in "_-")) for char in label)
+                for label in labels)):
+            raise RuntimeError("--archive-host is not a valid DNS/IP host")
+    # OpenSSH accepts an unbracketed IPv6 literal as its destination operand,
+    # but treats brackets as literal hostname characters (unlike scp/URI
+    # syntax). Normalize a validated bracketed literal before building argv.
+    return f"{user}@{literal if host.startswith('[') else host}"
+
+
+def remote_ssh_argv(remote_cmd: str) -> list[str]:
+    """Build an SSH command with an explicit end to option processing."""
+    return [
+        "ssh", "-o", "BatchMode=yes", "--",
+        validate_ssh_destination(ARCHIVE_USER, ARCHIVE_HOST), remote_cmd,
+    ]
+
+
+def tunnel_ssh_argv() -> list[str]:
+    """Build the loopback P2P tunnel command without destination ambiguity."""
+    return [
+        "ssh", "-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes",
+        "-N", "-L", f"127.0.0.1:{ARCHIVE_P2P}:127.0.0.1:{ARCHIVE_P2P}",
+        "--", validate_ssh_destination(ARCHIVE_USER, ARCHIVE_HOST),
+    ]
+
+
 def sh_remote(remote_cmd: str, timeout: int = 120, input_text: str | None = None) -> str:
     r = subprocess.run(
-        ["ssh", "-o", "BatchMode=yes", f"{ARCHIVE_USER}@{ARCHIVE_HOST}", remote_cmd],
+        remote_ssh_argv(remote_cmd),
         check=True,
         capture_output=True,
         text=True,
@@ -340,13 +431,31 @@ def remote_sha256(path: str) -> str:
 
 def validate_remote_file_path(value: str, option: str) -> str:
     """Accept an absolute, non-traversing archive-owned file path."""
-    if not isinstance(value, str) or "\x00" in value or "\n" in value:
+    if (not isinstance(value, str) or "\x00" in value or "\n" in value or
+            "\r" in value):
         raise RuntimeError(f"{option} is not a safe remote path")
     path = PurePosixPath(value)
     if (not path.is_absolute() or ".." in path.parts or
             path.parent == PurePosixPath("/")):
         raise RuntimeError(f"{option} must be an absolute archive-owned file path")
     return str(path)
+
+
+def require_private_local_file(path: Path, option: str) -> None:
+    """Require owner-only mode bits on a local secret file."""
+    if stat.S_IMODE(path.stat().st_mode) & 0o077:
+        raise RuntimeError(f"{option} must not be accessible by group or others")
+
+
+def remote_private_file_check_command(path: str) -> str:
+    """Build a Linux/macOS check for a readable owner-only remote file."""
+    quoted = shlex.quote(path)
+    return (
+        f"test -f {quoted} && test -r {quoted} && "
+        f"mode=$(if stat -c '%a' {quoted} >/dev/null 2>&1; "
+        f"then stat -c '%a' {quoted}; else stat -f '%Lp' {quoted}; fi) && "
+        "case \"$mode\" in *[0-7]00) ;; *) exit 13 ;; esac"
+    )
 
 
 def validate_remote_archive_dir(value: str) -> str:
@@ -359,6 +468,97 @@ def validate_remote_archive_dir(value: str) -> str:
             REMOTE_ARCHIVE_NAME.fullmatch(path.name) is None):
         raise RuntimeError("remote mktemp returned an unsafe archive datadir")
     return str(path)
+
+
+def validate_remote_pid(value: str, label: str = "remote archive PID") -> str:
+    """Accept one positive decimal PID and no surrounding command output."""
+    if not isinstance(value, str):
+        raise RuntimeError(f"{label} is not a valid process ID")
+    value = value.strip()
+    if REMOTE_PID.fullmatch(value) is None:
+        raise RuntimeError(f"{label} is not a valid process ID")
+    return value
+
+
+def validate_remote_start_identity(
+    value: str, label: str = "remote archive start identity",
+) -> str:
+    """Accept one printable, locale-stabilized `ps lstart` identity."""
+    if not isinstance(value, str):
+        raise RuntimeError(f"{label} is not valid")
+    value = value.strip()
+    if REMOTE_START_IDENTITY.fullmatch(value) is None:
+        raise RuntimeError(f"{label} is not valid")
+    return value
+
+
+def validate_remote_launch_output(value: str) -> tuple[str, str]:
+    """Parse the exact PID/start tuple emitted atomically by the launcher."""
+    if not isinstance(value, str):
+        raise RuntimeError("remote archive launch identity is not valid")
+    lines = value.splitlines()
+    if len(lines) != 2:
+        raise RuntimeError("remote archive launch identity is not valid")
+    return (
+        validate_remote_pid(lines[0], "remote archive launcher PID"),
+        validate_remote_start_identity(
+            lines[1], "remote archive launcher start identity"
+        ),
+    )
+
+
+def remote_stop_archive_command(
+    pid: str, datadir: str, *, expected_start_identity: str,
+    require_pidfile: bool = False,
+) -> str:
+    """Build a bounded, identity-checked TERM/KILL shutdown command."""
+    pid = validate_remote_pid(pid)
+    datadir = validate_remote_archive_dir(datadir)
+    quoted_datadir = shlex.quote(datadir)
+    quoted_pidfile = shlex.quote(f"{datadir}/regtest/btxd.pid")
+    expected_start = shlex.quote(validate_remote_start_identity(
+        expected_start_identity
+    ))
+    required = "1" if require_pidfile else "0"
+    return (
+        f"pid={pid}; datadir={quoted_datadir}; pidfile={quoted_pidfile}; "
+        f"expected_started={expected_start}; "
+        f"pidfile_required={required}; "
+        "is_live() { state=$(ps -p \"$pid\" -o stat= 2>/dev/null) || "
+        "return 1; case \"$state\" in *Z*) return 1 ;; *) return 0 ;; esac; }; "
+        "verify_pidfile() { test -r \"$pidfile\" || return 1; "
+        "recorded=$(tr -d '[:space:]' < \"$pidfile\"); "
+        "test \"$recorded\" = \"$pid\"; }; "
+        "verify_identity() { "
+        "current_cmd=$(ps -p \"$pid\" -o command= 2>/dev/null) || return 1; "
+        "current_started=$(LC_ALL=C ps -p \"$pid\" -o lstart= 2>/dev/null | "
+        "sed 's/^[[:space:]]*//;s/[[:space:]]*$//') || return 1; "
+        "test \"$current_cmd\" = \"$cmd\" && "
+        "test \"$current_started\" = \"$expected_started\"; }; "
+        "if is_live; then "
+        "cmd=$(ps -p \"$pid\" -o command= 2>/dev/null) || exit 16; "
+        "started=$(LC_ALL=C ps -p \"$pid\" -o lstart= 2>/dev/null | "
+        "sed 's/^[[:space:]]*//;s/[[:space:]]*$//') || exit 16; "
+        "test -n \"$cmd\" && test -n \"$started\" || exit 16; "
+        "test \"$started\" = \"$expected_started\" || exit 18; "
+        "case \"$cmd\" in *\"$datadir\"*) ;; *) exit 16 ;; esac; "
+        "if test -r \"$pidfile\"; then verify_pidfile || exit 15; "
+        "pidfile_required=1; "
+        "elif test \"$pidfile_required\" = 1; then exit 17; fi; "
+        "kill -TERM \"$pid\" 2>/dev/null || true; "
+        "i=0; while is_live && "
+        f"test \"$i\" -lt {REMOTE_TERM_WAIT_SECONDS}; do "
+        "sleep 1; i=$((i + 1)); done; fi; "
+        "if is_live; then "
+        "verify_identity || { is_live && exit 18; }; "
+        "if is_live; then "
+        "test \"$pidfile_required\" = 0 || verify_pidfile || exit 15; "
+        "kill -KILL \"$pid\" 2>/dev/null || true; "
+        "i=0; while is_live && "
+        f"test \"$i\" -lt {REMOTE_KILL_WAIT_SECONDS}; do "
+        "sleep 1; i=$((i + 1)); done; fi; fi; "
+        "if is_live; then exit 14; fi"
+    )
 
 
 def validate_signer_pubkey(value: str) -> str:
@@ -444,7 +644,9 @@ def wait_rpc(fn, label: str, timeout: float = 120) -> None:
 
 
 def cleanup_archive() -> None:
-    global ARCHIVE_PROC
+    global ARCHIVE_PROC, ARCHIVE_REMOTE_PID, ARCHIVE_REMOTE_START_IDENTITY
+    global ARCHIVE_REMOTE_LAUNCH_ATTEMPTED
+    global ARCHIVE_REMOTE_STARTUP_COMPLETED
     if not ARCHIVE_DD:
         return
     if ARCHIVE_LOCAL:
@@ -459,18 +661,59 @@ def cleanup_archive() -> None:
         if not KEEP_ARTIFACTS:
             shutil.rmtree(ARCHIVE_DD, ignore_errors=True)
         return
-    try:
-        sh_remote(
-            f"kill $(cat {shlex.quote(ARCHIVE_DD + '/regtest/btxd.pid')} "
-            "2>/dev/null) 2>/dev/null || true"
-        )
-    except Exception:
-        pass
-    if not KEEP_ARTIFACTS:
+    if ARCHIVE_REMOTE_LAUNCH_ATTEMPTED:
+        pid = ARCHIVE_REMOTE_PID
+        started = ARCHIVE_REMOTE_START_IDENTITY
+        if not pid:
+            launcher_pid_file = shlex.quote(
+                f"{ARCHIVE_DD}/rehearsal-launch.pid"
+            )
+            try:
+                pid = validate_remote_pid(
+                    sh_remote(f"cat {launcher_pid_file}"),
+                    "remote archive launcher PID",
+                )
+            except Exception as error:
+                raise RuntimeError(
+                    "cannot establish the remote archive PID; refusing to "
+                    "remove its datadir"
+                ) from error
+        if not started:
+            launcher_start_file = shlex.quote(
+                f"{ARCHIVE_DD}/rehearsal-launch.start"
+            )
+            try:
+                started = validate_remote_start_identity(
+                    sh_remote(f"cat {launcher_start_file}"),
+                    "remote archive launcher start identity",
+                )
+            except Exception as error:
+                raise RuntimeError(
+                    "cannot establish the remote archive start identity; "
+                    "refusing to remove its datadir"
+                ) from error
         try:
-            sh_remote(f"rm -rf -- {shlex.quote(ARCHIVE_DD)}")
-        except Exception:
-            pass
+            sh_remote(
+                remote_stop_archive_command(
+                    pid, ARCHIVE_DD,
+                    expected_start_identity=started,
+                    require_pidfile=ARCHIVE_REMOTE_STARTUP_COMPLETED,
+                ),
+                timeout=(
+                    REMOTE_TERM_WAIT_SECONDS + REMOTE_KILL_WAIT_SECONDS + 10
+                ),
+            )
+        except Exception as error:
+            raise RuntimeError(
+                "remote archive did not reach a verified stopped state; "
+                "refusing to remove its datadir"
+            ) from error
+        ARCHIVE_REMOTE_PID = ""
+        ARCHIVE_REMOTE_START_IDENTITY = ""
+        ARCHIVE_REMOTE_LAUNCH_ATTEMPTED = False
+        ARCHIVE_REMOTE_STARTUP_COMPLETED = False
+    if not KEEP_ARTIFACTS:
+        sh_remote(f"rm -rf -- {shlex.quote(ARCHIVE_DD)}")
 
 
 def _require_object(parent: dict, key: str, path: str) -> dict:
@@ -494,6 +737,23 @@ def _require_nonnegative_int(parent: dict, key: str, path: str) -> int:
             f"getmininginfo schema error: {path} must be a non-negative integer"
         )
     return value
+
+
+def _require_positive_number(parent: dict, key: str, path: str) -> float:
+    value = parent.get(key)
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise RuntimeError(
+            f"getmininginfo schema error: {path} must be a positive finite number"
+        )
+    try:
+        valid = math.isfinite(value) and value > 0
+    except OverflowError:
+        valid = False
+    if not valid:
+        raise RuntimeError(
+            f"getmininginfo schema error: {path} must be a positive finite number"
+        )
+    return float(value)
 
 
 def _require_public_string(parent: dict, key: str, path: str) -> str:
@@ -649,8 +909,9 @@ def extract_scheduler_evidence(mining_info: object) -> dict:
         "rc_accelerator_scheduler.winner_reseal_authority",
     )
     for field in (
-        "published", "consumed", "rejected_not_block_target", "expired",
-        "evicted", "misses", "entries",
+        "published", "consumed", "rejected_not_block_target",
+        "rejected_not_production_ready", "invalidated_before_consume",
+        "expired", "evicted", "misses", "entries",
     ):
         _require_nonnegative_int(
             authority, field, f"winner_reseal_authority.{field}"
@@ -663,62 +924,126 @@ def extract_scheduler_evidence(mining_info: object) -> dict:
             "getmininginfo schema error: winner_reseal_authority.last_provider "
             "must be empty or a public class token"
         )
+    consumed_by_provider = _require_object(
+        authority, "consumed_by_provider",
+        "winner_reseal_authority.consumed_by_provider",
+    )
+    for provider, count in consumed_by_provider.items():
+        if (not isinstance(provider, str) or not provider or
+                PUBLIC_CLASS.fullmatch(provider) is None):
+            raise RuntimeError(
+                "getmininginfo schema error: winner_reseal_authority."
+                "consumed_by_provider keys must be public provider tokens"
+            )
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            raise RuntimeError(
+                "getmininginfo schema error: winner_reseal_authority."
+                "consumed_by_provider values must be non-negative integers"
+            )
+    recent_consumed = authority.get("recent_consumed")
+    if not isinstance(recent_consumed, list):
+        raise RuntimeError(
+            "getmininginfo schema error: winner_reseal_authority."
+            "recent_consumed must be an array"
+        )
+    for index, sample in enumerate(recent_consumed):
+        path = f"winner_reseal_authority.recent_consumed[{index}]"
+        if not isinstance(sample, dict):
+            raise RuntimeError(f"getmininginfo schema error: {path} must be an object")
+        try:
+            EVIDENCE_IDENTITY.require_hex(
+                sample.get("block_hash"), EVIDENCE_IDENTITY.HEX64,
+                f"{path}.block_hash",
+            )
+        except EVIDENCE_IDENTITY.EvidenceIdentityError as error:
+            raise RuntimeError(f"getmininginfo schema error: {error}") from error
+        _require_nonnegative_int(sample, "block_height", f"{path}.block_height")
+        if _require_nonnegative_int(
+                sample, "solve_attempts", f"{path}.solve_attempts") == 0:
+            raise RuntimeError(
+                f"getmininginfo schema error: {path}.solve_attempts must be positive"
+            )
+        provider = sample.get("provider")
+        if (not isinstance(provider, str) or not provider or
+                PUBLIC_CLASS.fullmatch(provider) is None):
+            raise RuntimeError(
+                f"getmininginfo schema error: {path}.provider must be a "
+                "public provider token"
+            )
+        for field in (
+            "solve_to_reseal_s", "reseal_to_consume_s", "solve_to_consume_s",
+        ):
+            _require_positive_number(sample, field, f"{path}.{field}")
     return scheduler
 
 
 def validate_archive_strict_proof(
     *, mode: str, baseline_mining_info: object, final_mining_info: object,
-    validation: dict, expected_provider: str,
+    expected_provider: str, expected_blocks: list[tuple[int, str]],
 ) -> dict:
-    """Close exactly one explicit strict-device proof mode, fail closed."""
-    if mode == "receiving-validation":
-        if not validation.get("available"):
-            raise RuntimeError(
-                "receiving-validation proof requested but no validation is available"
-            )
-        return {
-            "mode": mode,
-            "provider": validation["provider"],
-            "require_device": validation["require_device"],
-            "fully_accelerated": validation["fully_accelerated"],
-            "cpu_gemm_calls": validation["cpu_gemm_calls"],
-            "cpu_gemm_fallbacks": validation["cpu_gemm_fallbacks"],
-        }
+    """Close this self-mining runner's exact winner-reseal proof, fail closed."""
     if mode != "winner-reseal-authority":
-        raise RuntimeError(f"unsupported strict proof mode: {mode}")
+        raise RuntimeError(
+            "the two-node self-mining rehearsal supports only "
+            "winner-reseal-authority"
+        )
 
     baseline = extract_scheduler_evidence(baseline_mining_info)
     final = extract_scheduler_evidence(final_mining_info)
     baseline_lanes = baseline["lanes"]
     final_lanes = final["lanes"]
     deltas = {}
-    for lane_name in ("candidate_mining", "winner_reseal"):
-        delta = (
-            final_lanes[lane_name]["completions"] -
-            baseline_lanes[lane_name]["completions"]
+    candidate_delta = (
+        final_lanes["candidate_mining"]["completions"] -
+        baseline_lanes["candidate_mining"]["completions"]
+    )
+    if candidate_delta < PRODUCTION_BLOCKS:
+        raise RuntimeError(
+            f"strict proof recorded only {candidate_delta} candidate_mining "
+            f"completions; expected at least {PRODUCTION_BLOCKS}"
         )
-        if delta < PRODUCTION_BLOCKS:
-            raise RuntimeError(
-                f"strict proof recorded only {delta} {lane_name} completions; "
-                f"expected at least {PRODUCTION_BLOCKS}"
-            )
-        if final_lanes[lane_name]["last_execution_s"] <= 0:
-            raise RuntimeError(f"strict proof recorded no {lane_name} execution time")
-        deltas[f"{lane_name}_completions"] = delta
+    if final_lanes["candidate_mining"]["last_execution_s"] <= 0:
+        raise RuntimeError("strict proof recorded no candidate_mining execution time")
+    deltas["candidate_mining_completions"] = candidate_delta
 
-    if final["release_invariant_violations"] != 0:
-        raise RuntimeError("accelerator scheduler release invariant was violated")
+    reseal_delta = (
+        final_lanes["winner_reseal"]["completions"] -
+        baseline_lanes["winner_reseal"]["completions"]
+    )
+    if reseal_delta != PRODUCTION_BLOCKS:
+        raise RuntimeError(
+            f"strict proof recorded {reseal_delta} winner_reseal completions; "
+            f"expected exactly {PRODUCTION_BLOCKS}"
+        )
+    if final_lanes["winner_reseal"]["last_execution_s"] <= 0:
+        raise RuntimeError("strict proof recorded no winner_reseal execution time")
+    deltas["winner_reseal_completions"] = reseal_delta
+
+    for label, scheduler in (("baseline", baseline), ("final", final)):
+        if scheduler["release_invariant_violations"] != 0:
+            raise RuntimeError(
+                f"accelerator scheduler release invariant was violated in {label}"
+            )
     baseline_authority = baseline["winner_reseal_authority"]
     final_authority = final["winner_reseal_authority"]
+    if baseline_authority["entries"] != 0 or final_authority["entries"] != 0:
+        raise RuntimeError(
+            "winner-reseal authority store must be empty before and after proof"
+        )
     for field in ("published", "consumed"):
         delta = final_authority[field] - baseline_authority[field]
-        if delta < PRODUCTION_BLOCKS:
+        if delta != PRODUCTION_BLOCKS:
             raise RuntimeError(
-                f"winner-reseal authority {field} only increased by {delta}; "
-                f"expected at least {PRODUCTION_BLOCKS}"
+                f"winner-reseal authority {field} changed by {delta}; "
+                f"expected exactly {PRODUCTION_BLOCKS}"
             )
         deltas[f"authority_{field}"] = delta
-    for field in ("rejected_not_block_target", "expired", "evicted", "misses"):
+    if deltas["authority_published"] != deltas["authority_consumed"]:
+        raise RuntimeError("winner-reseal published and consumed deltas differ")
+    for field in (
+        "rejected_not_block_target", "rejected_not_production_ready",
+        "invalidated_before_consume", "expired", "evicted", "misses",
+    ):
         delta = final_authority[field] - baseline_authority[field]
         if delta != 0:
             raise RuntimeError(
@@ -726,6 +1051,75 @@ def validate_archive_strict_proof(
             )
     if final_authority["last_provider"] != expected_provider:
         raise RuntimeError("winner-reseal authority provider differs from canary provider")
+    baseline_providers = baseline_authority["consumed_by_provider"]
+    final_providers = final_authority["consumed_by_provider"]
+    all_providers = set(baseline_providers) | set(final_providers)
+    provider_deltas = {
+        provider: final_providers.get(provider, 0) -
+        baseline_providers.get(provider, 0)
+        for provider in all_providers
+    }
+    if provider_deltas != {expected_provider: PRODUCTION_BLOCKS}:
+        raise RuntimeError(
+            "winner-reseal consumed-provider deltas do not bind all three "
+            "authorities to the canary provider"
+        )
+    if len(expected_blocks) != PRODUCTION_BLOCKS:
+        raise RuntimeError(
+            f"strict proof expected-block set has {len(expected_blocks)} records; "
+            f"expected exactly {PRODUCTION_BLOCKS}"
+        )
+    normalized_expected: set[tuple[int, str]] = set()
+    for height, block_hash in expected_blocks:
+        if (not isinstance(height, int) or isinstance(height, bool) or height < 0):
+            raise RuntimeError("strict proof expected block height is invalid")
+        try:
+            canonical_hash = EVIDENCE_IDENTITY.require_hex(
+                block_hash, EVIDENCE_IDENTITY.HEX64,
+                "strict_proof.expected_block_hash",
+            )
+        except EVIDENCE_IDENTITY.EvidenceIdentityError as error:
+            raise RuntimeError(f"strict proof expected block is invalid: {error}") from error
+        if (height, canonical_hash) in normalized_expected:
+            raise RuntimeError("strict proof expected-block set contains a duplicate")
+        normalized_expected.add((height, canonical_hash))
+
+    baseline_samples = baseline_authority["recent_consumed"]
+    final_samples = final_authority["recent_consumed"]
+    if baseline_samples:
+        raise RuntimeError(
+            "winner-reseal recent-consumed history must be empty before proof"
+        )
+    if len(final_samples) != PRODUCTION_BLOCKS:
+        raise RuntimeError(
+            f"winner-reseal recent-consumed history has {len(final_samples)} "
+            f"records; expected exactly {PRODUCTION_BLOCKS}"
+        )
+    observed: dict[tuple[int, str], dict] = {}
+    for sample in final_samples:
+        key = (sample["block_height"], sample["block_hash"])
+        if key in observed:
+            raise RuntimeError(
+                "winner-reseal recent-consumed history contains a duplicate "
+                "exact block"
+            )
+        if sample["provider"] != expected_provider:
+            raise RuntimeError(
+                "winner-reseal exact-block provider differs from canary provider"
+            )
+        observed[key] = sample
+    observed_blocks = set(observed)
+    if observed_blocks != normalized_expected:
+        missing = sorted(normalized_expected - observed_blocks)
+        unexpected = sorted(observed_blocks - normalized_expected)
+        raise RuntimeError(
+            "winner-reseal recent-consumed history does not match the exact "
+            f"mined blocks (missing={missing}, unexpected={unexpected})"
+        )
+    exact_authorities = [
+        observed[(height, block_hash)]
+        for height, block_hash in expected_blocks
+    ]
     return {
         "mode": mode,
         "provider": final_authority["last_provider"],
@@ -733,6 +1127,8 @@ def validate_archive_strict_proof(
         "candidate_last_execution_s": final_lanes["candidate_mining"]["last_execution_s"],
         "winner_reseal_last_execution_s": final_lanes["winner_reseal"]["last_execution_s"],
         "release_invariant_violations": final["release_invariant_violations"],
+        "consumed_by_provider": provider_deltas,
+        "exact_consumed_authorities": exact_authorities,
     }
 
 
@@ -809,6 +1205,9 @@ def validate_trusted_mirror_rehearsal(
 def main(argv: list[str] | None = None) -> None:
     global ARCHIVE_DD, ARCHIVE_HOST, ARCHIVE_USER, ARCHIVE_BTXD, ARCHIVE_CLI
     global ARCHIVE_BACKEND, ARCHIVE_LOCAL, ARCHIVE_PROC, ARCHIVE_LOG
+    global ARCHIVE_REMOTE_PID, ARCHIVE_REMOTE_START_IDENTITY
+    global ARCHIVE_REMOTE_LAUNCH_ATTEMPTED
+    global ARCHIVE_REMOTE_STARTUP_COMPLETED
     global ARCHIVE_SIGNER_WIF_FILE, STRICT_PROOF_MODE
     global MIRROR_BTXD, MIRROR_CLI, SIGNER_WIF_FILE, SIGNER_PUB
     global RUNTIME_ROOT, MIRROR_DD, OUT, KEEP_ARTIFACTS
@@ -850,12 +1249,12 @@ def main(argv: list[str] | None = None) -> None:
                 parser.error("archive btxd SHA256 does not match --archive-btxd-sha256")
             if remote_sha256(ARCHIVE_CLI) != ARCHIVE_CLI_SHA256:
                 parser.error("archive btx-cli SHA256 does not match --archive-cli-sha256")
-            sh_remote(
-                f"test -f {shlex.quote(ARCHIVE_SIGNER_WIF_FILE)} "
-                f"-a -r {shlex.quote(ARCHIVE_SIGNER_WIF_FILE)}"
-            )
+            sh_remote(remote_private_file_check_command(ARCHIVE_SIGNER_WIF_FILE))
         except (subprocess.SubprocessError, EVIDENCE_IDENTITY.EvidenceIdentityError) as error:
-            parser.error(f"cannot verify archive deployment identity: {error}")
+            parser.error(
+                "cannot verify archive binary identity or private signer permissions "
+                f"({type(error).__name__})"
+            )
     MIRROR_DD = Path(
         tempfile.mkdtemp(prefix="btx-trusted-mirror-", dir=RUNTIME_ROOT)
     )
@@ -939,12 +1338,7 @@ rpcallowip=127.0.0.1
     tunnel = None
     if not ARCHIVE_LOCAL:
         tunnel = subprocess.Popen(
-            [
-                "ssh", "-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes",
-                "-N", "-L",
-                f"127.0.0.1:{ARCHIVE_P2P}:127.0.0.1:{ARCHIVE_P2P}",
-                f"{ARCHIVE_USER}@{ARCHIVE_HOST}",
-            ],
+            tunnel_ssh_argv(),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -962,8 +1356,13 @@ listenonion=0
 port={MIRROR_P2P}
 rpcport={MIRROR_RPC}
 connect=127.0.0.1:{ARCHIVE_P2P}
+bind=127.0.0.1
+rpcbind=127.0.0.1
+rpcallowip=127.0.0.1
 """
-    (MIRROR_DD / "btx.conf").write_text(mirror_conf)
+    mirror_conf_path = MIRROR_DD / "btx.conf"
+    mirror_conf_path.write_text(mirror_conf, encoding="utf-8")
+    mirror_conf_path.chmod(0o600)
 
     archive_env = os.environ.copy()
     archive_env["BTX_MATMUL_V4_BACKEND"] = ARCHIVE_BACKEND
@@ -980,21 +1379,43 @@ connect=127.0.0.1:{ARCHIVE_P2P}
             stderr=subprocess.STDOUT,
         )
     else:
-        sh_remote(
-            f"BTX_MATMUL_V4_BACKEND={shlex.quote(ARCHIVE_BACKEND)} "
-            "BTX_RC_ACCEL_POLICY=production "
+        ARCHIVE_REMOTE_LAUNCH_ATTEMPTED = True
+        launcher_pid_file = shlex.quote(
+            f"{ARCHIVE_DD}/rehearsal-launch.pid"
+        )
+        launcher_start_file = shlex.quote(
+            f"{ARCHIVE_DD}/rehearsal-launch.start"
+        )
+        launch_output = sh_remote(
+            "umask 077; "
+            f"export BTX_MATMUL_V4_BACKEND={shlex.quote(ARCHIVE_BACKEND)} "
+            "BTX_RC_ACCEL_POLICY=production; "
             f"nohup {shlex.quote(ARCHIVE_BTXD)} "
             f"-datadir={shlex.quote(ARCHIVE_DD)} "
             f"-conf={shlex.quote(ARCHIVE_DD + '/btx.conf')} "
-            f">{shlex.quote(ARCHIVE_DD + '/stdout.log')} 2>&1 & echo $!"
+            f">{shlex.quote(ARCHIVE_DD + '/stdout.log')} 2>&1 & "
+            "pid=$!; started=$(LC_ALL=C ps -p \"$pid\" -o lstart= "
+            "2>/dev/null | sed "
+            "'s/^[[:space:]]*//;s/[[:space:]]*$//') || "
+            "{ kill -TERM \"$pid\" 2>/dev/null || true; exit 19; }; "
+            "test -n \"$started\" || "
+            "{ kill -TERM \"$pid\" 2>/dev/null || true; exit 19; }; "
+            f"printf \"%s\\n\" \"$pid\" > {launcher_pid_file}; "
+            f"printf \"%s\\n\" \"$started\" > {launcher_start_file}; "
+            "printf \"%s\\n%s\\n\" \"$pid\" \"$started\""
+        )
+        ARCHIVE_REMOTE_PID, ARCHIVE_REMOTE_START_IDENTITY = (
+            validate_remote_launch_output(launch_output)
         )
     wait_rpc(archive_rpc, "archive", timeout=args.archive_startup_timeout)
+    if not ARCHIVE_LOCAL:
+        ARCHIVE_REMOTE_STARTUP_COMPLETED = True
     archive_rpc("createwallet", "miner")
 
     # Start local mirror
     mirror_log = (MIRROR_DD / "stdout.log").open("w")
     mirror_proc = subprocess.Popen(
-        [str(MIRROR_BTXD), f"-datadir={MIRROR_DD}", f"-conf={MIRROR_DD / 'btx.conf'}"],
+        [str(MIRROR_BTXD), f"-datadir={MIRROR_DD}", f"-conf={mirror_conf_path}"],
         stdout=mirror_log,
         stderr=subprocess.STDOUT,
     )
@@ -1023,15 +1444,35 @@ connect=127.0.0.1:{ARCHIVE_P2P}
         # Mine through activation+2 on archive. This yields exactly three
         # production Profile-1 winners (heights 6, 7, and 8).
         timings = []
+        production_blocks = []
         for _ in range(ACTIVATION + 2):
             t0 = time.perf_counter()
-            archive_rpc(
+            generated = archive_rpc(
                 "generatetoaddress", "1", archive_rpc("getnewaddress"),
                 timeout=args.mine_timeout,
             )
             dt = time.perf_counter() - t0
             ah = archive_rpc("getblockcount")
-            timings.append({"mined_height": ah, "archive_generate_s": round(dt, 3)})
+            if (not isinstance(generated, list) or len(generated) != 1):
+                raise RuntimeError(
+                    "generatetoaddress did not return exactly one block hash"
+                )
+            try:
+                generated_hash = EVIDENCE_IDENTITY.require_hex(
+                    generated[0], EVIDENCE_IDENTITY.HEX64,
+                    "generatetoaddress.block_hash",
+                )
+            except EVIDENCE_IDENTITY.EvidenceIdentityError as error:
+                raise RuntimeError(
+                    f"generatetoaddress returned an invalid block hash: {error}"
+                ) from error
+            timings.append({
+                "mined_height": ah,
+                "block_hash": generated_hash,
+                "archive_generate_s": round(dt, 3),
+            })
+            if ah >= ACTIVATION:
+                production_blocks.append((ah, generated_hash))
             print(f"archive mined h={ah} in {dt:.3f}s", flush=True)
 
         tip = archive_rpc("getbestblockhash")
@@ -1067,8 +1508,8 @@ connect=127.0.0.1:{ARCHIVE_P2P}
             mode=STRICT_PROOF_MODE,
             baseline_mining_info=baseline_mining_info,
             final_mining_info=final_mining_info,
-            validation=validation,
             expected_provider=canary["provider"],
+            expected_blocks=production_blocks,
         )
         result = {
             "ok": True,

@@ -1,10 +1,13 @@
-> **Mixed current/historical runbook.** The legacy `matmul_v4::ComputeDigest`
-> backend contract below remains useful for the old workload, but it is not the
-> Epoch-A certification procedure. MatMul v4.7 launches with Profile 1
-> ExactReplay; proof authority and Profile 2 occur only in later, separately
-> activated epochs. Mainnet Epoch A (v4 = BMX4C = RC) has a finite compiled candidate height and true source flags, so it would activate if merged unchanged; the release remains NO-GO pending exact-final combined-tree CUDA+Metal evidence, reviewed schema-4 ASERT calibration, ratification re-affirmation, full closeout, and live-tip runway validation. All other transition heights remain disabled. See
-> [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md)
-> and [`benchmarking.md`](benchmarking.md).
+> **Historical provenance / current deferral.** This document preserves a dated
+> design, audit, or measurement record; its body is not the current activation
+> plan. This later, untagged corrective source keeps public-network Epoch A
+> (`v4 = BMX4C = RC`) disabled at `INT32_MAX`, with RC ASERT `1/1` and
+> GPU-lifecycle ratification false. The public `btxchain/btx` signed annotated
+> `v0.33.2` tag, GitHub release, binaries, checksums, and height-179000 snapshot
+> assets identify the earlier `H=185000` source tree, not this corrective tree.
+> Publishing the correction requires an explicit public release/tag/version
+> disposition and regenerated artifacts. See the
+> [canonical transition roadmap](btx-matmul-v4.7-transition-roadmap.md).
 
 # MatMul v4 GPU Backends — Build & Hardware-Verification Runbook
 

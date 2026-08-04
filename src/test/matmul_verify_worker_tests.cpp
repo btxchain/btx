@@ -1803,12 +1803,14 @@ BOOST_AUTO_TEST_CASE(
 BOOST_AUTO_TEST_CASE(
     rc_authenticated_relay_observation_is_staged_and_one_shot)
 {
+    using Scheduler = matmul::v4::rc::RCAcceleratorScheduler;
     auto& scheduler{
         matmul::v4::rc::GetRCAcceleratorScheduler()};
     BOOST_REQUIRE(scheduler.ResetStatsForTest());
+    const uint256 block_hash{1};
 
     auto observation{
-        scheduler.BeginAuthenticatedRelayObservation()};
+        scheduler.BeginAuthenticatedRelayObservation(block_hash)};
     BOOST_CHECK(
         !scheduler.CommitAuthenticatedRelayObservation(
             observation));
@@ -1825,6 +1827,11 @@ BOOST_AUTO_TEST_CASE(
             observation));
     BOOST_CHECK_EQUAL(
         scheduler.GetStats().authenticated_relay_samples, 1U);
+    BOOST_REQUIRE_EQUAL(
+        scheduler.GetStats().recent_authenticated_relays.size(), 1U);
+    BOOST_CHECK_EQUAL(
+        scheduler.GetStats().recent_authenticated_relays[0].block_hash,
+        block_hash);
 
     // A duplicate completion cannot count the same authenticated transport
     // interval twice, even if a delivery callback is repeated.
@@ -1836,6 +1843,7 @@ BOOST_AUTO_TEST_CASE(
 
     matmul::v4::rc::RCAcceleratorScheduler::
         AuthenticatedRelayObservation reversed{
+            .block_hash = uint256{2},
             .announced = std::chrono::steady_clock::now(),
             .body_received = std::chrono::steady_clock::now() -
                 std::chrono::seconds{1}};
@@ -1843,6 +1851,38 @@ BOOST_AUTO_TEST_CASE(
         !scheduler.CommitAuthenticatedRelayObservation(reversed));
     BOOST_CHECK_EQUAL(
         scheduler.GetStats().authenticated_relay_samples, 1U);
+
+    // A second accepted block remains a distinct bounded record; neither
+    // duration can be relabeled with the other block hash.
+    const uint256 competing_hash{3};
+    auto competing{
+        scheduler.BeginAuthenticatedRelayObservation(competing_hash)};
+    scheduler.MarkAuthenticatedRelayBodyReceived(competing);
+    BOOST_REQUIRE(
+        scheduler.CommitAuthenticatedRelayObservation(competing));
+    const auto records{
+        scheduler.GetStats().recent_authenticated_relays};
+    BOOST_REQUIRE_EQUAL(records.size(), 2U);
+    BOOST_CHECK_EQUAL(records[0].block_hash, block_hash);
+    BOOST_CHECK_EQUAL(records[1].block_hash, competing_hash);
+
+    // Exact-block telemetry has a fixed FIFO bound. A new completion evicts
+    // only the oldest record and cannot rewrite any retained hash.
+    for (uint64_t value = 4; value <= 34; ++value) {
+        auto bounded{
+            scheduler.BeginAuthenticatedRelayObservation(
+                uint256{static_cast<uint8_t>(value)})};
+        scheduler.MarkAuthenticatedRelayBodyReceived(bounded);
+        BOOST_REQUIRE(
+            scheduler.CommitAuthenticatedRelayObservation(bounded));
+    }
+    const auto bounded_records{
+        scheduler.GetStats().recent_authenticated_relays};
+    BOOST_REQUIRE_EQUAL(
+        bounded_records.size(),
+        Scheduler::MAX_AUTHENTICATED_RELAY_SAMPLES);
+    BOOST_CHECK_EQUAL(bounded_records.front().block_hash, competing_hash);
+    BOOST_CHECK_EQUAL(bounded_records.back().block_hash, uint256{34});
 }
 
 BOOST_AUTO_TEST_CASE(

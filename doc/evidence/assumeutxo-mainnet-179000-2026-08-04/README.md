@@ -19,7 +19,9 @@ the full history.
 | `SHA256SUMS` | Checksum for the external `snapshot.dat` blob |
 
 The binary `snapshot.dat` (452,282,113 bytes, SHA256 in `SHA256SUMS`) is not
-stored in git. It is distributed with the v0.33.2 release.
+stored in git. It is published with its manifest and signed checksums in the
+public `btxchain/btx` v0.33.2 GitHub release, whose tagged source predates the
+later untagged Epoch-A corrective deferral.
 
 ## Chainparams updates (same freeze)
 

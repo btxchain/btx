@@ -5,10 +5,9 @@ Snapshot date: 2026-07-31
 Status: historical implementation snapshot; not a current readiness verdict
 
 This document preserves the implementation and gate state reviewed on its
-snapshot date. Its statements that the public heights were `INT32_MAX`, the RC
-ASERT ratio was `1/1`, both ratification records were false, or the production
-manifest was empty describe that earlier revision and are no longer statements
-about the current activation-candidate source. See
+snapshot date. Current corrective source again keeps the public heights at
+`INT32_MAX`, the live RC ASERT ratio at `1/1`, and GPU-lifecycle ratification
+false; that agreement does not make the snapshot's old evidence current. See
 [`btx-production-readiness.md`](btx-production-readiness.md) for the current
 candidate tuple and fail-closed readiness status. Nothing in this historical
 record is an activation approval.
@@ -89,7 +88,16 @@ The PR97 implementation has the following local controls:
   attestations, duplicates, and incomplete observations cannot create a
   sample. This supplies the live transport component, but the latest-component
   summary is still not a correlated percentile campaign and readiness remains
-  false until the hardware evidence gates pass.
+  false. The schema-4 lifecycle campaign instead measures one observer wall
+  clock and requires bounded miner-authority, authenticated-relay, and strict
+  receiving-ExactReplay records to carry the same exact block hash. Its output
+  remains evidence input, not a consensus verdict or self-ratification action.
+  The miner authority spans the complete solve invocation, counts every nonce
+  attempt, and includes queue waits. Contention evidence starts its monotonic
+  observer before concurrent sibling solve submissions, checkpoints both local
+  accepts, winning-branch extension and reorg convergence, then ends at the
+  exact direct-tip child's authenticated-tip observation. A post-convergence
+  child-only timer is not accepted as contention evidence.
 - The RC admission budgets, retained-address/netgroup accounting, pending-work
   reservation, same-hash sidecar hardening, and equal-priority handoff rules
   apply before scarce accelerator work starts. Local failure and cancellation

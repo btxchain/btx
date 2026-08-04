@@ -111,14 +111,12 @@ static constexpr int64_t kRCDatacenterAsertRescaleDen{1027};
 // exactly what DeriveMatMulEpochATransitionTarget computes. The realized
 // loosen is the OUTCOME k = p_rc/p = q * C, not an input.
 //
-// MEASURED, same-silicon, two vendors
-// (doc/evidence/asert-two-rig-calibration-2026-08-03):
-//     CUDA sm_120 : N/M = 6.93e9  -> k ~ 119'783
-//     Metal m4    : N/M = 1.15e9  -> k ~  19'900
-// The 5.8x spread is a hardware-mix property. Installed at the CUDA figure
-// because the loss function is asymmetric: under-loosening costs linearly in
-// the error while over-loosening costs only logarithmically, so biasing toward
-// the faster observed miner is the cheap direction.
+// HISTORICAL DIAGNOSTIC ESTIMATES (not exact-final calibration evidence) in
+// doc/evidence/asert-two-rig-calibration-2026-08-03 reported CUDA and Metal
+// values near 6.93e9 and 1.15e9. Epoch-A calibration policy is CUDA-only because
+// it models the expected mining cohort. Metal remains independently mandatory
+// for the CUDA+Metal correctness-golden cohort. Do not treat the historical
+// values as the provenance of the installed policy coefficient below.
 //
 // HAZARD, and the reason this comment is long. An earlier revision of this
 // file installed a SATURATED uint32 value and described the field as a
@@ -127,22 +125,22 @@ static constexpr int64_t kRCDatacenterAsertRescaleDen{1027};
 // instead of the intended ~1.2e5 -- under-loosening by 1/q ~ 57'864x, which at
 // a 90 s target is a first block expected in roughly 60 DAYS. The uint32
 // saturation is also gone: the Epoch-A path does exact wide arithmetic and now
-// reduces through ReduceRescaleRatioToU64, so the measured value is installed
-// directly rather than clipped.
+// reduces through ReduceRescaleRatioToU64, so any reviewed policy value that
+// fits the signed consensus field is installed directly rather than clipped.
 //
 // matmul_unified_activation_tests pins a fixed vector at the calibration nBits
 // asserting the realized k, so a future value of the wrong KIND fails a test
 // rather than the chain.
-// RATIFIED POLICY COEFFICIENT, not a reproduced measurement. Say so plainly here,
-// because the previous comment implied this number came out of a campaign.
+// STAGED POLICY COEFFICIENT, not live consensus and not a reproduced final
+// measurement. It remains available for review while the public ratio is 1/1.
 //
 // The first assembled schema-4 corpus now exists:
 // doc/evidence/epoch-a-asert-schema4-cuda-2026-08-04. Measured on the CUDA
 // launch cohort at this freeze it derives 4'007'014'530 -- parent 331'891'937
 // attempts/s over 5 samples, RC 12.073250614 s over 8 episodes, bound to exact
-// binaries and revision. The value installed here is 1.730x that envelope.
+// binaries and revision. The staged value here is 1.730x that envelope.
 //
-// It is installed deliberately high because the error is asymmetric: too low
+// It was selected high because the error is asymmetric: too low
 // risks slow or stalled blocks at the fork, too high yields temporarily fast
 // blocks that ASERT corrects within an epoch. Two further reasons not to lower
 // it to the measured figure:
@@ -150,25 +148,27 @@ static constexpr int64_t kRCDatacenterAsertRescaleDen{1027};
 //  - the historical campaign behind this constant measured ~215.36M attempts/s
 //    and ~32.18 s per RC episode on a different device class, and this cohort's
 //    own RC timing has appeared in two clusters (~12 s and ~32 s) across builds
-//    on the same GPU with no resolved explanation. The installed value lies
+//    on the same GPU with no resolved explanation. The staged value lies
 //    between the coefficients those clusters imply;
 //  - this exact constant is NOT reproducible from the retained historical
 //    artifacts, which yield 6'898'853'852, and those artifacts are classified
 //    historical and non-authorizing.
 //
 // So: the corpus establishes a measured lower bound and binds it to real
-// evidence; this separate ratified coefficient deliberately sits above it.
-// Recalibrate if the representative launch cohort changes.
-static constexpr int64_t kRCEpochAAsertRescaleNum{6931159304};
-static constexpr int64_t kRCEpochAAsertRescaleDen{1};
+// evidence; this separate staged coefficient sits above it. Recalibrate and
+// re-ratify it against the exact activation source before wiring it live.
+[[maybe_unused]] static constexpr int64_t kRCEpochAAsertRescaleNum{6931159304};
+[[maybe_unused]] static constexpr int64_t kRCEpochAAsertRescaleDen{1};
 
-// Release-candidate value, but a technically live consensus instruction if
-// this source is merged: mainnet will enforce Epoch A at this height. The
-// consolidated v0.33.2 activation review must recompute it once against the
-// live mainnet tip before the exact-final CUDA+Metal evidence build is frozen.
-// Keep all three Epoch-A heights bound to this single constant so that a later
-// update cannot create a digest-only v4/BMX4C interval.
-static constexpr int32_t BTX_MATMUL_V47_EPOCH_A_HEIGHT{185'000};
+// Corrective fail-closed state. Keep all three Epoch-A heights bound to this
+// single disabled constant so a partial edit cannot create a digest-only
+// v4/BMX4C interval. A later activation-only change must replace this with a
+// fresh live-tip-derived height, rewire the staged RC coefficient below, set
+// the lifecycle ratification flag, and then regenerate the exact-final
+// CUDA+Metal, lifecycle, manifest, and binary evidence without another source
+// change.
+static constexpr int32_t BTX_MATMUL_V47_EPOCH_A_HEIGHT{
+    std::numeric_limits<int32_t>::max()};
 
 // MatMul v4.2 / ENC-BMX4C construction invariants (spec §8.1/§8.2). No-op when
 // the profile is unset (nMatMulBMX4CHeight == INT32_MAX = disabled); when a
@@ -454,7 +454,8 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
     // entirely and is wrong by that factor. The correct one-time loosen is
     //     k = 2^epsilon * p(H_A-1) * (R_v3 / R_rc).
     // MatMulAsert now derives that factor from live parent nBits with a 512-bit
-    // intermediate. These fields carry only the measured throughput ratio.
+    // intermediate. These fields carry only the attempt-rate coefficient C;
+    // release provenance determines whether its policy value is evidence-bound.
     // ASERT-RATIO CONSISTENCY guardrail: the datacenter one-time ASERT rescale
     // constant MUST equal the EXACT reduced datacenter/base episode-MAC ratio, so
     // it can never silently drift from the real per-block work uplift when the
@@ -728,9 +729,9 @@ public:
         consensus.fMatMulRequireProductPayload = false;
         consensus.nMatMulFreivaldsBindingHeight = 61'000;
         consensus.nMatMulProductDigestHeight = 61'000;
-        // Epoch A performs one atomic v4 = BMX4C = RC Profile-1 transition at
-        // the finite height installed below. DRLT/LT and coupled Profile-2 are
-        // later, separately reviewed transitions and remain disabled here.
+        // Epoch A is implemented but mainnet-disabled. DRLT/LT and coupled
+        // Profile-2 are later, separately reviewed transitions and remain
+        // disabled here as well.
         // Keeping their heights at INT32_MAX is consensus-significant: neither
         // the LT seal nor Stage-3/proof authority may leak into Epoch A.
         consensus.nMatMulDRLTHeight = std::numeric_limits<int32_t>::max();
@@ -744,32 +745,16 @@ public:
         // MatMul v4.7 Epoch A selects Profile 1 from Consensus::Params.
         // Profile 2 and Stage-3 proof authority remain separate transitions.
         //
-        // MatMul v4.7 Epoch-A release-candidate activation height.
-        //
-        // H_A = 185'000. Chosen against the live mainnet tip 178'841, i.e.
-        // 6'159 blocks of runway (about 154 hours at the 90-second target).
-        // Sized on measured spacing rather than the
-        // 90 s target: the realized interval is 89 s over the last 4'032
-        // blocks and 85 s over the last 144. Using the faster recent figure
-        // is the conservative direction here -- it makes the initial runway
-        // about 145.4 h at 85 s and 152.3 h at 89 s, safely above 96 hours.
-        //
-        // The previous constant 182'283 was sized against tip 178'283 and had
-        // decayed to ~93 h of runway by the time the tree was ready. Recompute
-        // this against the live tip if the merge slips again -- the runway is
-        // measured from the tip when the constant is chosen, not from the
-        // merge, and it only shrinks while the PR sits.
-        //
         // IsMatMulV47EpochAActivationTuple() requires v4, BMX4C and RC to share
-        // one height, with DRLT and the coupled height disabled and profile 1,
-        // so all three are set together here. AssertBMX4CConstructionInvariants
-        // additionally refuses a neutral rescale at a live Profile-1 height,
-        // which is why the calibration above is installed in this same commit.
+        // one finite height, with DRLT and the coupled height disabled and
+        // profile 1. All three stay bound to the disabled constant here. The
+        // staged calibration constant above remains available for review, but
+        // a disabled public network must expose a neutral 1/1 consensus ratio.
         consensus.nMatMulV4Height = BTX_MATMUL_V47_EPOCH_A_HEIGHT;
         consensus.nMatMulBMX4CHeight = BTX_MATMUL_V47_EPOCH_A_HEIGHT;
         consensus.nMatMulRCHeight = BTX_MATMUL_V47_EPOCH_A_HEIGHT;
-        consensus.nMatMulRCAsertRescaleNum = kRCEpochAAsertRescaleNum;
-        consensus.nMatMulRCAsertRescaleDen = kRCEpochAAsertRescaleDen;
+        consensus.nMatMulRCAsertRescaleNum = 1;
+        consensus.nMatMulRCAsertRescaleDen = 1;
         consensus.nMaxReorgDepth = 12;
         consensus.nReorgProtectionStartHeight = 61'000;
         consensus.nEmptyBlockSubsidyPenaltyHeight = BTX_EMPTY_BLOCK_SUBSIDY_PENALTY_HEIGHT;
@@ -1980,8 +1965,8 @@ public:
         }
         // COUPLED ASERT: when the datacenter profile (2) is live at a finite RC
         // height on regtest, apply the exact 16422/1027 (~16×) one-time loosen together with
-        // it (design §5) — mirrors the mainnet deploy where profile 2 + finite
-        // height + 16422/1027 ASERT activate as one. Satisfies the coupled-trio invariant
+        // it (design §5) — mirrors the shape a future separately reviewed
+        // profile-2 activation would use. Satisfies the coupled-trio invariant
         // in AssertBMX4CConstructionInvariants. (Behaviorally moot on CI toy dims
         // but keeps the activation shape faithful.)
         if (consensus.nMatMulRCProfile == 2 &&

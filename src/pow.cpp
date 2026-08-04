@@ -994,9 +994,9 @@ bool ReduceRescaleRatioToU64(int64_t num, int64_t den, uint64_t& out_num, uint64
     // ScaleTargetByTimespan clamps each of its two scale arguments to UINT32_MAX
     // independently. The Epoch-A transition does NOT go through that function --
     // DeriveMatMulEpochATransitionTarget does exact wide arithmetic -- so the
-    // ceiling is an artificial limit there, and a real one: the measured
-    // pre-gate attempt-rate ratio for the fastest available accelerator is about
-    // 6.93e9, which does not fit in uint32 and previously had to be saturated.
+    // ceiling is an artificial limit there, and a real one: the staged
+    // pre-gate attempt-rate policy coefficient is about 6.93e9, which does not
+    // fit in uint32 and previously had to be saturated.
     // The consensus fields are already int64_t, so no serialization changes.
     if (num <= 0 || den <= 0) return false;
     const int64_t g{std::gcd(num, den)};
@@ -2894,7 +2894,7 @@ unsigned int MatMulAsert(const CBlockIndex* pindexLast, const Consensus::Params&
             //
             // Uses the 64-bit reducer: this path does exact wide arithmetic and
             // is not subject to ScaleTargetByTimespan's UINT32_MAX clamp, and
-            // the measured coefficient exceeds uint32.
+            // the installed policy coefficient exceeds uint32.
             uint64_t rc_an, rc_ad;
             if (!ReduceRescaleRatioToU64(params.nMatMulRCAsertRescaleNum,
                                          params.nMatMulRCAsertRescaleDen,
@@ -4764,8 +4764,9 @@ struct MatMulRCWinnerAuthorityRecord {
     std::string provider;
     matmul::v4::rc::RCProductionProviderCapability production_capability;
     std::string production_capability_id;
-    std::chrono::steady_clock::time_point candidate_started{};
+    std::chrono::steady_clock::time_point solve_started{};
     std::chrono::steady_clock::time_point reseal_completed{};
+    uint64_t solve_attempts{0};
     std::chrono::steady_clock::time_point expires{};
 };
 std::mutex g_matmul_rc_winner_authority_mutex;
@@ -4773,6 +4774,8 @@ std::map<uint256, MatMulRCWinnerAuthorityRecord>
     g_matmul_rc_winner_authorities;
 std::deque<uint256> g_matmul_rc_winner_authority_fifo;
 MatMulRCWinnerAuthorityStats g_matmul_rc_winner_authority_stats;
+std::deque<MatMulRCWinnerAuthoritySample>
+    g_matmul_rc_winner_authority_samples;
 
 double MatMulAuthoritySeconds(
     std::chrono::steady_clock::duration duration)
@@ -4822,8 +4825,9 @@ bool PublishMatMulRCWinnerResealAuthority(
     const matmul::v4::lt::ExactGemmBackend& backend,
     const Consensus::Params& consensus,
     std::chrono::milliseconds ttl,
-    std::chrono::steady_clock::time_point candidate_started,
-    std::chrono::steady_clock::time_point reseal_completed)
+    std::chrono::steady_clock::time_point solve_started,
+    std::chrono::steady_clock::time_point reseal_completed,
+    uint64_t solve_attempts)
 {
     const auto now{std::chrono::steady_clock::now()};
     std::lock_guard<std::mutex> lock{
@@ -4850,8 +4854,9 @@ bool PublishMatMulRCWinnerResealAuthority(
     if (header.matmul_digest.IsNull() || block_target == 0 ||
         UintToArith256(header.matmul_digest) > block_target ||
         ttl <= std::chrono::milliseconds{0} ||
-        candidate_started.time_since_epoch().count() == 0 ||
-        reseal_completed < candidate_started) {
+        solve_started.time_since_epoch().count() == 0 ||
+        solve_started > now || reseal_completed < solve_started ||
+        reseal_completed > now || solve_attempts == 0) {
         ++g_matmul_rc_winner_authority_stats.
             rejected_not_block_target;
         return false;
@@ -4875,8 +4880,9 @@ bool PublishMatMulRCWinnerResealAuthority(
         .production_capability = capability,
         .production_capability_id =
             matmul::v4::rc::RCProductionProviderCapabilityId(capability),
-        .candidate_started = candidate_started,
+        .solve_started = solve_started,
         .reseal_completed = reseal_completed,
+        .solve_attempts = solve_attempts,
         .expires = now + ttl,
     };
     const bool replacing{
@@ -4894,8 +4900,8 @@ bool PublishMatMulRCWinnerResealAuthority(
         hash, std::move(record));
     if (!replacing) g_matmul_rc_winner_authority_fifo.push_back(hash);
     ++g_matmul_rc_winner_authority_stats.published;
-    g_matmul_rc_winner_authority_stats.last_candidate_to_reseal_s =
-        MatMulAuthoritySeconds(reseal_completed - candidate_started);
+    g_matmul_rc_winner_authority_stats.last_solve_to_reseal_s =
+        MatMulAuthoritySeconds(reseal_completed - solve_started);
     g_matmul_rc_winner_authority_stats.entries =
         g_matmul_rc_winner_authorities.size();
     return true;
@@ -4942,9 +4948,32 @@ bool ConsumeMatMulRCWinnerResealAuthority(
     ++g_matmul_rc_winner_authority_stats.consumed;
     g_matmul_rc_winner_authority_stats.last_reseal_to_consume_s =
         MatMulAuthoritySeconds(now - record.reseal_completed);
-    g_matmul_rc_winner_authority_stats.last_candidate_to_consume_s =
-        MatMulAuthoritySeconds(now - record.candidate_started);
+    g_matmul_rc_winner_authority_stats.last_solve_to_consume_s =
+        MatMulAuthoritySeconds(now - record.solve_started);
     g_matmul_rc_winner_authority_stats.last_provider = record.provider;
+    ++g_matmul_rc_winner_authority_stats.
+        consumed_by_provider[record.provider];
+    std::erase_if(
+        g_matmul_rc_winner_authority_samples,
+        [&](const MatMulRCWinnerAuthoritySample& sample) {
+            return sample.block_hash == hash.ToString();
+        });
+    g_matmul_rc_winner_authority_samples.push_back({
+        .block_hash = hash.ToString(),
+        .height = block_height,
+        .solve_attempts = record.solve_attempts,
+        .solve_to_reseal_s = MatMulAuthoritySeconds(
+            record.reseal_completed - record.solve_started),
+        .reseal_to_consume_s = MatMulAuthoritySeconds(
+            now - record.reseal_completed),
+        .solve_to_consume_s = MatMulAuthoritySeconds(
+            now - record.solve_started),
+        .provider = record.provider,
+    });
+    while (g_matmul_rc_winner_authority_samples.size() >
+           MATMUL_RC_WINNER_AUTHORITY_SAMPLE_MAX) {
+        g_matmul_rc_winner_authority_samples.pop_front();
+    }
     g_matmul_rc_winner_authority_stats.entries =
         g_matmul_rc_winner_authorities.size();
     if (provider != nullptr) *provider = record.provider;
@@ -4959,6 +4988,9 @@ MatMulRCWinnerAuthorityStats GetMatMulRCWinnerAuthorityStats()
         std::chrono::steady_clock::now());
     g_matmul_rc_winner_authority_stats.entries =
         g_matmul_rc_winner_authorities.size();
+    g_matmul_rc_winner_authority_stats.recent_consumed.assign(
+        g_matmul_rc_winner_authority_samples.begin(),
+        g_matmul_rc_winner_authority_samples.end());
     return g_matmul_rc_winner_authority_stats;
 }
 
@@ -4968,6 +5000,7 @@ void ResetMatMulRCWinnerAuthorityForTest()
         g_matmul_rc_winner_authority_mutex};
     g_matmul_rc_winner_authorities.clear();
     g_matmul_rc_winner_authority_fifo.clear();
+    g_matmul_rc_winner_authority_samples.clear();
     g_matmul_rc_winner_authority_stats = {};
 }
 
@@ -7236,13 +7269,13 @@ static bool SolveMatMulV4RC(CBlockHeader& block,
     const auto resolved_rc =
         matmul_v4::accel::ResolveExactGemmBackendForRC();
 
+    uint64_t solve_attempts{0};
     while (max_tries > 0) {
         if (abort_flag != nullptr && abort_flag->load(std::memory_order_relaxed)) {
             RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
             return false;
         }
-        const auto candidate_started{
-            std::chrono::steady_clock::now()};
+        ++solve_attempts;
         if (!SetDeterministicMatMulSeeds(block, params, block_height, parent_median_time_past)) {
             RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
             return false;
@@ -7691,7 +7724,7 @@ static bool SolveMatMulV4RC(CBlockHeader& block,
                             block, block_height, block_target,
                             resolved_rc.provider, *capability,
                             resolved_rc.backend, params, ttl,
-                            candidate_started, reseal_completed)) {
+                            start, reseal_completed, solve_attempts)) {
                         LogWarning(
                             "SolveMatMulV4RC: strict winner authority "
                             "handoff declined for block=%s provider=%s "

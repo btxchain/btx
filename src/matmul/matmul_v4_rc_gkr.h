@@ -1001,6 +1001,8 @@ enum class RCExactReplayAdjudication : uint8_t {
 };
 
 struct ExactReplayVerifyResult {
+    uint256 block_hash{};
+    int32_t block_height{-1};
     bool ok{false};
     ExactReplayVerifyOutcome outcome{ExactReplayVerifyOutcome::InvalidConsensus};
     RCExactReplayExecutionPolicy execution_policy{
@@ -1084,6 +1086,9 @@ void SetRCExactReplayExecutionPolicy(RCExactReplayExecutionPolicy policy);
 /** Last completed production verifier call, for operator RPC/log telemetry. */
 [[nodiscard]] std::optional<ExactReplayVerifyResult>
 GetLastExactReplayVerifyResult();
+inline constexpr size_t kRCExactReplayRecentResultsMax{32};
+[[nodiscard]] std::vector<ExactReplayVerifyResult>
+GetRecentExactReplayVerifyResults();
 void ResetLastExactReplayVerifyResultForTest();
 [[nodiscard]] RCExactReplayProviderHealth
 GetRCExactReplayProviderHealth();

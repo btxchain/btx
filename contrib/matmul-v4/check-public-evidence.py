@@ -24,6 +24,7 @@ DEFAULT_PATHS = (
     REPO_ROOT / "contrib/matmul-v4/measure-v3-regimes.cpp",
     REPO_ROOT / "contrib/matmul-v4/derive-epoch-a-asert.py",
     REPO_ROOT / "contrib/matmul-v4/assemble-epoch-a-asert-corpus.py",
+    REPO_ROOT / "contrib/matmul-v4/verify-epoch-a-activation-gate.py",
     REPO_ROOT / "contrib/matmul-v4/multi-gpu-golden-corpus.sh",
     REPO_ROOT / "contrib/matmul-v4/sanitize-public-evidence.py",
     REPO_ROOT / "contrib/matmul-v4/verify-evidence-provenance.py",

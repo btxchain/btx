@@ -717,15 +717,15 @@ BOOST_AUTO_TEST_CASE(rc_coup_asert_unsafe_ordering_rejected_at_construction)
     p.nMatMulRCCoupledAsertRescaleDen = 1;
     BOOST_CHECK(ValidateMatMulAsertParams(p, p.nMatMulAsertHeight));
 
-    // Mainnet's release candidate uses one finite Epoch-A height; the COUPLED
-    // height is the one that must stay unreachable. Epoch A is Profile-1
-    // ExactReplay only -- coupled/Profile-2 is a separate, later transition, and
-    // IsMatMulV47EpochAActivationTuple() requires the coupled height disabled.
+    // Mainnet keeps every Epoch-A and coupled transition disabled until a
+    // separately reviewed activation-only change.
     const auto main = CreateChainParams(ArgsManager{}, ChainType::MAIN)->GetConsensus();
-    BOOST_CHECK(main.nMatMulRCHeight != std::numeric_limits<int32_t>::max());
+    BOOST_CHECK_EQUAL(main.nMatMulRCHeight, std::numeric_limits<int32_t>::max());
     BOOST_CHECK_EQUAL(main.nMatMulRCHeight, main.nMatMulV4Height);
     BOOST_CHECK_EQUAL(main.nMatMulRCHeight, main.nMatMulBMX4CHeight);
     BOOST_CHECK_EQUAL(main.nMatMulRCCoupledHeight, std::numeric_limits<int32_t>::max());
+    BOOST_CHECK_EQUAL(main.nMatMulRCAsertRescaleNum, 1);
+    BOOST_CHECK_EQUAL(main.nMatMulRCAsertRescaleDen, 1);
     BOOST_CHECK_EQUAL(main.nMatMulRCCoupledAsertRescaleNum, 1);
     BOOST_CHECK_EQUAL(main.nMatMulRCCoupledAsertRescaleDen, 1);
 }
@@ -770,8 +770,9 @@ BOOST_AUTO_TEST_CASE(rc_coup_unified_height_switch_activates_family_together)
                       std::numeric_limits<int32_t>::max());
     const auto main_default =
         CreateChainParams(ArgsManager{}, ChainType::MAIN)->GetConsensus();
-    // RC is finite at Epoch A; coupled is still a separate later transition.
-    BOOST_CHECK(main_default.nMatMulRCHeight != std::numeric_limits<int32_t>::max());
+    // Public Epoch A and its later coupled transition remain disabled.
+    BOOST_CHECK_EQUAL(main_default.nMatMulRCHeight,
+                      std::numeric_limits<int32_t>::max());
     BOOST_CHECK_EQUAL(main_default.nMatMulRCHeight, main_default.nMatMulV4Height);
     BOOST_CHECK_EQUAL(main_default.nMatMulRCHeight, main_default.nMatMulBMX4CHeight);
     BOOST_CHECK_EQUAL(main_default.nMatMulRCCoupledHeight,

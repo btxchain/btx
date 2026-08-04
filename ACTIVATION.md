@@ -7,18 +7,17 @@
 > Profile 1 ExactReplay is the Epoch-A launch candidate. Profile 2 is reserved
 > for a later, separately activated proof-authoritative workload.
 >
-> **Update — Epoch A release candidate:** mainnet stages one atomic
-> `nMatMulV4Height = nMatMulBMX4CHeight = nMatMulRCHeight = H_A` tuple with
-> both ratification constants. The numeric height and RC ASERT coefficient are
-> release-final only after exact-final-binary CUDA+Metal evidence and a live-tip
-> runway calculation. Testnet/signet and Epochs B–D remain disabled.
+> **Update — corrective fail-closed state:** mainnet, testnet, and signet keep
+> `nMatMulV4Height`, `nMatMulBMX4CHeight`, and `nMatMulRCHeight` at
+> `INT32_MAX`. The live RC ASERT ratio is `1/1` and the GPU-lifecycle
+> ratification flag is false. The implementation and calibration remain staged;
+> a later activation-only change must choose and reseal a fresh atomic tuple.
 
 This file tracks the path from the reference implementation to a mainnet
-hard-fork activation. **Mainnet Epoch A is a scheduled candidate; every Epoch
-B–D height remains unset on every network.** Implementation review and
-activation review are separate gates. The source flags are staged for candidate
-testing, but the activation decision and any explicit risk disposition remain
-open until the exact-final evidence is reviewed.
+hard-fork activation. **Mainnet Epoch A and every Epoch B–D height remain unset
+on every public network.** Implementation review and activation review are
+separate gates. The activation decision remains open until exact-final evidence
+for a freshly selected tuple is reviewed.
 
 The required order is:
 
@@ -32,12 +31,11 @@ The required order is:
 Do not collapse these epochs or infer one activation height from another.
 Epoch A is the only epoch eligible for the first activation-height PR.
 
-HISTORY: merging the implementation PR activated nothing — through the
-implementation-only releases `nMatMulV4Height`, `nMatMulBMX4CHeight`, and
-`nMatMulRCHeight` all stayed `INT32_MAX` and the public-network ratification
-constants stayed false. This branch may stage candidate values, but no finite
-tuple or ratification flag is release-authorizing until exact-final evidence
-passes and the activation review selects `H_A` from the live tip.
+CURRENT SOURCE: `nMatMulV4Height`, `nMatMulBMX4CHeight`, and `nMatMulRCHeight`
+are `INT32_MAX`, the RC ASERT ratio is `1/1`, and the GPU-lifecycle flag is
+false. The implementation and staged coefficient are non-authorizing until an
+activation review selects `H_A` from the live tip and the unchanged result
+passes the exact-final evidence gate.
 
 The eventual Epoch-A activation must set one atomic tuple at a single height
 `H_A`; it must never be a one-field flip:
@@ -48,7 +46,7 @@ The eventual Epoch-A activation must set one atomic tuple at a single height
 | Withdrawn/intermediate paths | DRLT and coupled-RC heights remain `INT32_MAX` |
 | Workload/authority | Profile 1, production dimensions, ExactReplay authority |
 | Header admission | HeaderPoW remains disabled; Poseidon2 `rcadmit` is P2P policy |
-| ASERT | v4 and BMX4C ratios remain inert `1/1`; the live RC branch owns the measured one-time calibration |
+| ASERT | v4 and BMX4C ratios remain inert `1/1`; the live RC branch owns the reviewed one-time policy coefficient, which must be reproduced by exact-final CUDA launch-cohort evidence |
 | Authorization | `BTX_MATMUL_NO_INVERSION_GATE_RATIFIED` and `BTX_MATMUL_V47_GPU_LIFECYCLE_GATE_RATIFIED` are separate, explicit reviewed decisions |
 
 Epochs B–D require new height-versioned proof-required, proof-authority, and
@@ -56,9 +54,9 @@ Profile-2 selectors. They must not be implemented by flipping the current
 global Stage-3 readiness value or `nMatMulRCProfile`, because doing so would
 reinterpret historical Epoch-A blocks under a later rule.
 
-The older, pre-v4.7 tracker below describes two historical broad gates. Its
-"disabled" wording describes the implementation-only state at that time, not
-the finite-but-provisional values staged in the current release candidate:
+The older, pre-v4.7 tracker below describes two historical broad gates. Current
+source again implements its fail-closed state: all public Epoch-A heights are
+`INT32_MAX`, live RC ASERT is `1/1`, and GPU-lifecycle ratification is false:
 
 - **Historical Gate A — merge to `main` (after public review).** The fork was
   to land *disabled* and remain inert until a later activation change.
@@ -116,10 +114,9 @@ to settle §K.2b(c).
 
 This section records the superseded implementation-only merge plan, under
 which code and documentation could be merged with all activation heights
-unreachable. It does not describe the current release candidate, which stages
-a finite provisional tuple but remains non-authorizing pending exact-final
-evidence and release review. Neither state enables proof authority or Profile
-2 by default.
+unreachable. Current source also keeps Epoch A unreachable, but requires a
+fresh separately reviewed activation-only tuple and exact-final evidence.
+Neither state enables proof authority or Profile 2 by default.
 
 | # | Item | Status |
 |---|---|---|
@@ -159,8 +156,8 @@ activation heights were `INT32_MAX` and
 
 **Required closing basis:** the operator may finalize Epoch A only after three
 revision-bound evidence sets pass on the exact final implementation: a
-CUDA+Metal golden cohort, zero-fallback lifecycle soak, and two-vendor ASERT
-calibration (see
+CUDA+Metal correctness-golden cohort, zero-fallback CUDA lifecycle soak, and
+CUDA launch-cohort ASERT calibration (see
 `doc/btx-matmul-v4.7-transition-roadmap.md` §4), and with multi-day
 wall-clock soak, multi-peer public testnet topology, and released-binary
 upgrade behavior either completed or explicitly dispositioned in the reviewed
@@ -318,13 +315,11 @@ supermajority upgraded → activate.
 
 ### B6. Staged mainnet activation — atomic Epoch-A tuple
 
-The current source stages a finite Epoch-A tuple and ratification flags for
-release-candidate testing. Those values are provisional and non-authorizing:
-they must not ship unless the exact-final evidence and activation review pass.
-Once every required exit criterion is GO (with CUDA and Metal PASSes only two
-of the required inputs), a narrow release-final change must replace or
-re-affirm the complete tuple, measured coefficient, and ratification decision
-atomically:
+The current source keeps the Epoch-A tuple disabled, the live RC ratio neutral,
+and GPU-lifecycle ratification false. Once every required exit criterion is GO
+(with CUDA and Metal PASSes only two of the required inputs), a narrow
+activation-only change must install the complete tuple, evidence-bound policy
+coefficient, and ratification decision atomically:
 
 1. **Pick the height from the live tip at source freeze.**
    `H_activate = current_mainnet_height + Δ`, where `Δ` gives **at least
@@ -343,9 +338,10 @@ atomically:
 4. **Assign ASERT ownership once.** Keep both
    `nMatMulV4AsertRescaleNum/Den` and
    `nMatMulBMX4CAsertRescaleNum/Den` at `1/1`; set only
-   `nMatMulRCAsertRescaleNum/Den` to the independently reviewed, measured
-   v3-to-Epoch-A calibration. The RC dispatch branch is live at the unified
-   height and owns that one-time rescale.
+   `nMatMulRCAsertRescaleNum/Den` to the independently reviewed policy
+   coefficient reproduced by the exact-final v3-to-Epoch-A CUDA calibration.
+   The RC dispatch branch is live at the unified height and owns that one-time
+   rescale. The signed consensus fields cap each term at `INT64_MAX`.
 5. **Re-affirm ratification explicitly.** The activation release must record
    the reviewed L0 decision and set both required source constants as part of
    the same release-final change. Candidate values, a height, benchmark,
@@ -356,24 +352,69 @@ atomically:
    only proceeds once a supermajority has upgraded — a flag-day with no adoption
    check risks a split.
 
+The release-final review must run
+`contrib/matmul-v4/verify-epoch-a-activation-gate.py` with a reviewed schema-2
+policy record and the exact six role-specific binaries it names. The ASERT and
+golden CUDA harnesses are deliberately separate inputs; equal source does not
+imply byte-identical builds across evidence hosts or build configurations. The
+verifier binds the
+release source separately from the ASERT, golden, and lifecycle source commits.
+Each artifact commit must resolve exactly, be a reachable ancestor in the
+golden/ASERT-to-lifecycle-to-release chronology, and reproduce its own declared
+full build-relevant tree fingerprint. A second immutable implementation
+fingerprint must match every role and the release; it normalizes only the three
+release-final height/coefficient literals and two ratification booleans, and
+excludes only the sealed production manifest. Per-role binary hashes are
+explicit; the manifest-bearing lifecycle daemon and CLI must exactly match the
+lifecycle artifact. This permits evidence, manifest, and final authorization
+commits after pre-manifest goldens without accepting any other source-code
+change or an arbitrary ancestor. The verifier also binds the compiled
+height/coefficient, both source
+ratification flags, a re-derived CUDA-only ASERT corpus, the separate sealed
+CUDA+Metal correctness cohort, and a correlated strict-device two-node CUDA
+lifecycle campaign. The lifecycle policy explicitly records its
+minimum complete/contention samples and p99/max bounds; the tool does not
+invent those values. The campaign itself never self-ratifies a source flag.
+The lifecycle campaign emits schema 4. A steady observer measures from
+immediately before the solve RPC through the receiving node reporting that
+exact authenticated tip. A contention observer starts before concurrently
+submitting sibling solve RPCs to disconnected nodes and stops only after both
+local sibling accepts, winning-branch extension, reorg convergence, and the
+next exact direct-tip child's authentication. Monotonic checkpoints prove that
+ordering and reproduce the full observer endpoint. Sums of component counters
+are not accepted as the observer wall. Bounded daemon telemetry must bind the
+same measured-child hash to strict winner reseal/local-authority consumption,
+authenticated relay, and receiving strict ExactReplay. Missing, cancelled,
+cross-block, post-convergence-only, or sequentially mislabeled contention data
+is incomplete. The winner record starts at the solve RPC dispatch, counts every
+nonce attempt, and includes all solve/reseal scheduler waits. The scheduler's
+independent latest-component summary remains
+diagnostic and cannot substitute for these exact-block records.
+Changing source, a binary, evidence bytes, the height, a flag, a provider
+cohort, or a lifecycle bound requires a new exact-final campaign and policy
+record.
+
 Until the exact-final tuple, coefficient, and ratification decision are
 committed in a reviewed release and that release reaches its selected height,
-the public network stays on v3. The finite values in this development branch
-are not deployment authorization. A partial tuple is invalid by construction.
+the public network stays on v3. The staged coefficient constants in this
+development branch are not deployment authorization: the public heights remain
+disabled and the live RC ratio remains neutral. A partial tuple is invalid by
+construction.
 
 ---
 
 ## Gate C — historical ENC-BMX4C research tracker
 
-> **v4.7 precedence:** The Epoch-A candidate activates BMX4C atomically with v4 and
-> Profile-1 ExactReplay at `H_A`. It is not a later standalone mainnet fork.
+> **v4.7 precedence:** The Epoch-A release design activates BMX4C atomically with
+> v4 and Profile-1 ExactReplay at `H_A`. It is not a later standalone mainnet fork.
 > The material below is retained as design and measurement provenance; its old
 > ordering and independent-height recommendations do not govern v4.7.
 
-**Historical note:** before the Epoch-A candidate,
-`nMatMulBMX4CHeight` was deliberately unset on every network. The candidate
-stages it at the same release-selected height as v4 and RC, but the tuple is
-not final or shipped until the current activation gates close. Design source
+**Historical note:** before the atomic Epoch-A release design,
+`nMatMulBMX4CHeight` was deliberately unset on every network. A later
+activation-only change will stage it at the same release-selected height as v4
+and RC, but the current corrective source keeps the entire tuple disabled.
+Design source
 of truth for the historical encoding work:
 `doc/btx-matmul-v4.2-consolidated-design.md`; normative encoding spec + profile
 machinery: `doc/btx-matmul-v4.2-bmx4c-spec.md`; governance framework:

@@ -43,6 +43,11 @@ REQUIRED_PROVIDERS = ("cuda",)
 PROVIDER_PREFIXES = {"cuda": "cuda_", "metal": "metal_"}
 CANONICAL_RC_EPISODE_MACS = 141_149_805_215_744
 UINT64_MAX = (1 << 64) - 1
+# Consensus::Params stores the installed coefficient in an int64_t. Raw
+# counters may legitimately use the full uint64 range, but a derived release
+# coefficient above INT64_MAX cannot be represented by the consensus tuple and
+# must be rejected here rather than overflowing when copied into C++.
+INT64_MAX = (1 << 63) - 1
 COEFFICIENT_POLICY_METHOD = (
     "max_observed_cross_product_plus_margin_quantized_up_v1"
 )
@@ -530,8 +535,8 @@ def derive(
             )
             * quantum
         )
-        if coefficient <= 0 or coefficient > UINT64_MAX:
-            raise CalibrationError(f"{provider}: coefficient is outside uint64 range")
+        if coefficient <= 0 or coefficient > INT64_MAX:
+            raise CalibrationError(f"{provider}: coefficient is outside int64 range")
         results.append({
             "provider_family": provider,
             "device_architecture": architecture,
@@ -606,6 +611,14 @@ def parse_uint64(text: str) -> int:
     return value
 
 
+def parse_int64(text: str) -> int:
+    """Parse the non-negative decimal range representable by consensus int64."""
+    value = parse_uint64(text)
+    if value > INT64_MAX:
+        raise argparse.ArgumentTypeError("must fit int64")
+    return value
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", type=Path, default=DEFAULT_INPUT)
@@ -614,7 +627,7 @@ def main() -> int:
         "--source-revision", required=True,
         help="exact 40-character clean commit measured by every binary",
     )
-    parser.add_argument("--expected-coefficient", type=parse_uint64)
+    parser.add_argument("--expected-coefficient", type=parse_int64)
     args = parser.parse_args()
 
     try:

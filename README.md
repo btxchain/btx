@@ -13,21 +13,18 @@ active from genesis, enforces reduced-data transaction constraints (BIP
 This repository contains the full node implementation, wallet, mining
 infrastructure, and test suites.
 
-## MatMul v4.7 transition — Epoch A release candidate
+## MatMul v4.7 transition — Epoch A staged and disabled
 
-This branch carries the MatMul v4.7 transition and an **Epoch-A release
-candidate**. The candidate contains one atomic `nMatMulV4Height = nMatMulBMX4CHeight =
-nMatMulRCHeight = H_A` tuple and both ratification constants; testnet and
-signet heights remain disabled, as do Epochs B–D, DRLT, and coupled RC. The
-numeric `H_A` and one-time RC ASERT coefficient in `src/kernel/chainparams.cpp`
-are candidate values. Release preparation must first settle the tuple and
-recompute at least 96 hours of runway from the live tip, freeze that source,
-and then run the exact-final-binary CUDA+Metal and ASERT confirmation campaigns
-without changing it. The finite height and true flags are technically live if this source is
-merged unchanged; review status does not make them inert. This draft remains
-NO-GO for merge or release until the exact-final evidence and activation review
-pass; any tuple change repeats the freeze and evidence. It must not be described
-as already deployed or shipped.
+This branch carries the MatMul v4.7 transition and its **Epoch-A
+implementation**. Mainnet, testnet, and signet keep `nMatMulV4Height`,
+`nMatMulBMX4CHeight`, and `nMatMulRCHeight` at `INT32_MAX`; the live RC ASERT
+ratio is neutral `1/1`, and the GPU-lifecycle ratification flag is false.
+Epochs B–D, DRLT, and coupled RC are also disabled. A later activation-only
+change must choose a fresh `H_A` with at least 96 hours of live-tip runway,
+install the reviewed coefficient, set the lifecycle flag, and then seal the
+unchanged exact-final source and binaries with CUDA+Metal, a schema-4 gate,
+and revision-bound ASERT evidence. Historical corpora do not authorize a new
+source revision.
 
 The transition deliberately separates verification authority from workload
 size:
@@ -196,7 +193,7 @@ multiplication — is the same operation that dominates GPU and TPU workloads fo
 AI/ML training and inference, making the mining hardware directly reusable for
 productive computation.
 
-> **MatMul v4.7 Resident Curriculum transition — Epoch A release candidate.**
+> **MatMul v4.7 Resident Curriculum transition — Epoch A staged and disabled.**
 > The implementation preserves the 182-byte digest-only header and a
 > header-derived work statement, but divides the consensus change into four
 > separately activated epochs:
@@ -213,10 +210,10 @@ productive computation.
 > `T_leaf=1,024`. Profile 2 is approximately 16 times heavier and is not a
 > routine validator requirement at launch. Sampled/Freivalds carriers and
 > unfinished GKR/FRI machinery are never allowed to silently become
-> authority. Mainnet schedules Epoch A at the release-selected atomic `H_A`
-> (v4 = BMX4C = RC, with a final-binary RC ASERT rescale);
-> testnet and signet heights remain disabled, and Epochs B–D require
-> separate future activation heights. See the
+> authority. Mainnet, testnet, and signet keep Epoch A disabled at
+> `INT32_MAX`, with live RC ASERT `1/1` and GPU-lifecycle ratification false.
+> A future activation-only change must select and reseal one atomic `H_A`
+> (v4 = BMX4C = RC); Epochs B–D require separate future activation heights. See the
 > [canonical roadmap](doc/btx-matmul-v4.7-transition-roadmap.md) and
 > [Epoch-A launch gates](doc/matmul-v4-exact-replay-launch-candidate.md).
 

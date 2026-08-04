@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Focused tests for MatMul lifecycle and trusted-mirror command-line tools."""
 
+import copy
 import importlib.util
 import copy
 import os
@@ -89,6 +90,209 @@ class TrustedMirrorToolsTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unsupported lifecycle mode"):
             module.execution_policy_for_mode("unknown")
 
+    def test_lifecycle_public_errors_omit_private_exception_detail(self):
+        module = load_lifecycle()
+        private_detail = "/Users/" + "fixture-operator/private-build/bin/btxd"
+        public = module.public_exception_name(RuntimeError(private_detail))
+        self.assertEqual(public, "RuntimeError")
+        self.assertNotIn("fixture-operator", public)
+        self.assertNotIn("/Users/", public)
+
+    def test_lifecycle_exact_block_records_cannot_mix_or_cancel(self):
+        module = load_lifecycle()
+        block_hash = "1" * 64
+        authority = {
+            "block_hash": block_hash,
+            "block_height": 6,
+            "solve_attempts": 3,
+            "solve_to_reseal_s": 40.0,
+            "reseal_to_consume_s": 1.0,
+            "solve_to_consume_s": 41.0,
+            "provider": "cuda_rc_exact_test",
+        }
+        relay = {"block_hash": block_hash, "relay_s": 0.5}
+        validation = {
+            "block_hash": block_hash,
+            "block_height": 6,
+            "outcome": "valid",
+            "execution_policy": "strict-device",
+            "require_device": True,
+            "provider": "cuda_rc_exact_test",
+            "fully_accelerated": True,
+            "device_gemm_calls": 136,
+            "device_gemm_macs": 1,
+            "device_xof_fallbacks": 0,
+            "host_xof_calls": 0,
+            "cpu_gemm_calls": 0,
+            "cpu_gemm_fallbacks": 0,
+            "wall_s": 20.0,
+        }
+        miner = {"backend_runtime": {"rc_accelerator_scheduler": {
+            "winner_reseal_authority": {"recent_consumed": [authority]},
+        }}}
+        validator = {"backend_runtime": {
+            "rc_accelerator_scheduler": {
+                "recent_authenticated_relays": [relay],
+            },
+            "rc_exact_replay": {"recent_validations": [validation]},
+        }}
+        actual = module.extract_exact_block_lifecycle(
+            miner, validator, block_hash=block_hash,
+            block_height=6, observer_wall_s=50.0,
+            observer_elapsed_ns=50_000_000_000,
+        )
+        self.assertTrue(actual["rpc_correlated_end_to_end_sample"])
+        self.assertEqual(actual["correlation_block_hash"], block_hash)
+        self.assertEqual(actual["miner_authority"]["solve_attempts"], 3)
+        contention_actual = module.extract_exact_block_lifecycle(
+            miner, validator, block_hash=block_hash,
+            block_height=6, observer_wall_s=50.0,
+            observer_elapsed_ns=50_000_000_000,
+            observer_start_event=(
+                "before_concurrent_competing_sibling_rpc_submission"
+            ),
+        )
+        self.assertEqual(
+            contention_actual["observer_measurement"]["start_event"],
+            "before_concurrent_competing_sibling_rpc_submission",
+        )
+        core = module.extract_exact_block_core_lifecycle(
+            validator, block_hash=block_hash, block_height=6,
+            observer_wall_s=50.0,
+            observer_elapsed_ns=50_000_000_000,
+        )
+        self.assertTrue(core["core_complete_without_authority"])
+        self.assertFalse(core["authority_measured"])
+
+        stale = copy.deepcopy(validator)
+        stale_relay = copy.deepcopy(relay)
+        stale_relay["block_hash"] = "9" * 64
+        stale["backend_runtime"]["rc_accelerator_scheduler"][
+            "recent_authenticated_relays"
+        ].insert(0, stale_relay)
+        selected = module.extract_exact_block_lifecycle(
+            miner, stale, block_hash=block_hash,
+            block_height=6, observer_wall_s=50.0,
+            observer_elapsed_ns=50_000_000_000,
+        )
+        self.assertEqual(
+            selected["authenticated_relay"]["block_hash"], block_hash
+        )
+
+        duplicate = copy.deepcopy(validator)
+        duplicate["backend_runtime"]["rc_accelerator_scheduler"][
+            "recent_authenticated_relays"
+        ].append(copy.deepcopy(relay))
+        with self.assertRaisesRegex(RuntimeError, "2 records for exact block hash"):
+            module.extract_exact_block_lifecycle(
+                miner, duplicate, block_hash=block_hash,
+                block_height=6, observer_wall_s=50.0,
+                observer_elapsed_ns=50_000_000_000,
+            )
+
+        mixed = copy.deepcopy(validator)
+        mixed["backend_runtime"]["rc_accelerator_scheduler"][
+            "recent_authenticated_relays"
+        ][0]["block_hash"] = "2" * 64
+        with self.assertRaisesRegex(RuntimeError, "0 records for exact block hash"):
+            module.extract_exact_block_lifecycle(
+                miner, mixed, block_hash=block_hash,
+                block_height=6, observer_wall_s=50.0,
+                observer_elapsed_ns=50_000_000_000,
+            )
+
+        missing_attempts = copy.deepcopy(miner)
+        missing_attempts["backend_runtime"]["rc_accelerator_scheduler"][
+            "winner_reseal_authority"
+        ]["recent_consumed"][0].pop("solve_attempts")
+        with self.assertRaisesRegex(RuntimeError, "solve_attempts"):
+            module.extract_exact_block_lifecycle(
+                missing_attempts, validator, block_hash=block_hash,
+                block_height=6, observer_wall_s=50.0,
+                observer_elapsed_ns=50_000_000_000,
+            )
+
+        cancelled = copy.deepcopy(validator)
+        cancelled["backend_runtime"]["rc_exact_replay"][
+            "recent_validations"
+        ][0]["outcome"] = "cancelled"
+        with self.assertRaisesRegex(RuntimeError, "outcome mismatch"):
+            module.extract_exact_block_lifecycle(
+                miner, cancelled, block_hash=block_hash,
+                block_height=6, observer_wall_s=50.0,
+                observer_elapsed_ns=50_000_000_000,
+            )
+
+        missing = copy.deepcopy(miner)
+        missing["backend_runtime"]["rc_accelerator_scheduler"][
+            "winner_reseal_authority"
+        ]["recent_consumed"] = []
+        with self.assertRaisesRegex(RuntimeError, "0 records for exact block hash"):
+            module.extract_exact_block_lifecycle(
+                missing, validator, block_hash=block_hash,
+                block_height=6, observer_wall_s=50.0,
+                observer_elapsed_ns=50_000_000_000,
+            )
+
+    def test_lifecycle_exports_both_runtime_build_and_validation_facts(self):
+        module = load_lifecycle()
+        revision = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        fingerprint = module.EVIDENCE_IDENTITY.tree_fingerprint(REPO_ROOT, revision)
+        canary = {
+            "outcome": "passed",
+            "attempted": True,
+            "passed": True,
+            "manifest_has_reviewed_goldens": True,
+            "build_provenance_matches": True,
+            "build_source_dirty": False,
+            "build_source_revision": revision,
+            "build_source_tree_fingerprint": fingerprint,
+            "exact_manifest_match": True,
+            "provider": "cuda_rc_exact_test",
+            "provider_family": "cuda",
+            "device_architecture": "sm_120",
+            "epoch_activation_height": 6,
+            "epoch_profile": 1,
+            "epoch_matmul_dimension": 4096,
+            "device_macs": 1,
+            "device_xof_fallbacks": 0,
+            "host_xof_calls": 0,
+            "cpu_fallbacks": 0,
+            "reason": "passed",
+        }
+        response = {
+            "backend_runtime": {
+                "rc_exact_replay": {
+                    "resolved_provider": "cuda_rc_exact_test",
+                    "production_canary": canary,
+                    "last_validation": {
+                        "available": True,
+                        "outcome": "valid",
+                        "execution_policy": "strict-device",
+                        "require_device": True,
+                        "provider": "cuda_rc_exact_test",
+                        "fully_accelerated": True,
+                        "cpu_gemm_calls": 0,
+                        "cpu_gemm_fallbacks": 0,
+                    },
+                    "provider_health": {
+                        "quarantined": False,
+                        "validator_readiness_lost": False,
+                    },
+                }
+            }
+        }
+        evidence = module.extract_public_runtime_evidence(
+            response, revision=revision, fingerprint=fingerprint,
+            label="validator",
+        )
+        self.assertEqual(evidence["resolved_provider"], "cuda_rc_exact_test")
+        self.assertTrue(evidence["production_canary"]["exact_manifest_match"])
+        self.assertEqual(evidence["last_validation"]["execution_policy"], "strict-device")
+
     def test_rehearsal_parses_explicit_local_deployment_arguments(self):
         module = load_rehearsal()
         with tempfile.TemporaryDirectory() as tmp:
@@ -100,6 +304,7 @@ class TrustedMirrorToolsTest(unittest.TestCase):
             ):
                 paths[name] = root / name
                 paths[name].write_text("test\n", encoding="utf-8")
+            paths["signer-wif"].chmod(0o600)
             revision = subprocess.run(
                 ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"],
                 capture_output=True, text=True, check=True,
@@ -267,8 +472,26 @@ class TrustedMirrorToolsTest(unittest.TestCase):
 
     def test_winner_reseal_authority_proof_is_fresh_and_header_bound(self):
         module = load_rehearsal()
+        expected_blocks = [
+            (6, "1" * 64),
+            (7, "2" * 64),
+            (8, "3" * 64),
+        ]
 
-        def mining_info(*, candidate, reseal, published, consumed, provider):
+        def authority_sample(height, block_hash, provider):
+            return {
+                "block_hash": block_hash,
+                "block_height": height,
+                "solve_attempts": 4,
+                "solve_to_reseal_s": 20.0,
+                "reseal_to_consume_s": 0.5,
+                "solve_to_consume_s": 20.5,
+                "provider": provider,
+            }
+
+        def mining_info(
+            *, candidate, reseal, published, consumed, provider, samples,
+        ):
             return {
                 "backend_runtime": {
                     "rc_accelerator_scheduler": {
@@ -287,46 +510,98 @@ class TrustedMirrorToolsTest(unittest.TestCase):
                             "published": published,
                             "consumed": consumed,
                             "rejected_not_block_target": 0,
+                            "rejected_not_production_ready": 0,
+                            "invalidated_before_consume": 0,
                             "expired": 0,
                             "evicted": 0,
                             "misses": 0,
                             "entries": 0,
                             "last_provider": provider,
+                            "consumed_by_provider": (
+                                {provider: consumed} if provider else {}
+                            ),
+                            "recent_consumed": samples,
                         },
                     }
                 }
             }
 
         baseline = mining_info(
-            candidate=0, reseal=0, published=0, consumed=0, provider=""
+            candidate=0, reseal=0, published=0, consumed=0, provider="",
+            samples=[],
         )
         final = mining_info(
             candidate=5, reseal=3, published=3, consumed=3,
             provider="metal_rc_exact",
+            samples=[
+                authority_sample(height, block_hash, "metal_rc_exact")
+                for height, block_hash in expected_blocks
+            ],
         )
         proof = module.validate_archive_strict_proof(
             mode="winner-reseal-authority",
             baseline_mining_info=baseline,
             final_mining_info=final,
-            validation={"available": False},
             expected_provider="metal_rc_exact",
+            expected_blocks=expected_blocks,
         )
         self.assertEqual(proof["authority_consumed"], 3)
         self.assertEqual(proof["winner_reseal_completions"], 3)
+        self.assertEqual(
+            [(entry["block_height"], entry["block_hash"])
+             for entry in proof["exact_consumed_authorities"]],
+            expected_blocks,
+        )
 
         cases = []
         too_few = copy.deepcopy(final)
         too_few["backend_runtime"]["rc_accelerator_scheduler"]["winner_reseal_authority"]["consumed"] = 2
-        cases.append(("at least 3", too_few))
+        cases.append(("expected exactly 3", too_few))
+        too_many_reseals = copy.deepcopy(final)
+        too_many_reseals["backend_runtime"]["rc_accelerator_scheduler"]["lanes"]["winner_reseal"]["completions"] = 4
+        cases.append(("expected exactly 3", too_many_reseals))
+        residual = copy.deepcopy(final)
+        residual["backend_runtime"]["rc_accelerator_scheduler"]["winner_reseal_authority"]["entries"] = 1
+        cases.append(("store must be empty", residual))
         wrong_provider = copy.deepcopy(final)
         wrong_provider["backend_runtime"]["rc_accelerator_scheduler"]["winner_reseal_authority"]["last_provider"] = "cuda_rc_exact_fused_extract"
         cases.append(("provider differs", wrong_provider))
+        mixed_provider = copy.deepcopy(final)
+        mixed_authority = mixed_provider["backend_runtime"]["rc_accelerator_scheduler"]["winner_reseal_authority"]
+        mixed_authority["consumed_by_provider"] = {
+            "metal_rc_exact": 2,
+            "cuda_rc_exact_fused_extract": 1,
+        }
+        cases.append(("do not bind all three", mixed_provider))
         invariant = copy.deepcopy(final)
         invariant["backend_runtime"]["rc_accelerator_scheduler"]["release_invariant_violations"] = 1
         cases.append(("invariant", invariant))
         missed = copy.deepcopy(final)
         missed["backend_runtime"]["rc_accelerator_scheduler"]["winner_reseal_authority"]["misses"] = 1
         cases.append(("misses changed", missed))
+        invalidated = copy.deepcopy(final)
+        invalidated["backend_runtime"]["rc_accelerator_scheduler"]["winner_reseal_authority"]["invalidated_before_consume"] = 1
+        cases.append(("invalidated_before_consume changed", invalidated))
+        missing_exact = copy.deepcopy(final)
+        missing_exact["backend_runtime"]["rc_accelerator_scheduler"]["winner_reseal_authority"]["recent_consumed"].pop()
+        cases.append(("expected exactly 3", missing_exact))
+        wrong_exact = copy.deepcopy(final)
+        wrong_exact["backend_runtime"]["rc_accelerator_scheduler"]["winner_reseal_authority"]["recent_consumed"][0]["block_hash"] = "4" * 64
+        cases.append(("does not match the exact mined blocks", wrong_exact))
+        duplicate_exact = copy.deepcopy(final)
+        duplicate_exact["backend_runtime"]["rc_accelerator_scheduler"]["winner_reseal_authority"]["recent_consumed"][2] = copy.deepcopy(
+            duplicate_exact["backend_runtime"]["rc_accelerator_scheduler"]["winner_reseal_authority"]["recent_consumed"][1]
+        )
+        cases.append(("duplicate exact block", duplicate_exact))
+        wrong_exact_provider = copy.deepcopy(final)
+        wrong_exact_provider["backend_runtime"]["rc_accelerator_scheduler"]["winner_reseal_authority"]["recent_consumed"][0]["provider"] = "cuda_rc_exact_fused_extract"
+        cases.append(("exact-block provider differs", wrong_exact_provider))
+        zero_attempts = copy.deepcopy(final)
+        zero_attempts["backend_runtime"]["rc_accelerator_scheduler"]["winner_reseal_authority"]["recent_consumed"][0]["solve_attempts"] = 0
+        cases.append(("solve_attempts must be positive", zero_attempts))
+        zero_timing = copy.deepcopy(final)
+        zero_timing["backend_runtime"]["rc_accelerator_scheduler"]["winner_reseal_authority"]["recent_consumed"][0]["solve_to_reseal_s"] = 0.0
+        cases.append(("must be a positive finite number", zero_timing))
         for error, changed in cases:
             with self.subTest(error=error):
                 with self.assertRaisesRegex(RuntimeError, error):
@@ -334,35 +609,20 @@ class TrustedMirrorToolsTest(unittest.TestCase):
                         mode="winner-reseal-authority",
                         baseline_mining_info=baseline,
                         final_mining_info=changed,
-                        validation={"available": False},
                         expected_provider="metal_rc_exact",
+                        expected_blocks=expected_blocks,
                     )
 
-    def test_receiving_validation_proof_fails_closed_when_unavailable(self):
+    def test_self_mining_runner_rejects_receiving_validation_mode(self):
         module = load_rehearsal()
-        with self.assertRaisesRegex(RuntimeError, "no validation is available"):
+        with self.assertRaisesRegex(RuntimeError, "supports only"):
             module.validate_archive_strict_proof(
                 mode="receiving-validation",
                 baseline_mining_info={},
                 final_mining_info={},
-                validation={"available": False},
                 expected_provider="metal_rc_exact",
+                expected_blocks=[],
             )
-        proof = module.validate_archive_strict_proof(
-            mode="receiving-validation",
-            baseline_mining_info={},
-            final_mining_info={},
-            validation={
-                "available": True,
-                "provider": "metal_rc_exact",
-                "require_device": True,
-                "fully_accelerated": True,
-                "cpu_gemm_calls": 0,
-                "cpu_gemm_fallbacks": 0,
-            },
-            expected_provider="metal_rc_exact",
-        )
-        self.assertEqual(proof["mode"], "receiving-validation")
 
     def test_rehearsal_requires_proven_archive_mirror_trust_boundary(self):
         module = load_rehearsal()
@@ -529,6 +789,305 @@ class TrustedMirrorToolsTest(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaisesRegex(RuntimeError, "unsafe archive datadir"):
                     module.validate_remote_archive_dir(value)
+
+    def test_remote_pid_and_bounded_stop_command_are_fail_closed(self):
+        module = load_rehearsal()
+        self.assertEqual(module.validate_remote_pid("12345\n"), "12345")
+        start = "Tue Aug 4 00:00:00 2026"
+        self.assertEqual(
+            module.validate_remote_launch_output(f"12345\n{start}\n"),
+            ("12345", start),
+        )
+        for value in ("", "0", "-1", "1 2", "1; touch /tmp/no", "12\n13"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(RuntimeError, "valid process ID"):
+                    module.validate_remote_pid(value)
+        for value in ("12345", "12345\n", "12345\nbad\n", "1\nstart\nextra\n"):
+            with self.subTest(launch_output=value):
+                with self.assertRaisesRegex(RuntimeError, "launch identity|not valid"):
+                    module.validate_remote_launch_output(value)
+        command = module.remote_stop_archive_command(
+            "12345", "/tmp/btx-trusted-archive.A1b2C3",
+            expected_start_identity=start,
+        )
+        self.assertIn('ps -p "$pid" -o command=', command)
+        self.assertIn('kill -TERM "$pid"', command)
+        self.assertIn('kill -KILL "$pid"', command)
+        self.assertIn("exit 14", command)
+        self.assertLess(command.index("kill -TERM"), command.index("kill -KILL"))
+
+    def test_ssh_destination_and_argv_reject_option_injection(self):
+        module = load_rehearsal()
+        for user, host, expected_host in (
+            ("operator", "gpu-archive.example.invalid", "gpu-archive.example.invalid"),
+            ("user.name", "127.0.0.1", "127.0.0.1"),
+            ("u_1", "2001:db8::1", "2001:db8::1"),
+            ("u+1", "[2001:db8::1]", "2001:db8::1"),
+            ("u", "fe80::1%en0", "fe80::1%en0"),
+        ):
+            with self.subTest(user=user, host=host):
+                self.assertEqual(
+                    module.validate_ssh_destination(user, host),
+                    f"{user}@{expected_host}",
+                )
+        for user, host in (
+            ("-F/tmp/config", "example.invalid"),
+            ("-oProxyCommand=touch /tmp/no", "example.invalid"),
+            ("user name", "example.invalid"),
+            ("user@other", "example.invalid"),
+            ("operator", "-oProxyCommand=touch"),
+            ("operator", "host name"),
+            ("operator", "host@example.invalid"),
+            ("operator", "example..invalid"),
+            ("operator", "bad/host"),
+            ("operator", "[::1"),
+            ("operator", "::1]"),
+            ("operator", "$(touch-no)"),
+            ("operator", "\N{SNOWMAN}.invalid"),
+            ("operator", "\N{LATIN SMALL LETTER E WITH ACUTE}xample.invalid"),
+        ):
+            with self.subTest(user=user, host=host):
+                with self.assertRaisesRegex(RuntimeError, "safe|valid|malformed"):
+                    module.validate_ssh_destination(user, host)
+
+        module.ARCHIVE_USER = "operator"
+        module.ARCHIVE_HOST = "gpu-archive.example.invalid"
+        for argv in (
+            module.remote_ssh_argv("true"), module.tunnel_ssh_argv(),
+        ):
+            delimiter = argv.index("--")
+            self.assertEqual(
+                argv[delimiter + 1], "operator@gpu-archive.example.invalid"
+            )
+            self.assertFalse(any(arg.startswith("-oProxyCommand")
+                                 for arg in argv[delimiter + 1:]))
+
+        module.ARCHIVE_HOST = "[2001:db8::1]"
+        for argv in (
+            module.remote_ssh_argv("true"), module.tunnel_ssh_argv(),
+        ):
+            delimiter = argv.index("--")
+            self.assertEqual(argv[delimiter + 1], "operator@2001:db8::1")
+
+    def test_remote_stop_shell_terminates_and_refuses_changed_identity(self):
+        module = load_rehearsal()
+        original_term = module.REMOTE_TERM_WAIT_SECONDS
+        original_kill = module.REMOTE_KILL_WAIT_SECONDS
+        module.REMOTE_TERM_WAIT_SECONDS = 1
+        module.REMOTE_KILL_WAIT_SECONDS = 1
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                datadir = Path(tmp) / "btx-trusted-archive.A1b2C3"
+                regtest = datadir / "regtest"
+                regtest.mkdir(parents=True)
+                pidfile = regtest / "btxd.pid"
+
+                def launch(ignore_term):
+                    handler = (
+                        "signal.signal(signal.SIGTERM, signal.SIG_IGN);"
+                        if ignore_term else ""
+                    )
+                    process = subprocess.Popen(
+                        [
+                            sys.executable, "-c",
+                            "import signal,sys,time;" + handler +
+                            "print('ready', flush=True);time.sleep(60)",
+                            str(datadir),
+                        ],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.DEVNULL,
+                        text=True,
+                    )
+                    self.assertEqual(process.stdout.readline().strip(), "ready")
+                    process.stdout.close()
+                    pidfile.write_text(f"{process.pid}\n", encoding="utf-8")
+                    return process
+
+                def start_identity(process):
+                    return subprocess.run(
+                        ["ps", "-p", str(process.pid), "-o", "lstart="],
+                        check=True, capture_output=True, text=True,
+                    ).stdout.strip()
+
+                process = launch(False)
+                command = module.remote_stop_archive_command(
+                    str(process.pid), str(datadir),
+                    expected_start_identity=start_identity(process),
+                    require_pidfile=True,
+                )
+                result = subprocess.run(
+                    ["/bin/sh", "-c", command], capture_output=True,
+                    text=True, check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                process.wait(timeout=5)
+
+                process = launch(True)
+                pidfile.unlink()
+                command = module.remote_stop_archive_command(
+                    str(process.pid), str(datadir),
+                    expected_start_identity=start_identity(process),
+                    require_pidfile=True,
+                )
+                result = subprocess.run(
+                    ["/bin/sh", "-c", command], capture_output=True,
+                    text=True, check=False,
+                )
+                self.assertEqual(result.returncode, 17, result.stderr)
+                self.assertIsNone(process.poll())
+                process.kill()
+                process.wait(timeout=5)
+
+                process = launch(True)
+                fake_bin = Path(tmp) / "fake-bin"
+                fake_bin.mkdir()
+                counter = Path(tmp) / "lstart-count"
+                fake_ps = fake_bin / "ps"
+                fake_ps.write_text(
+                    "#!/bin/sh\n"
+                    "case \" $* \" in\n"
+                    "  *' lstart='*)\n"
+                    "    n=$(cat \"$PS_COUNTER\" 2>/dev/null || echo 0)\n"
+                    "    n=$((n + 1)); printf '%s\\n' \"$n\" > \"$PS_COUNTER\"\n"
+                    "    if test \"$n\" -gt 1; then echo changed-identity; exit 0; fi\n"
+                    "    ;;\n"
+                    "esac\n"
+                    "exec /bin/ps \"$@\"\n",
+                    encoding="utf-8",
+                )
+                fake_ps.chmod(0o700)
+                command = module.remote_stop_archive_command(
+                    str(process.pid), str(datadir),
+                    expected_start_identity=start_identity(process),
+                    require_pidfile=True,
+                )
+                env = dict(os.environ)
+                env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+                env["PS_COUNTER"] = str(counter)
+                result = subprocess.run(
+                    ["/bin/sh", "-c", command], capture_output=True,
+                    text=True, check=False, env=env,
+                )
+                self.assertEqual(result.returncode, 18, result.stderr)
+                self.assertIsNone(process.poll())
+                process.kill()
+                process.wait(timeout=5)
+        finally:
+            module.REMOTE_TERM_WAIT_SECONDS = original_term
+            module.REMOTE_KILL_WAIT_SECONDS = original_kill
+
+    def test_remote_cleanup_stops_before_removing_datadir(self):
+        module = load_rehearsal()
+        commands = []
+        original = {
+            name: getattr(module, name)
+            for name in (
+                "ARCHIVE_DD", "ARCHIVE_LOCAL", "ARCHIVE_REMOTE_PID",
+                "ARCHIVE_REMOTE_START_IDENTITY",
+                "ARCHIVE_REMOTE_LAUNCH_ATTEMPTED", "KEEP_ARTIFACTS",
+                "sh_remote",
+            )
+        }
+        try:
+            module.ARCHIVE_DD = "/tmp/btx-trusted-archive.A1b2C3"
+            module.ARCHIVE_LOCAL = False
+            module.ARCHIVE_REMOTE_PID = "12345"
+            module.ARCHIVE_REMOTE_START_IDENTITY = "Tue Aug 4 00:00:00 2026"
+            module.ARCHIVE_REMOTE_LAUNCH_ATTEMPTED = True
+            module.KEEP_ARTIFACTS = False
+            module.sh_remote = (
+                lambda command, **kwargs: commands.append(command) or ""
+            )
+            module.cleanup_archive()
+            self.assertEqual(len(commands), 2)
+            self.assertIn("kill -TERM", commands[0])
+            self.assertTrue(commands[1].startswith("rm -rf -- "))
+            self.assertFalse(module.ARCHIVE_REMOTE_LAUNCH_ATTEMPTED)
+        finally:
+            for name, value in original.items():
+                setattr(module, name, value)
+
+    def test_remote_cleanup_never_removes_after_unverified_stop(self):
+        module = load_rehearsal()
+        commands = []
+        original = {
+            name: getattr(module, name)
+            for name in (
+                "ARCHIVE_DD", "ARCHIVE_LOCAL", "ARCHIVE_REMOTE_PID",
+                "ARCHIVE_REMOTE_START_IDENTITY",
+                "ARCHIVE_REMOTE_LAUNCH_ATTEMPTED", "KEEP_ARTIFACTS",
+                "sh_remote",
+            )
+        }
+        try:
+            module.ARCHIVE_DD = "/tmp/btx-trusted-archive.A1b2C3"
+            module.ARCHIVE_LOCAL = False
+            module.ARCHIVE_REMOTE_PID = "12345"
+            module.ARCHIVE_REMOTE_START_IDENTITY = "Tue Aug 4 00:00:00 2026"
+            module.ARCHIVE_REMOTE_LAUNCH_ATTEMPTED = True
+            module.KEEP_ARTIFACTS = False
+
+            def fail_stop(command, **kwargs):
+                commands.append(command)
+                raise subprocess.CalledProcessError(14, command)
+
+            module.sh_remote = fail_stop
+            with self.assertRaisesRegex(RuntimeError, "verified stopped state"):
+                module.cleanup_archive()
+            self.assertEqual(len(commands), 1)
+            self.assertNotIn("rm -rf", commands[0])
+        finally:
+            for name, value in original.items():
+                setattr(module, name, value)
+
+    def test_remote_signer_path_is_absolute_and_injection_safe(self):
+        module = load_rehearsal()
+        self.assertEqual(
+            module.validate_remote_file_path(
+                "/secure/archive/signer.wif", "--archive-signer-wif-file"
+            ),
+            "/secure/archive/signer.wif",
+        )
+        for value in (
+            "relative/signer.wif", "/signer.wif", "/secure/../signer.wif",
+            "/secure/signer.wif\nserver=0", "/secure/signer.wif\rserver=0",
+        ):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(RuntimeError, "absolute|safe"):
+                    module.validate_remote_file_path(
+                        value, "--archive-signer-wif-file"
+                    )
+        command = module.remote_private_file_check_command(
+            "/secure/archive/signer file.wif"
+        )
+        self.assertIn("test -f '/secure/archive/signer file.wif'", command)
+        self.assertIn("stat -c '%a' '/secure/archive/signer file.wif'", command)
+        self.assertIn("stat -f '%Lp' '/secure/archive/signer file.wif'", command)
+
+    def test_local_signer_permissions_fail_closed(self):
+        module = load_rehearsal()
+        with tempfile.TemporaryDirectory() as tmp:
+            signer = Path(tmp) / "signer.wif"
+            signer.write_text("private\n", encoding="utf-8")
+            signer.chmod(0o600)
+            module.require_private_local_file(signer, "--signer-wif-file")
+            self.assertEqual(
+                subprocess.run(
+                    ["sh", "-c", module.remote_private_file_check_command(str(signer))],
+                    check=False,
+                ).returncode,
+                0,
+            )
+            signer.chmod(0o640)
+            with self.assertRaisesRegex(RuntimeError, "group or others"):
+                module.require_private_local_file(signer, "--signer-wif-file")
+            self.assertNotEqual(
+                subprocess.run(
+                    ["sh", "-c", module.remote_private_file_check_command(str(signer))],
+                    check=False,
+                ).returncode,
+                0,
+            )
 
     def test_signer_pubkey_rejects_config_injection(self):
         module = load_rehearsal()

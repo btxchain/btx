@@ -1,12 +1,11 @@
 # MatMul v4.7 GPU validator operator runbook
 
-Status: Epoch A is a mainnet release candidate with a finite compiled candidate
-height (`185000`) and true source ratification flags. Those values are
-technically live if this source is merged unchanged, but they are not a release
-approval. Testnet and signet remain disabled. Operators must not advertise
-production readiness until the exact-final combined-tree golden, schema-4
-ASERT, trusted-mirror rehearsal, full-suite, operational-evidence, and
-live-tip-runway gates close.
+Status: Epoch A is implemented but disabled on mainnet, testnet, and signet.
+The three public heights are `INT32_MAX`, the live mainnet RC ASERT ratio is
+`1/1`, and GPU-lifecycle ratification is false. Operators must not advertise
+production readiness until a fresh atomic tuple and the exact-final
+combined-tree golden, schema-4 lifecycle/ASERT gate, trusted-mirror
+rehearsal, full-suite, operational-evidence, and live-tip-runway gates close.
 
 Canonical transition and activation policy:
 [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md).
