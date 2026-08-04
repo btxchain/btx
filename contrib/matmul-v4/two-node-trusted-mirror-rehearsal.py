@@ -362,6 +362,76 @@ def extract_strict_replay_evidence(
     return rc, canary, validation
 
 
+def validate_trusted_mirror_rehearsal(
+    *, archive_services: object, mirror_services: object,
+    archive_status: object, mirror_status: object, mirror_mode: object,
+) -> None:
+    """Prove the archive/mirror trust boundary before emitting ok=true."""
+    if (not isinstance(archive_services, list) or
+            not isinstance(mirror_services, list) or
+            any(not isinstance(item, str) for item in archive_services + mirror_services)):
+        raise RuntimeError("trusted-mirror schema error: service lists are required")
+    required_archive = {"MATMUL_ATTESTATION_ARCHIVE", "MATMUL_CONSENSUS"}
+    if not required_archive.issubset(set(archive_services)):
+        raise RuntimeError("archive does not advertise required MatMul services")
+    if ("MATMUL_TRUSTED_MIRROR" not in mirror_services or
+            "MATMUL_CONSENSUS" in mirror_services or
+            "MATMUL_ATTESTATION_ARCHIVE" in mirror_services):
+        raise RuntimeError("mirror service separation is invalid")
+    if mirror_mode != "trusted":
+        raise RuntimeError("mirror validation mode is not trusted")
+    if not isinstance(archive_status, dict) or not isinstance(mirror_status, dict):
+        raise RuntimeError("trusted-mirror schema error: status objects are required")
+
+    archive_required = {
+        "configured": True,
+        "trusted_mirror": False,
+        "serves_attestations": True,
+        "local_signer": True,
+        "attestation_version": 2,
+        "threshold": 1,
+        "trusted_signers": 1,
+    }
+    mirror_required = {
+        "configured": True,
+        "trusted_mirror": True,
+        "serves_attestations": False,
+        "local_signer": False,
+        "attestation_version": 2,
+        "threshold": 1,
+        "trusted_signers": 1,
+    }
+    for label, status, required in (
+        ("archive", archive_status, archive_required),
+        ("mirror", mirror_status, mirror_required),
+    ):
+        for field, expected in required.items():
+            actual = status.get(field)
+            type_ok = (
+                actual is expected if isinstance(expected, bool)
+                else isinstance(actual, int) and not isinstance(actual, bool)
+            )
+            if not type_ok or actual != expected:
+                raise RuntimeError(
+                    f"{label} trusted status {field} must equal {expected!r}"
+                )
+        context = status.get("replay_authority_context")
+        try:
+            EVIDENCE_IDENTITY.require_hex(
+                context, EVIDENCE_IDENTITY.HEX64,
+                f"{label}.replay_authority_context",
+            )
+        except EVIDENCE_IDENTITY.EvidenceIdentityError as error:
+            raise RuntimeError(f"trusted-mirror schema error: {error}") from error
+    if (mirror_status["replay_authority_context"] !=
+            archive_status["replay_authority_context"]):
+        raise RuntimeError("archive and mirror replay authority contexts differ")
+    for field in ("accepted", "blocks_with_quorum"):
+        value = mirror_status.get(field)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise RuntimeError(f"mirror trusted status {field} must be at least 1")
+
+
 def main(argv: list[str] | None = None) -> None:
     global ARCHIVE_DD, ARCHIVE_HOST, ARCHIVE_USER, ARCHIVE_BTXD, ARCHIVE_CLI
     global MIRROR_BTXD, MIRROR_CLI, SIGNER_WIF_FILE, SIGNER_PUB
@@ -560,7 +630,16 @@ connect=127.0.0.1:{ARCHIVE_P2P}
                 + json.dumps(mirror_rpc("getmatmultrustedstatus"))
             )
 
+        archive_trusted = archive_rpc("getmatmultrustedstatus")
         trusted = mirror_rpc("getmatmultrustedstatus")
+        mirror_mode = mirror_rpc("getblockchaininfo").get("matmulvalidationmode")
+        validate_trusted_mirror_rehearsal(
+            archive_services=a_services,
+            mirror_services=m_services,
+            archive_status=archive_trusted,
+            mirror_status=trusted,
+            mirror_mode=mirror_mode,
+        )
         archive_rc, canary, validation = extract_strict_replay_evidence(
             archive_rpc("getmininginfo"),
             expected_revision=SOURCE_REVISION,
@@ -596,7 +675,8 @@ connect=127.0.0.1:{ARCHIVE_P2P}
             "mirror_height": mirror_rpc("getblockcount"),
             "archive_services": a_services,
             "mirror_services": m_services,
-            "mirror_mode": mirror_rpc("getblockchaininfo").get("matmulvalidationmode"),
+            "mirror_mode": mirror_mode,
+            "archive_trusted_status": archive_trusted,
             "trusted_status": trusted,
             "archive_production_canary": canary,
             "archive_last_validation": validation,

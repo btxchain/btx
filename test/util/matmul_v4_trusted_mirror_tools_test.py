@@ -158,6 +158,77 @@ class TrustedMirrorToolsTest(unittest.TestCase):
         self.assertTrue(canary["passed"])
         self.assertEqual(validation["cpu_gemm_fallbacks"], 0)
 
+    def test_rehearsal_requires_proven_archive_mirror_trust_boundary(self):
+        module = load_rehearsal()
+        context = "a" * 64
+        archive_status = {
+            "configured": True,
+            "trusted_mirror": False,
+            "serves_attestations": True,
+            "local_signer": True,
+            "attestation_version": 2,
+            "threshold": 1,
+            "trusted_signers": 1,
+            "replay_authority_context": context,
+        }
+        mirror_status = {
+            "configured": True,
+            "trusted_mirror": True,
+            "serves_attestations": False,
+            "local_signer": False,
+            "attestation_version": 2,
+            "threshold": 1,
+            "trusted_signers": 1,
+            "replay_authority_context": context,
+            "accepted": 1,
+            "blocks_with_quorum": 1,
+        }
+        kwargs = {
+            "archive_services": [
+                "NETWORK", "MATMUL_CONSENSUS", "MATMUL_ATTESTATION_ARCHIVE"
+            ],
+            "mirror_services": ["NETWORK", "MATMUL_TRUSTED_MIRROR"],
+            "archive_status": archive_status,
+            "mirror_status": mirror_status,
+            "mirror_mode": "trusted",
+        }
+        module.validate_trusted_mirror_rehearsal(**kwargs)
+        cases = (
+            ("archive service", {**kwargs, "archive_services": ["NETWORK"]}),
+            ("mirror service", {**kwargs, "mirror_services": ["MATMUL_CONSENSUS"]}),
+            ("validation mode", {**kwargs, "mirror_mode": "consensus"}),
+            ("threshold", {
+                **kwargs,
+                "mirror_status": {**mirror_status, "threshold": 0},
+            }),
+            ("boolean threshold", {
+                **kwargs,
+                "mirror_status": {**mirror_status, "threshold": True},
+            }),
+            ("numeric configured", {
+                **kwargs,
+                "mirror_status": {**mirror_status, "configured": 1},
+            }),
+            ("contexts", {
+                **kwargs,
+                "mirror_status": {
+                    **mirror_status, "replay_authority_context": "b" * 64,
+                },
+            }),
+            ("accepted", {
+                **kwargs,
+                "mirror_status": {**mirror_status, "accepted": 0},
+            }),
+            ("quorum", {
+                **kwargs,
+                "mirror_status": {**mirror_status, "blocks_with_quorum": 0},
+            }),
+        )
+        for label, changed in cases:
+            with self.subTest(label=label):
+                with self.assertRaises(RuntimeError):
+                    module.validate_trusted_mirror_rehearsal(**changed)
+
     def test_rejects_old_flat_rpc_shape(self):
         module = load_rehearsal()
         with self.assertRaisesRegex(RuntimeError, "backend_runtime"):
@@ -286,6 +357,46 @@ class TrustedMirrorToolsTest(unittest.TestCase):
             production, mode="production", revision=revision,
             fingerprint=fingerprint,
         )
+        for field, replacement, error in (
+            ("cuda_fallbacks_to_cpu", None, "integer zero"),
+            ("cuda_fallbacks_to_cpu", True, "cuda_fallbacks_to_cpu"),
+            ("resolved_provider", "not_cuda_cpu", "non-CUDA ExactReplay"),
+        ):
+            with self.subTest(field=field, replacement=replacement):
+                invalid = {**production, field: replacement}
+                with self.assertRaisesRegex(Exception, error):
+                    identity.validate_cuda_soak_metric(
+                        invalid, mode="production", revision=revision,
+                        fingerprint=fingerprint,
+                    )
+        missing = dict(production)
+        del missing["cuda_fallbacks_to_cpu"]
+        with self.assertRaisesRegex(Exception, "integer zero"):
+            identity.validate_cuda_soak_metric(
+                missing, mode="production", revision=revision,
+                fingerprint=fingerprint,
+            )
+
+    def test_machine_class_is_runtime_derived_and_privacy_bounded(self):
+        module = load_rehearsal()
+        identity = module.EVIDENCE_IDENTITY
+        actual = identity.public_machine_class(
+            provider_family="cuda",
+            resolved_providers=["cuda_rc_exact_fused_extract"],
+            device_architectures=["sm_120"],
+            system="Linux",
+            machine="aarch64",
+        )
+        self.assertEqual(actual["os_class"], "Linux aarch64")
+        self.assertEqual(actual["device_architecture_classes"], ["sm_120"])
+        with self.assertRaisesRegex(Exception, "not a public machine class"):
+            identity.public_machine_class(
+                provider_family="cuda",
+                resolved_providers=["/private/device"],
+                device_architectures=["sm_120"],
+                system="Linux",
+                machine="x86_64",
+            )
 
     def test_rejects_incomplete_validation_schema(self):
         module = load_rehearsal()

@@ -768,12 +768,14 @@ def main() -> int:
                 if args.mode == "toy"
                 else "cuda_complete_lifecycle_asert_calibration"
             ),
-            "date": "2026-08-01",
-            "machine_class": {
-                "os": "Linux x86_64",
-                "gpu_class": "NVIDIA consumer Blackwell-class discrete GPU, 16 GiB VRAM, CC 12.0",
-                "note": "Sanitized machine-class only; no hostname, account, or private path.",
-            },
+            "date": time.strftime("%Y-%m-%d", time.gmtime()),
+            "machine_class": EVIDENCE_IDENTITY.public_machine_class(
+                provider_family="cuda",
+                resolved_providers=[identity["resolved_provider"]]
+                if identity["resolved_provider"] else [],
+                device_architectures=[identity["device_architecture_class"]]
+                if identity["device_architecture_class"] else [],
+            ),
             "source_revision": args.source_revision or None,
             "source_tree_fingerprint": source_tree_fingerprint,
             "binary_sha256": {

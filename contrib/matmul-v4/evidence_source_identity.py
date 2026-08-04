@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import platform
 import re
 import subprocess
 from pathlib import Path
@@ -16,6 +17,7 @@ FINGERPRINT_PATHS = ("CMakeLists.txt", "cmake", "src", "contrib/matmul-v4")
 FINGERPRINT_EXCLUDE = (
     b"src/matmul/matmul_v4_rc_production_golden_manifest.data",
 )
+SAFE_PUBLIC_CLASS = re.compile(r"[A-Za-z0-9_.+-]+")
 
 
 class EvidenceIdentityError(ValueError):
@@ -135,14 +137,22 @@ def validate_cuda_soak_metric(
         raise EvidenceIdentityError(
             f"required CUDA backend unsatisfied on node {node}"
         )
-    if metric.get("cuda_fallbacks_to_cpu") not in (None, 0):
+    fallback_count = metric.get("cuda_fallbacks_to_cpu")
+    if (fallback_count is not None and
+            (not isinstance(fallback_count, int) or
+             isinstance(fallback_count, bool) or fallback_count != 0)):
         raise EvidenceIdentityError(
-            f"cuda_fallbacks_to_cpu={metric.get('cuda_fallbacks_to_cpu')} "
+            f"cuda_fallbacks_to_cpu={fallback_count} "
             f"on node {node}"
         )
     if mode == "toy":
         return
-    if "cuda" not in str(metric.get("resolved_provider") or "").lower():
+    if (not isinstance(fallback_count, int) or
+            isinstance(fallback_count, bool) or fallback_count != 0):
+        raise EvidenceIdentityError(
+            f"production cuda_fallbacks_to_cpu must be integer zero on node {node}"
+        )
+    if not str(metric.get("resolved_provider") or "").lower().startswith("cuda_"):
         raise EvidenceIdentityError(
             f"non-CUDA ExactReplay provider on node {node}: "
             f"{metric.get('resolved_provider')}"
@@ -153,3 +163,41 @@ def validate_cuda_soak_metric(
         fingerprint=fingerprint,
         prefix=f"soak node {node}",
     )
+
+
+def public_machine_class(
+    *, provider_family: str, resolved_providers: list[str],
+    device_architectures: list[str], system: str | None = None,
+    machine: str | None = None,
+) -> dict[str, Any]:
+    """Return accurate machine-class-only metadata without host identity."""
+    values = {
+        "provider_family": provider_family,
+        "system": system if system is not None else platform.system(),
+        "machine": machine if machine is not None else platform.machine(),
+    }
+    for field, value in values.items():
+        if not isinstance(value, str) or SAFE_PUBLIC_CLASS.fullmatch(value) is None:
+            raise EvidenceIdentityError(f"{field} is not a public machine class")
+
+    def classes(items: list[str], field: str) -> list[str]:
+        result = sorted(set(items))
+        for value in result:
+            if (not isinstance(value, str) or
+                    SAFE_PUBLIC_CLASS.fullmatch(value) is None):
+                raise EvidenceIdentityError(
+                    f"{field} is not a public machine class"
+                )
+        return result
+
+    return {
+        "os_class": f"{values['system']} {values['machine']}",
+        "provider_family": values["provider_family"],
+        "resolved_provider_classes": classes(
+            resolved_providers, "resolved_provider"
+        ),
+        "device_architecture_classes": classes(
+            device_architectures, "device_architecture"
+        ),
+        "note": "Machine-class only; no hostname, account, or private path.",
+    }

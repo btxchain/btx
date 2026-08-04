@@ -578,10 +578,19 @@ write_summary() {
   local elapsed="$2"
   python3 - "${SUMMARY_JSON}" "${status}" "${elapsed}" "${DURATION_SECS}" \
     "$(counts_json)" "${SOURCE_REVISION}" "${SOURCE_TREE_FINGERPRINT}" \
-    "${BTXD_SHA256}" "${BTXCLI_SHA256}" <<'PY'
+    "${BTXD_SHA256}" "${BTXCLI_SHA256}" "${METRICS_JSONL}" "${ROOT}" <<'PY'
 import json, sys, datetime
-path, status, elapsed, planned, counts_s, revision, fingerprint, btxd_sha, cli_sha = sys.argv[1:10]
+from pathlib import Path
+
+path, status, elapsed, planned, counts_s, revision, fingerprint, btxd_sha, cli_sha, metrics_path, root = sys.argv[1:12]
+sys.path.insert(0, str(Path(root) / "contrib/matmul-v4"))
+import evidence_source_identity as identity
+
 counts = json.loads(counts_s)
+metrics = []
+for line in Path(metrics_path).read_text(encoding="utf-8").splitlines():
+  if line.strip():
+    metrics.append(json.loads(line))
 payload = {
   "title": "CUDA Profile-1 bounded soak (pre-ratification)",
   "ratification": False,
@@ -592,11 +601,11 @@ payload = {
   "source_revision": revision,
   "source_tree_fingerprint": fingerprint,
   "binary_sha256": {"btxd": btxd_sha, "btx_cli": cli_sha},
-  "hardware_class": {
-    "os": "Linux x86_64",
-    "gpu": "NVIDIA consumer Blackwell-class discrete GPU, 16 GiB VRAM, CC 12.0",
-    "note": "hostname/username redacted from evidence copies",
-  },
+  "hardware_class": identity.public_machine_class(
+    provider_family="cuda",
+    resolved_providers=[m["resolved_provider"] for m in metrics if m.get("resolved_provider")],
+    device_architectures=[m["device_architecture"] for m in metrics if m.get("device_architecture")],
+  ),
   "scenarios": counts,
   "not_covered": [
     "multi-day wall-clock soak",
