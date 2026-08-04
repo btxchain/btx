@@ -10,16 +10,6 @@ from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import assert_equal
 
 
-class CBlockWithForbiddenSketch(CBlock):
-    """Serialize an ENC-DR body with empty A/B vectors and one C word."""
-
-    def serialize(self, with_witness=True):
-        # CBlock's Python wire model intentionally stops after transactions.
-        # The C++ extension is three CompactSize-prefixed uint32 vectors; ENC-DR
-        # requires all three to be empty, so make only C non-empty here.
-        return super().serialize(with_witness) + b"\x00\x00\x01\x01\x00\x00\x00"
-
-
 class BTXMatMulAdmissionPrecheckTest(BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 2
@@ -52,8 +42,9 @@ class BTXMatMulAdmissionPrecheckTest(BitcoinTestFramework):
         # committed, so appending one keeps the same block hash and is rejected
         # contextually without needing the expensive digest recomputation.
         # Repeat it to model a relayer replaying cheaply noncanonical bodies.
-        malformed = CBlockWithForbiddenSketch(block)
+        malformed = CBlock(block)
         malformed.vtx = block.vtx
+        malformed.matrix_c_data = [1]
         assert_equal(malformed.sha256, block.sha256)
 
         expected = ["validated block does not require recomputation"] * 3

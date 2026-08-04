@@ -104,6 +104,17 @@ class FeatureIndexPruneTest(BitcoinTestFramework):
         self.generate(self.nodes[0], 51)
         self.sync_index(height=751)
 
+        # Index-owned prune locks are deliberately temporary and disappear
+        # while an index is disabled. Install an explicit persistent lock to
+        # model the intended resume boundary across the restart below.
+        index_best_height = 751
+        for node in self.nodes[:3]:
+            assert node.setprunelock("index-resume", {
+                "desc": "Preserve the disabled-index resume boundary",
+                "height": [index_best_height, index_best_height],
+                "sync": True,
+            })["success"]
+
         self.restart_without_indices()
 
         self.log.info("make sure trying to access the indices throws errors")
@@ -117,7 +128,6 @@ class FeatureIndexPruneTest(BitcoinTestFramework):
         self.generate(self.nodes[0], 749)
 
         self.log.info("prune request beyond, but actual pruning below, the indices best blocks while indices are disabled")
-        index_best_height = 751
         for i in range(3):
             pruneheight_2 = self.nodes[i].pruneblockchain(1000)
             assert_greater_than(pruneheight_2, 0)
@@ -128,6 +138,8 @@ class FeatureIndexPruneTest(BitcoinTestFramework):
 
         self.log.info("make sure that we can continue with the partially synced indices after having pruned up to the index height")
         self.sync_index(height=1500)
+        for node in self.nodes[:3]:
+            assert node.setprunelock("index-resume", {})["success"]
 
         self.log.info("prune further than the indices best blocks while the indices are disabled")
         self.restart_without_indices()

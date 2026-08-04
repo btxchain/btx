@@ -21,9 +21,11 @@ from test_framework.util import assert_equal, assert_raises_rpc_error
 class GetChainTipsTest (BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 4
+        self.setup_clean_chain = True
         self.extra_args = [[*REGTEST_GENERIC_P2P_MATMUL_ARGS] for _ in range(self.num_nodes)]
 
     def run_test(self):
+        self.generate(self.nodes[0], 200)
         self.log.info("Test getchaintips behavior with two chains of different length")
         tips = self.nodes[0].getchaintips()
         assert_equal(len(tips), 1)
