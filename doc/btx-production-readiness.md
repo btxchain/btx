@@ -14,7 +14,7 @@ defined in
 ## Current MatMul v4.7 candidate status: NO-GO
 
 The current candidate source is activation-armed: the mainnet Epoch-A v4,
-BMX4C, and RC heights are atomically set to `182600`; the RC ASERT ratio is
+BMX4C, and RC heights are atomically set to `185000`; the RC ASERT ratio is
 `6931159304/1`; and both public ratification records are `true`. These are
 candidate source values, not evidence that the release is ready or that the
 currently deployed network has activated them.
