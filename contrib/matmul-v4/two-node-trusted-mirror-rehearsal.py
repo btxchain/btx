@@ -75,6 +75,8 @@ ARCHIVE_BACKEND = ""
 ARCHIVE_LOCAL = False
 ARCHIVE_PROC: subprocess.Popen | None = None
 ARCHIVE_LOG = None
+ARCHIVE_REMOTE_PID = ""
+ARCHIVE_REMOTE_LAUNCH_ATTEMPTED = False
 MIRROR_BTXD = Path()
 MIRROR_CLI = Path()
 SIGNER_WIF_FILE = Path()
@@ -98,9 +100,12 @@ ARCHIVE_CLI_SHA256 = ""
 MIRROR_BTXD_SHA256 = ""
 MIRROR_CLI_SHA256 = ""
 REMOTE_ARCHIVE_NAME = re.compile(r"btx-trusted-archive\.[A-Za-z0-9]{6}")
+REMOTE_PID = re.compile(r"[1-9][0-9]{0,9}")
 COMPRESSED_PUBKEY = re.compile(r"(?:02|03)[0-9a-fA-F]{64}")
 PUBLIC_CLASS = re.compile(r"[A-Za-z0-9_.+-]+")
 PRODUCTION_BLOCKS = 3
+REMOTE_TERM_WAIT_SECONDS = 30
+REMOTE_KILL_WAIT_SECONDS = 10
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -123,9 +128,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--strict-proof-mode",
-        choices=("winner-reseal-authority", "receiving-validation"),
+        choices=("winner-reseal-authority",),
         default=os.environ.get("BTX_TRUSTED_MIRROR_STRICT_PROOF_MODE"),
-        help="exact archive evidence that must close before ok=true",
+        help=(
+            "required self-mining archive proof mode; this two-node runner "
+            "supports only winner-reseal-authority"
+        ),
     )
     parser.add_argument("--mirror-btxd", type=Path, default=os.environ.get("MIRROR_BTXD"))
     parser.add_argument("--mirror-cli", type=Path, default=os.environ.get("MIRROR_CLI"))
@@ -203,6 +211,11 @@ def validate_args(
     for name, option, env_name in required:
         if getattr(args, name) in (None, ""):
             parser.error(f"{option} is required (or set {env_name})")
+    if args.strict_proof_mode != "winner-reseal-authority":
+        parser.error(
+            "--strict-proof-mode must be winner-reseal-authority for this "
+            "two-node self-mining rehearsal"
+        )
     if args.archive_local:
         if args.signer_wif_file in (None, ""):
             parser.error(
@@ -388,6 +401,43 @@ def validate_remote_archive_dir(value: str) -> str:
     return str(path)
 
 
+def validate_remote_pid(value: str, label: str = "remote archive PID") -> str:
+    """Accept one positive decimal PID and no surrounding command output."""
+    if not isinstance(value, str):
+        raise RuntimeError(f"{label} is not a valid process ID")
+    value = value.strip()
+    if REMOTE_PID.fullmatch(value) is None:
+        raise RuntimeError(f"{label} is not a valid process ID")
+    return value
+
+
+def remote_stop_archive_command(pid: str, datadir: str) -> str:
+    """Build a bounded, identity-checked TERM/KILL shutdown command."""
+    pid = validate_remote_pid(pid)
+    datadir = validate_remote_archive_dir(datadir)
+    quoted_datadir = shlex.quote(datadir)
+    quoted_pidfile = shlex.quote(f"{datadir}/regtest/btxd.pid")
+    return (
+        f"pid={pid}; datadir={quoted_datadir}; pidfile={quoted_pidfile}; "
+        "if kill -0 \"$pid\" 2>/dev/null; then "
+        "cmd=$(ps -p \"$pid\" -o command= 2>/dev/null) || exit 16; "
+        "case \"$cmd\" in *\"$datadir\"*) ;; *) exit 16 ;; esac; "
+        "if test -r \"$pidfile\"; then "
+        "recorded=$(tr -d '[:space:]' < \"$pidfile\"); "
+        "test \"$recorded\" = \"$pid\" || exit 15; fi; "
+        "kill -TERM \"$pid\" 2>/dev/null || true; "
+        "i=0; while kill -0 \"$pid\" 2>/dev/null && "
+        f"test \"$i\" -lt {REMOTE_TERM_WAIT_SECONDS}; do "
+        "sleep 1; i=$((i + 1)); done; fi; "
+        "if kill -0 \"$pid\" 2>/dev/null; then "
+        "kill -KILL \"$pid\" 2>/dev/null || true; "
+        "i=0; while kill -0 \"$pid\" 2>/dev/null && "
+        f"test \"$i\" -lt {REMOTE_KILL_WAIT_SECONDS}; do "
+        "sleep 1; i=$((i + 1)); done; fi; "
+        "if kill -0 \"$pid\" 2>/dev/null; then exit 14; fi"
+    )
+
+
 def validate_signer_pubkey(value: str) -> str:
     """Reject config injection before btxd performs full curve validation."""
     value = value.strip()
@@ -471,7 +521,7 @@ def wait_rpc(fn, label: str, timeout: float = 120) -> None:
 
 
 def cleanup_archive() -> None:
-    global ARCHIVE_PROC
+    global ARCHIVE_PROC, ARCHIVE_REMOTE_PID, ARCHIVE_REMOTE_LAUNCH_ATTEMPTED
     if not ARCHIVE_DD:
         return
     if ARCHIVE_LOCAL:
@@ -486,18 +536,38 @@ def cleanup_archive() -> None:
         if not KEEP_ARTIFACTS:
             shutil.rmtree(ARCHIVE_DD, ignore_errors=True)
         return
-    try:
-        sh_remote(
-            f"kill $(cat {shlex.quote(ARCHIVE_DD + '/regtest/btxd.pid')} "
-            "2>/dev/null) 2>/dev/null || true"
-        )
-    except Exception:
-        pass
-    if not KEEP_ARTIFACTS:
+    if ARCHIVE_REMOTE_LAUNCH_ATTEMPTED:
+        pid = ARCHIVE_REMOTE_PID
+        if not pid:
+            launcher_pid_file = shlex.quote(
+                f"{ARCHIVE_DD}/rehearsal-launch.pid"
+            )
+            try:
+                pid = validate_remote_pid(
+                    sh_remote(f"cat {launcher_pid_file}"),
+                    "remote archive launcher PID",
+                )
+            except Exception as error:
+                raise RuntimeError(
+                    "cannot establish the remote archive PID; refusing to "
+                    "remove its datadir"
+                ) from error
         try:
-            sh_remote(f"rm -rf -- {shlex.quote(ARCHIVE_DD)}")
-        except Exception:
-            pass
+            sh_remote(
+                remote_stop_archive_command(pid, ARCHIVE_DD),
+                timeout=(
+                    REMOTE_TERM_WAIT_SECONDS + REMOTE_KILL_WAIT_SECONDS + 10
+                ),
+            )
+        except Exception as error:
+            raise RuntimeError(
+                "remote archive did not reach a verified stopped state; "
+                "refusing to remove its datadir"
+            ) from error
+        ARCHIVE_REMOTE_PID = ""
+        ARCHIVE_REMOTE_LAUNCH_ATTEMPTED = False
+    if not KEEP_ARTIFACTS:
+        sh_remote(f"rm -rf -- {shlex.quote(ARCHIVE_DD)}")
 
 
 def _require_object(parent: dict, key: str, path: str) -> dict:
@@ -676,8 +746,9 @@ def extract_scheduler_evidence(mining_info: object) -> dict:
         "rc_accelerator_scheduler.winner_reseal_authority",
     )
     for field in (
-        "published", "consumed", "rejected_not_block_target", "expired",
-        "evicted", "misses", "entries",
+        "published", "consumed", "rejected_not_block_target",
+        "rejected_not_production_ready", "invalidated_before_consume",
+        "expired", "evicted", "misses", "entries",
     ):
         _require_nonnegative_int(
             authority, field, f"winner_reseal_authority.{field}"
@@ -690,66 +761,92 @@ def extract_scheduler_evidence(mining_info: object) -> dict:
             "getmininginfo schema error: winner_reseal_authority.last_provider "
             "must be empty or a public class token"
         )
+    consumed_by_provider = _require_object(
+        authority, "consumed_by_provider",
+        "winner_reseal_authority.consumed_by_provider",
+    )
+    for provider, count in consumed_by_provider.items():
+        if (not isinstance(provider, str) or not provider or
+                PUBLIC_CLASS.fullmatch(provider) is None):
+            raise RuntimeError(
+                "getmininginfo schema error: winner_reseal_authority."
+                "consumed_by_provider keys must be public provider tokens"
+            )
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            raise RuntimeError(
+                "getmininginfo schema error: winner_reseal_authority."
+                "consumed_by_provider values must be non-negative integers"
+            )
     return scheduler
 
 
 def validate_archive_strict_proof(
     *, mode: str, baseline_mining_info: object, final_mining_info: object,
-    validation: dict, expected_provider: str,
+    expected_provider: str,
 ) -> dict:
-    """Close exactly one explicit strict-device proof mode, fail closed."""
-    if mode == "receiving-validation":
-        if not validation.get("available"):
-            raise RuntimeError(
-                "receiving-validation proof requested but no validation is available"
-            )
-        if validation.get("provider") != expected_provider:
-            raise RuntimeError(
-                "receiving-validation provider differs from canary provider"
-            )
-        return {
-            "mode": mode,
-            "provider": validation["provider"],
-            "require_device": validation["require_device"],
-            "fully_accelerated": validation["fully_accelerated"],
-            "cpu_gemm_calls": validation["cpu_gemm_calls"],
-            "cpu_gemm_fallbacks": validation["cpu_gemm_fallbacks"],
-        }
+    """Close this self-mining runner's exact winner-reseal proof, fail closed."""
     if mode != "winner-reseal-authority":
-        raise RuntimeError(f"unsupported strict proof mode: {mode}")
+        raise RuntimeError(
+            "the two-node self-mining rehearsal supports only "
+            "winner-reseal-authority"
+        )
 
     baseline = extract_scheduler_evidence(baseline_mining_info)
     final = extract_scheduler_evidence(final_mining_info)
     baseline_lanes = baseline["lanes"]
     final_lanes = final["lanes"]
     deltas = {}
-    for lane_name in ("candidate_mining", "winner_reseal"):
-        delta = (
-            final_lanes[lane_name]["completions"] -
-            baseline_lanes[lane_name]["completions"]
+    candidate_delta = (
+        final_lanes["candidate_mining"]["completions"] -
+        baseline_lanes["candidate_mining"]["completions"]
+    )
+    if candidate_delta < PRODUCTION_BLOCKS:
+        raise RuntimeError(
+            f"strict proof recorded only {candidate_delta} candidate_mining "
+            f"completions; expected at least {PRODUCTION_BLOCKS}"
         )
-        if delta < PRODUCTION_BLOCKS:
-            raise RuntimeError(
-                f"strict proof recorded only {delta} {lane_name} completions; "
-                f"expected at least {PRODUCTION_BLOCKS}"
-            )
-        if final_lanes[lane_name]["last_execution_s"] <= 0:
-            raise RuntimeError(f"strict proof recorded no {lane_name} execution time")
-        deltas[f"{lane_name}_completions"] = delta
+    if final_lanes["candidate_mining"]["last_execution_s"] <= 0:
+        raise RuntimeError("strict proof recorded no candidate_mining execution time")
+    deltas["candidate_mining_completions"] = candidate_delta
 
-    if final["release_invariant_violations"] != 0:
-        raise RuntimeError("accelerator scheduler release invariant was violated")
+    reseal_delta = (
+        final_lanes["winner_reseal"]["completions"] -
+        baseline_lanes["winner_reseal"]["completions"]
+    )
+    if reseal_delta != PRODUCTION_BLOCKS:
+        raise RuntimeError(
+            f"strict proof recorded {reseal_delta} winner_reseal completions; "
+            f"expected exactly {PRODUCTION_BLOCKS}"
+        )
+    if final_lanes["winner_reseal"]["last_execution_s"] <= 0:
+        raise RuntimeError("strict proof recorded no winner_reseal execution time")
+    deltas["winner_reseal_completions"] = reseal_delta
+
+    for label, scheduler in (("baseline", baseline), ("final", final)):
+        if scheduler["release_invariant_violations"] != 0:
+            raise RuntimeError(
+                f"accelerator scheduler release invariant was violated in {label}"
+            )
     baseline_authority = baseline["winner_reseal_authority"]
     final_authority = final["winner_reseal_authority"]
+    if baseline_authority["entries"] != 0 or final_authority["entries"] != 0:
+        raise RuntimeError(
+            "winner-reseal authority store must be empty before and after proof"
+        )
     for field in ("published", "consumed"):
         delta = final_authority[field] - baseline_authority[field]
-        if delta < PRODUCTION_BLOCKS:
+        if delta != PRODUCTION_BLOCKS:
             raise RuntimeError(
-                f"winner-reseal authority {field} only increased by {delta}; "
-                f"expected at least {PRODUCTION_BLOCKS}"
+                f"winner-reseal authority {field} changed by {delta}; "
+                f"expected exactly {PRODUCTION_BLOCKS}"
             )
         deltas[f"authority_{field}"] = delta
-    for field in ("rejected_not_block_target", "expired", "evicted", "misses"):
+    if deltas["authority_published"] != deltas["authority_consumed"]:
+        raise RuntimeError("winner-reseal published and consumed deltas differ")
+    for field in (
+        "rejected_not_block_target", "rejected_not_production_ready",
+        "invalidated_before_consume", "expired", "evicted", "misses",
+    ):
         delta = final_authority[field] - baseline_authority[field]
         if delta != 0:
             raise RuntimeError(
@@ -757,6 +854,19 @@ def validate_archive_strict_proof(
             )
     if final_authority["last_provider"] != expected_provider:
         raise RuntimeError("winner-reseal authority provider differs from canary provider")
+    baseline_providers = baseline_authority["consumed_by_provider"]
+    final_providers = final_authority["consumed_by_provider"]
+    all_providers = set(baseline_providers) | set(final_providers)
+    provider_deltas = {
+        provider: final_providers.get(provider, 0) -
+        baseline_providers.get(provider, 0)
+        for provider in all_providers
+    }
+    if provider_deltas != {expected_provider: PRODUCTION_BLOCKS}:
+        raise RuntimeError(
+            "winner-reseal consumed-provider deltas do not bind all three "
+            "authorities to the canary provider"
+        )
     return {
         "mode": mode,
         "provider": final_authority["last_provider"],
@@ -764,6 +874,7 @@ def validate_archive_strict_proof(
         "candidate_last_execution_s": final_lanes["candidate_mining"]["last_execution_s"],
         "winner_reseal_last_execution_s": final_lanes["winner_reseal"]["last_execution_s"],
         "release_invariant_violations": final["release_invariant_violations"],
+        "consumed_by_provider": provider_deltas,
     }
 
 
@@ -840,6 +951,7 @@ def validate_trusted_mirror_rehearsal(
 def main(argv: list[str] | None = None) -> None:
     global ARCHIVE_DD, ARCHIVE_HOST, ARCHIVE_USER, ARCHIVE_BTXD, ARCHIVE_CLI
     global ARCHIVE_BACKEND, ARCHIVE_LOCAL, ARCHIVE_PROC, ARCHIVE_LOG
+    global ARCHIVE_REMOTE_PID, ARCHIVE_REMOTE_LAUNCH_ATTEMPTED
     global ARCHIVE_SIGNER_WIF_FILE, STRICT_PROOF_MODE
     global MIRROR_BTXD, MIRROR_CLI, SIGNER_WIF_FILE, SIGNER_PUB
     global RUNTIME_ROOT, MIRROR_DD, OUT, KEEP_ARTIFACTS
@@ -993,6 +1105,9 @@ listenonion=0
 port={MIRROR_P2P}
 rpcport={MIRROR_RPC}
 connect=127.0.0.1:{ARCHIVE_P2P}
+bind=127.0.0.1
+rpcbind=127.0.0.1
+rpcallowip=127.0.0.1
 """
     mirror_conf_path = MIRROR_DD / "btx.conf"
     mirror_conf_path.write_text(mirror_conf, encoding="utf-8")
@@ -1013,13 +1128,23 @@ connect=127.0.0.1:{ARCHIVE_P2P}
             stderr=subprocess.STDOUT,
         )
     else:
-        sh_remote(
-            f"BTX_MATMUL_V4_BACKEND={shlex.quote(ARCHIVE_BACKEND)} "
-            "BTX_RC_ACCEL_POLICY=production "
+        ARCHIVE_REMOTE_LAUNCH_ATTEMPTED = True
+        launcher_pid_file = shlex.quote(
+            f"{ARCHIVE_DD}/rehearsal-launch.pid"
+        )
+        launch_output = sh_remote(
+            "umask 077; "
+            f"export BTX_MATMUL_V4_BACKEND={shlex.quote(ARCHIVE_BACKEND)} "
+            "BTX_RC_ACCEL_POLICY=production; "
             f"nohup {shlex.quote(ARCHIVE_BTXD)} "
             f"-datadir={shlex.quote(ARCHIVE_DD)} "
             f"-conf={shlex.quote(ARCHIVE_DD + '/btx.conf')} "
-            f">{shlex.quote(ARCHIVE_DD + '/stdout.log')} 2>&1 & echo $!"
+            f">{shlex.quote(ARCHIVE_DD + '/stdout.log')} 2>&1 & "
+            f"pid=$!; printf \"%s\\n\" \"$pid\" > {launcher_pid_file}; "
+            "printf \"%s\\n\" \"$pid\""
+        )
+        ARCHIVE_REMOTE_PID = validate_remote_pid(
+            launch_output, "remote archive launcher PID"
         )
     wait_rpc(archive_rpc, "archive", timeout=args.archive_startup_timeout)
     archive_rpc("createwallet", "miner")
@@ -1100,7 +1225,6 @@ connect=127.0.0.1:{ARCHIVE_P2P}
             mode=STRICT_PROOF_MODE,
             baseline_mining_info=baseline_mining_info,
             final_mining_info=final_mining_info,
-            validation=validation,
             expected_provider=canary["provider"],
         )
         result = {

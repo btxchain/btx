@@ -1820,6 +1820,12 @@ static UniValue BuildBackendRuntimeProfile(
         authority.pushKV(
             "rejected_not_block_target",
             winner_authority.rejected_not_block_target);
+        authority.pushKV(
+            "rejected_not_production_ready",
+            winner_authority.rejected_not_production_ready);
+        authority.pushKV(
+            "invalidated_before_consume",
+            winner_authority.invalidated_before_consume);
         authority.pushKV("expired", winner_authority.expired);
         authority.pushKV("evicted", winner_authority.evicted);
         authority.pushKV("misses", winner_authority.misses);
@@ -1834,6 +1840,13 @@ static UniValue BuildBackendRuntimeProfile(
             "last_candidate_to_consume_s",
             winner_authority.last_candidate_to_consume_s);
         authority.pushKV("last_provider", winner_authority.last_provider);
+        UniValue consumed_by_provider(UniValue::VOBJ);
+        for (const auto& [provider, count] :
+             winner_authority.consumed_by_provider) {
+            consumed_by_provider.pushKV(provider, count);
+        }
+        authority.pushKV(
+            "consumed_by_provider", std::move(consumed_by_provider));
         rc_scheduler.pushKV(
             "winner_reseal_authority", std::move(authority));
         const auto lifecycle{
@@ -6280,6 +6293,8 @@ static RPCHelpMan getmininginfo()
                                     {RPCResult::Type::NUM, "published", "Strict block-target winner authorities published"},
                                     {RPCResult::Type::NUM, "consumed", "Exact-header authorities consumed by local acceptance"},
                                     {RPCResult::Type::NUM, "rejected_not_block_target", "Unsafe or malformed publication attempts refused"},
+                                    {RPCResult::Type::NUM, "rejected_not_production_ready", "Publication attempts refused because the production provider capability was absent or stale"},
+                                    {RPCResult::Type::NUM, "invalidated_before_consume", "Authorities erased because their production provider capability became invalid before local acceptance"},
                                     {RPCResult::Type::NUM, "expired", "Unused authorities expired"},
                                     {RPCResult::Type::NUM, "evicted", "Authorities evicted by the fixed store bound"},
                                     {RPCResult::Type::NUM, "misses", "Local acceptance lookups without an exact authority"},
@@ -6288,6 +6303,10 @@ static RPCHelpMan getmininginfo()
                                     {RPCResult::Type::NUM, "last_reseal_to_consume_s", "Latest reseal-to-local-acceptance handoff"},
                                     {RPCResult::Type::NUM, "last_candidate_to_consume_s", "Latest candidate start through local authority consumption"},
                                     {RPCResult::Type::STR, "last_provider", "Provider recorded by the most recently consumed authority"},
+                                    {RPCResult::Type::OBJ_DYN, "consumed_by_provider", "Process-lifetime consumed-authority counts by exact provider",
+                                    {
+                                        {RPCResult::Type::NUM, "provider", "Consumed authorities for this provider"},
+                                    }},
                                 }},
                                 {RPCResult::Type::OBJ, "complete_lifecycle_readiness", "Fail-closed candidate-to-authenticated-tip timing assessment; never an activation or consensus gate",
                                 {

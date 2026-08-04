@@ -151,13 +151,16 @@ security.
 Run a rehearsal only from an exact, clean, reviewed source revision whose
 strict-device manifest contains the archive's provider class. Record the four
 reviewed binary SHA256 values and write the result outside the source tree. The
-runner mines three production Profile-1 blocks and requires a passed,
-provider-bound startup canary plus one explicit strict proof mode. When the
-archive mines, use `winner-reseal-authority`: the runner requires fresh
-candidate, reseal, exact-header authority publication, and local-authority
-consumption telemetry. `last_validation.available=false` is expected in that
-mode because local acceptance consumes the one-shot winner authority instead
-of replaying the just-resealed block again.
+runner mines exactly three production Profile-1 blocks and supports only the
+`winner-reseal-authority` strict proof mode. It requires a passed,
+provider-bound startup canary, at least three candidate completions, exactly
+three winner reseals, exactly three exact-header authority publications and
+consumptions, an empty authority store, and no authority failure-counter
+change. Provider counters must bind all three consumed authorities to the
+canary provider. `last_validation.available=false` is expected because local
+acceptance consumes the one-shot winner authority instead of replaying the
+just-resealed block again. A receiving-validation campaign needs a separate
+external-miner topology and is outside this two-node self-mining runner.
 
 On one Apple Silicon Metal archive, use local mode (no SSH or self-tunnel) and
 a disposable regtest-only signing key whose file mode denies group/other access
@@ -184,6 +187,10 @@ python3 -u contrib/matmul-v4/two-node-trusted-mirror-rehearsal.py \
   --out /private/result/trusted-mirror-production.json
 ```
 
+The runner never deletes the caller-owned WIF. Destroy the disposable regtest
+WIF after collecting the result, and never reuse it for mainnet or another
+deployment.
+
 For a remote archive, run the same tool on the mirror host without
 `--archive-local`, add `--archive-host`, `--archive-user`, and
 `--archive-signer-wif-file`. The latter must name a permission-restricted key
@@ -192,6 +199,11 @@ never reads or copies the archive WIF through the mirror host. Only the public
 key file belongs on the mirror host. The result contains public provider and
 architecture classes, source identity, binary hashes, and counters; it never
 contains deployment hostnames, usernames, paths, or private keys.
+Remote cleanup records the exact launched daemon PID, verifies its command and
+pidfile identity, waits a bounded interval after `TERM`, escalates to `KILL` if
+needed, and refuses to delete the remote datadir unless process exit is
+confirmed. The pre-provisioned remote signer remains operator-owned and is
+never deleted by the runner.
 
 The checked-in 2026-08-01 two-node artifact is historical toy-dimension
 coverage. It is not production closure evidence and must not be relabeled as

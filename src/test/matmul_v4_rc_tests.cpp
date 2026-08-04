@@ -3494,6 +3494,9 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(stats.entries, 0U);
     BOOST_CHECK_GE(stats.misses, 3U);
     BOOST_CHECK_GT(stats.last_candidate_to_reseal_s, 0.0);
+    BOOST_REQUIRE_EQUAL(stats.consumed_by_provider.size(), 1U);
+    BOOST_CHECK_EQUAL(
+        stats.consumed_by_provider.at("test:winner-device"), 1U);
 
     // An easier pool-share result must never authorize local block acceptance.
     header.nNonce64 = 92;

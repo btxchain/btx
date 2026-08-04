@@ -288,11 +288,16 @@ class TrustedMirrorToolsTest(unittest.TestCase):
                             "published": published,
                             "consumed": consumed,
                             "rejected_not_block_target": 0,
+                            "rejected_not_production_ready": 0,
+                            "invalidated_before_consume": 0,
                             "expired": 0,
                             "evicted": 0,
                             "misses": 0,
                             "entries": 0,
                             "last_provider": provider,
+                            "consumed_by_provider": (
+                                {provider: consumed} if provider else {}
+                            ),
                         },
                     }
                 }
@@ -309,7 +314,6 @@ class TrustedMirrorToolsTest(unittest.TestCase):
             mode="winner-reseal-authority",
             baseline_mining_info=baseline,
             final_mining_info=final,
-            validation={"available": False},
             expected_provider="metal_rc_exact",
         )
         self.assertEqual(proof["authority_consumed"], 3)
@@ -318,16 +322,32 @@ class TrustedMirrorToolsTest(unittest.TestCase):
         cases = []
         too_few = copy.deepcopy(final)
         too_few["backend_runtime"]["rc_accelerator_scheduler"]["winner_reseal_authority"]["consumed"] = 2
-        cases.append(("at least 3", too_few))
+        cases.append(("expected exactly 3", too_few))
+        too_many_reseals = copy.deepcopy(final)
+        too_many_reseals["backend_runtime"]["rc_accelerator_scheduler"]["lanes"]["winner_reseal"]["completions"] = 4
+        cases.append(("expected exactly 3", too_many_reseals))
+        residual = copy.deepcopy(final)
+        residual["backend_runtime"]["rc_accelerator_scheduler"]["winner_reseal_authority"]["entries"] = 1
+        cases.append(("store must be empty", residual))
         wrong_provider = copy.deepcopy(final)
         wrong_provider["backend_runtime"]["rc_accelerator_scheduler"]["winner_reseal_authority"]["last_provider"] = "cuda_rc_exact_fused_extract"
         cases.append(("provider differs", wrong_provider))
+        mixed_provider = copy.deepcopy(final)
+        mixed_authority = mixed_provider["backend_runtime"]["rc_accelerator_scheduler"]["winner_reseal_authority"]
+        mixed_authority["consumed_by_provider"] = {
+            "metal_rc_exact": 2,
+            "cuda_rc_exact_fused_extract": 1,
+        }
+        cases.append(("do not bind all three", mixed_provider))
         invariant = copy.deepcopy(final)
         invariant["backend_runtime"]["rc_accelerator_scheduler"]["release_invariant_violations"] = 1
         cases.append(("invariant", invariant))
         missed = copy.deepcopy(final)
         missed["backend_runtime"]["rc_accelerator_scheduler"]["winner_reseal_authority"]["misses"] = 1
         cases.append(("misses changed", missed))
+        invalidated = copy.deepcopy(final)
+        invalidated["backend_runtime"]["rc_accelerator_scheduler"]["winner_reseal_authority"]["invalidated_before_consume"] = 1
+        cases.append(("invalidated_before_consume changed", invalidated))
         for error, changed in cases:
             with self.subTest(error=error):
                 with self.assertRaisesRegex(RuntimeError, error):
@@ -335,41 +355,16 @@ class TrustedMirrorToolsTest(unittest.TestCase):
                         mode="winner-reseal-authority",
                         baseline_mining_info=baseline,
                         final_mining_info=changed,
-                        validation={"available": False},
                         expected_provider="metal_rc_exact",
                     )
 
-    def test_receiving_validation_proof_fails_closed_when_unavailable(self):
+    def test_self_mining_runner_rejects_receiving_validation_mode(self):
         module = load_rehearsal()
-        with self.assertRaisesRegex(RuntimeError, "no validation is available"):
+        with self.assertRaisesRegex(RuntimeError, "supports only"):
             module.validate_archive_strict_proof(
                 mode="receiving-validation",
                 baseline_mining_info={},
                 final_mining_info={},
-                validation={"available": False},
-                expected_provider="metal_rc_exact",
-            )
-        proof = module.validate_archive_strict_proof(
-            mode="receiving-validation",
-            baseline_mining_info={},
-            final_mining_info={},
-            validation={
-                "available": True,
-                "provider": "metal_rc_exact",
-                "require_device": True,
-                "fully_accelerated": True,
-                "cpu_gemm_calls": 0,
-                "cpu_gemm_fallbacks": 0,
-            },
-            expected_provider="metal_rc_exact",
-        )
-        self.assertEqual(proof["mode"], "receiving-validation")
-        with self.assertRaisesRegex(RuntimeError, "provider differs"):
-            module.validate_archive_strict_proof(
-                mode="receiving-validation",
-                baseline_mining_info={},
-                final_mining_info={},
-                validation={**proof, "available": True, "provider": "cuda_rc_exact"},
                 expected_provider="metal_rc_exact",
             )
 
@@ -538,6 +533,82 @@ class TrustedMirrorToolsTest(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaisesRegex(RuntimeError, "unsafe archive datadir"):
                     module.validate_remote_archive_dir(value)
+
+    def test_remote_pid_and_bounded_stop_command_are_fail_closed(self):
+        module = load_rehearsal()
+        self.assertEqual(module.validate_remote_pid("12345\n"), "12345")
+        for value in ("", "0", "-1", "1 2", "1; touch /tmp/no", "12\n13"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(RuntimeError, "valid process ID"):
+                    module.validate_remote_pid(value)
+        command = module.remote_stop_archive_command(
+            "12345", "/tmp/btx-trusted-archive.A1b2C3"
+        )
+        self.assertIn('ps -p "$pid" -o command=', command)
+        self.assertIn('kill -TERM "$pid"', command)
+        self.assertIn('kill -KILL "$pid"', command)
+        self.assertIn("exit 14", command)
+        self.assertLess(command.index("kill -TERM"), command.index("kill -KILL"))
+
+    def test_remote_cleanup_stops_before_removing_datadir(self):
+        module = load_rehearsal()
+        commands = []
+        original = {
+            name: getattr(module, name)
+            for name in (
+                "ARCHIVE_DD", "ARCHIVE_LOCAL", "ARCHIVE_REMOTE_PID",
+                "ARCHIVE_REMOTE_LAUNCH_ATTEMPTED", "KEEP_ARTIFACTS",
+                "sh_remote",
+            )
+        }
+        try:
+            module.ARCHIVE_DD = "/tmp/btx-trusted-archive.A1b2C3"
+            module.ARCHIVE_LOCAL = False
+            module.ARCHIVE_REMOTE_PID = "12345"
+            module.ARCHIVE_REMOTE_LAUNCH_ATTEMPTED = True
+            module.KEEP_ARTIFACTS = False
+            module.sh_remote = (
+                lambda command, **kwargs: commands.append(command) or ""
+            )
+            module.cleanup_archive()
+            self.assertEqual(len(commands), 2)
+            self.assertIn("kill -TERM", commands[0])
+            self.assertTrue(commands[1].startswith("rm -rf -- "))
+            self.assertFalse(module.ARCHIVE_REMOTE_LAUNCH_ATTEMPTED)
+        finally:
+            for name, value in original.items():
+                setattr(module, name, value)
+
+    def test_remote_cleanup_never_removes_after_unverified_stop(self):
+        module = load_rehearsal()
+        commands = []
+        original = {
+            name: getattr(module, name)
+            for name in (
+                "ARCHIVE_DD", "ARCHIVE_LOCAL", "ARCHIVE_REMOTE_PID",
+                "ARCHIVE_REMOTE_LAUNCH_ATTEMPTED", "KEEP_ARTIFACTS",
+                "sh_remote",
+            )
+        }
+        try:
+            module.ARCHIVE_DD = "/tmp/btx-trusted-archive.A1b2C3"
+            module.ARCHIVE_LOCAL = False
+            module.ARCHIVE_REMOTE_PID = "12345"
+            module.ARCHIVE_REMOTE_LAUNCH_ATTEMPTED = True
+            module.KEEP_ARTIFACTS = False
+
+            def fail_stop(command, **kwargs):
+                commands.append(command)
+                raise subprocess.CalledProcessError(14, command)
+
+            module.sh_remote = fail_stop
+            with self.assertRaisesRegex(RuntimeError, "verified stopped state"):
+                module.cleanup_archive()
+            self.assertEqual(len(commands), 1)
+            self.assertNotIn("rm -rf", commands[0])
+        finally:
+            for name, value in original.items():
+                setattr(module, name, value)
 
     def test_remote_signer_path_is_absolute_and_injection_safe(self):
         module = load_rehearsal()

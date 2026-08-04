@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cstddef>
 #include <limits>
+#include <map>
 #include <memory>
 #include <optional>
 #include <stdint.h>
@@ -373,6 +374,10 @@ struct MatMulRCWinnerAuthorityStats {
     double last_reseal_to_consume_s{0};
     double last_candidate_to_consume_s{0};
     std::string last_provider;
+    /** Authorities consumed by provider since process start. This is bounded by
+     *  the process-qualified provider registry and lets evidence tooling prove
+     *  that every handoff in a rehearsal came from the canary-bound provider. */
+    std::map<std::string, uint64_t> consumed_by_provider;
 };
 
 bool PublishMatMulRCWinnerResealAuthority(

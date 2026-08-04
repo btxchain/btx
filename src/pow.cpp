@@ -4945,6 +4945,8 @@ bool ConsumeMatMulRCWinnerResealAuthority(
     g_matmul_rc_winner_authority_stats.last_candidate_to_consume_s =
         MatMulAuthoritySeconds(now - record.candidate_started);
     g_matmul_rc_winner_authority_stats.last_provider = record.provider;
+    ++g_matmul_rc_winner_authority_stats.
+        consumed_by_provider[record.provider];
     g_matmul_rc_winner_authority_stats.entries =
         g_matmul_rc_winner_authorities.size();
     if (provider != nullptr) *provider = record.provider;
