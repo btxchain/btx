@@ -249,7 +249,16 @@ def load_fallback_candidates(wallet_rpc: RPCClient) -> list[dict[str, Any]]:
     utxos = wallet_rpc.call("listunspent", [1])
     candidates = [
         utxo for utxo in utxos
-        if utxo.get("safe", True) and (utxo.get("spendable", False) or utxo.get("solvable", False))
+        if utxo.get("safe", True)
+        and (
+            utxo.get("spendable", False)
+            or utxo.get("solvable", False)
+            # The source coordinator's specialized P2MR path is intentionally
+            # watch-only and remains non-solvable for generic automatic spending,
+            # but a parent descriptor proves that this wallet tracks the coin;
+            # z_fundpsbt remains the authoritative selection and witness gate.
+            or bool(utxo.get("parent_descs"))
+        )
     ]
     candidates.sort(key=utxo_sort_key)
     return candidates

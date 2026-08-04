@@ -1338,8 +1338,15 @@ BOOST_AUTO_TEST_CASE(CreateNewBlock_validity)
             block.nNonce64 = 0;
             block.mix_hash.SetNull();
             const uint32_t block_height{static_cast<uint32_t>(current_height + 1)};
-            BOOST_REQUIRE(MineHeaderForConsensus(block, block_height, Assert(m_node.chainman)->GetConsensus(), 10'000'000));
-            PopulateFreivaldsPayload(block, Assert(m_node.chainman)->GetConsensus());
+            const CBlockIndex* prev_index{Assert(m_node.chainman)->ActiveChain().Tip()};
+            // MineHeaderForConsensus(CBlock&) attaches the correct MatMul payload
+            // for the active consensus (v4 product sketch or v3 Freivalds C').
+            BOOST_REQUIRE(MineHeaderForConsensus(
+                block,
+                block_height,
+                Assert(m_node.chainman)->GetConsensus(),
+                10'000'000,
+                prev_index ? std::optional<int64_t>{prev_index->GetMedianTimePast()} : std::nullopt));
         }
         std::shared_ptr<const CBlock> shared_pblock = std::make_shared<const CBlock>(block);
         // Alternate calls between Chainman's ProcessNewBlock and submitSolution

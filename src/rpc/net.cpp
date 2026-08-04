@@ -83,6 +83,8 @@ static std::string MatMulValidationModeToString(kernel::MatMulValidationMode mod
     switch (mode) {
     case kernel::MatMulValidationMode::CONSENSUS:
         return "consensus";
+    case kernel::MatMulValidationMode::TRUSTED:
+        return "trusted";
     case kernel::MatMulValidationMode::ECONOMIC:
         return "economic";
     case kernel::MatMulValidationMode::SPV:
@@ -1006,7 +1008,7 @@ static RPCHelpMan getnetworkinfo()
                         {
                             {RPCResult::Type::STR, "SERVICE_NAME", "the service name"},
                         }},
-                        {RPCResult::Type::STR, "matmulvalidationmode", "MatMul validation tier mode: consensus (full-node tier), economic (Phase 1 only), or spv"},
+                        {RPCResult::Type::STR, "matmulvalidationmode", "MatMul validation tier mode: consensus (independent full-node tier), trusted (operator-trusted signed-quorum mirror), economic (Phase 1 only), or spv"},
                         {RPCResult::Type::BOOL, "localrelay", "true if transaction relay is requested from peers"},
                         {RPCResult::Type::NUM, "timeoffset", "the time offset"},
                         {RPCResult::Type::NUM, "connections", "the total number of connections"},
@@ -1368,26 +1370,28 @@ static RPCHelpMan addpeeraddress()
 
     UniValue obj(UniValue::VOBJ);
     std::optional<CNetAddr> net_addr{LookupHost(addr_string, false)};
+    if (!net_addr.has_value()) {
+        throw JSONRPCError(RPC_CLIENT_INVALID_IP_OR_SUBNET, "Invalid IP address");
+    }
+
     bool success{false};
 
-    if (net_addr.has_value()) {
-        CService service{net_addr.value(), port};
-        CAddress address{MaybeFlipIPv6toCJDNS(service), ServiceFlags{NODE_NETWORK | NODE_WITNESS}};
-        address.nTime = Now<NodeSeconds>();
-        // The source address is set equal to the address. This is equivalent to the peer
-        // announcing itself.
-        if (addrman.Add({address}, address)) {
-            success = true;
-            if (tried) {
-                // Attempt to move the address to the tried addresses table.
-                if (!addrman.Good(address)) {
-                    success = false;
-                    obj.pushKV("error", "failed-adding-to-tried");
-                }
+    CService service{net_addr.value(), port};
+    CAddress address{MaybeFlipIPv6toCJDNS(service), ServiceFlags{NODE_NETWORK | NODE_WITNESS}};
+    address.nTime = Now<NodeSeconds>();
+    // The source address is set equal to the address. This is equivalent to the peer
+    // announcing itself.
+    if (addrman.Add({address}, address)) {
+        success = true;
+        if (tried) {
+            // Attempt to move the address to the tried addresses table.
+            if (!addrman.Good(address)) {
+                success = false;
+                obj.pushKV("error", "failed-adding-to-tried");
             }
-        } else {
-            obj.pushKV("error", "failed-adding-to-new");
         }
+    } else {
+        obj.pushKV("error", "failed-adding-to-new");
     }
 
     obj.pushKV("success", success);

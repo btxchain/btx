@@ -226,7 +226,11 @@ class TooManySigops(BadTxTemplate):
         # BTX consensus limits each non-OP_RETURN scriptPubKey to <= 34 bytes.
         # Exceed block sigops by spreading CHECKSIG opcodes across many outputs.
         checksig_script = CScript([OP_CHECKSIG] * 34)
-        output_count = (MAX_BLOCK_SIGOPS // 34) + 1
+        # Leave a visible margin above the limit. BTX's larger block capacity
+        # and per-script output constraints make an exact one-sigop boundary
+        # fixture brittle when auxiliary transaction fields are rewritten by
+        # the functional-test signer.
+        output_count = (MAX_BLOCK_SIGOPS // 34) + 100
 
         tx = CTransaction()
         tx.vin.append(self.valid_txin)

@@ -1,6 +1,14 @@
 Mining Operator Helpers
 -----------------------
 
+These helpers follow the active chain parameters. The MatMul v4.7 branch
+stages Epoch A on mainnet at one release-selected block height `H_A`. Epoch A uses Profile 1 with
+ExactReplay authority and optional shadow proofs. Epochs B/C introduce
+mandatory and then authoritative Profile 1 proofs, and Epoch D separately
+selects Profile 2. Do not configure Profile 2 as an interim ExactReplay
+default. See
+[`doc/btx-matmul-v4.7-transition-roadmap.md`](../../doc/btx-matmul-v4.7-transition-roadmap.md).
+
 This directory contains optional operator tooling for local solo-mining
 workflows. These scripts are not required for `getblocktemplate` / external
 miner setups, but they provide a safer starting point than ad-hoc shell loops
@@ -102,6 +110,31 @@ Best practices:
   `btx-agent-setup.py` bootstrapped.
 
 Quick start:
+
+For a new release-based installation, the complete verified install,
+AssumeUTXO bootstrap, mining-wallet provisioning, and supervisor handoff is one
+command:
+
+```bash
+python3 contrib/faststart/btx-agent-setup.py \
+  --repo btxchain/btx \
+  --release-tag v0.33.2 \
+  --preset miner \
+  --datadir="$HOME/.btx" \
+  --start-mining
+```
+
+The command returns only after the fast-start bootstrap succeeds and
+block validation catches up to known headers, then waits for
+`start-live-mining.sh` to pass its initial startup check. This prevents mining
+against a tip that is still moving during post-snapshot catch-up. It does not
+duplicate the supervisor: repeated runs keep the existing PID-file idempotency.
+Pass approved supervisor options with repeated `--mining-arg=VALUE` arguments;
+credentials, payout overrides, process-mode changes, and unknown options are
+rejected by the installer.
+
+For scripts that need to inspect or modify the generated handoff instead, omit
+`--start-mining` and consume the JSON command arrays:
 
 ```bash
 SETUP_JSON="$(python3 contrib/faststart/btx-agent-setup.py \

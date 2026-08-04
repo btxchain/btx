@@ -24,6 +24,11 @@ class ValidationSignals;
 
 static constexpr bool DEFAULT_CHECKPOINTS_ENABLED{true};
 static constexpr auto DEFAULT_MAX_TIP_AGE{24h};
+// Two workers provided the best end-to-end result in BTX's cold-restart
+// persisted-UTXO benchmark. More workers remain available through
+// -prevoutfetchthreads, but can regress fast storage through scheduling and
+// LevelDB lock contention.
+static constexpr int32_t DEFAULT_PREVOUTFETCH_THREADS{2};
 //! Fail closed for shielded assumeutxo state unless the snapshot height has a
 //! consensus shielded-state pin, or the operator explicitly opts into trusting an
 //! unpinned shielded snapshot with -allowunpinnedshieldedsnapshot=1.
@@ -33,6 +38,11 @@ namespace kernel {
 
 enum class MatMulValidationMode {
     CONSENSUS,
+    //! Operator-configured M-of-N trust in signed ExactReplay attestations.
+    //! This mode performs every ordinary block/body/script check but delegates
+    //! the expensive Profile-1 replay verdict to explicitly configured archive
+    //! validators. It is not independent consensus validation.
+    TRUSTED,
     ECONOMIC,
     SPV,
 };
@@ -208,6 +218,8 @@ struct ChainstateManagerOpts {
     ValidationSignals* signals{nullptr};
     //! Number of script check worker threads. Zero means no parallel verification.
     int worker_threads_num{0};
+    //! Number of workers used to prefetch block input prevouts. Zero disables prefetching.
+    int32_t prevoutfetch_threads_num{DEFAULT_PREVOUTFETCH_THREADS};
     size_t script_execution_cache_bytes{DEFAULT_SCRIPT_EXECUTION_CACHE_BYTES};
     size_t signature_cache_bytes{DEFAULT_SIGNATURE_CACHE_BYTES};
 };

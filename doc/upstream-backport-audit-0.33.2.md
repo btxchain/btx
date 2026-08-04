@@ -10,14 +10,14 @@ performance changes.
 
 The result is recommended for review and CI as a release candidate, not as an
 already-approved public release. BTX still has no published `v0.33.2` tag. The
-integration base is local `main` at `0a623914277028391352eb4bd1634c91828c2445`,
-whose release notes still describe 0.33.2 as being prepared. Platform CI,
+integration baseline is the BTX 0.33.2 release candidate, whose release notes
+still describe 0.33.2 as being prepared. Platform validation,
 reproducible builds, the production activation gates, and final integration
 with BTX-local work remain required before cutting the tag.
 
-The parallel-prevout work also remains independently reviewable as a focused
-patch set. The aggregate release change does not replace that compatibility-
-boundary review.
+The parallel work also remains independently reviewable through its historical
+focused compatibility-boundary review. The aggregate branch does not replace
+that review.
 
 ## Audit boundary
 
@@ -25,7 +25,7 @@ Cutoff: 2026-07-17.
 
 | Source | Audited point | Scope |
 | --- | --- | --- |
-| BTX integration base | `0a623914277028391352eb4bd1634c91828c2445` | Intended 0.33.2 base |
+| BTX integration base | BTX 0.33.2 integration baseline | Intended 0.33.2 base |
 | Bitcoin Knots fork point | `v29.2.knots20251110` / `7b009f5531b9641f3fe5456f668638c5ddd5929a` | Point from which BTX diverged |
 | Bitcoin Knots 29.x | `f41f01e1e6de7025d52a865bef97f2a67277f0f3` | 1,164 post-fork commits screened |
 | Bitcoin Core master | `70d9ec7f3d452789d04dce81dc02db0b3b778bb5` | Landed v32-era work and later fixes |
@@ -85,7 +85,7 @@ heads move before the release cut.
 
 ### Baseline Core/Knots safety set
 
-The reviewed 33-commit upstream-backport baseline remains intact.
+The 33-commit upstream-backport baseline remains intact.
 It includes:
 
 - chain-tip reconstruction, block-file bounds, transaction-precompute lifetime,

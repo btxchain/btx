@@ -16,6 +16,9 @@
 #include <kernel/messagestartchars.h>
 #include <kernel/notifications_interface.h>
 #include <logging.h>
+#include <matmul/matmul_v4_rc.h>
+#include <matmul/matmul_v4_rc_coupled.h>
+#include <matmul/matmul_v4_rc_scale.h>
 #include <pow.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
@@ -55,6 +58,7 @@ static constexpr uint8_t DB_REINDEX_FLAG{'R'};
 static constexpr uint8_t DB_LAST_BLOCK{'l'};
 static constexpr uint8_t DB_PRUNE_LOCK{'L'};
 static constexpr uint8_t DB_PARKED_REORG_BRANCHES{'g'};
+static constexpr uint8_t DB_MATMUL_REPLAY_CONTEXT{'M'};
 // Keys used in previous version that might still be found in the DB:
 // BlockTreeDB::DB_TXINDEX_BLOCK{'T'};
 // BlockTreeDB::DB_TXINDEX{'t'}
@@ -65,10 +69,17 @@ bool BlockTreeDB::ReadBlockFileInfo(int nFile, CBlockFileInfo& info)
     return Read(std::make_pair(DB_BLOCK_FILES, nFile), info);
 }
 
-bool BlockTreeDB::WriteReindexing(bool fReindexing)
+bool BlockTreeDB::WriteReindexing(
+    bool fReindexing,
+    const std::optional<uint256>& matmul_replay_context)
 {
     if (fReindexing) {
-        return Write(DB_REINDEX_FLAG, uint8_t{'1'});
+        CDBBatch batch(*this);
+        batch.Write(DB_REINDEX_FLAG, uint8_t{'1'});
+        if (matmul_replay_context.has_value()) {
+            batch.Write(DB_MATMUL_REPLAY_CONTEXT, *matmul_replay_context);
+        }
+        return WriteBatch(batch, true);
     } else {
         return Erase(DB_REINDEX_FLAG);
     }
@@ -84,7 +95,7 @@ bool BlockTreeDB::ReadLastBlockFile(int& nFile)
     return Read(DB_LAST_BLOCK, nFile);
 }
 
-bool BlockTreeDB::WriteBatchSync(const std::vector<std::pair<int, const CBlockFileInfo*>>& fileInfo, int nLastFile, const std::vector<const CBlockIndex*>& blockinfo, const std::unordered_map<std::string, node::PruneLockInfo>& prune_locks)
+bool BlockTreeDB::WriteBatchSync(const std::vector<std::pair<int, const CBlockFileInfo*>>& fileInfo, int nLastFile, const std::vector<const CBlockIndex*>& blockinfo, const std::unordered_map<std::string, node::PruneLockInfo>& prune_locks, const std::optional<uint256>& matmul_replay_context)
 {
     CDBBatch batch(*this);
     for (const auto& [file, info] : fileInfo) {
@@ -97,6 +108,9 @@ bool BlockTreeDB::WriteBatchSync(const std::vector<std::pair<int, const CBlockFi
     for (const auto& prune_lock : prune_locks) {
         if (prune_lock.second.temporary) continue;
         batch.Write(std::make_pair(DB_PRUNE_LOCK, prune_lock.first), prune_lock.second);
+    }
+    if (matmul_replay_context.has_value()) {
+        batch.Write(DB_MATMUL_REPLAY_CONTEXT, *matmul_replay_context);
     }
     return WriteBatch(batch, true);
 }
@@ -127,6 +141,11 @@ bool BlockTreeDB::ReadParkedReorgBranches(std::set<uint256>& roots)
     }
     roots = {persisted_roots.begin(), persisted_roots.end()};
     return true;
+}
+
+bool BlockTreeDB::ReadMatMulReplayContext(uint256& context)
+{
+    return Read(DB_MATMUL_REPLAY_CONTEXT, context);
 }
 
 bool BlockTreeDB::LoadPruneLocks(std::unordered_map<std::string, node::PruneLockInfo>& prune_locks, const util::SignalInterrupt& interrupt) {
@@ -222,6 +241,273 @@ bool BlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, s
 } // namespace kernel
 
 namespace node {
+
+namespace {
+
+/** Serialize one resolved ENC_RC episode shape into the context hash. */
+void HashRCEpisodeShape(HashWriter& hasher, const matmul::v4::rc::RCEpisodeParams& e)
+{
+    hasher << e.rounds << e.d_head << e.n_q << e.n_ctx << e.L_lyr << e.d_model
+           << e.d_ff << e.b_seq << e.T_leaf;
+}
+
+/** Serialize the resolved ENC_RC_COUPLED shape + digest-affecting options. */
+void HashRCCoupShape(HashWriter& hasher, const matmul::v4::rc::RCCoupParams& c,
+                     const matmul::v4::rc::RCCoupOptions& o)
+{
+    hasher << c.barriers << c.lobes << c.lobe_width << c.bank_pages
+           << c.rows_per_lobe << c.pages_per_barrier_lobe
+           << o.transcript_version << o.full_bank_schedule << o.material_exchange
+           << o.exchange_rows << o.exchange_rounds;
+    // Test-only shortcut hooks are NOT part of the consensus predicate and are
+    // deliberately excluded (ResolveRCCoupOptions never sets them).
+}
+
+/**
+ * Fixed probe ladder for the derived-shape fingerprint.
+ *
+ * Epoch indices relative to nMatMulRCHeight. The ladder straddles the ENC_RC
+ * activation edge and both ends of the consensus-pinned growth table
+ * (Consensus::Params::kRCGrowthTableLen == 40), so the derived episode shape is
+ * sampled where the schedule can actually change it.
+ *
+ * Cost bound: ConsensusRCEpisodeParamsForHeight iterates e = 0..epoch and each
+ * step is memoized, so the ladder is O(max_epoch^2) Q16 multiplies at worst.
+ * Height clamping can only LOWER the resulting epoch index below the requested
+ * one (clamping means INT32_MAX - nMatMulRCHeight < e * nRCScaleEpochBlocks, so
+ * the realized epoch is < e), hence max_epoch <= 41 for every reachable
+ * parameterization -- including nMatMulRCHeight == INT32_MAX, where every probe
+ * collapses to epoch 0.
+ */
+constexpr int64_t kRCShapeProbeEpochs[]{0, 1, 2, 3, 5, 10, 20, 39, 40, 41};
+
+} // namespace
+
+uint256 ComputeMatMulReplayEpisodeShapeFingerprint(const CChainParams& params)
+{
+    const Consensus::Params& consensus{params.GetConsensus()};
+    HashWriter hasher;
+    hasher << std::string{"BTX_MATMUL_REPLAY_EPISODE_SHAPE"};
+
+    const auto clamp_height = [](int64_t h) -> int32_t {
+        if (h < 0) return 0;
+        if (h > std::numeric_limits<int32_t>::max()) {
+            return std::numeric_limits<int32_t>::max();
+        }
+        return static_cast<int32_t>(h);
+    };
+    const int64_t rc_height{consensus.nMatMulRCHeight};
+    // A non-positive epoch length disables growth in RCScaleForHeight; use 1
+    // here only so the probe ladder stays well-defined (the raw knob is hashed
+    // separately, so the misconfiguration is still bound).
+    const int64_t epoch_blocks{
+        consensus.nRCScaleEpochBlocks > 0 ? int64_t{consensus.nRCScaleEpochBlocks} : 1};
+
+    // Pre-activation probes: bind the "RC not yet live" shape too.
+    for (const int64_t h : {int64_t{0}, int64_t{1}, rc_height - 1}) {
+        const int32_t probe{clamp_height(h)};
+        hasher << probe;
+        HashRCEpisodeShape(hasher, matmul::v4::rc::ResolveRCEpisodeParams(consensus, probe));
+    }
+    for (const int64_t e : kRCShapeProbeEpochs) {
+        const int32_t probe{clamp_height(rc_height + e * epoch_blocks)};
+        hasher << probe;
+        HashRCEpisodeShape(hasher, matmul::v4::rc::ResolveRCEpisodeParams(consensus, probe));
+    }
+
+    // ENC_RC_COUPLED shape is height-independent (profile x toydims only), so a
+    // single resolution binds it. Included here so a change to the Make*RCCoup*
+    // shape constructors is caught, not just a change to the selector knobs.
+    HashRCCoupShape(hasher, matmul::v4::rc::ResolveRCCoupParams(consensus),
+                    matmul::v4::rc::ResolveRCCoupOptions(consensus));
+    return hasher.GetHash();
+}
+
+uint256 ComputeMatMulReplayAuthorityContext(const CChainParams& params)
+{
+    // This schema domain covers consensus-code changes that do not alter an
+    // explicit parameter. Bump it whenever the selected replay predicate or
+    // statement semantics change.
+    //   v2 -> v3: bound the ENC_RC §R.7 scheduled-scaling knobs that feed
+    //             ConsensusRCEpisodeParamsForHeight, plus a derived
+    //             episode-shape fingerprint (see below).
+    static constexpr uint32_t SCHEMA_VERSION{3};
+    const Consensus::Params& consensus{params.GetConsensus()};
+    HashWriter hasher;
+    hasher << std::string{"BTX_MATMUL_REPLAY_AUTHORITY_CONTEXT"}
+           << SCHEMA_VERSION
+           << params.GenesisBlock().GetHash()
+           // Header target/range and difficulty-schedule authority. Known
+           // headers are not contextually rechecked on duplicate delivery, so
+           // these must be bound alongside the expensive replay predicate.
+           << consensus.powLimit
+           << consensus.fPowAllowMinDifficultyBlocks
+           << consensus.enforce_BIP94
+           << consensus.fPowNoRetargeting
+           << consensus.nPowTargetSpacing
+           << consensus.nPowTargetTimespan
+           << consensus.nPowTargetSpacingNormal
+           << consensus.nPowTargetSpacingFastMs
+           << consensus.nFastMineDifficultyScale
+           << consensus.nFastMineHeight
+           << consensus.nDgwAsymmetricClampHeight
+           << consensus.nDgwEasingBoostHeight
+           << consensus.nDgwWindowAlignmentHeight
+           << consensus.nDgwSlewGuardHeight
+           << consensus.nMatMulAsertHeight
+           << consensus.nMatMulAsertHalfLife
+           << consensus.nMatMulAsertBootstrapFactor
+           << consensus.nMatMulAsertRetuneHeight
+           << consensus.nMatMulAsertRetuneHardeningFactor
+           << consensus.nMatMulAsertRetune2Height
+           << consensus.nMatMulAsertRetune2TargetNum
+           << consensus.nMatMulAsertRetune2TargetDen
+           << consensus.nMatMulAsertHalfLifeUpgradeHeight
+           << consensus.nMatMulAsertHalfLifeUpgrade
+           << consensus.nMatMulMaxFutureMtpDriftHeight
+           << consensus.nMatMulMaxFutureMtpDrift
+           << consensus.nMatMulTimewarpReconcileHeight
+           << consensus.fMatMulPOW
+           << consensus.fSkipMatMulValidation
+           << consensus.nMatMulDimension
+           << consensus.nMatMulTranscriptBlockSize
+           << consensus.nMatMulNoiseRank
+           << consensus.nMatMulMinDimension
+           << consensus.nMatMulMaxDimension
+           << consensus.nMatMulFieldModulus
+           << consensus.nMatMulValidationWindow
+           << consensus.nMatMulProofAssumeValidMinAge
+           << consensus.fMatMulFreivaldsEnabled
+           << consensus.nMatMulFreivaldsRounds
+           << consensus.fMatMulRequireProductPayload
+           << consensus.nMatMulFreivaldsBindingHeight
+           << consensus.nMatMulProductDigestHeight
+           << consensus.nMatMulNonceSeedHeight
+           << consensus.nMatMulParentMtpSeedHeight
+           << consensus.nMatMulPreHashEpsilonBits
+           << consensus.nMatMulPreHashEpsilonBitsUpgradeHeight
+           << consensus.nMatMulPreHashEpsilonBitsUpgrade
+           << consensus.nMatMulV4Height
+           << consensus.nMatMulV4MinDimension
+           << consensus.nMatMulV4MaxDimension
+           << consensus.nMatMulV4Dimension
+           << consensus.nMatMulV4FreivaldsRounds
+           << consensus.nMatMulV4TranscriptBlockSize
+           << consensus.nMatMulV4AsertRescaleNum
+           << consensus.nMatMulV4AsertRescaleDen
+           << consensus.fMatMulV4FlatSketchReplay
+           << consensus.nMatMulBMX4CHeight
+           << consensus.nMatMulBMX4CAsertRescaleNum
+           << consensus.nMatMulBMX4CAsertRescaleDen
+           << consensus.nMatMulDRLTHeight
+           << consensus.nMatMulConsensusQStar
+           << consensus.nMatMulLTTranscriptBlockSize
+           << consensus.nMatMulDRLTAsertRescaleNum
+           << consensus.nMatMulDRLTAsertRescaleDen
+           << consensus.fMatMulLTSealAsPoW
+           << consensus.nMatMulRCHeight
+           << consensus.nMatMulRCAsertRescaleNum
+           << consensus.nMatMulRCAsertRescaleDen
+           << consensus.nMatMulRCProfile
+           << consensus.nMatMulRCProfile2FullyVerifyTerminalRound
+           << consensus.fMatMulRCUseToyDims
+           << consensus.nMatMulRCCoupledHeight
+           << consensus.nMatMulRCCoupledAsertRescaleNum
+           << consensus.nMatMulRCCoupledAsertRescaleDen
+           << consensus.nMatMulRCCoupledProfile
+           << consensus.fMatMulRCCoupledUseToyDims
+           << consensus.nMatMulHeaderPoWDiscountBits
+           << consensus.hashMatMulRCStage3ProgramRegistryAlgRoot
+           << consensus.hashMatMulRCStage3ProgramRegistryShaAuditRoot
+           << consensus.hashMatMulRCStage3ProgramRegistryBinding;
+
+    // --- ENC_RC §R.7 scheduled scaling (raw knobs) ---
+    // These select the replay episode SHAPE via
+    // ConsensusRCEpisodeParamsForHeight -> RCScaleForHeight, i.e. they are part
+    // of the PoW predicate. They are inert today because
+    // kRCGrowthScheduleEnabled is compile-time false,
+    // but an unhashed predicate input is a latent silent-skip: a node that
+    // retuned them after the flag flipped would keep trusting persisted
+    // BLOCK_EXACT_REPLAY_VERIFIED verdicts computed under the old shape.
+    //
+    // nRCBrakeDeltaPct is NOT read by any current derivation -- the chainwork
+    // brake is OMITTED (A3 / F6: BrakeAllowsStep ignores params, and
+    // ResolveRCEpisodeParams takes the empty-brake overload). It is bound here
+    // anyway so that reintroducing the brake cannot silently become a predicate
+    // change that this context misses.
+    hasher << static_cast<uint64_t>(Consensus::Params::kRCGrowthTableLen)
+           << consensus.nRCScaleEpochBlocks
+           << consensus.nRCScaleHardCapResBytes
+           << consensus.nRCScaleHardCapCapBytes
+           << consensus.nRCBrakeDeltaPct;
+    // std::array<int64_t, N> has no Serialize overload (only byte arrays), so
+    // the tables are hashed element-wise.
+    for (size_t i = 0; i < Consensus::Params::kRCGrowthTableLen; ++i) {
+        hasher << consensus.nRCGrowthResTableQ16[i]
+               << consensus.nRCGrowthCapTableQ16[i];
+    }
+
+    // --- Derived episode shape ---
+    // The raw knobs above bind the schedule's INPUTS. This binds its OUTPUT at a
+    // fixed probe ladder, which additionally covers inputs that are not in
+    // Consensus::Params at all: kRCGrowthScheduleEnabled, kRCW0Res / kRCW0Cap,
+    // kRCQueryPerHead, the frozen kRC{Rounds,HeadDim,Layers,ModelDim,
+    // TileLeafBytes} dims, the epoch-invariant fallback rules, and the coupled
+    // Make*RCCoup* shapes. Neither alone is sufficient: the ladder samples
+    // heights (a mid-table growth entry can be masked by the hard-cap ratchet),
+    // and the knobs cannot see a change to the derivation code.
+    hasher << ComputeMatMulReplayEpisodeShapeFingerprint(params);
+    return hasher.GetHash();
+}
+
+MatMulReplayContextMigration ReconcileMatMulReplayAuthorityContext(
+    std::span<CBlockIndex* const> indices,
+    const std::optional<uint256>& persisted_context,
+    const uint256& current_context,
+    std::set<CBlockIndex*>& dirty_indices)
+{
+    AssertLockHeld(::cs_main);
+    const bool context_matches{
+        persisted_context.has_value() && *persisted_context == current_context};
+    if (!context_matches) {
+        // First scan only. Returning REINDEX_REQUIRED must leave both the
+        // in-memory index and dirty set untouched so startup cannot partially
+        // migrate a datadir it is about to reject. Only a locally completed
+        // ExactReplay verdict can make historical chainwork depend on the old
+        // authority context. Trusted-attestation bits are audit metadata and
+        // are safe (and required) to clear below.
+        for (const CBlockIndex* index : indices) {
+            if (index != nullptr &&
+                (index->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0) {
+                return {
+                    MatMulReplayContextDisposition::REINDEX_REQUIRED,
+                    0};
+            }
+        }
+    }
+
+    size_t cleared_trusted{0};
+    for (CBlockIndex* index : indices) {
+        if (index == nullptr) {
+            continue;
+        }
+        // Trusted attestations are local-policy authority and are never safe
+        // to preserve across startup: the signer set and threshold are not
+        // consensus parameters. ExactReplay may survive only under an exact
+        // versioned consensus-context match.
+        if ((index->nStatus & BLOCK_TRUSTED_REPLAY_ATTESTED) == 0) {
+            continue;
+        }
+        index->nStatus &= ~BLOCK_TRUSTED_REPLAY_ATTESTED;
+        dirty_indices.insert(index);
+        ++cleared_trusted;
+    }
+    return {
+        context_matches
+            ? MatMulReplayContextDisposition::MATCHED
+            : MatMulReplayContextDisposition::MIGRATED,
+        cleared_trusted};
+}
 
 // Randomized equal-work tie-breaking state (see blockstorage.h). Default ON
 // through startup argument handling, with explicit opt-out for legacy behavior.
@@ -355,8 +641,17 @@ CBlockIndex* BlockManager::AddToBlockIndex(const CBlockHeader& block, CBlockInde
     }
     pindexNew->nTimeMax = (pindexNew->pprev ? std::max(pindexNew->pprev->nTimeMax, pindexNew->nTime) : pindexNew->nTime);
     pindexNew->nChainWork = (pindexNew->pprev ? pindexNew->pprev->nChainWork : 0) + GetBlockProof(*pindexNew);
+    // Audit P0.1/C1: a freshly added header is only BLOCK_VALID_TREE, so at MatMul
+    // heights it contributes zero AUTHENTICATED work until its body validates
+    // (promoted later in ReceivedBlockTransactions). Pre-MatMul heights contribute
+    // full work here, keeping nAuthenticatedChainWork == nChainWork identical.
+    UpdateAuthenticatedChainWork(*pindexNew, GetConsensus());
     pindexNew->RaiseValidity(BLOCK_VALID_TREE);
-    if (best_header == nullptr || best_header->nChainWork < pindexNew->nChainWork) {
+    // Prefer authenticated work for best-header selection. The shared
+    // trust-adjusted allowance is zero, so even one unverified MatMul header
+    // cannot displace an authenticated tip on claimed work (matching
+    // net_processing peer decisions).
+    if (best_header == nullptr || PreferTrustAdjustedHeader(*best_header, *pindexNew)) {
         best_header = pindexNew;
     }
 
@@ -656,6 +951,11 @@ bool BlockManager::LoadBlockIndex(const std::optional<uint256>& snapshot_blockha
         }
         previous_index = pindex;
         pindex->nChainWork = (pindex->pprev ? pindex->pprev->nChainWork : 0) + GetBlockProof(*pindex);
+        // Audit P0.1/C1: deterministically recompute authenticated chainwork from
+        // persisted nStatus. This is the restart path -- height-ordered so pprev is
+        // always finalized first. Reproduces exactly what the incremental
+        // AddToBlockIndex/ReceivedBlockTransactions maintenance built at runtime.
+        UpdateAuthenticatedChainWork(*pindex, GetConsensus());
         pindex->nTimeMax = (pindex->pprev ? std::max(pindex->pprev->nTimeMax, pindex->nTime) : pindex->nTime);
 
         // We can link the chain of blocks for which we've received transactions at some point, or
@@ -668,11 +968,22 @@ bool BlockManager::LoadBlockIndex(const std::optional<uint256>& snapshot_blockha
                         pindex->GetBlockHash() == *snapshot_blockhash) {
                     // Should have been set above; don't disturb it with code below.
                     Assert(pindex->m_chain_tx_count > 0);
+                    // The hardcoded chain transaction count does not mean that
+                    // the background chainstate has processed this block's
+                    // parents. Keep an already-stored snapshot base linked to
+                    // its missing parent so normal candidate propagation can
+                    // resume after restart.
+                    if ((pindex->nStatus & BLOCK_HAVE_DATA) &&
+                        !pindex->pprev->HaveNumChainTxs()) {
+                        AddUnlinkedBlock(pindex);
+                    }
                 } else if (pindex->pprev->m_chain_tx_count > 0) {
                     pindex->m_chain_tx_count = pindex->pprev->m_chain_tx_count + pindex->nTx;
                 } else {
                     pindex->m_chain_tx_count = 0;
-                    m_blocks_unlinked.insert(std::make_pair(pindex->pprev, pindex));
+                    if (pindex->nStatus & BLOCK_HAVE_DATA) {
+                        AddUnlinkedBlock(pindex);
+                    }
                 }
             } else {
                 pindex->m_chain_tx_count = pindex->nTx;
@@ -688,6 +999,18 @@ bool BlockManager::LoadBlockIndex(const std::optional<uint256>& snapshot_blockha
     }
 
     return true;
+}
+
+void BlockManager::AddUnlinkedBlock(CBlockIndex* block)
+{
+    AssertLockHeld(cs_main);
+    Assume(block != nullptr);
+    Assume(block->nStatus & BLOCK_HAVE_DATA);
+    auto range = m_blocks_unlinked.equal_range(block->pprev);
+    for (auto it = range.first; it != range.second; ++it) {
+        if (it->second == block) return;
+    }
+    m_blocks_unlinked.emplace(block->pprev, block);
 }
 
 bool BlockManager::WriteBlockIndexDB()
@@ -706,9 +1029,12 @@ bool BlockManager::WriteBlockIndexDB()
         m_dirty_blockindex.erase(it++);
     }
     int max_blockfile = WITH_LOCK(cs_LastBlockFile, return this->MaxBlockfileNum());
-    if (!m_block_tree_db->WriteBatchSync(vFiles, max_blockfile, vBlocks, m_prune_locks)) {
+    if (!m_block_tree_db->WriteBatchSync(
+            vFiles, max_blockfile, vBlocks, m_prune_locks,
+            m_pending_matmul_replay_context)) {
         return false;
     }
+    m_pending_matmul_replay_context.reset();
     return true;
 }
 
@@ -716,6 +1042,33 @@ bool BlockManager::LoadBlockIndexDB(const std::optional<uint256>& snapshot_block
 {
     if (!LoadBlockIndex(snapshot_blockhash)) {
         return false;
+    }
+    const uint256 current_replay_context{
+        ComputeMatMulReplayAuthorityContext(GetParams())};
+    uint256 stored_replay_context;
+    const std::optional<uint256> persisted_replay_context{
+        m_block_tree_db->ReadMatMulReplayContext(stored_replay_context)
+            ? std::optional<uint256>{stored_replay_context}
+            : std::nullopt};
+    std::vector<CBlockIndex*> all_indices{GetAllBlockIndices()};
+    const MatMulReplayContextMigration replay_migration{
+        ReconcileMatMulReplayAuthorityContext(
+            all_indices, persisted_replay_context,
+            current_replay_context, m_dirty_blockindex)};
+    if (replay_migration.disposition ==
+        MatMulReplayContextDisposition::REINDEX_REQUIRED) {
+        LogError(
+            "MatMul replay authority context changed while persisted replay "
+            "authority exists; restart with -reindex to revalidate blocks "
+            "under the current consensus predicate\n");
+        return false;
+    }
+    if (replay_migration.disposition ==
+        MatMulReplayContextDisposition::MIGRATED) {
+        m_pending_matmul_replay_context = current_replay_context;
+        LogPrintf(
+            "MatMul replay authority context initialized/changed; "
+            "no persisted replay authority required revalidation\n");
     }
     int max_blockfile_num{0};
 
@@ -770,6 +1123,15 @@ bool BlockManager::LoadBlockIndexDB(const std::optional<uint256>& snapshot_block
     bool fReindexing = false;
     m_block_tree_db->ReadReindexing(fReindexing);
     if (fReindexing) m_blockfiles_indexed = false;
+
+    // Commit the new context and every cleared status bit in one LevelDB batch.
+    // A crash before this point leaves the old/missing context, so the next
+    // startup repeats the migration instead of trusting partially cleared data.
+    if ((m_pending_matmul_replay_context.has_value() ||
+         replay_migration.cleared_trusted_status != 0) &&
+        !WriteBlockIndexDB()) {
+        return false;
+    }
 
     return true;
 }
@@ -882,7 +1244,8 @@ void BlockManager::CleanupBlockRevFiles() const
 CBlockFileInfo* BlockManager::GetBlockFileInfo(size_t n)
 {
     LOCK(cs_LastBlockFile);
-    if (n > m_blockfile_info.size()-1) return nullptr;
+
+    if (n >= m_blockfile_info.size()) return nullptr;
     return &m_blockfile_info.at(n);
 }
 
@@ -955,14 +1318,19 @@ bool BlockManager::ReadBlockUndo(CBlockUndo& blockundo, const CBlockIndex& index
     return true;
 }
 
+bool BlockManager::FlushFile(const FlatFileSeq& file_seq, const FlatFilePos& pos,
+                             bool finalize, const bilingual_str& flush_error_message)
+{
+    if (file_seq.Flush(pos, finalize)) return true;
+    m_opts.notifications.flushError(flush_error_message);
+    return false;
+}
+
 bool BlockManager::FlushUndoFile(int block_file, bool finalize)
 {
     FlatFilePos undo_pos_old(block_file, m_blockfile_info[block_file].nUndoSize);
-    if (!m_undo_file_seq.Flush(undo_pos_old, finalize)) {
-        m_opts.notifications.flushError(_("Flushing undo file to disk failed. This is likely the result of an I/O error."));
-        return false;
-    }
-    return true;
+    return FlushFile(m_undo_file_seq, undo_pos_old, finalize,
+                     _("Flushing undo file to disk failed. This is likely the result of an I/O error."));
 }
 
 bool BlockManager::FlushBlockFile(int blockfile_num, bool fFinalize, bool finalize_undo)
@@ -980,8 +1348,8 @@ bool BlockManager::FlushBlockFile(int blockfile_num, bool fFinalize, bool finali
     assert(static_cast<int>(m_blockfile_info.size()) > blockfile_num);
 
     FlatFilePos block_pos_old(blockfile_num, m_blockfile_info[blockfile_num].nSize);
-    if (!m_block_file_seq.Flush(block_pos_old, fFinalize)) {
-        m_opts.notifications.flushError(_("Flushing block file to disk failed. This is likely the result of an I/O error."));
+    if (!FlushFile(m_block_file_seq, block_pos_old, fFinalize,
+                   _("Flushing block file to disk failed. This is likely the result of an I/O error."))) {
         success = false;
     }
     // we do not always flush the undo file, as the chain tip may be lagging behind the incoming blocks,
@@ -999,16 +1367,25 @@ BlockfileType BlockManager::BlockfileTypeForHeight(int height)
     if (!m_snapshot_height) {
         return BlockfileType::NORMAL;
     }
-    return (height >= *m_snapshot_height) ? BlockfileType::ASSUMED : BlockfileType::NORMAL;
+    // The snapshot base is connected by the background chainstate and belongs
+    // to the normal range. Only descendants of the base belong to the assumed
+    // range.
+    return (height > *m_snapshot_height) ? BlockfileType::ASSUMED : BlockfileType::NORMAL;
 }
 
-bool BlockManager::FlushChainstateBlockFile(int tip_height)
+bool BlockManager::FlushChainstateBlockFile(int tip_height, bool snapshot_chainstate)
 {
     LOCK(cs_LastBlockFile);
-    auto& cursor = m_blockfile_cursors[BlockfileTypeForHeight(tip_height)];
-    // If the cursor does not exist, it means an assumeutxo snapshot is loaded,
-    // but no blocks past the snapshot height have been written yet, so there
-    // is no data associated with the chainstate, and it is safe not to flush.
+    BlockfileType type{BlockfileTypeForHeight(tip_height)};
+    if (snapshot_chainstate && m_snapshot_height && tip_height == *m_snapshot_height) {
+        // The base belongs to the background chainstate's normal range. A
+        // snapshot chainstate still at the base has no normal-range data of
+        // its own to flush.
+        type = BlockfileType::ASSUMED;
+    }
+    auto& cursor = m_blockfile_cursors[type];
+    // A missing cursor means there is no blockfile data associated with this
+    // chainstate yet, so there is nothing to flush.
     if (cursor) {
         return FlushBlockFile(cursor->file_num, /*fFinalize=*/false, /*finalize_undo=*/false);
     }
@@ -1426,13 +1803,7 @@ static auto InitBlocksdirXorKey(const BlockManager::Options& opts)
         xor_key_file >> xor_key;
     } else {
         // Create initial or missing xor key file
-        AutoFile xor_key_file{fsbridge::fopen(xor_key_path,
-#ifdef __MINGW64__
-            "wb" // Temporary workaround for https://github.com/bitcoin/bitcoin/issues/30210
-#else
-            "wbx"
-#endif
-        )};
+        AutoFile xor_key_file{fsbridge::fopen(xor_key_path, "wbx")};
         xor_key_file << xor_key;
         if (xor_key_file.fclose() != 0) {
             throw std::runtime_error{strprintf("Error closing XOR key file %s: %s",
@@ -1463,7 +1834,16 @@ BlockManager::BlockManager(const util::SignalInterrupt& interrupt, Options opts)
     m_block_tree_db = std::make_unique<BlockTreeDB>(m_opts.block_tree_db_params);
 
     if (m_opts.block_tree_db_params.wipe_data) {
-        m_block_tree_db->WriteReindexing(true);
+        // The reindex marker and replay-authority context describe one fresh
+        // database generation and must survive or fail together. Persist them
+        // in one synchronous batch before any revalidated authority bit can be
+        // written, including across an interrupted/resumed reindex.
+        const uint256 replay_context{
+            ComputeMatMulReplayAuthorityContext(GetParams())};
+        if (!m_block_tree_db->WriteReindexing(true, replay_context)) {
+            throw std::runtime_error{
+                "Failed to initialize block database reindex authority context"};
+        }
         m_blockfiles_indexed = false;
         // If we're reindexing in prune mode, wipe away unusable block files and all undo data files
         if (m_prune_mode) {

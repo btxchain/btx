@@ -81,13 +81,15 @@ util::Result<void> ApplyArgsManOptions(const ArgsManager& args, ChainstateManage
     if (auto value{args.GetArg("-matmulvalidation")}) {
         if (*value == "consensus") {
             opts.matmul_validation_mode = kernel::MatMulValidationMode::CONSENSUS;
+        } else if (*value == "trusted") {
+            opts.matmul_validation_mode = kernel::MatMulValidationMode::TRUSTED;
         } else if (*value == "economic") {
             opts.matmul_validation_mode = kernel::MatMulValidationMode::ECONOMIC;
         } else if (*value == "spv") {
             opts.matmul_validation_mode = kernel::MatMulValidationMode::SPV;
         } else {
             return util::Error{Untranslated(strprintf(
-                "Invalid -matmulvalidation value (%s). Valid values: consensus, economic, spv", *value))};
+                "Invalid -matmulvalidation value (%s). Valid values: consensus, trusted, economic, spv", *value))};
         }
     }
 
@@ -178,6 +180,15 @@ util::Result<void> ApplyArgsManOptions(const ArgsManager& args, ChainstateManage
     }
     // Subtract 1 because the main thread counts towards the par threads.
     opts.worker_threads_num = script_threads - 1;
+
+    if (auto value{args.GetIntArg("-prevoutfetchthreads")}) {
+        if (*value < 0) {
+            return util::Error{Untranslated(strprintf(
+                "-prevoutfetchthreads must be non-negative (got %d). Use 0 to disable parallel input fetching.",
+                *value))};
+        }
+        opts.prevoutfetch_threads_num = static_cast<int32_t>(std::min<int64_t>(*value, MAX_PREVOUTFETCH_THREADS));
+    }
 
     if (auto max_size = args.GetIntArg("-maxsigcachesize")) {
         // 1. When supplied with a max_size of 0, both the signature cache and

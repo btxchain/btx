@@ -99,14 +99,15 @@ class WalletSignerTest(BitcoinTestFramework):
 
         # assert_raises_rpc_error(-4, "Multiple signers found, please specify which to use", wallet_name='not_hww', disable_private_keys=True, descriptors=True, external_signer=True)
 
-        self.log.info('Verify imported descriptors are ranged P2MR/BIP87h based')
+        self.log.info('Verify imported descriptors are ranged P2MR/PQHD based')
         descs = hww.listdescriptors(private=False)["descriptors"]
         active = [d["desc"] for d in descs if d.get("active")]
         assert_equal(len(active), 2)
         for desc in active:
             assert "mr(" in desc
             assert "pk_slh(" in desc
-            assert "/87h/" in desc
+            assert "pqhd(" in desc
+            assert "/1h/0h/" in desc
             assert "/*" in desc
 
         self.log.info('Verify external signer exposes a usable ranged keypool for P2MR')

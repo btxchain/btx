@@ -2559,23 +2559,16 @@ std::vector<WalletDestination> DescriptorScriptPubKeyMan::MarkUnusedAddresses(co
     LOCK(cs_desc_man);
     std::vector<WalletDestination> result;
     if (IsMine(script)) {
-        int32_t index = m_map_script_pub_keys[script];
+        const int32_t index = m_map_script_pub_keys[script];
+        CTxDestination observed_dest;
+        // Only materialize the destination that was actually observed. Any
+        // skipped destinations can be recorded lazily if they appear later.
+        if (ExtractDestination(script, observed_dest)) {
+            result.push_back({observed_dest, std::nullopt});
+        }
         if (index >= m_wallet_descriptor.next_index) {
-            WalletLogPrintf("%s: Detected a used keypool item at index %d, mark all keypool items up to this item as used\n", __func__, index);
-            auto out_keys = std::make_unique<FlatSigningProvider>();
-            std::vector<CScript> scripts_temp;
-            while (index >= m_wallet_descriptor.next_index) {
-                if (!m_wallet_descriptor.descriptor->ExpandFromCache(m_wallet_descriptor.next_index, m_wallet_descriptor.cache, scripts_temp, *out_keys)) {
-                    throw std::runtime_error(std::string(__func__) + ": Unable to expand descriptor from cache");
-                }
-                if (scripts_temp.empty()) {
-                    throw std::runtime_error(std::string(__func__) + ": Descriptor expansion returned no scripts");
-                }
-                CTxDestination dest;
-                ExtractDestination(scripts_temp[0], dest);
-                result.push_back({dest, std::nullopt});
-                m_wallet_descriptor.next_index++;
-            }
+            WalletLogPrintf("%s: Detected a used keypool item at index %d, advance descriptor state past this item\n", __func__, index);
+            m_wallet_descriptor.next_index = index + 1;
         }
         if (!TopUp()) {
             WalletLogPrintf("%s: Topping up keypool failed (locked wallet)\n", __func__);
@@ -2750,6 +2743,34 @@ std::unique_ptr<FlatSigningProvider> DescriptorScriptPubKeyMan::GetSigningProvid
     int32_t index = it->second;
 
     return GetSigningProvider(index, include_private);
+}
+
+std::unique_ptr<FlatSigningProvider> DescriptorScriptPubKeyMan::GetP2MRSizingProvider(const CScript& script) const
+{
+    LOCK(cs_desc_man);
+
+    const auto it = m_map_script_pub_keys.find(script);
+    if (it == m_map_script_pub_keys.end()) return nullptr;
+
+    const int32_t index{it->second};
+    auto provider = std::make_unique<FlatSigningProvider>();
+    if (const auto cached = m_map_signing_providers.find(index); cached != m_map_signing_providers.end()) {
+        provider->Merge(FlatSigningProvider{cached->second});
+    } else {
+        // Fee selection must never fall back to direct descriptor expansion:
+        // a PQ descriptor can perform private PQ key generation while deriving
+        // an uncached public key. A missing/corrupt cache fails closed here.
+        std::vector<CScript> scripts;
+        if (!m_wallet_descriptor.descriptor->ExpandFromCache(
+                index, m_wallet_descriptor.cache, scripts, *provider)) {
+            return nullptr;
+        }
+        m_map_signing_providers[index] = *provider;
+    }
+
+    m_wallet_descriptor.descriptor->ExpandP2MRSigningKeyAvailability(
+        index, m_wallet_descriptor.cache, provider->pq_signing_key_availability);
+    return provider;
 }
 
 std::unique_ptr<FlatSigningProvider> DescriptorScriptPubKeyMan::GetSigningProvider(const CPubKey& pubkey) const

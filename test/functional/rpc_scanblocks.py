@@ -8,16 +8,15 @@ from test_framework.blockfilter import (
     bip158_basic_element_hash,
     bip158_relevant_scriptpubkeys,
 )
-from test_framework.messages import COIN
+from test_framework.descriptors import descsum_create
+from test_framework.messages import COIN, CTxOut
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     assert_equal,
+    assert_greater_than_or_equal,
     assert_raises_rpc_error,
 )
-from test_framework.wallet import (
-    MiniWallet,
-    getnewdestination,
-)
+from test_framework.wallet import MiniWallet
 
 
 class ScanblocksTest(BitcoinTestFramework):
@@ -29,16 +28,36 @@ class ScanblocksTest(BitcoinTestFramework):
         node = self.nodes[0]
         wallet = MiniWallet(node)
 
-        # send 1.0, mempool only
-        _, spk_1, addr_1 = getnewdestination()
-        wallet.send_to(from_node=node, scriptPubKey=spk_1, amount=1 * COIN)
+        # Use deterministic private PQHD descriptors so the test remains
+        # wallet-module independent while producing policy-standard P2MR
+        # destinations and change.
+        seed = "01" * 32
+        receive_desc = descsum_create(
+            f"mr(pqhd({seed}/1h/0h/0/*),pk_slh(pqhd({seed}/1h/0h/0/*)))"
+        )
+        change_desc = descsum_create(
+            f"mr(pqhd({seed}/1h/0h/1/*),pk_slh(pqhd({seed}/1h/0h/1/*)))"
+        )
+        receive_addresses = node.deriveaddresses(receive_desc, [0, 5])
+        change_addresses = iter(node.deriveaddresses(change_desc, [0, 1]))
 
-        parent_key = "tpubD6NzVbkrYhZ4WaWSyoBvQwbpLkojyoTZPRsgXELWz3Popb3qkjcJyJUGLnL4qHHoQvao8ESaAstxYSnhyswJ76uZPStJRJCTKvosUCJZL5B"
+        def send_to_p2mr(script_pub_key, amount, fee=1000):
+            """Spend a MiniWallet coin using only standard P2MR outputs."""
+            tx = wallet.create_self_transfer(fee_rate=0)["tx"]
+            assert_greater_than_or_equal(tx.vout[0].nValue, amount + fee)
+            tx.vout[0].nValue -= amount + fee
+            tx.vout[0].scriptPubKey = address_to_scriptpubkey(next(change_addresses))
+            tx.vout.append(CTxOut(amount, script_pub_key))
+            wallet.sendrawtransaction(from_node=node, tx_hex=tx.serialize().hex())
+
         # send 1.0, mempool only
-        # childkey 5 of `parent_key`
-        wallet.send_to(from_node=node,
-                       scriptPubKey=address_to_scriptpubkey("mkS4HXoTYWRTescLGaUTGbtTTYX5EjJyEE"),
-                       amount=1 * COIN)
+        addr_1 = receive_addresses[0]
+        send_to_p2mr(address_to_scriptpubkey(addr_1), 1 * COIN)
+
+        # send 1.0, mempool only
+        # child 5 of the ranged P2MR descriptor
+        ranged_addr = receive_addresses[5]
+        send_to_p2mr(address_to_scriptpubkey(ranged_addr), 1 * COIN)
 
         # mine a block and assure that the mined blockhash is in the filterresult
         blockhash = self.generate(node, 1)[0]
@@ -80,7 +99,7 @@ class ScanblocksTest(BitcoinTestFramework):
 
         # make sure the blockhash is present when using the first mined block as start_height
         assert blockhash in node.scanblocks(
-            "start", [{"desc": f"pkh({parent_key}/*)", "range": [0, 100]}], height)['relevant_blocks']
+            "start", [{"desc": receive_desc, "range": [0, 100]}], height)['relevant_blocks']
 
         # check that false-positives are included in the result now; note that
         # finding a false-positive at runtime would take too long, hence we simply
@@ -91,8 +110,8 @@ class ScanblocksTest(BitcoinTestFramework):
         assert_equal(len(genesis_spks), 1)
         genesis_coinbase_spk = list(genesis_spks)[0]
         # Precomputed collision for BTX regtest genesis blockhash:
-        # 5b7ffeb9cabf3fb88e036e7fb0b6115fbcdd60d2a9389f70bff5744b1b83223d
-        false_positive_spk = bytes.fromhex("00140000000000000000000000000000000000041fd0")
+        # 521ad0951ed299e9c56aeb7db8188972772067560351b8e55adf71dbed532360
+        false_positive_spk = bytes.fromhex("001400000000000000000000000000000000000bc25f")
 
         genesis_coinbase_hash = bip158_basic_element_hash(genesis_coinbase_spk, 1, genesis_blockhash)
         false_positive_hash = bip158_basic_element_hash(false_positive_spk, 1, genesis_blockhash)

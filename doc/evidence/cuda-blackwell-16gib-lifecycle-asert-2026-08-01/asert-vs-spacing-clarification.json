@@ -1,0 +1,55 @@
+{
+  "evidence_kind": "asert_vs_lifecycle_spacing_clarification",
+  "date": "2026-08-01",
+  "target_spacing_s": 90.0,
+  "source_revision": "c4ac2e439ac496245f12dcbf8b42c9575247dbe9",
+  "core_lifecycle_n": 20,
+  "core_lifecycle_summary_s": {
+    "n": 20,
+    "min": 96.25752747199999,
+    "p50": 96.673725817,
+    "p95": 96.98471223199999,
+    "p99": 97.317815106,
+    "max": 97.317815106,
+    "mean": 96.71682185845
+  },
+  "early_probe_core_lifecycle_samples_s": [
+    96.673988524,
+    96.689700063
+  ],
+  "complete_sample_count": 0,
+  "incomplete_sample_count": 0,
+  "within_target_spacing_at_90s": false,
+  "samples_within_90s": 0,
+  "loaded_exactreplay_p99_s": 32.705060405,
+  "clarification": [
+    "nMatMulRCAsertRescaleNum/Den is a one-time PoW work/throughput anchor rescale at nMatMulRCHeight (ScaleTargetByTimespan).",
+    "Classical formula: Num/Den \u2248 R_pre/R_post (nonce/s), or MAC_post/MAC_pre when MFU-comparable; Num>Den loosens target.",
+    "It does NOT change nPowTargetSpacingNormal (90s) and does NOT by itself make a ~97s serial candidate+reseal+tip ExactReplay pipeline fit inside 90s.",
+    "Lifecycle within_target_spacing is a separate activation gate from ASERT work-ratio calibration.",
+    "Historical RC datacenter fixture 16422/1027 ~= episode-MAC ratio (~16x), not lifecycle/spacing ratio.",
+    "Lifecycle-continuity proxy 967/900 is a PROPOSAL illustration only; not installed on mainnet."
+  ],
+  "lifecycle_gt_90s_implies_rescale_alone_sufficient": false,
+  "ratification_gates": false,
+  "updated_at": "2026-08-01T05:25:46Z",
+  "note": "Refreshed after production n=20 core_without_authority campaign finished. NOT activation-complete; authority handoff absent (missing_golden).",
+  "contention_supplement": {
+    "core_sample_count_without_authority": 6,
+    "incomplete_sample_count": 5,
+    "core_lifecycle_summary_s": {
+      "n": 6,
+      "min": 96.45532735500001,
+      "p50": 96.587353282,
+      "p95": 96.87268256,
+      "p99": 96.87268256,
+      "max": 96.87268256,
+      "mean": 96.60263581733334
+    },
+    "within_target_spacing_at_90s": false,
+    "phases_observed": [
+      "competing_tip",
+      "steady_mine_relay"
+    ]
+  }
+}

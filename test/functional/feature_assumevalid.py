@@ -34,6 +34,7 @@ import math
 
 from test_framework.blocktools import (
     COINBASE_MATURITY,
+    REGTEST_GENERIC_P2P_MATMUL_ARGS,
     REGTEST_KAWPOW_TARGET_SPACING,
     create_block,
     create_coinbase,
@@ -46,7 +47,6 @@ from test_framework.messages import (
     CTxOut,
     msg_block,
     msg_headers,
-    register_solved_block,
 )
 from test_framework.p2p import P2PInterface
 from test_framework.script import (
@@ -72,9 +72,10 @@ class AssumeValidTest(BitcoinTestFramework):
         self.setup_clean_chain = True
         self.num_nodes = 3
         self.rpc_timeout = 120
+        self.extra_args = [[*REGTEST_GENERIC_P2P_MATMUL_ARGS] for _ in range(self.num_nodes)]
 
     def setup_network(self):
-        self.add_nodes(3)
+        self.add_nodes(3, extra_args=self.extra_args)
         # Start node0. We don't start the other nodes yet since
         # we need to pre-mine a block with an invalid transaction
         # signature so we can pass in the block hash as assumevalid.
@@ -93,16 +94,10 @@ class AssumeValidTest(BitcoinTestFramework):
 
     @staticmethod
     def finalize_block_for_header_work(block):
-        # BTX regtest defaults to skipping expensive KAWPOW validation. Record
-        # each handcrafted header directly so DGW-based next-work selection and
-        # chainwork accounting stay deterministic without long Python solve loops.
-        block.rehash()
-        register_solved_block(
-            block_hash=block.sha256,
-            prev_hash=block.hashPrevBlock,
-            n_time=block.nTime,
-            n_bits=block.nBits,
-        )
+        # Even when the test does not need expensive payload validation, BTX
+        # headers must carry phase-1-valid deterministic MatMul fields and meet
+        # the compact target before they can participate in assumevalid logic.
+        block.solve()
 
     def run_test(self):
         two_weeks_seconds = 14 * 24 * 60 * 60
@@ -143,7 +138,10 @@ class AssumeValidTest(BitcoinTestFramework):
         # Create a transaction spending the coinbase output with an invalid (null) signature
         tx = CTransaction()
         tx.vin.append(CTxIn(COutPoint(self.block1.vtx[0].sha256, 0), scriptSig=b""))
-        tx.vout.append(CTxOut(49 * 100000000, CScript([OP_TRUE])))
+        # BTX's regtest coinbase subsidy is 20 BTX. Keep this transaction
+        # value-valid so its empty signature is the only invalid property;
+        # assumevalid deliberately skips script checks, not amount checks.
+        tx.vout.append(CTxOut(19 * 100000000, CScript([OP_TRUE])))
         tx.calc_sha256()
 
         block102 = create_block(self.tip, create_coinbase(height), self.block_time, txlist=[tx])
@@ -175,8 +173,8 @@ class AssumeValidTest(BitcoinTestFramework):
             height += 1
 
         # Start node1 and node2 with assumevalid so they accept a block with a bad signature.
-        self.start_node(1, extra_args=["-assumevalid=" + block102.hash])
-        self.start_node(2, extra_args=["-assumevalid=" + block102.hash])
+        self.start_node(1, extra_args=[*self.extra_args[1], "-assumevalid=" + block102.hash])
+        self.start_node(2, extra_args=[*self.extra_args[2], "-assumevalid=" + block102.hash])
 
         p2p0 = self.nodes[0].add_p2p_connection(BaseNode())
         p2p0.send_header_for_blocks(self.blocks)

@@ -18,6 +18,7 @@ add_executable(bench_btx
   checkblock.cpp
   checkblockindex.cpp
   checkqueue.cpp
+  coinsviewoverlay.cpp
   cluster_linearize.cpp
   crypto_hash.cpp
   descriptors.cpp
@@ -31,13 +32,6 @@ add_executable(bench_btx
   load_external.cpp
   lockedpool.cpp
   logging.cpp
-  matmul_genesis_calibration.cpp
-  matmul_batch_tuning_bench.cpp
-  matmul_freivalds_bench.cpp
-  matmul_metal_bench.cpp
-  matmul_prehash_bench.cpp
-  matmul_reuse_bench.cpp
-  matmul_solve_bench.cpp
   mempool_ephemeral_spends.cpp
   mempool_eviction.cpp
   mempool_stress.cpp

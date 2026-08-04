@@ -16,11 +16,13 @@ mkdir -p "${AUX_AUDIT_DIR}" "${AUX_HOSTED_DIR}" "${AUX_HOSTED_VALIDATION_DIR}"
 printf 'audit bundle fixture\n' > "${AUX_AUDIT_DIR}/README.txt"
 printf 'hosted run fixture\n' > "${AUX_HOSTED_DIR}/README.txt"
 printf 'hosted validation fixture\n' > "${AUX_HOSTED_VALIDATION_DIR}/README.txt"
-python3 - "${AUX_HOSTED_DIR}/manifest.json" "${AUX_HOSTED_VALIDATION_DIR}/manifest.json" <<'PY'
+python3 - "${ROOT_DIR}" "${AUX_HOSTED_DIR}/manifest.json" "${AUX_HOSTED_VALIDATION_DIR}/manifest.json" <<'PY'
 import json
 import pathlib
 import sys
 
+creator_home = pathlib.Path.home()
+creator_repo = pathlib.Path(sys.argv[1]).resolve()
 payload = {
     "overall_status": "pass",
     "configuration": {
@@ -31,11 +33,11 @@ payload = {
             "command": [
                 "scp",
                 "-i",
-                "/Users/admin/.ssh/id_ed25519",
+                str(creator_home / ".ssh" / "id_ed25519"),
                 "/private/tmp/btx-m22-old/source.tar.gz",
                 "root@198.51.100.8:/root/upload.tar.gz",
             ],
-            "cwd": "/Users/admin/Documents/btxchain/btx-node",
+            "cwd": str(creator_repo),
             "log": "/private/tmp/btx-m22-old/logs/source_upload.log",
         }
     ],
@@ -46,7 +48,7 @@ payload = {
         "remote_extract_dir": "/private/tmp/btx-m22-old/artifacts/remote_artifacts",
     },
 }
-for target in sys.argv[1:]:
+for target in sys.argv[2:]:
     pathlib.Path(target).write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 PY
 
@@ -105,6 +107,7 @@ window_guide = pathlib.Path(sys.argv[6]).read_text(encoding="utf-8")
 hosted_manifest = json.loads(pathlib.Path(sys.argv[7]).read_text(encoding="utf-8"))
 hosted_validation_manifest = json.loads(pathlib.Path(sys.argv[8]).read_text(encoding="utf-8"))
 tmp_root = sys.argv[9]
+creator_home = str(pathlib.Path.home())
 
 packet_paths = {entry["packet_path"] for entry in packet_manifest["included_sources"]}
 required_packet_paths = {
@@ -134,7 +137,7 @@ if summary["overall_status"] != "fail":
     raise SystemExit("expected placeholder derived intake summary to fail")
 
 rendered_packet_manifest = json.dumps(packet_manifest)
-if "/Users/admin" in rendered_packet_manifest or tmp_root in rendered_packet_manifest:
+if creator_home in rendered_packet_manifest or tmp_root in rendered_packet_manifest:
     raise SystemExit("packet manifest still leaks creator-machine local paths")
 
 packet_entry = next(
@@ -159,7 +162,7 @@ for ref in required_refs:
         raise SystemExit(f"missing expected relative packet reference: {ref}")
 
 for text in [participant_brief, operator_checklist, window_guide]:
-    if tmp_root in text or "/Users/admin/Documents/btxchain/infra/" in text:
+    if tmp_root in text or creator_home in text:
         raise SystemExit("creator-machine absolute path leaked into packet docs")
 
 if "infra/btx-seed-server-spec.md" not in window_guide:
@@ -178,7 +181,7 @@ if hosted_manifest["artifacts"]["source_archive"]["path"] != "source.tar.gz":
     raise SystemExit("hosted manifest source_archive path was not sanitized")
 if hosted_manifest["artifacts"]["remote_extract_dir"] != "artifacts/remote_artifacts":
     raise SystemExit("hosted manifest remote_extract_dir was not sanitized")
-if "/Users/admin" in json.dumps(hosted_manifest) or "/private/tmp/btx-m22-old" in json.dumps(hosted_manifest):
+if creator_home in json.dumps(hosted_manifest) or "/private/tmp/btx-m22-old" in json.dumps(hosted_manifest):
     raise SystemExit("hosted manifest still leaks creator-machine local paths")
 
 validation_step = hosted_validation_manifest["steps"][0]
@@ -188,7 +191,7 @@ if hosted_validation_manifest["artifacts"]["source_archive"]["path"] != "source.
     raise SystemExit("hosted validation manifest source_archive path was not sanitized")
 if hosted_validation_manifest["artifacts"]["remote_extract_dir"] != "artifacts/remote_artifacts":
     raise SystemExit("hosted validation manifest remote_extract_dir was not sanitized")
-if "/Users/admin" in json.dumps(hosted_validation_manifest) or "/private/tmp/btx-m22-old" in json.dumps(hosted_validation_manifest):
+if creator_home in json.dumps(hosted_validation_manifest) or "/private/tmp/btx-m22-old" in json.dumps(hosted_validation_manifest):
     raise SystemExit("hosted validation manifest still leaks creator-machine local paths")
 PY
 

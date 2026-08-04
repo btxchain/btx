@@ -1,0 +1,109 @@
+// Copyright (c) 2026 The BTX developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+
+#ifndef BTX_MATMUL_EXACT_GEMM_RESOLVE_H
+#define BTX_MATMUL_EXACT_GEMM_RESOLVE_H
+
+#include <matmul/matmul_v4_lt.h>
+
+#include <string>
+#include <string_view>
+
+// Thin resolve surface so pow.cpp / miners can inject device ExactGemm without
+// pulling matmul_v4_lt.h into every accel_v4.h consumer.
+
+namespace matmul_v4::accel {
+
+struct ResolvedRCExactGemm {
+    matmul::v4::lt::ExactGemmBackend backend{};
+    /** Operator request ("auto" when no explicit backend was selected). */
+    std::string requested{"auto"};
+    std::string provider{"cpu"};
+    std::string reason{"cpu_reference"};
+    std::string policy{"ProductionPreferred"};
+    /** Current self-qualification covers toy + scaled-medium exact replay. */
+    std::string qualification_scope{"none"};
+    bool resolved{false};
+    bool device_requested{false};
+    bool self_qualified{false};
+    /** Correctness-qualified lane selected by the automatic provider-family
+     *  policy. This is necessary but not sufficient for production use. */
+    bool automatic_policy_eligible{false};
+    /** Separate from byte-exact self-qualification and family policy. True
+     *  only after an exact provider/device/runtime/epoch manifest match and a
+     *  strict full-production startup canary. */
+    bool production_eligible{false};
+    /** Activation-readiness gates. These deliberately remain false until
+     *  independently reproduced production-shape goldens are committed and a
+     *  full startup/epoch canary matches them. */
+    bool production_goldens_available{false};
+    bool startup_canary_passed{false};
+    bool activation_ready{false};
+};
+
+/** Build an injectable ExactGemmBackend for MatExpand / LT mining. An explicit
+ *  BTX_MATMUL_LT_EXACT_BACKEND=tpu|trainium selects a registered, self-qualified
+ *  bounded-exact cloud provider; otherwise ResolveBackend() wires CUDA, HIP,
+ *  Metal, or Ascend. Null slots keep MatExpand on CPU ExactGemm*, and false
+ *  provider returns fall back per call. Profile 1 winners use a separate
+ *  strict-device reseal after this generic LT resolution path.
+ *
+ *  LT-only: does NOT run ProbeRCSelfQual / clear on RC deficit. RC self-qual
+ *  must never corrupt a valid LT ExactGemm inject while RC is inactive. */
+[[nodiscard]] matmul::v4::lt::ExactGemmBackend MakeResolvedExactGemmBackend();
+
+/** Same provider resolution as MakeResolvedExactGemmBackend, then RC fail-closed
+ *  gate (ProbeRCSelfQual). On mining_accelerator_ok failure returns empty
+ *  backend (= CPU ExactGemmS8S8). RC callers only — never use for LT mining.
+ *
+ *  F5: results are cached by {provider_label, gemm_fn, epoch}. Repeated calls
+ *  reuse the cached backend and do NOT re-enter ProbeRCSelfQual. */
+[[nodiscard]] matmul::v4::lt::ExactGemmBackend MakeResolvedExactGemmBackendForRC();
+
+/** Status-bearing RC resolver.
+ *
+ * Unlike the generic v4 mining registry, this narrow resolver may admit an
+ * Apple M4 Metal ExactGemm lane after the RC ExactPanels and whole-episode
+ * byte-parity self-quals pass. Metal 4 MPP INT8 is preferred when its runtime
+ * exactness probe succeeds; exact MSL integer ALU is the fallback. The generic
+ * registry remains M5-identity-only; this exception accelerates deterministic
+ * ExactReplay without claiming M4 is M5-class or that OCP MXFP4 is available.
+ */
+[[nodiscard]] ResolvedRCExactGemm ResolveExactGemmBackendForRC();
+
+/** True only for the exact CUDA LT provider identity. Availability of a CUDA
+ * runtime alone must never graft CUDA RC callbacks onto HIP, TPU, Trainium,
+ * Ascend, Metal, or another non-CUDA ExactGemm backend. */
+[[nodiscard]] bool IsCudaExactGemmBackend(
+    const matmul::v4::lt::ExactGemmBackend& backend,
+    std::string_view provider_label);
+
+/**
+ * Last RC resolver status for operator telemetry. This probe never initiates a
+ * device qualification or production replay. `resolved=false` means no RC
+ * caller has resolved a backend since process start/reset.
+ */
+[[nodiscard]] ResolvedRCExactGemm ProbeLastRCExactGemmResolution();
+
+/** Apply RC self-qual gate to an already-resolved ExactGemm candidate.
+ *  Cached by {provider_label, gemm_s8s8 fn ptr, epoch}. epoch=-1 is the
+ *  default (non-height) probe used by miners. */
+[[nodiscard]] matmul::v4::lt::ExactGemmBackend GateExactGemmWithRCSelfQualCached(
+    matmul::v4::lt::ExactGemmBackend backend, const char* provider_label,
+    int32_t epoch = -1);
+
+/** Test hook: clear the F5 resolve/self-qual cache (process-local). */
+void ResetRCExactGemmResolveCacheForTest();
+
+/** Build an injectable ExactMxProjectionBackend for miner-local B̂·V.
+ *  ResolveBackend() wires CUDA/HIP LaunchProjectedRightMx, Metal
+ *  TryLaunchLtMetalMxProjectRight, or Ascend TryLaunchLtCubeMxProjectRight.
+ *  TPU/Trainium ExactGemm providers do not expose MX; those requests leave
+ *  project_right null (CPU oracle via ComputeProjectedRightMxDispatched).
+ *  Mismatched device results fail closed to ComputeProjectedRightMxBlockScaleLT. */
+[[nodiscard]] matmul::v4::lt::ExactMxProjectionBackend MakeResolvedExactMxProjectionBackend();
+
+} // namespace matmul_v4::accel
+
+#endif // BTX_MATMUL_EXACT_GEMM_RESOLVE_H

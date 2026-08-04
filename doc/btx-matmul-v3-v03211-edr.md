@@ -1,3 +1,13 @@
+> **HISTORICAL DESIGN / AUDIT EVIDENCE — MatMul v4.7 roadmap takes precedence.**
+> This document preserves version-local findings, names, and measurements; it is not
+> the current activation plan. The proposed transition is defined by
+> `doc/btx-matmul-v4.7-transition-roadmap.md`: Epoch A uses Profile 1 with
+> ExactReplay authority and optional shadow proofs; Epoch B requires both a durable
+> Profile-1 proof and ExactReplay; Epoch C makes the Profile-1 proof authoritative;
+> and Epoch D separately moves to Profile 2 under proof authority. Mainnet Epoch A (v4 = BMX4C = RC) has a finite compiled candidate height and true source flags, so it would activate if merged unchanged; release remains NO-GO pending exact-final combined-tree CUDA+Metal evidence, reviewed schema-4 ASERT calibration, ratification re-affirmation, full closeout, and live-tip runway validation; all other transition heights remain disabled. Any older “production,” “default,” “shipping,” direct-fork,
+> sampled-verifier, or coupled-profile recommendation below is historical unless the
+> canonical roadmap expressly carries it forward.
+
 # MatMul v3 / v0.32.11 Engineering Decision Record
 
 Status: accepted for the v0.32.11 posture. This is a decision record, not a

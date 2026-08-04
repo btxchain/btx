@@ -1,3 +1,13 @@
+> **HISTORICAL BACKEND TRACKER — MatMul v4.7 roadmap takes precedence.**
+> This document preserves the original Metal/CUDA miner-backend integration
+> record. It does not define the current workload, verification authority, or
+> activation plan. See
+> [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md):
+> Epoch A uses Profile-1 ExactReplay with optional shadow proofs; Epoch B
+> requires a durable Profile-1 proof plus ExactReplay; Epoch C makes that proof
+> authoritative; and Epoch D separately moves to Profile 2 under proof
+> authority. Mainnet Epoch A (v4 = BMX4C = RC) has a finite compiled candidate height and true source flags, so it would activate if merged unchanged; release remains NO-GO pending exact-final combined-tree CUDA+Metal evidence, reviewed schema-4 ASERT calibration, ratification re-affirmation, full closeout, and live-tip runway validation; all other transition heights remain disabled.
+
 # MatMul External Miner Backend Tracking (Metal + CUDA Scaffold)
 
 ## Scope

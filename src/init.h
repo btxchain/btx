@@ -7,6 +7,9 @@
 #define BITCOIN_INIT_H
 
 #include <atomic>
+#include <string>
+
+class CChainParams;
 
 //! Default value for -daemon option
 static constexpr bool DEFAULT_DAEMON = false;
@@ -48,6 +51,11 @@ bool AppInitBasicSetup(const ArgsManager& args, std::atomic<int>& exit_status);
  * @pre Parameters should be parsed and config file should be read, AppInitBasicSetup should have been called.
  */
 bool AppInitParameterInteraction(const ArgsManager& args);
+
+/** Fail closed if RC accelerator resolution or its production canary ran
+ * before Unix daemonization. Device runtimes and their process-local caches
+ * are not safe to inherit across fork(). */
+bool CheckMatMulAcceleratorPreForkInvariant();
 /**
  * Initialization sanity checks.
  * @note This can be done before daemonization. Do not call Shutdown() if this function fails.
@@ -78,5 +86,16 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc=false);
 
 /** Validates requirements to run the indexes and spawns each index initial sync thread */
 bool StartIndexBackgroundSync(node::NodeContext& node);
+
+/**
+ * Resolve the default -matmulrcexecution mode for a chain.
+ *
+ * Returns "strict-device" on a public chain that carries a finite RC activation
+ * height, and "auto-fallback" otherwise. Exposed so the truth table can be
+ * pinned by a test: this default decides whether a node will silently accept an
+ * unusable CPU ExactReplay path on an activated network, and it is consumed by
+ * AppInitParameterInteraction, which the test harnesses execute too.
+ */
+std::string DefaultMatMulRCExecutionMode(const CChainParams& chainparams);
 
 #endif // BITCOIN_INIT_H

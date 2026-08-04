@@ -1,0 +1,124 @@
+{
+  "tool": "measure_v3_regimes",
+  "schema_version": 1,
+  "public_evidence": true,
+  "purpose": "same-silicon v3-vs-RC work ratio for the Epoch-A ASERT rescale, on two independent accelerator vendors",
+  "consensus_context": {
+    "matmul_dimension": 512,
+    "transcript_block_size": 16,
+    "noise_rank": 8,
+    "prehash_epsilon_bits": 18,
+    "assumed_difficulty": 3.531677073810059,
+    "assumed_nbits": "1c487c56",
+    "two_pow_eps_times_p": 1.728193e-05
+  },
+  "rigs": [
+    {
+      "provider_family": "cuda",
+      "device_architecture": "sm_120",
+      "matmul_mode": {
+        "attempts": 20000,
+        "wall_s": 1.288235,
+        "digest_requests": 10061,
+        "r_matmul_per_s": 7809.9
+      },
+      "mixed_mode_samples": [
+        {
+          "tries": 100000000,
+          "wall_s": 0.519563,
+          "digest_requests": 1703
+        },
+        {
+          "tries": 100000000,
+          "wall_s": 0.443907,
+          "digest_requests": 1709
+        },
+        {
+          "tries": 100000000,
+          "wall_s": 0.456367,
+          "digest_requests": 1803
+        },
+        {
+          "tries": 100000000,
+          "wall_s": 0.459067,
+          "digest_requests": 1795
+        },
+        {
+          "tries": 100000000,
+          "wall_s": 0.442786,
+          "digest_requests": 1766
+        }
+      ],
+      "r_eff_per_s": 3795.4,
+      "r_eff_cv_percent": 6.9,
+      "r_rc_per_s": 0.031217,
+      "rc_mean_wall_s": 32.034,
+      "eligible_nonce_rate_A_per_s": 3734.8,
+      "gamma": 2.09,
+      "regime": "sigma_bound",
+      "k": 121581
+    },
+    {
+      "provider_family": "metal",
+      "device_architecture": "m4_class",
+      "matmul_mode": {
+        "attempts": 20000,
+        "wall_s": 9.563593,
+        "digest_requests": 9983,
+        "r_matmul_per_s": 1043.9
+      },
+      "mixed_mode_samples": [
+        {
+          "tries": 100000000,
+          "wall_s": 2.456314,
+          "digest_requests": 1759
+        },
+        {
+          "tries": 100000000,
+          "wall_s": 2.432667,
+          "digest_requests": 1724
+        },
+        {
+          "tries": 100000000,
+          "wall_s": 2.392369,
+          "digest_requests": 1685
+        },
+        {
+          "tries": 100000000,
+          "wall_s": 2.394702,
+          "digest_requests": 1708
+        },
+        {
+          "tries": 100000000,
+          "wall_s": 2.444861,
+          "digest_requests": 1732
+        }
+      ],
+      "r_eff_per_s": 710.2,
+      "r_eff_cv_percent": 0.6,
+      "r_rc_per_s": 0.0357,
+      "rc_mean_wall_s": 28.011,
+      "eligible_nonce_rate_A_per_s": 713.0,
+      "gamma": 1.46,
+      "regime": "sigma_bound",
+      "k": 19892
+    }
+  ],
+  "derived": {
+    "k_min": 19892,
+    "k_max": 121581,
+    "k_cross_vendor_spread": 6.11,
+    "k_geometric_mean": 49178,
+    "regime_agreement": "both rigs sigma_bound (gamma > 1)",
+    "note": "k varies 6.1x across vendors because R_eff varies 5.3x while R_rc varies only 1.14x: v3 mining favours the CUDA rig far more than RC does."
+  },
+  "resolved_prior_uncertainty": {
+    "claim": "unexplained 52% swing in RC episode time between 2026-07-30 (21.244 s) and 2026-08-01 (32.273 s)",
+    "resolution": "not variance; a superseded code state. device_extract_tiles rose 15.2x (1.51e11 -> 2.31e12) and device_gemm_calls halved (28560 -> 13600). The 07-30 README already records a CUDA TU fingerprint that does not match tip.",
+    "consequence": "32.0-32.6 s is the correct RC figure for current code; the 21.2 s measurement understated the workload and must not be used for calibration."
+  },
+  "installed": false,
+  "consensus_note": "nMatMulRCHeight remains INT32_MAX; no rescale value is installed by this artifact.",
+  "source_revision": "76704a391acac79914e95a3d723e0f1c8c51eb98",
+  "source_tree_fingerprint": "41a071900c855ce8cba0930114e7ecded689684da500ffd35ed0b5244369c1ed"
+}

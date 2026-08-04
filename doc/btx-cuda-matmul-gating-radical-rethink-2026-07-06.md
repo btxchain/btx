@@ -7,7 +7,7 @@ An idle `btxd` process held about 1.2 GiB of device memory during these runs.
 
 ## Baselines
 
-`main` was built from a clean release worktree at
+`main` was built from `/path/to/btx-source` at
 `fcc201340d6acd680e76e095ce74410c4a9b5a26` into `./build-cuda-main`.
 The comparison branch baseline was `4f340060c43d362f82c628453616833c94b5cc04`
 before the exploratory edits in this branch.

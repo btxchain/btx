@@ -7,6 +7,7 @@
 import configparser
 from enum import Enum
 import argparse
+from importlib.util import find_spec
 import logging
 import os
 import platform
@@ -179,8 +180,17 @@ class BitcoinTestFramework(metaclass=BitcoinTestMetaClass):
                             help="Force test of previous releases (default: %(default)s)")
         parser.add_argument("--coveragedir", dest="coveragedir",
                             help="Write tested RPC commands into this directory")
+        # Prefer source-tree test/config.ini when present; otherwise fall back to
+        # the CMake-generated build/test/config.ini (common when invoking scripts
+        # from the repo root without an out-of-tree symlink).
+        _test_dir = os.path.abspath(os.path.dirname(test_file) + "/..")
+        _default_config = os.path.join(_test_dir, "config.ini")
+        if not os.path.isfile(_default_config):
+            _build_config = os.path.abspath(os.path.join(_test_dir, "..", "build", "test", "config.ini"))
+            if os.path.isfile(_build_config):
+                _default_config = _build_config
         parser.add_argument("--configfile", dest="configfile",
-                            default=os.path.abspath(os.path.dirname(test_file) + "/../config.ini"),
+                            default=_default_config,
                             help="Location of the test framework config file (default: %(default)s)")
         parser.add_argument("--pdbonfailure", dest="pdbonfailure", default=False, action="store_true",
                             help="Attach a python debugger if test fails")
@@ -1020,6 +1030,17 @@ class BitcoinTestFramework(metaclass=BitcoinTestMetaClass):
         """Skip the running test if previous releases are not available."""
         if not self.has_previous_releases():
             raise SkipTest("previous releases not available or disabled")
+
+    def has_resource_module(self):
+        """Checks whether the resource module is available."""
+        return find_spec('resource') is not None
+
+    @property
+    def RLIM_INFINITY(self):
+        if not self.has_resource_module():
+            return None
+        import resource
+        return resource.RLIM_INFINITY
 
     def has_previous_releases(self):
         """Checks whether previous releases are present and enabled."""

@@ -44,6 +44,7 @@
 #include <memory>
 #include <optional>
 #include <queue>
+#include <string>
 #include <thread>
 #include <unordered_set>
 #include <vector>
@@ -61,8 +62,48 @@ static constexpr std::chrono::minutes TIMEOUT_INTERVAL{20};
 static constexpr auto FEELER_INTERVAL = 2min;
 /** Run the extra block-relay-only connection loop once every 5 minutes. **/
 static constexpr auto EXTRA_BLOCK_RELAY_ONLY_PEER_INTERVAL = 5min;
-/** Maximum length of incoming protocol messages. Must accommodate consensus-valid block relay payloads. */
+/** Maximum length of an ordinary incoming protocol message (all commands EXCEPT
+ *  the block-bearing ones below). Kept at 16 MB so a peer cannot force 24 MB of
+ *  buffering/parsing on an arbitrary/unknown command (audit P1-1: raising this
+ *  global limit expands the per-peer allocation + bandwidth DoS envelope by 50%
+ *  for every message type, not just blocks). */
 static const unsigned int MAX_PROTOCOL_MESSAGE_LENGTH = 16 * 1000 * 1000;
+/** Maximum length of a BLOCK-BEARING message (`block`, `blocktxn`), which alone
+ *  may legitimately approach a full serialized block. MUST be >=
+ *  MAX_BLOCK_SERIALIZED_SIZE, or a consensus-valid block becomes un-relayable
+ *  (audit P0.5: a 16-24 MB block was valid but un-relayable over the `block`
+ *  path -- a latent split/eclipse surface). A `block <= block-message`
+ *  static_assert in net.cpp keeps the two from silently diverging. The larger
+ *  ceiling is applied ONLY to these commands (see net.cpp), so ordinary messages
+ *  keep the 16 MB bound. */
+static const unsigned int MAX_BLOCK_MESSAGE_LENGTH = 24 * 1000 * 1000;
+/** Maximum payload of a v4.4 ENC-DR `mmsketch` sketch-cache message: the
+ *  profile's 8·m² serialized sketch (8 MiB at the production m = 1024) plus
+ *  small framing (32-byte block hash + compactSize). Rides in ONE piece under
+ *  BOTH the v2 (BIP324) ~16 MB packet ceiling AND the v1
+ *  MAX_PROTOCOL_MESSAGE_LENGTH (16 MB), so the command needs NO special
+ *  net-layer ceiling (tension-resolution §4.3). If a future shape retarget
+ *  pushes 8·m² past this bound, nodes simply stop serving sketches for that
+ *  profile (peers recompute) — the cache is best-effort, never load-bearing.
+ *  The exact profile-derived cap is re-checked in net_processing on both the
+ *  serve and receive sides. */
+static const unsigned int MAX_MMSKETCH_PAYLOAD_SIZE = 8 * 1024 * 1024 + 64;
+static_assert(MAX_MMSKETCH_PAYLOAD_SIZE < MAX_PROTOCOL_MESSAGE_LENGTH,
+              "an mmsketch (payload + framing) must ride under the ordinary "
+              "protocol-message ceiling on both v1 and v2 transports");
+/** Maximum payload of a datacenter-profile `rccarrier` message: a serialized
+ *  RCFreivaldsSampledCarrier (hard-capped at kRCFreivaldsCarrierMaxSerializedBytes
+ *  = 12 MiB in matmul_v4_rc_freivalds_sampled.h) plus small framing (32-byte
+ *  block hash + compactSize). Rides in ONE piece under BOTH the v2 (BIP324)
+ *  ~16 MB packet ceiling AND the v1 MAX_PROTOCOL_MESSAGE_LENGTH (16 MB). The
+ *  exact carrier-derived cap is re-checked in net_processing on both the serve
+ *  and receive sides; a carrier whose bytes exceed the cap is simply not served
+ *  / dropped (peers rebuild), never load-bearing on this transport. A
+ *  net_processing static_assert keeps this in step with the matmul-side ceiling. */
+static const unsigned int MAX_RCCARRIER_PAYLOAD_SIZE = 12u * 1024u * 1024u + 64u;
+static_assert(MAX_RCCARRIER_PAYLOAD_SIZE < MAX_PROTOCOL_MESSAGE_LENGTH,
+              "an rccarrier (payload + framing) must ride under the ordinary "
+              "protocol-message ceiling on both v1 and v2 transports");
 /** Maximum length of the user agent string in `version` message */
 static const unsigned int MAX_SUBVERSION_LENGTH = 256;
 /** Maximum number of automatic outgoing nodes over which we'll relay everything (blocks, tx, addrs, etc) */
@@ -97,6 +138,9 @@ static const size_t DEFAULT_MAXSENDBUFFER    = 1 * 1000;
 static constexpr bool DEFAULT_V2_TRANSPORT{true};
 
 typedef int64_t NodeId;
+
+/** Get the score of a local address. */
+int GetnScore(const CService& addr);
 
 struct AddedNodeParams {
     std::string m_added_node;
@@ -159,8 +203,8 @@ enum
 /** Returns a local address that we should advertise to this peer. */
 std::optional<CService> GetLocalAddrForPeer(CNode& node);
 
-bool AddLocal(const CService& addr, int nScore = LOCAL_NONE);
-bool AddLocal(const CNetAddr& addr, int nScore = LOCAL_NONE);
+bool AddLocal(const CService& addr, int nScore = LOCAL_NONE, bool add_even_if_unreachable = false);
+bool AddLocal(const CNetAddr& addr, int nScore = LOCAL_NONE, bool add_even_if_unreachable = false);
 void RemoveLocal(const CService& addr);
 bool SeenLocal(const CService& addr);
 bool IsLocal(const CService& addr);
@@ -368,6 +412,17 @@ public:
 
     /** Whether upon disconnections, a reconnect with V1 is warranted. */
     virtual bool ShouldReconnectV1() const noexcept = 0;
+
+    /** WP-8 / C4 residual: the largest msg.data payload this transport can
+     *  currently emit as ONE message. V1 carries up to the block-bearing
+     *  ceiling (MAX_BLOCK_MESSAGE_LENGTH, 24 MB); a single V2/BIP324 packet is
+     *  physically capped by its 3-byte contents-length field (~16 MB) and the
+     *  send path DROPS anything larger rather than desyncing the cipher
+     *  stream. Block-serving code must consult this bound BEFORE composing a
+     *  block/blocktxn message so an oversized payload is routed (compact
+     *  block / NOTFOUND) instead of silently vanishing. Call from the message
+     *  handler thread (same discipline as GetInfo()). */
+    virtual size_t MaxSendablePayloadBytes() const noexcept = 0;
 };
 
 class V1Transport final : public Transport
@@ -450,6 +505,13 @@ public:
     void MarkBytesSent(size_t bytes_sent) noexcept override EXCLUSIVE_LOCKS_REQUIRED(!m_send_mutex);
     size_t GetSendMemoryUsage() const noexcept override EXCLUSIVE_LOCKS_REQUIRED(!m_send_mutex);
     bool ShouldReconnectV1() const noexcept override { return false; }
+    size_t MaxSendablePayloadBytes() const noexcept override
+    {
+        // V1 frames the payload length in a 4-byte field; the effective bound
+        // is the per-command receive-side ceiling, whose maximum is the
+        // block-bearing limit (readHeader enforces it on the other end).
+        return MAX_BLOCK_MESSAGE_LENGTH;
+    }
 };
 
 class V2Transport final : public Transport
@@ -712,6 +774,7 @@ public:
     // Miscellaneous functions.
     bool ShouldReconnectV1() const noexcept override EXCLUSIVE_LOCKS_REQUIRED(!m_recv_mutex, !m_send_mutex);
     Info GetInfo() const noexcept override EXCLUSIVE_LOCKS_REQUIRED(!m_recv_mutex);
+    size_t MaxSendablePayloadBytes() const noexcept override EXCLUSIVE_LOCKS_REQUIRED(!m_send_mutex);
 
     /** (Test only) Whether the post-quantum hybrid rekey has been applied to the cipher. */
     bool IsHybridActiveForTest() const noexcept EXCLUSIVE_LOCKS_REQUIRED(!m_send_mutex);
@@ -1221,9 +1284,10 @@ public:
     bool Start(CScheduler& scheduler, const Options& options) EXCLUSIVE_LOCKS_REQUIRED(!m_total_bytes_sent_mutex, !m_added_nodes_mutex, !m_addr_fetches_mutex, !mutexMsgProc);
 
     void StopThreads();
-    void StopNodes();
-    void Stop()
+    void StopNodes() EXCLUSIVE_LOCKS_REQUIRED(!m_reconnections_mutex);
+    void Stop() EXCLUSIVE_LOCKS_REQUIRED(!m_reconnections_mutex)
     {
+        AssertLockNotHeld(m_reconnections_mutex);
         StopThreads();
         StopNodes();
     };
@@ -1327,6 +1391,9 @@ public:
     bool DisconnectNode(const CSubNet& subnet);
     bool DisconnectNode(const CNetAddr& addr);
     bool DisconnectNode(NodeId id);
+    /** Mark every node for disconnect, including peers that have not completed
+     * the VERSION handshake. Returns the number of nodes marked. */
+    size_t DisconnectAllNodes();
 
     //! Used to convey which local services we are offering peers during node
     //! connection.
@@ -1338,8 +1405,8 @@ public:
 
     //! Updates the local services that this node advertises to other peers
     //! during connection handshake.
-    void AddLocalServices(ServiceFlags services) { m_local_services = ServiceFlags(m_local_services | services); };
-    void RemoveLocalServices(ServiceFlags services) { m_local_services = ServiceFlags(m_local_services & ~services); }
+    void AddLocalServices(ServiceFlags services);
+    void RemoveLocalServices(ServiceFlags services);
 
     //! set the max outbound target in bytes
     void SetMaxOutboundTarget(uint64_t limit) EXCLUSIVE_LOCKS_REQUIRED(!m_total_bytes_sent_mutex);
@@ -1463,6 +1530,10 @@ private:
      */
     bool AlreadyConnectedToAddress(const CAddress& addr);
 
+    std::string ManualConnectionKey(const std::string& dest) const;
+    bool MarkManualConnectionInProgress(const std::string& key);
+    void ClearManualConnectionInProgress(const std::string& key);
+
     /**
      * Attempt to disconnect a connected peer.
      * Used to make room for new inbound connections, returns true if successful.
@@ -1553,6 +1624,7 @@ private:
     std::vector<CNode*> m_nodes GUARDED_BY(m_nodes_mutex);
     std::list<CNode*> m_nodes_disconnected;
     mutable RecursiveMutex m_nodes_mutex;
+    std::unordered_set<std::string> m_manual_connection_in_progress GUARDED_BY(m_nodes_mutex);
     std::atomic<NodeId> nLastNodeId{0};
     unsigned int nPrevNodeCount{0};
 
@@ -1586,17 +1658,18 @@ private:
      */
     std::map<uint64_t, CachedAddrResponse> m_addr_response_caches;
 
-    /**
-     * Services this node offers.
+    /** Serializes advertised-service snapshots with their final insertion into
+     * m_nodes. Peer initialization happens without this mutex; insertion
+     * compares the current value with its snapshot and disconnects a stale
+     * Peer. Runtime service changes plus a node sweep therefore cannot miss a
+     * handshaking peer. Lock order is this mutex before m_nodes_mutex. */
+    RecursiveMutex m_local_services_mutex;
+
+    /** Services this node offers. This data is replicated in every Peer.
+     * Runtime changes are synchronized for AssumeUTXO service transitions and
+     * fail-closed MatMul validator-readiness publication/withdrawal.
      *
-     * This data is replicated in each Peer instance we create.
-     *
-     * This data is not marked const, but after being set it should not
-     * change. Unless AssumeUTXO is started, in which case, the peer
-     * will be limited until the background chain sync finishes.
-     *
-     * \sa Peer::our_services
-     */
+     * \sa Peer::our_services */
     std::atomic<ServiceFlags> m_local_services;
 
     std::unique_ptr<CSemaphore> semOutbound;

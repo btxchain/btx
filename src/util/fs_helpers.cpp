@@ -8,15 +8,20 @@
 #include <bitcoin-build-config.h> // IWYU pragma: keep
 
 #include <logging.h>
+#include <random.h>
 #include <sync.h>
+#include <tinyformat.h>
+#include <util/check.h>
 #include <util/fs.h>
 #include <util/syserror.h>
 
 #include <cerrno>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -39,6 +44,7 @@
 #else
 #include <io.h> /* For _get_osfhandle, _chsize */
 #include <shlobj.h> /* For SHGetSpecialFolderPathW */
+#include <windows.h>
 #endif // WIN32
 
 /** Mutex to protect dir_locks. */
@@ -156,27 +162,40 @@ bool TruncateFile(FILE* file, unsigned int length)
 #endif
 }
 
-/**
- * this function tries to raise the file descriptor limit to the requested number.
- * It returns the actual file descriptor limit (which may be more or less than nMinFD)
- */
-int RaiseFileDescriptorLimit(int nMinFD)
+int RaiseFileDescriptorLimit(int min_fd)
 {
+    Assert(min_fd >= 0);
 #if defined(WIN32)
     return 2048;
 #else
     struct rlimit limitFD;
     if (getrlimit(RLIMIT_NOFILE, &limitFD) != -1) {
-        if (limitFD.rlim_cur < (rlim_t)nMinFD) {
-            limitFD.rlim_cur = nMinFD;
-            if (limitFD.rlim_cur > limitFD.rlim_max)
+        // If the current soft limit is already higher, don't raise it
+        if (limitFD.rlim_cur != RLIM_INFINITY && std::cmp_less(limitFD.rlim_cur, min_fd)) {
+            const auto current_limit{limitFD.rlim_cur};
+            limitFD.rlim_cur = std::in_range<rlim_t>(min_fd) ? static_cast<rlim_t>(min_fd) : limitFD.rlim_max;
+            // Don't raise soft limit beyond hard limit
+            if (limitFD.rlim_max != RLIM_INFINITY && (
+                limitFD.rlim_cur > limitFD.rlim_max
+                )
+            ) {
                 limitFD.rlim_cur = limitFD.rlim_max;
-            setrlimit(RLIMIT_NOFILE, &limitFD);
-            getrlimit(RLIMIT_NOFILE, &limitFD);
+            }
+            if (current_limit != limitFD.rlim_cur) {
+                setrlimit(RLIMIT_NOFILE, &limitFD);
+                getrlimit(RLIMIT_NOFILE, &limitFD);
+            }
+        }
+        // Check the (possibly raised) current soft limit against the special
+        // value of RLIM_INFINITY. Some platforms implement this as the maximum
+        // uint64, others as int64 (-1). Avoid casting even if the return type
+        // is changed to uint64_t.
+        if (limitFD.rlim_cur == RLIM_INFINITY) {
+            return std::numeric_limits<int>::max();
         }
         return limitFD.rlim_cur;
     }
-    return nMinFD; // getrlimit failed, assume it's fine
+    return min_fd; // getrlimit failed, assume it's fine
 #endif
 }
 
@@ -237,9 +256,12 @@ void AllocateFileRange(FILE* file, unsigned int offset, unsigned int length)
                 return;
             }
             memset(&buf[rlen], 0, now - rlen);
-            if (0 != fseek(file, -rlen, SEEK_CUR)) {
-                return;
-            }
+        }
+        // fread advances the stream even when it fills the entire buffer.
+        // Rewind to the beginning of this chunk before writing it back so
+        // existing data is preserved in place rather than appended.
+        if (0 != fseek(file, -static_cast<long>(rlen), SEEK_CUR)) {
+            return;
         }
         fwrite(buf, 1, now, file); // allowed to fail; this function is advisory anyway
         length -= now;
@@ -401,4 +423,34 @@ std::optional<fs::perms> InterpretPermString(const std::string& s)
     } else {
         return std::nullopt;
     }
+}
+
+bool IsDirWritable(const fs::path& dir_path)
+{
+    if (!fs::is_directory(dir_path)) {
+        throw std::runtime_error(strprintf("Path %s is not a directory", fs::PathToString(dir_path)));
+    }
+    FastRandomContext rng;
+    const fs::path tmp{dir_path / fs::PathFromString(strprintf(".tmp_%d", rng.rand64()))};
+
+    if (const auto created{fsbridge::fopen(tmp, "wbx")}) {
+        std::fclose(created);
+        std::error_code ec;
+        fs::remove(tmp, ec);
+        return true;
+    }
+    return false;
+}
+
+bool IsSymlink(const fs::path& path)
+{
+#ifdef WIN32
+    const DWORD file_attrs{GetFileAttributesW(path.wstring().c_str())};
+    if (file_attrs == INVALID_FILE_ATTRIBUTES) {
+        throw fs::filesystem_error("Unable to get file attributes", fs::PathToString(path), std::make_error_code(std::errc::invalid_argument));
+    }
+    return (file_attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+#else
+    return fs::is_symlink(path);
+#endif
 }

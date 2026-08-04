@@ -1,5 +1,17 @@
 # `nMatMulPeerVerifyBudgetPerMin` Default Value Analysis
 
+> **Historical policy analysis — not the MatMul v4.7 verifier schedule.**
+> The Phase-2 FIFO/concurrency defaults below predate header-first ExactReplay,
+> authenticated-tip priority, admission tickets, duplicate collapse, and stale
+> cancellation. They must not be copied into v4.7 policy. The current
+> authority and admission invariants are defined by
+> [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md);
+> mainnet Epoch A has a finite compiled candidate height and true flags, so it
+> would activate if merged unchanged; release remains NO-GO pending exact-final
+> combined-tree CUDA+Metal evidence, schema-4 ASERT review, full closeout, and
+> live-tip runway validation; all other production
+> transition heights remain disabled.
+
 ## Parameter Definition
 
 `nMatMulPeerVerifyBudgetPerMin` (default: **8**) controls the maximum number of

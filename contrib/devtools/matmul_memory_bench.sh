@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BIN_DEFAULT="/Users/admin/Documents/btxchain/btx-node/build-btx/bin"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+BIN_DEFAULT="${ROOT_DIR}/build-btx/bin"
 BIN_DIR="${BIN_DIR:-$BIN_DEFAULT}"
 MODE="${MODE:-wallet}"                # wallet | descriptor
 ITERATIONS="${ITERATIONS:-10}"

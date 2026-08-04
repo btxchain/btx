@@ -5,11 +5,11 @@
 """Test BIP68 implementation."""
 
 import time
+from decimal import Decimal
+
+from test_framework.address import address_to_scriptpubkey
 
 from test_framework.blocktools import (
-    NORMAL_GBT_REQUEST_PARAMS,
-    add_witness_commitment,
-    create_block,
     script_to_p2wsh_script,
 )
 from test_framework.messages import (
@@ -53,6 +53,7 @@ class BIP68Test(BitcoinTestFramework):
         self.extra_args = [
             [
                 '-testactivationheight=csv@432',
+                '-acceptnonstdtxn=1',
             ],
             [
                 '-testactivationheight=csv@432',
@@ -286,8 +287,6 @@ class BIP68Test(BitcoinTestFramework):
 
         # Advance the time on the node so that we can test timelocks
         self.nodes[0].setmocktime(cur_time+600)
-        # Save block template now to use for the reorg later
-        tmpl = self.nodes[0].getblocktemplate(NORMAL_GBT_REQUEST_PARAMS)
         self.generate(self.nodes[0], 1)
         assert tx2.hash not in self.nodes[0].getrawmempool()
 
@@ -327,18 +326,19 @@ class BIP68Test(BitcoinTestFramework):
         assert tx4.hash not in self.nodes[0].getrawmempool()
         assert tx3.hash in self.nodes[0].getrawmempool()
 
-        # Now mine 2 empty blocks to reorg out the current tip (labeled tip-1 in
-        # diagram above).
-        # This would cause tx2 to be added back to the mempool, which in turn causes
-        # tx3 to be removed.
-        for i in range(2):
-            block = create_block(tmpl=tmpl, ntime=cur_time)
-            block.solve()
-            tip = block.sha256
-            assert_equal(None if i == 1 else 'inconclusive', self.nodes[0].submitblock(block.serialize().hex()))
-            tmpl = self.nodes[0].getblocktemplate(NORMAL_GBT_REQUEST_PARAMS)
-            tmpl['previousblockhash'] = '%x' % tip
-            tmpl['transactions'] = []
+        # Rewind the tx2 block and mine two explicitly empty blocks on the
+        # resulting branch. MatMul header fields are parent/context bound, so
+        # reusing and manually retargeting an old GBT (the Bitcoin fixture's
+        # original approach) cannot produce a valid BTX header.
+        self.nodes[0].invalidateblock(self.nodes[0].getbestblockhash())
+        for _ in range(2):
+            self.nodes[0].setmocktime(cur_time)
+            self.generateblock(
+                self.nodes[0],
+                output="raw(51)",
+                transactions=[],
+                sync_fun=self.no_op,
+            )
             cur_time += 1
 
         mempool = self.nodes[0].getrawmempool()
@@ -387,13 +387,17 @@ class BIP68Test(BitcoinTestFramework):
 
         assert_raises_rpc_error(-26, NOT_FINAL_ERROR, self.wallet.sendrawtransaction, from_node=self.nodes[0], tx_hex=tx3.serialize().hex())
 
-        # make a block that violates bip68; ensure that the tip updates
-        block = create_block(tmpl=self.nodes[0].getblocktemplate(NORMAL_GBT_REQUEST_PARAMS), txlist=[tx1, tx2, tx3])
-        add_witness_commitment(block)
-        block.solve()
-
-        assert_equal(None, self.nodes[0].submitblock(block.serialize().hex()))
-        assert_equal(self.nodes[0].getbestblockhash(), block.hash)
+        # Make a block that violates BIP68 and let the node seal the BTX MatMul
+        # header. The assertion remains a consensus assertion: tx3 was rejected
+        # from the mempool but is valid in a pre-activation block.
+        block = self.nodes[0].generateblock(
+            output="raw(51)",
+            transactions=[tx1.serialize().hex(), tx2.serialize().hex(), tx3.serialize().hex()],
+            submit=False,
+            called_by_framework=True,
+        )
+        assert_equal(None, self.nodes[0].submitblock(block["hex"]))
+        assert_equal(self.nodes[0].getbestblockhash(), block["hash"])
 
     def activateCSV(self):
         # activation should happen at block height 432 (3 periods)
@@ -409,8 +413,31 @@ class BIP68Test(BitcoinTestFramework):
 
     # Use self.nodes[1] to test that version 2 transactions are standard.
     def test_version2_relay(self):
-        mini_wallet = MiniWallet(self.nodes[1])
-        mini_wallet.send_self_transfer(from_node=self.nodes[1], version=2)
+        node0, node1 = self.nodes
+
+        # The sequence fixtures above intentionally use legacy anyone-can-spend
+        # scripts on node0. Prove the standardness property independently with
+        # a wallet-signed native P2MR spend relayed to node1, which retains the
+        # default require-standard policy.
+        node0.createwallet(wallet_name="p2mr_v2_sender", descriptors=True)
+        node1.createwallet(wallet_name="p2mr_v2_receiver", descriptors=True)
+        sender = node0.get_wallet_rpc("p2mr_v2_sender")
+        receiver = node1.get_wallet_rpc("p2mr_v2_receiver")
+
+        funding_address = sender.getnewaddress(address_type="p2mr")
+        self.wallet.send_to(
+            from_node=node0,
+            scriptPubKey=address_to_scriptpubkey(funding_address),
+            amount=COIN,
+        )
+        self.generate(self.wallet, 1, sync_fun=self.no_op)
+        self.sync_blocks()
+
+        destination = receiver.getnewaddress(address_type="p2mr")
+        txid = sender.sendtoaddress(destination, Decimal("0.5"))
+        decoded = sender.gettransaction(txid, verbose=True)["decoded"]
+        assert_equal(decoded["version"], 2)
+        self.wait_until(lambda: txid in node1.getrawmempool())
 
 
 if __name__ == '__main__':

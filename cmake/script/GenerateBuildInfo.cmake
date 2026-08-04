@@ -12,7 +12,7 @@ endmacro()
 
 if(DEFINED BUILD_INFO_HEADER_PATH AND IS_ABSOLUTE "${BUILD_INFO_HEADER_PATH}")
   if(EXISTS "${BUILD_INFO_HEADER_PATH}")
-    file(STRINGS ${BUILD_INFO_HEADER_PATH} INFO LIMIT_COUNT 1)
+    file(READ "${BUILD_INFO_HEADER_PATH}" INFO)
   endif()
 else()
   unset(INFO)
@@ -31,6 +31,9 @@ endif()
 
 set(GIT_TAG)
 set(GIT_COMMIT)
+set(GIT_FULL_COMMIT)
+set(GIT_DIRTY)
+set(GIT_SOURCE_TREE_FINGERPRINT)
 if(NOT "$ENV{BITCOIN_GENBUILD_NO_GIT}" STREQUAL "1")
   find_package(Git QUIET)
   if(Git_FOUND)
@@ -90,11 +93,60 @@ if(NOT "$ENV{BITCOIN_GENBUILD_NO_GIT}" STREQUAL "1")
         ERROR_QUIET
       )
 
+      string(LENGTH "${HEAD_COMMIT}" HEAD_COMMIT_LENGTH)
+      if(HEAD_COMMIT_LENGTH EQUAL 40 AND HEAD_COMMIT MATCHES "^[0-9a-fA-F]+$")
+        set(GIT_FULL_COMMIT ${HEAD_COMMIT})
+      endif()
+
       execute_process(
         COMMAND ${GIT_EXECUTABLE} diff-index --quiet HEAD --
         WORKING_DIRECTORY ${WORKING_DIR}
         RESULT_VARIABLE IS_DIRTY
       )
+      # Evidence binaries are bound to the build-relevant tree. Include
+      # untracked inputs, which diff-index intentionally ignores, while not
+      # treating generated evidence/documents as changes to compiled code.
+      execute_process(
+        COMMAND ${GIT_EXECUTABLE} status --porcelain -uall -- CMakeLists.txt cmake src contrib/matmul-v4
+        WORKING_DIRECTORY ${WORKING_DIR}
+        RESULT_VARIABLE BUILD_RELEVANT_STATUS_EXITCODE
+        OUTPUT_VARIABLE BUILD_RELEVANT_STATUS
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+      )
+      if(BUILD_RELEVANT_STATUS_EXITCODE OR NOT "${BUILD_RELEVANT_STATUS}" STREQUAL "")
+        set(GIT_DIRTY 1)
+      else()
+        set(GIT_DIRTY 0)
+      endif()
+
+      # Bind production binaries to the same implementation fingerprint used
+      # by the CUDA+Metal golden corpus. Include the authoritative evidence and
+      # calibration tools in contrib/matmul-v4: those programs can otherwise be
+      # modified without changing the identity they emit. Only the inert
+      # manifest data file is excluded to avoid a self-reference. Its bytes are
+      # converted to a C++ byte array by fingerprinted CMake logic and parsed by
+      # fingerprinted C++; no executable translation unit or evidence policy is
+      # outside this identity.
+      execute_process(
+        COMMAND ${GIT_EXECUTABLE} ls-tree -r --full-tree HEAD -- CMakeLists.txt cmake src contrib/matmul-v4
+        WORKING_DIRECTORY ${WORKING_DIR}
+        RESULT_VARIABLE BUILD_RELEVANT_TREE_EXITCODE
+        OUTPUT_VARIABLE BUILD_RELEVANT_TREE
+        ERROR_QUIET
+      )
+      if(NOT BUILD_RELEVANT_TREE_EXITCODE AND NOT "${BUILD_RELEVANT_TREE}" STREQUAL "")
+        string(REPLACE "\n" ";" BUILD_RELEVANT_TREE_LINES "${BUILD_RELEVANT_TREE}")
+        set(BUILD_RELEVANT_TREE_FILTERED "")
+        foreach(TREE_LINE IN LISTS BUILD_RELEVANT_TREE_LINES)
+          if(NOT "${TREE_LINE}" MATCHES "src/matmul/matmul_v4_rc_production_golden_manifest\\.data$")
+            if(NOT "${TREE_LINE}" STREQUAL "")
+              string(APPEND BUILD_RELEVANT_TREE_FILTERED "${TREE_LINE}\n")
+            endif()
+          endif()
+        endforeach()
+        string(SHA256 GIT_SOURCE_TREE_FINGERPRINT "${BUILD_RELEVANT_TREE_FILTERED}")
+      endif()
 
       if(HEAD_COMMIT STREQUAL MOST_RECENT_TAG_COMMIT AND NOT IS_DIRTY)
         # If latest commit is tagged and not dirty, then use the tag name.
@@ -126,7 +178,20 @@ else()
   set(NEWINFO [[// No build information available]])
 endif()
 
+# Keep an immutable, machine-readable source identity alongside the concise
+# user-agent build suffix above. Production evidence must not be able to label
+# an older harness binary with a newer operator-supplied revision. Release
+# tarballs preserve these lines when make_release_tarball.sh embeds NEWINFO.
+if(GIT_FULL_COMMIT)
+  string(APPEND NEWINFO "\n#define BUILD_GIT_FULL_COMMIT \"${GIT_FULL_COMMIT}\"")
+  string(APPEND NEWINFO "\n#define BUILD_GIT_DIRTY ${GIT_DIRTY}")
+  if(GIT_SOURCE_TREE_FINGERPRINT)
+    string(APPEND NEWINFO "\n#define BUILD_GIT_SOURCE_TREE_FINGERPRINT \"${GIT_SOURCE_TREE_FINGERPRINT}\"")
+  endif()
+endif()
+
 # Only update the header if necessary.
-if(NOT "${INFO}" STREQUAL "${NEWINFO}")
-  file(WRITE ${BUILD_INFO_HEADER_PATH} "${NEWINFO}\n")
+set(NEWINFO_WITH_NEWLINE "${NEWINFO}\n")
+if(NOT "${INFO}" STREQUAL "${NEWINFO_WITH_NEWLINE}")
+  file(WRITE ${BUILD_INFO_HEADER_PATH} "${NEWINFO_WITH_NEWLINE}")
 endif()

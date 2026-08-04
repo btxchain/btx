@@ -30,6 +30,7 @@
 #include <scheduler.h>
 #include <support/cleanse.h>
 #include <util/fs.h>
+#include <util/overflow.h>
 #include <util/sock.h>
 #include <util/strencodings.h>
 #include <util/thread.h>
@@ -229,7 +230,7 @@ CService GetLocalAddress(const CNode& peer)
     return GetLocal(peer).value_or(CService{CNetAddr(), GetListenPort()});
 }
 
-static int GetnScore(const CService& addr)
+int GetnScore(const CService& addr)
 {
     LOCK(g_maplocalhost_mutex);
     const auto it = mapLocalHost.find(addr);
@@ -258,7 +259,7 @@ std::optional<CService> GetLocalAddrForPeer(CNode& node)
             // For inbound connections, assume both the address and the port
             // as seen from the peer.
             addrLocal = CService{node.GetAddrLocal()};
-        } else {
+        } else if (Proxy proxy; !GetProxy(node.addr.GetNetwork(), proxy)) {
             // For outbound connections, assume just the address as seen from
             // the peer and leave the port in `addrLocal` as returned by
             // `GetLocalAddress()` above. The peer has no way to observe our
@@ -275,7 +276,7 @@ std::optional<CService> GetLocalAddrForPeer(CNode& node)
 }
 
 // learn a new local address
-bool AddLocal(const CService& addr_, int nScore)
+bool AddLocal(const CService& addr_, int nScore, bool add_even_if_unreachable)
 {
     CService addr{MaybeFlipIPv6toCJDNS(addr_)};
 
@@ -286,7 +287,7 @@ bool AddLocal(const CService& addr_, int nScore)
         return false;
 
     // IPv4 and IPv6 cannot be connected to unless their networks are reachable, but Tor is not necessarily bidirectional
-    if (!(g_reachable_nets.Contains(addr) || addr.IsTor()))
+    if (!(g_reachable_nets.Contains(addr) || addr.IsTor() || add_even_if_unreachable))
         return false;
 
     LogPrintf("AddLocal(%s,%i)\n", addr.ToStringAddrPort(), nScore);
@@ -298,7 +299,7 @@ bool AddLocal(const CService& addr_, int nScore)
         fAlready = !is_newly_added;
         LocalServiceInfo &info = it->second;
         if (is_newly_added || nScore >= info.nScore) {
-            info.nScore = nScore + (is_newly_added ? 0 : 1);
+            info.nScore = SaturatingAdd(nScore, is_newly_added ? 0 : 1);
             info.nPort = addr.GetPort();
         }
     }
@@ -310,9 +311,9 @@ bool AddLocal(const CService& addr_, int nScore)
     return true;
 }
 
-bool AddLocal(const CNetAddr &addr, int nScore)
+bool AddLocal(const CNetAddr& addr, int nScore, bool add_even_if_unreachable)
 {
-    return AddLocal(CService(addr, GetListenPort()), nScore);
+    return AddLocal(CService(addr, GetListenPort()), nScore, add_even_if_unreachable);
 }
 
 void RemoveLocal(const CService& addr)
@@ -331,7 +332,7 @@ bool SeenLocal(const CService& addr)
     LOCK(g_maplocalhost_mutex);
     const auto it = mapLocalHost.find(addr);
     if (it == mapLocalHost.end()) return false;
-    ++it->second.nScore;
+    it->second.nScore = SaturatingAdd(it->second.nScore, 1);
     return true;
 }
 
@@ -379,6 +380,27 @@ CNode* CConnman::FindNode(const CService& addr)
 bool CConnman::AlreadyConnectedToAddress(const CAddress& addr)
 {
     return FindNode(static_cast<CNetAddr>(addr)) || FindNode(addr.ToStringAddrPort());
+}
+
+std::string CConnman::ManualConnectionKey(const std::string& dest) const
+{
+    const CService resolved{MaybeFlipIPv6toCJDNS(LookupNumeric(dest, GetDefaultPort(dest)))};
+    return resolved.IsValid() ? resolved.ToStringAddrPort() : dest;
+}
+
+bool CConnman::MarkManualConnectionInProgress(const std::string& key)
+{
+    AssertLockNotHeld(m_nodes_mutex);
+    LOCK(m_nodes_mutex);
+    return m_manual_connection_in_progress.insert(key).second;
+}
+
+void CConnman::ClearManualConnectionInProgress(const std::string& key)
+{
+    AssertLockNotHeld(m_nodes_mutex);
+    LOCK(m_nodes_mutex);
+    const auto erased{m_manual_connection_in_progress.erase(key)};
+    Assume(erased == 1);
 }
 
 bool CConnman::CheckIncomingNonce(uint64_t nonce)
@@ -785,8 +807,34 @@ int V1Transport::readHeader(Span<const uint8_t> msg_bytes)
         return -1;
     }
 
-    // reject messages larger than MAX_SIZE or MAX_PROTOCOL_MESSAGE_LENGTH
-    if (hdr.nMessageSize > MAX_SIZE || hdr.nMessageSize > MAX_PROTOCOL_MESSAGE_LENGTH) {
+    // Audit P0.5 / P1-1: a consensus-valid block is relayed as a single `block`
+    // (or `blocktxn`) message, so the ceiling for THOSE commands must be at least
+    // the maximum serialized block size, or a valid block becomes un-relayable (a
+    // latent split/eclipse vector). But that larger ceiling must apply ONLY to
+    // block-bearing commands -- raising the GLOBAL limit would let a peer force
+    // 24 MB of buffering/parsing on any arbitrary command (a 50% DoS-envelope
+    // expansion). So ordinary messages keep MAX_PROTOCOL_MESSAGE_LENGTH (16 MB)
+    // and only `block`/`blocktxn` get MAX_BLOCK_MESSAGE_LENGTH (24 MB). The
+    // block-message ceiling is pinned >= a max block at compile time.
+    static_assert(MAX_BLOCK_SERIALIZED_SIZE <= MAX_BLOCK_MESSAGE_LENGTH,
+                  "block-bearing message limit must accommodate a maximum serialized "
+                  "block; otherwise a consensus-valid block cannot be relayed");
+
+    const std::string hdr_msg_type = hdr.GetMessageType();
+    const bool is_block_bearing_msg =
+        (hdr_msg_type == NetMsgType::BLOCK || hdr_msg_type == NetMsgType::BLOCKTXN);
+    // The v4.4 ENC-DR sketch-cache transport (`mmsketch`, tension-resolution §4.3)
+    // carries the 8·m² sketch (~8 MiB at m = 1024) in ONE message + small framing,
+    // so it needs NO command-specific ceiling — it rides under the ordinary
+    // MAX_PROTOCOL_MESSAGE_LENGTH (16 MB) on both v1 and v2 transports. (The
+    // retired segregated-proof relay's 40 MB single-shot / 1 MiB chunked framing
+    // is gone with the subsystem.)
+    const unsigned int msg_size_limit =
+        is_block_bearing_msg  ? MAX_BLOCK_MESSAGE_LENGTH :
+                                MAX_PROTOCOL_MESSAGE_LENGTH;
+
+    // reject messages larger than MAX_SIZE or the command-specific size limit
+    if (hdr.nMessageSize > MAX_SIZE || hdr.nMessageSize > msg_size_limit) {
         LogDebug(BCLog::NET, "Header error: Size too large (%s, %u bytes), peer=%d\n", SanitizeString(hdr.GetMessageType()), hdr.nMessageSize, m_node_id);
         return -1;
     }
@@ -1037,6 +1085,25 @@ bool V2TransportPQOnly() noexcept
     return gArgs.GetBoolArg("-v2pqonly", false);
 }
 } // namespace
+
+/** The maximum contents length a single V2 (BIP324) packet can carry, shared verbatim by the
+ *  receive path (V2Transport::ProcessReceivedPacketBytes) and the send path
+ *  (V2Transport::SetMessageToSend) so both enforce the identical bound. Contents are:
+ *  - 0x00 byte: indicating long message type encoding
+ *  - 12 bytes of message type
+ *  - payload (an ordinary message; capped at MAX_PROTOCOL_MESSAGE_LENGTH, and never above MAX_SIZE)
+ *
+ *  BIP324 encodes each packet's contents length in a 3-byte field (BIP324Cipher::LENGTH_LEN), so a
+ *  packet can never carry more than 0xFFFFFF bytes. The static_assert pins this bound at or below
+ *  that hard ceiling: the send side must never construct a contents length that the 3-byte field
+ *  would silently truncate. NOTE this is why a full 24 MB `block`/`blocktxn` (MAX_BLOCK_MESSAGE_LENGTH)
+ *  cannot traverse V2 as one message -- it must propagate via compact blocks or the v1 transport. */
+static constexpr size_t V2_MAX_CONTENTS_LEN =
+    1 + CMessageHeader::MESSAGE_TYPE_SIZE +
+    std::min<size_t>(MAX_SIZE, MAX_PROTOCOL_MESSAGE_LENGTH);
+static_assert(V2_MAX_CONTENTS_LEN <= 0xFFFFFF,
+              "a V2 packet's contents length must fit in BIP324's 3-byte length field "
+              "(BIP324Cipher::LENGTH_LEN), otherwise Encrypt would silently truncate it");
 
 V2Transport::V2Transport(NodeId nodeid, bool initiating, const CKey& key, Span<const std::byte> ent32, std::vector<uint8_t> garbage) noexcept
     : m_cipher{key, ent32}, m_initiating{initiating}, m_nodeid{nodeid},
@@ -1316,18 +1383,13 @@ bool V2Transport::ProcessReceivedPacketBytes() noexcept
     Assume(m_recv_state == RecvState::VERSION || m_recv_state == RecvState::PQ_CT ||
            m_recv_state == RecvState::APP);
 
-    // The maximum permitted contents length for a packet, consisting of:
-    // - 0x00 byte: indicating long message type encoding
-    // - 12 bytes of message type
-    // - payload
-    static constexpr size_t MAX_CONTENTS_LEN =
-        1 + CMessageHeader::MESSAGE_TYPE_SIZE +
-        std::min<size_t>(MAX_SIZE, MAX_PROTOCOL_MESSAGE_LENGTH);
+    // The maximum permitted contents length for a packet is shared with the send path via the
+    // file-scope V2_MAX_CONTENTS_LEN constant, so receive and send enforce the identical bound.
 
     if (m_recv_buffer.size() == BIP324Cipher::LENGTH_LEN) {
         // Length descriptor received.
         m_recv_len = m_cipher.DecryptLength(MakeByteSpan(m_recv_buffer));
-        if (m_recv_len > MAX_CONTENTS_LEN) {
+        if (m_recv_len > V2_MAX_CONTENTS_LEN) {
             LogDebug(BCLog::NET, "V2 transport error: packet too large (%u bytes), peer=%d\n", m_recv_len, m_nodeid);
             return false;
         }
@@ -1676,6 +1738,33 @@ bool V2Transport::SetMessageToSend(CSerializedNetMsg& msg) noexcept
         std::copy(msg.m_type.begin(), msg.m_type.end(), contents.data() + 1);
         std::copy(msg.data.begin(), msg.data.end(), contents.begin() + 1 + CMessageHeader::MESSAGE_TYPE_SIZE);
     }
+    // Fail-closed guard against BIP324's 3-byte packet-length field, mirroring the receive-side
+    // bound so send and receive use the identical V2_MAX_CONTENTS_LEN. A `block`/`blocktxn` may
+    // approach MAX_BLOCK_MESSAGE_LENGTH (24 MB), but a single V2 packet physically cannot carry
+    // more than V2_MAX_CONTENTS_LEN (~16 MB): the encoded length would overflow the 3-byte field
+    // and BIP324Cipher::Encrypt would SILENTLY TRUNCATE it, corrupting the wire length and
+    // desyncing the entire encrypted stream. Such a message must instead propagate via compact
+    // blocks (cmpctblock + blocktxn fragments, each well under the cap) or the v1 transport, so it
+    // never legitimately reaches this point for a v2 peer (see net_processing block-serving path).
+    //
+    // Handling: DROP the message (return true to consume it) rather than truncate it. Two rejected
+    // alternatives:
+    //   * return false -- leaves the message at the head of the queue; SocketSendData never
+    //     advances past it (it only pops on a true return), so it retries forever, a livelock that
+    //     stalls every subsequent message to this peer.
+    //   * disconnect (like the receive side) -- unnecessary here. The receive side MUST tear down
+    //     the peer because a desynced *inbound* ciphertext is unrecoverable; but we reject this
+    //     message BEFORE encryption, so our outbound stream never desyncs and the connection can
+    //     safely keep serving every other message. (V2Transport also has no handle to CNode to set
+    //     fDisconnect; the send-side bool is an overloaded "retry-later" signal, not a fatal
+    //     channel like the receive side's ReceivedBytes()->false.)
+    if (contents.size() > V2_MAX_CONTENTS_LEN) {
+        LogError("V2 transport: dropping oversized %s message (%u byte contents exceed the %u byte "
+                 "v2 packet limit; it cannot cross a v2 link and must relay via compact blocks/v1), peer=%d\n",
+                 SanitizeString(msg.m_type), contents.size(), V2_MAX_CONTENTS_LEN, m_nodeid);
+        ClearShrink(msg.data);
+        return true;
+    }
     // Construct ciphertext in send buffer.
     m_send_buffer.resize(contents.size() + BIP324Cipher::EXPANSION);
     m_cipher.Encrypt(MakeByteSpan(contents), {}, false, MakeWritableByteSpan(m_send_buffer));
@@ -1683,6 +1772,19 @@ bool V2Transport::SetMessageToSend(CSerializedNetMsg& msg) noexcept
     // Release memory
     ClearShrink(msg.data);
     return true;
+}
+
+size_t V2Transport::MaxSendablePayloadBytes() const noexcept
+{
+    AssertLockNotHeld(m_send_mutex);
+    LOCK(m_send_mutex);
+    // In V1 fallback the V1 rules apply. Otherwise mirror SetMessageToSend's
+    // contents framing exactly: worst case is the long message-type encoding
+    // (1 type-length byte + 12 type bytes) ahead of the payload, and the whole
+    // contents must fit the BIP324 3-byte length field bound the send guard
+    // enforces (an oversized message is DROPPED there, not truncated).
+    if (m_send_state == SendState::V1) return m_v1_fallback.MaxSendablePayloadBytes();
+    return V2_MAX_CONTENTS_LEN - 1 - CMessageHeader::MESSAGE_TYPE_SIZE;
 }
 
 Transport::BytesToSend V2Transport::GetBytesToSend(bool have_next_message) const noexcept
@@ -1951,6 +2053,7 @@ void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
                                             const CService& addr_bind,
                                             const CService& addr)
 {
+    AssertLockNotHeld(m_local_services_mutex);
     int nInbound = 0;
 
     const bool inbound_onion = [this, &addr, &addr_bind]{
@@ -2037,16 +2140,19 @@ void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
     NodeId id = GetNewNodeId();
     uint64_t nonce = GetDeterministicRandomizer(RANDOMIZER_ID_LOCALHOSTNONCE).Write(id).Finalize();
 
-    // The V2Transport transparently falls back to V1 behavior when an incoming V1 connection is
-    // detected, so use it whenever we signal NODE_P2P_V2.
-    ServiceFlags local_services = GetLocalServices();
-    const bool use_v2transport(local_services & NODE_P2P_V2);
-
     uint64_t network_id = GetDeterministicRandomizer(RANDOMIZER_ID_NETWORKKEY)
                         .Write(inbound_onion ? NET_ONION : addr.GetNetClass())
                         .Write(addr_bind.GetAddrBytes())
                         .Write(addr_bind.GetPort()) // inbound connections use bind port
                         .Finalize();
+    ServiceFlags local_services;
+    {
+        LOCK(m_local_services_mutex);
+        local_services = GetLocalServices();
+    }
+    // The V2Transport transparently falls back to V1 behavior for an incoming
+    // V1 connection. Bind its choice and Peer::our_services to one snapshot.
+    const bool use_v2transport{bool(local_services & NODE_P2P_V2)};
     CNode* pnode = new CNode(id,
                              std::move(sock),
                              CAddress{addr, NODE_NONE},
@@ -2067,8 +2173,13 @@ void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
     pnode->AddRef();
     m_msgproc->InitializeNode(*pnode, local_services);
     {
-        LOCK(m_nodes_mutex);
-        m_nodes.push_back(pnode);
+        LOCK(m_local_services_mutex);
+        const bool stale_services{GetLocalServices() != local_services};
+        {
+            LOCK(m_nodes_mutex);
+            m_nodes.push_back(pnode);
+            if (stale_services) pnode->fDisconnect = true;
+        }
     }
     LogDebug(BCLog::NET, "connection from %s accepted\n", addr.ToStringAddrPort());
     TRACEPOINT(net, inbound_connection,
@@ -3201,16 +3312,26 @@ void CConnman::ThreadOpenAddedConnections()
 {
     AssertLockNotHeld(m_unused_i2p_sessions_mutex);
     AssertLockNotHeld(m_reconnections_mutex);
+    std::unordered_set<std::string> logged_connected;
     while (true)
     {
         CSemaphoreGrant grant(*semAddnode);
-        std::vector<AddedNodeInfo> vInfo = GetAddedNodeInfo(/*include_connected=*/false);
+        std::vector<AddedNodeInfo> vInfo = GetAddedNodeInfo(/*include_connected=*/true);
+        std::unordered_set<std::string> current_added_nodes;
         bool tried = false;
         for (const AddedNodeInfo& info : vInfo) {
+            current_added_nodes.insert(info.m_params.m_added_node);
+            if (info.fConnected) {
+                if (logged_connected.insert(info.m_params.m_added_node).second) {
+                    LogDebug(BCLog::NET, "Skipping manual connection to %s, already connected\n", info.m_params.m_added_node);
+                }
+                continue;
+            }
+            logged_connected.erase(info.m_params.m_added_node);
             if (!grant) {
-                // If we've used up our semaphore and need a new one, let's not wait here since while we are waiting
-                // the addednodeinfo state might change.
-                break;
+                // Do not wait here: the added-node state may change while a
+                // semaphore grant is unavailable.
+                continue;
             }
             tried = true;
             CAddress addr(CService(), NODE_NONE);
@@ -3218,6 +3339,7 @@ void CConnman::ThreadOpenAddedConnections()
             if (!interruptNet.sleep_for(std::chrono::milliseconds(500))) return;
             grant = CSemaphoreGrant(*semAddnode, /*fTry=*/true);
         }
+        std::erase_if(logged_connected, [&](const auto& node) { return !current_added_nodes.contains(node); });
         // See if any reconnections are desired.
         PerformReconnections();
         // Retry every 60 seconds if a connection was attempted, otherwise two seconds
@@ -3230,6 +3352,7 @@ void CConnman::ThreadOpenAddedConnections()
 void CConnman::OpenNetworkConnection(const CAddress& addrConnect, bool fCountFailure, CSemaphoreGrant&& grant_outbound, const char *pszDest, ConnectionType conn_type, bool use_v2transport)
 {
     AssertLockNotHeld(m_unused_i2p_sessions_mutex);
+    AssertLockNotHeld(m_local_services_mutex);
     assert(conn_type != ConnectionType::INBOUND);
 
     //
@@ -3249,20 +3372,49 @@ void CConnman::OpenNetworkConnection(const CAddress& addrConnect, bool fCountFai
     } else if (FindNode(std::string(pszDest)))
         return;
 
+    std::optional<std::string> manual_connection;
+    if (conn_type == ConnectionType::MANUAL) {
+        if (pszDest) {
+            manual_connection = ManualConnectionKey(pszDest);
+        } else if (addrConnect.IsValid()) {
+            manual_connection = addrConnect.ToStringAddrPort();
+        }
+        if (manual_connection && !MarkManualConnectionInProgress(*manual_connection)) {
+            LogInfo("Not opening manual connection to %s, connection already in progress\n",
+                    pszDest ? pszDest : addrConnect.ToStringAddrPort());
+            return;
+        }
+    }
+
     CNode* pnode = ConnectNode(addrConnect, pszDest, fCountFailure, conn_type, use_v2transport);
 
-    if (!pnode)
+    if (!pnode) {
+        if (manual_connection) ClearManualConnectionInProgress(*manual_connection);
         return;
+    }
     pnode->grantOutbound = std::move(grant_outbound);
 
-    m_msgproc->InitializeNode(*pnode, m_local_services);
+    ServiceFlags local_services;
     {
-        LOCK(m_nodes_mutex);
-        m_nodes.push_back(pnode);
-
-        // update connection count by network
-        if (pnode->IsManualOrFullOutboundConn()) ++m_network_conn_counts[pnode->addr.GetNetwork()];
+        LOCK(m_local_services_mutex);
+        local_services = GetLocalServices();
     }
+    m_msgproc->InitializeNode(*pnode, local_services);
+    {
+        LOCK(m_local_services_mutex);
+        const bool stale_services{GetLocalServices() != local_services};
+        {
+            LOCK(m_nodes_mutex);
+            m_nodes.push_back(pnode);
+            if (stale_services) pnode->fDisconnect = true;
+
+            // update connection count by network
+            if (pnode->IsManualOrFullOutboundConn()) {
+                ++m_network_conn_counts[pnode->addr.GetNetwork()];
+            }
+        }
+    }
+    if (manual_connection) ClearManualConnectionInProgress(*manual_connection);
 
     TRACEPOINT(net, outbound_connection,
         pnode->GetId(),
@@ -3724,6 +3876,7 @@ void CConnman::StopThreads()
 
 void CConnman::StopNodes()
 {
+    AssertLockNotHeld(m_reconnections_mutex);
     if (fAddressesInitialized) {
         DumpAddresses();
         fAddressesInitialized = false;
@@ -3751,6 +3904,8 @@ void CConnman::StopNodes()
         DeleteNode(pnode);
     }
     m_nodes_disconnected.clear();
+    // Reconnection requests retain state associated with stopped nodes.
+    WITH_LOCK(m_reconnections_mutex, m_reconnections.clear());
     vhListenSocket.clear();
     semOutbound.reset();
     semAddnode.reset();
@@ -3771,11 +3926,14 @@ CConnman::~CConnman()
 
 std::vector<CAddress> CConnman::GetAddresses(size_t max_addresses, size_t max_pct, std::optional<Network> network, const bool filtered) const
 {
-    std::vector<CAddress> addresses = addrman.GetAddr(max_addresses, max_pct, network, filtered);
+    // Ask addrman for all candidates before applying the ban policy so banned
+    // entries do not make the final response undershoot max_addresses.
+    std::vector<CAddress> addresses = addrman.GetAddr(m_banman ? 0 : max_addresses, max_pct, network, filtered);
     if (m_banman) {
         addresses.erase(std::remove_if(addresses.begin(), addresses.end(),
                         [this](const CAddress& addr){return m_banman->IsDiscouraged(addr) || m_banman->IsBanned(addr);}),
                         addresses.end());
+        if (max_addresses && addresses.size() > max_addresses) addresses.resize(max_addresses);
     }
     return addresses;
 }
@@ -3944,6 +4102,15 @@ bool CConnman::DisconnectNode(NodeId id)
     return false;
 }
 
+size_t CConnman::DisconnectAllNodes()
+{
+    AssertLockNotHeld(m_local_services_mutex);
+    LOCK(m_local_services_mutex);
+    LOCK(m_nodes_mutex);
+    for (CNode* node : m_nodes) node->fDisconnect = true;
+    return m_nodes.size();
+}
+
 void CConnman::RecordBytesRecv(uint64_t bytes)
 {
     nTotalBytesRecv += bytes;
@@ -4053,7 +4220,27 @@ uint64_t CConnman::GetTotalBytesSent() const
 
 ServiceFlags CConnman::GetLocalServices() const
 {
-    return m_local_services;
+    return m_local_services.load(std::memory_order_relaxed);
+}
+
+void CConnman::AddLocalServices(ServiceFlags services)
+{
+    AssertLockNotHeld(m_local_services_mutex);
+    LOCK(m_local_services_mutex);
+    ServiceFlags current{m_local_services.load(std::memory_order_relaxed)};
+    while (!m_local_services.compare_exchange_weak(
+        current, ServiceFlags(current | services),
+        std::memory_order_relaxed, std::memory_order_relaxed)) {}
+}
+
+void CConnman::RemoveLocalServices(ServiceFlags services)
+{
+    AssertLockNotHeld(m_local_services_mutex);
+    LOCK(m_local_services_mutex);
+    ServiceFlags current{m_local_services.load(std::memory_order_relaxed)};
+    while (!m_local_services.compare_exchange_weak(
+        current, ServiceFlags(current & ~services),
+        std::memory_order_relaxed, std::memory_order_relaxed)) {}
 }
 
 static std::unique_ptr<Transport> MakeTransport(NodeId id, bool use_v2transport, bool inbound) noexcept

@@ -11,7 +11,7 @@ RPCs tested are:
 """
 from collections import defaultdict
 
-from test_framework.blocktools import COINBASE_MATURITY
+from test_framework.blocktools import COINBASE_MATURITY, REGTEST_INITIAL_SUBSIDY
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import assert_equal, assert_raises_rpc_error
 from test_framework.wallet_util import test_address
@@ -31,19 +31,19 @@ class WalletLabelsTest(BitcoinTestFramework):
     def invalid_label_name_test(self):
         node = self.nodes[0]
         address = node.getnewaddress()
-        pubkey = node.getaddressinfo(address)['pubkey']
         rpc_calls = [
             [node.getnewaddress],
             [node.setlabel, address],
             [node.getaddressesbylabel],
-            [node.importpubkey, pubkey],
-            [node.addmultisigaddress, 1, [pubkey]],
             [node.getreceivedbylabel],
             [node.listsinceblock, node.getblockhash(0), 1, False, True, False],
         ]
         if self.options.descriptors:
+            # Reuse a valid native P2MR descriptor; the assertion is about
+            # rejecting the reserved label, not Bitcoin secp key parsing.
+            descriptor = node.listdescriptors(private=False)['descriptors'][0]['desc']
             response = node.importdescriptors([{
-                'desc': f'pkh({pubkey})',
+                'desc': descriptor,
                 'label': '*',
                 'timestamp': 'now',
             }])
@@ -122,13 +122,13 @@ class WalletLabelsTest(BitcoinTestFramework):
         assert_raises_rpc_error(-8, "Invalid 'purpose' argument, must be a known purpose string, typically 'send', or 'receive'.", node.listlabels, "unknown")
 
         # Note each time we call generate, all generated coins go into
-        # the same address, so we call twice to get two addresses w/50 each
+        # the same address, so call twice to get two subsidy-bearing addresses.
         self.generatetoaddress(node, nblocks=1, address=node.getnewaddress(label='coinbase'))
         self.generatetoaddress(node, nblocks=COINBASE_MATURITY + 1, address=node.getnewaddress(label='coinbase'))
-        assert_equal(node.getbalance(), 100)
+        assert_equal(node.getbalance(), 2 * REGTEST_INITIAL_SUBSIDY)
 
         # there should be 2 address groups
-        # each with 1 address with a balance of 50 Bitcoins
+        # each with one address carrying one BTX regtest subsidy
         address_groups = node.listaddressgroupings()
         assert_equal(len(address_groups), 2)
         # the addresses aren't linked now, but will be after we send to the
@@ -137,14 +137,15 @@ class WalletLabelsTest(BitcoinTestFramework):
         for address_group in address_groups:
             assert_equal(len(address_group), 1)
             assert_equal(len(address_group[0]), 3)
-            assert_equal(address_group[0][1], 50)
+            assert_equal(address_group[0][1], REGTEST_INITIAL_SUBSIDY)
             assert_equal(address_group[0][2], 'coinbase')
             linked_addresses.add(address_group[0][0])
 
-        # send 50 from each address to a third address not in this wallet
-        common_address = "msf4WtN1YQKXvNtvdFYt9JBnUD2FB41kjr"
+        # Spend both rewards to a third address not in this wallet. Use a
+        # native P2MR address because BTX wallets do not create legacy outputs.
+        common_address = self.nodes[1].getnewaddress()
         node.sendmany(
-            amounts={common_address: 100},
+            amounts={common_address: 2 * REGTEST_INITIAL_SUBSIDY},
             subtractfeefrom=[common_address],
             minconf=1,
         )
@@ -239,44 +240,22 @@ class WalletLabelsTest(BitcoinTestFramework):
             self.test_sort_multisig_with_uncompressed_hash160(node)
 
         if self.options.descriptors:
-            # This is a descriptor wallet test because of segwit v1+ addresses
-            self.log.info('Check watchonly labels')
+            self.log.info('Check native P2MR watch-only labels')
             node.createwallet(wallet_name='watch_only', disable_private_keys=True)
             wallet_watch_only = node.get_wallet_rpc('watch_only')
-            BECH32_VALID = {
-                '✔️_VER15_PROG40': 'bcrt10qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqxkg7fn',
-                '✔️_VER16_PROG03': 'bcrt1sqqqqq8uhdgr',
-                '✔️_VER16_PROB02': 'bcrt1sqqqq4wstyw',
-            }
-            BECH32_INVALID = {
-                '❌_VER15_PROG41': 'bcrt1sqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqajlxj8',
-                '❌_VER16_PROB01': 'bcrt1sqq5r4036',
-            }
-            for l in BECH32_VALID:
-                ad = BECH32_VALID[l]
-                wallet_watch_only.importaddress(label=l, rescan=False, address=ad)
-                script_size = len(bytes.fromhex(wallet_watch_only.getaddressinfo(ad)["scriptPubKey"]))
-                if script_size <= 34:
-                    self.generatetoaddress(node, 1, ad)
-                else:
-                    # BTX consensus caps txout scriptPubKey sizes at 34 bytes.
-                    assert_raises_rpc_error(
-                        -1,
-                        "bad-txns-scriptpubkey-size",
-                        self.generatetoaddress,
-                        node,
-                        1,
-                        ad,
-                    )
-                assert_equal(wallet_watch_only.getaddressesbylabel(label=l), {ad: {'purpose': 'receive'}})
-                assert_equal(wallet_watch_only.getreceivedbylabel(label=l), 0)
-            for l in BECH32_INVALID:
-                ad = BECH32_INVALID[l]
-                assert_raises_rpc_error(
-                    -5,
-                    "Invalid Bitcoin address or script",
-                    lambda: wallet_watch_only.importaddress(label=l, rescan=False, address=ad),
-                )
+            label = 'p2mr_watchonly'
+            address = self.nodes[1].getnewaddress()
+            wallet_watch_only.importaddress(label=label, rescan=False, address=address)
+            assert_equal(wallet_watch_only.getaddressesbylabel(label=label), {address: {'purpose': 'receive'}})
+            assert_equal(wallet_watch_only.getreceivedbylabel(label=label), 0)
+            assert_raises_rpc_error(
+                -5,
+                "Invalid BTX address or script",
+                wallet_watch_only.importaddress,
+                "not-a-btx-address",
+                "invalid",
+                False,
+            )
 
 
 class Label:

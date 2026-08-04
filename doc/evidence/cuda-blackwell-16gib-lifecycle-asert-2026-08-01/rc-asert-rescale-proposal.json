@@ -1,0 +1,118 @@
+{
+  "evidence_kind": "rc_asert_rescale_proposal_draft",
+  "date": "2026-08-01",
+  "status": "PROPOSAL_NOT_INSTALLED",
+  "tip_sha": "c4ac2e439ac496245f12dcbf8b42c9575247dbe9",
+  "machine_class": {
+    "os": "Linux x86_64",
+    "cpu_class": "Intel Xeon W-class",
+    "logical_cpus": 24,
+    "gpu_class": "NVIDIA consumer Blackwell-class discrete GPU",
+    "vram_gib": 16,
+    "compute_capability": "12.0",
+    "host_ram_gib": 76
+  },
+  "ratification": {
+    "BTX_MATMUL_NO_INVERSION_GATE_RATIFIED": false,
+    "BTX_MATMUL_V47_GPU_LIFECYCLE_GATE_RATIFIED": false,
+    "mainnet_nMatMulRCAsertRescaleNum": 1,
+    "mainnet_nMatMulRCAsertRescaleDen": 1,
+    "v4_bmx4c_remain_1_1": true,
+    "installs_rc_asert_ratio": false
+  },
+  "formula": {
+    "application": "next_target = ScaleTargetByTimespan(parent_target, Num, Den) at nMatMulRCHeight",
+    "classical_work_ratio": "Num/Den ≈ R_pre / R_post (nonce/s); Num>Den loosens target when post-fork work is heavier",
+    "mac_proxy_when_mfu_comparable": "Num/Den ≈ MAC_post / MAC_pre (regtest datacenter fixture 16422/1027)",
+    "lifecycle_continuity_proxy_NOT_work_ratio": "Num/Den ≈ T_core_lifecycle / nPowTargetSpacingNormal (illustrative only)",
+    "target_spacing_s": 90.0,
+    "references": [
+      "doc/btx-matmul-v4.2-asert-calibration.md",
+      "doc/btx-matmul-v4.4-lt-c15-asert-fmm-calibration-2026-07-19.md",
+      "src/pow.cpp ScaleTargetByTimespan / nMatMulRCHeight branch",
+      "src/consensus/params.h nMatMulRCAsertRescaleNum/Den",
+      "doc/btx-matmul-v4.7-gpu-readiness-gates-2026-07-31.md Lifecycle calibration"
+    ]
+  },
+  "clarification": {
+    "rescale_compensates": "harder_or_slower_PoW_workload_hashrate_drop_across_fork",
+    "rescale_does_not_compensate": "fixed_serial_ExactReplay_lifecycle_wall_time_vs_90s_spacing",
+    "activation_gate_requires": "complete_correlated_lifecycle_within_target_spacing_plus_reviewed_work_ratio_for_RC_only",
+    "lifecycle_gt_90s_implies_rescale_alone_sufficient": false
+  },
+  "measurements": {
+    "core_lifecycle_n": 20,
+    "core_lifecycle_source": "lifecycle-campaign.json",
+    "core_lifecycle_campaign_target_n": 20,
+    "core_lifecycle_campaign_complete_n": 0,
+    "prior_rootcause_n": 2,
+    "core_lifecycle_summary_s": {
+      "n": 20,
+      "min": 96.257527472,
+      "p50": 96.673725817,
+      "p95": 96.984712232,
+      "p99": 97.317815106,
+      "max": 97.317815106,
+      "mean": 96.716821858
+    },
+    "core_components_p50_s": {
+      "candidate_execution_s": 32.337467,
+      "winner_reseal_s": 32.202869,
+      "tip_validation_s": 32.167652,
+      "authenticated_relay_s": 0.000472,
+      "queue_waits_s_total": "~3e-6"
+    },
+    "loaded_exactreplay_100": {
+      "path": "doc/evidence/cuda-blackwell-16gib-profile1-loaded-2026-08-01/",
+      "n": 100,
+      "mean_s": 32.27320038933,
+      "p50_s": 32.310893796,
+      "p95_s": 32.526835689,
+      "p99_s": 32.705060405,
+      "max_s": 32.709447342,
+      "cpu_gemm_fallbacks": 0
+    },
+    "within_target_spacing_at_90s_core": false,
+    "authority_measured": false,
+    "complete_lifecycle_n": 0
+  },
+  "proposal_candidates": {
+    "primary_lifecycle_continuity_proxy": {
+      "assumption": "Num/Den = round(T_core_mean / 90) as continuity illustration only",
+      "num": 967,
+      "den": 900,
+      "decimal": 1.0744444444444445,
+      "source_seconds": 96.716821858,
+      "note": "967/900 remains a compact continuity illustration near n=20 mean/p50 (~1.074); not installed",
+      "not_a_v3_to_rc_work_ratio": true,
+      "does_not_close_spacing_gate": true
+    },
+    "sensitivity_lifecycle_n2": {
+      "mean_ms_exact": {"num": 48341, "den": 45000, "decimal": 1.0742444444},
+      "max_compact": {"num": 3223, "den": 3000, "decimal": 1.0743333333}
+    },
+    "sensitivity_exactreplay_3x_proxy": {
+      "p50": {"three_x_s": 96.932681388, "ratio": 1.0770297932, "compact_hint": "1077/1000"},
+      "p95": {"three_x_s": 97.580507067, "ratio": 1.0842278563, "compact_hint": "1084/1000"},
+      "p99": {"three_x_s": 98.115181215, "ratio": 1.0901686802, "num": 6541, "den": 6000},
+      "max": {"three_x_s": 98.128342026, "ratio": 1.0903149114, "compact_hint": "1090/1000"}
+    },
+    "classical_work_ratio_epoch_a": {
+      "status": "INSUFFICIENT_DATA",
+      "required": "paired MatMul v3 vs Profile-1 RC nonce/s on same machine class",
+      "do_not_use": "16422/1027 (Profile-2 datacenter MAC ratio)",
+      "interim_mainnet": {"num": 1, "den": 1}
+    }
+  },
+  "gaps": [
+    "winner_authority_handoff unavailable without production goldens/canary",
+    "production golden manifest empty (missing_golden)",
+    "20-sample lifecycle campaign still running at draft time; refresh p50/p95/p99",
+    "contention/IBD/reorg soak not claimed",
+    "paired v3 vs RC work-ratio not measured for installable Num/Den"
+  ],
+  "refresh": {
+    "note": "Copy the finished sanitized campaign JSON into this evidence directory, then re-derive Num/Den from core_lifecycle_summary_s vs 90s. Do not commit host filesystem paths.",
+    "command": "python3 -c \"import json;from fractions import Fraction;from pathlib import Path;d=json.loads(Path('lifecycle-campaign-REPLACE.json').read_text());c=d['core_lifecycle_summary_s'];s=90.0;\n[print(k,c.get(k),Fraction(c[k]/s).limit_denominator(10**6) if c.get(k) is not None else None) for k in ('p50','p95','p99','mean','max')]\""
+  }
+}

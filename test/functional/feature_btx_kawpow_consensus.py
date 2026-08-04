@@ -4,7 +4,8 @@
 # file COPYING or https://opensource.org/license/mit/.
 """BTX KAWPOW and reduced-data consensus coverage."""
 
-from test_framework.messages import CBlock, CBlockHeader, from_hex
+from test_framework.messages import CBlock, CBlockHeader, COutPoint, CTransaction, CTxIn, CTxOut, from_hex
+from test_framework.script import CScript
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import assert_equal
 
@@ -17,8 +18,8 @@ class BTXKAWPOWConsensusTest(BitcoinTestFramework):
         self.extra_args = [["-test=matmulstrict"]]
         self.mining_output = "raw(51)"
 
-    def _mine_block_hex(self, output):
-        return self.generateblock(self.nodes[0], output, [], False, sync_fun=self.no_op)
+    def _mine_block_hex(self, output, transactions=None):
+        return self.generateblock(self.nodes[0], output, transactions or [], False, sync_fun=self.no_op)
 
     def _submit_generated_block(self, generated):
         assert_equal(self.nodes[0].submitblock(generated["hex"]), None)
@@ -60,17 +61,30 @@ class BTXKAWPOWConsensusTest(BitcoinTestFramework):
     def test_reduced_data_limits(self):
         node = self.nodes[0]
 
+        def invalid_output_transaction(script_hex):
+            # generateblock skips template validity checks on the strict MatMul
+            # test chain, allowing the node to solve a block whose transaction
+            # is deliberately consensus-invalid. Reduced-data checks run before
+            # UTXO lookup, so the dummy prevout cannot mask the intended reason.
+            tx = CTransaction()
+            tx.vin = [CTxIn(COutPoint(1, 0))]
+            tx.vout = [CTxOut(0, CScript(bytes.fromhex(script_hex)))]
+            tx.rehash()
+            return tx.serialize().hex()
+
         valid_script_34 = f"raw({'51' * 34})"
         self._submit_generated_block(self._mine_block_hex(valid_script_34))
 
-        invalid_script_35 = f"raw({'51' * 35})"
-        assert_equal(node.submitblock(self._mine_block_hex(invalid_script_35)["hex"]), "bad-txns-scriptpubkey-size")
+        invalid_script_tx = invalid_output_transaction("51" * 35)
+        invalid_script_block = self._mine_block_hex(self.mining_output, [invalid_script_tx])
+        assert_equal(node.submitblock(invalid_script_block["hex"]), "bad-txns-scriptpubkey-size")
 
         valid_opreturn_83 = f"raw(6a4c50{'11' * 80})"
         self._submit_generated_block(self._mine_block_hex(valid_opreturn_83))
 
-        invalid_opreturn_85 = f"raw(6a4c52{'11' * 82})"
-        assert_equal(node.submitblock(self._mine_block_hex(invalid_opreturn_85)["hex"]), "bad-txns-opreturn-size")
+        invalid_opreturn_tx = invalid_output_transaction(f"6a4c52{'11' * 82}")
+        invalid_opreturn_block = self._mine_block_hex(self.mining_output, [invalid_opreturn_tx])
+        assert_equal(node.submitblock(invalid_opreturn_block["hex"]), "bad-txns-opreturn-size")
 
     def run_test(self):
         kawpow_fields_available = self.test_header_serialization()

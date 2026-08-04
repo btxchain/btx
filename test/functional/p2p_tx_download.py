@@ -68,7 +68,15 @@ class ConnectionType(Enum):
 class TxDownloadTest(BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 2
-        self.extra_args= [['-datacarriersize=100000', '-maxmempool=5', '-persistmempool=0']] * self.num_nodes
+        # Keep this eviction-oriented fixture small while satisfying the
+        # invariant that maxmempool can hold one complete descendant package.
+        self.extra_args= [[
+            '-datacarriersize=100000',
+            '-limitdescendantsize=1',
+            '-maxmempool=5',
+            '-persistmempool=0',
+            '-acceptnonstdtxn=1',
+        ]] * self.num_nodes
 
     def test_tx_requests(self):
         self.log.info("Test that we request transactions from all our peers, eventually")

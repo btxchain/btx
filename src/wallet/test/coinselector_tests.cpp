@@ -24,6 +24,16 @@
 namespace wallet {
 BOOST_FIXTURE_TEST_SUITE(coinselector_tests, WalletTestingSetup)
 
+BOOST_AUTO_TEST_CASE(coins_result_effective_total_is_optional)
+{
+    CoinsResult result;
+    BOOST_CHECK(!result.GetEffectiveTotalAmount().has_value());
+
+    // Erasing from an empty result must preserve the unavailable aggregate.
+    result.Erase({COutPoint{Txid{}, 0}});
+    BOOST_CHECK(!result.GetEffectiveTotalAmount().has_value());
+}
+
 // how many times to run all the tests to have a chance to catch errors that only show up with particular random shuffles
 // The coin selection tests are intentionally heavy (randomized, large UTXO pools).
 // Debug builds in CI are significantly slower, so use fewer iterations there to
@@ -438,6 +448,35 @@ BOOST_AUTO_TEST_CASE(bnb_search_test)
         available_coins.Erase({(++available_coins.coins[OutputType::BECH32].begin())->outpoint});
         const auto result13 = SelectCoins(*wallet, available_coins, selected_input, 10 * CENT, coin_control, coin_selection_params_bnb);
         BOOST_CHECK(EquivalentResult(expected_result, *result13));
+    }
+
+    {
+        // Uneconomic outputs must not poison SelectCoins' aggregate
+        // sufficiency check. Selection algorithms omit negative-effective
+        // coins, so one positive coin that covers the target must remain
+        // selectable regardless of how many negative coins accompany it.
+        std::unique_ptr<CWallet> wallet = NewWallet(m_node);
+        LOCK(wallet->cs_wallet);
+
+        CoinSelectionParams params{coin_selection_params_bnb};
+        params.m_effective_feerate = CFeeRate(10'000);
+        params.m_long_term_feerate = CFeeRate(1'000);
+
+        CoinsResult available_coins;
+        const CAmount target{CENT};
+        const CAmount positive_input_fee{params.m_effective_feerate.GetFee(/*num_bytes=*/68)};
+        add_coin(available_coins, *wallet, target + positive_input_fee,
+                 params.m_effective_feerate, 6 * 24, false, 0, true, /*custom_size=*/68);
+        for (int i = 0; i < 20; ++i) {
+            add_coin(available_coins, *wallet, /*nValue=*/1,
+                     params.m_effective_feerate, 6 * 24, false, 0, true, /*custom_size=*/1'000);
+        }
+
+        CCoinControl coin_control;
+        const auto result = SelectCoins(*wallet, available_coins, /*pre_set_inputs=*/{}, target, coin_control, params);
+        BOOST_REQUIRE(result);
+        BOOST_CHECK_EQUAL(result->GetInputSet().size(), 1U);
+        BOOST_CHECK_EQUAL(result->GetSelectedEffectiveValue(), target);
     }
 
     {

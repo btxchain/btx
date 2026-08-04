@@ -57,8 +57,19 @@ def ensure_ring_diversity(test, node, wallet, mine_addr, zaddr, min_notes=16, to
     if notes_needed == 0:
         return
 
-    added = 0
-    for _ in range(notes_needed):
+    pending_added = 0
+    remaining = notes_needed
+    # Repeated z_shieldfunds spends the transparent change from the preceding
+    # transaction. Mine in bounded batches because block-template selection can
+    # leave part of a large top-up set in the mempool. The old all-at-once loop
+    # mined only one block and could therefore leave the confirmed note count
+    # below the requested target despite ample wallet balance.
+    # The template admits 16 of these fixed-size topups. Keeping the common
+    # min_notes=16 case (normally 15 additions after the seed note) in one
+    # block also preserves activation-boundary tests that assert an exact next
+    # height, while larger ring-policy cases still split deterministically.
+    batch_limit = 16
+    while remaining > 0:
         try:
             tx = wallet.z_shieldfunds(topup_amount, zaddr)
         except JSONRPCException as e:
@@ -70,6 +81,10 @@ def ensure_ring_diversity(test, node, wallet, mine_addr, zaddr, min_notes=16, to
                 tx = wallet.z_sendmany([{"address": zaddr, "amount": topup_amount}])
             else:
                 if e.error.get("code") == -6:
+                    if pending_added:
+                        test.generatetoaddress(node, 1, mine_addr, sync_fun=sync_fun)
+                        pending_added = 0
+                        continue
                     break
                 raise
         txid = tx["txid"] if isinstance(tx, dict) else tx
@@ -84,9 +99,14 @@ def ensure_ring_diversity(test, node, wallet, mine_addr, zaddr, min_notes=16, to
                 if e.error.get("code") != -27:
                     raise
         assert txid in node.getrawmempool()
-        added += 1
+        pending_added += 1
+        remaining -= 1
 
-    if added:
+        if pending_added >= batch_limit:
+            test.generatetoaddress(node, 1, mine_addr, sync_fun=sync_fun)
+            pending_added = 0
+
+    if pending_added:
         test.generatetoaddress(node, 1, mine_addr, sync_fun=sync_fun)
 
     final_notes = int(wallet.z_getbalance()["note_count"])

@@ -15,7 +15,7 @@ Date: 2026-03-20 (updated 2026-03-24)
 Paper working mirror:
 - `doc/research/smile-2021-564-working-mirror.md`
 - `doc/research/smile-2021-564.txt`
-- source PDF mirrored from `/Users/admin/Downloads/2021-564.pdf`
+- source PDF mirrored from `/path/to/2021-564.pdf`
 
 ## Status
 

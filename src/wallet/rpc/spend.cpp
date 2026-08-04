@@ -97,6 +97,13 @@ std::set<int> InterpretSubtractFeeFromOutputInstructions(const UniValue& sffo_in
     return sffo_set;
 }
 
+static const UniValue& GetSubtractFeeFromOutputsOption(const UniValue& options)
+{
+    return options.exists("subtract_fee_from_outputs") ?
+        options["subtract_fee_from_outputs"] :
+        options["subtractFeeFromOutputs"];
+}
+
 static UniValue FinishTransaction(const std::shared_ptr<CWallet> pwallet, const UniValue& options, CMutableTransaction& rawTx)
 {
     if (!options.exists("locktime")) {
@@ -826,9 +833,15 @@ CreatedTransactionResult FundTransaction(CWallet& wallet, const CMutableTransact
             }
             int64_t weight = weight_v.getInt<int64_t>();
             const int64_t min_input_weight = GetTransactionInputWeight(CTxIn());
-            CHECK_NONFATAL(min_input_weight == 165);
             if (weight < min_input_weight) {
-                throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter, weight cannot be less than 165 (41 bytes (size of outpoint + sequence + empty scriptSig) * 4 (witness scaling factor)) + 1 (empty witness)");
+                throw JSONRPCError(
+                    RPC_INVALID_PARAMETER,
+                    strprintf(
+                        "Invalid parameter, weight cannot be less than %d "
+                        "(41 bytes (size of outpoint + sequence + empty scriptSig) * %d "
+                        "(witness scaling factor)) + 1 (empty witness)",
+                        min_input_weight,
+                        WITNESS_SCALE_FACTOR));
             }
             if (weight > MAX_STANDARD_TX_WEIGHT) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("Invalid parameter, weight cannot be greater than the maximum standard tx weight of %d", MAX_STANDARD_TX_WEIGHT));
@@ -988,7 +1001,7 @@ RPCHelpMan fundrawtransaction()
     std::vector<std::string> dummy(destinations.size(), "dummy");
     std::vector<CRecipient> recipients = CreateRecipients(
             destinations,
-            InterpretSubtractFeeFromOutputInstructions(options["subtractFeeFromOutputs"], dummy)
+            InterpretSubtractFeeFromOutputInstructions(GetSubtractFeeFromOutputsOption(options), dummy)
     );
     CCoinControl coin_control;
     // Automatically select (additional) coins. Can be overridden by options.add_inputs.
@@ -1267,7 +1280,7 @@ static RPCHelpMan bumpfee_helper(std::string method_name)
 
     if ((!options.exists("require_replacable")) || options["require_replacable"].get_bool()) {
         const auto wtx = pwallet->GetWalletTx(hash);
-        if (!SignalsOptInRBF(*wtx->tx)) {
+        if (wtx && !SignalsOptInRBF(*wtx->tx)) {
             throw JSONRPCError(RPC_WALLET_ERROR, "Transaction is not BIP 125 replaceable");
         }
     }
@@ -1640,8 +1653,11 @@ RPCHelpMan sendall()
             } else {
                 CoinFilterParams coins_params;
                 coins_params.min_amount = 0;
-                for (const COutput& output : AvailableCoins(*pwallet, &coin_control, fee_rate, coins_params).All()) {
-                    CHECK_NONFATAL(output.input_bytes > 0);
+                auto available_coins_res = AvailableCoins(*pwallet, &coin_control, fee_rate, coins_params);
+                if (!available_coins_res) {
+                    throw JSONRPCError(RPC_WALLET_ERROR, util::ErrorString(available_coins_res).original);
+                }
+                for (const COutput& output : available_coins_res->All()) {
                     if (send_max && fee_rate.GetFee(output.input_bytes) > output.txout.nValue) {
                         continue;
                     }
@@ -1660,6 +1676,9 @@ RPCHelpMan sendall()
 
             // estimate final size of tx
             const TxSize tx_size{CalculateMaximumSignedTxSize(CTransaction(rawTx), pwallet.get())};
+            if (tx_size.vsize == -1) {
+                throw JSONRPCError(RPC_WALLET_ERROR, "Unable to determine the size of the transaction, the wallet contains unsolvable descriptors");
+            }
             const CAmount fee_from_size{fee_rate.GetFee(tx_size.vsize)};
             const std::optional<CAmount> total_bump_fees{pwallet->chain().calculateCombinedBumpFee(outpoints_spent, fee_rate)};
             CAmount effective_value = total_input_value - fee_from_size - total_bump_fees.value_or(0);
@@ -1953,7 +1972,7 @@ RPCHelpMan walletcreatefundedpsbt()
     outputs = NormalizeOutputs(request.params[1]);
     std::vector<CRecipient> recipients = CreateRecipients(
             ParseOutputs(outputs),
-            InterpretSubtractFeeFromOutputInstructions(options["subtractFeeFromOutputs"], outputs.getKeys())
+            InterpretSubtractFeeFromOutputInstructions(GetSubtractFeeFromOutputsOption(options), outputs.getKeys())
     );
     CCoinControl coin_control;
     // Automatically select coins, unless at least one is manually selected. Can

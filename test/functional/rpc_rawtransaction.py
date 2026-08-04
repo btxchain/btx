@@ -64,7 +64,7 @@ class multidict(dict):
 
 class RawTransactionsTest(BitcoinTestFramework):
     def add_options(self, parser):
-        self.add_wallet_options(parser, descriptors=False)
+        self.add_wallet_options(parser, legacy=False)
 
     def set_test_params(self):
         self.num_nodes = 3
@@ -95,9 +95,6 @@ class RawTransactionsTest(BitcoinTestFramework):
         self.sendrawtransaction_testmempoolaccept_tests()
         self.decoderawtransaction_tests()
         self.transaction_version_number_tests()
-        if self.is_specified_wallet_compiled() and not self.options.descriptors:
-            self.import_deterministic_coinbase_privkeys()
-            self.raw_multisig_transaction_legacy_tests()
         self.getrawtransaction_verbosity_tests()
 
     def run_btx_p2mr_rawtransaction_smoke(self):
@@ -113,11 +110,21 @@ class RawTransactionsTest(BitcoinTestFramework):
         assert_equal(node0.getrawtransaction(coinbase_txid, True, block_hash)["txid"], coinbase_txid)
         assert_equal(node0.decoderawtransaction(coinbase_hex)["txid"], coinbase_txid)
 
-        # Ensure raw-creation/decoding paths still function in BTX policy mode.
-        raw = node0.createrawtransaction([], {"data": "01"})
+        # OP_RETURN construction is disabled, while financial output
+        # creation/decoding remains available.
+        assert_raises_rpc_error(
+            -8,
+            'OP_RETURN "data" outputs are disabled on BTX',
+            node0.createrawtransaction,
+            [],
+            {"data": "01"},
+        )
+        node0.createwallet(wallet_name="rawtransaction_smoke", descriptors=True)
+        destination = node0.get_wallet_rpc("rawtransaction_smoke").getnewaddress(address_type="p2mr")
+        raw = node0.createrawtransaction([], {destination: 1})
         decoded_raw = node0.decoderawtransaction(raw)
         assert_equal(decoded_raw["vin"], [])
-        assert_equal(decoded_raw["vout"][0]["scriptPubKey"]["type"], "nulldata")
+        assert_equal(decoded_raw["vout"][0]["scriptPubKey"]["address"], destination)
 
         # Invalid-raw submission path remains deterministic.
         assert_raises_rpc_error(-22, "TX decode failed", node0.sendrawtransaction, "00")

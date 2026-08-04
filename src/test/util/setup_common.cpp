@@ -19,6 +19,7 @@
 #include <interfaces/chain.h>
 #include <kernel/mempool_entry.h>
 #include <logging.h>
+#include <matmul/matmul_v4_rc_gkr.h>
 #include <net.h>
 #include <net_processing.h>
 #include <node/blockstorage.h>
@@ -187,6 +188,16 @@ BasicTestingSetup::BasicTestingSetup(const ChainType chainType, TestOpts opts)
     if (G_TEST_LOG_FUN) LogInstance().PushBackCallback(G_TEST_LOG_FUN);
     InitLogging(*m_node.args);
     AppInitParameterInteraction(*m_node.args);
+    // A unit-test process is not a node, and must not inherit a node's
+    // device-strict production default. BasicTestingSetup defaults to
+    // ChainType::MAIN, where RC now carries a finite activation height, so
+    // AppInitParameterInteraction above resolves -matmulrcexecution to
+    // strict-device -- process-wide, for every suite, on hosts that have no
+    // qualified accelerator. That turned every ExactReplay in the suite into a
+    // local-execution failure. Pin the portable oracle explicitly; cases that
+    // exercise a specific policy set it themselves and restore it afterwards.
+    matmul::v4::rc::SetRCExactReplayExecutionPolicy(
+        matmul::v4::rc::RCExactReplayExecutionPolicy::AutoFallback);
     LogInstance().StartLogging();
     m_node.warnings = std::make_unique<node::Warnings>();
     m_node.kernel = std::make_unique<kernel::Context>();
@@ -410,7 +421,12 @@ CBlock TestChain100Setup::CreateBlock(
     RegenerateCommitments(block, *Assert(m_node.chainman));
     const CBlockIndex* prev_block{WITH_LOCK(::cs_main, return m_node.chainman->m_blockman.LookupBlockIndex(block.hashPrevBlock))};
     const uint32_t block_height{prev_block ? static_cast<uint32_t>(prev_block->nHeight + 1) : 0};
-    Assert(MineHeaderForConsensus(block, block_height, m_node.chainman->GetConsensus()));
+    Assert(MineHeaderForConsensus(
+        block,
+        block_height,
+        m_node.chainman->GetConsensus(),
+        5'000'000,
+        prev_block ? std::optional<int64_t>{prev_block->GetMedianTimePast()} : std::nullopt));
 
     return block;
 }

@@ -1,0 +1,44 @@
+{
+  "profile": "Profile1_ExactReplay",
+  "evidence_kind": "independent_digest_corpus_cuda_only_pending_portable_match",
+  "matmul_dim": 4096,
+  "n_headers": 8,
+  "episode_digests": [
+    "b4777985d4f2621d0b9c119f4188ac7d80158fc92560ade96cc7a3fd8cfae953",
+    "d5ca4a68a259c6494128993d752104e6ec4ddf9551e5bc1ee2aeb61dc60264aa",
+    "d95d122ad36c749e4a71e6aa449e566c2e0cd5c6d59105b7324d2aaeb063bf7f",
+    "0fd1b4a52c59fabf035b6c47f4c87be01f2eaa7b4834eb9e8bd7dd93b28766c7",
+    "197d83c30a8090be3ad881c3baf423790c7dffeb529470e384f4712fc1c7853f",
+    "dd73fd8532f72659dc75fe38a6623fbde07f7dcfb24c02a32837b67885402698",
+    "b85b555946eaa351666044aed7a57724b8e3a694d7e27f50f21d44f6f566140b",
+    "5a9041c96f0adeb5bba90d01ae88f4919fd708d41613361b3d3e12d9aea8415a"
+  ],
+  "episode_wall_samples_s": [
+    32.289541036,
+    32.489846556,
+    32.453143208,
+    32.573319249,
+    32.594031246,
+    32.394220063,
+    32.607691931,
+    32.532611868
+  ],
+  "mean_s": 32.491800644625,
+  "min_s": 32.289541036,
+  "max_s": 32.607691931,
+  "cpu_gemm_fallbacks": 0,
+  "all_consensus_macs_on_device": true,
+  "provider": "cuda_rc_exact_fused_extract",
+  "backend": "cuda_rc_exact_fused_extract",
+  "tip_sha": "c4ac2e439ac496245f12dcbf8b42c9575247dbe9",
+  "hardware": {
+    "gpu_class": "NVIDIA consumer Blackwell-class discrete GPU (16 GiB VRAM, compute capability 12.0)",
+    "cpu_class": "Intel Xeon W-class workstation CPU",
+    "os": "Linux x86_64"
+  },
+  "notes": [
+    "CUDA ExactReplay digests for 8 distinct production-shape episodes on the PR tip binary.",
+    "Portable/CPU oracle match for the same frozen headers remains pending (CPU probe did not finish before this write).",
+    "device_id and host identifiers stripped; ratification gates remain false; production manifest not populated."
+  ]
+}

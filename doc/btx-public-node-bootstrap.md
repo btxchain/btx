@@ -1,5 +1,15 @@
 # BTX Public Node Bootstrap (Archival)
 
+> **MatMul v4.7 note:** this bootstrap procedure does not opt a node into an
+> consensus epoch beyond the compiled chain parameters: Epoch A remains a
+> mainnet release candidate pending exact-final evidence, ratification, and a
+> live activation height; all other transition heights remain disabled.
+> Epochs A/B require Profile 1
+> ExactReplay for every claimed block, so future validating-node release notes
+> must state accelerator requirements and IBD/checkpoint assumptions. Profile 2
+> is not an Epoch-A validator requirement. See
+> [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md).
+
 This runbook is the canonical mainnet bootstrap path for operators who only
 have this repository and public Internet access.
 
@@ -62,20 +72,16 @@ Notes:
 - the current public DNS bootstrap set is `node.btx.dev`,
   `node.btxchain.org`, and `node.btx.tools`; direct IP addnodes are optional
   archive-node hints for controlled troubleshooting
-- `getblocktemplate` enforces an outbound peer floor on mainnet by default
-  (`-miningminoutboundpeers=2`) to reduce isolated-mining orphan risk.
-  Set `-miningminoutboundpeers=0` only for intentional isolated lab mining.
-- `getblocktemplate` also enforces that at least one outbound peer is actually
-  near tip on mainnet by default
-  (`-miningminsyncedoutboundpeers=1`, `-miningmaxpeersyncheightlag=2`).
-  This reduces stale/forked mining when outbound peers are connected but lagging.
-  Set `-miningminsyncedoutboundpeers=0` only for intentional isolated lab mining.
-- `getblocktemplate` also enforces a validated-tip/header-lag bound on mainnet
-  by default (`-miningmaxheaderlag=8`) so miners do not work from templates that
-  are materially behind known headers. Set `-miningmaxheaderlag=0` only for
-  intentional isolated lab workflows.
-- Longpoll template requests re-check these guards on wakeup, so miners do not
-  continue receiving work after a connectivity or validation-lag regression.
+- Mining diagnostics report advisory mainnet thresholds of three outbound
+  peers, two synced outbound peers, one block of peer sync-height lag, and
+  three blocks of validated-tip/header lag. The corresponding options are
+  `-miningminoutboundpeers`, `-miningminsyncedoutboundpeers`,
+  `-miningmaxpeersyncheightlag`, and `-miningmaxheaderlag`.
+- These thresholds do not block `getblocktemplate`, including after a longpoll
+  wakeup. That is intentional: remote peer churn or header spam must not be
+  able to stop an unattended honest miner. A deficient diagnostic still means
+  increased stale/orphan risk and should trigger peer recovery and operator
+  alerting.
 - This runbook is archival-only (`prune=0`).
 - For newcomer/miner-first mode use `./contrib/devtools/gen-btx-node-conf.sh fast` (default `prune=4096`, scalable bootstrap).
 - For canonical/seed operators use `./contrib/devtools/gen-btx-node-conf.sh archival` (default `prune=0`, scalable bootstrap).

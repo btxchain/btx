@@ -1,3 +1,11 @@
+> **HISTORICAL — superseded by MatMul v4.7.** This dated design record is
+> retained for provenance. It is not the proposed launch contract. Epoch A uses
+> Profile 1 with ExactReplay and optional shadow proofs; later, separately
+> activated epochs require dual validation, Profile 1 proof authority, and only
+> then Profile 2 proof authority. See
+> [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md).
+> Mainnet Epoch A (v4 = BMX4C = RC) has a finite compiled candidate height and true source flags, so it would activate if merged unchanged; release remains NO-GO pending exact-final combined-tree CUDA+Metal evidence, reviewed schema-4 ASERT calibration, ratification re-affirmation, full closeout, and live-tip runway validation; all other transition heights remain disabled.
+
 # BTX MatMul Nonce-Bound Seed V2
 
 Date: 2026-06-07

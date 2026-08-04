@@ -17,7 +17,9 @@ class WalletShieldedChunkingTest(BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 1
         self.setup_clean_chain = True
-        self.extra_args = [[]]
+        # This test covers legacy transparent-input chunk planning. Keep the
+        # post-fork direct-shield restriction outside its height window.
+        self.extra_args = [["-regtestshieldedmatrictdisableheight=500"]]
         self.rpc_timeout = 300
 
     def skip_test_if_missing_module(self):

@@ -39,6 +39,22 @@ $ btx-cli -rpcclienttimeout=0 loadtxoutset /path/to/input
 After the snapshot has loaded, the syncing process of both the snapshot chain
 and the background IBD chain can be monitored with the `getchainstates` RPC.
 
+### Foreground tip catch-up vs background integrity re-sync
+
+`loadtxoutset` activates the snapshot chain immediately and also keeps a
+background chainstate that re-validates genesis→snapshot. Block download
+prioritizes the active (snapshot) chain to network tip first: while
+`IsInitialBlockDownload()` is still true on the active chain, `btxd` does
+**not** request genesis→snapshot historical blocks from peers. That keeps
+scarce / mostly-pruned block servers focused on `snapshot_height→tip`.
+
+Once the active chain leaves IBD (near tip), background historical downloads
+and integrity re-validation resume automatically. Letting the background seal
+is still required for full assumeutxo completion; it is just deferred until
+the node is tip-usable. A newer compiled snapshot height shrinks the
+foreground gap further — prefer the latest `m_assumeutxo_data` entry published
+for your binary.
+
 ### BTX fast-start workflow
 
 BTX uses assumeutxo to support a "download the binary and go" workflow for:

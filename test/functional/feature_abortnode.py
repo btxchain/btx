@@ -16,6 +16,10 @@ class AbortNodeTest(BitcoinTestFramework):
     def set_test_params(self):
         self.setup_clean_chain = True
         self.num_nodes = 2
+        # This test needs the equal-work fork to remain dormant until node 1
+        # gains one more block; randomized equal-work selection would trigger
+        # the expected abort inside connect_nodes() itself.
+        self.extra_args = [["-randomtiebreak=0"]] * self.num_nodes
 
     def setup_network(self):
         self.setup_nodes()

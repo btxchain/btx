@@ -15,7 +15,7 @@ from test_framework.util import (
 
 class CreateWalletWatchonlyTest(BitcoinTestFramework):
     def add_options(self, parser):
-        self.add_wallet_options(parser)
+        self.add_wallet_options(parser, legacy=False)
 
     def set_test_params(self):
         self.num_nodes = 1
@@ -26,18 +26,36 @@ class CreateWalletWatchonlyTest(BitcoinTestFramework):
     def run_test(self):
         node = self.nodes[0]
 
-        self.nodes[0].createwallet(wallet_name='default')
+        self.nodes[0].createwallet(wallet_name='default', descriptors=True)
         def_wallet = node.get_wallet_rpc('default')
 
         a1 = def_wallet.getnewaddress()
         wo_change = def_wallet.getnewaddress()
         wo_addr = def_wallet.getnewaddress()
 
-        self.nodes[0].createwallet(wallet_name='wo', disable_private_keys=True)
+        self.nodes[0].createwallet(wallet_name='wo', disable_private_keys=True, blank=True, descriptors=True)
         wo_wallet = node.get_wallet_rpc('wo')
 
-        wo_wallet.importpubkey(pubkey=def_wallet.getaddressinfo(wo_addr)['pubkey'])
-        wo_wallet.importpubkey(pubkey=def_wallet.getaddressinfo(wo_change)['pubkey'])
+        def fixed_p2mr_descriptor(address):
+            mldsa_key = def_wallet.exportpqkey(address, "ml-dsa-44")["key"]
+            slhdsa_key = def_wallet.exportpqkey(address, "slh-dsa-shake-128s")["key"]
+            descriptor = node.getdescriptorinfo(f"mr({mldsa_key},{slhdsa_key})")["descriptor"]
+            assert_equal(node.deriveaddresses(descriptor), [address])
+            return descriptor
+
+        imported = wo_wallet.importdescriptors([
+            {
+                "desc": fixed_p2mr_descriptor(wo_addr),
+                "timestamp": "now",
+                "active": False,
+            },
+            {
+                "desc": fixed_p2mr_descriptor(wo_change),
+                "timestamp": "now",
+                "active": False,
+            },
+        ])
+        assert_equal(imported, [{"success": True}, {"success": True}])
 
         # generate some btc for testing
         self.generatetoaddress(node, COINBASE_MATURITY + 1, a1)
@@ -46,51 +64,54 @@ class CreateWalletWatchonlyTest(BitcoinTestFramework):
         txid = def_wallet.sendtoaddress(wo_addr, 1)
         self.generate(self.nodes[0], 1)
 
-        # getbalance
-        self.log.info('include_watchonly should default to true for watch-only wallets')
-        self.log.info('Testing getbalance watch-only defaults')
+        # DescriptorScriptPubKeyMan owns every imported descriptor even when
+        # the wallet has no private keys. Balance/history RPCs therefore do not
+        # classify these entries as legacy ISMINE_WATCH_ONLY or filter them via
+        # include_watchonly. Funding RPCs below still require includeWatching
+        # because the transaction must be completed by the external signer.
+        self.log.info('Testing private-key-disabled descriptor balance semantics')
         assert_equal(wo_wallet.getbalance(), 1)
         assert_equal(len(wo_wallet.listtransactions()), 1)
-        assert_equal(wo_wallet.getbalance(include_watchonly=False), 0)
+        assert_equal(wo_wallet.getbalance(include_watchonly=False), 1)
 
         self.log.info('Test sending from a watch-only wallet raises RPC error')
         msg = "Error: Private keys are disabled for this wallet"
         assert_raises_rpc_error(-4, msg, wo_wallet.sendtoaddress, a1, 0.1)
         assert_raises_rpc_error(-4, msg, wo_wallet.sendmany, amounts={a1: 0.1})
 
-        self.log.info('Testing listreceivedbyaddress watch-only defaults')
+        self.log.info('Testing listreceivedbyaddress descriptor ownership')
         result = wo_wallet.listreceivedbyaddress()
         assert_equal(len(result), 1)
-        assert_equal(result[0]["involvesWatchonly"], True)
+        assert "involvesWatchonly" not in result[0]
         result = wo_wallet.listreceivedbyaddress(include_watchonly=False)
-        assert_equal(len(result), 0)
+        assert_equal(len(result), 1)
 
-        self.log.info('Testing listreceivedbylabel watch-only defaults')
+        self.log.info('Testing listreceivedbylabel descriptor ownership')
         result = wo_wallet.listreceivedbylabel()
         assert_equal(len(result), 1)
-        assert_equal(result[0]["involvesWatchonly"], True)
+        assert "involvesWatchonly" not in result[0]
         result = wo_wallet.listreceivedbylabel(include_watchonly=False)
-        assert_equal(len(result), 0)
+        assert_equal(len(result), 1)
 
-        self.log.info('Testing listtransactions watch-only defaults')
+        self.log.info('Testing listtransactions descriptor ownership')
         result = wo_wallet.listtransactions()
         assert_equal(len(result), 1)
-        assert_equal(result[0]["involvesWatchonly"], True)
+        assert "involvesWatchonly" not in result[0]
         result = wo_wallet.listtransactions(include_watchonly=False)
-        assert_equal(len(result), 0)
+        assert_equal(len(result), 1)
 
-        self.log.info('Testing listsinceblock watch-only defaults')
+        self.log.info('Testing listsinceblock descriptor ownership')
         result = wo_wallet.listsinceblock()
         assert_equal(len(result["transactions"]), 1)
-        assert_equal(result["transactions"][0]["involvesWatchonly"], True)
+        assert "involvesWatchonly" not in result["transactions"][0]
         result = wo_wallet.listsinceblock(include_watchonly=False)
-        assert_equal(len(result["transactions"]), 0)
+        assert_equal(len(result["transactions"]), 1)
 
-        self.log.info('Testing gettransaction watch-only defaults')
+        self.log.info('Testing gettransaction descriptor ownership')
         result = wo_wallet.gettransaction(txid)
-        assert_equal(result["details"][0]["involvesWatchonly"], True)
+        assert "involvesWatchonly" not in result["details"][0]
         result = wo_wallet.gettransaction(txid=txid, include_watchonly=False)
-        assert_equal(len(result["details"]), 0)
+        assert_equal(len(result["details"]), 1)
 
         self.log.info('Testing walletcreatefundedpsbt watch-only defaults')
         inputs = []

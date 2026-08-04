@@ -1641,10 +1641,12 @@ public:
 
 enum class MRLeafType {
     CHECKSIG,
+    COMMITMENT,
     MULTISIG_PQ,
     CLTV_MULTISIG_PQ,
     CSV_MULTISIG_PQ,
     HTLC,
+    HTLC_TX,
     REFUND,
     CTV_ONLY,
     CTV_CHECKSIG,
@@ -1668,6 +1670,7 @@ struct MRLeafSpec {
     int64_t sequence{0};
 
     uint256 ctv_hash{};
+    uint256 commitment_hash{};
 
     PQAlgorithm csfs_algo{PQAlgorithm::ML_DSA_44};
     int csfs_provider_index{-1};
@@ -1684,6 +1687,7 @@ std::vector<unsigned char> DummyP2MRPubkey(PQAlgorithm algo)
 bool LeafUsesPrimaryKey(const MRLeafSpec& leaf)
 {
     return leaf.type == MRLeafType::CHECKSIG ||
+           leaf.type == MRLeafType::HTLC_TX ||
            leaf.type == MRLeafType::REFUND ||
            leaf.type == MRLeafType::CTV_CHECKSIG ||
            leaf.type == MRLeafType::CSFS_VERIFY_CHECKSIG;
@@ -1713,6 +1717,11 @@ std::vector<unsigned char> BuildP2MRLeafScript(
     switch (leaf.type) {
     case MRLeafType::CHECKSIG:
         return BuildP2MRScript(leaf.algo, primary_pubkey);
+    case MRLeafType::COMMITMENT: {
+        CScript script;
+        script << OP_RETURN << ToByteVector(leaf.commitment_hash);
+        return {script.begin(), script.end()};
+    }
     case MRLeafType::MULTISIG_PQ:
         return BuildP2MRMultisigScript(leaf.multisig_threshold, multisig_pubkeys);
     case MRLeafType::CLTV_MULTISIG_PQ:
@@ -1721,6 +1730,8 @@ std::vector<unsigned char> BuildP2MRLeafScript(
         return BuildP2MRCSVMultisigScript(leaf.sequence, leaf.multisig_threshold, multisig_pubkeys);
     case MRLeafType::HTLC:
         return BuildP2MRHTLCLeaf(leaf.htlc_hash160, leaf.csfs_algo, csfs_pubkey);
+    case MRLeafType::HTLC_TX:
+        return BuildP2MRHTLCTxLeaf(leaf.htlc_hash160, leaf.algo, primary_pubkey);
     case MRLeafType::REFUND:
         return BuildP2MRRefundLeaf(leaf.locktime, leaf.algo, primary_pubkey);
     case MRLeafType::CTV_ONLY:
@@ -1850,7 +1861,13 @@ static std::optional<int64_t> GetP2MRLeafMaxSatSize(const MRLeafSpec& leaf, int6
     }
     case MRLeafType::CTV_ONLY:
         return script_push_size + control_push_size;
+    case MRLeafType::COMMITMENT:
+        // A commitment leaf is deliberately unspendable and contributes no
+        // candidate satisfaction. Other financial leaves determine the
+        // descriptor's maximum satisfaction size.
+        return 0;
     case MRLeafType::HTLC:
+    case MRLeafType::HTLC_TX:
     case MRLeafType::CSFS_ONLY:
     case MRLeafType::CSFS_VERIFY_CHECKSIG:
         return {};
@@ -1876,7 +1893,10 @@ static std::optional<int64_t> GetP2MRLeafMaxSatElems(const MRLeafSpec& leaf)
         return static_cast<int64_t>(leaf.multisig_algos.size()) + 2;
     case MRLeafType::CTV_ONLY:
         return 2;
+    case MRLeafType::COMMITMENT:
+        return 0;
     case MRLeafType::HTLC:
+    case MRLeafType::HTLC_TX:
     case MRLeafType::CSFS_ONLY:
         return 4;
     case MRLeafType::CSFS_VERIFY_CHECKSIG:
@@ -1950,6 +1970,9 @@ protected:
                 if (!render_key(leaf.algo, leaf.provider_index, leaf.fixed_pubkey, key_expr)) return false;
                 ret += key_expr;
                 break;
+            case MRLeafType::COMMITMENT:
+                ret += strprintf("commit(%s)", HexStr(leaf.commitment_hash));
+                break;
             case MRLeafType::MULTISIG_PQ:
             case MRLeafType::CLTV_MULTISIG_PQ:
             case MRLeafType::CSV_MULTISIG_PQ:
@@ -2002,6 +2025,10 @@ protected:
             case MRLeafType::HTLC:
                 if (!render_key(leaf.csfs_algo, leaf.csfs_provider_index, leaf.csfs_fixed_pubkey, csfs_key_expr)) return false;
                 ret += strprintf("htlc(%s,%s)", HexStr(leaf.htlc_hash160), csfs_key_expr);
+                break;
+            case MRLeafType::HTLC_TX:
+                if (!render_key(leaf.algo, leaf.provider_index, leaf.fixed_pubkey, key_expr)) return false;
+                ret += strprintf("htlc_tx(%s,%s)", HexStr(leaf.htlc_hash160), key_expr);
                 break;
             case MRLeafType::REFUND:
                 if (!render_key(leaf.algo, leaf.provider_index, leaf.fixed_pubkey, key_expr)) return false;
@@ -2060,6 +2087,51 @@ protected:
             }
             if (LeafUsesCSFSKey(leaf)) {
                 add_private_key(leaf.csfs_algo, leaf.csfs_provider_index, leaf.csfs_fixed_pubkey);
+            }
+        }
+    }
+
+    void ExpandP2MRSigningKeyAvailability(
+        int pos,
+        const DescriptorCache& read_cache,
+        std::set<std::vector<unsigned char>, ShortestVectorFirstComparator>& out) const override
+    {
+        auto add_available_key = [&](PQAlgorithm algo, int provider_index, const std::vector<unsigned char>& fixed_pubkey) {
+            // A fixed public key is not evidence that this descriptor owns its
+            // private key. External providers can still advertise one.
+            if (!fixed_pubkey.empty()) return;
+            if (provider_index < 0 || static_cast<size_t>(provider_index) >= m_pubkey_args.size()) return;
+
+            const auto* pqhd = dynamic_cast<const PQHDPubkeyProvider*>(m_pubkey_args[provider_index].get());
+            if (!pqhd || !pqhd->HasSeed()) return;
+
+            std::vector<unsigned char> pubkey;
+            if (!read_cache.GetCachedDerivedPQPubKey(
+                    algo, m_pubkey_args[provider_index]->GetExprIndex(), pos, pubkey)) {
+                return;
+            }
+            if (pubkey.size() != GetPQPubKeySize(algo)) return;
+            out.insert(std::move(pubkey));
+        };
+
+        for (const auto& leaf : m_leaf_specs) {
+            if (LeafUsesPrimaryKey(leaf)) {
+                add_available_key(leaf.algo, leaf.provider_index, leaf.fixed_pubkey);
+            }
+            if (LeafUsesMultisigKeys(leaf)) {
+                if (leaf.multisig_algos.size() != leaf.multisig_provider_indices.size() ||
+                    leaf.multisig_algos.size() != leaf.multisig_fixed_pubkeys.size()) {
+                    continue;
+                }
+                for (size_t key_pos{0}; key_pos < leaf.multisig_algos.size(); ++key_pos) {
+                    add_available_key(
+                        leaf.multisig_algos[key_pos],
+                        leaf.multisig_provider_indices[key_pos],
+                        leaf.multisig_fixed_pubkeys[key_pos]);
+                }
+            }
+            if (LeafUsesCSFSKey(leaf)) {
+                add_available_key(leaf.csfs_algo, leaf.csfs_provider_index, leaf.csfs_fixed_pubkey);
             }
         }
     }
@@ -3002,6 +3074,22 @@ std::vector<std::unique_ptr<DescriptorImpl>> ParseScript(uint32_t& key_exp_index
             return true;
         };
 
+        auto parse_commitment_hash = [&](Span<const char> arg, uint256& hash_out, std::string& hash_hex_out) -> bool {
+            const std::string hash_hex(arg.begin(), arg.end());
+            if (!IsHex(hash_hex) || hash_hex.size() != uint256::size() * 2) {
+                error = "mr(): commitment hash must be 32-byte hex";
+                return false;
+            }
+            const std::vector<unsigned char> hash_bytes = ParseHex(hash_hex);
+            if (hash_bytes.size() != uint256::size()) {
+                error = "mr(): commitment hash must be 32-byte hex";
+                return false;
+            }
+            hash_out = uint256{hash_bytes};
+            hash_hex_out = HexStr(hash_bytes);
+            return true;
+        };
+
         auto parse_hash160 = [&](Span<const char> arg, std::vector<unsigned char>& hash_out, std::string& hash_hex_out) -> bool {
             const std::string hash_hex(arg.begin(), arg.end());
             if (!IsHex(hash_hex) || hash_hex.size() != uint160::size() * 2) {
@@ -3137,6 +3225,17 @@ std::vector<std::unique_ptr<DescriptorImpl>> ParseScript(uint32_t& key_exp_index
             };
 
             auto leaf_expr = arg;
+            if (Func("commit", leaf_expr)) {
+                uint256 commitment_hash;
+                std::string commitment_hex;
+                if (!parse_commitment_hash(leaf_expr, commitment_hash, commitment_hex)) return false;
+                MRLeafSpec spec;
+                spec.type = MRLeafType::COMMITMENT;
+                spec.commitment_hash = commitment_hash;
+                return append_leaf(std::move(spec), strprintf("commit(%s)", commitment_hex), leaf_specs, leaf_exprs);
+            }
+
+            leaf_expr = arg;
             if (Func("ctv", leaf_expr)) {
                 uint256 ctv_hash;
                 std::string ctv_hex;
@@ -3351,6 +3450,41 @@ std::vector<std::unique_ptr<DescriptorImpl>> ParseScript(uint32_t& key_exp_index
                 spec.csfs_provider_index = oracle_key.provider_index;
                 spec.csfs_fixed_pubkey = std::move(oracle_key.fixed_pubkey);
                 return append_leaf(std::move(spec), strprintf("htlc(%s,%s)", hash_hex, oracle_key.rendered), leaf_specs, leaf_exprs);
+            }
+
+            leaf_expr = arg;
+            if (Func("htlc_tx", leaf_expr)) {
+                const auto hash_arg = Expr(leaf_expr);
+                if (hash_arg.empty()) {
+                    error = "mr(): htlc_tx() missing hash160 argument";
+                    return false;
+                }
+                if (!Const(",", leaf_expr)) {
+                    error = "mr(): htlc_tx() missing claimant key argument";
+                    return false;
+                }
+                const auto claimant_arg = Expr(leaf_expr);
+                if (claimant_arg.empty()) {
+                    error = "mr(): htlc_tx() claimant key argument is empty";
+                    return false;
+                }
+                if (!leaf_expr.empty()) {
+                    error = "mr(): htlc_tx() has unexpected trailing data";
+                    return false;
+                }
+                std::vector<unsigned char> hash160;
+                std::string hash_hex;
+                if (!parse_hash160(hash_arg, hash160, hash_hex)) return false;
+                ParsedMRKey claimant_key;
+                if (!parse_mr_key(claimant_arg, providers, claimant_key)) return false;
+
+                MRLeafSpec spec;
+                spec.type = MRLeafType::HTLC_TX;
+                spec.htlc_hash160 = std::move(hash160);
+                spec.algo = claimant_key.algo;
+                spec.provider_index = claimant_key.provider_index;
+                spec.fixed_pubkey = std::move(claimant_key.fixed_pubkey);
+                return append_leaf(std::move(spec), strprintf("htlc_tx(%s,%s)", hash_hex, claimant_key.rendered), leaf_specs, leaf_exprs);
             }
 
             leaf_expr = arg;

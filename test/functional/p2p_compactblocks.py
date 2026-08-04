@@ -8,6 +8,7 @@ import random
 from test_framework.blocktools import (
     COINBASE_MATURITY,
     NORMAL_GBT_REQUEST_PARAMS,
+    REGTEST_GENERIC_P2P_MATMUL_ARGS,
     add_witness_commitment,
     create_block,
 )
@@ -145,8 +146,12 @@ class CompactBlocksTest(BitcoinTestFramework):
     def set_test_params(self):
         self.setup_clean_chain = True
         self.num_nodes = 1
+        # create_block() does not attach Freivalds product payloads; keep the
+        # body-payload / v4 requirements inactive (regtest-only). Consensus
+        # unchanged — see REGTEST_GENERIC_P2P_MATMUL_ARGS.
         self.extra_args = [[
             "-acceptnonstdtxn=1",
+            *REGTEST_GENERIC_P2P_MATMUL_ARGS,
         ]]
         self.utxos = []
 
@@ -264,6 +269,11 @@ class CompactBlocksTest(BitcoinTestFramework):
         test_node.send_and_ping(msg_sendcmpct(announce=False, version=2))
         check_announcement_of_new_block(node, test_node, lambda p: "cmpctblock" not in p.last_message and "headers" in p.last_message)
 
+    def test_invalid_sendcmpct_announce(self):
+        bad_peer = self.nodes[0].add_p2p_connection(TestP2PConn())
+        with self.nodes[0].assert_debug_log(["invalid sendcmpct announce field"]):
+            bad_peer.send_await_disconnect(msg_sendcmpct(announce=2, version=2))
+
     # This test actually causes bitcoind to (reasonably!) disconnect us, so do this last.
     def test_invalid_cmpctblock_message(self):
         self.generate(self.nodes[0], COINBASE_MATURITY + 1)
@@ -275,6 +285,10 @@ class CompactBlocksTest(BitcoinTestFramework):
         # This index will be too high
         prefilled_txn = PrefilledTransaction(1, block.vtx[0])
         cmpct_block.prefilled_txn = [prefilled_txn]
+        self.segwit_node.send_message(
+            msg_headers(headers=[CBlockHeader(block)])
+        )
+        self.segwit_node.wait_for_getdata([block.sha256])
         self.segwit_node.send_await_disconnect(msg_cmpctblock(cmpct_block))
         assert_equal(int(self.nodes[0].getbestblockhash(), 16), block.hashPrevBlock)
 
@@ -535,6 +549,8 @@ class CompactBlocksTest(BitcoinTestFramework):
         # Send compact block
         comp_block = HeaderAndShortIDs()
         comp_block.initialize_from_block(block, prefill_list=[0], use_witness=True)
+        test_node.send_message(msg_headers(headers=[CBlockHeader(block)]))
+        test_node.wait_for_getdata([block.sha256])
         test_node.send_and_ping(msg_cmpctblock(comp_block.to_p2p()))
         absolute_indexes = []
         with p2p_lock:
@@ -576,6 +592,8 @@ class CompactBlocksTest(BitcoinTestFramework):
         # Send compact block
         comp_block = HeaderAndShortIDs()
         comp_block.initialize_from_block(block, prefill_list=[0], use_witness=True)
+        test_node.send_message(msg_headers(headers=[CBlockHeader(block)]))
+        test_node.wait_for_getdata([block.sha256])
         test_node.send_and_ping(msg_cmpctblock(comp_block.to_p2p()))
         absolute_indexes = []
         with p2p_lock:
@@ -775,6 +793,8 @@ class CompactBlocksTest(BitcoinTestFramework):
         comp_block = HeaderAndShortIDs()
         comp_block.initialize_from_block(block, prefill_list=list(range(len(block.vtx))), use_witness=True)
         msg = msg_cmpctblock(comp_block.to_p2p())
+        test_node.send_message(msg_headers(headers=[CBlockHeader(block)]))
+        test_node.wait_for_getdata([block.sha256])
         test_node.send_and_ping(msg)
 
         # Check that the tip didn't advance
@@ -793,6 +813,17 @@ class CompactBlocksTest(BitcoinTestFramework):
         node = self.nodes[0]
         assert len(self.utxos)
 
+        # A peer that delivers a valid block becomes eligible for
+        # high-bandwidth compact relay. The node must not accept an
+        # unsolicited compact block merely because the same hash is already
+        # in flight from a different peer.
+        high_bandwidth_block = self.build_block_on_tip(node)
+        delivery_peer.send_and_ping(msg_block(high_bandwidth_block))
+        assert_equal(
+            int(node.getbestblockhash(), 16),
+            high_bandwidth_block.sha256,
+        )
+
         def announce_cmpct_block(node, peer):
             utxo = self.utxos.pop(0)
             block = self.build_block_with_transactions(node, utxo, 5)
@@ -800,6 +831,8 @@ class CompactBlocksTest(BitcoinTestFramework):
             cmpct_block = HeaderAndShortIDs()
             cmpct_block.initialize_from_block(block)
             msg = msg_cmpctblock(cmpct_block.to_p2p())
+            peer.send_message(msg_headers(headers=[CBlockHeader(block)]))
+            peer.wait_for_getdata([block.sha256])
             peer.send_and_ping(msg)
             with p2p_lock:
                 assert "getblocktxn" in peer.last_message
@@ -881,6 +914,8 @@ class CompactBlocksTest(BitcoinTestFramework):
             cmpct_block = HeaderAndShortIDs()
             cmpct_block.initialize_from_block(block)
             msg = msg_cmpctblock(cmpct_block.to_p2p())
+            peer.send_message(msg_headers(headers=[CBlockHeader(block)]))
+            peer.wait_for_getdata([block.sha256])
             peer.send_and_ping(msg)
             with p2p_lock:
                 assert "getblocktxn" in peer.last_message
@@ -888,11 +923,8 @@ class CompactBlocksTest(BitcoinTestFramework):
 
         for name, peer in [("delivery", delivery_peer), ("inbound", inbound_peer), ("outbound", outbound_peer)]:
             self.log.info(f"Setting {name} as high bandwidth peer")
-            block, cmpct_block = announce_cmpct_block(node, peer, 1)
-            msg = msg_blocktxn()
-            msg.block_transactions.blockhash = block.sha256
-            msg.block_transactions.transactions = block.vtx[1:]
-            peer.send_and_ping(msg)
+            block = self.build_block_on_tip(node)
+            peer.send_and_ping(msg_block(block))
             assert_equal(int(node.getbestblockhash(), 16), block.sha256)
             peer.clear_getblocktxn()
 
@@ -1002,6 +1034,9 @@ class CompactBlocksTest(BitcoinTestFramework):
 
         # The previous test will lead to a disconnection. Reconnect before continuing.
         self.segwit_node = self.nodes[0].add_p2p_connection(TestP2PConn())
+
+        self.log.info("Testing invalid announce field in sendcmpct message...")
+        self.test_invalid_sendcmpct_announce()
 
         self.log.info("Testing invalid index in cmpctblock message...")
         self.test_invalid_cmpctblock_message()

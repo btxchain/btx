@@ -1,0 +1,460 @@
+{
+  "evidence_kind": "cuda_complete_lifecycle_asert_calibration_contention_supplement",
+  "date": "2026-08-01",
+  "machine_class": {
+    "os": "Linux x86_64",
+    "gpu_class": "NVIDIA consumer Blackwell-class discrete GPU, 16 GiB VRAM, CC 12.0",
+    "note": "Sanitized machine-class only; no hostname, account, or private path."
+  },
+  "source_revision": "c4ac2e439ac496245f12dcbf8b42c9575247dbe9",
+  "execution_policy": "strict-device",
+  "profile": 1,
+  "mode": "production",
+  "matmul_dim": 4096,
+  "activation_height_regtest": 6,
+  "nodes": 2,
+  "contention": {
+    "single_gpu_host": true,
+    "competing_tip_every_n_attempts": 2,
+    "phases_observed": [
+      "competing_tip",
+      "steady_mine_relay"
+    ]
+  },
+  "ratification": {
+    "BTX_MATMUL_NO_INVERSION_GATE_RATIFIED": false,
+    "BTX_MATMUL_V47_GPU_LIFECYCLE_GATE_RATIFIED": false,
+    "installs_rc_asert_ratio": false,
+    "operationally_ready_claim": false,
+    "note": "Contention supplement is calibration only; gates remain false; NOT activation-complete."
+  },
+  "component_definition": [
+    "candidate_execution_s",
+    "candidate_queue_wait_s",
+    "winner_reseal_s",
+    "reseal_queue_wait_s",
+    "winner_authority_handoff_s",
+    "authenticated_relay_s",
+    "tip_validation_s",
+    "validation_queue_wait_s"
+  ],
+  "measurement_notes": [
+    "Complete samples require per-block counter advancement on miner candidate, reseal, authority consume, validator authenticated relay, and tip validation.",
+    "Core samples omit winner-authority handoff when the empty production-golden manifest prevents a production capability token; they are not treated as activation-ready complete lifecycle samples.",
+    "RPC complete_lifecycle_readiness sums latest lane components and omits winner-authority handoff; campaign complete sum includes handoff and is fail-closed.",
+    "correlated_end_to_end_sample remains false in RPC; campaign samples are counter-correlated across two nodes for one mined/synced tip.",
+    "Missing authenticated-relay observations are recorded as incomplete; none are invented."
+  ],
+  "gaps_vs_activation_gates": [
+    "winner_authority_handoff unavailable until reviewed production goldens + startup canary mint a process capability",
+    "BTX_MATMUL_V47_GPU_LIFECYCLE_GATE_RATIFIED remains false",
+    "BTX_MATMUL_NO_INVERSION_GATE_RATIFIED remains false",
+    "IBD multi-peer soak not claimed by this campaign"
+  ],
+  "identity": {
+    "resolved_provider": "cuda_rc_exact_fused_extract",
+    "device_architecture_class": "sm_120",
+    "driver_identity_class": "13020",
+    "runtime_identity_class": "13030",
+    "canary_outcome": "missing_golden",
+    "cpu_gemm_fallback_calls": null
+  },
+  "wall_clock_s": 1623.1,
+  "attempts": 11,
+  "complete_sample_count": 0,
+  "core_sample_count_without_authority": 6,
+  "incomplete_sample_count": 5,
+  "complete_lifecycle_summary_s": {
+    "n": 0,
+    "min": null,
+    "p50": null,
+    "p95": null,
+    "p99": null,
+    "max": null,
+    "mean": null
+  },
+  "core_lifecycle_summary_s": {
+    "n": 6,
+    "min": 96.45532735500001,
+    "p50": 96.587353282,
+    "p95": 96.87268256,
+    "p99": 96.87268256,
+    "max": 96.87268256,
+    "mean": 96.60263581733334
+  },
+  "component_summaries_s": {
+    "candidate_execution_s": {
+      "n": 0,
+      "min": null,
+      "p50": null,
+      "p95": null,
+      "p99": null,
+      "max": null,
+      "mean": null
+    },
+    "candidate_queue_wait_s": {
+      "n": 0,
+      "min": null,
+      "p50": null,
+      "p95": null,
+      "p99": null,
+      "max": null,
+      "mean": null
+    },
+    "winner_reseal_s": {
+      "n": 0,
+      "min": null,
+      "p50": null,
+      "p95": null,
+      "p99": null,
+      "max": null,
+      "mean": null
+    },
+    "reseal_queue_wait_s": {
+      "n": 0,
+      "min": null,
+      "p50": null,
+      "p95": null,
+      "p99": null,
+      "max": null,
+      "mean": null
+    },
+    "winner_authority_handoff_s": {
+      "n": 0,
+      "min": null,
+      "p50": null,
+      "p95": null,
+      "p99": null,
+      "max": null,
+      "mean": null
+    },
+    "authenticated_relay_s": {
+      "n": 0,
+      "min": null,
+      "p50": null,
+      "p95": null,
+      "p99": null,
+      "max": null,
+      "mean": null
+    },
+    "tip_validation_s": {
+      "n": 0,
+      "min": null,
+      "p50": null,
+      "p95": null,
+      "p99": null,
+      "max": null,
+      "mean": null
+    },
+    "validation_queue_wait_s": {
+      "n": 0,
+      "min": null,
+      "p50": null,
+      "p95": null,
+      "p99": null,
+      "max": null,
+      "mean": null
+    }
+  },
+  "core_component_summaries_s": {
+    "candidate_execution_s": {
+      "n": 6,
+      "min": 32.117361705,
+      "p50": 32.263398496,
+      "p95": 32.397487028,
+      "p99": 32.397487028,
+      "max": 32.397487028,
+      "mean": 32.27290609866667
+    },
+    "candidate_queue_wait_s": {
+      "n": 6,
+      "min": 5.39e-07,
+      "p50": 6.02e-07,
+      "p95": 8.95e-07,
+      "p99": 8.95e-07,
+      "max": 8.95e-07,
+      "mean": 6.418333333333333e-07
+    },
+    "winner_reseal_s": {
+      "n": 6,
+      "min": 32.033915275,
+      "p50": 32.113934329,
+      "p95": 32.326610736,
+      "p99": 32.326610736,
+      "max": 32.326610736,
+      "mean": 32.14670391533333
+    },
+    "reseal_queue_wait_s": {
+      "n": 6,
+      "min": 5.57e-07,
+      "p50": 6.86e-07,
+      "p95": 1.164e-06,
+      "p99": 1.164e-06,
+      "max": 1.164e-06,
+      "mean": 8.208333333333333e-07
+    },
+    "authenticated_relay_s": {
+      "n": 6,
+      "min": 0.000342848,
+      "p50": 0.000412217,
+      "p95": 0.000544637,
+      "p99": 0.000544637,
+      "max": 0.000544637,
+      "mean": 0.0004201496666666667
+    },
+    "tip_validation_s": {
+      "n": 6,
+      "min": 32.033311055,
+      "p50": 32.156034042,
+      "p95": 32.297690179,
+      "p99": 32.297690179,
+      "max": 32.297690179,
+      "mean": 32.18260287133334
+    },
+    "validation_queue_wait_s": {
+      "n": 6,
+      "min": 9.59e-07,
+      "p50": 1.33e-06,
+      "p95": 1.696e-06,
+      "p99": 1.696e-06,
+      "max": 1.696e-06,
+      "mean": 1.3196666666666666e-06
+    }
+  },
+  "samples": [],
+  "core_samples_without_authority": [
+    {
+      "attempt": 1,
+      "phase": "steady_mine_relay",
+      "height": 6,
+      "block_hash": "b305081a931bb6f439c99e9ee0d8f5b4ee3bc87e15bf66baaf427825a20b4a69",
+      "counter_gaps": [
+        "miner_authority_consumed: 0 -> 0 (need +1)"
+      ],
+      "counter_gaps_core": [],
+      "complete": false,
+      "core_complete_without_authority": true,
+      "authority_measured": false,
+      "missing_fields": [],
+      "components": {
+        "candidate_execution_s": 32.263398496,
+        "candidate_queue_wait_s": 5.39e-07,
+        "winner_reseal_s": 32.128214468,
+        "reseal_queue_wait_s": 1.143e-06,
+        "winner_authority_handoff_s": 0.0,
+        "authenticated_relay_s": 0.000544637,
+        "tip_validation_s": 32.251936139,
+        "validation_queue_wait_s": 1.353e-06
+      },
+      "core_lifecycle_s": 96.64409677500001,
+      "complete_lifecycle_s": null,
+      "rpc_assess_lifecycle_s": 32.252482129,
+      "rpc_complete_sample_set": false,
+      "rpc_correlated_end_to_end_sample": false,
+      "rpc_operationally_ready": false,
+      "rpc_omits_winner_authority_handoff": true,
+      "miner_provider": "",
+      "reason": "authority_handoff_unavailable_without_production_canary"
+    },
+    {
+      "attempt": 3,
+      "phase": "steady_mine_relay",
+      "height": 8,
+      "block_hash": "a92eb5d85075a389177e0ee0d89546c73e4e5524bc4ed5193f88d297bc55fdb5",
+      "counter_gaps": [
+        "miner_authority_consumed: 0 -> 0 (need +1)"
+      ],
+      "counter_gaps_core": [],
+      "complete": false,
+      "core_complete_without_authority": true,
+      "authority_measured": false,
+      "missing_fields": [],
+      "components": {
+        "candidate_execution_s": 32.117361705,
+        "candidate_queue_wait_s": 6.11e-07,
+        "winner_reseal_s": 32.053094674,
+        "reseal_queue_wait_s": 6.81e-07,
+        "winner_authority_handoff_s": 0.0,
+        "authenticated_relay_s": 0.000423497,
+        "tip_validation_s": 32.297690179,
+        "validation_queue_wait_s": 1.408e-06
+      },
+      "core_lifecycle_s": 96.468572755,
+      "complete_lifecycle_s": null,
+      "rpc_assess_lifecycle_s": 32.298115084,
+      "rpc_complete_sample_set": false,
+      "rpc_correlated_end_to_end_sample": false,
+      "rpc_operationally_ready": false,
+      "rpc_omits_winner_authority_handoff": true,
+      "miner_provider": "",
+      "reason": "authority_handoff_unavailable_without_production_canary"
+    },
+    {
+      "attempt": 5,
+      "phase": "steady_mine_relay",
+      "height": 10,
+      "block_hash": "e62363896509e7163a9abf4f790d4f827bd4095c1061858d5afd5a67ca08eaea",
+      "counter_gaps": [
+        "miner_authority_consumed: 0 -> 0 (need +1)"
+      ],
+      "counter_gaps_core": [],
+      "complete": false,
+      "core_complete_without_authority": true,
+      "authority_measured": false,
+      "missing_fields": [],
+      "components": {
+        "candidate_execution_s": 32.307694826,
+        "candidate_queue_wait_s": 6.03e-07,
+        "winner_reseal_s": 32.113934329,
+        "reseal_queue_wait_s": 5.57e-07,
+        "winner_authority_handoff_s": 0.0,
+        "authenticated_relay_s": 0.000384813,
+        "tip_validation_s": 32.033311055,
+        "validation_queue_wait_s": 1.172e-06
+      },
+      "core_lifecycle_s": 96.45532735500001,
+      "complete_lifecycle_s": null,
+      "rpc_assess_lifecycle_s": 32.03369703999999,
+      "rpc_complete_sample_set": false,
+      "rpc_correlated_end_to_end_sample": false,
+      "rpc_operationally_ready": false,
+      "rpc_omits_winner_authority_handoff": true,
+      "miner_provider": "",
+      "reason": "authority_handoff_unavailable_without_production_canary"
+    },
+    {
+      "attempt": 7,
+      "phase": "steady_mine_relay",
+      "height": 12,
+      "block_hash": "a758115ccf8b99a5ddedbdafea4c2553defa7f1ec4db936044103a4f77693570",
+      "counter_gaps": [
+        "miner_authority_consumed: 0 -> 0 (need +1)"
+      ],
+      "counter_gaps_core": [],
+      "complete": false,
+      "core_complete_without_authority": true,
+      "authority_measured": false,
+      "missing_fields": [],
+      "components": {
+        "candidate_execution_s": 32.397487028,
+        "candidate_queue_wait_s": 6.02e-07,
+        "winner_reseal_s": 32.033915275,
+        "reseal_queue_wait_s": 6.86e-07,
+        "winner_authority_handoff_s": 0.0,
+        "authenticated_relay_s": 0.000342848,
+        "tip_validation_s": 32.156034042,
+        "validation_queue_wait_s": 1.696e-06
+      },
+      "core_lifecycle_s": 96.587782177,
+      "complete_lifecycle_s": null,
+      "rpc_assess_lifecycle_s": 70.719241542,
+      "rpc_complete_sample_set": false,
+      "rpc_correlated_end_to_end_sample": false,
+      "rpc_operationally_ready": false,
+      "rpc_omits_winner_authority_handoff": true,
+      "miner_provider": "",
+      "reason": "authority_handoff_unavailable_without_production_canary"
+    },
+    {
+      "attempt": 9,
+      "phase": "steady_mine_relay",
+      "height": 14,
+      "block_hash": "d55d8629fdc585335717d60260ae9ef5c90c1305f8a63a80ed36ff308d2cb349",
+      "counter_gaps": [
+        "miner_authority_consumed: 0 -> 0 (need +1)"
+      ],
+      "counter_gaps_core": [],
+      "complete": false,
+      "core_complete_without_authority": true,
+      "authority_measured": false,
+      "missing_fields": [],
+      "components": {
+        "candidate_execution_s": 32.200178426,
+        "candidate_queue_wait_s": 8.95e-07,
+        "winner_reseal_s": 32.326610736,
+        "reseal_queue_wait_s": 6.94e-07,
+        "winner_authority_handoff_s": 0.0,
+        "authenticated_relay_s": 0.000412886,
+        "tip_validation_s": 32.060148315,
+        "validation_queue_wait_s": 1.33e-06
+      },
+      "core_lifecycle_s": 96.587353282,
+      "complete_lifecycle_s": null,
+      "rpc_assess_lifecycle_s": 70.623425487,
+      "rpc_complete_sample_set": false,
+      "rpc_correlated_end_to_end_sample": false,
+      "rpc_operationally_ready": false,
+      "rpc_omits_winner_authority_handoff": true,
+      "miner_provider": "",
+      "reason": "authority_handoff_unavailable_without_production_canary"
+    },
+    {
+      "attempt": 11,
+      "phase": "steady_mine_relay",
+      "height": 16,
+      "block_hash": "25d1691bfaf924a8d32cd3305a3fb38ee63b282e3eb183590e852a4a1d65e001",
+      "counter_gaps": [
+        "miner_authority_consumed: 0 -> 0 (need +1)"
+      ],
+      "counter_gaps_core": [],
+      "complete": false,
+      "core_complete_without_authority": true,
+      "authority_measured": false,
+      "missing_fields": [],
+      "components": {
+        "candidate_execution_s": 32.351316111,
+        "candidate_queue_wait_s": 6.01e-07,
+        "winner_reseal_s": 32.22445401,
+        "reseal_queue_wait_s": 1.164e-06,
+        "winner_authority_handoff_s": 0.0,
+        "authenticated_relay_s": 0.000412217,
+        "tip_validation_s": 32.296497498,
+        "validation_queue_wait_s": 9.59e-07
+      },
+      "core_lifecycle_s": 96.87268256,
+      "complete_lifecycle_s": null,
+      "rpc_assess_lifecycle_s": 70.85977363,
+      "rpc_complete_sample_set": false,
+      "rpc_correlated_end_to_end_sample": false,
+      "rpc_operationally_ready": false,
+      "rpc_omits_winner_authority_handoff": true,
+      "miner_provider": "",
+      "reason": "authority_handoff_unavailable_without_production_canary"
+    }
+  ],
+  "incomplete_samples": [
+    {
+      "attempt": 2,
+      "phase": "competing_tip",
+      "reason": "exception:RuntimeError",
+      "detail": "unexpected generatetodescriptor result: []"
+    },
+    {
+      "attempt": 4,
+      "phase": "competing_tip",
+      "reason": "exception:RuntimeError",
+      "detail": "unexpected generatetodescriptor result: []"
+    },
+    {
+      "attempt": 6,
+      "phase": "competing_tip",
+      "reason": "exception:RuntimeError",
+      "detail": "unexpected generatetodescriptor result: []"
+    },
+    {
+      "attempt": 8,
+      "phase": "competing_tip",
+      "reason": "exception:RuntimeError",
+      "detail": "unexpected generatetodescriptor result: []"
+    },
+    {
+      "attempt": 10,
+      "phase": "competing_tip",
+      "reason": "exception:RuntimeError",
+      "detail": "unexpected generatetodescriptor result: []"
+    }
+  ],
+  "parent_campaign": "lifecycle-campaign.json",
+  "label": "core_without_authority_contention_supplement",
+  "activation_complete": false
+}

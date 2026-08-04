@@ -191,8 +191,13 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager, TestChain100Setup)
         LOCK(::cs_main);
         c2.InitCoinsCache(1 << 23);
         c2.CoinsTip().SetBestBlock(active_tip->GetBlockHash());
-        c2.setBlockIndexCandidates.insert(manager.m_blockman.LookupBlockIndex(active_tip->GetBlockHash()));
+        for (Chainstate* cs : manager.GetAll()) {
+            cs->ClearBlockIndexCandidates();
+        }
         c2.LoadChainTip();
+        for (Chainstate* cs : manager.GetAll()) {
+            cs->PopulateBlockIndexCandidates();
+        }
     }
     BlockValidationState _;
     BOOST_CHECK(c2.ActivateBestChain(_, nullptr));
@@ -546,6 +551,71 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_activate_snapshot, SnapshotTestSetup)
     this->SetupSnapshot();
 }
 
+//! Candidate sets must stay empty while a live snapshot's chain tip is loaded,
+//! then be rebuilt after the snapshot/background roles become final.
+BOOST_FIXTURE_TEST_CASE(chainstatemanager_activate_snapshot_candidate_lifecycle, SnapshotTestSetup)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+
+    // Reach the regtest assumeutxo height, then simulate the normal case where
+    // historical validation has only reached genesis when the snapshot loads.
+    mineBlocks(10);
+    BOOST_REQUIRE(CreateAndActivateUTXOSnapshot(
+        this, NoMalleation, /*reset_chainstate=*/true));
+
+    LOCK(::cs_main);
+    CBlockIndex* snapshot_base{chainman.ActiveTip()};
+    BOOST_REQUIRE(snapshot_base != nullptr);
+    BOOST_CHECK_EQUAL(snapshot_base, chainman.GetSnapshotBaseBlock());
+    BOOST_CHECK(chainman.IsSnapshotActive());
+    BOOST_CHECK_EQUAL(chainman.GetAll().size(), 2);
+    BOOST_CHECK_EQUAL(
+        chainman.ActiveChainstate().setBlockIndexCandidates.count(snapshot_base), 1);
+
+    for (Chainstate* chainstate : chainman.GetAll()) {
+        BOOST_CHECK(!chainstate->setBlockIndexCandidates.empty());
+        if (chainstate != &chainman.ActiveChainstate()) {
+            // The background chainstate must validate its way to the base; it
+            // cannot inherit the snapshot chainstate's assumed-valid shortcut.
+            BOOST_CHECK_EQUAL(chainstate->setBlockIndexCandidates.count(snapshot_base), 0);
+        }
+    }
+}
+
+//! A BTX shielded-section rejection happens after the snapshot Chainstate is
+//! managed but before it becomes active. The old active chainstate must retain
+//! a usable candidate set, including for an in-memory snapshot with no DB dir.
+BOOST_FIXTURE_TEST_CASE(chainstatemanager_failed_snapshot_restores_candidates, SnapshotTestSetup)
+{
+    mineBlocks(10);
+
+    // SimulateNodeRestart reconstructs the manager with the production
+    // fail-closed default for unpinned shielded snapshots.
+    this->SimulateNodeRestart();
+    this->LoadVerifyActivateChainstate();
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    BOOST_CHECK(!chainman.m_options.allow_unpinned_shielded_snapshot);
+
+    BOOST_REQUIRE(!CreateAndActivateUTXOSnapshot(
+        this, NoMalleation, /*reset_chainstate=*/false,
+        /*in_memory_chainstate=*/true));
+
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK(!chainman.IsSnapshotActive());
+        BOOST_CHECK_EQUAL(chainman.GetAll().size(), 1);
+        Chainstate& active{chainman.ActiveChainstate()};
+        BOOST_REQUIRE(active.m_chain.Tip() != nullptr);
+        BOOST_CHECK(!active.setBlockIndexCandidates.empty());
+        BOOST_CHECK_EQUAL(active.setBlockIndexCandidates.count(active.m_chain.Tip()), 1);
+        BOOST_CHECK(!node::FindSnapshotChainstateDir(chainman.m_options.datadir));
+    }
+
+    // Candidate restoration is operational, not just structural.
+    mineBlocks(1);
+    BOOST_CHECK_EQUAL(WITH_LOCK(::cs_main, return chainman.ActiveHeight()), 111);
+}
+
 //! Test LoadBlockIndex behavior when multiple chainstates are in use.
 //!
 //! - First, verify that setBlockIndexCandidates is as expected when using a single,
@@ -588,7 +658,12 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_loadblockindex, TestChain100Setup)
             BOOST_CHECK(cs->setBlockIndexCandidates.empty());
         }
 
-        WITH_LOCK(::cs_main, chainman.LoadBlockIndex());
+        WITH_LOCK(::cs_main, {
+            chainman.LoadBlockIndex();
+            for (Chainstate* cs : chainman.GetAll()) {
+                cs->PopulateBlockIndexCandidates();
+            }
+        });
     };
 
     // Ensure that without any assumed-valid BlockIndex entries, only the current tip is
@@ -640,8 +715,8 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_loadblockindex, TestChain100Setup)
     // check contents below.
     reload_all_block_indexes();
 
-    // The fully validated chain should only have the current validated tip and
-    // the assumed valid base as candidates, blocks 90 and 110. Specifically:
+    // The fully validated chain should only have the current validated tip
+    // as a candidate (block 90). Specifically:
     //
     // - It does not have blocks 0-89 because they contain less work than the
     //   chain tip.
@@ -649,20 +724,13 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_loadblockindex, TestChain100Setup)
     // - It has block 90 because it has data and equal work to the chain tip,
     //   (since it is the chain tip).
     //
-    // - It does not have blocks 91-109 because they do not contain data.
-    //
-    // - It has block 110 even though it does not have data, because
-    //   LoadBlockIndex has a special case to always add the snapshot block as a
-    //   candidate. The special case is only actually intended to apply to the
-    //   snapshot chainstate cs2, not the background chainstate cs1, but it is
-    //   written broadly and applies to both.
+    // - It does not have blocks 91-110 because they do not contain data.
     //
     // - It does not have any blocks after height 110 because cs1 is a background
     //   chainstate, and only blocks where are ancestors of the snapshot block
     //   are added as candidates for the background chainstate.
-    BOOST_CHECK_EQUAL(cs1.setBlockIndexCandidates.size(), 2);
+    BOOST_CHECK_EQUAL(cs1.setBlockIndexCandidates.size(), 1);
     BOOST_CHECK_EQUAL(cs1.setBlockIndexCandidates.count(validated_tip), 1);
-    BOOST_CHECK_EQUAL(cs1.setBlockIndexCandidates.count(assumed_base), 1);
 
     // The assumed-valid tolerant chain has the assumed valid base as a
     // candidate, but otherwise has none of the assumed-valid (which do not
@@ -4020,6 +4088,12 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_args, BasicTestingSetup)
     BOOST_CHECK(!get_opts({"-minimumchainwork=xyz"}));                                                               // invalid hex characters
     BOOST_CHECK(!get_opts({"-minimumchainwork=01234567890123456789012345678901234567890123456789012345678901234"})); // > 64 hex chars
 
+    BOOST_CHECK_EQUAL(get_valid_opts({}).prevoutfetch_threads_num, DEFAULT_PREVOUTFETCH_THREADS);
+    BOOST_CHECK_EQUAL(get_valid_opts({"-prevoutfetchthreads=0"}).prevoutfetch_threads_num, 0);
+    BOOST_CHECK_EQUAL(get_valid_opts({"-prevoutfetchthreads=3"}).prevoutfetch_threads_num, 3);
+    BOOST_CHECK_EQUAL(get_valid_opts({"-prevoutfetchthreads=100"}).prevoutfetch_threads_num, MAX_PREVOUTFETCH_THREADS);
+    BOOST_CHECK(!get_opts({"-prevoutfetchthreads=-1"}));
+
     // test deep-reorg defense profiles, defaults, and overrides
     const auto default_reorg_opts = get_valid_opts({});
     BOOST_CHECK(default_reorg_opts.reorg_protection_profile == kernel::ReorgProtectionProfile::EMERGENCY);
@@ -4124,6 +4198,7 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_args, BasicTestingSetup)
     // test -matmulvalidation
     BOOST_CHECK_EQUAL(get_valid_opts({}).matmul_validation_mode, kernel::MatMulValidationMode::CONSENSUS);
     BOOST_CHECK_EQUAL(get_valid_opts({"-matmulvalidation=consensus"}).matmul_validation_mode, kernel::MatMulValidationMode::CONSENSUS);
+    BOOST_CHECK_EQUAL(get_valid_opts({"-matmulvalidation=trusted"}).matmul_validation_mode, kernel::MatMulValidationMode::TRUSTED);
     BOOST_CHECK_EQUAL(get_valid_opts({"-matmulvalidation=economic"}).matmul_validation_mode, kernel::MatMulValidationMode::ECONOMIC);
     BOOST_CHECK_EQUAL(get_valid_opts({"-matmulvalidation=spv"}).matmul_validation_mode, kernel::MatMulValidationMode::SPV);
     BOOST_CHECK(!get_opts({"-matmulvalidation=invalid"}));

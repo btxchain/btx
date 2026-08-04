@@ -11,17 +11,21 @@
 """
 
 from test_framework.blocktools import (
+    REGTEST_GENERIC_P2P_MATMUL_ARGS,
     create_block,
     create_coinbase,
 )
 from test_framework.test_framework import BitcoinTestFramework
-from test_framework.util import assert_equal
+from test_framework.util import assert_equal, assert_raises_rpc_error
 
 class GetChainTipsTest (BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 4
+        self.setup_clean_chain = True
+        self.extra_args = [[*REGTEST_GENERIC_P2P_MATMUL_ARGS] for _ in range(self.num_nodes)]
 
     def run_test(self):
+        self.generate(self.nodes[0], 200)
         self.log.info("Test getchaintips behavior with two chains of different length")
         tips = self.nodes[0].getchaintips()
         assert_equal(len(tips), 1)
@@ -72,18 +76,17 @@ class GetChainTipsTest (BitcoinTestFramework):
         invalid_block = create_block(tip, create_coinbase(start_height+1, nValue=100), block_time)
         invalid_block.solve()
 
-        block_time += 1
-        block2 = create_block(invalid_block.sha256, create_coinbase(2), block_time, version=4)
-        block2.solve()
-
-        self.log.info("Submit headers-only chain")
-        n0.submitheader(invalid_block.serialize().hex())
-        n0.submitheader(block2.serialize().hex())
+        self.log.info("MatMul chains reject header-only submission")
+        assert_raises_rpc_error(
+            -8,
+            "submitheader is not supported on MatMul proof-of-work chains",
+            n0.submitheader,
+            invalid_block.serialize().hex(),
+        )
         tips = n0.getchaintips()
-        assert_equal(len(tips), 3)
-        assert_equal(tips[0]['status'], 'headers-only')
+        assert_equal(len(tips), 2)
 
-        self.log.info("Submit invalid block that invalidates the headers-only chain")
+        self.log.info("Submit invalid full block and expose it as an invalid tip")
         n0.submitblock(invalid_block.serialize().hex())
         tips = n0.getchaintips()
         assert_equal(len(tips), 3)

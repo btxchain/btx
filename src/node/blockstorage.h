@@ -55,15 +55,18 @@ class BlockTreeDB : public CDBWrapper
 {
 public:
     using CDBWrapper::CDBWrapper;
-    bool WriteBatchSync(const std::vector<std::pair<int, const CBlockFileInfo*>>& fileInfo, int nLastFile, const std::vector<const CBlockIndex*>& blockinfo, const std::unordered_map<std::string, node::PruneLockInfo>& prune_locks);
+    bool WriteBatchSync(const std::vector<std::pair<int, const CBlockFileInfo*>>& fileInfo, int nLastFile, const std::vector<const CBlockIndex*>& blockinfo, const std::unordered_map<std::string, node::PruneLockInfo>& prune_locks, const std::optional<uint256>& matmul_replay_context = std::nullopt);
     bool ReadBlockFileInfo(int nFile, CBlockFileInfo& info);
     bool ReadLastBlockFile(int& nFile);
-    bool WriteReindexing(bool fReindexing);
+    bool WriteReindexing(
+        bool fReindexing,
+        const std::optional<uint256>& matmul_replay_context = std::nullopt);
     void ReadReindexing(bool& fReindexing);
     bool WritePruneLock(const std::string& name, const node::PruneLockInfo&);
     bool DeletePruneLock(const std::string& name);
     bool WriteParkedReorgBranches(const std::set<uint256>& roots);
     bool ReadParkedReorgBranches(std::set<uint256>& roots);
+    bool ReadMatMulReplayContext(uint256& context);
     bool WriteFlag(const std::string& name, bool fValue);
     bool ReadFlag(const std::string& name, bool& fValue);
     bool LoadBlockIndexGuts(const Consensus::Params& consensusParams, std::function<CBlockIndex*(const uint256&)> insertBlockIndex, const util::SignalInterrupt& interrupt)
@@ -130,6 +133,63 @@ using BlockMap = std::unordered_map<uint256, CBlockIndex, BlockHasher>;
  */
 extern bool g_random_tiebreak_enabled;
 extern uint256 g_tiebreak_seed;
+
+/**
+ * Versioned identity of every consensus/configuration input that selects the
+ * MatMul predicate whose ExactReplay result may be cached in CBlockIndex.
+ * Increment the internal schema domain whenever code changes that predicate
+ * without changing one of the serialized parameters below.
+ */
+[[nodiscard]] uint256 ComputeMatMulReplayAuthorityContext(
+    const CChainParams& params);
+
+/**
+ * Fingerprint of the DERIVED MatMul replay episode shape, sampled at a fixed
+ * probe ladder of heights (pre-activation, ENC_RC activation, and epoch
+ * boundaries spanning the consensus-pinned growth table), plus the resolved
+ * ENC_RC_COUPLED shape.
+ *
+ * Mixed into ComputeMatMulReplayAuthorityContext. Unlike the raw schedule
+ * knobs, this also binds derivation inputs that live in code rather than in
+ * Consensus::Params (kRCGrowthScheduleEnabled, the epoch-0 dials, the frozen
+ * dim ratios, the epoch-invariant fallback rules, the coupled shape
+ * constructors), so a change to the derivation itself invalidates cached
+ * BLOCK_EXACT_REPLAY_VERIFIED verdicts. Exposed for tests.
+ */
+[[nodiscard]] uint256 ComputeMatMulReplayEpisodeShapeFingerprint(
+    const CChainParams& params);
+
+enum class MatMulReplayContextDisposition : uint8_t {
+    MATCHED,
+    MIGRATED,
+    REINDEX_REQUIRED,
+};
+
+struct MatMulReplayContextMigration {
+    MatMulReplayContextDisposition disposition{
+        MatMulReplayContextDisposition::MATCHED};
+    size_t cleared_trusted_status{0};
+};
+
+/**
+ * Reconcile persisted replay authority with the current consensus context.
+ *
+ * A missing/mismatched context may be adopted only when no persisted replay
+ * authority exists. Once an authority bit has been written, the block may also
+ * have been promoted to BLOCK_VALID_TRANSACTIONS/SCRIPTS and contributed
+ * authenticated chainwork under the old predicate; clearing only the authority
+ * bit cannot undo that state safely. Such a datadir must be reindexed.
+ *
+ * With a matching context, ExactReplay authority is preserved and local-policy
+ * trusted-attestation status is cleared on every startup. The reindex-required
+ * result is detected before any index or dirty-set mutation.
+ */
+[[nodiscard]] MatMulReplayContextMigration ReconcileMatMulReplayAuthorityContext(
+    std::span<CBlockIndex* const> indices,
+    const std::optional<uint256>& persisted_context,
+    const uint256& current_context,
+    std::set<CBlockIndex*>& dirty_indices)
+    EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
 //! Enable/disable randomized equal-work tie-breaking and (re)seed it. Call once
 //! at startup before the block index is populated. A zero/absent seed argument
@@ -211,6 +271,10 @@ private:
     bool LoadBlockIndex(const std::optional<uint256>& snapshot_blockhash)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
+    /** Flush a block or undo file and always emit the supplied notification on failure. */
+    [[nodiscard]] bool FlushFile(const FlatFileSeq& file_seq, const FlatFilePos& pos,
+                                 bool finalize, const bilingual_str& flush_error_message);
+
     /** Return false if block file or undo file flushing fails. */
     [[nodiscard]] bool FlushBlockFile(int blockfile_num, bool fFinalize, bool finalize_undo);
 
@@ -227,7 +291,7 @@ private:
      * separator fields (BLOCK_SERIALIZATION_HEADER_SIZE).
      */
     [[nodiscard]] FlatFilePos FindNextBlockPos(unsigned int nAddSize, unsigned int nHeight, uint64_t nTime);
-    [[nodiscard]] bool FlushChainstateBlockFile(int tip_height);
+    [[nodiscard]] bool FlushChainstateBlockFile(int tip_height, bool snapshot_chainstate);
     bool FindUndoPos(BlockValidationState& state, int nFile, FlatFilePos& pos, unsigned int nAddSize);
 
     AutoFile OpenUndoFile(const FlatFilePos& pos, bool fReadOnly = false) const;
@@ -362,8 +426,13 @@ public:
      * Pruned nodes may have entries where B is missing data.
      */
     std::multimap<CBlockIndex*, CBlockIndex*> m_blocks_unlinked;
+    void AddUnlinkedBlock(CBlockIndex* block) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     std::unique_ptr<BlockTreeDB> m_block_tree_db GUARDED_BY(::cs_main);
+
+    /** Written atomically with any replay-bit migration. */
+    std::optional<uint256> m_pending_matmul_replay_context
+        GUARDED_BY(::cs_main);
 
     bool WriteBlockIndexDB() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool LoadBlockIndexDB(const std::optional<uint256>& snapshot_blockhash)

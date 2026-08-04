@@ -55,7 +55,11 @@ class MempoolPersistTest(BitcoinTestFramework):
 
     def set_test_params(self):
         self.num_nodes = 3
-        self.extra_args = [[], ["-persistmempool=0"], []]
+        self.extra_args = [
+            ["-acceptnonstdtxn=1"],
+            ["-persistmempool=0", "-acceptnonstdtxn=1"],
+            ["-acceptnonstdtxn=1"],
+        ]
 
     def run_test(self):
         self.mini_wallet = MiniWallet(self.nodes[2])
@@ -116,7 +120,7 @@ class MempoolPersistTest(BitcoinTestFramework):
         self.stop_nodes()
         # Give this node a head-start, so we can be "extra-sure" that it didn't load anything later
         # Also don't store the mempool, to keep the datadir clean
-        self.start_node(1, extra_args=["-persistmempool=0"])
+        self.start_node(1, extra_args=["-persistmempool=0", "-acceptnonstdtxn=1"])
         self.start_node(0)
         self.start_node(2)
         assert self.nodes[0].getmempoolinfo()["loaded"]  # start_node is blocking on the mempool being loaded
@@ -155,7 +159,7 @@ class MempoolPersistTest(BitcoinTestFramework):
 
         self.log.debug("Stop-start node0 with -persistmempool=0. Verify that it doesn't load its mempool.dat file.")
         self.stop_nodes()
-        self.start_node(0, extra_args=["-persistmempool=0"])
+        self.start_node(0, extra_args=["-persistmempool=0", "-acceptnonstdtxn=1"])
         assert self.nodes[0].getmempoolinfo()["loaded"]
         assert_equal(len(self.nodes[0].getrawmempool()), 0)
 
@@ -184,7 +188,7 @@ class MempoolPersistTest(BitcoinTestFramework):
         self.log.debug("Stop nodes, make node1 use mempool.dat from node0. Verify it has 7 transactions")
         os.rename(mempooldat0, mempooldat1)
         self.stop_nodes()
-        self.start_node(1, extra_args=["-persistmempool"])
+        self.start_node(1, extra_args=["-persistmempool", "-acceptnonstdtxn=1"])
         assert self.nodes[1].getmempoolinfo()["loaded"]
         assert_equal(len(self.nodes[1].getrawmempool()), 7)
 
@@ -214,7 +218,7 @@ class MempoolPersistTest(BitcoinTestFramework):
         self.mini_wallet.send_self_transfer(from_node=node0)
 
         # shutdown, then startup with wallet disabled
-        self.restart_node(0, extra_args=["-disablewallet"])
+        self.restart_node(0, extra_args=["-disablewallet", "-acceptnonstdtxn=1"])
 
         # check that txn gets broadcast due to unbroadcast logic
         conn = node0.add_p2p_connection(P2PTxInvStore())

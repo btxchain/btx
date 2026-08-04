@@ -41,6 +41,7 @@ from itertools import product
 import time
 
 from test_framework.blocktools import (
+    REGTEST_GENERIC_P2P_MATMUL_ARGS,
     create_block,
     create_coinbase,
 )
@@ -99,6 +100,21 @@ class BIP68_112_113Test(BitcoinTestFramework):
         self.noban_tx_relay = True
         self.extra_args = [[
             f'-testactivationheight=csv@{CSV_ACTIVATION_HEIGHT}',
+            # The CSV fixture intentionally uses legacy scriptSig programs so
+            # it can prepend OP_CSV operands. Their output form is nonstandard
+            # under BTX's P2MR-only relay policy, which is orthogonal to the
+            # consensus activation rules exercised here.
+            '-acceptnonstdtxn=1',
+            # All 83 independent fixture outputs must enter the same block so
+            # their relative-height reference is identical.
+            '-blockmaxtemplatetxs=0',
+            # This test intentionally hand-builds blocks to exercise CSV
+            # consensus transitions. Python blocktools cannot construct the
+            # production product-matrix body payload, so keep that independent
+            # MatMul regime inactive through the existing regtest-only fixture.
+            # MatMul PoW itself remains enabled and every synthetic header is
+            # still solved by CBlock.solve().
+            *REGTEST_GENERIC_P2P_MATMUL_ARGS,
         ]]
         self.supports_cli = False
 
@@ -182,7 +198,17 @@ class BIP68_112_113Test(BitcoinTestFramework):
         """Sends blocks to test node. Syncs and verifies that tip has advanced to most recent block.
 
         Call with success = False if the tip shouldn't advance to the most recent block."""
-        self.helper_peer.send_blocks_and_test(blocks, self.nodes[0], success=success, reject_reason=reject_reason)
+        # CSV does not test headers-first download. Send each synthetic block
+        # exactly once so an unexpected consensus rejection cannot trigger an
+        # unbounded getdata/resend loop and multi-gigabyte debug log.
+        self.helper_peer.send_blocks_and_test(
+            blocks,
+            self.nodes[0],
+            success=success,
+            reject_reason=reject_reason,
+            force_send=True,
+            timeout=30,
+        )
 
     def run_test(self):
         self.helper_peer = self.nodes[0].add_p2p_connection(P2PDataStore())

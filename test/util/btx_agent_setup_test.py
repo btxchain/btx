@@ -336,9 +336,9 @@ class BTXAgentSetupTest(unittest.TestCase):
             manifest_path = self._write_manifest(root, archive_path)
             checksum_path = root / "SHA256SUMS"
             snapshot_manifest_path = root / "snapshot.manifest.json"
-            api_prefix = "https://api.github.com/repos/btxchain/btx-node"
+            api_prefix = "https://api.github.com/repos/example/btx"
             manifest_url = (
-                "https://github.com/btxchain/btx-node/releases/download/v29.2/"
+                "https://github.com/example/btx/releases/download/v29.2/"
                 f"{manifest_path.name}"
             )
             release_url = f"{api_prefix}/releases/tags/v29.2"
@@ -405,7 +405,7 @@ class BTXAgentSetupTest(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             command = recorded_runs[0]
             self.assertIn(
-                "--snapshot-manifest=https://github.com/btxchain/btx-node/releases/download/v29.2/snapshot.manifest.json",
+                "--snapshot-manifest=https://github.com/example/btx/releases/download/v29.2/snapshot.manifest.json",
                 command,
             )
 
@@ -474,6 +474,199 @@ class BTXAgentSetupTest(unittest.TestCase):
                     f"--results-dir={datadir / 'mining-ops'}",
                 ],
             )
+
+    def test_start_mining_runs_supervisor_after_bootstrap(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            archive_path = self._build_fake_archive(root)
+            manifest_path = self._write_manifest(root, archive_path)
+            install_dir = root / "install"
+            datadir = root / "datadir"
+            results_dir = root / "operator" / "mining"
+            recorded: list[tuple[list[str], dict[str, object]]] = []
+
+            original_run = self.module.subprocess.run
+            try:
+                def fake_run(cmd, check, **kwargs):
+                    recorded.append((list(cmd), {"check": check, **kwargs}))
+                    class Result:
+                        returncode = 0
+                        stdout = (
+                            '{"blocks": 319, "headers": 319, "initialblockdownload": false}'
+                            if cmd[-1] == "getblockchaininfo"
+                            else "command output\n"
+                        )
+                        stderr = ""
+                    return Result()
+
+                self.module.subprocess.run = fake_run
+                output = io.StringIO()
+                errors = io.StringIO()
+                with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+                    exit_code = self.module.main(
+                        [
+                            "--release-manifest",
+                            str(manifest_path),
+                            "--platform",
+                            "linux-x86_64",
+                            "--install-dir",
+                            str(install_dir),
+                            "--preset",
+                            "miner",
+                            "--chain",
+                            "regtest",
+                            "--datadir",
+                            str(datadir),
+                            "--start-mining",
+                            "--mining-wallet",
+                            "worker",
+                            "--mining-results-dir",
+                            str(results_dir),
+                            "--mining-arg=--rpcport=19000",
+                            "--mining-arg=--no-default-bootstrap-peers",
+                            "--json",
+                        ]
+                    )
+            finally:
+                self.module.subprocess.run = original_run
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(len(recorded), 3)
+            faststart_command, faststart_kwargs = recorded[0]
+            mining_sync_command, mining_sync_kwargs = recorded[1]
+            mining_command, mining_kwargs = recorded[2]
+            self.assertIn("btx-faststart.py", faststart_command[1])
+            self.assertTrue(faststart_kwargs["capture_output"])
+            self.assertEqual(
+                mining_sync_command,
+                [
+                    str(pathlib.Path(install_dir / "btx-29.2" / "bin" / "btx-cli")),
+                    f"-datadir={datadir}",
+                    f"-conf={datadir / 'faststart' / 'faststart.conf'}",
+                    "-chain=regtest",
+                    "-rpcclienttimeout=30",
+                    "-rpcport=19000",
+                    "getblockchaininfo",
+                ],
+            )
+            self.assertTrue(mining_sync_kwargs["capture_output"])
+            self.assertEqual(
+                mining_command,
+                [
+                    str(ROOT / "contrib" / "mining" / "start-live-mining.sh"),
+                    f"--datadir={datadir}",
+                    f"--conf={datadir / 'faststart' / 'faststart.conf'}",
+                    "--chain=regtest",
+                    f"--cli={pathlib.Path(install_dir / 'btx-29.2' / 'bin' / 'btx-cli')}",
+                    f"--daemon={pathlib.Path(install_dir / 'btx-29.2' / 'bin' / 'btxd')}",
+                    "--wallet=worker",
+                    f"--results-dir={results_dir}",
+                    "--rpcport=19000",
+                    "--no-default-bootstrap-peers",
+                ],
+            )
+            self.assertTrue(mining_kwargs["capture_output"])
+            summary = json.loads(output.getvalue())
+            self.assertTrue(summary["mining_started"])
+            self.assertTrue(summary["mining_sync_ready"])
+            self.assertEqual(summary["start_live_mining_command"], mining_command)
+            self.assertEqual(summary["mining_results_dir"], str(results_dir))
+            self.assertEqual(errors.getvalue(), "command output\ncommand output\n")
+
+    def test_start_mining_rejects_incompatible_modes(self):
+        cases = (
+            ["--start-mining"],
+            ["--preset=service", "--start-mining"],
+            ["--preset=miner", "--start-mining", "--no-start-daemon"],
+            ["--preset=miner", "--start-mining", "--follow"],
+            ["--preset=service", "--mining-arg=--rpcport=19000"],
+            ["--preset=service", "--mining-wallet=worker"],
+            ["--preset=miner", "--mining-wallet="],
+            ["--preset=miner", "--mining-results-dir="],
+            ["--preset=miner", "--mining-arg=--results-dir=/tmp/mining"],
+            ["--preset=miner", "--mining-arg=--wallet=worker"],
+            ["--preset=miner", "--mining-arg=--help"],
+            ["--preset=miner", "--mining-arg=-h"],
+            ["--preset=miner", "--mining-arg=--foreground"],
+            ["--preset=miner", "--mining-arg=--rpcpassword=secret"],
+            ["--preset=miner", "--mining-arg=--address=external"],
+            ["--preset=miner", "--mining-arg=--rpcport"],
+            ["--preset=miner", "--mining-arg=--no-default-bootstrap-peers=1"],
+            ["--preset=miner", "--mining-arg=--unknown=value"],
+        )
+        for argv in cases:
+            with self.subTest(argv=argv), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as raised:
+                    self.module.main(list(argv))
+                self.assertEqual(raised.exception.code, 2)
+
+    def test_start_mining_resolves_detached_process_paths(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            archive_path = self._build_fake_archive(root)
+            manifest_path = self._write_manifest(root, archive_path)
+            recorded: list[list[str]] = []
+
+            def fake_run(cmd, check, **kwargs):
+                recorded.append(list(cmd))
+                return mock.Mock(
+                    returncode=0,
+                    stdout=(
+                        '{"blocks": 319, "headers": 319, "initialblockdownload": false}'
+                        if cmd[-1] == "getblockchaininfo"
+                        else ""
+                    ),
+                    stderr="",
+                )
+
+            original_cwd = pathlib.Path.cwd()
+            try:
+                os.chdir(root)
+                absolute_root = pathlib.Path.cwd()
+                with mock.patch.object(
+                    self.module.subprocess,
+                    "run",
+                    side_effect=fake_run,
+                ), contextlib.redirect_stdout(io.StringIO()):
+                    exit_code = self.module.main(
+                        [
+                            "--release-manifest",
+                            str(manifest_path),
+                            "--platform=linux-x86_64",
+                            "--install-dir=install",
+                            "--preset=miner",
+                            "--datadir=data",
+                            "--start-mining",
+                            "--mining-results-dir=results",
+                            "--mining-arg=--node-pidfile=node.pid",
+                            "--json",
+                        ]
+                    )
+            finally:
+                os.chdir(original_cwd)
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(len(recorded), 3)
+            mining_command = recorded[2]
+            self.assertIn(f"--datadir={absolute_root / 'data'}", mining_command)
+            self.assertIn(f"--conf={absolute_root / 'data' / 'faststart' / 'faststart.conf'}", mining_command)
+            self.assertIn(f"--cli={absolute_root / 'install' / 'btx-29.2' / 'bin' / 'btx-cli'}", mining_command)
+            self.assertIn(f"--daemon={absolute_root / 'install' / 'btx-29.2' / 'bin' / 'btxd'}", mining_command)
+            self.assertIn(f"--results-dir={absolute_root / 'results'}", mining_command)
+            self.assertIn(f"--node-pidfile={absolute_root / 'node.pid'}", mining_command)
+
+    def test_wait_for_mining_sync_fails_closed_on_moving_tip(self):
+        unsynced = mock.Mock(
+            returncode=0,
+            stdout='{"blocks": 302, "headers": 319, "initialblockdownload": false}',
+            stderr="",
+        )
+        with mock.patch.object(self.module.subprocess, "run", return_value=unsynced):
+            with self.assertRaisesRegex(
+                TimeoutError,
+                r"blocks=302 headers=319 initialblockdownload=False",
+            ):
+                self.module.wait_for_mining_sync(["btx-cli"], timeout_secs=0)
 
     def test_remote_release_requires_signature_unless_overridden(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -553,7 +746,7 @@ class BTXAgentSetupTest(unittest.TestCase):
             manifest_path = self._write_manifest(root, archive_path)
             checksum_path = root / "SHA256SUMS"
             snapshot_manifest_path = root / "snapshot.manifest.json"
-            api_prefix = "https://api.github.com/repos/btxchain/btx-node"
+            api_prefix = "https://api.github.com/repos/example/btx"
             release_url = f"{api_prefix}/releases/tags/v29.2"
             asset_urls = {
                 manifest_path.name: f"{api_prefix}/releases/assets/1",
@@ -586,7 +779,7 @@ class BTXAgentSetupTest(unittest.TestCase):
                         exit_code = self.module.main(
                             [
                                 "--repo",
-                                "btxchain/btx-node",
+                                "example/btx",
                                 "--release-tag",
                                 "v29.2",
                                 "--platform",
@@ -630,9 +823,9 @@ class BTXAgentSetupTest(unittest.TestCase):
             manifest_path = self._write_manifest(root, archive_path)
             checksum_path = root / "SHA256SUMS"
             snapshot_manifest_path = root / "snapshot.manifest.json"
-            api_prefix = "https://api.github.com/repos/btxchain/btx-node"
+            api_prefix = "https://api.github.com/repos/example/btx"
             manifest_url = (
-                "https://github.com/btxchain/btx-node/releases/download/v29.2/"
+                "https://github.com/example/btx/releases/download/v29.2/"
                 f"{manifest_path.name}"
             )
             release_url = f"{api_prefix}/releases/tags/v29.2"
@@ -733,7 +926,7 @@ class BTXAgentSetupTest(unittest.TestCase):
                 self.module.shutil.which = fake_which
                 self.module.subprocess.run = fake_run
                 output = self.module.download_to_path(
-                    "https://api.github.com/repos/btxchain/btx-node/releases/assets/123",
+                    "https://api.github.com/repos/example/btx/releases/assets/123",
                     destination,
                     headers={"Authorization": "Bearer token", "Accept": "application/octet-stream"},
                 )
@@ -775,7 +968,7 @@ class BTXAgentSetupTest(unittest.TestCase):
             self.module.shutil.which = fake_which
             self.module.subprocess.run = fake_run
             payload = self.module.load_json_source(
-                "https://api.github.com/repos/btxchain/btx-node/releases/assets/999",
+                "https://api.github.com/repos/example/btx/releases/assets/999",
                 headers=self.module.github_download_headers("token"),
             )
         finally:
@@ -813,7 +1006,7 @@ class BTXAgentSetupTest(unittest.TestCase):
             self.module.shutil.which = fake_which
             self.module.subprocess.run = fake_run
             payload = self.module.load_json_source(
-                "https://api.github.com/repos/btxchain/btx-node/releases/tags/v29.2",
+                "https://api.github.com/repos/example/btx/releases/tags/v29.2",
                 headers=self.module.github_api_headers("token", accept=self.module.GITHUB_JSON_ACCEPT),
             )
         finally:

@@ -6,6 +6,7 @@
 #include <clientversion.h>
 #include <common/args.h>
 #include <compat/compat.h>
+#include <consensus/consensus.h>
 #include <cstdint>
 #include <crypto/ml_kem.h>
 #include <net.h>
@@ -18,6 +19,7 @@
 #include <span.h>
 #include <streams.h>
 #include <test/util/random.h>
+#include <test/util/net.h>
 #include <test/util/setup_common.h>
 #include <test/util/validation.h>
 #include <util/strencodings.h>
@@ -31,6 +33,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <thread>
 
 using namespace std::literals;
 using namespace util::hex_literals;
@@ -135,6 +138,52 @@ BOOST_AUTO_TEST_CASE(cnode_simple_test)
     BOOST_CHECK(pnode4->IsInboundConn() == true);
     BOOST_CHECK(pnode4->m_inbound_onion == true);
     BOOST_CHECK_EQUAL(pnode4->ConnectedThroughNetwork(), Network::NET_ONION);
+}
+
+BOOST_AUTO_TEST_CASE(connman_runtime_service_updates_and_disconnect_all)
+{
+    auto& connman{static_cast<ConnmanTestMsg&>(*m_node.connman)};
+    const ServiceFlags matmul_services{static_cast<ServiceFlags>(
+        static_cast<uint64_t>(NODE_MATMUL_CONSENSUS) |
+        static_cast<uint64_t>(NODE_MATMUL_ATTESTATION_ARCHIVE))};
+
+    connman.RemoveLocalServices(static_cast<ServiceFlags>(~uint64_t{0}));
+    connman.AddLocalServices(matmul_services);
+
+    // Snapshot completion and runtime readiness loss update this atomic from
+    // independent threads. Repeatedly race the two disjoint modifications and
+    // require neither update to be lost.
+    for (int round{0}; round < 128; ++round) {
+        connman.RemoveLocalServices(NODE_NETWORK);
+        connman.AddLocalServices(matmul_services);
+        std::thread add_network{[&] { connman.AddLocalServices(NODE_NETWORK); }};
+        std::thread remove_matmul{[&] {
+            connman.RemoveLocalServices(matmul_services);
+        }};
+        add_network.join();
+        remove_matmul.join();
+        const ServiceFlags services{connman.GetLocalServices()};
+        BOOST_CHECK((services & NODE_NETWORK) != 0);
+        BOOST_CHECK((services & matmul_services) == 0);
+    }
+
+    in_addr loopback;
+    loopback.s_addr = htonl(0x7f000001);
+    CAddress address{CService{loopback, 18444}, NODE_NONE};
+    auto* handshaking = new CNode{
+        9001, nullptr, address, 0, 0, CAddress{}, "",
+        ConnectionType::INBOUND, false, 0};
+    auto* connected = new CNode{
+        9002, nullptr, address, 0, 0, CAddress{}, "",
+        ConnectionType::INBOUND, false, 0};
+    connected->fSuccessfullyConnected = true;
+    connman.AddTestNode(*handshaking);
+    connman.AddTestNode(*connected);
+
+    BOOST_CHECK_EQUAL(connman.DisconnectAllNodes(), 2U);
+    BOOST_CHECK(handshaking->fDisconnect);
+    BOOST_CHECK(connected->fDisconnect);
+    connman.ClearTestNodes();
 }
 
 BOOST_AUTO_TEST_CASE(cnetaddr_basic)
@@ -795,6 +844,37 @@ BOOST_AUTO_TEST_CASE(LocalAddress_BasicLifecycle)
     BOOST_CHECK(!IsLocal(addr));
     BOOST_CHECK(AddLocal(addr, 1000));
     BOOST_CHECK(IsLocal(addr));
+
+    RemoveLocal(addr);
+    BOOST_CHECK(!IsLocal(addr));
+}
+
+BOOST_AUTO_TEST_CASE(LocalAddress_nScore_Overflow)
+{
+    g_reachable_nets.Add(NET_IPV4);
+    CService addr{UtilBuildAddress(0x002, 0x001, 0x001, 0x001), 1000}; // 2.1.1.1:1000
+
+    // SeenLocal increments when nScore is below max
+    const int initial_score = 1000;
+    BOOST_REQUIRE(AddLocal(addr, initial_score));
+    BOOST_REQUIRE(IsLocal(addr));
+    BOOST_CHECK_EQUAL(GetnScore(addr), initial_score);
+
+    // SeenLocal increments the score
+    BOOST_CHECK(SeenLocal(addr));
+    BOOST_CHECK_EQUAL(GetnScore(addr), initial_score + 1);
+
+    // AddLocal saturates when updating an existing entry at max.
+    BOOST_REQUIRE(AddLocal(addr, std::numeric_limits<int>::max()));
+    BOOST_CHECK_EQUAL(GetnScore(addr), std::numeric_limits<int>::max());
+    BOOST_REQUIRE(AddLocal(addr, std::numeric_limits<int>::max()));
+    BOOST_CHECK_EQUAL(GetnScore(addr), std::numeric_limits<int>::max());
+
+    // SeenLocal saturates at max.
+    for (int i = 0; i < 2; ++i) {
+        BOOST_CHECK(SeenLocal(addr));
+        BOOST_CHECK_EQUAL(GetnScore(addr), std::numeric_limits<int>::max());
+    }
 
     RemoveLocal(addr);
     BOOST_CHECK(!IsLocal(addr));
@@ -1703,6 +1783,79 @@ BOOST_AUTO_TEST_CASE(v2transport_pqonly_enforcement_test)
     }
 
     gArgs.ForceSetArg("-v2pqonly", "0"); // restore default for subsequent tests
+}
+
+namespace {
+//! Feed a single V1 message header of the given command type and declared body
+//! size to a fresh V1Transport and report whether the transport accepted it
+//! (true) or rejected it as a protocol/size error (false). Only the header is
+//! fed; readHeader validates the declared size before any body is expected, so
+//! this isolates the command-specific size ceiling (audit P1-1).
+bool V1HeaderSizeAccepted(const std::string& msg_type, unsigned int declared_size)
+{
+    V1Transport transport{/*node_id=*/NodeId{0}};
+    CMessageHeader hdr(Params().MessageStart(), msg_type.c_str(), declared_size);
+    DataStream ser{};
+    ser << hdr;
+    std::vector<uint8_t> bytes(UCharCast(ser.data()), UCharCast(ser.data()) + ser.size());
+    Span<const uint8_t> span{bytes};
+    // ReceivedBytes returns false iff readHeader hit an error (bad magic / size
+    // too large). The magic is correct here, so the boolean is exactly the
+    // size-ceiling verdict.
+    return transport.ReceivedBytes(span);
+}
+} // namespace
+
+//! Audit P1-1: block-bearing commands (`block`, `blocktxn`) get the 24 MB
+//! MAX_BLOCK_MESSAGE_LENGTH ceiling so a consensus-valid block (up to
+//! MAX_BLOCK_SERIALIZED_SIZE) stays relayable, while every other command keeps
+//! the 16 MB MAX_PROTOCOL_MESSAGE_LENGTH ceiling so a peer cannot force 24 MB of
+//! buffering/parsing on an arbitrary message. This pins both ceilings and the
+//! command-specific split at the exact boundary values.
+BOOST_AUTO_TEST_CASE(v1transport_block_message_size_ceiling)
+{
+    // The two compile-time ceilings must bracket a maximum serialized block, or
+    // the whole scheme is unsound. (Mirrors the static_assert in net.cpp.)
+    static_assert(MAX_PROTOCOL_MESSAGE_LENGTH < MAX_BLOCK_MESSAGE_LENGTH);
+    static_assert(MAX_BLOCK_SERIALIZED_SIZE <= MAX_BLOCK_MESSAGE_LENGTH);
+
+    // A full-size block (and a full-size blocktxn) must be admissible over the
+    // block-bearing path -- this is the P0.5 relayability guarantee.
+    BOOST_CHECK(V1HeaderSizeAccepted(NetMsgType::BLOCK, MAX_BLOCK_SERIALIZED_SIZE));
+    BOOST_CHECK(V1HeaderSizeAccepted(NetMsgType::BLOCK, MAX_BLOCK_MESSAGE_LENGTH));
+    BOOST_CHECK(V1HeaderSizeAccepted(NetMsgType::BLOCKTXN, MAX_BLOCK_MESSAGE_LENGTH));
+    // One byte over the block-bearing ceiling is rejected.
+    BOOST_CHECK(!V1HeaderSizeAccepted(NetMsgType::BLOCK, MAX_BLOCK_MESSAGE_LENGTH + 1));
+    BOOST_CHECK(!V1HeaderSizeAccepted(NetMsgType::BLOCKTXN, MAX_BLOCK_MESSAGE_LENGTH + 1));
+
+    // An ordinary command keeps the 16 MB ceiling: it is rejected at exactly the
+    // sizes a block is accepted at (proving the larger ceiling is block-specific,
+    // audit P1-1 -- raising the GLOBAL limit is the DoS-envelope expansion we
+    // must avoid).
+    BOOST_CHECK(V1HeaderSizeAccepted(NetMsgType::ADDR, MAX_PROTOCOL_MESSAGE_LENGTH));
+    BOOST_CHECK(!V1HeaderSizeAccepted(NetMsgType::ADDR, MAX_PROTOCOL_MESSAGE_LENGTH + 1));
+    BOOST_CHECK(!V1HeaderSizeAccepted(NetMsgType::ADDR, MAX_BLOCK_SERIALIZED_SIZE));
+    // An unknown/arbitrary command likewise gets only the ordinary ceiling.
+    BOOST_CHECK(V1HeaderSizeAccepted("arbitrarycmd", MAX_PROTOCOL_MESSAGE_LENGTH));
+    BOOST_CHECK(!V1HeaderSizeAccepted("arbitrarycmd", MAX_PROTOCOL_MESSAGE_LENGTH + 1));
+}
+
+//! WP-8 / C4 residual (design D.7 #1): Transport::MaxSendablePayloadBytes must
+//! expose the byte-accurate single-message payload bound the send path
+//! enforces, so block-serving code can route oversized blocks instead of
+//! having V2Transport::SetMessageToSend silently drop them.
+BOOST_AUTO_TEST_CASE(transport_max_sendable_payload_bytes)
+{
+    // V1: the block-bearing ceiling (24 MB).
+    V1Transport v1{/*node_id=*/NodeId{0}};
+    BOOST_CHECK_EQUAL(v1.MaxSendablePayloadBytes(), MAX_BLOCK_MESSAGE_LENGTH);
+
+    // V2 (not in V1 fallback): the BIP324 3-byte contents-length bound minus
+    // the worst-case long message-type framing (1 + 12 bytes) — exactly the
+    // ordinary 16 MB protocol ceiling given V2_MAX_CONTENTS_LEN's definition.
+    V2Transport v2{/*nodeid=*/NodeId{0}, /*initiating=*/true};
+    BOOST_CHECK_EQUAL(v2.MaxSendablePayloadBytes(), MAX_PROTOCOL_MESSAGE_LENGTH);
+    BOOST_CHECK(v2.MaxSendablePayloadBytes() < MAX_BLOCK_SERIALIZED_SIZE);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

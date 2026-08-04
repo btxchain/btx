@@ -27,10 +27,13 @@ Options:
   --allow-dirty-head  Run against committed HEAD even if tracked files are dirty
   -h, --help          Show help
 
-This script mirrors macOS/ARM64 workflow jobs locally by:
-- using the same targets as .github/workflows/ci.yml and btx-readiness.yml
+This script runs the repository's macOS/ARM64 validation matrix locally by:
+- using targets pinned in scripts/ci/local-mac-matrix.tsv
 - running each target in a clean detached worktree at HEAD
-- applying per-job timeouts that match workflow timeout-minutes
+- applying per-job timeouts from that local-only manifest
+
+GitHub Actions is intentionally disabled; this runner does not dispatch or
+compare against hosted workflow jobs.
 USAGE
 }
 
@@ -126,48 +129,11 @@ trim_ws() {
   printf '%s' "${input}"
 }
 
-extract_matrix_entries() {
-  local workflow_file="$1"
-  awk '
-    /^[[:space:]]*-[[:space:]]name:[[:space:]]*/ {
-      line=$0
-      sub(/^[[:space:]]*-[[:space:]]name:[[:space:]]*/, "", line)
-      name=line
-      target=""
-      timeout=""
-      next
-    }
-    /^[[:space:]]*target:[[:space:]]*/ {
-      line=$0
-      sub(/^[[:space:]]*target:[[:space:]]*/, "", line)
-      target=line
-      next
-    }
-    /^[[:space:]]*timeout_minutes:[[:space:]]*/ {
-      line=$0
-      sub(/^[[:space:]]*timeout_minutes:[[:space:]]*/, "", line)
-      timeout=line
-      if (name != "" && target != "" && timeout != "") {
-        printf "%s|%s|%s\n", name, target, timeout
-      }
-      name=""
-      target=""
-      timeout=""
-      next
-    }
-  ' "${workflow_file}"
-}
-
-workflow_max_parallel() {
-  local workflow_file="$1"
-  awk '
-    /^[[:space:]]*max-parallel:[[:space:]]*/ {
-      line=$0
-      sub(/^[[:space:]]*max-parallel:[[:space:]]*/, "", line)
-      print line
-      exit 0
-    }
-  ' "${workflow_file}"
+manifest_max_parallel() {
+  local workflow="$1"
+  awk -F'|' -v workflow="${workflow}" '
+    $0 !~ /^#/ && $1 == workflow { print $2; exit 0 }
+  ' "${MATRIX_MANIFEST}"
 }
 
 toolchain_info() {
@@ -184,25 +150,35 @@ toolchain_info() {
   fi
 }
 
-TIMEOUT_BIN=""
-if command -v gtimeout >/dev/null 2>&1; then
-  TIMEOUT_BIN="gtimeout"
-elif command -v timeout >/dev/null 2>&1; then
-  TIMEOUT_BIN="timeout"
-fi
+run_with_timeout() {
+  local timeout_mins="$1"
+  shift
+  python3 - "${timeout_mins}" "$@" <<'PY'
+import os
+import signal
+import subprocess
+import sys
 
-if [[ -z "${TIMEOUT_BIN}" ]]; then
-  echo "warning: timeout command not found; local jobs will run without hard timeout" >&2
-fi
+timeout_seconds = int(sys.argv[1]) * 60
+proc = subprocess.Popen(sys.argv[2:], start_new_session=True)
+try:
+    raise SystemExit(proc.wait(timeout=timeout_seconds))
+except subprocess.TimeoutExpired:
+    os.killpg(proc.pid, signal.SIGTERM)
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+    raise SystemExit(124)
+PY
+}
 
-CI_WORKFLOW=".github/workflows/ci.yml"
-READINESS_WORKFLOW=".github/workflows/btx-readiness.yml"
-for wf in "${CI_WORKFLOW}" "${READINESS_WORKFLOW}"; do
-  if [[ ! -f "${wf}" ]]; then
-    echo "error: missing workflow file ${wf}" >&2
-    exit 1
-  fi
-done
+MATRIX_MANIFEST="scripts/ci/local-mac-matrix.tsv"
+if [[ ! -f "${MATRIX_MANIFEST}" ]]; then
+  echo "error: missing local validation manifest ${MATRIX_MANIFEST}" >&2
+  exit 1
+fi
 
 HEAD_SHA="$(git rev-parse HEAD)"
 if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
@@ -226,29 +202,32 @@ mkdir -p "${WORKTREE_ROOT}"
 
 jobs=()
 index=0
-CI_MAX_PARALLEL="$(trim_ws "$(workflow_max_parallel "${CI_WORKFLOW}")")"
-READINESS_MAX_PARALLEL="$(trim_ws "$(workflow_max_parallel "${READINESS_WORKFLOW}")")"
+CI_MAX_PARALLEL="$(trim_ws "$(manifest_max_parallel ci)")"
+READINESS_MAX_PARALLEL="$(trim_ws "$(manifest_max_parallel readiness)")"
 
 if [[ -z "${CI_MAX_PARALLEL}" || -z "${READINESS_MAX_PARALLEL}" ]]; then
-  echo "error: failed to parse max-parallel from workflow files" >&2
+  echo "error: failed to parse max-parallel from ${MATRIX_MANIFEST}" >&2
   exit 1
 fi
 
-if [[ "${MODE}" == "ci" ]]; then
-  PARALLEL="${CI_MAX_PARALLEL}"
-elif [[ "${MODE}" == "readiness" ]]; then
-  PARALLEL="${READINESS_MAX_PARALLEL}"
-elif [[ "${PARALLEL}" -gt "${CI_MAX_PARALLEL}" ]]; then
-  PARALLEL="${CI_MAX_PARALLEL}"
+MAX_PARALLEL="${CI_MAX_PARALLEL}"
+if [[ "${MODE}" == "readiness" ]]; then
+  MAX_PARALLEL="${READINESS_MAX_PARALLEL}"
+elif [[ "${MODE}" == "all" && "${READINESS_MAX_PARALLEL}" -lt "${MAX_PARALLEL}" ]]; then
+  MAX_PARALLEL="${READINESS_MAX_PARALLEL}"
+fi
+if [[ "${PARALLEL}" -gt "${MAX_PARALLEL}" ]]; then
+  PARALLEL="${MAX_PARALLEL}"
 fi
 
-add_jobs_from_workflow() {
+add_jobs_from_manifest() {
   local workflow="$1"
-  local workflow_file="$2"
   local line=""
   while IFS= read -r line; do
-    [[ -z "${line}" ]] && continue
-    IFS='|' read -r job_name target timeout_mins <<<"${line}"
+    [[ -z "${line}" || "${line}" == \#* ]] && continue
+    local entry_workflow max_parallel job_name target timeout_mins
+    IFS='|' read -r entry_workflow max_parallel job_name target timeout_mins <<<"${line}"
+    [[ "${entry_workflow}" != "${workflow}" ]] && continue
     job_name="$(trim_ws "${job_name}")"
     target="$(trim_ws "${target}")"
     timeout_mins="$(trim_ws "${timeout_mins}")"
@@ -256,7 +235,7 @@ add_jobs_from_workflow() {
       continue
     fi
     if ! [[ "${timeout_mins}" =~ ^[0-9]+$ ]]; then
-      echo "error: non-numeric timeout '${timeout_mins}' for target '${target}' in ${workflow_file}" >&2
+      echo "error: non-numeric timeout '${timeout_mins}' for target '${target}' in ${MATRIX_MANIFEST}" >&2
       exit 1
     fi
     if contains_only_filter "${job_name}" "${target}"; then
@@ -264,15 +243,15 @@ add_jobs_from_workflow() {
       jobs+=("${workflow}|${job_name}|${target}|${timeout_mins}|${key}")
       index=$((index + 1))
     fi
-  done < <(extract_matrix_entries "${workflow_file}")
+  done < "${MATRIX_MANIFEST}"
 }
 
 if [[ "${MODE}" == "ci" || "${MODE}" == "all" ]]; then
-  add_jobs_from_workflow "ci" "${CI_WORKFLOW}"
+  add_jobs_from_manifest "ci"
 fi
 
 if [[ "${MODE}" == "readiness" || "${MODE}" == "all" ]]; then
-  add_jobs_from_workflow "readiness" "${READINESS_WORKFLOW}"
+  add_jobs_from_manifest "readiness"
 fi
 
 if [[ ${#jobs[@]} -eq 0 ]]; then
@@ -304,34 +283,24 @@ start_job() {
   started_iso="$(iso_now)"
   started_epoch="$(epoch_now)"
 
-  {
-    printf 'workflow=%s\n' "${workflow}"
-    printf 'job_name=%s\n' "${job_name}"
-    printf 'target=%s\n' "${target}"
-    printf 'timeout_mins=%s\n' "${timeout_mins}"
-    printf 'job_key=%s\n' "${job_key}"
-    printf 'worktree=%s\n' "${worktree}"
-    printf 'log_file=%s\n' "${log_file}"
-    printf 'started_iso=%s\n' "${started_iso}"
-    printf 'started_epoch=%s\n' "${started_epoch}"
-  } > "${job_dir}/meta.env"
+  # This is data, not a shell program. Keep it tab-delimited so job names with
+  # spaces cannot be executed accidentally when the result is collected.
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "${workflow}" "${job_name}" "${target}" "${timeout_mins}" "${job_key}" \
+    "${worktree}" "${log_file}" "${started_iso}" "${started_epoch}" \
+    > "${job_dir}/meta.tsv"
 
   (
     set -euo pipefail
     cd "${worktree}"
-    export GITHUB_ACTIONS=true
-    export GITHUB_RUN_ID="local-${RUN_ID}"
-    export GITHUB_RUN_ATTEMPT=1
-    export GITHUB_JOB="${job_key}"
+    export BTX_LOCAL_VALIDATION=true
+    export BTX_LOCAL_RUN_ID="local-${RUN_ID}"
+    export BTX_LOCAL_JOB="${job_key}"
     export CI=true
 
     toolchain_info "${workflow}"
 
-    if [[ -n "${TIMEOUT_BIN}" ]]; then
-      "${TIMEOUT_BIN}" "${timeout_mins}m" scripts/ci/run_ci_target.sh "${target}"
-    else
-      scripts/ci/run_ci_target.sh "${target}"
-    fi
+    run_with_timeout "${timeout_mins}" scripts/ci/run_ci_target.sh "${target}"
   ) > "${log_file}" 2>&1 &
 
   local pid=$!
@@ -346,8 +315,15 @@ finalize_job() {
   local job_dir="$1"
   local exit_code="$2"
 
-  # shellcheck disable=SC1090,SC1091
-  source "${job_dir}/meta.env"
+  local workflow job_name target timeout_mins job_key worktree log_file started_iso started_epoch
+  IFS=$'\t' read -r workflow job_name target timeout_mins job_key worktree log_file started_iso started_epoch \
+    < "${job_dir}/meta.tsv"
+  if [[ -z "${workflow}" || -z "${job_name}" || -z "${target}" ||
+        -z "${timeout_mins}" || -z "${job_key}" || -z "${worktree}" ||
+        -z "${log_file}" || -z "${started_iso}" || -z "${started_epoch}" ]]; then
+    echo "error: incomplete local-matrix metadata in ${job_dir}/meta.tsv" >&2
+    return 1
+  fi
 
   local finished_iso finished_epoch elapsed status
   finished_iso="$(iso_now)"

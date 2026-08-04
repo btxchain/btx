@@ -30,6 +30,7 @@ import http.client
 import random
 import time
 
+from test_framework.authproxy import JSONRPCException
 from test_framework.blocktools import COINBASE_MATURITY
 from test_framework.messages import (
     COIN,
@@ -53,8 +54,10 @@ class ChainstateWriteCrashTest(BitcoinTestFramework):
         # Set -maxmempool=0 to turn off mempool memory sharing with dbcache
         self.base_args = [
             "-limitdescendantsize=0",
+            "-limitdescendantcount=10000",
             "-maxmempool=0",
             "-dbbatchsize=200000",
+            "-acceptnonstdtxn=1",
         ]
 
         # Set different crash ratios and cache sizes.  Note that not all of
@@ -65,7 +68,13 @@ class ChainstateWriteCrashTest(BitcoinTestFramework):
 
         # Node3 is a normal node with default args, except will mine full blocks
         # and txs with "dust" outputs
-        self.node3_args = ["-blockmaxweight=4000000", "-dustrelayfee=0"]
+        self.node3_args = [
+            "-blockmaxweight=4000000",
+            "-blockmaxtemplatetxs=0",
+            "-dustrelayfee=0",
+            "-limitdescendantcount=10000",
+            "-acceptnonstdtxn=1",
+        ]
         self.extra_args = [self.node0_args, self.node1_args, self.node2_args, self.node3_args]
 
     def setup_network(self):
@@ -73,20 +82,39 @@ class ChainstateWriteCrashTest(BitcoinTestFramework):
         self.start_nodes()
         # Leave them unconnected, we'll use submitblock directly in this test
 
-    def restart_node(self, node_index, expected_tip):
-        """Start up a given node id, wait for the tip to reach the given block hash, and calculate the utxo hash.
+    def restart_node(self, node_index, expected_block):
+        """Start a node and verify that the block interrupted by the crash was recovered.
+
+        The recovered block can be a known non-active side-chain block when a
+        crash interrupts the first block of a multi-block reorg. In that case,
+        its descendant will make the branch active later in sync_node3blocks(),
+        so return no UTXO hash yet. If the recovered block is already the active
+        tip, return the UTXO hash for the immediate consistency check. Return
+        ``known=False`` when an asynchronous crash happened before this block
+        was submitted, so the caller can retry it after recovery.
 
         Exceptions on startup should indicate node crash (due to -dbcrashratio), in which case we try again. Give up
-        after 60 seconds. Returns the utxo hash of the given node."""
+        after 120 seconds."""
 
         time_start = time.time()
         while time.time() - time_start < 120:
             try:
                 # Any of these RPC calls could throw due to node crash
                 self.start_node(node_index)
-                self.nodes[node_index].waitforblock(expected_tip)
+                try:
+                    recovered_header = self.nodes[node_index].getblockheader(expected_block)
+                except JSONRPCException as e:
+                    if e.error["code"] == -5:  # Block not found
+                        return False, None
+                    raise
+                if self.nodes[node_index].getbestblockhash() != expected_block:
+                    # A recovered non-active fork may need a later descendant
+                    # to become active. Confirm that it is retained as a side
+                    # branch instead of waiting forever for the tip to change.
+                    assert_equal(recovered_header["confirmations"], -1)
+                    return True, None
                 utxo_hash = self.nodes[node_index].gettxoutsetinfo()['hash_serialized_3']
-                return utxo_hash
+                return True, utxo_hash
             except Exception:
                 # An exception here should mean the node is about to crash.
                 # If bitcoind exits, then try again.  wait_for_node_exit()
@@ -142,20 +170,31 @@ class ChainstateWriteCrashTest(BitcoinTestFramework):
             nodei_utxo_hash = None
             self.log.debug(f"Syncing blocks to node {i}")
             for (block_hash, block) in blocks:
-                # Get the block from node3, and submit to node_i
-                self.log.debug(f"submitting block {block_hash}")
-                if not self.submit_block_catch_error(i, block):
+                submit_deadline = time.monotonic() + 300
+                while time.monotonic() < submit_deadline:
+                    # Get the block from node3, and submit to node_i
+                    self.log.debug(f"submitting block {block_hash}")
+                    if self.submit_block_catch_error(i, block):
+                        # Clear it out after successful submitblock calls -- the cached
+                        # utxo hash will no longer be correct
+                        nodei_utxo_hash = None
+                        break
+
                     # NOTE: more carefully check that the crash is due to -dbcrashratio
                     # (change the exit code perhaps, and check that here?)
                     self.wait_for_node_exit(i, timeout=30)
                     self.log.debug(f"Restarting node {i} after block hash {block_hash}")
-                    nodei_utxo_hash = self.restart_node(i, block_hash)
-                    assert nodei_utxo_hash is not None
+                    block_known, nodei_utxo_hash = self.restart_node(i, block_hash)
                     self.restart_counts[i] += 1
+                    if block_known:
+                        break
+                    self.log.debug(
+                        f"Block {block_hash} was not submitted before the asynchronous crash; retrying"
+                    )
                 else:
-                    # Clear it out after successful submitblock calls -- the cached
-                    # utxo hash will no longer be correct
-                    nodei_utxo_hash = None
+                    raise AssertionError(
+                        f"Unable to submit block {block_hash} to node {i} within recovery deadline"
+                    )
 
             # Check that the utxo hash matches node3's utxo set
             # NOTE: we only check the utxo set if we had to restart the node
@@ -167,6 +206,18 @@ class ChainstateWriteCrashTest(BitcoinTestFramework):
             if nodei_utxo_hash is not None:
                 self.log.debug(f"Checking txoutsetinfo matches for node {i}")
                 assert_equal(nodei_utxo_hash, node3_utxo_hash)
+            expected_tip = self.nodes[3].getbestblockhash()
+            try:
+                node_tip = self.nodes[i].getbestblockhash()
+            except (http.client.CannotSendRequest, http.client.RemoteDisconnected, OSError):
+                # The post-IBD scheduler can intentionally crash a dirty test
+                # node after its last successful submitblock response.
+                self.wait_for_node_exit(i, timeout=30)
+                block_known, _ = self.restart_node(i, expected_tip)
+                self.restart_counts[i] += 1
+                assert block_known
+                node_tip = self.nodes[i].getbestblockhash()
+            assert_equal(node_tip, expected_tip)
 
     def verify_utxo_hash(self):
         """Verify that the utxo hash of each node matches node3.
@@ -178,9 +229,13 @@ class ChainstateWriteCrashTest(BitcoinTestFramework):
         for i in range(3):
             try:
                 nodei_utxo_hash = self.nodes[i].gettxoutsetinfo()['hash_serialized_3']
-            except OSError:
+            except (http.client.CannotSendRequest, http.client.RemoteDisconnected, OSError):
                 # probably a crash on db flushing
-                nodei_utxo_hash = self.restart_node(i, self.nodes[3].getbestblockhash())
+                self.wait_for_node_exit(i, timeout=30)
+                block_known, nodei_utxo_hash = self.restart_node(i, self.nodes[3].getbestblockhash())
+                self.restart_counts[i] += 1
+                assert block_known
+                assert nodei_utxo_hash is not None
             assert_equal(nodei_utxo_hash, node3_utxo_hash)
 
     def generate_small_transactions(self, node, count, utxo_list):
@@ -259,6 +314,7 @@ class ChainstateWriteCrashTest(BitcoinTestFramework):
                     address=getnewdestination()[2],
                     sync_fun=self.no_op,
                 ))
+            assert_equal(len(self.nodes[3].getrawmempool()), 0)
             self.log.debug(f"Syncing {len(block_hashes)} new blocks...")
             self.sync_node3blocks(block_hashes)
             self.wallet.rescan_utxos()

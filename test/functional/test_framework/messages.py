@@ -73,7 +73,11 @@ MSG_WITNESS_TX = MSG_TX | MSG_WITNESS_FLAG
 
 FILTER_TYPE_BASIC = 0
 
-WITNESS_SCALE_FACTOR = 4
+# BTX consensus deliberately counts witness bytes at full weight. Keep the
+# Python transaction/block accounting identical to src/consensus/consensus.h;
+# retaining Bitcoin's factor of four understated policy vsize throughout the
+# functional suite and produced false mempool/orphan size failures.
+WITNESS_SCALE_FACTOR = 1
 
 DEFAULT_ANCESTOR_LIMIT = 25    # default max number of in-mempool ancestors
 DEFAULT_DESCENDANT_LIMIT = 25  # default max number of in-mempool descendants
@@ -319,13 +323,14 @@ def deser_vector(f, c, deser_function_name=None):
 # entries in the vector (we use this for serializing the vector of transactions
 # for a witness block).
 def ser_vector(l, ser_function_name=None):
-    r = ser_compact_size(len(l))
+    r = BytesIO()
+    r.write(ser_compact_size(len(l)))
     for i in l:
         if ser_function_name:
-            r += getattr(i, ser_function_name)()
+            r.write(getattr(i, ser_function_name)())
         else:
-            r += i.serialize()
-    return r
+            r.write(i.serialize())
+    return r.getvalue()
 
 
 def deser_uint256_vector(f):
@@ -342,6 +347,23 @@ def ser_uint256_vector(l):
     for i in l:
         r += ser_uint256(i)
     return r
+
+
+def deser_uint32_vector(f):
+    nit = deser_compact_size(f)
+    return [int.from_bytes(f.read(4), "little") for _ in range(nit)]
+
+
+def ser_uint32_vector(l):
+    return ser_compact_size(len(l)) + b"".join(i.to_bytes(4, "little") for i in l)
+
+
+def stream_has_trailing_payload(f):
+    """Return whether a seekable message stream has unread bytes without consuming them."""
+    position = f.tell()
+    trailing = f.read(1)
+    f.seek(position)
+    return trailing != b""
 
 
 def deser_string_vector(f):
@@ -954,15 +976,29 @@ BLOCK_HEADER_SIZE = len(CBlockHeader().serialize())
 assert_equal(BLOCK_HEADER_SIZE, 182)
 
 class CBlock(CBlockHeader):
-    __slots__ = ("vtx",)
+    __slots__ = ("vtx", "matrix_a_data", "matrix_b_data", "matrix_c_data")
 
     def __init__(self, header=None):
         super().__init__(header)
         self.vtx = []
+        self.matrix_a_data = []
+        self.matrix_b_data = []
+        self.matrix_c_data = []
 
     def deserialize(self, f):
         super().deserialize(f)
         self.vtx = deser_vector(f, CTransaction)
+        self.matrix_a_data = []
+        self.matrix_b_data = []
+        self.matrix_c_data = []
+        # Full blocks may be legacy payload-less encodings. When trailing
+        # bytes exist, mirror CBlock's canonical vector order exactly: A, B,
+        # then the optional product/proof vector C.
+        if self.vtx and stream_has_trailing_payload(f):
+            self.matrix_a_data = deser_uint32_vector(f)
+            self.matrix_b_data = deser_uint32_vector(f)
+            if stream_has_trailing_payload(f):
+                self.matrix_c_data = deser_uint32_vector(f)
 
     def serialize(self, with_witness=True):
         r = b""
@@ -971,6 +1007,16 @@ class CBlock(CBlockHeader):
             r += ser_vector(self.vtx, "serialize_with_witness")
         else:
             r += ser_vector(self.vtx, "serialize_without_witness")
+        # Full BTX blocks canonically carry the two MatMul input-payload
+        # vectors after the transaction vector, followed by an optional
+        # product/proof vector. Handcrafted digest-only blocks keep all three
+        # empty. Do not append them to the empty-vtx CBlock shim used by
+        # headers relay.
+        if self.vtx:
+            r += ser_uint32_vector(self.matrix_a_data)
+            r += ser_uint32_vector(self.matrix_b_data)
+            if self.matrix_c_data:
+                r += ser_uint32_vector(self.matrix_c_data)
         return r
 
     # Calculate the merkle root given a vector of transaction hashes
@@ -2023,6 +2069,79 @@ class msg_no_witness_blocktxn(msg_blocktxn):
         return self.block_transactions.serialize(with_witness=False)
 
 
+class msg_getmmsketch:
+    """Request the v4.4 ENC-DR sketch-cache bytes for a block (tension-resolution
+    §4.3). Payload: a single 32-byte block hash. Best-effort request/response,
+    modeled on getdata; a peer that does not hold the sketch silently ignores it."""
+    __slots__ = ("block_hash",)
+    msgtype = b"getmmsketch"
+
+    def __init__(self, block_hash=0):
+        self.block_hash = block_hash
+
+    def deserialize(self, f):
+        self.block_hash = deser_uint256(f)
+
+    def serialize(self):
+        return ser_uint256(self.block_hash)
+
+    def __repr__(self):
+        return "msg_getmmsketch(block_hash=%064x)" % self.block_hash
+
+
+class msg_mmsketch:
+    """Carry the full self-authenticating 8*m^2 sketch-cache payload for one block
+    (v4.4 ENC-DR, tension-resolution §4.3). Payload: 32-byte block hash followed by
+    the length-prefixed raw sketch bytes. The receiver authenticates with ONE hash
+    (H(sigma||bytes) == matmul_digest) before caching; a mismatch penalizes the
+    sender and is never evidence about the block."""
+    __slots__ = ("block_hash", "sketch")
+    msgtype = b"mmsketch"
+
+    def __init__(self, block_hash=0, sketch=b""):
+        self.block_hash = block_hash
+        self.sketch = sketch
+
+    def deserialize(self, f):
+        self.block_hash = deser_uint256(f)
+        self.sketch = deser_string(f)
+
+    def serialize(self):
+        r = b""
+        r += ser_uint256(self.block_hash)
+        r += ser_string(self.sketch)
+        return r
+
+    def __repr__(self):
+        return "msg_mmsketch(block_hash=%064x, sketch_len=%d)" % (self.block_hash, len(self.sketch))
+
+
+class msg_rcadmit:
+    """Carry the P2P-only admission ticket for an imminent RC block.
+
+    The sidecar is policy, not consensus: a 32-byte block hash followed by a
+    little-endian uint64 nonce. Generic test peers still need to decode it so a
+    valid sidecar sent before an automatically requested block does not tear
+    down the connection.
+    """
+    __slots__ = ("block_hash", "nonce")
+    msgtype = b"rcadmit"
+
+    def __init__(self, block_hash=0, nonce=0):
+        self.block_hash = block_hash
+        self.nonce = nonce
+
+    def deserialize(self, f):
+        self.block_hash = deser_uint256(f)
+        self.nonce = int.from_bytes(f.read(8), "little")
+
+    def serialize(self):
+        return ser_uint256(self.block_hash) + self.nonce.to_bytes(8, "little")
+
+    def __repr__(self):
+        return "msg_rcadmit(block_hash=%064x nonce=%d)" % (self.block_hash, self.nonce)
+
+
 class msg_getcfilters:
     __slots__ = ("filter_type", "start_height", "stop_hash")
     msgtype =  b"getcfilters"
@@ -2196,6 +2315,107 @@ class msg_sendtxrcncl:
             (self.version, self.salt)
 
 class TestFrameworkScript(unittest.TestCase):
+    def test_ser_vector_preserves_order_and_alternate_serializer(self):
+        calls = []
+
+        class Serializable:
+            def __init__(self, value):
+                self.value = value
+
+            def serialize(self):
+                calls.append(("default", self.value))
+                return bytes([self.value])
+
+            def serialize_alternate(self):
+                calls.append(("alternate", self.value))
+                return bytes([self.value + 10])
+
+        values = [Serializable(1), Serializable(2), Serializable(3)]
+        self.assertEqual(ser_vector(values), b"\x03\x01\x02\x03")
+        self.assertEqual(calls, [("default", 1), ("default", 2), ("default", 3)])
+
+        calls.clear()
+        self.assertEqual(
+            ser_vector(values, "serialize_alternate"),
+            b"\x03\x0b\x0c\x0d",
+        )
+        self.assertEqual(calls, [("alternate", 1), ("alternate", 2), ("alternate", 3)])
+
+        events = []
+        shared = bytearray(1)
+
+        class TrackedList(list):
+            def __len__(self):
+                events.append("length")
+                return super().__len__()
+
+        class MutableSerializable:
+            def __init__(self, value):
+                self.value = value
+
+            def serialize(self):
+                events.append(self.value)
+                shared[0] = self.value
+                return shared
+
+        mutable_values = TrackedList(MutableSerializable(i) for i in (1, 2, 3))
+        self.assertEqual(ser_vector(mutable_values), b"\x03\x01\x02\x03")
+        self.assertEqual(events, ["length", 1, 2, 3])
+
+    def test_block_empty_matmul_payload_serialization(self):
+        header_only = CBlock()
+        self.assertEqual(
+            header_only.serialize(),
+            CBlockHeader(header_only).serialize() + ser_compact_size(0),
+        )
+
+        full_block = CBlock()
+        full_block.vtx = [CTransaction()]
+        self.assertEqual(
+            full_block.serialize(),
+            CBlockHeader(full_block).serialize()
+            + ser_vector(full_block.vtx, "serialize_with_witness")
+            + ser_compact_size(0)
+            + ser_compact_size(0),
+        )
+        decoded = from_binary(CBlock, full_block.serialize())
+        self.assertEqual(decoded.serialize(), full_block.serialize())
+        self.assertEqual(decoded.matrix_a_data, [])
+        self.assertEqual(decoded.matrix_b_data, [])
+        self.assertEqual(decoded.matrix_c_data, [])
+
+        payload_block = CBlock()
+        payload_block.vtx = [CTransaction()]
+        payload_block.matrix_a_data = [0, 1, 0xffffffff]
+        payload_block.matrix_b_data = [2, 3]
+        payload_block.matrix_c_data = [4]
+        payload_decoded = from_binary(CBlock, payload_block.serialize())
+        self.assertEqual(payload_decoded.matrix_a_data, payload_block.matrix_a_data)
+        self.assertEqual(payload_decoded.matrix_b_data, payload_block.matrix_b_data)
+        self.assertEqual(payload_decoded.matrix_c_data, payload_block.matrix_c_data)
+        self.assertEqual(payload_decoded.serialize(), payload_block.serialize())
+
+        # Pre-payload full-block encodings remain readable for historical
+        # fixtures and old block files.
+        legacy = CBlockHeader(full_block).serialize() + ser_vector(full_block.vtx, "serialize_with_witness")
+        legacy_decoded = from_binary(CBlock, legacy)
+        self.assertEqual(legacy_decoded.vtx[0].serialize(), full_block.vtx[0].serialize())
+        self.assertEqual(legacy_decoded.matrix_a_data, [])
+        self.assertEqual(legacy_decoded.matrix_b_data, [])
+        self.assertEqual(legacy_decoded.matrix_c_data, [])
+
+    def test_rcadmit_encode_decode(self):
+        expected = msg_rcadmit(
+            block_hash=int("0123456789abcdef" * 4, 16),
+            nonce=0xFEDCBA9876543210,
+        )
+        encoded = expected.serialize()
+        self.assertEqual(len(encoded), 40)
+        actual = msg_rcadmit()
+        actual.deserialize(BytesIO(encoded))
+        self.assertEqual(actual.block_hash, expected.block_hash)
+        self.assertEqual(actual.nonce, expected.nonce)
+
     def test_addrv2_encode_decode(self):
         def check_addrv2(ip, net):
             addr = CAddress()

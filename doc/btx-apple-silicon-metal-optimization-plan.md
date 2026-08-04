@@ -1,5 +1,12 @@
 # Comprehensive Apple Silicon Mining Optimization and BTX Unit Migration Plan
 
+> **Historical legacy-workload plan.** The `n=512` pipeline, timings, and
+> optimization phases below predate MatMul v4.7 and are retained as
+> implementation provenance. They are not the Profile 1 ExactReplay launch
+> path or an activation argument. Epoch A requires corrected end-to-end Metal
+> replay evidence; proof authority and Profile 2 are later epochs. See
+> [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md).
+
 ## Current Architecture Analysis
 
 ### Mining Pipeline (per nonce attempt at mainnet n=512, b=16, r=8)

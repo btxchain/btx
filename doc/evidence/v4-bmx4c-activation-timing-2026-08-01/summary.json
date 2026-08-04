@@ -1,0 +1,24 @@
+{
+  "evidence_kind": "regtest_v4_bmx4c_activation_block_timing",
+  "host_class": "blackwell_16gib_cc120_cuda",
+  "dims": "toy_v4_dimension_128",
+  "v4_bmx4c_height": 100,
+  "rc_height": 101,
+  "warm_run": {
+    "activation_block_s": 1.257,
+    "rc_activation_s": 0.372,
+    "pre_v4_mean_s": 0.2067,
+    "post_rc_mean_s": 0.2552
+  },
+  "cold_cache_disabled_run": {
+    "activation_block_s": 1.248,
+    "rc_activation_s": 0.329
+  },
+  "log_signal": "MatMul-v4 mining backend: cuda (requested=auto, auto_selected_cuda:imma_s8s8s32_tensor_path:sm_120) appears on the activation block",
+  "interpretation": [
+    "On a warm local CUDA host with toy dims, activation is ~1.25s (~6x pre-v4 ~0.2s), not ~35s.",
+    "A prior ~35s activation on an ephemeral cloud GPU instance is consistent with cold driver/context/JIT + first backend selection, not steady-state ExactReplay cost.",
+    "RC activation and subsequent toy RC blocks stay sub-second after the first CUDA backend selection.",
+    "Mainnet Profile-1 production dims remain a separate measurement; this isolates the first-activation setup spike."
+  ]
+}

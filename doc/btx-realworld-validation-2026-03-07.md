@@ -65,7 +65,7 @@ Live runtime validation on `codex/shielded-pool-overhaul` after integrating
    - Transparent send, shield, and multisig cycles succeeded; unshield did not.
 
 9. Live stress (post-fix rerun):
-   - `python3 scripts/live_regtest_load_stress.py --build-dir build-btx --rounds 16 --initial-mine-blocks 140 --mine-every-rounds 2 --mine-batch-size 2 --max-runtime-seconds 900 --artifact /Users/admin/Documents/btxchain/real-run-20260307-1/artifacts/live-load-stress-run4b.json`
+   - `python3 scripts/live_regtest_load_stress.py --build-dir build-btx --rounds 16 --initial-mine-blocks 140 --mine-every-rounds 2 --mine-batch-size 2 --max-runtime-seconds 900 --artifact /path/to/Documents/example/real-run-20260307-1/artifacts/live-load-stress-run4b.json`
    - Result: `pass`
    - Key counters:
      - `shield_success=23`
@@ -74,15 +74,15 @@ Live runtime validation on `codex/shielded-pool-overhaul` after integrating
      - `failures=[]`
 
 10. Full lifecycle matrix rerun:
-   - `scripts/m15_full_lifecycle_matrix.sh --build-dir build-btx --centos-build-dir build-btx-centos --skip-centos-build --artifact /Users/admin/Documents/btxchain/real-run-20260307-1/artifacts/m15-full-matrix-run4b.json --log-dir /Users/admin/Documents/btxchain/real-run-20260307-1/m15-full-matrix-logs-run4b`
+   - `scripts/m15_full_lifecycle_matrix.sh --build-dir build-btx --centos-build-dir build-btx-centos --skip-centos-build --artifact /path/to/Documents/example/real-run-20260307-1/artifacts/m15-full-matrix-run4b.json --log-dir /path/to/Documents/example/real-run-20260307-1/m15-full-matrix-logs-run4b`
    - Result: `pass` (host single-node, CentOS container single-node, and macOS<->CentOS bridge all green)
 
 11. Full runtime matrix rerun (`real-run-20260307-4`):
-   - `python3 scripts/live_regtest_realworld_validation.py --build-dir build-btx --artifact /Users/admin/Documents/btxchain/real-run-20260307-4/artifacts/live-regtest-runtime.json --datadir /Users/admin/Documents/btxchain/real-run-20260307-4/single-node-runtime/datadir --keep-datadir --mine-blocks 260 --mine-batch-size 10 --mining-rpc-timeout-seconds 180 --shielded-rpc-timeout-seconds 180`
-   - `scripts/m12_dual_node_p2p_readiness.sh --build-dir build-btx --artifact /Users/admin/Documents/btxchain/real-run-20260307-4/artifacts/m12-dual-node.json --timeout-seconds 420`
-   - `scripts/m13_mac_centos_interop_readiness.sh --mac-build-dir build-btx --centos-build-dir build-btx-centos --skip-centos-build --artifact /Users/admin/Documents/btxchain/real-run-20260307-4/artifacts/m13-mac-centos.json --timeout-seconds 420`
-   - `scripts/m15_full_lifecycle_matrix.sh --build-dir build-btx --centos-build-dir build-btx-centos --skip-centos-build --artifact /Users/admin/Documents/btxchain/real-run-20260307-4/artifacts/m15-full-matrix.json --log-dir /Users/admin/Documents/btxchain/real-run-20260307-4/logs/m15-full-lifecycle-logs --timeout-seconds 1500`
-   - `python3 scripts/live_regtest_load_stress.py --build-dir build-btx --artifact /Users/admin/Documents/btxchain/real-run-20260307-4/artifacts/live-load-stress.json --rounds 24 --initial-mine-blocks 160 --mine-every-rounds 2 --mine-batch-size 2 --max-runtime-seconds 1200 --shielded-rpc-timeout-seconds 180`
+   - `python3 scripts/live_regtest_realworld_validation.py --build-dir build-btx --artifact /path/to/Documents/example/real-run-20260307-4/artifacts/live-regtest-runtime.json --datadir /path/to/Documents/example/real-run-20260307-4/single-node-runtime/datadir --keep-datadir --mine-blocks 260 --mine-batch-size 10 --mining-rpc-timeout-seconds 180 --shielded-rpc-timeout-seconds 180`
+   - `scripts/m12_dual_node_p2p_readiness.sh --build-dir build-btx --artifact /path/to/Documents/example/real-run-20260307-4/artifacts/m12-dual-node.json --timeout-seconds 420`
+   - `scripts/m13_mac_centos_interop_readiness.sh --mac-build-dir build-btx --centos-build-dir build-btx-centos --skip-centos-build --artifact /path/to/Documents/example/real-run-20260307-4/artifacts/m13-mac-centos.json --timeout-seconds 420`
+   - `scripts/m15_full_lifecycle_matrix.sh --build-dir build-btx --centos-build-dir build-btx-centos --skip-centos-build --artifact /path/to/Documents/example/real-run-20260307-4/artifacts/m15-full-matrix.json --log-dir /path/to/Documents/example/real-run-20260307-4/logs/m15-full-lifecycle-logs --timeout-seconds 1500`
+   - `python3 scripts/live_regtest_load_stress.py --build-dir build-btx --artifact /path/to/Documents/example/real-run-20260307-4/artifacts/live-load-stress.json --rounds 24 --initial-mine-blocks 160 --mine-every-rounds 2 --mine-batch-size 2 --max-runtime-seconds 1200 --shielded-rpc-timeout-seconds 180`
    - Result: all PASS
    - Key stress counters:
      - `rounds=24`
@@ -93,7 +93,7 @@ Live runtime validation on `codex/shielded-pool-overhaul` after integrating
      - `failures=[]`
 
 12. Fast->normal ASERT transition replay (post-fix):
-   - `scripts/m14_fast_normal_transition_sim.sh --build-dir build-btx-transition-sim --fast-mine-height 120 --normal-blocks 60 --artifact /Users/admin/Documents/btxchain/real-run-20260307-4/artifacts/m14-fast-normal-transition.json --log-file /Users/admin/Documents/btxchain/real-run-20260307-4/logs/m14-fast-normal-transition.log --backend cpu --max-wall-seconds 1200`
+   - `scripts/m14_fast_normal_transition_sim.sh --build-dir build-btx-transition-sim --fast-mine-height 120 --normal-blocks 60 --artifact /path/to/Documents/example/real-run-20260307-4/artifacts/m14-fast-normal-transition.json --log-file /path/to/Documents/example/real-run-20260307-4/logs/m14-fast-normal-transition.log --backend cpu --max-wall-seconds 1200`
    - Result: PASS (`completed=1`, `termination_reason=target_height_reached`)
    - Transition evidence:
      - Block `120` marked phase transition (`phase=normal` from height 120 onward)
@@ -101,17 +101,17 @@ Live runtime validation on `codex/shielded-pool-overhaul` after integrating
        (e.g., `h121` diff `2.922917893173699e-09` -> `h180` diff `3.742633565892171e-09`)
 
 13. Run-cycle key safekeep snapshot:
-   - `/Users/admin/Documents/btxchain/real-run-20260307-4/keys/multisig-test-keys.json`
+   - `/path/to/Documents/example/real-run-20260307-4/keys/multisig-test-keys.json`
    - Contains signer test addresses + exported PQ key material, watch multisig
      address reference, and chain-state metadata for this cycle.
 
 14. Full runtime matrix rerun (`real-run-20260307-5`):
-   - `python3 scripts/live_regtest_realworld_validation.py --build-dir build-btx --artifact /Users/admin/Documents/btxchain/real-run-20260307-5/artifacts/live-regtest-runtime.json --datadir /Users/admin/Documents/btxchain/real-run-20260307-5/single-node-runtime/datadir --keep-datadir --mine-blocks 280 --mine-batch-size 10 --mining-rpc-timeout-seconds 180 --shielded-rpc-timeout-seconds 180`
-   - `scripts/m12_dual_node_p2p_readiness.sh --build-dir build-btx --artifact /Users/admin/Documents/btxchain/real-run-20260307-5/artifacts/m12-dual-node.json --timeout-seconds 420`
-   - `scripts/m13_mac_centos_interop_readiness.sh --mac-build-dir build-btx --centos-build-dir build-btx-centos --skip-centos-build --artifact /Users/admin/Documents/btxchain/real-run-20260307-5/artifacts/m13-mac-centos.json --timeout-seconds 420`
-   - `scripts/m14_fast_normal_transition_sim.sh --build-dir build-btx-transition-sim --skip-build --fast-mine-height 160 --normal-blocks 40 --artifact /Users/admin/Documents/btxchain/real-run-20260307-5/artifacts/m14-fast-normal-transition.json --log-file /Users/admin/Documents/btxchain/real-run-20260307-5/logs/m14-fast-normal-transition.log --backend cpu`
-   - `scripts/m15_full_lifecycle_matrix.sh --build-dir build-btx --centos-build-dir build-btx-centos --skip-centos-build --artifact /Users/admin/Documents/btxchain/real-run-20260307-5/artifacts/m15-full-lifecycle-matrix.json --log-dir /Users/admin/Documents/btxchain/real-run-20260307-5/logs/m15-full-lifecycle-logs --timeout-seconds 1800`
-   - `python3 scripts/live_regtest_load_stress.py --build-dir build-btx --artifact /Users/admin/Documents/btxchain/real-run-20260307-5/artifacts/live-regtest-load-stress.json --rounds 30 --progress-every-rounds 5 --max-runtime-seconds 1800`
+   - `python3 scripts/live_regtest_realworld_validation.py --build-dir build-btx --artifact /path/to/Documents/example/real-run-20260307-5/artifacts/live-regtest-runtime.json --datadir /path/to/Documents/example/real-run-20260307-5/single-node-runtime/datadir --keep-datadir --mine-blocks 280 --mine-batch-size 10 --mining-rpc-timeout-seconds 180 --shielded-rpc-timeout-seconds 180`
+   - `scripts/m12_dual_node_p2p_readiness.sh --build-dir build-btx --artifact /path/to/Documents/example/real-run-20260307-5/artifacts/m12-dual-node.json --timeout-seconds 420`
+   - `scripts/m13_mac_centos_interop_readiness.sh --mac-build-dir build-btx --centos-build-dir build-btx-centos --skip-centos-build --artifact /path/to/Documents/example/real-run-20260307-5/artifacts/m13-mac-centos.json --timeout-seconds 420`
+   - `scripts/m14_fast_normal_transition_sim.sh --build-dir build-btx-transition-sim --skip-build --fast-mine-height 160 --normal-blocks 40 --artifact /path/to/Documents/example/real-run-20260307-5/artifacts/m14-fast-normal-transition.json --log-file /path/to/Documents/example/real-run-20260307-5/logs/m14-fast-normal-transition.log --backend cpu`
+   - `scripts/m15_full_lifecycle_matrix.sh --build-dir build-btx --centos-build-dir build-btx-centos --skip-centos-build --artifact /path/to/Documents/example/real-run-20260307-5/artifacts/m15-full-lifecycle-matrix.json --log-dir /path/to/Documents/example/real-run-20260307-5/logs/m15-full-lifecycle-logs --timeout-seconds 1800`
+   - `python3 scripts/live_regtest_load_stress.py --build-dir build-btx --artifact /path/to/Documents/example/real-run-20260307-5/artifacts/live-regtest-load-stress.json --rounds 30 --progress-every-rounds 5 --max-runtime-seconds 1800`
    - Result: all PASS
    - Key runtime counters:
      - `live-regtest-runtime`: `overall_status=pass`, `node.final_height=303`
@@ -121,7 +121,7 @@ Live runtime validation on `codex/shielded-pool-overhaul` after integrating
      - `m15`: `overall_status=pass`, all three lifecycle checks PASS
      - `live load stress`: `overall_status=pass`, `rounds=30`, `shield_success=23`, `unshield_success=3`, `multisig_success=3`, `mempool_max=4`, `failures=[]`
    - Run-cycle safekeep snapshot:
-     - `/Users/admin/Documents/btxchain/real-run-20260307-5/keys/multisig-test-keys.json`
+     - `/path/to/Documents/example/real-run-20260307-5/keys/multisig-test-keys.json`
      - Captures test addresses, multisig/shielded/bridge transaction IDs, and stress
        counters for handoff/replay; no private keys are exported.
 
@@ -206,20 +206,20 @@ The following current/public references were checked during this validation pass
   - `build-btx/test/functional/test_runner.py wallet_shielded_send_flow.py wallet_shielded_cross_wallet.py wallet_shielded_reorg_recovery.py p2p_shielded_relay.py wallet_shielded_sendmany_stress.py --jobs=1 ...`
   - Result: PASS (5/5)
 - Production readiness rerun:
-  - `scripts/verify_btx_production_readiness.sh --build-dir build-btx --artifact /Users/admin/Documents/btxchain/real-run-20260307-6/artifacts/production-readiness-final.json --log-dir /Users/admin/Documents/btxchain/real-run-20260307-6/logs/production-readiness-final --check-timeout-seconds 900`
+  - `scripts/verify_btx_production_readiness.sh --build-dir build-btx --artifact /path/to/Documents/example/real-run-20260307-6/artifacts/production-readiness-final.json --log-dir /path/to/Documents/example/real-run-20260307-6/logs/production-readiness-final --check-timeout-seconds 900`
   - Result: PASS
 - Metal mining validation rerun:
-  - `scripts/m11_metal_mining_validation.sh --build-dir build-btx --rounds 3 --artifact /Users/admin/Documents/btxchain/real-run-20260307-6/artifacts/m11-metal-validation-final.json`
+  - `scripts/m11_metal_mining_validation.sh --build-dir build-btx --rounds 3 --artifact /path/to/Documents/example/real-run-20260307-6/artifacts/m11-metal-validation-final.json`
   - Result: PASS
 
 ### Run6 artifacts
 
-- `/Users/admin/Documents/btxchain/real-run-20260307-6/artifacts/production-readiness-final.json`
-- `/Users/admin/Documents/btxchain/real-run-20260307-6/artifacts/m11-metal-validation-final.json`
-- `/Users/admin/Documents/btxchain/real-run-20260307-6/artifacts/production-readiness-postfix.json`
-- `/Users/admin/Documents/btxchain/real-run-20260307-6/artifacts/m7-pool-e2e-postfix.json`
-- `/Users/admin/Documents/btxchain/real-run-20260307-6/artifacts/launch-blockers-postfix.json`
-- `/Users/admin/Documents/btxchain/real-run-20260307-6/artifacts/m9-benchmark-postfix.json`
+- `/path/to/Documents/example/real-run-20260307-6/artifacts/production-readiness-final.json`
+- `/path/to/Documents/example/real-run-20260307-6/artifacts/m11-metal-validation-final.json`
+- `/path/to/Documents/example/real-run-20260307-6/artifacts/production-readiness-postfix.json`
+- `/path/to/Documents/example/real-run-20260307-6/artifacts/m7-pool-e2e-postfix.json`
+- `/path/to/Documents/example/real-run-20260307-6/artifacts/launch-blockers-postfix.json`
+- `/path/to/Documents/example/real-run-20260307-6/artifacts/m9-benchmark-postfix.json`
 
 ## Run8 Delta (2026-03-08, `real-run-20260308-1`)
 
@@ -241,15 +241,15 @@ The following current/public references were checked during this validation pass
 ### Run8 command/results summary
 
 1. Shielded functional subset rerun:
-   - `build-btx/test/functional/test_runner.py wallet_shielded_send_flow.py wallet_shielded_cross_wallet.py wallet_shielded_reorg_recovery.py p2p_shielded_relay.py wallet_shielded_sendmany_stress.py --jobs=1 --tmpdirprefix=/Users/admin/Documents/btxchain/real-run-20260308-1/single-node-runtime/functional-tmp`
+   - `build-btx/test/functional/test_runner.py wallet_shielded_send_flow.py wallet_shielded_cross_wallet.py wallet_shielded_reorg_recovery.py p2p_shielded_relay.py wallet_shielded_sendmany_stress.py --jobs=1 --tmpdirprefix=/path/to/Documents/example/real-run-20260308-1/single-node-runtime/functional-tmp`
    - Result: PASS (5/5, runtime 391s)
 
 2. Production readiness consolidated run:
-   - `scripts/verify_btx_production_readiness.sh --build-dir build-btx --artifact /Users/admin/Documents/btxchain/real-run-20260308-1/artifacts/production_readiness_20260308.json --log-dir /Users/admin/Documents/btxchain/real-run-20260308-1/logs/production-readiness`
+   - `scripts/verify_btx_production_readiness.sh --build-dir build-btx --artifact /path/to/Documents/example/real-run-20260308-1/artifacts/production_readiness_20260308.json --log-dir /path/to/Documents/example/real-run-20260308-1/logs/production-readiness`
    - Result: PASS (`overall_status=pass`, `checks_total=17`, no failed checks)
 
 3. Live single-node realworld runtime:
-   - `python3 scripts/live_regtest_realworld_validation.py --build-dir build-btx --artifact /Users/admin/Documents/btxchain/real-run-20260308-1/artifacts/live_regtest_realworld_validation_20260308.json --mine-blocks 180 --mine-batch-size 10 --datadir /Users/admin/Documents/btxchain/real-run-20260308-1/single-node-runtime/live-realworld-datadir --keep-datadir`
+   - `python3 scripts/live_regtest_realworld_validation.py --build-dir build-btx --artifact /path/to/Documents/example/real-run-20260308-1/artifacts/live_regtest_realworld_validation_20260308.json --mine-blocks 180 --mine-batch-size 10 --datadir /path/to/Documents/example/real-run-20260308-1/single-node-runtime/live-realworld-datadir --keep-datadir`
    - Result: PASS (`node.final_height=203`)
    - Key txids:
      - shield: `a1aab786481ba8cdee30400e7b6a7bc48152bea1bb2cc0058ff3562b303a4e6e`
@@ -257,7 +257,7 @@ The following current/public references were checked during this validation pass
      - multisig spend: `dae56b27fe724b70bd4ff8671caaf0a2e12a6189812c17ee1a907cf937bbd92b`
 
 4. Live load stress:
-   - `python3 scripts/live_regtest_load_stress.py --build-dir build-btx --artifact /Users/admin/Documents/btxchain/real-run-20260308-1/artifacts/live_regtest_load_stress_20260308.json --rounds 20 --initial-mine-blocks 160 --mine-every-rounds 2 --mine-batch-size 2 --max-runtime-seconds 1200 --progress-every-rounds 1`
+   - `python3 scripts/live_regtest_load_stress.py --build-dir build-btx --artifact /path/to/Documents/example/real-run-20260308-1/artifacts/live_regtest_load_stress_20260308.json --rounds 20 --initial-mine-blocks 160 --mine-every-rounds 2 --mine-batch-size 2 --max-runtime-seconds 1200 --progress-every-rounds 1`
    - Result: PASS
    - Counters:
      - `rounds=20`
@@ -268,7 +268,7 @@ The following current/public references were checked during this validation pass
      - `failures=[]`
 
 5. M12 dual-node same-host relay:
-   - `scripts/m12_dual_node_p2p_readiness.sh --build-dir build-btx --artifact /Users/admin/Documents/btxchain/real-run-20260308-1/artifacts/m12_dual_node_p2p_readiness_20260308.json`
+   - `scripts/m12_dual_node_p2p_readiness.sh --build-dir build-btx --artifact /path/to/Documents/example/real-run-20260308-1/artifacts/m12_dual_node_p2p_readiness_20260308.json`
    - Result: PASS
    - Evidence:
      - Shared genesis: `bbc501af18e6b3a69a43c6f134d4b9710bd96dff17ee07fa648c297438495247`
@@ -276,7 +276,7 @@ The following current/public references were checked during this validation pass
      - Final heights: A=104, B=104
 
 6. M13 macOS host <-> CentOS container interop:
-   - `scripts/m13_mac_centos_interop_readiness.sh --mac-build-dir build-btx --centos-build-dir build-btx-centos --skip-centos-build --artifact /Users/admin/Documents/btxchain/real-run-20260308-1/artifacts/m13_mac_centos_interop_readiness_20260308.json`
+   - `scripts/m13_mac_centos_interop_readiness.sh --mac-build-dir build-btx --centos-build-dir build-btx-centos --skip-centos-build --artifact /path/to/Documents/example/real-run-20260308-1/artifacts/m13_mac_centos_interop_readiness_20260308.json`
    - Result: PASS
    - Evidence:
      - Shared custom genesis: `52a0027ae57faa5a538d3bf396d4a85782c0e7a238fb2e3b23f73dfe5b16a88b`
@@ -285,7 +285,7 @@ The following current/public references were checked during this validation pass
      - Final heights: mac=104, centos=104
 
 7. M14 fast->normal ASERT transition replay:
-   - `scripts/m14_fast_normal_transition_sim.sh --build-dir build-btx-transition-sim --fast-mine-height 120 --normal-blocks 60 --artifact /Users/admin/Documents/btxchain/real-run-20260308-1/artifacts/m14_fast_normal_transition_20260308.json --log-file /Users/admin/Documents/btxchain/real-run-20260308-1/logs/m14_fast_normal_transition_20260308.log --backend cpu --max-wall-seconds 1200`
+   - `scripts/m14_fast_normal_transition_sim.sh --build-dir build-btx-transition-sim --fast-mine-height 120 --normal-blocks 60 --artifact /path/to/Documents/example/real-run-20260308-1/artifacts/m14_fast_normal_transition_20260308.json --log-file /path/to/Documents/example/real-run-20260308-1/logs/m14_fast_normal_transition_20260308.log --backend cpu --max-wall-seconds 1200`
    - Result: PASS (`completed=true`, `termination_reason=target_height_reached`)
    - Difficulty/target movement evidence:
      - transition height observed: `120`
@@ -293,7 +293,7 @@ The following current/public references were checked during this validation pass
      - difficulty: `2.910339243896464e-09` -> `3.744800718778047e-09`
 
 8. M15 full lifecycle matrix:
-   - `scripts/m15_full_lifecycle_matrix.sh --build-dir build-btx --centos-build-dir build-btx-centos --skip-centos-build --artifact /Users/admin/Documents/btxchain/real-run-20260308-1/artifacts/m15_full_lifecycle_matrix_20260308.json --log-dir /Users/admin/Documents/btxchain/real-run-20260308-1/logs/m15-full-lifecycle`
+   - `scripts/m15_full_lifecycle_matrix.sh --build-dir build-btx --centos-build-dir build-btx-centos --skip-centos-build --artifact /path/to/Documents/example/real-run-20260308-1/artifacts/m15_full_lifecycle_matrix_20260308.json --log-dir /path/to/Documents/example/real-run-20260308-1/logs/m15-full-lifecycle`
    - Result: PASS (`overall_status=pass`)
    - Check statuses:
      - `mac_host_lifecycle`: pass
@@ -302,7 +302,7 @@ The following current/public references were checked during this validation pass
 
 ### Run8 safekept key/tx snapshot
 
-- `/Users/admin/Documents/btxchain/real-run-20260308-1/keys/multisig-test-keys.json`
+- `/path/to/Documents/example/real-run-20260308-1/keys/multisig-test-keys.json`
 - Snapshot contains test addresses + tx references only (no private keys exported).
 
 ### Run8 external advisory sweep (web)
@@ -358,11 +358,11 @@ Local mapping status (no new blocker found in this pass):
    - Result: PASS (`8/8`, runtime 433s)
 
 3. Production readiness rerun:
-   - `scripts/verify_btx_production_readiness.sh --build-dir build-btx --artifact /Users/admin/Documents/btxchain/real-run-20260308-2/artifacts/production_readiness_20260308_run2.json --log-dir /Users/admin/Documents/btxchain/real-run-20260308-2/logs/production-readiness`
+   - `scripts/verify_btx_production_readiness.sh --build-dir build-btx --artifact /path/to/Documents/example/real-run-20260308-2/artifacts/production_readiness_20260308_run2.json --log-dir /path/to/Documents/example/real-run-20260308-2/logs/production-readiness`
    - Result: PASS (`overall_status=pass`, `checks_total=17`, `failed=[]`)
 
 4. Live single-node runtime:
-   - `python3 scripts/live_regtest_realworld_validation.py --build-dir build-btx --artifact /Users/admin/Documents/btxchain/real-run-20260308-2/artifacts/live_regtest_realworld_validation_20260308_run2.json --mine-blocks 220 --mine-batch-size 10 --datadir /Users/admin/Documents/btxchain/real-run-20260308-2/single-node-runtime/live-realworld-datadir --keep-datadir`
+   - `python3 scripts/live_regtest_realworld_validation.py --build-dir build-btx --artifact /path/to/Documents/example/real-run-20260308-2/artifacts/live_regtest_realworld_validation_20260308_run2.json --mine-blocks 220 --mine-batch-size 10 --datadir /path/to/Documents/example/real-run-20260308-2/single-node-runtime/live-realworld-datadir --keep-datadir`
    - Result: PASS (`final_height=243`)
    - Key txids:
      - shield: `8296888d5a868d62fcd56686f863160f6e13ad29180b1573892825843fb9d40b`
@@ -370,7 +370,7 @@ Local mapping status (no new blocker found in this pass):
      - multisig spend: `db45a47cdb674dc271ae2750d153ab40115fc4157a51cc2490d64ad64a88bdfd`
 
 5. Live stress rerun:
-   - `python3 scripts/live_regtest_load_stress.py --build-dir build-btx --artifact /Users/admin/Documents/btxchain/real-run-20260308-2/artifacts/live_regtest_load_stress_20260308_run2.json --rounds 24 --initial-mine-blocks 180 --mine-every-rounds 2 --mine-batch-size 2 --max-runtime-seconds 1500 --progress-every-rounds 2`
+   - `python3 scripts/live_regtest_load_stress.py --build-dir build-btx --artifact /path/to/Documents/example/real-run-20260308-2/artifacts/live_regtest_load_stress_20260308_run2.json --rounds 24 --initial-mine-blocks 180 --mine-every-rounds 2 --mine-batch-size 2 --max-runtime-seconds 1500 --progress-every-rounds 2`
    - Result: PASS
    - Counters:
      - `rounds=24`
@@ -392,25 +392,25 @@ Local mapping status (no new blocker found in this pass):
 
 ### Run9 safekept artifacts
 
-- `/Users/admin/Documents/btxchain/real-run-20260308-2/keys/multisig-test-keys.json`
-- `/Users/admin/Documents/btxchain/real-run-20260308-2/artifacts/production_readiness_20260308_run2.json`
-- `/Users/admin/Documents/btxchain/real-run-20260308-2/artifacts/live_regtest_realworld_validation_20260308_run2.json`
-- `/Users/admin/Documents/btxchain/real-run-20260308-2/artifacts/live_regtest_load_stress_20260308_run2.json`
-- `/Users/admin/Documents/btxchain/real-run-20260308-2/artifacts/m12_dual_node_p2p_readiness_20260308_run2.json`
-- `/Users/admin/Documents/btxchain/real-run-20260308-2/artifacts/m13_mac_centos_interop_readiness_20260308_run2.json`
-- `/Users/admin/Documents/btxchain/real-run-20260308-2/artifacts/m14_fast_normal_transition_20260308_run2.json`
-- `/Users/admin/Documents/btxchain/real-run-20260308-2/artifacts/m15_full_lifecycle_matrix_20260308_run2.json`
+- `/path/to/Documents/example/real-run-20260308-2/keys/multisig-test-keys.json`
+- `/path/to/Documents/example/real-run-20260308-2/artifacts/production_readiness_20260308_run2.json`
+- `/path/to/Documents/example/real-run-20260308-2/artifacts/live_regtest_realworld_validation_20260308_run2.json`
+- `/path/to/Documents/example/real-run-20260308-2/artifacts/live_regtest_load_stress_20260308_run2.json`
+- `/path/to/Documents/example/real-run-20260308-2/artifacts/m12_dual_node_p2p_readiness_20260308_run2.json`
+- `/path/to/Documents/example/real-run-20260308-2/artifacts/m13_mac_centos_interop_readiness_20260308_run2.json`
+- `/path/to/Documents/example/real-run-20260308-2/artifacts/m14_fast_normal_transition_20260308_run2.json`
+- `/path/to/Documents/example/real-run-20260308-2/artifacts/m15_full_lifecycle_matrix_20260308_run2.json`
 
 ## Run10 Delta (2026-03-08, `real-run-20260308-3`)
 
 ### Run10 command/results summary
 
 1. Production readiness rerun:
-   - `scripts/verify_btx_production_readiness.sh --build-dir build-btx --artifact /Users/admin/Documents/btxchain/real-run-20260308-3/artifacts/production_readiness_20260308_run3.json --log-dir /Users/admin/Documents/btxchain/real-run-20260308-3/logs/production-readiness`
+   - `scripts/verify_btx_production_readiness.sh --build-dir build-btx --artifact /path/to/Documents/example/real-run-20260308-3/artifacts/production_readiness_20260308_run3.json --log-dir /path/to/Documents/example/real-run-20260308-3/logs/production-readiness`
    - Result: PASS (`overall_status=pass`, `checks_total=17`)
 
 2. Live single-node runtime rerun:
-   - `python3 scripts/live_regtest_realworld_validation.py --build-dir build-btx --artifact /Users/admin/Documents/btxchain/real-run-20260308-3/artifacts/live_regtest_realworld_validation_20260308_run3.json --mine-blocks 260 --mine-batch-size 10 --datadir /Users/admin/Documents/btxchain/real-run-20260308-3/single-node-runtime/live-realworld-datadir --keep-datadir`
+   - `python3 scripts/live_regtest_realworld_validation.py --build-dir build-btx --artifact /path/to/Documents/example/real-run-20260308-3/artifacts/live_regtest_realworld_validation_20260308_run3.json --mine-blocks 260 --mine-batch-size 10 --datadir /path/to/Documents/example/real-run-20260308-3/single-node-runtime/live-realworld-datadir --keep-datadir`
    - Result: PASS (`overall_status=pass`)
    - Key evidence:
      - `node.final_height=283`
@@ -419,7 +419,7 @@ Local mapping status (no new blocker found in this pass):
      - `pq_multisig_flow.spend_txid=7bf6055b26516f00af17fa403d2688fce2562cae7e84f145730f77cca6113d96`
 
 3. Live load stress rerun:
-   - `python3 scripts/live_regtest_load_stress.py --build-dir build-btx --artifact /Users/admin/Documents/btxchain/real-run-20260308-3/artifacts/live_regtest_load_stress_20260308_run3.json --rounds 32 --initial-mine-blocks 200 --mine-every-rounds 2 --mine-batch-size 2 --max-runtime-seconds 1800 --progress-every-rounds 2`
+   - `python3 scripts/live_regtest_load_stress.py --build-dir build-btx --artifact /path/to/Documents/example/real-run-20260308-3/artifacts/live_regtest_load_stress_20260308_run3.json --rounds 32 --initial-mine-blocks 200 --mine-every-rounds 2 --mine-batch-size 2 --max-runtime-seconds 1800 --progress-every-rounds 2`
    - Result: PASS (`overall_status=pass`)
    - Counters:
      - `rounds=32`
@@ -431,7 +431,7 @@ Local mapping status (no new blocker found in this pass):
      - `failures=[]`
 
 4. Host<->container interop rerun (macOS + CentOS):
-   - `scripts/m13_mac_centos_interop_readiness.sh --mac-build-dir build-btx --centos-build-dir build-btx-centos --skip-centos-build --artifact /Users/admin/Documents/btxchain/real-run-20260308-3/artifacts/m13_mac_centos_interop_readiness_20260308_run3.json`
+   - `scripts/m13_mac_centos_interop_readiness.sh --mac-build-dir build-btx --centos-build-dir build-btx-centos --skip-centos-build --artifact /path/to/Documents/example/real-run-20260308-3/artifacts/m13_mac_centos_interop_readiness_20260308_run3.json`
    - Result: PASS (`overall_status=pass`)
    - Key evidence:
      - shared genesis: `52a0027ae57faa5a538d3bf396d4a85782c0e7a238fb2e3b23f73dfe5b16a88b`
@@ -457,7 +457,7 @@ Findings:
 
 ### Run10 artifacts
 
-- `/Users/admin/Documents/btxchain/real-run-20260308-3/artifacts/production_readiness_20260308_run3.json`
-- `/Users/admin/Documents/btxchain/real-run-20260308-3/artifacts/live_regtest_realworld_validation_20260308_run3.json`
-- `/Users/admin/Documents/btxchain/real-run-20260308-3/artifacts/live_regtest_load_stress_20260308_run3.json`
-- `/Users/admin/Documents/btxchain/real-run-20260308-3/artifacts/m13_mac_centos_interop_readiness_20260308_run3.json`
+- `/path/to/Documents/example/real-run-20260308-3/artifacts/production_readiness_20260308_run3.json`
+- `/path/to/Documents/example/real-run-20260308-3/artifacts/live_regtest_realworld_validation_20260308_run3.json`
+- `/path/to/Documents/example/real-run-20260308-3/artifacts/live_regtest_load_stress_20260308_run3.json`
+- `/path/to/Documents/example/real-run-20260308-3/artifacts/m13_mac_centos_interop_readiness_20260308_run3.json`

@@ -100,13 +100,17 @@ diagnosed and fixed.
 Primary hosted reproduction command from repository root:
 
 ```bash
-python3 scripts/m22_remote_shielded_redteam_campaign.py --output-dir /tmp/btx-m22-remote-redteam --admin-cidr 0.0.0.0/0
+export BTX_DO_TOKEN_FILE=/path/to/credentials/cloud-api-token
+export BTX_DO_SSH_KEY_ID=<provider-key-id>
+python3 scripts/m22_remote_shielded_redteam_campaign.py \
+  --output-dir /tmp/btx-m22-remote-redteam
 ```
 
-The default `--do-token-file` now resolves the repo-adjacent
-`../infra/digitalocean_api.key` path when the harness is run from the normal
-checkout. When running from an unpacked handoff snapshot or another workspace,
-pass `--do-token-file` explicitly instead of relying on that default.
+Credentials are never inferred from a repository-adjacent path. Supply the API
+token file and provider key id explicitly, either through the environment shown
+above or with `--do-token-file` and `--ssh-key-id`. The default firewall source
+is the operator's auto-detected public IPv4 address; widening it requires an
+explicit `--admin-cidr` decision.
 
 The resulting output directory contains:
 

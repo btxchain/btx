@@ -7,7 +7,11 @@ Test SyncCoinsTipAfterChainSync logic
 """
 
 
-from test_framework.blocktools import create_block, create_coinbase
+from test_framework.blocktools import (
+    REGTEST_GENERIC_P2P_MATMUL_ARGS,
+    create_block,
+    create_coinbase,
+)
 from test_framework.messages import (
     MSG_BLOCK,
     MSG_TYPE_MASK,
@@ -51,7 +55,7 @@ class SyncCoinsTipAfterChainSyncTest(BitcoinTestFramework):
         self.setup_clean_chain = True
         self.num_nodes = 1
         # Set maxtipage to 1 to get us out of IBD after 1 block past our mocktime
-        self.extra_args = [["-maxtipage=1"]]
+        self.extra_args = [[*REGTEST_GENERIC_P2P_MATMUL_ARGS, "-maxtipage=1"]]
 
     def run_test(self):
         NUM_BLOCKS = 3
@@ -134,11 +138,17 @@ class SyncCoinsTipAfterChainSyncTest(BitcoinTestFramework):
         ):
             node.mockscheduler(SYNC_CHECK_INTERVAL)
 
-        self.log.info("Verify node syncs chainstate to disk on next scheduler update")
+        self.log.info("Verify node flushes block index and chainstate on next scheduler update")
         with node.assert_debug_log(
-            ["Finished syncing to tip, syncing chainstate to disk"]
+            ["Finished syncing to tip, flushing block index and chainstate to disk"]
         ):
             node.mockscheduler(SYNC_CHECK_INTERVAL)
+
+        self.log.info("Verify the flushed tip survives an unclean restart without reindexing")
+        expected_tip = node.getbestblockhash()
+        node.kill_process()
+        self.start_node(0)
+        assert_equal(node.getbestblockhash(), expected_tip)
 
 
 if __name__ == "__main__":

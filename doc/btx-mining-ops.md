@@ -2,6 +2,24 @@
 
 This document tracks BTX mining/operator readiness for milestone M7.
 
+## MatMul v4.7 transition posture
+
+The code in this branch is an inactive implementation candidate. Operators
+must continue following the active network rules until a separate activation
+release names an Epoch-A height. The planned sequence is Profile 1 with
+ExactReplay authority and optional shadow proofs (A), mandatory durable proof
+plus ExactReplay (B), Profile 1 proof authority (C), then a separate Profile 2
+proof-authority workload fork (D).
+
+In Epochs A and B, a claimed block receives no authenticated chainwork,
+fork-choice influence, or mining eligibility until ExactReplay succeeds.
+Production operators therefore need a qualified full-acceleration replay
+device, one submitter per saturated device, bounded candidate admission, and
+monitoring for queue depth, cancellation, backend fallback, and cached
+verdicts. Mainnet remains on v3 until the exact-final evidence is reviewed and
+a live Epoch-A `H_A` is selected and ratified. See
+[the canonical roadmap](btx-matmul-v4.7-transition-roadmap.md).
+
 ## Current State
 
 - BTX node supports MatMul PoW consensus and strict regtest verification via:

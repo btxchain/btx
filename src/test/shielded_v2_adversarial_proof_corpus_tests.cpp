@@ -209,7 +209,11 @@ BOOST_AUTO_TEST_CASE(v2_send_adversarial_corpus_builds_expected_variants)
     BOOST_CHECK_EQUAL(corpus->variants[3].id, "statement_digest_mismatch");
     BOOST_CHECK_EQUAL(corpus->variants[4].id, "ring_challenge_tamper");
     BOOST_CHECK_EQUAL(corpus->variants[0].expected_reject_reason, "bad-shielded-proof-encoding");
+    BOOST_CHECK_EQUAL(corpus->variants[2].expected_failure_stage, "witness_parse");
     BOOST_CHECK_EQUAL(corpus->variants[4].expected_failure_stage, "proof_verify");
+    for (const auto& variant : corpus->variants) {
+        BOOST_CHECK_NE(variant.tx_hex, corpus->base_tx_hex);
+    }
 }
 
 BOOST_AUTO_TEST_CASE(v2_send_adversarial_corpus_matches_local_parse_and_verify_failures)

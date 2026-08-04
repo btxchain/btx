@@ -1,0 +1,16 @@
+# Local-only validation matrix. GitHub Actions is intentionally disabled.
+# workflow|max_parallel|job_name|target|timeout_minutes
+ci|4|lint|lint|45
+ci|4|macOS 14 native, arm64, no depends, sqlite only, gui|platform-macos-native|180
+ci|4|macOS 14 native, arm64, fuzz|platform-macos-native-fuzz|180
+ci|4|Linux native, CentOS container|platform-native-centos|180
+ci|4|tidy|tidy|60
+readiness|4|lint|lint|45
+readiness|4|tidy|tidy|45
+readiness|4|ctest|ctest|90
+readiness|4|fuzz regression|fuzz|45
+readiness|4|functional matmul|functional-matmul|45
+readiness|4|bridge view grants|bridge-viewgrants|180
+readiness|4|sanitizer mining smoke|sanitizer-smoke|90
+readiness|4|launch blockers|launch-blockers|45
+readiness|4|production readiness|production-readiness|120

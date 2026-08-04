@@ -74,6 +74,7 @@
 
 #include <condition_variable>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -253,6 +254,12 @@ UniValue blockheaderToJSON(const CBlockIndex& tip, const CBlockIndex& blockindex
     result.pushKV("time", blockindex.nTime);
     result.pushKV("mediantime", blockindex.GetMedianTimePast());
     result.pushKV("nonce", blockindex.nNonce);
+    // Audit (wave-3): the real MatMul PoW nonce is nNonce64. The legacy 32-bit
+    // nNonce is NOT on the P2P header wire, so a miner reports low32(nNonce64)
+    // while every relaying node reports 0 for the same block -- node-divergent and
+    // misleading. Expose the authoritative wire-consistent nNonce64 (matching
+    // getblock), which the schema already declares.
+    result.pushKV("nonce64", strprintf("%016x", blockindex.nNonce64));
     result.pushKV("bits", strprintf("%08x", blockindex.nBits));
     result.pushKV("target", GetTarget(blockindex, pow_limit).GetHex());
     result.pushKV("difficulty", GetDifficulty(blockindex));
@@ -269,7 +276,9 @@ UniValue blockheaderToJSON(const CBlockIndex& tip, const CBlockIndex& blockindex
 UniValue blockToJSON(BlockManager& blockman, const CBlock& block, const CBlockIndex& tip, const CBlockIndex& blockindex, TxVerbosity verbosity, const uint256 pow_limit)
 {
     UniValue result = blockheaderToJSON(tip, blockindex, pow_limit);
-    result.pushKV("nonce64", strprintf("%016x", block.nNonce64));
+    // nonce64 is now emitted by blockheaderToJSON (from the index); do not
+    // duplicate it here. (blockindex.nNonce64 == block.nNonce64 for a connected
+    // block.)
     result.pushKV("mixhash", block.mix_hash.GetHex());
     if (block.matmul_dim != 0 || !block.matmul_digest.IsNull() || !block.seed_a.IsNull() || !block.seed_b.IsNull()) {
         result.pushKV("matmul_digest", block.matmul_digest.GetHex());
@@ -755,7 +764,7 @@ static RPCHelpMan sweepprivkeys()
                     node.mempool->FindScriptPubKey(needles, coins);
                 }
                 Chainstate& active_chainstate = chainman.ActiveChainstate();
-                active_chainstate.ForceFlushStateToDisk();
+                active_chainstate.ForceFlushStateToDisk(/*wipe_cache=*/false);
                 pcursor = std::unique_ptr<CCoinsViewCursor>(active_chainstate.CoinsDB().Cursor());
                 CHECK_NONFATAL(pcursor);
             }
@@ -990,7 +999,9 @@ static CBlockUndo GetUndoChecked(BlockManager& blockman, const CBlockIndex& bloc
     return blockUndo;
 }
 
-const RPCResult getblock_vin{
+const RPCResult& GetBlockVin()
+{
+    static const RPCResult getblock_vin{
     RPCResult::Type::ARR, "vin", "",
     {
         {RPCResult::Type::OBJ, "", "",
@@ -1012,7 +1023,9 @@ const RPCResult getblock_vin{
             }},
         }},
     }
-};
+    };
+    return getblock_vin;
+}
 
 static RPCHelpMan getblock()
 {
@@ -1081,7 +1094,7 @@ static RPCHelpMan getblock()
                     {
                         {RPCResult::Type::OBJ, "", "",
                         {
-                            getblock_vin,
+                            GetBlockVin(),
                         }},
                     }},
                 }},
@@ -1483,22 +1496,31 @@ static RPCHelpMan gettxoutsetinfo()
 {
     UniValue ret(UniValue::VOBJ);
 
-    const CBlockIndex* pindex{nullptr};
     const CoinStatsHashType hash_type{request.params[0].isNull() ? CoinStatsHashType::HASH_SERIALIZED : ParseHashType(request.params[0].get_str())};
     bool index_requested = request.params[2].isNull() || request.params[2].get_bool();
 
     NodeContext& node = EnsureAnyNodeContext(request.context);
     ChainstateManager& chainman = EnsureChainman(node);
     Chainstate& active_chainstate = chainman.ActiveChainstate();
-    active_chainstate.ForceFlushStateToDisk();
+    active_chainstate.ForceFlushStateToDisk(/*wipe_cache=*/false);
 
+    const bool use_index{
+        index_requested && g_coin_stats_index &&
+        (hash_type == CoinStatsHashType::MUHASH || hash_type == CoinStatsHashType::NONE)};
     CCoinsView* coins_view;
     BlockManager* blockman;
+    const CBlockIndex* pindex{nullptr};
     {
         LOCK(::cs_main);
         coins_view = &active_chainstate.CoinsDB();
         blockman = &active_chainstate.m_blockman;
-        pindex = blockman->LookupBlockIndex(coins_view->GetBestBlock());
+        // An indexed no-target query needs a stable lookup target. The index
+        // can be caught up to this block while the chain and CoinsDB advance
+        // concurrently. Non-index cursor scans intentionally leave pindex null
+        // and report the tip read by their own database cursor.
+        if (use_index && request.params[1].isNull()) {
+            pindex = CHECK_NONFATAL(blockman->LookupBlockIndex(coins_view->GetBestBlock()));
+        }
     }
 
     if (!request.params[1].isNull()) {
@@ -1516,13 +1538,13 @@ static RPCHelpMan gettxoutsetinfo()
         pindex = ParseHashOrHeight(request.params[1], chainman);
     }
 
-    if (index_requested && g_coin_stats_index) {
+    if (use_index) {
         if (!g_coin_stats_index->BlockUntilSyncedToCurrentChain()) {
             const IndexSummary summary{g_coin_stats_index->GetSummary()};
 
             // If a specific block was requested and the index has already synced past that height, we can return the
             // data already even though the index is not fully synced yet.
-            if (pindex->nHeight > summary.best_block_height) {
+            if (pindex && pindex->nHeight > summary.best_block_height) {
                 throw JSONRPCError(RPC_INTERNAL_ERROR, strprintf("Unable to get data because coinstatsindex is still syncing. Current height: %d", summary.best_block_height));
             }
         }
@@ -1547,22 +1569,39 @@ static RPCHelpMan gettxoutsetinfo()
             ret.pushKV("transactions", static_cast<int64_t>(stats.nTransactions));
             ret.pushKV("disk_size", stats.nDiskSize);
         } else {
-            ret.pushKV("total_unspendable_amount", ValueFromAmount(stats.total_unspendable_amount));
-
             CCoinsStats prev_stats{};
-            if (pindex->nHeight > 0) {
-                const std::optional<CCoinsStats> maybe_prev_stats = GetUTXOStats(coins_view, *blockman, hash_type, node.rpc_interruption_point, pindex->pprev, index_requested);
+            if (stats.nHeight > 0) {
+                const CBlockIndex& block_index{*CHECK_NONFATAL(WITH_LOCK(::cs_main, return blockman->LookupBlockIndex(stats.hashBlock)))};
+                const std::optional<CCoinsStats> maybe_prev_stats = GetUTXOStats(coins_view, *blockman, hash_type, node.rpc_interruption_point, block_index.pprev, index_requested);
                 if (!maybe_prev_stats) {
                     throw JSONRPCError(RPC_INTERNAL_ERROR, "Unable to read UTXO set");
                 }
                 prev_stats = maybe_prev_stats.value();
             }
 
+            const CAmount total_unspendable_amount{stats.total_unspendables_genesis_block +
+                                                   stats.total_unspendables_bip30 +
+                                                   stats.total_unspendables_scripts +
+                                                   stats.total_unspendables_unclaimed_rewards};
+            const CAmount prev_total_unspendable_amount{prev_stats.total_unspendables_genesis_block +
+                                                        prev_stats.total_unspendables_bip30 +
+                                                        prev_stats.total_unspendables_scripts +
+                                                        prev_stats.total_unspendables_unclaimed_rewards};
+
+            ret.pushKV("total_unspendable_amount", ValueFromAmount(total_unspendable_amount));
+
+            const arith_uint256 prevout_diff{stats.total_prevout_spent_amount - prev_stats.total_prevout_spent_amount};
+            const arith_uint256 coinbase_diff{stats.total_coinbase_amount - prev_stats.total_coinbase_amount};
+            const arith_uint256 new_outputs_diff{stats.total_new_outputs_ex_coinbase_amount - prev_stats.total_new_outputs_ex_coinbase_amount};
+            assert(prevout_diff <= arith_uint256(std::numeric_limits<CAmount>::max()));
+            assert(coinbase_diff <= arith_uint256(std::numeric_limits<CAmount>::max()));
+            assert(new_outputs_diff <= arith_uint256(std::numeric_limits<CAmount>::max()));
+
             UniValue block_info(UniValue::VOBJ);
-            block_info.pushKV("prevout_spent", ValueFromAmount(stats.total_prevout_spent_amount - prev_stats.total_prevout_spent_amount));
-            block_info.pushKV("coinbase", ValueFromAmount(stats.total_coinbase_amount - prev_stats.total_coinbase_amount));
-            block_info.pushKV("new_outputs_ex_coinbase", ValueFromAmount(stats.total_new_outputs_ex_coinbase_amount - prev_stats.total_new_outputs_ex_coinbase_amount));
-            block_info.pushKV("unspendable", ValueFromAmount(stats.total_unspendable_amount - prev_stats.total_unspendable_amount));
+            block_info.pushKV("prevout_spent", ValueFromAmount(static_cast<CAmount>(prevout_diff.GetLow64())));
+            block_info.pushKV("coinbase", ValueFromAmount(static_cast<CAmount>(coinbase_diff.GetLow64())));
+            block_info.pushKV("new_outputs_ex_coinbase", ValueFromAmount(static_cast<CAmount>(new_outputs_diff.GetLow64())));
+            block_info.pushKV("unspendable", ValueFromAmount(total_unspendable_amount - prev_total_unspendable_amount));
 
             UniValue unspendables(UniValue::VOBJ);
             unspendables.pushKV("genesis_block", ValueFromAmount(stats.total_unspendables_genesis_block - prev_stats.total_unspendables_genesis_block));
@@ -1858,6 +1897,8 @@ static std::string MatMulValidationModeToString(kernel::MatMulValidationMode mod
     switch (mode) {
     case kernel::MatMulValidationMode::CONSENSUS:
         return "consensus";
+    case kernel::MatMulValidationMode::TRUSTED:
+        return "trusted";
     case kernel::MatMulValidationMode::ECONOMIC:
         return "economic";
     case kernel::MatMulValidationMode::SPV:
@@ -1886,7 +1927,7 @@ RPCHelpMan getblockchaininfo()
                 {RPCResult::Type::NUM_TIME, "mediantime", "The median block time expressed in " + UNIX_EPOCH_TIME},
                 {RPCResult::Type::NUM, "verificationprogress", "estimate of verification progress [0..1]"},
                 {RPCResult::Type::BOOL, "initialblockdownload", "(debug information) estimate of whether this node is in Initial Block Download mode"},
-                {RPCResult::Type::STR, "matmulvalidationmode", "MatMul validation tier mode: consensus (full node), economic (Phase 1 only), or spv"},
+                {RPCResult::Type::STR, "matmulvalidationmode", "MatMul validation tier mode: consensus (independent full node), trusted (operator-trusted signed-quorum mirror), economic (Phase 1 only), or spv"},
                 {RPCResult::Type::STR_HEX, "chainwork", "total amount of work in active chain, in hexadecimal"},
                 {RPCResult::Type::NUM, "size_on_disk", "the estimated size of the block and undo files on disk"},
                 {RPCResult::Type::BOOL, "pruned", "if the blocks are subject to pruning"},
@@ -3024,7 +3065,7 @@ static RPCHelpMan scantxoutset()
             ChainstateManager& chainman = EnsureChainman(node);
             LOCK(cs_main);
             Chainstate& active_chainstate = chainman.ActiveChainstate();
-            active_chainstate.ForceFlushStateToDisk();
+            active_chainstate.ForceFlushStateToDisk(/*wipe_cache=*/false);
             pcursor = CHECK_NONFATAL(active_chainstate.CoinsDB().Cursor());
             tip = CHECK_NONFATAL(active_chainstate.m_chain.Tip());
         }
@@ -3969,7 +4010,7 @@ PrepareUTXOSnapshot(
         //
         AssertLockHeld(::cs_main);
 
-        chainstate.ForceFlushStateToDisk();
+        chainstate.ForceFlushStateToDisk(/*wipe_cache=*/false);
 
         maybe_stats = GetUTXOStats(&chainstate.CoinsDB(), chainstate.m_blockman, CoinStatsHashType::HASH_SERIALIZED, interruption_point);
         if (!maybe_stats) {

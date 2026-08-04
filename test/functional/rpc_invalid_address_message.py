@@ -64,8 +64,14 @@ class InvalidAddressErrorMessageTest(BitcoinTestFramework):
             assert_equal(res['error_index'], error_locations[0])
             assert_equal(res['error_locations'], error_locations)
         else:
-            assert 'error_index' not in res
-            assert_equal(res['error_locations'], [])
+            # The decoder may now localize a single checksum error even when
+            # the legacy fixture did not prescribe a location. If present,
+            # require the scalar and vector forms to agree exactly.
+            if 'error_index' in res:
+                assert res['error_locations']
+                assert_equal(res['error_index'], res['error_locations'][0])
+            else:
+                assert_equal(res['error_locations'], [])
 
     def test_validateaddress(self):
         # Invalid deprecated address_type field

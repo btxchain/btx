@@ -6,6 +6,7 @@
 #include <script/sign.h>
 
 #include <consensus/amount.h>
+#include <consensus/validation.h>
 #include <key.h>
 #include <policy/policy.h>
 #include <primitives/transaction.h>
@@ -19,7 +20,9 @@
 #include <util/translation.h>
 #include <util/vector.h>
 
+#include <algorithm>
 #include <array>
+#include <functional>
 #include <optional>
 #include <set>
 
@@ -523,6 +526,7 @@ enum class P2MRLeafType {
     CSFS_ONLY,
     CSFS_VERIFY_CHECKSIG,
     HTLC,
+    HTLC_TX,
 };
 
 struct P2MRLeafInfo {
@@ -535,6 +539,8 @@ struct P2MRLeafInfo {
     Span<const unsigned char> csfs_pubkey{};
     uint256 ctv_hash{};
     std::vector<unsigned char> htlc_hash160{}; // HTLC leaf: the 20-byte preimage hashlock
+    PQAlgorithm htlc_algo{PQAlgorithm::ML_DSA_44};
+    std::vector<unsigned char> htlc_pubkey{};
 };
 
 static bool ParseP2MRChecksigLeaf(Span<const unsigned char> script, size_t offset, P2MRLeafInfo& info, size_t& consumed)
@@ -680,28 +686,36 @@ static bool ParseP2MRMultisigLeaf(Span<const unsigned char> script, P2MRLeafInfo
 
 static bool ParseP2MRHTLCLeaf(Span<const unsigned char> script, P2MRLeafInfo& info)
 {
-    // BuildP2MRHTLCLeaf layout (src/script/pqm.cpp):
-    //   <20-byte preimage-hash160 push> OP_OVER OP_HASH160 OP_EQUALVERIFY
-    //   <csfs pubkey push> OP_CHECKSIGFROMSTACK
-    if (script.size() < 25) return false;
-    if (script[0] != 0x14) return false;                                    // push of 20 bytes
-    if (script[21] != OP_OVER || script[22] != OP_HASH160 || script[23] != OP_EQUALVERIFY) return false;
-    Span<const unsigned char> pubkey;
+    std::vector<unsigned char> hash160;
     PQAlgorithm algo{PQAlgorithm::ML_DSA_44};
-    size_t push_consumed{0};
-    if (!ParseP2MRAnyPubkeyPush(script, /*offset=*/24, algo, pubkey, push_consumed)) return false;
-    const size_t tail = 24 + push_consumed;
-    if (script.size() != tail + 1) return false;
-    if (script[tail] != OP_CHECKSIGFROMSTACK) return false;
+    std::vector<unsigned char> pubkey;
+    if (!ParseP2MRLegacyHTLCLeaf(script, hash160, algo, pubkey)) return false;
     info.type = P2MRLeafType::HTLC;
-    info.htlc_hash160.assign(script.begin() + 1, script.begin() + 21);
+    info.htlc_hash160 = std::move(hash160);
     info.csfs_algo = algo;
-    info.csfs_pubkey = pubkey;
+    info.htlc_pubkey = std::move(pubkey);
+    info.csfs_pubkey = info.htlc_pubkey;
+    return true;
+}
+
+static bool ParseP2MRHTLCTxLeafForSigning(Span<const unsigned char> script, P2MRLeafInfo& info)
+{
+    std::vector<unsigned char> hash160;
+    PQAlgorithm algo{PQAlgorithm::ML_DSA_44};
+    std::vector<unsigned char> pubkey;
+    if (!ParseP2MRHTLCTxLeaf(script, hash160, algo, pubkey)) return false;
+    info.type = P2MRLeafType::HTLC_TX;
+    info.htlc_hash160 = std::move(hash160);
+    info.htlc_algo = algo;
+    info.htlc_pubkey = std::move(pubkey);
     return true;
 }
 
 static bool ExtractP2MRLeafInfo(Span<const unsigned char> script, P2MRLeafInfo& info)
 {
+    if (ParseP2MRHTLCTxLeafForSigning(script, info)) {
+        return true;
+    }
     if (ParseP2MRHTLCLeaf(script, info)) {
         return true;
     }
@@ -802,6 +816,315 @@ static bool ExtractP2MRLeafInfo(Span<const unsigned char> script, P2MRLeafInfo& 
 
     size_t consumed{0};
     return ParseP2MRChecksigLeaf(script, /*offset=*/0, info, consumed);
+}
+
+static std::array<PQAlgorithm, 2> GetP2MRAlgoPreferenceOrder(PQAlgorithm preferred_algo);
+static int P2MRPriority(PQAlgorithm algo, PQAlgorithm preferred_algo, int preferred_priority, int non_preferred_priority);
+
+namespace {
+
+using P2MRWitness = std::vector<std::vector<unsigned char>>;
+
+int64_t P2MRWitnessInputWeight(P2MRWitness witness)
+{
+    CTxIn txin;
+    txin.scriptWitness.stack = std::move(witness);
+    return GetTransactionInputWeight(txin);
+}
+
+bool IsUsableP2MRKey(const SigningProvider& provider, Span<const unsigned char> pubkey, PQAlgorithm algo)
+{
+    return provider.HavePQSigningKey(pubkey, algo);
+}
+
+std::vector<unsigned char> MaximumP2MRScriptSignature(PQAlgorithm algo)
+{
+    // A non-default sighash appends one byte. Fee estimation must cover both
+    // the default wallet path and externally supplied explicit sighashes.
+    return std::vector<unsigned char>(GetPQSignatureSize(algo) + 1);
+}
+
+std::vector<unsigned char> MaximumP2MRCSFSSignature(PQAlgorithm algo)
+{
+    // CSFS signs a stack message rather than a transaction sighash and never
+    // carries the extra sighash byte.
+    return std::vector<unsigned char>(GetPQSignatureSize(algo));
+}
+
+std::optional<P2MRWitness> MaximumP2MRLeafWitness(const P2MRLeafInfo& info)
+{
+    switch (info.type) {
+    case P2MRLeafType::CHECKSIG:
+    case P2MRLeafType::CLTV_CHECKSIG:
+    case P2MRLeafType::CTV_CHECKSIG:
+        return P2MRWitness{MaximumP2MRScriptSignature(info.algo)};
+    case P2MRLeafType::MULTISIG:
+    case P2MRLeafType::CLTV_MULTISIG:
+    case P2MRLeafType::CSV_MULTISIG:
+    case P2MRLeafType::CTV_MULTISIG: {
+        if (info.multisig_pubkeys.size() > MAX_PQ_PUBKEYS_PER_MULTISIG) return std::nullopt;
+        std::vector<size_t> signature_sizes;
+        signature_sizes.reserve(info.multisig_pubkeys.size());
+        for (const auto& [algo, _] : info.multisig_pubkeys) {
+            signature_sizes.push_back(GetPQSignatureSize(algo) + 1);
+        }
+        std::sort(signature_sizes.begin(), signature_sizes.end(), std::greater<size_t>());
+
+        // P2MR multisig leaves retain one witness position per public key;
+        // signatures occupy exactly threshold positions and the rest are empty.
+        P2MRWitness witness(info.multisig_pubkeys.size());
+        for (size_t i{0}; i < info.multisig_threshold; ++i) {
+            witness[i].resize(signature_sizes[i]);
+        }
+        return witness;
+    }
+    case P2MRLeafType::CTV_ONLY:
+        return P2MRWitness{};
+    case P2MRLeafType::CTV_CSFS_ONLY:
+    case P2MRLeafType::CSFS_ONLY:
+    case P2MRLeafType::HTLC:
+        return P2MRWitness{
+            MaximumP2MRCSFSSignature(info.csfs_algo),
+            std::vector<unsigned char>(MAX_SCRIPT_ELEMENT_SIZE)};
+    case P2MRLeafType::CSFS_VERIFY_CHECKSIG:
+        return P2MRWitness{
+            MaximumP2MRScriptSignature(info.algo),
+            MaximumP2MRCSFSSignature(info.csfs_algo),
+            std::vector<unsigned char>(MAX_SCRIPT_ELEMENT_SIZE)};
+    case P2MRLeafType::HTLC_TX:
+        return P2MRWitness{
+            MaximumP2MRScriptSignature(info.htlc_algo),
+            std::vector<unsigned char>(32)};
+    }
+    return std::nullopt;
+}
+
+std::optional<P2MRWitness> SelectedP2MRLeafWitness(
+    const P2MRLeafInfo& info,
+    const SigningProvider& provider,
+    PQAlgorithm preferred_algo,
+    int& priority)
+{
+    switch (info.type) {
+    case P2MRLeafType::CHECKSIG:
+    case P2MRLeafType::CLTV_CHECKSIG:
+        if (!IsUsableP2MRKey(provider, info.pubkey, info.algo)) return std::nullopt;
+        priority = P2MRPriority(info.algo, preferred_algo, /*preferred_priority=*/0, /*non_preferred_priority=*/10);
+        return P2MRWitness{MaximumP2MRScriptSignature(info.algo)};
+    case P2MRLeafType::MULTISIG:
+    case P2MRLeafType::CLTV_MULTISIG:
+    case P2MRLeafType::CSV_MULTISIG:
+    {
+        if (info.multisig_pubkeys.size() > MAX_PQ_PUBKEYS_PER_MULTISIG) return std::nullopt;
+        std::vector<bool> available(info.multisig_pubkeys.size());
+        size_t available_count{0};
+        for (size_t i{0}; i < info.multisig_pubkeys.size(); ++i) {
+            const auto& [algo, pubkey] = info.multisig_pubkeys[i];
+            available[i] = IsUsableP2MRKey(provider, pubkey, algo);
+            if (available[i]) ++available_count;
+        }
+        if (available_count < info.multisig_threshold) return std::nullopt;
+
+        P2MRWitness selected(info.multisig_pubkeys.size());
+        size_t selected_count{0};
+        int non_preferred_selected{0};
+        for (PQAlgorithm algo_preference : GetP2MRAlgoPreferenceOrder(preferred_algo)) {
+            for (size_t i{0}; i < available.size() && selected_count < info.multisig_threshold; ++i) {
+                if (!available[i] || info.multisig_pubkeys[i].first != algo_preference) continue;
+                selected[available.size() - 1 - i] = MaximumP2MRScriptSignature(algo_preference);
+                ++selected_count;
+                if (algo_preference != preferred_algo) ++non_preferred_selected;
+            }
+        }
+        if (selected_count != info.multisig_threshold) return std::nullopt;
+        priority = non_preferred_selected;
+        return selected;
+    }
+    case P2MRLeafType::CTV_ONLY:
+    case P2MRLeafType::CTV_CHECKSIG:
+    case P2MRLeafType::CTV_MULTISIG:
+    case P2MRLeafType::CTV_CSFS_ONLY:
+    case P2MRLeafType::CSFS_ONLY:
+    case P2MRLeafType::CSFS_VERIFY_CHECKSIG:
+    case P2MRLeafType::HTLC:
+    case P2MRLeafType::HTLC_TX:
+        // These paths require a caller-supplied message, preimage, or matching
+        // transaction template. A provider alone cannot prove satisfiability.
+        return std::nullopt;
+    }
+    return std::nullopt;
+}
+
+bool GetP2MRMetadata(
+    const CScript& script_pubkey,
+    const SigningProvider& provider,
+    std::vector<unsigned char>& program,
+    P2MRSpendData& spenddata)
+{
+    std::vector<std::vector<unsigned char>> solutions;
+    if (Solver(script_pubkey, solutions) != TxoutType::WITNESS_V2_P2MR || solutions.size() != 1 ||
+        solutions[0].size() != P2MR_PROGRAM_SIZE) {
+        return false;
+    }
+    program = solutions[0];
+    return provider.GetP2MRSpendData(WitnessV2P2MR{uint256{program}}, spenddata) && !spenddata.scripts.empty();
+}
+
+bool IsCommittedP2MRControl(
+    Span<const unsigned char> program,
+    Span<const unsigned char> script,
+    Span<const unsigned char> control)
+{
+    if (control.empty() || (control[0] & P2MR_LEAF_MASK) != P2MR_LEAF_VERSION) return false;
+    const uint256 leaf_hash{ComputeP2MRLeafHash(control[0] & P2MR_LEAF_MASK, script)};
+    return VerifyP2MRCommitment(control, program, leaf_hash);
+}
+
+bool ValidateP2MRSpendData(Span<const unsigned char> program, const P2MRSpendData& spenddata)
+{
+    if (spenddata.scripts.empty()) return false;
+    for (const auto& [script, controls] : spenddata.scripts) {
+        if (script.empty() || script.size() > MAX_P2MR_SCRIPT_SIZE || controls.empty()) return false;
+        P2MRLeafInfo info;
+        if (!ExtractP2MRLeafInfo(script, info)) return false;
+        if ((info.type == P2MRLeafType::MULTISIG ||
+             info.type == P2MRLeafType::CLTV_MULTISIG ||
+             info.type == P2MRLeafType::CSV_MULTISIG ||
+             info.type == P2MRLeafType::CTV_MULTISIG) &&
+            info.multisig_pubkeys.size() > MAX_PQ_PUBKEYS_PER_MULTISIG) {
+            return false;
+        }
+        for (const std::vector<unsigned char>& control : controls) {
+            if (!IsCommittedP2MRControl(program, script, control)) return false;
+        }
+    }
+    return true;
+}
+
+} // namespace
+
+std::optional<int64_t> CalculateMaximumP2MRInputWeight(
+    const CScript& script_pubkey,
+    const SigningProvider& provider)
+{
+    std::vector<unsigned char> program;
+    P2MRSpendData spenddata;
+    if (!GetP2MRMetadata(script_pubkey, provider, program, spenddata)) return std::nullopt;
+    if (!ValidateP2MRSpendData(program, spenddata)) return std::nullopt;
+
+    std::optional<int64_t> maximum;
+    for (const auto& [script, controls] : spenddata.scripts) {
+        P2MRLeafInfo info;
+        if (!ExtractP2MRLeafInfo(script, info)) return std::nullopt;
+        const auto base_witness{MaximumP2MRLeafWitness(info)};
+        if (!base_witness) return std::nullopt;
+
+        for (const std::vector<unsigned char>& control : controls) {
+            P2MRWitness witness{*base_witness};
+            witness.push_back(script);
+            witness.push_back(control);
+            const int64_t weight{P2MRWitnessInputWeight(std::move(witness))};
+            maximum = maximum ? std::max(*maximum, weight) : weight;
+        }
+    }
+    return maximum;
+}
+
+std::optional<int64_t> CalculateSelectedP2MRInputWeight(
+    const CScript& script_pubkey,
+    const SigningProvider& provider,
+    std::optional<PQAlgorithm> preferred_algo)
+{
+    std::vector<unsigned char> program;
+    P2MRSpendData spenddata;
+    if (!GetP2MRMetadata(script_pubkey, provider, program, spenddata)) return std::nullopt;
+    if (!ValidateP2MRSpendData(program, spenddata)) return std::nullopt;
+
+    const PQAlgorithm preferred{preferred_algo.value_or(PQAlgorithm::ML_DSA_44)};
+    bool have_best{false};
+    int best_priority{0};
+    int64_t best_weight{0};
+    for (const auto& [script, controls] : spenddata.scripts) {
+        const std::vector<unsigned char>* control{&*controls.begin()};
+
+        P2MRLeafInfo info;
+        if (!ExtractP2MRLeafInfo(script, info)) return std::nullopt;
+        int priority{0};
+        auto witness{SelectedP2MRLeafWitness(info, provider, preferred, priority)};
+        if (!witness) continue;
+        witness->push_back(script);
+        witness->push_back(*control);
+        const int64_t weight{P2MRWitnessInputWeight(std::move(*witness))};
+
+        // SignP2MR immediately accepts a fully preferred checksig/multisig leaf
+        // in provider map order; otherwise it retains the lowest priority.
+        if (priority == 0) return weight;
+        if (!have_best || priority < best_priority) {
+            have_best = true;
+            best_priority = priority;
+            best_weight = weight;
+        }
+    }
+    if (!have_best) return std::nullopt;
+    return best_weight;
+}
+
+bool HasGenericP2MRSigningPath(
+    const CScript& script_pubkey,
+    const SigningProvider& provider)
+{
+    std::vector<unsigned char> program;
+    P2MRSpendData spenddata;
+    if (!GetP2MRMetadata(script_pubkey, provider, program, spenddata)) return false;
+    if (!ValidateP2MRSpendData(program, spenddata)) return false;
+
+    for (const auto& [script, _] : spenddata.scripts) {
+        P2MRLeafInfo info;
+        if (!ExtractP2MRLeafInfo(script, info)) return false;
+        switch (info.type) {
+        case P2MRLeafType::CHECKSIG:
+        case P2MRLeafType::CLTV_CHECKSIG:
+        case P2MRLeafType::MULTISIG:
+        case P2MRLeafType::CLTV_MULTISIG:
+        case P2MRLeafType::CSV_MULTISIG:
+            return true;
+        case P2MRLeafType::CTV_ONLY:
+        case P2MRLeafType::CTV_CHECKSIG:
+        case P2MRLeafType::CTV_MULTISIG:
+        case P2MRLeafType::CTV_CSFS_ONLY:
+        case P2MRLeafType::CSFS_ONLY:
+        case P2MRLeafType::CSFS_VERIFY_CHECKSIG:
+        case P2MRLeafType::HTLC:
+        case P2MRLeafType::HTLC_TX:
+            break;
+        }
+    }
+    return false;
+}
+
+int64_t GetMaximumStandardP2MRInputWeight()
+{
+    static const int64_t weight{[] {
+        std::vector<std::pair<PQAlgorithm, std::vector<unsigned char>>> keys;
+        keys.reserve(MAX_PQ_PUBKEYS_PER_MULTISIG);
+        for (size_t i{0}; i < MAX_PQ_PUBKEYS_PER_MULTISIG; ++i) {
+            keys.emplace_back(
+                PQAlgorithm::SLH_DSA_128S,
+                std::vector<unsigned char>(GetPQPubKeySize(PQAlgorithm::SLH_DSA_128S), static_cast<unsigned char>(i + 1)));
+        }
+        const std::vector<unsigned char> script{
+            BuildP2MRMultisigCTVScript(uint256{}, MAX_PQ_PUBKEYS_PER_MULTISIG, keys)};
+        assert(!script.empty());
+
+        P2MRWitness witness(MAX_PQ_PUBKEYS_PER_MULTISIG);
+        for (auto& signature : witness) {
+            signature = MaximumP2MRScriptSignature(PQAlgorithm::SLH_DSA_128S);
+        }
+        witness.push_back(script);
+        witness.emplace_back(P2MR_CONTROL_MAX_SIZE);
+        return P2MRWitnessInputWeight(std::move(witness));
+    }()};
+    return weight;
 }
 
 static PQAlgorithm GetPreferredP2MRAlgo(const SignatureData& sigdata)
@@ -998,6 +1321,34 @@ static bool SignP2MR(const SigningProvider& provider,
             // is the single truthy stack element required by cleanstack.
             std::vector<valtype> candidate = Vector(sig_csfs, preimage, script_bytes, *control);
             const int priority = P2MRPriority(leaf_info.csfs_algo, preferred_algo, /*preferred_priority=*/20, /*non_preferred_priority=*/30);
+            commit_candidate(priority, std::move(candidate), script_bytes, *control);
+            continue;
+        }
+        case P2MRLeafType::HTLC_TX: {
+            const auto it_pre = sigdata.hash160_preimages.find(leaf_info.htlc_hash160);
+            if (it_pre == sigdata.hash160_preimages.end()) continue;
+
+            std::vector<unsigned char> sig;
+            if (!CreateP2MRScriptSig(
+                    creator,
+                    sigdata,
+                    provider,
+                    sig,
+                    leaf_info.htlc_pubkey,
+                    leaf_info.htlc_algo,
+                    leaf_hash,
+                    SigVersion::P2MR)) {
+                continue;
+            }
+            std::vector<valtype> candidate = Vector(sig, it_pre->second, script_bytes, *control);
+            const int priority = P2MRPriority(
+                leaf_info.htlc_algo, preferred_algo, /*preferred_priority=*/0, /*non_preferred_priority=*/10);
+            if (priority == 0) {
+                sigdata.p2mr_leaf_script = script;
+                sigdata.p2mr_control_block = *control;
+                result = std::move(candidate);
+                return true;
+            }
             commit_candidate(priority, std::move(candidate), script_bytes, *control);
             continue;
         }
@@ -1355,6 +1706,7 @@ public:
     DummySignatureChecker() = default;
     bool CheckECDSASignature(const std::vector<unsigned char>& sig, const std::vector<unsigned char>& vchPubKey, const CScript& scriptCode, SigVersion sigversion) const override { return sig.size() != 0; }
     bool CheckSchnorrSignature(Span<const unsigned char> sig, Span<const unsigned char> pubkey, SigVersion sigversion, ScriptExecutionData& execdata, ScriptError* serror) const override { return sig.size() != 0; }
+    bool CheckPQSignature(Span<const unsigned char> sig, Span<const unsigned char> pubkey, PQAlgorithm algo, uint8_t hash_type, SigVersion sigversion, ScriptExecutionData& execdata, bool slhdsa_fips205) const override { return !sig.empty(); }
     bool CheckLockTime(const CScriptNum& nLockTime) const override { return true; }
     bool CheckSequence(const CScriptNum& nSequence) const override { return true; }
 };

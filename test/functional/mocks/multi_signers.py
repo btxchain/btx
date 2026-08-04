@@ -32,17 +32,18 @@ def enumerate(args):
 
 
 def getdescriptors(args):
-    tpub_1 = "tpubDCBEcmVKbfC9KfdydyLbJ2gfNL88grZu1XcWSW9ytTM6fitvaRmVyr8Ddf7SjZ2ZfMx9RicjYAXhuh3fmLiVLPodPEqnQQURUfrBKiiVZc8"
-    tpub_2 = "tpubDDAfvogaaAxaFJ6c15ht7Tq6ZmiqFYfrSmZsHu7tHXBgnjMZSHAeHSwhvjARNA6Qybon4ksPksjRbPDVp7yXA1KjTjSd5x18KHqbppnXP1s"
     if args.fingerprint == "00000001":
-        receive = f"mr(pk_slh([00000001/87h/1h/0h]{tpub_1}/0/*))"
-        internal = f"mr(pk_slh([00000001/87h/1h/0h]{tpub_1}/1/*))"
+        fingerprint = "00000001"
     elif args.fingerprint == "00000002":
-        receive = f"mr(pk_slh([00000002/87h/1h/0h]{tpub_2}/0/*))"
-        internal = f"mr(pk_slh([00000002/87h/1h/0h]{tpub_2}/1/*))"
+        fingerprint = "00000002"
     else:
         sys.stdout.write(json.dumps({"error": "Unexpected fingerprint", "fingerprint": args.fingerprint}))
         return
+
+    receive_key = f"pqhd({fingerprint}/1h/0h/0/*)"
+    internal_key = f"pqhd({fingerprint}/1h/0h/1/*)"
+    receive = f"mr(pk_slh({receive_key}))"
+    internal = f"mr(pk_slh({internal_key}))"
 
     sys.stdout.write(json.dumps({
         "receive": [receive],
@@ -58,16 +59,14 @@ def getp2mrpubkeys(args):
         sys.stdout.write(json.dumps({"error": "Missing descriptor/index"}))
         return
 
-    material = f"{args.fingerprint}|{args.desc}|{args.index}|slh_dsa_128s".encode("utf-8")
-    pubkey = hashlib.sha256(material).hexdigest()
     sys.stdout.write(json.dumps({
-        "entries": [
-            {
-                "expr_index": 0,
-                "algo": "slh_dsa_128s",
-                "pubkey": pubkey,
-            }
-        ]
+        "entries": [{
+            "expr_index": 0,
+            "algo": "slh_dsa_128s",
+            "pubkey": hashlib.sha256(
+                f"{args.fingerprint}|{args.desc}|{args.index}|0|slh_dsa_128s".encode("utf-8")
+            ).hexdigest(),
+        }]
     }))
 
 parser = argparse.ArgumentParser(prog='./multi_signers.py', description='External multi-signer mock')

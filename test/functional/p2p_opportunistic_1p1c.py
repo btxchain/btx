@@ -62,6 +62,7 @@ class PackageRelayTest(BitcoinTestFramework):
         self.num_nodes = 1
         self.extra_args = [[
             "-datacarriersize=100000",
+            "-limitdescendantsize=1",
             "-maxmempool=5",
         ]]
         self.supports_cli = False

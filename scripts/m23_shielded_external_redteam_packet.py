@@ -27,7 +27,7 @@ DEFAULT_SOURCE_FILES = [
     "doc/btx-shielded-external-review-closeout.md",
     "doc/btx-production-readiness-matrix.md",
     "doc/btx-shielded-v2-overhaul-tracker-2026-03-14.md",
-    "../infra/btx-seed-server-spec.md",
+    "infra/btx-seed-server-spec.md",
     "scripts/m20_shielded_audit_handoff_bundle.py",
     "scripts/m21_shielded_redteam_campaign.sh",
     "scripts/m22_remote_shielded_redteam_campaign.py",

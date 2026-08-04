@@ -31,6 +31,7 @@
 #include <logging.h>
 #include <logging/timer.h>
 #include <node/blockstorage.h>
+#include <node/matmul_trusted_attestations.h>
 #include <node/utxo_snapshot.h>
 #include <policy/coin_age_priority.h>
 #include <policy/ephemeral_policy.h>
@@ -38,6 +39,8 @@
 #include <policy/rbf.h>
 #include <policy/settings.h>
 #include <policy/truc_policy.h>
+#include <matmul/matmul_v4_rc_stage3_consensus.h>
+#include <matmul/matmul_v4_rc_stage3_producer.h>
 #include <pow.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
@@ -64,6 +67,7 @@
 #include <util/signalinterrupt.h>
 #include <util/strencodings.h>
 #include <util/string.h>
+#include <util/threadpool.h>
 #include <util/time.h>
 #include <util/trace.h>
 #include <util/translation.h>
@@ -106,8 +110,6 @@ using node::CBlockIndexWorkComparator;
 using node::SnapshotMetadata;
 using node::ShieldedSnapshotSectionHeader;
 
-/** Size threshold for warning about slow UTXO set flush to disk. */
-static constexpr size_t WARN_FLUSH_COINS_SIZE = 1 << 30; // 1 GiB
 /** Time window to wait between writing blocks/block index and chainstate to disk.
  *  Randomize writing time inside the window to prevent a situation where the
  *  network over time settles into a few cohorts of synchronized writers.
@@ -116,6 +118,14 @@ static constexpr auto DATABASE_WRITE_INTERVAL_MIN{50min};
 static constexpr auto DATABASE_WRITE_INTERVAL_MAX{70min};
 /** Maximum age of our tip for us to be considered current for fee estimation */
 static constexpr std::chrono::hours MAX_FEE_ESTIMATION_TIP_AGE{3};
+
+// Return whether the completed full flush should compact chainstate.
+static bool ShouldCompactChainstate(bool in_ibd)
+{
+    static constexpr uint32_t flush_ratio{320}; // Roughly every 2 weeks with hourly flushes.
+    return !in_ibd && FastRandomContext().randrange(flush_ratio) == 0;
+}
+
 const std::vector<std::string> CHECKLEVEL_DOC {
     "level 0 reads the blocks from disk",
     "level 1 verifies block validity",
@@ -3661,11 +3671,7 @@ void Chainstate::MaybeUpdateMempoolForReorg(
         const LockPoints& lp = it->GetLockPoints();
         // CheckSequenceLocksAtTip checks if the transaction will be final in the next block to be
         // created on top of the new chain.
-        if (TestLockPointValidity(m_chain, lp)) {
-            if (!CheckSequenceLocksAtTip(m_chain.Tip(), lp)) {
-                return true;
-            }
-        } else {
+        if (!TestLockPointValidity(m_chain, lp) || !CheckSequenceLocksAtTip(m_chain.Tip(), lp)) {
             const CCoinsViewMemPool view_mempool{&CoinsTip(), *m_mempool};
             const std::optional<LockPoints> new_lock_points{CalculateLockPointsAtTip(m_chain.Tip(), view_mempool, tx)};
             if (new_lock_points.has_value() && CheckSequenceLocksAtTip(m_chain.Tip(), *new_lock_points)) {
@@ -5406,7 +5412,10 @@ bool MemPoolAccept::SubmitPackage(const ATMPArgs& args, std::vector<Workspace>& 
             package_state.Invalid(PackageValidationResult::PCKG_MEMPOOL_ERROR,
                                   strprintf("BUG! PolicyScriptChecks succeeded but ConsensusScriptChecks failed: %s",
                                             ws.m_ptx->GetHash().ToString()));
-            // Remove the transaction from the mempool.
+        }
+        // Remove the first failing transaction and every subsequent package
+        // member, which may depend on outputs that are no longer valid.
+        if (!all_submitted) {
             if (!m_subpackage.m_changeset) m_subpackage.m_changeset = m_pool.GetChangeSet();
             m_subpackage.m_changeset->StageRemoval(m_pool.GetIter(ws.m_ptx->GetHash()).value());
         }
@@ -6038,10 +6047,16 @@ CoinsViews::CoinsViews(DBParams db_params, CoinsViewOptions options)
     : m_dbview{std::move(db_params), std::move(options)},
       m_catcherview(&m_dbview) {}
 
-void CoinsViews::InitCache()
+void CoinsViews::InitCache(int32_t prevoutfetch_threads)
 {
     AssertLockHeld(::cs_main);
     m_cacheview = std::make_unique<CCoinsViewCache>(&m_catcherview);
+    auto thread_pool{std::make_shared<ThreadPool>("prevout")};
+    if (prevoutfetch_threads > 0) {
+        thread_pool->Start(prevoutfetch_threads);
+        LogInfo("Block input prevout fetching uses %d additional threads\n", prevoutfetch_threads);
+    }
+    m_connect_block_view = std::make_unique<CoinsViewOverlay>(&*m_cacheview, std::move(thread_pool));
 }
 
 Chainstate::Chainstate(
@@ -6089,7 +6104,7 @@ void Chainstate::InitCoinsCache(size_t cache_size_bytes)
     AssertLockHeld(::cs_main);
     assert(m_coins_views != nullptr);
     m_coinstip_cache_size_bytes = cache_size_bytes;
-    m_coins_views->InitCache();
+    m_coins_views->InitCache(m_chainman.m_options.prevoutfetch_threads_num);
 }
 
 // Note that though this is marked const, we may end up modifying `m_cached_finished_ibd`, which
@@ -6128,18 +6143,18 @@ void Chainstate::CheckForkWarningConditions()
 {
     AssertLockHeld(cs_main);
 
-    // Before we get past initial download, we cannot reliably alert about forks
-    // (we assume we don't get stuck on a fork before finishing our initial sync)
-    // Also not applicable to the background chainstate
-    if (m_chainman.IsInitialBlockDownload() || this->GetRole() == ChainstateRole::BACKGROUND) {
+    // Not applicable to the background chainstate. The active chain should
+    // warn even during IBD, since a persistent invalid higher-work chain may
+    // indicate corruption or a consensus incompatibility.
+    if (this->GetRole() == ChainstateRole::BACKGROUND) {
         return;
     }
 
     if (m_chainman.m_best_invalid && m_chainman.m_best_invalid->nChainWork > m_chain.Tip()->nChainWork + (GetBlockProof(*m_chain.Tip()) * 6)) {
-        LogPrintf("%s: Warning: Found invalid chain at least ~6 blocks longer than our best chain.\nChain state database corruption likely.\n", __func__);
+        LogWarning("Found invalid chain more than 6 blocks longer than our best chain. This could be due to database corruption or consensus incompatibility with peers.");
         m_chainman.GetNotifications().warningSet(
             kernel::Warning::LARGE_WORK_INVALID_CHAIN,
-            _("Warning: We do not appear to fully agree with our peers! You may need to upgrade, or other nodes may need to upgrade."));
+            _("Warning: Found invalid chain more than 6 blocks longer than our best chain. This could be due to database corruption or consensus incompatibility with peers."));
     } else {
         m_chainman.GetNotifications().warningUnset(kernel::Warning::LARGE_WORK_INVALID_CHAIN);
     }
@@ -6815,6 +6830,9 @@ static unsigned int GetBlockScriptFlags(const CBlockIndex& block_index, const Ch
     return flags;
 }
 
+static bool CheckContentEliminationRules(const CBlock& block, int nHeight,
+                                         const Consensus::Params& consensus_params,
+                                         BlockValidationState& state);
 
 /** Apply the effects of this block (with given index) on the UTXO set represented by coins.
  *  Validity checks that depend on the UTXO set are also done; ConnectBlock()
@@ -6856,6 +6874,14 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         return false;
     }
 
+    // ContextualCheckBlock is skipped by -reindex-chainstate. Re-run the
+    // content-elimination block rules here so a node that upgrades after the
+    // flag day cannot reconstruct a chainstate containing blocks accepted by
+    // older software but invalid under the new consensus rules.
+    if (!CheckContentEliminationRules(block, pindex->nHeight, params.GetConsensus(), state)) {
+        return false;
+    }
+
     // verify that the view's current state corresponds to the previous block
     uint256 hashPrevBlock = pindex->pprev == nullptr ? uint256() : pindex->pprev->GetBlockHash();
     if (hashPrevBlock != view.GetBestBlock()) {
@@ -6881,7 +6907,11 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         if (it != m_blockman.m_block_index.end()) {
             if (it->second.GetAncestor(pindex->nHeight) == pindex &&
                 m_chainman.m_best_header->GetAncestor(pindex->nHeight) == pindex &&
-                m_chainman.m_best_header->nChainWork >= m_chainman.MinimumChainWork()) {
+                // Audit P0.1/C1: use AUTHENTICATED work so a forged matmul-header
+                // chain cannot inflate best-header work past MinimumChainWork and
+                // thereby relax (skip) expensive script verification. Equal to
+                // nChainWork pre-fork and for any body-verified chain.
+                m_chainman.m_best_header->nAuthenticatedChainWork >= m_chainman.MinimumChainWork()) {
                 // This block is a member of the assumed verified chain and an ancestor of the best header.
                 // Script verification is skipped when connecting blocks under the
                 // assumevalid block. Assuming the assumevalid block is valid this
@@ -7052,6 +7082,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     // in multiple threads). Preallocate the vector size so a new allocation
     // doesn't invalidate pointers into the vector, and keep txsdata in scope
     // for as long as `control`.
+    std::vector<PrecomputedTransactionData> txsdata(block.vtx.size());
     CCheckQueueControl<CScriptCheck> control(fScriptChecks && parallel_script_checks ? &m_chainman.GetCheckQueue() : nullptr);
     // Shielded proof verification is a consensus check and is not relaxed by
     // assumevalid. Structural checks (nullifier uniqueness, pool balance,
@@ -7061,8 +7092,6 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         fShieldedProofChecks && parallel_shielded_checks ? &m_chainman.GetShieldedProofCheckQueue() : nullptr);
     CCheckQueueControl<CShieldedSpendAuthCheck, std::string> shielded_auth_control(
         fShieldedProofChecks && parallel_shielded_checks ? &m_chainman.GetShieldedSpendAuthCheckQueue() : nullptr);
-    std::vector<PrecomputedTransactionData> txsdata(block.vtx.size());
-
     std::vector<int> prevheights;
     CAmount nFees = 0;
     int nInputs = 0;
@@ -7666,13 +7695,15 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
             // P2MR witness leaf-type allowlist and the CSFS/HTLC message bound
             // from relay policy to consensus, so a cooperating miner can no
             // longer smuggle inscription data through a non-financial witness
-            // leaf. Reuse the exact IsWitnessStandard classifier so consensus
-            // and relay cannot diverge; it validates only financial leaf shapes
-            // (CHECKSIG/MULTISIG/CTV/CLTV/CSV/CSFS/HTLC), whitelisting the large
-            // PQ signature/pubkey operands by structure rather than size.
+            // leaf. IsFinancialP2MRWitness shares the financial leaf parser
+            // with relay policy but uses consensus-fixed bounds; it validates
+            // only financial leaf shapes (CHECKSIG/MULTISIG/CTV/CLTV/CSV/CSFS/
+            // HTLC), whitelisting large PQ signature/pubkey operands by
+            // structure rather than size. It must never inherit mutable relay
+            // policy such as -maxscriptsize.
             if (params.GetConsensus().IsContentEliminationActive(pindex->nHeight)) {
                 std::string witness_reject;
-                if (!IsWitnessStandard(tx, view, "bad-txns-witness-", witness_reject)) {
+                if (!IsFinancialP2MRWitness(tx, view, "bad-txns-witness-", witness_reject)) {
                     state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
                                   "bad-txns-nonfinancial-witness",
                                   witness_reject + " in transaction " + tx.GetHash().ToString());
@@ -8066,6 +8097,7 @@ CoinsCacheSizeState Chainstate::GetCoinsCacheSizeState(
     return CoinsCacheSizeState::OK;
 }
 
+
 bool Chainstate::FlushStateToDisk(
     BlockValidationState &state,
     FlushStateMode mode,
@@ -8076,8 +8108,8 @@ bool Chainstate::FlushStateToDisk(
     std::set<int> setFilesToPrune;
     bool full_flush_completed = false;
 
-    const size_t coins_count = CoinsTip().GetCacheSize();
-    const size_t coins_mem_usage = CoinsTip().DynamicMemoryUsage();
+    [[maybe_unused]] const size_t coins_count{CoinsTip().GetCacheSize()};
+    [[maybe_unused]] const size_t coins_mem_usage{CoinsTip().DynamicMemoryUsage()};
 
     try {
     {
@@ -8126,7 +8158,7 @@ bool Chainstate::FlushStateToDisk(
         // It's been a while since we wrote the block index and chain state to disk. Do this frequently, so we don't need to redownload or reindex after a crash.
         bool fPeriodicWrite = mode == FlushStateMode::PERIODIC && nNow >= m_next_write;
         // Combine all conditions that result in a write to disk.
-        bool should_write = (mode == FlushStateMode::ALWAYS) || fCacheLarge || fCacheCritical || fPeriodicWrite || fFlushForPrune;
+        bool should_write = (mode == FlushStateMode::FORCE_SYNC) || (mode == FlushStateMode::FORCE_FLUSH) || fCacheLarge || fCacheCritical || fPeriodicWrite || fFlushForPrune;
         // Write blocks, block index and best chain related state to disk.
         if (should_write) {
             // Ensure we can write block index
@@ -8137,10 +8169,11 @@ bool Chainstate::FlushStateToDisk(
                 LOG_TIME_MILLIS_WITH_CATEGORY("write block and undo data to disk", BCLog::BENCH);
 
                 // First make sure all block and undo data is flushed to disk.
-                // NOTE: Handle return error, or add detailed comment why it is
-                // safe to not return an error upon failure.
-                if (!m_blockman.FlushChainstateBlockFile(m_chain.Height())) {
-                    LogPrintLevel(BCLog::VALIDATION, BCLog::Level::Warning, "%s: Failed to flush block file.\n", __func__);
+                if (!m_blockman.FlushChainstateBlockFile(
+                        m_chain.Height(),
+                        /*snapshot_chainstate=*/m_from_snapshot_blockhash.has_value())) {
+                    // FlushChainstateBlockFile() already emitted the flush-error notification.
+                    return state.Error("Failed to flush block or undo file");
                 }
             }
 
@@ -8161,23 +8194,20 @@ bool Chainstate::FlushStateToDisk(
 
             if (!CoinsTip().GetBestBlock().IsNull()) {
 
-            if (coins_mem_usage >= WARN_FLUSH_COINS_SIZE) LogWarning("Flushing large (%d GiB) UTXO set to disk, it may take several minutes", coins_mem_usage >> 30);
-            LOG_TIME_MILLIS_WITH_CATEGORY(strprintf("write coins cache to disk (%d coins, %.2fKiB)",
-                coins_count, coins_mem_usage >> 10), BCLog::BENCH);
-
             // Typical Coin structures on disk are around 48 bytes in size.
             // Pushing a new one to the database can cause it to be written
             // twice (once in the log, and once in the tables). This is already
             // an overestimation, as most will delete an existing entry or
             // overwrite one. Still, use a conservative safety factor of 2.
-            if (!CheckDiskSpace(m_chainman.m_options.datadir, 48 * 2 * 2 * CoinsTip().GetCacheSize())) {
+            if (!CheckDiskSpace(m_chainman.m_options.datadir, 48 * 2 * 2 * CoinsTip().GetDirtyCount())) {
                 return FatalError(m_chainman.GetNotifications(), state, _("Disk space is too low!"));
             }
             // Flush the chainstate (which may refer to block index entries).
-            const auto empty_cache{(mode == FlushStateMode::ALWAYS) || fCacheLarge || fCacheCritical};
+            const auto empty_cache{(mode == FlushStateMode::FORCE_FLUSH) || fCacheLarge || fCacheCritical};
             if (empty_cache ? !CoinsTip().Flush() : !CoinsTip().Sync()) {
                 return FatalError(m_chainman.GetNotifications(), state, _("Failed to write to coin database."));
             }
+            m_last_flushed_block = m_blockman.LookupBlockIndex(CoinsTip().GetBestBlock());
             full_flush_completed = true;
             TRACEPOINT(utxocache, flush,
                     int64_t{Ticks<std::chrono::microseconds>(NodeClock::now() - nNow)},
@@ -8194,9 +8224,17 @@ bool Chainstate::FlushStateToDisk(
             m_next_write = FastRandomContext().rand_uniform_delay(NodeClock::now() + DATABASE_WRITE_INTERVAL_MIN, range);
         }
     }
-    if (full_flush_completed && m_chainman.m_options.signals) {
-        // Update best block in wallet (so we can detect restored wallets).
-        m_chainman.m_options.signals->ChainStateFlushed(this->GetRole(), m_chain.GetLocator());
+    if (full_flush_completed) {
+        if (m_chainman.m_options.signals) {
+            m_chainman.m_options.signals->ChainStateFlushed(this->GetRole(), GetLocator(m_last_flushed_block));
+        }
+        if (!m_chainman.m_interrupt && ShouldCompactChainstate(m_chainman.IsInitialBlockDownload())) {
+            try {
+                CoinsDB().CompactFull();
+            } catch (const std::exception& e) {
+                LogWarning("Failed to start chainstate compaction (%s)\n", e.what());
+            }
+        }
     }
     } catch (const std::runtime_error& e) {
         return FatalError(m_chainman.GetNotifications(), state, strprintf(_("System error while flushing: %s"), e.what()));
@@ -8204,10 +8242,10 @@ bool Chainstate::FlushStateToDisk(
     return true;
 }
 
-void Chainstate::ForceFlushStateToDisk()
+void Chainstate::ForceFlushStateToDisk(bool wipe_cache)
 {
     BlockValidationState state;
-    if (!this->FlushStateToDisk(state, FlushStateMode::ALWAYS)) {
+    if (!this->FlushStateToDisk(state, wipe_cache ? FlushStateMode::FORCE_FLUSH : FlushStateMode::FORCE_SYNC)) {
         LogPrintf("%s: failed to flush state (%s)\n", __func__, state.ToString());
     }
 }
@@ -8516,7 +8554,8 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
     LogDebug(BCLog::BENCH, "  - Load block from disk: %.2fms\n",
              Ticks<MillisecondsDouble>(time_2 - time_1));
     {
-        CCoinsViewCache view(&CoinsTip());
+        CoinsViewOverlay& view{*m_coins_views->m_connect_block_view};
+        const auto reset_guard{view.StartFetching(blockConnecting)};
         bool rv = ConnectBlock(blockConnecting, state, pindexNew, view);
         if (m_chainman.m_options.signals) {
             m_chainman.m_options.signals->BlockChecked(blockConnecting, state);
@@ -8677,8 +8716,7 @@ CBlockIndex* Chainstate::FindMostWorkChain()
                         // If we're missing data, then add back to m_blocks_unlinked,
                         // so that if the block arrives in the future we can try adding
                         // to setBlockIndexCandidates again.
-                        m_blockman.m_blocks_unlinked.insert(
-                            std::make_pair(pindexFailed->pprev, pindexFailed));
+                        m_blockman.AddUnlinkedBlock(pindexFailed);
                     }
                     setBlockIndexCandidates.erase(pindexFailed);
                     pindexFailed = pindexFailed->pprev;
@@ -9305,7 +9343,7 @@ bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex* pinde
         m_blockman.m_dirty_blockindex.insert(invalid_walk_tip);
         setBlockIndexCandidates.erase(invalid_walk_tip);
         TryAddBlockIndexCandidate(invalid_walk_tip->pprev);
-        if (invalid_walk_tip->pprev == to_mark_failed && (to_mark_failed->nStatus & BLOCK_FAILED_VALID)) {
+        if (invalid_walk_tip == to_mark_failed->pprev && (to_mark_failed->nStatus & BLOCK_FAILED_VALID)) {
             // We only want to mark the last disconnected block as BLOCK_FAILED_VALID; its children
             // need to be BLOCK_FAILED_CHILD instead.
             to_mark_failed->nStatus = (to_mark_failed->nStatus ^ BLOCK_FAILED_VALID) | BLOCK_FAILED_CHILD;
@@ -9387,8 +9425,9 @@ void Chainstate::SetBlockFailureFlags(CBlockIndex* invalid_block)
     AssertLockHeld(cs_main);
 
     for (auto& [_, block_index] : m_blockman.m_block_index) {
-        if (block_index.GetAncestor(invalid_block->nHeight) == invalid_block && !(block_index.nStatus & BLOCK_FAILED_MASK)) {
-            block_index.nStatus |= BLOCK_FAILED_CHILD;
+        if (invalid_block != &block_index && block_index.GetAncestor(invalid_block->nHeight) == invalid_block) {
+            block_index.nStatus = (block_index.nStatus & ~BLOCK_FAILED_VALID) | BLOCK_FAILED_CHILD;
+            m_blockman.m_dirty_blockindex.insert(&block_index);
         }
     }
 }
@@ -9400,7 +9439,7 @@ void Chainstate::ResetBlockFailureFlags(CBlockIndex *pindex) {
 
     // Remove the invalidity flag from this block and all its descendants.
     for (auto& [_, block_index] : m_blockman.m_block_index) {
-        if (!block_index.IsValid() && block_index.GetAncestor(nHeight) == pindex) {
+        if ((block_index.nStatus & BLOCK_FAILED_MASK) && block_index.GetAncestor(nHeight) == pindex) {
             block_index.nStatus &= ~BLOCK_FAILED_MASK;
             m_blockman.m_dirty_blockindex.insert(&block_index);
             if (block_index.IsValid(BLOCK_VALID_TRANSACTIONS) &&
@@ -9558,6 +9597,28 @@ void ChainstateManager::ReceivedBlockTransactions(const CBlock& block, CBlockInd
     pindexNew->RaiseValidity(BLOCK_VALID_TRANSACTIONS);
     m_blockman.m_dirty_blockindex.insert(pindexNew);
 
+    // Audit P0.1/C1: the block's body (and, at MatMul heights, its MatMul
+    // product-committed proof) has now verified -- ContextualCheckBlock ran before
+    // us. Promote this index's authenticated-work contribution from 0 to its full
+    // GetBlockProof. Handles the case where pprev is not yet connected (the else
+    // branch below); the descendant walk repeats this for every block that becomes
+    // connected, in parent-before-child order.
+    const arith_uint256 old_authenticated_work = pindexNew->nAuthenticatedChainWork;
+    UpdateAuthenticatedChainWork(*pindexNew, GetConsensus());
+    if (pindexNew->nAuthenticatedChainWork != old_authenticated_work) {
+        // Header-only descendants already in the index must inherit an updated
+        // authenticated base. Skip the global walk when receipt did not promote
+        // work (the normal pre-v4/disabled-fork case), otherwise ordered IBD and
+        // reindex perform two O(N) index scans per historical body.
+        PropagateAuthenticatedChainWorkDescendants(*pindexNew, GetConsensus(),
+            [this](std::function<void(CBlockIndex&)> visit) {
+                for (auto& entry : m_blockman.m_block_index) {
+                    visit(entry.second);
+                }
+            });
+        RecalculateBestHeader();
+    }
+
     if (pindexNew->pprev == nullptr || pindexNew->pprev->HaveNumChainTxs()) {
         // If pindexNew is the genesis block or all parents are BLOCK_VALID_TRANSACTIONS.
         std::deque<CBlockIndex*> queue;
@@ -9576,6 +9637,10 @@ void ChainstateManager::ReceivedBlockTransactions(const CBlock& block, CBlockInd
                    pindex->nHeight, pindex->m_chain_tx_count, prev_tx_sum(*pindex), CLIENT_NAME, FormatFullVersion(), CLIENT_BUGREPORT);
             }
             pindex->m_chain_tx_count = prev_tx_sum(*pindex);
+            // Audit P0.1/C1: re-derive authenticated chainwork for each block that
+            // just became connected. pprev is always processed before its children
+            // here, so pprev->nAuthenticatedChainWork is final by the time we read it.
+            UpdateAuthenticatedChainWork(*pindex, GetConsensus());
             pindex->nSequenceId = nBlockSequenceId++;
             for (Chainstate *c : GetAll()) {
                 c->TryAddBlockIndexCandidate(pindex);
@@ -9590,7 +9655,7 @@ void ChainstateManager::ReceivedBlockTransactions(const CBlock& block, CBlockInd
         }
     } else {
         if (pindexNew->pprev && pindexNew->pprev->IsValid(BLOCK_VALID_TREE)) {
-            m_blockman.m_blocks_unlinked.insert(std::make_pair(pindexNew->pprev, pindexNew));
+            m_blockman.AddUnlinkedBlock(pindexNew);
         }
     }
 }
@@ -9781,6 +9846,13 @@ bool CheckBlock(const CBlock& block, BlockValidationState& state, const Consensu
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-blk-length", "size limits failed");
     }
     const uint64_t stripped_block_size = ::GetSerializeSize(TX_NO_WITNESS_WITH_SHIELDED(block));
+    // MatMul v4.4 ENC-DR size accounting (tension-resolution §3.1-ii): at
+    // DIGEST_RECOMPUTE heights the block body carries NO sketch (matrix_c_data
+    // is empty by consensus rule — the miner emits a digest-only body and
+    // ContextualCheckBlock rejects any inline sketch), so serialized_block_size
+    // is headers + txs only and the 24 MB nMaxBlockSerializedSize ceiling is
+    // untouched. On the regtest FLAT_SKETCH_INBLOCK replay path the in-block
+    // sketch is counted here exactly as before.
     const uint64_t serialized_block_size = ::GetSerializeSize(TX_WITH_WITNESS(block));
     if (block.vtx.size() > consensusParams.nMaxBlockWeight / WITNESS_SCALE_FACTOR ||
         stripped_block_size > consensusParams.nMaxBlockWeight / WITNESS_SCALE_FACTOR ||
@@ -9990,11 +10062,76 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block,
     if (block.nBits != GetNextWorkRequired(pindexPrev, &block, consensusParams))
         return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "bad-diffbits", "incorrect proof of work");
 
+    // HeaderPoW bit-26 self-describing wire was WITHDRAWN: bit 26 was previously
+    // legal, so gating 182↔186 parse / GetHash on it forks pre-activation peers.
+    // Until a height-contextual wire design lands, do not require or forbid the
+    // bit here. Activation of a commitment-format HeaderPoW remains a hard NO-GO.
+
+    // Audit F1: header-PoW spam gate. At v4 heights the header-level PoW check is
+    // only `matmul_digest <= target`, and matmul_digest is a self-declared field
+    // (not a hash of the header), so header work is forgeable at zero cost -- a
+    // header-flood / best-header-poisoning DoS vector. When enabled this requires
+    // cheap UNFORGEABLE hash work per header. SINGLE ACTIVATION: no gate height of
+    // its own -- it rides the v4 fork and is enabled by a non-sentinel
+    // nMatMulHeaderPoWDiscountBits (default UINT32_MAX = disabled). NOT gated by
+    // fSkipMatMulValidation: it is a one-hash relay/DoS defense, not an
+    // expensive-verify correctness check.
+    if (consensusParams.fMatMulPOW && consensusParams.IsMatMulV4Active(nHeight) &&
+        consensusParams.IsMatMulHeaderPoWEnabled() &&
+        !CheckMatMulHeaderSpamGate(block, consensusParams)) {
+        return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "bad-matmul-header-pow",
+                             "matmul header proof-of-work spam gate not satisfied");
+    }
+
     // Deterministic seed enforcement: verify MatMul seeds match the active
     // height-gated derivation. This is done contextually (not in Phase 1)
     // because Phase 1 operates on header-only data without block index access.
     // Skip when fSkipMatMulValidation is true (default regtest without -test=matmulstrict).
     if (consensusParams.fMatMulPOW && !consensusParams.fSkipMatMulValidation && !block.hashPrevBlock.IsNull()) {
+        // MatMul v4 (spec §I.1/§I.2): Phase1 (CheckBlockHeader) is
+        // context-free and, when a v4 fork height is configured, leniently
+        // accepts EITHER the v3 or v4 dimension. This is the first
+        // height-aware check point, so enforce the exact height-gated
+        // dimension here.
+        if (consensusParams.IsMatMulV4Active(nHeight)) {
+            // Spec §G.2/§G.4-#2: structural accepted-dimension bounds, enforced
+            // ahead of the exact height-gated dimension below as defense in
+            // depth (reject any out-of-range matmul_dim outright).
+            if (block.matmul_dim < consensusParams.nMatMulV4MinDimension ||
+                block.matmul_dim > consensusParams.nMatMulV4MaxDimension) {
+                return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER,
+                                     "bad-matmul-dim",
+                                     "matmul v4 dimension out of range for this height");
+            }
+            if (block.matmul_dim != consensusParams.nMatMulV4Dimension) {
+                return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER,
+                                     "bad-matmul-dim",
+                                     "matmul v4 dimension mismatch for this height");
+            }
+            // MatMul v4.2 / ENC-BMX4C (spec §1.3/§8.2): at BMX4C heights the
+            // accepted-dim invariant additionally requires n % 32 == 0 (E8M0
+            // block scales run along the contraction dim in blocks of 32).
+            // Trivially true for the 4096/8192 (and regtest 256) dimensions,
+            // enforced here as defense in depth. GetMatMulEncodingProfile is the
+            // single profile selector (no second height compare, spec §8.2).
+            // ENC-BMX4C-LT inherits the same E8M0 block-length gate (MatExpand
+            // dequant still contracts over n with the BMX4 structural bound).
+            {
+                const auto enc = consensusParams.GetMatMulEncodingProfile(nHeight);
+                if ((enc == Consensus::MatMulEncodingProfile::ENC_BMX4C ||
+                     enc == Consensus::MatMulEncodingProfile::ENC_BMX4C_LT) &&
+                    (block.matmul_dim % Consensus::BMX4C_SCALE_BLOCK_LENGTH) != 0) {
+                    return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER,
+                                         "bad-matmul-dim",
+                                         "matmul bmx4c dimension not a multiple of the E8M0 block length");
+                }
+            }
+        } else if (block.matmul_dim != consensusParams.nMatMulDimension) {
+            return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER,
+                                 "bad-matmul-dim",
+                                 "matmul dimension mismatch for this height");
+        }
+
         CBlockHeader expected_header{block};
         if (!SetDeterministicMatMulSeeds(expected_header, consensusParams, nHeight, pindexPrev->GetMedianTimePast())) {
             return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER,
@@ -10007,7 +10144,11 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block,
                                  "matmul seeds do not match deterministic derivation for this height");
         }
 
-        if (fCheckPOW && !CheckMatMulPreHashGate(block, consensusParams, nHeight)) {
+        // MatMul v4 (spec §G.3): the pre-hash lottery gate is retired at v4
+        // heights -- CheckMatMulPreHashGate is bypassed (returns true
+        // unconditionally in effect) because v4 has no pre-hash step.
+        if (fCheckPOW && !consensusParams.IsMatMulV4Active(nHeight) &&
+            !CheckMatMulPreHashGate(block, consensusParams, nHeight)) {
             return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER,
                                  "high-hash",
                                  "matmul pre-hash proof failed");
@@ -10105,6 +10246,259 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block,
     return true;
 }
 
+namespace {
+/** G.1: RAII scoped release of an already-held cs_main for the duration of an
+ *  expensive, chainstate-INDEPENDENT computation, re-acquiring on scope exit
+ *  (including on exception). Used to run the v4.4 ENC-DR reference recompute —
+ *  a one-nonce O(W) GEMM (~seconds of CPU, ~100 MB transient at n=4096 on the
+ *  cache/accel miss path) — WITHOUT serializing it under the node's global lock.
+ *  Mirrors the LEAVE/ENTER_CRITICAL_SECTION longpoll precedent in
+ *  rpc/mining.cpp, made exception-safe by RAII. Safe here because
+ *  CheckMatMulProofOfWork_V4EncDr reads NO cs_main-guarded state (only the
+ *  caller-owned block, immutable consensus params, and a local height; its only
+ *  mutations are to the sketch cache and the phase2-budget counter, each under
+ *  its OWN mutex), and only a pure bool crosses the release boundary. cs_main
+ *  must be the innermost-held critical section at construction (it is, at the
+ *  ENC-DR recompute point in ContextualCheckBlock). */
+struct CsMainScopedRelease {
+    CsMainScopedRelease() NO_THREAD_SAFETY_ANALYSIS { LEAVE_CRITICAL_SECTION(::cs_main); }
+    ~CsMainScopedRelease() NO_THREAD_SAFETY_ANALYSIS { ENTER_CRITICAL_SECTION(::cs_main); }
+    CsMainScopedRelease(const CsMainScopedRelease&) = delete;
+    CsMainScopedRelease& operator=(const CsMainScopedRelease&) = delete;
+};
+} // namespace
+
+bool ChainstateManager::IsMatMulRecomputeAssumeValidTrusted(const CBlockIndex* pindex_self, int nHeight) const
+{
+    AssertLockHeld(::cs_main);
+    // Factored VERBATIM from ContextualCheckBlock's ASSUMEVALID BURIED-RECOMPUTE
+    // TRUST clause (tension-resolution §3.1-vi); see the in-line rationale there.
+    // Behavior must stay bit-identical to the historical in-line predicate: a
+    // null pindex_self, unset -assumevalid, or missing best header always mean
+    // "not trusted" (=> the recompute runs).
+    if (AssumedValidBlock().IsNull() || m_best_header == nullptr || pindex_self == nullptr) return false;
+    const auto av_it = m_blockman.m_block_index.find(AssumedValidBlock());
+    if (av_it == m_blockman.m_block_index.end()) return false;
+    if (av_it->second.GetAncestor(nHeight) != pindex_self) return false;
+    if (m_best_header->GetAncestor(nHeight) != pindex_self) return false;
+    if (m_best_header->nAuthenticatedChainWork < MinimumChainWork()) return false;
+    return GetBlockProofEquivalentTime(*m_best_header, *pindex_self, *m_best_header, GetConsensus()) >
+           static_cast<int64_t>(GetConsensus().nMatMulProofAssumeValidMinAge);
+}
+
+bool ChainstateManager::PersistMatMulExactReplayVerdict(
+    const uint256& block_hash)
+{
+    AssertLockHeld(::cs_main);
+    CBlockIndex* index{m_blockman.LookupBlockIndex(block_hash)};
+    if (index == nullptr || (index->nStatus & BLOCK_FAILED_MASK)) return false;
+    index->nStatus |= BLOCK_EXACT_REPLAY_VERIFIED;
+    m_blockman.m_dirty_blockindex.insert(index);
+    CacheMatMulEncDrVerdict(block_hash, true);
+    if (GetMatMulValidationMode() ==
+            kernel::MatMulValidationMode::CONSENSUS &&
+        GetConsensus().IsMatMulTrustedReplayAttestationActive(
+            index->nHeight) &&
+        node::matmul_trusted::HasLocalSigner()) {
+        const auto result{
+            node::matmul_trusted::SignAuthoritative(
+                block_hash, index->nHeight)};
+        if (result !=
+                matmul::trusted::AddResult::Accepted &&
+            result !=
+                matmul::trusted::AddResult::Duplicate) {
+            LogWarning(
+                "Unable to create local ExactReplay attestation "
+                "block=%s height=%d result=%s\n",
+                block_hash.ToString(), index->nHeight,
+                matmul::trusted::AddResultName(result));
+        }
+    }
+    return true;
+}
+
+bool ChainstateManager::PersistMatMulTrustedReplayAttestation(
+    const uint256& block_hash)
+{
+    AssertLockHeld(::cs_main);
+    CBlockIndex* index{m_blockman.LookupBlockIndex(block_hash)};
+    if (index == nullptr || (index->nStatus & BLOCK_FAILED_MASK) ||
+        GetMatMulValidationMode() !=
+            kernel::MatMulValidationMode::TRUSTED ||
+        !GetConsensus().IsMatMulTrustedReplayAttestationActive(
+            index->nHeight)) {
+        return false;
+    }
+    index->nStatus |= BLOCK_TRUSTED_REPLAY_ATTESTED;
+    m_blockman.m_dirty_blockindex.insert(index);
+    // Deliberately do not populate the replay memo here. The worker populated
+    // its process-local memo only after verifying current-config signatures;
+    // this persistent audit bit must never recreate that authority.
+    return true;
+}
+
+std::optional<ChainstateManager::MatMulEncDrClassifyResult>
+ChainstateManager::ClassifyMatMulEncDrRecompute(const CBlock& block,
+                                                bool* verdict_pinned,
+                                                bool* assumevalid_trusted) const
+{
+    AssertLockHeld(::cs_main);
+    if (verdict_pinned != nullptr) *verdict_pinned = false;
+    if (assumevalid_trusted != nullptr) *assumevalid_trusted = false;
+    const Consensus::Params& params = GetConsensus();
+    if (!params.fMatMulPOW) return std::nullopt;
+    const CBlockIndex* prev = m_blockman.LookupBlockIndex(block.hashPrevBlock);
+    // An unknown or overflowing prev means AcceptBlock cannot reach the ENC-DR
+    // seam for this delivery (it fails/queues upstream): keep it synchronous.
+    if (prev == nullptr || prev->nHeight == std::numeric_limits<int>::max()) return std::nullopt;
+    const int32_t nHeight = prev->nHeight + 1;
+    if (!params.IsMatMulV4Active(nHeight)) return std::nullopt;
+    if (params.GetMatMulProfileParams(nHeight).commitment !=
+        Consensus::MatMulCommitmentScheme::DIGEST_RECOMPUTE) return std::nullopt;
+    bool stage3_authority_job{false};
+    if constexpr (matmul::v4::rc::kRCStage3SuccinctAuthorityReady) {
+        stage3_authority_job = params.IsMatMulRCFamilyActive(nHeight);
+    }
+    // Do not enqueue an oversized proof body only to parse/verify it before
+    // the ordinary contextual weight check. Stage-3 bytes are non-witness
+    // block bytes and therefore receive the full weight multiplier.
+    if (stage3_authority_job &&
+        GetBlockWeight(block) >
+            static_cast<int64_t>(params.nMaxBlockWeight)) {
+        return std::nullopt;
+    }
+    // A/B payloads remain forbidden. A C payload is admissible only for the
+    // durable Stage-3 authority: its proof body is verified off-thread and is
+    // cached by (header, registry, payload), never by the header alone.
+    if (!block.matrix_a_data.empty() || !block.matrix_b_data.empty() ||
+        (!stage3_authority_job && !block.matrix_c_data.empty())) {
+        return std::nullopt;
+    }
+    // Phase B seal-as-PoW: tip verify needs parent MTP for sibling-slot V3
+    // seeds. Prev is known here, so MTP is always available — allow async
+    // enqueue and thread MTP into the worker Job. CheckMatMulProofOfWork_V4EncDr
+    // still fails closed if a Job somehow lacks MTP at seal heights.
+    if (const CBlockIndex* existing = m_blockman.LookupBlockIndex(block.GetHash())) {
+        // Already have the data: AcceptBlock short-circuits before the seam.
+        if (existing->nStatus & BLOCK_HAVE_DATA) return std::nullopt;
+        // Known-invalid: AcceptBlockHeader rejects it for free as "duplicate-invalid".
+        // A failed block stores no data (BLOCK_HAVE_DATA stays unset), so without this
+        // a re-delivered bad block would be enqueued and fully re-recomputed on EVERY
+        // delivery (DoS). Route it synchronous — it fails cheaply, no worker slot spent.
+        if (existing->nStatus & BLOCK_FAILED_MASK) return std::nullopt;
+        // Assumevalid-buried: independent validators may use the historical
+        // recompute shortcut. A Profile-1 trusted mirror must still obtain its
+        // current configured signature quorum; generic assumevalid is not a
+        // substitute for that explicit operator trust policy.
+        const bool trusted_profile1{
+            GetMatMulValidationMode() ==
+                kernel::MatMulValidationMode::TRUSTED &&
+            params.IsMatMulTrustedReplayAttestationActive(nHeight)};
+        if (!trusted_profile1 &&
+            IsMatMulRecomputeAssumeValidTrusted(existing, nHeight)) {
+            if (assumevalid_trusted != nullptr) *assumevalid_trusted = true;
+            return std::nullopt;
+        }
+    }
+    // The legacy verdict memo is header-keyed. Stage-3 attachments are body
+    // data, so only VerifyRCStage3ConsensusAttachment's proof-aware cache may
+    // short-circuit them.
+    if (!stage3_authority_job) {
+        if (const CBlockIndex* existing{
+                m_blockman.LookupBlockIndex(block.GetHash())};
+            existing != nullptr &&
+            (existing->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) &&
+            !(existing->nStatus & BLOCK_FAILED_MASK)) {
+            CacheMatMulEncDrVerdict(block.GetHash(), true);
+            return std::nullopt;
+        }
+        if (verdict_pinned != nullptr) {
+            if (PinCachedMatMulEncDrVerdict(block.GetHash()).has_value()) {
+                *verdict_pinned = true;
+                return std::nullopt;
+            }
+        } else if (LookupMatMulEncDrVerdict(block.GetHash()).has_value()) {
+            return std::nullopt;
+        }
+    }
+    return MatMulEncDrClassifyResult{nHeight, prev->GetMedianTimePast()};
+}
+
+static bool ContextualCheckBlockBodyOnly(const CBlock& block,
+                                         BlockValidationState& state,
+                                         const ChainstateManager& chainman,
+                                         const CBlockIndex* pindexPrev)
+{
+    if (pindexPrev != nullptr && pindexPrev->nHeight == std::numeric_limits<int>::max()) {
+        return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER,
+                             "bad-blk-height-overflow", "block height overflow");
+    }
+    const int nHeight{pindexPrev == nullptr ? 0 : pindexPrev->nHeight + 1};
+    const Consensus::Params& consensus_params{chainman.GetConsensus()};
+    const bool enforce_mtp{
+        pindexPrev != nullptr && DeploymentActiveAfter(pindexPrev, chainman, Consensus::DEPLOYMENT_CSV)};
+    const int64_t lock_time_cutoff{enforce_mtp ? pindexPrev->GetMedianTimePast()
+                                               : block.GetBlockTime()};
+
+    for (const auto& tx : block.vtx) {
+        if (!IsFinalTx(*tx, nHeight, lock_time_cutoff)) {
+            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                                 "bad-txns-nonfinal", "non-final transaction");
+        }
+    }
+
+    if (DeploymentActiveAfter(pindexPrev, chainman, Consensus::DEPLOYMENT_HEIGHTINCB)) {
+        const CScript expect{CScript() << nHeight};
+        if (block.vtx[0]->vin[0].scriptSig.size() < expect.size() ||
+            !std::equal(expect.begin(), expect.end(), block.vtx[0]->vin[0].scriptSig.begin())) {
+            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                                 "bad-cb-height", "block height mismatch in coinbase");
+        }
+    }
+
+    if (!CheckWitnessMalleation(
+            block, DeploymentActiveAfter(pindexPrev, chainman, Consensus::DEPLOYMENT_SEGWIT), state)) {
+        return false;
+    }
+    if (GetBlockWeight(block) > static_cast<int64_t>(consensus_params.nMaxBlockWeight)) {
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-blk-weight",
+                             "ContextualCheckBlock : weight limit failed");
+    }
+    return true;
+}
+
+bool ChainstateManager::CheckMatMulBlockAdmissionPreconditions(
+    const CBlock& block,
+    BlockValidationState& state,
+    bool force_processing,
+    bool min_pow_checked,
+    bool& reaches_contextual_check)
+{
+    AssertLockHeld(::cs_main);
+    reaches_contextual_check = false;
+    if (!CheckBlock(block, state, GetConsensus())) return false;
+
+    CBlockIndex* pindex{nullptr};
+    if (!AcceptBlockHeader(block, state, &pindex, min_pow_checked)) return false;
+    if (pindex == nullptr || !ContextualCheckBlockBodyOnly(block, state, *this, pindex->pprev)) return false;
+
+    if (pindex->nStatus & BLOCK_HAVE_DATA) return true;
+    if (!force_processing) {
+        if (pindex->nTx != 0) return true;
+        if (ActiveTip() != nullptr && pindex->nChainWork < ActiveTip()->nChainWork) return true;
+        if (pindex->nHeight > ActiveHeight() + int(MIN_BLOCKS_TO_KEEP)) return true;
+        if (pindex->nChainWork < MinimumChainWork()) return true;
+    }
+    reaches_contextual_check = true;
+    return true;
+}
+
+enum class MatMulRCAuthorityProvenance {
+    NONE,
+    LOCAL_EXACT_REPLAY,
+    TRUSTED_SIGNER_QUORUM,
+};
+
 /** NOTE: This function is not currently invoked by ConnectBlock(), so we
  *  should consider upgrade issues if we change which consensus rules are
  *  enforced in this function (eg by adding a new consensus rule). See comment
@@ -10120,8 +10514,9 @@ static constexpr size_t MAX_CONTENT_COINBASE_SCRIPTSIG{40};
 /** BTX content-elimination hard fork (doc/btx-inscription-elimination-plan.md).
  *  Height-gated block rules that remove the data-carriage channels that
  *  inscription/NFT/token meta-protocols depend on, while preserving every
- *  financial surface. Enforced here (context-aware) so the rules are flag-day
- *  gated on nContentEliminationHeight and legacy history is untouched. */
+ *  financial surface. Enforced from both ContextualCheckBlock and ConnectBlock
+ *  so normal admission and -reindex-chainstate apply identical flag-day rules
+ *  while leaving legacy history untouched. */
 static bool CheckContentEliminationRules(const CBlock& block, int nHeight,
                                          const Consensus::Params& consensus_params,
                                          BlockValidationState& state)
@@ -10169,9 +10564,24 @@ static bool ContextualCheckBlock(const CBlock& block,
                                  BlockValidationState& state,
                                  const ChainstateManager& chainman,
                                  const CBlockIndex* pindexPrev,
-                                 bool fCheckPOW = true) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+                                 bool fCheckPOW = true,
+                                 // E: gates whether the ENC-DR recompute below is permitted to
+                                 // release cs_main (see CsMainScopedRelease). AcceptBlock (the hot
+                                 // P2P path) passes true so the O(W) recompute never serializes
+                                 // under the global lock. TestBlockValidity passes false: it holds
+                                 // a stack-local CCoinsViewCache/CBlockIndex and a
+                                 // pindexPrev==Tip() precondition ACROSS this call and then runs
+                                 // ConnectBlock against them, so a mid-call tip advance by a
+                                 // concurrent thread must not be possible. Holding cs_main across
+                                 // the recompute is harmless there (not the hot path, and its
+                                 // fCheckPOW=true callers are single-threaded).
+                                 bool may_release_cs_main = true,
+                                 MatMulRCAuthorityProvenance* rc_authority = nullptr) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
 {
     AssertLockHeld(::cs_main);
+    if (rc_authority != nullptr) {
+        *rc_authority = MatMulRCAuthorityProvenance::NONE;
+    }
     if (pindexPrev != nullptr && pindexPrev->nHeight == std::numeric_limits<int>::max()) {
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-blk-height-overflow", "block height overflow");
     }
@@ -10182,7 +10592,362 @@ static bool ContextualCheckBlock(const CBlock& block,
     const bool is_ibd = chainman.IsInitialBlockDownload();
     const Consensus::Params& consensusParams = chainman.GetConsensus();
 
-    if (fCheckPOW && consensusParams.fMatMulPOW) {
+    if (fCheckPOW && consensusParams.fMatMulPOW && consensusParams.IsMatMulV4Active(nHeight)) {
+        // MatMul v4 (spec §I.2): exclusive cascade at and above nMatMulV4Height
+        // -- no v3 Phase2/Freivalds/ProductCommitted fallback, no transcript
+        // path, no dual-algorithm grace period.
+        if (!block.matrix_a_data.empty() || !block.matrix_b_data.empty()) {
+            return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "v4-forbidden-ab-payload",
+                "matmul v4 block carries forbidden legacy A/B matrix payload");
+        }
+        const Consensus::MatMulProfileParams matmul_profile = consensusParams.GetMatMulProfileParams(nHeight);
+        if (matmul_profile.commitment == Consensus::MatMulCommitmentScheme::DIGEST_RECOMPUTE) {
+            // Stage 3 replaces the header-only/sampled dispatch only after its
+            // compile-time authority gate is deliberately closed. Its proof is
+            // durable matrix_c_data, so all parse/binding/relation failures are
+            // BLOCK_MUTATED: the header hash is unchanged and a valid full
+            // block body may still exist (notably after compact reconstruction,
+            // whose wire format carries no Stage-3 body).
+            if constexpr (matmul::v4::rc::kRCStage3SuccinctAuthorityReady) {
+                if (consensusParams.IsMatMulRCFamilyActive(nHeight)) {
+                    // The complete proof parser is bounded independently, but
+                    // a consensus-invalid oversized body must be rejected
+                    // before any recursive verification work is attempted.
+                    if (GetBlockWeight(block) >
+                        static_cast<int64_t>(
+                            consensusParams.nMaxBlockWeight)) {
+                        return state.Invalid(
+                            BlockValidationResult::BLOCK_CONSENSUS,
+                            "bad-blk-weight",
+                            "ContextualCheckBlock : weight limit failed");
+                    }
+                    const auto target = DeriveTarget(block.nBits, consensusParams.powLimit);
+                    if (!target.has_value()) {
+                        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                                             "bad-matmul-stage3-target",
+                                             "matmul Stage-3 target is noncanonical");
+                    }
+                    matmul::v4::rc::RCStage3AttachmentStatus stage3_status;
+                    std::string stage3_why;
+                    if (may_release_cs_main) {
+                        CsMainScopedRelease release_cs_main_for_stage3;
+                        stage3_status =
+                            matmul::v4::rc::VerifyRCStage3ConsensusAttachment(
+                                block, consensusParams, nHeight,
+                                ArithToUint256(*target), &stage3_why);
+                    } else {
+                        stage3_status =
+                            matmul::v4::rc::VerifyRCStage3ConsensusAttachment(
+                                block, consensusParams, nHeight,
+                                ArithToUint256(*target), &stage3_why);
+                    }
+                    // The status -> verdict mapping lives in
+                    // matmul_v4_rc_stage3_producer.h so it can be unit-tested
+                    // while this whole branch is compiled out by the authority
+                    // gate above (see RCStage3ConsensusVerdictFor). Behaviour is
+                    // unchanged from the inline form it replaces, except that an
+                    // unexpected status now fails closed to BLOCK_CONSENSUS
+                    // instead of falling through.
+                    const auto stage3_verdict =
+                        matmul::v4::rc::RCStage3ConsensusVerdictFor(stage3_status);
+                    switch (stage3_verdict.action) {
+                    case matmul::v4::rc::RCStage3ConsensusAction::AcceptProceed:
+                        return ContextualCheckBlockBodyOnly(
+                            block, state, chainman, pindexPrev);
+                    case matmul::v4::rc::RCStage3ConsensusAction::RejectMutation:
+                        return state.Invalid(
+                            BlockValidationResult::BLOCK_MUTATED,
+                            stage3_verdict.reject_reason,
+                            strprintf("matmul Stage-3 proof body rejected: %s",
+                                      stage3_why));
+                    case matmul::v4::rc::RCStage3ConsensusAction::RejectConsensus:
+                        break;
+                    }
+                    return state.Invalid(
+                        BlockValidationResult::BLOCK_CONSENSUS,
+                        stage3_verdict.reject_reason,
+                        strprintf("matmul Stage-3 authority failed closed: %s",
+                                  stage3_why));
+                }
+            }
+            // v4.4 ENC-DR path (doc/btx-matmul-v4.4-tension-resolution.md §4.1):
+            // the block carries ZERO consensus proof bytes. The header's
+            // matmul_digest = H(sigma||Chat_true) is the whole commitment; the
+            // predicate is a pure function of the header, decided by exact
+            // recompute (the consensus definition, epsilon = 0) or by the
+            // cache-assisted Freivalds fast path (epsilon <= 2^-180) inside
+            // CheckMatMulProofOfWork_V4EncDr.
+            //
+            // (1) The in-block body sketch MUST be empty (§4.1 clause 2). A
+            // non-empty inline sketch at an ENC-DR height is classified as a
+            // body mutation (BLOCK_MUTATED, non-permanent): matrix_c_data is
+            // body data not covered by the header hash, so a relayer could
+            // append garbage bytes to an honest digest-only block — the honest
+            // empty-body block with the same header hash must not be poisoned.
+            if (!block.matrix_c_data.empty()) {
+                return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "v4-encdr-nonempty-sketch",
+                    "matmul v4.4 ENC-DR block carries a forbidden inline sketch payload");
+            }
+            // (2) ASSUMEVALID BURIED-RECOMPUTE TRUST (tension-resolution
+            // §3.1-vi; retargeted byte-for-byte from the retired segregated
+            // buried-proof trust, design §3.5-2). Below the configured
+            // assumevalid block, a node TRUSTS that the buried chain's PoW
+            // recomputes were verified by the network — the IDENTICAL trust
+            // ConnectBlock already extends to buried scriptSigs — instead of
+            // re-running the O(W) Chat recompute for every historical block.
+            // This predicate is the SOLE bound on deep-history recompute cost
+            // for a default node's IBD; a fully-verifying node
+            // (-assumevalid=0 => AssumedValidBlock null) NEVER trusts and
+            // always recomputes. The trust condition mirrors the ConnectBlock
+            // fScriptChecks skip EXACTLY: the block is an assumed-valid
+            // ancestor of the best header; the best header carries at least
+            // MinimumChainWork of AUTHENTICATED work (C1 — a forged-header
+            // chain cannot induce the skip); and it is buried more than the
+            // 2-week equivalent-time DoS guard. When trusted, the recompute is
+            // skipped for this block (every buried block stays re-auditable
+            // forever by digest-only recompute — re-derivability underneath
+            // the trust, §4.4).
+            // (Predicate factored to ChainstateManager::IsMatMulRecomputeAssumeValidTrusted
+            // so the WP-7 async-verify dispatcher and the WP-8 sketch-prefetch
+            // guard share this single implementation; behavior unchanged.)
+            const bool trusted_profile1{
+                chainman.GetMatMulValidationMode() ==
+                    kernel::MatMulValidationMode::TRUSTED &&
+                consensusParams.IsMatMulTrustedReplayAttestationActive(
+                    nHeight)};
+            const bool recompute_assumevalid_trusted =
+                !trusted_profile1 &&
+                (chainman.IsMatMulRecomputeAssumeValidTrusted(
+                    chainman.m_blockman.LookupBlockIndex(block.GetHash()), nHeight) ||
+                // P2P admission may have made the same trust decision under
+                // cs_main immediately before this call. Keep that decision
+                // scoped across ProcessNewBlock so a concurrent best-header
+                // branch change cannot turn the cheap path into an unbudgeted
+                // recomputation. The pin is not an exact-verdict memo and is
+                // released as soon as this validation re-entry completes.
+                IsMatMulEncDrAssumeValidTrustPinned(block.GetHash()));
+            // (3) Above assumevalid (or -assumevalid=0): decide the §4.1
+            // predicate. Any failure is a header-level PERMANENT consensus
+            // fault: with an empty body there are no proof bytes to mutate, so
+            // the MUTATED/permanent classification collapses (§4.1 clause 2)
+            // and "high-hash" is always correct here.
+            if (!recompute_assumevalid_trusted) {
+                // G.1: run the ENC-DR predicate WITHOUT cs_main held. On the
+                // cache/accel-miss path it performs the full O(W) one-nonce
+                // reference GEMM; holding the global lock across it would let a
+                // header-PoW-paying attacker (or a near-tip IBD node) serialize
+                // seconds of CPU under cs_main per non-cached block. The check is
+                // a pure function of the header + immutable params and reads no
+                // cs_main-guarded state (see CsMainScopedRelease), and every
+                // cs_main-dependent decision above (empty-body classification,
+                // assumevalid-trust) is already made; only this bool crosses the
+                // release boundary.
+                bool encdr_ok;
+                bool rc_local_execution_failure{false};
+                std::string rc_execution_detail;
+                const auto check_rc = [&]() {
+                    if (trusted_profile1) {
+                        matmul::trusted::WaitResult wait{
+                            matmul::trusted::WaitResult::Timeout};
+                        if (may_release_cs_main) {
+                            wait =
+                                node::matmul_trusted::WaitForQuorum(
+                                    block.GetHash(), nHeight,
+                                    [] { return false; });
+                        } else if (
+                            node::matmul_trusted::HasQuorum(
+                                block.GetHash(), nHeight)) {
+                            wait =
+                                matmul::trusted::WaitResult::Quorum;
+                        }
+                        rc_local_execution_failure =
+                            wait !=
+                            matmul::trusted::WaitResult::Quorum;
+                        if (!rc_local_execution_failure) {
+                            CacheMatMulEncDrVerdict(
+                                block.GetHash(), true);
+                            if (rc_authority != nullptr) {
+                                *rc_authority =
+                                    MatMulRCAuthorityProvenance::
+                                        TRUSTED_SIGNER_QUORUM;
+                            }
+                        } else {
+                            rc_execution_detail = strprintf(
+                                "trusted attestation quorum %s",
+                                matmul::trusted::WaitResultName(
+                                    wait));
+                        }
+                        return !rc_local_execution_failure;
+                    }
+                    const auto outcome{
+                        CheckMatMulProofOfWork_RCOutcome(
+                            block, consensusParams, nHeight,
+                            /*carrier_missing=*/nullptr,
+                            &rc_execution_detail)};
+                    rc_local_execution_failure =
+                        outcome ==
+                            MatMulRCValidationOutcome::
+                                LOCAL_ACCELERATOR_FAILURE ||
+                        outcome ==
+                            MatMulRCValidationOutcome::CANCELLED;
+                    const bool valid{
+                        outcome ==
+                        MatMulRCValidationOutcome::VALID};
+                    if (valid && rc_authority != nullptr) {
+                        *rc_authority =
+                            MatMulRCAuthorityProvenance::
+                                LOCAL_EXACT_REPLAY;
+                    }
+                    return valid;
+                };
+                std::string winner_authority_provider;
+                const bool winner_reseal_authority{
+                    !trusted_profile1 &&
+                    consensusParams.IsMatMulRCProfile1Active(nHeight) &&
+                    !consensusParams.IsMatMulRCCoupledActive(nHeight) &&
+                    ConsumeMatMulRCWinnerResealAuthority(
+                        block, nHeight, consensusParams,
+                        &winner_authority_provider)};
+                const CBlockIndex* exact_index{
+                    chainman.m_blockman.LookupBlockIndex(block.GetHash())};
+                if (winner_reseal_authority) {
+                    // This consumes exactly one process-local epsilon-zero
+                    // result produced by the strict winner reseal. It skips
+                    // only the duplicate replay: the function continues to
+                    // ContextualCheckBlockBodyOnly below, and ProcessNewBlock /
+                    // ConnectBlock retain all ordinary block and script checks.
+                    encdr_ok = true;
+                    if (rc_authority != nullptr) {
+                        *rc_authority =
+                            MatMulRCAuthorityProvenance::
+                                LOCAL_EXACT_REPLAY;
+                    }
+                    LogPrintf(
+                        "matmul RC local winner authority consumed: "
+                        "block=%s height=%d provider=%s\n",
+                        block.GetHash().ToString(), nHeight,
+                        winner_authority_provider);
+                } else if (exact_index != nullptr &&
+                    (exact_index->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) &&
+                    // A durable bit must never outrank a recorded failure.
+                    !(exact_index->nStatus & BLOCK_FAILED_MASK)) {
+                    // Block-index startup accepts persisted authority only
+                    // when its versioned MatMul activation/profile context
+                    // matches the current immutable consensus parameters. A
+                    // mismatch atomically clears local and trusted replay bits
+                    // before validation begins.
+                    encdr_ok = true;
+                    if (rc_authority != nullptr) {
+                        *rc_authority =
+                            MatMulRCAuthorityProvenance::
+                                LOCAL_EXACT_REPLAY;
+                    }
+                } else if (const auto memo{LookupMatMulEncDrVerdict(block.GetHash())}) {
+                    // WP-7 / C5: the async verify worker (net_processing's
+                    // node::MatMulVerifyWorker) already ran the pure ENC-DR
+                    // predicate for this header off-thread and memoized the
+                    // verdict. The predicate is a pure function of the header +
+                    // process-constant params (the hash pins prev => height =>
+                    // profile), so replaying the verdict here is
+                    // consensus-equivalent to recomputing — and it keeps the
+                    // completion's re-entry through ProcessNewBlock O(1) even
+                    // when the 8-entry sketch cache already evicted the entry
+                    // or the block is INVALID (nothing was ever cached).
+                    encdr_ok = *memo;
+                    if (encdr_ok && rc_authority != nullptr &&
+                        consensusParams.IsMatMulRCActive(nHeight) &&
+                        !consensusParams.IsMatMulRCCoupledActive(
+                            nHeight)) {
+                        *rc_authority = trusted_profile1
+                            ? MatMulRCAuthorityProvenance::
+                                  TRUSTED_SIGNER_QUORUM
+                            : MatMulRCAuthorityProvenance::
+                                  LOCAL_EXACT_REPLAY;
+                    }
+                } else if (may_release_cs_main) {
+                    CsMainScopedRelease release_cs_main_for_recompute;
+                    // DO NOT add cs_main-requiring code in this scope: TSA still
+                    // believes cs_main is held here (the RAII guard is
+                    // NO_THREAD_SAFETY_ANALYSIS), so a guarded call would compile
+                    // yet run unlocked. Keep it to the single pure recompute.
+                    // Parent MTP is a pure scalar from pindexPrev (already
+                    // resolved under cs_main above); Phase B seal-as-PoW needs
+                    // it for sibling-slot V3 seed re-derivation (LT-Q2).
+                    const std::optional<int64_t> parent_mtp =
+                        pindexPrev != nullptr
+                            ? std::optional<int64_t>{pindexPrev->GetMedianTimePast()}
+                            : std::nullopt;
+                    if (consensusParams.IsMatMulRCCoupledActive(nHeight)) {
+                        encdr_ok = CheckMatMulProofOfWork_RCCoupled(block, consensusParams, nHeight);
+                    } else if (consensusParams.IsMatMulRCActive(nHeight)) {
+                        encdr_ok = check_rc();
+                    } else {
+                        encdr_ok = CheckMatMulProofOfWork_V4EncDr(block, consensusParams, nHeight,
+                                                                  parent_mtp);
+                    }
+                } else {
+                    // E: TestBlockValidity path — keep cs_main held across the
+                    // recompute so the caller's Tip()-pinned viewNew/indexDummy
+                    // cannot be invalidated by a concurrent tip advance. The
+                    // verdict is identical; only the locking discipline differs.
+                    const std::optional<int64_t> parent_mtp =
+                        pindexPrev != nullptr
+                            ? std::optional<int64_t>{pindexPrev->GetMedianTimePast()}
+                            : std::nullopt;
+                    if (consensusParams.IsMatMulRCCoupledActive(nHeight)) {
+                        encdr_ok = CheckMatMulProofOfWork_RCCoupled(block, consensusParams, nHeight);
+                    } else if (consensusParams.IsMatMulRCActive(nHeight)) {
+                        encdr_ok = check_rc();
+                    } else {
+                        encdr_ok = CheckMatMulProofOfWork_V4EncDr(block, consensusParams, nHeight,
+                                                                  parent_mtp);
+                    }
+                }
+                if (rc_local_execution_failure) {
+                    return state.Error(strprintf(
+                        "matmul RC ExactReplay local execution incomplete: %s",
+                        rc_execution_detail));
+                }
+                if (!encdr_ok) {
+                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "high-hash",
+                        "matmul v4 proof of work failed");
+                }
+            }
+        } else {
+            // LEGACY IN-BLOCK path (FLAT_SKETCH_INBLOCK) — v4.4: reachable ONLY
+            // via the regtest-only fMatMulV4FlatSketchReplay differential-
+            // testing switch (tension-resolution §4.5); byte-for-byte the
+            // pre-ENC-DR carriage.
+            if (block.matrix_c_data.empty()) {
+                return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "missing-product-payload",
+                    "matmul v4 block missing required product sketch payload");
+            }
+            if (!IsMatMulV4PayloadSizeValid(block, consensusParams)) {
+                return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "invalid-product-payload",
+                    "matmul v4 block carries malformed product sketch payload");
+            }
+            if (!CheckMatMulProofOfWork_V4ProductCommitted(block, consensusParams, nHeight)) {
+                // Separate a body MUTATION from a header-level CONSENSUS fault. The
+                // sketch payload lives in the block body while matmul_digest is in
+                // the 182-byte header, so a corrupted payload leaves the block hash
+                // unchanged and a correct payload for that same hash still exists.
+                // Marking such a block permanently invalid (BLOCK_CONSENSUS) would
+                // let an attacker poison a valid header's hash by relaying a
+                // corrupted-payload copy first, blocking the honest block as
+                // "duplicate-invalid". Classify it as BLOCK_MUTATED (non-permanent),
+                // matching the A/B and payload-shape checks above. Only a payload
+                // that DOES reconstruct the committed digest but still fails
+                // (Freivalds mismatch or digest over target) is a real, permanent
+                // PoW failure.
+                if (!MatMulV4PayloadMatchesCommitment(block)) {
+                    return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "bad-matmul-v4-payload",
+                        "matmul v4 sketch payload does not match committed digest");
+                }
+                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "high-hash",
+                    "matmul v4 proof of work failed");
+            }
+        }
+    } else if (fCheckPOW && consensusParams.fMatMulPOW) {
         const bool has_v2_payload = HasMatMulV2Payload(block);
         const bool payload_shape_valid =
             !has_v2_payload || IsMatMulV2PayloadSizeValid(block, consensusParams);
@@ -10196,7 +10961,10 @@ static bool ContextualCheckBlock(const CBlock& block,
                 nHeight,
                 best_known_height,
                 consensusParams,
-                chainman.GetMatMulValidationMode() == kernel::MatMulValidationMode::CONSENSUS,
+                chainman.GetMatMulValidationMode() ==
+                        kernel::MatMulValidationMode::CONSENSUS ||
+                    chainman.GetMatMulValidationMode() ==
+                        kernel::MatMulValidationMode::TRUSTED,
                 is_ibd);
         const bool should_run_matmul_validation =
             should_run_phase2 || consensusParams.IsMatMulProductDigestActive(nHeight);
@@ -10270,63 +11038,7 @@ static bool ContextualCheckBlock(const CBlock& block,
         }
     }
 
-    // Enforce BIP113 (Median Time Past).
-    bool enforce_locktime_median_time_past{false};
-    if (DeploymentActiveAfter(pindexPrev, chainman, Consensus::DEPLOYMENT_CSV)) {
-        assert(pindexPrev != nullptr);
-        enforce_locktime_median_time_past = true;
-    }
-
-    const int64_t nLockTimeCutoff{enforce_locktime_median_time_past ?
-                                      pindexPrev->GetMedianTimePast() :
-                                      block.GetBlockTime()};
-
-    // Check that all transactions are finalized
-    for (const auto& tx : block.vtx) {
-        if (!IsFinalTx(*tx, nHeight, nLockTimeCutoff)) {
-            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-txns-nonfinal", "non-final transaction");
-        }
-    }
-
-    // Enforce rule that the coinbase starts with serialized block height
-    if (DeploymentActiveAfter(pindexPrev, chainman, Consensus::DEPLOYMENT_HEIGHTINCB))
-    {
-        CScript expect = CScript() << nHeight;
-        if (block.vtx[0]->vin[0].scriptSig.size() < expect.size() ||
-            !std::equal(expect.begin(), expect.end(), block.vtx[0]->vin[0].scriptSig.begin())) {
-            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-cb-height", "block height mismatch in coinbase");
-        }
-    }
-
-    // BTX content-elimination hard fork: forbid OP_RETURN data outputs and bound
-    // the coinbase scriptSig once active (flag-day gated on nHeight).
-    if (!CheckContentEliminationRules(block, nHeight, consensusParams, state)) {
-        return false;
-    }
-
-    // Validation for witness commitments.
-    // * We compute the witness hash (which is the hash including witnesses) of all the block's transactions, except the
-    //   coinbase (where 0x0000....0000 is used instead).
-    // * The coinbase scriptWitness is a stack of a single 32-byte vector, containing a witness reserved value (unconstrained).
-    // * We build a merkle tree with all those witness hashes as leaves (similar to the hashMerkleRoot in the block header).
-    // * There must be at least one output whose scriptPubKey is a single 36-byte push, the first 4 bytes of which are
-    //   {0xaa, 0x21, 0xa9, 0xed}, and the following 32 bytes are SHA256^2(witness root, witness reserved value). In case there are
-    //   multiple, the last one is used.
-    if (!CheckWitnessMalleation(block, DeploymentActiveAfter(pindexPrev, chainman, Consensus::DEPLOYMENT_SEGWIT), state)) {
-        return false;
-    }
-
-    // After the coinbase witness reserved value and commitment are verified,
-    // we can check if the block weight passes (before we've checked the
-    // coinbase witness, it would be possible for the weight to be too
-    // large by filling up the coinbase witness, which doesn't change
-    // the block hash, so we couldn't mark the block as permanently
-    // failed).
-    if (GetBlockWeight(block) > static_cast<int64_t>(consensusParams.nMaxBlockWeight)) {
-        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-blk-weight", strprintf("%s : weight limit failed", __func__));
-    }
-
-    return true;
+    return ContextualCheckBlockBodyOnly(block, state, chainman, pindexPrev);
 }
 
 bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValidationState& state, CBlockIndex** ppindex, bool min_pow_checked)
@@ -10344,7 +11056,8 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
                 *ppindex = pindex;
             if (pindex->nStatus & BLOCK_FAILED_MASK) {
                 LogDebug(BCLog::VALIDATION, "%s: block %s is marked invalid\n", __func__, hash.ToString());
-                return state.Invalid(BlockValidationResult::BLOCK_CACHED_INVALID, "duplicate-invalid");
+                return state.Invalid(BlockValidationResult::BLOCK_CACHED_INVALID, "duplicate-invalid",
+                                     strprintf("block %s was previously marked invalid", hash.ToString()));
             }
             return true;
         }
@@ -10478,7 +11191,9 @@ void ChainstateManager::ReportHeadersPresync(const arith_uint256& work, int64_t 
         // Don't report headers presync progress if we already have a post-minchainwork header chain.
         // This means we lose reporting for potentially legitimate, but unlikely, deep reorgs, but
         // prevent attackers that spam low-work headers from filling our logs.
-        if (m_best_header->nChainWork >= UintToArith256(GetConsensus().nMinimumChainWork)) return;
+        // Audit P0.1/C1: gate on AUTHENTICATED work so a forged matmul-header chain
+        // cannot suppress/flip presync reporting. Equal to nChainWork pre-fork.
+        if (m_best_header->nAuthenticatedChainWork >= UintToArith256(GetConsensus().nMinimumChainWork)) return;
         // Rate limit headers presync updates to 4 per second, as these are not subject to DoS
         // protection.
         auto now = std::chrono::steady_clock::now();
@@ -10547,9 +11262,14 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
     }
 
     const CChainParams& params{GetParams()};
+    MatMulRCAuthorityProvenance rc_authority{
+        MatMulRCAuthorityProvenance::NONE};
 
     if (!CheckBlock(block, state, params.GetConsensus()) ||
-        !ContextualCheckBlock(block, state, *this, pindex->pprev)) {
+        !ContextualCheckBlock(block, state, *this, pindex->pprev,
+                              /*fCheckPOW=*/true,
+                              /*may_release_cs_main=*/true,
+                              &rc_authority)) {
         if (state.IsInvalid() && state.GetResult() != BlockValidationResult::BLOCK_MUTATED) {
             pindex->nStatus |= BLOCK_FAILED_VALID;
             m_blockman.m_dirty_blockindex.insert(pindex);
@@ -10557,6 +11277,32 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
         LogError("%s: %s\n", __func__, state.ToString());
         return false;
     }
+
+    // Persist only explicit authority provenance. In particular, a generic
+    // assumevalid skip must never create an exact-replay bit, a trusted audit
+    // bit, or an archive signature.
+    if (rc_authority ==
+        MatMulRCAuthorityProvenance::LOCAL_EXACT_REPLAY) {
+        (void)PersistMatMulExactReplayVerdict(
+            pindex->GetBlockHash());
+    } else if (
+        rc_authority ==
+        MatMulRCAuthorityProvenance::TRUSTED_SIGNER_QUORUM) {
+        (void)PersistMatMulTrustedReplayAttestation(
+            pindex->GetBlockHash());
+    }
+
+    // G.1 duplicate-processing guard: ContextualCheckBlock may have RELEASED
+    // cs_main during the v4.4 ENC-DR recompute, opening a window in which
+    // another thread (a local submitblock/generateblock RPC, or reindex racing
+    // net) could have fully processed this same block — write +
+    // ReceivedBlockTransactions (which sets BLOCK_HAVE_DATA). fAlreadyHave was
+    // sampled BEFORE that window (above), so re-check now under the re-acquired
+    // lock to avoid a duplicate disk write / NewPoWValidBlock /
+    // ReceivedBlockTransactions for the same block. (A remote peer cannot
+    // trigger this — the message handler is single-threaded — but a concurrent
+    // RPC/reindex can.)
+    if (pindex->nStatus & BLOCK_HAVE_DATA) return true;
 
     // Header is valid/has work, merkle tree and segwit merkle tree are good...RELAY NOW
     // (but if it does not build on our best tip, let the SendMessages loop relay it)
@@ -10590,7 +11336,11 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
     // the block files may be pruned, so we can just call this on one
     // chainstate (particularly if we haven't implemented pruning with
     // background validation yet).
-    ActiveChainstate().FlushStateToDisk(state, FlushStateMode::NONE);
+    // Flush failures are fatal operational errors, not block-validation
+    // failures. Keep them out of the caller's validation state while the
+    // notification still initiates shutdown.
+    BlockValidationState flush_state_ignore;
+    (void)ActiveChainstate().FlushStateToDisk(flush_state_ignore, FlushStateMode::NONE);
 
     CheckBlockIndex();
 
@@ -10704,7 +11454,11 @@ bool TestBlockValidity(BlockValidationState& state,
         LogError("%s: Consensus::CheckBlock: %s\n", __func__, state.ToString());
         return false;
     }
-    if (!ContextualCheckBlock(block, state, chainstate.m_chainman, pindexPrev, fCheckPOW)) {
+    // E: pass may_release_cs_main=false. TestBlockValidity holds viewNew /
+    // indexDummy and the pindexPrev==Tip() precondition across this call and
+    // ConnectBlock below, so ContextualCheckBlock must NOT release cs_main
+    // mid-call even on the fCheckPOW=true ENC-DR recompute branch.
+    if (!ContextualCheckBlock(block, state, chainstate.m_chainman, pindexPrev, fCheckPOW, /*may_release_cs_main=*/false)) {
         LogError("%s: Consensus::ContextualCheckBlock: %s\n", __func__, state.ToString());
         return false;
     }
@@ -10743,19 +11497,23 @@ bool Chainstate::LoadChainTip()
         return false;
     }
     m_chain.SetTip(*pindex);
+    m_last_flushed_block = pindex;
     tip = m_chain.Tip();
+
+    // nSequenceId is a sort key for setBlockIndexCandidates and CBlockIndex
+    // objects are shared between chainstates. All candidate sets must therefore
+    // be empty before changing any sequence id.
+    for (Chainstate* chainstate : m_chainman.GetAll()) {
+        assert(chainstate->setBlockIndexCandidates.empty());
+    }
 
     // Make sure our chain tip before shutting down scores better than any other candidate
     // to maintain a consistent best tip over reboots in case of a tie.
     auto target = tip;
     while (target) {
-        const bool is_candidate{setBlockIndexCandidates.contains(target)};
-        if (is_candidate) setBlockIndexCandidates.erase(tip);
         target->nSequenceId = SEQ_ID_BEST_CHAIN_FROM_DISK;
-        if (is_candidate) setBlockIndexCandidates.insert(tip);
         target = target->pprev;
     }
-    PruneBlockIndexCandidates();
 
     tip = m_chain.Tip();
     LogPrintf("Loaded best chain: hashBestChain=%s height=%d date=%s progress=%f\n",
@@ -10769,6 +11527,8 @@ bool Chainstate::LoadChainTip()
         // Ignoring return value for now.
         (void)m_chainman.GetNotifications().blockTip(GetSynchronizationState(/*init=*/true, m_chainman.m_blockman.m_blockfiles_indexed), *pindex);
     }
+
+    CheckForkWarningConditions();
 
     return true;
 }
@@ -10858,6 +11618,13 @@ VerifyDBResult CVerifyDB::VerifyDB(
         size_t curr_coins_usage = coins.DynamicMemoryUsage() + chainstate.CoinsTip().DynamicMemoryUsage();
 
         if (nCheckLevel >= 3) {
+            // A snapshot chainstate cannot disconnect its base: its UTXO
+            // database starts at that block and contains no ancestor state.
+            // Shielded state is likewise loaded from the BTX snapshot section,
+            // so do not mutate it while performing this memory-only UTXO check.
+            if (is_snapshot_cs && pindex == chainstate.SnapshotBase()) {
+                break;
+            }
             if (curr_coins_usage <= chainstate.m_coinstip_cache_size_bytes) {
                 assert(coins.GetBestBlock() == pindex->GetBlockHash());
                 DisconnectResult res = chainstate.DisconnectBlock(block, pindex, coins, /*apply_shielded_state=*/false);
@@ -11212,6 +11979,31 @@ void Chainstate::ClearBlockIndexCandidates()
     setBlockIndexCandidates.clear();
 }
 
+void Chainstate::PopulateBlockIndexCandidates()
+{
+    AssertLockHeld(::cs_main);
+    const CBlockIndex* active_snapshot_base{m_chainman.GetSnapshotBaseBlock()};
+
+    for (CBlockIndex* pindex : m_blockman.GetAllBlockIndices()) {
+        // An assumeutxo chainstate needs its own snapshot base as an immediate
+        // candidate even when that block has not been downloaded yet. Do not
+        // add it to the historical/background chainstate: the latter will add
+        // it normally after processing the preceding transactions.
+        const bool background_snapshot_base_parent_unprocessed{
+            this != &m_chainman.ActiveChainstate() &&
+            pindex == active_snapshot_base &&
+            pindex->pprev &&
+            !pindex->pprev->HaveNumChainTxs()};
+        if (background_snapshot_base_parent_unprocessed) continue;
+
+        if (pindex == SnapshotBase() ||
+            (pindex->IsValid(BLOCK_VALID_TRANSACTIONS) &&
+             (pindex->HaveNumChainTxs() || pindex->pprev == nullptr))) {
+            TryAddBlockIndexCandidate(pindex);
+        }
+    }
+}
+
 bool ChainstateManager::LoadBlockIndex()
 {
     AssertLockHeld(cs_main);
@@ -11236,24 +12028,13 @@ bool ChainstateManager::LoadBlockIndex()
 
         for (CBlockIndex* pindex : vSortedByHeight) {
             if (m_interrupt) return false;
-            // If we have an assumeutxo-based chainstate, then the snapshot
-            // block will be a candidate for the tip, but it may not be
-            // VALID_TRANSACTIONS (eg if we haven't yet downloaded the block),
-            // so we special-case the snapshot block as a potential candidate
-            // here.
-            if (pindex == GetSnapshotBaseBlock() ||
-                    (pindex->IsValid(BLOCK_VALID_TRANSACTIONS) &&
-                     (pindex->HaveNumChainTxs() || pindex->pprev == nullptr))) {
-
-                for (Chainstate* chainstate : GetAll()) {
-                    chainstate->TryAddBlockIndexCandidate(pindex);
-                }
-            }
             if (pindex->nStatus & BLOCK_FAILED_MASK && (!m_best_invalid || pindex->nChainWork > m_best_invalid->nChainWork)) {
                 m_best_invalid = pindex;
             }
-            if (pindex->IsValid(BLOCK_VALID_TREE) && (m_best_header == nullptr || CBlockIndexWorkComparator()(m_best_header, pindex)))
+            if (pindex->IsValid(BLOCK_VALID_TREE) &&
+                (m_best_header == nullptr || PreferTrustAdjustedHeader(*m_best_header, *pindex))) {
                 m_best_header = pindex;
+            }
         }
     }
     return true;
@@ -11610,6 +12391,13 @@ void ChainstateManager::CheckBlockIndex()
         assert((pindexFirstNotTransactionsValid == nullptr || pindex == snap_base) == pindex->HaveNumChainTxs());
         assert(pindex->nHeight == nHeight); // nHeight must be consistent.
         assert(pindex->pprev == nullptr || pindex->nChainWork >= pindex->pprev->nChainWork); // For every block except the genesis block, the chainwork must be larger than the parent's.
+        // Authenticated-chainwork invariants (audit: contiguous authenticated prefix).
+        // Authenticated work is a monotone sub-total of claimed work: it never exceeds
+        // nChainWork (the GetTrustAdjustedChainWork subtraction relies on this) and never
+        // decreases parent->child. UpdateAuthenticatedChainWork maintains both; asserting
+        // here surfaces any future desync (e.g. a stale value) in tests/regtest.
+        assert(pindex->nAuthenticatedChainWork <= pindex->nChainWork);
+        assert(pindex->pprev == nullptr || pindex->nAuthenticatedChainWork >= pindex->pprev->nAuthenticatedChainWork);
         assert(nHeight < 2 || (pindex->pskip && (pindex->pskip->nHeight < nHeight))); // The pskip pointer must point back for all but the first 2 blocks.
         assert(pindexFirstNotTreeValid == nullptr); // All m_blockman.m_block_index entries must at least be TREE valid
         if ((pindex->nStatus & BLOCK_VALID_MASK) >= BLOCK_VALID_TREE) assert(pindexFirstNotTreeValid == nullptr); // TREE valid implies all parents are TREE valid
@@ -11831,7 +12619,7 @@ bool Chainstate::ResizeCoinsCaches(size_t coinstip_size, size_t coinsdb_size)
         ret = FlushStateToDisk(state, FlushStateMode::IF_NEEDED);
     } else {
         // Otherwise, flush state to disk and deallocate the in-memory coins map.
-        ret = FlushStateToDisk(state, FlushStateMode::ALWAYS);
+        ret = FlushStateToDisk(state, FlushStateMode::FORCE_FLUSH);
     }
     return ret;
 }
@@ -11936,6 +12724,23 @@ Chainstate& ChainstateManager::InitializeChainstate(CTxMemPool* mempool)
     return destroyed && !fs::exists(db_path);
 }
 
+bool IsAssumeUtxoSnapshotHeaderCompatible(
+    const CBlockIndex* best_header,
+    const CBlockIndex* snapshot_start_block,
+    bool known_assumeutxo_hash)
+{
+    if (best_header == nullptr || snapshot_start_block == nullptr) {
+        return false;
+    }
+    if (best_header->nHeight >= snapshot_start_block->nHeight &&
+        best_header->GetAncestor(snapshot_start_block->nHeight) ==
+            snapshot_start_block) {
+        return true;
+    }
+    return known_assumeutxo_hash &&
+           snapshot_start_block->nChainWork > best_header->nAuthenticatedChainWork;
+}
+
 util::Result<CBlockIndex*> ChainstateManager::ActivateSnapshot(
         AutoFile& coins_file,
         const SnapshotMetadata& metadata,
@@ -11949,6 +12754,16 @@ util::Result<CBlockIndex*> ChainstateManager::ActivateSnapshot(
     }
 
     CBlockIndex* snapshot_start_block{};
+    const auto snapshot_base_outworks_authenticated_headers{[&]() EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+        AssertLockHeld(::cs_main);
+        if (!snapshot_start_block || !m_best_header) return false;
+        const bool same_header_chain{
+            m_best_header->nHeight >= snapshot_start_block->nHeight
+                ? m_best_header->GetAncestor(snapshot_start_block->nHeight) == snapshot_start_block
+                : snapshot_start_block->GetAncestor(m_best_header->nHeight) == m_best_header};
+        return same_header_chain ||
+               m_best_header->nAuthenticatedChainWork < snapshot_start_block->nChainWork;
+    }};
 
     {
         LOCK(::cs_main);
@@ -11985,7 +12800,13 @@ util::Result<CBlockIndex*> ChainstateManager::ActivateSnapshot(
             return util::Error{Untranslated(strprintf("The base block header (%s) is part of an invalid chain", base_blockhash.ToString()))};
         }
 
-        if (!m_best_header || m_best_header->GetAncestor(snapshot_start_block->nHeight) != snapshot_start_block) {
+        // A compiled-in base hash pins the production header, ancestry, nBits,
+        // and claimed chainwork. Compare it with authenticated work so a
+        // divergent header-only MatMul suffix cannot deny snapshot activation.
+        // Height-only matching remains confined to mockable test chains.
+        if (!IsAssumeUtxoSnapshotHeaderCompatible(
+                m_best_header, snapshot_start_block,
+                known_assumeutxo_hash)) {
             return util::Error{Untranslated("A forked headers-chain with more work than the chain with the snapshot base block header exists. Please proceed to sync without AssumeUtxo.")};
         }
 
@@ -12031,6 +12852,12 @@ util::Result<CBlockIndex*> ChainstateManager::ActivateSnapshot(
         return std::make_unique<Chainstate>(
             /*mempool=*/nullptr, m_blockman, *this, base_blockhash));
 
+    // LoadChainTip() may update CBlockIndex::nSequenceId, which is part of the
+    // setBlockIndexCandidates comparator. Track whether activation has cleared
+    // the shared candidate sets so a failed BTX shielded-state handoff can
+    // restore the still-active IBD chainstate before returning.
+    bool candidate_sets_cleared{false};
+
     {
         LOCK(::cs_main);
         snapshot_chainstate->InitCoinsDB(
@@ -12043,7 +12870,8 @@ util::Result<CBlockIndex*> ChainstateManager::ActivateSnapshot(
     auto cleanup_bad_snapshot = [&](bilingual_str reason) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
         // PopulateAndValidateSnapshot can return (in error) before the leveldb datadir
         // has been created, so only attempt removal if we got that far.
-        if (auto snapshot_datadir = node::FindSnapshotChainstateDir(m_options.datadir)) {
+        const auto snapshot_datadir = node::FindSnapshotChainstateDir(m_options.datadir);
+        if (snapshot_datadir) {
             // We have to destruct leveldb::DB in order to release the db lock, otherwise
             // DestroyDB() (in DeleteCoinsDBFromDisk()) will fail. See `leveldb::~DBImpl()`.
             // Destructing the chainstate (and so resetting the coinsviews object) does this.
@@ -12063,6 +12891,19 @@ util::Result<CBlockIndex*> ChainstateManager::ActivateSnapshot(
                 GetNotifications().fatalError(strprintf(_("Failed to remove snapshot chainstate dir (%s). "
                     "Manually remove it before restarting.\n"), fs::PathToString(*snapshot_datadir)));
             }
+        } else if (m_snapshot_chainstate) {
+            // In-memory snapshots have no directory, but a delayed shielded
+            // snapshot failure must still discard the managed chainstate.
+            assert(m_active_chainstate != m_snapshot_chainstate.get());
+            m_snapshot_chainstate.reset();
+        } else {
+            snapshot_chainstate.reset();
+        }
+        if (candidate_sets_cleared) {
+            for (Chainstate* chainstate : GetAll()) {
+                chainstate->PopulateBlockIndexCandidates();
+            }
+            candidate_sets_cleared = false;
         }
         this->MaybeRebalanceCaches();
         return util::Error{std::move(reason)};
@@ -12104,6 +12945,14 @@ util::Result<CBlockIndex*> ChainstateManager::ActivateSnapshot(
 
     LOCK(::cs_main);  // cs_main required for rest of snapshot activation.
 
+    // Snapshot deserialization can be lengthy. Recheck the authenticated-header predicate under the
+    // final activation lock so a competing branch that completed body validation while the file was
+    // being loaded cannot race the initial check. RecalculateBestHeader publishes such work even if
+    // ActivateBestChain has not yet made that branch ActiveTip().
+    if (!snapshot_base_outworks_authenticated_headers()) {
+        return cleanup_bad_snapshot(Untranslated("A forked headers-chain with more work than the chain with the snapshot base block header exists. Please proceed to sync without AssumeUtxo."));
+    }
+
     // Do a final check to ensure that the snapshot chainstate is actually a more
     // work chain than the active chainstate; a user could have loaded a snapshot
     // very late in the IBD process, and we wouldn't want to load a useless chainstate.
@@ -12120,6 +12969,15 @@ util::Result<CBlockIndex*> ChainstateManager::ActivateSnapshot(
 
     assert(!m_snapshot_chainstate);
     m_snapshot_chainstate.swap(snapshot_chainstate);
+
+    // BTX cannot make the snapshot active until its shielded appendix and
+    // consensus pin have been validated. Clear every chainstate's candidate
+    // set before LoadChainTip() can update the shared block-index sequence ids,
+    // and leave them empty until the active/background roles are final.
+    for (Chainstate* chainstate : GetAll()) {
+        chainstate->ClearBlockIndexCandidates();
+    }
+    candidate_sets_cleared = true;
     const bool chaintip_loaded = m_snapshot_chainstate->LoadChainTip();
     assert(chaintip_loaded);
 
@@ -12175,6 +13033,13 @@ util::Result<CBlockIndex*> ChainstateManager::ActivateSnapshot(
     m_active_chainstate->m_mempool = nullptr;
     m_active_chainstate = m_snapshot_chainstate.get();
     m_blockman.m_snapshot_height = this->GetSnapshotBaseHeight();
+
+    // Candidate eligibility depends on whether a chainstate is active or
+    // background, so rebuild both sets only after the delayed BTX role switch.
+    for (Chainstate* chainstate : GetAll()) {
+        chainstate->PopulateBlockIndexCandidates();
+    }
+    candidate_sets_cleared = false;
 
     LogPrintf("[snapshot] successfully activated snapshot %s\n", base_blockhash.ToString());
     LogPrintf("[snapshot] (%.2f MB)\n",
@@ -12411,7 +13276,6 @@ util::Result<void> ChainstateManager::PopulateAndValidateSnapshot(
     assert(index);
     assert(index == snapshot_start_block);
     index->m_chain_tx_count = au_data.m_chain_tx_count;
-    snapshot_chainstate.setBlockIndexCandidates.insert(snapshot_start_block);
 
     LogPrintf("[snapshot] validated snapshot (%.2f MB)\n",
         coins_cache.DynamicMemoryUsage() / (1000 * 1000));
@@ -15081,7 +15945,11 @@ void ChainstateManager::RecalculateBestHeader()
     AssertLockHeld(cs_main);
     m_best_header = ActiveChain().Tip();
     for (auto& entry : m_blockman.m_block_index) {
-        if (!(entry.second.nStatus & BLOCK_FAILED_MASK) && m_best_header->nChainWork < entry.second.nChainWork) {
+        if (entry.second.nStatus & BLOCK_FAILED_MASK) continue;
+        // Authenticated-work selection: the production unauthenticated
+        // allowance is zero, so even one unverified MatMul header cannot
+        // displace its authenticated ancestor on claimed work.
+        if (m_best_header == nullptr || PreferTrustAdjustedHeader(*m_best_header, entry.second)) {
             m_best_header = &entry.second;
         }
     }

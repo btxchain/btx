@@ -275,6 +275,54 @@ BOOST_AUTO_TEST_CASE(memory_only_tree_does_not_mutate_persistent_commitment_inde
     BOOST_CHECK(*wallet_tree.CommitmentAt(0) == wallet_a);
 }
 
+BOOST_AUTO_TEST_CASE(witness_cursor_does_not_mutate_persistent_commitment_index)
+{
+    struct CommitmentStoreResetGuard {
+        ~CommitmentStoreResetGuard()
+        {
+            ShieldedMerkleTree::ResetCommitmentIndexStore();
+        }
+    } guard;
+
+    ShieldedMerkleTree::ResetCommitmentIndexStore();
+    const fs::path db_path = m_path_root / "shielded_merkle_witness_cursor_isolation";
+    BOOST_REQUIRE(ShieldedMerkleTree::ConfigureCommitmentIndexStore(db_path,
+                                                                     /*db_cache_bytes=*/1 << 20,
+                                                                     /*lru_capacity=*/1024,
+                                                                     /*memory_only=*/false,
+                                                                     /*wipe_data=*/true));
+
+    std::vector<uint256> canonical;
+    ShieldedMerkleTree consensus_tree;
+    for (uint32_t i = 0; i < 4; ++i) {
+        canonical.push_back(MakeCommitment(30'000 + i));
+        consensus_tree.Append(canonical.back());
+    }
+
+    // With a complete pair/frontier, this update starts a depth > 0 cursor.
+    // The cursor must remain private and must not write its position-zero leaf
+    // into the configured canonical commitment store.
+    auto witness = consensus_tree.Witness();
+    witness.IncrementalUpdate(MakeCommitment(40'000));
+    BOOST_CHECK(!witness.HasCommitmentIndexState());
+
+    // Wallet persistence round-trips witnesses. A deserialized partial cursor
+    // must remain index-free when it receives the next leaf as well.
+    DataStream encoded;
+    encoded << witness;
+    ShieldedMerkleWitness restored;
+    encoded >> restored;
+    BOOST_REQUIRE(encoded.empty());
+    restored.IncrementalUpdate(MakeCommitment(40'001));
+    BOOST_CHECK(!restored.HasCommitmentIndexState());
+
+    for (uint64_t position = 0; position < canonical.size(); ++position) {
+        const auto persisted = consensus_tree.CommitmentAt(position);
+        BOOST_REQUIRE(persisted.has_value());
+        BOOST_CHECK_EQUAL(*persisted, canonical[position]);
+    }
+}
+
 BOOST_AUTO_TEST_CASE(detached_scratch_tree_does_not_reattach_incompatible_persistent_index)
 {
     struct CommitmentStoreResetGuard {

@@ -16465,7 +16465,7 @@ RPCHelpMan buildhtlcrefund()
         "buildhtlcrefund",
         "\nBuild, sign, and finalize a transaction that refunds a P2MR HTLC output via the timeout (CLTV) path.\n"
         "By default the descriptor must be exactly mr(htlc_tx(<H160>,<claimerPubkey>),refund(<locktime>,<senderPubkey>)).\n"
-        "The wallet must hold the sender's ML-DSA private key. The spend is only valid once the active chain\n"
+        "The wallet must hold the sender's supported PQ private key (ML-DSA or SLH-DSA). The spend is only valid once the active chain\n"
         "height/MTP is at or beyond <locktime>.\n",
         {
             {"descriptor", RPCArg::Type::STR, RPCArg::Optional::NO, "The mr(...) HTLC descriptor (with or without #checksum)"},

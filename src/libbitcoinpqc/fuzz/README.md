@@ -7,8 +7,7 @@ This directory contains fuzz testing for the libbitcoinpqc library using
 
 You need a nightly Rust toolchain (cargo-fuzz uses unstable compiler
 flags for libFuzzer integration) and the `cargo-fuzz` subcommand. The
-repository pins specific versions of both so local results match the
-versioned workflow recipe:
+repository pins specific versions of both so local results are reproducible:
 
 ```
 rustup toolchain install nightly-2026-05-01
@@ -21,8 +20,7 @@ Or, equivalently, from this directory:
 make fuzz-toolchain
 ```
 
-Linux developers can install the system build deps that the workflow
-installs with:
+Linux developers can install the system build dependencies with:
 
 ```
 make fuzz-deps-linux
@@ -81,9 +79,7 @@ cargo +nightly-2026-05-01 fuzz run <target> artifacts/<target>/<crash-file>
 
 ## Pre-merge smoke check (`make fuzz-smoke`)
 
-The `Makefile` in this directory wraps the same recipe as
-`.github/workflows/libbitcoinpqc-fuzz.yml`, so the workflow recipe can
-be run locally with one command:
+The `Makefile` in this directory wraps the pinned local validation recipe:
 
 ```
 cd src/libbitcoinpqc/fuzz
@@ -98,18 +94,14 @@ This runs:
 4. `cargo +nightly-2026-05-01 fuzz run <target> -- -max_total_time=1` for each
    of the eight other targets in turn
 
-It's the same byte-for-byte recipe the workflow encodes: pinned
-nightly, pinned `cargo-fuzz`, same target order, same seed, same smoke
-time.
+The recipe pins the nightly toolchain and `cargo-fuzz`, target order, seed,
+and smoke duration.
 
 For PRs touching `src/libbitcoinpqc/**`, mention that `make fuzz-smoke`
-passed in the PR description or in a follow-up comment. The workflow
-YAML is the versioned recipe; in this repository the local invocation is
-the normal enforcement path.
+passed in the PR description or in a follow-up comment. The local invocation
+is the normal enforcement path.
 
-## CI
+## Validation policy
 
-`.github/workflows/libbitcoinpqc-fuzz.yml` captures the same recipe in a
-versioned workflow file. Even when GitHub-hosted runners are disabled,
-the workflow YAML stays in-tree as executable documentation and
-`make fuzz-smoke` remains the local equivalent.
+GitHub Actions is intentionally disabled. `make fuzz-smoke` is the versioned,
+local pre-merge check.

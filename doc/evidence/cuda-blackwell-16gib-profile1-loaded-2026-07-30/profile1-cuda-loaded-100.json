@@ -1,0 +1,35 @@
+{
+  "profile": "Profile1_ExactReplay",
+  "matmul_dim": 4096,
+  "n_samples": 100,
+  "distinct_headers": 100,
+  "distinct_digests": 100,
+  "mean_s": 21.244031752260007,
+  "p50_s": 21.2398300185,
+  "p95_s": 21.335198645700004,
+  "p99_s": 21.38550118993,
+  "nearest_rank_p99_s": 21.385333247,
+  "min_s": 21.05188412,
+  "max_s": 21.40212754,
+  "macs_per_episode": 141149805215744,
+  "cpu_gemm_fallbacks": 0,
+  "device_gemm_calls": 28560,
+  "device_extract_tiles": 151499980800,
+  "detail": "cuda_resident_ffn_chain+triple_stream+persistent_ws",
+  "source_fingerprint": {
+    "matmul_v4_rc_exact_replay_cuda_cu_md5": "66ed7c839df0c2ce264d6bec1591ffdf"
+  },
+  "hardware": {
+    "gpu_class": "NVIDIA consumer Blackwell-class discrete GPU (16 GiB VRAM, compute capability 12.0)",
+    "cpu_class": "Intel Xeon W-class workstation CPU",
+    "logical_cpus": 24,
+    "host_ram_gib": 76,
+    "os": "Linux x86_64",
+    "accel": "CUDA ExactReplay resident FFN chain + triple-stream + persistent workspace; device Phase-1 AssociativeRecall"
+  },
+  "notes": [
+    "Production headers bound matmul_dim=4096; 100 distinct dimension-bound headers (mine+verify each).",
+    "Kernel TU fingerprint matches the ExactReplay CUDA source landed in PR #97; Launch* ExactGemmBackend adapters are ABI-only.",
+    "Sanitized evidence: no hostname, username, personal paths, or machine inventory beyond CPU/GPU/memory class."
+  ]
+}

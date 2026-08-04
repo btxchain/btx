@@ -8,6 +8,7 @@ SCRIPT_PATH="${ROOT_DIR}/scripts/m22_remote_shielded_redteam_campaign.py"
 python3 - "${SCRIPT_PATH}" <<'PY'
 import ast
 import pathlib
+import re
 import sys
 
 path = pathlib.Path(sys.argv[1])
@@ -57,7 +58,8 @@ required_snippets = [
     "/firewalls/",
     "/droplets/",
     "\"overall_status\": \"pass\"",
-    "REPO_ROOT.parent / \"infra\" / \"digitalocean_api.key\"",
+    "BTX_DO_TOKEN_FILE",
+    "BTX_DO_SSH_KEY_ID",
     "\"ssh_private_key_name\"",
     "sanitize_manifest_value",
     "manifest_display_path",
@@ -67,12 +69,27 @@ missing = [snippet for snippet in required_snippets if snippet not in text]
 if missing:
     raise SystemExit(f"missing expected m22 remote redteam logic: {missing}")
 
-if "/Users/admin/Documents/btxchain/infra/digitalocean_api.key" in text:
-    raise SystemExit("m22 still hard-codes the creator-machine DigitalOcean token path")
+for pattern in (
+    r"/Users/[A-Za-z0-9._-]+/[^\s\"']*digitalocean_api\.key",
+    r"/home/[A-Za-z0-9._-]+/[^\s\"']*digitalocean_api\.key",
+):
+    if re.search(pattern, text):
+        raise SystemExit("m22 still hard-codes creator-specific provider configuration")
+
+for node in ast.walk(module):
+    if not isinstance(node, ast.Call) or not node.args:
+        continue
+    if not isinstance(node.args[0], ast.Constant) or node.args[0].value != "--ssh-key-id":
+        continue
+    for keyword in node.keywords:
+        if keyword.arg == "default" and isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, int):
+            raise SystemExit("m22 still hard-codes a provider SSH key id")
 
 if "\"ssh_private_key\"" in text:
     raise SystemExit("m22 still stores the absolute ssh private key path in its manifest")
 PY
+
+python3 "${SCRIPT_PATH}" --help >/dev/null
 
 python3 - "${SCRIPT_PATH}" <<'PY'
 import importlib.util

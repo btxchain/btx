@@ -6,6 +6,9 @@
 #include <chain.h>
 #include <chainparams.h>
 #include <clientversion.h>
+#include <consensus/params.h>
+#include <matmul/matmul_v4_rc.h>
+#include <matmul/matmul_v4_rc_scale.h>
 #include <node/blockstorage.h>
 #include <node/context.h>
 #include <node/kernel_notifications.h>
@@ -20,6 +23,12 @@
 #include <test/util/logging.h>
 #include <test/util/setup_common.h>
 
+#include <array>
+#include <cstdint>
+#include <limits>
+#include <string>
+#include <type_traits>
+
 using node::BLOCK_SERIALIZATION_HEADER_SIZE;
 using node::BlockManager;
 using node::KernelNotifications;
@@ -27,6 +36,254 @@ using node::MAX_BLOCKFILE_SIZE;
 
 // use BasicTestingSetup here for the data directory configuration, setup, and cleanup
 BOOST_FIXTURE_TEST_SUITE(blockmanager_tests, BasicTestingSetup)
+
+BOOST_AUTO_TEST_CASE(matmul_replay_authority_context_clean_migration)
+{
+    LOCK(cs_main);
+    CBlockIndex clean;
+    clean.nStatus = BLOCK_VALID_TREE;
+    std::array<CBlockIndex*, 1> indices{&clean};
+    std::set<CBlockIndex*> dirty;
+    const uint256 context{1};
+
+    const auto migration{node::ReconcileMatMulReplayAuthorityContext(
+        indices, std::nullopt, context, dirty)};
+    BOOST_CHECK(migration.disposition ==
+                node::MatMulReplayContextDisposition::MIGRATED);
+    BOOST_CHECK_EQUAL(migration.cleared_trusted_status, 0U);
+    BOOST_CHECK(dirty.empty());
+    BOOST_CHECK(clean.nStatus & BLOCK_VALID_TREE);
+}
+
+BOOST_AUTO_TEST_CASE(matmul_replay_authority_context_matching_preserves_exact)
+{
+    LOCK(cs_main);
+    CBlockIndex exact;
+    CBlockIndex trusted;
+    exact.nStatus = BLOCK_VALID_TREE | BLOCK_EXACT_REPLAY_VERIFIED;
+    trusted.nStatus = BLOCK_VALID_TREE | BLOCK_TRUSTED_REPLAY_ATTESTED;
+    std::array<CBlockIndex*, 2> indices{&exact, &trusted};
+    std::set<CBlockIndex*> dirty;
+    const uint256 context{1};
+
+    const auto migration{node::ReconcileMatMulReplayAuthorityContext(
+        indices, context, context, dirty)};
+    BOOST_CHECK(migration.disposition ==
+                node::MatMulReplayContextDisposition::MATCHED);
+    BOOST_CHECK_EQUAL(migration.cleared_trusted_status, 1U);
+    BOOST_CHECK(exact.nStatus & BLOCK_EXACT_REPLAY_VERIFIED);
+    BOOST_CHECK(!(trusted.nStatus & BLOCK_TRUSTED_REPLAY_ATTESTED));
+    BOOST_CHECK_EQUAL(dirty.size(), 1U);
+    BOOST_CHECK(dirty.count(&trusted));
+}
+
+BOOST_AUTO_TEST_CASE(matmul_replay_authority_context_mismatch_requires_reindex)
+{
+    LOCK(cs_main);
+    CBlockIndex exact;
+    CBlockIndex trusted;
+    exact.nStatus = BLOCK_VALID_SCRIPTS | BLOCK_EXACT_REPLAY_VERIFIED;
+    trusted.nStatus = BLOCK_VALID_SCRIPTS | BLOCK_TRUSTED_REPLAY_ATTESTED;
+    std::array<CBlockIndex*, 2> indices{&exact, &trusted};
+    std::set<CBlockIndex*> dirty;
+
+    const auto migration{node::ReconcileMatMulReplayAuthorityContext(
+        indices, uint256{2}, uint256{1}, dirty)};
+    BOOST_CHECK(migration.disposition ==
+                node::MatMulReplayContextDisposition::REINDEX_REQUIRED);
+    BOOST_CHECK_EQUAL(migration.cleared_trusted_status, 0U);
+    BOOST_CHECK(exact.nStatus & BLOCK_EXACT_REPLAY_VERIFIED);
+    BOOST_CHECK(trusted.nStatus & BLOCK_TRUSTED_REPLAY_ATTESTED);
+    BOOST_CHECK(dirty.empty());
+}
+
+BOOST_AUTO_TEST_CASE(matmul_replay_authority_context_mismatch_without_authority_migrates)
+{
+    LOCK(cs_main);
+    CBlockIndex clean;
+    clean.nStatus = BLOCK_VALID_SCRIPTS;
+    std::array<CBlockIndex*, 1> indices{&clean};
+    std::set<CBlockIndex*> dirty;
+
+    const auto migration{node::ReconcileMatMulReplayAuthorityContext(
+        indices, uint256{2}, uint256{1}, dirty)};
+    BOOST_CHECK(migration.disposition ==
+                node::MatMulReplayContextDisposition::MIGRATED);
+    BOOST_CHECK_EQUAL(migration.cleared_trusted_status, 0U);
+    BOOST_CHECK_EQUAL(clean.nStatus, BLOCK_VALID_SCRIPTS);
+    BOOST_CHECK(dirty.empty());
+}
+
+BOOST_AUTO_TEST_CASE(matmul_replay_authority_context_mismatch_clears_trusted_only)
+{
+    LOCK(cs_main);
+    CBlockIndex trusted;
+    trusted.nStatus = BLOCK_VALID_SCRIPTS | BLOCK_TRUSTED_REPLAY_ATTESTED;
+    std::array<CBlockIndex*, 1> indices{&trusted};
+    std::set<CBlockIndex*> dirty;
+
+    const auto migration{node::ReconcileMatMulReplayAuthorityContext(
+        indices, uint256{2}, uint256{1}, dirty)};
+    BOOST_CHECK(migration.disposition ==
+                node::MatMulReplayContextDisposition::MIGRATED);
+    BOOST_CHECK_EQUAL(migration.cleared_trusted_status, 1U);
+    BOOST_CHECK(!(trusted.nStatus & BLOCK_TRUSTED_REPLAY_ATTESTED));
+    BOOST_CHECK(trusted.nStatus & BLOCK_VALID_SCRIPTS);
+    BOOST_CHECK_EQUAL(dirty.size(), 1U);
+    BOOST_CHECK(dirty.count(&trusted));
+}
+
+BOOST_AUTO_TEST_CASE(matmul_replay_authority_context_full_reindex_seeds_database)
+{
+    KernelNotifications notifications{
+        Assert(m_node.shutdown_request), m_node.exit_status,
+        *Assert(m_node.warnings)};
+    const BlockManager::Options blockman_opts{
+        .chainparams = Params(),
+        .blocks_dir = m_args.GetBlocksDirPath(),
+        .notifications = notifications,
+        .block_tree_db_params = DBParams{
+            .path = m_args.GetDataDirNet() / "blocks" / "index",
+            .cache_bytes = 0,
+            .wipe_data = true,
+        },
+    };
+    BlockManager blockman{*Assert(m_node.shutdown_signal), blockman_opts};
+    const uint256 expected{node::ComputeMatMulReplayAuthorityContext(Params())};
+
+    LOCK(cs_main);
+    uint256 persisted;
+    BOOST_REQUIRE(blockman.m_block_tree_db->ReadMatMulReplayContext(persisted));
+    BOOST_CHECK(persisted == expected);
+}
+
+BOOST_AUTO_TEST_CASE(matmul_replay_authority_context_binds_profile_and_height)
+{
+    auto params{CreateChainParams(ArgsManager{}, ChainType::REGTEST)};
+    auto& consensus{const_cast<Consensus::Params&>(params->GetConsensus())};
+    const uint256 baseline{node::ComputeMatMulReplayAuthorityContext(*params)};
+
+    ++consensus.nMatMulRCProfile;
+    const uint256 changed_profile{
+        node::ComputeMatMulReplayAuthorityContext(*params)};
+    BOOST_CHECK(changed_profile != baseline);
+
+    --consensus.nMatMulRCProfile;
+    --consensus.nMatMulRCHeight;
+    const uint256 changed_height{
+        node::ComputeMatMulReplayAuthorityContext(*params)};
+    BOOST_CHECK(changed_height != baseline);
+
+    ++consensus.nMatMulRCHeight;
+    ++consensus.nMatMulRCAsertRescaleNum;
+    const uint256 changed_rc_asert{
+        node::ComputeMatMulReplayAuthorityContext(*params)};
+    BOOST_CHECK(changed_rc_asert != baseline);
+
+    --consensus.nMatMulRCAsertRescaleNum;
+    --consensus.nMatMulAsertHeight;
+    const uint256 changed_asert_activation{
+        node::ComputeMatMulReplayAuthorityContext(*params)};
+    BOOST_CHECK(changed_asert_activation != baseline);
+
+    ++consensus.nMatMulAsertHeight;
+    ++consensus.nMatMulProductDigestHeight;
+    const uint256 changed_legacy_digest_activation{
+        node::ComputeMatMulReplayAuthorityContext(*params)};
+    BOOST_CHECK(changed_legacy_digest_activation != baseline);
+}
+
+//! Every ENC_RC §R.7 scheduled-scaling knob feeding
+//! ConsensusRCEpisodeParamsForHeight selects the replay episode SHAPE, i.e. the
+//! PoW predicate. Each one must move the replay authority context, otherwise a
+//! retuned node would keep trusting persisted BLOCK_EXACT_REPLAY_VERIFIED
+//! verdicts computed under a different episode shape.
+BOOST_AUTO_TEST_CASE(matmul_replay_authority_context_binds_rc_scale_schedule)
+{
+    auto params{CreateChainParams(ArgsManager{}, ChainType::REGTEST)};
+    auto& consensus{const_cast<Consensus::Params&>(params->GetConsensus())};
+    const uint256 baseline{node::ComputeMatMulReplayAuthorityContext(*params)};
+    // Determinism: the derived-shape probe ladder must not make this stateful.
+    BOOST_CHECK(node::ComputeMatMulReplayAuthorityContext(*params) == baseline);
+
+    const auto check_field_bound{[&](const char* what, auto& field, auto delta) {
+        const auto saved{field};
+        field = static_cast<std::remove_reference_t<decltype(field)>>(field + delta);
+        BOOST_CHECK_MESSAGE(
+            node::ComputeMatMulReplayAuthorityContext(*params) != baseline,
+            std::string{"replay authority context ignores predicate-relevant field: "} + what);
+        field = saved;
+        BOOST_CHECK(node::ComputeMatMulReplayAuthorityContext(*params) == baseline);
+    }};
+
+    check_field_bound("nRCScaleEpochBlocks", consensus.nRCScaleEpochBlocks, 1);
+    check_field_bound("nRCScaleHardCapResBytes", consensus.nRCScaleHardCapResBytes, -1);
+    check_field_bound("nRCScaleHardCapCapBytes", consensus.nRCScaleHardCapCapBytes, -1);
+    // Currently unread (chainwork brake OMITTED, A3/F6) but bound so that
+    // reintroducing the brake cannot silently become an unbound predicate input.
+    check_field_bound("nRCBrakeDeltaPct", consensus.nRCBrakeDeltaPct, 1);
+
+    // Whole-table coverage: an off-by-one in the hashing loop must be caught.
+    for (size_t i = 0; i < Consensus::Params::kRCGrowthTableLen; ++i) {
+        check_field_bound("nRCGrowthResTableQ16[i]", consensus.nRCGrowthResTableQ16[i], 1);
+        check_field_bound("nRCGrowthCapTableQ16[i]", consensus.nRCGrowthCapTableQ16[i], 1);
+    }
+}
+
+//! The derived-shape fingerprint binds the OUTPUT of the episode-shape
+//! derivation, not just its Consensus::Params inputs, so a change to the
+//! derivation code (epoch-0 dials, frozen dim ratios, fallback rules, coupled
+//! shape constructors) also invalidates cached replay verdicts.
+BOOST_AUTO_TEST_CASE(matmul_replay_episode_shape_fingerprint_tracks_resolved_shape)
+{
+    auto params{CreateChainParams(ArgsManager{}, ChainType::REGTEST)};
+    auto& consensus{const_cast<Consensus::Params&>(params->GetConsensus())};
+    const uint256 baseline_shape{
+        node::ComputeMatMulReplayEpisodeShapeFingerprint(*params)};
+    const uint256 baseline_context{
+        node::ComputeMatMulReplayAuthorityContext(*params)};
+    BOOST_CHECK(node::ComputeMatMulReplayEpisodeShapeFingerprint(*params) ==
+                baseline_shape);
+
+    // Sanity: the probe ladder resolves a valid episode at every sampled height
+    // and never runs away (bounded epoch index) even at INT32_MAX activation.
+    const auto epoch0{matmul::v4::rc::ResolveRCEpisodeParams(consensus, 0)};
+    BOOST_CHECK(matmul::v4::rc::ValidateRCEpisodeParams(epoch0));
+
+    // Toy-dims flips the resolved episode shape without touching any scheduled
+    // scaling knob; both the fingerprint and the context must move.
+    const bool saved_toy{consensus.fMatMulRCUseToyDims};
+    consensus.fMatMulRCUseToyDims = !saved_toy;
+    BOOST_CHECK(node::ComputeMatMulReplayEpisodeShapeFingerprint(*params) !=
+                baseline_shape);
+    BOOST_CHECK(node::ComputeMatMulReplayAuthorityContext(*params) !=
+                baseline_context);
+    BOOST_CHECK(matmul::v4::rc::ResolveRCEpisodeParams(consensus, 0).n_ctx !=
+                epoch0.n_ctx);
+    consensus.fMatMulRCUseToyDims = saved_toy;
+    BOOST_CHECK(node::ComputeMatMulReplayEpisodeShapeFingerprint(*params) ==
+                baseline_shape);
+
+    // The resolved ENC_RC_COUPLED shape is part of the same fingerprint.
+    const uint32_t saved_coupled_profile{consensus.nMatMulRCCoupledProfile};
+    consensus.nMatMulRCCoupledProfile =
+        saved_coupled_profile == 4 ? 3 : saved_coupled_profile + 1;
+    BOOST_CHECK(node::ComputeMatMulReplayEpisodeShapeFingerprint(*params) !=
+                baseline_shape);
+    consensus.nMatMulRCCoupledProfile = saved_coupled_profile;
+    BOOST_CHECK(node::ComputeMatMulReplayEpisodeShapeFingerprint(*params) ==
+                baseline_shape);
+
+    // Activation height moves the probe ladder, so the fingerprint tracks it too.
+    const int32_t saved_rc_height{consensus.nMatMulRCHeight};
+    consensus.nMatMulRCHeight =
+        saved_rc_height == std::numeric_limits<int32_t>::max() ? 1000 : saved_rc_height + 1;
+    BOOST_CHECK(node::ComputeMatMulReplayEpisodeShapeFingerprint(*params) !=
+                baseline_shape);
+    consensus.nMatMulRCHeight = saved_rc_height;
+    BOOST_CHECK(node::ComputeMatMulReplayEpisodeShapeFingerprint(*params) ==
+                baseline_shape);
+}
 
 BOOST_AUTO_TEST_CASE(blockmanager_find_block_pos)
 {

@@ -1,5 +1,13 @@
 # BTX-Node Design Assessment: Critical Analysis of Architectural Decisions
 
+> **Historical MatMul assessment.** The MatMul pipeline, verification, and
+> activation conclusions below assess an earlier design and are not current
+> defaults. MatMul v4.7 transition policy is defined by
+> [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md):
+> Profile-1 ExactReplay in Epoch A, Profile-1 proof plus ExactReplay in Epoch B,
+> Profile-1 proof authority in Epoch C, then Profile-2 proof authority in
+> Epoch D. Mainnet Epoch A (v4 = BMX4C = RC) has a finite compiled candidate height and true source flags, so it would activate if merged unchanged; release remains NO-GO pending exact-final combined-tree CUDA+Metal evidence, reviewed schema-4 ASERT calibration, ratification re-affirmation, full closeout, and live-tip runway validation; all other transition heights remain disabled.
+
 ## Overview
 
 BTX-Node is a post-quantum blockchain forked from Bitcoin Knots v29.2. It replaces SHA-256d PoW with matrix multiplication PoW, replaces ECDSA/Schnorr with NIST post-quantum signatures, and adds a planned shielded pool for confidential transactions. This document critically assesses each major design decision.

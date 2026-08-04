@@ -1,0 +1,75 @@
+{
+  "tool": "c3-coupled-production",
+  "tip": "bf36b7d6d95fcb049d7aa5c8aebee614c58a607a",
+  "device": "RTX 5060 Ti 16GB sm_120",
+  "resident": {
+    "status": "INFEASIBLE-ON-16GB",
+    "required_hbm_bytes_est": 51540197632,
+    "required_hbm_gib_est": 48.00055,
+    "card_gib": 16
+  },
+  "streamed_runs": [
+    {
+      "file": "c3-coupled-2GiB.json",
+      "mem_cap_bytes": 2147483648,
+      "auto_streamed": true,
+      "wall_s": 989.948825637,
+      "bank_s": 914.28178452,
+      "barriers_s": 67.482653355,
+      "peak_rss_kib": 1317016,
+      "digest": "a3e485f132e04b3ebd9dd4a057b61ae5f49a16593e488caa56155589d3c0c868",
+      "mine_matches_cpu": true,
+      "streamed_peak_bytes_est": 67698944,
+      "resident_peak_bytes_est": 51540197632,
+      "backend": "cuda"
+    },
+    {
+      "file": "c3-coupled-512MiB.json",
+      "mem_cap_bytes": 536870912,
+      "auto_streamed": true,
+      "wall_s": 989.83234722,
+      "bank_s": 914.245523149,
+      "barriers_s": 67.416322308,
+      "peak_rss_kib": 1316876,
+      "digest": "a3e485f132e04b3ebd9dd4a057b61ae5f49a16593e488caa56155589d3c0c868",
+      "mine_matches_cpu": true,
+      "streamed_peak_bytes_est": 67698944,
+      "resident_peak_bytes_est": 51540197632,
+      "backend": "cuda"
+    },
+    {
+      "file": "c3-coupled-8GiB.json",
+      "mem_cap_bytes": 8589934592,
+      "auto_streamed": true,
+      "wall_s": 990.548492142,
+      "bank_s": 915.03981253,
+      "barriers_s": 67.362210405,
+      "peak_rss_kib": 1317136,
+      "digest": "a3e485f132e04b3ebd9dd4a057b61ae5f49a16593e488caa56155589d3c0c868",
+      "mine_matches_cpu": true,
+      "streamed_peak_bytes_est": 67698944,
+      "resident_peak_bytes_est": 51540197632,
+      "backend": "cuda"
+    },
+    {
+      "file": "c3-coupled-uncapped16G.json",
+      "mem_cap_bytes": 0,
+      "auto_streamed": true,
+      "wall_s": 985.983937882,
+      "bank_s": 911.002163115,
+      "barriers_s": 66.877101873,
+      "peak_rss_kib": 1316172,
+      "digest": "a3e485f132e04b3ebd9dd4a057b61ae5f49a16593e488caa56155589d3c0c868",
+      "mine_matches_cpu": true,
+      "streamed_peak_bytes_est": 67698944,
+      "resident_peak_bytes_est": 51540197632,
+      "backend": "cuda"
+    }
+  ],
+  "digest_parity_across_caps": true,
+  "wall_s_mean": 989.07840072025,
+  "stream_vs_resident_slowdown": "N/A \u2014 Resident not runnable on 16GB",
+  "gate_verdict": "NO-GO",
+  "timestamp": "2026-07-20T20:30:49Z",
+  "sweep_complete": true
+}

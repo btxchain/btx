@@ -9,9 +9,9 @@ import time
 
 from test_framework.messages import (
     COIN,
-    MAX_BLOCK_WEIGHT,
+    WITNESS_SCALE_FACTOR,
 )
-from test_framework.test_framework import BitcoinTestFramework, SkipTest
+from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     assert_equal,
     assert_raises_rpc_error,
@@ -20,6 +20,8 @@ from test_framework.util import (
 )
 from test_framework.wallet import MiniWallet
 
+TEST_BLOCK_MAX_WEIGHT = 1_000_000
+
 
 class PrioritiseTransactionTest(BitcoinTestFramework):
     def set_test_params(self):
@@ -27,6 +29,8 @@ class PrioritiseTransactionTest(BitcoinTestFramework):
         self.extra_args = [[
             "-printpriority=1",
             "-datacarriersize=100000",
+            "-acceptnonstdtxn=1",
+            f"-blockmaxweight={TEST_BLOCK_MAX_WEIGHT}",
         ]] * self.num_nodes
         self.supports_cli = False
 
@@ -118,7 +122,7 @@ class PrioritiseTransactionTest(BitcoinTestFramework):
         self.clear_prioritisation(node=self.nodes[0])
 
         self.log.info("Test priority while txs are not in mempool")
-        self.restart_node(0, extra_args=["-nopersistmempool"])
+        self.restart_node(0, extra_args=[*self.extra_args[0], "-nopersistmempool"])
         self.nodes[0].setmocktime(mock_time)
         assert_equal(self.nodes[0].getmempoolinfo()["size"], 0)
         self.nodes[0].prioritisetransaction(txid=txid_b, fee_delta=int(fee_delta_b * COIN))
@@ -147,11 +151,6 @@ class PrioritiseTransactionTest(BitcoinTestFramework):
         # BTX policy can reject legacy MiniWallet output scripts via "scriptpubkey"
         # (P2MR-only policy). In that configuration, fee-delta behavior is orthogonal
         # and this upstream test is not applicable.
-        probe_tx = self.wallet.create_self_transfer(fee_rate=Decimal("0.0001"))
-        probe = self.nodes[0].testmempoolaccept([probe_tx["hex"]])[0]
-        if not probe["allowed"] and "scriptpubkey" in probe.get("reject-reason", ""):
-            raise SkipTest("Skipping: node policy rejects MiniWallet scripts with scriptpubkey")
-
         # Test `prioritisetransaction` required parameters
         assert_raises_rpc_error(-1, "prioritisetransaction", self.nodes[0].prioritisetransaction)
 
@@ -202,7 +201,7 @@ class PrioritiseTransactionTest(BitcoinTestFramework):
                 utxos[start_range:end_range])
 
         # Make sure that the size of each group of transactions exceeds
-        # MAX_BLOCK_WEIGHT // 4 -- otherwise the test needs to be revised to
+        # the configured block-vsize limit -- otherwise the test needs to be revised to
         # create more transactions.
         mempool = self.nodes[0].getrawmempool(True)
         sizes = [0, 0, 0]
@@ -210,7 +209,7 @@ class PrioritiseTransactionTest(BitcoinTestFramework):
             for j in txids[i]:
                 assert j in mempool
                 sizes[i] += mempool[j]['vsize']
-            assert sizes[i] > MAX_BLOCK_WEIGHT // 4  # Fail => raise utxo_count
+            assert sizes[i] > TEST_BLOCK_MAX_WEIGHT // WITNESS_SCALE_FACTOR  # Fail => raise utxo_count
 
         assert_equal(self.nodes[0].getprioritisedtransactions(), {})
         # add a fee delta to something in the cheapest bucket and make sure it gets mined

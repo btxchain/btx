@@ -10,6 +10,7 @@
 #include <attributes.h>
 #include <chain.h>
 #include <checkqueue.h>
+#include <coins.h>
 #include <consensus/amount.h>
 #include <cuckoocache.h>
 #include <deploymentstatus.h>
@@ -104,6 +105,8 @@ static const uint64_t MIN_DISK_SPACE_FOR_BLOCK_FILES = 550 * 1024 * 1024;
 
 /** Maximum number of dedicated script-checking threads allowed */
 static constexpr int MAX_SCRIPTCHECK_THREADS{15};
+/** Maximum number of dedicated block-input prevout fetching threads allowed */
+static constexpr int32_t MAX_PREVOUTFETCH_THREADS{16};
 /** Maximum number of dedicated shielded-checking threads allowed */
 static constexpr int MAX_SHIELDEDCHECK_THREADS{8};
 
@@ -577,7 +580,8 @@ enum class FlushStateMode {
     NONE,
     IF_NEEDED,
     PERIODIC,
-    ALWAYS
+    FORCE_FLUSH,
+    FORCE_SYNC,
 };
 
 /**
@@ -603,6 +607,9 @@ public:
     //! can fit per the dbcache setting.
     std::unique_ptr<CCoinsViewCache> m_cacheview GUARDED_BY(cs_main);
 
+    //! Reused overlay for ConnectBlock. It is reset after every attempt and flushed only on success.
+    std::unique_ptr<CoinsViewOverlay> m_connect_block_view GUARDED_BY(cs_main);
+
     //! This constructor initializes CCoinsViewDB and CCoinsViewErrorCatcher instances, but it
     //! *does not* create a CCoinsViewCache instance by default. This is done separately because the
     //! presence of the cache has implications on whether or not we're allowed to flush the cache's
@@ -612,7 +619,7 @@ public:
     CoinsViews(DBParams db_params, CoinsViewOptions options);
 
     //! Initialize the CCoinsViewCache member.
-    void InitCache() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    void InitCache(int32_t prevoutfetch_threads) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 };
 
 enum class CoinsCacheSizeState
@@ -806,8 +813,8 @@ public:
         FlushStateMode mode,
         int nManualPruneHeight = 0);
 
-    //! Unconditionally flush all changes to disk.
-    void ForceFlushStateToDisk();
+    //! Unconditionally write all changes to disk, optionally wiping the UTXO cache.
+    void ForceFlushStateToDisk(bool wipe_cache = true);
 
     //! Prune blockfiles from the disk if necessary and then flush chainstate changes
     //! if we pruned.
@@ -887,6 +894,11 @@ public:
 
     void ClearBlockIndexCandidates() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
+    /** Populate candidates after all chain tips have finished loading.
+     * CBlockIndex::nSequenceId participates in the candidate-set comparator.
+     */
+    void PopulateBlockIndexCandidates() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
     /** Find the last common block of this chain and a locator. */
     const CBlockIndex* FindForkInGlobalIndex(const CBlockLocator& locator) const EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
@@ -903,6 +915,12 @@ public:
         size_t max_mempool_size_bytes) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     std::string ToString() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    //! Get the last block whose UTXO state was flushed to disk.
+    const CBlockIndex* GetLastFlushedBlock() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        return m_last_flushed_block;
+    }
 
     //! Indirection necessary to make lock annotations work with an optional mempool.
     RecursiveMutex* MempoolMutex() const LOCK_RETURNED(m_mempool->cs)
@@ -944,6 +962,7 @@ private:
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     NodeClock::time_point m_next_write{NodeClock::time_point::max()};
+    const CBlockIndex* m_last_flushed_block GUARDED_BY(::cs_main){nullptr};
 
     /**
      * In case of an invalid snapshot, rename the coins leveldb directory so
@@ -974,6 +993,17 @@ enum class SnapshotCompletionResult {
     // not match the one expected by the snapshot chainstate.
     BASE_BLOCKHASH_MISMATCH,
 };
+
+/**
+ * Return whether an assumeutxo snapshot base is compatible with the current
+ * best header. Exact chainparam-pinned snapshots may bridge RC's authenticated
+ * header lag when they carry strictly more work, but never a same-or-higher
+ * work competing header chain.
+ */
+bool IsAssumeUtxoSnapshotHeaderCompatible(
+    const CBlockIndex* best_header,
+    const CBlockIndex* snapshot_start_block,
+    bool known_assumeutxo_hash);
 
 /**
  * Provides an interface for creating and interacting with one or two
@@ -1154,6 +1184,72 @@ public:
     const uint256& AssumedValidBlock() const { return *Assert(m_options.assumed_valid_block); }
     kernel::MatMulValidationMode GetMatMulValidationMode() const { return m_options.matmul_validation_mode; }
     kernel::Notifications& GetNotifications() const { return m_options.notifications; };
+
+    /** WP-7: v4.4 ENC-DR assumevalid buried-recompute trust predicate, factored
+     *  verbatim out of ContextualCheckBlock (its (2) ASSUMEVALID BURIED-RECOMPUTE
+     *  TRUST clause) so the async-verify dispatcher and the sketch-prefetch
+     *  guard share the single implementation. True iff `pindex_self` (the index
+     *  of the block being considered, may be nullptr => false) is an
+     *  assumed-valid ancestor of the best header, the best header carries at
+     *  least MinimumChainWork of AUTHENTICATED work, and the block is buried by
+     *  more than the nMatMulProofAssumeValidMinAge equivalent-time guard. When
+     *  true the O(W) ENC-DR recompute for this block is skipped. */
+    bool IsMatMulRecomputeAssumeValidTrusted(const CBlockIndex* pindex_self, int nHeight) const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** WP-7 / C5: ADVISORY classifier for the async ENC-DR verify worker.
+     *  Returns height + parent MTP iff accepting `block` now would reach the
+     *  O(W) ENC-DR reference recompute inside ContextualCheckBlock
+     *  (fMatMulPOW, v4-active DIGEST_RECOMPUTE height, digest-only body, known
+     *  prev header, no stored data for this hash, not assumevalid-trusted).
+     *  nullopt means the synchronous path is cheap (or would fail cheaply) and
+     *  the block must NOT be dispatched off-thread. Phase B seal-as-PoW heights
+     *  are eligible when parent MTP can be supplied from prev (always, once
+     *  prev is known); without MTP Classify stays fail-closed (nullopt).
+     *  Divergence from the seam's own logic is fail-safe: it degrades to a
+     *  recompute, never to a wrong verdict (the memoized verdict is a pure
+     *  function of the header + parent MTP). */
+    struct MatMulEncDrClassifyResult {
+        int32_t height{0};
+        std::optional<int64_t> parent_median_time_past;
+    };
+    /** If `verdict_pinned` is non-null, a cached verdict is looked up and
+     *  pinned atomically. On return true in `*verdict_pinned`, the caller owns
+     *  one pin and MUST call UnpinMatMulEncDrVerdict after validation consumes
+     *  it. This prevents the bounded FIFO from turning a classified cheap path
+     *  into an unbudgeted recomputation before ProcessNewBlock re-entry.
+     *  `assumevalid_trusted` identifies the other moving no-recompute result;
+     *  admission must scope that trust decision across its ProcessNewBlock
+     *  re-entry rather than letting a best-header race change the work. */
+    std::optional<MatMulEncDrClassifyResult> ClassifyMatMulEncDrRecompute(
+        const CBlock& block, bool* verdict_pinned = nullptr,
+        bool* assumevalid_trusted = nullptr) const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** Persist a successful header-derived ExactReplay verdict without
+     *  promoting block validity or authenticated chainwork. */
+    bool PersistMatMulExactReplayVerdict(const uint256& block_hash)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** Record that the current process observed a valid configured M-of-N
+     *  quorum. Persisted solely for operator audit; validation never consumes
+     *  this bit as authority after restart/config rotation. */
+    bool PersistMatMulTrustedReplayAttestation(const uint256& block_hash)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** Cheap complete-block checks that must pass before P2P admission charges
+     *  an expensive MatMul recomputation. This covers context-free body rules,
+     *  contextual header rules, and contextual body rules, but deliberately
+     *  does not execute the MatMul phase-2/ENC-DR predicate itself. A valid
+     *  previously-unseen header is idempotently accepted/indexed here so its
+     *  nChainWork is available and the same unrequested gates as AcceptBlock
+     *  can be evaluated exactly before admission. */
+    bool CheckMatMulBlockAdmissionPreconditions(const CBlock& block,
+                                                BlockValidationState& state,
+                                                bool force_processing,
+                                                bool min_pow_checked,
+                                                bool& reaches_contextual_check)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /**
      * Make various assertions about the state of the block index.

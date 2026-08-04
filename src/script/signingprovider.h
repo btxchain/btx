@@ -16,6 +16,10 @@
 #include <span.h>
 #include <sync.h>
 
+#include <map>
+#include <set>
+#include <vector>
+
 static const bool DEFAULT_WALLET_IMPLICIT_SEGWIT = false;
 
 extern bool g_implicit_segwit;
@@ -175,6 +179,13 @@ public:
     virtual bool GetTaprootSpendData(const XOnlyPubKey& output_key, TaprootSpendData& spenddata) const { return false; }
     virtual bool GetTaprootBuilder(const XOnlyPubKey& output_key, TaprootBuilder& builder) const { return false; }
     virtual const CPQKey* GetPQKey(Span<const unsigned char> pubkey) const { return nullptr; }
+    /** Return whether a valid private PQ signing key is available without
+     *  requiring callers to materialize that key. */
+    virtual bool HavePQSigningKey(Span<const unsigned char> pubkey, PQAlgorithm algo) const
+    {
+        const CPQKey* key{GetPQKey(pubkey)};
+        return key != nullptr && key->IsValid() && key->GetAlgorithm() == algo;
+    }
     virtual bool GetP2MRSpendData(const WitnessV2P2MR& output, P2MRSpendData& spenddata) const { return false; }
 
     bool GetKeyByXOnly(const XOnlyPubKey& pubkey, CKey& key) const
@@ -220,6 +231,7 @@ public:
     bool GetTaprootSpendData(const XOnlyPubKey& output_key, TaprootSpendData& spenddata) const override;
     bool GetTaprootBuilder(const XOnlyPubKey& output_key, TaprootBuilder& builder) const override;
     const CPQKey* GetPQKey(Span<const unsigned char> pubkey) const override;
+    bool HavePQSigningKey(Span<const unsigned char> pubkey, PQAlgorithm algo) const override;
     bool GetP2MRSpendData(const WitnessV2P2MR& output, P2MRSpendData& spenddata) const override;
 };
 
@@ -231,6 +243,9 @@ struct FlatSigningProvider final : public SigningProvider
     std::map<CKeyID, CKey> keys;
     std::map<XOnlyPubKey, TaprootBuilder> tr_trees; /** Map from output key to Taproot tree (which can then make the TaprootSpendData */
     std::map<std::vector<unsigned char>, CPQKey, ShortestVectorFirstComparator> pq_keys;
+    /** PQ pubkeys whose descriptor providers can derive a private key. This
+     *  metadata supports fee selection without doing expensive PQ keygen. */
+    std::set<std::vector<unsigned char>, ShortestVectorFirstComparator> pq_signing_key_availability;
     std::map<WitnessV2P2MR, P2MRSpendData> p2mr_spends;
 
     bool GetCScript(const CScriptID& scriptid, CScript& script) const override;
@@ -241,6 +256,7 @@ struct FlatSigningProvider final : public SigningProvider
     bool GetTaprootSpendData(const XOnlyPubKey& output_key, TaprootSpendData& spenddata) const override;
     bool GetTaprootBuilder(const XOnlyPubKey& output_key, TaprootBuilder& builder) const override;
     const CPQKey* GetPQKey(Span<const unsigned char> pubkey) const override;
+    bool HavePQSigningKey(Span<const unsigned char> pubkey, PQAlgorithm algo) const override;
     bool GetP2MRSpendData(const WitnessV2P2MR& output, P2MRSpendData& spenddata) const override;
 
     void AddMasterKey(const CExtKey& key);
@@ -337,6 +353,7 @@ public:
     bool GetTaprootSpendData(const XOnlyPubKey& output_key, TaprootSpendData& spenddata) const override;
     bool GetTaprootBuilder(const XOnlyPubKey& output_key, TaprootBuilder& builder) const override;
     const CPQKey* GetPQKey(Span<const unsigned char> pubkey) const override;
+    bool HavePQSigningKey(Span<const unsigned char> pubkey, PQAlgorithm algo) const override;
     bool GetP2MRSpendData(const WitnessV2P2MR& output, P2MRSpendData& spenddata) const override;
 };
 
