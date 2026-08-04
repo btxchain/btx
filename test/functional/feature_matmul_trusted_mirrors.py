@@ -278,7 +278,10 @@ class MatMulTrustedMirrorsTest(BitcoinTestFramework):
         with mirror_a.assert_debug_log(
             ["mmattest over source verify budget"]
         ):
-            for _ in range(16):
+            # Sixteen full messages exactly consume the 256-signature source
+            # burst and can never prove the rejection path. The seventeenth
+            # must exceed the bucket even after the small elapsed-time refill.
+            for _ in range(17):
                 peer = mirror_a.add_p2p_connection(P2PInterface())
                 peer.send_and_ping(
                     msg_generic(b"mmattest", sixteen_attestations)
