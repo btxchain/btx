@@ -490,18 +490,73 @@ class ProductionGoldenSealTest(unittest.TestCase):
         self.git("add", ".")
         self.git("commit", "-qm", "seal")
 
-    def run_seal(self) -> subprocess.CompletedProcess[str]:
+    def run_seal(
+        self, seal_revision: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        command = ["python3", str(SEAL_SCRIPT), "seal", "--root", str(self.root)]
+        if seal_revision is not None:
+            command.extend(["--seal-revision", seal_revision])
         return subprocess.run(
-            ["python3", str(SEAL_SCRIPT), "seal", "--root", str(self.root)],
+            command,
             capture_output=True,
             text=True,
             check=False,
         )
 
+    def commit_lifecycle_record(self) -> str:
+        lifecycle = self.root / "doc/evidence/lifecycle/result.json"
+        lifecycle.parent.mkdir(parents=True, exist_ok=True)
+        lifecycle.write_text("{}\n", encoding="utf-8")
+        self.git("add", str(lifecycle.relative_to(self.root)))
+        self.git("commit", "-qm", "record manifest-bearing lifecycle")
+        return self.git("rev-parse", "HEAD").stdout.strip()
+
     def test_exact_freeze_to_seal_passes(self) -> None:
         self.build_seal()
         result = self.run_seal()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_explicit_manifest_bearing_lifecycle_revision_passes(self) -> None:
+        self.build_seal()
+        lifecycle_revision = self.commit_lifecycle_record()
+        release_note = self.root / "doc/release-final.md"
+        release_note.write_text("release authorization recorded separately\n")
+        self.git("add", str(release_note.relative_to(self.root)))
+        self.git("commit", "-qm", "record release-final disposition")
+        result = self.run_seal(lifecycle_revision)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"seal={lifecycle_revision}", result.stdout)
+
+    def test_manifest_mutation_after_lifecycle_revision_fails(self) -> None:
+        self.build_seal()
+        lifecycle_revision = self.commit_lifecycle_record()
+        manifest = self.root / "src/matmul/matmul_v4_rc_production_golden_manifest.data"
+        manifest.write_text(manifest.read_text().replace("sm_120", "sm_121"))
+        self.git("add", str(manifest.relative_to(self.root)))
+        self.git("commit", "-qm", "mutate manifest after lifecycle")
+        result = self.run_seal(lifecycle_revision)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("changed after manifest-bearing seal revision", result.stderr)
+
+    def test_raw_corpus_mutation_after_lifecycle_revision_fails(self) -> None:
+        self.build_seal()
+        lifecycle_revision = self.commit_lifecycle_record()
+        raw = self.root / "doc/evidence/final-corpus/raw/profile1-cuda-8.json"
+        payload = json.loads(raw.read_text())
+        payload["post_lifecycle_mutation"] = True
+        raw.write_text(json.dumps(payload))
+        self.git("add", str(raw.relative_to(self.root)))
+        self.git("commit", "-qm", "mutate raw corpus after lifecycle")
+        result = self.run_seal(lifecycle_revision)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("changed after manifest-bearing seal revision", result.stderr)
+
+    def test_wrong_pre_manifest_seal_revision_fails(self) -> None:
+        self.build_seal()
+        self.commit_lifecycle_record()
+        result = self.run_seal(self.freeze)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("changed after manifest-bearing seal revision", result.stderr)
 
     def test_raw_artifact_tamper_after_comparison_fails(self) -> None:
         def mutate(corpus, cuda_path, metal_path, compare_path, manifest):

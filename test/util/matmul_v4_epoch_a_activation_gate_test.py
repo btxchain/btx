@@ -10,6 +10,8 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -292,6 +294,49 @@ class EpochAActivationGateTest(unittest.TestCase):
             "epoch_a_gate_test_golden_verifier",
         )
         self.assertEqual(verifier.MANIFEST_MAGIC, "BTX_RC_PRODUCTION_GOLDEN_V1")
+
+    def test_golden_validation_targets_manifest_bearing_seal_revision(self) -> None:
+        corpus = self.root / "evidence"
+        corpus.mkdir()
+        comparison = corpus / "multi-gpu-digest-compare.json"
+        comparison.write_text(json.dumps({
+            "evidence_kind": "multi_gpu_profile1_exactreplay_golden_compare",
+            "schema_version": 2,
+            "tip_sha": REVISION,
+            "source_tree_fingerprint": FINGERPRINT,
+            "required_for_manifest": ["cuda", "metal"],
+            "complete_multi_gpu_match": True,
+            "cuda_metal_match": True,
+            "allow_partial": False,
+            "mismatches": [],
+            "coverage_failures": [],
+            "backends_succeeded": ["cuda", "metal"],
+            "by_backend": {
+                "cuda": {"harness_sha256": BINARY_HASHES["cuda_rc_harness"]},
+                "metal": {"harness_sha256": BINARY_HASHES["metal_rc_harness"]},
+            },
+        }), encoding="utf-8")
+        captured: list[object] = []
+        verifier = SimpleNamespace(
+            MANIFEST_RELATIVE=Path("manifest.data"),
+            parse_manifest=lambda _: [SimpleNamespace(evidence_path="evidence")],
+            seal_command=lambda args: captured.append(args) or 0,
+        )
+        seal_revision = "9" * 40
+        with mock.patch.object(MODULE, "import_tool", return_value=verifier):
+            MODULE.validate_golden(
+                self.root,
+                comparison,
+                REVISION,
+                FINGERPRINT,
+                {
+                    "cuda_rc_harness": BINARY_HASHES["cuda_rc_harness"],
+                    "metal_rc_harness": BINARY_HASHES["metal_rc_harness"],
+                },
+                seal_revision=seal_revision,
+            )
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(captured[0].seal_revision, seal_revision)
 
     def assert_lifecycle_rejected(self, value: dict, pattern: str) -> None:
         with self.assertRaisesRegex(MODULE.GateError, pattern):
@@ -602,6 +647,17 @@ class EpochAActivationGateTest(unittest.TestCase):
         run("commit", "-q", "-m", "E: change executable implementation")
         revision_e = run("rev-parse", "HEAD")
         implementation_e = MODULE.implementation_fingerprint(repo, revision_e)
+        unrelated_release = json.loads(json.dumps(release_ready))
+        unrelated_release["source_revision"] = revision_e
+        unrelated_release["source_tree_fingerprint"] = identity.tree_fingerprint(
+            repo, revision_e
+        )
+        with self.assertRaisesRegex(
+            MODULE.GateError, "implementation_fingerprint does not match"
+        ):
+            MODULE.validate_implementation_identity(
+                repo, unrelated_release, revision_e
+            )
         stale = json.loads(json.dumps(reviewed))
         stale["artifact_sources"]["lifecycle"]["source_revision"] = revision_e
         stale["artifact_sources"]["lifecycle"][

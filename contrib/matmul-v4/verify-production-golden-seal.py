@@ -495,12 +495,51 @@ def require_build_tree_clean(root: Path) -> None:
     )
 
 
+def require_unchanged_since(
+    root: Path, relative: Path, earlier: str, later: str,
+) -> None:
+    result = git(
+        root, "diff", "--quiet", earlier, later, "--", relative.as_posix(),
+        check=False,
+    )
+    require(
+        result.returncode == 0,
+        f"{relative}: changed after manifest-bearing seal revision {earlier}",
+    )
+
+
 def seal_command(args: argparse.Namespace) -> int:
     root = args.root.resolve()
     require_build_tree_clean(root)
+    current_head = git(root, "rev-parse", "HEAD").stdout.decode().strip()
+    requested_seal = getattr(args, "seal_revision", None)
+    seal_revision = requested_seal or current_head
+    require(
+        isinstance(seal_revision, str)
+        and HEX40.fullmatch(seal_revision) is not None,
+        "seal revision must be 40 lowercase hexadecimal characters",
+    )
+    require(
+        revision_exists(root, seal_revision),
+        f"seal revision {seal_revision} does not resolve to a commit",
+    )
+    resolved_seal = git(
+        root, "rev-parse", "--verify", f"{seal_revision}^{{commit}}"
+    ).stdout.decode().strip()
+    require(resolved_seal == seal_revision, "seal revision does not resolve exactly")
+    require(
+        git(
+            root, "merge-base", "--is-ancestor", seal_revision, current_head,
+            check=False,
+        ).returncode == 0,
+        "seal revision is not an ancestor of current HEAD",
+    )
     manifest_relative = args.manifest
     manifest_path = root / manifest_relative
     require_tracked_clean(root, manifest_relative)
+    require_unchanged_since(
+        root, manifest_relative, seal_revision, current_head,
+    )
     entries = parse_manifest(manifest_path)
 
     revision = entries[0].revision
@@ -508,19 +547,18 @@ def seal_command(args: argparse.Namespace) -> int:
     require(revision_exists(root, revision), f"manifest revision {revision} does not resolve to a commit")
     actual = tree_fingerprint(root, revision)
     require(actual == fingerprint, f"manifest fingerprint does not match freeze revision ({actual})")
-    head = git(root, "rev-parse", "HEAD").stdout.decode().strip()
-    require(git(root, "merge-base", "--is-ancestor", revision, head, check=False).returncode == 0, "freeze revision is not an ancestor of seal HEAD")
-    require(head != revision, "manifest must be committed in a seal after the measured freeze")
-    require(tree_fingerprint(root, head) == fingerprint, "build-relevant code changed after the measured freeze")
+    require(git(root, "merge-base", "--is-ancestor", revision, seal_revision, check=False).returncode == 0, "freeze revision is not an ancestor of seal revision")
+    require(seal_revision != revision, "manifest must be committed in a seal after the measured freeze")
+    require(tree_fingerprint(root, seal_revision) == fingerprint, "build-relevant code changed before the manifest-bearing seal")
     changed = {
         line.decode().strip()
-        for line in git(root, "diff", "--name-only", f"{revision}..{head}", "--", *BUILD_RELEVANT).stdout.splitlines()
+        for line in git(root, "diff", "--name-only", f"{revision}..{seal_revision}", "--", *BUILD_RELEVANT).stdout.splitlines()
         if line.strip()
     }
     require(changed == {manifest_relative.as_posix()}, f"freeze -> seal build changes must be exactly {manifest_relative}, got {sorted(changed)}")
     changed_all = {
         line.decode().strip()
-        for line in git(root, "diff", "--name-only", f"{revision}..{head}").stdout.splitlines()
+        for line in git(root, "diff", "--name-only", f"{revision}..{seal_revision}").stdout.splitlines()
         if line.strip()
     }
     disallowed = {
@@ -537,6 +575,9 @@ def seal_command(args: argparse.Namespace) -> int:
     corpus_relative = Path(entries[0].evidence_path)
     compare_relative = corpus_relative / "multi-gpu-digest-compare.json"
     require_tracked_clean(root, compare_relative)
+    require_unchanged_since(
+        root, compare_relative, seal_revision, current_head,
+    )
     comparison = load_json(root / compare_relative)
     for field, expected in (
         ("evidence_kind", "multi_gpu_profile1_exactreplay_golden_compare"),
@@ -565,6 +606,9 @@ def seal_command(args: argparse.Namespace) -> int:
         require(isinstance(raw_name, str) and Path(raw_name).name == raw_name, f"{compare_relative}: unsafe raw artifact name")
         raw_relative = corpus_relative / "raw" / raw_name
         require_tracked_clean(root, raw_relative)
+        require_unchanged_since(
+            root, raw_relative, seal_revision, current_head,
+        )
         raw_path = root / raw_relative
         artifact = validate_artifact(entry.family, raw_path, revision, fingerprint, 1, 8)
         record = next((item for item in artifact.records if item["header_nonce"] == entry.nonce), None)
@@ -593,7 +637,8 @@ def seal_command(args: argparse.Namespace) -> int:
 
     print(
         "verify-production-golden-seal: PASS "
-        f"freeze={revision} seal={head} corpus={corpus_relative} providers=cuda,metal"
+        f"freeze={revision} seal={seal_revision} current={current_head} "
+        f"corpus={corpus_relative} providers=cuda,metal"
     )
     return 0
 
@@ -614,6 +659,13 @@ def main() -> int:
     seal = subparsers.add_parser("seal")
     seal.add_argument("--root", type=Path, required=True)
     seal.add_argument("--manifest", type=Path, default=MANIFEST_RELATIVE)
+    seal.add_argument(
+        "--seal-revision",
+        help=(
+            "exact manifest-bearing revision to validate; current HEAD may "
+            "contain only separately authorized release-final changes"
+        ),
+    )
     seal.set_defaults(handler=seal_command)
 
     args = parser.parse_args()

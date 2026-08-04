@@ -660,7 +660,7 @@ def validate_asert(
 
 def validate_golden(
     root: Path, comparison_path: Path, revision: str, fingerprint: str,
-    binaries: dict[str, str],
+    binaries: dict[str, str], *, seal_revision: str,
 ) -> None:
     comparison = load_json(comparison_path)
     for field, expected in (
@@ -700,7 +700,11 @@ def validate_golden(
     )
     try:
         result = verifier.seal_command(
-            argparse.Namespace(root=root, manifest=verifier.MANIFEST_RELATIVE)
+            argparse.Namespace(
+                root=root,
+                manifest=verifier.MANIFEST_RELATIVE,
+                seal_revision=seal_revision,
+            )
         )
     except Exception as error:
         raise GateError(f"production golden seal rejected: {error}") from error
@@ -1251,6 +1255,7 @@ def verify(policy_path: Path, root: Path, binaries: dict[str, Path]) -> dict[str
         root, paths["golden_compare"],
         *artifact_sources["production_goldens"],
         binary_hashes["production_goldens"],
+        seal_revision=artifact_sources["lifecycle"][0],
     )
     validate_lifecycle(
         paths["lifecycle"], policy, *artifact_sources["lifecycle"],
