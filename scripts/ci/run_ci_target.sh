@@ -351,6 +351,8 @@ run_production_readiness() {
   python3 test/util/matmul_v4_public_evidence_test.py
   python3 test/util/matmul_v4_evidence_provenance_test.py
   python3 test/util/matmul_v4_multi_gpu_golden_test.py
+  python3 test/util/matmul_v4_asert_calibration_test.py
+  python3 test/util/matmul_v4_asert_assembly_test.py
   if ! have_core_binaries "build-btx" || [[ ! -x "build-btx/bin/bench_btx" ]]; then
     scripts/build_btx.sh "build-btx" -DWERROR=ON -DWITH_ZMQ=ON -DBUILD_BENCH=ON
   fi

@@ -39,6 +39,7 @@ class EvidenceProvenanceTest(unittest.TestCase):
         self.git("commit", "-qm", "second")
         self.revision_b = self.git("rev-parse", "HEAD").stdout.strip()
         self.fingerprint_b = self.fingerprint(self.revision_b)
+        self.main_branch = self.git("branch", "--show-current").stdout.strip()
         self.write_exclusions([])
 
     def tearDown(self) -> None:
@@ -78,17 +79,30 @@ class EvidenceProvenanceTest(unittest.TestCase):
         path.write_text(json.dumps(payload))
         return path
 
-    def run_verify(self) -> subprocess.CompletedProcess[str]:
+    def run_verify(self, *, strict: bool = True) -> subprocess.CompletedProcess[str]:
+        command = [
+            "python3", str(SCRIPT), "--root", str(self.root),
+            "--evidence-dir", "doc/evidence", "--exclusions",
+            str(self.exclusions),
+        ]
+        if strict:
+            command.append("--strict")
         return subprocess.run(
-            [
-                "python3", str(SCRIPT), "--root", str(self.root),
-                "--evidence-dir", "doc/evidence", "--exclusions",
-                str(self.exclusions), "--strict",
-            ],
+            command,
             capture_output=True,
             text=True,
             check=False,
         )
+
+    def create_matching_side_branch_revision(self) -> tuple[str, str]:
+        self.git("checkout", "-qb", "historical-side", self.revision_a)
+        (self.root / "src/value.cpp").write_text("int value = 3;\n")
+        self.git("add", "src/value.cpp")
+        self.git("commit", "-qm", "historical side branch")
+        revision = self.git("rev-parse", "HEAD").stdout.strip()
+        fingerprint = self.fingerprint(revision)
+        self.git("checkout", "-q", self.main_branch)
+        return revision, fingerprint
 
     def test_matching_object_local_pairs_pass(self) -> None:
         self.write_evidence({
@@ -134,6 +148,60 @@ class EvidenceProvenanceTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("EXCLUDED", result.stdout)
         self.assertIn("production_admissible=false", result.stdout)
+
+    def test_matching_side_branch_revision_fails_strict(self) -> None:
+        revision, fingerprint = self.create_matching_side_branch_revision()
+        self.write_evidence({
+            "source_revision": revision,
+            "source_tree_fingerprint": fingerprint,
+        })
+
+        non_strict = self.run_verify(strict=False)
+        self.assertEqual(
+            non_strict.returncode, 0, non_strict.stdout + non_strict.stderr
+        )
+
+        strict = self.run_verify()
+        self.assertNotEqual(strict.returncode, 0)
+        self.assertIn("is not reachable from HEAD", strict.stdout)
+
+    def test_excluded_side_branch_revision_is_visible_and_passes(self) -> None:
+        revision, fingerprint = self.create_matching_side_branch_revision()
+        relative = "doc/evidence/historical-side.json"
+        self.write_evidence({
+            "source_revision": revision,
+            "source_tree_fingerprint": fingerprint,
+        }, "historical-side.json")
+        self.write_exclusions([{
+            "evidence_path": relative,
+            "revision": revision,
+            "reason": "historical side-branch diagnostic",
+            "production_admissible": False,
+        }])
+
+        result = self.run_verify()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("EXCLUDED", result.stdout)
+        self.assertIn("production_admissible=false", result.stdout)
+
+    def test_symbolic_link_evidence_fails(self) -> None:
+        target = self.root / "outside-evidence.json"
+        target.write_text(json.dumps({"source_revision": self.revision_b}))
+        (self.evidence / "linked.json").symlink_to(target)
+
+        result = self.run_verify()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("symbolic-link evidence is not allowed", result.stdout)
+
+    def test_symbolic_link_exclusion_registry_fails(self) -> None:
+        target = self.root / "outside-exclusions.json"
+        target.write_text(json.dumps({"schema_version": 1, "exclusions": []}))
+        self.exclusions.unlink()
+        self.exclusions.symlink_to(target)
+
+        result = self.run_verify()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("symbolic links are not allowed", result.stdout)
 
     def test_stale_exclusion_fails_strict(self) -> None:
         self.write_evidence({"source_revision": self.revision_a})

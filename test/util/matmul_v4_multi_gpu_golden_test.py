@@ -432,7 +432,12 @@ class ProductionGoldenSealTest(unittest.TestCase):
         ]
         return hashlib.sha256(b"".join(kept)).hexdigest()
 
-    def build_seal(self, mutate=None, source_change: bool = False) -> None:
+    def build_seal(
+        self,
+        mutate=None,
+        source_change: bool = False,
+        non_documentation_change: bool = False,
+    ) -> None:
         corpus = self.root / "doc/evidence/final-corpus"
         raw = corpus / "raw"
         raw.mkdir(parents=True)
@@ -478,6 +483,10 @@ class ProductionGoldenSealTest(unittest.TestCase):
             mutate(corpus, cuda_path, metal_path, compare_path, manifest)
         if source_change:
             (self.root / "src/value.cpp").write_text("int value = 2;\n")
+        if non_documentation_change:
+            path = self.root / "scripts/operator.py"
+            path.parent.mkdir()
+            path.write_text("print('changed after freeze')\n")
         self.git("add", ".")
         self.git("commit", "-qm", "seal")
 
@@ -537,6 +546,24 @@ class ProductionGoldenSealTest(unittest.TestCase):
         result = self.run_seal()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("build-relevant code changed", result.stderr)
+
+    def test_non_documentation_change_after_freeze_fails(self) -> None:
+        self.build_seal(non_documentation_change=True)
+        result = self.run_seal()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("manifest and documentation only", result.stderr)
+
+    def test_symbolic_link_raw_artifact_fails(self) -> None:
+        def mutate(corpus, cuda_path, metal_path, compare_path, manifest):
+            target = metal_path.with_name("profile1-metal-target.json")
+            target.write_bytes(metal_path.read_bytes())
+            metal_path.unlink()
+            metal_path.symlink_to(target.name)
+
+        self.build_seal(mutate)
+        result = self.run_seal()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("symbolic links are not allowed", result.stderr)
 
 
 class BuildInfoGenerationTest(unittest.TestCase):

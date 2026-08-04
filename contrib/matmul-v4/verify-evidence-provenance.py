@@ -14,7 +14,8 @@ Object-local binding matters. A document containing revision A plus
 fingerprint B in one record and revision B plus fingerprint A in another must
 not pass merely because its document-wide sets happen to contain both values.
 
-Historical measurements whose source revision was never captured may be
+Historical measurements whose source revision was never captured, or whose
+source commit is no longer reachable from the published branch, may be
 excluded only through the explicit registry. Every exclusion is reported,
 must state that it is not production-admissible, and is rejected by ``--strict``
 if it no longer matches an artifact.
@@ -64,6 +65,16 @@ def repo_root(start: Path) -> Path:
 def revision_exists(root: Path, revision: str) -> bool:
     return subprocess.run(
         ["git", "-C", str(root), "cat-file", "-e", f"{revision}^{{commit}}"],
+        capture_output=True,
+    ).returncode == 0
+
+
+def revision_is_ancestor_of_head(root: Path, revision: str) -> bool:
+    return subprocess.run(
+        [
+            "git", "-C", str(root), "merge-base", "--is-ancestor",
+            revision, "HEAD",
+        ],
         capture_output=True,
     ).returncode == 0
 
@@ -122,6 +133,8 @@ def load_exclusions(
     if not path.is_absolute():
         path = root / path
     errors: list[str] = []
+    if path.is_symlink():
+        return {}, [f"exclusion registry {path}: symbolic links are not allowed"]
     try:
         payload = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError) as exc:
@@ -177,7 +190,10 @@ def main() -> int:
     )
     parser.add_argument(
         "--strict", action="store_true",
-        help="fail on unbound fingerprints and stale exclusions",
+        help=(
+            "fail on unbound fingerprints, revisions outside HEAD ancestry, "
+            "and stale exclusions"
+        ),
     )
     args = parser.parse_args()
 
@@ -186,6 +202,12 @@ def main() -> int:
     if not evidence.is_dir():
         print(f"verify-evidence-provenance: no such directory: {evidence}", file=sys.stderr)
         return 2
+    if evidence.is_symlink():
+        print(
+            f"verify-evidence-provenance: evidence directory is a symbolic link: {evidence}",
+            file=sys.stderr,
+        )
+        return 2
 
     exclusions, exclusion_errors = load_exclusions(root, args.exclusions)
     failures: list[str] = list(exclusion_errors)
@@ -193,8 +215,17 @@ def main() -> int:
     used_exclusions: set[tuple[str, str]] = set()
     checked_files = 0
     checked_revisions = 0
+    evidence_symlinks = {
+        path for path in evidence.rglob("*") if path.is_symlink()
+    }
+    failures.extend(
+        f"{path.relative_to(root)}: symbolic-link evidence is not allowed"
+        for path in sorted(evidence_symlinks)
+    )
 
     for path in sorted(evidence.rglob("*.json")):
+        if path in evidence_symlinks:
+            continue
         try:
             payload = json.loads(path.read_text())
         except (OSError, json.JSONDecodeError) as exc:
@@ -231,6 +262,12 @@ def main() -> int:
                     failures.append(
                         f"{relative_path} {location}: revision {revision} does not "
                         "resolve to a commit in this repository"
+                    )
+                    continue
+                if args.strict and not revision_is_ancestor_of_head(root, revision):
+                    failures.append(
+                        f"{relative_path} {location}: revision {revision} is not "
+                        "reachable from HEAD"
                     )
                     continue
                 valid_revisions.append(revision)

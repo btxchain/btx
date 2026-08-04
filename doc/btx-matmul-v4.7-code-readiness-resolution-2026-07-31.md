@@ -1,19 +1,27 @@
-# MatMul v4.7 code-readiness audit resolution
+# MatMul v4.7 code-readiness audit resolution (historical snapshot)
 
-Date: 2026-07-31
+Snapshot date: 2026-07-31
 
-Status: audited code paths and fail-closed controls are implemented; final
-revision-bound accelerator evidence and calibration remain hardware-gated
+Status: historical audit resolution; not a current readiness verdict
+
+This document preserves the disposition of the named audit findings at the
+snapshot revision. Its statements that the production manifest was empty,
+public ratification records were false, public activation heights were
+disabled, or RC ASERT was `1/1` are superseded and must not be read as the
+current source state. See
+[`btx-production-readiness.md`](btx-production-readiness.md) for the current
+candidate tuple and fail-closed readiness status. This historical resolution
+does not approve activation.
 
 Canonical transition and activation policy:
 [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md).
 
 This note records the disposition of PR97-CODE-F01 through F05 and the related
-Unix daemon CUDA lifecycle audit. It is not an activation approval. The
-production canary and manifest mechanism is implemented, but the committed
-manifest is intentionally EMPTY. The hardened comparator requires its entries
-to come from one final-code-freeze CUDA+Metal corpus. Public ratification gates
-remain false and public RC activation heights remain disabled.
+Unix daemon CUDA lifecycle audit. At that revision, the production canary and
+manifest mechanism was implemented, but the committed manifest was
+intentionally empty. The hardened comparator required its entries to come from
+one final-code-freeze CUDA+Metal corpus. Public ratification records were false
+and public RC activation heights were disabled in that snapshot.
 
 ## F01: accelerator initialization across Unix daemonization
 
@@ -41,7 +49,7 @@ BTX_RUN_CUDA_DAEMON_LIFECYCLE_TESTS=1 \
 
 The final two-daemon production RC-boundary path is exercised with the reviewed
 manifest and strict-device telemetry; daemon lifecycle coverage remains
-hardware-gated in ordinary CI.
+hardware-gated in ordinary automated test environments.
 
 ## F02: strict digest-mismatch adjudication
 
@@ -172,21 +180,24 @@ These corrections make test evidence and operator diagnostics describe the
 current construction without converting a witness, capacity fit, or research
 proof into consensus authority.
 
-## Activation boundary
+## Historical activation boundary
 
 Admission/scheduler controls, strict daemon lifecycle, trusted-mirror
 attestation plumbing, and the fail-closed canary/comparator implementation are
-implemented in code. A production strict-device trusted-mirror rehearsal is
-deliberately unable to cross the RC boundary while the production-golden
-manifest is empty: the archive withholds validator service and cannot produce
-the required attestation. Historical CUDA+Metal artifacts remain useful but
-must be regenerated from the corrected code freeze under the hardened
-provenance checks. Public RC ASERT is neutral `1/1`; the final provider-bound
-ratio and complete lifecycle evidence remain CUDA hardware work. HIP is
-optional and must match before that provider becomes production eligible.
-After those hardware gates close, the remaining consensus change is the
-separately reviewed activation height plus same-commit ASERT and ratification
-tuple.
+implemented in the snapshot code. At that revision, a production strict-device
+trusted-mirror rehearsal was deliberately unable to cross the RC boundary
+while the production-golden manifest was empty: the archive withheld validator
+service and could not produce the required attestation. Historical CUDA+Metal
+artifacts remained useful but had to be regenerated from the corrected code
+freeze under the hardened provenance checks. Public RC ASERT was neutral
+`1/1`; the final provider-bound ratio and complete lifecycle evidence remained
+CUDA hardware work. HIP was optional and had to match before that provider
+could become production eligible.
+
+Those empty-manifest, neutral-ASERT, disabled-height, and false-ratification
+statements describe only the snapshot. Consult
+[`btx-production-readiness.md`](btx-production-readiness.md) before evaluating
+the current activation-candidate source.
 
 Trusted GPU archive attestations remain a separate same-operator deployment
 option for RPC/archive mirrors. Such mirrors continue ordinary validation but

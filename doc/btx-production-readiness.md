@@ -4,12 +4,30 @@ This runbook defines the executable verification checklist used before BTX
 production deployment.
 
 For MatMul v4.7, a green legacy production-readiness run is necessary but not
-sufficient. The implementation PR keeps all heights disabled. Epoch A alone
-uses Profile 1 ExactReplay with optional shadow proofs; Epoch B requires a
-durable proof and ExactReplay; Epoch C moves authority to the Profile 1 proof;
-Epoch D separately activates Profile 2 under proof authority. The complete
-activation gates and their required ordering are defined in
+sufficient. Epoch A alone uses Profile 1 ExactReplay with optional shadow
+proofs; Epoch B requires a durable proof and ExactReplay; Epoch C moves
+authority to the Profile 1 proof; Epoch D separately activates Profile 2 under
+proof authority. The complete activation gates and their required ordering are
+defined in
 [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md).
+
+## Current MatMul v4.7 candidate status: NO-GO
+
+The current candidate source is activation-armed: the mainnet Epoch-A v4,
+BMX4C, and RC heights are atomically set to `185000`; the staged RC ASERT ratio
+is `6931159304/1`; and both public ratification records are `true`. These are
+candidate source values, not evidence that the release is ready or that the
+currently deployed network has activated them.
+
+Deployment remains **NO-GO**. The committed manifest and its supporting
+evidence are stale relative to the exact-final combined v0.33.2 source tree.
+Before release, that exact tree must close at least the revision-bound CUDA and
+Metal production-golden corpus, provider-bound ASERT and complete-lifecycle
+calibration, and production strict-device trusted-mirror rehearsal gates. The
+tuple must also be rechecked against the live mainnet tip immediately before
+the final source freeze so its upgrade runway remains adequate. Until those
+gates pass on the exact final tree, do not merge, ship, or rely on the armed
+height and ratification values.
 
 For shielded launch scope, this runbook must be read together with
 `doc/btx-shielded-production-status-2026-03-20.md` and

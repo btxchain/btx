@@ -56,6 +56,17 @@ to a numeric byte array and fingerprinted C++ parses its strict schema. Any
 other change in that scope invalidates equivalence and requires new CUDA and
 Metal artifacts.
 
+The final activation tuple, including the ASERT coefficient, must therefore be
+settled before the exact-final freeze. Calibration may first run against a
+candidate freeze to derive a proposed coefficient. Installing or changing that
+coefficient creates a new build-relevant tree and invalidates the candidate
+corpus. The required closure sequence is: candidate calibration, reviewed
+tuple update, final freeze, then a confirmation CUDA+Metal/ASERT campaign on
+that unchanged final freeze. Only sanitized evidence, documentation, and the
+inert manifest seal may be added afterward. If the confirmation campaign
+changes the proposed coefficient, repeat the freeze and all revision-bound
+hardware evidence; never relabel an earlier corpus as final.
+
 The in-process C++ parser strictly checks the manifest schema, field shapes,
 and cohort consistency, but it has no repository in which to resolve a commit
 or recompute a Git tree. A well-formed nonexistent revision could therefore

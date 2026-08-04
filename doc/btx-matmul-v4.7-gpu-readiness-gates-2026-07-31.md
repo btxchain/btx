@@ -1,8 +1,17 @@
-# MatMul v4.7 GPU execution and activation gates
+# MatMul v4.7 GPU execution and activation gates (historical snapshot)
 
-Date: 2026-07-31
+Snapshot date: 2026-07-31
 
-Status: implementation-only; public activation disabled
+Status: historical implementation snapshot; not a current readiness verdict
+
+This document preserves the implementation and gate state reviewed on its
+snapshot date. Its statements that the public heights were `INT32_MAX`, the RC
+ASERT ratio was `1/1`, both ratification records were false, or the production
+manifest was empty describe that earlier revision and are no longer statements
+about the current activation-candidate source. See
+[`btx-production-readiness.md`](btx-production-readiness.md) for the current
+candidate tuple and fail-closed readiness status. Nothing in this historical
+record is an activation approval.
 
 Canonical transition and activation policy:
 [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md).
@@ -150,15 +159,15 @@ The RPC calculation is operational telemetry only. Latest-component values
 are useful for diagnosis but are not a statistically coherent percentile
 campaign. Activation still requires a sustained two-node campaign reporting
 p50/p95/p99/max for the complete lifecycle under mining, IBD, competing-tip,
-and reorg contention. CI exercises deterministic repeated priority handoffs
+and reorg contention. Local deterministic tests exercise repeated priority handoffs
 and exact release/cancellation accounting; it is not represented as a
 hardware soak.
 
-## Activation switch remains false
+## Historical activation-switch state (superseded)
 
 Correctness self-qualification and automatic-provider eligibility are distinct
-from activation readiness. The source therefore keeps both public
-ratification records false:
+from activation readiness. At the time of this snapshot, the source kept both
+public ratification records false:
 
 - `BTX_MATMUL_NO_INVERSION_GATE_RATIFIED`;
 - `BTX_MATMUL_V47_GPU_LIFECYCLE_GATE_RATIFIED`.
@@ -172,8 +181,10 @@ third launch-authority requirement. Portable CPU oracle reproduction is not an
 accepted independent Epoch-A golden. Use
 `contrib/matmul-v4/multi-gpu-golden-corpus.sh` to reproduce the gate.
 
-The startup/epoch canary mechanism is implemented and the production manifest
-is intentionally empty. The exact-freeze Metal corpus is complete at
+At the time of this snapshot, the startup/epoch canary mechanism was implemented
+and the production manifest was intentionally empty. That empty-manifest
+statement is retained only as historical context. The exact-freeze Metal corpus
+was complete at
 `doc/evidence/multi-gpu-profile1-goldens-metal-2026-08-02-regression-closure/`;
 a matching strict CUDA rerun from that source revision/fingerprint is pending. A
 stable golden binds provider family, public device
@@ -186,18 +197,19 @@ numeric driver/runtime API versions. Metal reports its public GPU architecture
 class and OS build/release; neither path records a device name, serial,
 hostname, account identifier, or private path.
 
-The historical Epoch-A throughput proposal `16893794/1` is retained as
-engineering evidence but is not installed. Epoch A no longer treats that value
-as a static target multiplier: consensus derives the transition target from the
-live parent `nBits`, the retired pre-hash epsilon, and the measured throughput
-ratio with a wide exact intermediate. Public chainparams retain provisional
-`1/1` while heights remain `INT32_MAX`. The tip-correlated CUDA 100-run artifact is at
+The historical Epoch-A throughput proposal `16893794/1` was retained as
+engineering evidence but was not installed in the snapshot. Epoch A did not
+treat that value as a static target multiplier: consensus derived the
+transition target from the live parent `nBits`, the retired pre-hash epsilon,
+and the measured throughput ratio with a wide exact intermediate. At that time,
+public chainparams retained provisional `1/1` while heights remained
+`INT32_MAX`. The tip-correlated CUDA 100-run artifact is at
 `doc/evidence/cuda-blackwell-16gib-profile1-loaded-2026-08-01/` (p99 32.705 s,
 zero CPU GEMM fallbacks, TU md5 `ed1e9477432b1766f549c039b6779632`); the
 2026-07-30 CUDA report is retained as historical. Core lifecycle ASERT evidence
 is at `doc/evidence/cuda-blackwell-16gib-lifecycle-asert-2026-08-01/` (n=20 core
 ≈96.7 s; complete n=0 without goldens/authority). Public ratification gates
-remain false.
+were false in the snapshot revision.
 
 The historical production corpus has an eight-header CUDA + Metal digest match
 from one internally coherent source revision. Later build-relevant source
@@ -220,17 +232,18 @@ path has since been replaced by strict-device reseal). Those external artifacts
 were not present in this workspace and are not treated here as independently
 verified activation evidence.
 
-## Required activation-height review
+## Historical required activation-height review
 
-The code-side canary, strict execution policy, trusted-mirror attestation
-plumbing, and admission controls are implemented. A production strict-device
-trusted-mirror rehearsal remains fail-closed until the reviewed manifest is
-populated; an empty manifest withholds the archive's validator service and no
-post-RC attestation can be produced. Final-revision CUDA corpus, lifecycle,
-fault/recovery, and provider-bound ASERT evidence remain hardware-gated; the
-historical cross-provider corpus is not accepted by the hardened comparator.
-After those gates close, the remaining consensus-visible change is to choose
-the live-chain activation height with an adequate upgrade window, flip both
-ratification constants, and install the reviewed ASERT value plus atomic
-Epoch-A tuple in the same commit. Until then all public heights remain
-`INT32_MAX`, RC ASERT remains `1/1`, and mainnet remains on MatMul v3.
+In the snapshot revision, the code-side canary, strict execution policy,
+trusted-mirror attestation plumbing, and admission controls were implemented,
+while an empty manifest withheld the archive's validator service and prevented
+a post-RC attestation. Final-revision CUDA corpus, lifecycle, fault/recovery,
+and provider-bound ASERT evidence were hardware-gated, and the historical
+cross-provider corpus was not accepted by the hardened comparator.
+
+The snapshot therefore required those gates to close before choosing a live
+activation height, ratifying the transition, and installing a reviewed ASERT
+value plus atomic Epoch-A tuple. Its `INT32_MAX`, `1/1`, empty-manifest, and
+false-ratification descriptions are superseded. The current candidate is still
+NO-GO for different, revision-bound reasons documented in
+[`btx-production-readiness.md`](btx-production-readiness.md).

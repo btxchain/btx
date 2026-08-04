@@ -481,6 +481,7 @@ def parse_manifest(path: Path) -> list[ManifestEntry]:
 
 def require_tracked_clean(root: Path, relative: Path) -> None:
     require(not relative.is_absolute() and ".." not in relative.parts, f"unsafe repository path {relative}")
+    require(not (root / relative).is_symlink(), f"{relative}: symbolic links are not allowed")
     require(git(root, "ls-files", "--error-unmatch", relative.as_posix(), check=False).returncode == 0, f"{relative}: file is not tracked")
     require(git(root, "diff", "--quiet", "HEAD", "--", relative.as_posix(), check=False).returncode == 0, f"{relative}: file differs from HEAD")
 
@@ -499,8 +500,8 @@ def seal_command(args: argparse.Namespace) -> int:
     require_build_tree_clean(root)
     manifest_relative = args.manifest
     manifest_path = root / manifest_relative
-    entries = parse_manifest(manifest_path)
     require_tracked_clean(root, manifest_relative)
+    entries = parse_manifest(manifest_path)
 
     revision = entries[0].revision
     fingerprint = entries[0].fingerprint
@@ -517,6 +518,21 @@ def seal_command(args: argparse.Namespace) -> int:
         if line.strip()
     }
     require(changed == {manifest_relative.as_posix()}, f"freeze -> seal build changes must be exactly {manifest_relative}, got {sorted(changed)}")
+    changed_all = {
+        line.decode().strip()
+        for line in git(root, "diff", "--name-only", f"{revision}..{head}").stdout.splitlines()
+        if line.strip()
+    }
+    disallowed = {
+        path
+        for path in changed_all
+        if path != manifest_relative.as_posix() and not path.startswith("doc/")
+    }
+    require(
+        not disallowed,
+        "freeze -> seal changes must be the manifest and documentation only, got "
+        f"{sorted(disallowed)}",
+    )
 
     corpus_relative = Path(entries[0].evidence_path)
     compare_relative = corpus_relative / "multi-gpu-digest-compare.json"
