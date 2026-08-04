@@ -1363,8 +1363,17 @@ struct SlotReuseOrderingProbe {
         // interval. The host normally releases the gate after a 250 ms
         // observation window; this 750 ms ceiling is only the last-resort
         // cleanup path if the release stream cannot make progress.
+        // cudaDeviceProp::clockRate was REMOVED in CUDA 13, so reading it off
+        // the properties struct does not compile on a 13.x toolkit at all --
+        // which is where this gate actually has to run. cudaDevAttrClockRate is
+        // the supported query and is available on 12.x and 13.x alike.
+        int clock_khz{0};
+        if (cudaDeviceGetAttribute(&clock_khz, cudaDevAttrClockRate,
+                                   device_index) != cudaSuccess) {
+            return false;
+        }
         const uint64_t max_cycles{
-            static_cast<uint64_t>(std::max(properties.clockRate, 1)) * 750u};
+            static_cast<uint64_t>(std::max(clock_khz, 1)) * 750u};
         RcSlotReuseOrderingHoldGate<<<1, 1, 0, gate_stream>>>(
             release_flag.As<uint32_t>(),
             device_watchdog_expired.As<uint32_t>(), max_cycles);
