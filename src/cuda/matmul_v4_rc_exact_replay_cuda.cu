@@ -1323,7 +1323,12 @@ bool TryCudaRcFusedFfnChain(const std::vector<int8_t>& X0, bool weights_shared,
         cudaStream_t h2d{nullptr};
         cudaStream_t d2h{nullptr};
         cudaEvent_t w_ready{nullptr};
-        cudaEvent_t layer_done{nullptr};
+        // Per weight SLOT, not one sequence-wide event. The weight pair
+        // ping-pongs between slot 0 and slot 1, so the pair generated for layer
+        // l+1 lands in the slot layer l-1 read. Regeneration therefore has to be
+        // ordered after that slot's previous compute consumer, and that consumer
+        // is identified by slot, not by "the last layer".
+        cudaEvent_t layer_done[2]{nullptr, nullptr};
         cudaEvent_t d2h_done[2]{nullptr, nullptr};
         size_t x_bytes{0};
         size_t wup_bytes{0};
@@ -1336,12 +1341,14 @@ bool TryCudaRcFusedFfnChain(const std::vector<int8_t>& X0, bool weights_shared,
                 if (e) cudaEventDestroy(e);
                 e = nullptr;
             }
-            if (layer_done) cudaEventDestroy(layer_done);
+            for (auto& e : layer_done) {
+                if (e) cudaEventDestroy(e);
+                e = nullptr;
+            }
             if (w_ready) cudaEventDestroy(w_ready);
             if (d2h) cudaStreamDestroy(d2h);
             if (h2d) cudaStreamDestroy(h2d);
             if (compute) cudaStreamDestroy(compute);
-            layer_done = nullptr;
             w_ready = nullptr;
             d2h = nullptr;
             h2d = nullptr;
@@ -1388,9 +1395,10 @@ bool TryCudaRcFusedFfnChain(const std::vector<int8_t>& X0, bool weights_shared,
                                 cudaSuccess) {
                 return false;
             }
-            if (!layer_done &&
-                cudaEventCreateWithFlags(&layer_done, cudaEventDisableTiming) != cudaSuccess) {
-                return false;
+            for (auto& e : layer_done) {
+                if (!e && cudaEventCreateWithFlags(&e, cudaEventDisableTiming) != cudaSuccess) {
+                    return false;
+                }
             }
             for (auto& e : d2h_done) {
                 if (!e && cudaEventCreateWithFlags(&e, cudaEventDisableTiming) != cudaSuccess) {
@@ -1514,6 +1522,28 @@ bool TryCudaRcFusedFfnChain(const std::vector<int8_t>& X0, bool weights_shared,
         }
 
         if (l + 1 < L_lyr && !weights_shared) {
+            // The pair for layer l+1 goes into the slot layer l-1 read. Without
+            // this edge the generation kernels on h2d can rewrite W[l-1] while
+            // the exact GEMMs for that layer are still reading it: every pointer
+            // stays valid, CUDA reports nothing, and the resulting activation --
+            // and therefore the ExactReplay digest -- becomes timing-dependent.
+            // On a consensus path that is a split, not a performance bug.
+            //
+            // It has been latent only because the per-layer device-to-PAGEABLE
+            // download below happens to block the host long enough for the prior
+            // consumer to drain. CUDA explicitly documents that blocking as an
+            // implementation detail that must not be relied upon, and pinning
+            // that buffer or moving Merkle on-device -- both wanted for
+            // utilization -- removes it.
+            //
+            // l == 0 writes slot 1, which no compute has read yet.
+            const uint32_t next_slot{(l + 1) % 2};
+            if (l >= 1) {
+                if (!CudaOk(cudaStreamWaitEvent(
+                        ws.h2d, ws.layer_done[next_slot], 0))) {
+                    return false;
+                }
+            }
             if (!load_weight_pair(*dWup_nxt, *dWdn_nxt, l + 1)) return false;
             if (!CudaOk(cudaEventRecord(ws.w_ready, ws.h2d))) return false;
         }
@@ -1526,10 +1556,12 @@ bool TryCudaRcFusedFfnChain(const std::vector<int8_t>& X0, bool weights_shared,
             NoteCpuFallback();
             return false;
         }
-        if (!CudaOk(cudaEventRecord(ws.layer_done, ws.compute))) return false;
+        // Records completion of the compute that read WEIGHT slot `slot`; the
+        // h2d wait above consumes it before that slot is regenerated.
+        if (!CudaOk(cudaEventRecord(ws.layer_done[slot], ws.compute))) return false;
 
         if (matmul::v4::rc::ExactReplayCancellationRequested()) return false;
-        if (!CudaOk(cudaStreamWaitEvent(ws.d2h, ws.layer_done, 0))) return false;
+        if (!CudaOk(cudaStreamWaitEvent(ws.d2h, ws.layer_done[slot], 0))) return false;
         if (!CudaOk(cudaMemcpyAsync(out_X[l + 1].data(), d_nxt, x_bytes, cudaMemcpyDeviceToHost,
                                     ws.d2h))) {
             return false;
