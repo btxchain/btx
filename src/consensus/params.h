@@ -233,7 +233,7 @@ static constexpr bool BTX_MATMUL_NO_INVERSION_GATE_RATIFIED{true};
 //!
 //! The corrective source keeps this false and the public Epoch-A heights
 //! disabled. A later activation-only change may set it true only after the
-//! exact-final CUDA+Metal seal, schema-3 exact-block lifecycle campaign,
+//! exact-final CUDA+Metal seal, schema-4 exact-block lifecycle campaign,
 //! revision-bound ASERT review, deployment rehearsal, and fresh live-tip
 //! runway all describe the same source and binaries. A TRUE value plus a
 //! finite mainnet tuple is technically live; neither documentation nor stale
