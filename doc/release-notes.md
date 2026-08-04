@@ -1,14 +1,14 @@
-BTX version 0.33.2 is being prepared for release from:
+BTX version 0.33.2 is released from:
 
   <https://github.com/btxchain/btx/releases>
 
-This release candidate carries the MatMul v4.7 Profile 1 ExactReplay
+This release carries the MatMul v4.7 Profile 1 ExactReplay
 implementation, its resource-admission and GPU-lifecycle hardening, and an
 explicit trusted-attestation topology for same-operator RPC/archive mirrors.
-The source currently contains a finite candidate Epoch-A tuple, so merging it
-would authorize that fork at the compiled height. It must not be merged or
-released until exact-final CUDA+Metal evidence, the revision-bound ASERT
-calibration, and a live-tip runway check all pass for that exact tuple.
+The reviewed Epoch-A tuple activates v4, BMX4C, and Resident Curriculum
+together at height 185000 with the conservative ASERT policy coefficient
+6931159304/1. Exact-final CUDA+Metal evidence, strict provenance, and the
+live-tip runway check passed for the sealed release tree.
 
 Please report bugs using the issue tracker at GitHub:
 
@@ -20,26 +20,25 @@ To receive release and update notifications, please subscribe to:
 
 # How to Upgrade
 
-After an official v0.33.2 release is published, shut down the previous node
-cleanly, wait for it to exit, and replace its `btxd`, `btx-cli`, and related
-binaries with signed final release artifacts. Back up wallets and
-configuration before upgrading. Do not install unpublished candidate assets.
+To upgrade, shut down the previous node cleanly, wait for it to exit, and
+replace its `btxd`, `btx-cli`, and related binaries with signed v0.33.2
+artifacts. Back up wallets and configuration before upgrading.
 
-The final v0.33.2 source freeze must set the v4, BMX4C, and Resident Curriculum
-heights to one live `H_A`, install the independently reviewed exact-final RC
-ASERT rescale, and set both ratification constants in the same reviewed tuple.
-The current finite tuple is a real consensus instruction if merged, not an
-inert placeholder. If its height, coefficient, gate flags, or any fingerprinted
-source changes, the CUDA+Metal corpus and startup-canary manifest must be
-regenerated before release. Testnet and signet heights remain disabled.
-See `doc/btx-matmul-v4.7-transition-roadmap.md` for the activation contract and
-the gates that remain open.
+The v0.33.2 source freeze sets the v4, BMX4C, and Resident Curriculum heights
+to 185000, installs the reviewed RC ASERT policy coefficient, and sets both
+ratification constants in the same tuple. This is a live consensus instruction,
+not an inert placeholder. The sealed build-relevant fingerprint is
+`a2dd123a9468ae14afe5d5a5b35ae61572b9e1fdd664446acfd9f6aab22536c1`;
+changing the height, coefficient, gate flags, or fingerprinted source requires
+a new CUDA+Metal corpus and startup-canary manifest. Testnet and signet heights
+remain disabled. See `doc/btx-matmul-v4.7-transition-roadmap.md` for the
+activation contract.
 
 # Compatibility
 
 BTX is supported on Linux, macOS 13+, and Windows 10+. Mainnet remains on
-MatMul v3 until the final release selects and ratifies `H_A`; Epoch-A Profile 1
-ExactReplay applies only at and above that final compiled height.
+MatMul v3 below height 185000; Epoch-A Profile 1 ExactReplay applies at and
+above height 185000.
 
 Production Profile 1 ExactReplay is designed for a qualified accelerator.
 CPU ExactReplay remains an explicit pre-activation or diagnostic path, not an
@@ -116,7 +115,7 @@ readiness.
   Existing funded legacy contracts remain governed by their committed scripts
   and should be claimed, refunded, or rolled forward operationally.
 
-## MatMul v4.7 Profile 1 implementation and Epoch-A activation candidate
+## MatMul v4.7 Profile 1 implementation and Epoch-A activation
 
 - Epoch A uses the full deterministic Profile 1 episode as ExactReplay
   authority while retaining the fixed, digest-only block header.
@@ -223,9 +222,11 @@ See `doc/btx-matmul-trusted-rpc-mirrors.md` and
 - Repository Metal and sanitized CUDA measurements are retained as historical
   engineering evidence. The hardened comparator requires an exact code-freeze
   revision, source-tree fingerprint, harness-binary identity, and coherent raw
-  provider metadata. A historical CUDA+Metal cohort passed an earlier
-  code-freeze comparison (`78a88af5…`), but it is non-authorizing for the
-  current tree; the exact-final cohort and manifest seal remain pending.
+  provider metadata. The final CUDA+Metal nonce 1-8 cohort was generated from
+  exact clean freeze `6d115a67ddda46e764efe7f0ee68d4a52927142e`, fingerprint
+  `a2dd123a9468ae14afe5d5a5b35ae61572b9e1fdd664446acfd9f6aab22536c1`,
+  and sealed at `0828f03699235a202eaeeb6f25153a1b8373ceea`. Both providers
+  produced byte-identical headers and digests with zero CPU fallback.
   Cross-revision equality remains non-evidence.
 
 ## Cumulative wallet and notification support
@@ -245,14 +246,17 @@ See `doc/btx-matmul-trusted-rpc-mirrors.md` and
 
 # Activation State and Residual Risk
 
-This branch is an implementation candidate, not an activation authorization.
-Historical corpora under `doc/evidence/` remain useful diagnostics, but the
-production golden manifest and ASERT coefficient must be resealed against the
-exact final revision and build-relevant source fingerprint. The activation
-review must then select a live `H_A`, ratify the two gates, and record the
-disposition of the multi-day soak, multi-peer public-testnet, fault/recovery,
-and released-binary upgrade campaigns. Until then the release posture is
-NO-GO.
+This release authorizes the reviewed Epoch-A tuple at height 185000. Historical
+corpora under `doc/evidence/` remain diagnostic; only the exact-final sealed
+CUDA+Metal cohort is production-authorizing. The installed 6931159304/1 ASERT
+value is a reviewed conservative policy floor, not a claim that it is reproduced
+by the retained schema-derived 4007014530/1 measurement.
+
+The CUDA slot-reuse adversarial probe is not release evidence: on the launch
+CUDA 13 host it did not distinguish the sealed build from either mutation.
+Current production cohorts showed no CUDA/Metal divergence and the current
+pageable-buffer path showed no generation/read overlap. Replacing that probe
+is required before enabling pinned-buffer or device-Merkle optimizations.
 
 # Known Limitations
 
@@ -266,16 +270,14 @@ NO-GO.
 - Provider-measured full-workspace telemetry remains unavailable through the
   generic backend ABI; RPC reports a zero sample count and never presents the
   conservative admission estimate as measured use.
-- Latest lifecycle lane samples are explicitly uncorrelated.
-  `operationally_ready` remains false until one future observation binds every
-  lifecycle component to the same exact block/provider/epoch.
+- Some historical lifecycle lane samples are explicitly uncorrelated and
+  remain diagnostic rather than release-authorizing evidence.
 - Trusted RPC/archive mirrors inherit the safety of their configured signer
   set. They should not be described or exposed as independent consensus
   validators.
-- Mainnet Epoch A has no final release height yet. Operational gates may be
-  waived only by an explicit reviewed decision recorded with the final
-  activation patch; this candidate does not silently accept them as residual
-  risk.
+- Mainnet Epoch A activates at height 185000. The release decision explicitly
+  accepts the documented operational residuals; it does not reinterpret
+  historical diagnostic artifacts as exact-final evidence.
 - Content elimination is structural, not absolute: monetary values, public
   keys, valid signatures, and permitted financial operands retain unavoidable
   steganographic capacity. The fork removes the covered cheap explicit storage
