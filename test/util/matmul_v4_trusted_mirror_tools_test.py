@@ -2,6 +2,7 @@
 """Focused tests for MatMul lifecycle and trusted-mirror command-line tools."""
 
 import importlib.util
+import copy
 import os
 import subprocess
 import sys
@@ -39,6 +40,7 @@ class TrustedMirrorToolsTest(unittest.TestCase):
             "ARCHIVE_USER",
             "ARCHIVE_BTXD",
             "ARCHIVE_CLI",
+            "ARCHIVE_SIGNER_WIF_FILE",
             "MIRROR_BTXD",
             "MIRROR_CLI",
             "SIGNER_WIF_FILE",
@@ -48,6 +50,9 @@ class TrustedMirrorToolsTest(unittest.TestCase):
             "ARCHIVE_CLI_SHA256",
             "MIRROR_BTXD_SHA256",
             "MIRROR_CLI_SHA256",
+            "BTX_TRUSTED_MIRROR_ARCHIVE_LOCAL",
+            "BTX_TRUSTED_MIRROR_ARCHIVE_BACKEND",
+            "BTX_TRUSTED_MIRROR_STRICT_PROOF_MODE",
         ):
             env.pop(name, None)
         result = subprocess.run(
@@ -59,6 +64,9 @@ class TrustedMirrorToolsTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--archive-host", result.stdout)
+        self.assertIn("--archive-local", result.stdout)
+        self.assertIn("--archive-backend", result.stdout)
+        self.assertIn("--strict-proof-mode", result.stdout)
         self.assertIn("--mirror-cli", result.stdout)
 
     def test_lifecycle_uses_semantic_btx_cli_option(self):
@@ -81,12 +89,15 @@ class TrustedMirrorToolsTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unsupported lifecycle mode"):
             module.execution_policy_for_mode("unknown")
 
-    def test_rehearsal_parses_explicit_deployment_arguments(self):
+    def test_rehearsal_parses_explicit_local_deployment_arguments(self):
         module = load_rehearsal()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             paths = {}
-            for name in ("mirror-btxd", "mirror-cli", "signer-wif", "signer-pub"):
+            for name in (
+                "archive-btxd", "archive-cli", "mirror-btxd", "mirror-cli",
+                "signer-wif", "signer-pub",
+            ):
                 paths[name] = root / name
                 paths[name].write_text("test\n", encoding="utf-8")
             revision = subprocess.run(
@@ -98,14 +109,15 @@ class TrustedMirrorToolsTest(unittest.TestCase):
                 module.build_arg_parser(),
                 module.build_arg_parser().parse_args(
                     [
-                        "--archive-host",
-                        "gpu-archive.example.invalid",
-                        "--archive-user",
-                        "operator",
+                        "--archive-local",
                         "--archive-btxd",
-                        "/opt/btx/bin/btxd",
+                        str(paths["archive-btxd"]),
                         "--archive-cli",
-                        "/opt/btx/bin/btx-cli",
+                        str(paths["archive-cli"]),
+                        "--archive-backend",
+                        "metal",
+                        "--strict-proof-mode",
+                        "winner-reseal-authority",
                         "--mirror-btxd",
                         str(paths["mirror-btxd"]),
                         "--mirror-cli",
@@ -119,9 +131,9 @@ class TrustedMirrorToolsTest(unittest.TestCase):
                         "--source-revision",
                         revision,
                         "--archive-btxd-sha256",
-                        "a" * 64,
+                        binary_hash,
                         "--archive-cli-sha256",
-                        "b" * 64,
+                        binary_hash,
                         "--mirror-btxd-sha256",
                         binary_hash,
                         "--mirror-cli-sha256",
@@ -129,18 +141,80 @@ class TrustedMirrorToolsTest(unittest.TestCase):
                     ]
                 ),
             )
-        self.assertEqual(args.archive_host, "gpu-archive.example.invalid")
-        self.assertEqual(args.archive_cli, "/opt/btx/bin/btx-cli")
+        self.assertIsNone(args.archive_host)
+        self.assertTrue(args.archive_local)
+        self.assertEqual(args.archive_backend, "metal")
+        self.assertEqual(args.archive_cli.name, "archive-cli")
         self.assertEqual(args.mirror_cli.name, "mirror-cli")
         self.assertEqual(args.source_revision, revision)
+
+    def test_rehearsal_remote_mode_requires_archive_owned_signer(self):
+        module = load_rehearsal()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mirror_btxd = root / "mirror-btxd"
+            mirror_cli = root / "mirror-cli"
+            signer_pub = root / "signer-pub"
+            for path in (mirror_btxd, mirror_cli, signer_pub):
+                path.write_text("test\n", encoding="utf-8")
+            revision = subprocess.run(
+                ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"],
+                capture_output=True, text=True, check=True,
+            ).stdout.strip()
+            binary_hash = module.EVIDENCE_IDENTITY.sha256_file(mirror_btxd)
+            common = [
+                "--archive-host", "gpu-archive.example.invalid",
+                "--archive-user", "operator",
+                "--archive-btxd", "/opt/btx/bin/btxd",
+                "--archive-cli", "/opt/btx/bin/btx-cli",
+                "--archive-backend", "metal",
+                "--strict-proof-mode", "winner-reseal-authority",
+                "--mirror-btxd", str(mirror_btxd),
+                "--mirror-cli", str(mirror_cli),
+                "--signer-pub-file", str(signer_pub),
+                "--runtime-root", str(root),
+                "--source-revision", revision,
+                "--archive-btxd-sha256", "a" * 64,
+                "--archive-cli-sha256", "b" * 64,
+                "--mirror-btxd-sha256", binary_hash,
+                "--mirror-cli-sha256", binary_hash,
+            ]
+            parser = module.build_arg_parser()
+            args = module.validate_args(
+                parser,
+                parser.parse_args(
+                    [*common, "--archive-signer-wif-file", "/secure/signer.wif"]
+                ),
+            )
+            self.assertEqual(args.archive_signer_wif_file, "/secure/signer.wif")
+
+            local_wif = root / "signer.wif"
+            local_wif.write_text("private\n", encoding="utf-8")
+            parser = module.build_arg_parser()
+            with self.assertRaises(SystemExit):
+                module.validate_args(
+                    parser,
+                    parser.parse_args(
+                        [*common, "--archive-signer-wif-file", "/secure/signer.wif",
+                         "--signer-wif-file", str(local_wif)]
+                    ),
+                )
 
     def test_extracts_nested_strict_replay_evidence(self):
         module = load_rehearsal()
         rc = {
+            "production_eligible": True,
+            "startup_canary_passed": True,
+            "activation_ready": True,
+            "resolved_provider": "cuda_rc_exact_fused_extract",
             "production_canary": {
                 "passed": True,
+                "exact_manifest_match": True,
                 "device_macs": 1,
                 "cpu_fallbacks": 0,
+                "provider": "cuda_rc_exact_fused_extract",
+                "provider_family": "cuda",
+                "device_architecture": "sm_120",
             },
             "last_validation": {
                 "available": True,
@@ -157,6 +231,138 @@ class TrustedMirrorToolsTest(unittest.TestCase):
         self.assertIs(actual, rc)
         self.assertTrue(canary["passed"])
         self.assertEqual(validation["cpu_gemm_fallbacks"], 0)
+
+    def test_strict_replay_allows_unavailable_last_validation_for_miner(self):
+        module = load_rehearsal()
+        rc = {
+            "production_eligible": True,
+            "startup_canary_passed": True,
+            "activation_ready": True,
+            "resolved_provider": "metal_rc_exact",
+            "production_canary": {
+                "passed": True,
+                "exact_manifest_match": True,
+                "device_macs": 1,
+                "cpu_fallbacks": 0,
+                "provider": "metal_rc_exact",
+                "provider_family": "metal",
+                "device_architecture": "m4_class",
+            },
+            "last_validation": {"available": False},
+        }
+        _, canary, validation = module.extract_strict_replay_evidence(
+            {"backend_runtime": {"rc_exact_replay": rc}},
+            expected_provider_family="metal",
+        )
+        self.assertFalse(validation["available"])
+        self.assertEqual(
+            module.derive_archive_host_class(canary, "metal"),
+            "metal_m4_class_exactreplay_archive",
+        )
+        with self.assertRaisesRegex(RuntimeError, "provider family"):
+            module.extract_strict_replay_evidence(
+                {"backend_runtime": {"rc_exact_replay": rc}},
+                expected_provider_family="cuda",
+            )
+
+    def test_winner_reseal_authority_proof_is_fresh_and_header_bound(self):
+        module = load_rehearsal()
+
+        def mining_info(*, candidate, reseal, published, consumed, provider):
+            return {
+                "backend_runtime": {
+                    "rc_accelerator_scheduler": {
+                        "release_invariant_violations": 0,
+                        "lanes": {
+                            "candidate_mining": {
+                                "completions": candidate,
+                                "last_execution_s": 21.0 if candidate else 0.0,
+                            },
+                            "winner_reseal": {
+                                "completions": reseal,
+                                "last_execution_s": 21.0 if reseal else 0.0,
+                            },
+                        },
+                        "winner_reseal_authority": {
+                            "published": published,
+                            "consumed": consumed,
+                            "rejected_not_block_target": 0,
+                            "expired": 0,
+                            "evicted": 0,
+                            "misses": 0,
+                            "entries": 0,
+                            "last_provider": provider,
+                        },
+                    }
+                }
+            }
+
+        baseline = mining_info(
+            candidate=0, reseal=0, published=0, consumed=0, provider=""
+        )
+        final = mining_info(
+            candidate=5, reseal=3, published=3, consumed=3,
+            provider="metal_rc_exact",
+        )
+        proof = module.validate_archive_strict_proof(
+            mode="winner-reseal-authority",
+            baseline_mining_info=baseline,
+            final_mining_info=final,
+            validation={"available": False},
+            expected_provider="metal_rc_exact",
+        )
+        self.assertEqual(proof["authority_consumed"], 3)
+        self.assertEqual(proof["winner_reseal_completions"], 3)
+
+        cases = []
+        too_few = copy.deepcopy(final)
+        too_few["backend_runtime"]["rc_accelerator_scheduler"]["winner_reseal_authority"]["consumed"] = 2
+        cases.append(("at least 3", too_few))
+        wrong_provider = copy.deepcopy(final)
+        wrong_provider["backend_runtime"]["rc_accelerator_scheduler"]["winner_reseal_authority"]["last_provider"] = "cuda_rc_exact_fused_extract"
+        cases.append(("provider differs", wrong_provider))
+        invariant = copy.deepcopy(final)
+        invariant["backend_runtime"]["rc_accelerator_scheduler"]["release_invariant_violations"] = 1
+        cases.append(("invariant", invariant))
+        missed = copy.deepcopy(final)
+        missed["backend_runtime"]["rc_accelerator_scheduler"]["winner_reseal_authority"]["misses"] = 1
+        cases.append(("misses changed", missed))
+        for error, changed in cases:
+            with self.subTest(error=error):
+                with self.assertRaisesRegex(RuntimeError, error):
+                    module.validate_archive_strict_proof(
+                        mode="winner-reseal-authority",
+                        baseline_mining_info=baseline,
+                        final_mining_info=changed,
+                        validation={"available": False},
+                        expected_provider="metal_rc_exact",
+                    )
+
+    def test_receiving_validation_proof_fails_closed_when_unavailable(self):
+        module = load_rehearsal()
+        with self.assertRaisesRegex(RuntimeError, "no validation is available"):
+            module.validate_archive_strict_proof(
+                mode="receiving-validation",
+                baseline_mining_info={},
+                final_mining_info={},
+                validation={"available": False},
+                expected_provider="metal_rc_exact",
+            )
+        proof = module.validate_archive_strict_proof(
+            mode="receiving-validation",
+            baseline_mining_info={},
+            final_mining_info={},
+            validation={
+                "available": True,
+                "provider": "metal_rc_exact",
+                "require_device": True,
+                "fully_accelerated": True,
+                "cpu_gemm_calls": 0,
+                "cpu_gemm_fallbacks": 0,
+            },
+            expected_provider="metal_rc_exact",
+        )
+        self.assertEqual(proof["mode"], "receiving-validation")
 
     def test_rehearsal_requires_proven_archive_mirror_trust_boundary(self):
         module = load_rehearsal()
@@ -243,14 +449,22 @@ class TrustedMirrorToolsTest(unittest.TestCase):
         fingerprint = module.EVIDENCE_IDENTITY.tree_fingerprint(REPO_ROOT, revision)
         canary = {
             "passed": True,
+            "exact_manifest_match": True,
             "device_macs": 1,
             "cpu_fallbacks": 0,
+            "provider": "cuda_rc_exact_fused_extract",
+            "provider_family": "cuda",
+            "device_architecture": "sm_120",
             "build_source_revision": revision,
             "build_source_tree_fingerprint": fingerprint,
             "build_source_dirty": False,
             "build_provenance_matches": True,
         }
         rc = {
+            "production_eligible": True,
+            "startup_canary_passed": True,
+            "activation_ready": True,
+            "resolved_provider": "cuda_rc_exact_fused_extract",
             "production_canary": canary,
             "last_validation": {
                 "available": True,
@@ -405,10 +619,18 @@ class TrustedMirrorToolsTest(unittest.TestCase):
                 {
                     "backend_runtime": {
                         "rc_exact_replay": {
+                            "production_eligible": True,
+                            "startup_canary_passed": True,
+                            "activation_ready": True,
+                            "resolved_provider": "cuda_rc_exact_fused_extract",
                             "production_canary": {
                                 "passed": True,
+                                "exact_manifest_match": True,
                                 "device_macs": 1,
                                 "cpu_fallbacks": 0,
+                                "provider": "cuda_rc_exact_fused_extract",
+                                "provider_family": "cuda",
+                                "device_architecture": "sm_120",
                             },
                             "last_validation": {
                                 "available": True,

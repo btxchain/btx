@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
-"""Two-node trusted-mirror rehearsal: GPU archive + CPU mirror.
+"""Two-node trusted-mirror rehearsal: strict-device archive + trusted mirror.
 
 Archive runs matmulvalidation=consensus with attestation signing/serving.
 Mirror runs matmulvalidation=trusted and accepts Profile-1 ExactReplay via
 signed quorum from the archive — no local GPU required.
 
-Usage (run on the non-GPU host):
+Remote-archive usage (run on the non-GPU host; the signer file already exists
+on the archive and is never copied through the mirror host):
 
   python3 -u contrib/matmul-v4/two-node-trusted-mirror-rehearsal.py \\
     --archive-host gpu-archive.example.invalid \\
     --archive-user operator \\
     --archive-btxd /path/to/gpu-build/bin/btxd \\
     --archive-cli /path/to/gpu-build/bin/btx-cli \\
+    --archive-backend metal \\
+    --strict-proof-mode winner-reseal-authority \\
+    --archive-signer-wif-file /secure/archive-only/signer.wif \\
     --mirror-btxd /path/to/cpu-build/bin/btxd \\
     --mirror-cli /path/to/cpu-build/bin/btx-cli \\
     --source-revision <exact-40-character-commit> \\
@@ -19,8 +23,25 @@ Usage (run on the non-GPU host):
     --archive-cli-sha256 <reviewed-sha256> \\
     --mirror-btxd-sha256 <reviewed-sha256> \\
     --mirror-cli-sha256 <reviewed-sha256> \\
-    --signer-wif-file /secure/path/to/signer.wif \\
     --signer-pub-file /secure/path/to/signer.pub
+
+One-host Apple Metal rehearsal:
+
+  python3 -u contrib/matmul-v4/two-node-trusted-mirror-rehearsal.py \\
+    --archive-local \\
+    --archive-btxd /path/to/metal-build/bin/btxd \\
+    --archive-cli /path/to/metal-build/bin/btx-cli \\
+    --archive-backend metal \\
+    --strict-proof-mode winner-reseal-authority \\
+    --mirror-btxd /path/to/cpu-build/bin/btxd \\
+    --mirror-cli /path/to/cpu-build/bin/btx-cli \\
+    --signer-wif-file /secure/path/to/disposable-regtest-signer.wif \\
+    --signer-pub-file /secure/path/to/disposable-regtest-signer.pub \\
+    --source-revision <exact-40-character-commit> \\
+    --archive-btxd-sha256 <reviewed-sha256> \\
+    --archive-cli-sha256 <reviewed-sha256> \\
+    --mirror-btxd-sha256 <reviewed-sha256> \\
+    --mirror-cli-sha256 <reviewed-sha256>
 
 The matching uppercase environment variables remain supported as defaults.
 """
@@ -49,9 +70,14 @@ ARCHIVE_HOST = ""
 ARCHIVE_USER = ""
 ARCHIVE_BTXD = ""
 ARCHIVE_CLI = ""
+ARCHIVE_BACKEND = ""
+ARCHIVE_LOCAL = False
+ARCHIVE_PROC: subprocess.Popen | None = None
+ARCHIVE_LOG = None
 MIRROR_BTXD = Path()
 MIRROR_CLI = Path()
 SIGNER_WIF_FILE = Path()
+ARCHIVE_SIGNER_WIF_FILE = ""
 SIGNER_PUB = ""
 RUNTIME_ROOT = Path(tempfile.gettempdir())
 ARCHIVE_DD = ""
@@ -62,6 +88,7 @@ MIRROR_RPC = 19831
 MIRROR_P2P = 19832
 OUT = Path("trusted-mirror-result.json")
 KEEP_ARTIFACTS = False
+STRICT_PROOF_MODE = ""
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SOURCE_REVISION = ""
 SOURCE_TREE_FINGERPRINT = ""
@@ -71,18 +98,43 @@ MIRROR_BTXD_SHA256 = ""
 MIRROR_CLI_SHA256 = ""
 REMOTE_ARCHIVE_NAME = re.compile(r"btx-trusted-archive\.[A-Za-z0-9]{6}")
 COMPRESSED_PUBKEY = re.compile(r"(?:02|03)[0-9a-fA-F]{64}")
+PUBLIC_CLASS = re.compile(r"[A-Za-z0-9_.+-]+")
+PRODUCTION_BLOCKS = 3
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--archive-local",
+        action="store_true",
+        default=os.environ.get("BTX_TRUSTED_MIRROR_ARCHIVE_LOCAL") == "1",
+        help="run the strict-device archive locally without SSH or a tunnel",
+    )
     parser.add_argument("--archive-host", default=os.environ.get("ARCHIVE_HOST"))
     parser.add_argument("--archive-user", default=os.environ.get("ARCHIVE_USER"))
     parser.add_argument("--archive-btxd", default=os.environ.get("ARCHIVE_BTXD"))
     parser.add_argument("--archive-cli", default=os.environ.get("ARCHIVE_CLI"))
+    parser.add_argument(
+        "--archive-backend",
+        choices=("cuda", "metal", "hip"),
+        default=os.environ.get("BTX_TRUSTED_MIRROR_ARCHIVE_BACKEND"),
+        help="required strict archive provider family",
+    )
+    parser.add_argument(
+        "--strict-proof-mode",
+        choices=("winner-reseal-authority", "receiving-validation"),
+        default=os.environ.get("BTX_TRUSTED_MIRROR_STRICT_PROOF_MODE"),
+        help="exact archive evidence that must close before ok=true",
+    )
     parser.add_argument("--mirror-btxd", type=Path, default=os.environ.get("MIRROR_BTXD"))
     parser.add_argument("--mirror-cli", type=Path, default=os.environ.get("MIRROR_CLI"))
     parser.add_argument(
         "--signer-wif-file", type=Path, default=os.environ.get("SIGNER_WIF_FILE")
+    )
+    parser.add_argument(
+        "--archive-signer-wif-file",
+        default=os.environ.get("ARCHIVE_SIGNER_WIF_FILE"),
+        help="pre-provisioned archive-only WIF path for remote mode",
     )
     parser.add_argument(
         "--signer-pub-file", type=Path, default=os.environ.get("SIGNER_PUB_FILE")
@@ -105,6 +157,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--source-revision", default=os.environ.get("BTX_SOURCE_REVISION")
     )
+    parser.add_argument(
+        "--archive-startup-timeout",
+        type=int,
+        default=int(os.environ.get("BTX_TRUSTED_MIRROR_STARTUP_TIMEOUT", "600")),
+    )
+    parser.add_argument(
+        "--mine-timeout",
+        type=int,
+        default=int(os.environ.get("BTX_TRUSTED_MIRROR_MINE_TIMEOUT", "900")),
+    )
+    parser.add_argument(
+        "--mirror-sync-timeout",
+        type=int,
+        default=int(os.environ.get("BTX_TRUSTED_MIRROR_SYNC_TIMEOUT", "600")),
+    )
     for option, env_name in (
         ("archive-btxd-sha256", "ARCHIVE_BTXD_SHA256"),
         ("archive-cli-sha256", "ARCHIVE_CLI_SHA256"),
@@ -119,13 +186,12 @@ def validate_args(
     parser: argparse.ArgumentParser, args: argparse.Namespace
 ) -> argparse.Namespace:
     required = (
-        ("archive_host", "--archive-host", "ARCHIVE_HOST"),
-        ("archive_user", "--archive-user", "ARCHIVE_USER"),
         ("archive_btxd", "--archive-btxd", "ARCHIVE_BTXD"),
         ("archive_cli", "--archive-cli", "ARCHIVE_CLI"),
+        ("archive_backend", "--archive-backend", "BTX_TRUSTED_MIRROR_ARCHIVE_BACKEND"),
+        ("strict_proof_mode", "--strict-proof-mode", "BTX_TRUSTED_MIRROR_STRICT_PROOF_MODE"),
         ("mirror_btxd", "--mirror-btxd", "MIRROR_BTXD"),
         ("mirror_cli", "--mirror-cli", "MIRROR_CLI"),
-        ("signer_wif_file", "--signer-wif-file", "SIGNER_WIF_FILE"),
         ("signer_pub_file", "--signer-pub-file", "SIGNER_PUB_FILE"),
         ("source_revision", "--source-revision", "BTX_SOURCE_REVISION"),
         ("archive_btxd_sha256", "--archive-btxd-sha256", "ARCHIVE_BTXD_SHA256"),
@@ -136,17 +202,70 @@ def validate_args(
     for name, option, env_name in required:
         if getattr(args, name) in (None, ""):
             parser.error(f"{option} is required (or set {env_name})")
+    if args.archive_local:
+        if args.signer_wif_file in (None, ""):
+            parser.error(
+                "--signer-wif-file is required with --archive-local "
+                "(use a disposable regtest key)"
+            )
+        if args.archive_signer_wif_file not in (None, ""):
+            parser.error(
+                "--archive-signer-wif-file is only valid for a remote archive"
+            )
+    else:
+        for name, option, env_name in (
+            ("archive_host", "--archive-host", "ARCHIVE_HOST"),
+            ("archive_user", "--archive-user", "ARCHIVE_USER"),
+            (
+                "archive_signer_wif_file",
+                "--archive-signer-wif-file",
+                "ARCHIVE_SIGNER_WIF_FILE",
+            ),
+        ):
+            if getattr(args, name) in (None, ""):
+                parser.error(f"{option} is required (or set {env_name})")
+        if args.signer_wif_file not in (None, ""):
+            parser.error(
+                "remote mode never reads or uploads --signer-wif-file; "
+                "pre-provision --archive-signer-wif-file on the archive"
+            )
+        try:
+            args.archive_signer_wif_file = validate_remote_file_path(
+                args.archive_signer_wif_file,
+                "--archive-signer-wif-file",
+            )
+        except RuntimeError as error:
+            parser.error(str(error))
     for name, option in (
         ("mirror_btxd", "--mirror-btxd"),
         ("mirror_cli", "--mirror-cli"),
-        ("signer_wif_file", "--signer-wif-file"),
         ("signer_pub_file", "--signer-pub-file"),
     ):
         path = getattr(args, name)
         if not path.is_file():
             parser.error(f"{option} is not a file: {path}")
+    if args.archive_local:
+        args.archive_btxd = Path(args.archive_btxd)
+        args.archive_cli = Path(args.archive_cli)
+        for name, option in (
+            ("archive_btxd", "--archive-btxd"),
+            ("archive_cli", "--archive-cli"),
+            ("signer_wif_file", "--signer-wif-file"),
+        ):
+            path = getattr(args, name)
+            if not path.is_file():
+                parser.error(f"{option} is not a file: {path}")
+        args.signer_wif_file = args.signer_wif_file.resolve()
     if not args.runtime_root.is_dir():
         parser.error(f"--runtime-root is not a directory: {args.runtime_root}")
+    for name, option in (
+        ("archive_startup_timeout", "--archive-startup-timeout"),
+        ("mine_timeout", "--mine-timeout"),
+        ("mirror_sync_timeout", "--mirror-sync-timeout"),
+    ):
+        value = getattr(args, name)
+        if value < 60 or value > 3600:
+            parser.error(f"{option} must be between 60 and 3600 seconds")
     try:
         args.source_revision = EVIDENCE_IDENTITY.resolve_commit(
             REPO_ROOT, args.source_revision
@@ -160,14 +279,24 @@ def validate_args(
         EVIDENCE_IDENTITY.verify_binary(
             args.mirror_cli, args.mirror_cli_sha256, "mirror_cli_sha256"
         )
-        EVIDENCE_IDENTITY.require_hex(
-            args.archive_btxd_sha256, EVIDENCE_IDENTITY.HEX64,
-            "archive_btxd_sha256",
-        )
-        EVIDENCE_IDENTITY.require_hex(
-            args.archive_cli_sha256, EVIDENCE_IDENTITY.HEX64,
-            "archive_cli_sha256",
-        )
+        if args.archive_local:
+            EVIDENCE_IDENTITY.verify_binary(
+                args.archive_btxd, args.archive_btxd_sha256,
+                "archive_btxd_sha256",
+            )
+            EVIDENCE_IDENTITY.verify_binary(
+                args.archive_cli, args.archive_cli_sha256,
+                "archive_cli_sha256",
+            )
+        else:
+            EVIDENCE_IDENTITY.require_hex(
+                args.archive_btxd_sha256, EVIDENCE_IDENTITY.HEX64,
+                "archive_btxd_sha256",
+            )
+            EVIDENCE_IDENTITY.require_hex(
+                args.archive_cli_sha256, EVIDENCE_IDENTITY.HEX64,
+                "archive_cli_sha256",
+            )
     except EVIDENCE_IDENTITY.EvidenceIdentityError as error:
         parser.error(str(error))
     return args
@@ -207,6 +336,17 @@ def remote_sha256(path: str) -> str:
     return EVIDENCE_IDENTITY.require_hex(
         digest, EVIDENCE_IDENTITY.HEX64, "remote_binary_sha256"
     )
+
+
+def validate_remote_file_path(value: str, option: str) -> str:
+    """Accept an absolute, non-traversing archive-owned file path."""
+    if not isinstance(value, str) or "\x00" in value or "\n" in value:
+        raise RuntimeError(f"{option} is not a safe remote path")
+    path = PurePosixPath(value)
+    if (not path.is_absolute() or ".." in path.parts or
+            path.parent == PurePosixPath("/")):
+        raise RuntimeError(f"{option} must be an absolute archive-owned file path")
+    return str(path)
 
 
 def validate_remote_archive_dir(value: str) -> str:
@@ -255,6 +395,25 @@ def mirror_rpc(*args: str, timeout: int = 120):
 
 
 def archive_rpc(*args: str, timeout: int = 120):
+    if ARCHIVE_LOCAL:
+        out = sh_local(
+            [
+                str(ARCHIVE_CLI),
+                f"-datadir={ARCHIVE_DD}",
+                f"-rpcport={ARCHIVE_RPC}",
+                "-rpcuser=u",
+                "-rpcpassword=p",
+                "-rpcclienttimeout=0",
+                *args,
+            ],
+            timeout=timeout,
+        )
+        if not out:
+            return None
+        try:
+            return json.loads(out)
+        except json.JSONDecodeError:
+            return out
     # Escape for remote shell
     joined = " ".join(shlex.quote(a) for a in args)
     cmd = (
@@ -284,18 +443,27 @@ def wait_rpc(fn, label: str, timeout: float = 120) -> None:
     raise RuntimeError(f"{label} RPC not ready: {last}")
 
 
-def cleanup_remote_archive() -> None:
+def cleanup_archive() -> None:
+    global ARCHIVE_PROC
     if not ARCHIVE_DD:
+        return
+    if ARCHIVE_LOCAL:
+        if ARCHIVE_PROC is not None and ARCHIVE_PROC.poll() is None:
+            ARCHIVE_PROC.terminate()
+            try:
+                ARCHIVE_PROC.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                ARCHIVE_PROC.kill()
+                ARCHIVE_PROC.wait(timeout=10)
+        ARCHIVE_PROC = None
+        if not KEEP_ARTIFACTS:
+            shutil.rmtree(ARCHIVE_DD, ignore_errors=True)
         return
     try:
         sh_remote(
             f"kill $(cat {shlex.quote(ARCHIVE_DD + '/regtest/btxd.pid')} "
             "2>/dev/null) 2>/dev/null || true"
         )
-    except Exception:
-        pass
-    try:
-        sh_remote(f"rm -f -- {shlex.quote(ARCHIVE_DD + '/regtest/signer.wif')}")
     except Exception:
         pass
     if not KEEP_ARTIFACTS:
@@ -312,9 +480,51 @@ def _require_object(parent: dict, key: str, path: str) -> dict:
     return value
 
 
+def _require_bool(parent: dict, key: str, path: str) -> bool:
+    value = parent.get(key)
+    if not isinstance(value, bool):
+        raise RuntimeError(f"getmininginfo schema error: {path} must be a boolean")
+    return value
+
+
+def _require_nonnegative_int(parent: dict, key: str, path: str) -> int:
+    value = parent.get(key)
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise RuntimeError(
+            f"getmininginfo schema error: {path} must be a non-negative integer"
+        )
+    return value
+
+
+def _require_public_string(parent: dict, key: str, path: str) -> str:
+    value = parent.get(key)
+    if (not isinstance(value, str) or not value or
+            PUBLIC_CLASS.fullmatch(value) is None):
+        raise RuntimeError(
+            f"getmininginfo schema error: {path} must be a public class token"
+        )
+    return value
+
+
+def derive_archive_host_class(canary: dict, expected_provider_family: str) -> str:
+    """Derive a publication-safe machine class from runtime canary fields."""
+    family = _require_public_string(
+        canary, "provider_family", "production_canary.provider_family"
+    )
+    architecture = _require_public_string(
+        canary, "device_architecture", "production_canary.device_architecture"
+    )
+    if family != expected_provider_family:
+        raise RuntimeError(
+            "production canary provider family does not match --archive-backend"
+        )
+    return f"{family}_{architecture}_exactreplay_archive"
+
+
 def extract_strict_replay_evidence(
     mining_info: object, *, expected_revision: str | None = None,
     expected_fingerprint: str | None = None,
+    expected_provider_family: str | None = None,
 ) -> tuple[dict, dict, dict]:
     """Return and validate the strict-replay evidence exposed by getmininginfo."""
     if not isinstance(mining_info, dict):
@@ -327,26 +537,73 @@ def extract_strict_replay_evidence(
     validation = _require_object(
         rc, "last_validation", "backend_runtime.rc_exact_replay.last_validation"
     )
-    for obj, key, expected, path in (
-        (canary, "passed", bool, "production_canary.passed"),
-        (canary, "device_macs", int, "production_canary.device_macs"),
-        (canary, "cpu_fallbacks", int, "production_canary.cpu_fallbacks"),
-        (validation, "available", bool, "last_validation.available"),
-        (validation, "require_device", bool, "last_validation.require_device"),
-        (validation, "fully_accelerated", bool, "last_validation.fully_accelerated"),
-        (validation, "cpu_gemm_calls", int, "last_validation.cpu_gemm_calls"),
-        (validation, "cpu_gemm_fallbacks", int, "last_validation.cpu_gemm_fallbacks"),
+    for key in (
+        "production_eligible", "startup_canary_passed", "activation_ready"
     ):
-        value = obj.get(key)
-        if not isinstance(value, expected) or (
-            expected is int and (isinstance(value, bool) or value < 0)
+        if not _require_bool(rc, key, f"backend_runtime.rc_exact_replay.{key}"):
+            raise RuntimeError(f"strict archive readiness gate is false: {key}")
+    resolved_provider = _require_public_string(
+        rc, "resolved_provider", "backend_runtime.rc_exact_replay.resolved_provider"
+    )
+    if not _require_bool(canary, "passed", "production_canary.passed"):
+        raise RuntimeError("production canary did not pass")
+    if not _require_bool(
+        canary, "exact_manifest_match", "production_canary.exact_manifest_match"
+    ):
+        raise RuntimeError("production canary did not exactly match the manifest")
+    if _require_nonnegative_int(
+        canary, "device_macs", "production_canary.device_macs"
+    ) == 0:
+        raise RuntimeError("production canary recorded no device MACs")
+    if _require_nonnegative_int(
+        canary, "cpu_fallbacks", "production_canary.cpu_fallbacks"
+    ) != 0:
+        raise RuntimeError("production canary used CPU fallback")
+    canary_provider = _require_public_string(
+        canary, "provider", "production_canary.provider"
+    )
+    canary_family = _require_public_string(
+        canary, "provider_family", "production_canary.provider_family"
+    )
+    _require_public_string(
+        canary, "device_architecture", "production_canary.device_architecture"
+    )
+    if canary_provider != resolved_provider:
+        raise RuntimeError("resolved provider and canary provider differ")
+    if expected_provider_family is not None:
+        if canary_family != expected_provider_family:
+            raise RuntimeError(
+                "production canary provider family does not match --archive-backend"
+            )
+        if not canary_provider.startswith(expected_provider_family + "_"):
+            raise RuntimeError(
+                "production canary provider is incoherent with its provider family"
+            )
+
+    available = _require_bool(validation, "available", "last_validation.available")
+    if available:
+        if not _require_bool(
+            validation, "require_device", "last_validation.require_device"
         ):
-            typename = "a non-negative integer" if expected is int else "a boolean"
-            raise RuntimeError(f"getmininginfo schema error: {path} must be {typename}")
-    if not isinstance(validation.get("provider"), str) or not validation["provider"]:
-        raise RuntimeError(
-            "getmininginfo schema error: last_validation.provider must be a non-empty string"
+            raise RuntimeError("last validation did not require a device")
+        if not _require_bool(
+            validation, "fully_accelerated", "last_validation.fully_accelerated"
+        ):
+            raise RuntimeError("last validation was not fully accelerated")
+        for key in ("cpu_gemm_calls", "cpu_gemm_fallbacks"):
+            if _require_nonnegative_int(
+                validation, key, f"last_validation.{key}"
+            ) != 0:
+                raise RuntimeError(f"last validation recorded nonzero {key}")
+        validation_provider = _require_public_string(
+            validation, "provider", "last_validation.provider"
         )
+        if expected_provider_family is not None and not validation_provider.startswith(
+            expected_provider_family + "_"
+        ):
+            raise RuntimeError(
+                "last validation provider is incoherent with --archive-backend"
+            )
     if (expected_revision is None) != (expected_fingerprint is None):
         raise RuntimeError("source revision and fingerprint must be supplied together")
     if expected_revision is not None and expected_fingerprint is not None:
@@ -360,6 +617,123 @@ def extract_strict_replay_evidence(
         except EVIDENCE_IDENTITY.EvidenceIdentityError as error:
             raise RuntimeError(f"getmininginfo provenance error: {error}") from error
     return rc, canary, validation
+
+
+def extract_scheduler_evidence(mining_info: object) -> dict:
+    if not isinstance(mining_info, dict):
+        raise RuntimeError("getmininginfo schema error: response must be an object")
+    runtime = _require_object(mining_info, "backend_runtime", "backend_runtime")
+    scheduler = _require_object(
+        runtime, "rc_accelerator_scheduler",
+        "backend_runtime.rc_accelerator_scheduler",
+    )
+    lanes = _require_object(scheduler, "lanes", "rc_accelerator_scheduler.lanes")
+    for lane_name in ("candidate_mining", "winner_reseal"):
+        lane = _require_object(lanes, lane_name, f"rc_accelerator_scheduler.lanes.{lane_name}")
+        _require_nonnegative_int(
+            lane, "completions",
+            f"rc_accelerator_scheduler.lanes.{lane_name}.completions",
+        )
+        last_execution = lane.get("last_execution_s")
+        if not isinstance(last_execution, (int, float)) or isinstance(last_execution, bool):
+            raise RuntimeError(
+                "getmininginfo schema error: rc_accelerator_scheduler.lanes."
+                f"{lane_name}.last_execution_s must be numeric"
+            )
+    _require_nonnegative_int(
+        scheduler, "release_invariant_violations",
+        "rc_accelerator_scheduler.release_invariant_violations",
+    )
+    authority = _require_object(
+        scheduler, "winner_reseal_authority",
+        "rc_accelerator_scheduler.winner_reseal_authority",
+    )
+    for field in (
+        "published", "consumed", "rejected_not_block_target", "expired",
+        "evicted", "misses", "entries",
+    ):
+        _require_nonnegative_int(
+            authority, field, f"winner_reseal_authority.{field}"
+        )
+    last_provider = authority.get("last_provider")
+    if not isinstance(last_provider, str) or (
+        last_provider and PUBLIC_CLASS.fullmatch(last_provider) is None
+    ):
+        raise RuntimeError(
+            "getmininginfo schema error: winner_reseal_authority.last_provider "
+            "must be empty or a public class token"
+        )
+    return scheduler
+
+
+def validate_archive_strict_proof(
+    *, mode: str, baseline_mining_info: object, final_mining_info: object,
+    validation: dict, expected_provider: str,
+) -> dict:
+    """Close exactly one explicit strict-device proof mode, fail closed."""
+    if mode == "receiving-validation":
+        if not validation.get("available"):
+            raise RuntimeError(
+                "receiving-validation proof requested but no validation is available"
+            )
+        return {
+            "mode": mode,
+            "provider": validation["provider"],
+            "require_device": validation["require_device"],
+            "fully_accelerated": validation["fully_accelerated"],
+            "cpu_gemm_calls": validation["cpu_gemm_calls"],
+            "cpu_gemm_fallbacks": validation["cpu_gemm_fallbacks"],
+        }
+    if mode != "winner-reseal-authority":
+        raise RuntimeError(f"unsupported strict proof mode: {mode}")
+
+    baseline = extract_scheduler_evidence(baseline_mining_info)
+    final = extract_scheduler_evidence(final_mining_info)
+    baseline_lanes = baseline["lanes"]
+    final_lanes = final["lanes"]
+    deltas = {}
+    for lane_name in ("candidate_mining", "winner_reseal"):
+        delta = (
+            final_lanes[lane_name]["completions"] -
+            baseline_lanes[lane_name]["completions"]
+        )
+        if delta < PRODUCTION_BLOCKS:
+            raise RuntimeError(
+                f"strict proof recorded only {delta} {lane_name} completions; "
+                f"expected at least {PRODUCTION_BLOCKS}"
+            )
+        if final_lanes[lane_name]["last_execution_s"] <= 0:
+            raise RuntimeError(f"strict proof recorded no {lane_name} execution time")
+        deltas[f"{lane_name}_completions"] = delta
+
+    if final["release_invariant_violations"] != 0:
+        raise RuntimeError("accelerator scheduler release invariant was violated")
+    baseline_authority = baseline["winner_reseal_authority"]
+    final_authority = final["winner_reseal_authority"]
+    for field in ("published", "consumed"):
+        delta = final_authority[field] - baseline_authority[field]
+        if delta < PRODUCTION_BLOCKS:
+            raise RuntimeError(
+                f"winner-reseal authority {field} only increased by {delta}; "
+                f"expected at least {PRODUCTION_BLOCKS}"
+            )
+        deltas[f"authority_{field}"] = delta
+    for field in ("rejected_not_block_target", "expired", "evicted", "misses"):
+        delta = final_authority[field] - baseline_authority[field]
+        if delta != 0:
+            raise RuntimeError(
+                f"winner-reseal authority {field} changed by {delta} during proof"
+            )
+    if final_authority["last_provider"] != expected_provider:
+        raise RuntimeError("winner-reseal authority provider differs from canary provider")
+    return {
+        "mode": mode,
+        "provider": final_authority["last_provider"],
+        **deltas,
+        "candidate_last_execution_s": final_lanes["candidate_mining"]["last_execution_s"],
+        "winner_reseal_last_execution_s": final_lanes["winner_reseal"]["last_execution_s"],
+        "release_invariant_violations": final["release_invariant_violations"],
+    }
 
 
 def validate_trusted_mirror_rehearsal(
@@ -434,6 +808,8 @@ def validate_trusted_mirror_rehearsal(
 
 def main(argv: list[str] | None = None) -> None:
     global ARCHIVE_DD, ARCHIVE_HOST, ARCHIVE_USER, ARCHIVE_BTXD, ARCHIVE_CLI
+    global ARCHIVE_BACKEND, ARCHIVE_LOCAL, ARCHIVE_PROC, ARCHIVE_LOG
+    global ARCHIVE_SIGNER_WIF_FILE, STRICT_PROOF_MODE
     global MIRROR_BTXD, MIRROR_CLI, SIGNER_WIF_FILE, SIGNER_PUB
     global RUNTIME_ROOT, MIRROR_DD, OUT, KEEP_ARTIFACTS
     global SOURCE_REVISION, SOURCE_TREE_FINGERPRINT
@@ -446,6 +822,10 @@ def main(argv: list[str] | None = None) -> None:
     ARCHIVE_USER = args.archive_user
     ARCHIVE_BTXD = args.archive_btxd
     ARCHIVE_CLI = args.archive_cli
+    ARCHIVE_BACKEND = args.archive_backend
+    ARCHIVE_LOCAL = args.archive_local
+    ARCHIVE_SIGNER_WIF_FILE = args.archive_signer_wif_file
+    STRICT_PROOF_MODE = args.strict_proof_mode
     MIRROR_BTXD = args.mirror_btxd
     MIRROR_CLI = args.mirror_cli
     SIGNER_WIF_FILE = args.signer_wif_file
@@ -464,30 +844,37 @@ def main(argv: list[str] | None = None) -> None:
     ARCHIVE_CLI_SHA256 = args.archive_cli_sha256
     MIRROR_BTXD_SHA256 = args.mirror_btxd_sha256
     MIRROR_CLI_SHA256 = args.mirror_cli_sha256
-    try:
-        if remote_sha256(ARCHIVE_BTXD) != ARCHIVE_BTXD_SHA256:
-            parser.error("archive btxd SHA256 does not match --archive-btxd-sha256")
-        if remote_sha256(ARCHIVE_CLI) != ARCHIVE_CLI_SHA256:
-            parser.error("archive btx-cli SHA256 does not match --archive-cli-sha256")
-    except (subprocess.SubprocessError, EVIDENCE_IDENTITY.EvidenceIdentityError) as error:
-        parser.error(f"cannot verify archive binary identity: {error}")
+    if not ARCHIVE_LOCAL:
+        try:
+            if remote_sha256(ARCHIVE_BTXD) != ARCHIVE_BTXD_SHA256:
+                parser.error("archive btxd SHA256 does not match --archive-btxd-sha256")
+            if remote_sha256(ARCHIVE_CLI) != ARCHIVE_CLI_SHA256:
+                parser.error("archive btx-cli SHA256 does not match --archive-cli-sha256")
+            sh_remote(
+                f"test -f {shlex.quote(ARCHIVE_SIGNER_WIF_FILE)} "
+                f"-a -r {shlex.quote(ARCHIVE_SIGNER_WIF_FILE)}"
+            )
+        except (subprocess.SubprocessError, EVIDENCE_IDENTITY.EvidenceIdentityError) as error:
+            parser.error(f"cannot verify archive deployment identity: {error}")
     MIRROR_DD = Path(
         tempfile.mkdtemp(prefix="btx-trusted-mirror-", dir=RUNTIME_ROOT)
     )
     atexit.register(cleanup_local_artifacts)
 
-    ARCHIVE_DD = validate_remote_archive_dir(
-        sh_remote("mktemp -d \"${TMPDIR:-/tmp}/btx-trusted-archive.XXXXXX\"")
-    )
-    atexit.register(cleanup_remote_archive)
-    archive_regtest = f"{ARCHIVE_DD}/regtest"
-    sh_remote(f"umask 077; mkdir -p {shlex.quote(archive_regtest)}")
-    signer_wif = SIGNER_WIF_FILE.read_text().strip() + "\n"
-    sh_remote(
-        f"umask 077; cat > {shlex.quote(archive_regtest + '/signer.wif')}",
-        input_text=signer_wif,
-    )
-    del signer_wif
+    if ARCHIVE_LOCAL:
+        ARCHIVE_DD = tempfile.mkdtemp(
+            prefix="btx-trusted-archive-", dir=RUNTIME_ROOT
+        )
+        Path(ARCHIVE_DD, "regtest").mkdir(mode=0o700)
+        archive_signer_path = str(SIGNER_WIF_FILE)
+    else:
+        ARCHIVE_DD = validate_remote_archive_dir(
+            sh_remote("mktemp -d \"${TMPDIR:-/tmp}/btx-trusted-archive.XXXXXX\"")
+        )
+        archive_regtest = f"{ARCHIVE_DD}/regtest"
+        sh_remote(f"umask 077; mkdir -p {shlex.quote(archive_regtest)}")
+        archive_signer_path = ARCHIVE_SIGNER_WIF_FILE
+    atexit.register(cleanup_archive)
 
     common_regtest = f"""
 regtest=1
@@ -524,7 +911,7 @@ matmultrustedwaitms=60000
     archive_conf = common_regtest + f"""
 matmulvalidation=consensus
 matmulrcexecution=strict-device
-matmulattestationsignerkeyfile=signer.wif
+matmulattestationsignerkeyfile={archive_signer_path}
 matmulattestationserve=1
 listenonion=0
 allowdangerousnoban=1
@@ -536,27 +923,35 @@ bind=127.0.0.1
 rpcbind=127.0.0.1
 rpcallowip=127.0.0.1
 """
-    # Write archive conf remotely
-    sh_remote(
-        f"umask 077; cat > {shlex.quote(ARCHIVE_DD + '/btx.conf')}",
-        input_text=archive_conf,
-    )
+    if ARCHIVE_LOCAL:
+        archive_conf_path = Path(ARCHIVE_DD, "btx.conf")
+        archive_conf_path.write_text(archive_conf, encoding="utf-8")
+        archive_conf_path.chmod(0o600)
+    else:
+        sh_remote(
+            f"umask 077; cat > {shlex.quote(ARCHIVE_DD + '/btx.conf')}",
+            input_text=archive_conf,
+        )
 
-    # SSH local forward so this host reaches archive P2P on loopback
-    # (LAN P2P may be firewalled; RPC stays via ssh command).
-    tunnel = subprocess.Popen(
-        [
-            "ssh",
-            "-o",
-            "BatchMode=yes",
-            "-N",
-            "-L",
-            f"127.0.0.1:{ARCHIVE_P2P}:127.0.0.1:{ARCHIVE_P2P}",
-            f"{ARCHIVE_USER}@{ARCHIVE_HOST}",
-        ]
-    )
-    atexit.register(tunnel.terminate)
-    time.sleep(1)
+    # Remote mode tunnels only P2P. RPC remains an authenticated SSH command.
+    # Local mode deliberately has no self-SSH tunnel: archive already owns the
+    # loopback P2P port and a second bind would fail.
+    tunnel = None
+    if not ARCHIVE_LOCAL:
+        tunnel = subprocess.Popen(
+            [
+                "ssh", "-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes",
+                "-N", "-L",
+                f"127.0.0.1:{ARCHIVE_P2P}:127.0.0.1:{ARCHIVE_P2P}",
+                f"{ARCHIVE_USER}@{ARCHIVE_HOST}",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        atexit.register(tunnel.terminate)
+        time.sleep(1)
+        if tunnel.poll() is not None:
+            raise RuntimeError("SSH local forwarding failed before archive startup")
 
     mirror_conf = common_regtest + f"""
 matmulvalidation=trusted
@@ -570,14 +965,30 @@ connect=127.0.0.1:{ARCHIVE_P2P}
 """
     (MIRROR_DD / "btx.conf").write_text(mirror_conf)
 
-    # Start archive on GPU host
-    sh_remote(
-        f"CUDA_VISIBLE_DEVICES=0 nohup {shlex.quote(ARCHIVE_BTXD)} "
-        f"-datadir={shlex.quote(ARCHIVE_DD)} "
-        f"-conf={shlex.quote(ARCHIVE_DD + '/btx.conf')} "
-        f">{shlex.quote(ARCHIVE_DD + '/stdout.log')} 2>&1 & echo $!"
-    )
-    wait_rpc(archive_rpc, "archive")
+    archive_env = os.environ.copy()
+    archive_env["BTX_MATMUL_V4_BACKEND"] = ARCHIVE_BACKEND
+    archive_env["BTX_RC_ACCEL_POLICY"] = "production"
+    if ARCHIVE_LOCAL:
+        ARCHIVE_LOG = Path(ARCHIVE_DD, "stdout.log").open("w", encoding="utf-8")
+        ARCHIVE_PROC = subprocess.Popen(
+            [
+                str(ARCHIVE_BTXD), f"-datadir={ARCHIVE_DD}",
+                f"-conf={Path(ARCHIVE_DD, 'btx.conf')}",
+            ],
+            env=archive_env,
+            stdout=ARCHIVE_LOG,
+            stderr=subprocess.STDOUT,
+        )
+    else:
+        sh_remote(
+            f"BTX_MATMUL_V4_BACKEND={shlex.quote(ARCHIVE_BACKEND)} "
+            "BTX_RC_ACCEL_POLICY=production "
+            f"nohup {shlex.quote(ARCHIVE_BTXD)} "
+            f"-datadir={shlex.quote(ARCHIVE_DD)} "
+            f"-conf={shlex.quote(ARCHIVE_DD + '/btx.conf')} "
+            f">{shlex.quote(ARCHIVE_DD + '/stdout.log')} 2>&1 & echo $!"
+        )
+    wait_rpc(archive_rpc, "archive", timeout=args.archive_startup_timeout)
     archive_rpc("createwallet", "miner")
 
     # Start local mirror
@@ -589,9 +1000,9 @@ connect=127.0.0.1:{ARCHIVE_P2P}
     )
     atexit.register(mirror_proc.terminate)
     try:
-        wait_rpc(mirror_rpc, "mirror")
+        wait_rpc(mirror_rpc, "mirror", timeout=args.archive_startup_timeout)
         # Wait until P2P link is up through the tunnel
-        deadline = time.monotonic() + 60
+        deadline = time.monotonic() + min(120, args.mirror_sync_timeout)
         while time.monotonic() < deadline:
             peers = mirror_rpc("getpeerinfo") or []
             if peers:
@@ -599,7 +1010,7 @@ connect=127.0.0.1:{ARCHIVE_P2P}
                 break
             time.sleep(1)
         else:
-            raise RuntimeError("mirror never connected to archive P2P via tunnel")
+            raise RuntimeError("mirror never connected to the archive P2P endpoint")
 
         a_net = archive_rpc("getnetworkinfo")
         m_net = mirror_rpc("getnetworkinfo")
@@ -607,19 +1018,24 @@ connect=127.0.0.1:{ARCHIVE_P2P}
         m_services = m_net.get("localservicesnames", [])
         print("archive_services", a_services, flush=True)
         print("mirror_services", m_services, flush=True)
+        baseline_mining_info = archive_rpc("getmininginfo")
 
-        # Mine through activation+2 on archive; mirror should follow via attestations
+        # Mine through activation+2 on archive. This yields exactly three
+        # production Profile-1 winners (heights 6, 7, and 8).
         timings = []
         for _ in range(ACTIVATION + 2):
             t0 = time.perf_counter()
-            archive_rpc("generatetoaddress", "1", archive_rpc("getnewaddress"))
+            archive_rpc(
+                "generatetoaddress", "1", archive_rpc("getnewaddress"),
+                timeout=args.mine_timeout,
+            )
             dt = time.perf_counter() - t0
             ah = archive_rpc("getblockcount")
             timings.append({"mined_height": ah, "archive_generate_s": round(dt, 3)})
             print(f"archive mined h={ah} in {dt:.3f}s", flush=True)
 
         tip = archive_rpc("getbestblockhash")
-        deadline = time.monotonic() + 300
+        deadline = time.monotonic() + args.mirror_sync_timeout
         while time.monotonic() < deadline:
             if mirror_rpc("getbestblockhash") == tip:
                 break
@@ -640,26 +1056,34 @@ connect=127.0.0.1:{ARCHIVE_P2P}
             mirror_status=trusted,
             mirror_mode=mirror_mode,
         )
+        final_mining_info = archive_rpc("getmininginfo")
         archive_rc, canary, validation = extract_strict_replay_evidence(
-            archive_rpc("getmininginfo"),
+            final_mining_info,
             expected_revision=SOURCE_REVISION,
             expected_fingerprint=SOURCE_TREE_FINGERPRINT,
+            expected_provider_family=ARCHIVE_BACKEND,
         )
-        if not (
-            canary.get("passed")
-            and canary.get("device_macs", 0) > 0
-            and canary.get("cpu_fallbacks") == 0
-            and validation.get("available")
-            and validation.get("require_device")
-            and validation.get("fully_accelerated")
-            and validation.get("cpu_gemm_calls") == 0
-            and validation.get("cpu_gemm_fallbacks") == 0
-        ):
-            raise RuntimeError("archive did not prove strict zero-fallback ExactReplay")
+        strict_proof = validate_archive_strict_proof(
+            mode=STRICT_PROOF_MODE,
+            baseline_mining_info=baseline_mining_info,
+            final_mining_info=final_mining_info,
+            validation=validation,
+            expected_provider=canary["provider"],
+        )
         result = {
             "ok": True,
-            "archive_host_class": "cuda_gpu_exactreplay_archive",
+            "evidence_kind": "production_strict_trusted_mirror_rehearsal",
+            "schema_version": 2,
+            "production_shape": True,
+            "archive_host_class": derive_archive_host_class(canary, ARCHIVE_BACKEND),
             "mirror_host_class": "cpu_trusted_mirror",
+            "archive_provider_family": ARCHIVE_BACKEND,
+            "strict_proof_mode": STRICT_PROOF_MODE,
+            "trust_topology": "single-operator 1-of-1 trusted attestation",
+            "trust_warning": (
+                "The mirror is not an independently validating full node and "
+                "inherits the archive signer's failures."
+            ),
             "source_revision": SOURCE_REVISION,
             "source_tree_fingerprint": SOURCE_TREE_FINGERPRINT,
             "binary_sha256": {
@@ -668,7 +1092,7 @@ connect=127.0.0.1:{ARCHIVE_P2P}
                 "mirror_btxd": MIRROR_BTXD_SHA256,
                 "mirror_btx_cli": MIRROR_CLI_SHA256,
             },
-            "p2p_path": "ssh_local_forward",
+            "p2p_path": "local_loopback" if ARCHIVE_LOCAL else "ssh_local_forward",
             "activation_height": ACTIVATION,
             "archive_tip": tip,
             "mirror_tip": mirror_rpc("getbestblockhash"),
@@ -680,6 +1104,7 @@ connect=127.0.0.1:{ARCHIVE_P2P}
             "trusted_status": trusted,
             "archive_production_canary": canary,
             "archive_last_validation": validation,
+            "archive_strict_proof": strict_proof,
             "timings": timings,
             "activation_block_s": next(
                 (t["archive_generate_s"] for t in timings if t["mined_height"] == ACTIVATION),
@@ -695,15 +1120,20 @@ connect=127.0.0.1:{ARCHIVE_P2P}
             mirror_proc.wait(timeout=30)
         except Exception:
             mirror_proc.kill()
+        mirror_log.close()
         atexit.unregister(mirror_proc.terminate)
-        tunnel.terminate()
-        try:
-            tunnel.wait(timeout=10)
-        except Exception:
-            tunnel.kill()
-        atexit.unregister(tunnel.terminate)
-        cleanup_remote_archive()
-        atexit.unregister(cleanup_remote_archive)
+        if tunnel is not None:
+            tunnel.terminate()
+            try:
+                tunnel.wait(timeout=10)
+            except Exception:
+                tunnel.kill()
+            atexit.unregister(tunnel.terminate)
+        cleanup_archive()
+        if ARCHIVE_LOG is not None:
+            ARCHIVE_LOG.close()
+            ARCHIVE_LOG = None
+        atexit.unregister(cleanup_archive)
         cleanup_local_artifacts()
         atexit.unregister(cleanup_local_artifacts)
 
