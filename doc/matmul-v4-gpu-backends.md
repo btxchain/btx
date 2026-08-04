@@ -2,7 +2,7 @@
 > backend contract below remains useful for the old workload, but it is not the
 > Epoch-A certification procedure. MatMul v4.7 launches with Profile 1
 > ExactReplay; proof authority and Profile 2 occur only in later, separately
-> activated epochs. Mainnet Epoch A (v4 = BMX4C = RC) has a finite compiled candidate height and true source flags, so it would activate if merged unchanged; the release remains NO-GO pending exact-final combined-tree CUDA+Metal evidence, reviewed schema-4 ASERT calibration, ratification re-affirmation, full closeout, and live-tip runway validation. All other transition heights remain disabled. See
+> and Epoch D separately moves to Profile 2 under proof authority. Mainnet Epoch A (v4 = BMX4C = RC) is disabled in current source (`INT32_MAX`, lifecycle ratification false); implementation and calibration remain staged, and activation requires exact-final CUDA+Metal/lifecycle/ASERT evidence plus a fresh future height; all other transition heights remain disabled. Any older “production,” “default,” “shipping,” direct-fork,
 > [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md)
 > and [`benchmarking.md`](benchmarking.md).
 

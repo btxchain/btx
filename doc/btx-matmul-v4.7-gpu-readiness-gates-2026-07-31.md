@@ -5,10 +5,9 @@ Snapshot date: 2026-07-31
 Status: historical implementation snapshot; not a current readiness verdict
 
 This document preserves the implementation and gate state reviewed on its
-snapshot date. Its statements that the public heights were `INT32_MAX`, the RC
-ASERT ratio was `1/1`, both ratification records were false, or the production
-manifest was empty describe that earlier revision and are no longer statements
-about the current activation-candidate source. See
+snapshot date. Current corrective source again keeps the public heights at
+`INT32_MAX`, the live RC ASERT ratio at `1/1`, and GPU-lifecycle ratification
+false; that agreement does not make the snapshot's old evidence current. See
 [`btx-production-readiness.md`](btx-production-readiness.md) for the current
 candidate tuple and fail-closed readiness status. Nothing in this historical
 record is an activation approval.

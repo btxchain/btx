@@ -205,8 +205,9 @@ static constexpr uint32_t BMX4C_FALLBACK_INT8_ACCUMULATOR_BITS{32}; //!< C-1 flo
 //! MECHANISM as the retired `BTX_MATMUL_SEGREGATED_PROOF_RELAY_READY` flag,
 //! retargeted to the correct object (measured no-inversion + ratification, not
 //! relay readiness). A shipping release may set it true only in a deliberate,
-//! reviewed source change after gates (1)-(2) are recorded. A candidate that
-//! stages TRUE earlier is armed and must remain unmerged until that review.
+//! reviewed source change after gates (1)-(2) are recorded. The independent
+//! no-inversion decision is recorded true in corrective source, but it cannot
+//! authorize Epoch A while the lifecycle gate is false and heights are disabled.
 //!
 //! A TRUE value plus a finite mainnet height is technically live: a binary
 //! merged unchanged passes this guard and enforces Epoch A at that compiled
@@ -230,15 +231,14 @@ static constexpr bool BTX_MATMUL_NO_INVERSION_GATE_RATIFIED{true};
 //! armed and must remain unmerged until the separately reviewed activation
 //! decision closes them; regtest remains exempt for implementation exercises.
 //!
-//! A TRUE value plus a finite mainnet tuple is technically live: it satisfies
-//! this startup guard and does not wait for a document, runtime vote, or later
-//! flag flip. The constant is only the source-level decision record; it does
-//! not self-verify the required exact-final CUDA+Metal seal, schema-4 ASERT
-//! campaign, strict-device trusted-mirror rehearsal, full-suite closeout, or
-//! the reviewed disposition of soak, multi-peer testnet, fault/recovery, and
-//! released-binary upgrade evidence. Those remain external release gates and
-//! must describe the exact source that is merged.
-static constexpr bool BTX_MATMUL_V47_GPU_LIFECYCLE_GATE_RATIFIED{true};
+//! The corrective source keeps this false and the public Epoch-A heights
+//! disabled. A later activation-only change may set it true only after the
+//! exact-final CUDA+Metal seal, schema-3 exact-block lifecycle campaign,
+//! revision-bound ASERT review, deployment rehearsal, and fresh live-tip
+//! runway all describe the same source and binaries. A TRUE value plus a
+//! finite mainnet tuple is technically live; neither documentation nor stale
+//! evidence can make that combination inert.
+static constexpr bool BTX_MATMUL_V47_GPU_LIFECYCLE_GATE_RATIFIED{false};
 
 /**
  * Per-profile MatMul v4 shape + carriage (consensus-normative; design §4.1 and

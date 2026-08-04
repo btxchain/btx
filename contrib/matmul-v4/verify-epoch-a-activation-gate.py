@@ -430,6 +430,22 @@ def parse_cpp_integer(text: str, name: str) -> int:
     return int(match.group(1).replace("'", ""))
 
 
+def parse_cpp_activation_height(text: str, name: str) -> int | None:
+    """Parse a finite activation height or the canonical disabled sentinel."""
+    finite = re.search(
+        rf"\b{name}\s*\{{\s*([0-9][0-9']*)\s*\}}\s*;", text
+    )
+    if finite is not None:
+        return int(finite.group(1).replace("'", ""))
+    disabled = re.search(
+        rf"\b{name}\s*\{{\s*std::numeric_limits<int32_t>::max\(\)\s*"
+        rf"\}}\s*;",
+        text,
+    )
+    require(disabled is not None, f"cannot parse source constant {name}")
+    return None
+
+
 def parse_cpp_bool(text: str, name: str) -> bool:
     match = re.search(rf"\b{name}\s*\{{\s*(true|false)\s*\}}\s*;", text)
     require(match is not None, f"cannot parse source flag {name}")
@@ -481,10 +497,11 @@ def validate_source_tuple(root: Path, policy: dict[str, Any]) -> None:
     params = strip_cpp_comments(
         (root / "src/consensus/params.h").read_text(encoding="utf-8")
     )
-    require(
-        parse_cpp_integer(clean_chainparams, "BTX_MATMUL_V47_EPOCH_A_HEIGHT") == height,
-        "policy activation height does not match source",
+    source_height = parse_cpp_activation_height(
+        clean_chainparams, "BTX_MATMUL_V47_EPOCH_A_HEIGHT"
     )
+    require(source_height is not None, "source Epoch-A activation is disabled")
+    require(source_height == height, "policy activation height does not match source")
     require(
         parse_cpp_integer(clean_chainparams, "kRCEpochAAsertRescaleNum") == coefficient,
         "policy ASERT numerator does not match source",

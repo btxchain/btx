@@ -5,10 +5,10 @@ BTX version 0.33.2 is being prepared for release from:
 This release candidate carries the MatMul v4.7 Profile 1 ExactReplay
 implementation, its resource-admission and GPU-lifecycle hardening, and an
 explicit trusted-attestation topology for same-operator RPC/archive mirrors.
-The source currently contains a finite candidate Epoch-A tuple, so merging it
-would authorize that fork at the compiled height. It must not be merged or
-released until exact-final CUDA+Metal evidence, the revision-bound ASERT
-calibration, and a live-tip runway check all pass for that exact tuple.
+The signed v0.33.2 tag historically contained a finite Epoch-A tuple at height
+185000. Current corrective source disables that tuple (`INT32_MAX`, live RC
+ratio `1/1`, GPU-lifecycle ratification false). The old artifact is not changed
+by this correction and must not be represented as containing the deferral.
 
 Please report bugs using the issue tracker at GitHub:
 
@@ -20,18 +20,17 @@ To receive release and update notifications, please subscribe to:
 
 # How to Upgrade
 
-After an official v0.33.2 release is published, shut down the previous node
-cleanly, wait for it to exit, and replace its `btxd`, `btx-cli`, and related
-binaries with signed final release artifacts. Back up wallets and
-configuration before upgrading. Do not install unpublished candidate assets.
+Use only signed corrective artifacts that explicitly identify the deferral.
+Shut down the previous node cleanly and back up wallets and configuration
+before replacing binaries. Do not install unpublished candidates or assume the
+historical v0.33.2 binary was changed in place.
 
-The final v0.33.2 source freeze must set the v4, BMX4C, and Resident Curriculum
-heights to one live `H_A`, install the independently reviewed exact-final RC
-ASERT rescale, and set both ratification constants in the same reviewed tuple.
-The current finite tuple is a real consensus instruction if merged, not an
-inert placeholder. If its height, coefficient, gate flags, or any fingerprinted
-source changes, the CUDA+Metal corpus and startup-canary manifest must be
-regenerated before release. Testnet and signet heights remain disabled.
+Current source keeps the v4, BMX4C, and Resident Curriculum heights disabled.
+A later activation-only change must set one fresh `H_A`, install the
+independently reviewed exact-final RC ASERT rescale, and set both ratification
+constants in the same reviewed tuple. That new source requires regenerated
+CUDA+Metal, schema-3 lifecycle, ASERT, and startup-canary evidence before
+release. Testnet and signet heights remain disabled.
 See `doc/btx-matmul-v4.7-transition-roadmap.md` for the activation contract and
 the gates that remain open.
 

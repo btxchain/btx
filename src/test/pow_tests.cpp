@@ -5268,14 +5268,12 @@ BOOST_AUTO_TEST_CASE(MatMulHeaderPoW_grind_helper_and_public_nets_disabled)
         BOOST_CHECK_EQUAL(params->GetConsensus().nMatMulHeaderPoWDiscountBits,
                           std::numeric_limits<uint32_t>::max());
         BOOST_CHECK(!params->GetConsensus().IsMatMulHeaderPoWEnabled());
-        // The mainnet release candidate carries a finite atomic Epoch-A tuple;
-        // TESTNET has no activation height. The subject of this case is that
-        // header-PoW stays disabled either way -- an activation height must not
-        // switch it on.
+        // Every public network currently has no Epoch-A activation height. The
+        // subject of this case is that HeaderPoW also stays disabled.
         if (chain == ChainType::MAIN) {
             const auto& consensus{params->GetConsensus()};
-            BOOST_CHECK(consensus.nMatMulV4Height !=
-                        std::numeric_limits<int32_t>::max());
+            BOOST_CHECK_EQUAL(consensus.nMatMulV4Height,
+                              std::numeric_limits<int32_t>::max());
             BOOST_CHECK_EQUAL(consensus.nMatMulV4Height,
                               consensus.nMatMulBMX4CHeight);
             BOOST_CHECK_EQUAL(consensus.nMatMulV4Height,

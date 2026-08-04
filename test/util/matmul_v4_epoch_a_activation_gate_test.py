@@ -331,6 +331,33 @@ class EpochAActivationGateTest(unittest.TestCase):
         with self.assertRaisesRegex(MODULE.GateError, "must be true"):
             MODULE.validate_source_tuple(self.root, changed)
 
+    def test_disabled_source_cannot_satisfy_a_finite_activation_policy(self) -> None:
+        (self.root / "src/kernel").mkdir(parents=True)
+        (self.root / "src/consensus").mkdir(parents=True)
+        (self.root / "src/kernel/chainparams.cpp").write_text(
+            "static constexpr int64_t kRCEpochAAsertRescaleNum{4007014530};\n"
+            "static constexpr int64_t kRCEpochAAsertRescaleDen{1};\n"
+            "static constexpr int32_t BTX_MATMUL_V47_EPOCH_A_HEIGHT{\n"
+            "    std::numeric_limits<int32_t>::max()};\n"
+            "class CMainParams {\n"
+            "consensus.nMatMulV4Height = BTX_MATMUL_V47_EPOCH_A_HEIGHT;\n"
+            "consensus.nMatMulBMX4CHeight = BTX_MATMUL_V47_EPOCH_A_HEIGHT;\n"
+            "consensus.nMatMulRCHeight = BTX_MATMUL_V47_EPOCH_A_HEIGHT;\n"
+            "consensus.nMatMulRCAsertRescaleNum = 1;\n"
+            "consensus.nMatMulRCAsertRescaleDen = 1;\n"
+            "};\nclass CTestNetParams {};\n",
+            encoding="utf-8",
+        )
+        (self.root / "src/consensus/params.h").write_text(
+            "static constexpr bool BTX_MATMUL_NO_INVERSION_GATE_RATIFIED{true};\n"
+            "static constexpr bool BTX_MATMUL_V47_GPU_LIFECYCLE_GATE_RATIFIED{false};\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(
+            MODULE.GateError, "source Epoch-A activation is disabled"
+        ):
+            MODULE.validate_source_tuple(self.root, policy())
+
     def test_source_tuple_denominator_wiring_is_mainnet_scoped(self) -> None:
         (self.root / "src/kernel").mkdir(parents=True)
         (self.root / "src/consensus").mkdir(parents=True)

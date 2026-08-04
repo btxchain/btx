@@ -6,7 +6,7 @@
 > [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md):
 > Profile-1 ExactReplay in Epoch A, Profile-1 proof plus ExactReplay in Epoch B,
 > Profile-1 proof authority in Epoch C, then Profile-2 proof authority in
-> Epoch D. Mainnet Epoch A (v4 = BMX4C = RC) has a finite compiled candidate height and true source flags, so it would activate if merged unchanged; release remains NO-GO pending exact-final combined-tree CUDA+Metal evidence, reviewed schema-4 ASERT calibration, ratification re-affirmation, full closeout, and live-tip runway validation; all other transition heights remain disabled.
+> and Epoch D separately moves to Profile 2 under proof authority. Mainnet Epoch A (v4 = BMX4C = RC) is disabled in current source (`INT32_MAX`, lifecycle ratification false); implementation and calibration remain staged, and activation requires exact-final CUDA+Metal/lifecycle/ASERT evidence plus a fresh future height; all other transition heights remain disabled. Any older “production,” “default,” “shipping,” direct-fork,
 
 ## Overview
 

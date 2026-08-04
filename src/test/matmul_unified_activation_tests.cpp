@@ -239,13 +239,10 @@ BOOST_AUTO_TEST_CASE(epoch_a_tuple_selects_profile1_exact_replay_path)
     BOOST_CHECK_EQUAL(p.nMatMulRCProfile, 1U);
     BOOST_CHECK(!p.IsMatMulHeaderPoWEnabled());
     BOOST_CHECK(ValidateMatMulAsertParams(p, H));
-    // A structurally coherent tuple is not by itself an activation
-    // authorization: the GPU mine/reseal/validate lifecycle and its ASERT
-    // calibration are a separate gate. That gate has now been ratified for
-    // Epoch A, so this pins it as true rather than false -- the point of the
-    // assertion is that the flag is a deliberate, reviewed value, not that it
-    // has one particular setting forever.
-    BOOST_CHECK(Consensus::BTX_MATMUL_V47_GPU_LIFECYCLE_GATE_RATIFIED);
+    // A structurally coherent synthetic tuple is not an activation
+    // authorization. Public source remains fail-closed until exact-final
+    // lifecycle and calibration evidence is ratified with a fresh height.
+    BOOST_CHECK(!Consensus::BTX_MATMUL_V47_GPU_LIFECYCLE_GATE_RATIFIED);
     BOOST_CHECK(Consensus::BTX_MATMUL_NO_INVERSION_GATE_RATIFIED);
 }
 
@@ -301,27 +298,29 @@ BOOST_AUTO_TEST_CASE(epoch_a_target_derivation_uses_live_parent_lottery)
 }
 
 
-// FIXED VECTOR at the published calibration difficulty. Everything else in
+// FIXED VECTOR at the staged calibration difficulty. Everything else in
 // this suite tests the helper against synthetic inputs, i.e. against itself.
-// This case pins the SHIPPED constant against an externally computed
-// expectation so a future value of the wrong KIND fails here rather than on
-// mainnet.
-BOOST_AUTO_TEST_CASE(epoch_a_installed_coefficient_realizes_expected_loosen)
+// This case pins the reviewed staged coefficient against an externally
+// computed expectation while the public mainnet tuple remains disabled.
+BOOST_AUTO_TEST_CASE(epoch_a_staged_coefficient_realizes_expected_loosen)
 {
+    static constexpr int32_t H{185'000};
+    static constexpr int64_t STAGED_COEFFICIENT{6'931'159'304LL};
     // Mainnet nBits at the calibration sample, epsilon = 18.
     arith_uint256 parent{};
     parent.SetCompact(0x1c487c56);
     BOOST_REQUIRE(parent > 0);
 
-    const auto main{CreateChainParams(ArgsManager{}, ChainType::MAIN)};
-    const auto& p{main->GetConsensus()};
-    const uint32_t eps{p.GetMatMulPreHashEpsilonBitsForHeight(p.nMatMulRCHeight - 1)};
+    auto p{EpochAParams(H)};
+    p.nMatMulRCAsertRescaleNum = STAGED_COEFFICIENT;
+    p.nMatMulRCAsertRescaleDen = 1;
+    const uint32_t eps{p.GetMatMulPreHashEpsilonBitsForHeight(H - 1)};
     BOOST_CHECK_EQUAL(eps, 18u);
 
     uint64_t an{0}, ad{0};
     BOOST_REQUIRE(ReduceRescaleRatioToU64(p.nMatMulRCAsertRescaleNum,
                                           p.nMatMulRCAsertRescaleDen, an, ad));
-    // The installed policy coefficient exceeds uint32; the Epoch-A path must
+    // The staged policy coefficient exceeds uint32; the Epoch-A path must
     // not clip it. Exact-final measurement is a separate release gate.
     BOOST_CHECK_GT(an, static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()));
 
@@ -356,11 +355,11 @@ BOOST_AUTO_TEST_CASE(epoch_a_installed_coefficient_realizes_expected_loosen)
     BOOST_CHECK(*derived > parent);
     BOOST_CHECK(*derived <= UintToArith256(p.powLimit));
 
-    // Exercise the real fork dispatcher with the published mainnet tuple. The
+    // Exercise the real fork dispatcher with the staged synthetic tuple. The
     // transition branch depends only on the live parent's height/nBits, so a
     // single synthetic parent is sufficient and avoids a 182k-entry fixture.
     CBlockIndex parent_index;
-    parent_index.nHeight = p.nMatMulRCHeight - 1;
+    parent_index.nHeight = H - 1;
     parent_index.nBits = 0x1c487c56;
     parent_index.nTime = 1'700'000'000;
     CBlockHeader next;
@@ -451,23 +450,19 @@ BOOST_AUTO_TEST_CASE(epoch_a_tuple_selects_the_wide_transition_on_regtest)
     BOOST_CHECK(*derived > 0);
 }
 
-// Pin the complete public Epoch-A contract from the real mainnet parameters.
-// The activation height itself is intentionally not duplicated here: release
-// preparation may move it forward to preserve deployment runway, but it must
-// remain one finite atomic height for v4, BMX4C, and RC. Everything else below
-// is the consensus shape that may not drift when that scheduling-only value is
-// updated.
-BOOST_AUTO_TEST_CASE(mainnet_epoch_a_complete_consensus_tuple)
+// Pin the corrective public state: the implementation shape remains staged,
+// while every public transition height, live rescale, and lifecycle
+// authorization stays fail-closed.
+BOOST_AUTO_TEST_CASE(mainnet_epoch_a_is_staged_but_disabled)
 {
     const auto main{CreateChainParams(ArgsManager{}, ChainType::MAIN)};
     const auto& p{main->GetConsensus()};
     const int32_t disabled{std::numeric_limits<int32_t>::max()};
-    const int32_t height{p.nMatMulRCHeight};
+    static constexpr int32_t REPRESENTATIVE_HEIGHT{185'000};
 
-    BOOST_REQUIRE_NE(height, disabled);
-    BOOST_CHECK_EQUAL(p.nMatMulV4Height, height);
-    BOOST_CHECK_EQUAL(p.nMatMulBMX4CHeight, height);
-    BOOST_CHECK_EQUAL(p.nMatMulRCHeight, height);
+    BOOST_CHECK_EQUAL(p.nMatMulV4Height, disabled);
+    BOOST_CHECK_EQUAL(p.nMatMulBMX4CHeight, disabled);
+    BOOST_CHECK_EQUAL(p.nMatMulRCHeight, disabled);
     BOOST_CHECK_EQUAL(p.nMatMulDRLTHeight, disabled);
     BOOST_CHECK_EQUAL(p.nMatMulRCCoupledHeight, disabled);
 
@@ -484,23 +479,19 @@ BOOST_AUTO_TEST_CASE(mainnet_epoch_a_complete_consensus_tuple)
     BOOST_CHECK_EQUAL(p.nMatMulV4AsertRescaleDen, 1);
     BOOST_CHECK_EQUAL(p.nMatMulBMX4CAsertRescaleNum, 1);
     BOOST_CHECK_EQUAL(p.nMatMulBMX4CAsertRescaleDen, 1);
-    BOOST_CHECK_EQUAL(p.nMatMulRCAsertRescaleNum, 6'931'159'304LL);
+    BOOST_CHECK_EQUAL(p.nMatMulRCAsertRescaleNum, 1);
     BOOST_CHECK_EQUAL(p.nMatMulRCAsertRescaleDen, 1);
     BOOST_CHECK_EQUAL(
-        p.GetMatMulPreHashEpsilonBitsForHeight(height - 1), 18U);
+        p.GetMatMulPreHashEpsilonBitsForHeight(REPRESENTATIVE_HEIGHT), 18U);
 
-    BOOST_CHECK(!p.IsMatMulV4Active(height - 1));
-    BOOST_CHECK(!p.IsMatMulRCFamilyActive(height - 1));
-    BOOST_CHECK(p.IsMatMulV4Active(height));
-    BOOST_CHECK(p.IsBMX4CActive(height));
-    BOOST_CHECK(p.IsMatMulRCFamilyActive(height));
-    BOOST_CHECK_EQUAL(p.GetMatMulEncodingProfile(height),
-                      Consensus::MatMulEncodingProfile::ENC_RC);
-    BOOST_CHECK(p.IsMatMulV47EpochAActivationTuple());
-    BOOST_CHECK(ValidateMatMulAsertParams(p, height));
+    BOOST_CHECK(!p.IsMatMulV4Active(REPRESENTATIVE_HEIGHT));
+    BOOST_CHECK(!p.IsBMX4CActive(REPRESENTATIVE_HEIGHT));
+    BOOST_CHECK(!p.IsMatMulRCFamilyActive(REPRESENTATIVE_HEIGHT));
+    BOOST_CHECK(!p.IsMatMulV47EpochAActivationTuple());
+    BOOST_CHECK(ValidateMatMulAsertParams(p, REPRESENTATIVE_HEIGHT));
 
     BOOST_CHECK(Consensus::BTX_MATMUL_NO_INVERSION_GATE_RATIFIED);
-    BOOST_CHECK(Consensus::BTX_MATMUL_V47_GPU_LIFECYCLE_GATE_RATIFIED);
+    BOOST_CHECK(!Consensus::BTX_MATMUL_V47_GPU_LIFECYCLE_GATE_RATIFIED);
     BOOST_CHECK(!matmul::v4::rc::kRCGkrFormalSoundnessReady);
     BOOST_CHECK(!matmul::v4::rc::kRCStage3ProductionProgramRegistryReady);
     BOOST_CHECK(!matmul::v4::rc::kRCStage3SuccinctAuthorityReady);

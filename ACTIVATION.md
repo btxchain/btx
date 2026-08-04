@@ -7,18 +7,17 @@
 > Profile 1 ExactReplay is the Epoch-A launch candidate. Profile 2 is reserved
 > for a later, separately activated proof-authoritative workload.
 >
-> **Update — Epoch A release candidate:** mainnet stages one atomic
-> `nMatMulV4Height = nMatMulBMX4CHeight = nMatMulRCHeight = H_A` tuple with
-> both ratification constants. The numeric height and RC ASERT coefficient are
-> release-final only after exact-final-binary CUDA+Metal evidence and a live-tip
-> runway calculation. Testnet/signet and Epochs B–D remain disabled.
+> **Update — corrective fail-closed state:** mainnet, testnet, and signet keep
+> `nMatMulV4Height`, `nMatMulBMX4CHeight`, and `nMatMulRCHeight` at
+> `INT32_MAX`. The live RC ASERT ratio is `1/1` and the GPU-lifecycle
+> ratification flag is false. The implementation and calibration remain staged;
+> a later activation-only change must choose and reseal a fresh atomic tuple.
 
 This file tracks the path from the reference implementation to a mainnet
-hard-fork activation. **Mainnet Epoch A is a scheduled candidate; every Epoch
-B–D height remains unset on every network.** Implementation review and
-activation review are separate gates. The source flags are staged for candidate
-testing, but the activation decision and any explicit risk disposition remain
-open until the exact-final evidence is reviewed.
+hard-fork activation. **Mainnet Epoch A and every Epoch B–D height remain unset
+on every public network.** Implementation review and activation review are
+separate gates. The activation decision remains open until exact-final evidence
+for a freshly selected tuple is reviewed.
 
 The required order is:
 
@@ -32,12 +31,11 @@ The required order is:
 Do not collapse these epochs or infer one activation height from another.
 Epoch A is the only epoch eligible for the first activation-height PR.
 
-HISTORY: merging the implementation PR activated nothing — through the
-implementation-only releases `nMatMulV4Height`, `nMatMulBMX4CHeight`, and
-`nMatMulRCHeight` all stayed `INT32_MAX` and the public-network ratification
-constants stayed false. This branch may stage candidate values, but no finite
-tuple or ratification flag is release-authorizing until exact-final evidence
-passes and the activation review selects `H_A` from the live tip.
+CURRENT SOURCE: `nMatMulV4Height`, `nMatMulBMX4CHeight`, and `nMatMulRCHeight`
+are `INT32_MAX`, the RC ASERT ratio is `1/1`, and the GPU-lifecycle flag is
+false. The implementation and staged coefficient are non-authorizing until an
+activation review selects `H_A` from the live tip and the unchanged result
+passes the exact-final evidence gate.
 
 The eventual Epoch-A activation must set one atomic tuple at a single height
 `H_A`; it must never be a one-field flip:
@@ -318,13 +316,11 @@ supermajority upgraded → activate.
 
 ### B6. Staged mainnet activation — atomic Epoch-A tuple
 
-The current source stages a finite Epoch-A tuple and ratification flags for
-release-candidate testing. Those values are provisional and non-authorizing:
-they must not ship unless the exact-final evidence and activation review pass.
-Once every required exit criterion is GO (with CUDA and Metal PASSes only two
-of the required inputs), a narrow release-final change must replace or
-re-affirm the complete tuple, evidence-bound policy coefficient, and ratification decision
-atomically:
+The current source keeps the Epoch-A tuple disabled, the live RC ratio neutral,
+and GPU-lifecycle ratification false. Once every required exit criterion is GO
+(with CUDA and Metal PASSes only two of the required inputs), a narrow
+activation-only change must install the complete tuple, evidence-bound policy
+coefficient, and ratification decision atomically:
 
 1. **Pick the height from the live tip at source freeze.**
    `H_activate = current_mainnet_height + Δ`, where `Δ` gives **at least

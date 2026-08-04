@@ -1,12 +1,11 @@
 # MatMul v4.7 Profile 1 ExactReplay launch candidate
 
-Status: launch-candidate gate record for Epoch A. **Epoch A is not yet a
-shipped public-network transition.** The candidate tuple in
-`src/kernel/chainparams.cpp` already has a finite height, ASERT coefficient,
-and true ratification flags; those are technically live if merged unchanged.
-They remain release candidates that must be reviewed or replaced before the
-final source freeze. The exact-final-binary evidence must then confirm that
-unchanged tuple; any later change repeats the freeze and evidence. The canonical
+Status: launch-candidate gate record for Epoch A. **Epoch A is not a shipped or
+scheduled public-network transition.** Corrective source keeps all three
+public heights at `INT32_MAX`, the live RC ratio at `1/1`, and GPU-lifecycle
+ratification false. A later activation-only change must select a fresh tuple;
+exact-final-binary evidence must then confirm that unchanged tuple. Any later
+change repeats the freeze and evidence. The canonical
 four-epoch transition and naming rules are defined in
 [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md).
 
@@ -28,26 +27,17 @@ ExactReplay launch candidate. Profile 2 should become authoritative only with
 a completed succinct proof system (or separately proven multi-host verifier),
 not by silently requiring every validator to own a large Metal fleet.
 
-The current source selects Profile 1 and stages the mainnet activation tuple:
-`nMatMulV4Height = nMatMulBMX4CHeight = nMatMulRCHeight = H_A`. Testnet
-and signet heights remain disabled. Profile 2 stays explicitly selectable for
-later-epoch regression measurements; it is not inherited into Epoch A.
+The current source selects Profile 1 but keeps the mainnet activation tuple
+disabled: `nMatMulV4Height = nMatMulBMX4CHeight = nMatMulRCHeight =
+INT32_MAX`. Testnet and signet heights remain disabled. Profile 2 stays
+explicitly selectable for later-epoch regression measurements.
 
-The candidate satisfies the atomic-tuple shape this document requires:
-one identical `H_A` across the three heights; DRLT and coupled RC
-disabled; Profile 1 and production dimensions selected; unfinished Stage-3
-proof authority and HeaderPoW off. The v4 and BMX4C ASERT ratios remain inert
-at `1/1`, while the RC branch owns one provisional one-time v3-to-Epoch-A
-calibration. The candidate coefficient and its realized target change are
-technically effective at the compiled height; calling them provisional does
-not make them inert. Candidate calibration must derive and review the proposed
-coefficient first; after it is installed in the final freeze, an exact-final
-schema-4 merged two-provider corpus assembled from schema-3 parent samples and
-schema-2 CUDA+Metal RC artifacts must confirm it without a source change. The two L0 source
-flags are true and satisfy the code gate, but the activation review must
-re-affirm them against that final evidence before merge; a source constant is
-not, by itself, evidence that the required operational and governance review
-occurred.
+The staged shape keeps DRLT and coupled RC disabled, selects Profile 1 and
+production dimensions, and leaves unfinished Stage-3 proof authority and
+HeaderPoW off. Every live ASERT ratio is `1/1`; the reviewed RC coefficient is
+staged but not wired. After a fresh `H_A`, coefficient, and source flags are
+installed in one final freeze, exact-final CUDA+Metal, schema-3 lifecycle, and
+revision-bound ASERT evidence must confirm it without another source change.
 
 Round `r` is derived from round `r-1`'s root, so rounds are not sampled or run
 concurrently. The serialized block header remains 182 bytes and commits only

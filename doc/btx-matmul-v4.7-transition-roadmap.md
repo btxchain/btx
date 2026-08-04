@@ -1,13 +1,12 @@
 # MatMul v4.7 consensus transition roadmap
 
-Status: **canonical documentation for the MatMul v4.7 transition. Epoch A is a
-release candidate, not a shipped activation.** The atomic `H_A` tuple in
-`src/kernel/chainparams.cpp`, ratification flags, and RC ASERT coefficient are
-candidate values. The release must settle them with a live-tip runway
-calculation before the final source freeze, then confirm that unchanged freeze
-with exact-final-binary evidence. Any tuple change repeats the freeze and
-evidence.
-Testnet and signet heights remain disabled, as do Epochs B–D everywhere.
+Status: **canonical documentation for the MatMul v4.7 transition. Epoch A is
+implemented but disabled.** Mainnet, testnet, and signet keep the v4, BMX4C,
+and RC heights at `INT32_MAX`; mainnet's live RC ASERT ratio is `1/1` and the
+GPU-lifecycle ratification flag is false. A later activation-only change must
+select a fresh atomic `H_A`, install the reviewed coefficient, and then confirm
+that unchanged freeze with exact-final-binary evidence. Any tuple change
+repeats the freeze and evidence. Epochs B–D remain disabled everywhere.
 This document records the transition contract and the evidence still required
 to close the Epoch-A gates (§4). Consensus source schedules the transition;
 documentation does not authorize it.
@@ -33,7 +32,7 @@ separately specified durable proof object to consensus data, so its exact byte
 budget, commitment, relay, pruning, and IBD rules must be reviewed before that
 epoch can activate.
 
-### 1.1 Atomic Epoch-A contract — candidate shape
+### 1.1 Atomic Epoch-A contract — staged shape
 
 Historical contract: through every implementation-only release, all public
 v4, BMX4C, and RC heights stayed `INT32_MAX`; DRLT, coupled RC, HeaderPoW,
@@ -41,18 +40,18 @@ unfinished Stage-3 authority, and toy dimensions stayed disabled; Profile 1
 was the inert pre-activation selector; and
 `BTX_MATMUL_NO_INVERSION_GATE_RATIFIED` stayed false.
 
-The candidate sets the tuple atomically on mainnet at one release-selected
-`H_A`, satisfying the structural contract as follows:
+Current source keeps the tuple disabled while staging the structural contract
+for a later, separately reviewed activation-only change:
 
 | Component | Contract at Epoch A | Release-candidate value |
 |---|---|---|
-| Heights | `nMatMulV4Height = nMatMulBMX4CHeight = nMatMulRCHeight = H_A` | one finite candidate height; recomputed before release |
+| Heights | `nMatMulV4Height = nMatMulBMX4CHeight = nMatMulRCHeight = H_A` | all three `INT32_MAX`; a fresh `H_A` is required for activation |
 | Withdrawn/intermediate paths | `nMatMulDRLTHeight = nMatMulRCCoupledHeight = INT32_MAX` | both `INT32_MAX` (disabled) |
 | Workload | `nMatMulRCProfile = 1`, production dimensions, four-round replay | Profile 1, `matmul_dim = 4096` |
 | Authority | ExactReplay; Stage-3 proof authority remains disabled | ExactReplay only |
 | Header admission | HeaderPoW disabled; the fixed header remains 182 bytes | disabled; 182 bytes |
-| ASERT | v4 and BMX4C ratios remain `1/1`; RC owns the reviewed final-binary calibration | v4/BMX4C `1/1`; RC candidate is provisional pending the schema-4 exact-final-binary rerun |
-| Ratification | explicit L0 ratification is a separate reviewed decision | the source constants are true and technically satisfy the startup gate; merging unchanged arms the candidate, so release remains blocked until exact-final evidence and the activation review re-affirm them |
+| ASERT | v4 and BMX4C ratios remain `1/1`; RC owns the reviewed final-binary calibration | all live ratios `1/1`; the RC coefficient is staged, not wired |
+| Ratification | explicit L0 ratification is a separate reviewed decision | no-inversion remains recorded; GPU-lifecycle is false and activation is rejected |
 
 The equality of the three heights prevents any digest-only v4/BMX4C interval
 before ExactReplay authority. The ASERT assignment is deliberately
@@ -159,10 +158,9 @@ committed reports record only a broad hardware class and contain no hostname,
 username, personal path, or device serial. This 2026-08-01 campaign did not
 by itself constitute activation evidence; see §4 for which gates the later
 sealed cohort, soak, and calibration artifacts closed, and which remain open.
-The candidate currently sets both source flags true. Together with the finite
-height, that state technically passes the construction guard and will activate
-Epoch A if merged unchanged. It is not evidence of governance or operational
-closure, so the release review must re-affirm it against exact-final evidence.
+Corrective source keeps the GPU-lifecycle flag false and all three heights
+disabled. The construction guard therefore rejects activation. A later finite
+tuple must be re-affirmed against exact-final evidence before merge.
 
 ## 4. Epoch-A activation gates — current candidate status
 
@@ -298,18 +296,15 @@ acceleration, near-tip scheduler, admission policy, and local evidence. It
 also retains Profile 2 and unfinished Stage-3 proof machinery for continued
 development.
 
-The branch selects Profile 1 and contains a finite candidate Epoch-A tuple:
-`nMatMulV4Height = nMatMulBMX4CHeight = nMatMulRCHeight = H_A`, with the
-candidate RC rescale and both ratification flags set. That tuple is a real
-consensus instruction if merged; it is not made inert by calling it a release
-candidate. The branch therefore remains **NO-GO** until all release gates close,
-including exact-final CUDA+Metal evidence, a revision-bound ASERT calibration
-of the same source/height/coefficient/flags, the strict-device trusted-mirror
-rehearsal, full-suite closeout, reviewed operational-campaign dispositions, and
-a live-tip runway recheck. Any change to that fingerprinted freeze requires
-regenerating the corpus and production manifest. Epochs B–D remain unreachable
-(no height-versioned proof selectors exist), while testnet and signet remain on
-v3 with all transition heights disabled.
+The branch selects Profile 1 but keeps the mainnet Epoch-A tuple disabled:
+`nMatMulV4Height = nMatMulBMX4CHeight = nMatMulRCHeight = INT32_MAX`, live RC
+rescale `1/1`, and GPU-lifecycle ratification false. Activation remains
+**NO-GO** until a fresh finite tuple closes exact-final CUDA+Metal evidence, a
+revision-bound ASERT calibration, the strict-device trusted-mirror rehearsal,
+schema-3 lifecycle, full-suite closeout, reviewed operational-campaign
+dispositions, and a live-tip runway recheck. Any change to that fingerprinted
+freeze requires regenerating the corpus and production manifest. Epochs B–D
+remain unreachable, while testnet and signet remain on v3.
 
 ## 8. Documentation precedence
 

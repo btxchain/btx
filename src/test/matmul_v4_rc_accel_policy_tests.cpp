@@ -325,12 +325,13 @@ BOOST_AUTO_TEST_CASE(rc_execution_default_is_activation_aware_and_test_safe)
 {
     ArgsManager empty;
 
-    // Mainnet carries a finite RC activation height, so the default fails
-    // closed: no silent CPU replay behind a live consensus rule.
+    // Mainnet is currently disabled, so pre-activation operation keeps the
+    // portable diagnostic fallback. A later finite activation makes the
+    // default strict-device through the same policy function.
     const auto main{CreateChainParams(empty, ChainType::MAIN)};
-    BOOST_REQUIRE(main->GetConsensus().nMatMulRCHeight !=
-                  std::numeric_limits<int32_t>::max());
-    BOOST_CHECK_EQUAL(DefaultMatMulRCExecutionMode(*main), "strict-device");
+    BOOST_REQUIRE_EQUAL(main->GetConsensus().nMatMulRCHeight,
+                        std::numeric_limits<int32_t>::max());
+    BOOST_CHECK_EQUAL(DefaultMatMulRCExecutionMode(*main), "auto-fallback");
 
     // Regtest is exempt even though it routinely sets a finite RC height: it
     // runs toy dimensions on hosts with no qualified accelerator, so strict
