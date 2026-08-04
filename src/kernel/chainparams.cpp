@@ -111,14 +111,12 @@ static constexpr int64_t kRCDatacenterAsertRescaleDen{1027};
 // exactly what DeriveMatMulEpochATransitionTarget computes. The realized
 // loosen is the OUTCOME k = p_rc/p = q * C, not an input.
 //
-// MEASURED, same-silicon, two vendors
-// (doc/evidence/asert-two-rig-calibration-2026-08-03):
-//     CUDA sm_120 : N/M = 6.93e9  -> k ~ 119'783
-//     Metal m4    : N/M = 1.15e9  -> k ~  19'900
-// The 5.8x spread is a hardware-mix property. Installed at the CUDA figure
-// because the loss function is asymmetric: under-loosening costs linearly in
-// the error while over-loosening costs only logarithmically, so biasing toward
-// the faster observed miner is the cheap direction.
+// HISTORICAL DIAGNOSTIC ESTIMATES (not exact-final calibration evidence) in
+// doc/evidence/asert-two-rig-calibration-2026-08-03 reported CUDA and Metal
+// values near 6.93e9 and 1.15e9. Epoch-A calibration policy is CUDA-only because
+// it models the expected mining cohort. Metal remains independently mandatory
+// for the CUDA+Metal correctness-golden cohort. Do not treat the historical
+// values as the provenance of the installed policy coefficient below.
 //
 // HAZARD, and the reason this comment is long. An earlier revision of this
 // file installed a SATURATED uint32 value and described the field as a
@@ -127,8 +125,8 @@ static constexpr int64_t kRCDatacenterAsertRescaleDen{1027};
 // instead of the intended ~1.2e5 -- under-loosening by 1/q ~ 57'864x, which at
 // a 90 s target is a first block expected in roughly 60 DAYS. The uint32
 // saturation is also gone: the Epoch-A path does exact wide arithmetic and now
-// reduces through ReduceRescaleRatioToU64, so the measured value is installed
-// directly rather than clipped.
+// reduces through ReduceRescaleRatioToU64, so any reviewed policy value that
+// fits the signed consensus field is installed directly rather than clipped.
 //
 // matmul_unified_activation_tests pins a fixed vector at the calibration nBits
 // asserting the realized k, so a future value of the wrong KIND fails a test
@@ -454,7 +452,8 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
     // entirely and is wrong by that factor. The correct one-time loosen is
     //     k = 2^epsilon * p(H_A-1) * (R_v3 / R_rc).
     // MatMulAsert now derives that factor from live parent nBits with a 512-bit
-    // intermediate. These fields carry only the measured throughput ratio.
+    // intermediate. These fields carry only the attempt-rate coefficient C;
+    // release provenance determines whether its policy value is evidence-bound.
     // ASERT-RATIO CONSISTENCY guardrail: the datacenter one-time ASERT rescale
     // constant MUST equal the EXACT reduced datacenter/base episode-MAC ratio, so
     // it can never silently drift from the real per-block work uplift when the

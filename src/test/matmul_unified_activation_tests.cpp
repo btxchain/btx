@@ -321,7 +321,8 @@ BOOST_AUTO_TEST_CASE(epoch_a_installed_coefficient_realizes_expected_loosen)
     uint64_t an{0}, ad{0};
     BOOST_REQUIRE(ReduceRescaleRatioToU64(p.nMatMulRCAsertRescaleNum,
                                           p.nMatMulRCAsertRescaleDen, an, ad));
-    // The measured coefficient exceeds uint32; the Epoch-A path must not clip it.
+    // The installed policy coefficient exceeds uint32; the Epoch-A path must
+    // not clip it. Exact-final measurement is a separate release gate.
     BOOST_CHECK_GT(an, static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()));
 
     const auto derived{DeriveMatMulEpochATransitionTarget(
@@ -342,8 +343,10 @@ BOOST_AUTO_TEST_CASE(epoch_a_installed_coefficient_realizes_expected_loosen)
     // this is an independent check of the helper's output.
     const arith_uint256 k_ratio = *derived / parent;
     BOOST_CHECK_EQUAL(k_ratio.GetLow64(), 119'783U);
-    // Measured endpoints: Metal ~19'900, CUDA ~119'800. Installed at the CUDA
-    // figure. A value of the WRONG KIND lands far outside this band: supplying
+    // The installed policy produces a loosen near the historical CUDA estimate.
+    // That is a fixed-vector property, not a claim that this literal was
+    // reproduced by the current schema-4 evidence. A value of the WRONG KIND
+    // lands far outside this band: supplying
     // the realized loosen k instead of the attempt-rate ratio C yields ~2,
     // which is the 1/q under-loosen that would stall the chain for weeks.
     BOOST_CHECK(k_ratio > arith_uint256{50'000});

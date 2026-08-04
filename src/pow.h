@@ -221,8 +221,10 @@ bool ValidateMatMulAsertParams(const Consensus::Params& params, int32_t next_hei
  *  reduced terms fit in uint32. Prevents ScaleTargetByTimespan's independent
  *  per-term uint32 clamp from distorting a large-but-exact ratio (e.g. 2^40/2^39).*/
 bool ReduceRescaleRatioToU32(int64_t num, int64_t den, uint32_t& out_num, uint32_t& out_den);
-/** 64-bit reduction for paths that do exact wide arithmetic and are therefore
- *  not bound by ScaleTargetByTimespan's UINT32_MAX per-argument clamp. */
+/** Signed-consensus-field reduction for paths that do exact wide arithmetic
+ *  and are therefore not bound by ScaleTargetByTimespan's UINT32_MAX clamp.
+ *  Inputs are int64_t consensus parameters; outputs are uint64_t solely for
+ *  the subsequent non-negative wide arithmetic. */
 bool ReduceRescaleRatioToU64(int64_t num, int64_t den, uint64_t& out_num, uint64_t& out_den);
 /**
  * Derive the atomic v3 -> Epoch-A target from the live parent target.

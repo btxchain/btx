@@ -994,9 +994,9 @@ bool ReduceRescaleRatioToU64(int64_t num, int64_t den, uint64_t& out_num, uint64
     // ScaleTargetByTimespan clamps each of its two scale arguments to UINT32_MAX
     // independently. The Epoch-A transition does NOT go through that function --
     // DeriveMatMulEpochATransitionTarget does exact wide arithmetic -- so the
-    // ceiling is an artificial limit there, and a real one: the measured
-    // pre-gate attempt-rate ratio for the fastest available accelerator is about
-    // 6.93e9, which does not fit in uint32 and previously had to be saturated.
+    // ceiling is an artificial limit there, and a real one: the staged
+    // pre-gate attempt-rate policy coefficient is about 6.93e9, which does not
+    // fit in uint32 and previously had to be saturated.
     // The consensus fields are already int64_t, so no serialization changes.
     if (num <= 0 || den <= 0) return false;
     const int64_t g{std::gcd(num, den)};
@@ -2894,7 +2894,7 @@ unsigned int MatMulAsert(const CBlockIndex* pindexLast, const Consensus::Params&
             //
             // Uses the 64-bit reducer: this path does exact wide arithmetic and
             // is not subject to ScaleTargetByTimespan's UINT32_MAX clamp, and
-            // the measured coefficient exceeds uint32.
+            // the installed policy coefficient exceeds uint32.
             uint64_t rc_an, rc_ad;
             if (!ReduceRescaleRatioToU64(params.nMatMulRCAsertRescaleNum,
                                          params.nMatMulRCAsertRescaleDen,
