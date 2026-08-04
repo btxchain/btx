@@ -766,6 +766,15 @@ class EpochAActivationGateTest(unittest.TestCase):
         changed = lifecycle()
         changed["attempts"] = 3
         self.assert_lifecycle_rejected(changed, "attempts do not reconcile")
+        changed = lifecycle()
+        changed["core_sample_count_without_authority"] = 1
+        changed["core_samples_without_authority"] = [{
+            "attempt": 3,
+            "phase": "steady_mine_relay",
+            "reason": "production authority unavailable",
+        }]
+        changed["attempts"] = 3
+        self.assert_lifecycle_rejected(changed, "must not contain core-only samples")
 
     def test_lifecycle_stage_hashes_must_match_exact_block(self) -> None:
         changed = lifecycle()

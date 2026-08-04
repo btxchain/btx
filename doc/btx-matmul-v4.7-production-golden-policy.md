@@ -103,7 +103,8 @@ activation gate remains open until the exact final revision reproduces the
 corpus, the revision-bound ASERT calibration is independently reviewed, and
 the activation review records the disposition of lifecycle soak, multi-peer
 public testnet, fault/recovery, and released-binary upgrade evidence. The
-current candidate has already installed the tuple and flipped both source
-flags, so these requirements are release blockers rather than deferred runtime
-conditions: if the source were merged unchanged, the tuple would activate at
-its compiled height. Testnet and signet heights remain disabled.
+current corrective source is deliberately not armed: all public Epoch-A
+heights remain disabled, the live RC ratio remains neutral, and the GPU
+lifecycle source flag remains false. A later activation-only change may install
+the finite tuple and flip the lifecycle flag only after these release blockers
+close. Testnet and signet heights remain disabled.

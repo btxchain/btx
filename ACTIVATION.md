@@ -396,22 +396,25 @@ record.
 
 Until the exact-final tuple, coefficient, and ratification decision are
 committed in a reviewed release and that release reaches its selected height,
-the public network stays on v3. The finite values in this development branch
-are not deployment authorization. A partial tuple is invalid by construction.
+the public network stays on v3. The staged coefficient constants in this
+development branch are not deployment authorization: the public heights remain
+disabled and the live RC ratio remains neutral. A partial tuple is invalid by
+construction.
 
 ---
 
 ## Gate C — historical ENC-BMX4C research tracker
 
-> **v4.7 precedence:** The Epoch-A candidate activates BMX4C atomically with v4 and
-> Profile-1 ExactReplay at `H_A`. It is not a later standalone mainnet fork.
+> **v4.7 precedence:** The Epoch-A release design activates BMX4C atomically with
+> v4 and Profile-1 ExactReplay at `H_A`. It is not a later standalone mainnet fork.
 > The material below is retained as design and measurement provenance; its old
 > ordering and independent-height recommendations do not govern v4.7.
 
-**Historical note:** before the Epoch-A candidate,
-`nMatMulBMX4CHeight` was deliberately unset on every network. The candidate
-stages it at the same release-selected height as v4 and RC, but the tuple is
-not final or shipped until the current activation gates close. Design source
+**Historical note:** before the atomic Epoch-A release design,
+`nMatMulBMX4CHeight` was deliberately unset on every network. A later
+activation-only change will stage it at the same release-selected height as v4
+and RC, but the current corrective source keeps the entire tuple disabled.
+Design source
 of truth for the historical encoding work:
 `doc/btx-matmul-v4.2-consolidated-design.md`; normative encoding spec + profile
 machinery: `doc/btx-matmul-v4.2-bmx4c-spec.md`; governance framework:

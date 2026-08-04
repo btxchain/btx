@@ -856,6 +856,10 @@ def validate_lifecycle(
         "core_sample_count_without_authority",
     )
     require(core_count == len(core_samples), "lifecycle core sample count mismatch")
+    require(
+        core_count == 0,
+        "production lifecycle artifact must not contain core-only samples",
+    )
     incomplete_samples = artifact.get("incomplete_samples")
     require(isinstance(incomplete_samples, list),
             "lifecycle incomplete_samples must be an array")

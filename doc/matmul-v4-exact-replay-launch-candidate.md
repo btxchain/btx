@@ -241,7 +241,9 @@ Current candidate status before a release-final height:
   clean code freeze and committed as the production golden manifest.
 - [ ] One-time RC ASERT calibration rerun as a schema-4 corpus assembled from
   schema-3 parent samples and schema-2 RC artifacts on the exact final clean
-  binaries, with zero fallback on both vendors.
+  CUDA launch-miner binaries, with zero fallback across that cohort. The
+  separate production-golden gate still requires byte-identical CUDA+Metal
+  evidence from its own exact-final binaries.
 - [x] The consensus selector is Profile 1, with a construction invariant and
   regression coverage.
 - [x] The atomic Epoch-A tuple is a construction invariant: equal
