@@ -873,12 +873,12 @@ public:
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].nTimeout = Consensus::BIP9Deployment::NO_TIMEOUT;
         consensus.vDeployments[Consensus::DEPLOYMENT_TAPROOT].min_activation_height = 0;
 
-        // Mainnet anchor refreshed on 2026-08-01 at height 176'600 from a
+        // Mainnet anchor refreshed on 2026-08-04 at height 179'000 from a
         // synced archival node so stale history below the current public
         // release floor is rejected quickly.
-        consensus.nMinimumChainWork = uint256{"00000000000000000000000000000000000000000000000000027958e367c643"};
+        consensus.nMinimumChainWork = uint256{"00000000000000000000000000000000000000000000000000029d454fe795d2"};
         // Assume signatures valid up to the same anchored block to speed sync.
-        consensus.defaultAssumeValid = uint256{"d5ba7a35a8a61b89de1b0289a6655551909f0491193ddd7620aebbea37a3beaa"};
+        consensus.defaultAssumeValid = uint256{"2dd1d545b1b5e76c28b4414ebe0c22b1ba9d3ebd88662fbd1b9e4d0cf6693933"};
 
         /**
          * The message start string is designed to be unlikely to occur in normal data.
@@ -942,8 +942,7 @@ public:
         checkpointData = {
             {
                 {0, uint256{"75a998a39d2d6e25a9ca7de2cc659309c4105839c06cd435ba2b1aabf0fa4601"}},
-                {155700, uint256{"b5ea1fb02d12e1cfa4bbc5ccc4946ca026ad4a5f270b99a0816aa95853306c3d"}},
-                {176600, uint256{"d5ba7a35a8a61b89de1b0289a6655551909f0491193ddd7620aebbea37a3beaa"}},
+                {179000, uint256{"2dd1d545b1b5e76c28b4414ebe0c22b1ba9d3ebd88662fbd1b9e4d0cf6693933"}},
             }
         };
         m_assumeutxo_data = {
@@ -1095,11 +1094,19 @@ public:
                 .blockhash = consteval_ctor(uint256{"d5ba7a35a8a61b89de1b0289a6655551909f0491193ddd7620aebbea37a3beaa"}),
                 .shielded_state_commitment = uint256{"c0f3bde58e1138367a6cd2b0131975de8fad9c90a991f88a42e9397d742b77ce"},
             },
+            {
+                // main assumeutxo snapshot at height 179'000 (snapshot v9)
+                .height = 179'000,
+                .hash_serialized = AssumeutxoHash{uint256{"eaefa544df815ca35037024923166be89232884faa541d8a40c57481be30857c"}},
+                .m_chain_tx_count = 274'878,
+                .blockhash = consteval_ctor(uint256{"2dd1d545b1b5e76c28b4414ebe0c22b1ba9d3ebd88662fbd1b9e4d0cf6693933"}),
+                .shielded_state_commitment = uint256{"74a131a91f71cb7e488c1826eb3d5676802a586bddb8082b33356568d7def0b5"},
+            },
         };
         chainTxData = ChainTxData{
-            .nTime = 1785571483,
-            .tx_count = 271654,
-            .dTxRate = 0.023232,
+            .nTime = 1785786086,
+            .tx_count = 274878,
+            .dTxRate = 0.015165177474,
         };
     }
 };

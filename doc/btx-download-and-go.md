@@ -344,6 +344,13 @@ Operational note:
   final boolean, `include_local_registry_status`; set it to `false` for
   stateless high-volume verification when you do not need local
   issued/redeemed/redeemable flags
+- service challenges use the encoding profile selected at their anchored
+  proof height. ENC-S8, ENC-BMX4C, and Phase-A ENC-BMX4C-LT challenges use
+  their matching sketch implementation. Issuance, solving, and verification
+  fail closed while ENC-RC, ENC-RC-COUPLED, or LT seal-as-PoW is selected:
+  those regimes do not have the cheap carried-sketch proof this application
+  RPC promises, and the RPC must not silently substitute BMX4C work or launch
+  an unbudgeted ExactReplay
 
 ## 4. What release maintainers need to publish
 

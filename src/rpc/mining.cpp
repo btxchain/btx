@@ -33,6 +33,7 @@
 #include <matmul/matmul_pow.h>
 #include <matmul/matmul_v4_rc_accelerator_scheduler.h>
 #include <matmul/matmul_v4_bmx4.h>
+#include <matmul/matmul_v4_lt.h>
 #include <matmul/matmul_v4_rc.h>
 #include <matmul/matmul_v4_rc_coupled.h>
 #include <matmul/matmul_v4_rc_gkr.h>
@@ -1986,9 +1987,56 @@ static const char* ResolveMatMulEncodingProfileName(
         return "ENC-BMX4C-LT";
     case Consensus::MatMulEncodingProfile::ENC_BMX4C:
         return "ENC-BMX4C";
+    case Consensus::MatMulEncodingProfile::ENC_BMX4CD:
+        return "ENC-BMX4C-D-RETIRED";
     default:
         return "ENC-S8";
     }
+}
+
+/**
+ * Service proofs are designed for cheap verification at an application
+ * admission boundary. ENC-S8, ENC-BMX4C, and Phase-A ENC-BMX4C-LT all have a
+ * carried sketch which this RPC can verify under the exact profile-specific
+ * consensus primitive. ENC-RC has no such cheap proof: its authority is a
+ * complete ExactReplay, and ENC-RC-COUPLED additionally requires both work
+ * legs. Running either from an unaudited application RPC would bypass the
+ * network verifier's admission/scheduler controls. Fail closed until a
+ * separately budgeted service-proof design exists instead of silently
+ * evaluating the cheaper BMX4C workload.
+ *
+ * LT seal-as-PoW is also a distinct Q*-slot lottery rather than the Phase-A
+ * single-slot sketch carried by this API, so it must not be represented by the
+ * same envelope.
+ */
+static void EnsureMatMulServiceEncodingProfileSupported(
+    const Consensus::Params& consensus, int32_t height, int rpc_error_code)
+{
+    if (!consensus.IsMatMulV4Active(height)) return;
+
+    const auto profile = consensus.GetMatMulEncodingProfile(height);
+    switch (profile) {
+    case Consensus::MatMulEncodingProfile::ENC_S8:
+    case Consensus::MatMulEncodingProfile::ENC_BMX4C:
+        return;
+    case Consensus::MatMulEncodingProfile::ENC_BMX4CD:
+        throw JSONRPCError(
+            rpc_error_code,
+            "MatMul service challenges do not support retired encoding profile ENC-BMX4C-D");
+    case Consensus::MatMulEncodingProfile::ENC_BMX4C_LT:
+        if (!consensus.IsMatMulLTSealAsPoWActive(height)) return;
+        throw JSONRPCError(
+            rpc_error_code,
+            "MatMul service challenges do not support ENC-BMX4C-LT seal-as-PoW mode");
+    case Consensus::MatMulEncodingProfile::ENC_RC:
+    case Consensus::MatMulEncodingProfile::ENC_RC_COUPLED:
+        throw JSONRPCError(
+            rpc_error_code,
+            strprintf(
+                "MatMul service challenges do not support active encoding profile %s",
+                ResolveMatMulEncodingProfileName(consensus, height)));
+    }
+    throw JSONRPCError(rpc_error_code, "MatMul service challenge encoding profile is unknown");
 }
 
 /** Sketch/transcript tile b for the live profile at `height` (v4: per-profile
@@ -2652,14 +2700,15 @@ struct MatMulServiceChallengeContext {
     // matmul_v4::VerifySketch instead of the v3 transcript/Freivalds ladder.
     // Below the fork these stay false/0 and every v3 field/path is unchanged.
     bool is_v4{false};
-    // MatMul v4.2 / ENC-BMX4C (spec §8.2): at and above nMatMulBMX4CHeight the
-    // pooled/service challenge encodes operands with the ENC-BMX4C profile
-    // (M11 mantissa + E8M0 scale), so shares must be verified with
-    // VerifySketchBMX4C and solved via ComputeDigestBMX4C -- NOT the ENC-S8
-    // matmul_v4::VerifySketch / ComputeDigestDispatched. Selected by the SAME
-    // height-gated profile selector the consensus block path uses.
-    bool is_bmx4c{false};
-    std::string encoding_profile;
+    // Full height-selected profile. Supported sketch profiles dispatch to
+    // their exact ENC-S8, ENC-BMX4C, or Phase-A ENC-BMX4C-LT primitive; RC and
+    // coupled profiles are rejected before reaching solve/verify.
+    Consensus::MatMulEncodingProfile encoding_profile{
+        Consensus::MatMulEncodingProfile::ENC_S8};
+    // Canonical public name of the height-selected v4 encoding profile. This
+    // is reconstructed from consensus parameters rather than trusted from the
+    // submitted challenge, then used by the canonical-challenge comparison.
+    std::string encoding_profile_name;
     int32_t challenge_height{0};
     uint32_t v4_rounds{0};
     CBlockHeader header;
@@ -3934,6 +3983,7 @@ static UniValue BuildMatMulServiceChallengeResponse(
             throw JSONRPCError(RPC_INTERNAL_ERROR, "next block height overflow");
         }
     }
+    EnsureMatMulServiceEncodingProfileSupported(consensus, next_height, RPC_MISC_ERROR);
 
     const auto difficulty_resolution = ResolveMatMulServiceDifficultyPolicy(
         consensus,
@@ -4739,14 +4789,15 @@ static MatMulServiceChallengeContext ParseMatMulServiceChallenge(
         // Freivalds round count; below the fork the v3 parameters stand.
         ctx.challenge_height = ctx.anchor_height + 1;
         ctx.is_v4 = consensus.IsMatMulV4Active(ctx.challenge_height);
-        ctx.is_bmx4c = consensus.IsBMX4CActive(ctx.challenge_height);
         if (ctx.is_v4) {
-            ctx.encoding_profile = ResolveMatMulEncodingProfileName(
-                consensus, ctx.challenge_height);
-        }
-        if (ctx.is_v4) {
+            EnsureMatMulServiceEncodingProfileSupported(
+                consensus, ctx.challenge_height, RPC_INVALID_PARAMETER);
+            ctx.encoding_profile = consensus.GetMatMulEncodingProfile(ctx.challenge_height);
+            ctx.encoding_profile_name =
+                ResolveMatMulEncodingProfileName(consensus, ctx.challenge_height);
             ctx.n = static_cast<uint32_t>(consensus.nMatMulV4Dimension);
-            ctx.b = static_cast<uint32_t>(matmul_v4::kTileB);
+            ctx.b = static_cast<uint32_t>(
+                consensus.GetMatMulProfileParams(ctx.challenge_height).tile_b);
             ctx.r = static_cast<uint32_t>(consensus.nMatMulV4FreivaldsRounds);
             ctx.v4_rounds = static_cast<uint32_t>(consensus.nMatMulV4FreivaldsRounds);
         } else {
@@ -4913,13 +4964,11 @@ static std::optional<std::string> GetMatMulServiceChallengeMismatch(
     if (matmul.find_value("seed_a").get_str() != ctx.header.seed_a.GetHex()) return "challenge.matmul.seed_a";
     if (matmul.find_value("seed_b").get_str() != ctx.header.seed_b.GetHex()) return "challenge.matmul.seed_b";
     const UniValue& encoding_profile = matmul.find_value("encoding_profile");
-    if (ctx.is_v4) {
-        if (!encoding_profile.isStr() || encoding_profile.get_str() != ctx.encoding_profile) {
-            return "challenge.matmul.encoding_profile";
-        }
-    } else if (!encoding_profile.isNull()) {
+    if (ctx.is_v4 &&
+         (!encoding_profile.isStr() || encoding_profile.get_str() != ctx.encoding_profile_name)) {
         return "challenge.matmul.encoding_profile";
     }
+    if (!ctx.is_v4 && !encoding_profile.isNull()) return "challenge.matmul.encoding_profile";
 
     const UniValue& service_profile = challenge.find_value("service_profile").get_obj();
     if (ParseNumericServiceField(service_profile.find_value("solve_time_target_s"), "challenge.service_profile.solve_time_target_s") != ctx.solve_time_target_s) return "challenge.service_profile.solve_time_target_s";
@@ -5034,14 +5083,37 @@ static UniValue EvaluateMatMulServiceProof(
             !sketch_payload.empty() && matmul_v4::PayloadMatchesCommitment(header, sketch_payload);
         const bool meets_target = payload_sealed && UintToArith256(digest) <= ctx.target;
         uint256 recomputed;
-        // ENC-BMX4C (spec §8.2): at BMX4C heights regenerate M11+E8M0 operands via
-        // the BMX4C verifier; below it the ENC-S8 int8 verifier. Same profile
-        // selector the consensus block path uses -- so a share the network accepts
-        // is a share this service accepts, and vice versa.
-        transcript_valid = meets_target &&
-            (ctx.is_bmx4c
-                 ? matmul::v4::bmx4::VerifySketchBMX4C(header, ctx.n, ctx.v4_rounds, sketch_payload, recomputed)
-                 : matmul_v4::VerifySketch(header, ctx.n, ctx.v4_rounds, sketch_payload, recomputed));
+        // Dispatch through the exact sketch verifier selected by the canonical
+        // profile. RC-family profiles cannot reach this point because parsing
+        // rejects their replay-only authority model.
+        switch (ctx.encoding_profile) {
+        case Consensus::MatMulEncodingProfile::ENC_S8:
+            transcript_valid = meets_target &&
+                matmul_v4::VerifySketch(
+                    header, ctx.n, ctx.v4_rounds, sketch_payload, recomputed);
+            break;
+        case Consensus::MatMulEncodingProfile::ENC_BMX4C:
+            transcript_valid = meets_target &&
+                matmul::v4::bmx4::VerifySketchBMX4C(
+                    header, ctx.n, ctx.v4_rounds, sketch_payload, recomputed);
+            break;
+        case Consensus::MatMulEncodingProfile::ENC_BMX4CD:
+            throw JSONRPCError(
+                RPC_INVALID_PARAMETER,
+                "MatMul service challenges do not support retired encoding profile ENC-BMX4C-D");
+        case Consensus::MatMulEncodingProfile::ENC_BMX4C_LT:
+            transcript_valid = meets_target &&
+                matmul::v4::lt::VerifySketchBMX4CLT(
+                    header, ctx.n, ctx.v4_rounds, sketch_payload, recomputed);
+            break;
+        case Consensus::MatMulEncodingProfile::ENC_RC:
+        case Consensus::MatMulEncodingProfile::ENC_RC_COUPLED:
+            throw JSONRPCError(
+                RPC_INVALID_PARAMETER,
+                strprintf(
+                    "MatMul service challenges do not support active encoding profile %s",
+                    ctx.encoding_profile_name));
+        }
 
         UniValue proof(UniValue::VOBJ);
         proof.pushKV("nonce64_hex", nonce64_hex);
@@ -5052,7 +5124,7 @@ static UniValue EvaluateMatMulServiceProof(
         proof.pushKV("matmul_version", 4);
         // Audit finding B (RPC): disambiguate the v4.1/v4.2 encoding profile the
         // proof was evaluated under (matmul_version stays 4 for compatibility).
-        proof.pushKV("encoding_profile", ctx.is_bmx4c ? "ENC-BMX4C" : "ENC-S8");
+        proof.pushKV("encoding_profile", ctx.encoding_profile_name);
         proof.pushKV("meets_target", meets_target);
         proof.pushKV("commitment_valid", meets_target);
         proof.pushKV("transcript_valid", transcript_valid);
@@ -8102,14 +8174,35 @@ static RPCHelpMan solvematmulservicechallenge()
             CBlockHeader header = BuildMatMulServiceV4Header(ctx, nonce, uint256{});
             uint256 digest;
             std::vector<unsigned char> payload;
-            // ENC-BMX4C (spec §8.2): grind through the BMX4C single-nonce reference
-            // digest at BMX4C heights (M11+E8M0 operands), else the ENC-S8
-            // dispatched digest. ComputeDigestBMX4C is the same function the
-            // consensus solver reseals through, so the emitted share verifies
-            // under the network's VerifySketchBMX4C.
-            const bool ok = ctx.is_bmx4c
-                ? matmul::v4::bmx4::ComputeDigestBMX4C(header, ctx.n, digest, payload)
-                : matmul_v4::accel::ComputeDigestDispatched(header, ctx.n, ctx.v4_rounds, digest, payload);
+            // Grind through the exact single-nonce implementation selected by
+            // the canonical sketch profile. RC-family profiles cannot reach
+            // this point because parsing rejects their replay-only authority.
+            bool ok{false};
+            switch (ctx.encoding_profile) {
+            case Consensus::MatMulEncodingProfile::ENC_S8:
+                ok = matmul_v4::accel::ComputeDigestDispatched(
+                    header, ctx.n, ctx.v4_rounds, digest, payload);
+                break;
+            case Consensus::MatMulEncodingProfile::ENC_BMX4C:
+                ok = matmul::v4::bmx4::ComputeDigestBMX4C(
+                    header, ctx.n, digest, payload);
+                break;
+            case Consensus::MatMulEncodingProfile::ENC_BMX4CD:
+                throw JSONRPCError(
+                    RPC_INVALID_PARAMETER,
+                    "MatMul service challenges do not support retired encoding profile ENC-BMX4C-D");
+            case Consensus::MatMulEncodingProfile::ENC_BMX4C_LT:
+                ok = matmul::v4::lt::ComputeDigestBMX4CLT(
+                    header, ctx.n, digest, payload);
+                break;
+            case Consensus::MatMulEncodingProfile::ENC_RC:
+            case Consensus::MatMulEncodingProfile::ENC_RC_COUPLED:
+                throw JSONRPCError(
+                    RPC_INVALID_PARAMETER,
+                    strprintf(
+                        "MatMul service challenges do not support active encoding profile %s",
+                        ctx.encoding_profile_name));
+            }
             --max_tries;
             if (ok && UintToArith256(digest) <= ctx.target) {
                 solved = true;
