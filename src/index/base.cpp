@@ -224,24 +224,36 @@ void BaseIndex::Sync()
     }
 }
 
-bool BaseIndex::Commit()
+void BaseIndex::Commit()
 {
     // Don't commit anything if we haven't indexed any block yet
     // (this could happen if init is interrupted).
     bool ok = m_best_block_index != nullptr;
     if (ok) {
+        // Do not persist an index ahead of the durable UTXO tip. After an unclean
+        // shutdown, an index with state (for example coinstatsindex) could not
+        // rewind through blocks that the chainstate never flushed.
+        const CBlockIndex* index_tip{m_best_block_index.load()};
+        const CBlockIndex* last_flushed{
+            WITH_LOCK(::cs_main, return m_chainstate->GetLastFlushedBlock())};
+        if (!last_flushed || last_flushed->GetAncestor(index_tip->nHeight) != index_tip) {
+            LogDebug(BCLog::COINDB,
+                     "Skipping commit, index is ahead of flushed chainstate "
+                     "(index height %d, last flush at height %d)\n",
+                     index_tip->nHeight,
+                     last_flushed ? last_flushed->nHeight : -1);
+            return;
+        }
         CDBBatch batch(GetDB());
         ok = CustomCommit(batch);
         if (ok) {
-            GetDB().WriteBestBlock(batch, GetLocator(*m_chain, m_best_block_index.load()->GetBlockHash()));
+            GetDB().WriteBestBlock(batch, GetLocator(*m_chain, index_tip->GetBlockHash()));
             ok = GetDB().WriteBatch(batch);
         }
     }
     if (!ok) {
         LogError("%s: Failed to commit latest %s state\n", __func__, GetName());
-        return false;
     }
-    return true;
 }
 
 bool BaseIndex::Rewind(const CBlockIndex* current_tip, const CBlockIndex* new_tip)
@@ -385,6 +397,26 @@ bool BaseIndex::BlockUntilSyncedToCurrentChain() const
 
     LogPrintf("%s: %s is catching up on block notifications\n", __func__, GetName());
     m_chain->context()->validation_signals->SyncWithValidationInterfaceQueue();
+    return true;
+}
+
+bool BaseIndex::WaitForRacingWrite(const CBlockIndex* target, int max_ahead) const
+{
+    AssertLockNotHeld(cs_main);
+    if (!target || !m_synced) return false;
+
+    const CBlockIndex* best{m_best_block_index.load()};
+    if (!best) return false;
+
+    // A same-height miss can be a sibling reorg whose BlockConnected callback
+    // is queued. An older miss is real, and a far-future miss must not let a
+    // network peer force an unbounded queue drain.
+    const int ahead{target->nHeight - best->nHeight};
+    if (ahead < 0 || ahead > max_ahead) return false;
+
+    auto* signals{m_chain->context()->validation_signals.get()};
+    if (!signals) return false;
+    signals->SyncWithValidationInterfaceQueue();
     return true;
 }
 

@@ -63,8 +63,10 @@
 
 #include <array>
 #include <cassert>
+#include <cstddef>
 #include <cstdio>
 #include <string>
+#include <string_view>
 
 static std::string rtrim(std::string s)
 {
@@ -185,6 +187,44 @@ void no_nul_test()
     assert(val.read({buf + 3, 7}));
 }
 
+void expect_json_token(std::string_view raw, size_t size, enum jtokentype expected,
+                       unsigned int expected_consumed = 0,
+                       std::string_view expected_token_value = {})
+{
+    assert(size <= raw.size());
+    std::string token_value;
+    unsigned int consumed{0};
+    const enum jtokentype token{
+        getJsonToken(token_value, consumed, raw.data(), raw.data() + size)};
+    assert(token == expected);
+    assert(consumed == expected_consumed);
+    assert(std::string_view{token_value} == expected_token_value);
+}
+
+void get_json_token_end_test()
+{
+    expect_json_token("null", 3, JTOK_ERR);
+    expect_json_token("true", 3, JTOK_ERR);
+    expect_json_token("false", 4, JTOK_ERR);
+    expect_json_token("null", 4, JTOK_KW_NULL, 4);
+    expect_json_token("true", 4, JTOK_KW_TRUE, 4);
+    expect_json_token("false", 5, JTOK_KW_FALSE, 5);
+    expect_json_token("-0", 1, JTOK_ERR);
+    expect_json_token("-x", 1, JTOK_ERR);
+    expect_json_token("01", 1, JTOK_NUMBER, 1, "0");
+    expect_json_token("-01", 2, JTOK_NUMBER, 2, "-0");
+    expect_json_token("01", 2, JTOK_ERR);
+    expect_json_token("-01", 3, JTOK_ERR);
+    expect_json_token("1.5", 3, JTOK_NUMBER, 3, "1.5");
+    expect_json_token("-0.5", 4, JTOK_NUMBER, 4, "-0.5");
+    expect_json_token("1.5", 2, JTOK_ERR);
+    expect_json_token("1e5", 3, JTOK_NUMBER, 3, "1e5");
+    expect_json_token("-1e-5", 5, JTOK_NUMBER, 5, "-1e-5");
+    expect_json_token("1e", 2, JTOK_ERR);
+    expect_json_token("1.5e3", 5, JTOK_NUMBER, 5, "1.5e3");
+    expect_json_token("-1.5e-3", 7, JTOK_NUMBER, 7, "-1.5e-3");
+}
+
 int main(int argc, char* argv[])
 {
     for (const auto& [file, json] : tests) {
@@ -193,6 +233,7 @@ int main(int argc, char* argv[])
 
     unescape_unicode_test();
     no_nul_test();
+    get_json_token_end_test();
 
     return 0;
 }

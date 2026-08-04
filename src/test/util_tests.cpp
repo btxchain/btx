@@ -2210,6 +2210,16 @@ BOOST_AUTO_TEST_CASE(mib_string_literal_test)
     BOOST_CHECK_EXCEPTION(operator""_MiB(static_cast<unsigned long long>(max_mib) + 1), std::overflow_error, HasReason("MiB value too large for size_t byte conversion"));
 }
 
+BOOST_AUTO_TEST_CASE(ceil_div_test)
+{
+    BOOST_CHECK((std::is_same_v<decltype(CeilDiv(uint32_t{0}, uint64_t{1})), uint64_t>));
+    BOOST_CHECK_EQUAL(CeilDiv(0ULL, 1ULL), 0ULL);
+    BOOST_CHECK_EQUAL(CeilDiv(2ULL, 2ULL), 1ULL);
+    BOOST_CHECK_EQUAL(CeilDiv(3ULL, 2ULL), 2ULL);
+    constexpr uint64_t max{std::numeric_limits<uint64_t>::max()};
+    BOOST_CHECK_EQUAL(CeilDiv(max, 2ULL), max / 2 + 1);
+}
+
 BOOST_AUTO_TEST_CASE(is_space_byte_range_test)
 {
     std::vector expected(256, false);

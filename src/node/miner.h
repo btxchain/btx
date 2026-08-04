@@ -164,6 +164,9 @@ private:
     // Information on the current status of the block
     uint64_t nBlockWeight;
     uint64_t nBlockSize;
+    /** Height-aware serialized template ceiling (may be below policy to keep
+     *  the solved full block inside the P2P message limit). */
+    uint64_t m_block_max_size;
     uint64_t nBlockTx;
     uint64_t nBlockSigOpsCost;
     /** Accumulated shielded verification cost budget (spends + outputs). */

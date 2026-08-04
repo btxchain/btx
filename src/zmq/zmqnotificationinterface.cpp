@@ -14,6 +14,8 @@
 #include <primitives/block.h>
 #include <primitives/transaction.h>
 #include <validationinterface.h>
+#include <util/result.h>
+#include <util/translation.h>
 #include <zmq/zmqabstractnotifier.h>
 #include <zmq/zmqpublishnotifier.h>
 #include <zmq/zmqutil.h>
@@ -46,7 +48,7 @@ std::list<const CZMQAbstractNotifier*> CZMQNotificationInterface::GetActiveNotif
     return result;
 }
 
-std::unique_ptr<CZMQNotificationInterface> CZMQNotificationInterface::Create(std::function<bool(std::vector<uint8_t>&, const CBlockIndex&)> get_block_by_index)
+util::Result<std::unique_ptr<CZMQNotificationInterface>> CZMQNotificationInterface::Create(std::function<bool(std::vector<uint8_t>&, const CBlockIndex&)> get_block_by_index)
 {
     std::map<std::string, CZMQNotifierFactory> factories;
     factories["pubhashblock"] = CZMQAbstractNotifier::Create<CZMQPublishHashBlockNotifier>;
@@ -86,9 +88,12 @@ std::unique_ptr<CZMQNotificationInterface> CZMQNotificationInterface::Create(std
         if (notificationInterface->Initialize()) {
             return notificationInterface;
         }
+        if (!notificationInterface->m_fatal_error.empty()) {
+            return util::Error{Untranslated(notificationInterface->m_fatal_error)};
+        }
     }
 
-    return nullptr;
+    return std::unique_ptr<CZMQNotificationInterface>{};
 }
 
 // Called at startup to conditionally set up ZMQ socket(s)
@@ -118,6 +123,7 @@ bool CZMQNotificationInterface::Initialize()
             LogDebug(BCLog::ZMQ, "Notifier %s ready (address = %s)\n", notifier->GetType(), notifier->GetAddress());
         } else {
             LogDebug(BCLog::ZMQ, "Notifier %s failed (address = %s)\n", notifier->GetType(), notifier->GetAddress());
+            if (!notifier->GetFatalError().empty()) m_fatal_error = notifier->GetFatalError();
             return false;
         }
     }

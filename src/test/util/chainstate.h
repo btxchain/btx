@@ -85,7 +85,9 @@ CreateAndActivateUTXOSnapshot(
             chain.InitCoinsDB(1 << 20, true, false, "");
             chain.InitCoinsCache(1 << 20);
             chain.CoinsTip().SetBestBlock(gen_hash);
-            chain.setBlockIndexCandidates.insert(node.chainman->m_blockman.LookupBlockIndex(gen_hash));
+            for (Chainstate* chainstate : node.chainman->GetAll()) {
+                chainstate->ClearBlockIndexCandidates();
+            }
             chain.LoadChainTip();
             node.chainman->MaybeRebalanceCaches();
 
@@ -106,6 +108,9 @@ CreateAndActivateUTXOSnapshot(
                 pindex->m_chain_tx_count = 0;
                 pindex->nSequenceId = 0;
                 pindex = pindex->pprev;
+            }
+            for (Chainstate* chainstate : node.chainman->GetAll()) {
+                chainstate->PopulateBlockIndexCandidates();
             }
         }
         BlockValidationState state;
@@ -137,8 +142,14 @@ CreateAndActivateUTXOSnapshot(
                      util::ErrorString(res).original.c_str());
     }
 
-    // Restore the old tip.
-    new_active.m_chain.SetTip(*tip);
+    // Restore the old tip. Activation may have rebuilt candidates while the
+    // test-only temporary tip was one block lower, so prune against the tip we
+    // just restored as well.
+    {
+        LOCK(::cs_main);
+        new_active.m_chain.SetTip(*tip);
+        new_active.PruneBlockIndexCandidates();
+    }
     return !!res;
 }
 

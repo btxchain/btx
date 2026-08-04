@@ -3023,7 +3023,7 @@ static int64_t GetImportTimestamp(const UniValue& data, int64_t now)
         }
         throw JSONRPCError(RPC_TYPE_ERROR, strprintf("Expected number or \"now\" timestamp value for key. got type %s", uvTypeName(timestamp.type())));
     }
-    throw JSONRPCError(RPC_TYPE_ERROR, "Missing required timestamp field for key");
+    throw JSONRPCError(RPC_TYPE_ERROR, strprintf("Missing required timestamp field for import request: %s", data.write()));
 }
 
 RPCHelpMan importmulti()
@@ -3587,10 +3587,6 @@ RPCHelpMan importdescriptors()
     if (!pwallet) return UniValue::VNULL;
     CWallet& wallet{*pwallet};
 
-    // Make sure the results are valid at least up to the most recent block
-    // the user could have gotten from another RPC command prior to now
-    wallet.BlockUntilSyncedToCurrentChain();
-
     //  Make sure wallet is a descriptor wallet
     if (!pwallet->IsWalletFlagSet(WALLET_FLAG_DESCRIPTORS)) {
         throw JSONRPCError(RPC_WALLET_ERROR, "importdescriptors is not available for non-descriptor wallets");
@@ -3600,6 +3596,10 @@ RPCHelpMan importdescriptors()
     if (!reserver.reserve(/*with_passphrase=*/true)) {
         throw JSONRPCError(RPC_WALLET_ERROR, "Wallet is currently rescanning. Abort existing rescan or wait.");
     }
+
+    // Reserve before waiting on cs_wallet so concurrent imports cannot both
+    // pass the rescan reservation while one is blocked on wallet sync.
+    wallet.BlockUntilSyncedToCurrentChain();
 
     // Ensure that the wallet is not locked for the remainder of this RPC, as
     // the passphrase is used to top up the keypool.

@@ -82,8 +82,9 @@ The chain is unusually well equipped for this. Verified against current
   - `mr(multi_pq(m,k1,...))`, `sortedmulti_pq`
   - `mr(cltv_multi_pq(locktime,m,k1,...))`, `csv_multi_pq(seq,...)`
   - `mr(ctv_multi_pq(ctv_hash,m,k1,...))`, `ctv(hash)`, CTV+CHECKSIG
-  - `htlc(<hash160>,<claimer_key>)` and `refund(<locktime>,<sender_key>)`
-    leaves, CSFS delegation leaves
+  - `htlc_tx(<hash160>,<claimer_key>)` and `refund(<locktime>,<sender_key>)`
+    leaves, plus separate CSFS delegation leaves. Legacy `htlc()` is
+    recovery-only because its CSFS witness is transaction-replayable.
   - Trees: `mr(<primary_leaf>, {<leaf>, <leaf>})` — **the primary slot
     accepts any leaf type** (same `parse_leaf_expr`), so a vault can be
     built with *no* unconditional key path.
@@ -101,7 +102,7 @@ The chain is unusually well equipped for this. Verified against current
   `signmessage` for proof of key control.
 - **Cross-chain leg:** wBTX Model B trustless atomic swap
   (`contrib/wbtx/evm/WBTXAtomicSwapHTLC.sol`) shares the exact
-  `RIPEMD160(SHA256(preimage))` hashlock with the BTX `htlc()` leaf.
+  `RIPEMD160(SHA256(preimage))` hashlock with the BTX `htlc_tx()` leaf.
 
 What does **not** exist (and this design routes around): DLC/adaptor
 signatures/PTLC (PQ adaptor signatures for ML-DSA are research-grade), any
@@ -125,7 +126,8 @@ bonding happens in two stages:
 
 ```
 BOND = mr( multi_pq(2, S_settle, V),          # settlement handoff: seller + venue co-sign
-           refund(H_expiry, S_refund) )        # seller-only exit after offer expiry
+           { refund(H_expiry, S_refund),       # seller-only exit after offer expiry
+             commit(offer_terms_hash) } )      # unspendable terms binding
 ```
 
 - `S_settle`, `S_refund`: seller ML-DSA keys. `V`: the venue/orderbook
@@ -158,24 +160,21 @@ Every offer has a canonical **terms hash**:
 ```
 offer_terms_hash = SHA256(canonical_json{
     version, seller_id_pubkey, amount_sats, price_or_pricing_formula,
-    settle_asset, settle_venue, H_expiry, bond_outpoints[],
+    settle_asset, settle_venue, H_expiry,
     settlement_type, arbiter/oracle keys if any, nonce })
 ```
 
-The funding transaction that creates the bond UTXO(s) includes one
-`OP_RETURN` output:
+The P2MR vault descriptor includes an unspendable commitment leaf:
 
 ```
-OP_RETURN "BTXOTC1" || offer_terms_hash        # 7 + 32 = 39 bytes ≤ 83-byte cap
+commit(offer_terms_hash)
 ```
 
-Because an outpoint has exactly one funding transaction and that
-transaction commits to exactly one terms hash, **the same coins can never
-verifiably back two different offers** — a second "offer bundle" citing
-the same outpoint with different terms fails verification at every
-verifier, on every venue, with no cross-venue coordination needed.
-Offers funded without the commitment simply verify as *unbound* (tier
-B in §4.5) and should be priced/trusted accordingly.
+The leaf is folded into the vault's Merkle root but is never revealed as a
+spend witness or stored as an OP_RETURN output. Because an outpoint pays exactly
+one P2MR root, **the same coins can never verifiably back two different offers**:
+a bundle with different terms derives a different address and fails verification
+at every venue. Descriptors without the exact commitment fail closed.
 
 ### 4.3 The offer bundle and the verification algorithm
 
@@ -187,7 +186,7 @@ self-contained JSON bundle:
   "version": 1,
   "terms": { ...exact fields hashed above... },
   "bond": {
-    "descriptor": "mr(multi_pq(2,<S_settle>,<V>),{refund(812000,<S_refund>)})#checksum",
+    "descriptor": "mr(multi_pq(2,<S_settle>,<V>),{refund(812000,<S_refund>),commit(<terms_hash>)})#checksum",
     "outpoints": [ {"txid": "...", "vout": 0} ]
   },
   "attestation": {
@@ -201,17 +200,23 @@ self-contained JSON bundle:
 
 1. `getdescriptorinfo` / `deriveaddresses` on the descriptor → address
    `A`. Reject if descriptor grammar or checksum is off.
-2. For each outpoint: `gettxout` → exists, unspent, pays to `A`,
+2. For each outpoint: mempool-aware `gettxout` → exists, unspent, pays to `A`,
    confirmations ≥ `MIN_CONF` (recommend ≥ 20; 90-second blocks make
-   this ~30 minutes — see §8.1), sum ≥ `terms.amount_sats`. Kills T1/T5.
-3. Fetch each funding tx: `OP_RETURN "BTXOTC1" || H` present and
-   `H == SHA256(canonical terms)`. Kills T2.
+   this ~30 minutes — see §8.1), sum ≥ `terms.amount_sats`. An unconfirmed
+   spend invalidates the offer immediately; an immature coinbase is not
+   executable offered supply and must not be counted. Kills T1/T5.
+3. Require the descriptor's `commit(H)` leaf to equal
+   `H == SHA256(canonical terms)` and derive the funded address. Kills T2
+   without a data-carrier output or `-txindex`.
 4. Parse the descriptor tree: the **only** pre-expiry paths are the
    declared settlement path(s), and the refund leaf's locktime
    ≥ `terms.H_expiry`. Kills T3/T4 (no early unilateral exit exists).
-5. Verify the PQ attestation signature against `S_refund` and the fresh
-   challenge (proves the offer publisher controls the refund key — i.e.
-   is the coin owner, not someone replaying a stranger's bond).
+5. Derive the single-key `mr(S_refund)` address and require it to equal the
+   terms-committed seller address, then verify the fresh-challenge BIP-322
+   signature for that exact address. The seller SDK imports the fixed public
+   descriptor before signing, allowing the wallet to find `S_refund`'s private
+   key across its ranged descriptors. This proves the publisher controls the
+   bond's refund key rather than an unrelated wallet key.
 6. Continuously: watch the outpoints (`scantxoutset` or a ZMQ watcher).
    Spent-before-settlement ⇒ mark offer dead, flag the seller.
 
@@ -228,7 +233,8 @@ trustless hard bond:
 
 ```
 BOND = mr( ctv_multi_pq(<H_tmpl>, 1, S_settle),   # seller can ONLY spend into the
-           refund(H_expiry, S_refund) )            # pre-committed settlement tx
+           { refund(H_expiry, S_refund),            # pre-committed settlement tx
+             commit(offer_terms_hash) } )           # unspendable terms binding
 ```
 
 `H_tmpl` is the BIP-119-style template hash of the exact Stage-2 funding
@@ -243,7 +249,7 @@ destination other than the agreed escrow.**
 |------|--------------|-----------|----------------|
 | A+ | CTV bond (§4.4) | exists, exclusive, unpullable, destination-fixed | none |
 | A | Venue co-sign bond (§4.1) | exists, exclusive, unpullable | venue liveness (griefing only) |
-| B | Soft bond + OP_RETURN binding | exists, exclusive, pull is publicly visible | seller restraint pre-settle |
+| B | Soft bond + P2MR-root terms binding | exists, exclusive, pull is publicly visible | seller restraint pre-settle |
 | C | Bare signmessage over arbitrary UTXOs | exists at proof time | everything else (T2/T3/T4) |
 | F | Balance screenshots, shielded claims, no proof | none | everything — **treat as no supply** |
 
@@ -261,9 +267,8 @@ For BTX vs wBTX / stablecoin / any HTLC-capable asset. Already shipped
 end to end:
 
 ```
-SWAP = mr( <internal_or_ctv_leaf>,
-           { htlc(<H160>, K_buyer),          # buyer claims with preimage
-             refund(H_timeout_btx, S) } )    # seller refunds after timeout
+SWAP = mr( htlc_tx(<H160>, K_buyer),          # buyer claims with preimage + tx signature
+           refund(H_timeout_btx, S) )         # seller refunds after timeout
 ```
 
 - `H160 = RIPEMD160(SHA256(preimage))`, byte-identical to the hashlock in
@@ -411,7 +416,7 @@ the proof) and bond it. This converts T6 from "unfalsifiable claim" into
   capital is *visibly committed sell-side*, which is information the
   market prices correctly rather than manipulably.
 - **Exclusivity is cryptographic.** T2 (the main force multiplier for
-  phantom supply) dies with outpoint-unique OP_RETURN binding: N venues
+  phantom supply) dies with the outpoint's terms-bound P2MR root: N venues
   showing the same coins collapse to one verifiable offer.
 - **Lying is detectable in one RPC round-trip.** Once wallets/venues run
   `otc_verifyoffer` by default, an unproven quote is a self-labeling
@@ -444,7 +449,7 @@ the proof) and bond it. This converts T6 from "unfalsifiable claim" into
 4. **Leaf size / standardness.** Relay policy caps leaf scripts at 1,650
    bytes except multisig leaf types (consensus 11,000). One ML-DSA key ≈
    1,315 bytes in-leaf: keep non-multisig leaves to one ML-DSA key (+
-   32-byte SLH-DSA or oracle keys), exactly as the shipped `htlc()` /
+   32-byte SLH-DSA or oracle keys), exactly as the shipped `htlc_tx()` /
    `refund()` grammars do; k-of-n ML-DSA committees cap at n ≤ 8.
 5. **Oracle/arbiter key hygiene.** Arbiter and oracle keys must be
    per-role, ideally per-offer (the CSFS message binds the terms hash,
@@ -452,9 +457,8 @@ the proof) and bond it. This converts T6 from "unfalsifiable claim" into
    rotation limits blast radius of a key theft).
 6. **Privacy.** MAST hides untaken paths: a cooperatively settled trade
    reveals only the 2-of-2 leaf — not the arbiter's existence, the
-   dispute templates, or the refund key. The OP_RETURN tag does mark
-   bond funding txs as OTC bonds; sellers who dislike that trade
-   linkability for tier-B verifiability by choice.
+   dispute templates, refund key, or terms commitment. There is no explicit
+   on-chain OTC tag; the root is indistinguishable from another P2MR output.
 7. **Venue griefing (tier A).** The venue's only power is refusing to
    co-sign, delaying the seller until `H_expiry`. Sellers should size
    `H_expiry` to what they can tolerate having locked, and venues that
@@ -463,18 +467,18 @@ the proof) and bond it. This converts T6 from "unfalsifiable claim" into
 
 ## 9. Implementation roadmap
 
-**Phase 0 — usable today, zero code.** Tier-B soft bonds + §5.4 2-of-3 +
+**Phase 0 — available in BTX 0.33.2.** Tier-B soft bonds + §5.4 2-of-3 +
 §5.1 HTLC swaps all work with existing RPCs (`getdescriptorinfo`,
 `deriveaddresses`, `importdescriptors`, `createmultisig`, PSBT flows,
 `buildhtlcclaim`/`buildhtlcrefund`, `scantxoutset`, PQ `signmessage`).
 Publish the offer-bundle JSON schema and the verification checklist
 (§4.3) as a market convention document.
 
-**Phase 1 — tooling (contrib/otc + wallet RPCs), no consensus changes.**
+**Phase 1 — tooling (contrib/otc + wallet RPCs).**
 The key-management guide already flags canned vault templates as a gap;
 fill it with:
-- `otc_createoffer` — builds the bond descriptor (tier A/A+/B), funds it
-  with the `OP_RETURN "BTXOTC1"||H` commitment, emits the offer bundle.
+- `otc_createoffer` — builds the bond descriptor (tier A/A+/B), inserts the
+  `commit(H)` P2MR leaf, funds it, and emits the offer bundle.
 - `otc_verifyoffer` — runs §4.3 steps 1–5 against the local node;
   returns tier, verified size, expiry, and failure reasons. This is the
   single most important deliverable: verification must be one command.
@@ -498,9 +502,9 @@ even at tier C), Python SDK in `contrib/otc/` mirroring
 `scantxoutset`.
 
 **Phase 3 — research (optional).** PQ adaptor signatures / PTLC for
-scriptless swaps (open research for ML-DSA); zk proof-of-reserves for
-any future shielded surface; a standing "offer registry" OP_RETURN
-namespace if the market wants offer discovery fully on-chain.
+scriptless swaps (open research for ML-DSA) and zk proof-of-reserves for
+any future shielded surface. A public offer registry remains off-chain;
+the financial-only consensus rules deliberately provide no OP_RETURN namespace.
 
 ## 10. Worked example (tier A bond → HTLC settlement, regtest-ready)
 
@@ -513,20 +517,19 @@ S_REFUND_PK=$(btx-cli -rpcwallet=desk exportpqkey "$S_REFUND" | jq -r .pubkey)
 # Venue publishes V_PK out of band.
 
 # --- Stage 1: bond 50,000 BTX until height 812000 ---
-DESC="mr(multi_pq(2,$S_SETTLE_PK,$V_PK),{refund(812000,$S_REFUND_PK)})"
+TERMS_HASH=<sha256-of-canonical-terms>
+DESC="mr(multi_pq(2,$S_SETTLE_PK,$V_PK),{refund(812000,$S_REFUND_PK),commit($TERMS_HASH)})"
 CK=$(btx-cli getdescriptorinfo "$DESC" | jq -r .checksum)
 ADDR=$(btx-cli deriveaddresses "$DESC#$CK" | jq -r '.[0]')
-# Fund with a tx that also carries: OP_RETURN 4254584f544331 || <terms_hash>
-# (send via a raw tx / PSBT with a data output; wallet sendtoaddress + data
-#  output helper is a Phase-1 item)
+# Fund the single terms-bound P2MR vault output; no data output is created.
 
 # --- Any buyer verifies (no seller involvement) ---
 btx-cli gettxout <txid> <vout>          # unspent, ≥20 conf, pays $ADDR, amount ok
-btx-cli getrawtransaction <txid> 2      # OP_RETURN commitment matches terms hash
-# descriptor grammar shows: no path before 812000 except 2-of-2 with venue ✔
+# descriptor grammar and derived address prove the terms commitment; no txindex needed
+# no spendable path before 812000 except 2-of-2 with venue ✔
 
 # --- Stage 2: buyer engages; bond is spent into the swap vault ---
-SWAP="mr($S_SETTLE_PK,{htlc($H160,$BUYER_PK),refund(811500,$S_REFUND_PK)})"
+SWAP="mr(htlc_tx($H160,$BUYER_PK),refund(811500,$S_REFUND_PK))"
 # (seller+venue co-sign the bond spend whose sole non-change output is $SWAP_ADDR;
 #  buyer locks the wBTX/stable leg under the same H160 with a shorter timeout)
 
@@ -543,7 +546,7 @@ btx-cli -rpcwallet=desk buildhtlcrefund "$SWAP#..." '{"txid":"...","vout":0}' \
 | Problem | Answer | Mechanism |
 |---------|--------|-----------|
 | Does the supply exist? | Provable by anyone | Bond UTXO + confirmations (`gettxout`/`scantxoutset`) |
-| Is it double-pledged? | Impossible to hide | `OP_RETURN` terms-hash binding, outpoint uniqueness |
+| Is it double-pledged? | Impossible to hide | terms-bound P2MR root, outpoint uniqueness |
 | Can it vanish mid-quote? | No (tier A/A+) | No unilateral pre-expiry path in the MAST tree |
 | Is it borrowed for show? | Not while bonded | Timelocked refund leaf ≥ offer expiry |
 | Will settlement actually happen? | Atomic for crypto legs | HTLC leaves + `buildhtlcclaim`/`buildhtlcrefund` |

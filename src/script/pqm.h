@@ -102,6 +102,23 @@ std::vector<unsigned char> BuildP2MRHTLCLeaf(
     PQAlgorithm oracle_algo,
     Span<const unsigned char> oracle_pubkey);
 
+std::vector<unsigned char> BuildP2MRHTLCTxLeaf(
+    Span<const unsigned char> preimage_hash160,
+    PQAlgorithm claimant_algo,
+    Span<const unsigned char> claimant_pubkey);
+
+bool ParseP2MRLegacyHTLCLeaf(
+    Span<const unsigned char> script,
+    std::vector<unsigned char>& preimage_hash160,
+    PQAlgorithm& claimant_algo,
+    std::vector<unsigned char>& claimant_pubkey);
+
+bool ParseP2MRHTLCTxLeaf(
+    Span<const unsigned char> script,
+    std::vector<unsigned char>& preimage_hash160,
+    PQAlgorithm& claimant_algo,
+    std::vector<unsigned char>& claimant_pubkey);
+
 std::vector<unsigned char> BuildP2MRRefundLeaf(
     int64_t timeout,
     PQAlgorithm sender_algo,

@@ -31,10 +31,7 @@ void StartWallets(WalletContext& context);
 //! Flush all wallets in preparation for shutdown.
 void FlushWallets(WalletContext& context);
 
-//! Stop all wallets. Wallets will be flushed first.
-void StopWallets(WalletContext& context);
-
-//! Close all wallets.
+//! Disconnect and unload all wallets while their databases remain available.
 void UnloadWallets(WalletContext& context);
 } // namespace wallet
 

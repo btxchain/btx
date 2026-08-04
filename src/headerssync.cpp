@@ -26,11 +26,6 @@ constexpr size_t REDOWNLOAD_BUFFER_SIZE{7924}; // 7924/350 = ~22.6 commitments
 //! Synthetic index history kept for MatMul schedule-aware GetNextWorkRequired replay.
 constexpr size_t MATMUL_SYNTHETIC_INDEX_WINDOW{180};
 
-bool IsDisabledHeight(int32_t height)
-{
-    return height == std::numeric_limits<int32_t>::max();
-}
-
 std::optional<int> MatMulRequiredSyntheticFloor(
     const Consensus::Params& params,
     const CBlockIndex* previous_index)
@@ -40,19 +35,12 @@ std::optional<int> MatMulRequiredSyntheticFloor(
     const int64_t next_height = static_cast<int64_t>(previous_index->nHeight) + 1;
     if (next_height <= params.nMatMulAsertHeight) return std::nullopt;
 
-    int32_t anchor_height = params.nMatMulAsertHeight;
-    const bool retune_enabled =
-        !IsDisabledHeight(params.nMatMulAsertRetuneHeight) &&
-        params.nMatMulAsertRetuneHeight >= params.nMatMulAsertHeight;
-    const bool retune2_enabled =
-        !IsDisabledHeight(params.nMatMulAsertRetune2Height) &&
-        params.nMatMulAsertRetune2Height >= params.nMatMulAsertHeight;
-
-    if (retune2_enabled && previous_index->nHeight >= params.nMatMulAsertRetune2Height) {
-        anchor_height = params.nMatMulAsertRetune2Height;
-    } else if (retune_enabled && previous_index->nHeight >= params.nMatMulAsertRetuneHeight) {
-        anchor_height = params.nMatMulAsertRetuneHeight;
-    }
+    // Use the same height selector as MatMulAsert. Keeping a second, partial
+    // list here previously omitted the half-life, v4, and BMX4-C re-anchors;
+    // presync then pruned the live anchor after 180 headers and replay fell
+    // back to powLimit when GetAncestor(anchor_height) returned nullptr.
+    const int32_t anchor_height =
+        GetMatMulAsertHalfLifeInfo(previous_index, params).current_anchor_height;
 
     if (anchor_height > previous_index->nHeight || anchor_height < 0) return std::nullopt;
     return anchor_height;
@@ -277,9 +265,9 @@ void HeadersSyncState::AdvanceSyntheticIndexWindow(
 
     const std::optional<int> retained_floor = MatMulRequiredSyntheticFloor(m_consensus_params, last_index);
 
-    // Keep bounded memory while retaining chain continuity to m_chain_start.
-    // For MatMul ASERT replay, retain the active anchor ancestry floor so
-    // GetAncestor(anchor_height) remains valid in long presync/redownload runs.
+    // Retain contiguous ancestry back to the active ASERT anchor. CBlockIndex::
+    // GetAncestor assumes that every pprev hop decrements height by exactly
+    // one, so synthetic entries between the anchor and tip cannot be skipped.
     while (index_window.size() > MATMUL_SYNTHETIC_INDEX_WINDOW) {
         auto oldest = index_window.begin();
         auto second = oldest;
@@ -320,6 +308,22 @@ bool HeadersSyncState::ValidateAndAdvanceMatMulDifficulty(
             retained_floor.value_or(-1),
             static_cast<long long>(oldest_height),
             static_cast<long long>(newest_height));
+        return false;
+    }
+
+    // ContextualCheckBlockHeader enforces the same gate for normal header
+    // acceptance, but low-work chains pass through this synthetic presync path
+    // before that point. Enforce it here before crediting claimed chainwork or
+    // storing commitments, in both presync and redownload phases.
+    if (m_consensus_params.IsMatMulV4Active(static_cast<int32_t>(next_height)) &&
+        m_consensus_params.IsMatMulHeaderPoWEnabled() &&
+        !CheckMatMulHeaderSpamGate(header, m_consensus_params)) {
+        LogDebug(
+            BCLog::NET,
+            "Initial headers sync aborted with peer=%d: MatMul header spam gate failed at height=%lld (%s phase)\n",
+            m_id,
+            static_cast<long long>(next_height),
+            redownload_phase ? "redownload" : "presync");
         return false;
     }
 

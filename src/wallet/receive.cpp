@@ -29,6 +29,37 @@ bool AllInputsMine(const CWallet& wallet, const CTransaction& tx, const isminefi
     return true;
 }
 
+WalletTxInputOwnership TxGetInputOwnership(const CWallet& wallet, const CTransaction& tx, const isminefilter& filter)
+{
+    AssertLockHeld(wallet.cs_wallet);
+    if (tx.vin.empty()) return WalletTxInputOwnership::NONE;
+
+    bool any_mine{false};
+    bool any_not_mine{false};
+    for (const CTxIn& txin : tx.vin) {
+        if (InputIsMine(wallet, txin) & filter) {
+            any_mine = true;
+        } else {
+            any_not_mine = true;
+        }
+        if (any_mine && any_not_mine) return WalletTxInputOwnership::PARTIAL;
+    }
+    return any_mine ? WalletTxInputOwnership::ALL : WalletTxInputOwnership::NONE;
+}
+
+static bool AllForeignInputsKnownZeroValue(const CWallet& wallet, const CTransaction& tx, const isminefilter& filter)
+    EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet)
+{
+    AssertLockHeld(wallet.cs_wallet);
+    for (const CTxIn& txin : tx.vin) {
+        if (InputIsMine(wallet, txin) & filter) continue;
+        const CWalletTx* prev{wallet.GetWalletTx(txin.prevout.hash)};
+        if (!prev || txin.prevout.n >= prev->tx->vout.size()) return false;
+        if (prev->tx->vout[txin.prevout.n].nValue != 0) return false;
+    }
+    return true;
+}
+
 CAmount OutputGetCredit(const CWallet& wallet, const CTxOut& txout, const isminefilter& filter)
 {
     if (!MoneyRange(txout.nValue))
@@ -146,6 +177,30 @@ CAmount CachedTxGetChange(const CWallet& wallet, const CWalletTx& wtx)
     return wtx.nChangeCached;
 }
 
+WalletTxHistoryAccounting CachedTxGetHistoryAccounting(const CWallet& wallet, const CWalletTx& wtx, const isminefilter& filter)
+{
+    AssertLockHeld(wallet.cs_wallet);
+    const CAmount debit{CachedTxGetDebit(wallet, wtx, filter)};
+    const CAmount credit{CachedTxGetCredit(wallet, wtx, filter)};
+
+    // BTX shielded bundles have value flows which are not represented by
+    // transparent vin/vout accounting. Preserve the existing history behavior
+    // for them until shielded fee attribution is represented explicitly.
+    if (wtx.tx->HasShieldedBundle()) {
+        const WalletTxInputOwnership ownership{debit > 0 ? WalletTxInputOwnership::ALL : WalletTxInputOwnership::NONE};
+        const std::optional<CAmount> fee{debit > 0 ? std::optional<CAmount>{debit - wtx.tx->GetValueOut()} : std::nullopt};
+        return {ownership, debit, credit, fee};
+    }
+
+    const WalletTxInputOwnership ownership{TxGetInputOwnership(wallet, *wtx.tx, filter)};
+    std::optional<CAmount> fee;
+    if (ownership == WalletTxInputOwnership::ALL ||
+        (ownership == WalletTxInputOwnership::PARTIAL && AllForeignInputsKnownZeroValue(wallet, *wtx.tx, filter))) {
+        fee = debit - wtx.tx->GetValueOut();
+    }
+    return {ownership, debit, credit, fee};
+}
+
 CAmount CachedTxGetImmatureCredit(const CWallet& wallet, const CWalletTx& wtx, const isminefilter& filter)
 {
     AssertLockHeld(wallet.cs_wallet);
@@ -197,19 +252,19 @@ void CachedTxGetAmounts(const CWallet& wallet, const CWalletTx& wtx,
                   std::list<COutputEntry>& listSent, CAmount& nFee, const isminefilter& filter,
                   bool include_change)
 {
+    AssertLockHeld(wallet.cs_wallet);
     nFee = 0;
     listReceived.clear();
     listSent.clear();
 
+    const WalletTxHistoryAccounting accounting{CachedTxGetHistoryAccounting(wallet, wtx, filter)};
+    const bool can_attribute_sent_outputs{accounting.fee.has_value()};
+
     // Compute fee:
-    CAmount nDebit = CachedTxGetDebit(wallet, wtx, filter);
-    if (nDebit > 0) // debit>0 means we signed/sent this transaction
-    {
-        CAmount nValueOut = wtx.tx->GetValueOut();
-        nFee = nDebit - nValueOut;
+    if (accounting.fee.has_value()) {
+        nFee = *accounting.fee;
     }
 
-    LOCK(wallet.cs_wallet);
     // Sent/received.
     for (unsigned int i = 0; i < wtx.tx->vout.size(); ++i)
     {
@@ -218,7 +273,7 @@ void CachedTxGetAmounts(const CWallet& wallet, const CWalletTx& wtx,
         // Only need to handle txouts if AT LEAST one of these is true:
         //   1) they debit from us (sent)
         //   2) the output is to us (received)
-        if (nDebit > 0)
+        if (can_attribute_sent_outputs)
         {
             if (!include_change && OutputIsChange(wallet, txout))
                 continue;
@@ -239,7 +294,7 @@ void CachedTxGetAmounts(const CWallet& wallet, const CWalletTx& wtx,
         COutputEntry output = {address, txout.nValue, (int)i};
 
         // If we are debited by the transaction, add the output as a "sent" entry
-        if (nDebit > 0)
+        if (can_attribute_sent_outputs)
             listSent.push_back(output);
 
         // If we are receiving the output, add it as a "received" entry

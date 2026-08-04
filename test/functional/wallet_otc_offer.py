@@ -6,11 +6,11 @@
 
 Drives the contrib/otc/btx_otc.py SDK end to end against a regtest node:
 
-  1. CREATE   a tier-B bonded offer: fund the bond vault + the OP_RETURN
-              "BTXOTC1" || sha256(canonical terms) commitment in one tx.
+  1. CREATE   a tier-B bonded offer whose P2MR root includes an unspendable
+              commit(sha256(canonical terms)) leaf, with no data output.
   2. VERIFY   the published bundle with a node only (no seller cooperation):
-              descriptor shape, UTXO existence/confirmations/amount, funding-tx
-              commitment, expiry, attestation.
+              descriptor shape and commitment, UTXO existence/confirmations/
+              amount, expiry, and attestation.
   3. REJECT   fakes: tampered terms, double-pledged outpoints (same coins, second
               terms hash), fabricated outpoints, insufficient confirmations, and
               descriptor trees with undeclared spend paths (fail closed).
@@ -58,7 +58,9 @@ class WalletOtcOfferTest(BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 1
         self.setup_clean_chain = True
-        self.extra_args = [["-autoshieldcoinbase=0"]]
+        # Exercise the complete OTC lifecycle with PR #88's financial-only
+        # consensus rules active from the first non-genesis block.
+        self.extra_args = [["-autoshieldcoinbase=0", "-regtestcontenteliminationheight=1"]]
 
     def skip_test_if_missing_module(self):
         self.skip_if_no_wallet()
@@ -105,11 +107,13 @@ class WalletOtcOfferTest(BitcoinTestFramework):
         rpc_buyer = rpc_adapter(buyer)
 
         settle_pk = self.pq_pubkey(desk)
-        refund_pk = self.pq_pubkey(desk)
-        seller_address = desk.getnewaddress(address_type="p2mr")
+        refund_source_address = desk.getnewaddress(address_type="p2mr")
+        refund_pk = desk.exportpqkey(refund_source_address)["pubkey"]
+        refund_desc = btx_otc.add_checksum(rpc, f"mr({refund_pk})")
+        seller_address = btx_otc.bond_address(rpc, refund_desc)
 
         # === 1. CREATE a tier-B bonded offer ==================================
-        self.log.info("create bonded offer (soft bond + OP_RETURN terms binding)")
+        self.log.info("create bonded offer (terms-bound P2MR root, no OP_RETURN)")
         amount_sats = 3 * COIN_SAT
         expiry_height = node.getblockcount() + 30
         terms = self.make_terms(seller_address, amount_sats, expiry_height,
@@ -131,11 +135,11 @@ class WalletOtcOfferTest(BitcoinTestFramework):
         assert_equal(bundle["bond"]["tier"], "B")
         assert_equal(len(bundle["bond"]["outpoints"]), 1)
 
-        # The funding tx really carries the commitment output (no -txindex on this
-        # node, so scope the lookup to the block that just confirmed it).
+        # The P2MR descriptor commits the exact terms and the funding
+        # transaction carries no data output, even with PR #88 active.
+        assert f"commit({btx_otc.terms_hash_hex(terms)})" in bundle["bond"]["descriptor"]
         fund_tx = node.getrawtransaction(outpoint["txid"], True, node.getbestblockhash())
-        want_script = btx_otc.commitment_script_hex(terms)
-        assert any(o["scriptPubKey"]["hex"] == want_script for o in fund_tx["vout"])
+        assert all(o["scriptPubKey"].get("type") != "nulldata" for o in fund_tx["vout"])
 
         # === 2. VERIFY the bundle ==============================================
         self.log.info("verify offer bundle (positive)")
@@ -145,6 +149,28 @@ class WalletOtcOfferTest(BitcoinTestFramework):
         assert_equal(report.ok, True)
         assert_equal(report.tier, "B")
         assert_greater_than(report.verified_sats + 1, amount_sats)
+
+        self.log.info("reject: immature coinbase cannot back executable offered supply")
+        coinbase_hash = self.generatetoaddress(
+            node, 1, report.address, sync_fun=self.no_op,
+        )[0]
+        coinbase_block = node.getblock(coinbase_hash, 2)
+        coinbase_tx = coinbase_block["tx"][0]
+        coinbase_vout = next(
+            out["n"] for out in coinbase_tx["vout"]
+            if out.get("scriptPubKey", {}).get("address") == report.address
+        )
+        immature_coinbase = dict(
+            bundle,
+            bond=dict(bundle["bond"], outpoints=[{
+                "txid": coinbase_tx["txid"],
+                "vout": coinbase_vout,
+            }]),
+        )
+        self.assert_failed_checks(
+            btx_otc.verify_offer(rpc, immature_coinbase, min_conf=1),
+            {"outpoints"},
+        )
 
         # === 3. REJECT fakes ===================================================
         self.log.info("reject: tampered terms (amount inflated after funding)")
@@ -168,12 +194,33 @@ class WalletOtcOfferTest(BitcoinTestFramework):
         self.assert_failed_checks(btx_otc.verify_offer(rpc, fake, min_conf=1),
                                   {"outpoints"})
 
+        self.log.info("reject: malformed untrusted outpoint fields without raising")
+        malformed = dict(bundle, bond=dict(bundle["bond"],
+                                            outpoints=[{"txid": "xyz", "vout": True}]))
+        self.assert_failed_checks(btx_otc.verify_offer(rpc, malformed, min_conf=1),
+                                  {"outpoints"})
+
+        self.log.info("reject: non-object bundle, spoofed tier, and bad descriptor checksum")
+        self.assert_failed_checks(btx_otc.verify_offer(rpc, [], min_conf=1), {"bundle"})
+        spoofed_tier = dict(bundle, bond=dict(bundle["bond"], tier="A+"))
+        self.assert_failed_checks(btx_otc.verify_offer(rpc, spoofed_tier, min_conf=1),
+                                  {"descriptor-shape"})
+        bad_checksum = dict(
+            bundle,
+            bond=dict(
+                bundle["bond"],
+                descriptor=bundle["bond"]["descriptor"].rsplit("#", 1)[0] + "#deadbeef",
+            ),
+        )
+        self.assert_failed_checks(btx_otc.verify_offer(rpc, bad_checksum, min_conf=1),
+                                  {"descriptor-shape"})
+
         self.log.info("reject: insufficient confirmations")
         self.assert_failed_checks(btx_otc.verify_offer(rpc, bundle, min_conf=1000),
                                   {"outpoints"})
 
         self.log.info("reject: descriptor with an undeclared spend path (fail closed)")
-        sneaky_desc = (f"mr({settle_pk},{{htlc({'ee' * 20},{settle_pk}),"
+        sneaky_desc = (f"mr({settle_pk},{{htlc_tx({'ee' * 20},{settle_pk}),"
                        f"refund({expiry_height},{refund_pk})}})")
         sneaky = dict(bundle, bond=dict(bundle["bond"], descriptor=sneaky_desc))
         self.assert_failed_checks(btx_otc.verify_offer(rpc, sneaky, min_conf=1),
@@ -184,6 +231,35 @@ class WalletOtcOfferTest(BitcoinTestFramework):
                                      outpoints=[outpoint, dict(outpoint)]))
         self.assert_failed_checks(btx_otc.verify_offer(rpc, dup, min_conf=1),
                                   {"outpoints"})
+
+        self.log.info("reject: valid signature from a key unrelated to the bond refund path")
+        unrelated_address = desk.getnewaddress(address_type="p2mr")
+        challenge = "33" * 16
+        unrelated_attestation = {
+            "address": unrelated_address,
+            "challenge": challenge,
+            "signature": desk.signmessage(
+                unrelated_address, btx_otc.attestation_message(terms, challenge)),
+        }
+        wrong_signer = dict(bundle, attestation=unrelated_attestation)
+        self.assert_failed_checks(btx_otc.verify_offer(rpc, wrong_signer, min_conf=1),
+                                  {"attestation"})
+
+        self.log.info("reject: replayed attestation does not answer the verifier's fresh challenge")
+        self.assert_failed_checks(
+            btx_otc.verify_offer(rpc, bundle, min_conf=1,
+                                 expected_challenge="44" * 16),
+            {"attestation"},
+        )
+        assert_equal(
+            btx_otc.verify_offer(
+                rpc,
+                bundle,
+                min_conf=1,
+                expected_challenge=bundle["attestation"]["challenge"],
+            ).ok,
+            True,
+        )
 
         # === 4. REFUND the bond after expiry ===================================
         self.log.info("bond refund via refund leaf after expiry")
@@ -201,12 +277,19 @@ class WalletOtcOfferTest(BitcoinTestFramework):
                                         outpoint["txid"], outpoint["vout"],
                                         refund_dest, expiry_height, fee_sat)
         refund_txid = node.sendrawtransaction(raw)
+
+        # A mempool spend must immediately remove the bond from verified
+        # supply; waiting for confirmation leaves a double-quote window.
+        self.assert_failed_checks(btx_otc.verify_offer(rpc, bundle, min_conf=1),
+                                  {"outpoints"})
+        assert_equal(btx_otc.watch_offer(rpc, bundle, interval=0.01), "spent")
+
         mine_block(self, node, mine_addr)
         assert_equal(desk.gettransaction(refund_txid)["confirmations"] >= 1, True)
         assert_equal(Decimal(str(desk.getreceivedbyaddress(refund_dest))),
                      Decimal(amount_sats - fee_sat) / Decimal(COIN_SAT))
 
-        # A spent bond is detected instantly by the watcher.
+        # A confirmed spend remains detected by the watcher.
         assert_equal(btx_otc.watch_offer(rpc, bundle, interval=0.01), "spent")
 
         # === 5. SETTLE stage 2: HTLC vault, buyer claims with preimage =========
@@ -215,8 +298,8 @@ class WalletOtcOfferTest(BitcoinTestFramework):
         preimage = btx_otc.new_preimage()
         h160 = btx_otc.swap_hash160_hex(preimage)
         swap_locktime = node.getblockcount() + 100
-        swap_desc = btx_otc.swap_vault_descriptor(settle_pk, h160, buyer_pk,
-                                                  swap_locktime, refund_pk)
+        swap_desc = btx_otc.swap_vault_descriptor(
+            h160, buyer_pk, swap_locktime, refund_pk)
         swap_desc_ck = btx_otc.add_checksum(rpc, swap_desc)
         swap_addr = btx_otc.bond_address(rpc, swap_desc_ck)
         for w in (desk, buyer):

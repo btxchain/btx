@@ -111,7 +111,7 @@ BOOST_FIXTURE_TEST_CASE(scan_for_wallet_transactions, TestChain100Setup)
             LOCK(wallet.cs_wallet);
             LOCK(Assert(m_node.chainman)->GetMutex());
             wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
-            wallet.SetLastBlockProcessed(m_node.chainman->ActiveChain().Height(), m_node.chainman->ActiveChain().Tip()->GetBlockHash());
+            wallet.SetLastBlockProcessed(newTip->nHeight, newTip->GetBlockHash());
         }
         AddKey(wallet, coinbaseKey);
         WalletRescanReserver reserver(wallet);
@@ -142,8 +142,8 @@ BOOST_FIXTURE_TEST_CASE(scan_for_wallet_transactions, TestChain100Setup)
 
         {
             CBlockLocator locator;
-            BOOST_CHECK(!WalletBatch{wallet.GetDatabase()}.ReadBestBlock(locator));
-            BOOST_CHECK(locator.IsNull());
+            BOOST_CHECK(WalletBatch{wallet.GetDatabase()}.ReadBestBlock(locator));
+            BOOST_CHECK(!locator.IsNull() && locator.vHave.front() == newTip->GetBlockHash());
         }
 
         CWallet::ScanResult result = wallet.ScanForWalletTransactions(/*start_block=*/oldTip->GetBlockHash(), /*start_height=*/oldTip->nHeight, /*max_height=*/{}, reserver, /*fUpdate=*/false, /*save_progress=*/true);
@@ -156,7 +156,7 @@ BOOST_FIXTURE_TEST_CASE(scan_for_wallet_transactions, TestChain100Setup)
         {
             CBlockLocator locator;
             BOOST_CHECK(WalletBatch{wallet.GetDatabase()}.ReadBestBlock(locator));
-            BOOST_CHECK(!locator.IsNull());
+            BOOST_CHECK(!locator.IsNull() && locator.vHave.front() == newTip->GetBlockHash());
         }
     }
 
@@ -217,6 +217,32 @@ BOOST_FIXTURE_TEST_CASE(scan_for_wallet_transactions, TestChain100Setup)
         BOOST_CHECK(!result.last_scanned_height);
         BOOST_CHECK_EQUAL(GetBalance(wallet).m_mine_immature, 0);
     }
+}
+
+BOOST_FIXTURE_TEST_CASE(scan_for_wallet_transactions_abort, TestChain100Setup)
+{
+    CWallet wallet(m_node.chain.get(), "", CreateMockableWalletDatabase());
+    uint256 genesis_hash;
+    {
+        LOCK(wallet.cs_wallet);
+        LOCK(Assert(m_node.chainman)->GetMutex());
+        wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+        wallet.SetLastBlockProcessed(m_node.chainman->ActiveChain().Height(), m_node.chainman->ActiveChain().Tip()->GetBlockHash());
+        genesis_hash = m_node.chainman->ActiveChain().Genesis()->GetBlockHash();
+    }
+
+    wallet.AbortRescan();
+    WalletRescanReserver reserver(wallet);
+    BOOST_REQUIRE(reserver.reserve());
+    BOOST_CHECK(!wallet.IsAbortingRescan());
+
+    wallet.AbortRescan();
+    const CWallet::ScanResult result = wallet.ScanForWalletTransactions(
+        genesis_hash, /*start_height=*/0, /*max_height=*/{}, reserver,
+        /*fUpdate=*/false, /*save_progress=*/false);
+    BOOST_CHECK_EQUAL(result.status, CWallet::ScanResult::USER_ABORT);
+    BOOST_CHECK(result.last_scanned_block.IsNull());
+    BOOST_CHECK(!result.last_scanned_height);
 }
 
 BOOST_FIXTURE_TEST_CASE(importmulti_rescan, TestChain100Setup)
@@ -663,7 +689,7 @@ BOOST_FIXTURE_TEST_CASE(ListCoinsTest, ListCoinsTestingSetup)
     BOOST_CHECK_EQUAL(list.begin()->second.size(), 1U);
 
     // Check initial balance from one mature coinbase transaction.
-    BOOST_CHECK_EQUAL(m_coinbase_txns.at(0)->vout.at(0).nValue, WITH_LOCK(wallet->cs_wallet, return AvailableCoins(*wallet).GetTotalAmount()));
+    BOOST_CHECK_EQUAL(m_coinbase_txns.at(0)->vout.at(0).nValue, WITH_LOCK(wallet->cs_wallet, return Assert(AvailableCoins(*wallet))->GetTotalAmount()));
 
     // Add a transaction creating a change address, and confirm ListCoins still
     // returns the coin associated with the change address underneath the
@@ -704,6 +730,46 @@ BOOST_FIXTURE_TEST_CASE(ListCoinsTest, ListCoinsTestingSetup)
     BOOST_CHECK_EQUAL(list.begin()->second.size(), 2U);
 }
 
+BOOST_FIXTURE_TEST_CASE(MixedInputHistoryAccountingTest, ListCoinsTestingSetup)
+{
+    LOCK(wallet->cs_wallet);
+
+    const COutPoint mine_outpoint{m_coinbase_txns[0]->GetHash(), 0};
+    BOOST_REQUIRE(wallet->GetWalletTx(mine_outpoint.hash));
+    BOOST_REQUIRE(InputIsMine(*wallet, CTxIn{mine_outpoint}) & ISMINE_SPENDABLE);
+
+    CMutableTransaction foreign_parent;
+    foreign_parent.vin.emplace_back(COutPoint{Txid::FromUint256(uint256::ONE), 0});
+    foreign_parent.vout.emplace_back(0, CScript() << OP_TRUE);
+    const COutPoint foreign_outpoint{foreign_parent.GetHash(), 0};
+
+    const auto make_wtx = [](const std::vector<COutPoint>& prevouts) {
+        CMutableTransaction tx;
+        for (const COutPoint& prevout : prevouts) tx.vin.emplace_back(prevout);
+        tx.vout.emplace_back(1 * COIN, CScript() << OP_TRUE);
+        return CWalletTx(MakeTransactionRef(std::move(tx)), TxStateInactive{});
+    };
+
+    CWalletTx none_wtx{make_wtx({foreign_outpoint})};
+    BOOST_CHECK(TxGetInputOwnership(*wallet, *none_wtx.tx, ISMINE_SPENDABLE) == WalletTxInputOwnership::NONE);
+
+    CWalletTx all_wtx{make_wtx({mine_outpoint})};
+    BOOST_CHECK(TxGetInputOwnership(*wallet, *all_wtx.tx, ISMINE_SPENDABLE) == WalletTxInputOwnership::ALL);
+    BOOST_CHECK(CachedTxGetHistoryAccounting(*wallet, all_wtx, ISMINE_SPENDABLE).fee.has_value());
+
+    CWalletTx partial_wtx{make_wtx({mine_outpoint, foreign_outpoint})};
+    BOOST_CHECK(TxGetInputOwnership(*wallet, *partial_wtx.tx, ISMINE_SPENDABLE) == WalletTxInputOwnership::PARTIAL);
+    BOOST_CHECK(!CachedTxGetHistoryAccounting(*wallet, partial_wtx, ISMINE_SPENDABLE).fee.has_value());
+
+    // Once the wallet knows that the foreign input contributes zero value,
+    // all transaction value and therefore the fee are attributable to it.
+    BOOST_REQUIRE(wallet->AddToWallet(MakeTransactionRef(foreign_parent), TxStateInactive{}, /*update_wtx=*/nullptr));
+    BOOST_CHECK(CachedTxGetHistoryAccounting(*wallet, partial_wtx, ISMINE_SPENDABLE).fee.has_value());
+
+    CWalletTx empty_wtx{make_wtx({})};
+    BOOST_CHECK(TxGetInputOwnership(*wallet, *empty_wtx.tx, ISMINE_SPENDABLE) == WalletTxInputOwnership::NONE);
+}
+
 void TestCoinsResult(ListCoinsTest& context, OutputType out_type, CAmount amount,
                      std::map<OutputType, size_t>& expected_coins_sizes)
 {
@@ -712,7 +778,7 @@ void TestCoinsResult(ListCoinsTest& context, OutputType out_type, CAmount amount
     CWalletTx& wtx = context.AddTx(CRecipient{*dest, amount, /*fSubtractFeeFromAmount=*/true});
     CoinFilterParams filter;
     filter.skip_locked = false;
-    CoinsResult available_coins = AvailableCoins(*context.wallet, nullptr, std::nullopt, filter);
+    CoinsResult available_coins = *Assert(AvailableCoins(*context.wallet, nullptr, std::nullopt, filter));
     // Lock outputs so they are not spent in follow-up transactions
     for (uint32_t i = 0; i < wtx.tx->vout.size(); i++) context.wallet->LockCoin({wtx.GetHash(), i});
     for (const auto& [type, size] : expected_coins_sizes) BOOST_CHECK_EQUAL(size, available_coins.coins[type].size());
@@ -725,7 +791,11 @@ BOOST_FIXTURE_TEST_CASE(BasicOutputTypesTest, ListCoinsTest)
     std::map<OutputType, size_t> expected_coins_sizes;
     for (const auto& out_type : OUTPUT_TYPES) { expected_coins_sizes[out_type] = 0U; }
 
-    CoinsResult available_coins = WITH_LOCK(wallet->cs_wallet, return AvailableCoins(*wallet));
+    CoinsResult available_coins;
+    {
+        LOCK(wallet->cs_wallet);
+        available_coins = *Assert(AvailableCoins(*wallet));
+    }
     BOOST_CHECK_EQUAL(available_coins.Size(), 1U);
 
     // The fixture starts with one spendable coinbase UTXO. Track its output-type
@@ -1074,7 +1144,7 @@ BOOST_FIXTURE_TEST_CASE(wallet_sync_tx_invalid_state_test, TestingSetup)
                           HasReason("DB error adding transaction to wallet, write failed"));
 }
 
-BOOST_FIXTURE_TEST_CASE(tx_depth_height_overflow_guards, BasicTestingSetup)
+BOOST_FIXTURE_TEST_CASE(tx_depth_height_overflow_guards, TestChain100Setup)
 {
     CWallet wallet(m_node.chain.get(), "", CreateMockableWalletDatabase());
     const auto tx = MakeTransactionRef(CMutableTransaction{});

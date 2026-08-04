@@ -5,9 +5,11 @@
 """Test the listtransactions API."""
 
 from decimal import Decimal
+import time
 import os
 import shutil
 
+from test_framework.blocktools import MAX_FUTURE_BLOCK_TIME
 from test_framework.messages import (
     COIN,
     tx_from_hex,
@@ -109,6 +111,7 @@ class ListTransactionsTest(BitcoinTestFramework):
                                 {"txid": txid, "label": "watchonly"})
 
         self.run_rbf_opt_in_test()
+        self.test_from_me_status_change()
         self.run_externally_generated_address_test()
         self.run_coinjoin_test()
         self.run_invalid_parameters_test()
@@ -307,9 +310,16 @@ class ListTransactionsTest(BitcoinTestFramework):
         raw_hex = self.nodes[1].signrawtransactionwithwallet(raw_hex)["hex"]
         txid_join = self.nodes[0].sendrawtransaction(hexstring=raw_hex, maxfeerate=0)
         fee_join = self.nodes[0].getmempoolentry(txid_join)["fees"]["base"]
-        # Fee should be correct: assert_equal(fee_join, self.nodes[0].gettransaction(txid_join)['fee'])
-        # But it is not, see for example https://github.com/bitcoin/bitcoin/issues/14136:
-        assert fee_join != self.nodes[0].gettransaction(txid_join)["fee"]
+        assert fee_join > 0
+
+        # A wallet cannot safely attribute the full fee of a collaborative
+        # transaction when it does not own every input. BTX reports the known
+        # wallet flow and deliberately omits a fabricated fee.
+        tx_info = self.nodes[0].gettransaction(txid_join)
+        assert "fee" not in tx_info
+        assert_equal(tx_info["involves_mixed_inputs"], True)
+        assert_equal(tx_info["wallet_debit"], input_0["amount"])
+        assert_equal(any(detail.get("involves_mixed_inputs") for detail in tx_info["details"]), True)
 
     def run_invalid_parameters_test(self):
         self.log.info("Test listtransactions RPC parameter validity")
@@ -324,15 +334,85 @@ class ListTransactionsTest(BitcoinTestFramework):
         assert_raises_rpc_error(-8, "From must be <= 1000000", self.nodes[0].listtransactions, skip=huge)
 
     def test_op_return(self):
-        """Test if OP_RETURN outputs will be displayed correctly."""
-        raw_tx = self.nodes[0].createrawtransaction([], [{'data': 'aa'}])
-        funded_tx = self.nodes[0].fundrawtransaction(raw_tx)
-        signed_tx = self.nodes[0].signrawtransactionwithwallet(funded_tx['hex'])
-        tx_id = self.nodes[0].sendrawtransaction(signed_tx['hex'])
+        """BTX rejects non-financial OP_RETURN data outputs."""
+        assert_raises_rpc_error(
+            -8,
+            'OP_RETURN "data" outputs are disabled on BTX',
+            self.nodes[0].createrawtransaction,
+            [],
+            [{'data': 'aa'}],
+        )
 
-        op_ret_tx = [tx for tx in self.nodes[0].listtransactions() if tx['txid'] == tx_id][0]
+    def test_from_me_status_change(self):
+        self.log.info("Test gettransaction after changing a transaction's 'from me' status")
+        if not self.options.descriptors:
+            self.log.info("Skipping P2MR ownership-import regression for legacy wallets")
+            return
 
-        assert 'address' not in op_ret_tx
+        default_wallet = self.nodes[0].get_wallet_rpc(self.default_wallet_name)
+        source_entry = next(
+            entry
+            for entry in default_wallet.listdescriptors(private=True)["descriptors"]
+            if not entry.get("internal", False) and entry["desc"].startswith("mr(")
+        )
+        source_desc = source_entry["desc"]
+        first_index = source_entry["next"]
+
+        # Importing an input changes the transaction from receive-only to a
+        # mixed-input send. BTX intentionally leaves the fee unavailable when
+        # another non-wallet input contributes to the transaction.
+        for case, confirm in enumerate([False, True]):
+            wallet_name = f"fromme_{case}"
+            self.nodes[0].createwallet(wallet_name, descriptors=True)
+            wallet = self.nodes[0].get_wallet_rpc(wallet_name)
+            source_index = first_index + case
+            source_address = self.nodes[0].deriveaddresses(source_desc, [source_index, source_index])[0]
+
+            send_res = default_wallet.send(outputs=[{source_address: 1}, {wallet.getnewaddress(address_type="p2mr"): 1}])
+            assert_equal(send_res["complete"], True)
+            funding_tx = default_wallet.gettransaction(send_res["txid"], verbose=True)
+            self.nodes[0].sendrawtransaction(funding_tx["hex"], maxfeerate=0)
+            decoded = funding_tx["decoded"]
+            vout = next(
+                output["n"]
+                for output in decoded["vout"]
+                if output["scriptPubKey"].get("address") == source_address
+            )
+            utxos = [{"txid": send_res["txid"], "vout": vout}]
+            self.generate(self.nodes[0], 1, sync_fun=self.no_op)
+
+            send_res = default_wallet.send(
+                outputs=[{wallet.getnewaddress(address_type="p2mr"): 1.5}],
+                inputs=utxos,
+                add_inputs=True,
+            )
+            assert_equal(send_res["complete"], True)
+            txid = send_res["txid"]
+            spend_tx = default_wallet.gettransaction(txid)
+            self.nodes[0].sendrawtransaction(spend_tx["hex"], maxfeerate=0)
+            self.nodes[0].syncwithvalidationinterfacequeue()
+            tx_info = wallet.gettransaction(txid)
+            assert "fee" not in tx_info
+            assert "involves_mixed_inputs" not in tx_info
+            assert_equal(any(detail["category"] == "send" for detail in tx_info["details"]), False)
+
+            if confirm:
+                self.generate(self.nodes[0], 1, sync_fun=self.no_op)
+                self.nodes[0].setmocktime(int(time.time()) + MAX_FUTURE_BLOCK_TIME + 1)
+                self.generate(self.nodes[0], 10, sync_fun=self.no_op)
+
+            import_result = wallet.importdescriptors([{
+                "desc": source_desc,
+                "timestamp": "now",
+                "active": False,
+                "range": [source_index, source_index],
+            }])
+            assert_equal(import_result[0]["success"], True)
+            tx_info = wallet.gettransaction(txid)
+            assert "fee" not in tx_info
+            assert_equal(tx_info["involves_mixed_inputs"], True)
+            assert_equal(any(detail["category"] == "send" for detail in tx_info["details"]), True)
+            self.nodes[0].unloadwallet(wallet_name)
 
 
     def create_and_send_transaction(self, utxo, address, amt, feeRate):

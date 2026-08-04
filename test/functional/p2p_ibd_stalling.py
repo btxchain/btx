@@ -42,6 +42,16 @@ class P2PStaller(P2PDataStore):
         pass
 
 
+class SerializedBlock:
+    """Preserve BTX block payload fields unknown to the generic Python model."""
+
+    def __init__(self, block_hex):
+        self.raw = bytes.fromhex(block_hex)
+
+    def serialize(self):
+        return self.raw
+
+
 class P2PIBDStallingTest(BitcoinTestFramework):
     def set_test_params(self):
         self.setup_clean_chain = True
@@ -63,10 +73,14 @@ class P2PIBDStallingTest(BitcoinTestFramework):
         source_hashes = self.generate(miner, NUM_BLOCKS, sync_fun=self.no_op)
         block_dict = {}
         for block_hash in source_hashes:
-            block = from_hex(CBlock(), miner.getblock(block_hash, 0))
+            block_hex = miner.getblock(block_hash, 0)
+            block = from_hex(CBlock(), block_hex)
             block.rehash()
             blocks.append(block)
-            block_dict[block.sha256] = block
+            # CBlock parses the generic header and transaction vector but not
+            # BTX's trailing Freivalds product payload. Relay the original RPC
+            # bytes so validation receives the complete mined block.
+            block_dict[block.sha256] = SerializedBlock(block_hex)
         stall_block = blocks[0].sha256
 
         headers_message = msg_headers()
@@ -145,6 +159,80 @@ class P2PIBDStallingTest(BitcoinTestFramework):
 
         self.log.info("Check that all outstanding blocks get connected")
         self.wait_until(lambda: node.getblockcount() == NUM_BLOCKS)
+
+        self.test_manual_peer_stalling(node, miner, NUM_BLOCKS)
+
+    def test_manual_peer_stalling(self, node, miner, initial_height):
+        self.log.info("Test that a stalling manual peer is paused instead of disconnected")
+        BLOCK_DOWNLOAD_COOLDOWN = 10 * 60
+        NUM_BLOCKS = 1025
+        self.restart_node(0)
+
+        source_hashes = self.generate(miner, NUM_BLOCKS, sync_fun=self.no_op)
+        blocks = []
+        block_dict = {}
+        for block_hash in source_hashes:
+            block_hex = miner.getblock(block_hash, 0)
+            block = from_hex(CBlock(), block_hex)
+            block.rehash()
+            blocks.append(block)
+            block_dict[block.sha256] = SerializedBlock(block_hex)
+        stall_block = blocks[0].sha256
+
+        headers = msg_headers()
+        headers.headers = [CBlockHeader(block) for block in blocks]
+        self.mocktime += 1
+        node.setmocktime(self.mocktime)
+
+        manual_peer = node.add_manual_p2p_connection(P2PStaller(stall_block), p2p_idx=0)
+        manual_peer.block_store = block_dict
+        assert_equal(node.getpeerinfo()[0]['connection_type'], 'manual')
+        manual_peer.send_message(headers)
+
+        outbound_peers = []
+        for i in range(4):
+            peer = node.add_outbound_p2p_connection(
+                P2PStaller(None), p2p_idx=i + 1, connection_type="outbound-full-relay")
+            peer.block_store = block_dict
+            peer.send_message(headers)
+            outbound_peers.append(peer)
+        all_peers = [manual_peer] + outbound_peers
+
+        self.wait_until(lambda: sum(len(peer['inflight']) for peer in node.getpeerinfo()) == 1)
+        self.all_sync_send_with_ping(all_peers)
+        assert_equal(manual_peer.getdata_requests.count(stall_block), 1)
+        assert_equal(self.is_block_requested(outbound_peers, stall_block), False)
+
+        with node.assert_debug_log(expected_msgs=["Pausing block downloads from stalling manual peer"]):
+            self.mocktime += 3
+            node.setmocktime(self.mocktime)
+            manual_peer.sync_with_ping()
+
+        assert_equal(manual_peer.is_connected, True)
+        assert_equal(node.num_test_p2p_connections(), len(all_peers))
+        assert_equal(manual_peer.getdata_requests.count(stall_block), 1)
+        assert_equal(sum(len(peer['inflight']) for peer in node.getpeerinfo()
+                         if peer['connection_type'] == 'manual'), 0)
+
+        self.all_sync_send_with_ping(outbound_peers)
+        self.wait_until(lambda: self.is_block_requested(outbound_peers, stall_block))
+        self.wait_until(lambda: node.getblockcount() == initial_height + NUM_BLOCKS)
+
+        post_hash = self.generate(miner, 1, sync_fun=self.no_op)[0]
+        post_block_hex = miner.getblock(post_hash, 0)
+        post_block = from_hex(CBlock(), post_block_hex)
+        post_block.rehash()
+        manual_peer.block_store[post_block.sha256] = SerializedBlock(post_block_hex)
+        post_headers = msg_headers()
+        post_headers.headers = [CBlockHeader(post_block)]
+        manual_peer.send_and_ping(post_headers)
+        assert_equal(post_block.sha256 in manual_peer.getdata_requests, False)
+
+        self.mocktime += BLOCK_DOWNLOAD_COOLDOWN + 1
+        node.setmocktime(self.mocktime)
+        manual_peer.sync_with_ping()
+        self.wait_until(lambda: post_block.sha256 in manual_peer.getdata_requests)
+        self.wait_until(lambda: node.getblockcount() == initial_height + NUM_BLOCKS + 1)
 
     def total_bytes_recv_for_blocks(self):
         total = 0

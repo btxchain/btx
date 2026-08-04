@@ -198,7 +198,11 @@ BOOST_AUTO_TEST_CASE(Descriptor_IsKeyActive)
         descriptor.descriptor->ExpandFromCache(/*pos=*/5, descriptor.cache, scripts3, provider);
 
         BOOST_CHECK_EQUAL(scripts3.size(), 1);
-        spkm->MarkUnusedAddresses(scripts3.front());
+        const auto destinations = spkm->MarkUnusedAddresses(scripts3.front());
+        BOOST_REQUIRE_EQUAL(destinations.size(), 1);
+        CTxDestination observed;
+        BOOST_REQUIRE(ExtractDestination(scripts3.front(), observed));
+        BOOST_CHECK(destinations.front().dest == observed);
     }
 
     // Key pool size increased to replace used keys

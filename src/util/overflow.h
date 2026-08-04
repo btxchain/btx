@@ -5,6 +5,8 @@
 #ifndef BITCOIN_UTIL_OVERFLOW_H
 #define BITCOIN_UTIL_OVERFLOW_H
 
+#include <util/check.h>
+
 #include <climits>
 #include <concepts>
 #include <limits>
@@ -47,6 +49,14 @@ template <class T>
         }
     }
     return i + j;
+}
+
+/** Overflow-safe ceiling division for non-negative integral values. */
+template <std::integral Dividend, std::integral Divisor>
+[[nodiscard]] constexpr auto CeilDiv(const Dividend dividend, const Divisor divisor)
+{
+    Assert(dividend >= 0 && divisor > 0);
+    return dividend / divisor + (dividend % divisor != 0);
 }
 
 /**

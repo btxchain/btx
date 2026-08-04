@@ -6,10 +6,10 @@ btx_otc — BTX OTC bonded-offer SDK + CLI (proof-of-offered-supply and escrow s
 
 Implements the Phase-1 tooling of doc/btx-otc-escrow-supply-validation.md: an OTC
 offer only counts as real supply when it is backed by a *bonded offer vault* — coins
-locked in a P2MR output whose only spend paths are (a) settle this specific offer and
-(b) refund to the seller after the offer expires — with the offer terms bound to the
-funding transaction via an OP_RETURN commitment so the same coins can never back two
-different offers.
+locked in a P2MR output whose only spendable paths are (a) settle this specific offer
+and (b) refund to the seller after the offer expires. The offer terms hash is committed
+as an unspendable leaf inside the P2MR vault root, so the same outpoint cannot verify
+for two different offers and no OP_RETURN data output is required.
 
 The SDK drives a stock btxd via RPC only (no core dependency). Structure mirrors
 contrib/wbtx/btx_wbtx.py: pure helpers work offline; anything that touches the chain
@@ -30,7 +30,7 @@ Offer lifecycle::
         "nonce": os.urandom(16).hex(),         # one offer == one terms hash
     }
     desc = soft_bond_descriptor(settle_pk, terms["expiry_height"], refund_pk)
-    bundle = create_offer(rpc, rpc_wallet, terms, desc)   # funds vault + OP_RETURN
+    bundle = create_offer(rpc, rpc_wallet, terms, desc)   # funds terms-bound vault
     publish(json.dumps(bundle))                            # any channel works
 
     # --- Buyer / venue: verify against their own node -----------------------
@@ -48,7 +48,7 @@ Bond tiers (see the design doc §4.5)::
 
 Verification NEVER trusts the seller: descriptor shape is checked against a strict
 allow-list (unknown shapes fail closed), outpoints are checked in the UTXO set,
-the OP_RETURN terms-hash commitment is checked in the funding transactions, and the
+the descriptor's terms-hash commitment is checked against the vault output, and the
 optional attestation is checked with verifymessage.
 """
 from __future__ import annotations
@@ -69,11 +69,11 @@ from typing import Callable, Optional
 Rpc = Callable[..., object]
 
 COIN = 100_000_000
+COINBASE_MATURITY = 100
 
-# Tag prefixing every OTC bond commitment: OP_RETURN <"BTXOTC1" || sha256(terms)>.
+# Protocol tag used by off-chain attestations and bundle formats. The on-chain
+# binding is a hidden P2MR `commit(sha256(terms))` leaf, not an OP_RETURN output.
 OTC_TAG = b"BTXOTC1"
-# Serialized commitment scriptPubKey: OP_RETURN(0x6a) PUSH39(0x27) tag(7) hash(32).
-_COMMITMENT_SCRIPT_LEN = 1 + 1 + len(OTC_TAG) + 32
 
 
 # ============================= terms canonicalization =============================
@@ -104,10 +104,14 @@ def validate_terms(terms: dict) -> None:
     for f in REQUIRED_TERMS_FIELDS:
         if f not in terms:
             raise ValueError(f"terms missing required field '{f}'")
-    if not isinstance(terms["amount_sats"], int) or terms["amount_sats"] <= 0:
+    if type(terms["version"]) is not int or terms["version"] != 1:
+        raise ValueError("terms.version must be integer 1")
+    if type(terms["amount_sats"]) is not int or terms["amount_sats"] <= 0:
         raise ValueError("terms.amount_sats must be a positive integer (satoshis)")
-    if not isinstance(terms["expiry_height"], int) or terms["expiry_height"] <= 0:
+    if type(terms["expiry_height"]) is not int or terms["expiry_height"] <= 0:
         raise ValueError("terms.expiry_height must be a positive integer (block height)")
+    if not isinstance(terms["nonce"], str) or not terms["nonce"]:
+        raise ValueError("terms.nonce must be a non-empty string")
 
 
 def canonical_terms_bytes(terms: dict) -> bytes:
@@ -125,16 +129,9 @@ def terms_hash_hex(terms: dict) -> str:
     return terms_hash(terms).hex()
 
 
-def commitment_payload_hex(terms: dict) -> str:
-    """The OP_RETURN data payload (39 bytes) binding a funding tx to one offer."""
-    return (OTC_TAG + terms_hash(terms)).hex()
-
-
-def commitment_script_hex(terms: dict) -> str:
-    """The full expected OP_RETURN scriptPubKey hex (41 bytes serialized)."""
-    payload = OTC_TAG + terms_hash(terms)
-    assert len(payload) == 39
-    return "6a27" + payload.hex()
+def commitment_leaf_expr(terms: dict) -> str:
+    """Descriptor leaf that binds a P2MR vault root to exactly these terms."""
+    return f"commit({terms_hash_hex(terms)})"
 
 
 def attestation_message(terms: dict, challenge: str) -> str:
@@ -147,12 +144,20 @@ def attestation_message(terms: dict, challenge: str) -> str:
 # A descriptor key expression: raw ML-DSA hex, or pk_slh(<slh-dsa hex>).
 _KEY = r"(?:[0-9a-fA-F]+|pk_slh\([0-9a-fA-F]+\))"
 
+_HASH256 = r"[0-9a-fA-F]{64}"
 _TIER_B_RE = re.compile(
-    rf"^mr\(({_KEY}),\{{refund\((\d+),({_KEY})\)\}}\)$")
+    rf"^mr\(({_KEY}),\{{refund\((\d+),({_KEY})\),commit\(({_HASH256})\)\}}\)$")
 _TIER_A_RE = re.compile(
-    rf"^mr\(multi_pq\(2,({_KEY}),({_KEY})\),\{{refund\((\d+),({_KEY})\)\}}\)$")
+    rf"^mr\(multi_pq\(2,({_KEY}),({_KEY})\),\{{refund\((\d+),({_KEY})\),commit\(({_HASH256})\)\}}\)$")
 _TIER_APLUS_RE = re.compile(
-    rf"^mr\(ctv_multi_pq\(([0-9a-fA-F]{{64}}),1,({_KEY})\),\{{refund\((\d+),({_KEY})\)\}}\)$")
+    rf"^mr\(ctv_multi_pq\(({_HASH256}),1,({_KEY})\),\{{refund\((\d+),({_KEY})\),commit\(({_HASH256})\)\}}\)$")
+
+_TIER_B_UNBOUND_RE = re.compile(
+    rf"^mr\(({_KEY}),\{{refund\((\d+),({_KEY})\)\}}\)$")
+_TIER_A_UNBOUND_RE = re.compile(
+    rf"^mr\(multi_pq\(2,({_KEY}),({_KEY})\),\{{refund\((\d+),({_KEY})\)\}}\)$")
+_TIER_APLUS_UNBOUND_RE = re.compile(
+    rf"^mr\(ctv_multi_pq\(({_HASH256}),1,({_KEY})\),\{{refund\((\d+),({_KEY})\)\}}\)$")
 
 
 def soft_bond_descriptor(settle_pubkey: str, refund_locktime: int, refund_pubkey: str) -> str:
@@ -170,9 +175,10 @@ def venue_bond_descriptor(settle_pubkey: str, venue_pubkey: str,
 def ctv_bond_descriptor(ctv_template_hash_hex: str, settle_pubkey: str,
                         refund_locktime: int, refund_pubkey: str) -> str:
     """Tier A+: settlement constrained by covenant to one pre-committed transaction."""
-    if len(ctv_template_hash_hex) != 64:
+    if (not isinstance(ctv_template_hash_hex, str) or
+            not re.fullmatch(_HASH256, ctv_template_hash_hex)):
         raise ValueError("ctv_template_hash_hex must be 32 bytes of hex")
-    return (f"mr(ctv_multi_pq({ctv_template_hash_hex},1,{settle_pubkey}),"
+    return (f"mr(ctv_multi_pq({ctv_template_hash_hex.lower()},1,{settle_pubkey}),"
             f"{{refund({refund_locktime},{refund_pubkey})}})")
 
 
@@ -184,6 +190,7 @@ class BondInfo:
     settle_pubkey: str
     venue_pubkey: Optional[str] = None
     ctv_hash: Optional[str] = None
+    commitment_hash: str = ""
 
 
 def strip_checksum(descriptor: str) -> str:
@@ -200,15 +207,52 @@ def parse_bond_descriptor(descriptor: str) -> BondInfo:
     m = _TIER_APLUS_RE.match(desc)
     if m:
         return BondInfo(tier="A+", ctv_hash=m.group(1).lower(), settle_pubkey=m.group(2),
-                        refund_locktime=int(m.group(3)), refund_pubkey=m.group(4))
+                        refund_locktime=int(m.group(3)), refund_pubkey=m.group(4),
+                        commitment_hash=m.group(5).lower())
     m = _TIER_A_RE.match(desc)
     if m:
         return BondInfo(tier="A", settle_pubkey=m.group(1), venue_pubkey=m.group(2),
-                        refund_locktime=int(m.group(3)), refund_pubkey=m.group(4))
+                        refund_locktime=int(m.group(3)), refund_pubkey=m.group(4),
+                        commitment_hash=m.group(5).lower())
     m = _TIER_B_RE.match(desc)
     if m:
         return BondInfo(tier="B", settle_pubkey=m.group(1),
-                        refund_locktime=int(m.group(2)), refund_pubkey=m.group(3))
+                        refund_locktime=int(m.group(2)), refund_pubkey=m.group(3),
+                        commitment_hash=m.group(4).lower())
+    raise ValueError("unrecognized bond descriptor shape (fail-closed); "
+                     "expected a terms-bound tier A+/A/B form")
+
+
+def bind_bond_descriptor(descriptor: str, terms: dict) -> str:
+    """Return the tier A+/A/B descriptor with a canonical terms commitment leaf.
+
+    `create_offer` accepts the concise legacy constructor output, but the funded
+    descriptor and published bundle are always terms-bound. Already-bound input
+    is accepted only when it commits to these exact terms.
+    """
+    desc = strip_checksum(descriptor).replace(" ", "")
+    want = terms_hash_hex(terms)
+    try:
+        parsed = parse_bond_descriptor(desc)
+        if parsed.commitment_hash != want:
+            raise ValueError("bond descriptor is committed to different offer terms")
+        return desc
+    except ValueError as bound_error:
+        if "different offer terms" in str(bound_error):
+            raise
+
+    m = _TIER_APLUS_UNBOUND_RE.match(desc)
+    if m:
+        return (f"mr(ctv_multi_pq({m.group(1)},1,{m.group(2)}),"
+                f"{{refund({m.group(3)},{m.group(4)}),commit({want})}})")
+    m = _TIER_A_UNBOUND_RE.match(desc)
+    if m:
+        return (f"mr(multi_pq(2,{m.group(1)},{m.group(2)}),"
+                f"{{refund({m.group(3)},{m.group(4)}),commit({want})}})")
+    m = _TIER_B_UNBOUND_RE.match(desc)
+    if m:
+        return (f"mr({m.group(1)},"
+                f"{{refund({m.group(2)},{m.group(3)}),commit({want})}})")
     raise ValueError("unrecognized bond descriptor shape (fail-closed); "
                      "expected one of the documented tier A+/A/B forms")
 
@@ -225,6 +269,36 @@ def bond_address(rpc: Rpc, descriptor_with_checksum: str) -> str:
     if len(addrs) != 1:
         raise ValueError("bond descriptor must derive exactly one address")
     return addrs[0]
+
+
+def refund_key_address(rpc: Rpc, bond: BondInfo) -> str:
+    """Derive the single-key P2MR address controlled by a bond's refund key."""
+    return bond_address(rpc, add_checksum(rpc, f"mr({bond.refund_pubkey})"))
+
+
+def ensure_refund_attestation_descriptor(rpc: Rpc, rpc_wallet: Rpc,
+                                         bond: BondInfo) -> str:
+    """Make the exact refund-key challenge script visible to the signing wallet.
+
+    The private refund key can originate below a different, ranged descriptor.
+    Importing this fixed public descriptor lets wallet-wide P2MR signing combine
+    that existing private key with the exact single-key script used by verifiers.
+    """
+    desc_ck = add_checksum(rpc, f"mr({bond.refund_pubkey})")
+    address = bond_address(rpc, desc_ck)
+    info = rpc_wallet("getaddressinfo", address)
+    if not info.get("ismine", False) and not info.get("iswatchonly", False):
+        result = rpc_wallet("importdescriptors", [{
+            "desc": desc_ck,
+            "timestamp": "now",
+            "active": False,
+            "internal": False,
+        }])
+        if (not isinstance(result, list) or len(result) != 1 or
+                not result[0].get("success", False)):
+            detail = result[0].get("error", result) if isinstance(result, list) and result else result
+            raise RuntimeError(f"failed to import refund attestation descriptor: {detail}")
+    return address
 
 
 def sats_to_btx_str(sats: int) -> str:
@@ -247,26 +321,51 @@ def create_offer(rpc: Rpc, rpc_wallet: Rpc, terms: dict, descriptor: str,
     """
     Fund the bond vault and emit the self-contained offer bundle.
 
-    Builds ONE transaction paying `terms.amount_sats` to the vault address plus the
-    OP_RETURN commitment `"BTXOTC1" || sha256(canonical terms)`, via the wallet
-    `send` RPC. The commitment in the funding tx is what makes the bond exclusive
-    to this offer (§4.2 of the design doc).
+    Builds ONE transaction paying `terms.amount_sats` to a P2MR vault whose Merkle
+    root includes `commit(sha256(canonical terms))`. The terms-bound output address
+    makes the bond exclusive to this offer without a data-carrier output.
 
     If `attest` is set, the bundle also carries a BIP-322 attestation: a fresh
     challenge signed (signmessage) with the wallet address that owns the refund
     key, proving the offer publisher controls the bond's exit key.
     """
     validate_terms(terms)
+    descriptor = bind_bond_descriptor(descriptor, terms)
     bond = parse_bond_descriptor(descriptor)
     if bond.refund_locktime < terms["expiry_height"]:
         raise ValueError("refund locktime is below terms.expiry_height: the seller "
                          "could exit before the offer expires")
+    if (bond.tier == "A+" and
+            str(terms.get("ctv_template_hash", "")).lower() != bond.ctv_hash):
+        raise ValueError("tier A+ terms.ctv_template_hash must equal the descriptor's "
+                         "pre-committed settlement template hash")
 
     desc_ck = add_checksum(rpc, descriptor)
     address = bond_address(rpc, desc_ck)
 
-    outputs = [{address: sats_to_btx_str(terms["amount_sats"])},
-               {"data": commitment_payload_hex(terms)}]
+    # Complete all validation and signing before broadcasting the funding
+    # transaction. A bad attestation request must never strand coins in a vault
+    # while create_offer exits without returning its bundle.
+    attestation = None
+    if attest:
+        challenge = challenge or os.urandom(16).hex()
+        attest_addr = terms.get("seller_address")
+        if not attest_addr:
+            raise ValueError("attest=True requires terms.seller_address (the P2MR "
+                             "address controlled by the refund key); pass "
+                             "attest=False to skip")
+        expected_addr = refund_key_address(rpc, bond)
+        if attest_addr != expected_addr:
+            raise ValueError("terms.seller_address is not the P2MR address controlled "
+                             "by the bond refund key")
+        imported_addr = ensure_refund_attestation_descriptor(rpc, rpc_wallet, bond)
+        if imported_addr != expected_addr:
+            raise RuntimeError("refund attestation descriptor derived an unexpected address")
+        sig = rpc_wallet("signmessage", attest_addr, attestation_message(terms, challenge))
+        attestation = {"address": attest_addr, "challenge": challenge,
+                       "signature": sig}
+
+    outputs = [{address: sats_to_btx_str(terms["amount_sats"])}]
     options = {}
     if fee_rate is not None:
         options["fee_rate"] = fee_rate
@@ -297,16 +396,8 @@ def create_offer(rpc: Rpc, rpc_wallet: Rpc, terms: dict, descriptor: str,
         },
     }
 
-    if attest:
-        challenge = challenge or os.urandom(16).hex()
-        attest_addr = terms.get("seller_address")
-        if not attest_addr:
-            raise ValueError("attest=True requires terms.seller_address (a wallet "
-                             "address the seller signs the challenge with); pass "
-                             "attest=False to skip")
-        sig = rpc_wallet("signmessage", attest_addr, attestation_message(terms, challenge))
-        bundle["attestation"] = {"address": attest_addr, "challenge": challenge,
-                                 "signature": sig}
+    if attestation is not None:
+        bundle["attestation"] = attestation
     return bundle
 
 
@@ -339,27 +430,9 @@ class OfferVerification:
         }
 
 
-def _get_funding_tx(rpc: Rpc, txid: str, blockhash: Optional[str],
-                    funding_height: Optional[int] = None):
-    """
-    Verbose funding tx without requiring -txindex: try the mempool/txindex path,
-    then the bundle's optional 'blockhash' hint, then the block derived from the
-    UTXO's own confirmation depth (height - confirmations + 1).
-    """
-    try:
-        return rpc("getrawtransaction", txid, True)
-    except Exception:  # noqa: BLE001 - fall through to the block-scoped paths
-        pass
-    if blockhash:
-        return rpc("getrawtransaction", txid, True, blockhash)
-    if funding_height is not None:
-        derived = rpc("getblockhash", funding_height)
-        return rpc("getrawtransaction", txid, True, derived)
-    raise RuntimeError("funding tx not retrievable (no -txindex, no blockhash hint)")
-
-
 def verify_offer(rpc: Rpc, bundle: dict, min_conf: int = 20,
-                 require_attestation: bool = False) -> OfferVerification:
+                 require_attestation: bool = False,
+                 expected_challenge: Optional[str] = None) -> OfferVerification:
     """
     Run the full §4.3 verification against a local node. Returns a report whose
     `ok` is True only if every executed check passed. Trust-minimized: nothing is
@@ -373,10 +446,24 @@ def verify_offer(rpc: Rpc, bundle: dict, min_conf: int = 20,
         checks.append(Check(name, bool(ok), detail))
         return bool(ok)
 
+    if not isinstance(bundle, dict):
+        check("bundle", False, "bundle must be a JSON object")
+        return OfferVerification(False, tier, address, 0, 0, checks)
+
+    if type(min_conf) is not int or min_conf < 0:
+        check("parameters", False, "min_conf must be a non-negative integer")
+        return OfferVerification(False, tier, address, 0, 0, checks)
+    if (expected_challenge is not None and
+            (not isinstance(expected_challenge, str) or not expected_challenge)):
+        check("parameters", False, "expected_challenge must be a non-empty string")
+        return OfferVerification(False, tier, address, 0, 0, checks)
+
     # C1 — terms are well-formed and canonicalizable.
     terms = bundle.get("terms")
     try:
-        want_script_hex = commitment_script_hex(terms)
+        if type(bundle.get("version")) is not int or bundle.get("version") != 1:
+            raise ValueError("bundle.version must be integer 1")
+        want_commitment = terms_hash_hex(terms)
         expiry = terms["expiry_height"]
         check("terms-canonical", True, f"terms_hash={terms_hash_hex(terms)}")
     except Exception as e:  # noqa: BLE001
@@ -384,34 +471,76 @@ def verify_offer(rpc: Rpc, bundle: dict, min_conf: int = 20,
         return OfferVerification(False, tier, address, 0, 0, checks)
 
     # C2 — descriptor parses, is a known bond shape, and its timelock covers expiry.
+    expected_attest_address = ""
     try:
-        desc = bundle["bond"]["descriptor"]
-        desc_ck = add_checksum(rpc, desc)  # node-side parse + canonical checksum
+        bond_bundle = bundle["bond"]
+        if not isinstance(bond_bundle, dict):
+            raise ValueError("bundle.bond must be a JSON object")
+        desc = bond_bundle["descriptor"]
+        if not isinstance(desc, str):
+            raise ValueError("bond.descriptor must be a string")
+        desc_body, has_checksum, supplied_checksum = desc.partition("#")
+        descriptor_info = rpc("getdescriptorinfo", desc_body)
+        if has_checksum and supplied_checksum != descriptor_info["checksum"]:
+            raise ValueError("bond descriptor checksum does not match its descriptor")
+        desc_ck = f"{desc_body}#{descriptor_info['checksum']}"
         address = bond_address(rpc, desc_ck)
         bond = parse_bond_descriptor(desc)
         tier = bond.tier
-        ok = bond.refund_locktime >= expiry
+        if bond_bundle.get("tier") != tier:
+            raise ValueError(
+                f"bond.tier {bond_bundle.get('tier')!r} does not match derived tier {tier!r}"
+            )
+        expected_attest_address = refund_key_address(rpc, bond)
+        check("commitment", bond.commitment_hash == want_commitment,
+              f"descriptor commits {bond.commitment_hash}; expected {want_commitment}")
+        ctv_terms_ok = (bond.tier != "A+" or
+                        str(terms.get("ctv_template_hash", "")).lower() == bond.ctv_hash)
+        ok = bond.refund_locktime >= expiry and ctv_terms_ok
         check("descriptor-shape", ok,
               f"tier={bond.tier} refund_locktime={bond.refund_locktime} expiry={expiry}"
-              + ("" if ok else " (refund unlocks BEFORE offer expiry)"))
+              + ("" if bond.tier != "A+" else
+                 f" ctv_template_hash={bond.ctv_hash} terms_match={ctv_terms_ok}")
+              + ("" if bond.refund_locktime >= expiry else
+                 " (refund unlocks BEFORE offer expiry)"))
     except Exception as e:  # noqa: BLE001
         check("descriptor-shape", False, str(e))
         return OfferVerification(False, tier, address, 0, expiry, checks)
 
     # C3 — outpoints exist, are unspent, pay the vault, and are confirmed.
     outpoints = bundle["bond"].get("outpoints", [])
+    if not isinstance(outpoints, list):
+        check("outpoints", False, "bond.outpoints must be a JSON array")
+        return OfferVerification(False, tier, address, 0, expiry, checks)
     seen = set()
-    funding_heights: dict = {}
     all_utxos_ok = len(outpoints) > 0
     if not outpoints:
         check("outpoints", False, "bundle lists no outpoints")
     for op in outpoints:
-        key = (op["txid"], op["vout"])
+        if (not isinstance(op, dict) or
+                not isinstance(op.get("txid"), str) or
+                not re.fullmatch(_HASH256, op["txid"]) or
+                type(op.get("vout")) is not int or op["vout"] < 0):
+            all_utxos_ok = check(
+                "outpoints", False,
+                f"malformed outpoint {op!r}; expected 32-byte hex txid and non-negative integer vout",
+            ) and all_utxos_ok
+            continue
+        key = (op["txid"].lower(), op["vout"])
         if key in seen:
             all_utxos_ok = check("outpoints", False, f"duplicate outpoint {key}") and all_utxos_ok
             continue
         seen.add(key)
-        utxo = rpc("gettxout", op["txid"], op["vout"], False)
+        try:
+            # Include the mempool so a bond already consumed by an unconfirmed
+            # settlement/refund cannot continue to verify as offered supply.
+            utxo = rpc("gettxout", op["txid"], op["vout"], True)
+        except Exception as e:  # noqa: BLE001
+            all_utxos_ok = check(
+                "outpoints", False,
+                f"gettxout failed for {op['txid']}:{op['vout']}: {e}",
+            ) and all_utxos_ok
+            continue
         if utxo is None:
             all_utxos_ok = check("outpoints", False,
                                  f"{op['txid']}:{op['vout']} not in UTXO set "
@@ -429,8 +558,14 @@ def verify_offer(rpc: Rpc, bundle: dict, min_conf: int = 20,
                                  f"{op['txid']}:{op['vout']} has {confs} confirmations "
                                  f"(< {min_conf})") and all_utxos_ok
             continue
+        if utxo.get("coinbase", False) and confs < COINBASE_MATURITY:
+            all_utxos_ok = check(
+                "outpoints", False,
+                f"{op['txid']}:{op['vout']} is an immature coinbase with {confs} "
+                f"confirmations (< {COINBASE_MATURITY})",
+            ) and all_utxos_ok
+            continue
         verified_sats += to_sat(utxo["value"])
-        funding_heights[key] = rpc("getblockcount") - confs + 1
         check("outpoints", True, f"{op['txid']}:{op['vout']} {utxo['value']} BTX, {confs} conf")
 
     amount_ok = verified_sats >= terms["amount_sats"]
@@ -438,42 +573,30 @@ def verify_offer(rpc: Rpc, bundle: dict, min_conf: int = 20,
           f"verified {verified_sats} sats vs terms.amount_sats {terms['amount_sats']}")
     all_utxos_ok = all_utxos_ok and amount_ok
 
-    # C4 — every funding tx carries the OP_RETURN commitment to THESE terms.
-    commit_ok = True
-    for op in outpoints:
-        if (op["txid"], op["vout"]) not in seen:
-            continue
-        try:
-            fund_tx = _get_funding_tx(rpc, op["txid"], op.get("blockhash"),
-                                      funding_heights.get((op["txid"], op["vout"])))
-        except Exception as e:  # noqa: BLE001
-            commit_ok = check("commitment", False,
-                              f"{op['txid']}: funding tx unavailable ({e}); add a "
-                              "'blockhash' hint to the outpoint or run with -txindex") and commit_ok
-            continue
-        found = any(out.get("scriptPubKey", {}).get("hex", "").lower() == want_script_hex
-                    for out in fund_tx.get("vout", []))
-        commit_ok = check("commitment", found,
-                          f"{op['txid']}: OP_RETURN BTXOTC1||terms_hash "
-                          + ("present" if found else "MISSING or committed to different terms "
-                             "(possible double-pledge)")) and commit_ok
-
     # C5 — offer not already expired.
     height = rpc("getblockcount")
     not_expired = height < expiry
     check("not-expired", not_expired, f"height={height} expiry={expiry}")
 
-    # C6 — attestation (freshness / publisher-controls-a-seller-key). Optional:
-    # binding is 'declared' (attestation address is whatever the bundle names),
-    # so it proves challenge freshness and control of that address — the hard
-    # supply guarantees come from C2/C3/C4, not from this signature.
+    # C6 — optional freshness / publisher-controls-refund-key attestation.
+    # The signer address must be both committed in the terms and derived from
+    # the descriptor's refund key; accepting an arbitrary bundle-supplied
+    # address would prove no relationship to the bonded coins.
     att = bundle.get("attestation")
     att_ok = True
     if att:
         try:
             msg = attestation_message(terms, att["challenge"])
-            att_ok = bool(rpc("verifymessage", att["address"], att["signature"], msg))
-            check("attestation", att_ok, f"address={att['address']}")
+            address_bound = (att["address"] == terms.get("seller_address") ==
+                             expected_attest_address)
+            challenge_bound = (expected_challenge is None or
+                               att["challenge"] == expected_challenge)
+            signature_ok = bool(rpc("verifymessage", att["address"], att["signature"], msg))
+            att_ok = address_bound and challenge_bound and signature_ok
+            check("attestation", att_ok,
+                  f"address={att['address']} refund_address={expected_attest_address} "
+                  f"address_bound={address_bound} challenge_bound={challenge_bound} "
+                  f"signature_valid={signature_ok}")
         except Exception as e:  # noqa: BLE001
             att_ok = check("attestation", False, str(e))
     elif require_attestation:
@@ -502,7 +625,9 @@ def watch_offer(rpc: Rpc, bundle: dict, interval: float = 30.0,
         height = rpc("getblockcount")
         # Spent-ness wins over expiry: it is the terminal fact about the coins.
         for op in outpoints:
-            if rpc("gettxout", op["txid"], op["vout"], False) is None:
+            # Mempool spends terminate the offer immediately; waiting for the
+            # spend to confirm creates a double-quote window.
+            if rpc("gettxout", op["txid"], op["vout"], True) is None:
                 emit("spent", {"outpoint": op, "height": height})
                 return "spent"
         if height >= terms["expiry_height"]:
@@ -533,7 +658,8 @@ def build_bond_refund(rpc_wallet: Rpc, descriptor_with_checksum: str, txid: str,
     """
     try:
         res = rpc_wallet("buildhtlcrefund", descriptor_with_checksum,
-                         {"txid": txid, "vout": vout}, dest_address, locktime, fee_sat)
+                         {"txid": txid, "vout": vout}, dest_address, locktime, fee_sat,
+                         True)
     except Exception as e:  # noqa: BLE001
         if _is_unknown_method(e):
             raise NotImplementedError(
@@ -546,13 +672,11 @@ def build_bond_refund(rpc_wallet: Rpc, descriptor_with_checksum: str, txid: str,
     return res["hex"]
 
 
-def swap_vault_descriptor(internal_pubkey: str, preimage_hash160_hex: str,
-                          claimer_pubkey: str, refund_locktime: int,
+def swap_vault_descriptor(preimage_hash160_hex: str, claimer_pubkey: str, refund_locktime: int,
                           sender_pubkey: str) -> str:
-    """Stage-2 HTLC settlement vault (identical shape to the wBTX Model-B leg)."""
-    return (f"mr({internal_pubkey},"
-            f"{{htlc({preimage_hash160_hex},{claimer_pubkey}),"
-            f"refund({refund_locktime},{sender_pubkey})}})")
+    """Stage-2, two-leaf HTLC settlement vault (identical to the wBTX Model-B leg)."""
+    return (f"mr(htlc_tx({preimage_hash160_hex},{claimer_pubkey}),"
+            f"refund({refund_locktime},{sender_pubkey}))")
 
 
 def new_preimage() -> bytes:
@@ -588,8 +712,12 @@ def build_swap_refund(rpc_wallet: Rpc, descriptor_with_checksum: str, txid: str,
                       vout: int, dest_address: str, locktime: int,
                       fee_sat: int = 20000) -> str:
     """Seller reclaims an unclaimed settlement vault after its timeout."""
-    return build_bond_refund(rpc_wallet, descriptor_with_checksum, txid, vout,
-                             dest_address, locktime, fee_sat)
+    res = rpc_wallet("buildhtlcrefund", descriptor_with_checksum,
+                     {"txid": txid, "vout": vout}, dest_address, locktime, fee_sat)
+    if not res.get("complete", False):
+        raise RuntimeError("swap refund did not sign completely; check the locktime "
+                           "has been reached and the wallet owns the sender key")
+    return res["hex"]
 
 
 # ============================= offline selftest =============================
@@ -609,25 +737,29 @@ def selftest() -> None:
         raise AssertionError("float in terms must be rejected")
     except ValueError:
         pass
-    # Commitment script framing.
-    assert commitment_script_hex(terms) == "6a27" + (OTC_TAG + terms_hash(terms)).hex()
-    assert len(bytes.fromhex(commitment_script_hex(terms))) == _COMMITMENT_SCRIPT_LEN
-    # Descriptor round-trips for all tiers.
+    assert commitment_leaf_expr(terms) == f"commit({terms_hash_hex(terms)})"
+    # Descriptor round-trips for all tiers. create_offer performs this binding
+    # automatically before funding; the pure helper is pinned here.
     k1, k2, k3 = "aa" * 1312, "bb" * 1312, "cc" * 1312
-    b = parse_bond_descriptor(soft_bond_descriptor(k1, 900, k2))
+    b_desc = bind_bond_descriptor(soft_bond_descriptor(k1, 900, k2), terms)
+    b = parse_bond_descriptor(b_desc)
     assert (b.tier, b.refund_locktime, b.settle_pubkey, b.refund_pubkey) == ("B", 900, k1, k2)
-    a = parse_bond_descriptor(venue_bond_descriptor(k1, k3, 901, k2) + "#abcd1234")
+    a_desc = bind_bond_descriptor(venue_bond_descriptor(k1, k3, 901, k2), terms)
+    a = parse_bond_descriptor(a_desc)
     assert (a.tier, a.venue_pubkey, a.refund_locktime) == ("A", k3, 901)
-    ap = parse_bond_descriptor(ctv_bond_descriptor("11" * 32, k1, 902, k2))
+    ap_desc = bind_bond_descriptor(ctv_bond_descriptor("11" * 32, k1, 902, k2), terms)
+    ap = parse_bond_descriptor(ap_desc)
     assert (ap.tier, ap.ctv_hash, ap.refund_locktime) == ("A+", "11" * 32, 902)
+    assert b.commitment_hash == a.commitment_hash == ap.commitment_hash == terms_hash_hex(terms)
     # SLH-DSA key forms parse too.
-    parse_bond_descriptor(soft_bond_descriptor(f"pk_slh({'dd' * 32})", 900, k2))
+    parse_bond_descriptor(bind_bond_descriptor(
+        soft_bond_descriptor(f"pk_slh({'dd' * 32})", 900, k2), terms))
     # Unknown shapes fail closed.
     for bad in (f"mr({k1})",                                             # no refund leaf
-                f"mr({k1},{{htlc({'ee' * 20},{k2}),refund(900,{k2})}})",  # extra leaf
+                f"mr({k1},{{htlc_tx({'ee' * 20},{k2}),refund(900,{k2})}})",  # extra leaf
                 f"mr(multi_pq(1,{k1},{k3}),{{refund(900,{k2})}})"):       # 1-of-2 settle
         try:
-            parse_bond_descriptor(bad)
+            bind_bond_descriptor(bad, terms)
             raise AssertionError(f"must fail closed: {bad[:40]}...")
         except ValueError:
             pass
@@ -689,6 +821,8 @@ def main(argv=None) -> int:
     sp.add_argument("bundle_json")
     sp.add_argument("--min-conf", type=int, default=20)
     sp.add_argument("--require-attestation", action="store_true")
+    sp.add_argument("--expected-challenge", default=None,
+                    help="fresh buyer/venue challenge that the attestation must match")
 
     sp = sub.add_parser("watch", help="watch a bundle's bond outpoints until spent/expired")
     sp.add_argument("bundle_json")
@@ -721,7 +855,8 @@ def main(argv=None) -> int:
 
     if args.cmd == "verify":
         report = verify_offer(rpc, _load_json(args.bundle_json), min_conf=args.min_conf,
-                              require_attestation=args.require_attestation)
+                              require_attestation=args.require_attestation,
+                              expected_challenge=args.expected_challenge)
         print(json.dumps(report.as_dict(), indent=2))
         return 0 if report.ok else 1
 
@@ -747,11 +882,12 @@ def main(argv=None) -> int:
 
 
 __all__ = [
-    "OTC_TAG", "REQUIRED_TERMS_FIELDS", "validate_terms", "canonical_terms_bytes",
-    "terms_hash", "terms_hash_hex", "commitment_payload_hex", "commitment_script_hex",
+    "OTC_TAG", "COINBASE_MATURITY", "REQUIRED_TERMS_FIELDS", "validate_terms", "canonical_terms_bytes",
+    "terms_hash", "terms_hash_hex", "commitment_leaf_expr",
     "attestation_message", "soft_bond_descriptor", "venue_bond_descriptor",
-    "ctv_bond_descriptor", "BondInfo", "parse_bond_descriptor", "strip_checksum",
-    "add_checksum", "bond_address", "sats_to_btx_str", "to_sat", "create_offer",
+    "ctv_bond_descriptor", "BondInfo", "parse_bond_descriptor", "bind_bond_descriptor", "strip_checksum",
+    "add_checksum", "bond_address", "refund_key_address", "ensure_refund_attestation_descriptor",
+    "sats_to_btx_str", "to_sat", "create_offer",
     "Check", "OfferVerification", "verify_offer", "watch_offer", "build_bond_refund",
     "swap_vault_descriptor", "new_preimage", "swap_hash160_hex", "build_swap_claim",
     "build_swap_refund", "selftest",

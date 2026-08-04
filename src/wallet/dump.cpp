@@ -40,30 +40,45 @@ bool DumpWallet(WalletDatabase& db, bilingual_str& error, const std::string& dum
 
     std::unique_ptr<DatabaseBatch> batch = db.MakeBatch();
 
-    bool ret = true;
-    std::unique_ptr<DatabaseCursor> cursor = batch->GetNewCursor();
-    if (!cursor) {
-        error = _("Error: Couldn't create cursor into database");
-        ret = false;
-    }
+    struct DumpWalletError {
+        bilingual_str message;
+    };
+    auto throw_error = [](bilingual_str message) {
+        throw DumpWalletError{std::move(message)};
+    };
+    auto throw_write_error = [&] {
+        throw_error(strprintf(_("Unable to write complete dump file %s."), fs::PathToString(path)));
+    };
+    auto write = [&](const std::string& line) {
+        dump_file.write(line.data(), line.size());
+        if (dump_file.fail()) {
+            throw_write_error();
+        }
+    };
+    auto write_record = [&](const std::string& line) {
+        write(line);
+        hasher << Span{line};
+    };
 
-    // Write out a magic string with version
-    std::string line = strprintf("%s,%u\n", DUMP_MAGIC, DUMP_VERSION);
-    dump_file.write(line.data(), line.size());
-    hasher << Span{line};
+    try {
+        std::unique_ptr<DatabaseCursor> cursor = batch->GetNewCursor();
+        if (!cursor) {
+            throw_error(_("Error: Couldn't create cursor into database"));
+        }
 
-    // Write out the file format
-    std::string format = db.Format();
-    // BDB files that are opened using BerkeleyRODatabase have it's format as "bdb_ro"
-    // We want to override that format back to "bdb"
-    if (format == "bdb_ro") {
-        format = "bdb";
-    }
-    line = strprintf("%s,%s\n", "format", format);
-    dump_file.write(line.data(), line.size());
-    hasher << Span{line};
+        // Write out a magic string with version
+        std::string line = strprintf("%s,%u\n", DUMP_MAGIC, DUMP_VERSION);
+        write_record(line);
 
-    if (ret) {
+        // Write out the file format
+        std::string format = db.Format();
+        // BDB files that are opened using BerkeleyRODatabase have its format as "bdb_ro"
+        // We want to override that format back to "bdb"
+        if (format == "bdb_ro") {
+            format = "bdb";
+        }
+        line = strprintf("%s,%s\n", "format", format);
+        write_record(line);
 
         // Read the records
         while (true) {
@@ -71,35 +86,30 @@ bool DumpWallet(WalletDatabase& db, bilingual_str& error, const std::string& dum
             DataStream ss_value{};
             DatabaseCursor::Status status = cursor->Next(ss_key, ss_value);
             if (status == DatabaseCursor::Status::DONE) {
-                ret = true;
                 break;
             } else if (status == DatabaseCursor::Status::FAIL) {
-                error = _("Error reading next record from wallet database");
-                ret = false;
-                break;
+                throw_error(_("Error reading next record from wallet database"));
             }
             std::string key_str = HexStr(ss_key);
             std::string value_str = HexStr(ss_value);
             line = strprintf("%s,%s\n", key_str, value_str);
-            dump_file.write(line.data(), line.size());
-            hasher << Span{line};
+            write_record(line);
         }
-    }
 
-    cursor.reset();
-    batch.reset();
-
-    if (ret) {
         // Write the hash
-        tfm::format(dump_file, "checksum,%s\n", HexStr(hasher.GetHash()));
+        line = strprintf("checksum,%s\n", HexStr(hasher.GetHash()));
+        write(line);
         dump_file.close();
-    } else {
+        if (dump_file.fail()) throw_write_error();
+    } catch (const DumpWalletError& e) {
+        error = e.message;
         // Remove the dumpfile on failure
         dump_file.close();
         fs::remove(path);
+        return false;
     }
 
-    return ret;
+    return true;
 }
 
 // The standard wallet deleter function blocks on the validation interface
@@ -285,7 +295,7 @@ bool CreateFromDump(const ArgsManager& args, const std::string& name, const fs::
         dump_file.close();
     }
     // On failure, gather only the paths we created so cleanup does not delete unrelated files.
-    std::vector<fs::path> paths_to_remove{fs::PathFromString(wallet->GetDatabase().Filename())};
+    std::vector<fs::path> paths_to_remove{wallet->GetDatabase().Files()};
     if (!name.empty()) paths_to_remove.push_back(wallet_path);
 
     wallet.reset(); // The pointer deleter will close the wallet for us.

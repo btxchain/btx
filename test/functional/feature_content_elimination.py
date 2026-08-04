@@ -247,8 +247,8 @@ class ContentEliminationTest(BitcoinTestFramework):
         # End-to-end post-quantum: a 2-of-3 ML-DSA PQ multisig custody spend must
         # still relay AND confirm above the activation height. Pillars 2 & 3
         # promote the P2MR financial leaf allowlist to consensus by reusing the
-        # exact IsWitnessStandard classifier, so a MULTISIG leaf must pass both
-        # relay and the new ConnectBlock rule. This is the definitive check that
+        # financial P2MR classifier, so a MULTISIG leaf must pass both relay and
+        # the new ConnectBlock rule. This is the definitive check that
         # the fork preserves the PQ custody surface end to end.
         self._assert_pq_multisig_spends_post_activation(node, wallet)
 
@@ -288,7 +288,7 @@ class ContentEliminationTest(BitcoinTestFramework):
 
         # Relay path (IsWitnessStandard) accepts the PQ multisig witness...
         msig_txid = signers[0].sendrawtransaction(finalized["hex"])
-        # ...and the consensus path (ConnectBlock IsWitnessStandard) confirms it
+        # ...and the consensus path (ConnectBlock IsFinancialP2MRWitness) confirms it
         # in a block above the activation height.
         self.generate(node, 1)
         assert_greater_than(node.getblockcount(), ACTIVATION_HEIGHT - 1)

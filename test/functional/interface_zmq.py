@@ -6,6 +6,7 @@
 
 import io
 import os
+import re
 import struct
 import tempfile
 from io import BytesIO
@@ -20,6 +21,7 @@ from test_framework.blocktools import (
     create_coinbase,
 )
 from test_framework.test_framework import BitcoinTestFramework
+from test_framework.test_node import ErrorMatch
 from test_framework.messages import (
     CBlock,
     hash256,
@@ -130,9 +132,10 @@ class ZMQTest (BitcoinTestFramework):
         self.skip_if_no_bitcoind_zmq()
 
     def run_test(self):
-        self.wallet = MiniWallet(self.nodes[0])
         self.ctx = zmq.Context()
         try:
+            self.test_address_already_in_use()
+            self.wallet = MiniWallet(self.nodes[0])
             self.test_basic()
             if test_unix_socket():
                 self.test_basic(unix=True)
@@ -147,6 +150,21 @@ class ZMQTest (BitcoinTestFramework):
             # Destroy the ZMQ context.
             self.log.debug("Destroying ZMQ context")
             self.ctx.destroy(linger=None)
+
+    def test_address_already_in_use(self):
+        self.log.info("Test that ZMQ fails startup if the address is already in use")
+        address = f"tcp://127.0.0.1:{self.zmq_port_base + 3}"
+        self.restart_node(0, [f"-zmqpubrawblock={address}"])
+        self.stop_node(1)
+
+        self.nodes[1].assert_start_raises_init_error(
+            extra_args=[f"-zmqpubrawblock={address}"],
+            expected_msg=re.escape(f"Error: Unable to bind ZMQ address {address}"),
+            match=ErrorMatch.PARTIAL_REGEX,
+        )
+
+        self.restart_node(0)
+        self.start_node(1)
 
     # Restart node with the specified zmq notifications enabled, subscribe to
     # all of them and return the corresponding ZMQSubscriber objects.

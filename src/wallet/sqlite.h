@@ -166,6 +166,10 @@ public:
     void IncrementUpdateCounter() override { ++nUpdateCounter; }
 
     std::string Filename() override { return m_file_path; }
+    std::vector<fs::path> Files() override
+    {
+        return {fs::PathFromString(m_file_path), fs::PathFromString(m_file_path + "-journal")};
+    }
     std::string Format() override { return "sqlite"; }
 
     /** Make a SQLiteBatch connected to this database */

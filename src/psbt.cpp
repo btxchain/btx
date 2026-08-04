@@ -128,16 +128,21 @@ bool PartiallySignedTransaction::Merge(const PartiallySignedTransaction& psbt)
     } catch (const std::exception&) {
         return false;
     }
-    for (auto& xpub_pair : psbt.m_xpubs) {
-        if (m_xpubs.count(xpub_pair.first) == 0) {
-            m_xpubs[xpub_pair.first] = xpub_pair.second;
-        } else {
-            m_xpubs[xpub_pair.first].insert(xpub_pair.second.begin(), xpub_pair.second.end());
-        }
-    }
+    MergeGlobalXPubs(psbt);
+    m_proprietary.insert(psbt.m_proprietary.begin(), psbt.m_proprietary.end());
     unknown.insert(psbt.unknown.begin(), psbt.unknown.end());
 
     return true;
+}
+
+void PartiallySignedTransaction::MergeGlobalXPubs(const PartiallySignedTransaction& psbt)
+{
+    for (const auto& [origin, xpubs] : psbt.m_xpubs) {
+        for (const CExtPubKey& xpub : xpubs) {
+            const bool known{std::ranges::any_of(m_xpubs, [&](const auto& entry) { return entry.second.contains(xpub); })};
+            if (!known) m_xpubs[origin].insert(xpub);
+        }
+    }
 }
 
 bool PartiallySignedTransaction::AddInput(const CTxIn& txin, PSBTInput& psbtin)
@@ -349,6 +354,7 @@ void PSBTInput::Merge(const PSBTInput& input)
     hash160_preimages.insert(input.hash160_preimages.begin(), input.hash160_preimages.end());
     hash256_preimages.insert(input.hash256_preimages.begin(), input.hash256_preimages.end());
     hd_keypaths.insert(input.hd_keypaths.begin(), input.hd_keypaths.end());
+    m_proprietary.insert(input.m_proprietary.begin(), input.m_proprietary.end());
     unknown.insert(input.unknown.begin(), input.unknown.end());
     m_tap_script_sigs.insert(input.m_tap_script_sigs.begin(), input.m_tap_script_sigs.end());
     m_tap_scripts.insert(input.m_tap_scripts.begin(), input.m_tap_scripts.end());
@@ -458,6 +464,7 @@ bool PSBTOutput::IsNull() const
 void PSBTOutput::Merge(const PSBTOutput& output)
 {
     hd_keypaths.insert(output.hd_keypaths.begin(), output.hd_keypaths.end());
+    m_proprietary.insert(output.m_proprietary.begin(), output.m_proprietary.end());
     unknown.insert(output.unknown.begin(), output.unknown.end());
     m_tap_bip32_paths.insert(output.m_tap_bip32_paths.begin(), output.m_tap_bip32_paths.end());
     m_p2mr_bip32_paths.insert(output.m_p2mr_bip32_paths.begin(), output.m_p2mr_bip32_paths.end());

@@ -63,11 +63,10 @@ identical 20-byte value for the BTX descriptor.
 ## BTX-side recipe (Model B)
 1. **Lock address (descriptor):**
    ```
-   mr(<internal_pk>, { htlc(<H160>, <claimer_pk>), refund(<locktime>, <sender_pk>) })
+   mr(htlc_tx(<H160>, <claimer_pk>), refund(<locktime>, <sender_pk>))
    ```
    - `<H160>` = `RIPEMD160(SHA256(preimage))` (hex, 20 bytes).
-   - `<claimer_pk>` = the claimer's ML-DSA/SLH-DSA pubkey (the CSFS "oracle" key — here, the recipient
-     themselves, so the claim needs *both* the preimage and the recipient's signature).
+   - `<claimer_pk>` = the claimer's ML-DSA/SLH-DSA transaction-signing pubkey.
    - `<locktime>` = absolute block height/time after which `<sender_pk>` may refund.
    Add the checksum with `getdescriptorinfo`, derive with `deriveaddresses`, import with
    `importdescriptors`.
@@ -77,9 +76,9 @@ identical 20-byte value for the BTX descriptor.
    buildhtlcclaim "<descriptor#cksum>" {"txid":"<txid>","vout":<n>} "<preimage_hex>" "<dest_address>" <fee_sat>
        -> {"hex":"<signed raw tx>", "complete":true}
    ```
-   It assembles the HTLC leaf witness `<0x01> <csfs_sig> <preimage> <leaf_script> <control_block>`
-   (the wallet produces `csfs_sig`, the recipient's PQ signature over `TaggedHash("CSFS/btx", preimage)`,
-   and injects the `hash160` preimage + the P2MR CSFS message), signs, and returns the raw tx. Broadcast
+   It assembles the HTLC leaf witness `<tx_sig> <preimage> <leaf_script> <control_block>`
+   (the wallet produces a normal P2MR transaction-bound PQ signature and injects the
+   32-byte `hash160` preimage), signs, and returns the raw tx. Broadcast
    it with `sendrawtransaction` — the preimage is now on-chain, so the counterparty can claim the EVM leg.
 4. **Refund (sender)** — after `<locktime>`, use the wallet RPC:
    ```
@@ -114,7 +113,7 @@ preimage extraction. See the module docstring for an end-to-end example.
 - ✅ Architecture + decisions + EVM-attestation-verification analysis (`docs/wbtx-bridge-architecture.md`).
 - ✅ EVM reference contracts (token, bridge + ECDSA v1 verifier, atomic-swap HTLC).
 - ✅ BTX-side SDK for the Model-B swap leg (descriptors + PSBT).
-- ✅ HTLC spend RPCs `buildhtlcclaim` / `buildhtlcrefund` (audited control-block + CSFS + preimage
+- ✅ HTLC spend RPCs `buildhtlcclaim` / `buildhtlcrefund` (audited control-block + tx signature + preimage
   witness assembly and signing); covered by `test/functional/wallet_htlc_atomicswap.py`.
 - ⏳ Remaining ergonomic node RPCs: `createwbtxlock`, `extractpreimage`, `scanwbtxdeposits` — thin
   wrappers over existing script-tree/PSBT machinery.

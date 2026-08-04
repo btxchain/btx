@@ -8,6 +8,8 @@
 #include <streams.h>
 #include <test/util/setup_common.h>
 
+#include <fstream>
+
 #include <boost/test/unit_test.hpp>
 
 BOOST_FIXTURE_TEST_SUITE(flatfile_tests, BasicTestingSetup)
@@ -91,6 +93,26 @@ BOOST_AUTO_TEST_CASE(flatfile_open)
         BOOST_CHECK_THROW(file >> LIMITED_STRING(text, 256), std::ios_base::failure);
         BOOST_REQUIRE_EQUAL(file.fclose(), 0);
     }
+}
+
+BOOST_AUTO_TEST_CASE(flatfile_open_parent_failures)
+{
+    const auto data_dir{m_args.GetDataDirBase()};
+
+    // A read-only open must not create missing directories.
+    const fs::path missing_parent{data_dir / "missing" / "nested"};
+    const FlatFileSeq read_seq{missing_parent, "a", 100};
+    BOOST_CHECK(read_seq.Open(FlatFilePos{0, 0}, /*read_only=*/true) == nullptr);
+    BOOST_CHECK(!fs::exists(missing_parent));
+
+    // A path component that is a regular file makes directory creation fail.
+    // Open should return nullptr rather than leak a filesystem exception.
+    const fs::path blocker{data_dir / "not_a_directory"};
+    std::ofstream{blocker}.put('x');
+    const FlatFileSeq write_seq{blocker / "nested", "a", 100};
+    FILE* opened{nullptr};
+    BOOST_CHECK_NO_THROW(opened = write_seq.Open(FlatFilePos{0, 0}));
+    BOOST_CHECK(opened == nullptr);
 }
 
 BOOST_AUTO_TEST_CASE(flatfile_allocate)

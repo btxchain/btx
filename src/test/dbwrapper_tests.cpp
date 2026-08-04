@@ -185,6 +185,36 @@ BOOST_AUTO_TEST_CASE(dbwrapper_batch)
     }
 }
 
+BOOST_AUTO_TEST_CASE(dbwrapper_tryread_statuses)
+{
+    for (const bool obfuscate : {false, true}) {
+        const fs::path path{m_args.GetDataDirBase() / (obfuscate ? "dbwrapper_tryread_obfuscated" : "dbwrapper_tryread_plain")};
+        CDBWrapper dbw{{.path = path, .cache_bytes = 1_MiB, .wipe_data = true, .obfuscate = obfuscate}};
+
+        constexpr uint8_t key_ok{'A'};
+        constexpr uint8_t key_missing{'B'};
+        constexpr uint8_t key_bad{'C'};
+        const uint256 expected{m_rng.rand256()};
+        BOOST_REQUIRE(dbw.Write(key_ok, expected));
+        BOOST_REQUIRE(dbw.Write(key_bad, uint8_t{0xff}));
+
+        uint256 value;
+        const auto ok_status{dbw.TryRead(key_ok, value)};
+        BOOST_CHECK(ok_status.status == CDBWrapper::ReadStatus::Code::OK);
+        BOOST_CHECK_EQUAL(value, expected);
+
+        const auto missing_status{dbw.TryRead(key_missing, value)};
+        BOOST_CHECK(missing_status.status == CDBWrapper::ReadStatus::Code::NOT_FOUND);
+
+        const auto bad_status{dbw.TryRead(key_bad, value)};
+        BOOST_CHECK(bad_status.status == CDBWrapper::ReadStatus::Code::DESERIALIZATION_ERROR);
+        BOOST_CHECK(bad_status.op_error.has_value());
+
+        // Preserve the compatibility behavior of Read() for malformed values.
+        BOOST_CHECK(!dbw.Read(key_bad, value));
+    }
+}
+
 BOOST_AUTO_TEST_CASE(dbwrapper_iterator)
 {
     // Perform tests both obfuscated and non-obfuscated.

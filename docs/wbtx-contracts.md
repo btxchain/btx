@@ -176,12 +176,12 @@ one chain). No proxy ⇒ no initializer/storage-gap concerns.
 - **Signer rotation:** `rotateSigners(newSet, M)` via the Timelock; the old set is cleared.
 
 ### 5.3 Atomic-swap integrators (Model B, no federation)
-- **Build the BTX leg** as `mr(<internal>, {htlc(<H160>, <claimerPk>), refund(<locktime>, <senderPk>)})`
+- **Build the BTX leg** as `mr(htlc_tx(<H160>, <claimerPk>), refund(<locktime>, <senderPk>))`
   with `H160 = RIPEMD160(SHA256(preimage))`; lock the EVM leg via `WBTXAtomicSwapHTLC.open(...)` under
   the **same** `hashlock`. Assemble + import the lock with stock descriptor RPCs:
   `getdescriptorinfo` (add checksum) → `deriveaddresses` (the P2MR lock address) → `importdescriptors`
   (watch for the deposit), then `sendtoaddress` to fund it.
-- **Spend it with the node wallet RPCs** (these encapsulate the control-block + CSFS message + preimage
+- **Spend it with the node wallet RPCs** (these encapsulate the control-block + transaction signature + preimage
   witness assembly and signing, returning a fully-signed raw tx):
   ```
   # Recipient claims with the preimage (this REVEALS the preimage on-chain for the EVM leg):

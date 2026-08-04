@@ -1,0 +1,1411 @@
+// Copyright (c) 2026 The BTX developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://opensource.org/license/mit/.
+//
+// matmul-v4-report — one-command MatMul v4.1 hardware measurement tool.
+//
+// This is the report the activation gates consume: run it on ANY machine
+// (CPU-only, or a host with a compiled-in CUDA / Metal / HIP backend) and it
+// emits a single JSON file plus a human summary that feed three §K activation
+// gates directly:
+//
+//   B1  (bit-exact determinism)  — runs the resolved backend's BATCHED path
+//        (matmul_v4::accel::ComputeDigestsBatchedDispatched) over a nonce
+//        window and asserts every digest+payload is BYTE-IDENTICAL to the CPU
+//        reference (matmul_v4::ComputeDigest). A FAIL is a hard consensus-split
+//        signal — the backend must NOT be activated.
+//   B2b (ASERT throughput calibration) — reports sustained MARGINAL nonce/s
+//        (the per-nonce unit difficulty prices, since U*A is template-amortized
+//        under invariant I1'); with a supplied v3 baseline it prints a ready
+//        nMatMulV4AsertRescaleNum/Den candidate.
+//   B2g (datacenter-vs-consumer go/no-go) — instruments the §K.2a-WT stage
+//        boundaries (S0/S1b/S2/S3/S4) on the STACKED window shapes, reports the
+//        tensor-stage wall-time share and an implied INT8 tensor-utilization
+//        estimate vs a supplied device peak.
+//
+// This tool is NOT a nanobench: it is a standalone executable with explicit
+// timers and a machine-readable JSON output so results from many machines can
+// be diffed and aggregated. The per-stage instrumentation is the CPU-reference
+// methodology of src/bench/matmul_v4_stage_bench.cpp, lifted to a stacked
+// window; a GPU backend mirrors the SAME S-boundaries on-device and the
+// operator captures the device's own per-stage timers (see notes in output).
+//
+// ---------------------------------------------------------------------------
+// --profile bmx4c --mt24 : the M-t24 accumulator-exactness measurement (v4.2).
+//
+// doc/btx-matmul-v4.2-bmx4c-spec.md §5/§9 and doc/btx-matmul-v4-bmx4-asic-fpga-
+// deepdive.md pin M-t24 as THE gating measurement for whether commodity block-
+// scaled FP4/MX silicon may run the BMX4-C NATIVE path: the native path needs
+// a PROVEN exact accumulator of t=24 mantissa/integer bits (consensus
+// Params::nMatMulBMX4CMinProvenAccumulatorBits, BMX4C_NATIVE_PATH_PROVEN_T);
+// datasheet claims are never trusted (Hopper's "FP32-accumulate" FP8 path
+// retained only ~t=14 in practice). A device proven only t~=14 MUST fail
+// closed to the 1-GEMM INT8 fallback (§5.2's ladder) -- silently mining the
+// native path on such a device would round high-magnitude partial sums and
+// split the chain.
+//
+// `--profile bmx4c` runs the ENC-BMX4C reference (matmul::v4::bmx4,
+// src/matmul/matmul_v4_bmx4.{h,cpp}, COMMITTED and UNCHANGED by this tool)
+// instead of the v4.1 ENC-S8 profile: a BMX4-C bit-exactness gate (the B1
+// analogue: run-to-run determinism + limb-tensor-combine == direct-mod-q-
+// combine byte-equality over a nonce window), BMX4-C per-stage stacked-window
+// timing (the §K.2a-WT/§K.2b analogue), and the M-t24 boundary-vector suite
+// (`--mt24`, forced on under this profile): the §5.3 C-1' t-discrimination and
+// boundary-pin vectors (odd-step crossings of 2^14, exact pins at 2^22/2^23/
+// 2^24) run through the SAME accumulation primitives (ExactDot,
+// ComputeCombineModQ, ComputeCombineLimbTensor[BMX4C]) a device's native
+// block-scaled kernel must reproduce byte-for-byte. On CPU these primitives
+// are true int64/int32 C++ arithmetic, so M-t24 PASSes trivially and
+// `proven_accumulator_bits` reports the pinned t=24 threshold -- this is the
+// harness self-test (deliberately runnable/verifiable with no GPU). BMX4-C
+// batch kernels are wired for CUDA, Metal, and HIP, and their outputs are
+// reverified against this reference. The M-t24 vectors themselves are not yet
+// executed through a vendor-native FP4/MX accumulator, however. A hardware
+// request must therefore fail closed even when the fallback BMX4-C device
+// kernel is bit-exact; a CPU M-t24 pass is only a harness self-test.
+
+#include <matmul/accel_v4.h>
+#include <matmul/backend_capabilities_v4.h>
+#include <matmul/int8_field.h>
+#include <matmul/matmul_v4.h>
+#include <matmul/matmul_v4_batch.h>
+#include <matmul/matmul_v4_bmx4.h>
+#include <matmul/pow_v4.h>
+#include <metal/matmul_v4_bmx4_accel.h>
+#include <primitives/block.h>
+#include <uint256.h>
+#include <util/translation.h>
+
+#include <univalue.h>
+
+#include <algorithm>
+#include <chrono>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <fstream>
+#include <iostream>
+#include <numeric>
+#include <optional>
+#include <string>
+#include <vector>
+
+#if defined(__unix__) || defined(__APPLE__)
+#include <unistd.h>
+#endif
+
+const TranslateFn G_TRANSLATION_FUN{nullptr};
+
+namespace {
+
+using Clock = std::chrono::steady_clock;
+namespace mv4 = matmul::v4;
+
+double Secs(Clock::time_point a, Clock::time_point b)
+{
+    return std::chrono::duration<double>(b - a).count();
+}
+
+std::string HostName()
+{
+#if defined(__unix__) || defined(__APPLE__)
+    char buf[256] = {0};
+    if (gethostname(buf, sizeof(buf) - 1) == 0 && buf[0] != '\0') {
+        return std::string{buf};
+    }
+#endif
+    if (const char* h = std::getenv("HOSTNAME")) {
+        if (h[0] != '\0') return std::string{h};
+    }
+    return "unknown-host";
+}
+
+std::string HostCpuArch()
+{
+#if defined(__x86_64__) || defined(_M_X64)
+    return "x86_64";
+#elif defined(__aarch64__) || defined(_M_ARM64)
+    return "arm64";
+#elif defined(__arm__)
+    return "arm";
+#else
+    return "unknown";
+#endif
+}
+
+// A fixed synthetic template header (same constants as the stage bench so
+// results are comparable across machines); matmul_dim = n, nonce set per index.
+CBlockHeader ReportHeader(uint32_t n)
+{
+    CBlockHeader header;
+    header.nVersion = 0x20000004;
+    header.hashPrevBlock = uint256::FromHex("1111111111111111111111111111111111111111111111111111111111111111").value();
+    header.hashMerkleRoot = uint256::FromHex("2222222222222222222222222222222222222222222222222222222222222222").value();
+    header.nTime = 1'770'000'090U;
+    header.nBits = 0x207fffff;
+    header.nNonce64 = 7;
+    header.nNonce = 7;
+    header.matmul_dim = static_cast<uint16_t>(n);
+    header.seed_a = uint256::FromHex("0000000000000000000000000000000000000000000000000000000000000000").value();
+    header.seed_b = uint256::FromHex("4504d44d861b69197db1d95e473442346c4f2bc1f5869996bdccd63cfbdbd150").value();
+    return header;
+}
+
+std::vector<CBlockHeader> WindowHeaders(uint32_t n, uint32_t window, uint64_t base_nonce)
+{
+    std::vector<CBlockHeader> headers(window, ReportHeader(n));
+    for (uint32_t i = 0; i < window; ++i) {
+        headers[i].nNonce64 = base_nonce + i;
+        headers[i].nNonce = static_cast<uint32_t>(headers[i].nNonce64);
+    }
+    return headers;
+}
+
+// Per-stage wall-time over a STACKED nonce window, mirroring
+// matmul_v4_stage_bench::RunStagedNonce but across `window` nonces so S2/S3
+// run on the batched (stacked) shapes the §K.2b profile exists to enforce.
+struct StageResult {
+    uint32_t n{0};
+    uint32_t m{0};
+    uint32_t window{0};
+    double s0_template{0};   // amortized per template (EXCLUDED from marginal)
+    double s1b_expand{0};    // summed across window
+    double s2_gemm{0};       // summed across window
+    double s3_limb{0};       // stacked limb-tensor combine (one big GEMM)
+    double s3_alu{0};        // integer-ALU direct alternative (summed)
+    double s4_digest{0};     // summed across window
+    bool stage_bit_exact{false};
+    std::vector<uint256> digests;
+    std::vector<std::vector<unsigned char>> payloads;
+    bool valid{false};
+};
+
+StageResult MeasureStages(uint32_t n, uint32_t window, uint32_t rounds, uint64_t base_nonce)
+{
+    StageResult r;
+    r.n = n;
+    r.window = window;
+    uint32_t m = 0;
+    if (!mv4::ValidateDims(n, mv4::kTileB, m) || !mv4::CheckCombineLimbBound(n) || window == 0) {
+        return r;
+    }
+    r.m = m;
+    const uint32_t q_cols = window * m;
+    const std::vector<CBlockHeader> headers = WindowHeaders(n, window, base_nonce);
+
+    // S0: template-scoped work (A,U,V expand + P = U*A), paid ONCE per template
+    // under invariant I1'; reported separately, excluded from the marginal.
+    auto c0 = Clock::now();
+    const uint256 seed_a = mv4::DeriveOperandSeed(headers[0], mv4::Operand::A);
+    const auto [seed_u, seed_v] = mv4::DeriveProjectorSeeds(headers[0]);
+    const std::vector<int8_t> A = mv4::ExpandOperand(seed_a, n);
+    const std::vector<int8_t> U = mv4::ExpandProjector(seed_u, m, n);
+    const std::vector<int8_t> V = mv4::ExpandProjector(seed_v, n, m);
+    const std::vector<int32_t> P = mv4::ComputeProjectedLeft(U, A, n, m);
+    auto c1 = Clock::now();
+    r.s0_template = Secs(c0, c1);
+
+    // Build the stacked right factor Qstack = [B_1*V | ... | B_Q*V] (n x q_cols).
+    // S1b (expand B, per nonce) and S2 (Q_i = B_i*V, per nonce) are summed; on
+    // device these stack as one [B_1; ...; B_Q]*V GEMM with expansions overlapped.
+    std::vector<uint256> sigmas(window);
+    std::vector<int32_t> Qstack(static_cast<size_t>(n) * q_cols);
+    for (uint32_t i = 0; i < window; ++i) {
+        auto ca = Clock::now();
+        sigmas[i] = mv4::DeriveSigma(headers[i]);
+        const uint256 seed_b = mv4::DeriveOperandSeed(headers[i], mv4::Operand::B);
+        const std::vector<int8_t> B = mv4::ExpandOperand(seed_b, n);
+        auto cb = Clock::now();
+        r.s1b_expand += Secs(ca, cb);
+        const std::vector<int32_t> Qi = mv4::ComputeProjectedRight(B, V, n, m);
+        auto cc = Clock::now();
+        r.s2_gemm += Secs(cb, cc);
+        for (uint32_t k = 0; k < n; ++k) {
+            int32_t* dst = &Qstack[static_cast<size_t>(k) * q_cols + static_cast<size_t>(i) * m];
+            const int32_t* src = &Qi[static_cast<size_t>(k) * m];
+            std::copy(src, src + m, dst);
+        }
+    }
+
+    // S3 (limb-tensor path): the ONE LARGE DENSE GEMM P * Qstack (m x n by
+    // n x q_cols), the §K.2b combine the profile exists to make dense.
+    auto cd = Clock::now();
+    const std::vector<mv4::Fq> Chat_wide = mv4::ComputeCombineLimbTensorStacked(P, Qstack, n, m, q_cols);
+    auto ce = Clock::now();
+    r.s3_limb = Secs(cd, ce);
+
+    // S3' (integer-ALU direct alternative): per-nonce ComputeCombineModQ over
+    // the sliced Q_i. Miners take min(S3, S3') per device.
+    std::vector<mv4::Fq> Chat_alu_all;
+    {
+        auto cf = Clock::now();
+        for (uint32_t i = 0; i < window; ++i) {
+            std::vector<int32_t> Qi(static_cast<size_t>(n) * m);
+            for (uint32_t k = 0; k < n; ++k) {
+                const int32_t* src = &Qstack[static_cast<size_t>(k) * q_cols + static_cast<size_t>(i) * m];
+                std::copy(src, src + m, &Qi[static_cast<size_t>(k) * m]);
+            }
+            const std::vector<mv4::Fq> Chat = mv4::ComputeCombineModQ(P, Qi, n, m);
+            Chat_alu_all.insert(Chat_alu_all.end(), Chat.begin(), Chat.end());
+        }
+        auto cg = Clock::now();
+        r.s3_alu = Secs(cf, cg);
+    }
+
+    // S4 (serialize + digest, per nonce): slice the m x m block from Chat_wide.
+    r.digests.resize(window);
+    r.payloads.resize(window);
+    bool alu_matches_limb = true;
+    auto ch = Clock::now();
+    for (uint32_t i = 0; i < window; ++i) {
+        std::vector<mv4::Fq> Chat(static_cast<size_t>(m) * m);
+        for (uint32_t a = 0; a < m; ++a) {
+            const mv4::Fq* src = &Chat_wide[static_cast<size_t>(a) * q_cols + static_cast<size_t>(i) * m];
+            std::copy(src, src + m, &Chat[static_cast<size_t>(a) * m]);
+        }
+        r.payloads[i] = mv4::SerializeSketch(Chat);
+        r.digests[i] = mv4::ComputeSketchDigest(sigmas[i], r.payloads[i]);
+    }
+    auto ci = Clock::now();
+    r.s4_digest = Secs(ch, ci);
+
+    // Stage bit-exactness: each stacked-window nonce vs the single-nonce
+    // consensus reference AND the limb path vs the ALU-direct path.
+    bool all_ok = true;
+    for (uint32_t i = 0; i < window; ++i) {
+        uint256 ref_digest;
+        std::vector<unsigned char> ref_payload;
+        const bool ok = matmul_v4::ComputeDigest(headers[i], n, rounds, ref_digest, ref_payload);
+        // Compare this nonce's limb-path C-block against the ALU-direct block.
+        for (uint32_t a = 0; a < m && alu_matches_limb; ++a) {
+            const mv4::Fq* limb_src = &Chat_wide[static_cast<size_t>(a) * q_cols + static_cast<size_t>(i) * m];
+            const mv4::Fq* alu_src = &Chat_alu_all[(static_cast<size_t>(i) * m + a) * m];
+            if (!std::equal(limb_src, limb_src + m, alu_src)) alu_matches_limb = false;
+        }
+        if (!ok || r.digests[i] != ref_digest || r.payloads[i] != ref_payload) {
+            all_ok = false;
+        }
+    }
+    r.stage_bit_exact = all_ok && alu_matches_limb;
+    r.valid = true;
+    return r;
+}
+
+// Raw device batched entry point for a resolved GPU backend (nullptr for CPU).
+// Used to measure device mining throughput WITHOUT the per-nonce host verify
+// that ComputeDigestsBatchedDispatched adds (the miner only verifies a winner).
+matmul_v4::accel::BatchAccelFn RawBatchFnFor(matmul_v4::accel::Kind kind)
+{
+    using K = matmul_v4::accel::Kind;
+    switch (kind) {
+    case K::CUDA:  return &matmul_v4::cuda::ComputeDigestsBatchedAccel;
+    case K::METAL: return &matmul_v4::metal::ComputeDigestsBatchedAccel;
+    case K::HIP:   return &matmul_v4::hip::ComputeDigestsBatchedAccel;
+    case K::ASCEND: return &matmul_v4::ascend::ComputeDigestsBatchedAccel;
+    case K::CPU:   return nullptr;
+    }
+    return nullptr;
+}
+
+matmul_v4::backend::Kind ToEligKind(matmul_v4::accel::Kind k)
+{
+    using A = matmul_v4::accel::Kind;
+    using B = matmul_v4::backend::Kind;
+    switch (k) {
+    case A::CPU:   return B::CPU;
+    case A::CUDA:  return B::CUDA;
+    case A::METAL: return B::METAL;
+    case A::HIP:   return B::HIP;
+    case A::ASCEND: return B::ASCEND;
+    }
+    return B::CPU;
+}
+
+struct Args {
+    uint32_t n{4096};
+    uint32_t window{32};   // §K.2b asks for Q >= 32
+    uint32_t rounds{matmul_v4::kFreivaldsRounds};
+    bool quick{false};     // also run a n=256 / n=512 lane
+    double device_peak_int8_tops{0}; // advertised INT8 TOPS (0 = unknown)
+    double v3_hashrate{0};           // v3 sustained hashes/s on this box (0 = unset)
+    std::string out_path;            // JSON output (default derived from hostname)
+    std::string backend_override;    // sets BTX_MATMUL_V4_BACKEND if non-empty
+    std::string profile{"v41"};      // "v41" (ENC-S8, default) or "bmx4c" (ENC-BMX4C, v4.2)
+    bool mt24{false};                 // run the M-t24 boundary-vector suite (forced on for bmx4c)
+};
+
+void PrintUsage(std::ostream& os)
+{
+    os << "Usage: matmul-v4-report [options]\n"
+       << "  --backend <cpu|cuda|metal|hip|ascend> force backend (sets BTX_MATMUL_V4_BACKEND)\n"
+       << "  --profile <v41|bmx4c>            encoding profile: v4.1 ENC-S8 (default) or v4.2 ENC-BMX4C\n"
+       << "  --mt24                           run the M-t24 accumulator-exactness boundary-vector suite\n"
+       << "                                   (§5.3/C-1'; always on under --profile bmx4c)\n"
+       << "  --n <dim>                        matrix dimension (default 4096; env BTX_MATMUL_V4_REPORT_N)\n"
+       << "  --window <Q>                     nonce window (default 32; env BTX_MATMUL_V4_REPORT_WINDOW)\n"
+       << "  --rounds <R>                     Freivalds rounds for the verify gate (default 3)\n"
+       << "  --quick                          also run a fast n=256 and n=512 lane (v4.1 profile only)\n"
+       << "  --device-peak-int8-tops <TOPS>   advertised INT8 TOPS, for the tensor-utilization estimate\n"
+       << "  --v3-hashrate <H/s>              v3 sustained hashes/s on this host, for the ASERT rescale suggestion\n"
+       << "  --out <path>                     JSON output path (default matmul-v4-report-<hostname>.json)\n"
+       << "  -h, --help                       this help\n";
+}
+
+bool ParseArgs(int argc, char* argv[], Args& args, std::string& err)
+{
+    auto need = [&](int& i) -> const char* {
+        if (i + 1 >= argc) { err = std::string("missing value for ") + argv[i]; return nullptr; }
+        return argv[++i];
+    };
+    for (int i = 1; i < argc; ++i) {
+        const std::string a{argv[i]};
+        if (a == "-h" || a == "--help") { PrintUsage(std::cout); std::exit(0); }
+        else if (a == "--backend") { const char* v = need(i); if (!v) return false; args.backend_override = v; }
+        else if (a == "--profile") {
+            const char* v = need(i); if (!v) return false;
+            args.profile = v;
+            if (args.profile != "v41" && args.profile != "bmx4c") {
+                err = "unknown --profile (want v41 or bmx4c): " + args.profile;
+                return false;
+            }
+        }
+        else if (a == "--mt24") { args.mt24 = true; }
+        else if (a == "--n") { const char* v = need(i); if (!v) return false; args.n = static_cast<uint32_t>(std::strtoul(v, nullptr, 10)); }
+        else if (a == "--window") { const char* v = need(i); if (!v) return false; args.window = static_cast<uint32_t>(std::strtoul(v, nullptr, 10)); }
+        else if (a == "--rounds") { const char* v = need(i); if (!v) return false; args.rounds = static_cast<uint32_t>(std::strtoul(v, nullptr, 10)); }
+        else if (a == "--quick") { args.quick = true; }
+        else if (a == "--device-peak-int8-tops") { const char* v = need(i); if (!v) return false; args.device_peak_int8_tops = std::strtod(v, nullptr); }
+        else if (a == "--v3-hashrate") { const char* v = need(i); if (!v) return false; args.v3_hashrate = std::strtod(v, nullptr); }
+        else if (a == "--out") { const char* v = need(i); if (!v) return false; args.out_path = v; }
+        else { err = "unknown argument: " + a; return false; }
+    }
+    // Environment overrides (only when the flag was left at default).
+    if (const char* e = std::getenv("BTX_MATMUL_V4_REPORT_N")) args.n = static_cast<uint32_t>(std::strtoul(e, nullptr, 10));
+    if (const char* e = std::getenv("BTX_MATMUL_V4_REPORT_WINDOW")) args.window = static_cast<uint32_t>(std::strtoul(e, nullptr, 10));
+    if (args.window == 0) args.window = 1;
+    if (args.rounds == 0) args.rounds = 1;
+    // The M-t24 boundary-vector suite is the reason to run --profile bmx4c at
+    // all; force it on so an operator cannot forget the flag and mistake a
+    // profile-only run for a real M-t24 verdict. Symmetrically, `--mt24`
+    // alone (profile left at its default) selects the bmx4c profile, since
+    // M-t24 is meaningless under the v4.1 ENC-S8 profile.
+    if (args.profile == "bmx4c") args.mt24 = true;
+    else if (args.mt24) args.profile = "bmx4c";
+    return true;
+}
+
+// Sustained MARGINAL nonce/s for the resolved backend. For a GPU backend, time
+// the raw batched entry point (no per-nonce verify — that is the miner's
+// throughput). For CPU, use the batched miner (template-amortized), which is
+// the honest marginal per-nonce CPU unit. Returns 0 if unmeasurable.
+double MeasureBackendNoncePerSec(matmul_v4::accel::Kind kind, uint32_t n, uint32_t window,
+                                 uint32_t rounds, bool& used_device, std::string& note)
+{
+    used_device = false;
+    const std::vector<CBlockHeader> headers = WindowHeaders(n, window, 100000);
+
+    if (kind != matmul_v4::accel::Kind::CPU) {
+        const matmul_v4::accel::BatchAccelFn fn = RawBatchFnFor(kind);
+        std::vector<uint256> digs;
+        std::vector<std::vector<unsigned char>> pays;
+        // Warmup + capability probe.
+        bool ok = false;
+        try { ok = fn && fn(headers, n, rounds, digs, pays); } catch (...) { ok = false; }
+        if (ok && digs.size() == window) {
+            used_device = true;
+            uint32_t windows = 0;
+            auto t0 = Clock::now();
+            while (Secs(t0, Clock::now()) < 1.0 && windows < 64) {
+                try { fn(headers, n, rounds, digs, pays); } catch (...) { break; }
+                ++windows;
+            }
+            const double elapsed = Secs(t0, Clock::now());
+            note = "device raw batched throughput (no per-nonce host verify)";
+            if (elapsed > 0 && windows > 0) return (static_cast<double>(windows) * window) / elapsed;
+        }
+        note = "device backend not runnable on this host; reporting CPU marginal";
+    }
+
+    // CPU marginal via the batched miner (template-amortized), summed windows to ~0.5s.
+    const mv4::BatchedSketchMiner miner{ReportHeader(n), n};
+    if (!miner.Valid()) return 0;
+    std::vector<mv4::BatchNonceResult> out;
+    if (!miner.Mine(uint64_t{200000}, window, out)) return 0; // warmup
+    uint32_t windows = 0;
+    uint64_t nonce = 300000;
+    auto t0 = Clock::now();
+    while (Secs(t0, Clock::now()) < 0.5 && windows < 1024) {
+        if (!miner.Mine(nonce, window, out)) break;
+        nonce += window;
+        ++windows;
+    }
+    const double elapsed = Secs(t0, Clock::now());
+    if (kind == matmul_v4::accel::Kind::CPU) note = "CPU batched miner marginal per-nonce throughput";
+    if (elapsed > 0 && windows > 0) return (static_cast<double>(windows) * window) / elapsed;
+    return 0;
+}
+
+UniValue StageJson(const StageResult& r, double device_peak_tops, double backend_nps,
+                   double& tensor_share_pct_out, double& tensor_util_pct_out)
+{
+    UniValue o(UniValue::VOBJ);
+    const double comb = std::min(r.s3_limb, r.s3_alu);
+    const bool limb_chosen = r.s3_limb < r.s3_alu;
+    const double marginal = r.s1b_expand + r.s2_gemm + comb + r.s4_digest; // S0 amortized out
+    const double marginal_ns_per_nonce = r.window ? (marginal * 1e9 / r.window) : 0;
+    // Tensor-stage share: S2 (B*V) + S3b (the limb GEMMs) when the limb path is
+    // chosen; on the ALU-direct path only S2 is a tensor stage (§K.2a-WT gate).
+    const double tensor_time = r.s2_gemm + (limb_chosen ? comb : 0.0);
+    tensor_share_pct_out = marginal > 0 ? 100.0 * tensor_time / marginal : 0;
+
+    // Implied INT8 tensor utilization vs a supplied device peak. Marginal
+    // tensor MACs/nonce = n^2*m (B*V) + 16*m^2*n (the 16 limb-pair GEMMs) ~
+    // 1.25*n^3 at b=4; 1 MAC = 2 INT8 ops.
+    const double marginal_tensor_macs = static_cast<double>(r.n) * r.n * r.m + 16.0 * r.m * r.m * r.n;
+    const double marginal_tensor_ops = 2.0 * marginal_tensor_macs;
+    tensor_util_pct_out = -1; // unknown sentinel
+    if (device_peak_tops > 0 && backend_nps > 0) {
+        tensor_util_pct_out = 100.0 * marginal_tensor_ops * backend_nps / (device_peak_tops * 1e12);
+    }
+
+    o.pushKV("n", static_cast<uint64_t>(r.n));
+    o.pushKV("b", static_cast<uint64_t>(mv4::kTileB));
+    o.pushKV("m", static_cast<uint64_t>(r.m));
+    o.pushKV("window", static_cast<uint64_t>(r.window));
+    o.pushKV("bit_exact", r.stage_bit_exact);
+    o.pushKV("s0_template_ms", r.s0_template * 1e3);
+    o.pushKV("s1b_expand_ms", r.s1b_expand * 1e3);
+    o.pushKV("s2_gemm_ms", r.s2_gemm * 1e3);
+    o.pushKV("s3_limb_combine_ms", r.s3_limb * 1e3);
+    o.pushKV("s3_alu_direct_ms", r.s3_alu * 1e3);
+    o.pushKV("s3_chosen", limb_chosen ? "limb-tensor" : "alu-direct");
+    o.pushKV("s4_digest_ms", r.s4_digest * 1e3);
+    o.pushKV("marginal_per_nonce_ms", r.window ? (marginal * 1e3 / r.window) : 0);
+    o.pushKV("marginal_ns", marginal_ns_per_nonce);
+    o.pushKV("cpu_reference_nonce_per_s", marginal > 0 ? (r.window / marginal) : 0);
+    o.pushKV("marginal_tensor_macs_per_nonce", marginal_tensor_macs);
+    o.pushKV("tensor_share_pct", tensor_share_pct_out);
+    if (tensor_util_pct_out >= 0) {
+        o.pushKV("tensor_util_pct", tensor_util_pct_out);
+    } else {
+        o.pushKV("tensor_util_pct", "unknown");
+    }
+    return o;
+}
+
+std::string ReducedRatio(double num, double den)
+{
+    if (num <= 0 || den <= 0) return "n/a";
+    // Scale to integers with ~6 significant digits then reduce.
+    const int64_t N = static_cast<int64_t>(num + 0.5);
+    const int64_t D = static_cast<int64_t>(den + 0.5);
+    if (N <= 0 || D <= 0) return "n/a";
+    const int64_t g = std::gcd(N, D);
+    return std::to_string(N / g) + "/" + std::to_string(D / g);
+}
+
+// ---------------------------------------------------------------------------
+// M-t24 accumulator-exactness boundary-vector suite (spec §5.3, companion
+// doc/btx-matmul-v4-accumulator-eligibility.md's C-1 -> C-1' generalization).
+// ---------------------------------------------------------------------------
+
+namespace bx = matmul::v4::bmx4;
+
+// The proven-exact-accumulator-bits threshold the BMX4-C native path requires
+// (consensus Params::nMatMulBMX4CMinProvenAccumulatorBits /
+// Consensus::BMX4C_NATIVE_PATH_PROVEN_T, src/consensus/params.h). Mirrored as
+// a local constant so this tool does not need to pull in consensus/params.h.
+constexpr uint32_t kMt24RequiredProvenBits = 24;
+
+// One C-1' boundary/t-discrimination vector (spec §5.3 items 1-2): an
+// analytic `expected` value crossing, or pinned exactly at, a claimed
+// accumulator threshold; `actual` is produced by the SAME accumulation
+// primitive (ExactDot / ComputeCombineModQ / ComputeCombineLimbTensor[BMX4C])
+// a device's native block-scaled kernel must reproduce byte-for-byte.
+// `regime_pow2` is the 2^t threshold this vector exercises (14/19/22/23/24);
+// -1 marks a structural precondition (E8M0 scale-exactness) rather than an
+// accumulator-magnitude rung.
+struct BoundaryVector {
+    std::string name;
+    int64_t expected{0};
+    int64_t actual{0};
+    bool pass{false};
+    int32_t regime_pow2{-1};
+};
+
+std::vector<BoundaryVector> RunMt24BoundaryVectors()
+{
+    std::vector<BoundaryVector> out;
+
+    // V0 (precondition, §5.3 item 3): E8M0 dequant mu*2^e is a pure
+    // power-of-two shift for every (mu, e) in M11 x {0..S}; the top magnitude
+    // 6*2^3 must land EXACTLY at E_max = 48, no rounding, no overflow.
+    {
+        bool ok = true;
+        int64_t peak = 0;
+        for (int8_t mu : bx::kAlphabetM11) {
+            for (uint8_t e = 0; e <= bx::kScaleS; ++e) {
+                const int64_t deq = static_cast<int64_t>(mu) * (int64_t{1} << e);
+                if (deq < -bx::kEmax || deq > bx::kEmax) ok = false;
+                peak = std::max(peak, deq < 0 ? -deq : deq);
+            }
+        }
+        out.push_back({"e8m0_scale_exactness_precondition", bx::kEmax, peak,
+                       ok && peak == bx::kEmax, -1});
+    }
+
+    // V1 (t-discrimination): odd-step accumulation crossing 2^14. mu=3 (M11,
+    // e=0) rails, per-MAC 9, N=1824 -> 16,416 > 2^14 = 16,384; a device exact
+    // only to 2^14 (FP32-class ULP >= 2 there) MUST round on this dot product.
+    {
+        const uint32_t N = 1824;
+        const std::vector<int8_t> a(N, 3), b(N, 3);
+        const int64_t expected = int64_t{9} * N;
+        const int64_t actual = matmul::int8_field::ExactDot(a.data(), b.data(), N);
+        out.push_back({"t14_odd_step_base_product", expected, actual,
+                       actual == expected && expected > (int64_t{1} << 14), 14});
+    }
+
+    // V2 (t-discrimination, real GEMM shape): E_max=48 rails at n=256 push
+    // EVERY base-product entry to exactly 2304*n (well past 2^19), then
+    // cross-checks the three consensus-equivalent sketch paths byte-for-byte.
+    {
+        const uint32_t n = 256;
+        const uint32_t m = n / mv4::kTileB;
+        const std::vector<int8_t> Ahat(static_cast<size_t>(n) * n, static_cast<int8_t>(bx::kEmax));
+        const std::vector<int8_t> Bhat(static_cast<size_t>(n) * n, static_cast<int8_t>(bx::kEmax));
+        const auto C = mv4::ComputeExactProduct(Ahat, Bhat, n);
+        const int64_t expected = static_cast<int64_t>(bx::kBaseProductPerMac) * n;
+        size_t mismatches = 0;
+        for (int32_t x : C) mismatches += (x != expected) ? 1 : 0;
+
+        const uint256 su = uint256::FromHex("00000000000000000000000000000000000000000000000000000000000000e1").value();
+        const uint256 sv = uint256::FromHex("00000000000000000000000000000000000000000000000000000000000000e2").value();
+        const auto U = bx::ExpandProjectorBMX4C(su, m, n);
+        const auto V = bx::ExpandProjectorBMX4C(sv, n, m);
+        const auto full = mv4::ComputeSketch(U, C, V, n, m);
+        const auto P = mv4::ComputeProjectedLeft(U, Ahat, n, m);
+        const auto Q = mv4::ComputeProjectedRight(Bhat, V, n, m);
+        const auto direct = mv4::ComputeCombineModQ(P, Q, n, m);
+        const auto limb = bx::ComputeCombineLimbTensorBMX4C(P, Q, n, m);
+        const bool pass = mismatches == 0 && direct == full && limb == full;
+        out.push_back({"t19_high_magnitude_real_gemm", expected, C.empty() ? 0 : C[0], pass, 19});
+    }
+
+    // V3/V4 (boundary-pin): the BMX4-C limb-pair GEMM accumulator peak
+    // 1024*n hits EXACTLY 2^22 at n=4096 and 2^23 at n=8192 (all-32 rails).
+    for (const uint32_t n : {4096u, 8192u}) {
+        const uint32_t m = 8;
+        const std::vector<int32_t> P(static_cast<size_t>(m) * n, 32), Q(static_cast<size_t>(n) * m, 32);
+        const auto direct = mv4::ComputeCombineModQ(P, Q, n, m);
+        const auto limb = bx::ComputeCombineLimbTensorBMX4C(P, Q, n, m);
+        const int64_t expected = int64_t{1024} * n; // 2^22 at n=4096, 2^23 at n=8192
+        size_t mismatches = 0;
+        for (mv4::Fq v : direct) mismatches += (v != static_cast<uint64_t>(expected)) ? 1 : 0;
+        const int32_t pin = (n == 4096u) ? 22 : 23;
+        out.push_back({"t" + std::to_string(pin) + "_limb_pair_boundary_n" + std::to_string(n),
+                       expected, direct.empty() ? 0 : static_cast<int64_t>(direct[0]),
+                       mismatches == 0 && limb == direct, pin});
+    }
+
+    // V5 (boundary-pin, "any miner-local base-2^7 limb variant", spec §5.3
+    // item 2): the v4.1 base-2^7 limb combine (matmul::v4::
+    // ComputeCombineLimbTensor, digits in [-64,63]) hits EXACTLY n*64^2 = 2^24
+    // at n=4096 with all-64 rails -- the FP32-boundary-exact case the BMX4-C
+    // spec names explicitly as a cross-check pin.
+    {
+        const uint32_t n = 4096, m = 4;
+        const std::vector<int32_t> P(static_cast<size_t>(m) * n, 64), Q(static_cast<size_t>(n) * m, 64);
+        const auto direct = mv4::ComputeCombineModQ(P, Q, n, m);
+        const auto limb = mv4::ComputeCombineLimbTensor(P, Q, n, m);
+        const int64_t expected = int64_t{4096} * 64 * 64; // 2^24
+        size_t mismatches = 0;
+        for (mv4::Fq v : direct) mismatches += (v != static_cast<uint64_t>(expected)) ? 1 : 0;
+        out.push_back({"t24_boundary_pin_base2e7_limb_n4096", expected,
+                       direct.empty() ? 0 : static_cast<int64_t>(direct[0]),
+                       mismatches == 0 && limb == direct, 24});
+    }
+
+    return out;
+}
+
+struct Mt24Summary {
+    bool precondition_pass{true};
+    bool all_pass{false};
+    uint32_t proven_accumulator_bits{0};
+};
+
+// A device is "proven" up to the highest 2^t rung it passed WITHOUT any
+// lower rung failing first: a pass at a high magnitude certifies nothing if a
+// lower magnitude already diverged (the §5.1 associativity argument requires
+// EVERY intermediate accumulated value to be exact, not just the largest).
+Mt24Summary SummarizeMt24(const std::vector<BoundaryVector>& vecs)
+{
+    Mt24Summary s;
+    std::vector<const BoundaryVector*> ladder;
+    for (const auto& v : vecs) {
+        if (v.regime_pow2 < 0) { if (!v.pass) s.precondition_pass = false; continue; }
+        ladder.push_back(&v);
+    }
+    std::sort(ladder.begin(), ladder.end(),
+             [](const BoundaryVector* a, const BoundaryVector* b) { return a->regime_pow2 < b->regime_pow2; });
+    uint32_t proven = 0;
+    for (const auto* v : ladder) {
+        if (!v->pass) break;
+        proven = static_cast<uint32_t>(v->regime_pow2);
+    }
+    s.proven_accumulator_bits = proven;
+    s.all_pass = s.precondition_pass && proven >= kMt24RequiredProvenBits;
+    return s;
+}
+
+// Full M-t24 report: the boundary vectors, the derived proven-bits summary,
+// and the native-path-eligibility decision for the RESOLVED backend. BMX4-C
+// device kernels are now wired, but this harness still has no device-native
+// M-t24 primitive. Therefore non-CPU native-path eligibility MUST remain false
+// until those boundary vectors are executed through the requested native MX
+// accumulator rather than the CPU reference or INT8 fallback.
+struct Mt24Report {
+    std::vector<BoundaryVector> vectors;
+    Mt24Summary summary;
+    bool device_native_kernel_wired{false};
+    bool native_path_eligible{false};
+    std::string native_path_reason;
+};
+
+Mt24Report RunMt24(matmul_v4::accel::Kind backend)
+{
+    Mt24Report r;
+    r.vectors = RunMt24BoundaryVectors();
+    r.summary = SummarizeMt24(r.vectors);
+    r.device_native_kernel_wired = (backend == matmul_v4::accel::Kind::CPU);
+    if (backend == matmul_v4::accel::Kind::CPU) {
+        r.native_path_eligible = r.summary.all_pass;
+        r.native_path_reason = r.summary.all_pass
+            ? "CPU is a true int64/int32 accumulator by construction; all C-1' boundary vectors are "
+              "bit-exact up to and including the proven t=24 threshold."
+            : "CPU boundary-vector self-test FAILED -- this indicates a bug in the harness or the "
+              "BMX4-C reference implementation, not a hardware accumulator limitation.";
+    } else {
+        r.native_path_eligible = false;
+        r.native_path_reason =
+            "the BMX4-C batch kernel may be wired for backend '" +
+            matmul_v4::accel::ToString(backend) + "', but the M-t24 vectors in this report still run "
+            "through CPU reference arithmetic and do not force the device-native MX accumulator. "
+            "mt24_pass is only the harness self-test; it is NOT an on-silicon M-t24 measurement. "
+            "The vendor native primitive must execute this vector table and expose its qualification "
+            "result before native_path_eligible can become true (spec §9 item 1).";
+    }
+    return r;
+}
+
+// ---------------------------------------------------------------------------
+// BMX4-C per-stage marginal wall-time on a nonce window (§K.2a-WT/§K.2b
+// analogue for the ENC-BMX4C profile). Per-nonce combine (not a single
+// stacked GEMM like matmul_v4_batch's v4.1 path, since matmul_v4_bmx4.* has no
+// stacked-combine entry point) -- still gives an honest per-stage wall-time
+// split and tensor-stage share on this host.
+// ---------------------------------------------------------------------------
+
+struct StageResultBMX4C {
+    uint32_t n{0};
+    uint32_t m{0};
+    uint32_t window{0};
+    double s0_template{0};
+    double s1b_expand{0};
+    double s2_gemm{0};
+    double s3_limb{0};
+    double s3_alu{0};
+    double s4_digest{0};
+    bool stage_bit_exact{false};
+    bool valid{false};
+};
+
+StageResultBMX4C MeasureStagesBMX4C(uint32_t n, uint32_t window, uint64_t base_nonce)
+{
+    StageResultBMX4C r;
+    r.n = n;
+    r.window = window;
+    uint32_t m = 0;
+    if (!bx::ValidateDimsBMX4C(n, mv4::kTileB, m) || window == 0) {
+        return r;
+    }
+    r.m = m;
+    const std::vector<CBlockHeader> headers = WindowHeaders(n, window, base_nonce);
+
+    auto c0 = Clock::now();
+    const uint256 seed_a = bx::DeriveOperandSeedBMX4C(headers[0], mv4::Operand::A);
+    const auto [seed_u, seed_v] = bx::DeriveProjectorSeedsBMX4C(headers[0]);
+    const std::vector<int8_t> Ahat = bx::ExpandOperandA(seed_a, n);
+    const std::vector<int8_t> U = bx::ExpandProjectorBMX4C(seed_u, m, n);
+    const std::vector<int8_t> V = bx::ExpandProjectorBMX4C(seed_v, n, m);
+    const std::vector<int32_t> P = mv4::ComputeProjectedLeft(U, Ahat, n, m);
+    auto c1 = Clock::now();
+    r.s0_template = Secs(c0, c1);
+
+    bool all_ok = true;
+    for (uint32_t i = 0; i < window; ++i) {
+        auto ca = Clock::now();
+        const uint256 sigma = mv4::DeriveSigma(headers[i]);
+        const uint256 seed_b = bx::DeriveOperandSeedBMX4C(headers[i], mv4::Operand::B);
+        const std::vector<int8_t> Bhat = bx::ExpandOperandB(seed_b, n);
+        auto cb = Clock::now();
+        r.s1b_expand += Secs(ca, cb);
+
+        const std::vector<int32_t> Q = mv4::ComputeProjectedRight(Bhat, V, n, m);
+        auto cc = Clock::now();
+        r.s2_gemm += Secs(cb, cc);
+
+        const auto direct = mv4::ComputeCombineModQ(P, Q, n, m);
+        auto cd = Clock::now();
+        r.s3_alu += Secs(cc, cd);
+        const auto limb = bx::ComputeCombineLimbTensorBMX4C(P, Q, n, m);
+        auto ce = Clock::now();
+        r.s3_limb += Secs(cd, ce);
+
+        const auto payload = mv4::SerializeSketch(direct);
+        const uint256 digest = mv4::ComputeSketchDigest(sigma, payload);
+        auto cf = Clock::now();
+        r.s4_digest += Secs(ce, cf);
+
+        if (limb != direct) all_ok = false;
+        uint256 ref_digest;
+        std::vector<unsigned char> ref_payload;
+        if (!bx::ComputeDigestBMX4C(headers[i], n, ref_digest, ref_payload) ||
+            ref_digest != digest || ref_payload != payload) {
+            all_ok = false;
+        }
+    }
+    r.stage_bit_exact = all_ok;
+    r.valid = true;
+    return r;
+}
+
+UniValue StageJsonBMX4C(const StageResultBMX4C& r, double device_peak_tops, double backend_nps,
+                        double& tensor_share_pct_out, double& tensor_util_pct_out)
+{
+    UniValue o(UniValue::VOBJ);
+    const double comb = std::min(r.s3_limb, r.s3_alu);
+    const bool limb_chosen = r.s3_limb < r.s3_alu;
+    const double marginal = r.s1b_expand + r.s2_gemm + comb + r.s4_digest;
+    const double tensor_time = r.s2_gemm + (limb_chosen ? comb : 0.0);
+    tensor_share_pct_out = marginal > 0 ? 100.0 * tensor_time / marginal : 0;
+
+    // Marginal tensor MACs/nonce: n^2*m (Bhat*V) + 16*m^2*n (16 limb-pair
+    // GEMMs), the same shape as the v4.1 estimate (StageJson).
+    const double marginal_tensor_macs = static_cast<double>(r.n) * r.n * r.m + 16.0 * r.m * r.m * r.n;
+    const double marginal_tensor_ops = 2.0 * marginal_tensor_macs;
+    tensor_util_pct_out = -1;
+    if (device_peak_tops > 0 && backend_nps > 0) {
+        tensor_util_pct_out = 100.0 * marginal_tensor_ops * backend_nps / (device_peak_tops * 1e12);
+    }
+
+    o.pushKV("n", static_cast<uint64_t>(r.n));
+    o.pushKV("b", static_cast<uint64_t>(mv4::kTileB));
+    o.pushKV("m", static_cast<uint64_t>(r.m));
+    o.pushKV("window", static_cast<uint64_t>(r.window));
+    o.pushKV("bit_exact", r.stage_bit_exact);
+    o.pushKV("s0_template_ms", r.s0_template * 1e3);
+    o.pushKV("s1b_expand_ms", r.s1b_expand * 1e3);
+    o.pushKV("s2_gemm_ms", r.s2_gemm * 1e3);
+    o.pushKV("s3_limb_combine_ms", r.s3_limb * 1e3);
+    o.pushKV("s3_alu_direct_ms", r.s3_alu * 1e3);
+    o.pushKV("s3_chosen", limb_chosen ? "limb-tensor" : "alu-direct");
+    o.pushKV("s4_digest_ms", r.s4_digest * 1e3);
+    o.pushKV("marginal_per_nonce_ms", r.window ? (marginal * 1e3 / r.window) : 0);
+    o.pushKV("cpu_reference_nonce_per_s", marginal > 0 ? (r.window / marginal) : 0);
+    o.pushKV("marginal_tensor_macs_per_nonce", marginal_tensor_macs);
+    o.pushKV("tensor_share_pct", tensor_share_pct_out);
+    if (tensor_util_pct_out >= 0) {
+        o.pushKV("tensor_util_pct", tensor_util_pct_out);
+    } else {
+        o.pushKV("tensor_util_pct", "unknown");
+    }
+    return o;
+}
+
+// ---------------------------------------------------------------------------
+// --profile bmx4c entry point: BMX4-C bit-exactness gate (B1 analogue) +
+// per-stage stacked-window timing (B2g analogue) + the M-t24 boundary-vector
+// verdict, combined into one GO/NO-GO keyed to §K.2b AND M-t24.
+// ---------------------------------------------------------------------------
+
+int RunBmx4cProfile(const Args& args, const std::string& host, matmul_v4::accel::Kind backend,
+                    const std::string& backend_name, const matmul_v4::backend::Eligibility& elig)
+{
+    uint32_t m_check = 0;
+    if (!bx::ValidateDimsBMX4C(args.n, mv4::kTileB, m_check)) {
+        std::cerr << "error: invalid dimension n=" << args.n
+                  << " for --profile bmx4c (need n%32==0, b|n, and 288*n<=2^23-1)\n";
+        return 2;
+    }
+
+    // ---- BMX4-C bit-exactness gate (B1 analogue) ---------------------------
+    const std::vector<CBlockHeader> headers = WindowHeaders(args.n, args.window, 42);
+    std::vector<uint256> ref_digests(args.window);
+    std::vector<std::vector<unsigned char>> ref_payloads(args.window);
+    bool ref_ok = true;
+    for (uint32_t i = 0; i < args.window; ++i) {
+        uint256 d2;
+        std::vector<unsigned char> p2;
+        const bool ok1 = bx::ComputeDigestBMX4C(headers[i], args.n, ref_digests[i], ref_payloads[i]);
+        const bool ok2 = bx::ComputeDigestBMX4C(headers[i], args.n, d2, p2); // run-to-run determinism
+        if (!ok1 || !ok2 || ref_digests[i] != d2 || ref_payloads[i] != p2) { ref_ok = false; continue; }
+        CBlockHeader vh = headers[i];
+        vh.matmul_digest = ref_digests[i];
+        uint256 vout;
+        if (!bx::VerifySketchBMX4C(vh, args.n, args.rounds, ref_payloads[i], vout) || vout != ref_digests[i]) {
+            ref_ok = false;
+        }
+    }
+
+    matmul_v4::accel::ResetStats();
+    std::vector<uint256> disp_digests;
+    std::vector<std::vector<unsigned char>> disp_payloads;
+    const bool disp_ok = matmul_v4::accel::ComputeDigestsBMX4CDispatched(
+        headers, args.n, args.rounds,
+        uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"},
+        disp_digests, disp_payloads);
+    const auto dispatch_stats = matmul_v4::accel::ProbeStats();
+    bool bmx4c_bit_exact = ref_ok && disp_ok && disp_digests == ref_digests && disp_payloads == ref_payloads;
+    uint64_t device_ok_windows{0};
+    uint64_t device_mismatch_windows{0};
+    uint64_t device_fallback_windows{0};
+    switch (backend) {
+    case matmul_v4::accel::Kind::CUDA:
+        device_ok_windows = dispatch_stats.cuda_batch_ok;
+        device_mismatch_windows = dispatch_stats.cuda_batch_mismatch;
+        device_fallback_windows = dispatch_stats.cuda_batch_fallback;
+        break;
+    case matmul_v4::accel::Kind::METAL:
+        device_ok_windows = dispatch_stats.metal_batch_ok;
+        device_mismatch_windows = dispatch_stats.metal_batch_mismatch;
+        device_fallback_windows = dispatch_stats.metal_batch_fallback;
+        break;
+    case matmul_v4::accel::Kind::HIP:
+        device_ok_windows = dispatch_stats.hip_batch_ok;
+        device_mismatch_windows = dispatch_stats.hip_batch_mismatch;
+        device_fallback_windows = dispatch_stats.hip_batch_fallback;
+        break;
+    case matmul_v4::accel::Kind::ASCEND:
+        device_ok_windows = dispatch_stats.ascend_batch_ok;
+        device_mismatch_windows = dispatch_stats.ascend_batch_mismatch;
+        device_fallback_windows = dispatch_stats.ascend_batch_fallback;
+        break;
+    case matmul_v4::accel::Kind::CPU:
+        break;
+    }
+    const char* const backend_env = std::getenv("BTX_MATMUL_V4_BACKEND");
+    std::string requested_backend = !args.backend_override.empty()
+        ? args.backend_override
+        : (backend_env != nullptr ? std::string{backend_env} : std::string{});
+    for (char& c : requested_backend) {
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    }
+    const bool hardware_requested = backend != matmul_v4::accel::Kind::CPU ||
+        (!requested_backend.empty() && requested_backend != "cpu");
+    const bool requested_backend_resolved = !hardware_requested || backend != matmul_v4::accel::Kind::CPU;
+    const bool device_path_exercised = backend == matmul_v4::accel::Kind::CPU
+        ? !hardware_requested
+        : device_ok_windows > 0 && device_mismatch_windows == 0 && device_fallback_windows == 0;
+
+    std::cout << "\n[B1-analogue] BMX4-C bit-exact determinism gate\n";
+    std::cout << "  resolved-backend BMX4-C window vs CPU reference + verifier round-trip over "
+              << args.window << " nonces: " << (bmx4c_bit_exact ? "PASS" : "FAIL") << "\n";
+    if (!bmx4c_bit_exact) {
+        std::cout << "  *** FAIL is a HARD consensus-split signal for the ENC-BMX4C profile ***\n";
+    }
+    if (hardware_requested) {
+        std::cout << "  requested backend resolved     : " << (requested_backend_resolved ? "yes" : "NO") << "\n";
+        std::cout << "  device windows ok/mismatch/fallback: " << device_ok_windows << "/"
+                  << device_mismatch_windows << "/" << device_fallback_windows << "\n";
+        std::cout << "  requested device path exercised: " << (device_path_exercised ? "YES" : "NO") << "\n";
+    }
+
+    // ---- BMX4-C per-stage marginal wall-time -------------------------------
+    std::cout << "\n[B2g-analogue] BMX4-C per-stage marginal wall-time (n=" << args.n
+              << ", window Q=" << args.window << ")\n";
+    const StageResultBMX4C stage = MeasureStagesBMX4C(args.n, args.window, 42);
+    double tensor_share_pct = 0, tensor_util_pct = -1;
+    UniValue stage_json(UniValue::VOBJ);
+    if (stage.valid) {
+        const double comb = std::min(stage.s3_limb, stage.s3_alu);
+        const bool limb_chosen = stage.s3_limb < stage.s3_alu;
+        const double marginal = stage.s1b_expand + stage.s2_gemm + comb + stage.s4_digest;
+        auto pct = [&](double x) { return marginal > 0 ? 100.0 * x / marginal : 0.0; };
+        std::printf("  S0  template Ahat,U,V + P=U*Ahat (amortized): %9.3f ms\n", stage.s0_template * 1e3);
+        std::printf("  S1b per-nonce expand Bhat   (SHA/int)  : %9.3f ms  %5.1f%%\n",
+                    stage.s1b_expand * 1e3 / args.window, pct(stage.s1b_expand));
+        std::printf("  S2  per-nonce GEMM Q=Bhat*V (tensor)   : %9.3f ms  %5.1f%%\n",
+                    stage.s2_gemm * 1e3 / args.window, pct(stage.s2_gemm));
+        std::printf("  S3  combine P*Q chosen=%-13s: %9.3f ms  %5.1f%%\n",
+                    limb_chosen ? "limb-tensor" : "alu-direct", comb * 1e3 / args.window, pct(comb));
+        std::printf("      (limb-tensor %.3f ms vs ALU-direct %.3f ms, whole window)\n",
+                    stage.s3_limb * 1e3, stage.s3_alu * 1e3);
+        std::printf("  S4  serialize + digest      (SHA/int)  : %9.3f ms  %5.1f%%\n",
+                    stage.s4_digest * 1e3 / args.window, pct(stage.s4_digest));
+        std::printf("  per-nonce MARGINAL total (S0 amortized): %9.3f ms   stage-bit-exact=%s\n",
+                    marginal * 1e3 / args.window, stage.stage_bit_exact ? "YES" : "NO -- STAGE DIVERGED, TIMES VOID");
+        stage_json = StageJsonBMX4C(stage, args.device_peak_int8_tops, 0.0, tensor_share_pct, tensor_util_pct);
+    } else {
+        std::cout << "  (stage measurement unavailable for this dimension)\n";
+    }
+    std::cout << "  tensor-stage share (§K.2a-WT majority gate): ";
+    if (stage.valid) std::printf("%.1f%%\n", tensor_share_pct); else std::cout << "n/a\n";
+
+    // ---- M-t24 boundary-vector suite ---------------------------------------
+    std::cout << "\n[M-t24] accumulator-exactness boundary-vector suite (spec §5.3/C-1')\n";
+    const Mt24Report mt24 = RunMt24(backend);
+    for (const auto& v : mt24.vectors) {
+        std::string rung = v.regime_pow2 >= 0 ? (" (2^" + std::to_string(v.regime_pow2) + " rung)") : " (precondition)";
+        std::printf("  %-42s expected=%-12lld actual=%-12lld %s%s\n",
+                    v.name.c_str(), static_cast<long long>(v.expected), static_cast<long long>(v.actual),
+                    v.pass ? "PASS" : "FAIL", rung.c_str());
+    }
+    std::cout << "  proven exact-accumulator bits : " << mt24.summary.proven_accumulator_bits
+              << (mt24.summary.proven_accumulator_bits >= kMt24RequiredProvenBits
+                      ? "  (>= t=24: NATIVE PATH threshold met)"
+                      : "  (< t=24: native path FAILS CLOSED to the INT8 fallback)")
+              << "\n";
+    std::cout << "  M-t24 verdict                 : " << (mt24.summary.all_pass ? "PASS" : "FAIL") << "\n";
+    std::cout << "  device native kernel wired    : " << (mt24.device_native_kernel_wired ? "yes" : "no") << "\n";
+    std::cout << "  native path eligible           : " << (mt24.native_path_eligible ? "YES" : "NO") << "\n";
+    std::cout << "  reason                         : " << mt24.native_path_reason << "\n";
+
+    // ---- combined GO / NO-GO (§K.2b tensor majority AND M-t24) -------------
+    std::string verdict;
+    if (!bmx4c_bit_exact) {
+        verdict = "NO-GO: BMX4-C bit-exact determinism FAILED (consensus split)";
+    } else if (!stage.valid || !stage.stage_bit_exact) {
+        verdict = "NO-GO: BMX4-C stage outputs diverged (measurement void)";
+    } else if (!mt24.summary.all_pass) {
+        verdict = "NO-GO(native path): M-t24 FAILED -- proven only " +
+                  std::to_string(mt24.summary.proven_accumulator_bits) +
+                  " exact-accumulator bits (< t=24); BMX4-C NATIVE path is INELIGIBLE, MUST fall back "
+                  "to the 1-GEMM INT8 path (spec §5.2 fallback ladder)";
+    } else if (tensor_share_pct <= 50.0) {
+        verdict = "NO-GO(this machine's stage profile): tensor-stage share is NOT a strict majority ("
+                  + std::to_string(static_cast<int>(tensor_share_pct + 0.5)) + "%, §K.2b)";
+    } else if (!hardware_requested && backend == matmul_v4::accel::Kind::CPU) {
+        verdict = "HARNESS-PASS only: CPU reference is bit-exact and the M-t24 vector harness "
+                  "passes, but this is not device-native MX qualification and is NOT an activation GO";
+    } else if (!requested_backend_resolved || !device_path_exercised) {
+        verdict = "NO-GO: requested BMX4-C device backend was not exercised without fallback";
+    } else if (!mt24.native_path_eligible) {
+        verdict = "NO-GO(native path): BMX4-C batch execution may be bit-exact, but M-t24 was not "
+                  "executed through the device-native MX accumulator; native_path_eligible remains "
+                  "UNVERIFIED on real silicon (see reason above)";
+    } else {
+        verdict = "GO: BMX4-C bit-exact PASS, M-t24 PASS (proven t=" +
+                  std::to_string(mt24.summary.proven_accumulator_bits) +
+                  "), tensor-stage share is a majority (" +
+                  std::to_string(static_cast<int>(tensor_share_pct + 0.5)) +
+                  "%) -- native path ELIGIBLE on this device";
+    }
+    std::cout << "\n[GO/NO-GO §K.2b + M-t24] " << verdict << "\n";
+
+    // ---- H8: device-execution certification gate ---------------------------
+    // The BMX4-C profile is a DEVICE-certification profile: a green PASS
+    // (exit 0) may be emitted ONLY when a real on-silicon BMX4-C native tensor
+    // path actually executed and was certified. `native_path_eligible` is true
+    // for the CPU backend (the CPU is a true int64 accumulator) and for a real
+    // device only once an on-device BMX4-C block-scaled kernel is wired AND
+    // proves M-t24 on that silicon; no such kernel exists in this build, so a
+    // CPU-only run -- or any run on this GPU-less host -- must NOT certify.
+    // Failing closed here is always safe: the failure mode we eliminate is a
+    // CPU/emulation run masquerading as a certified native tensor measurement.
+    const bool ran_on_device = (backend != matmul_v4::accel::Kind::CPU);
+    const bool harness_self_test_ok =
+        bmx4c_bit_exact && stage.valid && stage.stage_bit_exact && mt24.summary.all_pass;
+    const bool device_certified = harness_self_test_ok && ran_on_device &&
+        requested_backend_resolved && device_path_exercised && mt24.native_path_eligible;
+    if (device_certified) {
+        // Honest device marker: verify-backend.sh (bmx4c mode) requires this in
+        // the report output, not merely exit 0. Emitted ONLY on a real,
+        // certified on-device native tensor path -- never on a CPU-only run.
+        std::cout << "DEVICE_BMX4C_MT24_PASS:" << backend_name << ":" << elig.reason << "\n";
+    } else {
+        std::cout << "\n[CERTIFICATION] NOT-CERTIFIED: no on-device BMX4-C native tensor path "
+                     "executed on this host (resolved backend=" << backend_name
+                  << "). The CPU harness self-test "
+                  << (harness_self_test_ok ? "PASSED" : "FAILED")
+                  << ", but a DEVICE profile certifies only on ACTUAL device execution; "
+                     "exiting non-zero (a CPU-only run of a device profile is NOT a PASS).\n";
+    }
+
+    // ---- machine-readable JSON ----------------------------------------------
+    UniValue root(UniValue::VOBJ);
+    root.pushKV("tool", "matmul-v4-report");
+    root.pushKV("schema_version", 2);
+    root.pushKV("host", host);
+    root.pushKV("host_cpu_arch", HostCpuArch());
+    root.pushKV("backend", backend_name);
+    UniValue elig_obj(UniValue::VOBJ);
+    elig_obj.pushKV("compiled", elig.compiled);
+    elig_obj.pushKV("available", elig.available);
+    elig_obj.pushKV("admissible", elig.admissible);
+    elig_obj.pushKV("reason", elig.reason);
+    root.pushKV("device", std::move(elig_obj));
+    root.pushKV("n", static_cast<uint64_t>(args.n));
+    root.pushKV("b", static_cast<uint64_t>(mv4::kTileB));
+    root.pushKV("window", static_cast<uint64_t>(args.window));
+    root.pushKV("rounds", static_cast<uint64_t>(args.rounds));
+
+    // -- additive top-level fields (task contract: profile / mt24_pass /
+    // proven_accumulator_bits / native_path_eligible) -----------------------
+    root.pushKV("profile", "bmx4c");
+    root.pushKV("mt24_pass", mt24.summary.all_pass);
+    root.pushKV("proven_accumulator_bits", static_cast<uint64_t>(mt24.summary.proven_accumulator_bits));
+    root.pushKV("native_path_eligible", mt24.native_path_eligible);
+    root.pushKV("requested_backend_resolved", requested_backend_resolved);
+    root.pushKV("device_path_exercised", device_path_exercised);
+    // H8: did an ACTUAL device tensor path execute and certify? (Gates exit 0.)
+    root.pushKV("device_execution_certified", device_certified);
+    root.pushKV("harness_self_test_pass", harness_self_test_ok);
+
+    root.pushKV("bit_exact", bmx4c_bit_exact);
+    root.pushKV("stages", stage_json);
+    root.pushKV("tensor_share_pct", stage.valid ? tensor_share_pct : 0);
+    if (tensor_util_pct >= 0) root.pushKV("tensor_util_pct", tensor_util_pct);
+    else root.pushKV("tensor_util_pct", "unknown");
+    root.pushKV("device_peak_int8_tops", args.device_peak_int8_tops);
+
+    UniValue mt24_obj(UniValue::VOBJ);
+    mt24_obj.pushKV("device_native_kernel_wired", mt24.device_native_kernel_wired);
+    mt24_obj.pushKV("native_path_reason", mt24.native_path_reason);
+    mt24_obj.pushKV("required_proven_bits", static_cast<uint64_t>(kMt24RequiredProvenBits));
+    UniValue vec_arr(UniValue::VARR);
+    for (const auto& v : mt24.vectors) {
+        UniValue vo(UniValue::VOBJ);
+        vo.pushKV("name", v.name);
+        vo.pushKV("expected", v.expected);
+        vo.pushKV("actual", v.actual);
+        vo.pushKV("pass", v.pass);
+        vo.pushKV("regime_pow2", v.regime_pow2);
+        vec_arr.push_back(vo);
+    }
+    mt24_obj.pushKV("vectors", vec_arr);
+    root.pushKV("mt24", mt24_obj);
+
+    root.pushKV("verdict", verdict);
+    root.pushKV("gates", [] {
+        UniValue g(UniValue::VOBJ);
+        g.pushKV("B1_analogue", "bit_exact (BMX4-C determinism + verifier round-trip)");
+        g.pushKV("B2g_analogue", "tensor_share_pct (§K.2a-WT/§K.2b tensor-stage majority)");
+        g.pushKV("Mt24", "mt24_pass + proven_accumulator_bits + native_path_eligible (spec §5.3/C-1')");
+        return g;
+    }());
+
+    std::ofstream ofs(args.out_path, std::ios::trunc);
+    if (!ofs) {
+        std::cerr << "error: cannot write JSON to " << args.out_path << "\n";
+        return 1;
+    }
+    ofs << root.write(2) << "\n";
+    ofs.close();
+    std::cout << "\nJSON report written: " << args.out_path << "\n";
+    std::cout << "M-t24 decides native-path eligibility; ENC-BMX4C MUST NOT activate without M-t24 "
+                 "PASS on >= 2 independent vendors' frontier parts (spec §7.5/§9).\n";
+
+    // H8: exit 0 (green PASS = CERTIFIED) requires an ACTUAL certified on-device
+    // native tensor path. The harness self-test passing on the CPU reference is
+    // necessary but NOT sufficient -- a CPU-only run of this device profile is a
+    // NOT-CERTIFIED result, so it returns non-zero.
+    return device_certified ? 0 : 1;
+}
+
+} // namespace
+
+int main(int argc, char* argv[])
+{
+    Args args;
+    std::string err;
+    if (!ParseArgs(argc, argv, args, err)) {
+        std::cerr << "error: " << err << "\n";
+        PrintUsage(std::cerr);
+        return 2;
+    }
+    if (!args.backend_override.empty()) {
+#if defined(_WIN32)
+        _putenv_s("BTX_MATMUL_V4_BACKEND", args.backend_override.c_str());
+#else
+        setenv("BTX_MATMUL_V4_BACKEND", args.backend_override.c_str(), 1);
+#endif
+    }
+
+    const std::string host = HostName();
+    if (args.out_path.empty()) {
+        args.out_path = "matmul-v4-report-" + host + ".json";
+    }
+
+    // ---- resolve backend + device identity -------------------------------
+    const matmul_v4::accel::Kind backend = matmul_v4::accel::ResolveBackend();
+    const std::string backend_name = matmul_v4::accel::ToString(backend);
+    auto elig = matmul_v4::backend::EligibilityFor(ToEligKind(backend));
+    std::optional<matmul_v4::bmx4::metal::AccelProbe> bmx4c_metal_probe;
+    const char* const backend_env = std::getenv("BTX_MATMUL_V4_BACKEND");
+    std::string requested_backend = !args.backend_override.empty()
+        ? args.backend_override
+        : (backend_env != nullptr ? std::string{backend_env} : std::string{});
+    for (char& c : requested_backend) {
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    }
+    if (args.profile == "bmx4c" &&
+        (backend == matmul_v4::accel::Kind::METAL ||
+         requested_backend == "metal" || requested_backend == "mlx")) {
+        bmx4c_metal_probe = matmul_v4::bmx4::metal::ProbeAcceleration();
+        if (backend == matmul_v4::accel::Kind::METAL) {
+            // The BMX4-C profile admits Metal's self-tested exact integer-ALU
+            // fallback; the generic v4.1 eligibility object intentionally
+            // requires Metal 4 tensor ops and is therefore not authoritative.
+            elig.compiled = true;
+            elig.available = bmx4c_metal_probe->available;
+            elig.admissible = bmx4c_metal_probe->available;
+            elig.self_test_required = true;
+            elig.reason = bmx4c_metal_probe->device_name + ":" +
+                bmx4c_metal_probe->gemm_path + ":" + bmx4c_metal_probe->reason;
+        }
+    }
+
+    std::cout << "== MatMul v" << (args.profile == "bmx4c" ? "4.2 (ENC-BMX4C)" : "4.1") << " hardware report ("
+              << host << ") ==\n";
+    std::cout << "profile          : " << args.profile << "\n";
+    std::cout << "resolved backend : " << backend_name
+              << "  [compiled=" << (elig.compiled ? "yes" : "no")
+              << " available=" << (elig.available ? "yes" : "no")
+              << " admissible=" << (elig.admissible ? "yes" : "no") << "]\n";
+    std::cout << "device identity  : " << elig.reason << "\n";
+    if (bmx4c_metal_probe.has_value()) {
+        std::cout << "BMX4-C Metal probe: " << (bmx4c_metal_probe->available ? "available" : "UNAVAILABLE")
+                  << " (" << bmx4c_metal_probe->reason << ")\n";
+    }
+    std::cout << "host cpu arch    : " << HostCpuArch() << "\n";
+    std::cout << "dims             : n=" << args.n << " b=" << mv4::kTileB
+              << " window(Q)=" << args.window << " rounds=" << args.rounds << "\n";
+
+    if (args.profile == "bmx4c") {
+        return RunBmx4cProfile(args, host, backend, backend_name, elig);
+    }
+
+    uint32_t m_check = 0;
+    if (!mv4::ValidateDims(args.n, mv4::kTileB, m_check) || !mv4::CheckCombineLimbBound(args.n)) {
+        std::cerr << "error: invalid dimension n=" << args.n
+                  << " (need b|n, accumulation bound, and n<=8589)\n";
+        return 2;
+    }
+
+    // ---- B1 bit-exactness via the resolved backend's BATCHED dispatch ----
+    // ComputeDigestsBatchedDispatched runs the device path (on a GPU host) and
+    // re-verifies every result against the CPU reference; here we ALSO compare
+    // its output byte-for-byte to per-nonce ComputeDigest so a silent device
+    // fallback still surfaces if the device output ever diverged.
+    const std::vector<CBlockHeader> b1_headers = WindowHeaders(args.n, args.window, 42);
+    std::vector<uint256> ref_digests(args.window);
+    std::vector<std::vector<unsigned char>> ref_payloads(args.window);
+    bool ref_ok = true;
+    for (uint32_t i = 0; i < args.window; ++i) {
+        if (!matmul_v4::ComputeDigest(b1_headers[i], args.n, args.rounds, ref_digests[i], ref_payloads[i])) {
+            ref_ok = false;
+        }
+    }
+    matmul_v4::accel::ResetStats();
+    std::vector<uint256> disp_digests;
+    std::vector<std::vector<unsigned char>> disp_payloads;
+    const bool disp_ok = matmul_v4::accel::ComputeDigestsBatchedDispatched(
+        b1_headers, args.n, args.rounds, disp_digests, disp_payloads);
+    bool bit_exact = ref_ok && disp_ok &&
+                     disp_digests.size() == args.window && disp_payloads.size() == args.window;
+    if (bit_exact) {
+        for (uint32_t i = 0; i < args.window; ++i) {
+            if (disp_digests[i] != ref_digests[i] || disp_payloads[i] != ref_payloads[i]) {
+                bit_exact = false;
+                break;
+            }
+        }
+    }
+    const auto stats = matmul_v4::accel::ProbeStats();
+
+    std::cout << "\n[B1] bit-exact determinism gate\n";
+    std::cout << "  resolved-backend batched digests vs CPU reference over "
+              << args.window << " nonces: " << (bit_exact ? "PASS" : "FAIL") << "\n";
+    if (!bit_exact) {
+        std::cout << "  *** FAIL is a HARD consensus-split signal — do NOT activate this backend ***\n";
+    }
+    if (backend != matmul_v4::accel::Kind::CPU) {
+        std::cout << "  device windows accepted(ok)/mismatch/fallback: "
+                  << (stats.cuda_batch_ok + stats.metal_batch_ok + stats.hip_batch_ok) << "/"
+                  << (stats.cuda_batch_mismatch + stats.metal_batch_mismatch + stats.hip_batch_mismatch) << "/"
+                  << (stats.cuda_batch_fallback + stats.metal_batch_fallback + stats.hip_batch_fallback) << "\n";
+    }
+
+    // ---- B2g per-stage wall-time on stacked window shapes -----------------
+    std::cout << "\n[B2g] per-stage marginal wall-time (n=" << args.n << ", stacked window Q=" << args.window << ")\n";
+    const StageResult stage = MeasureStages(args.n, args.window, args.rounds, 42);
+    double tensor_share_pct = 0, tensor_util_pct = -1;
+    UniValue stage_json(UniValue::VOBJ);
+    if (stage.valid) {
+        const double comb = std::min(stage.s3_limb, stage.s3_alu);
+        const bool limb_chosen = stage.s3_limb < stage.s3_alu;
+        const double marginal = stage.s1b_expand + stage.s2_gemm + comb + stage.s4_digest;
+        auto pct = [&](double x) { return marginal > 0 ? 100.0 * x / marginal : 0.0; };
+        std::printf("  S0  template A,U,V + P=U*A (amortized) : %9.3f ms\n", stage.s0_template * 1e3);
+        std::printf("  S1b per-nonce expand B      (SHA/int)  : %9.3f ms  %5.1f%%\n", stage.s1b_expand * 1e3 / args.window, pct(stage.s1b_expand));
+        std::printf("  S2  per-nonce GEMM Q=B*V    (tensor)   : %9.3f ms  %5.1f%%\n", stage.s2_gemm * 1e3 / args.window, pct(stage.s2_gemm));
+        std::printf("  S3  combine P*Qstack chosen=%-11s: %9.3f ms  %5.1f%%\n", limb_chosen ? "limb-tensor" : "alu-direct", comb * 1e3 / args.window, pct(comb));
+        std::printf("      (limb-tensor %.3f ms vs ALU-direct %.3f ms, whole window)\n", stage.s3_limb * 1e3, stage.s3_alu * 1e3);
+        std::printf("  S4  serialize + digest      (SHA/int)  : %9.3f ms  %5.1f%%\n", stage.s4_digest * 1e3 / args.window, pct(stage.s4_digest));
+        std::printf("  per-nonce MARGINAL total (S0 amortized): %9.3f ms   stage-bit-exact=%s\n",
+                    marginal * 1e3 / args.window, stage.stage_bit_exact ? "YES" : "NO -- STAGE DIVERGED, TIMES VOID");
+    } else {
+        std::cout << "  (stage measurement unavailable for this dimension)\n";
+    }
+
+    // ---- B2b sustained throughput -----------------------------------------
+    bool used_device = false;
+    std::string tp_note;
+    const double backend_nps = MeasureBackendNoncePerSec(backend, args.n, args.window, args.rounds, used_device, tp_note);
+    if (stage.valid) {
+        stage_json = StageJson(stage, args.device_peak_int8_tops, backend_nps, tensor_share_pct, tensor_util_pct);
+    }
+
+    std::cout << "\n[B2b] sustained throughput (ASERT calibration input)\n";
+    std::cout << "  backend marginal nonce/s : " << backend_nps
+              << "  (" << tp_note << ")\n";
+    std::cout << "  tensor-stage share (§K.2a-WT majority gate): ";
+    if (stage.valid) std::printf("%.1f%%\n", tensor_share_pct); else std::cout << "n/a\n";
+    std::cout << "  implied INT8 tensor utilization vs peak    : ";
+    if (tensor_util_pct >= 0) std::printf("%.1f%% (peak %.0f TOPS)\n", tensor_util_pct, args.device_peak_int8_tops);
+    else std::cout << "unknown (pass --device-peak-int8-tops to estimate)\n";
+
+    std::string asert_suggestion = "n/a (pass --v3-hashrate)";
+    if (args.v3_hashrate > 0 && backend_nps > 0) {
+        // target scales by v3/v4 throughput: next_target = parent_target*Num/Den,
+        // Num/Den = v3_hashes_per_s : v4_nonce_per_s (pow.cpp §I.4).
+        asert_suggestion = ReducedRatio(args.v3_hashrate, backend_nps);
+        std::cout << "  v3 baseline " << args.v3_hashrate << " H/s -> suggested nMatMulV4AsertRescaleNum/Den = "
+                  << asert_suggestion << "  (=" << (args.v3_hashrate / backend_nps) << ")\n";
+    }
+
+    // ---- quick lane (optional) --------------------------------------------
+    UniValue quick_arr(UniValue::VARR);
+    if (args.quick) {
+        std::cout << "\n[quick lane] fast n=256 / n=512 stage + bit-exact\n";
+        for (uint32_t qn : {256u, 512u}) {
+            const StageResult qr = MeasureStages(qn, std::min<uint32_t>(args.window, 16), args.rounds, 7);
+            double qts = 0, qtu = -1;
+            double qnps = 0; bool qdev = false; std::string qnote;
+            qnps = MeasureBackendNoncePerSec(backend, qn, std::min<uint32_t>(args.window, 16), args.rounds, qdev, qnote);
+            UniValue qj = StageJson(qr, args.device_peak_int8_tops, qnps, qts, qtu);
+            qj.pushKV("backend_nonce_per_s", qnps);
+            quick_arr.push_back(qj);
+            std::printf("  n=%u  bit-exact=%s  marginal=%.3f ms  tensor-share=%.1f%%  nonce/s=%.1f\n",
+                        qn, qr.stage_bit_exact ? "PASS" : "FAIL",
+                        qr.window ? (qr.s1b_expand + qr.s2_gemm + std::min(qr.s3_limb, qr.s3_alu) + qr.s4_digest) * 1e3 / qr.window : 0,
+                        qts, qnps);
+        }
+    }
+
+    // ---- GO / NO-GO line (§K.2b) ------------------------------------------
+    std::string verdict;
+    if (!bit_exact) {
+        verdict = "NO-GO: bit-exact determinism FAILED (consensus split)";
+    } else if (!stage.valid || !stage.stage_bit_exact) {
+        verdict = "NO-GO: stage outputs diverged (measurement void)";
+    } else if (tensor_share_pct <= 50.0) {
+        verdict = "NO-GO(this machine's stage profile): tensor-stage share is NOT a strict majority ("
+                  + std::to_string(static_cast<int>(tensor_share_pct + 0.5)) + "%)";
+    } else {
+        verdict = "GO-CANDIDATE: bit-exact PASS and tensor-stage share is a strict majority ("
+                  + std::to_string(static_cast<int>(tensor_share_pct + 0.5))
+                  + "%); ordering is UNDECIDABLE on one machine — aggregate across "
+                    "datacenter+consumer machines to decide the datacenter-favoring ordering (§K.2b(c))";
+    }
+    std::cout << "\n[GO/NO-GO §K.2b] " << verdict << "\n";
+
+    // ---- H8: device-execution certification gate --------------------------
+    // The v4.1 (ENC-S8) profile is a DEVICE-certification profile. A green PASS
+    // (exit 0) may be emitted ONLY when a real device backend actually executed
+    // its accelerated path AND its output was accepted bit-exact against the CPU
+    // reference: backend != CPU, at least one device window ACCEPTED (not fallen
+    // back), and the bit-exact gate green. A CPU-only run (backend resolves to
+    // CPU on this GPU-less host) certifies NOTHING about device silicon, so it
+    // must exit non-zero -- never a green PASS. Failing closed is always safe.
+    const uint64_t device_windows_ok =
+        stats.cuda_batch_ok + stats.metal_batch_ok + stats.hip_batch_ok;
+    const bool ran_on_device = (backend != matmul_v4::accel::Kind::CPU);
+    const bool device_certified = ran_on_device && bit_exact && device_windows_ok > 0;
+    if (device_certified) {
+        // Honest device marker (parallel to the bmx4c profile / verify-backend.sh).
+        std::cout << "DEVICE_V41_BITEXACT_PASS:" << backend_name << ":" << elig.reason << "\n";
+    } else {
+        std::cout << "\n[CERTIFICATION] NOT-CERTIFIED: no accepted on-device tensor path executed "
+                     "on this host (resolved backend=" << backend_name
+                  << ", device windows accepted=" << device_windows_ok
+                  << "). The bit-exact self-test " << (bit_exact ? "PASSED" : "FAILED")
+                  << " on the CPU reference, but a DEVICE profile certifies only on ACTUAL device "
+                     "execution; exiting non-zero (a CPU-only run of a device profile is NOT a PASS).\n";
+    }
+
+    // ---- machine-readable JSON --------------------------------------------
+    UniValue root(UniValue::VOBJ);
+    root.pushKV("tool", "matmul-v4-report");
+    root.pushKV("schema_version", 1);
+    root.pushKV("host", host);
+    root.pushKV("host_cpu_arch", HostCpuArch());
+    root.pushKV("backend", backend_name);
+    root.pushKV("backend_used_device", used_device);
+    // H8: did an ACTUAL device tensor path execute and get accepted? (Gates exit 0.)
+    root.pushKV("device_execution_certified", device_certified);
+    UniValue elig_obj(UniValue::VOBJ);
+    elig_obj.pushKV("compiled", elig.compiled);
+    elig_obj.pushKV("available", elig.available);
+    elig_obj.pushKV("admissible", elig.admissible);
+    elig_obj.pushKV("reason", elig.reason);
+    root.pushKV("device", std::move(elig_obj));
+    root.pushKV("n", static_cast<uint64_t>(args.n));
+    root.pushKV("b", static_cast<uint64_t>(mv4::kTileB));
+    root.pushKV("window", static_cast<uint64_t>(args.window));
+    root.pushKV("rounds", static_cast<uint64_t>(args.rounds));
+    // Additive schema fields (task contract for --profile bmx4c --mt24); the
+    // v4.1 profile does not run M-t24, so these are neutral placeholders that
+    // any consumer keyed on `profile == "bmx4c"` should ignore.
+    root.pushKV("profile", args.profile);
+    root.pushKV("mt24_pass", NullUniValue);
+    root.pushKV("proven_accumulator_bits", static_cast<uint64_t>(0));
+    root.pushKV("native_path_eligible", NullUniValue);
+    root.pushKV("bit_exact", bit_exact);
+    root.pushKV("stages", stage_json);
+    root.pushKV("backend_nonce_per_s", backend_nps);
+    root.pushKV("backend_throughput_note", tp_note);
+    root.pushKV("tensor_share_pct", stage.valid ? tensor_share_pct : 0);
+    if (tensor_util_pct >= 0) root.pushKV("tensor_util_pct", tensor_util_pct);
+    else root.pushKV("tensor_util_pct", "unknown");
+    root.pushKV("device_peak_int8_tops", args.device_peak_int8_tops);
+    root.pushKV("v3_hashrate", args.v3_hashrate);
+    root.pushKV("asert_rescale_num_den_suggestion", asert_suggestion);
+    if (args.quick) root.pushKV("quick_lane", quick_arr);
+    root.pushKV("verdict", verdict);
+    root.pushKV("gates", [] {
+        UniValue g(UniValue::VOBJ);
+        g.pushKV("B1", "bit_exact");
+        g.pushKV("B2b", "backend_nonce_per_s + asert_rescale_num_den_suggestion");
+        g.pushKV("B2g", "tensor_share_pct + tensor_util_pct + ordering(aggregate across machines)");
+        return g;
+    }());
+
+    std::ofstream ofs(args.out_path, std::ios::trunc);
+    if (!ofs) {
+        std::cerr << "error: cannot write JSON to " << args.out_path << "\n";
+        return 1;
+    }
+    ofs << root.write(2) << "\n";
+    ofs.close();
+    std::cout << "\nJSON report written: " << args.out_path << "\n";
+    std::cout << "Aggregate the JSON from datacenter + consumer + Apple machines to settle the B2g ordering.\n";
+
+    // H8: exit 0 (green PASS = CERTIFIED) requires an ACTUAL accepted on-device
+    // tensor path. bit_exact alone is a CPU-reference self-test; a CPU-only run
+    // of this device profile is NOT-CERTIFIED and returns non-zero.
+    return device_certified ? 0 : 1;
+}

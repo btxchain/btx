@@ -9,7 +9,8 @@ This script is the "download a binary and go" companion to btx-faststart.py:
 - fetch `btx-release-manifest.json` from a published release (or local path),
 - select the matching binary archive for the current platform,
 - verify and extract it,
-- optionally invoke `btx-faststart.py` with the installed binaries.
+- optionally invoke `btx-faststart.py` with the installed binaries,
+- optionally hand a miner preset off to the live-mining supervisor.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -40,6 +42,7 @@ GITHUB_TOKEN_ENV_VARS = ("BTX_GITHUB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN")
 GITHUB_API_BASE = "https://api.github.com"
 GITHUB_JSON_ACCEPT = "application/vnd.github+json"
 GITHUB_BINARY_ACCEPT = "application/octet-stream"
+MINING_SYNC_WAIT_SECS = 300
 
 
 def detect_platform_id() -> str:
@@ -455,7 +458,12 @@ def find_binary(install_dir: Path, names: tuple[str, ...]) -> Path:
     raise FileNotFoundError(f"could not find any of {', '.join(names)} under {install_dir}")
 
 
-def run_bootstrap_subprocess(cmd: list[str], *, json_mode: bool) -> None:
+def absolute_path(value: str | Path) -> Path:
+    """Make an operator path cwd-independent without resolving symlinks."""
+    return Path(os.path.abspath(Path(value).expanduser()))
+
+
+def run_logged_subprocess(cmd: list[str], *, json_mode: bool) -> None:
     if not json_mode:
         subprocess.run(cmd, check=True)
         return
@@ -473,6 +481,36 @@ def run_bootstrap_subprocess(cmd: list[str], *, json_mode: bool) -> None:
         print(result.stdout, end="", file=sys.stderr)
     if result.stderr:
         print(result.stderr, end="", file=sys.stderr)
+
+
+def wait_for_mining_sync(
+    cli_cmd: list[str],
+    *,
+    timeout_secs: int = MINING_SYNC_WAIT_SECS,
+    poll_secs: float = 1.0,
+) -> None:
+    """Wait until the bootstrapped daemon has caught up before mining starts."""
+    deadline = time.monotonic() + timeout_secs
+    while True:
+        result = subprocess.run(
+            [*cli_cmd, "getblockchaininfo"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        chain_info = json.loads(result.stdout)
+        blocks = int(chain_info["blocks"])
+        headers = int(chain_info["headers"])
+        initial_block_download = bool(chain_info["initialblockdownload"])
+        if blocks >= headers and not initial_block_download:
+            return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(
+                "timed out waiting for mining readiness "
+                f"(blocks={blocks} headers={headers} initialblockdownload={initial_block_download})"
+            )
+        time.sleep(min(poll_secs, remaining))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -537,6 +575,26 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--daemon-arg", action="append", default=[], help="Extra argument passed to btxd during bootstrap.")
     parser.add_argument("--cli-arg", action="append", default=[], help="Extra argument passed to btx-cli during bootstrap.")
     parser.add_argument(
+        "--start-mining",
+        action="store_true",
+        help="After a successful --preset=miner bootstrap, start the live-mining supervisor.",
+    )
+    parser.add_argument(
+        "--mining-wallet",
+        default="miner",
+        help="Wallet used by --start-mining (default: miner).",
+    )
+    parser.add_argument(
+        "--mining-results-dir",
+        help="Mining supervisor state/log directory (default: <datadir>/mining-ops).",
+    )
+    parser.add_argument(
+        "--mining-arg",
+        action="append",
+        default=[],
+        help="Approved extra argument passed to start-live-mining.sh; repeat as needed.",
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         help="Print a machine-readable JSON summary; bootstrap progress is written to stderr.",
@@ -545,7 +603,50 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str]) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    if args.start_mining and args.preset != "miner":
+        parser.error("--start-mining requires --preset=miner")
+    if args.start_mining and args.no_start_daemon:
+        parser.error("--start-mining cannot be combined with --no-start-daemon")
+    if args.start_mining and args.follow:
+        parser.error("--start-mining cannot be combined with --follow because bootstrap would not return")
+    if (args.mining_wallet != "miner" or args.mining_results_dir or args.mining_arg) and args.preset != "miner":
+        parser.error("--mining-wallet, --mining-results-dir, and --mining-arg require --preset=miner")
+    if not args.mining_wallet:
+        parser.error("--mining-wallet cannot be empty")
+    if args.mining_results_dir is not None and not args.mining_results_dir:
+        parser.error("--mining-results-dir cannot be empty")
+
+    managed_mining_args = ("--datadir", "--conf", "--chain", "--cli", "--daemon", "--wallet", "--results-dir")
+    value_mining_args = {
+        "--backend",
+        "--bootstrap-peers",
+        "--gpu-inputs",
+        "--max-backend-fallbacks",
+        "--node-pidfile",
+        "--require-backend",
+        "--rpcport",
+        "--should-mine-command",
+        "--sleep",
+    }
+    flag_mining_args = {"--no-default-bootstrap-peers"}
+    validated_mining_args: list[str] = []
+    for mining_arg in args.mining_arg:
+        if any(mining_arg == option or mining_arg.startswith(f"{option}=") for option in managed_mining_args):
+            parser.error(
+                f"--mining-arg cannot override installer-managed option {mining_arg.split('=', 1)[0]}"
+            )
+        option, separator, value = mining_arg.partition("=")
+        if option in flag_mining_args and not separator:
+            validated_mining_args.append(mining_arg)
+            continue
+        if option not in value_mining_args or not separator or not value:
+            parser.error(f"--mining-arg does not permit {option or mining_arg}")
+        if option == "--node-pidfile":
+            value = str(absolute_path(value))
+        validated_mining_args.append(f"{option}={value}")
 
     manifest_reference_source = args.release_manifest or default_release_manifest_source(
         args.repo,
@@ -573,11 +674,15 @@ def main(argv: list[str]) -> int:
     manifest = load_json_source(manifest_source, headers=github_asset_headers)
     platform_id = args.platform or detect_platform_id()
     release_tag = args.release_tag or manifest.get("release_tag") or "current"
-    install_dir = Path(args.install_dir).expanduser() if args.install_dir else (
-        Path.home() / ".local" / "btx" / str(release_tag) / platform_id
+    install_dir = absolute_path(
+        Path(args.install_dir).expanduser()
+        if args.install_dir
+        else Path.home() / ".local" / "btx" / str(release_tag) / platform_id
     )
-    cache_dir = Path(args.cache_dir).expanduser() if args.cache_dir else (
-        install_dir.parent / f"{install_dir.name}-agent-setup-cache"
+    cache_dir = absolute_path(
+        Path(args.cache_dir).expanduser()
+        if args.cache_dir
+        else install_dir.parent / f"{install_dir.name}-agent-setup-cache"
     )
     asset_base = args.asset_base_url or default_asset_base(manifest_reference_source)
     def resolved_asset_source(asset_name: str) -> str:
@@ -659,7 +764,7 @@ def main(argv: list[str]) -> int:
     }
 
     if args.preset:
-        datadir = Path(args.datadir).expanduser()
+        datadir = absolute_path(args.datadir)
         faststart_conf = datadir / "faststart" / "faststart.conf"
         faststart_cmd = [
             sys.executable,
@@ -673,7 +778,7 @@ def main(argv: list[str]) -> int:
         ]
         if args.matmul_service_challenge_file:
             faststart_cmd.append(
-                f"--matmul-service-challenge-file={Path(args.matmul_service_challenge_file).expanduser()}"
+                f"--matmul-service-challenge-file={absolute_path(args.matmul_service_challenge_file)}"
             )
         if args.follow:
             faststart_cmd.append("--follow")
@@ -688,7 +793,11 @@ def main(argv: list[str]) -> int:
         summary["faststart_conf"] = str(faststart_conf)
         summary["faststart_command"] = faststart_cmd
         if args.preset == "miner":
-            results_dir = datadir / "mining-ops"
+            results_dir = absolute_path(
+                Path(args.mining_results_dir).expanduser()
+                if args.mining_results_dir
+                else datadir / "mining-ops"
+            )
             summary["mining_results_dir"] = str(results_dir)
             summary["start_live_mining_command"] = [
                 str(SCRIPT_DIR.parent / "mining" / "start-live-mining.sh"),
@@ -697,14 +806,32 @@ def main(argv: list[str]) -> int:
                 f"--chain={args.chain}",
                 f"--cli={btx_cli_path}",
                 f"--daemon={btxd_path}",
-                "--wallet=miner",
+                f"--wallet={args.mining_wallet}",
                 f"--results-dir={results_dir}",
+                *validated_mining_args,
             ]
             summary["stop_live_mining_command"] = [
                 str(SCRIPT_DIR.parent / "mining" / "stop-live-mining.sh"),
                 f"--results-dir={results_dir}",
             ]
-        run_bootstrap_subprocess(faststart_cmd, json_mode=args.json)
+        run_logged_subprocess(faststart_cmd, json_mode=args.json)
+        if args.start_mining:
+            mining_sync_cmd = [
+                str(btx_cli_path),
+                f"-datadir={datadir}",
+                f"-conf={faststart_conf}",
+                f"-chain={args.chain}",
+                "-rpcclienttimeout=30",
+            ]
+            mining_sync_cmd.extend(
+                mining_arg.replace("--rpcport=", "-rpcport=", 1)
+                for mining_arg in validated_mining_args
+                if mining_arg.startswith("--rpcport=")
+            )
+            wait_for_mining_sync(mining_sync_cmd)
+            summary["mining_sync_ready"] = True
+            run_logged_subprocess(summary["start_live_mining_command"], json_mode=args.json)
+            summary["mining_started"] = True
 
     if args.json:
         print(json.dumps(summary, indent=2))
@@ -716,6 +843,8 @@ def main(argv: list[str]) -> int:
             print(f"snapshot manifest: {snapshot_manifest_path}")
         if args.preset:
             print(f"bootstrapped preset: {args.preset}")
+        if args.start_mining:
+            print("started live mining supervisor")
     return 0
 
 

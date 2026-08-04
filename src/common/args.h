@@ -8,16 +8,21 @@
 #include <common/settings.h>
 #include <compat/compat.h>
 #include <sync.h>
+#include <tinyformat.h>
 #include <util/chaintype.h>
 #include <util/fs.h>
+#include <util/result.h>
 
+#include <algorithm>
 #include <iosfwd>
+#include <limits>
 #include <list>
 #include <map>
 #include <optional>
 #include <set>
 #include <stdint.h>
 #include <string>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -308,6 +313,45 @@ protected:
      */
     int64_t GetIntArg(const std::string& strArg, int64_t nDefault) const;
     std::optional<int64_t> GetIntArg(const std::string& strArg) const;
+
+    template <typename T>
+    struct AssignIntArgToVarOptions {
+        T min{std::numeric_limits<T>::min()};
+        T max{std::numeric_limits<T>::max()};
+        T multiplier{1};
+    };
+
+    /** Assign an integer option only after checking narrowing and multiplication bounds. */
+    template <typename T, AssignIntArgToVarOptions<T> Opts = AssignIntArgToVarOptions<T>{}>
+    util::Result<void> AssignIntArgToVar(const std::string& arg_name, T& target) const
+    {
+        static_assert(Opts.multiplier > 0);
+        const auto val = GetIntArg(arg_name);
+        if (!val) return {};
+
+        constexpr auto min_val = []() -> int64_t {
+            constexpr auto arg_min = std::numeric_limits<int64_t>::min();
+            constexpr T target_min = std::max(Opts.min, std::numeric_limits<T>::min() / Opts.multiplier);
+            if (std::cmp_greater(arg_min, target_min)) return arg_min;
+            return static_cast<int64_t>(target_min);
+        }();
+        constexpr auto max_val = []() -> int64_t {
+            constexpr auto arg_max = std::numeric_limits<int64_t>::max();
+            constexpr T target_max = std::min(Opts.max, std::numeric_limits<T>::max() / Opts.multiplier);
+            if (std::cmp_less(arg_max, target_max)) return arg_max;
+            return static_cast<int64_t>(target_max);
+        }();
+        static_assert(min_val <= max_val);
+
+        if (*val < min_val) {
+            if constexpr (min_val == 0) return util::Error{strprintf(_("%s cannot be negative"), arg_name)};
+            return util::Error{strprintf(_("%s cannot be below %s"), arg_name, min_val)};
+        }
+        if (*val > max_val) return util::Error{strprintf(_("%s cannot exceed %s"), arg_name, max_val)};
+
+        target = static_cast<T>(*val) * Opts.multiplier;
+        return {};
+    }
 
     /**
      * Return fixed-point argument

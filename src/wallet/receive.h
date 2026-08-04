@@ -10,11 +10,22 @@
 #include <wallet/types.h>
 #include <wallet/wallet.h>
 
+#include <optional>
+
 namespace wallet {
 isminetype InputIsMine(const CWallet& wallet, const CTxIn& txin) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet);
 
 /** Returns whether all of the inputs match the filter */
 bool AllInputsMine(const CWallet& wallet, const CTransaction& tx, const isminefilter& filter);
+
+enum class WalletTxInputOwnership {
+    NONE,
+    PARTIAL,
+    ALL,
+};
+
+WalletTxInputOwnership TxGetInputOwnership(const CWallet& wallet, const CTransaction& tx, const isminefilter& filter)
+    EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet);
 
 CAmount OutputGetCredit(const CWallet& wallet, const CTxOut& txout, const isminefilter& filter);
 CAmount TxGetCredit(const CWallet& wallet, const CTransaction& tx, const isminefilter& filter);
@@ -39,11 +50,21 @@ struct COutputEntry
     CAmount amount;
     int vout;
 };
+struct WalletTxHistoryAccounting
+{
+    WalletTxInputOwnership input_ownership;
+    CAmount debit;
+    CAmount credit;
+    std::optional<CAmount> fee;
+};
+WalletTxHistoryAccounting CachedTxGetHistoryAccounting(const CWallet& wallet, const CWalletTx& wtx, const isminefilter& filter)
+    EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet);
 void CachedTxGetAmounts(const CWallet& wallet, const CWalletTx& wtx,
                         std::list<COutputEntry>& listReceived,
                         std::list<COutputEntry>& listSent,
                         CAmount& nFee, const isminefilter& filter,
-                        bool include_change);
+                        bool include_change)
+    EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet);
 bool CachedTxIsFromMe(const CWallet& wallet, const CWalletTx& wtx, const isminefilter& filter);
 bool CachedTxIsTrusted(const CWallet& wallet, const CWalletTx& wtx, std::set<uint256>& trusted_parents) EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet);
 bool CachedTxIsTrusted(const CWallet& wallet, const CWalletTx& wtx);

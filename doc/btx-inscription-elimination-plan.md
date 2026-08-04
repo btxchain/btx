@@ -291,8 +291,9 @@ not worth its cost on a sunsetting, outflow-only pool. The reasoning:
   bytes into it." That is already consensus-disabled at the 125000 sunset
   (`BTX_SHIELDED_POOL_CREDIT_DISABLE_HEIGHT`): no new shielded value may ENTER,
   the pool only drains. The credit freeze provides this, not any new rule here.
-- **The content-elimination height is *after* the sunset.** H (≈165000, §9) is
-  ≥ 125000, so this pillar would only ever operate in the outflow-only regime.
+- **Any future content-elimination height must be *after* the sunset.** H is
+  currently disabled and must be ≥ 125000 if assigned, so this pillar would
+  only ever operate in the outflow-only regime.
   The only transactions it could constrain are exits, recovery exits, and
   bridge/settlement — all carrying large, verifying proofs.
 - **The residual channel is expensive, low-bandwidth, temporary, and
@@ -473,11 +474,10 @@ These reflect what shipped (Pillars 1, 2, 3, 5 consensus + Pillar 6 relay):
 
 ## 9. Open items to resolve at sign-off
 
-1. **Activation height H.** Must be a future flag-day, ≥ current tip with ample
-   upgrade lead time, and ≥ 125000 (so the shielded-credit disable already
-   holds). Provisionally `BTX_CONTENT_ELIMINATION_HEIGHT = 165000`; confirm and
-   align to a release train like the existing 61000/123000/125000/128000
-   cluster.
+1. **Activation height H.** Production activation is disabled (`INT32_MAX`). A
+   future height must be ≥ 125000 so the shielded-credit disable already holds,
+   and may be selected only after the UTXO survey, Pillar 3 decision,
+   release-readiness, and network-adoption gates are complete.
 2. **Pillar 2 grandfathering.** Run the UTXO survey (§8); if any legitimate
    custody UTXO commits to a currently-non-allowlisted-but-benign leaf, add a
    hash-keyed exemption or widen the allowlist before H.

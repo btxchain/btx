@@ -278,13 +278,33 @@ OptionsDialog::OptionsDialog(QWidget* parent, bool enableWallet)
     ui->proxyPortTor->setEnabled(false);
     ui->proxyPortTor->setValidator(new QIntValidator(1, 65535, this));
 
-    connect(ui->connectSocks, &QPushButton::toggled, ui->proxyIp, &QWidget::setEnabled);
-    connect(ui->connectSocks, &QPushButton::toggled, ui->proxyPort, &QWidget::setEnabled);
-    connect(ui->connectSocks, &QPushButton::toggled, this, &OptionsDialog::updateProxyValidationState);
-
-    connect(ui->connectSocksTor, &QPushButton::toggled, ui->proxyIpTor, &QWidget::setEnabled);
-    connect(ui->connectSocksTor, &QPushButton::toggled, ui->proxyPortTor, &QWidget::setEnabled);
-    connect(ui->connectSocksTor, &QPushButton::toggled, this, &OptionsDialog::updateProxyValidationState);
+#if (QT_VERSION >= QT_VERSION_CHECK(6, 7, 0))
+    connect(ui->connectSocks, &QCheckBox::checkStateChanged, [this](const Qt::CheckState state){
+        const bool enabled = state == Qt::Checked;
+        ui->proxyIp->setEnabled(enabled);
+        ui->proxyPort->setEnabled(enabled);
+        updateProxyValidationState();
+    });
+    connect(ui->connectSocksTor, &QCheckBox::checkStateChanged, [this](const Qt::CheckState state){
+        const bool enabled = state == Qt::Checked;
+        ui->proxyIpTor->setEnabled(enabled);
+        ui->proxyPortTor->setEnabled(enabled);
+        updateProxyValidationState();
+    });
+#else
+    connect(ui->connectSocks, &QCheckBox::stateChanged, [this](int state){
+        const bool enabled = state == Qt::Checked;
+        ui->proxyIp->setEnabled(enabled);
+        ui->proxyPort->setEnabled(enabled);
+        updateProxyValidationState();
+    });
+    connect(ui->connectSocksTor, &QCheckBox::stateChanged, [this](int state){
+        const bool enabled = state == Qt::Checked;
+        ui->proxyIpTor->setEnabled(enabled);
+        ui->proxyPortTor->setEnabled(enabled);
+        updateProxyValidationState();
+    });
+#endif
 
     ui->maxuploadtarget->setMinimum(144 /* MiB/day */);
     ui->maxuploadtarget->setMaximum(std::numeric_limits<int>::max());
@@ -720,10 +740,18 @@ OptionsDialog::OptionsDialog(QWidget* parent, bool enableWallet)
     /* setup/change UI elements when proxy IPs are invalid/valid */
     ui->proxyIp->setCheckValidator(new ProxyAddressValidator(parent));
     ui->proxyIpTor->setCheckValidator(new ProxyAddressValidator(parent));
+    ui->proxyIp->setAllowEmptyInput(false);
+    ui->proxyIpTor->setAllowEmptyInput(false);
+    ui->proxyPort->setAllowEmptyInput(false);
+    ui->proxyPortTor->setAllowEmptyInput(false);
+    ui->proxyIp->setAllowValidationWhileEditing(true);
+    ui->proxyPort->setAllowValidationWhileEditing(true);
+    ui->proxyIpTor->setAllowValidationWhileEditing(true);
+    ui->proxyPortTor->setAllowValidationWhileEditing(true);
     connect(ui->proxyIp, &QValidatedLineEdit::validationDidChange, this, &OptionsDialog::updateProxyValidationState);
     connect(ui->proxyIpTor, &QValidatedLineEdit::validationDidChange, this, &OptionsDialog::updateProxyValidationState);
-    connect(ui->proxyPort, &QLineEdit::textChanged, this, &OptionsDialog::updateProxyValidationState);
-    connect(ui->proxyPortTor, &QLineEdit::textChanged, this, &OptionsDialog::updateProxyValidationState);
+    connect(ui->proxyPort, &QValidatedLineEdit::validationDidChange, this, &OptionsDialog::updateProxyValidationState);
+    connect(ui->proxyPortTor, &QValidatedLineEdit::validationDidChange, this, &OptionsDialog::updateProxyValidationState);
 
     if (!QSystemTrayIcon::isSystemTrayAvailable()) {
         ui->showTrayIcon->setChecked(false);
@@ -1152,6 +1180,15 @@ void OptionsDialog::on_okButton_clicked()
         model->setData(model->index(OptionsModel::dustdynamic, 0), "off");
     }
 
+    if (!ui->connectSocks->isChecked()) {
+        ui->proxyIp->clear();
+        ui->proxyPort->clear();
+    }
+    if (!ui->connectSocksTor->isChecked()) {
+        ui->proxyIpTor->clear();
+        ui->proxyPortTor->clear();
+    }
+
     mapper->submit();
     accept();
     updateDefaultProxyNets();
@@ -1174,11 +1211,10 @@ void OptionsDialog::on_showTrayIcon_stateChanged(int state)
 
 void OptionsDialog::changeEvent(QEvent* e)
 {
+    QWidget::changeEvent(e);
     if (e->type() == QEvent::PaletteChange) {
         updateThemeColors();
     }
-
-    QWidget::changeEvent(e);
 }
 
 void OptionsDialog::togglePruneWarning(bool enabled)
@@ -1211,17 +1247,40 @@ void OptionsDialog::clearStatusLabel()
 
 void OptionsDialog::updateProxyValidationState()
 {
-    QValidatedLineEdit *pUiProxyIp = ui->proxyIp;
-    QValidatedLineEdit *otherProxyWidget = (pUiProxyIp == ui->proxyIpTor) ? ui->proxyIp : ui->proxyIpTor;
-    if (pUiProxyIp->isValid() && (!ui->proxyPort->isEnabled() || ui->proxyPort->text().toInt() > 0) && (!ui->proxyPortTor->isEnabled() || ui->proxyPortTor->text().toInt() > 0))
-    {
-        setOkButtonState(otherProxyWidget->isValid()); //only enable ok button if both proxies are valid
+    const bool socks_proxy_enabled = ui->connectSocks->isChecked();
+    const bool tor_proxy_enabled = ui->connectSocksTor->isChecked();
+    const bool proxy_ip_valid = ui->proxyIp->isValid();
+    const bool proxy_port_valid = ui->proxyPort->isValid();
+    const bool tor_proxy_ip_valid = ui->proxyIpTor->isValid();
+    const bool tor_proxy_port_valid = ui->proxyPortTor->isValid();
+
+    const bool socks_proxy_ok = !socks_proxy_enabled || (proxy_ip_valid && proxy_port_valid);
+    const bool tor_proxy_ok = !tor_proxy_enabled || (tor_proxy_ip_valid && tor_proxy_port_valid);
+    if (socks_proxy_ok && tor_proxy_ok) {
+        setOkButtonState(true);
         clearStatusLabel();
-    }
-    else
-    {
+    } else {
         setOkButtonState(false);
-        ui->statusLabel->setText(tr("The supplied proxy address is invalid."));
+        QStringList errors;
+        if (socks_proxy_enabled) {
+            if (!proxy_ip_valid && !proxy_port_valid) {
+                errors.append(tr("The supplied proxy address and port are invalid."));
+            } else if (!proxy_ip_valid) {
+                errors.append(tr("The supplied proxy address is invalid."));
+            } else if (!proxy_port_valid) {
+                errors.append(tr("The supplied proxy port is invalid."));
+            }
+        }
+        if (tor_proxy_enabled) {
+            if (!tor_proxy_ip_valid && !tor_proxy_port_valid) {
+                errors.append(tr("The supplied Tor proxy address and port are invalid."));
+            } else if (!tor_proxy_ip_valid) {
+                errors.append(tr("The supplied Tor proxy address is invalid."));
+            } else if (!tor_proxy_port_valid) {
+                errors.append(tr("The supplied Tor proxy port is invalid."));
+            }
+        }
+        if (!errors.empty()) ui->statusLabel->setText(errors.join(" "));
     }
 }
 

@@ -977,7 +977,7 @@ RPCHelpMan gethdkeys()
                 UniValue xpub_info(UniValue::VOBJ);
                 xpub_info.pushKV("xpub", EncodeExtPubKey(xpub));
                 xpub_info.pushKV("has_private", has_xprv);
-                if (priv) {
+                if (priv && has_xprv) {
                     xpub_info.pushKV("xprv", EncodeExtKey(wallet_xprvs.at(xpub)));
                 }
                 xpub_info.pushKV("descriptors", std::move(descriptors));

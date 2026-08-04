@@ -146,12 +146,9 @@ bool WalletBatch::WriteKey(const CPubKey& vchPubKey, const CPrivKey& vchPrivKey,
     }
 
     // hash pubkey/privkey to accelerate wallet load
-    std::vector<unsigned char> vchKey;
-    vchKey.reserve(vchPubKey.size() + vchPrivKey.size());
-    vchKey.insert(vchKey.end(), vchPubKey.begin(), vchPubKey.end());
-    vchKey.insert(vchKey.end(), vchPrivKey.begin(), vchPrivKey.end());
+    const auto keypair_hash = Hash(vchPubKey, vchPrivKey);
 
-    return WriteIC(std::make_pair(DBKeys::KEY, vchPubKey), std::make_pair(vchPrivKey, Hash(vchKey)), false);
+    return WriteIC(std::make_pair(DBKeys::KEY, vchPubKey), std::make_pair(vchPrivKey, keypair_hash), false);
 }
 
 bool WalletBatch::WriteCryptedKey(const CPubKey& vchPubKey,
@@ -284,12 +281,9 @@ bool WalletBatch::EraseActiveScriptPubKeyMan(uint8_t type, bool internal)
 bool WalletBatch::WriteDescriptorKey(const uint256& desc_id, const CPubKey& pubkey, const CPrivKey& privkey)
 {
     // hash pubkey/privkey to accelerate wallet load
-    std::vector<unsigned char> key;
-    key.reserve(pubkey.size() + privkey.size());
-    key.insert(key.end(), pubkey.begin(), pubkey.end());
-    key.insert(key.end(), privkey.begin(), privkey.end());
+    const auto keypair_hash = Hash(pubkey, privkey);
 
-    return WriteIC(std::make_pair(DBKeys::WALLETDESCRIPTORKEY, std::make_pair(desc_id, pubkey)), std::make_pair(privkey, Hash(key)), false);
+    return WriteIC(std::make_pair(DBKeys::WALLETDESCRIPTORKEY, std::make_pair(desc_id, pubkey)), std::make_pair(privkey, keypair_hash), false);
 }
 
 bool WalletBatch::WriteCryptedDescriptorKey(const uint256& desc_id, const CPubKey& pubkey, const std::vector<unsigned char>& secret)
@@ -513,12 +507,9 @@ bool LoadKey(CWallet* pwallet, DataStream& ssKey, DataStream& ssValue, std::stri
         if (!hash.IsNull())
         {
             // hash pubkey/privkey to accelerate wallet load
-            std::vector<unsigned char> vchKey;
-            vchKey.reserve(vchPubKey.size() + pkey.size());
-            vchKey.insert(vchKey.end(), vchPubKey.begin(), vchPubKey.end());
-            vchKey.insert(vchKey.end(), pkey.begin(), pkey.end());
+            const auto keypair_hash = Hash(vchPubKey, pkey);
 
-            if (Hash(vchKey) != hash)
+            if (keypair_hash != hash)
             {
                 strErr = "Error reading wallet database: CPubKey/CPrivKey corrupt";
                 return false;
@@ -703,6 +694,30 @@ static LoadResult LoadRecords(CWallet* pwallet, DatabaseBatch& batch, const std:
     DataStream prefix;
     prefix << key;
     return LoadRecords(pwallet, batch, key, prefix, load_func);
+}
+
+bool HasLegacyRecords(CWallet& wallet)
+{
+    const auto& batch = wallet.GetDatabase().MakeBatch();
+    return HasLegacyRecords(wallet, *batch);
+}
+
+bool HasLegacyRecords(CWallet& wallet, DatabaseBatch& batch)
+{
+    for (const auto& type : DBKeys::LEGACY_TYPES) {
+        DataStream key;
+        DataStream value{};
+        DataStream prefix;
+        prefix << type;
+
+        std::unique_ptr<DatabaseCursor> cursor = batch.GetNewPrefixCursor(prefix);
+        if (!cursor) {
+            wallet.WalletLogPrintf("Error getting database cursor for '%s' records\n", type);
+            throw std::runtime_error(strprintf("Error getting database cursor for '%s' records", type));
+        }
+        if (cursor->Next(key, value) != DatabaseCursor::Status::DONE) return true;
+    }
+    return false;
 }
 
 static DBErrors LoadLegacyWalletRecords(CWallet* pwallet, DatabaseBatch& batch, int last_client) EXCLUSIVE_LOCKS_REQUIRED(pwallet->cs_wallet)
@@ -1019,6 +1034,10 @@ static DBErrors LoadDescriptorWalletRecords(CWallet* pwallet, DatabaseBatch& bat
 
             std::vector<unsigned char> ser_xpub(BIP32_EXTKEY_SIZE);
             value >> ser_xpub;
+            if (ser_xpub.size() != BIP32_EXTKEY_SIZE) {
+                err = "Error reading wallet database: descriptor cache xpub has invalid size";
+                return DBErrors::CORRUPT;
+            }
             CExtPubKey xpub;
             xpub.Decode(ser_xpub.data());
             if (parent) {
@@ -1042,6 +1061,10 @@ static DBErrors LoadDescriptorWalletRecords(CWallet* pwallet, DatabaseBatch& bat
 
             std::vector<unsigned char> ser_xpub(BIP32_EXTKEY_SIZE);
             value >> ser_xpub;
+            if (ser_xpub.size() != BIP32_EXTKEY_SIZE) {
+                err = "Error reading wallet database: descriptor last hardened cache xpub has invalid size";
+                return DBErrors::CORRUPT;
+            }
             CExtPubKey xpub;
             xpub.Decode(ser_xpub.data());
             cache.CacheLastHardenedExtPubKey(key_exp_index, xpub);
@@ -1107,12 +1130,9 @@ static DBErrors LoadDescriptorWalletRecords(CWallet* pwallet, DatabaseBatch& bat
             value >> hash;
 
             // hash pubkey/privkey to accelerate wallet load
-            std::vector<unsigned char> to_hash;
-            to_hash.reserve(pubkey.size() + pkey.size());
-            to_hash.insert(to_hash.end(), pubkey.begin(), pubkey.end());
-            to_hash.insert(to_hash.end(), pkey.begin(), pkey.end());
+            const auto keypair_hash = Hash(pubkey, pkey);
 
-            if (Hash(to_hash) != hash)
+            if (keypair_hash != hash)
             {
                 strErr = "Error reading wallet database: descriptor unencrypted key CPubKey/CPrivKey corrupt";
                 return DBErrors::CORRUPT;
@@ -1331,14 +1351,6 @@ static DBErrors LoadTxRecords(CWallet* pwallet, DatabaseBatch& batch, std::vecto
         return DBErrors::LOAD_OK;
     });
     result = std::max(result, order_pos_res.m_result);
-
-    // After loading all tx records, abandon any coinbase that is no longer in the active chain.
-    // This could happen during an external wallet load, or if the user replaced the chain data.
-    for (auto& [id, wtx] : pwallet->mapWallet) {
-        if (wtx.IsCoinBase() && wtx.isInactive()) {
-            pwallet->AbandonTransaction(wtx);
-        }
-    }
 
     return result;
 }

@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <consensus/amount.h>
+#include <key.h>
 #include <policy/fees.h>
 #include <script/solver.h>
 #include <validation.h>
@@ -15,6 +16,22 @@
 
 namespace wallet {
 BOOST_FIXTURE_TEST_SUITE(spend_tests, WalletTestingSetup)
+
+BOOST_AUTO_TEST_CASE(max_signed_input_size_uses_external_outpoint)
+{
+    const CKey key{GenerateRandomKey()};
+    FillableSigningProvider provider;
+    BOOST_REQUIRE(provider.AddKey(key));
+
+    const CTxOut txout{COIN, GetScriptForDestination(PKHash(key.GetPubKey()))};
+    const COutPoint outpoint{Txid{}, 0};
+    CCoinControl coin_control;
+    coin_control.Select(outpoint).SetTxOut(txout);
+
+    const int low_r{CalculateMaximumSignedInputSize(txout, COutPoint{}, &provider, /*can_grind_r=*/true, &coin_control)};
+    const int high_r{CalculateMaximumSignedInputSize(txout, outpoint, &provider, /*can_grind_r=*/true, &coin_control)};
+    BOOST_CHECK_EQUAL(high_r, low_r + 1);
+}
 
 BOOST_FIXTURE_TEST_CASE(SubtractFee, TestChain100Setup)
 {
@@ -72,7 +89,7 @@ BOOST_FIXTURE_TEST_CASE(wallet_duplicated_preset_inputs_test, TestChain100Setup)
     auto wallet = CreateSyncedWallet(*m_node.chain, WITH_LOCK(Assert(m_node.chainman)->GetMutex(), return m_node.chainman->ActiveChain()), coinbaseKey);
 
     LOCK(wallet->cs_wallet);
-    auto available_coins = AvailableCoins(*wallet);
+    auto available_coins = *Assert(AvailableCoins(*wallet));
     std::vector<COutput> coins = available_coins.All();
     // Preselect the first 3 UTXO (150 BTC total)
     std::set<COutPoint> preset_inputs = {coins[0].outpoint, coins[1].outpoint, coins[2].outpoint};
@@ -140,7 +157,7 @@ BOOST_FIXTURE_TEST_CASE(availablecoins_buckets_p2mr_outputs, TestChain100Setup)
     CoinsResult coins;
     {
         LOCK(wallet->cs_wallet);
-        coins = AvailableCoins(*wallet, /*coinControl=*/nullptr, /*feerate=*/std::nullopt, filter);
+        coins = *Assert(AvailableCoins(*wallet, /*coinControl=*/nullptr, /*feerate=*/std::nullopt, filter));
     }
 
     auto found_outpoint = [&](OutputType type) -> bool {

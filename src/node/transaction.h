@@ -9,7 +9,9 @@
 #include <policy/feerate.h>
 #include <primitives/transaction.h>
 #include <policy/policy.h>
+#include <util/expected.h>
 
+#include <string>
 #include <variant>
 
 class CBlockIndex;
@@ -64,9 +66,9 @@ static const CAmount DEFAULT_MAX_BURN_AMOUNT{0};
  * @param[in]  mempool         If provided, check mempool for tx
  * @param[in]  hash            The txid
  * @param[out] hashBlock       The block hash, if the tx was found via -txindex or block_index
- * @returns                    The tx if found, otherwise nullptr
+ * @returns                    The tx if found, nullptr if not found, or an error string for I/O issues
  */
-CTransactionRef GetTransaction(const CBlockIndex* const block_index, const CTxMemPool* const mempool, const uint256& hash, uint256& hashBlock, const BlockManager& blockman);
+util::Expected<CTransactionRef, std::string> GetTransaction(const CBlockIndex* const block_index, const CTxMemPool* const mempool, const uint256& hash, uint256& hashBlock, const BlockManager& blockman);
 } // namespace node
 
 #endif // BITCOIN_NODE_TRANSACTION_H

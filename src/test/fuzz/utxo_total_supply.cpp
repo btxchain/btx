@@ -96,9 +96,9 @@ FUZZ_TARGET(utxo_total_supply)
         tx.vin.emplace_back(txo.first);
         tx.vout.emplace_back(txo.second.nValue, txo.second.scriptPubKey); // "Forward" coin with no fee
     };
-    const auto UpdateUtxoStats = [&]() {
+    const auto UpdateUtxoStats = [&](bool wipe_cache) {
         LOCK(chainman.GetMutex());
-        chainman.ActiveChainstate().ForceFlushStateToDisk();
+        chainman.ActiveChainstate().ForceFlushStateToDisk(wipe_cache);
         utxo_stats = std::move(
             *Assert(kernel::ComputeUTXOStats(kernel::CoinStatsHashType::NONE, &chainman.ActiveChainstate().CoinsDB(), chainman.m_blockman, {})));
         assert(utxo_stats.total_amount.has_value());
@@ -116,7 +116,7 @@ FUZZ_TARGET(utxo_total_supply)
 
     // Update internal state to chain tip
     StoreLastTxo();
-    UpdateUtxoStats();
+    UpdateUtxoStats(/*wipe_cache=*/fuzzed_data_provider.ConsumeBool());
     supply_cap = *utxo_stats.total_amount;
     supply_cap_initialized = true;
     assert(ActiveHeight() == 0);
@@ -143,7 +143,7 @@ FUZZ_TARGET(utxo_total_supply)
     supply_cap += GetBlockSubsidy(ActiveHeight(), Params().GetConsensus());
 
     assert(ActiveHeight() == 1);
-    UpdateUtxoStats();
+    UpdateUtxoStats(/*wipe_cache=*/fuzzed_data_provider.ConsumeBool());
     current_block = PrepareNextBlock();
     StoreLastTxo();
 
@@ -184,7 +184,7 @@ FUZZ_TARGET(utxo_total_supply)
                     supply_cap += GetBlockSubsidy(ActiveHeight(), Params().GetConsensus());
                 }
 
-                UpdateUtxoStats();
+                UpdateUtxoStats(/*wipe_cache=*/fuzzed_data_provider.ConsumeBool());
 
                 if (!was_valid) {
                     // utxo stats must not change

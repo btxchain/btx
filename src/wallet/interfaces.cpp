@@ -485,7 +485,7 @@ public:
 
         // And fetch the wallet available coins
         if (coin_control.m_allow_other_inputs) {
-            total_amount += AvailableCoins(*m_wallet, &coin_control).GetTotalAmount();
+            total_amount += Assert(AvailableCoins(*m_wallet, &coin_control))->GetTotalAmount();
         }
 
         return total_amount;
@@ -615,7 +615,7 @@ public:
         m_context.chain = &chain;
         m_context.args = &args;
     }
-    ~WalletLoaderImpl() override { UnloadWallets(m_context); }
+    ~WalletLoaderImpl() override { stop(); }
 
     //! HACK to workaround libc++ bugs (assigning from other locations such as sweepprivkeys breaks std::any_cast type checking); see also https://github.com/llvm/llvm-project/issues/55684
     void assignContextHACK(std::any& a) override
@@ -642,7 +642,7 @@ public:
         return StartWallets(m_context);
     }
     void flush() override { return FlushWallets(m_context); }
-    void stop() override { return StopWallets(m_context); }
+    void stop() override { return UnloadWallets(m_context); }
     void setMockTime(int64_t time) override { return SetMockTime(time); }
     void schedulerMockForward(std::chrono::seconds delta) override { Assert(m_context.scheduler)->MockForward(delta); }
 

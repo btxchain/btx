@@ -622,6 +622,19 @@ BOOST_FIXTURE_TEST_CASE(calculate_cluster, TestChain100Setup)
     AddToMempool(pool, entry.Fee(CENT).FromTx(tx_501));
     const auto cluster_501 = pool.GatherClusters({tx_501->GetHash()});
     BOOST_CHECK_EQUAL(cluster_501.size(), 0);
+    {
+        std::vector<COutPoint> cluster_limit_outpoints;
+        cluster_limit_outpoints.reserve(chain_txids.size() + 1);
+        for (const auto& txid : chain_txids) {
+            cluster_limit_outpoints.emplace_back(txid, 0);
+        }
+        cluster_limit_outpoints.emplace_back(tx_501->GetHash(), 0);
+
+        node::MiniMiner mini_miner(pool, cluster_limit_outpoints);
+        BOOST_CHECK(!mini_miner.IsReadyToCalculate());
+        BOOST_CHECK(mini_miner.CalculateBumpFees(CFeeRate(CENT)).empty());
+        BOOST_CHECK(!mini_miner.CalculateTotalBumpFees(CFeeRate(CENT)).has_value());
+    }
 
     /* Zig Zag cluster:
      * txp0     txp1     txp2    ...  txp48  txp49

@@ -5,6 +5,7 @@
 #include <addresstype.h>
 #include <clientversion.h>
 #include <coins.h>
+#include <dbwrapper.h>
 #include <streams.h>
 #include <test/util/poolresourcetester.h>
 #include <test/util/random.h>
@@ -86,11 +87,14 @@ public:
         // Manually recompute the dynamic usage of the whole data, and compare it.
         size_t ret = memusage::DynamicUsage(cacheCoins);
         size_t count = 0;
+        size_t dirty_count = 0;
         for (const auto& entry : cacheCoins) {
             ret += entry.second.coin.DynamicMemoryUsage();
             ++count;
+            dirty_count += entry.second.IsDirty();
         }
         BOOST_CHECK_EQUAL(GetCacheSize(), count);
+        BOOST_CHECK_EQUAL(GetDirtyCount(), dirty_count);
         BOOST_CHECK_EQUAL(DynamicMemoryUsage(), ret);
         if (sanity_check) {
             SanityCheck();
@@ -100,6 +104,16 @@ public:
     CCoinsMap& map() const { return cacheCoins; }
     CoinsCachePair& sentinel() const { return m_sentinel; }
     size_t& usage() const { return cachedCoinsUsage; }
+    size_t& dirty() const { return m_dirty_count; }
+};
+
+struct TestCoinKey {
+    uint8_t prefix{'C'};
+    COutPoint outpoint;
+    SERIALIZE_METHODS(TestCoinKey, obj)
+    {
+        READWRITE(obj.prefix, obj.outpoint.hash, VARINT(obj.outpoint.n));
+    }
 };
 
 } // namespace
@@ -652,8 +666,10 @@ static void WriteCoinsViewEntry(CCoinsView& view, const MaybeCoin& cache_coin)
     CCoinsMapMemoryResource resource;
     CCoinsMap map{0, CCoinsMap::hasher{}, CCoinsMap::key_equal{}, &resource};
     auto usage{cache_coin ? InsertCoinsMapEntry(map, sentinel, *cache_coin) : 0};
-    auto cursor{CoinsViewCacheCursor(usage, sentinel, map, /*will_erase=*/true)};
+    size_t dirty_count{cache_coin && cache_coin->IsDirty()};
+    auto cursor{CoinsViewCacheCursor(usage, dirty_count, sentinel, map, /*will_erase=*/true)};
     BOOST_CHECK(view.BatchWrite(cursor, {}));
+    BOOST_CHECK_EQUAL(dirty_count, 0U);
 }
 
 class SingleEntryCacheTest
@@ -663,7 +679,10 @@ public:
     {
         auto base_cache_coin{base_value == ABSENT ? MISSING : CoinEntry{base_value, CoinEntry::State::DIRTY}};
         WriteCoinsViewEntry(base, base_cache_coin);
-        if (cache_coin) cache.usage() += InsertCoinsMapEntry(cache.map(), cache.sentinel(), *cache_coin);
+        if (cache_coin) {
+            cache.usage() += InsertCoinsMapEntry(cache.map(), cache.sentinel(), *cache_coin);
+            cache.dirty() += cache_coin->IsDirty();
+        }
     }
 
     CCoinsView root;
@@ -1049,6 +1068,39 @@ BOOST_FIXTURE_TEST_CASE(ccoins_flush_behavior, FlushTest)
     }
 }
 
+BOOST_AUTO_TEST_CASE(malformed_first_coin_key_cursor_invalid)
+{
+    const fs::path path{m_args.GetDataDirBase() / "malformed_coin_cursor"};
+    {
+        CDBWrapper dbw{{.path = path, .cache_bytes = 1_MiB, .wipe_data = true}};
+        // DB_COIN without the required outpoint bytes sorts into the coin
+        // keyspace but cannot be decoded as CoinEntry.
+        BOOST_REQUIRE(dbw.Write(uint8_t{'C'}, Coin{CTxOut{1, CScript{}}, 1, false}));
+    }
+
+    CCoinsViewDB view{{.path = path, .cache_bytes = 1_MiB}, {}};
+    std::unique_ptr<CCoinsViewCursor> cursor{Assert(view.Cursor())};
+    BOOST_CHECK(!cursor->Valid());
+    COutPoint outpoint;
+    BOOST_CHECK(!cursor->GetKey(outpoint));
+}
+
+BOOST_AUTO_TEST_CASE(corrupt_coin_value_throws_instead_of_appearing_missing)
+{
+    const fs::path path{m_args.GetDataDirBase() / "corrupt_coin_value"};
+    const COutPoint outpoint{Txid::FromUint256(m_rng.rand256()), 3};
+    {
+        CDBWrapper dbw{{.path = path, .cache_bytes = 1_MiB, .wipe_data = true}};
+        // One byte cannot deserialize as a Coin but is stored under a valid
+        // UTXO key, reproducing an on-disk format/corruption failure.
+        BOOST_REQUIRE(dbw.Write(TestCoinKey{.outpoint = outpoint}, uint8_t{0xff}));
+    }
+
+    CCoinsViewDB view{{.path = path, .cache_bytes = 1_MiB}, {}};
+    BOOST_CHECK_THROW(view.GetCoin(outpoint), dbwrapper_error);
+    BOOST_CHECK_THROW(view.HaveCoin(outpoint), dbwrapper_error);
+}
+
 BOOST_AUTO_TEST_CASE(coins_resource_is_used)
 {
     CCoinsMapMemoryResource resource;
@@ -1072,6 +1124,40 @@ BOOST_AUTO_TEST_CASE(coins_resource_is_used)
     }
 
     PoolResourceTester::CheckAllDataAccountedFor(resource);
+}
+
+BOOST_AUTO_TEST_CASE(ccoins_addcoin_exception_keeps_usage_balanced)
+{
+    CCoinsView root;
+    CCoinsViewCacheTest cache{&root};
+    const COutPoint outpoint{Txid::FromUint256(m_rng.rand256()), m_rng.rand32()};
+
+    const Coin coin1{CTxOut{m_rng.randrange(10), CScript{} << m_rng.randbytes(CScriptBase::STATIC_SIZE + 1)}, 1, false};
+    cache.AddCoin(outpoint, Coin{coin1}, /*possible_overwrite=*/false);
+    cache.SelfTest();
+
+    const Coin coin2{CTxOut{m_rng.randrange(20), CScript{} << m_rng.randbytes(CScriptBase::STATIC_SIZE + 2)}, 2, false};
+    BOOST_CHECK_THROW(cache.AddCoin(outpoint, Coin{coin2}, /*possible_overwrite=*/false), std::logic_error);
+    cache.SelfTest();
+    BOOST_CHECK(cache.AccessCoin(outpoint) == coin1);
+}
+
+BOOST_AUTO_TEST_CASE(ccoins_failed_flush_keeps_usage_balanced)
+{
+    // The base view's default BatchWrite() returns false without consuming
+    // the cursor. A failed flush must leave both the cache and its memory
+    // accounting intact so callers can retry safely.
+    CCoinsView root;
+    CCoinsViewCacheTest cache{&root};
+    const COutPoint outpoint{Txid::FromUint256(m_rng.rand256()), m_rng.rand32()};
+    const Coin coin{CTxOut{1, CScript{} << m_rng.randbytes(CScriptBase::STATIC_SIZE + 1)}, 1, false};
+    cache.AddCoin(outpoint, Coin{coin}, /*possible_overwrite=*/false);
+    const size_t usage_before{cache.DynamicMemoryUsage()};
+
+    BOOST_CHECK(!cache.Flush());
+    BOOST_CHECK_EQUAL(cache.DynamicMemoryUsage(), usage_before);
+    cache.SelfTest();
+    BOOST_CHECK(cache.AccessCoin(outpoint) == coin);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

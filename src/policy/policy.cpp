@@ -208,11 +208,13 @@ std::optional<PQAlgorithm> ChecksigAlgoForLeafType(P2MRLeafType leaf_type)
     case P2MRLeafType::CLTV_CHECKSIG_MLDSA:
     case P2MRLeafType::CTV_CHECKSIG_MLDSA:
     case P2MRLeafType::CSFS_VERIFY_CHECKSIG_MLDSA:
+    case P2MRLeafType::HTLC_MLDSA:
         return PQAlgorithm::ML_DSA_44;
     case P2MRLeafType::CHECKSIG_SLHDSA:
     case P2MRLeafType::CLTV_CHECKSIG_SLHDSA:
     case P2MRLeafType::CTV_CHECKSIG_SLHDSA:
     case P2MRLeafType::CSFS_VERIFY_CHECKSIG_SLHDSA:
+    case P2MRLeafType::HTLC_SLHDSA:
         return PQAlgorithm::SLH_DSA_128S;
     default:
         return std::nullopt;
@@ -224,11 +226,9 @@ std::optional<PQAlgorithm> CSFSAlgoForLeafType(P2MRLeafType leaf_type)
     switch (leaf_type) {
     case P2MRLeafType::CSFS_MLDSA:
     case P2MRLeafType::CTV_CSFS_MLDSA:
-    case P2MRLeafType::HTLC_MLDSA:
         return PQAlgorithm::ML_DSA_44;
     case P2MRLeafType::CSFS_SLHDSA:
     case P2MRLeafType::CTV_CSFS_SLHDSA:
-    case P2MRLeafType::HTLC_SLHDSA:
         return PQAlgorithm::SLH_DSA_128S;
     default:
         return std::nullopt;
@@ -380,23 +380,14 @@ P2MRLeafType ParsePolicyP2MRLeafScript(Span<const unsigned char> leaf_script)
         }
     }
 
-    // HTLC leaf: <20-byte H160 push> OP_OVER OP_HASH160 OP_EQUALVERIFY <csfs pubkey> OP_CHECKSIGFROMSTACK
-    // (hashlock + delegated CSFS signature; spent with witness <csfs_sig> <preimage> <leaf> <control>).
-    if (leaf_script.size() > 24 &&
-        leaf_script[0] == 0x14 &&
-        leaf_script[21] == static_cast<unsigned char>(OP_OVER) &&
-        leaf_script[22] == static_cast<unsigned char>(OP_HASH160) &&
-        leaf_script[23] == static_cast<unsigned char>(OP_EQUALVERIFY)) {
-        const Span<const unsigned char> tail = leaf_script.subspan(24);
-        for (const PQAlgorithm algo : GetSupportedPQAlgorithms()) {
-            Span<const unsigned char> pubkey;
-            size_t pk_len{0};
-            if (ParseP2MRPubkeyPush(tail, 0, algo, pubkey, pk_len) &&
-                tail.size() == pk_len + 1 &&
-                tail[pk_len] == static_cast<unsigned char>(OP_CHECKSIGFROMSTACK)) {
-                return HtlcLeafTypeForAlgo(algo);
-            }
-        }
+    // Transaction-bound HTLC claim leaf. Legacy htlc() leaves ending in
+    // OP_CHECKSIGFROMSTACK are intentionally not standard: their revealed
+    // witness can be replayed into a conflicting transaction.
+    std::vector<unsigned char> htlc_hash160;
+    std::vector<unsigned char> htlc_pubkey;
+    PQAlgorithm htlc_algo{PQAlgorithm::ML_DSA_44};
+    if (ParseP2MRHTLCTxLeaf(leaf_script, htlc_hash160, htlc_algo, htlc_pubkey)) {
+        return HtlcLeafTypeForAlgo(htlc_algo);
     }
 
     for (const PQAlgorithm algo : GetSupportedPQAlgorithms()) {
@@ -763,7 +754,10 @@ bool AreInputsStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs,
     return true;
 }
 
-bool IsWitnessStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs, const std::string& reason_prefix, std::string& out_reason, const ignore_rejects_type& ignore_rejects)
+static bool IsWitnessStandardImpl(const CTransaction& tx, const CCoinsViewCache& mapInputs,
+                                  const std::string& reason_prefix, std::string& out_reason,
+                                  const ignore_rejects_type& ignore_rejects,
+                                  const size_t max_non_multisig_p2mr_script_size)
 {
     if (tx.IsCoinBase())
         return true; // Coinbases are skipped
@@ -996,9 +990,7 @@ bool IsWitnessStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs,
                 break;
             }
             case P2MRLeafType::CSFS_MLDSA:
-            case P2MRLeafType::CSFS_SLHDSA:
-            case P2MRLeafType::HTLC_MLDSA:
-            case P2MRLeafType::HTLC_SLHDSA: {
+            case P2MRLeafType::CSFS_SLHDSA: {
                 // Witness: <csfs_sig> <message-or-preimage> <leaf_script> <control_block>.
                 if (stack.size() != 4) {
                     out_reason = reason_prefix + "p2mr-stack-size";
@@ -1011,6 +1003,24 @@ bool IsWitnessStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs,
                 }
                 if (stack[1].size() > MAX_SCRIPT_ELEMENT_SIZE) {
                     out_reason = reason_prefix + "p2mr-csfs-msg-size";
+                    return false;
+                }
+                break;
+            }
+            case P2MRLeafType::HTLC_MLDSA:
+            case P2MRLeafType::HTLC_SLHDSA: {
+                // Witness: <tx_sig> <32-byte preimage> <leaf_script> <control_block>.
+                if (stack.size() != 4) {
+                    out_reason = reason_prefix + "p2mr-stack-size";
+                    return false;
+                }
+                const auto algo = ChecksigAlgoForLeafType(leaf_type);
+                if (!algo.has_value() || !IsPolicyP2MRSignatureSize(stack[0], *algo)) {
+                    out_reason = reason_prefix + "p2mr-signature-size";
+                    return false;
+                }
+                if (stack[1].size() != 32) {
+                    out_reason = reason_prefix + "p2mr-htlc-preimage-size";
                     return false;
                 }
                 break;
@@ -1067,7 +1077,7 @@ bool IsWitnessStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs,
                                           leaf_type == P2MRLeafType::CSV_MULTISIG ||
                                           leaf_type == P2MRLeafType::CTV_MULTISIG)
                 ? static_cast<size_t>(MAX_P2MR_SCRIPT_SIZE)
-                : static_cast<size_t>(g_script_size_policy_limit);
+                : max_non_multisig_p2mr_script_size;
             if (leaf_script.size() > max_leaf_size) {
                 out_reason = reason_prefix + "p2mr-script-size";
                 return false;
@@ -1075,6 +1085,41 @@ bool IsWitnessStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs,
         }
     }
     return true;
+}
+
+bool IsWitnessStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs,
+                       const std::string& reason_prefix, std::string& out_reason,
+                       const ignore_rejects_type& ignore_rejects)
+{
+    return IsWitnessStandardImpl(tx, mapInputs, reason_prefix, out_reason, ignore_rejects,
+                                 g_script_size_policy_limit);
+}
+
+bool IsFinancialP2MRWitness(const CTransaction& tx, const CCoinsViewCache& mapInputs,
+                            const std::string& reason_prefix, std::string& out_reason)
+{
+    if (tx.IsCoinBase()) return true;
+
+    // Consensus may only classify direct witness-v2 P2MR spends here. Keeping
+    // every other witness version out of IsWitnessStandardImpl ensures that no
+    // unrelated or mutable relay-policy branch can influence block validity.
+    for (const CTxIn& input : tx.vin) {
+        if (input.scriptWitness.IsNull()) continue;
+
+        const CScript& prev_script = mapInputs.AccessCoin(input.prevout).out.scriptPubKey;
+        int witness_version{0};
+        std::vector<unsigned char> witness_program;
+        if (!prev_script.IsWitnessProgram(witness_version, witness_program) ||
+            witness_version != 2 || witness_program.size() != WITNESS_V2_P2MR_SIZE) {
+            out_reason = reason_prefix + "non-p2mr-input";
+            return false;
+        }
+    }
+
+    // Financial leaf templates are structurally bounded. Use the fixed P2MR
+    // consensus script maximum, not the operator-configurable relay maximum.
+    return IsWitnessStandardImpl(tx, mapInputs, reason_prefix, out_reason,
+                                 empty_ignore_rejects, MAX_P2MR_SCRIPT_SIZE);
 }
 
 bool SpendsNonAnchorWitnessProg(const CTransaction& tx, const CCoinsViewCache& prevouts)

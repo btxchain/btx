@@ -20,6 +20,22 @@
 
 BOOST_AUTO_TEST_SUITE(coinstatsindex_tests)
 
+BOOST_AUTO_TEST_CASE(coinstats_cumulative_volume_exceeds_camount)
+{
+    // Lifetime transaction volume is not bounded by the current money supply
+    // and must remain representable after it crosses CAmount's signed range.
+    const arith_uint256 max_camount{static_cast<uint64_t>(std::numeric_limits<CAmount>::max())};
+    kernel::CCoinsStats stats{};
+    stats.total_prevout_spent_amount = max_camount + 1;
+    stats.total_new_outputs_ex_coinbase_amount = max_camount + 2;
+    stats.total_coinbase_amount = max_camount + 3;
+
+    BOOST_CHECK(stats.total_prevout_spent_amount > max_camount);
+    BOOST_CHECK_EQUAL(UintToArith256(ArithToUint256(stats.total_prevout_spent_amount)), stats.total_prevout_spent_amount);
+    BOOST_CHECK_EQUAL(UintToArith256(ArithToUint256(stats.total_new_outputs_ex_coinbase_amount)), stats.total_new_outputs_ex_coinbase_amount);
+    BOOST_CHECK_EQUAL(UintToArith256(ArithToUint256(stats.total_coinbase_amount)), stats.total_coinbase_amount);
+}
+
 BOOST_FIXTURE_TEST_CASE(coinstatsindex_initial_sync, TestChain100Setup)
 {
     CoinStatsIndex coin_stats_index{interfaces::MakeChain(m_node), 1 << 20, true};

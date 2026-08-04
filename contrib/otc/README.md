@@ -7,8 +7,9 @@ provably real, exclusively committed to one offer, and not withdrawable
 while the quote is live. An offer that does not carry a valid proof bundle
 should be treated by the market as **no supply**.
 
-Everything here drives a stock `btxd` over RPC — there are no consensus,
-policy, or node changes. Funds-critical spends go through the node's
+Everything here drives a stock `btxd` over RPC. BTX 0.33.2 adds the
+`commit(<32-byte-hash>)` P2MR descriptor leaf used to bind offer terms without
+an OP_RETURN output. Funds-critical spends go through the node's
 audited `buildhtlcclaim` / `buildhtlcrefund` wallet RPCs.
 
 **Status: reference tooling. UNAUDITED.** Same caveat as `contrib/wbtx`:
@@ -31,22 +32,18 @@ the node, holding the offered coins with exactly two kinds of spend path:
 
 | Tier | Descriptor | Pre-expiry spend | Guarantee |
 |------|-----------|------------------|-----------|
-| A+ | `mr(ctv_multi_pq(<tmpl>,1,S),{refund(H,R)})` | only the pre-committed settlement tx | exists, exclusive, unpullable, destination-fixed |
-| A  | `mr(multi_pq(2,S,V),{refund(H,R)})` | seller + venue co-sign | exists, exclusive, unpullable (venue can only delay) |
-| B  | `mr(S,{refund(H,R)})` | seller alone | exists, exclusive; an early pull is publicly visible |
+| A+ | `mr(ctv_multi_pq(<tmpl>,1,S),{refund(H,R),commit(T)})` | only the pre-committed settlement tx | exists, exclusive, unpullable, destination-fixed |
+| A  | `mr(multi_pq(2,S,V),{refund(H,R),commit(T)})` | seller + venue co-sign | exists, exclusive, unpullable (venue can only delay) |
+| B  | `mr(S,{refund(H,R),commit(T)})` | seller alone | exists, exclusive; an early pull is publicly visible |
 
 `refund(H,R)` returns the coins to the seller only at/after block `H`,
 which must be ≥ the offer's advertised `expiry_height`.
 
-**Exclusivity** comes from the funding transaction: it must include
-
-```
-OP_RETURN "BTXOTC1" || SHA256(canonical offer terms)     (39-byte payload)
-```
-
-An outpoint has one funding tx and that tx commits to one terms hash, so
-the same coins can never verifiably back two different offers — on any
-venue, with no coordination.
+**Exclusivity** comes from `T = SHA256(canonical offer terms)` being an
+unspendable leaf in the vault's P2MR Merkle root. The leaf is not revealed or
+stored as a data output; it only changes the vault address. An outpoint pays one
+root and therefore verifies for exactly one terms hash, so the same coins cannot
+back two different offers on different venues.
 
 ## Quick start (CLI)
 
@@ -59,7 +56,7 @@ cat > terms.json <<'EOF'
   "expiry_height": 815000,
   "price": "spot-0.5%",
   "settle_asset": "wBTX",
-  "seller_address": "btx1z...",
+  "seller_address": "btx1z... (the address controlled by <refund_pk>)",
   "nonce": "<32 hex chars, fresh per offer>"
 }
 EOF
@@ -84,19 +81,25 @@ python3 btx_otc.py --cli "btx-cli -rpcwallet=desk" \
 `verify` re-checks everything on-chain and trusts nothing in the bundle:
 
 1. terms canonicalize; the descriptor parses and matches a **known tier
-   shape exactly** (unknown script trees fail closed — a leaf you can't
-   classify could be a hidden exit path);
+   shape exactly**, its supplied checksum is valid, and its declared tier
+   matches the derived tier (unknown script trees fail closed — a leaf you
+   can't classify could be a hidden exit path);
 2. the refund timelock covers the advertised expiry;
 3. every outpoint is a live, sufficiently-confirmed UTXO paying the vault
-   address, summing to at least `amount_sats` (no duplicates);
-4. every funding tx carries the `OP_RETURN` commitment to **these** terms
-   (this is what catches double-pledging);
+   address, summing to at least `amount_sats` (no duplicates); immature
+   coinbase outputs are not counted;
+4. the descriptor contains `commit(SHA256(canonical terms))`, and deriving that
+   exact descriptor reproduces the funded vault address;
 5. the offer has not expired;
 6. optionally, a fresh-challenge BIP-322 attestation verifies against the
-   seller's declared address.
+   address derived from the descriptor's refund key; that same address must be
+   committed as `terms.seller_address`. Buyers/venues should supply their own
+   nonce with `--expected-challenge`; accepting only the seller-published
+   challenge proves key control but not freshness.
 
-If the node has no `-txindex`, add a `"blockhash"` hint to each outpoint
-in the bundle so step 4 can fetch the funding tx.
+No transaction index or funding-transaction lookup is needed: mempool-aware
+`gettxout`, the descriptor, and the canonical terms are sufficient. An
+unconfirmed spend removes the bond from verified supply immediately.
 
 ## Settlement (stage 2)
 
@@ -109,8 +112,8 @@ from btx_otc import (swap_vault_descriptor, new_preimage, swap_hash160_hex,
                      build_swap_claim, build_swap_refund)
 
 secret = new_preimage()
-desc = swap_vault_descriptor(internal_pk, swap_hash160_hex(secret),
-                             buyer_pk, refund_height, seller_pk)
+desc = swap_vault_descriptor(swap_hash160_hex(secret), buyer_pk,
+                             refund_height, seller_pk)
 # buyer claims with the preimage (revealing it for the other chain's leg):
 raw = build_swap_claim(rpc_buyer, desc_ck, txid, vout, secret, buyer_dest)
 # or the seller refunds after the timeout:
@@ -125,17 +128,25 @@ node-native today, and turnkey builders here are follow-up work.
 
 - **Tier B**: coins exist and are bound to one offer; the seller *can*
   settle-or-pull early, but a pull kills the offer visibly (the watcher
-  flags the spent outpoint). Fine for small size; discount accordingly.
+  flags a spend as soon as it reaches the verifier's mempool). A private
+  transaction known only to the seller cannot be detected until broadcast;
+  use well-connected verifier nodes and continuous monitoring. Fine for small
+  size; discount accordingly.
 - **Tier A**: the venue co-key removes unilateral pulls; the venue never
   has custody and at worst delays the seller until the refund height.
   Co-signing uses the node's standard PQ-multisig PSBT flow.
 - **Tier A+**: no third party at all; the covenant fixes the settlement
   destination at bond time. Needs the settlement template known up front
-  (negotiated block trades).
-- **Attestation binding is declared, not derived**: the challenge
-  signature proves the publisher controls `terms.seller_address`, not
-  that this address owns the refund key — the *supply* guarantees come
-  from the UTXO/commitment/descriptor checks, which need no attestation.
+  (negotiated block trades). The verifier requires
+  `terms.ctv_template_hash` to equal the descriptor hash, but callers must
+  still independently inspect the corresponding settlement transaction and
+  confirm that its outputs implement the advertised trade.
+- **Attestation binding is derived**: the signer must control both
+  `terms.seller_address` and the single-key P2MR address calculated from the
+  descriptor's refund key. Before signing, `create_offer` imports that fixed,
+  public `mr(refund_key)` descriptor into the seller wallet; wallet-wide BIP-322
+  signing finds the matching private key even when it originated below another
+  ranged descriptor. Signing and all validation happen before funding.
 - **Confirmations**: MatMul PoW is young; default to `--min-conf 20`
   (~30 min at 90 s blocks) and scale with size.
 - **Long-lived bonds**: consider SLH-DSA keys (`pk_slh(...)` works in

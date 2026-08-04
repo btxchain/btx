@@ -46,7 +46,14 @@ constexpr int CONTENT_ELIMINATION_HEIGHT{101};
 TestOpts ContentEliminationOpts()
 {
     TestOpts opts;
-    opts.extra_args = {"-regtestcontenteliminationheight=101"};
+    // This suite exercises content rules, not the MatMul v4 mining harness.
+    // Keep v4/v4.2 disabled so TestChain100Setup can construct height 101 with
+    // its v3-only block helper; v4 mining itself has dedicated coverage.
+    opts.extra_args = {
+        "-regtestcontenteliminationheight=101",
+        "-regtestmatmulv4height=2147483647",
+        "-regtestbmx4cheight=2147483647",
+    };
     return opts;
 }
 

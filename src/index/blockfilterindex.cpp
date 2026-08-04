@@ -44,6 +44,8 @@ constexpr unsigned int FLTR_FILE_CHUNK_SIZE = 0x100000; // 1 MiB
  *  is big enough for a 2,000,000 length block chain, which
  *  we should be enough until ~2047. */
 constexpr size_t CF_HEADERS_CACHE_MAX_SZ{2000};
+/** Maximum distance that can plausibly be waiting in BlockConnected. */
+constexpr int CF_MAX_BLOCKS_AHEAD_RACE_WAIT{2};
 
 namespace {
 
@@ -111,6 +113,11 @@ BlockFilterIndex::BlockFilterIndex(std::unique_ptr<interfaces::Chain> chain, Blo
 
     m_db = std::make_unique<BaseIndex::DB>(path / "db", n_cache_size, f_memory, f_wipe);
     m_filter_fileseq = std::make_unique<FlatFileSeq>(std::move(path), "fltr", FLTR_FILE_CHUNK_SIZE);
+}
+
+bilingual_str BlockFilterIndex::GetDisableAction() const
+{
+    return strprintf(_("remove \"%s\" from -blockfilterindex"), BlockFilterTypeName(m_filter_type));
 }
 
 bool BlockFilterIndex::CustomInit(const std::optional<interfaces::BlockRef>& block)
@@ -444,7 +451,8 @@ bool BlockFilterIndex::LookupFilter(const CBlockIndex* block_index, BlockFilter&
 {
     DBVal entry;
     if (!LookupOne(*m_db, block_index, entry)) {
-        return false;
+        if (!WaitForRacingWrite(block_index, CF_MAX_BLOCKS_AHEAD_RACE_WAIT)) return false;
+        if (!LookupOne(*m_db, block_index, entry)) return false;
     }
 
     return ReadFilterFromDisk(entry.pos, entry.hash, filter_out);
@@ -452,12 +460,11 @@ bool BlockFilterIndex::LookupFilter(const CBlockIndex* block_index, BlockFilter&
 
 bool BlockFilterIndex::LookupFilterHeader(const CBlockIndex* block_index, uint256& header_out)
 {
-    LOCK(m_cs_headers_cache);
-
-    bool is_checkpoint{block_index->nHeight % CFCHECKPT_INTERVAL == 0};
+    const bool is_checkpoint{block_index->nHeight % CFCHECKPT_INTERVAL == 0};
 
     if (is_checkpoint) {
         // Try to find the block in the headers cache if this is a checkpoint height.
+        LOCK(m_cs_headers_cache);
         auto header = m_headers_cache.find(block_index->GetBlockHash());
         if (header != m_headers_cache.end()) {
             header_out = header->second;
@@ -467,13 +474,16 @@ bool BlockFilterIndex::LookupFilterHeader(const CBlockIndex* block_index, uint25
 
     DBVal entry;
     if (!LookupOne(*m_db, block_index, entry)) {
-        return false;
+        if (!WaitForRacingWrite(block_index, CF_MAX_BLOCKS_AHEAD_RACE_WAIT)) return false;
+        if (!LookupOne(*m_db, block_index, entry)) return false;
     }
 
-    if (is_checkpoint &&
-        m_headers_cache.size() < CF_HEADERS_CACHE_MAX_SZ) {
+    if (is_checkpoint) {
         // Add to the headers cache if this is a checkpoint height.
-        m_headers_cache.emplace(block_index->GetBlockHash(), entry.header);
+        LOCK(m_cs_headers_cache);
+        if (m_headers_cache.size() < CF_HEADERS_CACHE_MAX_SZ) {
+            m_headers_cache.try_emplace(block_index->GetBlockHash(), entry.header);
+        }
     }
 
     header_out = entry.header;
@@ -485,7 +495,9 @@ bool BlockFilterIndex::LookupFilterRange(int start_height, const CBlockIndex* st
 {
     std::vector<DBVal> entries;
     if (!LookupRange(*m_db, m_name, start_height, stop_index, entries)) {
-        return false;
+        if (!WaitForRacingWrite(stop_index, CF_MAX_BLOCKS_AHEAD_RACE_WAIT)) return false;
+        entries.clear();
+        if (!LookupRange(*m_db, m_name, start_height, stop_index, entries)) return false;
     }
 
     filters_out.resize(entries.size());
@@ -506,7 +518,9 @@ bool BlockFilterIndex::LookupFilterHashRange(int start_height, const CBlockIndex
 {
     std::vector<DBVal> entries;
     if (!LookupRange(*m_db, m_name, start_height, stop_index, entries)) {
-        return false;
+        if (!WaitForRacingWrite(stop_index, CF_MAX_BLOCKS_AHEAD_RACE_WAIT)) return false;
+        entries.clear();
+        if (!LookupRange(*m_db, m_name, start_height, stop_index, entries)) return false;
     }
 
     hashes_out.clear();

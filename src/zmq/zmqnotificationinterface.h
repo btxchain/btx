@@ -6,12 +6,14 @@
 #define BITCOIN_ZMQ_ZMQNOTIFICATIONINTERFACE_H
 
 #include <primitives/transaction.h>
+#include <util/result.h>
 #include <validationinterface.h>
 
 #include <cstdint>
 #include <functional>
 #include <list>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include <boost/signals2/connection.hpp>
@@ -28,7 +30,7 @@ public:
 
     std::list<const CZMQAbstractNotifier*> GetActiveNotifiers() const;
 
-    static std::unique_ptr<CZMQNotificationInterface> Create(std::function<bool(std::vector<uint8_t>&, const CBlockIndex&)> get_block_by_index);
+    static util::Result<std::unique_ptr<CZMQNotificationInterface>> Create(std::function<bool(std::vector<uint8_t>&, const CBlockIndex&)> get_block_by_index);
 
 protected:
     bool Initialize();
@@ -48,6 +50,7 @@ private:
 
     void* pcontext{nullptr};
     std::list<std::unique_ptr<CZMQAbstractNotifier>> notifiers;
+    std::string m_fatal_error;
     boost::signals2::connection m_wtx_added_connection;
 };
 

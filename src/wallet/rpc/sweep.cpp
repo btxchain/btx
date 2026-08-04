@@ -123,7 +123,11 @@ RPCHelpMan sweeptoself()
                 LOCK(pwallet->cs_wallet);
                 CoinFilterParams params;
                 params.min_amount = 0;
-                for (const COutput& output : AvailableCoins(*pwallet, &coin_control, coin_control.m_feerate, params).All()) {
+                auto available_coins_res = AvailableCoins(*pwallet, &coin_control, coin_control.m_feerate, params);
+                if (!available_coins_res) {
+                    throw JSONRPCError(RPC_WALLET_ERROR, util::ErrorString(available_coins_res).original);
+                }
+                for (const COutput& output : available_coins_res->All()) {
                     selected_inputs.push_back(output.outpoint);
                     coin_control.Select(output.outpoint);
                     total_input_value += output.txout.nValue;
