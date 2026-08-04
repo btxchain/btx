@@ -50,6 +50,18 @@
       "production_admissible": false
     },
     {
+      "evidence_path": "doc/evidence/multi-gpu-profile1-goldens-2026-08-01/multi-gpu-digest-compare.json",
+      "revision": "42b66394846caea8573e910e41fd9676838562db",
+      "reason": "Historical Metal-only comparison from an unreachable pre-publication source state; retained for diagnostic digest continuity only and not production-authorizing.",
+      "production_admissible": false
+    },
+    {
+      "evidence_path": "doc/evidence/multi-gpu-profile1-goldens-2026-08-01/raw/profile1-metal-8.json",
+      "revision": "42b66394846caea8573e910e41fd9676838562db",
+      "reason": "Historical Metal corpus from an unreachable pre-publication source state; retained for diagnostic digest continuity only and not production-authorizing.",
+      "production_admissible": false
+    },
+    {
       "evidence_path": "doc/evidence/multi-gpu-profile1-goldens-cuda-metal-2026-08-02-final/multi-gpu-digest-compare.json",
       "revision": "a0d441e1f1ab5376cd98b0d7effe1506cf2cfed1",
       "reason": "Superseded CUDA/Metal comparison from an earlier source freeze; retained for diagnostic digest continuity only.",
