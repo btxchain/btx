@@ -238,6 +238,10 @@ without treating the referenced block as invalid.
   required. Such a machine is an archive of block/RPC data, not an independent
   MatMul validator.
 - Back up the archive's blocks/index and protect the online signing key.
+- Pin rehearsals and deployments to reviewed archive/mirror binary SHA256
+  values. The rehearsal also requires an exact source revision, derives its
+  source-tree fingerprint, and rejects an archive canary whose embedded clean
+  build identity differs. A user-supplied revision label alone is not evidence.
 - Use M-of-N independent keys for a production fleet. Mainnet does **not**
   enforce a signer floor: a 1-of-1 mirror starts, with a loud startup warning.
   2 distinct signers with `M >= 2` is strongly recommended, and 2-of-3 is

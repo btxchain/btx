@@ -23,6 +23,14 @@ def load_rehearsal():
     return module
 
 
+def load_lifecycle():
+    spec = importlib.util.spec_from_file_location("cuda_lifecycle", LIFECYCLE)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 class TrustedMirrorToolsTest(unittest.TestCase):
     def test_rehearsal_help_requires_no_deployment_environment(self):
         env = dict(os.environ)
@@ -35,6 +43,11 @@ class TrustedMirrorToolsTest(unittest.TestCase):
             "MIRROR_CLI",
             "SIGNER_WIF_FILE",
             "SIGNER_PUB_FILE",
+            "BTX_SOURCE_REVISION",
+            "ARCHIVE_BTXD_SHA256",
+            "ARCHIVE_CLI_SHA256",
+            "MIRROR_BTXD_SHA256",
+            "MIRROR_CLI_SHA256",
         ):
             env.pop(name, None)
         result = subprocess.run(
@@ -67,6 +80,11 @@ class TrustedMirrorToolsTest(unittest.TestCase):
             for name in ("mirror-btxd", "mirror-cli", "signer-wif", "signer-pub"):
                 paths[name] = root / name
                 paths[name].write_text("test\n", encoding="utf-8")
+            revision = subprocess.run(
+                ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"],
+                capture_output=True, text=True, check=True,
+            ).stdout.strip()
+            binary_hash = module.EVIDENCE_IDENTITY.sha256_file(paths["mirror-btxd"])
             args = module.validate_args(
                 module.build_arg_parser(),
                 module.build_arg_parser().parse_args(
@@ -89,12 +107,23 @@ class TrustedMirrorToolsTest(unittest.TestCase):
                         str(paths["signer-pub"]),
                         "--runtime-root",
                         str(root),
+                        "--source-revision",
+                        revision,
+                        "--archive-btxd-sha256",
+                        "a" * 64,
+                        "--archive-cli-sha256",
+                        "b" * 64,
+                        "--mirror-btxd-sha256",
+                        binary_hash,
+                        "--mirror-cli-sha256",
+                        binary_hash,
                     ]
                 ),
             )
         self.assertEqual(args.archive_host, "gpu-archive.example.invalid")
         self.assertEqual(args.archive_cli, "/opt/btx/bin/btx-cli")
         self.assertEqual(args.mirror_cli.name, "mirror-cli")
+        self.assertEqual(args.source_revision, revision)
 
     def test_extracts_nested_strict_replay_evidence(self):
         module = load_rehearsal()
@@ -125,6 +154,56 @@ class TrustedMirrorToolsTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "backend_runtime"):
             module.extract_strict_replay_evidence({"rc_exact_replay": {}})
 
+    def test_runtime_canary_identity_is_bound(self):
+        module = load_rehearsal()
+        revision = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        fingerprint = module.EVIDENCE_IDENTITY.tree_fingerprint(REPO_ROOT, revision)
+        canary = {
+            "passed": True,
+            "device_macs": 1,
+            "cpu_fallbacks": 0,
+            "build_source_revision": revision,
+            "build_source_tree_fingerprint": fingerprint,
+            "build_source_dirty": False,
+            "build_provenance_matches": True,
+        }
+        rc = {
+            "production_canary": canary,
+            "last_validation": {
+                "available": True,
+                "require_device": True,
+                "fully_accelerated": True,
+                "cpu_gemm_calls": 0,
+                "cpu_gemm_fallbacks": 0,
+                "provider": "cuda_rc_exact_fused_extract",
+            },
+        }
+        module.extract_strict_replay_evidence(
+            {"backend_runtime": {"rc_exact_replay": rc}},
+            expected_revision=revision,
+            expected_fingerprint=fingerprint,
+        )
+        canary["build_source_dirty"] = True
+        with self.assertRaisesRegex(RuntimeError, "build_source_dirty"):
+            module.extract_strict_replay_evidence(
+                {"backend_runtime": {"rc_exact_replay": rc}},
+                expected_revision=revision,
+                expected_fingerprint=fingerprint,
+            )
+
+    def test_binary_hash_mismatch_fails_closed(self):
+        module = load_rehearsal()
+        with tempfile.TemporaryDirectory() as tmp:
+            binary = Path(tmp) / "btxd"
+            binary.write_bytes(b"exact binary bytes")
+            with self.assertRaisesRegex(Exception, "SHA256 mismatch"):
+                module.EVIDENCE_IDENTITY.verify_binary(
+                    binary, "0" * 64, "btxd_sha256"
+                )
+
     def test_rejects_incomplete_validation_schema(self):
         module = load_rehearsal()
         with self.assertRaisesRegex(RuntimeError, "cpu_gemm_fallbacks"):
@@ -147,6 +226,35 @@ class TrustedMirrorToolsTest(unittest.TestCase):
                         }
                     }
                 }
+            )
+
+    def test_lifecycle_binds_runtime_build_identity(self):
+        module = load_lifecycle()
+        revision = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        fingerprint = module.EVIDENCE_IDENTITY.tree_fingerprint(REPO_ROOT, revision)
+        canary = {
+            "build_source_revision": revision,
+            "build_source_tree_fingerprint": fingerprint,
+            "build_source_dirty": False,
+            "build_provenance_matches": True,
+        }
+        actual = module.validate_runtime_build_identity(
+            {"backend_runtime": {"rc_exact_replay": {"production_canary": canary}}},
+            revision=revision,
+            fingerprint=fingerprint,
+            label="miner",
+        )
+        self.assertIs(actual, canary)
+        canary["build_provenance_matches"] = False
+        with self.assertRaisesRegex(Exception, "build_provenance_matches"):
+            module.validate_runtime_build_identity(
+                {"backend_runtime": {"rc_exact_replay": {"production_canary": canary}}},
+                revision=revision,
+                fingerprint=fingerprint,
+                label="miner",
             )
 
 

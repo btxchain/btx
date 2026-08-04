@@ -8,7 +8,7 @@ import hashlib
 import json
 import re
 import subprocess
-from decimal import Decimal, ROUND_HALF_UP, getcontext
+from decimal import Decimal, ROUND_CEILING, getcontext
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +29,9 @@ REQUIRED_PROVIDERS = ("cuda", "metal")
 PROVIDER_PREFIXES = {"cuda": "cuda_", "metal": "metal_"}
 CANONICAL_RC_EPISODE_MACS = 141_149_805_215_744
 UINT64_MAX = (1 << 64) - 1
+COEFFICIENT_POLICY_METHOD = (
+    "max_observed_cross_product_plus_margin_quantized_up_v1"
+)
 FINGERPRINT_PATHS = ("CMakeLists.txt", "cmake", "src", "contrib/matmul-v4")
 FINGERPRINT_EXCLUDE = (
     b"src/matmul/matmul_v4_rc_production_golden_manifest.data",
@@ -97,6 +100,34 @@ def require_nonempty_string(value: Any, field: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise CalibrationError(f"{field} must be a non-empty string")
     return value
+
+
+def validate_coefficient_policy(value: Any) -> dict[str, int | str]:
+    """Validate policy chosen by review/governance, never inferred from timing."""
+    if not isinstance(value, dict):
+        raise CalibrationError("coefficient_policy must be an object")
+    expected_keys = {"method", "safety_margin_bps", "coefficient_quantum"}
+    if set(value) != expected_keys:
+        raise CalibrationError(
+            "coefficient_policy must contain exactly method, safety_margin_bps, "
+            "and coefficient_quantum"
+        )
+    if value.get("method") != COEFFICIENT_POLICY_METHOD:
+        raise CalibrationError("coefficient_policy.method is unsupported")
+    margin = require_int(
+        value.get("safety_margin_bps"),
+        "coefficient_policy.safety_margin_bps",
+    )
+    quantum = require_int(
+        value.get("coefficient_quantum"),
+        "coefficient_policy.coefficient_quantum",
+        minimum=1,
+    )
+    return {
+        "method": COEFFICIENT_POLICY_METHOD,
+        "safety_margin_bps": margin,
+        "coefficient_quantum": quantum,
+    }
 
 
 def require_zero(obj: dict[str, Any], fields: tuple[str, ...], prefix: str) -> None:
@@ -379,6 +410,7 @@ def derive(
     validate_identity(payload, prefix="root", revision=revision, fingerprint=fingerprint)
     if payload.get("consensus_context") != EXPECTED_CONTEXT:
         raise CalibrationError("consensus_context does not match the frozen Epoch-A campaign")
+    coefficient_policy = validate_coefficient_policy(payload.get("coefficient_policy"))
 
     rigs = payload.get("rigs")
     if not isinstance(rigs, list) or not rigs:
@@ -416,6 +448,7 @@ def derive(
             raise CalibrationError(f"{label}.mixed_mode_samples needs at least five runs")
         total_tries = 0
         total_parent_wall = Decimal(0)
+        parent_rates: list[Decimal] = []
         seeds: list[int] = []
         for sample_index, sample in enumerate(parent_samples):
             attempts, wall, seed = validate_parent_sample(
@@ -425,6 +458,7 @@ def derive(
             )
             total_tries += attempts
             total_parent_wall += wall
+            parent_rates.append(Decimal(attempts) / wall)
             seeds.append(seed)
         if len(set(seeds)) != len(seeds):
             raise CalibrationError(f"{label}.mixed_mode_samples contains duplicate seeds")
@@ -465,8 +499,23 @@ def derive(
         total_rc_wall = sum((wall for _, wall in rc_runs), Decimal(0))
         rc_mean_wall = total_rc_wall / Decimal(len(rc_runs))
         parent_attempts_per_s = Decimal(total_tries) / total_parent_wall
-        coefficient_exact = parent_attempts_per_s * rc_mean_wall
-        coefficient = int(coefficient_exact.quantize(Decimal(1), rounding=ROUND_HALF_UP))
+        coefficient_point_estimate = parent_attempts_per_s * rc_mean_wall
+        max_parent_attempts_per_s = max(parent_rates)
+        max_rc_wall_s = max(wall for _, wall in rc_runs)
+        observed_upper_envelope = max_parent_attempts_per_s * max_rc_wall_s
+        margin_adjusted = observed_upper_envelope * (
+            Decimal(10_000 + coefficient_policy["safety_margin_bps"])
+            / Decimal(10_000)
+        )
+        quantum = int(coefficient_policy["coefficient_quantum"])
+        coefficient = (
+            int(
+                (margin_adjusted / Decimal(quantum)).to_integral_value(
+                    rounding=ROUND_CEILING
+                )
+            )
+            * quantum
+        )
         if coefficient <= 0 or coefficient > UINT64_MAX:
             raise CalibrationError(f"{provider}: coefficient is outside uint64 range")
         results.append({
@@ -483,8 +532,13 @@ def derive(
             "parent_attempts_per_s": str(parent_attempts_per_s),
             "total_rc_wall_s": str(total_rc_wall),
             "rc_mean_wall_s": str(rc_mean_wall),
-            "coefficient_exact": str(coefficient_exact),
-            "coefficient_round_half_up": coefficient,
+            "coefficient_point_estimate": str(coefficient_point_estimate),
+            "max_parent_attempts_per_s": str(max_parent_attempts_per_s),
+            "max_rc_wall_s": str(max_rc_wall_s),
+            "observed_upper_envelope": str(observed_upper_envelope),
+            "margin_adjusted_upper_envelope": str(margin_adjusted),
+            "coefficient_quantized_up": coefficient,
+            "quantization_slack": str(Decimal(coefficient) - margin_adjusted),
         })
 
     missing = sorted(set(REQUIRED_PROVIDERS) - seen)
@@ -499,27 +553,29 @@ def derive(
             "required providers did not produce byte-identical RC digests"
         )
 
-    selected = max(results, key=lambda item: item["coefficient_round_half_up"])
+    selected = max(results, key=lambda item: item["coefficient_quantized_up"])
     file_hash = (require_hex(input_file_sha256, HEX64, "input_file_sha256")
                  if input_file_sha256 is not None else None)
     result = {
         "schema_version": ROOT_SCHEMA_VERSION,
         "coefficient_definition": (
-            "C = mixed-mode parent raw nonce attempts per second / "
-            "strict Profile-1 RC episodes per second"
+            "C = max observed mixed-mode parent raw nonce rate * max observed "
+            "strict Profile-1 RC episode wall time, then an explicit reviewed "
+            "margin and upward quantum are applied"
         ),
         "selection_policy": (
-            "maximum required-provider coefficient; under-loosening is the "
-            "asymmetric liveness risk"
+            "maximum quantized required-provider envelope; the tool does not "
+            "choose or imply a statistical confidence level"
         ),
-        "rounding": "decimal ROUND_HALF_UP to a uint64 numerator; denominator is 1",
+        "coefficient_policy": coefficient_policy,
+        "rounding": "decimal ROUND_CEILING to the reviewed positive quantum",
         "required_provider_families": list(REQUIRED_PROVIDERS),
         "source_revision": revision,
         "source_tree_fingerprint": fingerprint,
         "input_payload_sha256": canonical_payload_sha256(payload),
         "providers": results,
         "selected_provider_family": selected["provider_family"],
-        "nMatMulRCAsertRescaleNum": selected["coefficient_round_half_up"],
+        "nMatMulRCAsertRescaleNum": selected["coefficient_quantized_up"],
         "nMatMulRCAsertRescaleDen": 1,
     }
     if file_hash is not None:

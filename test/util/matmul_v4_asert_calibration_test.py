@@ -27,6 +27,11 @@ REVISION = subprocess.run(
 ).stdout.strip()
 FINGERPRINT = MODULE.tree_fingerprint(REPO_ROOT, REVISION)
 MACS = MODULE.CANONICAL_RC_EPISODE_MACS
+POLICY = {
+    "method": MODULE.COEFFICIENT_POLICY_METHOD,
+    "safety_margin_bps": 1000,
+    "coefficient_quantum": 100,
+}
 
 
 def identity() -> dict:
@@ -182,6 +187,7 @@ def payload() -> dict:
         "tool": MODULE.ROOT_TOOL,
         "schema_version": MODULE.ROOT_SCHEMA_VERSION,
         "consensus_context": copy.deepcopy(MODULE.EXPECTED_CONTEXT),
+        "coefficient_policy": copy.deepcopy(POLICY),
         "rigs": [
             rig("cuda", "sm_120", parent_wall=2),
             rig("metal", "m4_class", parent_wall=5),
@@ -205,7 +211,7 @@ class EpochAAsertCalibrationTest(unittest.TestCase):
         value = payload()
         result = self.derive(value, input_hash="e" * 64)
         self.assertEqual(result["selected_provider_family"], "cuda")
-        self.assertEqual(result["nMatMulRCAsertRescaleNum"], 500)
+        self.assertEqual(result["nMatMulRCAsertRescaleNum"], 700)
         self.assertEqual(result["nMatMulRCAsertRescaleDen"], 1)
         self.assertEqual(result["input_file_sha256"], "e" * 64)
         self.assertEqual(
@@ -216,6 +222,36 @@ class EpochAAsertCalibrationTest(unittest.TestCase):
         self.assertEqual(cuda["rc_harness_sha256"], "c" * 64)
         self.assertEqual(cuda["parent_seeds"], [1, 2, 3, 4, 5])
         self.assertEqual(cuda["rc_episode_nonces"], [1, 2, 3])
+        self.assertEqual(cuda["coefficient_point_estimate"], "500")
+        self.assertEqual(cuda["observed_upper_envelope"], "550")
+        self.assertEqual(cuda["coefficient_quantized_up"], 700)
+
+    def test_policy_is_explicit_and_fail_closed(self) -> None:
+        value = payload()
+        del value["coefficient_policy"]
+        self.assert_rejected(value, "coefficient_policy must be an object")
+        for field, replacement in (
+            ("method", "mean_round_half_up"),
+            ("safety_margin_bps", -1),
+            ("coefficient_quantum", 0),
+        ):
+            with self.subTest(field=field):
+                value = payload()
+                value["coefficient_policy"][field] = replacement
+                self.assert_rejected(value, f"coefficient_policy.{field}")
+
+    def test_quantization_is_stable_inside_reviewed_bucket(self) -> None:
+        value = payload()
+        first = self.derive(value)["nMatMulRCAsertRescaleNum"]
+        sample = value["rigs"][0]["rc_episode_samples"][0]
+        sample["frozen_headers"][2]["wall_s"] = "11.5"
+        sample["run_variance"]["episode_wall_samples_s"][2] = "11.5"
+        second = self.derive(value)["nMatMulRCAsertRescaleNum"]
+        self.assertEqual((first, second), (700, 700))
+
+        sample["frozen_headers"][2]["wall_s"] = 13
+        sample["run_variance"]["episode_wall_samples_s"][2] = 13
+        self.assertEqual(self.derive(value)["nMatMulRCAsertRescaleNum"], 800)
 
     def test_legacy_self_asserted_evidence_fails_closed(self) -> None:
         legacy = json.loads(LEGACY_EVIDENCE.read_text(encoding="utf-8"))

@@ -25,8 +25,11 @@ Usage (GPU host, under flock):
 
   contrib/matmul-v4/measure-cuda-lifecycle-campaign.py \\
     --btxd build-cuda/bin/btxd --btx-cli build-cuda/bin/btx-cli \\
+    --source-revision <exact-40-character-commit> \\
+    --btxd-sha256 <reviewed-sha256> --btx-cli-sha256 <reviewed-sha256> \\
     --samples 20 --max-wall-s 5400 --mode production \\
-    --out-dir doc/evidence/cuda-blackwell-16gib-lifecycle-asert-2026-08-01
+    --workdir <temporary-empty-directory> \\
+    --out-json <sanitized-evidence.json>
 """
 
 from __future__ import annotations
@@ -43,10 +46,13 @@ import time
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import evidence_source_identity as EVIDENCE_IDENTITY  # noqa: E402
 
 ACTIVATION_HEIGHT = 6
 V3_BINDING_HEIGHT = 2
 DISABLED_HEIGHT = 2_147_483_647
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def die(msg: str, code: int = 2) -> None:
@@ -391,6 +397,27 @@ def write_status(path: Path | None, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
+def validate_runtime_build_identity(
+    mining_info: object, *, revision: str, fingerprint: str, label: str,
+) -> dict[str, Any]:
+    if not isinstance(mining_info, dict):
+        raise EVIDENCE_IDENTITY.EvidenceIdentityError(
+            f"{label} getmininginfo response must be an object"
+        )
+    runtime = mining_info.get("backend_runtime")
+    rc = runtime.get("rc_exact_replay") if isinstance(runtime, dict) else None
+    canary = rc.get("production_canary") if isinstance(rc, dict) else None
+    if not isinstance(canary, dict):
+        raise EVIDENCE_IDENTITY.EvidenceIdentityError(
+            f"{label} production canary must be an object"
+        )
+    EVIDENCE_IDENTITY.validate_canary_build_identity(
+        canary, revision=revision, fingerprint=fingerprint,
+        prefix=f"{label}.production_canary",
+    )
+    return canary
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--btxd", type=Path, required=True)
@@ -411,7 +438,9 @@ def main() -> int:
         help="Every N complete attempts, briefly mine competing tips on both nodes",
     )
     ap.add_argument("--status-json", type=Path, default=None)
-    ap.add_argument("--source-revision", default=os.environ.get("BTX_SOURCE_REVISION", ""))
+    ap.add_argument("--source-revision", default=os.environ.get("BTX_SOURCE_REVISION"))
+    ap.add_argument("--btxd-sha256", default=os.environ.get("BTXD_SHA256"))
+    ap.add_argument("--btx-cli-sha256", default=os.environ.get("BTXCLI_SHA256"))
     ap.add_argument(
         "--allow-partial",
         action="store_true",
@@ -425,6 +454,25 @@ def main() -> int:
         die(f"btxd not found: {args.btxd}")
     if not args.btx_cli.is_file():
         die(f"btx-cli not found: {args.btx_cli}")
+    try:
+        if not args.source_revision:
+            raise EVIDENCE_IDENTITY.EvidenceIdentityError(
+                "--source-revision (or BTX_SOURCE_REVISION) is required"
+            )
+        args.source_revision = EVIDENCE_IDENTITY.resolve_commit(
+            REPO_ROOT, args.source_revision
+        )
+        source_tree_fingerprint = EVIDENCE_IDENTITY.tree_fingerprint(
+            REPO_ROOT, args.source_revision
+        )
+        btxd_sha256 = EVIDENCE_IDENTITY.verify_binary(
+            args.btxd, args.btxd_sha256, "btxd_sha256"
+        )
+        btx_cli_sha256 = EVIDENCE_IDENTITY.verify_binary(
+            args.btx_cli, args.btx_cli_sha256, "btx_cli_sha256"
+        )
+    except EVIDENCE_IDENTITY.EvidenceIdentityError as error:
+        die(str(error))
 
     env = dict(os.environ)
     env.update(
@@ -494,6 +542,17 @@ def main() -> int:
         status("starting two strict-device CUDA nodes")
         miner.start()
         validator.start()
+        try:
+            validate_runtime_build_identity(
+                miner.cli("getmininginfo"), revision=args.source_revision,
+                fingerprint=source_tree_fingerprint, label="miner",
+            )
+            validate_runtime_build_identity(
+                validator.cli("getmininginfo"), revision=args.source_revision,
+                fingerprint=source_tree_fingerprint, label="validator",
+            )
+        except EVIDENCE_IDENTITY.EvidenceIdentityError as error:
+            die(str(error))
         connect_peers(miner, validator)
         status("nodes up; mining to RC parent")
 
@@ -687,6 +746,11 @@ def main() -> int:
                 "note": "Sanitized machine-class only; no hostname, account, or private path.",
             },
             "source_revision": args.source_revision or None,
+            "source_tree_fingerprint": source_tree_fingerprint,
+            "binary_sha256": {
+                "btxd": btxd_sha256,
+                "btx_cli": btx_cli_sha256,
+            },
             "execution_policy": "strict-device",
             "profile": 1,
             "mode": args.mode,

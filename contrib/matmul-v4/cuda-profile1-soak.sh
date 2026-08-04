@@ -37,6 +37,10 @@ PUBLIC_EVIDENCE_SANITIZER="${ROOT}/contrib/matmul-v4/sanitize-public-evidence.py
 BUILD_DIR="${BTX_BUILD_DIR:-${ROOT}/build-cuda}"
 BTXD="${BTX_BTXD:-${BUILD_DIR}/bin/btxd}"
 BTXCLI="${BTX_BTXCLI:-${BUILD_DIR}/bin/btx-cli}"
+SOURCE_REVISION="${BTX_SOURCE_REVISION:-}"
+SOURCE_TREE_FINGERPRINT="${BTX_SOURCE_TREE_FINGERPRINT:-}"
+BTXD_SHA256="${BTX_BTXD_SHA256:-}"
+BTXCLI_SHA256="${BTX_BTXCLI_SHA256:-}"
 
 DURATION_SECS="${BTX_SOAK_DURATION_SECS:-14400}"   # default 4h
 MINE_INTERVAL_SECS="${BTX_SOAK_MINE_INTERVAL_SECS:-90}"
@@ -99,6 +103,10 @@ Env knobs (defaults shown):
   BTX_SOAK_GPU_LOCK             <temporary-dir>/locks/gpu.lock
   BTX_SOAK_REQUIRE_EXCLUSIVE    1   # flock exclusive gpu.lock or refuse
   BTX_SOAK_KEEP_RUNTIME         1
+  BTX_SOURCE_REVISION           required exact 40-character commit
+  BTX_SOURCE_TREE_FINGERPRINT   required exact source fingerprint
+  BTX_BTXD_SHA256               required reviewed btxd SHA256
+  BTX_BTXCLI_SHA256             required reviewed btx-cli SHA256
 
 Scenarios exercised (one GPU host, two local regtest peers):
   relay            mine on A, wait for B tip match + relay telemetry
@@ -122,6 +130,29 @@ if [[ ! -x "${BTXD}" || ! -x "${BTXCLI}" ]]; then
   echo "error: missing binaries under ${BUILD_DIR}/bin (need btxd + btx-cli)" >&2
   exit 2
 fi
+
+if [[ -z "${SOURCE_REVISION}" || -z "${SOURCE_TREE_FINGERPRINT}" || \
+      -z "${BTXD_SHA256}" || -z "${BTXCLI_SHA256}" ]]; then
+  echo "error: exact source revision, tree fingerprint, and binary SHA256 values are required" >&2
+  exit 2
+fi
+
+python3 - "${ROOT}" "${SOURCE_REVISION}" "${SOURCE_TREE_FINGERPRINT}" \
+  "${BTXD}" "${BTXD_SHA256}" "${BTXCLI}" "${BTXCLI_SHA256}" <<'PY'
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root / "contrib/matmul-v4"))
+import evidence_source_identity as identity
+
+revision = identity.resolve_commit(root, sys.argv[2])
+fingerprint = identity.tree_fingerprint(root, revision)
+if fingerprint != identity.require_hex(sys.argv[3], identity.HEX64, "source_tree_fingerprint"):
+    raise SystemExit("source_tree_fingerprint mismatch")
+identity.verify_binary(Path(sys.argv[4]), sys.argv[5], "btxd_sha256")
+identity.verify_binary(Path(sys.argv[6]), sys.argv[7], "btx_cli_sha256")
+PY
 
 mkdir -p "${LOG_DIR}" "${WORKDIR}" "$(dirname "${STATUS_JSON}")" "$(dirname "${GPU_LOCK}")"
 : >"${METRICS_JSONL}"
@@ -379,6 +410,10 @@ out = {
   "required_backend_satisfied": rt.get("required_backend_satisfied"),
   "resolved_provider": rc.get("resolved_provider"),
   "canary_outcome": canary.get("outcome"),
+  "build_source_revision": canary.get("build_source_revision"),
+  "build_source_tree_fingerprint": canary.get("build_source_tree_fingerprint"),
+  "build_source_dirty": canary.get("build_source_dirty"),
+  "build_provenance_matches": canary.get("build_provenance_matches"),
   "device_architecture": canary.get("device_architecture"),
   "cuda_fallbacks_to_cpu": rt.get("cuda_fallbacks_to_cpu"),
   "authenticated_relay_samples": sched.get("authenticated_relay_samples"),
@@ -397,7 +432,9 @@ PY
   # Toy-dim RC fixtures resolve ExactReplay to the portable cpu_reference
   # provider by design; mining still requires the CUDA active backend.
   # Production-dim soaks additionally require a CUDA ExactReplay provider.
-  METRIC_LINE="${line}" SOAK_MODE="${SOAK_MODE}" python3 <<'PY'
+  METRIC_LINE="${line}" SOAK_MODE="${SOAK_MODE}" \
+    EXPECTED_REVISION="${SOURCE_REVISION}" \
+    EXPECTED_FINGERPRINT="${SOURCE_TREE_FINGERPRINT}" python3 <<'PY'
 import json, os, sys
 m = json.loads(os.environ["METRIC_LINE"])
 mode = os.environ.get("SOAK_MODE", "toy")
@@ -412,6 +449,14 @@ if mode == "production" and "cuda" not in prov:
 fb = m.get("cuda_fallbacks_to_cpu")
 if fb not in (None, 0):
     sys.exit(f"cuda_fallbacks_to_cpu={fb} on node {m.get('node')}")
+if m.get("build_source_revision") != os.environ["EXPECTED_REVISION"]:
+    sys.exit(f"embedded source revision mismatch on node {m.get('node')}")
+if m.get("build_source_tree_fingerprint") != os.environ["EXPECTED_FINGERPRINT"]:
+    sys.exit(f"embedded source fingerprint mismatch on node {m.get('node')}")
+if m.get("build_source_dirty") is not False:
+    sys.exit(f"embedded source is dirty on node {m.get('node')}")
+if m.get("build_provenance_matches") is not True:
+    sys.exit(f"embedded source provenance mismatch on node {m.get('node')}")
 PY
 }
 
@@ -534,9 +579,11 @@ export_counts() {
 write_summary() {
   local status="$1"
   local elapsed="$2"
-  python3 - "${SUMMARY_JSON}" "${status}" "${elapsed}" "${DURATION_SECS}" "$(counts_json)" <<'PY'
+  python3 - "${SUMMARY_JSON}" "${status}" "${elapsed}" "${DURATION_SECS}" \
+    "$(counts_json)" "${SOURCE_REVISION}" "${SOURCE_TREE_FINGERPRINT}" \
+    "${BTXD_SHA256}" "${BTXCLI_SHA256}" <<'PY'
 import json, sys, datetime
-path, status, elapsed, planned, counts_s = sys.argv[1:6]
+path, status, elapsed, planned, counts_s, revision, fingerprint, btxd_sha, cli_sha = sys.argv[1:10]
 counts = json.loads(counts_s)
 payload = {
   "title": "CUDA Profile-1 bounded soak (pre-ratification)",
@@ -545,6 +592,9 @@ payload = {
   "status": status,
   "planned_duration_secs": int(planned),
   "elapsed_secs": int(elapsed),
+  "source_revision": revision,
+  "source_tree_fingerprint": fingerprint,
+  "binary_sha256": {"btxd": btxd_sha, "btx_cli": cli_sha},
   "hardware_class": {
     "os": "Linux x86_64",
     "gpu": "NVIDIA consumer Blackwell-class discrete GPU, 16 GiB VRAM, CC 12.0",

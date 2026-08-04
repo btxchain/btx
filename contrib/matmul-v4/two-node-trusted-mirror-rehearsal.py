@@ -14,6 +14,11 @@ Usage (run on the non-GPU host):
     --archive-cli /path/to/gpu-build/bin/btx-cli \\
     --mirror-btxd /path/to/cpu-build/bin/btxd \\
     --mirror-cli /path/to/cpu-build/bin/btx-cli \\
+    --source-revision <exact-40-character-commit> \\
+    --archive-btxd-sha256 <reviewed-sha256> \\
+    --archive-cli-sha256 <reviewed-sha256> \\
+    --mirror-btxd-sha256 <reviewed-sha256> \\
+    --mirror-cli-sha256 <reviewed-sha256> \\
     --signer-wif-file /secure/path/to/signer.wif \\
     --signer-pub-file /secure/path/to/signer.pub
 
@@ -28,9 +33,13 @@ import os
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import evidence_source_identity as EVIDENCE_IDENTITY  # noqa: E402
 
 ACTIVATION = 6
 DISABLED = 2_147_483_647
@@ -52,6 +61,13 @@ MIRROR_RPC = 19831
 MIRROR_P2P = 19832
 OUT = Path("trusted-mirror-result.json")
 KEEP_ARTIFACTS = False
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SOURCE_REVISION = ""
+SOURCE_TREE_FINGERPRINT = ""
+ARCHIVE_BTXD_SHA256 = ""
+ARCHIVE_CLI_SHA256 = ""
+MIRROR_BTXD_SHA256 = ""
+MIRROR_CLI_SHA256 = ""
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -83,6 +99,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=os.environ.get("BTX_TRUSTED_MIRROR_KEEP_ARTIFACTS") == "1",
     )
+    parser.add_argument(
+        "--source-revision", default=os.environ.get("BTX_SOURCE_REVISION")
+    )
+    for option, env_name in (
+        ("archive-btxd-sha256", "ARCHIVE_BTXD_SHA256"),
+        ("archive-cli-sha256", "ARCHIVE_CLI_SHA256"),
+        ("mirror-btxd-sha256", "MIRROR_BTXD_SHA256"),
+        ("mirror-cli-sha256", "MIRROR_CLI_SHA256"),
+    ):
+        parser.add_argument(f"--{option}", default=os.environ.get(env_name))
     return parser
 
 
@@ -98,6 +124,11 @@ def validate_args(
         ("mirror_cli", "--mirror-cli", "MIRROR_CLI"),
         ("signer_wif_file", "--signer-wif-file", "SIGNER_WIF_FILE"),
         ("signer_pub_file", "--signer-pub-file", "SIGNER_PUB_FILE"),
+        ("source_revision", "--source-revision", "BTX_SOURCE_REVISION"),
+        ("archive_btxd_sha256", "--archive-btxd-sha256", "ARCHIVE_BTXD_SHA256"),
+        ("archive_cli_sha256", "--archive-cli-sha256", "ARCHIVE_CLI_SHA256"),
+        ("mirror_btxd_sha256", "--mirror-btxd-sha256", "MIRROR_BTXD_SHA256"),
+        ("mirror_cli_sha256", "--mirror-cli-sha256", "MIRROR_CLI_SHA256"),
     )
     for name, option, env_name in required:
         if getattr(args, name) in (None, ""):
@@ -113,6 +144,29 @@ def validate_args(
             parser.error(f"{option} is not a file: {path}")
     if not args.runtime_root.is_dir():
         parser.error(f"--runtime-root is not a directory: {args.runtime_root}")
+    try:
+        args.source_revision = EVIDENCE_IDENTITY.resolve_commit(
+            REPO_ROOT, args.source_revision
+        )
+        args.source_tree_fingerprint = EVIDENCE_IDENTITY.tree_fingerprint(
+            REPO_ROOT, args.source_revision
+        )
+        EVIDENCE_IDENTITY.verify_binary(
+            args.mirror_btxd, args.mirror_btxd_sha256, "mirror_btxd_sha256"
+        )
+        EVIDENCE_IDENTITY.verify_binary(
+            args.mirror_cli, args.mirror_cli_sha256, "mirror_cli_sha256"
+        )
+        EVIDENCE_IDENTITY.require_hex(
+            args.archive_btxd_sha256, EVIDENCE_IDENTITY.HEX64,
+            "archive_btxd_sha256",
+        )
+        EVIDENCE_IDENTITY.require_hex(
+            args.archive_cli_sha256, EVIDENCE_IDENTITY.HEX64,
+            "archive_cli_sha256",
+        )
+    except EVIDENCE_IDENTITY.EvidenceIdentityError as error:
+        parser.error(str(error))
     return args
 
 
@@ -136,6 +190,20 @@ def sh_remote(remote_cmd: str, timeout: int = 120, input_text: str | None = None
         timeout=timeout,
     )
     return r.stdout.strip()
+
+
+def remote_sha256(path: str) -> str:
+    quoted = shlex.quote(path)
+    command = (
+        f"if command -v sha256sum >/dev/null 2>&1; then sha256sum -- {quoted}; "
+        f"elif command -v shasum >/dev/null 2>&1; then shasum -a 256 -- {quoted}; "
+        "else exit 127; fi"
+    )
+    output = sh_remote(command)
+    digest = output.split(maxsplit=1)[0] if output else ""
+    return EVIDENCE_IDENTITY.require_hex(
+        digest, EVIDENCE_IDENTITY.HEX64, "remote_binary_sha256"
+    )
 
 
 def mirror_rpc(*args: str, timeout: int = 120):
@@ -219,7 +287,10 @@ def _require_object(parent: dict, key: str, path: str) -> dict:
     return value
 
 
-def extract_strict_replay_evidence(mining_info: object) -> tuple[dict, dict, dict]:
+def extract_strict_replay_evidence(
+    mining_info: object, *, expected_revision: str | None = None,
+    expected_fingerprint: str | None = None,
+) -> tuple[dict, dict, dict]:
     """Return and validate the strict-replay evidence exposed by getmininginfo."""
     if not isinstance(mining_info, dict):
         raise RuntimeError("getmininginfo schema error: response must be an object")
@@ -251,6 +322,18 @@ def extract_strict_replay_evidence(mining_info: object) -> tuple[dict, dict, dic
         raise RuntimeError(
             "getmininginfo schema error: last_validation.provider must be a non-empty string"
         )
+    if (expected_revision is None) != (expected_fingerprint is None):
+        raise RuntimeError("source revision and fingerprint must be supplied together")
+    if expected_revision is not None and expected_fingerprint is not None:
+        try:
+            EVIDENCE_IDENTITY.validate_canary_build_identity(
+                canary,
+                revision=expected_revision,
+                fingerprint=expected_fingerprint,
+                prefix="production_canary",
+            )
+        except EVIDENCE_IDENTITY.EvidenceIdentityError as error:
+            raise RuntimeError(f"getmininginfo provenance error: {error}") from error
     return rc, canary, validation
 
 
@@ -258,6 +341,9 @@ def main(argv: list[str] | None = None) -> None:
     global ARCHIVE_DD, ARCHIVE_HOST, ARCHIVE_USER, ARCHIVE_BTXD, ARCHIVE_CLI
     global MIRROR_BTXD, MIRROR_CLI, SIGNER_WIF_FILE, SIGNER_PUB
     global RUNTIME_ROOT, MIRROR_DD, OUT, KEEP_ARTIFACTS
+    global SOURCE_REVISION, SOURCE_TREE_FINGERPRINT
+    global ARCHIVE_BTXD_SHA256, ARCHIVE_CLI_SHA256
+    global MIRROR_BTXD_SHA256, MIRROR_CLI_SHA256
 
     parser = build_arg_parser()
     args = validate_args(parser, parser.parse_args(argv))
@@ -274,6 +360,19 @@ def main(argv: list[str] | None = None) -> None:
     RUNTIME_ROOT = args.runtime_root
     OUT = args.out
     KEEP_ARTIFACTS = args.keep_artifacts
+    SOURCE_REVISION = args.source_revision
+    SOURCE_TREE_FINGERPRINT = args.source_tree_fingerprint
+    ARCHIVE_BTXD_SHA256 = args.archive_btxd_sha256
+    ARCHIVE_CLI_SHA256 = args.archive_cli_sha256
+    MIRROR_BTXD_SHA256 = args.mirror_btxd_sha256
+    MIRROR_CLI_SHA256 = args.mirror_cli_sha256
+    try:
+        if remote_sha256(ARCHIVE_BTXD) != ARCHIVE_BTXD_SHA256:
+            parser.error("archive btxd SHA256 does not match --archive-btxd-sha256")
+        if remote_sha256(ARCHIVE_CLI) != ARCHIVE_CLI_SHA256:
+            parser.error("archive btx-cli SHA256 does not match --archive-cli-sha256")
+    except (subprocess.SubprocessError, EVIDENCE_IDENTITY.EvidenceIdentityError) as error:
+        parser.error(f"cannot verify archive binary identity: {error}")
     MIRROR_DD = Path(
         tempfile.mkdtemp(prefix="btx-trusted-mirror-", dir=RUNTIME_ROOT)
     )
@@ -435,7 +534,9 @@ connect=127.0.0.1:{ARCHIVE_P2P}
 
         trusted = mirror_rpc("getmatmultrustedstatus")
         archive_rc, canary, validation = extract_strict_replay_evidence(
-            archive_rpc("getmininginfo")
+            archive_rpc("getmininginfo"),
+            expected_revision=SOURCE_REVISION,
+            expected_fingerprint=SOURCE_TREE_FINGERPRINT,
         )
         if not (
             canary.get("passed")
@@ -452,6 +553,14 @@ connect=127.0.0.1:{ARCHIVE_P2P}
             "ok": True,
             "archive_host_class": "cuda_gpu_exactreplay_archive",
             "mirror_host_class": "cpu_trusted_mirror",
+            "source_revision": SOURCE_REVISION,
+            "source_tree_fingerprint": SOURCE_TREE_FINGERPRINT,
+            "binary_sha256": {
+                "archive_btxd": ARCHIVE_BTXD_SHA256,
+                "archive_btx_cli": ARCHIVE_CLI_SHA256,
+                "mirror_btxd": MIRROR_BTXD_SHA256,
+                "mirror_btx_cli": MIRROR_CLI_SHA256,
+            },
             "p2p_path": "ssh_local_forward",
             "activation_height": ACTIVATION,
             "archive_tip": tip,

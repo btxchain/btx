@@ -26,6 +26,7 @@ REVISION = subprocess.run(
 ).stdout.strip()
 FINGERPRINT = DERIVE.tree_fingerprint(REPO_ROOT, REVISION)
 MACS = DERIVE.CANONICAL_RC_EPISODE_MACS
+POLICY_KW = {"safety_margin_bps": 1000, "coefficient_quantum": 100}
 
 
 def identity() -> dict:
@@ -205,6 +206,7 @@ class EpochAAsertAssemblyTest(unittest.TestCase):
             [metal, cuda],
             expected_revision=REVISION,
             expected_fingerprint=FINGERPRINT,
+            **POLICY_KW,
         )
         self.assertEqual(root["tool"], DERIVE.ROOT_TOOL)
         self.assertEqual(root["schema_version"], 3)
@@ -292,6 +294,7 @@ class EpochAAsertAssemblyTest(unittest.TestCase):
                 [cuda, metal],
                 expected_revision=REVISION,
                 expected_fingerprint=FINGERPRINT,
+                **POLICY_KW,
             ),
             "same parent seed set",
         )
@@ -304,6 +307,7 @@ class EpochAAsertAssemblyTest(unittest.TestCase):
                 [cuda, metal],
                 expected_revision=REVISION,
                 expected_fingerprint=FINGERPRINT,
+                **POLICY_KW,
             ),
             "same RC nonce set",
         )
@@ -319,6 +323,7 @@ class EpochAAsertAssemblyTest(unittest.TestCase):
                 [cuda, metal],
                 expected_revision=REVISION,
                 expected_fingerprint=FINGERPRINT,
+                **POLICY_KW,
             ),
             "byte-identical RC digests",
         )
@@ -329,6 +334,7 @@ class EpochAAsertAssemblyTest(unittest.TestCase):
             lambda: MODULE.merge_rigs(
                 [cuda], expected_revision=REVISION,
                 expected_fingerprint=FINGERPRINT,
+                **POLICY_KW,
             ),
             "exactly two",
         )
@@ -336,6 +342,7 @@ class EpochAAsertAssemblyTest(unittest.TestCase):
             lambda: MODULE.merge_rigs(
                 [cuda, copy.deepcopy(cuda)], expected_revision=REVISION,
                 expected_fingerprint=FINGERPRINT,
+                **POLICY_KW,
             ),
             "exactly one CUDA and one Metal",
         )

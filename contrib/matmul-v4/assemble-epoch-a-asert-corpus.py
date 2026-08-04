@@ -307,7 +307,8 @@ def _derive_rig(rig: dict[str, Any]) -> dict[str, Any]:
 
 def merge_rigs(
     rigs: list[dict[str, Any]], *, expected_revision: str,
-    expected_fingerprint: str,
+    expected_fingerprint: str, safety_margin_bps: int,
+    coefficient_quantum: int,
 ) -> dict[str, Any]:
     """Revalidate exactly one CUDA and one Metal rig and emit derive input."""
     if len(rigs) != 2:
@@ -376,6 +377,11 @@ def merge_rigs(
         "embedded_source_revision": revision,
         "embedded_source_dirty": False,
         "consensus_context": copy.deepcopy(DERIVE.EXPECTED_CONTEXT),
+        "coefficient_policy": DERIVE.validate_coefficient_policy({
+            "method": DERIVE.COEFFICIENT_POLICY_METHOD,
+            "safety_margin_bps": safety_margin_bps,
+            "coefficient_quantum": coefficient_quantum,
+        }),
         "rigs": [_derive_rig(rig) for rig in ordered],
     }
     # The assembler and the consumer are intentionally coupled: never emit an
@@ -420,6 +426,14 @@ def main() -> int:
 
     merge_parser = subparsers.add_parser("merge", help="merge exact CUDA+Metal rigs")
     merge_parser.add_argument("--source-revision", required=True)
+    merge_parser.add_argument(
+        "--safety-margin-bps", type=DERIVE.parse_uint64, required=True,
+        help="reviewed non-negative governance margin in basis points",
+    )
+    merge_parser.add_argument(
+        "--coefficient-quantum", type=DERIVE.parse_uint64, required=True,
+        help="reviewed positive numerator quantum used for upward rounding",
+    )
     merge_parser.add_argument("--rig", action="append", type=Path, required=True)
     merge_parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
@@ -440,6 +454,8 @@ def main() -> int:
                 [_read_object(path) for path in args.rig],
                 expected_revision=revision,
                 expected_fingerprint=fingerprint,
+                safety_margin_bps=args.safety_margin_bps,
+                coefficient_quantum=args.coefficient_quantum,
             )
         _write_object(args.output, result)
     except (AssemblyError, DERIVE.CalibrationError) as error:

@@ -9,6 +9,8 @@ Does not clear roadmap §4 gate 7.
 - [ ] Status `daemon` / `goldens` / `hwcampaign` / `lifecycle` all `done`
 - [ ] `flock` can acquire `/tmp/btx-pr97-campaigns/locks/gpu.lock`
 - [ ] `build-cuda/bin/btxd` and `btx-cli` executable
+- [ ] Exact clean source revision and source-tree fingerprint recorded
+- [ ] Reviewed SHA256 values supplied for the exact `btxd` and `btx-cli`
 - [ ] Evidence stub exists: `doc/evidence/cuda-blackwell-16gib-soak-2026-08-01/README.md`
 - [ ] Log dir created: `/tmp/btx-pr97-campaigns/logs/soak/`
 
@@ -16,6 +18,7 @@ Does not clear roadmap §4 gate 7.
 
 - [ ] Cross RC height once; both nodes share tip
 - [ ] Periodic relay mines; tips match; `getmininginfo` CUDA provider
+- [ ] Both canaries report the required clean embedded revision/fingerprint
 - [ ] Competing branch: disconnect → divergent tips → reconnect → converge
 - [ ] Restart node B; CUDA canary/provider still CUDA; tip catch-up
 - [ ] Cache persistence: mine after restart without CPU GEMM fallback

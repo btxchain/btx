@@ -94,6 +94,17 @@ larger required-provider result because under-loosening is the asymmetric
 liveness risk. On this historical corpus that yields **`6898853852/1`** from CUDA; the
 corresponding Metal result is `1155482264/1`.
 
+The release derivation deliberately does **not** try to reproduce one exact
+floating-point timing result after the coefficient itself changes the source
+fingerprint. Instead, for each required provider it takes the maximum observed
+raw parent attempt rate and maximum observed RC wall time, forms their cross
+product, applies an explicitly reviewed safety margin, and rounds upward to an
+explicitly reviewed coefficient quantum. It then chooses the larger provider
+result. The margin and quantum are governance inputs: the tool requires them
+and records them, but does not choose them. The measured sample counts do not
+justify a statistical confidence claim, so the policy is described as an
+observed upper envelope plus reviewed margin, not as a confidence interval.
+
 The current tool additionally requires schema-2 raw samples from clean binaries
 that embed one exact revision/fingerprint, explicit required-backend selection,
 and zero CPU fallbacks. It derives RC mean wall time from individual runs rather
@@ -139,6 +150,8 @@ be rerun against the exact final binaries before the activation-height commit.
   ```bash
   python3 contrib/matmul-v4/assemble-epoch-a-asert-corpus.py merge \
     --source-revision <exact-final-40-character-revision> \
+    --safety-margin-bps <reviewed-basis-points> \
+    --coefficient-quantum <reviewed-positive-quantum> \
     --rig <cuda-rig.json> \
     --rig <metal-rig.json> \
     --output <two-rig-v3-vs-rc-schema3.json>
@@ -152,6 +165,10 @@ be rerun against the exact final binaries before the activation-height commit.
 
 The legacy schema-1 file in `raw/` is retained only to document the earlier
 measurement and is expected to fail this command.
+
+Changing either reviewed policy input changes the canonical schema-3 corpus.
+The selected inputs and the resulting coefficient must therefore be reviewed
+with the activation tuple; they must not be silently inferred from one run.
 
 Machine-class and provider capability data only: no hostname, account name,
 filesystem path, device serial, network address, or credential.
