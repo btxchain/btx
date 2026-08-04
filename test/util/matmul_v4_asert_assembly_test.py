@@ -9,6 +9,7 @@ import json
 import subprocess
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -192,7 +193,6 @@ class EpochAAsertAssemblyTest(unittest.TestCase):
 
     def test_success_is_sanitized_and_accepted_by_deriver(self) -> None:
         cuda = build_rig("cuda", "sm_120")
-        metal = build_rig("metal", "m4_class")
         self.assertNotIn("untrusted_local_path", cuda["mixed_mode_samples"][0])
         self.assertNotIn(
             "untrusted_note", cuda["rc_episode_samples"][0]["run_variance"]
@@ -203,7 +203,7 @@ class EpochAAsertAssemblyTest(unittest.TestCase):
         )
         self.assertNotIn("/not/published", json.dumps(cuda, sort_keys=True))
         root = MODULE.merge_rigs(
-            [metal, cuda],
+            [cuda],
             expected_revision=REVISION,
             expected_fingerprint=FINGERPRINT,
             **POLICY_KW,
@@ -212,7 +212,7 @@ class EpochAAsertAssemblyTest(unittest.TestCase):
         self.assertEqual(root["schema_version"], DERIVE.ROOT_SCHEMA_VERSION)
         self.assertEqual(root["consensus_context"], DERIVE.EXPECTED_CONTEXT)
         self.assertEqual(
-            [rig["provider_family"] for rig in root["rigs"]], ["cuda", "metal"]
+            [rig["provider_family"] for rig in root["rigs"]], ["cuda"]
         )
         result = DERIVE.derive(
             root,
@@ -287,65 +287,69 @@ class EpochAAsertAssemblyTest(unittest.TestCase):
         )
 
     def test_cross_provider_seed_mismatch_fails_closed(self) -> None:
-        cuda = build_rig("cuda", "sm_120")
-        metal = build_rig("metal", "m4_class", seeds=(2, 3, 4, 5, 6))
-        self.assert_rejected(
-            lambda: MODULE.merge_rigs(
-                [cuda, metal],
-                expected_revision=REVISION,
-                expected_fingerprint=FINGERPRINT,
-                **POLICY_KW,
-            ),
-            "same parent seed set",
-        )
+        with mock.patch.object(DERIVE, "REQUIRED_PROVIDERS", ("cuda", "metal")):
+            cuda = build_rig("cuda", "sm_120")
+            metal = build_rig("metal", "m4_class", seeds=(2, 3, 4, 5, 6))
+            self.assert_rejected(
+                lambda: MODULE.merge_rigs(
+                    [cuda, metal],
+                    expected_revision=REVISION,
+                    expected_fingerprint=FINGERPRINT,
+                    **POLICY_KW,
+                ),
+                "same parent seed set",
+            )
 
     def test_cross_provider_nonce_mismatch_fails_closed(self) -> None:
-        cuda = build_rig("cuda", "sm_120")
-        metal = build_rig("metal", "m4_class", nonces=(2, 3, 4))
-        self.assert_rejected(
-            lambda: MODULE.merge_rigs(
-                [cuda, metal],
-                expected_revision=REVISION,
-                expected_fingerprint=FINGERPRINT,
-                **POLICY_KW,
-            ),
-            "same RC nonce set",
-        )
+        with mock.patch.object(DERIVE, "REQUIRED_PROVIDERS", ("cuda", "metal")):
+            cuda = build_rig("cuda", "sm_120")
+            metal = build_rig("metal", "m4_class", nonces=(2, 3, 4))
+            self.assert_rejected(
+                lambda: MODULE.merge_rigs(
+                    [cuda, metal],
+                    expected_revision=REVISION,
+                    expected_fingerprint=FINGERPRINT,
+                    **POLICY_KW,
+                ),
+                "same RC nonce set",
+            )
 
     def test_cross_provider_digest_mismatch_fails_closed(self) -> None:
-        cuda = build_rig("cuda", "sm_120")
-        metal = build_rig("metal", "m4_class")
-        metal["rc_episode_samples"][0]["frozen_headers"][0][
-            "exact_replay_digest"
-        ] = "f" * 64
-        self.assert_rejected(
-            lambda: MODULE.merge_rigs(
-                [cuda, metal],
-                expected_revision=REVISION,
-                expected_fingerprint=FINGERPRINT,
-                **POLICY_KW,
-            ),
-            "byte-identical RC digests",
-        )
+        with mock.patch.object(DERIVE, "REQUIRED_PROVIDERS", ("cuda", "metal")):
+            cuda = build_rig("cuda", "sm_120")
+            metal = build_rig("metal", "m4_class")
+            metal["rc_episode_samples"][0]["frozen_headers"][0][
+                "exact_replay_digest"
+            ] = "f" * 64
+            self.assert_rejected(
+                lambda: MODULE.merge_rigs(
+                    [cuda, metal],
+                    expected_revision=REVISION,
+                    expected_fingerprint=FINGERPRINT,
+                    **POLICY_KW,
+                ),
+                "byte-identical RC digests",
+            )
 
-    def test_merge_requires_exact_cuda_and_metal(self) -> None:
+    def test_merge_requires_exact_policy_cohort(self) -> None:
         cuda = build_rig("cuda", "sm_120")
         self.assert_rejected(
             lambda: MODULE.merge_rigs(
-                [cuda], expected_revision=REVISION,
+                [], expected_revision=REVISION,
                 expected_fingerprint=FINGERPRINT,
                 **POLICY_KW,
             ),
-            "exactly two",
+            "one rig JSON object per required provider",
         )
-        self.assert_rejected(
-            lambda: MODULE.merge_rigs(
-                [cuda, copy.deepcopy(cuda)], expected_revision=REVISION,
-                expected_fingerprint=FINGERPRINT,
-                **POLICY_KW,
-            ),
-            "exactly one CUDA and one Metal",
-        )
+        with mock.patch.object(DERIVE, "REQUIRED_PROVIDERS", ("cuda", "metal")):
+            self.assert_rejected(
+                lambda: MODULE.merge_rigs(
+                    [cuda, copy.deepcopy(cuda)], expected_revision=REVISION,
+                    expected_fingerprint=FINGERPRINT,
+                    **POLICY_KW,
+                ),
+                "exactly one CUDA and one Metal",
+            )
 
 
 if __name__ == "__main__":

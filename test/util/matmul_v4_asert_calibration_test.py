@@ -9,6 +9,7 @@ import json
 import subprocess
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -188,17 +189,17 @@ def rig(provider: str, architecture: str, *, parent_wall: int) -> dict:
     }
 
 
-def payload() -> dict:
+def payload(*, include_metal: bool = False) -> dict:
+    rigs = [rig("cuda", "sm_120", parent_wall=2)]
+    if include_metal:
+        rigs.append(rig("metal", "m4_class", parent_wall=5))
     return {
         **identity(),
         "tool": MODULE.ROOT_TOOL,
         "schema_version": MODULE.ROOT_SCHEMA_VERSION,
         "consensus_context": copy.deepcopy(MODULE.EXPECTED_CONTEXT),
         "coefficient_policy": copy.deepcopy(POLICY),
-        "rigs": [
-            rig("cuda", "sm_120", parent_wall=2),
-            rig("metal", "m4_class", parent_wall=5),
-        ],
+        "rigs": rigs,
     }
 
 
@@ -267,9 +268,10 @@ class EpochAAsertCalibrationTest(unittest.TestCase):
         self.assertEqual(self.derive(value)["nMatMulRCAsertRescaleNum"], 550)
 
     def test_equal_provider_coefficients_have_stable_selection(self) -> None:
-        value = payload()
+        value = payload(include_metal=True)
         value["rigs"][1] = rig("metal", "m4_class", parent_wall=2)
-        result = self.derive(value)
+        with mock.patch.object(MODULE, "REQUIRED_PROVIDERS", ("cuda", "metal")):
+            result = self.derive(value)
         self.assertEqual(
             result["providers"][0]["coefficient_quantized_up"],
             result["providers"][1]["coefficient_quantized_up"],
@@ -282,8 +284,8 @@ class EpochAAsertCalibrationTest(unittest.TestCase):
 
     def test_missing_required_provider_fails_closed(self) -> None:
         value = payload()
-        value["rigs"] = [value["rigs"][0]]
-        self.assert_rejected(value, "missing required providers")
+        with mock.patch.object(MODULE, "REQUIRED_PROVIDERS", ("cuda", "metal")):
+            self.assert_rejected(value, "missing required providers")
 
     def test_duplicate_provider_fails_closed(self) -> None:
         value = payload()
@@ -357,9 +359,10 @@ class EpochAAsertCalibrationTest(unittest.TestCase):
         value = payload()
         value["rigs"][0]["mixed_mode_samples"][1]["seed"] = 1
         self.assert_rejected(value, "duplicate seeds")
-        value = payload()
+        value = payload(include_metal=True)
         value["rigs"][1]["mixed_mode_samples"][0]["seed"] = 100
-        self.assert_rejected(value, "same parent seed set")
+        with mock.patch.object(MODULE, "REQUIRED_PROVIDERS", ("cuda", "metal")):
+            self.assert_rejected(value, "same parent seed set")
 
     def test_rc_harness_hash_and_provider_are_bound(self) -> None:
         value = payload()
@@ -414,16 +417,18 @@ class EpochAAsertCalibrationTest(unittest.TestCase):
         value = payload()
         value["rigs"][0]["rc_episode_samples"][0]["frozen_headers"][1]["header_nonce"] = 1
         self.assert_rejected(value, "duplicate nonces")
-        value = payload()
+        value = payload(include_metal=True)
         value["rigs"][1]["rc_episode_samples"][0]["frozen_headers"][0]["header_nonce"] = 100
-        self.assert_rejected(value, "same RC nonce set")
+        with mock.patch.object(MODULE, "REQUIRED_PROVIDERS", ("cuda", "metal")):
+            self.assert_rejected(value, "same RC nonce set")
 
     def test_cross_provider_rc_digest_mismatch_fails_closed(self) -> None:
-        value = payload()
+        value = payload(include_metal=True)
         value["rigs"][1]["rc_episode_samples"][0]["frozen_headers"][0][
             "exact_replay_digest"
         ] = "f" * 64
-        self.assert_rejected(value, "byte-identical RC digests")
+        with mock.patch.object(MODULE, "REQUIRED_PROVIDERS", ("cuda", "metal")):
+            self.assert_rejected(value, "byte-identical RC digests")
 
     def test_at_least_three_rc_runs_are_required(self) -> None:
         value = payload()
