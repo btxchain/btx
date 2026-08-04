@@ -141,13 +141,12 @@ static constexpr int32_t BTX_MATMUL_V47_EPOCH_A_HEIGHT{185'000};
 // mainnet); when a network sets a BMX4C activation height these MUST hold, so a
 // misconfiguration fails loudly at node startup rather than at the fork.
 //
-// These use Assert(), not assert(). Release builds compile with -DNDEBUG, under
-// which every plain assert() expression is discarded -- so the entire
-// fail-closed property this function documents was absent from exactly the
-// binaries it exists to protect, and present only in debug builds where a
-// malformed tuple cannot reach a fork anyway. Assert() is the always-on fatal
-// check (util/check.h); its documentation names it as the one to use for fatal
-// errors. Do not "simplify" these back to lowercase assert.
+// These use Assert() to express that every failure is fatal and to retain the
+// project's structured internal-error diagnostic. Supported CMake builds
+// already remove -DNDEBUG, and util/check.h rejects C++ builds that define it,
+// so the earlier lowercase assert() expressions were evaluated in supported
+// Release builds too. This conversion makes the intended primitive explicit;
+// it does not imply that supported releases previously skipped these checks.
 static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus, bool is_regtest)
 {
     // Audit P1-1 (per-network relay invariant): the enforced block-size ceiling
