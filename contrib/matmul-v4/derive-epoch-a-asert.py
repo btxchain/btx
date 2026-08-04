@@ -259,8 +259,8 @@ def validate_parent_sample(
         sample.get("gpu_input_generation_successes"),
         f"{label}.gpu_input_generation_successes",
     )
-    if gpu_successes > gpu_attempts:
-        raise CalibrationError(f"{label} has impossible GPU-input accounting")
+    if gpu_successes != gpu_attempts:
+        raise CalibrationError(f"{label} has incomplete GPU-input accounting")
     return attempts, wall, seed
 
 
@@ -388,6 +388,7 @@ def derive(
     seen: set[str] = set()
     seed_sets: dict[str, tuple[int, ...]] = {}
     nonce_sets: dict[str, tuple[int, ...]] = {}
+    digest_maps: dict[str, tuple[tuple[int, str], ...]] = {}
     for index, rig in enumerate(rigs):
         if not isinstance(rig, dict):
             raise CalibrationError(f"rigs[{index}] must be an object")
@@ -446,6 +447,20 @@ def derive(
         if len(set(nonces)) != len(nonces):
             raise CalibrationError(f"{label}.rc_episode_samples contains duplicate nonces")
         nonce_sets[provider] = tuple(sorted(nonces))
+        digest_maps[provider] = tuple(sorted(
+            (
+                require_int(
+                    header.get("header_nonce"),
+                    f"{label}.rc_episode_samples[{sample_index}].header_nonce",
+                ),
+                require_hex(
+                    header.get("exact_replay_digest"), HEX64,
+                    f"{label}.rc_episode_samples[{sample_index}].exact_replay_digest",
+                ),
+            )
+            for sample_index, sample in enumerate(rc_artifacts)
+            for header in sample["frozen_headers"]
+        ))
 
         total_rc_wall = sum((wall for _, wall in rc_runs), Decimal(0))
         rc_mean_wall = total_rc_wall / Decimal(len(rc_runs))
@@ -479,6 +494,10 @@ def derive(
         raise CalibrationError("required providers did not measure the same parent seed set")
     if len(set(nonce_sets.values())) != 1:
         raise CalibrationError("required providers did not measure the same RC nonce set")
+    if len(set(digest_maps.values())) != 1:
+        raise CalibrationError(
+            "required providers did not produce byte-identical RC digests"
+        )
 
     selected = max(results, key=lambda item: item["coefficient_round_half_up"])
     file_hash = (require_hex(input_file_sha256, HEX64, "input_file_sha256")

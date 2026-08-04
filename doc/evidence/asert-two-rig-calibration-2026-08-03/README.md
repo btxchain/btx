@@ -116,11 +116,37 @@ be rerun against the exact final binaries before the activation-height commit.
 ## Artifacts
 
 - `raw/two-rig-v3-vs-rc.json` — raw samples and derived values for both rigs.
-- A final schema-2 corpus will produce `derived/asert-coefficient.json` with:
+- The exact-final campaign first creates one sanitized rig artifact per
+  provider from at least five schema-3 mixed-parent samples and one or more
+  schema-2 RC artifacts:
 
   ```bash
-  python3 contrib/matmul-v4/derive-epoch-a-asert.py \
+  python3 contrib/matmul-v4/assemble-epoch-a-asert-corpus.py rig \
+    --provider metal \
     --source-revision <exact-final-40-character-revision> \
+    --parent-sample <sample-1.json> \
+    --parent-sample <sample-2.json> \
+    --parent-sample <sample-3.json> \
+    --parent-sample <sample-4.json> \
+    --parent-sample <sample-5.json> \
+    --rc-artifact <profile1-metal-8.json> \
+    --output <metal-rig.json>
+  ```
+
+  Repeat for CUDA with the same parent seed set and RC nonce set. Then assemble
+  the strict schema-3 two-provider corpus and derive the coefficient:
+
+  ```bash
+  python3 contrib/matmul-v4/assemble-epoch-a-asert-corpus.py merge \
+    --source-revision <exact-final-40-character-revision> \
+    --rig <cuda-rig.json> \
+    --rig <metal-rig.json> \
+    --output <two-rig-v3-vs-rc-schema3.json>
+
+  python3 contrib/matmul-v4/derive-epoch-a-asert.py \
+    --input <two-rig-v3-vs-rc-schema3.json> \
+    --source-revision <exact-final-40-character-revision> \
+    --output <asert-coefficient.json> \
     --expected-coefficient <candidate-coefficient>
   ```
 

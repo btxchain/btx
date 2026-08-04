@@ -5,9 +5,10 @@ BTX version 0.33.2 is being prepared for release from:
 This release candidate carries the MatMul v4.7 Profile 1 ExactReplay
 implementation, its resource-admission and GPU-lifecycle hardening, and an
 explicit trusted-attestation topology for same-operator RPC/archive mirrors.
-It does **not** yet authorize the Epoch-A hard fork. Exact-final CUDA+Metal
-evidence, a reviewed ASERT calibration, ratification, and selection of a live
-mainnet activation height remain NO-GO gates.
+The source currently contains a finite candidate Epoch-A tuple, so merging it
+would authorize that fork at the compiled height. It must not be merged or
+released until exact-final CUDA+Metal evidence, the revision-bound ASERT
+calibration, and a live-tip runway check all pass for that exact tuple.
 
 Please report bugs using the issue tracker at GitHub:
 
@@ -24,12 +25,13 @@ cleanly, wait for it to exit, and replace its `btxd`, `btx-cli`, and related
 binaries with signed final release artifacts. Back up wallets and
 configuration before upgrading. Do not install unpublished candidate assets.
 
-The final v0.33.2 activation patch must set the v4, BMX4C, and Resident
-Curriculum heights to one live `H_A`, install the independently reviewed
-exact-final RC ASERT rescale, and flip both ratification constants in the same
-reviewed change. Until that change is complete, any finite height or
-coefficient visible on this development branch is provisional and must not be
-treated as network authorization. Testnet and signet heights remain disabled.
+The final v0.33.2 source freeze must set the v4, BMX4C, and Resident Curriculum
+heights to one live `H_A`, install the independently reviewed exact-final RC
+ASERT rescale, and set both ratification constants in the same reviewed tuple.
+The current finite tuple is a real consensus instruction if merged, not an
+inert placeholder. If its height, coefficient, gate flags, or any fingerprinted
+source changes, the CUDA+Metal corpus and startup-canary manifest must be
+regenerated before release. Testnet and signet heights remain disabled.
 See `doc/btx-matmul-v4.7-transition-roadmap.md` for the activation contract and
 the gates that remain open.
 
@@ -125,7 +127,10 @@ readiness.
 
 - A GPU archive validator may sign a domain-separated ExactReplay attestation
   only after completing authoritative local replay for the exact chain,
-  height, block hash, MatMul version, and profile.
+  height, block hash, MatMul version, profile, and versioned replay-authority
+  context. The V2 context binds the consensus schedule and derived replay
+  predicate, so an attestation from a different authority context is rejected
+  even when its chain, height, and block hash match.
 - A configured same-operator RPC/archive mirror may accept a one-of-one or
   M-of-N quorum of those attestations instead of running ExactReplay locally.
   It continues to validate headers, block bodies, transactions, scripts, and

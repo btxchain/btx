@@ -112,6 +112,10 @@ class PublicEvidencePrivacyTest(unittest.TestCase):
     def test_complete_committed_publication_set_is_clean(self) -> None:
         files = list(MODULE.evidence_files(MODULE.DEFAULT_PATHS))
         self.assertGreater(len(files), 50)
+        self.assertIn(
+            REPO_ROOT / "contrib/matmul-v4/assemble-epoch-a-asert-corpus.py",
+            files,
+        )
         failures = [
             failure
             for path in files

@@ -16,7 +16,7 @@ This is an explicit operator-trust topology:
 ```text
 qualified GPU validator(s)
   consensus validation + ExactReplay
-  sign (chain, block hash, height, v4, Profile 1)
+  sign (chain, block hash, height, v4, Profile 1, replay authority context)
              |
              | bounded P2P sidecars or RPC export/import
              v
@@ -33,22 +33,38 @@ ordinary `consensus` mode ignore it as validation authority.
 
 ## Signed statement and quorum
 
-The domain-separated version-1 statement commits to:
+The domain-separated version-2 statement commits to:
 
 - the genesis hash as chain identifier;
 - block header hash;
 - exact block height;
 - MatMul major version 4; and
-- Profile 1.
+- Profile 1; and
+- the node's versioned replay-authority context, which fingerprints the
+  consensus parameters, activation schedule, and derived episode shapes that
+  select the authoritative ExactReplay predicate.
+
+The V2 context is appended after the V1 fields, so the block-hash field keeps
+its existing serialized offset. V1 statements and V2 statements produced for
+a different replay-authority context are rejected explicitly. This prevents a
+valid signature from being replayed after a release or configuration changes
+the predicate that an archive claims to have executed, even when chain,
+height, and header hash are otherwise unchanged.
 
 Signatures use canonical compressed secp256k1 keys and strict DER/low-S ECDSA.
 The store verifies the statement against the local block index and configured
 chain before counting it. A signer contributes at most one vote to a block,
 and quorum is `M` distinct members of the configured `N` keys.
 
-Wrong-chain, wrong-height, wrong-hash, non-member, duplicate, malformed, and
-invalid signatures do not count. Relayers have no authority: an attestation
-can arrive from any peer because only the configured signature matters.
+Wrong-chain, wrong-height, wrong-hash, wrong-authority-context, non-member,
+duplicate, malformed, and invalid signatures do not count. Relayers have no
+authority: an attestation can arrive from any peer because only the configured
+signature matters.
+
+Operators should compare `attestation_version` and
+`replay_authority_context` from `getmatmultrustedstatus` across every archive
+and mirror before admitting traffic. A mismatch is a configuration/release
+error and the affected mirror will reject those attestations.
 
 ## Roles and service capabilities
 

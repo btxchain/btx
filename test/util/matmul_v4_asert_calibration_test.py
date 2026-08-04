@@ -288,6 +288,11 @@ class EpochAAsertCalibrationTest(unittest.TestCase):
         value = payload()
         value["rigs"][0]["mixed_mode_samples"][0]["attempts_per_s"] = 1
         self.assert_rejected(value, "does not match raw attempts/wall")
+        value = payload()
+        value["rigs"][0]["mixed_mode_samples"][0][
+            "gpu_input_generation_successes"
+        ] = 0
+        self.assert_rejected(value, "incomplete GPU-input accounting")
 
     def test_duplicate_and_cross_provider_parent_seeds_fail_closed(self) -> None:
         value = payload()
@@ -353,6 +358,13 @@ class EpochAAsertCalibrationTest(unittest.TestCase):
         value = payload()
         value["rigs"][1]["rc_episode_samples"][0]["frozen_headers"][0]["header_nonce"] = 100
         self.assert_rejected(value, "same RC nonce set")
+
+    def test_cross_provider_rc_digest_mismatch_fails_closed(self) -> None:
+        value = payload()
+        value["rigs"][1]["rc_episode_samples"][0]["frozen_headers"][0][
+            "exact_replay_digest"
+        ] = "f" * 64
+        self.assert_rejected(value, "byte-identical RC digests")
 
     def test_at_least_three_rc_runs_are_required(self) -> None:
         value = payload()

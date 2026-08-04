@@ -49,7 +49,7 @@ The candidate sets the tuple atomically on mainnet at one release-selected
 | Workload | `nMatMulRCProfile = 1`, production dimensions, four-round replay | Profile 1, `matmul_dim = 4096` |
 | Authority | ExactReplay; Stage-3 proof authority remains disabled | ExactReplay only |
 | Header admission | HeaderPoW disabled; the fixed header remains 182 bytes | disabled; 182 bytes |
-| ASERT | v4 and BMX4C ratios remain `1/1`; RC owns the reviewed final-binary calibration | v4/BMX4C `1/1`; RC candidate is provisional pending the schema-2 exact-final-binary rerun |
+| ASERT | v4 and BMX4C ratios remain `1/1`; RC owns the reviewed final-binary calibration | v4/BMX4C `1/1`; RC candidate is provisional pending the schema-3 exact-final-binary rerun |
 | Ratification | explicit L0 ratification is a separate reviewed decision | the source constants are staged true in this candidate, but are non-authorizing until exact-final evidence and the activation review re-affirm them |
 
 The equality of the three heights prevents any digest-only v4/BMX4C interval
@@ -184,14 +184,14 @@ from the exact-final-revision evidence still required.
   (`gate7_multi_day_multi_peer_claim = false` in its summary).
 - **Two-rig, two-vendor ASERT calibration**
   (`asert-two-rig-calibration-2026-08-03`): both halves of the v3-vs-RC ratio
-  measured on the same silicon on two vendors. It predates strict schema-2
-  provenance and raw-RC-sample derivation, so it does not close the current
-  calibration gate.
+  measured on the same silicon on two vendors. It predates the strict
+  schema-3 campaign envelope (schema-3 parent samples plus schema-2 raw RC
+  artifacts), so it does not close the current calibration gate.
 
 **Still open before release-final activation:**
 
 - exact-final-revision CUDA+Metal corpus and manifest seal;
-- schema-2, zero-fallback ASERT rerun on both required providers;
+- schema-3, zero-fallback ASERT rerun on both required providers;
 - full unit and functional suite closeout on the final tree;
 - a live-tip activation height with at least 96 hours of runway;
 - multi-day wall-clock soak;
@@ -286,15 +286,17 @@ acceleration, near-tip scheduler, admission policy, and local evidence. It
 also retains Profile 2 and unfinished Stage-3 proof machinery for continued
 development.
 
-The branch selects Profile 1 and contains the Epoch-A implementation, but its
-activation posture remains **NO-GO**. Exact-final CUDA+Metal evidence and a
-revision-bound ASERT calibration must first freeze the production manifest and
-rescale. A subsequent reviewed change must then select one live `H_A`, set
-`nMatMulV4Height = nMatMulBMX4CHeight = nMatMulRCHeight = H_A`, and flip both
-ratification flags atomically. Any finite tuple or coefficient present before
-that freeze is provisional and non-authorizing. Epochs B–D remain unreachable
-(no height-versioned proof selectors exist), while testnet and signet remain
-on v3 with all transition heights disabled.
+The branch selects Profile 1 and contains a finite candidate Epoch-A tuple:
+`nMatMulV4Height = nMatMulBMX4CHeight = nMatMulRCHeight = H_A`, with the
+candidate RC rescale and both ratification flags set. That tuple is a real
+consensus instruction if merged; it is not made inert by calling it a release
+candidate. The branch therefore remains **NO-GO** until exact-final CUDA+Metal
+evidence and a revision-bound ASERT calibration validate the same source,
+height, coefficient, and flags, and the live-tip runway is rechecked. Any
+change to that fingerprinted freeze requires regenerating the corpus and
+production manifest. Epochs B–D remain unreachable (no height-versioned proof
+selectors exist), while testnet and signet remain on v3 with all transition
+heights disabled.
 
 ## 8. Documentation precedence
 
