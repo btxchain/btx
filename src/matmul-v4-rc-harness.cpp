@@ -471,6 +471,11 @@ UniValue FrozenHeaderJson(const CBlockHeader& header,
     o.pushKV("fully_accelerated", stats.fully_accelerated);
     o.pushKV("require_device", stats.require_device);
     o.pushKV("device_macs", stats.device_macs);
+    o.pushKV("device_xof_calls", stats.device_xof_calls);
+    o.pushKV("device_xof_elements", stats.device_xof_elements);
+    o.pushKV("device_xof_fallbacks", stats.device_xof_fallbacks);
+    o.pushKV("host_xof_calls", stats.host_xof_calls);
+    o.pushKV("host_xof_elements", stats.host_xof_elements);
     o.pushKV("cpu_calls", stats.cpu_calls);
     o.pushKV("cpu_macs", stats.cpu_macs);
     o.pushKV("cpu_fallbacks", stats.cpu_fallbacks);
@@ -1122,6 +1127,8 @@ int main(int argc, char* argv[])
     }
     const bool production_shape =
         args.production && args.rounds == 0;
+    const uint32_t episode_profile{
+        args.production && !args.base_production ? 2u : 1u};
 
     // Resolve the RC-only lane with provider/reason provenance. Unlike normal
     // consensus verification, this measurement harness is strict: a requested
@@ -1285,6 +1292,7 @@ int main(int argc, char* argv[])
             .require_device = device_run,
             .output_row_tile = args.output_row_tile,
             .stats = &run_stats,
+            .profile = episode_profile,
         };
         const uint256 digest = rc::RecomputeResidentCurriculumAccelerated(
             header, params, /*height=*/0, {}, nullptr, &t, acceleration);
@@ -1332,6 +1340,12 @@ int main(int argc, char* argv[])
             run_stats.device_xof_calls;
         acceleration_totals.device_xof_elements +=
             run_stats.device_xof_elements;
+        acceleration_totals.device_xof_fallbacks +=
+            run_stats.device_xof_fallbacks;
+        acceleration_totals.host_xof_calls +=
+            run_stats.host_xof_calls;
+        acceleration_totals.host_xof_elements +=
+            run_stats.host_xof_elements;
         acceleration_totals.device_xof_s +=
             run_stats.device_xof_s;
         acceleration_totals.resident_ffn_chain_s +=
@@ -1404,6 +1418,7 @@ int main(int argc, char* argv[])
             .require_device = device_run,
             .output_row_tile = args.output_row_tile,
             .stats = nullptr,
+            .profile = episode_profile,
         };
         d_all = rc::RecomputeResidentCurriculumAccelerated(
             k_header, params, 0, opt_all, nullptr, &t_all, k_acceleration);
@@ -1437,6 +1452,7 @@ int main(int argc, char* argv[])
                 .require_device = device_run,
                 .output_row_tile = args.output_row_tile,
                 .stats = nullptr,
+                .profile = episode_profile,
             };
             const uint256 d = rc::RecomputeResidentCurriculumAccelerated(
                 k_header, params, 0, opt, nullptr, &tm, mode_acceleration);
@@ -1625,6 +1641,15 @@ int main(int argc, char* argv[])
         "device_xof_elements",
         acceleration_totals.device_xof_elements);
     exact_replay_acceleration.pushKV(
+        "device_xof_fallbacks",
+        acceleration_totals.device_xof_fallbacks);
+    exact_replay_acceleration.pushKV(
+        "host_xof_calls",
+        acceleration_totals.host_xof_calls);
+    exact_replay_acceleration.pushKV(
+        "host_xof_elements",
+        acceleration_totals.host_xof_elements);
+    exact_replay_acceleration.pushKV(
         "device_xof_s",
         acceleration_totals.device_xof_s);
     exact_replay_acceleration.pushKV(
@@ -1659,6 +1684,10 @@ int main(int argc, char* argv[])
             ? "Self-qualified Metal operand XOF, exact contractions, ExtractMX, "
               "resident FFN chain, streaming Merkle leaves, and Merkle subtree "
               "folding produced the consensus digest."
+            : acceleration_totals.device_xof_calls != 0
+                ? "Every consensus matrix contraction is device-enforced; the "
+                  "seeded Profile-1 lane generated Q/K/V and FFN weights on "
+                  "device, while X0 and Merkle hashing remained on the host."
             : "Every consensus matrix contraction is device-enforced; deterministic "
               "XOF, ExtractMX, Merkle hashing, and operand staging remain on the host.");
 

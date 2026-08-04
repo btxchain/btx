@@ -102,8 +102,19 @@ RCEpisodeParams MakeEpochScaledMedium(const RCEpisodeParams& live)
     const auto header = MakeSelfQualHeader(nonce);
     const uint256 cpu = MineRCEpisode(header, params, /*height=*/0, nullptr,
                                       matmul::v4::lt::ExactGemmBackend{});
-    const uint256 with = MineRCEpisode(header, params, /*height=*/0, nullptr, backend);
-    if (cpu.IsNull() || with != cpu) {
+    RCExactReplayAccelerationStats stats;
+    const RCExactReplayAcceleration acceleration{
+        .gemm = backend,
+        .backend = "selfqual_device",
+        .require_device = true,
+        .stats = &stats,
+        .profile = 1,
+    };
+    const uint256 with = RecomputeResidentCurriculumAccelerated(
+        header, params, /*height=*/0, {}, nullptr, nullptr,
+        acceleration);
+    if (cpu.IsNull() || with != cpu || !stats.fully_accelerated ||
+        stats.cpu_calls != 0 || stats.cpu_fallbacks != 0) {
         reason = "episode_digest_mismatch_backend_vs_cpu";
         return false;
     }

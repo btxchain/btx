@@ -113,6 +113,7 @@ struct RCGemmDispatch {
     RCExactReplayAccelerationStats* stats{nullptr};
     bool require_device{false};
     uint32_t output_row_tile{0};
+    uint32_t profile{0};
 };
 
 uint64_t GemmMacs(uint32_t rows, uint32_t inner, uint32_t cols)
@@ -155,6 +156,58 @@ void RecordStrictDeviceFailure(RCGemmDispatch& dispatch, const char* failure)
     }
 }
 
+void RecordDeviceXof(RCGemmDispatch& dispatch, uint64_t elements,
+                     uint64_t calls,
+                     std::chrono::steady_clock::duration elapsed)
+{
+    if (dispatch.stats == nullptr) return;
+    dispatch.stats->device_xof_calls += calls;
+    dispatch.stats->device_xof_elements += elements;
+    dispatch.stats->operand_xof_on_device = true;
+    dispatch.stats->device_xof_s +=
+        std::chrono::duration<double>(elapsed).count();
+}
+
+void RecordHostXof(RCGemmDispatch& dispatch, uint64_t elements,
+                   bool device_fallback, const char* failure)
+{
+    if (dispatch.stats == nullptr) return;
+    ++dispatch.stats->host_xof_calls;
+    dispatch.stats->host_xof_elements += elements;
+    if (device_fallback) ++dispatch.stats->device_xof_fallbacks;
+    if (failure != nullptr && dispatch.stats->first_failure.empty()) {
+        dispatch.stats->first_failure = failure;
+    }
+}
+
+void RecordDeviceXofLaneFailure(
+    RCGemmDispatch& dispatch, uint64_t elements, uint64_t calls,
+    std::chrono::steady_clock::duration elapsed, const char* failure)
+{
+    if (dispatch.stats == nullptr) return;
+    // The fused callback may have generated some or all operands before a
+    // later GEMM/extract/cancellation failure. Count the admitted device work
+    // as attempted work instead of hiding it merely because the lane declined.
+    dispatch.stats->device_xof_calls += calls;
+    dispatch.stats->device_xof_elements += elements;
+    ++dispatch.stats->device_xof_fallbacks;
+    dispatch.stats->device_xof_s +=
+        std::chrono::duration<double>(elapsed).count();
+    if (failure != nullptr && dispatch.stats->first_failure.empty()) {
+        dispatch.stats->first_failure = failure;
+    }
+}
+
+bool SeededProfile1LaneEligible(
+    const RCEpisodeParams& params, const RCGemmDispatch& dispatch)
+{
+    // Shape is not authority: toy/non-datacenter dimensions can be selected
+    // under Profile 2 in tests and future epochs. Only the consensus-selected
+    // Profile 1 authority may enter the seeded CUDA lane.
+    return dispatch.profile == 1 &&
+        !UseDatacenterSharedFfnWeights(params);
+}
+
 bool ExpandMxDispatched(
     const uint256& seed,
     uint32_t rows,
@@ -162,6 +215,7 @@ bool ExpandMxDispatched(
     RCGemmDispatch& dispatch,
     std::vector<int8_t>& output)
 {
+    bool device_fallback{false};
     if (dispatch.gemm.rc_expand_mx != nullptr) {
         const auto device_start{
             std::chrono::steady_clock::now()};
@@ -175,29 +229,29 @@ bool ExpandMxDispatched(
         const size_t expected{
             static_cast<size_t>(rows) * columns};
         if (device_ok && output.size() == expected) {
-            if (dispatch.stats != nullptr) {
-                ++dispatch.stats->device_xof_calls;
-                dispatch.stats->device_xof_elements += expected;
-                dispatch.stats->operand_xof_on_device = true;
-                dispatch.stats->device_xof_s +=
-                    std::chrono::duration<double>(
-                        std::chrono::steady_clock::now() -
-                        device_start)
-                        .count();
-            }
+            RecordDeviceXof(
+                dispatch, expected, /*calls=*/1,
+                std::chrono::steady_clock::now() - device_start);
             return true;
         }
         output.clear();
-        if (dispatch.stats != nullptr &&
-            dispatch.stats->first_failure.empty()) {
-            dispatch.stats->first_failure =
-                "device_operand_xof_declined_or_wrong_size";
+        if (dispatch.require_device) {
+            RecordStrictDeviceFailure(
+                dispatch, "device_operand_xof_declined_or_wrong_size");
+            return false;
         }
+        device_fallback = true;
     }
     // Host ExpandMx is byte-identical to the serial oracle; use the parallel
     // verifier path for large CUDA/Metal-declined operands (K/V/W).
     const uint32_t threads = std::max(1u, std::thread::hardware_concurrency());
     output = ExpandMxDequantInt8Parallel(seed, rows, columns, threads);
+    RecordHostXof(
+        dispatch, static_cast<uint64_t>(rows) * columns,
+        device_fallback,
+        device_fallback
+            ? "device_operand_xof_declined_or_wrong_size"
+            : nullptr);
     return true;
 }
 
@@ -722,6 +776,63 @@ Phase1Result Phase1AssociativeRecall(const uint256& seed_r, const uint256& sigma
     std::vector<int8_t> K;
     std::vector<int8_t> V;
     Phase1Result out;
+    const bool try_seeded =
+        proof_sink == nullptr && !kRCSegmentLeavesEnabled &&
+        dispatch.gemm.rc_phase1_seeded != nullptr &&
+        SeededProfile1LaneEligible(p, dispatch);
+    if (try_seeded) {
+        const auto seeded_start{
+            std::chrono::steady_clock::now()};
+        bool seeded_ok{false};
+        try {
+            seeded_ok = dispatch.gemm.rc_phase1_seeded(
+                seed_Q, seed_K, seed_V, prf_S, prf_Z,
+                p.n_q, p.n_ctx, p.d_head, out.Z);
+        } catch (...) {
+            seeded_ok = false;
+        }
+        if (seeded_ok &&
+            out.Z.size() == static_cast<size_t>(p.n_q) * p.d_head) {
+            const uint64_t projection_macs{
+                GemmMacs(p.n_q, p.n_ctx, p.d_head)};
+            RecordDeviceGemm(dispatch, RCGemmPhase::Phase1,
+                             projection_macs);
+            RecordDeviceGemm(dispatch, RCGemmPhase::Phase1,
+                             projection_macs);
+            RecordDeviceXof(
+                dispatch,
+                static_cast<uint64_t>(p.n_q) * p.d_head +
+                    2ull * p.n_ctx * p.d_head,
+                /*calls=*/3,
+                std::chrono::steady_clock::now() - seeded_start);
+            if (dispatch.stats != nullptr) {
+                ++dispatch.stats->device_fused_phase1_calls;
+                dispatch.stats->device_extract_elements +=
+                    static_cast<uint64_t>(p.n_q) *
+                    (p.n_ctx + p.d_head);
+                dispatch.stats->phase1_extract_on_device = true;
+            }
+            return out;
+        }
+        out.Z.clear();
+        // The established device-input lane remains a valid same-provider
+        // recovery path. In non-strict mode it may ultimately reach the host;
+        // in strict mode ExpandMxDispatched/Phase1 enforce no CPU fallback.
+        RecordDeviceXofLaneFailure(
+            dispatch,
+            static_cast<uint64_t>(p.n_q) * p.d_head +
+                2ull * p.n_ctx * p.d_head,
+            /*calls=*/3,
+            std::chrono::steady_clock::now() - seeded_start,
+            "device_seeded_phase1_declined_or_wrong_size");
+        if (dispatch.require_device) {
+            RecordStrictDeviceFailure(
+                dispatch,
+                "device_seeded_phase1_declined_or_wrong_size");
+            out.ok = false;
+            return out;
+        }
+    }
     if (!ExpandMxDispatched(
             seed_Q, p.n_q, p.d_head, dispatch, Q) ||
         !ExpandMxDispatched(
@@ -1189,6 +1300,15 @@ Phase2Tensors Phase2MicroTraining(const uint256& seed_r, const uint256& sigma,
         out.ok = false;
         return out;
     }
+    const bool try_seeded_chain =
+        proof_sink == nullptr &&
+        ckpt == RCEpisodeOptions::Checkpoint::StoreAll &&
+        dispatch.gemm.rc_fused_ffn_chain_seeded != nullptr &&
+        SeededProfile1LaneEligible(p, dispatch);
+    std::vector<uint256> up_seeds(
+        out.ffn_weights_shared ? 1 : p.L_lyr);
+    std::vector<uint256> down_seeds(
+        out.ffn_weights_shared ? 1 : p.L_lyr);
     if (out.ffn_weights_shared) {
         // Config W (datacenter): FFN weights SHARED EPISODE-WIDE (sigma-derived, one pair
         // for the whole episode — across all rounds AND all layers). Fable-proven
@@ -1197,43 +1317,57 @@ Phase2Tensors Phase2MicroTraining(const uint256& seed_r, const uint256& sigma,
         // evaluations (batching is not a FLOP shortcut; the Q1/Q2 nonlinearity forecloses
         // cross-instance memoization). Cuts the verifier's dominant weight-regen ~R× (one
         // pair instead of R). Expanded ONCE, reused for every round and layer.
-        if (!ExpandMxDispatched(
-                DeriveOperandSeed(sigma, "BTX_RC_WUP_V1"),
-                p.d_model, p.d_ff, dispatch,
-                out.W_up_shared) ||
-            !ExpandMxDispatched(
-                DeriveOperandSeed(sigma, "BTX_RC_WDN_V1"),
-                p.d_ff, p.d_model, dispatch,
-                out.W_down_shared)) {
-            out.ok = false;
-            return out;
-        }
+        up_seeds[0] =
+            DeriveOperandSeed(sigma, "BTX_RC_WUP_V1");
+        down_seeds[0] =
+            DeriveOperandSeed(sigma, "BTX_RC_WDN_V1");
     }
 
     for (uint32_t l = 0; l < p.L_lyr; ++l) {
         char tag[40];
         if (!out.ffn_weights_shared) {
             std::snprintf(tag, sizeof(tag), "BTX_RC_WUP_%u_V1", l);
-            if (!ExpandMxDispatched(
-                    DeriveOperandSeed(seed_r, tag),
-                    p.d_model, p.d_ff, dispatch,
-                    out.W_up_layers[l])) {
-                out.ok = false;
-                return out;
-            }
+            up_seeds[l] = DeriveOperandSeed(seed_r, tag);
             std::snprintf(tag, sizeof(tag), "BTX_RC_WDN_%u_V1", l);
-            if (!ExpandMxDispatched(
-                    DeriveOperandSeed(seed_r, tag),
-                    p.d_ff, p.d_model, dispatch,
-                    out.W_down_layers[l])) {
-                out.ok = false;
-                return out;
-            }
+            down_seeds[l] = DeriveOperandSeed(seed_r, tag);
         }
         std::snprintf(tag, sizeof(tag), "BTX_RC_PRF_UP_%u_V1", l);
         out.prf_up[l] = lt::DeriveMatExpandPrfKey(DeriveOperandSeed(seed_r, tag));
         std::snprintf(tag, sizeof(tag), "BTX_RC_PRF_DN_%u_V1", l);
         out.prf_dn[l] = lt::DeriveMatExpandPrfKey(DeriveOperandSeed(seed_r, tag));
+    }
+
+    bool weights_materialized{false};
+    const auto materialize_weights = [&]() -> bool {
+        if (weights_materialized) return true;
+        if (out.ffn_weights_shared) {
+            if (!ExpandMxDispatched(
+                    up_seeds[0], p.d_model, p.d_ff, dispatch,
+                    out.W_up_shared) ||
+                !ExpandMxDispatched(
+                    down_seeds[0], p.d_ff, p.d_model, dispatch,
+                    out.W_down_shared)) {
+                return false;
+            }
+        } else {
+            for (uint32_t l = 0; l < p.L_lyr; ++l) {
+                if (ExactReplayCancellationRequested()) return false;
+                if (!ExpandMxDispatched(
+                        up_seeds[l], p.d_model, p.d_ff, dispatch,
+                        out.W_up_layers[l]) ||
+                    !ExpandMxDispatched(
+                        down_seeds[l], p.d_ff, p.d_model, dispatch,
+                        out.W_down_layers[l])) {
+                    return false;
+                }
+            }
+        }
+        weights_materialized = true;
+        return true;
+    };
+    if (!try_seeded_chain && !materialize_weights()) {
+        out.ok = false;
+        return out;
     }
 
     auto need_store = [&](uint32_t layer_idx) -> bool {
@@ -1249,36 +1383,79 @@ Phase2Tensors Phase2MicroTraining(const uint256& seed_r, const uint256& sigma,
     // the ordinary per-layer path.
     bool resident_chain_ok{false};
     if (proof_sink == nullptr &&
-        dispatch.gemm.rc_fused_ffn_chain != nullptr) {
+        (try_seeded_chain ||
+         dispatch.gemm.rc_fused_ffn_chain != nullptr)) {
         std::vector<std::vector<int8_t>> layer_outputs;
         // The PR95 datacenter profile intentionally shares one immutable
         // weight pair across every layer and round. The backend ABI already
         // denotes this with a one-element vector; move the pair into that
         // view for the synchronous call and restore it afterwards without a
         // 128 MiB host copy.
-        std::vector<std::vector<int8_t>> shared_up;
-        std::vector<std::vector<int8_t>> shared_down;
-        if (out.ffn_weights_shared) {
-            shared_up.emplace_back(std::move(out.W_up_shared));
-            shared_down.emplace_back(std::move(out.W_down_shared));
-        }
-        const auto& chain_up =
-            out.ffn_weights_shared ? shared_up : out.W_up_layers;
-        const auto& chain_down =
-            out.ffn_weights_shared ? shared_down : out.W_down_layers;
         const auto chain_start{
             std::chrono::steady_clock::now()};
-        try {
-            resident_chain_ok = dispatch.gemm.rc_fused_ffn_chain(
-                out.X[0], chain_up, chain_down,
-                out.prf_up, out.prf_dn, p.b_seq, p.d_model,
-                p.d_ff, layer_outputs);
-        } catch (...) {
-            resident_chain_ok = false;
+        if (try_seeded_chain) {
+            try {
+                resident_chain_ok =
+                    dispatch.gemm.rc_fused_ffn_chain_seeded(
+                        out.X[0], up_seeds, down_seeds,
+                        out.prf_up, out.prf_dn, p.b_seq,
+                        p.d_model, p.d_ff, layer_outputs);
+            } catch (...) {
+                resident_chain_ok = false;
+            }
+            if (resident_chain_ok &&
+                (layer_outputs.size() != p.L_lyr ||
+                 !std::all_of(
+                     layer_outputs.begin(), layer_outputs.end(),
+                     [&](const std::vector<int8_t>& x) {
+                         return x.size() ==
+                             static_cast<size_t>(p.b_seq) *
+                                 p.d_model;
+                     }))) {
+                resident_chain_ok = false;
+            }
+            if (!resident_chain_ok) {
+                layer_outputs.clear();
+                RecordDeviceXofLaneFailure(
+                    dispatch,
+                    2ull * p.L_lyr * p.d_model * p.d_ff,
+                    2ull * p.L_lyr,
+                    std::chrono::steady_clock::now() - chain_start,
+                    "device_seeded_ffn_chain_declined_or_wrong_size");
+                if (dispatch.require_device) {
+                    RecordStrictDeviceFailure(
+                        dispatch,
+                        "device_seeded_ffn_chain_declined_or_wrong_size");
+                    out.ok = false;
+                    return out;
+                }
+            }
         }
-        if (out.ffn_weights_shared) {
-            out.W_up_shared = std::move(shared_up.front());
-            out.W_down_shared = std::move(shared_down.front());
+        if (!resident_chain_ok &&
+            dispatch.gemm.rc_fused_ffn_chain != nullptr &&
+            materialize_weights()) {
+            std::vector<std::vector<int8_t>> shared_up;
+            std::vector<std::vector<int8_t>> shared_down;
+            if (out.ffn_weights_shared) {
+                shared_up.emplace_back(std::move(out.W_up_shared));
+                shared_down.emplace_back(std::move(out.W_down_shared));
+            }
+            const auto& chain_up = out.ffn_weights_shared
+                ? shared_up : out.W_up_layers;
+            const auto& chain_down = out.ffn_weights_shared
+                ? shared_down : out.W_down_layers;
+            try {
+                resident_chain_ok = dispatch.gemm.rc_fused_ffn_chain(
+                    out.X[0], chain_up, chain_down,
+                    out.prf_up, out.prf_dn, p.b_seq,
+                    p.d_model, p.d_ff, layer_outputs);
+            } catch (...) {
+                resident_chain_ok = false;
+            }
+            if (out.ffn_weights_shared) {
+                out.W_up_shared = std::move(shared_up.front());
+                out.W_down_shared = std::move(shared_down.front());
+            }
         }
         if (resident_chain_ok &&
             layer_outputs.size() == p.L_lyr &&
@@ -1313,12 +1490,23 @@ Phase2Tensors Phase2MicroTraining(const uint256& seed_r, const uint256& sigma,
                         chain_start)
                         .count();
             }
+            if (try_seeded_chain && !weights_materialized) {
+                RecordDeviceXof(
+                    dispatch,
+                    2ull * p.L_lyr * p.d_model * p.d_ff,
+                    2ull * p.L_lyr,
+                    std::chrono::steady_clock::now() - chain_start);
+            }
         } else {
             resident_chain_ok = false;
             layer_outputs.clear();
         }
     }
     if (!resident_chain_ok) {
+        if (!materialize_weights()) {
+            out.ok = false;
+            return out;
+        }
         // Backward/Wgrad are gone: the fused FFN commits only each layer's
         // output X[l+1].
         for (uint32_t l = 0; l < p.L_lyr; ++l) {
@@ -2269,6 +2457,7 @@ uint256 RecomputeResidentCurriculumAccelerated(
         acceleration.stats,
         acceleration.require_device,
         acceleration.output_row_tile,
+        acceleration.profile,
     };
     const uint256 digest =
         RunEpisode(header, params, options, out_rounds, out_timing, dispatch);
@@ -2301,6 +2490,8 @@ uint256 RecomputeResidentCurriculumAccelerated(
         acceleration.stats->full_metal_pipeline =
             acceleration.stats->fully_accelerated &&
             acceleration.stats->operand_xof_on_device &&
+            acceleration.stats->device_xof_fallbacks == 0 &&
+            acceleration.stats->host_xof_calls == 0 &&
             acceleration.stats->device_xof_elements ==
                 expected_xof_elements &&
             acceleration.stats->phase1_extract_on_device &&
@@ -2347,6 +2538,7 @@ RCStrictDeviceEpisodeResult MineRCEpisodeStrictDevice(
     acceleration.require_device = true;
     acceleration.output_row_tile = 256;
     acceleration.stats = &out.acceleration;
+    acceleration.profile = 1;
 
     const ScopedExactReplayCancellation cancellation_scope{
         cancelled, secondary_cancelled};

@@ -1566,6 +1566,21 @@ static UniValue BuildBackendRuntimeProfile(
         canary.pushKV(
             "device_macs", production_canary.acceleration.device_macs);
         canary.pushKV(
+            "device_xof_calls",
+            production_canary.acceleration.device_xof_calls);
+        canary.pushKV(
+            "device_xof_elements",
+            production_canary.acceleration.device_xof_elements);
+        canary.pushKV(
+            "device_xof_fallbacks",
+            production_canary.acceleration.device_xof_fallbacks);
+        canary.pushKV(
+            "host_xof_calls",
+            production_canary.acceleration.host_xof_calls);
+        canary.pushKV(
+            "host_xof_elements",
+            production_canary.acceleration.host_xof_elements);
+        canary.pushKV(
             "cpu_fallbacks",
             production_canary.acceleration.cpu_fallbacks);
         canary.pushKV("reason", production_canary.reason);
@@ -1596,6 +1611,16 @@ static UniValue BuildBackendRuntimeProfile(
                 "device_gemm_calls", last_validation->device_gemm_calls);
             validation.pushKV(
                 "device_gemm_macs", last_validation->device_gemm_macs);
+            validation.pushKV(
+                "device_xof_calls", last_validation->device_xof_calls);
+            validation.pushKV(
+                "device_xof_elements", last_validation->device_xof_elements);
+            validation.pushKV(
+                "device_xof_fallbacks", last_validation->device_xof_fallbacks);
+            validation.pushKV(
+                "host_xof_calls", last_validation->host_xof_calls);
+            validation.pushKV(
+                "host_xof_elements", last_validation->host_xof_elements);
             validation.pushKV(
                 "cpu_gemm_calls", last_validation->cpu_gemm_calls);
             validation.pushKV(
@@ -5958,6 +5983,11 @@ static RPCHelpMan getmininginfo()
                                     {RPCResult::Type::STR_HEX, "expected_digest", "Reviewed production golden digest, or zero when unavailable"},
                                     {RPCResult::Type::STR_HEX, "observed_digest", "Strict-device canary digest, or zero when not completed"},
                                     {RPCResult::Type::NUM, "device_macs", "Consensus GEMM MACs executed on device"},
+                                    {RPCResult::Type::NUM, "device_xof_calls", "Canonical operand-XOF calls executed on device"},
+                                    {RPCResult::Type::NUM, "device_xof_elements", "Canonical operand elements generated on device"},
+                                    {RPCResult::Type::NUM, "device_xof_fallbacks", "Declined or malformed device-XOF attempts; must be zero"},
+                                    {RPCResult::Type::NUM, "host_xof_calls", "Canonical operand-XOF calls executed on the host"},
+                                    {RPCResult::Type::NUM, "host_xof_elements", "Canonical operand elements generated on the host"},
                                     {RPCResult::Type::NUM, "cpu_fallbacks", "CPU fallback count; must be zero"},
                                     {RPCResult::Type::STR, "reason", "Fail-closed readiness reason"},
                                 }},
@@ -5973,6 +6003,11 @@ static RPCHelpMan getmininginfo()
                                     {RPCResult::Type::BOOL, "full_metal_pipeline", /*optional=*/true, "Whether the full replay used the Metal pipeline"},
                                     {RPCResult::Type::NUM, "device_gemm_calls", /*optional=*/true, "Device GEMM calls"},
                                     {RPCResult::Type::NUM, "device_gemm_macs", /*optional=*/true, "Consensus GEMM MACs executed on device"},
+                                    {RPCResult::Type::NUM, "device_xof_calls", /*optional=*/true, "Canonical operand-XOF calls executed on device"},
+                                    {RPCResult::Type::NUM, "device_xof_elements", /*optional=*/true, "Canonical operand elements generated on device"},
+                                    {RPCResult::Type::NUM, "device_xof_fallbacks", /*optional=*/true, "Declined or malformed device-XOF attempts"},
+                                    {RPCResult::Type::NUM, "host_xof_calls", /*optional=*/true, "Canonical operand-XOF calls executed on host"},
+                                    {RPCResult::Type::NUM, "host_xof_elements", /*optional=*/true, "Canonical operand elements generated on host"},
                                     {RPCResult::Type::NUM, "cpu_gemm_calls", /*optional=*/true, "CPU GEMM calls"},
                                     {RPCResult::Type::NUM, "cpu_gemm_fallbacks", /*optional=*/true, "CPU fallback calls"},
                                     {RPCResult::Type::STR, "acceleration_failure", /*optional=*/true, "First accelerator failure, if any"},

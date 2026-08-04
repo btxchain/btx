@@ -4872,6 +4872,11 @@ ExactReplayVerifyResult VerifyBoundedExactReplayImpl(
         acceleration_stats.full_metal_pipeline;
     out.device_gemm_calls = acceleration_stats.device_calls;
     out.device_gemm_macs = acceleration_stats.device_macs;
+    out.device_xof_calls = acceleration_stats.device_xof_calls;
+    out.device_xof_elements = acceleration_stats.device_xof_elements;
+    out.device_xof_fallbacks = acceleration_stats.device_xof_fallbacks;
+    out.host_xof_calls = acceleration_stats.host_xof_calls;
+    out.host_xof_elements = acceleration_stats.host_xof_elements;
     out.cpu_gemm_calls = acceleration_stats.cpu_calls;
     out.cpu_gemm_fallbacks = acceleration_stats.cpu_fallbacks;
     out.acceleration_failure = acceleration_stats.first_failure;
@@ -4934,6 +4939,11 @@ ExactReplayVerifyResult VerifyBoundedExactReplayImpl(
             out.cpu_gemm_calls += retry_stats.cpu_calls;
             out.cpu_gemm_fallbacks +=
                 retry_stats.cpu_fallbacks;
+            out.device_xof_calls += retry_stats.device_xof_calls;
+            out.device_xof_elements += retry_stats.device_xof_elements;
+            out.device_xof_fallbacks += retry_stats.device_xof_fallbacks;
+            out.host_xof_calls += retry_stats.host_xof_calls;
+            out.host_xof_elements += retry_stats.host_xof_elements;
             out.digest = retry_digest;
             out.fully_accelerated = false;
             out.full_metal_pipeline = false;
@@ -5088,6 +5098,7 @@ ExactReplayVerifyResult VerifyStrictWithAlternates(
     primary.require_device = true;
     primary.output_row_tile = primary.output_row_tile == 0 ? 256 : primary.output_row_tile;
     const std::string primary_provider{primary.backend};
+    const uint32_t profile{primary.profile};
     const auto registered{GetRCExactReplayAlternateProviders()};
 
     RCProductionProviderCapability primary_capability;
@@ -5120,6 +5131,7 @@ ExactReplayVerifyResult VerifyStrictWithAlternates(
         acceleration.backend = provider.provider;
         acceleration.require_device = true;
         acceleration.output_row_tile = 256;
+        acceleration.profile = profile;
         candidates.push_back({
             .acceleration = std::move(acceleration),
             .provider = provider.provider,
@@ -5144,6 +5156,11 @@ ExactReplayVerifyResult VerifyStrictWithAlternates(
     size_t aggregate_rss_kib{0};
     uint64_t aggregate_device_calls{0};
     uint64_t aggregate_device_macs{0};
+    uint64_t aggregate_device_xof_calls{0};
+    uint64_t aggregate_device_xof_elements{0};
+    uint64_t aggregate_device_xof_fallbacks{0};
+    uint64_t aggregate_host_xof_calls{0};
+    uint64_t aggregate_host_xof_elements{0};
     uint64_t aggregate_cpu_calls{0};
     uint64_t aggregate_cpu_fallbacks{0};
     bool every_attempt_fully_accelerated{true};
@@ -5153,6 +5170,11 @@ ExactReplayVerifyResult VerifyStrictWithAlternates(
         aggregate_rss_kib = std::max(aggregate_rss_kib, result.rss_kib);
         aggregate_device_calls += result.device_gemm_calls;
         aggregate_device_macs += result.device_gemm_macs;
+        aggregate_device_xof_calls += result.device_xof_calls;
+        aggregate_device_xof_elements += result.device_xof_elements;
+        aggregate_device_xof_fallbacks += result.device_xof_fallbacks;
+        aggregate_host_xof_calls += result.host_xof_calls;
+        aggregate_host_xof_elements += result.host_xof_elements;
         aggregate_cpu_calls += result.cpu_gemm_calls;
         aggregate_cpu_fallbacks += result.cpu_gemm_fallbacks;
         every_attempt_fully_accelerated =
@@ -5165,6 +5187,11 @@ ExactReplayVerifyResult VerifyStrictWithAlternates(
         result.rss_kib = aggregate_rss_kib;
         result.device_gemm_calls = aggregate_device_calls;
         result.device_gemm_macs = aggregate_device_macs;
+        result.device_xof_calls = aggregate_device_xof_calls;
+        result.device_xof_elements = aggregate_device_xof_elements;
+        result.device_xof_fallbacks = aggregate_device_xof_fallbacks;
+        result.host_xof_calls = aggregate_host_xof_calls;
+        result.host_xof_elements = aggregate_host_xof_elements;
         result.cpu_gemm_calls = aggregate_cpu_calls;
         result.cpu_gemm_fallbacks = aggregate_cpu_fallbacks;
         result.fully_accelerated =
@@ -5389,7 +5416,8 @@ ExactReplayVerifyResult VerifyBoundedExactReplay(
     const CBlockHeader& header,
     const RCEpisodeParams& params,
     int32_t height,
-    const arith_uint256* target)
+    const arith_uint256* target,
+    uint32_t profile)
 {
     const RCExactReplayExecutionPolicy policy{
         GetRCExactReplayExecutionPolicy()};
@@ -5454,6 +5482,7 @@ ExactReplayVerifyResult VerifyBoundedExactReplay(
     }
     acceleration.require_device =
         policy == RCExactReplayExecutionPolicy::StrictDevice;
+    acceleration.profile = profile;
     std::string resolution_reason{resolved.reason};
     const bool production_gate_required{
         RCExactReplayRequiresProductionEligibility(params)};

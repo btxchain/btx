@@ -84,15 +84,37 @@ uint64_t EstimateRCExactReplayWorkspaceBytes(
     // It is live across the up and down GEMMs, so it must be counted.
     const uint64_t ffn_intermediate{
         SaturatingWorkspaceMul(params.b_seq, params.d_ff)};
-    // At the shipped Profile-1 dimensions this moves the estimate from
-    // 2.625 GiB to 4.375 GiB against roughly 4.95 GiB actually allocated per
-    // device. The old figure was low enough to admit a provider that then
-    // cannot hold the episode -- an OOM on a validating node at production
-    // dimensions, which is why this is an admission gate and not a report.
-    return std::max(
+    // Profile-1 seeded CUDA operand generation retains one maximum-size
+    // mantissa/output pair, scales, SHA blocks, scan counters/offsets, and CUB
+    // temporary storage. The estimate deliberately uses an upper bound for
+    // scan storage so admission never depends on a toolkit-specific CUB size.
+    const uint64_t largest_seeded_operand{std::max(
+        SaturatingWorkspaceMul(params.n_ctx, params.d_head),
+        weight_matrix)};
+    const uint64_t seeded_blocks{SaturatingWorkspaceAdd(
+        largest_seeded_operand / 40, 1024)};
+    const uint64_t seeded_expand_scratch{SaturatingWorkspaceAdd(
+        kRCSeededExpandScanTempBaseBytes,
+        SaturatingWorkspaceAdd(
+            SaturatingWorkspaceAdd(
+                SaturatingWorkspaceMul(2, largest_seeded_operand),
+                largest_seeded_operand / 32),
+            SaturatingWorkspaceMul(
+                40 + kRCSeededExpandScanTempBytesPerBlock,
+                seeded_blocks)))};
+    // Keep the persistent fused workspace and the persistent seeded expansion
+    // scratch additive. Both allocations can be live at once, so taking only
+    // their maximum would understate device-capacity admission.
+    const uint64_t established_workspace{std::max(
         phase1,
         SaturatingWorkspaceAdd(SaturatingWorkspaceAdd(weights, activations),
-                               ffn_intermediate));
+                               ffn_intermediate))};
+    if (UseDatacenterSharedFfnWeights(params)) {
+        // Profile 2 does not dispatch the Profile-1 seeded CUDA lanes.
+        return established_workspace;
+    }
+    return SaturatingWorkspaceAdd(
+        established_workspace, seeded_expand_scratch);
 }
 
 bool RCExactReplayWorkspaceFits(

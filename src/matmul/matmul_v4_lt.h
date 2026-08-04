@@ -163,6 +163,20 @@ struct ExactGemmBackend {
         uint32_t d_model,
         uint32_t d_ff,
         std::vector<std::vector<int8_t>>& layer_outputs);
+    /** Profile-1 CUDA lane that materializes the FFN weights from their
+     * canonical operand seeds on-device. A one-element seed vector denotes
+     * episode-shared weights. This is an optional execution callback and must
+     * remain byte-identical to RCFusedFfnChainFn. */
+    using RCFusedFfnChainSeededFn = bool (*)(
+        const std::vector<int8_t>& X0,
+        const std::vector<uint256>& up_seeds,
+        const std::vector<uint256>& down_seeds,
+        const std::vector<uint256>& prf_up,
+        const std::vector<uint256>& prf_down,
+        uint32_t rows,
+        uint32_t d_model,
+        uint32_t d_ff,
+        std::vector<std::vector<int8_t>>& layer_outputs);
     using RCExpandMxFn = bool (*)(
         const uint256& seed,
         uint32_t rows,
@@ -180,6 +194,18 @@ struct ExactGemmBackend {
     using RCMerkleRootFn = bool (*)(
         const std::vector<uint256>& leaf_hashes,
         uint256& root);
+    /** Profile-1 CUDA Phase-1 lane that generates Q/K/V from their canonical
+     * operand seeds on-device before the resident GEMM/extract sequence. */
+    using RCPhase1SeededFn = bool (*)(
+        const uint256& seed_q,
+        const uint256& seed_k,
+        const uint256& seed_v,
+        const uint256& prf_s,
+        const uint256& prf_z,
+        uint32_t query_rows,
+        uint32_t context_rows,
+        uint32_t d_head,
+        std::vector<int8_t>& out_z);
     using RCPhase1Fn = bool (*)(
         const std::vector<int8_t>& Q,
         const std::vector<int8_t>& K,
@@ -194,9 +220,11 @@ struct ExactGemmBackend {
     S32S8Fn gemm_s32s8{nullptr};
     RCFusedFfnFn rc_fused_ffn{nullptr};
     RCFusedFfnChainFn rc_fused_ffn_chain{nullptr};
+    RCFusedFfnChainSeededFn rc_fused_ffn_chain_seeded{nullptr};
     RCExpandMxFn rc_expand_mx{nullptr};
     RCMerkleLeavesFn rc_merkle_leaves{nullptr};
     RCMerkleRootFn rc_merkle_root{nullptr};
+    RCPhase1SeededFn rc_phase1_seeded{nullptr};
     RCPhase1Fn rc_phase1{nullptr};
 
     [[nodiscard]] bool HasDeviceGemms() const

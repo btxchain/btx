@@ -1017,6 +1017,11 @@ struct ExactReplayVerifyResult {
     bool device_mismatch_confirmed{false};
     uint64_t device_gemm_calls{0};
     uint64_t device_gemm_macs{0};
+    uint64_t device_xof_calls{0};
+    uint64_t device_xof_elements{0};
+    uint64_t device_xof_fallbacks{0};
+    uint64_t host_xof_calls{0};
+    uint64_t host_xof_elements{0};
     uint64_t cpu_gemm_calls{0};
     uint64_t cpu_gemm_fallbacks{0};
     std::string acceleration_failure;
@@ -1212,7 +1217,7 @@ struct RCProdVerifyResult {
  */
 [[nodiscard]] ExactReplayVerifyResult VerifyBoundedExactReplay(
     const CBlockHeader& header, const RCEpisodeParams& params, int32_t height,
-    const arith_uint256* target = nullptr);
+    const arith_uint256* target = nullptr, uint32_t profile = 0);
 
 /**
  * Test-only dependency-injection seam for the first ExactReplay pass.

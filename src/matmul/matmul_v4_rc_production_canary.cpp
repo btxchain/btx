@@ -57,7 +57,7 @@ std::mutex g_production_canary_mutex;
 RCProductionCanaryStatus g_last_production_canary;
 
 struct BackendIdentity {
-    std::array<uintptr_t, 8> callbacks{};
+    std::array<uintptr_t, 10> callbacks{};
 
     friend bool operator==(const BackendIdentity&, const BackendIdentity&) =
         default;
@@ -234,9 +234,11 @@ BackendIdentity IdentifyBackend(
         reinterpret_cast<uintptr_t>(backend.gemm_s32s8),
         reinterpret_cast<uintptr_t>(backend.rc_fused_ffn),
         reinterpret_cast<uintptr_t>(backend.rc_fused_ffn_chain),
+        reinterpret_cast<uintptr_t>(backend.rc_fused_ffn_chain_seeded),
         reinterpret_cast<uintptr_t>(backend.rc_expand_mx),
         reinterpret_cast<uintptr_t>(backend.rc_merkle_leaves),
         reinterpret_cast<uintptr_t>(backend.rc_merkle_root),
+        reinterpret_cast<uintptr_t>(backend.rc_phase1_seeded),
         reinterpret_cast<uintptr_t>(backend.rc_phase1),
     }};
 }

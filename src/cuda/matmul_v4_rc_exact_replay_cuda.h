@@ -19,9 +19,9 @@
 // Digests MUST stay byte-identical to the host int64 oracle. Fail-closed:
 // any device decline returns false and the caller keeps the host path.
 //
-// Operand ExpandMx may remain host-side (Metal evidence also reports
-// device_resident:false for operand generation); the tensor-compute claim is
-// about resident GEMM+Extract, not XOF expand.
+// The explicitly authorized Profile-1 seeded lanes also generate canonical
+// Q/K/V and FFN weights on the selected CUDA device. Other profiles and proof
+// paths retain the established host-input contract.
 
 namespace matmul_v4::cuda {
 
@@ -29,6 +29,7 @@ namespace matmul_v4::cuda {
 inline constexpr uint32_t kRcExactReplayPhase1CtxChunk = 65536;
 
 struct RcExactReplayCudaStats {
+    int device_index{-1};
     uint64_t device_gemm_calls{0};
     uint64_t cpu_gemm_fallbacks{0};
     uint64_t device_extract_tiles{0};
@@ -55,7 +56,9 @@ void ResetRcExactReplayCudaStats();
 [[nodiscard]] bool TryCudaRcPhase1AssociativeRecall(
     const std::vector<int8_t>& Q, const std::vector<int8_t>& K,
     const std::vector<int8_t>& V, const uint256& prf_S, const uint256& prf_Z,
-    uint32_t n_q, uint32_t n_ctx, uint32_t d_head, std::vector<int8_t>& out_Z);
+    uint32_t n_q, uint32_t n_ctx, uint32_t d_head, std::vector<int8_t>& out_Z,
+    const uint256* seed_q = nullptr, const uint256* seed_k = nullptr,
+    const uint256* seed_v = nullptr);
 
 /**
  * Exact int8·int8 → int64 GEMM. Prefer a single IMMA launch over full K (int32
@@ -92,7 +95,9 @@ void ResetRcExactReplayCudaStats();
     const std::vector<int8_t>& W_down_shared, const std::vector<std::vector<int8_t>>& W_up_layers,
     const std::vector<std::vector<int8_t>>& W_down_layers, const std::vector<uint256>& prf_up,
     const std::vector<uint256>& prf_dn, uint32_t b_seq, uint32_t d_model, uint32_t d_ff,
-    uint32_t L_lyr, std::vector<std::vector<int8_t>>& out_X);
+    uint32_t L_lyr, std::vector<std::vector<int8_t>>& out_X,
+    const std::vector<uint256>* up_seeds = nullptr,
+    const std::vector<uint256>* down_seeds = nullptr);
 
 // --- ExactGemmBackend ABI (Metal-parity Launch* entry points) -----------------
 // These match matmul::v4::lt::ExactGemmBackend::RC*Fn so ResolveExactGemmBackendForRC
@@ -114,6 +119,34 @@ void ResetRcExactReplayCudaStats();
     const std::vector<int8_t>& Q, const std::vector<int8_t>& K, const std::vector<int8_t>& V,
     const uint256& prf_s, const uint256& prf_z, uint32_t query_rows, uint32_t context_rows,
     uint32_t d_head, std::vector<int8_t>& out_z);
+
+/** Profile-1-only seeded lanes. These generate canonical ExpandMx operands on
+ * the CUDA device and then execute the existing resident ExactReplay kernels.
+ * Callers retain the ordinary host-input callbacks for non-strict fallback. */
+[[nodiscard]] bool LaunchRcExactReplayFusedFfnChainSeeded(
+    const std::vector<int8_t>& X0, const std::vector<uint256>& up_seeds,
+    const std::vector<uint256>& down_seeds, const std::vector<uint256>& prf_up,
+    const std::vector<uint256>& prf_down, uint32_t rows, uint32_t d_model,
+    uint32_t d_ff, std::vector<std::vector<int8_t>>& layer_outputs);
+
+[[nodiscard]] bool LaunchRcExactReplayPhase1Seeded(
+    const uint256& seed_q, const uint256& seed_k, const uint256& seed_v,
+    const uint256& prf_s, const uint256& prf_z, uint32_t query_rows,
+    uint32_t context_rows, uint32_t d_head, std::vector<int8_t>& out_z);
+
+/** Direct CUDA implementation of the canonical ExpandMx operand stream.
+ * The implementation deterministically extends rejection-sampling batches
+ * until every requested mantissa exists; it never reports success for an
+ * incomplete device stream. */
+[[nodiscard]] bool LaunchRcExactReplayExpandMx(
+    const uint256& seed, uint32_t rows, uint32_t columns,
+    std::vector<int8_t>& output);
+
+/** Test-only continuation seam: caps each rejection-sampling batch without
+ * changing the canonical counter stream. */
+[[nodiscard]] bool LaunchRcExactReplayExpandMxForTest(
+    const uint256& seed, uint32_t rows, uint32_t columns,
+    uint32_t max_blocks_per_batch, std::vector<int8_t>& output);
 
 } // namespace matmul_v4::cuda
 

@@ -179,6 +179,13 @@ inline constexpr uint32_t kRCWgradExactChunk = 4096;
 static_assert(static_cast<uint64_t>(kRCWgradExactChunk) * 2304ull < (uint64_t{1} << 24),
               "wgrad ExactGemm chunk must stay under the 2^24 FP32-exact ceiling");
 
+/** Conservative CUB exclusive-scan workspace admission bound for the seeded
+ * CUDA ExpandMx lane. The CUDA implementation runtime-queries the exact CUB
+ * requirement and fails closed if a toolkit ever exceeds this per-input-block
+ * allowance; the scheduler uses the same constant before admitting work. */
+inline constexpr uint64_t kRCSeededExpandScanTempBaseBytes = 1ULL << 20;
+inline constexpr uint64_t kRCSeededExpandScanTempBytesPerBlock = 64;
+
 /** Fixed consensus K-segment length for Phase-1 Z=S·V and Phase-2 wgrad G·Xᵀ
  *  (§R.7 / §3). Never scales with epoch dials. Each segment's exact int64
  *  partial is committed as additional tile-tree leaves (LE int64 row-major)
@@ -318,6 +325,9 @@ struct RCExactReplayAccelerationStats {
     uint64_t device_extract_elements{0};
     uint64_t device_xof_calls{0};
     uint64_t device_xof_elements{0};
+    uint64_t device_xof_fallbacks{0};
+    uint64_t host_xof_calls{0};
+    uint64_t host_xof_elements{0};
     double device_xof_s{0};
     double resident_ffn_chain_s{0};
     uint64_t device_merkle_rounds{0};
@@ -348,6 +358,9 @@ struct RCExactReplayAcceleration {
     bool require_device{false};
     uint32_t output_row_tile{0};
     RCExactReplayAccelerationStats* stats{nullptr};
+    /** Consensus-selected RC profile. Seeded Profile-1-only device callbacks
+     * are disabled unless this authority is explicitly set to 1. */
+    uint32_t profile{0};
 };
 
 enum class RCStrictDeviceEpisodeOutcome : uint8_t {

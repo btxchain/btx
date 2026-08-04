@@ -4411,7 +4411,8 @@ MatMulRCValidationOutcome CheckMatMulProofOfWork_RCOutcome(
     // Consensus epsilon-zero ExactReplay for both profile 1 and the default
     // datacenter profile 2 while Stage-3 succinct authority remains disabled.
     const auto replay = matmul::v4::rc::VerifyBoundedExactReplay(header, params_rc, block_height,
-                                                                &*bnTarget);
+                                                                &*bnTarget,
+                                                                params.nMatMulRCProfile);
     if (detail != nullptr) *detail = replay.note;
     if (!replay.ok) {
         switch (replay.outcome) {

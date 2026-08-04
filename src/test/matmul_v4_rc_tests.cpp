@@ -16,6 +16,7 @@
 #include <matmul/matmul_v4_rc_mx_ozaki.h>
 #include <matmul/matmul_v4_rc_production_canary.h>
 #include <cuda/matmul_v4_rc_mx_ozaki_native.h>
+#include <cuda/matmul_v4_lt_accel.h>
 #include <matmul/matmul_v4_rc_scale.h>
 #include <matmul/matmul_v4_rc_scale_axes.h>
 #include <matmul/matmul_v4_rc_selfqual.h>
@@ -205,6 +206,37 @@ bool DecliningGemmS8S8D(const std::vector<int8_t>& L,
                         std::vector<int32_t>& out)
 {
     return DecliningGemmS8S8(L, R, rows, inner, cols, out);
+}
+
+bool DecliningSeededPhase1(
+    const uint256&, const uint256&, const uint256&, const uint256&,
+    const uint256&, uint32_t, uint32_t, uint32_t,
+    std::vector<int8_t>& out)
+{
+    out.clear();
+    return false;
+}
+
+bool WrongSizeSeededPhase1(
+    const uint256&, const uint256&, const uint256&, const uint256&,
+    const uint256&, uint32_t, uint32_t, uint32_t,
+    std::vector<int8_t>& out)
+{
+    out.assign(1, 0);
+    return true;
+}
+
+bool DecliningSeededFfnChain(
+    const std::vector<int8_t>&,
+    const std::vector<uint256>&,
+    const std::vector<uint256>&,
+    const std::vector<uint256>&,
+    const std::vector<uint256>&,
+    uint32_t, uint32_t, uint32_t,
+    std::vector<std::vector<int8_t>>& out)
+{
+    out.clear();
+    return false;
 }
 
 struct ProofWitnessCapture final : rc::RCEpisodeProofWitnessSink {
@@ -1051,6 +1083,185 @@ BOOST_AUTO_TEST_CASE(rc_exact_replay_strict_device_coverage_and_fallback_telemet
     BOOST_CHECK(!fallback_stats.first_failure.empty());
 }
 
+BOOST_AUTO_TEST_CASE(rc_seeded_phase1_decline_is_strict_and_fallback_is_explicit)
+{
+    const auto header{MakeRCHeader(0x534545445031)};
+    const auto params{rc::MakeToyRCEpisodeParams()};
+    const uint256 reference{
+        rc::RecomputeResidentCurriculumReference(header, params, 0)};
+    BOOST_REQUIRE(!reference.IsNull());
+
+    lt::ExactGemmBackend backend;
+    backend.gemm_s8s8 = &OracleGemmS8S8;
+    backend.rc_phase1_seeded = &DecliningSeededPhase1;
+
+    rc::RCExactReplayAccelerationStats strict_stats;
+    const uint256 strict{rc::RecomputeResidentCurriculumAccelerated(
+        header, params, 0, {}, nullptr, nullptr,
+        {.gemm = backend,
+         .backend = "test:seeded-phase1-decline",
+         .require_device = true,
+         .stats = &strict_stats,
+         .profile = 1})};
+    BOOST_CHECK(strict.IsNull());
+    BOOST_CHECK_EQUAL(strict_stats.cpu_calls, 0U);
+    BOOST_CHECK_EQUAL(strict_stats.host_xof_calls, 0U);
+    BOOST_CHECK_EQUAL(strict_stats.device_xof_fallbacks, 1U);
+    BOOST_CHECK_EQUAL(strict_stats.device_xof_calls, 3U);
+    BOOST_CHECK_GT(strict_stats.device_xof_elements, 0U);
+    BOOST_CHECK_GE(strict_stats.device_xof_s, 0.0);
+    BOOST_CHECK_EQUAL(
+        strict_stats.first_failure,
+        "device_seeded_phase1_declined_or_wrong_size");
+
+    rc::RCExactReplayAccelerationStats fallback_stats;
+    const uint256 fallback{rc::RecomputeResidentCurriculumAccelerated(
+        header, params, 0, {}, nullptr, nullptr,
+        {.gemm = backend,
+         .backend = "test:seeded-phase1-decline",
+         .require_device = false,
+         .stats = &fallback_stats,
+         .profile = 1})};
+    BOOST_CHECK(fallback == reference);
+    BOOST_CHECK_EQUAL(fallback_stats.device_xof_fallbacks, 1U);
+    BOOST_CHECK_GT(fallback_stats.host_xof_calls, 0U);
+    BOOST_CHECK_GT(fallback_stats.host_xof_elements, 0U);
+
+    backend.rc_phase1_seeded = &WrongSizeSeededPhase1;
+    rc::RCExactReplayAccelerationStats wrong_size_stats;
+    const uint256 wrong_size{rc::RecomputeResidentCurriculumAccelerated(
+        header, params, 0, {}, nullptr, nullptr,
+        {.gemm = backend,
+         .backend = "test:seeded-phase1-wrong-size",
+         .require_device = true,
+         .stats = &wrong_size_stats,
+         .profile = 1})};
+    BOOST_CHECK(wrong_size.IsNull());
+    BOOST_CHECK_EQUAL(wrong_size_stats.cpu_calls, 0U);
+    BOOST_CHECK_EQUAL(wrong_size_stats.host_xof_calls, 0U);
+}
+
+BOOST_AUTO_TEST_CASE(rc_seeded_ffn_decline_does_not_materialize_weights_in_strict_mode)
+{
+    const auto header{MakeRCHeader(0x5345454446464e)};
+    const auto params{rc::MakeToyRCEpisodeParams()};
+    const uint256 reference{
+        rc::RecomputeResidentCurriculumReference(header, params, 0)};
+    BOOST_REQUIRE(!reference.IsNull());
+
+    lt::ExactGemmBackend backend;
+    backend.gemm_s8s8 = &OracleGemmS8S8;
+    backend.rc_fused_ffn_chain_seeded = &DecliningSeededFfnChain;
+
+    rc::RCExactReplayAccelerationStats strict_stats;
+    const uint256 strict{rc::RecomputeResidentCurriculumAccelerated(
+        header, params, 0, {}, nullptr, nullptr,
+        {.gemm = backend,
+         .backend = "test:seeded-ffn-decline",
+         .require_device = true,
+         .stats = &strict_stats,
+         .profile = 1})};
+    BOOST_CHECK(strict.IsNull());
+    BOOST_CHECK_EQUAL(strict_stats.cpu_calls, 0U);
+    // Q/K/V plus X0 are the established host-generated operands. A strict
+    // seeded-chain decline must not additionally materialize any FFN weight.
+    BOOST_CHECK_EQUAL(strict_stats.host_xof_calls, 4U);
+    BOOST_CHECK_EQUAL(strict_stats.device_xof_fallbacks, 1U);
+    BOOST_CHECK_EQUAL(
+        strict_stats.device_xof_calls,
+        2U * params.L_lyr);
+
+    rc::RCExactReplayAccelerationStats fallback_stats;
+    const uint256 fallback{rc::RecomputeResidentCurriculumAccelerated(
+        header, params, 0, {}, nullptr, nullptr,
+        {.gemm = backend,
+         .backend = "test:seeded-ffn-decline",
+         .require_device = false,
+         .stats = &fallback_stats,
+         .profile = 1})};
+    BOOST_CHECK(fallback == reference);
+    BOOST_CHECK_EQUAL(fallback_stats.device_xof_fallbacks, 1U);
+    BOOST_CHECK_GT(fallback_stats.host_xof_calls, strict_stats.host_xof_calls);
+}
+
+BOOST_AUTO_TEST_CASE(rc_seeded_callbacks_require_explicit_profile1_authority)
+{
+    const auto header{MakeRCHeader(0x50524f46494c45)};
+    const auto params{rc::MakeToyRCEpisodeParams()};
+    const uint256 reference{
+        rc::RecomputeResidentCurriculumReference(header, params, 0)};
+    BOOST_REQUIRE(!reference.IsNull());
+
+    lt::ExactGemmBackend backend;
+    backend.gemm_s8s8 = &OracleGemmS8S8;
+    backend.rc_phase1_seeded = &DecliningSeededPhase1;
+    backend.rc_fused_ffn_chain_seeded = &DecliningSeededFfnChain;
+
+    rc::RCExactReplayAccelerationStats profile2_stats;
+    const uint256 profile2{rc::RecomputeResidentCurriculumAccelerated(
+        header, params, 0, {}, nullptr, nullptr,
+        {.gemm = backend,
+         .backend = "test:profile2-toy-non-dc",
+         .require_device = false,
+         .stats = &profile2_stats,
+         .profile = 2})};
+    BOOST_CHECK(profile2 == reference);
+    BOOST_CHECK_EQUAL(profile2_stats.device_xof_fallbacks, 0U);
+    BOOST_CHECK_EQUAL(profile2_stats.device_xof_calls, 0U);
+
+    rc::RCExactReplayAccelerationStats unspecified_stats;
+    const uint256 unspecified{rc::RecomputeResidentCurriculumAccelerated(
+        header, params, 0, {}, nullptr, nullptr,
+        {.gemm = backend,
+         .backend = "test:profile-unspecified",
+         .require_device = false,
+         .stats = &unspecified_stats})};
+    BOOST_CHECK(unspecified == reference);
+    BOOST_CHECK_EQUAL(unspecified_stats.device_xof_fallbacks, 0U);
+}
+
+BOOST_AUTO_TEST_CASE(rc_cuda_callback_attachment_requires_exact_cuda_backend_identity)
+{
+    lt::ExactGemmBackend cuda;
+    cuda.gemm_s8s8 = &matmul_v4::cuda::LaunchGemmS8S8;
+    cuda.gemm_s32s8 = &matmul_v4::cuda::LaunchGemmS32S8;
+    BOOST_CHECK(matmul_v4::accel::IsCudaExactGemmBackend(cuda, "cuda"));
+    BOOST_CHECK(!matmul_v4::accel::IsCudaExactGemmBackend(cuda, "tpu"));
+    BOOST_CHECK(!matmul_v4::accel::IsCudaExactGemmBackend(cuda, "trainium"));
+    BOOST_CHECK(!matmul_v4::accel::IsCudaExactGemmBackend(cuda, "hip"));
+
+    lt::ExactGemmBackend foreign;
+    foreign.gemm_s8s8 = &OracleGemmS8S8;
+    foreign.gemm_s32s8 = &WrongGemmS32S8;
+    BOOST_CHECK(!matmul_v4::accel::IsCudaExactGemmBackend(foreign, "cuda"));
+}
+
+BOOST_AUTO_TEST_CASE(rc_capability_identity_binds_seeded_callbacks)
+{
+    rc::ResetRCProductionCanaryForTest();
+    const auto params{rc::MakeToyRCEpisodeParams()};
+    const auto epoch{MakeReplayCapabilityEpoch(params)};
+    lt::ExactGemmBackend first;
+    first.gemm_s8s8 = &OracleGemmS8S8;
+    first.rc_phase1_seeded = &DecliningSeededPhase1;
+    const auto capability{
+        rc::IssueRCProductionProviderCapabilityForTest(
+            "test:seeded-identity", first, epoch)};
+    BOOST_REQUIRE(!capability.IsNull());
+
+    std::string reason;
+    BOOST_CHECK(rc::RCProductionProviderCapabilityAuthorizesIdentity(
+        capability, "test:seeded-identity", &first, &reason));
+    BOOST_CHECK(reason.empty());
+
+    lt::ExactGemmBackend second{first};
+    second.rc_phase1_seeded = &WrongSizeSeededPhase1;
+    BOOST_CHECK(!rc::RCProductionProviderCapabilityAuthorizesIdentity(
+        capability, "test:seeded-identity", &second, &reason));
+    BOOST_CHECK_EQUAL(reason, "capability_backend_mismatch");
+    rc::ResetRCProductionCanaryForTest();
+}
+
 BOOST_AUTO_TEST_CASE(rc_exact_replay_cancellation_is_not_consensus_invalid)
 {
     CBlockHeader header{MakeRCHeader(0x43414e43454c)};
@@ -1689,6 +1900,17 @@ BOOST_AUTO_TEST_CASE(rc_f5_selfqual_cached_across_nonce_resolves)
     (void)matmul_v4::accel::GateExactGemmWithRCSelfQualCached(good, "test-f5", /*epoch=*/7);
     BOOST_CHECK_EQUAL(rc::RCSelfQualProbeInvocationCountForTest() - before, 2u);
 
+    // Changing only an optional seeded callback must not inherit the cached
+    // verdict for the plain GEMM backend. The declining lane is exercised by
+    // strict self-qualification and clears the returned backend.
+    lt::ExactGemmBackend seeded_decline{good};
+    seeded_decline.rc_phase1_seeded = &DecliningSeededPhase1;
+    const auto rejected{
+        matmul_v4::accel::GateExactGemmWithRCSelfQualCached(
+            seeded_decline, "test-f5", /*epoch=*/7)};
+    BOOST_CHECK_EQUAL(rc::RCSelfQualProbeInvocationCountForTest() - before, 3u);
+    BOOST_CHECK(rejected.gemm_s8s8 == nullptr);
+
     matmul_v4::accel::ResetRCExactGemmResolveCacheForTest();
 }
 
@@ -2114,11 +2336,95 @@ BOOST_AUTO_TEST_CASE(rc_cuda_exact_replay_launch_abi_smoke)
     BOOST_REQUIRE(resolved.backend.gemm_s8s8 != nullptr);
     BOOST_REQUIRE(resolved.backend.rc_fused_ffn != nullptr);
     BOOST_REQUIRE(resolved.backend.rc_fused_ffn_chain != nullptr);
+    BOOST_REQUIRE(resolved.backend.rc_fused_ffn_chain_seeded != nullptr);
     BOOST_REQUIRE(resolved.backend.rc_phase1 != nullptr);
+    BOOST_REQUIRE(resolved.backend.rc_phase1_seeded != nullptr);
     BOOST_TEST_MESSAGE("CUDA ExactReplay provider=" << resolved.provider);
+    BOOST_CHECK_GE(
+        matmul_v4::cuda::GetRcExactReplayCudaStats().device_index, 0);
 
     const auto header = MakeRCHeader(0xC0DAE700ull);
     const auto params = rc::MakeToyRCEpisodeParams();
+    uint256 expand_seed;
+    for (uint32_t i = 0; i < uint256::size(); ++i) {
+        expand_seed.data()[i] = static_cast<unsigned char>(i * 7u + 3u);
+    }
+    const std::array<std::pair<uint32_t, uint32_t>, 3> xof_shapes{{
+        {32, 32}, {32, 64}, {64, 32},
+    }};
+    for (size_t shape = 0; shape < xof_shapes.size(); ++shape) {
+        expand_seed.data()[0] ^= static_cast<unsigned char>(shape + 1);
+        const auto [rows, columns] = xof_shapes[shape];
+        const auto host_expanded{
+            rc::ExpandMxDequantInt8(expand_seed, rows, columns)};
+        std::vector<int8_t> device_expanded;
+        BOOST_REQUIRE(matmul_v4::cuda::LaunchRcExactReplayExpandMx(
+            expand_seed, rows, columns, device_expanded));
+        BOOST_CHECK(device_expanded == host_expanded);
+        if (shape == 1) {
+            std::vector<int8_t> continued;
+            BOOST_REQUIRE(
+                matmul_v4::cuda::LaunchRcExactReplayExpandMxForTest(
+                    expand_seed, rows, columns,
+                    /*max_blocks_per_batch=*/1, continued));
+            BOOST_CHECK(continued == host_expanded);
+        }
+    }
+    {
+        uint256 seed_a{expand_seed};
+        uint256 seed_b{expand_seed};
+        seed_a.data()[3] ^= 0x5a;
+        seed_b.data()[7] ^= 0xa5;
+        const auto expected_a{rc::ExpandMxDequantInt8(seed_a, 32, 64)};
+        const auto expected_b{rc::ExpandMxDequantInt8(seed_b, 64, 32)};
+        std::vector<int8_t> out_a;
+        std::vector<int8_t> out_b;
+        bool ok_a{false};
+        bool ok_b{false};
+        std::thread first([&] {
+            ok_a = matmul_v4::cuda::LaunchRcExactReplayExpandMx(
+                seed_a, 32, 64, out_a);
+        });
+        std::thread second([&] {
+            ok_b = matmul_v4::cuda::LaunchRcExactReplayExpandMx(
+                seed_b, 64, 32, out_b);
+        });
+        first.join();
+        second.join();
+        BOOST_REQUIRE(ok_a);
+        BOOST_REQUIRE(ok_b);
+        BOOST_CHECK(out_a == expected_a);
+        BOOST_CHECK(out_b == expected_b);
+    }
+    {
+        std::atomic_bool cancelled{true};
+        rc::ScopedExactReplayCancellation cancellation_scope{&cancelled};
+        std::vector<int8_t> cancelled_output;
+        BOOST_CHECK(!matmul_v4::cuda::LaunchRcExactReplayExpandMx(
+            expand_seed, /*rows=*/32, /*columns=*/64,
+            cancelled_output));
+    }
+    {
+        std::atomic_bool started{false};
+        std::atomic_bool cancelled{false};
+        bool completed{true};
+        std::vector<int8_t> cancelled_output;
+        std::thread worker([&] {
+            rc::ScopedExactReplayCancellation cancellation_scope{&cancelled};
+            started.store(true, std::memory_order_release);
+            completed =
+                matmul_v4::cuda::LaunchRcExactReplayExpandMxForTest(
+                    expand_seed, /*rows=*/512, /*columns=*/512,
+                    /*max_blocks_per_batch=*/1, cancelled_output);
+        });
+        while (!started.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        cancelled.store(true, std::memory_order_release);
+        worker.join();
+        BOOST_CHECK(!completed);
+        BOOST_CHECK(cancelled_output.empty());
+    }
     const uint256 cpu = rc::RecomputeResidentCurriculumReference(header, params, 0);
     BOOST_REQUIRE(!cpu.IsNull());
 
@@ -2128,13 +2434,17 @@ BOOST_AUTO_TEST_CASE(rc_cuda_exact_replay_launch_abi_smoke)
         .backend = resolved.provider,
         .require_device = true,
         .stats = &stats,
+        .profile = 1,
     };
     const uint256 accelerated = rc::RecomputeResidentCurriculumAccelerated(
         header, params, 0, {}, nullptr, nullptr, acceleration);
     BOOST_CHECK(accelerated == cpu);
     BOOST_CHECK_EQUAL(stats.cpu_fallbacks, 0u);
-    BOOST_CHECK(stats.resident_ffn_chain_on_device || stats.device_fused_ffn_chain_calls > 0 ||
-                stats.device_fused_phase1_calls > 0);
+    BOOST_CHECK_GT(stats.device_fused_ffn_chain_calls, 0U);
+    BOOST_CHECK_GT(stats.device_fused_phase1_calls, 0U);
+    BOOST_CHECK_EQUAL(stats.device_xof_fallbacks, 0U);
+    BOOST_CHECK_GT(stats.device_xof_elements, 0U);
+    BOOST_CHECK_GT(stats.device_xof_s, 0.0);
     BOOST_TEST_MESSAGE("CUDA ExactReplay toy smoke ok fused_chain_calls="
                        << stats.device_fused_ffn_chain_calls
                        << " fused_phase1_calls=" << stats.device_fused_phase1_calls);

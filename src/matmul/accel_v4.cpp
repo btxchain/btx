@@ -29,6 +29,7 @@
 
 #include <atomic>
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cstdint>
 #include <cstdlib>
@@ -37,6 +38,7 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -653,17 +655,36 @@ ResolvedExactGemm ResolveExactGemmBackendForLT()
  *  ProbeRCSelfQual. On failure return an empty backend (CPU ExactGemmS8S8).
  *  Must only be applied on the RC resolve path — never on LT.
  *
- *  F5: keyed process-local cache so per-nonce miners never re-probe. Key =
- *  {provider_label, gemm_s8s8 address, epoch}. */
+ *  F5: keyed process-local cache so per-nonce miners never re-probe. Bind the
+ *  key to every execution callback plus provider and epoch so a new or
+ *  replaced fused/seeded lane cannot inherit an earlier verdict. */
 struct RCExactGemmCacheKey {
     std::string label;
-    uintptr_t gemm_fn{0};
+    std::array<uintptr_t, 10> callbacks{};
     int32_t epoch{-1};
     bool operator<(const RCExactGemmCacheKey& o) const
     {
-        return std::tie(label, gemm_fn, epoch) < std::tie(o.label, o.gemm_fn, o.epoch);
+        return std::tie(label, callbacks, epoch) <
+            std::tie(o.label, o.callbacks, o.epoch);
     }
 };
+
+std::array<uintptr_t, 10> RCBackendCallbackIdentity(
+    const matmul::v4::lt::ExactGemmBackend& backend)
+{
+    return {{
+        reinterpret_cast<uintptr_t>(backend.gemm_s8s8),
+        reinterpret_cast<uintptr_t>(backend.gemm_s32s8),
+        reinterpret_cast<uintptr_t>(backend.rc_fused_ffn),
+        reinterpret_cast<uintptr_t>(backend.rc_fused_ffn_chain),
+        reinterpret_cast<uintptr_t>(backend.rc_fused_ffn_chain_seeded),
+        reinterpret_cast<uintptr_t>(backend.rc_expand_mx),
+        reinterpret_cast<uintptr_t>(backend.rc_merkle_leaves),
+        reinterpret_cast<uintptr_t>(backend.rc_merkle_root),
+        reinterpret_cast<uintptr_t>(backend.rc_phase1_seeded),
+        reinterpret_cast<uintptr_t>(backend.rc_phase1),
+    }};
+}
 
 std::mutex g_rc_exact_gemm_cache_mu;
 std::map<RCExactGemmCacheKey, matmul::v4::lt::ExactGemmBackend> g_rc_exact_gemm_cache;
@@ -729,7 +750,7 @@ matmul::v4::lt::ExactGemmBackend GateExactGemmWithRCSelfQualCached(
 {
     RCExactGemmCacheKey key;
     key.label = provider_label != nullptr ? provider_label : "device";
-    key.gemm_fn = reinterpret_cast<uintptr_t>(backend.gemm_s8s8);
+    key.callbacks = RCBackendCallbackIdentity(backend);
     key.epoch = epoch;
 
     {
@@ -802,6 +823,15 @@ bool RcOzakiNativeMxfp4GemmS8S8(const std::vector<int8_t>& L, const std::vector<
 }
 
 } // namespace
+
+bool IsCudaExactGemmBackend(
+    const matmul::v4::lt::ExactGemmBackend& backend,
+    std::string_view provider_label)
+{
+    return provider_label == "cuda" &&
+        backend.gemm_s8s8 == &matmul_v4::cuda::LaunchGemmS8S8 &&
+        backend.gemm_s32s8 == &matmul_v4::cuda::LaunchGemmS32S8;
+}
 
 ResolvedRCExactGemm ResolveExactGemmBackendForRC()
 {
@@ -926,19 +956,25 @@ ResolvedRCExactGemm ResolveExactGemmBackendForRC()
     //
     // When CUDA ExactReplay self-probes available, attach the Metal-parity fused
     // Phase-1 / FFN / FFN-chain Launch* callbacks before the RC gate (same shape
-    // as the Apple Metal block above). ExpandMx / Merkle stay host-side on CUDA
-    // until dedicated device lanes land; GEMM+Extract residency is the claim.
+    // as the Apple Metal block above). The seeded callbacks generate Profile-1
+    // Q/K/V and FFN weights on-device. X0 and Merkle remain on the reviewed
+    // host path; Profile 2 deliberately retains its existing implementation.
     ResolvedExactGemm resolved = ResolveExactGemmBackendForLT();
     matmul::v4::lt::ExactGemmBackend backend = resolved.backend;
     std::string provider_label =
         resolved.label != nullptr ? std::string{resolved.label} : std::string{"cpu"};
     const bool explicit_cuda = requested == "cuda" || requested == "nvidia";
     const bool automatic_cuda = requested.empty() || requested == "auto";
-    if (backend.gemm_s8s8 != nullptr && (explicit_cuda || automatic_cuda) &&
+    if (IsCudaExactGemmBackend(backend, provider_label) &&
+        (explicit_cuda || automatic_cuda) &&
         matmul_v4::cuda::IsRcExactReplayCudaAvailable()) {
         backend.rc_fused_ffn = &matmul_v4::cuda::LaunchRcExactReplayFusedFfn;
         backend.rc_fused_ffn_chain = &matmul_v4::cuda::LaunchRcExactReplayFusedFfnChain;
+        backend.rc_fused_ffn_chain_seeded =
+            &matmul_v4::cuda::LaunchRcExactReplayFusedFfnChainSeeded;
         backend.rc_phase1 = &matmul_v4::cuda::LaunchRcExactReplayPhase1;
+        backend.rc_phase1_seeded =
+            &matmul_v4::cuda::LaunchRcExactReplayPhase1Seeded;
         // Distinct cache key so a prior plain-LT CUDA resolve cannot drop fused slots.
         provider_label = provider_label.empty() ? "cuda_rc_exact" : (provider_label + "_rc_exact");
     }

@@ -8,6 +8,7 @@
 #include <matmul/matmul_v4_lt.h>
 
 #include <string>
+#include <string_view>
 
 // Thin resolve surface so pow.cpp / miners can inject device ExactGemm without
 // pulling matmul_v4_lt.h into every accel_v4.h consumer.
@@ -70,6 +71,13 @@ struct ResolvedRCExactGemm {
  * ExactReplay without claiming M4 is M5-class or that OCP MXFP4 is available.
  */
 [[nodiscard]] ResolvedRCExactGemm ResolveExactGemmBackendForRC();
+
+/** True only for the exact CUDA LT provider identity. Availability of a CUDA
+ * runtime alone must never graft CUDA RC callbacks onto HIP, TPU, Trainium,
+ * Ascend, Metal, or another non-CUDA ExactGemm backend. */
+[[nodiscard]] bool IsCudaExactGemmBackend(
+    const matmul::v4::lt::ExactGemmBackend& backend,
+    std::string_view provider_label);
 
 /**
  * Last RC resolver status for operator telemetry. This probe never initiates a

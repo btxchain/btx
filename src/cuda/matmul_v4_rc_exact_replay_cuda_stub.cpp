@@ -15,7 +15,8 @@ RcExactReplayCudaStats GetRcExactReplayCudaStats() { return {}; }
 
 bool TryCudaRcPhase1AssociativeRecall(const std::vector<int8_t>&, const std::vector<int8_t>&,
                                       const std::vector<int8_t>&, const uint256&, const uint256&,
-                                      uint32_t, uint32_t, uint32_t, std::vector<int8_t>&)
+                                      uint32_t, uint32_t, uint32_t, std::vector<int8_t>&,
+                                      const uint256*, const uint256*, const uint256*)
 {
     return false;
 }
@@ -43,7 +44,8 @@ bool TryCudaRcFusedFfnChain(const std::vector<int8_t>&, bool, const std::vector<
                             const std::vector<int8_t>&, const std::vector<std::vector<int8_t>>&,
                             const std::vector<std::vector<int8_t>>&, const std::vector<uint256>&,
                             const std::vector<uint256>&, uint32_t, uint32_t, uint32_t, uint32_t,
-                            std::vector<std::vector<int8_t>>&)
+                            std::vector<std::vector<int8_t>>&,
+                            const std::vector<uint256>*, const std::vector<uint256>*)
 {
     return false;
 }
@@ -68,6 +70,35 @@ bool LaunchRcExactReplayFusedFfnChain(const std::vector<int8_t>&,
 bool LaunchRcExactReplayPhase1(const std::vector<int8_t>&, const std::vector<int8_t>&,
                                const std::vector<int8_t>&, const uint256&, const uint256&,
                                uint32_t, uint32_t, uint32_t, std::vector<int8_t>&)
+{
+    return false;
+}
+
+bool LaunchRcExactReplayFusedFfnChainSeeded(
+    const std::vector<int8_t>&, const std::vector<uint256>&,
+    const std::vector<uint256>&, const std::vector<uint256>&,
+    const std::vector<uint256>&, uint32_t, uint32_t, uint32_t,
+    std::vector<std::vector<int8_t>>&)
+{
+    return false;
+}
+
+bool LaunchRcExactReplayPhase1Seeded(
+    const uint256&, const uint256&, const uint256&, const uint256&,
+    const uint256&, uint32_t, uint32_t, uint32_t, std::vector<int8_t>&)
+{
+    return false;
+}
+
+bool LaunchRcExactReplayExpandMx(
+    const uint256&, uint32_t, uint32_t, std::vector<int8_t>&)
+{
+    return false;
+}
+
+bool LaunchRcExactReplayExpandMxForTest(
+    const uint256&, uint32_t, uint32_t, uint32_t,
+    std::vector<int8_t>&)
 {
     return false;
 }
