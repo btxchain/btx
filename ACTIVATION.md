@@ -366,6 +366,12 @@ separate sealed CUDA+Metal correctness cohort, and a correlated strict-device
 two-node CUDA lifecycle campaign. The lifecycle policy explicitly records its
 minimum complete/contention samples and p99/max bounds; the tool does not
 invent those values. The campaign itself never self-ratifies a source flag.
+The current lifecycle campaign emits schema 2 diagnostic estimates assembled
+from independent latest-component counters. Those records are explicitly
+non-authorizing and the verifier rejects them. Activation requires a future
+schema 3 record in which every component is bound by production telemetry to
+the same exact block; changing the schema label or a correlation boolean in an
+artifact is not a substitute for implementing that telemetry.
 Changing source, a binary, evidence bytes, the height, a flag, a provider
 cohort, or a lifecycle bound requires a new exact-final campaign and policy
 record.

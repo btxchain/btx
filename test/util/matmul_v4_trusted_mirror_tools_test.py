@@ -89,6 +89,14 @@ class TrustedMirrorToolsTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unsupported lifecycle mode"):
             module.execution_policy_for_mode("unknown")
 
+    def test_lifecycle_public_errors_omit_private_exception_detail(self):
+        module = load_lifecycle()
+        private_detail = "/Users/" + "fixture-operator/private-build/bin/btxd"
+        public = module.public_exception_name(RuntimeError(private_detail))
+        self.assertEqual(public, "RuntimeError")
+        self.assertNotIn("fixture-operator", public)
+        self.assertNotIn("/Users/", public)
+
     def test_lifecycle_exports_both_runtime_build_and_validation_facts(self):
         module = load_lifecycle()
         revision = subprocess.run(

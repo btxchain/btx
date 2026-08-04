@@ -89,7 +89,9 @@ The PR97 implementation has the following local controls:
   attestations, duplicates, and incomplete observations cannot create a
   sample. This supplies the live transport component, but the latest-component
   summary is still not a correlated percentile campaign and readiness remains
-  false until the hardware evidence gates pass.
+  false until both exact-block lifecycle telemetry and the hardware evidence
+  gates pass. Schema-2 campaign output remains diagnostic and is rejected by
+  the release-final activation gate.
 - The RC admission budgets, retained-address/netgroup accounting, pending-work
   reservation, same-hash sidecar hardening, and equal-priority handoff rules
   apply before scarce accelerator work starts. Local failure and cancellation

@@ -24,7 +24,11 @@ from typing import Any
 TOOL = "btx_epoch_a_activation_gate"
 SCHEMA_VERSION = 1
 LIFECYCLE_TOOL = "btx_cuda_complete_lifecycle_campaign"
-LIFECYCLE_SCHEMA_VERSION = 2
+# Schema 2 is deliberately non-authorizing: it contains independent latest
+# component counters, not a candidate-start-to-receiving-tip record bound to
+# one exact block.  Schema 3 is reserved for the future exact-block telemetry
+# contract validated below.  The current campaign therefore fails closed.
+LIFECYCLE_SCHEMA_VERSION = 3
 INT64_MAX = (1 << 63) - 1
 HEX40 = re.compile(r"[0-9a-f]{40}")
 HEX64 = re.compile(r"[0-9a-f]{64}")
@@ -131,7 +135,30 @@ def import_tool(path: Path, name: str):
     return module
 
 
+def require_clean_relevant_worktree(root: Path) -> None:
+    """Reject worktree code that is not represented by the reviewed commit.
+
+    The source fingerprint is computed from committed Git trees.  The gate also
+    imports helpers and reads consensus source from the worktree, so allowing a
+    staged, unstaged, or untracked relevant file would mix two source
+    identities.  Include the production manifest even though it is excluded
+    from the executable-source fingerprint because the golden verifier reads it
+    directly from the worktree.
+    """
+    relevant = ("CMakeLists.txt", "cmake", "src", "contrib/matmul-v4")
+    status = git(
+        root, "status", "--porcelain=v1", "--untracked-files=all", "--",
+        *relevant,
+    )
+    require(
+        status == "",
+        "build-relevant source, gate helpers, or production manifest is dirty",
+    )
+
+
 def validate_source_identity(root: Path, policy: dict[str, Any]) -> tuple[str, str]:
+    # This must run before importing evidence_source_identity.py below.
+    require_clean_relevant_worktree(root)
     revision = exact_hex(policy.get("source_revision"), HEX40, "source_revision")
     fingerprint = exact_hex(
         policy.get("source_tree_fingerprint"), HEX64, "source_tree_fingerprint"
@@ -173,6 +200,26 @@ def parse_cpp_bool(text: str, name: str) -> bool:
     return match.group(1) == "true"
 
 
+def strip_cpp_comments(text: str) -> str:
+    """Remove comments before matching consensus assignments.
+
+    This is intentionally small rather than a C++ parser: the activation tuple
+    uses simple assignments and integer constants.  Removing both comment forms
+    prevents commented examples from satisfying the gate.
+    """
+    without_blocks = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
+    return re.sub(r"//[^\n]*", "", without_blocks)
+
+
+def mainnet_chainparams_scope(text: str) -> str:
+    clean = strip_cpp_comments(text)
+    start = re.search(r"\bclass\s+CMainParams\b", clean)
+    end = re.search(r"\bclass\s+CTestNetParams\b", clean)
+    require(start is not None and end is not None and start.start() < end.start(),
+            "cannot isolate CMainParams source scope")
+    return clean[start.start():end.start()]
+
+
 def validate_source_tuple(root: Path, policy: dict[str, Any]) -> None:
     tuple_policy = policy.get("activation_tuple")
     require(isinstance(tuple_policy, dict), "activation_tuple must be an object")
@@ -193,24 +240,28 @@ def validate_source_tuple(root: Path, policy: dict[str, Any]) -> None:
         "activation_tuple.nMatMulRCAsertRescaleDen", minimum=1,
     )
     chainparams = (root / "src/kernel/chainparams.cpp").read_text(encoding="utf-8")
-    params = (root / "src/consensus/params.h").read_text(encoding="utf-8")
+    clean_chainparams = strip_cpp_comments(chainparams)
+    mainnet = mainnet_chainparams_scope(chainparams)
+    params = strip_cpp_comments(
+        (root / "src/consensus/params.h").read_text(encoding="utf-8")
+    )
     require(
-        parse_cpp_integer(chainparams, "BTX_MATMUL_V47_EPOCH_A_HEIGHT") == height,
+        parse_cpp_integer(clean_chainparams, "BTX_MATMUL_V47_EPOCH_A_HEIGHT") == height,
         "policy activation height does not match source",
     )
     require(
-        parse_cpp_integer(chainparams, "kRCEpochAAsertRescaleNum") == coefficient,
+        parse_cpp_integer(clean_chainparams, "kRCEpochAAsertRescaleNum") == coefficient,
         "policy ASERT numerator does not match source",
     )
     require(
-        parse_cpp_integer(chainparams, "kRCEpochAAsertRescaleDen") == denominator,
+        parse_cpp_integer(clean_chainparams, "kRCEpochAAsertRescaleDen") == denominator,
         "policy ASERT denominator does not match source",
     )
     for field in ("nMatMulV4Height", "nMatMulBMX4CHeight", "nMatMulRCHeight"):
         require(
             re.search(
                 rf"consensus\.{field}\s*=\s*BTX_MATMUL_V47_EPOCH_A_HEIGHT\s*;",
-                chainparams,
+                mainnet,
             ) is not None,
             f"mainnet {field} is not bound to the atomic Epoch-A height",
         )
@@ -218,9 +269,17 @@ def validate_source_tuple(root: Path, policy: dict[str, Any]) -> None:
         re.search(
             r"consensus\.nMatMulRCAsertRescaleNum\s*=\s*"
             r"kRCEpochAAsertRescaleNum\s*;",
-            chainparams,
+            mainnet,
         ) is not None,
         "mainnet ASERT numerator is not bound to the reviewed source constant",
+    )
+    require(
+        re.search(
+            r"consensus\.nMatMulRCAsertRescaleDen\s*=\s*"
+            r"kRCEpochAAsertRescaleDen\s*;",
+            mainnet,
+        ) is not None,
+        "mainnet ASERT denominator is not bound to the reviewed source constant",
     )
 
     ratification = policy.get("ratification")
@@ -438,8 +497,18 @@ def validate_lifecycle(
 ) -> None:
     artifact = load_json(lifecycle_path)
     require(artifact.get("tool") == LIFECYCLE_TOOL, "lifecycle tool mismatch")
-    require(artifact.get("schema_version") == LIFECYCLE_SCHEMA_VERSION,
-            "lifecycle schema mismatch")
+    schema = exact_int(artifact.get("schema_version"), "lifecycle schema_version")
+    require(
+        schema == LIFECYCLE_SCHEMA_VERSION,
+        "lifecycle schema lacks exact per-block correlation telemetry",
+    )
+    require(
+        artifact.get("correlation") == {
+            "model": "exact_per_block_v1",
+            "activation_eligible": True,
+        },
+        "lifecycle artifact is not exact-block correlated",
+    )
     require(artifact.get("evidence_kind") == "cuda_complete_lifecycle_asert_calibration",
             "lifecycle artifact is not production calibration")
     require(artifact.get("source_revision") == revision, "lifecycle revision mismatch")
@@ -504,7 +573,26 @@ def validate_lifecycle(
     count = exact_int(artifact.get("complete_sample_count"), "complete_sample_count")
     require(count == len(samples) and count >= minimum,
             "lifecycle complete sample threshold not met")
-    require(artifact.get("incomplete_sample_count") <= maximum_incomplete,
+    core_samples = artifact.get("core_samples_without_authority")
+    require(isinstance(core_samples, list),
+            "lifecycle core_samples_without_authority must be an array")
+    core_count = exact_int(
+        artifact.get("core_sample_count_without_authority"),
+        "core_sample_count_without_authority",
+    )
+    require(core_count == len(core_samples), "lifecycle core sample count mismatch")
+    incomplete_samples = artifact.get("incomplete_samples")
+    require(isinstance(incomplete_samples, list),
+            "lifecycle incomplete_samples must be an array")
+    incomplete_count = exact_int(
+        artifact.get("incomplete_sample_count"), "incomplete_sample_count",
+    )
+    require(incomplete_count == len(incomplete_samples),
+            "lifecycle incomplete sample count mismatch")
+    attempts = exact_int(artifact.get("attempts"), "lifecycle attempts")
+    require(attempts == count + core_count + incomplete_count,
+            "lifecycle attempts do not reconcile with recorded outcomes")
+    require(incomplete_count <= maximum_incomplete,
             "lifecycle incomplete sample bound exceeded")
     phases = {sample.get("phase") for sample in samples if isinstance(sample, dict)}
     require(set(required_phases).issubset(phases), "lifecycle required phases were not observed")
@@ -549,6 +637,17 @@ def validate_lifecycle(
         require(block_hash not in block_hashes,
                 f"lifecycle samples[{index}] duplicates a block hash")
         block_hashes.add(block_hash)
+        require(sample.get("rpc_correlated_end_to_end_sample") is True,
+                f"lifecycle samples[{index}] is not RPC block-correlated")
+        require(sample.get("correlation_block_hash") == block_hash,
+                f"lifecycle samples[{index}] correlation block hash mismatch")
+        component_hashes = sample.get("component_block_hashes")
+        require(
+            isinstance(component_hashes, dict)
+            and set(component_hashes) == set(expected_components)
+            and all(value == block_hash for value in component_hashes.values()),
+            f"lifecycle samples[{index}] components are not bound to one block",
+        )
         require(isinstance(sample.get("miner_provider"), str)
                 and sample["miner_provider"].startswith("cuda_"),
                 f"lifecycle samples[{index}] miner provider is not CUDA")

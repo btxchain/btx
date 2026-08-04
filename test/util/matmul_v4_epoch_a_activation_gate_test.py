@@ -3,9 +3,9 @@
 
 from __future__ import annotations
 
-import copy
 import importlib.util
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -132,6 +132,11 @@ def lifecycle() -> dict:
             "authority_measured": True,
             "counter_gaps": [],
             "block_hash": f"{len(samples) + 1:064x}",
+            "rpc_correlated_end_to_end_sample": True,
+            "correlation_block_hash": f"{len(samples) + 1:064x}",
+            "component_block_hashes": {
+                field: f"{len(samples) + 1:064x}" for field in components
+            },
             "miner_provider": "cuda_rc_exact_test",
             "validator_provider": "cuda_rc_exact_test",
             "validator_execution_policy": "strict-device",
@@ -155,6 +160,10 @@ def lifecycle() -> dict:
         "matmul_dim": 4096,
         "nodes": 2,
         "activation_height_regtest": 6,
+        "correlation": {
+            "model": "exact_per_block_v1",
+            "activation_eligible": True,
+        },
         "ratification": {
             "campaign_authorizes_no_inversion_gate": False,
             "campaign_authorizes_gpu_lifecycle_gate": False,
@@ -168,8 +177,12 @@ def lifecycle() -> dict:
             "tip_validation_s", "validation_queue_wait_s",
         ],
         "complete_sample_count": 2,
+        "core_sample_count_without_authority": 0,
         "incomplete_sample_count": 0,
+        "attempts": 2,
         "samples": samples,
+        "core_samples_without_authority": [],
+        "incomplete_samples": [],
         "complete_lifecycle_summary_s": {
             "n": 2, "min": 80, "p50": 80, "p95": 85, "p99": 85,
             "max": 85, "mean": 82.5,
@@ -215,10 +228,13 @@ class EpochAActivationGateTest(unittest.TestCase):
             "static constexpr int64_t kRCEpochAAsertRescaleNum{4007014530};\n"
             "static constexpr int64_t kRCEpochAAsertRescaleDen{1};\n"
             "static constexpr int32_t BTX_MATMUL_V47_EPOCH_A_HEIGHT{185'000};\n"
+            "class CMainParams {\n"
             "consensus.nMatMulV4Height = BTX_MATMUL_V47_EPOCH_A_HEIGHT;\n"
             "consensus.nMatMulBMX4CHeight = BTX_MATMUL_V47_EPOCH_A_HEIGHT;\n"
             "consensus.nMatMulRCHeight = BTX_MATMUL_V47_EPOCH_A_HEIGHT;\n"
-            "consensus.nMatMulRCAsertRescaleNum = kRCEpochAAsertRescaleNum;\n",
+            "consensus.nMatMulRCAsertRescaleNum = kRCEpochAAsertRescaleNum;\n"
+            "consensus.nMatMulRCAsertRescaleDen = kRCEpochAAsertRescaleDen;\n"
+            "};\nclass CTestNetParams {};\n",
             encoding="utf-8",
         )
         (self.root / "src/consensus/params.h").write_text(
@@ -235,6 +251,64 @@ class EpochAActivationGateTest(unittest.TestCase):
         changed["ratification"]["BTX_MATMUL_NO_INVERSION_GATE_RATIFIED"] = False
         with self.assertRaisesRegex(MODULE.GateError, "must be true"):
             MODULE.validate_source_tuple(self.root, changed)
+
+    def test_source_tuple_denominator_wiring_is_mainnet_scoped(self) -> None:
+        (self.root / "src/kernel").mkdir(parents=True)
+        (self.root / "src/consensus").mkdir(parents=True)
+        prefix = (
+            "static constexpr int64_t kRCEpochAAsertRescaleNum{4007014530};\n"
+            "static constexpr int64_t kRCEpochAAsertRescaleDen{1};\n"
+            "static constexpr int32_t BTX_MATMUL_V47_EPOCH_A_HEIGHT{185'000};\n"
+        )
+        assignments = (
+            "consensus.nMatMulV4Height = BTX_MATMUL_V47_EPOCH_A_HEIGHT;\n"
+            "consensus.nMatMulBMX4CHeight = BTX_MATMUL_V47_EPOCH_A_HEIGHT;\n"
+            "consensus.nMatMulRCHeight = BTX_MATMUL_V47_EPOCH_A_HEIGHT;\n"
+            "consensus.nMatMulRCAsertRescaleNum = kRCEpochAAsertRescaleNum;\n"
+        )
+        (self.root / "src/consensus/params.h").write_text(
+            "static constexpr bool BTX_MATMUL_NO_INVERSION_GATE_RATIFIED{true};\n"
+            "static constexpr bool BTX_MATMUL_V47_GPU_LIFECYCLE_GATE_RATIFIED{true};\n",
+            encoding="utf-8",
+        )
+        for label, mainnet_tail in (
+            ("missing", ""),
+            ("commented", "// consensus.nMatMulRCAsertRescaleDen = "
+                          "kRCEpochAAsertRescaleDen;\n"),
+        ):
+            with self.subTest(label=label):
+                (self.root / "src/kernel/chainparams.cpp").write_text(
+                    prefix + "class CMainParams {\n" + assignments + mainnet_tail
+                    + "};\nclass CTestNetParams {\n"
+                    + "consensus.nMatMulRCAsertRescaleDen = "
+                    "kRCEpochAAsertRescaleDen;\n};\n",
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(MODULE.GateError, "mainnet ASERT denominator"):
+                    MODULE.validate_source_tuple(self.root, policy())
+
+    def test_relevant_worktree_must_be_clean_before_imports(self) -> None:
+        repo = self.root / "repo"
+        source = repo / "src/example.cpp"
+        source.parent.mkdir(parents=True)
+        source.write_text("int clean = 1;\n", encoding="utf-8")
+        for command in (
+            ["git", "init", "-q"],
+            ["git", "config", "user.name", "Gate Test"],
+            ["git", "config", "user.email", "gate-test@users.noreply.github.com"],
+            ["git", "add", "src/example.cpp"],
+            ["git", "commit", "-q", "-m", "fixture"],
+        ):
+            subprocess.run(command, cwd=repo, check=True)
+        MODULE.require_clean_relevant_worktree(repo)
+        source.write_text("int dirty = 1;\n", encoding="utf-8")
+        with self.assertRaisesRegex(MODULE.GateError, "dirty"):
+            MODULE.require_clean_relevant_worktree(repo)
+        source.write_text("int clean = 1;\n", encoding="utf-8")
+        (repo / "contrib/matmul-v4/untracked.py").parent.mkdir(parents=True)
+        (repo / "contrib/matmul-v4/untracked.py").write_text("# untracked\n", encoding="utf-8")
+        with self.assertRaisesRegex(MODULE.GateError, "dirty"):
+            MODULE.require_clean_relevant_worktree(repo)
 
     def test_coefficient_is_signed_consensus_bounded(self) -> None:
         self.assertEqual(MODULE.exact_int(MODULE.INT64_MAX, "coefficient"), MODULE.INT64_MAX)
@@ -279,6 +353,39 @@ class EpochAActivationGateTest(unittest.TestCase):
         changed = lifecycle()
         changed["samples"][1]["phase"] = "steady_mine_relay"
         self.assert_lifecycle_rejected(changed, "required phases")
+
+    def test_lifecycle_rejects_uncorrelated_current_campaign_schema(self) -> None:
+        changed = lifecycle()
+        changed["schema_version"] = 2
+        changed["correlation"] = {
+            "model": "independent_latest_components",
+            "activation_eligible": False,
+        }
+        for sample in changed["samples"]:
+            sample["rpc_correlated_end_to_end_sample"] = False
+            sample.pop("correlation_block_hash")
+            sample.pop("component_block_hashes")
+        self.assert_lifecycle_rejected(changed, "lacks exact per-block correlation")
+
+    def test_lifecycle_incomplete_accounting_is_canonical_and_reconciled(self) -> None:
+        changed = lifecycle()
+        changed["incomplete_sample_count"] = -1
+        self.assert_lifecycle_rejected(changed, "incomplete_sample_count must be an integer")
+        changed = lifecycle()
+        changed["incomplete_samples"] = [{
+            "attempt": 3, "phase": "steady_mine_relay", "reason": "failed"
+        }]
+        self.assert_lifecycle_rejected(changed, "incomplete sample count mismatch")
+        changed = lifecycle()
+        changed["attempts"] = 3
+        self.assert_lifecycle_rejected(changed, "attempts do not reconcile")
+
+    def test_lifecycle_component_hashes_must_match_exact_block(self) -> None:
+        changed = lifecycle()
+        changed["samples"][0]["component_block_hashes"][
+            "tip_validation_s"
+        ] = "f" * 64
+        self.assert_lifecycle_rejected(changed, "components are not bound")
 
     def test_measurement_artifact_cannot_self_ratify(self) -> None:
         changed = lifecycle()

@@ -15,11 +15,12 @@ Measures the readiness-gate sum (not a single ExactReplay):
   + receiving tip validation
   + validation queue wait
 
-Samples are fail-closed: missing any component, or a counter that did not
-advance for the mined block, drops the observation from the complete set.
-Latest-component RPC `complete_lifecycle_readiness` is recorded for diagnosis
-but is never treated as a correlated activation vote. Ratification gates stay
-false; this script never flips them or installs an RC ASERT ratio.
+Samples are diagnostic latest-component estimates: missing any component, or a
+counter that did not advance during the attempt, drops the observation from the
+complete set. The scheduler does not yet bind every component to one exact
+block, so neither these samples nor the RPC `complete_lifecycle_readiness`
+record are correlated activation evidence. Ratification gates stay false; this
+script never flips them or installs an RC ASERT ratio.
 
 Usage (GPU host, under flock):
 
@@ -63,6 +64,11 @@ def execution_policy_for_mode(mode: str) -> str:
     if mode == "production":
         return "strict-device"
     raise ValueError(f"unsupported lifecycle mode: {mode}")
+
+
+def public_exception_name(error: BaseException) -> str:
+    """Return a stable public error class without local paths or arguments."""
+    return type(error).__name__
 
 
 def die(msg: str, code: int = 2) -> None:
@@ -790,8 +796,7 @@ def main() -> int:
                     {
                         "attempt": attempt,
                         "phase": phase,
-                        "reason": f"exception:{type(exc).__name__}",
-                        "detail": str(exc)[:300],
+                        "reason": f"exception:{public_exception_name(exc)}",
                     }
                 )
                 status(f"incomplete attempt {attempt}: {type(exc).__name__}")
@@ -881,6 +886,10 @@ def main() -> int:
             "matmul_dim": 128 if args.mode == "toy" else 4096,
             "activation_height_regtest": ACTIVATION_HEIGHT,
             "nodes": 2,
+            "correlation": {
+                "model": "independent_latest_components",
+                "activation_eligible": False,
+            },
             "contention": {
                 "single_gpu_host": True,
                 "competing_tip_every_n_attempts": args.contention_every,
@@ -909,10 +918,10 @@ def main() -> int:
                 "validation_queue_wait_s",
             ],
             "measurement_notes": [
-                "Complete samples require per-block counter advancement on miner candidate, reseal, authority consume, validator authenticated relay, and tip validation.",
+                "Complete diagnostic samples require counter advancement during an attempt on miner candidate, reseal, authority consume, validator authenticated relay, and tip validation.",
                 "Core samples omit winner-authority handoff when the empty production-golden manifest prevents a production capability token; they are not treated as activation-ready complete lifecycle samples.",
                 "RPC complete_lifecycle_readiness sums latest lane components and omits winner-authority handoff; campaign complete sum includes handoff and is fail-closed.",
-                "correlated_end_to_end_sample remains false in RPC; campaign samples are counter-correlated across two nodes for one mined/synced tip.",
+                "correlated_end_to_end_sample remains false in RPC; counters and latest component values are not bound to one exact block and cannot authorize activation.",
                 "Missing authenticated-relay observations are recorded as incomplete; none are invented.",
             ],
             "gaps_vs_activation_gates": [
@@ -982,7 +991,11 @@ def main() -> int:
             if "core_samples" in locals() or "samples" in locals():
                 partial = {
                     "evidence_kind": "cuda_complete_lifecycle_asert_calibration_partial",
-                    "error": f"{type(exc).__name__}: {exc}"[:500],
+                    # Exception strings can contain local binary, datadir, or
+                    # workspace paths. Public evidence records only the stable
+                    # exception class; operators retain detailed stderr/logs
+                    # outside the publication artifact.
+                    "error": public_exception_name(exc),
                     "complete_sample_count": len(samples) if "samples" in locals() else 0,
                     "core_sample_count_without_authority": len(core_samples)
                     if "core_samples" in locals()
