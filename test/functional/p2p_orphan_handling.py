@@ -59,6 +59,8 @@ def cleanup(func):
         finally:
             # Clear mempool
             self.generate(self.nodes[0], 1)
+            while self.nodes[0].getrawmempool():
+                self.generate(self.nodes[0], 1)
             self.nodes[0].disconnect_p2ps()
             self.nodes[0].bumpmocktime(LONG_TIME_SKIP)
             # Check that mempool and orphanage have been cleared
@@ -810,7 +812,7 @@ class OrphanHandlingTest(BitcoinTestFramework):
         self.wallet_nonsegwit = MiniWallet(self.nodes[0], mode=MiniWalletMode.RAW_P2PKH)
         self.generate(self.wallet_nonsegwit, 10)
         self.wallet = MiniWallet(self.nodes[0])
-        self.generate(self.wallet, 160)
+        self.generate(self.wallet, DEFAULT_MAX_ORPHAN_TRANSACTIONS + 60)
 
         self.test_arrival_timing_orphan()
         self.test_orphan_rejected_parents_exceptions()
