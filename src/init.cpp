@@ -1862,8 +1862,12 @@ static void SyncCoinsTipAfterChainSync(const NodeContext& node)
         return;
     }
 
-    LogDebug(BCLog::COINDB, "Finished syncing to tip, syncing chainstate to disk\n");
-    node.chainman->ActiveChainstate().CoinsTip().Sync();
+    // A chainstate batch commits a recovery marker that names its target block.
+    // Flush block data and the block index before that marker can reach disk,
+    // otherwise a crash during the batch may leave ReplayBlocks unable to find
+    // the target. ForceFlushStateToDisk preserves the required ordering.
+    LogDebug(BCLog::COINDB, "Finished syncing to tip, flushing block index and chainstate to disk\n");
+    node.chainman->ActiveChainstate().ForceFlushStateToDisk();
 }
 
 bool AppInitInterfaces(NodeContext& node)
