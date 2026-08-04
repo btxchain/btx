@@ -2344,7 +2344,12 @@ BOOST_AUTO_TEST_CASE(rc_cuda_exact_replay_launch_abi_smoke)
         matmul_v4::cuda::GetRcExactReplayCudaStats().device_index, 0);
 
     const auto header = MakeRCHeader(0xC0DAE700ull);
-    const auto params = rc::MakeToyRCEpisodeParams();
+    auto params = rc::MakeToyRCEpisodeParams();
+    // The default toy shape has only two FFN layers and therefore never
+    // reuses a ping-pong weight slot. Three layers are the smallest shape
+    // that exercises the slot-0 generation-after-consumer dependency.
+    params.L_lyr = 3;
+    BOOST_REQUIRE(rc::ValidateRCEpisodeParams(params));
     uint256 expand_seed;
     for (uint32_t i = 0; i < uint256::size(); ++i) {
         expand_seed.data()[i] = static_cast<unsigned char>(i * 7u + 3u);
@@ -2439,9 +2444,14 @@ BOOST_AUTO_TEST_CASE(rc_cuda_exact_replay_launch_abi_smoke)
     const uint256 accelerated = rc::RecomputeResidentCurriculumAccelerated(
         header, params, 0, {}, nullptr, nullptr, acceleration);
     BOOST_CHECK(accelerated == cpu);
+    BOOST_CHECK(stats.fully_accelerated);
+    BOOST_CHECK_EQUAL(stats.cpu_calls, 0U);
     BOOST_CHECK_EQUAL(stats.cpu_fallbacks, 0u);
-    BOOST_CHECK_GT(stats.device_fused_ffn_chain_calls, 0U);
-    BOOST_CHECK_GT(stats.device_fused_phase1_calls, 0U);
+    BOOST_CHECK_EQUAL(stats.device_fused_ffn_chain_calls, params.rounds);
+    BOOST_CHECK_EQUAL(stats.device_fused_phase1_calls, params.rounds);
+    BOOST_CHECK_EQUAL(
+        stats.device_xof_calls,
+        static_cast<uint64_t>(params.rounds) * (3U + 2U * params.L_lyr));
     BOOST_CHECK_EQUAL(stats.device_xof_fallbacks, 0U);
     BOOST_CHECK_GT(stats.device_xof_elements, 0U);
     BOOST_CHECK_GT(stats.device_xof_s, 0.0);
