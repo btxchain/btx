@@ -26,7 +26,7 @@ To receive release and update notifications, please subscribe to:
 There is no published v0.33.2 binary upgrade at this time. Do not build or
 deploy the tagged height-185000 tree as though it contained the corrective
 deferral, and do not install unpublished candidates. A future release decision
-must explicitly resolve the unchanged tag before any assets are published.
+must explicitly resolve the current tag before any assets are published.
 
 Current source keeps the v4, BMX4C, and Resident Curriculum heights disabled.
 A later activation-only change must set one fresh `H_A`, install the

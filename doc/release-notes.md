@@ -51,11 +51,13 @@ startup-canary policy record the supported launch classes; each deployed
 binary still self-qualifies its live provider and runtime before advertising
 readiness.
 
-The release assets include a mainnet AssumeUTXO snapshot at height 179000.
-Verify the signed release checksums, then load `snapshot.dat` with
-`btx-cli -rpcclienttimeout=0 loadtxoutset /path/to/snapshot.dat` to reduce
-foreground catch-up to the remaining blocks after that height. The node keeps
-validating the historical chain in the background.
+The source tree includes metadata and a checksum for a mainnet AssumeUTXO
+snapshot at height 179000. The external `snapshot.dat` has not been published.
+If it is later distributed as a signed release asset, verify the release
+checksums, then load it with `btx-cli -rpcclienttimeout=0 loadtxoutset
+/path/to/snapshot.dat` to reduce foreground catch-up to the remaining blocks
+after that height. The node keeps validating the historical chain in the
+background.
 
 # Notable Changes
 
@@ -303,9 +305,9 @@ is required before enabling pinned-buffer or device-Merkle optimizations.
 - Trusted RPC/archive mirrors inherit the safety of their configured signer
   set. They should not be described or exposed as independent consensus
   validators.
-- The unchanged signed v0.33.2 tag identifies the height-185000 source tree;
-  current untagged source disables it. No v0.33.2 release assets or release
-  binaries were published.
+- The current signed v0.33.2 tag identifies the height-185000 source tree and
+  was recreated during pre-release work; current untagged source disables it.
+  No v0.33.2 release assets or release binaries were published.
 - Content elimination is structural, not absolute: monetary values, public
   keys, valid signatures, and permitted financial operands retain unavoidable
   steganographic capacity. The fork removes the covered cheap explicit storage

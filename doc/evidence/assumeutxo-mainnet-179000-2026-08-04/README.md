@@ -19,7 +19,7 @@ the full history.
 | `SHA256SUMS` | Checksum for the external `snapshot.dat` blob |
 
 The binary `snapshot.dat` (452,282,113 bytes, SHA256 in `SHA256SUMS`) is not
-stored in git. It is distributed with the v0.33.2 release.
+stored in git and has not been published as a v0.33.2 release asset.
 
 ## Chainparams updates (same freeze)
 
