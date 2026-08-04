@@ -2,7 +2,7 @@
 # Copyright (c) 2026 The BTX developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or https://opensource.org/license/mit/.
-"""Two-node CUDA strict-device complete lifecycle campaign.
+"""Two-node CUDA lifecycle campaign: toy rehearsal or production strict-device.
 
 Measures the readiness-gate sum (not a single ExactReplay):
 
@@ -53,6 +53,14 @@ ACTIVATION_HEIGHT = 6
 V3_BINDING_HEIGHT = 2
 DISABLED_HEIGHT = 2_147_483_647
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def execution_policy_for_mode(mode: str) -> str:
+    if mode == "toy":
+        return "auto-fallback"
+    if mode == "production":
+        return "strict-device"
+    raise ValueError(f"unsupported lifecycle mode: {mode}")
 
 
 def die(msg: str, code: int = 2) -> None:
@@ -139,7 +147,7 @@ class Node:
             "-miningminsyncedoutboundpeers=0",
             "-matmulvalidation=consensus",
             # Toy RC uses toy-rc ExactReplay; strict-device fails AcceptBlock.
-            f"-matmulrcexecution={'auto-fallback' if toy else 'strict-device'}",
+            f"-matmulrcexecution={execution_policy_for_mode(self.mode)}",
             "-matmulasyncverify=1",
             f"-regtestmatmulbindingheight={V3_BINDING_HEIGHT}",
             f"-regtestmatmulproductdigestheight={V3_BINDING_HEIGHT}",
@@ -458,6 +466,12 @@ def main() -> int:
              "exit code cannot green-light an incomplete run)",
     )
     args = ap.parse_args()
+    execution_policy = execution_policy_for_mode(args.mode)
+    campaign_label = (
+        "two-node CUDA toy auto-fallback lifecycle rehearsal"
+        if args.mode == "toy"
+        else "two-node CUDA strict-device complete lifecycle"
+    )
 
     if not args.btxd.is_file():
         die(f"btxd not found: {args.btxd}")
@@ -534,7 +548,7 @@ def main() -> int:
                 "priority": 4,
                 "status": state,
                 "tip_sha": args.source_revision or None,
-                "campaign": "two-node CUDA strict-device complete lifecycle",
+                "campaign": campaign_label,
                 "mode": args.mode,
                 "samples_target": args.samples,
                 "samples_complete": len(samples),
@@ -548,7 +562,7 @@ def main() -> int:
         )
 
     try:
-        status("starting two strict-device CUDA nodes")
+        status(f"starting two CUDA nodes with {execution_policy} execution")
         miner.start()
         validator.start()
         try:
@@ -749,7 +763,11 @@ def main() -> int:
         core_lifecycle_vals = [float(s["core_lifecycle_s"]) for s in core_samples]
 
         payload = {
-            "evidence_kind": "cuda_complete_lifecycle_asert_calibration",
+            "evidence_kind": (
+                "cuda_lifecycle_toy_rehearsal"
+                if args.mode == "toy"
+                else "cuda_complete_lifecycle_asert_calibration"
+            ),
             "date": "2026-08-01",
             "machine_class": {
                 "os": "Linux x86_64",
@@ -762,7 +780,7 @@ def main() -> int:
                 "btxd": btxd_sha256,
                 "btx_cli": btx_cli_sha256,
             },
-            "execution_policy": "strict-device",
+            "execution_policy": execution_policy,
             "profile": 1,
             "mode": args.mode,
             "matmul_dim": 128 if args.mode == "toy" else 4096,

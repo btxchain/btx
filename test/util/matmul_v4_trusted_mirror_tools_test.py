@@ -72,6 +72,15 @@ class TrustedMirrorToolsTest(unittest.TestCase):
         self.assertIn("--btx-cli", result.stdout)
         self.assertNotIn("--/", result.stdout)
 
+    def test_lifecycle_execution_policy_matches_mode(self):
+        module = load_lifecycle()
+        self.assertEqual(module.execution_policy_for_mode("toy"), "auto-fallback")
+        self.assertEqual(
+            module.execution_policy_for_mode("production"), "strict-device"
+        )
+        with self.assertRaisesRegex(ValueError, "unsupported lifecycle mode"):
+            module.execution_policy_for_mode("unknown")
+
     def test_rehearsal_parses_explicit_deployment_arguments(self):
         module = load_rehearsal()
         with tempfile.TemporaryDirectory() as tmp:
