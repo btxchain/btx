@@ -1,12 +1,14 @@
 # BTX-Node Design Assessment: Critical Analysis of Architectural Decisions
 
-> **Historical MatMul assessment.** The MatMul pipeline, verification, and
-> activation conclusions below assess an earlier design and are not current
-> defaults. MatMul v4.7 transition policy is defined by
-> [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md):
-> Profile-1 ExactReplay in Epoch A, Profile-1 proof plus ExactReplay in Epoch B,
-> Profile-1 proof authority in Epoch C, then Profile-2 proof authority in
-> and Epoch D separately moves to Profile 2 under proof authority. Mainnet Epoch A (v4 = BMX4C = RC) is disabled in current source (`INT32_MAX`, lifecycle ratification false); implementation and calibration remain staged, and activation requires exact-final CUDA+Metal/lifecycle/ASERT evidence plus a fresh future height; all other transition heights remain disabled. Any older “production,” “default,” “shipping,” direct-fork,
+> **Historical provenance / current deferral.** This document preserves a dated
+> design, audit, or measurement record; its body is not the current activation
+> plan. Current source keeps public-network Epoch A (`v4 = BMX4C = RC`) disabled
+> at `INT32_MAX`, with RC ASERT `1/1` and GPU-lifecycle ratification false. The
+> signed annotated `v0.33.2` tag identifies an earlier `H=185000` source tree; no
+> GitHub v0.33.2 release or assets were published; no v0.33.2 release binaries
+> were published. The tag has not moved and is not corrective; changing its
+> disposition requires an explicit release decision. See the
+> [canonical transition roadmap](btx-matmul-v4.7-transition-roadmap.md).
 
 ## Overview
 

@@ -301,7 +301,7 @@ The branch selects Profile 1 but keeps the mainnet Epoch-A tuple disabled:
 rescale `1/1`, and GPU-lifecycle ratification false. Activation remains
 **NO-GO** until a fresh finite tuple closes exact-final CUDA+Metal evidence, a
 revision-bound ASERT calibration, the strict-device trusted-mirror rehearsal,
-schema-3 lifecycle, full-suite closeout, reviewed operational-campaign
+schema-4 lifecycle/ASERT, full-suite closeout, reviewed operational-campaign
 dispositions, and a live-tip runway recheck. Any change to that fingerprinted
 freeze requires regenerating the corpus and production manifest. Epochs B–D
 remain unreachable, while testnet and signet remain on v3.

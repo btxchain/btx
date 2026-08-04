@@ -1,13 +1,14 @@
 # BTX Metal Mining Tuning
 
-This guide includes legacy mining controls. MatMul v4.7 Epoch-A qualification
-is stricter: Profile 1 ExactReplay must keep its complete XOF, contraction,
-resident FFN, ExtractMX, and Merkle pipeline on Metal with zero unintended
-CPU fallback, and must pass the loaded/back-to-back/reorg campaigns. Use
-`BTX_MATMUL_V4_BACKEND=metal` with the Profile 1 production harness for that
-evidence; a legacy `BTX_MATMUL_BACKEND=metal` solve result alone is not
-> and Epoch D separately moves to Profile 2 under proof authority. Mainnet Epoch A (v4 = BMX4C = RC) is disabled in current source (`INT32_MAX`, lifecycle ratification false); implementation and calibration remain staged, and activation requires exact-final CUDA+Metal/lifecycle/ASERT evidence plus a fresh future height; all other transition heights remain disabled. Any older “production,” “default,” “shipping,” direct-fork,
-[`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md).
+> **Historical provenance / current deferral.** This document preserves a dated
+> design, audit, or measurement record; its body is not the current activation
+> plan. Current source keeps public-network Epoch A (`v4 = BMX4C = RC`) disabled
+> at `INT32_MAX`, with RC ASERT `1/1` and GPU-lifecycle ratification false. The
+> signed annotated `v0.33.2` tag identifies an earlier `H=185000` source tree; no
+> GitHub v0.33.2 release or assets were published; no v0.33.2 release binaries
+> were published. The tag has not moved and is not corrective; changing its
+> disposition requires an explicit release decision. See the
+> [canonical transition roadmap](btx-matmul-v4.7-transition-roadmap.md).
 
 This document describes the current Apple Metal mining defaults and the
 supported tuning overrides for `btxd`, `btx-matmul-solve-bench`, and related

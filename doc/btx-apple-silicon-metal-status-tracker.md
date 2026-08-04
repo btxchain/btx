@@ -1,13 +1,14 @@
 # BTX Apple Silicon + BTX Unit Migration Status Tracker
 
-Current note: this file is a historical tracker. The active audit branch has removed the precompiled
-MatMul/oracle `.metallib` loading path and uses embedded runtime source compilation instead. See
-`doc/btx-metal-mining-tuning.md` for current operator guidance.
-
-Its completed phases concern the legacy MatMul path and do not qualify MatMul
-v4.7 Epoch A. The current launch candidate is Profile 1 ExactReplay; Profile 2
-> and Epoch D separately moves to Profile 2 under proof authority. Mainnet Epoch A (v4 = BMX4C = RC) is disabled in current source (`INT32_MAX`, lifecycle ratification false); implementation and calibration remain staged, and activation requires exact-final CUDA+Metal/lifecycle/ASERT evidence plus a fresh future height; all other transition heights remain disabled. Any older “production,” “default,” “shipping,” direct-fork,
-[`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md).
+> **Historical provenance / current deferral.** This document preserves a dated
+> design, audit, or measurement record; its body is not the current activation
+> plan. Current source keeps public-network Epoch A (`v4 = BMX4C = RC`) disabled
+> at `INT32_MAX`, with RC ASERT `1/1` and GPU-lifecycle ratification false. The
+> signed annotated `v0.33.2` tag identifies an earlier `H=185000` source tree; no
+> GitHub v0.33.2 release or assets were published; no v0.33.2 release binaries
+> were published. The tag has not moved and is not corrective; changing its
+> disposition requires an explicit release decision. See the
+> [canonical transition roadmap](btx-matmul-v4.7-transition-roadmap.md).
 
 Last updated: 2026-02-20
 Branch: codex/apple-metal-strict-readiness-fix-20260220

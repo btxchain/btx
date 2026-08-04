@@ -22,7 +22,7 @@ ratio is neutral `1/1`, and the GPU-lifecycle ratification flag is false.
 Epochs B–D, DRLT, and coupled RC are also disabled. A later activation-only
 change must choose a fresh `H_A` with at least 96 hours of live-tip runway,
 install the reviewed coefficient, set the lifecycle flag, and then seal the
-unchanged exact-final source and binaries with CUDA+Metal, schema-3 lifecycle,
+unchanged exact-final source and binaries with CUDA+Metal, a schema-4 gate,
 and revision-bound ASERT evidence. Historical corpora do not authorize a new
 source revision.
 
@@ -193,7 +193,7 @@ multiplication — is the same operation that dominates GPU and TPU workloads fo
 AI/ML training and inference, making the mining hardware directly reusable for
 productive computation.
 
-> **MatMul v4.7 Resident Curriculum transition — Epoch A release candidate.**
+> **MatMul v4.7 Resident Curriculum transition — Epoch A staged and disabled.**
 > The implementation preserves the 182-byte digest-only header and a
 > header-derived work statement, but divides the consensus change into four
 > separately activated epochs:
@@ -210,10 +210,10 @@ productive computation.
 > `T_leaf=1,024`. Profile 2 is approximately 16 times heavier and is not a
 > routine validator requirement at launch. Sampled/Freivalds carriers and
 > unfinished GKR/FRI machinery are never allowed to silently become
-> authority. Mainnet schedules Epoch A at the release-selected atomic `H_A`
-> (v4 = BMX4C = RC, with a final-binary RC ASERT rescale);
-> testnet and signet heights remain disabled, and Epochs B–D require
-> separate future activation heights. See the
+> authority. Mainnet, testnet, and signet keep Epoch A disabled at
+> `INT32_MAX`, with live RC ASERT `1/1` and GPU-lifecycle ratification false.
+> A future activation-only change must select and reseal one atomic `H_A`
+> (v4 = BMX4C = RC); Epochs B–D require separate future activation heights. See the
 > [canonical roadmap](doc/btx-matmul-v4.7-transition-roadmap.md) and
 > [Epoch-A launch gates](doc/matmul-v4-exact-replay-launch-candidate.md).
 

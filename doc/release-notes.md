@@ -1,17 +1,18 @@
-BTX version 0.33.2 was released from:
+BTX version 0.33.2 release status:
 
   <https://github.com/btxchain/btx/releases>
 
-This release carries the MatMul v4.7 Profile 1 ExactReplay
-implementation, its resource-admission and GPU-lifecycle hardening, and an
-explicit trusted-attestation topology for same-operator RPC/archive mirrors.
-**Corrective erratum:** the signed v0.33.2 tag and binaries contained a live
-Epoch-A tuple at height 185000 with RC ratio 6931159304/1. That historical
-fact is preserved here; the artifacts are not silently redefined or retagged.
-Current corrective source disables v4, BMX4C, and RC at `INT32_MAX`, restores
-the live RC ratio to `1/1`, and clears GPU-lifecycle ratification pending a new
-exact-final evidence seal and fresh future height. Do not deploy the earlier
-v0.33.2 binaries as the corrective release.
+Only a signed annotated `v0.33.2` tag and its source tree currently exist. The
+tagged tree contains an Epoch-A tuple at height 185000 with RC ratio
+`6931159304/1`. No GitHub v0.33.2 release or release assets were published, and
+no v0.33.2 release binaries were published. The tag has not moved and is
+not the corrective tree; changing its disposition requires an explicit release
+decision.
+
+Current source is later than the tag and is not a published v0.33.2 release. It
+disables v4, BMX4C, and RC at `INT32_MAX`, restores the live RC ratio to `1/1`,
+and clears GPU-lifecycle ratification pending a new exact-final evidence seal
+and fresh future height.
 
 Please report bugs using the issue tracker at GitHub:
 
@@ -23,9 +24,11 @@ To receive release and update notifications, please subscribe to:
 
 # How to Upgrade
 
-To upgrade, shut down the previous node cleanly, wait for it to exit, and use
-only signed corrective artifacts that explicitly include this erratum. Back up
-wallets and configuration before upgrading.
+There is no published v0.33.2 binary upgrade at this time. Do not build or
+deploy the tagged height-185000 tree as though it contained the corrective
+deferral, and do not use unpublished candidates as release assets. When a new
+release disposition is explicitly approved, shut down the previous node
+cleanly and back up wallets and configuration before replacing binaries.
 
 The signed v0.33.2 tagged source tree set the v4, BMX4C, and Resident Curriculum
 heights to 185000 and installed the RC coefficient. Its sealed build-relevant
@@ -254,12 +257,13 @@ See `doc/btx-matmul-trusted-rpc-mirrors.md` and
 
 # Activation State and Residual Risk
 
-The historical signed v0.33.2 artifacts authorized Epoch A at height 185000.
-Corrective source removes that instruction from future builds; it does not
-alter binaries already deployed and does not authorize Epoch A.
-Historical corpora under `doc/evidence/` remain diagnostic; a future finite
-tuple requires a new exact-final sealed CUDA+Metal cohort. The staged
-6931159304/1 value is not live consensus in the corrective tree.
+The signed annotated v0.33.2 tag identifies a source tree that would authorize
+Epoch A at height 185000 if built and deployed. No GitHub release, release
+assets, or release binaries were published from that tag. Current source removes
+that instruction from future builds and does not authorize Epoch A. Historical
+corpora under `doc/evidence/` remain diagnostic; a future finite tuple requires
+a new exact-final sealed CUDA+Metal cohort. The staged `6931159304/1` value is
+not live consensus in the corrective tree.
 
 The CUDA slot-reuse adversarial probe is not release evidence: on the launch
 CUDA 13 host it did not distinguish the sealed build from either mutation.
@@ -300,9 +304,9 @@ is required before enabling pinned-buffer or device-Merkle optimizations.
 - Trusted RPC/archive mirrors inherit the safety of their configured signer
   set. They should not be described or exposed as independent consensus
   validators.
-- Historical v0.33.2 binaries contain the height-185000 instruction; corrective
-  source disables it. Operators must use the corrective release path rather
-  than treating this documentation edit as a change to an old binary.
+- The unchanged signed v0.33.2 tag identifies the height-185000 source tree;
+  current untagged source disables it. No v0.33.2 release assets or release
+  binaries were published.
 - Content elimination is structural, not absolute: monetary values, public
   keys, valid signatures, and permitted financial operands retain unavoidable
   steganographic capacity. The fork removes the covered cheap explicit storage

@@ -1,14 +1,17 @@
-BTX version 0.33.2 is being prepared for release from:
+BTX version 0.33.2 release status:
 
   <https://github.com/btxchain/btx/releases>
 
-This release candidate carries the MatMul v4.7 Profile 1 ExactReplay
-implementation, its resource-admission and GPU-lifecycle hardening, and an
-explicit trusted-attestation topology for same-operator RPC/archive mirrors.
-The signed v0.33.2 tag historically contained a finite Epoch-A tuple at height
-185000. Current corrective source disables that tuple (`INT32_MAX`, live RC
-ratio `1/1`, GPU-lifecycle ratification false). The old artifact is not changed
-by this correction and must not be represented as containing the deferral.
+Only a signed annotated `v0.33.2` tag and its source tree currently exist. The
+tagged tree contains a finite Epoch-A tuple at height 185000. No GitHub v0.33.2
+release or release assets were published, and no v0.33.2 release binaries were
+published. The tag has not moved and is not corrective; changing
+its disposition requires an explicit release decision.
+
+Current source is later than the tag and is not a published v0.33.2 release. It
+disables the tuple (`INT32_MAX`, live RC ratio `1/1`, GPU-lifecycle
+ratification false). The tagged tree must not be represented as containing
+that deferral.
 
 Please report bugs using the issue tracker at GitHub:
 
@@ -20,16 +23,16 @@ To receive release and update notifications, please subscribe to:
 
 # How to Upgrade
 
-Use only signed corrective artifacts that explicitly identify the deferral.
-Shut down the previous node cleanly and back up wallets and configuration
-before replacing binaries. Do not install unpublished candidates or assume the
-historical v0.33.2 binary was changed in place.
+There is no published v0.33.2 binary upgrade at this time. Do not build or
+deploy the tagged height-185000 tree as though it contained the corrective
+deferral, and do not install unpublished candidates. A future release decision
+must explicitly resolve the unchanged tag before any assets are published.
 
 Current source keeps the v4, BMX4C, and Resident Curriculum heights disabled.
 A later activation-only change must set one fresh `H_A`, install the
 independently reviewed exact-final RC ASERT rescale, and set both ratification
 constants in the same reviewed tuple. That new source requires regenerated
-CUDA+Metal, schema-3 lifecycle, ASERT, and startup-canary evidence before
+CUDA+Metal, schema-4 lifecycle/ASERT, and startup-canary evidence before
 release. Testnet and signet heights remain disabled.
 See `doc/btx-matmul-v4.7-transition-roadmap.md` for the activation contract and
 the gates that remain open.

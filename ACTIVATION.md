@@ -54,9 +54,9 @@ Profile-2 selectors. They must not be implemented by flipping the current
 global Stage-3 readiness value or `nMatMulRCProfile`, because doing so would
 reinterpret historical Epoch-A blocks under a later rule.
 
-The older, pre-v4.7 tracker below describes two historical broad gates. Its
-"disabled" wording describes the implementation-only state at that time, not
-the finite-but-provisional values staged in the current release candidate:
+The older, pre-v4.7 tracker below describes two historical broad gates. Current
+source again implements its fail-closed state: all public Epoch-A heights are
+`INT32_MAX`, live RC ASERT is `1/1`, and GPU-lifecycle ratification is false:
 
 - **Historical Gate A — merge to `main` (after public review).** The fork was
   to land *disabled* and remain inert until a later activation change.
@@ -114,10 +114,9 @@ to settle §K.2b(c).
 
 This section records the superseded implementation-only merge plan, under
 which code and documentation could be merged with all activation heights
-unreachable. It does not describe the current release candidate, which stages
-a finite provisional tuple but remains non-authorizing pending exact-final
-evidence and release review. Neither state enables proof authority or Profile
-2 by default.
+unreachable. Current source also keeps Epoch A unreachable, but requires a
+fresh separately reviewed activation-only tuple and exact-final evidence.
+Neither state enables proof authority or Profile 2 by default.
 
 | # | Item | Status |
 |---|---|---|

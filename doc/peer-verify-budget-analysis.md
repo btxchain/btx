@@ -1,16 +1,14 @@
 # `nMatMulPeerVerifyBudgetPerMin` Default Value Analysis
 
-> **Historical policy analysis — not the MatMul v4.7 verifier schedule.**
-> The Phase-2 FIFO/concurrency defaults below predate header-first ExactReplay,
-> authenticated-tip priority, admission tickets, duplicate collapse, and stale
-> cancellation. They must not be copied into v4.7 policy. The current
-> authority and admission invariants are defined by
-> [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md);
-> mainnet Epoch A has a finite compiled candidate height and true flags, so it
-> would activate if merged unchanged; release remains NO-GO pending exact-final
-> combined-tree CUDA+Metal evidence, schema-4 ASERT review, full closeout, and
-> live-tip runway validation; all other production
-> transition heights remain disabled.
+> **Historical provenance / current deferral.** This document preserves a dated
+> design, audit, or measurement record; its body is not the current activation
+> plan. Current source keeps public-network Epoch A (`v4 = BMX4C = RC`) disabled
+> at `INT32_MAX`, with RC ASERT `1/1` and GPU-lifecycle ratification false. The
+> signed annotated `v0.33.2` tag identifies an earlier `H=185000` source tree; no
+> GitHub v0.33.2 release or assets were published; no v0.33.2 release binaries
+> were published. The tag has not moved and is not corrective; changing its
+> disposition requires an explicit release decision. See the
+> [canonical transition roadmap](btx-matmul-v4.7-transition-roadmap.md).
 
 ## Parameter Definition
 

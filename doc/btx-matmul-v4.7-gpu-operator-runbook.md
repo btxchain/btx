@@ -4,7 +4,7 @@ Status: Epoch A is implemented but disabled on mainnet, testnet, and signet.
 The three public heights are `INT32_MAX`, the live mainnet RC ASERT ratio is
 `1/1`, and GPU-lifecycle ratification is false. Operators must not advertise
 production readiness until a fresh atomic tuple and the exact-final
-combined-tree golden, schema-3 lifecycle, revision-bound ASERT, trusted-mirror
+combined-tree golden, schema-4 lifecycle/ASERT gate, trusted-mirror
 rehearsal, full-suite, operational-evidence, and live-tip-runway gates close.
 
 Canonical transition and activation policy:

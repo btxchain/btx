@@ -1,16 +1,14 @@
 # BTX CUDA MatMul Mining Troubleshooting
 
-This guide primarily describes the legacy product-digest CUDA path. For
-MatMul v4.7 Epoch A, CUDA qualification additionally requires full Profile 1
-ExactReplay, strict no-fallback telemetry, a corrected 100-run loaded campaign,
-and cross-machine golden parity. A legacy digest backend appearing active is
-not sufficient, and Profile 2 is not the interim replay requirement. Mainnet
-Epoch A has a finite compiled candidate height and true flags, so it would
-activate if merged unchanged; release remains NO-GO pending exact-final
-combined-tree CUDA+Metal evidence, schema-4 ASERT review, full closeout, and
-live-tip runway validation; all other
-transition heights remain disabled. See
-[`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md).
+> **Historical provenance / current deferral.** This document preserves a dated
+> design, audit, or measurement record; its body is not the current activation
+> plan. Current source keeps public-network Epoch A (`v4 = BMX4C = RC`) disabled
+> at `INT32_MAX`, with RC ASERT `1/1` and GPU-lifecycle ratification false. The
+> signed annotated `v0.33.2` tag identifies an earlier `H=185000` source tree; no
+> GitHub v0.33.2 release or assets were published; no v0.33.2 release binaries
+> were published. The tag has not moved and is not corrective; changing its
+> disposition requires an explicit release decision. See the
+> [canonical transition roadmap](btx-matmul-v4.7-transition-roadmap.md).
 
 This guide helps diagnose the case where a GPU that was previously mining via the
 experimental CUDA MatMul backend silently stops engaging the GPU after a version

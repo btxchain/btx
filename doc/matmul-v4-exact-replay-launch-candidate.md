@@ -36,8 +36,8 @@ The staged shape keeps DRLT and coupled RC disabled, selects Profile 1 and
 production dimensions, and leaves unfinished Stage-3 proof authority and
 HeaderPoW off. Every live ASERT ratio is `1/1`; the reviewed RC coefficient is
 staged but not wired. After a fresh `H_A`, coefficient, and source flags are
-installed in one final freeze, exact-final CUDA+Metal, schema-3 lifecycle, and
-revision-bound ASERT evidence must confirm it without another source change.
+installed in one final freeze, exact-final CUDA+Metal and the schema-4
+lifecycle/ASERT gate must confirm it without another source change.
 
 Round `r` is derived from round `r-1`'s root, so rounds are not sampled or run
 concurrently. The serialized block header remains 182 bytes and commits only
