@@ -25,7 +25,21 @@ PARENT_TOOL = "matmul-v3-asert-calibration"
 PARENT_SCHEMA_VERSION = 3
 RC_TOOL = "rc-episode-harness"
 RC_SCHEMA_VERSION = 2
-REQUIRED_PROVIDERS = ("cuda", "metal")
+# Epoch-A difficulty calibration is bound to the CUDA launch cohort, deliberately
+# and by policy -- not because Metal evidence was unavailable.
+#
+# The coefficient converts v3 parent nonce-attempt rate into RC episode cost, so
+# it must describe the hardware that will actually mine the fork. That cohort is
+# CUDA-dominated; an M4-class Metal provider is roughly 5x slower per RC episode,
+# and including it in a "maximum required-provider envelope" would set network
+# difficulty from a provider that will contribute a negligible share of hashrate.
+#
+# Metal remains a REQUIRED provider for golden-corpus reproduction, which is a
+# correctness property: CUDA and Metal must derive byte-identical digests. See
+# RCProductionGoldenManifestCohortValid, which still demands both. This constant
+# governs difficulty calibration only. Do not conflate the two gates -- widening
+# this back to include Metal would silently reprice the fork.
+REQUIRED_PROVIDERS = ("cuda",)
 PROVIDER_PREFIXES = {"cuda": "cuda_", "metal": "metal_"}
 CANONICAL_RC_EPISODE_MACS = 141_149_805_215_744
 UINT64_MAX = (1 << 64) - 1

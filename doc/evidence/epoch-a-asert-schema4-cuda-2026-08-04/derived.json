@@ -1,0 +1,60 @@
+{
+  "coefficient_definition": "C = max observed mixed-mode parent raw nonce rate * max observed strict Profile-1 RC episode wall time, then an explicit reviewed margin and upward quantum are applied",
+  "coefficient_policy": {
+    "coefficient_quantum": 1,
+    "method": "max_observed_cross_product_plus_margin_quantized_up_v1",
+    "safety_margin_bps": 0
+  },
+  "input_file_sha256": "0e61ea1c9ea34b0f96315a4a7cd41799cadd7861b787f9466ae4b03566e7cdaf",
+  "input_payload_sha256": "0f79ba4d14a94c69669e758849f296b3e8c6fc9edd0ff996b9b23b89c8ffd77a",
+  "nMatMulRCAsertRescaleDen": 1,
+  "nMatMulRCAsertRescaleNum": 4007014530,
+  "providers": [
+    {
+      "coefficient_point_estimate": "3959224963.1329209375777645537515815999882996385372",
+      "coefficient_quantized_up": 4007014530,
+      "device_architecture": "sm_120",
+      "margin_adjusted_upper_envelope": "4007014529.4458929682718641595801336799553644242774",
+      "max_parent_attempts_per_s": "331891936.77462520768243734227019282513465469460165",
+      "max_rc_wall_s": "12.073250614",
+      "observed_upper_envelope": "4007014529.4458929682718641595801336799553644242774",
+      "parent_attempts_per_s": "330078580.61610359975986083493587556977838633353445",
+      "parent_binary_sha256": "8cd863d2ee80c8168f52a00def84f073179156fde5842c929de17fc5697211fb",
+      "parent_sample_count": 5,
+      "parent_seeds": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "provider_family": "cuda",
+      "quantization_slack": "0.5541070317281358404198663200446355757226",
+      "rc_episode_nonces": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8
+      ],
+      "rc_harness_sha256": "4cf5b820c825419f6af67ca5b548fd0691d1a590d6eda3c5e105f52bb410ae06",
+      "rc_mean_wall_s": "11.994795165875",
+      "rc_sample_count": 8,
+      "total_parent_attempts": 10000000000,
+      "total_parent_wall_s": "30.295816170",
+      "total_rc_wall_s": "95.958361327"
+    }
+  ],
+  "required_provider_families": [
+    "cuda"
+  ],
+  "rounding": "decimal ROUND_CEILING to the reviewed positive quantum",
+  "schema_version": 4,
+  "selected_provider_family": "cuda",
+  "selection_policy": "maximum quantized required-provider envelope; the tool does not choose or imply a statistical confidence level",
+  "source_revision": "0a1769cdff12d1a18488b295075e737ee3b5e4f2",
+  "source_tree_fingerprint": "6158de794bb33308e8f6bd1b7680bb31d68b84834c8bf546b14ef9bed35d0f79"
+}

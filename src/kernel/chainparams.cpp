@@ -126,6 +126,32 @@ static constexpr int64_t kRCDatacenterAsertRescaleDen{1027};
 // matmul_unified_activation_tests pins a fixed vector at the calibration nBits
 // asserting the realized k, so a future value of the wrong KIND fails a test
 // rather than the chain.
+// RATIFIED POLICY FLOOR, not a reproduced measurement. Say so plainly here,
+// because the previous comment implied this number came out of a campaign.
+//
+// The first assembled schema-4 corpus now exists:
+// doc/evidence/epoch-a-asert-schema4-cuda-2026-08-04. Measured on the CUDA
+// launch cohort at this freeze it derives 4'007'014'530 -- parent 331'891'937
+// attempts/s over 5 samples, RC 12.073250614 s over 8 episodes, bound to exact
+// binaries and revision. The value installed here is 1.730x that envelope.
+//
+// It is installed deliberately high because the error is asymmetric: too low
+// risks slow or stalled blocks at the fork, too high yields temporarily fast
+// blocks that ASERT corrects within an epoch. Two further reasons not to lower
+// it to the measured figure:
+//
+//  - the historical campaign behind this constant measured ~215.36M attempts/s
+//    and ~32.18 s per RC episode on a different device class, and this cohort's
+//    own RC timing has appeared in two clusters (~12 s and ~32 s) across builds
+//    on the same GPU with no resolved explanation. The installed value lies
+//    between the coefficients those clusters imply;
+//  - this exact constant is NOT reproducible from the retained historical
+//    artifacts, which yield 6'898'853'852, and those artifacts are classified
+//    historical and non-authorizing.
+//
+// So: the corpus establishes a measured lower bound and binds it to real
+// evidence; this constant remains a conservative ratified ceiling above it.
+// Recalibrate if the representative launch cohort changes.
 static constexpr int64_t kRCEpochAAsertRescaleNum{6931159304};
 static constexpr int64_t kRCEpochAAsertRescaleDen{1};
 

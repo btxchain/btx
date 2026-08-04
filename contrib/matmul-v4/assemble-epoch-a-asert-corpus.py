@@ -311,8 +311,15 @@ def merge_rigs(
     coefficient_quantum: int,
 ) -> dict[str, Any]:
     """Revalidate exactly one CUDA and one Metal rig and emit derive input."""
-    if len(rigs) != 2:
-        raise AssemblyError("merge requires exactly two rig JSON objects")
+    # Bound to the calibration policy rather than a literal 2, so the required
+    # cohort is stated in exactly one place (DERIVE.REQUIRED_PROVIDERS) and this
+    # check cannot silently disagree with the one below that validates which
+    # provider families are present.
+    if len(rigs) != len(DERIVE.REQUIRED_PROVIDERS):
+        raise AssemblyError(
+            "merge requires exactly one rig JSON object per required provider "
+            f"({', '.join(DERIVE.REQUIRED_PROVIDERS)})"
+        )
     revision = DERIVE.require_hex(expected_revision, DERIVE.HEX40, "source_revision")
     fingerprint = DERIVE.require_hex(
         expected_fingerprint, DERIVE.HEX64, "source_tree_fingerprint"

@@ -14,10 +14,18 @@ defined in
 ## Current MatMul v4.7 candidate status: NO-GO
 
 The current candidate source is activation-armed: the mainnet Epoch-A v4,
-BMX4C, and RC heights are atomically set to `185000`; the staged RC ASERT ratio
-is `6931159304/1`; and both public ratification records are `true`. These are
+BMX4C, and RC heights are atomically set to `182600`; the RC ASERT ratio is
+`6931159304/1`; and both public ratification records are `true`. These are
 candidate source values, not evidence that the release is ready or that the
 currently deployed network has activated them.
+
+The ASERT ratio is a **ratified conservative policy floor**, not a reproduced
+measurement. The first assembled schema-4 corpus
+(`doc/evidence/epoch-a-asert-schema4-cuda-2026-08-04`) derives `4007014530` on
+the CUDA launch cohort at the implementation freeze; the installed value is
+1.730x that envelope, chosen because the error is asymmetric — too low risks
+stalled blocks at the fork, too high yields temporarily fast blocks that ASERT
+corrects. See the rationale in `src/kernel/chainparams.cpp`.
 
 Deployment remains **NO-GO**. The CUDA+Metal seal committed at PR #97 commit
 `df075c5184` is valid for its exact PR-97-only freeze: both providers reproduced
