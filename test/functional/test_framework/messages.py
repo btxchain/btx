@@ -73,7 +73,11 @@ MSG_WITNESS_TX = MSG_TX | MSG_WITNESS_FLAG
 
 FILTER_TYPE_BASIC = 0
 
-WITNESS_SCALE_FACTOR = 4
+# BTX consensus deliberately counts witness bytes at full weight. Keep the
+# Python transaction/block accounting identical to src/consensus/consensus.h;
+# retaining Bitcoin's factor of four understated policy vsize throughout the
+# functional suite and produced false mempool/orphan size failures.
+WITNESS_SCALE_FACTOR = 1
 
 DEFAULT_ANCESTOR_LIMIT = 25    # default max number of in-mempool ancestors
 DEFAULT_DESCENDANT_LIMIT = 25  # default max number of in-mempool descendants
@@ -342,6 +346,23 @@ def ser_uint256_vector(l):
     for i in l:
         r += ser_uint256(i)
     return r
+
+
+def deser_uint32_vector(f):
+    nit = deser_compact_size(f)
+    return [int.from_bytes(f.read(4), "little") for _ in range(nit)]
+
+
+def ser_uint32_vector(l):
+    return ser_compact_size(len(l)) + b"".join(i.to_bytes(4, "little") for i in l)
+
+
+def stream_has_trailing_payload(f):
+    """Return whether a seekable message stream has unread bytes without consuming them."""
+    position = f.tell()
+    trailing = f.read(1)
+    f.seek(position)
+    return trailing != b""
 
 
 def deser_string_vector(f):
@@ -954,15 +975,29 @@ BLOCK_HEADER_SIZE = len(CBlockHeader().serialize())
 assert_equal(BLOCK_HEADER_SIZE, 182)
 
 class CBlock(CBlockHeader):
-    __slots__ = ("vtx",)
+    __slots__ = ("vtx", "matrix_a_data", "matrix_b_data", "matrix_c_data")
 
     def __init__(self, header=None):
         super().__init__(header)
         self.vtx = []
+        self.matrix_a_data = []
+        self.matrix_b_data = []
+        self.matrix_c_data = []
 
     def deserialize(self, f):
         super().deserialize(f)
         self.vtx = deser_vector(f, CTransaction)
+        self.matrix_a_data = []
+        self.matrix_b_data = []
+        self.matrix_c_data = []
+        # Full blocks may be legacy payload-less encodings. When trailing
+        # bytes exist, mirror CBlock's canonical vector order exactly: A, B,
+        # then the optional product/proof vector C.
+        if self.vtx and stream_has_trailing_payload(f):
+            self.matrix_a_data = deser_uint32_vector(f)
+            self.matrix_b_data = deser_uint32_vector(f)
+            if stream_has_trailing_payload(f):
+                self.matrix_c_data = deser_uint32_vector(f)
 
     def serialize(self, with_witness=True):
         r = b""
@@ -971,6 +1006,16 @@ class CBlock(CBlockHeader):
             r += ser_vector(self.vtx, "serialize_with_witness")
         else:
             r += ser_vector(self.vtx, "serialize_without_witness")
+        # Full BTX blocks canonically carry the two MatMul input-payload
+        # vectors after the transaction vector, followed by an optional
+        # product/proof vector. Handcrafted digest-only blocks keep all three
+        # empty. Do not append them to the empty-vtx CBlock shim used by
+        # headers relay.
+        if self.vtx:
+            r += ser_uint32_vector(self.matrix_a_data)
+            r += ser_uint32_vector(self.matrix_b_data)
+            if self.matrix_c_data:
+                r += ser_uint32_vector(self.matrix_c_data)
         return r
 
     # Calculate the merkle root given a vector of transaction hashes
@@ -2269,6 +2314,48 @@ class msg_sendtxrcncl:
             (self.version, self.salt)
 
 class TestFrameworkScript(unittest.TestCase):
+    def test_block_empty_matmul_payload_serialization(self):
+        header_only = CBlock()
+        self.assertEqual(
+            header_only.serialize(),
+            CBlockHeader(header_only).serialize() + ser_compact_size(0),
+        )
+
+        full_block = CBlock()
+        full_block.vtx = [CTransaction()]
+        self.assertEqual(
+            full_block.serialize(),
+            CBlockHeader(full_block).serialize()
+            + ser_vector(full_block.vtx, "serialize_with_witness")
+            + ser_compact_size(0)
+            + ser_compact_size(0),
+        )
+        decoded = from_binary(CBlock, full_block.serialize())
+        self.assertEqual(decoded.serialize(), full_block.serialize())
+        self.assertEqual(decoded.matrix_a_data, [])
+        self.assertEqual(decoded.matrix_b_data, [])
+        self.assertEqual(decoded.matrix_c_data, [])
+
+        payload_block = CBlock()
+        payload_block.vtx = [CTransaction()]
+        payload_block.matrix_a_data = [0, 1, 0xffffffff]
+        payload_block.matrix_b_data = [2, 3]
+        payload_block.matrix_c_data = [4]
+        payload_decoded = from_binary(CBlock, payload_block.serialize())
+        self.assertEqual(payload_decoded.matrix_a_data, payload_block.matrix_a_data)
+        self.assertEqual(payload_decoded.matrix_b_data, payload_block.matrix_b_data)
+        self.assertEqual(payload_decoded.matrix_c_data, payload_block.matrix_c_data)
+        self.assertEqual(payload_decoded.serialize(), payload_block.serialize())
+
+        # Pre-payload full-block encodings remain readable for historical
+        # fixtures and old block files.
+        legacy = CBlockHeader(full_block).serialize() + ser_vector(full_block.vtx, "serialize_with_witness")
+        legacy_decoded = from_binary(CBlock, legacy)
+        self.assertEqual(legacy_decoded.vtx[0].serialize(), full_block.vtx[0].serialize())
+        self.assertEqual(legacy_decoded.matrix_a_data, [])
+        self.assertEqual(legacy_decoded.matrix_b_data, [])
+        self.assertEqual(legacy_decoded.matrix_c_data, [])
+
     def test_rcadmit_encode_decode(self):
         expected = msg_rcadmit(
             block_hash=int("0123456789abcdef" * 4, 16),

@@ -188,17 +188,22 @@ bool RecoverDatabaseFile(const ArgsManager& args, const fs::path& file_path, bil
         std::string strType, strErr;
 
         // We only care about KEY, MASTER_KEY, CRYPTED_KEY, and HDCHAIN types
-        ssKey >> strType;
         bool fReadOK = false;
-        if (strType == DBKeys::KEY) {
-            fReadOK = LoadKey(&dummyWallet, ssKey, ssValue, strErr);
-        } else if (strType == DBKeys::CRYPTED_KEY) {
-            fReadOK = LoadCryptedKey(&dummyWallet, ssKey, ssValue, strErr);
-        } else if (strType == DBKeys::MASTER_KEY) {
-            fReadOK = LoadEncryptionKey(&dummyWallet, ssKey, ssValue, strErr);
-        } else if (strType == DBKeys::HDCHAIN) {
-            fReadOK = LoadHDChain(&dummyWallet, ssValue, strErr);
-        } else {
+        try {
+            ssKey >> strType;
+            if (strType == DBKeys::KEY) {
+                fReadOK = LoadKey(&dummyWallet, ssKey, ssValue, strErr);
+            } else if (strType == DBKeys::CRYPTED_KEY) {
+                fReadOK = LoadCryptedKey(&dummyWallet, ssKey, ssValue, strErr);
+            } else if (strType == DBKeys::MASTER_KEY) {
+                fReadOK = LoadEncryptionKey(&dummyWallet, ssKey, ssValue, strErr);
+            } else if (strType == DBKeys::HDCHAIN) {
+                fReadOK = LoadHDChain(&dummyWallet, ssValue, strErr);
+            } else {
+                continue;
+            }
+        } catch (const std::exception& e) {
+            warnings.push_back(Untranslated(strprintf("WARNING: WalletBatch::Recover skipping %s: %s", strType, e.what())));
             continue;
         }
 

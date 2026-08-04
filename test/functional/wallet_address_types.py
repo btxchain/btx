@@ -67,17 +67,13 @@ from test_framework.util import (
 
 class AddressTypeTest(BitcoinTestFramework):
     def add_options(self, parser):
-        self.add_wallet_options(parser)
+        self.add_wallet_options(parser, descriptors=True, legacy=True)
 
     def set_test_params(self):
-        self.num_nodes = 6
+        self.num_nodes = 2
         self.extra_args = [
-            ["-addresstype=legacy"],
-            ["-addresstype=p2sh-segwit"],
-            ["-addresstype=p2sh-segwit", "-changetype=bech32"],
-            ["-addresstype=bech32"],
-            ["-changetype=p2sh-segwit"],
-            [],
+            ["-addresstype=p2mr", "-changetype=p2mr"],
+            ["-addresstype=p2mr", "-changetype=p2mr"],
         ]
         # whitelist peers to speed up tx relay / mempool sync
         self.noban_tx_relay = True
@@ -98,6 +94,40 @@ class AddressTypeTest(BitcoinTestFramework):
     def get_balances(self, key='trusted'):
         """Return a list of balances."""
         return [self.nodes[i].getbalances()['mine'][key] for i in range(4)]
+
+    def run_test(self):
+        """Exercise BTX's native P2MR wallet policy and retained secp descriptors."""
+        self.generate(self.nodes[1], COINBASE_MATURITY + 1)
+
+        for node in self.nodes:
+            receive = node.getnewaddress(address_type="p2mr")
+            change = node.getrawchangeaddress(address_type="p2mr")
+            assert node.validateaddress(receive)["isvalid"]
+            assert node.validateaddress(change)["isvalid"]
+            assert_equal(node.getaddressinfo(receive)["ismine"], True)
+            for disabled in ("legacy", "p2sh-segwit", "bech32", "bech32m"):
+                assert_raises_rpc_error(-8, "Only address type 'p2mr' is supported", node.getnewaddress, "", disabled)
+                assert_raises_rpc_error(-8, "Only address type 'p2mr' is supported", node.getrawchangeaddress, disabled)
+
+        destination = self.nodes[0].getnewaddress()
+        txid = self.nodes[1].sendtoaddress(destination, 1)
+        self.generate(self.nodes[1], 1)
+        assert_equal(self.nodes[0].gettransaction(txid)["confirmations"], 1)
+
+        # BTX disables automatic secp address generation, but keeps descriptor
+        # parsing/derivation/import for compatibility and offline inspection.
+        secp = descsum_create(
+            "wpkh(tpubD6NzVbkrYhZ4WaWSyoBvQwbpLkojyoTZPRsgXELWz3Popb3qkjcJyJUGLnL4qHHoQvao8ESaAstxYSnhyswJ76uZPStJRJCTKvosUCJZL5B/0/*)"
+        )
+        info = self.nodes[0].getdescriptorinfo(secp)
+        assert_equal(info["isrange"], True)
+        derived = self.nodes[0].deriveaddresses(secp, [0, 1])
+        assert_equal(len(derived), 2)
+        assert all(self.nodes[0].validateaddress(addr)["isvalid"] for addr in derived)
+        self.nodes[0].createwallet("secp-watch", disable_private_keys=True, blank=True, descriptors=True)
+        watch = self.nodes[0].get_wallet_rpc("secp-watch")
+        result = watch.importdescriptors([{"desc": secp, "timestamp": "now", "active": False, "range": [0, 1]}])
+        assert_equal(result[0]["success"], True)
 
     def test_address(self, node, address, multisig, typ):
         """Run sanity checks on an address."""
@@ -225,7 +255,13 @@ class AddressTypeTest(BitcoinTestFramework):
         self.log.debug("Check if change address " + change_addresses[0] + " is " + expected_type)
         self.test_address(node_sender, change_addresses[0], multisig=False, typ=expected_type)
 
-    def run_test(self):
+    def _unsupported_bitcoin_address_type_reference(self):
+        """Unexecuted upstream reference for address types BTX wallets reject.
+
+        Native behavior and retained secp descriptor compatibility are covered
+        by run_test(). This reference is kept temporarily to make future
+        upstream rebases reviewable; it is not BTX functional-test coverage.
+        """
         # Mine 101 blocks on node5 to bring nodes out of IBD and make sure that
         # no coinbases are maturing for the nodes-under-test during the test
         self.generate(self.nodes[5], COINBASE_MATURITY + 1)

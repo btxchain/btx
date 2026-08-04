@@ -99,6 +99,22 @@ def assert_snapshot_sync(blockchaininfo, active, background_validation_in_progre
 
 class AssumeutxoTest(BitcoinTestFramework):
 
+    def start_node(self, i, *args, **kwargs):
+        # The framework records TestNode.mocktime but a restarted daemon otherwise
+        # begins startup with wall time. This test's cached chain is dated in 2011;
+        # pass the clock on the command line so startup IBD/service decisions and
+        # later background-snapshot download policy see the same deterministic time.
+        saved_mocktime = self.nodes[i].mocktime
+        if saved_mocktime is not None:
+            mocktime_arg = f"-mocktime={saved_mocktime}"
+            if args:
+                positional = list(args)
+                positional[0] = [*(positional[0] or []), mocktime_arg]
+                args = tuple(positional)
+            else:
+                kwargs["extra_args"] = [*(kwargs.get("extra_args") or []), mocktime_arg]
+        super().start_node(i, *args, **kwargs)
+
     def set_test_params(self):
         """Use the pregenerated, deterministic chain up to height 199."""
         self.num_nodes = 4
@@ -261,7 +277,12 @@ class AssumeutxoTest(BitcoinTestFramework):
         for height in range(1, end_height + 1):
             msg.headers.append(from_hex(CBlockHeader(), source.getblockheader(source.getblockhash(height), verbose=False)))
         peer.send_message(msg)
-        self.wait_until(lambda: target.getblockchaininfo()["headers"] == end_height)
+        # Header-only MatMul suffixes intentionally contribute zero authenticated chainwork and do
+        # not replace getblockchaininfo.headers. Observe the accepted header as the leaf this
+        # isolated helper just submitted. BTX getblockheader intentionally requires block data, so
+        # it cannot be used to query a header-only entry here.
+        end_hash = source.getblockhash(end_height)
+        self.wait_until(lambda: any(tip["hash"] == end_hash for tip in target.getchaintips()))
         peer.peer_disconnect()
 
     def test_invalid_chainstate_scenarios(self):
@@ -414,6 +435,14 @@ class AssumeutxoTest(BitcoinTestFramework):
         for node in (snapshot_node, ibd_node):
             self.stop_node(node.index)
             rmtree(node.chain_path)
+            # The IBD peer is deliberately fresh. Do not restore the cached
+            # chain's 2011 mock clock for that node: with only genesis it would
+            # appear current and permit historical requests from the
+            # NETWORK_LIMITED snapshot peer. The snapshot node does retain
+            # mocktime; BTX's background MatMul download policy uses it to make
+            # deterministic forward progress through this cached chain.
+            if node is ibd_node:
+                node.mocktime = None
             self.start_node(node.index, extra_args=self.extra_args[node.index])
 
         # Sync-up headers chain on snapshot_node to load snapshot
@@ -530,10 +559,12 @@ class AssumeutxoTest(BitcoinTestFramework):
         for node in self.nodes[1:]:
             self.sync_headers_via_p2p(n0, node, SNAPSHOT_BASE_HEIGHT)
 
-        # Ensure everyone is seeing the same headers.
+        # Ensure everyone knows the snapshot-base header. Header-only MatMul suffixes deliberately
+        # do not replace m_best_header before body authentication.
+        snapshot_base_hash = n0.getblockhash(SNAPSHOT_BASE_HEIGHT)
         for n in self.nodes:
             blockchaininfo = n.getblockchaininfo()
-            assert_equal(blockchaininfo["headers"], SNAPSHOT_BASE_HEIGHT)
+            assert any(tip["hash"] == snapshot_base_hash for tip in n.getchaintips())
             expected_profile = "full_commitment_index" if n.index == 2 else "externalized"
             expected_retain = (n.index == 2)
             assert_shielded_retention(blockchaininfo, expected_profile, expected_retain)

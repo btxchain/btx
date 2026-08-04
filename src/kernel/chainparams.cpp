@@ -2138,6 +2138,16 @@ public:
             opts.genesis_nonce.has_value() ||
             opts.genesis_bits.has_value() ||
             opts.genesis_version.has_value();
+        // The functional harness always selects the Phase-A seal with
+        // -regtestmatmulltsealaspow=0. The checked-in height-299 snapshot was
+        // generated for that deterministic harness chain, and the height-61,010
+        // fast-start fixture is explicitly mockable/height-bound. The default
+        // height-110 snapshot belongs to the Phase-B chain and is removed below.
+        // Any additional consensus override still makes custom_consensus true
+        // and clears all canned metadata; snapshot content hashes remain fully
+        // validated.
+        const bool functional_harness_seal_override =
+            opts.matmul_lt_seal_as_pow.has_value() && !*opts.matmul_lt_seal_as_pow;
         const bool custom_consensus =
             custom_genesis ||
             !opts.activation_heights.empty() ||
@@ -2165,7 +2175,7 @@ public:
             opts.matmul_rc_coupled_use_toy_dims.has_value() ||
             opts.matmul_rc_coupled_profile.has_value() ||
             opts.matmul_rc_profile.has_value() ||
-            opts.matmul_lt_seal_as_pow.has_value() ||
+            (opts.matmul_lt_seal_as_pow.has_value() && !functional_harness_seal_override) ||
             opts.matmul_flat_sketch_replay ||
             opts.shielded_tx_binding_activation_height.has_value() ||
             opts.shielded_bridge_tag_activation_height.has_value() ||
@@ -2266,6 +2276,11 @@ public:
                     .blockhash = consteval_ctor(uint256{"0000000000000000000000000000000000000000000000000000000000000000"}),
                 },
             };
+            if (functional_harness_seal_override) {
+                std::erase_if(m_assumeutxo_data, [](const auto& snapshot) {
+                    return snapshot.height == 110;
+                });
+            }
         } else {
             // Consensus-altering regtest overrides invalidate canned snapshot metadata.
             m_assumeutxo_data.clear();

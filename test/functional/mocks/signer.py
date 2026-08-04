@@ -30,9 +30,10 @@ def enumerate(args):
     }]))
 
 def getdescriptors(args):
-    xpub = "tpubDCBEcmVKbfC9KfdydyLbJ2gfNL88grZu1XcWSW9ytTM6fitvaRmVyr8Ddf7SjZ2ZfMx9RicjYAXhuh3fmLiVLPodPEqnQQURUfrBKiiVZc8"
-    receive_desc = f"mr(pk_slh([00000001/87h/1h/0h]{xpub}/0/*))"
-    internal_desc = f"mr(pk_slh([00000001/87h/1h/0h]{xpub}/1/*))"
+    receive_key = "pqhd(00000001/1h/0h/0/*)"
+    internal_key = "pqhd(00000001/1h/0h/1/*)"
+    receive_desc = f"mr(pk_slh({receive_key}))"
+    internal_desc = f"mr(pk_slh({internal_key}))"
 
     sys.stdout.write(json.dumps({
         "receive": [receive_desc],
@@ -47,17 +48,14 @@ def getp2mrpubkeys(args):
     if args.desc is None or args.index is None:
         return sys.stdout.write(json.dumps({"error": "Missing descriptor/index"}))
 
-    material = f"{args.desc}|{args.index}|slh_dsa_128s".encode("utf-8")
-    pubkey = hashlib.sha256(material).hexdigest()
-
     sys.stdout.write(json.dumps({
-        "entries": [
-            {
-                "expr_index": 0,
-                "algo": "slh_dsa_128s",
-                "pubkey": pubkey,
-            }
-        ]
+        "entries": [{
+            "expr_index": 0,
+            "algo": "slh_dsa_128s",
+            "pubkey": hashlib.sha256(
+                f"{args.desc}|{args.index}|0|slh_dsa_128s".encode("utf-8")
+            ).hexdigest(),
+        }]
     }))
 
 

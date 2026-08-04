@@ -14,6 +14,7 @@ from test_framework.blocktools import (
     get_legacy_sigopcount_block,
     get_legacy_sigopcount_tx,
     MAX_BLOCK_SIGOPS,
+    REGTEST_GENERIC_P2P_MATMUL_ARGS,
     REGTEST_KAWPOW_TARGET_SPACING,
 )
 from test_framework.messages import (
@@ -25,6 +26,8 @@ from test_framework.messages import (
     CTxOut,
     MAX_BLOCK_WEIGHT,
     SEQUENCE_FINAL,
+    WITNESS_SCALE_FACTOR,
+    ser_uint32_vector,
     uint256_from_str,
 )
 from test_framework.p2p import P2PDataStore
@@ -76,6 +79,11 @@ class CBrokenBlock(CBlock):
                 r += tx.serialize_with_witness()
             else:
                 r += tx.serialize_without_witness()
+        if self.vtx:
+            r += ser_uint32_vector(self.matrix_a_data)
+            r += ser_uint32_vector(self.matrix_b_data)
+            if self.matrix_c_data:
+                r += ser_uint32_vector(self.matrix_c_data)
         return r
 
     def normal_serialize(self):
@@ -91,7 +99,9 @@ class FullBlockTest(BitcoinTestFramework):
         self.setup_clean_chain = True
         self.extra_args = [[
             '-acceptnonstdtxn=1',  # This is a consensus block test, we don't care about tx policy
+            '-randomtiebreak=0',  # Preserve first-seen ordering for the equal-work fork assertions below
             '-testactivationheight=bip34@2',
+            *REGTEST_GENERIC_P2P_MATMUL_ARGS,
         ]]
 
     def run_test(self):
@@ -339,13 +349,16 @@ class FullBlockTest(BitcoinTestFramework):
         self.save_spendable_output()
 
         # TEST: block_serialized_size_over_limit_rejected
-        self.log.info("Reject a block of weight MAX_BLOCK_WEIGHT + 4")
+        self.log.info("Reject a block one serialized-size unit over MAX_BLOCK_WEIGHT")
         self.move_tip(15)
         b24 = self.next_block(24, spend=out[6])
-        tx = self.create_weight_padding_tx(b24.vtx[1], MAX_BLOCK_WEIGHT + 4 - b24.get_weight())
+        tx = self.create_weight_padding_tx(b24.vtx[1], MAX_BLOCK_WEIGHT + WITNESS_SCALE_FACTOR - b24.get_weight())
         b24 = self.update_block(24, [tx])
-        assert_equal(b24.get_weight(), MAX_BLOCK_WEIGHT + 1 * 4)
-        self.send_blocks([b24], success=False, reject_reason='bad-blk-length', reconnect=True)
+        assert_equal(b24.get_weight(), MAX_BLOCK_WEIGHT + WITNESS_SCALE_FACTOR)
+        # At WITNESS_SCALE_FACTOR=1 this exceeds both the consensus block-size
+        # limit and the transport's block-message ceiling by one byte. The
+        # transport must reject it before deserialization and disconnect.
+        self.send_blocks([b24], success=False, reject_reason='Header error: Size too large', reconnect=True)
 
         b25 = self.next_block(25, spend=out[7])
         self.send_blocks([b25], False)
@@ -706,7 +719,10 @@ class FullBlockTest(BitcoinTestFramework):
         b50 = self.next_block(50)
         b50.nBits = b50.nBits - 1
         b50.solve()
-        self.send_blocks([b50], False, force_send=True, reject_reason='bad-diffbits', reconnect=True)
+        # BTX rejects the claimed header work in the networking prefilter,
+        # before contextual validation can emit the inherited bad-diffbits
+        # reason. Assert the earlier disconnect boundary.
+        self.send_blocks([b50], False, force_send=True, reject_reason='invalid claimed block-header work', reconnect=True)
 
         self.log.info("Reject a block with two coinbase transactions")
         self.move_tip(44)
@@ -962,17 +978,19 @@ class FullBlockTest(BitcoinTestFramework):
         b64a.initialize(regular_block)
         self.blocks["64a"] = b64a
         self.tip = b64a
-        tx = self.create_weight_padding_tx(b64a.vtx[1], MAX_BLOCK_WEIGHT + 8 * 4 - b64a.get_weight())
+        tx = self.create_weight_padding_tx(b64a.vtx[1], MAX_BLOCK_WEIGHT + 8 * WITNESS_SCALE_FACTOR - b64a.get_weight())
         b64a = self.update_block("64a", [tx])
-        assert_equal(b64a.get_weight(), MAX_BLOCK_WEIGHT + 8 * 4)
-        self.send_blocks([b64a], success=False, reject_reason='non-canonical ReadCompactSize()')
-
-        # bitcoind doesn't disconnect us for sending a bloated block, but if we subsequently
-        # resend the header message, it won't send us the getdata message again. Just
-        # disconnect and reconnect and then call sync_blocks.
-        # NOTE: improve this test to be less dependent on P2P DOS behaviour.
-        node.disconnect_p2ps()
-        self.reconnect_p2p()
+        assert_equal(b64a.get_weight(), MAX_BLOCK_WEIGHT + 8 * WITNESS_SCALE_FACTOR)
+        # BTX's 24 MB serialized-message ceiling rejects this 8-byte-over wire
+        # encoding in the transport before CompactSize deserialization and
+        # disconnects the peer. The canonical serialization of the same block
+        # must nevertheless remain acceptable after reconnect.
+        self.send_blocks(
+            [b64a],
+            success=False,
+            reject_reason="Header error: Size too large",
+            reconnect=True,
+        )
 
         self.move_tip('dup_2')
         b64 = CBlock(b64a)
@@ -1384,8 +1402,8 @@ class FullBlockTest(BitcoinTestFramework):
     def create_weight_padding_tx(self, spend_tx, target_weight):
         """Create an anyone-can-spend tx with an exact non-witness weight."""
         assert target_weight > 0
-        assert target_weight % 4 == 0
-        target_bytes = target_weight // 4
+        assert target_weight % WITNESS_SCALE_FACTOR == 0
+        target_bytes = target_weight // WITNESS_SCALE_FACTOR
 
         # tx_size = 4(version) + 1(vin_count) + 41(vin) + compact(vout_count)
         #           + sum(9 + script_len) + 4(locktime)

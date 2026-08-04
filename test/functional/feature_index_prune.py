@@ -74,11 +74,15 @@ class FeatureIndexPruneTest(BitcoinTestFramework):
 
         self.log.info("prune some blocks")
         for node in self.nodes[:2]:
-            with node.assert_debug_log(['Prune: UnlinkPrunedFiles deleted blk/rev (00000)']):
+            with node.assert_debug_log(['Prune: UnlinkPrunedFiles deleted blk/rev']):
                 pruneheight_new = node.pruneblockchain(400)
-                # the prune heights used here and below are magic numbers that are determined by the
-                # thresholds at which block files wrap, so they depend on disk serialization and default block file size.
-                assert_equal(pruneheight_new, 248)
+                # The exact height is a block-file boundary and therefore depends on BTX block
+                # serialization. The RPC contract is that pruning stops at or below the request.
+                assert_greater_than(pruneheight_new, 0)
+                assert pruneheight_new <= 400
+                # pruneblockchain returns the last pruned height, while
+                # getblockchaininfo reports the first retained height.
+                assert_equal(node.getblockchaininfo()['pruneheight'], pruneheight_new + 1)
 
         self.log.info("check if we can access the tips blockfilter and coinstats when we have pruned some blocks")
         tip = self.nodes[0].getbestblockhash()
@@ -89,6 +93,8 @@ class FeatureIndexPruneTest(BitcoinTestFramework):
 
         self.log.info("check if we can access the blockfilter and coinstats of a pruned block")
         height_hash = self.nodes[0].getblockhash(2)
+        for node in self.nodes[:2]:
+            assert_raises_rpc_error(-1, "Block not available (pruned data)", node.getblock, height_hash, 0)
         for node in filter_nodes:
             assert_greater_than(len(node.getblockfilter(height_hash)['filter']), 0)
         for node in stats_nodes:
@@ -110,10 +116,13 @@ class FeatureIndexPruneTest(BitcoinTestFramework):
 
         self.generate(self.nodes[0], 749)
 
-        self.log.info("prune exactly up to the indices best blocks while the indices are disabled")
+        self.log.info("prune request beyond, but actual pruning below, the indices best blocks while indices are disabled")
+        index_best_height = 751
         for i in range(3):
             pruneheight_2 = self.nodes[i].pruneblockchain(1000)
-            assert_equal(pruneheight_2, 750)
+            assert_greater_than(pruneheight_2, 0)
+            assert pruneheight_2 < index_best_height
+            assert_equal(self.nodes[i].getblockchaininfo()['pruneheight'], pruneheight_2 + 1)
             # Restart the nodes again with the indices activated
             self.restart_node(i, extra_args=self.extra_args[i])
 
@@ -126,7 +135,9 @@ class FeatureIndexPruneTest(BitcoinTestFramework):
 
         for i in range(3):
             pruneheight_3 = self.nodes[i].pruneblockchain(2000)
-            assert_greater_than(pruneheight_3, pruneheight_2)
+            assert_greater_than(pruneheight_3, 1500)
+            assert pruneheight_3 <= 2000
+            assert_equal(self.nodes[i].getblockchaininfo()['pruneheight'], pruneheight_3 + 1)
             self.stop_node(i)
 
         self.log.info("make sure we get an init error when starting the nodes again with the indices")
@@ -145,9 +156,14 @@ class FeatureIndexPruneTest(BitcoinTestFramework):
         self.sync_index(height=2500)
 
         for node in self.nodes[:2]:
-            with node.assert_debug_log(['Prune: UnlinkPrunedFiles deleted blk/rev (00007)']):
+            previous_pruneheight = node.getblockchaininfo()['pruneheight']
+            with node.assert_debug_log(['Prune: UnlinkPrunedFiles deleted blk/rev']):
                 pruneheight_new = node.pruneblockchain(2500)
-                assert_equal(pruneheight_new, 2005)
+                assert_greater_than(pruneheight_new + 1, previous_pruneheight)
+                # Manual pruning retains at least 288 blocks. The returned height is the
+                # last block in a fully pruned file and may be lower than this cap.
+                assert pruneheight_new <= 2500 - 288
+                assert_equal(node.getblockchaininfo()['pruneheight'], pruneheight_new + 1)
 
         self.log.info("ensure that prune locks don't prevent indices from failing in a reorg scenario")
         with self.nodes[0].assert_debug_log(['basic block filter index prune lock moved back to 2480']):

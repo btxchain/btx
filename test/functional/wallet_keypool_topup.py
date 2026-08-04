@@ -45,9 +45,8 @@ class KeypoolRestoreTest(BitcoinTestFramework):
         for i in [1, 2, 3, 4]:
             self.connect_nodes(0, i)
 
-        output_types = ["legacy", "p2sh-segwit", "bech32"]
-        if self.options.descriptors:
-            output_types.append("bech32m")
+        # BTX wallets expose the native P2MR keypool only.
+        output_types = ["p2mr"]
         for i, output_type in enumerate(output_types):
             self.log.info("Generate keys for wallet with address type: {}".format(output_type))
             idx = i+1
@@ -55,17 +54,11 @@ class KeypoolRestoreTest(BitcoinTestFramework):
                 addr_oldpool = self.nodes[idx].getnewaddress(address_type=output_type)
             for _ in range(20):
                 addr_extpool = self.nodes[idx].getnewaddress(address_type=output_type)
+            expected_next_address = self.nodes[idx].getnewaddress(address_type=output_type)
 
             # Make sure we're creating the outputs we expect
             address_details = self.nodes[idx].validateaddress(addr_extpool)
-            if i == 0:
-                assert not address_details["isscript"] and not address_details["iswitness"]
-            elif i == 1:
-                assert address_details["isscript"] and not address_details["iswitness"]
-            elif i == 2:
-                assert not address_details["isscript"] and address_details["iswitness"]
-            elif i == 3:
-                assert address_details["isscript"] and address_details["iswitness"]
+            assert address_details["isvalid"]
 
             self.log.info("Send funds to wallet")
             self.nodes[0].sendtoaddress(addr_oldpool, 10)
@@ -83,18 +76,13 @@ class KeypoolRestoreTest(BitcoinTestFramework):
             self.log.info("Verify keypool is restored and balance is correct")
             assert_equal(self.nodes[idx].getbalance(), 15)
             assert_equal(self.nodes[idx].listtransactions()[0]['category'], "receive")
-            # Check that we have marked all keys up to the used keypool key as used
-            if self.options.descriptors:
-                if output_type == 'legacy':
-                    assert_equal(self.nodes[idx].getaddressinfo(self.nodes[idx].getnewaddress(address_type=output_type))['hdkeypath'], "m/44h/1h/0h/0/110")
-                elif output_type == 'p2sh-segwit':
-                    assert_equal(self.nodes[idx].getaddressinfo(self.nodes[idx].getnewaddress(address_type=output_type))['hdkeypath'], "m/49h/1h/0h/0/110")
-                elif output_type == 'bech32':
-                    assert_equal(self.nodes[idx].getaddressinfo(self.nodes[idx].getnewaddress(address_type=output_type))['hdkeypath'], "m/84h/1h/0h/0/110")
-                elif output_type == 'bech32m':
-                    assert_equal(self.nodes[idx].getaddressinfo(self.nodes[idx].getnewaddress(address_type=output_type))['hdkeypath'], "m/86h/1h/0h/0/110")
-            else:
-                assert_equal(self.nodes[idx].getaddressinfo(self.nodes[idx].getnewaddress(address_type=output_type))['hdkeypath'], "m/0'/0'/110'")
+            # Rescanning both used P2MR destinations must advance the restored
+            # deterministic keypool past every used key, not merely produce a
+            # syntactically valid address.
+            assert_equal(
+                self.nodes[idx].getnewaddress(address_type=output_type),
+                expected_next_address,
+            )
 
 
 if __name__ == '__main__':

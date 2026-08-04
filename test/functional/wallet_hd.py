@@ -16,7 +16,7 @@ from test_framework.util import (
 
 class WalletHDTest(BitcoinTestFramework):
     def add_options(self, parser):
-        self.add_wallet_options(parser)
+        self.add_wallet_options(parser, descriptors=True, legacy=True)
 
     def set_test_params(self):
         self.setup_clean_chain = True
@@ -31,6 +31,62 @@ class WalletHDTest(BitcoinTestFramework):
         self.skip_if_no_wallet()
 
     def run_test(self):
+        """Exercise native PQHD derivation, backup, restore, and rescan."""
+        wallet = self.nodes[1]
+        descriptors = [item for item in wallet.listdescriptors(True)["descriptors"] if "pqhd(" in item["desc"]]
+        assert len(descriptors) >= 2
+        assert any(item["internal"] for item in descriptors)
+        assert any(not item["internal"] for item in descriptors)
+
+        # The BIP32-only export is deliberately unavailable for descriptor
+        # wallets; PQ seed portability is covered by wallet_btxwallet.py.
+        assert_raises_rpc_error(-4, "Only legacy wallets", wallet.dumpmasterprivkey)
+
+        backup_path = wallet.datadir_path / "pqhd.bak"
+        wallet.backupwallet(backup_path)
+        expected_receive = [wallet.getnewaddress() for _ in range(10)]
+        expected_change = wallet.getrawchangeaddress()
+        assert all(wallet.validateaddress(address)["isvalid"] for address in expected_receive)
+        assert wallet.validateaddress(expected_change)["isvalid"]
+
+        self.generate(self.nodes[0], COINBASE_MATURITY + 1)
+        for address in expected_receive:
+            self.nodes[0].sendtoaddress(address, 1)
+            self.generate(self.nodes[0], 1)
+        self.sync_all()
+        assert_equal(wallet.getbalance(), 10)
+
+        self.log.info("Restore the pre-derivation backup and reproduce the exact PQHD sequence")
+        self.stop_node(1)
+        shutil.rmtree(self.nodes[1].blocks_path)
+        shutil.rmtree(self.nodes[1].chain_path / "chainstate")
+        shutil.copyfile(
+            backup_path,
+            self.nodes[1].wallets_path / self.default_wallet_name / self.wallet_data_filename,
+        )
+        self.start_node(1)
+        wallet = self.nodes[1]
+        assert_equal([wallet.getnewaddress() for _ in range(10)], expected_receive)
+        assert_equal(wallet.getrawchangeaddress(), expected_change)
+
+        self.connect_nodes(0, 1)
+        self.sync_all()
+        wallet.rescanblockchain()
+        assert_equal(wallet.getbalance(), 10)
+
+        txid = wallet.sendtoaddress(self.nodes[0].getnewaddress(), 1)
+        decoded = wallet.gettransaction(txid=txid, verbose=True)["decoded"]
+        change = [vout["scriptPubKey"]["address"] for vout in decoded["vout"] if vout["value"] != 1]
+        assert_equal(len(change), 1)
+        assert_equal(wallet.getaddressinfo(change[0])["ismine"], True)
+
+    def _unsupported_bitcoin_bip32_reference(self):
+        """Unexecuted upstream BIP32-wallet reference.
+
+        BTX-native PQHD backup/restore/rescan coverage lives in run_test().
+        Retained secp descriptor import/export coverage lives in
+        wallet_gethdkeys.py. This body is not counted as executed coverage.
+        """
         # Make sure we use hd, keep masterkeyid
         hd_fingerprint = self.nodes[1].getaddressinfo(self.nodes[1].getnewaddress())['hdmasterfingerprint']
         assert_equal(len(hd_fingerprint), 8)

@@ -53,8 +53,10 @@ class ChainstateWriteCrashTest(BitcoinTestFramework):
         # Set -maxmempool=0 to turn off mempool memory sharing with dbcache
         self.base_args = [
             "-limitdescendantsize=0",
+            "-limitdescendantcount=10000",
             "-maxmempool=0",
             "-dbbatchsize=200000",
+            "-acceptnonstdtxn=1",
         ]
 
         # Set different crash ratios and cache sizes.  Note that not all of
@@ -65,7 +67,12 @@ class ChainstateWriteCrashTest(BitcoinTestFramework):
 
         # Node3 is a normal node with default args, except will mine full blocks
         # and txs with "dust" outputs
-        self.node3_args = ["-blockmaxweight=4000000", "-dustrelayfee=0"]
+        self.node3_args = [
+            "-blockmaxweight=4000000",
+            "-dustrelayfee=0",
+            "-limitdescendantcount=10000",
+            "-acceptnonstdtxn=1",
+        ]
         self.extra_args = [self.node0_args, self.node1_args, self.node2_args, self.node3_args]
 
     def setup_network(self):

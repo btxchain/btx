@@ -613,6 +613,36 @@ BOOST_AUTO_TEST_CASE(test_regtest_assumeutxo)
     BOOST_CHECK(!params->AssumeutxoForBlockhash(uint256{1}));
 }
 
+BOOST_AUTO_TEST_CASE(test_regtest_assumeutxo_functional_harness_override)
+{
+    ArgsManager harness_args;
+    harness_args.ForceSetArg("-regtestmatmulltsealaspow", "0");
+    const auto harness_params = CreateChainParams(harness_args, ChainType::REGTEST);
+
+    // Phase A keeps only its deterministic height-299 fixture and the
+    // explicitly mockable height-61,010 fast-start fixture. The height-110
+    // snapshot is committed to the default Phase-B chain and must not leak
+    // across this consensus override.
+    BOOST_CHECK(!harness_params->AssumeutxoForHeight(110));
+    BOOST_REQUIRE(harness_params->AssumeutxoForHeight(299));
+    BOOST_REQUIRE(harness_params->AssumeutxoForHeight(61'010));
+    const std::vector<int> expected_harness_heights{299, 61'010};
+    const auto harness_heights = harness_params->GetAvailableSnapshotHeights();
+    BOOST_CHECK_EQUAL_COLLECTIONS(
+        harness_heights.begin(), harness_heights.end(),
+        expected_harness_heights.begin(), expected_harness_heights.end());
+
+    ArgsManager custom_args;
+    custom_args.ForceSetArg("-regtestmatmulltsealaspow", "0");
+    custom_args.ForceSetArg("-regtestmatmulv4dimension", "128");
+    const auto custom_params = CreateChainParams(custom_args, ChainType::REGTEST);
+
+    // Combining the harness seal choice with any other consensus override
+    // invalidates the canned chain and must still fail closed.
+    BOOST_CHECK(custom_params->GetAvailableSnapshotHeights().empty());
+    BOOST_CHECK(!custom_params->AssumeutxoForHeight(299));
+}
+
 BOOST_AUTO_TEST_CASE(test_mainnet_assumeutxo_snapshot_metadata)
 {
     // Mainnet snapshots are anchored again; verify the published heights and a

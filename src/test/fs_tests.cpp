@@ -8,9 +8,11 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <cstdio>
 #include <fstream>
 #include <ios>
 #include <string>
+#include <vector>
 
 BOOST_FIXTURE_TEST_SUITE(fs_tests, BasicTestingSetup)
 
@@ -137,6 +139,44 @@ BOOST_AUTO_TEST_CASE(rename)
         BOOST_CHECK_EQUAL(contents, path1_contents);
     }
     fs::remove(path2);
+}
+
+BOOST_AUTO_TEST_CASE(allocate_file_range_preserves_existing_data)
+{
+    constexpr size_t EXISTING_SIZE{65536 + 16384};
+    constexpr size_t EXTENSION_SIZE{32768};
+    constexpr size_t ALLOCATED_SIZE{EXISTING_SIZE + EXTENSION_SIZE};
+    const fs::path path{m_args.GetDataDirBase() / "allocate_file_range.dat"};
+
+    std::vector<unsigned char> expected(EXISTING_SIZE);
+    for (size_t i{0}; i < expected.size(); ++i) {
+        expected[i] = static_cast<unsigned char>((i * 37 + 11) & 0xff);
+    }
+    {
+        std::ofstream out{path, std::ios::binary};
+        BOOST_REQUIRE(out.is_open());
+        out.write(reinterpret_cast<const char*>(expected.data()), expected.size());
+        BOOST_REQUIRE(out.good());
+    }
+
+    FILE* file{fsbridge::fopen(path, "rb+")};
+    BOOST_REQUIRE(file != nullptr);
+    AllocateFileRange(file, 0, ALLOCATED_SIZE);
+    BOOST_REQUIRE_EQUAL(std::fclose(file), 0);
+
+    BOOST_REQUIRE_EQUAL(fs::file_size(path), ALLOCATED_SIZE);
+    std::vector<unsigned char> actual(ALLOCATED_SIZE);
+    {
+        std::ifstream in{path, std::ios::binary};
+        BOOST_REQUIRE(in.is_open());
+        in.read(reinterpret_cast<char*>(actual.data()), actual.size());
+        BOOST_REQUIRE_EQUAL(static_cast<size_t>(in.gcount()), actual.size());
+    }
+    BOOST_CHECK_EQUAL_COLLECTIONS(actual.begin(), actual.begin() + EXISTING_SIZE, expected.begin(), expected.end());
+    const std::vector<unsigned char> zero_extension(EXTENSION_SIZE);
+    BOOST_CHECK_EQUAL_COLLECTIONS(actual.begin() + EXISTING_SIZE, actual.end(), zero_extension.begin(), zero_extension.end());
+
+    fs::remove(path);
 }
 
 #ifndef __MINGW64__ // no symlinks on mingw

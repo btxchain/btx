@@ -79,6 +79,8 @@ a. Repeat 100 times:
 b. Then send 99 more headers that don't connect.
    Expect: getheaders message each time.
 """
+
+from test_framework.blocktools import REGTEST_GENERIC_P2P_MATMUL_ARGS
 from test_framework.blocktools import create_block, create_coinbase
 from test_framework.messages import CInv
 from test_framework.p2p import (
@@ -193,6 +195,7 @@ class SendHeadersTest(BitcoinTestFramework):
     def set_test_params(self):
         self.setup_clean_chain = True
         self.num_nodes = 2
+        self.extra_args = [[*REGTEST_GENERIC_P2P_MATMUL_ARGS]] * self.num_nodes
 
     def mine_blocks(self, count):
         """Mine count blocks and return the new tip."""

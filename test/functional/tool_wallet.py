@@ -22,6 +22,7 @@ from test_framework.util import (
     sha256sum_file,
 )
 from test_framework.wallet import getnewdestination
+from test_framework.wallet_util import create_legacy_wallet_with_tool
 
 
 class ToolWalletTest(BitcoinTestFramework):
@@ -38,8 +39,37 @@ class ToolWalletTest(BitcoinTestFramework):
             self.extra_args = [["-swapbdbendian"]]
 
     def skip_test_if_missing_module(self):
-        self.skip_if_no_wallet()
+        if self.options.descriptors:
+            self.skip_if_no_wallet()
+        else:
+            if not self.is_wallet_compiled():
+                self.skip_if_no_wallet()
+            self.enable_wallet_if_possible()
+            if not self.is_bdb_compiled():
+                self.skip_if_no_sqlite()
         self.skip_if_no_wallet_tool()
+        if not self.options.descriptors and (self.options.bdbro or self.options.swap_bdb_endian):
+            self.skip_if_no_bdb()
+
+    def setup_nodes(self):
+        extra_args = self.extra_args or [[] for _ in range(self.num_nodes)]
+        if not self.options.descriptors:
+            extra_args = [args + ["-nowallet"] for args in extra_args]
+        self.add_nodes(self.num_nodes, extra_args)
+        if not self.options.descriptors:
+            self.legacy_format = "bdb" if self.is_bdb_compiled() else "sqlite"
+            create_legacy_wallet_with_tool(
+                self,
+                self.nodes[0],
+                self.default_wallet_name,
+                force_bdb=self.legacy_format == "bdb",
+                swap_bdb_endian=self.options.swap_bdb_endian,
+            )
+        self.start_nodes()
+        if self.options.descriptors:
+            self.import_deterministic_coinbase_privkeys()
+        else:
+            self.nodes[0].loadwallet(self.default_wallet_name)
 
     def bitcoin_wallet_process(self, *args):
         default_args = ['-datadir={}'.format(self.nodes[0].datadir_path), '-chain=%s' % self.chain]
@@ -202,11 +232,12 @@ class ToolWalletTest(BitcoinTestFramework):
         self.assert_raises_tool_error("Error parsing command line arguments: Invalid command 'help'", 'help')
         self.assert_raises_tool_error('Error: Additional arguments provided (create). Methods do not take arguments. Please refer to `-help`.', 'info', 'create')
         self.assert_raises_tool_error('Error parsing command line arguments: Invalid parameter -foo', '-foo')
-        self.assert_raises_tool_error('No method provided. Run `bitcoin-wallet -help` for valid methods.')
+        wallet_tool_name = os.path.basename(self.options.bitcoinwallet)
+        self.assert_raises_tool_error(f'No method provided. Run `{wallet_tool_name} -help` for valid methods.')
         self.assert_raises_tool_error('Wallet name must be provided when creating a new wallet.', 'create')
         locked_dir = self.nodes[0].wallets_path
         error = 'Error initializing wallet database environment "{}"!'.format(locked_dir)
-        if self.options.descriptors:
+        if self.options.descriptors or getattr(self, "legacy_format", None) == "sqlite":
             error = f"SQLiteDatabase: Unable to obtain an exclusive lock on the database, is it being used by another instance of {self.config['environment']['CLIENT_NAME']}?"
         self.assert_raises_tool_error(
             error,
@@ -598,6 +629,9 @@ class ToolWalletTest(BitcoinTestFramework):
 
     def run_test(self):
         self.wallet_path = self.nodes[0].wallets_path / self.default_wallet_name / self.wallet_data_filename
+        if not self.options.descriptors:
+            self.run_legacy_policy_compatible_tests()
+            return
         self.test_invalid_tool_commands_and_args()
         # Warning: The following tests are order-dependent.
         self.test_tool_wallet_info()
@@ -614,6 +648,73 @@ class ToolWalletTest(BitcoinTestFramework):
         self.test_dump_very_large_records()
         if not self.options.descriptors and self.is_bdb_compiled() and not self.options.swap_bdb_endian:
             self.test_compare_legacy_dump_with_framework_bdb_parser()
+
+    def run_legacy_policy_compatible_tests(self):
+        """Exercise the offline legacy surface without asking btxd to create or spend."""
+        self.test_invalid_tool_commands_and_args()
+        self.stop_node(0)
+
+        info = self.bitcoin_wallet_process(f"-wallet={self.default_wallet_name}", "info")
+        stdout, stderr = info.communicate()
+        assert_equal(info.returncode, 0)
+        assert_equal(stderr, "")
+        assert f"Format: {self.legacy_format}" in stdout
+        assert "Descriptors: no" in stdout
+
+        dump_path = self.nodes[0].datadir_path / "legacy-wallet.dump"
+        dump = self.bitcoin_wallet_process(
+            f"-wallet={self.default_wallet_name}",
+            f"-dumpfile={dump_path}",
+            "dump",
+        )
+        stdout, stderr = dump.communicate()
+        assert_equal(dump.returncode, 0)
+        assert_equal(stdout, "")
+        assert "dumpfile may contain private keys" in stderr
+        expected = self.read_dump(dump_path)
+        assert_equal(expected["format"], self.legacy_format)
+
+        roundtrip_formats = [("roundtrip", self.legacy_format)]
+        if self.legacy_format == "bdb":
+            roundtrip_formats.append(("roundtrip-swap", "bdb_swap"))
+        for wallet_name, file_format in roundtrip_formats:
+            restore = self.bitcoin_wallet_process(
+                f"-wallet={wallet_name}",
+                f"-dumpfile={dump_path}",
+                f"-format={file_format}",
+                "createfromdump",
+            )
+            stdout, _stderr = restore.communicate()
+            assert_equal(restore.returncode, 0)
+            assert_equal(stdout, "")
+
+            roundtrip_dump = self.nodes[0].datadir_path / f"{wallet_name}.dump"
+            dumped = self.bitcoin_wallet_process(
+                f"-wallet={wallet_name}",
+                f"-dumpfile={roundtrip_dump}",
+                "dump",
+            )
+            stdout, _stderr = dumped.communicate()
+            assert_equal(dumped.returncode, 0)
+            assert_equal(stdout, "")
+            self.assert_dump(expected, self.read_dump(roundtrip_dump))
+
+        if self.legacy_format == "bdb" and not self.options.swap_bdb_endian:
+            raw_dump = dump_bdb_kv(self.wallet_path)
+            expected_records = expected.copy()
+            del expected_records["BITCOIN_CORE_WALLET_DUMP"]
+            del expected_records["format"]
+            del expected_records["checksum"]
+            observed_records = OrderedDict(
+                (key.hex(), value.hex()) for key, value in sorted(raw_dump.items())
+            )
+            assert_equal(observed_records, expected_records)
+
+        if self.legacy_format == "bdb":
+            salvage = self.bitcoin_wallet_process(f"-wallet={self.default_wallet_name}", "salvage")
+            stdout, _stderr = salvage.communicate()
+            assert_equal(salvage.returncode, 0)
+            assert_equal(stdout, "")
 
 
 if __name__ == '__main__':

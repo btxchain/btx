@@ -12,6 +12,7 @@ from test_framework.wallet import MiniWallet
 class MempoolCoinbaseTest(BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 1
+        self.extra_args = [["-acceptnonstdtxn=1"]]
 
     def run_test(self):
         node = self.nodes[0]

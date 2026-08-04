@@ -165,7 +165,10 @@ class ShieldedV2ProofRedteamCampaignTest(BitcoinTestFramework):
 
         result = user_wallet.z_sendmany([{"address": recipient_zaddr, "amount": Decimal("0.25")}])
         txid = result["txid"]
-        assert_equal(user_wallet.z_viewtransaction(txid)["family"], "v2_send")
+        public_view = user_wallet.z_viewtransaction(txid)
+        assert_equal(public_view["family"], "shielded_v2")
+        assert_equal(public_view["family_redacted"], True)
+        assert_equal(user_wallet.z_viewtransaction(txid, True)["family"], "v2_send")
         assert txid not in node1.getrawmempool(), txid
         tx_hex = user_wallet.gettransaction(txid)["hex"]
         return {
@@ -200,9 +203,23 @@ class ShieldedV2ProofRedteamCampaignTest(BitcoinTestFramework):
 
     def assert_variant_rejected(self, node_index, variant):
         node = self.nodes[node_index]
-        accept = node.testmempoolaccept([variant["tx_hex"]], 0)[0]
-        assert_equal(accept["allowed"], False)
-        assert_equal(accept["reject-reason"], variant["expected_reject_reason"])
+        accept = None
+        accept_error = None
+        try:
+            accept = node.testmempoolaccept([variant["tx_hex"]], 0)[0]
+        except JSONRPCException as e:
+            accept_error = e.error
+
+        if variant["expected_failure_stage"] == "witness_parse" and accept_error is not None:
+            # Structural witness mutations may fail transaction decoding before
+            # reaching the shielded proof parser. This is the same fail-closed
+            # outcome accepted by the corresponding C++ corpus test.
+            assert_equal(accept_error["code"], -22)
+            assert "TX decode failed" in accept_error["message"], accept_error
+        else:
+            assert accept_error is None, accept_error
+            assert_equal(accept["allowed"], False)
+            assert_equal(accept["reject-reason"], variant["expected_reject_reason"])
 
         error = None
         try:
@@ -211,12 +228,17 @@ class ShieldedV2ProofRedteamCampaignTest(BitcoinTestFramework):
         except JSONRPCException as e:
             error = e.error
         assert error is not None
-        assert variant["expected_reject_reason"] in error["message"], error
+        if accept_error is not None:
+            assert_equal(error["code"], -22)
+            assert "TX decode failed" in error["message"], error
+        else:
+            assert variant["expected_reject_reason"] in error["message"], error
         assert_equal(node.getrawmempool(), [])
 
         return {
             "node": node_index,
             "testmempoolaccept": accept,
+            "testmempoolaccept_error": accept_error,
             "sendrawtransaction_error": error,
             "debug_trace": self.consume_debug_trace(node_index),
         }

@@ -57,7 +57,7 @@ class AbandonConflictTest(BitcoinTestFramework):
         assert_raises_rpc_error(-5, 'Transaction not eligible for abandonment', lambda: alice.abandontransaction(txid=txA))
 
         newbalance = alice.getbalance()
-        assert balance - newbalance < Decimal("0.001")  #no more than fees lost
+        assert balance - newbalance < Decimal("0.01")  # no more than PQ transaction fees lost
         balance = newbalance
 
         # Disconnect nodes so node0's transactions don't get into node1's mempool
@@ -74,13 +74,14 @@ class AbandonConflictTest(BitcoinTestFramework):
         inputs.append({"txid": txB, "vout": nB})
         outputs = {}
 
-        outputs[alice.getnewaddress()] = Decimal("14.99998")
+        outputs[alice.getnewaddress()] = Decimal("14.9998")
         outputs[bob.getnewaddress()] = Decimal("5")
         signed = alice.signrawtransactionwithwallet(alice.createrawtransaction(inputs, outputs))
         txAB1 = self.nodes[0].sendrawtransaction(signed["hex"])
 
-        # Identify the 14.99998btc output
-        nAB = next(tx_out["vout"] for tx_out in alice.gettransaction(txAB1)["details"] if tx_out["amount"] == Decimal("14.99998"))
+        # Identify the change output. The 20,000 sat fee clears BTX's larger
+        # P2MR relay footprint at the low-fee setting but not after restart.
+        nAB = next(tx_out["vout"] for tx_out in alice.gettransaction(txAB1)["details"] if tx_out["amount"] == Decimal("14.9998"))
 
         #Create a child tx spending AB1 and C
         inputs = []
@@ -154,13 +155,13 @@ class AbandonConflictTest(BitcoinTestFramework):
         # But its child tx remains abandoned
         self.nodes[0].sendrawtransaction(signed["hex"])
         newbalance = alice.getbalance()
-        assert_equal(newbalance, balance - Decimal("20") + Decimal("14.99998"))
+        assert_equal(newbalance, balance - Decimal("20") + Decimal("14.9998"))
         balance = newbalance
 
         # Send child tx again so it is unabandoned
         self.nodes[0].sendrawtransaction(signed2["hex"])
         newbalance = alice.getbalance()
-        assert_equal(newbalance, balance - Decimal("10") - Decimal("14.99998") + Decimal("24.9996"))
+        assert_equal(newbalance, balance - Decimal("10") - Decimal("14.9998") + Decimal("24.9996"))
         balance = newbalance
 
         # Remove using high relay fee again

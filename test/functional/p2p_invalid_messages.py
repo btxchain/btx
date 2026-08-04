@@ -30,6 +30,7 @@ from test_framework.p2p import (
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     assert_equal,
+    p2p_port,
 )
 
 VALID_DATA_LIMIT = MAX_PROTOCOL_MESSAGE_LENGTH - 5  # Account for the 5-byte length prefix
@@ -243,11 +244,18 @@ class InvalidMessagesTest(BitcoinTestFramework):
 
     def test_addrv2_unrecognized_network(self):
         now_hex = int(time.time()).to_bytes(4, "little").hex()
+        active_port_hex = p2p_port(0).to_bytes(2, "big").hex()
         self.test_addrv2('unrecognized network',
             [
                 'received: addrv2 (25 bytes)',
-                '9.9.9.9:8333',
-                'Added 1 addresses',
+                # BTX summarizes ADDRv2 processing instead of logging each
+                # accepted address. The recognized entry must still be parsed
+                # after the unknown network entry without disconnecting.
+                # BTX counts the ignored unknown-network placeholder as
+                # processed, while only the recognized IPv4 address reaches
+                # the address manager.
+                'Received addr: 2 addresses (2 processed, 0 rate-limited)',
+                'Added 1 addresses (of 2)',
             ],
             bytes.fromhex(
                 '02' +     # number of entries
@@ -257,14 +265,14 @@ class InvalidMessagesTest(BitcoinTestFramework):
                 '99' +     # network type (unrecognized)
                 '02' +     # address length (COMPACTSIZE(2))
                 'ab' * 2 + # address
-                '208d' +   # port
+                active_port_hex +   # active BTX regtest port
                 # this should be added:
                 now_hex +  # time
                 '01' +     # service flags, COMPACTSIZE(NODE_NETWORK)
                 '01' +     # network type (IPv4)
                 '04' +     # address length (COMPACTSIZE(4))
                 '09' * 4 + # address
-                '208d'))   # port
+                active_port_hex))   # active BTX regtest port
 
     def test_oversized_msg(self, msg, size):
         msg_type = msg.msgtype.decode('ascii')
