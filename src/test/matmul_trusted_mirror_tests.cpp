@@ -273,7 +273,8 @@ BOOST_AUTO_TEST_CASE(staged_signer_finalizes_after_ecc_and_resets_cleanly)
 // replaces it: above the Profile-1 height the local ExactReplay is skipped and
 // the attestation quorum is the node's only MatMul proof-of-work authority. A
 // 1-of-1 quorum therefore hands one key the power to make the node accept
-// MatMul-invalid blocks, so mainnet requires 2 distinct signers with M >= 2.
+// MatMul-invalid blocks. Mainnet supports this topology with a loud warning;
+// 2 distinct signers with M >= 2 remain the recommended production minimum.
 BOOST_AUTO_TEST_CASE(mainnet_trusted_mirror_allows_but_warns_on_single_key_quorum)
 {
     // A single-key mainnet mirror is a real exposure -- above the Profile-1
@@ -326,8 +327,8 @@ BOOST_AUTO_TEST_CASE(mainnet_trusted_mirror_accepts_two_of_two)
 }
 
 // Without this, "-matmultrustedpubkey=X -matmultrustedpubkey=X
-// -matmultrustedthreshold=2" would pass the mainnet 2-of-2 minimum while the
-// quorum still rests on one private key.
+// -matmultrustedthreshold=2" would falsely claim two independent authorities
+// while the quorum still rests on one private key.
 BOOST_AUTO_TEST_CASE(duplicate_trusted_pubkeys_are_refused)
 {
     RuntimeReset reset;
@@ -355,8 +356,8 @@ BOOST_AUTO_TEST_CASE(duplicate_trusted_pubkeys_are_refused)
     BOOST_CHECK(!node::matmul_trusted::IsConfigured());
 }
 
-// Test networks are unaffected: the functional/rehearsal harnesses run
-// single-signer mirrors and must keep working.
+// Functional/rehearsal harnesses use supported single-signer mirrors and must
+// keep working without the mainnet warning path.
 BOOST_FIXTURE_TEST_CASE(non_mainnet_trusted_mirror_keeps_one_of_one,
                         RegtestParamSetup)
 {

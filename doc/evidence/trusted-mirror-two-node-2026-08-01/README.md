@@ -1,4 +1,9 @@
-# Two-node trusted-mirror rehearsal
+# Historical toy two-node trusted-mirror rehearsal
+
+This artifact is toy-dimension functional coverage only. It is not a
+production-shape strict-device closure result, does not carry the current
+source/binary provenance schema, and must not be used to close activation or
+release evidence gates.
 
 GPU ExactReplay archive (CUDA consensus + attestation signer/serve) paired with a
 CPU-only `-matmulvalidation=trusted` mirror.

@@ -122,8 +122,8 @@ class MatMulTrustedMirrorsTest(BitcoinTestFramework):
                 "raises N without adding an independent attestation authority."
             ),
         )
-        # Regtest keeps 1-of-1 mirrors: the mainnet 2-of-2 floor must not leak
-        # onto test networks (this whole test is a single-signer mirror).
+        # This rehearsal intentionally uses supported 1-of-1 trusted mode.
+        # Mainnet warns for this topology but does not impose a 2-of-2 floor.
         self.start_node(2, self.mirror_args)
 
         self.connect_nodes(0, 2)

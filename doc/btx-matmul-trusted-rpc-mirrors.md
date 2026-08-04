@@ -97,12 +97,12 @@ independent authority. Test networks (testnet/signet/regtest) still permit
 
 ## Example: two GPU archives and three HA RPC mirrors
 
-Two independent archives is the smallest topology mainnet accepts, because a
-single-key quorum is a single point of proof-of-work authority: whoever holds
-that key, or steals it, can make the node accept MatMul-invalid blocks with no
-second signer to disagree. That is the operator's risk to take knowingly, which
-is why the node warns rather than refusing to start -- refusing would break
-already-deployed single-signer mirrors on upgrade.
+Two independent archives are the recommended minimum production topology, not
+a protocol-enforced mainnet floor. A supported 1-of-1 mirror is a single point
+of proof-of-work authority: whoever holds or steals that key can make that
+mirror accept MatMul-invalid blocks with no second signer to disagree. That is
+the operator's risk to take knowingly, which is why the node warns rather than
+refusing to start.
 
 Generate a dedicated online attestation key per archive. Put each WIF on its
 own GPU archive in a permission-restricted file. Distribute only the compressed
@@ -145,6 +145,57 @@ assumevalid=0
 Use `rpcbind`, `rpcallowip`, firewalling, authentication, and TLS/reverse-proxy
 policy appropriate to the deployment. Trusted MatMul mode does not relax RPC
 security.
+
+## Production-shape rehearsal
+
+Run a rehearsal only from an exact, clean, reviewed source revision whose
+strict-device manifest contains the archive's provider class. Record the four
+reviewed binary SHA256 values and write the result outside the source tree. The
+runner mines three production Profile-1 blocks and requires a passed,
+provider-bound startup canary plus one explicit strict proof mode. When the
+archive mines, use `winner-reseal-authority`: the runner requires fresh
+candidate, reseal, exact-header authority publication, and local-authority
+consumption telemetry. `last_validation.available=false` is expected in that
+mode because local acceptance consumes the one-shot winner authority instead
+of replaying the just-resealed block again.
+
+On one Apple Silicon Metal archive, use local mode (no SSH or self-tunnel) and
+a disposable regtest-only signing key:
+
+```sh
+python3 -u contrib/matmul-v4/two-node-trusted-mirror-rehearsal.py \
+  --archive-local \
+  --archive-btxd /path/to/metal-build/bin/btxd \
+  --archive-cli /path/to/metal-build/bin/btx-cli \
+  --archive-backend metal \
+  --strict-proof-mode winner-reseal-authority \
+  --mirror-btxd /path/to/mirror-build/bin/btxd \
+  --mirror-cli /path/to/mirror-build/bin/btx-cli \
+  --signer-wif-file /secure/local/disposable-regtest-signer.wif \
+  --signer-pub-file /secure/local/disposable-regtest-signer.pub \
+  --source-revision <exact-40-character-commit> \
+  --archive-btxd-sha256 <reviewed-sha256> \
+  --archive-cli-sha256 <reviewed-sha256> \
+  --mirror-btxd-sha256 <reviewed-sha256> \
+  --mirror-cli-sha256 <reviewed-sha256> \
+  --archive-startup-timeout 600 --mine-timeout 900 \
+  --mirror-sync-timeout 600 \
+  --out /private/result/trusted-mirror-production.json
+```
+
+For a remote archive, run the same tool on the mirror host without
+`--archive-local`, add `--archive-host`, `--archive-user`, and
+`--archive-signer-wif-file`. The latter must name a permission-restricted key
+already provisioned on the archive. Remote mode rejects `--signer-wif-file` and
+never reads or copies the archive WIF through the mirror host. Only the public
+key file belongs on the mirror host. The result contains public provider and
+architecture classes, source identity, binary hashes, and counters; it never
+contains deployment hostnames, usernames, paths, or private keys.
+
+The checked-in 2026-08-01 two-node artifact is historical toy-dimension
+coverage. It is not production closure evidence and must not be relabeled as
+such. Generate production evidence only after source, activation parameters,
+and final binaries are frozen.
 
 For fault tolerance on top of the compromise floor, deploy three independent
 archive signers and configure the mirrors with all three public keys, keeping
