@@ -58,6 +58,7 @@ from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     assert_equal,
     assert_greater_than,
+    assert_greater_than_or_equal,
 )
 from test_framework.wallet_util import generate_keypair
 from data import invalid_txs
@@ -345,7 +346,7 @@ class FullBlockTest(BitcoinTestFramework):
         b23 = self.update_block(23, [tx])
         # Make sure the math above worked out to produce a max-weighted block
         assert_equal(b23.get_weight(), MAX_BLOCK_WEIGHT)
-        self.send_blocks([b23], True)
+        self.send_blocks([b23], True, force_send=True, announce_before_force_send=True)
         self.save_spendable_output()
 
         # TEST: block_serialized_size_over_limit_rejected
@@ -358,7 +359,7 @@ class FullBlockTest(BitcoinTestFramework):
         # At WITNESS_SCALE_FACTOR=1 this exceeds both the consensus block-size
         # limit and the transport's block-message ceiling by one byte. The
         # transport must reject it before deserialization and disconnect.
-        self.send_blocks([b24], success=False, reject_reason='Header error: Size too large', reconnect=True)
+        self.send_blocks([b24], success=False, reject_reason='Header error: Size too large', force_send=True, announce_before_force_send=True, reconnect=True)
 
         b25 = self.next_block(25, spend=out[7])
         self.send_blocks([b25], False)
@@ -577,7 +578,7 @@ class FullBlockTest(BitcoinTestFramework):
             del b39.vtx[-1]
 
         b39 = self.update_block(39, [])
-        self.send_blocks([b39], True)
+        self.send_blocks([b39], True, force_send=True, announce_before_force_send=True)
         self.save_spendable_output()
 
         # Test sigops in P2SH redeem scripts
@@ -989,6 +990,8 @@ class FullBlockTest(BitcoinTestFramework):
             [b64a],
             success=False,
             reject_reason="Header error: Size too large",
+            force_send=True,
+            announce_before_force_send=True,
             reconnect=True,
         )
 
@@ -999,7 +1002,7 @@ class FullBlockTest(BitcoinTestFramework):
         assert_equal(b64.get_weight(), MAX_BLOCK_WEIGHT)
         self.blocks[64] = b64
         b64 = self.update_block(64, [])
-        self.send_blocks([b64], True)
+        self.send_blocks([b64], True, force_send=True, announce_before_force_send=True)
         self.save_spendable_output()
 
         # Spend an output created in the block itself
@@ -1419,19 +1422,24 @@ class FullBlockTest(BitcoinTestFramework):
             if remaining < min_payload or remaining > max_payload:
                 continue
 
-            script_lens = [1] * output_count
             extra = remaining - min_payload
-            for i in range(output_count):
-                if extra == 0:
-                    break
-                delta = min(33, extra)
-                script_lens[i] += delta
-                extra -= delta
-            assert_equal(extra, 0)
+            full_script_count, partial_extra = divmod(extra, 33)
+            partial_script_count = int(partial_extra != 0)
+            minimal_script_count = output_count - full_script_count - partial_script_count
+            assert_greater_than_or_equal(minimal_script_count, 0)
 
             tx = CTransaction()
             tx.vin.append(CTxIn(COutPoint(spend_tx.sha256, 0)))
-            tx.vout = [CTxOut(0, CScript([OP_TRUE] * script_len)) for script_len in script_lens]
+            # CScript is immutable. Reuse the handful of distinct script byte
+            # strings while keeping every CTxOut object distinct; constructing
+            # 500k+ identical Python CScript objects made each 24 MB boundary
+            # fixture take minutes without changing its serialized bytes.
+            full_script = CScript([OP_TRUE] * 34)
+            minimal_script = CScript([OP_TRUE])
+            tx.vout = [CTxOut(0, full_script) for _ in range(full_script_count)]
+            if partial_script_count:
+                tx.vout.append(CTxOut(0, CScript([OP_TRUE] * (1 + partial_extra))))
+            tx.vout.extend(CTxOut(0, minimal_script) for _ in range(minimal_script_count))
             assert_equal(tx.get_weight(), target_weight)
             return tx
 
@@ -1574,11 +1582,11 @@ class FullBlockTest(BitcoinTestFramework):
         self.nodes[0].disconnect_p2ps()
         self.bootstrap_p2p(timeout=timeout)
 
-    def send_blocks(self, blocks, success=True, reject_reason=None, force_send=False, reconnect=False, timeout=960):
+    def send_blocks(self, blocks, success=True, reject_reason=None, force_send=False, announce_before_force_send=False, reconnect=False, timeout=960):
         """Sends blocks to test node. Syncs and verifies that tip has advanced to most recent block.
 
         Call with success = False if the tip shouldn't advance to the most recent block."""
-        self.helper_peer.send_blocks_and_test(blocks, self.nodes[0], success=success, reject_reason=reject_reason, force_send=force_send, timeout=timeout, expect_disconnect=reconnect)
+        self.helper_peer.send_blocks_and_test(blocks, self.nodes[0], success=success, reject_reason=reject_reason, force_send=force_send, announce_before_force_send=announce_before_force_send, timeout=timeout, expect_disconnect=reconnect)
 
         if reconnect:
             self.reconnect_p2p(timeout=timeout)

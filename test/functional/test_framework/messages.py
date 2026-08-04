@@ -323,13 +323,14 @@ def deser_vector(f, c, deser_function_name=None):
 # entries in the vector (we use this for serializing the vector of transactions
 # for a witness block).
 def ser_vector(l, ser_function_name=None):
-    r = ser_compact_size(len(l))
+    r = BytesIO()
+    r.write(ser_compact_size(len(l)))
     for i in l:
         if ser_function_name:
-            r += getattr(i, ser_function_name)()
+            r.write(getattr(i, ser_function_name)())
         else:
-            r += i.serialize()
-    return r
+            r.write(i.serialize())
+    return r.getvalue()
 
 
 def deser_uint256_vector(f):
@@ -2314,6 +2315,53 @@ class msg_sendtxrcncl:
             (self.version, self.salt)
 
 class TestFrameworkScript(unittest.TestCase):
+    def test_ser_vector_preserves_order_and_alternate_serializer(self):
+        calls = []
+
+        class Serializable:
+            def __init__(self, value):
+                self.value = value
+
+            def serialize(self):
+                calls.append(("default", self.value))
+                return bytes([self.value])
+
+            def serialize_alternate(self):
+                calls.append(("alternate", self.value))
+                return bytes([self.value + 10])
+
+        values = [Serializable(1), Serializable(2), Serializable(3)]
+        self.assertEqual(ser_vector(values), b"\x03\x01\x02\x03")
+        self.assertEqual(calls, [("default", 1), ("default", 2), ("default", 3)])
+
+        calls.clear()
+        self.assertEqual(
+            ser_vector(values, "serialize_alternate"),
+            b"\x03\x0b\x0c\x0d",
+        )
+        self.assertEqual(calls, [("alternate", 1), ("alternate", 2), ("alternate", 3)])
+
+        events = []
+        shared = bytearray(1)
+
+        class TrackedList(list):
+            def __len__(self):
+                events.append("length")
+                return super().__len__()
+
+        class MutableSerializable:
+            def __init__(self, value):
+                self.value = value
+
+            def serialize(self):
+                events.append(self.value)
+                shared[0] = self.value
+                return shared
+
+        mutable_values = TrackedList(MutableSerializable(i) for i in (1, 2, 3))
+        self.assertEqual(ser_vector(mutable_values), b"\x03\x01\x02\x03")
+        self.assertEqual(events, ["length", 1, 2, 3])
+
     def test_block_empty_matmul_payload_serialization(self):
         header_only = CBlock()
         self.assertEqual(
