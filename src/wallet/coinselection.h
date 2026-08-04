@@ -165,9 +165,10 @@ struct CoinSelectionParams {
     int tx_noinputs_size = 0;
     /** Indicate that we are subtracting the fee from outputs */
     bool m_subtract_fee_outputs = false;
-    /** When true, always spend all (up to OUTPUT_GROUP_MAX_ENTRIES) or none of the outputs
-     * associated with the same address. This helps reduce privacy leaks resulting from address
-     * reuse. Dust outputs are not eligible to be added to output groups and thus not considered. */
+    /** When true, always spend all (up to a transaction-weight-aware limit no greater than
+     * OUTPUT_GROUP_MAX_ENTRIES) or none of the outputs associated with the same address. This helps
+     * reduce privacy leaks resulting from address reuse. Dust outputs are not eligible to be added
+     * to output groups and thus not considered. */
     bool m_avoid_partial_spends = false;
     /**
      * When true, allow unsafe coins to be selected during Coin Selection. This may spend unconfirmed outputs:
@@ -211,7 +212,7 @@ struct CoinEligibilityFilter
     const uint64_t max_ancestors;
     /** Maximum number of descendants that a single UTXO in the OutputGroup may have. */
     const uint64_t max_descendants;
-    /** When avoid_reuse=true and there are full groups (OUTPUT_GROUP_MAX_ENTRIES), whether or not to use any partial groups.*/
+    /** When avoid_reuse=true and there are full weight-aware groups, whether or not to use any partial groups.*/
     const bool m_include_partial_groups{false};
 
     CoinEligibilityFilter() = delete;

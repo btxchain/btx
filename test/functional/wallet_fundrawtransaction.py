@@ -9,7 +9,7 @@ from decimal import Decimal
 from itertools import product
 from math import ceil
 from test_framework.address import address_to_scriptpubkey
-from test_framework.blocktools import COINBASE_MATURITY
+from test_framework.blocktools import COINBASE_MATURITY, MAX_STANDARD_TX_WEIGHT
 from test_framework.authproxy import JSONRPCException
 
 from test_framework.descriptors import descsum_create
@@ -17,6 +17,7 @@ from test_framework.messages import (
     COIN,
     CTransaction,
     CTxOut,
+    WITNESS_SCALE_FACTOR,
 )
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
@@ -111,7 +112,7 @@ class RawTransactionsTest(BitcoinTestFramework):
     def run_test(self):
         self.watchonly_utxo = None
         if not self._supports_wallet_address_type("bech32"):
-            self.run_btx_p2mr_fundrawtransaction_smoke()
+            self.run_btx_p2mr_fundrawtransaction_tests()
             return
         self.log.info("Connect nodes, set fees, generate blocks, and sync")
         self.min_relay_tx_fee = self.nodes[0].getnetworkinfo()['relayfee']
@@ -173,30 +174,238 @@ class RawTransactionsTest(BitcoinTestFramework):
         self.test_input_confs_control()
         self.test_duplicate_outputs()
 
-    def run_btx_p2mr_fundrawtransaction_smoke(self):
-        self.log.info("BTX p2mr-only policy detected; running fundrawtransaction smoke coverage.")
+    def _new_p2mr_wallet(self, node, name):
+        node.createwallet(wallet_name=name, descriptors=True)
+        return node.get_wallet_rpc(name)
 
+    def _fund_p2mr_wallet(self, wallet, amounts, *, confirm=True):
+        outputs = [{wallet.getnewaddress(address_type="p2mr"): amount} for amount in amounts]
+        outpoints = self.create_outpoints(self.nodes[0], outputs=outputs)
+        if confirm:
+            self.generate(self.nodes[0], 1)
+        return outpoints
+
+    def _fixed_p2mr_descriptor(self, signer, address):
+        """Return a public, fixed-key descriptor for a signer-owned P2MR address."""
+        mldsa_key = signer.exportpqkey(address, "ml-dsa-44")["key"]
+        slhdsa_key = signer.exportpqkey(address, "slh-dsa-shake-128s")["key"]
+        descriptor = self.nodes[0].getdescriptorinfo(f"mr({mldsa_key},{slhdsa_key})")["descriptor"]
+        assert_equal(self.nodes[0].deriveaddresses(descriptor)[0], address)
+        return descriptor
+
+    def run_btx_p2mr_fundrawtransaction_tests(self):
+        """Exercise generic fundrawtransaction behavior with native BTX P2MR inputs.
+
+        The upstream test assumes wallets can create legacy, P2SH-SegWit, and
+        SegWit-v0 outputs. Those script-template comparison cases are not
+        meaningful under BTX's P2MR-only wallet policy, but the RPC's generic
+        coin-selection, fee, locking, watch-only, and limit behavior is.
+        """
+        self.log.info("BTX P2MR-only policy detected; running native fundrawtransaction coverage")
         node0 = self.nodes[0]
-        wallet = self.nodes[2]
+        destination = self.nodes[1].get_wallet_rpc(self.default_wallet_name)
+        assert_raises_rpc_error(-8, "Only address type 'p2mr' is supported", self.nodes[2].getnewaddress, address_type="bech32")
 
-        assert_raises_rpc_error(-8, "Only address type 'p2mr' is supported", wallet.getnewaddress, address_type="bech32")
+        self.min_relay_tx_fee = node0.getnetworkinfo()["relayfee"]
+        for node in self.nodes:
+            node.settxfee(self.min_relay_tx_fee)
+        self.generate(node0, COINBASE_MATURITY + 10)
 
-        # Ensure wallet has confirmed funds and can fund/sign/send a raw tx.
-        self.generate(node0, 110)
-        receive_addr = wallet.getnewaddress()
-        node0.sendtoaddress(receive_addr, Decimal("2.0"))
+        self.log.info("P2MR: automatic and preset input selection, change, and locked coins")
+        selection = self._new_p2mr_wallet(self.nodes[2], "p2mr_selection")
+        self._fund_p2mr_wallet(selection, [Decimal("1"), Decimal("2"), Decimal("5")])
+        coins = sorted(selection.listunspent(), key=lambda coin: coin["amount"])
+
+        raw = selection.createrawtransaction([], {destination.getnewaddress(): Decimal("1.5")})
+        automatic = selection.fundrawtransaction(raw, fee_rate=2)
+        automatic_decoded = selection.decoderawtransaction(automatic["hex"])
+        assert_greater_than(len(automatic_decoded["vin"]), 0)
+        assert_greater_than_or_equal(automatic["changepos"], 0)
+        automatic_signed = selection.signrawtransactionwithwallet(automatic["hex"])
+        assert automatic_signed["complete"]
+        assert selection.testmempoolaccept([automatic_signed["hex"]])[0]["allowed"]
+
+        preset = {"txid": coins[0]["txid"], "vout": coins[0]["vout"]}
+        raw = selection.createrawtransaction([preset], {destination.getnewaddress(): Decimal("1.5")})
+        assert_raises_rpc_error(-4, ERR_NOT_ENOUGH_PRESET_INPUTS, selection.fundrawtransaction, raw, add_inputs=False)
+        added = selection.fundrawtransaction(raw, add_inputs=True, fee_rate=2)
+        added_inputs = selection.decoderawtransaction(added["hex"])["vin"]
+        assert_greater_than(len(added_inputs), 1)
+        assert any(vin["txid"] == preset["txid"] and vin["vout"] == preset["vout"] for vin in added_inputs)
+
+        enough = {"txid": coins[2]["txid"], "vout": coins[2]["vout"]}
+        change_address = selection.getrawchangeaddress(address_type="p2mr")
+        raw = selection.createrawtransaction([enough], {destination.getnewaddress(): Decimal("1")})
+        with_change = selection.fundrawtransaction(
+            raw,
+            add_inputs=False,
+            changeAddress=change_address,
+            changePosition=0,
+            lockUnspents=True,
+            fee_rate=2,
+        )
+        decoded = selection.decoderawtransaction(with_change["hex"])
+        assert_equal(with_change["changepos"], 0)
+        assert_equal(decoded["vout"][0]["scriptPubKey"]["address"], change_address)
+        locked = {(coin["txid"], coin["vout"]) for coin in selection.listlockunspent()}
+        assert (enough["txid"], enough["vout"]) in locked
+        selection.lockunspent(True)
+        assert_equal(selection.listlockunspent(), [])
+
+        no_change_raw = selection.createrawtransaction([enough], {destination.getnewaddress(): Decimal("5")})
+        no_change = selection.fundrawtransaction(
+            no_change_raw,
+            add_inputs=False,
+            subtractFeeFromOutputs=[0],
+            fee_rate=2,
+        )
+        no_change_decoded = selection.decoderawtransaction(no_change["hex"])
+        assert_equal(no_change["changepos"], -1)
+        assert_equal(no_change_decoded["vout"][0]["value"] + no_change["fee"], Decimal("5"))
+
+        assert_raises_rpc_error(-8, "Unknown named parameter foo", selection.fundrawtransaction, raw, foo="bar")
+        assert_raises_rpc_error(-5, "Change address must be a valid BTX address", selection.fundrawtransaction, raw, changeAddress="not-an-address")
+        assert_raises_rpc_error(-8, "changePosition out of bounds", selection.fundrawtransaction, raw, changePosition=2)
+
+        self.log.info("P2MR: explicit fee rates and subtractFeeFromOutputs")
+        fee_wallet = self._new_p2mr_wallet(self.nodes[2], "p2mr_fees")
+        self._fund_p2mr_wallet(fee_wallet, [Decimal("5")])
+        recipients = [destination.getnewaddress(), destination.getnewaddress()]
+        raw = fee_wallet.createrawtransaction([], [{recipients[0]: Decimal("1")}, {recipients[1]: Decimal("1")}])
+        low_fee = fee_wallet.fundrawtransaction(raw, fee_rate=1)
+        high_fee = fee_wallet.fundrawtransaction(raw, fee_rate=5)
+        assert_greater_than(high_fee["fee"], low_fee["fee"])
+        subtracted = fee_wallet.fundrawtransaction(raw, fee_rate=2, subtractFeeFromOutputs=[0, 1])
+        subtracted_decoded = fee_wallet.decoderawtransaction(subtracted["hex"])
+        paid = sum(
+            output["value"]
+            for output in subtracted_decoded["vout"]
+            if output["scriptPubKey"].get("address") in recipients
+        )
+        assert_equal(paid + subtracted["fee"], Decimal("2"))
+        assert_raises_rpc_error(-8, "Cannot specify both fee_rate", fee_wallet.fundrawtransaction, raw, fee_rate=2, feeRate=Decimal("0.00002"))
+
+        self.log.info("P2MR: duplicate outputs and OP_RETURN funding")
+        duplicate_address = destination.getnewaddress()
+        duplicate_tx = CTransaction()
+        duplicate_tx.vin = []
+        duplicate_tx.vout = [CTxOut(COIN // 2, bytearray(address_to_scriptpubkey(duplicate_address)))] * 2
+        duplicate_tx.nLockTime = 0
+        duplicate_funded = fee_wallet.fundrawtransaction(duplicate_tx.serialize().hex(), add_inputs=True, fee_rate=2)
+        duplicate_decoded = fee_wallet.decoderawtransaction(duplicate_funded["hex"])
+        duplicate_outputs = [
+            output for output in duplicate_decoded["vout"]
+            if output["scriptPubKey"].get("address") == duplicate_address
+        ]
+        assert_equal(len(duplicate_outputs), 2)
+        duplicate_sffo = fee_wallet.fundrawtransaction(
+            duplicate_tx.serialize().hex(),
+            add_inputs=True,
+            fee_rate=2,
+            subtractFeeFromOutputs=[0, 1],
+        )
+        assert_greater_than(duplicate_sffo["fee"], 0)
+
+        op_return = "0100000000010000000000000000066a047465737400000000"
+        op_return_funded = fee_wallet.fundrawtransaction(op_return, fee_rate=2)
+        op_return_decoded = fee_wallet.decoderawtransaction(op_return_funded["hex"])
+        assert_greater_than(len(op_return_decoded["vin"]), 0)
+        assert_equal(sum(output["scriptPubKey"]["type"] == "nulldata" for output in op_return_decoded["vout"]), 1)
+
+        self.log.info("P2MR: many-input funding and transaction-weight bounds")
+        many = self._new_p2mr_wallet(self.nodes[2], "p2mr_many_inputs")
+        self._fund_p2mr_wallet(many, [Decimal("0.1")] * 24)
+        raw = many.createrawtransaction([], {destination.getnewaddress(): Decimal("2.35")})
+        many_funded = many.fundrawtransaction(raw, fee_rate=1)
+        many_decoded = many.decoderawtransaction(many_funded["hex"])
+        assert_greater_than_or_equal(len(many_decoded["vin"]), 20)
+        many_signed = many.signrawtransactionwithwallet(many_funded["hex"])
+        assert many_signed["complete"]
+        assert_greater_than_or_equal(MAX_STANDARD_TX_WEIGHT, many.decoderawtransaction(many_signed["hex"])["weight"])
+        assert many.testmempoolaccept([many_signed["hex"]])[0]["allowed"]
+        assert_raises_rpc_error(
+            -4,
+            "maximum weight",
+            many.fundrawtransaction,
+            raw,
+            fee_rate=1,
+            max_tx_weight=1000,
+        )
+
+        self.log.info("P2MR: watch-only funding uses conservative descriptor sizing")
+        signer = self._new_p2mr_wallet(self.nodes[3], "p2mr_watch_signer")
+        watch_addresses = [signer.getnewaddress(address_type="p2mr") for _ in range(2)]
+        watch_descriptors = [self._fixed_p2mr_descriptor(signer, address) for address in watch_addresses]
+        change_address = signer.getrawchangeaddress(address_type="p2mr")
+        change_descriptor = self._fixed_p2mr_descriptor(signer, change_address)
+        self.nodes[3].createwallet(wallet_name="p2mr_watch", disable_private_keys=True, blank=True, descriptors=True)
+        watch = self.nodes[3].get_wallet_rpc("p2mr_watch")
+        requests = [{"desc": descriptor, "timestamp": "now", "internal": False} for descriptor in watch_descriptors]
+        requests.append({"desc": change_descriptor, "timestamp": "now", "internal": True})
+        assert_equal(watch.importdescriptors(requests), [{"success": True}] * 3)
+        watch_outpoints = self.create_outpoints(node0, outputs=[{address: Decimal("2")} for address in watch_addresses])
         self.generate(node0, 1)
+        assert_equal(len(watch.listunspent()), 2)
+        watch_input = watch_outpoints[0]
+        raw = watch.createrawtransaction([watch_input], {destination.getnewaddress(): Decimal("1")})
+        watch_funded = watch.fundrawtransaction(
+            raw,
+            add_inputs=False,
+            includeWatching=True,
+            changeAddress=change_address,
+            fee_rate=2,
+        )
+        watch_signed = watch.signrawtransactionwithwallet(watch_funded["hex"])
+        assert not watch_signed["complete"]
+        signer_signed = signer.signrawtransactionwithwallet(watch_signed["hex"])
+        assert signer_signed["complete"]
+        assert signer.testmempoolaccept([signer_signed["hex"]])[0]["allowed"]
 
-        raw = wallet.createrawtransaction([], {node0.getnewaddress(): Decimal("0.5")})
-        funded = wallet.fundrawtransaction(raw)
-        assert "hex" in funded
-        assert funded["fee"] > 0
-
-        signed = wallet.signrawtransactionwithwallet(funded["hex"])
-        assert signed["complete"]
-        txid = wallet.sendrawtransaction(signed["hex"])
+        self.log.info("P2MR: unconfirmed unsafe inputs")
+        unsafe = self._new_p2mr_wallet(self.nodes[1], "p2mr_unsafe")
+        unsafe_addresses = [unsafe.getnewaddress() for _ in range(2)]
+        unsafe_outpoints = self.create_outpoints(node0, outputs=[{address: Decimal("2")} for address in unsafe_addresses])
+        self.sync_mempools()
+        raw = unsafe.createrawtransaction([], {node0.getnewaddress(): Decimal("3")})
+        assert_raises_rpc_error(-4, "Insufficient funds", unsafe.fundrawtransaction, raw)
+        unsafe_funded = unsafe.fundrawtransaction(raw, include_unsafe=True, fee_rate=2)
+        unsafe_inputs = {(vin["txid"], vin["vout"]) for vin in unsafe.decoderawtransaction(unsafe_funded["hex"])["vin"]}
+        assert_equal(unsafe_inputs, {(outpoint["txid"], outpoint["vout"]) for outpoint in unsafe_outpoints})
+        unsafe_signed = unsafe.signrawtransactionwithwallet(unsafe_funded["hex"])
+        assert unsafe_signed["complete"]
+        assert unsafe.testmempoolaccept([unsafe_signed["hex"]])[0]["allowed"]
         self.generate(node0, 1)
-        assert_equal(node0.getrawtransaction(txid, True)["txid"], txid)
+        assert "hex" in unsafe.fundrawtransaction(raw, include_unsafe=False, fee_rate=2)
+
+        self.log.info("P2MR: external input validation and explicit sizing")
+        external_address = node0.getnewaddress(address_type="p2mr")
+        external_outpoint = self.create_outpoints(node0, outputs=[{external_address: Decimal("2")}])[0]
+        self.generate(node0, 1)
+        external_raw = selection.createrawtransaction([external_outpoint], {destination.getnewaddress(): Decimal("1")})
+        assert_raises_rpc_error(-4, "Not solvable pre-selected input", selection.fundrawtransaction, external_raw)
+        assert_raises_rpc_error(
+            -8,
+            "weight cannot be less than",
+            selection.fundrawtransaction,
+            external_raw,
+            input_weights=[{**external_outpoint, "weight": 41 * WITNESS_SCALE_FACTOR}],
+        )
+        externally_sized = selection.fundrawtransaction(
+            external_raw,
+            add_inputs=False,
+            input_weights=[{**external_outpoint, "weight": 30000}],
+            fee_rate=2,
+        )
+        partial = selection.signrawtransactionwithwallet(externally_sized["hex"])
+        assert not partial["complete"]
+        complete = node0.signrawtransactionwithwallet(partial["hex"])
+        assert complete["complete"]
+        assert node0.testmempoolaccept([complete["hex"]])[0]["allowed"]
+
+        self.log.info(
+            "P2MR-only exclusions: legacy/P2PKH, P2SH, SegWit-v0, ECDSA multisig, "
+            "and script-type fee-comparison cases remain intentionally unexecuted"
+        )
 
     def test_duplicate_outputs(self):
         self.log.info("Test deserializing and funding a transaction with duplicate outputs")
@@ -1164,9 +1373,10 @@ class RawTransactionsTest(BitcoinTestFramework):
         assert_raises_rpc_error(-8, "Invalid parameter, missing vout key", wallet.fundrawtransaction, raw_tx, input_weights=[{"txid": ext_utxo["txid"]}])
         assert_raises_rpc_error(-8, "Invalid parameter, vout cannot be negative", wallet.fundrawtransaction, raw_tx, input_weights=[{"txid": ext_utxo["txid"], "vout": -1}])
         assert_raises_rpc_error(-8, "Invalid parameter, missing weight key", wallet.fundrawtransaction, raw_tx, input_weights=[{"txid": ext_utxo["txid"], "vout": ext_utxo["vout"]}])
-        assert_raises_rpc_error(-8, "Invalid parameter, weight cannot be less than 165", wallet.fundrawtransaction, raw_tx, input_weights=[{"txid": ext_utxo["txid"], "vout": ext_utxo["vout"], "weight": 164}])
-        assert_raises_rpc_error(-8, "Invalid parameter, weight cannot be less than 165", wallet.fundrawtransaction, raw_tx, input_weights=[{"txid": ext_utxo["txid"], "vout": ext_utxo["vout"], "weight": -1}])
-        assert_raises_rpc_error(-8, "Invalid parameter, weight cannot be greater than", wallet.fundrawtransaction, raw_tx, input_weights=[{"txid": ext_utxo["txid"], "vout": ext_utxo["vout"], "weight": 400001}])
+        min_input_weight = 41 * WITNESS_SCALE_FACTOR + 1
+        assert_raises_rpc_error(-8, f"Invalid parameter, weight cannot be less than {min_input_weight}", wallet.fundrawtransaction, raw_tx, input_weights=[{"txid": ext_utxo["txid"], "vout": ext_utxo["vout"], "weight": min_input_weight - 1}])
+        assert_raises_rpc_error(-8, f"Invalid parameter, weight cannot be less than {min_input_weight}", wallet.fundrawtransaction, raw_tx, input_weights=[{"txid": ext_utxo["txid"], "vout": ext_utxo["vout"], "weight": -1}])
+        assert_raises_rpc_error(-8, "Invalid parameter, weight cannot be greater than", wallet.fundrawtransaction, raw_tx, input_weights=[{"txid": ext_utxo["txid"], "vout": ext_utxo["vout"], "weight": MAX_STANDARD_TX_WEIGHT + 1}])
 
         # But funding should work when the solving data is provided
         funded_tx = wallet.fundrawtransaction(raw_tx, solving_data={"pubkeys": [addr_info['pubkey']], "scripts": [addr_info["embedded"]["scriptPubKey"]]})
@@ -1185,7 +1395,7 @@ class RawTransactionsTest(BitcoinTestFramework):
         signed_weight = self.nodes[0].decoderawtransaction(signed_tx2["hex"])["weight"]
         # Input's weight is difference between weight of signed and unsigned,
         # and the weight of stuff that didn't change (prevout, sequence, 1 byte of scriptSig)
-        input_weight = signed_weight - unsigned_weight + (41 * 4)
+        input_weight = signed_weight - unsigned_weight + (41 * WITNESS_SCALE_FACTOR)
         low_input_weight = input_weight // 2
         high_input_weight = input_weight * 2
 
@@ -1206,9 +1416,9 @@ class RawTransactionsTest(BitcoinTestFramework):
         assert_equal(funded_tx2["fee"], funded_tx3["fee"])
         # The feerate should be met
         funded_tx4 = wallet.fundrawtransaction(raw_tx, input_weights=[{"txid": ext_utxo["txid"], "vout": ext_utxo["vout"], "weight": high_input_weight}], fee_rate=10)
-        input_add_weight = high_input_weight - (41 * 4)
+        input_add_weight = high_input_weight - (41 * WITNESS_SCALE_FACTOR)
         tx4_weight = wallet.decoderawtransaction(funded_tx4["hex"])["weight"] + input_add_weight
-        tx4_vsize = int(ceil(tx4_weight / 4))
+        tx4_vsize = int(ceil(tx4_weight / WITNESS_SCALE_FACTOR))
         assert_fee_amount(funded_tx4["fee"], tx4_vsize, Decimal(0.0001))
 
         # Funding with weight at csuint boundaries should not cause problems
@@ -1401,16 +1611,16 @@ class RawTransactionsTest(BitcoinTestFramework):
         rawtx = wallet.createrawtransaction([utxo], [{self.nodes[0].getnewaddress(address_type="bech32"): 8}])
         fundedtx = wallet.fundrawtransaction(rawtx, fee_rate=10, change_type="bech32")
         # with 71-byte signatures we should expect following tx size
-        # tx overhead (10) + 2 inputs (41 each) + 2 p2wpkh (31 each) + (segwit marker and flag (2) + 2 p2wpkh 71 byte sig witnesses (107 each)) / witness scaling factor (4)
-        tx_size = ceil(10 + 41*2 + 31*2 + (2 + 107*2)/4)
+        # tx overhead (10) + 2 inputs (41 each) + 2 p2wpkh (31 each) + witness data scaled by this chain's factor
+        tx_size = ceil(10 + 41*2 + 31*2 + (2 + 107*2) / WITNESS_SCALE_FACTOR)
         assert_equal(fundedtx['fee'] * COIN, tx_size * 10)
 
         # Using the other output should have 72 byte sigs
         rawtx = wallet.createrawtransaction([ext_utxo], [{self.nodes[0].getnewaddress(): 13}])
         ext_desc = self.nodes[0].getaddressinfo(ext_addr)["desc"]
         fundedtx = wallet.fundrawtransaction(rawtx, fee_rate=10, change_type="bech32", solving_data={"descriptors": [ext_desc]})
-        # tx overhead (10) + 3 inputs (41 each) + 2 p2wpkh(31 each) + (segwit marker and flag (2) + 2 p2wpkh 71 bytes sig witnesses (107 each) + p2wpkh 72 byte sig witness (108)) / witness scaling factor (4)
-        tx_size = ceil(10 + 41*3 + 31*2 + (2 + 107*2 + 108)/4)
+        # tx overhead (10) + 3 inputs (41 each) + 2 p2wpkh outputs (31 each) + scaled witness data
+        tx_size = ceil(10 + 41*3 + 31*2 + (2 + 107*2 + 108) / WITNESS_SCALE_FACTOR)
         assert_equal(fundedtx['fee'] * COIN, tx_size * 10)
 
         self.nodes[2].unloadwallet("test_weight_calculation")

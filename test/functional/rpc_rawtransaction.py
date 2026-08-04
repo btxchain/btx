@@ -64,7 +64,7 @@ class multidict(dict):
 
 class RawTransactionsTest(BitcoinTestFramework):
     def add_options(self, parser):
-        self.add_wallet_options(parser, descriptors=False)
+        self.add_wallet_options(parser, legacy=False)
 
     def set_test_params(self):
         self.num_nodes = 3
@@ -95,9 +95,6 @@ class RawTransactionsTest(BitcoinTestFramework):
         self.sendrawtransaction_testmempoolaccept_tests()
         self.decoderawtransaction_tests()
         self.transaction_version_number_tests()
-        if self.is_specified_wallet_compiled() and not self.options.descriptors:
-            self.import_deterministic_coinbase_privkeys()
-            self.raw_multisig_transaction_legacy_tests()
         self.getrawtransaction_verbosity_tests()
 
     def run_btx_p2mr_rawtransaction_smoke(self):

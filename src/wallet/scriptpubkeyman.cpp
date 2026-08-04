@@ -2752,6 +2752,34 @@ std::unique_ptr<FlatSigningProvider> DescriptorScriptPubKeyMan::GetSigningProvid
     return GetSigningProvider(index, include_private);
 }
 
+std::unique_ptr<FlatSigningProvider> DescriptorScriptPubKeyMan::GetP2MRSizingProvider(const CScript& script) const
+{
+    LOCK(cs_desc_man);
+
+    const auto it = m_map_script_pub_keys.find(script);
+    if (it == m_map_script_pub_keys.end()) return nullptr;
+
+    const int32_t index{it->second};
+    auto provider = std::make_unique<FlatSigningProvider>();
+    if (const auto cached = m_map_signing_providers.find(index); cached != m_map_signing_providers.end()) {
+        provider->Merge(FlatSigningProvider{cached->second});
+    } else {
+        // Fee selection must never fall back to direct descriptor expansion:
+        // a PQ descriptor can perform private PQ key generation while deriving
+        // an uncached public key. A missing/corrupt cache fails closed here.
+        std::vector<CScript> scripts;
+        if (!m_wallet_descriptor.descriptor->ExpandFromCache(
+                index, m_wallet_descriptor.cache, scripts, *provider)) {
+            return nullptr;
+        }
+        m_map_signing_providers[index] = *provider;
+    }
+
+    m_wallet_descriptor.descriptor->ExpandP2MRSigningKeyAvailability(
+        index, m_wallet_descriptor.cache, provider->pq_signing_key_availability);
+    return provider;
+}
+
 std::unique_ptr<FlatSigningProvider> DescriptorScriptPubKeyMan::GetSigningProvider(const CPubKey& pubkey) const
 {
     LOCK(cs_desc_man);

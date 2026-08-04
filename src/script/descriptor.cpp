@@ -2064,6 +2064,51 @@ protected:
         }
     }
 
+    void ExpandP2MRSigningKeyAvailability(
+        int pos,
+        const DescriptorCache& read_cache,
+        std::set<std::vector<unsigned char>, ShortestVectorFirstComparator>& out) const override
+    {
+        auto add_available_key = [&](PQAlgorithm algo, int provider_index, const std::vector<unsigned char>& fixed_pubkey) {
+            // A fixed public key is not evidence that this descriptor owns its
+            // private key. External providers can still advertise one.
+            if (!fixed_pubkey.empty()) return;
+            if (provider_index < 0 || static_cast<size_t>(provider_index) >= m_pubkey_args.size()) return;
+
+            const auto* pqhd = dynamic_cast<const PQHDPubkeyProvider*>(m_pubkey_args[provider_index].get());
+            if (!pqhd || !pqhd->HasSeed()) return;
+
+            std::vector<unsigned char> pubkey;
+            if (!read_cache.GetCachedDerivedPQPubKey(
+                    algo, m_pubkey_args[provider_index]->GetExprIndex(), pos, pubkey)) {
+                return;
+            }
+            if (pubkey.size() != GetPQPubKeySize(algo)) return;
+            out.insert(std::move(pubkey));
+        };
+
+        for (const auto& leaf : m_leaf_specs) {
+            if (LeafUsesPrimaryKey(leaf)) {
+                add_available_key(leaf.algo, leaf.provider_index, leaf.fixed_pubkey);
+            }
+            if (LeafUsesMultisigKeys(leaf)) {
+                if (leaf.multisig_algos.size() != leaf.multisig_provider_indices.size() ||
+                    leaf.multisig_algos.size() != leaf.multisig_fixed_pubkeys.size()) {
+                    continue;
+                }
+                for (size_t key_pos{0}; key_pos < leaf.multisig_algos.size(); ++key_pos) {
+                    add_available_key(
+                        leaf.multisig_algos[key_pos],
+                        leaf.multisig_provider_indices[key_pos],
+                        leaf.multisig_fixed_pubkeys[key_pos]);
+                }
+            }
+            if (LeafUsesCSFSKey(leaf)) {
+                add_available_key(leaf.csfs_algo, leaf.csfs_provider_index, leaf.csfs_fixed_pubkey);
+            }
+        }
+    }
+
     std::vector<CScript> MakeScripts(int pos, const SigningProvider& arg, const std::vector<CPubKey>&, Span<const CScript>, FlatSigningProvider& out, const DescriptorCache* read_cache, DescriptorCache* write_cache) const override
     {
         std::vector<uint256> leaf_hashes;

@@ -25,11 +25,14 @@
 #include <wallet/coincontrol.h>
 #include <wallet/fees.h>
 #include <wallet/receive.h>
+#include <wallet/scriptpubkeyman.h>
 #include <wallet/spend.h>
 #include <wallet/transaction.h>
 #include <wallet/wallet.h>
 
 #include <cmath>
+#include <functional>
+#include <limits>
 
 using common::StringForFeeReason;
 using common::TransactionErrorString;
@@ -43,11 +46,29 @@ TRACEPOINT_SEMAPHORE(coin_selection, aps_create_tx_internal);
 
 namespace wallet {
 static constexpr size_t OUTPUT_GROUP_MAX_ENTRIES{100};
-// Conservative worst-case P2MR input weight for fee estimation.
-// Worst case is 3-of-3 SLH-DSA multisig:
-//   3 sigs × 7856 B + 3 pubkeys × 1312 B + control block 4097 B + ~200 B overhead
-//   ≈ 31,842 weight.  Rounded up to 33,000 to avoid underestimation.
-static constexpr int64_t P2MR_MAX_INPUT_WEIGHT{33000};
+
+static int64_t MaxOutputGroupInputWeight(const CoinSelectionParams& params)
+{
+    const int64_t max_tx_weight{params.m_max_tx_weight.value_or(MAX_STANDARD_TX_WEIGHT)};
+    const int64_t noinputs_weight{static_cast<int64_t>(params.tx_noinputs_size) * WITNESS_SCALE_FACTOR};
+    return std::max<int64_t>(0, max_tx_weight - noinputs_weight);
+}
+
+static int64_t EstimatedOutputInputWeight(const COutput& output)
+{
+    // A selectable output with no size estimate must not make an APS group appear
+    // weightless. P2MR is the largest normal wallet input and is a conservative
+    // fallback for the other standard wallet script types as well.
+    return output.input_bytes > 0 ? output.input_bytes * WITNESS_SCALE_FACTOR : GetMaximumStandardP2MRInputWeight();
+}
+
+static bool OutputGroupWouldOverflow(const CoinSelectionParams& params, size_t entries, int64_t weight, const COutput& next)
+{
+    if (entries == 0) return false;
+    if (entries >= OUTPUT_GROUP_MAX_ENTRIES) return true;
+    const int64_t next_weight{EstimatedOutputInputWeight(next)};
+    return weight > MaxOutputGroupInputWeight(params) - next_weight;
+}
 
 /** Whether the descriptor represents, directly or not, a witness program. */
 static bool IsSegwit(const Descriptor& desc) {
@@ -67,6 +88,31 @@ static std::unique_ptr<SigningProvider> GetSolvingProvider(const CWallet* wallet
     auto providers = std::make_unique<MultiSigningProvider>();
     for (const auto spkman: wallet->GetScriptPubKeyMans(script_pubkey)) {
         providers->AddProvider(spkman->GetSolvingProvider(script_pubkey));
+    }
+    if (coin_control) {
+        providers->AddProvider(std::make_unique<FlatSigningProvider>(coin_control->m_external_provider));
+    }
+    return providers;
+}
+
+/** Build a provider containing public P2MR solving data and cheap wallet PQ
+ *  signing-key availability metadata. This never derives a private PQ key. */
+static std::unique_ptr<SigningProvider> GetP2MRSigningProvider(
+    const CWallet* wallet,
+    const CCoinControl* coin_control,
+    const CScript& script_pubkey)
+{
+    auto providers = std::make_unique<MultiSigningProvider>();
+    for (ScriptPubKeyMan* spkman : wallet->GetScriptPubKeyMans(script_pubkey)) {
+        if (const auto desc_spkman = dynamic_cast<DescriptorScriptPubKeyMan*>(spkman)) {
+            if (auto provider = desc_spkman->GetP2MRSizingProvider(script_pubkey)) {
+                providers->AddProvider(std::move(provider));
+            }
+        } else {
+            if (auto provider = spkman->GetSolvingProvider(script_pubkey)) {
+                providers->AddProvider(std::move(provider));
+            }
+        }
     }
     if (coin_control) {
         providers->AddProvider(std::make_unique<FlatSigningProvider>(coin_control->m_external_provider));
@@ -105,86 +151,36 @@ static std::optional<int64_t> MaxInputWeight(const Descriptor& desc, const std::
     return {};
 }
 
-static std::optional<int64_t> DummySignInputWeight(const CTxOut& txout,
-                                                   const SigningProvider& provider,
-                                                   const bool use_max_sig)
-{
-    SignatureData sig_data;
-    if (!ProduceSignature(
-            provider,
-            use_max_sig ? DUMMY_MAXIMUM_SIGNATURE_CREATOR : DUMMY_SIGNATURE_CREATOR,
-            txout.scriptPubKey,
-            sig_data)) {
-        return {};
-    }
-
-    CTxIn txin;
-    UpdateInput(txin, sig_data);
-    return GetTransactionInputWeight(txin);
-}
-
 static bool IsP2MROutput(const CScript& script_pubkey)
 {
     std::vector<std::vector<unsigned char>> solutions;
     return Solver(script_pubkey, solutions) == TxoutType::WITNESS_V2_P2MR;
 }
 
-static std::optional<int64_t> WalletSignP2MRInputWeight(const CWallet* wallet, const CTxOut& txout)
+static bool AllowWatchOnlyP2MRSizingFallback(
+    const CCoinControl* coin_control)
 {
-    CMutableTransaction tx;
-    const COutPoint prevout{Txid::FromUint256(uint256{1}), 0};
-    tx.vin.emplace_back(prevout);
-    tx.vout.emplace_back(txout.nValue, txout.scriptPubKey);
-
-    std::map<COutPoint, Coin> coins;
-    coins.emplace(prevout, Coin{txout, /*nHeight=*/1, /*fCoinBase=*/false});
-
-    std::map<int, bilingual_str> input_errors;
-    if (!wallet->SignTransaction(tx, coins, SIGHASH_DEFAULT, input_errors, /*inputs_amount_sum=*/nullptr)) {
-        return {};
-    }
-    if (!input_errors.empty()) return {};
-    return GetTransactionInputWeight(tx.vin[0]);
-}
-
-static std::optional<TxSize> WalletSignP2MRTxSize(const CTransaction& tx,
-                                                  const CWallet* wallet,
-                                                  const std::vector<CTxOut>& txouts)
-{
-    if (tx.vin.size() != txouts.size()) return {};
-
-    CMutableTransaction tx_signed(tx);
-    std::map<COutPoint, Coin> coins;
-    for (size_t i = 0; i < txouts.size(); ++i) {
-        coins.emplace(tx.vin[i].prevout, Coin{txouts[i], /*nHeight=*/1, /*fCoinBase=*/false});
-    }
-
-    std::map<int, bilingual_str> input_errors;
-    if (!wallet->SignTransaction(tx_signed, coins, SIGHASH_DEFAULT, input_errors, /*inputs_amount_sum=*/nullptr)) {
-        return {};
-    }
-    if (!input_errors.empty()) return {};
-
-    const CTransaction signed_tx{tx_signed};
-    return TxSize{GetVirtualTransactionSize(signed_tx), GetTransactionWeight(signed_tx)};
+    // Descriptor wallets classify a known descriptor as spendable even when
+    // it contains no private keys, so IsMine() cannot distinguish this case.
+    // Only an explicit watch-only funding request may use the conservative
+    // structural maximum when no locally signable P2MR path is available.
+    return coin_control && coin_control->fAllowWatchOnly;
 }
 
 int CalculateMaximumSignedInputSize(const CTxOut& txout, const COutPoint outpoint, const SigningProvider* provider, bool can_grind_r, const CCoinControl* coin_control)
 {
     if (!provider) return -1;
 
+    if (IsP2MROutput(txout.scriptPubKey)) {
+        if (!HasGenericP2MRSigningPath(txout.scriptPubKey, *provider)) return -1;
+        const auto weight{CalculateMaximumP2MRInputWeight(txout.scriptPubKey, *provider)};
+        return weight ? static_cast<int>(GetVirtualTransactionSize(*weight, 0, 0)) : -1;
+    }
+
     if (const auto desc = InferDescriptor(txout.scriptPubKey, *provider)) {
         if (const auto weight = MaxInputWeight(*desc, {}, coin_control, true, can_grind_r)) {
             return static_cast<int>(GetVirtualTransactionSize(*weight, 0, 0));
         }
-    }
-
-    std::vector<std::vector<unsigned char>> solutions;
-    if (Solver(txout.scriptPubKey, solutions) == TxoutType::WITNESS_V2_P2MR) {
-        if (const auto weight = DummySignInputWeight(txout, *provider, !can_grind_r || UseMaxSig({}, coin_control))) {
-            return static_cast<int>(GetVirtualTransactionSize(*weight, 0, 0));
-        }
-        return static_cast<int>(GetVirtualTransactionSize(P2MR_MAX_INPUT_WEIGHT, 0, 0));
     }
 
     return -1;
@@ -193,9 +189,20 @@ int CalculateMaximumSignedInputSize(const CTxOut& txout, const COutPoint outpoin
 int CalculateMaximumSignedInputSize(const CTxOut& txout, const CWallet* wallet, const CCoinControl* coin_control)
 {
     if (IsP2MROutput(txout.scriptPubKey)) {
-        if (const auto weight = WalletSignP2MRInputWeight(wallet, txout)) {
+        const auto signing_provider{GetP2MRSigningProvider(wallet, coin_control, txout.scriptPubKey)};
+        if (const auto weight = CalculateSelectedP2MRInputWeight(
+                txout.scriptPubKey,
+                *signing_provider,
+                coin_control ? coin_control->m_preferred_pq_signing_algo : std::nullopt)) {
             return static_cast<int>(GetVirtualTransactionSize(*weight, 0, 0));
         }
+        if (AllowWatchOnlyP2MRSizingFallback(coin_control) &&
+            HasGenericP2MRSigningPath(txout.scriptPubKey, *signing_provider)) {
+            if (const auto weight = CalculateMaximumP2MRInputWeight(txout.scriptPubKey, *signing_provider)) {
+                return static_cast<int>(GetVirtualTransactionSize(*weight, 0, 0));
+            }
+        }
+        return -1;
     }
     const std::unique_ptr<SigningProvider> provider = GetSolvingProvider(wallet, coin_control, txout.scriptPubKey);
     return CalculateMaximumSignedInputSize(txout, COutPoint(), provider.get(), wallet->CanGrindR(), coin_control);
@@ -220,6 +227,23 @@ static std::optional<int64_t> GetSignedTxinWeight(const CWallet* wallet, const C
         return weight.value();
     }
 
+    if (IsP2MROutput(txo.scriptPubKey)) {
+        const auto signing_provider{GetP2MRSigningProvider(wallet, coin_control, txo.scriptPubKey)};
+        if (const auto selected_weight = CalculateSelectedP2MRInputWeight(
+                txo.scriptPubKey,
+                *signing_provider,
+                coin_control ? coin_control->m_preferred_pq_signing_algo : std::nullopt)) {
+            return selected_weight;
+        }
+        if (AllowWatchOnlyP2MRSizingFallback(coin_control) &&
+            HasGenericP2MRSigningPath(txo.scriptPubKey, *signing_provider)) {
+            const auto maximum_weight = CalculateMaximumP2MRInputWeight(txo.scriptPubKey, *signing_provider);
+            if (!maximum_weight) return {};
+            return maximum_weight;
+        }
+        return {};
+    }
+
     // Otherwise, use the maximum satisfaction size provided by the descriptor.
     std::unique_ptr<Descriptor> desc{GetDescriptor(wallet, coin_control, txo.scriptPubKey)};
     if (desc) {
@@ -228,29 +252,12 @@ static std::optional<int64_t> GetSignedTxinWeight(const CWallet* wallet, const C
         }
     }
 
-    std::vector<std::vector<unsigned char>> solutions;
-    if (Solver(txo.scriptPubKey, solutions) == TxoutType::WITNESS_V2_P2MR) {
-        const std::unique_ptr<SigningProvider> provider = GetSolvingProvider(wallet, coin_control, txo.scriptPubKey);
-        if (provider) {
-            if (const auto weight = DummySignInputWeight(txo, *provider, !can_grind_r || UseMaxSig({txin}, coin_control))) {
-                return weight;
-            }
-        }
-        return P2MR_MAX_INPUT_WEIGHT;
-    }
-
     return {};
 }
 
 // txouts needs to be in the order of tx.vin
 TxSize CalculateMaximumSignedTxSize(const CTransaction &tx, const CWallet *wallet, const std::vector<CTxOut>& txouts, const CCoinControl* coin_control)
 {
-    if (std::any_of(txouts.begin(), txouts.end(), [](const CTxOut& txo) { return IsP2MROutput(txo.scriptPubKey); })) {
-        if (const auto exact_size = WalletSignP2MRTxSize(tx, wallet, txouts)) {
-            return *exact_size;
-        }
-    }
-
     // version + nLockTime + input count + output count
     int64_t weight = (4 + 4 + GetSizeOfCompactSize(tx.vin.size()) + GetSizeOfCompactSize(tx.vout.size())) * WITNESS_SCALE_FACTOR;
     // Whether any input spends a witness program. Necessary to run before the next loop over the
@@ -438,8 +445,11 @@ CoinsResult AvailableCoins(const CWallet& wallet,
     const int max_depth = {coinControl ? coinControl->m_max_depth : DEFAULT_MAX_DEPTH};
     const bool only_safe = {coinControl ? !coinControl->m_include_unsafe_inputs : true};
     const bool segwit_inputs_only = {coinControl ? coinControl->m_segwit_inputs_only : false};
-    const bool can_grind_r = wallet.CanGrindR();
     std::vector<COutPoint> outpoints;
+    // Reused destinations can have thousands of UTXOs. Cache the metadata-only
+    // P2MR estimate per script so coin enumeration remains O(unique scripts)
+    // rather than repeating descriptor/private-key expansion per output.
+    std::map<CScript, int> p2mr_input_size_cache;
 
     std::set<uint256> trusted_parents;
     for (const auto& entry : wallet.mapWallet)
@@ -529,17 +539,35 @@ CoinsResult AvailableCoins(const CWallet& wallet,
                 continue;
             }
 
-            std::unique_ptr<SigningProvider> provider = wallet.GetSolvingProvider(output.scriptPubKey);
+            const bool is_p2mr{IsP2MROutput(output.scriptPubKey)};
+            std::unique_ptr<SigningProvider> provider;
+            if (!is_p2mr) provider = wallet.GetSolvingProvider(output.scriptPubKey);
 
-            if (segwit_inputs_only && !IsSegWitOutput(*provider, wtx.tx->vout[i].scriptPubKey)) {
-                continue;
+            if (segwit_inputs_only && !is_p2mr) {
+                if (!IsSegWitOutput(*provider, wtx.tx->vout[i].scriptPubKey)) continue;
             }
 
-            int input_bytes = CalculateMaximumSignedInputSize(output, COutPoint(), provider.get(), can_grind_r, coinControl);
+            int input_bytes{-1};
+            if (is_p2mr) {
+                auto [it, inserted] = p2mr_input_size_cache.try_emplace(output.scriptPubKey, -1);
+                if (inserted) {
+                    it->second = CalculateMaximumSignedInputSize(output, &wallet, coinControl);
+                }
+                input_bytes = it->second;
+            } else {
+                input_bytes = CalculateMaximumSignedInputSize(output, &wallet, coinControl);
+            }
             // Because CalculateMaximumSignedInputSize infers a solvable descriptor to get the satisfaction size,
             // it is safe to assume that this input is solvable if input_bytes is greater than -1.
             bool solvable = input_bytes > -1;
-            bool spendable = ((mine & ISMINE_SPENDABLE) != ISMINE_NO) || (((mine & ISMINE_WATCH_ONLY) != ISMINE_NO) && (coinControl && coinControl->fAllowWatchOnly && solvable));
+            // A descriptor can own the keys committed by a specialized P2MR
+            // leaf while still lacking the message, preimage, or transaction
+            // template needed by the generic wallet signer. Do not offer such
+            // coins to automatic selection merely because IsMine reports the
+            // descriptor's keys as spendable.
+            bool spendable = (((mine & ISMINE_SPENDABLE) != ISMINE_NO) && (!is_p2mr || solvable)) ||
+                             (((mine & ISMINE_WATCH_ONLY) != ISMINE_NO) &&
+                              (coinControl && coinControl->fAllowWatchOnly && solvable));
 
             // Filter by spendable outputs only
             if (!spendable && params.only_spendable) continue;
@@ -681,12 +709,13 @@ FilteredOutputGroups GroupOutputs(const CWallet& wallet,
         return filtered_groups;
     }
 
-    // We want to combine COutputs that have the same scriptPubKey into single OutputGroups
-    // except when there are more than OUTPUT_GROUP_MAX_ENTRIES COutputs grouped in an OutputGroup.
+    // We want to combine COutputs that have the same scriptPubKey into single OutputGroups,
+    // without creating a group whose inputs alone cannot fit in the transaction weight limit.
+    // OUTPUT_GROUP_MAX_ENTRIES remains a hard privacy/fee bound for small inputs.
     // To do this, we maintain a map where the key is the scriptPubKey and the value is a vector of OutputGroups.
-    // For each COutput, we check if the scriptPubKey is in the map, and if it is, the COutput is added
-    // to the last OutputGroup in the vector for the scriptPubKey. When the last OutputGroup has
-    // OUTPUT_GROUP_MAX_ENTRIES COutputs, a new OutputGroup is added to the end of the vector.
+    // Inputs are ordered by descending weight and placed in the first same-script group with enough
+    // residual capacity. If no group can accept the input within the weight or 100-entry cap, a new
+    // OutputGroup is appended.
     typedef std::map<std::pair<CScript, OutputType>, std::vector<OutputGroup>> ScriptPubKeyToOutgroup;
     const auto& insert_output = [&](
             const std::shared_ptr<COutput>& output, OutputType type, size_t ancestors, size_t descendants,
@@ -698,25 +727,46 @@ FilteredOutputGroups GroupOutputs(const CWallet& wallet,
             groups.emplace_back(coin_sel_params);
         }
 
-        // Get the last OutputGroup in the vector so that we can add the COutput to it
-        // A pointer is used here so that group can be reassigned later if it is full.
-        OutputGroup* group = &groups.back();
-
-        // Check if this OutputGroup is full. We limit to OUTPUT_GROUP_MAX_ENTRIES when using -avoidpartialspends
-        // to avoid surprising users with very high fees.
-        if (group->m_outputs.size() >= OUTPUT_GROUP_MAX_ENTRIES) {
-            // The last output group is full, add a new group to the vector and use that group for the insertion
+        // First-fit packing lets a smaller input use residual capacity in an earlier group instead
+        // of exposing that underfilled group as independently selectable. Inputs are processed in
+        // descending weight order below, so every group skipped here is already unable to fit this
+        // input or any previously processed (no-smaller) input.
+        OutputGroup* group{nullptr};
+        for (OutputGroup& candidate : groups) {
+            if (!OutputGroupWouldOverflow(coin_sel_params, candidate.m_outputs.size(), candidate.m_weight, *output)) {
+                group = &candidate;
+                break;
+            }
+        }
+        if (group == nullptr) {
             groups.emplace_back(coin_sel_params);
             group = &groups.back();
         }
 
         group->Insert(output, ancestors, descendants);
+        if (output->input_bytes <= 0) {
+            // OutputGroup::Insert intentionally cannot estimate an unknown input. APS grouping
+            // has a conservative P2MR bound available, so retain it in the group's selection
+            // weight without changing the COutput fee/effective-value bookkeeping.
+            group->m_weight += GetMaximumStandardP2MRInputWeight();
+        }
     };
 
     ScriptPubKeyToOutgroup spk_to_groups_map;
     ScriptPubKeyToOutgroup spk_to_positive_groups_map;
     for (const auto& [type, outs] : coins.coins) {
-        for (const COutput& output : outs) {
+        std::vector<std::reference_wrapper<const COutput>> ordered_outputs;
+        ordered_outputs.reserve(outs.size());
+        for (const COutput& output : outs) ordered_outputs.emplace_back(std::cref(output));
+
+        // AutomaticCoinSelection randomizes split candidates before grouping. Keep that randomized
+        // order for equal-weight inputs, while stable weight ordering makes first-fit packing
+        // capacity-aware for heterogeneous inputs sharing a destination.
+        std::stable_sort(ordered_outputs.begin(), ordered_outputs.end(), [](const COutput& lhs, const COutput& rhs) {
+            return EstimatedOutputInputWeight(lhs) > EstimatedOutputInputWeight(rhs);
+        });
+
+        for (const COutput& output : ordered_outputs) {
             size_t ancestors, descendants;
             wallet.chain().getTransactionAncestry(output.outpoint.hash, ancestors, descendants);
 
@@ -734,7 +784,21 @@ FilteredOutputGroups GroupOutputs(const CWallet& wallet,
     // Now we go through the entire maps and pull out the OutputGroups
     const auto& push_output_groups = [&](const ScriptPubKeyToOutgroup& groups_map, bool positive_only) {
         for (const auto& [script, groups] : groups_map) {
-            // Go through the vector backwards. This allows for the first item we deal with being the partial group.
+            int64_t smallest_input_weight{std::numeric_limits<int64_t>::max()};
+            for (const OutputGroup& candidate_group : groups) {
+                for (const auto& output : candidate_group.m_outputs) {
+                    smallest_input_weight = std::min(smallest_input_weight, EstimatedOutputInputWeight(*output));
+                }
+            }
+
+            const auto group_is_full = [&](const OutputGroup& group) {
+                if (group.m_outputs.size() >= OUTPUT_GROUP_MAX_ENTRIES) return true;
+                if (smallest_input_weight == std::numeric_limits<int64_t>::max()) return false;
+                return group.m_weight > MaxOutputGroupInputWeight(coin_sel_params) - smallest_input_weight;
+            };
+
+            // Preserve the historical reverse traversal, while evaluating fullness for every
+            // weight-aware group rather than assuming only the final group can be partial.
             for (auto group_it = groups.rbegin(); group_it != groups.rend(); group_it++) {
                 const OutputGroup& group = *group_it;
 
@@ -744,8 +808,10 @@ FilteredOutputGroups GroupOutputs(const CWallet& wallet,
                     const auto& filter = sel_filter.filter;
                     if (!group.EligibleForSpending(filter)) continue;
 
-                    // Don't include partial groups if there are full groups too and we don't want partial groups
-                    if (group_it == groups.rbegin() && groups.size() > 1 && !filter.m_include_partial_groups) {
+                    // A lone group is the best possible all-at-once representation. With multiple
+                    // groups, defer every group that could still accept the smallest input until a
+                    // later filter explicitly permits partial groups.
+                    if (groups.size() > 1 && !group_is_full(group) && !filter.m_include_partial_groups) {
                         continue;
                     }
 
@@ -910,10 +976,19 @@ util::Result<SelectionResult> SelectCoins(const CWallet& wallet, CoinsResult& av
         return result;
     }
 
-    // Return early if we cannot cover the target with the wallet's UTXO.
-    // We use the total effective value if we are not subtracting fee from outputs and 'available_coins' contains the data.
-    CAmount available_coins_total_amount = coin_selection_params.m_subtract_fee_outputs ? available_coins.GetTotalAmount() :
-            (available_coins.GetEffectiveTotalAmount().has_value() ? *available_coins.GetEffectiveTotalAmount() : 0);
+    // Return early only when the selectable pool cannot cover the target. A
+    // negative-effective coin is omitted by the positive selection groups; it
+    // must not reduce this upper bound and poison an otherwise sufficient
+    // positive coin (notably a large P2MR UTXO beside small uneconomic ones).
+    CAmount available_coins_total_amount{available_coins.GetTotalAmount()};
+    if (!coin_selection_params.m_subtract_fee_outputs) {
+        available_coins_total_amount = 0;
+        for (const COutput& coin : available_coins.All()) {
+            if (coin.HasEffectiveValue()) {
+                available_coins_total_amount += std::max<CAmount>(coin.GetEffectiveValue(), 0);
+            }
+        }
+    }
     if (selection_target > available_coins_total_amount) {
         return util::Error(); // Insufficient funds
     }
@@ -950,10 +1025,25 @@ util::Result<SelectionResult> AutomaticCoinSelection(const CWallet& wallet, Coin
     const size_t max_descendants = (size_t)std::max<int64_t>(1, limit_descendant_count);
     const bool fRejectLongChains = gArgs.GetBoolArg("-walletrejectlongchains", DEFAULT_WALLET_REJECT_LONG_CHAINS);
 
-    // Cases where we have 101+ outputs all pointing to the same destination may result in
-    // privacy leaks as they will potentially be deterministically sorted. We solve that by
-    // explicitly shuffling the outputs before processing
-    if (coin_selection_params.m_avoid_partial_spends && available_coins.Size() > OUTPUT_GROUP_MAX_ENTRIES) {
+    // Splitting reused-address outputs into multiple groups can otherwise make their selection
+    // order deterministic. Detect a hard-count or cumulative-weight split before grouping.
+    bool requires_group_split{false};
+    if (coin_selection_params.m_avoid_partial_spends) {
+        std::map<std::pair<CScript, OutputType>, std::pair<size_t, int64_t>> prospective_groups;
+        for (const auto& [type, outputs] : available_coins.coins) {
+            for (const COutput& output : outputs) {
+                auto& [entries, weight] = prospective_groups[std::make_pair(output.txout.scriptPubKey, type)];
+                if (OutputGroupWouldOverflow(coin_selection_params, entries, weight, output)) {
+                    requires_group_split = true;
+                    break;
+                }
+                ++entries;
+                weight += EstimatedOutputInputWeight(output);
+            }
+            if (requires_group_split) break;
+        }
+    }
+    if (requires_group_split) {
         available_coins.Shuffle(coin_selection_params.rng_fast);
     }
 

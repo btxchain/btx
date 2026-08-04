@@ -12,6 +12,7 @@
 
 #include <array>
 #include <optional>
+#include <set>
 #include <vector>
 
 using ExtPubKeyMap = std::unordered_map<uint32_t, CExtPubKey>;
@@ -163,6 +164,14 @@ struct Descriptor {
      * @param[out] out Any private keys available for the specified `pos`.
      */
     virtual void ExpandPrivate(int pos, const SigningProvider& provider, FlatSigningProvider& out) const = 0;
+
+    /** Record cached PQ public keys whose descriptor key expressions have
+     *  private signing material available. This must not derive a private key
+     *  or enter a PQ signing implementation. */
+    virtual void ExpandP2MRSigningKeyAvailability(
+        int pos,
+        const DescriptorCache& read_cache,
+        std::set<std::vector<unsigned char>, ShortestVectorFirstComparator>& out) const {}
 
     /** @return The OutputType of the scriptPubKey(s) produced by this descriptor. Or nullopt if indeterminate (multiple or none) */
     virtual std::optional<OutputType> GetOutputType() const = 0;

@@ -59,6 +59,10 @@ const CPQKey* HidingSigningProvider::GetPQKey(Span<const unsigned char> pubkey) 
     if (m_hide_secret) return nullptr;
     return m_provider->GetPQKey(pubkey);
 }
+bool HidingSigningProvider::HavePQSigningKey(Span<const unsigned char> pubkey, PQAlgorithm algo) const
+{
+    return !m_hide_secret && m_provider->HavePQSigningKey(pubkey, algo);
+}
 bool HidingSigningProvider::GetP2MRSpendData(const WitnessV2P2MR& output, P2MRSpendData& spenddata) const
 {
     return m_provider->GetP2MRSpendData(output, spenddata);
@@ -98,6 +102,12 @@ const CPQKey* FlatSigningProvider::GetPQKey(Span<const unsigned char> pubkey) co
     if (it == pq_keys.end()) return nullptr;
     return &it->second;
 }
+bool FlatSigningProvider::HavePQSigningKey(Span<const unsigned char> pubkey, PQAlgorithm algo) const
+{
+    if (SigningProvider::HavePQSigningKey(pubkey, algo)) return true;
+    if (pubkey.size() != GetPQPubKeySize(algo)) return false;
+    return pq_signing_key_availability.count(std::vector<unsigned char>{pubkey.begin(), pubkey.end()}) != 0;
+}
 bool FlatSigningProvider::GetP2MRSpendData(const WitnessV2P2MR& output, P2MRSpendData& spenddata) const
 {
     return LookupHelper(p2mr_spends, output, spenddata);
@@ -121,6 +131,7 @@ FlatSigningProvider& FlatSigningProvider::Merge(FlatSigningProvider&& b)
     origins.merge(b.origins);
     tr_trees.merge(b.tr_trees);
     pq_keys.merge(b.pq_keys);
+    pq_signing_key_availability.merge(b.pq_signing_key_availability);
     for (auto& [output, data] : b.p2mr_spends) {
         p2mr_spends[output].Merge(std::move(data));
     }
@@ -327,6 +338,13 @@ const CPQKey* MultiSigningProvider::GetPQKey(Span<const unsigned char> pubkey) c
         if (const CPQKey* key = provider->GetPQKey(pubkey)) return key;
     }
     return nullptr;
+}
+bool MultiSigningProvider::HavePQSigningKey(Span<const unsigned char> pubkey, PQAlgorithm algo) const
+{
+    for (const auto& provider : m_providers) {
+        if (provider->HavePQSigningKey(pubkey, algo)) return true;
+    }
+    return false;
 }
 bool MultiSigningProvider::GetP2MRSpendData(const WitnessV2P2MR& output, P2MRSpendData& spenddata) const
 {

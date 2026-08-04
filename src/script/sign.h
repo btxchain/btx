@@ -126,6 +126,33 @@ void UpdateInput(CTxIn& input, const SignatureData& data);
 /** Check whether a scriptPubKey is known to be segwit. */
 bool IsSegWitOutput(const SigningProvider& provider, const CScript& script);
 
+/** Return the largest standard input weight for any canonical P2MR leaf/control
+ *  path committed by scriptPubKey and described by provider. This is a
+ *  metadata-only calculation: it never creates or verifies a signature. */
+std::optional<int64_t> CalculateMaximumP2MRInputWeight(
+    const CScript& script_pubkey,
+    const SigningProvider& provider);
+
+/** Return the input weight of the canonical P2MR path the wallet would select
+ *  with the private PQ keys exposed by provider and the requested algorithm.
+ *  This mirrors SignP2MR's key-path priority without creating signatures.
+ *  Message/preimage-dependent CSFS paths are deliberately not selected. */
+std::optional<int64_t> CalculateSelectedP2MRInputWeight(
+    const CScript& script_pubkey,
+    const SigningProvider& provider,
+    std::optional<PQAlgorithm> preferred_algo = std::nullopt);
+
+/** Return whether validated provider metadata commits at least one canonical
+ *  key-signature path that a generic wallet transaction can satisfy. Message,
+ *  preimage, and fixed-template paths are deliberately excluded. */
+bool HasGenericP2MRSigningPath(
+    const CScript& script_pubkey,
+    const SigningProvider& provider);
+
+/** Conservative standard-policy fallback for a P2MR input whose exact
+ *  metadata is unavailable. */
+int64_t GetMaximumStandardP2MRInputWeight();
+
 struct P2MRTimelockedInput {
     unsigned int input_index;
     std::vector<unsigned char> leaf_script;

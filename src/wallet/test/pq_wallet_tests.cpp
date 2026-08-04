@@ -25,6 +25,7 @@
 #include <util/strencodings.h>
 #include <wallet/test/util.h>
 #include <wallet/test/wallet_test_fixture.h>
+#include <wallet/coincontrol.h>
 #include <wallet/wallet.h>
 #include <wallet/walletdb.h>
 #include <wallet/spend.h>
@@ -166,6 +167,30 @@ struct DirectP2MRSpendFixture {
     CMutableTransaction tx;
     std::map<COutPoint, Coin> coins;
 };
+
+struct P2MRWeightFixture {
+    FlatSigningProvider provider;
+    CScript script_pubkey;
+    std::vector<unsigned char> control;
+};
+
+P2MRWeightFixture MakeP2MRWeightFixture(const std::vector<unsigned char>& leaf_script, size_t depth)
+{
+    BOOST_REQUIRE_LE(depth, (P2MR_CONTROL_MAX_SIZE - P2MR_CONTROL_BASE_SIZE) / P2MR_CONTROL_NODE_SIZE);
+    std::vector<unsigned char> control{P2MR_LEAF_VERSION};
+    uint256 root{ComputeP2MRLeafHash(P2MR_LEAF_VERSION, leaf_script)};
+    for (size_t i{0}; i < depth; ++i) {
+        uint256 node;
+        node.begin()[0] = static_cast<unsigned char>(i + 1);
+        root = ComputeP2MRBranchHash(root, node);
+        control.insert(control.end(), node.begin(), node.end());
+    }
+
+    const WitnessV2P2MR output{root};
+    FlatSigningProvider provider;
+    provider.p2mr_spends[output].scripts[leaf_script].insert(control);
+    return {std::move(provider), GetScriptForDestination(output), std::move(control)};
+}
 
 DirectP2MRSpendFixture MakeDirectP2MRSpendFixture(const std::string& desc_str, unsigned char prev_txid_seed)
 {
@@ -421,6 +446,256 @@ BOOST_AUTO_TEST_CASE(sign_p2mr_prefers_mldsa_when_available_and_slhdsa_fallback_
     BOOST_CHECK(VerifyDirectP2MRSpend(slh_fixture.tx, slh_fixture.prev_coin, SLHDSA_FIPS205_SCRIPT_VERIFY_FLAGS));
 }
 
+BOOST_AUTO_TEST_CASE(p2mr_metadata_weight_estimator_matches_selected_algorithm)
+{
+    const auto seed = MakePQSeed(0x28);
+    WalletDescriptor wallet_desc = GeneratePQWalletDescriptor(seed, /*internal=*/false);
+    std::string desc;
+    BOOST_REQUIRE(wallet_desc.descriptor->ToPrivateString(DUMMY_SIGNING_PROVIDER, desc));
+
+    auto ml_fixture = MakeDirectP2MRSpendFixture(desc, /*prev_txid_seed=*/45);
+    const auto selected_ml = CalculateSelectedP2MRInputWeight(
+        ml_fixture.prev_coin.out.scriptPubKey, ml_fixture.provider, PQAlgorithm::ML_DSA_44);
+    const auto selected_slh = CalculateSelectedP2MRInputWeight(
+        ml_fixture.prev_coin.out.scriptPubKey, ml_fixture.provider, PQAlgorithm::SLH_DSA_128S);
+    const auto maximum = CalculateMaximumP2MRInputWeight(
+        ml_fixture.prev_coin.out.scriptPubKey, ml_fixture.provider);
+    BOOST_REQUIRE(selected_ml);
+    BOOST_REQUIRE(selected_slh);
+    BOOST_REQUIRE(maximum);
+    BOOST_CHECK_LT(*selected_ml, *selected_slh);
+    BOOST_CHECK_GE(*maximum, *selected_slh);
+
+    BOOST_REQUIRE(SignDirectP2MRSpend(
+        ml_fixture, /*slhdsa_fips205=*/true, PQAlgorithm::ML_DSA_44));
+    BOOST_CHECK_GE(*selected_ml, GetTransactionInputWeight(ml_fixture.tx.vin[0]));
+
+    auto slh_fixture = MakeDirectP2MRSpendFixture(desc, /*prev_txid_seed=*/46);
+    BOOST_REQUIRE(SignDirectP2MRSpend(
+        slh_fixture, /*slhdsa_fips205=*/true, PQAlgorithm::SLH_DSA_128S));
+    BOOST_CHECK_GE(*selected_slh, GetTransactionInputWeight(slh_fixture.tx.vin[0]));
+
+    // Public metadata remains enough for a conservative maximum, but never
+    // pretends that a signing path is available.
+    HidingSigningProvider public_only{&ml_fixture.provider, /*hide_secret=*/true, /*hide_origin=*/false};
+    BOOST_CHECK(!CalculateSelectedP2MRInputWeight(
+        ml_fixture.prev_coin.out.scriptPubKey, public_only, PQAlgorithm::ML_DSA_44));
+    BOOST_CHECK(CalculateMaximumP2MRInputWeight(
+        ml_fixture.prev_coin.out.scriptPubKey, public_only));
+
+    // If the preferred ML key is absent, selection must fall back to the
+    // available SLH leaf without underestimating it.
+    const auto fallback_seed = MakePQSeed(0x29);
+    const std::vector<unsigned char> fixed_mldsa = MakePattern(MLDSA44_PUBKEY_SIZE, 0x69);
+    const std::string fallback_desc = AddChecksum(
+        "mr(" + HexStr(fixed_mldsa) + ",pk_slh(" +
+        MakeP2MRKeyPathExpr(fallback_seed, /*internal=*/false) + "))");
+    auto fallback_fixture = MakeDirectP2MRSpendFixture(fallback_desc, /*prev_txid_seed=*/47);
+    const auto fallback_weight = CalculateSelectedP2MRInputWeight(
+        fallback_fixture.prev_coin.out.scriptPubKey,
+        fallback_fixture.provider,
+        PQAlgorithm::ML_DSA_44);
+    BOOST_REQUIRE(fallback_weight);
+    BOOST_CHECK_GE(*fallback_weight, *selected_slh);
+}
+
+BOOST_AUTO_TEST_CASE(p2mr_metadata_weight_estimator_is_fail_closed_and_covers_policy_maxima)
+{
+    std::vector<std::pair<PQAlgorithm, std::vector<unsigned char>>> slh_keys;
+    for (size_t i{0}; i < MAX_PQ_PUBKEYS_PER_MULTISIG; ++i) {
+        slh_keys.emplace_back(
+            PQAlgorithm::SLH_DSA_128S,
+            std::vector<unsigned char>(SLHDSA128S_PUBKEY_SIZE, static_cast<unsigned char>(i + 1)));
+    }
+    const auto multisig_script = BuildP2MRMultisigCTVScript(
+        uint256{}, MAX_PQ_PUBKEYS_PER_MULTISIG, slh_keys);
+    BOOST_REQUIRE(!multisig_script.empty());
+    auto maximum_fixture = MakeP2MRWeightFixture(
+        multisig_script,
+        (P2MR_CONTROL_MAX_SIZE - P2MR_CONTROL_BASE_SIZE) / P2MR_CONTROL_NODE_SIZE);
+
+    const auto maximum = CalculateMaximumP2MRInputWeight(
+        maximum_fixture.script_pubkey, maximum_fixture.provider);
+    BOOST_REQUIRE(maximum);
+    BOOST_CHECK_GT(*maximum, 33'000);
+    BOOST_CHECK_EQUAL(*maximum, GetMaximumStandardP2MRInputWeight());
+    BOOST_CHECK(!HasGenericP2MRSigningPath(
+        maximum_fixture.script_pubkey, maximum_fixture.provider));
+
+    // Explicit non-default sighash bytes and empty multisig slots are part of
+    // the serialized witness bound. The all-signature case exercises the
+    // former; a mixed 2-of-3 leaf exercises the latter.
+    CTxIn expected_maximum;
+    expected_maximum.scriptWitness.stack.assign(
+        MAX_PQ_PUBKEYS_PER_MULTISIG,
+        std::vector<unsigned char>(SLHDSA128S_SIGNATURE_SIZE + 1));
+    expected_maximum.scriptWitness.stack.push_back(multisig_script);
+    expected_maximum.scriptWitness.stack.push_back(maximum_fixture.control);
+    BOOST_CHECK_EQUAL(*maximum, GetTransactionInputWeight(expected_maximum));
+
+    const std::vector<std::pair<PQAlgorithm, std::vector<unsigned char>>> mixed_keys{
+        {PQAlgorithm::ML_DSA_44, MakePattern(MLDSA44_PUBKEY_SIZE, 0x10)},
+        {PQAlgorithm::SLH_DSA_128S, MakePattern(SLHDSA128S_PUBKEY_SIZE, 0x20)},
+        {PQAlgorithm::ML_DSA_44, MakePattern(MLDSA44_PUBKEY_SIZE, 0x30)},
+    };
+    const auto mixed_script = BuildP2MRMultisigScript(/*threshold=*/2, mixed_keys);
+    auto mixed_fixture = MakeP2MRWeightFixture(mixed_script, /*depth=*/1);
+    const auto mixed_maximum = CalculateMaximumP2MRInputWeight(
+        mixed_fixture.script_pubkey, mixed_fixture.provider);
+    BOOST_REQUIRE(mixed_maximum);
+    CTxIn expected_mixed;
+    expected_mixed.scriptWitness.stack = {
+        std::vector<unsigned char>(SLHDSA128S_SIGNATURE_SIZE + 1),
+        std::vector<unsigned char>(MLDSA44_SIGNATURE_SIZE + 1),
+        {},
+        mixed_script,
+        mixed_fixture.control,
+    };
+    BOOST_CHECK_EQUAL(*mixed_maximum, GetTransactionInputWeight(expected_mixed));
+
+    // Standard CSFS/HTLC message or preimage bounds are 520 bytes; CSFS
+    // signatures carry no transaction-sighash suffix.
+    const auto csfs_pubkey = MakePattern(SLHDSA128S_PUBKEY_SIZE, 0x40);
+    const auto csfs_script = BuildP2MRCSFSScript(PQAlgorithm::SLH_DSA_128S, csfs_pubkey);
+    auto csfs_fixture = MakeP2MRWeightFixture(csfs_script, /*depth=*/0);
+    const auto csfs_maximum = CalculateMaximumP2MRInputWeight(
+        csfs_fixture.script_pubkey, csfs_fixture.provider);
+    BOOST_REQUIRE(csfs_maximum);
+    CTxIn expected_csfs;
+    expected_csfs.scriptWitness.stack = {
+        std::vector<unsigned char>(SLHDSA128S_SIGNATURE_SIZE),
+        std::vector<unsigned char>(MAX_SCRIPT_ELEMENT_SIZE),
+        csfs_script,
+        csfs_fixture.control,
+    };
+    BOOST_CHECK_EQUAL(*csfs_maximum, GetTransactionInputWeight(expected_csfs));
+    BOOST_CHECK(!HasGenericP2MRSigningPath(
+        csfs_fixture.script_pubkey, csfs_fixture.provider));
+    BOOST_CHECK_EQUAL(
+        CalculateMaximumSignedInputSize(
+            CTxOut{COIN, csfs_fixture.script_pubkey},
+            COutPoint{},
+            &csfs_fixture.provider,
+            /*can_grind_r=*/false,
+            /*coin_control=*/nullptr),
+        -1);
+
+    const auto htlc_script = BuildP2MRHTLCLeaf(
+        std::vector<unsigned char>(20, 0x41), PQAlgorithm::SLH_DSA_128S, csfs_pubkey);
+    BOOST_REQUIRE(!htlc_script.empty());
+    auto htlc_fixture = MakeP2MRWeightFixture(htlc_script, /*depth=*/0);
+    BOOST_CHECK(CalculateMaximumP2MRInputWeight(
+        htlc_fixture.script_pubkey, htlc_fixture.provider));
+    BOOST_CHECK(!HasGenericP2MRSigningPath(
+        htlc_fixture.script_pubkey, htlc_fixture.provider));
+    BOOST_CHECK_EQUAL(
+        CalculateMaximumSignedInputSize(
+            CTxOut{COIN, htlc_fixture.script_pubkey},
+            COutPoint{},
+            &htlc_fixture.provider,
+            /*can_grind_r=*/false,
+            /*coin_control=*/nullptr),
+        -1);
+
+    // Missing, malformed, or root-inconsistent provider metadata must never
+    // turn an unknown P2MR output into a solvable one.
+    FlatSigningProvider empty_provider;
+    BOOST_CHECK(!CalculateMaximumP2MRInputWeight(
+        maximum_fixture.script_pubkey, empty_provider));
+
+    FlatSigningProvider wrong_version{maximum_fixture.provider};
+    auto& wrong_version_spend = wrong_version.p2mr_spends.begin()->second;
+    const auto script_it = wrong_version_spend.scripts.begin();
+    std::vector<unsigned char> bad_version_control{*script_it->second.begin()};
+    wrong_version_spend.scripts.clear();
+    bad_version_control[0] = 0x00;
+    wrong_version_spend.scripts[multisig_script].insert(bad_version_control);
+    BOOST_CHECK(!CalculateMaximumP2MRInputWeight(
+        maximum_fixture.script_pubkey, wrong_version));
+
+    FlatSigningProvider wrong_commitment{maximum_fixture.provider};
+    auto& wrong_commitment_spend = wrong_commitment.p2mr_spends.begin()->second;
+    std::vector<unsigned char> bad_commitment_control{*wrong_commitment_spend.scripts.begin()->second.begin()};
+    wrong_commitment_spend.scripts.clear();
+    bad_commitment_control.back() ^= 0x01;
+    wrong_commitment_spend.scripts[multisig_script].insert(bad_commitment_control);
+    BOOST_CHECK(!CalculateMaximumP2MRInputWeight(
+        maximum_fixture.script_pubkey, wrong_commitment));
+}
+
+BOOST_AUTO_TEST_CASE(p2mr_specialized_leaf_is_not_automatically_selected)
+{
+    const auto seed = MakePQSeed(0x2a);
+    const std::string hash160(40, '4');
+    const std::string receive_desc = AddChecksum(
+        "mr(htlc(" + hash160 + "," +
+        MakeP2MRKeyPathExpr(seed, /*internal=*/false) + "))");
+    const std::string change_desc = AddChecksum(
+        "mr(htlc(" + hash160 + "," +
+        MakeP2MRKeyPathExpr(seed, /*internal=*/true) + "))");
+    const auto wallet = CreateP2MRDescriptorWalletFromStrings(
+        *this, receive_desc, change_desc);
+
+    const CTxDestination dest = *Assert(wallet->GetNewDestination(OutputType::P2MR, ""));
+    CMutableTransaction funding;
+    funding.vout.emplace_back(5 * COIN, GetScriptForDestination(dest));
+
+    LOCK(wallet->cs_wallet);
+    BOOST_REQUIRE(wallet->AddToWallet(
+        MakeTransactionRef(funding), TxStateInactive{}, /*update_wtx=*/nullptr,
+        /*fFlushOnClose=*/false));
+
+    CCoinControl include_unsafe;
+    include_unsafe.m_include_unsafe_inputs = true;
+    const CoinsResult selectable = AvailableCoins(
+        *wallet, &include_unsafe, /*feerate=*/std::nullopt);
+    BOOST_CHECK_EQUAL(selectable.Size(), 0U);
+    BOOST_CHECK_EQUAL(CalculateMaximumSignedInputSize(
+        funding.vout[0], wallet.get(), &include_unsafe), -1);
+}
+
+BOOST_AUTO_TEST_CASE(p2mr_mixed_tree_requires_an_available_generic_key)
+{
+    const auto seed = MakePQSeed(0x2b);
+    const std::string hash160(40, '5');
+    const std::string unavailable_refund_key =
+        HexStr(MakePattern(MLDSA44_PUBKEY_SIZE, 0x52));
+    const std::string receive_desc = AddChecksum(
+        "mr(htlc(" + hash160 + "," +
+        MakeP2MRKeyPathExpr(seed, /*internal=*/false) + "),refund(500," +
+        unavailable_refund_key + "))");
+    const std::string change_desc = AddChecksum(
+        "mr(htlc(" + hash160 + "," +
+        MakeP2MRKeyPathExpr(seed, /*internal=*/true) + "),refund(500," +
+        unavailable_refund_key + "))");
+    const auto wallet = CreateP2MRDescriptorWalletFromStrings(
+        *this, receive_desc, change_desc);
+
+    const CTxDestination dest = *Assert(wallet->GetNewDestination(OutputType::P2MR, ""));
+    CMutableTransaction funding;
+    funding.vout.emplace_back(5 * COIN, GetScriptForDestination(dest));
+
+    LOCK(wallet->cs_wallet);
+    BOOST_CHECK((wallet->IsMine(funding.vout[0]) & ISMINE_SPENDABLE) != ISMINE_NO);
+    BOOST_REQUIRE(wallet->AddToWallet(
+        MakeTransactionRef(funding), TxStateInactive{}, /*update_wtx=*/nullptr,
+        /*fFlushOnClose=*/false));
+
+    CCoinControl include_unsafe;
+    include_unsafe.m_include_unsafe_inputs = true;
+    const CoinsResult selectable = AvailableCoins(
+        *wallet, &include_unsafe, /*feerate=*/std::nullopt);
+    BOOST_CHECK_EQUAL(selectable.Size(), 0U);
+    BOOST_CHECK_EQUAL(CalculateMaximumSignedInputSize(
+        funding.vout[0], wallet.get(), &include_unsafe), -1);
+
+    // Explicit watch-only funding may use the committed tree's conservative
+    // maximum so that a separate signer can later satisfy the transaction.
+    include_unsafe.fAllowWatchOnly = true;
+    BOOST_CHECK_GT(CalculateMaximumSignedInputSize(
+        funding.vout[0], wallet.get(), &include_unsafe), 0);
+}
+
 BOOST_AUTO_TEST_CASE(sign_p2mr_transaction_multisig_leaf)
 {
     const auto seed = MakePQSeed(0x31);
@@ -528,6 +803,12 @@ BOOST_AUTO_TEST_CASE(p2mr_backup_estimator_covers_actual_weight)
     tx.vin.emplace_back(prevout);
     tx.vout.emplace_back(input_value - 1500, GetScriptForDestination(to_dest));
 
+    const std::unique_ptr<SigningProvider> provider{wallet->GetSolvingProvider(prev_coin.out.scriptPubKey)};
+    BOOST_REQUIRE(provider);
+    const int provider_estimate = CalculateMaximumSignedInputSize(
+        prev_coin.out, prevout, provider.get(), wallet->CanGrindR(), /*coin_control=*/nullptr);
+    BOOST_REQUIRE_GT(provider_estimate, 0);
+
     const TxSize estimated = CalculateMaximumSignedTxSize(CTransaction{tx}, wallet.get(), std::vector<CTxOut>{prev_coin.out});
     BOOST_REQUIRE(estimated.weight > 0);
     BOOST_REQUIRE(estimated.vsize > 0);
@@ -537,6 +818,9 @@ BOOST_AUTO_TEST_CASE(p2mr_backup_estimator_covers_actual_weight)
     const CTransaction tx_signed{tx};
     const int64_t actual_weight = GetTransactionWeight(tx_signed);
     const int64_t actual_vsize = GetVirtualTransactionSize(tx_signed);
+    const int64_t actual_input_vsize = GetVirtualTransactionSize(GetTransactionInputWeight(tx.vin[0]), 0, 0);
+    BOOST_CHECK_GE(provider_estimate, actual_input_vsize);
+    BOOST_CHECK_LT(provider_estimate - actual_input_vsize, 100);
     BOOST_CHECK_GE(estimated.weight, actual_weight);
     BOOST_CHECK_GE(estimated.vsize, actual_vsize);
     BOOST_CHECK_LT(estimated.weight - actual_weight, 5000);
@@ -551,9 +835,26 @@ BOOST_AUTO_TEST_CASE(p2mr_primary_estimator_covers_actual_weight)
     const CAmount input_value{50 * COIN};
     Coin prev_coin{CTxOut{input_value, GetScriptForDestination(from_dest)}, /*nHeight=*/1, /*fCoinBase=*/false};
 
+    const auto spkmans = wallet->GetScriptPubKeyMans(prev_coin.out.scriptPubKey);
+    BOOST_REQUIRE_EQUAL(spkmans.size(), 1);
+    const auto* desc_spkman = dynamic_cast<const DescriptorScriptPubKeyMan*>(*spkmans.begin());
+    BOOST_REQUIRE(desc_spkman != nullptr);
+    const auto sizing_provider = desc_spkman->GetP2MRSizingProvider(prev_coin.out.scriptPubKey);
+    BOOST_REQUIRE(sizing_provider);
+    BOOST_CHECK(sizing_provider->pq_keys.empty());
+    BOOST_CHECK(!sizing_provider->pq_signing_key_availability.empty());
+    BOOST_CHECK(CalculateSelectedP2MRInputWeight(
+        prev_coin.out.scriptPubKey, *sizing_provider, PQAlgorithm::ML_DSA_44));
+
     CMutableTransaction tx;
     tx.vin.emplace_back(prevout);
     tx.vout.emplace_back(input_value - 2000, GetScriptForDestination(to_dest));
+
+    const std::unique_ptr<SigningProvider> provider{wallet->GetSolvingProvider(prev_coin.out.scriptPubKey)};
+    BOOST_REQUIRE(provider);
+    const int provider_estimate = CalculateMaximumSignedInputSize(
+        prev_coin.out, prevout, provider.get(), wallet->CanGrindR(), /*coin_control=*/nullptr);
+    BOOST_REQUIRE_GT(provider_estimate, 0);
 
     const TxSize estimated = CalculateMaximumSignedTxSize(CTransaction{tx}, wallet.get(), std::vector<CTxOut>{prev_coin.out});
     BOOST_REQUIRE(estimated.weight > 0);
@@ -564,6 +865,13 @@ BOOST_AUTO_TEST_CASE(p2mr_primary_estimator_covers_actual_weight)
     const CTransaction tx_signed{tx};
     const int64_t actual_weight = GetTransactionWeight(tx_signed);
     const int64_t actual_vsize = GetVirtualTransactionSize(tx_signed);
+    const int64_t actual_input_vsize = GetVirtualTransactionSize(GetTransactionInputWeight(tx.vin[0]), 0, 0);
+    BOOST_CHECK_GE(provider_estimate, actual_input_vsize);
+    // Provider-only sizing deliberately chooses the larger SLH-DSA leaf when
+    // key availability is unknown; the wallet-aware estimator above selects
+    // the actual default ML-DSA path.
+    BOOST_CHECK_LE(provider_estimate - actual_input_vsize,
+                   static_cast<int64_t>(SLHDSA128S_SIGNATURE_SIZE - MLDSA44_SIGNATURE_SIZE + 500));
     BOOST_CHECK_GE(estimated.weight, actual_weight);
     BOOST_CHECK_GE(estimated.vsize, actual_vsize);
     // The estimator intentionally uses a conservative worst-case P2MR input bound.

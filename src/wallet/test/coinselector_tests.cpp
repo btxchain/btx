@@ -441,6 +441,35 @@ BOOST_AUTO_TEST_CASE(bnb_search_test)
     }
 
     {
+        // Uneconomic outputs must not poison SelectCoins' aggregate
+        // sufficiency check. Selection algorithms omit negative-effective
+        // coins, so one positive coin that covers the target must remain
+        // selectable regardless of how many negative coins accompany it.
+        std::unique_ptr<CWallet> wallet = NewWallet(m_node);
+        LOCK(wallet->cs_wallet);
+
+        CoinSelectionParams params{coin_selection_params_bnb};
+        params.m_effective_feerate = CFeeRate(10'000);
+        params.m_long_term_feerate = CFeeRate(1'000);
+
+        CoinsResult available_coins;
+        const CAmount target{CENT};
+        const CAmount positive_input_fee{params.m_effective_feerate.GetFee(/*num_bytes=*/68)};
+        add_coin(available_coins, *wallet, target + positive_input_fee,
+                 params.m_effective_feerate, 6 * 24, false, 0, true, /*custom_size=*/68);
+        for (int i = 0; i < 20; ++i) {
+            add_coin(available_coins, *wallet, /*nValue=*/1,
+                     params.m_effective_feerate, 6 * 24, false, 0, true, /*custom_size=*/1'000);
+        }
+
+        CCoinControl coin_control;
+        const auto result = SelectCoins(*wallet, available_coins, /*pre_set_inputs=*/{}, target, coin_control, params);
+        BOOST_REQUIRE(result);
+        BOOST_CHECK_EQUAL(result->GetInputSet().size(), 1U);
+        BOOST_CHECK_EQUAL(result->GetSelectedEffectiveValue(), target);
+    }
+
+    {
         // Test bnb max weight exceeded
         // Inputs set [10, 9, 8, 5, 3, 1], Selection Target = 16 and coin 5 exceeding the max weight.
 
