@@ -250,8 +250,9 @@ Current candidate status before a release-final height:
   v4/BMX4C/RC heights, withdrawn paths off, HeaderPoW off, v4/BMX4C ASERT
   inert, and RC as the sole calibrated branch.
 
-Current verdict: **NO-GO for merge or activation while release gates remain
-open, including the revision-bound CUDA+Metal corpus, schema-4 ASERT rerun,
-strict-device trusted-mirror rehearsal, full-suite closeout, reviewed
-operational-campaign dispositions, and live-tip runway selection.** Historical
-artifacts remain useful diagnostics but do not authorize the final source tree.
+Current verdict: **NO-GO for an activation-authorizing merge or public
+activation while release gates remain open, including the revision-bound
+CUDA+Metal corpus, schema-4 ASERT rerun, strict-device trusted-mirror rehearsal,
+full-suite closeout, reviewed operational-campaign dispositions, and live-tip
+runway selection.** Historical artifacts remain useful diagnostics but do not
+authorize the final source tree.
