@@ -26,6 +26,11 @@ wallet backups.
 Optional operator helper for attaching and recovering historical stuck bridge
 batches through the wallet-managed pending journal.
 
+### [OTC](/contrib/otc) ###
+Bonded OTC offer tooling: create, verify, and watch offers whose quoted supply
+is provably locked on-chain and bound to a single offer, plus HTLC settlement
+helpers. See doc/btx-otc-escrow-supply-validation.md for the design.
+
 Build Tools and Keys
 ---------------------
 
