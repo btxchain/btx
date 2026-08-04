@@ -2,12 +2,11 @@ BTX version 0.33.2 release status:
 
   <https://github.com/btxchain/btx/releases>
 
-Only a signed annotated `v0.33.2` tag and its source tree currently exist. The
-tagged tree contains an Epoch-A tuple at height 185000 with RC ratio
-`6931159304/1`. No GitHub v0.33.2 release or release assets were published, and
-no v0.33.2 release binaries were published. The tag has not moved and is
-not the corrective tree; changing its disposition requires an explicit release
-decision.
+The current signed annotated `v0.33.2` tag identifies a source tree containing
+an Epoch-A tuple at height 185000 with RC ratio `6931159304/1`. The tag was
+recreated during pre-release work. No GitHub v0.33.2 release, assets, or release
+binaries were published. The tag is not the corrective tree; any further
+disposition requires an explicit release decision.
 
 Current source is later than the tag and is not a published v0.33.2 release. It
 disables v4, BMX4C, and RC at `INT32_MAX`, restores the live RC ratio to `1/1`,

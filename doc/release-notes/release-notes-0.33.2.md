@@ -2,11 +2,11 @@ BTX version 0.33.2 release status:
 
   <https://github.com/btxchain/btx/releases>
 
-Only a signed annotated `v0.33.2` tag and its source tree currently exist. The
-tagged tree contains a finite Epoch-A tuple at height 185000. No GitHub v0.33.2
-release or release assets were published, and no v0.33.2 release binaries were
-published. The tag has not moved and is not corrective; changing
-its disposition requires an explicit release decision.
+The current signed annotated `v0.33.2` tag identifies a source tree containing
+a finite Epoch-A tuple at height 185000. The tag was recreated during
+pre-release work. No GitHub v0.33.2 release, assets, or release binaries were
+published. The tag is not corrective; any further disposition requires an
+explicit release decision.
 
 Current source is later than the tag and is not a published v0.33.2 release. It
 disables the tuple (`INT32_MAX`, live RC ratio `1/1`, GPU-lifecycle
