@@ -54,6 +54,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -256,6 +257,14 @@ def validate_args(
             if not path.is_file():
                 parser.error(f"{option} is not a file: {path}")
         args.signer_wif_file = args.signer_wif_file.resolve()
+        if "\n" in str(args.signer_wif_file) or "\r" in str(args.signer_wif_file):
+            parser.error("--signer-wif-file is not safe for a configuration value")
+        try:
+            require_private_local_file(
+                args.signer_wif_file, "--signer-wif-file"
+            )
+        except RuntimeError as error:
+            parser.error(str(error))
     if not args.runtime_root.is_dir():
         parser.error(f"--runtime-root is not a directory: {args.runtime_root}")
     for name, option in (
@@ -340,13 +349,31 @@ def remote_sha256(path: str) -> str:
 
 def validate_remote_file_path(value: str, option: str) -> str:
     """Accept an absolute, non-traversing archive-owned file path."""
-    if not isinstance(value, str) or "\x00" in value or "\n" in value:
+    if (not isinstance(value, str) or "\x00" in value or "\n" in value or
+            "\r" in value):
         raise RuntimeError(f"{option} is not a safe remote path")
     path = PurePosixPath(value)
     if (not path.is_absolute() or ".." in path.parts or
             path.parent == PurePosixPath("/")):
         raise RuntimeError(f"{option} must be an absolute archive-owned file path")
     return str(path)
+
+
+def require_private_local_file(path: Path, option: str) -> None:
+    """Require owner-only mode bits on a local secret file."""
+    if stat.S_IMODE(path.stat().st_mode) & 0o077:
+        raise RuntimeError(f"{option} must not be accessible by group or others")
+
+
+def remote_private_file_check_command(path: str) -> str:
+    """Build a Linux/macOS check for a readable owner-only remote file."""
+    quoted = shlex.quote(path)
+    return (
+        f"test -f {quoted} && test -r {quoted} && "
+        f"mode=$(if stat -c '%a' {quoted} >/dev/null 2>&1; "
+        f"then stat -c '%a' {quoted}; else stat -f '%Lp' {quoted}; fi) && "
+        "case \"$mode\" in *[0-7]00) ;; *) exit 13 ;; esac"
+    )
 
 
 def validate_remote_archive_dir(value: str) -> str:
@@ -676,6 +703,10 @@ def validate_archive_strict_proof(
             raise RuntimeError(
                 "receiving-validation proof requested but no validation is available"
             )
+        if validation.get("provider") != expected_provider:
+            raise RuntimeError(
+                "receiving-validation provider differs from canary provider"
+            )
         return {
             "mode": mode,
             "provider": validation["provider"],
@@ -850,12 +881,12 @@ def main(argv: list[str] | None = None) -> None:
                 parser.error("archive btxd SHA256 does not match --archive-btxd-sha256")
             if remote_sha256(ARCHIVE_CLI) != ARCHIVE_CLI_SHA256:
                 parser.error("archive btx-cli SHA256 does not match --archive-cli-sha256")
-            sh_remote(
-                f"test -f {shlex.quote(ARCHIVE_SIGNER_WIF_FILE)} "
-                f"-a -r {shlex.quote(ARCHIVE_SIGNER_WIF_FILE)}"
-            )
+            sh_remote(remote_private_file_check_command(ARCHIVE_SIGNER_WIF_FILE))
         except (subprocess.SubprocessError, EVIDENCE_IDENTITY.EvidenceIdentityError) as error:
-            parser.error(f"cannot verify archive deployment identity: {error}")
+            parser.error(
+                "cannot verify archive binary identity or private signer permissions "
+                f"({type(error).__name__})"
+            )
     MIRROR_DD = Path(
         tempfile.mkdtemp(prefix="btx-trusted-mirror-", dir=RUNTIME_ROOT)
     )
@@ -963,7 +994,9 @@ port={MIRROR_P2P}
 rpcport={MIRROR_RPC}
 connect=127.0.0.1:{ARCHIVE_P2P}
 """
-    (MIRROR_DD / "btx.conf").write_text(mirror_conf)
+    mirror_conf_path = MIRROR_DD / "btx.conf"
+    mirror_conf_path.write_text(mirror_conf, encoding="utf-8")
+    mirror_conf_path.chmod(0o600)
 
     archive_env = os.environ.copy()
     archive_env["BTX_MATMUL_V4_BACKEND"] = ARCHIVE_BACKEND
@@ -994,7 +1027,7 @@ connect=127.0.0.1:{ARCHIVE_P2P}
     # Start local mirror
     mirror_log = (MIRROR_DD / "stdout.log").open("w")
     mirror_proc = subprocess.Popen(
-        [str(MIRROR_BTXD), f"-datadir={MIRROR_DD}", f"-conf={MIRROR_DD / 'btx.conf'}"],
+        [str(MIRROR_BTXD), f"-datadir={MIRROR_DD}", f"-conf={mirror_conf_path}"],
         stdout=mirror_log,
         stderr=subprocess.STDOUT,
     )

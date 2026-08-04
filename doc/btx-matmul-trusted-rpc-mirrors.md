@@ -160,7 +160,8 @@ mode because local acceptance consumes the one-shot winner authority instead
 of replaying the just-resealed block again.
 
 On one Apple Silicon Metal archive, use local mode (no SSH or self-tunnel) and
-a disposable regtest-only signing key:
+a disposable regtest-only signing key whose file mode denies group/other access
+(for example, `chmod 600`):
 
 ```sh
 python3 -u contrib/matmul-v4/two-node-trusted-mirror-rehearsal.py \

@@ -100,6 +100,7 @@ class TrustedMirrorToolsTest(unittest.TestCase):
             ):
                 paths[name] = root / name
                 paths[name].write_text("test\n", encoding="utf-8")
+            paths["signer-wif"].chmod(0o600)
             revision = subprocess.run(
                 ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"],
                 capture_output=True, text=True, check=True,
@@ -363,6 +364,14 @@ class TrustedMirrorToolsTest(unittest.TestCase):
             expected_provider="metal_rc_exact",
         )
         self.assertEqual(proof["mode"], "receiving-validation")
+        with self.assertRaisesRegex(RuntimeError, "provider differs"):
+            module.validate_archive_strict_proof(
+                mode="receiving-validation",
+                baseline_mining_info={},
+                final_mining_info={},
+                validation={**proof, "available": True, "provider": "cuda_rc_exact"},
+                expected_provider="metal_rc_exact",
+            )
 
     def test_rehearsal_requires_proven_archive_mirror_trust_boundary(self):
         module = load_rehearsal()
@@ -529,6 +538,55 @@ class TrustedMirrorToolsTest(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaisesRegex(RuntimeError, "unsafe archive datadir"):
                     module.validate_remote_archive_dir(value)
+
+    def test_remote_signer_path_is_absolute_and_injection_safe(self):
+        module = load_rehearsal()
+        self.assertEqual(
+            module.validate_remote_file_path(
+                "/secure/archive/signer.wif", "--archive-signer-wif-file"
+            ),
+            "/secure/archive/signer.wif",
+        )
+        for value in (
+            "relative/signer.wif", "/signer.wif", "/secure/../signer.wif",
+            "/secure/signer.wif\nserver=0", "/secure/signer.wif\rserver=0",
+        ):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(RuntimeError, "absolute|safe"):
+                    module.validate_remote_file_path(
+                        value, "--archive-signer-wif-file"
+                    )
+        command = module.remote_private_file_check_command(
+            "/secure/archive/signer file.wif"
+        )
+        self.assertIn("test -f '/secure/archive/signer file.wif'", command)
+        self.assertIn("stat -c '%a' '/secure/archive/signer file.wif'", command)
+        self.assertIn("stat -f '%Lp' '/secure/archive/signer file.wif'", command)
+
+    def test_local_signer_permissions_fail_closed(self):
+        module = load_rehearsal()
+        with tempfile.TemporaryDirectory() as tmp:
+            signer = Path(tmp) / "signer.wif"
+            signer.write_text("private\n", encoding="utf-8")
+            signer.chmod(0o600)
+            module.require_private_local_file(signer, "--signer-wif-file")
+            self.assertEqual(
+                subprocess.run(
+                    ["sh", "-c", module.remote_private_file_check_command(str(signer))],
+                    check=False,
+                ).returncode,
+                0,
+            )
+            signer.chmod(0o640)
+            with self.assertRaisesRegex(RuntimeError, "group or others"):
+                module.require_private_local_file(signer, "--signer-wif-file")
+            self.assertNotEqual(
+                subprocess.run(
+                    ["sh", "-c", module.remote_private_file_check_command(str(signer))],
+                    check=False,
+                ).returncode,
+                0,
+            )
 
     def test_signer_pubkey_rejects_config_injection(self):
         module = load_rehearsal()
