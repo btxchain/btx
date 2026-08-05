@@ -153,6 +153,16 @@ RunRcExactReplaySlotReuseOrderingTest();
     const std::vector<uint256>& prf_down, uint32_t rows, uint32_t d_model,
     uint32_t d_ff, std::vector<std::vector<int8_t>>& layer_outputs);
 
+/** Generate X0 and weights directly into resident CUDA buffers. Completed
+ * layer activations are committed on-device and returned as leaf hashes. */
+[[nodiscard]] bool LaunchRcExactReplaySeededFfnChain(
+    const std::vector<uint256>& seed_x0_blocks, uint32_t x0_rows_per_seed,
+    const std::vector<uint256>& seed_w_up, const std::vector<uint256>& seed_w_down,
+    const std::vector<uint256>& prf_up, const std::vector<uint256>& prf_down,
+    uint32_t rows, uint32_t d_model, uint32_t d_ff, uint32_t merkle_leaf_bytes,
+    std::vector<std::vector<int8_t>>& outputs_x0_through_layers,
+    std::vector<uint256>& committed_layer_leaf_hashes);
+
 [[nodiscard]] bool LaunchRcExactReplayPhase1Seeded(
     const uint256& seed_q, const uint256& seed_k, const uint256& seed_v,
     const uint256& prf_s, const uint256& prf_z, uint32_t query_rows,
@@ -165,6 +175,13 @@ RunRcExactReplaySlotReuseOrderingTest();
 [[nodiscard]] bool LaunchRcExactReplayExpandMx(
     const uint256& seed, uint32_t rows, uint32_t columns,
     std::vector<int8_t>& output);
+
+/** CUDA SHA256d tile-tree callbacks. */
+[[nodiscard]] bool LaunchRcExactReplayMerkleLeaves(
+    const unsigned char* leaf_payloads, uint32_t leaf_bytes, size_t leaf_count,
+    std::vector<uint256>& leaf_hashes);
+[[nodiscard]] bool LaunchRcExactReplayMerkleRoot(
+    const std::vector<uint256>& leaf_hashes, uint256& root);
 
 /** Test-only continuation seam: caps each rejection-sampling batch without
  * changing the canonical counter stream. */

@@ -660,7 +660,7 @@ ResolvedExactGemm ResolveExactGemmBackendForLT()
  *  replaced fused/seeded lane cannot inherit an earlier verdict. */
 struct RCExactGemmCacheKey {
     std::string label;
-    std::array<uintptr_t, 10> callbacks{};
+    std::array<uintptr_t, 11> callbacks{};
     int32_t epoch{-1};
     bool operator<(const RCExactGemmCacheKey& o) const
     {
@@ -669,7 +669,7 @@ struct RCExactGemmCacheKey {
     }
 };
 
-std::array<uintptr_t, 10> RCBackendCallbackIdentity(
+std::array<uintptr_t, 11> RCBackendCallbackIdentity(
     const matmul::v4::lt::ExactGemmBackend& backend)
 {
     return {{
@@ -678,6 +678,7 @@ std::array<uintptr_t, 10> RCBackendCallbackIdentity(
         reinterpret_cast<uintptr_t>(backend.rc_fused_ffn),
         reinterpret_cast<uintptr_t>(backend.rc_fused_ffn_chain),
         reinterpret_cast<uintptr_t>(backend.rc_fused_ffn_chain_seeded),
+        reinterpret_cast<uintptr_t>(backend.rc_seeded_ffn_chain),
         reinterpret_cast<uintptr_t>(backend.rc_expand_mx),
         reinterpret_cast<uintptr_t>(backend.rc_merkle_leaves),
         reinterpret_cast<uintptr_t>(backend.rc_merkle_root),
@@ -993,8 +994,9 @@ ResolvedRCExactGemm ResolveExactGemmBackendForRC()
     // When CUDA ExactReplay self-probes available, attach the Metal-parity fused
     // Phase-1 / FFN / FFN-chain Launch* callbacks before the RC gate (same shape
     // as the Apple Metal block above). The seeded callbacks generate Profile-1
-    // Q/K/V and FFN weights on-device. X0 and Merkle remain on the reviewed
-    // host path; Profile 2 deliberately retains its existing implementation.
+    // Q/K/V, X0, and FFN weights on-device. Canonical activation commitment
+    // and tile-tree folding also stay on CUDA; Profile 2 deliberately retains
+    // its existing implementation.
     ResolvedExactGemm resolved = ResolveExactGemmBackendForLT();
     matmul::v4::lt::ExactGemmBackend backend = resolved.backend;
     std::string provider_label =
@@ -1008,6 +1010,14 @@ ResolvedRCExactGemm ResolveExactGemmBackendForRC()
         backend.rc_fused_ffn_chain = &matmul_v4::cuda::LaunchRcExactReplayFusedFfnChain;
         backend.rc_fused_ffn_chain_seeded =
             &matmul_v4::cuda::LaunchRcExactReplayFusedFfnChainSeeded;
+        backend.rc_seeded_ffn_chain =
+            &matmul_v4::cuda::LaunchRcExactReplaySeededFfnChain;
+        backend.rc_expand_mx =
+            &matmul_v4::cuda::LaunchRcExactReplayExpandMx;
+        backend.rc_merkle_leaves =
+            &matmul_v4::cuda::LaunchRcExactReplayMerkleLeaves;
+        backend.rc_merkle_root =
+            &matmul_v4::cuda::LaunchRcExactReplayMerkleRoot;
         backend.rc_phase1 = &matmul_v4::cuda::LaunchRcExactReplayPhase1;
         backend.rc_phase1_seeded =
             &matmul_v4::cuda::LaunchRcExactReplayPhase1Seeded;

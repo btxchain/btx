@@ -177,6 +177,23 @@ struct ExactGemmBackend {
         uint32_t d_model,
         uint32_t d_ff,
         std::vector<std::vector<int8_t>>& layer_outputs);
+    /** Profile-1 seed-to-resident commitment lane. X0 and weights are expanded
+     * directly into provider-owned device buffers. When merkle_leaf_bytes is
+     * non-zero, the provider returns canonical leaf hashes for X[1..L] rather
+     * than copying the full activation sequence through host memory. */
+    using RCSeededFfnChainFn = bool (*)(
+        const std::vector<uint256>& seed_x0_blocks,
+        uint32_t x0_rows_per_seed,
+        const std::vector<uint256>& seed_w_up,
+        const std::vector<uint256>& seed_w_down,
+        const std::vector<uint256>& prf_up,
+        const std::vector<uint256>& prf_down,
+        uint32_t rows,
+        uint32_t d_model,
+        uint32_t d_ff,
+        uint32_t merkle_leaf_bytes,
+        std::vector<std::vector<int8_t>>& outputs_x0_through_layers,
+        std::vector<uint256>& committed_layer_leaf_hashes);
     using RCExpandMxFn = bool (*)(
         const uint256& seed,
         uint32_t rows,
@@ -221,6 +238,7 @@ struct ExactGemmBackend {
     RCFusedFfnFn rc_fused_ffn{nullptr};
     RCFusedFfnChainFn rc_fused_ffn_chain{nullptr};
     RCFusedFfnChainSeededFn rc_fused_ffn_chain_seeded{nullptr};
+    RCSeededFfnChainFn rc_seeded_ffn_chain{nullptr};
     RCExpandMxFn rc_expand_mx{nullptr};
     RCMerkleLeavesFn rc_merkle_leaves{nullptr};
     RCMerkleRootFn rc_merkle_root{nullptr};

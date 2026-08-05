@@ -1264,7 +1264,7 @@ int main(int argc, char* argv[])
     bool digests_stable = true;
     const bool device_run = args.backend != "cpu";
     bool all_fully_accelerated = device_run;
-    bool all_full_metal_pipeline = metal_exact_lane;
+    bool all_full_device_pipeline = device_run;
     rc::RCExactReplayAccelerationStats acceleration_totals{};
     acceleration_totals.backend = backend_resolved;
     acceleration_totals.device_backend_present = gemm.gemm_s8s8 != nullptr;
@@ -1317,11 +1317,8 @@ int main(int argc, char* argv[])
 
         all_fully_accelerated =
             all_fully_accelerated && run_stats.fully_accelerated;
-        if (metal_exact_lane) {
-            all_full_metal_pipeline =
-                all_full_metal_pipeline &&
-                run_stats.full_metal_pipeline;
-        }
+        all_full_device_pipeline =
+            all_full_device_pipeline && run_stats.full_metal_pipeline;
         acceleration_totals.device_calls += run_stats.device_calls;
         acceleration_totals.device_macs += run_stats.device_macs;
         acceleration_totals.phase1_device_calls += run_stats.phase1_device_calls;
@@ -1383,7 +1380,7 @@ int main(int argc, char* argv[])
     }
     acceleration_totals.fully_accelerated = all_fully_accelerated;
     acceleration_totals.full_metal_pipeline =
-        all_full_metal_pipeline;
+        all_full_device_pipeline;
 
     // Mean phase walls across episodes (real chrono measurements).
     const double inv_ep = args.episodes > 0 ? 1.0 / static_cast<double>(args.episodes) : 0.0;
@@ -1487,7 +1484,7 @@ int main(int argc, char* argv[])
     const bool g1_pass =
         digests_stable && args.episodes > 0 &&
         (!device_run || all_fully_accelerated) &&
-        (!metal_exact_lane || all_full_metal_pipeline);
+        (!device_run || all_full_device_pipeline);
     std::cout << "  ExtractMX:  " << (g1_pass ? "pass" : "fail")
               << " digests_stable=" << (digests_stable ? "true" : "false") << "\n";
     std::cout << "  phase_wall: p1=" << timed.phase1_s << "s p2=" << timed.phase2_s
@@ -1496,7 +1493,7 @@ int main(int argc, char* argv[])
     std::cout << "  device_exec: provider=" << backend_resolved
               << " fully_accelerated=" << (all_fully_accelerated ? "true" : "false")
               << " full_metal_pipeline="
-              << (all_full_metal_pipeline ? "true" : "false")
+              << (all_full_device_pipeline ? "true" : "false")
               << " device_calls=" << acceleration_totals.device_calls
               << " device_macs=" << acceleration_totals.device_macs
               << " cpu_calls=" << acceleration_totals.cpu_calls
@@ -1681,7 +1678,7 @@ int main(int argc, char* argv[])
     exact_replay_acceleration.pushKV(
         "device_residency_note",
         acceleration_totals.full_metal_pipeline
-            ? "Self-qualified Metal operand XOF, exact contractions, ExtractMX, "
+            ? "Self-qualified device operand XOF, exact contractions, ExtractMX, "
               "resident FFN chain, streaming Merkle leaves, and Merkle subtree "
               "folding produced the consensus digest."
             : acceleration_totals.device_xof_calls != 0
