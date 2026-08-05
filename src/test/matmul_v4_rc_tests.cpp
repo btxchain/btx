@@ -647,6 +647,26 @@ BOOST_AUTO_TEST_CASE(rc_p11_streaming_merkle_equals_full_buffer)
     parts.Absorb(b);
     parts.Absorb(c);
     BOOST_CHECK(parts.FinalizeRoot() == rc::BuildTileTreeRoot(joined, t_leaf));
+
+    // A resident accelerator may return canonical leaf hashes instead of
+    // bouncing the committed activation bytes through host memory.
+    std::vector<int8_t> resident_bytes(t_leaf * 4);
+    for (size_t i = 0; i < resident_bytes.size(); ++i) {
+        resident_bytes[i] = static_cast<int8_t>((i * 29 + 7) & 0x7f);
+    }
+    const auto resident_leaves =
+        rc::BuildTileTreeLeaves(resident_bytes, t_leaf);
+    rc::RoundMerkleStream resident_stream(t_leaf);
+    resident_stream.Absorb(resident_bytes.data(), t_leaf);
+    std::vector<uint256> prehashed_tail(
+        resident_leaves.begin() + 1, resident_leaves.end());
+    BOOST_REQUIRE(resident_stream.AbsorbPrehashedLeaves(prehashed_tail));
+    BOOST_CHECK(resident_stream.FinalizeRoot() ==
+                rc::BuildTileTreeRoot(resident_bytes, t_leaf));
+
+    rc::RoundMerkleStream unaligned(t_leaf);
+    unaligned.Absorb(resident_bytes.data(), 1);
+    BOOST_CHECK(!unaligned.AbsorbPrehashedLeaves(prehashed_tail));
 }
 
 BOOST_AUTO_TEST_CASE(rc_p11_streaming_episode_matches_collected_stream_root)
@@ -2423,6 +2443,9 @@ BOOST_AUTO_TEST_CASE(rc_cuda_exact_replay_launch_abi_smoke)
     BOOST_REQUIRE(resolved.backend.rc_fused_ffn != nullptr);
     BOOST_REQUIRE(resolved.backend.rc_fused_ffn_chain != nullptr);
     BOOST_REQUIRE(resolved.backend.rc_fused_ffn_chain_seeded != nullptr);
+    BOOST_REQUIRE(resolved.backend.rc_seeded_ffn_chain != nullptr);
+    BOOST_REQUIRE(resolved.backend.rc_merkle_leaves != nullptr);
+    BOOST_REQUIRE(resolved.backend.rc_merkle_root != nullptr);
     BOOST_REQUIRE(resolved.backend.rc_phase1 != nullptr);
     BOOST_REQUIRE(resolved.backend.rc_phase1_seeded != nullptr);
     BOOST_TEST_MESSAGE("CUDA ExactReplay provider=" << resolved.provider);
@@ -2516,6 +2539,24 @@ BOOST_AUTO_TEST_CASE(rc_cuda_exact_replay_launch_abi_smoke)
         BOOST_CHECK(!completed);
         BOOST_CHECK(cancelled_output.empty());
     }
+    {
+        constexpr uint32_t leaf_bytes{64};
+        std::vector<int8_t> payload(leaf_bytes * 4);
+        for (size_t i = 0; i < payload.size(); ++i) {
+            payload[i] = static_cast<int8_t>((i * 17 + 11) & 0xff);
+        }
+        const auto host_leaves{
+            rc::BuildTileTreeLeaves(payload, leaf_bytes)};
+        std::vector<uint256> device_leaves;
+        BOOST_REQUIRE(matmul_v4::cuda::LaunchRcExactReplayMerkleLeaves(
+            reinterpret_cast<const unsigned char*>(payload.data()),
+            leaf_bytes, payload.size() / leaf_bytes, device_leaves));
+        BOOST_CHECK(device_leaves == host_leaves);
+        uint256 device_root;
+        BOOST_REQUIRE(matmul_v4::cuda::LaunchRcExactReplayMerkleRoot(
+            device_leaves, device_root));
+        BOOST_CHECK(device_root == rc::BuildTileTreeRoot(payload, leaf_bytes));
+    }
     const uint256 cpu = rc::RecomputeResidentCurriculumReference(header, params, 0);
     BOOST_REQUIRE(!cpu.IsNull());
 
@@ -2537,10 +2578,12 @@ BOOST_AUTO_TEST_CASE(rc_cuda_exact_replay_launch_abi_smoke)
     BOOST_CHECK_EQUAL(stats.device_fused_phase1_calls, params.rounds);
     BOOST_CHECK_EQUAL(
         stats.device_xof_calls,
-        static_cast<uint64_t>(params.rounds) * (3U + 2U * params.L_lyr));
+        static_cast<uint64_t>(params.rounds) * (4U + 2U * params.L_lyr));
     BOOST_CHECK_EQUAL(stats.device_xof_fallbacks, 0U);
     BOOST_CHECK_GT(stats.device_xof_elements, 0U);
     BOOST_CHECK_GT(stats.device_xof_s, 0.0);
+    BOOST_CHECK_EQUAL(stats.device_merkle_rounds, params.rounds);
+    BOOST_CHECK(stats.full_metal_pipeline);
     BOOST_TEST_MESSAGE("CUDA ExactReplay toy smoke ok fused_chain_calls="
                        << stats.device_fused_ffn_chain_calls
                        << " fused_phase1_calls=" << stats.device_fused_phase1_calls);

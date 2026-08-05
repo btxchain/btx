@@ -374,6 +374,78 @@ __global__ void er_gemm_s8s8_i32(const int8_t* __restrict__ A,
     C[static_cast<size_t>(row) * N + col] = acc;
 }
 
+__device__ __forceinline__ void RcWriteShaDigest(
+    const uint32_t state[8], uint8_t* output)
+{
+#pragma unroll
+    for (uint32_t word = 0; word < 8; ++word) {
+        const uint32_t value{state[word]};
+        output[word * 4 + 0] = static_cast<uint8_t>(value >> 24U);
+        output[word * 4 + 1] = static_cast<uint8_t>(value >> 16U);
+        output[word * 4 + 2] = static_cast<uint8_t>(value >> 8U);
+        output[word * 4 + 3] = static_cast<uint8_t>(value);
+    }
+}
+
+/** SHA256d(tag || fixed-size payload), one record per CUDA thread. */
+__global__ void RcSha256dTagged(const uint8_t* __restrict__ payloads,
+                                uint32_t payload_bytes, uint32_t records,
+                                uint8_t tag, uint8_t* __restrict__ hashes)
+{
+    const uint32_t record{blockIdx.x * blockDim.x + threadIdx.x};
+    if (record >= records) return;
+    const uint8_t* payload{
+        payloads + static_cast<size_t>(record) * payload_bytes};
+    const uint64_t message_bytes{1ULL + payload_bytes};
+    const uint64_t padded_blocks{(message_bytes + 9ULL + 63ULL) / 64ULL};
+    const uint64_t padded_bytes{padded_blocks * 64ULL};
+    const uint64_t bit_length{message_bytes * 8ULL};
+
+    uint32_t first[8];
+    matmul_v4::lt_device::ShaInit(first);
+    for (uint64_t block_index = 0; block_index < padded_blocks;
+         ++block_index) {
+        uint32_t block[16]{};
+#pragma unroll
+        for (uint32_t byte = 0; byte < 64; ++byte) {
+            const uint64_t position{block_index * 64ULL + byte};
+            uint8_t value{0};
+            if (position == 0) {
+                value = tag;
+            } else if (position < message_bytes) {
+                value = payload[position - 1];
+            } else if (position == message_bytes) {
+                value = 0x80U;
+            } else if (position >= padded_bytes - 8ULL) {
+                value = static_cast<uint8_t>(
+                    bit_length >> ((padded_bytes - 1 - position) * 8));
+            }
+            matmul_v4::lt_device::ShaSetByte(block, byte, value);
+        }
+        matmul_v4::lt_device::ShaCompress(first, block);
+    }
+
+    uint32_t second[8];
+    uint32_t block[16]{};
+    matmul_v4::lt_device::ShaInit(second);
+#pragma unroll
+    for (uint32_t word = 0; word < 8; ++word) {
+        matmul_v4::lt_device::ShaSetByte(
+            block, word * 4 + 0, first[word] >> 24U);
+        matmul_v4::lt_device::ShaSetByte(
+            block, word * 4 + 1, first[word] >> 16U);
+        matmul_v4::lt_device::ShaSetByte(
+            block, word * 4 + 2, first[word] >> 8U);
+        matmul_v4::lt_device::ShaSetByte(
+            block, word * 4 + 3, first[word]);
+    }
+    matmul_v4::lt_device::ShaSetByte(block, 32, 0x80U);
+    block[15] = 32U * 8U;
+    matmul_v4::lt_device::ShaCompress(second, block);
+    RcWriteShaDigest(
+        second, hashes + static_cast<size_t>(record) * 32);
+}
+
 struct DeviceBuf {
     void* p{nullptr};
     size_t bytes{0};
@@ -1486,6 +1558,10 @@ bool TryCudaRcFusedFfnChainImpl(const std::vector<int8_t>& X0, bool weights_shar
                             std::vector<std::vector<int8_t>>& out_X,
                             const std::vector<uint256>* up_seeds,
                             const std::vector<uint256>* down_seeds,
+                            const std::vector<uint256>* x0_seeds,
+                            uint32_t x0_rows_per_seed,
+                            uint32_t merkle_leaf_bytes,
+                            std::vector<uint256>* committed_layer_leaf_hashes,
                             SlotReuseOrderingProbe* ordering_probe)
 {
     if constexpr (TestSlotReuseOrdering) {
@@ -1494,7 +1570,23 @@ bool TryCudaRcFusedFfnChainImpl(const std::vector<int8_t>& X0, bool weights_shar
     if (!IsRcExactReplayCudaAvailable()) return false;
     if (L_lyr == 0 || b_seq == 0 || d_model == 0 || d_ff == 0) return false;
     if ((d_model % kRCMxBlockLen) != 0 || (d_ff % kRCMxBlockLen) != 0) return false;
-    if (X0.size() != static_cast<size_t>(b_seq) * d_model) return false;
+    const size_t x_bytes = static_cast<size_t>(b_seq) * d_model;
+    const bool commit_on_device{
+        committed_layer_leaf_hashes != nullptr && merkle_leaf_bytes != 0};
+    if ((committed_layer_leaf_hashes == nullptr) !=
+            (merkle_leaf_bytes == 0)) return false;
+    if (x0_seeds != nullptr) {
+        if (!commit_on_device || x0_seeds->empty() ||
+            x0_rows_per_seed == 0 ||
+            static_cast<uint64_t>(x0_seeds->size()) * x0_rows_per_seed !=
+                b_seq) return false;
+    } else if (X0.size() != x_bytes) {
+        return false;
+    }
+    if (commit_on_device &&
+        ((x_bytes % merkle_leaf_bytes) != 0 ||
+         x_bytes / merkle_leaf_bytes >
+             std::numeric_limits<uint32_t>::max())) return false;
     if (prf_up.size() != L_lyr || prf_dn.size() != L_lyr) return false;
     if ((up_seeds == nullptr) != (down_seeds == nullptr)) return false;
     if (up_seeds != nullptr) {
@@ -1509,14 +1601,19 @@ bool TryCudaRcFusedFfnChainImpl(const std::vector<int8_t>& X0, bool weights_shar
         return false;
     }
 
-    const size_t x_bytes = static_cast<size_t>(b_seq) * d_model;
     const size_t wup_bytes = static_cast<size_t>(d_model) * d_ff;
     const size_t wdn_bytes = static_cast<size_t>(d_ff) * d_model;
+    const uint32_t leaves_per_layer{commit_on_device
+        ? static_cast<uint32_t>(x_bytes / merkle_leaf_bytes)
+        : 0};
+    const size_t leaf_hash_bytes{
+        static_cast<size_t>(leaves_per_layer) * sizeof(uint256)};
 
     // Persistent workspace across rounds/verifies — avoid cudaMalloc storms.
     struct Workspace {
-        DeviceBuf dXa, dXb, dWup0, dWup1, dWdn0, dWdn1, d_keyUp, d_keyDn, d_h32, dH, d_y32,
-            d_y64, d_partial, dAp, dBp, d_h64;
+        DeviceBuf dXa, dXb, dWup0, dWup1, dWdn0, dWdn1,
+            d_leaf_hashes0, d_leaf_hashes1, d_keyUp, d_keyDn, d_h32, dH,
+            d_y32, d_y64, d_partial, dAp, dBp, d_h64;
         cudaStream_t compute{nullptr};
         cudaStream_t h2d{nullptr};
         cudaStream_t d2h{nullptr};
@@ -1553,8 +1650,9 @@ bool TryCudaRcFusedFfnChainImpl(const std::vector<int8_t>& X0, bool weights_shar
             compute = nullptr;
             DeviceBuf* buffers[]{
                 &dXa, &dXb, &dWup0, &dWup1, &dWdn0, &dWdn1,
-                &d_keyUp, &d_keyDn, &d_h32, &dH, &d_y32, &d_y64,
-                &d_partial, &dAp, &dBp, &d_h64};
+                &d_leaf_hashes0, &d_leaf_hashes1, &d_keyUp, &d_keyDn,
+                &d_h32, &dH, &d_y32, &d_y64, &d_partial, &dAp, &dBp,
+                &d_h64};
             for (DeviceBuf* buffer : buffers) (void)buffer->Alloc(0);
             x_bytes = 0;
             wup_bytes = 0;
@@ -1567,7 +1665,8 @@ bool TryCudaRcFusedFfnChainImpl(const std::vector<int8_t>& X0, bool weights_shar
             Reset();
         }
         [[nodiscard]] bool Ensure(
-            size_t xb, size_t wup, size_t wdn, int selected_device)
+            size_t xb, size_t wup, size_t wdn, size_t hash_bytes,
+            int selected_device)
         {
             if (device_index != selected_device) {
                 if (device_index >= 0) {
@@ -1607,6 +1706,8 @@ bool TryCudaRcFusedFfnChainImpl(const std::vector<int8_t>& X0, bool weights_shar
             if (!dXa.Alloc(xb) || !dXb.Alloc(xb)) return false;
             if (!dWup0.Alloc(wup) || !dWdn0.Alloc(wdn)) return false;
             if (!dWup1.Alloc(wup) || !dWdn1.Alloc(wdn)) return false;
+            if (!d_leaf_hashes0.Alloc(hash_bytes) ||
+                !d_leaf_hashes1.Alloc(hash_bytes)) return false;
             if (!d_keyUp.Alloc(8 * sizeof(uint32_t)) || !d_keyDn.Alloc(8 * sizeof(uint32_t))) {
                 return false;
             }
@@ -1627,15 +1728,22 @@ bool TryCudaRcFusedFfnChainImpl(const std::vector<int8_t>& X0, bool weights_shar
     std::lock_guard<std::mutex> ws_lock(ws_mu);
     int selected_device{-1};
     if (!BindSelectedRcCudaDevice(&selected_device) ||
-        !ws.Ensure(x_bytes, wup_bytes, wdn_bytes, selected_device)) {
+        !ws.Ensure(x_bytes, wup_bytes, wdn_bytes, leaf_hash_bytes,
+                   selected_device)) {
         NoteCpuFallback();
         return false;
     }
 
-    out_X.resize(L_lyr + 1);
-    out_X[0] = X0;
-    for (uint32_t l = 1; l <= L_lyr; ++l) {
-        if (out_X[l].size() != x_bytes) out_X[l].assign(x_bytes, 0);
+    if (commit_on_device) {
+        out_X.clear();
+        committed_layer_leaf_hashes->assign(
+            static_cast<size_t>(L_lyr) * leaves_per_layer, uint256{});
+    } else {
+        out_X.resize(L_lyr + 1);
+        out_X[0] = X0;
+        for (uint32_t l = 1; l <= L_lyr; ++l) {
+            if (out_X[l].size() != x_bytes) out_X[l].assign(x_bytes, 0);
+        }
     }
 
     // Cancellation/failure must not release ws_mu (and then the outer
@@ -1694,7 +1802,19 @@ bool TryCudaRcFusedFfnChainImpl(const std::vector<int8_t>& X0, bool weights_shar
                    cudaMemcpyHostToDevice, ws.h2d));
     };
 
-    if (!CudaOk(cudaMemcpyAsync(ws.dXa.p, X0.data(), x_bytes, cudaMemcpyHostToDevice, ws.h2d))) {
+    if (x0_seeds != nullptr) {
+        auto& expand{ExpandContext()};
+        std::lock_guard<std::mutex> lock(expand.mutex);
+        for (size_t block = 0; block < x0_seeds->size(); ++block) {
+            int8_t* target{ws.dXa.As<int8_t>() +
+                block * static_cast<size_t>(x0_rows_per_seed) * d_model};
+            if (!RcExpandMxGenerateDevice(
+                    (*x0_seeds)[block], x0_rows_per_seed, d_model,
+                    target, ws.h2d)) return false;
+        }
+    } else if (!CudaOk(cudaMemcpyAsync(
+                   ws.dXa.p, X0.data(), x_bytes,
+                   cudaMemcpyHostToDevice, ws.h2d))) {
         return false;
     }
     if (matmul::v4::rc::ExactReplayCancellationRequested()) return false;
@@ -1801,8 +1921,25 @@ bool TryCudaRcFusedFfnChainImpl(const std::vector<int8_t>& X0, bool weights_shar
 
         if (matmul::v4::rc::ExactReplayCancellationRequested()) return false;
         if (!CudaOk(cudaStreamWaitEvent(ws.d2h, ws.layer_done[slot], 0))) return false;
-        if (!CudaOk(cudaMemcpyAsync(out_X[l + 1].data(), d_nxt, x_bytes, cudaMemcpyDeviceToHost,
-                                    ws.d2h))) {
+        if (commit_on_device) {
+            constexpr uint32_t hash_threads{128};
+            DeviceBuf& hashes{slot == 0 ? ws.d_leaf_hashes0 :
+                                         ws.d_leaf_hashes1};
+            RcSha256dTagged<<<
+                (leaves_per_layer + hash_threads - 1) / hash_threads,
+                hash_threads, 0, ws.d2h>>>(
+                    reinterpret_cast<const uint8_t*>(d_nxt),
+                    merkle_leaf_bytes, leaves_per_layer, 0x00,
+                    hashes.As<uint8_t>());
+            if (cudaGetLastError() != cudaSuccess ||
+                !CudaOk(cudaMemcpyAsync(
+                    committed_layer_leaf_hashes->data() +
+                        static_cast<size_t>(l) * leaves_per_layer,
+                    hashes.p, leaf_hash_bytes, cudaMemcpyDeviceToHost,
+                    ws.d2h))) return false;
+        } else if (!CudaOk(cudaMemcpyAsync(
+                       out_X[l + 1].data(), d_nxt, x_bytes,
+                       cudaMemcpyDeviceToHost, ws.d2h))) {
             return false;
         }
         if (!CudaOk(cudaEventRecord(ws.d2h_done[slot], ws.d2h))) return false;
@@ -1827,7 +1964,9 @@ bool TryCudaRcFusedFfnChainImpl(const std::vector<int8_t>& X0, bool weights_shar
         g_stats.phase2_extract_device = true;
         g_stats.phase2_ffn_fused_device = true;
         g_stats.phase2_ffn_chain_resident = true;
-        g_stats.detail = "cuda_resident_ffn_chain+triple_stream+persistent_ws";
+        g_stats.detail = commit_on_device
+            ? "cuda_seeded_resident_ffn_chain+xof+device_commit"
+            : "cuda_resident_ffn_chain+triple_stream+persistent_ws";
     }
     return true;
 }
@@ -1850,7 +1989,7 @@ bool TryCudaRcFusedFfnChain(const std::vector<int8_t>& X0, bool weights_shared,
     return TryCudaRcFusedFfnChainImpl<false>(
         X0, weights_shared, W_up_shared, W_down_shared, W_up_layers,
         W_down_layers, prf_up, prf_dn, b_seq, d_model, d_ff, L_lyr,
-        out_X, up_seeds, down_seeds, nullptr);
+        out_X, up_seeds, down_seeds, nullptr, 0, 0, nullptr, nullptr);
 }
 
 RcExactReplaySlotReuseOrderingTestResult
@@ -1955,7 +2094,7 @@ RunRcExactReplaySlotReuseOrderingTest()
     result.chain_completed = TryCudaRcFusedFfnChainImpl<true>(
         x0, /*weights_shared=*/false, empty, empty, empty_layers,
         empty_layers, prf_up, prf_down, rows, d_model, d_ff, layers,
-        outputs, &up_seeds, &down_seeds, &probe);
+        outputs, &up_seeds, &down_seeds, nullptr, 0, 0, nullptr, &probe);
     call_finished.store(true, std::memory_order_release);
     probe.Release();
     watchdog.join();
@@ -2170,6 +2309,37 @@ bool LaunchRcExactReplayFusedFfnChainSeeded(
     return layer_outputs.size() == layers;
 }
 
+bool LaunchRcExactReplaySeededFfnChain(
+    const std::vector<uint256>& seed_x0_blocks,
+    uint32_t x0_rows_per_seed,
+    const std::vector<uint256>& seed_w_up,
+    const std::vector<uint256>& seed_w_down,
+    const std::vector<uint256>& prf_up,
+    const std::vector<uint256>& prf_down,
+    uint32_t rows, uint32_t d_model, uint32_t d_ff,
+    uint32_t merkle_leaf_bytes,
+    std::vector<std::vector<int8_t>>& outputs_x0_through_layers,
+    std::vector<uint256>& committed_layer_leaf_hashes)
+{
+    outputs_x0_through_layers.clear();
+    committed_layer_leaf_hashes.clear();
+    if (prf_up.empty() || prf_up.size() != prf_down.size() ||
+        seed_w_up.empty() || seed_w_up.size() != seed_w_down.size()) {
+        return false;
+    }
+    const uint32_t layers{static_cast<uint32_t>(prf_up.size())};
+    const bool weights_shared{seed_w_up.size() == 1};
+    if (!weights_shared && seed_w_up.size() != layers) return false;
+    static const std::vector<int8_t> empty;
+    static const std::vector<std::vector<int8_t>> empty_layers;
+    return TryCudaRcFusedFfnChainImpl<false>(
+        empty, weights_shared, empty, empty, empty_layers, empty_layers,
+        prf_up, prf_down, rows, d_model, d_ff, layers,
+        outputs_x0_through_layers, &seed_w_up, &seed_w_down,
+        &seed_x0_blocks, x0_rows_per_seed, merkle_leaf_bytes,
+        &committed_layer_leaf_hashes, nullptr);
+}
+
 bool LaunchRcExactReplayPhase1Seeded(
     const uint256& seed_q, const uint256& seed_k, const uint256& seed_v,
     const uint256& prf_s, const uint256& prf_z, uint32_t query_rows,
@@ -2244,6 +2414,91 @@ bool LaunchRcExactReplayExpandMxForTest(
         return false;
     }
     return true;
+}
+
+bool LaunchRcExactReplayMerkleLeaves(
+    const unsigned char* leaf_payloads, uint32_t leaf_bytes,
+    size_t leaf_count, std::vector<uint256>& leaf_hashes)
+{
+    leaf_hashes.clear();
+    if (!IsRcExactReplayCudaAvailable() || leaf_payloads == nullptr ||
+        leaf_bytes == 0 || leaf_count == 0 ||
+        leaf_count > std::numeric_limits<uint32_t>::max() ||
+        leaf_count > std::numeric_limits<size_t>::max() / leaf_bytes ||
+        leaf_count > std::numeric_limits<size_t>::max() / sizeof(uint256)) {
+        return false;
+    }
+    const size_t payload_bytes{leaf_count * leaf_bytes};
+    const size_t hash_bytes{leaf_count * sizeof(uint256)};
+    struct Workspace {
+        std::mutex mutex;
+        DeviceBuf payloads;
+        DeviceBuf hashes;
+    };
+    static Workspace workspace;
+    std::lock_guard<std::mutex> lock(workspace.mutex);
+    if (!BindSelectedRcCudaDevice() ||
+        !workspace.payloads.Alloc(payload_bytes) ||
+        !workspace.hashes.Alloc(hash_bytes) ||
+        cudaMemcpy(workspace.payloads.p, leaf_payloads, payload_bytes,
+                   cudaMemcpyHostToDevice) != cudaSuccess) {
+        return false;
+    }
+    constexpr uint32_t threads{128};
+    const uint32_t records{static_cast<uint32_t>(leaf_count)};
+    RcSha256dTagged<<<(records + threads - 1) / threads, threads>>>(
+        workspace.payloads.As<uint8_t>(), leaf_bytes, records, 0x00,
+        workspace.hashes.As<uint8_t>());
+    if (cudaGetLastError() != cudaSuccess) return false;
+    leaf_hashes.resize(leaf_count);
+    if (cudaMemcpy(leaf_hashes.data(), workspace.hashes.p, hash_bytes,
+                   cudaMemcpyDeviceToHost) != cudaSuccess) {
+        leaf_hashes.clear();
+        return false;
+    }
+    return true;
+}
+
+bool LaunchRcExactReplayMerkleRoot(
+    const std::vector<uint256>& leaf_hashes, uint256& root)
+{
+    root.SetNull();
+    if (!IsRcExactReplayCudaAvailable() || leaf_hashes.empty() ||
+        (leaf_hashes.size() & (leaf_hashes.size() - 1)) != 0 ||
+        leaf_hashes.size() > std::numeric_limits<uint32_t>::max() ||
+        leaf_hashes.size() >
+            std::numeric_limits<size_t>::max() / sizeof(uint256)) {
+        return false;
+    }
+    const size_t bytes{leaf_hashes.size() * sizeof(uint256)};
+    struct Workspace {
+        std::mutex mutex;
+        DeviceBuf level_a;
+        DeviceBuf level_b;
+    };
+    static Workspace workspace;
+    std::lock_guard<std::mutex> lock(workspace.mutex);
+    if (!BindSelectedRcCudaDevice() ||
+        !workspace.level_a.Alloc(bytes) ||
+        !workspace.level_b.Alloc(std::max<size_t>(sizeof(uint256), bytes / 2)) ||
+        cudaMemcpy(workspace.level_a.p, leaf_hashes.data(), bytes,
+                   cudaMemcpyHostToDevice) != cudaSuccess) {
+        return false;
+    }
+    auto* input{workspace.level_a.As<uint8_t>()};
+    auto* output{workspace.level_b.As<uint8_t>()};
+    uint32_t level_count{static_cast<uint32_t>(leaf_hashes.size())};
+    constexpr uint32_t threads{128};
+    while (level_count > 1) {
+        const uint32_t parents{level_count / 2};
+        RcSha256dTagged<<<(parents + threads - 1) / threads, threads>>>(
+            input, 2 * sizeof(uint256), parents, 0x01, output);
+        if (cudaGetLastError() != cudaSuccess) return false;
+        std::swap(input, output);
+        level_count = parents;
+    }
+    return cudaMemcpy(root.data(), input, sizeof(uint256),
+                      cudaMemcpyDeviceToHost) == cudaSuccess;
 }
 
 } // namespace matmul_v4::cuda

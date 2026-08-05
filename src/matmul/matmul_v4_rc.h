@@ -735,6 +735,9 @@ public:
     void Absorb(const std::vector<int8_t>& v) { Absorb(v.data(), v.size()); }
     /** Append int64 matrix as little-endian bytes (segment-leaf layout). */
     void AbsorbInt64LE(const std::vector<int64_t>& M);
+    /** Append already-computed canonical leaf hashes at a leaf boundary. */
+    [[nodiscard]] bool AbsorbPrehashedLeaves(
+        const std::vector<uint256>& hashes);
     /** Finalize last partial leaf (zero-pad) + pow2 pad leaves; return leaves. */
     [[nodiscard]] std::vector<uint256> FinalizeLeaves();
     [[nodiscard]] uint256 FinalizeRoot();

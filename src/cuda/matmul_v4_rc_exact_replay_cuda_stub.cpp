@@ -92,6 +92,17 @@ bool LaunchRcExactReplayFusedFfnChainSeeded(
     return false;
 }
 
+bool LaunchRcExactReplaySeededFfnChain(
+    const std::vector<uint256>&, uint32_t, const std::vector<uint256>&,
+    const std::vector<uint256>&, const std::vector<uint256>&,
+    const std::vector<uint256>&, uint32_t, uint32_t, uint32_t, uint32_t,
+    std::vector<std::vector<int8_t>>& outputs, std::vector<uint256>& hashes)
+{
+    outputs.clear();
+    hashes.clear();
+    return false;
+}
+
 bool LaunchRcExactReplayPhase1Seeded(
     const uint256&, const uint256&, const uint256&, const uint256&,
     const uint256&, uint32_t, uint32_t, uint32_t, std::vector<int8_t>&)
@@ -109,6 +120,20 @@ bool LaunchRcExactReplayExpandMxForTest(
     const uint256&, uint32_t, uint32_t, uint32_t,
     std::vector<int8_t>&)
 {
+    return false;
+}
+
+bool LaunchRcExactReplayMerkleLeaves(
+    const unsigned char*, uint32_t, size_t, std::vector<uint256>& leaf_hashes)
+{
+    leaf_hashes.clear();
+    return false;
+}
+
+bool LaunchRcExactReplayMerkleRoot(
+    const std::vector<uint256>&, uint256& root)
+{
+    root.SetNull();
     return false;
 }
 

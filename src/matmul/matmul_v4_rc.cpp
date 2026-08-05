@@ -1023,6 +1023,10 @@ struct Phase2Tensors {
     std::vector<std::vector<int8_t>> W_down_layers;
     std::vector<uint256> prf_up;
     std::vector<uint256> prf_dn;
+    /** Canonical SHA256d(0x00 || T_leaf bytes) for X[1..L]. The
+     * seed-resident CUDA lane returns these instead of multi-gigabyte host
+     * activation copies when no transcript or proof witness is requested. */
+    std::vector<uint256> prehashed_X_leaves;
 };
 
 /** Exact int8·int8 → int64 GEMM: out[m×n] = A[m×k]·B[k×n]. Contraction k is split
@@ -1286,6 +1290,7 @@ Phase2Tensors Phase2MicroTraining(const uint256& seed_r, const uint256& sigma,
                                   const RCEpisodeParams& p,
                                   RCEpisodeOptions::Checkpoint ckpt,
                                   RCGemmDispatch& dispatch,
+                                  bool allow_prehashed_commitment,
                                   uint32_t round_ordinal = 0,
                                   RCEpisodeProofWitnessSink* proof_sink = nullptr)
 {
@@ -1307,16 +1312,29 @@ Phase2Tensors Phase2MicroTraining(const uint256& seed_r, const uint256& sigma,
     // X0_r's sampled rows against seed_r, so the chain is verified at no extra cost.
     // BASE keeps X0 per-round already; seed_r is correct for both, so no branch.
     const uint256 seed_X0 = DeriveOperandSeed(seed_r, "BTX_RC_X0_V1");
-    if (!ExpandX0ForEpisodeDispatched(
-            seed_X0, p, dispatch, out.X[0])) {
-        out.ok = false;
-        return out;
-    }
-    const bool try_seeded_chain =
+    const bool seeded_lane_eligible =
         proof_sink == nullptr &&
         ckpt == RCEpisodeOptions::Checkpoint::StoreAll &&
-        dispatch.gemm.rc_fused_ffn_chain_seeded != nullptr &&
         SeededProfile1LaneEligible(p, dispatch);
+    const bool try_committed_seeded_chain =
+        seeded_lane_eligible && allow_prehashed_commitment &&
+        dispatch.gemm.rc_seeded_ffn_chain != nullptr;
+    const bool try_seeded_chain =
+        seeded_lane_eligible &&
+        dispatch.gemm.rc_fused_ffn_chain_seeded != nullptr;
+    std::vector<uint256> seed_x0_blocks;
+    uint32_t x0_rows_per_seed{p.b_seq};
+    if (UseDatacenterRowBlockX0(p)) {
+        x0_rows_per_seed = kRCX0RowBlockRows;
+        const uint32_t blocks{p.b_seq / x0_rows_per_seed};
+        seed_x0_blocks.reserve(blocks);
+        for (uint32_t block = 0; block < blocks; ++block) {
+            seed_x0_blocks.push_back(
+                DeriveX0RowBlockSeed(seed_X0, block));
+        }
+    } else {
+        seed_x0_blocks.push_back(seed_X0);
+    }
     std::vector<uint256> up_seeds(
         out.ffn_weights_shared ? 1 : p.L_lyr);
     std::vector<uint256> down_seeds(
@@ -1349,6 +1367,91 @@ Phase2Tensors Phase2MicroTraining(const uint256& seed_r, const uint256& sigma,
         out.prf_dn[l] = lt::DeriveMatExpandPrfKey(DeriveOperandSeed(seed_r, tag));
     }
 
+    bool committed_seeded_chain_ok{false};
+    const auto committed_chain_start{
+        std::chrono::steady_clock::now()};
+    if (try_committed_seeded_chain) {
+        std::vector<std::vector<int8_t>> outputs;
+        std::vector<uint256> prehashed;
+        try {
+            committed_seeded_chain_ok = dispatch.gemm.rc_seeded_ffn_chain(
+                seed_x0_blocks, x0_rows_per_seed, up_seeds, down_seeds,
+                out.prf_up, out.prf_dn, p.b_seq, p.d_model, p.d_ff,
+                p.T_leaf, outputs, prehashed);
+        } catch (...) {
+            committed_seeded_chain_ok = false;
+        }
+        const size_t x_elements{
+            static_cast<size_t>(p.b_seq) * p.d_model};
+        const size_t expected_prehashed{
+            (x_elements % p.T_leaf) == 0
+                ? static_cast<size_t>(p.L_lyr) *
+                      (x_elements / p.T_leaf)
+                : 0};
+        if (committed_seeded_chain_ok && outputs.empty() &&
+            expected_prehashed != 0 &&
+            prehashed.size() == expected_prehashed) {
+            out.prehashed_X_leaves = std::move(prehashed);
+            const uint64_t projection_macs{
+                GemmMacs(p.b_seq, p.d_model, p.d_ff)};
+            for (uint32_t l = 0; l < p.L_lyr; ++l) {
+                RecordDeviceGemm(
+                    dispatch, RCGemmPhase::Phase2, projection_macs);
+                RecordDeviceGemm(
+                    dispatch, RCGemmPhase::Phase2, projection_macs);
+            }
+            if (dispatch.stats != nullptr) {
+                dispatch.stats->device_fused_ffn_calls += p.L_lyr;
+                ++dispatch.stats->device_fused_ffn_chain_calls;
+                dispatch.stats->device_extract_elements +=
+                    static_cast<uint64_t>(p.L_lyr) * p.b_seq *
+                    (p.d_ff + p.d_model);
+                dispatch.stats->phase2_extract_on_device = true;
+                dispatch.stats->resident_ffn_chain_on_device = true;
+                dispatch.stats->resident_ffn_chain_s +=
+                    std::chrono::duration<double>(
+                        std::chrono::steady_clock::now() -
+                        committed_chain_start).count();
+            }
+            RecordDeviceXof(
+                dispatch,
+                static_cast<uint64_t>(p.b_seq) * p.d_model +
+                    static_cast<uint64_t>(up_seeds.size() +
+                                          down_seeds.size()) *
+                        p.d_model * p.d_ff,
+                seed_x0_blocks.size() + up_seeds.size() +
+                    down_seeds.size(),
+                std::chrono::steady_clock::now() -
+                    committed_chain_start);
+        } else {
+            committed_seeded_chain_ok = false;
+            RecordDeviceXofLaneFailure(
+                dispatch,
+                static_cast<uint64_t>(p.b_seq) * p.d_model +
+                    static_cast<uint64_t>(up_seeds.size() +
+                                          down_seeds.size()) *
+                        p.d_model * p.d_ff,
+                seed_x0_blocks.size() + up_seeds.size() +
+                    down_seeds.size(),
+                std::chrono::steady_clock::now() -
+                    committed_chain_start,
+                "device_committed_seeded_ffn_chain_declined_or_wrong_size");
+            if (dispatch.require_device) {
+                RecordStrictDeviceFailure(
+                    dispatch,
+                    "device_committed_seeded_ffn_chain_declined_or_wrong_size");
+                out.ok = false;
+                return out;
+            }
+        }
+    }
+
+    if (!committed_seeded_chain_ok &&
+        !ExpandX0ForEpisodeDispatched(seed_X0, p, dispatch, out.X[0])) {
+        out.ok = false;
+        return out;
+    }
+
     bool weights_materialized{false};
     const auto materialize_weights = [&]() -> bool {
         if (weights_materialized) return true;
@@ -1377,7 +1480,8 @@ Phase2Tensors Phase2MicroTraining(const uint256& seed_r, const uint256& sigma,
         weights_materialized = true;
         return true;
     };
-    if (!try_seeded_chain && !materialize_weights()) {
+    if (!committed_seeded_chain_ok && !try_seeded_chain &&
+        !materialize_weights()) {
         out.ok = false;
         return out;
     }
@@ -1393,8 +1497,8 @@ Phase2Tensors Phase2MicroTraining(const uint256& seed_r, const uint256& sigma,
     // once and keeps all X[l] buffers resident across four-layer command
     // batches. It is exact-output-only, so proof witness production retains
     // the ordinary per-layer path.
-    bool resident_chain_ok{false};
-    if (proof_sink == nullptr &&
+    bool resident_chain_ok{committed_seeded_chain_ok};
+    if (!resident_chain_ok && proof_sink == nullptr &&
         (try_seeded_chain ||
          dispatch.gemm.rc_fused_ffn_chain != nullptr)) {
         std::vector<std::vector<int8_t>> layer_outputs;
@@ -1664,6 +1768,21 @@ uint256 StreamRoundIntoMerkle(Phase1Result& p1, Phase2Tensors& p2, const RCEpiso
         p1.z_segs.shrink_to_fit();
     }
 
+    if (!p2.prehashed_X_leaves.empty()) {
+        // A retained transcript needs the canonical bytes, not only their
+        // hashes. The resident commitment lane is therefore enabled only for
+        // ordinary digest/reseal/validation calls.
+        if (out_stream != nullptr ||
+            !merkle.AbsorbPrehashedLeaves(p2.prehashed_X_leaves)) {
+            return uint256{};
+        }
+        p2.prehashed_X_leaves.clear();
+        p2.prehashed_X_leaves.shrink_to_fit();
+        p2.prf_up.clear();
+        p2.prf_dn.clear();
+        return merkle.FinalizeRoot();
+    }
+
     auto need_store = [&](uint32_t layer_idx) -> bool {
         if (ckpt == RCEpisodeOptions::Checkpoint::StoreAll) return true;
         if (ckpt == RCEpisodeOptions::Checkpoint::StoreOnlyX0) return layer_idx == 0;
@@ -1734,7 +1853,9 @@ uint256 RunEpisode(const CBlockHeader& header, const RCEpisodeParams& params,
         if (!p1.ok) return uint256{};
         const auto t2 = clock::now();
         auto p2 = Phase2MicroTraining(
-            seed_r, sigma, params, options.checkpoint, dispatch, r, proof_sink);
+            seed_r, sigma, params, options.checkpoint, dispatch,
+            /*allow_prehashed_commitment=*/out_rounds == nullptr,
+            r, proof_sink);
         if (!p2.ok) return uint256{};
         const auto t3 = clock::now();
 
@@ -2299,6 +2420,17 @@ void RoundMerkleStream::AbsorbInt64LE(const std::vector<int64_t>& M)
     }
 }
 
+bool RoundMerkleStream::AbsorbPrehashedLeaves(
+    const std::vector<uint256>& hashes)
+{
+    assert(!m_finalized);
+    if (!m_partial.empty()) return false;
+    FlushDeviceLeafBatch();
+    m_leaves.insert(m_leaves.end(), hashes.begin(), hashes.end());
+    m_absorbed += hashes.size() * static_cast<size_t>(m_t_leaf);
+    return true;
+}
+
 std::vector<uint256> RoundMerkleStream::FinalizeLeaves()
 {
     assert(!m_finalized);
@@ -2674,7 +2806,8 @@ uint256 RecomputeRCRoundRoot(const uint256& seed_r, const uint256& sigma,
         seed_r, sigma, params, options.phase1_tile_delta, dispatch);
     if (!p1.ok) return uint256{};
     auto p2 = Phase2MicroTraining(
-        seed_r, sigma, params, options.checkpoint, dispatch);
+        seed_r, sigma, params, options.checkpoint, dispatch,
+        /*allow_prehashed_commitment=*/true);
     if (!p2.ok) return uint256{};
     RoundMerkleStream merkle(params.T_leaf);
     return StreamRoundIntoMerkle(p1, p2, params, options.checkpoint, dispatch, merkle,
