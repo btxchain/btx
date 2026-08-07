@@ -500,19 +500,21 @@ struct SnapshotTestSetup : TestChain100Setup {
         return std::make_tuple(&validation_chainstate, &snapshot_chainstate);
     }
 
-    // Simulate a restart of the node by flushing all state to disk, clearing the
-    // existing ChainstateManager, and unloading the block index.
+    // Simulate a restart of the node by optionally flushing state to disk, clearing
+    // the existing ChainstateManager, and unloading the block index.
     //
     // @returns a reference to the "restarted" ChainstateManager
-    ChainstateManager& SimulateNodeRestart()
+    ChainstateManager& SimulateNodeRestart(bool flush_chainstates = true)
     {
         ChainstateManager& chainman = *Assert(m_node.chainman);
 
         BOOST_TEST_MESSAGE("Simulating node restart");
         {
-            for (Chainstate* cs : chainman.GetAll()) {
-                LOCK(::cs_main);
-                cs->ForceFlushStateToDisk();
+            if (flush_chainstates) {
+                for (Chainstate* cs : chainman.GetAll()) {
+                    LOCK(::cs_main);
+                    cs->ForceFlushStateToDisk();
+                }
             }
             // Process all callbacks referring to the old manager before wiping it.
             m_node.validation_signals->SyncWithValidationInterfaceQueue();
@@ -539,6 +541,11 @@ struct SnapshotTestSetup : TestChain100Setup {
             // For robustness, ensure the old manager is destroyed before creating a
             // new one.
             m_node.chainman.reset();
+            // ResetChainstates() replaces its members with default instances after releasing the
+            // configured stores, which can reattach the process-global LevelDB handles. A real
+            // process exit releases them; do that explicitly before constructing the test restart.
+            shielded::ShieldedMerkleTree::ResetCommitmentIndexStore();
+            shielded::registry::ShieldedAccountRegistryState::ResetPayloadStore();
             m_node.chainman = std::make_unique<ChainstateManager>(*Assert(m_node.shutdown_signal), chainman_opts, blockman_opts);
         }
         return *Assert(m_node.chainman);
@@ -579,6 +586,172 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_activate_snapshot_candidate_lifecycle,
             // cannot inherit the snapshot chainstate's assumed-valid shortcut.
             BOOST_CHECK_EQUAL(chainstate->setBlockIndexCandidates.count(snapshot_base), 0);
         }
+    }
+}
+
+//! An abrupt restart can expose the periodically-flushed snapshot chainstate one block behind the
+//! independently persisted shielded tip. If the AssumeUTXO node has no pre-snapshot block bodies,
+//! exact-tip restore must fail closed without entering the destructive full-rebuild path.
+BOOST_FIXTURE_TEST_CASE(chainstatemanager_snapshot_tip_mismatch_missing_history_preserves_persisted_shielded_record,
+                        SnapshotTestSetup)
+{
+    auto [background_chainstate_ptr, snapshot_chainstate_ptr] = this->SetupSnapshot();
+    Chainstate& background_chainstate = *Assert(background_chainstate_ptr);
+    BOOST_REQUIRE(snapshot_chainstate_ptr != nullptr);
+
+    // Keep background validation one block below the snapshot base across restart. Otherwise the
+    // loader legitimately completes validation and removes the snapshot before shielded restore.
+    DisconnectedBlockTransactions unused_pool{MAX_DISCONNECTED_TX_POOL_BYTES};
+    BlockValidationState unused_state;
+    {
+        LOCK2(::cs_main, background_chainstate.MempoolMutex());
+        BOOST_REQUIRE(background_chainstate.DisconnectTip(unused_state, &unused_pool));
+        unused_pool.clear();
+        BOOST_REQUIRE_EQUAL(background_chainstate.m_chain.Height(), 109);
+    }
+
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    shielded::ShieldedMerkleTree persisted_tree;
+    std::vector<uint256> persisted_anchor_roots;
+    uint256 persisted_tip_hash;
+    int32_t persisted_tip_height{-1};
+    CAmount persisted_balance{0};
+    std::optional<uint256> persisted_commitment_index_digest;
+    std::optional<shielded::registry::ShieldedAccountRegistryPersistedSnapshot>
+        persisted_account_registry_snapshot;
+    std::vector<uint256> persisted_account_registry_roots;
+    uint64_t persisted_tree_size{0};
+    uint256 persisted_tree_root;
+    const uint256 ahead_tip_hash = GetRandHash();
+
+    // Flush the periodically-persisted chainstates first, then plant the independently advanced
+    // shielded record below. The subsequent no-flush restart models an abrupt process exit in the
+    // ordering window instead of overwriting the mismatch with a graceful shutdown flush.
+    for (Chainstate* chainstate : chainman.GetAll()) {
+        LOCK(::cs_main);
+        chainstate->ForceFlushStateToDisk();
+    }
+
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman.IsSnapshotActive());
+        BOOST_REQUIRE(chainman.ActiveChainstate().m_from_snapshot_blockhash.has_value());
+        BOOST_REQUIRE(chainman.EnsureShieldedStateInitialized());
+        BOOST_REQUIRE(chainman.ReadPersistedShieldedState(
+            persisted_tree,
+            persisted_anchor_roots,
+            persisted_tip_hash,
+            persisted_tip_height,
+            persisted_balance,
+            persisted_commitment_index_digest,
+            persisted_account_registry_snapshot,
+            &persisted_account_registry_roots));
+        BOOST_REQUIRE(chainman.ActiveTip() != nullptr);
+        persisted_tree_size = persisted_tree.Size();
+        persisted_tree_root = persisted_tree.Root();
+
+        // Model the crash window directly: shielded persistence reached the next tip while the
+        // snapshot chainstate DB still exposes the previous periodic-flush tip on restart.
+        persisted_tip_hash = ahead_tip_hash;
+        persisted_tip_height = chainman.ActiveTip()->nHeight + 1;
+        BOOST_REQUIRE(chainman.WritePersistedShieldedState(
+            persisted_tree,
+            persisted_anchor_roots,
+            persisted_tip_hash,
+            persisted_tip_height,
+            persisted_balance,
+            persisted_commitment_index_digest,
+            persisted_account_registry_snapshot,
+            persisted_account_registry_roots));
+        // ReadPersistedState() moves a tree carrying the process-global commitment-store handle
+        // into this test variable. Release that test-only handle before simulating process exit.
+        persisted_tree = shielded::ShieldedMerkleTree{
+            shielded::ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY};
+    }
+
+    ChainstateManager& chainman_restarted = this->SimulateNodeRestart(/*flush_chainstates=*/false);
+    node::ChainstateLoadOptions options;
+    options.mempool = Assert(m_node.mempool.get());
+    options.coins_db_in_memory = m_coins_db_in_memory;
+    options.wipe_chainstate_db = false;
+    options.prune = chainman_restarted.m_blockman.IsPruneMode();
+    // Keep CVerifyDB from reading the deliberately unavailable ancestor before the shielded
+    // initialization boundary under test.
+    options.check_blocks = 0;
+    options.check_level = m_args.GetIntArg("-checklevel", DEFAULT_CHECKLEVEL);
+    options.require_full_verification = false;
+    const auto load_result = node::LoadChainstate(chainman_restarted, m_kernel_cache_sizes, options);
+    BOOST_REQUIRE(std::get<0>(load_result) == node::ChainstateLoadStatus::SUCCESS);
+
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman_restarted.IsSnapshotActive());
+        BOOST_REQUIRE(chainman_restarted.ActiveChainstate().m_from_snapshot_blockhash.has_value());
+        BOOST_REQUIRE(chainman_restarted.ActiveTip() != nullptr);
+
+        CBlockIndex* missing = chainman_restarted.ActiveChain()[10];
+        BOOST_REQUIRE(missing != nullptr);
+        BOOST_REQUIRE((missing->nStatus & BLOCK_HAVE_DATA) != 0);
+        BOOST_REQUIRE(missing->nDataPos >= node::BLOCK_SERIALIZATION_HEADER_SIZE);
+        // Retain the old disk position while clearing HAVE_DATA. This is the realistic metadata
+        // shape the fallback-aware availability predicate accepted even though the destructive
+        // rebuild's direct CBlockIndex reader converts it to FlatFilePos(-1, 0).
+        missing->nStatus &= ~BLOCK_HAVE_DATA;
+
+        bool rebuild_started{false};
+        bool invalid_raw_read_attempted{false};
+        DebugLogHelper no_rebuild_log{
+            "RebuildShieldedState: replaying",
+            [&](const std::string* line) {
+                if (line != nullptr) rebuild_started = true;
+                return false;
+            }};
+        DebugLogHelper no_invalid_raw_read_log{
+            "ReadRawBlock: OpenBlockFile failed for FlatFilePos",
+            [&](const std::string* line) {
+                if (line != nullptr) invalid_raw_read_attempted = true;
+                return false;
+            }};
+        ASSERT_DEBUG_LOG("persisted shielded tip mismatch");
+        ASSERT_DEBUG_LOG("refusing destructive full shielded rebuild");
+        BOOST_CHECK(!chainman_restarted.EnsureShieldedStateInitialized());
+        BOOST_CHECK(!rebuild_started);
+        BOOST_CHECK(!invalid_raw_read_attempted);
+
+        // The persisted record lives in the nullifier DB that rebuild_from_chain() used to wipe
+        // before reading history. Its exact survival proves the destructive boundary was not crossed.
+        shielded::ShieldedMerkleTree restored_tree;
+        std::vector<uint256> restored_anchor_roots;
+        uint256 restored_tip_hash;
+        int32_t restored_tip_height{-1};
+        CAmount restored_balance{0};
+        std::optional<uint256> restored_commitment_index_digest;
+        std::optional<shielded::registry::ShieldedAccountRegistryPersistedSnapshot>
+            restored_account_registry_snapshot;
+        std::vector<uint256> restored_account_registry_roots;
+        BOOST_REQUIRE(chainman_restarted.ReadPersistedShieldedState(
+            restored_tree,
+            restored_anchor_roots,
+            restored_tip_hash,
+            restored_tip_height,
+            restored_balance,
+            restored_commitment_index_digest,
+            restored_account_registry_snapshot,
+            &restored_account_registry_roots));
+        BOOST_CHECK_EQUAL(restored_tip_hash, persisted_tip_hash);
+        BOOST_CHECK_EQUAL(restored_tip_height, persisted_tip_height);
+        BOOST_CHECK_EQUAL(restored_tree.Size(), persisted_tree_size);
+        BOOST_CHECK_EQUAL(restored_tree.Root(), persisted_tree_root);
+        BOOST_CHECK_EQUAL(restored_balance, persisted_balance);
+        BOOST_CHECK(restored_commitment_index_digest == persisted_commitment_index_digest);
+        BOOST_CHECK_EQUAL_COLLECTIONS(restored_anchor_roots.begin(),
+                                      restored_anchor_roots.end(),
+                                      persisted_anchor_roots.begin(),
+                                      persisted_anchor_roots.end());
+        BOOST_CHECK_EQUAL_COLLECTIONS(restored_account_registry_roots.begin(),
+                                      restored_account_registry_roots.end(),
+                                      persisted_account_registry_roots.begin(),
+                                      persisted_account_registry_roots.end());
     }
 }
 
@@ -2936,11 +3109,25 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_rebuilds_missing_account_registry_payl
         return *Assert(m_node.chainman);
     };
 
+    auto load_chainstate_without_block_verification = [&](ChainstateManager& manager) {
+        node::ChainstateLoadOptions options;
+        options.mempool = Assert(m_node.mempool.get());
+        options.coins_db_in_memory = m_coins_db_in_memory;
+        options.wipe_chainstate_db = false;
+        options.prune = manager.m_blockman.IsPruneMode();
+        options.check_blocks = 0;
+        options.check_level = m_args.GetIntArg("-checklevel", DEFAULT_CHECKLEVEL);
+        options.require_full_verification = false;
+        const auto load_result = node::LoadChainstate(manager, m_kernel_cache_sizes, options);
+        BOOST_REQUIRE(std::get<0>(load_result) == node::ChainstateLoadStatus::SUCCESS);
+    };
+
     ChainstateManager& chainman_restarted = simulate_node_restart(/*wipe_account_registry_payloads=*/true);
     this->LoadVerifyActivateChainstate();
 
     {
         LOCK(::cs_main);
+        ASSERT_DEBUG_LOG("RebuildShieldedAccountRegistryState: replaying");
         BOOST_REQUIRE(chainman_restarted.EnsureShieldedStateInitialized());
         BOOST_CHECK_EQUAL(chainman_restarted.GetShieldedAccountRegistryRoot(), expected_registry_root);
         BOOST_CHECK_EQUAL(chainman_restarted.GetShieldedAccountRegistryEntryCount(), expected_registry_size);
@@ -2956,6 +3143,39 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_rebuilds_missing_account_registry_payl
         BOOST_CHECK_EQUAL(chainman_restarted.GetShieldedAccountRegistryRoot(), expected_registry_root);
         BOOST_REQUIRE(chainman_restarted.GetShieldedAccountRegistry().MaterializeEntry(
             expected_registry_size - 1).has_value());
+    }
+
+    ChainstateManager& chainman_missing_position =
+        simulate_node_restart(/*wipe_account_registry_payloads=*/true);
+    load_chainstate_without_block_verification(chainman_missing_position);
+
+    {
+        LOCK(::cs_main);
+        CBlockIndex* missing_position = chainman_missing_position.ActiveChain()[10];
+        BOOST_REQUIRE(missing_position != nullptr);
+        missing_position->nStatus &= ~BLOCK_HAVE_DATA;
+        missing_position->nDataPos = 0;
+        missing_position->nFile = -1;
+
+        const fs::path registry_dir = datadir / "shielded_state" / "account_registry";
+        fs::create_directories(registry_dir);
+        const fs::path sentinel = registry_dir / "account-registry-preservation-sentinel";
+        FILE* sentinel_file{fsbridge::fopen(sentinel, "wb")};
+        BOOST_REQUIRE(sentinel_file != nullptr);
+        BOOST_REQUIRE(std::fputs("preserve", sentinel_file) >= 0);
+        BOOST_REQUIRE_EQUAL(std::fclose(sentinel_file), 0);
+
+        bool rebuild_started{false};
+        DebugLogHelper no_account_rebuild_log{
+            "RebuildShieldedAccountRegistryState: replaying",
+            [&](const std::string* line) {
+                if (line != nullptr) rebuild_started = true;
+                return false;
+            }};
+        ASSERT_DEBUG_LOG("refusing destructive account-registry rebuild");
+        BOOST_CHECK(!chainman_missing_position.EnsureShieldedStateInitialized());
+        BOOST_CHECK(!rebuild_started);
+        BOOST_CHECK(fs::exists(sentinel));
     }
 }
 
