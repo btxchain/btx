@@ -1441,6 +1441,15 @@ BOOST_AUTO_TEST_CASE(rc_accelerator_scheduler_prioritizes_and_preempts)
     auto& scheduler{matmul::v4::rc::GetRCAcceleratorScheduler()};
     BOOST_REQUIRE(scheduler.ResetStatsForTest());
 
+    // Disable the CandidateMining min-lease quantum so this unit test still
+    // asserts immediate tip preemption. Production defaults to a non-zero
+    // quantum (see BTX_RC_CANDIDATE_MINING_LEASE_MS).
+#ifdef WIN32
+    _putenv_s("BTX_RC_CANDIDATE_MINING_LEASE_MS", "0");
+#else
+    setenv("BTX_RC_CANDIDATE_MINING_LEASE_MS", "0", 1);
+#endif
+
     std::atomic_bool candidate_cancelled{false};
     auto candidate{scheduler.Acquire(
         Scheduler::Priority::CandidateMining, &candidate_cancelled,
@@ -1497,6 +1506,12 @@ BOOST_AUTO_TEST_CASE(rc_accelerator_scheduler_prioritizes_and_preempts)
     BOOST_CHECK_EQUAL(stats.preemption_requests, 1U);
     BOOST_CHECK_GE(stats.queue_high_water, 3U);
     BOOST_CHECK(!stats.active);
+
+#ifdef WIN32
+    _putenv_s("BTX_RC_CANDIDATE_MINING_LEASE_MS", "");
+#else
+    unsetenv("BTX_RC_CANDIDATE_MINING_LEASE_MS");
+#endif
 }
 
 BOOST_AUTO_TEST_CASE(rc_accelerator_scheduler_cancelled_wait_is_retryable)
@@ -1734,6 +1749,12 @@ BOOST_AUTO_TEST_CASE(
     auto& scheduler{matmul::v4::rc::GetRCAcceleratorScheduler()};
     BOOST_REQUIRE(scheduler.ResetStatsForTest());
 
+#ifdef WIN32
+    _putenv_s("BTX_RC_CANDIDATE_MINING_LEASE_MS", "0");
+#else
+    setenv("BTX_RC_CANDIDATE_MINING_LEASE_MS", "0", 1);
+#endif
+
     // CI-scale contention rehearsal: repeatedly occupy the candidate lane,
     // enqueue one request from every validation/reseal class, then verify
     // priority handoff and exact ownership release. This is deterministic and
@@ -1798,6 +1819,64 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(stats.completions, rounds * 4);
     BOOST_CHECK_EQUAL(stats.release_invariant_violations, 0U);
     BOOST_CHECK_GE(stats.preemption_requests, rounds);
+
+#ifdef WIN32
+    _putenv_s("BTX_RC_CANDIDATE_MINING_LEASE_MS", "");
+#else
+    unsetenv("BTX_RC_CANDIDATE_MINING_LEASE_MS");
+#endif
+}
+
+BOOST_AUTO_TEST_CASE(
+    rc_accelerator_scheduler_candidate_mining_min_lease_quantum)
+{
+    using Scheduler = matmul::v4::rc::RCAcceleratorScheduler;
+    auto& scheduler{matmul::v4::rc::GetRCAcceleratorScheduler()};
+    BOOST_REQUIRE(scheduler.ResetStatsForTest());
+
+#ifdef WIN32
+    _putenv_s("BTX_RC_CANDIDATE_MINING_LEASE_MS", "200");
+#else
+    setenv("BTX_RC_CANDIDATE_MINING_LEASE_MS", "200", 1);
+#endif
+
+    std::atomic_bool candidate_cancelled{false};
+    auto candidate{scheduler.Acquire(
+        Scheduler::Priority::CandidateMining, &candidate_cancelled,
+        "candidate-quantum")};
+    BOOST_REQUIRE(candidate);
+
+    std::atomic_bool tip_cancelled{false};
+    std::atomic_bool tip_acquired{false};
+    std::thread tip{[&] {
+        auto lease{scheduler.Acquire(
+            Scheduler::Priority::TipValidation, &tip_cancelled,
+            "tip-quantum")};
+        tip_acquired.store(static_cast<bool>(lease),
+                           std::memory_order_relaxed);
+    }};
+
+    BOOST_REQUIRE(WaitFor(
+        [&] { return scheduler.GetStats().queue_depth == 1; }));
+    // Within the quantum, tip must wait and must not cancel mining yet.
+    std::this_thread::sleep_for(std::chrono::milliseconds{50});
+    BOOST_CHECK(!candidate_cancelled.load(std::memory_order_relaxed));
+    BOOST_CHECK_GE(scheduler.GetStats().preemption_deferred, 1U);
+    BOOST_CHECK(scheduler.GetStats().combined_authority_miner_degraded);
+
+    BOOST_REQUIRE(WaitFor([&] {
+        return candidate_cancelled.load(std::memory_order_relaxed);
+    }));
+    candidate = {};
+    tip.join();
+    BOOST_CHECK(tip_acquired.load(std::memory_order_relaxed));
+    BOOST_CHECK_GE(scheduler.GetStats().preemption_requests, 1U);
+
+#ifdef WIN32
+    _putenv_s("BTX_RC_CANDIDATE_MINING_LEASE_MS", "");
+#else
+    unsetenv("BTX_RC_CANDIDATE_MINING_LEASE_MS");
+#endif
 }
 
 BOOST_AUTO_TEST_CASE(

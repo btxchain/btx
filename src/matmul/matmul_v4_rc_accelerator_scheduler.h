@@ -61,6 +61,21 @@ public:
     static constexpr std::chrono::milliseconds DEFAULT_MAX_QUEUE_WAIT{
         std::chrono::seconds{90}};
 
+    /**
+     * Minimum hold time before TipValidation / WinnerReseal may preempt an
+     * active CandidateMining lease. Validation still outranks mining overall;
+     * this only stops zero-progress thrashing on combined authority+miner
+     * nodes (HANDOVER item 7). Override with BTX_RC_CANDIDATE_MINING_LEASE_MS
+     * (0 disables the quantum). Default covers roughly one Profile-1 episode.
+     */
+    static constexpr std::chrono::milliseconds
+        DEFAULT_CANDIDATE_MINING_MIN_LEASE{
+            std::chrono::milliseconds{25000}};
+
+    /** Resolve the candidate-mining min-lease quantum (env override aware). */
+    [[nodiscard]] static std::chrono::milliseconds
+    CandidateMiningMinLeaseQuantum();
+
     struct LaneStats {
         uint64_t requests{0};
         uint64_t acquisitions{0};
@@ -84,6 +99,7 @@ public:
         uint64_t queue_rejections{0};
         uint64_t capacity_rejections{0};
         uint64_t preemption_requests{0};
+        uint64_t preemption_deferred{0};
         uint64_t release_invariant_violations{0};
         uint64_t queue_depth{0};
         uint64_t queue_high_water{0};
@@ -111,6 +127,9 @@ public:
         uint64_t authenticated_relay_samples{0};
         double last_authenticated_relay_s{0};
         double max_authenticated_relay_s{0};
+        /** True after tip/reseal deferred preemption of CandidateMining. */
+        bool combined_authority_miner_degraded{false};
+        int64_t candidate_mining_min_lease_ms{0};
     };
 
     /**
@@ -277,6 +296,13 @@ private:
                  std::chrono::steady_clock::time_point started,
                  bool assert_on_mismatch = true);
     [[nodiscard]] bool IsFirst(const std::shared_ptr<Waiter>& waiter) const;
+    /** True when a higher-priority waiter is queued ahead of admission. */
+    [[nodiscard]] bool HasHigherPriorityWaiter(Priority owner) const;
+    /**
+     * Apply or defer preemption of the active owner. Returns true when the
+     * preempt latch was newly set on this call.
+     */
+    bool MaybePreemptActiveOwner(Priority requester);
 
     mutable std::mutex m_mutex;
     std::condition_variable m_cv;
@@ -292,6 +318,8 @@ private:
     std::chrono::steady_clock::time_point m_active_started{};
     std::string m_workspace_provider;
     uint64_t m_workspace_capacity_bytes{0};
+    bool m_combined_authority_miner_degraded{false};
+    bool m_logged_combined_degraded{false};
     Stats m_stats;
 };
 
