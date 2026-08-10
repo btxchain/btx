@@ -70,7 +70,10 @@ std::string DefaultBackendRequest()
 #if defined(__APPLE__)
     return "metal";
 #else
-    return "cpu";
+    // Prefer auto-select on Linux so CUDA hosts (and any future GPU path)
+    // mine on accelerator without requiring BTX_MATMUL_BACKEND=cuda by hand.
+    // ResolveBackend() falls back to CPU when no bit-exact device path exists.
+    return "auto";
 #endif
 }
 

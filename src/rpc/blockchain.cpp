@@ -904,24 +904,22 @@ static RPCHelpMan getblockheader()
         return strHex;
     }
 
+    // Header fields live on CBlockIndex / GetBlockHeader(). Do NOT require block
+    // body data here — that made headers-only tips undiagnosable via RPC
+    // ("Block not available") and forced blind peer-rotation watchdogs.
+    // Upstream Bitcoin Core returns the header whenever the index entry exists;
+    // only getblock should demand BLOCK_HAVE_DATA.
     UniValue result = blockheaderToJSON(*tip, *pblockindex, chainman.GetConsensus().powLimit);
     if (chainman.GetConsensus().fKAWPOW || chainman.GetConsensus().fMatMulPOW) {
-        CBlock block;
-        {
-            LOCK(cs_main);
-            if (!chainman.m_blockman.ReadBlock(block, *pblockindex)) {
-                throw JSONRPCError(RPC_MISC_ERROR, "Block not available");
-            }
-        }
-        result.pushKV("nonce64", strprintf("%016x", block.nNonce64));
+        // nonce64 is already emitted by blockheaderToJSON from the index.
         if (chainman.GetConsensus().fKAWPOW) {
-            result.pushKV("mixhash", block.mix_hash.GetHex());
+            result.pushKV("mixhash", pblockindex->mix_hash.GetHex());
         }
         if (chainman.GetConsensus().fMatMulPOW) {
-            result.pushKV("matmul_digest", block.matmul_digest.GetHex());
-            result.pushKV("matmul_dim", static_cast<uint64_t>(block.matmul_dim));
-            result.pushKV("seed_a", block.seed_a.GetHex());
-            result.pushKV("seed_b", block.seed_b.GetHex());
+            result.pushKV("matmul_digest", pblockindex->matmul_digest.GetHex());
+            result.pushKV("matmul_dim", static_cast<uint64_t>(pblockindex->matmul_dim));
+            result.pushKV("seed_a", pblockindex->seed_a.GetHex());
+            result.pushKV("seed_b", pblockindex->seed_b.GetHex());
         }
     }
     return result;
