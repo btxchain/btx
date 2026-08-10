@@ -226,11 +226,26 @@ bool CoinStatsIndex::CustomAppend(const interfaces::BlockInfo& block)
     // new outputs + coinbase + current unspendable amount this means
     // the miner did not claim the full block reward. Unclaimed block
     // rewards are also unspendable.
+    //
+    // On BTX the Bitcoin-style transparent identity can go negative when
+    // shielded fees or unshields fund coinbase/value the equation does not
+    // credit. Refuse to assert-crash: fail the append (index stops) instead.
     const CAmount total_unspendable_amount{m_total_unspendables_genesis_block + m_total_unspendables_bip30 +
                                            m_total_unspendables_scripts + m_total_unspendables_unclaimed_rewards};
-    const arith_uint256 unclaimed_rewards{(m_total_prevout_spent_amount + m_total_subsidy) -
-                                          (m_total_new_outputs_ex_coinbase_amount + m_total_coinbase_amount + total_unspendable_amount)};
-    assert(unclaimed_rewards <= arith_uint256(std::numeric_limits<CAmount>::max()));
+    const arith_uint256 credit{m_total_prevout_spent_amount + m_total_subsidy};
+    const arith_uint256 debit{m_total_new_outputs_ex_coinbase_amount + m_total_coinbase_amount + total_unspendable_amount};
+    if (credit < debit) {
+        LogError("%s: transparent coinstats identity underflow at height %d "
+                 "(shielded value flows are not represented); refusing to update index\n",
+                 __func__, block.height);
+        return false;
+    }
+    const arith_uint256 unclaimed_rewards{credit - debit};
+    if (unclaimed_rewards > arith_uint256(std::numeric_limits<CAmount>::max())) {
+        LogError("%s: unclaimed_rewards exceeds CAmount range at height %d; refusing to update index\n",
+                 __func__, block.height);
+        return false;
+    }
     m_total_unspendables_unclaimed_rewards += static_cast<CAmount>(unclaimed_rewards.GetLow64());
 
     std::pair<uint256, DBVal> value;

@@ -151,6 +151,8 @@ struct PeerManagerInfo {
     bool ignores_incoming_txs{false};
     int min_smile_v2_version{MIN_SMILE_V2_PROTOCOL_VERSION};
     int smile_v2_enforcement_height{SMILE_V2_ENFORCEMENT_HEIGHT};
+    int min_matmul_rc_version{MIN_MATMUL_RC_PROTOCOL_VERSION};
+    int matmul_rc_enforcement_height{MATMUL_RC_ENFORCEMENT_HEIGHT};
 };
 
 class PeerManager : public CValidationInterface, public NetEventsInterface
@@ -181,6 +183,14 @@ public:
         int min_smile_v2_version{MIN_SMILE_V2_PROTOCOL_VERSION};
         //! Chain height at which SMILE v2 protocol version enforcement activates.
         int smile_v2_enforcement_height{SMILE_V2_ENFORCEMENT_HEIGHT};
+        //! Minimum protocol version required to follow the MatMul v4.7 Epoch-A
+        //! chain. Peers below this are disconnected once the tip is past
+        //! matmul_rc_enforcement_height. Overridable via -minmatmulrcversion.
+        int min_matmul_rc_version{MIN_MATMUL_RC_PROTOCOL_VERSION};
+        //! Chain height at which Epoch-A protocol version enforcement activates.
+        //! Default MATMUL_RC_ENFORCEMENT_HEIGHT is INT32_MAX (off). Overridable
+        //! via -matmulrcenforcementheight.
+        int matmul_rc_enforcement_height{MATMUL_RC_ENFORCEMENT_HEIGHT};
         //! WP-7 / C5: whether the v4.4 ENC-DR reference recompute for P2P block
         //! deliveries may run on a bounded off-thread worker pool instead of the
         //! message-handler thread. Only effective when the MatMul v4 fork height

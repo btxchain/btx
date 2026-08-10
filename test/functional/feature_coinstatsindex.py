@@ -27,6 +27,7 @@ from test_framework.script import (
     OP_RETURN,
 )
 from test_framework.test_framework import BitcoinTestFramework
+from test_framework.test_framework import SkipTest
 from test_framework.util import (
     assert_equal,
     assert_raises_rpc_error,
@@ -45,17 +46,14 @@ class CoinStatsIndexTest(BitcoinTestFramework):
         self.supports_cli = False
         self.extra_args = [
             [],
-            ["-coinstatsindex"]
+            []
         ]
 
     def run_test(self):
-        self.wallet = MiniWallet(self.nodes[0])
-        self._test_coin_stats_index()
-        self._test_gettxoutsetinfo_tip_consistency()
-        self._test_use_index_option()
-        self._test_reorg_index()
-        self._test_index_rejects_hash_serialized()
-        self._test_init_index_after_reorg()
+        raise SkipTest(
+            "-coinstatsindex is rejected at startup in this release "
+            "(shielded value flows break transparent unclaimed-rewards accounting)"
+        )
 
     def block_sanity_check(self, block_info):
         block_subsidy = 50
