@@ -1706,6 +1706,14 @@ static UniValue BuildBackendRuntimeProfile(
         rc_scheduler.pushKV(
             "preemption_requests", scheduler.preemption_requests);
         rc_scheduler.pushKV(
+            "preemption_deferred", scheduler.preemption_deferred);
+        rc_scheduler.pushKV(
+            "combined_authority_miner_degraded",
+            scheduler.combined_authority_miner_degraded);
+        rc_scheduler.pushKV(
+            "candidate_mining_min_lease_ms",
+            scheduler.candidate_mining_min_lease_ms);
+        rc_scheduler.pushKV(
             "release_invariant_violations",
             scheduler.release_invariant_violations);
         rc_scheduler.pushKV("queue_depth", scheduler.queue_depth);
@@ -6233,6 +6241,9 @@ static RPCHelpMan getmininginfo()
                                 {RPCResult::Type::NUM, "queue_rejections", "Requests refused by global or per-lane waiter limits"},
                                 {RPCResult::Type::NUM, "capacity_rejections", "Requests refused because the declared workspace exceeds provider capacity"},
                                 {RPCResult::Type::NUM, "preemption_requests", "Higher-priority requests that asked the current owner to cancel"},
+                                {RPCResult::Type::NUM, "preemption_deferred", "Tip/reseal preemption attempts delayed by the CandidateMining min-lease quantum"},
+                                {RPCResult::Type::BOOL, "combined_authority_miner_degraded", "True after tip/reseal contended with CandidateMining on this process; combined authority+miner is throughput-degraded"},
+                                {RPCResult::Type::NUM, "candidate_mining_min_lease_ms", "Min CandidateMining lease hold before yielding to higher priority (BTX_RC_CANDIDATE_MINING_LEASE_MS)"},
                                 {RPCResult::Type::NUM, "release_invariant_violations", "Invalid/double/mismatched lease release attempts; any nonzero value is a fatal integrity signal"},
                                 {RPCResult::Type::NUM, "queue_depth", "Current accelerator waiters"},
                                 {RPCResult::Type::NUM, "queue_high_water", "Maximum accelerator waiters"},

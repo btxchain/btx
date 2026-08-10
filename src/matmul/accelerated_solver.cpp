@@ -70,7 +70,10 @@ std::string DefaultBackendRequest()
 #if defined(__APPLE__)
     return "metal";
 #else
-    return "cpu";
+    // Prefer an admissible device backend (CUDA/HIP/Ascend/…) when present.
+    // ResolveBackend() fails closed to CPU when no bit-exact INT8 path is
+    // available, so this is local mining policy only — no consensus risk.
+    return "auto";
 #endif
 }
 

@@ -7313,7 +7313,11 @@ static bool SolveMatMulV4RC(CBlockHeader& block,
                 if (!accelerator_lease) {
                     LogPrintf(
                         "SolveMatMulV4RC: candidate accelerator wait "
-                        "cancelled at nonce=%llu\n",
+                        "cancelled at nonce=%llu "
+                        "(combined authority+miner is degraded under tip "
+                        "validation contention; see "
+                        "rc_accelerator_scheduler.combined_authority_miner_degraded "
+                        "and BTX_RC_CANDIDATE_MINING_LEASE_MS)\n",
                         static_cast<unsigned long long>(
                             block.nNonce64));
                     RegisterMatMulSolveRuntimeSample(
@@ -8029,13 +8033,40 @@ bool SolveMatMul(CBlockHeader& block, const Consensus::Params& params, uint64_t&
                     product_digest_active);
             // The top-level call owns the pipeline diagnostic stats; workers (worker-context true)
             // never touch them, so the parallel state reported here is the one that sticks.
+            //
+            // Async-prepare / prefetch used to be unconditionally forced off here, which
+            // made BTX_MATMUL_PIPELINE_ASYNC / BTX_MATMUL_PREPARE_WORKERS /
+            // BTX_MATMUL_PREPARE_PREFETCH_DEPTH inert. Default stays conservative (off)
+            // unless those env vars are set; then reuse the same resolvers as the
+            // legacy SolveMatMul path.
+            //
+            // NOTE (Epoch-A / mining throughput): at Epoch-A heights
+            // pre_hash_epsilon_bits == 0, so gpu_nonce_seed_scan_enabled stays false and
+            // batch_size collapses to 1. Whether epsilon 0 is intentional is a consensus
+            // question — do NOT change consensus epsilon here. This block only restores
+            // env-configurable async prepare.
+            const char* async_env = std::getenv("BTX_MATMUL_PIPELINE_ASYNC");
+            const char* prepare_workers_env = std::getenv("BTX_MATMUL_PREPARE_WORKERS");
+            const char* prefetch_depth_env = std::getenv("BTX_MATMUL_PREPARE_PREFETCH_DEPTH");
+            const bool pipeline_env_configured =
+                (async_env != nullptr && async_env[0] != '\0') ||
+                (prepare_workers_env != nullptr && prepare_workers_env[0] != '\0') ||
+                (prefetch_depth_env != nullptr && prefetch_depth_env[0] != '\0');
+            const bool async_prepare_enabled = pipeline_env_configured &&
+                ShouldEnableAsyncPrepare(active_backend, nonce_seed_batch_size);
+            const uint32_t prefetch_depth = async_prepare_enabled
+                ? ResolvePreparePrefetchDepth(active_backend, nonce_seed_batch_size)
+                : 1U;
             g_matmul_parallel_solver_enabled.store(parallel_solver_enabled, std::memory_order_relaxed);
             g_matmul_parallel_solver_threads.store(
                 parallel_solver_enabled ? solver_threads : 1U, std::memory_order_relaxed);
-            g_matmul_async_prepare_enabled.store(false, std::memory_order_relaxed);
+            g_matmul_async_prepare_enabled.store(async_prepare_enabled, std::memory_order_relaxed);
             g_matmul_cpu_confirm_candidates.store(false, std::memory_order_relaxed);
-            g_matmul_prefetch_depth.store(1U, std::memory_order_relaxed);
+            g_matmul_prefetch_depth.store(prefetch_depth == 0 ? 1U : prefetch_depth, std::memory_order_relaxed);
             g_matmul_batch_size.store(nonce_seed_batch_size, std::memory_order_relaxed);
+            if (async_prepare_enabled) {
+                GetMatMulPrepareExecutor();
+            }
             if (parallel_solver_enabled) {
                 return SolveMatMulParallel(
                     block, params, max_tries, block_height, abort_flag,
