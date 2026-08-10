@@ -318,6 +318,15 @@ struct QueuedBlock {
     const CBlockIndex* pindex;
     /** Optional, used for CMPCTBLOCK downloads */
     std::unique_ptr<PartiallyDownloadedBlock> partialBlock;
+    /** When this specific block was requested from this peer.
+     *
+     * The peer-wide CNodeState::m_downloading_since only advances when the
+     * *front* of the queue is received, so a peer that keeps delivering later
+     * blocks while one block never arrives can hold the queue head
+     * indefinitely without ever tripping the download timeout. Timing each
+     * block from its own request instant makes the timeout independent of
+     * what else that peer happens to deliver. */
+    std::chrono::microseconds requested_at{0us};
 };
 
 /** Payload for shielded bundle block-data responses. */
@@ -1984,7 +1993,8 @@ bool PeerManagerImpl::BlockRequested(NodeId nodeid, const CBlockIndex& block, st
     RemoveBlockRequest(hash, nodeid);
 
     std::list<QueuedBlock>::iterator it = state->vBlocksInFlight.insert(state->vBlocksInFlight.end(),
-            {&block, std::unique_ptr<PartiallyDownloadedBlock>(pit ? new PartiallyDownloadedBlock(&m_mempool) : nullptr)});
+            {&block, std::unique_ptr<PartiallyDownloadedBlock>(pit ? new PartiallyDownloadedBlock(&m_mempool) : nullptr),
+             GetTime<std::chrono::microseconds>()});
     if (state->vBlocksInFlight.size() == 1) {
         // We're starting a block download (batch) from this peer.
         state->m_downloading_since = GetTime<std::chrono::microseconds>();
@@ -11638,8 +11648,23 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                 std::chrono::duration_cast<std::chrono::microseconds>(
                     spacing * (BLOCK_DOWNLOAD_TIMEOUT_BASE + BLOCK_DOWNLOAD_TIMEOUT_PER_PEER * nOtherPeersWithValidatedDownloads)),
                 std::chrono::duration_cast<std::chrono::microseconds>(BLOCK_DOWNLOAD_TIMEOUT_MIN));
-            if (current_time > state.m_downloading_since + download_timeout) {
-                LogInfo("Timeout downloading block %s, %s\n", queuedBlock.pindex->GetBlockHash().ToString(), pto->DisconnectMsg(fLogIPs));
+            // Time the head of the queue from when *it* was requested, not from
+            // the peer-wide m_downloading_since. m_downloading_since only moves
+            // when the front block is received, so a peer that keeps delivering
+            // later blocks while the head never arrives would otherwise pin the
+            // queue forever and stall the whole chain behind one block.
+            const auto head_requested_at = queuedBlock.requested_at.count() > 0
+                                               ? queuedBlock.requested_at
+                                               : state.m_downloading_since;
+            if (current_time > head_requested_at + download_timeout) {
+                const uint256 stuck_hash{queuedBlock.pindex->GetBlockHash()};
+                LogInfo("Timeout downloading block %s (in flight %ds), %s\n",
+                        stuck_hash.ToString(),
+                        static_cast<int>(count_microseconds(current_time - head_requested_at) / 1000000),
+                        pto->DisconnectMsg(fLogIPs));
+                // Release the stuck request immediately so the block is eligible
+                // to be re-requested from another peer, then drop this one.
+                RemoveBlockRequest(stuck_hash, pto->GetId());
                 pto->fDisconnect = true;
                 return true;
             }
