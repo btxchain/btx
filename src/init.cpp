@@ -584,7 +584,9 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
                              DEFAULT_BLOCK_RECONSTRUCTION_EXTRA_TXN_SIZE / 1000000),
                    ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-blocksonly", strprintf("Whether to reject transactions from network peers. Disables automatic broadcast and rebroadcast of transactions, unless the source peer has the 'forcerelay' permission. RPC transactions are not affected. (default: %u)", DEFAULT_BLOCKSONLY), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-coinstatsindex", strprintf("Maintain coinstats index used by the gettxoutsetinfo RPC (default: %u)", DEFAULT_COINSTATSINDEX), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-coinstatsindex", strprintf("Maintain coinstats index used by the gettxoutsetinfo RPC (default: %u). "
+        "Unsupported in this release: shielded value flows break the transparent unclaimed-rewards identity and previously crash-looped the node. Enabling this option is rejected at startup.",
+        DEFAULT_COINSTATSINDEX), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-conf=<file>", strprintf("Specify path to read-only configuration file. Relative paths will be prefixed by datadir location (only useable from command line, not configuration file) (default: %s)", BITCOIN_CONF_FILENAME), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-confrw=<file>", strprintf("Specify read/write configuration file. Relative paths will be prefixed by the network-specific datadir location (default: %s)", BITCOIN_RW_CONF_FILENAME), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-corepolicy", strprintf("Use BTX policy defaults (default: %u)", DEFAULT_COREPOLICY), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -688,6 +690,12 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-minsmilev2version=<n>", strprintf("Minimum peer protocol version required for SMILE v2 shielded transactions. "
         "Peers below this version are disconnected once the chain tip passes the enforcement height. "
         "(default: %d)", MIN_SMILE_V2_PROTOCOL_VERSION), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
+    argsman.AddArg("-minmatmulrcversion=<n>", strprintf("Minimum peer protocol version required to follow the MatMul v4.7 Epoch-A chain. "
+        "Peers below this version are disconnected once the chain tip passes the enforcement height. "
+        "(default: %d)", MIN_MATMUL_RC_PROTOCOL_VERSION), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
+    argsman.AddArg("-matmulrcenforcementheight=<n>", strprintf("Chain height at which MatMul v4.7 Epoch-A peer protocol version enforcement activates. "
+        "Default %d (INT32_MAX) leaves enforcement disabled so upgraded nodes do not self-partition from 800001 peers. "
+        "Lower only when the network has coordinated an upgrade.", MATMUL_RC_ENFORCEMENT_HEIGHT), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-txreconciliation", strprintf("Enable transaction reconciliations per BIP 330 (default: %d)", DEFAULT_TXRECONCILIATION_ENABLE), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CONNECTION);
     argsman.AddArg("-port=<port>", strprintf("Listen for connections on <port> (default: %u, testnet3: %u, testnet4: %u, signet: %u, regtest: %u, shieldedv2dev: %u). Not relevant for I2P (see doc/i2p.md). If set to a value x, the default onion listening port will be set to x+1.", defaultChainParams->GetDefaultPort(), testnetChainParams->GetDefaultPort(), testnet4ChainParams->GetDefaultPort(), signetChainParams->GetDefaultPort(), regtestChainParams->GetDefaultPort(), shieldedv2devChainParams->GetDefaultPort()), ArgsManager::ALLOW_ANY | ArgsManager::NETWORK_ONLY, OptionsCategory::CONNECTION);
     const std::string proxy_doc_for_value =
@@ -2831,8 +2839,12 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     }
 
     if (args.GetBoolArg("-coinstatsindex", DEFAULT_COINSTATSINDEX)) {
-        g_coin_stats_index = std::make_unique<CoinStatsIndex>(interfaces::MakeChain(node), /*cache_size=*/0, false, do_reindex);
-        node.indexes.emplace_back(g_coin_stats_index.get());
+        // Fail closed: CoinStatsIndex::CustomAppend asserts when the transparent
+        // unclaimed-rewards identity underflows. On BTX that happens in normal
+        // operation because shielded fees/unshields create coinbase/value that
+        // the Bitcoin-style coinstats equation does not credit. Prefer rejecting
+        // at startup over crash-looping after sync begins.
+        return InitError(_("-coinstatsindex is unsupported in this release: shielded value flows break the transparent unclaimed-rewards accounting and previously crash-looped the node. Remove -coinstatsindex (or set -coinstatsindex=0). gettxoutsetinfo without the index remains available."));
     }
 
     // Init indexes

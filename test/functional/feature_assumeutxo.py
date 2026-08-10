@@ -124,8 +124,8 @@ class AssumeutxoTest(BitcoinTestFramework):
         # commitment indexing for operator-facing fast starts.
         self.extra_args = [
             ["-retainshieldedcommitmentindex=0", "-allowunpinnedshieldedsnapshot=1"],
-            ["-fastprune", "-prune=1", "-blockfilterindex=1", "-coinstatsindex=1", "-retainshieldedcommitmentindex=0", "-allowunpinnedshieldedsnapshot=1"],
-            ["-persistmempool=0","-txindex=1", "-blockfilterindex=1", "-coinstatsindex=1", "-retainshieldedcommitmentindex=1", "-allowunpinnedshieldedsnapshot=1"],
+            ["-fastprune", "-prune=1", "-blockfilterindex=1", "-retainshieldedcommitmentindex=0", "-allowunpinnedshieldedsnapshot=1"],
+            ["-persistmempool=0","-txindex=1", "-blockfilterindex=1", "-retainshieldedcommitmentindex=1", "-allowunpinnedshieldedsnapshot=1"],
             ["-retainshieldedcommitmentindex=0", "-allowunpinnedshieldedsnapshot=1"],
             ["-retainshieldedcommitmentindex=0", "-allowunpinnedshieldedsnapshot=1", "-checkblocks=20", "-checklevel=4"],
         ]
@@ -953,7 +953,6 @@ class AssumeutxoTest(BitcoinTestFramework):
         # Ensure indexes have synced.
         completed_idx_state = {
             'basic block filter index': COMPLETE_IDX,
-            'coinstatsindex': COMPLETE_IDX,
         }
         self.wait_until(lambda: n1.getindexinfo() == completed_idx_state)
 
@@ -1055,7 +1054,6 @@ class AssumeutxoTest(BitcoinTestFramework):
 
         completed_idx_state = {
             'basic block filter index': COMPLETE_IDX,
-            'coinstatsindex': COMPLETE_IDX,
             'txindex': COMPLETE_IDX,
         }
         self.wait_until(lambda: n2.getindexinfo() == completed_idx_state)

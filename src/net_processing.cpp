@@ -2991,6 +2991,8 @@ PeerManagerInfo PeerManagerImpl::GetInfo() const
         .ignores_incoming_txs = m_opts.ignore_incoming_txs,
         .min_smile_v2_version = m_opts.min_smile_v2_version,
         .smile_v2_enforcement_height = m_opts.smile_v2_enforcement_height,
+        .min_matmul_rc_version = m_opts.min_matmul_rc_version,
+        .matmul_rc_enforcement_height = m_opts.matmul_rc_enforcement_height,
     };
 }
 
@@ -7421,6 +7423,26 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 LogPrintf("Disconnecting peer=%d (version %d) - below minimum for SMILE v2 (%d), chain height %d > enforcement height %d\n",
                           pfrom.GetId(), nVersion, m_opts.min_smile_v2_version,
                           tip->nHeight, m_opts.smile_v2_enforcement_height);
+                pfrom.fDisconnect = true;
+                return;
+            }
+        }
+
+        // MatMul v4.7 Epoch-A enforcement: disconnect peers whose protocol
+        // version predates the Epoch-A work transition, but only once the chain
+        // tip has passed the enforcement height. Such peers extend the legacy
+        // chain, whose headers sealed nodes reject anyway ("invalid claimed
+        // header work transition"); dropping them at the handshake keeps peer
+        // slots and reported peer heights meaningful for pool operators.
+        // Default enforcement height is INT32_MAX (disabled) so shipping an
+        // 800002 advertisement cannot self-partition from 800001 peers.
+        if (nVersion < m_opts.min_matmul_rc_version) {
+            LOCK(cs_main);
+            const CBlockIndex* tip = m_chainman.ActiveChain().Tip();
+            if (tip && tip->nHeight > m_opts.matmul_rc_enforcement_height) {
+                LogPrintf("Disconnecting peer=%d (version %d) - below minimum for MatMul RC Epoch-A (%d), chain height %d > enforcement height %d\n",
+                          pfrom.GetId(), nVersion, m_opts.min_matmul_rc_version,
+                          tip->nHeight, m_opts.matmul_rc_enforcement_height);
                 pfrom.fDisconnect = true;
                 return;
             }

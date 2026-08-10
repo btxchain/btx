@@ -33,6 +33,14 @@ void ApplyArgsManOptions(const ArgsManager& argsman, PeerManager::Options& optio
         options.min_smile_v2_version = int(std::clamp<int64_t>(*value, 0, std::numeric_limits<int>::max()));
     }
 
+    if (auto value{argsman.GetIntArg("-minmatmulrcversion")}) {
+        options.min_matmul_rc_version = int(std::clamp<int64_t>(*value, 0, std::numeric_limits<int>::max()));
+    }
+
+    if (auto value{argsman.GetIntArg("-matmulrcenforcementheight")}) {
+        options.matmul_rc_enforcement_height = int(std::clamp<int64_t>(*value, 0, std::numeric_limits<int>::max()));
+    }
+
     if (auto value{argsman.GetBoolArg("-matmulasyncverify")}) options.matmul_async_verify = *value;
     if (auto value{argsman.GetBoolArg("-matmulrcheaderfirst")}) options.matmul_rc_header_first = *value;
     if (auto value{argsman.GetBoolArg("-matmulrcadmission")}) options.matmul_rc_admission = *value;
