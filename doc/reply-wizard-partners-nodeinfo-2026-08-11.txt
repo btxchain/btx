@@ -1,0 +1,26 @@
+BTX tip-holding peer for Wizard Partners (David) — 2026-08-11
+
+addnode=114.150.94.235:19335
+
+Role: macpro2 public archival + MatMul consensus / attestation archive
+  (externalip from btx.conf; NAT to the miner/archive host)
+
+Observed at handoff:
+  version/subversion: 3302 / /BTX:0.33.2/
+  protocolversion: 800001
+  services: NETWORK, WITNESS, SHIELDED, NETWORK_LIMITED, P2P_V2,
+            MATMUL_CONSENSUS, MATMUL_ATTESTATION_ARCHIVE
+  matmulvalidationmode: consensus
+  matmulrcexecution: strict-device (configured)
+  blocks/headers: 185552 / 185552 (active tip)
+  bestblockhash: 7314a4660612200995cbe5a0a7d7cd4664b8bfa924520331852bbcd733a29cfa
+  pruned: false; txindex/blockfilterindex on
+  connections: ~94 (incl. inbound from 194.247.183.68 already)
+
+Notes for David:
+  - Your archive 194.247.183.68 was already connected inbound to this peer and
+    receiving block bytes; outbound addnode of 114.150.94.235:19335 still helps
+    if your tip lags.
+  - Headers-only tips ahead of active are normal while bodies catch up; 0.33.3
+    hardens per-block download timeout + competing-branch ExactReplay priority.
+  - For sm_120 canary: use CUDA 13.2 + cuBLASLt 13.4 (13.0/13.1 mismatches).

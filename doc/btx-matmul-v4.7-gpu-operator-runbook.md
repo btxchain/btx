@@ -31,6 +31,44 @@ Profile 1 winner without strict reseal, while a pre-activation validator can
 still exercise consensus mechanics on a CPU-only test machine. An active
 public RC validator must use strict-device and satisfy every readiness gate.
 
+## CUDA / cuBLASLt stack (sm_120)
+
+Self-qualification and the production canary on Blackwell sm_120 are bound to
+the **runtime stack**, not only the silicon:
+
+| Stack | Observed result |
+|---|---|
+| CUDA **13.2** + cuBLASLt **13.4** | Canary / ExactReplay pass on RTX 5090 / RTX PRO 6000 |
+| CUDA 13.0 + cuBLASLt 13.1 | `episode_digest_mismatch_backend_vs_cpu` — fails closed |
+
+Ada (4090), Hopper (H100), and B200/B300 are outside the sealed golden
+manifest and cannot self-qualify. Archive / consensus operators on sm_120
+should pin the 13.2 / 13.4 combo before expecting `NODE_MATMUL_CONSENSUS`.
+
+## Competing-branch / “zombie” ExactReplay
+
+If headers for a better-work chain arrive while the node still holds a local
+stub tip, async ExactReplay of that competing branch must not run at
+`SpeculativeValidation` priority (it was preempted → `ExactReplay: cancelled`
+and the branch never connected). 0.33.3 maps competing-branch verify work to
+`TipValidation`. Until upgraded, operators can recover with:
+
+```text
+matmulrcexecution=strict-device
+# then invalidateblock <local stub tip> and/or feed blocks via submitblock
+```
+
+## Public block-data peers (post-activation)
+
+When seeds advertise headers but not bodies, `addnode` a tip-holding archive:
+
+- Project miner / attestation archive: `114.150.94.235:19335`
+- Wizard Partners archive (RTX PRO 6000, unpruned, strict-device):
+  `194.247.183.68:19335`
+
+See also
+[`btx-postfork-field-report-wizard-partners-2026-08-10.txt`](btx-postfork-field-report-wizard-partners-2026-08-10.txt).
+
 ## Monitoring
 
 Inspect:

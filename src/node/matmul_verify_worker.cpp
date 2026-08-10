@@ -404,8 +404,18 @@ void MatMulVerifyWorker::WorkerLoop()
         if (!m_verify_override &&
             m_params.IsMatMulRCFamilyActive(job.height) &&
             !trusted_exact_replay) {
+            // CompetingBranch must use TipValidation, not SpeculativeValidation.
+            // Field report (Wizard Partners, 2026-08-10): async ExactReplay of a
+            // non-active/canonical competing branch at SpeculativeValidation was
+            // preempted ("ExactReplay: cancelled", outcome=3) and the node never
+            // connected that branch — the "zombie block" freeze. Operators worked
+            // around it with matmulrcexecution=strict-device (sync path). Elevating
+            // CompetingBranch to TipValidation keeps async verify from being
+            // starved by CandidateMining while still ranking below an authenticated
+            // tip-child via the worker's own Priority ordering.
             const auto device_priority{
-                job.priority == Priority::AuthenticatedTipChild
+                (job.priority == Priority::AuthenticatedTipChild ||
+                 job.priority == Priority::CompetingBranch)
                     ? matmul::v4::rc::RCAcceleratorScheduler::
                           Priority::TipValidation
                     : matmul::v4::rc::RCAcceleratorScheduler::
