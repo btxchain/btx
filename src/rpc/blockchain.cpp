@@ -32,9 +32,11 @@
 #include <net_processing.h>
 #include <node/blockstorage.h>
 #include <node/context.h>
+#include <node/matmul_trusted_attestations.h>
 #include <node/transaction.h>
 #include <node/utxo_snapshot.h>
 #include <node/warnings.h>
+#include <matmul/trusted_utxo_snapshot_attestation.h>
 #include <primitives/transaction.h>
 #include <policy/settings.h>
 #include <rpc/server.h>
@@ -4317,6 +4319,427 @@ static RPCHelpMan loadtxoutset()
     };
 }
 
+namespace {
+
+bool WriteManifestFile(const fs::path& path,
+                       const matmul::trusted::UtxoSnapshotManifest& manifest,
+                       std::string& error)
+{
+    FILE* file{fsbridge::fopen(path, "wb")};
+    AutoFile afile{file};
+    if (afile.IsNull()) {
+        error = "Couldn't open manifest file for writing: " + path.utf8string();
+        return false;
+    }
+    try {
+        afile << manifest;
+    } catch (const std::ios_base::failure& e) {
+        error = strprintf("Failed to serialize manifest: %s", e.what());
+        return false;
+    }
+    if (afile.fclose() != 0) {
+        error = "Failed to close manifest file: " + path.utf8string();
+        return false;
+    }
+    return true;
+}
+
+bool ReadManifestFile(const fs::path& path,
+                      matmul::trusted::UtxoSnapshotManifest& manifest,
+                      std::string& error)
+{
+    FILE* file{fsbridge::fopen(path, "rb")};
+    AutoFile afile{file};
+    if (afile.IsNull()) {
+        error = "Couldn't open manifest file for reading: " + path.utf8string();
+        return false;
+    }
+    try {
+        afile >> manifest;
+    } catch (const std::ios_base::failure& e) {
+        error = strprintf("Unable to parse manifest: %s", e.what());
+        return false;
+    }
+    return true;
+}
+
+} // namespace
+
+static RPCHelpMan dumptxoutsetattested()
+{
+    return RPCHelpMan{
+        "dumptxoutsetattested",
+        "Write the current UTXO set to a snapshot file and emit a locally signed "
+        "attested-fast-forward manifest for trusted-mirror importers.\n\n"
+        "Requires a configured MatMul attestation local signer. When MatMul "
+        "ExactReplay is active at the tip, the tip must carry "
+        "BLOCK_EXACT_REPLAY_VERIFIED. Additional signers can append signatures "
+        "with signutxosnapshotmanifest until the importer's M-of-N threshold is "
+        "met. P2P distribution of manifests is not implemented in v1.\n\n"
+        "This call may take several minutes. Use no RPC timeout "
+        "(btx-cli -rpcclienttimeout=0).",
+        {
+            {"path", RPCArg::Type::STR, RPCArg::Optional::NO,
+             "Path to the output snapshot file. If relative, prefixed by datadir."},
+            {"manifest_path", RPCArg::Type::STR, RPCArg::Optional::NO,
+             "Path to the output manifest file. If relative, prefixed by datadir."},
+        },
+        RPCResult{
+            RPCResult::Type::OBJ, "", "",
+                {
+                    {RPCResult::Type::NUM, "coins_written", "the number of coins written in the snapshot"},
+                    {RPCResult::Type::STR_HEX, "base_hash", "the hash of the base of the snapshot"},
+                    {RPCResult::Type::NUM, "base_height", "the height of the base of the snapshot"},
+                    {RPCResult::Type::STR, "path", "the absolute path of the snapshot"},
+                    {RPCResult::Type::STR, "manifest_path", "the absolute path of the signed manifest"},
+                    {RPCResult::Type::STR_HEX, "txoutset_hash", "the hash of the snapshot contents (hash_serialized_3)"},
+                    {RPCResult::Type::NUM, "nchaintx", "the chain tx count at the snapshot base"},
+                    {RPCResult::Type::STR_HEX, "shielded_state_pin", "shielded-state commitment bound into the manifest"},
+                    {RPCResult::Type::NUM, "signatures", "number of signatures currently in the manifest"},
+                }},
+        RPCExamples{
+            HelpExampleCli("-rpcclienttimeout=0 dumptxoutsetattested",
+                           "utxo.dat utxo.manifest")
+        },
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    EnsureNotWalletRestricted(request);
+    NodeContext& node = EnsureAnyNodeContext(request.context);
+    ChainstateManager& chainman = EnsureChainman(node);
+    const ArgsManager& args{EnsureArgsman(node)};
+
+    if (!node::matmul_trusted::IsConfigured() ||
+        !node::matmul_trusted::HasLocalSigner()) {
+        throw JSONRPCError(
+            RPC_MISC_ERROR,
+            "dumptxoutsetattested requires a configured MatMul attestation local signer");
+    }
+    const auto chain_id{node::matmul_trusted::ChainId()};
+    const auto authority{node::matmul_trusted::ReplayAuthorityContext()};
+    if (!chain_id || !authority) {
+        throw JSONRPCError(RPC_MISC_ERROR, "MatMul trusted configuration incomplete");
+    }
+
+    {
+        LOCK(chainman.GetMutex());
+        const CBlockIndex* tip{chainman.ActiveChain().Tip()};
+        if (!tip) {
+            throw JSONRPCError(RPC_MISC_ERROR, "No active tip to snapshot");
+        }
+        if (chainman.GetConsensus().IsMatMulRCFamilyActive(tip->nHeight) &&
+            !(tip->nStatus & BLOCK_EXACT_REPLAY_VERIFIED)) {
+            throw JSONRPCError(
+                RPC_MISC_ERROR,
+                "Tip is not ExactReplay-verified; refusing to attest a UTXO snapshot");
+        }
+    }
+
+    const fs::path path{
+        AbsPathForConfigVal(args, fs::u8path(self.Arg<std::string>("path")))};
+    const fs::path manifest_path{
+        AbsPathForConfigVal(args, fs::u8path(self.Arg<std::string>("manifest_path")))};
+    const fs::path tmppath{path + ".tmp"};
+    if (fs::exists(path)) {
+        throw JSONRPCError(
+            RPC_INVALID_PARAMETER,
+            path.utf8string() +
+                " already exists. If you are sure this is what you want, "
+                "move it out of the way first");
+    }
+    if (fs::exists(manifest_path)) {
+        throw JSONRPCError(
+            RPC_INVALID_PARAMETER,
+            manifest_path.utf8string() +
+                " already exists. If you are sure this is what you want, "
+                "move it out of the way first");
+    }
+
+    FILE* file{fsbridge::fopen(tmppath, "wb")};
+    AutoFile afile{file};
+    if (afile.IsNull()) {
+        throw JSONRPCError(
+            RPC_INVALID_PARAMETER,
+            "Couldn't open file " + tmppath.utf8string() + " for writing.");
+    }
+
+    UniValue result = CreateUTXOSnapshot(
+        node, chainman.ActiveChainstate(), std::move(afile), path, tmppath);
+    try {
+        fs::rename(tmppath, path);
+    } catch (const fs::filesystem_error& e) {
+        fs::remove(tmppath);
+        throw JSONRPCError(
+            RPC_MISC_ERROR,
+            strprintf("Failed to move snapshot into place: %s", e.what()));
+    }
+    if (!fs::exists(path)) {
+        throw JSONRPCError(RPC_MISC_ERROR, "Snapshot file was not produced");
+    }
+
+    if (!result.exists("shielded_state_pin") ||
+        !result.exists("txoutset_hash") ||
+        !result.exists("nchaintx") ||
+        !result.exists("coins_written") ||
+        !result.exists("base_hash") ||
+        !result.exists("base_height")) {
+        fs::remove(path);
+        throw JSONRPCError(
+            RPC_MISC_ERROR,
+            "Snapshot dump missing fields required for an attested manifest");
+    }
+
+    auto parse_hex_field = [](const UniValue& value, const char* name) -> uint256 {
+        const auto parsed{uint256::FromHex(value.get_str())};
+        if (!parsed) {
+            throw JSONRPCError(
+                RPC_MISC_ERROR,
+                strprintf("Snapshot dump produced an invalid %s hex field", name));
+        }
+        return *parsed;
+    };
+
+    matmul::trusted::UtxoSnapshotStatement statement;
+    statement.chain_id = *chain_id;
+    statement.block_hash = parse_hex_field(result["base_hash"], "base_hash");
+    statement.block_height = result["base_height"].getInt<int>();
+    statement.hash_serialized =
+        parse_hex_field(result["txoutset_hash"], "txoutset_hash");
+    statement.coins_count = result["coins_written"].getInt<int64_t>();
+    statement.m_chain_tx_count = result["nchaintx"].getInt<int64_t>();
+    statement.shielded_state_commitment =
+        parse_hex_field(result["shielded_state_pin"], "shielded_state_pin");
+    statement.replay_authority_context = *authority;
+
+    auto signature{node::matmul_trusted::SignUtxoSnapshot(statement)};
+    if (!signature) {
+        fs::remove(path);
+        throw JSONRPCError(
+            RPC_MISC_ERROR,
+            "Failed to sign attested UTXO snapshot manifest with local signer");
+    }
+
+    matmul::trusted::UtxoSnapshotManifest manifest;
+    manifest.statement = std::move(statement);
+    manifest.signatures.push_back(std::move(*signature));
+
+    std::string error;
+    if (!WriteManifestFile(manifest_path, manifest, error)) {
+        fs::remove(path);
+        throw JSONRPCError(RPC_MISC_ERROR, error);
+    }
+
+    result.pushKV("manifest_path", manifest_path.utf8string());
+    result.pushKV("signatures", static_cast<int64_t>(manifest.signatures.size()));
+    return result;
+},
+    };
+}
+
+static RPCHelpMan signutxosnapshotmanifest()
+{
+    return RPCHelpMan{
+        "signutxosnapshotmanifest",
+        "Append a local MatMul attestation signature to an attested UTXO "
+        "snapshot manifest file.\n"
+        "Used to collect M-of-N signatures after dumptxoutsetattested. The "
+        "statement fields must already match this node's chain id and replay "
+        "authority context.",
+        {
+            {"manifest_path", RPCArg::Type::STR, RPCArg::Optional::NO,
+             "Path to the manifest file to update. If relative, prefixed by datadir."},
+        },
+        RPCResult{
+            RPCResult::Type::OBJ, "", "",
+                {
+                    {RPCResult::Type::STR, "manifest_path", ""},
+                    {RPCResult::Type::NUM, "signatures", "number of signatures after appending"},
+                    {RPCResult::Type::STR_HEX, "signer", "local signer pubkey that was appended"},
+                }},
+        RPCExamples{
+            HelpExampleCli("signutxosnapshotmanifest", "utxo.manifest")
+        },
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    EnsureNotWalletRestricted(request);
+    NodeContext& node = EnsureAnyNodeContext(request.context);
+    const ArgsManager& args{EnsureArgsman(node)};
+
+    if (!node::matmul_trusted::IsConfigured() ||
+        !node::matmul_trusted::HasLocalSigner()) {
+        throw JSONRPCError(
+            RPC_MISC_ERROR,
+            "signutxosnapshotmanifest requires a configured MatMul attestation local signer");
+    }
+
+    const fs::path manifest_path{
+        AbsPathForConfigVal(args, fs::u8path(self.Arg<std::string>("manifest_path")))};
+    matmul::trusted::UtxoSnapshotManifest manifest;
+    std::string error;
+    if (!ReadManifestFile(manifest_path, manifest, error)) {
+        throw JSONRPCError(RPC_DESERIALIZATION_ERROR, error);
+    }
+
+    auto signature{node::matmul_trusted::SignUtxoSnapshot(manifest.statement)};
+    if (!signature) {
+        throw JSONRPCError(
+            RPC_MISC_ERROR,
+            "Failed to sign manifest (check chain id / replay authority / local signer)");
+    }
+    for (const auto& existing : manifest.signatures) {
+        if (existing.signer == signature->signer) {
+            throw JSONRPCError(RPC_MISC_ERROR, "Local signer has already signed this manifest");
+        }
+    }
+    const std::string signer_hex{HexStr(signature->signer)};
+    manifest.signatures.push_back(std::move(*signature));
+    if (!WriteManifestFile(manifest_path, manifest, error)) {
+        throw JSONRPCError(RPC_MISC_ERROR, error);
+    }
+
+    UniValue result{UniValue::VOBJ};
+    result.pushKV("manifest_path", manifest_path.utf8string());
+    result.pushKV("signatures", static_cast<int64_t>(manifest.signatures.size()));
+    result.pushKV("signer", signer_hex);
+    return result;
+},
+    };
+}
+
+static RPCHelpMan loadtxoutsetattested()
+{
+    return RPCHelpMan{
+        "loadtxoutsetattested",
+        "Load a UTXO snapshot authenticated by an M-of-N signed manifest from "
+        "the configured matmulvalidation=trusted signer set.\n\n"
+        "This is a modified assumeutxo path: it does NOT consult "
+        "m_assumeutxo_data in chainparams. Strict consensus nodes "
+        "(matmulvalidation=consensus) must refuse this RPC.\n\n"
+        "The snapshot base must already be an ancestor of this node's "
+        "best-header chain. Failures leave chainstate untouched.\n\n"
+        "This call may take several minutes. Use no RPC timeout "
+        "(btx-cli -rpcclienttimeout=0).",
+        {
+            {"path", RPCArg::Type::STR, RPCArg::Optional::NO,
+             "Path to the snapshot file. If relative, prefixed by datadir."},
+            {"manifest_path", RPCArg::Type::STR, RPCArg::Optional::NO,
+             "Path to the signed manifest. If relative, prefixed by datadir."},
+        },
+        RPCResult{
+            RPCResult::Type::OBJ, "", "",
+                {
+                    {RPCResult::Type::NUM, "coins_loaded", "the number of coins loaded from the snapshot"},
+                    {RPCResult::Type::STR_HEX, "tip_hash", "the hash of the base of the snapshot"},
+                    {RPCResult::Type::NUM, "base_height", "the height of the base of the snapshot"},
+                    {RPCResult::Type::STR, "path", "the absolute path that the snapshot was loaded from"},
+                    {RPCResult::Type::STR, "manifest_path", "the absolute path of the verified manifest"},
+                    {RPCResult::Type::NUM, "signatures", "number of valid unique signer signatures accepted"},
+                    {RPCResult::Type::STR, "shielded_retention_profile", "the shielded retained-state profile active during snapshot activation"},
+                    {RPCResult::Type::BOOL, "retain_shielded_commitment_index", "whether the shielded commitment-position index is being retained on disk"},
+                }},
+        RPCExamples{
+            HelpExampleCli("-rpcclienttimeout=0 loadtxoutsetattested",
+                           "utxo.dat utxo.manifest")
+        },
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    EnsureNotWalletRestricted(request);
+    NodeContext& node = EnsureAnyNodeContext(request.context);
+    ChainstateManager& chainman = EnsureChainman(node);
+    const ArgsManager& args{EnsureArgsman(node)};
+
+    if (!node::matmul_trusted::IsTrustedMirror()) {
+        throw JSONRPCError(
+            RPC_MISC_ERROR,
+            "loadtxoutsetattested is only available when matmulvalidation=trusted "
+            "(strict consensus nodes must not attested-fast-forward)");
+    }
+
+    const fs::path path{
+        AbsPathForConfigVal(args, fs::u8path(self.Arg<std::string>("path")))};
+    const fs::path manifest_path{
+        AbsPathForConfigVal(args, fs::u8path(self.Arg<std::string>("manifest_path")))};
+
+    matmul::trusted::UtxoSnapshotManifest manifest;
+    std::string error;
+    if (!ReadManifestFile(manifest_path, manifest, error)) {
+        throw JSONRPCError(RPC_DESERIALIZATION_ERROR, error);
+    }
+
+    const auto verified{node::matmul_trusted::VerifyUtxoSnapshotManifest(manifest)};
+    if (verified != matmul::trusted::UtxoSnapshotVerifyResult::Valid) {
+        throw JSONRPCError(
+            RPC_INVALID_PARAMETER,
+            strprintf("Attested UTXO snapshot manifest rejected: %s",
+                      matmul::trusted::UtxoSnapshotVerifyResultName(verified)));
+    }
+
+    FILE* file{fsbridge::fopen(path, "rb")};
+    AutoFile afile{file};
+    if (afile.IsNull()) {
+        throw JSONRPCError(
+            RPC_INVALID_PARAMETER,
+            "Couldn't open file " + path.utf8string() + " for reading.");
+    }
+
+    SnapshotMetadata metadata{chainman.GetParams().MessageStart()};
+    try {
+        afile >> metadata;
+    } catch (const std::ios_base::failure& e) {
+        throw JSONRPCError(RPC_DESERIALIZATION_ERROR, strprintf("Unable to parse metadata: %s", e.what()));
+    }
+
+    if (metadata.m_base_blockhash != manifest.statement.block_hash) {
+        throw JSONRPCError(
+            RPC_INVALID_PARAMETER,
+            "Snapshot metadata blockhash does not match the attested manifest");
+    }
+    if (metadata.m_coins_count != manifest.statement.coins_count) {
+        throw JSONRPCError(
+            RPC_INVALID_PARAMETER,
+            "Snapshot metadata coins_count does not match the attested manifest");
+    }
+
+    AssumeutxoData attested_au{
+        .height = manifest.statement.block_height,
+        .hash_serialized = AssumeutxoHash{manifest.statement.hash_serialized},
+        .m_chain_tx_count = manifest.statement.m_chain_tx_count,
+        .blockhash = manifest.statement.block_hash,
+        .shielded_state_commitment = manifest.statement.shielded_state_commitment,
+    };
+
+    auto activation_result{
+        chainman.ActivateSnapshot(afile, metadata, /*in_memory=*/false, attested_au)};
+    if (!activation_result) {
+        throw JSONRPCError(
+            RPC_INTERNAL_ERROR,
+            strprintf("Unable to load attested UTXO snapshot: %s. (%s)",
+                      util::ErrorString(activation_result).original,
+                      path.utf8string()));
+    }
+
+    // Because we can't provide historical blocks during tip or background sync.
+    node.connman->RemoveLocalServices(NODE_NETWORK);
+    node.connman->AddLocalServices(NODE_NETWORK_LIMITED);
+
+    CBlockIndex& snapshot_index{*CHECK_NONFATAL(*activation_result)};
+
+    UniValue result{UniValue::VOBJ};
+    result.pushKV("coins_loaded", metadata.m_coins_count);
+    result.pushKV("tip_hash", snapshot_index.GetBlockHash().ToString());
+    result.pushKV("base_height", snapshot_index.nHeight);
+    result.pushKV("path", fs::PathToString(path));
+    result.pushKV("manifest_path", manifest_path.utf8string());
+    result.pushKV("signatures", static_cast<int64_t>(manifest.signatures.size()));
+    result.pushKV("shielded_retention_profile",
+                  chainman.RetainShieldedCommitmentIndex() ? "full_commitment_index"
+                                                           : "externalized");
+    result.pushKV("retain_shielded_commitment_index",
+                  chainman.RetainShieldedCommitmentIndex());
+    return result;
+},
+    };
+}
+
 const std::vector<RPCResult> RPCHelpForChainstate{
     {RPCResult::Type::NUM, "blocks", "number of blocks in this chainstate"},
     {RPCResult::Type::STR_HEX, "bestblockhash", "blockhash of the tip"},
@@ -4533,6 +4956,9 @@ void RegisterBlockchainRPCCommands(CRPCTable& t)
         {"blockchain", &getblockfilter},
         {"blockchain", &dumptxoutset},
         {"blockchain", &loadtxoutset},
+        {"blockchain", &dumptxoutsetattested},
+        {"blockchain", &signutxosnapshotmanifest},
+        {"blockchain", &loadtxoutsetattested},
         {"blockchain", &getchainstates},
         {"hidden", &getblockfileinfo},
         {"hidden", &invalidateblock},

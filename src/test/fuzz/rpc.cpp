@@ -75,6 +75,7 @@ const std::vector<std::string> RPC_COMMANDS_NOT_SAFE_FOR_FUZZING{
     "addnode",        // avoid DNS lookups
     "addpeeraddress", // avoid DNS lookups
     "dumptxoutset",   // avoid writing to disk
+    "dumptxoutsetattested", // avoid writing to disk
     "dumpwallet", // avoid writing to disk
     "enumeratesigners",
     "echoipc",              // avoid assertion failure (Assertion `"EnsureAnyNodeContext(request.context).init" && check' failed.)
@@ -84,10 +85,12 @@ const std::vector<std::string> RPC_COMMANDS_NOT_SAFE_FOR_FUZZING{
     "importmempool", // avoid reading from disk
     "importwallet", // avoid reading from disk
     "loadtxoutset",   // avoid reading from disk
+    "loadtxoutsetattested", // avoid reading from disk
     "loadwallet",   // avoid reading from disk
     "savefeeestimates",      // disabled as a precautionary measure: may take a file path argument in the future
     "savemempool",           // disabled as a precautionary measure: may take a file path argument in the future
     "setban",                // avoid DNS lookups
+    "signutxosnapshotmanifest", // avoid writing to disk
     "stop",                  // avoid shutdown state
 };
 
