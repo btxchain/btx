@@ -7,10 +7,13 @@
 
 #include <node/matmul_verify_worker.h>
 #include <node/matmul_rc_admission.h>
+#include <node/matmul_trusted_attestations.h>
 #include <matmul/matmul_v4_rc_accelerator_scheduler.h>
+#include <matmul/trusted_exact_replay_attestation.h>
 
 #include <chainparams.h>
 #include <consensus/params.h>
+#include <key.h>
 #include <matmul/exact_gemm_resolve.h>
 #include <matmul/matmul_v4_lt.h>
 #include <matmul/matmul_v4_rc.h>
@@ -2052,6 +2055,145 @@ BOOST_AUTO_TEST_CASE(rc_accelerator_scheduler_queue_deadline_is_bounded)
             Scheduler::Priority::SpeculativeValidation)].timed_out_waits,
         1U);
     owner = {};
+}
+
+BOOST_AUTO_TEST_CASE(trusted_mirror_parks_without_blocking_other_jobs)
+{
+    using namespace std::chrono_literals;
+    node::matmul_trusted::ResetForTest();
+    const CKey signer{[] {
+        CKey key;
+        key.MakeNewKey(/*fCompressed=*/true);
+        return key;
+    }()};
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256::ONE;
+    config.replay_authority_context =
+        uint256::FromHex(std::string(64, 'a')).value();
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    config.local_signer = signer;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/true,
+        /*serve=*/false, /*wait_timeout=*/50ms, error));
+
+    auto params{MakeProfile1ActiveParams()};
+
+    std::atomic<int> completed{0};
+    std::atomic<int> deferred{0};
+    MatMulVerifyWorker worker{params, /*max_threads=*/1};
+
+    const uint256 tip_hash{uint256::ONE};
+    worker.SetActiveTip(tip_hash, /*tip_height=*/100);
+
+    auto enqueue_trusted = [&](uint32_t salt, int32_t height,
+                               const uint256& prev) {
+        auto block{std::make_shared<CBlock>(*MakeBlock(salt))};
+        block->hashPrevBlock = prev;
+        MatMulVerifyWorker::Job job{
+            .block = block,
+            .height = height,
+            .parent_median_time_past = 1,
+            .completion =
+                [&](bool ok) {
+                    if (ok) ++completed;
+                },
+            .retryable_failure = [&] { ++deferred; },
+            .priority = height == 101
+                            ? MatMulVerifyWorker::Priority::
+                                  AuthenticatedTipChild
+                            : MatMulVerifyWorker::Priority::
+                                  CompetingBranch,
+        };
+        BOOST_REQUIRE(EnqueueAccepted(worker.Enqueue(job)));
+    };
+
+    // Below-tip backfill and a tip-extender both lack quorum: both must park
+    // concurrently on a single worker thread (no serial 50ms+50ms stall).
+    enqueue_trusted(/*salt=*/1, /*height=*/50, /*prev=*/uint256::ZERO);
+    enqueue_trusted(/*salt=*/2, /*height=*/101, /*prev=*/tip_hash);
+
+    BOOST_REQUIRE(WaitFor(
+        [&] { return worker.AwaitingQuorumForTest() >= 2; }, 2s));
+    BOOST_CHECK_EQUAL(worker.AwaitingQuorumForTest(), 2U);
+    BOOST_CHECK_EQUAL(completed.load(), 0);
+    BOOST_CHECK_EQUAL(deferred.load(), 0);
+
+    // Quorum for the tip-extender only: it must complete while backfill stays
+    // parked (or later times out retryably).
+    {
+        auto tip_child{std::make_shared<CBlock>(*MakeBlock(2))};
+        tip_child->hashPrevBlock = tip_hash;
+        matmul::trusted::ExactReplayAttestation produced;
+        BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
+                          tip_child->GetHash(), 101, &produced) ==
+                      matmul::trusted::AddResult::Accepted);
+        worker.NotifyQuorumReady(tip_child->GetHash());
+    }
+
+    BOOST_REQUIRE(WaitFor([&] { return completed.load() >= 1; }, 2s));
+    BOOST_CHECK_EQUAL(completed.load(), 1);
+    // Backfill should still be awaiting or have timed out retryably — never
+    // accepted without quorum.
+    BOOST_REQUIRE(WaitFor(
+        [&] {
+            return deferred.load() >= 1 ||
+                   worker.AwaitingQuorumForTest() >= 1;
+        },
+        2s));
+    BOOST_CHECK_EQUAL(completed.load(), 1);
+
+    worker.Stop();
+    node::matmul_trusted::ResetForTest();
+}
+
+BOOST_AUTO_TEST_CASE(trusted_mirror_park_timeout_is_retryable_not_accept)
+{
+    using namespace std::chrono_literals;
+    node::matmul_trusted::ResetForTest();
+    const CKey signer{[] {
+        CKey key;
+        key.MakeNewKey(/*fCompressed=*/true);
+        return key;
+    }()};
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256::ONE;
+    config.replay_authority_context =
+        uint256::FromHex(std::string(64, 'a')).value();
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/true,
+        /*serve=*/false, /*wait_timeout=*/20ms, error));
+
+    auto params{MakeProfile1ActiveParams()};
+
+    std::atomic<int> completed{0};
+    std::atomic<int> deferred{0};
+    MatMulVerifyWorker worker{params, /*max_threads=*/1};
+    worker.SetActiveTip(uint256::ONE, 10);
+
+    auto block{std::make_shared<CBlock>(*MakeBlock(9))};
+    block->hashPrevBlock = uint256::ONE;
+    MatMulVerifyWorker::Job job{
+        .block = block,
+        .height = 11,
+        .parent_median_time_past = 1,
+        .completion = [&](bool) { ++completed; },
+        .retryable_failure = [&] { ++deferred; },
+        .priority =
+            MatMulVerifyWorker::Priority::AuthenticatedTipChild,
+    };
+    BOOST_REQUIRE(EnqueueAccepted(worker.Enqueue(job)));
+    BOOST_REQUIRE(WaitFor([&] { return deferred.load() >= 1; }, 2s));
+    BOOST_CHECK_EQUAL(completed.load(), 0);
+    BOOST_CHECK_EQUAL(deferred.load(), 1);
+    BOOST_CHECK(!node::matmul_trusted::HasQuorum(block->GetHash(), 11));
+
+    worker.Stop();
+    node::matmul_trusted::ResetForTest();
 }
 
 BOOST_AUTO_TEST_SUITE_END()

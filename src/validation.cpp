@@ -10747,19 +10747,17 @@ static bool ContextualCheckBlock(const CBlock& block,
                 std::string rc_execution_detail;
                 const auto check_rc = [&]() {
                     if (trusted_profile1) {
-                        matmul::trusted::WaitResult wait{
-                            matmul::trusted::WaitResult::Timeout};
-                        if (may_release_cs_main) {
-                            wait =
-                                node::matmul_trusted::WaitForQuorum(
-                                    block.GetHash(), nHeight,
-                                    [] { return false; });
-                        } else if (
+                        // Never block ProcessNewBlock on attestation quorum.
+                        // Trusted mirrors park async verify jobs instead; this
+                        // sync seam only accepts an already-formed M-of-N
+                        // quorum (or fails closed as retryable).
+                        const bool have_quorum{
                             node::matmul_trusted::HasQuorum(
-                                block.GetHash(), nHeight)) {
-                            wait =
-                                matmul::trusted::WaitResult::Quorum;
-                        }
+                                block.GetHash(), nHeight)};
+                        const matmul::trusted::WaitResult wait{
+                            have_quorum
+                                ? matmul::trusted::WaitResult::Quorum
+                                : matmul::trusted::WaitResult::Timeout};
                         rc_local_execution_failure =
                             wait !=
                             matmul::trusted::WaitResult::Quorum;

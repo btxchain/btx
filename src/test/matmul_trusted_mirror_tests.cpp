@@ -323,7 +323,7 @@ BOOST_AUTO_TEST_CASE(mainnet_trusted_mirror_accepts_two_of_two)
                         finalize_error);
     BOOST_CHECK_EQUAL(node::matmul_trusted::Threshold(), 2U);
     BOOST_CHECK_EQUAL(node::matmul_trusted::TrustedSigners().size(), 2U);
-    BOOST_CHECK_EQUAL(node::matmul_trusted::WaitTimeout().count(), 30'000);
+    BOOST_CHECK_EQUAL(node::matmul_trusted::WaitTimeout().count(), 60'000);
 }
 
 // Without this, "-matmultrustedpubkey=X -matmultrustedpubkey=X
@@ -383,6 +383,84 @@ BOOST_FIXTURE_TEST_CASE(non_mainnet_trusted_mirror_keeps_one_of_one,
         error);
     BOOST_CHECK(!FinalizedTrustedMirrorInstalled(finalize_error));
     BOOST_CHECK(!node::matmul_trusted::IsConfigured());
+}
+
+BOOST_AUTO_TEST_CASE(tip_priority_orders_tip_extender_before_backfill)
+{
+    using node::matmul_trusted::MakeTrustedWorkRank;
+    using node::matmul_trusted::PreferTrustedWork;
+
+    const int32_t tip_height{185787};
+    const auto tip_child{MakeTrustedWorkRank(
+        /*tip_extending=*/true, /*height=*/185788, tip_height,
+        /*priority_rank=*/2, /*sequence=*/10)};
+    const auto far_above{MakeTrustedWorkRank(
+        false, 186093, tip_height, /*priority_rank=*/1, /*sequence=*/1)};
+    const auto near_above{MakeTrustedWorkRank(
+        false, 185860, tip_height, /*priority_rank=*/1, /*sequence=*/2)};
+    const auto below_tip{MakeTrustedWorkRank(
+        false, 185589, tip_height, /*priority_rank=*/1, /*sequence=*/0)};
+
+    BOOST_CHECK(PreferTrustedWork(tip_child, far_above));
+    BOOST_CHECK(PreferTrustedWork(tip_child, below_tip));
+    BOOST_CHECK(PreferTrustedWork(near_above, far_above));
+    BOOST_CHECK(PreferTrustedWork(near_above, below_tip));
+    BOOST_CHECK(PreferTrustedWork(far_above, below_tip));
+    BOOST_CHECK(!PreferTrustedWork(below_tip, tip_child));
+}
+
+BOOST_AUTO_TEST_CASE(partial_quorum_is_never_accepted)
+{
+    RuntimeReset reset;
+    const CKey a{NewKey()};
+    const CKey b{NewKey()};
+    const uint256 chain{Hex256('c')};
+    const uint256 block{Hex256('d')};
+
+    matmul::trusted::StoreConfig config;
+    config.chain_id = chain;
+    config.replay_authority_context = Hex256('e');
+    config.trusted_signers = {a.GetPubKey(), b.GetPubKey()};
+    config.threshold = 2;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/true,
+        /*serve=*/false, std::chrono::milliseconds{5},
+        error));
+
+    matmul::trusted::ExactReplayStatement statement;
+    statement.chain_id = chain;
+    statement.block_hash = block;
+    statement.block_height = 42;
+    statement.replay_authority_context = Hex256('e');
+    const auto att_a{matmul::trusted::SignStatement(statement, a)};
+    BOOST_REQUIRE(att_a);
+    BOOST_CHECK(node::matmul_trusted::Add(*att_a, block, 42) ==
+                matmul::trusted::AddResult::Accepted);
+    BOOST_CHECK(!node::matmul_trusted::HasQuorum(block, 42));
+    BOOST_CHECK(node::matmul_trusted::WaitForQuorum(
+                    block, 42, [] { return false; }) ==
+                matmul::trusted::WaitResult::Timeout);
+}
+
+BOOST_AUTO_TEST_CASE(wait_timeout_clamp_rejects_insane_values)
+{
+    RuntimeReset reset;
+    matmul::trusted::StoreConfig config;
+    config.chain_id = Hex256('f');
+    config.replay_authority_context = Hex256('0');
+    config.trusted_signers = {NewKey().GetPubKey()};
+    config.threshold = 1;
+    std::string error;
+    BOOST_CHECK(!node::matmul_trusted::Configure(
+        config, /*trusted_mirror=*/true, /*serve=*/false,
+        std::chrono::milliseconds{-1}, error));
+    BOOST_CHECK(error.find("600000") != std::string::npos);
+    error.clear();
+    BOOST_CHECK(!node::matmul_trusted::Configure(
+        config, /*trusted_mirror=*/true, /*serve=*/false,
+        std::chrono::milliseconds{600'001}, error));
+    BOOST_CHECK(error.find("600000") != std::string::npos);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

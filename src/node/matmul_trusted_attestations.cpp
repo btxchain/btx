@@ -22,12 +22,12 @@ struct StagedConfiguration {
     std::optional<std::string> local_signer_wif;
     bool trusted_mirror{false};
     bool serve_attestations{false};
-    std::chrono::milliseconds wait_timeout{30'000};
+    std::chrono::milliseconds wait_timeout{60'000};
 };
 std::optional<StagedConfiguration> g_staged;
 bool g_trusted_mirror{false};
 bool g_serve_attestations{false};
-std::chrono::milliseconds g_wait_timeout{30'000};
+std::chrono::milliseconds g_wait_timeout{60'000};
 
 void CleanseStagedConfigurationLocked()
 {
@@ -146,7 +146,7 @@ void Reset()
     CleanseStagedConfigurationLocked();
     g_trusted_mirror = false;
     g_serve_attestations = false;
-    g_wait_timeout = std::chrono::milliseconds{30'000};
+    g_wait_timeout = std::chrono::milliseconds{60'000};
 }
 
 void ResetForTest()

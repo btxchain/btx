@@ -8,6 +8,7 @@
 #include <primitives/block.h>
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
@@ -177,12 +178,23 @@ public:
     size_t CancelIf(const std::function<bool(const CBlockHeader&, int32_t)>& predicate);
     [[nodiscard]] bool Contains(const uint256& hash) const;
 
+    /** Publish the active tip so queued/parked trusted work ranks tip-first. */
+    void SetActiveTip(const uint256& tip_hash, int32_t tip_height);
+
+    /**
+     * A parked trusted-mirror job may proceed: quorum is available for `hash`.
+     * Never blocks; safe to call from the message thread without cs_main.
+     */
+    void NotifyQuorumReady(const uint256& hash);
+
     /** Stop accepting jobs; queued-not-started jobs receive retryable cleanup
      *  but no consensus completion; join in-flight jobs. Idempotent. */
     void Stop();
 
     //! Test introspection: current queued (not yet started) job count.
     size_t QueueDepthForTest() const;
+    //! Test introspection: jobs parked awaiting an attestation quorum.
+    size_t AwaitingQuorumForTest() const;
 
 private:
     struct Pending {
@@ -194,10 +206,22 @@ private:
         //! Once a full block joins a header-first replay, tip churn may no
         //! longer cancel the shared computation and discard body validation.
         bool body_joined{false};
+        //! When set, this job is parked awaiting attestation quorum and must
+        //! not occupy a worker thread. Deadline is steady_clock.
+        std::optional<std::chrono::steady_clock::time_point>
+            awaiting_quorum_deadline{};
     };
 
-    [[nodiscard]] static bool HigherPriority(const Pending& lhs, const Pending& rhs);
+    [[nodiscard]] bool HigherPriority(const Pending& lhs,
+                                      const Pending& rhs) const;
     void WorkerLoop();
+    /** Move expired/cancelled parked jobs out of the awaiting set. Caller
+     *  invokes retryable callbacks WITHOUT holding m_mutex. */
+    void TakeExpiredAwaitingQuorum(
+        std::vector<std::shared_ptr<Pending>>& expired);
+    [[nodiscard]] std::optional<std::chrono::steady_clock::time_point>
+    NextAwaitingDeadline() const;
+    void FinishRetryablePending(const std::shared_ptr<Pending>& pending);
 
     const Consensus::Params& m_params;
     const std::function<bool(const CBlock&, int32_t, std::optional<int64_t>)> m_verify_override;
@@ -207,6 +231,11 @@ private:
     std::condition_variable m_cv;
     std::vector<std::shared_ptr<Pending>> m_queue; // GUARDED_BY(m_mutex)
     std::map<uint256, std::shared_ptr<Pending>> m_pending; // GUARDED_BY(m_mutex)
+    //! Parked trusted-mirror jobs: waiting for M-of-N quorum without binding a
+    //! worker thread. Still present in m_pending.
+    std::map<uint256, std::shared_ptr<Pending>> m_awaiting_quorum; // GUARDED_BY(m_mutex)
+    uint256 m_tip_hash{}; // GUARDED_BY(m_mutex)
+    int32_t m_tip_height{-1}; // GUARDED_BY(m_mutex)
     uint64_t m_next_sequence{0};          // GUARDED_BY(m_mutex)
     bool m_stopped{false};               // GUARDED_BY(m_mutex)
     std::vector<std::thread> m_threads;  // GUARDED_BY(m_mutex); lazily started on Enqueue
