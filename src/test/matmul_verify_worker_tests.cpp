@@ -2196,4 +2196,84 @@ BOOST_AUTO_TEST_CASE(trusted_mirror_park_timeout_is_retryable_not_accept)
     node::matmul_trusted::ResetForTest();
 }
 
+BOOST_AUTO_TEST_CASE(trusted_mirror_above_frontier_does_not_consume_park_slot)
+{
+    using namespace std::chrono_literals;
+    node::matmul_trusted::ResetForTest();
+    const CKey signer{[] {
+        CKey key;
+        key.MakeNewKey(/*fCompressed=*/true);
+        return key;
+    }()};
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256::ONE;
+    config.replay_authority_context =
+        uint256::FromHex(std::string(64, 'a')).value();
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    config.local_signer = signer;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/true,
+        /*serve=*/false, /*wait_timeout=*/2s, error));
+
+    // Establish an authority frontier below the competing heights.
+    matmul::trusted::ExactReplayAttestation frontier_att;
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
+                      uint256::ONE, /*block_height=*/100,
+                      &frontier_att) ==
+                  matmul::trusted::AddResult::Accepted);
+    BOOST_REQUIRE(
+        node::matmul_trusted::AuthorityAttestedFrontier().has_value());
+    BOOST_CHECK_EQUAL(
+        *node::matmul_trusted::AuthorityAttestedFrontier(), 100);
+
+    auto params{MakeProfile1ActiveParams()};
+    std::atomic<int> completed{0};
+    std::atomic<int> deferred{0};
+    MatMulVerifyWorker worker{params, /*max_threads=*/1};
+    const uint256 tip_hash{uint256::ONE};
+    worker.SetActiveTip(tip_hash, /*tip_height=*/90);
+
+    // Competing block above frontier, not tip-extending: must not park.
+    auto above{std::make_shared<CBlock>(*MakeBlock(7))};
+    above->hashPrevBlock = uint256::ZERO;
+    MatMulVerifyWorker::Job above_job{
+        .block = above,
+        .height = 150,
+        .parent_median_time_past = 1,
+        .completion = [&](bool) { ++completed; },
+        .retryable_failure = [&] { ++deferred; },
+        .priority = MatMulVerifyWorker::Priority::CompetingBranch,
+    };
+    BOOST_REQUIRE(EnqueueAccepted(worker.Enqueue(above_job)));
+
+    // Tip-extender at tip+1 still parks (serviceable under reservation).
+    auto tip_child{std::make_shared<CBlock>(*MakeBlock(8))};
+    tip_child->hashPrevBlock = tip_hash;
+    MatMulVerifyWorker::Job tip_job{
+        .block = tip_child,
+        .height = 91,
+        .parent_median_time_past = 1,
+        .completion = [&](bool) { ++completed; },
+        .retryable_failure = [&] { ++deferred; },
+        .priority =
+            MatMulVerifyWorker::Priority::AuthenticatedTipChild,
+    };
+    BOOST_REQUIRE(EnqueueAccepted(worker.Enqueue(tip_job)));
+
+    BOOST_REQUIRE(WaitFor(
+        [&] {
+            return deferred.load() >= 1 &&
+                   worker.AwaitingQuorumForTest() >= 1;
+        },
+        2s));
+    BOOST_CHECK_EQUAL(worker.AwaitingQuorumForTest(), 1U);
+    BOOST_CHECK_EQUAL(completed.load(), 0);
+    BOOST_CHECK(!node::matmul_trusted::HasQuorum(above->GetHash(), 150));
+
+    worker.Stop();
+    node::matmul_trusted::ResetForTest();
+}
+
 BOOST_AUTO_TEST_SUITE_END()

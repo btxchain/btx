@@ -463,4 +463,143 @@ BOOST_AUTO_TEST_CASE(wait_timeout_clamp_rejects_insane_values)
     BOOST_CHECK(error.find("600000") != std::string::npos);
 }
 
+BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
+{
+    using node::matmul_trusted::EvaluateTrustedAttestationAdmit;
+    using node::matmul_trusted::TrustedAttestationAdmit;
+    using node::matmul_trusted::TrustedAttestationAdmitView;
+
+    // Competing height above the authority tip must not consume a slot.
+    BOOST_CHECK(
+        EvaluateTrustedAttestationAdmit(TrustedAttestationAdmitView{
+            .tip_extending = false,
+            .extends_active_tip_chain = true,
+            .on_parked_reorg_branch = false,
+            .height = 186087,
+            .authority_frontier = 186011,
+            .in_backoff = false,
+        }) == TrustedAttestationAdmit::RejectAboveFrontier);
+
+    // Parked deep-reorg branch is never attestable by our policy.
+    BOOST_CHECK(
+        EvaluateTrustedAttestationAdmit(TrustedAttestationAdmitView{
+            .tip_extending = false,
+            .extends_active_tip_chain = false,
+            .on_parked_reorg_branch = true,
+            .height = 186074,
+            .authority_frontier = 186011,
+            .in_backoff = false,
+        }) == TrustedAttestationAdmit::RejectParkedReorg);
+
+    // Fork that does not extend the active tip is refused even below frontier.
+    BOOST_CHECK(
+        EvaluateTrustedAttestationAdmit(TrustedAttestationAdmitView{
+            .tip_extending = false,
+            .extends_active_tip_chain = false,
+            .on_parked_reorg_branch = false,
+            .height = 185950,
+            .authority_frontier = 186011,
+            .in_backoff = false,
+        }) == TrustedAttestationAdmit::RejectNotForwardOfTip);
+
+    // Tip-extender is always allowed, including a one-step frontier probe.
+    BOOST_CHECK(
+        EvaluateTrustedAttestationAdmit(TrustedAttestationAdmitView{
+            .tip_extending = true,
+            .extends_active_tip_chain = true,
+            .on_parked_reorg_branch = false,
+            .height = 186012,
+            .authority_frontier = 186011,
+            .in_backoff = true,
+        }) == TrustedAttestationAdmit::Allow);
+
+    // Forward of tip at/under frontier is allowed.
+    BOOST_CHECK(
+        EvaluateTrustedAttestationAdmit(TrustedAttestationAdmitView{
+            .tip_extending = false,
+            .extends_active_tip_chain = true,
+            .on_parked_reorg_branch = false,
+            .height = 185944,
+            .authority_frontier = 186011,
+            .in_backoff = false,
+        }) == TrustedAttestationAdmit::Allow);
+
+    // Signer-absent backoff blocks re-admission of non-tip work.
+    BOOST_CHECK(
+        EvaluateTrustedAttestationAdmit(TrustedAttestationAdmitView{
+            .tip_extending = false,
+            .extends_active_tip_chain = true,
+            .on_parked_reorg_branch = false,
+            .height = 185944,
+            .authority_frontier = 186011,
+            .in_backoff = true,
+        }) == TrustedAttestationAdmit::RejectBackoff);
+}
+
+BOOST_AUTO_TEST_CASE(tip_extender_capacity_reserved_under_slot_pressure)
+{
+    using node::matmul_trusted::TrustedAttestationRequestCapacityAllows;
+
+    constexpr size_t kMax{1024};
+    constexpr size_t kReserved{1};
+    // Backfill cannot fill the last reserved slot.
+    BOOST_CHECK(!TrustedAttestationRequestCapacityAllows(
+        /*tip_extending=*/false, /*outstanding=*/kMax - kReserved, kMax,
+        kReserved));
+    BOOST_CHECK(TrustedAttestationRequestCapacityAllows(
+        /*tip_extending=*/false, /*outstanding=*/kMax - kReserved - 1, kMax,
+        kReserved));
+    // Tip-extender may always attempt admission (displace path handles full).
+    BOOST_CHECK(TrustedAttestationRequestCapacityAllows(
+        /*tip_extending=*/true, /*outstanding=*/kMax, kMax, kReserved));
+    BOOST_CHECK(TrustedAttestationRequestCapacityAllows(
+        /*tip_extending=*/true, /*outstanding=*/kMax - 1, kMax, kReserved));
+}
+
+BOOST_AUTO_TEST_CASE(authority_frontier_tracks_accepted_attestations)
+{
+    RuntimeReset reset;
+    const CKey a{NewKey()};
+    const uint256 chain{Hex256('1')};
+    const uint256 block_lo{Hex256('2')};
+    const uint256 block_hi{Hex256('3')};
+
+    matmul::trusted::StoreConfig config;
+    config.chain_id = chain;
+    config.replay_authority_context = Hex256('4');
+    config.trusted_signers = {a.GetPubKey()};
+    config.threshold = 1;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/true,
+        /*serve=*/false, std::chrono::milliseconds{50},
+        error));
+
+    BOOST_CHECK(!node::matmul_trusted::AuthorityAttestedFrontier().has_value());
+
+    matmul::trusted::ExactReplayStatement statement;
+    statement.chain_id = chain;
+    statement.block_hash = block_lo;
+    statement.block_height = 100;
+    statement.replay_authority_context = Hex256('4');
+    const auto att_lo{matmul::trusted::SignStatement(statement, a)};
+    BOOST_REQUIRE(att_lo);
+    BOOST_CHECK(node::matmul_trusted::Add(*att_lo, block_lo, 100) ==
+                matmul::trusted::AddResult::Accepted);
+    BOOST_REQUIRE(node::matmul_trusted::AuthorityAttestedFrontier().has_value());
+    BOOST_CHECK_EQUAL(*node::matmul_trusted::AuthorityAttestedFrontier(), 100);
+
+    statement.block_hash = block_hi;
+    statement.block_height = 250;
+    const auto att_hi{matmul::trusted::SignStatement(statement, a)};
+    BOOST_REQUIRE(att_hi);
+    BOOST_CHECK(node::matmul_trusted::Add(*att_hi, block_hi, 250) ==
+                matmul::trusted::AddResult::Accepted);
+    BOOST_CHECK_EQUAL(*node::matmul_trusted::AuthorityAttestedFrontier(), 250);
+
+    // Soft peer-tip hint can raise the effective frontier further.
+    node::matmul_trusted::NoteAuthorityPeerTipHint(300);
+    BOOST_CHECK_EQUAL(*node::matmul_trusted::AuthorityAttestedFrontier(), 300);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

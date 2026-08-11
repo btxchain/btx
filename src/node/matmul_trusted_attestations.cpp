@@ -28,6 +28,10 @@ std::optional<StagedConfiguration> g_staged;
 bool g_trusted_mirror{false};
 bool g_serve_attestations{false};
 std::chrono::milliseconds g_wait_timeout{60'000};
+//! Highest height of a configured-signer attestation observed this process.
+int32_t g_highest_attested_height{-1};
+//! Soft hint: max best-known height among peers that recently served MMATTEST.
+int32_t g_authority_peer_tip_hint{-1};
 
 void CleanseStagedConfigurationLocked()
 {
@@ -147,6 +151,8 @@ void Reset()
     g_trusted_mirror = false;
     g_serve_attestations = false;
     g_wait_timeout = std::chrono::milliseconds{60'000};
+    g_highest_attested_height = -1;
+    g_authority_peer_tip_hint = -1;
 }
 
 void ResetForTest()
@@ -216,7 +222,14 @@ matmul::trusted::AddResult Add(
 {
     auto store{Store()};
     if (!store) return matmul::trusted::AddResult::UntrustedSigner;
-    return store->Add(attestation, expected_hash, expected_height);
+    const auto result{store->Add(attestation, expected_hash, expected_height)};
+    // Accepted and Duplicate both prove a configured signer attested this
+    // height; advance the local frontier high-water mark either way.
+    if (result == matmul::trusted::AddResult::Accepted ||
+        result == matmul::trusted::AddResult::Duplicate) {
+        NoteAcceptedAttestationHeight(expected_height);
+    }
+    return result;
 }
 
 matmul::trusted::AddResult SignAuthoritative(
@@ -226,7 +239,12 @@ matmul::trusted::AddResult SignAuthoritative(
 {
     auto store{Store()};
     if (!store) return matmul::trusted::AddResult::NoLocalSigner;
-    return store->SignLocal(block_hash, block_height, produced);
+    const auto result{store->SignLocal(block_hash, block_height, produced)};
+    if (result == matmul::trusted::AddResult::Accepted ||
+        result == matmul::trusted::AddResult::Duplicate) {
+        NoteAcceptedAttestationHeight(block_height);
+    }
+    return result;
 }
 
 std::optional<matmul::trusted::UtxoSnapshotSignature> SignUtxoSnapshot(
@@ -287,6 +305,47 @@ matmul::trusted::StoreStats Stats()
 {
     auto store{Store()};
     return !store ? matmul::trusted::StoreStats{} : store->GetStats();
+}
+
+std::optional<int32_t> HighestAttestedHeight()
+{
+    std::lock_guard lock{g_mutex};
+    if (g_highest_attested_height < 0) return std::nullopt;
+    return g_highest_attested_height;
+}
+
+std::optional<int32_t> AuthorityPeerTipHint()
+{
+    std::lock_guard lock{g_mutex};
+    if (g_authority_peer_tip_hint < 0) return std::nullopt;
+    return g_authority_peer_tip_hint;
+}
+
+std::optional<int32_t> AuthorityAttestedFrontier()
+{
+    std::lock_guard lock{g_mutex};
+    const int32_t frontier{
+        std::max(g_highest_attested_height, g_authority_peer_tip_hint)};
+    if (frontier < 0) return std::nullopt;
+    return frontier;
+}
+
+void NoteAcceptedAttestationHeight(int32_t height)
+{
+    if (height < 0) return;
+    std::lock_guard lock{g_mutex};
+    if (height > g_highest_attested_height) {
+        g_highest_attested_height = height;
+    }
+}
+
+void NoteAuthorityPeerTipHint(int32_t height)
+{
+    if (height < 0) return;
+    std::lock_guard lock{g_mutex};
+    if (height > g_authority_peer_tip_hint) {
+        g_authority_peer_tip_hint = height;
+    }
 }
 
 } // namespace node::matmul_trusted

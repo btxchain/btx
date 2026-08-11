@@ -160,7 +160,14 @@ static constexpr auto MATMUL_ATTESTATION_TOKEN_REFILL{1s};
 static constexpr auto MATMUL_ATTESTATION_SOURCE_BUDGET_TTL{10min};
 static constexpr auto MATMUL_ATTESTATION_REQUEST_TTL{60s};
 static constexpr size_t MATMUL_ATTESTATION_OUTSTANDING_MAX{1024};
+//! Leave one outstanding slot free so a tip-extender can always admit under
+//! backfill pressure (binding tip-first under slot scarcity).
+static constexpr size_t MATMUL_ATTESTATION_TIP_RESERVED{1};
 static constexpr size_t MATMUL_ATTESTATION_RELAY_PEERS{2};
+//! Negative-cache base delay after archive/signer peers stay silent for a hash.
+static constexpr auto MATMUL_ATTESTATION_MISS_BACKOFF_BASE{60s};
+static constexpr int MATMUL_ATTESTATION_MISS_BACKOFF_MAX_EXP{6};
+static constexpr auto MATMUL_TRUSTED_MIRROR_STALL_LOG_INTERVAL{30s};
 /** WP-8 / H9/H10: expiry for outstanding GETMMSKETCH prefetch requests. An
  *  entry that received no reply within the TTL frees its node-wide in-flight
  *  slot (the request side is strictly best-effort — nothing is ever awaited or
@@ -1439,12 +1446,28 @@ private:
         //! Peers already queried for this hash; preserved across TTL refresh so
         //! a silent miss is not immediately re-asked to the same peer.
         std::set<NodeId> asked_peers{};
+        //! True once at least one preferred archive / recent-success peer was
+        //! asked this round (distinguishes signer-absent from transient miss).
+        bool asked_preferred{false};
     };
     std::map<uint256, MatMulAttestationRequest> m_matmul_attestation_requested
         GUARDED_BY(cs_main);
     //! Peers that recently delivered a usable MMATTEST (prefer on re-request).
     std::map<NodeId, std::chrono::microseconds> m_matmul_attestation_peer_success
         GUARDED_BY(cs_main);
+    //! Negative cache for hashes where preferred signers/archives stayed silent.
+    struct MatMulAttestationBackoff {
+        int consecutive_misses{0};
+        std::chrono::steady_clock::time_point not_before{};
+        bool signer_absent{false};
+    };
+    std::map<uint256, MatMulAttestationBackoff> m_matmul_attestation_backoff
+        GUARDED_BY(cs_main);
+    //! Rate-limited stall diagnostics for trusted mirrors.
+    std::chrono::steady_clock::time_point m_matmul_trusted_last_stall_log
+        GUARDED_BY(cs_main){};
+    uint64_t m_matmul_trusted_reject_unattestable
+        GUARDED_BY(cs_main){0};
     /** Sybil/reconnect-resistant inbound signature-verification budgets.
      *
      * Two independent pools per source, because they bound different things and
@@ -1784,6 +1807,16 @@ private:
      *  monopolizing the bounded outstanding-request map. */
     void RequestMatMulTrustedAttestations(const uint256& hash,
                                           NodeId source);
+    /** Trusted-mirror local sync filter: whether this hash may consume an
+     *  attestation request / park / verify slot. Requires cs_main. */
+    [[nodiscard]] node::matmul_trusted::TrustedAttestationAdmit
+    EvaluateTrustedMirrorAttestationAdmit(const uint256& hash,
+                                          const CBlockIndex* index,
+                                          const CBlockIndex* tip,
+                                          bool tip_extending) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    void MaybeLogTrustedMirrorStall(int32_t tip_height)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     bool ConsumeMatMulAttestationInboundBudget(
         uint64_t keyed_netgroup,
         uint64_t count,
@@ -5857,6 +5890,62 @@ bool PeerManagerImpl::ConsumeMatMulAttestationVerifyBudget(
     return true;
 }
 
+node::matmul_trusted::TrustedAttestationAdmit
+PeerManagerImpl::EvaluateTrustedMirrorAttestationAdmit(
+    const uint256& hash,
+    const CBlockIndex* index,
+    const CBlockIndex* tip,
+    bool tip_extending) const
+{
+    AssertLockHeld(cs_main);
+    const bool extends_active_tip_chain{
+        tip_extending ||
+        (tip != nullptr && index != nullptr &&
+         index->nHeight >= tip->nHeight &&
+         index->GetAncestor(tip->nHeight) == tip)};
+    const bool parked{
+        index != nullptr && m_chainman.IsOnParkedReorgBranch(index)};
+    bool in_backoff{false};
+    const auto backoff_it{m_matmul_attestation_backoff.find(hash)};
+    if (backoff_it != m_matmul_attestation_backoff.end()) {
+        in_backoff =
+            std::chrono::steady_clock::now() < backoff_it->second.not_before;
+    }
+    return node::matmul_trusted::EvaluateTrustedAttestationAdmit({
+        .tip_extending = tip_extending,
+        .extends_active_tip_chain = extends_active_tip_chain,
+        .on_parked_reorg_branch = parked,
+        .height = index ? index->nHeight : -1,
+        .authority_frontier =
+            node::matmul_trusted::AuthorityAttestedFrontier(),
+        .in_backoff = in_backoff,
+    });
+}
+
+void PeerManagerImpl::MaybeLogTrustedMirrorStall(int32_t tip_height)
+{
+    AssertLockHeld(cs_main);
+    const auto now{std::chrono::steady_clock::now()};
+    if (m_matmul_trusted_last_stall_log.time_since_epoch().count() != 0 &&
+        now - m_matmul_trusted_last_stall_log <
+            MATMUL_TRUSTED_MIRROR_STALL_LOG_INTERVAL) {
+        return;
+    }
+    m_matmul_trusted_last_stall_log = now;
+    const auto frontier{node::matmul_trusted::AuthorityAttestedFrontier()};
+    LogWarning(
+        "matmul trusted mirror stall: tip_height=%d needed_height=%d "
+        "authority_frontier=%s outstanding_slots=%zu/%zu "
+        "rejected_unattestable=%llu\n",
+        tip_height,
+        tip_height + 1,
+        frontier.has_value() ? strprintf("%d", *frontier) : "unknown",
+        m_matmul_attestation_requested.size(),
+        MATMUL_ATTESTATION_OUTSTANDING_MAX,
+        static_cast<unsigned long long>(
+            m_matmul_trusted_reject_unattestable));
+}
+
 void PeerManagerImpl::RequestMatMulTrustedAttestations(
     const uint256& hash, NodeId source)
 {
@@ -5865,6 +5954,7 @@ void PeerManagerImpl::RequestMatMulTrustedAttestations(
     std::set<NodeId> skip_peers;
     std::vector<NodeId> prefer_peers;
     bool request{false};
+    bool asked_preferred_round{false};
     {
         LOCK(cs_main);
         const auto now{GetTime<std::chrono::microseconds>()};
@@ -5876,6 +5966,20 @@ void PeerManagerImpl::RequestMatMulTrustedAttestations(
         const bool tip_extending{
             tip != nullptr && index != nullptr &&
             index->pprev == tip};
+
+        const auto admit{EvaluateTrustedMirrorAttestationAdmit(
+            hash, index, tip, tip_extending)};
+        if (admit != node::matmul_trusted::TrustedAttestationAdmit::Allow) {
+            ++m_matmul_trusted_reject_unattestable;
+            LogDebug(
+                BCLog::NET,
+                "matmul trusted mirror skip attestation request "
+                "block=%s height=%d reason=%s\n",
+                hash.ToString(), height,
+                node::matmul_trusted::TrustedAttestationAdmitName(admit));
+            MaybeLogTrustedMirrorStall(tip_height);
+            return;
+        }
 
         // Drop stale peer-success hints.
         for (auto it = m_matmul_attestation_peer_success.begin();
@@ -5893,20 +5997,55 @@ void PeerManagerImpl::RequestMatMulTrustedAttestations(
                 MATMUL_ATTESTATION_REQUEST_TTL) {
                 return; // still in flight
             }
-            // TTL expired: allow a fresh round, but do not re-ask peers that
-            // already failed to answer for this hash.
+            // TTL expired without quorum: if preferred peers were asked and
+            // stayed silent, treat as signer-absent (not a transient miss) and
+            // back the hash off with increasing delay.
+            if (existing->second.asked_preferred && !tip_extending) {
+                auto& backoff{m_matmul_attestation_backoff[hash]};
+                backoff.signer_absent = true;
+                backoff.consecutive_misses =
+                    std::min(backoff.consecutive_misses + 1,
+                             MATMUL_ATTESTATION_MISS_BACKOFF_MAX_EXP);
+                const auto delay{
+                    MATMUL_ATTESTATION_MISS_BACKOFF_BASE *
+                    (1 << std::max(0, backoff.consecutive_misses - 1))};
+                backoff.not_before =
+                    std::chrono::steady_clock::now() + delay;
+                LogDebug(
+                    BCLog::NET,
+                    "matmul trusted mirror signer-absent backoff "
+                    "block=%s height=%d misses=%d delay_s=%d\n",
+                    hash.ToString(), height, backoff.consecutive_misses,
+                    static_cast<int>(
+                        std::chrono::duration_cast<std::chrono::seconds>(
+                            delay)
+                            .count()));
+                m_matmul_attestation_requested.erase(existing);
+                ++m_matmul_trusted_reject_unattestable;
+                MaybeLogTrustedMirrorStall(tip_height);
+                return;
+            }
+            // Transient miss (no preferred peer reached): allow a fresh round,
+            // but do not re-ask peers that already failed to answer.
             skip_peers = existing->second.asked_peers;
             existing->second.requested_at = now;
             existing->second.height = height;
             existing->second.tip_extending = tip_extending;
+            existing->second.asked_preferred = false;
             request = true;
         } else {
-            if (m_matmul_attestation_requested.size() >=
-                MATMUL_ATTESTATION_OUTSTANDING_MAX) {
-                if (!tip_extending) {
-                    // Backfill must not consume slots needed for tip advance.
+            const size_t outstanding{m_matmul_attestation_requested.size()};
+            if (!tip_extending) {
+                // Reserve capacity so a tip-extender can always admit.
+                if (!node::matmul_trusted::
+                        TrustedAttestationRequestCapacityAllows(
+                            /*tip_extending=*/false, outstanding,
+                            MATMUL_ATTESTATION_OUTSTANDING_MAX,
+                            MATMUL_ATTESTATION_TIP_RESERVED)) {
+                    MaybeLogTrustedMirrorStall(tip_height);
                     return;
                 }
+            } else if (outstanding >= MATMUL_ATTESTATION_OUTSTANDING_MAX) {
                 // Evict the oldest non-tip-extending request.
                 auto victim{m_matmul_attestation_requested.end()};
                 for (auto it = m_matmul_attestation_requested.begin();
@@ -5928,6 +6067,7 @@ void PeerManagerImpl::RequestMatMulTrustedAttestations(
                     }
                 }
                 if (victim == m_matmul_attestation_requested.end()) {
+                    MaybeLogTrustedMirrorStall(tip_height);
                     return; // map full of tip-extending work
                 }
                 m_matmul_attestation_requested.erase(victim);
@@ -5938,7 +6078,8 @@ void PeerManagerImpl::RequestMatMulTrustedAttestations(
                     .requested_at = now,
                     .height = height,
                     .tip_extending = tip_extending,
-                    .asked_peers = {}});
+                    .asked_peers = {},
+                    .asked_preferred = false});
             request = true;
         }
 
@@ -5957,14 +6098,11 @@ void PeerManagerImpl::RequestMatMulTrustedAttestations(
     }
     if (!request) return;
 
-    // Query archive providers that actually serve attestations. Prefer peers
-    // that recently delivered a usable MMATTEST; skip peers already asked for
-    // this hash that stayed silent. The admitted source is also queried to
-    // tolerate a provider whose service advertisement has not propagated yet.
-    // Service flags are only routing hints; configured signatures decide
-    // authority.
+    // Prefer peers that recently delivered usable MMATTEST, then attestation
+    // archives, then the admitted source. Service flags are routing hints;
+    // configured signatures decide authority.
     std::set<NodeId> asked_now;
-    auto consider = [&](CNode* target) {
+    auto consider = [&](CNode* target, bool preferred_lane) {
         if (!target ||
             target->GetCommonVersion() < MATMUL_ATTESTATION_VERSION) {
             return;
@@ -5977,25 +6115,31 @@ void PeerManagerImpl::RequestMatMulTrustedAttestations(
             target_peer
                 ? target_peer->m_their_services.load()
                 : NODE_NONE};
-        const bool preferred{
+        const bool recent_success{
             std::find(prefer_peers.begin(), prefer_peers.end(), id) !=
             prefer_peers.end()};
-        if ((services & NODE_MATMUL_ATTESTATION_ARCHIVE) !=
-                NODE_MATMUL_ATTESTATION_ARCHIVE &&
-            id != source && !preferred) {
+        const bool archive{
+            (services & NODE_MATMUL_ATTESTATION_ARCHIVE) ==
+            NODE_MATMUL_ATTESTATION_ARCHIVE};
+        if (!recent_success && !archive && id != source) {
             return;
         }
         MakeAndPushMessage(*target, NetMsgType::GETMMATTEST, hash);
         asked_now.insert(id);
+        if (preferred_lane || recent_success || archive) {
+            asked_preferred_round = true;
+        }
     };
 
     for (NodeId id : prefer_peers) {
         m_connman.ForNode(id, [&](CNode* target) {
-            consider(target);
+            consider(target, /*preferred_lane=*/true);
             return true;
         });
     }
-    m_connman.ForEachNode([&](CNode* target) { consider(target); });
+    m_connman.ForEachNode([&](CNode* target) {
+        consider(target, /*preferred_lane=*/false);
+    });
 
     if (!asked_now.empty()) {
         LOCK(cs_main);
@@ -6003,6 +6147,9 @@ void PeerManagerImpl::RequestMatMulTrustedAttestations(
         if (it != m_matmul_attestation_requested.end()) {
             it->second.asked_peers.insert(asked_now.begin(),
                                           asked_now.end());
+            if (asked_preferred_round) {
+                it->second.asked_preferred = true;
+            }
         }
     }
 }
@@ -7959,6 +8106,47 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
     }
     if (accepted_ticket) {
         RememberMatMulRCOutboundTicket(*accepted_ticket);
+    }
+    // Trusted mirrors must not spend scarce verify/park slots on work the
+    // configured authority will never attest (parked deep-reorg branches,
+    // competing forks that do not extend the active tip, heights above the
+    // known attested frontier, or hashes in signer-absent backoff).
+    if (node::matmul_trusted::IsTrustedMirror() &&
+        params.IsMatMulTrustedReplayAttestationActive(
+            exact_reference_height)) {
+        node::matmul_trusted::TrustedAttestationAdmit admit{
+            node::matmul_trusted::TrustedAttestationAdmit::Allow};
+        int32_t tip_height{-1};
+        {
+            LOCK(cs_main);
+            const CBlockIndex* tip{m_chainman.ActiveTip()};
+            tip_height = tip ? tip->nHeight : -1;
+            const CBlockIndex* index{
+                m_chainman.m_blockman.LookupBlockIndex(block_hash)};
+            const bool tip_extending{
+                tip != nullptr &&
+                block.hashPrevBlock == tip->GetBlockHash()};
+            admit = EvaluateTrustedMirrorAttestationAdmit(
+                block_hash, index, tip, tip_extending);
+            if (admit !=
+                node::matmul_trusted::TrustedAttestationAdmit::Allow) {
+                ++m_matmul_trusted_reject_unattestable;
+                MaybeLogTrustedMirrorStall(tip_height);
+            }
+        }
+        if (admit !=
+            node::matmul_trusted::TrustedAttestationAdmit::Allow) {
+            restore_accepted_ticket();
+            LogDebug(
+                BCLog::NET,
+                "Skipping MatMul verification admission for trusted "
+                "mirror %s hash=%s height=%d reason=%s peer=%d\n",
+                source, block_hash.ToString(), exact_reference_height,
+                node::matmul_trusted::TrustedAttestationAdmitName(admit),
+                node.GetId());
+            admission.state = MatMulBlockAdmission::State::HEADER_ONLY;
+            return true;
+        }
     }
     if (exact_encdr_profile && !MarkMatMulAsyncVerification(block_hash)) {
         restore_accepted_ticket();
@@ -11147,6 +11335,13 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                     LOCK(cs_main);
                     m_matmul_attestation_peer_success[pfrom.GetId()] =
                         GetTime<std::chrono::microseconds>();
+                    m_matmul_attestation_backoff.erase(hash);
+                    if (const CNodeState* state{State(pfrom.GetId())};
+                        state != nullptr &&
+                        state->pindexBestKnownBlock != nullptr) {
+                        node::matmul_trusted::NoteAuthorityPeerTipHint(
+                            state->pindexBestKnownBlock->nHeight);
+                    }
                 }
             } else if (result !=
                        matmul::trusted::AddResult::Duplicate) {

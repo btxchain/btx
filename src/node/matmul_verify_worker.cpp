@@ -467,6 +467,7 @@ void MatMulVerifyWorker::WorkerLoop()
     for (;;) {
         std::shared_ptr<Pending> pending;
         std::vector<std::shared_ptr<Pending>> expired_awaiting;
+        uint256 active_tip_hash{};
         {
             std::unique_lock<std::mutex> lock(m_mutex);
             for (;;) {
@@ -518,11 +519,13 @@ void MatMulVerifyWorker::WorkerLoop()
             pending = m_queue[best];
             m_queue.erase(m_queue.begin() + best);
             pending->running = true;
+            active_tip_hash = m_tip_hash;
         }
 
         Job& job{pending->job};
         const CBlockHeader& header{job.GetHeader()};
         const uint256 hash{header.GetHash()};
+        const bool tip_extending{header.hashPrevBlock == active_tip_hash};
         const auto finish_retryable_without_verdict = [&] {
             std::vector<std::function<void()>> callbacks;
             {
@@ -622,6 +625,22 @@ void MatMulVerifyWorker::WorkerLoop()
             // (deadline = matmultrustedwaitms) so other blocks stay in flight;
             // NotifyQuorumReady requeues when M-of-N arrives. Timeout/cancel
             // remain retryable and non-punitive.
+            //
+            // Do not park provably-unattestable work: heights above the known
+            // authority frontier (except the tip-extender, which may probe one
+            // step ahead) must not consume scarce park slots.
+            const auto frontier{
+                node::matmul_trusted::AuthorityAttestedFrontier()};
+            if (!tip_extending && frontier.has_value() &&
+                job.height > *frontier) {
+                LogDebug(
+                    BCLog::NET,
+                    "matmul trusted mirror skip park above frontier: "
+                    "block=%s height=%d frontier=%d\n",
+                    hash.ToString(), job.height, *frontier);
+                finish_retryable_without_verdict();
+                continue;
+            }
             if (node::matmul_trusted::HasQuorum(hash, job.height)) {
                 ok = true;
                 // Ephemeral only. The index's trusted-status bit is audit

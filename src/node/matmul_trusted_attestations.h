@@ -95,6 +95,111 @@ VerifyUtxoSnapshotManifest(
 [[nodiscard]] matmul::trusted::StoreStats Stats();
 
 /**
+ * Local sync-policy hints for a trusted mirror (not consensus).
+ *
+ * The attested frontier is the highest height for which this process has seen a
+ * cryptographically valid attestation from a configured signer. Optionally, a
+ * soft peer-tip hint records the best-known height of peers that recently
+ * delivered usable MMATTEST. Neither field lowers the M-of-N quorum; they only
+ * decide which blocks may consume scarce request/park/verify slots.
+ */
+[[nodiscard]] std::optional<int32_t> HighestAttestedHeight();
+[[nodiscard]] std::optional<int32_t> AuthorityPeerTipHint();
+/** Effective frontier: max(highest attested, peer tip hint), if either known. */
+[[nodiscard]] std::optional<int32_t> AuthorityAttestedFrontier();
+void NoteAcceptedAttestationHeight(int32_t height);
+void NoteAuthorityPeerTipHint(int32_t height);
+
+/**
+ * Pure admission policy for trusted-mirror attestation / park / verify slots.
+ *
+ * Tip-extending work is always eligible (except cancelled/stopped paths): it is
+ * how the mirror advances, and may briefly probe one height past a stale
+ * frontier so the frontier can catch up when the authority mines. Everything
+ * else must be a forward extension of the active tip's chain, must not sit on a
+ * parked deep-reorg branch, must not exceed the known authority frontier, and
+ * must not be in negative-cache backoff after signers stayed silent.
+ */
+enum class TrustedAttestationAdmit : uint8_t {
+    Allow,
+    RejectNotForwardOfTip,
+    RejectParkedReorg,
+    RejectAboveFrontier,
+    RejectBackoff,
+};
+
+struct TrustedAttestationAdmitView {
+    bool tip_extending{false};
+    //! index->GetAncestor(tip_height) == tip (strict forward of active tip).
+    bool extends_active_tip_chain{false};
+    bool on_parked_reorg_branch{false};
+    int32_t height{-1};
+    std::optional<int32_t> authority_frontier{};
+    bool in_backoff{false};
+};
+
+[[nodiscard]] inline TrustedAttestationAdmit EvaluateTrustedAttestationAdmit(
+    const TrustedAttestationAdmitView& v)
+{
+    if (v.tip_extending) {
+        // Tip-extender is never starved by frontier/backoff/branch filters.
+        return TrustedAttestationAdmit::Allow;
+    }
+    if (v.on_parked_reorg_branch) {
+        return TrustedAttestationAdmit::RejectParkedReorg;
+    }
+    if (!v.extends_active_tip_chain) {
+        return TrustedAttestationAdmit::RejectNotForwardOfTip;
+    }
+    if (v.authority_frontier.has_value() &&
+        v.height > *v.authority_frontier) {
+        return TrustedAttestationAdmit::RejectAboveFrontier;
+    }
+    if (v.in_backoff) {
+        return TrustedAttestationAdmit::RejectBackoff;
+    }
+    return TrustedAttestationAdmit::Allow;
+}
+
+[[nodiscard]] inline const char* TrustedAttestationAdmitName(
+    TrustedAttestationAdmit decision)
+{
+    switch (decision) {
+    case TrustedAttestationAdmit::Allow:
+        return "allow";
+    case TrustedAttestationAdmit::RejectNotForwardOfTip:
+        return "reject_not_forward_of_tip";
+    case TrustedAttestationAdmit::RejectParkedReorg:
+        return "reject_parked_reorg";
+    case TrustedAttestationAdmit::RejectAboveFrontier:
+        return "reject_above_frontier";
+    case TrustedAttestationAdmit::RejectBackoff:
+        return "reject_backoff";
+    }
+    return "unknown";
+}
+
+/**
+ * Outstanding-request capacity under tip reservation.
+ *
+ * Non-tip work may only fill `max_outstanding - tip_reserved` slots so a
+ * tip-extender can always admit (binding tip-first under slot pressure). Tip
+ * work itself is always permitted to attempt admission (and may displace
+ * non-tip occupants when the map is completely full).
+ */
+[[nodiscard]] inline bool TrustedAttestationRequestCapacityAllows(
+    bool tip_extending,
+    size_t outstanding,
+    size_t max_outstanding,
+    size_t tip_reserved = 1)
+{
+    if (max_outstanding == 0) return false;
+    if (tip_reserved > max_outstanding) tip_reserved = max_outstanding;
+    if (tip_extending) return true;
+    return outstanding < max_outstanding - tip_reserved;
+}
+
+/**
  * Tip-first ranking for trusted-mirror attestation / verify work.
  *
  * Prefer the block that extends the active tip, then blocks above the tip in
