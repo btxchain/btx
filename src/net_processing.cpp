@@ -973,7 +973,7 @@ private:
         int32_t reference_height,
         bool& global_exhausted,
         bool rc_recompute = false,
-        bool header_batch = false) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+        bool header_batch = false);
     /** Charge only the retained source's RC budget for a bounded handoff.
      *  The inherited paid attempt already owns the one global debit. */
     bool ConsumeMatMulRCPeerBudgetForHandoff(
@@ -1136,7 +1136,8 @@ private:
      */
     bool MaybeSendGetHeaders(CNode& pfrom, const CBlockLocator& locator, Peer& peer) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
     /** Potentially fetch blocks from this peer upon receipt of a new headers tip */
-    void HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, const CBlockIndex& last_header);
+    void HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, const CBlockIndex& last_header)
+        EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
     /** Update peer state based on received headers message */
     void UpdatePeerStateForReceivedHeaders(CNode& pfrom, Peer& peer, const CBlockIndex& last_header, bool received_new_header, bool may_have_more_headers)
         EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
@@ -1343,12 +1344,21 @@ private:
         GUARDED_BY(m_matmul_rc_deferred_mutex);
     void MarkMatMulRCBodyDeferred(const uint256& hash, int64_t peer_id) NO_THREAD_SAFETY_ANALYSIS;
     bool IsMatMulRCBodyDeferred(const uint256& hash, int64_t peer_id) const NO_THREAD_SAFETY_ANALYSIS;
-    /** Highest block height advertised by any connected peer, cached ~1s.
+    /** Highest block height advertised by any connected peer.
      *  Used to detect catch-up WITHOUT depending on our own m_best_header,
-     *  which cannot advance while verification is budget-starved. */
+     *  which cannot advance while verification is budget-starved.
+     *  Updated lock-free from cs_main holders via NoteBestPeerAdvertisedHeight;
+     *  ConsumeMatMulVerificationBudgetForPeer reads it without cs_main. */
     std::atomic<int> m_best_peer_height_cache{0};
-    std::atomic<std::chrono::seconds> m_best_peer_height_cached_at{0s};
-    int BestPeerAdvertisedHeight() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    /** Raise the cached max peer-advertised height (monotonic). */
+    void NoteBestPeerAdvertisedHeight(int height)
+    {
+        int cur{m_best_peer_height_cache.load(std::memory_order_relaxed)};
+        while (height > cur &&
+               !m_best_peer_height_cache.compare_exchange_weak(
+                   cur, height, std::memory_order_relaxed)) {
+        }
+    }
 
     /** Bodies held back by the MatMul verification budget, kept for re-validation
      *  when the window refills rather than discarded and re-downloaded. */
@@ -2246,23 +2256,6 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
                      /*post_process=*/{});
 }
 
-int PeerManagerImpl::BestPeerAdvertisedHeight()
-{
-    const auto now{GetTime<std::chrono::seconds>()};
-    if (now == m_best_peer_height_cached_at.load()) {
-        return m_best_peer_height_cache.load();
-    }
-    int best{0};
-    for (const auto& [id, st] : m_node_states) {
-        if (st.pindexBestKnownBlock != nullptr) {
-            best = std::max(best, st.pindexBestKnownBlock->nHeight);
-        }
-    }
-    m_best_peer_height_cache.store(best);
-    m_best_peer_height_cached_at.store(now);
-    return best;
-}
-
 bool PeerManagerImpl::IsMatMulRCBodyDeferred(const uint256& hash, int64_t peer_id) const
 {
     LOCK(m_matmul_rc_deferred_mutex);
@@ -2682,6 +2675,7 @@ void PeerManagerImpl::ProcessBlockAvailability(NodeId nodeid) {
         if (pindex && pindex->nChainWork > 0) {
             if (state->pindexBestKnownBlock == nullptr || pindex->nChainWork >= state->pindexBestKnownBlock->nChainWork) {
                 state->pindexBestKnownBlock = pindex;
+                NoteBestPeerAdvertisedHeight(pindex->nHeight);
             }
             state->hashLastUnknownBlock.SetNull();
         }
@@ -2699,6 +2693,7 @@ void PeerManagerImpl::UpdateBlockAvailability(NodeId nodeid, const uint256 &hash
         // An actually better block was announced.
         if (state->pindexBestKnownBlock == nullptr || pindex->nChainWork >= state->pindexBestKnownBlock->nChainWork) {
             state->pindexBestKnownBlock = pindex;
+            NoteBestPeerAdvertisedHeight(pindex->nHeight);
         }
     } else {
         // An unknown block was announced; just assume that the latest one is the best one.
@@ -2720,17 +2715,23 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
     ProcessBlockAvailability(peer.m_id);
 
     const CBlockIndex* tip{m_chainman.ActiveChain().Tip()};
+    // Snapshot cs_main-guarded diagnostics before the lambda. Clang does not
+    // propagate FindNextBlocksToDownload's EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+    // into nested lambdas, so reading m_best_header / mapBlocksInFlight inside
+    // log_skip would be a false-positive -Wthread-safety-analysis hit even
+    // though this whole function holds cs_main.
+    const int tip_height{tip != nullptr ? tip->nHeight : 0};
+    const int best_header_height{
+        m_chainman.m_best_header != nullptr ? m_chainman.m_best_header->nHeight : 0};
+    const int blocks_in_flight_global{static_cast<int>(mapBlocksInFlight.size())};
     const auto log_skip = [&](const char* reason) {
         // Only log when something is actually waiting to be fetched; otherwise
         // this path is the steady-state "peer has nothing new" case.
         if (tip == nullptr) return;
-        const int best_header_ahead{
-            m_chainman.m_best_header != nullptr
-                ? m_chainman.m_best_header->nHeight - tip->nHeight
-                : 0};
+        const int best_header_ahead{best_header_height - tip_height};
         const int peer_ahead{
             state->pindexBestKnownBlock != nullptr
-                ? state->pindexBestKnownBlock->nHeight - tip->nHeight
+                ? state->pindexBestKnownBlock->nHeight - tip_height
                 : 0};
         if (best_header_ahead < BLOCK_FETCH_STALL_HEADERS_AHEAD &&
             peer_ahead < BLOCK_FETCH_STALL_HEADERS_AHEAD) {
@@ -2739,8 +2740,8 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
         LogDebug(BCLog::NET, "FindNextBlocksToDownload skip peer=%d reason=%s tip=%d "
                 "best_header_ahead=%d peer_best_ahead=%d in_flight_global=%d "
                 "peer_in_flight=%d\n",
-                peer.m_id, reason, tip->nHeight, best_header_ahead, peer_ahead,
-                static_cast<int>(mapBlocksInFlight.size()),
+                peer.m_id, reason, tip_height, best_header_ahead, peer_ahead,
+                blocks_in_flight_global,
                 static_cast<int>(state->vBlocksInFlight.size()));
     };
 
@@ -3795,19 +3796,29 @@ bool PeerManagerImpl::ConsumeMatMulVerificationBudgetForPeer(
                 // peer_best_ahead=60, with 346 budget-exhaustion events in 75s.
                 // Peer-advertised height is independent of our own stuck
                 // validation and breaks that circularity.
-                const int active_height{m_chainman.ActiveHeight()};
-                const int best_header_height{
-                    std::max(m_chainman.m_best_header != nullptr
-                                 ? m_chainman.m_best_header->nHeight
-                                 : 0,
-                             BestPeerAdvertisedHeight())};
-                if (best_header_height - active_height >
+                //
+                // Both heights are lock-free atomics. Callers
+                // (MaybeStartMatMulRCHeaderVerification, ProcessHeadersMessage,
+                // ProcessBlock) intentionally do NOT hold cs_main here: the
+                // body path AssertLockNotHeld(cs_main) because ProcessNewBlock
+                // re-enters validation. Reading tip state under a fresh
+                // LOCK(cs_main) would recreate the production deadlock class.
+                // m_best_height is maintained by SetBestBlock/ActiveTipChange;
+                // m_best_peer_height_cache is raised from UpdateBlockAvailability
+                // under cs_main. A slightly stale snapshot only delays or
+                // briefly extends the catch-up multiplier — never races
+                // mapBlocksInFlight / m_best_header under another mutex.
+                const int active_height{
+                    std::max(0, m_best_height.load(std::memory_order_relaxed))};
+                const int best_peer_height{
+                    m_best_peer_height_cache.load(std::memory_order_relaxed)};
+                if (best_peer_height - active_height >
                     MATMUL_RC_CATCHUP_DEPTH_THRESHOLD) {
                     // Scale with the size of the backlog we are actually
                     // following, not a flat factor: a node 200 blocks behind
                     // needs proportionally more verification headroom than one
                     // 10 behind. Bounded so this can never become unlimited.
-                    const int behind{best_header_height - active_height};
+                    const int behind{best_peer_height - active_height};
                     const uint32_t scale{std::clamp<uint32_t>(
                         static_cast<uint32_t>(behind /
                                               MATMUL_RC_CATCHUP_DEPTH_THRESHOLD),
@@ -5522,6 +5533,7 @@ bool PeerManagerImpl::MaybeSendGetHeaders(CNode& pfrom, const CBlockLocator& loc
  */
 void PeerManagerImpl::HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, const CBlockIndex& last_header)
 {
+    AssertLockHeld(g_msgproc_mutex);
     LOCK(cs_main);
     // Not eligibility-gated: see MaybeSendGetHeaders. Fetching is not validating.
     CNodeState *nodestate = State(pfrom.GetId());
@@ -8263,6 +8275,9 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         peer->m_their_services = nServices;
         pfrom.SetAddrLocal(addrMe);
         peer->m_starting_height = starting_height;
+        if (starting_height > 0) {
+            NoteBestPeerAdvertisedHeight(starting_height);
+        }
 
         // Only initialize the Peer::TxRelay m_relay_txs data structure if:
         // - this isn't an outbound block-relay-only connection, and
