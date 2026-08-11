@@ -63,6 +63,21 @@ void ResetForTest();
     const uint256& block_hash,
     int32_t block_height,
     matmul::trusted::ExactReplayAttestation* produced = nullptr);
+/**
+ * Sign a UTXO snapshot statement with the configured local attestation key.
+ * Returns nullopt when unconfigured or the statement's chain/authority fields
+ * do not match the local trusted-mirror configuration.
+ */
+[[nodiscard]] std::optional<matmul::trusted::UtxoSnapshotSignature>
+SignUtxoSnapshot(const matmul::trusted::UtxoSnapshotStatement& statement);
+/**
+ * Verify an attested-fast-forward manifest against the configured signer set
+ * and threshold. Consensus nodes (no store) always fail closed.
+ */
+[[nodiscard]] matmul::trusted::UtxoSnapshotVerifyResult
+VerifyUtxoSnapshotManifest(
+    const matmul::trusted::UtxoSnapshotManifest& manifest);
+[[nodiscard]] std::optional<uint256> ChainId();
 [[nodiscard]] bool HasQuorum(const uint256& block_hash, int32_t block_height);
 [[nodiscard]] matmul::trusted::WaitResult WaitForQuorum(
     const uint256& block_hash,

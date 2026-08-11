@@ -229,6 +229,33 @@ matmul::trusted::AddResult SignAuthoritative(
     return store->SignLocal(block_hash, block_height, produced);
 }
 
+std::optional<matmul::trusted::UtxoSnapshotSignature> SignUtxoSnapshot(
+    const matmul::trusted::UtxoSnapshotStatement& statement)
+{
+    auto store{Store()};
+    if (!store) return std::nullopt;
+    return store->SignUtxoSnapshot(statement);
+}
+
+matmul::trusted::UtxoSnapshotVerifyResult VerifyUtxoSnapshotManifest(
+    const matmul::trusted::UtxoSnapshotManifest& manifest)
+{
+    auto store{Store()};
+    if (!store) {
+        return matmul::trusted::UtxoSnapshotVerifyResult::ThresholdNotMet;
+    }
+    return matmul::trusted::VerifyUtxoSnapshotManifestSelfConsistent(
+        manifest, store->ChainId(), store->ReplayAuthorityContext(),
+        store->TrustedSigners(), store->Threshold());
+}
+
+std::optional<uint256> ChainId()
+{
+    auto store{Store()};
+    if (!store) return std::nullopt;
+    return store->ChainId();
+}
+
 bool HasQuorum(const uint256& block_hash, int32_t block_height)
 {
     auto store{Store()};

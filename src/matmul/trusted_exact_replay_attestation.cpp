@@ -335,6 +335,18 @@ AddResult AttestationStore::SignLocal(
     return result;
 }
 
+std::optional<UtxoSnapshotSignature> AttestationStore::SignUtxoSnapshot(
+    const UtxoSnapshotStatement& statement) const
+{
+    if (!m_config.local_signer.has_value()) return std::nullopt;
+    if (statement.chain_id != m_config.chain_id) return std::nullopt;
+    if (statement.replay_authority_context !=
+        m_config.replay_authority_context) {
+        return std::nullopt;
+    }
+    return SignUtxoSnapshotStatement(statement, *m_config.local_signer);
+}
+
 bool AttestationStore::HasQuorum(const uint256& block_hash,
                                   int32_t block_height) const
 {

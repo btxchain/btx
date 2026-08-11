@@ -6,6 +6,7 @@
 #define BTX_MATMUL_TRUSTED_EXACT_REPLAY_ATTESTATION_H
 
 #include <key.h>
+#include <matmul/trusted_utxo_snapshot_attestation.h>
 #include <pubkey.h>
 #include <serialize.h>
 #include <uint256.h>
@@ -196,6 +197,13 @@ public:
         const uint256& block_hash,
         int32_t block_height,
         ExactReplayAttestation* produced = nullptr);
+
+    /**
+     * Sign an attested-fast-forward UTXO snapshot statement with the optional
+     * local key. Does not store the signature; callers assemble manifests.
+     */
+    [[nodiscard]] std::optional<UtxoSnapshotSignature> SignUtxoSnapshot(
+        const UtxoSnapshotStatement& statement) const;
 
     [[nodiscard]] bool HasQuorum(const uint256& block_hash,
                                  int32_t block_height) const;
