@@ -2245,6 +2245,35 @@ static bool InitializeMatMulRCReadinessPostDaemon(
         static_cast<unsigned long long>(
             rc_workspace_capacity_bytes));
 
+    // Actionable guidance when this node cannot validate post-activation blocks.
+    //
+    // Without it the failure is silent and unactionable: a CPU-only node syncs
+    // perfectly up to the Epoch-A activation height and then pins one block
+    // below it, logging only "ExactReplay: local execution failed" every ~60s
+    // forever. An operator has no way to know that the node is working as
+    // designed and simply needs either a qualified GPU or trusted mode.
+    // Reported by an independent operator 2026-08-11 whose fresh CPU node
+    // stalled at 184999 with no idea why.
+    if (!rc_strict_device_ready &&
+        chainparams.GetConsensus().nMatMulRCHeight != std::numeric_limits<int32_t>::max() &&
+        args.GetArg("-matmulvalidation", "consensus") == "consensus") {
+        LogPrintf(
+            "MatMul RC WARNING: this node has NO qualified ExactReplay device "
+            "(provider=%s reason=%s) and is running -matmulvalidation=consensus. "
+            "It will validate normally up to the Epoch-A activation height and "
+            "then STALL one block below it, deferring every MatMul block with "
+            "\"ExactReplay: local execution failed\". Choose one:\n"
+            "  (a) provide a qualified GPU (see the operator runbook; a Profile-1 "
+            "episode needs ~%llu bytes of device workspace), or\n"
+            "  (b) run as a trusted mirror instead: -matmulvalidation=trusted "
+            "plus -matmultrustedpubkey=<signer> (repeat for N signers) and "
+            "-matmultrustedthreshold=<M>, which replaces local ExactReplay with "
+            "a signed archive-validator quorum. A trusted mirror is NOT an "
+            "independently validating full node.\n",
+            rc_provider, rc_resolution_reason,
+            static_cast<unsigned long long>(rc_workspace_required_bytes));
+    }
+
     // Publish validation-tier services only after provider readiness is known.
     // In particular, no parent process may advertise consensus or attestation
     // archive service based on accelerator state inherited across fork().

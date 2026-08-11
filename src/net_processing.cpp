@@ -260,6 +260,10 @@ static_assert(INVENTORY_BROADCAST_MAX >= INVENTORY_BROADCAST_TARGET, "INVENTORY_
 static_assert(INVENTORY_BROADCAST_MAX <= node::MAX_PEER_TX_ANNOUNCEMENTS, "INVENTORY_BROADCAST_MAX too high");
 /** Hard cap on queued tx announcements per peer to bound memory usage. */
 static constexpr size_t MAX_TX_INVENTORY_TO_SEND = node::MAX_PEER_TX_ANNOUNCEMENTS;
+/** How often we may probe a single peer with getheaders purely to learn its
+ *  best block, when it has never told us one. */
+static constexpr auto BEST_KNOWN_PROBE_INTERVAL{2min};
+
 /** Bounds on the deferred-body store. A body held back for verification budget
  *  is KEPT so it can be validated when the window refills, instead of being
  *  discarded and re-downloaded (which is what turned budget pressure into a
@@ -1347,6 +1351,9 @@ private:
     void RetryMatMulDeferredBodies()
         EXCLUSIVE_LOCKS_REQUIRED(!m_matmul_deferred_body_mutex, !cs_main);
     std::atomic<std::chrono::seconds> m_matmul_deferred_retry_at{0s};
+    /** Last time we probed a peer with getheaders solely to establish
+     *  pindexBestKnownBlock, keyed by NodeId. */
+    std::map<NodeId, std::chrono::microseconds> m_best_known_probe_at GUARDED_BY(cs_main);
     void ClearMatMulRCBodyDeferred(const uint256& hash) NO_THREAD_SAFETY_ANALYSIS;
     void PinMatMulBlockSource(const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     void UnpinMatMulBlockSource(const uint256& hash) NO_THREAD_SAFETY_ANALYSIS;
@@ -2996,6 +3003,7 @@ void PeerManagerImpl::ReattemptInitialBroadcast(CScheduler& scheduler)
 
 void PeerManagerImpl::FinalizeNode(const CNode& node)
 {
+    WITH_LOCK(cs_main, m_best_known_probe_at.erase(node.GetId()));
     if (m_dandelion) m_dandelion->PeerDisconnected(node.GetId());
     NodeId nodeid = node.GetId();
     {
@@ -11967,6 +11975,48 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                          expected_headers
                         );
                     nSyncStarted++;
+                }
+            }
+        }
+
+        // Fan-out probe: establish pindexBestKnownBlock for peers that never
+        // told us one.
+        //
+        // Block download requires state->pindexBestKnownBlock; without it a
+        // peer is reported as 'no_best_known' and is unusable, no matter how
+        // high a chain it advertised at VERSION time. We only send getheaders
+        // to the single sync peer and to peers that spontaneously announce a
+        // header, so a peer that connects advertising a tip far above ours and
+        // then stays quiet is never asked and never becomes usable. Download
+        // then serialises onto one peer's MAX_BLOCKS_IN_TRANSIT_PER_PEER window
+        // and crawls.
+        //
+        // Measured 2026-08-11: on one node 26 of 66 peers sat at
+        // synced_headers=-1, 11 of them advertising heights ABOVE our tip; on an
+        // independent CPU node only 2 of ~10 peers were ever sent getheaders and
+        // it sped up measurably as soon as a second peer became usable.
+        //
+        // So: when we are behind a peer's advertised height and have no best
+        // known block for it, ask once, rate-limited per peer. This is the same
+        // message the sync peer already gets, not a new protocol burden, and it
+        // is bounded by BEST_KNOWN_PROBE_INTERVAL per peer.
+        if (state.pindexBestKnownBlock == nullptr && CanServeBlocks(*peer) &&
+            !m_chainman.m_blockman.LoadingBlocks() && !pto->IsAddrFetchConn()) {
+            const CBlockIndex* tip{m_chainman.ActiveChain().Tip()};
+            if (tip != nullptr && peer->m_starting_height > tip->nHeight) {
+                auto& last_probe{m_best_known_probe_at[pto->GetId()]};
+                if (last_probe.count() == 0 ||
+                    current_time - last_probe > BEST_KNOWN_PROBE_INTERVAL) {
+                    const CBlockIndex* start{m_chainman.m_best_header};
+                    if (start != nullptr && start->pprev) start = start->pprev;
+                    if (start != nullptr &&
+                        MaybeSendGetHeaders(*pto, GetLocator(start), *peer)) {
+                        last_probe = current_time;
+                        LogDebug(BCLog::NET,
+                                 "best-known probe: getheaders to peer=%d "
+                                 "(advertised %d, our tip %d)\n",
+                                 pto->GetId(), peer->m_starting_height, tip->nHeight);
+                    }
                 }
             }
         }
