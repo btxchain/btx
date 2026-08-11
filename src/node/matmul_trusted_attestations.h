@@ -15,6 +15,9 @@
 #include <string>
 #include <vector>
 
+#include <uint256.h>
+#include <util/fs.h>
+
 namespace node::matmul_trusted {
 
 /** Process-local operator trust runtime.
@@ -93,6 +96,53 @@ VerifyUtxoSnapshotManifest(
 [[nodiscard]] std::vector<matmul::trusted::ExactReplayAttestation> Get(
     const uint256& block_hash, int32_t block_height);
 [[nodiscard]] matmul::trusted::StoreStats Stats();
+
+/**
+ * Open/replace the durable attestation archive under `path`.
+ *
+ * Retention: capacity-bounded to the store's max_blocks/max_attestations
+ * (defaults 4096 blocks / 16384 signatures). Wall-clock TTL pruning is
+ * disabled while the archive is open so a long-lived authority process cannot
+ * drop signatures that mirrors still need after a restart. Oldest completed
+ * buckets are still evicted under capacity pressure. Load verifies every
+ * signature against the current configured chain/signers before import.
+ */
+bool OpenPersistence(const fs::path& path, std::string& error);
+void ClosePersistence();
+[[nodiscard]] bool PersistenceEnabled();
+/** Flush the in-memory store to the durable archive (no-op if closed). */
+bool FlushPersistence(std::string& error);
+
+/**
+ * Historical ExactReplay re-verify budget (authority serve path).
+ *
+ * Unauthenticated peers already pay a GETMMATTEST token; this second budget
+ * bounds expensive GPU ExactReplay so a flood of requests for blocks lacking a
+ * persisted ExactReplay bit cannot monopolize the device. Defaults: burst 2,
+ * refill one token / 30s, max 4 queued, max 1 in flight.
+ */
+struct HistoricalReverifyBudget {
+    static constexpr double BURST{2.0};
+    static constexpr auto REFILL{std::chrono::seconds{30}};
+    static constexpr size_t QUEUE_MAX{4};
+    static constexpr size_t INFLIGHT_MAX{1};
+};
+
+enum class HistoricalReverifyAdmit : uint8_t {
+    Allow,
+    RateLimited,
+    QueueFull,
+    AlreadyQueued,
+    InflightFull,
+};
+
+[[nodiscard]] HistoricalReverifyAdmit TryAdmitHistoricalReverify(
+    const uint256& block_hash);
+void NoteHistoricalReverifyStarted(const uint256& block_hash);
+void NoteHistoricalReverifyFinished(const uint256& block_hash);
+void ResetHistoricalReverifyBudgetForTest();
+[[nodiscard]] size_t HistoricalReverifyQueuedForTest();
+[[nodiscard]] size_t HistoricalReverifyInflightForTest();
 
 /**
  * Local sync-policy hints for a trusted mirror (not consensus).

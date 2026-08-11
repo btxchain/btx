@@ -5,10 +5,20 @@
 #include <node/matmul_trusted_attestations.h>
 
 #include <key_io.h>
+#include <logging.h>
+#include <span.h>
+#include <streams.h>
 #include <support/cleanse.h>
+#include <util/fs.h>
+#include <util/readwritefile.h>
+#include <util/strencodings.h>
+#include <util/string.h>
 
 #include <algorithm>
+#include <chrono>
+#include <cstring>
 #include <mutex>
+#include <set>
 #include <stdexcept>
 #include <utility>
 
@@ -33,6 +43,20 @@ int32_t g_highest_attested_height{-1};
 //! Soft hint: max best-known height among peers that recently served MMATTEST.
 int32_t g_authority_peer_tip_hint{-1};
 
+fs::path g_persist_path;
+bool g_persist_enabled{false};
+
+std::mutex g_reverify_mutex;
+double g_reverify_tokens{HistoricalReverifyBudget::BURST};
+std::chrono::steady_clock::time_point g_reverify_last_refill{
+    std::chrono::steady_clock::now()};
+std::set<uint256> g_reverify_queued;
+std::set<uint256> g_reverify_inflight;
+
+constexpr char PERSIST_MAGIC[16] = "BTX_MMATTEST_V1";
+//! Bound the on-disk rewrite so a corrupt/oversized file cannot DoS startup.
+constexpr size_t PERSIST_MAX_BYTES{32 * 1024 * 1024};
+
 void CleanseStagedConfigurationLocked()
 {
     if (g_staged.has_value() &&
@@ -47,6 +71,150 @@ std::shared_ptr<matmul::trusted::AttestationStore> Store()
 {
     std::lock_guard lock{g_mutex};
     return g_store;
+}
+
+void RefillReverifyTokensLocked(
+    std::chrono::steady_clock::time_point now)
+{
+
+    const auto elapsed{now - g_reverify_last_refill};
+    const double refill{
+        static_cast<double>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(elapsed)
+                .count()) /
+        static_cast<double>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                HistoricalReverifyBudget::REFILL)
+                .count())};
+    if (refill <= 0.0) return;
+    g_reverify_tokens = std::min(HistoricalReverifyBudget::BURST,
+                                 g_reverify_tokens + refill);
+    g_reverify_last_refill = now;
+}
+
+bool FlushPersistenceLocked(
+    const std::shared_ptr<matmul::trusted::AttestationStore>& store,
+    std::string& error)
+{
+
+    if (!g_persist_enabled || g_persist_path.empty() || !store) {
+        return true;
+    }
+    const auto attestations{store->ExportAll()};
+    DataStream encoded;
+    encoded.write(AsBytes(Span{PERSIST_MAGIC, sizeof(PERSIST_MAGIC)}));
+    encoded << static_cast<uint64_t>(attestations.size());
+    for (const auto& attestation : attestations) {
+        encoded << attestation;
+    }
+    if (encoded.size() > PERSIST_MAX_BYTES) {
+        error = "attestation archive exceeds size bound";
+        return false;
+    }
+    const fs::path tmp{g_persist_path + ".tmp"};
+    if (!WriteBinaryFile(tmp, std::string(encoded.begin(), encoded.end()))) {
+        error = "failed to write attestation archive temp file";
+        return false;
+    }
+    std::error_code ec;
+    fs::rename(tmp, g_persist_path, ec);
+    if (ec) {
+        error = strprintf("failed to publish attestation archive: %s",
+                          ec.message());
+        fs::remove(tmp, ec);
+        return false;
+    }
+    return true;
+}
+
+bool LoadPersistenceLocked(
+    const std::shared_ptr<matmul::trusted::AttestationStore>& store,
+    std::string& error)
+{
+
+    if (!g_persist_enabled || g_persist_path.empty() || !store) {
+        return true;
+    }
+    if (!fs::exists(g_persist_path)) return true;
+    const auto [ok, bytes]{ReadBinaryFile(g_persist_path, PERSIST_MAX_BYTES)};
+    if (!ok) {
+        error = "failed to read attestation archive";
+        return false;
+    }
+    if (bytes.size() >= PERSIST_MAX_BYTES) {
+        error = "attestation archive exceeds size bound";
+        return false;
+    }
+    if (bytes.size() < sizeof(PERSIST_MAGIC)) {
+        error = "attestation archive too short";
+        return false;
+    }
+    try {
+        DataStream encoded{MakeUCharSpan(bytes)};
+        char magic[sizeof(PERSIST_MAGIC)];
+        encoded.read(AsWritableBytes(Span{magic, sizeof(magic)}));
+        if (std::memcmp(magic, PERSIST_MAGIC, sizeof(PERSIST_MAGIC)) != 0) {
+            error = "attestation archive magic mismatch";
+            return false;
+        }
+        uint64_t count{0};
+        encoded >> count;
+        if (count > 16384) {
+            error = "attestation archive count exceeds bound";
+            return false;
+        }
+        std::vector<matmul::trusted::ExactReplayAttestation> loaded;
+        loaded.reserve(count);
+        for (uint64_t i = 0; i < count; ++i) {
+            matmul::trusted::ExactReplayAttestation attestation;
+            encoded >> attestation;
+            loaded.push_back(std::move(attestation));
+        }
+        if (!encoded.empty()) {
+            error = "attestation archive has trailing data";
+            return false;
+        }
+        size_t accepted{0};
+        for (const auto& attestation : loaded) {
+            const auto result{store->Add(
+                attestation, attestation.statement.block_hash,
+                attestation.statement.block_height)};
+            if (result == matmul::trusted::AddResult::Accepted ||
+                result == matmul::trusted::AddResult::Duplicate) {
+                ++accepted;
+                if (attestation.statement.block_height >
+                    g_highest_attested_height) {
+                    g_highest_attested_height =
+                        attestation.statement.block_height;
+                }
+            }
+        }
+        LogPrintf(
+            "Loaded %zu MatMul ExactReplay attestation(s) from %s\n",
+            accepted, fs::PathToString(g_persist_path));
+        return true;
+    } catch (const std::exception& e) {
+        error = strprintf("attestation archive decode failed: %s", e.what());
+        return false;
+    }
+}
+
+void PersistAfterMutation(
+    const std::shared_ptr<matmul::trusted::AttestationStore>& store)
+{
+    std::string error;
+    std::lock_guard lock{g_mutex};
+    if (!FlushPersistenceLocked(store, error)) {
+        LogWarning("MatMul attestation archive flush failed: %s\n", error);
+    }
+}
+
+void ResetHistoricalReverifyBudgetUnlocked()
+{
+    g_reverify_tokens = HistoricalReverifyBudget::BURST;
+    g_reverify_last_refill = std::chrono::steady_clock::now();
+    g_reverify_queued.clear();
+    g_reverify_inflight.clear();
 }
 
 } // namespace
@@ -153,11 +321,17 @@ void Reset()
     g_wait_timeout = std::chrono::milliseconds{60'000};
     g_highest_attested_height = -1;
     g_authority_peer_tip_hint = -1;
+    g_persist_enabled = false;
+    g_persist_path.clear();
 }
 
 void ResetForTest()
 {
     Reset();
+    {
+        std::lock_guard lock{g_reverify_mutex};
+        ResetHistoricalReverifyBudgetUnlocked();
+    }
 }
 
 bool IsConfigured()
@@ -229,6 +403,9 @@ matmul::trusted::AddResult Add(
         result == matmul::trusted::AddResult::Duplicate) {
         NoteAcceptedAttestationHeight(expected_height);
     }
+    if (result == matmul::trusted::AddResult::Accepted) {
+        PersistAfterMutation(store);
+    }
     return result;
 }
 
@@ -243,6 +420,9 @@ matmul::trusted::AddResult SignAuthoritative(
     if (result == matmul::trusted::AddResult::Accepted ||
         result == matmul::trusted::AddResult::Duplicate) {
         NoteAcceptedAttestationHeight(block_height);
+    }
+    if (result == matmul::trusted::AddResult::Accepted) {
+        PersistAfterMutation(store);
     }
     return result;
 }
@@ -346,6 +526,101 @@ void NoteAuthorityPeerTipHint(int32_t height)
     if (height > g_authority_peer_tip_hint) {
         g_authority_peer_tip_hint = height;
     }
+}
+
+bool OpenPersistence(const fs::path& path, std::string& error)
+{
+    auto store{Store()};
+    if (!store) {
+        error = "attestation store is not configured";
+        return false;
+    }
+    store->SetDurableRetention(true);
+    std::lock_guard lock{g_mutex};
+    g_persist_path = path;
+    g_persist_enabled = true;
+    if (!LoadPersistenceLocked(store, error)) {
+        g_persist_enabled = false;
+        g_persist_path.clear();
+        return false;
+    }
+    return true;
+}
+
+void ClosePersistence()
+{
+    std::lock_guard lock{g_mutex};
+    g_persist_enabled = false;
+    g_persist_path.clear();
+}
+
+bool PersistenceEnabled()
+{
+    std::lock_guard lock{g_mutex};
+    return g_persist_enabled;
+}
+
+bool FlushPersistence(std::string& error)
+{
+    auto store{Store()};
+    std::lock_guard lock{g_mutex};
+    return FlushPersistenceLocked(store, error);
+}
+
+HistoricalReverifyAdmit TryAdmitHistoricalReverify(
+    const uint256& block_hash)
+{
+    std::lock_guard lock{g_reverify_mutex};
+    RefillReverifyTokensLocked(std::chrono::steady_clock::now());
+    if (g_reverify_queued.count(block_hash) != 0 ||
+        g_reverify_inflight.count(block_hash) != 0) {
+        return HistoricalReverifyAdmit::AlreadyQueued;
+    }
+    if (g_reverify_inflight.size() >=
+        HistoricalReverifyBudget::INFLIGHT_MAX) {
+        return HistoricalReverifyAdmit::InflightFull;
+    }
+    if (g_reverify_queued.size() >= HistoricalReverifyBudget::QUEUE_MAX) {
+        return HistoricalReverifyAdmit::QueueFull;
+    }
+    if (g_reverify_tokens < 1.0) {
+        return HistoricalReverifyAdmit::RateLimited;
+    }
+    g_reverify_tokens -= 1.0;
+    g_reverify_queued.insert(block_hash);
+    return HistoricalReverifyAdmit::Allow;
+}
+
+void NoteHistoricalReverifyStarted(const uint256& block_hash)
+{
+    std::lock_guard lock{g_reverify_mutex};
+    g_reverify_queued.erase(block_hash);
+    g_reverify_inflight.insert(block_hash);
+}
+
+void NoteHistoricalReverifyFinished(const uint256& block_hash)
+{
+    std::lock_guard lock{g_reverify_mutex};
+    g_reverify_queued.erase(block_hash);
+    g_reverify_inflight.erase(block_hash);
+}
+
+void ResetHistoricalReverifyBudgetForTest()
+{
+    std::lock_guard lock{g_reverify_mutex};
+    ResetHistoricalReverifyBudgetUnlocked();
+}
+
+size_t HistoricalReverifyQueuedForTest()
+{
+    std::lock_guard lock{g_reverify_mutex};
+    return g_reverify_queued.size();
+}
+
+size_t HistoricalReverifyInflightForTest()
+{
+    std::lock_guard lock{g_reverify_mutex};
+    return g_reverify_inflight.size();
 }
 
 } // namespace node::matmul_trusted

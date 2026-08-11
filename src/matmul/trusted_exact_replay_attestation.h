@@ -213,6 +213,19 @@ public:
         const uint256& block_hash, int32_t block_height) const;
 
     /**
+     * Snapshot every retained attestation (for durable archive flush).
+     * Order is height/hash ascending; callers may rewrite a bounded disk file.
+     */
+    [[nodiscard]] std::vector<ExactReplayAttestation> ExportAll() const;
+
+    /**
+     * When true, wall-clock TTL pruning is disabled. Capacity eviction still
+     * applies. Used when a durable datadir archive backs the store so a
+     * restart cannot silently drop recent authority signatures.
+     */
+    void SetDurableRetention(bool durable);
+
+    /**
      * Wait for quorum, cancellation, or timeout.
      *
      * cancel_requested is polled at a bounded interval even when no producer
@@ -288,6 +301,7 @@ private:
     std::map<BlockKey, Bucket> m_buckets;
     size_t m_attestation_count{0};
     StoreStats m_stats;
+    bool m_durable_retention{false};
 };
 
 } // namespace matmul::trusted
