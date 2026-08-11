@@ -503,6 +503,36 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
             .in_backoff = false,
         }) == TrustedAttestationAdmit::RejectNotForwardOfTip);
 
+    // A better-work branch IS admissible even though it does not extend the
+    // active tip -- that is what a reorg looks like. Regression: a mirror lost a
+    // same-height race at 186355 and sat on the losing sibling while the
+    // authority ran 23 blocks ahead. Nothing on the winning branch extended its
+    // tip, so every rescuing block was refused as not-forward-of-tip and the
+    // node was stuck until an operator ran invalidateblock.
+    BOOST_CHECK(
+        EvaluateTrustedAttestationAdmit(TrustedAttestationAdmitView{
+            .tip_extending = false,
+            .extends_active_tip_chain = false,
+            .better_work_reorg_candidate = true,
+            .on_parked_reorg_branch = false,
+            .height = 186356,
+            .authority_frontier = 186383,
+            .in_backoff = false,
+        }) == TrustedAttestationAdmit::Allow);
+
+    // Better work does NOT override the park policy: a refused deep reorg stays
+    // refused, so this cannot become a back door around deep-reorg finality.
+    BOOST_CHECK(
+        EvaluateTrustedAttestationAdmit(TrustedAttestationAdmitView{
+            .tip_extending = false,
+            .extends_active_tip_chain = false,
+            .better_work_reorg_candidate = true,
+            .on_parked_reorg_branch = true,
+            .height = 186356,
+            .authority_frontier = 186383,
+            .in_backoff = false,
+        }) == TrustedAttestationAdmit::RejectParkedReorg);
+
     // Tip-extender is always allowed, including a one-step frontier probe.
     BOOST_CHECK(
         EvaluateTrustedAttestationAdmit(TrustedAttestationAdmitView{

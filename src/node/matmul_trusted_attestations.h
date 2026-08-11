@@ -182,6 +182,16 @@ struct TrustedAttestationAdmitView {
     bool tip_extending{false};
     //! index->GetAncestor(tip_height) == tip (strict forward of active tip).
     bool extends_active_tip_chain{false};
+    //! Branch carries strictly more work than the active tip, i.e. this is a
+    //! genuine reorg candidate rather than sibling noise. A mirror that lands on
+    //! a losing sibling (same height, different hash) has an active tip that
+    //! NOTHING on the winning branch extends, so without this the forward-of-tip
+    //! rule rejects every block that could rescue it and the mirror is stuck
+    //! until an operator runs invalidateblock. Observed in production: a mirror
+    //! sat on a 1-block sibling fork at 186355 while the authority ran 23 blocks
+    //! ahead, requesting nothing. Deep-reorg refusal stays with the park policy,
+    //! which is evaluated separately and still wins.
+    bool better_work_reorg_candidate{false};
     bool on_parked_reorg_branch{false};
     int32_t height{-1};
     std::optional<int32_t> authority_frontier{};
@@ -198,7 +208,12 @@ struct TrustedAttestationAdmitView {
     if (v.on_parked_reorg_branch) {
         return TrustedAttestationAdmit::RejectParkedReorg;
     }
-    if (!v.extends_active_tip_chain) {
+    // A better-work branch is admissible even though it does not extend our
+    // active tip -- that is precisely what a reorg looks like. Refusing it here
+    // would make a mirror that lost a same-height race unable to ever fetch the
+    // winning branch. Depth is not this rule's concern: on_parked_reorg_branch
+    // above already refused anything the park policy declined.
+    if (!v.extends_active_tip_chain && !v.better_work_reorg_candidate) {
         return TrustedAttestationAdmit::RejectNotForwardOfTip;
     }
     if (v.authority_frontier.has_value() &&
@@ -313,6 +328,12 @@ struct TrustedWorkRank {
  */
 struct TrustedMirrorTipChainHeaderView {
     bool extends_active_tip_chain{false};
+    //! Candidate branch carries strictly more work than the active tip. Without
+    //! this, a mirror that lost a same-height race pins m_best_header to its own
+    //! losing branch forever: nothing on the winning branch extends its tip, so
+    //! the header frontier never moves and it never requests the bodies that
+    //! would let it reorg. Park policy still excludes refused deep reorgs.
+    bool better_work_reorg_candidate{false};
     bool on_parked_reorg_branch{false};
     int32_t candidate_height{-1};
     int32_t tip_height{-1};
@@ -326,7 +347,10 @@ struct TrustedMirrorTipChainHeaderView {
 [[nodiscard]] inline bool PreferTrustedMirrorTipChainHeader(
     const TrustedMirrorTipChainHeaderView& v)
 {
-    if (!v.extends_active_tip_chain || v.on_parked_reorg_branch) {
+    if (v.on_parked_reorg_branch) {
+        return false;
+    }
+    if (!v.extends_active_tip_chain && !v.better_work_reorg_candidate) {
         return false;
     }
     if (v.candidate_height <= v.tip_height) {

@@ -6051,6 +6051,9 @@ PeerManagerImpl::EvaluateTrustedMirrorAttestationAdmit(
         (tip != nullptr && index != nullptr &&
          index->nHeight >= tip->nHeight &&
          index->GetAncestor(tip->nHeight) == tip)};
+    const bool better_work_reorg_candidate{
+        tip != nullptr && index != nullptr &&
+        index->nChainWork > tip->nChainWork};
     const bool parked{
         index != nullptr && m_chainman.IsOnParkedReorgBranch(index)};
     bool in_backoff{false};
@@ -6062,6 +6065,7 @@ PeerManagerImpl::EvaluateTrustedMirrorAttestationAdmit(
     return node::matmul_trusted::EvaluateTrustedAttestationAdmit({
         .tip_extending = tip_extending,
         .extends_active_tip_chain = extends_active_tip_chain,
+        .better_work_reorg_candidate = better_work_reorg_candidate,
         .on_parked_reorg_branch = parked,
         .height = index ? index->nHeight : -1,
         .authority_frontier =

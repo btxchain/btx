@@ -11153,6 +11153,8 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
                 pindex->GetAncestor(m_best_header->nHeight) == m_best_header};
             if (node::matmul_trusted::PreferTrustedMirrorTipChainHeader({
                     .extends_active_tip_chain = extends_tip,
+                    .better_work_reorg_candidate =
+                        pindex->nChainWork > tip->nChainWork,
                     .on_parked_reorg_branch = IsOnParkedReorgBranch(pindex),
                     .candidate_height = pindex->nHeight,
                     .tip_height = tip->nHeight,
