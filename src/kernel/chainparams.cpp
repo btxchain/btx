@@ -876,9 +876,10 @@ public:
         // Mainnet anchor refreshed on 2026-08-04 at height 179'000 from a
         // synced archival node so stale history below the current public
         // release floor is rejected quickly.
-        consensus.nMinimumChainWork = uint256{"00000000000000000000000000000000000000000000000000029d454fe795d2"};
+        // Refreshed to the work at height 186000, the new checkpoint anchor.
+        consensus.nMinimumChainWork = uint256{"00000000000000000000000000000000000000000000000000030b4f85e66df7"};
         // Assume signatures valid up to the same anchored block to speed sync.
-        consensus.defaultAssumeValid = uint256{"2dd1d545b1b5e76c28b4414ebe0c22b1ba9d3ebd88662fbd1b9e4d0cf6693933"};
+        consensus.defaultAssumeValid = uint256{"0a51fccfd75d2051e94be1a8cc5abff8b86ac53d0cc134680f286fe769aa2129"};
 
         /**
          * The message start string is designed to be unlikely to occur in normal data.
@@ -949,6 +950,18 @@ public:
                 // work-transition error, and stops fresh syncs from being led
                 // onto a pre-fork chain by a legacy majority.
                 {185000, uint256{"f03a7af21d20f67a5efecfb8b0b3e5e1b91efa208b385419470c59450f2afb8b"}},
+                // Post-activation anchor. A competing branch diverges from the
+                // canonical chain at ~185544, above the 185000 checkpoint, and
+                // is ~800 blocks long. nMaxReorgDepth (12) already stops any
+                // running node being reorged onto it, but that rule says
+                // nothing about a node syncing from scratch, which simply
+                // follows the heaviest valid chain it is offered. Without an
+                // anchor above the divergence a fresh sync could settle on the
+                // competing branch. Checkpointing 186000 rejects anything
+                // forking below it, closing that window; the height is ~300
+                // blocks behind the tip, far beyond nMaxReorgDepth, so it
+                // cannot pin a block that might still legitimately reorg.
+                {186000, uint256{"0a51fccfd75d2051e94be1a8cc5abff8b86ac53d0cc134680f286fe769aa2129"}},
             }
         };
         m_assumeutxo_data = {
