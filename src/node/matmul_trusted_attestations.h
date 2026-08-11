@@ -322,18 +322,18 @@ struct TrustedWorkRank {
  * PreferTrustAdjustedHeader intentionally pins m_best_header to authenticated
  * work so an unverified MatMul header cannot displace its parent. Trusted
  * mirrors still need the header frontier that extends the active tip so they
- * can request the next body from the attestation authority. Competing forks
- * never satisfy `extends_active_tip_chain`. Parked deep-reorg branches are
- * excluded. This does not accept blocks; M-of-N quorum remains required.
+ * can request the next body from the attestation authority.
+ *
+ * Ordinary competing forks must not displace m_best_header (that froze
+ * headers==blocks while unattestable headers arrived continuously). The
+ * attestation-authority path may additionally follow a better-or-equal-work
+ * reorg candidate via PreferTrustedMirrorAuthorityHeader — that is how a
+ * mirror that lost a same-height race converges without operator
+ * invalidateblock. Parked deep-reorg branches are always excluded. This does
+ * not accept blocks; M-of-N quorum remains required.
  */
 struct TrustedMirrorTipChainHeaderView {
     bool extends_active_tip_chain{false};
-    //! Candidate branch carries strictly more work than the active tip. Without
-    //! this, a mirror that lost a same-height race pins m_best_header to its own
-    //! losing branch forever: nothing on the winning branch extends its tip, so
-    //! the header frontier never moves and it never requests the bodies that
-    //! would let it reorg. Park policy still excludes refused deep reorgs.
-    bool better_work_reorg_candidate{false};
     bool on_parked_reorg_branch{false};
     int32_t candidate_height{-1};
     int32_t tip_height{-1};
@@ -350,7 +350,7 @@ struct TrustedMirrorTipChainHeaderView {
     if (v.on_parked_reorg_branch) {
         return false;
     }
-    if (!v.extends_active_tip_chain && !v.better_work_reorg_candidate) {
+    if (!v.extends_active_tip_chain) {
         return false;
     }
     if (v.candidate_height <= v.tip_height) {
@@ -363,6 +363,105 @@ struct TrustedMirrorTipChainHeaderView {
     // Grow along the tip-chain frontier.
     return v.candidate_extends_current_best &&
            v.candidate_height > v.current_best_height;
+}
+
+/**
+ * Authority-scoped header-frontier policy for trusted mirrors.
+ *
+ * Tip-chain extensions behave like PreferTrustedMirrorTipChainHeader.
+ * Additionally, when the header came from an attestation-authority peer, a
+ * better-or-equal-work branch that does not extend the (losing) tip may
+ * displace m_best_header so getheaders / download chase the authority's
+ * chain. Park policy is evaluated first and is never bypassed.
+ */
+struct TrustedMirrorAuthorityHeaderView {
+    bool from_authority_peer{false};
+    bool extends_active_tip_chain{false};
+    //! Candidate carries >= tip work and is not the tip itself (equal-work
+    //! sibling or heavier fork).
+    bool better_work_reorg_candidate{false};
+    bool on_parked_reorg_branch{false};
+    int32_t candidate_height{-1};
+    int32_t tip_height{-1};
+    int32_t current_best_height{-1};
+    bool current_best_extends_tip{false};
+    bool candidate_extends_current_best{false};
+};
+
+[[nodiscard]] inline bool PreferTrustedMirrorAuthorityHeader(
+    const TrustedMirrorAuthorityHeaderView& v)
+{
+    if (!v.from_authority_peer) {
+        return PreferTrustedMirrorTipChainHeader({
+            .extends_active_tip_chain = v.extends_active_tip_chain,
+            .on_parked_reorg_branch = v.on_parked_reorg_branch,
+            .candidate_height = v.candidate_height,
+            .tip_height = v.tip_height,
+            .current_best_height = v.current_best_height,
+            .current_best_extends_tip = v.current_best_extends_tip,
+            .candidate_extends_current_best = v.candidate_extends_current_best,
+        });
+    }
+    if (v.on_parked_reorg_branch) {
+        return false;
+    }
+    if (v.extends_active_tip_chain) {
+        return PreferTrustedMirrorTipChainHeader({
+            .extends_active_tip_chain = true,
+            .on_parked_reorg_branch = false,
+            .candidate_height = v.candidate_height,
+            .tip_height = v.tip_height,
+            .current_best_height = v.current_best_height,
+            .current_best_extends_tip = v.current_best_extends_tip,
+            .candidate_extends_current_best = v.candidate_extends_current_best,
+        });
+    }
+    // Authority competing branch: only follow better/equal work, never a
+    // lighter fork, and never below tip height (no rewind via headers alone).
+    if (!v.better_work_reorg_candidate) {
+        return false;
+    }
+    if (v.candidate_height < v.tip_height) {
+        return false;
+    }
+    // Tip-pinned losing best-header must be displaced so headers advance off
+    // the stranded tip. This is the production stall (headers==blocks while
+    // the authority is hundreds of blocks ahead on the other sibling).
+    if (v.current_best_extends_tip) {
+        return true;
+    }
+    // Already following a non-tip branch: grow along it, or jump to a taller
+    // authority header on another equal/better-work fork.
+    if (v.candidate_extends_current_best) {
+        return v.candidate_height > v.current_best_height;
+    }
+    return v.candidate_height >= v.current_best_height;
+}
+
+/**
+ * Whether a trusted mirror may download / direct-fetch toward a peer's
+ * best-known tip that does not extend the active tip.
+ *
+ * Ordinary peers: never (unattestable bodies starve authority catch-up).
+ * Authority peers: yes for better-or-equal-work non-parked branches — that is
+ * the self-healing path after losing a same-height race.
+ */
+[[nodiscard]] inline bool TrustedMirrorMayDownloadCompetingBranch(
+    bool is_authority_peer,
+    bool best_known_extends_tip,
+    bool better_or_equal_work,
+    bool on_parked_reorg_branch)
+{
+    if (best_known_extends_tip) {
+        return true;
+    }
+    if (on_parked_reorg_branch) {
+        return false;
+    }
+    if (!is_authority_peer) {
+        return false;
+    }
+    return better_or_equal_work;
 }
 
 /**

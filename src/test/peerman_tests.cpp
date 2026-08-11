@@ -898,6 +898,255 @@ BOOST_AUTO_TEST_CASE(trusted_mirror_authority_headers_advance_best_header)
     BOOST_CHECK(download_allocated);
 }
 
+// Regression: trusted mirror on a divergent (losing) tip must acquire the
+// authority's competing-branch headers and allocate download toward them
+// without operator invalidateblock. Before the fix, tip-chain-only policy
+// treated the authority chain as a competing fork, froze m_best_header at the
+// losing tip (headers==blocks), and FindNextBlocks skipped the authority peer
+// (outstanding_slots=0).
+BOOST_AUTO_TEST_CASE(trusted_mirror_divergent_tip_follows_authority_headers)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+
+    ConnmanTestMsg& connman = static_cast<ConnmanTestMsg&>(*m_node.connman);
+    PeerManager& peerman = *m_node.peerman;
+
+    const CBlockIndex* fork_parent{
+        WITH_LOCK(::cs_main, return m_node.chainman->ActiveChain().Tip())};
+    BOOST_REQUIRE(fork_parent != nullptr);
+    SetMockTime(std::chrono::seconds{fork_parent->GetBlockTime() + 1});
+
+    Consensus::Params& consensus = const_cast<Consensus::Params&>(
+        m_node.chainman->GetParams().GetConsensus());
+    const int32_t saved_rc = consensus.nMatMulRCHeight;
+    const int32_t saved_v4 = consensus.nMatMulV4Height;
+    const int32_t saved_bmx4c = consensus.nMatMulBMX4CHeight;
+    const int32_t saved_drlt = consensus.nMatMulDRLTHeight;
+    const int32_t saved_coupled = consensus.nMatMulRCCoupledHeight;
+    struct RestoreHeights {
+        Consensus::Params& params;
+        int32_t rc;
+        int32_t v4;
+        int32_t bmx4c;
+        int32_t drlt;
+        int32_t coupled;
+        ~RestoreHeights()
+        {
+            params.nMatMulRCHeight = rc;
+            params.nMatMulV4Height = v4;
+            params.nMatMulBMX4CHeight = bmx4c;
+            params.nMatMulDRLTHeight = drlt;
+            params.nMatMulRCCoupledHeight = coupled;
+        }
+    } restore_heights{consensus, saved_rc, saved_v4, saved_bmx4c, saved_drlt,
+                      saved_coupled};
+
+    // Keep MatMul activation below the race so connecting the losing tip does
+    // not require trusted-attestation admission (we enable the mirror after).
+    consensus.nMatMulV4Height = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulBMX4CHeight = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulDRLTHeight = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulRCHeight = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulRCCoupledHeight = std::numeric_limits<int32_t>::max();
+
+    const int race_height{fork_parent->nHeight + 1};
+
+    // Losing sibling: connect it as the active tip BEFORE enabling the mirror
+    // (production stall starts with an already-connected divergent tip).
+    CBlock losing = node::BlockAssembler{
+        m_node.chainman->ActiveChainstate(), nullptr, {}, m_node}
+                        .CreateNewBlock()
+                        ->block;
+    losing.hashMerkleRoot = BlockMerkleRoot(losing);
+    BOOST_REQUIRE(MineHeaderForConsensus(
+        losing, race_height, m_node.chainman->GetConsensus(), 5'000'000,
+        fork_parent->GetMedianTimePast()));
+    {
+        BlockValidationState state;
+        const CBlockHeader losing_header{losing.GetBlockHeader()};
+        BOOST_REQUIRE(m_node.chainman->ProcessNewBlockHeaders(
+            {{losing_header}}, /*min_pow_checked=*/true, state));
+        std::shared_ptr<const CBlock> losing_ptr{
+            std::make_shared<const CBlock>(losing)};
+        BOOST_REQUIRE(m_node.chainman->ProcessNewBlock(
+            losing_ptr, /*force_processing=*/true, /*min_pow_checked=*/true,
+            nullptr));
+    }
+    CBlockIndex* losing_tip{WITH_LOCK(
+        ::cs_main, return m_node.chainman->ActiveChain().Tip())};
+    BOOST_REQUIRE(losing_tip != nullptr);
+    BOOST_REQUIRE_EQUAL(losing_tip->nHeight, race_height);
+    BOOST_REQUIRE_EQUAL(losing_tip->GetBlockHash(), losing.GetHash());
+
+    // Now become a trusted mirror (stranded on the divergent tip).
+    node::matmul_trusted::ResetForTest();
+    CKey signer;
+    signer.MakeNewKey(/*fCompressed=*/true);
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256::FromHex(std::string(64, '1')).value();
+    config.replay_authority_context =
+        uint256::FromHex(std::string(64, '2')).value();
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/true, /*serve=*/false,
+        std::chrono::milliseconds{50}, error));
+    BOOST_REQUIRE(node::matmul_trusted::IsTrustedMirror());
+    struct MirrorReset {
+        ~MirrorReset() { node::matmul_trusted::ResetForTest(); }
+    } mirror_reset;
+
+    // Activate RC/attestation at the losing tip so authority preference applies.
+    consensus.nMatMulV4Height = losing_tip->nHeight;
+    consensus.nMatMulBMX4CHeight = losing_tip->nHeight;
+    consensus.nMatMulRCHeight = losing_tip->nHeight;
+    peerman.SetBestBlock(losing_tip->nHeight,
+                         std::chrono::seconds{losing_tip->GetBlockTime()});
+    WITH_LOCK(::cs_main, m_node.chainman->m_best_header = losing_tip);
+    BOOST_REQUIRE_EQUAL(
+        WITH_LOCK(::cs_main,
+                  return m_node.chainman->m_best_header->GetBlockHash()),
+        losing.GetHash());
+
+    const ServiceFlags authority_services{ServiceFlags(
+        NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS |
+        NODE_MATMUL_ATTESTATION_ARCHIVE)};
+    const ServiceFlags ordinary_services{ServiceFlags(
+        NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS)};
+
+    CNode authority{/*id=*/61,
+                    /*sock=*/nullptr,
+                    CAddress{},
+                    /*nKeyedNetGroupIn=*/0,
+                    /*nLocalHostNonceIn=*/0,
+                    CAddress{},
+                    /*addrNameIn=*/"authority-divergent",
+                    ConnectionType::OUTBOUND_FULL_RELAY,
+                    /*inbound_onion=*/false,
+                    /*network_key=*/0};
+    CNode ordinary{/*id=*/62,
+                   /*sock=*/nullptr,
+                   CAddress{},
+                   /*nKeyedNetGroupIn=*/0,
+                   /*nLocalHostNonceIn=*/0,
+                   CAddress{},
+                   /*addrNameIn=*/"ordinary-divergent",
+                   ConnectionType::OUTBOUND_FULL_RELAY,
+                   /*inbound_onion=*/false,
+                   /*network_key=*/0};
+    connman.Handshake(authority, /*successfully_connected=*/true,
+                      authority_services, authority_services, PROTOCOL_VERSION,
+                      /*relay_txs=*/true);
+    connman.Handshake(ordinary, /*successfully_connected=*/true,
+                      ordinary_services, ordinary_services, PROTOCOL_VERSION,
+                      /*relay_txs=*/true);
+    connman.FlushSendBuffer(authority);
+    connman.FlushSendBuffer(ordinary);
+    struct FinalizePeers {
+        PeerManager& peerman;
+        CNode& first;
+        CNode& second;
+        ~FinalizePeers()
+        {
+            peerman.FinalizeNode(first);
+            peerman.FinalizeNode(second);
+        }
+    } finalize{peerman, authority, ordinary};
+
+    // Winning sibling at the same height, then one extension (strictly more
+    // work) — what the authority actually has after the race resolves.
+    CBlock winning;
+    winning.SetNull();
+    winning.hashPrevBlock = fork_parent->GetBlockHash();
+    winning.nTime = fork_parent->GetBlockTime() + 2;
+    winning.nBits = losing.nBits;
+    winning.nVersion = losing.nVersion;
+    winning.nNonce = 0;
+    winning.hashMerkleRoot =
+        uint256::FromHex(std::string(64, 'c')).value();
+    BOOST_REQUIRE(MineHeaderForConsensus(
+        winning, race_height, m_node.chainman->GetConsensus(), 5'000'000,
+        fork_parent->GetMedianTimePast()));
+
+    CBlock winning_next;
+    winning_next.SetNull();
+    winning_next.hashPrevBlock = winning.GetHash();
+    winning_next.nTime = winning.nTime + 1;
+    winning_next.nBits = winning.nBits;
+    winning_next.nVersion = winning.nVersion;
+    winning_next.nNonce = 0;
+    winning_next.hashMerkleRoot =
+        uint256::FromHex(std::string(64, 'd')).value();
+    BOOST_REQUIRE(MineHeaderForConsensus(
+        winning_next, race_height + 1, m_node.chainman->GetConsensus(),
+        5'000'000, winning.GetBlockTime()));
+
+    std::vector<CBlock> authority_headers{
+        CBlock{winning.GetBlockHeader()},
+        CBlock{winning_next.GetBlockHeader()}};
+    auto authority_msg{NetMsg::Make(NetMsgType::HEADERS,
+                                    TX_WITH_WITNESS(authority_headers))};
+    BOOST_REQUIRE(connman.ReceiveMsgFrom(authority, std::move(authority_msg)));
+    authority.fPauseSend = false;
+    (void)connman.ProcessMessagesOnce(authority);
+
+    const CBlockIndex* winning_next_index{WITH_LOCK(
+        ::cs_main,
+        return m_node.chainman->m_blockman.LookupBlockIndex(
+            winning_next.GetHash()))};
+    BOOST_REQUIRE(winning_next_index != nullptr);
+
+    // Headers frontier must leave the losing tip for the authority branch.
+    BOOST_CHECK_EQUAL(
+        WITH_LOCK(::cs_main,
+                  return m_node.chainman->m_best_header->GetBlockHash()),
+        winning_next.GetHash());
+    BOOST_CHECK_EQUAL(
+        WITH_LOCK(::cs_main, return m_node.chainman->m_best_header->nHeight),
+        race_height + 1);
+
+    // Ordinary peer offering a different competing fork must not displace it.
+    CBlock ordinary_fork;
+    ordinary_fork.SetNull();
+    ordinary_fork.hashPrevBlock = fork_parent->GetBlockHash();
+    ordinary_fork.nTime = fork_parent->GetBlockTime() + 3;
+    ordinary_fork.nBits = fork_parent->nBits;
+    ordinary_fork.nVersion = fork_parent->nVersion;
+    ordinary_fork.nNonce = 0;
+    ordinary_fork.hashMerkleRoot =
+        uint256::FromHex(std::string(64, 'e')).value();
+    if (MineHeaderForConsensus(
+            ordinary_fork, race_height, m_node.chainman->GetConsensus(),
+            5'000'000, fork_parent->GetMedianTimePast())) {
+        std::vector<CBlock> ordinary_headers{
+            CBlock{ordinary_fork.GetBlockHeader()}};
+        auto ordinary_msg{NetMsg::Make(NetMsgType::HEADERS,
+                                       TX_WITH_WITNESS(ordinary_headers))};
+        BOOST_REQUIRE(
+            connman.ReceiveMsgFrom(ordinary, std::move(ordinary_msg)));
+        ordinary.fPauseSend = false;
+        (void)connman.ProcessMessagesOnce(ordinary);
+    }
+    BOOST_CHECK_EQUAL(
+        WITH_LOCK(::cs_main,
+                  return m_node.chainman->m_best_header->GetBlockHash()),
+        winning_next.GetHash());
+
+    node::matmul_trusted::NoteAuthorityPeerTipHint(race_height + 10);
+    BOOST_CHECK(peerman.SendMessages(&authority));
+
+    CNodeStateStats authority_stats;
+    BOOST_REQUIRE(peerman.GetNodeStateStats(authority.GetId(), authority_stats));
+    // Authority best-known must be the competing (winning) branch, and download
+    // toward it must be allocated — the stranded-mirror self-heal path.
+    BOOST_CHECK_EQUAL(authority_stats.nSyncHeight, race_height + 1);
+    const bool download_allocated{
+        !authority_stats.vHeightInFlight.empty() ||
+        HasQueuedMessageType(authority, NetMsgType::GETDATA)};
+    BOOST_CHECK(download_allocated);
+}
+
 BOOST_AUTO_TEST_CASE(broadcast_transaction_fails_closed_without_peerman)
 {
     std::unique_ptr<PeerManager> saved_peerman = std::move(m_node.peerman);

@@ -112,7 +112,11 @@ bool FlushPersistenceLocked(
         return false;
     }
     const fs::path tmp{g_persist_path + ".tmp"};
-    if (!WriteBinaryFile(tmp, std::string(encoded.begin(), encoded.end()))) {
+    // DataStream iterators yield std::byte; GCC 13 rejects constructing
+    // std::string directly from those iterators (GCC 15 accepted it).
+    const std::string payload{
+        reinterpret_cast<const char*>(encoded.data()), encoded.size()};
+    if (!WriteBinaryFile(tmp, payload)) {
         error = "failed to write attestation archive temp file";
         return false;
     }
