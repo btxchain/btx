@@ -11131,6 +11131,41 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
     }
     CBlockIndex* pindex{m_blockman.AddToBlockIndex(block, m_best_header)};
 
+    // Trusted mirrors: PreferTrustAdjustedHeader keeps m_best_header on
+    // authenticated work, which freezes headers==blocks while the tip-chain
+    // header frontier is what the mirror must follow from its attestation
+    // authority. Advance m_best_header only along active-tip extensions that
+    // are not parked; competing forks never qualify. Blocks still require
+    // M-of-N quorum — this is header-frontier tracking only.
+    if (node::matmul_trusted::IsTrustedMirror() && pindex != nullptr) {
+        const CBlockIndex* tip{ActiveChain().Tip()};
+        if (tip != nullptr) {
+            const bool extends_tip{
+                pindex->nHeight >= tip->nHeight &&
+                pindex->GetAncestor(tip->nHeight) == tip};
+            const bool current_extends_tip{
+                m_best_header != nullptr &&
+                m_best_header->nHeight >= tip->nHeight &&
+                m_best_header->GetAncestor(tip->nHeight) == tip};
+            const bool extends_current{
+                m_best_header != nullptr &&
+                pindex->nHeight > m_best_header->nHeight &&
+                pindex->GetAncestor(m_best_header->nHeight) == m_best_header};
+            if (node::matmul_trusted::PreferTrustedMirrorTipChainHeader({
+                    .extends_active_tip_chain = extends_tip,
+                    .on_parked_reorg_branch = IsOnParkedReorgBranch(pindex),
+                    .candidate_height = pindex->nHeight,
+                    .tip_height = tip->nHeight,
+                    .current_best_height =
+                        m_best_header ? m_best_header->nHeight : -1,
+                    .current_best_extends_tip = current_extends_tip,
+                    .candidate_extends_current_best = extends_current,
+                })) {
+                m_best_header = pindex;
+            }
+        }
+    }
+
     if (ppindex)
         *ppindex = pindex;
 

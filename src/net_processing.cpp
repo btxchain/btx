@@ -168,6 +168,13 @@ static constexpr size_t MATMUL_ATTESTATION_RELAY_PEERS{2};
 static constexpr auto MATMUL_ATTESTATION_MISS_BACKOFF_BASE{60s};
 static constexpr int MATMUL_ATTESTATION_MISS_BACKOFF_MAX_EXP{6};
 static constexpr auto MATMUL_TRUSTED_MIRROR_STALL_LOG_INTERVAL{30s};
+//! Sticky negative-cache window for unattestable hashes (competing / parked /
+//! above-frontier). Prevents re-evaluating the same item thousands of times
+//! per minute while still allowing periodic re-checks as tip/frontier move.
+static constexpr auto MATMUL_TRUSTED_REJECT_STICKY{60s};
+//! How often a trusted mirror re-asks attestation-authority peers for headers
+//! when its tip lags the observed frontier.
+static constexpr auto TRUSTED_MIRROR_AUTHORITY_HEADERS_INTERVAL{15s};
 /** WP-8 / H9/H10: expiry for outstanding GETMMSKETCH prefetch requests. An
  *  entry that received no reply within the TTL frees its node-wide in-flight
  *  slot (the request side is strictly best-effort — nothing is ever awaited or
@@ -1455,7 +1462,8 @@ private:
     //! Peers that recently delivered a usable MMATTEST (prefer on re-request).
     std::map<NodeId, std::chrono::microseconds> m_matmul_attestation_peer_success
         GUARDED_BY(cs_main);
-    //! Negative cache for hashes where preferred signers/archives stayed silent.
+    //! Negative cache for hashes where preferred signers/archives stayed silent
+    //! or that are known-unattestable (competing / parked / above-frontier).
     struct MatMulAttestationBackoff {
         int consecutive_misses{0};
         std::chrono::steady_clock::time_point not_before{};
@@ -1466,8 +1474,12 @@ private:
     //! Rate-limited stall diagnostics for trusted mirrors.
     std::chrono::steady_clock::time_point m_matmul_trusted_last_stall_log
         GUARDED_BY(cs_main){};
+    //! Count of distinct unattestable hashes observed (not repeat evaluations).
     uint64_t m_matmul_trusted_reject_unattestable
         GUARDED_BY(cs_main){0};
+    //! Last authority-header getheaders probe time per peer.
+    std::map<NodeId, std::chrono::microseconds> m_trusted_mirror_authority_headers_at
+        GUARDED_BY(cs_main);
     /** Sybil/reconnect-resistant inbound signature-verification budgets.
      *
      * Two independent pools per source, because they bound different things and
@@ -1817,6 +1829,19 @@ private:
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     void MaybeLogTrustedMirrorStall(int32_t tip_height)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    /** Record an unattestable reject with sticky backoff. Returns true when
+     *  this is a newly counted distinct hash (or an expired sticky re-arm). */
+    bool NoteTrustedMirrorUnattestableReject(const uint256& hash)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    /** Attestation-archive peer or one that recently delivered usable MMATTEST. */
+    [[nodiscard]] bool IsTrustedMirrorAuthorityPeer(
+        NodeId peer_id, ServiceFlags services) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    /** Actively request tip-chain headers from an authority peer when the
+     *  mirror tip lags the observed frontier. */
+    void MaybeRequestTrustedMirrorAuthorityHeaders(
+        CNode& pto, Peer& peer, std::chrono::microseconds current_time)
+        EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex, cs_main);
     bool ConsumeMatMulAttestationInboundBudget(
         uint64_t keyed_netgroup,
         uint64_t count,
@@ -2724,6 +2749,34 @@ void PeerManagerImpl::ProcessBlockAvailability(NodeId nodeid) {
     if (!state->hashLastUnknownBlock.IsNull()) {
         const CBlockIndex* pindex = m_chainman.m_blockman.LookupBlockIndex(state->hashLastUnknownBlock);
         if (pindex && pindex->nChainWork > 0) {
+            if (node::matmul_trusted::IsTrustedMirror()) {
+                const CBlockIndex* tip{m_chainman.ActiveChain().Tip()};
+                if (tip != nullptr) {
+                    const bool candidate_extends_tip{
+                        pindex->nHeight >= tip->nHeight &&
+                        pindex->GetAncestor(tip->nHeight) == tip};
+                    const bool current_extends_tip{
+                        state->pindexBestKnownBlock != nullptr &&
+                        state->pindexBestKnownBlock->nHeight >= tip->nHeight &&
+                        state->pindexBestKnownBlock->GetAncestor(
+                            tip->nHeight) == tip};
+                    if (current_extends_tip && !candidate_extends_tip) {
+                        state->hashLastUnknownBlock.SetNull();
+                        return;
+                    }
+                    if (candidate_extends_tip) {
+                        if (state->pindexBestKnownBlock == nullptr ||
+                            !current_extends_tip ||
+                            pindex->nHeight >=
+                                state->pindexBestKnownBlock->nHeight) {
+                            state->pindexBestKnownBlock = pindex;
+                            NoteBestPeerAdvertisedHeight(pindex->nHeight);
+                        }
+                        state->hashLastUnknownBlock.SetNull();
+                        return;
+                    }
+                }
+            }
             if (state->pindexBestKnownBlock == nullptr || pindex->nChainWork >= state->pindexBestKnownBlock->nChainWork) {
                 state->pindexBestKnownBlock = pindex;
                 NoteBestPeerAdvertisedHeight(pindex->nHeight);
@@ -2741,6 +2794,36 @@ void PeerManagerImpl::UpdateBlockAvailability(NodeId nodeid, const uint256 &hash
 
     const CBlockIndex* pindex = m_chainman.m_blockman.LookupBlockIndex(hash);
     if (pindex && pindex->nChainWork > 0) {
+        // Trusted mirrors must not let competing-branch tips (higher claimed
+        // work) displace a tip-chain best-known pointer. Download walks toward
+        // pindexBestKnownBlock; following a competing tip starves our-chain
+        // catch-up from the attestation authority.
+        if (node::matmul_trusted::IsTrustedMirror()) {
+            const CBlockIndex* tip{m_chainman.ActiveChain().Tip()};
+            if (tip != nullptr) {
+                const bool candidate_extends_tip{
+                    pindex->nHeight >= tip->nHeight &&
+                    pindex->GetAncestor(tip->nHeight) == tip};
+                const bool current_extends_tip{
+                    state->pindexBestKnownBlock != nullptr &&
+                    state->pindexBestKnownBlock->nHeight >= tip->nHeight &&
+                    state->pindexBestKnownBlock->GetAncestor(tip->nHeight) ==
+                        tip};
+                if (current_extends_tip && !candidate_extends_tip) {
+                    return;
+                }
+                if (candidate_extends_tip) {
+                    if (state->pindexBestKnownBlock == nullptr ||
+                        !current_extends_tip ||
+                        pindex->nHeight >=
+                            state->pindexBestKnownBlock->nHeight) {
+                        state->pindexBestKnownBlock = pindex;
+                        NoteBestPeerAdvertisedHeight(pindex->nHeight);
+                    }
+                    return;
+                }
+            }
+        }
         // An actually better block was announced.
         if (state->pindexBestKnownBlock == nullptr || pindex->nChainWork >= state->pindexBestKnownBlock->nChainWork) {
             state->pindexBestKnownBlock = pindex;
@@ -2795,6 +2878,17 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
                 blocks_in_flight_global,
                 static_cast<int>(state->vBlocksInFlight.size()));
     };
+
+    // Trusted mirrors only download along the active tip's chain. Peers whose
+    // best-known tip is a competing fork would otherwise fill inflight slots
+    // with unattestable bodies and starve authority catch-up.
+    if (node::matmul_trusted::IsTrustedMirror() && tip != nullptr &&
+        state->pindexBestKnownBlock != nullptr) {
+        if (state->pindexBestKnownBlock->GetAncestor(tip->nHeight) != tip) {
+            log_skip("trusted_mirror_not_tip_chain");
+            return;
+        }
+    }
 
     // WP-8 site 4: download eligibility. The primary test runs on
     // TRUST-ADJUSTED work; a CLAIMED-work escape (nChainWork >= tip work) is
@@ -5639,6 +5733,16 @@ void PeerManagerImpl::HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, c
         return;
     }
 
+    // Trusted mirrors never direct-fetch a competing fork; those bodies are
+    // unattestable and only feed the reject hot-loop.
+    if (node::matmul_trusted::IsTrustedMirror()) {
+        const CBlockIndex* tip{m_chainman.ActiveChain().Tip()};
+        if (tip == nullptr ||
+            last_header.GetAncestor(tip->nHeight) != tip) {
+            return;
+        }
+    }
+
     // WP-8 site 1: gate the direct fetch on TRUST-ADJUSTED work (== nChainWork
     // pre-fork). Honest announcements extend our validated tip and pass
     // immediately; a forged deep high-work fork is clamped and falls back to
@@ -5946,6 +6050,90 @@ void PeerManagerImpl::MaybeLogTrustedMirrorStall(int32_t tip_height)
             m_matmul_trusted_reject_unattestable));
 }
 
+bool PeerManagerImpl::NoteTrustedMirrorUnattestableReject(const uint256& hash)
+{
+    AssertLockHeld(cs_main);
+    const auto now{std::chrono::steady_clock::now()};
+    auto it{m_matmul_attestation_backoff.find(hash)};
+    const bool already_cached{it != m_matmul_attestation_backoff.end()};
+    const bool window_active{
+        already_cached && now < it->second.not_before};
+    if (!node::matmul_trusted::CountTrustedRejectAsDistinct({
+            .already_cached = already_cached,
+            .window_active = window_active,
+        })) {
+        return false;
+    }
+    auto& backoff{already_cached ? it->second
+                                 : m_matmul_attestation_backoff[hash]};
+    backoff.not_before = now + MATMUL_TRUSTED_REJECT_STICKY;
+    ++m_matmul_trusted_reject_unattestable;
+    return true;
+}
+
+bool PeerManagerImpl::IsTrustedMirrorAuthorityPeer(
+    NodeId peer_id, ServiceFlags services) const
+{
+    AssertLockHeld(cs_main);
+    if ((services & NODE_MATMUL_ATTESTATION_ARCHIVE) ==
+        NODE_MATMUL_ATTESTATION_ARCHIVE) {
+        return true;
+    }
+    return m_matmul_attestation_peer_success.count(peer_id) != 0;
+}
+
+void PeerManagerImpl::MaybeRequestTrustedMirrorAuthorityHeaders(
+    CNode& pto, Peer& peer, std::chrono::microseconds current_time)
+{
+    AssertLockHeld(g_msgproc_mutex);
+    AssertLockHeld(cs_main);
+    if (!node::matmul_trusted::IsTrustedMirror()) return;
+    if (!CanServeBlocks(peer) || pto.IsAddrFetchConn()) return;
+    if (m_chainman.m_blockman.LoadingBlocks()) return;
+    if (!IsTrustedMirrorAuthorityPeer(pto.GetId(), peer.m_their_services)) {
+        return;
+    }
+
+    const CBlockIndex* tip{m_chainman.ActiveChain().Tip()};
+    if (tip == nullptr) return;
+    const int32_t tip_height{tip->nHeight};
+
+    int32_t target_height{tip_height};
+    if (const auto frontier{
+            node::matmul_trusted::AuthorityAttestedFrontier()}) {
+        target_height = std::max(target_height, *frontier);
+    }
+    if (const CNodeState* state{State(pto.GetId())};
+        state != nullptr && state->pindexBestKnownBlock != nullptr) {
+        const CBlockIndex* known{state->pindexBestKnownBlock};
+        if (known->nHeight >= tip->nHeight &&
+            known->GetAncestor(tip->nHeight) == tip) {
+            target_height = std::max(target_height, known->nHeight);
+        }
+    }
+    const int starting{peer.m_starting_height.load(std::memory_order_relaxed)};
+    if (starting > tip_height) {
+        target_height = std::max(target_height, starting);
+    }
+    if (tip_height >= target_height) return;
+
+    auto& last{m_trusted_mirror_authority_headers_at[pto.GetId()]};
+    if (last.count() != 0 &&
+        current_time - last < TRUSTED_MIRROR_AUTHORITY_HEADERS_INTERVAL) {
+        return;
+    }
+    const CBlockIndex* start{tip->pprev ? tip->pprev : tip};
+    if (!MaybeSendGetHeaders(pto, GetLocator(start), peer)) {
+        return;
+    }
+    last = current_time;
+    LogDebug(
+        BCLog::NET,
+        "trusted mirror authority getheaders to peer=%d "
+        "(tip=%d target=%d)\n",
+        pto.GetId(), tip_height, target_height);
+}
+
 void PeerManagerImpl::RequestMatMulTrustedAttestations(
     const uint256& hash, NodeId source)
 {
@@ -5970,14 +6158,15 @@ void PeerManagerImpl::RequestMatMulTrustedAttestations(
         const auto admit{EvaluateTrustedMirrorAttestationAdmit(
             hash, index, tip, tip_extending)};
         if (admit != node::matmul_trusted::TrustedAttestationAdmit::Allow) {
-            ++m_matmul_trusted_reject_unattestable;
-            LogDebug(
-                BCLog::NET,
-                "matmul trusted mirror skip attestation request "
-                "block=%s height=%d reason=%s\n",
-                hash.ToString(), height,
-                node::matmul_trusted::TrustedAttestationAdmitName(admit));
-            MaybeLogTrustedMirrorStall(tip_height);
+            if (NoteTrustedMirrorUnattestableReject(hash)) {
+                LogDebug(
+                    BCLog::NET,
+                    "matmul trusted mirror skip attestation request "
+                    "block=%s height=%d reason=%s\n",
+                    hash.ToString(), height,
+                    node::matmul_trusted::TrustedAttestationAdmitName(admit));
+                MaybeLogTrustedMirrorStall(tip_height);
+            }
             return;
         }
 
@@ -6001,6 +6190,10 @@ void PeerManagerImpl::RequestMatMulTrustedAttestations(
             // stayed silent, treat as signer-absent (not a transient miss) and
             // back the hash off with increasing delay.
             if (existing->second.asked_preferred && !tip_extending) {
+                // Count as a distinct reject before extending the window with
+                // exponential signer-absent delay (may exceed the sticky base).
+                const bool counted{
+                    NoteTrustedMirrorUnattestableReject(hash)};
                 auto& backoff{m_matmul_attestation_backoff[hash]};
                 backoff.signer_absent = true;
                 backoff.consecutive_misses =
@@ -6009,8 +6202,11 @@ void PeerManagerImpl::RequestMatMulTrustedAttestations(
                 const auto delay{
                     MATMUL_ATTESTATION_MISS_BACKOFF_BASE *
                     (1 << std::max(0, backoff.consecutive_misses - 1))};
-                backoff.not_before =
-                    std::chrono::steady_clock::now() + delay;
+                const auto sticky_until{
+                    std::chrono::steady_clock::now() + delay};
+                if (sticky_until > backoff.not_before) {
+                    backoff.not_before = sticky_until;
+                }
                 LogDebug(
                     BCLog::NET,
                     "matmul trusted mirror signer-absent backoff "
@@ -6021,8 +6217,9 @@ void PeerManagerImpl::RequestMatMulTrustedAttestations(
                             delay)
                             .count()));
                 m_matmul_attestation_requested.erase(existing);
-                ++m_matmul_trusted_reject_unattestable;
-                MaybeLogTrustedMirrorStall(tip_height);
+                if (counted) {
+                    MaybeLogTrustedMirrorStall(tip_height);
+                }
                 return;
             }
             // Transient miss (no preferred peer reached): allow a fresh round,
@@ -6954,7 +7151,18 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
     // Consider fetching more headers if we are not using our headers-sync mechanism.
     if (nCount == m_opts.max_headers_result && !have_headers_sync) {
         // Headers message had its maximum size; the peer may have more headers.
-        if (MaybeSendGetHeaders(pfrom, GetLocator(pindexLast), peer)) {
+        // Trusted mirrors must not keep digging into a competing fork: chasing
+        // max-size batches from the ~99 non-authority peers is what starved
+        // our-chain header sync from the attestation authority.
+        bool chase_more{true};
+        if (node::matmul_trusted::IsTrustedMirror()) {
+            LOCK(cs_main);
+            const CBlockIndex* tip{m_chainman.ActiveChain().Tip()};
+            chase_more = tip != nullptr &&
+                pindexLast->GetAncestor(tip->nHeight) == tip;
+        }
+        if (chase_more &&
+            MaybeSendGetHeaders(pfrom, GetLocator(pindexLast), peer)) {
             LogDebug(BCLog::NET, "more getheaders (%d) to end to peer=%d (startheight:%d)\n",
                     pindexLast->nHeight, pfrom.GetId(), peer.m_starting_height);
         }
@@ -8130,8 +8338,9 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
                 block_hash, index, tip, tip_extending);
             if (admit !=
                 node::matmul_trusted::TrustedAttestationAdmit::Allow) {
-                ++m_matmul_trusted_reject_unattestable;
-                MaybeLogTrustedMirrorStall(tip_height);
+                if (NoteTrustedMirrorUnattestableReject(block_hash)) {
+                    MaybeLogTrustedMirrorStall(tip_height);
+                }
             }
         }
         if (admit !=
@@ -8677,10 +8886,18 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 !pfrom.IsAddrFetchConn() &&
                 CanServeBlocks(*peer);
             const bool require_matmul_consensus = RequireMatMulConsensusPeersForSync();
-            state->fPreferredDownload = base_preferred &&
-                IsMatMulPeerEligibleForSync(
-                    require_matmul_consensus, nServices,
-                    pfrom.HasPermission(NetPermissionFlags::NoBan));
+            bool preferred_ok = IsMatMulPeerEligibleForSync(
+                require_matmul_consensus, nServices,
+                pfrom.HasPermission(NetPermissionFlags::NoBan));
+            // Trusted mirrors prefer attestation-archive peers for download
+            // preference (see SendMessages reconcile). NoBan still qualifies.
+            if (preferred_ok && node::matmul_trusted::IsTrustedMirror() &&
+                require_matmul_consensus &&
+                !pfrom.HasPermission(NetPermissionFlags::NoBan)) {
+                preferred_ok = IsTrustedMirrorAuthorityPeer(
+                    pfrom.GetId(), nServices);
+            }
+            state->fPreferredDownload = base_preferred && preferred_ok;
             m_num_preferred_download_peers += state->fPreferredDownload;
 
             if (require_matmul_consensus && base_preferred && !state->fPreferredDownload) {
@@ -12485,9 +12702,22 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
         // defeated the preference-only design (superseded by 75a9d850). Liveness
         // is already ungated -- getheaders / HeadersDirectFetchBlocks / getdata
         // do not consult this bit.
-        const bool consensus_ok = IsMatMulPeerEligibleForSync(
+        //
+        // Trusted mirrors prefer attestation-archive / recent-MMATTEST peers for
+        // the scarce preferred-download + initial header-sync slot. Competing
+        // NODE_MATMUL_CONSENSUS peers must not monopolize it. When no authority
+        // peer is preferred (m_num_preferred_download_peers == 0), ordinary
+        // peers still claim the slot via the existing scarcity fallback below
+        // (degrade; do not freeze).
+        bool consensus_ok = IsMatMulPeerEligibleForSync(
             require_matmul_consensus, peer->m_their_services,
             pto->HasPermission(NetPermissionFlags::NoBan));
+        if (consensus_ok && node::matmul_trusted::IsTrustedMirror() &&
+            require_matmul_consensus &&
+            !pto->HasPermission(NetPermissionFlags::NoBan)) {
+            consensus_ok = IsTrustedMirrorAuthorityPeer(
+                pto->GetId(), peer->m_their_services);
+        }
         const auto preferred_reconcile{
             ReconcileMatMulPreferredDownloadForSync(
                 state.fPreferredDownload,
@@ -12669,6 +12899,11 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                 }
             }
         }
+
+        // Trusted mirrors: actively pull tip-chain headers from attestation
+        // authority peers whenever the local tip lags the observed frontier.
+        // Competing-branch peers must not be the only source of getheaders.
+        MaybeRequestTrustedMirrorAuthorityHeaders(*pto, *peer, current_time);
 
         //
         // Try sending block announcements via headers

@@ -5,6 +5,9 @@
 #include <blockencodings.h>
 #include <chainparams.h>
 #include <consensus/merkle.h>
+#include <key.h>
+#include <matmul/trusted_exact_replay_attestation.h>
+#include <node/matmul_trusted_attestations.h>
 #include <node/miner.h>
 #include <node/transaction.h>
 #include <net_processing.h>
@@ -693,6 +696,206 @@ BOOST_AUTO_TEST_CASE(matmul_consensus_tier_compact_block_boundary_policy)
                                              post_boundary_stats));
     BOOST_CHECK(!post_boundary_stats.m_preferred_download);
     BOOST_CHECK(!post_boundary_peer.fDisconnect);
+}
+
+// Regression: a trusted mirror whose attestation authority is ahead must
+// advance m_best_header along the tip chain when the authority serves
+// headers, and must not let competing-branch headers from ordinary peers
+// displace that frontier (fra1: headers==blocks frozen while competing
+// headers at 186270+ arrived continuously).
+BOOST_AUTO_TEST_CASE(trusted_mirror_authority_headers_advance_best_header)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+
+    node::matmul_trusted::ResetForTest();
+    CKey signer;
+    signer.MakeNewKey(/*fCompressed=*/true);
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256::FromHex(std::string(64, '1')).value();
+    config.replay_authority_context =
+        uint256::FromHex(std::string(64, '2')).value();
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/true, /*serve=*/false,
+        std::chrono::milliseconds{50}, error));
+    BOOST_REQUIRE(node::matmul_trusted::IsTrustedMirror());
+    struct MirrorReset {
+        ~MirrorReset() { node::matmul_trusted::ResetForTest(); }
+    } mirror_reset;
+
+    ConnmanTestMsg& connman = static_cast<ConnmanTestMsg&>(*m_node.connman);
+    PeerManager& peerman = *m_node.peerman;
+
+    const ServiceFlags authority_services{ServiceFlags(
+        NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS |
+        NODE_MATMUL_ATTESTATION_ARCHIVE)};
+    const ServiceFlags ordinary_services{ServiceFlags(
+        NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS)};
+
+    CNode authority{/*id=*/51,
+                    /*sock=*/nullptr,
+                    CAddress{},
+                    /*nKeyedNetGroupIn=*/0,
+                    /*nLocalHostNonceIn=*/0,
+                    CAddress{},
+                    /*addrNameIn=*/"authority-archive",
+                    ConnectionType::OUTBOUND_FULL_RELAY,
+                    /*inbound_onion=*/false,
+                    /*network_key=*/0};
+    CNode ordinary{/*id=*/52,
+                   /*sock=*/nullptr,
+                   CAddress{},
+                   /*nKeyedNetGroupIn=*/0,
+                   /*nLocalHostNonceIn=*/0,
+                   CAddress{},
+                   /*addrNameIn=*/"ordinary-competing",
+                   ConnectionType::OUTBOUND_FULL_RELAY,
+                   /*inbound_onion=*/false,
+                   /*network_key=*/0};
+    connman.Handshake(authority, /*successfully_connected=*/true,
+                      authority_services, authority_services, PROTOCOL_VERSION,
+                      /*relay_txs=*/true);
+    connman.Handshake(ordinary, /*successfully_connected=*/true,
+                      ordinary_services, ordinary_services, PROTOCOL_VERSION,
+                      /*relay_txs=*/true);
+    connman.FlushSendBuffer(authority);
+    connman.FlushSendBuffer(ordinary);
+    struct FinalizePeers {
+        PeerManager& peerman;
+        CNode& first;
+        CNode& second;
+        ~FinalizePeers()
+        {
+            peerman.FinalizeNode(first);
+            peerman.FinalizeNode(second);
+        }
+    } finalize{peerman, authority, ordinary};
+
+    const CBlockIndex* tip{
+        WITH_LOCK(::cs_main, return m_node.chainman->ActiveChain().Tip())};
+    BOOST_REQUIRE(tip != nullptr);
+    SetMockTime(std::chrono::seconds{tip->GetBlockTime() + 1});
+
+    Consensus::Params& consensus = const_cast<Consensus::Params&>(
+        m_node.chainman->GetParams().GetConsensus());
+    const int32_t saved_rc = consensus.nMatMulRCHeight;
+    const int32_t saved_v4 = consensus.nMatMulV4Height;
+    const int32_t saved_bmx4c = consensus.nMatMulBMX4CHeight;
+    const int32_t saved_drlt = consensus.nMatMulDRLTHeight;
+    const int32_t saved_coupled = consensus.nMatMulRCCoupledHeight;
+    struct RestoreHeights {
+        Consensus::Params& params;
+        int32_t rc;
+        int32_t v4;
+        int32_t bmx4c;
+        int32_t drlt;
+        int32_t coupled;
+        ~RestoreHeights()
+        {
+            params.nMatMulRCHeight = rc;
+            params.nMatMulV4Height = v4;
+            params.nMatMulBMX4CHeight = bmx4c;
+            params.nMatMulDRLTHeight = drlt;
+            params.nMatMulRCCoupledHeight = coupled;
+        }
+    } restore_heights{consensus, saved_rc, saved_v4, saved_bmx4c, saved_drlt,
+                      saved_coupled};
+
+    // RC/trusted-attestation live at the current tip so consensus-tier
+    // preference (and the trusted-mirror authority refinement) is active.
+    consensus.nMatMulV4Height = tip->nHeight;
+    consensus.nMatMulBMX4CHeight = tip->nHeight;
+    consensus.nMatMulDRLTHeight = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulRCHeight = tip->nHeight;
+    consensus.nMatMulRCCoupledHeight = std::numeric_limits<int32_t>::max();
+    peerman.SetBestBlock(tip->nHeight, std::chrono::seconds{tip->GetBlockTime()});
+    BOOST_REQUIRE(consensus.IsMatMulRCActive(tip->nHeight));
+    BOOST_REQUIRE(
+        consensus.IsMatMulTrustedReplayAttestationActive(tip->nHeight + 1));
+
+    const int next_height{tip->nHeight + 1};
+
+    // Tip-chain header from the attestation authority.
+    CBlock our_next = node::BlockAssembler{
+        m_node.chainman->ActiveChainstate(), nullptr, {}, m_node}
+                          .CreateNewBlock()
+                          ->block;
+    our_next.hashMerkleRoot = BlockMerkleRoot(our_next);
+    BOOST_REQUIRE(MineHeaderForConsensus(
+        our_next, next_height, m_node.chainman->GetConsensus(), 5'000'000,
+        tip->GetMedianTimePast()));
+    std::vector<CBlock> our_headers{CBlock{our_next.GetBlockHeader()}};
+    auto authority_msg{
+        NetMsg::Make(NetMsgType::HEADERS, TX_WITH_WITNESS(our_headers))};
+    BOOST_REQUIRE(connman.ReceiveMsgFrom(authority, std::move(authority_msg)));
+    authority.fPauseSend = false;
+    (void)connman.ProcessMessagesOnce(authority);
+
+    const CBlockIndex* our_index{WITH_LOCK(
+        ::cs_main,
+        return m_node.chainman->m_blockman.LookupBlockIndex(
+            our_next.GetHash()))};
+    BOOST_REQUIRE(our_index != nullptr);
+    BOOST_CHECK_EQUAL(
+        WITH_LOCK(::cs_main,
+                  return m_node.chainman->m_best_header->GetBlockHash()),
+        our_next.GetHash());
+    BOOST_CHECK_EQUAL(
+        WITH_LOCK(::cs_main, return m_node.chainman->m_best_header->nHeight),
+        next_height);
+
+    // Competing fork from tip->pprev (does not extend active tip).
+    if (tip->pprev != nullptr) {
+        CBlock competing_full;
+        competing_full.SetNull();
+        competing_full.hashPrevBlock = tip->pprev->GetBlockHash();
+        competing_full.nTime = tip->pprev->GetBlockTime() + 2;
+        competing_full.nBits = tip->nBits;
+        competing_full.nVersion = tip->nVersion;
+        competing_full.nNonce = 0;
+        competing_full.hashMerkleRoot =
+            uint256::FromHex(std::string(64, 'a')).value();
+        if (MineHeaderForConsensus(
+                competing_full, tip->pprev->nHeight + 1,
+                m_node.chainman->GetConsensus(), 5'000'000,
+                tip->pprev->GetMedianTimePast())) {
+            std::vector<CBlock> competing_headers{
+                CBlock{competing_full.GetBlockHeader()}};
+            auto ordinary_msg{NetMsg::Make(
+                NetMsgType::HEADERS, TX_WITH_WITNESS(competing_headers))};
+            BOOST_REQUIRE(
+                connman.ReceiveMsgFrom(ordinary, std::move(ordinary_msg)));
+            ordinary.fPauseSend = false;
+            (void)connman.ProcessMessagesOnce(ordinary);
+        }
+    }
+
+    BOOST_CHECK_EQUAL(
+        WITH_LOCK(::cs_main,
+                  return m_node.chainman->m_best_header->GetBlockHash()),
+        our_next.GetHash());
+
+    // Raise the authority frontier so the mirror knows it is behind.
+    node::matmul_trusted::NoteAuthorityPeerTipHint(next_height + 10);
+
+    CNodeStateStats authority_stats;
+    CNodeStateStats ordinary_stats;
+    BOOST_CHECK(peerman.SendMessages(&authority));
+    BOOST_CHECK(peerman.SendMessages(&ordinary));
+    BOOST_REQUIRE(peerman.GetNodeStateStats(authority.GetId(), authority_stats));
+    BOOST_REQUIRE(peerman.GetNodeStateStats(ordinary.GetId(), ordinary_stats));
+    BOOST_CHECK(authority_stats.m_preferred_download);
+    BOOST_CHECK(!ordinary_stats.m_preferred_download);
+
+    // Best-header ahead of tip: authority must allocate download toward the
+    // tip-chain child (GETDATA / in-flight). That is the path that advances tip
+    // once the body + M-of-N quorum arrive.
+    const bool download_allocated{
+        !authority_stats.vHeightInFlight.empty() ||
+        HasQueuedMessageType(authority, NetMsgType::GETDATA)};
+    BOOST_CHECK(download_allocated);
 }
 
 BOOST_AUTO_TEST_CASE(broadcast_transaction_fails_closed_without_peerman)

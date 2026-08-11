@@ -251,6 +251,63 @@ struct TrustedWorkRank {
     };
 }
 
+/**
+ * Trusted-mirror best-header policy (sync only, not consensus).
+ *
+ * PreferTrustAdjustedHeader intentionally pins m_best_header to authenticated
+ * work so an unverified MatMul header cannot displace its parent. Trusted
+ * mirrors still need the header frontier that extends the active tip so they
+ * can request the next body from the attestation authority. Competing forks
+ * never satisfy `extends_active_tip_chain`. Parked deep-reorg branches are
+ * excluded. This does not accept blocks; M-of-N quorum remains required.
+ */
+struct TrustedMirrorTipChainHeaderView {
+    bool extends_active_tip_chain{false};
+    bool on_parked_reorg_branch{false};
+    int32_t candidate_height{-1};
+    int32_t tip_height{-1};
+    int32_t current_best_height{-1};
+    //! True when the current m_best_header itself extends the active tip.
+    bool current_best_extends_tip{false};
+    //! True when candidate is a descendant of the current best header.
+    bool candidate_extends_current_best{false};
+};
+
+[[nodiscard]] inline bool PreferTrustedMirrorTipChainHeader(
+    const TrustedMirrorTipChainHeaderView& v)
+{
+    if (!v.extends_active_tip_chain || v.on_parked_reorg_branch) {
+        return false;
+    }
+    if (v.candidate_height <= v.tip_height) {
+        return false;
+    }
+    // Displace a best-header that is not on the tip chain (stale / competing).
+    if (!v.current_best_extends_tip) {
+        return true;
+    }
+    // Grow along the tip-chain frontier.
+    return v.candidate_extends_current_best &&
+           v.candidate_height > v.current_best_height;
+}
+
+/**
+ * Sticky unattestable-reject accounting: count a hash only when it is newly
+ * entered into the negative cache (or its sticky window has expired and it is
+ * being re-armed). Repeat evaluations inside the window must not increment.
+ */
+struct TrustedRejectStickyView {
+    bool already_cached{false};
+    bool window_active{false};
+};
+
+[[nodiscard]] inline bool CountTrustedRejectAsDistinct(
+    const TrustedRejectStickyView& v)
+{
+    if (!v.already_cached) return true;
+    return !v.window_active;
+}
+
 } // namespace node::matmul_trusted
 
 #endif // BTX_NODE_MATMUL_TRUSTED_ATTESTATIONS_H

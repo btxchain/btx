@@ -602,4 +602,76 @@ BOOST_AUTO_TEST_CASE(authority_frontier_tracks_accepted_attestations)
     BOOST_CHECK_EQUAL(*node::matmul_trusted::AuthorityAttestedFrontier(), 300);
 }
 
+BOOST_AUTO_TEST_CASE(tip_chain_header_preference_ignores_competing_fork)
+{
+    using node::matmul_trusted::PreferTrustedMirrorTipChainHeader;
+    using node::matmul_trusted::TrustedMirrorTipChainHeaderView;
+
+    // Tip-chain extension past the authenticated tip must become best-header.
+    BOOST_CHECK(PreferTrustedMirrorTipChainHeader(TrustedMirrorTipChainHeaderView{
+        .extends_active_tip_chain = true,
+        .on_parked_reorg_branch = false,
+        .candidate_height = 186051,
+        .tip_height = 186050,
+        .current_best_height = 186050,
+        .current_best_extends_tip = true,
+        .candidate_extends_current_best = true,
+    }));
+
+    // Competing fork (not a tip-chain extension) must never displace.
+    BOOST_CHECK(!PreferTrustedMirrorTipChainHeader(TrustedMirrorTipChainHeaderView{
+        .extends_active_tip_chain = false,
+        .on_parked_reorg_branch = false,
+        .candidate_height = 186291,
+        .tip_height = 186050,
+        .current_best_height = 186050,
+        .current_best_extends_tip = true,
+        .candidate_extends_current_best = false,
+    }));
+
+    // Parked deep-reorg branch is excluded even if heights look ahead.
+    BOOST_CHECK(!PreferTrustedMirrorTipChainHeader(TrustedMirrorTipChainHeaderView{
+        .extends_active_tip_chain = true,
+        .on_parked_reorg_branch = true,
+        .candidate_height = 186060,
+        .tip_height = 186050,
+        .current_best_height = 186050,
+        .current_best_extends_tip = true,
+        .candidate_extends_current_best = true,
+    }));
+
+    // A tip-chain header may displace a stale best-header that is not on tip.
+    BOOST_CHECK(PreferTrustedMirrorTipChainHeader(TrustedMirrorTipChainHeaderView{
+        .extends_active_tip_chain = true,
+        .on_parked_reorg_branch = false,
+        .candidate_height = 186051,
+        .tip_height = 186050,
+        .current_best_height = 186200,
+        .current_best_extends_tip = false,
+        .candidate_extends_current_best = false,
+    }));
+}
+
+BOOST_AUTO_TEST_CASE(unattestable_reject_counter_is_distinct_not_hot_loop)
+{
+    using node::matmul_trusted::CountTrustedRejectAsDistinct;
+    using node::matmul_trusted::TrustedRejectStickyView;
+
+    // First sighting of a hash counts.
+    BOOST_CHECK(CountTrustedRejectAsDistinct(TrustedRejectStickyView{
+        .already_cached = false,
+        .window_active = false,
+    }));
+    // Repeats inside the sticky window must not count again.
+    BOOST_CHECK(!CountTrustedRejectAsDistinct(TrustedRejectStickyView{
+        .already_cached = true,
+        .window_active = true,
+    }));
+    // After the window expires, a re-arm may count once more.
+    BOOST_CHECK(CountTrustedRejectAsDistinct(TrustedRejectStickyView{
+        .already_cached = true,
+        .window_active = false,
+    }));
+}
+
 BOOST_AUTO_TEST_SUITE_END()
