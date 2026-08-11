@@ -260,6 +260,11 @@ static_assert(INVENTORY_BROADCAST_MAX >= INVENTORY_BROADCAST_TARGET, "INVENTORY_
 static_assert(INVENTORY_BROADCAST_MAX <= node::MAX_PEER_TX_ANNOUNCEMENTS, "INVENTORY_BROADCAST_MAX too high");
 /** Hard cap on queued tx announcements per peer to bound memory usage. */
 static constexpr size_t MAX_TX_INVENTORY_TO_SEND = node::MAX_PEER_TX_ANNOUNCEMENTS;
+/** Below this many NODE_MATMUL_CONSENSUS peers, the consensus tier stops
+ *  restricting header sync and block download: with too few eligible peers the
+ *  restriction cannot be satisfied and merely deadlocks the node. */
+static constexpr int MATMUL_MIN_ELIGIBLE_PEERS_FOR_TIER{2};
+
 /** An async MatMul verification marker older than this is treated as abandoned.
  *
  *  m_matmul_async_verifying exists so a body being verified off-thread is not
@@ -1299,6 +1304,11 @@ private:
         GUARDED_BY(m_matmul_rc_deferred_mutex);
     void MarkMatMulRCBodyDeferred(const uint256& hash, int64_t peer_id) NO_THREAD_SAFETY_ANALYSIS;
     bool IsMatMulRCBodyDeferred(const uint256& hash, int64_t peer_id) const NO_THREAD_SAFETY_ANALYSIS;
+    /** Number of connected peers advertising NODE_MATMUL_CONSENSUS, cached and
+     *  refreshed at most once a second (see MatMulEligiblePeerCount). */
+    std::atomic<int> m_matmul_eligible_peer_cache{0};
+    std::atomic<std::chrono::seconds> m_matmul_eligible_peer_cached_at{0s};
+    int MatMulEligiblePeerCount() EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
     void ClearMatMulRCBodyDeferred(const uint256& hash) NO_THREAD_SAFETY_ANALYSIS;
     void PinMatMulBlockSource(const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     void UnpinMatMulBlockSource(const uint256& hash) NO_THREAD_SAFETY_ANALYSIS;
@@ -2057,6 +2067,26 @@ void PeerManagerImpl::MarkMatMulRCBodyDeferred(const uint256& hash, int64_t peer
     LOCK(m_matmul_rc_deferred_mutex);
     (void)m_matmul_rc_deferred_bodies.Mark(
         hash, peer_id, std::chrono::steady_clock::now());
+}
+
+int PeerManagerImpl::MatMulEligiblePeerCount()
+{
+    const auto now{GetTime<std::chrono::seconds>()};
+    if (now == m_matmul_eligible_peer_cached_at.load()) {
+        return m_matmul_eligible_peer_cache.load();
+    }
+    int eligible{0};
+    {
+        LOCK(m_peer_mutex);
+        for (const auto& [id, peer] : m_peer_map) {
+            if ((peer->m_their_services & NODE_MATMUL_CONSENSUS) == NODE_MATMUL_CONSENSUS) {
+                ++eligible;
+            }
+        }
+    }
+    m_matmul_eligible_peer_cache.store(eligible);
+    m_matmul_eligible_peer_cached_at.store(now);
+    return eligible;
 }
 
 bool PeerManagerImpl::IsMatMulRCBodyDeferred(const uint256& hash, int64_t peer_id) const
@@ -11620,9 +11650,38 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
         // in IBD (once out of IBD, we sync from all peers).
         bool sync_blocks_and_headers_from_peer = false;
         const bool require_matmul_consensus = RequireMatMulConsensusPeersForSync();
-        const bool consensus_ok = IsMatMulPeerEligibleForSync(
+        bool consensus_ok = IsMatMulPeerEligibleForSync(
             require_matmul_consensus, peer->m_their_services,
             pto->HasPermission(NetPermissionFlags::NoBan));
+
+        // Degenerate-network fallback.
+        //
+        // The consensus tier restricts header sync AND block download to peers
+        // advertising NODE_MATMUL_CONSENSUS, and disconnects ineligible
+        // outbound peers outright. That bit is only set by a node running
+        // strict-device with a currently qualified GPU. On a CPU-only node --
+        // every trusted mirror, and any operator without a qualifying GPU --
+        // that is a closed deadlock whenever GPU peers are scarce: ineligible
+        // peers are dropped, no header sync starts, m_best_header never
+        // advances past our tip, so nothing is ever fetchable and the node
+        // stalls forever with a full peer table.
+        //
+        // Measured on mainnet 2026-08-11 on a stalled CPU mirror: 105k
+        // matmul_ineligible download skips, 464k no_fetchable_in_window with
+        // best_header_ahead=0 while peers advertised +136, and only 2 of ~90
+        // peers had ever served it a block.
+        //
+        // Requiring the bit to FETCH conflates fetching with validating. Block
+        // bytes are self-validating: PoW is checked before any expensive MatMul
+        // work, ExactReplay or an attestation quorum gates connection, and the
+        // per-peer/netgroup/global verify budgets bound the cost independently.
+        // So when we do not have enough eligible peers to sync from, fall back
+        // to ordinary peers rather than deadlock. The tier still governs
+        // PREFERENCE while eligible peers exist.
+        if (!consensus_ok && require_matmul_consensus &&
+            MatMulEligiblePeerCount() < MATMUL_MIN_ELIGIBLE_PEERS_FOR_TIER) {
+            consensus_ok = true;
+        }
         const auto preferred_reconcile{
             ReconcileMatMulPreferredDownloadForSync(
                 state.fPreferredDownload,
