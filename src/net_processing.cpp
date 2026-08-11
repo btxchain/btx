@@ -314,7 +314,7 @@ static constexpr auto MATMUL_BUDGET_DEFER_COOLDOWN{60s};
  *  is unreachable. Observed on mainnet 2026-08-11: a node held 162 of 163
  *  blocks of a better branch and stalled indefinitely on the single missing
  *  block immediately after its tip. */
-static constexpr auto BLOCK_REREQUEST_STALE_AFTER{90s};
+static constexpr auto BLOCK_REREQUEST_STALE_AFTER{180s};
 
 /** Depth behind the best known header past which a node is treated as
  *  catching up / racing a competing branch for MatMul RC verify budgeting. */
@@ -2030,6 +2030,12 @@ bool PeerManagerImpl::IsMatMulBudgetDeferred(const uint256& hash,
 
 void PeerManagerImpl::NoteMatMulBudgetDeferred(const uint256& hash)
 {
+    // Prune on insert as well as on lookup: a hash deferred and never queried
+    // again (reorg, peer gone) would otherwise persist, letting a peer grow this
+    // map with unique hashes.
+    const auto now_us{GetTime<std::chrono::microseconds>()};
+    std::erase_if(m_matmul_budget_deferred,
+                  [&](const auto& e) { return now_us >= e.second; });
     m_matmul_budget_deferred[hash] =
         GetTime<std::chrono::microseconds>() +
         std::chrono::duration_cast<std::chrono::microseconds>(MATMUL_BUDGET_DEFER_COOLDOWN);
@@ -5424,7 +5430,12 @@ bool PeerManagerImpl::IsAncestorOfBestHeaderOrTip(const CBlockIndex* header)
 
 bool PeerManagerImpl::MaybeSendGetHeaders(CNode& pfrom, const CBlockLocator& locator, Peer& peer)
 {
-    if (!IsPeerEligibleForMatMulSync(pfrom, peer)) return false;
+    // NOT eligibility-gated. Headers are cheap and self-validating, and they
+    // establish pindexBestKnownBlock -- without which a peer is unusable for
+    // block download. Gating this on NODE_MATMUL_CONSENSUS silently defeated the
+    // fan-out probe added for exactly that problem: the probe called this and it
+    // returned false for every peer it was meant to reach. The consensus tier
+    // remains a PREFERENCE via fPreferredDownload, never a gate.
 
     const auto current_time = NodeClock::now();
 
@@ -5446,8 +5457,7 @@ bool PeerManagerImpl::MaybeSendGetHeaders(CNode& pfrom, const CBlockLocator& loc
 void PeerManagerImpl::HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, const CBlockIndex& last_header)
 {
     LOCK(cs_main);
-    if (!IsPeerEligibleForMatMulSync(pfrom, peer)) return;
-
+    // Not eligibility-gated: see MaybeSendGetHeaders. Fetching is not validating.
     CNodeState *nodestate = State(pfrom.GetId());
     if (nodestate == nullptr || GetTime<std::chrono::microseconds>() < nodestate->m_block_download_paused_until) {
         return;
@@ -12519,8 +12529,6 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
         // Message: getdata (blocks)
         //
         MaybeRecoverStalledBlockFetch(current_time);
-        // Re-validate anything the verification budget held back earlier.
-        RetryMatMulDeferredBodies();
         std::vector<CInv> vGetData;
         const bool can_request_blocks_from_peer{current_time >= state.m_block_download_paused_until};
         const bool should_request_blocks_from_peer{
@@ -12641,6 +12649,15 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
         if (!vGetData.empty())
             MakeAndPushMessage(*pto, NetMsgType::GETDATA, vGetData);
     } // release cs_main
+
+    // Re-validate anything the verification budget held back earlier.
+    //
+    // Deliberately OUTSIDE the cs_main scope above. This can run a full
+    // ProcessNewBlock, potentially including ExactReplay, and doing that under
+    // cs_main stalls every other message-processing thread. Two independent
+    // reviews flagged the previous placement as the same hazard class as the
+    // lock-order deadlock this routine already caused once.
+    RetryMatMulDeferredBodies();
     MaybeSendFeefilter(*pto, *peer, current_time);
     return true;
 }
