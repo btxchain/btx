@@ -58,6 +58,17 @@ static const int SHORT_IDS_BLOCKS_VERSION = 70014;
 //! not banning for invalid compact blocks starts with this version
 static const int INVALID_CB_NO_BAN_VERSION = 70015;
 
+//! Signed Profile-1 ExactReplay attestation relay (getmmattest/mmattest) is
+//! available from this version onward.
+//!
+//! MUST be a fixed introduction version, never PROTOCOL_VERSION. Gating this
+//! feature on PROTOCOL_VERSION is self-referential: GetCommonVersion() is
+//! min(ours, theirs), so the moment PROTOCOL_VERSION is bumped ahead of the
+//! network every peer fails the check, a trusted mirror stops sending
+//! getmmattest entirely, receives no attestations, and stalls permanently.
+//! That regression was observed on mainnet 2026-08-11 (accepted=0, rejected=0).
+static const int MATMUL_ATTESTATION_VERSION = 800001;
+
 //! "wtxidrelay" command for wtxid-based relay starts with this version
 static const int WTXID_RELAY_VERSION = 70016;
 

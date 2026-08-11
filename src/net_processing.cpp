@@ -260,6 +260,13 @@ static_assert(INVENTORY_BROADCAST_MAX >= INVENTORY_BROADCAST_TARGET, "INVENTORY_
 static_assert(INVENTORY_BROADCAST_MAX <= node::MAX_PEER_TX_ANNOUNCEMENTS, "INVENTORY_BROADCAST_MAX too high");
 /** Hard cap on queued tx announcements per peer to bound memory usage. */
 static constexpr size_t MAX_TX_INVENTORY_TO_SEND = node::MAX_PEER_TX_ANNOUNCEMENTS;
+/** Depth behind the best known header past which a node is treated as
+ *  catching up / racing a competing branch for MatMul RC verify budgeting. */
+static constexpr int MATMUL_RC_CATCHUP_DEPTH_THRESHOLD{8};
+/** Bounded multiplier applied to the GLOBAL RC verify budget while catching up.
+ *  Per-peer and per-netgroup budgets are deliberately NOT scaled. */
+static constexpr uint32_t MATMUL_RC_CATCHUP_BUDGET_MULTIPLIER{8};
+
 /** Retain reconnect-resistant MatMul verification budgets for this duration. */
 static constexpr auto MATMUL_ADDR_BUDGET_RETENTION{10min};
 /** Header-first ExactReplay is a small near-tip lane, not an IBD/backfill
@@ -3371,8 +3378,44 @@ bool PeerManagerImpl::ConsumeMatMulVerificationBudgetForPeer(
                     verification_count, now, is_ibd, reference_height)) {
                 return false;
             }
-            const uint32_t global_budget =
+            uint32_t global_budget =
                 EffectiveMatMulRCGlobalVerifyBudgetPerMin(params, reference_height);
+            // Catch-up allowance for a chain race.
+            //
+            // The flat per-minute global cap is correct anti-abuse policy in
+            // steady state, but during a chain race it becomes a livelock: to
+            // decide which of two branches has more work we must first VERIFY
+            // the competing branch, and the cap stops us partway through, after
+            // which the deferred blocks are re-requested and deferred again.
+            // Two nodes on rival branches then stay permanently blind to each
+            // other and the chain fragments instead of converging by work.
+            // Observed on mainnet 2026-08-10/11: one archive logged 2146
+            // "Global RC verify budget exhausted" events and never re-synced,
+            // while a sibling that never hit the cap converged and stayed.
+            //
+            // While our tip is materially behind the best header we know of,
+            // raise ONLY the global cap by a bounded factor. Per-peer and
+            // per-netgroup budgets are untouched, so no single source (or
+            // netgroup) can spend more than before: an attacker still cannot
+            // buy extra verification, they can only stop being the reason we
+            // are blind to everyone else.
+            if (global_budget > 0) {
+                const int best_header_height{
+                    m_chainman.m_best_header != nullptr
+                        ? m_chainman.m_best_header->nHeight
+                        : 0};
+                const int active_height{m_chainman.ActiveHeight()};
+                if (best_header_height - active_height >
+                    MATMUL_RC_CATCHUP_DEPTH_THRESHOLD) {
+                    global_budget =
+                        (global_budget >
+                         std::numeric_limits<uint32_t>::max() /
+                             MATMUL_RC_CATCHUP_BUDGET_MULTIPLIER)
+                            ? std::numeric_limits<uint32_t>::max()
+                            : global_budget *
+                                  MATMUL_RC_CATCHUP_BUDGET_MULTIPLIER;
+                }
+            }
             if (!ConsumeGlobalMatMulRCBudget(global_budget, verification_count, now)) {
                 RefundMatMulRCPeerVerifyBudget(
                     budget_state.budget, verification_count, now);
@@ -5355,7 +5398,7 @@ void PeerManagerImpl::RequestMatMulTrustedAttestations(
     // decide authority. The admitted source is also queried to tolerate a
     // provider whose service advertisement has not propagated yet.
     m_connman.ForEachNode([&](CNode* target) {
-        if (target->GetCommonVersion() < PROTOCOL_VERSION) return;
+        if (target->GetCommonVersion() < MATMUL_ATTESTATION_VERSION) return;
         const PeerRef target_peer{GetPeerRef(target->GetId())};
         const ServiceFlags services{
             target_peer
@@ -7398,7 +7441,7 @@ void PeerManagerImpl::ProcessBlockSync(NodeId nodeid, CNode* node, const std::sh
                         message{std::move(produced)};
                     m_connman.ForEachNode([&](CNode* target) {
                         if (target->GetCommonVersion() >=
-                            PROTOCOL_VERSION) {
+                            MATMUL_ATTESTATION_VERSION) {
                             MakeAndPushMessage(
                                 *target,
                                 NetMsgType::MMATTEST,
@@ -10093,7 +10136,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
     }
 
     if (msg_type == NetMsgType::GETMMATTEST) {
-        if (pfrom.GetCommonVersion() < PROTOCOL_VERSION) {
+        if (pfrom.GetCommonVersion() < MATMUL_ATTESTATION_VERSION) {
             pfrom.fDisconnect = true;
             return;
         }
@@ -10181,7 +10224,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
     }
 
     if (msg_type == NetMsgType::MMATTEST) {
-        if (pfrom.GetCommonVersion() < PROTOCOL_VERSION) {
+        if (pfrom.GetCommonVersion() < MATMUL_ATTESTATION_VERSION) {
             pfrom.fDisconnect = true;
             return;
         }
@@ -10350,7 +10393,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             m_connman.ForEachNode([&](CNode* target) {
                 if (relayed >= MATMUL_ATTESTATION_RELAY_PEERS ||
                     target->GetId() == pfrom.GetId() ||
-                    target->GetCommonVersion() < PROTOCOL_VERSION) {
+                    target->GetCommonVersion() < MATMUL_ATTESTATION_VERSION) {
                     return;
                 }
                 MakeAndPushMessage(

@@ -123,10 +123,19 @@ inline ReorgProtectionProfileSettings GetReorgProtectionProfileSettings(ReorgPro
             .hysteresis_work_margin = 2,
         };
     case ReorgProtectionProfile::EMERGENCY:
+        // Automatic deep-reorg finality (default profile).
+        //
+        // Rented-hashpower reorg attacks were executed against mainnet on
+        // 2026-08-10/11 (151-block and 8-block rewrites, a third prepared).
+        // WARN-only meant every operator had to park by hand, in coordination,
+        // at each incident. PARK at 6 makes the refusal automatic and
+        // network-wide: ordinary 1-5 block races still settle by work, while a
+        // deep rewrite is refused and left for an operator decision.
+        // Override with -parkdeepreorg=0 / -maxreorgdepthpark=<n>.
         return {
-            .action = DeepReorgAction::WARN,
+            .action = DeepReorgAction::PARK,
             .warn_depth = 3,
-            .park_depth = REORG_PROTECTION_DEPTH_DISABLED,
+            .park_depth = 6,
             .finality_depth = 72,
             .hysteresis_depth = 0,
             .hysteresis_work_margin = 2,

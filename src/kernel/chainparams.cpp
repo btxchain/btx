@@ -943,6 +943,12 @@ public:
             {
                 {0, uint256{"75a998a39d2d6e25a9ca7de2cc659309c4105839c06cd435ba2b1aabf0fa4601"}},
                 {179000, uint256{"2dd1d545b1b5e76c28b4414ebe0c22b1ba9d3ebd88662fbd1b9e4d0cf6693933"}},
+                // MatMul v4.7 Epoch-A activation. Non-upgraded nodes extend a
+                // legacy chain past this height; checkpointing it rejects them
+                // explicitly at the first header instead of surfacing a cryptic
+                // work-transition error, and stops fresh syncs from being led
+                // onto a pre-fork chain by a legacy majority.
+                {185000, uint256{"f03a7af21d20f67a5efecfb8b0b3e5e1b91efa208b385419470c59450f2afb8b"}},
             }
         };
         m_assumeutxo_data = {
