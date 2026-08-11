@@ -147,7 +147,13 @@ MetalGemmContext& Ctx()
     static MetalGemmContext ctx;
     static std::once_flag once;
     std::call_once(once, [] {
-        ctx.device = MTLCreateSystemDefaultDevice();
+        // MTLCreateSystemDefaultDevice() is restricted to interactive apps on
+        // macOS 14+ and returns nil from CLI/daemon contexts, so -daemon=1 lost
+        // the Metal backend and fell back to CPU. MTLCopyAllDevices() is Apple's
+        // documented replacement that works in any context.
+        NSArray<id<MTLDevice>>* allDevices = MTLCopyAllDevices();
+        if (allDevices == nil || allDevices.count == 0) return;
+        ctx.device = allDevices[0];
         if (ctx.device == nil) return;
         ctx.queue = [ctx.device newCommandQueue];
         if (ctx.queue == nil) return;

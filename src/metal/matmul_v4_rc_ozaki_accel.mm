@@ -549,7 +549,15 @@ RcFusedMetalContext& FusedCtx()
     static std::once_flag once;
     std::call_once(once, [] {
         @autoreleasepool {
-            ctx.device = MTLCreateSystemDefaultDevice();
+            // MTLCreateSystemDefaultDevice() is restricted to interactive apps on
+            // macOS 14+ and returns nil from CLI/daemon contexts, so a node started
+            // with -daemon=1 silently lost its Metal backend and fell back to CPU
+            // (reported by a Mac operator 2026-08-11: works with -daemon=0, falls
+            // back with -daemon=1 and identical backend env). MTLCopyAllDevices()
+            // is Apple's documented replacement that works in any context.
+            NSArray<id<MTLDevice>>* allDevices = MTLCopyAllDevices();
+            if (allDevices == nil || allDevices.count == 0) return;
+            ctx.device = allDevices[0];
             if (ctx.device == nil) return;
             ctx.queue = [ctx.device newCommandQueue];
             if (ctx.queue == nil) return;
