@@ -520,6 +520,22 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
             .in_backoff = false,
         }) == TrustedAttestationAdmit::Allow);
 
+    // Equal-work sibling must also be admissible. This is the exact production
+    // stall: a mirror connected one side of a same-height race, so the winning
+    // side carried EQUAL work, not greater. With a strict > test it never
+    // fetched the branch that could rescue it, and it could not wait for the
+    // authority to extend because being stranded froze its header sync.
+    BOOST_CHECK(
+        EvaluateTrustedAttestationAdmit(TrustedAttestationAdmitView{
+            .tip_extending = false,
+            .extends_active_tip_chain = false,
+            .better_work_reorg_candidate = true,
+            .on_parked_reorg_branch = false,
+            .height = 186335,
+            .authority_frontier = 186390,
+            .in_backoff = false,
+        }) == TrustedAttestationAdmit::Allow);
+
     // Better work does NOT override the park policy: a refused deep reorg stays
     // refused, so this cannot become a back door around deep-reorg finality.
     BOOST_CHECK(

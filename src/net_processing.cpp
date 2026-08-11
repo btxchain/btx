@@ -6051,9 +6051,19 @@ PeerManagerImpl::EvaluateTrustedMirrorAttestationAdmit(
         (tip != nullptr && index != nullptr &&
          index->nHeight >= tip->nHeight &&
          index->GetAncestor(tip->nHeight) == tip)};
+    // >=, not >. A same-height sibling carries EQUAL work, and that is exactly
+    // the case that strands a mirror: it connects one side of a race, nothing on
+    // the other side extends its tip, and with a strict > test it never fetches
+    // the branch that would let it recover. It cannot wait for the authority to
+    // extend either -- being stranded freezes its header sync, so it never sees
+    // the extension. Admitting equal work only lets it LEARN the sibling branch;
+    // chain selection is untouched, so an equal-work branch does not become the
+    // tip and this cannot flap. Once the authority extends, work is strictly
+    // greater and the ordinary reorg fires.
     const bool better_work_reorg_candidate{
         tip != nullptr && index != nullptr &&
-        index->nChainWork > tip->nChainWork};
+        index->nChainWork >= tip->nChainWork &&
+        index != tip};
     const bool parked{
         index != nullptr && m_chainman.IsOnParkedReorgBranch(index)};
     bool in_backoff{false};

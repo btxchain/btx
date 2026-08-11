@@ -11153,8 +11153,13 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
                 pindex->GetAncestor(m_best_header->nHeight) == m_best_header};
             if (node::matmul_trusted::PreferTrustedMirrorTipChainHeader({
                     .extends_active_tip_chain = extends_tip,
+                    // >= so a same-height sibling (equal work) can still move
+                    // the header frontier. A stranded mirror whose best-header
+                    // is pinned to its own losing branch never requests the
+                    // bodies that would let it recover.
                     .better_work_reorg_candidate =
-                        pindex->nChainWork > tip->nChainWork,
+                        pindex->nChainWork >= tip->nChainWork &&
+                        pindex != tip,
                     .on_parked_reorg_branch = IsOnParkedReorgBranch(pindex),
                     .candidate_height = pindex->nHeight,
                     .tip_height = tip->nHeight,
