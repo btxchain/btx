@@ -260,6 +260,26 @@ static_assert(INVENTORY_BROADCAST_MAX >= INVENTORY_BROADCAST_TARGET, "INVENTORY_
 static_assert(INVENTORY_BROADCAST_MAX <= node::MAX_PEER_TX_ANNOUNCEMENTS, "INVENTORY_BROADCAST_MAX too high");
 /** Hard cap on queued tx announcements per peer to bound memory usage. */
 static constexpr size_t MAX_TX_INVENTORY_TO_SEND = node::MAX_PEER_TX_ANNOUNCEMENTS;
+/** After a block body is deferred for MatMul verification budget, wait this long
+ *  before re-requesting it.
+ *
+ *  The budget refills on a per-minute window. Without a cooldown the download
+ *  scheduler re-requests the deferred block immediately, it is deferred again on
+ *  arrival, and the node spins -- discard, re-request, discard -- making no
+ *  progress while burning bandwidth. Waiting for the window to refill converts
+ *  that livelock into an ordinary retry. */
+static constexpr auto MATMUL_BUDGET_DEFER_COOLDOWN{60s};
+
+/** A block request older than this may be duplicated to another peer.
+ *
+ *  Without this, a single peer that accepts a getdata and never delivers holds
+ *  the block forever: FindNextBlocksToDownload skips anything already in
+ *  mapBlocksInFlight, so no other peer is ever asked, and every block behind it
+ *  is unreachable. Observed on mainnet 2026-08-11: a node held 162 of 163
+ *  blocks of a better branch and stalled indefinitely on the single missing
+ *  block immediately after its tip. */
+static constexpr auto BLOCK_REREQUEST_STALE_AFTER{90s};
+
 /** Depth behind the best known header past which a node is treated as
  *  catching up / racing a competing branch for MatMul RC verify budgeting. */
 static constexpr int MATMUL_RC_CATCHUP_DEPTH_THRESHOLD{8};
@@ -1446,6 +1466,17 @@ private:
 
     /** Have we requested this block from a peer */
     bool IsBlockRequested(const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    /** Blocks whose body was deferred for verification budget, and the earliest
+     *  time each may be requested again. Bounded by pruning on lookup. */
+    std::map<uint256, std::chrono::microseconds> m_matmul_budget_deferred GUARDED_BY(cs_main);
+    /** True while a budget-deferred block is still in its cooldown. */
+    bool IsMatMulBudgetDeferred(const uint256& hash, std::chrono::microseconds now)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    void NoteMatMulBudgetDeferred(const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    /** True when every outstanding request for `hash` is older than
+     *  BLOCK_REREQUEST_STALE_AFTER and we may duplicate it to another peer. */
+    bool MayDuplicateStaleBlockRequest(const uint256& hash, std::chrono::microseconds now)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     /** Have we requested this block from an outbound peer */
     bool IsBlockRequestedFromOutbound(const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main, !m_peer_mutex);
@@ -1912,6 +1943,44 @@ std::chrono::microseconds PeerManagerImpl::NextInvToInbounds(std::chrono::micros
 bool PeerManagerImpl::IsBlockRequested(const uint256& hash)
 {
     return mapBlocksInFlight.count(hash);
+}
+
+bool PeerManagerImpl::IsMatMulBudgetDeferred(const uint256& hash,
+                                             std::chrono::microseconds now)
+{
+    for (auto it = m_matmul_budget_deferred.begin(); it != m_matmul_budget_deferred.end();) {
+        if (now >= it->second) {
+            it = m_matmul_budget_deferred.erase(it);  // cooldown elapsed
+        } else {
+            ++it;
+        }
+    }
+    return m_matmul_budget_deferred.count(hash) > 0;
+}
+
+void PeerManagerImpl::NoteMatMulBudgetDeferred(const uint256& hash)
+{
+    m_matmul_budget_deferred[hash] =
+        GetTime<std::chrono::microseconds>() +
+        std::chrono::duration_cast<std::chrono::microseconds>(MATMUL_BUDGET_DEFER_COOLDOWN);
+}
+
+bool PeerManagerImpl::MayDuplicateStaleBlockRequest(const uint256& hash,
+                                                    std::chrono::microseconds now)
+{
+    auto range = mapBlocksInFlight.equal_range(hash);
+    if (range.first == range.second) return false;  // not requested at all
+    size_t owners{0};
+    for (auto it = range.first; it != range.second; ++it) {
+        ++owners;
+        const auto requested_at = it->second.second->requested_at;
+        // A request with no timestamp predates this field; treat as fresh.
+        if (requested_at.count() == 0 || now - requested_at < BLOCK_REREQUEST_STALE_AFTER) {
+            return false;  // somebody is still plausibly delivering it
+        }
+    }
+    // Bound how many peers may hold the same block concurrently.
+    return owners < static_cast<size_t>(MAX_CMPCTBLOCKS_INFLIGHT_PER_BLOCK);
 }
 
 bool PeerManagerImpl::IsBlockRequestedFromOutbound(const uint256& hash)
@@ -2560,11 +2629,24 @@ void PeerManagerImpl::FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, c
 
             // Is block in-flight?
             if (IsBlockRequested(pindex->GetBlockHash())) {
-                if (waitingfor == -1) {
-                    // This is the first already-in-flight block.
-                    waitingfor = mapBlocksInFlight.lower_bound(pindex->GetBlockHash())->second.first;
+                // ... and has the peer holding it gone quiet? A peer that
+                // accepts a getdata and never sends the block would otherwise
+                // pin it forever, because this loop skips anything in
+                // mapBlocksInFlight and nothing else re-requests it. Once every
+                // outstanding request for this block is stale, let another peer
+                // fetch it in parallel (bounded by MAX_CMPCTBLOCKS_INFLIGHT_PER_BLOCK).
+                // The redundant copy is discarded cheaply if both arrive.
+                if (!MayDuplicateStaleBlockRequest(pindex->GetBlockHash(),
+                                                   GetTime<std::chrono::microseconds>())) {
+                    if (waitingfor == -1) {
+                        // This is the first already-in-flight block.
+                        waitingfor = mapBlocksInFlight.lower_bound(pindex->GetBlockHash())->second.first;
+                    }
+                    continue;
                 }
-                continue;
+                LogDebug(BCLog::NET,
+                         "Re-requesting stale in-flight block %s (height %d) from an additional peer\n",
+                         pindex->GetBlockHash().ToString(), pindex->nHeight);
             }
 
             // Receipt removes the ordinary download-in-flight entry before an
@@ -2574,6 +2656,13 @@ void PeerManagerImpl::FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, c
             // filling the verify queue with duplicate Q*-scale jobs and
             // producing an unbounded getdata/block busy loop.
             if (IsMatMulAsyncVerificationPending(pindex->GetBlockHash())) {
+                continue;
+            }
+
+            // Deferred for MatMul verification budget: wait for the window to
+            // refill rather than re-requesting into a discard/re-request loop.
+            if (IsMatMulBudgetDeferred(pindex->GetBlockHash(),
+                                       GetTime<std::chrono::microseconds>())) {
                 continue;
             }
 
@@ -6671,9 +6760,15 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
             return true;
         }
         if (global_exhausted) {
+            // Hold this block off the download scheduler until the per-minute
+            // budget window refills, instead of re-requesting it immediately
+            // and being deferred again on arrival.
+            LOCK(cs_main);
+            NoteMatMulBudgetDeferred(hash);
             LogDebug(BCLog::NET,
-                     "Deferring block from peer=%d: global MatMul verification budget exhausted\n",
-                     node.GetId());
+                     "Deferring block from peer=%d for %ds: global MatMul verification budget exhausted\n",
+                     node.GetId(),
+                     static_cast<int>(count_seconds(MATMUL_BUDGET_DEFER_COOLDOWN)));
         } else if (matmul_admission.is_ibd) {
             // During IBD, disconnecting the (often sole) download peer for a
             // transient per-peer header/body verify burst stalls sync forever.
