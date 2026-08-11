@@ -7016,10 +7016,27 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
         } else if (matmul_admission.is_ibd) {
             // During IBD, disconnecting the (often sole) download peer for a
             // transient per-peer header/body verify burst stalls sync forever.
-            // Keep the header, drop this body attempt, and let download retry.
+            // Keep the header, hold this body, and retry when the window refills.
+            //
+            // "let download retry" was a busy loop: the peer re-delivers the same
+            // body immediately, we defer it again, and nothing ever holds it off
+            // or keeps it. Measured on mainnet 2026-08-11 on a node 67 blocks
+            // behind: 2385 of these in 75s (~32/second) from a SINGLE peer, while
+            // the one block needed to advance was requested from nobody and the
+            // tip did not move for many minutes.
+            //
+            // This is the branch that actually fires in practice; the cooldown
+            // and body store were previously only wired to the global-budget
+            // branch, which never fired here.
+            {
+                LOCK(cs_main);
+                NoteMatMulBudgetDeferred(hash);
+            }
+            StoreMatMulDeferredBody(hash, block);
             LogDebug(BCLog::NET,
-                     "Deferring block from peer=%d during IBD: MatMul per-peer verification budget exhausted\n",
-                     node.GetId());
+                     "Deferring block from peer=%d during IBD: MatMul per-peer verification budget exhausted (held %ds)\n",
+                     node.GetId(),
+                     static_cast<int>(count_seconds(MATMUL_BUDGET_DEFER_COOLDOWN)));
         } else {
             LogDebug(BCLog::NET,
                      "Disconnecting peer=%d: MatMul per-peer verification budget exhausted (block)\n",
