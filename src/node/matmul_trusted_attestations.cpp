@@ -112,7 +112,16 @@ bool FlushPersistenceLocked(
         return false;
     }
     const fs::path tmp{g_persist_path + ".tmp"};
-    if (!WriteBinaryFile(tmp, std::string(encoded.begin(), encoded.end()))) {
+    // Convert explicitly. DataStream holds std::byte, and constructing a
+    // std::string from std::byte iterators is ill-formed: basic_string
+    // instantiates char_traits<char>::assign(char&, std::byte&) and std::byte
+    // has no implicit conversion to char. libstdc++ 15 happens to accept it,
+    // which is why this shipped -- GCC 13 on stock Ubuntu 24.04, the toolchain
+    // operators actually build with, rejects it and the whole node fails to
+    // compile.
+    const std::string encoded_bytes{
+        reinterpret_cast<const char*>(encoded.data()), encoded.size()};
+    if (!WriteBinaryFile(tmp, encoded_bytes)) {
         error = "failed to write attestation archive temp file";
         return false;
     }
