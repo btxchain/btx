@@ -2686,6 +2686,17 @@ void PeerManagerImpl::FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, c
             // filling the verify queue with duplicate Q*-scale jobs and
             // producing an unbounded getdata/block busy loop.
             if (IsMatMulAsyncVerificationPending(pindex->GetBlockHash())) {
+            // Do NOT schedule successors past the FIRST missing body. A block
+            // held back here cannot connect, so everything after it is
+            // unusable until it arrives -- but fetching those successors
+            // consumes in-flight slots and the same global MatMul verify
+            // budget that the held block needs, which is what keeps tip+1
+            // "in flight from nobody" while the node looks busy with dozens of
+            // requests. Observed on mainnet 2026-08-11: 26 successor blocks in
+            // flight across 82 peers while the one needed block was requested
+            // from no one. If we have not queued anything yet, this gap IS the
+            // work; yield and retry once it clears.
+                if (vBlocks.empty()) return;
                 continue;
             }
 
@@ -2693,6 +2704,8 @@ void PeerManagerImpl::FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, c
             // refill rather than re-requesting into a discard/re-request loop.
             if (IsMatMulBudgetDeferred(pindex->GetBlockHash(),
                                        GetTime<std::chrono::microseconds>())) {
+                // Same reasoning as the async-verification gap above.
+                if (vBlocks.empty()) return;
                 continue;
             }
 
