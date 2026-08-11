@@ -260,6 +260,20 @@ static_assert(INVENTORY_BROADCAST_MAX >= INVENTORY_BROADCAST_TARGET, "INVENTORY_
 static_assert(INVENTORY_BROADCAST_MAX <= node::MAX_PEER_TX_ANNOUNCEMENTS, "INVENTORY_BROADCAST_MAX too high");
 /** Hard cap on queued tx announcements per peer to bound memory usage. */
 static constexpr size_t MAX_TX_INVENTORY_TO_SEND = node::MAX_PEER_TX_ANNOUNCEMENTS;
+/** An async MatMul verification marker older than this is treated as abandoned.
+ *
+ *  m_matmul_async_verifying exists so a body being verified off-thread is not
+ *  requested again. It had no expiry: if the unmark path was ever missed -- a
+ *  cancelled worker, an aborted job, an early return -- the hash stayed in the
+ *  set for the lifetime of the process, FindNextBlocksToDownload skipped that
+ *  block forever, and the chain stalled behind it. The block is never requested,
+ *  so it is never in flight, so no download timeout or re-request logic can
+ *  rescue it; only a restart clears the in-memory set. That is precisely the
+ *  "node stops requesting entirely, restart-only recovery" stall seen on
+ *  mainnet 2026-08-10/11. Expiring the marker makes the block requestable again
+ *  while still suppressing duplicate work for a genuinely running verification. */
+static constexpr auto MATMUL_ASYNC_VERIFY_STALE_AFTER{10min};
+
 /** After a block body is deferred for MatMul verification budget, wait this long
  *  before re-requesting it.
  *
@@ -1270,7 +1284,8 @@ private:
      *  per-hash marker so FindNextBlocksToDownload cannot immediately request
      *  that same body again and enqueue duplicate expensive work. */
     mutable Mutex m_matmul_async_verify_mutex;
-    std::set<uint256> m_matmul_async_verifying GUARDED_BY(m_matmul_async_verify_mutex);
+    mutable std::map<uint256, std::chrono::steady_clock::time_point> m_matmul_async_verifying
+        GUARDED_BY(m_matmul_async_verify_mutex);
     bool MarkMatMulAsyncVerification(const uint256& hash) NO_THREAD_SAFETY_ANALYSIS;
     void UnmarkMatMulAsyncVerification(const uint256& hash) NO_THREAD_SAFETY_ANALYSIS;
     bool IsMatMulAsyncVerificationPending(const uint256& hash) const NO_THREAD_SAFETY_ANALYSIS;
@@ -2007,7 +2022,12 @@ bool PeerManagerImpl::IsBlockRequestedFromPeer(const uint256& hash, NodeId peer)
 bool PeerManagerImpl::MarkMatMulAsyncVerification(const uint256& hash)
 {
     LOCK(m_matmul_async_verify_mutex);
-    return m_matmul_async_verifying.insert(hash).second;
+    const auto now{std::chrono::steady_clock::now()};
+    // Drop abandoned markers first so a leaked entry cannot block this hash.
+    std::erase_if(m_matmul_async_verifying, [&](const auto& e) {
+        return now - e.second > MATMUL_ASYNC_VERIFY_STALE_AFTER;
+    });
+    return m_matmul_async_verifying.emplace(hash, now).second;
 }
 
 void PeerManagerImpl::UnmarkMatMulAsyncVerification(const uint256& hash)
@@ -2019,7 +2039,17 @@ void PeerManagerImpl::UnmarkMatMulAsyncVerification(const uint256& hash)
 bool PeerManagerImpl::IsMatMulAsyncVerificationPending(const uint256& hash) const
 {
     LOCK(m_matmul_async_verify_mutex);
-    return m_matmul_async_verifying.count(hash) != 0;
+    const auto it{m_matmul_async_verifying.find(hash)};
+    if (it == m_matmul_async_verifying.end()) return false;
+    if (std::chrono::steady_clock::now() - it->second > MATMUL_ASYNC_VERIFY_STALE_AFTER) {
+        // Abandoned marker: let the block be requested again.
+        LogDebug(BCLog::NET,
+                 "Expiring stale MatMul async-verification marker for %s\n",
+                 hash.ToString());
+        m_matmul_async_verifying.erase(it);
+        return false;
+    }
+    return true;
 }
 
 void PeerManagerImpl::MarkMatMulRCBodyDeferred(const uint256& hash, int64_t peer_id)
