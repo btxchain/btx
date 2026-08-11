@@ -973,7 +973,7 @@ private:
         int32_t reference_height,
         bool& global_exhausted,
         bool rc_recompute = false,
-        bool header_batch = false);
+        bool header_batch = false) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     /** Charge only the retained source's RC budget for a bounded handoff.
      *  The inherited paid attempt already owns the one global debit. */
     bool ConsumeMatMulRCPeerBudgetForHandoff(
