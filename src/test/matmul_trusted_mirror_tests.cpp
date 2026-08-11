@@ -16,6 +16,7 @@
 #include <uint256.h>
 #include <univalue.h>
 #include <util/chaintype.h>
+#include <util/fs.h>
 #include <util/strencodings.h>
 #include <util/translation.h>
 
@@ -600,6 +601,97 @@ BOOST_AUTO_TEST_CASE(authority_frontier_tracks_accepted_attestations)
     // Soft peer-tip hint can raise the effective frontier further.
     node::matmul_trusted::NoteAuthorityPeerTipHint(300);
     BOOST_CHECK_EQUAL(*node::matmul_trusted::AuthorityAttestedFrontier(), 300);
+}
+
+BOOST_AUTO_TEST_CASE(attestations_survive_simulated_restart)
+{
+    RuntimeReset reset;
+    const CKey signer{NewKey()};
+    const uint256 chain{Hex256('a')};
+    const uint256 block{Hex256('b')};
+    const fs::path archive{
+        m_args.GetDataDirNet() / "matmul_attestations_test.dat"};
+
+    {
+        matmul::trusted::StoreConfig config;
+        config.chain_id = chain;
+        config.replay_authority_context = Hex256('c');
+        config.trusted_signers = {signer.GetPubKey()};
+        config.threshold = 1;
+        config.local_signer = signer;
+        std::string error;
+        BOOST_REQUIRE(node::matmul_trusted::Configure(
+            std::move(config), /*trusted_mirror=*/false,
+            /*serve=*/true, std::chrono::milliseconds{50}, error));
+        BOOST_REQUIRE(node::matmul_trusted::OpenPersistence(archive, error));
+        BOOST_CHECK(node::matmul_trusted::SignAuthoritative(block, 42) ==
+                    matmul::trusted::AddResult::Accepted);
+        BOOST_REQUIRE(!node::matmul_trusted::Get(block, 42).empty());
+        BOOST_REQUIRE(node::matmul_trusted::FlushPersistence(error));
+    }
+
+    // Simulate process restart: drop the in-memory store, then reload.
+    node::matmul_trusted::ResetForTest();
+    {
+        matmul::trusted::StoreConfig config;
+        config.chain_id = chain;
+        config.replay_authority_context = Hex256('c');
+        config.trusted_signers = {signer.GetPubKey()};
+        config.threshold = 1;
+        config.local_signer = signer;
+        std::string error;
+        BOOST_REQUIRE(node::matmul_trusted::Configure(
+            std::move(config), /*trusted_mirror=*/false,
+            /*serve=*/true, std::chrono::milliseconds{50}, error));
+        BOOST_REQUIRE(node::matmul_trusted::OpenPersistence(archive, error));
+        const auto restored{node::matmul_trusted::Get(block, 42)};
+        BOOST_REQUIRE_EQUAL(restored.size(), 1U);
+        BOOST_CHECK(restored[0].statement.block_hash == block);
+        BOOST_CHECK_EQUAL(restored[0].statement.block_height, 42);
+        BOOST_CHECK(node::matmul_trusted::HasQuorum(block, 42));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(historical_reverify_is_rate_limited)
+{
+    RuntimeReset reset;
+    node::matmul_trusted::ResetHistoricalReverifyBudgetForTest();
+
+    const uint256 a{Hex256('1')};
+    const uint256 b{Hex256('2')};
+    const uint256 c{Hex256('3')};
+    const uint256 d{Hex256('4')};
+
+    BOOST_CHECK(
+        node::matmul_trusted::TryAdmitHistoricalReverify(a) ==
+        node::matmul_trusted::HistoricalReverifyAdmit::Allow);
+    BOOST_CHECK(
+        node::matmul_trusted::TryAdmitHistoricalReverify(a) ==
+        node::matmul_trusted::HistoricalReverifyAdmit::AlreadyQueued);
+    BOOST_CHECK(
+        node::matmul_trusted::TryAdmitHistoricalReverify(b) ==
+        node::matmul_trusted::HistoricalReverifyAdmit::Allow);
+    // Burst exhausted (2 tokens); further distinct hashes are rate-limited
+    // until refill, independent of queue room.
+    BOOST_CHECK(
+        node::matmul_trusted::TryAdmitHistoricalReverify(c) ==
+        node::matmul_trusted::HistoricalReverifyAdmit::RateLimited);
+
+    node::matmul_trusted::NoteHistoricalReverifyStarted(a);
+    BOOST_CHECK_EQUAL(
+        node::matmul_trusted::HistoricalReverifyInflightForTest(), 1U);
+    // Inflight cap is checked before spending another token, so a fresh hash
+    // is refused as InflightFull while one ExactReplay is already running.
+    BOOST_CHECK(
+        node::matmul_trusted::TryAdmitHistoricalReverify(d) ==
+        node::matmul_trusted::HistoricalReverifyAdmit::InflightFull);
+
+    node::matmul_trusted::NoteHistoricalReverifyFinished(a);
+    node::matmul_trusted::NoteHistoricalReverifyFinished(b);
+    BOOST_CHECK_EQUAL(
+        node::matmul_trusted::HistoricalReverifyQueuedForTest(), 0U);
+    BOOST_CHECK_EQUAL(
+        node::matmul_trusted::HistoricalReverifyInflightForTest(), 0U);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

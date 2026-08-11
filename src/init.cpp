@@ -547,7 +547,7 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-matmultrustedwaitms=<n>", "Maximum time a trusted-mirror block may remain parked awaiting an M-of-N attestation quorum before the attempt is left retryable (non-punitive), in milliseconds (default: 60000, maximum: 600000). Does not block the verify worker: many blocks may await quorum concurrently.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmulattestationsignerkeyfile=<file>", "Archive-validator file containing exactly one WIF signing key. Relative paths resolve under the network datadir. The corresponding public key is added to the configured signer set. Protect this file as an online validation key.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmulattestationsignerkey=<wif>", "UNSAFE/deprecated convenience form for the archive-validator WIF key; command lines may leak through process listings. Prefer -matmulattestationsignerkeyfile.", ArgsManager::ALLOW_ANY | ArgsManager::SENSITIVE, OptionsCategory::OPTIONS);
-    argsman.AddArg("-matmulattestationserve", "Serve and relay bounded signed ExactReplay attestations (default: 1 when a local signing key is configured, otherwise 0). Historical responses are generated only for blocks carrying a persisted local ExactReplay-success bit.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-matmulattestationserve", "Serve and relay bounded signed ExactReplay attestations (default: 1 when a local signing key is configured, otherwise 0). Responses prefer the durable datadir archive (matmul_attestations.dat, capacity-bounded to the in-memory store limits). When no signature is cached, an archive with a local ExactReplay-success bit may regenerate its own statement; otherwise a rate-limited background ExactReplay may be queued for canonical Profile-1 blocks.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmulservicechallengefile=<file>", "Path to the persistent MatMul service challenge registry. Relative paths are resolved under the network datadir. Point multiple service nodes at the same shared file to let getmatmulservicechallenge issuance and redeemmatmulserviceproof redemption work across the cluster. (default: <netdir>/matmul_service_challenges.dat)", ArgsManager::ALLOW_ANY, OptionsCategory::RPC);
     argsman.AddArg("-matmulasyncverify", "Run the MatMul v4.4 ENC-DR reference recompute for P2P block deliveries on a bounded background worker pool instead of the network message thread (default: 1). Only effective on networks where the v4 fork height is set; verdicts are identical either way (the recompute is a pure function of the header) — this only changes WHICH thread computes them. Set to 0 to force the historical fully-synchronous path.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmulrcheaderfirst", "Begin admitted near-tip RC ExactReplay from the immutable block header while compact/full block transactions transfer and validate (default: 1). The early verdict grants no chainwork; complete block validation remains authoritative.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -2322,6 +2322,27 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         return InitError(strprintf(
             _("Invalid MatMul trusted-attestation configuration: %s"),
             trusted_attestation_error));
+    }
+    if (node::matmul_trusted::IsConfigured()) {
+        std::string persist_error;
+        if (!node::matmul_trusted::OpenPersistence(
+                args.GetDataDirNet() / "matmul_attestations.dat",
+                persist_error)) {
+            InitWarning(strprintf(
+                _("Failed to load MatMul attestation archive (%s); starting with an empty archive and regenerating from ExactReplay bits as needed."),
+                persist_error));
+            node::matmul_trusted::ClosePersistence();
+            std::string reopen_error;
+            // Truncate the corrupt file by opening a fresh empty archive.
+            fs::remove(args.GetDataDirNet() / "matmul_attestations.dat");
+            if (!node::matmul_trusted::OpenPersistence(
+                    args.GetDataDirNet() / "matmul_attestations.dat",
+                    reopen_error)) {
+                return InitError(strprintf(
+                    _("Failed to create MatMul attestation archive: %s"),
+                    reopen_error));
+            }
+        }
     }
 
     auto opt_max_upload = ParseByteUnits(args.GetArg("-maxuploadtarget", DEFAULT_MAX_UPLOAD_TARGET), ByteUnit::M);

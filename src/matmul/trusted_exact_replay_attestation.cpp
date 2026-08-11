@@ -378,6 +378,27 @@ std::vector<ExactReplayAttestation> AttestationStore::GetAttestations(
     return GetAttestationsLocked(BlockKey{block_height, block_hash});
 }
 
+std::vector<ExactReplayAttestation> AttestationStore::ExportAll() const
+{
+    std::lock_guard lock{m_mutex};
+    std::vector<ExactReplayAttestation> out;
+    out.reserve(m_attestation_count);
+    for (const auto& [key, bucket] : m_buckets) {
+        (void)key;
+        for (const auto& [signer, attestation] : bucket.attestations) {
+            (void)signer;
+            out.push_back(attestation);
+        }
+    }
+    return out;
+}
+
+void AttestationStore::SetDurableRetention(bool durable)
+{
+    std::lock_guard lock{m_mutex};
+    m_durable_retention = durable;
+}
+
 WaitResult AttestationStore::WaitForQuorum(
     const uint256& block_hash,
     int32_t block_height,
@@ -427,6 +448,7 @@ void AttestationStore::EraseLocked(
 
 void AttestationStore::PruneExpiredLocked(Clock::time_point now)
 {
+    if (m_durable_retention) return;
     for (auto it = m_buckets.begin(); it != m_buckets.end();) {
         if (now - it->second.updated < m_config.ttl) {
             ++it;

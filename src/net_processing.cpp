@@ -62,12 +62,15 @@
 
 #include <algorithm>
 #include <atomic>
+#include <condition_variable>
+#include <deque>
 #include <future>
 #include <limits>
 #include <memory>
 #include <optional>
 #include <ranges>
 #include <set>
+#include <thread>
 #include <typeinfo>
 #include <utility>
 
@@ -167,6 +170,8 @@ static constexpr size_t MATMUL_ATTESTATION_RELAY_PEERS{2};
 //! Negative-cache base delay after archive/signer peers stay silent for a hash.
 static constexpr auto MATMUL_ATTESTATION_MISS_BACKOFF_BASE{60s};
 static constexpr int MATMUL_ATTESTATION_MISS_BACKOFF_MAX_EXP{6};
+/** Rate-limit authority getmmattest outcome logs (still LogDebug every time). */
+static constexpr auto MATMUL_ATTESTATION_SERVE_LOG_INTERVAL{2s};
 static constexpr auto MATMUL_TRUSTED_MIRROR_STALL_LOG_INTERVAL{30s};
 /** WP-8 / H9/H10: expiry for outstanding GETMMSKETCH prefetch requests. An
  *  entry that received no reply within the TTL frees its node-wide in-flight
@@ -1468,6 +1473,26 @@ private:
         GUARDED_BY(cs_main){};
     uint64_t m_matmul_trusted_reject_unattestable
         GUARDED_BY(cs_main){0};
+    //! Rate-limited LogInfo for getmmattest serve outcomes (LogDebug is always on).
+    std::chrono::steady_clock::time_point m_matmul_attest_serve_last_log
+        GUARDED_BY(NetEventsInterface::g_msgproc_mutex){};
+    /**
+     * Background ExactReplay for historical GETMMATTEST when the durable bit is
+     * missing. Owned separately from MatMulVerifyWorker so tip verification
+     * cannot be starved by peer-driven backfill, and so msghand never blocks.
+     */
+    struct HistoricalAttestationReverifyJob {
+        uint256 hash{};
+        int32_t height{-1};
+        CBlockHeader header{};
+    };
+    Mutex m_hist_attest_mutex;
+    std::deque<HistoricalAttestationReverifyJob> m_hist_attest_queue
+        GUARDED_BY(m_hist_attest_mutex);
+    std::condition_variable m_hist_attest_cv;
+    std::thread m_hist_attest_thread GUARDED_BY(m_hist_attest_mutex);
+    bool m_hist_attest_stop GUARDED_BY(m_hist_attest_mutex){false};
+    bool m_hist_attest_started GUARDED_BY(m_hist_attest_mutex){false};
     /** Sybil/reconnect-resistant inbound signature-verification budgets.
      *
      * Two independent pools per source, because they bound different things and
@@ -1807,6 +1832,24 @@ private:
      *  monopolizing the bounded outstanding-request map. */
     void RequestMatMulTrustedAttestations(const uint256& hash,
                                           NodeId source);
+    /**
+     * Queue a rate-limited background ExactReplay so an archive can later serve
+     * an attestation for a canonical Profile-1 block that lacks a persisted
+     * ExactReplay bit. Never runs on the message thread; never takes cs_main
+     * across the GPU work.
+     */
+    bool MaybeQueueHistoricalAttestationReverify(
+        const uint256& hash, int32_t height, const CBlockHeader& header)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_hist_attest_mutex);
+    void EnsureHistoricalAttestationReverifyThread()
+        EXCLUSIVE_LOCKS_REQUIRED(m_hist_attest_mutex);
+    void HistoricalAttestationReverifyLoop();
+    void StopHistoricalAttestationReverify();
+    void MaybeLogAttestationServe(const char* reason,
+                                  const uint256& hash,
+                                  int32_t height,
+                                  NodeId peer)
+        EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex);
     /** Trusted-mirror local sync filter: whether this hash may consume an
      *  attestation request / park / verify slot. Requires cs_main. */
     [[nodiscard]] node::matmul_trusted::TrustedAttestationAdmit
@@ -4336,6 +4379,7 @@ PeerManagerImpl::~PeerManagerImpl()
     // chainman/connman teardown), so no worker thread outlives the state its
     // completions touch.
     if (m_matmul_verify_worker) m_matmul_verify_worker->Stop();
+    StopHistoricalAttestationReverify();
 }
 
 void PeerManagerImpl::SetDandelionManager(Dandelion::DandelionManager* mgr)
@@ -5946,6 +5990,127 @@ void PeerManagerImpl::MaybeLogTrustedMirrorStall(int32_t tip_height)
             m_matmul_trusted_reject_unattestable));
 }
 
+void PeerManagerImpl::MaybeLogAttestationServe(const char* reason,
+                                               const uint256& hash,
+                                               int32_t height,
+                                               NodeId peer)
+{
+    AssertLockNotHeld(cs_main);
+    LogDebug(BCLog::NET,
+             "getmmattest peer=%d block=%s height=%d reason=%s\n",
+             peer, hash.ToString(), height, reason);
+    const auto now{std::chrono::steady_clock::now()};
+    if (m_matmul_attest_serve_last_log.time_since_epoch().count() != 0 &&
+        now - m_matmul_attest_serve_last_log <
+            MATMUL_ATTESTATION_SERVE_LOG_INTERVAL) {
+        return;
+    }
+    m_matmul_attest_serve_last_log = now;
+    LogInfo(
+        "getmmattest peer=%d block=%s height=%d reason=%s\n",
+        peer, hash.ToString(), height, reason);
+}
+
+void PeerManagerImpl::EnsureHistoricalAttestationReverifyThread()
+{
+    AssertLockHeld(m_hist_attest_mutex);
+    if (m_hist_attest_started) return;
+    m_hist_attest_stop = false;
+    m_hist_attest_thread =
+        std::thread([this] { HistoricalAttestationReverifyLoop(); });
+    m_hist_attest_started = true;
+}
+
+void PeerManagerImpl::StopHistoricalAttestationReverify()
+{
+    std::thread worker;
+    {
+        LOCK(m_hist_attest_mutex);
+        if (!m_hist_attest_started) return;
+        m_hist_attest_stop = true;
+        m_hist_attest_cv.notify_all();
+        worker = std::move(m_hist_attest_thread);
+        m_hist_attest_started = false;
+        m_hist_attest_queue.clear();
+    }
+    if (worker.joinable()) worker.join();
+}
+
+bool PeerManagerImpl::MaybeQueueHistoricalAttestationReverify(
+    const uint256& hash, int32_t height, const CBlockHeader& header)
+{
+    AssertLockNotHeld(cs_main);
+    if (m_chainman.GetMatMulValidationMode() !=
+            kernel::MatMulValidationMode::CONSENSUS ||
+        !node::matmul_trusted::HasLocalSigner() ||
+        !node::matmul_trusted::ServesAttestations()) {
+        return false;
+    }
+    const auto admit{
+        node::matmul_trusted::TryAdmitHistoricalReverify(hash)};
+    if (admit != node::matmul_trusted::HistoricalReverifyAdmit::Allow) {
+        return false;
+    }
+    {
+        LOCK(m_hist_attest_mutex);
+        m_hist_attest_queue.push_back(HistoricalAttestationReverifyJob{
+            .hash = hash,
+            .height = height,
+            .header = header,
+        });
+        EnsureHistoricalAttestationReverifyThread();
+        m_hist_attest_cv.notify_one();
+    }
+    return true;
+}
+
+void PeerManagerImpl::HistoricalAttestationReverifyLoop()
+{
+    while (true) {
+        HistoricalAttestationReverifyJob job;
+        {
+            WAIT_LOCK(m_hist_attest_mutex, lock);
+            m_hist_attest_cv.wait(lock, [this] {
+                AssertLockHeld(m_hist_attest_mutex);
+                return m_hist_attest_stop || !m_hist_attest_queue.empty();
+            });
+            if (m_hist_attest_stop && m_hist_attest_queue.empty()) {
+                return;
+            }
+            if (m_hist_attest_queue.empty()) continue;
+            job = std::move(m_hist_attest_queue.front());
+            m_hist_attest_queue.pop_front();
+        }
+        node::matmul_trusted::NoteHistoricalReverifyStarted(job.hash);
+        bool ok{false};
+        try {
+            // Pure header ExactReplay; must not take cs_main or g_msgproc.
+            ok = CheckMatMulProofOfWork_RC(
+                job.header, m_chainparams.GetConsensus(), job.height);
+        } catch (...) {
+            ok = false;
+        }
+        if (ok) {
+            {
+                LOCK(cs_main);
+                // Sets BLOCK_EXACT_REPLAY_VERIFIED and signs when a local
+                // archive key is configured (see PersistMatMulExactReplayVerdict).
+                (void)m_chainman.PersistMatMulExactReplayVerdict(job.hash);
+            }
+            LogInfo(
+                "historical ExactReplay re-verify succeeded block=%s "
+                "height=%d; attestation available for getmmattest\n",
+                job.hash.ToString(), job.height);
+        } else {
+            LogWarning(
+                "historical ExactReplay re-verify failed block=%s "
+                "height=%d\n",
+                job.hash.ToString(), job.height);
+        }
+        node::matmul_trusted::NoteHistoricalReverifyFinished(job.hash);
+    }
+}
+
 void PeerManagerImpl::RequestMatMulTrustedAttestations(
     const uint256& hash, NodeId source)
 {
@@ -5998,8 +6163,8 @@ void PeerManagerImpl::RequestMatMulTrustedAttestations(
                 return; // still in flight
             }
             // TTL expired without quorum: if preferred peers were asked and
-            // stayed silent, treat as signer-absent (not a transient miss) and
-            // back the hash off with increasing delay.
+            // stayed silent on non-tip work, treat as signer-absent (not a
+            // transient miss) and back the hash off with increasing delay.
             if (existing->second.asked_preferred && !tip_extending) {
                 auto& backoff{m_matmul_attestation_backoff[hash]};
                 backoff.signer_absent = true;
@@ -6025,9 +6190,13 @@ void PeerManagerImpl::RequestMatMulTrustedAttestations(
                 MaybeLogTrustedMirrorStall(tip_height);
                 return;
             }
-            // Transient miss (no preferred peer reached): allow a fresh round,
-            // but do not re-ask peers that already failed to answer.
-            skip_peers = existing->second.asked_peers;
+            // Fresh round after TTL. Clear asked_peers so a previously silent
+            // archive/signer can be re-queried (e.g. after it regenerated an
+            // attestation or recovered from restart). Concurrent fan-out to
+            // every eligible archive still happens below; a slow/absent peer
+            // must not block combining partial results from others.
+            existing->second.asked_peers.clear();
+            skip_peers.clear();
             existing->second.requested_at = now;
             existing->second.height = height;
             existing->second.tip_extending = tip_extending;
@@ -11144,49 +11313,116 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         }
         peer->m_matmul_attestation_last_refill = now;
         if (peer->m_matmul_attestation_request_tokens < 1.0) {
+            MaybeLogAttestationServe(
+                "rate_limited", block_hash, /*height=*/-1, pfrom.GetId());
             LogDebug(BCLog::NET,
                      "Ignoring rate-limited getmmattest from peer=%d\n",
                      pfrom.GetId());
             return;
         }
         peer->m_matmul_attestation_request_tokens -= 1.0;
-        if (!node::matmul_trusted::ServesAttestations()) return;
+        if (!node::matmul_trusted::ServesAttestations()) {
+            MaybeLogAttestationServe(
+                "not_serving", block_hash, /*height=*/-1, pfrom.GetId());
+            return;
+        }
 
         int32_t height{-1};
+        bool known{false};
+        bool failed{false};
+        bool profile1{false};
+        bool on_active_chain{false};
         bool locally_exact{false};
+        std::optional<CBlockHeader> header;
         {
             LOCK(cs_main);
             const CBlockIndex* index{
                 m_chainman.m_blockman.LookupBlockIndex(block_hash)};
-            if (index != nullptr &&
-                !(index->nStatus & BLOCK_FAILED_MASK) &&
-                (index->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) &&
-                m_chainparams.GetConsensus()
-                    .IsMatMulTrustedReplayAttestationActive(
-                        index->nHeight)) {
-                height = index->nHeight;
-                locally_exact = true;
-            }
-        }
-        if (!locally_exact) return;
-
-        // Regeneration after restart is permitted only because the durable
-        // exact bit records this node's own authoritative replay.
-        if (node::matmul_trusted::HasLocalSigner()) {
-            matmul::trusted::ExactReplayAttestation produced;
-            const auto result{
-                node::matmul_trusted::SignAuthoritative(
-                    block_hash, height, &produced)};
-            if (result != matmul::trusted::AddResult::Accepted &&
-                result != matmul::trusted::AddResult::Duplicate) {
-                LogWarning(
-                    "Unable to sign historical MatMul attestation "
-                    "block=%s height=%d result=%s\n",
-                    block_hash.ToString(), height,
-                    matmul::trusted::AddResultName(result));
+            if (index == nullptr) {
+                MaybeLogAttestationServe(
+                    "no_such_block", block_hash, /*height=*/-1,
+                    pfrom.GetId());
                 return;
             }
+            known = true;
+            height = index->nHeight;
+            failed = (index->nStatus & BLOCK_FAILED_MASK) != 0;
+            profile1 = m_chainparams.GetConsensus()
+                           .IsMatMulTrustedReplayAttestationActive(
+                               index->nHeight);
+            on_active_chain =
+                m_chainman.ActiveChain().Contains(index);
+            locally_exact =
+                !failed && profile1 &&
+                (index->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0;
+            if (!failed && profile1) {
+                header = index->GetBlockHeader();
+            }
         }
+        if (!known) return;
+        if (failed) {
+            MaybeLogAttestationServe(
+                "not_validated", block_hash, height, pfrom.GetId());
+            return;
+        }
+        if (!profile1) {
+            MaybeLogAttestationServe(
+                "not_profile1", block_hash, height, pfrom.GetId());
+            return;
+        }
+        if (!on_active_chain) {
+            MaybeLogAttestationServe(
+                "not_canonical", block_hash, height, pfrom.GetId());
+            return;
+        }
+
+        const char* serve_reason{"cached"};
+        if (node::matmul_trusted::HasLocalSigner()) {
+            auto existing{
+                node::matmul_trusted::Get(block_hash, height)};
+            if (existing.empty()) {
+                if (locally_exact) {
+                    matmul::trusted::ExactReplayAttestation produced;
+                    const auto result{
+                        node::matmul_trusted::SignAuthoritative(
+                            block_hash, height, &produced)};
+                    if (result != matmul::trusted::AddResult::Accepted &&
+                        result != matmul::trusted::AddResult::Duplicate) {
+                        MaybeLogAttestationServe(
+                            "sign_failed", block_hash, height,
+                            pfrom.GetId());
+                        LogWarning(
+                            "Unable to sign historical MatMul attestation "
+                            "block=%s height=%d result=%s\n",
+                            block_hash.ToString(), height,
+                            matmul::trusted::AddResultName(result));
+                        return;
+                    }
+                    serve_reason = "regenerated";
+                } else if (header.has_value()) {
+                    // Durable ExactReplay bit missing (e.g. assumevalid IBD).
+                    // Queue a rate-limited background ExactReplay; answer on a
+                    // later GETMMATTEST once the bit + signature exist.
+                    if (MaybeQueueHistoricalAttestationReverify(
+                            block_hash, height, *header)) {
+                        MaybeLogAttestationServe(
+                            "reverify_queued", block_hash, height,
+                            pfrom.GetId());
+                    } else {
+                        MaybeLogAttestationServe(
+                            "reverify_rate_limited", block_hash, height,
+                            pfrom.GetId());
+                    }
+                    return;
+                } else {
+                    MaybeLogAttestationServe(
+                        "not_validated", block_hash, height,
+                        pfrom.GetId());
+                    return;
+                }
+            }
+        }
+
         auto attestations{
             node::matmul_trusted::Get(block_hash, height)};
         if (attestations.size() >
@@ -11196,6 +11432,11 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         if (!attestations.empty()) {
             MakeAndPushMessage(
                 pfrom, NetMsgType::MMATTEST, attestations);
+            MaybeLogAttestationServe(
+                serve_reason, block_hash, height, pfrom.GetId());
+        } else {
+            MaybeLogAttestationServe(
+                "empty", block_hash, height, pfrom.GetId());
         }
         return;
     }
