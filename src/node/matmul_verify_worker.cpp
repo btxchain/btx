@@ -258,9 +258,12 @@ bool MatMulVerifyWorker::Cancel(const uint256& hash)
     pending->job.cancelled->store(true, std::memory_order_relaxed);
     if (!pending->running) {
         std::erase(m_queue, pending);
+        m_awaiting_quorum.erase(hash);
+        pending->awaiting_quorum_deadline.reset();
         m_pending.erase(it);
     }
     matmul::v4::rc::GetRCAcceleratorScheduler().NotifyCancellation();
+    m_cv.notify_all();
     return true;
 }
 
@@ -283,6 +286,8 @@ size_t MatMulVerifyWorker::CancelIf(
         ++count;
         if (!pending->running) {
             std::erase(m_queue, pending);
+            m_awaiting_quorum.erase(it->first);
+            pending->awaiting_quorum_deadline.reset();
             it = m_pending.erase(it);
         } else {
             ++it;
@@ -291,6 +296,7 @@ size_t MatMulVerifyWorker::CancelIf(
     if (count != 0) {
         matmul::v4::rc::GetRCAcceleratorScheduler().
             NotifyCancellation();
+        m_cv.notify_all();
     }
     return count;
 }
@@ -301,6 +307,36 @@ bool MatMulVerifyWorker::Contains(const uint256& hash) const
     return m_pending.count(hash) != 0;
 }
 
+void MatMulVerifyWorker::SetActiveTip(const uint256& tip_hash,
+                                      int32_t tip_height)
+{
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_tip_hash = tip_hash;
+        m_tip_height = tip_height;
+    }
+    // Tip movement can change which parked/queued job should run next.
+    m_cv.notify_all();
+}
+
+void MatMulVerifyWorker::NotifyQuorumReady(const uint256& hash)
+{
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        const auto it{m_awaiting_quorum.find(hash)};
+        if (it == m_awaiting_quorum.end()) return;
+        auto pending{it->second};
+        m_awaiting_quorum.erase(it);
+        pending->awaiting_quorum_deadline.reset();
+        if (!pending->running &&
+            std::find(m_queue.begin(), m_queue.end(), pending) ==
+                m_queue.end()) {
+            m_queue.push_back(std::move(pending));
+        }
+    }
+    m_cv.notify_one();
+}
+
 void MatMulVerifyWorker::Stop()
 {
     std::vector<std::shared_ptr<Pending>> orphaned;
@@ -308,12 +344,19 @@ void MatMulVerifyWorker::Stop()
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         m_stopped = true;
-        // Queued-not-started jobs receive no consensus completion. Their
-        // retryable-failure cleanup runs below so network async markers are
-        // released while the unprocessed blocks stay re-requestable.
+        // Queued-not-started and parked-awaiting jobs receive no consensus
+        // completion. Their retryable-failure cleanup runs below so network
+        // async markers are released while the unprocessed blocks stay
+        // re-requestable.
         orphaned.swap(m_queue);
+        for (auto& [hash, pending] : m_awaiting_quorum) {
+            (void)hash;
+            orphaned.push_back(pending);
+        }
+        m_awaiting_quorum.clear();
         for (const auto& pending : orphaned) {
             pending->job.cancelled->store(true, std::memory_order_relaxed);
+            pending->awaiting_quorum_deadline.reset();
             m_pending.erase(pending->job.GetHeader().GetHash());
         }
         threads.swap(m_threads);
@@ -341,12 +384,81 @@ size_t MatMulVerifyWorker::QueueDepthForTest() const
     return m_queue.size();
 }
 
-bool MatMulVerifyWorker::HigherPriority(const Pending& lhs, const Pending& rhs)
+size_t MatMulVerifyWorker::AwaitingQuorumForTest() const
 {
-    const auto lp{static_cast<uint8_t>(lhs.job.priority)};
-    const auto rp{static_cast<uint8_t>(rhs.job.priority)};
-    if (lp != rp) return lp > rp;
-    return lhs.sequence < rhs.sequence;
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_awaiting_quorum.size();
+}
+
+bool MatMulVerifyWorker::HigherPriority(const Pending& lhs,
+                                        const Pending& rhs) const
+{
+    const auto left{node::matmul_trusted::MakeTrustedWorkRank(
+        lhs.job.GetHeader().hashPrevBlock == m_tip_hash,
+        lhs.job.height,
+        m_tip_height,
+        static_cast<uint8_t>(lhs.job.priority),
+        lhs.sequence)};
+    const auto right{node::matmul_trusted::MakeTrustedWorkRank(
+        rhs.job.GetHeader().hashPrevBlock == m_tip_hash,
+        rhs.job.height,
+        m_tip_height,
+        static_cast<uint8_t>(rhs.job.priority),
+        rhs.sequence)};
+    return node::matmul_trusted::PreferTrustedWork(left, right);
+}
+
+void MatMulVerifyWorker::TakeExpiredAwaitingQuorum(
+    std::vector<std::shared_ptr<Pending>>& expired)
+{
+    const auto now{std::chrono::steady_clock::now()};
+    for (auto it = m_awaiting_quorum.begin();
+         it != m_awaiting_quorum.end();) {
+        auto& pending{it->second};
+        const bool cancelled{
+            pending->job.cancelled->load(std::memory_order_relaxed)};
+        const bool timed_out{
+            pending->awaiting_quorum_deadline.has_value() &&
+            now >= *pending->awaiting_quorum_deadline};
+        if (!cancelled && !timed_out) {
+            ++it;
+            continue;
+        }
+        pending->awaiting_quorum_deadline.reset();
+        m_pending.erase(it->first);
+        expired.push_back(pending);
+        it = m_awaiting_quorum.erase(it);
+    }
+}
+
+std::optional<std::chrono::steady_clock::time_point>
+MatMulVerifyWorker::NextAwaitingDeadline() const
+{
+    std::optional<std::chrono::steady_clock::time_point> next;
+    for (const auto& [hash, pending] : m_awaiting_quorum) {
+        (void)hash;
+        if (!pending->awaiting_quorum_deadline) continue;
+        if (!next || *pending->awaiting_quorum_deadline < *next) {
+            next = pending->awaiting_quorum_deadline;
+        }
+    }
+    return next;
+}
+
+void MatMulVerifyWorker::FinishRetryablePending(
+    const std::shared_ptr<Pending>& pending)
+{
+    std::vector<std::function<void()>> callbacks;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (pending->job.retryable_failure) {
+            callbacks.push_back(std::move(pending->job.retryable_failure));
+        }
+        std::move(pending->follower_retryable_failures.begin(),
+                  pending->follower_retryable_failures.end(),
+                  std::back_inserter(callbacks));
+    }
+    for (auto& callback : callbacks) callback();
 }
 
 void MatMulVerifyWorker::WorkerLoop()
@@ -354,10 +466,51 @@ void MatMulVerifyWorker::WorkerLoop()
     util::ThreadRename("mmverify");
     for (;;) {
         std::shared_ptr<Pending> pending;
+        std::vector<std::shared_ptr<Pending>> expired_awaiting;
         {
             std::unique_lock<std::mutex> lock(m_mutex);
-            m_cv.wait(lock, [this]() { return m_stopped || !m_queue.empty(); });
-            if (m_stopped) return; // remaining queued jobs are drained by Stop()
+            for (;;) {
+                TakeExpiredAwaitingQuorum(expired_awaiting);
+                if (!expired_awaiting.empty()) break;
+                if (m_stopped) return;
+                if (!m_queue.empty()) break;
+                const auto deadline{NextAwaitingDeadline()};
+                if (deadline) {
+                    m_cv.wait_until(lock, *deadline);
+                } else {
+                    m_cv.wait(lock, [this] {
+                        return m_stopped || !m_queue.empty() ||
+                               !m_awaiting_quorum.empty();
+                    });
+                }
+            }
+            if (m_stopped && m_queue.empty() && expired_awaiting.empty()) {
+                // Stop() owns cleanup of any remaining parked jobs.
+                return;
+            }
+        }
+        for (auto& expired : expired_awaiting) {
+            LogWarning(
+                "matmul trusted mirror deferred: block=%s height=%d "
+                "result=%s (retryable, peer not punished)\n",
+                expired->job.GetHeader().GetHash().ToString(),
+                expired->job.height,
+                matmul::trusted::WaitResultName(
+                    expired->job.cancelled->load(
+                        std::memory_order_relaxed)
+                        ? matmul::trusted::WaitResult::Cancelled
+                        : matmul::trusted::WaitResult::Timeout));
+            FinishRetryablePending(expired);
+        }
+        if (!expired_awaiting.empty() || m_stopped) {
+            if (m_stopped) return;
+            continue;
+        }
+
+        {
+            std::unique_lock<std::mutex> lock(m_mutex);
+            if (m_stopped) return;
+            if (m_queue.empty()) continue;
             size_t best{0};
             for (size_t i = 1; i < m_queue.size(); ++i) {
                 if (HigherPriority(*m_queue[i], *m_queue[best])) best = i;
@@ -386,6 +539,7 @@ void MatMulVerifyWorker::WorkerLoop()
                 // registered, then erase ownership. The local shared_ptr also
                 // keeps the object alive through callback invocation.
                 m_pending.erase(hash);
+                m_awaiting_quorum.erase(hash);
             }
             for (auto& callback : callbacks) callback();
         };
@@ -464,17 +618,12 @@ void MatMulVerifyWorker::WorkerLoop()
                     synthetic, job.height, job.parent_median_time_past);
             }
         } else if (trusted_exact_replay) {
-            const auto wait_result{
-                node::matmul_trusted::WaitForQuorum(
-                    hash, job.height,
-                    [&job] {
-                        return job.cancelled->load(
-                            std::memory_order_relaxed);
-                    })};
-            ok = wait_result ==
-                matmul::trusted::WaitResult::Quorum;
-            local_execution_failure = !ok;
-            if (ok) {
+            // Never block a worker thread on attestation quorum. Park the job
+            // (deadline = matmultrustedwaitms) so other blocks stay in flight;
+            // NotifyQuorumReady requeues when M-of-N arrives. Timeout/cancel
+            // remain retryable and non-punitive.
+            if (node::matmul_trusted::HasQuorum(hash, job.height)) {
+                ok = true;
                 // Ephemeral only. The index's trusted-status bit is audit
                 // metadata and must never survive config rotation as
                 // authority; every restart rebuilds this memo from signatures
@@ -486,11 +635,22 @@ void MatMulVerifyWorker::WorkerLoop()
                     hash.ToString(), job.height,
                     node::matmul_trusted::Threshold());
             } else {
-                LogWarning(
-                    "matmul trusted mirror deferred: block=%s height=%d "
-                    "result=%s (retryable, peer not punished)\n",
-                    hash.ToString(), job.height,
-                    matmul::trusted::WaitResultName(wait_result));
+                const auto deadline{
+                    std::chrono::steady_clock::now() +
+                    node::matmul_trusted::WaitTimeout()};
+                {
+                    std::lock_guard<std::mutex> lock(m_mutex);
+                    pending->running = false;
+                    pending->awaiting_quorum_deadline = deadline;
+                    m_awaiting_quorum[hash] = pending;
+                }
+                // TOCTOU: quorum may have landed between HasQuorum and park.
+                if (node::matmul_trusted::HasQuorum(hash, job.height)) {
+                    NotifyQuorumReady(hash);
+                } else {
+                    m_cv.notify_one();
+                }
+                continue;
             }
         } else {
             // A Stage-3 attachment is block-body data and is deliberately not

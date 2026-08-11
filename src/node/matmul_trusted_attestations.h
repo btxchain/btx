@@ -8,6 +8,7 @@
 #include <matmul/trusted_exact_replay_attestation.h>
 
 #include <chrono>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -79,6 +80,11 @@ VerifyUtxoSnapshotManifest(
     const matmul::trusted::UtxoSnapshotManifest& manifest);
 [[nodiscard]] std::optional<uint256> ChainId();
 [[nodiscard]] bool HasQuorum(const uint256& block_hash, int32_t block_height);
+/**
+ * Blocking wait retained for tests and rare sync callers. Trusted-mirror
+ * verify workers must NOT use this on the hot path: they park the job and
+ * continue so other blocks stay in flight (see MatMulVerifyWorker).
+ */
 [[nodiscard]] matmul::trusted::WaitResult WaitForQuorum(
     const uint256& block_hash,
     int32_t block_height,
@@ -87,6 +93,58 @@ VerifyUtxoSnapshotManifest(
 [[nodiscard]] std::vector<matmul::trusted::ExactReplayAttestation> Get(
     const uint256& block_hash, int32_t block_height);
 [[nodiscard]] matmul::trusted::StoreStats Stats();
+
+/**
+ * Tip-first ranking for trusted-mirror attestation / verify work.
+ *
+ * Prefer the block that extends the active tip, then blocks above the tip in
+ * ascending height (build toward the best header), and never let already-
+ * connected / below-tip backfill starve tip advancement. `priority_rank` is the
+ * MatMulVerifyWorker::Priority ordinal when applicable (higher is better); use
+ * 0 when ranking request slots alone. Lower `sequence` wins ties (FIFO).
+ */
+struct TrustedWorkRank {
+    bool tip_extending{false};
+    bool above_tip{false};
+    uint8_t priority_rank{0};
+    int32_t height{0};
+    uint64_t sequence{0};
+};
+
+[[nodiscard]] inline bool PreferTrustedWork(const TrustedWorkRank& a,
+                                            const TrustedWorkRank& b)
+{
+    if (a.tip_extending != b.tip_extending) return a.tip_extending;
+    if (a.above_tip != b.above_tip) return a.above_tip;
+    if (a.priority_rank != b.priority_rank) {
+        return a.priority_rank > b.priority_rank;
+    }
+    if (a.above_tip && b.above_tip && a.height != b.height) {
+        // Ascending from the tip toward the best header.
+        return a.height < b.height;
+    }
+    if (!a.above_tip && !b.above_tip && a.height != b.height) {
+        // Backfill last; among it, prefer higher (closer to tip) first.
+        return a.height > b.height;
+    }
+    return a.sequence < b.sequence;
+}
+
+[[nodiscard]] inline TrustedWorkRank MakeTrustedWorkRank(
+    bool tip_extending,
+    int32_t height,
+    int32_t tip_height,
+    uint8_t priority_rank = 0,
+    uint64_t sequence = 0)
+{
+    return TrustedWorkRank{
+        .tip_extending = tip_extending,
+        .above_tip = height > tip_height,
+        .priority_rank = priority_rank,
+        .height = height,
+        .sequence = sequence,
+    };
+}
 
 } // namespace node::matmul_trusted
 

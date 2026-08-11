@@ -1430,8 +1430,20 @@ private:
         GUARDED_BY(cs_main);
     /** Trusted mirrors request signed attestations while the full block is
      * queued for body validation. One hash is requested from multiple eligible
-     * peers, but occupies one bounded node-wide slot until quorum/expiry. */
-    std::map<uint256, std::chrono::microseconds> m_matmul_attestation_requested
+     * peers, but occupies one bounded node-wide slot until quorum/expiry.
+     * Tip-extending requests may displace oldest backfill when at capacity. */
+    struct MatMulAttestationRequest {
+        std::chrono::microseconds requested_at{0us};
+        int32_t height{-1};
+        bool tip_extending{false};
+        //! Peers already queried for this hash; preserved across TTL refresh so
+        //! a silent miss is not immediately re-asked to the same peer.
+        std::set<NodeId> asked_peers{};
+    };
+    std::map<uint256, MatMulAttestationRequest> m_matmul_attestation_requested
+        GUARDED_BY(cs_main);
+    //! Peers that recently delivered a usable MMATTEST (prefer on re-request).
+    std::map<NodeId, std::chrono::microseconds> m_matmul_attestation_peer_success
         GUARDED_BY(cs_main);
     /** Sybil/reconnect-resistant inbound signature-verification budgets.
      *
@@ -4273,6 +4285,11 @@ PeerManagerImpl::PeerManagerImpl(CConnman& connman, AddrMan& addrman,
             consensus.nMatMulV4Height != std::numeric_limits<int32_t>::max() &&
             m_opts.matmul_async_verify) {
             m_matmul_verify_worker = std::make_unique<node::MatMulVerifyWorker>(consensus);
+            if (const CBlockIndex* tip{
+                    WITH_LOCK(cs_main, return m_chainman.ActiveTip())}) {
+                m_matmul_verify_worker->SetActiveTip(tip->GetBlockHash(),
+                                                     tip->nHeight);
+            }
         }
     }
 }
@@ -4349,6 +4366,13 @@ void PeerManagerImpl::ActiveTipChange(const CBlockIndex& new_tip, bool is_ibd)
     // (and outbound desirable-service decisions) reading a stale height until
     // the scheduler drains — including across the RC activation boundary.
     SetBestBlock(new_tip.nHeight, std::chrono::seconds{new_tip.GetBlockTime()});
+
+    // Tip-first trusted-mirror ranking: keep the verify worker's tip cache in
+    // lockstep with ActivateBestChain (same sync delivery as SetBestBlock).
+    if (m_matmul_verify_worker) {
+        m_matmul_verify_worker->SetActiveTip(new_tip.GetBlockHash(),
+                                             new_tip.nHeight);
+    }
 
     if (!is_ibd) {
         LOCK(m_tx_download_mutex);
@@ -5838,47 +5862,149 @@ void PeerManagerImpl::RequestMatMulTrustedAttestations(
 {
     if (!node::matmul_trusted::IsTrustedMirror()) return;
 
+    std::set<NodeId> skip_peers;
+    std::vector<NodeId> prefer_peers;
     bool request{false};
     {
         LOCK(cs_main);
         const auto now{GetTime<std::chrono::microseconds>()};
-        for (auto it = m_matmul_attestation_requested.begin();
-             it != m_matmul_attestation_requested.end();) {
-            if (now - it->second >
-                MATMUL_ATTESTATION_REQUEST_TTL) {
-                it = m_matmul_attestation_requested.erase(it);
+        const CBlockIndex* tip{m_chainman.ActiveTip()};
+        const int32_t tip_height{tip ? tip->nHeight : -1};
+        const CBlockIndex* index{
+            m_chainman.m_blockman.LookupBlockIndex(hash)};
+        const int32_t height{index ? index->nHeight : -1};
+        const bool tip_extending{
+            tip != nullptr && index != nullptr &&
+            index->pprev == tip};
+
+        // Drop stale peer-success hints.
+        for (auto it = m_matmul_attestation_peer_success.begin();
+             it != m_matmul_attestation_peer_success.end();) {
+            if (now - it->second > MATMUL_ATTESTATION_REQUEST_TTL) {
+                it = m_matmul_attestation_peer_success.erase(it);
             } else {
                 ++it;
             }
         }
-        if (m_matmul_attestation_requested.size() <
-                MATMUL_ATTESTATION_OUTSTANDING_MAX &&
-            m_matmul_attestation_requested
-                .try_emplace(hash, now).second) {
+
+        auto existing{m_matmul_attestation_requested.find(hash)};
+        if (existing != m_matmul_attestation_requested.end()) {
+            if (now - existing->second.requested_at <=
+                MATMUL_ATTESTATION_REQUEST_TTL) {
+                return; // still in flight
+            }
+            // TTL expired: allow a fresh round, but do not re-ask peers that
+            // already failed to answer for this hash.
+            skip_peers = existing->second.asked_peers;
+            existing->second.requested_at = now;
+            existing->second.height = height;
+            existing->second.tip_extending = tip_extending;
             request = true;
+        } else {
+            if (m_matmul_attestation_requested.size() >=
+                MATMUL_ATTESTATION_OUTSTANDING_MAX) {
+                if (!tip_extending) {
+                    // Backfill must not consume slots needed for tip advance.
+                    return;
+                }
+                // Evict the oldest non-tip-extending request.
+                auto victim{m_matmul_attestation_requested.end()};
+                for (auto it = m_matmul_attestation_requested.begin();
+                     it != m_matmul_attestation_requested.end(); ++it) {
+                    if (it->second.tip_extending) continue;
+                    if (victim == m_matmul_attestation_requested.end() ||
+                        it->second.requested_at <
+                            victim->second.requested_at ||
+                        (it->second.requested_at ==
+                             victim->second.requested_at &&
+                         node::matmul_trusted::PreferTrustedWork(
+                             node::matmul_trusted::MakeTrustedWorkRank(
+                                 victim->second.tip_extending,
+                                 victim->second.height, tip_height),
+                             node::matmul_trusted::MakeTrustedWorkRank(
+                                 it->second.tip_extending, it->second.height,
+                                 tip_height)))) {
+                        victim = it;
+                    }
+                }
+                if (victim == m_matmul_attestation_requested.end()) {
+                    return; // map full of tip-extending work
+                }
+                m_matmul_attestation_requested.erase(victim);
+            }
+            m_matmul_attestation_requested.emplace(
+                hash,
+                MatMulAttestationRequest{
+                    .requested_at = now,
+                    .height = height,
+                    .tip_extending = tip_extending,
+                    .asked_peers = {}});
+            request = true;
+        }
+
+        for (const auto& [peer_id, seen_at] :
+             m_matmul_attestation_peer_success) {
+            (void)seen_at;
+            if (skip_peers.count(peer_id) == 0) {
+                prefer_peers.push_back(peer_id);
+            }
+        }
+        if (request) {
+            auto& state{m_matmul_attestation_requested[hash]};
+            // Snapshot skip set for the send loop below.
+            skip_peers = state.asked_peers;
         }
     }
     if (!request) return;
 
-    // Query every connected independently validating provider. Service flags
-    // are only routing hints; configured signatures, not relayer identity,
-    // decide authority. The admitted source is also queried to tolerate a
-    // provider whose service advertisement has not propagated yet.
-    m_connman.ForEachNode([&](CNode* target) {
-        if (target->GetCommonVersion() < MATMUL_ATTESTATION_VERSION) return;
-        const PeerRef target_peer{GetPeerRef(target->GetId())};
+    // Query archive providers that actually serve attestations. Prefer peers
+    // that recently delivered a usable MMATTEST; skip peers already asked for
+    // this hash that stayed silent. The admitted source is also queried to
+    // tolerate a provider whose service advertisement has not propagated yet.
+    // Service flags are only routing hints; configured signatures decide
+    // authority.
+    std::set<NodeId> asked_now;
+    auto consider = [&](CNode* target) {
+        if (!target ||
+            target->GetCommonVersion() < MATMUL_ATTESTATION_VERSION) {
+            return;
+        }
+        const NodeId id{target->GetId()};
+        if (skip_peers.count(id) != 0) return;
+        if (asked_now.count(id) != 0) return;
+        const PeerRef target_peer{GetPeerRef(id)};
         const ServiceFlags services{
             target_peer
                 ? target_peer->m_their_services.load()
                 : NODE_NONE};
+        const bool preferred{
+            std::find(prefer_peers.begin(), prefer_peers.end(), id) !=
+            prefer_peers.end()};
         if ((services & NODE_MATMUL_ATTESTATION_ARCHIVE) !=
                 NODE_MATMUL_ATTESTATION_ARCHIVE &&
-            target->GetId() != source) {
+            id != source && !preferred) {
             return;
         }
-        MakeAndPushMessage(
-            *target, NetMsgType::GETMMATTEST, hash);
-    });
+        MakeAndPushMessage(*target, NetMsgType::GETMMATTEST, hash);
+        asked_now.insert(id);
+    };
+
+    for (NodeId id : prefer_peers) {
+        m_connman.ForNode(id, [&](CNode* target) {
+            consider(target);
+            return true;
+        });
+    }
+    m_connman.ForEachNode([&](CNode* target) { consider(target); });
+
+    if (!asked_now.empty()) {
+        LOCK(cs_main);
+        auto it{m_matmul_attestation_requested.find(hash)};
+        if (it != m_matmul_attestation_requested.end()) {
+            it->second.asked_peers.insert(asked_now.begin(),
+                                          asked_now.end());
+        }
+    }
 }
 
 void PeerManagerImpl::BeginMatMulAuthenticatedRelayObservation(
@@ -11017,6 +11143,11 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             if (result ==
                 matmul::trusted::AddResult::Accepted) {
                 relay.push_back(attestation);
+                {
+                    LOCK(cs_main);
+                    m_matmul_attestation_peer_success[pfrom.GetId()] =
+                        GetTime<std::chrono::microseconds>();
+                }
             } else if (result !=
                        matmul::trusted::AddResult::Duplicate) {
                 // Relayers are untrusted and may not be the signer. Reject the
@@ -11030,8 +11161,15 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             }
             if (node::matmul_trusted::HasQuorum(
                     hash, expected_height)) {
-                LOCK(cs_main);
-                m_matmul_attestation_requested.erase(hash);
+                {
+                    LOCK(cs_main);
+                    m_matmul_attestation_requested.erase(hash);
+                }
+                // Wake any parked trusted-mirror verify job. Do this outside
+                // cs_main: NotifyQuorumReady only touches the worker mutex.
+                if (m_matmul_verify_worker) {
+                    m_matmul_verify_worker->NotifyQuorumReady(hash);
+                }
             }
         }
         // Charge the shared buckets now, for newly accepted objects that this
