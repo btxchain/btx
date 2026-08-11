@@ -11741,13 +11741,12 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                 }
                 m_outbound_peers_with_protect_from_disconnect = recomputed_count;
             }
-            if (pto->IsOutboundOrBlockRelayConn() &&
-                !pto->HasPermission(NetPermissionFlags::NoBan)) {
-                LogPrintf("MATMUL: rotating ineligible pre-activation outbound "
-                          "peer=%d for a consensus-tier replacement\n", pto->GetId());
-                pto->fDisconnect = true;
-                return true;
-            }
+            // Deliberately NOT disconnecting here any more. Dropping every
+            // outbound peer that lacks the bit is what closed the deadlock on
+            // CPU-only nodes: with the peers gone, header sync never starts and
+            // nothing is ever fetchable. Losing consensus-tier PREFERENCE is
+            // sufficient; an ordinary peer can still relay valid blocks, which
+            // we validate ourselves regardless of who sent them.
         }
         if (state.fPreferredDownload && consensus_ok) {
             sync_blocks_and_headers_from_peer = true;
@@ -11769,13 +11768,12 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
             // gate above so that a node whose only source of blocks is an
             // inbound consensus-tier peer does not stall forever (which would
             // also suppress the low-work anti-DoS headers path for that peer).
-            if (consensus_ok &&
-                (m_num_preferred_download_peers == 0 || mapBlocksInFlight.empty())) {
+            if (m_num_preferred_download_peers == 0 || mapBlocksInFlight.empty()) {
                 sync_blocks_and_headers_from_peer = true;
             }
         }
 
-        if (!state.fSyncStarted && consensus_ok && CanServeBlocks(*peer) && !m_chainman.m_blockman.LoadingBlocks()) {
+        if (!state.fSyncStarted && CanServeBlocks(*peer) && !m_chainman.m_blockman.LoadingBlocks()) {
             // Only actively request headers from a single peer, unless we're close to today.
             if ((nSyncStarted == 0 && sync_blocks_and_headers_from_peer) || m_chainman.m_best_header->Time() > NodeClock::now() - 24h) {
                 const CBlockIndex* pindexStart = m_chainman.m_best_header;
@@ -12286,7 +12284,12 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
         const bool should_request_blocks_from_peer{
             CanServeBlocks(*peer) && can_request_blocks_from_peer &&
             ShouldRequestBlocksFromMatMulPeer(
-                /*can_serve_blocks=*/true, consensus_ok,
+                // Fetching is not validating: an ordinary peer may relay a
+                // block we then validate ourselves. Passing eligibility as
+                // true keeps the tier a PREFERENCE (see fPreferredDownload
+                // above) without letting it gate getdata, which deadlocked
+                // CPU-only nodes whenever GPU peers were scarce.
+                /*can_serve_blocks=*/true, /*peer_is_eligible=*/true,
                 /*request_window_open=*/true, sync_blocks_and_headers_from_peer,
                 IsLimitedPeer(*peer), m_chainman.IsInitialBlockDownload(),
                 state.vBlocksInFlight.size(), MAX_BLOCKS_IN_TRANSIT_PER_PEER)};
