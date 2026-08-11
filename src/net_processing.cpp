@@ -2164,14 +2164,24 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
 
     std::shared_ptr<const CBlock> candidate;
     uint256 candidate_hash;
+    // LOCK ORDER: read the tip under cs_main BEFORE taking the store mutex.
+    //
+    // Taking m_matmul_deferred_body_mutex and then cs_main inverts the order
+    // used by the block path (cs_main held around NoteMatMulBudgetDeferred,
+    // then StoreMatMulDeferredBody takes the store mutex) and deadlocks the
+    // node: every thread ends in futex wait, the RPC port stays open but
+    // unresponsive, and nothing is logged. Observed on a live archive
+    // 2026-08-11: 65 threads, 59 in futex wait, no log output for 28 minutes,
+    // requiring SIGKILL. Never hold the store mutex while acquiring cs_main.
+    const uint256 wanted{WITH_LOCK(cs_main,
+        return m_chainman.ActiveChain().Tip()
+                   ? m_chainman.ActiveChain().Tip()->GetBlockHash()
+                   : uint256{})};
     {
         LOCK(m_matmul_deferred_body_mutex);
         if (m_matmul_deferred_body_store.empty()) return;
         // Prefer the body that extends our tip: it is the one unblocking the
         // chain. Otherwise take the oldest.
-        const uint256 wanted{WITH_LOCK(cs_main, return m_chainman.ActiveChain().Tip()
-                                                     ? m_chainman.ActiveChain().Tip()->GetBlockHash()
-                                                     : uint256{})};
         auto pick{m_matmul_deferred_body_store.end()};
         for (auto it = m_matmul_deferred_body_store.begin();
              it != m_matmul_deferred_body_store.end(); ++it) {
