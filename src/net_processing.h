@@ -77,8 +77,11 @@ constexpr bool IsMatMulPeerEligibleForSync(
 }
 
 /** Whether this SendMessages pass may allocate block-download work to a peer.
- * The dynamic MatMul eligibility input is part of both the IBD and near-tip
- * paths, so an ordinary peer cannot bypass the activated tier requirement. */
+ *
+ * Production call sites pass peer_is_eligible=true: the MatMul consensus tier
+ * is a PREFERENCE (fPreferredDownload), never a getdata gate. The parameter
+ * remains so unit tests can assert the helper's combinatorial shape without
+ * regressing the preference-only call site. */
 constexpr bool ShouldRequestBlocksFromMatMulPeer(
     bool can_serve_blocks,
     bool peer_is_eligible,

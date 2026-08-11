@@ -358,7 +358,8 @@ BOOST_AUTO_TEST_CASE(matmul_consensus_tier_connected_peer_loses_preference_at_ac
     } finalize{peerman, ordinary_peer, consensus_peer};
 
     // Exercise the real chain-sync protection path before activation. The
-    // ordinary full-outbound peer must relinquish this slot at the boundary.
+    // ordinary full-outbound peer must lose preference/protection at the
+    // boundary, without being disconnected.
     std::vector<CBlock> known_headers{
         CBlock{tip->GetBlockHeader()}};
     auto headers_msg{
@@ -410,8 +411,10 @@ BOOST_AUTO_TEST_CASE(matmul_consensus_tier_connected_peer_loses_preference_at_ac
     BOOST_REQUIRE(!consensus_stats.m_headers_sync_started);
     BOOST_REQUIRE_EQUAL(consensus_stats.m_total_headers_sync_peer_count, 1);
 
-    // Exercise the production SendMessages selection hook. The ordinary peer
-    // loses both VERSION-time preference and header-sync ownership exactly once.
+    // Preference-only: the ordinary peer loses VERSION-time preference,
+    // header-sync ownership, and chain-sync protection exactly once -- but is
+    // NOT disconnected. Dropping ineligible outbounds was the CPU-mirror
+    // deadlock (peers gone -> no header sync -> nothing fetchable).
     BOOST_CHECK(peerman.SendMessages(&ordinary_peer));
     BOOST_REQUIRE(peerman.GetNodeStateStats(ordinary_peer.GetId(), ordinary_stats));
     BOOST_REQUIRE(!ordinary_stats.m_preferred_download);
@@ -421,7 +424,7 @@ BOOST_AUTO_TEST_CASE(matmul_consensus_tier_connected_peer_loses_preference_at_ac
     BOOST_REQUIRE(!ordinary_stats.m_chain_sync_protected);
     BOOST_REQUIRE_EQUAL(
         ordinary_stats.m_total_chain_sync_protected_peer_count, 0);
-    BOOST_REQUIRE(ordinary_peer.fDisconnect);
+    BOOST_REQUIRE(!ordinary_peer.fDisconnect);
 
     BOOST_CHECK(peerman.SendMessages(&ordinary_peer));
     BOOST_CHECK(peerman.SendMessages(&consensus_peer));
@@ -435,6 +438,7 @@ BOOST_AUTO_TEST_CASE(matmul_consensus_tier_connected_peer_loses_preference_at_ac
     BOOST_CHECK(consensus_stats.m_headers_sync_started);
     BOOST_CHECK_EQUAL(ordinary_stats.m_total_headers_sync_peer_count, 1);
     BOOST_CHECK_EQUAL(consensus_stats.m_total_headers_sync_peer_count, 1);
+    BOOST_CHECK(!ordinary_peer.fDisconnect);
     BOOST_CHECK(!consensus_peer.fDisconnect);
 }
 
@@ -625,14 +629,21 @@ BOOST_AUTO_TEST_CASE(matmul_consensus_tier_compact_block_boundary_policy)
     BOOST_CHECK_EQUAL(
         peerman.GetDesirableServiceFlags(base),
         ServiceFlags(base | NODE_MATMUL_CONSENSUS));
+    // Preference-only at the boundary: the pre-boundary ordinary peer loses
+    // preferred-download status but stays connected. Disconnecting every
+    // ineligible outbound was the CPU-mirror deadlock.
     BOOST_CHECK(peerman.SendMessages(&pre_boundary_peer));
-    BOOST_CHECK(pre_boundary_peer.fDisconnect);
+    BOOST_REQUIRE(peerman.GetNodeStateStats(pre_boundary_peer.GetId(),
+                                             pre_boundary_stats));
+    BOOST_CHECK(!pre_boundary_stats.m_preferred_download);
+    BOOST_CHECK(!pre_boundary_peer.fDisconnect);
 
-    // After the local authenticated tip is RC-active, the same class of peer
-    // may still relay a header but must not allocate any compact/full block
-    // download state. Mine a valid next RC child so success cannot be explained
-    // by malformed-header rejection; the header must enter the block index while
-    // its body remains unrequested.
+    // After the local authenticated tip is RC-active, an ordinary peer may
+    // still announce and be asked for the next body: fetching is not
+    // validating. Mine a valid next RC child so success cannot be explained by
+    // malformed-header rejection. The header must enter the block index AND
+    // download work must still be allocatable (CMPCT reconstruction and/or
+    // GETDATA) -- eligibility must not gate getdata.
     const CBlockIndex* rc_tip{
         WITH_LOCK(::cs_main, return m_node.chainman->ActiveChain().Tip())};
     BOOST_REQUIRE(rc_tip != nullptr);
@@ -669,11 +680,19 @@ BOOST_AUTO_TEST_CASE(matmul_consensus_tier_compact_block_boundary_policy)
         ::cs_main,
         return m_node.chainman->m_blockman.LookupBlockIndex(
                    post_boundary_candidate.GetHash()) != nullptr));
-    BOOST_CHECK(post_boundary_stats.vHeightInFlight.empty());
-    BOOST_CHECK(!HasQueuedMessageType(post_boundary_peer,
-                                      NetMsgType::GETBLOCKTXN));
-    BOOST_CHECK(!HasQueuedMessageType(post_boundary_peer,
-                                      NetMsgType::GETDATA));
+    // Preference-only: ordinary peer remains usable for download after the
+    // boundary. Accept either compact reconstruction (GETBLOCKTXN) or a full
+    // GETDATA / in-flight allocation -- any of these proves the gate is gone.
+    const bool download_allocated{
+        !post_boundary_stats.vHeightInFlight.empty() ||
+        HasQueuedMessageType(post_boundary_peer, NetMsgType::GETBLOCKTXN) ||
+        HasQueuedMessageType(post_boundary_peer, NetMsgType::GETDATA)};
+    BOOST_CHECK(download_allocated);
+    BOOST_CHECK(peerman.SendMessages(&post_boundary_peer));
+    BOOST_REQUIRE(peerman.GetNodeStateStats(post_boundary_peer.GetId(),
+                                             post_boundary_stats));
+    BOOST_CHECK(!post_boundary_stats.m_preferred_download);
+    BOOST_CHECK(!post_boundary_peer.fDisconnect);
 }
 
 BOOST_AUTO_TEST_CASE(broadcast_transaction_fails_closed_without_peerman)

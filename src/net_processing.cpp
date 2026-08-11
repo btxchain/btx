@@ -277,11 +277,6 @@ static constexpr auto MATMUL_DEFERRED_BODY_MAX_AGE{10min};
 /** Upper bound on the catch-up multiplier applied to the global verify budget. */
 static constexpr uint32_t MATMUL_RC_CATCHUP_BUDGET_MULTIPLIER_MAX{64};
 
-/** Below this many NODE_MATMUL_CONSENSUS peers, the consensus tier stops
- *  restricting header sync and block download: with too few eligible peers the
- *  restriction cannot be satisfied and merely deadlocks the node. */
-static constexpr int MATMUL_MIN_ELIGIBLE_PEERS_FOR_TIER{2};
-
 /** An async MatMul verification marker older than this is treated as abandoned.
  *
  *  m_matmul_async_verifying exists so a body being verified off-thread is not
@@ -1348,11 +1343,6 @@ private:
         GUARDED_BY(m_matmul_rc_deferred_mutex);
     void MarkMatMulRCBodyDeferred(const uint256& hash, int64_t peer_id) NO_THREAD_SAFETY_ANALYSIS;
     bool IsMatMulRCBodyDeferred(const uint256& hash, int64_t peer_id) const NO_THREAD_SAFETY_ANALYSIS;
-    /** Number of connected peers advertising NODE_MATMUL_CONSENSUS, cached and
-     *  refreshed at most once a second (see MatMulEligiblePeerCount). */
-    std::atomic<int> m_matmul_eligible_peer_cache{0};
-    std::atomic<std::chrono::seconds> m_matmul_eligible_peer_cached_at{0s};
-    int MatMulEligiblePeerCount() EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
     /** Highest block height advertised by any connected peer, cached ~1s.
      *  Used to detect catch-up WITHOUT depending on our own m_best_header,
      *  which cannot advance while verification is budget-starved. */
@@ -2271,26 +2261,6 @@ int PeerManagerImpl::BestPeerAdvertisedHeight()
     m_best_peer_height_cache.store(best);
     m_best_peer_height_cached_at.store(now);
     return best;
-}
-
-int PeerManagerImpl::MatMulEligiblePeerCount()
-{
-    const auto now{GetTime<std::chrono::seconds>()};
-    if (now == m_matmul_eligible_peer_cached_at.load()) {
-        return m_matmul_eligible_peer_cache.load();
-    }
-    int eligible{0};
-    {
-        LOCK(m_peer_mutex);
-        for (const auto& [id, peer] : m_peer_map) {
-            if ((peer->m_their_services & NODE_MATMUL_CONSENSUS) == NODE_MATMUL_CONSENSUS) {
-                ++eligible;
-            }
-        }
-    }
-    m_matmul_eligible_peer_cache.store(eligible);
-    m_matmul_eligible_peer_cached_at.store(now);
-    return eligible;
 }
 
 bool PeerManagerImpl::IsMatMulRCBodyDeferred(const uint256& hash, int64_t peer_id) const
@@ -9560,14 +9530,11 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             return;
         }
 
-        // An ordinary peer connected before the RC tier became mandatory may
-        // still announce compact blocks, but it must not allocate compact/full
-        // block download work after the boundary. Preserve the header signal.
-        if (!IsPeerEligibleForMatMulSync(pfrom, *peer)) {
-            return ProcessHeadersMessage(
-                pfrom, *peer, {cmpctblock.header},
-                /*via_compact_block=*/true);
-        }
+        // Preference-only: an ordinary peer may still deliver a compact block
+        // after RC activation. Fetching is not validating; ExactReplay /
+        // attestation and the verify budgets gate acceptance independently of
+        // who announced the bytes. NODE_MATMUL_CONSENSUS remains a preference
+        // via fPreferredDownload, not a CMPCTBLOCK gate.
 
         bool received_new_header = false;
         const auto blockhash = cmpctblock.header.GetHash();
@@ -11971,38 +11938,16 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
         // in IBD (once out of IBD, we sync from all peers).
         bool sync_blocks_and_headers_from_peer = false;
         const bool require_matmul_consensus = RequireMatMulConsensusPeersForSync();
-        bool consensus_ok = IsMatMulPeerEligibleForSync(
+        // Raw eligibility for PREFERENCE only. Do not degrade this into a
+        // scarcity fallback: the earlier MATMUL_MIN_ELIGIBLE_PEERS_FOR_TIER
+        // override forced consensus_ok=true whenever fewer than two GPU peers
+        // were connected, which silently kept ordinary peers preferred and
+        // defeated the preference-only design (superseded by 75a9d850). Liveness
+        // is already ungated -- getheaders / HeadersDirectFetchBlocks / getdata
+        // do not consult this bit.
+        const bool consensus_ok = IsMatMulPeerEligibleForSync(
             require_matmul_consensus, peer->m_their_services,
             pto->HasPermission(NetPermissionFlags::NoBan));
-
-        // Degenerate-network fallback.
-        //
-        // The consensus tier restricts header sync AND block download to peers
-        // advertising NODE_MATMUL_CONSENSUS, and disconnects ineligible
-        // outbound peers outright. That bit is only set by a node running
-        // strict-device with a currently qualified GPU. On a CPU-only node --
-        // every trusted mirror, and any operator without a qualifying GPU --
-        // that is a closed deadlock whenever GPU peers are scarce: ineligible
-        // peers are dropped, no header sync starts, m_best_header never
-        // advances past our tip, so nothing is ever fetchable and the node
-        // stalls forever with a full peer table.
-        //
-        // Measured on mainnet 2026-08-11 on a stalled CPU mirror: 105k
-        // matmul_ineligible download skips, 464k no_fetchable_in_window with
-        // best_header_ahead=0 while peers advertised +136, and only 2 of ~90
-        // peers had ever served it a block.
-        //
-        // Requiring the bit to FETCH conflates fetching with validating. Block
-        // bytes are self-validating: PoW is checked before any expensive MatMul
-        // work, ExactReplay or an attestation quorum gates connection, and the
-        // per-peer/netgroup/global verify budgets bound the cost independently.
-        // So when we do not have enough eligible peers to sync from, fall back
-        // to ordinary peers rather than deadlock. The tier still governs
-        // PREFERENCE while eligible peers exist.
-        if (!consensus_ok && require_matmul_consensus &&
-            MatMulEligiblePeerCount() < MATMUL_MIN_ELIGIBLE_PEERS_FOR_TIER) {
-            consensus_ok = true;
-        }
         const auto preferred_reconcile{
             ReconcileMatMulPreferredDownloadForSync(
                 state.fPreferredDownload,
@@ -12096,7 +12041,21 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
 
         if (!state.fSyncStarted && CanServeBlocks(*peer) && !m_chainman.m_blockman.LoadingBlocks()) {
             // Only actively request headers from a single peer, unless we're close to today.
-            if ((nSyncStarted == 0 && sync_blocks_and_headers_from_peer) || m_chainman.m_best_header->Time() > NodeClock::now() - 24h) {
+            //
+            // Preference-only handoff: after an ordinary peer loses fPreferredDownload at
+            // RC activation it also relinquishes fSyncStarted above. The block-download
+            // fallback (mapBlocksInFlight.empty()) still sets sync_blocks_and_headers_from_peer
+            // so that peer remains usable for getdata -- but it must not immediately reclaim
+            // the scarce initial IBD sync slot while preferred peers exist. Otherwise the
+            // activation handoff never reaches a consensus-tier peer. When no preferred
+            // peers are connected (CPU-only / scarce GPU), ordinary peers may still claim
+            // the slot so header sync cannot deadlock.
+            const bool near_tip_headers{
+                m_chainman.m_best_header->Time() > NodeClock::now() - 24h};
+            const bool may_claim_initial_sync_slot{
+                nSyncStarted == 0 && sync_blocks_and_headers_from_peer &&
+                (state.fPreferredDownload || m_num_preferred_download_peers == 0)};
+            if (may_claim_initial_sync_slot || near_tip_headers) {
                 const CBlockIndex* pindexStart = m_chainman.m_best_header;
                 /* If possible, start at the block preceding the currently
                    best known header.  This ensures that we always get a
