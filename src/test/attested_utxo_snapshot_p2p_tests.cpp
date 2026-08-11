@@ -135,6 +135,8 @@ BOOST_AUTO_TEST_CASE(offer_roundtrip_chunk_read)
         BOOST_REQUIRE(f);
         AutoFile a{f};
         a << manifest;
+        // AutoFile requires an explicit fclose after write (streams.h).
+        BOOST_REQUIRE_EQUAL(a.fclose(), 0);
     }
 
     node::AttestedUTXOSnapshotOffer offer;
