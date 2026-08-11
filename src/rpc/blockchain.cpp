@@ -31,6 +31,8 @@
 #include <net.h>
 #include <net_processing.h>
 #include <node/blockstorage.h>
+#include <node/attested_utxo_snapshot.h>
+#include <node/attested_utxo_snapshot_p2p.h>
 #include <node/context.h>
 #include <node/matmul_trusted_attestations.h>
 #include <node/transaction.h>
@@ -4375,7 +4377,13 @@ static RPCHelpMan dumptxoutsetattested()
         "ExactReplay is active at the tip, the tip must carry "
         "BLOCK_EXACT_REPLAY_VERIFIED. Additional signers can append signatures "
         "with signutxosnapshotmanifest until the importer's M-of-N threshold is "
-        "met. P2P distribution of manifests is not implemented in v1.\n\n"
+        "met.\n\n"
+        "This export does not hold cs_main across the multi-GB coin walk: after a "
+        "brief ForceFlush + LevelDB snapshot cursor open (and a shielded-state "
+        "capture), coins are serialized and hash_serialized_3 is computed without "
+        "cs_main so the node can keep connecting blocks and serving RPC. Offer the "
+        "resulting files with offerattestedutxosnapshot for P2P distribution, or "
+        "use the file-based loadtxoutsetattested fallback.\n\n"
         "This call may take several minutes. Use no RPC timeout "
         "(btx-cli -rpcclienttimeout=0).",
         {
@@ -4396,6 +4404,9 @@ static RPCHelpMan dumptxoutsetattested()
                     {RPCResult::Type::NUM, "nchaintx", "the chain tx count at the snapshot base"},
                     {RPCResult::Type::STR_HEX, "shielded_state_pin", "shielded-state commitment bound into the manifest"},
                     {RPCResult::Type::NUM, "signatures", "number of signatures currently in the manifest"},
+                    {RPCResult::Type::NUM, "max_cs_main_hold_us", "worst continuous cs_main hold during this export (microseconds)"},
+                    {RPCResult::Type::NUM, "flush_cs_main_hold_us", "cs_main hold for ForceFlush + cursor open (microseconds)"},
+                    {RPCResult::Type::NUM, "shielded_cs_main_hold_us", "cs_main hold for shielded-state capture (microseconds)"},
                 }},
         RPCExamples{
             HelpExampleCli("-rpcclienttimeout=0 dumptxoutsetattested",
@@ -4462,8 +4473,16 @@ static RPCHelpMan dumptxoutsetattested()
             "Couldn't open file " + tmppath.utf8string() + " for writing.");
     }
 
-    UniValue result = CreateUTXOSnapshot(
-        node, chainman.ActiveChainstate(), std::move(afile), path, tmppath);
+    node::AttestedUTXOSnapshotExportResult exported;
+    try {
+        exported = node::CreateAttestedUTXOSnapshot(
+            chainman.ActiveChainstate(), std::move(afile), path, tmppath,
+            node.rpc_interruption_point);
+    } catch (const std::exception& e) {
+        fs::remove(tmppath);
+        fs::remove(tmppath + ".coins");
+        throw JSONRPCError(RPC_MISC_ERROR, e.what());
+    }
     try {
         fs::rename(tmppath, path);
     } catch (const fs::filesystem_error& e) {
@@ -4476,38 +4495,14 @@ static RPCHelpMan dumptxoutsetattested()
         throw JSONRPCError(RPC_MISC_ERROR, "Snapshot file was not produced");
     }
 
-    if (!result.exists("shielded_state_pin") ||
-        !result.exists("txoutset_hash") ||
-        !result.exists("nchaintx") ||
-        !result.exists("coins_written") ||
-        !result.exists("base_hash") ||
-        !result.exists("base_height")) {
-        fs::remove(path);
-        throw JSONRPCError(
-            RPC_MISC_ERROR,
-            "Snapshot dump missing fields required for an attested manifest");
-    }
-
-    auto parse_hex_field = [](const UniValue& value, const char* name) -> uint256 {
-        const auto parsed{uint256::FromHex(value.get_str())};
-        if (!parsed) {
-            throw JSONRPCError(
-                RPC_MISC_ERROR,
-                strprintf("Snapshot dump produced an invalid %s hex field", name));
-        }
-        return *parsed;
-    };
-
     matmul::trusted::UtxoSnapshotStatement statement;
     statement.chain_id = *chain_id;
-    statement.block_hash = parse_hex_field(result["base_hash"], "base_hash");
-    statement.block_height = result["base_height"].getInt<int>();
-    statement.hash_serialized =
-        parse_hex_field(result["txoutset_hash"], "txoutset_hash");
-    statement.coins_count = result["coins_written"].getInt<int64_t>();
-    statement.m_chain_tx_count = result["nchaintx"].getInt<int64_t>();
-    statement.shielded_state_commitment =
-        parse_hex_field(result["shielded_state_pin"], "shielded_state_pin");
+    statement.block_hash = exported.base_hash;
+    statement.block_height = exported.base_height;
+    statement.hash_serialized = exported.txoutset_hash;
+    statement.coins_count = exported.coins_written;
+    statement.m_chain_tx_count = exported.nchaintx;
+    statement.shielded_state_commitment = exported.shielded_state_pin;
     statement.replay_authority_context = *authority;
 
     auto signature{node::matmul_trusted::SignUtxoSnapshot(statement)};
@@ -4528,8 +4523,19 @@ static RPCHelpMan dumptxoutsetattested()
         throw JSONRPCError(RPC_MISC_ERROR, error);
     }
 
+    UniValue result{UniValue::VOBJ};
+    result.pushKV("coins_written", exported.coins_written);
+    result.pushKV("base_hash", exported.base_hash.ToString());
+    result.pushKV("base_height", exported.base_height);
+    result.pushKV("path", path.utf8string());
     result.pushKV("manifest_path", manifest_path.utf8string());
+    result.pushKV("txoutset_hash", exported.txoutset_hash.ToString());
+    result.pushKV("nchaintx", exported.nchaintx);
+    result.pushKV("shielded_state_pin", exported.shielded_state_pin.GetHex());
     result.pushKV("signatures", static_cast<int64_t>(manifest.signatures.size()));
+    result.pushKV("max_cs_main_hold_us", exported.max_cs_main_hold.count());
+    result.pushKV("flush_cs_main_hold_us", exported.flush_hold.count());
+    result.pushKV("shielded_cs_main_hold_us", exported.shielded_hold.count());
     return result;
 },
     };
@@ -4735,6 +4741,299 @@ static RPCHelpMan loadtxoutsetattested()
                                                            : "externalized");
     result.pushKV("retain_shielded_commitment_index",
                   chainman.RetainShieldedCommitmentIndex());
+    return result;
+},
+    };
+}
+
+static RPCHelpMan offerattestedutxosnapshot()
+{
+    return RPCHelpMan{
+        "offerattestedutxosnapshot",
+        "Advertise and serve an already-exported attested UTXO snapshot over P2P.\n"
+        "Does not require this node to be a signer — any host holding the snapshot "
+        "file and a quorum-complete manifest may offer it. Sets the "
+        "NODE_ATTESTED_UTXO_SNAPSHOT service bit while an offer is active.",
+        {
+            {"path", RPCArg::Type::STR, RPCArg::Optional::NO, "Snapshot file path"},
+            {"manifest_path", RPCArg::Type::STR, RPCArg::Optional::NO, "Manifest file path"},
+            {"chunk_size", RPCArg::Type::NUM, RPCArg::Default{static_cast<uint32_t>(node::ATTESTED_UTXO_SNAPSHOT_CHUNK_SIZE)},
+             "Chunk size in bytes (max 4 MiB)"},
+        },
+        RPCResult{RPCResult::Type::OBJ, "", "", {
+            {RPCResult::Type::STR_HEX, "block_hash", ""},
+            {RPCResult::Type::NUM, "height", ""},
+            {RPCResult::Type::NUM, "file_size", ""},
+            {RPCResult::Type::NUM, "chunk_size", ""},
+            {RPCResult::Type::NUM, "chunk_count", ""},
+            {RPCResult::Type::STR_HEX, "file_hash", ""},
+            {RPCResult::Type::NUM, "signatures", ""},
+        }},
+        RPCExamples{
+            HelpExampleCli("offerattestedutxosnapshot", "utxo.dat utxo.manifest")
+        },
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    EnsureNotWalletRestricted(request);
+    NodeContext& node = EnsureAnyNodeContext(request.context);
+    const ArgsManager& args{EnsureArgsman(node)};
+    const fs::path path{
+        AbsPathForConfigVal(args, fs::u8path(self.Arg<std::string>("path")))};
+    const fs::path manifest_path{
+        AbsPathForConfigVal(args, fs::u8path(self.Arg<std::string>("manifest_path")))};
+    const uint32_t chunk_size{
+        request.params.size() > 2 && !request.params[2].isNull()
+            ? static_cast<uint32_t>(request.params[2].getInt<int64_t>())
+            : node::ATTESTED_UTXO_SNAPSHOT_CHUNK_SIZE};
+
+    node::AttestedUTXOSnapshotOffer offer;
+    std::string error;
+    if (!node::BuildAttestedUTXOSnapshotOfferFromFiles(
+            path, manifest_path, chunk_size, offer, error)) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, error);
+    }
+    // Verify quorum against local trusted config when available; mirrors and
+    // signers both may offer. Consensus nodes without a store skip this check
+    // but can still re-serve files they hold.
+    if (node::matmul_trusted::IsConfigured()) {
+        const auto verified{
+            node::matmul_trusted::VerifyUtxoSnapshotManifest(offer.manifest)};
+        if (verified != matmul::trusted::UtxoSnapshotVerifyResult::Valid) {
+            throw JSONRPCError(
+                RPC_INVALID_PARAMETER,
+                strprintf("Manifest failed local quorum check: %s",
+                          matmul::trusted::UtxoSnapshotVerifyResultName(verified)));
+        }
+    }
+    if (!node::OfferAttestedUTXOSnapshot(offer, error)) {
+        throw JSONRPCError(RPC_MISC_ERROR, error);
+    }
+    node.connman->AddLocalServices(NODE_ATTESTED_UTXO_SNAPSHOT);
+
+    UniValue result{UniValue::VOBJ};
+    result.pushKV("block_hash", offer.block_hash.ToString());
+    result.pushKV("height", offer.height);
+    result.pushKV("file_size", offer.file_size);
+    result.pushKV("chunk_size", static_cast<int64_t>(offer.chunk_size));
+    result.pushKV("chunk_count", static_cast<int64_t>(offer.chunk_count));
+    result.pushKV("file_hash", offer.file_hash.ToString());
+    result.pushKV("signatures", static_cast<int64_t>(offer.manifest.signatures.size()));
+    return result;
+},
+    };
+}
+
+static RPCHelpMan withdrawattestedutxosnapshot()
+{
+    return RPCHelpMan{
+        "withdrawattestedutxosnapshot",
+        "Stop advertising/serving the local attested UTXO snapshot offer.",
+        {},
+        RPCResult{RPCResult::Type::OBJ, "", "", {
+            {RPCResult::Type::BOOL, "withdrawn", ""},
+        }},
+        RPCExamples{HelpExampleCli("withdrawattestedutxosnapshot", "")},
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    EnsureNotWalletRestricted(request);
+    NodeContext& node = EnsureAnyNodeContext(request.context);
+    node::ClearAttestedUTXOSnapshotOffer();
+    node.connman->RemoveLocalServices(NODE_ATTESTED_UTXO_SNAPSHOT);
+    UniValue result{UniValue::VOBJ};
+    result.pushKV("withdrawn", true);
+    return result;
+},
+    };
+}
+
+static RPCHelpMan fetchattestedutxosnapshot()
+{
+    return RPCHelpMan{
+        "fetchattestedutxosnapshot",
+        "Fetch an attested UTXO snapshot from a P2P peer advertising "
+        "NODE_ATTESTED_UTXO_SNAPSHOT.\n\n"
+        "Fetches the manifest first and verifies the configured M-of-N quorum "
+        "BEFORE downloading any snapshot body chunk. Chunks are written to disk "
+        "incrementally with per-chunk integrity checks. Does not activate the "
+        "snapshot; call loadtxoutsetattested afterwards.\n\n"
+        "Only available when matmulvalidation=trusted.",
+        {
+            {"path", RPCArg::Type::STR, RPCArg::Optional::NO, "Output snapshot path"},
+            {"manifest_path", RPCArg::Type::STR, RPCArg::Optional::NO, "Output manifest path"},
+            {"block_hash", RPCArg::Type::STR_HEX, RPCArg::Default{""},
+             "Optional base block hash (empty = any offered snapshot)"},
+            {"peer_id", RPCArg::Type::NUM, RPCArg::Default{-1},
+             "Optional peer id; default picks any advertising peer"},
+            {"timeout_ms", RPCArg::Type::NUM, RPCArg::Default{120000},
+             "Per-message wait timeout in milliseconds"},
+        },
+        RPCResult{RPCResult::Type::OBJ, "", "", {
+            {RPCResult::Type::STR_HEX, "block_hash", ""},
+            {RPCResult::Type::NUM, "height", ""},
+            {RPCResult::Type::NUM, "file_size", ""},
+            {RPCResult::Type::NUM, "chunks_received", ""},
+            {RPCResult::Type::NUM, "signatures", ""},
+            {RPCResult::Type::NUM, "peer_id", ""},
+            {RPCResult::Type::STR, "path", ""},
+            {RPCResult::Type::STR, "manifest_path", ""},
+        }},
+        RPCExamples{
+            HelpExampleCli("-rpcclienttimeout=0 fetchattestedutxosnapshot",
+                           "utxo.dat utxo.manifest")
+        },
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    EnsureNotWalletRestricted(request);
+    NodeContext& node = EnsureAnyNodeContext(request.context);
+    if (!node::matmul_trusted::IsTrustedMirror()) {
+        throw JSONRPCError(
+            RPC_MISC_ERROR,
+            "fetchattestedutxosnapshot is only available when matmulvalidation=trusted");
+    }
+    PeerManager& peerman = EnsurePeerman(node);
+    const ArgsManager& args{EnsureArgsman(node)};
+    const fs::path path{
+        AbsPathForConfigVal(args, fs::u8path(self.Arg<std::string>("path")))};
+    const fs::path manifest_path{
+        AbsPathForConfigVal(args, fs::u8path(self.Arg<std::string>("manifest_path")))};
+    if (fs::exists(path) || fs::exists(manifest_path)) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Output path already exists");
+    }
+
+    uint256 want_hash{};
+    const std::string block_hash_arg{self.Arg<std::string>("block_hash")};
+    if (!block_hash_arg.empty()) {
+        const auto parsed{uint256::FromHex(block_hash_arg)};
+        if (!parsed) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid block_hash hex");
+        }
+        want_hash = *parsed;
+    }
+    const int peer_arg{
+        request.params.size() > 3 && !request.params[3].isNull()
+            ? request.params[3].getInt<int>()
+            : -1};
+    const int64_t timeout_ms{
+        request.params.size() > 4 && !request.params[4].isNull()
+            ? request.params[4].getInt<int64_t>()
+            : 120000};
+    const auto timeout{std::chrono::milliseconds{timeout_ms}};
+
+    NodeId peer_id{-1};
+    if (peer_arg >= 0) {
+        peer_id = static_cast<NodeId>(peer_arg);
+    } else {
+        const auto peers{peerman.GetAttestedUTXOSnapshotPeers()};
+        if (peers.empty()) {
+            throw JSONRPCError(RPC_CLIENT_NODE_NOT_CONNECTED,
+                               "No connected peer advertises NODE_ATTESTED_UTXO_SNAPSHOT");
+        }
+        peer_id = peers.front();
+    }
+
+    auto& coord{node::AttestedUTXOSnapshotP2P::Get()};
+    coord.CancelWaits();
+    coord.BeginManifestWait(peer_id, want_hash);
+    if (!peerman.RequestAttestedUTXOManifest(peer_id, want_hash)) {
+        coord.CancelWaits();
+        throw JSONRPCError(RPC_CLIENT_NODE_NOT_CONNECTED, "Peer not available");
+    }
+    auto manifest_msg{coord.WaitManifest(timeout)};
+    if (!manifest_msg) {
+        throw JSONRPCError(RPC_CLIENT_NODE_NOT_CONNECTED,
+                           "Timed out waiting for utxomanifest (quorum-before-body gate)");
+    }
+
+    // Fail closed: verify quorum BEFORE any body download.
+    const auto verified{
+        node::matmul_trusted::VerifyUtxoSnapshotManifest(manifest_msg->manifest)};
+    if (verified != matmul::trusted::UtxoSnapshotVerifyResult::Valid) {
+        throw JSONRPCError(
+            RPC_INVALID_PARAMETER,
+            strprintf("Remote manifest rejected before body download: %s",
+                      matmul::trusted::UtxoSnapshotVerifyResultName(verified)));
+    }
+    if (!want_hash.IsNull() && manifest_msg->block_hash != want_hash) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Remote offer block hash mismatch");
+    }
+
+    std::string error;
+    if (!WriteManifestFile(manifest_path, manifest_msg->manifest, error)) {
+        throw JSONRPCError(RPC_MISC_ERROR, error);
+    }
+
+    const fs::path tmppath{path + ".tmp"};
+    FILE* out{fsbridge::fopen(tmppath, "wb")};
+    if (!out) {
+        fs::remove(manifest_path);
+        throw JSONRPCError(RPC_MISC_ERROR, "Couldn't open output snapshot for writing");
+    }
+
+    HashWriter file_hash{};
+    uint64_t written{0};
+    try {
+        for (uint32_t i = 0; i < manifest_msg->chunk_count; ++i) {
+            if (node.rpc_interruption_point) node.rpc_interruption_point();
+            coord.BeginChunkWait(peer_id, manifest_msg->block_hash, i);
+            if (!peerman.RequestAttestedUTXOChunk(peer_id, manifest_msg->block_hash, i)) {
+                throw std::runtime_error("Peer disconnected during chunk fetch");
+            }
+            auto chunk{coord.WaitChunk(timeout)};
+            if (!chunk) {
+                throw std::runtime_error(strprintf(
+                    "Timed out waiting for chunk %u (slow/malicious server)", i));
+            }
+            const uint256 actual = node::AttestedUTXOSnapshotBytesHash(
+                Span{chunk->data.data(), chunk->data.size()});
+            if (actual != chunk->chunk_hash) {
+                throw std::runtime_error(strprintf(
+                    "Chunk %u integrity failure", i));
+            }
+            if (fwrite(chunk->data.data(), 1, chunk->data.size(), out) !=
+                chunk->data.size()) {
+                throw std::runtime_error("Short write while storing snapshot chunk");
+            }
+            file_hash.write(AsBytes(Span{chunk->data.data(), chunk->data.size()}));
+            written += chunk->data.size();
+        }
+    } catch (const std::exception& e) {
+        fclose(out);
+        fs::remove(tmppath);
+        fs::remove(manifest_path);
+        coord.CancelWaits();
+        throw JSONRPCError(RPC_MISC_ERROR, e.what());
+    }
+    fclose(out);
+    coord.CancelWaits();
+
+    if (written != manifest_msg->file_size) {
+        fs::remove(tmppath);
+        fs::remove(manifest_path);
+        throw JSONRPCError(RPC_MISC_ERROR, "Downloaded size does not match manifest file_size");
+    }
+    if (file_hash.GetHash() != manifest_msg->file_hash) {
+        fs::remove(tmppath);
+        fs::remove(manifest_path);
+        throw JSONRPCError(RPC_MISC_ERROR, "Downloaded file hash mismatch");
+    }
+    try {
+        fs::rename(tmppath, path);
+    } catch (const fs::filesystem_error& e) {
+        fs::remove(tmppath);
+        fs::remove(manifest_path);
+        throw JSONRPCError(RPC_MISC_ERROR, e.what());
+    }
+
+    UniValue result{UniValue::VOBJ};
+    result.pushKV("block_hash", manifest_msg->block_hash.ToString());
+    result.pushKV("height", manifest_msg->height);
+    result.pushKV("file_size", written);
+    result.pushKV("chunks_received", static_cast<int64_t>(manifest_msg->chunk_count));
+    result.pushKV("signatures",
+                  static_cast<int64_t>(manifest_msg->manifest.signatures.size()));
+    result.pushKV("peer_id", peer_id);
+    result.pushKV("path", path.utf8string());
+    result.pushKV("manifest_path", manifest_path.utf8string());
     return result;
 },
     };
@@ -4959,6 +5258,9 @@ void RegisterBlockchainRPCCommands(CRPCTable& t)
         {"blockchain", &dumptxoutsetattested},
         {"blockchain", &signutxosnapshotmanifest},
         {"blockchain", &loadtxoutsetattested},
+        {"blockchain", &offerattestedutxosnapshot},
+        {"blockchain", &withdrawattestedutxosnapshot},
+        {"blockchain", &fetchattestedutxosnapshot},
         {"blockchain", &getchainstates},
         {"hidden", &getblockfileinfo},
         {"hidden", &invalidateblock},

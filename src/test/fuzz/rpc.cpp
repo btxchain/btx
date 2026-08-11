@@ -76,6 +76,8 @@ const std::vector<std::string> RPC_COMMANDS_NOT_SAFE_FOR_FUZZING{
     "addpeeraddress", // avoid DNS lookups
     "dumptxoutset",   // avoid writing to disk
     "dumptxoutsetattested", // avoid writing to disk
+    "offerattestedutxosnapshot", // needs on-disk snapshot
+    "fetchattestedutxosnapshot", // P2P + disk
     "dumpwallet", // avoid writing to disk
     "enumeratesigners",
     "echoipc",              // avoid assertion failure (Assertion `"EnsureAnyNodeContext(request.context).init" && check' failed.)

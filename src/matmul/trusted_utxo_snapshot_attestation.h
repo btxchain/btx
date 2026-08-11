@@ -72,9 +72,8 @@ struct UtxoSnapshotSignature {
 };
 
 /**
- * File/RPC payload: one statement plus M unique-signer signatures over it.
- * P2P distribution is intentionally out of scope for v1; this structure is the
- * hook a future GETUTXOATTEST/UTXOATTEST path would reuse.
+ * File/RPC/P2P payload: one statement plus M unique-signer signatures over it.
+ * P2P distribution reuses this structure on the utxomanifest message path.
  */
 struct UtxoSnapshotManifest {
     UtxoSnapshotStatement statement{};

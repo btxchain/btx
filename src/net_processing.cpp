@@ -24,6 +24,8 @@
 #include <netbase.h>
 #include <netmessagemaker.h>
 #include <node/blockstorage.h>
+#include <node/attested_utxo_snapshot.h>
+#include <node/attested_utxo_snapshot_p2p.h>
 #include <node/matmul_rc_admission.h>
 #include <node/matmul_trusted_attestations.h>
 #include <node/matmul_verify_worker.h>
@@ -897,6 +899,10 @@ public:
     void ProcessMessage(CNode& pfrom, const std::string& msg_type, DataStream& vRecv,
                         const std::chrono::microseconds time_received, const std::atomic<bool>& interruptMsgProc) override
         EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_most_recent_block_mutex, !m_headers_presync_mutex, g_msgproc_mutex, !m_tx_download_mutex);
+    std::vector<NodeId> GetAttestedUTXOSnapshotPeers() const override
+        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
+    bool RequestAttestedUTXOManifest(NodeId peer_id, const uint256& block_hash) override;
+    bool RequestAttestedUTXOChunk(NodeId peer_id, const uint256& block_hash, uint32_t chunk_index) override;
     void UpdateLastBlockAnnounceTime(NodeId node, int64_t time_in_seconds) override;
     ServiceFlags GetDesirableServiceFlags(ServiceFlags services) const override;
     int GetNumberOfPeersWithValidatedDownloads() const override EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
@@ -3089,6 +3095,8 @@ void PeerManagerImpl::FinalizeNode(const CNode& node)
     // the peer is already gone.
     DropMatMulCarrierDeferralsForPeer(nodeid);
 
+    node::AttestedUTXOSnapshotP2P::Get().PeerDisconnected(nodeid);
+
     if (m_node_states.empty()) {
         // Do a consistency check after the last peer is removed.
         assert(mapBlocksInFlight.empty());
@@ -4589,6 +4597,39 @@ void PeerManagerImpl::SendPings()
 {
     LOCK(m_peer_mutex);
     for(auto& it : m_peer_map) it.second->m_ping_queued = true;
+}
+
+std::vector<NodeId> PeerManagerImpl::GetAttestedUTXOSnapshotPeers() const
+{
+    LOCK(m_peer_mutex);
+    std::vector<NodeId> out;
+    for (const auto& [id, peer] : m_peer_map) {
+        if ((peer->m_their_services.load() & NODE_ATTESTED_UTXO_SNAPSHOT) ==
+            NODE_ATTESTED_UTXO_SNAPSHOT) {
+            out.push_back(id);
+        }
+    }
+    return out;
+}
+
+bool PeerManagerImpl::RequestAttestedUTXOManifest(NodeId peer_id,
+                                                  const uint256& block_hash)
+{
+    return m_connman.ForNode(peer_id, [&](CNode* node) {
+        MakeAndPushMessage(*node, NetMsgType::GETUTXOMANIF, block_hash);
+        return true;
+    });
+}
+
+bool PeerManagerImpl::RequestAttestedUTXOChunk(NodeId peer_id,
+                                               const uint256& block_hash,
+                                               uint32_t chunk_index)
+{
+    return m_connman.ForNode(peer_id, [&](CNode* node) {
+        MakeAndPushMessage(*node, NetMsgType::GETUTXOCHUNK, block_hash,
+                           chunk_index);
+        return true;
+    });
 }
 
 void PeerManagerImpl::RelayTransaction(const uint256& txid, const uint256& wtxid)
@@ -10508,6 +10549,157 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         // optional; drain any entry retained across the transition. cs_main is
         // not held here.
         ResubmitMatMulCarrierDeferredBlock(pfrom, block_hash);
+        return;
+    }
+
+    if (msg_type == NetMsgType::GETUTXOMANIF) {
+        uint256 block_hash;
+        vRecv >> block_hash;
+        if (!vRecv.empty()) {
+            Misbehaving(*peer, "getutxomanif trailing data");
+            return;
+        }
+        const auto now{GetTime<std::chrono::microseconds>()};
+        if (!node::AttestedUTXOSnapshotP2P::Get().AdmitManifestRequest(
+                pfrom.GetId(), now)) {
+            LogDebug(BCLog::NET,
+                     "Ignoring rate-limited getutxomanif from peer=%d\n",
+                     pfrom.GetId());
+            return;
+        }
+        const auto offer{node::GetAttestedUTXOSnapshotOffer()};
+        if (!offer) {
+            LogDebug(BCLog::NET,
+                     "Ignoring getutxomanif from peer=%d (no local offer)\n",
+                     pfrom.GetId());
+            return;
+        }
+        if (!block_hash.IsNull() && offer->block_hash != block_hash) {
+            LogDebug(BCLog::NET,
+                     "Ignoring getutxomanif %s from peer=%d (offer is %s)\n",
+                     block_hash.ToString(), pfrom.GetId(),
+                     offer->block_hash.ToString());
+            return;
+        }
+        DataStream manifest_size_check{};
+        manifest_size_check << offer->manifest;
+        if (manifest_size_check.size() > node::ATTESTED_UTXO_SNAPSHOT_MAX_MANIFEST_BYTES) {
+            LogWarning("Refusing to serve oversized attested UTXO manifest\n");
+            return;
+        }
+        node::AttestedUTXOSnapshotManifestMsg msg;
+        msg.block_hash = offer->block_hash;
+        msg.height = offer->height;
+        msg.file_size = offer->file_size;
+        msg.chunk_size = offer->chunk_size;
+        msg.chunk_count = offer->chunk_count;
+        msg.file_hash = offer->file_hash;
+        msg.manifest = offer->manifest;
+        MakeAndPushMessage(pfrom, NetMsgType::UTXOMANIFEST, msg);
+        return;
+    }
+
+    if (msg_type == NetMsgType::UTXOMANIFEST) {
+        node::AttestedUTXOSnapshotManifestMsg msg;
+        vRecv >> msg;
+        if (!vRecv.empty()) {
+            Misbehaving(*peer, "utxomanifest trailing data");
+            return;
+        }
+        DataStream size_check{};
+        size_check << msg.manifest;
+        if (size_check.size() > node::ATTESTED_UTXO_SNAPSHOT_MAX_MANIFEST_BYTES) {
+            Misbehaving(*peer, "utxomanifest too large");
+            return;
+        }
+        if (msg.chunk_size == 0 ||
+            msg.chunk_size > node::ATTESTED_UTXO_SNAPSHOT_MAX_CHUNK_SIZE ||
+            msg.chunk_count == 0 || msg.file_size == 0) {
+            Misbehaving(*peer, "utxomanifest invalid geometry");
+            return;
+        }
+        const uint64_t expected_chunks{
+            (msg.file_size + msg.chunk_size - 1) / msg.chunk_size};
+        if (msg.chunk_count != expected_chunks) {
+            Misbehaving(*peer, "utxomanifest chunk_count mismatch");
+            return;
+        }
+        node::AttestedUTXOSnapshotP2P::Get().DeliverManifest(pfrom.GetId(),
+                                                             std::move(msg));
+        return;
+    }
+
+    if (msg_type == NetMsgType::GETUTXOCHUNK) {
+        uint256 block_hash;
+        uint32_t chunk_index{0};
+        vRecv >> block_hash >> chunk_index;
+        if (!vRecv.empty()) {
+            Misbehaving(*peer, "getutxochunk trailing data");
+            return;
+        }
+        const auto now{GetTime<std::chrono::microseconds>()};
+        if (!node::AttestedUTXOSnapshotP2P::Get().AdmitChunkRequest(
+                pfrom.GetId(), now)) {
+            LogDebug(BCLog::NET,
+                     "Ignoring rate/concurrency-limited getutxochunk from peer=%d\n",
+                     pfrom.GetId());
+            return;
+        }
+        // RAII-ish release even on early returns below.
+        struct TransferGuard {
+            NodeId id;
+            ~TransferGuard()
+            {
+                node::AttestedUTXOSnapshotP2P::Get().ReleaseChunkTransfer(id);
+            }
+        } guard{pfrom.GetId()};
+
+        const auto offer{node::GetAttestedUTXOSnapshotOffer()};
+        if (!offer || offer->block_hash != block_hash) {
+            LogDebug(BCLog::NET,
+                     "Ignoring getutxochunk for unknown offer from peer=%d\n",
+                     pfrom.GetId());
+            return;
+        }
+        std::vector<uint8_t> data;
+        uint256 chunk_hash;
+        std::string error;
+        if (!node::ReadAttestedUTXOSnapshotChunk(*offer, chunk_index, data,
+                                                chunk_hash, error)) {
+            LogDebug(BCLog::NET,
+                     "getutxochunk %u failed for peer=%d: %s\n", chunk_index,
+                     pfrom.GetId(), error);
+            return;
+        }
+        node::AttestedUTXOSnapshotChunkMsg msg;
+        msg.block_hash = block_hash;
+        msg.chunk_index = chunk_index;
+        msg.chunk_hash = chunk_hash;
+        msg.data = std::move(data);
+        MakeAndPushMessage(pfrom, NetMsgType::UTXOCHUNK, msg);
+        return;
+    }
+
+    if (msg_type == NetMsgType::UTXOCHUNK) {
+        node::AttestedUTXOSnapshotChunkMsg msg;
+        vRecv >> msg;
+        if (!vRecv.empty()) {
+            Misbehaving(*peer, "utxochunk trailing data");
+            return;
+        }
+        if (msg.data.size() > node::ATTESTED_UTXO_SNAPSHOT_MAX_CHUNK_SIZE) {
+            Misbehaving(*peer, "utxochunk oversized");
+            return;
+        }
+        const uint256 actual{
+            node::AttestedUTXOSnapshotBytesHash(
+                Span{msg.data.data(), msg.data.size()})};
+        if (actual != msg.chunk_hash) {
+            Misbehaving(*peer, "utxochunk integrity failure");
+            return;
+        }
+        node::AttestedUTXOSnapshotP2P::Get().DeliverChunk(pfrom.GetId(),
+                                                          std::move(msg));
         return;
     }
 
