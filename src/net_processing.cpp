@@ -843,8 +843,35 @@ private:
     uint32_t m_work_units{0};
 };
 
+class PeerManagerImpl;
+
+/** Owns one mapBlockSource pin for an async MatMul verify job.
+ *
+ *  Completions should call Release() so the unpin happens promptly under a
+ *  known lock context. The destructor must NEVER take cs_main: shared_ptr
+ *  deleters / _M_dispose can run while another lock is held (observed wedging
+ *  b-mmverify behind a msghand that already owned cs_main). If Release was
+ *  skipped, the destructor only schedules a deferred unpin. */
+class MatMulBlockSourcePin final
+{
+public:
+    MatMulBlockSourcePin(PeerManagerImpl& peer_manager, const uint256& hash)
+        : m_peer_manager(&peer_manager), m_hash(hash) {}
+    MatMulBlockSourcePin(const MatMulBlockSourcePin&) = delete;
+    MatMulBlockSourcePin& operator=(const MatMulBlockSourcePin&) = delete;
+    ~MatMulBlockSourcePin();
+
+    void Release();
+
+private:
+    PeerManagerImpl* m_peer_manager;
+    uint256 m_hash;
+    std::atomic<bool> m_active{true};
+};
+
 class PeerManagerImpl final : public PeerManager
 {
+    friend class MatMulBlockSourcePin;
 public:
     PeerManagerImpl(CConnman& connman, AddrMan& addrman,
                     BanMan* banman, ChainstateManager& chainman,
@@ -1356,8 +1383,19 @@ private:
     std::map<NodeId, std::chrono::microseconds> m_best_known_probe_at GUARDED_BY(cs_main);
     void ClearMatMulRCBodyDeferred(const uint256& hash) NO_THREAD_SAFETY_ANALYSIS;
     void PinMatMulBlockSource(const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    /** Immediate unpin. May be called with or without cs_main (RecursiveMutex).
+     *  Must not run from a destructor / shared_ptr deleter. */
     void UnpinMatMulBlockSource(const uint256& hash) NO_THREAD_SAFETY_ANALYSIS;
+    /** Destructor-safe unpin: enqueue only, never takes cs_main. */
+    void ScheduleMatMulBlockSourceUnpin(const uint256& hash)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_matmul_source_unpin_mutex);
+    /** Apply any destructor-scheduled unpins. Must not hold cs_main. */
+    void DrainMatMulPendingSourceUnpins()
+        EXCLUSIVE_LOCKS_REQUIRED(!m_matmul_source_unpin_mutex, !cs_main);
     void EraseMatMulBlockSourceIfUnpinned(const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    /** Pins whose owning job was destroyed without Release(); drained outside cs_main. */
+    mutable Mutex m_matmul_source_unpin_mutex;
+    std::vector<uint256> m_matmul_pending_source_unpins GUARDED_BY(m_matmul_source_unpin_mutex);
     struct MatMulAddrBudgetState {
         MatMulPeerVerificationBudget budget;
         std::chrono::steady_clock::time_point last_update{};
@@ -1684,7 +1722,8 @@ private:
     void ProcessBlock(CNode& node, const std::shared_ptr<const CBlock>& block, bool force_processing, bool min_pow_checked,
                       std::optional<ScopedMatMulPendingVerification> matmul_slot,
                       std::function<void()> post_process,
-                      MatMulBlockAdmission matmul_admission);
+                      MatMulBlockAdmission matmul_admission)
+        LOCKS_EXCLUDED(cs_main);
 
     /** Admit one complete block to an expensive MatMul verification path.
      *
@@ -1758,7 +1797,8 @@ private:
      *  CConnman::ForNode). */
     void ProcessBlockSync(NodeId nodeid, CNode* node, const std::shared_ptr<const CBlock>& block,
                           bool force_processing, bool min_pow_checked,
-                          const std::function<void()>& post_process);
+                          const std::function<void()>& post_process)
+        LOCKS_EXCLUDED(cs_main);
 
     /** Process compact block txns  */
     void ProcessCompactBlockTxns(CNode& pfrom, Peer& peer, const BlockTransactions& block_transactions)
@@ -2162,11 +2202,14 @@ void PeerManagerImpl::StoreMatMulDeferredBody(const uint256& hash,
 
 void PeerManagerImpl::RetryMatMulDeferredBodies()
 {
+    AssertLockNotHeld(cs_main);
     // Rate-limit: the budget refills on a per-minute window, so retrying more
     // than once a second is pointless work.
     const auto now_s{GetTime<std::chrono::seconds>()};
     if (now_s == m_matmul_deferred_retry_at.load()) return;
     m_matmul_deferred_retry_at.store(now_s);
+
+    DrainMatMulPendingSourceUnpins();
 
     std::shared_ptr<const CBlock> candidate;
     uint256 candidate_hash;
@@ -2271,9 +2314,12 @@ void PeerManagerImpl::PinMatMulBlockSource(const uint256& hash)
 
 void PeerManagerImpl::UnpinMatMulBlockSource(const uint256& hash)
 {
+    // RecursiveMutex: callers may already hold cs_main (FinalizeNode /
+    // DropMatMulCarrierDeferralsForPeer). Must not be invoked from a
+    // destructor — use ScheduleMatMulBlockSourceUnpin there instead.
     LOCK(cs_main);
     const auto pin{m_matmul_block_source_pins.find(hash)};
-    Assume(pin != m_matmul_block_source_pins.end());
+    if (pin == m_matmul_block_source_pins.end()) return;
     Assume(pin->second > 0);
     if (--pin->second == 0) {
         m_matmul_block_source_pins.erase(pin);
@@ -2281,10 +2327,45 @@ void PeerManagerImpl::UnpinMatMulBlockSource(const uint256& hash)
     }
 }
 
+void PeerManagerImpl::ScheduleMatMulBlockSourceUnpin(const uint256& hash)
+{
+    LOCK(m_matmul_source_unpin_mutex);
+    m_matmul_pending_source_unpins.push_back(hash);
+}
+
+void PeerManagerImpl::DrainMatMulPendingSourceUnpins()
+{
+    AssertLockNotHeld(cs_main);
+    std::vector<uint256> pending;
+    {
+        LOCK(m_matmul_source_unpin_mutex);
+        if (m_matmul_pending_source_unpins.empty()) return;
+        pending.swap(m_matmul_pending_source_unpins);
+    }
+    for (const uint256& hash : pending) {
+        UnpinMatMulBlockSource(hash);
+    }
+}
+
 void PeerManagerImpl::EraseMatMulBlockSourceIfUnpinned(const uint256& hash)
 {
     AssertLockHeld(cs_main);
     if (!m_matmul_block_source_pins.contains(hash)) mapBlockSource.erase(hash);
+}
+
+MatMulBlockSourcePin::~MatMulBlockSourcePin()
+{
+    // Never lock cs_main from a deleter / _M_dispose path.
+    if (m_active.exchange(false, std::memory_order_acq_rel)) {
+        m_peer_manager->ScheduleMatMulBlockSourceUnpin(m_hash);
+    }
+}
+
+void MatMulBlockSourcePin::Release()
+{
+    if (m_active.exchange(false, std::memory_order_acq_rel)) {
+        m_peer_manager->UnpinMatMulBlockSource(m_hash);
+    }
 }
 
 void PeerManagerImpl::RemoveBlockRequest(const uint256& hash, std::optional<NodeId> from_peer)
@@ -3432,13 +3513,21 @@ bool PeerManagerImpl::RequireMatMulConsensusPeersForSync() const
     // golden canary (and therefore do not advertise NODE_MATMUL_CONSENSUS).
     // Rotate to consensus-tier peers only after local body validation and the
     // selected MatMul authority have advanced the authenticated active tip.
-    // A header-only first RC child has no authenticated chainwork yet; using a
-    // merely best-known header here could disconnect the ordinary peer before
-    // its body is fetched. cs_main is RecursiveMutex; callers may already hold
-    // it.
-    LOCK(cs_main);
-    const CBlockIndex* tip = m_chainman.ActiveChain().Tip();
-    return tip != nullptr && consensus.IsMatMulRCActive(tip->nHeight);
+    //
+    // Prefer the lock-free tip-height cache maintained by SetBestBlock /
+    // ActiveTipChange. ThreadOpenConnections calls this via
+    // HasAllDesirableServiceFlags on the outbound-connect hot path; taking
+    // cs_main there freezes connects whenever msghand holds cs_main across
+    // ProcessNewBlock (macpro2 deadlock secondary damage). Fall back to a
+    // brief cs_main read only before the first tip notification (startup /
+    // tests that never RegisterValidationInterface the peerman).
+    int tip_height{m_best_height.load(std::memory_order_relaxed)};
+    if (tip_height < 0) {
+        LOCK(cs_main);
+        const CBlockIndex* tip = m_chainman.ActiveChain().Tip();
+        tip_height = tip != nullptr ? tip->nHeight : -1;
+    }
+    return tip_height >= 0 && consensus.IsMatMulRCActive(tip_height);
 }
 
 bool PeerManagerImpl::IsPeerEligibleForMatMulSync(
@@ -4264,6 +4353,13 @@ void PeerManagerImpl::ActiveTipChange(const CBlockIndex& new_tip, bool is_ibd)
     // m_tx_download_mutex waits on the mempool mutex.
     AssertLockNotHeld(m_mempool.cs);
     AssertLockNotHeld(m_tx_download_mutex);
+
+    // ActiveTipChange is delivered synchronously from ActivateBestChain.
+    // UpdatedBlockTip is only enqueued onto the validation queue, so using it
+    // alone for m_best_height would leave RequireMatMulConsensusPeersForSync
+    // (and outbound desirable-service decisions) reading a stale height until
+    // the scheduler drains — including across the RC activation boundary.
+    SetBestBlock(new_tip.nHeight, std::chrono::seconds{new_tip.GetBlockTime()});
 
     if (!is_ibd) {
         LOCK(m_tx_download_mutex);
@@ -6920,6 +7016,9 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                                    std::function<void()> post_process,
                                    MatMulBlockAdmission matmul_admission)
 {
+    // ProcessNewBlock / ProcessNewBlockHeaders / ActivateBestChain all call
+    // SyncWithValidationInterfaceQueue and MUST NOT run under cs_main.
+    AssertLockNotHeld(cs_main);
     const uint256 hash{block->GetHash()};
     MarkMatMulAuthenticatedRelayBodyReceived(hash);
     MatMulRCVerificationBudgetDebit body_budget_debit;
@@ -7216,17 +7315,13 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                 // if a same-hash mutated or header-only delivery is handled
                 // before the worker completes. The shared owner also releases
                 // correctly when Stop() destroys a queued job without invoking
-                // its completion.
+                // its completion — via MatMulBlockSourcePin's lock-free
+                // destructor schedule (never takes cs_main from _M_dispose).
                 {
                     LOCK(cs_main);
                     PinMatMulBlockSource(hash);
                 }
-                auto source_pin = std::shared_ptr<uint256>(
-                    new uint256(hash),
-                    [this](uint256* pinned_hash) {
-                        UnpinMatMulBlockSource(*pinned_hash);
-                        delete pinned_hash;
-                    });
+                auto source_pin = std::make_shared<MatMulBlockSourcePin>(*this, hash);
                 // std::function requires a copyable callable: box the move-only
                 // slot in a shared_ptr. It is released when the last closure
                 // copy is destroyed — i.e. after recompute AND re-entry, or on
@@ -7255,6 +7350,10 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                                   CompetingBranch;
                     }
                 }
+                // Both callbacks must share source_pin by copy. An init-capture
+                // move into completion would leave retryable_failure with an
+                // empty shared_ptr (observed: Unpin then only ran from the
+                // completion object's destructor / _M_dispose path).
                 node::MatMulVerifyWorker::Job job{
                     .block = block,
                     .height = encdr->height,
@@ -7264,8 +7363,7 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                     [this, nodeid, block, hash, force_processing,
                      min_pow_checked, slot,
                      authority_height = encdr->height,
-                     source_pin = std::move(source_pin),
-                     post = post_process](bool encdr_ok) mutable {
+                     source_pin, post = post_process](bool encdr_ok) mutable {
                         ClearMatMulRCBodyDeferred(hash);
                         // The verdict reaches validation via the ENC-DR verdict
                         // memo consulted inside ContextualCheckBlock; re-enter
@@ -7289,6 +7387,7 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                         PinMatMulEncDrVerdict(hash, encdr_ok);
                         ProcessBlockSync(nodeid, /*node=*/nullptr, block, force_processing, min_pow_checked, post);
                         UnpinMatMulEncDrVerdict(hash);
+                        source_pin->Release();
                         source_pin.reset();
                         UnmarkMatMulAsyncVerification(hash);
                     },
@@ -7302,6 +7401,7 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                         // body may be requested and retried on a healthy
                         // provider.
                         if (post) post();
+                        source_pin->Release();
                         source_pin.reset();
                         UnmarkMatMulAsyncVerification(hash);
                     },
@@ -7354,8 +7454,15 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                         body_budget_debit);
                     rollback_body_ticket();
                 }
-                UnmarkMatMulAsyncVerification(hash);
-                if (post_process) post_process();
+                // Prefer the job's retryable cleanup so the source pin is
+                // Released under this known lock context rather than deferred
+                // from ~MatMulBlockSourcePin when `job` is destroyed.
+                if (job.retryable_failure) {
+                    job.retryable_failure();
+                } else {
+                    UnmarkMatMulAsyncVerification(hash);
+                    if (post_process) post_process();
+                }
                 return;
             }
             // Queue/slot saturated: NEVER fall through to ProcessBlockSync for
@@ -7754,6 +7861,12 @@ void PeerManagerImpl::ProcessBlockSync(NodeId nodeid, CNode* node, const std::sh
                                        bool force_processing, bool min_pow_checked,
                                        const std::function<void()>& post_process)
 {
+    // Invariant: ProcessNewBlock -> ActivateBestChain ->
+    // SyncWithValidationInterfaceQueue. Holding cs_main here deadlocks against
+    // the scheduler draining BlockConnected callbacks that need cs_main
+    // (macpro2 height 186028, 2026-08-11).
+    AssertLockNotHeld(cs_main);
+    DrainMatMulPendingSourceUnpins();
     bool new_block{false};
     m_chainman.ProcessNewBlock(block, force_processing, min_pow_checked, &new_block);
     bool exact_replay_authenticated{false};
@@ -12657,6 +12770,10 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
     // cs_main stalls every other message-processing thread. Two independent
     // reviews flagged the previous placement as the same hazard class as the
     // lock-order deadlock this routine already caused once.
+    //
+    // Also drains destructor-scheduled mapBlockSource unpins (MatMul async
+    // verify jobs) so those never take cs_main from a shared_ptr deleter.
+    DrainMatMulPendingSourceUnpins();
     RetryMatMulDeferredBodies();
     MaybeSendFeefilter(*pto, *peer, current_time);
     return true;

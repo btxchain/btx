@@ -14,7 +14,9 @@
 #include <validation.h>
 
 #include <algorithm>
+#include <atomic>
 #include <limits>
+#include <thread>
 
 #include <boost/test/unit_test.hpp>
 
@@ -106,6 +108,43 @@ BOOST_AUTO_TEST_CASE(connections_desirable_service_flags)
     BOOST_CHECK(peerman->GetDesirableServiceFlags(peer_flags) == desirable_full);
 }
 
+// Regression: HasAllDesirableServiceFlags / GetDesirableServiceFlags must not
+// take cs_main. ThreadOpenConnections calls them on the outbound-connect hot
+// path; if they block on cs_main while msghand holds it across
+// ProcessNewBlock/SyncWithValidationInterfaceQueue, the node stops opening
+// connections (macpro2 deadlock secondary damage, 2026-08-11).
+BOOST_AUTO_TEST_CASE(desirable_flags_do_not_block_on_cs_main)
+{
+    std::unique_ptr<PeerManager> peerman = PeerManager::make(
+        *m_node.connman, *m_node.addrman, nullptr, *m_node.chainman,
+        *m_node.mempool, *m_node.warnings, {});
+    auto tip = WITH_LOCK(::cs_main, return m_node.chainman->ActiveChain().Tip());
+    peerman->SetBestBlock(tip->nHeight, std::chrono::seconds{tip->GetBlockTime()});
+
+    std::atomic<bool> holder_ready{false};
+    std::atomic<bool> release_holder{false};
+    std::thread cs_main_holder([&] {
+        LOCK(::cs_main);
+        holder_ready.store(true, std::memory_order_release);
+        while (!release_holder.load(std::memory_order_acquire)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        }
+    });
+    while (!holder_ready.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+    }
+
+    // Must complete while another thread holds cs_main. A regression that
+    // reintroduces LOCK(cs_main) here deadlocks this test.
+    const ServiceFlags peer_flags{NODE_WITNESS | NODE_NETWORK};
+    const auto desirable = peerman->GetDesirableServiceFlags(peer_flags);
+    BOOST_CHECK((desirable & NODE_NETWORK) != 0);
+    BOOST_CHECK(peerman->HasAllDesirableServiceFlags(desirable));
+
+    release_holder.store(true, std::memory_order_release);
+    cs_main_holder.join();
+}
+
 BOOST_AUTO_TEST_CASE(matmul_consensus_tier_desirable_service_flags)
 {
     std::unique_ptr<PeerManager> peerman = PeerManager::make(*m_node.connman, *m_node.addrman, nullptr, *m_node.chainman, *m_node.mempool, *m_node.warnings, {});
@@ -118,8 +157,10 @@ BOOST_AUTO_TEST_CASE(matmul_consensus_tier_desirable_service_flags)
     // still treat ordinary NODE_NETWORK peers as desirable. Otherwise two
     // self-qualified CUDA nodes with an empty production golden manifest can
     // never sync the pre-activation parent chain.
+    auto tip = WITH_LOCK(::cs_main, return m_node.chainman->ActiveChain().Tip());
+    peerman->SetBestBlock(tip->nHeight, std::chrono::seconds{tip->GetBlockTime()});
     BOOST_REQUIRE(!m_node.chainman->GetParams().GetConsensus().IsMatMulRCActive(
-        WITH_LOCK(::cs_main, return m_node.chainman->ActiveChain().Height())));
+        tip->nHeight));
     BOOST_CHECK(peerman->GetDesirableServiceFlags(base) == base);
     BOOST_CHECK(peerman->HasAllDesirableServiceFlags(base));
     BOOST_CHECK(peerman->HasAllDesirableServiceFlags(consensus_peer));
@@ -143,8 +184,7 @@ BOOST_AUTO_TEST_CASE(matmul_consensus_tier_desirable_service_flags)
     } restore{consensus, saved_rc, saved_v4};
     consensus.nMatMulV4Height = 0;
     consensus.nMatMulRCHeight = 0;
-    BOOST_REQUIRE(consensus.IsMatMulRCActive(
-        WITH_LOCK(::cs_main, return m_node.chainman->ActiveChain().Height())));
+    BOOST_REQUIRE(consensus.IsMatMulRCActive(tip->nHeight));
     BOOST_CHECK(peerman->GetDesirableServiceFlags(base) ==
                 ServiceFlags(base | NODE_MATMUL_CONSENSUS));
     BOOST_CHECK(peerman->HasAllDesirableServiceFlags(consensus_peer));
