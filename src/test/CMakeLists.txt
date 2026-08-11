@@ -76,6 +76,7 @@ add_executable(test_btx
   matmul_trusted_mirror_tests.cpp
   matmul_rc_admission_tests.cpp
   trusted_exact_replay_attestation_tests.cpp
+  trusted_utxo_snapshot_attestation_tests.cpp
   matmul_accelerated_solver_tests.cpp
   matmul_backend_capabilities_tests.cpp
   matmul_metal_tests.cpp
