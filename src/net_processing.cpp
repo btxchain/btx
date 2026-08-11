@@ -260,6 +260,19 @@ static_assert(INVENTORY_BROADCAST_MAX >= INVENTORY_BROADCAST_TARGET, "INVENTORY_
 static_assert(INVENTORY_BROADCAST_MAX <= node::MAX_PEER_TX_ANNOUNCEMENTS, "INVENTORY_BROADCAST_MAX too high");
 /** Hard cap on queued tx announcements per peer to bound memory usage. */
 static constexpr size_t MAX_TX_INVENTORY_TO_SEND = node::MAX_PEER_TX_ANNOUNCEMENTS;
+/** Bounds on the deferred-body store. A body held back for verification budget
+ *  is KEPT so it can be validated when the window refills, instead of being
+ *  discarded and re-downloaded (which is what turned budget pressure into a
+ *  download livelock). Bounded by both count and total serialized bytes so a
+ *  peer cannot use it as a memory amplifier. */
+static constexpr size_t MATMUL_DEFERRED_BODY_MAX_COUNT{64};
+static constexpr size_t MATMUL_DEFERRED_BODY_MAX_BYTES{128 * 1024 * 1024};
+/** A stored body older than this is dropped; it will be re-downloaded if still
+ *  wanted. Prevents the store pinning bodies for a chain we abandoned. */
+static constexpr auto MATMUL_DEFERRED_BODY_MAX_AGE{10min};
+/** Upper bound on the catch-up multiplier applied to the global verify budget. */
+static constexpr uint32_t MATMUL_RC_CATCHUP_BUDGET_MULTIPLIER_MAX{64};
+
 /** Below this many NODE_MATMUL_CONSENSUS peers, the consensus tier stops
  *  restricting header sync and block download: with too few eligible peers the
  *  restriction cannot be satisfied and merely deadlocks the node. */
@@ -1309,6 +1322,31 @@ private:
     std::atomic<int> m_matmul_eligible_peer_cache{0};
     std::atomic<std::chrono::seconds> m_matmul_eligible_peer_cached_at{0s};
     int MatMulEligiblePeerCount() EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
+    /** Highest block height advertised by any connected peer, cached ~1s.
+     *  Used to detect catch-up WITHOUT depending on our own m_best_header,
+     *  which cannot advance while verification is budget-starved. */
+    std::atomic<int> m_best_peer_height_cache{0};
+    std::atomic<std::chrono::seconds> m_best_peer_height_cached_at{0s};
+    int BestPeerAdvertisedHeight() EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
+    /** Bodies held back by the MatMul verification budget, kept for re-validation
+     *  when the window refills rather than discarded and re-downloaded. */
+    struct DeferredBody {
+        std::shared_ptr<const CBlock> block;
+        std::chrono::steady_clock::time_point stored_at;
+        size_t bytes{0};
+    };
+    mutable Mutex m_matmul_deferred_body_mutex;
+    std::map<uint256, DeferredBody> m_matmul_deferred_body_store
+        GUARDED_BY(m_matmul_deferred_body_mutex);
+    size_t m_matmul_deferred_body_bytes GUARDED_BY(m_matmul_deferred_body_mutex){0};
+    void StoreMatMulDeferredBody(const uint256& hash,
+                                 const std::shared_ptr<const CBlock>& block)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_matmul_deferred_body_mutex);
+    /** Re-submit stored bodies once the budget can absorb them. */
+    void RetryMatMulDeferredBodies()
+        EXCLUSIVE_LOCKS_REQUIRED(!m_matmul_deferred_body_mutex, !cs_main);
+    std::atomic<std::chrono::seconds> m_matmul_deferred_retry_at{0s};
     void ClearMatMulRCBodyDeferred(const uint256& hash) NO_THREAD_SAFETY_ANALYSIS;
     void PinMatMulBlockSource(const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     void UnpinMatMulBlockSource(const uint256& hash) NO_THREAD_SAFETY_ANALYSIS;
@@ -2067,6 +2105,106 @@ void PeerManagerImpl::MarkMatMulRCBodyDeferred(const uint256& hash, int64_t peer
     LOCK(m_matmul_rc_deferred_mutex);
     (void)m_matmul_rc_deferred_bodies.Mark(
         hash, peer_id, std::chrono::steady_clock::now());
+}
+
+void PeerManagerImpl::StoreMatMulDeferredBody(const uint256& hash,
+                                              const std::shared_ptr<const CBlock>& block)
+{
+    if (!block) return;
+    const size_t bytes{::GetSerializeSize(TX_WITH_WITNESS(*block))};
+    if (bytes > MATMUL_DEFERRED_BODY_MAX_BYTES) return;  // never storable
+    LOCK(m_matmul_deferred_body_mutex);
+    const auto now{std::chrono::steady_clock::now()};
+    // Age out first.
+    for (auto it = m_matmul_deferred_body_store.begin();
+         it != m_matmul_deferred_body_store.end();) {
+        if (now - it->second.stored_at > MATMUL_DEFERRED_BODY_MAX_AGE) {
+            m_matmul_deferred_body_bytes -= it->second.bytes;
+            it = m_matmul_deferred_body_store.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    if (m_matmul_deferred_body_store.count(hash)) return;
+    // Evict oldest until this one fits.
+    while (!m_matmul_deferred_body_store.empty() &&
+           (m_matmul_deferred_body_store.size() >= MATMUL_DEFERRED_BODY_MAX_COUNT ||
+            m_matmul_deferred_body_bytes + bytes > MATMUL_DEFERRED_BODY_MAX_BYTES)) {
+        auto oldest{m_matmul_deferred_body_store.begin()};
+        for (auto it = m_matmul_deferred_body_store.begin();
+             it != m_matmul_deferred_body_store.end(); ++it) {
+            if (it->second.stored_at < oldest->second.stored_at) oldest = it;
+        }
+        m_matmul_deferred_body_bytes -= oldest->second.bytes;
+        m_matmul_deferred_body_store.erase(oldest);
+    }
+    m_matmul_deferred_body_store.emplace(hash, DeferredBody{block, now, bytes});
+    m_matmul_deferred_body_bytes += bytes;
+    LogDebug(BCLog::NET,
+             "Stored budget-deferred body %s for re-validation (%u held, %u MiB)\n",
+             hash.ToString(),
+             static_cast<unsigned>(m_matmul_deferred_body_store.size()),
+             static_cast<unsigned>(m_matmul_deferred_body_bytes >> 20));
+}
+
+void PeerManagerImpl::RetryMatMulDeferredBodies()
+{
+    // Rate-limit: the budget refills on a per-minute window, so retrying more
+    // than once a second is pointless work.
+    const auto now_s{GetTime<std::chrono::seconds>()};
+    if (now_s == m_matmul_deferred_retry_at.load()) return;
+    m_matmul_deferred_retry_at.store(now_s);
+
+    std::shared_ptr<const CBlock> candidate;
+    uint256 candidate_hash;
+    {
+        LOCK(m_matmul_deferred_body_mutex);
+        if (m_matmul_deferred_body_store.empty()) return;
+        // Prefer the body that extends our tip: it is the one unblocking the
+        // chain. Otherwise take the oldest.
+        const uint256 wanted{WITH_LOCK(cs_main, return m_chainman.ActiveChain().Tip()
+                                                     ? m_chainman.ActiveChain().Tip()->GetBlockHash()
+                                                     : uint256{})};
+        auto pick{m_matmul_deferred_body_store.end()};
+        for (auto it = m_matmul_deferred_body_store.begin();
+             it != m_matmul_deferred_body_store.end(); ++it) {
+            if (it->second.block && it->second.block->hashPrevBlock == wanted) { pick = it; break; }
+            if (pick == m_matmul_deferred_body_store.end() ||
+                it->second.stored_at < pick->second.stored_at) {
+                pick = it;
+            }
+        }
+        if (pick == m_matmul_deferred_body_store.end()) return;
+        candidate = pick->second.block;
+        candidate_hash = pick->first;
+        m_matmul_deferred_body_bytes -= pick->second.bytes;
+        m_matmul_deferred_body_store.erase(pick);
+    }
+    if (!candidate) return;
+    LogDebug(BCLog::NET, "Re-validating budget-deferred body %s\n",
+             candidate_hash.ToString());
+    // No originating peer: this is our own retry, so nothing is charged to a
+    // peer budget and no peer can be punished for our scheduling.
+    ProcessBlockSync(/*nodeid=*/-1, /*node=*/nullptr, candidate,
+                     /*force_processing=*/false, /*min_pow_checked=*/true,
+                     /*post_process=*/{});
+}
+
+int PeerManagerImpl::BestPeerAdvertisedHeight()
+{
+    const auto now{GetTime<std::chrono::seconds>()};
+    if (now == m_best_peer_height_cached_at.load()) {
+        return m_best_peer_height_cache.load();
+    }
+    int best{0};
+    for (const auto& [id, st] : m_node_states) {
+        if (st.pindexBestKnownBlock != nullptr) {
+            best = std::max(best, st.pindexBestKnownBlock->nHeight);
+        }
+    }
+    m_best_peer_height_cache.store(best);
+    m_best_peer_height_cached_at.store(now);
+    return best;
 }
 
 int PeerManagerImpl::MatMulEligiblePeerCount()
@@ -3562,20 +3700,40 @@ bool PeerManagerImpl::ConsumeMatMulVerificationBudgetForPeer(
             // buy extra verification, they can only stop being the reason we
             // are blind to everyone else.
             if (global_budget > 0) {
-                const int best_header_height{
-                    m_chainman.m_best_header != nullptr
-                        ? m_chainman.m_best_header->nHeight
-                        : 0};
+                // Detect catch-up from what PEERS advertise, not from our own
+                // m_best_header.
+                //
+                // Keying this off m_best_header made the allowance inert
+                // exactly when it was needed: a budget-starved node cannot
+                // validate, so m_best_header never advances past the tip, so
+                // best_header_ahead stays 0, so the multiplier never engages,
+                // so the budget stays starved. Measured on mainnet 2026-08-11
+                // while 194 blocks behind: best_header_ahead=0 while
+                // peer_best_ahead=60, with 346 budget-exhaustion events in 75s.
+                // Peer-advertised height is independent of our own stuck
+                // validation and breaks that circularity.
                 const int active_height{m_chainman.ActiveHeight()};
+                const int best_header_height{
+                    std::max(m_chainman.m_best_header != nullptr
+                                 ? m_chainman.m_best_header->nHeight
+                                 : 0,
+                             BestPeerAdvertisedHeight())};
                 if (best_header_height - active_height >
                     MATMUL_RC_CATCHUP_DEPTH_THRESHOLD) {
+                    // Scale with the size of the backlog we are actually
+                    // following, not a flat factor: a node 200 blocks behind
+                    // needs proportionally more verification headroom than one
+                    // 10 behind. Bounded so this can never become unlimited.
+                    const int behind{best_header_height - active_height};
+                    const uint32_t scale{std::clamp<uint32_t>(
+                        static_cast<uint32_t>(behind /
+                                              MATMUL_RC_CATCHUP_DEPTH_THRESHOLD),
+                        MATMUL_RC_CATCHUP_BUDGET_MULTIPLIER,
+                        MATMUL_RC_CATCHUP_BUDGET_MULTIPLIER_MAX)};
                     global_budget =
-                        (global_budget >
-                         std::numeric_limits<uint32_t>::max() /
-                             MATMUL_RC_CATCHUP_BUDGET_MULTIPLIER)
+                        (global_budget > std::numeric_limits<uint32_t>::max() / scale)
                             ? std::numeric_limits<uint32_t>::max()
-                            : global_budget *
-                                  MATMUL_RC_CATCHUP_BUDGET_MULTIPLIER;
+                            : global_budget * scale;
                 }
             }
             if (!ConsumeGlobalMatMulRCBudget(global_budget, verification_count, now)) {
@@ -6836,8 +6994,13 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
             // Hold this block off the download scheduler until the per-minute
             // budget window refills, instead of re-requesting it immediately
             // and being deferred again on arrival.
-            LOCK(cs_main);
-            NoteMatMulBudgetDeferred(hash);
+            {
+                LOCK(cs_main);
+                NoteMatMulBudgetDeferred(hash);
+            }
+            // Keep the body. It was downloaded and is presumed good; discarding
+            // it only forces a re-download that will be deferred again.
+            StoreMatMulDeferredBody(hash, block);
             LogDebug(BCLog::NET,
                      "Deferring block from peer=%d for %ds: global MatMul verification budget exhausted\n",
                      node.GetId(),
@@ -12279,6 +12442,8 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
         // Message: getdata (blocks)
         //
         MaybeRecoverStalledBlockFetch(current_time);
+        // Re-validate anything the verification budget held back earlier.
+        RetryMatMulDeferredBodies();
         std::vector<CInv> vGetData;
         const bool can_request_blocks_from_peer{current_time >= state.m_block_download_paused_until};
         const bool should_request_blocks_from_peer{
@@ -12305,14 +12470,19 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                     : 0};
             if (best_header_ahead >= BLOCK_FETCH_STALL_HEADERS_AHEAD ||
                 peer_ahead >= BLOCK_FETCH_STALL_HEADERS_AHEAD) {
+                // NOTE: eligibility is no longer a gate (the tier is a
+                // preference), so it must not be reported as the blocking
+                // reason -- doing so mislabels every skip on a node with
+                // ineligible peers and sent one investigation down the wrong
+                // path. Report it only as a trailing hint.
                 const char* reason = !CanServeBlocks(*peer) ? "cannot_serve_blocks"
                     : !can_request_blocks_from_peer ? "peer_download_paused"
-                    : !consensus_ok ? "matmul_ineligible"
                     : (m_chainman.IsInitialBlockDownload() &&
                        !(sync_blocks_and_headers_from_peer && !IsLimitedPeer(*peer)))
                           ? "ibd_not_selected_sync_peer"
                     : state.vBlocksInFlight.size() >= static_cast<size_t>(MAX_BLOCKS_IN_TRANSIT_PER_PEER)
                           ? "peer_inflight_slots_full"
+                    : !consensus_ok ? "not_matmul_preferred"
                     : "should_request_false";
                 LogDebug(BCLog::NET,
                          "Block fetch not requesting peer=%d reason=%s tip=%d "
