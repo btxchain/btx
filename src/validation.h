@@ -1065,6 +1065,11 @@ private:
     //! prevent code from using the pointer while deleting it.
     std::unique_ptr<Chainstate> m_snapshot_chainstate GUARDED_BY(::cs_main);
 
+    //! Operator-quorum AssumeutxoData for an attested-fast-forward snapshot.
+    //! When set, it replaces chainparams pins for load-time hash checks and
+    //! for MaybeCompleteSnapshotValidation after restart.
+    std::optional<AssumeutxoData> m_attested_assumeutxo GUARDED_BY(::cs_main);
+
     //! Points to either the ibd or snapshot chainstate; indicates our
     //! most-work chain.
     Chainstate* m_active_chainstate GUARDED_BY(::cs_main) {nullptr};
@@ -1087,7 +1092,8 @@ private:
     [[nodiscard]] util::Result<void> PopulateAndValidateSnapshot(
         Chainstate& snapshot_chainstate,
         AutoFile& coins_file,
-        const node::SnapshotMetadata& metadata);
+        const node::SnapshotMetadata& metadata,
+        const AssumeutxoData* attested_au);
 
     /**
      * If a block header hasn't already been seen, call CheckBlockHeader on it, ensure
@@ -1359,13 +1365,22 @@ public:
     //! - Initialize an unused Chainstate.
     //! - Load its `CoinsViews` contents from `coins_file`.
     //! - Verify that the hash of the resulting coinsdb matches the expected hash
-    //!   per assumeutxo chain parameters.
+    //!   per assumeutxo chain parameters, or per attested_au when provided.
     //! - Wait for our headers chain to include the base block of the snapshot.
     //! - "Fast forward" the tip of the new chainstate to the base of the snapshot.
     //! - Move the new chainstate to `m_snapshot_chainstate` and make it our
     //!   ChainstateActive().
+    //!
+    //! When attested_au is set, the chainparams pin is replaced by that
+    //! operator-quorum AssumeutxoData. Callers must have already authenticated
+    //! attested_au (trusted-mirror M-of-N). Consensus nodes must not use this
+    //! path. The snapshot base must be an ancestor of the current best-header
+    //! chain; the compiled-in assumeutxo work escape hatch is not available.
     [[nodiscard]] util::Result<CBlockIndex*> ActivateSnapshot(
-        AutoFile& coins_file, const node::SnapshotMetadata& metadata, bool in_memory);
+        AutoFile& coins_file,
+        const node::SnapshotMetadata& metadata,
+        bool in_memory,
+        const std::optional<AssumeutxoData>& attested_au = std::nullopt);
 
     //! Once the background validation chainstate has reached the height which
     //! is the base of the UTXO snapshot in use, compare its coins to ensure

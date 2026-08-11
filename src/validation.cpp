@@ -12691,6 +12691,7 @@ Chainstate& ChainstateManager::InitializeChainstate(CTxMemPool* mempool)
 
     if (is_snapshot) {
         fs::path base_blockhash_path = db_path / node::SNAPSHOT_BLOCKHASH_FILENAME;
+        fs::path attested_path = db_path / node::SNAPSHOT_ATTESTED_ASSUMEUTXO_FILENAME;
 
         try {
             bool existed = fs::remove(base_blockhash_path);
@@ -12701,6 +12702,12 @@ Chainstate& ChainstateManager::InitializeChainstate(CTxMemPool* mempool)
         } catch (const fs::filesystem_error& e) {
             LogPrintf("[snapshot] failed to remove file %s: %s\n",
                     fs::PathToString(base_blockhash_path), fsbridge::get_filesystem_error_message(e));
+        }
+        try {
+            fs::remove(attested_path);
+        } catch (const fs::filesystem_error& e) {
+            LogPrintf("[snapshot] failed to remove file %s: %s\n",
+                    fs::PathToString(attested_path), fsbridge::get_filesystem_error_message(e));
         }
     }
 
@@ -12744,7 +12751,8 @@ bool IsAssumeUtxoSnapshotHeaderCompatible(
 util::Result<CBlockIndex*> ChainstateManager::ActivateSnapshot(
         AutoFile& coins_file,
         const SnapshotMetadata& metadata,
-        bool in_memory)
+        bool in_memory,
+        const std::optional<AssumeutxoData>& attested_au)
 {
     uint256 base_blockhash = metadata.m_base_blockhash;
     std::optional<ShieldedSnapshotSectionHeader> shielded_snapshot_section;
@@ -12770,44 +12778,86 @@ util::Result<CBlockIndex*> ChainstateManager::ActivateSnapshot(
 
         snapshot_start_block = m_blockman.LookupBlockIndex(base_blockhash);
 
-        const bool known_assumeutxo_hash{GetParams().AssumeutxoForBlockhash(base_blockhash).has_value()};
-        if (!known_assumeutxo_hash) {
-            const bool allow_mockable_height_match{
-                GetParams().IsMockableChain() &&
-                snapshot_start_block &&
-                GetParams().AssumeutxoForHeight(snapshot_start_block->nHeight).has_value()};
+        const bool using_attested_au{attested_au.has_value()};
+        if (using_attested_au) {
+            if (attested_au->blockhash != base_blockhash) {
+                return util::Error{Untranslated("Attested assumeutxo blockhash does not match snapshot metadata")};
+            }
+            if (attested_au->shielded_state_commitment.IsNull()) {
+                return util::Error{Untranslated("Attested assumeutxo must include a shielded state commitment")};
+            }
+            if (!snapshot_start_block) {
+                return util::Error{Untranslated(strprintf(
+                    "The base block header (%s) must appear in the headers chain. Make sure all headers are syncing, and call loadtxoutsetattested again",
+                    base_blockhash.ToString()))};
+            }
+            if (attested_au->height != snapshot_start_block->nHeight) {
+                return util::Error{Untranslated("Attested assumeutxo height does not match the base block header")};
+            }
+            if (attested_au->m_chain_tx_count == 0 && snapshot_start_block->nHeight > 0) {
+                return util::Error{Untranslated("Attested assumeutxo m_chain_tx_count must be non-zero above genesis")};
+            }
+            // Conservative LionHeart-era policy: attested fast-forward may only
+            // land on the chain we already consider best-header. Never use the
+            // compiled-in assumeutxo "more work than authenticated headers"
+            // escape hatch here — that would turn a stolen signer key into a
+            // silent branch-switch lever.
+            if (!m_best_header ||
+                m_best_header->nHeight < snapshot_start_block->nHeight ||
+                m_best_header->GetAncestor(snapshot_start_block->nHeight) !=
+                    snapshot_start_block) {
+                return util::Error{Untranslated(
+                    "Attested snapshot base must be an ancestor of the current best-header chain")};
+            }
+            if (IsOnParkedReorgBranch(snapshot_start_block)) {
+                return util::Error{Untranslated(
+                    "Attested snapshot base is on a parked reorg branch")};
+            }
+        } else {
+            const bool known_assumeutxo_hash{GetParams().AssumeutxoForBlockhash(base_blockhash).has_value()};
+            if (!known_assumeutxo_hash) {
+                const bool allow_mockable_height_match{
+                    GetParams().IsMockableChain() &&
+                    snapshot_start_block &&
+                    GetParams().AssumeutxoForHeight(snapshot_start_block->nHeight).has_value()};
 
-            if (!allow_mockable_height_match) {
-                auto available_heights = GetParams().GetAvailableSnapshotHeights();
-                std::string heights_formatted = util::Join(available_heights, ", ", [&](const auto& i) { return util::ToString(i); });
-                return util::Error{Untranslated(strprintf("assumeutxo block hash in snapshot metadata not recognized (hash: %s). The following snapshot heights are available: %s",
+                if (!allow_mockable_height_match) {
+                    auto available_heights = GetParams().GetAvailableSnapshotHeights();
+                    std::string heights_formatted = util::Join(available_heights, ", ", [&](const auto& i) { return util::ToString(i); });
+                    return util::Error{Untranslated(strprintf("assumeutxo block hash in snapshot metadata not recognized (hash: %s). The following snapshot heights are available: %s",
+                        base_blockhash.ToString(),
+                        heights_formatted))};
+                }
+
+                LogPrintf("[snapshot] mockable chain accepting assumeutxo base hash %s at height %d via height-only match\n",
                     base_blockhash.ToString(),
-                    heights_formatted))};
+                    snapshot_start_block->nHeight);
             }
 
-            LogPrintf("[snapshot] mockable chain accepting assumeutxo base hash %s at height %d via height-only match\n",
-                base_blockhash.ToString(),
-                snapshot_start_block->nHeight);
-        }
+            if (!snapshot_start_block) {
+                return util::Error{Untranslated(strprintf("The base block header (%s) must appear in the headers chain. Make sure all headers are syncing, and call loadtxoutset again",
+                              base_blockhash.ToString()))};
+            }
 
-        if (!snapshot_start_block) {
-            return util::Error{Untranslated(strprintf("The base block header (%s) must appear in the headers chain. Make sure all headers are syncing, and call loadtxoutset again",
-                          base_blockhash.ToString()))};
+            bool start_block_invalid = snapshot_start_block->nStatus & BLOCK_FAILED_MASK;
+            if (start_block_invalid) {
+                return util::Error{Untranslated(strprintf("The base block header (%s) is part of an invalid chain", base_blockhash.ToString()))};
+            }
+
+            // A compiled-in base hash pins the production header, ancestry, nBits,
+            // and claimed chainwork. Compare it with authenticated work so a
+            // divergent header-only MatMul suffix cannot deny snapshot activation.
+            // Height-only matching remains confined to mockable test chains.
+            if (!IsAssumeUtxoSnapshotHeaderCompatible(
+                    m_best_header, snapshot_start_block,
+                    known_assumeutxo_hash)) {
+                return util::Error{Untranslated("A forked headers-chain with more work than the chain with the snapshot base block header exists. Please proceed to sync without AssumeUtxo.")};
+            }
         }
 
         bool start_block_invalid = snapshot_start_block->nStatus & BLOCK_FAILED_MASK;
         if (start_block_invalid) {
             return util::Error{Untranslated(strprintf("The base block header (%s) is part of an invalid chain", base_blockhash.ToString()))};
-        }
-
-        // A compiled-in base hash pins the production header, ancestry, nBits,
-        // and claimed chainwork. Compare it with authenticated work so a
-        // divergent header-only MatMul suffix cannot deny snapshot activation.
-        // Height-only matching remains confined to mockable test chains.
-        if (!IsAssumeUtxoSnapshotHeaderCompatible(
-                m_best_header, snapshot_start_block,
-                known_assumeutxo_hash)) {
-            return util::Error{Untranslated("A forked headers-chain with more work than the chain with the snapshot base block header exists. Please proceed to sync without AssumeUtxo.")};
         }
 
         auto mempool{m_active_chainstate->GetMempool()};
@@ -12905,6 +12955,7 @@ util::Result<CBlockIndex*> ChainstateManager::ActivateSnapshot(
             }
             candidate_sets_cleared = false;
         }
+        m_attested_assumeutxo.reset();
         this->MaybeRebalanceCaches();
         return util::Error{std::move(reason)};
     };
@@ -12926,7 +12977,9 @@ util::Result<CBlockIndex*> ChainstateManager::ActivateSnapshot(
         m_shielded_state_initialized = false;
     };
 
-    if (auto res{this->PopulateAndValidateSnapshot(*snapshot_chainstate, coins_file, metadata)}; !res) {
+    if (auto res{this->PopulateAndValidateSnapshot(
+            *snapshot_chainstate, coins_file, metadata,
+            attested_au ? &*attested_au : nullptr)}; !res) {
         LOCK(::cs_main);
         return cleanup_bad_snapshot(Untranslated(strprintf("Population failed: %s", util::ErrorString(res).original)));
     }
@@ -12949,7 +13002,20 @@ util::Result<CBlockIndex*> ChainstateManager::ActivateSnapshot(
     // final activation lock so a competing branch that completed body validation while the file was
     // being loaded cannot race the initial check. RecalculateBestHeader publishes such work even if
     // ActivateBestChain has not yet made that branch ActiveTip().
-    if (!snapshot_base_outworks_authenticated_headers()) {
+    // Attested loads keep the stricter ancestry-only rule (no compiled-in work escape hatch).
+    if (attested_au) {
+        if (!m_best_header ||
+            m_best_header->nHeight < snapshot_start_block->nHeight ||
+            m_best_header->GetAncestor(snapshot_start_block->nHeight) !=
+                snapshot_start_block) {
+            return cleanup_bad_snapshot(Untranslated(
+                "Attested snapshot base must be an ancestor of the current best-header chain"));
+        }
+        if (IsOnParkedReorgBranch(snapshot_start_block)) {
+            return cleanup_bad_snapshot(Untranslated(
+                "Attested snapshot base is on a parked reorg branch"));
+        }
+    } else if (!snapshot_base_outworks_authenticated_headers()) {
         return cleanup_bad_snapshot(Untranslated("A forked headers-chain with more work than the chain with the snapshot base block header exists. Please proceed to sync without AssumeUtxo."));
     }
 
@@ -12965,10 +13031,20 @@ util::Result<CBlockIndex*> ChainstateManager::ActivateSnapshot(
         if (!node::WriteSnapshotBaseBlockhash(*snapshot_chainstate)) {
             return cleanup_bad_snapshot(Untranslated("could not write base blockhash"));
         }
+        if (attested_au) {
+            if (!node::WriteAttestedAssumeutxoData(*snapshot_chainstate, *attested_au)) {
+                return cleanup_bad_snapshot(Untranslated("could not write attested assumeutxo data"));
+            }
+        }
     }
 
     assert(!m_snapshot_chainstate);
     m_snapshot_chainstate.swap(snapshot_chainstate);
+    if (attested_au) {
+        m_attested_assumeutxo = *attested_au;
+        LogPrintf("[snapshot] activated attested-fast-forward snapshot at height %d (%s)\n",
+                  attested_au->height, base_blockhash.ToString());
+    }
 
     // BTX cannot make the snapshot active until its shielded appendix and
     // consensus pin have been validated. Clear every chainstate's candidate
@@ -12986,6 +13062,7 @@ util::Result<CBlockIndex*> ChainstateManager::ActivateSnapshot(
             LoadShieldedSnapshotSection(coins_file, *shielded_snapshot_section, snapshot_start_block)};
         if (!shielded_section_result) {
             release_partial_shielded_snapshot_state();
+            m_attested_assumeutxo.reset();
             return cleanup_bad_snapshot(Untranslated(strprintf(
                 "could not load BTX shielded snapshot section: %s",
                 util::ErrorString(shielded_section_result).original)));
@@ -12998,17 +13075,22 @@ util::Result<CBlockIndex*> ChainstateManager::ActivateSnapshot(
     // double-spend on the bootstrapped node. Reject loading unless the loaded shielded state hashes to
     // the consensus-pinned commitment for this snapshot's base height. (Null pin == not yet computed
     // == legacy behavior, so existing snapshots are unaffected until their pin is filled in.)
+    // Attested fast-forward always supplies a pin via the signed manifest.
     if (shielded_snapshot_section) {
-        const auto& shielded_au = GetParams().AssumeutxoForHeight(snapshot_start_block->nHeight);
+        const auto& shielded_au =
+            attested_au ? std::optional<AssumeutxoData>{*attested_au}
+                        : GetParams().AssumeutxoForHeight(snapshot_start_block->nHeight);
         const bool pinned = shielded_au && !shielded_au->shielded_state_commitment.IsNull();
         if (pinned) {
             const auto pin = ComputeShieldedSnapshotStatePin();  // shared with the dump side; cannot drift
             if (!pin.has_value()) {
                 release_partial_shielded_snapshot_state();
+                m_attested_assumeutxo.reset();
                 return cleanup_bad_snapshot(Untranslated("BTX shielded snapshot state commitment unavailable for pin check"));
             }
             if (*pin != shielded_au->shielded_state_commitment) {
                 release_partial_shielded_snapshot_state();
+                m_attested_assumeutxo.reset();
                 return cleanup_bad_snapshot(Untranslated("BTX shielded snapshot state does not match the consensus-pinned commitment"));
             }
         } else if (!m_options.allow_unpinned_shielded_snapshot) {
@@ -13016,6 +13098,7 @@ util::Result<CBlockIndex*> ChainstateManager::ActivateSnapshot(
             // validated against consensus, so loading it can seed a double-spend (omitted nullifiers) or
             // a forged pool balance. Refuse unless the operator explicitly opts in to trusting it.
             release_partial_shielded_snapshot_state();
+            m_attested_assumeutxo.reset();
             return cleanup_bad_snapshot(Untranslated("BTX shielded snapshot section has no consensus pin for this height; refusing to load (set -allowunpinnedshieldedsnapshot to override)"));
         } else {
             LogPrintf("[snapshot] WARNING: loading an UNPINNED shielded snapshot section at height %d "
@@ -13076,7 +13159,8 @@ static void SnapshotUTXOHashBreakpoint(const util::SignalInterrupt& interrupt)
 util::Result<void> ChainstateManager::PopulateAndValidateSnapshot(
     Chainstate& snapshot_chainstate,
     AutoFile& coins_file,
-    const SnapshotMetadata& metadata)
+    const SnapshotMetadata& metadata,
+    const AssumeutxoData* attested_au)
 {
     // It's okay to release cs_main before we're done using `coins_cache` because we know
     // that nothing else will be referencing the newly created snapshot_chainstate yet.
@@ -13094,7 +13178,12 @@ util::Result<void> ChainstateManager::PopulateAndValidateSnapshot(
     }
 
     int base_height = snapshot_start_block->nHeight;
-    const auto& maybe_au_data = GetParams().AssumeutxoForHeight(base_height);
+    std::optional<AssumeutxoData> maybe_au_data;
+    if (attested_au) {
+        maybe_au_data = *attested_au;
+    } else {
+        maybe_au_data = GetParams().AssumeutxoForHeight(base_height);
+    }
 
     if (!maybe_au_data) {
         return util::Error{Untranslated(strprintf("Assumeutxo height in snapshot metadata not recognized "
@@ -13371,7 +13460,9 @@ SnapshotCompletionResult ChainstateManager::MaybeCompleteSnapshotValidation()
     CCoinsViewDB& ibd_coins_db = m_ibd_chainstate->CoinsDB();
     m_ibd_chainstate->ForceFlushStateToDisk();
 
-    const auto& maybe_au_data = m_options.chainparams.AssumeutxoForHeight(curr_height);
+    const auto& maybe_au_data =
+        m_attested_assumeutxo ? m_attested_assumeutxo
+                              : m_options.chainparams.AssumeutxoForHeight(curr_height);
     if (!maybe_au_data) {
         LogPrintf("[snapshot] assumeutxo data not found for height "
             "(%d) - refusing to validate snapshot\n", curr_height);
@@ -15824,6 +15915,12 @@ bool ChainstateManager::DetectSnapshotChainstate()
     }
     LogPrintf("[snapshot] detected active snapshot chainstate (%s) - loading\n",
         fs::PathToString(*path));
+
+    if (auto attested = node::ReadAttestedAssumeutxoData(*path)) {
+        m_attested_assumeutxo = *attested;
+        LogPrintf("[snapshot] restored attested-fast-forward assumeutxo override at height %d\n",
+                  attested->height);
+    }
 
     this->ActivateExistingSnapshot(*base_blockhash);
     return true;
