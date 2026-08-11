@@ -9611,7 +9611,11 @@ void ChainstateManager::ReceivedBlockTransactions(const CBlock& block, CBlockInd
         // work (the normal pre-v4/disabled-fork case), otherwise ordered IBD and
         // reindex perform two O(N) index scans per historical body.
         PropagateAuthenticatedChainWorkDescendants(*pindexNew, GetConsensus(),
-            [this](std::function<void(CBlockIndex&)> visit) {
+            [this](std::function<void(CBlockIndex&)> visit) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+                // ReceivedBlockTransactions holds cs_main; clang does not see
+                // that through std::function type erasure, so annotate the
+                // visitor explicitly.
+                AssertLockHeld(::cs_main);
                 for (auto& entry : m_blockman.m_block_index) {
                     visit(entry.second);
                 }
