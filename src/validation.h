@@ -76,6 +76,25 @@ enum class ShieldedAutoRepairKind {
 };
 
 /**
+ * Durable shielded-transition write boundaries exposed only to deterministic
+ * failure tests. Production code has no installed hook.
+ */
+enum class ShieldedTransitionWriteSeam {
+    ACCOUNT_PAYLOAD,
+    PREPARED_MARKER,
+    NULLIFIERS,
+    RECOVERY_EXITS,
+    SETTLEMENT_ANCHORS,
+    NETTING_MANIFESTS,
+    UNSHIELD_VELOCITY,
+    POOL_BALANCE,
+    PERSISTED_STATE,
+    NULLIFIER_ACCUMULATOR,
+    STATE_PIN,
+    MARKER_CLEAR,
+};
+
+/**
  * Chainstate-owned view of divergence and recovery. Header acquisition, body
  * scheduling, verification admission, and activation should consult this
  * common state instead of independently inferring whether the followed branch
@@ -1099,6 +1118,16 @@ private:
     CBlockIndex* m_best_invalid GUARDED_BY(::cs_main){nullptr};
     std::set<uint256> m_parked_reorg_branch_roots GUARDED_BY(::cs_main);
     std::optional<node::ReorgRecoveryRecord> m_reorg_recovery GUARDED_BY(::cs_main);
+    /**
+     * Authenticated/quorum branch tips used by exceptional shallow-race
+     * recovery. Maintained incrementally so each received body does not scan
+     * the complete block index for a best/unique recovery branch.
+     */
+    std::set<CBlockIndex*, node::CBlockIndexWorkComparator>
+        m_reorg_authenticated_candidate_tips GUARDED_BY(::cs_main);
+
+    void NoteAuthenticatedRecoveryCandidate(CBlockIndex* candidate)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /** The last header for which a headerTip notification was issued. */
     CBlockIndex* m_last_notified_header GUARDED_BY(GetMutex()){nullptr};
@@ -1181,6 +1210,11 @@ private:
     uint64_t m_shielded_state_rebuild_attempts GUARDED_BY(::cs_main){0};
     std::function<void(ShieldedAutoRepairKind)> m_shielded_auto_repair_hook_for_test
         GUARDED_BY(::cs_main);
+    std::function<bool(ShieldedTransitionWriteSeam)>
+        m_shielded_transition_write_fault_hook_for_test GUARDED_BY(::cs_main);
+
+    [[nodiscard]] bool InjectShieldedTransitionWriteFailureForTest(
+        ShieldedTransitionWriteSeam seam) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     //! Timers and counters used for benchmarking validation in both background
     //! and active chainstates.
@@ -1363,6 +1397,12 @@ public:
 
     /** Best header we've seen so far (used for getheaders queries' starting points). */
     CBlockIndex* m_best_header GUARDED_BY(::cs_main){nullptr};
+    /**
+     * Lock-free publication of the exact height currently owned by
+     * m_best_header. Unlike a peer height hint this value is reversible: an
+     * invalidate/reconsider/reorg rescan may move it backwards.
+     */
+    std::atomic<int32_t> m_best_followed_header_height{-1};
 
     //! The total number of bytes available for us to use across all in-memory
     //! coins caches. This will be split somehow across chainstates.
@@ -1666,6 +1706,22 @@ public:
     //! header in our block-index not known to be invalid, recalculate it.
     void RecalculateBestHeader() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
+    /** Publish a new authoritative followed header and its exact height. */
+    void SetBestHeader(CBlockIndex* best_header) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        AssertLockHeld(::cs_main);
+        m_best_header = best_header;
+        m_best_followed_header_height.store(
+            best_header != nullptr ? best_header->nHeight : -1,
+            std::memory_order_release);
+    }
+
+    /** Exact accepted followed-header height for lock-free liveness budgets. */
+    [[nodiscard]] int32_t BestFollowedHeaderHeight() const noexcept
+    {
+        return m_best_followed_header_height.load(std::memory_order_acquire);
+    }
+
     bool m_script_check_queue_enabled{true};
 
     CCheckQueue<CScriptCheck>& GetCheckQueue() { return m_script_check_queue; }
@@ -1967,6 +2023,15 @@ public:
 
     /** Run the installed automatic shielded repair test hook, if any. */
     void RunShieldedAutoRepairHookForTest(ShieldedAutoRepairKind kind) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** Install a deterministic write-boundary failure hook. Tests must clear
+     *  this hook before simulating restart recovery. */
+    void SetShieldedTransitionWriteFaultHookForTest(
+        std::function<bool(ShieldedTransitionWriteSeam)> hook)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        m_shielded_transition_write_fault_hook_for_test = std::move(hook);
+    }
 
     [[nodiscard]] std::optional<shielded::registry::ShieldedAccountRegistrySnapshot>
     ExportShieldedAccountRegistrySnapshot(

@@ -375,4 +375,38 @@ BOOST_AUTO_TEST_CASE(unverifiable_production_consensus_startup_fails_closed)
         /*allow_unverifiable_startup=*/false));
 }
 
+BOOST_AUTO_TEST_CASE(runtime_reprobe_is_bounded_and_unavailable_only)
+{
+    int calls{0};
+    const auto probe = [&calls](const std::string& provider) {
+        ++calls;
+        BOOST_CHECK_EQUAL(provider, "cuda");
+        return std::pair<bool, std::string>{true, "complete"};
+    };
+
+    // A healthy validator must never repeat even the cheap identity probe.
+    const auto ready{RunUnavailableMatMulRCRuntimeReprobe(
+        /*strict_device_ready=*/true, "cuda", probe)};
+    BOOST_CHECK(!ready.attempted);
+    BOOST_CHECK_EQUAL(calls, 0);
+
+    // One scheduler firing performs exactly one injected probe. It observes a
+    // candidate only; it cannot claim that self-qualification or the expensive
+    // process/epoch-bound production canary passed.
+    const auto unavailable{RunUnavailableMatMulRCRuntimeReprobe(
+        /*strict_device_ready=*/false, "cuda", probe)};
+    BOOST_CHECK(unavailable.attempted);
+    BOOST_CHECK(unavailable.runtime_candidate_available);
+    BOOST_CHECK_EQUAL(unavailable.provider, "cuda");
+    BOOST_CHECK_EQUAL(unavailable.reason, "complete");
+    BOOST_CHECK_EQUAL(calls, 1);
+
+    // An absent candidate is a bounded no-op and does not invoke the callback.
+    const auto absent{RunUnavailableMatMulRCRuntimeReprobe(
+        /*strict_device_ready=*/false, "", probe)};
+    BOOST_CHECK(!absent.attempted);
+    BOOST_CHECK_EQUAL(absent.reason, "no_runtime_candidate");
+    BOOST_CHECK_EQUAL(calls, 1);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

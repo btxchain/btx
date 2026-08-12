@@ -10,17 +10,12 @@
 
 namespace node {
 
-AttestedUTXOSnapshotP2P& AttestedUTXOSnapshotP2P::Get()
-{
-    static AttestedUTXOSnapshotP2P instance;
-    return instance;
-}
-
 void AttestedUTXOSnapshotP2P::ResetForTest()
 {
     LOCK(m_mutex);
     m_budgets.clear();
     m_global_transfers = 0;
+    m_offer.reset();
     m_sessions.clear();
     m_next_session = 1;
 }
@@ -105,6 +100,35 @@ void AttestedUTXOSnapshotP2P::PeerDisconnected(NodeId peer)
         if (session.peer == peer) session.cancelled = true;
     }
     m_cv.notify_all();
+}
+
+bool AttestedUTXOSnapshotP2P::OfferSnapshot(AttestedUTXOSnapshotOffer offer,
+                                            std::string& error)
+{
+    if (!ValidateAttestedUTXOSnapshotOffer(offer, error)) {
+        return false;
+    }
+    LOCK(m_mutex);
+    m_offer = std::move(offer);
+    return true;
+}
+
+void AttestedUTXOSnapshotP2P::ClearOffer()
+{
+    LOCK(m_mutex);
+    m_offer.reset();
+}
+
+std::optional<AttestedUTXOSnapshotOffer> AttestedUTXOSnapshotP2P::GetOffer()
+{
+    LOCK(m_mutex);
+    return m_offer;
+}
+
+bool AttestedUTXOSnapshotP2P::HasOffer()
+{
+    LOCK(m_mutex);
+    return m_offer.has_value();
 }
 
 std::optional<AttestedUTXOSnapshotP2P::SessionId>

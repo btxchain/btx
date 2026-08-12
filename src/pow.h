@@ -722,6 +722,9 @@ private:
 
 bool ConsumeGlobalMatMulPhase2Budget(uint32_t max_global_per_minute, uint32_t count, std::chrono::steady_clock::time_point now, MatMulPhase2BudgetLane lane = MatMulPhase2BudgetLane::ExpensiveVerification);
 bool ConsumeGlobalMatMulRCBudget(uint32_t max_global_per_minute, uint32_t count, std::chrono::steady_clock::time_point now);
+/** Time until the current process-wide RC budget window refills. Zero means
+ *  the next charge can be retried immediately. */
+std::chrono::steady_clock::duration GlobalMatMulRCBudgetRetryDelay(std::chrono::steady_clock::time_point now);
 /** Roll back an RC budget debit only when admission failed before work began.
  *  `charged_at` prevents a delayed rollback from decrementing a later window. */
 void RefundGlobalMatMulRCBudget(uint32_t count, std::chrono::steady_clock::time_point charged_at);

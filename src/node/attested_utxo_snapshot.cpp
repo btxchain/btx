@@ -33,8 +33,6 @@
 namespace node {
 namespace {
 
-Mutex g_attested_offer_mutex;
-std::optional<AttestedUTXOSnapshotOffer> g_attested_offer GUARDED_BY(g_attested_offer_mutex);
 std::atomic<int64_t> g_last_max_cs_main_hold_us{0};
 
 class CsMainHoldScope
@@ -415,7 +413,8 @@ AttestedUTXOSnapshotExportResult CreateAttestedUTXOSnapshot(
     return result;
 }
 
-bool OfferAttestedUTXOSnapshot(AttestedUTXOSnapshotOffer offer, std::string& error)
+bool ValidateAttestedUTXOSnapshotOffer(const AttestedUTXOSnapshotOffer& offer,
+                                       std::string& error)
 {
     if (offer.block_hash.IsNull() || offer.height < 0 || offer.file_size == 0 ||
         offer.file_size > ATTESTED_UTXO_SNAPSHOT_MAX_FILE_SIZE ||
@@ -437,27 +436,7 @@ bool OfferAttestedUTXOSnapshot(AttestedUTXOSnapshotOffer offer, std::string& err
         error = "Snapshot offer geometry does not match signed manifest";
         return false;
     }
-    LOCK(g_attested_offer_mutex);
-    g_attested_offer = std::move(offer);
     return true;
-}
-
-void ClearAttestedUTXOSnapshotOffer()
-{
-    LOCK(g_attested_offer_mutex);
-    g_attested_offer.reset();
-}
-
-std::optional<AttestedUTXOSnapshotOffer> GetAttestedUTXOSnapshotOffer()
-{
-    LOCK(g_attested_offer_mutex);
-    return g_attested_offer;
-}
-
-bool HasAttestedUTXOSnapshotOffer()
-{
-    LOCK(g_attested_offer_mutex);
-    return g_attested_offer.has_value();
 }
 
 bool ReadAttestedUTXOSnapshotChunk(const AttestedUTXOSnapshotOffer& offer,

@@ -17,6 +17,11 @@ enum class Warning {
     //! This is a loud alarm only; it never changes consensus. See the deep-reorg
     //! handling in Chainstate::ActivateBestChainStep.
     DEEP_REORG_DETECTED,
+    //! Strict-device consensus validation has no qualified runtime provider.
+    //! Unlike a transient log line, this remains visible through the standard
+    //! RPC warnings array, the GUI status, and -alertnotify until the process
+    //! is restarted with a fully qualified provider.
+    MATMUL_RC_NEXT_BLOCK_UNVERIFIABLE,
 };
 } // namespace kernel
 #endif // BITCOIN_KERNEL_WARNING_H

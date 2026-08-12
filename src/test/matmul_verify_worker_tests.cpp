@@ -90,6 +90,16 @@ struct BlockingVerify {
     }
 };
 
+struct PendingLeaseProbe {
+    explicit PendingLeaseProbe(std::atomic<int>& live_in) : live{live_in}
+    {
+        ++live;
+    }
+    ~PendingLeaseProbe() { --live; }
+
+    std::atomic<int>& live;
+};
+
 //! Sentinel standing in for the RAII pending-verification slot: counts
 //! destructions, so we can prove queued-but-never-run jobs still release
 //! their captured resources when Stop() drains the queue.
@@ -2082,6 +2092,7 @@ BOOST_AUTO_TEST_CASE(trusted_mirror_parks_without_blocking_other_jobs)
 
     std::atomic<int> completed{0};
     std::atomic<int> deferred{0};
+    std::atomic<int> pending_leases{0};
     MatMulVerifyWorker worker{params, /*max_threads=*/1};
 
     const uint256 tip_hash{uint256::ONE};
@@ -2105,6 +2116,9 @@ BOOST_AUTO_TEST_CASE(trusted_mirror_parks_without_blocking_other_jobs)
                                   AuthenticatedTipChild
                             : MatMulVerifyWorker::Priority::
                                   CompetingBranch,
+            .rc_pending_lease =
+                std::make_shared<PendingLeaseProbe>(pending_leases),
+            .retained_body_bytes = 1024,
         };
         BOOST_REQUIRE(EnqueueAccepted(worker.Enqueue(job)));
     };
@@ -2119,6 +2133,10 @@ BOOST_AUTO_TEST_CASE(trusted_mirror_parks_without_blocking_other_jobs)
     BOOST_CHECK_EQUAL(worker.AwaitingQuorumForTest(), 2U);
     BOOST_CHECK_EQUAL(completed.load(), 0);
     BOOST_CHECK_EQUAL(deferred.load(), 0);
+    // Signature waits must not retain the cap-one expensive replay lease.
+    // This is the production admission stall the parked-worker change alone
+    // did not fix.
+    BOOST_CHECK_EQUAL(pending_leases.load(), 0);
 
     // Quorum for the tip-extender only: it must complete while backfill stays
     // parked (or later times out retryably).
@@ -2143,6 +2161,68 @@ BOOST_AUTO_TEST_CASE(trusted_mirror_parks_without_blocking_other_jobs)
         },
         2s));
     BOOST_CHECK_EQUAL(completed.load(), 1);
+
+    worker.Stop();
+    node::matmul_trusted::ResetForTest();
+}
+
+BOOST_AUTO_TEST_CASE(trusted_mirror_awaiting_quorum_pool_is_bounded)
+{
+    using namespace std::chrono_literals;
+    node::matmul_trusted::ResetForTest();
+    const CKey signer{[] {
+        CKey key;
+        key.MakeNewKey(/*fCompressed=*/true);
+        return key;
+    }()};
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256::ONE;
+    config.replay_authority_context =
+        uint256::FromHex(std::string(64, 'a')).value();
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/true,
+        /*serve=*/false, /*wait_timeout=*/5s, error));
+
+    auto params{MakeProfile1ActiveParams()};
+    std::atomic<int> deferred{0};
+    std::atomic<int> pending_leases{0};
+    MatMulVerifyWorker worker{params, /*max_threads=*/1};
+    const uint256 tip_hash{uint256::ONE};
+    worker.SetActiveTip(tip_hash, /*tip_height=*/100);
+
+    for (size_t i = 0;
+         i < MatMulVerifyWorker::MAX_AWAITING_QUORUM_JOBS + 1; ++i) {
+        auto block{std::make_shared<CBlock>(
+            *MakeBlock(static_cast<uint32_t>(100 + i)))};
+        block->hashPrevBlock = tip_hash;
+        MatMulVerifyWorker::Job job{
+            .block = block,
+            .height = 101,
+            .parent_median_time_past = 1,
+            .retryable_failure = [&] { ++deferred; },
+            .priority = MatMulVerifyWorker::Priority::
+                AuthenticatedTipChild,
+            .rc_pending_lease =
+                std::make_shared<PendingLeaseProbe>(pending_leases),
+            .retained_body_bytes = 1,
+        };
+        BOOST_REQUIRE(EnqueueAccepted(worker.Enqueue(job)));
+    }
+
+    BOOST_REQUIRE(WaitFor(
+        [&] {
+            return worker.AwaitingQuorumForTest() ==
+                       MatMulVerifyWorker::MAX_AWAITING_QUORUM_JOBS &&
+                   deferred.load() >= 1;
+        },
+        2s));
+    BOOST_CHECK_EQUAL(
+        worker.AwaitingQuorumForTest(),
+        MatMulVerifyWorker::MAX_AWAITING_QUORUM_JOBS);
+    BOOST_CHECK_EQUAL(pending_leases.load(), 0);
 
     worker.Stop();
     node::matmul_trusted::ResetForTest();

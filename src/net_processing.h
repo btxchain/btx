@@ -22,6 +22,7 @@ class ChainstateManager;
 namespace Dandelion { class DandelionManager; }
 
 namespace node {
+class AttestedUTXOSnapshotP2P;
 class Warnings;
 } // namespace node
 
@@ -268,6 +269,9 @@ public:
     [[nodiscard]] virtual bool RequestAttestedUTXOManifest(NodeId peer_id, const uint256& block_hash) = 0;
     /** Send getutxochunk to peer. */
     [[nodiscard]] virtual bool RequestAttestedUTXOChunk(NodeId peer_id, const uint256& block_hash, uint32_t chunk_index) = 0;
+    /** Coordinator owned by this peer-manager/node instance. */
+    [[nodiscard]] virtual node::AttestedUTXOSnapshotP2P&
+    AttestedUTXOSnapshotCoordinator() = 0;
 
     /** This function is used for testing the stale tip eviction logic, see denialofservice_tests.cpp */
     virtual void UpdateLastBlockAnnounceTime(NodeId node, int64_t time_in_seconds) = 0;

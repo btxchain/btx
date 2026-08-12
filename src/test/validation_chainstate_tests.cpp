@@ -292,7 +292,8 @@ BOOST_FIXTURE_TEST_CASE(chainstate_authenticated_shallow_race_auto_unparks_with_
     auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
     auto& action = const_cast<kernel::DeepReorgAction&>(chainman.m_options.deep_reorg_action);
     auto& park_depth = const_cast<std::optional<uint32_t>&>(chainman.m_options.max_reorg_depth_park);
-    auto& hysteresis = const_cast<std::optional<uint32_t>&>(chainman.m_options.reorg_hysteresis_work_margin);
+    auto& hysteresis_depth = const_cast<std::optional<uint32_t>&>(chainman.m_options.reorg_hysteresis_depth);
+    auto& hysteresis_work_margin = const_cast<std::optional<uint32_t>&>(chainman.m_options.reorg_hysteresis_work_margin);
     struct Restore {
         Consensus::Params& consensus;
         int32_t start;
@@ -300,21 +301,31 @@ BOOST_FIXTURE_TEST_CASE(chainstate_authenticated_shallow_race_auto_unparks_with_
         kernel::DeepReorgAction saved_action;
         std::optional<uint32_t>& park_depth;
         std::optional<uint32_t> saved_park_depth;
-        std::optional<uint32_t>& hysteresis;
-        std::optional<uint32_t> saved_hysteresis;
+        std::optional<uint32_t>& hysteresis_depth;
+        std::optional<uint32_t> saved_hysteresis_depth;
+        std::optional<uint32_t>& hysteresis_work_margin;
+        std::optional<uint32_t> saved_hysteresis_work_margin;
         ~Restore()
         {
             consensus.nReorgProtectionStartHeight = start;
             action = saved_action;
             park_depth = saved_park_depth;
-            hysteresis = saved_hysteresis;
+            hysteresis_depth = saved_hysteresis_depth;
+            hysteresis_work_margin = saved_hysteresis_work_margin;
         }
     } restore{consensus, consensus.nReorgProtectionStartHeight,
-              action, action, park_depth, park_depth, hysteresis, hysteresis};
+              action, action, park_depth, park_depth,
+              hysteresis_depth, hysteresis_depth,
+              hysteresis_work_margin, hysteresis_work_margin};
     consensus.nReorgProtectionStartHeight = 10;
     action = kernel::DeepReorgAction::PARK;
     park_depth = 2;
-    hysteresis = 0;
+    // Exercise the production mechanism rather than disabling hysteresis for
+    // the test.  This margin is deliberately impossible for the four-block
+    // recovery branch to satisfy, so only authenticated recovery bypass can
+    // make activation progress.
+    hysteresis_depth = 1;
+    hysteresis_work_margin = 64;
 
     const CScript script = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
     CBlockIndex* fork;
@@ -385,9 +396,11 @@ BOOST_FIXTURE_TEST_CASE(chainstate_equal_authenticated_sibling_cannot_freeze_tip
     auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
     auto& action = const_cast<kernel::DeepReorgAction&>(chainman.m_options.deep_reorg_action);
     auto& park_depth = const_cast<std::optional<uint32_t>&>(chainman.m_options.max_reorg_depth_park);
+    auto& mode = const_cast<kernel::MatMulValidationMode&>(chainman.m_options.matmul_validation_mode);
     const int32_t saved_start{consensus.nReorgProtectionStartHeight};
     const auto saved_action{action};
     const auto saved_depth{park_depth};
+    const auto saved_mode{mode};
     struct Restore {
         Consensus::Params& consensus;
         int32_t start;
@@ -395,8 +408,17 @@ BOOST_FIXTURE_TEST_CASE(chainstate_equal_authenticated_sibling_cannot_freeze_tip
         kernel::DeepReorgAction saved_action;
         std::optional<uint32_t>& depth;
         std::optional<uint32_t> saved_depth;
-        ~Restore() { consensus.nReorgProtectionStartHeight = start; action = saved_action; depth = saved_depth; }
-    } restore{consensus, saved_start, action, saved_action, park_depth, saved_depth};
+        kernel::MatMulValidationMode& mode;
+        kernel::MatMulValidationMode saved_mode;
+        ~Restore()
+        {
+            node::matmul_trusted::ResetForTest();
+            consensus.nReorgProtectionStartHeight = start;
+            action = saved_action;
+            depth = saved_depth;
+            mode = saved_mode;
+        }
+    } restore{consensus, saved_start, action, saved_action, park_depth, saved_depth, mode, saved_mode};
     consensus.nReorgProtectionStartHeight = 10;
     action = kernel::DeepReorgAction::PARK;
     park_depth = 2;
@@ -427,6 +449,23 @@ BOOST_FIXTURE_TEST_CASE(chainstate_equal_authenticated_sibling_cannot_freeze_tip
     state = BlockValidationState{};
     BOOST_REQUIRE(chainstate.ActivateBestChain(state));
     BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()->GetBlockHash()) == original_hash);
+
+    CKey signer;
+    signer.MakeNewKey(/*fCompressed=*/true);
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256::ONE;
+    config.replay_authority_context = uint256::FromHex(std::string(64, 'b')).value();
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    config.local_signer = signer;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/true, /*serve=*/false,
+        std::chrono::milliseconds{50}, error));
+    mode = kernel::MatMulValidationMode::TRUSTED;
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
+                      sibling->GetBlockHash(), sibling->nHeight) ==
+                  matmul::trusted::AddResult::Accepted);
     {
         LOCK(::cs_main);
         chainstate.ResetBlockFailureFlags(sibling);
@@ -532,11 +571,13 @@ BOOST_FIXTURE_TEST_CASE(chainstate_current_authority_recovers_long_shallow_race_
             (recovery_tip->nStatus & ~(BLOCK_VALID_MASK | BLOCK_HAVE_DATA)) |
             BLOCK_VALID_TREE;
         recovery_tip->m_chain_tx_count = 0;
-        chainman.m_best_header = original_tip;
+        chainman.SetBestHeader(original_tip);
         BOOST_CHECK(chainman.m_best_header != recovery_tip);
         BOOST_REQUIRE(chainman.ParkReorgBranch(recovery_root));
         BOOST_REQUIRE(chainman.MaybeTrackReorgRecovery(recovery_tip));
         BOOST_CHECK_EQUAL(chainman.m_best_header, recovery_tip);
+        BOOST_CHECK_EQUAL(chainman.BestFollowedHeaderHeight(),
+                          recovery_tip->nHeight);
         const auto record{chainman.GetReorgRecoveryRecord()};
         BOOST_REQUIRE(record.has_value());
         BOOST_CHECK_EQUAL(record->mode, static_cast<uint8_t>(
@@ -544,10 +585,12 @@ BOOST_FIXTURE_TEST_CASE(chainstate_current_authority_recovers_long_shallow_race_
         BOOST_CHECK_EQUAL(record->initial_reorg_depth, 2U);
         BOOST_CHECK(chainman.IsOnParkedReorgBranch(recovery_tip));
         BOOST_REQUIRE(chainman.LoadReorgRecoveryRecord());
-        chainman.m_best_header = original_tip;
+        chainman.SetBestHeader(original_tip);
         BOOST_REQUIRE(chainman.NormalizeReorgRecovery(chainstate.m_chain.Tip()));
         BOOST_CHECK(chainman.GetReorgRecoveryRecord().has_value());
         BOOST_CHECK_EQUAL(chainman.m_best_header, recovery_tip);
+        BOOST_CHECK_EQUAL(chainman.BestFollowedHeaderHeight(),
+                          recovery_tip->nHeight);
 
         // Candidate filtering must freeze activation on the losing side while
         // the authority body is still unavailable.
@@ -563,6 +606,15 @@ BOOST_FIXTURE_TEST_CASE(chainstate_current_authority_recovers_long_shallow_race_
         chainstate.ResetBlockFailureFlags(recovery_root);
         BOOST_REQUIRE(chainman.MaybeTrackReorgRecovery(recovery_tip));
         BOOST_CHECK(!chainman.IsOnParkedReorgBranch(recovery_tip));
+
+        // Invalidation/reconsider and startup both rebuild best-header state.
+        // With peer provenance unavailable, current-config quorum ancestry is
+        // the authoritative predicate and publication must move with it.
+        chainman.SetBestHeader(original_tip);
+        chainman.RecalculateBestHeader();
+        BOOST_CHECK_EQUAL(chainman.m_best_header, recovery_tip);
+        BOOST_CHECK_EQUAL(chainman.BestFollowedHeaderHeight(),
+                          recovery_tip->nHeight);
     }
 
     state = BlockValidationState{};
@@ -616,10 +668,11 @@ BOOST_FIXTURE_TEST_CASE(chainstate_reports_shared_recovery_phase, TestChain100Se
     struct RestoreBestHeader {
         ChainstateManager& chainman;
         CBlockIndex* saved;
-        ~RestoreBestHeader() { chainman.m_best_header = saved; }
+        ~RestoreBestHeader() { chainman.SetBestHeader(saved); }
     } restore{chainman, saved_best_header};
 
-    chainman.m_best_header = active_tip;
+    chainman.SetBestHeader(active_tip);
+    BOOST_CHECK_EQUAL(chainman.BestFollowedHeaderHeight(), active_tip->nHeight);
     auto state = chainman.GetChainRecoveryState();
     BOOST_CHECK(state.phase == ChainRecoveryPhase::CONVERGED);
     BOOST_CHECK_EQUAL(state.followed_target, active_tip);
@@ -628,7 +681,8 @@ BOOST_FIXTURE_TEST_CASE(chainstate_reports_shared_recovery_phase, TestChain100Se
     extension.pprev = active_tip;
     extension.nHeight = active_tip->nHeight + 1;
     extension.BuildSkip();
-    chainman.m_best_header = &extension;
+    chainman.SetBestHeader(&extension);
+    BOOST_CHECK_EQUAL(chainman.BestFollowedHeaderHeight(), extension.nHeight);
     state = chainman.GetChainRecoveryState();
     BOOST_CHECK(state.phase == ChainRecoveryPhase::CHASING);
     BOOST_CHECK_EQUAL(state.fork, active_tip);
@@ -643,7 +697,8 @@ BOOST_FIXTURE_TEST_CASE(chainstate_reports_shared_recovery_phase, TestChain100Se
         index.BuildSkip();
         parent = &index;
     }
-    chainman.m_best_header = &alternative[2];
+    chainman.SetBestHeader(&alternative[2]);
+    BOOST_CHECK_EQUAL(chainman.BestFollowedHeaderHeight(), alternative[2].nHeight);
     state = chainman.GetChainRecoveryState();
     BOOST_CHECK(state.phase == ChainRecoveryPhase::RECOVERING_REORG);
     BOOST_CHECK_EQUAL(state.followed_target, &alternative[2]);

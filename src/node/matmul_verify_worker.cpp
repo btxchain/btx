@@ -52,6 +52,20 @@ MatMulVerifyWorker::EnqueueResult MatMulVerifyWorker::Enqueue(
                 it->second->job.cancelled->load(std::memory_order_relaxed)) {
                 return EnqueueResult::Deferred;
             }
+            if (job.block && m_awaiting_quorum.count(hash) != 0) {
+                const size_t old_bytes{
+                    it->second->job.retained_body_bytes};
+                const size_t new_bytes{std::max(
+                    old_bytes, job.retained_body_bytes)};
+                const size_t additional{new_bytes - old_bytes};
+                if (additional >
+                    MAX_AWAITING_QUORUM_BYTES -
+                        std::min(m_awaiting_quorum_bytes,
+                                 MAX_AWAITING_QUORUM_BYTES)) {
+                    return EnqueueResult::Deferred;
+                }
+                m_awaiting_quorum_bytes += additional;
+            }
             // A full body arriving behind a header-first job joins the same
             // pure header verdict. Its completion still re-enters ordinary
             // block validation, which alone can authenticate chainwork.
@@ -64,6 +78,9 @@ MatMulVerifyWorker::EnqueueResult MatMulVerifyWorker::Enqueue(
             }
             if (job.block) {
                 it->second->body_joined = true;
+                it->second->job.retained_body_bytes =
+                    std::max(it->second->job.retained_body_bytes,
+                             job.retained_body_bytes);
             }
             if (static_cast<uint8_t>(job.priority) >
                 static_cast<uint8_t>(it->second->job.priority)) {
@@ -258,7 +275,12 @@ bool MatMulVerifyWorker::Cancel(const uint256& hash)
     pending->job.cancelled->store(true, std::memory_order_relaxed);
     if (!pending->running) {
         std::erase(m_queue, pending);
-        m_awaiting_quorum.erase(hash);
+        if (m_awaiting_quorum.erase(hash) != 0) {
+            Assume(m_awaiting_quorum_bytes >=
+                   pending->job.retained_body_bytes);
+            m_awaiting_quorum_bytes -=
+                pending->job.retained_body_bytes;
+        }
         pending->awaiting_quorum_deadline.reset();
         m_pending.erase(it);
     }
@@ -286,7 +308,12 @@ size_t MatMulVerifyWorker::CancelIf(
         ++count;
         if (!pending->running) {
             std::erase(m_queue, pending);
-            m_awaiting_quorum.erase(it->first);
+            if (m_awaiting_quorum.erase(it->first) != 0) {
+                Assume(m_awaiting_quorum_bytes >=
+                       pending->job.retained_body_bytes);
+                m_awaiting_quorum_bytes -=
+                    pending->job.retained_body_bytes;
+            }
             pending->awaiting_quorum_deadline.reset();
             it = m_pending.erase(it);
         } else {
@@ -327,6 +354,9 @@ void MatMulVerifyWorker::NotifyQuorumReady(const uint256& hash)
         if (it == m_awaiting_quorum.end()) return;
         auto pending{it->second};
         m_awaiting_quorum.erase(it);
+        Assume(m_awaiting_quorum_bytes >=
+               pending->job.retained_body_bytes);
+        m_awaiting_quorum_bytes -= pending->job.retained_body_bytes;
         pending->awaiting_quorum_deadline.reset();
         if (!pending->running &&
             std::find(m_queue.begin(), m_queue.end(), pending) ==
@@ -354,6 +384,7 @@ void MatMulVerifyWorker::Stop()
             orphaned.push_back(pending);
         }
         m_awaiting_quorum.clear();
+        m_awaiting_quorum_bytes = 0;
         for (const auto& pending : orphaned) {
             pending->job.cancelled->store(true, std::memory_order_relaxed);
             pending->awaiting_quorum_deadline.reset();
@@ -426,6 +457,9 @@ void MatMulVerifyWorker::TakeExpiredAwaitingQuorum(
         }
         pending->awaiting_quorum_deadline.reset();
         m_pending.erase(it->first);
+        Assume(m_awaiting_quorum_bytes >=
+               pending->job.retained_body_bytes);
+        m_awaiting_quorum_bytes -= pending->job.retained_body_bytes;
         expired.push_back(pending);
         it = m_awaiting_quorum.erase(it);
     }
@@ -526,6 +560,7 @@ void MatMulVerifyWorker::WorkerLoop()
         const CBlockHeader& header{job.GetHeader()};
         const uint256 hash{header.GetHash()};
         const bool tip_extending{header.hashPrevBlock == active_tip_hash};
+        if (job.on_started) job.on_started();
         const auto finish_retryable_without_verdict = [&] {
             std::vector<std::function<void()>> callbacks;
             {
@@ -657,11 +692,40 @@ void MatMulVerifyWorker::WorkerLoop()
                 const auto deadline{
                     std::chrono::steady_clock::now() +
                     node::matmul_trusted::WaitTimeout()};
+                // Waiting for signatures is not expensive replay work. Drop
+                // the pending-work lease before publishing this job in the
+                // parked set, otherwise the production default cap of one
+                // prevents every later body from reaching quorum admission.
+                // The parked set has its own count/byte bounds below.
+                if (job.on_parked) job.on_parked();
+                job.rc_pending_lease.reset();
+                bool parked{false};
                 {
                     std::lock_guard<std::mutex> lock(m_mutex);
-                    pending->running = false;
-                    pending->awaiting_quorum_deadline = deadline;
-                    m_awaiting_quorum[hash] = pending;
+                    const bool count_available{
+                        m_awaiting_quorum.size() <
+                        MAX_AWAITING_QUORUM_JOBS};
+                    const bool bytes_available{
+                        job.retained_body_bytes <=
+                        MAX_AWAITING_QUORUM_BYTES -
+                            std::min(m_awaiting_quorum_bytes,
+                                     MAX_AWAITING_QUORUM_BYTES)};
+                    if (count_available && bytes_available) {
+                        pending->running = false;
+                        pending->awaiting_quorum_deadline = deadline;
+                        m_awaiting_quorum[hash] = pending;
+                        m_awaiting_quorum_bytes +=
+                            job.retained_body_bytes;
+                        parked = true;
+                    }
+                }
+                if (!parked) {
+                    LogWarning(
+                        "matmul trusted mirror deferred: block=%s height=%d "
+                        "result=awaiting_quorum_capacity (retryable, peer not punished)\n",
+                        hash.ToString(), job.height);
+                    finish_retryable_without_verdict();
+                    continue;
                 }
                 // TOCTOU: quorum may have landed between HasQuorum and park.
                 if (node::matmul_trusted::HasQuorum(hash, job.height)) {

@@ -98,15 +98,10 @@ struct AttestedUTXOSnapshotOffer {
     matmul::trusted::UtxoSnapshotManifest manifest{};
 };
 
-/**
- * Register (or replace) the single local offer. Serving does not require being
- * a signer — any node that holds the snapshot file + quorum manifest may offer.
- */
-[[nodiscard]] bool OfferAttestedUTXOSnapshot(AttestedUTXOSnapshotOffer offer,
-                                             std::string& error);
-void ClearAttestedUTXOSnapshotOffer();
-[[nodiscard]] std::optional<AttestedUTXOSnapshotOffer> GetAttestedUTXOSnapshotOffer();
-[[nodiscard]] bool HasAttestedUTXOSnapshotOffer();
+/** Validate a local offer before a node-owned P2P coordinator serves it. */
+[[nodiscard]] bool ValidateAttestedUTXOSnapshotOffer(
+    const AttestedUTXOSnapshotOffer& offer,
+    std::string& error);
 
 /** Read one chunk from the offered snapshot file (bounded, seek-based). */
 [[nodiscard]] bool ReadAttestedUTXOSnapshotChunk(

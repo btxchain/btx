@@ -1070,6 +1070,169 @@ struct RecoveryExitVelocityFastStartupPersistedTestChain100Setup : TestChain100S
     }
 };
 
+struct ShieldedWriteFaultPersistedTestChain100Setup : TestChain100Setup
+{
+    ShieldedWriteFaultPersistedTestChain100Setup()
+        : TestChain100Setup(
+              ChainType::REGTEST,
+              {.extra_args = {"-regtestshieldedunshieldvelocityactivationheight=100",
+                              "-fastshieldedstartup=1",
+                              "-shieldedstartupaudit=0"},
+               .coins_db_in_memory = false,
+               .block_tree_db_in_memory = false})
+    {
+    }
+
+    void ExerciseWriteFailure(ShieldedTransitionWriteSeam seam,
+                              bool settlement_transaction = false)
+    {
+        ChainstateManager& chainman = *Assert(m_node.chainman);
+        const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+        CMutableTransaction tx;
+        if (settlement_transaction) {
+            tx = BuildChainstateSettlementAnchorReceiptFixture(chainman).tx;
+        } else {
+            tx = BuildChainstateRebalanceFixture(*this, chainman).tx;
+        }
+        const CBlock block = CreateBlock({tx}, script_pub_key,
+                                         chainman.ActiveChainstate(),
+                                         /*use_mempool=*/false);
+        const uint256 target_hash = block.GetHash();
+        CBlockIndex* target_index{nullptr};
+        {
+            LOCK(::cs_main);
+            BOOST_REQUIRE(chainman.EnsureShieldedStateInitialized());
+            BlockValidationState accept_state;
+            bool new_block{false};
+            BOOST_REQUIRE(chainman.AcceptBlock(std::make_shared<const CBlock>(block),
+                                               accept_state,
+                                               &target_index,
+                                               /*fRequested=*/true,
+                                               /*dbp=*/nullptr,
+                                               &new_block,
+                                               /*min_pow_checked=*/true));
+            BOOST_REQUIRE(accept_state.IsValid());
+            BOOST_REQUIRE(new_block);
+            BOOST_REQUIRE(target_index != nullptr);
+            // Make the candidate body/index and the old committed state
+            // durable before modelling a process crash during ConnectBlock.
+            for (Chainstate* cs : chainman.GetAll()) cs->ForceFlushStateToDisk();
+        }
+
+        bool injected{false};
+        {
+            LOCK(::cs_main);
+            chainman.SetShieldedTransitionWriteFaultHookForTest(
+                [&](ShieldedTransitionWriteSeam current) {
+                    if (!injected && current == seam) {
+                        injected = true;
+                        return true;
+                    }
+                    return false;
+                });
+        }
+        // Exercise the production fail-stop path without interrupting the unit
+        // test process; KernelNotifications still records the fatal warning.
+        Assert(m_node.notifications)->m_shutdown_on_fatal_error = false;
+        BlockValidationState activation_state;
+        BOOST_CHECK(!chainman.ActiveChainstate().ActivateBestChain(
+            activation_state, std::make_shared<const CBlock>(block)));
+        BOOST_REQUIRE(injected);
+        BOOST_CHECK(activation_state.IsError());
+        {
+            LOCK(::cs_main);
+            chainman.SetShieldedTransitionWriteFaultHookForTest({});
+            BOOST_CHECK_EQUAL(target_index->nStatus & BLOCK_FAILED_MASK, 0U);
+            const bool marker_must_exist =
+                seam != ShieldedTransitionWriteSeam::ACCOUNT_PAYLOAD &&
+                seam != ShieldedTransitionWriteSeam::PREPARED_MARKER;
+            BOOST_CHECK_EQUAL(chainman.ReadShieldedMutationMarker().has_value(),
+                              marker_must_exist);
+        }
+
+        // Drop handles without a clean-state flush: this is the exact crash
+        // boundary under test. Startup must use PREPARED redo or bounded gap
+        // recovery and must never poison the candidate as consensus-invalid.
+        m_node.validation_signals->SyncWithValidationInterfaceQueue();
+        const fs::path datadir = chainman.m_options.datadir;
+        {
+            LOCK(::cs_main);
+            chainman.ResetChainstates();
+            m_node.chainman.reset();
+            m_node.notifications = std::make_unique<KernelNotifications>(
+                Assert(m_node.shutdown_request), m_node.exit_status,
+                *Assert(m_node.warnings));
+            const ChainstateManager::Options chainman_opts{
+                .chainparams = ::Params(),
+                .datadir = datadir,
+                .shielded_startup_audit = false,
+                .fast_shielded_startup = true,
+                .notifications = *m_node.notifications,
+                .signals = m_node.validation_signals.get(),
+            };
+            const BlockManager::Options blockman_opts{
+                .chainparams = chainman_opts.chainparams,
+                .blocks_dir = m_args.GetBlocksDirPath(),
+                .notifications = chainman_opts.notifications,
+                .block_tree_db_params = DBParams{
+                    .path = datadir / "blocks" / "index",
+                    .cache_bytes = m_kernel_cache_sizes.block_tree_db,
+                    .memory_only = m_block_tree_db_in_memory,
+                },
+            };
+            m_node.chainman = std::make_unique<ChainstateManager>(
+                *Assert(m_node.shutdown_signal), chainman_opts, blockman_opts);
+        }
+        ChainstateManager& restarted = *Assert(m_node.chainman);
+        LoadVerifyActivateChainstate();
+        {
+            LOCK(::cs_main);
+            BOOST_REQUIRE(restarted.EnsureShieldedStateInitialized());
+            BOOST_REQUIRE(restarted.ActiveTip() != nullptr);
+            BOOST_CHECK_EQUAL(restarted.ActiveTip()->GetBlockHash(), target_hash);
+            CBlockIndex* restarted_target =
+                restarted.m_blockman.LookupBlockIndex(target_hash);
+            BOOST_REQUIRE(restarted_target != nullptr);
+            BOOST_CHECK_EQUAL(restarted_target->nStatus & BLOCK_FAILED_MASK, 0U);
+            BOOST_CHECK(!restarted.ReadShieldedMutationMarker().has_value());
+        }
+    }
+};
+
+#define SHIELDED_REBALANCE_WRITE_FAULT_TEST(test_name, seam_name)                  \
+    BOOST_FIXTURE_TEST_CASE(test_name, ShieldedWriteFaultPersistedTestChain100Setup) \
+    {                                                                              \
+        ExerciseWriteFailure(ShieldedTransitionWriteSeam::seam_name);              \
+    }
+
+SHIELDED_REBALANCE_WRITE_FAULT_TEST(shielded_write_failure_payload_is_fatal_and_restart_safe,
+                                    ACCOUNT_PAYLOAD)
+SHIELDED_REBALANCE_WRITE_FAULT_TEST(shielded_write_failure_prepared_marker_is_fatal_and_restart_safe,
+                                    PREPARED_MARKER)
+SHIELDED_REBALANCE_WRITE_FAULT_TEST(shielded_write_failure_manifest_is_fatal_and_restart_safe,
+                                    NETTING_MANIFESTS)
+SHIELDED_REBALANCE_WRITE_FAULT_TEST(shielded_write_failure_velocity_is_fatal_and_restart_safe,
+                                    UNSHIELD_VELOCITY)
+SHIELDED_REBALANCE_WRITE_FAULT_TEST(shielded_write_failure_pool_is_fatal_and_restart_safe,
+                                    POOL_BALANCE)
+SHIELDED_REBALANCE_WRITE_FAULT_TEST(shielded_write_failure_final_state_is_fatal_and_restart_safe,
+                                    PERSISTED_STATE)
+SHIELDED_REBALANCE_WRITE_FAULT_TEST(shielded_write_failure_accumulator_is_fatal_and_restart_safe,
+                                    NULLIFIER_ACCUMULATOR)
+SHIELDED_REBALANCE_WRITE_FAULT_TEST(shielded_write_failure_state_pin_is_fatal_and_restart_safe,
+                                    STATE_PIN)
+SHIELDED_REBALANCE_WRITE_FAULT_TEST(shielded_write_failure_marker_clear_is_fatal_and_restart_safe,
+                                    MARKER_CLEAR)
+
+#undef SHIELDED_REBALANCE_WRITE_FAULT_TEST
+
+BOOST_FIXTURE_TEST_CASE(shielded_write_failure_settlement_is_fatal_and_restart_safe,
+                        ShieldedWriteFaultPersistedTestChain100Setup)
+{
+    ExerciseWriteFailure(ShieldedTransitionWriteSeam::SETTLEMENT_ANCHORS,
+                         /*settlement_transaction=*/true);
+}
+
 BOOST_FIXTURE_TEST_CASE(chainstatemanager_rebuilds_shielded_state_when_commitment_index_missing, PersistedTestChain100Setup)
 {
     ChainstateManager& chainman = *Assert(m_node.chainman);
@@ -3363,7 +3526,7 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_restores_prepared_shielded_transition_
                         PersistedTestChain100Setup)
 {
     ChainstateManager& chainman = *Assert(m_node.chainman);
-    auto simulate_node_restart = [&]() -> ChainstateManager& {
+    auto simulate_node_restart = [&](bool drop_account_payload_store = false) -> ChainstateManager& {
         ChainstateManager& current_chainman = *Assert(m_node.chainman);
 
         for (Chainstate* cs : current_chainman.GetAll()) {
@@ -3394,6 +3557,11 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_restores_prepared_shielded_transition_
                 },
             };
             m_node.chainman.reset();
+            if (drop_account_payload_store) {
+                shielded::registry::ShieldedAccountRegistryState::ResetPayloadStore();
+                fs::remove_all(chainman_opts.datadir /
+                               "shielded_state" / "account_registry");
+            }
             m_node.chainman = std::make_unique<ChainstateManager>(
                 *Assert(m_node.shutdown_signal), chainman_opts, blockman_opts);
         }
@@ -3463,6 +3631,8 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_restores_prepared_shielded_transition_
             *target_commitment_index_digest;
         prepared_marker.prepared_target_snapshot.account_registry_snapshot =
             chainman.GetShieldedAccountRegistry().ExportPersistedSnapshot();
+        prepared_marker.prepared_target_snapshot.journaled_account_payloads =
+            chainman.GetShieldedAccountRegistry().ExportSnapshot().entries;
         BOOST_REQUIRE(prepared_marker.IsPreparedTransitionJournal());
 
         BOOST_REQUIRE(chainman.WritePersistedShieldedState(source_tree,
@@ -3478,7 +3648,11 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_restores_prepared_shielded_transition_
     source_tree = shielded::ShieldedMerkleTree{
         shielded::ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY};
 
-    ChainstateManager& chainman_restarted = simulate_node_restart();
+    // Model crash after PREPARED but before the account payload batch. The
+    // journal must contain enough data to recreate the missing payload store
+    // and finish without a genesis replay.
+    ChainstateManager& chainman_restarted = simulate_node_restart(
+        /*drop_account_payload_store=*/true);
     this->LoadVerifyActivateChainstate();
 
     {
@@ -3494,6 +3668,283 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_restores_prepared_shielded_transition_
         BOOST_CHECK_EQUAL(chainman_restarted.GetShieldedAccountRegistryRoot(), expected_registry_root);
         BOOST_CHECK_EQUAL(chainman_restarted.GetShieldedAccountRegistryEntryCount(), expected_registry_size);
         BOOST_CHECK(!chainman_restarted.ReadShieldedMutationMarker().has_value());
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(chainstatemanager_gap_only_catches_up_persisted_shielded_ancestor,
+                        PersistedTestChain100Setup)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    shielded::ShieldedMerkleTree persisted_tree;
+    std::vector<uint256> persisted_anchor_roots;
+    uint256 persisted_tip_hash;
+    int32_t persisted_tip_height{-1};
+    CAmount persisted_balance{0};
+    std::optional<uint256> persisted_commitment_digest;
+    std::optional<shielded::registry::ShieldedAccountRegistryPersistedSnapshot>
+        persisted_registry;
+    std::vector<uint256> persisted_registry_roots;
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman.EnsureShieldedStateInitialized());
+        BOOST_REQUIRE(chainman.ReadPersistedShieldedState(
+            persisted_tree,
+            persisted_anchor_roots,
+            persisted_tip_hash,
+            persisted_tip_height,
+            persisted_balance,
+            persisted_commitment_digest,
+            persisted_registry,
+            &persisted_registry_roots));
+    }
+
+    const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    for (int i = 0; i < 4; ++i) CreateAndProcessBlock({}, script_pub_key);
+    uint256 expected_tip_hash;
+    int32_t expected_tip_height{-1};
+    {
+        LOCK(::cs_main);
+        expected_tip_hash = Assert(chainman.ActiveTip())->GetBlockHash();
+        expected_tip_height = chainman.ActiveTip()->nHeight;
+        // Simulate a cleanly durable shielded base followed by block-index
+        // progress that did not yet publish the newer shielded tip record.
+        BOOST_REQUIRE(chainman.WritePersistedShieldedState(
+            persisted_tree,
+            persisted_anchor_roots,
+            persisted_tip_hash,
+            persisted_tip_height,
+            persisted_balance,
+            persisted_commitment_digest,
+            persisted_registry,
+            persisted_registry_roots));
+        for (Chainstate* cs : chainman.GetAll()) cs->ForceFlushStateToDisk();
+        // ForceFlush may republish the current tip; restore the simulated
+        // ancestor record after the block index is fully durable.
+        BOOST_REQUIRE(chainman.WritePersistedShieldedState(
+            persisted_tree,
+            persisted_anchor_roots,
+            persisted_tip_hash,
+            persisted_tip_height,
+            persisted_balance,
+            persisted_commitment_digest,
+            persisted_registry,
+            persisted_registry_roots));
+    }
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+
+    const fs::path datadir = chainman.m_options.datadir;
+    {
+        LOCK(::cs_main);
+        // Drop all tree/nullifier/payload-store handles before reopening the
+        // same LevelDB paths in-process, exactly as a real process exit does.
+        chainman.ResetChainstates();
+        persisted_tree = shielded::ShieldedMerkleTree{
+            shielded::ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY};
+        m_node.chainman.reset();
+        m_node.notifications = std::make_unique<KernelNotifications>(
+            Assert(m_node.shutdown_request), m_node.exit_status, *Assert(m_node.warnings));
+        const ChainstateManager::Options chainman_opts{
+            .chainparams = ::Params(),
+            .datadir = datadir,
+            .shielded_startup_audit = false,
+            .fast_shielded_startup = true,
+            .notifications = *m_node.notifications,
+            .signals = m_node.validation_signals.get(),
+        };
+        const BlockManager::Options blockman_opts{
+            .chainparams = chainman_opts.chainparams,
+            .blocks_dir = m_args.GetBlocksDirPath(),
+            .notifications = chainman_opts.notifications,
+            .block_tree_db_params = DBParams{
+                .path = datadir / "blocks" / "index",
+                .cache_bytes = m_kernel_cache_sizes.block_tree_db,
+                .memory_only = m_block_tree_db_in_memory,
+            },
+        };
+        m_node.chainman = std::make_unique<ChainstateManager>(
+            *Assert(m_node.shutdown_signal), chainman_opts, blockman_opts);
+    }
+    ChainstateManager& restarted = *Assert(m_node.chainman);
+    this->LoadVerifyActivateChainstate();
+    {
+        LOCK(::cs_main);
+        ASSERT_DEBUG_LOG("completed gap-only shielded catch-up of 4 block(s)");
+        BOOST_REQUIRE(restarted.EnsureShieldedStateInitialized());
+        BOOST_REQUIRE(restarted.ActiveTip() != nullptr);
+        BOOST_CHECK_EQUAL(restarted.ActiveTip()->GetBlockHash(), expected_tip_hash);
+        BOOST_CHECK_EQUAL(restarted.ActiveTip()->nHeight, expected_tip_height);
+        BOOST_CHECK(!restarted.ReadShieldedMutationMarker().has_value());
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(chainstatemanager_gap_only_unwinds_persisted_shielded_descendant,
+                        PersistedTestChain100Setup)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    CreateAndProcessBlock({}, script_pub_key);
+
+    shielded::ShieldedMerkleTree ahead_tree;
+    std::vector<uint256> ahead_anchor_roots;
+    uint256 ahead_tip_hash;
+    int32_t ahead_tip_height{-1};
+    CAmount ahead_balance{0};
+    std::optional<uint256> ahead_digest;
+    std::optional<shielded::registry::ShieldedAccountRegistryPersistedSnapshot> ahead_registry;
+    std::vector<uint256> ahead_registry_roots;
+    CBlockIndex* ahead_index{nullptr};
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman.EnsureShieldedStateInitialized());
+        BOOST_REQUIRE(chainman.ReadPersistedShieldedState(
+            ahead_tree, ahead_anchor_roots, ahead_tip_hash, ahead_tip_height,
+            ahead_balance, ahead_digest, ahead_registry, &ahead_registry_roots));
+        ahead_index = chainman.m_blockman.LookupBlockIndex(ahead_tip_hash);
+        BOOST_REQUIRE(ahead_index != nullptr);
+    }
+    BlockValidationState invalidate_state;
+    BOOST_REQUIRE(chainman.ActiveChainstate().InvalidateBlock(
+        invalidate_state, ahead_index));
+    BOOST_REQUIRE(invalidate_state.IsValid());
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman.ActiveTip() != nullptr);
+        BOOST_REQUIRE_EQUAL(chainman.ActiveTip()->nHeight, ahead_tip_height - 1);
+        for (Chainstate* cs : chainman.GetAll()) cs->ForceFlushStateToDisk();
+        BOOST_REQUIRE(chainman.WritePersistedShieldedState(
+            ahead_tree, ahead_anchor_roots, ahead_tip_hash, ahead_tip_height,
+            ahead_balance, ahead_digest, ahead_registry, ahead_registry_roots));
+    }
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+
+    const fs::path datadir = chainman.m_options.datadir;
+    {
+        LOCK(::cs_main);
+        chainman.ResetChainstates();
+        ahead_tree = shielded::ShieldedMerkleTree{
+            shielded::ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY};
+        m_node.chainman.reset();
+        m_node.notifications = std::make_unique<KernelNotifications>(
+            Assert(m_node.shutdown_request), m_node.exit_status, *Assert(m_node.warnings));
+        const ChainstateManager::Options chainman_opts{
+            .chainparams = ::Params(),
+            .datadir = datadir,
+            .shielded_startup_audit = false,
+            .fast_shielded_startup = true,
+            .notifications = *m_node.notifications,
+            .signals = m_node.validation_signals.get(),
+        };
+        const BlockManager::Options blockman_opts{
+            .chainparams = chainman_opts.chainparams,
+            .blocks_dir = m_args.GetBlocksDirPath(),
+            .notifications = chainman_opts.notifications,
+            .block_tree_db_params = DBParams{
+                .path = datadir / "blocks" / "index",
+                .cache_bytes = m_kernel_cache_sizes.block_tree_db,
+                .memory_only = m_block_tree_db_in_memory,
+            },
+        };
+        m_node.chainman = std::make_unique<ChainstateManager>(
+            *Assert(m_node.shutdown_signal), chainman_opts, blockman_opts);
+    }
+    ChainstateManager& restarted = *Assert(m_node.chainman);
+    this->LoadVerifyActivateChainstate();
+    {
+        LOCK(::cs_main);
+        ASSERT_DEBUG_LOG("completed gap-only shielded unwind of 1 block(s)");
+        BOOST_REQUIRE(restarted.EnsureShieldedStateInitialized());
+        BOOST_CHECK(!restarted.ReadShieldedMutationMarker().has_value());
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(chainstatemanager_gap_only_recovers_persisted_shielded_short_fork,
+                        PersistedTestChain100Setup)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    shielded::ShieldedMerkleTree old_tree;
+    std::vector<uint256> old_anchor_roots;
+    uint256 old_tip_hash;
+    int32_t old_tip_height{-1};
+    CAmount old_balance{0};
+    std::optional<uint256> old_digest;
+    std::optional<shielded::registry::ShieldedAccountRegistryPersistedSnapshot>
+        old_registry;
+    std::vector<uint256> old_registry_roots;
+    CBlockIndex* old_tip{nullptr};
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman.EnsureShieldedStateInitialized());
+        BOOST_REQUIRE(chainman.ReadPersistedShieldedState(
+            old_tree, old_anchor_roots, old_tip_hash, old_tip_height,
+            old_balance, old_digest, old_registry, &old_registry_roots));
+        old_tip = chainman.m_blockman.LookupBlockIndex(old_tip_hash);
+        BOOST_REQUIRE(old_tip != nullptr);
+    }
+
+    BlockValidationState invalidate_state;
+    BOOST_REQUIRE(chainman.ActiveChainstate().InvalidateBlock(
+        invalidate_state, old_tip));
+    BOOST_REQUIRE(invalidate_state.IsValid());
+    const auto script_pub_key =
+        GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    const CBlock alternate{CreateAndProcessBlock({}, script_pub_key)};
+    BOOST_REQUIRE_NE(alternate.GetHash(), old_tip_hash);
+
+    uint256 expected_tip_hash;
+    const fs::path datadir = chainman.m_options.datadir;
+    {
+        LOCK(::cs_main);
+        expected_tip_hash = Assert(chainman.ActiveTip())->GetBlockHash();
+        BOOST_REQUIRE_EQUAL(chainman.ActiveTip()->nHeight, old_tip_height);
+        for (Chainstate* cs : chainman.GetAll()) cs->ForceFlushStateToDisk();
+        // Simulate a crash after the block-index reorg committed but before
+        // the old shielded tip record was transactionally advanced.
+        BOOST_REQUIRE(chainman.WritePersistedShieldedState(
+            old_tree, old_anchor_roots, old_tip_hash, old_tip_height,
+            old_balance, old_digest, old_registry, old_registry_roots));
+    }
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+
+    {
+        LOCK(::cs_main);
+        chainman.ResetChainstates();
+        old_tree = shielded::ShieldedMerkleTree{
+            shielded::ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY};
+        m_node.chainman.reset();
+        m_node.notifications = std::make_unique<KernelNotifications>(
+            Assert(m_node.shutdown_request), m_node.exit_status,
+            *Assert(m_node.warnings));
+        const ChainstateManager::Options chainman_opts{
+            .chainparams = ::Params(),
+            .datadir = datadir,
+            .shielded_startup_audit = false,
+            .fast_shielded_startup = true,
+            .notifications = *m_node.notifications,
+            .signals = m_node.validation_signals.get(),
+        };
+        const BlockManager::Options blockman_opts{
+            .chainparams = chainman_opts.chainparams,
+            .blocks_dir = m_args.GetBlocksDirPath(),
+            .notifications = chainman_opts.notifications,
+            .block_tree_db_params = DBParams{
+                .path = datadir / "blocks" / "index",
+                .cache_bytes = m_kernel_cache_sizes.block_tree_db,
+                .memory_only = m_block_tree_db_in_memory,
+            },
+        };
+        m_node.chainman = std::make_unique<ChainstateManager>(
+            *Assert(m_node.shutdown_signal), chainman_opts, blockman_opts);
+    }
+    ChainstateManager& restarted = *Assert(m_node.chainman);
+    this->LoadVerifyActivateChainstate();
+    {
+        LOCK(::cs_main);
+        ASSERT_DEBUG_LOG(
+            "completed gap-only shielded short-reorg transition (disconnect=1 connect=1)");
+        BOOST_REQUIRE(restarted.EnsureShieldedStateInitialized());
+        BOOST_REQUIRE(restarted.ActiveTip() != nullptr);
+        BOOST_CHECK_EQUAL(restarted.ActiveTip()->GetBlockHash(), expected_tip_hash);
+        BOOST_CHECK(!restarted.ReadShieldedMutationMarker().has_value());
     }
 }
 
@@ -4004,6 +4455,12 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_fast_startup_repairs_stale_unshield_ve
         expected_tip_hash = chainman.ActiveTip()->GetBlockHash();
         expected_tip_height = chainman.ActiveTip()->nHeight;
         window_blocks = chainman.GetConsensus().nShieldedUnshieldVelocityWindowBlocks;
+        ShieldedUnshieldVelocity expected_velocity;
+        expected_velocity.RecordBlock(chainman.ActiveTip()->nHeight, 0);
+        expected_velocity.Prune(
+            chainman.ActiveTip()->nHeight -
+            2 * static_cast<int32_t>(window_blocks));
+        BOOST_REQUIRE(chainman.WriteShieldedUnshieldVelocityForTest(expected_velocity));
         const auto state_pin = chainman.ComputeShieldedSnapshotStatePin();
         BOOST_REQUIRE(state_pin.has_value());
         expected_state_pin = *state_pin;

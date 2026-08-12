@@ -5502,6 +5502,20 @@ bool ConsumeGlobalMatMulRCBudget(uint32_t max_global_per_minute, uint32_t count,
     return true;
 }
 
+std::chrono::steady_clock::duration GlobalMatMulRCBudgetRetryDelay(
+    std::chrono::steady_clock::time_point now)
+{
+    using namespace std::chrono;
+    const int64_t now_sec = duration_cast<seconds>(now.time_since_epoch()).count();
+
+    LOCK(g_matmul_global_rc_mutex);
+    if (g_matmul_global_rc_window_start_sec == 0 ||
+        now_sec - g_matmul_global_rc_window_start_sec >= 60) {
+        return steady_clock::duration::zero();
+    }
+    return seconds{60 - (now_sec - g_matmul_global_rc_window_start_sec)};
+}
+
 void RefundGlobalMatMulRCBudget(
     uint32_t count,
     std::chrono::steady_clock::time_point charged_at)

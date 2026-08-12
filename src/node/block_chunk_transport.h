@@ -32,6 +32,21 @@ static constexpr uint32_t BLOCK_CHUNK_MAX_COUNT{
                                   BLOCK_CHUNK_SIZE)};
 static constexpr uint64_t BLOCK_CHUNK_GLOBAL_MEMORY_BYTES{64ULL << 20};
 static constexpr auto BLOCK_CHUNK_STALL_TIMEOUT{std::chrono::minutes{2}};
+/** Absolute lifetime prevents a slow-loris source from refreshing the idle
+ * timeout with one chunk while retaining a max-block memory reservation for
+ * tens of minutes. At the 24 MiB consensus ceiling this still permits an
+ * intentionally conservative minimum sustained rate of about 80 KiB/s. */
+static constexpr auto BLOCK_CHUNK_MAX_TRANSFER_TIME{std::chrono::minutes{5}};
+
+inline bool BlockChunkTransferExpired(
+    std::chrono::steady_clock::time_point started_at,
+    std::chrono::steady_clock::time_point last_activity,
+    std::chrono::steady_clock::time_point now)
+{
+    return now < started_at || now < last_activity ||
+           now - last_activity > BLOCK_CHUNK_STALL_TIMEOUT ||
+           now - started_at > BLOCK_CHUNK_MAX_TRANSFER_TIME;
+}
 
 struct BlockChunkManifest {
     uint256 block_hash;

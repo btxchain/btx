@@ -97,12 +97,20 @@ struct ConfirmedSettlementAnchorState
 
 struct ShieldedStateMutationMarker
 {
+    /** A transition is produced by one block/gap step, so its account payload
+     * journal must never exceed the absolute consensus block serialization
+     * ceiling, independent of runtime chain parameters. */
+    static constexpr uint64_t MAX_JOURNALED_ACCOUNT_PAYLOAD_BYTES{
+        MAX_BLOCK_SERIALIZED_SIZE};
+
     struct PreparedSnapshot
     {
         shielded::ShieldedMerkleTree tree{};
         CAmount pool_balance{0};
         uint256 commitment_index_digest;
         shielded::registry::ShieldedAccountRegistryPersistedSnapshot account_registry_snapshot;
+        std::vector<shielded::registry::ShieldedAccountRegistryEntry>
+            journaled_account_payloads;
 
         [[nodiscard]] bool IsValid() const
         {
@@ -111,7 +119,18 @@ struct ShieldedStateMutationMarker
                    pool_balance >= 0 &&
                    actual_commitment_index_digest.has_value() &&
                    commitment_index_digest == *actual_commitment_index_digest &&
-                   account_registry_snapshot.IsValid();
+                   account_registry_snapshot.IsValid() &&
+                   std::all_of(journaled_account_payloads.begin(),
+                               journaled_account_payloads.end(),
+                               [&](const auto& payload) {
+                                   return payload.IsValid() &&
+                                          !payload.spent &&
+                                          payload.leaf_index <
+                                              account_registry_snapshot.entries.size() &&
+                                          account_registry_snapshot.entries[payload.leaf_index]
+                                                  .account_leaf_commitment ==
+                                              payload.account_leaf_commitment;
+                               });
         }
 
         SERIALIZE_METHODS(PreparedSnapshot, obj)
@@ -124,7 +143,8 @@ struct ShieldedStateMutationMarker
     };
 
     static constexpr uint8_t LEGACY_VERSION{1};
-    static constexpr uint8_t PREPARED_TRANSITION_VERSION{2};
+    static constexpr uint8_t LEGACY_PREPARED_TRANSITION_VERSION{2};
+    static constexpr uint8_t PREPARED_TRANSITION_VERSION{3};
     static constexpr uint8_t PREPARED_STAGE{1};
 
     uint8_t version{LEGACY_VERSION};
@@ -145,7 +165,8 @@ struct ShieldedStateMutationMarker
         if (version == LEGACY_VERSION) {
             return IsValidTip(target_tip_height, target_tip_hash);
         }
-        if (version != PREPARED_TRANSITION_VERSION) {
+        if (version != LEGACY_PREPARED_TRANSITION_VERSION &&
+            version != PREPARED_TRANSITION_VERSION) {
             return false;
         }
         return stage == PREPARED_STAGE &&
@@ -156,7 +177,8 @@ struct ShieldedStateMutationMarker
 
     [[nodiscard]] bool IsPreparedTransitionJournal() const
     {
-        return version == PREPARED_TRANSITION_VERSION &&
+        return (version == LEGACY_PREPARED_TRANSITION_VERSION ||
+                version == PREPARED_TRANSITION_VERSION) &&
                stage == PREPARED_STAGE &&
                prepared_target_snapshot.IsValid();
     }
@@ -180,6 +202,84 @@ struct ShieldedStateMutationMarker
                   obj.source_tip_hash,
                   obj.source_tip_height,
                   obj.prepared_target_snapshot);
+        if (obj.version >= PREPARED_TRANSITION_VERSION) {
+            auto& payloads{
+                obj.prepared_target_snapshot.journaled_account_payloads};
+            if constexpr (ser_action.ForRead()) {
+                const uint64_t count = shielded::registry::detail::
+                    UnserializeBoundedCompactSize(
+                        s,
+                        shielded::registry::MAX_REGISTRY_ENTRIES,
+                        "ShieldedStateMutationMarker::Unserialize oversized payload count");
+                payloads.clear();
+                uint64_t cumulative_payload_bytes{0};
+                for (uint64_t i = 0; i < count; ++i) {
+                    shielded::registry::ShieldedAccountRegistryEntry entry;
+                    ::Unserialize(s, entry.version);
+                    if (entry.version != shielded::registry::REGISTRY_WIRE_VERSION) {
+                        throw std::ios_base::failure(
+                            "ShieldedStateMutationMarker::Unserialize invalid payload version");
+                    }
+                    ::Unserialize(s, entry.leaf_index);
+                    ::Unserialize(s, entry.account_leaf_commitment);
+                    const uint64_t remaining{
+                        MAX_JOURNALED_ACCOUNT_PAYLOAD_BYTES -
+                        cumulative_payload_bytes};
+                    const uint64_t payload_size = shielded::registry::detail::
+                        UnserializeBoundedCompactSize(
+                            s,
+                            remaining,
+                            "ShieldedStateMutationMarker::Unserialize oversized cumulative payloads");
+                    entry.account_leaf_payload.assign(payload_size, 0);
+                    if (payload_size > 0) {
+                        s.read(AsWritableBytes(Span<uint8_t>{
+                            entry.account_leaf_payload.data(),
+                            entry.account_leaf_payload.size()}));
+                    }
+                    ::Unserialize(s, entry.spent);
+                    if (!entry.IsValid() || entry.spent) {
+                        throw std::ios_base::failure(
+                            "ShieldedStateMutationMarker::Unserialize invalid journaled payload");
+                    }
+                    cumulative_payload_bytes += payload_size;
+                    payloads.push_back(std::move(entry));
+                }
+            } else {
+                shielded::registry::detail::SerializeBoundedCompactSize(
+                    s,
+                    payloads.size(),
+                    shielded::registry::MAX_REGISTRY_ENTRIES,
+                    "ShieldedStateMutationMarker::Serialize oversized payload count");
+                uint64_t cumulative_payload_bytes{0};
+                for (const auto& entry : payloads) {
+                    if (!entry.IsValid() || entry.spent ||
+                        entry.account_leaf_payload.size() >
+                            MAX_JOURNALED_ACCOUNT_PAYLOAD_BYTES -
+                                cumulative_payload_bytes) {
+                        throw std::ios_base::failure(
+                            "ShieldedStateMutationMarker::Serialize oversized or invalid journaled payload");
+                    }
+                    ::Serialize(s, entry.version);
+                    ::Serialize(s, entry.leaf_index);
+                    ::Serialize(s, entry.account_leaf_commitment);
+                    shielded::registry::detail::SerializeBoundedCompactSize(
+                        s,
+                        entry.account_leaf_payload.size(),
+                        MAX_JOURNALED_ACCOUNT_PAYLOAD_BYTES -
+                            cumulative_payload_bytes,
+                        "ShieldedStateMutationMarker::Serialize oversized cumulative payloads");
+                    if (!entry.account_leaf_payload.empty()) {
+                        s.write(AsBytes(Span<const uint8_t>{
+                            entry.account_leaf_payload.data(),
+                            entry.account_leaf_payload.size()}));
+                    }
+                    ::Serialize(s, entry.spent);
+                    cumulative_payload_bytes += entry.account_leaf_payload.size();
+                }
+            }
+        } else if constexpr (ser_action.ForRead()) {
+            obj.prepared_target_snapshot.journaled_account_payloads.clear();
+        }
     }
 };
 

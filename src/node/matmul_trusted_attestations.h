@@ -166,7 +166,8 @@ void NoteAuthorityPeerTipHint(int32_t height);
  * Tip-extending work is always eligible (except cancelled/stopped paths): it is
  * how the mirror advances, and may briefly probe one height past a stale
  * frontier so the frontier can catch up when the authority mines. Everything
- * else must be a forward extension of the active tip's chain, must not sit on a
+ * else must be a forward extension of the active tip's chain or lie on the
+ * exact branch selected by shared shallow-recovery state, must not sit on a
  * parked deep-reorg branch, must not exceed the known authority frontier, and
  * must not be in negative-cache backoff after signers stayed silent.
  */
@@ -192,6 +193,10 @@ struct TrustedAttestationAdmitView {
     //! ahead, requesting nothing. Deep-reorg refusal stays with the park policy,
     //! which is evaluated separately and still wins.
     bool better_work_reorg_candidate{false};
+    //! Candidate lies on the exact branch selected by shared recovery state.
+    //! Roots of that branch may temporarily carry less work than a losing
+    //! active tip and still must be admitted so their descendants can connect.
+    bool on_recovery_branch{false};
     bool on_parked_reorg_branch{false};
     int32_t height{-1};
     std::optional<int32_t> authority_frontier{};
@@ -213,7 +218,8 @@ struct TrustedAttestationAdmitView {
     // would make a mirror that lost a same-height race unable to ever fetch the
     // winning branch. Depth is not this rule's concern: on_parked_reorg_branch
     // above already refused anything the park policy declined.
-    if (!v.extends_active_tip_chain && !v.better_work_reorg_candidate) {
+    if (!v.extends_active_tip_chain && !v.better_work_reorg_candidate &&
+        !v.on_recovery_branch) {
         return TrustedAttestationAdmit::RejectNotForwardOfTip;
     }
     if (v.authority_frontier.has_value() &&
@@ -406,6 +412,19 @@ struct TrustedMirrorAuthorityHeaderView {
     bool current_best_extends_tip{false};
     bool candidate_extends_current_best{false};
 };
+
+/** A peer's recent valid signature is branch-bound provenance, not a bearer
+ * capability. It may steer only descendants of the exact attested block. */
+[[nodiscard]] inline bool AuthorityProofCoversCandidate(
+    bool proof_recent, bool proof_index_known, int32_t proof_height,
+    int32_t candidate_height, bool candidate_descends_proof,
+    bool proof_not_behind_active_tip = true,
+    bool authority_context_matches = true)
+{
+    return proof_recent && proof_index_known && proof_height >= 0 &&
+        candidate_height >= proof_height && candidate_descends_proof &&
+        proof_not_behind_active_tip && authority_context_matches;
+}
 
 [[nodiscard]] inline bool PreferTrustedMirrorAuthorityHeader(
     const TrustedMirrorAuthorityHeaderView& v)

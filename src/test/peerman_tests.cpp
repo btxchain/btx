@@ -129,6 +129,23 @@ BOOST_AUTO_TEST_CASE(block_chunk_manifest_and_assembler_bounds)
     BOOST_CHECK(bad.Add(second) == BlockChunkAddResult::HASH_MISMATCH);
 }
 
+BOOST_AUTO_TEST_CASE(block_chunk_transfer_has_idle_and_absolute_deadlines)
+{
+    using namespace std::chrono_literals;
+    const auto start{std::chrono::steady_clock::time_point{10min}};
+
+    BOOST_CHECK(!node::BlockChunkTransferExpired(
+        start, start + 90s, start + 2min));
+    BOOST_CHECK(node::BlockChunkTransferExpired(
+        start, start + 1min, start + 3min + 1s));
+
+    // Continuous small chunks cannot refresh a reservation indefinitely.
+    BOOST_CHECK(node::BlockChunkTransferExpired(
+        start, start + 4min + 59s, start + 5min + 1s));
+    BOOST_CHECK(node::BlockChunkTransferExpired(
+        start, start, start - 1s));
+}
+
 // Verifying when network-limited peer connections are desirable based on the node's proximity to the tip
 BOOST_AUTO_TEST_CASE(connections_desirable_service_flags)
 {
@@ -1082,7 +1099,7 @@ BOOST_AUTO_TEST_CASE(trusted_mirror_divergent_tip_follows_authority_headers)
     consensus.nMatMulRCHeight = losing_tip->nHeight;
     peerman.SetBestBlock(losing_tip->nHeight,
                          std::chrono::seconds{losing_tip->GetBlockTime()});
-    WITH_LOCK(::cs_main, m_node.chainman->m_best_header = losing_tip);
+    WITH_LOCK(::cs_main, m_node.chainman->SetBestHeader(losing_tip));
     BOOST_REQUIRE_EQUAL(
         WITH_LOCK(::cs_main,
                   return m_node.chainman->m_best_header->GetBlockHash()),

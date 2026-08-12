@@ -73,15 +73,17 @@ struct AttestedUTXOSnapshotChunkMsg {
 };
 
 /**
- * Process-local coordinator for RPC-driven attested snapshot fetches and for
- * server-side DoS accounting. Message delivery is fulfilled from net_processing.
+ * Peer-manager-owned coordinator for RPC-driven attested snapshot fetches and
+ * server-side DoS accounting. Message delivery is fulfilled from the owning
+ * net_processing instance, preventing sessions/budgets bleeding across nodes
+ * or successive test contexts in one process.
  */
 class AttestedUTXOSnapshotP2P
 {
 public:
     using SessionId = uint64_t;
     static constexpr size_t MAX_CLIENT_SESSIONS{4};
-    static AttestedUTXOSnapshotP2P& Get();
+    AttestedUTXOSnapshotP2P() = default;
 
     void ResetForTest();
 
@@ -91,6 +93,11 @@ public:
     [[nodiscard]] bool AdmitChunkRequest(NodeId peer, std::chrono::microseconds now);
     void ReleaseChunkTransfer(NodeId peer);
     void PeerDisconnected(NodeId peer);
+    [[nodiscard]] bool OfferSnapshot(AttestedUTXOSnapshotOffer offer,
+                                     std::string& error);
+    void ClearOffer();
+    [[nodiscard]] std::optional<AttestedUTXOSnapshotOffer> GetOffer();
+    [[nodiscard]] bool HasOffer();
 
     /**
      * Client: allocate an isolated fetch session. Concurrent RPCs cannot
@@ -122,6 +129,7 @@ private:
     std::condition_variable m_cv;
     std::map<NodeId, PeerBudget> m_budgets GUARDED_BY(m_mutex);
     size_t m_global_transfers GUARDED_BY(m_mutex){0};
+    std::optional<AttestedUTXOSnapshotOffer> m_offer GUARDED_BY(m_mutex);
 
     struct ClientSession {
         NodeId peer{-1};

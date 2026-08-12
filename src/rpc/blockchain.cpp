@@ -4811,6 +4811,7 @@ static RPCHelpMan offerattestedutxosnapshot()
 {
     EnsureNotWalletRestricted(request);
     NodeContext& node = EnsureAnyNodeContext(request.context);
+    PeerManager& peerman = EnsurePeerman(node);
     const ArgsManager& args{EnsureArgsman(node)};
     const fs::path path{
         AbsPathForConfigVal(args, fs::u8path(self.Arg<std::string>("path")))};
@@ -4840,7 +4841,7 @@ static RPCHelpMan offerattestedutxosnapshot()
                           matmul::trusted::UtxoSnapshotVerifyResultName(verified)));
         }
     }
-    if (!node::OfferAttestedUTXOSnapshot(offer, error)) {
+    if (!peerman.AttestedUTXOSnapshotCoordinator().OfferSnapshot(offer, error)) {
         throw JSONRPCError(RPC_MISC_ERROR, error);
     }
     node.connman->AddLocalServices(NODE_ATTESTED_UTXO_SNAPSHOT);
@@ -4872,7 +4873,8 @@ static RPCHelpMan withdrawattestedutxosnapshot()
 {
     EnsureNotWalletRestricted(request);
     NodeContext& node = EnsureAnyNodeContext(request.context);
-    node::ClearAttestedUTXOSnapshotOffer();
+    PeerManager& peerman = EnsurePeerman(node);
+    peerman.AttestedUTXOSnapshotCoordinator().ClearOffer();
     node.connman->RemoveLocalServices(NODE_ATTESTED_UTXO_SNAPSHOT);
     UniValue result{UniValue::VOBJ};
     result.pushKV("withdrawn", true);
@@ -4966,7 +4968,7 @@ static RPCHelpMan fetchattestedutxosnapshot()
         peer_id = peers.front();
     }
 
-    auto& coord{node::AttestedUTXOSnapshotP2P::Get()};
+    auto& coord{peerman.AttestedUTXOSnapshotCoordinator()};
     const auto session{coord.BeginSession(peer_id, want_hash)};
     if (!session) {
         throw JSONRPCError(RPC_MISC_ERROR,

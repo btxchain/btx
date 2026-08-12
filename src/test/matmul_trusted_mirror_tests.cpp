@@ -80,42 +80,17 @@ std::string HexPubKey(const CKey& key)
     return HexStr(pubkey);
 }
 
-//! Run the real startup parameter interaction with a trusted-mirror signer
-//! configuration, on whatever chain the enclosing fixture selected.
-//! Restores every argument this helper forces, on every exit path.
-//!
-//! Without it these cases leaked -matmultrustedpubkey into the shared
-//! ArgsManager, so any LATER test in the same test_btx process hit parameter
-//! interaction with a stale (and, across two cases, duplicated) signer set.
-//! matmul_v4_rc_production_canary_tests then failed when run after this suite
-//! while passing in isolation -- order-dependent global state, which is the
-//! hardest kind of failure to diagnose from a combined run.
-class ScopedForcedArgs
-{
-public:
-    explicit ScopedForcedArgs(ArgsManager& args) : m_args{args} {}
-    ~ScopedForcedArgs()
-    {
-        // Restore VALID defaults, not empty strings: an empty
-        // -matmulvalidation is not a recognised mode, so clearing it that way
-        // made every later AppInitParameterInteraction in the process fail.
-        m_args.ForceSetArgV("-matmultrustedpubkey", UniValue{UniValue::VARR});
-        m_args.ForceSetArg("-matmultrustedthreshold", int64_t{1});
-        m_args.ForceSetArg("-matmulvalidation", "consensus");
-        // Deliberately does NOT reset the trusted-mirror runtime: the accept
-        // cases inspect the installed quorum after this helper returns.
-    }
-private:
-    ArgsManager& m_args;
-};
-
-bool TrustedMirrorStartupAccepted(ArgsManager& args,
-                                  const std::vector<std::string>& pubkeys,
+//! Each simulated startup gets a private argument value store. Registration is
+//! intentionally unnecessary here: AppInitParameterInteraction reads these
+//! values but parsing/help is not under test. Reusing the fixture's global
+//! manager would leak ForceSet values into later fixtures, while registering a
+//! second complete server option table recursively constructs chain params.
+bool TrustedMirrorStartupAccepted(const std::vector<std::string>& pubkeys,
                                   int64_t threshold,
                                   std::string& error)
 {
     node::matmul_trusted::ResetForTest();
-    ScopedForcedArgs restore{args};
+    ArgsManager args;
     args.ForceSetArg("-matmulvalidation", "trusted");
     UniValue keys{UniValue::VARR};
     for (const auto& hex : pubkeys) keys.push_back(hex);
@@ -296,19 +271,19 @@ BOOST_AUTO_TEST_CASE(mainnet_trusted_mirror_allows_but_warns_on_single_key_quoru
 
     // 1-of-1 starts.
     BOOST_CHECK_MESSAGE(TrustedMirrorStartupAccepted(
-        *m_node.args, {key_a}, /*threshold=*/1, error), error);
+        {key_a}, /*threshold=*/1, error), error);
 
     // 2-of-N with M == 1 is the same single-key authority, and also starts.
     RuntimeReset reset_again;
     BOOST_CHECK_MESSAGE(TrustedMirrorStartupAccepted(
-        *m_node.args, {key_a, key_b}, /*threshold=*/1, error), error);
+        {key_a, key_b}, /*threshold=*/1, error), error);
 
     // What must STILL be refused is a threshold that cannot be met, and
     // duplicate keys inflating the signer count -- neither is a deployed
     // configuration and both are simply invalid.
     RuntimeReset reset_third;
     BOOST_CHECK(!TrustedMirrorStartupAccepted(
-        *m_node.args, {key_a}, /*threshold=*/2, error));
+        {key_a}, /*threshold=*/2, error));
 }
 
 BOOST_AUTO_TEST_CASE(mainnet_trusted_mirror_accepts_two_of_two)
@@ -321,7 +296,7 @@ BOOST_AUTO_TEST_CASE(mainnet_trusted_mirror_accepts_two_of_two)
 
     BOOST_CHECK_MESSAGE(
         TrustedMirrorStartupAccepted(
-            *m_node.args, {key_a, key_b}, /*threshold=*/2, error),
+            {key_a, key_b}, /*threshold=*/2, error),
         error);
     std::string finalize_error;
     BOOST_CHECK_MESSAGE(FinalizedTrustedMirrorInstalled(finalize_error),
@@ -343,7 +318,7 @@ BOOST_AUTO_TEST_CASE(duplicate_trusted_pubkeys_are_refused)
     std::string finalize_error;
 
     BOOST_CHECK(!TrustedMirrorStartupAccepted(
-        *m_node.args, {key_a, key_a}, /*threshold=*/2, error));
+        {key_a, key_a}, /*threshold=*/2, error));
     BOOST_CHECK_MESSAGE(
         error.find("Duplicate -matmultrustedpubkey") != std::string::npos,
         error);
@@ -353,7 +328,7 @@ BOOST_AUTO_TEST_CASE(duplicate_trusted_pubkeys_are_refused)
     // Also refused when the duplicate is not adjacent and N would otherwise be
     // large enough on its own.
     BOOST_CHECK(!TrustedMirrorStartupAccepted(
-        *m_node.args, {key_a, key_b, key_a}, /*threshold=*/2, error));
+        {key_a, key_b, key_a}, /*threshold=*/2, error));
     BOOST_CHECK_MESSAGE(
         error.find("Duplicate -matmultrustedpubkey") != std::string::npos,
         error);
@@ -373,7 +348,7 @@ BOOST_FIXTURE_TEST_CASE(non_mainnet_trusted_mirror_keeps_one_of_one,
 
     BOOST_CHECK_MESSAGE(
         TrustedMirrorStartupAccepted(
-            *m_node.args, {key_a}, /*threshold=*/1, error),
+            {key_a}, /*threshold=*/1, error),
         error);
     std::string finalize_error;
     BOOST_CHECK_MESSAGE(FinalizedTrustedMirrorInstalled(finalize_error),
@@ -382,7 +357,7 @@ BOOST_FIXTURE_TEST_CASE(non_mainnet_trusted_mirror_keeps_one_of_one,
 
     // The duplicate rejection is chain-independent.
     BOOST_CHECK(!TrustedMirrorStartupAccepted(
-        *m_node.args, {key_a, key_a}, /*threshold=*/2, error));
+        {key_a, key_a}, /*threshold=*/2, error));
     BOOST_CHECK_MESSAGE(
         error.find("Duplicate -matmultrustedpubkey") != std::string::npos,
         error);
@@ -521,6 +496,22 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
             .on_parked_reorg_branch = false,
             .height = 186356,
             .authority_frontier = 186383,
+            .in_backoff = false,
+        }) == TrustedAttestationAdmit::Allow);
+
+    // The lower roots of an explicitly selected shallow recovery branch can
+    // have less work than the losing active tip. They remain admissible so the
+    // already-followed/authenticated upper branch can connect. This does not
+    // bypass PARK, which is evaluated first.
+    BOOST_CHECK(
+        EvaluateTrustedAttestationAdmit(TrustedAttestationAdmitView{
+            .tip_extending = false,
+            .extends_active_tip_chain = false,
+            .better_work_reorg_candidate = false,
+            .on_recovery_branch = true,
+            .on_parked_reorg_branch = false,
+            .height = 186350,
+            .authority_frontier = 186390,
             .in_backoff = false,
         }) == TrustedAttestationAdmit::Allow);
 
@@ -855,6 +846,41 @@ BOOST_AUTO_TEST_CASE(authority_header_preference_rescues_divergent_tip)
         /*best_header_known=*/false,
         /*peer_best_is_ancestor_of_best_header=*/true,
         /*peer_best_extends_best_header=*/true));
+}
+
+BOOST_AUTO_TEST_CASE(authority_peer_proof_is_branch_bound)
+{
+    using node::matmul_trusted::AuthorityProofCoversCandidate;
+
+    BOOST_CHECK(AuthorityProofCoversCandidate(
+        /*proof_recent=*/true, /*proof_index_known=*/true,
+        /*proof_height=*/100, /*candidate_height=*/120,
+        /*candidate_descends_proof=*/true));
+
+    // An old valid signature relayed by a peer is not authority for an
+    // unrelated equal/heavier fork, and expiry closes even the certified
+    // branch's temporary routing preference.
+    BOOST_CHECK(!AuthorityProofCoversCandidate(
+        /*proof_recent=*/true, /*proof_index_known=*/true,
+        /*proof_height=*/100, /*candidate_height=*/120,
+        /*candidate_descends_proof=*/false));
+    BOOST_CHECK(!AuthorityProofCoversCandidate(
+        /*proof_recent=*/false, /*proof_index_known=*/true,
+        /*proof_height=*/100, /*candidate_height=*/120,
+        /*candidate_descends_proof=*/true));
+    // A replayed signature below the current tip is a common-ancestor token,
+    // not a branch certificate; accepting it would authorize either sibling.
+    BOOST_CHECK(!AuthorityProofCoversCandidate(
+        /*proof_recent=*/true, /*proof_index_known=*/true,
+        /*proof_height=*/100, /*candidate_height=*/120,
+        /*candidate_descends_proof=*/true,
+        /*proof_not_behind_active_tip=*/false));
+    BOOST_CHECK(!AuthorityProofCoversCandidate(
+        /*proof_recent=*/true, /*proof_index_known=*/true,
+        /*proof_height=*/100, /*candidate_height=*/120,
+        /*candidate_descends_proof=*/true,
+        /*proof_not_behind_active_tip=*/true,
+        /*authority_context_matches=*/false));
 }
 
 BOOST_AUTO_TEST_CASE(unattestable_reject_counter_is_distinct_not_hot_loop)

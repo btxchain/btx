@@ -61,6 +61,13 @@ namespace node {
 class MatMulVerifyWorker
 {
 public:
+    /** Trusted mirrors wait for signatures rather than consuming a compute
+     * lane. Bound that retained-body state independently from the expensive
+     * replay queue so a missing signer cannot monopolize the default cap-one
+     * RC verifier or turn full block deliveries into unbounded memory. */
+    static constexpr size_t MAX_AWAITING_QUORUM_JOBS{16};
+    static constexpr size_t MAX_AWAITING_QUORUM_BYTES{128U * 1024U * 1024U};
+
     enum class Priority : uint8_t {
         Background = 0,
         CompetingBranch = 1,
@@ -109,6 +116,11 @@ public:
         //! leaving the block retryable; it must not punish a peer or pin a
         //! negative verdict.
         std::function<void()> retryable_failure;
+        //! Expensive-lifecycle transition hooks. These are resource-owner
+        //! callbacks, not observers: net_processing uses them to advance the
+        //! generation that owns the retained body/cancel token/pending lease.
+        std::function<void()> on_started;
+        std::function<void()> on_parked;
         //! Header-only jobs begin digest-only ExactReplay while the body is
         //! still transferring/reconstructing. Exactly one of block/header is
         //! populated.
@@ -119,6 +131,10 @@ public:
         //! stores it outside `completion` so one bounded equal-priority
         //! handoff can transfer ownership without opening a second slot.
         std::shared_ptr<void> rc_pending_lease;
+        //! Serialized full-body bytes retained while this job awaits quorum.
+        //! Header-only jobs use zero. This is charged against the dedicated
+        //! awaiting-quorum byte cap, not the compute pending-work cap.
+        size_t retained_body_bytes{0};
         //! Header-only speculative quota/set ownership. Transferred to another
         //! header or released when the handoff target is a complete body.
         std::shared_ptr<void> rc_speculative_lease;
@@ -234,6 +250,7 @@ private:
     //! Parked trusted-mirror jobs: waiting for M-of-N quorum without binding a
     //! worker thread. Still present in m_pending.
     std::map<uint256, std::shared_ptr<Pending>> m_awaiting_quorum; // GUARDED_BY(m_mutex)
+    size_t m_awaiting_quorum_bytes{0}; // GUARDED_BY(m_mutex)
     uint256 m_tip_hash{}; // GUARDED_BY(m_mutex)
     int32_t m_tip_height{-1}; // GUARDED_BY(m_mutex)
     uint64_t m_next_sequence{0};          // GUARDED_BY(m_mutex)

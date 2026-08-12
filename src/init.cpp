@@ -122,6 +122,7 @@
 #include <fstream>
 #include <functional>
 #include <limits>
+#include <memory>
 #include <set>
 #include <string>
 #include <string_view>
@@ -1235,6 +1236,29 @@ bool RefuseUnverifiableMatMulConsensusStartup(
            validation_mode == "consensus" &&
            !strict_device_ready &&
            !allow_unverifiable_startup;
+}
+
+MatMulRCRuntimeReprobeResult RunUnavailableMatMulRCRuntimeReprobe(
+    const bool strict_device_ready,
+    const std::string& provider,
+    const std::function<std::pair<bool, std::string>(const std::string&)>& probe)
+{
+    MatMulRCRuntimeReprobeResult result;
+    result.provider = provider;
+    if (strict_device_ready || provider.empty() || !probe) {
+        result.reason = strict_device_ready ? "strict_device_ready" :
+            (provider.empty() ? "no_runtime_candidate" : "probe_unavailable");
+        return result;
+    }
+
+    result.attempted = true;
+    auto [available, reason] = probe(provider);
+    result.runtime_candidate_available = available;
+    result.reason = reason.empty()
+        ? (available ? "runtime_identity_available"
+                     : "runtime_identity_unavailable")
+        : std::move(reason);
+    return result;
 }
 
 bool AppInitParameterInteraction(const ArgsManager& args)
@@ -3360,8 +3384,50 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         static_cast<uint64_t>(NODE_MATMUL_ATTESTATION_ARCHIVE))};
     const ServiceFlags ready_services{static_cast<ServiceFlags>(
         connOptions.m_local_services & withdrawn)};
+    const bool rc_runtime_monitor_enabled{
+        chainparams.GetConsensus().nMatMulRCHeight !=
+            std::numeric_limits<int32_t>::max() &&
+        !chainparams.GetConsensus().fMatMulRCUseToyDims &&
+        args.GetArg("-matmulvalidation", "consensus") == "consensus" &&
+        matmul::v4::rc::GetRCExactReplayExecutionPolicy() ==
+            matmul::v4::rc::RCExactReplayExecutionPolicy::StrictDevice};
+    const int32_t rc_activation_height{
+        chainparams.GetConsensus().nMatMulRCHeight};
+    const auto rc_runtime_ready{std::make_shared<std::atomic_bool>(
+        !rc_runtime_monitor_enabled || ready_services != NODE_NONE)};
+    const auto publish_rc_unverifiable_warning =
+        [&node, rc_activation_height](const std::string& provider,
+                                      const std::string& reason) {
+            // Keep this independent of tip movement so -alertnotify does not
+            // fire on every bounded scheduler observation. The warning is
+            // intentionally persistent: this process has no safe transition
+            // that can clear a process-lifetime provider quarantine and issue
+            // a new canary-bound capability atomically.
+            const auto warning{strprintf(
+                _("CRITICAL: MatMul RC strict-device validation is unavailable. "
+                  "The next MatMul RC block at or after activation height %d "
+                  "cannot be independently verified by this node; MatMul "
+                  "consensus-validator and attestation-archive services are "
+                  "withheld. provider=%s reason=%s. Runtime presence is "
+                  "re-probed on a bounded cooldown, but presence alone is not "
+                  "qualification. Restart with a provider that passes the "
+                  "full self-qualification and production canary, or use an "
+                  "explicitly trusted/economic/SPV validation mode."),
+                rc_activation_height,
+                provider.empty() ? "unavailable" : provider,
+                reason.empty() ? "strict_device_not_ready" : reason)};
+            node.chainman->GetNotifications().warningSet(
+                kernel::Warning::MATMUL_RC_NEXT_BLOCK_UNVERIFIABLE,
+                warning, /*update=*/true);
+        };
     const auto withdraw_validator_readiness =
-        [&node](const std::string& provider, const std::string& reason) {
+        [&node, rc_runtime_monitor_enabled, rc_runtime_ready,
+         publish_rc_unverifiable_warning](
+            const std::string& provider, const std::string& reason) {
+            if (rc_runtime_monitor_enabled) {
+                rc_runtime_ready->store(false, std::memory_order_release);
+                publish_rc_unverifiable_warning(provider, reason);
+            }
             if (!node.connman) return;
             const ServiceFlags withdrawn{static_cast<ServiceFlags>(
                 static_cast<uint64_t>(NODE_MATMUL_CONSENSUS) |
@@ -3381,7 +3447,8 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                 "unavailable (last_provider=%s, reason=%s). Disconnected %u "
                 "peer(s) so they re-handshake without stale service flags. "
                 "This node no longer advertises MatMul consensus validation; "
-                "restart with a qualified provider to restore it.\n",
+                "runtime presence will be re-probed on a bounded cooldown, "
+                "but restart with a fully qualified provider to restore it.\n",
                 provider, reason, dropped);
         };
 
@@ -3429,6 +3496,76 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                 }
             }
         }
+    }
+
+    if (rc_runtime_monitor_enabled) {
+        if (!rc_runtime_ready->load(std::memory_order_acquire)) {
+            const auto resolution{
+                matmul_v4::accel::ProbeLastRCExactGemmResolution()};
+            const auto health{
+                matmul::v4::rc::GetRCExactReplayProviderHealth()};
+            publish_rc_unverifiable_warning(
+                health.provider.empty() ? resolution.provider : health.provider,
+                health.reason.empty() ? resolution.reason : health.reason);
+        }
+
+        // A production-shape canary can be extremely expensive. This monitor
+        // therefore does one cheap, non-secret runtime-identity observation per
+        // cooldown and only while unavailable. It never clears process-lifetime
+        // quarantine, mutates provider registration, runs self-qualification,
+        // reruns a golden canary, or republishes service bits. Those operations
+        // require a single atomic recovery protocol that the provider layer does
+        // not currently expose; claiming recovery from presence alone would be
+        // a fail-open consensus bug.
+        scheduler.scheduleEvery(
+            [rc_runtime_ready, publish_rc_unverifiable_warning] {
+                if (rc_runtime_ready->load(std::memory_order_acquire)) return;
+
+                const auto resolution{
+                    matmul_v4::accel::ProbeLastRCExactGemmResolution()};
+                std::string candidate{resolution.provider};
+                if (candidate.empty() || candidate == "cpu" ||
+                    candidate == "not-probed") {
+                    if (resolution.requested == "cuda" ||
+                        resolution.requested == "nvidia") {
+                        candidate = "cuda";
+                    } else if (resolution.requested == "metal" ||
+                               resolution.requested == "mlx" ||
+                               resolution.requested == "apple") {
+                        candidate = "metal";
+                    } else {
+#if defined(__APPLE__)
+                        candidate = "metal";
+#else
+                        candidate = "cuda";
+#endif
+                    }
+                }
+
+                const auto observation{RunUnavailableMatMulRCRuntimeReprobe(
+                    /*strict_device_ready=*/false, candidate,
+                    [](const std::string& provider) {
+                        const auto identity{
+                            matmul::v4::rc::ProbeRCProductionProviderIdentity(
+                                provider)};
+                        // Do not surface driver strings, device names, paths,
+                        // or other deployment details in the persistent alert.
+                        return std::pair<bool, std::string>{
+                            identity.complete,
+                            identity.complete
+                                ? "runtime_identity_present_but_full_qualification_requires_restart"
+                                : "runtime_identity_unavailable"};
+                    })};
+                publish_rc_unverifiable_warning(
+                    observation.provider, observation.reason);
+                LogPrintf(
+                    "MatMul RC runtime re-probe: provider=%s present=%d "
+                    "reason=%s; validator readiness remains fail-closed\n",
+                    observation.provider,
+                    observation.runtime_candidate_available,
+                    observation.reason);
+            },
+            std::chrono::minutes{30});
     }
 
     // ********************************************************* Step 13: finished

@@ -2644,6 +2644,29 @@ BOOST_AUTO_TEST_CASE(rc_enqueue_refund_receipt_rolls_source_counters_back_once)
     RefundGlobalMatMulRCBudget(kWorkUnits, charged_at);
 }
 
+BOOST_AUTO_TEST_CASE(rc_global_budget_retry_delay_tracks_current_window)
+{
+    using namespace std::chrono_literals;
+
+    const auto charged_at{std::chrono::steady_clock::now()};
+    BOOST_REQUIRE(ConsumeGlobalMatMulRCBudget(
+        /*max_global_per_minute=*/1, /*count=*/1, charged_at));
+
+    const auto still_limited_at{charged_at + 10s};
+    BOOST_CHECK(!ConsumeGlobalMatMulRCBudget(
+        /*max_global_per_minute=*/1, /*count=*/1, still_limited_at));
+    const auto retry_delay{GlobalMatMulRCBudgetRetryDelay(still_limited_at)};
+    BOOST_CHECK_GE(retry_delay, 49s);
+    BOOST_CHECK_LE(retry_delay, 50s);
+
+    BOOST_CHECK_EQUAL(
+        GlobalMatMulRCBudgetRetryDelay(charged_at + 60s),
+        std::chrono::steady_clock::duration::zero());
+
+    // Do not leak this process-global test debit into later suites.
+    RefundGlobalMatMulRCBudget(/*count=*/1, charged_at);
+}
+
 // --- Stage H required-test scaffolding (final-form build spec) -------------
 
 BOOST_AUTO_TEST_CASE(rc_stage_h_v1_golden_preserved)

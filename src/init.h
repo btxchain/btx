@@ -7,7 +7,9 @@
 #define BITCOIN_INIT_H
 
 #include <atomic>
+#include <functional>
 #include <string>
+#include <utility>
 
 class CChainParams;
 
@@ -105,5 +107,23 @@ bool RefuseUnverifiableMatMulConsensusStartup(
     const std::string& validation_mode,
     bool strict_device_ready,
     bool allow_unverifiable_startup);
+
+/** Result of one cheap runtime-presence re-probe while strict-device
+ * validation is unavailable. This deliberately does not run self-
+ * qualification or the production-shape golden canary. */
+struct MatMulRCRuntimeReprobeResult {
+    bool attempted{false};
+    bool runtime_candidate_available{false};
+    std::string provider;
+    std::string reason;
+};
+
+/** Invoke a supplied cheap runtime-identity probe at most once, and only while
+ * strict-device readiness is unavailable. Exposed to pin the scheduler's
+ * fail-closed policy without touching accelerator hardware in unit tests. */
+MatMulRCRuntimeReprobeResult RunUnavailableMatMulRCRuntimeReprobe(
+    bool strict_device_ready,
+    const std::string& provider,
+    const std::function<std::pair<bool, std::string>(const std::string&)>& probe);
 
 #endif // BITCOIN_INIT_H

@@ -585,6 +585,23 @@ MakePreparedShieldedSnapshot(const shielded::ShieldedMerkleTree& tree,
     prepared_snapshot.pool_balance = pool.GetBalance();
     prepared_snapshot.commitment_index_digest = *commitment_index_digest;
     prepared_snapshot.account_registry_snapshot = account_registry_snapshot;
+    const auto journaled_account_payloads =
+        account_registry.ExportPreparedPayloadEntries();
+    if (!journaled_account_payloads.has_value()) {
+        return std::nullopt;
+    }
+    uint64_t cumulative_payload_bytes{0};
+    for (const auto& entry : *journaled_account_payloads) {
+        const uint64_t payload_size{entry.account_leaf_payload.size()};
+        if (payload_size >
+            ShieldedStateMutationMarker::MAX_JOURNALED_ACCOUNT_PAYLOAD_BYTES -
+                cumulative_payload_bytes) {
+            return std::nullopt;
+        }
+        cumulative_payload_bytes += payload_size;
+    }
+    prepared_snapshot.journaled_account_payloads =
+        *journaled_account_payloads;
     if (!prepared_snapshot.IsValid()) {
         return std::nullopt;
     }
@@ -1968,11 +1985,9 @@ template <typename Spend>
                               pindex->GetBlockHash().ToString());
             return false;
         }
-        bool block_had_shielded_bundle{false};
         CAmount block_value_balance{0};
         for (const auto& txref : block.vtx) {
             if (!txref->HasShieldedBundle()) continue;
-            block_had_shielded_bundle = true;
             std::string reject_reason;
             const auto value_balance =
                 TryGetShieldedStateValueBalance(txref->GetShieldedBundle(), reject_reason);
@@ -1992,7 +2007,11 @@ template <typename Spend>
             }
             block_value_balance = *next_value_balance;
         }
-        if (!block_had_shielded_bundle) continue;
+        // Match ConnectBlock/RebuildShieldedState exactly: once the velocity
+        // cap is active every connected block has a deterministic log entry,
+        // including transparent zero-egress blocks. The zero entries are part
+        // of the state pin, make disconnect undo exact, and prevent fast-start
+        // repair from producing a different serialized velocity state.
         velocity.RecordBlock(pindex->nHeight, block_value_balance > 0 ? block_value_balance : 0);
         velocity.Prune(pindex->nHeight -
             2 * static_cast<int32_t>(consensus.nShieldedUnshieldVelocityWindowBlocks));
@@ -7099,7 +7118,11 @@ DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIn
         }
     }
 
-    if (apply_shielded_state && this == &m_chainman.ActiveChainstate() && BlockHasShieldedBundle(block)) {
+    const bool block_has_shielded_bundle{BlockHasShieldedBundle(block)};
+    const bool block_updates_shielded_velocity{
+        m_chainman.GetConsensus().IsShieldedUnshieldVelocityCapActive(pindex->nHeight)};
+    if (apply_shielded_state && this == &m_chainman.ActiveChainstate() &&
+        (block_has_shielded_bundle || block_updates_shielded_velocity)) {
         if (!m_chainman.EnsureShieldedStateInitialized()) {
             return DISCONNECT_FAILED;
         }
@@ -7692,8 +7715,12 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
 
     CBlockUndo blockundo;
 
+    const bool block_has_shielded_bundle{BlockHasShieldedBundle(block)};
+    const bool block_updates_shielded_velocity{
+        params.GetConsensus().IsShieldedUnshieldVelocityCapActive(pindex->nHeight)};
     const bool enforce_shielded_consensus{
-        apply_shielded_state && this == &m_chainman.ActiveChainstate() && BlockHasShieldedBundle(block)};
+        apply_shielded_state && this == &m_chainman.ActiveChainstate() &&
+        (block_has_shielded_bundle || block_updates_shielded_velocity)};
     if (enforce_shielded_consensus) {
         if (!m_chainman.EnsureShieldedStateInitialized()) {
             return state.Error("shielded-state-init-failed");
@@ -8542,33 +8569,45 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
                                          "bad-blk-shielded-account-registry-size-limit");
                 }
             }
-            if (BlockHasShieldedBundle(block)) {
+            if (block_has_shielded_bundle || block_updates_shielded_velocity) {
                 const auto prepared_marker = MakePreparedShieldedMutationMarker(
                     pindex->pprev,
                     pindex,
                     next_shielded_tree,
                     next_pool_balance,
                     projected_account_registry);
-                if (!prepared_marker.has_value() ||
+                if (!prepared_marker.has_value()) {
+                    return state.Error("shielded-mutation-marker-write-failed");
+                }
+                // The payload store is append-only and its batch is atomic.
+                // Publish it first: a crash here leaves an unreachable suffix,
+                // while every durable PREPARED marker can subsequently rely
+                // on all referenced payloads already existing. The v3 marker
+                // also carries the suffix for validation/idempotent repair.
+                if (m_chainman.InjectShieldedTransitionWriteFailureForTest(
+                        ShieldedTransitionWriteSeam::ACCOUNT_PAYLOAD) ||
+                    !projected_account_registry.CommitPreparedPayloads()) {
+                    return state.Error("shielded-account-registry-payload-write-failed");
+                }
+                if (m_chainman.InjectShieldedTransitionWriteFailureForTest(
+                        ShieldedTransitionWriteSeam::PREPARED_MARKER) ||
                     !WriteShieldedMutationMarker(m_chainman.m_shielded_nullifiers.get(), *prepared_marker)) {
                     return state.Error("shielded-mutation-marker-write-failed");
                 }
             }
-            // The projection above deliberately kept new account payloads in
-            // memory. Publish them only after the PREPARED transition journal
-            // is durable, and do so in one atomic LevelDB batch. A failed local
-            // write is a retryable/system error, never evidence that the block
-            // violated consensus.
-            if (!projected_account_registry.CommitPreparedPayloads()) {
-                return state.Error("shielded-account-registry-payload-write-failed");
-            }
-            if (!block_nullifier_vec.empty() && !m_chainman.m_shielded_nullifiers->Insert(block_nullifier_vec)) {
+            if (!block_nullifier_vec.empty() &&
+                (m_chainman.InjectShieldedTransitionWriteFailureForTest(
+                     ShieldedTransitionWriteSeam::NULLIFIERS) ||
+                 !m_chainman.m_shielded_nullifiers->Insert(block_nullifier_vec))) {
                 return state.Error("shielded-nullifier-db-write-failed");
             }
             // V2_RECOVERY_EXIT: permanently retire the claimed commitments (reorg-safe; removed in
             // DisconnectBlock). The derived nullifiers were already retired via block_nullifier_vec above.
             if (!block_recovery_exit_commitments.empty() &&
-                !m_chainman.m_shielded_nullifiers->InsertRecoveryExitCommitments(block_recovery_exit_commitments)) {
+                (m_chainman.InjectShieldedTransitionWriteFailureForTest(
+                     ShieldedTransitionWriteSeam::RECOVERY_EXITS) ||
+                 !m_chainman.m_shielded_nullifiers->InsertRecoveryExitCommitments(
+                     block_recovery_exit_commitments))) {
                 return state.Error("shielded-recovery-exit-db-write-failed");
             }
             if (!block_settlement_anchor_states.empty() &&
@@ -8581,16 +8620,25 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
                     }
                 }
                 if (!unconsumed_settlement_anchors.empty() &&
-                    !m_chainman.m_shielded_nullifiers->InsertSettlementAnchors(unconsumed_settlement_anchors)) {
+                    (m_chainman.InjectShieldedTransitionWriteFailureForTest(
+                         ShieldedTransitionWriteSeam::SETTLEMENT_ANCHORS) ||
+                     !m_chainman.m_shielded_nullifiers->InsertSettlementAnchors(
+                         unconsumed_settlement_anchors))) {
                     return state.Error("shielded-settlement-anchor-db-write-failed");
                 }
             } else if (!block_settlement_anchor_states.empty() &&
-                       !m_chainman.m_shielded_nullifiers->InsertSettlementAnchors(block_settlement_anchor_states)) {
+                       (m_chainman.InjectShieldedTransitionWriteFailureForTest(
+                            ShieldedTransitionWriteSeam::SETTLEMENT_ANCHORS) ||
+                        !m_chainman.m_shielded_nullifiers->InsertSettlementAnchors(
+                            block_settlement_anchor_states))) {
                 return state.Error("shielded-settlement-anchor-db-write-failed");
             }
             if (!block_consumed_settlement_anchor_vec.empty() &&
                 UseSingleUseSettlementAnchors(params.GetConsensus(), pindex->nHeight) &&
-                !m_chainman.m_shielded_nullifiers->RemoveSettlementAnchors(block_consumed_settlement_anchor_vec)) {
+                (m_chainman.InjectShieldedTransitionWriteFailureForTest(
+                     ShieldedTransitionWriteSeam::SETTLEMENT_ANCHORS) ||
+                 !m_chainman.m_shielded_nullifiers->RemoveSettlementAnchors(
+                     block_consumed_settlement_anchor_vec))) {
                 return state.Error("shielded-settlement-anchor-db-write-failed");
             }
             std::vector<ConfirmedNettingManifestState> block_netting_manifest_states;
@@ -8607,7 +8655,10 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
                                                      created_manifests->end());
             }
             if (!block_netting_manifest_states.empty() &&
-                !m_chainman.m_shielded_nullifiers->InsertNettingManifests(block_netting_manifest_states)) {
+                (m_chainman.InjectShieldedTransitionWriteFailureForTest(
+                     ShieldedTransitionWriteSeam::NETTING_MANIFESTS) ||
+                 !m_chainman.m_shielded_nullifiers->InsertNettingManifests(
+                     block_netting_manifest_states))) {
                 return state.Error("shielded-netting-manifest-db-write-failed");
             }
 
@@ -8615,8 +8666,8 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
             // decrease this block (value that left the pool); a trailing-window sum of net egress must
             // stay within cap_bps/10000 of the pool balance at block start. Computed, checked, and
             // persisted before the pool-balance commit so a violation rejects the block cleanly.
-            const auto& vparams = params.GetConsensus();
-            const bool velocity_active = vparams.IsShieldedUnshieldVelocityCapActive(pindex->nHeight);
+              const auto& vparams = params.GetConsensus();
+              const bool velocity_active = block_updates_shielded_velocity;
             ShieldedUnshieldVelocity next_velocity;
             if (velocity_active) {
                 next_velocity = m_chainman.m_shielded_unshield_velocity;
@@ -8635,12 +8686,16 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
                 }
                 next_velocity.Prune(pindex->nHeight -
                     2 * static_cast<int32_t>(vparams.nShieldedUnshieldVelocityWindowBlocks));
-                if (!m_chainman.m_shielded_nullifiers->WriteUnshieldVelocity(next_velocity)) {
+                if (m_chainman.InjectShieldedTransitionWriteFailureForTest(
+                        ShieldedTransitionWriteSeam::UNSHIELD_VELOCITY) ||
+                    !m_chainman.m_shielded_nullifiers->WriteUnshieldVelocity(next_velocity)) {
                     return state.Error("shielded-velocity-db-write-failed");
                 }
             }
 
-            if (!m_chainman.m_shielded_nullifiers->WritePoolBalance(next_pool_balance.GetBalance())) {
+            if (m_chainman.InjectShieldedTransitionWriteFailureForTest(
+                    ShieldedTransitionWriteSeam::POOL_BALANCE) ||
+                !m_chainman.m_shielded_nullifiers->WritePoolBalance(next_pool_balance.GetBalance())) {
                 return state.Error("shielded-pool-db-write-failed");
             }
 
@@ -9209,7 +9264,10 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
         if (!rv) {
             if (state.IsInvalid())
                 InvalidBlockFound(pindexNew, state);
-            else if (state.IsError() && BlockHasShieldedBundle(blockConnecting)) {
+            else if (state.IsError() &&
+                     (BlockHasShieldedBundle(blockConnecting) ||
+                      m_chainman.GetConsensus().IsShieldedUnshieldVelocityCapActive(
+                          pindexNew->nHeight))) {
                 // ConnectBlock may have durably published only a prefix of
                 // the auxiliary shielded transition after its PREPARED
                 // journal was synced. Do not predicate shutdown on reading the
@@ -9406,12 +9464,21 @@ CBlockIndex* Chainstate::FindMostWorkChain()
                 cm_opts.reorg_hysteresis_depth.value_or(profile_settings.hysteresis_depth);
             const uint32_t hysteresis_work_margin =
                 cm_opts.reorg_hysteresis_work_margin.value_or(profile_settings.hysteresis_work_margin);
+            // Once the durable recovery coordinator has identified a unique,
+            // authenticated shallow-race winner, that decision must bypass both
+            // local finality mechanisms.  ActivateBestChainStep already lets the
+            // same candidate escape PARK; applying hysteresis here first would
+            // make the escape unreachable when the branch is only one-work-unit
+            // ahead (the normal already-have-data recovery case).
+            const bool recovery_escape{
+                m_chainman.IsAutomaticReorgRecoveryCandidate(pindexNew)};
             if (old_tip != nullptr &&
                 fork != nullptr &&
                 fork != old_tip &&
                 old_tip->nHeight >= consensus_params.nReorgProtectionStartHeight &&
                 hysteresis_depth != kernel::REORG_PROTECTION_DEPTH_DISABLED &&
-                hysteresis_work_margin > 0) {
+                hysteresis_work_margin > 0 &&
+                !recovery_escape) {
                 const int reorg_depth = old_tip->nHeight - fork->nHeight;
                 const bool candidate_would_park =
                     cm_opts.deep_reorg_action == kernel::DeepReorgAction::PARK &&
@@ -10419,6 +10486,43 @@ bool BlockIndexDescends(const CBlockIndex* block, const CBlockIndex* ancestor)
 
 } // namespace
 
+void ChainstateManager::NoteAuthenticatedRecoveryCandidate(CBlockIndex* candidate)
+{
+    AssertLockHeld(::cs_main);
+    if (candidate == nullptr || (candidate->nStatus & BLOCK_FAILED_MASK)) return;
+
+    const bool eligible{
+        (m_options.matmul_validation_mode ==
+             kernel::MatMulValidationMode::TRUSTED &&
+         node::matmul_trusted::HasQuorum(
+             candidate->GetBlockHash(), candidate->nHeight)) ||
+        (m_options.matmul_validation_mode ==
+             kernel::MatMulValidationMode::CONSENSUS &&
+         (candidate->nStatus & BLOCK_HAVE_DATA) != 0 &&
+         candidate->IsValid(BLOCK_VALID_TRANSACTIONS) &&
+         candidate->HaveNumChainTxs() &&
+         IsBlockAuthenticated(*candidate, GetConsensus()))};
+    if (!eligible) return;
+
+    // Keep only maximal authenticated tips per branch. The loop is bounded by
+    // the number of competing branch tips, not total chain height/index size.
+    for (auto it = m_reorg_authenticated_candidate_tips.begin();
+         it != m_reorg_authenticated_candidate_tips.end();) {
+        CBlockIndex* const indexed{*it};
+        if (BlockIndexDescends(indexed, candidate)) {
+            // A newer notification for an ancestor cannot replace the already
+            // indexed descendant tip.
+            return;
+        }
+        if (BlockIndexDescends(candidate, indexed)) {
+            it = m_reorg_authenticated_candidate_tips.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    m_reorg_authenticated_candidate_tips.insert(candidate);
+}
+
 bool ChainstateManager::IsAutomaticReorgRecoveryCandidate(
     const CBlockIndex* candidate) const
 {
@@ -10470,8 +10574,9 @@ bool ChainstateManager::IsAutomaticReorgRecoveryCandidate(
     // A second incomparable branch with equal or greater authenticated work (or
     // any current authority quorum in trusted mode) makes the choice ambiguous
     // and therefore operator-only.
-    for (const CBlockIndex* other : std::as_const(m_blockman).GetAllBlockIndices()) {
+    for (const CBlockIndex* other : m_reorg_authenticated_candidate_tips) {
         if (other == nullptr || other == candidate ||
+            (other->nStatus & BLOCK_FAILED_MASK) ||
             BlockIndexComparable(other, candidate) ||
             BlockIndexDescends(other, active_tip) ||
             (other->nHeight <= active_tip->nHeight &&
@@ -10522,6 +10627,7 @@ bool ChainstateManager::MaybeTrackReorgRecovery(const CBlockIndex* candidate)
 {
     AssertLockHeld(::cs_main);
     if (m_active_chainstate == nullptr || candidate == nullptr) return true;
+    NoteAuthenticatedRecoveryCandidate(const_cast<CBlockIndex*>(candidate));
     const CBlockIndex* const active_tip{m_active_chainstate->m_chain.Tip()};
     if (active_tip == nullptr) return true;
 
@@ -10543,12 +10649,15 @@ bool ChainstateManager::MaybeTrackReorgRecovery(const CBlockIndex* candidate)
         uint8_t mode;
         if (m_options.matmul_validation_mode ==
             kernel::MatMulValidationMode::TRUSTED) {
-            // Current quorum authenticates the authority's ExactReplay verdict
-            // even before this mirror has downloaded the body. Persist the
-            // shallow divergence now so the local tip cannot grow it into a
-            // deep PARK while the recovery body is still in flight.
+            // Current quorum authenticates the authority's ExactReplay verdict,
+            // but that verdict is validity provenance, not a canonical fork
+            // choice. Only install the losing-tip growth barrier once the
+            // certified branch has strictly more work than the active tip; equal
+            // or stale side forks remain learnable/downloadable but cannot pin
+            // honest growth.
             if (!node::matmul_trusted::HasQuorum(
-                    candidate->GetBlockHash(), candidate->nHeight)) {
+                    candidate->GetBlockHash(), candidate->nHeight) ||
+                candidate->nChainWork <= active_tip->nChainWork) {
                 return true;
             }
             mode = static_cast<uint8_t>(
@@ -10581,8 +10690,9 @@ bool ChainstateManager::MaybeTrackReorgRecovery(const CBlockIndex* candidate)
         // Reject ambiguity before persisting a growth barrier. In consensus
         // mode only an equal-or-better independently authenticated branch is a
         // competitor; in trusted mode any other current authority branch is.
-        for (const CBlockIndex* other : m_blockman.GetAllBlockIndices()) {
+        for (const CBlockIndex* other : m_reorg_authenticated_candidate_tips) {
             if (other == nullptr || other == candidate ||
+                (other->nStatus & BLOCK_FAILED_MASK) ||
                 BlockIndexComparable(other, candidate) ||
                 BlockIndexDescends(other, active_tip) ||
                 (other->nHeight <= active_tip->nHeight &&
@@ -10633,7 +10743,7 @@ bool ChainstateManager::MaybeTrackReorgRecovery(const CBlockIndex* candidate)
             // then-unproven peer, so the header-follow path may not previously
             // have selected it. Make the durable recovery target the followed
             // target now; later authority headers can extend it normally.
-            m_best_header = const_cast<CBlockIndex*>(candidate);
+            SetBestHeader(const_cast<CBlockIndex*>(candidate));
         }
         LogWarning("%s: armed automatic %s recovery at fork=%s initial_depth=%d recovery_root=%s authenticated_tip=%s\n",
                    __func__,
@@ -10649,8 +10759,9 @@ bool ChainstateManager::MaybeTrackReorgRecovery(const CBlockIndex* candidate)
     const CBlockIndex* best_recovery{nullptr};
     const CBlockIndex* const root{
         m_blockman.LookupBlockIndex(m_reorg_recovery->recovery_root_hash)};
-    for (const CBlockIndex* index : m_blockman.GetAllBlockIndices()) {
+    for (const CBlockIndex* index : m_reorg_authenticated_candidate_tips) {
         if (!BlockIndexDescends(index, root) ||
+            (index->nStatus & BLOCK_FAILED_MASK) ||
             !(index->nStatus & BLOCK_HAVE_DATA) ||
             !index->IsValid(BLOCK_VALID_TRANSACTIONS) ||
             !index->HaveNumChainTxs() ||
@@ -10662,9 +10773,8 @@ bool ChainstateManager::MaybeTrackReorgRecovery(const CBlockIndex* candidate)
             best_recovery = index;
         }
     }
-    // Uniqueness is an index-wide check, but evaluate it only once for the best
-    // fully authenticated descendant. This keeps each received body O(N), not
-    // O(N^2), while a recovery record is armed.
+    // Uniqueness is evaluated once for the best maintained authenticated branch
+    // tip. Neither this selection nor the ambiguity check scans the block index.
     if (best_recovery == nullptr ||
         !IsAutomaticReorgRecoveryCandidate(best_recovery)) {
         return true;
@@ -10758,7 +10868,7 @@ bool ChainstateManager::NormalizeReorgRecovery(const CBlockIndex* active_tip)
     if (trusted_record && !BlockIndexDescends(m_best_header, recovery_root)) {
         // Reconstruct the followed authority target on restart from the
         // durable, current-config-reverified quorum record.
-        m_best_header = const_cast<CBlockIndex*>(authenticated_tip);
+        SetBestHeader(const_cast<CBlockIndex*>(authenticated_tip));
     }
     return MaybeTrackReorgRecovery(authenticated_tip);
 }
@@ -10819,9 +10929,10 @@ void ChainstateManager::ReceivedBlockTransactions(const CBlock& block, CBlockInd
             EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
             AssertLockHeld(::cs_main);
             if (candidate.nStatus & BLOCK_FAILED_MASK) return;
+            NoteAuthenticatedRecoveryCandidate(&candidate);
             if (m_best_header == nullptr ||
                 PreferTrustAdjustedHeader(*m_best_header, candidate)) {
-                m_best_header = &candidate;
+                SetBestHeader(&candidate);
             }
         };
         consider_best_header(*pindexNew);
@@ -12385,10 +12496,14 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
                     .current_best_extends_tip = current_extends_tip,
                     .candidate_extends_current_best = extends_current,
                 })) {
-                m_best_header = pindex;
+                SetBestHeader(pindex);
             }
         }
     }
+
+    // AddToBlockIndex may have changed m_best_header through its legacy
+    // reference parameter even when the trusted overlay kept that choice.
+    SetBestHeader(m_best_header);
 
     if (ppindex)
         *ppindex = pindex;
@@ -13323,14 +13438,16 @@ bool ChainstateManager::LoadBlockIndex()
 
         for (CBlockIndex* pindex : vSortedByHeight) {
             if (m_interrupt) return false;
+            NoteAuthenticatedRecoveryCandidate(pindex);
             if (pindex->nStatus & BLOCK_FAILED_MASK && (!m_best_invalid || pindex->nChainWork > m_best_invalid->nChainWork)) {
                 m_best_invalid = pindex;
             }
             if (pindex->IsValid(BLOCK_VALID_TREE) &&
                 (m_best_header == nullptr || PreferTrustAdjustedHeader(*m_best_header, *pindex))) {
-                m_best_header = pindex;
+                SetBestHeader(pindex);
             }
         }
+        SetBestHeader(m_best_header);
     }
     return true;
 }
@@ -15307,6 +15424,14 @@ void ChainstateManager::RunShieldedAutoRepairHookForTest(ShieldedAutoRepairKind 
     }
 }
 
+bool ChainstateManager::InjectShieldedTransitionWriteFailureForTest(
+    ShieldedTransitionWriteSeam seam)
+{
+    AssertLockHeld(::cs_main);
+    return m_shielded_transition_write_fault_hook_for_test &&
+           m_shielded_transition_write_fault_hook_for_test(seam);
+}
+
 ShieldedSnapshotSectionHeader ChainstateManager::GetShieldedSnapshotSectionHeader(
     const Chainstate& chainstate,
     const CBlockIndex* tip) const
@@ -15463,7 +15588,9 @@ bool ChainstateManager::PersistShieldedState(const CBlockIndex* tip,
     AssertLockHeld(::cs_main);
     if (!m_shielded_nullifiers) return false;
     if (!fast_startup_trusted &&
-        !m_shielded_nullifiers->ClearPersistedShieldedStatePin()) {
+        (InjectShieldedTransitionWriteFailureForTest(
+             ShieldedTransitionWriteSeam::STATE_PIN) ||
+         !m_shielded_nullifiers->ClearPersistedShieldedStatePin())) {
         return false;
     }
     const auto commitment_index_digest = m_shielded_merkle_tree.CommitmentIndexDigest();
@@ -15501,7 +15628,9 @@ bool ChainstateManager::PersistShieldedState(const CBlockIndex* tip,
         return false;
     }
 
-    if (!m_shielded_nullifiers->WritePersistedState(
+    if (InjectShieldedTransitionWriteFailureForTest(
+            ShieldedTransitionWriteSeam::PERSISTED_STATE) ||
+        !m_shielded_nullifiers->WritePersistedState(
         m_shielded_merkle_tree,
         anchor_roots,
         tip ? tip->GetBlockHash() : uint256{},
@@ -15516,14 +15645,20 @@ bool ChainstateManager::PersistShieldedState(const CBlockIndex* tip,
     // verify the loaded nullifier set has not drifted (without re-deriving it from chain). Written
     // only here -- direct test/diagnostic nullifier insertions that bypass PersistShieldedState
     // leave the persisted digest unchanged, so the restart drift check still catches them.
-    if (!m_shielded_nullifiers->PersistNullifierAccumulator()) {
+    if (InjectShieldedTransitionWriteFailureForTest(
+            ShieldedTransitionWriteSeam::NULLIFIER_ACCUMULATOR) ||
+        !m_shielded_nullifiers->PersistNullifierAccumulator()) {
         return false;
     }
     if (fast_startup_trusted &&
-        !m_shielded_nullifiers->PersistShieldedStatePin(*shielded_state_pin)) {
+        (InjectShieldedTransitionWriteFailureForTest(
+             ShieldedTransitionWriteSeam::STATE_PIN) ||
+         !m_shielded_nullifiers->PersistShieldedStatePin(*shielded_state_pin))) {
         return false;
     }
-    return m_shielded_nullifiers->ClearMutationMarker();
+    return !InjectShieldedTransitionWriteFailureForTest(
+               ShieldedTransitionWriteSeam::MARKER_CLEAR) &&
+           m_shielded_nullifiers->ClearMutationMarker();
 }
 
 bool ChainstateManager::ReadPersistedShieldedState(
@@ -16402,6 +16537,247 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
         m_shielded_state_initialized = false;
     };
 
+    // Complete the idempotent, disk-backed portion of a PREPARED transition
+    // from block/undo data. The marker owns the exact target frontier,
+    // registry and pool state; this routine makes the remaining stores agree
+    // with that target. Every operation below is safe to repeat, so a crash at
+    // any point leaves PREPARED in place and the next startup resumes instead
+    // of discarding 100k+ blocks of otherwise valid persisted state.
+    auto redo_prepared_transition_stores =
+        [&](const ShieldedStateMutationMarker& marker) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) -> bool {
+            AssertLockHeld(::cs_main);
+            if (!marker.IsPreparedTransitionJournal() || !m_shielded_nullifiers) return false;
+
+            const CBlockIndex* const source = marker.source_tip_height < 0
+                ? nullptr
+                : m_blockman.LookupBlockIndex(marker.source_tip_hash);
+            const CBlockIndex* const target = marker.target_tip_height < 0
+                ? nullptr
+                : m_blockman.LookupBlockIndex(marker.target_tip_hash);
+            if ((source == nullptr) != (marker.source_tip_height < 0) ||
+                (target == nullptr) != (marker.target_tip_height < 0) ||
+                (source != nullptr && source->nHeight != marker.source_tip_height) ||
+                (target != nullptr && target->nHeight != marker.target_tip_height)) {
+                return false;
+            }
+
+            const bool forward = target != nullptr &&
+                (source == nullptr || (target->nHeight >= source->nHeight &&
+                 target->GetAncestor(source->nHeight) == source));
+            const bool reverse = source != nullptr &&
+                (target == nullptr || (source->nHeight >= target->nHeight &&
+                 source->GetAncestor(target->nHeight) == target));
+            const CBlockIndex* const transition_fork =
+                source != nullptr && target != nullptr
+                    ? LastCommonAncestor(source, target)
+                    : nullptr;
+            if (!forward && !reverse && source != target && transition_fork == nullptr) return false;
+
+            std::vector<Nullifier> nullifiers_to_insert;
+            std::vector<Nullifier> nullifiers_to_remove;
+            std::vector<uint256> recovery_commitments_to_insert;
+            std::vector<uint256> recovery_commitments_to_remove;
+            std::map<uint256, ConfirmedSettlementAnchorState> settlement_to_insert;
+            std::set<uint256> settlement_to_remove;
+            std::map<uint256, ConfirmedNettingManifestState> manifests_to_insert;
+            std::set<uint256> manifests_to_remove;
+
+            auto schedule_settlement_insert =
+                [&](const ConfirmedSettlementAnchorState& state) {
+                    settlement_to_remove.erase(state.anchor);
+                    settlement_to_insert.insert_or_assign(state.anchor, state);
+                };
+            auto schedule_settlement_remove = [&](const uint256& anchor) {
+                settlement_to_insert.erase(anchor);
+                settlement_to_remove.insert(anchor);
+            };
+
+            auto collect_forward_block =
+                [&](const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) -> bool {
+                CBlock block;
+                if (!ReadShieldedRebuildBlock(*m_active_chainstate, *pindex, block)) return false;
+                std::set<uint256> created_anchors;
+                std::set<uint256> consumed_anchors;
+                for (const auto& txref : block.vtx) {
+                    std::string reject_reason;
+                    const auto created =
+                        ExtractCreatedShieldedSettlementAnchors(*txref, pindex->nHeight, reject_reason);
+                    const auto manifests =
+                        ExtractCreatedShieldedNettingManifestStates(*txref, pindex->nHeight, reject_reason);
+                    if (!created.has_value() || !manifests.has_value()) return false;
+                    created_anchors.insert(created->begin(), created->end());
+                    for (const auto& manifest : *manifests) {
+                        manifests_to_remove.erase(manifest.manifest_id);
+                        manifests_to_insert.insert_or_assign(manifest.manifest_id, manifest);
+                    }
+                    if (!txref->HasShieldedBundle()) continue;
+                    const CShieldedBundle& bundle = txref->GetShieldedBundle();
+                    const auto block_nullifiers = CollectShieldedNullifiers(bundle);
+                    nullifiers_to_insert.insert(nullifiers_to_insert.end(),
+                                                block_nullifiers.begin(),
+                                                block_nullifiers.end());
+                    if (IsRecoveryExitBundle(bundle)) {
+                        shielded::recovery::RecoveryExitClaim claim;
+                        shielded::recovery::RecoveryExitIdentifiers ids;
+                        if (!GetRecoveryExitIdentifiersFromBundle(bundle, claim, ids)) return false;
+                        nullifiers_to_insert.push_back(ids.nullifier);
+                        recovery_commitments_to_insert.push_back(ids.commitment);
+                    }
+                    if (UseSingleUseSettlementAnchors(GetConsensus(), pindex->nHeight)) {
+                        const auto consumed = CollectShieldedSettlementAnchorRefs(bundle);
+                        consumed_anchors.insert(consumed.begin(), consumed.end());
+                    }
+                }
+                for (const auto& anchor : created_anchors) {
+                    if (consumed_anchors.count(anchor) == 0) {
+                        schedule_settlement_insert({anchor, pindex->nHeight});
+                    }
+                }
+                for (const auto& anchor : consumed_anchors) schedule_settlement_remove(anchor);
+                return true;
+            };
+
+            auto collect_reverse_block =
+                [&](const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) -> bool {
+                CBlock block;
+                CBlockUndo undo;
+                if (!ReadShieldedRebuildBlock(*m_active_chainstate, *pindex, block) ||
+                    !m_blockman.ReadBlockUndo(undo, *pindex)) {
+                    return false;
+                }
+                std::set<uint256> created_anchors;
+                std::set<uint256> consumed_anchors;
+                for (const auto& txref : block.vtx) {
+                    std::string reject_reason;
+                    const auto created =
+                        ExtractCreatedShieldedSettlementAnchors(*txref, pindex->nHeight, reject_reason);
+                    const auto manifests =
+                        ExtractCreatedShieldedNettingManifestStates(*txref, pindex->nHeight, reject_reason);
+                    if (!created.has_value() || !manifests.has_value()) return false;
+                    created_anchors.insert(created->begin(), created->end());
+                    for (const auto& manifest : *manifests) {
+                        manifests_to_insert.erase(manifest.manifest_id);
+                        manifests_to_remove.insert(manifest.manifest_id);
+                    }
+                    if (!txref->HasShieldedBundle()) continue;
+                    const CShieldedBundle& bundle = txref->GetShieldedBundle();
+                    const auto block_nullifiers = CollectShieldedNullifiers(bundle);
+                    nullifiers_to_remove.insert(nullifiers_to_remove.end(),
+                                                block_nullifiers.begin(),
+                                                block_nullifiers.end());
+                    if (IsRecoveryExitBundle(bundle)) {
+                        shielded::recovery::RecoveryExitClaim claim;
+                        shielded::recovery::RecoveryExitIdentifiers ids;
+                        if (!GetRecoveryExitIdentifiersFromBundle(bundle, claim, ids)) return false;
+                        nullifiers_to_remove.push_back(ids.nullifier);
+                        recovery_commitments_to_remove.push_back(ids.commitment);
+                    }
+                    if (UseSingleUseSettlementAnchors(GetConsensus(), pindex->nHeight)) {
+                        const auto consumed = CollectShieldedSettlementAnchorRefs(bundle);
+                        consumed_anchors.insert(consumed.begin(), consumed.end());
+                    }
+                }
+                for (const auto& anchor : created_anchors) {
+                    if (consumed_anchors.count(anchor) == 0) schedule_settlement_remove(anchor);
+                }
+                std::map<uint256, ConfirmedSettlementAnchorState> undo_states;
+                for (const auto& state : undo.consumed_settlement_anchor_states) {
+                    if (!state.IsValid() || !undo_states.emplace(state.anchor, state).second) return false;
+                }
+                for (const auto& anchor : consumed_anchors) {
+                    if (created_anchors.count(anchor) != 0) continue;
+                    const auto it = undo_states.find(anchor);
+                    if (it == undo_states.end()) return false;
+                    schedule_settlement_insert(it->second);
+                }
+                return true;
+            };
+
+            if (forward) {
+                std::vector<const CBlockIndex*> path;
+                for (const CBlockIndex* cursor = target; cursor != source; cursor = cursor->pprev) {
+                    if (cursor == nullptr) return false;
+                    path.push_back(cursor);
+                }
+                std::reverse(path.begin(), path.end());
+                for (const CBlockIndex* pindex : path) {
+                    if (!collect_forward_block(pindex)) return false;
+                }
+            } else if (reverse) {
+                for (const CBlockIndex* cursor = source; cursor != target; cursor = cursor->pprev) {
+                    if (cursor == nullptr || !collect_reverse_block(cursor)) return false;
+                }
+            } else if (source != target) {
+                for (const CBlockIndex* cursor = source; cursor != transition_fork;
+                     cursor = cursor->pprev) {
+                    if (cursor == nullptr || !collect_reverse_block(cursor)) return false;
+                }
+                std::vector<const CBlockIndex*> path;
+                for (const CBlockIndex* cursor = target; cursor != transition_fork;
+                     cursor = cursor->pprev) {
+                    if (cursor == nullptr) return false;
+                    path.push_back(cursor);
+                }
+                std::reverse(path.begin(), path.end());
+                for (const CBlockIndex* pindex : path) {
+                    if (!collect_forward_block(pindex)) return false;
+                }
+            }
+
+            if (!nullifiers_to_remove.empty() &&
+                !m_shielded_nullifiers->Remove(nullifiers_to_remove)) return false;
+            if (!recovery_commitments_to_remove.empty() &&
+                !m_shielded_nullifiers->RemoveRecoveryExitCommitments(
+                    recovery_commitments_to_remove)) return false;
+            if (!nullifiers_to_insert.empty() &&
+                !m_shielded_nullifiers->Insert(nullifiers_to_insert)) return false;
+            if (!recovery_commitments_to_insert.empty() &&
+                !m_shielded_nullifiers->InsertRecoveryExitCommitments(
+                    recovery_commitments_to_insert)) return false;
+
+            std::vector<uint256> settlement_removals(settlement_to_remove.begin(),
+                                                     settlement_to_remove.end());
+            if (!settlement_removals.empty() &&
+                !m_shielded_nullifiers->RemoveSettlementAnchors(settlement_removals)) return false;
+            std::vector<ConfirmedSettlementAnchorState> settlement_insertions;
+            settlement_insertions.reserve(settlement_to_insert.size());
+            for (const auto& [_, state] : settlement_to_insert) {
+                settlement_insertions.push_back(state);
+            }
+            if (!settlement_insertions.empty() &&
+                !m_shielded_nullifiers->InsertSettlementAnchors(settlement_insertions)) return false;
+
+            std::vector<uint256> manifest_removals(manifests_to_remove.begin(),
+                                                   manifests_to_remove.end());
+            if (!manifest_removals.empty() &&
+                !m_shielded_nullifiers->RemoveNettingManifests(manifest_removals)) return false;
+            std::vector<ConfirmedNettingManifestState> manifest_insertions;
+            manifest_insertions.reserve(manifests_to_insert.size());
+            for (const auto& [_, state] : manifests_to_insert) manifest_insertions.push_back(state);
+            if (!manifest_insertions.empty() &&
+                !m_shielded_nullifiers->InsertNettingManifests(manifest_insertions)) return false;
+
+            ShieldedUnshieldVelocity target_velocity;
+            std::string velocity_error;
+            if (target != nullptr &&
+                !RebuildRecentShieldedUnshieldVelocity(*m_active_chainstate,
+                                                       target,
+                                                       GetConsensus(),
+                                                       target_velocity,
+                                                       velocity_error)) {
+                LogPrintf("EnsureShieldedStateInitialized: prepared transition could not rebuild recent unshield velocity at target height=%d hash=%s (%s)\n",
+                          target->nHeight, target->GetBlockHash().ToString(), velocity_error);
+                return false;
+            }
+            if (!m_shielded_nullifiers->WriteUnshieldVelocity(target_velocity) ||
+                !m_shielded_nullifiers->WritePoolBalance(
+                    marker.prepared_target_snapshot.pool_balance)) {
+                return false;
+            }
+            m_shielded_unshield_velocity = std::move(target_velocity);
+            return true;
+        };
+
     auto try_restore_prepared_transition =
         [&](const ShieldedStateMutationMarker& marker) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) -> bool {
             AssertLockHeld(::cs_main);
@@ -16415,11 +16791,20 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
                 return false;
             }
 
-            const auto restored_registry =
+            auto restored_registry =
                 shielded::registry::ShieldedAccountRegistryState::RestorePersisted(
                     marker.prepared_target_snapshot.account_registry_snapshot);
             if (!restored_registry.has_value()) {
                 LogPrintf("EnsureShieldedStateInitialized: prepared mutation marker carried invalid account registry snapshot; rebuilding full state from chain\n");
+                return false;
+            }
+            if (!restored_registry->CommitJournaledPayloads(
+                    marker.prepared_target_snapshot.journaled_account_payloads)) {
+                LogPrintf("EnsureShieldedStateInitialized: prepared mutation marker account payload redo failed; retaining PREPARED for retry\n");
+                return false;
+            }
+            if (!redo_prepared_transition_stores(marker)) {
+                LogPrintf("EnsureShieldedStateInitialized: prepared mutation marker could not deterministically redo target stores; rebuilding full state from chain\n");
                 return false;
             }
             if (!restored_registry->CanMaterializeAllEntries()) {
@@ -16428,6 +16813,11 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
             }
 
             m_shielded_merkle_tree = marker.prepared_target_snapshot.tree;
+            if (!m_shielded_merkle_tree.HasCommitmentIndex() &&
+                !m_shielded_merkle_tree.AttachConfiguredCommitmentIndexStore()) {
+                LogPrintf("EnsureShieldedStateInitialized: prepared mutation marker could not attach the commitment index store\n");
+                return false;
+            }
             const auto restored_commitment_digest = m_shielded_merkle_tree.CommitmentIndexDigest();
             if (!restored_commitment_digest.has_value() ||
                 *restored_commitment_digest != marker.prepared_target_snapshot.commitment_index_digest) {
@@ -16460,12 +16850,7 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
                 return false;
             }
             m_shielded_state_initialized = true;
-            if (!RebuildShieldedAnchorHistory(*m_active_chainstate, tip) ||
-                !SyncShieldedBridgeMetadataState(*m_active_chainstate,
-                                                 tip,
-                                                 *m_shielded_nullifiers,
-                                                 PersistedShieldedMetadataSyncMode::STRICT_CHAIN_CONVERGENCE,
-                                                 &GetNotifications())) {
+            if (!RebuildShieldedAnchorHistory(*m_active_chainstate, tip)) {
                 m_shielded_state_initialized = false;
                 return false;
             }
@@ -16486,15 +16871,11 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
                 m_shielded_state_initialized = false;
                 return false;
             }
-            std::string audit_error;
-            if (!AuditShieldedStateAgainstChain(*m_active_chainstate,
-                                               audit_error,
-                                               /*include_proof_audit=*/false)) {
-                LogPrintf("EnsureShieldedStateInitialized: prepared mutation marker audit failed (%s); rebuilding full state from chain\n",
-                          audit_error);
-                m_shielded_state_initialized = false;
-                return false;
-            }
+            // The target structures came from the already validated block
+            // transition and every auxiliary store was just idempotently
+            // replayed from the same block/undo path. A genesis audit here
+            // defeats the purpose of the journal and turned a single local
+            // write interruption into a multi-hour outage.
             if (!PersistShieldedState(tip)) {
                 m_shielded_state_initialized = false;
                 return false;
@@ -17143,9 +17524,10 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
         m_shielded_state_initialized = false;
     }
 
-    // Tip mismatch: prefer incremental catch-up / unwind over a from-genesis rebuild when the
-    // persisted tip still sits on the active chain. This is the invalidateblock / mid-reorg
-    // restart path that previously always paid for a full archive replay.
+    // Tip mismatch: restore a cryptographically pinned persisted ancestor and
+    // project only the missing active-chain suffix. This deliberately uses the
+    // same PREPARED redo path as crash recovery, so the gap operation itself is
+    // resumable at every durable write boundary.
     if (tip != nullptr &&
         !persisted_tip_hash.IsNull() &&
         persisted_tip_height >= 0 &&
@@ -17154,8 +17536,7 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
         if (persisted_index != nullptr &&
             persisted_index->nHeight == persisted_tip_height &&
             tip->GetAncestor(persisted_tip_height) == persisted_index &&
-            persisted_tip_height < tip->nHeight &&
-            ShieldedFullRebuildBlocksAvailable(*m_active_chainstate, tip)) {
+            persisted_tip_height < tip->nHeight) {
             const int gap_blocks = tip->nHeight - persisted_tip_height;
             LogPrintf("EnsureShieldedStateInitialized: persisted shielded tip height=%d hash=%s is behind active tip height=%d hash=%s; catching up %d block(s) without from-genesis rebuild\n",
                       persisted_tip_height,
@@ -17163,21 +17544,438 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
                       tip->nHeight,
                       tip->GetBlockHash().ToString(),
                       gap_blocks);
-            // Restoring the persisted frontier then replaying only the gap still requires the
-            // full ConnectBlock shielded path (settlement undo metadata, velocity, etc.). The
-            // cheapest correct approach that reuses the already-fused walker is to rebuild from
-            // genesis once; gap-only connect is left as a follow-up. Fall through to fused rebuild.
+
+            bool base_trusted{false};
+            auto restored_registry = persisted_account_registry_snapshot.has_value()
+                ? shielded::registry::ShieldedAccountRegistryState::RestorePersisted(
+                      *persisted_account_registry_snapshot)
+                : std::nullopt;
+            if (restored_registry.has_value() &&
+                restored_registry->CanMaterializeAllEntries() &&
+                m_shielded_pool_balance.SetBalance(persisted_balance)) {
+                m_shielded_merkle_tree = persisted_tree;
+                const auto actual_digest = m_shielded_merkle_tree.CommitmentIndexDigest();
+                const bool digest_matches =
+                    persisted_commitment_index_digest.has_value() &&
+                    actual_digest.has_value() &&
+                    *persisted_commitment_index_digest == *actual_digest;
+                if (digest_matches &&
+                    (m_shielded_merkle_tree.HasCommitmentIndex() ||
+                     m_shielded_merkle_tree.AttachConfiguredCommitmentIndexStore())) {
+                    m_shielded_account_registry = std::move(*restored_registry);
+                    m_shielded_anchor_roots.assign(persisted_anchor_roots.begin(),
+                                                   persisted_anchor_roots.end());
+                    m_shielded_account_registry_roots.assign(
+                        persisted_account_registry_roots.begin(),
+                        persisted_account_registry_roots.end());
+                    m_shielded_smile_public_accounts.clear();
+                    m_shielded_account_leaf_commitments.clear();
+                    if (shielded::registry::BuildRegistryAccountState(
+                            m_shielded_account_registry,
+                            m_shielded_smile_public_accounts,
+                            m_shielded_account_leaf_commitments) &&
+                        load_persisted_unshield_velocity()) {
+                        InvalidateShieldedAccountStateSnapshotCaches();
+                        m_shielded_state_initialized = true;
+                        const auto persisted_accumulator =
+                            m_shielded_nullifiers->ReadPersistedNullifierAccumulator();
+                        const auto persisted_pin =
+                            m_shielded_nullifiers->ReadPersistedShieldedStatePin();
+                        const auto current_pin = ComputeShieldedSnapshotStatePin();
+                        base_trusted =
+                            persisted_accumulator.has_value() &&
+                            *persisted_accumulator ==
+                                m_shielded_nullifiers->NullifierAccumulatorDigest() &&
+                            persisted_pin.has_value() &&
+                            current_pin.has_value() &&
+                            *persisted_pin == *current_pin;
+                    }
+                }
+            }
+
+            if (base_trusted) {
+                shielded::ShieldedMerkleTree target_tree = m_shielded_merkle_tree;
+                ShieldedPoolBalance target_pool = m_shielded_pool_balance;
+                shielded::registry::ShieldedAccountRegistryState target_registry =
+                    m_shielded_account_registry;
+                if (!target_tree.DetachToMemoryOnly()) {
+                    base_trusted = false;
+                }
+
+                std::vector<const CBlockIndex*> gap_path;
+                for (const CBlockIndex* cursor = tip; cursor != persisted_index;
+                     cursor = cursor->pprev) {
+                    if (cursor == nullptr) {
+                        base_trusted = false;
+                        break;
+                    }
+                    gap_path.push_back(cursor);
+                }
+                std::reverse(gap_path.begin(), gap_path.end());
+                for (const CBlockIndex* pindex : gap_path) {
+                    if (!base_trusted) break;
+                    CBlock block;
+                    if (!ReadShieldedRebuildBlock(*m_active_chainstate, *pindex, block)) {
+                        base_trusted = false;
+                        break;
+                    }
+                    const bool use_nonced_bridge_tag =
+                        UseNoncedShieldedBridgeTags(GetConsensus(), pindex->nHeight);
+                    for (const auto& txref : block.vtx) {
+                        if (!txref->HasShieldedBundle()) continue;
+                        const CShieldedBundle& bundle = txref->GetShieldedBundle();
+                        std::string height_gate_reject;
+                        if (!RejectShieldedHeightGateViolation(*txref,
+                                                               GetConsensus(),
+                                                               pindex->nHeight,
+                                                               height_gate_reject) ||
+                            !ApplyShieldedStateEffects(bundle,
+                                                       use_nonced_bridge_tag,
+                                                       pindex->GetBlockHash(),
+                                                       target_tree,
+                                                       target_pool)) {
+                            base_trusted = false;
+                            break;
+                        }
+                        const auto leaves =
+                            shielded::registry::CollectShieldedOutputAccountLeaves(
+                                bundle, use_nonced_bridge_tag);
+                        if (!leaves.has_value() ||
+                            !target_registry.AppendPrepared(
+                                Span<const shielded::registry::ShieldedAccountLeaf>{
+                                    leaves->data(), leaves->size()})) {
+                            base_trusted = false;
+                            break;
+                        }
+                    }
+                }
+
+                if (base_trusted) {
+                    const auto marker = MakePreparedShieldedMutationMarker(
+                        persisted_index, tip, target_tree, target_pool, target_registry);
+                    if (marker.has_value() &&
+                        target_registry.CommitPreparedPayloads() &&
+                        ::WriteShieldedMutationMarker(m_shielded_nullifiers.get(), *marker) &&
+                        try_restore_prepared_transition(*marker)) {
+                        LogPrintf("EnsureShieldedStateInitialized: completed gap-only shielded catch-up of %d block(s) to height=%d hash=%s\n",
+                                  gap_blocks, tip->nHeight,
+                                  tip->GetBlockHash().ToString());
+                        return finish_success();
+                    }
+                }
+            }
+            LogPrintf("EnsureShieldedStateInitialized: persisted ancestor failed gap-only provenance or transition checks; using single-pass fused rebuild\n");
+            reset_shielded_state();
         } else if (persisted_index != nullptr &&
                    persisted_index->nHeight == persisted_tip_height &&
                    persisted_index->GetAncestor(tip->nHeight) == tip &&
                    tip->nHeight < persisted_tip_height) {
             const int gap_blocks = persisted_tip_height - tip->nHeight;
-            LogPrintf("EnsureShieldedStateInitialized: persisted shielded tip height=%d hash=%s is ahead of active tip height=%d hash=%s (e.g. interrupted invalidateblock); unwinding requires chain-derived rebuild of %d block(s) of divergence — using single-pass fused rebuild\n",
+            LogPrintf("EnsureShieldedStateInitialized: persisted shielded tip height=%d hash=%s is ahead of active tip height=%d hash=%s (e.g. interrupted invalidateblock); unwinding %d block(s) from persisted state\n",
                       persisted_tip_height,
                       persisted_tip_hash.ToString(),
                       tip->nHeight,
                       tip->GetBlockHash().ToString(),
                       gap_blocks);
+
+            bool base_trusted{false};
+            auto restored_registry = persisted_account_registry_snapshot.has_value()
+                ? shielded::registry::ShieldedAccountRegistryState::RestorePersisted(
+                      *persisted_account_registry_snapshot)
+                : std::nullopt;
+            if (restored_registry.has_value() &&
+                restored_registry->CanMaterializeAllEntries() &&
+                m_shielded_pool_balance.SetBalance(persisted_balance)) {
+                m_shielded_merkle_tree = persisted_tree;
+                const auto actual_digest = m_shielded_merkle_tree.CommitmentIndexDigest();
+                if (persisted_commitment_index_digest.has_value() &&
+                    actual_digest.has_value() &&
+                    *persisted_commitment_index_digest == *actual_digest &&
+                    (m_shielded_merkle_tree.HasCommitmentIndex() ||
+                     m_shielded_merkle_tree.AttachConfiguredCommitmentIndexStore())) {
+                    m_shielded_account_registry = std::move(*restored_registry);
+                    m_shielded_anchor_roots.assign(persisted_anchor_roots.begin(),
+                                                   persisted_anchor_roots.end());
+                    m_shielded_account_registry_roots.assign(
+                        persisted_account_registry_roots.begin(),
+                        persisted_account_registry_roots.end());
+                    m_shielded_smile_public_accounts.clear();
+                    m_shielded_account_leaf_commitments.clear();
+                    if (shielded::registry::BuildRegistryAccountState(
+                            m_shielded_account_registry,
+                            m_shielded_smile_public_accounts,
+                            m_shielded_account_leaf_commitments) &&
+                        load_persisted_unshield_velocity()) {
+                        InvalidateShieldedAccountStateSnapshotCaches();
+                        m_shielded_state_initialized = true;
+                        const auto persisted_accumulator =
+                            m_shielded_nullifiers->ReadPersistedNullifierAccumulator();
+                        const auto persisted_pin =
+                            m_shielded_nullifiers->ReadPersistedShieldedStatePin();
+                        const auto current_pin = ComputeShieldedSnapshotStatePin();
+                        base_trusted =
+                            persisted_accumulator.has_value() &&
+                            *persisted_accumulator ==
+                                m_shielded_nullifiers->NullifierAccumulatorDigest() &&
+                            persisted_pin.has_value() && current_pin.has_value() &&
+                            *persisted_pin == *current_pin;
+                    }
+                }
+            }
+
+            if (base_trusted) {
+                shielded::ShieldedMerkleTree target_tree = m_shielded_merkle_tree;
+                ShieldedPoolBalance target_pool = m_shielded_pool_balance;
+                shielded::registry::ShieldedAccountRegistryState target_registry =
+                    m_shielded_account_registry;
+                if (!target_tree.DetachToMemoryOnly()) base_trusted = false;
+                for (const CBlockIndex* cursor = persisted_index;
+                     base_trusted && cursor != tip;
+                     cursor = cursor->pprev) {
+                    CBlock block;
+                    if (cursor == nullptr ||
+                        !ReadShieldedRebuildBlock(*m_active_chainstate, *cursor, block)) {
+                        base_trusted = false;
+                        break;
+                    }
+                    uint64_t output_count{0};
+                    uint64_t registry_leaf_count{0};
+                    for (const auto& txref : block.vtx) {
+                        if (!txref->HasShieldedBundle()) continue;
+                        const CShieldedBundle& bundle = txref->GetShieldedBundle();
+                        const uint64_t bundle_outputs = bundle.GetShieldedOutputCount();
+                        if (output_count > std::numeric_limits<uint64_t>::max() - bundle_outputs) {
+                            base_trusted = false;
+                            break;
+                        }
+                        output_count += bundle_outputs;
+                        uint64_t appends{0};
+                        if (!TryCountShieldedAccountRegistryAppends(
+                                bundle, GetConsensus(), cursor->nHeight, appends) ||
+                            registry_leaf_count >
+                                std::numeric_limits<uint64_t>::max() - appends) {
+                            base_trusted = false;
+                            break;
+                        }
+                        registry_leaf_count += appends;
+                        std::string value_balance_reject;
+                        const auto value_balance =
+                            TryGetShieldedStateValueBalance(bundle, value_balance_reject);
+                        if (!value_balance.has_value() ||
+                            !target_pool.UndoValueBalance(*value_balance)) {
+                            base_trusted = false;
+                            break;
+                        }
+                    }
+                    if (!base_trusted || output_count > target_tree.Size() ||
+                        registry_leaf_count > target_registry.Size() ||
+                        !target_tree.Truncate(target_tree.Size() - output_count) ||
+                        !target_registry.Truncate(
+                            target_registry.Size() - registry_leaf_count,
+                            shielded::registry::ShieldedAccountRegistryState::PayloadPruneMode::KEEP)) {
+                        base_trusted = false;
+                    }
+                }
+                if (base_trusted) {
+                    const auto marker = MakePreparedShieldedMutationMarker(
+                        persisted_index, tip, target_tree, target_pool, target_registry);
+                    if (marker.has_value() &&
+                        ::WriteShieldedMutationMarker(m_shielded_nullifiers.get(), *marker) &&
+                        try_restore_prepared_transition(*marker)) {
+                        LogPrintf("EnsureShieldedStateInitialized: completed gap-only shielded unwind of %d block(s) to height=%d hash=%s\n",
+                                  gap_blocks, tip->nHeight,
+                                  tip->GetBlockHash().ToString());
+                        return finish_success();
+                    }
+                }
+            }
+            LogPrintf("EnsureShieldedStateInitialized: persisted descendant failed gap-only provenance or transition checks; using single-pass fused rebuild\n");
+            reset_shielded_state();
+        } else if (persisted_index != nullptr &&
+                   persisted_index->nHeight == persisted_tip_height) {
+            const CBlockIndex* const transition_fork{
+                LastCommonAncestor(persisted_index, tip)};
+            const int disconnect_blocks = transition_fork
+                ? persisted_index->nHeight - transition_fork->nHeight
+                : std::numeric_limits<int>::max();
+            const int connect_blocks = transition_fork
+                ? tip->nHeight - transition_fork->nHeight
+                : std::numeric_limits<int>::max();
+            bool base_trusted{
+                transition_fork != nullptr && disconnect_blocks > 0 &&
+                connect_blocks > 0 &&
+                disconnect_blocks + connect_blocks <= SHIELDED_ANCHOR_DEPTH};
+            auto restored_registry = persisted_account_registry_snapshot.has_value()
+                ? shielded::registry::ShieldedAccountRegistryState::RestorePersisted(
+                      *persisted_account_registry_snapshot)
+                : std::nullopt;
+            if (!restored_registry.has_value() ||
+                !restored_registry->CanMaterializeAllEntries() ||
+                !m_shielded_pool_balance.SetBalance(persisted_balance)) {
+                base_trusted = false;
+            }
+            if (base_trusted) {
+                m_shielded_merkle_tree = persisted_tree;
+                const auto actual_digest =
+                    m_shielded_merkle_tree.CommitmentIndexDigest();
+                base_trusted =
+                    persisted_commitment_index_digest.has_value() &&
+                    actual_digest.has_value() &&
+                    *persisted_commitment_index_digest == *actual_digest &&
+                    (m_shielded_merkle_tree.HasCommitmentIndex() ||
+                     m_shielded_merkle_tree.AttachConfiguredCommitmentIndexStore());
+            }
+            if (base_trusted) {
+                m_shielded_account_registry = std::move(*restored_registry);
+                m_shielded_anchor_roots.assign(persisted_anchor_roots.begin(),
+                                               persisted_anchor_roots.end());
+                m_shielded_account_registry_roots.assign(
+                    persisted_account_registry_roots.begin(),
+                    persisted_account_registry_roots.end());
+                m_shielded_smile_public_accounts.clear();
+                m_shielded_account_leaf_commitments.clear();
+                base_trusted =
+                    shielded::registry::BuildRegistryAccountState(
+                        m_shielded_account_registry,
+                        m_shielded_smile_public_accounts,
+                        m_shielded_account_leaf_commitments) &&
+                    load_persisted_unshield_velocity();
+                if (base_trusted) {
+                    InvalidateShieldedAccountStateSnapshotCaches();
+                    m_shielded_state_initialized = true;
+                    const auto persisted_accumulator =
+                        m_shielded_nullifiers->ReadPersistedNullifierAccumulator();
+                    const auto persisted_pin =
+                        m_shielded_nullifiers->ReadPersistedShieldedStatePin();
+                    const auto current_pin = ComputeShieldedSnapshotStatePin();
+                    base_trusted =
+                        persisted_accumulator.has_value() &&
+                        *persisted_accumulator ==
+                            m_shielded_nullifiers->NullifierAccumulatorDigest() &&
+                        persisted_pin.has_value() && current_pin.has_value() &&
+                        *persisted_pin == *current_pin;
+                }
+            }
+
+            if (base_trusted) {
+                LogPrintf("EnsureShieldedStateInitialized: persisted shielded tip height=%d hash=%s is on a short fork from active tip height=%d hash=%s; disconnecting %d and connecting %d block(s) without from-genesis rebuild\n",
+                          persisted_tip_height, persisted_tip_hash.ToString(),
+                          tip->nHeight, tip->GetBlockHash().ToString(),
+                          disconnect_blocks, connect_blocks);
+                shielded::ShieldedMerkleTree target_tree = m_shielded_merkle_tree;
+                ShieldedPoolBalance target_pool = m_shielded_pool_balance;
+                shielded::registry::ShieldedAccountRegistryState target_registry =
+                    m_shielded_account_registry;
+                if (!target_tree.DetachToMemoryOnly()) base_trusted = false;
+
+                for (const CBlockIndex* cursor = persisted_index;
+                     base_trusted && cursor != transition_fork;
+                     cursor = cursor->pprev) {
+                    CBlock block;
+                    CBlockUndo undo;
+                    if (!ReadShieldedRebuildBlock(*m_active_chainstate,
+                                                  *cursor, block) ||
+                        !m_blockman.ReadBlockUndo(undo, *cursor)) {
+                        base_trusted = false;
+                        break;
+                    }
+                    uint64_t output_count{0};
+                    uint64_t registry_leaf_count{0};
+                    for (const auto& txref : block.vtx) {
+                        if (!txref->HasShieldedBundle()) continue;
+                        const CShieldedBundle& bundle = txref->GetShieldedBundle();
+                        const uint64_t outputs{bundle.GetShieldedOutputCount()};
+                        uint64_t appends{0};
+                        if (output_count >
+                                std::numeric_limits<uint64_t>::max() - outputs ||
+                            !TryCountShieldedAccountRegistryAppends(
+                                bundle, GetConsensus(), cursor->nHeight, appends) ||
+                            registry_leaf_count >
+                                std::numeric_limits<uint64_t>::max() - appends) {
+                            base_trusted = false;
+                            break;
+                        }
+                        output_count += outputs;
+                        registry_leaf_count += appends;
+                        std::string reject;
+                        const auto value_balance =
+                            TryGetShieldedStateValueBalance(bundle, reject);
+                        if (!value_balance.has_value() ||
+                            !target_pool.UndoValueBalance(*value_balance)) {
+                            base_trusted = false;
+                            break;
+                        }
+                    }
+                    if (!base_trusted || output_count > target_tree.Size() ||
+                        registry_leaf_count > target_registry.Size() ||
+                        !target_tree.Truncate(target_tree.Size() - output_count) ||
+                        !target_registry.Truncate(
+                            target_registry.Size() - registry_leaf_count,
+                            shielded::registry::ShieldedAccountRegistryState::
+                                PayloadPruneMode::KEEP)) {
+                        base_trusted = false;
+                    }
+                }
+
+                std::vector<const CBlockIndex*> connect_path;
+                for (const CBlockIndex* cursor = tip;
+                     base_trusted && cursor != transition_fork;
+                     cursor = cursor->pprev) {
+                    connect_path.push_back(cursor);
+                }
+                std::reverse(connect_path.begin(), connect_path.end());
+                for (const CBlockIndex* pindex : connect_path) {
+                    CBlock block;
+                    if (!ReadShieldedRebuildBlock(*m_active_chainstate,
+                                                  *pindex, block)) {
+                        base_trusted = false;
+                        break;
+                    }
+                    const bool use_nonced_bridge_tag =
+                        UseNoncedShieldedBridgeTags(GetConsensus(), pindex->nHeight);
+                    for (const auto& txref : block.vtx) {
+                        if (!txref->HasShieldedBundle()) continue;
+                        const CShieldedBundle& bundle = txref->GetShieldedBundle();
+                        std::string reject;
+                        if (!RejectShieldedHeightGateViolation(
+                                *txref, GetConsensus(), pindex->nHeight, reject) ||
+                            !ApplyShieldedStateEffects(
+                                bundle, use_nonced_bridge_tag,
+                                pindex->GetBlockHash(), target_tree, target_pool)) {
+                            base_trusted = false;
+                            break;
+                        }
+                        const auto leaves =
+                            shielded::registry::CollectShieldedOutputAccountLeaves(
+                                bundle, use_nonced_bridge_tag);
+                        if (!leaves.has_value() ||
+                            !target_registry.AppendPrepared(
+                                Span<const shielded::registry::ShieldedAccountLeaf>{
+                                    leaves->data(), leaves->size()})) {
+                            base_trusted = false;
+                            break;
+                        }
+                    }
+                    if (!base_trusted) break;
+                }
+                if (base_trusted) {
+                    const auto marker = MakePreparedShieldedMutationMarker(
+                        persisted_index, tip, target_tree, target_pool,
+                        target_registry);
+                    if (marker.has_value() &&
+                        target_registry.CommitPreparedPayloads() &&
+                        ::WriteShieldedMutationMarker(
+                            m_shielded_nullifiers.get(), *marker) &&
+                        try_restore_prepared_transition(*marker)) {
+                        LogPrintf("EnsureShieldedStateInitialized: completed gap-only shielded short-reorg transition (disconnect=%d connect=%d) to height=%d hash=%s\n",
+                                  disconnect_blocks, connect_blocks,
+                                  tip->nHeight, tip->GetBlockHash().ToString());
+                        return finish_success();
+                    }
+                }
+            }
+            LogPrintf("EnsureShieldedStateInitialized: persisted short-fork state failed bounded gap-only provenance or transition checks; using single-pass fused rebuild\n");
+            reset_shielded_state();
         } else {
             LogPrintf("EnsureShieldedStateInitialized: persisted shielded tip height=%d hash=%s diverges from active tip height=%d hash=%s; performing single-pass fused rebuild from chain\n",
                       persisted_tip_height,
@@ -17576,15 +18374,65 @@ std::optional<int> ChainstateManager::GetSnapshotBaseHeight() const
 void ChainstateManager::RecalculateBestHeader()
 {
     AssertLockHeld(cs_main);
-    m_best_header = ActiveChain().Tip();
-    for (auto& entry : m_blockman.m_block_index) {
-        if (entry.second.nStatus & BLOCK_FAILED_MASK) continue;
-        // Authenticated-work selection with a bounded unauth allowance: a short
-        // unverified MatMul suffix may displace a losing tip for chase, but a
-        // forged flood beyond the allowance cannot outrank authenticated work.
-        if (m_best_header == nullptr || PreferTrustAdjustedHeader(*m_best_header, entry.second)) {
-            m_best_header = &entry.second;
+    const CBlockIndex* const active_tip{ActiveChain().Tip()};
+    SetBestHeader(ActiveChain().Tip());
+    if (!node::matmul_trusted::IsTrustedMirror() || active_tip == nullptr) {
+        for (auto& entry : m_blockman.m_block_index) {
+            if (entry.second.nStatus & BLOCK_FAILED_MASK) continue;
+            // Authenticated-work selection with a bounded unauth allowance: a short
+            // unverified MatMul suffix may displace a losing tip for chase, but a
+            // forged flood beyond the allowance cannot outrank authenticated work.
+            if (m_best_header == nullptr || PreferTrustAdjustedHeader(*m_best_header, entry.second)) {
+                SetBestHeader(&entry.second);
+            }
         }
+        return;
+    }
+
+    // Recalculation runs after load/invalidate/reconsider and has no peer
+    // provenance. Preserve the live mirror predicate: ordinary headers may
+    // only advance the active-tip branch, while a competing branch requires a
+    // current-config M-of-N quorum on itself or an ancestor. This prevents an
+    // unordered generic rescan from following unattestable fork spam or from
+    // silently pinning m_best_header back to the losing active sibling after
+    // the authority branch was already accepted and persisted.
+    CBlockIndex* authority_best{nullptr};
+    for (auto& [_, candidate] : m_blockman.m_block_index) {
+        if ((candidate.nStatus & BLOCK_FAILED_MASK) ||
+            IsOnParkedReorgBranch(&candidate) ||
+            candidate.nHeight < active_tip->nHeight) {
+            continue;
+        }
+
+        if (BlockIndexDescends(&candidate, active_tip)) {
+            if (m_best_header == nullptr ||
+                PreferTrustAdjustedHeader(*m_best_header, candidate)) {
+                SetBestHeader(&candidate);
+            }
+            continue;
+        }
+        if (candidate.nChainWork < active_tip->nChainWork) continue;
+
+        bool has_authority_ancestor{false};
+        for (const CBlockIndex* cursor = &candidate;
+             cursor != nullptr && cursor->nHeight >= active_tip->nHeight;
+             cursor = cursor->pprev) {
+            if (node::matmul_trusted::HasQuorum(
+                    cursor->GetBlockHash(), cursor->nHeight)) {
+                has_authority_ancestor = true;
+                break;
+            }
+        }
+        if (!has_authority_ancestor) continue;
+        if (authority_best == nullptr ||
+            CBlockIndexWorkComparator()(authority_best, &candidate)) {
+            authority_best = &candidate;
+        }
+    }
+    if (authority_best != nullptr) {
+        // Current quorum is stronger than peer provenance and therefore may
+        // displace the active-tip branch on reconstruction.
+        SetBestHeader(authority_best);
     }
 }
 

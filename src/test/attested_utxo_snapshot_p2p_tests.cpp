@@ -44,8 +44,7 @@ BOOST_AUTO_TEST_CASE(chunk_decoder_rejects_oversize_before_allocation)
 
 BOOST_AUTO_TEST_CASE(server_rate_limits_manifest_and_chunk_requests)
 {
-    auto& coord{node::AttestedUTXOSnapshotP2P::Get()};
-    coord.ResetForTest();
+    node::AttestedUTXOSnapshotP2P coord;
     const auto now{GetTime<std::chrono::microseconds>()};
     const NodeId peer{7};
 
@@ -67,8 +66,7 @@ BOOST_AUTO_TEST_CASE(server_rate_limits_manifest_and_chunk_requests)
 
 BOOST_AUTO_TEST_CASE(server_caps_concurrent_transfers)
 {
-    auto& coord{node::AttestedUTXOSnapshotP2P::Get()};
-    coord.ResetForTest();
+    node::AttestedUTXOSnapshotP2P coord;
     const auto now{GetTime<std::chrono::microseconds>()};
 
     BOOST_CHECK(coord.AdmitChunkRequest(/*peer=*/1, now));
@@ -89,8 +87,7 @@ BOOST_AUTO_TEST_CASE(quorum_before_body_gate_is_enforced_by_fetch_ordering)
     // The fetch RPC verifies the manifest before requesting chunks. This unit
     // test locks the coordinator contract that DeliverChunk is ignored unless
     // a chunk wait was armed after a successful manifest wait.
-    auto& coord{node::AttestedUTXOSnapshotP2P::Get()};
-    coord.ResetForTest();
+    node::AttestedUTXOSnapshotP2P coord;
 
     node::AttestedUTXOSnapshotChunkMsg early_chunk;
     early_chunk.block_hash = uint256::ONE;
@@ -125,8 +122,7 @@ BOOST_AUTO_TEST_CASE(quorum_before_body_gate_is_enforced_by_fetch_ordering)
 
 BOOST_AUTO_TEST_CASE(concurrent_client_sessions_are_isolated)
 {
-    auto& coord{node::AttestedUTXOSnapshotP2P::Get()};
-    coord.ResetForTest();
+    node::AttestedUTXOSnapshotP2P coord;
     const auto first{coord.BeginSession(/*peer=*/10, uint256{})};
     const auto second{coord.BeginSession(/*peer=*/11, uint256{})};
     BOOST_REQUIRE(first);

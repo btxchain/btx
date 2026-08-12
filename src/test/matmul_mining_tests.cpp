@@ -865,11 +865,11 @@ BOOST_AUTO_TEST_CASE(difficulty_health_reports_nonzero_best_header_lag)
         synthetic_best_header.nHeight =
             m_node.chainman->ActiveHeight() + 4;
         synthetic_best_header.pprev = original_best_header;
-        m_node.chainman->m_best_header = &synthetic_best_header;
+        m_node.chainman->SetBestHeader(&synthetic_best_header);
         struct BestHeaderRestore {
             ChainstateManager& chainman;
             CBlockIndex* original;
-            ~BestHeaderRestore() { chainman.m_best_header = original; }
+            ~BestHeaderRestore() { chainman.SetBestHeader(original); }
         } restore{*m_node.chainman, original_best_header};
 
         // Keep cs_main held until the RPC has consumed the synthetic height.
