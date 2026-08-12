@@ -433,15 +433,24 @@ Build example:
 ```bash
 cmake -B build \
   -DBTX_ENABLE_CUDA_EXPERIMENTAL=ON \
-  -DCUDAToolkit_ROOT=/usr/local/cuda \
-  -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc \
+  -DCUDAToolkit_ROOT=/usr/local/cuda-13.2 \
+  -DCMAKE_CUDA_COMPILER=/usr/local/cuda-13.2/bin/nvcc \
   -DBTX_CUDA_ARCHITECTURES=120
 cmake --build build -j"$(nproc)"
 ```
 
+Pin `CUDAToolkit_ROOT` to the **validated toolkit directory** (CUDA Toolkit
+`13.2` as of the Linux CUDA work on this branch), not the host's
+`/usr/local/cuda` symlink. That symlink has been observed pointing at CUDA
+`13.0` while `13.2` sat beside it; building against `13.0` produced exact-
+integer GEMM results that disagreed with the CPU oracle
+(`episode_digest_mismatch_backend_vs_cpu`), failed RC self-qualification, and
+left the node on `provider=cpu` / `ready=0`. Do not "fix" a digest mismatch by
+loosening comparison — it is a genuine correctness signal.
+
 The Linux CUDA backend work on this branch was developed and validated against
 CUDA Toolkit `13.2`, the current CUDA Toolkit documentation line as of April
-2026, installed at `/usr/local/cuda`.
+2026, installed at `/usr/local/cuda-13.2`.
 
 Run `btxd` with CUDA selected:
 

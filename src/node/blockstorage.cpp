@@ -647,10 +647,9 @@ CBlockIndex* BlockManager::AddToBlockIndex(const CBlockHeader& block, CBlockInde
     // full work here, keeping nAuthenticatedChainWork == nChainWork identical.
     UpdateAuthenticatedChainWork(*pindexNew, GetConsensus());
     pindexNew->RaiseValidity(BLOCK_VALID_TREE);
-    // Prefer authenticated work for best-header selection. The shared
-    // trust-adjusted allowance is zero, so even one unverified MatMul header
-    // cannot displace an authenticated tip on claimed work (matching
-    // net_processing peer decisions).
+    // Prefer authenticated work for best-header selection, with a bounded
+    // unauth allowance so a short competing headers-only suffix can displace a
+    // losing tip for chase (matching net_processing peer decisions).
     if (best_header == nullptr || PreferTrustAdjustedHeader(*best_header, *pindexNew)) {
         best_header = pindexNew;
     }

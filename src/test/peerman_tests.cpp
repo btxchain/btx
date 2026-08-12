@@ -552,7 +552,9 @@ BOOST_AUTO_TEST_CASE(matmul_consensus_tier_compact_block_boundary_policy)
     // peer remains able to announce its header and deliver its body. Only local
     // ExactReplay can move the active chain across the boundary. In particular,
     // indexing an unauthenticated boundary header must not rotate away the only
-    // available body source.
+    // available body source. With the bounded unauth allowance, m_best_header
+    // advances onto that header so the body is chased; the active tip stays put
+    // until the body authenticates.
     CBlock boundary_candidate = node::BlockAssembler{
         m_node.chainman->ActiveChainstate(), nullptr, {}, m_node}
                                     .CreateNewBlock()
@@ -594,10 +596,14 @@ BOOST_AUTO_TEST_CASE(matmul_consensus_tier_compact_block_boundary_policy)
         WITH_LOCK(::cs_main,
                   return m_node.chainman->ActiveChain().Tip()->GetBlockHash()),
         tip->GetBlockHash());
+    // Bounded allowance: chase the unverified RC header; tip stays authenticated.
     BOOST_CHECK_EQUAL(
         WITH_LOCK(::cs_main,
                   return m_node.chainman->m_best_header->GetBlockHash()),
-        tip->GetBlockHash());
+        boundary_candidate.GetHash());
+    BOOST_CHECK(WITH_LOCK(
+        ::cs_main,
+        return PreferTrustAdjustedHeader(*tip, *boundary_index)));
 
     CNodeStateStats pre_boundary_stats;
     BOOST_REQUIRE(peerman.GetNodeStateStats(pre_boundary_peer.GetId(),

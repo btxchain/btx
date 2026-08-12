@@ -18,6 +18,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <mutex>
 #include <vector>
 
 namespace matmul::v4::rc {
@@ -26,6 +27,14 @@ namespace {
 std::atomic<bool> g_rc_selfqual_ok{false};
 std::atomic<bool> g_rc_selfqual_diagnosed{false};
 std::atomic<uint64_t> g_rc_selfqual_probe_count{0};
+std::mutex g_rc_selfqual_deficit_mu;
+std::string g_rc_selfqual_last_deficit;
+
+void StoreLastSelfQualDeficit(std::string reason)
+{
+    std::lock_guard<std::mutex> lock{g_rc_selfqual_deficit_mu};
+    g_rc_selfqual_last_deficit = std::move(reason);
+}
 
 CBlockHeader MakeSelfQualHeader(uint64_t nonce)
 {
@@ -170,20 +179,23 @@ RCSelfQualStatus ProbeRCSelfQual(const matmul::v4::lt::ExactGemmBackend& backend
     st.native_mxfp4_qualified = IsRcOzakiMxfp4Qualified();
     st.native_fp8_qualified = false;
 
-    // CPU-only path: oracle is always available; no ExactGemm accelerator to admit.
-    if (backend.gemm_s8s8 == nullptr) {
-        st.deficit_reason = "cpu_exactgemm_no_device_backend";
+    auto fail = [&](std::string reason) -> RCSelfQualStatus {
+        st.deficit_reason = std::move(reason);
+        StoreLastSelfQualDeficit(st.deficit_reason);
         g_rc_selfqual_ok.store(false, std::memory_order_release);
         return st;
+    };
+
+    // CPU-only path: oracle is always available; no ExactGemm accelerator to admit.
+    if (backend.gemm_s8s8 == nullptr) {
+        return fail("cpu_exactgemm_no_device_backend");
     }
 
     std::string reason;
 
     if (!ProbeDirectS8S8(backend, reason)) {
-        st.deficit_reason = reason;
         st.cpu_oracle_ok = true;
-        g_rc_selfqual_ok.store(false, std::memory_order_release);
-        return st;
+        return fail(std::move(reason));
     }
 
     const bool have_epoch = height.has_value() && params_ref != nullptr;
@@ -193,49 +205,36 @@ RCSelfQualStatus ProbeRCSelfQual(const matmul::v4::lt::ExactGemmBackend& backend
             ConsensusRCEpisodeParamsForHeight(*height, *params_ref);
         // Compact stand-in for <2^24 stages: toy episode (CI-safe).
         if (!ProbeEpisodeDigestMatch(backend, MakeToyRCEpisodeParams(), /*nonce=*/42, reason)) {
-            st.deficit_reason = reason;
-            g_rc_selfqual_ok.store(false, std::memory_order_release);
-            return st;
+            return fail(std::move(reason));
         }
         // >2^24 regime at epoch-scaled medium contraction (not full live dims).
         const RCEpisodeParams med = MakeEpochScaledMedium(live);
         if (!ProbeEpisodeDigestMatch(backend, med, /*nonce=*/7, reason)) {
-            st.deficit_reason = std::string("epoch_medium_") + reason;
-            g_rc_selfqual_ok.store(false, std::memory_order_release);
-            return st;
+            return fail(std::string("epoch_medium_") + reason);
         }
         if (!ProbeWgradBoundary(med.b_seq, reason)) {
-            st.deficit_reason = reason;
-            g_rc_selfqual_ok.store(false, std::memory_order_release);
-            return st;
+            return fail(std::move(reason));
         }
         // Record that live shape was consulted (dims available for T-FP9).
         if (live.n_ctx == 0 || live.b_seq == 0) {
-            st.deficit_reason = "live_epoch_dims_invalid";
-            g_rc_selfqual_ok.store(false, std::memory_order_release);
-            return st;
+            return fail("live_epoch_dims_invalid");
         }
     } else {
         if (!ProbeEpisodeDigestMatch(backend, MakeToyRCEpisodeParams(), /*nonce=*/42, reason)) {
-            st.deficit_reason = reason;
-            g_rc_selfqual_ok.store(false, std::memory_order_release);
-            return st;
+            return fail(std::move(reason));
         }
         if (!ProbeEpisodeDigestMatch(backend, MakeMediumRCEpisodeParams(), /*nonce=*/7, reason)) {
-            st.deficit_reason = std::string("medium_") + reason;
-            g_rc_selfqual_ok.store(false, std::memory_order_release);
-            return st;
+            return fail(std::string("medium_") + reason);
         }
         if (!ProbeWgradBoundary(MakeMediumRCEpisodeParams().b_seq, reason)) {
-            st.deficit_reason = reason;
-            g_rc_selfqual_ok.store(false, std::memory_order_release);
-            return st;
+            return fail(std::move(reason));
         }
     }
 
     st.exact_gemm_backend_ok = true;
     st.mining_accelerator_ok = true;
     st.deficit_reason.clear();
+    StoreLastSelfQualDeficit({});
     // Amendment 1.B: native MXFP4 only after Ozaki MXFP4 device path quals.
     // ExactGemm panels may qualify separately and must NOT flip native_*.
     // LT native_mxfp4_qualified must never be copied here.
@@ -269,6 +268,12 @@ bool HasPassedRCSelfQual()
     return g_rc_selfqual_ok.load(std::memory_order_acquire);
 }
 
+std::string GetLastRCSelfQualDeficitReason()
+{
+    std::lock_guard<std::mutex> lock{g_rc_selfqual_deficit_mu};
+    return g_rc_selfqual_last_deficit;
+}
+
 uint64_t RCSelfQualProbeInvocationCountForTest()
 {
     return g_rc_selfqual_probe_count.load(std::memory_order_relaxed);
@@ -284,6 +289,7 @@ void ResetRCSelfQualCacheForTest()
     g_rc_selfqual_ok.store(false, std::memory_order_release);
     g_rc_selfqual_diagnosed.store(false, std::memory_order_release);
     g_rc_selfqual_probe_count.store(0, std::memory_order_relaxed);
+    StoreLastSelfQualDeficit({});
 }
 
 } // namespace matmul::v4::rc

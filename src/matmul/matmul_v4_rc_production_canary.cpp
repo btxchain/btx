@@ -11,6 +11,7 @@
 #include <logging.h>
 #include <matmul/exact_gemm_resolve.h>
 #include <matmul/matmul_v4_rc_scale.h>
+#include <matmul/matmul_v4_rc_selfqual.h>
 #include <random.h>
 
 #include <array>
@@ -693,8 +694,23 @@ static RCProductionCanaryStatus RunRCProductionStartupCanaryImpl(
     }
 
     if (!automatic_policy_eligible) {
-        out.outcome = RCProductionCanaryOutcome::ProviderNotPolicyEligible;
-        out.reason = "provider_not_automatic_policy_eligible";
+        // Prefer the concrete RC self-qual deficit when present. A CUDA toolkit
+        // that disagrees with the CPU oracle on exact-integer GEMM fails closed
+        // correctly, but previously surfaced only as provider_not_policy_eligible
+        // / no_rc_self_qualified_device_backend — indistinguishable from a
+        // misconfigured policy flag.
+        const std::string deficit{
+            matmul::v4::rc::GetLastRCSelfQualDeficitReason()};
+        if (deficit.find("episode_digest_mismatch") != std::string::npos) {
+            out.outcome = RCProductionCanaryOutcome::DigestMismatch;
+            out.reason = "rc_self_qual_episode_digest_mismatch_backend_vs_cpu";
+        } else if (!deficit.empty()) {
+            out.outcome = RCProductionCanaryOutcome::ProviderNotPolicyEligible;
+            out.reason = "provider_not_policy_eligible:" + deficit;
+        } else {
+            out.outcome = RCProductionCanaryOutcome::ProviderNotPolicyEligible;
+            out.reason = "provider_not_automatic_policy_eligible";
+        }
         StoreStatus(out);
         return out;
     }

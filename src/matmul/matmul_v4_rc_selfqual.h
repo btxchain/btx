@@ -55,6 +55,11 @@ void DiagnoseRCSelfQualOnce();
  *  Used by backend ResolveBackend fail-closed gate (§N.3-v style). */
 [[nodiscard]] bool HasPassedRCSelfQual();
 
+/** Most recent ProbeRCSelfQual deficit_reason (empty after a successful probe).
+ *  Surfaced so resolvers/canaries can report episode_digest_mismatch distinctly
+ *  instead of collapsing it into a generic policy-ineligible string. */
+[[nodiscard]] std::string GetLastRCSelfQualDeficitReason();
+
 /** Test hooks (F5): ProbeRCSelfQual invocation counter + cache reset.
  *  Production miners must resolve ExactGemm once per {backend,arch,epoch}
  *  and never re-enter ProbeRCSelfQual on the per-nonce path. */

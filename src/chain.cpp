@@ -206,9 +206,9 @@ arith_uint256 GetTrustAdjustedChainWork(const CBlockIndex& block, unsigned int u
     // broken, an unsigned arith_uint256 underflow would wrap to ~2^256 and, via the
     // std::min below, mis-rank an unauthenticated chain UPWARD. std::min pins it to 0.
     const arith_uint256 unauth{block.nChainWork - std::min(block.nChainWork, block.nAuthenticatedChainWork)};
-    // Production passes a zero allowance, so possibly forged tip nBits cannot
-    // add any preference before body verification. Keep the generic calculation
-    // here for deterministic policy-unit coverage.
+    // Production passes a bounded allowance: a short unverified suffix may earn
+    // limited preference so a lost same-height race can be chased, but a forged
+    // tip's nBits cannot buy unbounded ranking before body verification.
     arith_uint256 allowance{GetBlockProof(block)};
     allowance *= unauth_allowance_blocks;
     return block.nAuthenticatedChainWork + std::min(unauth, allowance);
@@ -225,12 +225,11 @@ bool PreferTrustAdjustedHeader(const CBlockIndex& current, const CBlockIndex& ca
         return current_adjusted < candidate_adjusted;
     }
 
-    // With the production zero allowance every unauthenticated suffix is on the
-    // same authenticated-work plateau as its last verified ancestor. Never let
+    // Equal adjusted work: either both fully authenticated (legacy tie → keep
+    // current), or both sit on the same allowance-capped plateau. Never let
     // unordered block-index iteration choose an arbitrary, possibly
-    // millions-of-headers-deep member of that plateau as m_best_header. Keep
-    // legacy/full-body ties unchanged; for a tie involving unauthenticated work,
-    // prefer the most authenticated and then the shallowest claimed suffix.
+    // millions-of-headers-deep member of that plateau as m_best_header. Prefer
+    // the most authenticated and then the shallowest claimed suffix.
     const bool current_has_unauth = current.nAuthenticatedChainWork < current.nChainWork;
     const bool candidate_has_unauth = candidate.nAuthenticatedChainWork < candidate.nChainWork;
     if (!current_has_unauth && !candidate_has_unauth) return false;
