@@ -19,6 +19,7 @@
 #include <chainparams.h>
 #include <common/args.h>
 #include <consensus/params.h>
+#include <kernel/chainstatemanager_opts.h>
 #include <test/util/setup_common.h>
 #include <util/chaintype.h>
 
@@ -306,13 +307,19 @@ BOOST_AUTO_TEST_CASE(pre_fork_heights_are_byte_identical)
 }
 
 // WP-8 / C1/H2: GetTrustAdjustedChainWork must be EXACTLY nChainWork pre-fork
-// (the routed peer-selection sites are then behavior-identical), but give zero
-// production credit to every post-fork unauthenticated suffix.
-BOOST_AUTO_TEST_CASE(trust_adjusted_work_identity_and_zero_credit)
+// (the routed peer-selection sites are then behavior-identical). Post-fork,
+// production credits at most TRUST_ADJUSTED_WORK_ALLOWANCE_BLOCKS of unverified
+// suffix — never the full claimed flood.
+BOOST_AUTO_TEST_CASE(trust_adjusted_work_identity_and_bounded_credit)
 {
     LOCK(::cs_main);
     constexpr unsigned int kAllowance{TRUST_ADJUSTED_WORK_ALLOWANCE_BLOCKS};
-    static_assert(kAllowance == 0);
+    // Bound equals EMERGENCY park_depth so chase preference cannot outrun the
+    // depth at which PARK refuses activation of a rewrite.
+    static_assert(kAllowance == 6);
+    static_assert(kAllowance == kernel::GetReorgProtectionProfileSettings(
+                                    kernel::ReorgProtectionProfile::EMERGENCY)
+                                    .park_depth);
 
     // Pre-fork (fork disabled, like INT32_MAX today): identity on every status mix.
     {
@@ -328,8 +335,8 @@ BOOST_AUTO_TEST_CASE(trust_adjusted_work_identity_and_zero_credit)
         }
     }
 
-    // Post-fork: neither one header nor a forged 100-header suffix receives
-    // work beyond the last authenticated ancestor.
+    // Post-fork: one unverified header receives exactly one proof of credit;
+    // a forged 100-header suffix is capped at the allowance (not full claimed).
     {
         const int32_t kFork = 3;
         const Consensus::Params params = ParamsWithFork(kFork);
@@ -341,13 +348,19 @@ BOOST_AUTO_TEST_CASE(trust_adjusted_work_identity_and_zero_credit)
 
         const CBlockIndex& forged_tip = c.blocks.back();
         const CBlockIndex& first_unverified = c.blocks[kFork + 1];
+        const arith_uint256 one_proof{GetBlockProof(first_unverified)};
+        arith_uint256 allowance_work{one_proof};
+        allowance_work *= kAllowance;
 
-        // Zero credit for both the first unverified header and the deep suffix.
+        // One-header credit: auth + 1 proof.
         BOOST_CHECK_EQUAL(GetTrustAdjustedChainWork(first_unverified, kAllowance).GetHex(),
-                          last_auth->nAuthenticatedChainWork.GetHex());
+                          (last_auth->nAuthenticatedChainWork + one_proof).GetHex());
+        // Deep forged tip: capped at auth + allowance, never full claimed work.
         BOOST_CHECK_EQUAL(GetTrustAdjustedChainWork(forged_tip, kAllowance).GetHex(),
-                          last_auth->nAuthenticatedChainWork.GetHex());
+                          (last_auth->nAuthenticatedChainWork + allowance_work).GetHex());
         BOOST_CHECK(GetTrustAdjustedChainWork(forged_tip, kAllowance) < forged_tip.nChainWork);
+        BOOST_CHECK(GetTrustAdjustedChainWork(forged_tip, kAllowance) >
+                    last_auth->nAuthenticatedChainWork);
 
         // Fully authenticated chains are always identity, post-fork included.
         BOOST_CHECK_EQUAL(GetTrustAdjustedChainWork(*last_auth, kAllowance).GetHex(),
@@ -355,10 +368,12 @@ BOOST_AUTO_TEST_CASE(trust_adjusted_work_identity_and_zero_credit)
     }
 }
 
-// An Epoch-A RC header extends an authenticated tip and therefore has greater
-// raw claimed work. Until its body passes ExactReplay it must nevertheless be
-// unable to replace that authenticated tip as operational best header.
-BOOST_AUTO_TEST_CASE(one_unverified_rc_header_cannot_displace_authenticated_tip)
+// An Epoch-A RC header extending an authenticated tip has greater raw claimed
+// work. With the production bounded allowance it MUST be able to displace that
+// tip as operational best header so the body can be chased — otherwise a node
+// that is only one header behind never requests it. Zero-allowance previously
+// forbade this and stranded tips; the bound (not zero) is the escape valve.
+BOOST_AUTO_TEST_CASE(one_unverified_rc_header_can_displace_authenticated_tip_for_chase)
 {
     LOCK(::cs_main);
     const int32_t kFork = 2;
@@ -374,11 +389,55 @@ BOOST_AUTO_TEST_CASE(one_unverified_rc_header_cannot_displace_authenticated_tip)
 
     BOOST_REQUIRE(params.IsMatMulRCActive(unverified_rc_header->nHeight));
     BOOST_CHECK(unverified_rc_header->nChainWork > authenticated_tip->nChainWork);
-    BOOST_CHECK_EQUAL(
-        GetTrustAdjustedChainWork(*unverified_rc_header, TRUST_ADJUSTED_WORK_ALLOWANCE_BLOCKS).GetHex(),
-        authenticated_tip->nAuthenticatedChainWork.GetHex());
-    BOOST_CHECK(!PreferTrustAdjustedHeader(*authenticated_tip, *unverified_rc_header));
-    BOOST_CHECK(PreferTrustAdjustedHeader(*unverified_rc_header, *authenticated_tip));
+    BOOST_CHECK(GetTrustAdjustedChainWork(*unverified_rc_header, TRUST_ADJUSTED_WORK_ALLOWANCE_BLOCKS) >
+                authenticated_tip->nAuthenticatedChainWork);
+    BOOST_CHECK(PreferTrustAdjustedHeader(*authenticated_tip, *unverified_rc_header));
+    BOOST_CHECK(!PreferTrustAdjustedHeader(*unverified_rc_header, *authenticated_tip));
+}
+
+// Same-height race: the losing authenticated tip must be displaceable by a
+// competing headers-only branch that is only a few headers ahead, otherwise
+// m_best_header stays pinned and bodies on the winning branch are never chased.
+BOOST_AUTO_TEST_CASE(bounded_allowance_rescues_losing_same_height_tip)
+{
+    LOCK(::cs_main);
+    constexpr unsigned int kAllowance{TRUST_ADJUSTED_WORK_ALLOWANCE_BLOCKS};
+    const Consensus::Params params = ParamsWithFork(1);
+
+    Chain base;
+    CBlockIndex* fork = base.Add(ST_AUTHENTICATED);
+    base.Recompute(params);
+
+    // Losing tip: one authenticated sibling past the fork.
+    std::deque<CBlockIndex> losing;
+    losing.emplace_back();
+    CBlockIndex& lose = losing.back();
+    lose.pprev = fork;
+    lose.nHeight = fork->nHeight + 1;
+    lose.nBits = TEST_NBITS;
+    lose.nStatus = ST_AUTHENTICATED;
+    lose.nChainWork = fork->nChainWork + GetBlockProof(lose);
+    UpdateAuthenticatedChainWork(lose, params);
+
+    // Winning branch: allowance headers of header-only work past the same fork
+    // (the production stall was hundreds ahead; allowance blocks is enough).
+    std::deque<CBlockIndex> winning;
+    CBlockIndex* win = fork;
+    for (unsigned int i = 0; i < kAllowance; ++i) {
+        winning.emplace_back();
+        CBlockIndex& idx = winning.back();
+        idx.pprev = win;
+        idx.nHeight = win->nHeight + 1;
+        idx.nBits = TEST_NBITS;
+        idx.nStatus = ST_HEADER_ONLY;
+        idx.nChainWork = win->nChainWork + GetBlockProof(idx);
+        UpdateAuthenticatedChainWork(idx, params);
+        win = &idx;
+    }
+
+    BOOST_CHECK(win->nChainWork > lose.nChainWork);
+    BOOST_CHECK(PreferTrustAdjustedHeader(lose, *win, kAllowance));
+    BOOST_CHECK(!PreferTrustAdjustedHeader(*win, lose, kAllowance));
 }
 
 BOOST_AUTO_TEST_CASE(prefer_trust_adjusted_header_rejects_forged_long_chain)
@@ -393,7 +452,9 @@ BOOST_AUTO_TEST_CASE(prefer_trust_adjusted_header_rejects_forged_long_chain)
     CBlockIndex* fork = base.Add(ST_AUTHENTICATED);
     base.Recompute(params);
 
-    // Honest tip: many body-authenticated blocks past the fork.
+    // Honest tip: many body-authenticated blocks past the fork (deeper than
+    // the unauth allowance, so authenticated work alone outranks any forged
+    // suffix capped at the allowance).
     std::deque<CBlockIndex> auth_branch;
     CBlockIndex* auth_tip = fork;
     for (int i = 0; i < 40; ++i) {
@@ -423,18 +484,22 @@ BOOST_AUTO_TEST_CASE(prefer_trust_adjusted_header_rejects_forged_long_chain)
         forged_tip = &idx;
     }
 
-    // Raw claimed work prefers the forged tip; authenticated-work selection
-    // must prefer the genuinely verified branch because unauth credit is zero.
+    // Raw claimed work prefers the forged tip; trust-adjusted selection must
+    // still prefer the genuinely verified branch because unauth credit is capped
+    // well below 40 authenticated proofs.
     BOOST_CHECK(forged_tip->nChainWork > auth_tip->nChainWork);
     BOOST_CHECK(PreferTrustAdjustedHeader(*forged_tip, *auth_tip));
     BOOST_CHECK(!PreferTrustAdjustedHeader(*auth_tip, *forged_tip));
 }
 
-BOOST_AUTO_TEST_CASE(prefer_trust_adjusted_header_chooses_shallow_zero_credit_tip)
+// On the allowance-capped plateau (both tips have >= allowance unauth headers
+// from the same auth ancestor) prefer the shallowest claimed suffix so a
+// million-header forged flood cannot pin m_best_header via index iteration.
+BOOST_AUTO_TEST_CASE(prefer_trust_adjusted_header_chooses_shallow_capped_tip)
 {
     LOCK(::cs_main);
     constexpr unsigned int kAllowance{TRUST_ADJUSTED_WORK_ALLOWANCE_BLOCKS};
-    static_assert(kAllowance == 0);
+    static_assert(kAllowance > 0);
     const Consensus::Params params = ParamsWithFork(1);
 
     Chain c;
@@ -444,7 +509,7 @@ BOOST_AUTO_TEST_CASE(prefer_trust_adjusted_header_chooses_shallow_zero_credit_ti
     std::deque<CBlockIndex> suffix;
     CBlockIndex* shallow = nullptr;
     CBlockIndex* tip = base;
-    for (int i = 1; i <= 100; ++i) {
+    for (unsigned int i = 1; i <= 100; ++i) {
         suffix.emplace_back();
         CBlockIndex& idx = suffix.back();
         idx.pprev = tip;
@@ -454,14 +519,74 @@ BOOST_AUTO_TEST_CASE(prefer_trust_adjusted_header_chooses_shallow_zero_credit_ti
         idx.nChainWork = tip->nChainWork + GetBlockProof(idx);
         UpdateAuthenticatedChainWork(idx, params);
         tip = &idx;
-        if (i == 1) shallow = tip;
+        if (i == kAllowance) shallow = tip;
     }
 
     BOOST_REQUIRE(shallow != nullptr);
+    // Both are at the allowance cap → equal adjusted work.
     BOOST_CHECK_EQUAL(GetTrustAdjustedChainWork(*shallow, kAllowance).GetHex(),
                       GetTrustAdjustedChainWork(*tip, kAllowance).GetHex());
+    // Tie-break: prefer shallower unauth suffix.
     BOOST_CHECK(PreferTrustAdjustedHeader(*tip, *shallow, kAllowance));
     BOOST_CHECK(!PreferTrustAdjustedHeader(*shallow, *tip, kAllowance));
+}
+
+// Chase ranking must not become a back-door past PARK. A headers-only branch
+// deeper than EMERGENCY park_depth may win PreferTrustAdjustedHeader for chase,
+// but ActivateBestChain with PARK still refuses the deep rewrite (covered by
+// chainstate_deep_reorg_rejection_prunes_candidate_branch). This unit test pins
+// the invariant that allowance == park_depth and that a forged branch beyond
+// park_depth still cannot outrank an authenticated tip of park_depth blocks.
+BOOST_AUTO_TEST_CASE(allowance_bound_does_not_outrank_park_depth_authenticated)
+{
+    LOCK(::cs_main);
+    constexpr unsigned int kAllowance{TRUST_ADJUSTED_WORK_ALLOWANCE_BLOCKS};
+    constexpr uint32_t kPark =
+        kernel::GetReorgProtectionProfileSettings(
+            kernel::ReorgProtectionProfile::EMERGENCY)
+            .park_depth;
+    static_assert(kAllowance == kPark);
+    const Consensus::Params params = ParamsWithFork(1);
+
+    Chain base;
+    CBlockIndex* fork = base.Add(ST_AUTHENTICATED);
+    base.Recompute(params);
+
+    std::deque<CBlockIndex> auth_branch;
+    CBlockIndex* auth_tip = fork;
+    for (uint32_t i = 0; i < kPark; ++i) {
+        auth_branch.emplace_back();
+        CBlockIndex& idx = auth_branch.back();
+        idx.pprev = auth_tip;
+        idx.nHeight = auth_tip->nHeight + 1;
+        idx.nBits = TEST_NBITS;
+        idx.nStatus = ST_AUTHENTICATED;
+        idx.nChainWork = auth_tip->nChainWork + GetBlockProof(idx);
+        UpdateAuthenticatedChainWork(idx, params);
+        auth_tip = &idx;
+    }
+
+    std::deque<CBlockIndex> forged_branch;
+    CBlockIndex* forged_tip = fork;
+    // Deeper than park_depth (and allowance): still capped at allowance proofs.
+    for (uint32_t i = 0; i < kPark + 20; ++i) {
+        forged_branch.emplace_back();
+        CBlockIndex& idx = forged_branch.back();
+        idx.pprev = forged_tip;
+        idx.nHeight = forged_tip->nHeight + 1;
+        idx.nBits = TEST_NBITS;
+        idx.nStatus = ST_HEADER_ONLY;
+        idx.nChainWork = forged_tip->nChainWork + GetBlockProof(idx);
+        UpdateAuthenticatedChainWork(idx, params);
+        forged_tip = &idx;
+    }
+
+    // Equal adjusted work at the allowance/park_depth proof count → prefer the
+    // authenticated branch (more authenticated work in the tie-break).
+    BOOST_CHECK_EQUAL(GetTrustAdjustedChainWork(*auth_tip, kAllowance).GetHex(),
+                      GetTrustAdjustedChainWork(*forged_tip, kAllowance).GetHex());
+    BOOST_CHECK(PreferTrustAdjustedHeader(*forged_tip, *auth_tip, kAllowance));
+    BOOST_CHECK(!PreferTrustAdjustedHeader(*auth_tip, *forged_tip, kAllowance));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

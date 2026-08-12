@@ -987,8 +987,21 @@ ResolvedRCExactGemm ResolveExactGemmBackendForRC()
     if (out.self_qualified && out.backend.rc_fused_ffn != nullptr) {
         out.provider += "_fused_extract";
     }
-    out.reason = out.self_qualified ? "generic_exactgemm_and_rc_self_qualified"
-                                    : "no_rc_self_qualified_device_backend";
+    if (out.self_qualified) {
+        out.reason = "generic_exactgemm_and_rc_self_qualified";
+    } else {
+        // Preserve the concrete self-qual deficit. Collapsing every failure into
+        // no_rc_self_qualified_device_backend made CUDA toolkit digest mismatches
+        // look like a config/policy problem (hours of operator misdiagnosis).
+        const std::string deficit{matmul::v4::rc::GetLastRCSelfQualDeficitReason()};
+        if (deficit.find("episode_digest_mismatch") != std::string::npos) {
+            out.reason = "rc_self_qual_episode_digest_mismatch_backend_vs_cpu";
+        } else if (!deficit.empty()) {
+            out.reason = "no_rc_self_qualified_device_backend:" + deficit;
+        } else {
+            out.reason = "no_rc_self_qualified_device_backend";
+        }
+    }
     out.qualification_scope =
         out.self_qualified ? "toy_and_scaled_medium" : "none";
     return RecordRCResolution(std::move(out));

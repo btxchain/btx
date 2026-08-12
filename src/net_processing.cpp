@@ -250,6 +250,12 @@ static constexpr int BLOCK_FETCH_STALL_HEADERS_AHEAD = 2;
 static constexpr auto BLOCK_FETCH_STALL_IDLE_INTERVAL{45s};
 /** Minimum interval between residual-stall safety-valve kicks (anti-thrash). */
 static constexpr auto BLOCK_FETCH_STALL_KICK_COOLDOWN{60s};
+/** In-flight requests older than this, with peers still ahead and no progress,
+ *  are treated as a residual stall even when mapBlocksInFlight is non-empty.
+ *  Matches BLOCK_REREQUEST_STALE_AFTER so we do not thrash below the duplicate-
+ *  request threshold. Observed: 80 blocks in flight across 9 peers that never
+ *  resolved, starving new getdata forever while best_header_ahead stayed 0. */
+static constexpr auto BLOCK_FETCH_STALL_INFLIGHT_STALE{180s};
 /** Maximum number of headers to announce when relaying blocks with headers message.*/
 static const unsigned int MAX_BLOCKS_TO_ANNOUNCE = 8;
 /** Minimum blocks required to signal NODE_NETWORK_LIMITED */
@@ -1953,16 +1959,19 @@ private:
      * branch tens of blocks ahead, vBlocksInFlight / mapBlocksInFlight empty
      * (so no per-block timeout can fire), and only a btxd restart clears it.
      *
-     * PreferTrustAdjustedHeader with a zero unauth allowance can keep
-     * m_best_header at the authenticated tip even while a higher-claimed
-     * headers-only fork exists, so the valve also considers peer
-     * pindexBestKnownBlock heights. Likely contributing causes audited below:
+     * PreferTrustAdjustedHeader with a bounded unauth allowance still may keep
+     * m_best_header near the authenticated tip while a higher-claimed
+     * headers-only fork exists beyond the allowance, so the valve also
+     * considers peer pindexBestKnownBlock heights. A second observed mode is
+     * non-empty mapBlocksInFlight where every entry is stale and never frees
+     * slots for new getdata. Likely contributing causes audited below:
      * orphaned mapBlocksInFlight entries, stale m_matmul_async_verifying
      * markers (body received → RemoveBlockRequest → FindNextBlocks skips the
      * hash forever while the marker lives), and m_peers_downloading_from /
      * pindexLastCommonBlock desync that leaves every candidate peer refusing
-     * to allocate getdata. The safety valve reconciles accounting and clears
-     * markers that cannot correspond to live work.
+     * to allocate getdata. The safety valve reconciles accounting, clears
+     * markers that cannot correspond to live work, and releases fully-stale
+     * in-flight sets.
      */
     std::chrono::microseconds m_block_fetch_idle_since GUARDED_BY(cs_main){0us};
     std::chrono::microseconds m_last_block_fetch_stall_kick GUARDED_BY(cs_main){0us};
@@ -1974,8 +1983,9 @@ private:
     bool ReconcileBlockDownloadAccounting(const char* reason) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     /** If headers/peer tips are ahead of the active tip while nothing is
-     *  in flight for BLOCK_FETCH_STALL_IDLE_INTERVAL, force reconsideration
-     *  so FindNextBlocksToDownload can allocate getdata again. */
+     *  in flight for BLOCK_FETCH_STALL_IDLE_INTERVAL — or every in-flight
+     *  entry is older than BLOCK_FETCH_STALL_INFLIGHT_STALE — force
+     *  reconsideration so FindNextBlocksToDownload can allocate getdata again. */
     void MaybeRecoverStalledBlockFetch(std::chrono::microseconds now) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     void AddToCompactExtraTransactions(const CTransactionRef& tx, size_t tx_dynamic_usage) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
@@ -2699,9 +2709,10 @@ void PeerManagerImpl::MaybeRecoverStalledBlockFetch(std::chrono::microseconds no
     if (m_chainman.m_best_header != nullptr) {
         best_ahead = m_chainman.m_best_header->nHeight - tip->nHeight;
     }
-    // PreferTrustAdjustedHeader (zero unauth allowance) can keep m_best_header
-    // pinned to the authenticated tip while getchaintips still shows a
-    // headers-only fork with more claimed work. Peer best-known tips catch that.
+    // PreferTrustAdjustedHeader (bounded unauth allowance) can keep
+    // m_best_header near the authenticated tip while getchaintips still shows
+    // a headers-only fork with more claimed work beyond the allowance. Peer
+    // best-known tips catch that.
     int peer_ahead{0};
     for (const auto& [nodeid, state] : m_node_states) {
         (void)nodeid;
@@ -2711,7 +2722,28 @@ void PeerManagerImpl::MaybeRecoverStalledBlockFetch(std::chrono::microseconds no
     }
     const int ahead{std::max(best_ahead, peer_ahead)};
 
-    if (ahead < BLOCK_FETCH_STALL_HEADERS_AHEAD || !mapBlocksInFlight.empty()) {
+    const bool headers_ahead{ahead >= BLOCK_FETCH_STALL_HEADERS_AHEAD};
+    const bool empty_inflight{mapBlocksInFlight.empty()};
+
+    // Fully-stale in-flight set: every outstanding request is older than the
+    // duplicate-request threshold and peers are still ahead. Per-peer timeouts
+    // should usually clear these, but when they do not (orphaned accounting,
+    // peers that never enter SendMessages timeout path) the slots pin forever
+    // and starve new getdata — the independent operator's 80-across-9 case.
+    size_t stale_inflight{0};
+    if (!empty_inflight) {
+        for (const auto& entry : mapBlocksInFlight) {
+            const auto requested_at = entry.second.second->requested_at;
+            if (requested_at.count() > 0 &&
+                now >= requested_at + BLOCK_FETCH_STALL_INFLIGHT_STALE) {
+                ++stale_inflight;
+            }
+        }
+    }
+    const bool all_inflight_stale{
+        !empty_inflight && stale_inflight == mapBlocksInFlight.size()};
+
+    if (!headers_ahead || (!empty_inflight && !all_inflight_stale)) {
         m_block_fetch_idle_since = 0us;
         return;
     }
@@ -2732,9 +2764,23 @@ void PeerManagerImpl::MaybeRecoverStalledBlockFetch(std::chrono::microseconds no
     m_block_fetch_idle_since = now;
 
     LogInfo("Block fetch stall detected: tip=%d best_header_ahead=%d peer_best_ahead=%d "
-            "in_flight=%d peers_downloading=%d — reconciling and forcing reconsideration\n",
+            "in_flight=%d stale_in_flight=%d peers_downloading=%d — reconciling and forcing reconsideration\n",
             tip->nHeight, best_ahead, peer_ahead,
-            static_cast<int>(mapBlocksInFlight.size()), m_peers_downloading_from);
+            static_cast<int>(mapBlocksInFlight.size()),
+            static_cast<int>(stale_inflight),
+            m_peers_downloading_from);
+
+    if (all_inflight_stale) {
+        // Release slots so FindNextBlocks can allocate again. Unique hashes
+        // only — RemoveBlockRequest erases every peer entry for a hash.
+        std::set<uint256> stale_hashes;
+        for (const auto& entry : mapBlocksInFlight) {
+            stale_hashes.insert(entry.first);
+        }
+        for (const uint256& hash : stale_hashes) {
+            RemoveBlockRequest(hash, /*from_peer=*/std::nullopt);
+        }
+    }
 
     ReconcileBlockDownloadAccounting("fetch-stall");
 
@@ -2777,15 +2823,16 @@ static bool PeerHasHeader(CNodeState *state, const CBlockIndex *pindex) EXCLUSIV
 }
 
 //! WP-8 / C1/H2: number of not-yet-body-authenticated blocks' worth of claimed
-//! work a header chain may count in peer-selection decisions. This is zero:
-//! headers remain available to the download pipeline, but claimed MatMul work
-//! receives no trust before the corresponding body verifies.
+//! work a header chain may count in peer-selection decisions. Bounded to the
+//! production allowance: headers remain available to the download pipeline, and
+//! a short unverified suffix may briefly affect preference so a lost race can
+//! be chased; forged MatMul work beyond the allowance still receives no trust
+//! before the corresponding body verifies.
 static constexpr unsigned int UNAUTH_WORK_ALLOWANCE_BLOCKS{TRUST_ADJUSTED_WORK_ALLOWANCE_BLOCKS};
 
 //! C1/H2: work value used for peer-selection / anti-DoS decisions in place of
-//! raw claimed nChainWork. It is authenticated (body-validated) work only:
-//! unverified suffixes receive zero credit and authenticate progressively as
-//! bodies download and pass ExactReplay.
+//! raw claimed nChainWork. Authenticated (body-validated) work plus at most
+//! UNAUTH_WORK_ALLOWANCE_BLOCKS of unverified suffix credit.
 //! Pre-fork (nMatMulV4Height == INT32_MAX) nAuthenticatedChainWork ==
 //! nChainWork for EVERY index, so this is EXACTLY nChainWork and every routed
 //! call site is behavior-identical while the fork is disabled.

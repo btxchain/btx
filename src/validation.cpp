@@ -11131,14 +11131,12 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
     }
     CBlockIndex* pindex{m_blockman.AddToBlockIndex(block, m_best_header)};
 
-    // Trusted mirrors: PreferTrustAdjustedHeader keeps m_best_header on
-    // authenticated work, which freezes headers==blocks while the tip-chain
-    // header frontier is what the mirror must follow from its attestation
-    // authority. Advance m_best_header here only along active-tip extensions
-    // that are not parked. Competing better-work branches are followed only
-    // from attestation-authority peers in net_processing (peer context is
-    // unavailable here; allowing any heavier fork would re-freeze headers on
-    // unattestable ordinary-peer spam). Blocks still require M-of-N quorum.
+    // Trusted mirrors: PreferTrustAdjustedHeader carries a bounded unauth
+    // allowance, but ordinary competing forks must still not freeze headers on
+    // unattestable spam. Advance m_best_header here only along active-tip
+    // extensions that are not parked. Competing better-work branches are
+    // followed only from attestation-authority peers in net_processing (peer
+    // context is unavailable here). Blocks still require M-of-N quorum.
     if (node::matmul_trusted::IsTrustedMirror() && pindex != nullptr) {
         const CBlockIndex* tip{ActiveChain().Tip()};
         if (tip != nullptr) {
@@ -16082,9 +16080,9 @@ void ChainstateManager::RecalculateBestHeader()
     m_best_header = ActiveChain().Tip();
     for (auto& entry : m_blockman.m_block_index) {
         if (entry.second.nStatus & BLOCK_FAILED_MASK) continue;
-        // Authenticated-work selection: the production unauthenticated
-        // allowance is zero, so even one unverified MatMul header cannot
-        // displace its authenticated ancestor on claimed work.
+        // Authenticated-work selection with a bounded unauth allowance: a short
+        // unverified MatMul suffix may displace a losing tip for chase, but a
+        // forged flood beyond the allowance cannot outrank authenticated work.
         if (m_best_header == nullptr || PreferTrustAdjustedHeader(*m_best_header, entry.second)) {
             m_best_header = &entry.second;
         }

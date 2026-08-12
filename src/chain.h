@@ -423,29 +423,35 @@ void UpdateAuthenticatedChainWork(CBlockIndex& block, const Consensus::Params& p
 
 /** WP-8 / C1/H2: claimed chain work clamped for peer-selection / anti-DoS use.
  *  Returns nAuthenticatedChainWork plus min(unauthenticated suffix work,
- *  unauth_allowance_blocks * GetBlockProof(block)). Production passes a zero
- *  allowance: an unverified MatMul suffix receives no work-based preference,
- *  even when it is only one header deep. Pre-fork (and for any fully
- *  body-validated chain) nAuthenticatedChainWork == nChainWork, so this returns
- *  EXACTLY nChainWork — call sites routed through it are behavior-identical
- *  while the MatMul v4 fork is disabled. The explicit parameter remains for
- *  deterministic policy-unit coverage; production callers use the constant
- *  below. */
+ *  unauth_allowance_blocks * GetBlockProof(block)). Production passes a small
+ *  bounded allowance (see TRUST_ADJUSTED_WORK_ALLOWANCE_BLOCKS): enough for a
+ *  competing headers-only branch to briefly outrank a losing authenticated tip
+ *  so bodies can be chased and real authenticated work can decide, but never
+ *  enough for a forged header flood to claim unbounded preference. Pre-fork
+ *  (and for any fully body-validated chain) nAuthenticatedChainWork ==
+ *  nChainWork, so this returns EXACTLY nChainWork — call sites routed through
+ *  it are behavior-identical while the MatMul v4 fork is disabled. The
+ *  explicit parameter remains for deterministic policy-unit coverage;
+ *  production callers use the constant below. */
 arith_uint256 GetTrustAdjustedChainWork(const CBlockIndex& block, unsigned int unauth_allowance_blocks);
 
 /** Production unauthenticated-work allowance used for best-header selection
- *  and peer trust decisions. Zero is deliberate: header download may continue,
- *  but no claimed MatMul work affects preference before body verification.
- *  Kept here so validation, blockstorage, and net_processing share the same
- *  fail-closed policy. */
-inline constexpr unsigned int TRUST_ADJUSTED_WORK_ALLOWANCE_BLOCKS = 0;
+ *  and peer trust decisions. Equal to the EMERGENCY park_depth (6): a node that
+ *  lost a same-height race can prefer a competing headers-only branch far
+ *  enough to download and authenticate bodies, after which authenticated work
+ *  alone decides. A forged suffix still cannot outrank an already-
+ *  authenticated branch of park_depth+ blocks. This only ranks chase targets;
+ *  ActivateBestChain PARK still refuses deep rewrites. Kept here so
+ *  validation, blockstorage, and net_processing share the same bound. */
+inline constexpr unsigned int TRUST_ADJUSTED_WORK_ALLOWANCE_BLOCKS = 6;
 
 /** True iff `candidate` should replace `current` as best header under the
- *  trust-adjusted work metric. With the production zero allowance this is
- *  authenticated work only. Tied unauthenticated branches prefer more
- *  authenticated work and then the shallowest suffix, so even one unverified
- *  header cannot displace its authenticated parent on claimed work.
- *  Pre-MatMul-fork/full-body ties retain legacy behavior. */
+ *  trust-adjusted work metric. Production uses a bounded unauth allowance so a
+ *  short competing headers-only suffix can displace a losing tip for chase.
+ *  Tied branches (both at the allowance cap, or fully authenticated) prefer
+ *  more authenticated work and then the shallowest claimed suffix, so a
+ *  million-header forged plateau cannot pin m_best_header. Pre-MatMul-fork /
+ *  full-body ties retain legacy behavior. */
 [[nodiscard]] bool PreferTrustAdjustedHeader(const CBlockIndex& current,
                                              const CBlockIndex& candidate,
                                              unsigned int unauth_allowance_blocks = TRUST_ADJUSTED_WORK_ALLOWANCE_BLOCKS);

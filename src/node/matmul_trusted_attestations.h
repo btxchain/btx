@@ -319,18 +319,15 @@ struct TrustedWorkRank {
 /**
  * Trusted-mirror best-header policy (sync only, not consensus).
  *
- * PreferTrustAdjustedHeader intentionally pins m_best_header to authenticated
- * work so an unverified MatMul header cannot displace its parent. Trusted
- * mirrors still need the header frontier that extends the active tip so they
- * can request the next body from the attestation authority.
- *
- * Ordinary competing forks must not displace m_best_header (that froze
- * headers==blocks while unattestable headers arrived continuously). The
- * attestation-authority path may additionally follow a better-or-equal-work
- * reorg candidate via PreferTrustedMirrorAuthorityHeader — that is how a
- * mirror that lost a same-height race converges without operator
- * invalidateblock. Parked deep-reorg branches are always excluded. This does
- * not accept blocks; M-of-N quorum remains required.
+ * PreferTrustAdjustedHeader now carries a bounded unauth allowance so any
+ * node (including consensus) can chase a short competing headers-only branch
+ * after a lost race. Trusted mirrors still need this tip-chain / authority
+ * overlay: (1) ordinary non-authority competing forks must not displace
+ * m_best_header with unattestable spam, (2) authority peers may follow a
+ * better-or-equal-work reorg candidate even when it sits beyond the global
+ * allowance or the tip-pinned best-header would otherwise stall getheaders,
+ * and (3) parked deep-reorg branches stay excluded. This does not accept
+ * blocks; M-of-N quorum remains required.
  */
 struct TrustedMirrorTipChainHeaderView {
     bool extends_active_tip_chain{false};

@@ -83,7 +83,7 @@ struct ReorgProtectionProfileSettings {
 
 inline constexpr uint32_t REORG_PROTECTION_DEPTH_DISABLED{std::numeric_limits<uint32_t>::max()};
 
-inline ReorgProtectionProfileSettings GetReorgProtectionProfileSettings(ReorgProtectionProfile profile)
+inline constexpr ReorgProtectionProfileSettings GetReorgProtectionProfileSettings(ReorgProtectionProfile profile)
 {
     switch (profile) {
     case ReorgProtectionProfile::STANDARD:
