@@ -2384,6 +2384,17 @@ static void RefreshShieldedValidationSnapshots(
     }
     std::reverse(chain.begin(), chain.end());
 
+    // Full-chain settlement-anchor rebuild is O(height) and can read hundreds of GB on archive
+    // nodes. Emit the same style of rate-limited progress used by RebuildShieldedState so a long
+    // pass is distinguishable from a hang in debug.log / operator diagnostics.
+    const size_t total_blocks = chain.size();
+    const auto rebuild_start = std::chrono::steady_clock::now();
+    auto last_progress_log = rebuild_start;
+    size_t blocks_processed = 0;
+    LogPrintf("RebuildShieldedSettlementAnchorState: scanning %u blocks (genesis -> height %d) for settlement anchors...\n",
+              static_cast<unsigned int>(total_blocks),
+              tip->nHeight);
+
     std::map<uint256, ConfirmedSettlementAnchorState> active_settlement_anchors;
     for (const CBlockIndex* pindex : chain) {
         CBlock block;
@@ -2414,11 +2425,35 @@ static void RefreshShieldedValidationSnapshots(
                 }
             }
         }
+        ++blocks_processed;
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last_progress_log >= std::chrono::seconds{15}) {
+            last_progress_log = now;
+            const double pct = total_blocks > 0
+                                   ? 100.0 * static_cast<double>(blocks_processed) / static_cast<double>(total_blocks)
+                                   : 100.0;
+            const auto elapsed_s = std::chrono::duration_cast<std::chrono::seconds>(now - rebuild_start).count();
+            LogPrintf("RebuildShieldedSettlementAnchorState: scanning settlement anchors %u/%u (height=%d, %.1f%%, elapsed=%llds, anchors=%u)\n",
+                      static_cast<unsigned int>(blocks_processed),
+                      static_cast<unsigned int>(total_blocks),
+                      pindex->nHeight,
+                      pct,
+                      static_cast<long long>(elapsed_s),
+                      static_cast<unsigned int>(active_settlement_anchors.size()));
+        }
     }
     settlement_anchors.reserve(active_settlement_anchors.size());
     for (const auto& [anchor, anchor_state] : active_settlement_anchors) {
         settlement_anchors.push_back(anchor_state);
     }
+    const auto elapsed_s = std::chrono::duration_cast<std::chrono::seconds>(
+                               std::chrono::steady_clock::now() - rebuild_start)
+                               .count();
+    LogPrintf("RebuildShieldedSettlementAnchorState: scanned %u blocks to height %d in %llds (anchors=%u)\n",
+              static_cast<unsigned int>(total_blocks),
+              tip->nHeight,
+              static_cast<long long>(elapsed_s),
+              static_cast<unsigned int>(settlement_anchors.size()));
     return true;
 }
 
@@ -2435,6 +2470,14 @@ static void RefreshShieldedValidationSnapshots(
         chain.push_back(pindex);
     }
     std::reverse(chain.begin(), chain.end());
+
+    const size_t total_blocks = chain.size();
+    const auto rebuild_start = std::chrono::steady_clock::now();
+    auto last_progress_log = rebuild_start;
+    size_t blocks_processed = 0;
+    LogPrintf("RebuildShieldedNettingManifestState: scanning %u blocks (genesis -> height %d) for netting manifests...\n",
+              static_cast<unsigned int>(total_blocks),
+              tip->nHeight);
 
     for (const CBlockIndex* pindex : chain) {
         CBlock block;
@@ -2455,7 +2498,31 @@ static void RefreshShieldedValidationSnapshots(
             }
             manifests.insert(manifests.end(), created->begin(), created->end());
         }
+        ++blocks_processed;
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last_progress_log >= std::chrono::seconds{15}) {
+            last_progress_log = now;
+            const double pct = total_blocks > 0
+                                   ? 100.0 * static_cast<double>(blocks_processed) / static_cast<double>(total_blocks)
+                                   : 100.0;
+            const auto elapsed_s = std::chrono::duration_cast<std::chrono::seconds>(now - rebuild_start).count();
+            LogPrintf("RebuildShieldedNettingManifestState: scanning netting manifests %u/%u (height=%d, %.1f%%, elapsed=%llds, manifests=%u)\n",
+                      static_cast<unsigned int>(blocks_processed),
+                      static_cast<unsigned int>(total_blocks),
+                      pindex->nHeight,
+                      pct,
+                      static_cast<long long>(elapsed_s),
+                      static_cast<unsigned int>(manifests.size()));
+        }
     }
+    const auto elapsed_s = std::chrono::duration_cast<std::chrono::seconds>(
+                               std::chrono::steady_clock::now() - rebuild_start)
+                               .count();
+    LogPrintf("RebuildShieldedNettingManifestState: scanned %u blocks to height %d in %llds (manifests=%u)\n",
+              static_cast<unsigned int>(total_blocks),
+              tip->nHeight,
+              static_cast<long long>(elapsed_s),
+              static_cast<unsigned int>(manifests.size()));
     return true;
 }
 
@@ -14743,6 +14810,8 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
         return false;
     }
 
+    GetNotifications().progress(_("Initializing shielded state…"), 0, false);
+
     // -resetshieldedstate: supported one-shot repair. Wipe the whole shielded_state directory before
     // any DB is opened so a stale in-flight mutation marker or a partially-rebuilt/corrupt store cannot
     // wedge startup; the normal path below then opens fresh stores and does one clean full rebuild from
@@ -14783,6 +14852,13 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
                                                             /*wipe_data=*/false);
     const CBlockIndex* const tip = m_active_chainstate->m_chain.Tip();
     bool startup_shielded_repair_performed{false};
+    // Recent anchor / account-registry root windows are derived from the tip frontier + the last
+    // SHIELDED_ANCHOR_DEPTH blocks. Refreshing those windows is cheap and does not invalidate the
+    // nullifier-accumulator / full-state-pin evidence used by -fastshieldedstartup. Treat it as a
+    // distinct class from substantive repairs (full rebuild, registry rewrite, commitment-index
+    // rebuild, etc.) so a history-window mismatch cannot force a silent full-chain settlement /
+    // netting / audit scan (the production 224 GB / 15+ minute restart stall).
+    bool startup_history_window_refreshed{false};
     bool startup_velocity_repair_performed{false};
     auto load_persisted_unshield_velocity = [&]() EXCLUSIVE_LOCKS_REQUIRED(::cs_main) -> bool {
         AssertLockHeld(::cs_main);
@@ -14882,12 +14958,15 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
             !verify_or_repair_startup_velocity()) {
             return false;
         }
-        if (startup_shielded_repair_performed || startup_velocity_repair_performed) {
+        if (startup_shielded_repair_performed ||
+            startup_history_window_refreshed ||
+            startup_velocity_repair_performed) {
             AutoReconsiderShieldedInvalidBlocksAfterStartupRepair();
         }
         // Register the shielded prune-retention lock at startup, before any FindFilesToPrune can run,
         // even if no new block has connected yet (no-op unless pruning + shielded).
         UpdateShieldedPruneRetentionLock(*m_active_chainstate);
+        GetNotifications().progress(bilingual_str{}, 100, false);
         return true;
     };
     const auto persisted_mutation_marker = m_shielded_nullifiers->ReadMutationMarker();
@@ -15411,7 +15490,8 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
                               persisted_tip_hash.ToString(),
                               static_cast<unsigned int>(loaded_anchor_roots.size()),
                               static_cast<unsigned int>(m_shielded_anchor_roots.size()));
-                    startup_shielded_repair_performed = true;
+                    // History-window refresh only — do not set startup_shielded_repair_performed.
+                    startup_history_window_refreshed = true;
                     anchor_history_rebuilt = true;
                 }
             } else {
@@ -15473,7 +15553,8 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
                               persisted_tip_hash.ToString(),
                               static_cast<unsigned int>(loaded_account_registry_roots.size()),
                               static_cast<unsigned int>(rebuilt_account_registry_roots.size()));
-                    startup_shielded_repair_performed = true;
+                    // History-window refresh only — do not set startup_shielded_repair_performed.
+                    startup_history_window_refreshed = true;
                 }
                 if (account_registry_rebuilt_from_chain || account_registry_roots_changed) {
                     if (!PersistShieldedState(tip)) {
@@ -15538,6 +15619,11 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
                 nullifier_accumulator_verified &&
                 (!recovery_exit_active_at_tip || recovery_exit_state_pin_verified);
             if (preserve_persisted_bridge_metadata) {
+                if (startup_history_window_refreshed) {
+                    LogPrintf("EnsureShieldedStateInitialized: refreshed recent shielded history windows at height=%d hash=%s without disabling -fastshieldedstartup (history refresh is not a substantive shielded-state repair)\n",
+                              tip != nullptr ? tip->nHeight : -1,
+                              tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
+                }
                 if (recovery_exit_active_at_tip) {
                     LogPrintf("EnsureShieldedStateInitialized: preserving persisted settlement-anchor and netting-manifest metadata at height=%d hash=%s because -fastshieldedstartup=1, persisted nullifier accumulator verified, and full shielded state pin verified\n",
                               tip != nullptr ? tip->nHeight : -1,
@@ -15552,7 +15638,16 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
                     LogPrintf("EnsureShieldedStateInitialized: full shielded rebuild blocks available at height=%d hash=%s; converging snapshot bridge metadata to chain state\n",
                               tip != nullptr ? tip->nHeight : -1,
                               tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
+                } else if (startup_shielded_repair_performed) {
+                    LogPrintf("EnsureShieldedStateInitialized: converging settlement-anchor and netting-manifest metadata from chain after substantive shielded-state repair at height=%d hash=%s (full-chain scan)\n",
+                              tip != nullptr ? tip->nHeight : -1,
+                              tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
+                } else if (!m_options.fast_shielded_startup) {
+                    LogPrintf("EnsureShieldedStateInitialized: converging settlement-anchor and netting-manifest metadata from chain because -fastshieldedstartup=0 at height=%d hash=%s (full-chain scan)\n",
+                              tip != nullptr ? tip->nHeight : -1,
+                              tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
                 }
+                GetNotifications().progress(_("Rebuilding shielded bridge metadata…"), 0, false);
                 if (!SyncShieldedSettlementAnchorState(m_blockman, tip, *m_shielded_nullifiers)) {
                     LogPrintf("EnsureShieldedStateInitialized: failed to sync persisted settlement-anchor state; rebuilding full state from chain\n");
                     reset_shielded_state();
