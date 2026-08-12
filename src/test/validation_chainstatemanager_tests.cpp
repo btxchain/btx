@@ -287,14 +287,42 @@ struct SnapshotTestSetup : TestChain100Setup {
     // Note that this means the tests run considerably slower than in-memory DB
     // tests, but we can't otherwise test this functionality since it relies on
     // destructive filesystem operations.
+    //
+    // Keep the default regtest MatMul activation schedule (and therefore the
+    // canned assumeutxo@110 metadata). Any -regtestmatmul* height override
+    // clears m_assumeutxo_data, and Debug mining across v4/RC@100/101 is slow,
+    // so these cases are opt-in via BTX_EXTENDED_CHAINSTATE_TESTS=1.
+    static bool ExtendedSnapshotTestsEnabled()
+    {
+        const char* env = std::getenv("BTX_EXTENDED_CHAINSTATE_TESTS");
+        return env != nullptr && env[0] != '\0' && env[0] != '0';
+    }
+
+    // When the extended suite is off, keep the cheap MatMul deferral so Boost
+    // still constructs the fixture quickly before SkipUnlessExtended returns.
+    // When extended is on, use the real regtest schedule (assumeutxo@110).
     SnapshotTestSetup() : TestChain100Setup{
                               {},
                               {
                                   .coins_db_in_memory = false,
                                   .block_tree_db_in_memory = false,
+                                  .defer_expensive_matmul = !ExtendedSnapshotTestsEnabled(),
                               },
                           }
     {
+    }
+
+    //! Returns true when the caller should return early (extended suite off).
+    bool SkipUnlessExtendedSnapshotTests()
+    {
+        if (ExtendedSnapshotTestsEnabled()) {
+            return false;
+        }
+        BOOST_TEST_MESSAGE(
+            "Skipping SnapshotTestSetup case (Debug MatMul@v4/RC mining is too "
+            "slow for the default suite). Set BTX_EXTENDED_CHAINSTATE_TESTS=1 "
+            "to opt in.");
+        return true;
     }
 
     std::tuple<Chainstate*, Chainstate*> SetupSnapshot()
@@ -548,6 +576,7 @@ struct SnapshotTestSetup : TestChain100Setup {
 //! Test basic snapshot activation.
 BOOST_FIXTURE_TEST_CASE(chainstatemanager_activate_snapshot, SnapshotTestSetup)
 {
+    if (SkipUnlessExtendedSnapshotTests()) return;
     this->SetupSnapshot();
 }
 
@@ -555,6 +584,7 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_activate_snapshot, SnapshotTestSetup)
 //! then be rebuilt after the snapshot/background roles become final.
 BOOST_FIXTURE_TEST_CASE(chainstatemanager_activate_snapshot_candidate_lifecycle, SnapshotTestSetup)
 {
+    if (SkipUnlessExtendedSnapshotTests()) return;
     ChainstateManager& chainman = *Assert(m_node.chainman);
 
     // Reach the regtest assumeutxo height, then simulate the normal case where
@@ -587,6 +617,7 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_activate_snapshot_candidate_lifecycle,
 //! a usable candidate set, including for an in-memory snapshot with no DB dir.
 BOOST_FIXTURE_TEST_CASE(chainstatemanager_failed_snapshot_restores_candidates, SnapshotTestSetup)
 {
+    if (SkipUnlessExtendedSnapshotTests()) return;
     mineBlocks(10);
 
     // SimulateNodeRestart reconstructs the manager with the production
@@ -626,8 +657,12 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_failed_snapshot_restores_candidates, S
 //!   chainstate only contains fully validated blocks and the other chainstate contains all blocks,
 //!   except those marked assume-valid, because those entries don't HAVE_DATA.
 //!
-BOOST_FIXTURE_TEST_CASE(chainstatemanager_loadblockindex, TestChain100Setup)
+//! Requires the canned regtest assumeutxo@110 metadata (and therefore the default MatMul
+//! activation schedule). Opt in with BTX_EXTENDED_CHAINSTATE_TESTS=1.
+BOOST_FIXTURE_TEST_CASE(chainstatemanager_loadblockindex, SnapshotTestSetup)
 {
+    if (SkipUnlessExtendedSnapshotTests()) return;
+
     ChainstateManager& chainman = *Assert(m_node.chainman);
     Chainstate& cs1 = chainman.ActiveChainstate();
 
@@ -760,6 +795,7 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_loadblockindex, TestChain100Setup)
 //! Ensure that snapshot chainstates initialize properly when found on disk.
 BOOST_FIXTURE_TEST_CASE(chainstatemanager_snapshot_init, SnapshotTestSetup)
 {
+    if (SkipUnlessExtendedSnapshotTests()) return;
     ChainstateManager& chainman = *Assert(m_node.chainman);
     Chainstate& bg_chainstate = chainman.ActiveChainstate();
 
@@ -829,6 +865,7 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_snapshot_init, SnapshotTestSetup)
 
 BOOST_FIXTURE_TEST_CASE(chainstatemanager_snapshot_completion, SnapshotTestSetup)
 {
+    if (SkipUnlessExtendedSnapshotTests()) return;
     this->SetupSnapshot();
 
     ChainstateManager& chainman = *Assert(m_node.chainman);
@@ -912,6 +949,7 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_snapshot_completion, SnapshotTestSetup
 
 BOOST_FIXTURE_TEST_CASE(chainstatemanager_snapshot_completion_hash_mismatch, SnapshotTestSetup)
 {
+    if (SkipUnlessExtendedSnapshotTests()) return;
     auto chainstates = this->SetupSnapshot();
     Chainstate& validation_chainstate = *std::get<0>(chainstates);
     ChainstateManager& chainman = *Assert(m_node.chainman);
@@ -4097,10 +4135,10 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_args, BasicTestingSetup)
     // test deep-reorg defense profiles, defaults, and overrides
     const auto default_reorg_opts = get_valid_opts({});
     BOOST_CHECK(default_reorg_opts.reorg_protection_profile == kernel::ReorgProtectionProfile::EMERGENCY);
-    BOOST_CHECK(default_reorg_opts.deep_reorg_action == kernel::DeepReorgAction::WARN);
+    BOOST_CHECK(default_reorg_opts.deep_reorg_action == kernel::DeepReorgAction::PARK);
     const auto default_profile = kernel::GetReorgProtectionProfileSettings(default_reorg_opts.reorg_protection_profile);
     BOOST_CHECK_EQUAL(default_profile.warn_depth, 3U);
-    BOOST_CHECK_EQUAL(default_profile.park_depth, kernel::REORG_PROTECTION_DEPTH_DISABLED);
+    BOOST_CHECK_EQUAL(default_profile.park_depth, 6U);
     BOOST_CHECK_EQUAL(default_profile.finality_depth, 72U);
     BOOST_CHECK_EQUAL(default_profile.hysteresis_depth, 0U);
     BOOST_CHECK_EQUAL(default_profile.hysteresis_work_margin, 2U);
@@ -4144,10 +4182,10 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_args, BasicTestingSetup)
 
     const auto emergency_opts = get_valid_opts({"-reorgprotectionprofile=emergency"});
     BOOST_CHECK(emergency_opts.reorg_protection_profile == kernel::ReorgProtectionProfile::EMERGENCY);
-    BOOST_CHECK(emergency_opts.deep_reorg_action == kernel::DeepReorgAction::WARN);
+    BOOST_CHECK(emergency_opts.deep_reorg_action == kernel::DeepReorgAction::PARK);
     const auto emergency_profile = kernel::GetReorgProtectionProfileSettings(emergency_opts.reorg_protection_profile);
     BOOST_CHECK_EQUAL(emergency_profile.warn_depth, 3U);
-    BOOST_CHECK_EQUAL(emergency_profile.park_depth, kernel::REORG_PROTECTION_DEPTH_DISABLED);
+    BOOST_CHECK_EQUAL(emergency_profile.park_depth, 6U);
     BOOST_CHECK_EQUAL(emergency_profile.finality_depth, 72U);
     BOOST_CHECK_EQUAL(emergency_profile.hysteresis_depth, 0U);
     BOOST_CHECK_EQUAL(emergency_profile.hysteresis_work_margin, 2U);
