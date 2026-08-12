@@ -23,6 +23,7 @@
 
 #include <algorithm>
 #include <array>
+#include <vector>
 #include <atomic>
 #include <cstdio>
 #include <map>
@@ -312,7 +313,9 @@ AttestedUTXOSnapshotExportResult CreateAttestedUTXOSnapshot(
         throw std::runtime_error("Couldn't reopen temporary coins file");
     }
     {
-        std::array<uint8_t, 1 << 20> buf{};
+        // Heap, not stack: a 1 MiB std::array overflows the ~544 KiB RPC
+        // worker stack and crashes btxd deterministically (audit P0).
+        std::vector<uint8_t> buf(1 << 20);
         while (true) {
             const size_t n{fread(buf.data(), 1, buf.size(), coins_in)};
             if (n > 0) {
@@ -487,7 +490,8 @@ bool BuildAttestedUTXOSnapshotOfferFromFiles(const fs::path& snapshot_path,
     }
 
     HashWriter file_hash{};
-    std::array<uint8_t, 1 << 20> buf{};
+    // Heap, not stack (see above): avoids RPC-worker stack overflow.
+    std::vector<uint8_t> buf(1 << 20);
     uint64_t total{0};
     while (true) {
         const size_t n{fread(buf.data(), 1, buf.size(), sfile)};
