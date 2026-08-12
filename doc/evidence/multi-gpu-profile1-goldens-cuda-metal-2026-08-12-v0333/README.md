@@ -55,10 +55,10 @@ Public evidence is machine-class only (no hostname/SKU/path identifiers).
 
 ## CUDA half — procedure (not executed here)
 
-`macpro2` is the live production attestation authority (single RTX 5060 Ti
-16 GiB, sm_120). Running the CUDA golden harness there requires **explicit
-owner approval**. This section documents the safe procedure and the measured
-costs; it was **not** started in this work.
+The available CUDA system is also a live production attestation authority
+(Blackwell-class 16 GiB, sm_120). Running the CUDA golden harness there
+requires **explicit owner approval**. This section documents the safe
+procedure and the measured costs; it was **not** started in this work.
 
 ### Measured costs (prior sm_120 Profile-1 goldens at production dims)
 
@@ -136,9 +136,8 @@ approves. Do **not** restart, reconfigure, stop, or redeploy the node.
 1. Confirm tip is healthy and GPU is idle (`utilization.gpu == 0`, free VRAM
    ≥ 4 GiB). Record `blocks`/`headers` lag; abort if lag ≥ 1.
 2. Build the harness in a **separate tree** at freeze `215a7324…` (do not
-   disturb the live datadir or the running binary). Note:
-   `~/v0333-final2/build-cuda` currently lacks `matmul-v4-rc-harness`; the
-   target must be built at this freeze before any episode runs.
+   disturb the live datadir or the running binary). The target must be built
+   in that isolated tree at this freeze before any episode runs.
 3. Run **one episode at a time** (`--episodes 1`, nonce N), at nice/ionice
    idle priority, only while GPU util is 0%:
 
