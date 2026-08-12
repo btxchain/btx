@@ -683,6 +683,38 @@ static RCProductionCanaryStatus RunRCProductionStartupCanaryImpl(
         return out;
     }
 
+    if (!automatic_policy_eligible) {
+        // Self-qual / policy refusal must not collapse into a generic
+        // "provider_not_policy_eligible" label when the resolver already named
+        // a concrete correctness failure (digest / GEMM mismatch, etc.).
+        // Checked before build-provenance so a mismatched toolkit still names
+        // itself on dirty or unsealed developer binaries.
+        const auto resolved{matmul_v4::accel::ProbeLastRCExactGemmResolution()};
+        const std::string& surfaced = resolved.reason;
+        const bool correctness_mismatch =
+            surfaced.find("mismatch") != std::string::npos ||
+            surfaced.find("episode_digest") != std::string::npos;
+        if (correctness_mismatch) {
+            out.outcome = RCProductionCanaryOutcome::DigestMismatch;
+            out.reason = surfaced;
+        } else if (!surfaced.empty() &&
+                   surfaced != "cpu_reference" &&
+                   surfaced != "generic_exactgemm_and_rc_self_qualified" &&
+                   surfaced != "native_rc_ozaki_self_qualified" &&
+                   surfaced != "rc_exactpanels_and_episode_self_qualified") {
+            // Other self-qual deficits (boundary probes, missing device slot,
+            // metal/native gate failures) keep a fail-closed outcome but name
+            // themselves instead of looking like a policy misconfiguration.
+            out.outcome = RCProductionCanaryOutcome::LocalAcceleratorFailure;
+            out.reason = surfaced;
+        } else {
+            out.outcome = RCProductionCanaryOutcome::ProviderNotPolicyEligible;
+            out.reason = "provider_not_automatic_policy_eligible";
+        }
+        StoreStatus(out);
+        return out;
+    }
+
     if (!out.build_provenance_matches) {
         out.outcome = RCProductionCanaryOutcome::BuildProvenanceMismatch;
         out.reason = out.build_source_dirty
@@ -692,12 +724,6 @@ static RCProductionCanaryStatus RunRCProductionStartupCanaryImpl(
         return out;
     }
 
-    if (!automatic_policy_eligible) {
-        out.outcome = RCProductionCanaryOutcome::ProviderNotPolicyEligible;
-        out.reason = "provider_not_automatic_policy_eligible";
-        StoreStatus(out);
-        return out;
-    }
     if (!out.provider_identity.complete) {
         out.outcome = RCProductionCanaryOutcome::ProviderIdentityUnavailable;
         out.reason = out.provider_identity.reason;

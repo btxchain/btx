@@ -649,6 +649,61 @@ BOOST_AUTO_TEST_CASE(generateblock_mines_valid_matmul_block)
     BOOST_CHECK_EQUAL(header.find_value("matmul_digest").get_str().size(), 64U);
 }
 
+// Verbose getblockheader must work for headers-only index entries: operators
+// walk competing branches via this RPC, and requiring the body made the node
+// look like it lacked the header entirely ("Block not available").
+BOOST_AUTO_TEST_CASE(getblockheader_verbose_works_for_headers_only_entry)
+{
+    SetMiningChainGuard(false);
+    const auto& consensus = m_node.chainman->GetConsensus();
+    BOOST_REQUIRE(consensus.fMatMulPOW);
+
+    const auto generated = CallRPC("generateblock", GenerateBlockParams(/*submit=*/true)).get_obj();
+    const std::string hash = generated.find_value("hash").get_str();
+    const auto parsed = uint256::FromHex(hash);
+    BOOST_REQUIRE(parsed.has_value());
+    const uint256 block_hash = *parsed;
+
+    // Snapshot MatMul header fields while the body is still present.
+    UniValue header_params{UniValue::VARR};
+    header_params.push_back(hash);
+    header_params.push_back(true);
+    const auto full = CallRPC("getblockheader", UniValue{header_params}).get_obj();
+    const std::string digest = full.find_value("matmul_digest").get_str();
+    const std::string seed_a = full.find_value("seed_a").get_str();
+    const std::string seed_b = full.find_value("seed_b").get_str();
+    const int64_t matmul_dim = full.find_value("matmul_dim").getInt<int64_t>();
+    const std::string prev = full.find_value("previousblockhash").get_str();
+    BOOST_CHECK(full.exists("nTx"));
+
+    {
+        LOCK(cs_main);
+        CBlockIndex* index = m_node.chainman->m_blockman.LookupBlockIndex(block_hash);
+        BOOST_REQUIRE(index != nullptr);
+        BOOST_REQUIRE(index->nStatus & BLOCK_HAVE_DATA);
+        index->nStatus &= ~BLOCK_HAVE_DATA;
+        BOOST_REQUIRE(!(index->nStatus & BLOCK_HAVE_DATA));
+    }
+
+    // Verbose must not throw "Block not available"; PoW fields stay readable.
+    const auto headers_only = CallRPC("getblockheader", std::move(header_params)).get_obj();
+    BOOST_CHECK_EQUAL(headers_only.find_value("hash").get_str(), hash);
+    BOOST_CHECK_EQUAL(headers_only.find_value("matmul_digest").get_str(), digest);
+    BOOST_CHECK_EQUAL(headers_only.find_value("seed_a").get_str(), seed_a);
+    BOOST_CHECK_EQUAL(headers_only.find_value("seed_b").get_str(), seed_b);
+    BOOST_CHECK_EQUAL(headers_only.find_value("matmul_dim").getInt<int64_t>(), matmul_dim);
+    BOOST_CHECK_EQUAL(headers_only.find_value("previousblockhash").get_str(), prev);
+    // nTx is body-derived; omit rather than emit a misleading 0.
+    BOOST_CHECK(!headers_only.exists("nTx"));
+
+    // Non-verbose hex form continues to work.
+    UniValue hex_params{UniValue::VARR};
+    hex_params.push_back(hash);
+    hex_params.push_back(false);
+    const auto header_hex = CallRPC("getblockheader", std::move(hex_params)).get_str();
+    BOOST_CHECK_GE(header_hex.size(), 160U);
+}
+
 // TEST: submitblock_accepts_valid_matmul_block
 BOOST_AUTO_TEST_CASE(submitblock_accepts_valid_matmul_block)
 {

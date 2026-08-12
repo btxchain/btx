@@ -428,20 +428,25 @@ The current supported backends are:
 | MLX | Experimental | macOS (Apple Silicon) |
 | CUDA | Production | Linux (NVIDIA GPUs, opt-in build) |
 
-Build example:
+Build example (pin an explicit toolkit install — do **not** use the
+`/usr/local/cuda` symlink, whose target varies per host):
 
 ```bash
 cmake -B build \
   -DBTX_ENABLE_CUDA_EXPERIMENTAL=ON \
-  -DCUDAToolkit_ROOT=/usr/local/cuda \
-  -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc \
+  -DCUDAToolkit_ROOT=/usr/local/cuda-13.2 \
+  -DCMAKE_CUDA_COMPILER=/usr/local/cuda-13.2/bin/nvcc \
   -DBTX_CUDA_ARCHITECTURES=120
 cmake --build build -j"$(nproc)"
 ```
 
-The Linux CUDA backend work on this branch was developed and validated against
-CUDA Toolkit `13.2`, the current CUDA Toolkit documentation line as of April
-2026, installed at `/usr/local/cuda`.
+Production goldens and RC ExactReplay self-qualification on this branch were
+validated against **CUDA Toolkit 13.2** (nvcc `release 13.2`, cuBLASLt 13.4)
+installed at `/usr/local/cuda-13.2`. A different toolkit version (including a
+`/usr/local/cuda` symlink that resolves to 13.0) may produce exact-integer GEMM
+results that disagree with the CPU reference; self-qualification then fails
+closed with `episode_digest_mismatch_backend_vs_cpu`. That is a correctness
+signal — do not loosen digest comparison to make a mismatched toolkit pass.
 
 Run `btxd` with CUDA selected:
 

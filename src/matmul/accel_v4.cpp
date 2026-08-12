@@ -687,7 +687,15 @@ std::array<uintptr_t, 10> RCBackendCallbackIdentity(
 }
 
 std::mutex g_rc_exact_gemm_cache_mu;
-std::map<RCExactGemmCacheKey, matmul::v4::lt::ExactGemmBackend> g_rc_exact_gemm_cache;
+struct RCExactGemmCacheEntry {
+    matmul::v4::lt::ExactGemmBackend backend{};
+    /** Empty when the gated backend was admitted; otherwise the ProbeRCSelfQual
+     *  deficit that cleared ExactGemm slots (e.g. episode_digest_mismatch_*). */
+    std::string deficit_reason;
+};
+std::map<RCExactGemmCacheKey, RCExactGemmCacheEntry> g_rc_exact_gemm_cache;
+/** Most recent RC gate deficit (including cache hits). Surfaced by Resolve*. */
+std::string g_last_rc_gate_deficit;
 std::mutex g_rc_resolution_status_mu;
 ResolvedRCExactGemm g_rc_resolution_status;
 
@@ -722,15 +730,28 @@ ResolvedRCExactGemm RecordRCResolution(ResolvedRCExactGemm out)
     return out;
 }
 
+/** Prefer the concrete self-qual deficit over a generic "no backend" label. */
+std::string RCSelfQualFailureReason(std::string_view fallback)
+{
+    if (!g_last_rc_gate_deficit.empty()) return g_last_rc_gate_deficit;
+    return std::string{fallback};
+}
+
 matmul::v4::lt::ExactGemmBackend GateExactGemmWithRCSelfQualUncached(
-    matmul::v4::lt::ExactGemmBackend backend, const char* provider_label)
+    matmul::v4::lt::ExactGemmBackend backend, const char* provider_label,
+    std::string* deficit_out)
 {
     if (backend.gemm_s8s8 == nullptr) {
+        if (deficit_out != nullptr) deficit_out->clear();
         return backend;
     }
     const matmul::v4::rc::RCSelfQualStatus st = matmul::v4::rc::ProbeRCSelfQual(backend);
     if (st.mining_accelerator_ok) {
+        if (deficit_out != nullptr) deficit_out->clear();
         return backend;
+    }
+    if (deficit_out != nullptr) {
+        *deficit_out = st.deficit_reason.empty() ? "rc_self_qual_failed" : st.deficit_reason;
     }
     static std::atomic_bool logged_rc_gate{false};
     bool expected{false};
@@ -757,17 +778,23 @@ matmul::v4::lt::ExactGemmBackend GateExactGemmWithRCSelfQualCached(
         std::lock_guard<std::mutex> lock(g_rc_exact_gemm_cache_mu);
         const auto it = g_rc_exact_gemm_cache.find(key);
         if (it != g_rc_exact_gemm_cache.end()) {
-            return it->second;
+            g_last_rc_gate_deficit = it->second.deficit_reason;
+            return it->second.backend;
         }
     }
 
+    std::string deficit;
     const matmul::v4::lt::ExactGemmBackend gated =
-        GateExactGemmWithRCSelfQualUncached(std::move(backend), provider_label);
+        GateExactGemmWithRCSelfQualUncached(std::move(backend), provider_label, &deficit);
 
-    std::lock_guard<std::mutex> lock(g_rc_exact_gemm_cache_mu);
-    const auto [it, inserted] = g_rc_exact_gemm_cache.emplace(key, gated);
-    (void)inserted;
-    return it->second;
+    {
+        std::lock_guard<std::mutex> lock(g_rc_exact_gemm_cache_mu);
+        g_last_rc_gate_deficit = deficit;
+        const auto [it, inserted] = g_rc_exact_gemm_cache.emplace(
+            key, RCExactGemmCacheEntry{gated, deficit});
+        (void)inserted;
+        return it->second.backend;
+    }
 }
 
 void ResetRCExactGemmResolveCacheForTest()
@@ -775,6 +802,7 @@ void ResetRCExactGemmResolveCacheForTest()
     {
         std::lock_guard<std::mutex> lock(g_rc_exact_gemm_cache_mu);
         g_rc_exact_gemm_cache.clear();
+        g_last_rc_gate_deficit.clear();
     }
     {
         std::lock_guard<std::mutex> lock(g_rc_resolution_status_mu);
@@ -782,6 +810,13 @@ void ResetRCExactGemmResolveCacheForTest()
     }
     matmul::v4::rc::ResetRCSelfQualCacheForTest();
     matmul::v4::rc::ResetRCProductionCanaryForTest();
+}
+
+void SetLastRCExactGemmResolutionForTest(ResolvedRCExactGemm status)
+{
+    status.resolved = true;
+    std::lock_guard<std::mutex> lock(g_rc_resolution_status_mu);
+    g_rc_resolution_status = std::move(status);
 }
 
 ResolvedRCExactGemm ProbeLastRCExactGemmResolution()
@@ -869,8 +904,9 @@ ResolvedRCExactGemm ResolveExactGemmBackendForRC()
                 out.self_qualified &&
                 policy == RCAccelerationPolicy::ProductionPreferred &&
                 matmul::v4::rc::kRcOzakiMxfp4ProductionEligible;
-            out.reason = out.self_qualified ? "native_rc_ozaki_self_qualified"
-                                            : "native_rc_ozaki_self_qual_failed";
+            out.reason = out.self_qualified
+                ? "native_rc_ozaki_self_qualified"
+                : RCSelfQualFailureReason("native_rc_ozaki_self_qual_failed");
             out.qualification_scope =
                 out.self_qualified ? "toy_and_scaled_medium" : "none";
             return RecordRCResolution(std::move(out));
@@ -942,7 +978,7 @@ ResolvedRCExactGemm ResolveExactGemmBackendForRC()
                 policy == RCAccelerationPolicy::ProductionPreferred;
             out.qualification_scope = "toy_and_scaled_medium";
         } else {
-            out.reason = "metal_rc_episode_self_qual_failed";
+            out.reason = RCSelfQualFailureReason("metal_rc_episode_self_qual_failed");
         }
         return RecordRCResolution(std::move(out));
     }
@@ -987,8 +1023,9 @@ ResolvedRCExactGemm ResolveExactGemmBackendForRC()
     if (out.self_qualified && out.backend.rc_fused_ffn != nullptr) {
         out.provider += "_fused_extract";
     }
-    out.reason = out.self_qualified ? "generic_exactgemm_and_rc_self_qualified"
-                                    : "no_rc_self_qualified_device_backend";
+    out.reason = out.self_qualified
+        ? "generic_exactgemm_and_rc_self_qualified"
+        : RCSelfQualFailureReason("no_rc_self_qualified_device_backend");
     out.qualification_scope =
         out.self_qualified ? "toy_and_scaled_medium" : "none";
     return RecordRCResolution(std::move(out));
