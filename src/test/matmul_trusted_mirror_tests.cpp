@@ -760,7 +760,7 @@ BOOST_AUTO_TEST_CASE(authority_header_preference_rescues_divergent_tip)
         .candidate_extends_current_best = false,
     }));
 
-    // Download gate mirrors the same authority / park split.
+    // Download gate mirrors the same authority / park / followed-chain split.
     BOOST_CHECK(TrustedMirrorMayDownloadCompetingBranch(
         /*is_authority_peer=*/true, /*best_known_extends_tip=*/false,
         /*better_or_equal_work=*/true, /*on_parked_reorg_branch=*/false));
@@ -773,6 +773,35 @@ BOOST_AUTO_TEST_CASE(authority_header_preference_rescues_divergent_tip)
     BOOST_CHECK(TrustedMirrorMayDownloadCompetingBranch(
         /*is_authority_peer=*/false, /*best_known_extends_tip=*/true,
         /*better_or_equal_work=*/false, /*on_parked_reorg_branch=*/false));
+    // Ordinary peer on the already-followed best-header chain may serve bodies
+    // (production: authority inflight stall must not be a single point of failure).
+    BOOST_CHECK(TrustedMirrorMayDownloadCompetingBranch(
+        /*is_authority_peer=*/false, /*best_known_extends_tip=*/false,
+        /*better_or_equal_work=*/true, /*on_parked_reorg_branch=*/false,
+        /*on_followed_best_header_chain=*/true));
+    // Followed-chain does not bypass park-depth finality.
+    BOOST_CHECK(!TrustedMirrorMayDownloadCompetingBranch(
+        /*is_authority_peer=*/false, /*best_known_extends_tip=*/false,
+        /*better_or_equal_work=*/true, /*on_parked_reorg_branch=*/true,
+        /*on_followed_best_header_chain=*/true));
+    // Less-work competing branch stays refused even when followed.
+    BOOST_CHECK(!TrustedMirrorMayDownloadCompetingBranch(
+        /*is_authority_peer=*/false, /*best_known_extends_tip=*/false,
+        /*better_or_equal_work=*/false, /*on_parked_reorg_branch=*/false,
+        /*on_followed_best_header_chain=*/true));
+    using node::matmul_trusted::TrustedMirrorOnFollowedHeaderChain;
+    BOOST_CHECK(TrustedMirrorOnFollowedHeaderChain(
+        /*best_header_known=*/true,
+        /*peer_best_is_ancestor_of_best_header=*/true,
+        /*peer_best_extends_best_header=*/false));
+    BOOST_CHECK(TrustedMirrorOnFollowedHeaderChain(
+        /*best_header_known=*/true,
+        /*peer_best_is_ancestor_of_best_header=*/false,
+        /*peer_best_extends_best_header=*/true));
+    BOOST_CHECK(!TrustedMirrorOnFollowedHeaderChain(
+        /*best_header_known=*/false,
+        /*peer_best_is_ancestor_of_best_header=*/true,
+        /*peer_best_extends_best_header=*/true));
 }
 
 BOOST_AUTO_TEST_CASE(unattestable_reject_counter_is_distinct_not_hot_loop)

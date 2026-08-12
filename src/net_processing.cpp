@@ -2971,6 +2971,25 @@ static arith_uint256 TrustAdjustedWork(const CBlockIndex& index) EXCLUSIVE_LOCKS
     return GetTrustAdjustedChainWork(index, UNAUTH_WORK_ALLOWANCE_BLOCKS);
 }
 
+//! True when `pindex` lies on the mirror's followed best-header chain
+//! (ancestor of, or extension of, m_best_header).
+static bool TrustedMirrorIndexOnFollowedHeaderChain(
+    const ChainstateManager& chainman, const CBlockIndex* pindex)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    const CBlockIndex* best_header{chainman.m_best_header};
+    if (best_header == nullptr || pindex == nullptr) {
+        return false;
+    }
+    return node::matmul_trusted::TrustedMirrorOnFollowedHeaderChain(
+        /*best_header_known=*/true,
+        /*peer_best_is_ancestor_of_best_header=*/
+        best_header->GetAncestor(pindex->nHeight) == pindex,
+        /*peer_best_extends_best_header=*/
+        pindex->nHeight >= best_header->nHeight &&
+            pindex->GetAncestor(best_header->nHeight) == best_header);
+}
+
 void PeerManagerImpl::ProcessBlockAvailability(NodeId nodeid) {
     CNodeState *state = State(nodeid);
     assert(state != nullptr);
@@ -2999,7 +3018,9 @@ void PeerManagerImpl::ProcessBlockAvailability(NodeId nodeid) {
                             authority,
                             candidate_extends_tip,
                             pindex->nChainWork >= tip->nChainWork,
-                            m_chainman.IsOnParkedReorgBranch(pindex))};
+                            m_chainman.IsOnParkedReorgBranch(pindex),
+                            TrustedMirrorIndexOnFollowedHeaderChain(
+                                m_chainman, pindex))};
                     if (current_extends_tip && !candidate_extends_tip &&
                         !may_competing) {
                         state->hashLastUnknownBlock.SetNull();
@@ -3069,7 +3090,9 @@ void PeerManagerImpl::UpdateBlockAvailability(NodeId nodeid, const uint256 &hash
                         authority,
                         candidate_extends_tip,
                         pindex->nChainWork >= tip->nChainWork,
-                        m_chainman.IsOnParkedReorgBranch(pindex))};
+                        m_chainman.IsOnParkedReorgBranch(pindex),
+                        TrustedMirrorIndexOnFollowedHeaderChain(
+                            m_chainman, pindex))};
                 if (current_extends_tip && !candidate_extends_tip &&
                     !may_competing) {
                     return;
@@ -3156,25 +3179,43 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
     };
 
     // Trusted mirrors download along the active tip's chain by default.
-    // Ordinary peers whose best-known tip is a competing fork would fill
-    // inflight with unattestable bodies. Attestation-authority peers are
-    // exempt for better/equal-work non-parked branches: after a lost
-    // same-height race their chain is exactly that "competing" fork.
+    // Competing forks from peers that are neither attestation-authority nor
+    // already on the followed best-header chain would fill inflight with
+    // unattestable bodies. IsTrustedMirrorAuthorityPeer (archive service bit
+    // or recent MMATTEST success) DOES open this gate for authority peers —
+    // production archives match — but recovery that depends on that one
+    // connection still strands when its inflight slots are stale/capped
+    // while ordinary peers hold the identical followed recovery chain
+    // (dominant skip was trusted_mirror_not_tip_chain with peer_best_ahead
+    // hundreds and in_flight_global stuck at 2-3). Any peer on the already-
+    // followed best-header chain may therefore fetch better/equal-work
+    // non-parked branches; acceptance still requires M-of-N.
     if (node::matmul_trusted::IsTrustedMirror() && tip != nullptr &&
         state->pindexBestKnownBlock != nullptr) {
         const bool extends_tip{
             state->pindexBestKnownBlock->GetAncestor(tip->nHeight) == tip};
         if (!extends_tip) {
-            const bool may_competing{
-                node::matmul_trusted::TrustedMirrorMayDownloadCompetingBranch(
-                    IsTrustedMirrorAuthorityPeer(peer.m_id,
-                                                 peer.m_their_services),
-                    /*best_known_extends_tip=*/false,
-                    state->pindexBestKnownBlock->nChainWork >= tip->nChainWork,
-                    m_chainman.IsOnParkedReorgBranch(
-                        state->pindexBestKnownBlock))};
-            if (!may_competing) {
-                log_skip("trusted_mirror_not_tip_chain");
+            const bool is_authority{IsTrustedMirrorAuthorityPeer(
+                peer.m_id, peer.m_their_services)};
+            const bool better_work{
+                state->pindexBestKnownBlock->nChainWork >= tip->nChainWork};
+            const bool parked{m_chainman.IsOnParkedReorgBranch(
+                state->pindexBestKnownBlock)};
+            const bool on_followed{TrustedMirrorIndexOnFollowedHeaderChain(
+                m_chainman, state->pindexBestKnownBlock)};
+            // Distinct skip reasons: production conflated parked / less-work /
+            // non-authority into trusted_mirror_not_tip_chain, hiding whether
+            // the authority exception itself was failing.
+            if (parked) {
+                log_skip("trusted_mirror_parked_reorg");
+                return;
+            }
+            if (!better_work) {
+                log_skip("trusted_mirror_competing_less_work");
+                return;
+            }
+            if (!is_authority && !on_followed) {
+                log_skip("trusted_mirror_not_followed_chain");
                 return;
             }
         }
@@ -6024,24 +6065,29 @@ void PeerManagerImpl::HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, c
         return;
     }
 
-    // Trusted mirrors never direct-fetch an ordinary competing fork; those
-    // bodies are unattestable and only feed the reject hot-loop. Authority
-    // peers may direct-fetch a better/equal-work non-parked branch so a
-    // mirror that lost a same-height race can converge without invalidateblock.
+    // Trusted mirrors never direct-fetch an ordinary competing fork that is
+    // not the followed best-header chain; those bodies are unattestable and
+    // only feed the reject hot-loop. Authority peers, and any peer on the
+    // authority-selected recovery chain, may direct-fetch a better/equal-work
+    // non-parked branch so a mirror that lost a same-height race can converge.
+    bool may_competing{false};
+    bool extends_tip{true};
     if (node::matmul_trusted::IsTrustedMirror()) {
         const CBlockIndex* tip{m_chainman.ActiveChain().Tip()};
         if (tip == nullptr) {
             return;
         }
-        const bool extends_tip{last_header.GetAncestor(tip->nHeight) == tip};
+        extends_tip = last_header.GetAncestor(tip->nHeight) == tip;
         if (!extends_tip) {
-            const bool may_competing{
+            may_competing =
                 node::matmul_trusted::TrustedMirrorMayDownloadCompetingBranch(
                     IsTrustedMirrorAuthorityPeer(pfrom.GetId(),
                                                  peer.m_their_services),
                     /*best_known_extends_tip=*/false,
                     last_header.nChainWork >= tip->nChainWork,
-                    m_chainman.IsOnParkedReorgBranch(&last_header))};
+                    m_chainman.IsOnParkedReorgBranch(&last_header),
+                    TrustedMirrorIndexOnFollowedHeaderChain(
+                        m_chainman, &last_header));
             if (!may_competing) {
                 return;
             }
@@ -6052,7 +6098,22 @@ void PeerManagerImpl::HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, c
     // pre-fork). Honest announcements extend our validated tip and pass
     // immediately; a forged deep high-work fork is clamped and falls back to
     // the (budgeted, self-healing) parallel download path instead.
-    if (CanDirectFetch() && last_header.IsValid(BLOCK_VALID_TREE) && m_chainman.ActiveChain().Tip()->nChainWork <= TrustAdjustedWork(last_header)) {
+    //
+    // Trusted-mirror competing recovery is the exception: after a 1-2 block
+    // same-height race the active tip already carries more *authenticated*
+    // work than the headers-only winning branch (TrustAdjustedWork stops at
+    // the fork). Claimed-work escape lets direct-fetch pull the first window
+    // of recovery bodies; MayDownloadCompetingBranch already refused parked /
+    // unfollowed forks.
+    const CBlockIndex* tip_for_work{m_chainman.ActiveChain().Tip()};
+    const bool trust_gate_ok{
+        tip_for_work != nullptr &&
+        tip_for_work->nChainWork <= TrustAdjustedWork(last_header)};
+    const bool competing_claimed_ok{
+        tip_for_work != nullptr && !extends_tip && may_competing &&
+        tip_for_work->nChainWork <= last_header.nChainWork};
+    if (CanDirectFetch() && last_header.IsValid(BLOCK_VALID_TREE) &&
+        (trust_gate_ok || competing_claimed_ok)) {
         std::vector<const CBlockIndex*> vToFetch;
         const CBlockIndex* pindexWalk{&last_header};
         // Calculate all the blocks we'd need to switch to last_header, up to a limit.
@@ -7681,7 +7742,9 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
                                                      peer.m_their_services),
                         /*best_known_extends_tip=*/false,
                         pindexLast->nChainWork >= tip->nChainWork,
-                        m_chainman.IsOnParkedReorgBranch(pindexLast));
+                        m_chainman.IsOnParkedReorgBranch(pindexLast),
+                        TrustedMirrorIndexOnFollowedHeaderChain(
+                            m_chainman, pindexLast));
             }
         }
         if (chase_more &&
@@ -13353,10 +13416,15 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                           adjusted_count, recomputed_count);
             }
         }
-        if (!consensus_ok && state.fSyncStarted) {
-            // A peer selected before activation must also relinquish the
-            // initial-header-sync slot. Otherwise an ineligible peer can keep
-            // the sole slot indefinitely even after losing preferred status.
+        if (!consensus_ok && state.fSyncStarted &&
+            m_num_preferred_download_peers > 0) {
+            // Relinquish the initial-header-sync slot only when a preferred peer
+            // exists to take it. Clearing while preferred_count==0 immediately
+            // reclaims via may_claim_initial_sync_slot / near_tip_headers; with
+            // m_last_getheaders_timestamp cleared on every headers response that
+            // livelocks msghand in getheaders/headers (trusted-mirror recovery
+            // against a non-archive followed-chain peer reproduced 360k+ repeats
+            // and starved tip activation).
             state.fSyncStarted = false;
             peer->m_headers_sync_timeout = 0us;
             const bool counter_inconsistent{nSyncStarted <= 0};

@@ -1140,12 +1140,37 @@ BOOST_AUTO_TEST_CASE(trusted_mirror_divergent_tip_follows_authority_headers)
         winning_next.GetHash());
 
     node::matmul_trusted::NoteAuthorityPeerTipHint(race_height + 10);
+
+    // After best-header follows the authority branch, an ordinary peer that
+    // announces the same chain must be eligible for body download. Authority
+    // HeadersDirectFetch already marked the recovery bodies in-flight, so
+    // advance mock time past BLOCK_REREQUEST_STALE_AFTER so the ordinary peer
+    // may take a duplicate request — the production defect refused that peer
+    // entirely with trusted_mirror_not_tip_chain.
+    std::vector<CBlock> followed_headers{
+        CBlock{winning.GetBlockHeader()},
+        CBlock{winning_next.GetBlockHeader()}};
+    auto ordinary_followed_msg{NetMsg::Make(
+        NetMsgType::HEADERS, TX_WITH_WITNESS(followed_headers))};
+    BOOST_REQUIRE(
+        connman.ReceiveMsgFrom(ordinary, std::move(ordinary_followed_msg)));
+    ordinary.fPauseSend = false;
+    (void)connman.ProcessMessagesOnce(ordinary);
+    SetMockTime(std::chrono::seconds{GetTime() + 181});
+    BOOST_CHECK(peerman.SendMessages(&ordinary));
+    CNodeStateStats ordinary_stats;
+    BOOST_REQUIRE(peerman.GetNodeStateStats(ordinary.GetId(), ordinary_stats));
+    BOOST_CHECK_EQUAL(ordinary_stats.nSyncHeight, race_height + 1);
+    const bool ordinary_download{
+        !ordinary_stats.vHeightInFlight.empty() ||
+        HasQueuedMessageType(ordinary, NetMsgType::GETDATA)};
+    BOOST_CHECK(ordinary_download);
+
     BOOST_CHECK(peerman.SendMessages(&authority));
 
     CNodeStateStats authority_stats;
     BOOST_REQUIRE(peerman.GetNodeStateStats(authority.GetId(), authority_stats));
-    // Authority best-known must be the competing (winning) branch, and download
-    // toward it must be allocated — the stranded-mirror self-heal path.
+    // Authority best-known must be the competing (winning) branch.
     BOOST_CHECK_EQUAL(authority_stats.nSyncHeight, race_height + 1);
     const bool download_allocated{
         !authority_stats.vHeightInFlight.empty() ||
