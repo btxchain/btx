@@ -250,12 +250,6 @@ static constexpr int BLOCK_FETCH_STALL_HEADERS_AHEAD = 2;
 static constexpr auto BLOCK_FETCH_STALL_IDLE_INTERVAL{45s};
 /** Minimum interval between residual-stall safety-valve kicks (anti-thrash). */
 static constexpr auto BLOCK_FETCH_STALL_KICK_COOLDOWN{60s};
-/** In-flight requests older than this, with peers still ahead and no progress,
- *  are treated as a residual stall even when mapBlocksInFlight is non-empty.
- *  Matches BLOCK_REREQUEST_STALE_AFTER so we do not thrash below the duplicate-
- *  request threshold. Observed: 80 blocks in flight across 9 peers that never
- *  resolved, starving new getdata forever while best_header_ahead stayed 0. */
-static constexpr auto BLOCK_FETCH_STALL_INFLIGHT_STALE{180s};
 /** Maximum number of headers to announce when relaying blocks with headers message.*/
 static const unsigned int MAX_BLOCKS_TO_ANNOUNCE = 8;
 /** Minimum blocks required to signal NODE_NETWORK_LIMITED */
@@ -337,6 +331,22 @@ static constexpr auto MATMUL_BUDGET_DEFER_COOLDOWN{60s};
  *  blocks of a better branch and stalled indefinitely on the single missing
  *  block immediately after its tip. */
 static constexpr auto BLOCK_REREQUEST_STALE_AFTER{180s};
+
+/** Hard backstop: reclaim (release) any in-flight block request older than this,
+ *  regardless of queue position or peer liveness.
+ *
+ *  BLOCK_REREQUEST_STALE_AFTER only permits *duplicating* a stale request to a
+ *  peer with spare capacity; it does not free the original slot. When every
+ *  download peer is already at MAX_BLOCKS_IN_TRANSIT_PER_PEER with never-
+ *  arriving requests, duplication cannot run, FindNextBlocksToDownload reports
+ *  no_fetchable_in_window forever, and MaybeRecoverStalledBlockFetch (which
+ *  required an empty map) never fires. Production 2026-08-12: tip frozen with
+ *  headers ahead and slots occupied far past 180s until restart. Reclaiming
+ *  the aged entries restores window capacity without raising the cap. */
+static constexpr auto BLOCK_INFLIGHT_HARD_RECLAIM_AFTER{BLOCK_REREQUEST_STALE_AFTER};
+
+/** Minimum interval between hard-reclaim sweeps (anti-thrash). */
+static constexpr auto BLOCK_INFLIGHT_RECLAIM_COOLDOWN{15s};
 
 /** Depth behind the best known header past which a node is treated as
  *  catching up / racing a competing branch for MatMul RC verify budgeting. */
@@ -1989,11 +1999,12 @@ private:
      * hash forever while the marker lives), and m_peers_downloading_from /
      * pindexLastCommonBlock desync that leaves every candidate peer refusing
      * to allocate getdata. The safety valve reconciles accounting, clears
-     * markers that cannot correspond to live work, and releases fully-stale
-     * in-flight sets.
+     * markers that cannot correspond to live work, and the hard-reclaim
+     * backstop releases aged in-flight slots (see ReclaimStaleInFlightBlockRequests).
      */
     std::chrono::microseconds m_block_fetch_idle_since GUARDED_BY(cs_main){0us};
     std::chrono::microseconds m_last_block_fetch_stall_kick GUARDED_BY(cs_main){0us};
+    std::chrono::microseconds m_last_inflight_reclaim GUARDED_BY(cs_main){0us};
 
     /** Reconcile mapBlocksInFlight ↔ per-peer vBlocksInFlight and
      *  m_peers_downloading_from; clear orphaned MatMul async-verify markers
@@ -2001,10 +2012,22 @@ private:
      *  was repaired. */
     bool ReconcileBlockDownloadAccounting(const char* reason) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
+    /** Age of the oldest live in-flight request, or 0us when the map is empty.
+     *  Entries with requested_at==0 (predate the field) are treated as
+     *  infinitely old so operators see them as jammed. */
+    std::chrono::microseconds OldestInFlightRequestAge(std::chrono::microseconds now) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
+    /** Release every in-flight request older than BLOCK_INFLIGHT_HARD_RECLAIM_AFTER
+     *  (any queue position). Returns the number of slots freed. Rate-limited
+     *  LogInfo names the reason so no_fetchable_in_window jams are diagnosable. */
+    int ReclaimStaleInFlightBlockRequests(std::chrono::microseconds now, const char* reason)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
     /** If headers/peer tips are ahead of the active tip while nothing is
-     *  in flight for BLOCK_FETCH_STALL_IDLE_INTERVAL — or every in-flight
-     *  entry is older than BLOCK_FETCH_STALL_INFLIGHT_STALE — force
-     *  reconsideration so FindNextBlocksToDownload can allocate getdata again. */
+     *  in flight for BLOCK_FETCH_STALL_IDLE_INTERVAL, force reconsideration
+     *  so FindNextBlocksToDownload can allocate getdata again. Also runs the
+     *  hard-reclaim backstop when the window is jammed with aged entries. */
     void MaybeRecoverStalledBlockFetch(std::chrono::microseconds now) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     void AddToCompactExtraTransactions(const CTransactionRef& tx, size_t tx_dynamic_usage) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
@@ -2714,6 +2737,109 @@ bool PeerManagerImpl::ReconcileBlockDownloadAccounting(const char* reason)
     return repaired;
 }
 
+std::chrono::microseconds PeerManagerImpl::OldestInFlightRequestAge(std::chrono::microseconds now) const
+{
+    AssertLockHeld(cs_main);
+    std::chrono::microseconds oldest{0us};
+    bool any{false};
+    for (const auto& [nodeid, state] : m_node_states) {
+        (void)nodeid;
+        for (const QueuedBlock& entry : state.vBlocksInFlight) {
+            const auto requested_at = entry.requested_at.count() > 0
+                                          ? entry.requested_at
+                                          : state.m_downloading_since;
+            if (requested_at.count() == 0) {
+                // Untimestamped entry cannot age out via the ordinary timeout
+                // comparison; surface it as "jammed" (older than any bound).
+                return std::chrono::duration_cast<std::chrono::microseconds>(
+                    BLOCK_INFLIGHT_HARD_RECLAIM_AFTER * 2);
+            }
+            const auto age = now > requested_at ? now - requested_at : 0us;
+            if (!any || age > oldest) {
+                oldest = age;
+                any = true;
+            }
+        }
+    }
+    return oldest;
+}
+
+int PeerManagerImpl::ReclaimStaleInFlightBlockRequests(std::chrono::microseconds now,
+                                                       const char* reason)
+{
+    AssertLockHeld(cs_main);
+
+    if (m_last_inflight_reclaim.count() != 0 &&
+        now < m_last_inflight_reclaim + BLOCK_INFLIGHT_RECLAIM_COOLDOWN) {
+        return 0;
+    }
+
+    // Collect first: RemoveBlockRequest mutates the lists we are walking.
+    std::vector<std::pair<NodeId, uint256>> stale;
+    std::chrono::microseconds oldest_reclaimed{0us};
+    for (const auto& [nodeid, state] : m_node_states) {
+        for (const QueuedBlock& entry : state.vBlocksInFlight) {
+            const auto requested_at = entry.requested_at.count() > 0
+                                          ? entry.requested_at
+                                          : state.m_downloading_since;
+            // requested_at==0 with m_downloading_since==0: cannot be timed by
+            // the head-of-queue path either — reclaim as abandoned.
+            const bool untimestamped = requested_at.count() == 0;
+            const bool aged = !untimestamped &&
+                              now >= requested_at + BLOCK_INFLIGHT_HARD_RECLAIM_AFTER;
+            if (!untimestamped && !aged) continue;
+            stale.emplace_back(nodeid, entry.pindex->GetBlockHash());
+            if (!untimestamped) {
+                const auto age = now - requested_at;
+                if (oldest_reclaimed.count() == 0 || age > oldest_reclaimed) {
+                    oldest_reclaimed = age;
+                }
+            } else if (oldest_reclaimed.count() == 0) {
+                oldest_reclaimed = std::chrono::duration_cast<std::chrono::microseconds>(
+                    BLOCK_INFLIGHT_HARD_RECLAIM_AFTER);
+            }
+        }
+    }
+
+    if (stale.empty()) {
+        // Still useful to reconcile orphans that keep IsBlockRequested true
+        // with no live peer queue (nothing times those out either).
+        if (ReconcileBlockDownloadAccounting("inflight-reclaim-idle")) {
+            m_last_inflight_reclaim = now;
+        }
+        return 0;
+    }
+
+    m_last_inflight_reclaim = now;
+    std::set<NodeId> peers_reclaimed;
+    for (const auto& [nodeid, hash] : stale) {
+        RemoveBlockRequest(hash, nodeid);
+        peers_reclaimed.insert(nodeid);
+    }
+    // Pause every peer we just stripped so the next FindNextBlocksToDownload
+    // pass prefers a different source. Without this, the same silent peer is
+    // immediately re-assigned the freed hashes and the window jams again
+    // within one SendMessages cycle (observed in the jam-recovery functional
+    // test: reclaim → remaining_in_flight=0 → same peer refilled to 16).
+    for (NodeId nodeid : peers_reclaimed) {
+        if (CNodeState* state = State(nodeid)) {
+            state->m_block_download_paused_until =
+                now + BLOCK_DOWNLOAD_TIMEOUT_REREQUEST_COOLDOWN;
+        }
+    }
+    ReconcileBlockDownloadAccounting("inflight-reclaim");
+
+    LogInfo("Block download slot reclaim (%s): released %d stale in-flight "
+            "request(s) from %d peer(s), oldest_reclaimed_age=%ds, "
+            "remaining_in_flight=%d, peers_downloading=%d\n",
+            reason, static_cast<int>(stale.size()),
+            static_cast<int>(peers_reclaimed.size()),
+            static_cast<int>(count_seconds(std::chrono::duration_cast<std::chrono::seconds>(
+                oldest_reclaimed))),
+            static_cast<int>(mapBlocksInFlight.size()), m_peers_downloading_from);
+    return static_cast<int>(stale.size());
+}
+
 void PeerManagerImpl::MaybeRecoverStalledBlockFetch(std::chrono::microseconds now)
 {
     AssertLockHeld(cs_main);
@@ -2741,39 +2867,36 @@ void PeerManagerImpl::MaybeRecoverStalledBlockFetch(std::chrono::microseconds no
     }
     const int ahead{std::max(best_ahead, peer_ahead)};
 
-    const bool headers_ahead{ahead >= BLOCK_FETCH_STALL_HEADERS_AHEAD};
-    const bool empty_inflight{mapBlocksInFlight.empty()};
-
-    // Fully-stale in-flight set: every outstanding request is older than the
-    // duplicate-request threshold and peers are still ahead. Per-peer timeouts
-    // should usually clear these, but when they do not (orphaned accounting,
-    // peers that never enter SendMessages timeout path) the slots pin forever
-    // and starve new getdata — the independent operator's 80-across-9 case.
-    size_t stale_inflight{0};
-    if (!empty_inflight) {
-        for (const auto& entry : mapBlocksInFlight) {
-            const auto requested_at = entry.second.second->requested_at;
-            if (requested_at.count() > 0 &&
-                now >= requested_at + BLOCK_FETCH_STALL_INFLIGHT_STALE) {
-                ++stale_inflight;
-            }
-        }
-    }
-    const bool all_inflight_stale{
-        !empty_inflight && stale_inflight == mapBlocksInFlight.size()};
-
-    if (!headers_ahead || (!empty_inflight && !all_inflight_stale)) {
+    if (ahead < BLOCK_FETCH_STALL_HEADERS_AHEAD) {
         m_block_fetch_idle_since = 0us;
         return;
     }
 
-    if (m_block_fetch_idle_since.count() == 0) {
-        m_block_fetch_idle_since = now;
+    // Hard backstop: free any request older than BLOCK_INFLIGHT_HARD_RECLAIM_AFTER
+    // even while the global map is non-empty. This is the production jam that
+    // the empty-map residual valve could not see.
+    const int reclaimed = ReclaimStaleInFlightBlockRequests(now, "fetch-stall-backstop");
+    const auto oldest_age = OldestInFlightRequestAge(now);
+    const int oldest_age_s = static_cast<int>(count_seconds(
+        std::chrono::duration_cast<std::chrono::seconds>(oldest_age)));
+
+    if (!mapBlocksInFlight.empty() && reclaimed == 0) {
+        // Fresh in-flight work still outstanding — not a residual stall. The
+        // per-block download timeout / next reclaim pass will progress this.
+        m_block_fetch_idle_since = 0us;
         return;
     }
-    if (now < m_block_fetch_idle_since + BLOCK_FETCH_STALL_IDLE_INTERVAL) {
-        return;
+
+    if (mapBlocksInFlight.empty()) {
+        if (m_block_fetch_idle_since.count() == 0) {
+            m_block_fetch_idle_since = now;
+            return;
+        }
+        if (now < m_block_fetch_idle_since + BLOCK_FETCH_STALL_IDLE_INTERVAL) {
+            return;
+        }
     }
+    // Either empty long enough, or we just freed stale slots — kick.
     if (m_last_block_fetch_stall_kick.count() != 0 &&
         now < m_last_block_fetch_stall_kick + BLOCK_FETCH_STALL_KICK_COOLDOWN) {
         return;
@@ -2783,23 +2906,11 @@ void PeerManagerImpl::MaybeRecoverStalledBlockFetch(std::chrono::microseconds no
     m_block_fetch_idle_since = now;
 
     LogInfo("Block fetch stall detected: tip=%d best_header_ahead=%d peer_best_ahead=%d "
-            "in_flight=%d stale_in_flight=%d peers_downloading=%d — reconciling and forcing reconsideration\n",
+            "in_flight=%d peers_downloading=%d oldest_inflight_age=%ds reclaimed=%d "
+            "— reconciling and forcing reconsideration\n",
             tip->nHeight, best_ahead, peer_ahead,
-            static_cast<int>(mapBlocksInFlight.size()),
-            static_cast<int>(stale_inflight),
-            m_peers_downloading_from);
-
-    if (all_inflight_stale) {
-        // Release slots so FindNextBlocks can allocate again. Unique hashes
-        // only — RemoveBlockRequest erases every peer entry for a hash.
-        std::set<uint256> stale_hashes;
-        for (const auto& entry : mapBlocksInFlight) {
-            stale_hashes.insert(entry.first);
-        }
-        for (const uint256& hash : stale_hashes) {
-            RemoveBlockRequest(hash, /*from_peer=*/std::nullopt);
-        }
-    }
+            static_cast<int>(mapBlocksInFlight.size()), m_peers_downloading_from,
+            oldest_age_s, reclaimed);
 
     ReconcileBlockDownloadAccounting("fetch-stall");
 
@@ -3018,6 +3129,10 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
     const int best_header_height{
         m_chainman.m_best_header != nullptr ? m_chainman.m_best_header->nHeight : 0};
     const int blocks_in_flight_global{static_cast<int>(mapBlocksInFlight.size())};
+    const auto now_for_diag{GetTime<std::chrono::microseconds>()};
+    const int oldest_inflight_age_s{static_cast<int>(count_seconds(
+        std::chrono::duration_cast<std::chrono::seconds>(
+            OldestInFlightRequestAge(now_for_diag))))};
     const auto log_skip = [&](const char* reason) {
         // Only log when something is actually waiting to be fetched; otherwise
         // this path is the steady-state "peer has nothing new" case.
@@ -3033,10 +3148,11 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
         }
         LogDebug(BCLog::NET, "FindNextBlocksToDownload skip peer=%d reason=%s tip=%d "
                 "best_header_ahead=%d peer_best_ahead=%d in_flight_global=%d "
-                "peer_in_flight=%d\n",
+                "peer_in_flight=%d oldest_inflight_age=%ds\n",
                 peer.m_id, reason, tip_height, best_header_ahead, peer_ahead,
                 blocks_in_flight_global,
-                static_cast<int>(state->vBlocksInFlight.size()));
+                static_cast<int>(state->vBlocksInFlight.size()),
+                oldest_inflight_age_s);
     };
 
     // Trusted mirrors download along the active tip's chain by default.
@@ -10507,13 +10623,22 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
 
     if (msg_type == NetMsgType::CMPCTBLOCK)
     {
-        // Ignore cmpctblock received while importing
-        if (m_chainman.m_blockman.LoadingBlocks()) {
-            LogDebug(BCLog::CMPCTBLOCK, "Peer %d sent a compact block while blocks are loading\n", pfrom.GetId());
-            return;
-        }
         if (m_opts.ignore_incoming_txs) {
             LogDebug(BCLog::CMPCTBLOCK, "Peer %d sent a compact block to a blocksonly node\n", pfrom.GetId());
+            return;
+        }
+
+        CBlockHeaderAndShortTxIDs cmpctblock;
+        vRecv >> cmpctblock;
+        if (!vRecv.empty()) {
+            Misbehaving(*peer, strprintf("trailing data after cmpctblock = %u bytes", vRecv.size()));
+            return;
+        }
+
+        // Ignore while importing, but free any in-flight slot for this hash.
+        if (m_chainman.m_blockman.LoadingBlocks()) {
+            LogDebug(BCLog::CMPCTBLOCK, "Peer %d sent a compact block while blocks are loading\n", pfrom.GetId());
+            WITH_LOCK(cs_main, RemoveBlockRequest(cmpctblock.header.GetHash(), pfrom.GetId()));
             return;
         }
 
@@ -10524,13 +10649,6 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 LogDebug(BCLog::CMPCTBLOCK, "Peer %d sent a compact block without negotiating SENDCMPCT\n", pfrom.GetId());
                 return;
             }
-        }
-
-        CBlockHeaderAndShortTxIDs cmpctblock;
-        vRecv >> cmpctblock;
-        if (!vRecv.empty()) {
-            Misbehaving(*peer, strprintf("trailing data after cmpctblock = %u bytes", vRecv.size()));
-            return;
         }
 
         // Preference-only: an ordinary peer may still deliver a compact block
@@ -10926,16 +11044,18 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
 
     if (msg_type == NetMsgType::BLOCKTXN)
     {
-        // Ignore blocktxn received while importing
-        if (m_chainman.m_blockman.LoadingBlocks()) {
-            LogDebug(BCLog::NET, "Unexpected blocktxn message received from peer %d\n", pfrom.GetId());
-            return;
-        }
-
         BlockTransactions resp;
         vRecv >> resp;
         if (!vRecv.empty()) {
             Misbehaving(*peer, strprintf("trailing data after blocktxn = %u bytes", vRecv.size()));
+            return;
+        }
+
+        // Ignore while importing, but free the in-flight slot so a LoadingBlocks
+        // window cannot pin the hash permanently after import completes.
+        if (m_chainman.m_blockman.LoadingBlocks()) {
+            LogDebug(BCLog::NET, "Unexpected blocktxn message received from peer %d\n", pfrom.GetId());
+            WITH_LOCK(cs_main, RemoveBlockRequest(resp.blockhash, pfrom.GetId()));
             return;
         }
 
@@ -12157,16 +12277,20 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
 
     if (msg_type == NetMsgType::BLOCK)
     {
-        // Ignore block received while importing
-        if (m_chainman.m_blockman.LoadingBlocks()) {
-            LogDebug(BCLog::NET, "Unexpected block message received from peer %d\n", pfrom.GetId());
-            return;
-        }
-
         std::shared_ptr<CBlock> pblock = std::make_shared<CBlock>();
         vRecv >> TX_WITH_WITNESS(*pblock);
         if (!vRecv.empty()) {
             Misbehaving(*peer, strprintf("trailing data after block = %u bytes", vRecv.size()));
+            return;
+        }
+
+        // Ignore block bodies while importing, but still release the in-flight
+        // slot. Leaving mapBlocksInFlight occupied across a LoadingBlocks
+        // window is a permanent jam once import finishes: nothing else erases
+        // the entry and FindNextBlocks skips the hash forever.
+        if (m_chainman.m_blockman.LoadingBlocks()) {
+            LogDebug(BCLog::NET, "Unexpected block message received from peer %d\n", pfrom.GetId());
+            WITH_LOCK(cs_main, RemoveBlockRequest(pblock->GetHash(), pfrom.GetId()));
             return;
         }
 
@@ -13768,6 +13892,33 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                 // Release the stuck request immediately so the block is eligible
                 // to be re-requested from another peer.
                 RemoveBlockRequest(stuck_hash, pto->GetId());
+                // Also free any other aged entries on this peer in the same
+                // pass. The head-only timeout drains a silent peer one block
+                // per download_timeout; a peer holding 16 never-arriving
+                // requests would otherwise jam the window for many minutes
+                // even after the first timeout fired.
+                {
+                    std::vector<uint256> also_stale;
+                    for (const QueuedBlock& entry : state.vBlocksInFlight) {
+                        const auto req_at = entry.requested_at.count() > 0
+                                                ? entry.requested_at
+                                                : state.m_downloading_since;
+                        if (req_at.count() == 0 ||
+                            current_time >= req_at + BLOCK_INFLIGHT_HARD_RECLAIM_AFTER) {
+                            also_stale.push_back(entry.pindex->GetBlockHash());
+                        }
+                    }
+                    for (const uint256& h : also_stale) {
+                        RemoveBlockRequest(h, pto->GetId());
+                    }
+                    if (!also_stale.empty()) {
+                        LogInfo("Block download slot reclaim (peer-timeout): released %d "
+                                "additional stale request(s) from peer=%d, "
+                                "remaining_peer_in_flight=%d\n",
+                                static_cast<int>(also_stale.size()), pto->GetId(),
+                                static_cast<int>(state.vBlocksInFlight.size()));
+                    }
+                }
                 ++state.m_block_download_timeout_count;
                 // Prefer re-request over disconnect when other download peers
                 // exist: dropping this peer also discards its other useful
