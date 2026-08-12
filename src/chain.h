@@ -623,6 +623,45 @@ public:
     CBlockIndex* FindEarliestAtLeast(int64_t nTime, int height) const;
 };
 
+/**
+ * First block strictly above `start` on `best_known`'s ancestor chain that does
+ * not yet have a usable body: neither BLOCK_HAVE_DATA nor contained in
+ * `active_chain` (when provided). Returns nullptr when every block through
+ * `best_known` is present.
+ *
+ * Used by block-download selection to keep walks root-first: a higher body on
+ * disk (or a sibling on the active chain) must not hide a lower hole.
+ */
+const CBlockIndex* FindLowestMissingBody(const CBlockIndex* start,
+                                         const CBlockIndex* best_known,
+                                         const CChain* active_chain);
+
+/**
+ * Result of re-deriving pindexLastCommonBlock so the download walk cannot start
+ * past a missing body on the followed (best-known) chain.
+ */
+struct LastCommonRootFirstResult {
+    const CBlockIndex* last_common{nullptr};
+    const CBlockIndex* lowest_missing{nullptr};
+    bool clamped{false};
+    /** Stable reason token for production logs / tests. */
+    const char* reason{"ok"};
+};
+
+/**
+ * Clamp `last_common` so it never sits at or past a missing body on
+ * `best_known`'s chain. Re-derives against `LastCommonAncestor(tip, best_known)`
+ * when a desync is detected (HaveNumChainTxs can outlive BLOCK_HAVE_DATA after
+ * prune/partial loss, so a monotonic LastCommon drag leaves holes unrequested).
+ *
+ * `last_common` may be null (caller still bootstrapping). `tip` and
+ * `best_known` must be non-null.
+ */
+LastCommonRootFirstResult ClampLastCommonToRootFirst(const CBlockIndex* last_common,
+                                                     const CBlockIndex* best_known,
+                                                     const CBlockIndex* tip,
+                                                     const CChain* active_chain);
+
 /** Get a locator for a block index entry. */
 CBlockLocator GetLocator(const CBlockIndex* index);
 

@@ -235,6 +235,8 @@ static constexpr auto BLOCK_DOWNLOAD_TIMEOUT_MIN{10s};
  *  more peers should mean faster failover, not a longer stall. 3× spacing
  *  (~270s on mainnet) bounds a dead peer while still covering saturated links. */
 static constexpr double BLOCK_DOWNLOAD_TIMEOUT_MAX_MULT = 3.0;
+/** Minimum interval between root-first download summary LogInfo lines. */
+static constexpr auto BLOCK_ROOT_FIRST_SUMMARY_INTERVAL{30s};
 /** After a download timeout where we keep the peer (other download peers exist),
  *  briefly pause new requests to it so FindNextBlocksToDownload prefers another
  *  source for the released hash. */
@@ -2005,6 +2007,8 @@ private:
     std::chrono::microseconds m_block_fetch_idle_since GUARDED_BY(cs_main){0us};
     std::chrono::microseconds m_last_block_fetch_stall_kick GUARDED_BY(cs_main){0us};
     std::chrono::microseconds m_last_inflight_reclaim GUARDED_BY(cs_main){0us};
+    /** Rate-limit the production-visible root-first download summary line. */
+    std::chrono::microseconds m_last_root_first_summary GUARDED_BY(cs_main){0us};
 
     /** Reconcile mapBlocksInFlight ↔ per-peer vBlocksInFlight and
      *  m_peers_downloading_from; clear orphaned MatMul async-verify markers
@@ -3267,6 +3271,71 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
     // If the peer reorganized, our previous pindexLastCommonBlock may not be an ancestor
     // of its current tip anymore. Go back enough to fix that.
     state->pindexLastCommonBlock = LastCommonAncestor(state->pindexLastCommonBlock, state->pindexBestKnownBlock);
+
+    // ROOT-FIRST: HaveNumChainTxs() can outlive BLOCK_HAVE_DATA (prune / partial
+    // loss), and a prior walk can leave pindexLastCommonBlock sitting past a
+    // still-missing lower root on the followed chain while higher bodies (or
+    // active-chain siblings) tempt the pointer forward. Re-derive against the
+    // tip LCA and clamp so the walk always (re)considers the lowest hole.
+    const LastCommonRootFirstResult root_first{ClampLastCommonToRootFirst(
+        state->pindexLastCommonBlock, state->pindexBestKnownBlock, tip,
+        &m_chainman.ActiveChain())};
+    state->pindexLastCommonBlock = root_first.last_common;
+    if (root_first.clamped && root_first.lowest_missing != nullptr &&
+        IsBlockRequested(root_first.lowest_missing->GetBlockHash())) {
+        // Reservations taken while LastCommon was past the hole never complete
+        // from this walk; free them so root-first re-request can proceed.
+        // Same RemoveBlockRequest path the slot-leak backstop uses.
+        RemoveBlockRequest(root_first.lowest_missing->GetBlockHash(), std::nullopt);
+    }
+
+    const char* select_reason{"will_walk"};
+    if (state->pindexLastCommonBlock == state->pindexBestKnownBlock) {
+        select_reason = "already_at_peer_best";
+    } else if (root_first.lowest_missing != nullptr) {
+        if (IsBlockRequested(root_first.lowest_missing->GetBlockHash()) &&
+            !MayDuplicateStaleBlockRequest(root_first.lowest_missing->GetBlockHash(),
+                                           now_for_diag)) {
+            select_reason = "root_in_flight";
+        } else if (IsMatMulAsyncVerificationPending(
+                       root_first.lowest_missing->GetBlockHash())) {
+            select_reason = "root_async_pending";
+        } else if (IsMatMulBudgetDeferred(root_first.lowest_missing->GetBlockHash(),
+                                          now_for_diag)) {
+            select_reason = "root_budget_deferred";
+        } else {
+            select_reason = root_first.clamped ? "clamped_request_root" : "request_root";
+        }
+    } else {
+        select_reason = "no_missing_body";
+    }
+
+    if (best_header_height - tip_height >= BLOCK_FETCH_STALL_HEADERS_AHEAD ||
+        (state->pindexBestKnownBlock->nHeight - tip_height) >=
+            BLOCK_FETCH_STALL_HEADERS_AHEAD) {
+        if (m_last_root_first_summary.count() == 0 ||
+            now_for_diag >= m_last_root_first_summary + BLOCK_ROOT_FIRST_SUMMARY_INTERVAL) {
+            m_last_root_first_summary = now_for_diag;
+            LogInfo("Block download root-first: peer=%d tip=%d last_common=%d "
+                    "lowest_missing=%s missing_height=%d select=%s clamp=%s "
+                    "reason=%s in_flight_global=%d\n",
+                    peer.m_id, tip_height,
+                    state->pindexLastCommonBlock != nullptr
+                        ? state->pindexLastCommonBlock->nHeight
+                        : -1,
+                    root_first.lowest_missing != nullptr
+                        ? root_first.lowest_missing->GetBlockHash().ToString()
+                        : "none",
+                    root_first.lowest_missing != nullptr
+                        ? root_first.lowest_missing->nHeight
+                        : -1,
+                    select_reason,
+                    root_first.clamped ? "yes" : "no",
+                    root_first.reason,
+                    blocks_in_flight_global);
+        }
+    }
+
     if (state->pindexLastCommonBlock == state->pindexBestKnownBlock) {
         log_skip("already_at_peer_best");
         return;
@@ -3373,7 +3442,14 @@ void PeerManagerImpl::FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, c
             }
 
             if (pindex->nStatus & BLOCK_HAVE_DATA || (activeChain && activeChain->Contains(pindex))) {
-                if (activeChain && pindex->HaveNumChainTxs()) {
+                // Advance LastCommon only when the body is still usable AND
+                // HaveNumChainTxs. HaveNumChainTxs alone is not enough: it can
+                // outlive BLOCK_HAVE_DATA after prune, and advancing past a
+                // hole leaves FindNextBlocksToDownload starting beyond the
+                // missing root forever. ClampLastCommonToRootFirst repairs
+                // that desync; this guard limits how far we drag forward.
+                if (activeChain && pindex->HaveNumChainTxs() &&
+                    (pindex->nStatus & BLOCK_HAVE_DATA || activeChain->Contains(pindex))) {
                     state->pindexLastCommonBlock = pindex;
                 }
                 continue;
@@ -3393,6 +3469,15 @@ void PeerManagerImpl::FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, c
                     if (waitingfor == -1) {
                         // This is the first already-in-flight block.
                         waitingfor = mapBlocksInFlight.lower_bound(pindex->GetBlockHash())->second.first;
+                    }
+                    // ROOT-FIRST: do not fill the window with successors while
+                    // the earliest missing body is still pinned in-flight.
+                    // Fetching higher blocks (especially when some higher bodies
+                    // are already on disk) consumes slots and never advances tip
+                    // past this hole — the production "six missing roots" stall.
+                    if (vBlocks.empty()) {
+                        if (nodeStaller) *nodeStaller = waitingfor;
+                        return;
                     }
                     continue;
                 }
@@ -6499,7 +6584,14 @@ void PeerManagerImpl::MaybeFollowTrustedMirrorAuthorityHeader(
     CBlockIndex* followed{
         m_chainman.m_blockman.LookupBlockIndex(header.GetBlockHash())};
     if (followed == nullptr) return;
+    const CBlockIndex* prev_best{m_chainman.m_best_header};
     m_chainman.m_best_header = followed;
+    // Activation wake: header-following advanced onto a new best-header tip so
+    // block selection must re-run and pick up newly-relevant roots (otherwise
+    // SendMessages may idle until the next inbound message).
+    if (prev_best != followed) {
+        m_connman.WakeMessageHandler();
+    }
 }
 
 void PeerManagerImpl::MaybeRequestTrustedMirrorAuthorityHeaders(
@@ -12183,6 +12275,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         // signature-verification budget above, but must not spend the scarce
         // node-wide relay allowance: valid public attestations are replayable
         // by anyone.
+        bool wake_block_fetch{false};
         for (const auto& attestation : received) {
             const uint256 hash{
                 attestation.statement.block_hash};
@@ -12215,6 +12308,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             if (result ==
                 matmul::trusted::AddResult::Accepted) {
                 relay.push_back(attestation);
+                wake_block_fetch = true;
                 {
                     LOCK(cs_main);
                     m_matmul_attestation_peer_success[pfrom.GetId()] =
@@ -12244,12 +12338,19 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                     LOCK(cs_main);
                     m_matmul_attestation_requested.erase(hash);
                 }
+                wake_block_fetch = true;
                 // Wake any parked trusted-mirror verify job. Do this outside
                 // cs_main: NotifyQuorumReady only touches the worker mutex.
                 if (m_matmul_verify_worker) {
                     m_matmul_verify_worker->NotifyQuorumReady(hash);
                 }
             }
+        }
+        // Attestation acceptance / quorum can newly unlock tip-extending bodies
+        // (or make previously known roots selectable). Wake message processing
+        // so FindNextBlocksToDownload runs without waiting for the next inbound.
+        if (wake_block_fetch) {
+            m_connman.WakeMessageHandler();
         }
         // Charge the shared buckets now, for newly accepted objects that this
         // node could actually relay. Local acceptance is bounded independently

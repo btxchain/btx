@@ -391,6 +391,7 @@ add_executable(test_btx
   ml_kem_tests.cpp
   lattice_poly_tests.cpp
   lattice_polyvec_tests.cpp
+  lastcommon_root_first_tests.cpp
   note_encryption_tests.cpp
   shielded_merkle_serialization_tests.cpp
   shielded_merkle_tests.cpp

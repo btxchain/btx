@@ -31,6 +31,13 @@ authenticated tip — but DOWNLOAD must still use claimed nChainWork so bodies
 can arrive and authenticate. A test that only diverges by 1-2 blocks cannot
 catch that interaction (production stall was ~193 headers-only ahead).
 
+It also guards pindexLastCommonBlock root-first recovery: when higher canonical
+bodies are already on the mirror (getblockfrompeer / partial sync) while six
+lower roots on the followed chain are still missing, LastCommon must not skip
+past the holes — the mirror must request the roots and reach tip with no
+operator action. A test that does not first plant higher bodies cannot
+reproduce that stall class.
+
 It also guards deep-reorg finality (failure C): a competing rewrite deeper than
 EMERGENCY park_depth must still be refused by both authority and mirror.
 """
@@ -61,6 +68,10 @@ REORG_PROTECTION_START = 5
 PARK_DEPTH = 6
 # Must match src/chain.h TRUST_ADJUSTED_WORK_ALLOWANCE_BLOCKS.
 TRUST_ADJUSTED_WORK_ALLOWANCE = 6
+# Missing lower roots planted in the LastCommon drag scenario.
+MISSING_ROOT_COUNT = 6
+# Higher bodies planted above the hole (must be > 0 so LastCommon is tempted).
+HIGHER_BODY_COUNT = 6
 # EMERGENCY hysteresis_work_margin is 2; extend the winning branch past that.
 AUTHORITY_EXTENSIONS = 4
 # NODE_MATMUL_ATTESTATION_ARCHIVE = 1 << 31 (src/protocol.h). Not exported by
@@ -365,6 +376,14 @@ class MatMulTrustedMirrorConvergenceTest(BitcoinTestFramework):
         )
 
         self.log.info(
+            "Six missing roots with higher bodies already present: "
+            "root-first must request the holes without operator action"
+        )
+        self._test_six_missing_roots_with_higher_bodies(
+            authority, mirror, loser, relay
+        )
+
+        self.log.info(
             "Deep-reorg guard: rewrite deeper than park_depth must stay refused"
         )
         self._test_deep_reorg_refusal(authority, mirror, loser)
@@ -515,6 +534,138 @@ class MatMulTrustedMirrorConvergenceTest(BitcoinTestFramework):
             "download gate opened"
         )
 
+        assert_equal(mirror.getbestblockhash(), authority.getbestblockhash())
+        self._disconnect_all()
+
+    def _test_six_missing_roots_with_higher_bodies(
+        self, authority, mirror, loser, relay
+    ):
+        """Reproduce LastCommon drag past missing roots when higher bodies exist.
+
+        Topology:
+          - Mirror tip stranded on a losing sibling
+          - Authority winning branch: sibling + MISSING_ROOT_COUNT + HIGHER_BODY_COUNT
+          - Headers + attestations delivered; tip stays stranded
+          - Higher canonical bodies planted onto the mirror via RPC (HAVE_DATA
+            without a contiguous connectable prefix) so pindexLastCommonBlock is
+            tempted to skip the hole
+          - Bodies for the six lower roots remain absent
+          - Non-archive relay holds the full winning chain
+
+        Old behavior: walk starts past the holes → roots never requested → tip
+        frozen. New behavior: root-first clamp re-derives LastCommon and the
+        mirror converges with no invalidateblock/restart.
+        """
+        self._disconnect_all()
+
+        self.connect_nodes(0, 1)
+        self.connect_nodes(0, 2)
+        self.connect_nodes(0, 3)
+        tip_hash = authority.getbestblockhash()
+        self.wait_until(
+            lambda: mirror.getbestblockhash() == tip_hash
+            and loser.getbestblockhash() == tip_hash
+            and relay.getbestblockhash() == tip_hash,
+            timeout=300,
+        )
+        self._disconnect_all()
+
+        fork_hash = tip_hash
+        fork_height = authority.getblockcount()
+        winning = self.generate(authority, 1, sync_fun=self.no_op)[0]
+        losing = self.generate(loser, 1, sync_fun=self.no_op)[0]
+        assert winning != losing
+        # Six lower roots after the winning sibling, then six higher bodies.
+        self.generate(
+            authority,
+            MISSING_ROOT_COUNT + HIGHER_BODY_COUNT,
+            sync_fun=self.no_op,
+        )
+        authority_tip = authority.getbestblockhash()
+        authority_height = authority.getblockcount()
+        assert_equal(
+            authority_height,
+            fork_height + 1 + MISSING_ROOT_COUNT + HIGHER_BODY_COUNT,
+        )
+
+        # Winning-branch hashes from low to high (exclusive of fork).
+        winning_hashes = []
+        blockhash = authority_tip
+        while blockhash != fork_hash:
+            winning_hashes.append(blockhash)
+            header = authority.getblockheader(blockhash, True)
+            blockhash = header["previousblockhash"]
+        winning_hashes.reverse()
+        assert_equal(len(winning_hashes), 1 + MISSING_ROOT_COUNT + HIGHER_BODY_COUNT)
+        missing_roots = winning_hashes[: 1 + MISSING_ROOT_COUNT]
+        higher_bodies = winning_hashes[1 + MISSING_ROOT_COUNT :]
+        assert_equal(len(missing_roots), 1 + MISSING_ROOT_COUNT)
+        assert_equal(len(higher_bodies), HIGHER_BODY_COUNT)
+
+        submit_chain_via_rpc(authority, relay)
+        assert_equal(relay.getbestblockhash(), authority_tip)
+
+        self.connect_nodes(1, 2)
+        self.wait_until(lambda: mirror.getbestblockhash() == losing, timeout=180)
+        stranded_height = mirror.getblockcount()
+        stranded_tip = mirror.getbestblockhash()
+        self.disconnect_nodes(1, 2)
+        assert_equal(stranded_tip, losing)
+
+        # Headers-only follow onto the winning branch; tip stays stranded.
+        self._push_authority_headers_only(authority, mirror, fork_hash, authority_tip)
+        self.wait_until(
+            lambda: mirror.getblockchaininfo()["headers"] >= authority_height,
+            timeout=180,
+        )
+        info = mirror.getblockchaininfo()
+        assert_equal(info["blocks"], stranded_height)
+        assert_equal(info["bestblockhash"], stranded_tip)
+
+        self._seed_attestations_for_chain(authority, mirror, stop_hash=fork_hash)
+
+        # Plant ONLY the higher bodies so LastCommon is tempted past the hole.
+        # Headers are already known; submitblock stores HAVE_DATA even when the
+        # parent body is absent (unlinked). That is the production drag bait.
+        for blockhash in higher_bodies:
+            raw = authority.getblock(blockhash, False)
+            try:
+                result = mirror.submitblock(raw)
+            except JSONRPCException as exc:
+                # Quorum race: attestations were seeded, but retry once.
+                if "quorum" not in str(exc).lower():
+                    raise
+                atts = authority.getmatmulattestations(blockhash)
+                mirror.submitmatmulattestations(atts)
+                result = mirror.submitblock(raw)
+            assert result in (None, "duplicate", "inconclusive"), (
+                f"plant higher body {blockhash} -> {result}"
+            )
+            # Prove the body is on disk (HAVE_DATA), not merely the header.
+            mirror.getblock(blockhash, False)
+
+        # Confirm the lower roots (winning sibling + six) are still absent.
+        for blockhash in missing_roots:
+            try:
+                mirror.getblock(blockhash, False)
+                raise AssertionError(
+                    f"missing root {blockhash} unexpectedly present before reconnect"
+                )
+            except JSONRPCException:
+                pass
+
+        pre = mirror.getblockchaininfo()
+        assert_equal(pre["blocks"], stranded_height)
+        assert_equal(pre["bestblockhash"], stranded_tip)
+        assert_greater_than_or_equal(pre["headers"], authority_height)
+
+        # Bodies for the roots can ONLY come from the non-archive relay.
+        self.connect_nodes(1, 3)
+        self.wait_until(
+            lambda: mirror.getbestblockhash() == authority_tip,
+            timeout=300,
+        )
+        assert_equal(mirror.getblockcount(), authority_height)
         assert_equal(mirror.getbestblockhash(), authority.getbestblockhash())
         self._disconnect_all()
 

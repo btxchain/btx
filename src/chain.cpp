@@ -309,3 +309,85 @@ const CBlockIndex* LastCommonAncestor(const CBlockIndex* pa, const CBlockIndex* 
     assert(pa == pb);
     return pa;
 }
+
+static bool HasUsableBlockBody(const CBlockIndex* pindex, const CChain* active_chain)
+{
+    if (pindex == nullptr) return false;
+    if (pindex->nStatus & BLOCK_HAVE_DATA) return true;
+    return active_chain != nullptr && active_chain->Contains(pindex);
+}
+
+const CBlockIndex* FindLowestMissingBody(const CBlockIndex* start,
+                                         const CBlockIndex* best_known,
+                                         const CChain* active_chain)
+{
+    if (best_known == nullptr) return nullptr;
+    if (start == nullptr) {
+        // No known common point: treat genesis/parent of best_known's full
+        // ancestry as the scan base by walking from height 0.
+        start = best_known->GetAncestor(0);
+    }
+    // start must be an ancestor of best_known (caller re-derives via LCA).
+    if (best_known->GetAncestor(start->nHeight) != start) {
+        start = LastCommonAncestor(start, best_known);
+    }
+    if (start == best_known) return nullptr;
+
+    for (int height = start->nHeight + 1; height <= best_known->nHeight; ++height) {
+        const CBlockIndex* pindex{best_known->GetAncestor(height)};
+        if (!HasUsableBlockBody(pindex, active_chain)) {
+            return pindex;
+        }
+    }
+    return nullptr;
+}
+
+LastCommonRootFirstResult ClampLastCommonToRootFirst(const CBlockIndex* last_common,
+                                                     const CBlockIndex* best_known,
+                                                     const CBlockIndex* tip,
+                                                     const CChain* active_chain)
+{
+    LastCommonRootFirstResult out;
+    assert(best_known != nullptr);
+    assert(tip != nullptr);
+
+    // True fork point with our tip — never start a competing-chain walk above this
+    // without first proving every followed-chain body from here is present.
+    const CBlockIndex* tip_lca{LastCommonAncestor(tip, best_known)};
+    out.last_common = last_common != nullptr
+                          ? LastCommonAncestor(last_common, best_known)
+                          : tip_lca;
+
+    // Prefer tip_lca when the stored pointer is not on the tip↔best_known fork
+    // path (should already be corrected by the LCA above, but be defensive).
+    if (out.last_common != tip_lca &&
+        tip_lca->GetAncestor(out.last_common->nHeight) != out.last_common &&
+        out.last_common->GetAncestor(tip_lca->nHeight) != tip_lca) {
+        out.last_common = tip_lca;
+        out.clamped = true;
+        out.reason = "rederived_tip_lca";
+    }
+
+    // If last_common is below tip_lca, raise to the real fork.
+    if (out.last_common->nHeight < tip_lca->nHeight) {
+        out.last_common = tip_lca;
+        out.clamped = true;
+        out.reason = "raised_to_tip_lca";
+    }
+
+    out.lowest_missing = FindLowestMissingBody(tip_lca, best_known, active_chain);
+    if (out.lowest_missing == nullptr) {
+        if (!out.clamped) out.reason = "ok_no_missing";
+        return out;
+    }
+
+    // Parent of the lowest hole is the latest safe common point.
+    const CBlockIndex* safe{out.lowest_missing->pprev};
+    assert(safe != nullptr);
+    if (out.last_common->nHeight >= out.lowest_missing->nHeight) {
+        out.last_common = safe;
+        out.clamped = true;
+        out.reason = "clamped_past_missing_root";
+    }
+    return out;
+}
