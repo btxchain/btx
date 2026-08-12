@@ -268,7 +268,13 @@ UniValue blockheaderToJSON(const CBlockIndex& tip, const CBlockIndex& blockindex
     result.pushKV("target", GetTarget(blockindex, pow_limit).GetHex());
     result.pushKV("difficulty", GetDifficulty(blockindex));
     result.pushKV("chainwork", blockindex.nChainWork.GetHex());
-    result.pushKV("nTx", blockindex.nTx);
+    // nTx is filled only when the block body has been received. Emitting 0 for a
+    // headers-only index entry looks like an empty block and misleads operators
+    // diagnosing competing branches; omit it until BLOCK_HAVE_DATA is set.
+    const bool have_body = WITH_LOCK(::cs_main, return (blockindex.nStatus & BLOCK_HAVE_DATA) != 0);
+    if (have_body) {
+        result.pushKV("nTx", blockindex.nTx);
+    }
 
     if (blockindex.pprev)
         result.pushKV("previousblockhash", blockindex.pprev->GetBlockHash().GetHex());
@@ -840,7 +846,11 @@ static RPCHelpMan getblockheader()
 {
     return RPCHelpMan{"getblockheader",
                 "\nIf verbose is false, returns a string that is serialized, hex-encoded data for blockheader 'hash'.\n"
-                "If verbose is true, returns an Object with information about blockheader <hash>.\n",
+                "If verbose is true, returns an Object with information about blockheader <hash>.\n"
+                "\nVerbose mode never requires the block body: MatMul/KAWPOW PoW fields are read from\n"
+                "the block index (populated from the header). On a headers-only entry, nTx is omitted\n"
+                "because the transaction count is unknown until the body arrives; do not treat a\n"
+                "missing nTx as zero transactions.\n",
                 {
                     {"blockhash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The block hash"},
                     {"verbose", RPCArg::Type::BOOL, RPCArg::Default{true}, "true for a json object, false for the hex-encoded data"},
@@ -868,7 +878,7 @@ static RPCHelpMan getblockheader()
                             {RPCResult::Type::STR_HEX, "target", "The difficulty target"},
                             {RPCResult::Type::NUM, "difficulty", "The difficulty"},
                             {RPCResult::Type::STR_HEX, "chainwork", "Expected number of hashes required to produce the current chain"},
-                            {RPCResult::Type::NUM, "nTx", "The number of transactions in the block"},
+                            {RPCResult::Type::NUM, "nTx", /*optional=*/true, "Transaction count when the block body is available; omitted for headers-only entries"},
                             {RPCResult::Type::STR_HEX, "previousblockhash", /*optional=*/true, "The hash of the previous block (if available)"},
                             {RPCResult::Type::STR_HEX, "nextblockhash", /*optional=*/true, "The hash of the next block (if available)"},
                         }},

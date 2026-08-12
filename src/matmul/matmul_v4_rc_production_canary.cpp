@@ -11,7 +11,6 @@
 #include <logging.h>
 #include <matmul/exact_gemm_resolve.h>
 #include <matmul/matmul_v4_rc_scale.h>
-#include <matmul/matmul_v4_rc_selfqual.h>
 #include <random.h>
 
 #include <array>
@@ -684,6 +683,38 @@ static RCProductionCanaryStatus RunRCProductionStartupCanaryImpl(
         return out;
     }
 
+    if (!automatic_policy_eligible) {
+        // Self-qual / policy refusal must not collapse into a generic
+        // "provider_not_policy_eligible" label when the resolver already named
+        // a concrete correctness failure (digest / GEMM mismatch, etc.).
+        // Checked before build-provenance so a mismatched toolkit still names
+        // itself on dirty or unsealed developer binaries.
+        const auto resolved{matmul_v4::accel::ProbeLastRCExactGemmResolution()};
+        const std::string& surfaced = resolved.reason;
+        const bool correctness_mismatch =
+            surfaced.find("mismatch") != std::string::npos ||
+            surfaced.find("episode_digest") != std::string::npos;
+        if (correctness_mismatch) {
+            out.outcome = RCProductionCanaryOutcome::DigestMismatch;
+            out.reason = surfaced;
+        } else if (!surfaced.empty() &&
+                   surfaced != "cpu_reference" &&
+                   surfaced != "generic_exactgemm_and_rc_self_qualified" &&
+                   surfaced != "native_rc_ozaki_self_qualified" &&
+                   surfaced != "rc_exactpanels_and_episode_self_qualified") {
+            // Other self-qual deficits (boundary probes, missing device slot,
+            // metal/native gate failures) keep a fail-closed outcome but name
+            // themselves instead of looking like a policy misconfiguration.
+            out.outcome = RCProductionCanaryOutcome::LocalAcceleratorFailure;
+            out.reason = surfaced;
+        } else {
+            out.outcome = RCProductionCanaryOutcome::ProviderNotPolicyEligible;
+            out.reason = "provider_not_automatic_policy_eligible";
+        }
+        StoreStatus(out);
+        return out;
+    }
+
     if (!out.build_provenance_matches) {
         out.outcome = RCProductionCanaryOutcome::BuildProvenanceMismatch;
         out.reason = out.build_source_dirty
@@ -693,27 +724,6 @@ static RCProductionCanaryStatus RunRCProductionStartupCanaryImpl(
         return out;
     }
 
-    if (!automatic_policy_eligible) {
-        // Prefer the concrete RC self-qual deficit when present. A CUDA toolkit
-        // that disagrees with the CPU oracle on exact-integer GEMM fails closed
-        // correctly, but previously surfaced only as provider_not_policy_eligible
-        // / no_rc_self_qualified_device_backend — indistinguishable from a
-        // misconfigured policy flag.
-        const std::string deficit{
-            matmul::v4::rc::GetLastRCSelfQualDeficitReason()};
-        if (deficit.find("episode_digest_mismatch") != std::string::npos) {
-            out.outcome = RCProductionCanaryOutcome::DigestMismatch;
-            out.reason = "rc_self_qual_episode_digest_mismatch_backend_vs_cpu";
-        } else if (!deficit.empty()) {
-            out.outcome = RCProductionCanaryOutcome::ProviderNotPolicyEligible;
-            out.reason = "provider_not_policy_eligible:" + deficit;
-        } else {
-            out.outcome = RCProductionCanaryOutcome::ProviderNotPolicyEligible;
-            out.reason = "provider_not_automatic_policy_eligible";
-        }
-        StoreStatus(out);
-        return out;
-    }
     if (!out.provider_identity.complete) {
         out.outcome = RCProductionCanaryOutcome::ProviderIdentityUnavailable;
         out.reason = out.provider_identity.reason;
