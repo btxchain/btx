@@ -2911,6 +2911,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
 
     {
         LOCK(cs_main);
+        uiInterface.InitMessage(_("Initializing shielded state…"));
         if (!chainman.EnsureShieldedStateInitialized()) {
             return InitError(Untranslated("Failed to initialize shielded state database."));
         }

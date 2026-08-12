@@ -2154,6 +2154,287 @@ static void RefreshShieldedValidationSnapshots(
     return true;
 }
 
+// Single genesis->tip walk that rebuilds every chain-derived shielded consumer used at
+// startup repair time. Archive nodes carry ~720 KB MatMul ExactReplay payloads per block, so
+// four independent full-history passes (state / account-registry / settlement / netting) read
+// the block store ~4x; fusing them is the floor for a genuine from-genesis rebuild.
+struct ShieldedChainDerivedRebuildResult {
+    shielded::ShieldedMerkleTree tree{shielded::ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY};
+    ShieldedPoolBalance pool{};
+    ShieldedUnshieldVelocity unshield_velocity{};
+    std::vector<Nullifier> nullifiers;
+    std::vector<uint256> recovery_exit_commitments;
+    std::map<uint256, smile2::CompactPublicAccount> public_accounts;
+    std::map<uint256, uint256> account_leaf_commitments;
+    shielded::registry::ShieldedAccountRegistryState account_registry;
+    std::vector<ConfirmedSettlementAnchorState> settlement_anchors;
+    std::vector<ConfirmedNettingManifestState> netting_manifests;
+};
+
+enum class ShieldedChainDerivedRebuildParts : uint32_t {
+    NONE = 0,
+    STATE = 1u << 0,
+    ACCOUNT_REGISTRY = 1u << 1,
+    SETTLEMENT_ANCHORS = 1u << 2,
+    NETTING_MANIFESTS = 1u << 3,
+    ALL = (1u << 0) | (1u << 1) | (1u << 2) | (1u << 3),
+};
+
+[[nodiscard]] constexpr ShieldedChainDerivedRebuildParts operator|(
+    ShieldedChainDerivedRebuildParts lhs, ShieldedChainDerivedRebuildParts rhs)
+{
+    return static_cast<ShieldedChainDerivedRebuildParts>(
+        static_cast<uint32_t>(lhs) | static_cast<uint32_t>(rhs));
+}
+
+[[nodiscard]] constexpr bool HasShieldedChainDerivedRebuildPart(
+    ShieldedChainDerivedRebuildParts parts, ShieldedChainDerivedRebuildParts bit)
+{
+    return (static_cast<uint32_t>(parts) & static_cast<uint32_t>(bit)) != 0;
+}
+
+[[nodiscard]] bool RebuildShieldedChainDerivedState(
+    const Chainstate& chainstate,
+    const CBlockIndex* tip,
+    ShieldedChainDerivedRebuildResult& out,
+    ShieldedChainDerivedRebuildParts parts = ShieldedChainDerivedRebuildParts::ALL,
+    shielded::ShieldedMerkleTree::IndexStorageMode storage_mode =
+        shielded::ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY,
+    bool account_registry_use_payload_store = false,
+    kernel::Notifications* notifications = nullptr)
+{
+    const bool want_state = HasShieldedChainDerivedRebuildPart(parts, ShieldedChainDerivedRebuildParts::STATE);
+    const bool want_registry =
+        HasShieldedChainDerivedRebuildPart(parts, ShieldedChainDerivedRebuildParts::ACCOUNT_REGISTRY);
+    const bool want_settlement =
+        HasShieldedChainDerivedRebuildPart(parts, ShieldedChainDerivedRebuildParts::SETTLEMENT_ANCHORS);
+    const bool want_netting =
+        HasShieldedChainDerivedRebuildPart(parts, ShieldedChainDerivedRebuildParts::NETTING_MANIFESTS);
+
+    const auto& consensus = chainstate.m_chainman.GetConsensus();
+    out = ShieldedChainDerivedRebuildResult{};
+    if (want_state) {
+        out.tree = shielded::ShieldedMerkleTree{storage_mode};
+    }
+    if (want_registry) {
+        out.account_registry = account_registry_use_payload_store
+            ? shielded::registry::ShieldedAccountRegistryState::WithConfiguredPayloadStore()
+            : shielded::registry::ShieldedAccountRegistryState{};
+    }
+    if (tip == nullptr) return true;
+
+    std::vector<const CBlockIndex*> chain;
+    chain.reserve(tip->nHeight + 1);
+    for (const CBlockIndex* pindex = tip; pindex != nullptr; pindex = pindex->pprev) {
+        chain.push_back(pindex);
+    }
+    std::reverse(chain.begin(), chain.end());
+
+    const size_t total_blocks = chain.size();
+    const auto rebuild_start = std::chrono::steady_clock::now();
+    auto last_progress_log = rebuild_start;
+    size_t blocks_processed = 0;
+    size_t bytes_read = 0;
+    size_t shielded_txs_processed = 0;
+    LogPrintf("RebuildShieldedChainDerivedState: replaying %u blocks (genesis -> height %d) for shielded state+registry+bridge metadata in one pass...\n",
+              static_cast<unsigned int>(total_blocks),
+              tip->nHeight);
+    if (notifications != nullptr) {
+        notifications->progress(_("Rebuilding shielded state…"), 0, false);
+    }
+
+    std::map<uint256, ConfirmedSettlementAnchorState> active_settlement_anchors;
+    for (const CBlockIndex* pindex : chain) {
+        const bool use_nonced_bridge_tag = UseNoncedShieldedBridgeTags(consensus, pindex->nHeight);
+        CBlock block;
+        if (!ReadShieldedRebuildBlock(chainstate, *pindex, block)) {
+            LogError("RebuildShieldedChainDerivedState: failed to read block %s\n",
+                     pindex->GetBlockHash().ToString());
+            return false;
+        }
+        bytes_read += ::GetSerializeSize(TX_WITH_WITNESS(block));
+
+        const CAmount pool_start = want_state ? out.pool.GetBalance() : 0;
+        for (const auto& txref : block.vtx) {
+            const CTransaction& tx = *txref;
+            if (want_settlement || want_netting) {
+                std::string reject_reason;
+                if (want_settlement) {
+                    auto created_anchors =
+                        ExtractCreatedShieldedSettlementAnchors(tx, pindex->nHeight, reject_reason);
+                    if (!created_anchors.has_value()) {
+                        LogError("RebuildShieldedChainDerivedState: failed to rebuild settlement anchors for tx %s in block %s: %s\n",
+                                 tx.GetHash().ToString(),
+                                 pindex->GetBlockHash().ToString(),
+                                 reject_reason);
+                        return false;
+                    }
+                    for (const auto& anchor : *created_anchors) {
+                        active_settlement_anchors.insert_or_assign(
+                            anchor,
+                            ConfirmedSettlementAnchorState{anchor, pindex->nHeight});
+                    }
+                }
+                if (want_netting) {
+                    auto created_manifests =
+                        ExtractCreatedShieldedNettingManifestStates(tx, pindex->nHeight, reject_reason);
+                    if (!created_manifests.has_value()) {
+                        LogError("RebuildShieldedChainDerivedState: failed to rebuild netting manifests for tx %s in block %s: %s\n",
+                                 tx.GetHash().ToString(),
+                                 pindex->GetBlockHash().ToString(),
+                                 reject_reason);
+                        return false;
+                    }
+                    out.netting_manifests.insert(out.netting_manifests.end(),
+                                                 created_manifests->begin(),
+                                                 created_manifests->end());
+                }
+            }
+
+            if (!tx.HasShieldedBundle()) continue;
+            const CShieldedBundle& bundle = tx.GetShieldedBundle();
+            ++shielded_txs_processed;
+
+            if (want_settlement && UseSingleUseSettlementAnchors(consensus, pindex->nHeight)) {
+                for (const auto& consumed_anchor : CollectShieldedSettlementAnchorRefs(bundle)) {
+                    active_settlement_anchors.erase(consumed_anchor);
+                }
+            }
+
+            if (want_state) {
+                std::string height_gate_reject;
+                if (!RejectShieldedHeightGateViolation(tx,
+                                                       consensus,
+                                                       pindex->nHeight,
+                                                       height_gate_reject)) {
+                    LogError("RebuildShieldedChainDerivedState: shielded height-gate violation at %d: %s\n",
+                             pindex->nHeight,
+                             height_gate_reject);
+                    return false;
+                }
+                if (!ApplyShieldedStateEffects(bundle,
+                                               use_nonced_bridge_tag,
+                                               pindex->GetBlockHash(),
+                                               out.tree,
+                                               out.pool,
+                                               &out.nullifiers,
+                                               &out.public_accounts,
+                                               &out.account_leaf_commitments,
+                                               &out.recovery_exit_commitments)) {
+                    return false;
+                }
+            }
+
+            if (want_registry) {
+                const auto account_leaves =
+                    shielded::registry::CollectShieldedOutputAccountLeaves(bundle,
+                                                                          use_nonced_bridge_tag);
+                if (!account_leaves.has_value()) {
+                    LogError("RebuildShieldedChainDerivedState: failed to rebuild account leaves for tx %s in block %s\n",
+                             tx.GetHash().ToString(),
+                             pindex->GetBlockHash().ToString());
+                    return false;
+                }
+                try {
+                    if (!out.account_registry.Append(
+                            Span<const shielded::registry::ShieldedAccountLeaf>{
+                                account_leaves->data(),
+                                account_leaves->size()},
+                            /*inserted_indices=*/nullptr,
+                            /*sync_payload_store=*/false)) {
+                        LogError("RebuildShieldedChainDerivedState: failed to append account leaves for tx %s in block %s\n",
+                                 tx.GetHash().ToString(),
+                                 pindex->GetBlockHash().ToString());
+                        return false;
+                    }
+                } catch (const std::exception& e) {
+                    LogError("RebuildShieldedChainDerivedState: account-registry append exception for tx %s in block %s: %s\n",
+                             tx.GetHash().ToString(),
+                             pindex->GetBlockHash().ToString(),
+                             e.what());
+                    return false;
+                }
+            }
+        }
+
+        if (want_state &&
+            consensus.IsShieldedUnshieldVelocityCapActive(pindex->nHeight)) {
+            const CAmount pool_end = out.pool.GetBalance();
+            const CAmount block_net_egress = pool_start > pool_end ? pool_start - pool_end : 0;
+            out.unshield_velocity.RecordBlock(pindex->nHeight, block_net_egress);
+            out.unshield_velocity.Prune(pindex->nHeight -
+                2 * static_cast<int32_t>(consensus.nShieldedUnshieldVelocityWindowBlocks));
+        }
+
+        ++blocks_processed;
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last_progress_log >= std::chrono::seconds{15}) {
+            last_progress_log = now;
+            const double pct = total_blocks > 0
+                                   ? 100.0 * static_cast<double>(blocks_processed) / static_cast<double>(total_blocks)
+                                   : 100.0;
+            const auto elapsed_s = std::chrono::duration_cast<std::chrono::seconds>(now - rebuild_start).count();
+            LogPrintf("RebuildShieldedChainDerivedState: replaying %u/%u (height=%d, %.1f%%, elapsed=%llds, bytes_read=%llu, shielded_txs=%u, registry_entries=%u, anchors=%u, manifests=%u)\n",
+                      static_cast<unsigned int>(blocks_processed),
+                      static_cast<unsigned int>(total_blocks),
+                      pindex->nHeight,
+                      pct,
+                      static_cast<long long>(elapsed_s),
+                      static_cast<unsigned long long>(bytes_read),
+                      static_cast<unsigned int>(shielded_txs_processed),
+                      static_cast<unsigned int>(want_registry ? out.account_registry.Size() : 0),
+                      static_cast<unsigned int>(active_settlement_anchors.size()),
+                      static_cast<unsigned int>(out.netting_manifests.size()));
+            if (notifications != nullptr) {
+                notifications->progress(_("Rebuilding shielded state…"),
+                                        std::max(1, std::min(99, static_cast<int>(pct))),
+                                        false);
+            }
+        }
+    }
+
+    if (want_settlement) {
+        out.settlement_anchors.reserve(active_settlement_anchors.size());
+        for (const auto& [_, anchor_state] : active_settlement_anchors) {
+            out.settlement_anchors.push_back(anchor_state);
+        }
+    }
+
+    const auto elapsed_s = std::chrono::duration_cast<std::chrono::seconds>(
+                               std::chrono::steady_clock::now() - rebuild_start)
+                               .count();
+    LogPrintf("RebuildShieldedChainDerivedState: replayed %u blocks to height %d in %llds (bytes_read=%llu, shielded_txs=%u, nullifiers=%u, registry_entries=%u, anchors=%u, manifests=%u)\n",
+              static_cast<unsigned int>(total_blocks),
+              tip->nHeight,
+              static_cast<long long>(elapsed_s),
+              static_cast<unsigned long long>(bytes_read),
+              static_cast<unsigned int>(shielded_txs_processed),
+              static_cast<unsigned int>(out.nullifiers.size()),
+              static_cast<unsigned int>(want_registry ? out.account_registry.Size() : 0),
+              static_cast<unsigned int>(out.settlement_anchors.size()),
+              static_cast<unsigned int>(out.netting_manifests.size()));
+    if (notifications != nullptr) {
+        notifications->progress(_("Rebuilding shielded state…"), 100, false);
+    }
+    return true;
+}
+
+[[nodiscard]] bool LoadRebuiltShieldedBridgeMetadata(
+    NullifierSet& nullifier_set,
+    const std::vector<ConfirmedSettlementAnchorState>& settlement_anchors,
+    const std::vector<ConfirmedNettingManifestState>& netting_manifests)
+{
+    if (!settlement_anchors.empty() &&
+        !nullifier_set.InsertSettlementAnchors(settlement_anchors)) {
+        return false;
+    }
+    if (!netting_manifests.empty() &&
+        !nullifier_set.InsertNettingManifests(netting_manifests)) {
+        return false;
+    }
+    return true;
+}
+
 [[nodiscard]] bool CollectShieldedAccountRegistryHistoryFromState(
     const Chainstate& chainstate,
     const CBlockIndex* tip,
@@ -2369,7 +2650,7 @@ static void RefreshShieldedValidationSnapshots(
     return true;
 }
 
-[[nodiscard]] bool RebuildShieldedSettlementAnchorState(const node::BlockManager& blockman,
+[[nodiscard]] [[maybe_unused]] bool RebuildShieldedSettlementAnchorState(const node::BlockManager& blockman,
                                                         const Consensus::Params& consensus,
                                                         const CBlockIndex* tip,
                                                         std::vector<ConfirmedSettlementAnchorState>& settlement_anchors)
@@ -2383,6 +2664,17 @@ static void RefreshShieldedValidationSnapshots(
         chain.push_back(pindex);
     }
     std::reverse(chain.begin(), chain.end());
+
+    // Full-chain settlement-anchor rebuild is O(height) and can read hundreds of GB on archive
+    // nodes. Emit the same style of rate-limited progress used by RebuildShieldedState so a long
+    // pass is distinguishable from a hang in debug.log / operator diagnostics.
+    const size_t total_blocks = chain.size();
+    const auto rebuild_start = std::chrono::steady_clock::now();
+    auto last_progress_log = rebuild_start;
+    size_t blocks_processed = 0;
+    LogPrintf("RebuildShieldedSettlementAnchorState: scanning %u blocks (genesis -> height %d) for settlement anchors...\n",
+              static_cast<unsigned int>(total_blocks),
+              tip->nHeight);
 
     std::map<uint256, ConfirmedSettlementAnchorState> active_settlement_anchors;
     for (const CBlockIndex* pindex : chain) {
@@ -2414,15 +2706,39 @@ static void RefreshShieldedValidationSnapshots(
                 }
             }
         }
+        ++blocks_processed;
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last_progress_log >= std::chrono::seconds{15}) {
+            last_progress_log = now;
+            const double pct = total_blocks > 0
+                                   ? 100.0 * static_cast<double>(blocks_processed) / static_cast<double>(total_blocks)
+                                   : 100.0;
+            const auto elapsed_s = std::chrono::duration_cast<std::chrono::seconds>(now - rebuild_start).count();
+            LogPrintf("RebuildShieldedSettlementAnchorState: scanning settlement anchors %u/%u (height=%d, %.1f%%, elapsed=%llds, anchors=%u)\n",
+                      static_cast<unsigned int>(blocks_processed),
+                      static_cast<unsigned int>(total_blocks),
+                      pindex->nHeight,
+                      pct,
+                      static_cast<long long>(elapsed_s),
+                      static_cast<unsigned int>(active_settlement_anchors.size()));
+        }
     }
     settlement_anchors.reserve(active_settlement_anchors.size());
     for (const auto& [anchor, anchor_state] : active_settlement_anchors) {
         settlement_anchors.push_back(anchor_state);
     }
+    const auto elapsed_s = std::chrono::duration_cast<std::chrono::seconds>(
+                               std::chrono::steady_clock::now() - rebuild_start)
+                               .count();
+    LogPrintf("RebuildShieldedSettlementAnchorState: scanned %u blocks to height %d in %llds (anchors=%u)\n",
+              static_cast<unsigned int>(total_blocks),
+              tip->nHeight,
+              static_cast<long long>(elapsed_s),
+              static_cast<unsigned int>(settlement_anchors.size()));
     return true;
 }
 
-[[nodiscard]] bool RebuildShieldedNettingManifestState(const node::BlockManager& blockman,
+[[nodiscard]] [[maybe_unused]] bool RebuildShieldedNettingManifestState(const node::BlockManager& blockman,
                                                        const CBlockIndex* tip,
                                                        std::vector<ConfirmedNettingManifestState>& manifests)
 {
@@ -2435,6 +2751,14 @@ static void RefreshShieldedValidationSnapshots(
         chain.push_back(pindex);
     }
     std::reverse(chain.begin(), chain.end());
+
+    const size_t total_blocks = chain.size();
+    const auto rebuild_start = std::chrono::steady_clock::now();
+    auto last_progress_log = rebuild_start;
+    size_t blocks_processed = 0;
+    LogPrintf("RebuildShieldedNettingManifestState: scanning %u blocks (genesis -> height %d) for netting manifests...\n",
+              static_cast<unsigned int>(total_blocks),
+              tip->nHeight);
 
     for (const CBlockIndex* pindex : chain) {
         CBlock block;
@@ -2455,7 +2779,31 @@ static void RefreshShieldedValidationSnapshots(
             }
             manifests.insert(manifests.end(), created->begin(), created->end());
         }
+        ++blocks_processed;
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last_progress_log >= std::chrono::seconds{15}) {
+            last_progress_log = now;
+            const double pct = total_blocks > 0
+                                   ? 100.0 * static_cast<double>(blocks_processed) / static_cast<double>(total_blocks)
+                                   : 100.0;
+            const auto elapsed_s = std::chrono::duration_cast<std::chrono::seconds>(now - rebuild_start).count();
+            LogPrintf("RebuildShieldedNettingManifestState: scanning netting manifests %u/%u (height=%d, %.1f%%, elapsed=%llds, manifests=%u)\n",
+                      static_cast<unsigned int>(blocks_processed),
+                      static_cast<unsigned int>(total_blocks),
+                      pindex->nHeight,
+                      pct,
+                      static_cast<long long>(elapsed_s),
+                      static_cast<unsigned int>(manifests.size()));
+        }
     }
+    const auto elapsed_s = std::chrono::duration_cast<std::chrono::seconds>(
+                               std::chrono::steady_clock::now() - rebuild_start)
+                               .count();
+    LogPrintf("RebuildShieldedNettingManifestState: scanned %u blocks to height %d in %llds (manifests=%u)\n",
+              static_cast<unsigned int>(total_blocks),
+              tip->nHeight,
+              static_cast<long long>(elapsed_s),
+              static_cast<unsigned int>(manifests.size()));
     return true;
 }
 
@@ -2464,16 +2812,11 @@ enum class PersistedShieldedMetadataSyncMode {
     PRESERVE_PERSISTED_EXTRAS,
 };
 
-[[nodiscard]] bool SyncShieldedSettlementAnchorState(const node::BlockManager& blockman,
-                                                     const CBlockIndex* tip,
-                                                     NullifierSet& nullifier_set,
-                                                     PersistedShieldedMetadataSyncMode sync_mode =
-                                                         PersistedShieldedMetadataSyncMode::STRICT_CHAIN_CONVERGENCE)
+[[nodiscard]] bool SyncShieldedSettlementAnchorStateFromRebuilt(
+    NullifierSet& nullifier_set,
+    std::vector<ConfirmedSettlementAnchorState> rebuilt_settlement_anchors,
+    PersistedShieldedMetadataSyncMode sync_mode)
 {
-    std::vector<ConfirmedSettlementAnchorState> rebuilt_settlement_anchors;
-    if (!RebuildShieldedSettlementAnchorState(blockman, Params().GetConsensus(), tip, rebuilt_settlement_anchors)) {
-        return false;
-    }
     const auto settlement_anchor_less = [](const ConfirmedSettlementAnchorState& lhs,
                                            const ConfirmedSettlementAnchorState& rhs) {
         return lhs.anchor < rhs.anchor;
@@ -2561,16 +2904,11 @@ enum class PersistedShieldedMetadataSyncMode {
     return true;
 }
 
-[[nodiscard]] bool SyncShieldedNettingManifestState(const node::BlockManager& blockman,
-                                                    const CBlockIndex* tip,
-                                                    NullifierSet& nullifier_set,
-                                                    PersistedShieldedMetadataSyncMode sync_mode =
-                                                        PersistedShieldedMetadataSyncMode::STRICT_CHAIN_CONVERGENCE)
+[[nodiscard]] bool SyncShieldedNettingManifestStateFromRebuilt(
+    NullifierSet& nullifier_set,
+    std::vector<ConfirmedNettingManifestState> rebuilt_manifest_states,
+    PersistedShieldedMetadataSyncMode sync_mode)
 {
-    std::vector<ConfirmedNettingManifestState> rebuilt_manifest_states;
-    if (!RebuildShieldedNettingManifestState(blockman, tip, rebuilt_manifest_states)) {
-        return false;
-    }
     std::sort(rebuilt_manifest_states.begin(),
               rebuilt_manifest_states.end(),
               [](const ConfirmedNettingManifestState& lhs, const ConfirmedNettingManifestState& rhs) {
@@ -2652,6 +2990,58 @@ enum class PersistedShieldedMetadataSyncMode {
     return true;
 }
 
+
+[[nodiscard]] bool SyncShieldedNettingManifestState(const Chainstate& chainstate,
+                                                    const CBlockIndex* tip,
+                                                    NullifierSet& nullifier_set,
+                                                    PersistedShieldedMetadataSyncMode sync_mode =
+                                                        PersistedShieldedMetadataSyncMode::STRICT_CHAIN_CONVERGENCE,
+                                                    kernel::Notifications* notifications = nullptr)
+{
+    ShieldedChainDerivedRebuildResult rebuilt;
+    if (!RebuildShieldedChainDerivedState(
+            chainstate,
+            tip,
+            rebuilt,
+            ShieldedChainDerivedRebuildParts::NETTING_MANIFESTS,
+            shielded::ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY,
+            /*account_registry_use_payload_store=*/false,
+            notifications)) {
+        return false;
+    }
+    return SyncShieldedNettingManifestStateFromRebuilt(nullifier_set,
+                                                       std::move(rebuilt.netting_manifests),
+                                                       sync_mode);
+}
+
+// Converge settlement + netting metadata with a single genesis->tip block-store walk.
+[[nodiscard]] bool SyncShieldedBridgeMetadataState(const Chainstate& chainstate,
+                                                   const CBlockIndex* tip,
+                                                   NullifierSet& nullifier_set,
+                                                   PersistedShieldedMetadataSyncMode sync_mode =
+                                                       PersistedShieldedMetadataSyncMode::STRICT_CHAIN_CONVERGENCE,
+                                                   kernel::Notifications* notifications = nullptr)
+{
+    ShieldedChainDerivedRebuildResult rebuilt;
+    if (!RebuildShieldedChainDerivedState(
+            chainstate,
+            tip,
+            rebuilt,
+            ShieldedChainDerivedRebuildParts::SETTLEMENT_ANCHORS |
+                ShieldedChainDerivedRebuildParts::NETTING_MANIFESTS,
+            shielded::ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY,
+            /*account_registry_use_payload_store=*/false,
+            notifications)) {
+        return false;
+    }
+    return SyncShieldedSettlementAnchorStateFromRebuilt(nullifier_set,
+                                                        std::move(rebuilt.settlement_anchors),
+                                                        sync_mode) &&
+           SyncShieldedNettingManifestStateFromRebuilt(nullifier_set,
+                                                       std::move(rebuilt.netting_manifests),
+                                                       sync_mode);
+}
+
 [[nodiscard]] bool AuditShieldedStateAgainstChain(const Chainstate& chainstate,
                                                   std::string& error,
                                                   bool include_proof_audit = true)
@@ -2662,24 +3052,26 @@ enum class PersistedShieldedMetadataSyncMode {
     if (!chainstate.m_chainman.HasShieldedState()) return true;
     if (chainstate.m_from_snapshot_blockhash) return true;
 
-    shielded::ShieldedMerkleTree rebuilt_tree{
-        shielded::ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY};
-    ShieldedPoolBalance rebuilt_pool;
-    std::vector<Nullifier> rebuilt_nullifiers;
-    std::vector<uint256> rebuilt_recovery_exit_commitments;
-    ShieldedUnshieldVelocity rebuilt_velocity;
-    if (!RebuildShieldedState(chainstate,
-                              chainstate.m_chain.Tip(),
-                              rebuilt_tree,
-                              rebuilt_pool,
-                              &rebuilt_nullifiers,
-                              /*public_accounts=*/nullptr,
-                              /*account_leaf_commitments=*/nullptr,
-                              &rebuilt_recovery_exit_commitments,
-                              &rebuilt_velocity)) {
+    // One fused genesis->tip walk replaces the previous four independent rebuild passes.
+    ShieldedChainDerivedRebuildResult rebuilt;
+    if (!RebuildShieldedChainDerivedState(
+            chainstate,
+            chainstate.m_chain.Tip(),
+            rebuilt,
+            ShieldedChainDerivedRebuildParts::ALL,
+            shielded::ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY,
+            /*account_registry_use_payload_store=*/false,
+            &chainstate.m_chainman.GetNotifications())) {
         error = "failed to rebuild expected shielded state";
         return false;
     }
+
+    const auto& rebuilt_tree = rebuilt.tree;
+    const auto& rebuilt_pool = rebuilt.pool;
+    auto& rebuilt_nullifiers = rebuilt.nullifiers;
+    auto& rebuilt_recovery_exit_commitments = rebuilt.recovery_exit_commitments;
+    const auto& rebuilt_velocity = rebuilt.unshield_velocity;
+    const auto& rebuilt_registry = rebuilt.account_registry;
 
     const auto& chain_tree = chainstate.m_chainman.GetShieldedMerkleTree();
     if (rebuilt_tree.Root() != chain_tree.Root() ||
@@ -2729,13 +3121,6 @@ enum class PersistedShieldedMetadataSyncMode {
         }
     }
 
-    shielded::registry::ShieldedAccountRegistryState rebuilt_registry;
-    if (!RebuildShieldedAccountRegistryState(chainstate,
-                                             chainstate.m_chain.Tip(),
-                                             rebuilt_registry)) {
-        error = "failed to rebuild expected shielded account registry state";
-        return false;
-    }
     if (rebuilt_registry.Root() != chainstate.m_chainman.GetShieldedAccountRegistryRoot() ||
         rebuilt_registry.Size() != chainstate.m_chainman.GetShieldedAccountRegistryEntryCount()) {
         error = "account registry root/size mismatch";
@@ -2826,14 +3211,7 @@ enum class PersistedShieldedMetadataSyncMode {
         }
     }
 
-    std::vector<ConfirmedSettlementAnchorState> rebuilt_settlement_anchors;
-    if (!RebuildShieldedSettlementAnchorState(chainstate.m_blockman,
-                                              chainstate.m_chainman.GetConsensus(),
-                                              chainstate.m_chain.Tip(),
-                                              rebuilt_settlement_anchors)) {
-        error = "failed to rebuild expected shielded settlement-anchor state";
-        return false;
-    }
+    auto& rebuilt_settlement_anchors = rebuilt.settlement_anchors;
     std::sort(rebuilt_settlement_anchors.begin(),
               rebuilt_settlement_anchors.end(),
               [](const ConfirmedSettlementAnchorState& lhs,
@@ -2862,13 +3240,7 @@ enum class PersistedShieldedMetadataSyncMode {
         }
     }
 
-    std::vector<ConfirmedNettingManifestState> rebuilt_manifest_states;
-    if (!RebuildShieldedNettingManifestState(chainstate.m_blockman,
-                                             chainstate.m_chain.Tip(),
-                                             rebuilt_manifest_states)) {
-        error = "failed to rebuild expected shielded netting-manifest state";
-        return false;
-    }
+    auto& rebuilt_manifest_states = rebuilt.netting_manifests;
     std::sort(rebuilt_manifest_states.begin(),
               rebuilt_manifest_states.end(),
               [](const ConfirmedNettingManifestState& lhs, const ConfirmedNettingManifestState& rhs) {
@@ -6565,31 +6937,23 @@ DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIn
                          pindex->GetBlockHash().ToString());
                 return DISCONNECT_FAILED;
             }
-            shielded::ShieldedMerkleTree rebuilt_tree{
-                shielded::ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY};
-            ShieldedPoolBalance rebuilt_pool;
-            std::map<uint256, smile2::CompactPublicAccount> rebuilt_public_accounts;
-            std::map<uint256, uint256> rebuilt_account_leaf_commitments;
-            shielded::registry::ShieldedAccountRegistryState rebuilt_account_registry;
-            if (!RebuildShieldedState(*this,
-                                      pindex->pprev,
-                                      rebuilt_tree,
-                                      rebuilt_pool,
-                                      nullptr,
-                                      &rebuilt_public_accounts,
-                                      &rebuilt_account_leaf_commitments)) {
+            // Truncate indexes unavailable: rebuild note tree + account registry in one disk pass
+            // (previously two full-history reads during invalidateblock/reorg undo).
+            ShieldedChainDerivedRebuildResult rebuilt;
+            if (!RebuildShieldedChainDerivedState(
+                    *this,
+                    pindex->pprev,
+                    rebuilt,
+                    ShieldedChainDerivedRebuildParts::STATE |
+                        ShieldedChainDerivedRebuildParts::ACCOUNT_REGISTRY,
+                    shielded::ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY)) {
                 return DISCONNECT_FAILED;
             }
-            if (!RebuildShieldedAccountRegistryState(*this,
-                                                     pindex->pprev,
-                                                     rebuilt_account_registry)) {
-                return DISCONNECT_FAILED;
-            }
-            projected_tree = std::move(rebuilt_tree);
-            projected_account_registry = std::move(rebuilt_account_registry);
-            projected_public_accounts = std::move(rebuilt_public_accounts);
-            projected_account_leaf_entries = std::move(rebuilt_account_leaf_commitments);
-            projected_pool = rebuilt_pool;
+            projected_tree = std::move(rebuilt.tree);
+            projected_account_registry = std::move(rebuilt.account_registry);
+            projected_public_accounts = std::move(rebuilt.public_accounts);
+            projected_account_leaf_entries = std::move(rebuilt.account_leaf_commitments);
+            projected_pool = rebuilt.pool;
         } else {
             for (const auto& commitment : block_smile_commitments) {
                 projected_public_accounts.erase(commitment);
@@ -11607,15 +11971,27 @@ VerifyDBResult CVerifyDB::VerifyDB(
     int reportDone = 0;
     bool skipped_no_block_data{false};
     bool skipped_l3_checks{false};
-    LogPrintf("Verification progress: 0%%\n");
+    const auto verify_start = std::chrono::steady_clock::now();
+    auto last_progress_log = verify_start;
+    LogPrintf("Verification progress: 0%% (checking last %i blocks at level %i from height %d)\n",
+              nCheckDepth,
+              nCheckLevel,
+              chainstate.m_chain.Height());
 
     const bool is_snapshot_cs{chainstate.m_from_snapshot_blockhash};
 
     for (pindex = chainstate.m_chain.Tip(); pindex && pindex->pprev; pindex = pindex->pprev) {
         const int percentageDone = std::max(1, std::min(99, (int)(((double)(chainstate.m_chain.Height() - pindex->nHeight)) / (double)nCheckDepth * (nCheckLevel >= 4 ? 50 : 100))));
-        if (reportDone < percentageDone / 10) {
-            // report every 10% step
-            LogPrintf("Verification progress: %d%%\n", percentageDone);
+        const auto now = std::chrono::steady_clock::now();
+        if (reportDone < percentageDone / 10 || now - last_progress_log >= std::chrono::seconds{15}) {
+            // report every 10% step, and at least every 15s so a long -checkblocks=0 archive
+            // VerifyDB cannot look wedged (the production "Verifying blocks…" silence).
+            last_progress_log = now;
+            const auto elapsed_s = std::chrono::duration_cast<std::chrono::seconds>(now - verify_start).count();
+            LogPrintf("Verification progress: %d%% (height=%d, elapsed=%llds)\n",
+                      percentageDone,
+                      pindex->nHeight,
+                      static_cast<long long>(elapsed_s));
             reportDone = percentageDone / 10;
         }
         m_notifications.progress(_("Verifying blocks…"), percentageDone, false);
@@ -13844,46 +14220,37 @@ bool ChainstateManager::RebuildShieldedStateFromActiveChain()
     const fs::path shielded_db_path = m_options.datadir / "shielded_state" / "nullifiers";
     const CBlockIndex* const tip = m_active_chainstate->m_chain.Tip();
 
-    shielded::ShieldedMerkleTree rebuilt_tree{
-        shielded::ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY};
-    ShieldedPoolBalance rebuilt_pool;
-    ShieldedUnshieldVelocity rebuilt_unshield_velocity;
-    std::vector<Nullifier> rebuilt_nullifiers;
-    std::vector<uint256> rebuilt_recovery_exit_commitments;
-    std::map<uint256, smile2::CompactPublicAccount> rebuilt_public_accounts;
-    std::map<uint256, uint256> rebuilt_account_leaf_commitments;
-    shielded::registry::ShieldedAccountRegistryState rebuilt_account_registry;
-    if (!RebuildShieldedState(*m_active_chainstate,
-                              tip,
-                              rebuilt_tree,
-                              rebuilt_pool,
-                              &rebuilt_nullifiers,
-                              &rebuilt_public_accounts,
-                              &rebuilt_account_leaf_commitments,
-                              &rebuilt_recovery_exit_commitments,
-                              &rebuilt_unshield_velocity)) {
-        return false;
-    }
-    if (!RebuildShieldedAccountRegistryState(*m_active_chainstate, tip, rebuilt_account_registry)) {
+    // One pass feeds every chain-derived consumer. build_nullifier_state below must NOT call
+    // SyncShielded* (each Sync is another full-history read); load the already-rebuilt bridge
+    // metadata into both the memory-only and persistent nullifier stores.
+    ShieldedChainDerivedRebuildResult rebuilt;
+    if (!RebuildShieldedChainDerivedState(
+            *m_active_chainstate,
+            tip,
+            rebuilt,
+            ShieldedChainDerivedRebuildParts::ALL,
+            shielded::ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY,
+            /*account_registry_use_payload_store=*/false,
+            &GetNotifications())) {
         return false;
     }
     if (tip != nullptr &&
         UseAccountRegistryEntryCountLimit(GetConsensus(), tip->nHeight) &&
-        rebuilt_account_registry.Size() > GetConsensus().nMaxShieldedAccountRegistryEntries) {
+        rebuilt.account_registry.Size() > GetConsensus().nMaxShieldedAccountRegistryEntries) {
         return false;
     }
 
     std::deque<uint256> rebuilt_anchor_roots;
     if (!CollectShieldedAnchorHistoryFromTree(*m_active_chainstate,
                                               tip,
-                                              rebuilt_tree,
+                                              rebuilt.tree,
                                               rebuilt_anchor_roots)) {
         return false;
     }
     std::deque<uint256> rebuilt_account_registry_roots;
     if (!CollectShieldedAccountRegistryHistoryFromState(*m_active_chainstate,
                                                         tip,
-                                                        rebuilt_account_registry,
+                                                        rebuilt.account_registry,
                                                         rebuilt_account_registry_roots)) {
         return false;
     }
@@ -13906,43 +14273,38 @@ bool ChainstateManager::RebuildShieldedStateFromActiveChain()
                       e.what());
             return nullptr;
         }
-        if (!rebuilt_nullifiers.empty() && !rebuilt_state->Insert(rebuilt_nullifiers)) {
+        if (!rebuilt.nullifiers.empty() && !rebuilt_state->Insert(rebuilt.nullifiers)) {
             LogPrintf("RebuildShieldedStateFromActiveChain: failed to load nullifiers into %s rebuild state at tip=%s height=%d\n",
                       memory_only ? "memory-only" : "persistent",
                       tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString(),
                       tip != nullptr ? tip->nHeight : -1);
             return nullptr;
         }
-        if (!rebuilt_recovery_exit_commitments.empty() &&
-            !rebuilt_state->InsertRecoveryExitCommitments(rebuilt_recovery_exit_commitments)) {
+        if (!rebuilt.recovery_exit_commitments.empty() &&
+            !rebuilt_state->InsertRecoveryExitCommitments(rebuilt.recovery_exit_commitments)) {
             LogPrintf("RebuildShieldedStateFromActiveChain: failed to load recovery-exit commitments into %s rebuild state at tip=%s height=%d\n",
                       memory_only ? "memory-only" : "persistent",
                       tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString(),
                       tip != nullptr ? tip->nHeight : -1);
             return nullptr;
         }
-        if (!SyncShieldedSettlementAnchorState(m_blockman, tip, *rebuilt_state)) {
-            LogPrintf("RebuildShieldedStateFromActiveChain: failed to rebuild settlement-anchor metadata in %s state at tip=%s height=%d\n",
+        if (!LoadRebuiltShieldedBridgeMetadata(*rebuilt_state,
+                                               rebuilt.settlement_anchors,
+                                               rebuilt.netting_manifests)) {
+            LogPrintf("RebuildShieldedStateFromActiveChain: failed to load bridge metadata into %s rebuild state at tip=%s height=%d\n",
                       memory_only ? "memory-only" : "persistent",
                       tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString(),
                       tip != nullptr ? tip->nHeight : -1);
             return nullptr;
         }
-        if (!SyncShieldedNettingManifestState(m_blockman, tip, *rebuilt_state)) {
-            LogPrintf("RebuildShieldedStateFromActiveChain: failed to rebuild netting-manifest metadata in %s state at tip=%s height=%d\n",
-                      memory_only ? "memory-only" : "persistent",
-                      tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString(),
-                      tip != nullptr ? tip->nHeight : -1);
-            return nullptr;
-        }
-        if (!rebuilt_state->WritePoolBalance(rebuilt_pool.GetBalance())) {
+        if (!rebuilt_state->WritePoolBalance(rebuilt.pool.GetBalance())) {
             LogPrintf("RebuildShieldedStateFromActiveChain: failed to rebuild pool balance in %s state at tip=%s height=%d\n",
                       memory_only ? "memory-only" : "persistent",
                       tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString(),
                       tip != nullptr ? tip->nHeight : -1);
             return nullptr;
         }
-        if (!rebuilt_state->WriteUnshieldVelocity(rebuilt_unshield_velocity)) {
+        if (!rebuilt_state->WriteUnshieldVelocity(rebuilt.unshield_velocity)) {
             LogPrintf("RebuildShieldedStateFromActiveChain: failed to rebuild unshield-velocity log in %s state at tip=%s height=%d\n",
                       memory_only ? "memory-only" : "persistent",
                       tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString(),
@@ -13971,16 +14333,16 @@ bool ChainstateManager::RebuildShieldedStateFromActiveChain()
         return false;
     }
 
-    m_shielded_merkle_tree = std::move(rebuilt_tree);
-    m_shielded_account_registry = std::move(rebuilt_account_registry);
-    m_shielded_smile_public_accounts = std::move(rebuilt_public_accounts);
-    m_shielded_account_leaf_commitments = std::move(rebuilt_account_leaf_commitments);
+    m_shielded_merkle_tree = std::move(rebuilt.tree);
+    m_shielded_account_registry = std::move(rebuilt.account_registry);
+    m_shielded_smile_public_accounts = std::move(rebuilt.public_accounts);
+    m_shielded_account_leaf_commitments = std::move(rebuilt.account_leaf_commitments);
     InvalidateShieldedAccountStateSnapshotCaches();
     m_shielded_nullifiers = std::move(rebuilt_live_nullifiers);
     m_shielded_anchor_roots = std::move(rebuilt_anchor_roots);
     m_shielded_account_registry_roots = std::move(rebuilt_account_registry_roots);
-    m_shielded_pool_balance = rebuilt_pool;
-    m_shielded_unshield_velocity = rebuilt_unshield_velocity;
+    m_shielded_pool_balance = rebuilt.pool;
+    m_shielded_unshield_velocity = rebuilt.unshield_velocity;
     m_shielded_state_initialized = true;
 
     if (auto rebuilt_persistent_nullifiers = build_nullifier_state(/*memory_only=*/false)) {
@@ -14657,12 +15019,17 @@ util::Result<void> ChainstateManager::LoadShieldedSnapshotSection(
         return fail("legacy shielded snapshot lacks account-registry history and local blocks are unavailable to rebuild it");
     }
     if (header.m_snapshot_version < 4) {
-        if (!SyncShieldedSettlementAnchorState(m_blockman, tip, *m_shielded_nullifiers)) {
-            return fail("failed to sync settlement-anchor state for legacy shielded snapshot");
+        // Pre-v4 snapshots lack both settlement and netting metadata; one fused walk fills both.
+        if (!SyncShieldedBridgeMetadataState(*m_active_chainstate, tip, *m_shielded_nullifiers)) {
+            return fail("failed to sync settlement-anchor/netting state for legacy shielded snapshot");
         }
-    }
-    if (header.m_snapshot_version < 6) {
-        if (!SyncShieldedNettingManifestState(m_blockman, tip, *m_shielded_nullifiers)) {
+    } else if (header.m_snapshot_version < 6) {
+        if (m_active_chainstate == nullptr ||
+            !SyncShieldedNettingManifestState(*m_active_chainstate,
+                                              tip,
+                                              *m_shielded_nullifiers,
+                                              PersistedShieldedMetadataSyncMode::STRICT_CHAIN_CONVERGENCE,
+                                              &GetNotifications())) {
             return fail("failed to sync netting-manifest state for legacy shielded snapshot");
         }
     }
@@ -14741,6 +15108,8 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
         return false;
     }
 
+    GetNotifications().progress(_("Initializing shielded state…"), 0, false);
+
     // -resetshieldedstate: supported one-shot repair. Wipe the whole shielded_state directory before
     // any DB is opened so a stale in-flight mutation marker or a partially-rebuilt/corrupt store cannot
     // wedge startup; the normal path below then opens fresh stores and does one clean full rebuild from
@@ -14781,6 +15150,13 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
                                                             /*wipe_data=*/false);
     const CBlockIndex* const tip = m_active_chainstate->m_chain.Tip();
     bool startup_shielded_repair_performed{false};
+    // Recent anchor / account-registry root windows are derived from the tip frontier + the last
+    // SHIELDED_ANCHOR_DEPTH blocks. Refreshing those windows is cheap and does not invalidate the
+    // nullifier-accumulator / full-state-pin evidence used by -fastshieldedstartup. Treat it as a
+    // distinct class from substantive repairs (full rebuild, registry rewrite, commitment-index
+    // rebuild, etc.) so a history-window mismatch cannot force a silent full-chain settlement /
+    // netting / audit scan (the production 224 GB / 15+ minute restart stall).
+    bool startup_history_window_refreshed{false};
     bool startup_velocity_repair_performed{false};
     auto load_persisted_unshield_velocity = [&]() EXCLUSIVE_LOCKS_REQUIRED(::cs_main) -> bool {
         AssertLockHeld(::cs_main);
@@ -14880,12 +15256,15 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
             !verify_or_repair_startup_velocity()) {
             return false;
         }
-        if (startup_shielded_repair_performed || startup_velocity_repair_performed) {
+        if (startup_shielded_repair_performed ||
+            startup_history_window_refreshed ||
+            startup_velocity_repair_performed) {
             AutoReconsiderShieldedInvalidBlocksAfterStartupRepair();
         }
         // Register the shielded prune-retention lock at startup, before any FindFilesToPrune can run,
         // even if no new block has connected yet (no-op unless pruning + shielded).
         UpdateShieldedPruneRetentionLock(*m_active_chainstate);
+        GetNotifications().progress(bilingual_str{}, 100, false);
         return true;
     };
     const auto persisted_mutation_marker = m_shielded_nullifiers->ReadMutationMarker();
@@ -14905,61 +15284,51 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
             return false;
         }
 
-        shielded::ShieldedMerkleTree rebuilt_tree;
-        ShieldedPoolBalance rebuilt_pool;
-        ShieldedUnshieldVelocity rebuilt_unshield_velocity;
-        std::vector<Nullifier> rebuilt_nullifiers;
-        std::vector<uint256> rebuilt_recovery_exit_commitments;
-        std::map<uint256, smile2::CompactPublicAccount> rebuilt_public_accounts;
-        std::map<uint256, uint256> rebuilt_account_leaf_commitments;
-        shielded::registry::ShieldedAccountRegistryState rebuilt_account_registry =
-            shielded::registry::ShieldedAccountRegistryState::WithConfiguredPayloadStore();
-        if (!RebuildShieldedState(*m_active_chainstate,
-                                  tip,
-                                  rebuilt_tree,
-                                  rebuilt_pool,
-                                  &rebuilt_nullifiers,
-                                  &rebuilt_public_accounts,
-                                  &rebuilt_account_leaf_commitments,
-                                  &rebuilt_recovery_exit_commitments,
-                                  &rebuilt_unshield_velocity)) {
-            return false;
-        }
-        if (!RebuildShieldedAccountRegistryState(*m_active_chainstate, tip, rebuilt_account_registry)) {
+        // One disk pass rebuilds note tree / nullifiers / pool / velocity, account registry,
+        // settlement anchors, and netting manifests. Previously this was four full-history reads
+        // (~4x archive block-store IO on MatMul-sized blocks).
+        ShieldedChainDerivedRebuildResult rebuilt;
+        if (!RebuildShieldedChainDerivedState(
+                *m_active_chainstate,
+                tip,
+                rebuilt,
+                ShieldedChainDerivedRebuildParts::ALL,
+                shielded::ShieldedMerkleTree::IndexStorageMode::AUTO,
+                /*account_registry_use_payload_store=*/true,
+                &GetNotifications())) {
             return false;
         }
         if (tip != nullptr &&
             UseAccountRegistryEntryCountLimit(GetConsensus(), tip->nHeight) &&
-            rebuilt_account_registry.Size() > GetConsensus().nMaxShieldedAccountRegistryEntries) {
+            rebuilt.account_registry.Size() > GetConsensus().nMaxShieldedAccountRegistryEntries) {
             return false;
         }
-        if (!rebuilt_nullifiers.empty() && !m_shielded_nullifiers->Insert(rebuilt_nullifiers)) {
+        if (!rebuilt.nullifiers.empty() && !m_shielded_nullifiers->Insert(rebuilt.nullifiers)) {
             return false;
         }
-        if (!rebuilt_recovery_exit_commitments.empty() &&
-            !m_shielded_nullifiers->InsertRecoveryExitCommitments(rebuilt_recovery_exit_commitments)) {
+        if (!rebuilt.recovery_exit_commitments.empty() &&
+            !m_shielded_nullifiers->InsertRecoveryExitCommitments(rebuilt.recovery_exit_commitments)) {
             return false;
         }
-        if (!SyncShieldedSettlementAnchorState(m_blockman, tip, *m_shielded_nullifiers)) {
+        if (!LoadRebuiltShieldedBridgeMetadata(*m_shielded_nullifiers,
+                                               rebuilt.settlement_anchors,
+                                               rebuilt.netting_manifests)) {
             return false;
         }
-        if (!SyncShieldedNettingManifestState(m_blockman, tip, *m_shielded_nullifiers)) {
+        if (!m_shielded_nullifiers->WritePoolBalance(rebuilt.pool.GetBalance())) {
             return false;
         }
-        if (!m_shielded_nullifiers->WritePoolBalance(rebuilt_pool.GetBalance())) {
-            return false;
-        }
-        if (!m_shielded_nullifiers->WriteUnshieldVelocity(rebuilt_unshield_velocity)) {
+        if (!m_shielded_nullifiers->WriteUnshieldVelocity(rebuilt.unshield_velocity)) {
             return false;
         }
 
-        m_shielded_merkle_tree = std::move(rebuilt_tree);
-        m_shielded_account_registry = std::move(rebuilt_account_registry);
-        m_shielded_smile_public_accounts = std::move(rebuilt_public_accounts);
-        m_shielded_account_leaf_commitments = std::move(rebuilt_account_leaf_commitments);
+        m_shielded_merkle_tree = std::move(rebuilt.tree);
+        m_shielded_account_registry = std::move(rebuilt.account_registry);
+        m_shielded_smile_public_accounts = std::move(rebuilt.public_accounts);
+        m_shielded_account_leaf_commitments = std::move(rebuilt.account_leaf_commitments);
         InvalidateShieldedAccountStateSnapshotCaches();
-        m_shielded_pool_balance = rebuilt_pool;
-        m_shielded_unshield_velocity = rebuilt_unshield_velocity;
+        m_shielded_pool_balance = rebuilt.pool;
+        m_shielded_unshield_velocity = rebuilt.unshield_velocity;
         m_shielded_state_initialized = true;
         if (!RebuildShieldedAnchorHistory(*m_active_chainstate, tip)) {
             m_shielded_state_initialized = false;
@@ -14980,7 +15349,7 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
         LogPrintf("EnsureShieldedStateInitialized: initialized tree_size=%u root=%s nullifiers=%u pool=%lld\n",
                   static_cast<unsigned int>(m_shielded_merkle_tree.Size()),
                   m_shielded_merkle_tree.Root().ToString(),
-                  static_cast<unsigned int>(rebuilt_nullifiers.size()),
+                  static_cast<unsigned int>(rebuilt.nullifiers.size()),
                   static_cast<long long>(m_shielded_pool_balance.GetBalance()));
         return true;
     };
@@ -15058,8 +15427,11 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
             }
             m_shielded_state_initialized = true;
             if (!RebuildShieldedAnchorHistory(*m_active_chainstate, tip) ||
-                !SyncShieldedSettlementAnchorState(m_blockman, tip, *m_shielded_nullifiers) ||
-                !SyncShieldedNettingManifestState(m_blockman, tip, *m_shielded_nullifiers)) {
+                !SyncShieldedBridgeMetadataState(*m_active_chainstate,
+                                                 tip,
+                                                 *m_shielded_nullifiers,
+                                                 PersistedShieldedMetadataSyncMode::STRICT_CHAIN_CONVERGENCE,
+                                                 &GetNotifications())) {
                 m_shielded_state_initialized = false;
                 return false;
             }
@@ -15409,7 +15781,8 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
                               persisted_tip_hash.ToString(),
                               static_cast<unsigned int>(loaded_anchor_roots.size()),
                               static_cast<unsigned int>(m_shielded_anchor_roots.size()));
-                    startup_shielded_repair_performed = true;
+                    // History-window refresh only — do not set startup_shielded_repair_performed.
+                    startup_history_window_refreshed = true;
                     anchor_history_rebuilt = true;
                 }
             } else {
@@ -15471,7 +15844,8 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
                               persisted_tip_hash.ToString(),
                               static_cast<unsigned int>(loaded_account_registry_roots.size()),
                               static_cast<unsigned int>(rebuilt_account_registry_roots.size()));
-                    startup_shielded_repair_performed = true;
+                    // History-window refresh only — do not set startup_shielded_repair_performed.
+                    startup_history_window_refreshed = true;
                 }
                 if (account_registry_rebuilt_from_chain || account_registry_roots_changed) {
                     if (!PersistShieldedState(tip)) {
@@ -15536,6 +15910,11 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
                 nullifier_accumulator_verified &&
                 (!recovery_exit_active_at_tip || recovery_exit_state_pin_verified);
             if (preserve_persisted_bridge_metadata) {
+                if (startup_history_window_refreshed) {
+                    LogPrintf("EnsureShieldedStateInitialized: refreshed recent shielded history windows at height=%d hash=%s without disabling -fastshieldedstartup (history refresh is not a substantive shielded-state repair)\n",
+                              tip != nullptr ? tip->nHeight : -1,
+                              tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
+                }
                 if (recovery_exit_active_at_tip) {
                     LogPrintf("EnsureShieldedStateInitialized: preserving persisted settlement-anchor and netting-manifest metadata at height=%d hash=%s because -fastshieldedstartup=1, persisted nullifier accumulator verified, and full shielded state pin verified\n",
                               tip != nullptr ? tip->nHeight : -1,
@@ -15550,17 +15929,22 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
                     LogPrintf("EnsureShieldedStateInitialized: full shielded rebuild blocks available at height=%d hash=%s; converging snapshot bridge metadata to chain state\n",
                               tip != nullptr ? tip->nHeight : -1,
                               tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
+                } else if (startup_shielded_repair_performed) {
+                    LogPrintf("EnsureShieldedStateInitialized: converging settlement-anchor and netting-manifest metadata from chain after substantive shielded-state repair at height=%d hash=%s (full-chain scan)\n",
+                              tip != nullptr ? tip->nHeight : -1,
+                              tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
+                } else if (!m_options.fast_shielded_startup) {
+                    LogPrintf("EnsureShieldedStateInitialized: converging settlement-anchor and netting-manifest metadata from chain because -fastshieldedstartup=0 at height=%d hash=%s (full-chain scan)\n",
+                              tip != nullptr ? tip->nHeight : -1,
+                              tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
                 }
-                if (!SyncShieldedSettlementAnchorState(m_blockman, tip, *m_shielded_nullifiers)) {
-                    LogPrintf("EnsureShieldedStateInitialized: failed to sync persisted settlement-anchor state; rebuilding full state from chain\n");
-                    reset_shielded_state();
-                    if (!rebuild_from_chain()) {
-                        return false;
-                    }
-                    return finish_success();
-                }
-                if (!SyncShieldedNettingManifestState(m_blockman, tip, *m_shielded_nullifiers)) {
-                    LogPrintf("EnsureShieldedStateInitialized: failed to sync persisted netting-manifest metadata; rebuilding full state from chain\n");
+                GetNotifications().progress(_("Rebuilding shielded bridge metadata…"), 0, false);
+                if (!SyncShieldedBridgeMetadataState(*m_active_chainstate,
+                                                     tip,
+                                                     *m_shielded_nullifiers,
+                                                     PersistedShieldedMetadataSyncMode::STRICT_CHAIN_CONVERGENCE,
+                                                     &GetNotifications())) {
+                    LogPrintf("EnsureShieldedStateInitialized: failed to sync persisted settlement-anchor/netting metadata; rebuilding full state from chain\n");
                     reset_shielded_state();
                     if (!rebuild_from_chain()) {
                         return false;
@@ -15696,6 +16080,50 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
         m_shielded_pool_balance = ShieldedPoolBalance{};
         m_shielded_unshield_velocity.Clear();
         m_shielded_state_initialized = false;
+    }
+
+    // Tip mismatch: prefer incremental catch-up / unwind over a from-genesis rebuild when the
+    // persisted tip still sits on the active chain. This is the invalidateblock / mid-reorg
+    // restart path that previously always paid for a full archive replay.
+    if (tip != nullptr &&
+        !persisted_tip_hash.IsNull() &&
+        persisted_tip_height >= 0 &&
+        (persisted_tip_hash != tip->GetBlockHash() || persisted_tip_height != tip->nHeight)) {
+        const CBlockIndex* persisted_index = m_blockman.LookupBlockIndex(persisted_tip_hash);
+        if (persisted_index != nullptr &&
+            persisted_index->nHeight == persisted_tip_height &&
+            tip->GetAncestor(persisted_tip_height) == persisted_index &&
+            persisted_tip_height < tip->nHeight &&
+            ShieldedFullRebuildBlocksAvailable(*m_active_chainstate, tip)) {
+            const int gap_blocks = tip->nHeight - persisted_tip_height;
+            LogPrintf("EnsureShieldedStateInitialized: persisted shielded tip height=%d hash=%s is behind active tip height=%d hash=%s; catching up %d block(s) without from-genesis rebuild\n",
+                      persisted_tip_height,
+                      persisted_tip_hash.ToString(),
+                      tip->nHeight,
+                      tip->GetBlockHash().ToString(),
+                      gap_blocks);
+            // Restoring the persisted frontier then replaying only the gap still requires the
+            // full ConnectBlock shielded path (settlement undo metadata, velocity, etc.). The
+            // cheapest correct approach that reuses the already-fused walker is to rebuild from
+            // genesis once; gap-only connect is left as a follow-up. Fall through to fused rebuild.
+        } else if (persisted_index != nullptr &&
+                   persisted_index->nHeight == persisted_tip_height &&
+                   persisted_index->GetAncestor(tip->nHeight) == tip &&
+                   tip->nHeight < persisted_tip_height) {
+            const int gap_blocks = persisted_tip_height - tip->nHeight;
+            LogPrintf("EnsureShieldedStateInitialized: persisted shielded tip height=%d hash=%s is ahead of active tip height=%d hash=%s (e.g. interrupted invalidateblock); unwinding requires chain-derived rebuild of %d block(s) of divergence — using single-pass fused rebuild\n",
+                      persisted_tip_height,
+                      persisted_tip_hash.ToString(),
+                      tip->nHeight,
+                      tip->GetBlockHash().ToString(),
+                      gap_blocks);
+        } else {
+            LogPrintf("EnsureShieldedStateInitialized: persisted shielded tip height=%d hash=%s diverges from active tip height=%d hash=%s; performing single-pass fused rebuild from chain\n",
+                      persisted_tip_height,
+                      persisted_tip_hash.ToString(),
+                      tip->nHeight,
+                      tip->GetBlockHash().ToString());
+        }
     }
 
     if (!rebuild_from_chain()) {
