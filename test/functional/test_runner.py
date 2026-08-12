@@ -585,6 +585,8 @@ BTX_BASE_SCRIPTS = [
     'feature_matmul_drlt_sealaspow.py',
     'feature_matmul_v47_epoch_a_activation.py',
     'feature_matmul_trusted_mirrors.py',
+    'feature_matmul_trusted_mirror_convergence.py',
+    'feature_matmul_trusted_mirror_backfill.py',
     'feature_attested_utxo_snapshot_p2p.py',
     'feature_matmul_rc_activation.py',
     'feature_btx_multinode_genesis.py',
