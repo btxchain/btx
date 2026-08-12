@@ -2003,6 +2003,68 @@ class msg_sendcmpct:
         return "msg_sendcmpct(announce=%s, version=%lu)" % (self.announce, self.version)
 
 
+class msg_sendblkchnk:
+    __slots__ = ("version",)
+    msgtype = b"sendblkchnk"
+
+    def __init__(self, version=1):
+        self.version = version
+
+    def deserialize(self, f):
+        self.version = int.from_bytes(f.read(8), "little")
+
+    def serialize(self):
+        return self.version.to_bytes(8, "little")
+
+
+class msg_blkchnkman:
+    __slots__ = ("block_hash", "total_size", "chunk_size", "chunk_count",
+                 "payload_hash")
+    msgtype = b"blkchnkman"
+
+    def __init__(self, *, block_hash=0, total_size=0, chunk_size=0,
+                 chunk_count=0, payload_hash=0):
+        self.block_hash = block_hash
+        self.total_size = total_size
+        self.chunk_size = chunk_size
+        self.chunk_count = chunk_count
+        self.payload_hash = payload_hash
+
+    def deserialize(self, f):
+        self.block_hash = deser_uint256(f)
+        self.total_size = int.from_bytes(f.read(8), "little")
+        self.chunk_size = int.from_bytes(f.read(4), "little")
+        self.chunk_count = int.from_bytes(f.read(4), "little")
+        self.payload_hash = deser_uint256(f)
+
+    def serialize(self):
+        return (ser_uint256(self.block_hash) +
+                self.total_size.to_bytes(8, "little") +
+                self.chunk_size.to_bytes(4, "little") +
+                self.chunk_count.to_bytes(4, "little") +
+                ser_uint256(self.payload_hash))
+
+
+class msg_blkchunk:
+    __slots__ = ("block_hash", "index", "data")
+    msgtype = b"blkchunk"
+
+    def __init__(self, *, block_hash=0, index=0, data=b""):
+        self.block_hash = block_hash
+        self.index = index
+        self.data = data
+
+    def deserialize(self, f):
+        self.block_hash = deser_uint256(f)
+        self.index = int.from_bytes(f.read(4), "little")
+        self.data = deser_string(f)
+
+    def serialize(self):
+        return (ser_uint256(self.block_hash) +
+                self.index.to_bytes(4, "little") +
+                ser_string(self.data))
+
+
 class msg_cmpctblock:
     __slots__ = ("header_and_shortids",)
     msgtype = b"cmpctblock"

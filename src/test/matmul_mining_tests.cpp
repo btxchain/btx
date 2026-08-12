@@ -1016,14 +1016,14 @@ BOOST_AUTO_TEST_CASE(matmul_service_profile_reports_measured_runtime_and_network
     BOOST_CHECK_EQUAL(reorg_protection.find_value("current_tip_height").getInt<int>(), ActiveHeight());
     BOOST_CHECK_EQUAL(reorg_protection.find_value("start_height").getInt<int>(), 0);
     BOOST_CHECK_EQUAL(reorg_protection.find_value("warn_depth").getInt<int>(), static_cast<int>(emergency_profile.warn_depth));
-    BOOST_CHECK(!reorg_protection.find_value("parking_enabled").get_bool());
-    BOOST_CHECK(reorg_protection.find_value("follows_most_work").get_bool());
-    BOOST_CHECK_EQUAL(reorg_protection.find_value("park_depth").getInt<int>(), 0);
+    BOOST_CHECK(reorg_protection.find_value("parking_enabled").get_bool());
+    BOOST_CHECK(!reorg_protection.find_value("follows_most_work").get_bool());
+    BOOST_CHECK_EQUAL(reorg_protection.find_value("park_depth").getInt<int>(), 6);
     BOOST_CHECK_EQUAL(reorg_protection.find_value("local_finality_depth").getInt<int>(), static_cast<int>(emergency_profile.finality_depth));
     BOOST_CHECK_EQUAL(reorg_protection.find_value("hysteresis_depth").getInt<int>(), static_cast<int>(emergency_profile.hysteresis_depth));
     BOOST_CHECK_EQUAL(reorg_protection.find_value("hysteresis_work_margin").getInt<int>(), static_cast<int>(emergency_profile.hysteresis_work_margin));
     BOOST_CHECK_EQUAL(reorg_protection.find_value("locally_finalized_height").getInt<int>(), 0);
-    BOOST_CHECK_EQUAL(reorg_protection.find_value("max_reorg_depth").getInt<int>(), 0);
+    BOOST_CHECK_EQUAL(reorg_protection.find_value("max_reorg_depth").getInt<int>(), 6);
     const int64_t expected_consensus_max_reorg_depth{
         consensus.nMaxReorgDepth != std::numeric_limits<uint32_t>::max()
             ? static_cast<int64_t>(consensus.nMaxReorgDepth)
@@ -1032,7 +1032,7 @@ BOOST_AUTO_TEST_CASE(matmul_service_profile_reports_measured_runtime_and_network
     BOOST_CHECK_EQUAL(reorg_protection.find_value("rejected_reorgs").getInt<uint64_t>(), 1U);
     BOOST_CHECK_EQUAL(reorg_protection.find_value("deepest_rejected_reorg_depth").getInt<int>(), 248);
     BOOST_CHECK_EQUAL(reorg_protection.find_value("last_rejected_reorg_depth").getInt<int>(), 248);
-    BOOST_CHECK_EQUAL(reorg_protection.find_value("last_rejected_max_reorg_depth").getInt<int>(), 0);
+    BOOST_CHECK_EQUAL(reorg_protection.find_value("last_rejected_max_reorg_depth").getInt<int>(), 6);
     BOOST_CHECK_EQUAL(reorg_protection.find_value("deferred_reorgs").getInt<uint64_t>(), 0U);
     BOOST_CHECK_EQUAL(reorg_protection.find_value("deepest_deferred_reorg_depth").getInt<int>(), 0);
     BOOST_CHECK_EQUAL(reorg_protection.find_value("last_deferred_required_work_margin").getInt<int>(), 0);

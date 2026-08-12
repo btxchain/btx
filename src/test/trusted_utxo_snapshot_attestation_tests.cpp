@@ -8,6 +8,7 @@
 #include <test/util/setup_common.h>
 
 #include <vector>
+#include <limits>
 
 #include <boost/test/unit_test.hpp>
 
@@ -42,6 +43,10 @@ UtxoSnapshotStatement MakeStatement(const uint256& chain,
     statement.m_chain_tx_count = 99;
     statement.shielded_state_commitment = TestHash(0x44);
     statement.replay_authority_context = TestHash(0x55);
+    statement.snapshot_file_size = 2U << 20;
+    statement.snapshot_file_hash = TestHash(0x66);
+    statement.snapshot_chunk_size = 1U << 20;
+    statement.snapshot_chunk_count = 2;
     return statement;
 }
 
@@ -205,6 +210,35 @@ BOOST_AUTO_TEST_CASE(consensus_style_refuse_without_signer_set)
                     manifest, chain, statement.replay_authority_context,
                     /*trusted_signers=*/{}, /*threshold=*/1) ==
                 UtxoSnapshotVerifyResult::ThresholdNotMet);
+}
+
+BOOST_AUTO_TEST_CASE(signed_snapshot_geometry_is_strict_and_overflow_safe)
+{
+    const auto keys{MakeKeys(1)};
+    const uint256 chain{TestHash(0x11)};
+    auto statement{MakeStatement(chain, TestHash(0x22), 10)};
+    const std::set<CPubKey> trusted{keys[0].GetPubKey()};
+
+    auto verify = [&](const UtxoSnapshotStatement& candidate) {
+        UtxoSnapshotManifest manifest;
+        manifest.statement = candidate;
+        manifest.signatures = {MustSign(candidate, keys[0])};
+        return VerifyUtxoSnapshotManifestSelfConsistent(
+            manifest, chain, candidate.replay_authority_context, trusted, 1);
+    };
+
+    BOOST_CHECK(verify(statement) == UtxoSnapshotVerifyResult::Valid);
+    statement.snapshot_chunk_count++;
+    BOOST_CHECK(verify(statement) ==
+                UtxoSnapshotVerifyResult::InvalidSnapshotGeometry);
+    statement = MakeStatement(chain, TestHash(0x22), 10);
+    statement.snapshot_file_size = std::numeric_limits<uint64_t>::max();
+    BOOST_CHECK(verify(statement) ==
+                UtxoSnapshotVerifyResult::InvalidSnapshotGeometry);
+    statement = MakeStatement(chain, TestHash(0x22), 10);
+    statement.snapshot_chunk_size = 1;
+    BOOST_CHECK(verify(statement) ==
+                UtxoSnapshotVerifyResult::InvalidSnapshotGeometry);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

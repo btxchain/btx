@@ -461,11 +461,19 @@ inline constexpr unsigned int TRUST_ADJUSTED_WORK_ALLOWANCE_BLOCKS = 6;
  *  Header-only children contribute zero authenticated proof but must inherit
  *  the updated parent authenticated base; without this walk a forged long
  *  header branch can keep a stale (too-low) authenticated sum after a
- *  genuine body promotion lower in the tree. */
+ *  genuine body promotion lower in the tree.
+ *
+ *  `for_each_child` must enumerate only the direct children of its first
+ *  argument. BlockManager maintains that adjacency incrementally, keeping a
+ *  normal ordered body promotion proportional to the affected subtree instead
+ *  of rebuilding the complete block-index graph under cs_main. */
 void PropagateAuthenticatedChainWorkDescendants(
     CBlockIndex& root,
     const Consensus::Params& params,
-    std::function<void(std::function<void(CBlockIndex&)>)> for_each_index);
+    const std::function<void(
+        CBlockIndex&,
+        const std::function<void(CBlockIndex&)>&)>& for_each_child,
+    const std::function<void(CBlockIndex&)>& on_updated = {});
 
 /** Return the time it would take to redo the work difference between from and to, assuming the current hashrate corresponds to the difficulty at tip, in seconds. */
 int64_t GetBlockProofEquivalentTime(const CBlockIndex& to, const CBlockIndex& from, const CBlockIndex& tip, const Consensus::Params&);

@@ -7,19 +7,23 @@
 
 #include <chainparams.h>
 #include <common/args.h>
+#include <hash.h>
 #include <init.h>
 #include <key_io.h>
 #include <matmul/trusted_exact_replay_attestation.h>
 #include <node/interface_ui.h>
 #include <node/matmul_trusted_attestations.h>
+#include <streams.h>
 #include <test/util/setup_common.h>
 #include <uint256.h>
 #include <univalue.h>
 #include <util/chaintype.h>
 #include <util/fs.h>
+#include <util/readwritefile.h>
 #include <util/strencodings.h>
 #include <util/translation.h>
 
+#include <array>
 #include <string>
 #include <vector>
 
@@ -603,6 +607,44 @@ BOOST_AUTO_TEST_CASE(tip_extender_capacity_reserved_under_slot_pressure)
         /*tip_extending=*/true, /*outstanding=*/kMax - 1, kMax, kReserved));
 }
 
+BOOST_AUTO_TEST_CASE(tip_extending_occupancy_cap_blocks_sibling_flood)
+{
+    using node::matmul_trusted::EvaluateTipExtendingCapacity;
+    using node::matmul_trusted::MakeTrustedWorkRank;
+    using node::matmul_trusted::TrustedWorkRank;
+
+    constexpr size_t kTipCapacity{8};
+    std::vector<TrustedWorkRank> occupants;
+    for (uint64_t sequence{1}; sequence <= kTipCapacity; ++sequence) {
+        occupants.push_back(MakeTrustedWorkRank(
+            /*tip_extending=*/true, /*height=*/101, /*tip_height=*/100,
+            /*priority_rank=*/0, sequence));
+    }
+
+    // A ninth free Phase-1 sibling with identical work cannot grow the set.
+    auto decision{EvaluateTipExtendingCapacity(
+        MakeTrustedWorkRank(true, 101, 100, 0, 9), occupants,
+        kTipCapacity)};
+    BOOST_CHECK(!decision.allow);
+    BOOST_CHECK(!decision.replace_index.has_value());
+
+    // Capacity replacement is permitted only for a strictly better-ranked
+    // request; total tip-extending occupancy remains bounded at eight.
+    decision = EvaluateTipExtendingCapacity(
+        MakeTrustedWorkRank(true, 101, 100, /*priority_rank=*/1, 9),
+        occupants, kTipCapacity);
+    BOOST_REQUIRE(decision.allow);
+    BOOST_REQUIRE(decision.replace_index.has_value());
+    BOOST_CHECK_LT(*decision.replace_index, occupants.size());
+
+    occupants.pop_back();
+    decision = EvaluateTipExtendingCapacity(
+        MakeTrustedWorkRank(true, 101, 100, 0, 10), occupants,
+        kTipCapacity);
+    BOOST_CHECK(decision.allow);
+    BOOST_CHECK(!decision.replace_index.has_value());
+}
+
 BOOST_AUTO_TEST_CASE(authority_frontier_tracks_accepted_attestations)
 {
     RuntimeReset reset;
@@ -884,6 +926,287 @@ BOOST_AUTO_TEST_CASE(attestations_survive_simulated_restart)
         BOOST_CHECK_EQUAL(restored[0].statement.block_height, 42);
         BOOST_CHECK(node::matmul_trusted::HasQuorum(block, 42));
     }
+}
+
+BOOST_AUTO_TEST_CASE(durable_history_outlives_bounded_hot_cache)
+{
+    RuntimeReset reset;
+    const CKey signer{NewKey()};
+    const uint256 chain{Hex256('7')};
+    const uint256 context{Hex256('8')};
+    const fs::path archive{
+        m_args.GetDataDirNet() / "matmul_attestations_long_history.dat"};
+    constexpr size_t BLOCK_COUNT{4097};
+    const uint256 first_block{(HashWriter{} << uint64_t{0}).GetHash()};
+    const uint256 last_block{
+        (HashWriter{} << uint64_t{BLOCK_COUNT - 1}).GetHash()};
+
+    // Build a legacy flat archive one entry beyond the default 4096-block hot
+    // cache. OpenPersistence migrates it to disk-backed authority history.
+    constexpr char magic[16] = "BTX_MMATTEST_V1";
+    DataStream encoded;
+    encoded.write(AsBytes(Span{magic, sizeof(magic)}));
+    encoded << uint64_t{BLOCK_COUNT};
+    for (size_t i{0}; i < BLOCK_COUNT; ++i) {
+        matmul::trusted::ExactReplayStatement statement;
+        statement.chain_id = chain;
+        statement.block_hash = (HashWriter{} << uint64_t{i}).GetHash();
+        statement.block_height = static_cast<int32_t>(i);
+        statement.replay_authority_context = context;
+        const auto attestation{matmul::trusted::SignStatement(statement, signer)};
+        BOOST_REQUIRE(attestation.has_value());
+        encoded << *attestation;
+    }
+    BOOST_REQUIRE(WriteBinaryFile(
+        archive,
+        std::string{reinterpret_cast<const char*>(encoded.data()),
+                    encoded.size()}));
+
+    auto configure = [&] {
+        matmul::trusted::StoreConfig config;
+        config.chain_id = chain;
+        config.replay_authority_context = context;
+        config.trusted_signers = {signer.GetPubKey()};
+        config.threshold = 1;
+        std::string error;
+        BOOST_REQUIRE(node::matmul_trusted::Configure(
+            std::move(config), /*trusted_mirror=*/true,
+            /*serve=*/true, std::chrono::milliseconds{50}, error));
+    };
+
+    configure();
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::OpenPersistence(archive, error));
+    const auto stats{node::matmul_trusted::Stats()};
+    BOOST_CHECK_LE(stats.stored_blocks, 4096U);
+    BOOST_CHECK_LE(stats.stored_attestations, 16384U);
+    BOOST_CHECK(node::matmul_trusted::HasQuorum(first_block, 0));
+    BOOST_CHECK(node::matmul_trusted::HasQuorum(
+        last_block, static_cast<int32_t>(BLOCK_COUNT - 1)));
+    BOOST_REQUIRE_EQUAL(node::matmul_trusted::Get(first_block, 0).size(), 1U);
+    node::matmul_trusted::ClosePersistence();
+
+    // Prove the LevelDB, rather than a rewritten bounded archive, owns the
+    // full history after restart.
+    std::error_code remove_ec;
+    fs::remove(archive, remove_ec);
+    node::matmul_trusted::ResetForTest();
+    configure();
+    error.clear();
+    BOOST_REQUIRE(node::matmul_trusted::OpenPersistence(archive, error));
+    BOOST_CHECK(node::matmul_trusted::HasQuorum(first_block, 0));
+    BOOST_CHECK(node::matmul_trusted::HasQuorum(
+        last_block, static_cast<int32_t>(BLOCK_COUNT - 1)));
+    const auto restart_stats{node::matmul_trusted::Stats()};
+    BOOST_CHECK_EQUAL(restart_stats.stored_blocks, 4096U);
+    // Startup verifies all 4097 database records but hydrates only the bounded
+    // tail. An accepted count of 4097 would prove the old O(history*cache)
+    // add/evict loop was still running.
+    BOOST_CHECK_EQUAL(restart_stats.accepted, 4096U);
+    BOOST_CHECK_EQUAL(restart_stats.evicted_blocks, 0U);
+}
+
+BOOST_AUTO_TEST_CASE(durable_history_is_namespaced_across_signer_rotation)
+{
+    RuntimeReset reset;
+    const CKey old_signer{NewKey()};
+    const CKey new_signer{NewKey()};
+    const uint256 chain{Hex256('9')};
+    const uint256 context{Hex256('a')};
+    const uint256 block{Hex256('b')};
+    const fs::path archive{
+        m_args.GetDataDirNet() / "matmul_attestations_rotation_test.dat"};
+
+    auto configure = [&](const CKey& signer) {
+        matmul::trusted::StoreConfig config;
+        config.chain_id = chain;
+        config.replay_authority_context = context;
+        config.trusted_signers = {signer.GetPubKey()};
+        config.threshold = 1;
+        config.local_signer = signer;
+        std::string error;
+        BOOST_REQUIRE(node::matmul_trusted::Configure(
+            std::move(config), /*trusted_mirror=*/false,
+            /*serve=*/true, std::chrono::milliseconds{50}, error));
+    };
+
+    configure(old_signer);
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::OpenPersistence(archive, error));
+    BOOST_CHECK(node::matmul_trusted::SignAuthoritative(block, 51) ==
+                matmul::trusted::AddResult::Accepted);
+    BOOST_REQUIRE(node::matmul_trusted::FlushPersistence(error));
+    node::matmul_trusted::ResetForTest();
+
+    // An intentional authority change must neither trust the old quorum nor
+    // make startup fatal. It gets a separate durable namespace.
+    configure(new_signer);
+    error.clear();
+    BOOST_REQUIRE(node::matmul_trusted::OpenPersistence(archive, error));
+    BOOST_CHECK(!node::matmul_trusted::HasQuorum(block, 51));
+    BOOST_CHECK(node::matmul_trusted::SignAuthoritative(block, 51) ==
+                matmul::trusted::AddResult::Accepted);
+    BOOST_CHECK(node::matmul_trusted::HasQuorum(block, 51));
+}
+
+BOOST_AUTO_TEST_CASE(durable_worker_checkpoints_wal_under_sustained_history)
+{
+    RuntimeReset reset;
+    const CKey signer{NewKey()};
+    const uint256 chain{Hex256('c')};
+    const uint256 context{Hex256('d')};
+    const fs::path archive{
+        m_args.GetDataDirNet() / "matmul_attestations_wal_checkpoint.dat"};
+    const fs::path wal{archive + ".wal"};
+    constexpr size_t BLOCK_COUNT{4097};
+
+    auto configure = [&] {
+        matmul::trusted::StoreConfig config;
+        config.chain_id = chain;
+        config.replay_authority_context = context;
+        config.trusted_signers = {signer.GetPubKey()};
+        config.threshold = 1;
+        config.local_signer = signer;
+        std::string error;
+        BOOST_REQUIRE(node::matmul_trusted::Configure(
+            std::move(config), /*trusted_mirror=*/false,
+            /*serve=*/true, std::chrono::milliseconds{50}, error));
+    };
+
+    configure();
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::OpenPersistence(archive, error));
+    for (size_t i{0}; i < BLOCK_COUNT; ++i) {
+        const uint256 block{(HashWriter{} << uint64_t{i}).GetHash()};
+        BOOST_CHECK(node::matmul_trusted::SignAuthoritative(
+                        block, static_cast<int32_t>(i)) ==
+                    matmul::trusted::AddResult::Accepted);
+    }
+    BOOST_REQUIRE(node::matmul_trusted::FlushPersistence(error));
+    // Header-only is the steady checkpoint. This proves the worker did not
+    // retain one legacy WAL record per historical block.
+    BOOST_REQUIRE(fs::exists(wal));
+    BOOST_CHECK_LE(fs::file_size(wal), 16U);
+    node::matmul_trusted::ResetForTest();
+
+    configure();
+    error.clear();
+    BOOST_REQUIRE(node::matmul_trusted::OpenPersistence(archive, error));
+    const uint256 first{(HashWriter{} << uint64_t{0}).GetHash()};
+    const uint256 last{
+        (HashWriter{} << uint64_t{BLOCK_COUNT - 1}).GetHash()};
+    BOOST_CHECK(node::matmul_trusted::HasQuorum(first, 0));
+    BOOST_CHECK(node::matmul_trusted::HasQuorum(
+        last, static_cast<int32_t>(BLOCK_COUNT - 1)));
+    BOOST_CHECK_LE(node::matmul_trusted::Stats().stored_blocks, 4096U);
+}
+
+BOOST_AUTO_TEST_CASE(truncated_attestation_wal_fails_closed_and_is_preserved)
+{
+    RuntimeReset reset;
+    const CKey signer{NewKey()};
+    const fs::path archive{
+        m_args.GetDataDirNet() / "matmul_attestations_truncated_test.dat"};
+    const fs::path wal{archive + ".wal"};
+
+    auto configure = [&] {
+        matmul::trusted::StoreConfig config;
+        config.chain_id = Hex256('d');
+        config.replay_authority_context = Hex256('e');
+        config.trusted_signers = {signer.GetPubKey()};
+        config.threshold = 1;
+        std::string error;
+        BOOST_REQUIRE(node::matmul_trusted::Configure(
+            std::move(config), /*trusted_mirror=*/true,
+            /*serve=*/false, std::chrono::milliseconds{50}, error));
+    };
+    configure();
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::OpenPersistence(archive, error));
+    node::matmul_trusted::ClosePersistence();
+
+    // Simulate a torn record after the durable WAL header. Startup must not
+    // discard or truncate it while reporting the failure.
+    {
+        FILE* file{fsbridge::fopen(wal, "ab")};
+        BOOST_REQUIRE(file);
+        const std::array<unsigned char, 3> torn{0x7f, 0x01, 0x02};
+        BOOST_REQUIRE_EQUAL(fwrite(torn.data(), 1, torn.size(), file),
+                            torn.size());
+        BOOST_REQUIRE_EQUAL(fclose(file), 0);
+    }
+    const auto size_before{fs::file_size(wal)};
+
+    node::matmul_trusted::ResetForTest();
+    configure();
+    error.clear();
+    BOOST_CHECK(!node::matmul_trusted::OpenPersistence(archive, error));
+    BOOST_CHECK(!error.empty());
+    BOOST_CHECK(fs::exists(wal));
+    BOOST_CHECK_EQUAL(fs::file_size(wal), size_before);
+}
+
+BOOST_AUTO_TEST_CASE(invalid_signed_wal_record_fails_closed_and_is_preserved)
+{
+    RuntimeReset reset;
+    const CKey signer{NewKey()};
+    const uint256 chain{Hex256('4')};
+    const uint256 context{Hex256('5')};
+    const uint256 block{Hex256('6')};
+    const fs::path archive{
+        m_args.GetDataDirNet() / "matmul_attestations_invalid_sig_test.dat"};
+    const fs::path wal{archive + ".wal"};
+
+    auto configure = [&] {
+        matmul::trusted::StoreConfig config;
+        config.chain_id = chain;
+        config.replay_authority_context = context;
+        config.trusted_signers = {signer.GetPubKey()};
+        config.threshold = 1;
+        std::string error;
+        BOOST_REQUIRE(node::matmul_trusted::Configure(
+            std::move(config), /*trusted_mirror=*/true,
+            /*serve=*/false, std::chrono::milliseconds{50}, error));
+    };
+    configure();
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::OpenPersistence(archive, error));
+    node::matmul_trusted::ClosePersistence();
+
+    matmul::trusted::ExactReplayStatement statement;
+    statement.chain_id = chain;
+    statement.block_hash = block;
+    statement.block_height = 73;
+    statement.replay_authority_context = context;
+    auto invalid{matmul::trusted::SignStatement(statement, signer)};
+    BOOST_REQUIRE(invalid);
+    BOOST_REQUIRE(!invalid->signature.empty());
+    invalid->signature.front() = 0; // Valid encoding, invalid ECDSA payload.
+
+    DataStream record;
+    record << *invalid;
+    DataStream prefix;
+    prefix << static_cast<uint32_t>(record.size());
+    {
+        FILE* file{fsbridge::fopen(wal, "ab")};
+        BOOST_REQUIRE(file);
+        BOOST_REQUIRE_EQUAL(
+            fwrite(prefix.data(), 1, prefix.size(), file), prefix.size());
+        BOOST_REQUIRE_EQUAL(
+            fwrite(record.data(), 1, record.size(), file), record.size());
+        BOOST_REQUIRE_EQUAL(fclose(file), 0);
+    }
+    const auto [read_before, bytes_before]{ReadBinaryFile(wal)};
+    BOOST_REQUIRE(read_before);
+
+    node::matmul_trusted::ResetForTest();
+    configure();
+    error.clear();
+    BOOST_CHECK(!node::matmul_trusted::OpenPersistence(archive, error));
+    BOOST_CHECK(error.find("invalid-signature") != std::string::npos);
+    const auto [read_after, bytes_after]{ReadBinaryFile(wal)};
+    BOOST_REQUIRE(read_after);
+    BOOST_CHECK(bytes_after == bytes_before);
 }
 
 BOOST_AUTO_TEST_CASE(historical_reverify_is_rate_limited)

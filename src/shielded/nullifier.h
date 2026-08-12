@@ -309,6 +309,7 @@ public:
 
     /** Persist/read the full shielded-state pin used to authorize restart fast-start skips. */
     [[nodiscard]] bool PersistShieldedStatePin(const uint256& state_pin);
+    [[nodiscard]] bool ClearPersistedShieldedStatePin();
     [[nodiscard]] std::optional<uint256> ReadPersistedShieldedStatePin() const;
 
     /** Read the persisted active shielded frontier state for the current tip. */

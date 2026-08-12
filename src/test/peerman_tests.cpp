@@ -8,6 +8,7 @@
 #include <key.h>
 #include <matmul/trusted_exact_replay_attestation.h>
 #include <node/matmul_trusted_attestations.h>
+#include <node/block_chunk_transport.h>
 #include <node/miner.h>
 #include <node/transaction.h>
 #include <net_processing.h>
@@ -57,6 +58,75 @@ static void mineBlock(const node::NodeContext& node, std::chrono::seconds block_
     SetMockTime(curr_time); // process block at current time
     Assert(node.chainman->ProcessNewBlock(std::make_shared<const CBlock>(block), /*force_processing=*/true, /*min_pow_checked=*/true, nullptr));
     node.validation_signals->SyncWithValidationInterfaceQueue(); // drain events queue
+}
+
+BOOST_AUTO_TEST_CASE(block_chunk_manifest_and_assembler_bounds)
+{
+    using namespace node;
+    BlockChunkManifest manifest;
+    manifest.block_hash = uint256::ONE;
+    manifest.total_size = BLOCK_CHUNK_SIZE + 3;
+    manifest.chunk_size = BLOCK_CHUNK_SIZE;
+    manifest.chunk_count = 2;
+    const std::vector<uint8_t> payload(manifest.total_size, uint8_t{0x5a});
+    manifest.payload_hash = Hash(payload);
+    BOOST_CHECK(ValidateBlockChunkManifest(manifest));
+
+    BlockChunkManifest malformed{manifest};
+    malformed.block_hash = uint256::ZERO;
+    BOOST_CHECK(!ValidateBlockChunkManifest(malformed));
+    malformed = manifest;
+    malformed.total_size = std::numeric_limits<uint64_t>::max();
+    BOOST_CHECK(!ValidateBlockChunkManifest(malformed));
+    malformed = manifest;
+    malformed.total_size = BLOCK_CHUNK_MAX_TOTAL_BYTES + 1;
+    BOOST_CHECK(!ValidateBlockChunkManifest(malformed));
+    malformed = manifest;
+    malformed.chunk_count = 1;
+    BOOST_CHECK(!ValidateBlockChunkManifest(malformed));
+    malformed = manifest;
+    malformed.chunk_size = 0;
+    BOOST_CHECK(!ValidateBlockChunkManifest(malformed));
+    BlockChunkManifest maximum{manifest};
+    maximum.total_size = BLOCK_CHUNK_MAX_TOTAL_BYTES;
+    maximum.chunk_count = BLOCK_CHUNK_MAX_COUNT;
+    BOOST_CHECK(ValidateBlockChunkManifest(maximum));
+
+    DataStream oversized_wire;
+    oversized_wire << manifest.block_hash << uint32_t{0};
+    WriteCompactSize(oversized_wire, BLOCK_CHUNK_SIZE + 1);
+    BlockChunkMessage oversized_chunk;
+    BOOST_CHECK_THROW(oversized_wire >> oversized_chunk,
+                      std::ios_base::failure);
+
+    BlockChunkAssembler assembler{manifest};
+    BlockChunkMessage second{manifest.block_hash, 1,
+                             std::vector<uint8_t>(3, uint8_t{0x5a})};
+    BOOST_CHECK(assembler.Add(second) == BlockChunkAddResult::WRONG_INDEX);
+    BlockChunkMessage first{manifest.block_hash, 0,
+                            std::vector<uint8_t>(BLOCK_CHUNK_SIZE,
+                                                 uint8_t{0x5a})};
+    BOOST_CHECK(assembler.Add(first) == BlockChunkAddResult::ACCEPTED);
+    const uint256 other_hash{
+        uint256::FromHex(std::string(64, '2')).value()};
+    BlockChunkMessage wrong_block{other_hash, 1,
+                                  std::vector<uint8_t>(3, uint8_t{0x5a})};
+    BOOST_CHECK(assembler.Add(wrong_block) ==
+                BlockChunkAddResult::WRONG_BLOCK);
+    BlockChunkMessage wrong_final{manifest.block_hash, 1,
+                                  std::vector<uint8_t>(2, uint8_t{0x5a})};
+    BOOST_CHECK(assembler.Add(wrong_final) ==
+                BlockChunkAddResult::WRONG_SIZE);
+    BOOST_CHECK(assembler.Add(second) == BlockChunkAddResult::COMPLETE);
+    BOOST_CHECK_EQUAL_COLLECTIONS(assembler.Bytes().begin(),
+                                  assembler.Bytes().end(), payload.begin(),
+                                  payload.end());
+
+    BlockChunkManifest bad_hash{manifest};
+    bad_hash.payload_hash = uint256::ZERO;
+    BlockChunkAssembler bad{bad_hash};
+    BOOST_CHECK(bad.Add(first) == BlockChunkAddResult::ACCEPTED);
+    BOOST_CHECK(bad.Add(second) == BlockChunkAddResult::HASH_MISMATCH);
 }
 
 // Verifying when network-limited peer connections are desirable based on the node's proximity to the tip
@@ -115,7 +185,7 @@ BOOST_AUTO_TEST_CASE(connections_desirable_service_flags)
 // take cs_main. ThreadOpenConnections calls them on the outbound-connect hot
 // path; if they block on cs_main while msghand holds it across
 // ProcessNewBlock/SyncWithValidationInterfaceQueue, the node stops opening
-// connections (macpro2 deadlock secondary damage, 2026-08-11).
+// connections.
 BOOST_AUTO_TEST_CASE(desirable_flags_do_not_block_on_cs_main)
 {
     std::unique_ptr<PeerManager> peerman = PeerManager::make(
@@ -169,8 +239,9 @@ BOOST_AUTO_TEST_CASE(matmul_consensus_tier_desirable_service_flags)
     BOOST_CHECK(peerman->HasAllDesirableServiceFlags(consensus_peer));
     BOOST_CHECK(peerman->HasAllDesirableServiceFlags(economic_peer));
 
-    // Force RC-active height identity for the preference gate without mining a
-    // full activation window. Restore immediately so later tests stay hermetic.
+    // Force RC-active height identity without mining a full activation window.
+    // MatMul service bits remain scoring hints and never enter the transport
+    // service set used by outbound connection acceptance.
     Consensus::Params& consensus = const_cast<Consensus::Params&>(
         m_node.chainman->GetParams().GetConsensus());
     const int32_t saved_rc = consensus.nMatMulRCHeight;
@@ -188,11 +259,10 @@ BOOST_AUTO_TEST_CASE(matmul_consensus_tier_desirable_service_flags)
     consensus.nMatMulV4Height = 0;
     consensus.nMatMulRCHeight = 0;
     BOOST_REQUIRE(consensus.IsMatMulRCActive(tip->nHeight));
-    BOOST_CHECK(peerman->GetDesirableServiceFlags(base) ==
-                ServiceFlags(base | NODE_MATMUL_CONSENSUS));
+    BOOST_CHECK(peerman->GetDesirableServiceFlags(base) == base);
     BOOST_CHECK(peerman->HasAllDesirableServiceFlags(consensus_peer));
-    BOOST_CHECK(!peerman->HasAllDesirableServiceFlags(base));
-    BOOST_CHECK(!peerman->HasAllDesirableServiceFlags(economic_peer));
+    BOOST_CHECK(peerman->HasAllDesirableServiceFlags(base));
+    BOOST_CHECK(peerman->HasAllDesirableServiceFlags(economic_peer));
 }
 
 BOOST_AUTO_TEST_CASE(matmul_consensus_tier_sync_eligibility_tracks_activation)
@@ -414,16 +484,17 @@ BOOST_AUTO_TEST_CASE(matmul_consensus_tier_connected_peer_loses_preference_at_ac
     BOOST_REQUIRE(!consensus_stats.m_headers_sync_started);
     BOOST_REQUIRE_EQUAL(consensus_stats.m_total_headers_sync_peer_count, 1);
 
-    // Preference-only: the ordinary peer loses VERSION-time preference,
-    // header-sync ownership, and chain-sync protection exactly once -- but is
+    // Preference-only: the ordinary peer loses VERSION-time preference and
+    // chain-sync protection, but can retain the liveness-critical header-sync
+    // slot and is
     // NOT disconnected. Dropping ineligible outbounds was the CPU-mirror
     // deadlock (peers gone -> no header sync -> nothing fetchable).
     BOOST_CHECK(peerman.SendMessages(&ordinary_peer));
     BOOST_REQUIRE(peerman.GetNodeStateStats(ordinary_peer.GetId(), ordinary_stats));
     BOOST_REQUIRE(!ordinary_stats.m_preferred_download);
     BOOST_REQUIRE_EQUAL(ordinary_stats.m_total_preferred_download_peer_count, 1);
-    BOOST_REQUIRE(!ordinary_stats.m_headers_sync_started);
-    BOOST_REQUIRE_EQUAL(ordinary_stats.m_total_headers_sync_peer_count, 0);
+    BOOST_REQUIRE(ordinary_stats.m_headers_sync_started);
+    BOOST_REQUIRE_EQUAL(ordinary_stats.m_total_headers_sync_peer_count, 1);
     BOOST_REQUIRE(!ordinary_stats.m_chain_sync_protected);
     BOOST_REQUIRE_EQUAL(
         ordinary_stats.m_total_chain_sync_protected_peer_count, 0);
@@ -437,8 +508,8 @@ BOOST_AUTO_TEST_CASE(matmul_consensus_tier_connected_peer_loses_preference_at_ac
     BOOST_CHECK(consensus_stats.m_preferred_download);
     BOOST_CHECK_EQUAL(ordinary_stats.m_total_preferred_download_peer_count, 1);
     BOOST_CHECK_EQUAL(consensus_stats.m_total_preferred_download_peer_count, 1);
-    BOOST_CHECK(!ordinary_stats.m_headers_sync_started);
-    BOOST_CHECK(consensus_stats.m_headers_sync_started);
+    BOOST_CHECK(ordinary_stats.m_headers_sync_started);
+    BOOST_CHECK(!consensus_stats.m_headers_sync_started);
     BOOST_CHECK_EQUAL(ordinary_stats.m_total_headers_sync_peer_count, 1);
     BOOST_CHECK_EQUAL(consensus_stats.m_total_headers_sync_peer_count, 1);
     BOOST_CHECK(!ordinary_peer.fDisconnect);
@@ -637,7 +708,7 @@ BOOST_AUTO_TEST_CASE(matmul_consensus_tier_compact_block_boundary_policy)
         boundary_candidate.GetHash());
     BOOST_CHECK_EQUAL(
         peerman.GetDesirableServiceFlags(base),
-        ServiceFlags(base | NODE_MATMUL_CONSENSUS));
+        base);
     // Preference-only at the boundary: the pre-boundary ordinary peer loses
     // preferred-download status but stays connected. Disconnecting every
     // ineligible outbound was the CPU-mirror deadlock.
@@ -892,7 +963,9 @@ BOOST_AUTO_TEST_CASE(trusted_mirror_authority_headers_advance_best_header)
     BOOST_CHECK(peerman.SendMessages(&ordinary));
     BOOST_REQUIRE(peerman.GetNodeStateStats(authority.GetId(), authority_stats));
     BOOST_REQUIRE(peerman.GetNodeStateStats(ordinary.GetId(), ordinary_stats));
-    BOOST_CHECK(authority_stats.m_preferred_download);
+    // The archive bit is discovery only. Until this peer proves authority by
+    // delivering a valid MMATTEST it must not receive authority preference.
+    BOOST_CHECK(!authority_stats.m_preferred_download);
     BOOST_CHECK(!ordinary_stats.m_preferred_download);
 
     // Best-header ahead of tip: authority must allocate download toward the
@@ -1176,6 +1249,134 @@ BOOST_AUTO_TEST_CASE(trusted_mirror_divergent_tip_follows_authority_headers)
         !authority_stats.vHeightInFlight.empty() ||
         HasQueuedMessageType(authority, NetMsgType::GETDATA)};
     BOOST_CHECK(download_allocated);
+}
+
+// A persisted PARK is branch-specific. It must suppress requests from a peer
+// advertising that divergent branch without freezing another peer that can
+// supply a body extending the current active tip.
+BOOST_AUTO_TEST_CASE(parked_reorg_suppresses_only_parked_peer_downloads)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+
+    ChainstateManager& chainman{*Assert(m_node.chainman)};
+    PeerManager& peerman{*Assert(m_node.peerman)};
+    ConnmanTestMsg& connman{static_cast<ConnmanTestMsg&>(*m_node.connman)};
+    const CBlockIndex* starting_tip{
+        WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip())};
+    BOOST_REQUIRE(starting_tip != nullptr);
+    if (starting_tip->pprev == nullptr) {
+        mineBlock(m_node,
+                  std::chrono::seconds{starting_tip->GetBlockTime() + 1});
+    }
+    const CBlockIndex* active_tip{
+        WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip())};
+    BOOST_REQUIRE(active_tip != nullptr);
+    BOOST_REQUIRE(active_tip->pprev != nullptr);
+    SetMockTime(std::chrono::seconds{active_tip->GetBlockTime() + 10});
+
+    auto make_header = [&](const CBlockIndex& prev, unsigned char tag) {
+        CBlock block;
+        block.SetNull();
+        block.hashPrevBlock = prev.GetBlockHash();
+        block.hashMerkleRoot = uint256::FromHex(
+            std::string(62, '0') + strprintf("%02x", tag)).value();
+        block.nTime = std::max<int64_t>(prev.GetBlockTime() + 1,
+                                        GetTime());
+        block.nBits = prev.nBits;
+        block.nVersion = VERSIONBITS_TOP_BITS;
+        BOOST_REQUIRE(MineHeaderForConsensus(
+            block, prev.nHeight + 1, chainman.GetConsensus(), 5'000'000,
+            prev.GetMedianTimePast()));
+        BlockValidationState state;
+        const CBlockHeader header{block.GetBlockHeader()};
+        BOOST_REQUIRE_MESSAGE(chainman.ProcessNewBlockHeaders(
+            {{header}}, /*min_pow_checked=*/true, state), state.ToString());
+        CBlockIndex* index{WITH_LOCK(
+            ::cs_main,
+            return chainman.m_blockman.LookupBlockIndex(block.GetHash()))};
+        BOOST_REQUIRE(index != nullptr);
+        return index;
+    };
+
+    CBlockIndex* active_child{make_header(*active_tip, 0xa1)};
+    CBlockIndex* parked_root{make_header(*active_tip->pprev, 0xb1)};
+    CBlockIndex* parked_mid{make_header(*parked_root, 0xb2)};
+    CBlockIndex* parked_tip{make_header(*parked_mid, 0xb3)};
+    BOOST_REQUIRE_EQUAL(parked_tip->nHeight, active_child->nHeight + 1);
+
+    auto& action{const_cast<kernel::DeepReorgAction&>(
+        chainman.m_options.deep_reorg_action)};
+    const kernel::DeepReorgAction saved_action{action};
+    action = kernel::DeepReorgAction::PARK;
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman.ParkReorgBranch(parked_root));
+        BOOST_REQUIRE(chainman.IsOnParkedReorgBranch(parked_tip));
+        BOOST_REQUIRE_EQUAL(chainman.GetChainRecoveryState().phase,
+                            ChainRecoveryPhase::PARKED_NEEDS_OPERATOR);
+    }
+    struct RestorePark {
+        ChainstateManager& chainman;
+        kernel::DeepReorgAction& action;
+        kernel::DeepReorgAction saved_action;
+        CBlockIndex* parked_tip;
+        ~RestorePark()
+        {
+            LOCK(::cs_main);
+            chainman.UnparkReorgBranchContainingBlock(parked_tip);
+            action = saved_action;
+        }
+    } restore{chainman, action, saved_action, parked_tip};
+
+    const ServiceFlags services{ServiceFlags(NODE_NETWORK | NODE_WITNESS)};
+    CNode active_peer{/*id=*/71, /*sock=*/nullptr, CAddress{},
+                      /*nKeyedNetGroupIn=*/0, /*nLocalHostNonceIn=*/0,
+                      CAddress{}, /*addrNameIn=*/"active-descendant",
+                      ConnectionType::OUTBOUND_FULL_RELAY,
+                      /*inbound_onion=*/false, /*network_key=*/0};
+    CNode parked_peer{/*id=*/72, /*sock=*/nullptr, CAddress{},
+                      /*nKeyedNetGroupIn=*/0, /*nLocalHostNonceIn=*/0,
+                      CAddress{}, /*addrNameIn=*/"parked-divergent",
+                      ConnectionType::OUTBOUND_FULL_RELAY,
+                      /*inbound_onion=*/false, /*network_key=*/0};
+    connman.Handshake(active_peer, /*successfully_connected=*/true, services,
+                      services, PROTOCOL_VERSION, /*relay_txs=*/true);
+    connman.Handshake(parked_peer, /*successfully_connected=*/true, services,
+                      services, PROTOCOL_VERSION, /*relay_txs=*/true);
+    connman.FlushSendBuffer(active_peer);
+    connman.FlushSendBuffer(parked_peer);
+    struct FinalizePeers {
+        PeerManager& peerman;
+        CNode& active_peer;
+        CNode& parked_peer;
+        ~FinalizePeers()
+        {
+            peerman.FinalizeNode(active_peer);
+            peerman.FinalizeNode(parked_peer);
+        }
+    } finalize{peerman, active_peer, parked_peer};
+
+    auto advertise = [&](CNode& peer, const uint256& hash) {
+        std::vector<CInv> inv{{MSG_BLOCK, hash}};
+        BOOST_REQUIRE(connman.ReceiveMsgFrom(
+            peer, NetMsg::Make(NetMsgType::INV, inv)));
+        peer.fPauseSend = false;
+        (void)connman.ProcessMessagesOnce(peer);
+        connman.FlushSendBuffer(peer);
+    };
+    advertise(active_peer, active_child->GetBlockHash());
+    advertise(parked_peer, parked_tip->GetBlockHash());
+
+    BOOST_CHECK(peerman.SendMessages(&parked_peer));
+    BOOST_CHECK(peerman.SendMessages(&active_peer));
+    CNodeStateStats active_stats;
+    CNodeStateStats parked_stats;
+    BOOST_REQUIRE(peerman.GetNodeStateStats(active_peer.GetId(), active_stats));
+    BOOST_REQUIRE(peerman.GetNodeStateStats(parked_peer.GetId(), parked_stats));
+    BOOST_CHECK(parked_stats.vHeightInFlight.empty());
+    BOOST_CHECK(!HasQueuedMessageType(parked_peer, NetMsgType::GETDATA));
+    BOOST_CHECK(!active_stats.vHeightInFlight.empty() ||
+                HasQueuedMessageType(active_peer, NetMsgType::GETDATA));
 }
 
 BOOST_AUTO_TEST_CASE(broadcast_transaction_fails_closed_without_peerman)

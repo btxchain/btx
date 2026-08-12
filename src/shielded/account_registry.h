@@ -420,6 +420,17 @@ public:
     [[nodiscard]] bool Append(Span<const ShieldedAccountLeaf> account_leaves,
                               std::vector<uint64_t>* inserted_indices = nullptr,
                               bool sync_payload_store = true);
+    /**
+     * Append entries to a projected transition without mutating the shared
+     * payload database. The new payloads remain inline until
+     * CommitPreparedPayloads() is called after the shielded PREPARED journal is
+     * durable. This prevents a failed ConnectBlock projection from leaking
+     * payloads ahead of the rest of the shielded state transition.
+     */
+    [[nodiscard]] bool AppendPrepared(Span<const ShieldedAccountLeaf> account_leaves,
+                                      std::vector<uint64_t>* inserted_indices = nullptr);
+    /** Atomically persist payloads retained by AppendPrepared(). */
+    [[nodiscard]] bool CommitPreparedPayloads(bool sync_payload_store = true);
     [[nodiscard]] bool Truncate(size_t size,
                                 PayloadPruneMode prune_mode = PayloadPruneMode::PRUNE);
     [[nodiscard]] std::optional<uint64_t> FindLeafIndexByCommitment(
@@ -465,6 +476,10 @@ private:
     [[nodiscard]] bool LoadFromSnapshot(const ShieldedAccountRegistrySnapshot& snapshot);
     [[nodiscard]] bool LoadFromPersistedSnapshot(
         const ShieldedAccountRegistryPersistedSnapshot& snapshot);
+    [[nodiscard]] bool AppendInternal(Span<const ShieldedAccountLeaf> account_leaves,
+                                      std::vector<uint64_t>* inserted_indices,
+                                      bool sync_payload_store,
+                                      bool defer_payload_store);
     [[nodiscard]] std::optional<std::vector<uint8_t>> LoadPayloadBytes(uint64_t leaf_index) const;
     void AttachConfiguredPayloadStore();
 

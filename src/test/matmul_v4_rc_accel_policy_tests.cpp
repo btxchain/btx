@@ -345,4 +345,34 @@ BOOST_AUTO_TEST_CASE(rc_execution_default_is_activation_aware_and_test_safe)
     BOOST_CHECK_EQUAL(DefaultMatMulRCExecutionMode(*testnet), "auto-fallback");
 }
 
+BOOST_AUTO_TEST_CASE(unverifiable_production_consensus_startup_fails_closed)
+{
+    ArgsManager empty;
+    const auto main{CreateChainParams(empty, ChainType::MAIN)};
+    const auto regtest{CreateChainParams(empty, ChainType::REGTEST)};
+    const auto testnet{CreateChainParams(empty, ChainType::TESTNET)};
+
+    BOOST_CHECK(RefuseUnverifiableMatMulConsensusStartup(
+        *main, "consensus", /*strict_device_ready=*/false,
+        /*allow_unverifiable_startup=*/false));
+    BOOST_CHECK(!RefuseUnverifiableMatMulConsensusStartup(
+        *main, "consensus", /*strict_device_ready=*/true,
+        /*allow_unverifiable_startup=*/false));
+    BOOST_CHECK(!RefuseUnverifiableMatMulConsensusStartup(
+        *main, "trusted", /*strict_device_ready=*/false,
+        /*allow_unverifiable_startup=*/false));
+    BOOST_CHECK(!RefuseUnverifiableMatMulConsensusStartup(
+        *main, "consensus", /*strict_device_ready=*/false,
+        /*allow_unverifiable_startup=*/true));
+
+    // Toy-dimension regtest and a network without a finite RC epoch remain
+    // runnable without production accelerator hardware.
+    BOOST_CHECK(!RefuseUnverifiableMatMulConsensusStartup(
+        *regtest, "consensus", /*strict_device_ready=*/false,
+        /*allow_unverifiable_startup=*/false));
+    BOOST_CHECK(!RefuseUnverifiableMatMulConsensusStartup(
+        *testnet, "consensus", /*strict_device_ready=*/false,
+        /*allow_unverifiable_startup=*/false));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

@@ -9,6 +9,15 @@ include_directories(${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR})
 
 if(APPLE)
   option(BTX_ENABLE_METAL "Enable optional Metal acceleration helpers for BTX utilities" ON)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    set(BTX_ACCELERATE_DEFAULT ON)
+  else()
+    # Current Apple Accelerate headers require Clang vector-extension
+    # semantics and do not compile with GCC. Keep the portable scalar path
+    # available so the supported GCC audit build can run on macOS too.
+    set(BTX_ACCELERATE_DEFAULT OFF)
+  endif()
+  option(BTX_ENABLE_ACCELERATE "Enable optional Apple Accelerate MatMul helper" ${BTX_ACCELERATE_DEFAULT})
   function(find_btx_apple_framework out_var framework_name)
     set(framework_hints)
     if(CMAKE_OSX_SYSROOT)
@@ -944,9 +953,10 @@ target_link_libraries(bitcoin_common
     $<TARGET_NAME_IF_EXISTS:USDT::headers>
     $<$<PLATFORM_ID:Windows>:ws2_32>
 )
-if(APPLE)
+if(APPLE AND BTX_ENABLE_ACCELERATE)
   find_btx_apple_framework(BTX_ACCELERATE_FRAMEWORK Accelerate)
   target_link_libraries(bitcoin_common PRIVATE ${BTX_ACCELERATE_FRAMEWORK})
+  target_compile_definitions(bitcoin_common PRIVATE BTX_HAVE_ACCELERATE=1)
 endif()
 
 # OpenMP for the multi-threaded Fp3 recursive prover (composition/quotient

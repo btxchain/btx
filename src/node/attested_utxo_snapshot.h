@@ -25,8 +25,12 @@ namespace node {
 
 /** Default P2P chunk size for attested UTXO snapshot bodies (1 MiB). */
 static constexpr uint32_t ATTESTED_UTXO_SNAPSHOT_CHUNK_SIZE{1u << 20};
+/** Reject pathological tiny chunks that amplify request/message overhead. */
+static constexpr uint32_t ATTESTED_UTXO_SNAPSHOT_MIN_CHUNK_SIZE{64u << 10};
 /** Hard cap on a single chunk (must stay under the 16 MiB P2P message ceiling). */
 static constexpr uint32_t ATTESTED_UTXO_SNAPSHOT_MAX_CHUNK_SIZE{4u << 20};
+/** Hard upper bound for one fetched snapshot body (512 GiB). */
+static constexpr uint64_t ATTESTED_UTXO_SNAPSHOT_MAX_FILE_SIZE{512ULL << 30};
 /** Maximum concurrent outbound snapshot transfers served by this node. */
 static constexpr size_t ATTESTED_UTXO_SNAPSHOT_MAX_CONCURRENT_TRANSFERS{2};
 /** Maximum concurrent transfers served to one peer. */
@@ -58,6 +62,8 @@ struct AttestedUTXOSnapshotExportResult {
     uint256 txoutset_hash;
     uint64_t nchaintx{0};
     uint256 shielded_state_pin;
+    uint64_t file_size{0};
+    uint256 file_hash;
     std::chrono::microseconds max_cs_main_hold{0};
     std::chrono::microseconds flush_hold{0};
     std::chrono::microseconds shielded_hold{0};
@@ -119,6 +125,12 @@ void ClearAttestedUTXOSnapshotOffer();
     const fs::path& manifest_path,
     uint32_t chunk_size,
     AttestedUTXOSnapshotOffer& out,
+    std::string& error);
+
+/** Hash and size-check a snapshot body against its signed statement. */
+[[nodiscard]] bool VerifyAttestedUTXOSnapshotFile(
+    const fs::path& snapshot_path,
+    const matmul::trusted::UtxoSnapshotStatement& statement,
     std::string& error);
 
 /**

@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <node/blockstorage.h>
+#include <node/matmul_trusted_attestations.h>
 
 #include <arith_uint256.h>
 #include <chain.h>
@@ -58,6 +59,7 @@ static constexpr uint8_t DB_REINDEX_FLAG{'R'};
 static constexpr uint8_t DB_LAST_BLOCK{'l'};
 static constexpr uint8_t DB_PRUNE_LOCK{'L'};
 static constexpr uint8_t DB_PARKED_REORG_BRANCHES{'g'};
+static constexpr uint8_t DB_REORG_RECOVERY_RECORD{'G'};
 static constexpr uint8_t DB_MATMUL_REPLAY_CONTEXT{'M'};
 // Keys used in previous version that might still be found in the DB:
 // BlockTreeDB::DB_TXINDEX_BLOCK{'T'};
@@ -140,6 +142,31 @@ bool BlockTreeDB::ReadParkedReorgBranches(std::set<uint256>& roots)
         return true;
     }
     roots = {persisted_roots.begin(), persisted_roots.end()};
+    return true;
+}
+
+bool BlockTreeDB::WriteReorgRecoveryRecord(
+    const std::optional<node::ReorgRecoveryRecord>& record)
+{
+    CDBBatch batch(*this);
+    if (record.has_value()) {
+        batch.Write(DB_REORG_RECOVERY_RECORD, *record);
+    } else {
+        batch.Erase(DB_REORG_RECOVERY_RECORD);
+    }
+    return WriteBatch(batch, /*fSync=*/true);
+}
+
+bool BlockTreeDB::ReadReorgRecoveryRecord(
+    std::optional<node::ReorgRecoveryRecord>& record)
+{
+    if (!Exists(DB_REORG_RECOVERY_RECORD)) {
+        record.reset();
+        return true;
+    }
+    node::ReorgRecoveryRecord decoded;
+    if (!Read(DB_REORG_RECOVERY_RECORD, decoded)) return false;
+    record = std::move(decoded);
     return true;
 }
 
@@ -491,11 +518,15 @@ MatMulReplayContextMigration ReconcileMatMulReplayAuthorityContext(
         if (index == nullptr) {
             continue;
         }
-        // Trusted attestations are local-policy authority and are never safe
-        // to preserve across startup: the signer set and threshold are not
-        // consensus parameters. ExactReplay may survive only under an exact
-        // versioned consensus-context match.
+        // Trusted attestations are local-policy authority. Preserve the bit
+        // only if the durable archive can still prove quorum under the current
+        // chain id, replay context, signer set, and threshold. Add() verifies
+        // every restored signature against that complete current context.
         if ((index->nStatus & BLOCK_TRUSTED_REPLAY_ATTESTED) == 0) {
+            continue;
+        }
+        if (index->phashBlock != nullptr &&
+            node::matmul_trusted::HasQuorum(index->GetBlockHash(), index->nHeight)) {
             continue;
         }
         index->nStatus &= ~BLOCK_TRUSTED_REPLAY_ATTESTED;
@@ -507,6 +538,18 @@ MatMulReplayContextMigration ReconcileMatMulReplayAuthorityContext(
             ? MatMulReplayContextDisposition::MATCHED
             : MatMulReplayContextDisposition::MIGRATED,
         cleared_trusted};
+}
+
+void RecomputeMatMulAuthenticatedChainWork(
+    std::span<CBlockIndex* const> indices,
+    const Consensus::Params& params)
+{
+    AssertLockHeld(::cs_main);
+    std::vector<CBlockIndex*> ordered{indices.begin(), indices.end()};
+    std::sort(ordered.begin(), ordered.end(), CBlockIndexHeightOnlyComparator{});
+    for (CBlockIndex* index : ordered) {
+        if (index != nullptr) UpdateAuthenticatedChainWork(*index, params);
+    }
 }
 
 // Randomized equal-work tie-breaking state (see blockstorage.h). Default ON
@@ -603,6 +646,29 @@ std::vector<CBlockIndex*> BlockManager::GetAllBlockIndices()
     return rv;
 }
 
+std::vector<const CBlockIndex*> BlockManager::GetAllBlockIndices() const
+{
+    AssertLockHeld(cs_main);
+    std::vector<const CBlockIndex*> rv;
+    rv.reserve(m_block_index.size());
+    for (const auto& [_, block_index] : m_block_index) {
+        rv.push_back(&block_index);
+    }
+    return rv;
+}
+
+void BlockManager::ForEachBlockChild(
+    CBlockIndex& parent,
+    const std::function<void(CBlockIndex&)>& visit)
+{
+    AssertLockHeld(cs_main);
+    const auto it{m_block_children.find(&parent)};
+    if (it == m_block_children.end()) return;
+    for (CBlockIndex* child : it->second) {
+        visit(*child);
+    }
+}
+
 CBlockIndex* BlockManager::LookupBlockIndex(const uint256& hash)
 {
     AssertLockHeld(cs_main);
@@ -636,6 +702,7 @@ CBlockIndex* BlockManager::AddToBlockIndex(const CBlockHeader& block, CBlockInde
     BlockMap::iterator miPrev = m_block_index.find(block.hashPrevBlock);
     if (miPrev != m_block_index.end()) {
         pindexNew->pprev = &(*miPrev).second;
+        m_block_children[pindexNew->pprev].push_back(pindexNew);
         pindexNew->nHeight = NextBlockHeightOrLimit(pindexNew->pprev->nHeight);
         pindexNew->BuildSkip();
     }
@@ -890,18 +957,40 @@ CBlockIndex* BlockManager::InsertBlockIndex(const uint256& hash)
     return pindex;
 }
 
-bool BlockManager::LoadBlockIndex(const std::optional<uint256>& snapshot_blockhash)
+bool BlockManager::LoadBlockIndex(
+    const std::optional<uint256>& snapshot_blockhash,
+    const std::optional<AssumeutxoData>& attested_assumeutxo)
 {
     if (!m_block_tree_db->LoadBlockIndexGuts(
             GetConsensus(), [this](const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main) { return this->InsertBlockIndex(hash); }, m_interrupt)) {
         return false;
     }
 
+    // LoadBlockIndexGuts fills parent pointers while entries are deserialized.
+    // Build adjacency once after that pass; subsequent AddToBlockIndex calls
+    // maintain it incrementally.
+    m_block_children.clear();
+    for (auto& [_, block_index] : m_block_index) {
+        if (block_index.pprev != nullptr) {
+            m_block_children[block_index.pprev].push_back(&block_index);
+        }
+    }
+
     if (!m_block_tree_db->LoadPruneLocks(m_prune_locks, m_interrupt)) return false;
 
     if (snapshot_blockhash) {
         CBlockIndex* base{LookupBlockIndex(*snapshot_blockhash)};
-        std::optional<AssumeutxoData> maybe_au_data = GetParams().AssumeutxoForBlockhash(*snapshot_blockhash);
+        std::optional<AssumeutxoData> maybe_au_data;
+        if (attested_assumeutxo) {
+            if (attested_assumeutxo->blockhash != *snapshot_blockhash) {
+                m_opts.notifications.fatalError(
+                    _("Attested snapshot metadata does not match the snapshot base blockhash."));
+                return false;
+            }
+            maybe_au_data = attested_assumeutxo;
+        } else {
+            maybe_au_data = GetParams().AssumeutxoForBlockhash(*snapshot_blockhash);
+        }
         if (!maybe_au_data && GetParams().IsMockableChain() && base != nullptr) {
             maybe_au_data = GetParams().AssumeutxoForHeight(base->nHeight);
             if (maybe_au_data) {
@@ -1037,9 +1126,11 @@ bool BlockManager::WriteBlockIndexDB()
     return true;
 }
 
-bool BlockManager::LoadBlockIndexDB(const std::optional<uint256>& snapshot_blockhash)
+bool BlockManager::LoadBlockIndexDB(
+    const std::optional<uint256>& snapshot_blockhash,
+    const std::optional<AssumeutxoData>& attested_assumeutxo)
 {
-    if (!LoadBlockIndex(snapshot_blockhash)) {
+    if (!LoadBlockIndex(snapshot_blockhash, attested_assumeutxo)) {
         return false;
     }
     const uint256 current_replay_context{
@@ -1068,6 +1159,13 @@ bool BlockManager::LoadBlockIndexDB(const std::optional<uint256>& snapshot_block
         LogPrintf(
             "MatMul replay authority context initialized/changed; "
             "no persisted replay authority required revalidation\n");
+    }
+    if (replay_migration.cleared_trusted_status != 0) {
+        // LoadBlockIndex derived authenticated work before current signer
+        // provenance was reconciled. Demote the changed blocks and every
+        // descendant parent-first before ChainstateManager selects its best
+        // header or populates download/candidate state.
+        RecomputeMatMulAuthenticatedChainWork(all_indices, GetConsensus());
     }
     int max_blockfile_num{0};
 

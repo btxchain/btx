@@ -21,13 +21,8 @@ void AttestedUTXOSnapshotP2P::ResetForTest()
     LOCK(m_mutex);
     m_budgets.clear();
     m_global_transfers = 0;
-    m_waiting_manifest = false;
-    m_waiting_chunk = false;
-    m_manifest.reset();
-    m_chunk.reset();
-    m_wait_peer = -1;
-    m_wait_hash.SetNull();
-    m_wait_chunk_index = 0;
+    m_sessions.clear();
+    m_next_session = 1;
 }
 
 bool AttestedUTXOSnapshotP2P::AdmitManifestRequest(NodeId peer,
@@ -106,43 +101,38 @@ void AttestedUTXOSnapshotP2P::PeerDisconnected(NodeId peer)
         }
         m_budgets.erase(it);
     }
-    if (m_wait_peer == peer) {
-        m_waiting_manifest = false;
-        m_waiting_chunk = false;
-        m_cv.notify_all();
+    for (auto& [_, session] : m_sessions) {
+        if (session.peer == peer) session.cancelled = true;
     }
+    m_cv.notify_all();
 }
 
-void AttestedUTXOSnapshotP2P::BeginManifestWait(NodeId peer, const uint256& block_hash)
+std::optional<AttestedUTXOSnapshotP2P::SessionId>
+AttestedUTXOSnapshotP2P::BeginSession(NodeId peer, const uint256& block_hash)
 {
     LOCK(m_mutex);
-    m_waiting_manifest = true;
-    m_waiting_chunk = false;
-    m_wait_peer = peer;
-    m_wait_hash = block_hash;
-    m_manifest.reset();
-    m_chunk.reset();
+    if (m_sessions.size() >= MAX_CLIENT_SESSIONS) return std::nullopt;
+    const SessionId id{m_next_session++};
+    m_sessions.emplace(id, ClientSession{.peer = peer, .block_hash = block_hash});
+    return id;
 }
 
-void AttestedUTXOSnapshotP2P::BeginChunkWait(NodeId peer,
-                                             const uint256& block_hash,
-                                             uint32_t chunk_index)
+bool AttestedUTXOSnapshotP2P::BeginChunkWait(SessionId id, uint32_t chunk_index)
 {
     LOCK(m_mutex);
-    m_waiting_chunk = true;
-    m_waiting_manifest = false;
-    m_wait_peer = peer;
-    m_wait_hash = block_hash;
-    m_wait_chunk_index = chunk_index;
-    m_chunk.reset();
+    auto it{m_sessions.find(id)};
+    if (it == m_sessions.end() || it->second.cancelled ||
+        it->second.waiting_manifest) return false;
+    it->second.waiting_chunk = true;
+    it->second.chunk_index = chunk_index;
+    it->second.chunk.reset();
+    return true;
 }
 
-void AttestedUTXOSnapshotP2P::CancelWaits()
+void AttestedUTXOSnapshotP2P::CancelSession(SessionId id)
 {
     LOCK(m_mutex);
-    m_waiting_manifest = false;
-    m_waiting_chunk = false;
-    m_wait_peer = -1;
+    m_sessions.erase(id);
     m_cv.notify_all();
 }
 
@@ -150,53 +140,76 @@ void AttestedUTXOSnapshotP2P::DeliverManifest(NodeId peer,
                                               AttestedUTXOSnapshotManifestMsg msg)
 {
     LOCK(m_mutex);
-    if (!m_waiting_manifest || m_wait_peer != peer) return;
-    if (!m_wait_hash.IsNull() && msg.block_hash != m_wait_hash) return;
-    m_manifest = std::move(msg);
-    m_waiting_manifest = false;
+    for (auto& [_, session] : m_sessions) {
+        if (!session.waiting_manifest || session.cancelled ||
+            session.peer != peer ||
+            (!session.block_hash.IsNull() && msg.block_hash != session.block_hash)) {
+            continue;
+        }
+        session.manifest = msg;
+        session.block_hash = msg.block_hash;
+        session.waiting_manifest = false;
+    }
     m_cv.notify_all();
 }
 
 void AttestedUTXOSnapshotP2P::DeliverChunk(NodeId peer, AttestedUTXOSnapshotChunkMsg msg)
 {
     LOCK(m_mutex);
-    if (!m_waiting_chunk || m_wait_peer != peer) return;
-    if (msg.block_hash != m_wait_hash || msg.chunk_index != m_wait_chunk_index) return;
-    m_chunk = std::move(msg);
-    m_waiting_chunk = false;
+    for (auto& [_, session] : m_sessions) {
+        if (!session.waiting_chunk || session.cancelled ||
+            session.peer != peer || msg.block_hash != session.block_hash ||
+            msg.chunk_index != session.chunk_index) {
+            continue;
+        }
+        session.chunk = msg;
+        session.waiting_chunk = false;
+    }
     m_cv.notify_all();
 }
 
 std::optional<AttestedUTXOSnapshotManifestMsg> AttestedUTXOSnapshotP2P::WaitManifest(
-    std::chrono::milliseconds timeout)
+    SessionId id, std::chrono::milliseconds timeout)
 {
     WAIT_LOCK(m_mutex, lock);
     const auto deadline{std::chrono::steady_clock::now() + timeout};
-    while (!m_manifest.has_value() && m_waiting_manifest) {
+    while (true) {
+        auto it{m_sessions.find(id)};
+        if (it == m_sessions.end() || it->second.cancelled) return std::nullopt;
+        if (it->second.manifest.has_value()) {
+            auto out{std::move(it->second.manifest)};
+            it->second.manifest.reset();
+            return out;
+        }
+        if (!it->second.waiting_manifest) return std::nullopt;
         if (m_cv.wait_until(lock, deadline) == std::cv_status::timeout) {
-            m_waiting_manifest = false;
+            it = m_sessions.find(id);
+            if (it != m_sessions.end()) it->second.waiting_manifest = false;
             return std::nullopt;
         }
     }
-    auto out{std::move(m_manifest)};
-    m_manifest.reset();
-    return out;
 }
 
 std::optional<AttestedUTXOSnapshotChunkMsg> AttestedUTXOSnapshotP2P::WaitChunk(
-    std::chrono::milliseconds timeout)
+    SessionId id, std::chrono::milliseconds timeout)
 {
     WAIT_LOCK(m_mutex, lock);
     const auto deadline{std::chrono::steady_clock::now() + timeout};
-    while (!m_chunk.has_value() && m_waiting_chunk) {
+    while (true) {
+        auto it{m_sessions.find(id)};
+        if (it == m_sessions.end() || it->second.cancelled) return std::nullopt;
+        if (it->second.chunk.has_value()) {
+            auto out{std::move(it->second.chunk)};
+            it->second.chunk.reset();
+            return out;
+        }
+        if (!it->second.waiting_chunk) return std::nullopt;
         if (m_cv.wait_until(lock, deadline) == std::cv_status::timeout) {
-            m_waiting_chunk = false;
+            it = m_sessions.find(id);
+            if (it != m_sessions.end()) it->second.waiting_chunk = false;
             return std::nullopt;
         }
     }
-    auto out{std::move(m_chunk)};
-    m_chunk.reset();
-    return out;
 }
 
 } // namespace node

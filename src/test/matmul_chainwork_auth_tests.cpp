@@ -20,14 +20,18 @@
 #include <common/args.h>
 #include <consensus/params.h>
 #include <kernel/chainstatemanager_opts.h>
+#include <node/blockstorage.h>
 #include <test/util/setup_common.h>
 #include <util/chaintype.h>
 
 #include <boost/test/unit_test.hpp>
 
+#include <array>
 #include <cstdint>
 #include <deque>
 #include <limits>
+#include <set>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -645,6 +649,159 @@ BOOST_AUTO_TEST_CASE(claimed_work_exceeds_tip_while_trust_adjusted_does_not)
     // deeper authenticated tip — download policy must not copy this metric.
     BOOST_CHECK(PreferTrustAdjustedHeader(*comp_tip, *auth_tip, kAllowance));
     BOOST_CHECK(!PreferTrustAdjustedHeader(*auth_tip, *comp_tip, kAllowance));
+}
+
+// Regression for the production descendant propagation contract: promoting a
+// body on one branch must visit only that branch's affected subtree. Historical
+// unrelated headers must not turn every ordered IBD body into a full-index scan
+// while cs_main is held.
+BOOST_AUTO_TEST_CASE(authenticated_propagation_visits_only_affected_subtree)
+{
+    LOCK(::cs_main);
+    const Consensus::Params params = ParamsWithFork(1);
+
+    Chain base;
+    CBlockIndex* fork = base.Add(ST_AUTHENTICATED);
+    base.Recompute(params);
+
+    std::deque<CBlockIndex> affected;
+    CBlockIndex* parent = fork;
+    constexpr size_t AFFECTED_DESCENDANTS{50};
+    for (size_t i = 0; i <= AFFECTED_DESCENDANTS; ++i) {
+        affected.emplace_back();
+        CBlockIndex& idx = affected.back();
+        idx.pprev = parent;
+        idx.nHeight = parent->nHeight + 1;
+        idx.nBits = TEST_NBITS;
+        idx.nStatus = ST_HEADER_ONLY;
+        idx.nChainWork = parent->nChainWork + GetBlockProof(idx);
+        UpdateAuthenticatedChainWork(idx, params);
+        parent = &idx;
+    }
+    CBlockIndex& promoted{affected.front()};
+    CBlockIndex& affected_tip{affected.back()};
+
+    std::deque<CBlockIndex> unrelated;
+    CBlockIndex* unrelated_parent = fork;
+    constexpr size_t UNRELATED_HEADERS{10'000};
+    for (size_t i = 0; i < UNRELATED_HEADERS; ++i) {
+        unrelated.emplace_back();
+        CBlockIndex& idx = unrelated.back();
+        idx.pprev = unrelated_parent;
+        idx.nHeight = unrelated_parent->nHeight + 1;
+        idx.nBits = TEST_NBITS;
+        idx.nStatus = ST_HEADER_ONLY;
+        idx.nChainWork = unrelated_parent->nChainWork + GetBlockProof(idx);
+        UpdateAuthenticatedChainWork(idx, params);
+        unrelated_parent = &idx;
+    }
+    const arith_uint256 unrelated_before{
+        unrelated.back().nAuthenticatedChainWork};
+
+    std::unordered_map<CBlockIndex*, std::vector<CBlockIndex*>> children;
+    auto index_branch = [&](auto& branch) {
+        for (CBlockIndex& idx : branch) children[idx.pprev].push_back(&idx);
+    };
+    index_branch(affected);
+    index_branch(unrelated);
+
+    promoted.nStatus = ST_AUTHENTICATED;
+    UpdateAuthenticatedChainWork(promoted, params);
+    size_t enumerated_parents{0};
+    size_t visited_children{0};
+    PropagateAuthenticatedChainWorkDescendants(
+        promoted, params,
+        [&](CBlockIndex& current,
+            const std::function<void(CBlockIndex&)>& visit) {
+            ++enumerated_parents;
+            const auto it{children.find(&current)};
+            if (it == children.end()) return;
+            for (CBlockIndex* child : it->second) {
+                ++visited_children;
+                visit(*child);
+            }
+        });
+
+    BOOST_CHECK_EQUAL(visited_children, AFFECTED_DESCENDANTS);
+    BOOST_CHECK_EQUAL(enumerated_parents, AFFECTED_DESCENDANTS + 1);
+    BOOST_CHECK(affected_tip.nAuthenticatedChainWork >
+                unrelated_before);
+    BOOST_CHECK_EQUAL(unrelated.back().nAuthenticatedChainWork.GetHex(),
+                      unrelated_before.GetHex());
+}
+
+// BLOCK_VALID_TRANSACTIONS records block validity, not durable authority. In
+// trusted replay mode, removing a signer or raising the quorum on restart must
+// demote trust-adjusted work unless current provenance is still available.
+BOOST_AUTO_TEST_CASE(trusted_replay_requires_current_authority_provenance)
+{
+    LOCK(::cs_main);
+    Consensus::Params params = ParamsWithFork(1);
+    params.nMatMulRCHeight = 1;
+    params.nMatMulRCProfile = 1;
+    params.nMatMulRCCoupledHeight = std::numeric_limits<int32_t>::max();
+
+    Chain chain;
+    CBlockIndex* pre_fork = chain.Add(ST_AUTHENTICATED);
+    CBlockIndex* trusted = chain.Add(ST_AUTHENTICATED);
+    chain.Recompute(params);
+
+    BOOST_REQUIRE(params.IsMatMulTrustedReplayAttestationActive(trusted->nHeight));
+    BOOST_CHECK(!IsBlockAuthenticated(*trusted, params));
+
+    trusted->nStatus |= BLOCK_TRUSTED_REPLAY_ATTESTED;
+    BOOST_CHECK(IsBlockAuthenticated(*trusted, params));
+
+    trusted->nStatus &= ~BLOCK_TRUSTED_REPLAY_ATTESTED;
+    BOOST_CHECK(!IsBlockAuthenticated(*trusted, params));
+
+    trusted->nStatus |= BLOCK_EXACT_REPLAY_VERIFIED;
+    BOOST_CHECK(IsBlockAuthenticated(*trusted, params));
+    BOOST_CHECK(IsBlockAuthenticated(*pre_fork, params));
+}
+
+BOOST_AUTO_TEST_CASE(trusted_replay_provenance_demotion_recomputes_descendants)
+{
+    LOCK(::cs_main);
+    Consensus::Params params = ParamsWithFork(1);
+    params.nMatMulRCHeight = 1;
+    params.nMatMulRCProfile = 1;
+    params.nMatMulRCCoupledHeight = std::numeric_limits<int32_t>::max();
+
+    Chain chain;
+    CBlockIndex* pre_fork = chain.Add(ST_AUTHENTICATED);
+    CBlockIndex* trusted = chain.Add(
+        ST_AUTHENTICATED | BLOCK_TRUSTED_REPLAY_ATTESTED);
+    CBlockIndex* descendant = chain.Add(ST_HEADER_ONLY);
+    // Exercise the production HasQuorum lookup instead of taking the
+    // synthetic null-phash shortcut in authority reconciliation.
+    trusted->phashBlock = &uint256::ONE;
+    chain.Recompute(params);
+    const arith_uint256 trusted_work{trusted->nAuthenticatedChainWork};
+    BOOST_REQUIRE(trusted_work > pre_fork->nAuthenticatedChainWork);
+    BOOST_CHECK_EQUAL(descendant->nAuthenticatedChainWork.GetHex(),
+                      trusted_work.GetHex());
+
+    std::array<CBlockIndex*, 3> indices{pre_fork, trusted, descendant};
+    std::set<CBlockIndex*> dirty_indices;
+    const uint256 replay_context{};
+    const auto migration{node::ReconcileMatMulReplayAuthorityContext(
+        indices,
+        replay_context,
+        replay_context,
+        dirty_indices)};
+    BOOST_CHECK(migration.disposition ==
+                node::MatMulReplayContextDisposition::MATCHED);
+    BOOST_CHECK_EQUAL(migration.cleared_trusted_status, 1U);
+    BOOST_CHECK((trusted->nStatus & BLOCK_TRUSTED_REPLAY_ATTESTED) == 0);
+    BOOST_CHECK_EQUAL(dirty_indices.count(trusted), 1U);
+
+    node::RecomputeMatMulAuthenticatedChainWork(indices, params);
+
+    BOOST_CHECK_EQUAL(trusted->nAuthenticatedChainWork.GetHex(),
+                      pre_fork->nAuthenticatedChainWork.GetHex());
+    BOOST_CHECK_EQUAL(descendant->nAuthenticatedChainWork.GetHex(),
+                      pre_fork->nAuthenticatedChainWork.GetHex());
 }
 
 BOOST_AUTO_TEST_SUITE_END()

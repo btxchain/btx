@@ -6,12 +6,16 @@
 
 #include <hash.h>
 
+#include <limits>
 #include <string>
 
 namespace matmul::trusted {
 namespace {
 
-constexpr char HASH_DOMAIN[] = "BTX_TRUSTED_UTXO_SNAPSHOT_ATTESTATION_V1";
+constexpr char HASH_DOMAIN[] = "BTX_TRUSTED_UTXO_SNAPSHOT_ATTESTATION_V2";
+constexpr uint64_t MAX_SIGNED_SNAPSHOT_FILE_SIZE{512ULL << 30};
+constexpr uint32_t MIN_SIGNED_SNAPSHOT_CHUNK_SIZE{64U << 10};
+constexpr uint32_t MAX_SIGNED_SNAPSHOT_CHUNK_SIZE{4U << 20};
 
 bool IsCanonicalSigner(const CPubKey& pubkey)
 {
@@ -94,6 +98,20 @@ UtxoSnapshotVerifyResult VerifyStatementFields(
     if (statement.replay_authority_context !=
         expected_replay_authority_context) {
         return UtxoSnapshotVerifyResult::WrongReplayAuthorityContext;
+    }
+    if (statement.snapshot_file_size == 0 ||
+        statement.snapshot_file_size > MAX_SIGNED_SNAPSHOT_FILE_SIZE ||
+        statement.snapshot_file_hash.IsNull() ||
+        statement.snapshot_chunk_size < MIN_SIGNED_SNAPSHOT_CHUNK_SIZE ||
+        statement.snapshot_chunk_size > MAX_SIGNED_SNAPSHOT_CHUNK_SIZE) {
+        return UtxoSnapshotVerifyResult::InvalidSnapshotGeometry;
+    }
+    const uint64_t expected_chunks{
+        1 + ((statement.snapshot_file_size - 1) /
+             statement.snapshot_chunk_size)};
+    if (expected_chunks > std::numeric_limits<uint32_t>::max() ||
+        statement.snapshot_chunk_count != expected_chunks) {
+        return UtxoSnapshotVerifyResult::InvalidSnapshotGeometry;
     }
     return UtxoSnapshotVerifyResult::Valid;
 }
@@ -242,6 +260,8 @@ std::string_view UtxoSnapshotVerifyResultName(
         return "wrong-shielded-commitment";
     case UtxoSnapshotVerifyResult::WrongReplayAuthorityContext:
         return "wrong-replay-authority-context";
+    case UtxoSnapshotVerifyResult::InvalidSnapshotGeometry:
+        return "invalid-snapshot-geometry";
     case UtxoSnapshotVerifyResult::InvalidSigner: return "invalid-signer";
     case UtxoSnapshotVerifyResult::UntrustedSigner: return "untrusted-signer";
     case UtxoSnapshotVerifyResult::InvalidSignature: return "invalid-signature";

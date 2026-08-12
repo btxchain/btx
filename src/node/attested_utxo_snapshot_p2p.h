@@ -15,6 +15,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <ios>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -49,9 +50,25 @@ struct AttestedUTXOSnapshotChunkMsg {
     uint256 chunk_hash{};
     std::vector<uint8_t> data{};
 
-    SERIALIZE_METHODS(AttestedUTXOSnapshotChunkMsg, obj)
+    template <typename Stream>
+    void Serialize(Stream& s) const
     {
-        READWRITE(obj.block_hash, obj.chunk_index, obj.chunk_hash, obj.data);
+        s << block_hash << chunk_index << chunk_hash;
+        WriteCompactSize(s, data.size());
+        if (!data.empty()) s.write(MakeByteSpan(data));
+    }
+
+    template <typename Stream>
+    void Unserialize(Stream& s)
+    {
+        s >> block_hash >> chunk_index >> chunk_hash;
+        const uint64_t size{ReadCompactSize(s)};
+        if (size > ATTESTED_UTXO_SNAPSHOT_MAX_CHUNK_SIZE) {
+            throw std::ios_base::failure(
+                "attested UTXO snapshot chunk exceeds policy limit");
+        }
+        data.resize(static_cast<size_t>(size));
+        if (!data.empty()) s.read(MakeWritableByteSpan(data));
     }
 };
 
@@ -62,6 +79,8 @@ struct AttestedUTXOSnapshotChunkMsg {
 class AttestedUTXOSnapshotP2P
 {
 public:
+    using SessionId = uint64_t;
+    static constexpr size_t MAX_CLIENT_SESSIONS{4};
     static AttestedUTXOSnapshotP2P& Get();
 
     void ResetForTest();
@@ -73,18 +92,22 @@ public:
     void ReleaseChunkTransfer(NodeId peer);
     void PeerDisconnected(NodeId peer);
 
-    /** Client: register interest so an inbound utxomanifest is delivered here. */
-    void BeginManifestWait(NodeId peer, const uint256& block_hash);
-    void BeginChunkWait(NodeId peer, const uint256& block_hash, uint32_t chunk_index);
-    void CancelWaits();
+    /**
+     * Client: allocate an isolated fetch session. Concurrent RPCs cannot
+     * cancel, overwrite, or consume each other's replies.
+     */
+    [[nodiscard]] std::optional<SessionId> BeginSession(
+        NodeId peer, const uint256& block_hash);
+    [[nodiscard]] bool BeginChunkWait(SessionId session, uint32_t chunk_index);
+    void CancelSession(SessionId session);
 
     void DeliverManifest(NodeId peer, AttestedUTXOSnapshotManifestMsg msg);
     void DeliverChunk(NodeId peer, AttestedUTXOSnapshotChunkMsg msg);
 
     [[nodiscard]] std::optional<AttestedUTXOSnapshotManifestMsg> WaitManifest(
-        std::chrono::milliseconds timeout);
+        SessionId session, std::chrono::milliseconds timeout);
     [[nodiscard]] std::optional<AttestedUTXOSnapshotChunkMsg> WaitChunk(
-        std::chrono::milliseconds timeout);
+        SessionId session, std::chrono::milliseconds timeout);
 
 private:
     struct PeerBudget {
@@ -100,14 +123,18 @@ private:
     std::map<NodeId, PeerBudget> m_budgets GUARDED_BY(m_mutex);
     size_t m_global_transfers GUARDED_BY(m_mutex){0};
 
-    bool m_waiting_manifest GUARDED_BY(m_mutex){false};
-    NodeId m_wait_peer GUARDED_BY(m_mutex){-1};
-    uint256 m_wait_hash GUARDED_BY(m_mutex){};
-    std::optional<AttestedUTXOSnapshotManifestMsg> m_manifest GUARDED_BY(m_mutex);
-
-    bool m_waiting_chunk GUARDED_BY(m_mutex){false};
-    uint32_t m_wait_chunk_index GUARDED_BY(m_mutex){0};
-    std::optional<AttestedUTXOSnapshotChunkMsg> m_chunk GUARDED_BY(m_mutex);
+    struct ClientSession {
+        NodeId peer{-1};
+        uint256 block_hash{};
+        bool waiting_manifest{true};
+        bool waiting_chunk{false};
+        bool cancelled{false};
+        uint32_t chunk_index{0};
+        std::optional<AttestedUTXOSnapshotManifestMsg> manifest{};
+        std::optional<AttestedUTXOSnapshotChunkMsg> chunk{};
+    };
+    std::map<SessionId, ClientSession> m_sessions GUARDED_BY(m_mutex);
+    SessionId m_next_session GUARDED_BY(m_mutex){1};
 };
 
 } // namespace node

@@ -542,6 +542,7 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-assumevalid=<hex>", strprintf("If this block is in the chain assume that it and its ancestors are valid and potentially skip script verification for their transactions while still checking other consensus rules (0 to verify all, default: %s, testnet3: %s, testnet4: %s, signet: %s, shieldedv2dev: %s)", defaultChainParams->GetConsensus().defaultAssumeValid.GetHex(), testnetChainParams->GetConsensus().defaultAssumeValid.GetHex(), testnet4ChainParams->GetConsensus().defaultAssumeValid.GetHex(), signetChainParams->GetConsensus().defaultAssumeValid.GetHex(), shieldedv2devChainParams->GetConsensus().defaultAssumeValid.GetHex()), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmulvalidation=<mode>", "Select MatMul transcript verification mode: consensus (default), trusted, economic, or spv. trusted performs ordinary block/body/script validation but replaces local Profile-1 ExactReplay with an explicitly configured M-of-N signed archive-validator quorum; it is an operator-trusted mirror, not an independently validating full node.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmulrcexecution=<mode>", "Select local MatMul RC ExactReplay execution: strict-device requires a production-qualified device and forbids CPU fallback; auto-fallback permits device-to-CPU fallback for pre-activation/testing; cpu-diagnostic explicitly runs the portable oracle (default: strict-device on a chain with a finite RC activation height, auto-fallback while RC activation is disabled). Only strict-device with a currently qualified production provider advertises NODE_MATMUL_CONSENSUS.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-allowunverifiablematmulconsensus", "Allow a consensus-mode node to start on a production chain even when no qualified MatMul ExactReplay provider is available (default: 0). The node cannot cross the RC activation boundary until a provider becomes ready. This emergency diagnostic override is unsafe for unattended nodes.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmultrustedpubkey=<hex>", "Compressed secp256k1 public key trusted to attest successful Profile-1 ExactReplay. Repeat for N signers; each must be distinct. Required with -matmulvalidation=trusted. Mainnet permits 1-of-1 with a prominent warning; configure at least 2 independent signers to avoid a single proof-of-work authority.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmultrustedthreshold=<n>", "Required distinct trusted signatures (M) for one block, 1..N (default: 1). On mainnet, fewer than 2 distinct configured signers or M<2 starts with a prominent warning rather than being refused: above the Profile-1 activation height the quorum replaces the MatMul proof-of-work check, so a 1-of-1 quorum makes one key the node's sole proof-of-work authority. Configure 2 independent signers with M=2 to remove that single point of failure.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmultrustedwaitms=<n>", "Maximum time a trusted-mirror block may remain parked awaiting an M-of-N attestation quorum before the attempt is left retryable (non-punitive), in milliseconds (default: 60000, maximum: 600000). Does not block the verify worker: many blocks may await quorum concurrently.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -559,10 +560,10 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-shieldedstartupaudit", "Audit restored shielded state against historical block data during startup (default: 1). Applies when -fastshieldedstartup is disabled or cannot be taken: set to 0 to keep the persisted-state drift sync but skip the cross-chain audit. Consensus checks still run for newly connected blocks.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-resetshieldedstate", "One-shot repair: wipe the on-disk shielded_state directory at startup and force a single clean rebuild of shielded validation state from local block data (default: 0). Supported replacement for manually moving shielded_state aside when a prior shielded rebuild was interrupted/corrupted; block files and wallets are untouched. Pass once, let the rebuild finish (watch the 'RebuildShieldedState: replaying ...' progress lines), then remove it. Requires intact local block data; if blocks are pruned/corrupt use a snapshot or -reindex instead.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-allowunpinnedshieldedsnapshot", "Allow loadtxoutset to load an assumeutxo snapshot whose shielded section (pool balance + nullifier set + commitment tree) has no consensus pin for its height (default: 0). An unpinned shielded section is trusted from the snapshot source and not validated against a consensus pin; set to 1 only for explicitly trusted repair/bootstrap material.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-reorgprotectionprofile=<mode>", "Per-node reorg/finality profile: emergency (default), standard, miner (alias for standard), archive, balanced, or strict. Built-in profiles require extra work before following any late branch that rewrites one or more active-chain blocks; emergency/strict/standard warn after 3-block rewrites, balanced warns after 12, and archive alarms after 72. Parking is opt-in with -parkdeepreorg=1. This is local fork-choice policy, not block validity.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-parkdeepreorg", "Per-node deep-reorg parking action override (NON-CONSENSUS). When 1 and -maxreorgdepthpark/profile park depth is set, the node refuses to auto-switch to a branch deeper than that depth and stays on its current tip pending operator action. When 0, it follows the automated fork-choice policy and only alarms/defers by hysteresis. (default: 0)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-reorgprotectionprofile=<mode>", "Per-node reorg/finality profile: emergency (default), standard, miner (alias for standard), archive, balanced, or strict. Emergency parks rewrites deeper than 6 blocks; standard/strict warn after 3-block rewrites, balanced warns after 12, and archive alarms after 72. Use -parkdeepreorg=0 to disable emergency parking. This is local fork-choice policy, not block validity.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-parkdeepreorg", "Per-node deep-reorg parking action override (NON-CONSENSUS). When 1 and -maxreorgdepthpark/profile park depth is set, the node refuses to auto-switch to a branch deeper than that depth and stays on its current tip pending operator action. When 0, it follows the automated fork-choice policy and only alarms/defers by hysteresis. When unset, the selected profile decides (the default emergency profile parks beyond depth 6).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-maxreorgdepthwarn=<n>", "Warn/alarm when a candidate branch would reorganize more than this many blocks (default: active -reorgprotectionprofile warn depth, standard=3). Must be >= 1.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-maxreorgdepthpark=<n>", "Park/refuse automatic switch when a candidate branch would reorganize more than this many blocks and -parkdeepreorg=1 (default: disabled in all built-in profiles). Must be >= 1.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-maxreorgdepthpark=<n>", "Park/refuse automatic switch when a candidate branch would reorganize more than this many blocks and parking is enabled (default: 6 for emergency; disabled for other built-in profiles). Must be >= 1.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-localfinalitydepth=<n>", "Report practical local finality after this many confirmations in mining/difficulty RPCs (default: active -reorgprotectionprofile finality depth, emergency=72, standard=12). This is not consensus finality. Must be >= 1.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-reorghysteresisdepth=<n>", "Require extra work before auto-switching to a late branch that would reorganize more than this many blocks (default: active -reorgprotectionprofile hysteresis depth; built-in profiles use 0, so any depth-1-or-deeper rewrite needs extra work). Set to 0 to protect every active-chain rewrite; use -reorghysteresisworkmargin=0 to disable. Must be >= 0.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-reorghysteresisworkmargin=<n>", "Extra work margin, in current-tip block equivalents, required for shallow reorg hysteresis (default: active -reorgprotectionprofile margin; standard/emergency=2). Set to 0 to disable hysteresis while keeping warnings/optional parking.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -1218,6 +1219,22 @@ std::string DefaultMatMulRCExecutionMode(const CChainParams& chainparams)
                    std::numeric_limits<int32_t>::max()
                ? "strict-device"
                : "auto-fallback";
+}
+
+bool RefuseUnverifiableMatMulConsensusStartup(
+    const CChainParams& chainparams,
+    const std::string& validation_mode,
+    bool strict_device_ready,
+    bool allow_unverifiable_startup)
+{
+    const auto& consensus{chainparams.GetConsensus()};
+    const bool production_rc_epoch_configured{
+        consensus.nMatMulRCHeight != std::numeric_limits<int32_t>::max() &&
+        !consensus.fMatMulRCUseToyDims};
+    return production_rc_epoch_configured &&
+           validation_mode == "consensus" &&
+           !strict_device_ready &&
+           !allow_unverifiable_startup;
 }
 
 bool AppInitParameterInteraction(const ArgsManager& args)
@@ -2254,11 +2271,28 @@ static bool InitializeMatMulRCReadinessPostDaemon(
     // designed and simply needs either a qualified GPU or trusted mode.
     // Reported by an independent operator 2026-08-11 whose fresh CPU node
     // stalled at 184999 with no idea why.
-    if (!rc_strict_device_ready &&
-        chainparams.GetConsensus().nMatMulRCHeight != std::numeric_limits<int32_t>::max() &&
-        args.GetArg("-matmulvalidation", "consensus") == "consensus") {
+    const bool unverifiable_consensus{
+        !rc_strict_device_ready &&
+        chainparams.GetConsensus().nMatMulRCHeight !=
+            std::numeric_limits<int32_t>::max() &&
+        matmul_validation_mode == "consensus"};
+    if (RefuseUnverifiableMatMulConsensusStartup(
+            chainparams, matmul_validation_mode, rc_strict_device_ready,
+            args.GetBoolArg("-allowunverifiablematmulconsensus", false))) {
+        return InitError(strprintf(
+            _("MatMul consensus startup refused: no qualified ExactReplay "
+              "provider is ready (provider=%s, reason=%s, "
+              "workspace_required=%llu, workspace_capacity=%llu). Provide a "
+              "qualified accelerator, select an explicitly trusted/economic/SPV "
+              "validation mode, or use -allowunverifiablematmulconsensus=1 only "
+              "for supervised diagnostics."),
+            rc_provider, rc_resolution_reason,
+            static_cast<unsigned long long>(rc_workspace_required_bytes),
+            static_cast<unsigned long long>(rc_workspace_capacity_bytes)));
+    }
+    if (unverifiable_consensus) {
         LogPrintf(
-            "MatMul RC WARNING: this node has NO qualified ExactReplay device "
+            "MatMul RC UNSAFE OVERRIDE: this node has NO qualified ExactReplay device "
             "(provider=%s reason=%s) and is running -matmulvalidation=consensus. "
             "It will validate normally up to the Epoch-A activation height and "
             "then STALL one block below it, deferring every MatMul block with "
@@ -2328,20 +2362,13 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         if (!node::matmul_trusted::OpenPersistence(
                 args.GetDataDirNet() / "matmul_attestations.dat",
                 persist_error)) {
-            InitWarning(strprintf(
-                _("Failed to load MatMul attestation archive (%s); starting with an empty archive and regenerating from ExactReplay bits as needed."),
-                persist_error));
             node::matmul_trusted::ClosePersistence();
-            std::string reopen_error;
-            // Truncate the corrupt file by opening a fresh empty archive.
-            fs::remove(args.GetDataDirNet() / "matmul_attestations.dat");
-            if (!node::matmul_trusted::OpenPersistence(
-                    args.GetDataDirNet() / "matmul_attestations.dat",
-                    reopen_error)) {
-                return InitError(strprintf(
-                    _("Failed to create MatMul attestation archive: %s"),
-                    reopen_error));
-            }
+            // Authority history is not a disposable cache. Preserve the
+            // archive and WAL byte-for-byte for diagnosis/recovery and refuse
+            // to continue with an implicitly empty signer history.
+            return InitError(strprintf(
+                _("Failed to load the durable MatMul attestation archive: %s. The archive and WAL were preserved; repair or explicitly replace them before restarting."),
+                persist_error));
         }
     }
 

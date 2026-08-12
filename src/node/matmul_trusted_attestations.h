@@ -6,6 +6,7 @@
 #define BTX_NODE_MATMUL_TRUSTED_ATTESTATIONS_H
 
 #include <matmul/trusted_exact_replay_attestation.h>
+#include <span.h>
 
 #include <chrono>
 #include <cstdint>
@@ -100,17 +101,16 @@ VerifyUtxoSnapshotManifest(
 /**
  * Open/replace the durable attestation archive under `path`.
  *
- * Retention: capacity-bounded to the store's max_blocks/max_attestations
- * (defaults 4096 blocks / 16384 signatures). Wall-clock TTL pruning is
- * disabled while the archive is open so a long-lived authority process cannot
- * drop signatures that mirrors still need after a restart. Oldest completed
- * buckets are still evicted under capacity pressure. Load verifies every
- * signature against the current configured chain/signers before import.
+ * The in-memory hot cache remains capacity-bounded (defaults 4096 blocks /
+ * 16384 signatures), while complete verified provenance is retained in a
+ * disk-backed LevelDB and queried on cache misses. The legacy flat archive and
+ * bounded WAL are migrated into that database. Every record is reverified
+ * against the current configured chain/context/signers before use.
  */
 bool OpenPersistence(const fs::path& path, std::string& error);
 void ClosePersistence();
 [[nodiscard]] bool PersistenceEnabled();
-/** Flush the in-memory store to the durable archive (no-op if closed). */
+/** Synchronize queued records and checkpoint the bounded WAL (no-op if closed). */
 bool FlushPersistence(std::string& error);
 
 /**
@@ -314,6 +314,28 @@ struct TrustedWorkRank {
         .height = height,
         .sequence = sequence,
     };
+}
+
+/** Result of applying the independent tip-extender occupancy ceiling. */
+struct TipExtendingCapacityDecision {
+    bool allow{false};
+    std::optional<size_t> replace_index{};
+};
+
+/** Bound free Phase-1 siblings that all claim to extend the active tip. */
+[[nodiscard]] inline TipExtendingCapacityDecision EvaluateTipExtendingCapacity(
+    const TrustedWorkRank& candidate,
+    Span<const TrustedWorkRank> current,
+    size_t max_tip_extending)
+{
+    if (max_tip_extending == 0) return {};
+    if (current.size() < max_tip_extending) return {.allow = true};
+    size_t worst{0};
+    for (size_t i{1}; i < current.size(); ++i) {
+        if (PreferTrustedWork(current[worst], current[i])) worst = i;
+    }
+    if (!PreferTrustedWork(candidate, current[worst])) return {};
+    return {.allow = true, .replace_index = worst};
 }
 
 /**

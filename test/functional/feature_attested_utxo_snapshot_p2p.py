@@ -105,7 +105,9 @@ class AttestedUtxoSnapshotP2PTest(BitcoinTestFramework):
         assert_equal(dump["signatures"], 1)
 
         self.log.info("Offer from signer; CPU mirror fetches (quorum-before-body)")
-        offer = archive.offerattestedutxosnapshot("utxo.dat", "utxo.manifest", 4096)
+        # Transfer geometry is signed into the v2 manifest so a server cannot
+        # amplify requests or disk allocation after quorum verification.
+        offer = archive.offerattestedutxosnapshot("utxo.dat", "utxo.manifest", 1 << 20)
         assert_greater_than(offer["chunk_count"], 0)
         assert "ATTESTED_UTXO_SNAPSHOT" in archive.getnetworkinfo()["localservicesnames"]
 
@@ -152,7 +154,7 @@ class AttestedUtxoSnapshotP2PTest(BitcoinTestFramework):
         self.log.info("Non-signer CPU mirror re-serves the snapshot")
         archive.withdrawattestedutxosnapshot()
         reoffer = mirror_a.offerattestedutxosnapshot(
-            "fetched.dat", "fetched.manifest", 4096
+            "fetched.dat", "fetched.manifest", 1 << 20
         )
         assert_equal(reoffer["block_hash"], dump["base_hash"])
 

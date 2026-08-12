@@ -1101,6 +1101,28 @@ bool ShieldedAccountRegistryState::Append(Span<const ShieldedAccountLeaf> accoun
                                           std::vector<uint64_t>* inserted_indices,
                                           bool sync_payload_store)
 {
+    return AppendInternal(account_leaves,
+                          inserted_indices,
+                          sync_payload_store,
+                          /*defer_payload_store=*/false);
+}
+
+bool ShieldedAccountRegistryState::AppendPrepared(
+    Span<const ShieldedAccountLeaf> account_leaves,
+    std::vector<uint64_t>* inserted_indices)
+{
+    return AppendInternal(account_leaves,
+                          inserted_indices,
+                          /*sync_payload_store=*/false,
+                          /*defer_payload_store=*/true);
+}
+
+bool ShieldedAccountRegistryState::AppendInternal(
+    Span<const ShieldedAccountLeaf> account_leaves,
+    std::vector<uint64_t>* inserted_indices,
+    bool sync_payload_store,
+    bool defer_payload_store)
+{
     if (account_leaves.empty()) return true;
     if (m_entries.size() + account_leaves.size() > MAX_REGISTRY_ENTRIES) {
         return false;
@@ -1138,7 +1160,7 @@ bool ShieldedAccountRegistryState::Append(Span<const ShieldedAccountLeaf> accoun
         }
         entry.account_leaf_payload = SerializeShieldedAccountLeafPayload(leaf);
         if (!entry.IsValid()) return false;
-        if (m_payload_store) {
+        if (m_payload_store && !defer_payload_store) {
             payload_batch.emplace_back(entry.leaf_index, entry.account_leaf_payload);
         }
         if (inserted_indices != nullptr) {
@@ -1149,8 +1171,9 @@ bool ShieldedAccountRegistryState::Append(Span<const ShieldedAccountLeaf> accoun
             .account_leaf_commitment = entry.account_leaf_commitment,
             .entry_commitment = ComputeShieldedAccountRegistryEntryCommitment(entry),
             .spent = entry.spent,
-            .inline_payload = m_payload_store ? std::vector<uint8_t>{}
-                                              : std::move(entry.account_leaf_payload),
+            .inline_payload = m_payload_store && !defer_payload_store
+                ? std::vector<uint8_t>{}
+                : std::move(entry.account_leaf_payload),
         });
     }
 
@@ -1164,6 +1187,27 @@ bool ShieldedAccountRegistryState::Append(Span<const ShieldedAccountLeaf> accoun
     m_entries.insert(m_entries.end(),
                      std::make_move_iterator(new_entries.begin()),
                      std::make_move_iterator(new_entries.end()));
+    return true;
+}
+
+bool ShieldedAccountRegistryState::CommitPreparedPayloads(bool sync_payload_store)
+{
+    if (!m_payload_store) return true;
+
+    std::vector<std::pair<uint64_t, std::vector<uint8_t>>> payload_batch;
+    for (const auto& entry : m_entries) {
+        if (!entry.inline_payload.empty()) {
+            payload_batch.emplace_back(entry.leaf_index, entry.inline_payload);
+        }
+    }
+    if (payload_batch.empty()) return true;
+    if (!m_payload_store->WritePayloadBatch(payload_batch, sync_payload_store)) {
+        return false;
+    }
+    for (auto& entry : m_entries) {
+        entry.inline_payload.clear();
+        entry.inline_payload.shrink_to_fit();
+    }
     return true;
 }
 

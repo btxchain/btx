@@ -249,6 +249,11 @@ public:
         return m_config.replay_authority_context;
     }
     [[nodiscard]] size_t Threshold() const { return m_config.threshold; }
+    [[nodiscard]] size_t MaxBlocks() const { return m_config.max_blocks; }
+    [[nodiscard]] size_t MaxAttestations() const
+    {
+        return m_config.max_attestations;
+    }
     [[nodiscard]] const std::set<CPubKey>& TrustedSigners() const
     {
         return m_trusted_signers;

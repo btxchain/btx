@@ -27,6 +27,7 @@
 #include <atomic>
 #include <cstdio>
 #include <map>
+#include <limits>
 #include <stdexcept>
 
 namespace node {
@@ -180,6 +181,52 @@ bool CaptureShieldedSection(Chainstate& chainstate,
     return true;
 }
 
+bool HashSnapshotFile(const fs::path& path,
+                      uint64_t& out_size,
+                      uint256& out_hash,
+                      std::string& error)
+{
+    FILE* file{fsbridge::fopen(path, "rb")};
+    if (!file) {
+        error = "Couldn't open snapshot file for hashing";
+        return false;
+    }
+    HashWriter hasher{};
+    std::vector<uint8_t> buffer(1 << 20);
+    uint64_t total{0};
+    while (true) {
+        const size_t n{fread(buffer.data(), 1, buffer.size(), file)};
+        if (n > 0) {
+            if (total > ATTESTED_UTXO_SNAPSHOT_MAX_FILE_SIZE - n) {
+                fclose(file);
+                error = "Snapshot exceeds the signed file-size cap";
+                return false;
+            }
+            hasher.write(AsBytes(Span{buffer.data(), n}));
+            total += n;
+        }
+        if (n < buffer.size()) {
+            if (ferror(file)) {
+                fclose(file);
+                error = "Error hashing snapshot file";
+                return false;
+            }
+            break;
+        }
+    }
+    if (fclose(file) != 0) {
+        error = "Error closing snapshot file after hashing";
+        return false;
+    }
+    if (total == 0) {
+        error = "Snapshot body is empty";
+        return false;
+    }
+    out_size = total;
+    out_hash = hasher.GetHash();
+    return true;
+}
+
 } // namespace
 
 uint256 AttestedUTXOSnapshotBytesHash(Span<const uint8_t> data)
@@ -298,7 +345,9 @@ AttestedUTXOSnapshotExportResult CreateAttestedUTXOSnapshot(
 
     const uint256 txoutset_hash{hash_ss.GetHash()};
 
-    if (coins_afile.fclose() != 0) {
+    const bool coins_committed{coins_afile.Commit()};
+    const int coins_close_result{coins_afile.fclose()};
+    if (!coins_committed || coins_close_result != 0) {
         fs::remove(coins_tmp);
         throw std::runtime_error("Error closing temporary coins file");
     }
@@ -339,7 +388,9 @@ AttestedUTXOSnapshotExportResult CreateAttestedUTXOSnapshot(
         afile.write(AsBytes(Span{shielded_bytes.data(), shielded_bytes.size()}));
     }
 
-    if (afile.fclose() != 0) {
+    const bool snapshot_committed{afile.Commit()};
+    const int snapshot_close_result{afile.fclose()};
+    if (!snapshot_committed || snapshot_close_result != 0) {
         throw std::runtime_error(strprintf(
             "Error closing %s: %s", fs::PathToString(tmppath), SysErrorString(errno)));
     }
@@ -352,6 +403,11 @@ AttestedUTXOSnapshotExportResult CreateAttestedUTXOSnapshot(
     result.txoutset_hash = txoutset_hash;
     result.nchaintx = tip->m_chain_tx_count;
     result.shielded_state_pin = shielded_state_pin;
+    std::string file_error;
+    if (!HashSnapshotFile(tmppath, result.file_size, result.file_hash,
+                          file_error)) {
+        throw std::runtime_error(file_error);
+    }
     result.max_cs_main_hold = max_hold;
     result.flush_hold = flush_hold;
     result.shielded_hold = shielded_hold;
@@ -362,7 +418,8 @@ AttestedUTXOSnapshotExportResult CreateAttestedUTXOSnapshot(
 bool OfferAttestedUTXOSnapshot(AttestedUTXOSnapshotOffer offer, std::string& error)
 {
     if (offer.block_hash.IsNull() || offer.height < 0 || offer.file_size == 0 ||
-        offer.chunk_size == 0 ||
+        offer.file_size > ATTESTED_UTXO_SNAPSHOT_MAX_FILE_SIZE ||
+        offer.chunk_size < ATTESTED_UTXO_SNAPSHOT_MIN_CHUNK_SIZE ||
         offer.chunk_size > ATTESTED_UTXO_SNAPSHOT_MAX_CHUNK_SIZE ||
         offer.chunk_count == 0 || offer.snapshot_path.empty() ||
         offer.manifest_path.empty() || offer.manifest.signatures.empty()) {
@@ -371,6 +428,13 @@ bool OfferAttestedUTXOSnapshot(AttestedUTXOSnapshotOffer offer, std::string& err
     }
     if (!fs::exists(offer.snapshot_path) || !fs::exists(offer.manifest_path)) {
         error = "Snapshot or manifest file missing for offer";
+        return false;
+    }
+    if (offer.file_size != offer.manifest.statement.snapshot_file_size ||
+        offer.file_hash != offer.manifest.statement.snapshot_file_hash ||
+        offer.chunk_size != offer.manifest.statement.snapshot_chunk_size ||
+        offer.chunk_count != offer.manifest.statement.snapshot_chunk_count) {
+        error = "Snapshot offer geometry does not match signed manifest";
         return false;
     }
     LOCK(g_attested_offer_mutex);
@@ -449,7 +513,8 @@ bool BuildAttestedUTXOSnapshotOfferFromFiles(const fs::path& snapshot_path,
                                              AttestedUTXOSnapshotOffer& out,
                                              std::string& error)
 {
-    if (chunk_size == 0 || chunk_size > ATTESTED_UTXO_SNAPSHOT_MAX_CHUNK_SIZE) {
+    if (chunk_size < ATTESTED_UTXO_SNAPSHOT_MIN_CHUNK_SIZE ||
+        chunk_size > ATTESTED_UTXO_SNAPSHOT_MAX_CHUNK_SIZE) {
         error = "Invalid chunk size";
         return false;
     }
@@ -489,28 +554,28 @@ bool BuildAttestedUTXOSnapshotOfferFromFiles(const fs::path& snapshot_path,
         return false;
     }
 
-    HashWriter file_hash{};
-    // Heap, not stack (see above): avoids RPC-worker stack overflow.
-    std::vector<uint8_t> buf(1 << 20);
-    uint64_t total{0};
-    while (true) {
-        const size_t n{fread(buf.data(), 1, buf.size(), sfile)};
-        if (n > 0) {
-            file_hash.write(AsBytes(Span{buf.data(), n}));
-            total += n;
-        }
-        if (n < buf.size()) {
-            if (ferror(sfile)) {
-                fclose(sfile);
-                error = "Error hashing snapshot file";
-                return false;
-            }
-            break;
-        }
-    }
     fclose(sfile);
+    uint64_t total{0};
+    uint256 file_hash;
+    if (!HashSnapshotFile(snapshot_path, total, file_hash, error)) {
+        return false;
+    }
     if (total != static_cast<uint64_t>(sz)) {
-        error = "Snapshot size mismatch while hashing";
+        error = "Snapshot size changed while hashing";
+        return false;
+    }
+
+    const auto& statement{manifest.statement};
+    if (total != statement.snapshot_file_size ||
+        file_hash != statement.snapshot_file_hash ||
+        chunk_size != statement.snapshot_chunk_size) {
+        error = "Snapshot body or requested chunk geometry does not match signed manifest";
+        return false;
+    }
+    const uint64_t chunk_count64{1 + ((total - 1) / chunk_size)};
+    if (chunk_count64 > std::numeric_limits<uint32_t>::max() ||
+        chunk_count64 != statement.snapshot_chunk_count) {
+        error = "Signed snapshot chunk count is inconsistent";
         return false;
     }
 
@@ -518,12 +583,27 @@ bool BuildAttestedUTXOSnapshotOfferFromFiles(const fs::path& snapshot_path,
     out.height = manifest.statement.block_height;
     out.file_size = total;
     out.chunk_size = chunk_size;
-    out.chunk_count = static_cast<uint32_t>(
-        (total + chunk_size - 1) / chunk_size);
-    out.file_hash = file_hash.GetHash();
+    out.chunk_count = static_cast<uint32_t>(chunk_count64);
+    out.file_hash = file_hash;
     out.snapshot_path = snapshot_path;
     out.manifest_path = manifest_path;
     out.manifest = std::move(manifest);
+    return true;
+}
+
+bool VerifyAttestedUTXOSnapshotFile(
+    const fs::path& snapshot_path,
+    const matmul::trusted::UtxoSnapshotStatement& statement,
+    std::string& error)
+{
+    uint64_t size{0};
+    uint256 hash;
+    if (!HashSnapshotFile(snapshot_path, size, hash, error)) return false;
+    if (size != statement.snapshot_file_size ||
+        hash != statement.snapshot_file_hash) {
+        error = "Snapshot body does not match signed size/hash";
+        return false;
+    }
     return true;
 }
 

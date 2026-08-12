@@ -1745,7 +1745,8 @@ bool V2Transport::SetMessageToSend(CSerializedNetMsg& msg) noexcept
     // and BIP324Cipher::Encrypt would SILENTLY TRUNCATE it, corrupting the wire length and
     // desyncing the entire encrypted stream. Such a message must instead propagate via compact
     // blocks (cmpctblock + blocktxn fragments, each well under the cap) or the v1 transport, so it
-    // never legitimately reaches this point for a v2 peer (see net_processing block-serving path).
+    // never legitimately reaches this point for a v2 peer (see the negotiated
+    // bounded chunk path in net_processing block serving).
     //
     // Handling: DROP the message (return true to consume it) rather than truncate it. Two rejected
     // alternatives:
@@ -4390,6 +4391,19 @@ bool CConnman::ForNode(NodeId id, std::function<bool(CNode* pnode)> func)
         }
     }
     return found != nullptr && NodeFullyConnected(found) && func(found);
+}
+
+std::shared_ptr<CNode> CConnman::GetNodeRef(NodeId id)
+{
+    LOCK(m_nodes_mutex);
+    for (CNode* node : m_nodes) {
+        if (node->GetId() != id || !NodeFullyConnected(node)) continue;
+        node->AddRef();
+        return std::shared_ptr<CNode>(node, [](CNode* owned) {
+            owned->Release();
+        });
+    }
+    return {};
 }
 
 CSipHasher CConnman::GetDeterministicRandomizer(uint64_t id) const

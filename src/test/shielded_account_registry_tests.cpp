@@ -632,6 +632,34 @@ BOOST_AUTO_TEST_CASE(registry_persisted_snapshot_requires_payload_store_and_full
     ShieldedAccountRegistryState::ResetPayloadStore();
 }
 
+BOOST_AUTO_TEST_CASE(registry_prepared_append_does_not_publish_payload_before_commit)
+{
+    RegistryPayloadStoreGuard payload_store_guard(
+        m_path_root / "registry_payload_store_prepared_transition");
+
+    const auto direct_leaf = BuildDirectSendAccountLeaf(MakeDirectOutput(0x89));
+    BOOST_REQUIRE(direct_leaf.has_value());
+    const std::vector<ShieldedAccountLeaf> leaves{*direct_leaf};
+
+    ShieldedAccountRegistryState projected =
+        ShieldedAccountRegistryState::WithConfiguredPayloadStore();
+    BOOST_REQUIRE(projected.AppendPrepared(
+        Span<const ShieldedAccountLeaf>{leaves.data(), leaves.size()}));
+    BOOST_REQUIRE(projected.MaterializeEntry(0).has_value());
+
+    const auto prepared_snapshot = projected.ExportPersistedSnapshot();
+    BOOST_REQUIRE(prepared_snapshot.IsValid());
+    auto before_commit = ShieldedAccountRegistryState::RestorePersisted(prepared_snapshot);
+    BOOST_REQUIRE(before_commit.has_value());
+    BOOST_CHECK(!before_commit->CanMaterializeAllEntries());
+
+    BOOST_REQUIRE(projected.CommitPreparedPayloads());
+    auto after_commit = ShieldedAccountRegistryState::RestorePersisted(prepared_snapshot);
+    BOOST_REQUIRE(after_commit.has_value());
+    BOOST_CHECK(after_commit->CanMaterializeAllEntries());
+    BOOST_CHECK_EQUAL(after_commit->Root(), projected.Root());
+}
+
 BOOST_AUTO_TEST_CASE(registry_truncate_prunes_externalized_payloads)
 {
     RegistryPayloadStoreGuard payload_store_guard(m_path_root / "registry_payload_store_truncate_prune");

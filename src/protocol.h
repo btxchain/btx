@@ -136,6 +136,12 @@ inline constexpr const char* HEADERS{"headers"};
  * The block message transmits a single serialized block.
  */
 inline constexpr const char* BLOCK{"block"};
+/** Negotiate version 1 of bounded full-block chunk relay. */
+inline constexpr const char* SENDBLKCHNK{"sendblkchnk"};
+/** Hashed geometry for a chunked full-block response to GETDATA. */
+inline constexpr const char* BLKCHNKMAN{"blkchnkman"};
+/** One sequential, bounded full-block payload chunk. */
+inline constexpr const char* BLKCHUNK{"blkchunk"};
 /**
  * The getaddr message requests an addr message from the receiving node,
  * preferably one with lots of IP addresses of other receiving nodes.
@@ -401,6 +407,9 @@ inline const std::array ALL_NET_MESSAGE_TYPES{std::to_array<std::string>({
     NetMsgType::SHIELDEDDATA,
     NetMsgType::HEADERS,
     NetMsgType::BLOCK,
+    NetMsgType::SENDBLKCHNK,
+    NetMsgType::BLKCHNKMAN,
+    NetMsgType::BLKCHUNK,
     NetMsgType::GETADDR,
     NetMsgType::MEMPOOL,
     NetMsgType::PING,

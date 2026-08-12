@@ -30,6 +30,18 @@ BOOST_AUTO_TEST_CASE(chunk_bytes_hash_detects_corruption)
     BOOST_CHECK(good != bad);
 }
 
+BOOST_AUTO_TEST_CASE(chunk_decoder_rejects_oversize_before_allocation)
+{
+    DataStream wire;
+    wire << uint256::ONE << uint32_t{0} << uint256::ONE;
+    WriteCompactSize(
+        wire, node::ATTESTED_UTXO_SNAPSHOT_MAX_CHUNK_SIZE + 1ULL);
+
+    node::AttestedUTXOSnapshotChunkMsg decoded;
+    BOOST_CHECK_THROW(wire >> decoded, std::ios_base::failure);
+    BOOST_CHECK(decoded.data.empty());
+}
+
 BOOST_AUTO_TEST_CASE(server_rate_limits_manifest_and_chunk_requests)
 {
     auto& coord{node::AttestedUTXOSnapshotP2P::Get()};
@@ -87,9 +99,9 @@ BOOST_AUTO_TEST_CASE(quorum_before_body_gate_is_enforced_by_fetch_ordering)
     early_chunk.chunk_hash = node::AttestedUTXOSnapshotBytesHash(
         Span{early_chunk.data.data(), early_chunk.data.size()});
     coord.DeliverChunk(/*peer=*/9, early_chunk);
-    BOOST_CHECK(!coord.WaitChunk(std::chrono::milliseconds{1}).has_value());
 
-    coord.BeginManifestWait(/*peer=*/9, uint256{});
+    const auto session{coord.BeginSession(/*peer=*/9, uint256{})};
+    BOOST_REQUIRE(session);
     node::AttestedUTXOSnapshotManifestMsg man;
     man.block_hash = uint256::ONE;
     man.height = 1;
@@ -98,16 +110,53 @@ BOOST_AUTO_TEST_CASE(quorum_before_body_gate_is_enforced_by_fetch_ordering)
     man.chunk_count = 1;
     man.file_hash = early_chunk.chunk_hash;
     coord.DeliverManifest(/*peer=*/9, man);
-    auto got_man{coord.WaitManifest(std::chrono::milliseconds{50})};
+    auto got_man{coord.WaitManifest(*session, std::chrono::milliseconds{50})};
     BOOST_REQUIRE(got_man);
     BOOST_CHECK_EQUAL(got_man->height, 1);
 
     // Only after explicit BeginChunkWait may a chunk be delivered.
-    coord.BeginChunkWait(/*peer=*/9, uint256::ONE, /*chunk_index=*/0);
+    BOOST_REQUIRE(coord.BeginChunkWait(*session, /*chunk_index=*/0));
     coord.DeliverChunk(/*peer=*/9, early_chunk);
-    auto got_chunk{coord.WaitChunk(std::chrono::milliseconds{50})};
+    auto got_chunk{coord.WaitChunk(*session, std::chrono::milliseconds{50})};
     BOOST_REQUIRE(got_chunk);
     BOOST_CHECK_EQUAL(got_chunk->chunk_index, 0U);
+    coord.CancelSession(*session);
+}
+
+BOOST_AUTO_TEST_CASE(concurrent_client_sessions_are_isolated)
+{
+    auto& coord{node::AttestedUTXOSnapshotP2P::Get()};
+    coord.ResetForTest();
+    const auto first{coord.BeginSession(/*peer=*/10, uint256{})};
+    const auto second{coord.BeginSession(/*peer=*/11, uint256{})};
+    BOOST_REQUIRE(first);
+    BOOST_REQUIRE(second);
+
+    node::AttestedUTXOSnapshotManifestMsg a;
+    a.block_hash = uint256::ONE;
+    a.height = 10;
+    node::AttestedUTXOSnapshotManifestMsg b;
+    b.block_hash.data()[0] = 2;
+    b.height = 20;
+    coord.DeliverManifest(/*peer=*/11, b);
+    coord.DeliverManifest(/*peer=*/10, a);
+
+    const auto got_a{coord.WaitManifest(*first, std::chrono::milliseconds{1})};
+    const auto got_b{coord.WaitManifest(*second, std::chrono::milliseconds{1})};
+    BOOST_REQUIRE(got_a);
+    BOOST_REQUIRE(got_b);
+    BOOST_CHECK_EQUAL(got_a->height, 10);
+    BOOST_CHECK_EQUAL(got_b->height, 20);
+
+    coord.CancelSession(*first);
+    BOOST_REQUIRE(coord.BeginChunkWait(*second, 3));
+    node::AttestedUTXOSnapshotChunkMsg chunk;
+    chunk.block_hash = b.block_hash;
+    chunk.chunk_index = 3;
+    chunk.data = {4, 5, 6};
+    coord.DeliverChunk(/*peer=*/11, chunk);
+    BOOST_REQUIRE(coord.WaitChunk(*second, std::chrono::milliseconds{1}));
+    coord.CancelSession(*second);
 }
 
 BOOST_AUTO_TEST_CASE(offer_roundtrip_chunk_read)
@@ -120,7 +169,7 @@ BOOST_AUTO_TEST_CASE(offer_roundtrip_chunk_read)
     {
         FILE* f{fsbridge::fopen(snap, "wb")};
         BOOST_REQUIRE(f);
-        const std::string payload(4096, 'Z');
+        const std::string payload(128U << 10, 'Z');
         BOOST_REQUIRE_EQUAL(fwrite(payload.data(), 1, payload.size(), f), payload.size());
         fclose(f);
     }
@@ -129,6 +178,15 @@ BOOST_AUTO_TEST_CASE(offer_roundtrip_chunk_read)
     manifest.statement.block_hash = uint256::ONE;
     manifest.statement.block_height = 42;
     manifest.statement.coins_count = 1;
+    manifest.statement.snapshot_file_size = 128U << 10;
+    manifest.statement.snapshot_chunk_size =
+        node::ATTESTED_UTXO_SNAPSHOT_MIN_CHUNK_SIZE;
+    manifest.statement.snapshot_chunk_count = 2;
+    {
+        const std::vector<uint8_t> payload(128U << 10, 'Z');
+        manifest.statement.snapshot_file_hash =
+            node::AttestedUTXOSnapshotBytesHash(Span{payload.data(), payload.size()});
+    }
     manifest.signatures.push_back({});
     {
         FILE* f{fsbridge::fopen(man_path, "wb")};
@@ -142,14 +200,14 @@ BOOST_AUTO_TEST_CASE(offer_roundtrip_chunk_read)
     node::AttestedUTXOSnapshotOffer offer;
     std::string error;
     BOOST_REQUIRE(node::BuildAttestedUTXOSnapshotOfferFromFiles(
-        snap, man_path, /*chunk_size=*/1024, offer, error));
-    BOOST_CHECK_EQUAL(offer.chunk_count, 4U);
+        snap, man_path, node::ATTESTED_UTXO_SNAPSHOT_MIN_CHUNK_SIZE, offer, error));
+    BOOST_CHECK_EQUAL(offer.chunk_count, 2U);
     BOOST_CHECK_EQUAL(offer.height, 42);
 
     std::vector<uint8_t> chunk;
     uint256 chunk_hash;
     BOOST_REQUIRE(node::ReadAttestedUTXOSnapshotChunk(offer, 0, chunk, chunk_hash, error));
-    BOOST_CHECK_EQUAL(chunk.size(), 1024U);
+    BOOST_CHECK_EQUAL(chunk.size(), node::ATTESTED_UTXO_SNAPSHOT_MIN_CHUNK_SIZE);
     BOOST_CHECK(chunk_hash == node::AttestedUTXOSnapshotBytesHash(
                     Span{chunk.data(), chunk.size()}));
 

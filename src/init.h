@@ -98,4 +98,12 @@ bool StartIndexBackgroundSync(node::NodeContext& node);
  */
 std::string DefaultMatMulRCExecutionMode(const CChainParams& chainparams);
 
+/** Return true when a production RC consensus node would be unable to verify
+ * the first activated block and startup has not been explicitly overridden. */
+bool RefuseUnverifiableMatMulConsensusStartup(
+    const CChainParams& chainparams,
+    const std::string& validation_mode,
+    bool strict_device_ready,
+    bool allow_unverifiable_startup);
+
 #endif // BITCOIN_INIT_H

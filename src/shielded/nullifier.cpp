@@ -1177,6 +1177,16 @@ bool NullifierSet::PersistShieldedStatePin(const uint256& state_pin)
     return m_db->Write(std::make_pair(DB_SHIELDED_STATE_PIN, uint8_t{0}), state_pin, /*fSync=*/false);
 }
 
+bool NullifierSet::ClearPersistedShieldedStatePin()
+{
+    std::unique_lock lock(m_rwlock);
+    // This erase is the trust-provenance boundary for imported or repaired
+    // state. Sync it before the unverified state stores are published so a
+    // crash can only cause an extra audit, never preserve an obsolete
+    // fast-start authorization beside newly imported data.
+    return m_db->Erase(std::make_pair(DB_SHIELDED_STATE_PIN, uint8_t{0}), /*fSync=*/true);
+}
+
 std::optional<uint256> NullifierSet::ReadPersistedShieldedStatePin() const
 {
     std::shared_lock lock(m_rwlock);

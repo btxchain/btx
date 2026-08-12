@@ -29,6 +29,7 @@
 #include <test/util/validation.h>
 #include <uint256.h>
 #include <util/fs.h>
+#include <util/readwritefile.h>
 #include <util/result.h>
 #include <util/vector.h>
 #include <validation.h>
@@ -1759,7 +1760,10 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_restores_persisted_shielded_state_afte
         BOOST_CHECK(!result);
         BOOST_CHECK_EQUAL(util::ErrorString(result).original,
                           "truncated or malformed BTX shielded snapshot section");
-        BOOST_CHECK(!chainman.HasShieldedState());
+        // Snapshot rollback now restores and reopens the previous durable
+        // state before returning, so callers never observe a half-initialized
+        // consensus view after a rejected section.
+        BOOST_REQUIRE(chainman.HasShieldedState());
 
         BOOST_REQUIRE(chainman.EnsureShieldedStateInitialized());
         BOOST_REQUIRE(chainman.ActiveTip() != nullptr);
@@ -3264,10 +3268,10 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_rebuilds_full_shielded_state_from_chai
     }
 }
 
-// Issue #35 regression: a stale in-flight mutation marker that would force a full shielded rebuild
-// from chain must NOT crash-loop when a block needed for that rebuild has been pruned. Instead the
-// node clears the stale marker, retains its persisted shielded state, and comes up.
-BOOST_FIXTURE_TEST_CASE(chainstatemanager_recovers_when_marker_rebuild_needs_pruned_block,
+// A stale in-flight marker plus missing rebuild blocks is ambiguous: some
+// auxiliary stores may contain source state while others contain target state.
+// Preserve the journal and fail closed instead of exposing that mixed view.
+BOOST_FIXTURE_TEST_CASE(chainstatemanager_fails_closed_when_marker_rebuild_needs_pruned_block,
                         PersistedTestChain100Setup)
 {
     ChainstateManager& chainman = *Assert(m_node.chainman);
@@ -3344,16 +3348,14 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_recovers_when_marker_rebuild_needs_pru
         pruned->nDataPos = 0;
         pruned->nFile = -1;
 
-        // Pre-issue-#35 the stale marker forced rebuild_from_chain() -> ReadBlock() on the pruned
-        // block, which failed identically on every restart -> deterministic crash-loop. With the
-        // full hardening (clear stale marker + retain persisted commitment index / anchor / registry
-        // / settlement state + skip the cross-chain audit when blocks are pruned), a node with a
-        // valid persisted snapshot now RECOVERS under pruning: it comes up on its validated frontier
-        // and clears the stale marker so no restart re-enters the rebuild loop.
-        BOOST_REQUIRE(chainman_restarted.EnsureShieldedStateInitialized());
+        BOOST_CHECK(!chainman_restarted.EnsureShieldedStateInitialized());
         BOOST_REQUIRE(chainman_restarted.ActiveTip() != nullptr);
         BOOST_CHECK(chainman_restarted.ActiveTip()->GetBlockHash() == expected_tip_hash);
-        BOOST_CHECK(!chainman_restarted.ReadShieldedMutationMarker().has_value());
+        const auto retained_marker = chainman_restarted.ReadShieldedMutationMarker();
+        BOOST_REQUIRE(retained_marker.has_value());
+        BOOST_CHECK_EQUAL(retained_marker->target_tip_hash, expected_tip_hash);
+        BOOST_CHECK_EQUAL(retained_marker->target_tip_height, expected_tip_height);
+        BOOST_CHECK(!chainman_restarted.HasShieldedState());
     }
 }
 
@@ -4077,6 +4079,199 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_loads_v9_snapshot_unshield_velocity,
         BOOST_REQUIRE(chainman.ReadShieldedUnshieldVelocity(loaded_velocity));
         BOOST_CHECK_EQUAL(loaded_velocity.WindowTotal(next_block_height, window_blocks), 123 * COIN);
     }
+}
+
+BOOST_FIXTURE_TEST_CASE(chainstatemanager_wrong_snapshot_pin_restores_previous_state,
+                        RecoveryExitVelocityFastStartupPersistedTestChain100Setup)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    const fs::path shielded_section_path =
+        m_args.GetDataDirNet() / "shielded_wrong_pin_rollback.dat";
+
+    node::ShieldedSnapshotSectionHeader header;
+    uint256 original_pin;
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman.EnsureShieldedStateInitialized());
+        const CBlockIndex* const tip = chainman.ActiveTip();
+        BOOST_REQUIRE(tip != nullptr);
+        const auto pin{chainman.ComputeShieldedSnapshotStatePin()};
+        BOOST_REQUIRE(pin.has_value());
+        original_pin = *pin;
+        header = chainman.GetShieldedSnapshotSectionHeader(
+            chainman.ActiveChainstate(), tip);
+        BOOST_CHECK_EQUAL(header.m_commitment_count, 0U);
+        BOOST_CHECK_EQUAL(header.m_nullifier_count, 0U);
+        BOOST_CHECK_EQUAL(header.m_recovery_exit_commitment_count, 0U);
+        BOOST_CHECK_EQUAL(header.m_settlement_anchor_count, 0U);
+        BOOST_CHECK_EQUAL(header.m_netting_manifest_count, 0U);
+        BOOST_CHECK_EQUAL(header.m_account_registry_entry_count, 0U);
+    }
+    {
+        AutoFile outfile{fsbridge::fopen(shielded_section_path, "wb")};
+        BOOST_REQUIRE(!outfile.IsNull());
+        BOOST_REQUIRE_EQUAL(outfile.fclose(), 0);
+    }
+
+    {
+        LOCK(::cs_main);
+        const CBlockIndex* const tip = chainman.ActiveTip();
+        BOOST_REQUIRE(tip != nullptr);
+        uint256 wrong_pin{*uint256::FromHex(std::string(64, 'f'))};
+        if (wrong_pin == original_pin) {
+            wrong_pin = *uint256::FromHex(std::string(64, 'e'));
+        }
+        AutoFile infile{fsbridge::fopen(shielded_section_path, "rb")};
+        BOOST_REQUIRE(!infile.IsNull());
+        auto result{chainman.LoadShieldedSnapshotSection(
+            infile, header, tip,
+            ChainstateManager::ShieldedSnapshotPinPolicy{
+                .required_pin = wrong_pin,
+                .persist_accepted_pin = true,
+            })};
+        BOOST_CHECK(!result);
+        BOOST_CHECK(util::ErrorString(result).original.find(
+                        "does not match the consensus-pinned commitment") !=
+                    std::string::npos);
+
+        // The failing import closed the staging stores and restored the old
+        // directories. Reinitialization must recover the exact previous pin.
+        BOOST_REQUIRE(chainman.EnsureShieldedStateInitialized());
+        const auto restored_pin{chainman.ComputeShieldedSnapshotStatePin()};
+        BOOST_REQUIRE(restored_pin.has_value());
+        BOOST_CHECK_EQUAL(*restored_pin, original_pin);
+    }
+
+    // A later sidecar/base-blockhash failure exercises the same deferred
+    // completion with commit=false. The old state must remain live, not merely
+    // have its directories put back on disk.
+    {
+        LOCK(::cs_main);
+        const CBlockIndex* const tip = chainman.ActiveTip();
+        BOOST_REQUIRE(tip != nullptr);
+        std::function<bool(bool)> finish_snapshot;
+        AutoFile infile{fsbridge::fopen(shielded_section_path, "rb")};
+        BOOST_REQUIRE(!infile.IsNull());
+        auto result{chainman.LoadShieldedSnapshotSection(
+            infile, header, tip,
+            ChainstateManager::ShieldedSnapshotPinPolicy{
+                .required_pin = original_pin,
+                .persist_accepted_pin = true,
+                .deferred_completion = &finish_snapshot,
+            })};
+        BOOST_REQUIRE(result);
+        BOOST_REQUIRE(finish_snapshot);
+        BOOST_REQUIRE(finish_snapshot(false));
+        const auto restored_pin{chainman.ComputeShieldedSnapshotStatePin()};
+        BOOST_REQUIRE(restored_pin.has_value());
+        BOOST_CHECK_EQUAL(*restored_pin, original_pin);
+        BOOST_CHECK(chainman.HasShieldedState());
+    }
+
+    // Operational proof that the restored in-memory handles can still advance.
+    mineBlocks(1);
+}
+
+BOOST_FIXTURE_TEST_CASE(shielded_snapshot_transaction_crash_recovery,
+                        BasicTestingSetup)
+{
+    const fs::path datadir{m_args.GetDataDirNet()};
+    const fs::path live_root{datadir / "shielded_state"};
+    const fs::path live_nullifiers{live_root / "nullifiers"};
+    const std::string backup_name{
+        "shielded_state_snapshot_backup_" + std::string(64, 'a')};
+    const fs::path backup_root{
+        datadir / fs::PathFromString(backup_name)};
+    const fs::path marker_path{datadir /
+                               "shielded_state_snapshot_transaction"};
+    constexpr uint8_t BACKUP_COMPLETE{2};
+    constexpr uint8_t ROLLING_BACK{3};
+
+    auto write_marker = [&](uint8_t phase) {
+        DataStream marker;
+        marker << uint32_t{1} << phase << backup_name;
+        BOOST_REQUIRE(WriteBinaryFile(
+            marker_path,
+            std::string{reinterpret_cast<const char*>(marker.data()),
+                        marker.size()}));
+    };
+    auto write_payload = [](const fs::path& path, std::string_view payload) {
+        fs::create_directories(path);
+        BOOST_REQUIRE(WriteBinaryFile(path / "identity", std::string{payload}));
+    };
+
+    // Pre-base crash: old data is in backup, imported partial data occupies
+    // live paths, and no discoverable snapshot commit exists. Recovery must
+    // remove partial live state and restore the old directory atomically.
+    write_payload(backup_root / "nullifiers", "old-state");
+    write_payload(live_nullifiers, "partial-new-state");
+    write_marker(BACKUP_COMPLETE);
+    BOOST_REQUIRE(
+        ChainstateManager::RecoverInterruptedShieldedSnapshotForTest(datadir));
+    const auto [old_ok, old_bytes]{ReadBinaryFile(live_nullifiers / "identity")};
+    BOOST_REQUIRE(old_ok);
+    BOOST_CHECK_EQUAL(old_bytes, "old-state");
+    BOOST_CHECK(!fs::exists(backup_root));
+    BOOST_CHECK(!fs::exists(marker_path));
+
+    // Mid-rollback crash: nullifiers were already restored and removed from
+    // the backup, while commitments remain backed up. ROLLING_BACK recovery
+    // must not erase the already-restored live directory when completing the
+    // remaining rename.
+    const fs::path live_commitments{live_root / "commitments"};
+    write_payload(backup_root / "commitments", "old-commitments");
+    write_payload(live_commitments, "partial-new-commitments");
+    write_marker(ROLLING_BACK);
+    BOOST_REQUIRE(
+        ChainstateManager::RecoverInterruptedShieldedSnapshotForTest(datadir));
+    const auto [resumed_nullifiers_ok, resumed_nullifiers]{
+        ReadBinaryFile(live_nullifiers / "identity")};
+    const auto [resumed_commitments_ok, resumed_commitments]{
+        ReadBinaryFile(live_commitments / "identity")};
+    BOOST_REQUIRE(resumed_nullifiers_ok);
+    BOOST_REQUIRE(resumed_commitments_ok);
+    BOOST_CHECK_EQUAL(resumed_nullifiers, "old-state");
+    BOOST_CHECK_EQUAL(resumed_commitments, "old-commitments");
+    BOOST_CHECK(!fs::exists(backup_root));
+    BOOST_CHECK(!fs::exists(marker_path));
+
+    // A malformed backup fails closed without deleting the only old copy or
+    // its retry marker. Once the unexpected entry is removed, recovery can
+    // safely resume the same transaction.
+    write_payload(backup_root / "nullifiers", "retry-old-state");
+    write_payload(backup_root / "unexpected", "do-not-delete-backup");
+    write_payload(live_nullifiers, "retry-partial-new-state");
+    write_marker(BACKUP_COMPLETE);
+    BOOST_CHECK(
+        !ChainstateManager::RecoverInterruptedShieldedSnapshotForTest(datadir));
+    BOOST_CHECK(fs::exists(backup_root / "nullifiers" / "identity"));
+    BOOST_CHECK(fs::exists(marker_path));
+    fs::remove_all(backup_root / "unexpected");
+    BOOST_REQUIRE(
+        ChainstateManager::RecoverInterruptedShieldedSnapshotForTest(datadir));
+    const auto [retry_ok, retry_bytes]{
+        ReadBinaryFile(live_nullifiers / "identity")};
+    BOOST_REQUIRE(retry_ok);
+    BOOST_CHECK_EQUAL(retry_bytes, "retry-old-state");
+
+    // Post-base crash: base_blockhash is the final snapshot discovery commit,
+    // so recovery keeps new live state and discards only the stale backup.
+    write_payload(backup_root / "nullifiers", "old-state-2");
+    BOOST_REQUIRE(WriteBinaryFile(live_nullifiers / "identity",
+                                  "committed-new-state"));
+    write_marker(BACKUP_COMPLETE);
+    const fs::path snapshot_dir{datadir / "chainstate_snapshot"};
+    write_payload(snapshot_dir, "unused");
+    BOOST_REQUIRE(WriteBinaryFile(snapshot_dir /
+                                      node::SNAPSHOT_BLOCKHASH_FILENAME,
+                                  std::string(32, '\x01')));
+    BOOST_REQUIRE(
+        ChainstateManager::RecoverInterruptedShieldedSnapshotForTest(datadir));
+    const auto [new_ok, new_bytes]{ReadBinaryFile(live_nullifiers / "identity")};
+    BOOST_REQUIRE(new_ok);
+    BOOST_CHECK_EQUAL(new_bytes, "committed-new-state");
+    BOOST_CHECK(!fs::exists(backup_root));
+    BOOST_CHECK(!fs::exists(marker_path));
 }
 
 BOOST_FIXTURE_TEST_CASE(chainstatemanager_loads_legacy_snapshot_rebuilds_unshield_velocity,

@@ -2416,7 +2416,12 @@ void ReconsiderBlock(ChainstateManager& chainman, uint256 block_hash) {
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Block not found");
         }
 
-        chainman.UnparkReorgBranchContainingBlock(pblockindex);
+        const bool was_parked =
+            chainman.FindParkedReorgBranchRoot(pblockindex) != nullptr;
+        if (was_parked && !chainman.UnparkReorgBranchContainingBlock(pblockindex)) {
+            throw JSONRPCError(RPC_DATABASE_ERROR,
+                               "Failed to persist parked reorg branch removal");
+        }
         chainman.ActiveChainstate().ResetBlockFailureFlags(pblockindex);
         chainman.RecalculateBestHeader();
     }
@@ -4337,22 +4342,34 @@ bool WriteManifestFile(const fs::path& path,
                        const matmul::trusted::UtxoSnapshotManifest& manifest,
                        std::string& error)
 {
-    FILE* file{fsbridge::fopen(path, "wb")};
+    const fs::path tmp{path + ".tmp"};
+    FILE* file{fsbridge::fopen(tmp, "wb")};
     AutoFile afile{file};
     if (afile.IsNull()) {
-        error = "Couldn't open manifest file for writing: " + path.utf8string();
+        error = "Couldn't open manifest temp file for writing: " + tmp.utf8string();
         return false;
     }
     try {
         afile << manifest;
     } catch (const std::ios_base::failure& e) {
         error = strprintf("Failed to serialize manifest: %s", e.what());
+        afile.fclose();
+        fs::remove(tmp);
         return false;
     }
-    if (afile.fclose() != 0) {
-        error = "Failed to close manifest file: " + path.utf8string();
+    const bool committed{afile.Commit()};
+    const int close_result{afile.fclose()};
+    if (!committed || close_result != 0) {
+        fs::remove(tmp);
+        error = "Failed to commit manifest file: " + path.utf8string();
         return false;
     }
+    if (!RenameOver(tmp, path)) {
+        fs::remove(tmp);
+        error = "Failed to publish manifest file: " + path.utf8string();
+        return false;
+    }
+    DirectoryCommit(path.parent_path());
     return true;
 }
 
@@ -4370,6 +4387,15 @@ bool ReadManifestFile(const fs::path& path,
         afile >> manifest;
     } catch (const std::ios_base::failure& e) {
         error = strprintf("Unable to parse manifest: %s", e.what());
+        return false;
+    }
+    const int64_t end_of_manifest{afile.tell()};
+    afile.seek(0, SEEK_END);
+    if (afile.tell() != end_of_manifest ||
+        end_of_manifest < 0 ||
+        static_cast<uint64_t>(end_of_manifest) >
+            node::ATTESTED_UTXO_SNAPSHOT_MAX_MANIFEST_BYTES) {
+        error = "Manifest has trailing data or exceeds the size limit";
         return false;
     }
     return true;
@@ -4493,14 +4519,13 @@ static RPCHelpMan dumptxoutsetattested()
         fs::remove(tmppath + ".coins");
         throw JSONRPCError(RPC_MISC_ERROR, e.what());
     }
-    try {
-        fs::rename(tmppath, path);
-    } catch (const fs::filesystem_error& e) {
+    if (!RenameOver(tmppath, path)) {
         fs::remove(tmppath);
         throw JSONRPCError(
             RPC_MISC_ERROR,
-            strprintf("Failed to move snapshot into place: %s", e.what()));
+            "Failed to move snapshot into place");
     }
+    DirectoryCommit(path.parent_path());
     if (!fs::exists(path)) {
         throw JSONRPCError(RPC_MISC_ERROR, "Snapshot file was not produced");
     }
@@ -4514,6 +4539,11 @@ static RPCHelpMan dumptxoutsetattested()
     statement.m_chain_tx_count = exported.nchaintx;
     statement.shielded_state_commitment = exported.shielded_state_pin;
     statement.replay_authority_context = *authority;
+    statement.snapshot_file_size = exported.file_size;
+    statement.snapshot_file_hash = exported.file_hash;
+    statement.snapshot_chunk_size = node::ATTESTED_UTXO_SNAPSHOT_CHUNK_SIZE;
+    statement.snapshot_chunk_count = static_cast<uint32_t>(
+        1 + ((exported.file_size - 1) / statement.snapshot_chunk_size));
 
     auto signature{node::matmul_trusted::SignUtxoSnapshot(statement)};
     if (!signature) {
@@ -4714,17 +4744,12 @@ static RPCHelpMan loadtxoutsetattested()
             RPC_INVALID_PARAMETER,
             "Snapshot metadata coins_count does not match the attested manifest");
     }
-
-    AssumeutxoData attested_au{
-        .height = manifest.statement.block_height,
-        .hash_serialized = AssumeutxoHash{manifest.statement.hash_serialized},
-        .m_chain_tx_count = manifest.statement.m_chain_tx_count,
-        .blockhash = manifest.statement.block_hash,
-        .shielded_state_commitment = manifest.statement.shielded_state_commitment,
-    };
+    if (!node::VerifyAttestedUTXOSnapshotFile(path, manifest.statement, error)) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, error);
+    }
 
     auto activation_result{
-        chainman.ActivateSnapshot(afile, metadata, /*in_memory=*/false, attested_au)};
+        chainman.ActivateSnapshot(afile, metadata, /*in_memory=*/false, manifest)};
     if (!activation_result) {
         throw JSONRPCError(
             RPC_INTERNAL_ERROR,
@@ -4942,13 +4967,20 @@ static RPCHelpMan fetchattestedutxosnapshot()
     }
 
     auto& coord{node::AttestedUTXOSnapshotP2P::Get()};
-    coord.CancelWaits();
-    coord.BeginManifestWait(peer_id, want_hash);
+    const auto session{coord.BeginSession(peer_id, want_hash)};
+    if (!session) {
+        throw JSONRPCError(RPC_MISC_ERROR,
+                           "Too many concurrent attested snapshot fetches");
+    }
+    struct FetchSessionGuard {
+        node::AttestedUTXOSnapshotP2P& coordinator;
+        node::AttestedUTXOSnapshotP2P::SessionId id;
+        ~FetchSessionGuard() { coordinator.CancelSession(id); }
+    } session_guard{coord, *session};
     if (!peerman.RequestAttestedUTXOManifest(peer_id, want_hash)) {
-        coord.CancelWaits();
         throw JSONRPCError(RPC_CLIENT_NODE_NOT_CONNECTED, "Peer not available");
     }
-    auto manifest_msg{coord.WaitManifest(timeout)};
+    auto manifest_msg{coord.WaitManifest(*session, timeout)};
     if (!manifest_msg) {
         throw JSONRPCError(RPC_CLIENT_NODE_NOT_CONNECTED,
                            "Timed out waiting for utxomanifest (quorum-before-body gate)");
@@ -4966,12 +4998,24 @@ static RPCHelpMan fetchattestedutxosnapshot()
     if (!want_hash.IsNull() && manifest_msg->block_hash != want_hash) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, "Remote offer block hash mismatch");
     }
-
-    std::string error;
-    if (!WriteManifestFile(manifest_path, manifest_msg->manifest, error)) {
-        throw JSONRPCError(RPC_MISC_ERROR, error);
+    const auto& signed_statement{manifest_msg->manifest.statement};
+    if (manifest_msg->block_hash != signed_statement.block_hash ||
+        manifest_msg->height != signed_statement.block_height ||
+        manifest_msg->file_size != signed_statement.snapshot_file_size ||
+        manifest_msg->file_hash != signed_statement.snapshot_file_hash ||
+        manifest_msg->chunk_size != signed_statement.snapshot_chunk_size ||
+        manifest_msg->chunk_count != signed_statement.snapshot_chunk_count) {
+        throw JSONRPCError(
+            RPC_INVALID_PARAMETER,
+            "Remote transfer geometry does not match the signed manifest");
+    }
+    if (!CheckDiskSpace(path.parent_path(), manifest_msg->file_size)) {
+        throw JSONRPCError(
+            RPC_MISC_ERROR,
+            "Insufficient disk space for attested snapshot and safety reserve");
     }
 
+    std::string error;
     const fs::path tmppath{path + ".tmp"};
     FILE* out{fsbridge::fopen(tmppath, "wb")};
     if (!out) {
@@ -4984,11 +5028,13 @@ static RPCHelpMan fetchattestedutxosnapshot()
     try {
         for (uint32_t i = 0; i < manifest_msg->chunk_count; ++i) {
             if (node.rpc_interruption_point) node.rpc_interruption_point();
-            coord.BeginChunkWait(peer_id, manifest_msg->block_hash, i);
+            if (!coord.BeginChunkWait(*session, i)) {
+                throw std::runtime_error("Snapshot fetch session was cancelled");
+            }
             if (!peerman.RequestAttestedUTXOChunk(peer_id, manifest_msg->block_hash, i)) {
                 throw std::runtime_error("Peer disconnected during chunk fetch");
             }
-            auto chunk{coord.WaitChunk(timeout)};
+            auto chunk{coord.WaitChunk(*session, timeout)};
             if (!chunk) {
                 throw std::runtime_error(strprintf(
                     "Timed out waiting for chunk %u (slow/malicious server)", i));
@@ -4998,6 +5044,15 @@ static RPCHelpMan fetchattestedutxosnapshot()
             if (actual != chunk->chunk_hash) {
                 throw std::runtime_error(strprintf(
                     "Chunk %u integrity failure", i));
+            }
+            const uint64_t expected_size{
+                i + 1 == manifest_msg->chunk_count
+                    ? manifest_msg->file_size -
+                          static_cast<uint64_t>(i) * manifest_msg->chunk_size
+                    : manifest_msg->chunk_size};
+            if (chunk->data.size() != expected_size) {
+                throw std::runtime_error(strprintf(
+                    "Chunk %u length does not match signed geometry", i));
             }
             if (fwrite(chunk->data.data(), 1, chunk->data.size(), out) !=
                 chunk->data.size()) {
@@ -5009,29 +5064,36 @@ static RPCHelpMan fetchattestedutxosnapshot()
     } catch (const std::exception& e) {
         fclose(out);
         fs::remove(tmppath);
-        fs::remove(manifest_path);
-        coord.CancelWaits();
         throw JSONRPCError(RPC_MISC_ERROR, e.what());
     }
-    fclose(out);
-    coord.CancelWaits();
+    const bool committed{FileCommit(out)};
+    const int close_result{fclose(out)};
+    if (!committed || close_result != 0) {
+        fs::remove(tmppath);
+        throw JSONRPCError(RPC_MISC_ERROR,
+                           "Failed to commit downloaded snapshot to disk");
+    }
 
     if (written != manifest_msg->file_size) {
         fs::remove(tmppath);
-        fs::remove(manifest_path);
         throw JSONRPCError(RPC_MISC_ERROR, "Downloaded size does not match manifest file_size");
     }
     if (file_hash.GetHash() != manifest_msg->file_hash) {
         fs::remove(tmppath);
-        fs::remove(manifest_path);
         throw JSONRPCError(RPC_MISC_ERROR, "Downloaded file hash mismatch");
     }
-    try {
-        fs::rename(tmppath, path);
-    } catch (const fs::filesystem_error& e) {
+    if (!RenameOver(tmppath, path)) {
         fs::remove(tmppath);
-        fs::remove(manifest_path);
-        throw JSONRPCError(RPC_MISC_ERROR, e.what());
+        throw JSONRPCError(RPC_MISC_ERROR,
+                           "Failed to publish downloaded snapshot");
+    }
+    DirectoryCommit(path.parent_path());
+    // Publish the signed manifest last. Its presence is the commit marker for
+    // the body+manifest pair after a crash.
+    if (!WriteManifestFile(manifest_path, manifest_msg->manifest, error)) {
+        fs::remove(path);
+        DirectoryCommit(path.parent_path());
+        throw JSONRPCError(RPC_MISC_ERROR, error);
     }
 
     UniValue result{UniValue::VOBJ};

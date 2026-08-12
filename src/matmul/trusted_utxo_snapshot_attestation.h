@@ -29,7 +29,7 @@ namespace matmul::trusted {
  * pin dumptxoutset emits for AssumeutxoData.
  */
 struct UtxoSnapshotStatement {
-    static constexpr uint8_t CURRENT_VERSION{1};
+    static constexpr uint8_t CURRENT_VERSION{2};
 
     uint8_t version{CURRENT_VERSION};
     uint256 chain_id{};
@@ -40,11 +40,20 @@ struct UtxoSnapshotStatement {
     uint64_t m_chain_tx_count{0};
     uint256 shielded_state_commitment{};
     uint256 replay_authority_context{};
+    /**
+     * Raw snapshot-body commitment and transfer geometry. These fields are
+     * signed so an untrusted server cannot turn a valid state manifest into an
+     * unbounded disk allocation or substitute a different body/chunk layout.
+     */
+    uint64_t snapshot_file_size{0};
+    uint256 snapshot_file_hash{};
+    uint32_t snapshot_chunk_size{0};
+    uint32_t snapshot_chunk_count{0};
 
     SERIALIZE_METHODS(UtxoSnapshotStatement, obj)
     {
-        READWRITE(obj.version,
-                  obj.chain_id,
+        READWRITE(obj.version);
+        READWRITE(obj.chain_id,
                   obj.block_hash,
                   obj.block_height,
                   obj.hash_serialized,
@@ -52,6 +61,12 @@ struct UtxoSnapshotStatement {
                   obj.m_chain_tx_count,
                   obj.shielded_state_commitment,
                   obj.replay_authority_context);
+        if (obj.version >= 2) {
+            READWRITE(obj.snapshot_file_size,
+                      obj.snapshot_file_hash,
+                      obj.snapshot_chunk_size,
+                      obj.snapshot_chunk_count);
+        }
     }
 
     friend bool operator==(const UtxoSnapshotStatement&,
@@ -107,6 +122,7 @@ enum class UtxoSnapshotVerifyResult : uint8_t {
     MissingShieldedCommitment,
     WrongShieldedCommitment,
     WrongReplayAuthorityContext,
+    InvalidSnapshotGeometry,
     InvalidSigner,
     UntrustedSigner,
     InvalidSignature,

@@ -413,15 +413,16 @@ public:
     /** Whether upon disconnections, a reconnect with V1 is warranted. */
     virtual bool ShouldReconnectV1() const noexcept = 0;
 
-    /** WP-8 / C4 residual: the largest msg.data payload this transport can
+    /** The largest msg.data payload this transport can
      *  currently emit as ONE message. V1 carries up to the block-bearing
      *  ceiling (MAX_BLOCK_MESSAGE_LENGTH, 24 MB); a single V2/BIP324 packet is
      *  physically capped by its 3-byte contents-length field (~16 MB) and the
      *  send path DROPS anything larger rather than desyncing the cipher
      *  stream. Block-serving code must consult this bound BEFORE composing a
-     *  block/blocktxn message so an oversized payload is routed (compact
-     *  block / NOTFOUND) instead of silently vanishing. Call from the message
-     *  handler thread (same discipline as GetInfo()). */
+     *  block/blocktxn message so an oversized payload is routed through the
+     *  negotiated bounded chunk encoding (or NOTFOUND for legacy peers)
+     *  instead of silently vanishing. Call from the message handler thread
+     *  (same discipline as GetInfo()). */
     virtual size_t MaxSendablePayloadBytes() const noexcept = 0;
 };
 
@@ -1304,6 +1305,10 @@ public:
     RecursiveMutex& GetNodesMutex() const LOCK_RETURNED(m_nodes_mutex) { return m_nodes_mutex; }
 
     bool ForNode(NodeId id, std::function<bool(CNode* pnode)> func);
+    /** Return a lifetime-pinned fully-connected node without retaining
+     * m_nodes_mutex while the caller performs validation work. */
+    std::shared_ptr<CNode> GetNodeRef(NodeId id)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
 
     void PushMessage(CNode* pnode, CSerializedNetMsg&& msg) EXCLUSIVE_LOCKS_REQUIRED(!m_total_bytes_sent_mutex);
 

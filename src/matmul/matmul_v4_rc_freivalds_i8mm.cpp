@@ -77,8 +77,12 @@ void DenseRowBlockPackedScalarLocal(const int8_t* lhs, const int8_t* rhs_packed,
 }
 
 #if defined(__aarch64__) && defined(__ARM_NEON)
-#if defined(__clang__) || defined(__GNUC__)
+#if defined(__clang__)
 #define BTX_RC_TARGET_I8MM __attribute__((target("i8mm")))
+#elif defined(__GNUC__)
+// GCC's AArch64 function target syntax requires extension names to carry the
+// leading '+'. Clang accepts the bare feature name instead.
+#define BTX_RC_TARGET_I8MM __attribute__((target("+i8mm")))
 #else
 #define BTX_RC_TARGET_I8MM
 #endif

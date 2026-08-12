@@ -11,8 +11,6 @@
 #include <algorithm>
 #include <deque>
 #include <functional>
-#include <unordered_map>
-#include <vector>
 
 std::string CBlockFileInfo::ToString() const
 {
@@ -164,13 +162,19 @@ bool IsBlockAuthenticated(const CBlockIndex& block, const Consensus::Params& par
     // legacy nChainWork exactly). At and above the fork, a header's work is only
     // authenticated once its body arrived and the height-selected MatMul
     // authority passed (Profile-1 RC uses ExactReplay). That is precisely the
-    // point at which the index reaches BLOCK_VALID_TRANSACTIONS:
-    // ContextualCheckBlock finishes the MatMul check before
-    // ReceivedBlockTransactions raises validity. A block that failed validation
-    // can never authenticate.
+    // point at which the index reaches BLOCK_VALID_TRANSACTIONS. In trusted
+    // replay mode, transaction validity is deliberately not enough by itself:
+    // signer configuration is local policy and can change across restart, so
+    // an explicit authority-provenance bit must still be present under the
+    // current configuration.
     if (!params.IsMatMulV4Active(block.nHeight)) return true;
     if (block.nStatus & BLOCK_FAILED_MASK) return false;
     if ((block.nStatus & BLOCK_VALID_MASK) < BLOCK_VALID_TRANSACTIONS) return false;
+    if (params.IsMatMulTrustedReplayAttestationActive(block.nHeight) &&
+        (block.nStatus & (BLOCK_EXACT_REPLAY_VERIFIED |
+                          BLOCK_TRUSTED_REPLAY_ATTESTED)) == 0) {
+        return false;
+    }
 
     // Authentication is a contiguous-prefix property, not a count of
     // independently verified bodies. A child body can arrive and pass the
@@ -248,29 +252,21 @@ bool PreferTrustAdjustedHeader(const CBlockIndex& current, const CBlockIndex& ca
 void PropagateAuthenticatedChainWorkDescendants(
     CBlockIndex& root,
     const Consensus::Params& params,
-    std::function<void(std::function<void(CBlockIndex&)>)> for_each_index)
+    const std::function<void(
+        CBlockIndex&,
+        const std::function<void(CBlockIndex&)>&)>& for_each_child,
+    const std::function<void(CBlockIndex&)>& on_updated)
 {
-    // Build a parent→children adjacency from the live block index, then BFS
-    // from `root` so every descendant inherits the updated authenticated base.
-    // Called rarely (body promotion), so an O(N) index scan is acceptable.
-    std::unordered_map<CBlockIndex*, std::vector<CBlockIndex*>> children;
-    for_each_index([&](CBlockIndex& idx) {
-        if (idx.pprev != nullptr) {
-            children[idx.pprev].push_back(&idx);
-        }
-    });
-
     std::deque<CBlockIndex*> queue;
     queue.push_back(&root);
     while (!queue.empty()) {
         CBlockIndex* parent = queue.front();
         queue.pop_front();
-        const auto it = children.find(parent);
-        if (it == children.end()) continue;
-        for (CBlockIndex* child : it->second) {
-            UpdateAuthenticatedChainWork(*child, params);
-            queue.push_back(child);
-        }
+        for_each_child(*parent, [&](CBlockIndex& child) {
+            UpdateAuthenticatedChainWork(child, params);
+            if (on_updated) on_updated(child);
+            queue.push_back(&child);
+        });
     }
 }
 

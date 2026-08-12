@@ -5,12 +5,14 @@
 #include <node/utxo_snapshot.h>
 
 #include <logging.h>
+#include <node/matmul_trusted_attestations.h>
 #include <streams.h>
 #include <sync.h>
 #include <tinyformat.h>
 #include <txdb.h>
 #include <uint256.h>
 #include <util/fs.h>
+#include <util/fs_helpers.h>
 #include <validation.h>
 
 #include <algorithm>
@@ -29,8 +31,9 @@ bool WriteSnapshotBaseBlockhash(Chainstate& snapshot_chainstate)
     const std::optional<fs::path> chaindir = snapshot_chainstate.CoinsDB().StoragePath();
     assert(chaindir); // Sanity check that chainstate isn't in-memory.
     const fs::path write_to = *chaindir / node::SNAPSHOT_BLOCKHASH_FILENAME;
+    const fs::path tmp{write_to + ".tmp"};
 
-    FILE* file{fsbridge::fopen(write_to, "wb")};
+    FILE* file{fsbridge::fopen(tmp, "wb")};
     AutoFile afile{file};
     if (afile.IsNull()) {
         LogPrintf("[snapshot] failed to open base blockhash file for writing: %s\n",
@@ -39,11 +42,16 @@ bool WriteSnapshotBaseBlockhash(Chainstate& snapshot_chainstate)
     }
     afile << *snapshot_chainstate.m_from_snapshot_blockhash;
 
-    if (afile.fclose() != 0) {
+    const bool committed{afile.Commit()};
+    const int close_result{afile.fclose()};
+    if (!committed || close_result != 0 || !RenameOver(tmp, write_to)) {
+        std::error_code ec;
+        fs::remove(tmp, ec);
         LogPrintf("[snapshot] failed to close base blockhash file %s after writing\n",
                   fs::PathToString(write_to));
         return false;
     }
+    DirectoryCommit(write_to.parent_path());
     return true;
 }
 
@@ -82,8 +90,9 @@ std::optional<uint256> ReadSnapshotBaseBlockhash(fs::path chaindir)
     return base_blockhash;
 }
 
-bool WriteAttestedAssumeutxoData(Chainstate& snapshot_chainstate,
-                                 const AssumeutxoData& data)
+bool WriteAttestedAssumeutxoData(
+    Chainstate& snapshot_chainstate,
+    const matmul::trusted::UtxoSnapshotManifest& manifest)
 {
     AssertLockHeld(::cs_main);
     assert(snapshot_chainstate.m_from_snapshot_blockhash);
@@ -91,36 +100,37 @@ bool WriteAttestedAssumeutxoData(Chainstate& snapshot_chainstate,
     const std::optional<fs::path> chaindir = snapshot_chainstate.CoinsDB().StoragePath();
     assert(chaindir);
     const fs::path write_to = *chaindir / node::SNAPSHOT_ATTESTED_ASSUMEUTXO_FILENAME;
+    const fs::path tmp{write_to + ".tmp"};
 
-    FILE* file{fsbridge::fopen(write_to, "wb")};
+    FILE* file{fsbridge::fopen(tmp, "wb")};
     AutoFile afile{file};
     if (afile.IsNull()) {
         LogPrintf("[snapshot] failed to open attested assumeutxo file for writing: %s\n",
                   fs::PathToString(write_to));
         return false;
     }
-    // Versioned sidecar so future fields can be added without silently
-    // mis-parsing older files. v1 matches AssumeutxoData's current layout.
-    constexpr uint32_t ATTESTED_ASSUMEUTXO_VERSION{1};
-    uint256 hash_serialized;
-    std::copy(data.hash_serialized.begin(), data.hash_serialized.end(),
-              hash_serialized.begin());
+    // v2 persists the complete signed trust proof. Startup re-verifies it
+    // against the current signer set, threshold, chain id and authority
+    // context instead of trusting unsigned derived fields.
+    constexpr uint32_t ATTESTED_ASSUMEUTXO_VERSION{2};
     afile << ATTESTED_ASSUMEUTXO_VERSION;
-    afile << data.height;
-    afile << hash_serialized;
-    afile << data.m_chain_tx_count;
-    afile << data.blockhash;
-    afile << data.shielded_state_commitment;
+    afile << manifest;
 
-    if (afile.fclose() != 0) {
+    const bool committed{afile.Commit()};
+    const int close_result{afile.fclose()};
+    if (!committed || close_result != 0 || !RenameOver(tmp, write_to)) {
+        std::error_code ec;
+        fs::remove(tmp, ec);
         LogPrintf("[snapshot] failed to close attested assumeutxo file %s after writing\n",
                   fs::PathToString(write_to));
         return false;
     }
+    DirectoryCommit(write_to.parent_path());
     return true;
 }
 
-std::optional<AssumeutxoData> ReadAttestedAssumeutxoData(fs::path chaindir)
+std::optional<VerifiedAttestedSnapshotData> ReadAttestedAssumeutxoData(
+    fs::path chaindir)
 {
     if (!fs::exists(chaindir)) {
         return std::nullopt;
@@ -140,34 +150,44 @@ std::optional<AssumeutxoData> ReadAttestedAssumeutxoData(fs::path chaindir)
 
     uint32_t version{0};
     try {
-        uint256 hash_serialized;
-        int height{0};
-        uint64_t chain_tx_count{0};
-        uint256 blockhash;
-        uint256 shielded_state_commitment;
         afile >> version;
-        if (version != 1) {
+        if (version != 2) {
             LogPrintf("[snapshot] unsupported attested assumeutxo version %u in %s\n",
                       version, fs::PathToString(read_from));
             return std::nullopt;
         }
-        afile >> height;
-        afile >> hash_serialized;
-        afile >> chain_tx_count;
-        afile >> blockhash;
-        afile >> shielded_state_commitment;
-        return AssumeutxoData{
-            .height = height,
-            .hash_serialized = AssumeutxoHash{hash_serialized},
-            .m_chain_tx_count = chain_tx_count,
-            .blockhash = blockhash,
-            .shielded_state_commitment = shielded_state_commitment,
+        matmul::trusted::UtxoSnapshotManifest manifest;
+        afile >> manifest;
+        const int64_t position{afile.tell()};
+        afile.seek(0, SEEK_END);
+        if (afile.tell() != position ||
+            node::matmul_trusted::VerifyUtxoSnapshotManifest(manifest) !=
+                matmul::trusted::UtxoSnapshotVerifyResult::Valid) {
+            LogPrintf("[snapshot] attested snapshot sidecar failed current trust verification: %s\n",
+                      fs::PathToString(read_from));
+            return std::nullopt;
+        }
+        const auto& statement{manifest.statement};
+        return VerifiedAttestedSnapshotData{
+            .assumeutxo = AssumeutxoData{
+                .height = statement.block_height,
+                .hash_serialized = AssumeutxoHash{statement.hash_serialized},
+                .m_chain_tx_count = statement.m_chain_tx_count,
+                .blockhash = statement.block_hash,
+                .shielded_state_commitment = statement.shielded_state_commitment,
+            },
+            .manifest = std::move(manifest),
         };
     } catch (const std::ios_base::failure& e) {
         LogPrintf("[snapshot] failed to parse attested assumeutxo file %s: %s\n",
                   fs::PathToString(read_from), e.what());
         return std::nullopt;
     }
+}
+
+bool AttestedAssumeutxoDataExists(const fs::path& chaindir)
+{
+    return fs::exists(chaindir / SNAPSHOT_ATTESTED_ASSUMEUTXO_FILENAME);
 }
 
 std::optional<fs::path> FindSnapshotChainstateDir(const fs::path& data_dir)

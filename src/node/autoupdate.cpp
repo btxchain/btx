@@ -44,7 +44,14 @@
 #include <unistd.h>
 #include <vector>
 #if defined(__APPLE__)
+#if defined(__GNUC__) && !defined(__clang__)
+// Apple's current mach-o/dyld.h transitively uses Clang-only SDK assertion
+// machinery. GCC needs only this stable dyld entry point here, so avoid pulling
+// the incompatible Mach header graph into the supported GNU audit build.
+extern "C" int _NSGetExecutablePath(char* buffer, unsigned int* size);
+#else
 #include <mach-o/dyld.h>
+#endif
 #include <crt_externs.h>
 #include <cstdlib>
 #define BTX_ENVIRON (*_NSGetEnviron())

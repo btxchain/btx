@@ -19,6 +19,7 @@
 #include <kernel/chainparams.h>
 #include <kernel/chainstatemanager_opts.h>
 #include <kernel/cs_main.h> // IWYU pragma: export
+#include <matmul/trusted_utxo_snapshot_attestation.h>
 #include <node/blockstorage.h>
 #include <policy/feerate.h>
 #include <policy/packages.h>
@@ -72,6 +73,27 @@ struct AssumeutxoData;
 enum class ShieldedAutoRepairKind {
     ANCHOR_HISTORY,
     STATE_REBUILD,
+};
+
+/**
+ * Chainstate-owned view of divergence and recovery. Header acquisition, body
+ * scheduling, verification admission, and activation should consult this
+ * common state instead of independently inferring whether the followed branch
+ * is actionable.
+ */
+enum class ChainRecoveryPhase {
+    CONVERGED,
+    CHASING,
+    RECOVERING_REORG,
+    PARKED_NEEDS_OPERATOR,
+};
+
+struct ChainRecoveryState {
+    ChainRecoveryPhase phase{ChainRecoveryPhase::CONVERGED};
+    const CBlockIndex* followed_target{nullptr};
+    const CBlockIndex* fork{nullptr};
+    uint32_t reorg_depth{0};
+    const char* reason{"converged"};
 };
 
 using ShieldedAutoRepairGeneration = std::tuple<uint256, uint64_t, uint256>;
@@ -1076,6 +1098,7 @@ private:
 
     CBlockIndex* m_best_invalid GUARDED_BY(::cs_main){nullptr};
     std::set<uint256> m_parked_reorg_branch_roots GUARDED_BY(::cs_main);
+    std::optional<node::ReorgRecoveryRecord> m_reorg_recovery GUARDED_BY(::cs_main);
 
     /** The last header for which a headerTip notification was issued. */
     CBlockIndex* m_last_notified_header GUARDED_BY(GetMutex()){nullptr};
@@ -1371,16 +1394,17 @@ public:
     //! - Move the new chainstate to `m_snapshot_chainstate` and make it our
     //!   ChainstateActive().
     //!
-    //! When attested_au is set, the chainparams pin is replaced by that
-    //! operator-quorum AssumeutxoData. Callers must have already authenticated
-    //! attested_au (trusted-mirror M-of-N). Consensus nodes must not use this
+    //! When attested_manifest is set, the chainparams pin is replaced by the
+    //! AssumeutxoData authenticated by that complete operator-quorum manifest.
+    //! Callers must have already authenticated the manifest (trusted-mirror
+    //! M-of-N). Consensus nodes must not use this
     //! path. The snapshot base must be an ancestor of the current best-header
     //! chain; the compiled-in assumeutxo work escape hatch is not available.
     [[nodiscard]] util::Result<CBlockIndex*> ActivateSnapshot(
         AutoFile& coins_file,
         const node::SnapshotMetadata& metadata,
         bool in_memory,
-        const std::optional<AssumeutxoData>& attested_au = std::nullopt);
+        const std::optional<matmul::trusted::UtxoSnapshotManifest>& attested_manifest = std::nullopt);
 
     //! Once the background validation chainstate has reached the height which
     //! is the base of the UTXO snapshot in use, compare its coins to ensure
@@ -1439,12 +1463,37 @@ public:
     /** Guess verification progress (as a fraction between 0.0=genesis and 1.0=current tip). */
     double GuessVerificationProgress(const CBlockIndex* pindex) const;
 
+    [[nodiscard]] ChainRecoveryState GetChainRecoveryState() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
     const CBlockIndex* FindParkedReorgBranchRoot(const CBlockIndex* pindex) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool IsOnParkedReorgBranch(const CBlockIndex* pindex) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool ParkReorgBranch(CBlockIndex* branch_root) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool UnparkReorgBranchContainingBlock(const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /**
+     * Remove stale persisted park roots that cannot safely apply to the current
+     * policy or active chain. On persistence failure, leave the in-memory set
+     * unchanged and return false.
+     */
+    bool NormalizeParkedReorgBranches(const CBlockIndex* active_tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     std::vector<uint256> GetParkedReorgBranchRoots() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool PersistParkedReorgBranches() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /**
+     * Observe a fully body-validated divergent block and, when it identifies a
+     * unique authenticated branch inside the PARK allowance, durably arm
+     * automatic recovery before the local losing tip can grow the reorg past
+     * that allowance. Also releases a previously parked recovery branch once
+     * its stored data is sufficient for safe activation.
+     */
+    bool MaybeTrackReorgRecovery(const CBlockIndex* candidate) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    bool LoadReorgRecoveryRecord() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    bool NormalizeReorgRecovery(const CBlockIndex* active_tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    bool ShouldDeferLosingTipExtension(const CBlockIndex* candidate) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    bool IsAutomaticReorgRecoveryCandidate(const CBlockIndex* candidate) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    std::optional<node::ReorgRecoveryRecord> GetReorgRecoveryRecord() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        return m_reorg_recovery;
+    }
 
     /**
      * Import blocks from an external file
@@ -1845,8 +1894,11 @@ public:
     [[nodiscard]] bool RebuildShieldedAccountRegistryHistory(const Chainstate& chainstate,
                                                              const CBlockIndex* tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
-    /** Persist active shielded state for restart recovery. */
-    [[nodiscard]] bool PersistShieldedState(const CBlockIndex* tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** Persist active shielded state for restart recovery. When
+     *  fast_startup_trusted is false, revoke the audit credential before
+     *  publishing imported/pre-audit state. */
+    [[nodiscard]] bool PersistShieldedState(const CBlockIndex* tip,
+                                            bool fast_startup_trusted = true) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /** Read the persisted shielded restart snapshot for testing and diagnostics. */
     [[nodiscard]] bool ReadPersistedShieldedState(
@@ -1874,11 +1926,33 @@ public:
         std::vector<uint256> account_registry_roots = {})
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
+    struct ShieldedSnapshotPinPolicy {
+        /** Signed/compiled pin that the fully imported state must match. */
+        std::optional<uint256> required_pin;
+        /** Publish the computed pin as a restart credential before commit. */
+        bool persist_accepted_pin;
+        /**
+         * Optional activation transaction. The loader returns a callback that
+         * must receive true only after all snapshot discovery metadata is
+         * durable; false restores and reopens the previous shielded state.
+         */
+        std::function<bool(bool)>* deferred_completion{nullptr};
+    };
+
     /** Load shielded state from a BTX assumeutxo snapshot section. */
     [[nodiscard]] util::Result<void> LoadShieldedSnapshotSection(
         AutoFile& file,
         const node::ShieldedSnapshotSectionHeader& header,
         const CBlockIndex* tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    [[nodiscard]] util::Result<void> LoadShieldedSnapshotSection(
+        AutoFile& file,
+        const node::ShieldedSnapshotSectionHeader& header,
+        const CBlockIndex* tip,
+        ShieldedSnapshotPinPolicy pin_policy) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** Filesystem-only crash-recovery hook for snapshot transaction tests. */
+    [[nodiscard]] static bool RecoverInterruptedShieldedSnapshotForTest(
+        const fs::path& datadir);
 
     /** Rebuild the active shielded state from the active chain tip. */
     [[nodiscard]] bool RebuildShieldedStateFromActiveChain() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);

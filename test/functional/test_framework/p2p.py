@@ -35,6 +35,8 @@ from test_framework.messages import (
     msg_addr,
     msg_addrv2,
     msg_block,
+    msg_blkchnkman,
+    msg_blkchunk,
     MSG_BLOCK,
     msg_blocktxn,
     msg_cfcheckpt,
@@ -67,6 +69,7 @@ from test_framework.messages import (
     msg_rcadmit,
     msg_sendaddrv2,
     msg_sendcmpct,
+    msg_sendblkchnk,
     msg_sendheaders,
     msg_sendtxrcncl,
     msg_tx,
@@ -120,6 +123,8 @@ MESSAGEMAP = {
     b"addr": msg_addr,
     b"addrv2": msg_addrv2,
     b"block": msg_block,
+    b"blkchnkman": msg_blkchnkman,
+    b"blkchunk": msg_blkchunk,
     b"blocktxn": msg_blocktxn,
     b"cfcheckpt": msg_cfcheckpt,
     b"cfheaders": msg_cfheaders,
@@ -150,6 +155,7 @@ MESSAGEMAP = {
     b"rcadmit": msg_rcadmit,
     b"sendaddrv2": msg_sendaddrv2,
     b"sendcmpct": msg_sendcmpct,
+    b"sendblkchnk": msg_sendblkchnk,
     b"sendheaders": msg_sendheaders,
     b"sendtxrcncl": msg_sendtxrcncl,
     b"tx": msg_tx,
@@ -536,6 +542,8 @@ class P2PInterface(P2PConnection):
 
     def on_addr(self, message): pass
     def on_addrv2(self, message): pass
+    def on_blkchnkman(self, message): pass
+    def on_blkchunk(self, message): pass
     def on_block(self, message): pass
     def on_blocktxn(self, message): pass
     def on_cfcheckpt(self, message): pass
@@ -562,6 +570,7 @@ class P2PInterface(P2PConnection):
     def on_rcadmit(self, message): pass
     def on_sendaddrv2(self, message): pass
     def on_sendcmpct(self, message): pass
+    def on_sendblkchnk(self, message): pass
     def on_sendheaders(self, message): pass
     def on_sendtxrcncl(self, message): pass
     def on_tx(self, message): pass

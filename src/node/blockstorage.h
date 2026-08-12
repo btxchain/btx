@@ -14,6 +14,7 @@
 #include <kernel/cs_main.h>
 #include <kernel/messagestartchars.h>
 #include <primitives/block.h>
+#include <serialize.h>
 #include <streams.h>
 #include <sync.h>
 #include <uint256.h>
@@ -44,6 +45,39 @@ struct Params;
 }
 namespace node {
 struct PruneLockInfo;
+
+/**
+ * Durable local-policy record for a reorg that was first observed while it was
+ * still inside the configured PARK depth. This is deliberately not block
+ * validity or consensus state; it only prevents a losing local tip from
+ * growing until an already-authenticated recovery branch can be activated.
+ */
+struct ReorgRecoveryRecord {
+    static constexpr uint8_t CURRENT_VERSION{1};
+    enum class Mode : uint8_t {
+        CONSENSUS_AUTHENTICATED = 1,
+        TRUSTED_AUTHORITY = 2,
+    };
+
+    uint8_t version{CURRENT_VERSION};
+    uint8_t mode{static_cast<uint8_t>(Mode::CONSENSUS_AUTHENTICATED)};
+    uint256 fork_hash;
+    uint256 losing_tip_hash;
+    uint256 recovery_root_hash;
+    uint256 authenticated_tip_hash;
+    uint32_t initial_reorg_depth{0};
+
+    SERIALIZE_METHODS(ReorgRecoveryRecord, obj)
+    {
+        READWRITE(obj.version,
+                  obj.mode,
+                  obj.fork_hash,
+                  obj.losing_tip_hash,
+                  obj.recovery_root_hash,
+                  obj.authenticated_tip_hash,
+                  obj.initial_reorg_depth);
+    }
+};
 };
 namespace util {
 class SignalInterrupt;
@@ -66,6 +100,8 @@ public:
     bool DeletePruneLock(const std::string& name);
     bool WriteParkedReorgBranches(const std::set<uint256>& roots);
     bool ReadParkedReorgBranches(std::set<uint256>& roots);
+    bool WriteReorgRecoveryRecord(const std::optional<node::ReorgRecoveryRecord>& record);
+    bool ReadReorgRecoveryRecord(std::optional<node::ReorgRecoveryRecord>& record);
     bool ReadMatMulReplayContext(uint256& context);
     bool WriteFlag(const std::string& name, bool fValue);
     bool ReadFlag(const std::string& name, bool& fValue);
@@ -181,14 +217,22 @@ struct MatMulReplayContextMigration {
  * bit cannot undo that state safely. Such a datadir must be reindexed.
  *
  * With a matching context, ExactReplay authority is preserved and local-policy
- * trusted-attestation status is cleared on every startup. The reindex-required
- * result is detected before any index or dirty-set mutation.
+ * trusted-attestation status is preserved only when the current durable archive
+ * still proves quorum. The reindex-required result is detected before any index
+ * or dirty-set mutation.
  */
 [[nodiscard]] MatMulReplayContextMigration ReconcileMatMulReplayAuthorityContext(
     std::span<CBlockIndex* const> indices,
     const std::optional<uint256>& persisted_context,
     const uint256& current_context,
     std::set<CBlockIndex*>& dirty_indices)
+    EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+/** Recompute derived authenticated chainwork parent-first after startup
+ * authority reconciliation changes any persisted provenance bit. */
+void RecomputeMatMulAuthenticatedChainWork(
+    std::span<CBlockIndex* const> indices,
+    const Consensus::Params& params)
     EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
 //! Enable/disable randomized equal-work tie-breaking and (re)seed it. Call once
@@ -268,7 +312,9 @@ private:
      * per index entry (nStatus, nChainWork, nTimeMax, etc.) as well as peripheral
      * collections like m_dirty_blockindex.
      */
-    bool LoadBlockIndex(const std::optional<uint256>& snapshot_blockhash)
+    bool LoadBlockIndex(
+        const std::optional<uint256>& snapshot_blockhash,
+        const std::optional<AssumeutxoData>& attested_assumeutxo)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     /** Flush a block or undo file and always emit the supplied notification on failure. */
@@ -405,6 +451,14 @@ public:
 
     BlockMap m_block_index GUARDED_BY(cs_main);
 
+    /** Direct parent→children adjacency for the live block index.
+     *
+     * Rebuilt once during block-index load and maintained incrementally for new
+     * headers. This prevents authenticated-work propagation from rescanning and
+     * reallocating over the complete block index for every received body. */
+    std::unordered_map<CBlockIndex*, std::vector<CBlockIndex*>> m_block_children
+        GUARDED_BY(cs_main);
+
     /**
      * The height of the base block of an assumeutxo snapshot, if one is in use.
      *
@@ -420,6 +474,14 @@ public:
     std::optional<int> m_snapshot_height;
 
     std::vector<CBlockIndex*> GetAllBlockIndices() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    std::vector<const CBlockIndex*> GetAllBlockIndices() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** Visit the direct children of `parent`. The callback must not mutate the
+     * block index or this adjacency while it is running. */
+    void ForEachBlockChild(
+        CBlockIndex& parent,
+        const std::function<void(CBlockIndex&)>& visit)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /**
      * All pairs A->B, where A (or one of its ancestors) misses transactions, but B has transactions.
@@ -435,7 +497,9 @@ public:
         GUARDED_BY(::cs_main);
 
     bool WriteBlockIndexDB() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
-    bool LoadBlockIndexDB(const std::optional<uint256>& snapshot_blockhash)
+    bool LoadBlockIndexDB(
+        const std::optional<uint256>& snapshot_blockhash,
+        const std::optional<AssumeutxoData>& attested_assumeutxo = std::nullopt)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /**
