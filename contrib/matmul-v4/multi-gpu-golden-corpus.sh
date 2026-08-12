@@ -20,6 +20,13 @@
 # launch cohort; HIP is optional, but when supplied it must match exactly.
 # Use --compare-only to rebuild a comparison from sanitized artifacts already
 # present under OUT_DIR/raw without executing a backend on the current host.
+#
+# Portability (GNU/Linux and macOS / BSD):
+#   - Never use GNU long options on mkdir (`--parents`, bare `--help`); BSD
+#     mkdir rejects them with "illegal option -- -" and exit 64. Use `-p` only.
+#   - Do not use `readlink -f`, `sed -i` without backup suffix, `date -d`,
+#     `stat -c`, or `grep -P`. Resolve paths with cd/pwd; hash with sha256sum
+#     or `shasum -a 256`. Requires bash 3.2+ and python3 on PATH.
 set -euo pipefail
 
 HARNESS=""
@@ -35,6 +42,29 @@ TIP_SHA=""
 
 die() { echo "multi-gpu-golden-corpus: $*" >&2; exit 2; }
 
+# Absolute directory of this script (no readlink -f; works on BSD and GNU).
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+
+# BSD mkdir accepts -p but not --parents / GNU long options. Prefer absolute
+# paths so a leading "-" in a relative segment cannot be parsed as a flag.
+portable_mkdir_p() {
+  local dir="$1"
+  case "${dir}" in
+    "") die "portable_mkdir_p: empty path" ;;
+    /*) command mkdir -p "${dir}" ;;
+    *) command mkdir -p "./${dir}" ;;
+  esac
+}
+
+# Resolve a path to absolute form without readlink -f / realpath --*.
+# Creates the directory first when abs_dir is requested for an output path.
+abspath_dir() {
+  local dir="$1"
+  portable_mkdir_p "${dir}"
+  (cd "${dir}" && pwd)
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --harness) HARNESS="${2:-}"; shift 2 ;;
@@ -47,7 +77,8 @@ while [[ $# -gt 0 ]]; do
     --allow-partial) ALLOW_PARTIAL=1; shift ;;
     --compare-only) COMPARE_ONLY=1; shift ;;
     -h|--help)
-      sed -n '1,30p' "$0"
+      # Prefer sed -n over head for portability; do not invoke mkdir --help.
+      sed -n '1,40p' "$0"
       exit 0
       ;;
     *) die "unknown arg: $1" ;;
@@ -55,19 +86,29 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "${OUT_DIR}" ]] || die "--out-dir required"
-mkdir -p "${OUT_DIR}/raw"
+OUT_DIR="$(abspath_dir "${OUT_DIR}")"
+portable_mkdir_p "${OUT_DIR}/raw"
 if [[ ${COMPARE_ONLY} -eq 0 ]]; then
-  [[ -n "${HARNESS}" && -x "${HARNESS}" ]] || die "--harness executable required"
+  [[ -n "${HARNESS}" ]] || die "--harness executable required"
+  # Resolve relative harness paths against the caller's cwd before any cd.
+  case "${HARNESS}" in
+    /*) ;;
+    *) HARNESS="$(cd "$(dirname "${HARNESS}")" && pwd)/$(basename "${HARNESS}")" ;;
+  esac
+  [[ -x "${HARNESS}" ]] || die "--harness executable required: ${HARNESS}"
 fi
 
-REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+command -v python3 >/dev/null 2>&1 || die "python3 is required on PATH"
 
-# Portable SHA-256: coreutils exposes sha256sum, macOS/perl exposes shasum.
+# Portable SHA-256: coreutils/Apple expose sha256sum; older macOS uses shasum.
+# Never pass GNU long options (e.g. --binary) — Apple's sha256sum rejects them.
 sha256_stdin() {
   if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum | awk '{print $1}'
+    command sha256sum | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    command shasum -a 256 | awk '{print $1}'
   else
-    shasum -a 256 | awk '{print $1}'
+    die "neither sha256sum nor shasum found"
   fi
 }
 
