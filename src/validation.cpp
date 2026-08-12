@@ -11134,9 +11134,11 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
     // Trusted mirrors: PreferTrustAdjustedHeader keeps m_best_header on
     // authenticated work, which freezes headers==blocks while the tip-chain
     // header frontier is what the mirror must follow from its attestation
-    // authority. Advance m_best_header only along active-tip extensions that
-    // are not parked; competing forks never qualify. Blocks still require
-    // M-of-N quorum — this is header-frontier tracking only.
+    // authority. Advance m_best_header here only along active-tip extensions
+    // that are not parked. Competing better-work branches are followed only
+    // from attestation-authority peers in net_processing (peer context is
+    // unavailable here; allowing any heavier fork would re-freeze headers on
+    // unattestable ordinary-peer spam). Blocks still require M-of-N quorum.
     if (node::matmul_trusted::IsTrustedMirror() && pindex != nullptr) {
         const CBlockIndex* tip{ActiveChain().Tip()};
         if (tip != nullptr) {
@@ -11153,13 +11155,6 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
                 pindex->GetAncestor(m_best_header->nHeight) == m_best_header};
             if (node::matmul_trusted::PreferTrustedMirrorTipChainHeader({
                     .extends_active_tip_chain = extends_tip,
-                    // >= so a same-height sibling (equal work) can still move
-                    // the header frontier. A stranded mirror whose best-header
-                    // is pinned to its own losing branch never requests the
-                    // bodies that would let it recover.
-                    .better_work_reorg_candidate =
-                        pindex->nChainWork >= tip->nChainWork &&
-                        pindex != tip,
                     .on_parked_reorg_branch = IsOnParkedReorgBranch(pindex),
                     .candidate_height = pindex->nHeight,
                     .tip_height = tip->nHeight,

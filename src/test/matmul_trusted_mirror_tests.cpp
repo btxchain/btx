@@ -665,7 +665,8 @@ BOOST_AUTO_TEST_CASE(tip_chain_header_preference_ignores_competing_fork)
         .candidate_extends_current_best = true,
     }));
 
-    // Competing fork (not a tip-chain extension) must never displace.
+    // Competing fork (not a tip-chain extension) must never displace via the
+    // tip-chain-only path (AcceptBlockHeader / ordinary peers).
     BOOST_CHECK(!PreferTrustedMirrorTipChainHeader(TrustedMirrorTipChainHeaderView{
         .extends_active_tip_chain = false,
         .on_parked_reorg_branch = false,
@@ -697,6 +698,81 @@ BOOST_AUTO_TEST_CASE(tip_chain_header_preference_ignores_competing_fork)
         .current_best_extends_tip = false,
         .candidate_extends_current_best = false,
     }));
+}
+
+BOOST_AUTO_TEST_CASE(authority_header_preference_rescues_divergent_tip)
+{
+    using node::matmul_trusted::PreferTrustedMirrorAuthorityHeader;
+    using node::matmul_trusted::TrustedMirrorAuthorityHeaderView;
+    using node::matmul_trusted::TrustedMirrorMayDownloadCompetingBranch;
+
+    // Non-authority competing fork must still be refused (fra1 regression).
+    BOOST_CHECK(!PreferTrustedMirrorAuthorityHeader(TrustedMirrorAuthorityHeaderView{
+        .from_authority_peer = false,
+        .extends_active_tip_chain = false,
+        .better_work_reorg_candidate = true,
+        .on_parked_reorg_branch = false,
+        .candidate_height = 186394,
+        .tip_height = 186393,
+        .current_best_height = 186393,
+        .current_best_extends_tip = true,
+        .candidate_extends_current_best = false,
+    }));
+
+    // Authority equal-work sibling (same-height race loser) must displace the
+    // tip-pinned best-header so headers can advance off the stranded tip.
+    BOOST_CHECK(PreferTrustedMirrorAuthorityHeader(TrustedMirrorAuthorityHeaderView{
+        .from_authority_peer = true,
+        .extends_active_tip_chain = false,
+        .better_work_reorg_candidate = true,
+        .on_parked_reorg_branch = false,
+        .candidate_height = 186393,
+        .tip_height = 186393,
+        .current_best_height = 186393,
+        .current_best_extends_tip = true,
+        .candidate_extends_current_best = false,
+    }));
+
+    // Authority heavier extension past the fork must become best-header.
+    BOOST_CHECK(PreferTrustedMirrorAuthorityHeader(TrustedMirrorAuthorityHeaderView{
+        .from_authority_peer = true,
+        .extends_active_tip_chain = false,
+        .better_work_reorg_candidate = true,
+        .on_parked_reorg_branch = false,
+        .candidate_height = 186674,
+        .tip_height = 186393,
+        .current_best_height = 186393,
+        .current_best_extends_tip = true,
+        .candidate_extends_current_best = false,
+    }));
+
+    // Parked deep-reorg branch stays refused even from an authority peer —
+    // EMERGENCY park_depth must not be bypassable via header follow.
+    BOOST_CHECK(!PreferTrustedMirrorAuthorityHeader(TrustedMirrorAuthorityHeaderView{
+        .from_authority_peer = true,
+        .extends_active_tip_chain = false,
+        .better_work_reorg_candidate = true,
+        .on_parked_reorg_branch = true,
+        .candidate_height = 186674,
+        .tip_height = 186393,
+        .current_best_height = 186393,
+        .current_best_extends_tip = true,
+        .candidate_extends_current_best = false,
+    }));
+
+    // Download gate mirrors the same authority / park split.
+    BOOST_CHECK(TrustedMirrorMayDownloadCompetingBranch(
+        /*is_authority_peer=*/true, /*best_known_extends_tip=*/false,
+        /*better_or_equal_work=*/true, /*on_parked_reorg_branch=*/false));
+    BOOST_CHECK(!TrustedMirrorMayDownloadCompetingBranch(
+        /*is_authority_peer=*/false, /*best_known_extends_tip=*/false,
+        /*better_or_equal_work=*/true, /*on_parked_reorg_branch=*/false));
+    BOOST_CHECK(!TrustedMirrorMayDownloadCompetingBranch(
+        /*is_authority_peer=*/true, /*best_known_extends_tip=*/false,
+        /*better_or_equal_work=*/true, /*on_parked_reorg_branch=*/true));
+    BOOST_CHECK(TrustedMirrorMayDownloadCompetingBranch(
+        /*is_authority_peer=*/false, /*best_known_extends_tip=*/true,
+        /*better_or_equal_work=*/false, /*on_parked_reorg_branch=*/false));
 }
 
 BOOST_AUTO_TEST_CASE(unattestable_reject_counter_is_distinct_not_hot_loop)
