@@ -439,18 +439,43 @@ struct TrustedMirrorAuthorityHeaderView {
 }
 
 /**
+ * Whether a peer's best-known tip lies on the best-header chain the mirror
+ * already follows (ancestor of, or extension of, m_best_header).
+ *
+ * Used to widen competing-branch *download* to any peer that has the recovery
+ * chain after authority header-follow selected it. Fetching is not trusting;
+ * acceptance still requires M-of-N. Random competing forks that never became
+ * m_best_header cannot qualify, preserving the fra1 inflight-DoS bound.
+ */
+[[nodiscard]] inline bool TrustedMirrorOnFollowedHeaderChain(
+    bool best_header_known,
+    bool peer_best_is_ancestor_of_best_header,
+    bool peer_best_extends_best_header)
+{
+    if (!best_header_known) {
+        return false;
+    }
+    return peer_best_is_ancestor_of_best_header ||
+           peer_best_extends_best_header;
+}
+
+/**
  * Whether a trusted mirror may download / direct-fetch toward a peer's
  * best-known tip that does not extend the active tip.
  *
- * Ordinary peers: never (unattestable bodies starve authority catch-up).
- * Authority peers: yes for better-or-equal-work non-parked branches — that is
- * the self-healing path after losing a same-height race.
+ * Parked deep-reorg branches: never.
+ * Better/equal-work competing branch: yes from an attestation-authority peer,
+ * OR from any peer whose best-known lies on the already-followed best-header
+ * chain (authority-selected recovery path). Depending on a single authority
+ * connection left mirrors stranded when that peer's inflight slots were full
+ * or silent while many ordinary peers held the identical recovery bodies.
  */
 [[nodiscard]] inline bool TrustedMirrorMayDownloadCompetingBranch(
     bool is_authority_peer,
     bool best_known_extends_tip,
     bool better_or_equal_work,
-    bool on_parked_reorg_branch)
+    bool on_parked_reorg_branch,
+    bool on_followed_best_header_chain = false)
 {
     if (best_known_extends_tip) {
         return true;
@@ -458,10 +483,13 @@ struct TrustedMirrorAuthorityHeaderView {
     if (on_parked_reorg_branch) {
         return false;
     }
-    if (!is_authority_peer) {
+    if (!better_or_equal_work) {
         return false;
     }
-    return better_or_equal_work;
+    if (is_authority_peer) {
+        return true;
+    }
+    return on_followed_best_header_chain;
 }
 
 /**
