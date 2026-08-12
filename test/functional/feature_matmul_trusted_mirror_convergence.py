@@ -24,6 +24,13 @@ IsTrustedMirrorAuthorityPeer). Depending on a single authority connection left
 production mirrors stranded with trusted_mirror_not_tip_chain while ordinary
 peers held the identical recovery chain.
 
+It also guards the claimed-vs-trust-adjusted download deadlock: a competing
+headers-only branch MORE THAN TRUST_ADJUSTED_WORK_ALLOWANCE_BLOCKS (6) past the
+fork has trust-adjusted work capped at fork+6, which can lose to the
+authenticated tip — but DOWNLOAD must still use claimed nChainWork so bodies
+can arrive and authenticate. A test that only diverges by 1-2 blocks cannot
+catch that interaction (production stall was ~193 headers-only ahead).
+
 It also guards deep-reorg finality (failure C): a competing rewrite deeper than
 EMERGENCY park_depth must still be refused by both authority and mirror.
 """
@@ -52,6 +59,8 @@ DISABLED_HEIGHT = 2_147_483_647
 # Arm local reorg protection early so the park-depth guard is reachable on regtest.
 REORG_PROTECTION_START = 5
 PARK_DEPTH = 6
+# Must match src/chain.h TRUST_ADJUSTED_WORK_ALLOWANCE_BLOCKS.
+TRUST_ADJUSTED_WORK_ALLOWANCE = 6
 # EMERGENCY hysteresis_work_margin is 2; extend the winning branch past that.
 AUTHORITY_EXTENSIONS = 4
 # NODE_MATMUL_ATTESTATION_ARCHIVE = 1 << 31 (src/protocol.h). Not exported by
@@ -63,9 +72,13 @@ ARCHIVE_SERVICES = (
 # Small race: mirror tip is the losing sibling (1 block divergent) while the
 # winning branch must still clear EMERGENCY hysteresis_work_margin=2
 # (required_work = tip_work + 2*proof). Sibling + 2 extensions ⇒ work margin 2.
-# Large gap covers the multi-block production stall class.
+# Large gap MUST exceed the unauth allowance so trust-adjusted work of the
+# headers-only winning branch is capped below what a naive trust-adjusted
+# download gate would require — claimed work must still open the fetch.
 RELAY_GAP_SMALL = 2
 RELAY_GAP_LARGE = 12
+assert RELAY_GAP_LARGE > TRUST_ADJUSTED_WORK_ALLOWANCE
+assert RELAY_GAP_LARGE > PARK_DEPTH
 
 
 TRUST_WARNING = (
@@ -344,7 +357,8 @@ class MatMulTrustedMirrorConvergenceTest(BitcoinTestFramework):
             authority, mirror, loser, relay, extensions=RELAY_GAP_SMALL
         )
         self.log.info(
-            "Non-authority relay must serve followed-branch bodies (multi-block gap)"
+            "Non-authority relay must serve followed-branch bodies "
+            f"(gap>{TRUST_ADJUSTED_WORK_ALLOWANCE} past fork — claimed-work download)"
         )
         self._test_bodies_from_non_authority_relay(
             authority, mirror, loser, relay, extensions=RELAY_GAP_LARGE
@@ -402,6 +416,12 @@ class MatMulTrustedMirrorConvergenceTest(BitcoinTestFramework):
         Headers are injected via a headers-only archive P2P peer so the tip
         remains stranded; bodies can then ONLY arrive from the non-archive relay.
         Old gate: fail (tip never moves). New gate: pass.
+
+        When extensions > TRUST_ADJUSTED_WORK_ALLOWANCE, the headers-only winning
+        branch is deeper than the unauth allowance: trust-adjusted work caps at
+        fork+allowance while claimed nChainWork keeps climbing. Download must
+        still open on claimed work (production: trusted_mirror_competing_less_work
+        must not fire for a claimed-heavier recovery branch).
         """
         self._disconnect_all()
 
@@ -428,6 +448,10 @@ class MatMulTrustedMirrorConvergenceTest(BitcoinTestFramework):
         authority_tip = authority.getbestblockhash()
         authority_height = authority.getblockcount()
         assert_equal(authority_height, fork_height + 1 + extensions)
+        # Winning branch length past the fork (sibling + extensions).
+        gap_past_fork = authority_height - fork_height
+        if extensions > TRUST_ADJUSTED_WORK_ALLOWANCE:
+            assert_greater_than(gap_past_fork, TRUST_ADJUSTED_WORK_ALLOWANCE)
 
         # Relay holds the full winning bodies but does NOT advertise archive.
         submit_chain_via_rpc(authority, relay)
@@ -453,6 +477,9 @@ class MatMulTrustedMirrorConvergenceTest(BitcoinTestFramework):
         assert_equal(info["blocks"], stranded_height)
         assert_equal(info["bestblockhash"], stranded_tip)
         assert_greater_than_or_equal(info["headers"], authority_height)
+        headers_ahead = info["headers"] - info["blocks"]
+        if extensions > TRUST_ADJUSTED_WORK_ALLOWANCE:
+            assert_greater_than(headers_ahead, TRUST_ADJUSTED_WORK_ALLOWANCE)
 
         # Seed quorums via RPC so acceptance does not depend on the relay
         # serving MMATTEST (it does not). Download policy is what we test.
@@ -462,6 +489,8 @@ class MatMulTrustedMirrorConvergenceTest(BitcoinTestFramework):
         self.connect_nodes(1, 3)
         # Old gate: trusted_mirror_not_tip_chain forever. New gate: relay is on
         # the followed best-header chain → bodies download → tip moves.
+        # Claimed-work download: even when headers_ahead > allowance, tip must
+        # advance without invalidateblock / restart.
         self.wait_until(
             lambda: mirror.getbestblockhash() == authority_tip,
             timeout=300,

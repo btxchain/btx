@@ -461,11 +461,15 @@ struct TrustedMirrorAuthorityHeaderView {
  * best-known tip that does not extend the active tip.
  *
  * Parked deep-reorg branches: never.
- * Better/equal-work competing branch: yes from an attestation-authority peer,
- * OR from any peer whose best-known lies on the already-followed best-header
- * chain (authority-selected recovery path). Depending on a single authority
- * connection left mirrors stranded when that peer's inflight slots were full
- * or silent while many ordinary peers held the identical recovery bodies.
+ * Better/equal CLAIMED work (nChainWork, not trust-adjusted) competing branch:
+ * yes from an attestation-authority peer, OR from any peer whose best-known
+ * lies on the already-followed best-header chain (authority-selected recovery
+ * path). Callers must pass claimed-work comparisons for better_or_equal_work —
+ * trust-adjusted work is for preference/acceptance only; gating download on it
+ * deadlocks when a headers-only suffix is deeper than the unauth allowance.
+ * Depending on a single authority connection left mirrors stranded when that
+ * peer's inflight slots were full or silent while many ordinary peers held the
+ * identical recovery bodies.
  */
 [[nodiscard]] inline bool TrustedMirrorMayDownloadCompetingBranch(
     bool is_authority_peer,

@@ -789,6 +789,17 @@ BOOST_AUTO_TEST_CASE(authority_header_preference_rescues_divergent_tip)
         /*is_authority_peer=*/false, /*best_known_extends_tip=*/false,
         /*better_or_equal_work=*/false, /*on_parked_reorg_branch=*/false,
         /*on_followed_best_header_chain=*/true));
+    // Claimed-heavier must pass even when trust-adjusted work would lose
+    // (headers-only suffix deeper than TRUST_ADJUSTED_WORK_ALLOWANCE_BLOCKS
+    // while the active tip holds more authenticated work than fork+allowance).
+    // Callers pass better_or_equal_work from nChainWork, never TrustAdjustedWork.
+    BOOST_CHECK(TrustedMirrorMayDownloadCompetingBranch(
+        /*is_authority_peer=*/true, /*best_known_extends_tip=*/false,
+        /*better_or_equal_work=*/true, /*on_parked_reorg_branch=*/false));
+    BOOST_CHECK(TrustedMirrorMayDownloadCompetingBranch(
+        /*is_authority_peer=*/false, /*best_known_extends_tip=*/false,
+        /*better_or_equal_work=*/true, /*on_parked_reorg_branch=*/false,
+        /*on_followed_best_header_chain=*/true));
     using node::matmul_trusted::TrustedMirrorOnFollowedHeaderChain;
     BOOST_CHECK(TrustedMirrorOnFollowedHeaderChain(
         /*best_header_known=*/true,

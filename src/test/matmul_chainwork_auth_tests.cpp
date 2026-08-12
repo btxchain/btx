@@ -589,4 +589,62 @@ BOOST_AUTO_TEST_CASE(allowance_bound_does_not_outrank_park_depth_authenticated)
     BOOST_CHECK(!PreferTrustAdjustedHeader(*auth_tip, *forged_tip, kAllowance));
 }
 
+// DOWNLOAD must use claimed nChainWork, not trust-adjusted work. Geometry:
+// authenticated tip deeper than the unauth allowance past the fork, competing
+// headers-only branch even deeper. Trust-adjusted(competing) < tip.nChainWork
+// (allowance caps at +6), but claimed(competing) > tip.nChainWork. Gating fetch
+// on trust-adjusted recreates the stranding deadlock; claimed lets bodies land
+// so authentication can catch up. Preference/acceptance still uses trust-adjusted
+// (PreferTrustAdjustedHeader below still refuses to rank the forged tip over the
+// deep authenticated tip for chase once auth depth >= allowance).
+BOOST_AUTO_TEST_CASE(claimed_work_exceeds_tip_while_trust_adjusted_does_not)
+{
+    LOCK(::cs_main);
+    constexpr unsigned int kAllowance{TRUST_ADJUSTED_WORK_ALLOWANCE_BLOCKS};
+    const Consensus::Params params = ParamsWithFork(1);
+
+    Chain base;
+    CBlockIndex* fork = base.Add(ST_AUTHENTICATED);
+    base.Recompute(params);
+
+    // Authenticated tip: allowance + 4 blocks past the fork (outranks any
+    // headers-only suffix on trust-adjusted work alone).
+    std::deque<CBlockIndex> auth_branch;
+    CBlockIndex* auth_tip = fork;
+    for (unsigned int i = 0; i < kAllowance + 4; ++i) {
+        auth_branch.emplace_back();
+        CBlockIndex& idx = auth_branch.back();
+        idx.pprev = auth_tip;
+        idx.nHeight = auth_tip->nHeight + 1;
+        idx.nBits = TEST_NBITS;
+        idx.nStatus = ST_AUTHENTICATED;
+        idx.nChainWork = auth_tip->nChainWork + GetBlockProof(idx);
+        UpdateAuthenticatedChainWork(idx, params);
+        auth_tip = &idx;
+    }
+
+    // Competing headers-only: deeper still, so claimed work beats the tip.
+    std::deque<CBlockIndex> competing;
+    CBlockIndex* comp_tip = fork;
+    for (unsigned int i = 0; i < kAllowance + 20; ++i) {
+        competing.emplace_back();
+        CBlockIndex& idx = competing.back();
+        idx.pprev = comp_tip;
+        idx.nHeight = comp_tip->nHeight + 1;
+        idx.nBits = TEST_NBITS;
+        idx.nStatus = ST_HEADER_ONLY;
+        idx.nChainWork = comp_tip->nChainWork + GetBlockProof(idx);
+        UpdateAuthenticatedChainWork(idx, params);
+        comp_tip = &idx;
+    }
+
+    BOOST_CHECK(comp_tip->nChainWork > auth_tip->nChainWork);
+    BOOST_CHECK(GetTrustAdjustedChainWork(*comp_tip, kAllowance) <
+                auth_tip->nChainWork);
+    // Preference still refuses to let the capped headers-only tip displace the
+    // deeper authenticated tip — download policy must not copy this metric.
+    BOOST_CHECK(PreferTrustAdjustedHeader(*comp_tip, *auth_tip, kAllowance));
+    BOOST_CHECK(!PreferTrustAdjustedHeader(*auth_tip, *comp_tip, kAllowance));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

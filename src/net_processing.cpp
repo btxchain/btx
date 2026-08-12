@@ -3197,6 +3197,13 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
         if (!extends_tip) {
             const bool is_authority{IsTrustedMirrorAuthorityPeer(
                 peer.m_id, peer.m_their_services)};
+            // DOWNLOAD uses CLAIMED nChainWork only. Trust-adjusted work caps an
+            // unauthenticated suffix at TRUST_ADJUSTED_WORK_ALLOWANCE_BLOCKS and
+            // is the right metric for preference/acceptance — but gating fetch on
+            // it is circular: bodies must download before the branch can
+            // authenticate and earn trust-adjusted credit. A claimed-heavier
+            // headers-only fork (production: hundreds ahead of the fork while
+            // trust-adjusted counts only +6) must still be fetchable.
             const bool better_work{
                 state->pindexBestKnownBlock->nChainWork >= tip->nChainWork};
             const bool parked{m_chainman.IsOnParkedReorgBranch(
@@ -3221,19 +3228,15 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
         }
     }
 
-    // WP-8 site 4: download eligibility. The primary test runs on
-    // TRUST-ADJUSTED work; a CLAIMED-work escape (nChainWork >= tip work) is
-    // deliberately kept for the >allowance-deep-reorg case — this path is
-    // SELF-HEALING (bodies download earliest-first from the fork point, so at
-    // most one in-flight window of bodies is fetched before the first invalid
-    // body fails validation, marks the branch BLOCK_FAILED and punishes the
-    // peer), unlike sites 2/3 which never require a body. The MinimumChainWork
-    // floor stays on claimed work: authenticated work cannot precede download
-    // (bootstrap liveness). Pre-fork all three predicates are identical to the
+    // Download eligibility uses CLAIMED nChainWork only (mirror and consensus).
+    // Trust-adjusted work is for preference/acceptance, not fetch: bodies are
+    // self-validating, and this path is SELF-HEALING (earliest-first from the
+    // fork; an invalid body fails the branch and punishes the peer). The
+    // MinimumChainWork floor stays on claimed work for bootstrap liveness.
+    // Pre-fork nAuthenticatedChainWork == nChainWork, so this matches the
     // historical raw-nChainWork test.
     if (state->pindexBestKnownBlock == nullptr ||
-        (TrustAdjustedWork(*state->pindexBestKnownBlock) < m_chainman.ActiveChain().Tip()->nChainWork &&
-         state->pindexBestKnownBlock->nChainWork < m_chainman.ActiveChain().Tip()->nChainWork) ||
+        state->pindexBestKnownBlock->nChainWork < m_chainman.ActiveChain().Tip()->nChainWork ||
         state->pindexBestKnownBlock->nChainWork < m_chainman.MinimumChainWork()) {
         // This peer has nothing interesting.
         log_skip(state->pindexBestKnownBlock == nullptr ? "no_best_known"
@@ -6068,18 +6071,17 @@ void PeerManagerImpl::HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, c
     // Trusted mirrors never direct-fetch an ordinary competing fork that is
     // not the followed best-header chain; those bodies are unattestable and
     // only feed the reject hot-loop. Authority peers, and any peer on the
-    // authority-selected recovery chain, may direct-fetch a better/equal-work
-    // non-parked branch so a mirror that lost a same-height race can converge.
-    bool may_competing{false};
-    bool extends_tip{true};
+    // authority-selected recovery chain, may direct-fetch a better/equal
+    // CLAIMED-work non-parked branch so a mirror that lost a same-height race
+    // can converge.
     if (node::matmul_trusted::IsTrustedMirror()) {
         const CBlockIndex* tip{m_chainman.ActiveChain().Tip()};
         if (tip == nullptr) {
             return;
         }
-        extends_tip = last_header.GetAncestor(tip->nHeight) == tip;
+        const bool extends_tip{last_header.GetAncestor(tip->nHeight) == tip};
         if (!extends_tip) {
-            may_competing =
+            const bool may_competing =
                 node::matmul_trusted::TrustedMirrorMayDownloadCompetingBranch(
                     IsTrustedMirrorAuthorityPeer(pfrom.GetId(),
                                                  peer.m_their_services),
@@ -6094,26 +6096,20 @@ void PeerManagerImpl::HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, c
         }
     }
 
-    // WP-8 site 1: gate the direct fetch on TRUST-ADJUSTED work (== nChainWork
-    // pre-fork). Honest announcements extend our validated tip and pass
-    // immediately; a forged deep high-work fork is clamped and falls back to
-    // the (budgeted, self-healing) parallel download path instead.
-    //
-    // Trusted-mirror competing recovery is the exception: after a 1-2 block
-    // same-height race the active tip already carries more *authenticated*
-    // work than the headers-only winning branch (TrustAdjustedWork stops at
-    // the fork). Claimed-work escape lets direct-fetch pull the first window
-    // of recovery bodies; MayDownloadCompetingBranch already refused parked /
-    // unfollowed forks.
+    // Direct-fetch DOWNLOAD eligibility uses CLAIMED nChainWork only.
+    // Trust-adjusted work (allowance-capped) is for preference/acceptance; using
+    // it here stranded nodes whenever a headers-only competing suffix was deeper
+    // than TRUST_ADJUSTED_WORK_ALLOWANCE_BLOCKS while the active tip still held
+    // more authenticated work than fork+allowance. Bodies are self-validating
+    // (and mirrors still require M-of-N); inflight caps bound the fetch window.
+    // Mirror competing forks were already filtered by MayDownloadCompetingBranch
+    // above (parked / less claimed work / not followed).
     const CBlockIndex* tip_for_work{m_chainman.ActiveChain().Tip()};
-    const bool trust_gate_ok{
+    const bool claimed_download_ok{
         tip_for_work != nullptr &&
-        tip_for_work->nChainWork <= TrustAdjustedWork(last_header)};
-    const bool competing_claimed_ok{
-        tip_for_work != nullptr && !extends_tip && may_competing &&
         tip_for_work->nChainWork <= last_header.nChainWork};
     if (CanDirectFetch() && last_header.IsValid(BLOCK_VALID_TREE) &&
-        (trust_gate_ok || competing_claimed_ok)) {
+        claimed_download_ok) {
         std::vector<const CBlockIndex*> vToFetch;
         const CBlockIndex* pindexWalk{&last_header};
         // Calculate all the blocks we'd need to switch to last_header, up to a limit.
