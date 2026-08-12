@@ -3163,6 +3163,42 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_rebuilds_full_shielded_state_from_chai
 
     {
         LOCK(::cs_main);
+        // Mutation-marker full rebuild must use the fused single genesis->tip walk rather than
+        // four independent block-store passes (state / registry / settlement / netting).
+        ASSERT_DEBUG_LOG("RebuildShieldedChainDerivedState: replaying");
+        ASSERT_DEBUG_LOG("RebuildShieldedChainDerivedState: replayed");
+        DebugLogHelper no_separate_state(
+            "RebuildShieldedState: replaying",
+            [](const std::string* line) {
+                if (line != nullptr) {
+                    throw std::runtime_error("unexpected separate RebuildShieldedState pass during fused rebuild");
+                }
+                return false;
+            });
+        DebugLogHelper no_separate_registry(
+            "RebuildShieldedAccountRegistryState: replaying",
+            [](const std::string* line) {
+                if (line != nullptr) {
+                    throw std::runtime_error("unexpected separate account-registry pass during fused rebuild");
+                }
+                return false;
+            });
+        DebugLogHelper no_separate_settlement(
+            "RebuildShieldedSettlementAnchorState: scanning",
+            [](const std::string* line) {
+                if (line != nullptr) {
+                    throw std::runtime_error("unexpected separate settlement-anchor pass during fused rebuild");
+                }
+                return false;
+            });
+        DebugLogHelper no_separate_netting(
+            "RebuildShieldedNettingManifestState: scanning",
+            [](const std::string* line) {
+                if (line != nullptr) {
+                    throw std::runtime_error("unexpected separate netting-manifest pass during fused rebuild");
+                }
+                return false;
+            });
         BOOST_REQUIRE(chainman_restarted.EnsureShieldedStateInitialized());
         BOOST_REQUIRE(chainman_restarted.ActiveTip() != nullptr);
         BOOST_CHECK(chainman_restarted.ActiveTip()->GetBlockHash() == expected_tip_hash);
