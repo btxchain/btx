@@ -1831,7 +1831,8 @@ private:
                                               const Peer& peer,
                                               const CBlockIndex& index,
                                               const CBlockHeader& header,
-                                              bool is_ibd);
+                                              bool is_ibd)
+        LOCKS_EXCLUDED(cs_main);
     /** Stage announcement/body transport timing and promote it only after the
      * corresponding block is accepted with local ExactReplay provenance. */
     void BeginMatMulAuthenticatedRelayObservation(
@@ -1908,11 +1909,29 @@ private:
         std::chrono::microseconds now)
         EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex);
     /** Relay an admitted direct-tip child as a paid BIP152 hint while its
-     * ExactReplay job runs. This never updates validity or chainwork. */
+     * ExactReplay job runs. This never updates validity or chainwork.
+     *
+     * Lock order: must not hold cs_main or m_nodes_mutex on entry. Peer
+     * selection snapshots under m_nodes_mutex, releases, then consults
+     * CNodeState under cs_main alone — never m_nodes_mutex → cs_main
+     * (canonical pair order is cs_main before m_nodes_mutex). */
     void MaybeRelayProvisionalMatMulRCCompactBlock(
         CNode& source,
         const CBlock& block,
-        const MatMulBlockAdmission& admission);
+        const MatMulBlockAdmission& admission)
+        LOCKS_EXCLUDED(cs_main);
+    /**
+     * Snapshot high-bandwidth provisional-RC relay targets without nesting
+     * cs_main under m_nodes_mutex.
+     *
+     * Canonical order for this mutex pair is cs_main before m_nodes_mutex
+     * (see getnetworkinfo, NewPoWValidBlock, EvictExtraOutboundPeers). Holding
+     * m_nodes_mutex across LOCK(cs_main) is an ABBA inversion against those
+     * paths and trips DEBUG_LOCKORDER.
+     */
+    std::vector<NodeId> SelectProvisionalMatMulRCRelayPeers(
+        NodeId source_id, const uint256& prev_hash)
+        LOCKS_EXCLUDED(cs_main);
     void RememberMatMulRCOutboundTicket(
         const node::RCAdmissionTicket& ticket);
     std::optional<node::RCAdmissionTicket> LookupMatMulRCOutboundTicket(
@@ -6747,6 +6766,7 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
     const CBlockHeader& header,
     bool is_ibd)
 {
+    AssertLockNotHeld(cs_main);
     if (!m_opts.matmul_rc_header_first || !m_matmul_verify_worker || is_ibd) {
         return;
     }
@@ -7070,30 +7090,12 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
         !accepted_ticket) {
         return;
     }
+    const std::vector<NodeId> targets{SelectProvisionalMatMulRCRelayPeers(
+        node.GetId(), header.hashPrevBlock)};
     uint32_t relayed{0};
-    m_connman.ForEachNode(
-        [this, source = node.GetId(), &header, &accepted_ticket,
-         &relayed](CNode* peer_node) {
-            if (relayed >= MATMUL_RC_PROVISIONAL_RELAY_PEERS ||
-                peer_node->GetId() == source || peer_node->fDisconnect ||
-                peer_node->GetCommonVersion() < INVALID_CB_NO_BAN_VERSION) {
-                return;
-            }
-            bool high_bandwidth{false};
-            {
-                LOCK(cs_main);
-                if (CNodeState* state{State(peer_node->GetId())}) {
-                    const CBlockIndex* previous{
-                        m_chainman.m_blockman.LookupBlockIndex(
-                            header.hashPrevBlock)};
-                    high_bandwidth = state->m_requested_hb_cmpctblocks &&
-                        previous != nullptr &&
-                        PeerHasHeader(state, previous);
-                }
-            }
-            if (!high_bandwidth) return;
-            std::vector<CBlock> relay_headers{
-                CBlock{header}};
+    for (const NodeId peer_id : targets) {
+        const bool sent{m_connman.ForNode(peer_id, [&](CNode* peer_node) {
+            std::vector<CBlock> relay_headers{CBlock{header}};
             MakeAndPushMessage(
                 *peer_node, NetMsgType::HEADERS,
                 TX_WITH_WITNESS(relay_headers));
@@ -7101,8 +7103,10 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
             // does not consume the bounded unknown-hash quarantine.
             MakeAndPushMessage(
                 *peer_node, NetMsgType::RCADMIT, *accepted_ticket);
-            ++relayed;
-        });
+            return true;
+        })};
+        if (sent) ++relayed;
+    }
     if (relayed != 0) {
         LogDebug(BCLog::NET,
                  "matmul: provisionally relayed paid header hash=%s peers=%u; ExactReplay remains pending\n",
@@ -7110,11 +7114,54 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
     }
 }
 
+std::vector<NodeId> PeerManagerImpl::SelectProvisionalMatMulRCRelayPeers(
+    NodeId source_id, const uint256& prev_hash)
+{
+    // Snapshot peer ids under m_nodes_mutex, then consult CNodeState under
+    // cs_main alone. Never nest cs_main inside ForEachNode/ForNode: that is
+    // m_nodes_mutex → cs_main and ABBA-inverts getnetworkinfo /
+    // NewPoWValidBlock (cs_main → m_nodes_mutex).
+    AssertLockNotHeld(cs_main);
+    AssertLockNotHeld(m_connman.GetNodesMutex());
+
+    std::vector<NodeId> candidates;
+    m_connman.ForEachNode([&](CNode* peer_node) {
+        if (peer_node->GetId() == source_id || peer_node->fDisconnect ||
+            peer_node->GetCommonVersion() < INVALID_CB_NO_BAN_VERSION) {
+            return;
+        }
+        candidates.push_back(peer_node->GetId());
+    });
+
+    std::vector<NodeId> selected;
+    selected.reserve(std::min<size_t>(
+        candidates.size(), MATMUL_RC_PROVISIONAL_RELAY_PEERS));
+    for (const NodeId peer_id : candidates) {
+        if (selected.size() >= MATMUL_RC_PROVISIONAL_RELAY_PEERS) break;
+        bool high_bandwidth{false};
+        {
+            LOCK(cs_main);
+            AssertLockNotHeld(m_connman.GetNodesMutex());
+            if (CNodeState* state{State(peer_id)}) {
+                const CBlockIndex* previous{
+                    m_chainman.m_blockman.LookupBlockIndex(prev_hash)};
+                high_bandwidth = state->m_requested_hb_cmpctblocks &&
+                    previous != nullptr && PeerHasHeader(state, previous);
+            }
+        }
+        if (high_bandwidth) selected.push_back(peer_id);
+    }
+    return selected;
+}
+
 void PeerManagerImpl::MaybeRelayProvisionalMatMulRCCompactBlock(
     CNode& source,
     const CBlock& block,
     const MatMulBlockAdmission& admission)
 {
+    AssertLockNotHeld(cs_main);
+    AssertLockNotHeld(m_connman.GetNodesMutex());
+
     if (!m_opts.matmul_rc_provisional_relay ||
         admission.state != MatMulBlockAdmission::State::RECOMPUTE_RESERVED ||
         !admission.rc_profile || admission.is_ibd) {
@@ -7128,6 +7175,7 @@ void PeerManagerImpl::MaybeRelayProvisionalMatMulRCCompactBlock(
     bool authenticated_tip_child{false};
     {
         LOCK(cs_main);
+        AssertLockNotHeld(m_connman.GetNodesMutex());
         const CBlockIndex* parent{
             m_chainman.m_blockman.LookupBlockIndex(block.hashPrevBlock)};
         const CBlockIndex* active_tip{m_chainman.ActiveTip()};
@@ -7140,27 +7188,11 @@ void PeerManagerImpl::MaybeRelayProvisionalMatMulRCCompactBlock(
     const auto compact{
         std::make_shared<const CBlockHeaderAndShortTxIDs>(
             block, FastRandomContext().rand64())};
+    const std::vector<NodeId> targets{SelectProvisionalMatMulRCRelayPeers(
+        source.GetId(), block.hashPrevBlock)};
     uint32_t relayed{0};
-    m_connman.ForEachNode(
-        [this, source_id = source.GetId(), &block, &ticket, &compact,
-         &relayed](CNode* peer_node) {
-            if (relayed >= MATMUL_RC_PROVISIONAL_RELAY_PEERS ||
-                peer_node->GetId() == source_id || peer_node->fDisconnect ||
-                peer_node->GetCommonVersion() < INVALID_CB_NO_BAN_VERSION) {
-                return;
-            }
-            bool high_bandwidth{false};
-            {
-                LOCK(cs_main);
-                if (CNodeState* state{State(peer_node->GetId())}) {
-                    const CBlockIndex* parent{
-                        m_chainman.m_blockman.LookupBlockIndex(
-                            block.hashPrevBlock)};
-                    high_bandwidth = state->m_requested_hb_cmpctblocks &&
-                        parent != nullptr && PeerHasHeader(state, parent);
-                }
-            }
-            if (!high_bandwidth) return;
+    for (const NodeId peer_id : targets) {
+        const bool sent{m_connman.ForNode(peer_id, [&](CNode* peer_node) {
             std::vector<CBlock> relay_headers{
                 CBlock{block.GetBlockHeader()}};
             MakeAndPushMessage(
@@ -7172,8 +7204,10 @@ void PeerManagerImpl::MaybeRelayProvisionalMatMulRCCompactBlock(
                 *peer_node, NetMsgType::RCADMIT, *ticket);
             MakeAndPushMessage(
                 *peer_node, NetMsgType::CMPCTBLOCK, *compact);
-            ++relayed;
-        });
+            return true;
+        })};
+        if (sent) ++relayed;
+    }
 
     if (relayed != 0) {
         LogDebug(BCLog::NET,

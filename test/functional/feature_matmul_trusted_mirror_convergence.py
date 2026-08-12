@@ -145,11 +145,6 @@ class MatMulTrustedMirrorConvergenceTest(BitcoinTestFramework):
             # Keep the profile's PARK action explicit for the finality guard.
             "-parkdeepreorg=1",
             f"-maxreorgdepthpark={PARK_DEPTH}",
-            # Avoid Debug DEBUG_LOCKORDER abort: provisional RC relay takes
-            # m_nodes_mutex→cs_main while connect_nodes/getnetworkinfo takes
-            # cs_main→m_nodes_mutex. Convergence under test does not need
-            # provisional header relay.
-            "-matmulrcprovisionalrelay=0",
             "-debug=net",
         ]
         archive = common + [

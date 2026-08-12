@@ -1053,7 +1053,11 @@ static RPCHelpMan getnetworkinfo()
                 },
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
-    LOCK(cs_main);
+    // Canonical mutex order vs CConnman::m_nodes_mutex is cs_main before
+    // m_nodes_mutex. Keep any cs_main acquisition outside GetNodeCount (which
+    // takes m_nodes_mutex) so this path cannot ABBA-invert provisional RC
+    // relay / other ForEachNode users that must never take cs_main while
+    // holding m_nodes_mutex.
     UniValue obj(UniValue::VOBJ);
     obj.pushKV("version",       CLIENT_VERSION);
     obj.pushKV("subversion",    strSubVersion);

@@ -76,7 +76,6 @@ class MatMulTrustedMirrorBackfillTest(BitcoinTestFramework):
             f"-matmultrustedpubkey={self.signer_pub}",
             "-matmultrustedthreshold=1",
             "-matmultrustedwaitms=30000",
-            "-matmulrcprovisionalrelay=0",
             "-debug=net",
         ]
         archive = common + [

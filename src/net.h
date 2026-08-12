@@ -1300,14 +1300,20 @@ public:
     bool CheckIncomingNonce(uint64_t nonce);
     void ASMapHealthCheck();
 
-    // alias for thread safety annotations only, not defined
-    RecursiveMutex& GetNodesMutex() const LOCK_RETURNED(m_nodes_mutex);
+    /** Accessor for thread-safety annotations and AssertLockNotHeld/Held. */
+    RecursiveMutex& GetNodesMutex() const LOCK_RETURNED(m_nodes_mutex) { return m_nodes_mutex; }
 
     bool ForNode(NodeId id, std::function<bool(CNode* pnode)> func);
 
     void PushMessage(CNode* pnode, CSerializedNetMsg&& msg) EXCLUSIVE_LOCKS_REQUIRED(!m_total_bytes_sent_mutex);
 
     using NodeFn = std::function<void(CNode*)>;
+    /** Iterate fully-connected peers under m_nodes_mutex.
+     *
+     * Canonical lock order vs cs_main is cs_main before m_nodes_mutex
+     * (getnetworkinfo, NewPoWValidBlock, EvictExtraOutboundPeers). Callbacks
+     * must not acquire cs_main unless the caller already holds it; taking
+     * cs_main from inside this callback is an ABBA inversion. */
     void ForEachNode(const NodeFn& func)
     {
         LOCK(m_nodes_mutex);
