@@ -9378,6 +9378,31 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
  * Return the tip of the chain with the most work in it, that isn't
  * known to be invalid (it's however far from certain to be valid).
  */
+//! Trusted mirrors and the local signer must not let a heavier competing
+//! fork occupy FindMostWorkChain. Tip children stay eligible. A short
+//! attested race may replace an unattested tip only.
+static bool TrustedMirrorShouldConsiderMostWorkCandidate(
+    const CBlockIndex* tip, const CBlockIndex* candidate)
+    EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+{
+    if (!node::matmul_trusted::IsTrustedMirror() &&
+        !node::matmul_trusted::HasLocalSigner()) {
+        return true;
+    }
+    if (tip == nullptr || candidate == nullptr || candidate == tip) return true;
+    const bool extends_tip{
+        candidate->nHeight >= tip->nHeight &&
+        candidate->GetAncestor(tip->nHeight) == tip};
+    const CBlockIndex* lca{LastCommonAncestor(tip, candidate)};
+    const int lca_depth{lca != nullptr ? tip->nHeight - lca->nHeight : 0};
+    return node::matmul_trusted::TrustedMirrorMaySelectMostWorkCandidate(
+        extends_tip,
+        node::matmul_trusted::TrustedMirrorIsShortTipReorg(lca_depth),
+        node::matmul_trusted::HasQuorum(
+            candidate->GetBlockHash(), candidate->nHeight),
+        node::matmul_trusted::HasQuorum(tip->GetBlockHash(), tip->nHeight));
+}
+
 CBlockIndex* Chainstate::FindMostWorkChain()
 {
     AssertLockHeld(::cs_main);
@@ -9426,6 +9451,13 @@ CBlockIndex* Chainstate::FindMostWorkChain()
             LogWarning("%s: deferring losing-tip extension hash=%s height=%d while authenticated reorg recovery is armed\n",
                        __func__, pindexNew->GetBlockHash().ToString(),
                        pindexNew->nHeight);
+            setBlockIndexCandidates.erase(pindexNew);
+            continue;
+        }
+        if (!TrustedMirrorShouldConsiderMostWorkCandidate(m_chain.Tip(), pindexNew)) {
+            LogDebug(BCLog::VALIDATION,
+                     "FindMostWorkChain: skipping unattested competing candidate hash=%s height=%d\n",
+                     pindexNew->GetBlockHash().ToString(), pindexNew->nHeight);
             setBlockIndexCandidates.erase(pindexNew);
             continue;
         }
@@ -9883,6 +9915,10 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
                 // (with the exception of shutdown due to hardware issues, low disk space, etc).
                 ConnectTrace connectTrace; // Destructed before cs_main is unlocked
 
+                if (m_chainman.m_interrupt) {
+                    break;
+                }
+
                 if (pindexMostWork == nullptr) {
                     pindexMostWork = FindMostWorkChain();
                 }
@@ -10259,7 +10295,8 @@ void Chainstate::TryAddBlockIndexCandidate(CBlockIndex* pindex)
 {
     AssertLockHeld(cs_main);
     if (m_chainman.IsOnParkedReorgBranch(pindex) ||
-        m_chainman.ShouldDeferLosingTipExtension(pindex)) {
+        m_chainman.ShouldDeferLosingTipExtension(pindex) ||
+        !TrustedMirrorShouldConsiderMostWorkCandidate(m_chain.Tip(), pindex)) {
         return;
     }
 
@@ -17696,13 +17733,21 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
         persisted_tip_height >= 0 &&
         (persisted_tip_hash != tip->GetBlockHash() || persisted_tip_height != tip->nHeight)) {
         const CBlockIndex* persisted_index = m_blockman.LookupBlockIndex(persisted_tip_hash);
+        // Trust the block-index height when pin metadata disagrees (unclean
+        // SIGKILL can tear the height field while the hash is still valid).
         if (persisted_index != nullptr &&
-            persisted_index->nHeight == persisted_tip_height &&
-            tip->GetAncestor(persisted_tip_height) == persisted_index &&
-            persisted_tip_height < tip->nHeight) {
-            const int gap_blocks = tip->nHeight - persisted_tip_height;
-            LogPrintf("EnsureShieldedStateInitialized: persisted shielded tip height=%d hash=%s is behind active tip height=%d hash=%s; catching up %d block(s) without from-genesis rebuild\n",
+            persisted_index->nHeight != persisted_tip_height) {
+            LogPrintf("EnsureShieldedStateInitialized: persisted pin height=%d disagrees with index height=%d for hash=%s; using index height\n",
                       persisted_tip_height,
+                      persisted_index->nHeight,
+                      persisted_tip_hash.ToString());
+        }
+        if (persisted_index != nullptr &&
+            tip->GetAncestor(persisted_index->nHeight) == persisted_index &&
+            persisted_index->nHeight < tip->nHeight) {
+            const int gap_blocks = tip->nHeight - persisted_index->nHeight;
+            LogPrintf("EnsureShieldedStateInitialized: persisted shielded tip height=%d hash=%s is behind active tip height=%d hash=%s; catching up %d block(s) without from-genesis rebuild\n",
+                      persisted_index->nHeight,
                       persisted_tip_hash.ToString(),
                       tip->nHeight,
                       tip->GetBlockHash().ToString(),
@@ -17830,12 +17875,11 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
             LogPrintf("EnsureShieldedStateInitialized: persisted ancestor failed gap-only provenance or transition checks; using single-pass fused rebuild\n");
             reset_shielded_state();
         } else if (persisted_index != nullptr &&
-                   persisted_index->nHeight == persisted_tip_height &&
                    persisted_index->GetAncestor(tip->nHeight) == tip &&
-                   tip->nHeight < persisted_tip_height) {
-            const int gap_blocks = persisted_tip_height - tip->nHeight;
-            LogPrintf("EnsureShieldedStateInitialized: persisted shielded tip height=%d hash=%s is ahead of active tip height=%d hash=%s (e.g. interrupted invalidateblock); unwinding %d block(s) from persisted state\n",
-                      persisted_tip_height,
+                   tip->nHeight < persisted_index->nHeight) {
+            const int gap_blocks = persisted_index->nHeight - tip->nHeight;
+            LogPrintf("EnsureShieldedStateInitialized: persisted shielded tip height=%d hash=%s is ahead of active tip height=%d hash=%s (e.g. interrupted invalidateblock / unclean stop); unwinding %d block(s) from persisted state\n",
+                      persisted_index->nHeight,
                       persisted_tip_hash.ToString(),
                       tip->nHeight,
                       tip->GetBlockHash().ToString(),
@@ -17954,8 +17998,7 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
             }
             LogPrintf("EnsureShieldedStateInitialized: persisted descendant failed gap-only provenance or transition checks; using single-pass fused rebuild\n");
             reset_shielded_state();
-        } else if (persisted_index != nullptr &&
-                   persisted_index->nHeight == persisted_tip_height) {
+        } else if (persisted_index != nullptr) {
             const CBlockIndex* const transition_fork{
                 LastCommonAncestor(persisted_index, tip)};
             const int disconnect_blocks = transition_fork
@@ -18143,7 +18186,7 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
             LogPrintf("EnsureShieldedStateInitialized: persisted short-fork state failed bounded gap-only provenance or transition checks; using single-pass fused rebuild\n");
             reset_shielded_state();
         } else {
-            LogPrintf("EnsureShieldedStateInitialized: persisted shielded tip height=%d hash=%s diverges from active tip height=%d hash=%s; performing single-pass fused rebuild from chain\n",
+            LogPrintf("EnsureShieldedStateInitialized: persisted shielded tip height=%d hash=%s is not in the block index (active tip height=%d hash=%s); performing single-pass fused rebuild from chain\n",
                       persisted_tip_height,
                       persisted_tip_hash.ToString(),
                       tip->nHeight,

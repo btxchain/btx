@@ -333,6 +333,11 @@ void Interrupt(NodeContext& node)
     for (auto* index : node.indexes) {
         index->Interrupt();
     }
+    // SIGTERM must stop mmverify before Shutdown() joins HTTP workers.
+    // Otherwise ActivateBestChain / preciousblock sitting in an HTTP thread
+    // waits forever on b-mmverify, StopHTTPServer never returns, and systemd
+    // SIGKILLs — skipping PersistShieldedState and forcing a fused rebuild.
+    if (node.peerman) node.peerman->StopBackgroundWorkers();
 }
 
 void Shutdown(NodeContext& node)
@@ -350,6 +355,10 @@ void Shutdown(NodeContext& node)
     util::ThreadRename("shutoff");
     if (node.mempool) node.mempool->AddTransactionsUpdated(1);
 
+    // Stop mmverify before joining HTTP/RPC workers. Interrupt() already did
+    // this; calling it again is idempotent. Doing it here covers the path
+    // where Shutdown() runs without Interrupt() (failed init / Qt).
+    if (node.peerman) node.peerman->StopBackgroundWorkers();
     StopHTTPRPC();
     StopREST();
     StopRPC();

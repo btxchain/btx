@@ -662,10 +662,12 @@ void MatMulVerifyWorker::WorkerLoop()
             // remain retryable and non-punitive.
             //
             // Do not park provably-unattestable work: heights above the known
-            // authority frontier (except the tip-extender, which may probe one
-            // step ahead) must not consume scarce park slots.
+            // attested high-water (except the tip-extender, which may probe one
+            // step ahead) must not consume scarce park slots. Peer-tip hints
+            // are unauthenticated competing headers and must not inflate this
+            // bound (live: frontier 187859 vs signer 187791).
             const auto frontier{
-                node::matmul_trusted::AuthorityAttestedFrontier()};
+                node::matmul_trusted::HighestAttestedHeight()};
             if (!tip_extending && frontier.has_value() &&
                 job.height > *frontier) {
                 LogDebug(

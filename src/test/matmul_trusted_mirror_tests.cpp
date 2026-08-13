@@ -576,6 +576,98 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
             .authority_frontier = 186011,
             .in_backoff = true,
         }) == TrustedAttestationAdmit::RejectBackoff);
+
+    // Short tip-race reorg is first-class: admit even when it does not
+    // extend the losing tip and would otherwise sit above a stale frontier
+    // or in signer-absent backoff. Live: 187773 sibling vs 250c7e53.
+    BOOST_CHECK(
+        EvaluateTrustedAttestationAdmit(TrustedAttestationAdmitView{
+            .tip_extending = false,
+            .short_tip_reorg = true,
+            .extends_active_tip_chain = false,
+            .better_work_reorg_candidate = true,
+            .on_parked_reorg_branch = false,
+            .height = 187774,
+            .authority_frontier = 187773,
+            .in_backoff = false,
+        }) == TrustedAttestationAdmit::Allow);
+    BOOST_CHECK(
+        EvaluateTrustedAttestationAdmit(TrustedAttestationAdmitView{
+            .tip_extending = false,
+            .short_tip_reorg = true,
+            .extends_active_tip_chain = false,
+            .on_parked_reorg_branch = false,
+            .height = 187773,
+            .authority_frontier = 187859,
+            .in_backoff = true,
+        }) == TrustedAttestationAdmit::Allow);
+    // Competing miner fork hundreds ahead is not a short reorg (live ~187975).
+    BOOST_CHECK(
+        EvaluateTrustedAttestationAdmit(TrustedAttestationAdmitView{
+            .tip_extending = false,
+            .short_tip_reorg = false,
+            .extends_active_tip_chain = false,
+            .on_parked_reorg_branch = false,
+            .height = 187975,
+            .authority_frontier = 187859,
+            .in_backoff = false,
+        }) == TrustedAttestationAdmit::RejectNotForwardOfTip);
+    // Park still wins over a short-reorg flag (must not be a back door).
+    BOOST_CHECK(
+        EvaluateTrustedAttestationAdmit(TrustedAttestationAdmitView{
+            .tip_extending = false,
+            .short_tip_reorg = true,
+            .extends_active_tip_chain = false,
+            .on_parked_reorg_branch = true,
+            .height = 187774,
+            .authority_frontier = 187773,
+            .in_backoff = false,
+        }) == TrustedAttestationAdmit::RejectParkedReorg);
+
+    using node::matmul_trusted::TrustedMirrorIsShortTipReorg;
+    using node::matmul_trusted::TrustedMirrorPreferGetMmAttest;
+    using node::matmul_trusted::TRUSTED_MIRROR_SHORT_REORG_DEPTH;
+    BOOST_CHECK_EQUAL(TRUSTED_MIRROR_SHORT_REORG_DEPTH, 6);
+    BOOST_CHECK(!TrustedMirrorIsShortTipReorg(0));
+    BOOST_CHECK(TrustedMirrorIsShortTipReorg(1));
+    BOOST_CHECK(TrustedMirrorIsShortTipReorg(6));
+    BOOST_CHECK(!TrustedMirrorIsShortTipReorg(7));
+    BOOST_CHECK(!TrustedMirrorIsShortTipReorg(187975 - 187773));
+    using node::matmul_trusted::TrustedMirrorMaySelectMostWorkCandidate;
+    BOOST_CHECK(TrustedMirrorMaySelectMostWorkCandidate(
+        /*extends_active_tip_chain=*/true, /*short_tip_reorg=*/false,
+        /*has_quorum=*/false));
+    BOOST_CHECK(TrustedMirrorMaySelectMostWorkCandidate(
+        /*extends_active_tip_chain=*/false, /*short_tip_reorg=*/true,
+        /*has_quorum=*/true));
+    BOOST_CHECK(!TrustedMirrorMaySelectMostWorkCandidate(
+        /*extends_active_tip_chain=*/false, /*short_tip_reorg=*/true,
+        /*has_quorum=*/false));
+    BOOST_CHECK(!TrustedMirrorMaySelectMostWorkCandidate(
+        /*extends_active_tip_chain=*/false, /*short_tip_reorg=*/false,
+        /*has_quorum=*/true));
+    BOOST_CHECK(!TrustedMirrorMaySelectMostWorkCandidate(
+        /*extends_active_tip_chain=*/false, /*short_tip_reorg=*/false,
+        /*has_quorum=*/false));
+    // Signed tip must not be abandoned for a heavier attested short fork.
+    BOOST_CHECK(!TrustedMirrorMaySelectMostWorkCandidate(
+        /*extends_active_tip_chain=*/false, /*short_tip_reorg=*/true,
+        /*has_quorum=*/true, /*active_tip_has_quorum=*/true));
+    BOOST_CHECK(TrustedMirrorMaySelectMostWorkCandidate(
+        /*extends_active_tip_chain=*/true, /*short_tip_reorg=*/false,
+        /*has_quorum=*/false, /*active_tip_has_quorum=*/true));
+    BOOST_CHECK(TrustedMirrorPreferGetMmAttest(
+        /*active_tip_child=*/true, /*short_tip_reorg_missing_root=*/false));
+    BOOST_CHECK(TrustedMirrorPreferGetMmAttest(
+        /*active_tip_child=*/false, /*short_tip_reorg_missing_root=*/true));
+    BOOST_CHECK(!TrustedMirrorPreferGetMmAttest(
+        /*active_tip_child=*/false, /*short_tip_reorg_missing_root=*/false));
+    BOOST_CHECK(!TrustedMirrorPreferGetMmAttest(
+        /*active_tip_child=*/true, /*short_tip_reorg_missing_root=*/true,
+        /*on_parked_reorg_branch=*/true));
+    BOOST_CHECK(!TrustedMirrorPreferGetMmAttest(
+        /*active_tip_child=*/false, /*short_tip_reorg_missing_root=*/true,
+        /*on_parked_reorg_branch=*/true));
 }
 
 BOOST_AUTO_TEST_CASE(tip_extender_capacity_reserved_under_slot_pressure)
@@ -676,10 +768,55 @@ BOOST_AUTO_TEST_CASE(authority_frontier_tracks_accepted_attestations)
     BOOST_CHECK(node::matmul_trusted::Add(*att_hi, block_hi, 250) ==
                 matmul::trusted::AddResult::Accepted);
     BOOST_CHECK_EQUAL(*node::matmul_trusted::AuthorityAttestedFrontier(), 250);
+    const auto hints{node::matmul_trusted::AttestedFrontierHints()};
+    BOOST_REQUIRE(!hints.empty());
+    BOOST_CHECK_EQUAL(hints.back().height, 250);
+    BOOST_CHECK(hints.back().hash == block_hi);
 
-    // Soft peer-tip hint can raise the effective frontier further.
+    // Soft peer-tip hint can raise the raw high-water further.
     node::matmul_trusted::NoteAuthorityPeerTipHint(300);
     BOOST_CHECK_EQUAL(*node::matmul_trusted::AuthorityAttestedFrontier(), 300);
+    // Production admit/park must not use that raw max when the hint is a
+    // competing/unauthenticated height.
+    using node::matmul_trusted::SelectAuthorityAttestedFrontier;
+    using node::matmul_trusted::AuthorityFrontierCandidateUsable;
+    BOOST_CHECK(!AuthorityFrontierCandidateUsable({
+        .on_or_extends_active_tip_chain = false,
+        .short_tip_reorg = false,
+        .on_parked_reorg_branch = false,
+    }));
+    BOOST_CHECK(!AuthorityFrontierCandidateUsable({
+        .on_or_extends_active_tip_chain = true,
+        .short_tip_reorg = false,
+        .on_parked_reorg_branch = true,
+    }));
+    BOOST_CHECK(AuthorityFrontierCandidateUsable({
+        .on_or_extends_active_tip_chain = true,
+        .short_tip_reorg = false,
+        .on_parked_reorg_branch = false,
+    }));
+    BOOST_CHECK(AuthorityFrontierCandidateUsable({
+        .on_or_extends_active_tip_chain = false,
+        .short_tip_reorg = true,
+        .on_parked_reorg_branch = false,
+    }));
+    // Live: attested 187773 on the losing sibling, peer hint 187859 on the
+    // miner fork, signer actually at 187791. Effective frontier must not be
+    // 187859.
+    const auto capped{SelectAuthorityAttestedFrontier(
+        /*attested_height=*/187773, /*attested_usable=*/true,
+        /*peer_tip_hint=*/187859, /*hint_usable=*/false)};
+    BOOST_REQUIRE(capped.has_value());
+    BOOST_CHECK_EQUAL(*capped, 187773);
+    const auto signer_short{SelectAuthorityAttestedFrontier(
+        /*attested_height=*/187791, /*attested_usable=*/true,
+        /*peer_tip_hint=*/187859, /*hint_usable=*/false)};
+    BOOST_REQUIRE(signer_short.has_value());
+    BOOST_CHECK_EQUAL(*signer_short, 187791);
+    BOOST_CHECK(!SelectAuthorityAttestedFrontier(
+                     /*attested_height=*/187859, /*attested_usable=*/false,
+                     /*peer_tip_hint=*/187859, /*hint_usable=*/false)
+                     .has_value());
 }
 
 BOOST_AUTO_TEST_CASE(tip_chain_header_preference_ignores_competing_fork)
@@ -790,6 +927,36 @@ BOOST_AUTO_TEST_CASE(authority_header_preference_rescues_divergent_tip)
         .tip_height = 186393,
         .current_best_height = 186393,
         .current_best_extends_tip = true,
+        .candidate_extends_current_best = false,
+    }));
+
+    // Authority short-reorg must displace a taller claimed-heaviest miner
+    // fork that is not on the active tip (live: m_best_header 187978 vs
+    // signer sibling 187791 while tip is 187773).
+    BOOST_CHECK(PreferTrustedMirrorAuthorityHeader(TrustedMirrorAuthorityHeaderView{
+        .from_authority_peer = true,
+        .extends_active_tip_chain = false,
+        .better_work_reorg_candidate = true,
+        .on_parked_reorg_branch = false,
+        .short_tip_reorg = true,
+        .candidate_height = 187791,
+        .tip_height = 187773,
+        .current_best_height = 187978,
+        .current_best_extends_tip = false,
+        .candidate_extends_current_best = false,
+    }));
+    // Without the short-reorg bit, a shorter authority header must not
+    // displace the taller competing best-header (deep fork stays parked).
+    BOOST_CHECK(!PreferTrustedMirrorAuthorityHeader(TrustedMirrorAuthorityHeaderView{
+        .from_authority_peer = true,
+        .extends_active_tip_chain = false,
+        .better_work_reorg_candidate = true,
+        .on_parked_reorg_branch = false,
+        .short_tip_reorg = false,
+        .candidate_height = 187791,
+        .tip_height = 187773,
+        .current_best_height = 187978,
+        .current_best_extends_tip = false,
         .candidate_extends_current_best = false,
     }));
 

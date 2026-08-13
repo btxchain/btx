@@ -11,6 +11,7 @@
 #include <span.h>
 #include <streams.h>
 #include <support/cleanse.h>
+#include <uint256.h>
 #include <util/fs.h>
 #include <util/fs_helpers.h>
 #include <util/readwritefile.h>
@@ -52,6 +53,11 @@ std::chrono::milliseconds g_wait_timeout{60'000};
 int32_t g_highest_attested_height{-1};
 //! Soft hint: max best-known height among peers that recently served MMATTEST.
 int32_t g_authority_peer_tip_hint{-1};
+uint256 g_authority_peer_tip_hash{};
+//! Recent attested (height -> hash) so the effective frontier can ignore a
+//! competing/parked high-water mark and still see the signer-chain height.
+std::map<int32_t, uint256> g_attested_by_height;
+static constexpr int32_t ATTESTED_FRONTIER_HINT_WINDOW{512};
 
 fs::path g_persist_path;
 bool g_persist_enabled{false};
@@ -826,6 +832,8 @@ void Reset()
     g_wait_timeout = std::chrono::milliseconds{60'000};
     g_highest_attested_height = -1;
     g_authority_peer_tip_hint = -1;
+    g_authority_peer_tip_hash.SetNull();
+    g_attested_by_height.clear();
     g_persist_enabled = false;
     g_persist_path.clear();
 }
@@ -906,7 +914,7 @@ matmul::trusted::AddResult Add(
     // height; advance the local frontier high-water mark either way.
     if (result == matmul::trusted::AddResult::Accepted ||
         result == matmul::trusted::AddResult::Duplicate) {
-        NoteAcceptedAttestationHeight(expected_height);
+        NoteAcceptedAttestationHeight(expected_height, expected_hash);
     }
     if (result == matmul::trusted::AddResult::Accepted) {
         PersistAfterMutation(attestation);
@@ -930,7 +938,7 @@ matmul::trusted::AddResult SignAuthoritative(
     }
     if (result == matmul::trusted::AddResult::Accepted ||
         result == matmul::trusted::AddResult::Duplicate) {
-        NoteAcceptedAttestationHeight(block_height);
+        NoteAcceptedAttestationHeight(block_height, block_hash);
     }
     if (result == matmul::trusted::AddResult::Accepted) {
         PersistAfterMutation(signed_attestation);
@@ -1036,6 +1044,26 @@ std::optional<int32_t> AuthorityPeerTipHint()
     return g_authority_peer_tip_hint;
 }
 
+std::optional<uint256> AuthorityPeerTipHintHash()
+{
+    std::lock_guard lock{g_mutex};
+    if (g_authority_peer_tip_hint < 0 || g_authority_peer_tip_hash.IsNull()) {
+        return std::nullopt;
+    }
+    return g_authority_peer_tip_hash;
+}
+
+std::vector<AttestedFrontierHint> AttestedFrontierHints()
+{
+    std::lock_guard lock{g_mutex};
+    std::vector<AttestedFrontierHint> out;
+    out.reserve(g_attested_by_height.size());
+    for (const auto& [height, hash] : g_attested_by_height) {
+        out.push_back({.hash = hash, .height = height});
+    }
+    return out;
+}
+
 std::optional<int32_t> AuthorityAttestedFrontier()
 {
     std::lock_guard lock{g_mutex};
@@ -1045,21 +1073,33 @@ std::optional<int32_t> AuthorityAttestedFrontier()
     return frontier;
 }
 
-void NoteAcceptedAttestationHeight(int32_t height)
+void NoteAcceptedAttestationHeight(int32_t height, const uint256& hash)
 {
     if (height < 0) return;
     std::lock_guard lock{g_mutex};
     if (height > g_highest_attested_height) {
         g_highest_attested_height = height;
     }
+    if (!hash.IsNull()) {
+        g_attested_by_height[height] = hash;
+        const int32_t floor_height{
+            g_highest_attested_height - ATTESTED_FRONTIER_HINT_WINDOW};
+        while (!g_attested_by_height.empty() &&
+               g_attested_by_height.begin()->first < floor_height) {
+            g_attested_by_height.erase(g_attested_by_height.begin());
+        }
+    }
 }
 
-void NoteAuthorityPeerTipHint(int32_t height)
+void NoteAuthorityPeerTipHint(int32_t height, const uint256& hash)
 {
     if (height < 0) return;
     std::lock_guard lock{g_mutex};
     if (height > g_authority_peer_tip_hint) {
         g_authority_peer_tip_hint = height;
+        g_authority_peer_tip_hash = hash;
+    } else if (height == g_authority_peer_tip_hint && !hash.IsNull()) {
+        g_authority_peer_tip_hash = hash;
     }
 }
 

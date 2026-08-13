@@ -8,6 +8,7 @@
 #include <matmul/trusted_exact_replay_attestation.h>
 #include <span.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -152,24 +153,121 @@ void ResetHistoricalReverifyBudgetForTest();
  * soft peer-tip hint records the best-known height of peers that recently
  * delivered usable MMATTEST. Neither field lowers the M-of-N quorum; they only
  * decide which blocks may consume scarce request/park/verify slots.
+ *
+ * AuthorityAttestedFrontier() is the raw high-water mark (tests / diagnostics).
+ * Production admit/park/header-request MUST run that mark through
+ * SelectAuthorityAttestedFrontier so competing or unauthenticated heights —
+ * including the parked miner fork — cannot raise the frontier above the
+ * active tip chain or a short reorg (depth <= TRUSTED_MIRROR_SHORT_REORG_DEPTH).
+ * Live 2026-08-13: raw frontier 187859 while the signer tip was 187791.
  */
+static constexpr int TRUSTED_MIRROR_SHORT_REORG_DEPTH{6};
+
+/** LCA(tip, candidate) depth in (0, TRUSTED_MIRROR_SHORT_REORG_DEPTH].
+ *  Depth 0 is the tip itself; depth 7+ is the EMERGENCY park window and the
+ *  competing miner fork (live: ~200 headers at 1879xx vs a 187773 sibling). */
+[[nodiscard]] inline bool TrustedMirrorIsShortTipReorg(int lca_depth)
+{
+    return lca_depth > 0 && lca_depth <= TRUSTED_MIRROR_SHORT_REORG_DEPTH;
+}
+
+/** FindMostWorkChain / candidate-set gate for trusted mirrors and the
+ *  local signer.
+ *
+ *  Tip-extending HAVE_DATA must always remain selectable: that is how the
+ *  node catches up after a short reorg once the new parent is the tip.
+ *  A short attested tip-race (LCA depth 1–6 with quorum) may replace an
+ *  *unattested* tip so a lost same-height sibling can converge.
+ *
+ *  Never reorg away a tip that already has quorum. Live 2026-08-13: the
+ *  signer followed a heavier 4-block competing fork at 187795, signed it,
+ *  and every mirror treated that as an attested short race. Competing
+ *  then extended as "tip-extending" to 18781x. */
+[[nodiscard]] inline bool TrustedMirrorMaySelectMostWorkCandidate(
+    bool extends_active_tip_chain,
+    bool short_tip_reorg,
+    bool has_quorum,
+    bool active_tip_has_quorum = false)
+{
+    if (extends_active_tip_chain) return true;
+    if (active_tip_has_quorum) return false;
+    return short_tip_reorg && has_quorum;
+}
+
+/** Preferred GETMMATTEST work on a trusted mirror: the ActiveTip child, or
+ *  the missing root of a short tip-race reorg (sibling of tip / first hole
+ *  on the authority peer's best-known). Competing headers at 1879xx are
+ *  neither. Parked deep-reorg branches never prefer. */
+[[nodiscard]] inline bool TrustedMirrorPreferGetMmAttest(
+    bool active_tip_child,
+    bool short_tip_reorg_missing_root,
+    bool on_parked_reorg_branch = false)
+{
+    if (on_parked_reorg_branch) return false;
+    return active_tip_child || short_tip_reorg_missing_root;
+}
+
+struct AttestedFrontierHint {
+    uint256 hash{};
+    int32_t height{-1};
+};
+
 [[nodiscard]] std::optional<int32_t> HighestAttestedHeight();
 [[nodiscard]] std::optional<int32_t> AuthorityPeerTipHint();
-/** Effective frontier: max(highest attested, peer tip hint), if either known. */
+[[nodiscard]] std::optional<uint256> AuthorityPeerTipHintHash();
+[[nodiscard]] std::vector<AttestedFrontierHint> AttestedFrontierHints();
+/** Raw high-water: max(highest attested, peer tip hint), if either known. */
 [[nodiscard]] std::optional<int32_t> AuthorityAttestedFrontier();
-void NoteAcceptedAttestationHeight(int32_t height);
-void NoteAuthorityPeerTipHint(int32_t height);
+void NoteAcceptedAttestationHeight(int32_t height, const uint256& hash = {});
+void NoteAuthorityPeerTipHint(int32_t height, const uint256& hash = {});
+
+/** Whether a frontier candidate may raise the effective attested frontier. */
+struct AuthorityFrontierCandidateView {
+    bool on_or_extends_active_tip_chain{false};
+    bool short_tip_reorg{false};
+    bool on_parked_reorg_branch{false};
+};
+
+[[nodiscard]] inline bool AuthorityFrontierCandidateUsable(
+    const AuthorityFrontierCandidateView& v)
+{
+    if (v.on_parked_reorg_branch) return false;
+    return v.on_or_extends_active_tip_chain || v.short_tip_reorg;
+}
+
+/** Pick the highest usable attested height / peer-tip hint. Unusable
+ *  competing or parked heights are ignored rather than mixed into max(). */
+[[nodiscard]] inline std::optional<int32_t> SelectAuthorityAttestedFrontier(
+    std::optional<int32_t> attested_height,
+    bool attested_usable,
+    std::optional<int32_t> peer_tip_hint,
+    bool hint_usable)
+{
+    std::optional<int32_t> out;
+    if (attested_usable && attested_height.has_value() &&
+        *attested_height >= 0) {
+        out = attested_height;
+    }
+    if (hint_usable && peer_tip_hint.has_value() && *peer_tip_hint >= 0) {
+        out = out.has_value() ? std::max(*out, *peer_tip_hint) : peer_tip_hint;
+    }
+    return out;
+}
 
 /**
  * Pure admission policy for trusted-mirror attestation / park / verify slots.
  *
  * Tip-extending work is always eligible (except cancelled/stopped paths): it is
  * how the mirror advances, and may briefly probe one height past a stale
- * frontier so the frontier can catch up when the authority mines. Everything
- * else must be a forward extension of the active tip's chain or lie on the
- * exact branch selected by shared shallow-recovery state, must not sit on a
- * parked deep-reorg branch, must not exceed the known authority frontier, and
- * must not be in negative-cache backoff after signers stayed silent.
+ * frontier so the frontier can catch up when the authority mines. A short tip
+ * reorg (LCA depth 1–TRUSTED_MIRROR_SHORT_REORG_DEPTH) is first-class like
+ * tip-extending: it must not be starved by competing getmmattest slots,
+ * signer-absent backoff, or RejectNotForwardOfTip. Park is evaluated first
+ * for that path and is never bypassed. Everything else must be a forward
+ * extension of the active tip's chain or lie on the exact branch selected by
+ * shared shallow-recovery state, must not sit on a parked deep-reorg branch,
+ * must not exceed the known authority frontier, and must not be in
+ * negative-cache backoff after signers stayed silent.
  */
 enum class TrustedAttestationAdmit : uint8_t {
     Allow,
@@ -181,6 +279,10 @@ enum class TrustedAttestationAdmit : uint8_t {
 
 struct TrustedAttestationAdmitView {
     bool tip_extending{false};
+    //! LCA(tip, candidate) depth in (0, TRUSTED_MIRROR_SHORT_REORG_DEPTH].
+    //! Same-height sibling / short fork of the authenticated tip. First-class
+    //! like tip_extending for GETMMATTEST slots, but park still wins.
+    bool short_tip_reorg{false};
     //! index->GetAncestor(tip_height) == tip (strict forward of active tip).
     bool extends_active_tip_chain{false};
     //! Branch carries strictly more work than the active tip, i.e. this is a
@@ -212,6 +314,10 @@ struct TrustedAttestationAdmitView {
     }
     if (v.on_parked_reorg_branch) {
         return TrustedAttestationAdmit::RejectParkedReorg;
+    }
+    if (v.short_tip_reorg) {
+        // Short tip-race reorg: first-class like tip-extending after park.
+        return TrustedAttestationAdmit::Allow;
     }
     // A better-work branch is admissible even though it does not extend our
     // active tip -- that is precisely what a reorg looks like. Refusing it here
@@ -406,6 +512,10 @@ struct TrustedMirrorAuthorityHeaderView {
     //! sibling or heavier fork).
     bool better_work_reorg_candidate{false};
     bool on_parked_reorg_branch{false};
+    //! LCA(tip, candidate) depth in (0, TRUSTED_MIRROR_SHORT_REORG_DEPTH].
+    //! An authority short-reorg must displace a best-header that sits on the
+    //! claimed-heaviest miner fork (live: m_best_header 187978 vs signer 187791).
+    bool short_tip_reorg{false};
     int32_t candidate_height{-1};
     int32_t tip_height{-1};
     int32_t current_best_height{-1};
@@ -461,6 +571,16 @@ struct TrustedMirrorAuthorityHeaderView {
     }
     if (v.candidate_height < v.tip_height) {
         return false;
+    }
+    // Authority short-reorg displaces a best-header that is not on the active
+    // tip chain — including a *taller* claimed-heaviest miner fork. Height
+    // comparison against that fork would pin m_best_header there forever
+    // (live: 187978 competing vs signer 187791) and starve sibling download.
+    if (v.short_tip_reorg && !v.current_best_extends_tip) {
+        if (v.candidate_extends_current_best) {
+            return v.candidate_height > v.current_best_height;
+        }
+        return true;
     }
     // Tip-pinned losing best-header must be displaced so headers advance off
     // the stranded tip. This is the production stall (headers==blocks while
