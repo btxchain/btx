@@ -1843,6 +1843,11 @@ public:
     [[nodiscard]] bool InsertShieldedRecoveryExitCommitmentsForTest(const std::vector<uint256>& commitments)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
+    /** Test hook: append account-registry leaves, rebuild views, and persist a trusted pin. */
+    [[nodiscard]] bool AppendShieldedAccountRegistryForTest(
+        Span<const shielded::registry::ShieldedAccountLeaf> leaves)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
     /** Test/diagnostic hook to inject persisted settlement anchors into the live shielded store. */
     [[nodiscard]] bool InsertShieldedSettlementAnchorsForTest(const std::vector<uint256>& anchors)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);

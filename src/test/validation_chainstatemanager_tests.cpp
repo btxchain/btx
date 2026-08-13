@@ -4359,6 +4359,115 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_fast_startup_skips_recovery_exit_audit
     }
 }
 
+BOOST_FIXTURE_TEST_CASE(chainstatemanager_fast_startup_verifies_pin_after_nonempty_registry_restore,
+                        RecoveryExitFastStartupPersistedTestChain100Setup)
+{
+    // Production: V3 pin covers account_registry_root. Hashing it before the
+    // persisted registry is restored (empty default root vs 32k-entry archive)
+    // caches a mismatch and forces a recovery-exit genesis audit.
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    auto simulate_node_restart = [&]() -> ChainstateManager& {
+        ChainstateManager& current_chainman = *Assert(m_node.chainman);
+
+        for (Chainstate* cs : current_chainman.GetAll()) {
+            LOCK(::cs_main);
+            cs->ForceFlushStateToDisk();
+        }
+        m_node.validation_signals->SyncWithValidationInterfaceQueue();
+        {
+            LOCK(::cs_main);
+            current_chainman.ResetChainstates();
+            BOOST_CHECK_EQUAL(current_chainman.GetAll().size(), 0);
+            m_node.notifications = std::make_unique<KernelNotifications>(
+                Assert(m_node.shutdown_request), m_node.exit_status, *Assert(m_node.warnings));
+            const ChainstateManager::Options chainman_opts{
+                .chainparams = ::Params(),
+                .datadir = current_chainman.m_options.datadir,
+                .shielded_startup_audit = false,
+                .fast_shielded_startup = true,
+                .notifications = *m_node.notifications,
+                .signals = m_node.validation_signals.get(),
+            };
+            const BlockManager::Options blockman_opts{
+                .chainparams = chainman_opts.chainparams,
+                .blocks_dir = m_args.GetBlocksDirPath(),
+                .notifications = chainman_opts.notifications,
+                .block_tree_db_params = DBParams{
+                    .path = current_chainman.m_options.datadir / "blocks" / "index",
+                    .cache_bytes = m_kernel_cache_sizes.block_tree_db,
+                    .memory_only = m_block_tree_db_in_memory,
+                },
+            };
+            m_node.chainman.reset();
+            m_node.chainman = std::make_unique<ChainstateManager>(
+                *Assert(m_node.shutdown_signal), chainman_opts, blockman_opts);
+        }
+        return *Assert(m_node.chainman);
+    };
+
+    uint256 expected_tip_hash;
+    int32_t expected_tip_height{-1};
+    uint256 expected_registry_root;
+    size_t expected_registry_size{0};
+    uint256 expected_state_pin;
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman.EnsureShieldedStateInitialized());
+        BOOST_REQUIRE(chainman.ActiveTip() != nullptr);
+        BOOST_REQUIRE(chainman.GetConsensus().IsShieldedRecoveryExitActive(chainman.ActiveTip()->nHeight));
+        const auto account = test::shielded::MakeDeterministicCompactPublicAccount(/*seed=*/0x51u);
+        const uint256 note_commitment = test::shielded::MakeDeterministicTestUint256(/*seed=*/0x51u, /*domain=*/0x44);
+        const auto leaf = test::shielded::BuildDirectAccountLeaf(note_commitment, account);
+        BOOST_REQUIRE(leaf.has_value());
+        BOOST_REQUIRE(chainman.AppendShieldedAccountRegistryForTest(
+            Span<const shielded::registry::ShieldedAccountLeaf>{&*leaf, 1}));
+        expected_tip_hash = chainman.ActiveTip()->GetBlockHash();
+        expected_tip_height = chainman.ActiveTip()->nHeight;
+        expected_registry_root = chainman.GetShieldedAccountRegistryRoot();
+        expected_registry_size = chainman.GetShieldedAccountRegistryEntryCount();
+        BOOST_REQUIRE_GT(expected_registry_size, 0U);
+        const auto state_pin = chainman.ComputeShieldedSnapshotStatePin();
+        BOOST_REQUIRE(state_pin.has_value());
+        expected_state_pin = *state_pin;
+    }
+
+    ChainstateManager& chainman_restarted = simulate_node_restart();
+    this->LoadVerifyActivateChainstate();
+
+    {
+        LOCK(::cs_main);
+        ASSERT_DEBUG_LOG("-fastshieldedstartup verified persisted full shielded state pin");
+        DebugLogHelper no_pin_mismatch(
+            "full shielded state pin mismatch",
+            [](const std::string* line) {
+                if (line != nullptr) {
+                    throw std::runtime_error(
+                        "unexpected pin mismatch after restoring a non-empty account registry");
+                }
+                return false;
+            });
+        DebugLogHelper no_genesis_replay(
+            "replaying",
+            [](const std::string* line) {
+                if (line != nullptr && line->find("genesis") != std::string::npos) {
+                    throw std::runtime_error(
+                        "unexpected genesis replay after restoring a non-empty account registry");
+                }
+                return false;
+            });
+        BOOST_REQUIRE(chainman_restarted.EnsureShieldedStateInitialized());
+        BOOST_REQUIRE(chainman_restarted.ActiveTip() != nullptr);
+        BOOST_CHECK(chainman_restarted.ActiveTip()->GetBlockHash() == expected_tip_hash);
+        BOOST_CHECK_EQUAL(chainman_restarted.ActiveTip()->nHeight, expected_tip_height);
+        BOOST_CHECK_EQUAL(chainman_restarted.GetShieldedAccountRegistryRoot(), expected_registry_root);
+        BOOST_CHECK_EQUAL(chainman_restarted.GetShieldedAccountRegistryEntryCount(), expected_registry_size);
+        const auto restored_state_pin = chainman_restarted.ComputeShieldedSnapshotStatePin();
+        BOOST_REQUIRE(restored_state_pin.has_value());
+        BOOST_CHECK_EQUAL(*restored_state_pin, expected_state_pin);
+        BOOST_CHECK(!chainman_restarted.ReadShieldedMutationMarker().has_value());
+    }
+}
+
 BOOST_FIXTURE_TEST_CASE(chainstatemanager_fast_startup_keeps_fast_path_after_history_window_refresh,
                         RecoveryExitFastStartupPersistedTestChain100Setup)
 {

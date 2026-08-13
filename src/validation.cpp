@@ -17253,13 +17253,6 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
                     }
                     return fast_startup_state_pin_verified;
                 };
-            // Capture provenance before any startup repair writes back state.
-            // Otherwise a history-window refresh could accidentally mint a
-            // fast-start credential for an imported/unverified snapshot. A
-            // previously valid pin may survive history-only refreshes because
-            // those do not change the state structures covered by the pin.
-            const bool pre_repair_state_pin_verified{
-                verify_fast_startup_state_pin()};
             auto build_account_registry_views =
                 [&]() EXCLUSIVE_LOCKS_REQUIRED(::cs_main) -> bool {
                     AssertLockHeld(::cs_main);
@@ -17356,6 +17349,14 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
                     return false;
                 }
             }
+            // Hash the pin only after the persisted registry is live. The V3 pin
+            // covers account_registry_root; computing it on the empty default
+            // registry (the previous order) mismatches any non-empty archive
+            // snapshot, caches the failure, and forces a multi-hour recovery-exit
+            // audit. Capture before history-window rewrite/persist so a later
+            // refresh cannot mint a fast-start credential for repaired state.
+            const bool pre_repair_state_pin_verified{
+                verify_fast_startup_state_pin()};
             bool account_registry_roots_changed{false};
             if (ShieldedRebuildHistoryBlocksAvailable(*m_active_chainstate, tip)) {
                 if (!RebuildShieldedAccountRegistryHistory(*m_active_chainstate, tip)) {
@@ -17522,11 +17523,13 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
                 m_options.fast_shielded_startup &&
                 !startup_shielded_repair_performed;
             if (!full_state_pin_verified) {
-                LogPrintf("EnsureShieldedStateInitialized: full shielded state pin %s at height=%d hash=%s; cross-chain audit is required\n",
+                LogPrintf("EnsureShieldedStateInitialized: full shielded state pin %s at height=%d hash=%s tree_size=%u registry_entries=%u; cross-chain audit is required\n",
                           !fast_startup_state_pin_present ? "absent" :
                           !fast_startup_state_pin_current_available ? "unavailable" : "mismatch",
                           tip != nullptr ? tip->nHeight : -1,
-                          tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString());
+                          tip != nullptr ? tip->GetBlockHash().ToString() : uint256{}.ToString(),
+                          static_cast<unsigned int>(m_shielded_merkle_tree.Size()),
+                          static_cast<unsigned int>(m_shielded_account_registry.Size()));
             }
             std::string audit_error;
             const bool full_rebuild_blocks_available =
@@ -18259,6 +18262,21 @@ bool ChainstateManager::InsertShieldedRecoveryExitCommitmentsForTest(const std::
     AssertLockHeld(::cs_main);
     if (!m_shielded_nullifiers) return false;
     return m_shielded_nullifiers->InsertRecoveryExitCommitments(commitments);
+}
+
+bool ChainstateManager::AppendShieldedAccountRegistryForTest(
+    Span<const shielded::registry::ShieldedAccountLeaf> leaves)
+{
+    AssertLockHeld(::cs_main);
+    if (!m_shielded_state_initialized) return false;
+    if (!m_shielded_account_registry.Append(leaves)) return false;
+    if (!shielded::registry::BuildRegistryAccountState(m_shielded_account_registry,
+                                                       m_shielded_smile_public_accounts,
+                                                       m_shielded_account_leaf_commitments)) {
+        return false;
+    }
+    InvalidateShieldedAccountStateSnapshotCaches();
+    return PersistShieldedState(ActiveTip(), /*fast_startup_trusted=*/true);
 }
 
 bool ChainstateManager::InsertShieldedSettlementAnchorsForTest(const std::vector<uint256>& anchors)
