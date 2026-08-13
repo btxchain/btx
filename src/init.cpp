@@ -415,18 +415,22 @@ void Shutdown(NodeContext& node)
         }
         // §11: seal tip-matched shielded state on graceful stop so a leftover
         // PREPARED/legacy mutation marker cannot force a multi-hour
-        // from-genesis rebuild on the next start. PersistShieldedState refreshes
-        // the tip snapshot, pin, nullifier accumulator, and clears the marker.
+        // from-genesis rebuild on the next start. Skip a second full-tree
+        // fsync when ConnectTip already sealed this tip — that rewrite is what
+        // hung archive shutdowns until systemd SIGKILL.
         if (node.chainman->HasShieldedState()) {
-            if (!node.chainman->PersistShieldedState(node.chainman->ActiveTip())) {
+            const CBlockIndex* const tip{node.chainman->ActiveTip()};
+            if (node.chainman->HasDurableShieldedSnapshotAt(tip)) {
+                LogPrintf("Shutdown: shielded state already sealed at tip height=%d hash=%s; skipping rewrite\n",
+                          tip ? tip->nHeight : -1,
+                          tip ? tip->GetBlockHash().ToString() : uint256{}.ToString());
+            } else if (!node.chainman->PersistShieldedState(tip)) {
                 LogPrintf("Shutdown: PersistShieldedState failed while sealing shielded tip; "
                           "next start may rebuild shielded state from chain\n");
             } else {
                 LogPrintf("Shutdown: sealed shielded state at tip height=%d hash=%s\n",
-                          node.chainman->ActiveTip() ? node.chainman->ActiveTip()->nHeight : -1,
-                          node.chainman->ActiveTip()
-                              ? node.chainman->ActiveTip()->GetBlockHash().ToString()
-                              : uint256{}.ToString());
+                          tip ? tip->nHeight : -1,
+                          tip ? tip->GetBlockHash().ToString() : uint256{}.ToString());
             }
         }
     }
@@ -763,6 +767,7 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
         "-whitebind. "
         "Implicit whitelist permissions are download,mempool,addr plus relay/forcerelay knobs; noban must be explicit. "
         "Additional flags \"in\" and \"out\" control whether permissions apply to incoming connections and/or outgoing (default: incoming only). "
+        "Specifying \"out\" without \"in\" replaces that inbound default rather than adding to it; noban without inbound will not protect inbound peers from MatMul near-tip disconnects. "
         "Can be specified multiple times.", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-allowdangerousnoban", strprintf("Allow broad -whitelist=noban ranges (default: %u)", false), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
 
@@ -3309,6 +3314,12 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
             InitWarning(strprintf(
                 _("Dangerous configuration: broad -whitelist=noban range '%s' enabled by -allowdangerousnoban=1"),
                 subnet.m_subnet.ToString()));
+        }
+        if (NetPermissions::HasFlag(subnet.m_flags, NetPermissionFlags::NoBan) &&
+            !(connection_direction & ConnectionDirection::In)) {
+            InitWarning(strprintf(
+                _("whitelist '%s' grants noban without inbound ('in'). A bare 'out' replaces the default inbound direction, so NoBan does not apply to inbound peers that announce a heavier tip. Use in,out,noban if those peers should bypass MatMul near-tip disconnects."),
+                net));
         }
         NetPermissions::AddFlag(all_permission_flags, subnet.m_flags);
         if (connection_direction & ConnectionDirection::In) {

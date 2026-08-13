@@ -38,6 +38,7 @@
 #include <policy/fees.h>
 #include <policy/policy.h>
 #include <policy/settings.h>
+#include <pubkey.h>
 #include <matmul/matmul_sketch_cache.h>
 #include <matmul/matmul_v4_rc.h>
 #include <matmul/matmul_v4_rc_accelerator_scheduler.h>
@@ -302,8 +303,18 @@ static constexpr auto BEST_KNOWN_PROBE_INTERVAL{2min};
 static constexpr size_t MATMUL_DEFERRED_BODY_MAX_COUNT{64};
 static constexpr size_t MATMUL_DEFERRED_BODY_MAX_BYTES{128 * 1024 * 1024};
 /** A stored body older than this is dropped; it will be re-downloaded if still
- *  wanted. Prevents the store pinning bodies for a chain we abandoned. */
-static constexpr auto MATMUL_DEFERRED_BODY_MAX_AGE{10min};
+ *  wanted. ExactReplay on a live GPU is ~11s/block, so 10 minutes only covers
+ *  ~54 deferred bodies — past that, catch-up ages out faster than it validates.
+ *  45 minutes covers ~245 blocks of deferred ExactReplay. */
+static constexpr auto MATMUL_DEFERRED_BODY_MAX_AGE{45min};
+
+/** True when the validated tip lags known headers. The previous "+10" threshold
+ *  left 2–10 block gaps on the tiny steady-state verify budget, which then
+ *  disconnected the only peers holding those bodies. */
+static bool MatMulTreatAsIbdForBudget(int32_t active_height, int32_t best_known_height)
+{
+    return active_height < best_known_height;
+}
 /** Upper bound on the catch-up multiplier applied to the global verify budget. */
 static constexpr uint32_t MATMUL_RC_CATCHUP_BUDGET_MULTIPLIER_MAX{64};
 
@@ -2575,15 +2586,12 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
     candidate = retry->second;
     if (!candidate.block) return;
 
-    // Retry through the exact same source-bound admission and asynchronous
-    // worker path as the original delivery. The source must still be live so
-    // permission, address and keyed-netgroup accounting cannot silently turn
-    // into an uncharged local replay. If it disconnected, keep the retained
-    // body until its bounded expiry; the ordinary scheduler may then fetch it
-    // from another source.
+    // Prefer the original source so permission, address and keyed-netgroup
+    // accounting stay charged. If that peer is gone, replay locally: waiting
+    // for expiry is how a 7-block headers-only stall rotted eight held bodies
+    // after the only uploaders were budget-disconnected.
     const std::shared_ptr<CNode> source{
         m_connman.GetNodeRef(candidate.source_peer)};
-    bool resubmitted{false};
     if (source && !source->fDisconnect &&
         source->nKeyedNetGroup == candidate.source_netgroup) {
             std::optional<ScopedMatMulPendingVerification> slot;
@@ -2620,13 +2628,14 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
                          candidate.min_pow_checked, std::move(slot),
                          /*post_process=*/nullptr, admission,
                          /*is_retained_retry=*/true);
-            resubmitted = true;
+            return;
     }
-    if (!resubmitted) {
-        LogDebug(BCLog::NET,
-                 "Budget-deferred body %s awaits original peer=%d (retained, not replayed locally)\n",
-                 candidate_hash.ToString(), candidate.source_peer);
-    }
+    LogDebug(BCLog::NET,
+             "Replaying budget-deferred body %s locally (source peer=%d gone)\n",
+             candidate_hash.ToString(), candidate.source_peer);
+    ProcessBlockSync(candidate.source_peer, /*node=*/nullptr, candidate.block,
+                     candidate.force_processing, candidate.min_pow_checked,
+                     /*post_process=*/nullptr);
 }
 
 bool PeerManagerImpl::IsMatMulRCBodyDeferred(const uint256& hash, uint64_t keyed_netgroup) const
@@ -4117,7 +4126,7 @@ void PeerManagerImpl::ResubmitMatMulCarrierDeferredBlock(CNode& carrier_delivere
             BestKnownHeightForPeer(
                 carrier_deliverer.GetId(), prev_block->nHeight)};
         is_ibd = m_chainman.IsInitialBlockDownload();
-        if (!is_ibd && m_chainman.ActiveHeight() + 10 < best_known_height) is_ibd = true;
+        if (!is_ibd && MatMulTreatAsIbdForBudget(m_chainman.ActiveHeight(), best_known_height)) is_ibd = true;
         requires_matmul = CountMatMulExpensiveVerifyChecks(
                               static_cast<int64_t>(prev_block->nHeight) + 1, /*header_count=*/1,
                               best_known_height, consensus_params,
@@ -8206,7 +8215,8 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
         LOCK(cs_main);
         header_first_is_ibd = m_chainman.IsInitialBlockDownload() ||
             (m_chainman.m_best_header != nullptr &&
-             m_chainman.ActiveHeight() + 10 < m_chainman.m_best_header->nHeight);
+             MatMulTreatAsIbdForBudget(m_chainman.ActiveHeight(),
+                                       m_chainman.m_best_header->nHeight));
     } else if (consensus_params.fMatMulPOW) {
         int32_t best_known_height{chain_start_header->nHeight};
         bool is_ibd{false};
@@ -8217,11 +8227,11 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
                 : chain_start_header->nHeight;
             is_ibd = m_chainman.IsInitialBlockDownload();
             const int32_t active_height = m_chainman.ActiveHeight();
-            // Treat catch-up phase (active tip far behind best header) as
-            // IBD-equivalent for verification budget purposes.  Without this,
-            // the budget drops to steady-state (32/min) the moment IBD exits
-            // even though hundreds of blocks still need Phase2 verification.
-            if (!is_ibd && active_height + 10 < best_known_height) {
+            // Treat catch-up (active tip behind best known header) as IBD for
+            // verification budget. A "+10" gap was too large: a 7-block
+            // headers-only stall used the tiny steady-state budget, disconnected
+            // the only body sources, and the retained bodies then expired.
+            if (!is_ibd && MatMulTreatAsIbdForBudget(active_height, best_known_height)) {
                 is_ibd = true;
             }
             header_first_is_ibd = is_ibd;
@@ -8290,8 +8300,10 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
                         LogDebug(BCLog::NET, "Deferring headers from peer=%d: global MatMul verification budget exhausted\n", pfrom.GetId());
                         return;
                     }
-                    LogDebug(BCLog::NET, "Disconnecting peer=%d: MatMul per-peer verification budget exhausted\n", pfrom.GetId());
-                    pfrom.fDisconnect = true;
+                    // Same trap as the block path: disconnecting the peer that
+                    // just handed us the headers we are catching up on strands
+                    // the node headers-only. Drop this batch; keep the peer.
+                    LogDebug(BCLog::NET, "Deferring headers from peer=%d: MatMul per-peer verification budget exhausted\n", pfrom.GetId());
                     return;
                 }
             }
@@ -8903,10 +8915,34 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                      static_cast<int>(std::chrono::duration_cast<std::chrono::seconds>(
                          clamped_retry_delay).count()));
         } else {
+            // Non-IBD catch-up used to disconnect here. Observed on a live
+            // miner 2026-08-13: a 7-block headers-only gap (below the old +10
+            // IBD threshold) stored the bodies, then disconnected the only
+            // peers holding them; 10 minutes later MATMUL_DEFERRED_BODY_MAX_AGE
+            // destroyed the store and mining sat on a headers-only fork.
+            // Retain like the IBD/global paths. Disconnect only if the store
+            // cannot hold the body.
+            const auto clamped_retry_delay{
+                ClampMatMulBudgetDeferredDelay(retry_delay)};
+            {
+                LOCK(cs_main);
+                NoteMatMulBudgetDeferred(
+                    hash,
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        clamped_retry_delay));
+            }
+            const bool retained{StoreMatMulDeferredBody(
+                hash, block, node, force_processing, min_pow_checked,
+                matmul_admission.is_ibd,
+                matmul_admission.reference_height,
+                matmul_admission.work_units,
+                clamped_retry_delay)};
+            if (!retained) node.fDisconnect = true;
             LogDebug(BCLog::NET,
-                     "Disconnecting peer=%d: MatMul per-peer verification budget exhausted (block)\n",
-                     node.GetId());
-            node.fDisconnect = true;
+                     "Deferring block from peer=%d: MatMul per-peer verification budget exhausted (held %ds)\n",
+                     node.GetId(),
+                     static_cast<int>(std::chrono::duration_cast<std::chrono::seconds>(
+                         clamped_retry_delay).count()));
         }
         return false;
     };
@@ -10023,7 +10059,7 @@ void PeerManagerImpl::ProcessCompactBlockTxns(CNode& pfrom, Peer& peer, const Bl
         const int32_t best_known_height{
             BestKnownHeightForPeer(pfrom.GetId(), prev_block->nHeight)};
         is_ibd = m_chainman.IsInitialBlockDownload();
-        if (!is_ibd && m_chainman.ActiveHeight() + 10 < best_known_height) {
+        if (!is_ibd && MatMulTreatAsIbdForBudget(m_chainman.ActiveHeight(), best_known_height)) {
             is_ibd = true;
         }
         requires_matmul_verification = CountMatMulExpensiveVerifyChecks(
@@ -11848,7 +11884,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         const int32_t best_known_height{
             BestKnownHeightForPeer(pfrom.GetId(), prev_block->nHeight)};
         is_ibd = m_chainman.IsInitialBlockDownload();
-        if (!is_ibd && m_chainman.ActiveHeight() + 10 < best_known_height) {
+        if (!is_ibd && MatMulTreatAsIbdForBudget(m_chainman.ActiveHeight(), best_known_height)) {
             is_ibd = true;
         }
         requires_matmul_phase2 = CountMatMulExpensiveVerifyChecks(
@@ -13310,6 +13346,62 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 }
             }
             if (!known_profile1) {
+                const bool header_unknown{WITH_LOCK(cs_main,
+                    return m_chainman.m_blockman.LookupBlockIndex(hash) == nullptr)};
+                if (header_unknown &&
+                    node::matmul_trusted::IsConfigured()) {
+                    // Attestations routinely arrive minutes before the header
+                    // (measured p50 224s, p90 474s). Do not Add() until the
+                    // header is indexed; a signature that verifies against the
+                    // configured signers is enough to fetch those headers.
+                    const auto chain_id{node::matmul_trusted::ChainId()};
+                    const auto authority{
+                        node::matmul_trusted::ReplayAuthorityContext()};
+                    if (chain_id && authority) {
+                        const auto trusted{
+                            node::matmul_trusted::TrustedSigners()};
+                        const std::set<CPubKey> signers(
+                            trusted.begin(), trusted.end());
+                        const auto verified{matmul::trusted::VerifyAttestation(
+                            attestation, *chain_id, *authority, hash,
+                            attestation.statement.block_height, signers)};
+                        if (verified == matmul::trusted::VerifyResult::Valid) {
+                            CBlockLocator locator;
+                            {
+                                LOCK(cs_main);
+                                if (m_chainman.m_best_header) {
+                                    locator = GetLocator(m_chainman.m_best_header);
+                                }
+                            }
+                            if (!locator.vHave.empty() &&
+                                MaybeSendGetHeaders(pfrom, locator, *peer)) {
+                                LogDebug(
+                                    BCLog::NET,
+                                    "mmattest for unknown block=%s height=%d "
+                                    "from trusted signer; requested headers peer=%d\n",
+                                    hash.ToString(),
+                                    attestation.statement.block_height,
+                                    pfrom.GetId());
+                            } else {
+                                LogDebug(
+                                    BCLog::NET,
+                                    "mmattest for unknown block=%s height=%d "
+                                    "from trusted signer; headers already in-flight peer=%d\n",
+                                    hash.ToString(),
+                                    attestation.statement.block_height,
+                                    pfrom.GetId());
+                            }
+                            continue;
+                        }
+                        LogDebug(
+                            BCLog::NET,
+                            "Ignoring mmattest for unknown block=%s peer=%d "
+                            "verify=%s\n",
+                            hash.ToString(), pfrom.GetId(),
+                            matmul::trusted::VerifyResultName(verified));
+                        continue;
+                    }
+                }
                 LogDebug(
                     BCLog::NET,
                     "Ignoring mmattest for unknown/non-Profile1 "
@@ -13545,7 +13637,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                     BestKnownHeightForPeer(
                         pfrom.GetId(), prev_block->nHeight)};
                 is_ibd = m_chainman.IsInitialBlockDownload();
-                if (!is_ibd && m_chainman.ActiveHeight() + 10 < best_known_height) {
+                if (!is_ibd && MatMulTreatAsIbdForBudget(m_chainman.ActiveHeight(), best_known_height)) {
                     is_ibd = true;
                 }
                 requires_matmul_phase2 = CountMatMulExpensiveVerifyChecks(

@@ -1204,6 +1204,11 @@ private:
     //! v0.32.0 defense-in-depth: trailing-window net-unshield log enforcing the egress velocity cap.
     ShieldedUnshieldVelocity m_shielded_unshield_velocity GUARDED_BY(::cs_main);
     bool m_shielded_state_initialized GUARDED_BY(::cs_main){false};
+    //! Last tip whose shielded snapshot, pin, and marker were actually written
+    //! by PersistShieldedState. Shutdown skips a second full-tree fsync when
+    //! this still matches ActiveTip(); a crash leaves it unset so the next
+    //! start uses on-disk state.
+    std::optional<uint256> m_last_persisted_shielded_tip_hash GUARDED_BY(::cs_main);
     std::optional<ShieldedAutoRepairGeneration> m_last_shielded_anchor_auto_repair_generation GUARDED_BY(::cs_main);
     std::optional<ShieldedAutoRepairGeneration> m_last_shielded_state_rebuild_generation GUARDED_BY(::cs_main);
     uint64_t m_shielded_anchor_auto_repair_attempts GUARDED_BY(::cs_main){0};
@@ -1960,6 +1965,10 @@ public:
      *  publishing imported/pre-audit state. */
     [[nodiscard]] bool PersistShieldedState(const CBlockIndex* tip,
                                             bool fast_startup_trusted = true) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** True when PersistShieldedState already sealed this tip in this process. */
+    [[nodiscard]] bool HasDurableShieldedSnapshotAt(const CBlockIndex* tip) const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /** Read the persisted shielded restart snapshot for testing and diagnostics. */
     [[nodiscard]] bool ReadPersistedShieldedState(

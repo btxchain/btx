@@ -9813,6 +9813,20 @@ static void LimitValidationInterfaceQueue(ValidationSignals& signals) LOCKS_EXCL
     }
 }
 
+//! Drain the validation-interface queue without holding m_chainstate_mutex.
+//! Syncing while that mutex is held deadlocks against net/RPC ActivateBestChain
+//! (scheduler callbacks vs the thread blocked in Sync).
+template <typename MutexType>
+static void DrainValidationInterfaceQueue(ValidationSignals& signals, UniqueLock<MutexType>& chainstate_lock)
+    LOCKS_EXCLUDED(cs_main)
+{
+    AssertLockNotHeld(cs_main);
+    if (signals.CallbacksPending() <= 10) return;
+    Assert(chainstate_lock.owns_lock());
+    REVERSE_LOCK(chainstate_lock);
+    signals.SyncWithValidationInterfaceQueue();
+}
+
 bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<const CBlock> pblock)
 {
     AssertLockNotHeld(m_chainstate_mutex);
@@ -9827,7 +9841,7 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
     // because this function periodically releases cs_main so that it does not lock up other threads for too long
     // during large connects - and to allow for e.g. the callback queue to drain
     // we use m_chainstate_mutex to enforce mutual exclusion so that only one caller may execute this function at a time
-    LOCK(m_chainstate_mutex);
+    WAIT_LOCK(m_chainstate_mutex, chainstate_lock);
 
     // Belt-and-suspenders check that we aren't attempting to advance the background
     // chainstate past the snapshot base block.
@@ -9841,13 +9855,20 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
     CBlockIndex *pindexNewTip = nullptr;
     bool exited_ibd{false};
     do {
-        // Block until the validation queue drains. This should largely
-        // never happen in normal operation, however may happen during
-        // reindex, causing memory blowup if we run too far ahead.
+        // Drain the validation queue without holding m_chainstate_mutex. Syncing
+        // while that mutex is held deadlocks against net-thread ActivateBestChain
+        // (the Bitcoin Core comment below is the same failure mode).
         // Note that if a validationinterface callback ends up calling
         // ActivateBestChain this may lead to a deadlock! We should
         // probably have a DEBUG_LOCKORDER test for this in the future.
-        if (m_chainman.m_options.signals) LimitValidationInterfaceQueue(*m_chainman.m_options.signals);
+        if (m_chainman.m_options.signals) {
+            DrainValidationInterfaceQueue(*m_chainman.m_options.signals, chainstate_lock);
+            if (WITH_LOCK(::cs_main, return m_disabled)) {
+                LogPrintf("m_disabled is set - this chainstate should not be in operation. "
+                    "Please report this as a bug. %s\n", CLIENT_BUGREPORT);
+                return false;
+            }
+        }
 
         {
             LOCK(cs_main);
@@ -10032,7 +10053,7 @@ bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex* pinde
     // We do not allow ActivateBestChain() to run while InvalidateBlock() is
     // running, as that could cause the tip to change while we disconnect
     // blocks.
-    LOCK(m_chainstate_mutex);
+    WAIT_LOCK(m_chainstate_mutex, chainstate_lock);
 
     // We'll be acquiring and releasing cs_main below, to allow the validation
     // callbacks to run. However, we should keep the block index in a
@@ -10066,8 +10087,10 @@ bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex* pinde
     while (true) {
         if (m_chainman.m_interrupt) break;
 
-        // Make sure the queue of validation callbacks doesn't grow unboundedly.
-        if (m_chainman.m_options.signals) LimitValidationInterfaceQueue(*m_chainman.m_options.signals);
+        // Do not SyncWithValidationInterfaceQueue while m_chainstate_mutex is
+        // held (deep invalidateblock deadlocked here: RPC held this mutex,
+        // scheduler callbacks / net wanted ActivateBestChain). Queue growth is
+        // drained after the mutex is released below.
 
         LOCK(cs_main);
         // Lock for as long as disconnectpool is in scope to make sure MaybeUpdateMempoolForReorg is
@@ -10177,6 +10200,10 @@ bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex* pinde
         if (m_chainman.m_options.signals) {
             m_chainman.m_options.signals->ActiveTipChange(*Assert(m_chain.Tip()), m_chainman.IsInitialBlockDownload());
         }
+    }
+    if (m_chainman.m_options.signals) {
+        REVERSE_LOCK(chainstate_lock);
+        LimitValidationInterfaceQueue(*m_chainman.m_options.signals);
     }
     return true;
 }
@@ -15654,6 +15681,12 @@ bool ChainstateManager::PersistShieldedState(const CBlockIndex* tip,
         return false;
     }
 
+    LogDebug(BCLog::VALIDATION, "PersistShieldedState: writing snapshot height=%d hash=%s tree_size=%u registry_entries=%u\n",
+              tip ? tip->nHeight : -1,
+              tip ? tip->GetBlockHash().ToString() : uint256{}.ToString(),
+              static_cast<unsigned int>(m_shielded_merkle_tree.Size()),
+              static_cast<unsigned int>(m_shielded_account_registry.Size()));
+
     if (InjectShieldedTransitionWriteFailureForTest(
             ShieldedTransitionWriteSeam::PERSISTED_STATE) ||
         !m_shielded_nullifiers->WritePersistedState(
@@ -15682,9 +15715,21 @@ bool ChainstateManager::PersistShieldedState(const CBlockIndex* tip,
          !m_shielded_nullifiers->PersistShieldedStatePin(*shielded_state_pin))) {
         return false;
     }
-    return !InjectShieldedTransitionWriteFailureForTest(
-               ShieldedTransitionWriteSeam::MARKER_CLEAR) &&
-           m_shielded_nullifiers->ClearMutationMarker();
+    if (InjectShieldedTransitionWriteFailureForTest(
+            ShieldedTransitionWriteSeam::MARKER_CLEAR) ||
+        !m_shielded_nullifiers->ClearMutationMarker()) {
+        return false;
+    }
+    if (tip) m_last_persisted_shielded_tip_hash = tip->GetBlockHash();
+    return true;
+}
+
+bool ChainstateManager::HasDurableShieldedSnapshotAt(const CBlockIndex* tip) const
+{
+    AssertLockHeld(::cs_main);
+    return tip != nullptr &&
+           m_last_persisted_shielded_tip_hash.has_value() &&
+           *m_last_persisted_shielded_tip_hash == tip->GetBlockHash();
 }
 
 bool ChainstateManager::ReadPersistedShieldedState(
@@ -17990,13 +18035,16 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
                      base_trusted && cursor != transition_fork;
                      cursor = cursor->pprev) {
                     CBlock block;
-                    CBlockUndo undo;
                     if (!ReadShieldedRebuildBlock(*m_active_chainstate,
-                                                  *cursor, block) ||
-                        !m_blockman.ReadBlockUndo(undo, *cursor)) {
+                                                  *cursor, block)) {
                         base_trusted = false;
                         break;
                     }
+                    // Undo is best-effort provenance. A SIGKILL after ConnectTip
+                    // can persist shielded state before the matching undo file is
+                    // durable; requiring undo here forced a from-genesis rebuild
+                    // for a 2-block short fork. Disconnect uses the block's
+                    // shielded output counts, same as the persisted-ahead path.
                     uint64_t output_count{0};
                     uint64_t registry_leaf_count{0};
                     for (const auto& txref : block.vtx) {

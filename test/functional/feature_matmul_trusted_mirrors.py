@@ -257,7 +257,7 @@ class MatMulTrustedMirrorsTest(BitcoinTestFramework):
         unknown_attestation = bytearray(raw_attestation)
         # V2 preserves the legacy version || chain_id || block_hash prefix.
         unknown_attestation[33:65] = b"\xff" * 32
-        with mirror_a.assert_debug_log(["unknown/non-Profile1"]):
+        with mirror_a.assert_debug_log(["mmattest for unknown"]):
             peer = mirror_a.add_p2p_connection(P2PInterface())
             peer.send_message(
                 msg_generic(

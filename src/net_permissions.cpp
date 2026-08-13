@@ -77,7 +77,12 @@ static bool TryParsePermissionFlags(const std::string& str, NetPermissionFlags& 
         readen++;
     }
 
-    // By default, whitelist only applies to incoming connections
+    // By default, whitelist only applies to incoming connections.
+    // A bare "out" (or "out,noban") replaces that default rather than adding
+    // to it, so NoBan then covers outbound only. Ahead peers typically connect
+    // inbound; NoBan is the bypass for MatMul near-tip verify-budget,
+    // rcadmit, and download preference. Operators who mean both directions
+    // must write in,out,noban.
     if (connection_direction == ConnectionDirection::None) {
         connection_direction = ConnectionDirection::In;
     } else if (flags == NetPermissionFlags::None) {
