@@ -12003,25 +12003,11 @@ bool ChainstateManager::PersistMatMulExactReplayVerdict(
     index->nStatus |= BLOCK_EXACT_REPLAY_VERIFIED;
     m_blockman.m_dirty_blockindex.insert(index);
     CacheMatMulEncDrVerdict(block_hash, true);
-    if (GetMatMulValidationMode() ==
-            kernel::MatMulValidationMode::CONSENSUS &&
-        GetConsensus().IsMatMulTrustedReplayAttestationActive(
-            index->nHeight) &&
-        node::matmul_trusted::HasLocalSigner()) {
-        const auto result{
-            node::matmul_trusted::SignAuthoritative(
-                block_hash, index->nHeight)};
-        if (result !=
-                matmul::trusted::AddResult::Accepted &&
-            result !=
-                matmul::trusted::AddResult::Duplicate) {
-            LogWarning(
-                "Unable to create local ExactReplay attestation "
-                "block=%s height=%d result=%s\n",
-                block_hash.ToString(), index->nHeight,
-                matmul::trusted::AddResultName(result));
-        }
-    }
+    // ExactReplay proves validity, not canonicality. Do not sign here: this
+    // seam also runs for valid off-active fork bodies. Signing every replayed
+    // branch lets one authority key equivocate and leaves mirrors with two
+    // equally authentic fork choices. ProcessNewBlock signs only after normal
+    // fork choice has made the exact-replayed block the active tip.
     return true;
 }
 
@@ -13140,6 +13126,40 @@ bool ChainstateManager::ProcessNewBlock(const std::shared_ptr<const CBlock>& blo
         LogError("%s: ActivateBestChain failed (%s)\n", __func__, state.ToString());
 
         return false;
+    }
+
+    // ExactReplay is validity provenance; an authority attestation also makes
+    // a canonical statement. Bind local signing to the post-activation tip so
+    // merely validating an off-active competing body cannot equivocate the
+    // configured signer. Read the stable identity under cs_main, then sign
+    // outside it (the attestation store has its own synchronization).
+    std::optional<std::pair<uint256, int32_t>> active_exact_tip;
+    {
+        LOCK(cs_main);
+        const CBlockIndex* const tip{ActiveTip()};
+        if (tip != nullptr &&
+            GetMatMulValidationMode() ==
+                kernel::MatMulValidationMode::CONSENSUS &&
+            GetConsensus().IsMatMulTrustedReplayAttestationActive(
+                tip->nHeight) &&
+            (tip->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0 &&
+            (tip->nStatus & BLOCK_FAILED_MASK) == 0 &&
+            node::matmul_trusted::HasLocalSigner()) {
+            active_exact_tip.emplace(tip->GetBlockHash(), tip->nHeight);
+        }
+    }
+    if (active_exact_tip) {
+        const auto result{node::matmul_trusted::SignAuthoritative(
+            active_exact_tip->first, active_exact_tip->second)};
+        if (result != matmul::trusted::AddResult::Accepted &&
+            result != matmul::trusted::AddResult::Duplicate) {
+            LogWarning(
+                "Unable to create active-tip ExactReplay attestation "
+                "block=%s height=%d result=%s\n",
+                active_exact_tip->first.ToString(),
+                active_exact_tip->second,
+                matmul::trusted::AddResultName(result));
+        }
     }
 
     Chainstate* bg_chain{WITH_LOCK(cs_main, return BackgroundSyncInProgress() ? m_ibd_chainstate.get() : nullptr)};

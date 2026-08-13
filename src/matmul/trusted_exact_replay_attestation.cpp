@@ -434,6 +434,23 @@ WaitResult AttestationStore::WaitForQuorum(
     }
 }
 
+void AttestationStore::RecordWaitResult(WaitResult result)
+{
+    std::lock_guard lock{m_mutex};
+    ++m_stats.waits;
+    switch (result) {
+    case WaitResult::Quorum:
+        ++m_stats.wait_quorums;
+        break;
+    case WaitResult::Timeout:
+        ++m_stats.wait_timeouts;
+        break;
+    case WaitResult::Cancelled:
+        ++m_stats.wait_cancellations;
+        break;
+    }
+}
+
 void AttestationStore::EraseLocked(
     std::map<BlockKey, Bucket>::iterator it, bool expired)
 {

@@ -361,6 +361,7 @@ void MatMulVerifyWorker::SetActiveTip(const uint256& tip_hash,
 
 void MatMulVerifyWorker::NotifyQuorumReady(const uint256& hash)
 {
+    bool resumed{false};
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         const auto it{m_awaiting_quorum.find(hash)};
@@ -376,6 +377,11 @@ void MatMulVerifyWorker::NotifyQuorumReady(const uint256& hash)
                 m_queue.end()) {
             m_queue.push_back(std::move(pending));
         }
+        resumed = true;
+    }
+    if (resumed) {
+        node::matmul_trusted::RecordAsyncWaitResult(
+            matmul::trusted::WaitResult::Quorum);
     }
     m_cv.notify_one();
 }
@@ -601,16 +607,17 @@ void MatMulVerifyWorker::WorkerLoop()
             }
         }
         for (auto& expired : expired_awaiting) {
+            const auto result{
+                expired->job.cancelled->load(std::memory_order_relaxed)
+                    ? matmul::trusted::WaitResult::Cancelled
+                    : matmul::trusted::WaitResult::Timeout};
+            node::matmul_trusted::RecordAsyncWaitResult(result);
             LogWarning(
                 "matmul trusted mirror deferred: block=%s height=%d "
                 "result=%s (retryable, peer not punished)\n",
                 expired->job.GetHeader().GetHash().ToString(),
                 expired->job.height,
-                matmul::trusted::WaitResultName(
-                    expired->job.cancelled->load(
-                        std::memory_order_relaxed)
-                        ? matmul::trusted::WaitResult::Cancelled
-                        : matmul::trusted::WaitResult::Timeout));
+                matmul::trusted::WaitResultName(result));
             FinishRetryablePending(expired);
         }
         if (!expired_awaiting.empty() || m_stopped) {

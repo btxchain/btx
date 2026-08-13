@@ -46,6 +46,7 @@ bool DecodeAttestation(
 struct KnownAttestationBlock {
     int32_t height{-1};
     bool local_exact{false};
+    bool on_active_chain{false};
 };
 
 std::optional<KnownAttestationBlock> LookupAttestationBlock(
@@ -63,7 +64,8 @@ std::optional<KnownAttestationBlock> LookupAttestationBlock(
     return KnownAttestationBlock{
         index->nHeight,
         (index->nStatus &
-         BLOCK_EXACT_REPLAY_VERIFIED) != 0};
+         BLOCK_EXACT_REPLAY_VERIFIED) != 0,
+        chainman.ActiveChain().Contains(index)};
 }
 
 RPCHelpMan getmatmultrustedstatus()
@@ -275,7 +277,7 @@ RPCHelpMan getmatmulattestations()
                     RPC_INVALID_ADDRESS_OR_KEY,
                     "Unknown or non-Profile-1 block");
             }
-            if (known->local_exact &&
+            if (known->local_exact && known->on_active_chain &&
                 node::matmul_trusted::HasLocalSigner()) {
                 const auto sign_result{
                     node::matmul_trusted::SignAuthoritative(
