@@ -162,6 +162,10 @@ void ResetHistoricalReverifyBudgetForTest();
  * Live 2026-08-13: raw frontier 187859 while the signer tip was 187791.
  */
 static constexpr int TRUSTED_MIRROR_SHORT_REORG_DEPTH{6};
+/** How far behind the active tip a node may GETMMATTEST so the attested
+ *  tip is visible on a quiet linear chain (signer typically attests ~1
+ *  behind). */
+static constexpr int TRUSTED_MIRROR_ATTESTED_TIP_LOOKBACK{2};
 
 /** LCA(tip, candidate) depth in (0, TRUSTED_MIRROR_SHORT_REORG_DEPTH].
  *  Depth 0 is the tip itself; depth 7+ is the EMERGENCY park window and the
@@ -171,8 +175,9 @@ static constexpr int TRUSTED_MIRROR_SHORT_REORG_DEPTH{6};
     return lca_depth > 0 && lca_depth <= TRUSTED_MIRROR_SHORT_REORG_DEPTH;
 }
 
-/** FindMostWorkChain / candidate-set gate for trusted mirrors and the
- *  local signer.
+/** FindMostWorkChain / candidate-set gate for any node that tracks a
+ *  configured attestation quorum (trusted mirror, local signer, or
+ *  consensus + -matmultrustedpubkey).
  *
  *  Tip-extending HAVE_DATA must always remain selectable: that is how the
  *  node catches up after a short reorg once the new parent is the tip.
@@ -182,7 +187,10 @@ static constexpr int TRUSTED_MIRROR_SHORT_REORG_DEPTH{6};
  *  Never reorg away a tip that already has quorum. Live 2026-08-13: the
  *  signer followed a heavier 4-block competing fork at 187795, signed it,
  *  and every mirror treated that as an attested short race. Competing
- *  then extended as "tip-extending" to 18781x. */
+ *  then extended as "tip-extending" to 18781x.
+ *
+ *  A node already sitting on a heavier unattested fork is recovered by
+ *  FindUniqueCompetingAttestedIndex, not by this gate. */
 [[nodiscard]] inline bool TrustedMirrorMaySelectMostWorkCandidate(
     bool extends_active_tip_chain,
     bool short_tip_reorg,
@@ -201,10 +209,12 @@ static constexpr int TRUSTED_MIRROR_SHORT_REORG_DEPTH{6};
 [[nodiscard]] inline bool TrustedMirrorPreferGetMmAttest(
     bool active_tip_child,
     bool short_tip_reorg_missing_root,
-    bool on_parked_reorg_branch = false)
+    bool on_parked_reorg_branch = false,
+    bool recent_active_ancestor = false)
 {
     if (on_parked_reorg_branch) return false;
-    return active_tip_child || short_tip_reorg_missing_root;
+    return active_tip_child || short_tip_reorg_missing_root ||
+           recent_active_ancestor;
 }
 
 struct AttestedFrontierHint {
@@ -299,6 +309,10 @@ struct TrustedAttestationAdmitView {
     //! Roots of that branch may temporarily carry less work than a losing
     //! active tip and still must be admitted so their descendants can connect.
     bool on_recovery_branch{false};
+    //! Active tip or an ancestor within TRUSTED_MIRROR_ATTESTED_TIP_LOOKBACK.
+    //! Linear-chain GETMMATTEST so getmatmulattestedtip is populated without
+    //! waiting for a race. Park still wins.
+    bool on_recent_active_ancestor{false};
     bool on_parked_reorg_branch{false};
     int32_t height{-1};
     std::optional<int32_t> authority_frontier{};
@@ -315,8 +329,9 @@ struct TrustedAttestationAdmitView {
     if (v.on_parked_reorg_branch) {
         return TrustedAttestationAdmit::RejectParkedReorg;
     }
-    if (v.short_tip_reorg) {
-        // Short tip-race reorg: first-class like tip-extending after park.
+    if (v.short_tip_reorg || v.on_recent_active_ancestor) {
+        // Short tip-race reorg, or the active tip / last few ancestors so a
+        // linear chain can populate getmatmulattestedtip. Park still wins.
         return TrustedAttestationAdmit::Allow;
     }
     // A better-work branch is admissible even though it does not extend our

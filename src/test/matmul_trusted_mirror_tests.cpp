@@ -566,6 +566,29 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
             .in_backoff = false,
         }) == TrustedAttestationAdmit::Allow);
 
+    // Active tip / last few ancestors: populate getmatmulattestedtip on a
+    // linear chain (signer typically attests ~1 behind).
+    BOOST_CHECK(
+        EvaluateTrustedAttestationAdmit(TrustedAttestationAdmitView{
+            .tip_extending = false,
+            .extends_active_tip_chain = false,
+            .on_recent_active_ancestor = true,
+            .on_parked_reorg_branch = false,
+            .height = 186010,
+            .authority_frontier = 186011,
+            .in_backoff = true,
+        }) == TrustedAttestationAdmit::Allow);
+    BOOST_CHECK(
+        EvaluateTrustedAttestationAdmit(TrustedAttestationAdmitView{
+            .tip_extending = false,
+            .extends_active_tip_chain = false,
+            .on_recent_active_ancestor = true,
+            .on_parked_reorg_branch = true,
+            .height = 186010,
+            .authority_frontier = 186011,
+            .in_backoff = false,
+        }) == TrustedAttestationAdmit::RejectParkedReorg);
+
     // Signer-absent backoff blocks re-admission of non-tip work.
     BOOST_CHECK(
         EvaluateTrustedAttestationAdmit(TrustedAttestationAdmitView{
@@ -662,6 +685,12 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         /*active_tip_child=*/false, /*short_tip_reorg_missing_root=*/true));
     BOOST_CHECK(!TrustedMirrorPreferGetMmAttest(
         /*active_tip_child=*/false, /*short_tip_reorg_missing_root=*/false));
+    BOOST_CHECK(TrustedMirrorPreferGetMmAttest(
+        /*active_tip_child=*/false, /*short_tip_reorg_missing_root=*/false,
+        /*on_parked_reorg_branch=*/false, /*recent_active_ancestor=*/true));
+    BOOST_CHECK(!TrustedMirrorPreferGetMmAttest(
+        /*active_tip_child=*/false, /*short_tip_reorg_missing_root=*/false,
+        /*on_parked_reorg_branch=*/true, /*recent_active_ancestor=*/true));
     BOOST_CHECK(!TrustedMirrorPreferGetMmAttest(
         /*active_tip_child=*/true, /*short_tip_reorg_missing_root=*/true,
         /*on_parked_reorg_branch=*/true));

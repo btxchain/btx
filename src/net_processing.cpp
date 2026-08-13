@@ -176,7 +176,9 @@ static constexpr size_t MATMUL_ATTESTATION_TIP_EXTENDING_MAX{8};
 static constexpr size_t MATMUL_ATTESTATION_TIP_RESERVED{1};
 static constexpr size_t MATMUL_ATTESTATION_RELAY_PEERS{2};
 //! Negative-cache base delay after archive/signer peers stay silent for a hash.
-static constexpr auto MATMUL_ATTESTATION_MISS_BACKOFF_BASE{60s};
+//! First retry is short so a recovering node with one archive is not stuck at
+//! ~1 block / 60s; exponential still bounds a persistently silent signer.
+static constexpr auto MATMUL_ATTESTATION_MISS_BACKOFF_BASE{5s};
 static constexpr int MATMUL_ATTESTATION_MISS_BACKOFF_MAX_EXP{6};
 /** Rate-limit authority getmmattest outcome logs (still LogDebug every time). */
 static constexpr auto MATMUL_ATTESTATION_SERVE_LOG_INTERVAL{2s};
@@ -7087,6 +7089,13 @@ PeerManagerImpl::EvaluateTrustedMirrorAttestationAdmit(
           index->GetAncestor(recovery_target->nHeight) == recovery_target))};
     const bool parked{
         index != nullptr && m_chainman.IsOnParkedReorgBranch(index)};
+    const bool recent_active_ancestor{
+        tip != nullptr && index != nullptr &&
+        index->nHeight >= 0 &&
+        tip->nHeight - index->nHeight >= 0 &&
+        tip->nHeight - index->nHeight <=
+            node::matmul_trusted::TRUSTED_MIRROR_ATTESTED_TIP_LOOKBACK &&
+        tip->GetAncestor(index->nHeight) == index};
     bool in_backoff{false};
     const auto backoff_it{m_matmul_attestation_backoff.find(hash)};
     if (backoff_it != m_matmul_attestation_backoff.end()) {
@@ -7099,6 +7108,7 @@ PeerManagerImpl::EvaluateTrustedMirrorAttestationAdmit(
         .extends_active_tip_chain = extends_active_tip_chain,
         .better_work_reorg_candidate = better_work_reorg_candidate,
         .on_recovery_branch = on_recovery_branch,
+        .on_recent_active_ancestor = recent_active_ancestor,
         .on_parked_reorg_branch = parked,
         .height = index ? index->nHeight : -1,
         .authority_frontier = CappedAuthorityAttestedFrontier(m_chainman),
@@ -7317,7 +7327,7 @@ void PeerManagerImpl::MaybeRequestTrustedMirrorPreferredAttestations(
 {
     AssertLockHeld(g_msgproc_mutex);
     AssertLockHeld(cs_main);
-    if (!node::matmul_trusted::IsTrustedMirror()) return;
+    if (!node::matmul_trusted::IsConfigured()) return;
     if (!IsTrustedMirrorAuthorityPeer(pto.GetId(), peer.m_their_services)) {
         return;
     }
@@ -7356,9 +7366,17 @@ void PeerManagerImpl::MaybeRequestTrustedMirrorPreferredAttestations(
     auto request_if_preferred = [&](const CBlockIndex* target) {
         if (target == nullptr) return;
         if (m_chainman.IsOnParkedReorgBranch(target)) return;
+        const bool recent_active_ancestor{
+            target->nHeight >= 0 &&
+            tip->nHeight - target->nHeight >= 0 &&
+            tip->nHeight - target->nHeight <=
+                node::matmul_trusted::TRUSTED_MIRROR_ATTESTED_TIP_LOOKBACK &&
+            tip->GetAncestor(target->nHeight) == target};
         if (!node::matmul_trusted::TrustedMirrorPreferGetMmAttest(
                 target->pprev == tip,
-                TrustedMirrorShortTipReorg(tip, target))) {
+                TrustedMirrorShortTipReorg(tip, target),
+                /*on_parked_reorg_branch=*/false,
+                recent_active_ancestor)) {
             return;
         }
         RequestMatMulTrustedAttestations(target->GetBlockHash(),
@@ -7366,6 +7384,12 @@ void PeerManagerImpl::MaybeRequestTrustedMirrorPreferredAttestations(
     };
     request_if_preferred(child);
     if (hole != child) request_if_preferred(hole);
+    // Linear-chain attested tip: signer typically attests ~1 behind. Without
+    // these, getmatmulattestations stays empty until a race.
+    request_if_preferred(tip);
+    if (tip->pprev != nullptr && tip->pprev != child && tip->pprev != hole) {
+        request_if_preferred(tip->pprev);
+    }
 }
 
 void PeerManagerImpl::MaybeLogAttestationServe(const char* reason,
@@ -7492,7 +7516,7 @@ void PeerManagerImpl::HistoricalAttestationReverifyLoop()
 void PeerManagerImpl::RequestMatMulTrustedAttestations(
     const uint256& hash, NodeId source)
 {
-    if (!node::matmul_trusted::IsTrustedMirror()) return;
+    if (!node::matmul_trusted::IsConfigured()) return;
 
     std::set<NodeId> skip_peers;
     std::vector<NodeId> prefer_peers;
@@ -7511,12 +7535,20 @@ void PeerManagerImpl::RequestMatMulTrustedAttestations(
         const bool tip_child{
             tip != nullptr && index != nullptr && index->pprev == tip};
         const bool short_reorg{TrustedMirrorShortTipReorg(tip, index)};
+        const bool recent_active_ancestor{
+            tip != nullptr && index != nullptr &&
+            index->nHeight >= 0 &&
+            tip->nHeight - index->nHeight >= 0 &&
+            tip->nHeight - index->nHeight <=
+                node::matmul_trusted::TRUSTED_MIRROR_ATTESTED_TIP_LOOKBACK &&
+            tip->GetAncestor(index->nHeight) == index};
         // Slot reservation / signer-absent skip: ActiveTip child OR short
-        // reorg missing root. Do not pass short_reorg as tip_extending into
-        // admit — park must still win. Competing 1879xx is neither.
+        // reorg missing root OR recent active ancestor (linear attested tip).
+        // Do not pass short_reorg as tip_extending into admit — park must
+        // still win. Competing 1879xx is neither.
         const bool preferred{
             node::matmul_trusted::TrustedMirrorPreferGetMmAttest(
-                tip_child, short_reorg, parked)};
+                tip_child, short_reorg, parked, recent_active_ancestor)};
 
         const auto admit{EvaluateTrustedMirrorAttestationAdmit(
             hash, index, tip, /*tip_extending=*/tip_child)};

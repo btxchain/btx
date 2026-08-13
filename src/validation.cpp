@@ -9378,15 +9378,17 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
  * Return the tip of the chain with the most work in it, that isn't
  * known to be invalid (it's however far from certain to be valid).
  */
-//! Trusted mirrors and the local signer must not let a heavier competing
-//! fork occupy FindMostWorkChain. Tip children stay eligible. A short
-//! attested race may replace an unattested tip only.
+//! Nodes that track a configured attestation quorum must not let a heavier
+//! competing fork occupy FindMostWorkChain. That includes trusted mirrors,
+//! the local signer, and consensus miners with -matmultrustedpubkey (they
+//! still ExactReplay locally; the quorum is fork-choice, not a substitute
+//! for the MatMul check). Tip children stay eligible. A short attested
+//! race may replace an unattested tip only.
 static bool TrustedMirrorShouldConsiderMostWorkCandidate(
     const CBlockIndex* tip, const CBlockIndex* candidate)
     EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
 {
-    if (!node::matmul_trusted::IsTrustedMirror() &&
-        !node::matmul_trusted::HasLocalSigner()) {
+    if (!node::matmul_trusted::IsConfigured()) {
         return true;
     }
     if (tip == nullptr || candidate == nullptr || candidate == tip) return true;
@@ -9427,17 +9429,32 @@ CBlockIndex* Chainstate::FindMostWorkChain()
             pindexNew = *it;
         }
 
+        if (CBlockIndex* abandon{const_cast<CBlockIndex*>(
+                m_chainman.FindUniqueCompetingAttestedIndex())}) {
+            // Already on a heavier unattested fork: do not wait for the
+            // operator to invalidateblock the first divergent block. Prefer
+            // the unique competing attested HAVE_DATA chain even if it has
+            // less work. A pending-attestation child of an attested ancestor
+            // is not competing and is left alone. Insert so ConnectTip /
+            // CheckBlockIndex see the new tip in the candidate set.
+            pindexNew = abandon;
+            setBlockIndexCandidates.insert(abandon);
+        }
+
         if (m_chainman.IsOnParkedReorgBranch(pindexNew)) {
             // Mirror park-escape: if we parked our own uniquely attested
             // authority branch (self-inflicted tip-extension into the park
             // wall), unpark it. A heavier unattested rewrite (the 137-deep
             // competing miner branch) has no quorum and stays parked.
+            // Abandon-fork recovery also unparks: the attested chain may
+            // carry less work than the unattested tip we are leaving.
             const bool authority_escape{
-                node::matmul_trusted::IsTrustedMirror() &&
-                node::matmul_trusted::HasQuorum(
-                    pindexNew->GetBlockHash(), pindexNew->nHeight) &&
-                m_chain.Tip() != nullptr &&
-                pindexNew->nChainWork >= m_chain.Tip()->nChainWork};
+                (node::matmul_trusted::IsTrustedMirror() &&
+                 node::matmul_trusted::HasQuorum(
+                     pindexNew->GetBlockHash(), pindexNew->nHeight) &&
+                 m_chain.Tip() != nullptr &&
+                 pindexNew->nChainWork >= m_chain.Tip()->nChainWork) ||
+                m_chainman.IsAttestedAbandonForkCandidate(pindexNew)};
             if (!authority_escape ||
                 !m_chainman.UnparkReorgBranchContainingBlock(pindexNew)) {
                 setBlockIndexCandidates.erase(pindexNew);
@@ -9454,7 +9471,8 @@ CBlockIndex* Chainstate::FindMostWorkChain()
             setBlockIndexCandidates.erase(pindexNew);
             continue;
         }
-        if (!TrustedMirrorShouldConsiderMostWorkCandidate(m_chain.Tip(), pindexNew)) {
+        if (!TrustedMirrorShouldConsiderMostWorkCandidate(m_chain.Tip(), pindexNew) &&
+            !m_chainman.IsAttestedAbandonForkCandidate(pindexNew)) {
             LogDebug(BCLog::VALIDATION,
                      "FindMostWorkChain: skipping unattested competing candidate hash=%s height=%d\n",
                      pindexNew->GetBlockHash().ToString(), pindexNew->nHeight);
@@ -9519,7 +9537,8 @@ CBlockIndex* Chainstate::FindMostWorkChain()
             // make the escape unreachable when the branch is only one-work-unit
             // ahead (the normal already-have-data recovery case).
             const bool recovery_escape{
-                m_chainman.IsAutomaticReorgRecoveryCandidate(pindexNew)};
+                m_chainman.IsAutomaticReorgRecoveryCandidate(pindexNew) ||
+                m_chainman.IsAttestedAbandonForkCandidate(pindexNew)};
             if (old_tip != nullptr &&
                 fork != nullptr &&
                 fork != old_tip &&
@@ -9662,7 +9681,8 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
             warn_depth != kernel::REORG_PROTECTION_DEPTH_DISABLED &&
             reorg_depth > static_cast<int>(warn_depth);
         const bool recovery_escape{
-            m_chainman.IsAutomaticReorgRecoveryCandidate(pindexMostWork)};
+            m_chainman.IsAutomaticReorgRecoveryCandidate(pindexMostWork) ||
+            m_chainman.IsAttestedAbandonForkCandidate(pindexMostWork)};
         const bool park =
             cm_opts.deep_reorg_action == kernel::DeepReorgAction::PARK &&
             park_depth != kernel::REORG_PROTECTION_DEPTH_DISABLED &&
@@ -10301,8 +10321,12 @@ void Chainstate::TryAddBlockIndexCandidate(CBlockIndex* pindex)
     }
 
     // The block only is a candidate for the most-work-chain if it has the same
-    // or more work than our current tip.
-    if (m_chain.Tip() != nullptr && setBlockIndexCandidates.value_comp()(pindex, m_chain.Tip())) {
+    // or more work than our current tip. Attested abandon-fork targets are the
+    // exception: they must be selectable while the unattested tip still has
+    // more work.
+    if (m_chain.Tip() != nullptr &&
+        setBlockIndexCandidates.value_comp()(pindex, m_chain.Tip()) &&
+        !m_chainman.IsAttestedAbandonForkCandidate(pindex)) {
         return;
     }
 
@@ -10575,6 +10599,115 @@ bool BlockIndexDescends(const CBlockIndex* block, const CBlockIndex* ancestor)
 }
 
 } // namespace
+
+const CBlockIndex* ChainstateManager::FindBestKnownAttestedIndex() const
+{
+    AssertLockHeld(::cs_main);
+    if (!node::matmul_trusted::IsConfigured() || m_active_chainstate == nullptr) {
+        return nullptr;
+    }
+    const CBlockIndex* best{nullptr};
+    auto consider = [&](const CBlockIndex* idx) {
+        if (idx == nullptr || (idx->nStatus & BLOCK_FAILED_MASK)) return;
+        if (!(idx->nStatus & BLOCK_HAVE_DATA) ||
+            !idx->IsValid(BLOCK_VALID_TRANSACTIONS) ||
+            !idx->HaveNumChainTxs()) {
+            return;
+        }
+        if (!node::matmul_trusted::HasQuorum(
+                idx->GetBlockHash(), idx->nHeight)) {
+            return;
+        }
+        if (best == nullptr || CBlockIndexWorkComparator()(best, idx)) {
+            best = idx;
+        }
+    };
+    for (const auto& hint : node::matmul_trusted::AttestedFrontierHints()) {
+        consider(m_blockman.LookupBlockIndex(hint.hash));
+    }
+    for (CBlockIndex* idx : m_reorg_authenticated_candidate_tips) {
+        consider(idx);
+    }
+    if (const CBlockIndex* tip{m_active_chainstate->m_chain.Tip()}) {
+        for (const CBlockIndex* p{tip}; p != nullptr; p = p->pprev) {
+            if (node::matmul_trusted::HasQuorum(
+                    p->GetBlockHash(), p->nHeight)) {
+                consider(p);
+                break;
+            }
+        }
+    }
+    return best;
+}
+
+const CBlockIndex* ChainstateManager::FindUniqueCompetingAttestedIndex() const
+{
+    AssertLockHeld(::cs_main);
+    if (!node::matmul_trusted::IsConfigured() || m_active_chainstate == nullptr) {
+        return nullptr;
+    }
+    const CBlockIndex* const tip{m_active_chainstate->m_chain.Tip()};
+    if (tip == nullptr ||
+        node::matmul_trusted::HasQuorum(tip->GetBlockHash(), tip->nHeight)) {
+        return nullptr;
+    }
+
+    std::vector<const CBlockIndex*> competing;
+    auto consider = [&](const CBlockIndex* idx) {
+        if (idx == nullptr || idx == tip ||
+            (idx->nStatus & BLOCK_FAILED_MASK)) {
+            return;
+        }
+        if (!(idx->nStatus & BLOCK_HAVE_DATA) ||
+            !idx->IsValid(BLOCK_VALID_TRANSACTIONS) ||
+            !idx->HaveNumChainTxs()) {
+            return;
+        }
+        if (!node::matmul_trusted::HasQuorum(
+                idx->GetBlockHash(), idx->nHeight)) {
+            return;
+        }
+        // Pending-attestation extensions of the active chain must not be
+        // disconnected: the signer typically attests ~1 behind the tip.
+        if (m_active_chainstate->m_chain.Contains(idx)) return;
+        competing.push_back(idx);
+    };
+    for (const auto& hint : node::matmul_trusted::AttestedFrontierHints()) {
+        consider(m_blockman.LookupBlockIndex(hint.hash));
+    }
+    for (CBlockIndex* idx : m_reorg_authenticated_candidate_tips) {
+        consider(idx);
+    }
+
+    const CBlockIndex* unique{nullptr};
+    for (const CBlockIndex* idx : competing) {
+        if (unique == nullptr) {
+            unique = idx;
+            continue;
+        }
+        if (BlockIndexDescends(idx, unique)) {
+            unique = idx;
+            continue;
+        }
+        if (BlockIndexDescends(unique, idx)) continue;
+        if (!BlockIndexComparable(unique, idx)) {
+            return nullptr;
+        }
+        if (CBlockIndexWorkComparator()(unique, idx)) unique = idx;
+    }
+    if (unique == nullptr || unique->nChainWork >= tip->nChainWork) {
+        return nullptr;
+    }
+    return unique;
+}
+
+bool ChainstateManager::IsAttestedAbandonForkCandidate(
+    const CBlockIndex* candidate) const
+{
+    AssertLockHeld(::cs_main);
+    return candidate != nullptr &&
+           candidate == FindUniqueCompetingAttestedIndex();
+}
 
 void ChainstateManager::NoteAuthenticatedRecoveryCandidate(CBlockIndex* candidate)
 {
@@ -13983,7 +14116,12 @@ void ChainstateManager::CheckBlockIndex()
                     // In this case it must be in m_blocks_unlinked -- see test below.
                 }
             } else { // If this block sorts worse than the current tip or some ancestor's block has never been seen, it cannot be in setBlockIndexCandidates.
-                assert(c->setBlockIndexCandidates.count(pindex) == 0);
+                // Attested abandon-fork targets are inserted while the
+                // unattested tip still has more work so ActivateBestChain can
+                // switch to them.
+                if (!c->m_chainman.IsAttestedAbandonForkCandidate(pindex)) {
+                    assert(c->setBlockIndexCandidates.count(pindex) == 0);
+                }
             }
         }
         // Check whether this block is in m_blocks_unlinked.

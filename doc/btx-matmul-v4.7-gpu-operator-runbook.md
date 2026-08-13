@@ -69,6 +69,51 @@ When seeds advertise headers but not bodies, `addnode` a tip-holding archive:
 See also
 [`btx-postfork-field-report-wizard-partners-2026-08-10.txt`](btx-postfork-field-report-wizard-partners-2026-08-10.txt).
 
+## Mining on the attested chain
+
+Canonical blocks are those the configured signer set attests. A heavier
+unattested fork is an orphan once the signer stays on the other branch. Hashrate
+wins races; it does not raise the canonical block rate above the signer's
+ExactReplay + attestation throughput (today often ~1 block / 1–2 minutes with a
+single signer). 1-of-1 is a single point of failure; M-of-N is the production
+shape when independent signers exist.
+
+### Submit/mining node config (none of these is optional)
+
+```text
+blocksonly=0
+matmulvalidation=consensus
+matmultrustedpubkey=<signer compressed pubkey>
+matmultrustedthreshold=1
+```
+
+- `-blocksonly=0`: a mining/submit node must relay aggressively. With
+  `-blocksonly=1` winning blocks often never reach the signer (signer tip stuck
+  at yours minus one) and every win orphans.
+- `-matmultrustedpubkey` + `-matmultrustedthreshold`: a plain consensus node
+  reports `getmatmultrustedstatus.configured=false` and stores zero
+  attestations, so tooling cannot see the attested tip. Adding the signer key
+  does **not** skip ExactReplay; it only lets the node track `MMATTEST` and
+  follow/recover onto the attested chain.
+- Pool: build only on `getmatmulattestedtip` (or
+  `getmatmultrustedstatus.attested_tip`). If `on_active_chain` is false, the
+  node is on a competing unattested fork and will auto-reorg; do not stack
+  unattested candidates. Win → wait for attestation; lose → abandon.
+
+`getmatmulattestedtip` is the continuous attested-tip surface. On a quiet
+linear chain the signer typically attests ~1 behind the active tip, so `hash`
+may lag `getbestblockhash` by one block. `getmatmulattestations <hash>` still
+only lists retained signatures for that hash.
+
+Until upgraded, a node already on a heavier unattested fork needed
+`invalidateblock` of the first divergent block (deep invalidate deadlocked
+before `3d7a6600`; after that commit a stuck RPC can still freeze activation
+until restart). Current heads auto-abandon that fork when a unique competing
+attested `HAVE_DATA` chain is known.
+
+Public archival `addnode` seeds:
+[`btx-public-node-bootstrap.md`](btx-public-node-bootstrap.md).
+
 ## Monitoring
 
 Inspect:

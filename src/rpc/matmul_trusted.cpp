@@ -95,10 +95,18 @@ RPCHelpMan getmatmultrustedstatus()
                 {RPCResult::Type::NUM, "expired_blocks", ""},
                 {RPCResult::Type::NUM, "quorum_transitions", ""},
                 {RPCResult::Type::NUM, "wait_timeouts", ""},
+                {RPCResult::Type::OBJ, "attested_tip", /*optional=*/true,
+                 "Highest-work block this node currently has a quorum for (also getmatmulattestedtip)",
+                    {
+                        {RPCResult::Type::STR_HEX, "hash", "Attested block hash"},
+                        {RPCResult::Type::NUM, "height", "Attested block height"},
+                        {RPCResult::Type::BOOL, "on_active_chain", "Whether that block is an ancestor of (or is) the active tip"},
+                        {RPCResult::Type::BOOL, "active_tip_has_quorum", "Whether the active tip itself currently has quorum"},
+                    }},
                 {RPCResult::Type::STR, "warning", ""},
             }},
         RPCExamples{HelpExampleCli("getmatmultrustedstatus", "")},
-        [](const RPCHelpMan&, const JSONRPCRequest&) {
+        [](const RPCHelpMan&, const JSONRPCRequest& request) {
             UniValue result{UniValue::VOBJ};
             const auto stats{
                 node::matmul_trusted::Stats()};
@@ -154,11 +162,86 @@ RPCHelpMan getmatmultrustedstatus()
                 stats.quorum_transitions);
             result.pushKV(
                 "wait_timeouts", stats.wait_timeouts);
+            if (node::matmul_trusted::IsConfigured()) {
+                ChainstateManager& chainman{
+                    EnsureAnyChainman(request.context)};
+                LOCK(cs_main);
+                const CBlockIndex* const tip{chainman.ActiveChain().Tip()};
+                const CBlockIndex* const attested{
+                    chainman.FindBestKnownAttestedIndex()};
+                if (attested != nullptr) {
+                    UniValue attested_tip{UniValue::VOBJ};
+                    attested_tip.pushKV("hash", attested->GetBlockHash().GetHex());
+                    attested_tip.pushKV("height", attested->nHeight);
+                    attested_tip.pushKV(
+                        "on_active_chain",
+                        tip != nullptr &&
+                            tip->GetAncestor(attested->nHeight) == attested);
+                    attested_tip.pushKV(
+                        "active_tip_has_quorum",
+                        tip != nullptr &&
+                            node::matmul_trusted::HasQuorum(
+                                tip->GetBlockHash(), tip->nHeight));
+                    result.pushKV("attested_tip", std::move(attested_tip));
+                }
+            }
             result.pushKV(
                 "warning",
                 node::matmul_trusted::IsTrustedMirror()
                     ? "Operator-trusted mirror: signed M-of-N attestations replace local ExactReplay; this is not independent full validation."
                     : "");
+            return result;
+        }};
+}
+
+RPCHelpMan getmatmulattestedtip()
+{
+    return RPCHelpMan{
+        "getmatmulattestedtip",
+        "Return the highest-work block this node currently has a configured "
+        "attestation quorum for. Intended for pool/tooling authors: mine on "
+        "this hash (or its descendant) and abandon a heavier unattested fork. "
+        "Requires -matmultrustedpubkey (and typically -matmultrustedthreshold). "
+        "On a quiet linear chain the signer often attests ~1 behind the active "
+        "tip, so this may lag getbestblockhash by one block.\n",
+        {},
+        RPCResult{RPCResult::Type::OBJ, "", "",
+            {
+                {RPCResult::Type::BOOL, "configured", "Whether a trusted-signer set is configured"},
+                {RPCResult::Type::STR_HEX, "hash", /*optional=*/true, "Attested block hash"},
+                {RPCResult::Type::NUM, "height", /*optional=*/true, "Attested block height"},
+                {RPCResult::Type::BOOL, "on_active_chain", /*optional=*/true, "Whether that block is an ancestor of (or is) the active tip"},
+                {RPCResult::Type::BOOL, "active_tip_has_quorum", /*optional=*/true, "Whether the active tip itself currently has quorum"},
+                {RPCResult::Type::STR_HEX, "active_tip_hash", /*optional=*/true, "Active chain tip hash"},
+                {RPCResult::Type::NUM, "active_tip_height", /*optional=*/true, "Active chain tip height"},
+            }},
+        RPCExamples{HelpExampleCli("getmatmulattestedtip", "")},
+        [](const RPCHelpMan&, const JSONRPCRequest& request) {
+            UniValue result{UniValue::VOBJ};
+            result.pushKV("configured", node::matmul_trusted::IsConfigured());
+            if (!node::matmul_trusted::IsConfigured()) {
+                return result;
+            }
+            ChainstateManager& chainman{EnsureAnyChainman(request.context)};
+            LOCK(cs_main);
+            const CBlockIndex* const tip{chainman.ActiveChain().Tip()};
+            if (tip != nullptr) {
+                result.pushKV("active_tip_hash", tip->GetBlockHash().GetHex());
+                result.pushKV("active_tip_height", tip->nHeight);
+                result.pushKV(
+                    "active_tip_has_quorum",
+                    node::matmul_trusted::HasQuorum(
+                        tip->GetBlockHash(), tip->nHeight));
+            }
+            if (const CBlockIndex* attested{
+                    chainman.FindBestKnownAttestedIndex()}) {
+                result.pushKV("hash", attested->GetBlockHash().GetHex());
+                result.pushKV("height", attested->nHeight);
+                result.pushKV(
+                    "on_active_chain",
+                    tip != nullptr &&
+                        tip->GetAncestor(attested->nHeight) == attested);
+            }
             return result;
         }};
 }
@@ -307,6 +390,7 @@ void RegisterMatMulTrustedRPCCommands(CRPCTable& table)
 {
     static const CRPCCommand commands[]{
         {"mining", &getmatmultrustedstatus},
+        {"mining", &getmatmulattestedtip},
         {"mining", &getmatmulattestations},
         {"mining", &submitmatmulattestations},
     };
@@ -314,7 +398,7 @@ void RegisterMatMulTrustedRPCCommands(CRPCTable& table)
         table.appendCommand(command.name, &command);
     }
     table.appendCommand(
-        "exportmatmulattestations", &commands[1]);
+        "exportmatmulattestations", &commands[2]);
     table.appendCommand(
-        "importmatmulattestations", &commands[2]);
+        "importmatmulattestations", &commands[3]);
 }

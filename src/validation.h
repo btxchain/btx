@@ -1535,6 +1535,20 @@ public:
     bool NormalizeReorgRecovery(const CBlockIndex* active_tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool ShouldDeferLosingTipExtension(const CBlockIndex* candidate) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool IsAutomaticReorgRecoveryCandidate(const CBlockIndex* candidate) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /**
+     * Highest-work HAVE_DATA block this node has a current quorum for.
+     * Used by getmatmulattestedtip. May be an ancestor of the active tip
+     * (linear chain, signer ~1 behind) or a competing branch.
+     */
+    const CBlockIndex* FindBestKnownAttestedIndex() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /**
+     * Unique competing attested HAVE_DATA tip, when the active tip itself
+     * has no quorum. Empty if the only attested index is on the active
+     * chain (pending-attestation extension — do not disconnect it) or if
+     * two incomparable attested branches exist.
+     */
+    const CBlockIndex* FindUniqueCompetingAttestedIndex() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    bool IsAttestedAbandonForkCandidate(const CBlockIndex* candidate) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     std::optional<node::ReorgRecoveryRecord> GetReorgRecoveryRecord() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
     {
         return m_reorg_recovery;

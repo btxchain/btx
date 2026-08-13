@@ -619,7 +619,7 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
                    strprintf("Upper limit of memory usage (in megabytes) for keeping extra transactions in memory for compact block reconstructions (default: %s)",
                              DEFAULT_BLOCK_RECONSTRUCTION_EXTRA_TXN_SIZE / 1000000),
                    ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-blocksonly", strprintf("Whether to reject transactions from network peers. Disables automatic broadcast and rebroadcast of transactions, unless the source peer has the 'forcerelay' permission. RPC transactions are not affected. (default: %u)", DEFAULT_BLOCKSONLY), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-blocksonly", strprintf("Whether to reject transactions from network peers. Disables automatic broadcast and rebroadcast of transactions, unless the source peer has the 'forcerelay' permission. RPC transactions are not affected. Do not use this on a mining or submit node: the signer will not see your winning blocks promptly (default: %u)", DEFAULT_BLOCKSONLY), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-coinstatsindex", strprintf("Maintain coinstats index used by the gettxoutsetinfo RPC (default: %u). "
         "Unsupported in this release: shielded value flows break the transparent unclaimed-rewards identity and previously crash-looped the node. Enabling this option is rejected at startup.",
         DEFAULT_COINSTATSINDEX), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -1127,6 +1127,7 @@ void InitParameterInteraction(ArgsManager& args)
                                                    min_blocksonly_mempool_mb);
         if (args.SoftSetArg("-maxmempool", ToString(blocksonly_mempool_mb)))
             LogInfo("parameter interaction: -blocksonly=1 -> setting -maxmempool=%d\n", blocksonly_mempool_mb);
+        InitWarning(_("This node is running -blocksonly=1. A mining or submit node must relay blocks aggressively (-blocksonly=0); otherwise winning blocks may never reach the ExactReplay signer and will orphan even on the attested chain."));
     }
 
     // Forcing relay from whitelisted hosts implies we will accept relays from them in the first place.
@@ -1552,6 +1553,13 @@ bool AppInitParameterInteraction(const ArgsManager& args)
                 _("This node is a single-key trusted MatMul mirror on mainnet (%u signer(s), threshold %d). Above the Profile-1 activation height, trusted mode does not merely accelerate the MatMul check -- the attestation quorum REPLACES it, and the local ExactReplay is skipped. With a 1-of-1 quorum the holder of that key, or anyone who steals it, can make this node accept MatMul-invalid blocks, with no second signer to disagree. Configuring a second independent signer with -matmultrustedthreshold=2 removes that single point of failure; -matmulvalidation=consensus validates MatMul independently instead."),
                 trusted_signers.size(), trusted_threshold));
         }
+        if (!trusted_mirror_mode &&
+            chainparams.GetChainType() == ChainType::MAIN &&
+            (preliminary_signer_capacity < 2 || trusted_threshold < 2)) {
+            InitWarning(strprintf(
+                _("This consensus node tracks a 1-of-1 MatMul attestation quorum on mainnet (%u signer(s), threshold %d). Local ExactReplay is unchanged, but canonical fork-choice and pool integration follow that one key: unattested blocks are orphans, and the canonical block rate is capped by the signer's ExactReplay/attestation rate rather than hashrate. Configure additional independent signers (M-of-N) when they exist."),
+                preliminary_signer_capacity, trusted_threshold));
+        }
         matmul::trusted::StoreConfig config;
         config.chain_id = chainparams.GenesisBlock().GetHash();
         config.replay_authority_context =
@@ -1575,6 +1583,9 @@ bool AppInitParameterInteraction(const ArgsManager& args)
         }
     } else {
         node::matmul_trusted::Reset();
+        if (matmul_validation_mode == "consensus") {
+            LogInfo("This consensus node has no -matmultrustedpubkey. getmatmultrustedstatus reports configured=false and getmatmulattestedtip is empty, so the node cannot see or follow the attested tip. Mining/submit nodes should set -matmultrustedpubkey to the signer key(s) and -matmultrustedthreshold (ExactReplay is unchanged).\n");
+        }
     }
     if (trusted_mirror_mode) {
         InitWarning(strprintf(
