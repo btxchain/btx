@@ -511,14 +511,24 @@ struct TrustedMirrorAuthorityHeaderView {
  * Depending on a single authority connection left mirrors stranded when that
  * peer's inflight slots were full or silent while many ordinary peers held the
  * identical recovery bodies.
+ *
+ * `on_followed_best_header_chain` is accepted for call-site compatibility but
+ * MUST NOT open the download gate by itself. Production m_best_header tracks
+ * claimed-heaviest headers, which is the competing miner fork (~hundreds
+ * ahead). Treating that as "followed" made mirrors fetch the parked heavy
+ * branch and skip the authority's same-height sibling (live 187773 race).
+ * A short tip reorg (LCA depth 1–park) is the recovery that actually
+ * unsticks a mirror that lost a 1-block race.
  */
 [[nodiscard]] inline bool TrustedMirrorMayDownloadCompetingBranch(
     bool is_authority_peer,
     bool best_known_extends_tip,
     bool better_or_equal_work,
     bool on_parked_reorg_branch,
-    bool on_followed_best_header_chain = false)
+    bool on_followed_best_header_chain = false,
+    bool short_tip_reorg = false)
 {
+    (void)on_followed_best_header_chain;
     if (best_known_extends_tip) {
         return true;
     }
@@ -528,10 +538,7 @@ struct TrustedMirrorAuthorityHeaderView {
     if (!better_or_equal_work) {
         return false;
     }
-    if (is_authority_peer) {
-        return true;
-    }
-    return on_followed_best_header_chain;
+    return is_authority_peer || short_tip_reorg;
 }
 
 /**

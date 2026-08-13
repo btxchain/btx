@@ -3193,7 +3193,7 @@ static arith_uint256 TrustAdjustedWork(const CBlockIndex& index) EXCLUSIVE_LOCKS
 
 //! True when `pindex` lies on the mirror's followed best-header chain
 //! (ancestor of, or extension of, m_best_header).
-static bool TrustedMirrorIndexOnFollowedHeaderChain(
+[[maybe_unused]] static bool TrustedMirrorIndexOnFollowedHeaderChain(
     const ChainstateManager& chainman, const CBlockIndex* pindex)
     EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
@@ -3208,6 +3208,23 @@ static bool TrustedMirrorIndexOnFollowedHeaderChain(
         /*peer_best_extends_best_header=*/
         pindex->nHeight >= best_header->nHeight &&
             pindex->GetAncestor(best_header->nHeight) == best_header);
+}
+
+//! Same-height sibling or short fork of the authenticated tip. Depth is capped
+//! at the emergency park window so a 1-block mining race can converge without
+//! opening the hundreds-deep competing miner fork (live: LCA at 187660).
+static bool TrustedMirrorShortTipReorg(
+    const CBlockIndex* tip, const CBlockIndex* candidate)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    static constexpr int MAX_SHORT_REORG_DEPTH{6};
+    if (tip == nullptr || candidate == nullptr || tip->pprev == nullptr) {
+        return false;
+    }
+    const CBlockIndex* lca{LastCommonAncestor(tip, candidate)};
+    if (lca == nullptr) return false;
+    const int depth{tip->nHeight - lca->nHeight};
+    return depth > 0 && depth <= MAX_SHORT_REORG_DEPTH;
 }
 
 void PeerManagerImpl::ProcessBlockAvailability(NodeId nodeid) {
@@ -3238,8 +3255,8 @@ void PeerManagerImpl::ProcessBlockAvailability(NodeId nodeid) {
                             candidate_extends_tip,
                             pindex->nChainWork >= tip->nChainWork,
                             m_chainman.IsOnParkedReorgBranch(pindex),
-                            TrustedMirrorIndexOnFollowedHeaderChain(
-                                m_chainman, pindex))};
+                            /*on_followed_best_header_chain=*/false,
+                            TrustedMirrorShortTipReorg(tip, pindex))};
                     if (current_extends_tip && !candidate_extends_tip &&
                         !may_competing) {
                         state->hashLastUnknownBlock.SetNull();
@@ -3306,8 +3323,8 @@ void PeerManagerImpl::UpdateBlockAvailability(NodeId nodeid, const uint256 &hash
                         candidate_extends_tip,
                         pindex->nChainWork >= tip->nChainWork,
                         m_chainman.IsOnParkedReorgBranch(pindex),
-                        TrustedMirrorIndexOnFollowedHeaderChain(
-                            m_chainman, pindex))};
+                        /*on_followed_best_header_chain=*/false,
+                        TrustedMirrorShortTipReorg(tip, pindex))};
                 if (current_extends_tip && !candidate_extends_tip &&
                     !may_competing) {
                     return;
@@ -3411,28 +3428,18 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
             const bool is_authority{IsTrustedMirrorAuthorityPeer(
                 peer.m_id, peer.m_their_services,
                 state->pindexBestKnownBlock)};
-            // DOWNLOAD uses CLAIMED nChainWork only. Trust-adjusted work caps an
-            // unauthenticated suffix at TRUST_ADJUSTED_WORK_ALLOWANCE_BLOCKS and
-            // is the right metric for preference/acceptance — but gating fetch on
-            // it is circular: bodies must download before the branch can
-            // authenticate and earn trust-adjusted credit. A claimed-heavier
-            // headers-only fork (production: hundreds ahead of the fork while
-            // trust-adjusted counts only +6) must still be fetchable.
             const bool better_work{
                 state->pindexBestKnownBlock->nChainWork >= tip->nChainWork};
             const bool parked{m_chainman.IsOnParkedReorgBranch(
                 state->pindexBestKnownBlock)};
-            const bool on_followed{TrustedMirrorIndexOnFollowedHeaderChain(
-                m_chainman, state->pindexBestKnownBlock)};
+            const bool short_reorg{TrustedMirrorShortTipReorg(
+                tip, state->pindexBestKnownBlock)};
             const bool recovery_target{
                 recovery.phase == ChainRecoveryPhase::RECOVERING_REORG &&
                 recovery.followed_target != nullptr &&
                 state->pindexBestKnownBlock->GetAncestor(
                     recovery.followed_target->nHeight) ==
                     recovery.followed_target};
-            // Distinct skip reasons: production conflated parked / less-work /
-            // non-authority into trusted_mirror_not_tip_chain, hiding whether
-            // the authority exception itself was failing.
             if (parked) {
                 log_skip("trusted_mirror_parked_reorg");
                 return;
@@ -3441,7 +3448,10 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
                 log_skip("trusted_mirror_competing_less_work");
                 return;
             }
-            if (!is_authority && !on_followed && !recovery_target) {
+            // Do not treat m_best_header (claimed-heaviest competing fork)
+            // as followed. Only the signer, a short tip-race reorg, or an
+            // explicit recovery target may fetch a non-extending branch.
+            if (!is_authority && !short_reorg && !recovery_target) {
                 log_skip("trusted_mirror_not_followed_chain");
                 return;
             }
@@ -6671,8 +6681,8 @@ void PeerManagerImpl::HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, c
                     /*best_known_extends_tip=*/false,
                     last_header.nChainWork >= tip->nChainWork,
                     m_chainman.IsOnParkedReorgBranch(&last_header),
-                    TrustedMirrorIndexOnFollowedHeaderChain(
-                        m_chainman, &last_header));
+                    /*on_followed_best_header_chain=*/false,
+                    TrustedMirrorShortTipReorg(tip, &last_header));
             if (!may_competing) {
                 return;
             }
@@ -7167,7 +7177,9 @@ void PeerManagerImpl::MaybeRequestTrustedMirrorAuthorityHeaders(
                     pto.GetId(), peer.m_their_services, known),
                 extends_tip,
                 known->nChainWork >= tip->nChainWork,
-                m_chainman.IsOnParkedReorgBranch(known))};
+                m_chainman.IsOnParkedReorgBranch(known),
+                /*on_followed_best_header_chain=*/false,
+                TrustedMirrorShortTipReorg(tip, known))};
         if (extends_tip || may_competing) {
             target_height = std::max(target_height, known->nHeight);
         }
@@ -7335,7 +7347,7 @@ void PeerManagerImpl::RequestMatMulTrustedAttestations(
         const int32_t height{index ? index->nHeight : -1};
         const bool tip_extending{
             tip != nullptr && index != nullptr &&
-            index->pprev == tip};
+            (index->pprev == tip || TrustedMirrorShortTipReorg(tip, index))};
 
         const auto admit{EvaluateTrustedMirrorAttestationAdmit(
             hash, index, tip, tip_extending)};
@@ -8407,8 +8419,8 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
                         /*best_known_extends_tip=*/false,
                         pindexLast->nChainWork >= tip->nChainWork,
                         m_chainman.IsOnParkedReorgBranch(pindexLast),
-                        TrustedMirrorIndexOnFollowedHeaderChain(
-                            m_chainman, pindexLast));
+                        /*on_followed_best_header_chain=*/false,
+                        TrustedMirrorShortTipReorg(tip, pindexLast));
             }
         }
         if (chase_more &&
@@ -9867,7 +9879,8 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
                 m_chainman.m_blockman.LookupBlockIndex(block_hash)};
             const bool tip_extending{
                 tip != nullptr &&
-                block.hashPrevBlock == tip->GetBlockHash()};
+                (block.hashPrevBlock == tip->GetBlockHash() ||
+                 TrustedMirrorShortTipReorg(tip, index))};
             admit = EvaluateTrustedMirrorAttestationAdmit(
                 block_hash, index, tip, tip_extending);
             if (admit !=

@@ -806,17 +806,29 @@ BOOST_AUTO_TEST_CASE(authority_header_preference_rescues_divergent_tip)
     BOOST_CHECK(TrustedMirrorMayDownloadCompetingBranch(
         /*is_authority_peer=*/false, /*best_known_extends_tip=*/true,
         /*better_or_equal_work=*/false, /*on_parked_reorg_branch=*/false));
-    // Ordinary peer on the already-followed best-header chain may serve bodies
-    // (production: authority inflight stall must not be a single point of failure).
-    BOOST_CHECK(TrustedMirrorMayDownloadCompetingBranch(
+    // Ordinary peer on the claimed-heaviest best-header chain must NOT open
+    // the download gate: that header is the competing miner fork. Only a
+    // short tip-race reorg (or an authority peer) may fetch a non-extending
+    // branch.
+    BOOST_CHECK(!TrustedMirrorMayDownloadCompetingBranch(
         /*is_authority_peer=*/false, /*best_known_extends_tip=*/false,
         /*better_or_equal_work=*/true, /*on_parked_reorg_branch=*/false,
         /*on_followed_best_header_chain=*/true));
+    BOOST_CHECK(TrustedMirrorMayDownloadCompetingBranch(
+        /*is_authority_peer=*/false, /*best_known_extends_tip=*/false,
+        /*better_or_equal_work=*/true, /*on_parked_reorg_branch=*/false,
+        /*on_followed_best_header_chain=*/false,
+        /*short_tip_reorg=*/true));
     // Followed-chain does not bypass park-depth finality.
     BOOST_CHECK(!TrustedMirrorMayDownloadCompetingBranch(
         /*is_authority_peer=*/false, /*best_known_extends_tip=*/false,
         /*better_or_equal_work=*/true, /*on_parked_reorg_branch=*/true,
         /*on_followed_best_header_chain=*/true));
+    BOOST_CHECK(!TrustedMirrorMayDownloadCompetingBranch(
+        /*is_authority_peer=*/false, /*best_known_extends_tip=*/false,
+        /*better_or_equal_work=*/true, /*on_parked_reorg_branch=*/true,
+        /*on_followed_best_header_chain=*/false,
+        /*short_tip_reorg=*/true));
     // Less-work competing branch stays refused even when followed.
     BOOST_CHECK(!TrustedMirrorMayDownloadCompetingBranch(
         /*is_authority_peer=*/false, /*best_known_extends_tip=*/false,
@@ -829,7 +841,7 @@ BOOST_AUTO_TEST_CASE(authority_header_preference_rescues_divergent_tip)
     BOOST_CHECK(TrustedMirrorMayDownloadCompetingBranch(
         /*is_authority_peer=*/true, /*best_known_extends_tip=*/false,
         /*better_or_equal_work=*/true, /*on_parked_reorg_branch=*/false));
-    BOOST_CHECK(TrustedMirrorMayDownloadCompetingBranch(
+    BOOST_CHECK(!TrustedMirrorMayDownloadCompetingBranch(
         /*is_authority_peer=*/false, /*best_known_extends_tip=*/false,
         /*better_or_equal_work=*/true, /*on_parked_reorg_branch=*/false,
         /*on_followed_best_header_chain=*/true));
