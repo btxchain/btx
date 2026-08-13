@@ -1396,6 +1396,167 @@ BOOST_AUTO_TEST_CASE(parked_reorg_suppresses_only_parked_peer_downloads)
                 HasQueuedMessageType(active_peer, NetMsgType::GETDATA));
 }
 
+// GETMMATTEST must reach the signer archive and trusted mirrors that
+// cache-forward accepted signatures. Ordinary consensus miners (no store)
+// are skipped so miss-backoff is not burned on not_serving.
+BOOST_AUTO_TEST_CASE(getmmattest_skips_non_serving_peers)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+
+    node::matmul_trusted::ResetForTest();
+    CKey signer;
+    signer.MakeNewKey(/*fCompressed=*/true);
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256::FromHex(std::string(64, '1')).value();
+    config.replay_authority_context =
+        uint256::FromHex(std::string(64, '2')).value();
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/true, /*serve=*/false,
+        std::chrono::milliseconds{50}, error));
+    BOOST_REQUIRE(node::matmul_trusted::IsTrustedMirror());
+    struct MirrorReset {
+        ~MirrorReset() { node::matmul_trusted::ResetForTest(); }
+    } mirror_reset;
+
+    ConnmanTestMsg& connman = static_cast<ConnmanTestMsg&>(*m_node.connman);
+    PeerManager& peerman = *m_node.peerman;
+
+    const ServiceFlags archive_services{ServiceFlags(
+        NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS |
+        NODE_MATMUL_ATTESTATION_ARCHIVE)};
+    const ServiceFlags miner_services{ServiceFlags(
+        NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS)};
+    const ServiceFlags mirror_services{ServiceFlags(
+        NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_TRUSTED_MIRROR |
+        NODE_ATTESTED_UTXO_SNAPSHOT)};
+
+    CNode archive{/*id=*/71,
+                  /*sock=*/nullptr,
+                  CAddress{},
+                  /*nKeyedNetGroupIn=*/0,
+                  /*nLocalHostNonceIn=*/0,
+                  CAddress{},
+                  /*addrNameIn=*/"attestation-archive",
+                  ConnectionType::OUTBOUND_FULL_RELAY,
+                  /*inbound_onion=*/false,
+                  /*network_key=*/0};
+    CNode miner{/*id=*/72,
+                /*sock=*/nullptr,
+                CAddress{},
+                /*nKeyedNetGroupIn=*/0,
+                /*nLocalHostNonceIn=*/0,
+                CAddress{},
+                /*addrNameIn=*/"ordinary-miner",
+                ConnectionType::OUTBOUND_FULL_RELAY,
+                /*inbound_onion=*/false,
+                /*network_key=*/0};
+    CNode mirror{/*id=*/73,
+                 /*sock=*/nullptr,
+                 CAddress{},
+                 /*nKeyedNetGroupIn=*/0,
+                 /*nLocalHostNonceIn=*/0,
+                 CAddress{},
+                 /*addrNameIn=*/"trusted-mirror",
+                 ConnectionType::OUTBOUND_FULL_RELAY,
+                 /*inbound_onion=*/false,
+                 /*network_key=*/0};
+    connman.Handshake(archive, /*successfully_connected=*/true,
+                      archive_services, archive_services, PROTOCOL_VERSION,
+                      /*relay_txs=*/true);
+    connman.Handshake(miner, /*successfully_connected=*/true, miner_services,
+                      miner_services, PROTOCOL_VERSION, /*relay_txs=*/true);
+    connman.Handshake(mirror, /*successfully_connected=*/true, mirror_services,
+                      mirror_services, PROTOCOL_VERSION, /*relay_txs=*/true);
+    connman.AddTestNode(archive);
+    connman.AddTestNode(miner);
+    connman.AddTestNode(mirror);
+    connman.FlushSendBuffer(archive);
+    connman.FlushSendBuffer(miner);
+    connman.FlushSendBuffer(mirror);
+    struct FinalizePeers {
+        ConnmanTestMsg& connman;
+        PeerManager& peerman;
+        CNode& first;
+        CNode& second;
+        CNode& third;
+        ~FinalizePeers()
+        {
+            peerman.FinalizeNode(first);
+            peerman.FinalizeNode(second);
+            peerman.FinalizeNode(third);
+            connman.RemoveTestNode(first);
+            connman.RemoveTestNode(second);
+            connman.RemoveTestNode(third);
+        }
+    } finalize{connman, peerman, archive, miner, mirror};
+
+    const CBlockIndex* tip{
+        WITH_LOCK(::cs_main, return m_node.chainman->ActiveChain().Tip())};
+    BOOST_REQUIRE(tip != nullptr);
+    SetMockTime(std::chrono::seconds{tip->GetBlockTime() + 1});
+
+    Consensus::Params& consensus = const_cast<Consensus::Params&>(
+        m_node.chainman->GetParams().GetConsensus());
+    const int32_t saved_rc = consensus.nMatMulRCHeight;
+    const int32_t saved_v4 = consensus.nMatMulV4Height;
+    const int32_t saved_bmx4c = consensus.nMatMulBMX4CHeight;
+    const int32_t saved_drlt = consensus.nMatMulDRLTHeight;
+    const int32_t saved_coupled = consensus.nMatMulRCCoupledHeight;
+    struct RestoreHeights {
+        Consensus::Params& params;
+        int32_t rc;
+        int32_t v4;
+        int32_t bmx4c;
+        int32_t drlt;
+        int32_t coupled;
+        ~RestoreHeights()
+        {
+            params.nMatMulRCHeight = rc;
+            params.nMatMulV4Height = v4;
+            params.nMatMulBMX4CHeight = bmx4c;
+            params.nMatMulDRLTHeight = drlt;
+            params.nMatMulRCCoupledHeight = coupled;
+        }
+    } restore_heights{consensus, saved_rc, saved_v4, saved_bmx4c, saved_drlt,
+                      saved_coupled};
+
+    consensus.nMatMulV4Height = tip->nHeight;
+    consensus.nMatMulBMX4CHeight = tip->nHeight;
+    consensus.nMatMulDRLTHeight = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulRCHeight = tip->nHeight;
+    consensus.nMatMulRCCoupledHeight = std::numeric_limits<int32_t>::max();
+    peerman.SetBestBlock(tip->nHeight, std::chrono::seconds{tip->GetBlockTime()});
+    BOOST_REQUIRE(consensus.IsMatMulTrustedReplayAttestationActive(tip->nHeight));
+    BOOST_REQUIRE(
+        consensus.IsMatMulTrustedReplayAttestationActive(tip->nHeight + 1));
+
+    CBlock our_next = node::BlockAssembler{
+        m_node.chainman->ActiveChainstate(), nullptr, {}, m_node}
+                          .CreateNewBlock()
+                          ->block;
+    our_next.hashMerkleRoot = BlockMerkleRoot(our_next);
+    BOOST_REQUIRE(MineHeaderForConsensus(
+        our_next, tip->nHeight + 1, m_node.chainman->GetConsensus(), 5'000'000,
+        tip->GetMedianTimePast()));
+    std::vector<CBlock> our_headers{CBlock{our_next.GetBlockHeader()}};
+    auto archive_msg{
+        NetMsg::Make(NetMsgType::HEADERS, TX_WITH_WITNESS(our_headers))};
+    BOOST_REQUIRE(connman.ReceiveMsgFrom(archive, std::move(archive_msg)));
+    archive.fPauseSend = false;
+    (void)connman.ProcessMessagesOnce(archive);
+
+    BOOST_CHECK(peerman.SendMessages(&archive));
+    BOOST_CHECK(peerman.SendMessages(&miner));
+    BOOST_CHECK(peerman.SendMessages(&mirror));
+
+    BOOST_CHECK(HasQueuedMessageType(archive, NetMsgType::GETMMATTEST));
+    BOOST_CHECK(!HasQueuedMessageType(miner, NetMsgType::GETMMATTEST));
+    BOOST_CHECK(HasQueuedMessageType(mirror, NetMsgType::GETMMATTEST));
+}
+
 BOOST_AUTO_TEST_CASE(broadcast_transaction_fails_closed_without_peerman)
 {
     std::unique_ptr<PeerManager> saved_peerman = std::move(m_node.peerman);

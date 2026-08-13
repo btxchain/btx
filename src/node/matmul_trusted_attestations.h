@@ -181,15 +181,18 @@ static constexpr int TRUSTED_MIRROR_ATTESTED_TIP_LOOKBACK{2};
  *
  *  Tip-extending HAVE_DATA must always remain selectable: that is how the
  *  node catches up after a short reorg once the new parent is the tip.
- *  A short attested tip-race (LCA depth 1–6 with quorum) may replace an
- *  *unattested* tip so a lost same-height sibling can converge.
+ *  Selection is not the connect gate: TrustedMirrorMustDeferUnattestedConnect
+ *  still refuses ConnectTip of an unattested Profile-1 block on a trusted
+ *  mirror. A short attested tip-race (LCA depth 1–6 with quorum) may replace
+ *  an *unattested* tip so a lost same-height sibling can converge.
  *
  *  Never reorg away a tip that already has quorum. Live 2026-08-13: the
  *  signer followed a heavier 4-block competing fork at 187795, signed it,
  *  and every mirror treated that as an attested short race. Competing
  *  then extended as "tip-extending" to 18781x.
  *
- *  A node already sitting on a heavier unattested fork is recovered by
+ *  A node already sitting on an unattested tip (equal-work lost sibling
+ *  or heavier unattested fork) is recovered by
  *  FindUniqueCompetingAttestedIndex, not by this gate. */
 [[nodiscard]] inline bool TrustedMirrorMaySelectMostWorkCandidate(
     bool extends_active_tip_chain,
@@ -200,6 +203,18 @@ static constexpr int TRUSTED_MIRROR_ATTESTED_TIP_LOOKBACK{2};
     if (extends_active_tip_chain) return true;
     if (active_tip_has_quorum) return false;
     return short_tip_reorg && has_quorum;
+}
+
+/** ConnectTip / ActivateBestChainStep gate for a trusted Profile-1 node.
+ *  Tip-extending HAVE_DATA stays selectable so a consensus signer can
+ *  getdata an unattested tip-child (chicken-egg with archives). Quorum
+ *  still gates activation: HAVE_DATA must not make an unattested MatMul
+ *  block the active tip. */
+[[nodiscard]] inline bool TrustedMirrorMustDeferUnattestedConnect(
+    bool trusted_mirror_profile1,
+    bool has_quorum)
+{
+    return trusted_mirror_profile1 && !has_quorum;
 }
 
 /** Preferred GETMMATTEST work on a trusted mirror: the ActiveTip child, or
@@ -215,6 +230,21 @@ static constexpr int TRUSTED_MIRROR_ATTESTED_TIP_LOOKBACK{2};
     if (on_parked_reorg_branch) return false;
     return active_tip_child || short_tip_reorg_missing_root ||
            recent_active_ancestor;
+}
+
+/** GETMMATTEST destinations. NODE_MATMUL_ATTESTATION_ARCHIVE is the signer.
+ *  Trusted mirrors cache-and-forward signatures they have already accepted
+ *  (they cannot SignAuthoritative). A recent valid MMATTEST is the same
+ *  proof after the fact. Ordinary miners and nodes with no services still
+ *  skip — they have no store. Direct signer addnode must not be required
+ *  for functional mining. */
+[[nodiscard]] inline bool PreferGetMmAttestPeer(
+    bool has_attestation_archive_bit,
+    bool recent_valid_mmattest,
+    bool trusted_mirror = false)
+{
+    return has_attestation_archive_bit || recent_valid_mmattest ||
+           trusted_mirror;
 }
 
 struct AttestedFrontierHint {

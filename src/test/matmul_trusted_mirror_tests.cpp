@@ -679,6 +679,15 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(TrustedMirrorMaySelectMostWorkCandidate(
         /*extends_active_tip_chain=*/true, /*short_tip_reorg=*/false,
         /*has_quorum=*/false, /*active_tip_has_quorum=*/true));
+    using node::matmul_trusted::TrustedMirrorMustDeferUnattestedConnect;
+    BOOST_CHECK(TrustedMirrorMustDeferUnattestedConnect(
+        /*trusted_mirror_profile1=*/true, /*has_quorum=*/false));
+    BOOST_CHECK(!TrustedMirrorMustDeferUnattestedConnect(
+        /*trusted_mirror_profile1=*/true, /*has_quorum=*/true));
+    BOOST_CHECK(!TrustedMirrorMustDeferUnattestedConnect(
+        /*trusted_mirror_profile1=*/false, /*has_quorum=*/false));
+    BOOST_CHECK(!TrustedMirrorMustDeferUnattestedConnect(
+        /*trusted_mirror_profile1=*/false, /*has_quorum=*/true));
     BOOST_CHECK(TrustedMirrorPreferGetMmAttest(
         /*active_tip_child=*/true, /*short_tip_reorg_missing_root=*/false));
     BOOST_CHECK(TrustedMirrorPreferGetMmAttest(
@@ -697,6 +706,19 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(!TrustedMirrorPreferGetMmAttest(
         /*active_tip_child=*/false, /*short_tip_reorg_missing_root=*/true,
         /*on_parked_reorg_branch=*/true));
+    using node::matmul_trusted::PreferGetMmAttestPeer;
+    BOOST_CHECK(PreferGetMmAttestPeer(
+        /*has_attestation_archive_bit=*/true, /*recent_valid_mmattest=*/false));
+    BOOST_CHECK(PreferGetMmAttestPeer(
+        /*has_attestation_archive_bit=*/false, /*recent_valid_mmattest=*/true));
+    BOOST_CHECK(PreferGetMmAttestPeer(
+        /*has_attestation_archive_bit=*/true, /*recent_valid_mmattest=*/true));
+    BOOST_CHECK(PreferGetMmAttestPeer(
+        /*has_attestation_archive_bit=*/false, /*recent_valid_mmattest=*/false,
+        /*trusted_mirror=*/true));
+    BOOST_CHECK(!PreferGetMmAttestPeer(
+        /*has_attestation_archive_bit=*/false,
+        /*recent_valid_mmattest=*/false));
 }
 
 BOOST_AUTO_TEST_CASE(tip_extender_capacity_reserved_under_slot_pressure)
@@ -1015,6 +1037,8 @@ BOOST_AUTO_TEST_CASE(authority_header_preference_rescues_divergent_tip)
         /*better_or_equal_work=*/true, /*on_parked_reorg_branch=*/false,
         /*on_followed_best_header_chain=*/false,
         /*short_tip_reorg=*/true));
+    // Equal-work short reorg is the consensus-miner race-loss fetch:
+    // IsConfigured (not only IsTrustedMirror) callers use this helper.
     // Followed-chain does not bypass park-depth finality.
     BOOST_CHECK(!TrustedMirrorMayDownloadCompetingBranch(
         /*is_authority_peer=*/false, /*best_known_extends_tip=*/false,

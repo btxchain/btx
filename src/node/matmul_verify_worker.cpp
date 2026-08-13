@@ -18,6 +18,7 @@
 #include <util/threadnames.h>
 
 #include <algorithm>
+#include <chrono>
 #include <iterator>
 #include <utility>
 
@@ -90,6 +91,10 @@ MatMulVerifyWorker::EnqueueResult MatMulVerifyWorker::Enqueue(
             return EnqueueResult::Joined;
         }
         if (mode == EnqueueMode::JoinOnly) return EnqueueResult::Deferred;
+        PruneCancelRetryBackoff();
+        if (UnderCancelRetryBackoff(hash)) {
+            return EnqueueResult::Deferred;
+        }
         if (job.priority == Priority::AuthenticatedTipChild &&
             (!job.cancelled ||
              !job.cancelled->load(std::memory_order_relaxed))) {
@@ -101,13 +106,18 @@ MatMulVerifyWorker::EnqueueResult MatMulVerifyWorker::Enqueue(
             // queued competing-branch set is retained and its lower priority
             // naturally places it behind the reserved tip lane.
             //
+            // Never cancel a body-holding CompetingBranch / AuthenticatedTipChild
+            // that is already running ExactReplay. Header-only tip churn was
+            // aborting recovery replays, then retryable_failure re-admitted
+            // the same hash immediately (live ExactReplay cancelled tight loop).
+            //
             // This also interrupts an inline portable device-mismatch retry:
             // ScopedExactReplayCancellation covers the complete predicate,
             // including that retry, and the replay checks cancellation at
             // layer/round command-buffer boundaries.
             for (const auto& [pending_hash, pending] : m_pending) {
                 if (pending_hash == hash || !pending->running ||
-                    pending->body_joined) {
+                    ProtectsBodyReplay(*pending)) {
                     continue;
                 }
                 const bool lower_priority{
@@ -160,14 +170,16 @@ MatMulVerifyWorker::HandoffAuthenticatedTip(Job& replacement)
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         if (m_stopped) return HandoffResult::Stopped;
-        if (m_pending.count(replacement_hash) != 0) {
+        PruneCancelRetryBackoff();
+        if (m_pending.count(replacement_hash) != 0 ||
+            UnderCancelRetryBackoff(replacement_hash)) {
             return HandoffResult::Deferred;
         }
 
         std::shared_ptr<Pending> source;
         for (const auto& [hash, pending] : m_pending) {
             if (hash == replacement_hash ||
-                pending->body_joined ||
+                ProtectsBodyReplay(*pending) ||
                 !pending->job.IsHeaderOnly() ||
                 pending->job.priority !=
                     Priority::AuthenticatedTipChild ||
@@ -243,12 +255,13 @@ bool MatMulVerifyWorker::CanHandoffAuthenticatedTip(
     const uint256 replacement_hash{replacement.GetHash()};
     std::lock_guard<std::mutex> lock(m_mutex);
     if (m_stopped ||
-        m_pending.count(replacement_hash) != 0) {
+        m_pending.count(replacement_hash) != 0 ||
+        UnderCancelRetryBackoff(replacement_hash)) {
         return false;
     }
     for (const auto& [hash, pending] : m_pending) {
         if (hash != replacement_hash &&
-            !pending->body_joined &&
+            !ProtectsBodyReplay(*pending) &&
             pending->job.IsHeaderOnly() &&
             pending->job.priority ==
                 Priority::AuthenticatedTipChild &&
@@ -271,7 +284,7 @@ bool MatMulVerifyWorker::Cancel(const uint256& hash)
     const auto it{m_pending.find(hash)};
     if (it == m_pending.end()) return false;
     const auto pending{it->second};
-    if (pending->body_joined) return false;
+    if (ProtectsBodyReplay(*pending)) return false;
     pending->job.cancelled->store(true, std::memory_order_relaxed);
     if (!pending->running) {
         std::erase(m_queue, pending);
@@ -296,7 +309,7 @@ size_t MatMulVerifyWorker::CancelIf(
     size_t count{0};
     for (auto it = m_pending.begin(); it != m_pending.end();) {
         const auto pending{it->second};
-        if (pending->body_joined) {
+        if (ProtectsBodyReplay(*pending)) {
             ++it;
             continue;
         }
@@ -391,6 +404,7 @@ void MatMulVerifyWorker::Stop()
             m_pending.erase(pending->job.GetHeader().GetHash());
         }
         threads.swap(m_threads);
+        m_cancel_retry_backoff.clear();
     }
     m_cv.notify_all();
     matmul::v4::rc::GetRCAcceleratorScheduler().NotifyCancellation();
@@ -419,6 +433,67 @@ size_t MatMulVerifyWorker::AwaitingQuorumForTest() const
 {
     std::lock_guard<std::mutex> lock(m_mutex);
     return m_awaiting_quorum.size();
+}
+
+bool MatMulVerifyWorker::CancelRetryBackoffActiveForTest(
+    const uint256& hash) const
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return UnderCancelRetryBackoff(hash);
+}
+
+bool MatMulVerifyWorker::ProtectsBodyReplay(const Pending& pending)
+{
+    // Full-body validation owns acceptance bookkeeping. Header-only
+    // speculation may be revoked; a body-holding ExactReplay may not.
+    return pending.body_joined;
+}
+
+void MatMulVerifyWorker::ArmCancelRetryBackoff(const uint256& hash)
+{
+    auto& entry{m_cancel_retry_backoff[hash]};
+    entry.consecutive =
+        std::min(entry.consecutive + 1, CANCEL_RETRY_BACKOFF_MAX_EXP);
+    const auto delay{
+        CANCEL_RETRY_BACKOFF_BASE *
+        (1 << std::max(0, entry.consecutive - 1))};
+    entry.not_before = std::chrono::steady_clock::now() + delay;
+    LogDebug(
+        BCLog::NET,
+        "matmul verify worker cancel retry backoff: block=%s "
+        "consecutive=%d delay=%ds\n",
+        hash.ToString(), entry.consecutive,
+        static_cast<int>(std::chrono::duration_cast<std::chrono::seconds>(
+                             delay)
+                             .count()));
+}
+
+bool MatMulVerifyWorker::UnderCancelRetryBackoff(const uint256& hash) const
+{
+    const auto it{m_cancel_retry_backoff.find(hash)};
+    if (it == m_cancel_retry_backoff.end()) return false;
+    return std::chrono::steady_clock::now() < it->second.not_before;
+}
+
+void MatMulVerifyWorker::ClearCancelRetryBackoff(const uint256& hash)
+{
+    m_cancel_retry_backoff.erase(hash);
+}
+
+void MatMulVerifyWorker::PruneCancelRetryBackoff()
+{
+    const auto now{std::chrono::steady_clock::now()};
+    const auto stale_after{
+        CANCEL_RETRY_BACKOFF_BASE *
+        (1 << (CANCEL_RETRY_BACKOFF_MAX_EXP - 1))};
+    for (auto it = m_cancel_retry_backoff.begin();
+         it != m_cancel_retry_backoff.end();) {
+        if (now >= it->second.not_before + stale_after) {
+            it = m_cancel_retry_backoff.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 bool MatMulVerifyWorker::HigherPriority(const Pending& lhs,
@@ -485,6 +560,7 @@ void MatMulVerifyWorker::FinishRetryablePending(
     std::vector<std::function<void()>> callbacks;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
+        ArmCancelRetryBackoff(pending->job.GetHeader().GetHash());
         if (pending->job.retryable_failure) {
             callbacks.push_back(std::move(pending->job.retryable_failure));
         }
@@ -565,6 +641,7 @@ void MatMulVerifyWorker::WorkerLoop()
             std::vector<std::function<void()>> callbacks;
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
+                ArmCancelRetryBackoff(hash);
                 if (job.retryable_failure) {
                     callbacks.push_back(
                         std::move(job.retryable_failure));
@@ -583,7 +660,8 @@ void MatMulVerifyWorker::WorkerLoop()
         };
         bool ok{false};
         bool local_execution_failure{false};
-        if (job.cancelled->load(std::memory_order_relaxed)) {
+        if (job.cancelled->load(std::memory_order_relaxed) &&
+            !ProtectsBodyReplay(*pending)) {
             finish_retryable_without_verdict();
             continue;
         }
@@ -593,6 +671,7 @@ void MatMulVerifyWorker::WorkerLoop()
             !m_verify_override &&
             node::matmul_trusted::IsTrustedMirror() &&
             m_params.IsMatMulTrustedReplayAttestationActive(job.height)};
+        const bool protect_body_replay{ProtectsBodyReplay(*pending)};
         if (!m_verify_override &&
             m_params.IsMatMulRCFamilyActive(job.height) &&
             !trusted_exact_replay) {
@@ -619,9 +698,14 @@ void MatMulVerifyWorker::WorkerLoop()
                 matmul::v4::rc::
                     EstimateRCExactReplayWorkspaceBytes(
                         episode_params)};
+            // Body-holding recovery replay: the scheduler must not raise the
+            // job latch, or ExactReplay cancels and retryable_failure
+            // immediately re-admits the same hash. Header-only speculation
+            // still yields the device via preempt_latch.
             accelerator_lease =
                 matmul::v4::rc::GetRCAcceleratorScheduler().Acquire(
-                    device_priority, job.cancelled.get(),
+                    device_priority,
+                    protect_body_replay ? nullptr : job.cancelled.get(),
                     strprintf("verify:%s:%d", hash.ToString(),
                               job.height),
                     /*external_cancelled=*/nullptr,
@@ -645,7 +729,7 @@ void MatMulVerifyWorker::WorkerLoop()
                 accelerator_lease.QueueWaitSeconds());
         }
         matmul::v4::rc::ScopedExactReplayCancellation cancellation_scope{
-            job.cancelled.get()};
+            protect_body_replay ? nullptr : job.cancelled.get()};
         if (m_verify_override) {
             if (job.block) {
                 ok = m_verify_override(
@@ -806,14 +890,20 @@ void MatMulVerifyWorker::WorkerLoop()
             // not-yet-arrived sampled carrier is a transient availability
             // miss and must not poison the header verdict memo.
             MatMulRecomputeSingleFlight sf(hash);
+            const auto suppress_verdict{[&] {
+                return local_execution_failure ||
+                       (job.cancelled->load(std::memory_order_relaxed) &&
+                        !ProtectsBodyReplay(*pending));
+            }};
             if (sf.IsLeader()) {
                 ok = verify_pure();
                 // Cancellation means no verdict. Publishing the cancellation
                 // result would poison followers and the persistent header
                 // memo, especially when a valid replay reports false solely
-                // because the cancellation boundary fired.
-                if (!job.cancelled->load(std::memory_order_relaxed) &&
-                    !local_execution_failure) {
+                // because the cancellation boundary fired. A body-holding
+                // replay that finished is a real verdict even if a later
+                // header-only tip child raised the latch.
+                if (!suppress_verdict()) {
                     sf.SetResult(ok); // publish before ~sf releases waiters
                 }
             } else if (const auto leader_result{sf.LeaderResult()}) {
@@ -822,9 +912,7 @@ void MatMulVerifyWorker::WorkerLoop()
                 // Leader exited without publishing: decide ourselves.
                 ok = verify_pure();
             }
-            if (!job.cancelled->load(std::memory_order_relaxed) &&
-                !local_execution_failure &&
-                !(carrier_missing && !ok)) {
+            if (!suppress_verdict() && !(carrier_missing && !ok)) {
                 CacheMatMulEncDrVerdict(hash, ok);
             }
             LogDebug(BCLog::NET, "matmul async verify: block %s height %d encdr_ok=%d carrier_missing=%d local_failure=%d\n",
@@ -837,10 +925,13 @@ complete:
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             m_pending.erase(hash);
+            const bool cancelled_header_only{
+                job.cancelled->load(std::memory_order_relaxed) &&
+                !ProtectsBodyReplay(*pending)};
             const bool retryable_without_verdict{
-                local_execution_failure ||
-                job.cancelled->load(std::memory_order_relaxed)};
+                local_execution_failure || cancelled_header_only};
             if (retryable_without_verdict) {
+                ArmCancelRetryBackoff(hash);
                 if (job.retryable_failure) {
                     retryable_failures.push_back(
                         std::move(job.retryable_failure));
@@ -849,7 +940,8 @@ complete:
                     pending->follower_retryable_failures.begin(),
                     pending->follower_retryable_failures.end(),
                     std::back_inserter(retryable_failures));
-            } else if (!job.cancelled->load(std::memory_order_relaxed)) {
+            } else if (!cancelled_header_only) {
+                ClearCancelRetryBackoff(hash);
                 if (job.completion) {
                     completions.push_back(std::move(job.completion));
                 }

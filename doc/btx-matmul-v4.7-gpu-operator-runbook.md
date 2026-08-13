@@ -60,14 +60,13 @@ matmulrcexecution=strict-device
 
 ## Public block-data peers (post-activation)
 
-When seeds advertise headers but not bodies, `addnode` a tip-holding archive:
+Public archival seeds are enough for functional participation. Do **not**
+require a direct signer `addnode`. After the 0.33.3 network-stability work,
+those archives persist tip-child bodies before quorum, `getdata`-serve them
+to the signer, cache-and-forward `MMATTEST`, and answer `GETMMATTEST` from
+that cache. Keep `blocksonly=0` so the seeds actually see your blocks.
 
-- Project miner / attestation archive: `114.150.94.235:19335`
-- Wizard Partners archive (RTX PRO 6000, unpruned, strict-device):
-  `194.247.183.68:19335`
-
-See also
-[`btx-postfork-field-report-wizard-partners-2026-08-10.txt`](btx-postfork-field-report-wizard-partners-2026-08-10.txt).
+Seed list: [`btx-public-node-bootstrap.md`](btx-public-node-bootstrap.md).
 
 ## Mining on the attested chain
 
@@ -99,6 +98,11 @@ matmultrustedthreshold=1
   `getmatmultrustedstatus.attested_tip`). If `on_active_chain` is false, the
   node is on a competing unattested fork and will auto-reorg; do not stack
   unattested candidates. Win → wait for attestation; lose → abandon.
+- Public archival `addnode` seeds are enough for participation. Do **not**
+  require a direct signer peer: archives persist tip-child bodies before
+  quorum, `getdata`-serve them to the signer, cache-and-forward `MMATTEST`,
+  and answer `GETMMATTEST` from that cache. Keep `blocksonly=0` so those
+  seeds actually see your blocks.
 
 `getmatmulattestedtip` is the continuous attested-tip surface. On a quiet
 linear chain the signer typically attests ~1 behind the active tip, so `hash`

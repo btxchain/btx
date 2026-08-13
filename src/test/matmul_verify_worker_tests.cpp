@@ -792,6 +792,132 @@ BOOST_AUTO_TEST_CASE(full_body_is_not_preempted_by_authenticated_tip)
         WaitFor([&] { return body_completions.load() == 1; }));
 }
 
+BOOST_AUTO_TEST_CASE(body_competing_branch_survives_header_tip_child_spam)
+{
+    const Consensus::Params& params = Params().GetConsensus();
+    BlockingVerify gate;
+    std::atomic<int> body_completions{0};
+    std::atomic<int> body_retryable{0};
+    std::atomic<int> header_retryable{0};
+    auto body_cancelled{std::make_shared<std::atomic_bool>(false)};
+    MatMulVerifyWorker worker{
+        params, /*max_threads=*/1,
+        [&](const CBlock&, int32_t, std::optional<int64_t>) {
+            return gate.Run();
+        }};
+
+    const auto body{MakeBlock(200)};
+    const uint256 body_hash{body->GetHash()};
+    MatMulVerifyWorker::Job body_job{
+        .block = body,
+        .height = 100,
+        .completion = [&](bool ok) {
+            BOOST_CHECK(ok);
+            ++body_completions;
+        },
+        .retryable_failure = [&] { ++body_retryable; },
+        .priority = MatMulVerifyWorker::Priority::CompetingBranch,
+        .cancelled = body_cancelled,
+    };
+    BOOST_REQUIRE(EnqueueAccepted(worker.Enqueue(body_job)));
+    BOOST_REQUIRE(WaitFor([&] { return gate.running.load() == 1; }));
+
+    constexpr int kSpam{32};
+    for (int i = 0; i < kSpam; ++i) {
+        MatMulVerifyWorker::Job header_job{
+            .height = 101,
+            .retryable_failure = [&] { ++header_retryable; },
+            .header = std::make_shared<CBlockHeader>(
+                MakeBlock(300 + i)->GetBlockHeader()),
+            .priority =
+                MatMulVerifyWorker::Priority::AuthenticatedTipChild,
+        };
+        BOOST_REQUIRE(EnqueueAccepted(worker.Enqueue(header_job)));
+        BOOST_CHECK(
+            !body_cancelled->load(std::memory_order_relaxed));
+    }
+    BOOST_CHECK_EQUAL(body_retryable.load(), 0);
+    BOOST_CHECK(!worker.CancelRetryBackoffActiveForTest(body_hash));
+    BOOST_CHECK(worker.Contains(body_hash));
+
+    gate.Release();
+    BOOST_REQUIRE(WaitFor([&] { return body_completions.load() == 1; }));
+    BOOST_CHECK_EQUAL(body_retryable.load(), 0);
+    BOOST_CHECK(
+        !body_cancelled->load(std::memory_order_relaxed));
+    BOOST_CHECK(!worker.CancelRetryBackoffActiveForTest(body_hash));
+    worker.Stop();
+    BOOST_CHECK_EQUAL(body_completions.load(), 1);
+    BOOST_CHECK_EQUAL(body_retryable.load(), 0);
+}
+
+BOOST_AUTO_TEST_CASE(cancelled_exact_replay_same_hash_has_retry_backoff)
+{
+    const Consensus::Params& params = Params().GetConsensus();
+    BlockingVerify gate;
+    std::atomic<int> retryable{0};
+    std::atomic<int> verdicts{0};
+    MatMulVerifyWorker worker{
+        params, /*max_threads=*/1,
+        [&](const CBlock&, int32_t, std::optional<int64_t>) {
+            return gate.Run();
+        }};
+
+    const auto block{MakeBlock(400)};
+    const uint256 hash{block->GetHash()};
+    auto cancelled{std::make_shared<std::atomic_bool>(false)};
+    MatMulVerifyWorker::Job header_job{
+        .height = 100,
+        .completion = [&](bool) { ++verdicts; },
+        .retryable_failure = [&] { ++retryable; },
+        .header = std::make_shared<CBlockHeader>(
+            block->GetBlockHeader()),
+        .priority = MatMulVerifyWorker::Priority::CompetingBranch,
+        .cancelled = cancelled,
+    };
+    BOOST_REQUIRE(EnqueueAccepted(worker.Enqueue(header_job)));
+    BOOST_REQUIRE(WaitFor([&] { return gate.running.load() == 1; }));
+
+    MatMulVerifyWorker::Job tip_job{
+        .height = 100,
+        .header = std::make_shared<CBlockHeader>(
+            MakeBlock(401)->GetBlockHeader()),
+        .priority =
+            MatMulVerifyWorker::Priority::AuthenticatedTipChild,
+    };
+    BOOST_REQUIRE(EnqueueAccepted(worker.Enqueue(tip_job)));
+    BOOST_CHECK(cancelled->load(std::memory_order_relaxed));
+    gate.Release();
+    BOOST_REQUIRE(WaitFor([&] { return retryable.load() == 1; }));
+    BOOST_CHECK_EQUAL(verdicts.load(), 0);
+    BOOST_CHECK(worker.CancelRetryBackoffActiveForTest(hash));
+
+    MatMulVerifyWorker::Job immediate_retry{
+        .height = 100,
+        .completion = [&](bool) { ++verdicts; },
+        .retryable_failure = [&] { ++retryable; },
+        .header = std::make_shared<CBlockHeader>(
+            block->GetBlockHeader()),
+        .priority = MatMulVerifyWorker::Priority::CompetingBranch,
+    };
+    BOOST_CHECK(
+        worker.Enqueue(immediate_retry) ==
+        MatMulVerifyWorker::EnqueueResult::Deferred);
+    BOOST_CHECK(immediate_retry.header != nullptr);
+    BOOST_CHECK(immediate_retry.completion);
+    BOOST_CHECK_EQUAL(retryable.load(), 1);
+
+    MatMulVerifyWorker::Job other_hash{
+        .height = 100,
+        .header = std::make_shared<CBlockHeader>(
+            MakeBlock(402)->GetBlockHeader()),
+        .priority = MatMulVerifyWorker::Priority::CompetingBranch,
+    };
+    BOOST_CHECK(EnqueueAccepted(worker.Enqueue(other_hash)));
+    worker.Stop();
+    BOOST_CHECK_EQUAL(verdicts.load(), 0);
+}
+
 BOOST_AUTO_TEST_CASE(body_does_not_join_already_cancelled_header)
 {
     const Consensus::Params& params = Params().GetConsensus();

@@ -20,6 +20,7 @@
 #include <util/mempressure.h>
 #include <validation.h>
 
+#include <memory>
 #include <optional>
 #include <chrono>
 #include <string>
@@ -391,6 +392,10 @@ BOOST_FIXTURE_TEST_CASE(chainstate_authenticated_shallow_race_auto_unparks_with_
 
 BOOST_FIXTURE_TEST_CASE(chainstate_equal_authenticated_sibling_cannot_freeze_tip_growth, TestChain100Setup)
 {
+    // Live miner report: lost a same-height race, stayed on the unattested
+    // sibling, attested chain advanced, node never reorged. An equal-work
+    // attested HAVE_DATA sibling must become tip; growth then continues on
+    // that chain (this is not a freeze — it is race-loss convergence).
     ChainstateManager& chainman = *Assert(m_node.chainman);
     Chainstate& chainstate = chainman.ActiveChainstate();
     auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
@@ -459,22 +464,35 @@ BOOST_FIXTURE_TEST_CASE(chainstate_equal_authenticated_sibling_cannot_freeze_tip
     config.threshold = 1;
     config.local_signer = signer;
     std::string error;
+    // Production mining path: consensus + pubkey, not a trusted mirror.
     BOOST_REQUIRE(node::matmul_trusted::Configure(
-        std::move(config), /*trusted_mirror=*/true, /*serve=*/false,
+        std::move(config), /*trusted_mirror=*/false, /*serve=*/false,
         std::chrono::milliseconds{50}, error));
-    mode = kernel::MatMulValidationMode::TRUSTED;
+    mode = kernel::MatMulValidationMode::CONSENSUS;
     BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
                       sibling->GetBlockHash(), sibling->nHeight) ==
                   matmul::trusted::AddResult::Accepted);
     {
         LOCK(::cs_main);
         chainstate.ResetBlockFailureFlags(sibling);
+        BOOST_REQUIRE(sibling->nChainWork == original_tip->nChainWork);
+        BOOST_CHECK_EQUAL(chainman.FindUniqueCompetingAttestedIndex(), sibling);
+        BOOST_CHECK(chainman.IsAttestedAbandonForkCandidate(sibling));
         BOOST_REQUIRE(chainman.MaybeTrackReorgRecovery(sibling));
         BOOST_CHECK(!chainman.GetReorgRecoveryRecord().has_value());
     }
 
+    state = BlockValidationState{};
+    BOOST_REQUIRE(chainstate.ActivateBestChain(state));
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()) == sibling);
+
     const CBlock extension{CreateAndProcessBlock({}, script)};
-    BOOST_CHECK(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()->GetBlockHash()) == extension.GetHash());
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK_EQUAL(chainstate.m_chain.Tip()->GetBlockHash(), extension.GetHash());
+        BOOST_CHECK_EQUAL(chainstate.m_chain.Tip()->pprev, sibling);
+        BOOST_CHECK(chainman.FindUniqueCompetingAttestedIndex() == nullptr);
+    }
 }
 
 BOOST_FIXTURE_TEST_CASE(chainstate_current_authority_recovers_long_shallow_race_with_existing_data, TestChain100Setup)
@@ -1231,6 +1249,229 @@ BOOST_FIXTURE_TEST_CASE(chainstate_unattested_heavier_tip_abandons_for_attested,
         BOOST_CHECK_EQUAL(chainstate.m_chain.Tip()->GetBlockHash(), original_hash);
         BOOST_CHECK_EQUAL(chainstate.m_chain.Height(), original_height);
         BOOST_CHECK(!chainman.IsOnParkedReorgBranch(original_tip));
+    }
+    chainman.CheckBlockIndex();
+}
+
+BOOST_FIXTURE_TEST_CASE(chainstate_trusted_mirror_persists_unattested_tip_child_without_connecting, TestChain100Setup)
+{
+    // Production chicken-egg: trusted archives dropped miner tip-children
+    // before HAVE_DATA because ContextualCheckBlock failed closed without
+    // quorum, so a consensus signer peered only with archives never saw the
+    // bodies and never attested. Persist the tip-child body; ConnectTip must
+    // still refuse until HasQuorum (via TrustedMirrorMustDeferUnattestedConnect).
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    Chainstate& chainstate = chainman.ActiveChainstate();
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    auto& mode = const_cast<kernel::MatMulValidationMode&>(chainman.m_options.matmul_validation_mode);
+    const int32_t saved_v4{consensus.nMatMulV4Height};
+    const int32_t saved_bmx{consensus.nMatMulBMX4CHeight};
+    const int32_t saved_rc{consensus.nMatMulRCHeight};
+    const auto saved_mode{mode};
+    struct Restore {
+        Consensus::Params& consensus;
+        int32_t v4;
+        int32_t bmx;
+        int32_t rc;
+        kernel::MatMulValidationMode& mode;
+        kernel::MatMulValidationMode saved_mode;
+        ~Restore()
+        {
+            node::matmul_trusted::ResetForTest();
+            consensus.nMatMulV4Height = v4;
+            consensus.nMatMulBMX4CHeight = bmx;
+            consensus.nMatMulRCHeight = rc;
+            mode = saved_mode;
+        }
+    } restore{consensus, saved_v4, saved_bmx, saved_rc, mode, saved_mode};
+
+    const CScript script = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    CBlockIndex* parent_tip{WITH_LOCK(::cs_main, return chainstate.m_chain.Tip())};
+    BOOST_REQUIRE(parent_tip != nullptr);
+    const uint256 parent_hash{parent_tip->GetBlockHash()};
+    const int parent_height{parent_tip->nHeight};
+    const int32_t child_height{parent_height + 1};
+
+    consensus.nMatMulV4Height = child_height;
+    consensus.nMatMulBMX4CHeight = child_height;
+    consensus.nMatMulRCHeight = child_height;
+    BOOST_REQUIRE(consensus.IsMatMulTrustedReplayAttestationActive(child_height));
+
+    CKey signer;
+    signer.MakeNewKey(/*fCompressed=*/true);
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256::ONE;
+    config.replay_authority_context = uint256::FromHex(std::string(64, 'e')).value();
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    config.local_signer = signer;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/true, /*serve=*/false,
+        std::chrono::milliseconds{50}, error));
+    mode = kernel::MatMulValidationMode::TRUSTED;
+    BOOST_REQUIRE(node::matmul_trusted::IsTrustedMirror());
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
+                      parent_hash, parent_height) ==
+                  matmul::trusted::AddResult::Accepted);
+
+    const auto pblock{std::make_shared<const CBlock>(CreateBlock({}, script, chainstate))};
+    const uint256 child_hash{pblock->GetHash()};
+    BOOST_CHECK(!node::matmul_trusted::HasQuorum(child_hash, child_height));
+
+    bool new_block{false};
+    BOOST_REQUIRE(chainman.ProcessNewBlock(pblock, /*force_processing=*/true,
+                                           /*min_pow_checked=*/true, &new_block));
+    BOOST_CHECK(new_block);
+    CBlockIndex* child_index{nullptr};
+    {
+        LOCK(::cs_main);
+        child_index = chainman.m_blockman.LookupBlockIndex(child_hash);
+        BOOST_REQUIRE(child_index != nullptr);
+        BOOST_CHECK(child_index->nStatus & BLOCK_HAVE_DATA);
+        BOOST_CHECK(child_index->IsValid(BLOCK_VALID_TRANSACTIONS));
+        BOOST_CHECK(!(child_index->nStatus & BLOCK_FAILED_MASK));
+        BOOST_CHECK_EQUAL(child_index->pprev, parent_tip);
+        BOOST_CHECK_EQUAL(chainstate.m_chain.Tip(), parent_tip);
+        BOOST_CHECK(!chainstate.m_chain.Contains(child_index));
+        BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(child_index), 1);
+        BOOST_CHECK(node::matmul_trusted::TrustedMirrorMustDeferUnattestedConnect(
+            /*trusted_mirror_profile1=*/true, /*has_quorum=*/false));
+    }
+    chainman.CheckBlockIndex();
+
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
+                      child_hash, child_height) ==
+                  matmul::trusted::AddResult::Accepted);
+    BOOST_CHECK(node::matmul_trusted::HasQuorum(child_hash, child_height));
+
+    BlockValidationState state;
+    BOOST_REQUIRE(chainstate.ActivateBestChain(state));
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK_EQUAL(chainstate.m_chain.Tip(), child_index);
+        BOOST_CHECK(chainstate.m_chain.Contains(child_index));
+    }
+    chainman.CheckBlockIndex();
+}
+
+BOOST_FIXTURE_TEST_CASE(chainstate_retryable_matmul_error_does_not_spin_activatebestchain, TestChain100Setup)
+{
+    // Control flow: ContextualCheckBlock reports ExactReplay cancelled /
+    // trusted quorum timeout as state.Error("matmul RC ExactReplay local
+    // execution incomplete: …"). ActivateBestChainStep used to treat that
+    // as a fatal system error (return false) or, if returned as success,
+    // the inner ABC comparator would retry the same pindexMostWork forever
+    // after a reorg disconnect left the tip worse than starting_tip.
+    // One retryable failure must break inner+outer ABC, leave the candidate
+    // in setBlockIndexCandidates, and return success so invalidateblock RPC
+    // can complete. Net/scheduler retries later. Injected here without a GPU.
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    Chainstate& chainstate = chainman.ActiveChainstate();
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    auto& action = const_cast<kernel::DeepReorgAction&>(chainman.m_options.deep_reorg_action);
+    auto& park_depth = const_cast<std::optional<uint32_t>&>(chainman.m_options.max_reorg_depth_park);
+    auto& hysteresis_work_margin = const_cast<std::optional<uint32_t>&>(chainman.m_options.reorg_hysteresis_work_margin);
+    struct Restore {
+        Consensus::Params& consensus;
+        int32_t start;
+        kernel::DeepReorgAction& action;
+        kernel::DeepReorgAction saved_action;
+        std::optional<uint32_t>& park_depth;
+        std::optional<uint32_t> saved_park_depth;
+        std::optional<uint32_t>& hysteresis_work_margin;
+        std::optional<uint32_t> saved_hysteresis_work_margin;
+        ChainstateManager& chainman;
+        ~Restore()
+        {
+            chainman.SetRetryableMatMulConnectFailureForTest(false);
+            node::matmul_trusted::ResetForTest();
+            consensus.nReorgProtectionStartHeight = start;
+            action = saved_action;
+            park_depth = saved_park_depth;
+            hysteresis_work_margin = saved_hysteresis_work_margin;
+        }
+    } restore{consensus, consensus.nReorgProtectionStartHeight,
+              action, action, park_depth, park_depth,
+              hysteresis_work_margin, hysteresis_work_margin, chainman};
+    consensus.nReorgProtectionStartHeight = 10;
+    action = kernel::DeepReorgAction::PARK;
+    park_depth = 100;
+    hysteresis_work_margin = 0;
+
+    const CScript script = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    CBlockIndex* original_tip{nullptr};
+    CBlockIndex* original_root{nullptr};
+    {
+        LOCK(::cs_main);
+        original_tip = chainstate.m_chain.Tip();
+        original_root = original_tip;
+    }
+    BOOST_REQUIRE(original_tip != nullptr);
+    const uint256 original_hash{original_tip->GetBlockHash()};
+    const int original_height{original_tip->nHeight};
+
+    BlockValidationState state;
+    BOOST_REQUIRE(chainstate.InvalidateBlock(state, original_root));
+    CBlockIndex* competing_tip{nullptr};
+    for (int i = 0; i < 2; ++i) {
+        const CBlock block{CreateAndProcessBlock({}, script)};
+        LOCK(::cs_main);
+        competing_tip = chainman.m_blockman.LookupBlockIndex(block.GetHash());
+    }
+    BOOST_REQUIRE(competing_tip);
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()) == competing_tip);
+
+    {
+        LOCK(::cs_main);
+        chainstate.ResetBlockFailureFlags(original_root);
+        BOOST_REQUIRE(original_tip->nStatus & BLOCK_HAVE_DATA);
+        BOOST_REQUIRE(competing_tip->nChainWork > original_tip->nChainWork);
+    }
+
+    CKey signer;
+    signer.MakeNewKey(/*fCompressed=*/true);
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256::ONE;
+    config.replay_authority_context = uint256::FromHex(std::string(64, 'd')).value();
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    config.local_signer = signer;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/true, /*serve=*/false,
+        std::chrono::milliseconds{50}, error));
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
+                      original_hash, original_height) ==
+                  matmul::trusted::AddResult::Accepted);
+
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK_EQUAL(
+            chainman.FindUniqueCompetingAttestedIndex(), original_tip);
+        BOOST_CHECK(chainman.IsAttestedAbandonForkCandidate(original_tip));
+    }
+
+    chainman.SetRetryableMatMulConnectFailureForTest(true);
+    state = BlockValidationState{};
+    BOOST_REQUIRE(chainstate.ActivateBestChain(state));
+    BOOST_CHECK(state.IsValid());
+    BOOST_CHECK_EQUAL(chainman.RetryableMatMulConnectFailureAttemptsForTest(), 1);
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK(chainstate.m_chain.Tip() != original_tip);
+        BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(original_tip), 1);
+        BOOST_CHECK(chainman.IsAttestedAbandonForkCandidate(original_tip));
+    }
+    chainman.CheckBlockIndex();
+
+    chainman.SetRetryableMatMulConnectFailureForTest(false);
+    state = BlockValidationState{};
+    BOOST_REQUIRE(chainstate.ActivateBestChain(state));
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK_EQUAL(chainstate.m_chain.Tip()->GetBlockHash(), original_hash);
+        BOOST_CHECK_EQUAL(chainstate.m_chain.Height(), original_height);
     }
     chainman.CheckBlockIndex();
 }

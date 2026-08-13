@@ -68,6 +68,16 @@ public:
     static constexpr size_t MAX_AWAITING_QUORUM_JOBS{16};
     static constexpr size_t MAX_AWAITING_QUORUM_BYTES{128U * 1024U * 1024U};
 
+    /** Worker-local cooldown after a retryable ExactReplay cancel/failure.
+     *  Cancellation is not a consensus verdict, but immediately invoking
+     *  retryable_failure lets net_processing re-admit the same hash into a
+     *  cancel→retry tight loop (live: ~310% CPU, shallow invalidateblock
+     *  stuck in ActivateBestChain). Same spirit as the 5s attestation-miss
+     *  base; this map is owned here so the worker can fail-closed even when
+     *  the caller retries synchronously from the completion thread. */
+    static constexpr std::chrono::seconds CANCEL_RETRY_BACKOFF_BASE{5};
+    static constexpr int CANCEL_RETRY_BACKOFF_MAX_EXP{6};
+
     enum class Priority : uint8_t {
         Background = 0,
         CompetingBranch = 1,
@@ -171,8 +181,11 @@ public:
      *  same-hash job or a failed JoinOnly as permission to run Q*-scale work
      *  synchronously on the P2P message thread. An authenticated-tip child
      *  preempts lower-priority in-flight speculation so a valid admission
-     *  ticket cannot reserve the sole device lane indefinitely. Threads are
-     *  started lazily. */
+     *  ticket cannot reserve the sole device lane indefinitely. A body-holding
+     *  CompetingBranch / AuthenticatedTipChild already running ExactReplay is
+     *  never preempted by a later header-only AuthenticatedTipChild. Same-hash
+     *  re-enqueue after a retryable cancel is Deferred until the worker-local
+     *  backoff expires. Threads are started lazily. */
     EnqueueResult Enqueue(
         Job& job,
         EnqueueMode mode = EnqueueMode::JoinOrEnqueue);
@@ -211,6 +224,9 @@ public:
     size_t QueueDepthForTest() const;
     //! Test introspection: jobs parked awaiting an attestation quorum.
     size_t AwaitingQuorumForTest() const;
+    //! Test introspection: same-hash re-enqueue is Deferred until this clears.
+    [[nodiscard]] bool CancelRetryBackoffActiveForTest(
+        const uint256& hash) const;
 
 private:
     struct Pending {
@@ -238,6 +254,13 @@ private:
     [[nodiscard]] std::optional<std::chrono::steady_clock::time_point>
     NextAwaitingDeadline() const;
     void FinishRetryablePending(const std::shared_ptr<Pending>& pending);
+    /** True once a full body owns this job: tip-header churn must not cancel
+     *  the in-flight ExactReplay or discard a completed body verdict. */
+    [[nodiscard]] static bool ProtectsBodyReplay(const Pending& pending);
+    void ArmCancelRetryBackoff(const uint256& hash);
+    [[nodiscard]] bool UnderCancelRetryBackoff(const uint256& hash) const;
+    void ClearCancelRetryBackoff(const uint256& hash);
+    void PruneCancelRetryBackoff();
 
     const Consensus::Params& m_params;
     const std::function<bool(const CBlock&, int32_t, std::optional<int64_t>)> m_verify_override;
@@ -255,6 +278,12 @@ private:
     int32_t m_tip_height{-1}; // GUARDED_BY(m_mutex)
     uint64_t m_next_sequence{0};          // GUARDED_BY(m_mutex)
     bool m_stopped{false};               // GUARDED_BY(m_mutex)
+    struct CancelRetryBackoff {
+        std::chrono::steady_clock::time_point not_before{};
+        int consecutive{0};
+    };
+    std::map<uint256, CancelRetryBackoff>
+        m_cancel_retry_backoff; // GUARDED_BY(m_mutex)
     std::vector<std::thread> m_threads;  // GUARDED_BY(m_mutex); lazily started on Enqueue
 };
 

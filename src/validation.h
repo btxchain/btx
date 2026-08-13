@@ -1543,9 +1543,10 @@ public:
     const CBlockIndex* FindBestKnownAttestedIndex() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /**
      * Unique competing attested HAVE_DATA tip, when the active tip itself
-     * has no quorum. Empty if the only attested index is on the active
-     * chain (pending-attestation extension — do not disconnect it) or if
-     * two incomparable attested branches exist.
+     * has no quorum. Used to abandon a lost race (equal-work attested
+     * sibling) or a heavier unattested fork. Empty if the only attested
+     * index is on the active chain (pending-attestation extension — do
+     * not disconnect it) or if two incomparable attested branches exist.
      */
     const CBlockIndex* FindUniqueCompetingAttestedIndex() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool IsAttestedAbandonForkCandidate(const CBlockIndex* candidate) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
@@ -2060,6 +2061,11 @@ public:
     {
         m_shielded_transition_write_fault_hook_for_test = std::move(hook);
     }
+
+    /** Test-only: make ActivateBestChainStep fail ConnectTip with a retryable
+     *  MatMul ExactReplay incomplete Error (no GPU). Tests must clear this. */
+    void SetRetryableMatMulConnectFailureForTest(bool enable);
+    [[nodiscard]] int RetryableMatMulConnectFailureAttemptsForTest() const;
 
     [[nodiscard]] std::optional<shielded::registry::ShieldedAccountRegistrySnapshot>
     ExportShieldedAccountRegistrySnapshot(

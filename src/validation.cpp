@@ -82,6 +82,7 @@
 #include <shielded/v2_types.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <chrono>
 #include <cinttypes>
@@ -9216,6 +9217,32 @@ public:
     }
 };
 
+//! ContextualCheckBlock reports retryable local ExactReplay / trusted-quorum
+//! misses as state.Error("matmul RC ExactReplay local execution incomplete: …")
+//! rather than Invalid. Disk and other fatal Errors use different messages.
+static constexpr const char* RETRYABLE_MATMUL_ACTIVATION_PREFIX =
+    "matmul RC ExactReplay local execution incomplete";
+
+[[nodiscard]] static bool TrustedMirrorMustDeferUnattestedConnect(
+    const ChainstateManager& chainman, const CBlockIndex* pindex)
+    EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+{
+    if (pindex == nullptr) return false;
+    if (chainman.GetMatMulValidationMode() !=
+        kernel::MatMulValidationMode::TRUSTED) {
+        return false;
+    }
+    if (!node::matmul_trusted::IsConfigured()) return false;
+    if (!chainman.GetConsensus().IsMatMulTrustedReplayAttestationActive(
+            pindex->nHeight)) {
+        return false;
+    }
+    return node::matmul_trusted::TrustedMirrorMustDeferUnattestedConnect(
+        /*trusted_mirror_profile1=*/true,
+        node::matmul_trusted::HasQuorum(
+            pindex->GetBlockHash(), pindex->nHeight));
+}
+
 /**
  * Connect a new block to m_chain. pblock is either nullptr or a pointer to a CBlock
  * corresponding to pindexNew, to bypass loading it again from disk.
@@ -9232,6 +9259,17 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
                  pindexNew->pprev ? pindexNew->pprev->GetBlockHash().GetHex() : "null",
                  m_chain.Tip() ? m_chain.Tip()->GetBlockHash().GetHex() : "null");
         return FatalError(m_chainman.GetNotifications(), state, _("ConnectTip: block's previous is not the current chain tip."));
+    }
+    // Trusted Profile-1 mirrors may persist tip-extending HAVE_DATA before
+    // quorum (so a consensus signer can getdata the body). ConnectBlock does
+    // not re-run ContextualCheckBlock, so this is the activation gate:
+    // unattested MatMul must not become the active tip.
+    if (TrustedMirrorMustDeferUnattestedConnect(m_chainman, pindexNew)) {
+        LogDebug(BCLog::VALIDATION,
+                 "ConnectTip: deferring unattested profile-1 block hash=%s height=%d until attestation quorum\n",
+                 pindexNew->GetBlockHash().ToString(), pindexNew->nHeight);
+        return state.Error(std::string(RETRYABLE_MATMUL_ACTIVATION_PREFIX) +
+                           ": trusted attestation quorum Timeout");
     }
     // Read block from disk.
     const auto time_1{SteadyClock::now()};
@@ -9431,12 +9469,13 @@ CBlockIndex* Chainstate::FindMostWorkChain()
 
         if (CBlockIndex* abandon{const_cast<CBlockIndex*>(
                 m_chainman.FindUniqueCompetingAttestedIndex())}) {
-            // Already on a heavier unattested fork: do not wait for the
-            // operator to invalidateblock the first divergent block. Prefer
-            // the unique competing attested HAVE_DATA chain even if it has
-            // less work. A pending-attestation child of an attested ancestor
-            // is not competing and is left alone. Insert so ConnectTip /
-            // CheckBlockIndex see the new tip in the candidate set.
+            // Unattested active tip, unique competing attested HAVE_DATA:
+            // lost same-height race, attested chain pulled ahead, or
+            // heavier unattested fork. Do not wait for the operator to
+            // invalidateblock. A pending-attestation child of an attested
+            // ancestor is not competing and is left alone. Insert so
+            // ConnectTip / CheckBlockIndex see the new tip in the
+            // candidate set.
             pindexNew = abandon;
             setBlockIndexCandidates.insert(abandon);
         }
@@ -9607,11 +9646,52 @@ void Chainstate::PruneBlockIndexCandidates() {
     assert(!setBlockIndexCandidates.empty());
 }
 
+[[nodiscard]] static bool IsRetryableMatMulActivationError(const BlockValidationState& state)
+{
+    return state.IsError() &&
+           state.GetRejectReason().find(RETRYABLE_MATMUL_ACTIVATION_PREFIX) != std::string::npos;
+}
+
+static std::atomic<bool> g_inject_retryable_matmul_connect_failure{false};
+static std::atomic<int> g_retryable_matmul_connect_failure_attempts{0};
+//! Auto-disable the test hook after this many ConnectTip injections so a
+//! missed ABC-loop break cannot hang unit tests.
+static constexpr int MAX_RETRYABLE_MATMUL_CONNECT_FAILURE_INJECTIONS{32};
+
+void ChainstateManager::SetRetryableMatMulConnectFailureForTest(bool enable)
+{
+    g_inject_retryable_matmul_connect_failure.store(enable);
+    if (enable) {
+        g_retryable_matmul_connect_failure_attempts.store(0);
+    }
+}
+
+int ChainstateManager::RetryableMatMulConnectFailureAttemptsForTest() const
+{
+    return g_retryable_matmul_connect_failure_attempts.load();
+}
+
+[[nodiscard]] static bool ConsumeRetryableMatMulConnectFailureForTest(BlockValidationState& state)
+{
+    if (!g_inject_retryable_matmul_connect_failure.load()) return false;
+    const int attempts =
+        g_retryable_matmul_connect_failure_attempts.fetch_add(1) + 1;
+    if (attempts >= MAX_RETRYABLE_MATMUL_CONNECT_FAILURE_INJECTIONS) {
+        g_inject_retryable_matmul_connect_failure.store(false);
+    }
+    state.Error(std::string(RETRYABLE_MATMUL_ACTIVATION_PREFIX) +
+                ": ExactReplay: cancelled");
+    return true;
+}
+
 /**
  * Try to make some progress towards making pindexMostWork the active block.
  * pblock is either nullptr or a pointer to a CBlock corresponding to pindexMostWork.
  *
- * @returns true unless a system error occurred
+ * @returns true unless a system error occurred. Retryable MatMul ExactReplay
+ *          incomplete / cancelled / quorum-timeout Errors return true with
+ *          state.IsError() set so ActivateBestChain can stop without
+ *          busy-looping the same pindexMostWork or treating the miss as fatal.
  */
 bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex* pindexMostWork, const std::shared_ptr<const CBlock>& pblock, bool& fInvalidFound, ConnectTrace& connectTrace)
 {
@@ -9782,8 +9862,20 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
         nHeight = nTargetHeight;
 
         // Connect new blocks.
+        bool connected_this_step = false;
         for (CBlockIndex* pindexConnect : vpindexToConnect | std::views::reverse) {
-            if (!ConnectTip(state, pindexConnect, pindexConnect == pindexMostWork ? pblock : std::shared_ptr<const CBlock>(), connectTrace, disconnectpool)) {
+            // After the first ConnectTip of this step, honor shutdown before
+            // starting another ExactReplay/connect so a long reorg cannot
+            // ignore m_interrupt. The first connect of the first ABC step
+            // still runs so LoadChainTip can attach genesis.
+            if (connected_this_step && m_chainman.m_interrupt) {
+                fContinue = false;
+                break;
+            }
+            const bool injected_retryable{
+                ConsumeRetryableMatMulConnectFailureForTest(state)};
+            if (injected_retryable ||
+                !ConnectTip(state, pindexConnect, pindexConnect == pindexMostWork ? pblock : std::shared_ptr<const CBlock>(), connectTrace, disconnectpool)) {
                 if (state.IsInvalid()) {
                     // The block violates a consensus rule.
                     if (state.GetResult() != BlockValidationResult::BLOCK_MUTATED) {
@@ -9791,6 +9883,33 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
                     }
                     state = BlockValidationState();
                     fInvalidFound = true;
+                    fContinue = false;
+                    break;
+                } else if (IsRetryableMatMulActivationError(state)) {
+                    // ExactReplay cancelled / local accelerator miss / trusted
+                    // quorum timeout. Not a disk/system fatal and not consensus
+                    // invalid: leave pindexMostWork in setBlockIndexCandidates
+                    // and let ActivateBestChain return so RPC/net can complete.
+                    // The scheduler retries when the GPU or quorum is ready.
+                    LogWarning("ActivateBestChainStep: retryable MatMul failure connecting %s (%s); "
+                               "leaving candidate in setBlockIndexCandidates\n",
+                               pindexConnect->GetBlockHash().ToString(),
+                               state.ToString());
+                    // DisconnectTip does not maintain the candidate set.
+                    // ABC CheckBlockIndex requires the new tip and every
+                    // still-valid fork with >= tip work to be present.
+                    if (pindexOldTip != nullptr) {
+                        CBlockIndex* disconnected{
+                            const_cast<CBlockIndex*>(pindexOldTip)};
+                        for (; disconnected != nullptr &&
+                               disconnected != m_chain.Tip();
+                             disconnected = disconnected->pprev) {
+                            TryAddBlockIndexCandidate(disconnected);
+                        }
+                    }
+                    if (m_chain.Tip() != nullptr) {
+                        TryAddBlockIndexCandidate(m_chain.Tip());
+                    }
                     fContinue = false;
                     break;
                 } else {
@@ -9801,6 +9920,7 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
                     return false;
                 }
             } else {
+                connected_this_step = true;
                 PruneBlockIndexCandidates();
                 if (!pindexOldTip || m_chain.Tip()->nChainWork > pindexOldTip->nChainWork) {
                     // We're in a better position than we were. Return temporarily to release the lock.
@@ -9820,7 +9940,8 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
 
     CheckForkWarningConditions();
 
-    if (this == &m_chainman.ActiveChainstate() &&
+    if (!IsRetryableMatMulActivationError(state) &&
+        this == &m_chainman.ActiveChainstate() &&
         !m_chainman.NormalizeReorgRecovery(m_chain.Tip())) {
         return state.Error("failed to persist completed reorg recovery transition");
     }
@@ -9906,6 +10027,8 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
     CBlockIndex *pindexMostWork = nullptr;
     CBlockIndex *pindexNewTip = nullptr;
     bool exited_ibd{false};
+    bool attempted_step{false};
+    bool retryable_matmul_deferred{false};
     do {
         // Drain the validation queue without holding m_chainstate_mutex. Syncing
         // while that mutex is held deadlocks against net-thread ActivateBestChain
@@ -9935,7 +10058,11 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
                 // (with the exception of shutdown due to hardware issues, low disk space, etc).
                 ConnectTrace connectTrace; // Destructed before cs_main is unlocked
 
-                if (m_chainman.m_interrupt) {
+                // Give ActivateBestChainStep one chance (LoadChainTip must still
+                // connect genesis even if shutdown is already requested). After
+                // that, honor m_interrupt BEFORE starting another ExactReplay/
+                // connect so a retryable MatMul recovery cannot ignore shutdown.
+                if (attempted_step && m_chainman.m_interrupt) {
                     break;
                 }
 
@@ -9958,12 +10085,8 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
                     // A system error occurred
                     return false;
                 }
+                attempted_step = true;
                 blocks_connected = true;
-
-                if (fInvalidFound) {
-                    // Wipe cache, we may need another branch now.
-                    pindexMostWork = nullptr;
-                }
                 pindexNewTip = m_chain.Tip();
 
                 for (const PerBlockConnectTrace& trace : connectTrace.GetBlocksConnected()) {
@@ -9971,6 +10094,25 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
                     if (m_chainman.m_options.signals) {
                         m_chainman.m_options.signals->BlockConnected(chainstate_role, trace.pblock, trace.pindex);
                     }
+                }
+
+                if (IsRetryableMatMulActivationError(state)) {
+                    // Do not busy-loop the same pindexMostWork: after a reorg
+                    // disconnect the tip is worse than starting_tip, so the
+                    // inner comparator would retry forever. Leave the candidate
+                    // in setBlockIndexCandidates; net/scheduler retries later.
+                    LogWarning("ActivateBestChain: retryable MatMul failure toward %s (%s); "
+                               "stopping activation so RPC/net can complete\n",
+                               pindexMostWork->GetBlockHash().ToString(),
+                               state.ToString());
+                    state = BlockValidationState();
+                    retryable_matmul_deferred = true;
+                    break;
+                }
+
+                if (fInvalidFound) {
+                    // Wipe cache, we may need another branch now.
+                    pindexMostWork = nullptr;
                 }
 
                 // This will have been toggled in
@@ -10043,11 +10185,11 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
             break;
         }
 
-        // We check interrupt only after giving ActivateBestChainStep a chance to run once so that we
-        // never interrupt before connecting the genesis block during LoadChainTip(). Previously this
-        // caused an assert() failure during interrupt in such cases as the UTXO DB flushing checks
-        // that the best block hash is non-null.
+        // Interrupt is also checked at the top of each subsequent inner
+        // iteration (see attempted_step above). This trailing check still
+        // lets the first step run so LoadChainTip can connect genesis.
         if (m_chainman.m_interrupt) break;
+        if (retryable_matmul_deferred) break;
     } while (pindexNewTip != pindexMostWork);
 
     m_chainman.CheckBlockIndex();
@@ -10146,7 +10288,9 @@ bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex* pinde
         // Do not SyncWithValidationInterfaceQueue while m_chainstate_mutex is
         // held (deep invalidateblock deadlocked here: RPC held this mutex,
         // scheduler callbacks / net wanted ActivateBestChain). Queue growth is
-        // drained after the mutex is released below.
+        // drained after the mutex is released below. This loop stays
+        // interruptible at the top of every disconnect; ActivateBestChain
+        // after the RPC helper also honors m_interrupt.
 
         LOCK(cs_main);
         // Lock for as long as disconnectpool is in scope to make sure MaybeUpdateMempoolForReorg is
@@ -10695,9 +10839,11 @@ const CBlockIndex* ChainstateManager::FindUniqueCompetingAttestedIndex() const
         }
         if (CBlockIndexWorkComparator()(unique, idx)) unique = idx;
     }
-    if (unique == nullptr || unique->nChainWork >= tip->nChainWork) {
-        return nullptr;
-    }
+    // Equal-work attested sibling (lost race) and more-work attested
+    // chain (signer pulled ahead) must switch; less-work attested
+    // recovers a heavier unattested fork. Restricting to strictly-less
+    // work left consensus miners stranded on their own unattested
+    // sibling while the attested chain advanced (live 187847).
     return unique;
 }
 
@@ -11917,6 +12063,15 @@ ChainstateManager::ClassifyMatMulEncDrRecompute(const CBlock& block,
     if (!params.IsMatMulV4Active(nHeight)) return std::nullopt;
     if (params.GetMatMulProfileParams(nHeight).commitment !=
         Consensus::MatMulCommitmentScheme::DIGEST_RECOMPUTE) return std::nullopt;
+    // Trusted Profile-1 tip-children must go through AcceptBlock so HAVE_DATA
+    // is written even before quorum. Parking them in the async worker leaves
+    // the body only in RAM; a consensus signer peered with this mirror cannot
+    // getdata it, so never attests, so the mirror never connects (chicken-egg).
+    if (GetMatMulValidationMode() == kernel::MatMulValidationMode::TRUSTED &&
+        params.IsMatMulTrustedReplayAttestationActive(nHeight) &&
+        prev == ActiveTip()) {
+        return std::nullopt;
+    }
     bool stage3_authority_job{false};
     if constexpr (matmul::v4::rc::kRCStage3SuccinctAuthorityReady) {
         stage3_authority_job = params.IsMatMulRCFamilyActive(nHeight);
@@ -12310,34 +12465,33 @@ static bool ContextualCheckBlock(const CBlock& block,
                 const auto check_rc = [&]() {
                     if (trusted_profile1) {
                         // Never block ProcessNewBlock on attestation quorum.
-                        // Trusted mirrors park async verify jobs instead; this
-                        // sync seam only accepts an already-formed M-of-N
-                        // quorum (or fails closed as retryable).
+                        // Tip-extending bodies persist via AcceptBlock so a
+                        // consensus signer can getdata them before quorum;
+                        // ConnectTip still requires HasQuorum. Competing
+                        // (non-tip-parent) deliveries stay retryable Errors.
                         const bool have_quorum{
                             node::matmul_trusted::HasQuorum(
                                 block.GetHash(), nHeight)};
-                        const matmul::trusted::WaitResult wait{
-                            have_quorum
-                                ? matmul::trusted::WaitResult::Quorum
-                                : matmul::trusted::WaitResult::Timeout};
-                        rc_local_execution_failure =
-                            wait !=
-                            matmul::trusted::WaitResult::Quorum;
-                        if (!rc_local_execution_failure) {
-                            CacheMatMulEncDrVerdict(
-                                block.GetHash(), true);
-                            if (rc_authority != nullptr) {
-                                *rc_authority =
-                                    MatMulRCAuthorityProvenance::
-                                        TRUSTED_SIGNER_QUORUM;
+                        if (!have_quorum) {
+                            if (pindexPrev != nullptr &&
+                                pindexPrev == chainman.ActiveTip()) {
+                                return true;
                             }
-                        } else {
+                            rc_local_execution_failure = true;
                             rc_execution_detail = strprintf(
                                 "trusted attestation quorum %s",
                                 matmul::trusted::WaitResultName(
-                                    wait));
+                                    matmul::trusted::WaitResult::Timeout));
+                            return false;
                         }
-                        return !rc_local_execution_failure;
+                        CacheMatMulEncDrVerdict(
+                            block.GetHash(), true);
+                        if (rc_authority != nullptr) {
+                            *rc_authority =
+                                MatMulRCAuthorityProvenance::
+                                    TRUSTED_SIGNER_QUORUM;
+                        }
+                        return true;
                     }
                     const auto outcome{
                         CheckMatMulProofOfWork_RCOutcome(
@@ -14116,9 +14270,9 @@ void ChainstateManager::CheckBlockIndex()
                     // In this case it must be in m_blocks_unlinked -- see test below.
                 }
             } else { // If this block sorts worse than the current tip or some ancestor's block has never been seen, it cannot be in setBlockIndexCandidates.
-                // Attested abandon-fork targets are inserted while the
-                // unattested tip still has more work so ActivateBestChain can
-                // switch to them.
+                // Attested abandon-fork targets are inserted so ActivateBestChain
+                // can switch to them (heavier unattested tip, or equal-work
+                // lost sibling).
                 if (!c->m_chainman.IsAttestedAbandonForkCandidate(pindex)) {
                     assert(c->setBlockIndexCandidates.count(pindex) == 0);
                 }

@@ -28,6 +28,7 @@
 #include <kernel/coinstats.h>
 #include <key_io.h>
 #include <logging/timer.h>
+#include <util/signalinterrupt.h>
 #include <net.h>
 #include <net_processing.h>
 #include <node/blockstorage.h>
@@ -2375,7 +2376,12 @@ void InvalidateBlock(ChainstateManager& chainman, const uint256 block_hash) {
     }
     chainman.ActiveChainstate().InvalidateBlock(state, pblockindex);
 
-    if (state.IsValid()) {
+    // InvalidateBlock already honors m_interrupt between disconnects and does
+    // not SyncWithValidationInterfaceQueue while holding m_chainstate_mutex.
+    // Skip ABC on shutdown so invalidateblock cannot start another ExactReplay
+    // after the operator interrupted a deep invalidate. ABC itself is also
+    // interruptible after its first step.
+    if (state.IsValid() && !chainman.m_interrupt) {
         chainman.ActiveChainstate().ActivateBestChain(state);
     }
 
