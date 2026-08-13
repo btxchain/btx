@@ -1941,6 +1941,15 @@ RPCHelpMan getblockchaininfo()
                 {RPCResult::Type::NUM, "verificationprogress", "estimate of verification progress [0..1]"},
                 {RPCResult::Type::BOOL, "initialblockdownload", "(debug information) estimate of whether this node is in Initial Block Download mode"},
                 {RPCResult::Type::STR, "matmulvalidationmode", "MatMul validation tier mode: consensus (independent full node), trusted (operator-trusted signed-quorum mirror), economic (Phase 1 only), or spv"},
+                {RPCResult::Type::OBJ, "matmul_signed_frontier", /*optional=*/true,
+                 "Present when -matmultrustedpubkey is configured. Highest height this node has a current-key quorum for, including hashes it has not fetched. Distinguishes a stranded fork from a paused signer: getmatmulattestedtip.hash only sees HAVE_DATA on this chain.",
+                    {
+                        {RPCResult::Type::NUM, "height", "Highest stored quorum height"},
+                        {RPCResult::Type::STR_HEX, "hash", /*optional=*/true, "Hash recorded for that height, if known"},
+                        {RPCResult::Type::BOOL, "on_active_chain", "Whether that hash is an ancestor of (or is) the active tip"},
+                        {RPCResult::Type::NUM, "on_chain_attested_height", "Highest quorum ancestor of the active tip, or -1 if none"},
+                        {RPCResult::Type::NUM, "blocks_behind", "max(0, height - on_chain_attested_height). Zero on a healthy linear chain; large with on_active_chain=false is a stranded fork"},
+                    }},
                 {RPCResult::Type::STR_HEX, "chainwork", "total amount of work in active chain, in hexadecimal"},
                 {RPCResult::Type::NUM, "size_on_disk", "the estimated size of the block and undo files on disk"},
                 {RPCResult::Type::BOOL, "pruned", "if the blocks are subject to pruning"},
@@ -1996,6 +2005,19 @@ RPCHelpMan getblockchaininfo()
     obj.pushKV("verificationprogress", chainman.GuessVerificationProgress(&tip));
     obj.pushKV("initialblockdownload", chainman.IsInitialBlockDownload());
     obj.pushKV("matmulvalidationmode", MatMulValidationModeToString(chainman.GetMatMulValidationMode()));
+    if (const auto frontier{chainman.GetSignedFrontierStatus()};
+        frontier.available) {
+        UniValue signed_frontier{UniValue::VOBJ};
+        signed_frontier.pushKV("height", frontier.height);
+        if (frontier.hash_known) {
+            signed_frontier.pushKV("hash", frontier.hash.GetHex());
+        }
+        signed_frontier.pushKV("on_active_chain", frontier.on_active_chain);
+        signed_frontier.pushKV(
+            "on_chain_attested_height", frontier.on_chain_attested_height);
+        signed_frontier.pushKV("blocks_behind", frontier.blocks_behind);
+        obj.pushKV("matmul_signed_frontier", std::move(signed_frontier));
+    }
     obj.pushKV("chainwork", tip.nChainWork.GetHex());
     obj.pushKV("size_on_disk", chainman.m_blockman.CalculateCurrentUsage());
     obj.pushKV("pruned", chainman.m_blockman.IsPruneMode());
@@ -4666,8 +4688,10 @@ static RPCHelpMan loadtxoutsetattested()
         "This is a modified assumeutxo path: it does NOT consult "
         "m_assumeutxo_data in chainparams. Strict consensus nodes "
         "(matmulvalidation=consensus) must refuse this RPC.\n\n"
-        "The snapshot base must already be an ancestor of this node's "
-        "best-header chain. Failures leave chainstate untouched.\n\n"
+        "The snapshot base header must already be known. A competing "
+        "most-work headers-only tree (higher claimed chainwork, no "
+        "attestation) does not block the load. Failures leave chainstate "
+        "untouched.\n\n"
         "This call may take several minutes. Use no RPC timeout "
         "(btx-cli -rpcclienttimeout=0).",
         {

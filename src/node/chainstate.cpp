@@ -11,6 +11,7 @@
 #include <kernel/caches.h>
 #include <logging.h>
 #include <node/blockstorage.h>
+#include <node/matmul_trusted_attestations.h>
 #include <sync.h>
 #include <threadsafety.h>
 #include <tinyformat.h>
@@ -132,6 +133,15 @@ static ChainstateLoadResult CompleteChainstateInitialization(
     // it while any candidate set is populated is undefined behavior.
     for (Chainstate* chainstate : chainman.GetAll()) {
         chainstate->PopulateBlockIndexCandidates();
+    }
+
+    // LoadBlockIndex ranks m_best_header by PreferTrustAdjustedHeader. A
+    // configured node that already has an active tip (snapshot or IBD) must
+    // not keep a competing unattested flood as the download target across
+    // restart; RecalculateBestHeader reapplies the tip-chain overlay.
+    if (node::matmul_trusted::IsConfigured() &&
+        chainman.ActiveChain().Tip() != nullptr) {
+        chainman.RecalculateBestHeader();
     }
 
     auto chainstates{chainman.GetAll()};

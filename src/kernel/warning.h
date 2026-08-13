@@ -22,6 +22,11 @@ enum class Warning {
     //! RPC warnings array, the GUI status, and -alertnotify until the process
     //! is restarted with a fully qualified provider.
     MATMUL_RC_NEXT_BLOCK_UNVERIFIABLE,
+    //! Configured node is several blocks behind the highest height it has a
+    //! current-key quorum for (including hashes not on the active chain).
+    //! Distinguishes a stranded fork from a paused signer: getmatmulattestedtip
+    //! hash/on_active_chain only see HAVE_DATA on this node's own chain.
+    MATMUL_BEHIND_SIGNED_FRONTIER,
 };
 } // namespace kernel
 #endif // BITCOIN_KERNEL_WARNING_H

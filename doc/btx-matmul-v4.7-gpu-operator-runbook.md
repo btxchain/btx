@@ -103,11 +103,28 @@ matmultrustedthreshold=1
   quorum, `getdata`-serve them to the signer, cache-and-forward `MMATTEST`,
   and answer `GETMMATTEST` from that cache. Keep `blocksonly=0` so those
   seeds actually see your blocks.
+- `NODE_MATMUL_ATTESTATION_ARCHIVE` is not a signer locator. Competing-tree
+  nodes advertise that bit too. Follow `getmatmulattestedtip` with
+  `on_active_chain=true`, not a peer's service flags.
+- `loadtxoutsetattested`: the snapshot base header must be known. A competing
+  most-work headers-only tree (the 1883xx flood) does **not** block the load
+  and is not a reason to `invalidateblock` or `connect=`-restrict. Do not
+  `preciousblock` that tree.
+- `-matmulvalidation=trusted` only connects past the snapshot when archives
+  can answer `GETMMATTEST` for the canonical suffix. Until the public seed
+  fleet is on this head, use `consensus` (ExactReplay) for that climb;
+  `trusted` after the seeds are upgraded.
 
 `getmatmulattestedtip` is the continuous attested-tip surface. On a quiet
 linear chain the signer typically attests ~1 behind the active tip, so `hash`
-may lag `getbestblockhash` by one block. `getmatmulattestations <hash>` still
-only lists retained signatures for that hash.
+may lag `getbestblockhash` by one block. `hash` / `on_active_chain` only see
+HAVE_DATA on **this** chain: a stranded fork still reports
+`on_active_chain=true` there. Use `getblockchaininfo.matmul_signed_frontier`
+(`blocks_behind`, `on_active_chain`) — also on `getmatmulattestedtip.signed_frontier`
+and every `UpdateTip` line as `signed_frontier=` / `behind=`. A large
+`blocks_behind` with `on_active_chain=false` is a fork, not a paused signer.
+`getmatmulattestations <hash>` still only lists retained signatures for that
+hash.
 
 Until upgraded, a node already on a heavier unattested fork needed
 `invalidateblock` of the first divergent block (deep invalidate deadlocked

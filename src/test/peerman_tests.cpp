@@ -1118,7 +1118,7 @@ BOOST_AUTO_TEST_CASE(trusted_mirror_divergent_tip_follows_authority_headers)
                     /*nLocalHostNonceIn=*/0,
                     CAddress{},
                     /*addrNameIn=*/"authority-divergent",
-                    ConnectionType::OUTBOUND_FULL_RELAY,
+                    ConnectionType::MANUAL,
                     /*inbound_onion=*/false,
                     /*network_key=*/0};
     CNode ordinary{/*id=*/62,

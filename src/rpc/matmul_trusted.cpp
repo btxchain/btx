@@ -210,10 +210,19 @@ RPCHelpMan getmatmulattestedtip()
                 {RPCResult::Type::BOOL, "configured", "Whether a trusted-signer set is configured"},
                 {RPCResult::Type::STR_HEX, "hash", /*optional=*/true, "Attested block hash"},
                 {RPCResult::Type::NUM, "height", /*optional=*/true, "Attested block height"},
-                {RPCResult::Type::BOOL, "on_active_chain", /*optional=*/true, "Whether that block is an ancestor of (or is) the active tip"},
+                {RPCResult::Type::BOOL, "on_active_chain", /*optional=*/true, "Whether that HAVE_DATA attested block is an ancestor of (or is) the active tip"},
                 {RPCResult::Type::BOOL, "active_tip_has_quorum", /*optional=*/true, "Whether the active tip itself currently has quorum"},
                 {RPCResult::Type::STR_HEX, "active_tip_hash", /*optional=*/true, "Active chain tip hash"},
                 {RPCResult::Type::NUM, "active_tip_height", /*optional=*/true, "Active chain tip height"},
+                {RPCResult::Type::OBJ, "signed_frontier", /*optional=*/true,
+                 "Highest stored quorum height, including hashes without HAVE_DATA. A stranded fork keeps hash/on_active_chain healthy while blocks_behind climbs.",
+                    {
+                        {RPCResult::Type::NUM, "height", "Highest stored quorum height"},
+                        {RPCResult::Type::STR_HEX, "hash", /*optional=*/true, "Hash recorded for that height, if known"},
+                        {RPCResult::Type::BOOL, "on_active_chain", "Whether that hash is an ancestor of (or is) the active tip"},
+                        {RPCResult::Type::NUM, "on_chain_attested_height", "Highest quorum ancestor of the active tip, or -1 if none"},
+                        {RPCResult::Type::NUM, "blocks_behind", "max(0, height - on_chain_attested_height)"},
+                    }},
             }},
         RPCExamples{HelpExampleCli("getmatmulattestedtip", "")},
         [](const RPCHelpMan&, const JSONRPCRequest& request) {
@@ -241,6 +250,21 @@ RPCHelpMan getmatmulattestedtip()
                     "on_active_chain",
                     tip != nullptr &&
                         tip->GetAncestor(attested->nHeight) == attested);
+            }
+            if (const auto frontier{chainman.GetSignedFrontierStatus()};
+                frontier.available) {
+                UniValue signed_frontier{UniValue::VOBJ};
+                signed_frontier.pushKV("height", frontier.height);
+                if (frontier.hash_known) {
+                    signed_frontier.pushKV("hash", frontier.hash.GetHex());
+                }
+                signed_frontier.pushKV(
+                    "on_active_chain", frontier.on_active_chain);
+                signed_frontier.pushKV(
+                    "on_chain_attested_height",
+                    frontier.on_chain_attested_height);
+                signed_frontier.pushKV("blocks_behind", frontier.blocks_behind);
+                result.pushKV("signed_frontier", std::move(signed_frontier));
             }
             return result;
         }};

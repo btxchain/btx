@@ -688,6 +688,28 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         /*trusted_mirror_profile1=*/false, /*has_quorum=*/false));
     BOOST_CHECK(!TrustedMirrorMustDeferUnattestedConnect(
         /*trusted_mirror_profile1=*/false, /*has_quorum=*/true));
+    using node::matmul_trusted::TrustedMirrorDeferUnattestedMostWorkForAttestedSibling;
+    BOOST_CHECK(TrustedMirrorDeferUnattestedMostWorkForAttestedSibling(
+        /*trusted_mirror_profile1=*/true, /*candidate_extends_tip=*/true,
+        /*candidate_has_quorum=*/false, /*attested_tip_child_exists=*/true));
+    BOOST_CHECK(!TrustedMirrorDeferUnattestedMostWorkForAttestedSibling(
+        /*trusted_mirror_profile1=*/true, /*candidate_extends_tip=*/true,
+        /*candidate_has_quorum=*/false, /*attested_tip_child_exists=*/false));
+    BOOST_CHECK(!TrustedMirrorDeferUnattestedMostWorkForAttestedSibling(
+        /*trusted_mirror_profile1=*/true, /*candidate_extends_tip=*/true,
+        /*candidate_has_quorum=*/true, /*attested_tip_child_exists=*/true));
+    BOOST_CHECK(!TrustedMirrorDeferUnattestedMostWorkForAttestedSibling(
+        /*trusted_mirror_profile1=*/false, /*candidate_extends_tip=*/true,
+        /*candidate_has_quorum=*/false, /*attested_tip_child_exists=*/true));
+    BOOST_CHECK(!TrustedMirrorDeferUnattestedMostWorkForAttestedSibling(
+        /*trusted_mirror_profile1=*/true, /*candidate_extends_tip=*/false,
+        /*candidate_has_quorum=*/false, /*attested_tip_child_exists=*/true));
+    using node::matmul_trusted::BlocksBehindSignedFrontier;
+    BOOST_CHECK_EQUAL(BlocksBehindSignedFrontier(188160, 187947), 213);
+    BOOST_CHECK_EQUAL(BlocksBehindSignedFrontier(187947, 187947), 0);
+    BOOST_CHECK_EQUAL(BlocksBehindSignedFrontier(187946, 187947), 0);
+    BOOST_CHECK_EQUAL(BlocksBehindSignedFrontier(-1, 187947), 0);
+    BOOST_CHECK_EQUAL(BlocksBehindSignedFrontier(188160, -1), 0);
     BOOST_CHECK(TrustedMirrorPreferGetMmAttest(
         /*active_tip_child=*/true, /*short_tip_reorg_missing_root=*/false));
     BOOST_CHECK(TrustedMirrorPreferGetMmAttest(

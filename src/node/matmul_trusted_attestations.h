@@ -217,6 +217,44 @@ static constexpr int TRUSTED_MIRROR_ATTESTED_TIP_LOOKBACK{2};
     return trusted_mirror_profile1 && !has_quorum;
 }
 
+/** FindMostWorkChain overlay for trusted Profile-1 mirrors.
+ *
+ *  Tip-children stay selectable (HAVE_DATA chicken-egg), but ConnectTip
+ *  defers any unattested one. If that unattested child is also the heaviest
+ *  candidate, ActivateBestChain stops on quorum Timeout and never tries an
+ *  attested sibling already in the set. Live 2026-08-14 fra1: tip 187931,
+ *  attested a18786b0 at 187932, ABC looping 39c12144 (unattested twin) so
+ *  advertised seed height froze while the signer kept moving.
+ *
+ *  Defer the unattested most-work child only when an attested tip-chain
+ *  alternative exists. If it is the only child, keep current wait-for-quorum
+ *  behavior. Consensus+pubkey nodes ExactReplay and must not use this. */
+[[nodiscard]] inline bool TrustedMirrorDeferUnattestedMostWorkForAttestedSibling(
+    bool trusted_mirror_profile1,
+    bool candidate_extends_tip,
+    bool candidate_has_quorum,
+    bool attested_tip_child_exists)
+{
+    return trusted_mirror_profile1 && candidate_extends_tip &&
+           !candidate_has_quorum && attested_tip_child_exists;
+}
+
+/** Height gap between the signed frontier (any stored quorum, including
+ *  hashes this node has not fetched) and the highest quorum ancestor of
+ *  the active tip. Zero on a healthy linear chain (signer ~1 behind the
+ *  tip still yields 0: both sides sit at the last attested height). A
+ *  stranded fork that never fetched the other chain's bodies still
+ *  climbs this when MMATTEST arrives. */
+[[nodiscard]] inline int32_t BlocksBehindSignedFrontier(
+    int32_t signed_frontier_height,
+    int32_t on_chain_attested_height)
+{
+    if (signed_frontier_height < 0 || on_chain_attested_height < 0) {
+        return 0;
+    }
+    return std::max(0, signed_frontier_height - on_chain_attested_height);
+}
+
 /** Preferred GETMMATTEST work on a trusted mirror: the ActiveTip child, or
  *  the missing root of a short tip-race reorg (sibling of tip / first hole
  *  on the authority peer's best-known). Competing headers at 1879xx are

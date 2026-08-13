@@ -8972,8 +8972,17 @@ static void UpdateTipLog(
 
     AssertLockHeld(::cs_main);
 
+    std::string frontier_suffix;
+    const auto frontier{chainman.GetSignedFrontierStatus()};
+    if (frontier.available) {
+        frontier_suffix = strprintf(
+            " signed_frontier=%d behind=%d on_active_chain=%s",
+            frontier.height, frontier.blocks_behind,
+            frontier.on_active_chain ? "true" : "false");
+    }
+
     // Disable rate limiting in LogPrintLevel_ so this source location may log during IBD.
-    LogPrintLevel_(BCLog::LogFlags::ALL, BCLog::Level::Info, /*should_ratelimit=*/false, "%s%s: new best=%s height=%d version=0x%08x log2_work=%f tx=%lu date='%s' progress=%f cache=%.1fMiB(%utxo)%s\n",
+    LogPrintLevel_(BCLog::LogFlags::ALL, BCLog::Level::Info, /*should_ratelimit=*/false, "%s%s: new best=%s height=%d version=0x%08x log2_work=%f tx=%lu date='%s' progress=%f cache=%.1fMiB(%utxo)%s%s\n",
                    prefix, func_name,
                    tip->GetBlockHash().ToString(), tip->nHeight, tip->nVersion,
                    log(tip->nChainWork.getdouble()) / log(2.0), tip->m_chain_tx_count,
@@ -8981,7 +8990,8 @@ static void UpdateTipLog(
                    chainman.GuessVerificationProgress(tip),
                    coins_tip.DynamicMemoryUsage() * (1.0 / (1 << 20)),
                    coins_tip.GetCacheSize(),
-                   !warning_messages.empty() ? strprintf(" warning='%s'", warning_messages) : "");
+                   !warning_messages.empty() ? strprintf(" warning='%s'", warning_messages) : "",
+                   frontier_suffix);
 }
 
 void Chainstate::UpdateTip(const CBlockIndex* pindexNew)
@@ -9077,6 +9087,7 @@ void Chainstate::UpdateTip(const CBlockIndex* pindexNew)
 
     UpdateTipLog(m_chainman, coins_tip, pindexNew, __func__, "",
                  util::Join(warning_messages, Untranslated(", ")).original);
+    m_chainman.NotifySignedFrontierStatus();
 }
 
 /** Disconnect m_chain's tip.
@@ -9517,6 +9528,53 @@ CBlockIndex* Chainstate::FindMostWorkChain()
                      pindexNew->GetBlockHash().ToString(), pindexNew->nHeight);
             setBlockIndexCandidates.erase(pindexNew);
             continue;
+        }
+
+        // Trusted mirrors: do not let an unattested tip-child win most-work
+        // over an attested sibling. ConnectTip would defer it and ABC would
+        // stop, freezing the advertised height at the parent.
+        if (node::matmul_trusted::IsTrustedMirror() &&
+            m_chainman.GetMatMulValidationMode() ==
+                kernel::MatMulValidationMode::TRUSTED &&
+            m_chain.Tip() != nullptr &&
+            m_chainman.GetConsensus().IsMatMulTrustedReplayAttestationActive(
+                pindexNew->nHeight)) {
+            const CBlockIndex* const tip{m_chain.Tip()};
+            const bool extends_tip{
+                pindexNew->nHeight >= tip->nHeight &&
+                pindexNew->GetAncestor(tip->nHeight) == tip};
+            const bool has_quorum{node::matmul_trusted::HasQuorum(
+                pindexNew->GetBlockHash(), pindexNew->nHeight)};
+            bool attested_tip_child_exists{false};
+            if (extends_tip && !has_quorum) {
+                for (CBlockIndex* alt : setBlockIndexCandidates) {
+                    if (alt == pindexNew) continue;
+                    if ((alt->nStatus & BLOCK_HAVE_DATA) == 0) continue;
+                    if ((alt->nStatus & BLOCK_FAILED_MASK) != 0) continue;
+                    if (alt->nHeight < tip->nHeight ||
+                        alt->GetAncestor(tip->nHeight) != tip) {
+                        continue;
+                    }
+                    if (node::matmul_trusted::HasQuorum(
+                            alt->GetBlockHash(), alt->nHeight)) {
+                        attested_tip_child_exists = true;
+                        break;
+                    }
+                }
+            }
+            if (node::matmul_trusted::TrustedMirrorDeferUnattestedMostWorkForAttestedSibling(
+                    /*trusted_mirror_profile1=*/true,
+                    extends_tip,
+                    has_quorum,
+                    attested_tip_child_exists)) {
+                LogDebug(BCLog::VALIDATION,
+                         "FindMostWorkChain: deferring unattested tip-child hash=%s height=%d; attested sibling is in the candidate set\n",
+                         pindexNew->GetBlockHash().ToString(),
+                         pindexNew->nHeight);
+                setBlockIndexCandidates.erase(pindexNew);
+                hysteresis_deferred_candidates.push_back(pindexNew);
+                continue;
+            }
         }
 
         // Check whether all blocks on the path between the currently active chain and the candidate are valid.
@@ -10743,6 +10801,97 @@ bool BlockIndexDescends(const CBlockIndex* block, const CBlockIndex* ancestor)
 }
 
 } // namespace
+
+ChainstateManager::SignedFrontierStatus ChainstateManager::GetSignedFrontierStatus() const
+{
+    AssertLockHeld(::cs_main);
+    SignedFrontierStatus out;
+    if (!node::matmul_trusted::IsConfigured() || m_active_chainstate == nullptr) {
+        return out;
+    }
+    const auto frontier_height{node::matmul_trusted::HighestAttestedHeight()};
+    if (!frontier_height.has_value()) {
+        return out;
+    }
+    out.available = true;
+    out.height = *frontier_height;
+    for (const auto& hint : node::matmul_trusted::AttestedFrontierHints()) {
+        if (hint.height == out.height && !hint.hash.IsNull()) {
+            out.hash = hint.hash;
+            out.hash_known = true;
+            break;
+        }
+    }
+    const CBlockIndex* const tip{m_active_chainstate->m_chain.Tip()};
+    if (tip != nullptr) {
+        for (const CBlockIndex* p{tip}; p != nullptr; p = p->pprev) {
+            if (node::matmul_trusted::HasQuorum(
+                    p->GetBlockHash(), p->nHeight)) {
+                out.on_chain_attested_height = p->nHeight;
+                break;
+            }
+        }
+        if (out.hash_known) {
+            const CBlockIndex* const frontier_index{
+                m_blockman.LookupBlockIndex(out.hash)};
+            out.on_active_chain =
+                frontier_index != nullptr &&
+                tip->nHeight >= frontier_index->nHeight &&
+                tip->GetAncestor(frontier_index->nHeight) == frontier_index;
+        } else if (out.on_chain_attested_height == out.height) {
+            // Height-only: cannot prove a fork at equal height.
+            out.on_active_chain = true;
+        }
+    }
+    out.blocks_behind = node::matmul_trusted::BlocksBehindSignedFrontier(
+        out.height, out.on_chain_attested_height);
+    return out;
+}
+
+void ChainstateManager::NotifySignedFrontierStatus()
+{
+    AssertLockHeld(::cs_main);
+    const SignedFrontierStatus st{GetSignedFrontierStatus()};
+    if (!st.available || st.blocks_behind < 6) {
+        GetNotifications().warningUnset(
+            kernel::Warning::MATMUL_BEHIND_SIGNED_FRONTIER);
+    } else {
+        const bilingual_str warning{strprintf(
+            _("Warning: this node is %d blocks behind the signed MatMul "
+              "frontier (height %d%s). getmatmulattestedtip.hash only reflects "
+              "HAVE_DATA on this chain; a stranded fork reports "
+              "on_active_chain=true there. See "
+              "getblockchaininfo.matmul_signed_frontier."),
+            st.blocks_behind,
+            st.height,
+            st.hash_known ? strprintf(", hash %s", st.hash.ToString()) : "")};
+        GetNotifications().warningSet(
+            kernel::Warning::MATMUL_BEHIND_SIGNED_FRONTIER, warning,
+            /*update=*/true);
+    }
+    if (st.available && st.blocks_behind >= 2) {
+        static int32_t last_behind{-1};
+        static bool last_on_chain{true};
+        static std::chrono::steady_clock::time_point last_log{};
+        const auto now{std::chrono::steady_clock::now()};
+        const bool changed{
+            st.blocks_behind != last_behind ||
+            st.on_active_chain != last_on_chain};
+        if (changed || last_log.time_since_epoch().count() == 0 ||
+            now - last_log >= std::chrono::seconds{30}) {
+            LogInfo("signed frontier height=%d hash=%s on_active_chain=%s "
+                    "behind=%d on_chain_attested_height=%d\n",
+                    st.height,
+                    st.hash_known ? st.hash.ToString() : "unknown",
+                    st.on_active_chain ? "true" : "false",
+                    st.blocks_behind,
+                    st.on_chain_attested_height);
+            last_behind = st.blocks_behind;
+            last_on_chain = st.on_active_chain;
+            last_log = now;
+        }
+    }
+}
 
 const CBlockIndex* ChainstateManager::FindBestKnownAttestedIndex() const
 {
@@ -12841,39 +12990,46 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
         LogDebug(BCLog::VALIDATION, "%s: not adding new block header %s, missing anti-dos proof-of-work validation\n", __func__, hash.ToString());
         return state.Invalid(BlockValidationResult::BLOCK_HEADER_LOW_WORK, "too-little-chainwork");
     }
+    CBlockIndex* const prev_best{m_best_header};
     CBlockIndex* pindex{m_blockman.AddToBlockIndex(block, m_best_header)};
 
-    // Trusted mirrors: PreferTrustAdjustedHeader carries a bounded unauth
-    // allowance, but ordinary competing forks must still not freeze headers on
-    // unattestable spam. Advance m_best_header here only along active-tip
-    // extensions that are not parked. Competing better-work branches are
-    // followed only from attestation-authority peers in net_processing (peer
-    // context is unavailable here). Blocks still require M-of-N quorum.
-    if (node::matmul_trusted::IsTrustedMirror() && pindex != nullptr) {
+    // PreferTrustAdjustedHeader's unauth allowance is denominated in the
+    // candidate's own nBits. A high-difficulty stale fork (live 1883xx)
+    // therefore outranks the ASERT-floor attested suffix, and AddToBlockIndex
+    // writes that into m_best_header. Configured nodes (trusted mirrors and
+    // consensus+pubkey) must not keep that choice: competing better-work
+    // branches are followed only from attestation-authority peers in
+    // net_processing. Blocks still require M-of-N quorum.
+    if (node::matmul_trusted::IsConfigured() && pindex != nullptr) {
         const CBlockIndex* tip{ActiveChain().Tip()};
         if (tip != nullptr) {
             const bool extends_tip{
                 pindex->nHeight >= tip->nHeight &&
                 pindex->GetAncestor(tip->nHeight) == tip};
-            const bool current_extends_tip{
-                m_best_header != nullptr &&
-                m_best_header->nHeight >= tip->nHeight &&
-                m_best_header->GetAncestor(tip->nHeight) == tip};
-            const bool extends_current{
-                m_best_header != nullptr &&
-                pindex->nHeight > m_best_header->nHeight &&
-                pindex->GetAncestor(m_best_header->nHeight) == m_best_header};
+            const bool prev_extends_tip{
+                prev_best != nullptr &&
+                prev_best->nHeight >= tip->nHeight &&
+                prev_best->GetAncestor(tip->nHeight) == tip};
+            const bool extends_prev{
+                prev_best != nullptr &&
+                pindex->nHeight > prev_best->nHeight &&
+                pindex->GetAncestor(prev_best->nHeight) == prev_best};
             if (node::matmul_trusted::PreferTrustedMirrorTipChainHeader({
                     .extends_active_tip_chain = extends_tip,
                     .on_parked_reorg_branch = IsOnParkedReorgBranch(pindex),
                     .candidate_height = pindex->nHeight,
                     .tip_height = tip->nHeight,
                     .current_best_height =
-                        m_best_header ? m_best_header->nHeight : -1,
-                    .current_best_extends_tip = current_extends_tip,
-                    .candidate_extends_current_best = extends_current,
+                        prev_best ? prev_best->nHeight : -1,
+                    .current_best_extends_tip = prev_extends_tip,
+                    .candidate_extends_current_best = extends_prev,
                 })) {
                 SetBestHeader(pindex);
+            } else if (m_best_header == pindex && prev_best != nullptr &&
+                       prev_best != pindex) {
+                // Undo only this AddToBlockIndex promotion. Do not snap an
+                // authority-followed short reorg back to ActiveTip().
+                SetBestHeader(prev_best);
             }
         }
     }
@@ -14550,6 +14706,40 @@ bool IsAssumeUtxoSnapshotHeaderCompatible(
            snapshot_start_block->nChainWork > best_header->nAuthenticatedChainWork;
 }
 
+bool IsAttestedSnapshotHeaderCompatible(
+    const CBlockIndex* best_header,
+    const CBlockIndex* snapshot_start_block)
+{
+    if (best_header == nullptr || snapshot_start_block == nullptr) {
+        return false;
+    }
+    if ((snapshot_start_block->nStatus & BLOCK_FAILED_MASK) != 0) {
+        return false;
+    }
+    if (best_header->nHeight >= snapshot_start_block->nHeight) {
+        if (best_header->GetAncestor(snapshot_start_block->nHeight) ==
+            snapshot_start_block) {
+            return true;
+        }
+    } else if (snapshot_start_block->GetAncestor(best_header->nHeight) ==
+               best_header) {
+        return true;
+    }
+    // Live 2026-08-14: competing 1883xx has more claimed work than attested
+    // 187798, so m_best_header is the flood. The snapshot manifest already
+    // authenticated the base. Refuse only if the competing header itself
+    // carries a quorum or extra authenticated work past the fork.
+    const CBlockIndex* fork{
+        LastCommonAncestor(best_header, snapshot_start_block)};
+    if (fork == nullptr) return false;
+    if (node::matmul_trusted::HasQuorum(
+            best_header->GetBlockHash(), best_header->nHeight)) {
+        return false;
+    }
+    return best_header->nAuthenticatedChainWork <=
+           fork->nAuthenticatedChainWork;
+}
+
 util::Result<CBlockIndex*> ChainstateManager::ActivateSnapshot(
         AutoFile& coins_file,
         const SnapshotMetadata& metadata,
@@ -14621,17 +14811,17 @@ util::Result<CBlockIndex*> ChainstateManager::ActivateSnapshot(
             if (attested_au->m_chain_tx_count == 0 && snapshot_start_block->nHeight > 0) {
                 return util::Error{Untranslated("Attested assumeutxo m_chain_tx_count must be non-zero above genesis")};
             }
-            // Conservative LionHeart-era policy: attested fast-forward may only
-            // land on the chain we already consider best-header. Never use the
-            // compiled-in assumeutxo "more work than authenticated headers"
-            // escape hatch here — that would turn a stolen signer key into a
-            // silent branch-switch lever.
-            if (!m_best_header ||
-                m_best_header->nHeight < snapshot_start_block->nHeight ||
-                m_best_header->GetAncestor(snapshot_start_block->nHeight) !=
-                    snapshot_start_block) {
+            // Attested fast-forward is authenticated by the snapshot manifest,
+            // not by claimed-heaviest m_best_header. A competing 1883xx
+            // headers-only tree must not strand loadtxoutsetattested. Two
+            // attested histories, or a competing suffix that already has
+            // authenticated work, still refuse.
+            if (!IsAttestedSnapshotHeaderCompatible(
+                    m_best_header, snapshot_start_block)) {
                 return util::Error{Untranslated(
-                    "Attested snapshot base must be an ancestor of the current best-header chain")};
+                    "Attested snapshot base is incompatible with the current "
+                    "best-header chain (competing header is attested or has "
+                    "authenticated work past the fork)")};
             }
             if (IsOnParkedReorgBranch(snapshot_start_block)) {
                 return util::Error{Untranslated(
@@ -14805,18 +14995,18 @@ util::Result<CBlockIndex*> ChainstateManager::ActivateSnapshot(
 
     LOCK(::cs_main);  // cs_main required for rest of snapshot activation.
 
-    // Snapshot deserialization can be lengthy. Recheck the authenticated-header predicate under the
-    // final activation lock so a competing branch that completed body validation while the file was
-    // being loaded cannot race the initial check. RecalculateBestHeader publishes such work even if
-    // ActivateBestChain has not yet made that branch ActiveTip().
-    // Attested loads keep the stricter ancestry-only rule (no compiled-in work escape hatch).
+    // Snapshot deserialization can be lengthy. Recheck under the final
+    // activation lock so a competing branch that completed body validation
+    // while the file was being loaded cannot race the initial check.
+    // Attested loads use IsAttestedSnapshotHeaderCompatible (competing
+    // unauthenticated most-work is not a veto).
     if (attested_au) {
-        if (!m_best_header ||
-            m_best_header->nHeight < snapshot_start_block->nHeight ||
-            m_best_header->GetAncestor(snapshot_start_block->nHeight) !=
-                snapshot_start_block) {
+        if (!IsAttestedSnapshotHeaderCompatible(
+                m_best_header, snapshot_start_block)) {
             return cleanup_bad_snapshot(Untranslated(
-                "Attested snapshot base must be an ancestor of the current best-header chain"));
+                "Attested snapshot base is incompatible with the current "
+                "best-header chain (competing header is attested or has "
+                "authenticated work past the fork)"));
         }
         if (IsOnParkedReorgBranch(snapshot_start_block)) {
             return cleanup_bad_snapshot(Untranslated(
@@ -14967,6 +15157,14 @@ util::Result<CBlockIndex*> ChainstateManager::ActivateSnapshot(
         chainstate->PopulateBlockIndexCandidates();
     }
     candidate_sets_cleared = false;
+
+    // LoadBlockIndex / AddToBlockIndex may have left m_best_header on a
+    // claimed-heaviest 1883xx flood. Configured nodes must chase the snapshot
+    // tip-chain (and any already-known attested suffix) rather than that
+    // flood, or IBD downloads the competing tree after a successful load.
+    if (node::matmul_trusted::IsConfigured()) {
+        RecalculateBestHeader();
+    }
 
     LogPrintf("[snapshot] successfully activated snapshot %s\n", base_blockhash.ToString());
     LogPrintf("[snapshot] (%.2f MB)\n",
@@ -18900,7 +19098,7 @@ void ChainstateManager::RecalculateBestHeader()
     AssertLockHeld(cs_main);
     const CBlockIndex* const active_tip{ActiveChain().Tip()};
     SetBestHeader(ActiveChain().Tip());
-    if (!node::matmul_trusted::IsTrustedMirror() || active_tip == nullptr) {
+    if (!node::matmul_trusted::IsConfigured() || active_tip == nullptr) {
         for (auto& entry : m_blockman.m_block_index) {
             if (entry.second.nStatus & BLOCK_FAILED_MASK) continue;
             // Authenticated-work selection with a bounded unauth allowance: a short
@@ -18914,12 +19112,11 @@ void ChainstateManager::RecalculateBestHeader()
     }
 
     // Recalculation runs after load/invalidate/reconsider and has no peer
-    // provenance. Preserve the live mirror predicate: ordinary headers may
-    // only advance the active-tip branch, while a competing branch requires a
-    // current-config M-of-N quorum on itself or an ancestor. This prevents an
-    // unordered generic rescan from following unattestable fork spam or from
-    // silently pinning m_best_header back to the losing active sibling after
-    // the authority branch was already accepted and persisted.
+    // provenance. Preserve the live configured-node predicate: ordinary
+    // headers may only advance the active-tip branch, while a competing
+    // branch requires a current-config M-of-N quorum on itself or an
+    // ancestor. This prevents an unordered generic rescan from following
+    // unattestable fork spam.
     CBlockIndex* authority_best{nullptr};
     for (auto& [_, candidate] : m_blockman.m_block_index) {
         if ((candidate.nStatus & BLOCK_FAILED_MASK) ||

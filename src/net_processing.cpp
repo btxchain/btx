@@ -13492,15 +13492,16 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 m_chainman.ActiveChain().Contains(index);
             const CBlockIndex* const tip{m_chainman.ActiveTip()};
             const CBlockIndex* const followed{m_chainman.m_best_header};
-            const bool tip_child{
-                tip != nullptr && index->pprev == tip};
+            const bool on_active_suffix{
+                tip != nullptr && index->nHeight >= tip->nHeight &&
+                index->GetAncestor(tip->nHeight) == tip};
             // Serve cached signatures for the active chain, a stored
-            // unconnected tip-child (archives persist HAVE_DATA before
-            // quorum), or a tip-extending header on the followed chain.
-            // Never serve a competing off-tip rewrite (m_best_header of the
-            // 137-deep heavier branch is not "followed").
+            // unconnected tip-child, or any header that extends the active
+            // tip. m_best_header of the competing 1883xx tree is not
+            // "followed" and must not make canonical suffix hashes
+            // not_canonical (live: GETMMATTEST 187895 while tip is 187800).
             on_our_followed_chain =
-                on_active_chain || tip_child ||
+                on_active_chain || on_active_suffix ||
                 (tip != nullptr && followed != nullptr &&
                  followed->GetAncestor(tip->nHeight) == tip &&
                  index->nHeight >= tip->nHeight &&
@@ -13837,6 +13838,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                                  "MMATTEST quorum block=%s height=%d\n",
                                  hash.ToString(), expected_height);
                     }
+                    m_chainman.NotifySignedFrontierStatus();
                 }
                 wake_block_fetch = true;
                 // Wake any parked trusted-mirror verify job. Do this outside
