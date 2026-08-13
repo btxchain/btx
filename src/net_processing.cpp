@@ -1021,6 +1021,7 @@ public:
 
     /** Implement PeerManager */
     void StartScheduledTasks(CScheduler& scheduler) override;
+    void StopBackgroundWorkers() override;
     void CheckForStaleTipAndEvictPeers() override;
     std::optional<std::string> FetchBlock(NodeId peer_id, const uint256& hash, const CBlockIndex* block_index) override
         EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
@@ -3457,6 +3458,30 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
         return;
     }
 
+    // Consensus / archive catch-up: do not fill the download window with
+    // unfollowed competing bodies. Park is the acceptance policy; fetching
+    // those headers-only forks occupies inflight (production: 9–16) and
+    // then FindNextBlocks aborts on root_budget_deferred for the one
+    // authenticated-tip child we actually need. Mirrors keep their
+    // authority / followed-header exceptions above.
+    if (!node::matmul_trusted::IsTrustedMirror() && tip != nullptr &&
+        state->pindexBestKnownBlock != nullptr) {
+        const bool extends_tip{
+            state->pindexBestKnownBlock->GetAncestor(tip->nHeight) == tip};
+        if (!extends_tip) {
+            const bool recovery_target{
+                recovery.phase == ChainRecoveryPhase::RECOVERING_REORG &&
+                recovery.followed_target != nullptr &&
+                state->pindexBestKnownBlock->GetAncestor(
+                    recovery.followed_target->nHeight) ==
+                    recovery.followed_target};
+            if (!recovery_target) {
+                log_skip("competing_not_active_tip_chain");
+                return;
+            }
+        }
+    }
+
     // Download eligibility uses CLAIMED nChainWork only (mirror and consensus).
     // Trust-adjusted work is for preference/acceptance, not fetch: bodies are
     // self-validating, and this path is SELF-HEALING (earliest-first from the
@@ -3738,14 +3763,31 @@ void PeerManagerImpl::FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, c
                 // map is empty they must not block the only needed body —
                 // that is the production idle stall (in_flight_global=0
                 // while headers sit ahead, then a burst that looks like a
-                // deep reorg).
-                if (!mapBlocksInFlight.empty()) {
+                // deep reorg). A hole that extends the authenticated tip
+                // is the same work even when competing-fork getdata has
+                // already filled inflight: aborting here is the
+                // root_budget_deferred stall (missing_height on the
+                // followed chain, in_flight_global=9).
+                const CBlockIndex* const tip{
+                    activeChain != nullptr ? activeChain->Tip() : nullptr};
+                const bool tip_chain_needed{
+                    tip != nullptr &&
+                    pindex->GetAncestor(tip->nHeight) == tip};
+                if (!mapBlocksInFlight.empty() && !tip_chain_needed) {
                     return;
                 }
-                LogDebug(BCLog::NET,
-                         "Idle catch-up: requesting budget-deferred block %s "
-                         "height=%d (in_flight_global=0)\n",
-                         pindex->GetBlockHash().ToString(), pindex->nHeight);
+                if (mapBlocksInFlight.empty()) {
+                    LogDebug(BCLog::NET,
+                             "Idle catch-up: requesting budget-deferred block %s "
+                             "height=%d (in_flight_global=0)\n",
+                             pindex->GetBlockHash().ToString(), pindex->nHeight);
+                } else {
+                    LogDebug(BCLog::NET,
+                             "Catch-up: requesting budget-deferred tip-chain "
+                             "block %s height=%d despite in_flight_global=%d\n",
+                             pindex->GetBlockHash().ToString(), pindex->nHeight,
+                             static_cast<int>(mapBlocksInFlight.size()));
+                }
             }
 
             // Same reasoning for a body THIS PEER deferred for want of an RC
@@ -5107,13 +5149,17 @@ PeerManagerImpl::PeerManagerImpl(CConnman& connman, AddrMan& addrman,
 
 PeerManagerImpl::~PeerManagerImpl()
 {
+    StopBackgroundWorkers();
+}
+
+void PeerManagerImpl::StopBackgroundWorkers()
+{
     m_stopping.store(true, std::memory_order_release);
     // Stop the async verify worker FIRST: queued jobs are destroyed without
     // running completions (their RAII slot captures release
-    // m_matmul_pending_verifications), in-flight jobs are joined. This runs
-    // before the rest of the members (and, at the init.cpp level, before
-    // chainman/connman teardown), so no worker thread outlives the state its
-    // completions touch.
+    // m_matmul_pending_verifications), in-flight jobs are joined. Call this
+    // from Shutdown while the validation scheduler is still running so
+    // ProcessBlockSync / ActivateBestChain can drain the queue.
     if (m_matmul_verify_worker) m_matmul_verify_worker->Stop();
     StopHistoricalAttestationReverify();
 }
@@ -9665,8 +9711,29 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
     // MAX_BLOCKS_IN_TRANSIT_PER_PEER and BLOCK_DOWNLOAD_WINDOW, still consume
     // the pending/global work budgets, and still earn no chainwork credit until
     // ExactReplay succeeds. The ticket requirement is retained in full for
-    // UNSOLICITED bodies, which is the case it was designed for.
+    // unsolicited bodies at a live tip and for competing-fork pushes.
+    // During catch-up, inbound miners push our-chain bodies with
+    // forceProcessing=false and no near-tip ticket — requiring rcadmit
+    // there drops the only copy as HEADER_ONLY. Do not treat competing
+    // headers-ahead as catch-up for this exemption: m_best_header can sit
+    // on a parked heavier fork while the authenticated tip is current.
+    bool extends_active_tip{false};
+    {
+        LOCK(cs_main);
+        const CBlockIndex* const tip{m_chainman.ActiveChain().Tip()};
+        if (tip != nullptr && block.hashPrevBlock == tip->GetBlockHash()) {
+            extends_active_tip = true;
+        } else {
+            const CBlockIndex* prev{
+                m_chainman.m_blockman.LookupBlockIndex(block.hashPrevBlock)};
+            extends_active_tip = prev != nullptr &&
+                                 m_chainman.ActiveChain().Contains(prev);
+        }
+    }
     const bool requested_body = force_processing;
+    const bool catchup_inbound_push =
+        is_ibd && node.IsInboundConn() && extends_active_tip;
+    const bool ticket_exempt = requested_body || catchup_inbound_push;
     std::optional<node::RCAdmissionTicket> accepted_ticket;
     const auto restore_accepted_ticket = [&] {
         if (!accepted_ticket) return;
@@ -9677,7 +9744,7 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
         accepted_ticket.reset();
     };
     if (rc_profile && m_opts.matmul_rc_admission &&
-        !requested_body &&
+        !ticket_exempt &&
         !node.HasPermission(NetPermissionFlags::NoBan) &&
         (!m_matmul_verify_worker ||
          !m_matmul_verify_worker->Contains(block_hash))) {

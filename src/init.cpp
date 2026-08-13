@@ -375,6 +375,11 @@ void Shutdown(NodeContext& node)
 
     if (node.background_init_thread.joinable()) node.background_init_thread.join();
     if (node.autoupdate) node.autoupdate->Stop();
+    // Join MatMul verify workers while the scheduler is still running.
+    // Completions call ProcessBlockSync → ActivateBestChain →
+    // SyncWithValidationInterfaceQueue. Stopping the scheduler first
+    // deadlocks b-shutoff against b-mmverify and skips PersistShieldedState.
+    if (node.peerman) node.peerman->StopBackgroundWorkers();
     // After everything has been shut down, but before things get flushed, stop the
     // the scheduler. After this point, SyncWithValidationInterfaceQueue() should not be called anymore
     // as this would prevent the shutdown from completing.

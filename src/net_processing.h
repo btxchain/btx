@@ -229,6 +229,14 @@ public:
     /** Begin running background tasks, should only be called once */
     virtual void StartScheduledTasks(CScheduler& scheduler) = 0;
 
+    /**
+     * Join the MatMul verify worker while the validation scheduler is still
+     * running. In-flight completions call ProcessBlockSync / ActivateBestChain,
+     * which drain the scheduler queue. Stopping the scheduler first deadlocks
+     * b-shutoff vs b-mmverify and skips PersistShieldedState.
+     */
+    virtual void StopBackgroundWorkers() = 0;
+
     /** Get statistics from node state */
     virtual bool GetNodeStateStats(NodeId nodeid, CNodeStateStats& stats) const = 0;
     virtual void LimitOrphanTxSize(uint32_t nMaxOrphans) = 0;
