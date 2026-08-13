@@ -2475,6 +2475,11 @@ void PeerManagerImpl::UnmarkMatMulAsyncVerification(
 
 void PeerManagerImpl::UnmarkMatMulAsyncVerification(const uint256& hash)
 {
+    // Hash-only reclaim must expire a live Begin that never retained a body
+    // (GETMMATTEST / stale marker). RetryInactive cannot mutate a live
+    // generation, so without this the marker blocks FindNextBlocks until the
+    // 10-minute stale timeout.
+    if (m_matmul_block_lifecycle.ExpireActiveWithoutBody(hash)) return;
     (void)m_matmul_block_lifecycle.RetryInactive(
         hash, MATMUL_BUDGET_DEFER_COOLDOWN);
 }
@@ -3644,8 +3649,11 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
             !MayDuplicateStaleBlockRequest(root_first.lowest_missing->GetBlockHash(),
                                            now_for_diag)) {
             select_reason = "root_in_flight";
-        } else if (IsMatMulAsyncVerificationPending(
-                       root_first.lowest_missing->GetBlockHash())) {
+        } else if (m_matmul_block_lifecycle.ShouldSkipFetchWhileAsyncPending(
+                       root_first.lowest_missing->GetBlockHash(),
+                       (root_first.lowest_missing->nStatus & BLOCK_HAVE_DATA) != 0)) {
+            // Async-pending is a VERIFY state. ShouldSkipFetch reclaims a
+            // no-body marker and returns false so this stays request_root.
             select_reason = "root_async_pending";
         } else if (IsMatMulBudgetDeferred(root_first.lowest_missing->GetBlockHash(),
                                           now_for_diag)) {
@@ -3833,23 +3841,27 @@ void PeerManagerImpl::FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, c
             }
 
             // Receipt removes the ordinary download-in-flight entry before an
-            // asynchronous ENC-DR/LT predicate has finished.  Treat that pure
-            // verification as an in-flight state too.  Otherwise this loop
-            // requests the same body again on every message-handler pass,
-            // filling the verify queue with duplicate Q*-scale jobs and
-            // producing an unbounded getdata/block busy loop.
+            // asynchronous ENC-DR/LT predicate has finished.  A live attempt
+            // that already has the body (HAVE_DATA, or a retained body after
+            // reclaim fails) is still a VERIFY state: skip duplicate getdata.
+            // A marker WITHOUT a body is not. GETMMATTEST / lifecycle Begin
+            // can leave ADMISSION_PENDING with nothing to verify; treating
+            // that as in-flight skipped getdata until the 10-minute stale
+            // timeout (production: attested snapshot at H, headers H+1 known,
+            // in_flight_global=0, select=root_async_pending, never getdata
+            // the canonical child). Never skip DOWNLOAD of a body we do not
+            // have.
             if (IsMatMulAsyncVerificationPending(pindex->GetBlockHash())) {
-            // Do NOT schedule successors past the FIRST missing body. A block
-            // held back here cannot connect, so everything after it is
-            // unusable until it arrives -- but fetching those successors
-            // consumes in-flight slots and the same global MatMul verify
-            // budget that the held block needs, which is what keeps tip+1
-            // "in flight from nobody" while the node looks busy with dozens of
-            // requests. Observed on mainnet 2026-08-11: 26 successor blocks in
-            // flight across 82 peers while the one needed block was requested
-            // from no one. If we have not queued anything yet, this gap IS the
-            // work; yield and retry once it clears.
-                return;
+                const bool have_data{
+                    (pindex->nStatus & BLOCK_HAVE_DATA) != 0};
+                if (m_matmul_block_lifecycle.ShouldSkipFetchWhileAsyncPending(
+                        pindex->GetBlockHash(), have_data)) {
+                    return;
+                }
+                LogDebug(BCLog::NET,
+                         "Reclaimed stale MatMul async-pending marker without "
+                         "body for %s height=%d; requesting download\n",
+                         pindex->GetBlockHash().ToString(), pindex->nHeight);
             }
 
             // Deferred for MatMul verification budget: wait for the window to

@@ -972,4 +972,159 @@ BOOST_FIXTURE_TEST_CASE(chainstate_warn_profile_deep_reorg_follows_most_work, Te
     BOOST_CHECK(saw_deep_reorg_warning);
 }
 
+//! FindMostWorkChain erases unattested competing HAVE_DATA tips from
+//! setBlockIndexCandidates on a trusted mirror (intentional gate). CheckBlockIndex
+//! must not require those blocks back into the set. Parked branches stay exempt,
+//! and a tip-extending child remains a candidate.
+BOOST_FIXTURE_TEST_CASE(chainstate_trusted_mirror_gate_evicted_candidate_survives_checkblockindex, TestChain100Setup)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    Chainstate& chainstate = chainman.ActiveChainstate();
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    auto& action = const_cast<kernel::DeepReorgAction&>(chainman.m_options.deep_reorg_action);
+    auto& park_depth = const_cast<std::optional<uint32_t>&>(chainman.m_options.max_reorg_depth_park);
+    auto& hysteresis_work_margin = const_cast<std::optional<uint32_t>&>(chainman.m_options.reorg_hysteresis_work_margin);
+    struct Restore {
+        Consensus::Params& consensus;
+        int32_t start;
+        kernel::DeepReorgAction& action;
+        kernel::DeepReorgAction saved_action;
+        std::optional<uint32_t>& park_depth;
+        std::optional<uint32_t> saved_park_depth;
+        std::optional<uint32_t>& hysteresis_work_margin;
+        std::optional<uint32_t> saved_hysteresis_work_margin;
+        ~Restore()
+        {
+            node::matmul_trusted::ResetForTest();
+            consensus.nReorgProtectionStartHeight = start;
+            action = saved_action;
+            park_depth = saved_park_depth;
+            hysteresis_work_margin = saved_hysteresis_work_margin;
+        }
+    } restore{consensus, consensus.nReorgProtectionStartHeight,
+              action, action, park_depth, park_depth,
+              hysteresis_work_margin, hysteresis_work_margin};
+    consensus.nReorgProtectionStartHeight = 10;
+    action = kernel::DeepReorgAction::PARK;
+    // Keep park deeper than this short competing fork so the trusted-mirror
+    // most-work gate is what evicts the candidate, not PARK.
+    park_depth = 100;
+    hysteresis_work_margin = 0;
+
+    const CScript script = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    CBlockIndex* original_tip{nullptr};
+    CBlockIndex* original_root{nullptr};
+    {
+        LOCK(::cs_main);
+        original_tip = chainstate.m_chain.Tip();
+        original_root = original_tip;
+    }
+    BOOST_REQUIRE(original_tip != nullptr);
+    const uint256 original_hash{original_tip->GetBlockHash()};
+    const int original_height{original_tip->nHeight};
+
+    BlockValidationState state;
+    BOOST_REQUIRE(chainstate.InvalidateBlock(state, original_root));
+    CBlockIndex* competing_root{nullptr};
+    CBlockIndex* competing_tip{nullptr};
+    for (int i = 0; i < 2; ++i) {
+        const CBlock block{CreateAndProcessBlock({}, script)};
+        LOCK(::cs_main);
+        competing_tip = chainman.m_blockman.LookupBlockIndex(block.GetHash());
+        if (i == 0) competing_root = competing_tip;
+    }
+    BOOST_REQUIRE(competing_root && competing_tip);
+    BOOST_REQUIRE_EQUAL(competing_tip->nHeight, original_height + 1);
+
+    state = BlockValidationState{};
+    BOOST_REQUIRE(chainstate.InvalidateBlock(state, competing_root));
+    {
+        LOCK(::cs_main);
+        chainstate.ResetBlockFailureFlags(original_root);
+    }
+    state = BlockValidationState{};
+    BOOST_REQUIRE(chainstate.ActivateBestChain(state));
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()->GetBlockHash()) == original_hash);
+
+    {
+        LOCK(::cs_main);
+        chainstate.ResetBlockFailureFlags(competing_root);
+        BOOST_REQUIRE_EQUAL(chainstate.setBlockIndexCandidates.count(competing_tip), 1);
+        BOOST_REQUIRE(competing_tip->nStatus & BLOCK_HAVE_DATA);
+        BOOST_REQUIRE(competing_tip->nChainWork > original_tip->nChainWork);
+    }
+
+    CKey signer;
+    signer.MakeNewKey(/*fCompressed=*/true);
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256::ONE;
+    config.replay_authority_context = uint256::FromHex(std::string(64, 'c')).value();
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    config.local_signer = signer;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/true, /*serve=*/false,
+        std::chrono::milliseconds{50}, error));
+    BOOST_REQUIRE(node::matmul_trusted::IsTrustedMirror());
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
+                      original_hash, original_height) ==
+                  matmul::trusted::AddResult::Accepted);
+    BOOST_REQUIRE(node::matmul_trusted::HasQuorum(original_hash, original_height));
+
+    state = BlockValidationState{};
+    BOOST_CHECK(chainstate.ActivateBestChain(state));
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK_EQUAL(chainstate.m_chain.Tip()->GetBlockHash(), original_hash);
+        BOOST_CHECK_EQUAL(chainstate.m_chain.Height(), original_height);
+        BOOST_CHECK(!chainman.IsOnParkedReorgBranch(competing_tip));
+        BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(competing_tip), 0);
+        BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(original_tip), 1);
+        BOOST_CHECK(!chainman.ShouldDeferLosingTipExtension(competing_tip));
+    }
+    chainman.CheckBlockIndex();
+
+    const CBlock child{CreateAndProcessBlock({}, script)};
+    CBlockIndex* child_index{nullptr};
+    {
+        LOCK(::cs_main);
+        child_index = chainman.m_blockman.LookupBlockIndex(child.GetHash());
+        BOOST_REQUIRE(child_index != nullptr);
+        BOOST_CHECK_EQUAL(chainstate.m_chain.Tip(), child_index);
+        BOOST_CHECK_EQUAL(child_index->pprev, original_tip);
+        BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(child_index), 1);
+        BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(competing_tip), 0);
+    }
+    const auto child_attested{node::matmul_trusted::SignAuthoritative(
+        child.GetHash(), child_index->nHeight)};
+    BOOST_REQUIRE(child_attested == matmul::trusted::AddResult::Accepted ||
+                  child_attested == matmul::trusted::AddResult::Duplicate);
+    BOOST_CHECK(node::matmul_trusted::HasQuorum(
+        child.GetHash(), child_index->nHeight));
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(child_index), 1);
+    }
+    chainman.CheckBlockIndex();
+
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman.ParkReorgBranch(competing_root));
+        BOOST_CHECK(chainman.IsOnParkedReorgBranch(competing_tip));
+        BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(competing_tip), 0);
+        BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(child_index), 1);
+    }
+    chainman.CheckBlockIndex();
+
+    // Parked exemption must still apply when the trusted-mirror gate is off.
+    node::matmul_trusted::ResetForTest();
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK(chainman.IsOnParkedReorgBranch(competing_tip));
+        BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(competing_tip), 0);
+    }
+    chainman.CheckBlockIndex();
+}
+
 BOOST_AUTO_TEST_SUITE_END()

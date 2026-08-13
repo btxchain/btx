@@ -13967,7 +13967,13 @@ void ChainstateManager::CheckBlockIndex()
                         // chainstate is a background validation chainstate, and
                         // pindex only needs to be added if it is an ancestor of
                         // the snapshot that is being validated.
+                        //
+                        // Parked branches, armed losing-tip extensions, and
+                        // trusted-mirror gate refusals are not candidates
+                        // (FindMostWorkChain / TryAddBlockIndexCandidate).
                         if (!c->m_chainman.IsOnParkedReorgBranch(pindex) &&
+                            !c->m_chainman.ShouldDeferLosingTipExtension(pindex) &&
+                            TrustedMirrorShouldConsiderMostWorkCandidate(c->m_chain.Tip(), pindex) &&
                             (c == &ActiveChainstate() || snap_base->GetAncestor(pindex->nHeight) == pindex)) {
                             assert(c->setBlockIndexCandidates.count(pindex));
                         }
@@ -14012,7 +14018,9 @@ void ChainstateManager::CheckBlockIndex()
                 const bool is_active = c == &ActiveChainstate();
                 if (!CBlockIndexWorkComparator()(pindex, c->m_chain.Tip()) &&
                     c->setBlockIndexCandidates.count(pindex) == 0 &&
-                    !c->m_chainman.IsOnParkedReorgBranch(pindex)) {
+                    !c->m_chainman.IsOnParkedReorgBranch(pindex) &&
+                    !c->m_chainman.ShouldDeferLosingTipExtension(pindex) &&
+                    TrustedMirrorShouldConsiderMostWorkCandidate(c->m_chain.Tip(), pindex)) {
                     if (pindexFirstInvalid == nullptr) {
                         if (is_active || snap_base->GetAncestor(pindex->nHeight) == pindex) {
                             assert(foundInUnlinked);

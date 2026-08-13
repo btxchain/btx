@@ -169,6 +169,55 @@ BOOST_AUTO_TEST_CASE(park_releases_cap_and_terminal_frees_bytes)
     BOOST_CHECK_EQUAL(lifecycle.RetainedCountForTest(), 0U);
 }
 
+BOOST_AUTO_TEST_CASE(async_pending_without_body_does_not_block_download)
+{
+    // FindNextBlocks invariant: async-pending is a VERIFY state. A marker
+    // without HAVE_DATA / without a retained body must be reclaimed so the
+    // hash is getdata'd. A marker that already has a body (HAVE_DATA analog)
+    // must remain so duplicate verify is skipped.
+    node::MatMulBlockLifecycle lifecycle{2, 200, 10min, 10min};
+    const auto now{node::MatMulBlockLifecycle::Clock::now()};
+
+    const uint256 missing_hash{
+        uint256::FromHex(std::string(63, '0') + "a").value()};
+    BOOST_REQUIRE(lifecycle.Begin(missing_hash, now));
+    BOOST_CHECK(lifecycle.IsActive(missing_hash, now));
+    // Hash-only RetryInactive must not clear a live generation (even with
+    // no body). That was the production Unmark pitfall.
+    BOOST_CHECK(!lifecycle.RetryInactive(missing_hash, 0s, now));
+    BOOST_CHECK(lifecycle.IsActive(missing_hash, now));
+    BOOST_CHECK(lifecycle.ExpireActiveWithoutBody(missing_hash, now));
+    BOOST_CHECK(!lifecycle.IsActive(missing_hash, now));
+    BOOST_CHECK(!lifecycle.StateForTest(missing_hash));
+
+    BOOST_REQUIRE(lifecycle.Begin(missing_hash, now + 1s));
+    // No HAVE_DATA: reclaim and request. Must not skip.
+    BOOST_CHECK(!lifecycle.ShouldSkipFetchWhileAsyncPending(
+        missing_hash, /*have_data=*/false, now + 1s));
+    BOOST_CHECK(!lifecycle.IsActive(missing_hash, now + 1s));
+    // Second pass is a no-op: hash stays requestable.
+    BOOST_CHECK(!lifecycle.ShouldSkipFetchWhileAsyncPending(
+        missing_hash, /*have_data=*/false, now + 2s));
+
+    const uint256 have_data_hash{
+        uint256::FromHex(std::string(63, '0') + "b").value()};
+    BOOST_REQUIRE(lifecycle.Retain(have_data_hash, Body(9, 50, now), now));
+    BOOST_CHECK(lifecycle.HasRetainedBody(have_data_hash));
+    BOOST_REQUIRE(lifecycle.Begin(have_data_hash, now));
+    BOOST_CHECK(lifecycle.IsActive(have_data_hash, now));
+    BOOST_CHECK(!lifecycle.ExpireActiveWithoutBody(have_data_hash, now));
+    BOOST_CHECK(lifecycle.IsActive(have_data_hash, now));
+    // HAVE_DATA: skip duplicate verify.
+    BOOST_CHECK(lifecycle.ShouldSkipFetchWhileAsyncPending(
+        have_data_hash, /*have_data=*/true, now));
+    BOOST_CHECK(lifecycle.IsActive(have_data_hash, now));
+    // Retained body without HAVE_DATA is still verify-in-flight: skip
+    // duplicate getdata, do not expire the live generation.
+    BOOST_CHECK(lifecycle.ShouldSkipFetchWhileAsyncPending(
+        have_data_hash, /*have_data=*/false, now));
+    BOOST_CHECK(lifecycle.IsActive(have_data_hash, now));
+}
+
 BOOST_AUTO_TEST_CASE(progress_vector_tracks_causal_events_not_time)
 {
     node::MatMulBlockLifecycle lifecycle{1, 100, 10min, 10min};

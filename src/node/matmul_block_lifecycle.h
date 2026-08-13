@@ -332,6 +332,58 @@ public:
     }
 
     /**
+     * Release a live attempt that never received a body.
+     *
+     * GETMMATTEST / lifecycle Begin without Retain can leave
+     * ADMISSION_PENDING with no body. FindNextBlocks must not treat that
+     * VERIFY marker as a reason to skip DOWNLOAD. Attempts that already
+     * retained a body are left alone (verify is actually in flight).
+     *
+     * @return true if a no-body active attempt was erased.
+     */
+    bool ExpireActiveWithoutBody(const uint256& hash,
+                                 Clock::time_point now = Clock::now())
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        (void)now;
+        const auto it{m_entries.find(hash)};
+        if (it == m_entries.end() || !IsActive(it->second.state) ||
+            it->second.body) {
+            return false;
+        }
+        if (it->second.state == State::RUNNING ||
+            it->second.state == State::AWAITING_QUORUM) {
+            ++m_progress.verify_completed;
+        }
+        if (it->second.cancelled) {
+            it->second.cancelled->store(true, std::memory_order_relaxed);
+        }
+        it->second.pending_lease.reset();
+        it->second.cancelled.reset();
+        it->second.owned_resources.clear();
+        m_entries.erase(it);
+        return true;
+    }
+
+    /**
+     * Download-selector invariant: async-pending is a VERIFY state and must
+     * never block DOWNLOAD of a body the node does not have.
+     *
+     * - have_data: skip while a live attempt remains (duplicate verify).
+     * - !have_data: reclaim a no-body marker and do not skip; if a body was
+     *   already retained the attempt stays live and fetch is skipped so a
+     *   getdata/block busy loop cannot restart while ExactReplay is in flight.
+     */
+    bool ShouldSkipFetchWhileAsyncPending(
+        const uint256& hash, bool have_data,
+        Clock::time_point now = Clock::now())
+    {
+        if (have_data) return IsActive(hash, now);
+        if (ExpireActiveWithoutBody(hash, now)) return false;
+        return IsActive(hash, now);
+    }
+
+    /**
      * Compatibility cleanup for legacy state without a generation token.
      * It may postpone an inactive retained body, but can never mutate a live
      * generation: a delayed hash-only callback must not release a newer
@@ -351,6 +403,17 @@ public:
         it->second.state = State::TRANSIENT_FAILURE;
         it->second.updated_at = now;
         return true;
+    }
+
+    /**
+     * True when this hash still owns a retained body. Async-pending with a
+     * body is a verify-in-flight state; without one it cannot be.
+     */
+    bool HasRetainedBody(const uint256& hash) const
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        const auto it{m_entries.find(hash)};
+        return it != m_entries.end() && it->second.body.has_value();
     }
 
     /** Terminal acceptance/invalidity atomically releases every resource. */
