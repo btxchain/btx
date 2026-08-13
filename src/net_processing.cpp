@@ -58,6 +58,7 @@
 #include <txrequest.h>
 #include <dandelion.h>
 #include <util/check.h>
+#include <util/signalinterrupt.h>
 #include <util/strencodings.h>
 #include <util/time.h>
 #include <util/trace.h>
@@ -5428,13 +5429,20 @@ void PeerManagerImpl::ActiveTipChange(const CBlockIndex& new_tip, bool is_ibd)
                     m_chainman.m_blockman.LookupBlockIndex(hash)};
                 const CBlockIndex* parent{
                     index != nullptr ? index->pprev : nullptr};
+                const bool trusted_active_tip_child{
+                    index != nullptr && parent == &new_tip &&
+                    node::matmul_trusted::IsTrustedMirror() &&
+                    m_chainparams.GetConsensus()
+                        .IsMatMulTrustedReplayAttestationActive(
+                            index->nHeight)};
                 const bool near{
                     index != nullptr && parent != nullptr &&
                     index->nHeight >= new_tip.nHeight - 2 &&
                     index->nHeight <=
                         new_tip.nHeight + MATMUL_RC_NEAR_TIP_DEPTH &&
-                    parent->nAuthenticatedChainWork ==
-                        parent->nChainWork &&
+                    (parent->nAuthenticatedChainWork ==
+                         parent->nChainWork ||
+                     trusted_active_tip_child) &&
                     (parent == &new_tip ||
                      parent->nHeight >= new_tip.nHeight - 2)};
                 if (!near) stale.push_back(hash);
@@ -7385,11 +7393,16 @@ void PeerManagerImpl::MaybeRequestTrustedMirrorPreferredAttestations(
         state->pindexBestKnownBlock == nullptr) {
         return;
     }
+    const CBlockIndex* known{state->pindexBestKnownBlock};
     const Consensus::Params& params{m_chainparams.GetConsensus()};
-    if (!params.IsMatMulTrustedReplayAttestationActive(tip->nHeight)) {
+    // At the activation boundary the active tip is still the final pre-trusted
+    // block while its first trusted child is already header/body-known. Gating
+    // on tip->nHeight strands the mirror forever at H-1: later attestations can
+    // arrive, but the missing H quorum prevents every connect. The peer-known
+    // frontier determines whether this catch-up path has trusted-era work.
+    if (!params.IsMatMulTrustedReplayAttestationActive(known->nHeight)) {
         return;
     }
-    const CBlockIndex* known{state->pindexBestKnownBlock};
     const bool parked{m_chainman.IsOnParkedReorgBranch(known)};
     const bool extends_tip{
         known->nHeight >= tip->nHeight &&
@@ -7585,6 +7598,17 @@ void PeerManagerImpl::RequestMatMulTrustedAttestations(
         const CBlockIndex* index{
             m_chainman.m_blockman.LookupBlockIndex(hash)};
         const int32_t height{index ? index->nHeight : -1};
+        if (index != nullptr &&
+            node::matmul_trusted::HasQuorum(hash, height)) {
+            // Preferred-attestation polling revisits the active tip and its
+            // recent ancestors on every SendMessages pass. Once quorum exists,
+            // re-opening the request here creates a tight GETMMATTEST/duplicate
+            // response loop that exhausts the signer's serve bucket before the
+            // next tip child can ask for its first attestation.
+            m_matmul_attestation_requested.erase(hash);
+            m_matmul_attestation_backoff.erase(hash);
+            return;
+        }
         const bool parked{
             index != nullptr && m_chainman.IsOnParkedReorgBranch(index)};
         const bool tip_child{
@@ -7942,7 +7966,7 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
     bool is_ibd)
 {
     AssertLockNotHeld(cs_main);
-    if (!m_opts.matmul_rc_header_first || !m_matmul_verify_worker || is_ibd) {
+    if (!m_opts.matmul_rc_header_first || !m_matmul_verify_worker) {
         return;
     }
     if constexpr (matmul::v4::rc::kRCStage3SuccinctAuthorityReady) {
@@ -7957,6 +7981,12 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
     const bool trusted_attestation_only{
         node::matmul_trusted::IsTrustedMirror() &&
         params.IsMatMulTrustedReplayAttestationActive(index.nHeight)};
+    // Ordinary speculative ExactReplay remains disabled during IBD. A trusted
+    // mirror job performs no local replay, however: it only waits in the
+    // bounded quorum set. Skipping that job on a restarted mirror leaves a
+    // complete unattested tip child permanently retryable with no timeout or
+    // re-admission callback.
+    if (is_ibd && !trusted_attestation_only) return;
 
     bool authenticated_tip_child{false};
     std::optional<int64_t> parent_mtp;
@@ -7972,8 +8002,13 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
             return;
         }
         const CBlockIndex* parent{index.pprev};
-        if (parent == nullptr ||
-            parent->nAuthenticatedChainWork != parent->nChainWork) {
+        if (parent == nullptr) {
+            return;
+        }
+        const bool trusted_active_tip_child{
+            trusted_attestation_only && parent == active_tip};
+        if (parent->nAuthenticatedChainWork != parent->nChainWork &&
+            !trusted_active_tip_child) {
             return;
         }
         authenticated_tip_child = parent == active_tip;
@@ -9868,7 +9903,8 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
                         ? body_reaches_expensive && encdr.has_value()
                         : requires_expensive_verification && body_reaches_expensive;
                     if (exact_recompute_required &&
-                        node::matmul_trusted::IsConfigured()) {
+                        node::matmul_trusted::IsConfigured() &&
+                        !node::matmul_trusted::IsTrustedMirror()) {
                         const CBlockIndex* tip{m_chainman.ActiveTip()};
                         const bool tip_child{prev == tip};
                         if (!tip_child &&
@@ -10262,17 +10298,18 @@ void PeerManagerImpl::ProcessBlockSync(NodeId nodeid, CNode* node, const std::sh
     DrainMatMulPendingSourceUnpins();
     bool new_block{false};
     m_chainman.ProcessNewBlock(block, force_processing, min_pow_checked, &new_block);
-    bool exact_replay_authenticated{false};
+    bool replay_authenticated{false};
     bool terminal_failure{false};
     {
         LOCK(cs_main);
         const CBlockIndex* index{
             m_chainman.m_blockman.LookupBlockIndex(block->GetHash())};
-        exact_replay_authenticated = index != nullptr &&
-            (index->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0 &&
+        replay_authenticated = index != nullptr &&
             (index->nStatus & BLOCK_HAVE_DATA) != 0 &&
             (index->nStatus & BLOCK_FAILED_MASK) == 0 &&
-            index->IsValid(BLOCK_VALID_SCRIPTS);
+            index->IsValid(BLOCK_VALID_TRANSACTIONS) &&
+            index->HaveNumChainTxs() &&
+            IsBlockAuthenticated(*index, m_chainparams.GetConsensus());
         terminal_failure = index != nullptr &&
             (index->nStatus & BLOCK_FAILED_MASK) != 0;
     }
@@ -10281,7 +10318,7 @@ void PeerManagerImpl::ProcessBlockSync(NodeId nodeid, CNode* node, const std::sh
     // accelerator failure deliberately leaves the candidate retryable. Keep
     // that bounded observation until exact local authority succeeds, the
     // index is permanently failed, or its TTL expires.
-    if (exact_replay_authenticated || terminal_failure) {
+    if (replay_authenticated || terminal_failure) {
         if (lifecycle_token) {
             m_matmul_block_lifecycle.Terminal(*lifecycle_token);
         } else {
@@ -10289,13 +10326,13 @@ void PeerManagerImpl::ProcessBlockSync(NodeId nodeid, CNode* node, const std::sh
         }
         ClearMatMulRCBodyDeferred(block->GetHash());
         FinishMatMulAuthenticatedRelayObservation(
-            block->GetHash(), exact_replay_authenticated);
+            block->GetHash(), replay_authenticated);
     } else {
         RefreshMatMulDeferredBodyRetry(
             block->GetHash(), "non-terminal replay result");
     }
-    if (new_block || exact_replay_authenticated) {
-        if (exact_replay_authenticated &&
+    if (new_block || replay_authenticated) {
+        if (replay_authenticated &&
             m_chainman.GetMatMulValidationMode() ==
                 kernel::MatMulValidationMode::CONSENSUS &&
             node::matmul_trusted::ServesAttestations() &&
@@ -12961,8 +12998,13 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                         active_tip->nHeight + MATMUL_RC_NEAR_TIP_DEPTH};
                 const bool eligible_parent{
                     pindex->pprev != nullptr &&
-                    pindex->pprev->nAuthenticatedChainWork ==
-                        pindex->pprev->nChainWork};
+                    (pindex->pprev->nAuthenticatedChainWork ==
+                         pindex->pprev->nChainWork ||
+                     (node::matmul_trusted::IsTrustedMirror() &&
+                      pindex->pprev == active_tip &&
+                      m_chainparams.GetConsensus()
+                          .IsMatMulTrustedReplayAttestationActive(
+                              pindex->nHeight)))};
                 const bool unverified{
                     (pindex->nStatus &
                      (BLOCK_FAILED_MASK | BLOCK_EXACT_REPLAY_VERIFIED)) == 0 &&
@@ -13539,6 +13581,17 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 node::matmul_trusted::Get(block_hash, height)};
             if (existing.empty()) {
                 if (locally_exact) {
+                    // ExactReplay alone proves validity. A new local
+                    // attestation additionally asserts fork choice, so never
+                    // create one for an off-active tip-child/followed branch.
+                    // Cached statements may still be served below because a
+                    // signature that already exists cannot be revoked.
+                    if (!on_active_chain) {
+                        MaybeLogAttestationServe(
+                            "not_canonical", block_hash, height,
+                            pfrom.GetId());
+                        return;
+                    }
                     matmul::trusted::ExactReplayAttestation produced;
                     const auto result{
                         node::matmul_trusted::SignAuthoritative(
@@ -13698,6 +13751,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         // node-wide relay allowance: valid public attestations are replayable
         // by anyone.
         bool wake_block_fetch{false};
+        bool reactivate_best_chain{false};
         for (const auto& attestation : received) {
             const uint256 hash{
                 attestation.statement.block_hash};
@@ -13828,14 +13882,24 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                     // and asynchronous verification are still pending.
                     if (const CBlockIndex* index{
                             m_chainman.m_blockman.LookupBlockIndex(hash)};
-                        index != nullptr &&
-                        !m_chainman.MaybeTrackReorgRecovery(index)) {
-                        // The attestation remains valid and available for
-                        // retry; persistence failure must not misclassify the
-                        // relaying peer or discard the quorum object.
-                        LogError("Unable to persist reorg recovery after "
-                                 "MMATTEST quorum block=%s height=%d\n",
-                                 hash.ToString(), expected_height);
+                        index != nullptr) {
+                        if (!m_chainman.MaybeTrackReorgRecovery(index)) {
+                            // The attestation remains valid and available for
+                            // retry; persistence failure must not misclassify
+                            // the relaying peer or discard the quorum object.
+                            LogError("Unable to persist reorg recovery after "
+                                     "MMATTEST quorum block=%s height=%d\n",
+                                     hash.ToString(), expected_height);
+                        }
+                        // A complete tip-child can reach ConnectTip before its
+                        // MMATTEST and remain a retryable candidate. Quorum
+                        // then wakes the worker and block fetch, but neither
+                        // path re-enters ActivateBestChain. Re-run ordinary
+                        // selection after dropping cs_main so the now-attested
+                        // parent connects before the next pipelined child body
+                        // arrives and is judged against a stale tip/frontier.
+                        reactivate_best_chain |=
+                            (index->nStatus & BLOCK_HAVE_DATA) != 0;
                     }
                 }
                 wake_block_fetch = true;
@@ -13846,6 +13910,17 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 }
             }
         }
+        // Attestation quorum can make a previously deferred complete block
+        // connectable. This must run without cs_main; ActivateBestChain applies
+        // the normal validity, candidate-selection, and trusted-connect gates.
+        if (reactivate_best_chain && !m_chainman.m_interrupt) {
+            BlockValidationState state;
+            if (!m_chainman.ActiveChainstate().ActivateBestChain(state)) {
+                LogError("Unable to activate best chain after MMATTEST quorum "
+                         "(%s)\n", state.ToString());
+            }
+        }
+
         // Attestation acceptance / quorum can newly unlock tip-extending bodies
         // (or make previously known roots selectable). Wake message processing
         // so FindNextBlocksToDownload runs without waiting for the next inbound.

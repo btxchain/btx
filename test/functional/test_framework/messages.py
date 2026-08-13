@@ -2204,6 +2204,24 @@ class msg_rcadmit:
         return "msg_rcadmit(block_hash=%064x nonce=%d)" % (self.block_hash, self.nonce)
 
 
+class msg_getmmattest:
+    """Request retained ExactReplay attestations for one block hash."""
+    __slots__ = ("block_hash",)
+    msgtype = b"getmmattest"
+
+    def __init__(self, block_hash=0):
+        self.block_hash = block_hash
+
+    def deserialize(self, f):
+        self.block_hash = deser_uint256(f)
+
+    def serialize(self):
+        return ser_uint256(self.block_hash)
+
+    def __repr__(self):
+        return "msg_getmmattest(block_hash=%064x)" % self.block_hash
+
+
 class msg_getcfilters:
     __slots__ = ("filter_type", "start_height", "stop_hash")
     msgtype =  b"getcfilters"
@@ -2477,6 +2495,16 @@ class TestFrameworkScript(unittest.TestCase):
         actual.deserialize(BytesIO(encoded))
         self.assertEqual(actual.block_hash, expected.block_hash)
         self.assertEqual(actual.nonce, expected.nonce)
+
+    def test_getmmattest_encode_decode(self):
+        expected = msg_getmmattest(
+            block_hash=int("fedcba9876543210" * 4, 16)
+        )
+        encoded = expected.serialize()
+        self.assertEqual(len(encoded), 32)
+        actual = msg_getmmattest()
+        actual.deserialize(BytesIO(encoded))
+        self.assertEqual(actual.block_hash, expected.block_hash)
 
     def test_addrv2_encode_decode(self):
         def check_addrv2(ip, net):

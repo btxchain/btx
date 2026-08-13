@@ -1012,6 +1012,12 @@ matmul::trusted::WaitResult WaitForQuorum(
                                 cancelled, quorum);
 }
 
+void RecordAsyncWaitResult(matmul::trusted::WaitResult result)
+{
+    auto store{Store()};
+    if (store) store->RecordWaitResult(result);
+}
+
 std::vector<matmul::trusted::ExactReplayAttestation> Get(
     const uint256& block_hash, int32_t block_height)
 {

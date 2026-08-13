@@ -20,6 +20,7 @@ Coverage:
 
 import os
 import re
+import shutil
 import time
 
 from test_framework.test_framework import BitcoinTestFramework
@@ -122,7 +123,15 @@ class MatMulTrustedMirrorBackfillTest(BitcoinTestFramework):
             authority.datadir_path, "regtest", "matmul_attestations.dat"
         )
         assert os.path.exists(attest_path), attest_path
-        os.remove(attest_path)
+        # Persistence is a LevelDB plus snapshot/WAL compatibility family. A
+        # test that removes only the snapshot file is not a wipe: restart must
+        # (correctly) recover the records from the durable DB or WAL.
+        durable_db = attest_path + ".db"
+        assert os.path.isdir(durable_db), durable_db
+        shutil.rmtree(durable_db)
+        for persisted_file in (attest_path, attest_path + ".wal"):
+            if os.path.exists(persisted_file):
+                os.remove(persisted_file)
         self.start_node(0, extra_args=self.archive_args)
         assert_equal(authority.getblockcount(), tip_height)
         assert_equal(authority.getbestblockhash(), authority_tip)

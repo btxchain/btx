@@ -95,6 +95,8 @@ VerifyUtxoSnapshotManifest(
     int32_t block_height,
     const std::function<bool()>& cancelled,
     std::vector<matmul::trusted::ExactReplayAttestation>* quorum = nullptr);
+/** Account for a quorum wait performed by the non-blocking verify worker. */
+void RecordAsyncWaitResult(matmul::trusted::WaitResult result);
 [[nodiscard]] std::vector<matmul::trusted::ExactReplayAttestation> Get(
     const uint256& block_hash, int32_t block_height);
 [[nodiscard]] matmul::trusted::StoreStats Stats();

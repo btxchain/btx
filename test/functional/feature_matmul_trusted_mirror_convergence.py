@@ -32,13 +32,15 @@ can arrive and authenticate. A test that only diverges by 1-2 blocks cannot
 catch that interaction (production stall was ~193 headers-only ahead).
 
 It also guards the combined production recovery case, rather than testing its
-pieces only in isolation: the mirror is exactly PARK_DEPTH blocks down a losing
-fork, the authenticated branch is more than 10 headers ahead and more than the
-unauthenticated-work allowance past the fork, and the mirror already holds its
-higher canonical bodies. Six lower roots remain missing. LastCommon must not
-skip past those holes, and receipt of the roots over P2P must automatically
-activate the authority branch without invalidateblock, reconsiderblock, a
-restart, or any other operator recovery action.
+pieces only in isolation: a configured-consensus recovery node is exactly
+PARK_DEPTH blocks down an unsigned losing fork, the authenticated branch is
+more than 10 headers ahead and more than the unauthenticated-work allowance
+past the fork, and the recovery node already holds its higher canonical bodies.
+Six lower roots remain missing. LastCommon must not skip past those holes, and
+receipt of the roots over P2P must automatically activate the authority branch
+without invalidateblock, reconsiderblock, a restart, or any other operator
+recovery action. The narrower cases below exercise the equivalent download
+gates on the trusted mirror itself.
 
 It also guards deep-reorg finality (failure C): a competing rewrite deeper than
 EMERGENCY park_depth must still be refused by both authority and mirror.
@@ -246,11 +248,48 @@ class MatMulTrustedMirrorConvergenceTest(BitcoinTestFramework):
                 except Exception:
                     pass
 
+    def _reset_signing_fixture_to_authority(self, authority, signer_fixture):
+        """Reset the auxiliary signer between independent fork scenarios.
+
+        The fixture deliberately owns the same private signer as the authority
+        so it can place the mirror on a signed losing branch. Those signatures
+        make both branches authentic forever; production fork choice must not
+        silently resolve that signer equivocation. Explicitly invalidate only
+        the fixture's old branch between scenarios. The mirror under test is
+        never invalidated, reconsidered, or restarted.
+        """
+        authority_tip = authority.getbestblockhash()
+        if signer_fixture.getbestblockhash() == authority_tip:
+            return
+
+        common_height = min(
+            authority.getblockcount(), signer_fixture.getblockcount()
+        )
+        while (
+            authority.getblockhash(common_height)
+            != signer_fixture.getblockhash(common_height)
+        ):
+            common_height -= 1
+        stale_root = signer_fixture.getblockhash(common_height + 1)
+        self.log.info(
+            "Fixture-only reset of prior signed losing branch at "
+            f"height {common_height + 1}; mirror remains untouched"
+        )
+        signer_fixture.invalidateblock(stale_root)
+        self.connect_nodes(authority.index, signer_fixture.index)
+        self.wait_until(
+            lambda: signer_fixture.getbestblockhash() == authority_tip,
+            timeout=300,
+        )
+        self.disconnect_nodes(authority.index, signer_fixture.index)
+
     def _drive_mirror_onto(self, mirror, source, blockhash, *, timeout=180):
         """Make blockhash the mirror tip via P2P, then RPC bodies if needed.
 
-        Losing-race blocks are unattested (loser is not a trusted signer).
-        Tip-extending remains eligible for the most-work gate.
+        The auxiliary source shares the test signer so the trusted mirror can
+        legitimately connect this losing branch. Its immutable signature is
+        why the source itself is reset explicitly between scenarios; only the
+        mirror's later autonomous recovery is the behavior under test.
         """
         try:
             self.wait_until(
@@ -370,7 +409,7 @@ class MatMulTrustedMirrorConvergenceTest(BitcoinTestFramework):
             "and recover without operator action"
         )
         self._test_six_missing_roots_with_higher_bodies(
-            authority, mirror, loser, relay
+            authority, relay, mirror
         )
 
         self.log.info(
@@ -391,7 +430,7 @@ class MatMulTrustedMirrorConvergenceTest(BitcoinTestFramework):
         self.log.info(
             "Deep-reorg guard: rewrite deeper than park_depth must stay refused"
         )
-        self._test_deep_reorg_refusal(authority, mirror, loser)
+        self._test_deep_reorg_refusal(authority, mirror, loser, relay)
 
         self.stop_node(0, expected_stderr=INLINE_SIGNER_WARNING)
         self.stop_node(1, expected_stderr=TRUST_WARNING.format(1))
@@ -489,6 +528,7 @@ class MatMulTrustedMirrorConvergenceTest(BitcoinTestFramework):
         must not fire for a claimed-heavier recovery branch).
         """
         self._disconnect_all()
+        self._reset_signing_fixture_to_authority(authority, loser)
 
         # Align everyone on the post-convergence tip, then create a fresh race.
         self.connect_nodes(0, 1)
@@ -524,13 +564,14 @@ class MatMulTrustedMirrorConvergenceTest(BitcoinTestFramework):
         relay_services = int(relay.getnetworkinfo()["localservices"], 16)
         assert_equal(relay_services & NODE_MATMUL_ATTESTATION_ARCHIVE, 0)
 
-        self.connect_nodes(1, 2)
-        self._drive_mirror_onto(mirror, loser, losing, timeout=180)
+        # Keep the trusted mirror on the shared signed fork. Putting it on the
+        # losing branch would require the same authority key to sign both
+        # siblings; that is signer equivocation and must remain fail-closed,
+        # not an automatic non-authority-relay recovery case.
         stranded_height = mirror.getblockcount()
         stranded_tip = mirror.getbestblockhash()
-        self.disconnect_nodes(1, 2)
-        assert_equal(stranded_height, fork_height + 1)
-        assert_equal(stranded_tip, losing)
+        assert_equal(stranded_height, fork_height)
+        assert_equal(stranded_tip, fork_hash)
 
         # The headers-only source proves authority by delivering a valid signer
         # statement on this connection; its self-advertised service bit alone
@@ -584,15 +625,16 @@ class MatMulTrustedMirrorConvergenceTest(BitcoinTestFramework):
         self._disconnect_all()
 
     def _test_six_missing_roots_with_higher_bodies(
-        self, authority, mirror, loser, relay
+        self, authority, recovery, body_relay
     ):
         """Reproduce automatic PARK-depth recovery with higher bodies held.
 
         Topology:
-          - Mirror tip stranded exactly PARK_DEPTH blocks down a losing fork
+          - Configured consensus recovery node stranded exactly PARK_DEPTH
+            blocks down an unsigned losing fork
           - Authority winning branch: sibling + MISSING_ROOT_COUNT + HIGHER_BODY_COUNT
           - Headers + attestations delivered; tip stays stranded
-          - Higher canonical bodies planted onto the mirror via RPC (HAVE_DATA
+          - Higher canonical bodies planted onto the recovery node via RPC (HAVE_DATA
             without a contiguous connectable prefix) so pindexLastCommonBlock is
             tempted to skip the hole
           - Bodies for the six lower roots remain absent
@@ -607,14 +649,12 @@ class MatMulTrustedMirrorConvergenceTest(BitcoinTestFramework):
         """
         self._disconnect_all()
 
-        self.connect_nodes(0, 1)
-        self.connect_nodes(0, 2)
-        self.connect_nodes(0, 3)
+        self.connect_nodes(authority.index, recovery.index)
+        self.connect_nodes(authority.index, body_relay.index)
         tip_hash = authority.getbestblockhash()
         self.wait_until(
-            lambda: mirror.getbestblockhash() == tip_hash
-            and loser.getbestblockhash() == tip_hash
-            and relay.getbestblockhash() == tip_hash,
+            lambda: recovery.getbestblockhash() == tip_hash
+            and body_relay.getbestblockhash() == tip_hash,
             timeout=300,
         )
         self._disconnect_all()
@@ -622,14 +662,14 @@ class MatMulTrustedMirrorConvergenceTest(BitcoinTestFramework):
         fork_hash = tip_hash
         fork_height = authority.getblockcount()
         winning = self.generate(authority, 1, sync_fun=self.no_op)[0]
-        losing_hashes = self.generate(loser, PARK_DEPTH, sync_fun=self.no_op)
+        losing_hashes = self.generate(recovery, PARK_DEPTH, sync_fun=self.no_op)
         losing_root = losing_hashes[0]
         losing_tip = losing_hashes[-1]
         assert winning != losing_root
         assert_equal(
-            loser.getblockheader(losing_root)["previousblockhash"], fork_hash
+            recovery.getblockheader(losing_root)["previousblockhash"], fork_hash
         )
-        assert_equal(loser.getblockcount(), fork_height + PARK_DEPTH)
+        assert_equal(recovery.getblockcount(), fork_height + PARK_DEPTH)
 
         # Six lower roots after the winning sibling, then twelve higher bodies.
         # This makes both the winning branch length and the observable
@@ -668,14 +708,17 @@ class MatMulTrustedMirrorConvergenceTest(BitcoinTestFramework):
         assert_equal(len(missing_roots), 1 + MISSING_ROOT_COUNT)
         assert_equal(len(higher_bodies), HIGHER_BODY_COUNT)
 
-        submit_chain_via_rpc(authority, relay)
-        assert_equal(relay.getbestblockhash(), authority_tip)
+        # The body source is the ordinary trusted mirror, synchronized to the
+        # canonical authority branch but not advertising archive service.
+        self.connect_nodes(authority.index, body_relay.index)
+        self.wait_until(
+            lambda: body_relay.getbestblockhash() == authority_tip,
+            timeout=300,
+        )
+        self.disconnect_nodes(authority.index, body_relay.index)
 
-        self.connect_nodes(1, 2)
-        self._drive_mirror_onto(mirror, loser, losing_tip, timeout=300)
-        stranded_height = mirror.getblockcount()
-        stranded_tip = mirror.getbestblockhash()
-        self.disconnect_nodes(1, 2)
+        stranded_height = recovery.getblockcount()
+        stranded_tip = recovery.getbestblockhash()
         assert_equal(stranded_tip, losing_tip)
         assert_equal(stranded_height, fork_height + PARK_DEPTH)
         assert_equal(stranded_height - fork_height, PARK_DEPTH)
@@ -685,16 +728,25 @@ class MatMulTrustedMirrorConvergenceTest(BitcoinTestFramework):
         # statement on this connection; its self-advertised service bit alone
         # grants no frontier-follow authority.
         self._push_authenticated_authority_headers_only(
-            authority, mirror, fork_hash, authority_tip
+            authority, recovery, fork_hash, authority_tip
         )
-        self.wait_until(
-            lambda: mirror.getblockchaininfo()["headers"] >= authority_height,
-            timeout=180,
-        )
-        info = mirror.getblockchaininfo()
+        # Configured-consensus nodes intentionally keep pindexBestHeader on the
+        # active branch until the competing bodies authenticate. Prove that the
+        # complete authority side-header chain is known directly; waiting on
+        # getblockchaininfo.headers here would assert the opposite policy.
+        known_tip = recovery.getblockheader(authority_tip)
+        assert_equal(known_tip["height"], authority_height)
+        assert_equal(known_tip["confirmations"], -1)
+        side_tips = {
+            tip["hash"]: tip for tip in recovery.getchaintips()
+        }
+        assert authority_tip in side_tips
+        assert_equal(side_tips[authority_tip]["status"], "headers-only")
+        info = recovery.getblockchaininfo()
         assert_equal(info["blocks"], stranded_height)
         assert_equal(info["bestblockhash"], stranded_tip)
-        assert_greater_than(info["headers"] - info["blocks"], 10)
+        assert_equal(info["headers"], stranded_height)
+        assert_greater_than(authority_height - info["blocks"], 10)
 
         # Plant ONLY the higher bodies so LastCommon is tempted past the hole.
         # Headers are already known; submitblock stores HAVE_DATA even when the
@@ -702,57 +754,68 @@ class MatMulTrustedMirrorConvergenceTest(BitcoinTestFramework):
         for blockhash in higher_bodies:
             raw = authority.getblock(blockhash, False)
             try:
-                result = mirror.submitblock(raw)
+                result = recovery.submitblock(raw)
             except JSONRPCException as exc:
                 # Quorum race: attestations were seeded, but retry once.
                 if "quorum" not in str(exc).lower():
                     raise
                 atts = authority.getmatmulattestations(blockhash)
-                mirror.submitmatmulattestations(atts)
-                result = mirror.submitblock(raw)
+                recovery.submitmatmulattestations(atts)
+                result = recovery.submitblock(raw)
             assert result in (None, "duplicate", "inconclusive"), (
                 f"plant higher body {blockhash} -> {result}"
             )
             # Prove the body is on disk (HAVE_DATA), not merely the header.
-            mirror.getblock(blockhash, False)
+            recovery.getblock(blockhash, False)
         assert_equal(len(higher_bodies), HIGHER_BODY_COUNT)
 
         # Confirm the lower roots (winning sibling + six) are still absent.
         for blockhash in missing_roots:
             try:
-                mirror.getblock(blockhash, False)
+                recovery.getblock(blockhash, False)
                 raise AssertionError(
                     f"missing root {blockhash} unexpectedly present before reconnect"
                 )
             except JSONRPCException:
                 pass
 
-        pre = mirror.getblockchaininfo()
+        pre = recovery.getblockchaininfo()
         assert_equal(pre["blocks"], stranded_height)
         assert_equal(pre["bestblockhash"], stranded_tip)
-        assert_greater_than_or_equal(pre["headers"], authority_height)
-        assert_greater_than(pre["headers"] - pre["blocks"], 10)
+        assert_equal(pre["headers"], stranded_height)
+        assert_greater_than(authority_height - pre["blocks"], 10)
         # Re-read every planted block immediately before the network recovery
         # trigger. This is the acceptance proof that the mirror already holds
         # the upper branch data while its active tip remains on the losing fork.
         for blockhash in higher_bodies:
-            mirror.getblock(blockhash, False)
+            recovery.getblock(blockhash, False)
 
         # Bodies for the roots can ONLY come from the non-archive relay. From
         # this point onward the test performs no RPC that mutates chain state:
         # P2P delivery and activation must complete recovery automatically.
-        self.connect_nodes(1, 3)
+        self.connect_nodes(recovery.index, body_relay.index)
         self.wait_until(
-            lambda: mirror.getbestblockhash() == authority_tip,
+            lambda: recovery.getbestblockhash() == authority_tip,
             timeout=300,
         )
-        assert_equal(mirror.getblockcount(), authority_height)
-        assert_equal(mirror.getbestblockhash(), authority.getbestblockhash())
+        assert_equal(recovery.getblockcount(), authority_height)
+        assert_equal(recovery.getbestblockhash(), authority.getbestblockhash())
         self._disconnect_all()
 
-    def _test_deep_reorg_refusal(self, authority, mirror, loser):
-        # Ensure mirror follows authority on the canonical tip first.
+    def _test_deep_reorg_refusal(
+        self, authority, mirror, signing_fixture, consensus_competitor
+    ):
+        """Prove PARK finality and signed-rewrite refusal independently.
+
+        The consensus competitor has no signer, while the signing fixture
+        intentionally owns the test authority key and simulates equivocation.
+        Both complete heavier rewrites must leave nodes on their already signed
+        active tips. The active-tip authority gate may reject before the PARK
+        counter, but parking must remain enabled as the depth backstop.
+        """
+        # Ensure all fixtures follow authority on the canonical tip first.
         self._disconnect_all()
+        self._reset_signing_fixture_to_authority(authority, signing_fixture)
 
         # Grow a settled tip well above park_depth so a deep rewrite is possible.
         self.connect_nodes(0, 1)
@@ -767,59 +830,80 @@ class MatMulTrustedMirrorConvergenceTest(BitcoinTestFramework):
         assert_greater_than(fork_height, REORG_PROTECTION_START)
         fork_hash = authority.getblockhash(fork_height)
 
-        rejected_before = authority.getdifficultyhealth(5)["reorg_protection"]["rejected_reorgs"]
-        mirror_rejected_before = mirror.getdifficultyhealth(5)["reorg_protection"]["rejected_reorgs"]
-
         self.log.info(
-            f"Build competing branch from height {fork_height} deeper than park_depth={PARK_DEPTH}"
+            f"Build unsigned competing branch from height {fork_height} "
+            f"deeper than park_depth={PARK_DEPTH}"
         )
         self.disconnect_nodes(0, 1)
-        # Bring the competing miner onto the authority tip first (consensus path,
-        # no attestations required), then rewind to the fork and mine a deep rewrite.
-        submit_chain_via_rpc(authority, loser)
-        self.wait_until(lambda: loser.getbestblockhash() == tip_hash, timeout=120)
-        while loser.getblockcount() > fork_height:
-            loser.invalidateblock(loser.getbestblockhash())
-        assert_equal(loser.getbestblockhash(), fork_hash)
+        submit_chain_via_rpc(authority, consensus_competitor)
+        self.wait_until(
+            lambda: consensus_competitor.getbestblockhash() == tip_hash,
+            timeout=120,
+        )
+        while consensus_competitor.getblockcount() > fork_height:
+            consensus_competitor.invalidateblock(
+                consensus_competitor.getbestblockhash()
+            )
+        assert_equal(consensus_competitor.getbestblockhash(), fork_hash)
         competing_len = (tip_height - fork_height) + 3
-        self.generate(loser, competing_len, sync_fun=self.no_op)
-        assert_greater_than(loser.getblockcount(), tip_height)
-        competing_tip = loser.getbestblockhash()
+        self.generate(consensus_competitor, competing_len, sync_fun=self.no_op)
+        assert_greater_than(consensus_competitor.getblockcount(), tip_height)
+        unsigned_competing_tip = consensus_competitor.getbestblockhash()
 
-        # Authority is consensus: RPC submit is enough to exercise PARK.
-        submit_chain_via_rpc(loser, authority, stop_hash=fork_hash)
+        # The authority is consensus: submit every unsigned exact-replayed body
+        # so refusal cannot be explained by missing branch data.
+        submit_chain_via_rpc(
+            consensus_competitor, authority, stop_hash=fork_hash
+        )
         assert_equal(authority.getbestblockhash(), tip_hash)
         assert_equal(authority.getblockcount(), tip_height)
+        # A local ExactReplay verdict on an off-active competing body must not
+        # make this authority key equivocate. The RPC is also forbidden from
+        # regenerating a signature for an off-active block.
+        assert_equal(
+            authority.getmatmulattestations(unsigned_competing_tip), []
+        )
+        auth_rp = authority.getdifficultyhealth(5)["reorg_protection"]
+        assert_equal(auth_rp["parking_enabled"], True)
 
-        # Mirror: deliver competing bodies with attestations so ActivateBestChain
-        # actually considers the rewrite and must PARK it.
-        submit_attested_chain_via_rpc(loser, mirror, stop_hash=fork_hash)
+        # Build a separate deep rewrite on the signer fixture. Because that key
+        # already signed the authority chain, these signatures model explicit
+        # equivocation. The trusted mirror must remain on its signed active tip;
+        # the active-tip authority gate may refuse it before PARK accounting.
+        submit_chain_via_rpc(authority, signing_fixture)
+        self.wait_until(
+            lambda: signing_fixture.getbestblockhash() == tip_hash,
+            timeout=120,
+        )
+        while signing_fixture.getblockcount() > fork_height:
+            signing_fixture.invalidateblock(signing_fixture.getbestblockhash())
+        assert_equal(signing_fixture.getbestblockhash(), fork_hash)
+        self.generate(signing_fixture, competing_len, sync_fun=self.no_op)
+        signed_competing_tip = signing_fixture.getbestblockhash()
+        assert signed_competing_tip != unsigned_competing_tip
+        submit_attested_chain_via_rpc(
+            signing_fixture, mirror, stop_hash=fork_hash
+        )
         assert_equal(mirror.getbestblockhash(), tip_hash)
         assert_equal(mirror.getblockcount(), tip_height)
 
-        # Competing headers may be known, but must not become the active tip.
+        # Both complete competing branches are known, but neither became active.
         auth_tips = {t["hash"]: t for t in authority.getchaintips()}
-        assert competing_tip in auth_tips or any(
-            t.get("height", 0) >= loser.getblockcount() for t in authority.getchaintips()
-        )
-
-        auth_rp = authority.getdifficultyhealth(5)["reorg_protection"]
+        assert unsigned_competing_tip in auth_tips
+        mirror_tips = {t["hash"]: t for t in mirror.getchaintips()}
+        assert signed_competing_tip in mirror_tips
         mirror_rp = mirror.getdifficultyhealth(5)["reorg_protection"]
-        assert_greater_than_or_equal(auth_rp["rejected_reorgs"], rejected_before + 1)
-        assert_greater_than_or_equal(
-            mirror_rp["rejected_reorgs"], mirror_rejected_before + 1
-        )
-        assert_equal(auth_rp["parking_enabled"], True)
         assert_equal(mirror_rp["parking_enabled"], True)
 
-        # Mirror still must not chase the parked rewrite once reconnected to authority.
+        # Mirror still must not chase either rewrite once reconnected to authority.
         self.connect_nodes(1, 0)
         self.generate(authority, 1, sync_fun=self.no_op)
         self.wait_until(
             lambda: mirror.getbestblockhash() == authority.getbestblockhash(),
             timeout=180,
         )
-        assert mirror.getbestblockhash() != competing_tip
+        assert mirror.getbestblockhash() != unsigned_competing_tip
+        assert mirror.getbestblockhash() != signed_competing_tip
 
 
 if __name__ == "__main__":

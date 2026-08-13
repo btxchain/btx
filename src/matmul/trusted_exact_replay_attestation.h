@@ -239,6 +239,9 @@ public:
         const std::function<bool()>& cancel_requested = {},
         std::vector<ExactReplayAttestation>* quorum = nullptr);
 
+    /** Record the terminal result of a bounded asynchronous quorum wait. */
+    void RecordWaitResult(WaitResult result);
+
     void Erase(const uint256& block_hash, int32_t block_height);
     void PruneExpired();
 

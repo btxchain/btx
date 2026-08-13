@@ -436,8 +436,6 @@ add_executable(test_btx
   shielded_v2_send_runtime_report.cpp
   shielded_v2_send_runtime_report_tests.cpp
   shielded_v2_wire_tests.cpp
-  shielded_wallet_privacy_tests.cpp
-  shielded_wallet_chunk_discovery_tests.cpp
   shielded_chunk_runtime_report.cpp
   shielded_chunk_runtime_report_tests.cpp
   shielded_scan_hint_runtime_report.cpp
@@ -511,6 +509,16 @@ add_executable(test_btx
   versionbits_tests.cpp
   ../stats/test/stats_tests.cpp
 )
+
+# Wallet-only tests must not enter the walletless observer build. Keeping them
+# in the unconditional source list compiles successfully but fails at link time
+# when ENABLE_WALLET=OFF because bitcoin_wallet intentionally does not exist.
+if(TARGET bitcoin_wallet)
+  target_sources(test_btx PRIVATE
+    shielded_wallet_privacy_tests.cpp
+    shielded_wallet_chunk_discovery_tests.cpp
+  )
+endif()
 
 include(TargetDataSources)
 target_json_data_sources(test_btx

@@ -316,11 +316,17 @@ BOOST_AUTO_TEST_CASE(wait_quorum_no_lost_wakeup_cancel_and_timeout)
     BOOST_CHECK(store.WaitForQuorum(TestHash(0x54), 90, 5ms) ==
                 WaitResult::Timeout);
 
+    // The non-blocking verify worker records the same terminal outcomes
+    // without entering AttestationStore::WaitForQuorum.
+    store.RecordWaitResult(WaitResult::Quorum);
+    store.RecordWaitResult(WaitResult::Cancelled);
+    store.RecordWaitResult(WaitResult::Timeout);
+
     const auto stats{store.GetStats()};
-    BOOST_CHECK_EQUAL(stats.waits, 4);
-    BOOST_CHECK_EQUAL(stats.wait_quorums, 2);
-    BOOST_CHECK_EQUAL(stats.wait_cancellations, 1);
-    BOOST_CHECK_EQUAL(stats.wait_timeouts, 1);
+    BOOST_CHECK_EQUAL(stats.waits, 7);
+    BOOST_CHECK_EQUAL(stats.wait_quorums, 3);
+    BOOST_CHECK_EQUAL(stats.wait_cancellations, 2);
+    BOOST_CHECK_EQUAL(stats.wait_timeouts, 2);
 }
 
 BOOST_AUTO_TEST_CASE(capacity_eviction_and_expiry)
