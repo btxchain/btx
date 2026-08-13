@@ -6974,7 +6974,8 @@ PeerManagerImpl::EvaluateTrustedMirrorAttestationAdmit(
     const bool better_work_reorg_candidate{
         tip != nullptr && index != nullptr &&
         index->nChainWork >= tip->nChainWork &&
-        index != tip};
+        index != tip &&
+        TrustedMirrorShortTipReorg(tip, index)};
     const ChainRecoveryState recovery{m_chainman.GetChainRecoveryState()};
     const CBlockIndex* recovery_target{recovery.followed_target};
     const bool on_recovery_branch{
@@ -13173,7 +13174,6 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                      pfrom.GetId());
             return;
         }
-        peer->m_matmul_attestation_request_tokens -= 1.0;
         if (!node::matmul_trusted::ServesAttestations()) {
             MaybeLogAttestationServe(
                 "not_serving", block_hash, /*height=*/-1, pfrom.GetId());
@@ -13241,6 +13241,10 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 "not_canonical", block_hash, height, pfrom.GetId());
             return;
         }
+        // Charge only after the request is canonical. Competing not_canonical
+        // getmmattest used to drain the 16-token bucket so ActiveChain
+        // hashes never got a cached/signed reply.
+        peer->m_matmul_attestation_request_tokens -= 1.0;
 
         const char* serve_reason{"cached"};
         if (node::matmul_trusted::HasLocalSigner()) {
@@ -13511,12 +13515,8 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                         };
                     }
                     m_matmul_attestation_backoff.erase(hash);
-                    if (const CNodeState* state{State(pfrom.GetId())};
-                        state != nullptr &&
-                        state->pindexBestKnownBlock != nullptr) {
-                        node::matmul_trusted::NoteAuthorityPeerTipHint(
-                            state->pindexBestKnownBlock->nHeight);
-                    }
+                    node::matmul_trusted::NoteAuthorityPeerTipHint(
+                        expected_height);
                 }
             } else if (result !=
                        matmul::trusted::AddResult::Duplicate) {
