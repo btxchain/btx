@@ -643,16 +643,14 @@ BOOST_FIXTURE_TEST_CASE(chainstate_normalizes_park_roots_against_active_tip_and_
     BOOST_REQUIRE(active_tip != nullptr);
 
     action = kernel::DeepReorgAction::PARK;
-    BOOST_REQUIRE(chainman.ParkReorgBranch(active_tip));
-    BOOST_CHECK(chainman.IsOnParkedReorgBranch(active_tip));
-    BOOST_REQUIRE(chainman.NormalizeParkedReorgBranches(active_tip));
+    BOOST_CHECK(!chainman.ParkReorgBranch(active_tip));
     BOOST_CHECK(chainman.GetParkedReorgBranchRoots().empty());
     BOOST_CHECK(!chainman.IsOnParkedReorgBranch(active_tip));
 
     // A root left by a prior PARK profile must also be retired atomically when
     // the operator restarts under a warn-only profile, or PARK -> WARN -> PARK
-    // can resurrect a stale refusal later.
-    BOOST_REQUIRE(chainman.ParkReorgBranch(active_tip));
+    // can resurrect a stale refusal later. Active-chain roots are now refused
+    // at insert time; Normalize of an empty set under WARN stays empty.
     action = kernel::DeepReorgAction::WARN;
     BOOST_REQUIRE(chainman.NormalizeParkedReorgBranches(active_tip));
     BOOST_CHECK(chainman.GetParkedReorgBranchRoots().empty());

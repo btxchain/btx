@@ -9893,8 +9893,9 @@ void PeerManagerImpl::ProcessBlockSync(NodeId nodeid, CNode* node, const std::sh
         RefreshMatMulDeferredBodyRetry(
             block->GetHash(), "non-terminal replay result");
     }
-    if (new_block) {
-        if (m_chainman.GetMatMulValidationMode() ==
+    if (new_block || exact_replay_authenticated) {
+        if (exact_replay_authenticated &&
+            m_chainman.GetMatMulValidationMode() ==
                 kernel::MatMulValidationMode::CONSENSUS &&
             node::matmul_trusted::ServesAttestations() &&
             node::matmul_trusted::HasLocalSigner()) {
@@ -9910,7 +9911,8 @@ void PeerManagerImpl::ProcessBlockSync(NodeId nodeid, CNode* node, const std::sh
                     !(index->nStatus & BLOCK_FAILED_MASK) &&
                     m_chainparams.GetConsensus()
                         .IsMatMulTrustedReplayAttestationActive(
-                            index->nHeight)) {
+                            index->nHeight) &&
+                    m_chainman.ActiveChain().Contains(index)) {
                     exact_height = index->nHeight;
                 }
             }
@@ -9947,15 +9949,17 @@ void PeerManagerImpl::ProcessBlockSync(NodeId nodeid, CNode* node, const std::sh
                 }
             }
         }
-        if (node != nullptr) {
-            // Message-thread path: identical to the historical direct access.
-            node->m_last_block_time = GetTime<std::chrono::seconds>();
-        } else {
-            // Worker-thread path: the peer may be gone; ForNode is a no-op then.
-            m_connman.ForNode(nodeid, [](CNode* pnode) {
-                pnode->m_last_block_time = GetTime<std::chrono::seconds>();
-                return true;
-            });
+        if (new_block) {
+            if (node != nullptr) {
+                // Message-thread path: identical to the historical direct access.
+                node->m_last_block_time = GetTime<std::chrono::seconds>();
+            } else {
+                // Worker-thread path: the peer may be gone; ForNode is a no-op then.
+                m_connman.ForNode(nodeid, [](CNode* pnode) {
+                    pnode->m_last_block_time = GetTime<std::chrono::seconds>();
+                    return true;
+                });
+            }
         }
         // In case this block came from a different peer than we requested
         // from, we can erase the block request now anyway (as we just stored
@@ -13065,6 +13069,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         bool failed{false};
         bool profile1{false};
         bool on_active_chain{false};
+        bool on_our_followed_chain{false};
         bool locally_exact{false};
         std::optional<CBlockHeader> header;
         {
@@ -13085,6 +13090,18 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                                index->nHeight);
             on_active_chain =
                 m_chainman.ActiveChain().Contains(index);
+            const CBlockIndex* const tip{m_chainman.ActiveTip()};
+            const CBlockIndex* const followed{m_chainman.m_best_header};
+            // Serve attestations for our own followed chain, including
+            // tip-extending headers we have already ExactReplay-verified while
+            // chasing. Never serve a competing off-tip rewrite (the 137-deep
+            // heavier branch stays unattested).
+            on_our_followed_chain =
+                on_active_chain ||
+                (tip != nullptr && followed != nullptr &&
+                 followed->GetAncestor(tip->nHeight) == tip &&
+                 index->nHeight >= tip->nHeight &&
+                 followed->GetAncestor(index->nHeight) == index);
             locally_exact =
                 !failed && profile1 &&
                 (index->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0;
@@ -13103,7 +13120,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 "not_profile1", block_hash, height, pfrom.GetId());
             return;
         }
-        if (!on_active_chain) {
+        if (!on_our_followed_chain) {
             MaybeLogAttestationServe(
                 "not_canonical", block_hash, height, pfrom.GetId());
             return;

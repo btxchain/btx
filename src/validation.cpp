@@ -9403,8 +9403,24 @@ CBlockIndex* Chainstate::FindMostWorkChain()
         }
 
         if (m_chainman.IsOnParkedReorgBranch(pindexNew)) {
-            setBlockIndexCandidates.erase(pindexNew);
-            continue;
+            // Mirror park-escape: if we parked our own uniquely attested
+            // authority branch (self-inflicted tip-extension into the park
+            // wall), unpark it. A heavier unattested rewrite (the 137-deep
+            // competing miner branch) has no quorum and stays parked.
+            const bool authority_escape{
+                node::matmul_trusted::IsTrustedMirror() &&
+                node::matmul_trusted::HasQuorum(
+                    pindexNew->GetBlockHash(), pindexNew->nHeight) &&
+                m_chain.Tip() != nullptr &&
+                pindexNew->nChainWork >= m_chain.Tip()->nChainWork};
+            if (!authority_escape ||
+                !m_chainman.UnparkReorgBranchContainingBlock(pindexNew)) {
+                setBlockIndexCandidates.erase(pindexNew);
+                continue;
+            }
+            LogWarning("%s: auto-unparked uniquely attested authority branch hash=%s height=%d (park-escape; unattested heavier rewrites stay parked)\n",
+                       __func__, pindexNew->GetBlockHash().ToString(),
+                       pindexNew->nHeight);
         }
         if (m_chainman.ShouldDeferLosingTipExtension(pindexNew)) {
             LogWarning("%s: deferring losing-tip extension hash=%s height=%d while authenticated reorg recovery is armed\n",
@@ -10367,6 +10383,16 @@ bool ChainstateManager::ParkReorgBranch(CBlockIndex* branch_root)
 {
     AssertLockHeld(::cs_main);
     if (branch_root == nullptr) return false;
+    // A parked root ancestral to the active tip makes IsOnParkedReorgBranch(tip)
+    // true and permanently rejects tip candidate insertion (PARK→WARN→PARK).
+    // Never persist such a root; NormalizeParkedReorgBranches still repairs
+    // legacy datadirs that already have one on disk.
+    if (ActiveChain().Contains(branch_root)) {
+        LogWarning("%s: refusing to park active-chain ancestor hash=%s height=%d\n",
+                   __func__, branch_root->GetBlockHash().ToString(),
+                   branch_root->nHeight);
+        return false;
+    }
     const uint256 root_hash = branch_root->GetBlockHash();
     if (!m_parked_reorg_branch_roots.insert(root_hash).second) return true;
     if (!PersistParkedReorgBranches()) {
