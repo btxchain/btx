@@ -34,6 +34,30 @@ episodes.
 no coverage failures. The committed production manifest pins the nonce-1
 digest and both provider-specific harness identities to this freeze.
 
+## Production seal on this PR
+
+This directory is the Authority CUDA golden other operators can consume.
+The JSON capture freeze above is unchanged. The production canary on
+`pr/0.33.3-network-stability` seals that same cohort to the stall-fix
+source tree:
+
+| | |
+|---|---|
+| Manifest `source_revision` | `3d7a6600ac79ff7a48c2c59ac11f1646b676dedb` |
+| Manifest `source_tree_fingerprint` | `3081521fb3b20c27676a86f22bec891b176cbaa8f382672f0b158a4293592ea6` |
+| Seal commit | `3455bbdcfe6b905cf9e1705c6f18a4cfc2de9a1f` |
+| Nonce-1 digest | `b4777985d4f2621d0b9c119f4188ac7d80158fc92560ade96cc7a3fd8cfae953` |
+| CUDA artifact | [`raw/profile1-cuda-8.json`](raw/profile1-cuda-8.json) |
+| Manifest | [`src/matmul/matmul_v4_rc_production_golden_manifest.data`](../../../src/matmul/matmul_v4_rc_production_golden_manifest.data) |
+
+A live CUDA signer built from that seal passed `canary=passed` against this
+digest. CPU/pool nodes should build this branch; they do not need a CUDA
+`btxd`. Do not follow the competing most-work fork. The authenticated tip to
+recover onto is height **187798**, hash
+`891e0e33ef0b3b535e210da2350580d32d92835a5f3c342a709c67baf892c577`. Public
+archival `addnode` seeds are in
+[`doc/btx-public-node-bootstrap.md`](../../../doc/btx-public-node-bootstrap.md).
+
 ## Policy
 
 Independent reproduction for Epoch-A production goldens is
