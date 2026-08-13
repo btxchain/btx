@@ -413,6 +413,22 @@ void Shutdown(NodeContext& node)
                 chainstate->ForceFlushStateToDisk();
             }
         }
+        // §11: seal tip-matched shielded state on graceful stop so a leftover
+        // PREPARED/legacy mutation marker cannot force a multi-hour
+        // from-genesis rebuild on the next start. PersistShieldedState refreshes
+        // the tip snapshot, pin, nullifier accumulator, and clears the marker.
+        if (node.chainman->HasShieldedState()) {
+            if (!node.chainman->PersistShieldedState(node.chainman->ActiveTip())) {
+                LogPrintf("Shutdown: PersistShieldedState failed while sealing shielded tip; "
+                          "next start may rebuild shielded state from chain\n");
+            } else {
+                LogPrintf("Shutdown: sealed shielded state at tip height=%d hash=%s\n",
+                          node.chainman->ActiveTip() ? node.chainman->ActiveTip()->nHeight : -1,
+                          node.chainman->ActiveTip()
+                              ? node.chainman->ActiveTip()->GetBlockHash().ToString()
+                              : uint256{}.ToString());
+            }
+        }
     }
 
     // After there are no more peers/RPC left to give us new data which may generate

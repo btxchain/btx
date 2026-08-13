@@ -3522,6 +3522,132 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_fails_closed_when_marker_rebuild_needs
     }
 }
 
+// §11: a tip-matched PREPARED journal whose prepared redo cannot run (e.g. bogus
+// source tip) must not force a from-genesis rebuild when the durable tip snapshot
+// already carries a verifying pin+accumulator. Production clean-stop leftovers of
+// this shape were the multi-hour restart tax.
+BOOST_FIXTURE_TEST_CASE(chainstatemanager_skips_genesis_rebuild_for_stale_tip_matched_prepared_marker,
+                        PersistedTestChain100Setup)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    auto simulate_node_restart = [&]() -> ChainstateManager& {
+        ChainstateManager& current_chainman = *Assert(m_node.chainman);
+
+        for (Chainstate* cs : current_chainman.GetAll()) {
+            LOCK(::cs_main);
+            cs->ForceFlushStateToDisk();
+        }
+        m_node.validation_signals->SyncWithValidationInterfaceQueue();
+        {
+            LOCK(::cs_main);
+            current_chainman.ResetChainstates();
+            BOOST_CHECK_EQUAL(current_chainman.GetAll().size(), 0);
+            m_node.notifications = std::make_unique<KernelNotifications>(
+                Assert(m_node.shutdown_request), m_node.exit_status, *Assert(m_node.warnings));
+            const ChainstateManager::Options chainman_opts{
+                .chainparams = ::Params(),
+                .datadir = current_chainman.m_options.datadir,
+                .notifications = *m_node.notifications,
+                .signals = m_node.validation_signals.get(),
+            };
+            const BlockManager::Options blockman_opts{
+                .chainparams = chainman_opts.chainparams,
+                .blocks_dir = m_args.GetBlocksDirPath(),
+                .notifications = chainman_opts.notifications,
+                .block_tree_db_params = DBParams{
+                    .path = current_chainman.m_options.datadir / "blocks" / "index",
+                    .cache_bytes = m_kernel_cache_sizes.block_tree_db,
+                    .memory_only = m_block_tree_db_in_memory,
+                },
+            };
+            m_node.chainman.reset();
+            m_node.chainman = std::make_unique<ChainstateManager>(
+                *Assert(m_node.shutdown_signal), chainman_opts, blockman_opts);
+        }
+        return *Assert(m_node.chainman);
+    };
+
+    uint256 expected_tip_hash;
+    int32_t expected_tip_height{-1};
+    size_t expected_tree_size{0};
+    uint256 expected_tree_root;
+    uint64_t expected_nullifier_count{0};
+    CAmount expected_pool_balance{0};
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman.EnsureShieldedStateInitialized());
+        BOOST_REQUIRE(chainman.ActiveTip() != nullptr);
+        expected_tip_hash = chainman.ActiveTip()->GetBlockHash();
+        expected_tip_height = chainman.ActiveTip()->nHeight;
+        expected_tree_size = chainman.GetShieldedMerkleTree().Size();
+        expected_tree_root = chainman.GetShieldedMerkleTree().Root();
+        expected_nullifier_count = chainman.GetShieldedNullifierCount();
+        expected_pool_balance = chainman.GetShieldedPoolBalance();
+        BOOST_REQUIRE(chainman.ComputeShieldedSnapshotStatePin().has_value());
+        // Ensure tip pin/accumulator are sealed on disk before planting the stale marker.
+        BOOST_REQUIRE(chainman.PersistShieldedState(chainman.ActiveTip()));
+
+        ShieldedStateMutationMarker prepared_marker;
+        prepared_marker.version = ShieldedStateMutationMarker::PREPARED_TRANSITION_VERSION;
+        prepared_marker.stage = ShieldedStateMutationMarker::PREPARED_STAGE;
+        // Tip-matched target, but a nonexistent source tip so prepared redo fails
+        // and would previously fall through to rebuild_from_chain.
+        prepared_marker.source_tip_hash = GetRandHash();
+        prepared_marker.source_tip_height = std::max(0, expected_tip_height - 1);
+        prepared_marker.target_tip_hash = expected_tip_hash;
+        prepared_marker.target_tip_height = expected_tip_height;
+        prepared_marker.prepared_target_snapshot.tree = chainman.GetShieldedMerkleTree();
+        prepared_marker.prepared_target_snapshot.pool_balance = expected_pool_balance;
+        const auto target_commitment_index_digest =
+            chainman.GetShieldedMerkleTree().CommitmentIndexDigest();
+        BOOST_REQUIRE(target_commitment_index_digest.has_value());
+        prepared_marker.prepared_target_snapshot.commitment_index_digest =
+            *target_commitment_index_digest;
+        prepared_marker.prepared_target_snapshot.account_registry_snapshot =
+            chainman.GetShieldedAccountRegistry().ExportPersistedSnapshot();
+        prepared_marker.prepared_target_snapshot.journaled_account_payloads =
+            chainman.GetShieldedAccountRegistry().ExportSnapshot().entries;
+        BOOST_REQUIRE(prepared_marker.IsPreparedTransitionJournal());
+        BOOST_REQUIRE(chainman.WriteShieldedMutationMarker(prepared_marker));
+        BOOST_REQUIRE(chainman.ReadShieldedMutationMarker().has_value());
+    }
+
+    ChainstateManager& chainman_restarted = simulate_node_restart();
+    this->LoadVerifyActivateChainstate();
+
+    {
+        LOCK(::cs_main);
+        ASSERT_DEBUG_LOG("clearing stale tip-matched PREPARED mutation marker");
+        DebugLogHelper no_full_rebuild(
+            "rebuilding full shielded state from chain",
+            [](const std::string* line) {
+                if (line != nullptr) {
+                    throw std::runtime_error(
+                        "unexpected from-genesis rebuild for tip-matched PREPARED marker");
+                }
+                return false;
+            });
+        DebugLogHelper no_genesis_replay(
+            "replaying",
+            [](const std::string* line) {
+                if (line != nullptr && line->find("genesis") != std::string::npos) {
+                    throw std::runtime_error(
+                        "unexpected genesis replay for tip-matched PREPARED marker");
+                }
+                return false;
+            });
+        BOOST_REQUIRE(chainman_restarted.EnsureShieldedStateInitialized());
+        BOOST_REQUIRE(chainman_restarted.ActiveTip() != nullptr);
+        BOOST_CHECK(chainman_restarted.ActiveTip()->GetBlockHash() == expected_tip_hash);
+        BOOST_CHECK_EQUAL(chainman_restarted.ActiveTip()->nHeight, expected_tip_height);
+        BOOST_CHECK_EQUAL(chainman_restarted.GetShieldedMerkleTree().Size(), expected_tree_size);
+        BOOST_CHECK_EQUAL(chainman_restarted.GetShieldedMerkleTree().Root(), expected_tree_root);
+        BOOST_CHECK_EQUAL(chainman_restarted.GetShieldedNullifierCount(), expected_nullifier_count);
+        BOOST_CHECK_EQUAL(chainman_restarted.GetShieldedPoolBalance(), expected_pool_balance);
+        BOOST_CHECK(!chainman_restarted.ReadShieldedMutationMarker().has_value());
+    }
+}
+
 BOOST_FIXTURE_TEST_CASE(chainstatemanager_restores_prepared_shielded_transition_from_journal,
                         PersistedTestChain100Setup)
 {
