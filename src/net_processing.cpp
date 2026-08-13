@@ -2565,7 +2565,11 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
         return m_chainman.ActiveChain().Tip()
                    ? m_chainman.ActiveChain().Tip()->GetBlockHash()
                    : uint256{})};
-    const auto retry{m_matmul_block_lifecycle.NextRetry(wanted)};
+    const bool idle_catchup{
+        m_matmul_pending_verifications.load(std::memory_order_relaxed) == 0 &&
+        m_matmul_rc_pending_verifications.load(std::memory_order_relaxed) == 0};
+    const auto retry{m_matmul_block_lifecycle.NextRetry(
+        wanted, node::MatMulBlockLifecycle::Clock::now(), idle_catchup)};
     if (!retry) return;
     candidate_hash = retry->first;
     candidate = retry->second;
@@ -3514,7 +3518,9 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
             select_reason = "root_async_pending";
         } else if (IsMatMulBudgetDeferred(root_first.lowest_missing->GetBlockHash(),
                                           now_for_diag)) {
-            select_reason = "root_budget_deferred";
+            select_reason = (blocks_in_flight_global == 0)
+                                ? "idle_catchup_budget_deferred"
+                                : "root_budget_deferred";
         } else {
             select_reason = root_first.clamped ? "clamped_request_root" : "request_root";
         }
@@ -3719,8 +3725,18 @@ void PeerManagerImpl::FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, c
             // refill rather than re-requesting into a discard/re-request loop.
             if (IsMatMulBudgetDeferred(pindex->GetBlockHash(),
                                        GetTime<std::chrono::microseconds>())) {
-                // Same reasoning as the async-verification gap above.
-                return;
+                // Budget defers pace concurrent verifies. When the download
+                // map is empty they must not block the only needed body —
+                // that is the production idle stall (in_flight_global=0
+                // while headers sit ahead, then a burst that looks like a
+                // deep reorg).
+                if (!mapBlocksInFlight.empty()) {
+                    return;
+                }
+                LogDebug(BCLog::NET,
+                         "Idle catch-up: requesting budget-deferred block %s "
+                         "height=%d (in_flight_global=0)\n",
+                         pindex->GetBlockHash().ToString(), pindex->nHeight);
             }
 
             // Same reasoning for a body THIS PEER deferred for want of an RC
@@ -4525,6 +4541,17 @@ bool PeerManagerImpl::ConsumeMatMulVerificationBudgetForPeer(
         *retry_delay = MATMUL_BUDGET_DEFER_COOLDOWN;
     }
     if (verification_count == 0) return true;
+    auto allow_idle_catchup = [&]() -> bool {
+        if (m_matmul_pending_verifications.load(std::memory_order_relaxed) != 0 ||
+            m_matmul_rc_pending_verifications.load(std::memory_order_relaxed) != 0) {
+            return false;
+        }
+        LogDebug(BCLog::NET,
+                 "Idle MatMul catch-up: allowing verify despite exhausted budget peer=%s\n",
+                 peer.m_addr.ToStringAddr());
+        global_exhausted = false;
+        return true;
+    };
     {
         UniqueLock lock(m_matmul_addr_budget_mutex, "m_matmul_addr_budget_mutex", __FILE__, __LINE__);
         MaybeExpireMatMulSourceBudgets(now);
@@ -4541,6 +4568,7 @@ bool PeerManagerImpl::ConsumeMatMulVerificationBudgetForPeer(
                     *retry_delay = MatMulRCSourceBudgetRetryDelay(
                         budget_state.budget, netgroup_state.budget, now);
                 }
+                if (allow_idle_catchup()) return true;
                 return false;
             }
             uint32_t global_budget =
@@ -4629,6 +4657,7 @@ bool PeerManagerImpl::ConsumeMatMulVerificationBudgetForPeer(
                 }
                 LogDebug(BCLog::NET, "Global RC verify budget exhausted (%u/min), deferring peer %s\n",
                          global_budget, peer.m_addr.ToStringAddr());
+                if (allow_idle_catchup()) return true;
                 return false;
             }
             return true;
@@ -4650,6 +4679,7 @@ bool PeerManagerImpl::ConsumeMatMulVerificationBudgetForPeer(
                     reference_height, lane)) {
                 source_window_start = saved_window_start;
                 source_count = saved_count;
+                if (allow_idle_catchup()) return true;
                 return false;
             }
         }
@@ -4670,6 +4700,7 @@ bool PeerManagerImpl::ConsumeMatMulVerificationBudgetForPeer(
                 global_exhausted = true;
                 LogDebug(BCLog::NET, "Global Phase2 budget exhausted (%u/min), deferring peer %s\n",
                          global_budget, peer.m_addr.ToStringAddr());
+                if (allow_idle_catchup()) return true;
                 return false;
             }
         }

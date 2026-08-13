@@ -215,7 +215,8 @@ public:
 
     std::optional<std::pair<uint256, RetainedBody>> NextRetry(
         const uint256& preferred_parent,
-        Clock::time_point now = Clock::now())
+        Clock::time_point now = Clock::now(),
+        bool ignore_retry_delay = false)
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         PruneExpiredRetained(now);
@@ -223,7 +224,7 @@ public:
         for (auto it = m_entries.begin(); it != m_entries.end(); ++it) {
             const Entry& entry{it->second};
             if (!entry.body || IsActive(entry.state) ||
-                now < entry.body->retry_not_before) {
+                (!ignore_retry_delay && now < entry.body->retry_not_before)) {
                 continue;
             }
             if (entry.body->block->hashPrevBlock == preferred_parent) {

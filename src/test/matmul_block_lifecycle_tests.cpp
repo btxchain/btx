@@ -117,6 +117,18 @@ BOOST_AUTO_TEST_CASE(retry_cooldown_prevents_header_only_hot_loop)
     BOOST_CHECK(lifecycle.NextRetry(uint256{}, now + 60s).has_value());
 }
 
+BOOST_AUTO_TEST_CASE(idle_catchup_ignores_retry_cooldown)
+{
+    node::MatMulBlockLifecycle lifecycle{1, 100, 10min, 10min};
+    const auto now{node::MatMulBlockLifecycle::Clock::now()};
+    const uint256 hash{
+        uint256::FromHex(std::string(63, '0') + "5").value()};
+    BOOST_REQUIRE(lifecycle.Retain(hash, Body(8, 50, now), now));
+    BOOST_REQUIRE(lifecycle.RefreshRetry(hash, 60s, now));
+    BOOST_CHECK(!lifecycle.NextRetry(uint256{}, now + 1s).has_value());
+    BOOST_CHECK(lifecycle.NextRetry(uint256{}, now + 1s, /*ignore_retry_delay=*/true).has_value());
+}
+
 BOOST_AUTO_TEST_CASE(capacity_does_not_evict_active_generation)
 {
     node::MatMulBlockLifecycle lifecycle{1, 100, 10min, 10min};
