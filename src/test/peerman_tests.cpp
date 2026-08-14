@@ -1557,6 +1557,162 @@ BOOST_AUTO_TEST_CASE(getmmattest_skips_non_serving_peers)
     BOOST_CHECK(HasQueuedMessageType(mirror, NetMsgType::GETMMATTEST));
 }
 
+BOOST_AUTO_TEST_CASE(getdata_unknown_block_sends_notfound)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+
+    ConnmanTestMsg& connman{static_cast<ConnmanTestMsg&>(*m_node.connman)};
+    PeerManager& peerman{*Assert(m_node.peerman)};
+    const ServiceFlags services{ServiceFlags(NODE_NETWORK | NODE_WITNESS)};
+    CNode peer{/*id=*/91, /*sock=*/nullptr, CAddress{},
+               /*nKeyedNetGroupIn=*/0, /*nLocalHostNonceIn=*/0,
+               CAddress{}, /*addrNameIn=*/"notfound-peer",
+               ConnectionType::OUTBOUND_FULL_RELAY,
+               /*inbound_onion=*/false, /*network_key=*/0};
+    connman.Handshake(peer, /*successfully_connected=*/true, services,
+                      services, PROTOCOL_VERSION, /*relay_txs=*/true);
+    connman.FlushSendBuffer(peer);
+    struct FinalizePeer {
+        PeerManager& peerman;
+        ConnmanTestMsg& connman;
+        CNode& peer;
+        ~FinalizePeer()
+        {
+            peerman.FinalizeNode(peer);
+            connman.RemoveTestNode(peer);
+        }
+    } finalize{peerman, connman, peer};
+
+    std::vector<CInv> inv{{MSG_BLOCK | MSG_WITNESS_FLAG, uint256::ONE}};
+    BOOST_REQUIRE(connman.ReceiveMsgFrom(
+        peer, NetMsg::Make(NetMsgType::GETDATA, inv)));
+    peer.fPauseSend = false;
+    (void)connman.ProcessMessagesOnce(peer);
+    BOOST_CHECK(HasQueuedMessageType(peer, NetMsgType::NOTFOUND));
+}
+
+BOOST_AUTO_TEST_CASE(catchup_requests_only_lowest_hole_and_fails_over_silent_peer)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+
+    ChainstateManager& chainman{*Assert(m_node.chainman)};
+    PeerManager& peerman{*Assert(m_node.peerman)};
+    ConnmanTestMsg& connman{static_cast<ConnmanTestMsg&>(*m_node.connman)};
+    const CBlockIndex* starting_tip{
+        WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip())};
+    BOOST_REQUIRE(starting_tip != nullptr);
+    SetMockTime(std::chrono::seconds{starting_tip->GetBlockTime() + 3600});
+    BOOST_REQUIRE(!chainman.IsInitialBlockDownload());
+
+    auto make_header = [&](const CBlockIndex& prev, unsigned char tag) {
+        CBlock block;
+        block.SetNull();
+        block.hashPrevBlock = prev.GetBlockHash();
+        block.hashMerkleRoot = uint256::FromHex(
+            std::string(62, '0') + strprintf("%02x", tag)).value();
+        block.nTime = prev.GetBlockTime() + 1;
+        block.nBits = prev.nBits;
+        block.nVersion = VERSIONBITS_TOP_BITS;
+        BOOST_REQUIRE(MineHeaderForConsensus(
+            block, prev.nHeight + 1, chainman.GetConsensus(), 5'000'000,
+            prev.GetMedianTimePast()));
+        BlockValidationState state;
+        const CBlockHeader header{block.GetBlockHeader()};
+        BOOST_REQUIRE_MESSAGE(chainman.ProcessNewBlockHeaders(
+            {{header}}, /*min_pow_checked=*/true, state), state.ToString());
+        CBlockIndex* index{WITH_LOCK(
+            ::cs_main,
+            return chainman.m_blockman.LookupBlockIndex(block.GetHash()))};
+        BOOST_REQUIRE(index != nullptr);
+        return index;
+    };
+
+    const CBlockIndex* tip{
+        WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip())};
+    std::vector<CBlockIndex*> headers;
+    const CBlockIndex* walk{tip};
+    for (unsigned char tag = 0xc1; tag <= 0xc6; ++tag) {
+        CBlockIndex* nxt{make_header(*walk, tag)};
+        headers.push_back(nxt);
+        walk = nxt;
+    }
+    BOOST_REQUIRE_EQUAL(headers.size(), 6U);
+    BOOST_CHECK_EQUAL(
+        WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip()->nHeight),
+        tip->nHeight);
+    BOOST_CHECK_EQUAL(
+        WITH_LOCK(::cs_main, return chainman.m_best_header->nHeight),
+        tip->nHeight + 6);
+
+    const ServiceFlags services{ServiceFlags(NODE_NETWORK | NODE_WITNESS)};
+    CNode silent{/*id=*/92, /*sock=*/nullptr, CAddress{},
+                 /*nKeyedNetGroupIn=*/0, /*nLocalHostNonceIn=*/0,
+                 CAddress{}, /*addrNameIn=*/"catchup-silent",
+                 ConnectionType::OUTBOUND_FULL_RELAY,
+                 /*inbound_onion=*/false, /*network_key=*/0};
+    CNode second{/*id=*/93, /*sock=*/nullptr, CAddress{},
+                 /*nKeyedNetGroupIn=*/1, /*nLocalHostNonceIn=*/0,
+                 CAddress{}, /*addrNameIn=*/"catchup-second",
+                 ConnectionType::OUTBOUND_FULL_RELAY,
+                 /*inbound_onion=*/false, /*network_key=*/0};
+    connman.Handshake(silent, /*successfully_connected=*/true, services,
+                      services, PROTOCOL_VERSION, /*relay_txs=*/true);
+    connman.Handshake(second, /*successfully_connected=*/true, services,
+                      services, PROTOCOL_VERSION, /*relay_txs=*/true);
+    connman.FlushSendBuffer(silent);
+    connman.FlushSendBuffer(second);
+    struct FinalizePeers {
+        PeerManager& peerman;
+        ConnmanTestMsg& connman;
+        CNode& silent;
+        CNode& second;
+        ~FinalizePeers()
+        {
+            peerman.FinalizeNode(silent);
+            peerman.FinalizeNode(second);
+            connman.RemoveTestNode(silent);
+            connman.RemoveTestNode(second);
+        }
+    } finalize{peerman, connman, silent, second};
+
+    auto advertise = [&](CNode& peer) {
+        std::vector<CBlock> hdrs;
+        hdrs.reserve(headers.size());
+        {
+            LOCK(::cs_main);
+            for (CBlockIndex* idx : headers) {
+                hdrs.emplace_back(idx->GetBlockHeader());
+            }
+        }
+        BOOST_REQUIRE(connman.ReceiveMsgFrom(
+            peer, NetMsg::Make(NetMsgType::HEADERS, TX_WITH_WITNESS(hdrs))));
+        peer.fPauseSend = false;
+        (void)connman.ProcessMessagesOnce(peer);
+    };
+    advertise(silent);
+    advertise(second);
+
+    BOOST_CHECK(peerman.SendMessages(&silent));
+    CNodeStateStats silent_stats;
+    BOOST_REQUIRE(peerman.GetNodeStateStats(silent.GetId(), silent_stats));
+    BOOST_REQUIRE_EQUAL(silent_stats.vHeightInFlight.size(), 1U);
+    BOOST_CHECK_EQUAL(silent_stats.vHeightInFlight.front(), tip->nHeight + 1);
+    BOOST_CHECK(HasQueuedMessageType(silent, NetMsgType::GETDATA));
+
+    BOOST_CHECK(peerman.SendMessages(&second));
+    CNodeStateStats second_stats;
+    BOOST_REQUIRE(peerman.GetNodeStateStats(second.GetId(), second_stats));
+    BOOST_REQUIRE_EQUAL(second_stats.vHeightInFlight.size(), 1U);
+    BOOST_CHECK_EQUAL(second_stats.vHeightInFlight.front(), tip->nHeight + 1);
+
+    SetMockTime(std::chrono::seconds{GetTime() + 16});
+    BOOST_CHECK(peerman.SendMessages(&silent));
+    CNodeStateStats silent_after;
+    BOOST_REQUIRE(peerman.GetNodeStateStats(silent.GetId(), silent_after));
+    BOOST_CHECK(silent_after.vHeightInFlight.empty());
+    BOOST_CHECK(!silent.fDisconnect);
+}
+
 BOOST_AUTO_TEST_CASE(broadcast_transaction_fails_closed_without_peerman)
 {
     std::unique_ptr<PeerManager> saved_peerman = std::move(m_node.peerman);

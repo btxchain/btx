@@ -184,4 +184,44 @@ BOOST_AUTO_TEST_CASE(no_clamp_when_contiguous_from_tip_lca)
     BOOST_CHECK_EQUAL(result.last_common->nHeight, 3);
 }
 
+BOOST_AUTO_TEST_CASE(have_data_unconnected_child_does_not_hide_next_hole)
+{
+    // Production catch-up: tip=H, last_common=H+1 with HAVE_DATA but not
+    // connected, lowest_missing=H+2. Download must still see H+2 as the hole;
+    // connecting H+1 is ActivateBestChain's job. A walk that then fills 16
+    // successors of H+2 is the root_in_flight stall — covered in peerman.
+    ChainFixture f;
+    CBlockIndex* genesis = f.Add(nullptr, 0);
+    ChainFixture::MarkHaveData(genesis, /*have_chain_txs=*/true);
+
+    std::vector<CBlockIndex*> chain;
+    chain.push_back(genesis);
+    for (int h = 1; h <= 5; ++h) {
+        CBlockIndex* idx = f.Add(chain.back(), h);
+        if (h <= 2) {
+            ChainFixture::MarkHaveData(idx, /*have_chain_txs=*/true);
+        }
+        chain.push_back(idx);
+    }
+
+    CChain active;
+    active.SetTip(*chain[1]);
+    BOOST_CHECK(active.Contains(chain[1]));
+    BOOST_CHECK(!active.Contains(chain[2]));
+    BOOST_CHECK(chain[2]->nStatus & BLOCK_HAVE_DATA);
+
+    const LastCommonRootFirstResult result = ClampLastCommonToRootFirst(
+        /*last_common=*/chain[2],
+        /*best_known=*/chain[5],
+        /*tip=*/chain[1],
+        &active);
+
+    BOOST_CHECK(!result.clamped);
+    BOOST_REQUIRE(result.last_common != nullptr);
+    BOOST_CHECK_EQUAL(result.last_common->nHeight, 2);
+    BOOST_REQUIRE(result.lowest_missing != nullptr);
+    BOOST_CHECK_EQUAL(result.lowest_missing->nHeight, 3);
+    BOOST_CHECK(result.last_common->nHeight > active.Height());
+}
+
 BOOST_AUTO_TEST_SUITE_END()
