@@ -424,6 +424,10 @@ void Shutdown(NodeContext& node)
         LOCK(cs_main);
         for (Chainstate* chainstate : node.chainman->GetAll()) {
             if (chainstate->CanFlushToDisk()) {
+                // FlushStateToDisk already skips CompactFull when m_chainman.m_interrupt
+                // is set. DisableNewCompaction covers Shutdown() without Interrupt()
+                // (failed init / Qt) so a shutdown flush cannot start a new CompactFull.
+                chainstate->CoinsDB().DisableNewCompaction();
                 chainstate->ForceFlushStateToDisk();
             }
         }
@@ -467,11 +471,29 @@ void Shutdown(NodeContext& node)
     // next startup faster by avoiding rescan.
 
     if (node.chainman) {
-        LOCK(cs_main);
-        for (Chainstate* chainstate : node.chainman->GetAll()) {
-            if (chainstate->CanFlushToDisk()) {
-                chainstate->ForceFlushStateToDisk();
-                chainstate->ResetCoinsViews();
+        std::vector<CCoinsViewDB*> coins_dbs;
+        {
+            LOCK(cs_main);
+            for (Chainstate* chainstate : node.chainman->GetAll()) {
+                if (chainstate->CanFlushToDisk()) {
+                    chainstate->CoinsDB().DisableNewCompaction();
+                    chainstate->ForceFlushStateToDisk();
+                    coins_dbs.push_back(&chainstate->CoinsDB());
+                }
+            }
+        }
+        // Wait for any in-flight CompactFull without cs_main. Holding cs_main
+        // across CCoinsViewDB destruction previously blocked the node until
+        // LevelDB Compact() finished (systemd SIGKILL / skipped seal).
+        for (CCoinsViewDB* coins_db : coins_dbs) {
+            coins_db->WaitForCompaction();
+        }
+        {
+            LOCK(cs_main);
+            for (Chainstate* chainstate : node.chainman->GetAll()) {
+                if (chainstate->CanFlushToDisk()) {
+                    chainstate->ResetCoinsViews();
+                }
             }
         }
     }

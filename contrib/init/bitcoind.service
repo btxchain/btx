@@ -37,7 +37,8 @@ PIDFile=/run/bitcoind/bitcoind.pid
 
 Restart=on-failure
 TimeoutStartSec=infinity
-TimeoutStopSec=600
+# 1h graceful stop: shielded seal + any leftover CompactFull. Do not use 600s.
+TimeoutStopSec=3600
 
 # Directory creation and permissions
 ####################################

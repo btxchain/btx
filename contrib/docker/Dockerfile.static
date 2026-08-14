@@ -34,9 +34,9 @@ RUN cmake .. \
     -DCMAKE_FIND_LIBRARY_SUFFIXES=".a" \
     -DCMAKE_CXX_STANDARD_LIBRARIES="-levent_core -levent_extra -levent_pthreads -levent -lsqlite3 -lzmq -lz" \
     -DBUILD_DAEMON="ON" -DBUILD_CLI="ON" -DENABLE_WALLET="ON" -DWITH_SQLITE="ON" -DWITH_ZMQ="ON" \
-    -DBUILD_TESTS="OFF" -DBUILD_GUI="OFF" -DBUILD_TX="OFF" -DBUILD_UTIL="OFF" \
+    -DBUILD_TESTS="OFF" -DBUILD_GUI="OFF" -DBUILD_TX="OFF" -DBUILD_UTIL="ON" \
     -DBUILD_WALLET_TOOL="OFF" -DBUILD_BENCH="OFF" -DBUILD_FUZZ_BINARY="OFF" \
     -DBUILD_UTIL_CHAINSTATE="OFF" -DWITH_BDB="OFF" -DWITH_USDT="OFF" \
     -DINSTALL_MAN="OFF" -DWITH_CCACHE="OFF"
-RUN cmake --build . --target btxd btx-cli -j$(nproc)
-RUN strip bin/btxd bin/btx-cli && file bin/btxd
+RUN cmake --build . --target btxd btx-cli btx-util -j$(nproc)
+RUN strip bin/btxd bin/btx-cli bin/btx-util && file bin/btxd

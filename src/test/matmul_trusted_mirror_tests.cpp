@@ -688,21 +688,43 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         /*trusted_mirror_profile1=*/false, /*has_quorum=*/false));
     BOOST_CHECK(!TrustedMirrorMustDeferUnattestedConnect(
         /*trusted_mirror_profile1=*/false, /*has_quorum=*/true));
+    using node::matmul_trusted::TrustedMirrorAttestedSiblingIsActionable;
+    // Qualifier 3ed2619c: the attested tip / self candidate must not defer
+    // a sole linear tip-child.
+    BOOST_CHECK(!TrustedMirrorAttestedSiblingIsActionable(
+        /*distinct_from_candidate=*/false, /*same_parent=*/true,
+        /*same_height_as_tip_child=*/true, /*has_quorum=*/true));
+    BOOST_CHECK(!TrustedMirrorAttestedSiblingIsActionable(
+        /*distinct_from_candidate=*/true, /*same_parent=*/false,
+        /*same_height_as_tip_child=*/true, /*has_quorum=*/true));
+    BOOST_CHECK(!TrustedMirrorAttestedSiblingIsActionable(
+        /*distinct_from_candidate=*/true, /*same_parent=*/true,
+        /*same_height_as_tip_child=*/false, /*has_quorum=*/true));
+    BOOST_CHECK(!TrustedMirrorAttestedSiblingIsActionable(
+        /*distinct_from_candidate=*/true, /*same_parent=*/true,
+        /*same_height_as_tip_child=*/true, /*has_quorum=*/false));
+    BOOST_CHECK(!TrustedMirrorAttestedSiblingIsActionable(
+        /*distinct_from_candidate=*/true, /*same_parent=*/true,
+        /*same_height_as_tip_child=*/true, /*has_quorum=*/true,
+        /*failed=*/true));
+    BOOST_CHECK(TrustedMirrorAttestedSiblingIsActionable(
+        /*distinct_from_candidate=*/true, /*same_parent=*/true,
+        /*same_height_as_tip_child=*/true, /*has_quorum=*/true));
     using node::matmul_trusted::TrustedMirrorDeferUnattestedMostWorkForAttestedSibling;
     BOOST_CHECK(TrustedMirrorDeferUnattestedMostWorkForAttestedSibling(
-        /*trusted_mirror_profile1=*/true, /*candidate_extends_tip=*/true,
+        /*configured_profile1=*/true, /*candidate_extends_tip=*/true,
         /*candidate_has_quorum=*/false, /*attested_tip_child_exists=*/true));
     BOOST_CHECK(!TrustedMirrorDeferUnattestedMostWorkForAttestedSibling(
-        /*trusted_mirror_profile1=*/true, /*candidate_extends_tip=*/true,
+        /*configured_profile1=*/true, /*candidate_extends_tip=*/true,
         /*candidate_has_quorum=*/false, /*attested_tip_child_exists=*/false));
     BOOST_CHECK(!TrustedMirrorDeferUnattestedMostWorkForAttestedSibling(
-        /*trusted_mirror_profile1=*/true, /*candidate_extends_tip=*/true,
+        /*configured_profile1=*/true, /*candidate_extends_tip=*/true,
         /*candidate_has_quorum=*/true, /*attested_tip_child_exists=*/true));
     BOOST_CHECK(!TrustedMirrorDeferUnattestedMostWorkForAttestedSibling(
-        /*trusted_mirror_profile1=*/false, /*candidate_extends_tip=*/true,
+        /*configured_profile1=*/false, /*candidate_extends_tip=*/true,
         /*candidate_has_quorum=*/false, /*attested_tip_child_exists=*/true));
     BOOST_CHECK(!TrustedMirrorDeferUnattestedMostWorkForAttestedSibling(
-        /*trusted_mirror_profile1=*/true, /*candidate_extends_tip=*/false,
+        /*configured_profile1=*/true, /*candidate_extends_tip=*/false,
         /*candidate_has_quorum=*/false, /*attested_tip_child_exists=*/true));
     using node::matmul_trusted::BlocksBehindSignedFrontier;
     BOOST_CHECK_EQUAL(BlocksBehindSignedFrontier(188160, 187947), 213);

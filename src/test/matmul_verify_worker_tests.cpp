@@ -2158,6 +2158,60 @@ BOOST_AUTO_TEST_CASE(
     scheduler.ConfigureWorkspaceCapacity("", 0);
 }
 
+BOOST_AUTO_TEST_CASE(rc_accelerator_scheduler_tip_validation_displaces_oldest_same_lane)
+{
+    using Scheduler = matmul::v4::rc::RCAcceleratorScheduler;
+    auto& scheduler{matmul::v4::rc::GetRCAcceleratorScheduler()};
+    BOOST_REQUIRE(scheduler.ResetStatsForTest());
+
+    std::atomic_bool owner_cancelled{false};
+    auto owner{scheduler.Acquire(
+        Scheduler::Priority::CandidateMining, &owner_cancelled,
+        "mining-owner")};
+    BOOST_REQUIRE(owner);
+
+    std::atomic_bool first_cancelled{false};
+    std::atomic_bool first_acquired{true};
+    std::thread first{[&] {
+        auto lease{scheduler.Acquire(
+            Scheduler::Priority::TipValidation, &first_cancelled,
+            "sibling-a", nullptr, std::chrono::seconds{30})};
+        first_acquired.store(static_cast<bool>(lease),
+                             std::memory_order_relaxed);
+    }};
+    BOOST_REQUIRE(WaitFor(
+        [&] { return scheduler.GetStats().queue_depth == 1; }));
+    std::atomic_bool second_cancelled{false};
+    std::thread second{[&] {
+        auto lease{scheduler.Acquire(
+            Scheduler::Priority::TipValidation, &second_cancelled,
+            "sibling-b", nullptr, std::chrono::seconds{30})};
+        (void)lease;
+    }};
+    BOOST_REQUIRE(WaitFor(
+        [&] { return scheduler.GetStats().queue_depth == 2; }));
+
+    std::atomic_bool third_cancelled{false};
+    std::thread third{[&] {
+        auto lease{scheduler.Acquire(
+            Scheduler::Priority::TipValidation, &third_cancelled,
+            "attested-child", nullptr, std::chrono::seconds{30})};
+        (void)lease;
+    }};
+    BOOST_REQUIRE(WaitFor(
+        [&] { return scheduler.GetStats().cancelled_waits >= 1; }));
+
+    first_cancelled.store(true);
+    second_cancelled.store(true);
+    third_cancelled.store(true);
+    scheduler.NotifyCancellation();
+    first.join();
+    second.join();
+    third.join();
+    owner = {};
+    BOOST_CHECK(!first_acquired.load(std::memory_order_relaxed));
+}
+
 BOOST_AUTO_TEST_CASE(rc_accelerator_scheduler_queue_deadline_is_bounded)
 {
     using Scheduler = matmul::v4::rc::RCAcceleratorScheduler;

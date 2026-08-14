@@ -2,16 +2,21 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <addresstype.h>
 #include <chain.h>
 #include <consensus/merkle.h>
 #include <common/system.h>
 #include <consensus/consensus.h>
+#include <consensus/validation.h>
 #include <interfaces/mining.h>
 #include <kernel/chainstatemanager_opts.h>
+#include <key.h>
 #include <matmul/matmul_pow.h>
 #include <net.h>
+#include <node/matmul_trusted_attestations.h>
 #include <node/miner.h>
 #include <pow.h>
+#include <rpc/protocol.h>
 #include <rpc/server.h>
 #include <serialize.h>
 #include <streams.h>
@@ -24,6 +29,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include <charconv>
+#include <chrono>
 #include <limits>
 #include <optional>
 #include <stdexcept>
@@ -2435,6 +2441,152 @@ BOOST_AUTO_TEST_CASE(pre_v4_service_challenge_omits_and_rejects_added_encoding_p
     BOOST_CHECK_EQUAL(
         rejected.find_value("mismatch_field").get_str(),
         "challenge.matmul.encoding_profile");
+}
+
+BOOST_AUTO_TEST_SUITE_END()
+
+class MatMulGbtAttestationBindSetup : public TestChain100Setup {
+public:
+    MatMulGbtAttestationBindSetup()
+    {
+        m_node.mining = interfaces::MakeMining(m_node);
+    }
+
+    UniValue CallRPC(const std::string& method, UniValue params = UniValue{UniValue::VARR})
+    {
+        JSONRPCRequest request;
+        request.context = &m_node;
+        request.strMethod = method;
+        request.params = std::move(params);
+        if (RPCIsInWarmup(nullptr)) SetRPCWarmupFinished();
+        try {
+            return tableRPC.execute(request);
+        } catch (const UniValue& obj_error) {
+            throw std::runtime_error{obj_error.find_value("message").get_str()};
+        }
+    }
+
+    std::optional<UniValue> CallRPCError(
+        const std::string& method, UniValue params = UniValue{UniValue::VARR})
+    {
+        JSONRPCRequest request;
+        request.context = &m_node;
+        request.strMethod = method;
+        request.params = std::move(params);
+        if (RPCIsInWarmup(nullptr)) SetRPCWarmupFinished();
+        try {
+            (void)tableRPC.execute(request);
+            return std::nullopt;
+        } catch (const UniValue& obj_error) {
+            return obj_error;
+        }
+    }
+
+    static UniValue GBTParams()
+    {
+        UniValue rules{UniValue::VARR};
+        rules.push_back("segwit");
+        UniValue req{UniValue::VOBJ};
+        req.pushKV("rules", std::move(rules));
+        UniValue params{UniValue::VARR};
+        params.push_back(std::move(req));
+        return params;
+    }
+};
+
+BOOST_FIXTURE_TEST_SUITE(matmul_gbt_attestation_bind_tests, MatMulGbtAttestationBindSetup)
+
+BOOST_AUTO_TEST_CASE(getblocktemplate_refuses_unattested_tip_with_attested_sibling)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    Chainstate& chainstate = chainman.ActiveChainstate();
+    auto& consensus = const_cast<Consensus::Params&>(chainman.GetConsensus());
+    const int32_t saved_v4{consensus.nMatMulV4Height};
+    const int32_t saved_rc{consensus.nMatMulRCHeight};
+    struct Restore {
+        Consensus::Params& consensus;
+        int32_t v4;
+        int32_t rc;
+        ~Restore()
+        {
+            node::matmul_trusted::ResetForTest();
+            consensus.nMatMulV4Height = v4;
+            consensus.nMatMulRCHeight = rc;
+        }
+    } restore{consensus, saved_v4, saved_rc};
+
+    const CScript script = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    CBlockIndex* original_tip{WITH_LOCK(::cs_main, return chainstate.m_chain.Tip())};
+    BOOST_REQUIRE(original_tip != nullptr);
+    const uint256 unattested_hash{original_tip->GetBlockHash()};
+    const int unattested_height{original_tip->nHeight};
+
+    BlockValidationState state;
+    BOOST_REQUIRE(chainstate.InvalidateBlock(state, original_tip));
+    const CBlock sibling_block{CreateAndProcessBlock({}, script)};
+    CBlockIndex* sibling{
+        WITH_LOCK(::cs_main, return chainman.m_blockman.LookupBlockIndex(sibling_block.GetHash()))};
+    BOOST_REQUIRE(sibling != nullptr);
+    state = BlockValidationState{};
+    BOOST_REQUIRE(chainstate.InvalidateBlock(state, sibling));
+    {
+        LOCK(::cs_main);
+        chainstate.ResetBlockFailureFlags(original_tip);
+    }
+    state = BlockValidationState{};
+    BOOST_REQUIRE(chainstate.ActivateBestChain(state));
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()->GetBlockHash()) ==
+                  unattested_hash);
+
+    consensus.nMatMulV4Height = unattested_height;
+    consensus.nMatMulRCHeight = unattested_height;
+    BOOST_REQUIRE(consensus.IsMatMulTrustedReplayAttestationActive(unattested_height));
+
+    // Unconfigured nodes keep GBT-on-active-tip, even on an unattested twin.
+    BOOST_REQUIRE(!node::matmul_trusted::IsConfigured());
+    {
+        const auto tmpl = CallRPC("getblocktemplate", GBTParams()).get_obj();
+        BOOST_CHECK_EQUAL(tmpl.find_value("previousblockhash").get_str(), unattested_hash.GetHex());
+    }
+
+    CKey signer;
+    signer.MakeNewKey(/*fCompressed=*/true);
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256::ONE;
+    config.replay_authority_context = uint256::FromHex(std::string(64, 'd')).value();
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    config.local_signer = signer;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/false, /*serve=*/false,
+        std::chrono::milliseconds{50}, error));
+    BOOST_REQUIRE(node::matmul_trusted::IsConfigured());
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
+                      sibling->GetBlockHash(), sibling->nHeight) ==
+                  matmul::trusted::AddResult::Accepted);
+
+    {
+        LOCK(::cs_main);
+        chainstate.ResetBlockFailureFlags(sibling);
+        BOOST_REQUIRE(sibling->nStatus & BLOCK_HAVE_DATA);
+        BOOST_REQUIRE(sibling->IsValid(BLOCK_VALID_TRANSACTIONS));
+        BOOST_CHECK(!node::matmul_trusted::HasQuorum(unattested_hash, unattested_height));
+        BOOST_CHECK_EQUAL(chainman.FindUniqueCompetingAttestedIndex(), sibling);
+        BOOST_CHECK_EQUAL(chainstate.m_chain.Tip()->GetBlockHash(), unattested_hash);
+    }
+
+    const auto err = CallRPCError("getblocktemplate", GBTParams());
+    BOOST_REQUIRE(err.has_value());
+    BOOST_CHECK_EQUAL(
+        err->find_value("code").getInt<int>(), RPC_CLIENT_IN_INITIAL_DOWNLOAD);
+    const std::string message{err->find_value("message").get_str()};
+    BOOST_CHECK(message.find("will not extend the unattested race") != std::string::npos);
+    BOOST_CHECK(message.find("getmatmulattestedtip") != std::string::npos);
+    BOOST_CHECK(message.find(unattested_hash.GetHex()) != std::string::npos);
+    BOOST_CHECK(message.find(sibling->GetBlockHash().GetHex()) != std::string::npos);
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()->GetBlockHash()) ==
+                  unattested_hash);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

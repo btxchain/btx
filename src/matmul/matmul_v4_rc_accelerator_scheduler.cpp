@@ -275,11 +275,66 @@ RCAcceleratorScheduler::Acquire(
     m_stats.candidate_mining_min_lease_ms =
         CandidateMiningMinLeaseQuantum().count();
 
-    const uint64_t lane_waiters{static_cast<uint64_t>(std::count_if(
+    // Self-recovery: drop waiters whose deadline already passed so a
+    // saturation burst cannot pin the queue until process restart.
+    const auto now_reap{std::chrono::steady_clock::now()};
+    const auto reaped{std::erase_if(
+        m_waiters, [&](const std::shared_ptr<Waiter>& queued_waiter) {
+            if (now_reap < queued_waiter->deadline) return false;
+            ++m_stats.timed_out_waits;
+            ++m_stats.lanes[LaneIndex(queued_waiter->priority)]
+                  .timed_out_waits;
+            return true;
+        })};
+    if (reaped > 0) {
+        m_stats.queue_depth = m_waiters.size();
+        m_cv.notify_all();
+    }
+
+    auto lane_waiters{static_cast<uint64_t>(std::count_if(
         m_waiters.begin(), m_waiters.end(),
         [priority](const auto& queued_waiter) {
             return queued_waiter->priority == priority;
         }))};
+    if (m_waiters.size() >= MAX_TOTAL_WAITERS ||
+        lane_waiters >= MAX_WAITERS_PER_LANE[LaneIndex(priority)]) {
+        // Displace the oldest same-or-lower-priority waiter so a real
+        // TipValidation child can enter after a sibling flood filled the
+        // lane. Equal-priority FIFO: the new request is newer, so the
+        // oldest occupant is the flood leftover.
+        auto victim{m_waiters.end()};
+        for (auto it{m_waiters.begin()}; it != m_waiters.end(); ++it) {
+            if (static_cast<uint8_t>((*it)->priority) >
+                static_cast<uint8_t>(priority)) {
+                continue;
+            }
+            if (victim == m_waiters.end() ||
+                (*it)->sequence < (*victim)->sequence) {
+                victim = it;
+            }
+        }
+        if (victim != m_waiters.end()) {
+            const bool strictly_lower{
+                static_cast<uint8_t>((*victim)->priority) <
+                static_cast<uint8_t>(priority)};
+            const bool displace_tip_validation_flood{
+                (*victim)->priority == priority &&
+                priority == Priority::TipValidation};
+            if (strictly_lower || displace_tip_validation_flood) {
+                ++m_stats.cancelled_waits;
+                ++m_stats.lanes[LaneIndex((*victim)->priority)]
+                      .cancelled_waits;
+                m_waiters.erase(victim);
+                m_stats.queue_depth = m_waiters.size();
+                m_cv.notify_all();
+                lane_waiters = static_cast<uint64_t>(std::count_if(
+                    m_waiters.begin(), m_waiters.end(),
+                    [priority](const auto& queued_waiter) {
+                        return queued_waiter->priority == priority;
+                    }));
+            }
+        }
+    }
     if (m_waiters.size() >= MAX_TOTAL_WAITERS ||
         lane_waiters >= MAX_WAITERS_PER_LANE[LaneIndex(priority)]) {
         ++m_stats.queue_rejections;
@@ -354,6 +409,13 @@ RCAcceleratorScheduler::Acquire(
             m_stats.queue_depth = m_waiters.size();
             lock.unlock();
             m_cv.notify_all();
+            return {};
+        }
+        if (std::find(m_waiters.begin(), m_waiters.end(), waiter) ==
+            m_waiters.end()) {
+            // Displaced by a later higher-or-equal priority Acquire so the
+            // sibling flood cannot pin both TipValidation slots.
+            lock.unlock();
             return {};
         }
         if (!m_active && IsFirst(waiter)) {

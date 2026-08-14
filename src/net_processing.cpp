@@ -267,11 +267,12 @@ static constexpr auto BLOCK_FETCH_STALL_KICK_COOLDOWN{60s};
  *  while the hole is unanswered is the production catch-up stall: one silent
  *  FULL seed pins select=root_in_flight, last_common sits one HAVE_DATA block
  *  past the connected tip, and a restart is required to move a handful of
- *  bodies. */
+ *  bodies. IBD keeps the 16-wide window for throughput. */
 static constexpr unsigned int CATCHUP_BLOCKS_IN_TRANSIT_PER_PEER = 1;
-/** Catch-up getdata failover. Mainnet spacing is 90s, so the ordinary timeout
- *  (90–270s) is longer than operators wait before restarting. A FULL seed can
- *  serve a ~400-byte body in well under a second. */
+/** Catch-up / IBD getdata failover. Mainnet spacing is 90s, so the ordinary
+ *  timeout (90–270s) is longer than operators wait before restarting. A FULL
+ *  seed can serve a ~400-byte body in well under a second. Applied during IBD
+ *  as well so a long-offline miner failsovers instead of waiting 180s. */
 static constexpr auto BLOCK_CATCHUP_DOWNLOAD_TIMEOUT{15s};
 /** Second FULL peer may take the catch-up hole immediately (bodies are cheap).
  *  A third waits until the existing owners are stale. */
@@ -280,23 +281,41 @@ static constexpr size_t CATCHUP_MIN_PARALLEL_OWNERS = 2;
  *  unconnected HAVE_DATA block above the active tip. */
 static constexpr auto UNCONNECTED_HAVE_DATA_ABC_KICK_INTERVAL{5s};
 
-/** True when we have left IBD and headers (or this peer's best-known) are
- *  ahead of the active tip. Catch-up must not use the IBD 16-wide window or
- *  the spacing-scaled timeout. */
-static bool IsCatchUpBlockFetch(const ChainstateManager& chainman, int peer_best_height = -1)
+/** How far the followed (tip-extending) header chain is ahead of the active
+ *  tip. Competing headers-only flood on m_best_header is ignored unless that
+ *  header itself extends the tip. `peer_best` is considered only when it too
+ *  extends the tip, so an attested-chain peer can still put a miner 125
+ *  behind into catch-up. */
+static int FollowedChainAhead(const ChainstateManager& chainman,
+                              const CBlockIndex* peer_best = nullptr)
     EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
-    if (chainman.IsInitialBlockDownload()) return false;
     const CBlockIndex* tip{chainman.ActiveChain().Tip()};
-    if (tip == nullptr) return false;
-    int ahead{0};
-    if (chainman.m_best_header != nullptr) {
-        ahead = chainman.m_best_header->nHeight - tip->nHeight;
-    }
-    if (peer_best_height >= 0) {
-        ahead = std::max(ahead, peer_best_height - tip->nHeight);
-    }
-    return ahead >= BLOCK_FETCH_STALL_HEADERS_AHEAD;
+    if (tip == nullptr) return 0;
+    int best_height{tip->nHeight};
+    const auto consider = [&](const CBlockIndex* pindex) {
+        if (pindex == nullptr || pindex->nHeight < tip->nHeight) return;
+        if (pindex->GetAncestor(tip->nHeight) == tip) {
+            best_height = std::max(best_height, pindex->nHeight);
+        }
+    };
+    consider(chainman.m_best_header);
+    consider(peer_best);
+    return best_height - tip->nHeight;
+}
+
+/** True when followed-chain headers (or this peer's tip-extending best-known)
+ *  are ahead of the active tip. Competing flood that does not extend the tip
+ *  does not qualify — a node already at the attested tip must not stay in
+ *  permanent 1-wide catch-up. True during IBD as well so the catch-up timeout
+ *  and parallel-owner failover apply; the 1-wide window is applied only after
+ *  IBD (see CATCHUP_BLOCKS_IN_TRANSIT_PER_PEER). */
+static bool IsCatchUpBlockFetch(const ChainstateManager& chainman,
+                                const CBlockIndex* peer_best = nullptr)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    if (chainman.ActiveChain().Tip() == nullptr) return false;
+    return FollowedChainAhead(chainman, peer_best) >= BLOCK_FETCH_STALL_HEADERS_AHEAD;
 }
 /** Maximum number of headers to announce when relaying blocks with headers message.*/
 static const unsigned int MAX_BLOCKS_TO_ANNOUNCE = 8;
@@ -3186,20 +3205,15 @@ void PeerManagerImpl::MaybeRecoverStalledBlockFetch(std::chrono::microseconds no
         return;
     }
 
-    int best_ahead{0};
-    if (m_chainman.m_best_header != nullptr) {
-        best_ahead = m_chainman.m_best_header->nHeight - tip->nHeight;
-    }
-    // PreferTrustAdjustedHeader (bounded unauth allowance) can keep
-    // m_best_header near the authenticated tip while getchaintips still shows
-    // a headers-only fork with more claimed work beyond the allowance. Peer
-    // best-known tips catch that.
+    // Followed-chain only: competing headers-only flood on m_best_header must
+    // not keep this valve in permanent catch-up. Peer best-known still counts
+    // when that header extends the active tip (miner 125 behind).
+    const int best_ahead{FollowedChainAhead(m_chainman)};
     int peer_ahead{0};
     for (const auto& [nodeid, state] : m_node_states) {
         (void)nodeid;
-        if (state.pindexBestKnownBlock != nullptr) {
-            peer_ahead = std::max(peer_ahead, state.pindexBestKnownBlock->nHeight - tip->nHeight);
-        }
+        peer_ahead = std::max(peer_ahead,
+                              FollowedChainAhead(m_chainman, state.pindexBestKnownBlock));
     }
     const int ahead{std::max(best_ahead, peer_ahead)};
 
@@ -3222,8 +3236,9 @@ void PeerManagerImpl::MaybeRecoverStalledBlockFetch(std::chrono::microseconds no
         }
     }
     const bool catch_up{IsCatchUpBlockFetch(m_chainman)};
+    const bool narrow_window{catch_up && !m_chainman.IsInitialBlockDownload()};
     int successors_reclaimed{0};
-    if (catch_up) {
+    if (narrow_window) {
         successors_reclaimed = ReclaimCatchupSuccessorRequests(
             keep_through, unconnected_have_data ? "have-data-unconnected"
                                                 : "catchup-root-only");
@@ -3286,7 +3301,8 @@ void PeerManagerImpl::MaybeRecoverStalledBlockFetch(std::chrono::microseconds no
     for (auto& [nodeid, state] : m_node_states) {
         (void)nodeid;
         if (state.pindexBestKnownBlock != nullptr &&
-            state.pindexBestKnownBlock->nHeight >= tip->nHeight + BLOCK_FETCH_STALL_HEADERS_AHEAD) {
+            state.pindexBestKnownBlock->nHeight >= tip->nHeight + BLOCK_FETCH_STALL_HEADERS_AHEAD &&
+            state.pindexBestKnownBlock->GetAncestor(tip->nHeight) == tip) {
             state.pindexLastCommonBlock = nullptr;
             if (state.m_block_download_paused_until > now) {
                 state.m_block_download_paused_until = now;
@@ -3397,24 +3413,62 @@ static bool TrustedMirrorMayDownloadIndex(
 //! ExactReplay GPU is 5GB+/12s. At the ASERT floor a competing header tree
 //! hundreds deep will saturate every device (live 2026-08-14: signer tip
 //! 187870, in-flight ExactReplay of competing 188012, 1458 headers-only tips
-//! above the attested tip, difficulty 1.9e-09). Configured nodes (signer,
-//! consensus+pubkey) may spend the device only on an active-tip child or on
-//! a short attested race. Unconfigured consensus keeps the historical
-//! near-tip competing window.
+//! above the attested tip, difficulty 1.9e-09). A later consensus+pubkey
+//! miner at the tip with the pool on ExactReplayed 25 same-height siblings
+//! and wedged the 2-slot scheduler (`queue deadline or capacity limit
+//! reached` ~6/s) until restart.
+//!
+//! Configured nodes (signer, consensus+pubkey): attestation is fork-choice.
+//! Do not spend the device on a sibling flood or on a hash that already has
+//! quorum (ContextualCheckBlock fast-accepts those). At most one unattested
+//! active-tip child may occupy ExactReplay; additional children wait for
+//! attestation. Unconfigured consensus keeps the historical near-tip window.
+[[nodiscard]] static bool ConfiguredTipChildAlreadyHasBody(
+    const ChainstateManager& chainman,
+    const CBlockIndex* tip,
+    const CBlockIndex* index)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    if (tip == nullptr) return false;
+    const auto& chainstate{chainman.ActiveChainstate()};
+    for (CBlockIndex* candidate : chainstate.setBlockIndexCandidates) {
+        if (candidate == nullptr || candidate == index) continue;
+        if (candidate->pprev != tip) continue;
+        if ((candidate->nStatus & BLOCK_HAVE_DATA) != 0) return true;
+        if ((candidate->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 [[nodiscard]] static bool MatMulMaySpendExactReplayGpu(
+    const ChainstateManager& chainman,
     const CBlockIndex* tip,
     const CBlockIndex* index)
     EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
     if (tip == nullptr || index == nullptr) return false;
-    if (index->pprev == tip) return true;
     if (!node::matmul_trusted::IsConfigured()) {
+        if (index->pprev == tip) return true;
         return index->nHeight >= tip->nHeight - 2 &&
                index->nHeight <= tip->nHeight + MATMUL_RC_NEAR_TIP_DEPTH;
     }
-    return TrustedMirrorShortTipReorg(tip, index) &&
-           node::matmul_trusted::HasQuorum(
-               index->GetBlockHash(), index->nHeight);
+    if (node::matmul_trusted::HasQuorum(
+            index->GetBlockHash(), index->nHeight)) {
+        // Quorum already authenticates this hash. Spending 5GB+/~5s on it
+        // while mining is what wedged the scheduler at low difficulty.
+        return false;
+    }
+    if (index->pprev != tip) {
+        // Competing (non-extending) work is decided by attestation. Never
+        // ExactReplay the headers-only flood.
+        return false;
+    }
+    if (ConfiguredTipChildAlreadyHasBody(chainman, tip, index)) {
+        return false;
+    }
+    return true;
 }
 
 static bool AuthorityFrontierIndexUsable(
@@ -3620,10 +3674,9 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
     ProcessBlockAvailability(peer.m_id);
 
     const CBlockIndex* tip{m_chainman.ActiveChain().Tip()};
-    const int peer_best_height{
-        state->pindexBestKnownBlock != nullptr ? state->pindexBestKnownBlock->nHeight : -1};
-    const bool catch_up{IsCatchUpBlockFetch(m_chainman, peer_best_height)};
-    if (catch_up && count > CATCHUP_BLOCKS_IN_TRANSIT_PER_PEER) {
+    const bool catch_up{IsCatchUpBlockFetch(m_chainman, state->pindexBestKnownBlock)};
+    const bool narrow_window{catch_up && !m_chainman.IsInitialBlockDownload()};
+    if (narrow_window && count > CATCHUP_BLOCKS_IN_TRANSIT_PER_PEER) {
         count = CATCHUP_BLOCKS_IN_TRANSIT_PER_PEER;
     }
     const auto rerequest_stale_after = catch_up
@@ -3814,7 +3867,7 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
         RemoveBlockRequest(root_first.lowest_missing->GetBlockHash(), std::nullopt);
     }
 
-    if (catch_up && tip != nullptr) {
+    if (narrow_window && tip != nullptr) {
         const int keep_through{
             state->pindexLastCommonBlock != nullptr &&
                     state->pindexLastCommonBlock->nHeight > tip->nHeight
@@ -6225,6 +6278,7 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
             !pfrom.HasPermission(NetPermissionFlags::Download) // nodes with the download permission may exceed target
         ) {
             LogDebug(BCLog::NET, "historical block serving limit reached, %s\n", pfrom.DisconnectMsg(fLogIPs));
+            send_block_notfound();
             pfrom.fDisconnect = true;
             return;
         }
@@ -6235,6 +6289,7 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
            )) {
             LogDebug(BCLog::NET, "Ignore block request below NODE_NETWORK_LIMITED threshold, %s\n", pfrom.DisconnectMsg(fLogIPs));
             //disconnect node and prevent it from stalling (would otherwise wait for the missing block)
+            send_block_notfound();
             pfrom.fDisconnect = true;
             return;
         }
@@ -6318,6 +6373,7 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
             } else {
                 LogError("Cannot load block from disk, %s\n", pfrom.DisconnectMsg(fLogIPs));
             }
+            send_block_notfound();
             pfrom.fDisconnect = true;
             return;
         }
@@ -6341,6 +6397,7 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
             } else {
                 LogError("Cannot load block from disk, %s\n", pfrom.DisconnectMsg(fLogIPs));
             }
+            send_block_notfound();
             pfrom.fDisconnect = true;
             return;
         }
@@ -7025,17 +7082,56 @@ void PeerManagerImpl::HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, c
         tip_for_work->nChainWork <= last_header.nChainWork};
     if (CanDirectFetch() && last_header.IsValid(BLOCK_VALID_TREE) &&
         claimed_download_ok) {
+        const bool extends_active_tip{
+            tip_for_work != nullptr &&
+            last_header.nHeight >= tip_for_work->nHeight &&
+            last_header.GetAncestor(tip_for_work->nHeight) == tip_for_work};
+        const bool catch_up{
+            IsCatchUpBlockFetch(m_chainman, nodestate->pindexBestKnownBlock)};
+        const bool narrow_window{
+            catch_up && !m_chainman.IsInitialBlockDownload()};
+        // Catch-up must not fill 16 newest hashes of a competing headers-only
+        // flood. Existing trusted-mirror / claimed-work filters above stay.
+        if (narrow_window && !extends_active_tip) {
+            return;
+        }
+        if (narrow_window && tip_for_work != nullptr) {
+            ReclaimCatchupSuccessorRequests(tip_for_work->nHeight + 1,
+                                            "headers-direct-fetch-catchup");
+        }
+        const unsigned int fetch_cap{
+            narrow_window ? CATCHUP_BLOCKS_IN_TRANSIT_PER_PEER
+                          : MAX_BLOCKS_IN_TRANSIT_PER_PEER};
         std::vector<const CBlockIndex*> vToFetch;
         const CBlockIndex* pindexWalk{&last_header};
-        // Calculate all the blocks we'd need to switch to last_header, up to a limit.
-        while (pindexWalk && !m_chainman.ActiveChain().Contains(pindexWalk) && vToFetch.size() <= MAX_BLOCKS_IN_TRANSIT_PER_PEER) {
-            if (!(pindexWalk->nStatus & BLOCK_HAVE_DATA) &&
-                    !IsBlockRequested(pindexWalk->GetBlockHash()) &&
-                    (!DeploymentActiveAt(*pindexWalk, m_chainman, Consensus::DEPLOYMENT_SEGWIT) || CanServeWitnesses(peer))) {
-                // We don't have this block, and it's not yet in flight.
-                vToFetch.push_back(pindexWalk);
+        if (narrow_window) {
+            // Walk the full path to the tip and keep the lowest missing hole.
+            // Collecting MAX_BLOCKS_IN_TRANSIT_PER_PEER newest then reversing
+            // would request tip+N-15 instead of tip+1 when N>16.
+            const CBlockIndex* lowest_missing{nullptr};
+            while (pindexWalk && !m_chainman.ActiveChain().Contains(pindexWalk)) {
+                if (!(pindexWalk->nStatus & BLOCK_HAVE_DATA) &&
+                    (!DeploymentActiveAt(*pindexWalk, m_chainman, Consensus::DEPLOYMENT_SEGWIT) ||
+                     CanServeWitnesses(peer))) {
+                    lowest_missing = pindexWalk;
+                }
+                pindexWalk = pindexWalk->pprev;
             }
-            pindexWalk = pindexWalk->pprev;
+            if (lowest_missing != nullptr &&
+                !IsBlockRequested(lowest_missing->GetBlockHash())) {
+                vToFetch.push_back(lowest_missing);
+            }
+        } else {
+            // Calculate all the blocks we'd need to switch to last_header, up to a limit.
+            while (pindexWalk && !m_chainman.ActiveChain().Contains(pindexWalk) && vToFetch.size() <= MAX_BLOCKS_IN_TRANSIT_PER_PEER) {
+                if (!(pindexWalk->nStatus & BLOCK_HAVE_DATA) &&
+                        !IsBlockRequested(pindexWalk->GetBlockHash()) &&
+                        (!DeploymentActiveAt(*pindexWalk, m_chainman, Consensus::DEPLOYMENT_SEGWIT) || CanServeWitnesses(peer))) {
+                    // We don't have this block, and it's not yet in flight.
+                    vToFetch.push_back(pindexWalk);
+                }
+                pindexWalk = pindexWalk->pprev;
+            }
         }
         // If pindexWalk still isn't on our main chain, we're looking at a
         // very large reorg at a time we think we're close to caught up to
@@ -7049,7 +7145,7 @@ void PeerManagerImpl::HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, c
             std::vector<CInv> vGetData;
             // Download as much as possible, from earliest to latest.
             for (const CBlockIndex* pindex : vToFetch | std::views::reverse) {
-                if (nodestate->vBlocksInFlight.size() >= MAX_BLOCKS_IN_TRANSIT_PER_PEER) {
+                if (nodestate->vBlocksInFlight.size() >= fetch_cap) {
                     // Can't download any more from this peer
                     break;
                 }
@@ -7554,7 +7650,10 @@ void PeerManagerImpl::MaybeRequestTrustedMirrorPreferredAttestations(
     const bool archive_discovery{
         (peer.m_their_services & NODE_MATMUL_ATTESTATION_ARCHIVE) ==
         NODE_MATMUL_ATTESTATION_ARCHIVE};
-    if (!archive_discovery &&
+    const bool trusted_mirror{
+        (peer.m_their_services & NODE_MATMUL_TRUSTED_MIRROR) ==
+        NODE_MATMUL_TRUSTED_MIRROR};
+    if (!archive_discovery && !trusted_mirror &&
         !IsTrustedMirrorAuthorityPeer(pto.GetId(), peer.m_their_services)) {
         return;
     }
@@ -8156,7 +8255,9 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
             return;
         }
         authenticated_tip_child = parent == active_tip;
-        if (!MatMulMaySpendExactReplayGpu(active_tip, &index)) return;
+        if (!MatMulMaySpendExactReplayGpu(m_chainman, active_tip, &index)) {
+            return;
+        }
         parent_mtp = parent->GetMedianTimePast();
     }
     if (m_matmul_verify_worker->Contains(header.GetHash())) return;
@@ -8165,8 +8266,11 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
     std::optional<node::RCAdmissionTicket> accepted_ticket;
     uint32_t pending{m_matmul_rc_speculative_pending.load(
         std::memory_order_relaxed)};
+    const uint32_t speculative_limit{
+        node::matmul_trusted::IsConfigured() ? 1u
+                                             : MATMUL_RC_SPECULATIVE_LIMIT};
     do {
-        if (pending >= MATMUL_RC_SPECULATIVE_LIMIT) return;
+        if (pending >= speculative_limit) return;
     } while (!m_matmul_rc_speculative_pending.compare_exchange_weak(
         pending, pending + 1, std::memory_order_relaxed));
 
@@ -10049,13 +10153,18 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
                     if (exact_recompute_required &&
                         node::matmul_trusted::IsConfigured()) {
                         const CBlockIndex* tip{m_chainman.ActiveTip()};
-                        const bool tip_child{prev == tip};
-                        if (!tip_child &&
-                            (indexed == nullptr ||
-                             !MatMulMaySpendExactReplayGpu(tip, indexed))) {
-                            // Live 2026-08-14: unsolicited competing bodies at
-                            // 1880xx occupied TipValidation while the attested
-                            // tip sat at 187870. Do not ExactReplay them.
+                        const bool has_quorum{node::matmul_trusted::HasQuorum(
+                            block_hash, exact_reference_height)};
+                        if (has_quorum) {
+                            // Fast-accept: ProcessNewBlock + cached quorum
+                            // verdict, no GPU. Do not HEADER_ONLY-drop the body.
+                            exact_recompute_required = false;
+                        } else if (indexed == nullptr ||
+                                   !MatMulMaySpendExactReplayGpu(
+                                       m_chainman, tip, indexed)) {
+                            // Live 2026-08-14: unsolicited competing bodies and
+                            // a 25-wide same-height sibling burst occupied
+                            // TipValidation while mining held the device.
                             exact_recompute_required = false;
                             skip_competing_exactreplay = true;
                         }
@@ -15715,9 +15824,7 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                     std::chrono::duration_cast<std::chrono::microseconds>(BLOCK_DOWNLOAD_TIMEOUT_MIN)),
                 std::chrono::duration_cast<std::chrono::microseconds>(
                     spacing * BLOCK_DOWNLOAD_TIMEOUT_MAX_MULT));
-            const int peer_best_height{
-                state.pindexBestKnownBlock != nullptr ? state.pindexBestKnownBlock->nHeight : -1};
-            const bool catch_up{IsCatchUpBlockFetch(m_chainman, peer_best_height)};
+            const bool catch_up{IsCatchUpBlockFetch(m_chainman, state.pindexBestKnownBlock)};
             if (catch_up) {
                 download_timeout = std::min(
                     download_timeout,

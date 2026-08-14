@@ -217,25 +217,52 @@ static constexpr int TRUSTED_MIRROR_ATTESTED_TIP_LOOKBACK{2};
     return trusted_mirror_profile1 && !has_quorum;
 }
 
-/** FindMostWorkChain overlay for trusted Profile-1 mirrors.
+/** True when an alternate index may defer an unattested most-work candidate.
  *
- *  Tip-children stay selectable (HAVE_DATA chicken-egg), but ConnectTip
- *  defers any unattested one. If that unattested child is also the heaviest
- *  candidate, ActivateBestChain stops on quorum Timeout and never tries an
- *  attested sibling already in the set. Live 2026-08-14 fra1: tip 187931,
- *  attested a18786b0 at 187932, ABC looping 39c12144 (unattested twin) so
- *  advertised seed height froze while the signer kept moving.
+ *  Qualifier 3ed2619c (PR 105): the active tip is always in
+ *  setBlockIndexCandidates and is usually attested. Counting it — or any
+ *  stale/non-distinct candidate-set entry — as an "attested sibling"
+ *  permanently deferred the sole linear tip-child (behind=1, 83 repeats).
+ *  Deferral is valid only for a distinct same-height child of the current
+ *  tip that still has quorum and is not FAILED. Headers-only + quorum is
+ *  usable (MMATTEST can land before the body); the tip itself is not. */
+[[nodiscard]] inline bool TrustedMirrorAttestedSiblingIsActionable(
+    bool distinct_from_candidate,
+    bool same_parent,
+    bool same_height_as_tip_child,
+    bool has_quorum,
+    bool failed = false)
+{
+    return distinct_from_candidate && same_parent &&
+           same_height_as_tip_child && has_quorum && !failed;
+}
+
+/** FindMostWorkChain overlay for configured Profile-1 nodes (trusted
+ *  mirrors and consensus miners with -matmultrustedpubkey).
  *
- *  Defer the unattested most-work child only when an attested tip-chain
- *  alternative exists. If it is the only child, keep current wait-for-quorum
- *  behavior. Consensus+pubkey nodes ExactReplay and must not use this. */
+ *  Tip-children stay selectable (HAVE_DATA chicken-egg), but ConnectTip on
+ *  a trusted mirror defers any unattested one. If that unattested child is
+ *  also the heaviest candidate, ActivateBestChain stops on quorum Timeout
+ *  and never tries an attested sibling already in the set. Live 2026-08-14
+ *  fra1: tip 187931, attested a18786b0 at 187932, ABC looping 39c12144
+ *  (unattested twin) so advertised seed height froze while the signer
+ *  kept moving.
+ *
+ *  Defer the unattested most-work descendant only when
+ *  TrustedMirrorAttestedSiblingIsActionable holds for some other index.
+ *  Headers-only + quorum is enough: setBlockIndexCandidates is
+ *  HAVE_DATA-gated, so the sibling may only be visible via
+ *  AttestedFrontierHints / authenticated-candidate tips. FAILED indexes
+ *  never block. If it is the only child, keep wait-for-quorum (mirror) or
+ *  ExactReplay (consensus) behavior. FindUniqueCompetingAttestedIndex
+ *  stays HAVE_DATA-gated (consensus miners switch on it after the fact). */
 [[nodiscard]] inline bool TrustedMirrorDeferUnattestedMostWorkForAttestedSibling(
-    bool trusted_mirror_profile1,
+    bool configured_profile1,
     bool candidate_extends_tip,
     bool candidate_has_quorum,
     bool attested_tip_child_exists)
 {
-    return trusted_mirror_profile1 && candidate_extends_tip &&
+    return configured_profile1 && candidate_extends_tip &&
            !candidate_has_quorum && attested_tip_child_exists;
 }
 
@@ -244,7 +271,12 @@ static constexpr int TRUSTED_MIRROR_ATTESTED_TIP_LOOKBACK{2};
  *  the active tip. Zero on a healthy linear chain (signer ~1 behind the
  *  tip still yields 0: both sides sit at the last attested height). A
  *  stranded fork that never fetched the other chain's bodies still
- *  climbs this when MMATTEST arrives. */
+ *  climbs this when MMATTEST arrives.
+ *
+ *  Qualifier 3ed2619c: this is 0 while a trusted mirror is stalled one
+ *  HAVE_DATA child below the signer (active tip has quorum; the child
+ *  does not). Do not treat blocks_behind==0 as "caught up to the
+ *  network tip". */
 [[nodiscard]] inline int32_t BlocksBehindSignedFrontier(
     int32_t signed_frontier_height,
     int32_t on_chain_attested_height)

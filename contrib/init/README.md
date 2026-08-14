@@ -1,6 +1,7 @@
 Sample configuration files for:
 ```
 systemd: btxd.service
+         btx-miner@.service
 Upstart: btxd.conf
 OpenRC:  btxd.openrc
          btxd.openrcconf

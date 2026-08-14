@@ -42,6 +42,7 @@
 #include <net.h>
 #include <net_processing.h>
 #include <node/context.h>
+#include <node/matmul_trusted_attestations.h>
 #include <node/miner.h>
 #include <node/mining_guard.h>
 #include <node/warnings.h>
@@ -252,6 +253,65 @@ static void EnsureMiningTemplateHasActiveTip(
     if (chainman.ActiveChain().Tip() == nullptr) {
         throw JSONRPCError(RPC_CLIENT_IN_INITIAL_DOWNLOAD, CLIENT_NAME " has no active tip yet");
     }
+}
+
+/**
+ * Bind getblocktemplate to the attested race when MatMul trusted-replay
+ * attestation is configured. BlockAssembler parents only on the active tip,
+ * so a unique competing attested HAVE_DATA sibling cannot be adopted here
+ * without a silent reorg. Refuse rather than extend the unattested twin.
+ *
+ * Unconfigured nodes (-matmultrustedpubkey unset) keep GBT-on-active-tip.
+ * Headers-only competitors never qualify (FindUniqueCompetingAttestedIndex
+ * requires HAVE_DATA + fully validated txs).
+ */
+static void EnsureMatMulAttestedMiningParent(
+    const ChainstateManager& chainman) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    if (!node::matmul_trusted::IsConfigured()) return;
+
+    const CBlockIndex* const tip{chainman.ActiveChain().Tip()};
+    if (tip == nullptr) return;
+
+    const Consensus::Params& consensus{chainman.GetConsensus()};
+    const bool active_at_tip{
+        consensus.IsMatMulTrustedReplayAttestationActive(tip->nHeight)};
+    const bool active_at_next{
+        tip->nHeight < std::numeric_limits<int32_t>::max() &&
+        consensus.IsMatMulTrustedReplayAttestationActive(tip->nHeight + 1)};
+    if (!active_at_tip && !active_at_next) return;
+
+    // 1. Active tip already has quorum: mine on it.
+    if (node::matmul_trusted::HasQuorum(tip->GetBlockHash(), tip->nHeight)) {
+        return;
+    }
+
+    // 2. Linear-chain signer lag: getmatmulattestedtip / signed frontier
+    //    on_active_chain with blocks_behind==0. FindUniqueCompetingAttestedIndex
+    //    is null in that case (attested HAVE_DATA sits on this chain), so GBT
+    //    keeps parenting the active tip. A headers-only competing flood is
+    //    likewise ignored — never parent a headers-only hash.
+    // 3. Unique competing attested HAVE_DATA sibling: do not issue a
+    //    template that extends the unattested active tip.
+    const CBlockIndex* const attested{
+        chainman.FindUniqueCompetingAttestedIndex()};
+    if (attested == nullptr || attested == tip) return;
+
+    if (!(attested->nStatus & BLOCK_HAVE_DATA) ||
+        !attested->IsValid(BLOCK_VALID_TRANSACTIONS) ||
+        !attested->HaveNumChainTxs()) {
+        return;
+    }
+
+    throw JSONRPCError(
+        RPC_CLIENT_IN_INITIAL_DOWNLOAD,
+        strprintf(
+            "Active tip %s (height %d) has no attestation quorum while unique competing attested block %s (height %d) is available with HAVE_DATA. "
+            "getblocktemplate will not extend the unattested race. Wait for the node to adopt the attested tip, or follow getmatmulattestedtip.",
+            tip->GetBlockHash().GetHex(),
+            tip->nHeight,
+            attested->GetBlockHash().GetHex(),
+            attested->nHeight));
 }
 
 /**
@@ -8736,6 +8796,7 @@ static RPCHelpMan getblocktemplate()
         "It returns data needed to construct a block to work on.\n"
         "For MatMul PoW networks, the template includes matrix seeds and parameters needed for external mining.\n"
         "External miners should solve the MatMul proof using the provided seeds and submit via submitblock.\n"
+        "When -matmultrustedpubkey is configured and Profile-1 attestation is active, a template is not issued on an unattested active tip that has a unique competing attested HAVE_DATA sibling; follow getmatmulattestedtip instead.\n"
         "For full specification, see BIPs 22, 23, 9, and 145:\n"
         "    https://github.com/bitcoin/bips/blob/master/bip-0022.mediawiki\n"
         "    https://github.com/bitcoin/bips/blob/master/bip-0023.mediawiki\n"
@@ -9143,6 +9204,7 @@ static RPCHelpMan getblocktemplate()
     }
     const auto chain_guard_status = node::GetMiningChainGuardStatus(node);
     node::MaybeRequestMiningChainGuardRecovery(chain_guard_status, node);
+    EnsureMatMulAttestedMiningParent(chainman);
 
     // Update block
     static uint256 pindexPrevHash;

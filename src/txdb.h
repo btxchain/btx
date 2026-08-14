@@ -12,6 +12,7 @@
 #include <sync.h>
 #include <util/fs.h>
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <future>
@@ -46,6 +47,7 @@ protected:
     Mutex m_db_mutex;
     std::unique_ptr<CDBWrapper> m_db;
     std::shared_future<void> m_compaction;
+    std::atomic<bool> m_compaction_allowed{true};
 public:
     explicit CCoinsViewDB(DBParams db_params, CoinsViewOptions options);
     ~CCoinsViewDB() override;
@@ -66,6 +68,12 @@ public:
 
     //! Perform a full LevelDB compaction on a one-shot background thread.
     std::shared_future<void> CompactFull() EXCLUSIVE_LOCKS_REQUIRED(cs_main, !m_db_mutex);
+
+    //! Refuse to start a new CompactFull (in-flight work is left running).
+    void DisableNewCompaction();
+
+    //! Block until any in-flight CompactFull finishes. Does not require cs_main.
+    void WaitForCompaction();
 
     //! @returns filesystem path to on-disk storage or std::nullopt if in memory.
     std::optional<fs::path> StoragePath() { return m_db->StoragePath(); }

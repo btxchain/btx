@@ -969,6 +969,14 @@ public:
         return m_mempool ? &m_mempool->cs : nullptr;
     }
 
+    /** Test-only: expose most-work selection so regressions can assert a sole
+     *  linear tip-child is not deferred by a stale attested parent in the
+     *  candidate set (qualifier 3ed2619c). */
+    CBlockIndex* FindMostWorkChainForTest() EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+    {
+        return FindMostWorkChain();
+    }
+
 private:
     bool ActivateBestChainStep(BlockValidationState& state, CBlockIndex* pindexMostWork, const std::shared_ptr<const CBlock>& pblock, bool& fInvalidFound, ConnectTrace& connectTrace) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool->cs);
     bool ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew, const std::shared_ptr<const CBlock>& pblock, ConnectTrace& connectTrace, DisconnectedBlockTransactions& disconnectpool) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool->cs);

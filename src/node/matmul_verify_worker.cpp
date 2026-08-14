@@ -684,13 +684,22 @@ void MatMulVerifyWorker::WorkerLoop()
             // CompetingBranch to TipValidation keeps async verify from being
             // starved by CandidateMining while still ranking below an authenticated
             // tip-child via the worker's own Priority ordering.
+            // Configured consensus+pubkey miners must not map CompetingBranch
+            // onto TipValidation: a same-height sibling burst then occupies
+            // both waiter slots, mining holds the device, and the attested
+            // child is queue-rejected until restart. Unconfigured nodes keep
+            // the historical CompetingBranch→TipValidation mapping (zombie
+            // freeze workaround).
             const auto device_priority{
-                (job.priority == Priority::AuthenticatedTipChild ||
-                 job.priority == Priority::CompetingBranch)
+                job.priority == Priority::AuthenticatedTipChild
                     ? matmul::v4::rc::RCAcceleratorScheduler::
                           Priority::TipValidation
-                    : matmul::v4::rc::RCAcceleratorScheduler::
-                          Priority::SpeculativeValidation};
+                    : (job.priority == Priority::CompetingBranch &&
+                       !node::matmul_trusted::IsConfigured())
+                          ? matmul::v4::rc::RCAcceleratorScheduler::
+                                Priority::TipValidation
+                          : matmul::v4::rc::RCAcceleratorScheduler::
+                                Priority::SpeculativeValidation};
             const auto episode_params{
                 matmul::v4::rc::ResolveRCEpisodeParams(
                     m_params, job.height)};

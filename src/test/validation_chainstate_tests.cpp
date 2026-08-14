@@ -1346,6 +1346,20 @@ BOOST_FIXTURE_TEST_CASE(chainstate_trusted_mirror_persists_unattested_tip_child_
         BOOST_CHECK_EQUAL(chainstate.m_chain.Tip(), parent_tip);
         BOOST_CHECK(!chainstate.m_chain.Contains(child_index));
         BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(child_index), 1);
+        // Qualifier 3ed2619c follow-up: candidate set is exactly the attested
+        // active tip plus this sole linear child (getchaintips height 11
+        // active / height 12 valid-headers, same parent, no competing
+        // branch). The tip must not count as an attested sibling.
+        BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(parent_tip), 1);
+        BOOST_CHECK_EQUAL(chainstate.FindMostWorkChainForTest(), child_index);
+        BOOST_CHECK_EQUAL(chainstate.FindMostWorkChainForTest(), child_index);
+        BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(child_index), 1);
+        {
+            const auto stalled{chainman.GetSignedFrontierStatus()};
+            BOOST_REQUIRE(stalled.available);
+            BOOST_CHECK(stalled.on_active_chain);
+            BOOST_CHECK_EQUAL(stalled.blocks_behind, 0);
+        }
         BOOST_CHECK(node::matmul_trusted::TrustedMirrorMustDeferUnattestedConnect(
             /*trusted_mirror_profile1=*/true, /*has_quorum=*/false));
     }
@@ -1464,11 +1478,150 @@ BOOST_FIXTURE_TEST_CASE(chainstate_trusted_mirror_connects_attested_sibling_not_
         attested->GetHash(), child_height));
     BOOST_CHECK(!node::matmul_trusted::HasQuorum(
         unattested->GetHash(), child_height));
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK_EQUAL(chainstate.FindMostWorkChainForTest(), attested_index);
+    }
 
     BlockValidationState state;
     BOOST_REQUIRE(chainstate.ActivateBestChain(state));
     {
         LOCK(::cs_main);
+        BOOST_CHECK_EQUAL(chainstate.m_chain.Tip(), attested_index);
+        BOOST_CHECK(!chainstate.m_chain.Contains(unattested_index));
+        BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(unattested_index), 1);
+    }
+    chainman.CheckBlockIndex();
+}
+
+BOOST_FIXTURE_TEST_CASE(chainstate_trusted_mirror_defers_unattested_twin_for_headers_only_attested_sibling, TestChain100Setup)
+{
+    // Mirror of chainstate_trusted_mirror_connects_attested_sibling_not_heavier_unattested
+    // with the attested twin headers-only. Live fra1: MMATTEST can land before
+    // the body, so the sibling is absent from setBlockIndexCandidates.
+    // FindMostWorkChain must still defer the unattested HAVE_DATA twin rather
+    // than ConnectTip-timeout it and freeze the advertised height.
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    Chainstate& chainstate = chainman.ActiveChainstate();
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    auto& mode = const_cast<kernel::MatMulValidationMode&>(chainman.m_options.matmul_validation_mode);
+    const int32_t saved_v4{consensus.nMatMulV4Height};
+    const int32_t saved_bmx{consensus.nMatMulBMX4CHeight};
+    const int32_t saved_rc{consensus.nMatMulRCHeight};
+    const auto saved_mode{mode};
+    struct Restore {
+        Consensus::Params& consensus;
+        int32_t v4;
+        int32_t bmx;
+        int32_t rc;
+        kernel::MatMulValidationMode& mode;
+        kernel::MatMulValidationMode saved_mode;
+        ~Restore()
+        {
+            node::matmul_trusted::ResetForTest();
+            consensus.nMatMulV4Height = v4;
+            consensus.nMatMulBMX4CHeight = bmx;
+            consensus.nMatMulRCHeight = rc;
+            mode = saved_mode;
+        }
+    } restore{consensus, saved_v4, saved_bmx, saved_rc, mode, saved_mode};
+
+    const CScript script = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    CKey other;
+    other.MakeNewKey(/*fCompressed=*/true);
+    const CScript script_alt = GetScriptForDestination(PKHash(other.GetPubKey()));
+    CBlockIndex* parent_tip{WITH_LOCK(::cs_main, return chainstate.m_chain.Tip())};
+    BOOST_REQUIRE(parent_tip != nullptr);
+    const uint256 parent_hash{parent_tip->GetBlockHash()};
+    const int parent_height{parent_tip->nHeight};
+    const int32_t child_height{parent_height + 1};
+
+    consensus.nMatMulV4Height = child_height;
+    consensus.nMatMulBMX4CHeight = child_height;
+    consensus.nMatMulRCHeight = child_height;
+
+    CKey signer;
+    signer.MakeNewKey(/*fCompressed=*/true);
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256::ONE;
+    config.replay_authority_context = uint256::FromHex(std::string(64, 'a')).value();
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    config.local_signer = signer;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/true, /*serve=*/false,
+        std::chrono::milliseconds{50}, error));
+    mode = kernel::MatMulValidationMode::TRUSTED;
+    BOOST_REQUIRE(node::matmul_trusted::IsTrustedMirror());
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
+                      parent_hash, parent_height) ==
+                  matmul::trusted::AddResult::Accepted);
+
+    const auto unattested{std::make_shared<const CBlock>(
+        CreateBlock({}, script, chainstate))};
+    bool new_block{false};
+    BOOST_REQUIRE(chainman.ProcessNewBlock(
+        unattested, /*force_processing=*/true, /*min_pow_checked=*/true,
+        &new_block));
+    const auto attested{std::make_shared<const CBlock>(
+        CreateBlock({}, script_alt, chainstate))};
+    BOOST_REQUIRE(attested->GetHash() != unattested->GetHash());
+    BlockValidationState header_state;
+    BOOST_REQUIRE(chainman.ProcessNewBlockHeaders(
+        {{attested->GetBlockHeader()}}, /*min_pow_checked=*/true, header_state));
+
+    CBlockIndex* unattested_index{nullptr};
+    CBlockIndex* attested_index{nullptr};
+    {
+        LOCK(::cs_main);
+        unattested_index =
+            chainman.m_blockman.LookupBlockIndex(unattested->GetHash());
+        attested_index =
+            chainman.m_blockman.LookupBlockIndex(attested->GetHash());
+        BOOST_REQUIRE(unattested_index && attested_index);
+        BOOST_CHECK_EQUAL(unattested_index->pprev, parent_tip);
+        BOOST_CHECK_EQUAL(attested_index->pprev, parent_tip);
+        BOOST_CHECK(unattested_index->nStatus & BLOCK_HAVE_DATA);
+        BOOST_CHECK(!(attested_index->nStatus & BLOCK_HAVE_DATA));
+        BOOST_CHECK_EQUAL(chainstate.m_chain.Tip(), parent_tip);
+        BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(unattested_index), 1);
+        BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(attested_index), 0);
+        BOOST_CHECK(chainman.FindUniqueCompetingAttestedIndex() == nullptr);
+    }
+
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
+                      attested->GetHash(), child_height) ==
+                  matmul::trusted::AddResult::Accepted);
+    BOOST_CHECK(node::matmul_trusted::HasQuorum(
+        attested->GetHash(), child_height));
+    BOOST_CHECK(!node::matmul_trusted::HasQuorum(
+        unattested->GetHash(), child_height));
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK_EQUAL(chainstate.FindMostWorkChainForTest(), parent_tip);
+    }
+
+    BlockValidationState state;
+    BOOST_REQUIRE(chainstate.ActivateBestChain(state));
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK_EQUAL(chainstate.m_chain.Tip(), parent_tip);
+        BOOST_CHECK(!chainstate.m_chain.Contains(unattested_index));
+        BOOST_CHECK(!chainstate.m_chain.Contains(attested_index));
+        BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(unattested_index), 1);
+        BOOST_CHECK(!(attested_index->nStatus & BLOCK_HAVE_DATA));
+        // HAVE_DATA gate on abandon-fork switch must stay in place.
+        BOOST_CHECK(chainman.FindUniqueCompetingAttestedIndex() == nullptr);
+    }
+    chainman.CheckBlockIndex();
+
+    BOOST_REQUIRE(chainman.ProcessNewBlock(
+        attested, /*force_processing=*/true, /*min_pow_checked=*/true,
+        &new_block));
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK(attested_index->nStatus & BLOCK_HAVE_DATA);
         BOOST_CHECK_EQUAL(chainstate.m_chain.Tip(), attested_index);
         BOOST_CHECK(!chainstate.m_chain.Contains(unattested_index));
         BOOST_CHECK_EQUAL(chainstate.setBlockIndexCandidates.count(unattested_index), 1);

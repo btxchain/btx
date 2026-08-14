@@ -61,12 +61,22 @@ CCoinsViewDB::CCoinsViewDB(DBParams db_params, CoinsViewOptions options) :
 
 CCoinsViewDB::~CCoinsViewDB()
 {
-    if (m_compaction.valid()) {
-        if (m_compaction.wait_for(std::chrono::seconds{0}) != std::future_status::ready) {
-            LogPrintf("Waiting for background chainstate compaction of %s\n", fs::PathToString(m_db_params.path));
-        }
-        m_compaction.wait();
+    WaitForCompaction();
+}
+
+void CCoinsViewDB::DisableNewCompaction()
+{
+    m_compaction_allowed.store(false, std::memory_order_release);
+}
+
+void CCoinsViewDB::WaitForCompaction()
+{
+    std::shared_future<void> compaction = m_compaction;
+    if (!compaction.valid()) return;
+    if (compaction.wait_for(std::chrono::seconds{0}) != std::future_status::ready) {
+        LogPrintf("Waiting for background chainstate compaction of %s\n", fs::PathToString(m_db_params.path));
     }
+    compaction.wait();
 }
 
 void CCoinsViewDB::ResizeCache(size_t new_cache_size)
@@ -195,6 +205,9 @@ size_t CCoinsViewDB::EstimateSize() const
 std::shared_future<void> CCoinsViewDB::CompactFull()
 {
     AssertLockHeld(::cs_main);
+    if (!m_compaction_allowed.load(std::memory_order_acquire)) {
+        return m_compaction;
+    }
     if (m_compaction.valid() && m_compaction.wait_for(std::chrono::seconds{0}) != std::future_status::ready) {
         return m_compaction;
     }

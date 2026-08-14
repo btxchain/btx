@@ -95,6 +95,17 @@ static constexpr std::chrono::seconds MAX_UPLOAD_TIMEFRAME{60 * 60 * 24};
 // A random time period (0 to 1 seconds) is added to feeler connections to prevent synchronization.
 static constexpr auto FEELER_SLEEP_WINDOW{1s};
 
+/** Soft-prefer addrman peers advertising any of these bits when we currently
+ *  have zero such outbounds. Not a required set: GetDesirableServiceFlags
+ *  stays NODE_NETWORK|NODE_WITNESS (MatMul VERSION bits are unverified). */
+static constexpr ServiceFlags MATMUL_PREFERRED_OUTBOUND_SERVICES{ServiceFlags(
+    NODE_MATMUL_TRUSTED_MIRROR | NODE_MATMUL_ATTESTATION_ARCHIVE |
+    NODE_MATMUL_CONSENSUS)};
+/** Bounded retries of otherwise-valid NODE_NETWORK addresses while looking
+ *  for a MatMul-capable outbound. After this many tries, accept any valid
+ *  peer so self-heal / DNS still works. Feelers are not filtered. */
+static constexpr int MATMUL_OUTBOUND_PREFERENCE_TRIES = 50;
+
 /** Frequency to attempt extra connections to reachable networks we're not connected to yet **/
 static constexpr auto EXTRA_NETWORK_PEER_INTERVAL{5min};
 
@@ -2985,6 +2996,7 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect, Spa
         int nOutboundBlockRelay = 0;
         int outbound_privacy_network_peers = 0;
         std::set<std::vector<unsigned char>> outbound_ipv46_peer_netgroups;
+        bool have_matmul_outbound = false;
 
         {
             LOCK(m_nodes_mutex);
@@ -3006,6 +3018,9 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect, Spa
                     case ConnectionType::MANUAL:
                     case ConnectionType::OUTBOUND_FULL_RELAY:
                     case ConnectionType::BLOCK_RELAY:
+                        if ((pnode->addr.nServices & MATMUL_PREFERRED_OUTBOUND_SERVICES) != 0) {
+                            have_matmul_outbound = true;
+                        }
                         const CAddress address{pnode->addr};
                         if (address.IsTor() || address.IsI2P() || address.IsCJDNS()) {
                             // Since our addrman-groups for these networks are
@@ -3206,6 +3221,16 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect, Spa
                               preferred_net.has_value() ? "network-specific " : "",
                               ConnectionTypeAsString(conn_type), GetNetworkName(addr.GetNetwork()),
                               fLogIPs ? strprintf(": %s", addr.ToStringAddrPort()) : "");
+                continue;
+            }
+
+            // Soft-prefer MatMul-capable peers when none of our persistent
+            // outbounds advertise those bits. Skip non-preferred addresses a
+            // bounded number of times, then accept any valid NODE_NETWORK
+            // peer. Feelers and anchors keep existing selection.
+            if (!fFeeler && !anchor && !have_matmul_outbound &&
+                nTries < MATMUL_OUTBOUND_PREFERENCE_TRIES &&
+                (addr.nServices & MATMUL_PREFERRED_OUTBOUND_SERVICES) == 0) {
                 continue;
             }
 

@@ -25,7 +25,7 @@ RUN cmake .. \
     -DBUILD_TESTS="OFF" \
     -DBUILD_GUI="OFF" \
     -DBUILD_TX="OFF" \
-    -DBUILD_UTIL="OFF" \
+    -DBUILD_UTIL="ON" \
     -DBUILD_WALLET_TOOL="OFF" \
     -DBUILD_BENCH="OFF" \
     -DBUILD_FUZZ_BINARY="OFF" \
@@ -52,6 +52,7 @@ RUN apk add --no-cache \
 
 COPY --from=builder /usr/local/bin/btxd     /usr/local/bin/btxd
 COPY --from=builder /usr/local/bin/btx-cli  /usr/local/bin/btx-cli
+COPY --from=builder /usr/local/bin/btx-util /usr/local/bin/btx-util
 
 RUN addgroup -S btx && \
     adduser -S -G btx -H -s /bin/false btx && \

@@ -9430,8 +9430,8 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
 //! Nodes that track a configured attestation quorum must not let a heavier
 //! competing fork occupy FindMostWorkChain. That includes trusted mirrors,
 //! the local signer, and consensus miners with -matmultrustedpubkey (they
-//! still ExactReplay locally; the quorum is fork-choice, not a substitute
-//! for the MatMul check). Tip children stay eligible. A short attested
+//! ExactReplay unattested tip-children and their own mining candidates; a
+//! verified quorum is fork-choice and skips redundant GPU ExactReplay).
 //! race may replace an unattested tip only.
 static bool TrustedMirrorShouldConsiderMostWorkCandidate(
     const CBlockIndex* tip, const CBlockIndex* candidate)
@@ -9530,12 +9530,18 @@ CBlockIndex* Chainstate::FindMostWorkChain()
             continue;
         }
 
-        // Trusted mirrors: do not let an unattested tip-child win most-work
-        // over an attested sibling. ConnectTip would defer it and ABC would
-        // stop, freezing the advertised height at the parent.
-        if (node::matmul_trusted::IsTrustedMirror() &&
-            m_chainman.GetMatMulValidationMode() ==
-                kernel::MatMulValidationMode::TRUSTED &&
+        // Configured Profile-1 nodes: do not let an unattested descendant
+        // win most-work over a distinct attested tip-child. On a trusted
+        // mirror ConnectTip would defer the unattested one and ABC would
+        // stop, freezing the advertised height at the parent. Headers-only
+        // attested siblings still count: they are often absent from
+        // setBlockIndexCandidates (HAVE_DATA / HaveNumChainTxs gated).
+        // Qualifier 3ed2619c: the active tip is always in the candidate
+        // set and usually has quorum. It is not a sibling. A sole linear
+        // child (getchaintips: height 11 active + height 12 valid-headers,
+        // same parent, no competing branch) must stay selectable so
+        // ConnectTip can wait for quorum instead of deferring forever.
+        if (node::matmul_trusted::IsConfigured() &&
             m_chain.Tip() != nullptr &&
             m_chainman.GetConsensus().IsMatMulTrustedReplayAttestationActive(
                 pindexNew->nHeight)) {
@@ -9545,32 +9551,56 @@ CBlockIndex* Chainstate::FindMostWorkChain()
                 pindexNew->GetAncestor(tip->nHeight) == tip};
             const bool has_quorum{node::matmul_trusted::HasQuorum(
                 pindexNew->GetBlockHash(), pindexNew->nHeight)};
-            bool attested_tip_child_exists{false};
+            const CBlockIndex* attested_sibling{nullptr};
             if (extends_tip && !has_quorum) {
+                auto consider_attested_tip_child = [&](const CBlockIndex* alt) {
+                    if (alt == nullptr) return false;
+                    return node::matmul_trusted::TrustedMirrorAttestedSiblingIsActionable(
+                        /*distinct_from_candidate=*/alt != pindexNew && alt != tip,
+                        /*same_parent=*/alt->pprev == tip,
+                        /*same_height_as_tip_child=*/alt->nHeight == tip->nHeight + 1,
+                        /*has_quorum=*/node::matmul_trusted::HasQuorum(
+                            alt->GetBlockHash(), alt->nHeight),
+                        /*failed=*/(alt->nStatus & BLOCK_FAILED_MASK) != 0);
+                };
                 for (CBlockIndex* alt : setBlockIndexCandidates) {
-                    if (alt == pindexNew) continue;
-                    if ((alt->nStatus & BLOCK_HAVE_DATA) == 0) continue;
-                    if ((alt->nStatus & BLOCK_FAILED_MASK) != 0) continue;
-                    if (alt->nHeight < tip->nHeight ||
-                        alt->GetAncestor(tip->nHeight) != tip) {
-                        continue;
-                    }
-                    if (node::matmul_trusted::HasQuorum(
-                            alt->GetBlockHash(), alt->nHeight)) {
-                        attested_tip_child_exists = true;
+                    if (consider_attested_tip_child(alt)) {
+                        attested_sibling = alt;
                         break;
+                    }
+                }
+                if (attested_sibling == nullptr) {
+                    for (const auto& hint :
+                         node::matmul_trusted::AttestedFrontierHints()) {
+                        const CBlockIndex* const alt{
+                            m_blockman.LookupBlockIndex(hint.hash)};
+                        if (consider_attested_tip_child(alt)) {
+                            attested_sibling = alt;
+                            break;
+                        }
+                    }
+                }
+                if (attested_sibling == nullptr) {
+                    for (CBlockIndex* alt :
+                         m_chainman.m_reorg_authenticated_candidate_tips) {
+                        if (consider_attested_tip_child(alt)) {
+                            attested_sibling = alt;
+                            break;
+                        }
                     }
                 }
             }
             if (node::matmul_trusted::TrustedMirrorDeferUnattestedMostWorkForAttestedSibling(
-                    /*trusted_mirror_profile1=*/true,
+                    /*configured_profile1=*/true,
                     extends_tip,
                     has_quorum,
-                    attested_tip_child_exists)) {
+                    attested_sibling != nullptr)) {
                 LogDebug(BCLog::VALIDATION,
-                         "FindMostWorkChain: deferring unattested tip-child hash=%s height=%d; attested sibling is in the candidate set\n",
+                         "FindMostWorkChain: deferring unattested tip-child hash=%s height=%d; distinct attested tip-child hash=%s height=%d\n",
                          pindexNew->GetBlockHash().ToString(),
-                         pindexNew->nHeight);
+                         pindexNew->nHeight,
+                         attested_sibling->GetBlockHash().ToString(),
+                         attested_sibling->nHeight);
                 setBlockIndexCandidates.erase(pindexNew);
                 hysteresis_deferred_candidates.push_back(pindexNew);
                 continue;
@@ -12635,6 +12665,24 @@ static bool ContextualCheckBlock(const CBlock& block,
                         }
                         CacheMatMulEncDrVerdict(
                             block.GetHash(), true);
+                        if (rc_authority != nullptr) {
+                            *rc_authority =
+                                MatMulRCAuthorityProvenance::
+                                    TRUSTED_SIGNER_QUORUM;
+                        }
+                        return true;
+                    }
+                    // Consensus-mode node with -matmultrustedpubkey: a verified
+                    // quorum is fork-choice authority for this hash. Skip the
+                    // redundant local ExactReplay so mining + a sibling flood
+                    // cannot wedge the 2-slot accelerator. Unattested
+                    // tip-children and our own candidates still ExactReplay.
+                    if (node::matmul_trusted::IsConfigured() &&
+                        consensusParams.IsMatMulTrustedReplayAttestationActive(
+                            nHeight) &&
+                        node::matmul_trusted::HasQuorum(
+                            block.GetHash(), nHeight)) {
+                        CacheMatMulEncDrVerdict(block.GetHash(), true);
                         if (rc_authority != nullptr) {
                             *rc_authority =
                                 MatMulRCAuthorityProvenance::
