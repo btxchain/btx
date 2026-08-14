@@ -2,7 +2,8 @@
 # Copyright (c) 2026 The BTX developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or https://opensource.org/license/mit/.
-"""One GPU-authority archive serving two trusted Profile-1 RPC mirrors."""
+"""One GPU-authority archive serving two trusted Profile-1 RPC mirrors,
+plus a late-joining consensus verifier with no local signer."""
 
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.messages import msg_generic, ser_compact_size
@@ -32,7 +33,7 @@ INLINE_SIGNER_WARNING = (
 
 class MatMulTrustedMirrorsTest(BitcoinTestFramework):
     def set_test_params(self):
-        self.num_nodes = 3
+        self.num_nodes = 4
         self.setup_clean_chain = True
         signer_wif, signer_pub = generate_keypair(wif=True)
         _, unavailable_pub = generate_keypair(wif=True)
@@ -69,7 +70,14 @@ class MatMulTrustedMirrorsTest(BitcoinTestFramework):
             "-matmulvalidation=trusted",
             "-matmulattestationserve=0",
         ]
+        # Consensus IBD without a local signer: same trusted pubkey/threshold
+        # as the archive/mirrors, but no signing key and no attestation serve.
+        consensus_verifier = common + [
+            "-matmulvalidation=consensus",
+            "-matmulattestationserve=0",
+        ]
         self.mirror_args = mirror
+        self.consensus_verifier_args = consensus_verifier
         self.insufficient_quorum_args = [
             arg for arg in mirror
             if not arg.startswith("-matmultrustedthreshold=")
@@ -79,10 +87,24 @@ class MatMulTrustedMirrorsTest(BitcoinTestFramework):
             "-matmultrustedthreshold=2",
             "-matmultrustedwaitms=1000",
         ]
-        self.extra_args = [archive, mirror, mirror]
+        self.extra_args = [archive, mirror, mirror, consensus_verifier]
+
+    def setup_network(self):
+        # Start archive + mirrors only. The consensus verifier joins from a
+        # clean height-0 datadir after the archive tip is past Profile-1
+        # activation (PR 105: Authority stuck at 0 while archive tip advanced).
+        self.add_nodes(self.num_nodes, self.extra_args)
+        for i in range(3):
+            self.start_node(i)
+        if self._requires_wallet:
+            for i in range(3):
+                self.init_wallet(node=i)
+        for i in range(2):
+            self.connect_nodes(i + 1, i)
+        self.sync_all(self.nodes[:3])
 
     def run_test(self):
-        archive, mirror_a, mirror_b = self.nodes
+        archive, mirror_a, mirror_b, verifier = self.nodes
 
         self.log.info("Trusted mirrors fail closed if configured to sign or serve")
         self.stop_node(2, expected_stderr=TRUST_WARNING.format(1))
@@ -210,6 +232,40 @@ class MatMulTrustedMirrorsTest(BitcoinTestFramework):
             assert_equal(frontier["blocks_behind"], 0)
             assert_greater_than(frontier["height"], before)
             assert_equal(mirror.getblockcount(), archive.getblockcount())
+
+        self.log.info(
+            "Consensus verifier without local signer syncs Profile-1 tip "
+            "from the archive (PR 105 qualifier)"
+        )
+        assert_equal(archive.getblockcount(), ACTIVATION_HEIGHT + 4)
+        self.start_node(3, self.consensus_verifier_args)
+        assert_equal(verifier.getblockcount(), 0)
+        self.connect_nodes(3, 0)
+        self.wait_until(
+            lambda: verifier.getbestblockhash()
+            == archive.getbestblockhash(),
+            timeout=300,
+        )
+        assert_equal(verifier.getblockcount(), archive.getblockcount())
+        verifier_services = verifier.getnetworkinfo()["localservicesnames"]
+        assert "MATMUL_CONSENSUS" in verifier_services
+        assert "MATMUL_TRUSTED_MIRROR" not in verifier_services
+        verifier_status = verifier.getmatmultrustedstatus()
+        assert_equal(verifier_status["trusted_mirror"], False)
+        assert_equal(verifier_status["local_signer"], False)
+        assert_equal(
+            verifier.getblockchaininfo()["matmulvalidationmode"],
+            "consensus",
+        )
+        self.generate(archive, 2, sync_fun=self.no_op)
+        self.wait_until(
+            lambda: all(
+                node.getbestblockhash() == archive.getbestblockhash()
+                for node in (mirror_a, mirror_b, verifier)
+            ),
+            timeout=300,
+        )
+        assert_equal(verifier.getblockcount(), archive.getblockcount())
 
         self.log.info("Archive export imports idempotently on both mirrors")
         activation_hash = archive.getblockhash(ACTIVATION_HEIGHT)
@@ -339,6 +395,7 @@ class MatMulTrustedMirrorsTest(BitcoinTestFramework):
         self.stop_node(0, expected_stderr=INLINE_SIGNER_WARNING)
         self.stop_node(1, expected_stderr=TRUST_WARNING.format(1))
         self.stop_node(2, expected_stderr=TRUST_WARNING.format(1))
+        self.stop_node(3)
 
 
 if __name__ == "__main__":

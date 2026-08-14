@@ -3412,21 +3412,8 @@ static bool TrustedMirrorMayDownloadIndex(
         TrustedMirrorShortTipReorg(tip, candidate));
 }
 
-//! ExactReplay GPU is 5GB+/12s. At the ASERT floor a competing header tree
-//! hundreds deep will saturate every device (live 2026-08-14: signer tip
-//! 187870, in-flight ExactReplay of competing 188012, 1458 headers-only tips
-//! above the attested tip, difficulty 1.9e-09). A later consensus+pubkey
-//! miner at the tip with the pool on ExactReplayed 25–198 same-height
-//! siblings and wedged the 2-slot scheduler (`queue deadline or capacity
-//! limit reached` ~6/s). Flood-immunity that only skipped HasQuorum /
-//! non-tip-children still ExactReplayed every unattested racing-tip sibling
-//! (all `pprev==tip`, none had HAVE_DATA yet), so the miner's own
-//! CandidateMining / submitblock ExactReplay starved and lost the height.
-//!
-//! Configured nodes (signer, consensus+pubkey): attestation is fork-choice.
-//! Never spend async P2P ExactReplay. Local submitblock / ConnectTip still
-//! ExactReplay via ContextualCheckBlock. Unconfigured consensus keeps the
-//! historical near-tip window.
+//! True if another unattested tip-child already has a body or ExactReplay
+//! verdict. Used so a trusted mirror persists at most one such child.
 [[nodiscard]] static bool ConfiguredTipChildAlreadyHasBody(
     const ChainstateManager& chainman,
     const CBlockIndex* tip,
@@ -3477,6 +3464,19 @@ static uint256 g_configured_claimed_tip_child{};
     return true;
 }
 
+//! ExactReplay GPU is 5GB+/12s. A competing header tree or same-height
+//! sibling burst will saturate every device and starve CandidateMining
+//! (live 2026-08-14). Split by role:
+//! - Trusted mirror: never P2P ExactReplay. GETMMATTEST + at most one
+//!   persisted unattested tip-child; ConnectTip waits for quorum.
+//! - Local signer/miner: never async P2P ExactReplay so CandidateMining
+//!   keeps the device. Competing P2P bodies stay HEADER_ONLY.
+//! - Independent consensus verifier (pubkey optional, no local signer):
+//!   ExactReplay P2P tip-children and the near-tip IBD window.
+//! Qualifier on d43eea4a: treating every IsConfigured() node like a miner
+//! left a consensus-no-signer node at height 0 (242 bodies admitted, 0
+//! UpdateTip) while trusted mirrors on the same archive reached 14.
+//! Callers that take the false path MUST still GETMMATTEST preferred hashes.
 [[nodiscard]] static bool MatMulMaySpendExactReplayGpu(
     [[maybe_unused]] const ChainstateManager& chainman,
     const CBlockIndex* tip,
@@ -3484,21 +3484,11 @@ static uint256 g_configured_claimed_tip_child{};
     EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
     if (tip == nullptr || index == nullptr) return false;
-    if (!node::matmul_trusted::IsConfigured()) {
-        if (index->pprev == tip) return true;
-        return index->nHeight >= tip->nHeight - 2 &&
-               index->nHeight <= tip->nHeight + MATMUL_RC_NEAR_TIP_DEPTH;
-    }
-    // Async P2P ExactReplay is never spent on a configured node. HasQuorum
-    // fast-accepts; unattested P2P siblings wait for attestation or (on a
-    // trusted mirror) persist without GPU. Local mining still ExactReplays
-    // through ContextualCheckBlock / CandidateMining.
-    //
-    // Callers that take this false path MUST still request attestations
-    // for preferred hashes. Skipping GPU must not skip GETMMATTEST: a
-    // trusted mirror then defers ConnectTip forever (qualifier: 0
-    // getmmattest on 5bc1e3d4, stall at pre-activation).
-    return false;
+    if (node::matmul_trusted::IsTrustedMirror()) return false;
+    if (node::matmul_trusted::HasLocalSigner()) return false;
+    if (index->pprev == tip) return true;
+    return index->nHeight >= tip->nHeight - 2 &&
+           index->nHeight <= tip->nHeight + MATMUL_RC_NEAR_TIP_DEPTH;
 }
 
 static bool AuthorityFrontierIndexUsable(
@@ -10225,12 +10215,16 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
                             // Live 2026-08-14: unsolicited competing bodies and
                             // a 25–198-wide same-height sibling burst occupied
                             // TipValidation while mining held the device.
-                            // Configured P2P never ExactReplays. Trusted
-                            // mirrors may persist exactly one unattested
-                            // tip-child so ConnectTip can wait for quorum
-                            // (qualifier sole-child). Extra siblings and
-                            // consensus+pubkey miner P2P bodies stay
-                            // HEADER_ONLY so local CandidateMining wins.
+                            // Trusted mirrors and local signers skip P2P
+                            // ExactReplay. Mirrors may persist exactly one
+                            // unattested tip-child so ConnectTip can wait for
+                            // quorum (qualifier sole-child). Extra siblings
+                            // and local-signer competing P2P bodies stay
+                            // HEADER_ONLY so CandidateMining wins.
+                            // Independent consensus verifiers (pubkey, no
+                            // local signer) do not take this path for
+                            // tip-children — MatMulMaySpendExactReplayGpu
+                            // is true, so ExactReplay reaches UpdateTip.
                             // Still request GETMMATTEST: ConnectTip waits
                             // for quorum that ExactReplay GPU used to arm.
                             exact_recompute_required = false;
@@ -10269,9 +10263,8 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
         return true;
     }
     if (skip_competing_exactreplay) {
-        LogDebug(BCLog::NET,
-                 "Skipping ExactReplay GPU for competing %s hash=%s height=%d from peer=%d (configured P2P sibling or non-tip-child; local mining keeps the device)\n",
-                 source, block_hash.ToString(), exact_reference_height, node.GetId());
+        LogInfo("MatMul admission HEADER_ONLY for %s hash=%s height=%d from peer=%d: skipped ExactReplay GPU (trusted-mirror or local-signer P2P sibling / non-tip-child; body not connected)\n",
+                source, block_hash.ToString(), exact_reference_height, node.GetId());
         admission.state = MatMulBlockAdmission::State::HEADER_ONLY;
         maybe_request_attestations_without_gpu();
         return true;
