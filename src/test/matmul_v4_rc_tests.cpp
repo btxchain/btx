@@ -26,6 +26,7 @@
 #include <cuda/matmul_v4_rc_exact_replay_cuda.h>
 #include <pow.h>
 #include <primitives/block.h>
+#include <node/matmul_rc_admission.h>
 #include <span.h>
 #include <test/util/setup_common.h>
 #include <uint256.h>
@@ -2642,6 +2643,78 @@ BOOST_AUTO_TEST_CASE(rc_enqueue_refund_receipt_rolls_source_counters_back_once)
         netgroup_budget.expensive_rc_verifications_this_minute, 0U);
     // Do not leak this process-global test debit into later suites.
     RefundGlobalMatMulRCBudget(kWorkUnits, charged_at);
+}
+
+BOOST_AUTO_TEST_CASE(handoff_peer_budget_miss_restores_ticket_and_refunds_debit)
+{
+    Consensus::Params p;
+    p.nMatMulV4Height = 1;
+    p.nMatMulRCHeight = 1;
+    p.fMatMulRCUseToyDims = true;
+    p.nMatMulRCPeerVerifyBudgetPerMin = 1;
+    constexpr int32_t kHeight{100};
+
+    MatMulPeerVerificationBudget address_budget;
+    MatMulPeerVerificationBudget netgroup_budget;
+    const auto now{std::chrono::steady_clock::now()};
+    BOOST_REQUIRE(ConsumeMatMulRCSourceVerifyBudgets(
+        address_budget, netgroup_budget, p, /*verification_count=*/1, now,
+        /*is_ibd=*/false, kHeight));
+    BOOST_CHECK(!ConsumeMatMulRCSourceVerifyBudgets(
+        address_budget, netgroup_budget, p, /*verification_count=*/1, now,
+        /*is_ibd=*/false, kHeight));
+    BOOST_CHECK_EQUAL(
+        address_budget.expensive_rc_verifications_this_minute, 1U);
+
+    CBlockHeader header;
+    header.nVersion = 4;
+    header.nTime = 1'900'000'000;
+    header.nBits = 0x207fffff;
+    header.hashPrevBlock = uint256{1};
+    header.hashMerkleRoot = uint256{2};
+    arith_uint256 limit;
+    limit.SetCompact(0x207fffff);
+    const uint256 regtest_limit{ArithToUint256(limit)};
+    node::RCAdmissionTicket ticket{header.GetHash(), 0};
+    uint64_t tries{2'000'000};
+    BOOST_REQUIRE(node::GrindRCAdmissionTicket(
+        header, regtest_limit, ticket, tries));
+
+    node::RCAdmissionStore store{{
+        .max_entries = 4,
+        .max_entries_per_netgroup = 2,
+    }};
+    constexpr uint64_t netgroup{0x51};
+    BOOST_REQUIRE(store.RememberKnown(
+        ticket, header, netgroup, regtest_limit, now) ==
+        node::RCAdmissionStore::RememberResult::Stored);
+    node::RCAdmissionTicket accepted;
+    BOOST_REQUIRE(store.Consume(
+        header, netgroup, regtest_limit, now, &accepted));
+
+    // Model the handoff miss: ticket already consumed, peer budget refuses a
+    // second debit. Restore the sidecar and leave source counters unchanged
+    // (the miss never charged). A later honest retry must be able to Consume.
+    BOOST_REQUIRE(store.RestoreConsumed(
+        accepted, header, netgroup, regtest_limit, now));
+    BOOST_CHECK(store.Consume(header, netgroup, regtest_limit, now));
+
+    MatMulRCVerificationBudgetDebit debit{
+        .verification_count = 1,
+        .charged_at = now,
+        .refundable = true,
+    };
+    const auto refund{TakeMatMulRCVerificationBudgetRefund(debit)};
+    BOOST_REQUIRE(refund);
+    RefundMatMulRCPeerVerifyBudget(
+        address_budget, refund->verification_count, refund->charged_at);
+    RefundMatMulRCPeerVerifyBudget(
+        netgroup_budget, refund->verification_count, refund->charged_at);
+    BOOST_CHECK_EQUAL(
+        address_budget.expensive_rc_verifications_this_minute, 0U);
+    BOOST_CHECK_EQUAL(
+        netgroup_budget.expensive_rc_verifications_this_minute, 0U);
+    BOOST_CHECK(!TakeMatMulRCVerificationBudgetRefund(debit));
 }
 
 BOOST_AUTO_TEST_CASE(rc_global_budget_retry_delay_tracks_current_window)

@@ -3983,6 +3983,117 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_gap_only_unwinds_persisted_shielded_de
     }
 }
 
+// Unclean stop after snapshot catch-up: shielded tip is ahead of the active
+// snapshot-base tip, gap-only unwind cannot read the missing post-snapshot
+// bodies, and fused rebuild would walk genesis. Never wipe shielded_state
+// on that already-unavoidable failure (assumeutxo brick).
+BOOST_FIXTURE_TEST_CASE(chainstatemanager_refuses_genesis_rebuild_wipe_when_ahead_tip_blocks_missing,
+                        PersistedTestChain100Setup)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    CreateAndProcessBlock({}, script_pub_key);
+
+    shielded::ShieldedMerkleTree ahead_tree;
+    std::vector<uint256> ahead_anchor_roots;
+    uint256 ahead_tip_hash;
+    int32_t ahead_tip_height{-1};
+    CAmount ahead_balance{0};
+    std::optional<uint256> ahead_digest;
+    std::optional<shielded::registry::ShieldedAccountRegistryPersistedSnapshot> ahead_registry;
+    std::vector<uint256> ahead_registry_roots;
+    CBlockIndex* ahead_index{nullptr};
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman.EnsureShieldedStateInitialized());
+        BOOST_REQUIRE(chainman.ReadPersistedShieldedState(
+            ahead_tree, ahead_anchor_roots, ahead_tip_hash, ahead_tip_height,
+            ahead_balance, ahead_digest, ahead_registry, &ahead_registry_roots));
+        ahead_index = chainman.m_blockman.LookupBlockIndex(ahead_tip_hash);
+        BOOST_REQUIRE(ahead_index != nullptr);
+    }
+    BlockValidationState invalidate_state;
+    BOOST_REQUIRE(chainman.ActiveChainstate().InvalidateBlock(
+        invalidate_state, ahead_index));
+    BOOST_REQUIRE(invalidate_state.IsValid());
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman.ActiveTip() != nullptr);
+        BOOST_REQUIRE_EQUAL(chainman.ActiveTip()->nHeight, ahead_tip_height - 1);
+        for (Chainstate* cs : chainman.GetAll()) cs->ForceFlushStateToDisk();
+        BOOST_REQUIRE(chainman.WritePersistedShieldedState(
+            ahead_tree, ahead_anchor_roots, ahead_tip_hash, ahead_tip_height,
+            ahead_balance, ahead_digest, ahead_registry, ahead_registry_roots));
+    }
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+
+    const fs::path datadir = chainman.m_options.datadir;
+    {
+        LOCK(::cs_main);
+        chainman.ResetChainstates();
+        ahead_tree = shielded::ShieldedMerkleTree{
+            shielded::ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY};
+        m_node.chainman.reset();
+        m_node.notifications = std::make_unique<KernelNotifications>(
+            Assert(m_node.shutdown_request), m_node.exit_status, *Assert(m_node.warnings));
+        const ChainstateManager::Options chainman_opts{
+            .chainparams = ::Params(),
+            .datadir = datadir,
+            .shielded_startup_audit = false,
+            .fast_shielded_startup = true,
+            .notifications = *m_node.notifications,
+            .signals = m_node.validation_signals.get(),
+        };
+        const BlockManager::Options blockman_opts{
+            .chainparams = chainman_opts.chainparams,
+            .blocks_dir = m_args.GetBlocksDirPath(),
+            .notifications = chainman_opts.notifications,
+            .block_tree_db_params = DBParams{
+                .path = datadir / "blocks" / "index",
+                .cache_bytes = m_kernel_cache_sizes.block_tree_db,
+                .memory_only = m_block_tree_db_in_memory,
+            },
+        };
+        m_node.chainman = std::make_unique<ChainstateManager>(
+            *Assert(m_node.shutdown_signal), chainman_opts, blockman_opts);
+    }
+    ChainstateManager& restarted = *Assert(m_node.chainman);
+    this->LoadVerifyActivateChainstate();
+    {
+        LOCK(::cs_main);
+        CBlockIndex* ahead = restarted.m_blockman.LookupBlockIndex(ahead_tip_hash);
+        BOOST_REQUIRE(ahead != nullptr);
+        ahead->nStatus &= ~BLOCK_HAVE_DATA;
+        ahead->nDataPos = 0;
+        ahead->nFile = -1;
+        CBlockIndex* pruned = restarted.ActiveChain()[10];
+        BOOST_REQUIRE(pruned != nullptr);
+        pruned->nStatus &= ~BLOCK_HAVE_DATA;
+        pruned->nDataPos = 0;
+        pruned->nFile = -1;
+
+        ASSERT_DEBUG_LOG("Refusing to wipe shielded_state");
+        BOOST_CHECK(!restarted.EnsureShieldedStateInitialized());
+        BOOST_CHECK(!restarted.HasShieldedState());
+
+        shielded::ShieldedMerkleTree retained_tree;
+        std::vector<uint256> retained_anchors;
+        uint256 retained_hash;
+        int32_t retained_height{-1};
+        CAmount retained_balance{0};
+        std::optional<uint256> retained_digest;
+        std::optional<shielded::registry::ShieldedAccountRegistryPersistedSnapshot>
+            retained_registry;
+        std::vector<uint256> retained_registry_roots;
+        BOOST_REQUIRE(restarted.ReadPersistedShieldedState(
+            retained_tree, retained_anchors, retained_hash, retained_height,
+            retained_balance, retained_digest, retained_registry,
+            &retained_registry_roots));
+        BOOST_CHECK_EQUAL(retained_hash, ahead_tip_hash);
+        BOOST_CHECK_EQUAL(retained_height, ahead_tip_height);
+    }
+}
+
 BOOST_FIXTURE_TEST_CASE(chainstatemanager_gap_only_recovers_persisted_shielded_short_fork,
                         PersistedTestChain100Setup)
 {

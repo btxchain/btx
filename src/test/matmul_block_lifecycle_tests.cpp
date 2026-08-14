@@ -260,4 +260,20 @@ BOOST_AUTO_TEST_CASE(progress_vector_tracks_causal_events_not_time)
     BOOST_CHECK_EQUAL(current.active_tip, initial.active_tip + 1);
 }
 
+BOOST_AUTO_TEST_CASE(retained_body_is_skip_fetch_until_terminal)
+{
+    // Ticketless followed-chain retain: skip-fetch while the only copy is
+    // held. Terminal release (ticket/retry success, invalid, capacity) is
+    // what invalidates the skip, not a 60s wall-clock expiry.
+    node::MatMulBlockLifecycle lifecycle{1, 100, 10min, 10min};
+    const auto now{node::MatMulBlockLifecycle::Clock::now()};
+    const uint256 hash{
+        uint256::FromHex(std::string(63, '0') + "9").value()};
+    BOOST_REQUIRE(lifecycle.Retain(hash, Body(9, 50, now), now));
+    BOOST_CHECK(lifecycle.HasRetainedBody(hash));
+    BOOST_CHECK(lifecycle.NextRetry(uint256{}, now).has_value());
+    lifecycle.TerminalRetained(hash);
+    BOOST_CHECK(!lifecycle.HasRetainedBody(hash));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

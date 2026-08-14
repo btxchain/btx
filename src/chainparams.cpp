@@ -409,6 +409,14 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
         options.matmul_lt_max_pending_verifications =
             ParseRegTestPositiveUInt32Arg(args, "-regtestmatmulltmaxpending");
     }
+    if (args.IsArgSet("-regtestmatmulmaxpending")) {
+        options.matmul_max_pending_verifications =
+            ParseRegTestUInt32Arg(args, "-regtestmatmulmaxpending");
+    }
+    if (args.IsArgSet("-regtestrcmaxpending")) {
+        options.matmul_rc_max_pending_verifications =
+            ParseRegTestUInt32Arg(args, "-regtestrcmaxpending");
+    }
     options.matmul_flat_sketch_replay = args.GetBoolArg("-regtestmatmulflatsketchreplay", false);
     // Audit dead-code deletion: the -regtestmatmulproofprunedepth parse was removed
     // along with the dead nMatMulProofPruneDepth field / matmul_proof_prune_depth

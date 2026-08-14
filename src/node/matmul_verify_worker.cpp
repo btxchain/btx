@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <chrono>
 #include <iterator>
+#include <thread>
 #include <utility>
 
 namespace node {
@@ -248,6 +249,13 @@ MatMulVerifyWorker::HandoffAuthenticatedTip(Job& replacement)
     return HandoffResult::HandedOff;
 }
 
+void MatMulVerifyWorker::InstallVerifyOverrideForTest(
+    std::function<bool(const CBlock&, int32_t, std::optional<int64_t>)> verify)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_verify_override = std::move(verify);
+}
+
 bool MatMulVerifyWorker::CanHandoffAuthenticatedTip(
     const CBlockHeader& replacement,
     int32_t height) const
@@ -341,6 +349,51 @@ size_t MatMulVerifyWorker::CancelIf(
     return count;
 }
 
+void MatMulVerifyWorker::CancelAllForTest()
+{
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_shutdown.store(true, std::memory_order_release);
+        for (auto& [hash, pending] : m_pending) {
+            (void)hash;
+            pending->job.cancelled->store(true, std::memory_order_relaxed);
+        }
+        m_queue.clear();
+        for (auto& [hash, pending] : m_awaiting_quorum) {
+            (void)hash;
+            pending->job.cancelled->store(true, std::memory_order_relaxed);
+            pending->awaiting_quorum_deadline.reset();
+        }
+        m_awaiting_quorum.clear();
+        m_awaiting_quorum_bytes = 0;
+        m_cancel_retry_backoff.clear();
+    }
+    matmul::v4::rc::GetRCAcceleratorScheduler().NotifyCancellation();
+    m_cv.notify_all();
+    const auto deadline{
+        std::chrono::steady_clock::now() + std::chrono::seconds{2}};
+    for (;;) {
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            bool running{false};
+            for (const auto& [hash, pending] : m_pending) {
+                (void)hash;
+                if (pending->running) {
+                    running = true;
+                    break;
+                }
+            }
+            if (!running) {
+                m_pending.clear();
+                break;
+            }
+        }
+        if (std::chrono::steady_clock::now() >= deadline) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds{10});
+    }
+    m_shutdown.store(false, std::memory_order_release);
+}
+
 bool MatMulVerifyWorker::Contains(const uint256& hash) const
 {
     std::lock_guard<std::mutex> lock(m_mutex);
@@ -387,6 +440,16 @@ void MatMulVerifyWorker::Stop()
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         m_stopped = true;
+        m_shutdown.store(true, std::memory_order_release);
+        // Cancel running ExactReplay as well as queued/parked work. CPU
+        // auto-fallback (and a spinning b-mmverify) otherwise holds
+        // b-shutoff in join() until the current episode finishes — SIGTERM
+        // then looks hung, operators SIGKILL, and that unclean stop bricks
+        // assumeutxo shielded_state.
+        for (auto& [hash, pending] : m_pending) {
+            (void)hash;
+            pending->job.cancelled->store(true, std::memory_order_relaxed);
+        }
         // Queued-not-started and parked-awaiting jobs receive no consensus
         // completion. Their retryable-failure cleanup runs below so network
         // async markers are released while the unprocessed blocks stay
@@ -618,6 +681,7 @@ void MatMulVerifyWorker::WorkerLoop()
             continue;
         }
 
+        std::function<bool(const CBlock&, int32_t, std::optional<int64_t>)> verify_override;
         {
             std::unique_lock<std::mutex> lock(m_mutex);
             if (m_stopped) return;
@@ -630,6 +694,7 @@ void MatMulVerifyWorker::WorkerLoop()
             m_queue.erase(m_queue.begin() + best);
             pending->running = true;
             active_tip_hash = m_tip_hash;
+            verify_override = m_verify_override;
         }
 
         Job& job{pending->job};
@@ -660,19 +725,21 @@ void MatMulVerifyWorker::WorkerLoop()
         };
         bool ok{false};
         bool local_execution_failure{false};
+        const bool shutting_down{
+            m_shutdown.load(std::memory_order_acquire)};
         if (job.cancelled->load(std::memory_order_relaxed) &&
-            !ProtectsBodyReplay(*pending)) {
+            (!ProtectsBodyReplay(*pending) || shutting_down)) {
             finish_retryable_without_verdict();
             continue;
         }
         matmul::v4::rc::RCAcceleratorScheduler::Lease
             accelerator_lease;
         const bool trusted_exact_replay{
-            !m_verify_override &&
+            !verify_override &&
             node::matmul_trusted::IsTrustedMirror() &&
             m_params.IsMatMulTrustedReplayAttestationActive(job.height)};
         const bool protect_body_replay{ProtectsBodyReplay(*pending)};
-        if (!m_verify_override &&
+        if (!verify_override &&
             m_params.IsMatMulRCFamilyActive(job.height) &&
             !trusted_exact_replay) {
             // CompetingBranch must use TipValidation, not SpeculativeValidation.
@@ -716,7 +783,9 @@ void MatMulVerifyWorker::WorkerLoop()
             accelerator_lease =
                 matmul::v4::rc::GetRCAcceleratorScheduler().Acquire(
                     device_priority,
-                    protect_body_replay ? nullptr : job.cancelled.get(),
+                    (protect_body_replay && !shutting_down)
+                        ? nullptr
+                        : job.cancelled.get(),
                     strprintf("verify:%s:%d", hash.ToString(),
                               job.height),
                     /*external_cancelled=*/nullptr,
@@ -740,14 +809,15 @@ void MatMulVerifyWorker::WorkerLoop()
                 accelerator_lease.QueueWaitSeconds());
         }
         matmul::v4::rc::ScopedExactReplayCancellation cancellation_scope{
-            protect_body_replay ? nullptr : job.cancelled.get()};
-        if (m_verify_override) {
+            (protect_body_replay && !shutting_down) ? nullptr
+                                                   : job.cancelled.get()};
+        if (verify_override) {
             if (job.block) {
-                ok = m_verify_override(
+                ok = verify_override(
                     *job.block, job.height, job.parent_median_time_past);
             } else {
                 CBlock synthetic{header};
-                ok = m_verify_override(
+                ok = verify_override(
                     synthetic, job.height, job.parent_median_time_past);
             }
         } else if (trusted_exact_replay) {
@@ -904,7 +974,7 @@ void MatMulVerifyWorker::WorkerLoop()
             const auto suppress_verdict{[&] {
                 return local_execution_failure ||
                        (job.cancelled->load(std::memory_order_relaxed) &&
-                        !ProtectsBodyReplay(*pending));
+                        (!ProtectsBodyReplay(*pending) || shutting_down));
             }};
             if (sf.IsLeader()) {
                 ok = verify_pure();
@@ -938,7 +1008,8 @@ complete:
             m_pending.erase(hash);
             const bool cancelled_header_only{
                 job.cancelled->load(std::memory_order_relaxed) &&
-                !ProtectsBodyReplay(*pending)};
+                (!ProtectsBodyReplay(*pending) ||
+                 (m_shutdown.load(std::memory_order_acquire) && !ok))};
             const bool retryable_without_verdict{
                 local_execution_failure || cancelled_header_only};
             if (retryable_without_verdict) {

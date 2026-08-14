@@ -512,7 +512,7 @@ class BTXFaststartTest(unittest.TestCase):
                 self.assertEqual(exit_code, 0)
                 self.assertNotIn("loadtxoutset", seen_methods)
                 self.assertIn("skipping loadtxoutset", stdout.getvalue())
-                self.assertFalse((datadir / "faststart" / "snapshot.dat").exists())
+                self.assertTrue((datadir / "faststart" / "snapshot.dat").exists())
         finally:
             self.module.subprocess.run = original_run
             self.module.snapshot_from_args = original_snapshot_from_args
@@ -578,7 +578,7 @@ class BTXFaststartTest(unittest.TestCase):
 
                 self.assertEqual(exit_code, 0)
                 self.assertIn("during loadtxoutset; continuing", stdout.getvalue())
-                self.assertFalse((datadir / "faststart" / "snapshot.dat").exists())
+                self.assertTrue((datadir / "faststart" / "snapshot.dat").exists())
         finally:
             self.module.subprocess.run = original_run
             self.module.snapshot_from_args = original_snapshot_from_args

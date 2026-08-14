@@ -541,6 +541,60 @@ BOOST_AUTO_TEST_CASE(deferred_cooldown_is_scoped_to_reconnect_resistant_netgroup
     BOOST_CHECK(!cooldowns.Contains(hash, independent_netgroup, start));
 }
 
+BOOST_AUTO_TEST_CASE(ticketless_followed_chain_persists_or_retains_competing_stays_header_only)
+{
+    // Closed livelock: a delivered followed historical hole always persists
+    // (HAVE_DATA, no ExactReplay GPU). A tip-child persists on mirrors/signers
+    // and is retained on independent consensus until ticket/retry. Competing
+    // siblings keep HEADER_ONLY + per-peer cooldown so one netgroup cannot
+    // censor an independent source or steal miner GPU.
+    BOOST_CHECK(
+        node::ClassifyTicketlessRCBody(
+            /*followed_historical_hole=*/true,
+            /*tip_child=*/false,
+            /*persist_without_exactreplay_gpu=*/false) ==
+        node::TicketlessRCBodyAction::PersistWithoutGpu);
+    BOOST_CHECK(
+        node::ClassifyTicketlessRCBody(
+            /*followed_historical_hole=*/true,
+            /*tip_child=*/false,
+            /*persist_without_exactreplay_gpu=*/true) ==
+        node::TicketlessRCBodyAction::PersistWithoutGpu);
+    BOOST_CHECK(
+        node::ClassifyTicketlessRCBody(
+            /*followed_historical_hole=*/false,
+            /*tip_child=*/true,
+            /*persist_without_exactreplay_gpu=*/true) ==
+        node::TicketlessRCBodyAction::PersistWithoutGpu);
+    BOOST_CHECK(
+        node::ClassifyTicketlessRCBody(
+            /*followed_historical_hole=*/false,
+            /*tip_child=*/true,
+            /*persist_without_exactreplay_gpu=*/false) ==
+        node::TicketlessRCBodyAction::RetainUntilTicketOrRetry);
+    BOOST_CHECK(
+        node::ClassifyTicketlessRCBody(
+            /*followed_historical_hole=*/false,
+            /*tip_child=*/false,
+            /*persist_without_exactreplay_gpu=*/true) ==
+        node::TicketlessRCBodyAction::HeaderOnlyPerPeerCooldown);
+    BOOST_CHECK(
+        node::ClassifyTicketlessRCBody(
+            /*followed_historical_hole=*/false,
+            /*tip_child=*/false,
+            /*persist_without_exactreplay_gpu=*/false) ==
+        node::TicketlessRCBodyAction::HeaderOnlyPerPeerCooldown);
+
+    node::RCDeferredBodyCooldowns cooldowns;
+    const uint256 competing{uint256::ONE};
+    const auto start{std::chrono::steady_clock::now()};
+    constexpr uint64_t source_netgroup{11};
+    constexpr uint64_t independent_netgroup{22};
+    BOOST_REQUIRE(cooldowns.Mark(competing, source_netgroup, start));
+    BOOST_CHECK(cooldowns.Contains(competing, source_netgroup, start));
+    BOOST_CHECK(!cooldowns.Contains(competing, independent_netgroup, start));
+}
+
 
 // A bounded store declining to allocate is NOT peer misbehaviour.
 //

@@ -259,6 +259,10 @@ public:
         //! Test-only pending-job cap override used to exercise exact admission
         //! boundaries (for example compact-block reservation transfer).
         std::optional<uint32_t> matmul_lt_max_pending_verifications{};
+        //! Test-only EncDr pending-job cap (nMatMulMaxPendingVerifications).
+        std::optional<uint32_t> matmul_max_pending_verifications{};
+        //! Test-only RC pending-job cap. Applied after the regtest RC unthrottle.
+        std::optional<uint32_t> matmul_rc_max_pending_verifications{};
         bool matmul_flat_sketch_replay{false};
         std::optional<uint32_t> matmul_proof_assumevalid_min_age{};
         bool fastprune{false};

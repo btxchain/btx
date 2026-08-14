@@ -570,7 +570,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional shared file path for service challenge redemption state during bootstrap.",
     )
     parser.add_argument("--follow", action="store_true", help="Keep watching getchainstates after bootstrap completes.")
-    parser.add_argument("--keep-snapshot", action="store_true", help="Keep the downloaded snapshot after loadtxoutset.")
+    parser.add_argument(
+        "--keep-snapshot",
+        dest="keep_snapshot",
+        action="store_true",
+        default=True,
+        help="Keep the downloaded snapshot after loadtxoutset (default).",
+    )
+    parser.add_argument(
+        "--discard-snapshot",
+        dest="keep_snapshot",
+        action="store_false",
+        help="Delete the downloaded snapshot after a confirmed loadtxoutset.",
+    )
     parser.add_argument("--no-start-daemon", action="store_true", help="Pass through to btx-faststart.py.")
     parser.add_argument("--daemon-arg", action="append", default=[], help="Extra argument passed to btxd during bootstrap.")
     parser.add_argument("--cli-arg", action="append", default=[], help="Extra argument passed to btx-cli during bootstrap.")
@@ -784,6 +796,8 @@ def main(argv: list[str]) -> int:
             faststart_cmd.append("--follow")
         if args.keep_snapshot:
             faststart_cmd.append("--keep-snapshot")
+        else:
+            faststart_cmd.append("--discard-snapshot")
         if args.no_start_daemon:
             faststart_cmd.append("--no-start-daemon")
         faststart_cmd.extend(f"--daemon-arg={value}" for value in args.daemon_arg)

@@ -1327,12 +1327,23 @@ public:
      *  does not execute the MatMul phase-2/ENC-DR predicate itself. A valid
      *  previously-unseen header is idempotently accepted/indexed here so its
      *  nChainWork is available and the same unrequested gates as AcceptBlock
-     *  can be evaluated exactly before admission. */
+     *  can be evaluated exactly before admission. Followed-chain historical
+     *  holes (active-tip or snapshot-base ancestors) bypass the unrequested
+     *  nTx / less-work / height / min-chainwork early exits so a delivered
+     *  body is persisted; competing forks keep the Bitcoin Core anti-DoS gates. */
     bool CheckMatMulBlockAdmissionPreconditions(const CBlock& block,
                                                 BlockValidationState& state,
                                                 bool force_processing,
                                                 bool min_pow_checked,
                                                 bool& reaches_contextual_check)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** Ancestor of the active tip or of GetSnapshotBaseBlock(). These bodies
+     *  must persist without ExactReplay GPU even when unrequested: the
+     *  less-work anti-DoS gate is true of every ancestor, pruned holes have
+     *  nTx != 0 without HAVE_DATA, and HEADER_ONLY dropping them is an
+     *  unbounded re-getdata loop. Competing forks are not followed holes. */
+    bool IsMatMulFollowedHistoricalHole(const CBlockIndex* index) const
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /**

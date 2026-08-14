@@ -2016,6 +2016,17 @@ public:
             consensus.nMatMulRCGlobalVerifyBudgetPerMin = std::numeric_limits<uint32_t>::max();
             consensus.nMatMulRCPeerVerifyBudgetPerMin = std::numeric_limits<uint32_t>::max();
         }
+        // Test-only EncDr / RC pending-cap overrides. RC is applied after the
+        // unthrottle above so a functional test can still exhaust the cap
+        // without enlarging production defaults.
+        if (opts.matmul_max_pending_verifications.has_value()) {
+            consensus.nMatMulMaxPendingVerifications =
+                *opts.matmul_max_pending_verifications;
+        }
+        if (opts.matmul_rc_max_pending_verifications.has_value()) {
+            consensus.nMatMulRCMaxPendingVerifications =
+                *opts.matmul_rc_max_pending_verifications;
+        }
         // v4.4-LT Q* Phase B: explicit regtest override in either direction.
         // Regtest defaults to seal mode, while =0 retains a Phase-A fixture.
         // Enabling remains meaningful only together with a live DRLT height.
@@ -2254,6 +2265,8 @@ public:
             opts.matmul_rc_profile.has_value() ||
             (opts.matmul_lt_seal_as_pow.has_value() && !functional_harness_seal_override) ||
             opts.matmul_lt_max_pending_verifications.has_value() ||
+            opts.matmul_max_pending_verifications.has_value() ||
+            opts.matmul_rc_max_pending_verifications.has_value() ||
             opts.matmul_flat_sketch_replay ||
             opts.matmul_proof_assumevalid_min_age.has_value() ||
             opts.shielded_tx_binding_activation_height.has_value() ||

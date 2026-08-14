@@ -200,11 +200,21 @@ public:
         const CBlockHeader& replacement,
         int32_t height) const;
 
+    /** Replace the pure-verify callback used by unit tests. WorkerLoop
+     *  snapshots the override under m_mutex when dequeuing, so a later
+     *  install cannot tear a running call. Prefer installing before the
+     *  first enqueue so the stall is in place before header-first work. */
+    void InstallVerifyOverrideForTest(
+        std::function<bool(const CBlock&, int32_t, std::optional<int64_t>)> verify);
+
     /** Cancel queued/running speculative work for one header hash. */
     bool Cancel(const uint256& hash);
 
     /** Cancel every job selected by a tip/reorg-aware predicate. */
     size_t CancelIf(const std::function<bool(const CBlockHeader&, int32_t)>& predicate);
+    /** Drop leftover ExactReplay work between shared-fixture peerman cases
+     *  without permanently stopping the worker. */
+    void CancelAllForTest();
     [[nodiscard]] bool Contains(const uint256& hash) const;
 
     /** Publish the active tip so queued/parked trusted work ranks tip-first. */
@@ -263,7 +273,7 @@ private:
     void PruneCancelRetryBackoff();
 
     const Consensus::Params& m_params;
-    const std::function<bool(const CBlock&, int32_t, std::optional<int64_t>)> m_verify_override;
+    std::function<bool(const CBlock&, int32_t, std::optional<int64_t>)> m_verify_override;
     const uint32_t m_max_threads;
 
     mutable std::mutex m_mutex;
@@ -278,6 +288,7 @@ private:
     int32_t m_tip_height{-1}; // GUARDED_BY(m_mutex)
     uint64_t m_next_sequence{0};          // GUARDED_BY(m_mutex)
     bool m_stopped{false};               // GUARDED_BY(m_mutex)
+    std::atomic<bool> m_shutdown{false};
     struct CancelRetryBackoff {
         std::chrono::steady_clock::time_point not_before{};
         int consecutive{0};

@@ -503,6 +503,7 @@ std::optional<bool> PinCachedMatMulEncDrVerdict(const uint256& block_hash);
 /** Pin a verdict already established by an exact recomputation. */
 void PinMatMulEncDrVerdict(const uint256& block_hash, bool valid);
 void UnpinMatMulEncDrVerdict(const uint256& block_hash);
+void ResetMatMulEncDrVerdictsForTest();
 /** Scope one assumevalid-trust decision across admission -> validation. Unlike
  *  a verdict pin this does not claim an exact recomputation occurred; it only
  *  preserves the trust decision the block would have consumed atomically. */
@@ -728,6 +729,8 @@ std::chrono::steady_clock::duration GlobalMatMulRCBudgetRetryDelay(std::chrono::
 /** Roll back an RC budget debit only when admission failed before work began.
  *  `charged_at` prevents a delayed rollback from decrementing a later window. */
 void RefundGlobalMatMulRCBudget(uint32_t count, std::chrono::steady_clock::time_point charged_at);
+/** Clear the process-wide RC global window so peerman tests can isolate DoS-F2. */
+void ResetGlobalMatMulRCBudgetForTest();
 MatMulSolvePipelineStats ProbeMatMulSolvePipelineStats();
 void ResetMatMulSolvePipelineStats();
 MatMulGpuPreHashScanStats ProbeMatMulGpuPreHashScanStats();

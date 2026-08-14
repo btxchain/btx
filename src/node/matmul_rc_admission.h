@@ -157,6 +157,7 @@ public:
 
     void Erase(const uint256& block_hash);
     void Prune(std::chrono::steady_clock::time_point now);
+    void Clear();
     [[nodiscard]] size_t Size() const
     {
         return m_validated_entries.size() + m_unknown_entries.size();
@@ -195,6 +196,39 @@ private:
     std::map<uint64_t, std::vector<std::chrono::steady_clock::time_point>>
         m_unknown_submission_history;
 };
+
+/**
+ * Closed livelock disposition for a ticketless RC body.
+ *
+ * Followed historical holes persist without ExactReplay GPU (HAVE_DATA;
+ * ConnectTip still waits for quorum). A tip-child persists without GPU on
+ * mirrors/signers, and is retained on independent consensus until a ticket
+ * or requested retry can run ExactReplay. Competing near-tip siblings stay
+ * HEADER_ONLY with a per-peer non-refreshing cooldown so one ticketless
+ * source cannot censor every peer or steal miner GPU.
+ */
+enum class TicketlessRCBodyAction : uint8_t {
+    PersistWithoutGpu,
+    RetainUntilTicketOrRetry,
+    HeaderOnlyPerPeerCooldown,
+};
+
+[[nodiscard]] constexpr TicketlessRCBodyAction ClassifyTicketlessRCBody(
+    bool followed_historical_hole,
+    bool tip_child,
+    bool persist_without_exactreplay_gpu) noexcept
+{
+    if (followed_historical_hole) {
+        return TicketlessRCBodyAction::PersistWithoutGpu;
+    }
+    if (!tip_child) {
+        return TicketlessRCBodyAction::HeaderOnlyPerPeerCooldown;
+    }
+    if (persist_without_exactreplay_gpu) {
+        return TicketlessRCBodyAction::PersistWithoutGpu;
+    }
+    return TicketlessRCBodyAction::RetainUntilTicketOrRetry;
+}
 
 /**
  * Bounded cooldown for RC bodies that arrived before a usable admission

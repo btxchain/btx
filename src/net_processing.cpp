@@ -1101,6 +1101,37 @@ public:
         m_best_block_time = time;
     };
     void UnitTestMisbehaving(NodeId peer_id) override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex) { Misbehaving(*Assert(GetPeerRef(peer_id)), ""); };
+    void InstallMatMulVerifyOverrideForTest(
+        std::function<bool(const CBlock&, int32_t, std::optional<int64_t>)> verify) override
+    {
+        if (m_matmul_verify_worker) {
+            m_matmul_verify_worker->InstallVerifyOverrideForTest(std::move(verify));
+        }
+    }
+    void ResetMatMulVerifyAdmissionForTest() override
+    {
+        m_matmul_rc_speculative_pending.store(0, std::memory_order_relaxed);
+        m_matmul_rc_pending_verifications.store(0, std::memory_order_relaxed);
+        {
+            LOCK(m_matmul_rc_admission_mutex);
+            m_matmul_rc_admission_store.Clear();
+            m_matmul_rc_outbound_tickets.clear();
+            m_matmul_rc_speculative_hashes.clear();
+        }
+        if (m_matmul_verify_worker) {
+            m_matmul_verify_worker->CancelAllForTest();
+        }
+        ResetMatMulEncDrVerdictsForTest();
+        ResetMatMulRCWinnerAuthorityForTest();
+    }
+    bool HasMatMulRetainedBodyForTest(const uint256& hash) const override
+    {
+        return m_matmul_block_lifecycle.HasRetainedBody(hash);
+    }
+    bool UnitTestHasMatMulRetainedBody(const uint256& hash) const override
+    {
+        return HasMatMulRetainedBodyForTest(hash);
+    }
     void ProcessMessage(CNode& pfrom, const std::string& msg_type, DataStream& vRecv,
                         const std::chrono::microseconds time_received, const std::atomic<bool>& interruptMsgProc) override
         EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_most_recent_block_mutex, !m_headers_presync_mutex, g_msgproc_mutex, !m_tx_download_mutex);
@@ -1571,11 +1602,10 @@ private:
         const node::MatMulBlockLifecycle::Token& token) NO_THREAD_SAFETY_ANALYSIS;
     void UnmarkMatMulAsyncVerification(const uint256& hash) NO_THREAD_SAFETY_ANALYSIS;
     bool IsMatMulAsyncVerificationPending(const uint256& hash) const NO_THREAD_SAFETY_ANALYSIS;
-    /** Bodies deferred to HEADER_ONLY because no RC admission ticket could be
-     *  consumed. A bounded, non-refreshing cooldown prevents a ticketless
-     *  sender from creating an unbounded getdata/block loop without letting it
-     *  indefinitely extend suppression of an honest source. Valid admission
-     *  and terminal verdict paths explicitly clear the hash. */
+    /** Competing ticketless RC bodies deferred to HEADER_ONLY. Followed-chain
+     *  ticketless deliveries persist or retain instead; this cooldown is the
+     *  per-peer anti-DoS for competing siblings. Non-refreshing, keyed by
+     *  (hash, netgroup). Valid admission and terminal verdicts clear the hash. */
     mutable Mutex m_matmul_rc_deferred_mutex;
     mutable node::RCDeferredBodyCooldowns m_matmul_rc_deferred_bodies
         GUARDED_BY(m_matmul_rc_deferred_mutex);
@@ -1668,11 +1698,20 @@ private:
     std::map<uint256, MatMulAttestationRequest> m_matmul_attestation_requested
         GUARDED_BY(cs_main);
     /** Competing near-tip P2P bodies dropped HEADER_ONLY so miner GPU /
-     *  trusted-mirror sole-child persist is not flooded. FindNextBlocks
-     *  must not re-getdata these until the active tip moves (qualifier:
-     *  snapshot backfill re-requested the same pre-snapshot hash 150–301
-     *  times after HEADER_ONLY discarded a delivered body). */
+     *  trusted-mirror / local-signer sole-child persist is not flooded.
+     *  FindNextBlocks must not re-getdata these until the active tip
+     *  moves OR quorum is recorded for that hash (qualifier: snapshot
+     *  backfill re-requested the same pre-snapshot hash 150–301 times
+     *  after HEADER_ONLY discarded a delivered body; a later quorum
+     *  used to leave the hash suppressed forever because both clear
+     *  sites required a tip advance that needed the suppressed body). */
     std::set<uint256> m_header_only_competing GUARDED_BY(cs_main);
+    /** Followed-chain historical holes that still could not be persisted
+     *  (true anti-DoS does not use this set). FindNextBlocks must not
+     *  unbounded re-getdata these until the active tip moves. Do not reuse
+     *  m_header_only_competing: competing siblings stay GPU-protected
+     *  independently of followed-hole skip. */
+    std::set<uint256> m_header_only_followed_skip GUARDED_BY(cs_main);
     /** Recent signer-authenticated proof delivered by a peer. A valid
      * signature authorizes routing only on the branch containing its exact
      * block hash; it is not a bearer token for arbitrary future forks. */
@@ -2004,6 +2043,15 @@ private:
         uint64_t body_ticket_netgroup{0};
         int32_t reference_height{std::numeric_limits<int32_t>::max()};
         uint32_t work_units{0};
+        //! Ticketless followed-chain: persist less-work holes as requested,
+        //! and retry retained tip-children as requested (ticket_exempt) so
+        //! ExactReplay can proceed without discarding the only copy.
+        bool retain_as_requested{false};
+        //! Scheduler re-admission delay for RETAIN_FOR_RETRY. Peer-budget
+        //! handoff misses wait for the per-minute window; pending-cap misses
+        //! retry as soon as the occupying job can finish.
+        std::chrono::steady_clock::duration retry_delay{
+            MATMUL_PENDING_RETRY_COOLDOWN};
     };
 
     /** Process a new block. Perform any post-processing housekeeping.
@@ -3440,8 +3488,9 @@ static bool TrustedMirrorMayDownloadIndex(
 }
 
 //! cs_main: at most one unattested configured tip-child may persist a P2P
-//! body without GPU (trusted-mirror catch-up). Extra siblings stay
-//! HEADER_ONLY so a concurrent burst cannot enqueue 80 ExactReplays.
+//! body without GPU (trusted mirror) or spend ExactReplay GPU (local
+//! signer IBD / catch-up). Extra siblings stay HEADER_ONLY so a concurrent
+//! burst cannot enqueue 80 ExactReplays.
 static uint256 g_configured_claimed_tip_child{};
 
 [[nodiscard]] static bool ClaimConfiguredUnattestedTipChildBody(
@@ -3477,21 +3526,10 @@ static uint256 g_configured_claimed_tip_child{};
 //! 2–5 requested 150–301 times, 0 refusals, bodies delivered then discarded).
 [[nodiscard]] static bool MatMulFollowedHistoricalHole(
     const ChainstateManager& chainman,
-    const CBlockIndex* tip,
     const CBlockIndex* index)
     EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
-    if (index == nullptr) return false;
-    if (tip != nullptr && index->nHeight < tip->nHeight &&
-        tip->GetAncestor(index->nHeight) == index) {
-        return true;
-    }
-    const CBlockIndex* const snap{chainman.GetSnapshotBaseBlock()};
-    if (snap != nullptr && index->nHeight <= snap->nHeight &&
-        snap->GetAncestor(index->nHeight) == index) {
-        return true;
-    }
-    return false;
+    return chainman.IsMatMulFollowedHistoricalHole(index);
 }
 
 //! ExactReplay GPU is 5GB+/12s. A competing header tree or same-height
@@ -3499,23 +3537,32 @@ static uint256 g_configured_claimed_tip_child{};
 //! (live 2026-08-14). Split by role:
 //! - Trusted mirror: never P2P ExactReplay. GETMMATTEST + at most one
 //!   persisted unattested tip-child; ConnectTip waits for quorum.
-//! - Local signer/miner: never async P2P ExactReplay so CandidateMining
-//!   keeps the device. Competing P2P bodies stay HEADER_ONLY.
+//! - Local signer/miner: ExactReplay the followed tip-child so this
+//!   node can SignAuthoritative and IBD. Quorum is created here
+//!   (chicken-egg): skipping GPU used to HEADER_ONLY every next IBD
+//!   body before ExactReplay could run (PR 105 review of 1eb8caf3).
+//!   Competing P2P siblings stay off the device so CandidateMining
+//!   keeps it.
 //! - Independent consensus verifier (pubkey optional, no local signer):
 //!   ExactReplay P2P tip-children and the near-tip IBD window.
-//! Qualifier on d43eea4a: treating every IsConfigured() node like a miner
-//! left a consensus-no-signer node at height 0 (242 bodies admitted, 0
-//! UpdateTip) while trusted mirrors on the same archive reached 14.
-//! Callers that take the false path MUST still GETMMATTEST preferred hashes.
+//! Qualifier on d43eea4a / b83b79a6: treating every IsConfigured() node
+//! like a miner left a consensus-no-signer node at height 0 (242 bodies
+//! admitted, 0 UpdateTip) while trusted mirrors on the same archive
+//! reached 14. Callers that take the false path MUST still GETMMATTEST
+//! preferred hashes.
 [[nodiscard]] static bool MatMulMaySpendExactReplayGpu(
-    [[maybe_unused]] const ChainstateManager& chainman,
+    const ChainstateManager& chainman,
     const CBlockIndex* tip,
     const CBlockIndex* index)
     EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
     if (tip == nullptr || index == nullptr) return false;
     if (node::matmul_trusted::IsTrustedMirror()) return false;
-    if (node::matmul_trusted::HasLocalSigner()) return false;
+    if (node::matmul_trusted::HasLocalSigner()) {
+        // Followed IBD/catch-up tip-child only. Same-height competing
+        // siblings stay HEADER_ONLY so CandidateMining keeps the device.
+        return ClaimConfiguredUnattestedTipChildBody(chainman, tip, index);
+    }
     if (index->pprev == tip) return true;
     return index->nHeight >= tip->nHeight - 2 &&
            index->nHeight <= tip->nHeight + MATMUL_RC_NEAR_TIP_DEPTH;
@@ -3910,6 +3957,9 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
         &m_chainman.ActiveChain())};
     state->pindexLastCommonBlock = root_first.last_common;
     if (root_first.clamped && root_first.lowest_missing != nullptr &&
+        !m_header_only_competing.count(root_first.lowest_missing->GetBlockHash()) &&
+        !m_header_only_followed_skip.count(root_first.lowest_missing->GetBlockHash()) &&
+        !m_matmul_block_lifecycle.HasRetainedBody(root_first.lowest_missing->GetBlockHash()) &&
         IsBlockRequested(root_first.lowest_missing->GetBlockHash())) {
         // Reservations taken while LastCommon was past the hole never complete
         // from this walk; free them so root-first re-request can proceed.
@@ -3958,11 +4008,17 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
             // Async-pending is a VERIFY state. ShouldSkipFetch reclaims a
             // no-body marker and returns false so this stays request_root.
             select_reason = "root_async_pending";
+        } else if (m_matmul_block_lifecycle.HasRetainedBody(
+                       root_first.lowest_missing->GetBlockHash())) {
+            select_reason = "root_retained_body";
         } else if (IsMatMulBudgetDeferred(root_first.lowest_missing->GetBlockHash(),
                                           now_for_diag)) {
             select_reason = (blocks_in_flight_global == 0)
                                 ? "idle_catchup_budget_deferred"
                                 : "root_budget_deferred";
+        } else if (m_header_only_competing.count(root_first.lowest_missing->GetBlockHash()) ||
+                   m_header_only_followed_skip.count(root_first.lowest_missing->GetBlockHash())) {
+            select_reason = "root_header_only_skip";
         } else {
             select_reason = root_first.clamped ? "clamped_request_root" : "request_root";
         }
@@ -4005,6 +4061,16 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
         // advance tip; it only fills inflight. Kick ABC (flag set above) and
         // wait. Restart's only useful effect was clearing that window.
         log_skip("have_data_unconnected");
+        return;
+    }
+    if (root_first.lowest_missing != nullptr &&
+        m_matmul_block_lifecycle.HasRetainedBody(
+            root_first.lowest_missing->GetBlockHash())) {
+        // Same stall as HAVE_DATA-unconnected: the followed-chain body is
+        // already in the lifecycle store (pending-cap / budget / ticketless
+        // retry). Re-getdata of this hash or its successors cannot connect
+        // until the scheduler re-admits.
+        log_skip("root_retained_body");
         return;
     }
 
@@ -4122,10 +4188,25 @@ void PeerManagerImpl::FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, c
                 continue;
             }
 
-            // Intentionally HEADER_ONLY competing near-tip sibling: do not
-            // re-getdata until UpdatedBlockTip clears the set. Snapshot
-            // backfill used to loop here after admission discarded the body.
-            if (m_header_only_competing.count(pindex->GetBlockHash())) {
+            // Intentionally HEADER_ONLY competing near-tip sibling, or a
+            // followed historical hole that still could not be persisted:
+            // do not re-getdata until the active tip moves, quorum is
+            // recorded for this hash, or HAVE_DATA lands. Snapshot backfill
+            // used to loop here after admission discarded the body;
+            // local-signer IBD used to stall here after a later quorum
+            // never unsuppressed the tip-child.
+            if (m_header_only_competing.count(pindex->GetBlockHash()) ||
+                m_header_only_followed_skip.count(pindex->GetBlockHash())) {
+                continue;
+            }
+
+            // A ticketless followed-chain body was retained instead of
+            // discarded. Skip-fetch until the retry scheduler re-admits it
+            // (ticket, requested retry, or tip move). Re-getdata after a 60s
+            // per-peer cooldown was the residual HEADER_ONLY livelock.
+            // Root-first: do not fill the window with descendants while the
+            // only copy of this hole is held off-disk.
+            if (m_matmul_block_lifecycle.HasRetainedBody(pindex->GetBlockHash())) {
                 continue;
             }
 
@@ -4218,14 +4299,14 @@ void PeerManagerImpl::FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, c
                 }
             }
 
-            // Same reasoning for a body THIS PEER deferred for want of an RC
-            // admission sidecar: asking the same source again before the
-            // deferral resolves can only produce another deferral. Scoped per
-            // peer so an unsolicited ticketless body from one source cannot
-            // suppress the block from every other source.
+            // Competing ticketless body THIS PEER deferred: asking the same
+            // source again before the cooldown expires can only produce another
+            // deferral. Scoped per keyed netgroup so one unsolicited source
+            // cannot suppress the hash from every other peer. Followed-chain
+            // ticketless deliveries persist or retain instead of this path.
             if (IsMatMulRCBodyDeferred(pindex->GetBlockHash(),
                                        state->m_keyed_netgroup)) {
-                return;
+                continue;
             }
 
             // The block is not already downloaded, and not yet in flight.
@@ -5677,6 +5758,8 @@ void PeerManagerImpl::ActiveTipChange(const CBlockIndex& new_tip, bool is_ibd)
     m_matmul_block_lifecycle.NoteActiveTipProgress();
     AssertLockHeld(::cs_main);
     m_header_only_competing.clear();
+    m_header_only_followed_skip.clear();
+    g_configured_claimed_tip_child.SetNull();
 
     // Tip-first trusted-mirror ranking: keep the verify worker's tip cache in
     // lockstep with ActivateBestChain (same sync delivery as SetBestBlock).
@@ -5933,6 +6016,7 @@ void PeerManagerImpl::UpdatedBlockTip(const CBlockIndex *pindexNew, const CBlock
         LOCK(cs_main);
         if (pindexNew == m_chainman.ActiveTip()) {
             m_header_only_competing.clear();
+            m_header_only_followed_skip.clear();
         }
     }
 
@@ -7177,6 +7261,9 @@ void PeerManagerImpl::HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, c
             const CBlockIndex* lowest_missing{nullptr};
             while (pindexWalk && !m_chainman.ActiveChain().Contains(pindexWalk)) {
                 if (!(pindexWalk->nStatus & BLOCK_HAVE_DATA) &&
+                    !m_header_only_competing.count(pindexWalk->GetBlockHash()) &&
+                    !m_header_only_followed_skip.count(pindexWalk->GetBlockHash()) &&
+                    !m_matmul_block_lifecycle.HasRetainedBody(pindexWalk->GetBlockHash()) &&
                     (!DeploymentActiveAt(*pindexWalk, m_chainman, Consensus::DEPLOYMENT_SEGWIT) ||
                      CanServeWitnesses(peer))) {
                     lowest_missing = pindexWalk;
@@ -7192,6 +7279,9 @@ void PeerManagerImpl::HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, c
             while (pindexWalk && !m_chainman.ActiveChain().Contains(pindexWalk) && vToFetch.size() <= MAX_BLOCKS_IN_TRANSIT_PER_PEER) {
                 if (!(pindexWalk->nStatus & BLOCK_HAVE_DATA) &&
                         !IsBlockRequested(pindexWalk->GetBlockHash()) &&
+                        !m_header_only_competing.count(pindexWalk->GetBlockHash()) &&
+                        !m_header_only_followed_skip.count(pindexWalk->GetBlockHash()) &&
+                        !m_matmul_block_lifecycle.HasRetainedBody(pindexWalk->GetBlockHash()) &&
                         (!DeploymentActiveAt(*pindexWalk, m_chainman, Consensus::DEPLOYMENT_SEGWIT) || CanServeWitnesses(peer))) {
                     // We don't have this block, and it's not yet in flight.
                     vToFetch.push_back(pindexWalk);
@@ -8412,7 +8502,16 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
                                 params.powLimit,
                                 std::chrono::steady_clock::now()));
                     }
-                    node.fDisconnect = true;
+                    // Header-only: there is no body to retain yet. Do not
+                    // disconnect — the followed-chain BLOCK may already be
+                    // queued, and AdmitMatMulBlockVerification retains it on
+                    // the same per-peer miss. Per-peer disconnect is allowed
+                    // only after that retain/persist. Global exhaustion is
+                    // never a disconnect (DoS-F2); this path is peer-only.
+                    LogDebug(
+                        BCLog::NET,
+                        "matmul: header-first ExactReplay handoff deferred by RC per-peer verification budget hash=%s peer=%d\n",
+                        header.GetHash().ToString(), node.GetId());
                     return;
                 }
                 handoff_peer_charged = true;
@@ -8506,14 +8605,15 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
                 /*rc_recompute=*/true)) {
             m_matmul_rc_speculative_pending.fetch_sub(
                 1, std::memory_order_relaxed);
-            if (!global_exhausted) {
-                node.fDisconnect = true;
-            }
+            // Header-only: there is no body to retain yet. Do not disconnect
+            // — the followed-chain BLOCK may already be queued, and
+            // AdmitMatMulBlockVerification retains it on the same per-peer
+            // miss. Global exhaustion is never a disconnect (DoS-F2).
             LogDebug(
                 BCLog::NET,
-                "matmul: header-first ExactReplay %s by RC rate budget hash=%s peer=%d\n",
-                global_exhausted ? "deferred" : "rejected",
-                header.GetHash().ToString(), node.GetId());
+                "matmul: header-first ExactReplay deferred by RC rate budget hash=%s peer=%d global=%d\n",
+                header.GetHash().ToString(), node.GetId(),
+                global_exhausted ? 1 : 0);
             return;
         }
         budget_debit = {
@@ -8977,37 +9077,40 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
                 // EncDr). EncDr/seal work-unit weighting applies on BLOCK paths.
                 if (!ReserveMatMulVerificationSlot(m_matmul_pending_verifications, consensus_params,
                                                   budget_reference_height, /*work_units=*/1)) {
-                    LogDebug(BCLog::NET, "Disconnecting peer=%d: MatMul pending verification cap reached\n", pfrom.GetId());
-                    pfrom.fDisconnect = true;
-                    return;
-                }
-                pending_matmul_slot.emplace(m_matmul_pending_verifications, /*work_units=*/1);
+                    // ExactReplay occupancy is not peer misbehavior. Headers are
+                    // cheap; the body path RETAIN_FOR_RETRY's when this same cap
+                    // is full. Disconnecting here was the residual EncDr honest-
+                    // source drop (HEADERS never reached StoreMatMulDeferredBody).
+                    LogDebug(BCLog::NET, "Accepting headers from peer=%d without a MatMul verify slot: pending verification cap reached\n", pfrom.GetId());
+                } else {
+                    pending_matmul_slot.emplace(m_matmul_pending_verifications, /*work_units=*/1);
 
-                bool global_exhausted{false};
-                if (!pfrom.HasPermission(NetPermissionFlags::NoBan) && !ConsumeMatMulVerificationBudgetForPeer(
-                        peer,
-                        pfrom.nKeyedNetGroup,
-                        consensus_params,
-                        phase2_checks,
-                        std::chrono::steady_clock::now(),
-                        is_ibd,
-                        budget_reference_height,
-                        global_exhausted,
-                        /*rc_recompute=*/false,
-                        /*header_batch=*/true)) {
-                    if (global_exhausted) {
-                        // DoS-F2: the process-wide shared budget is exhausted; DEFER
-                        // this message instead of disconnecting an otherwise-honest
-                        // peer for others' spend. The reserved pending-verification
-                        // slot is released by pending_matmul_slot on return.
-                        LogDebug(BCLog::NET, "Deferring headers from peer=%d: global MatMul verification budget exhausted\n", pfrom.GetId());
+                    bool global_exhausted{false};
+                    if (!pfrom.HasPermission(NetPermissionFlags::NoBan) && !ConsumeMatMulVerificationBudgetForPeer(
+                            peer,
+                            pfrom.nKeyedNetGroup,
+                            consensus_params,
+                            phase2_checks,
+                            std::chrono::steady_clock::now(),
+                            is_ibd,
+                            budget_reference_height,
+                            global_exhausted,
+                            /*rc_recompute=*/false,
+                            /*header_batch=*/true)) {
+                        if (global_exhausted) {
+                            // DoS-F2: the process-wide shared budget is exhausted; DEFER
+                            // this message instead of disconnecting an otherwise-honest
+                            // peer for others' spend. The reserved pending-verification
+                            // slot is released by pending_matmul_slot on return.
+                            LogDebug(BCLog::NET, "Deferring headers from peer=%d: global MatMul verification budget exhausted\n", pfrom.GetId());
+                            return;
+                        }
+                        // Same trap as the block path: disconnecting the peer that
+                        // just handed us the headers we are catching up on strands
+                        // the node headers-only. Drop this batch; keep the peer.
+                        LogDebug(BCLog::NET, "Deferring headers from peer=%d: MatMul per-peer verification budget exhausted\n", pfrom.GetId());
                         return;
                     }
-                    // Same trap as the block path: disconnecting the peer that
-                    // just handed us the headers we are catching up on strands
-                    // the node headers-only. Drop this batch; keep the peer.
-                    LogDebug(BCLog::NET, "Deferring headers from peer=%d: MatMul per-peer verification budget exhausted\n", pfrom.GetId());
-                    return;
                 }
             }
         }
@@ -9523,6 +9626,10 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
         {
             LOCK(cs_main);
             EraseMatMulBlockSourceIfUnpinned(hash);
+            // HEADER_ONLY dropped the delivered body. Leaving the getdata
+            // in-flight would pin the hash to this peer and censor every
+            // other netgroup until the request times out.
+            RemoveBlockRequest(hash, std::nullopt);
         }
         if (post_process) post_process();
     };
@@ -9672,20 +9779,38 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
 
     if (matmul_admission.state ==
             MatMulBlockAdmission::State::RETAIN_FOR_RETRY) {
+        const auto retry_delay{matmul_admission.retry_delay.count() > 0
+                                   ? matmul_admission.retry_delay
+                                   : MATMUL_PENDING_RETRY_COOLDOWN};
         {
             LOCK(cs_main);
             NoteMatMulBudgetDeferred(
                 hash,
                 std::chrono::duration_cast<std::chrono::microseconds>(
-                    MATMUL_PENDING_RETRY_COOLDOWN));
+                    retry_delay));
         }
         const bool retained{StoreMatMulDeferredBody(
-            hash, block, node, force_processing, min_pow_checked,
+            hash, block, node,
+            force_processing || matmul_admission.retain_as_requested,
+            min_pow_checked,
             matmul_admission.is_ibd,
             matmul_admission.reference_height,
             matmul_admission.work_units,
-            MATMUL_PENDING_RETRY_COOLDOWN)};
-        if (!retained) node.fDisconnect = true;
+            retry_delay)};
+        if (!retained) {
+            if (matmul_admission.retain_as_requested) {
+                // Capacity: do not HEADER_ONLY-drop the only followed-chain
+                // copy and then MarkMatMulRCBodyDeferred (the residual
+                // getdata livelock). Persist without ExactReplay GPU.
+                ProcessBlockSync(node.GetId(), &node, block,
+                                 /*force_processing=*/true, min_pow_checked,
+                                 post_process);
+                release_verdict_pin();
+                release_assumevalid_trust_pin();
+                return;
+            }
+            node.fDisconnect = true;
+        }
         finalize_header_only();
         release_verdict_pin();
         release_assumevalid_trust_pin();
@@ -9693,7 +9818,9 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
     }
 
     if (matmul_admission.state == MatMulBlockAdmission::State::NO_RECOMPUTE) {
-        ProcessBlockSync(node.GetId(), &node, block, force_processing, min_pow_checked, post_process);
+        ProcessBlockSync(node.GetId(), &node, block,
+                         force_processing || matmul_admission.retain_as_requested,
+                         min_pow_checked, post_process);
         release_verdict_pin();
         release_assumevalid_trust_pin();
         return;
@@ -9887,10 +10014,14 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                             .work_units = matmul_admission.work_units,
                         },
                         lifecycle_now)) {
-                    RefundMatMulRCVerificationBudgetForPeer(
-                        body_charged_address, body_charged_netgroup,
-                        body_budget_debit);
-                    rollback_body_ticket();
+                    if (handing_off_header) {
+                        rollback_handoff_admission();
+                    } else {
+                        RefundMatMulRCVerificationBudgetForPeer(
+                            body_charged_address, body_charged_netgroup,
+                            body_budget_debit);
+                        rollback_body_ticket();
+                    }
                     release_admission_marker();
                     node.fDisconnect = true;
                     if (post_process) post_process();
@@ -9929,10 +10060,14 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                             : std::shared_ptr<void>{},
                         lifecycle_cancelled,
                         std::move(lifecycle_resources))) {
-                    RefundMatMulRCVerificationBudgetForPeer(
-                        body_charged_address, body_charged_netgroup,
-                        body_budget_debit);
-                    rollback_body_ticket();
+                    if (handing_off_header) {
+                        rollback_handoff_admission();
+                    } else {
+                        RefundMatMulRCVerificationBudgetForPeer(
+                            body_charged_address, body_charged_netgroup,
+                            body_budget_debit);
+                        rollback_body_ticket();
+                    }
                     release_admission_marker();
                     if (post_process) post_process();
                     return;
@@ -10127,8 +10262,8 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
             // Queue/slot saturated: NEVER fall through to ProcessBlockSync for
             // an EncDr/LT seal recompute — that would put Q*-scale work on the
             // P2P message thread under adversarial load. Drop this attempt;
-            // the peer can retransmit, and other admission paths disconnect
-            // when they fail to reserve a slot.
+            // AdmitMatMulBlockVerification retains a complete body when the
+            // pending cap is full (RETAIN_FOR_RETRY) rather than disconnecting.
             LogDebug(BCLog::NET,
                      "Deferring MatMul EncDr block hash=%s from peer=%d: verification queue saturated\n",
                      block->GetHash().ToString(), node.GetId());
@@ -10207,6 +10342,7 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
     bool skip_competing_exactreplay{false};
     bool request_attestations_without_gpu{false};
     bool header_only_competing_first{false};
+    bool persist_unrequested_followed{false};
     {
         LOCK(cs_main);
         cheap_body_valid = m_chainman.CheckMatMulBlockAdmissionPreconditions(
@@ -10214,6 +10350,8 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
             acceptance_reaches_contextual);
         if (cheap_body_valid) {
             const CBlockIndex* indexed{m_chainman.m_blockman.LookupBlockIndex(block_hash)};
+            persist_unrequested_followed =
+                MatMulFollowedHistoricalHole(m_chainman, indexed);
             acceptance_stable_early_exit = indexed != nullptr &&
                 (((indexed->nStatus & BLOCK_HAVE_DATA) != 0) ||
                  (!force_processing &&
@@ -10262,30 +10400,21 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
                             // Live 2026-08-14: unsolicited competing bodies and
                             // a 25–198-wide same-height sibling burst occupied
                             // TipValidation while mining held the device.
-                            // Trusted mirrors and local signers skip P2P
-                            // ExactReplay. Mirrors may persist exactly one
-                            // unattested tip-child so ConnectTip can wait for
-                            // quorum (qualifier sole-child). Extra siblings
-                            // and local-signer competing P2P bodies stay
-                            // HEADER_ONLY so CandidateMining wins.
-                            // Independent consensus verifiers (pubkey, no
-                            // local signer) do not take this path for
-                            // tip-children — MatMulMaySpendExactReplayGpu
-                            // is true, so ExactReplay reaches UpdateTip.
-                            // Still request GETMMATTEST: ConnectTip waits
-                            // for quorum that ExactReplay GPU used to arm.
+                            // Trusted mirrors skip P2P ExactReplay and persist
+                            // at most one unattested tip-child (ConnectTip
+                            // waits for quorum). Local signers ExactReplay
+                            // that tip-child (MaySpend) so they can attest;
+                            // only competing siblings take this HEADER_ONLY
+                            // path. Still request GETMMATTEST on the GPU-skip
+                            // path.
                             exact_recompute_required = false;
                             request_attestations_without_gpu = true;
                             const bool persist_unattested_tip_child{
-                                node::matmul_trusted::IsTrustedMirror() &&
                                 indexed != nullptr &&
                                 ClaimConfiguredUnattestedTipChildBody(
                                     m_chainman, tip, indexed)};
-                            const bool persist_followed_hole{
-                                MatMulFollowedHistoricalHole(
-                                    m_chainman, tip, indexed)};
                             if (persist_unattested_tip_child ||
-                                persist_followed_hole) {
+                                persist_unrequested_followed) {
                                 // Persist without GPU: ConnectTip / background
                                 // chainstate still require quorum for Profile-1.
                             } else {
@@ -10321,7 +10450,7 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
     }
     if (skip_competing_exactreplay) {
         if (header_only_competing_first) {
-            LogInfo("MatMul admission HEADER_ONLY for %s hash=%s height=%d from peer=%d: skipped ExactReplay GPU (competing near-tip P2P sibling; body not connected; will not re-getdata until tip moves)\n",
+            LogInfo("MatMul admission HEADER_ONLY for %s hash=%s height=%d from peer=%d: skipped ExactReplay GPU (competing near-tip P2P sibling; body not connected; will not re-getdata until tip moves or MMATTEST quorum)\n",
                     source, block_hash.ToString(), exact_reference_height, node.GetId());
         } else {
             LogDebug(BCLog::NET,
@@ -10329,6 +10458,20 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
                      source, block_hash.ToString(), exact_reference_height, node.GetId());
         }
         admission.state = MatMulBlockAdmission::State::HEADER_ONLY;
+        maybe_request_attestations_without_gpu();
+        return true;
+    }
+    if (persist_unrequested_followed) {
+        // Followed-chain historical hole: persist without ExactReplay GPU
+        // regardless of IsConfigured() / ticket / pending-cap. Unrequested
+        // less-work / min-chainwork / nTx gates would stop after the header;
+        // AcceptBlock also bypasses those gates. ConnectTip still requires
+        // quorum. Tip-child ExactReplay is not this path (holes are ancestors).
+        LogDebug(BCLog::NET,
+                 "Persisting unrequested followed-chain body hash=%s from peer=%d without ExactReplay GPU\n",
+                 block_hash.ToString(), node.GetId());
+        admission.state = MatMulBlockAdmission::State::NO_RECOMPUTE;
+        admission.retain_as_requested = true;
         maybe_request_attestations_without_gpu();
         return true;
     }
@@ -10342,6 +10485,65 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
             admission.state = MatMulBlockAdmission::State::NO_RECOMPUTE;
             return true;
         }
+        // Unsolicited less-work followed hole or tip-child: AcceptBlock's
+        // unrequested gate would stop after the header. Persist HAVE_DATA
+        // without GPU, or retain until ticket/retry, rather than
+        // HEADER_ONLY-dropping the only copy. True anti-DoS competing forks
+        // remain HEADER_ONLY below (getdata-eligible for other netgroups).
+        bool persist_followed_hole{false};
+        bool tip_child{false};
+        {
+            LOCK(cs_main);
+            const CBlockIndex* const tip{m_chainman.ActiveTip()};
+            const CBlockIndex* const indexed{
+                m_chainman.m_blockman.LookupBlockIndex(block_hash)};
+            persist_followed_hole = MatMulFollowedHistoricalHole(
+                m_chainman, indexed);
+            tip_child = (tip != nullptr && indexed != nullptr &&
+                         indexed->pprev == tip) ||
+                        (tip != nullptr &&
+                         block.hashPrevBlock == tip->GetBlockHash());
+        }
+        const bool persist_without_gpu{
+            node::matmul_trusted::IsTrustedMirror()};
+        const auto gate_action{node::ClassifyTicketlessRCBody(
+            persist_followed_hole, tip_child, persist_without_gpu)};
+        if (gate_action == node::TicketlessRCBodyAction::PersistWithoutGpu) {
+            LogDebug(BCLog::NET,
+                     "Persisting ticketless followed-chain %s hash=%s from "
+                     "peer=%d without ExactReplay GPU (AcceptBlock gate)\n",
+                     source, block_hash.ToString(), node.GetId());
+            admission.state = MatMulBlockAdmission::State::NO_RECOMPUTE;
+            admission.retain_as_requested = true;
+            maybe_request_attestations_without_gpu();
+            return true;
+        }
+        if (gate_action == node::TicketlessRCBodyAction::RetainUntilTicketOrRetry) {
+            LogDebug(BCLog::NET,
+                     "Retaining ticketless followed-chain %s hash=%s from "
+                     "peer=%d until rcadmit or requested retry (AcceptBlock gate)\n",
+                     source, block_hash.ToString(), node.GetId());
+            admission.state = MatMulBlockAdmission::State::RETAIN_FOR_RETRY;
+            admission.is_ibd = is_ibd;
+            admission.encdr_profile = exact_encdr_profile;
+            admission.rc_profile =
+                m_chainparams.GetConsensus().IsMatMulRCFamilyActive(
+                    exact_reference_height);
+            admission.reference_height = exact_reference_height;
+            admission.work_units = admission.rc_profile
+                ? MatMulRCWorkUnits(m_chainparams.GetConsensus(),
+                                    exact_reference_height)
+                : uint32_t{1};
+            admission.retain_as_requested = true;
+            maybe_request_attestations_without_gpu();
+            return true;
+        }
+        // True anti-DoS: less-work competing fork or too-far-ahead. Do not
+        // persist and do not skip-fetch. Competing near-tip siblings already
+        // use m_header_only_competing; generic less-work / min-work hashes
+        // must remain getdata-eligible so IBD and p2p_unrequested_blocks inv
+        // recovery still fetch them when they become requested.
+        MarkMatMulRCBodyDeferred(block_hash, node.nKeyedNetGroup);
         LogDebug(BCLog::NET,
                  "Skipping full %s processing for hash=%s from peer=%d: exact AcceptBlock gate stopped after header\n",
                  source, block_hash.ToString(), node.GetId());
@@ -10462,7 +10664,18 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
     const bool requested_body = force_processing;
     const bool catchup_inbound_push =
         is_ibd && node.IsInboundConn() && extends_active_tip;
-    const bool ticket_exempt = requested_body || catchup_inbound_push;
+    const bool retained_retry{
+        m_matmul_block_lifecycle.HasRetainedBody(block_hash)};
+    // Requested historical / IBD bodies cannot be expected to carry a
+    // near-tip rcadmit ticket. A live tip-child without a ticket must still
+    // ClassifyTicketless (retain) rather than ExactReplay and HEADER_ONLY-drop:
+    // that was the re-getdata livelock. Scheduler re-admission of an
+    // already-retained body is the "requested retry" that may ExactReplay
+    // without a new ticket.
+    const bool ticket_exempt =
+        catchup_inbound_push ||
+        (requested_body && is_ibd) ||
+        (requested_body && retained_retry);
     std::optional<node::RCAdmissionTicket> accepted_ticket;
     const auto restore_accepted_ticket = [&] {
         if (!accepted_ticket) return;
@@ -10485,13 +10698,70 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
                     params.powLimit, std::chrono::steady_clock::now(),
                     &accepted))};
         if (!admitted) {
+            bool followed_historical_hole{false};
+            bool tip_child{false};
+            {
+                LOCK(cs_main);
+                const CBlockIndex* const tip{m_chainman.ActiveTip()};
+                const CBlockIndex* const indexed{
+                    m_chainman.m_blockman.LookupBlockIndex(block_hash)};
+                followed_historical_hole = MatMulFollowedHistoricalHole(
+                    m_chainman, indexed);
+                // Tip-child of the active tip is followed. Do not use the
+                // broader "parent on active chain" catch-up flag: that
+                // includes same-height siblings of the current tip, which
+                // must stay HEADER_ONLY (miner GPU / competing set).
+                // Indexed can be null for an unsolicited body that won the
+                // race with its header; hashPrevBlock is enough.
+                tip_child = (tip != nullptr && indexed != nullptr &&
+                             indexed->pprev == tip) ||
+                            (tip != nullptr &&
+                             block.hashPrevBlock == tip->GetBlockHash());
+            }
+            const bool persist_without_gpu{
+                node::matmul_trusted::IsTrustedMirror()};
+            const auto action{node::ClassifyTicketlessRCBody(
+                followed_historical_hole, tip_child, persist_without_gpu)};
+            if (action == node::TicketlessRCBodyAction::PersistWithoutGpu) {
+                // Historical holes always persist. Trusted mirrors also
+                // persist a tip-child: they never P2P ExactReplay.
+                // ConnectTip still waits for quorum. Local signers ExactReplay
+                // the followed tip-child (MaySpend) so they can attest.
+                // Treat as requested so less-work holes actually get
+                // HAVE_DATA through AcceptBlock.
+                LogDebug(BCLog::NET,
+                         "Persisting ticketless followed-chain %s hash=%s from "
+                         "peer=%d without ExactReplay GPU\n",
+                         source, block_hash.ToString(), node.GetId());
+                admission.state = MatMulBlockAdmission::State::NO_RECOMPUTE;
+                admission.retain_as_requested = true;
+                maybe_request_attestations_without_gpu();
+                return true;
+            }
+            if (action == node::TicketlessRCBodyAction::RetainUntilTicketOrRetry) {
+                // Independent consensus tip-child: do not discard the only
+                // copy, and do not ExactReplay unbudgeted. Retain until a
+                // ticket arrives or the scheduler retries as requested
+                // (ticket_exempt).
+                LogDebug(BCLog::NET,
+                         "Retaining ticketless followed-chain %s hash=%s from "
+                         "peer=%d until rcadmit or requested retry\n",
+                         source, block_hash.ToString(), node.GetId());
+                admission.state = MatMulBlockAdmission::State::RETAIN_FOR_RETRY;
+                admission.is_ibd = is_ibd;
+                admission.encdr_profile = exact_encdr_profile;
+                admission.rc_profile = rc_profile;
+                admission.reference_height = exact_reference_height;
+                admission.work_units = work;
+                admission.retain_as_requested = true;
+                return true;
+            }
             LogDebug(BCLog::NET,
                      "Deferring %s hash=%s from peer=%d: RC ExactReplay requires rcadmit\n",
                      source, block_hash.ToString(), node.GetId());
-            // There is no usable source-bound sidecar for this delivery.
-            // Suppress the immediate re-request loop, but do not refresh an
-            // existing deadline: repeated ticketless bodies must not censor a
-            // valid ticket/body supplied by another source indefinitely.
+            // Competing sibling: HEADER_ONLY + per-peer non-refreshing
+            // cooldown. Independent netgroups stay eligible; do not refresh
+            // an existing deadline.
             MarkMatMulRCBodyDeferred(block_hash, node.nKeyedNetGroup);
             admission.state = MatMulBlockAdmission::State::HEADER_ONLY;
             return true;
@@ -10504,6 +10774,27 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
         // The inherited attempt already paid the one global rate debit. Charge
         // this body's retained source separately before it can take ownership,
         // then let ProcessBlock atomically transfer the cap-one pending lease.
+        const auto retain_handoff_miss = [&](
+            const char* reason,
+            std::chrono::steady_clock::duration retry_delay) {
+            restore_accepted_ticket();
+            LogDebug(BCLog::NET,
+                     "Retaining %s hash=%s from peer=%d: %s\n",
+                     source, block_hash.ToString(), node.GetId(), reason);
+            // Followed/authenticated tip-child bodies must not HEADER_ONLY-drop
+            // here: that discards the only copy without skip-fetch, so
+            // FindNextBlocks re-getdata's into a livelock. Competing siblings
+            // on signer/mirror never reach this path (m_header_only_competing).
+            // ProcessBlock RETAIN_FOR_RETRY stores the body and notes the
+            // skip-fetch set until the per-peer window refills.
+            admission.state = MatMulBlockAdmission::State::RETAIN_FOR_RETRY;
+            admission.is_ibd = is_ibd;
+            admission.encdr_profile = true;
+            admission.rc_profile = true;
+            admission.reference_height = exact_reference_height;
+            admission.work_units = work;
+            admission.retry_delay = retry_delay;
+        };
         const auto handoff_charged_at{
             std::chrono::steady_clock::now()};
         CNetAddr handoff_charged_address;
@@ -10516,18 +10807,9 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
                     *peer, node.nKeyedNetGroup, params, work,
                     handoff_charged_at,
                     is_ibd, exact_reference_height)) {
-                if (accepted_ticket) {
-                    LOCK(m_matmul_rc_admission_mutex);
-                    Assume(m_matmul_rc_admission_store.RestoreConsumed(
-                        *accepted_ticket, block.GetBlockHeader(),
-                        node.nKeyedNetGroup, params.powLimit,
-                        std::chrono::steady_clock::now()));
-                }
-                // IBD: keep the peer and fall back to HEADER_ONLY rather than
-                // disconnecting the download source over a rate-limit miss.
-                if (peer && !is_ibd) node.fDisconnect = true;
-                admission.state =
-                    MatMulBlockAdmission::State::HEADER_ONLY;
+                retain_handoff_miss(
+                    "RC handoff per-peer verification budget exhausted",
+                    MATMUL_BUDGET_DEFER_COOLDOWN);
                 return true;
             }
             handoff_peer_charged = true;
@@ -10540,19 +10822,15 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
         }
         lifecycle_token = MarkMatMulAsyncVerification(block_hash);
         if (!lifecycle_token) {
-            if (accepted_ticket) {
-                LOCK(m_matmul_rc_admission_mutex);
-                Assume(m_matmul_rc_admission_store.RestoreConsumed(
-                    *accepted_ticket, block.GetBlockHeader(),
-                    node.nKeyedNetGroup, params.powLimit,
-                    std::chrono::steady_clock::now()));
-            }
             if (handoff_peer_charged) {
                 RefundMatMulRCPeerBudgetForHandoff(
                     handoff_charged_address, node.nKeyedNetGroup,
                     handoff_budget_debit);
             }
-            return false;
+            retain_handoff_miss(
+                "lifecycle token unavailable after handoff charge",
+                MATMUL_PENDING_RETRY_COOLDOWN);
+            return true;
         }
         admission.state =
             MatMulBlockAdmission::State::RECOMPUTE_HEADER_HANDOFF;
@@ -10642,18 +10920,19 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
         restore_accepted_ticket();
         LogDebug(
             BCLog::NET,
-            "%s peer=%d: MatMul pending verification cap reached (%s)\n",
-            rc_profile ? "Deferring" : "Disconnecting",
+            "Deferring peer=%d: MatMul pending verification cap reached (%s)\n",
             node.GetId(), source);
-        // An admitted speculative RC header or a slow full replay can occupy
-        // the complete RC cap. A later honest body is not evidence of abuse.
-        // Retain it and let the scheduler re-admit it after capacity clears;
-        // simply making it requestable creates a getdata/body livelock.
-        // Legacy EncDr retains its historical disconnect policy.
-        if (!rc_profile) node.fDisconnect = true;
-        admission.state = rc_profile
-            ? MatMulBlockAdmission::State::RETAIN_FOR_RETRY
-            : MatMulBlockAdmission::State::HEADER_ONLY;
+        // An admitted speculative header or a slow full replay can occupy the
+        // complete pending cap (RC or EncDr). A later honest body is not
+        // evidence of abuse: the cap is ours, not proof of peer misbehavior,
+        // and the body already paid bandwidth. Retain it and let the scheduler
+        // re-admit after capacity clears. HEADER_ONLY-dropping a followed-chain
+        // EncDr body created the same getdata/body livelock the RC path closed.
+        // Competing near-tip siblings never reach this reserve: they already
+        // took HEADER_ONLY so miner GPU / trusted-mirror sole-child persist is
+        // not flooded. Disconnect only if StoreMatMulDeferredBody cannot hold
+        // the body (RETAIN_FOR_RETRY handler).
+        admission.state = MatMulBlockAdmission::State::RETAIN_FOR_RETRY;
         admission.is_ibd = is_ibd;
         admission.encdr_profile = exact_encdr_profile;
         admission.rc_profile = rc_profile;
@@ -10697,8 +10976,9 @@ void PeerManagerImpl::ProcessBlockSync(NodeId nodeid, CNode* node, const std::sh
     bool terminal_failure{false};
     {
         LOCK(cs_main);
+        const uint256 hash{block->GetHash()};
         const CBlockIndex* index{
-            m_chainman.m_blockman.LookupBlockIndex(block->GetHash())};
+            m_chainman.m_blockman.LookupBlockIndex(hash)};
         exact_replay_authenticated = index != nullptr &&
             (index->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0 &&
             (index->nStatus & BLOCK_HAVE_DATA) != 0 &&
@@ -10706,6 +10986,22 @@ void PeerManagerImpl::ProcessBlockSync(NodeId nodeid, CNode* node, const std::sh
             index->IsValid(BLOCK_VALID_SCRIPTS);
         terminal_failure = index != nullptr &&
             (index->nStatus & BLOCK_FAILED_MASK) != 0;
+        // Persist-or-skip-fetch: a delivered followed-chain body that still
+        // lacks HAVE_DATA must not re-enter FindNextBlocks until the tip
+        // moves. True anti-DoS HEADER_ONLY never reaches ProcessNewBlock.
+        if (index != nullptr) {
+            if ((index->nStatus & BLOCK_HAVE_DATA) != 0) {
+                m_header_only_followed_skip.erase(hash);
+            } else if (!terminal_failure &&
+                       (m_chainman.IsMatMulFollowedHistoricalHole(index) ||
+                        g_configured_claimed_tip_child == hash)) {
+                if (m_header_only_followed_skip.insert(hash).second) {
+                    LogDebug(BCLog::NET,
+                             "Followed-chain body hash=%s was not persisted; skip-fetch until tip moves\n",
+                             hash.ToString());
+                }
+            }
+        }
     }
     // A duplicate/no-op ProcessNewBlock result is not necessarily terminal:
     // another delivery can still own the asynchronous replay, and a local
@@ -14253,6 +14549,14 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 {
                     LOCK(cs_main);
                     m_matmul_attestation_requested.erase(hash);
+                    // Body may have been HEADER_ONLY-dropped before quorum
+                    // existed. Tip-move clears are unreachable if this hash
+                    // is the followed tip-child that never connected. Allow
+                    // FindNextBlocks to fetch it now that HasQuorum would
+                    // persist without GPU. Competing siblings without quorum
+                    // stay suppressed.
+                    m_header_only_competing.erase(hash);
+                    m_header_only_followed_skip.erase(hash);
                     // Quorum is the first point at which a trusted header can
                     // safely arm the shallow-race recovery barrier. Do this
                     // before its body arrives so the losing local tip cannot
@@ -14271,6 +14575,9 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                     }
                     m_chainman.NotifySignedFrontierStatus();
                 }
+                // Same-netgroup HEADER_ONLY cooldown must not keep the now-
+                // authenticated hash unfetchable after the skip set is cleared.
+                ClearMatMulRCBodyDeferred(hash);
                 wake_block_fetch = true;
                 // Wake any parked trusted-mirror verify job. Do this outside
                 // cs_main: NotifyQuorumReady only touches the worker mutex.

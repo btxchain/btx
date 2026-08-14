@@ -432,6 +432,17 @@ void RCAdmissionStore::Prune(std::chrono::steady_clock::time_point now)
     PruneSubmissionHistory(now);
 }
 
+void RCAdmissionStore::Clear()
+{
+    m_validated_entries.clear();
+    m_unknown_entries.clear();
+    m_validated_netgroup_counts.clear();
+    m_validated_hash_counts.clear();
+    m_unknown_netgroup_counts.clear();
+    m_unknown_hash_counts.clear();
+    m_unknown_submission_history.clear();
+}
+
 size_t RCAdmissionStore::NetgroupSize(uint64_t keyed_netgroup) const
 {
     const auto it{m_validated_netgroup_counts.find(keyed_netgroup)};

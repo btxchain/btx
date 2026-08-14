@@ -5048,6 +5048,15 @@ void UnpinMatMulEncDrAssumeValidTrust(const uint256& block_hash)
     if (--it->second == 0) g_matmul_encdr_assumevalid_trust_pins.erase(it);
 }
 
+void ResetMatMulEncDrVerdictsForTest()
+{
+    std::lock_guard<std::mutex> lock(g_matmul_encdr_verdict_mutex);
+    g_matmul_encdr_verdicts.clear();
+    g_matmul_encdr_verdict_fifo.clear();
+    g_matmul_encdr_verdict_pins.clear();
+    g_matmul_encdr_assumevalid_trust_pins.clear();
+}
+
 bool MatMulV4PayloadMatchesCommitment(const CBlock& block)
 {
     // Distinguishes a v4 body mutation (payload does not reconstruct the
@@ -5514,6 +5523,13 @@ std::chrono::steady_clock::duration GlobalMatMulRCBudgetRetryDelay(
         return steady_clock::duration::zero();
     }
     return seconds{60 - (now_sec - g_matmul_global_rc_window_start_sec)};
+}
+
+void ResetGlobalMatMulRCBudgetForTest()
+{
+    LOCK(g_matmul_global_rc_mutex);
+    g_matmul_global_rc_this_minute = 0;
+    g_matmul_global_rc_window_start_sec = 0;
 }
 
 void RefundGlobalMatMulRCBudget(

@@ -13,11 +13,15 @@
 #include <validationinterface.h>
 
 #include <chrono>
+#include <functional>
+#include <optional>
 
 class AddrMan;
+class CBlock;
 class CChainParams;
 class CTxMemPool;
 class ChainstateManager;
+class uint256;
 
 namespace Dandelion { class DandelionManager; }
 
@@ -260,6 +264,18 @@ public:
 
     /* Public for unit testing. */
     virtual void UnitTestMisbehaving(NodeId peer_id) = 0;
+
+    /** Stall ExactReplay in peerman tests so a header-first job occupies the
+     *  cap-one lease long enough for a subsequent body to take the handoff
+     *  path. No-op when the async worker was not constructed. */
+    virtual void InstallMatMulVerifyOverrideForTest(
+        std::function<bool(const CBlock&, int32_t, std::optional<int64_t>)> verify) = 0;
+    /** Drop leftover speculative/pending ExactReplay leases between cases that
+     *  share one RegTestingSetup. */
+    virtual void ResetMatMulVerifyAdmissionForTest() = 0;
+    /** True while a complete body is held for scheduler re-admission. */
+    [[nodiscard]] virtual bool HasMatMulRetainedBodyForTest(const uint256& hash) const = 0;
+    [[nodiscard]] virtual bool UnitTestHasMatMulRetainedBody(const uint256& hash) const = 0;
 
     /**
      * Evict extra outbound peers. If we think our tip may be stale, connect to an extra outbound.

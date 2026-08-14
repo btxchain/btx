@@ -12363,6 +12363,23 @@ static bool ContextualCheckBlockBodyOnly(const CBlock& block,
     return true;
 }
 
+bool ChainstateManager::IsMatMulFollowedHistoricalHole(const CBlockIndex* index) const
+{
+    AssertLockHeld(::cs_main);
+    if (index == nullptr) return false;
+    const CBlockIndex* const tip{ActiveTip()};
+    if (tip != nullptr && index->nHeight < tip->nHeight &&
+        tip->GetAncestor(index->nHeight) == index) {
+        return true;
+    }
+    const CBlockIndex* const snap{GetSnapshotBaseBlock()};
+    if (snap != nullptr && index->nHeight <= snap->nHeight &&
+        snap->GetAncestor(index->nHeight) == index) {
+        return true;
+    }
+    return false;
+}
+
 bool ChainstateManager::CheckMatMulBlockAdmissionPreconditions(
     const CBlock& block,
     BlockValidationState& state,
@@ -12380,10 +12397,17 @@ bool ChainstateManager::CheckMatMulBlockAdmissionPreconditions(
 
     if (pindex->nStatus & BLOCK_HAVE_DATA) return true;
     if (!force_processing) {
-        if (pindex->nTx != 0) return true;
-        if (ActiveTip() != nullptr && pindex->nChainWork < ActiveTip()->nChainWork) return true;
-        if (pindex->nHeight > ActiveHeight() + int(MIN_BLOCKS_TO_KEEP)) return true;
-        if (pindex->nChainWork < MinimumChainWork()) return true;
+        // Followed-chain historical holes are ancestors, so they always have
+        // less work than the tip and may sit below nMinimumChainWork. Pruned
+        // holes also have nTx != 0 with !HAVE_DATA. Those Bitcoin Core
+        // unrequested anti-DoS gates must not drop a body we already know
+        // belongs on the active / snapshot chain.
+        if (!IsMatMulFollowedHistoricalHole(pindex)) {
+            if (pindex->nTx != 0) return true;
+            if (ActiveTip() != nullptr && pindex->nChainWork < ActiveTip()->nChainWork) return true;
+            if (pindex->nHeight > ActiveHeight() + int(MIN_BLOCKS_TO_KEEP)) return true;
+            if (pindex->nChainWork < MinimumChainWork()) return true;
+        }
     }
     reaches_contextual_check = true;
     return true;
@@ -12665,26 +12689,10 @@ static bool ContextualCheckBlock(const CBlock& block,
                             bool followed_hole{false};
                             {
                                 LOCK(::cs_main);
-                                const CBlockIndex* const self{
-                                    chainman.m_blockman.LookupBlockIndex(
-                                        block.GetHash())};
-                                const CBlockIndex* const tip{
-                                    chainman.ActiveTip()};
-                                const CBlockIndex* const snap{
-                                    chainman.GetSnapshotBaseBlock()};
-                                if (self != nullptr) {
-                                    if (tip != nullptr &&
-                                        self->nHeight < tip->nHeight &&
-                                        tip->GetAncestor(self->nHeight) ==
-                                            self) {
-                                        followed_hole = true;
-                                    } else if (snap != nullptr &&
-                                               self->nHeight <= snap->nHeight &&
-                                               snap->GetAncestor(self->nHeight) ==
-                                                   self) {
-                                        followed_hole = true;
-                                    }
-                                }
+                                followed_hole =
+                                    chainman.IsMatMulFollowedHistoricalHole(
+                                        chainman.m_blockman.LookupBlockIndex(
+                                            block.GetHash()));
                             }
                             if (followed_hole) return true;
                             rc_local_execution_failure = true;
@@ -13238,15 +13246,23 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
     // and unrequested blocks.
     if (fAlreadyHave) return true;
     if (!fRequested) {  // If we didn't ask for it:
-        if (pindex->nTx != 0) return true;    // This is a previously-processed block that was pruned
-        if (!fHasMoreOrSameWork) return true; // Don't process less-work chains
-        if (fTooFarAhead) return true;        // Block height is too high
+        // Followed-chain historical holes (active-tip / snapshot-base
+        // ancestors) are less-work by construction and may be pruned
+        // (nTx != 0, !HAVE_DATA). Persist a delivered body even when
+        // unrequested; competing forks, pruned junk, and too-far-ahead
+        // spam keep the Bitcoin Core anti-DoS early returns.
+        // ReceivedBlockTransactions already accepts a pruned re-download.
+        if (!IsMatMulFollowedHistoricalHole(pindex)) {
+            if (pindex->nTx != 0) return true;    // previously-processed, pruned
+            if (!fHasMoreOrSameWork) return true; // Don't process less-work chains
+            if (fTooFarAhead) return true;        // Block height is too high
 
-        // Protect against DoS attacks from low-work chains.
-        // If our tip is behind, a peer could try to send us
-        // low-work blocks on a fake chain that we would never
-        // request; don't process these.
-        if (pindex->nChainWork < MinimumChainWork()) return true;
+            // Protect against DoS attacks from low-work chains.
+            // If our tip is behind, a peer could try to send us
+            // low-work blocks on a fake chain that we would never
+            // request; don't process these.
+            if (pindex->nChainWork < MinimumChainWork()) return true;
+        }
     }
 
     const CChainParams& params{GetParams()};
@@ -17124,6 +17140,23 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
     auto persisted_mutation_marker = m_shielded_nullifiers->ReadMutationMarker();
     auto rebuild_from_chain = [&]() EXCLUSIVE_LOCKS_REQUIRED(::cs_main) -> bool {
         AssertLockHeld(::cs_main);
+        // Wipe is irreversible. A snapshot-bootstrapped node has no blocks
+        // below GetSnapshotBaseBlock(); walking genesis OpenBlockFile-fails
+        // after destroying hundreds of MB of otherwise recoverable state
+        // (assumeutxo brick after unclean stop). Check first.
+        if (!ShieldedFullRebuildBlocksAvailable(*m_active_chainstate, tip)) {
+            const CBlockIndex* const snap{GetSnapshotBaseBlock()};
+            LogError("EnsureShieldedStateInitialized: fused shielded rebuild "
+                     "needs block files this node does not have (active tip "
+                     "height=%d hash=%s snapshot_base height=%d). Refusing to "
+                     "wipe shielded_state. Reload the assumeutxo snapshot "
+                     "while snapshot.dat is still on disk, or restore "
+                     "shielded_state from backup.\n",
+                     tip ? tip->nHeight : -1,
+                     tip ? tip->GetBlockHash().ToString() : uint256{}.ToString(),
+                     snap ? snap->nHeight : -1);
+            return false;
+        }
         m_shielded_nullifiers.reset();
         m_shielded_nullifiers = std::make_unique<NullifierSet>(shielded_db_path,
                                                                8 << 20,
@@ -19196,6 +19229,20 @@ void ChainstateManager::RecalculateBestHeader()
     // branch requires a current-config M-of-N quorum on itself or an
     // ancestor. This prevents an unordered generic rescan from following
     // unattestable fork spam.
+    //
+    // PreferTrustAdjustedHeader on every tip-chain descendant is the wrong
+    // overlay after attested snapshot load: nAuthenticatedChainWork often
+    // covers only the first attested child (headers=H+1) while H+2..H+N
+    // stay HEADER_ONLY, so m_best_header stalls and getblockchaininfo
+    // rewinds (follow_forward: 11 < 18). Snap to the furthest HasQuorum
+    // descendant of the active tip, then to the unique suffix of that
+    // attested frontier — competing unattested siblings of H are not in
+    // that subtree.
+    CBlockIndex* attested_frontier{
+        node::matmul_trusted::HasQuorum(active_tip->GetBlockHash(),
+                                        active_tip->nHeight)
+            ? const_cast<CBlockIndex*>(active_tip)
+            : nullptr};
     CBlockIndex* authority_best{nullptr};
     for (auto& [_, candidate] : m_blockman.m_block_index) {
         if ((candidate.nStatus & BLOCK_FAILED_MASK) ||
@@ -19205,9 +19252,12 @@ void ChainstateManager::RecalculateBestHeader()
         }
 
         if (BlockIndexDescends(&candidate, active_tip)) {
-            if (m_best_header == nullptr ||
-                PreferTrustAdjustedHeader(*m_best_header, candidate)) {
-                SetBestHeader(&candidate);
+            if (node::matmul_trusted::HasQuorum(candidate.GetBlockHash(),
+                                                candidate.nHeight)) {
+                if (attested_frontier == nullptr ||
+                    CBlockIndexWorkComparator()(attested_frontier, &candidate)) {
+                    attested_frontier = &candidate;
+                }
             }
             continue;
         }
@@ -19228,6 +19278,22 @@ void ChainstateManager::RecalculateBestHeader()
             CBlockIndexWorkComparator()(authority_best, &candidate)) {
             authority_best = &candidate;
         }
+    }
+    if (attested_frontier != nullptr) {
+        CBlockIndex* followed{attested_frontier};
+        for (auto& [_, candidate] : m_blockman.m_block_index) {
+            if ((candidate.nStatus & BLOCK_FAILED_MASK) ||
+                IsOnParkedReorgBranch(&candidate) ||
+                !BlockIndexDescends(&candidate, attested_frontier)) {
+                continue;
+            }
+            if (candidate.nHeight > followed->nHeight ||
+                (candidate.nHeight == followed->nHeight &&
+                 CBlockIndexWorkComparator()(followed, &candidate))) {
+                followed = &candidate;
+            }
+        }
+        SetBestHeader(followed);
     }
     if (authority_best != nullptr) {
         // Current quorum is stronger than peer provenance and therefore may

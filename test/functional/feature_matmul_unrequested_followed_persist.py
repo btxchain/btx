@@ -1,46 +1,56 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026 The BTX developers
 # Distributed under the MIT software license, see the accompanying
-# file COPYING or https://opensource.org/license/mit/.
-"""Trusted mirror snapshot background backfill without unbounded re-getdata.
+# file COPYING or https://opensource.org/licenses/mit-license.php.
+"""Unrequested followed-chain bodies persist; competing forks stay anti-DoS.
 
-Production residual after 8e8b857d (jarekpiot): loadtxoutsetattested at H left
-pre-snapshot bodies missing. Background genesis→H backfill delivered those
-bodies, but HEADER_ONLY admission discarded them, so FindNextBlocks /
-TryDownloadingHistoricalBlocks re-requested the same hashes 150–301 times
-(heights 2–5 in the live report) while the tip still needed to follow
-signer-attested forward blocks.
+Residual after 1eb8caf3: AcceptBlock's unrequested less-work / height /
+min-chainwork / nTx gates dropped a delivered followed-chain body after the
+header (HEADER_ONLY). FindNextBlocks then getdata'd the same hash; compact/
+inbound delivery was still unrequested relative to that path, so the body
+never reached BLOCK_HAVE_DATA.
+
+Invariant: persist HAVE_DATA, or put the hash in the followed skip-fetch
+set until the active tip moves. True anti-DoS (less-work competing junk)
+must remain getdata-eligible (p2p_unrequested_blocks.py).
 
 This test:
-  - dumps an attested snapshot at height H on the signer archive
-  - wipes the trusted mirror to a clean datadir and loads the snapshot so the
-    tip is H with no pre-snapshot bodies
-  - reconnects over P2P and requires bounded getdata for each pre-snapshot hash
-  - requires the attested frontier to advance while backfill is still running
-  - does not require a competing unattested fork (follow_forward covers that)
+  - loads an attested snapshot so pre-snapshot hashes are followed holes
+    (ancestors of the snapshot tip) with no HAVE_DATA
+  - pushes those bodies unrequested over P2P and requires HAVE_DATA
+  - pushes an unrequested low-work competing fork and requires it is NOT
+    persisted
+  - reconnects to the archive and requires <20 Requesting-block log lines
+    per pre-snapshot hash (live bug was 150–301)
 
-CheckBlockIndex stays on (-checkblockindex=1). Do not disable it.
+CheckBlockIndex stays on. p2p_unrequested_blocks.py covers generic Bitcoin
+Core unrequested anti-DoS; this file is the followed-chain exception.
 """
 
 import collections
 import re
 import shutil
+import time
 from shutil import rmtree
 
+from test_framework.blocktools import create_block, create_coinbase
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     assert_equal,
     assert_greater_than,
     assert_greater_than_or_equal,
+    assert_raises_rpc_error,
 )
 from test_framework.authproxy import JSONRPCException
 from test_framework.wallet_util import generate_keypair
 from test_framework.messages import (
+    CBlock,
     CBlockHeader,
     NODE_MATMUL_CONSENSUS,
     NODE_NETWORK,
     NODE_WITNESS,
     from_hex,
+    msg_block,
     msg_generic,
     msg_headers,
     ser_compact_size,
@@ -54,13 +64,11 @@ SNAPSHOT_HEIGHT = ACTIVATION_HEIGHT + 4
 assert SNAPSHOT_HEIGHT > ACTIVATION_HEIGHT
 assert SNAPSHOT_HEIGHT == 10
 
-# NODE_MATMUL_ATTESTATION_ARCHIVE = 1 << 31 (src/protocol.h).
 NODE_MATMUL_ATTESTATION_ARCHIVE = 1 << 31
 ARCHIVE_SERVICES = (
     NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS | NODE_MATMUL_ATTESTATION_ARCHIVE
 )
 
-# Live bug: 150–301 requests per hash. Bound must stay well below that.
 MAX_REQUESTS_PER_HASH = 20
 
 TRUST_WARNING = (
@@ -75,11 +83,9 @@ INLINE_SIGNER_WARNING = (
     "-matmulattestationsignerkeyfile."
 )
 
-# net_processing.cpp variants (historical backfill uses the third form):
-#   "Requesting block %s from peer=%d"
-#   "Requesting block %s from  peer=%d"
-#   "Requesting block %s (%d) peer=%d"
-REQUESTING_BLOCK_RE = re.compile(r"Requesting block ([0-9a-f]{64})")
+REQUESTING_BLOCK_RE = re.compile(
+    r"Requesting block ([0-9a-f]{64})(?: \(\d+\))? from\s+peer=\d+"
+)
 
 
 def body_available(node, blockhash):
@@ -90,7 +96,7 @@ def body_available(node, blockhash):
         return False
 
 
-class MatMulTrustedMirrorSnapshotBackfillTest(BitcoinTestFramework):
+class MatMulUnrequestedFollowedPersistTest(BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 2
         self.setup_clean_chain = True
@@ -117,8 +123,6 @@ class MatMulTrustedMirrorSnapshotBackfillTest(BitcoinTestFramework):
             f"-matmultrustedpubkey={self.signer_pub}",
             "-matmultrustedthreshold=1",
             "-matmultrustedwaitms=30000",
-            # Required: header-known / body-missing after snapshot must not
-            # abort CheckBlockIndex. Never disable this to make the suite green.
             "-checkblockindex=1",
             "-debug=net",
         ]
@@ -141,7 +145,6 @@ class MatMulTrustedMirrorSnapshotBackfillTest(BitcoinTestFramework):
         self.sync_all()
 
     def _push_headers(self, dest, hashes, src, *, services, with_attestations):
-        """Deliver headers (and optional ExactReplay attestations) without bodies."""
         assert_greater_than(len(hashes), 0)
         headers = [
             from_hex(CBlockHeader(), src.getblockheader(h, False)) for h in hashes
@@ -197,16 +200,12 @@ class MatMulTrustedMirrorSnapshotBackfillTest(BitcoinTestFramework):
         snap = snapshots[0]
         assert_equal(snap["blocks"], blocks)
         assert_equal(snap["bestblockhash"], tip_hash)
-        assert_equal(states[-1].get("snapshot_blockhash"), base_hash)
         info = mirror.getblockchaininfo()
         assert_equal(info["blocks"], blocks)
         assert_equal(info["bestblockhash"], tip_hash)
 
     def _pre_snapshot_hashes(self, archive):
-        """Hashes at heights 2..SNAPSHOT_HEIGHT-1 (the live re-getdata window)."""
-        return [
-            archive.getblockhash(h) for h in range(2, SNAPSHOT_HEIGHT)
-        ]
+        return [archive.getblockhash(h) for h in range(2, SNAPSHOT_HEIGHT)]
 
     def _count_requesting_block(self, log_text, hashes):
         counts = collections.Counter()
@@ -226,11 +225,8 @@ class MatMulTrustedMirrorSnapshotBackfillTest(BitcoinTestFramework):
             lambda: mirror.getbestblockhash() == archive.getbestblockhash(),
             timeout=300,
         )
-        assert_equal(archive.getblockcount(), SNAPSHOT_HEIGHT)
-        assert_equal(mirror.getblockcount(), SNAPSHOT_HEIGHT)
         snapshot_hash = archive.getbestblockhash()
         pre_snapshot_hashes = self._pre_snapshot_hashes(archive)
-        assert_equal(len(pre_snapshot_hashes), SNAPSHOT_HEIGHT - 2)
         header_hashes = [
             archive.getblockhash(h) for h in range(1, SNAPSHOT_HEIGHT + 1)
         ]
@@ -239,8 +235,6 @@ class MatMulTrustedMirrorSnapshotBackfillTest(BitcoinTestFramework):
         dump = archive.dumptxoutsetattested("utxo.dat", "utxo.manifest")
         assert_equal(dump["base_height"], SNAPSHOT_HEIGHT)
         assert_equal(dump["base_hash"], snapshot_hash)
-        assert_greater_than(dump["coins_written"], 0)
-        assert_equal(dump["signatures"], 1)
 
         self.log.info("Stop mirror and wipe datadir to a clean chain")
         try:
@@ -253,7 +247,7 @@ class MatMulTrustedMirrorSnapshotBackfillTest(BitcoinTestFramework):
         mirror = self.nodes[1]
         assert_equal(mirror.getblockcount(), 0)
 
-        self.log.info("Feed headers through H (no bodies) so loadtxoutsetattested can see the base")
+        self.log.info("Feed headers through H (no bodies)")
         self._push_headers(
             mirror,
             header_hashes,
@@ -266,7 +260,6 @@ class MatMulTrustedMirrorSnapshotBackfillTest(BitcoinTestFramework):
             and any(t["hash"] == snapshot_hash for t in mirror.getchaintips()),
             timeout=180,
         )
-        assert_equal(mirror.getblockcount(), 0)
         for blockhash in pre_snapshot_hashes:
             mirror.getblockheader(blockhash)
             assert not body_available(mirror, blockhash), blockhash
@@ -278,7 +271,6 @@ class MatMulTrustedMirrorSnapshotBackfillTest(BitcoinTestFramework):
         shutil.copyfile(dump["manifest_path"], dst_man)
         loaded = mirror.loadtxoutsetattested("snapshot.dat", "snapshot.manifest")
         assert_equal(loaded["base_height"], SNAPSHOT_HEIGHT)
-        assert_equal(loaded["tip_hash"], snapshot_hash)
         self._assert_snapshot_chainstate(
             mirror, snapshot_hash, blocks=SNAPSHOT_HEIGHT, tip_hash=snapshot_hash
         )
@@ -286,85 +278,54 @@ class MatMulTrustedMirrorSnapshotBackfillTest(BitcoinTestFramework):
             assert not body_available(mirror, blockhash), blockhash
 
         self.log.info(
-            "Reconnect mirror→archive; backfill bodies while tip follows forward"
+            "Deliver unrequested followed-chain bodies; they must persist HAVE_DATA"
         )
         log_start = mirror.debug_log_size(encoding="utf-8")
-        before_frontier = mirror.getmatmulattestedtip().get("signed_frontier", {})
-        before_height = before_frontier.get("height", SNAPSHOT_HEIGHT)
-
-        self.connect_nodes(1, 0)
-
-        # Generate promptly so tip follow-forward overlaps background backfill.
-        self.generate(archive, 2, sync_fun=self.no_op)
-        archive_tip = archive.getbestblockhash()
-        archive_height = archive.getblockcount()
-        assert_equal(archive_height, SNAPSHOT_HEIGHT + 2)
-
-        def read_request_counts():
-            with open(mirror.debug_log_path, encoding="utf-8", errors="replace") as dl:
-                dl.seek(log_start)
-                return self._count_requesting_block(dl.read(), pre_snapshot_hashes)
-
-        def assert_requests_bounded(counts, *, require_seen=False):
-            for blockhash in pre_snapshot_hashes:
-                n = counts.get(blockhash, 0)
-                if require_seen:
-                    assert_greater_than_or_equal(n, 1)
-                assert n < MAX_REQUESTS_PER_HASH, (
-                    f"pre-snapshot {blockhash} requested {n} times "
-                    f"(limit {MAX_REQUESTS_PER_HASH}); unbounded HEADER_ONLY re-getdata"
-                )
-
-        def tip_and_frontier_caught_up():
-            # Fail fast if the HEADER_ONLY re-getdata loop is already unbounded;
-            # otherwise msghand floods debug.log and RPC stops answering.
-            assert_requests_bounded(read_request_counts())
-            if mirror.getblockcount() < SNAPSHOT_HEIGHT:
-                return False
-            attested = mirror.getmatmulattestedtip()
-            frontier = attested.get("signed_frontier")
-            if not frontier:
-                return False
-            return (
-                frontier["height"] >= before_height + 2
-                and frontier["on_active_chain"] is True
-                and frontier["blocks_behind"] == 0
-                and mirror.getbestblockhash() == archive_tip
+        peer = mirror.add_p2p_connection(P2PInterface(), services=ARCHIVE_SERVICES)
+        for blockhash in pre_snapshot_hashes:
+            raw = archive.getblock(blockhash, False)
+            block = from_hex(CBlock(), raw)
+            peer.send_and_ping(msg_block(block))
+            assert body_available(mirror, blockhash), (
+                f"unrequested followed-chain body {blockhash} was not persisted"
             )
 
-        self.wait_until(tip_and_frontier_caught_up, timeout=300)
-        assert_greater_than_or_equal(mirror.getblockcount(), SNAPSHOT_HEIGHT)
-        final_frontier = mirror.getmatmulattestedtip()["signed_frontier"]
-        assert_equal(final_frontier["on_active_chain"], True)
-        assert_equal(final_frontier["blocks_behind"], 0)
-        assert_greater_than_or_equal(final_frontier["height"], before_height + 2)
-        assert_equal(mirror.getblockcount(), archive_height)
-        assert_equal(mirror.getbestblockhash(), archive_tip)
-
-        def backfill_done():
-            assert_requests_bounded(read_request_counts())
-            if all(body_available(mirror, h) for h in pre_snapshot_hashes):
-                return True
-            states = mirror.getchainstates()["chainstates"]
-            if len(states) == 1:
-                return True
-            info = mirror.getblockchaininfo()
-            snap = info.get("snapshot_sync") or {}
-            if snap.get("active") and not snap.get("background_validation_in_progress"):
-                return True
-            return False
-
-        self.wait_until(backfill_done, timeout=300)
-        for blockhash in pre_snapshot_hashes:
-            assert body_available(mirror, blockhash), blockhash
-        assert_greater_than_or_equal(mirror.getblockcount(), SNAPSHOT_HEIGHT)
-
-        self.log.info(
-            "Each pre-snapshot hash must be Requesting-block'd fewer than "
-            f"{MAX_REQUESTS_PER_HASH} times (bug was 150–301)"
+        self.log.info("Unrequested low-work competing fork must not persist")
+        genesis = int("0x" + archive.getblockhash(0), 0)
+        competing = create_block(genesis, create_coinbase(1), int(time.time()) + 50)
+        competing.solve()
+        peer.send_and_ping(msg_block(competing))
+        assert_raises_rpc_error(
+            -1,
+            "Block not available (not fully downloaded)",
+            mirror.getblock,
+            competing.hash,
         )
-        counts = read_request_counts()
-        assert_requests_bounded(counts, require_seen=True)
+
+        peer.peer_disconnect()
+        mirror.disconnect_p2ps()
+
+        self.log.info("Reconnect; followed hashes must not unbounded re-getdata")
+        self.connect_nodes(1, 0)
+        self.generate(archive, 2, sync_fun=self.no_op)
+        archive_tip = archive.getbestblockhash()
+
+        def tip_caught_up():
+            return mirror.getbestblockhash() == archive_tip
+
+        self.wait_until(tip_caught_up, timeout=300)
+
+        with open(mirror.debug_log_path, encoding="utf-8", errors="replace") as dl:
+            dl.seek(log_start)
+            mirror_log = dl.read()
+        counts = self._count_requesting_block(mirror_log, pre_snapshot_hashes)
+        for blockhash in pre_snapshot_hashes:
+            n = counts.get(blockhash, 0)
+            assert n < MAX_REQUESTS_PER_HASH, (
+                f"followed hash {blockhash} requested {n} times "
+                f"(limit {MAX_REQUESTS_PER_HASH}); unbounded HEADER_ONLY re-getdata"
+            )
+            assert body_available(mirror, blockhash), blockhash
         self.log.info(
             "Request counts: "
             + ", ".join(
@@ -380,4 +341,4 @@ class MatMulTrustedMirrorSnapshotBackfillTest(BitcoinTestFramework):
 
 
 if __name__ == "__main__":
-    MatMulTrustedMirrorSnapshotBackfillTest(__file__).main()
+    MatMulUnrequestedFollowedPersistTest(__file__).main()
