@@ -1121,6 +1121,14 @@ public:
                 .blockhash = consteval_ctor(uint256{"2dd1d545b1b5e76c28b4414ebe0c22b1ba9d3ebd88662fbd1b9e4d0cf6693933"}),
                 .shielded_state_commitment = uint256{"74a131a91f71cb7e488c1826eb3d5676802a586bddb8082b33356568d7def0b5"},
             },
+            {
+                // main assumeutxo snapshot at height 189'307 (snapshot v9)
+                .height = 189'307,
+                .hash_serialized = AssumeutxoHash{uint256{"48da3da953130984036435da93847ebe7d1a20fc5464d789b07f49b79178e074"}},
+                .m_chain_tx_count = 287'404,
+                .blockhash = consteval_ctor(uint256{"bd8c44a30103613a34ac271b7cfffb4334b70aae9c41cf12831d98a98313e6c8"}),
+                .shielded_state_commitment = uint256{"94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541"},
+            },
         };
         chainTxData = ChainTxData{
             .nTime = 1785786086,
