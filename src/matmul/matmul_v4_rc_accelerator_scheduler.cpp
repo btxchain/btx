@@ -308,6 +308,12 @@ RCAcceleratorScheduler::Acquire(
                 static_cast<uint8_t>(priority)) {
                 continue;
             }
+            // CandidateMining waiters are a reserved lane. A TipValidation
+            // sibling flood must not steal them (live miner: own ExactReplay
+            // starved at 69–198 same-height siblings, ~9–18% win rate).
+            if ((*it)->priority == Priority::CandidateMining) {
+                continue;
+            }
             if (victim == m_waiters.end() ||
                 (*it)->sequence < (*victim)->sequence) {
                 victim = it;

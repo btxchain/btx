@@ -2212,6 +2212,81 @@ BOOST_AUTO_TEST_CASE(rc_accelerator_scheduler_tip_validation_displaces_oldest_sa
     BOOST_CHECK(!first_acquired.load(std::memory_order_relaxed));
 }
 
+BOOST_AUTO_TEST_CASE(rc_accelerator_scheduler_tip_validation_does_not_displace_candidate_mining)
+{
+    using Scheduler = matmul::v4::rc::RCAcceleratorScheduler;
+    auto& scheduler{matmul::v4::rc::GetRCAcceleratorScheduler()};
+    BOOST_REQUIRE(scheduler.ResetStatsForTest());
+
+    std::atomic_bool owner_cancelled{false};
+    auto owner{scheduler.Acquire(
+        Scheduler::Priority::TipValidation, &owner_cancelled,
+        "tip-owner")};
+    BOOST_REQUIRE(owner);
+
+    std::atomic_bool mining_cancelled{false};
+    std::atomic_bool mining_acquired{false};
+    std::thread mining{[&] {
+        auto lease{scheduler.Acquire(
+            Scheduler::Priority::CandidateMining, &mining_cancelled,
+            "own-candidate", nullptr, std::chrono::seconds{30})};
+        mining_acquired.store(static_cast<bool>(lease),
+                              std::memory_order_relaxed);
+    }};
+    BOOST_REQUIRE(WaitFor(
+        [&] { return scheduler.GetStats().queue_depth == 1; }));
+
+    std::atomic_bool sibling_a_cancelled{false};
+    std::thread sibling_a{[&] {
+        auto lease{scheduler.Acquire(
+            Scheduler::Priority::TipValidation, &sibling_a_cancelled,
+            "sibling-a", nullptr, std::chrono::seconds{30})};
+        (void)lease;
+    }};
+    BOOST_REQUIRE(WaitFor(
+        [&] { return scheduler.GetStats().queue_depth == 2; }));
+    std::atomic_bool sibling_b_cancelled{false};
+    std::thread sibling_b{[&] {
+        auto lease{scheduler.Acquire(
+            Scheduler::Priority::TipValidation, &sibling_b_cancelled,
+            "sibling-b", nullptr, std::chrono::seconds{30})};
+        (void)lease;
+    }};
+    BOOST_REQUIRE(WaitFor(
+        [&] { return scheduler.GetStats().queue_depth == 3; }));
+
+    // TipValidation lane is full (2 waiters) plus a CandidateMining waiter.
+    // A third sibling may displace the oldest TipValidation leftover, but
+    // must not steal the mining waiter.
+    std::atomic_bool sibling_c_cancelled{false};
+    std::thread sibling_c{[&] {
+        auto lease{scheduler.Acquire(
+            Scheduler::Priority::TipValidation, &sibling_c_cancelled,
+            "sibling-c", nullptr, std::chrono::seconds{30})};
+        (void)lease;
+    }};
+    BOOST_REQUIRE(WaitFor(
+        [&] { return scheduler.GetStats().cancelled_waits >= 1; }));
+    BOOST_CHECK_EQUAL(scheduler.GetStats().queue_depth, 3U);
+    BOOST_CHECK_EQUAL(
+        scheduler.GetStats()
+            .lanes[static_cast<size_t>(Scheduler::Priority::CandidateMining)]
+            .cancelled_waits,
+        0U);
+    BOOST_CHECK(!mining_acquired.load(std::memory_order_relaxed));
+
+    mining_cancelled.store(true);
+    sibling_a_cancelled.store(true);
+    sibling_b_cancelled.store(true);
+    sibling_c_cancelled.store(true);
+    scheduler.NotifyCancellation();
+    mining.join();
+    sibling_a.join();
+    sibling_b.join();
+    sibling_c.join();
+    owner = {};
+}
+
 BOOST_AUTO_TEST_CASE(rc_accelerator_scheduler_queue_deadline_is_bounded)
 {
     using Scheduler = matmul::v4::rc::RCAcceleratorScheduler;

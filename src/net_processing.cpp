@@ -3414,15 +3414,17 @@ static bool TrustedMirrorMayDownloadIndex(
 //! hundreds deep will saturate every device (live 2026-08-14: signer tip
 //! 187870, in-flight ExactReplay of competing 188012, 1458 headers-only tips
 //! above the attested tip, difficulty 1.9e-09). A later consensus+pubkey
-//! miner at the tip with the pool on ExactReplayed 25 same-height siblings
-//! and wedged the 2-slot scheduler (`queue deadline or capacity limit
-//! reached` ~6/s) until restart.
+//! miner at the tip with the pool on ExactReplayed 25–198 same-height
+//! siblings and wedged the 2-slot scheduler (`queue deadline or capacity
+//! limit reached` ~6/s). Flood-immunity that only skipped HasQuorum /
+//! non-tip-children still ExactReplayed every unattested racing-tip sibling
+//! (all `pprev==tip`, none had HAVE_DATA yet), so the miner's own
+//! CandidateMining / submitblock ExactReplay starved and lost the height.
 //!
 //! Configured nodes (signer, consensus+pubkey): attestation is fork-choice.
-//! Do not spend the device on a sibling flood or on a hash that already has
-//! quorum (ContextualCheckBlock fast-accepts those). At most one unattested
-//! active-tip child may occupy ExactReplay; additional children wait for
-//! attestation. Unconfigured consensus keeps the historical near-tip window.
+//! Never spend async P2P ExactReplay. Local submitblock / ConnectTip still
+//! ExactReplay via ContextualCheckBlock. Unconfigured consensus keeps the
+//! historical near-tip window.
 [[nodiscard]] static bool ConfiguredTipChildAlreadyHasBody(
     const ChainstateManager& chainman,
     const CBlockIndex* tip,
@@ -3442,8 +3444,39 @@ static bool TrustedMirrorMayDownloadIndex(
     return false;
 }
 
-[[nodiscard]] static bool MatMulMaySpendExactReplayGpu(
+//! cs_main: at most one unattested configured tip-child may persist a P2P
+//! body without GPU (trusted-mirror catch-up). Extra siblings stay
+//! HEADER_ONLY so a concurrent burst cannot enqueue 80 ExactReplays.
+static uint256 g_configured_claimed_tip_child{};
+
+[[nodiscard]] static bool ClaimConfiguredUnattestedTipChildBody(
     const ChainstateManager& chainman,
+    const CBlockIndex* tip,
+    const CBlockIndex* index)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    if (tip == nullptr || index == nullptr) return false;
+    if (index->pprev != tip) return false;
+    if (ConfiguredTipChildAlreadyHasBody(chainman, tip, index)) {
+        return false;
+    }
+    if (!g_configured_claimed_tip_child.IsNull() &&
+        g_configured_claimed_tip_child != index->GetBlockHash()) {
+        const CBlockIndex* claimed{
+            chainman.m_blockman.LookupBlockIndex(
+                g_configured_claimed_tip_child)};
+        if (claimed != nullptr && claimed->pprev == tip &&
+            (claimed->nStatus & (BLOCK_FAILED_MASK)) == 0) {
+            return false;
+        }
+        g_configured_claimed_tip_child.SetNull();
+    }
+    g_configured_claimed_tip_child = index->GetBlockHash();
+    return true;
+}
+
+[[nodiscard]] static bool MatMulMaySpendExactReplayGpu(
+    [[maybe_unused]] const ChainstateManager& chainman,
     const CBlockIndex* tip,
     const CBlockIndex* index)
     EXCLUSIVE_LOCKS_REQUIRED(cs_main)
@@ -3454,21 +3487,11 @@ static bool TrustedMirrorMayDownloadIndex(
         return index->nHeight >= tip->nHeight - 2 &&
                index->nHeight <= tip->nHeight + MATMUL_RC_NEAR_TIP_DEPTH;
     }
-    if (node::matmul_trusted::HasQuorum(
-            index->GetBlockHash(), index->nHeight)) {
-        // Quorum already authenticates this hash. Spending 5GB+/~5s on it
-        // while mining is what wedged the scheduler at low difficulty.
-        return false;
-    }
-    if (index->pprev != tip) {
-        // Competing (non-extending) work is decided by attestation. Never
-        // ExactReplay the headers-only flood.
-        return false;
-    }
-    if (ConfiguredTipChildAlreadyHasBody(chainman, tip, index)) {
-        return false;
-    }
-    return true;
+    // Async P2P ExactReplay is never spent on a configured node. HasQuorum
+    // fast-accepts; unattested P2P siblings wait for attestation or (on a
+    // trusted mirror) persist without GPU. Local mining still ExactReplays
+    // through ContextualCheckBlock / CandidateMining.
+    return false;
 }
 
 static bool AuthorityFrontierIndexUsable(
@@ -10163,10 +10186,23 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
                                    !MatMulMaySpendExactReplayGpu(
                                        m_chainman, tip, indexed)) {
                             // Live 2026-08-14: unsolicited competing bodies and
-                            // a 25-wide same-height sibling burst occupied
+                            // a 25–198-wide same-height sibling burst occupied
                             // TipValidation while mining held the device.
+                            // Configured P2P never ExactReplays. Trusted
+                            // mirrors may persist exactly one unattested
+                            // tip-child so ConnectTip can wait for quorum
+                            // (qualifier sole-child). Extra siblings and
+                            // consensus+pubkey miner P2P bodies stay
+                            // HEADER_ONLY so local CandidateMining wins.
                             exact_recompute_required = false;
-                            skip_competing_exactreplay = true;
+                            const bool persist_unattested_tip_child{
+                                node::matmul_trusted::IsTrustedMirror() &&
+                                indexed != nullptr &&
+                                ClaimConfiguredUnattestedTipChildBody(
+                                    m_chainman, tip, indexed)};
+                            if (!persist_unattested_tip_child) {
+                                skip_competing_exactreplay = true;
+                            }
                         }
                     }
                 }
@@ -10185,7 +10221,7 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
     }
     if (skip_competing_exactreplay) {
         LogDebug(BCLog::NET,
-                 "Skipping ExactReplay GPU for competing %s hash=%s height=%d from peer=%d (not an active-tip child or attested short race)\n",
+                 "Skipping ExactReplay GPU for competing %s hash=%s height=%d from peer=%d (configured P2P sibling or non-tip-child; local mining keeps the device)\n",
                  source, block_hash.ToString(), exact_reference_height, node.GetId());
         admission.state = MatMulBlockAdmission::State::HEADER_ONLY;
         return true;

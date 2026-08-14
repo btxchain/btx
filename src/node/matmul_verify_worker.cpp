@@ -684,18 +684,20 @@ void MatMulVerifyWorker::WorkerLoop()
             // CompetingBranch to TipValidation keeps async verify from being
             // starved by CandidateMining while still ranking below an authenticated
             // tip-child via the worker's own Priority ordering.
-            // Configured consensus+pubkey miners must not map CompetingBranch
-            // onto TipValidation: a same-height sibling burst then occupies
-            // both waiter slots, mining holds the device, and the attested
-            // child is queue-rejected until restart. Unconfigured nodes keep
-            // the historical CompetingBranch→TipValidation mapping (zombie
-            // freeze workaround).
+            // Configured nodes must not map *any* async worker job onto
+            // TipValidation: AuthenticatedTipChild is every `pprev==tip`
+            // sibling at an unattested racing tip, so 69–198 same-height
+            // bodies occupied both GPU slots and starved CandidateMining /
+            // submitblock ExactReplay (win-rate, not log noise). P2P
+            // admission already skips GPU; this mapping is belt-and-suspenders
+            // if a job leaks through. Unconfigured nodes keep the historical
+            // CompetingBranch→TipValidation mapping (zombie freeze workaround).
             const auto device_priority{
-                job.priority == Priority::AuthenticatedTipChild
+                node::matmul_trusted::IsConfigured()
                     ? matmul::v4::rc::RCAcceleratorScheduler::
-                          Priority::TipValidation
-                    : (job.priority == Priority::CompetingBranch &&
-                       !node::matmul_trusted::IsConfigured())
+                          Priority::SpeculativeValidation
+                    : (job.priority == Priority::AuthenticatedTipChild ||
+                       job.priority == Priority::CompetingBranch)
                           ? matmul::v4::rc::RCAcceleratorScheduler::
                                 Priority::TipValidation
                           : matmul::v4::rc::RCAcceleratorScheduler::
