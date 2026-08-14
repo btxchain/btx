@@ -1667,6 +1667,12 @@ private:
     };
     std::map<uint256, MatMulAttestationRequest> m_matmul_attestation_requested
         GUARDED_BY(cs_main);
+    /** Competing near-tip P2P bodies dropped HEADER_ONLY so miner GPU /
+     *  trusted-mirror sole-child persist is not flooded. FindNextBlocks
+     *  must not re-getdata these until the active tip moves (qualifier:
+     *  snapshot backfill re-requested the same pre-snapshot hash 150–301
+     *  times after HEADER_ONLY discarded a delivered body). */
+    std::set<uint256> m_header_only_competing GUARDED_BY(cs_main);
     /** Recent signer-authenticated proof delivered by a peer. A valid
      * signature authorizes routing only on the branch containing its exact
      * block hash; it is not a bearer token for arbitrary future forks. */
@@ -3464,6 +3470,30 @@ static uint256 g_configured_claimed_tip_child{};
     return true;
 }
 
+//! Followed-chain historical hole: ancestor of the active tip or of the
+//! assumeutxo snapshot base (background genesis→H backfill). These bodies
+//! must persist without ExactReplay GPU. HEADER_ONLY-dropping them is the
+//! unbounded re-getdata loop on loadtxoutsetattested (qualifier: heights
+//! 2–5 requested 150–301 times, 0 refusals, bodies delivered then discarded).
+[[nodiscard]] static bool MatMulFollowedHistoricalHole(
+    const ChainstateManager& chainman,
+    const CBlockIndex* tip,
+    const CBlockIndex* index)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    if (index == nullptr) return false;
+    if (tip != nullptr && index->nHeight < tip->nHeight &&
+        tip->GetAncestor(index->nHeight) == index) {
+        return true;
+    }
+    const CBlockIndex* const snap{chainman.GetSnapshotBaseBlock()};
+    if (snap != nullptr && index->nHeight <= snap->nHeight &&
+        snap->GetAncestor(index->nHeight) == index) {
+        return true;
+    }
+    return false;
+}
+
 //! ExactReplay GPU is 5GB+/12s. A competing header tree or same-height
 //! sibling burst will saturate every device and starve CandidateMining
 //! (live 2026-08-14). Split by role:
@@ -4089,6 +4119,13 @@ void PeerManagerImpl::FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, c
                     (pindex->nStatus & BLOCK_HAVE_DATA || activeChain->Contains(pindex))) {
                     state->pindexLastCommonBlock = pindex;
                 }
+                continue;
+            }
+
+            // Intentionally HEADER_ONLY competing near-tip sibling: do not
+            // re-getdata until UpdatedBlockTip clears the set. Snapshot
+            // backfill used to loop here after admission discarded the body.
+            if (m_header_only_competing.count(pindex->GetBlockHash())) {
                 continue;
             }
 
@@ -5638,6 +5675,8 @@ void PeerManagerImpl::ActiveTipChange(const CBlockIndex& new_tip, bool is_ibd)
     // the scheduler drains — including across the RC activation boundary.
     SetBestBlock(new_tip.nHeight, std::chrono::seconds{new_tip.GetBlockTime()});
     m_matmul_block_lifecycle.NoteActiveTipProgress();
+    AssertLockHeld(::cs_main);
+    m_header_only_competing.clear();
 
     // Tip-first trusted-mirror ranking: keep the verify worker's tip cache in
     // lockstep with ActivateBestChain (same sync delivery as SetBestBlock).
@@ -5889,6 +5928,13 @@ void PeerManagerImpl::NewPoWValidBlock(const CBlockIndex *pindex, const std::sha
 void PeerManagerImpl::UpdatedBlockTip(const CBlockIndex *pindexNew, const CBlockIndex *pindexFork, bool fInitialDownload)
 {
     SetBestBlock(pindexNew->nHeight, std::chrono::seconds{pindexNew->GetBlockTime()});
+
+    {
+        LOCK(cs_main);
+        if (pindexNew == m_chainman.ActiveTip()) {
+            m_header_only_competing.clear();
+        }
+    }
 
     // Don't relay inventory during initial block download.
     if (fInitialDownload) return;
@@ -10160,6 +10206,7 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
     int32_t exact_reference_height{reference_height};
     bool skip_competing_exactreplay{false};
     bool request_attestations_without_gpu{false};
+    bool header_only_competing_first{false};
     {
         LOCK(cs_main);
         cheap_body_valid = m_chainman.CheckMatMulBlockAdmissionPreconditions(
@@ -10234,8 +10281,18 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
                                 indexed != nullptr &&
                                 ClaimConfiguredUnattestedTipChildBody(
                                     m_chainman, tip, indexed)};
-                            if (!persist_unattested_tip_child) {
+                            const bool persist_followed_hole{
+                                MatMulFollowedHistoricalHole(
+                                    m_chainman, tip, indexed)};
+                            if (persist_unattested_tip_child ||
+                                persist_followed_hole) {
+                                // Persist without GPU: ConnectTip / background
+                                // chainstate still require quorum for Profile-1.
+                            } else {
                                 skip_competing_exactreplay = true;
+                                header_only_competing_first =
+                                    m_header_only_competing.insert(block_hash)
+                                        .second;
                             }
                         }
                     }
@@ -10263,8 +10320,14 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
         return true;
     }
     if (skip_competing_exactreplay) {
-        LogInfo("MatMul admission HEADER_ONLY for %s hash=%s height=%d from peer=%d: skipped ExactReplay GPU (trusted-mirror or local-signer P2P sibling / non-tip-child; body not connected)\n",
-                source, block_hash.ToString(), exact_reference_height, node.GetId());
+        if (header_only_competing_first) {
+            LogInfo("MatMul admission HEADER_ONLY for %s hash=%s height=%d from peer=%d: skipped ExactReplay GPU (competing near-tip P2P sibling; body not connected; will not re-getdata until tip moves)\n",
+                    source, block_hash.ToString(), exact_reference_height, node.GetId());
+        } else {
+            LogDebug(BCLog::NET,
+                     "MatMul admission HEADER_ONLY for %s hash=%s height=%d from peer=%d: already skipped competing sibling\n",
+                     source, block_hash.ToString(), exact_reference_height, node.GetId());
+        }
         admission.state = MatMulBlockAdmission::State::HEADER_ONLY;
         maybe_request_attestations_without_gpu();
         return true;

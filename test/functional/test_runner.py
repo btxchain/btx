@@ -588,6 +588,7 @@ BTX_BASE_SCRIPTS = [
     'feature_matmul_trusted_mirrors.py',
     'feature_matmul_trusted_mirror_convergence.py',
     'feature_matmul_trusted_mirror_follow_forward.py',
+    'feature_matmul_trusted_mirror_snapshot_backfill.py',
     'feature_matmul_trusted_mirror_backfill.py',
     'feature_block_download_slot_reclaim.py',
     'feature_attested_utxo_snapshot_p2p.py',

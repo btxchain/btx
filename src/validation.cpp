@@ -12656,6 +12656,37 @@ static bool ContextualCheckBlock(const CBlock& block,
                                 pindexPrev == chainman.ActiveTip()) {
                                 return true;
                             }
+                            // Followed-chain historical hole (active-tip
+                            // ancestor or assumeutxo snapshot-base ancestor):
+                            // persist HAVE_DATA without GPU so background
+                            // backfill is not a getdata livelock. ConnectTip
+                            // still requires HasQuorum. Competing off-path
+                            // bodies stay retryable Errors.
+                            bool followed_hole{false};
+                            {
+                                LOCK(::cs_main);
+                                const CBlockIndex* const self{
+                                    chainman.m_blockman.LookupBlockIndex(
+                                        block.GetHash())};
+                                const CBlockIndex* const tip{
+                                    chainman.ActiveTip()};
+                                const CBlockIndex* const snap{
+                                    chainman.GetSnapshotBaseBlock()};
+                                if (self != nullptr) {
+                                    if (tip != nullptr &&
+                                        self->nHeight < tip->nHeight &&
+                                        tip->GetAncestor(self->nHeight) ==
+                                            self) {
+                                        followed_hole = true;
+                                    } else if (snap != nullptr &&
+                                               self->nHeight <= snap->nHeight &&
+                                               snap->GetAncestor(self->nHeight) ==
+                                                   self) {
+                                        followed_hole = true;
+                                    }
+                                }
+                            }
+                            if (followed_hole) return true;
                             rc_local_execution_failure = true;
                             rc_execution_detail = strprintf(
                                 "trusted attestation quorum %s",
