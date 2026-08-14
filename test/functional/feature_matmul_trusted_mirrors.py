@@ -7,7 +7,11 @@
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.messages import msg_generic, ser_compact_size
 from test_framework.p2p import P2PInterface
-from test_framework.util import assert_equal
+from test_framework.util import (
+    assert_equal,
+    assert_greater_than,
+    assert_greater_than_or_equal,
+)
 from test_framework.wallet_util import generate_keypair
 
 
@@ -158,15 +162,54 @@ class MatMulTrustedMirrorsTest(BitcoinTestFramework):
             timeout=300,
         )
 
+        def peer_msg_bytes(node, sent, msg):
+            key = "bytessent_per_msg" if sent else "bytesrecv_per_msg"
+            return sum(
+                (peer.get(key) or {}).get(msg, 0) for peer in node.getpeerinfo()
+            )
+
+        self.log.info(
+            "Trusted mirrors request attestations for deferred Profile-1 blocks"
+        )
         for mirror in (mirror_a, mirror_b):
+            assert_greater_than(peer_msg_bytes(mirror, True, "getmmattest"), 0)
+            assert_greater_than(peer_msg_bytes(mirror, False, "mmattest"), 0)
             status = mirror.getmatmultrustedstatus()
             assert status["accepted"] >= 1
             assert status["blocks_with_quorum"] >= 1
+            attested = mirror.getmatmulattestedtip()
+            assert "signed_frontier" in attested, attested
+            frontier = attested["signed_frontier"]
+            assert frontier["on_active_chain"] is True
+            assert_equal(frontier["blocks_behind"], 0)
             assert_equal(mirror.getblockcount(), ACTIVATION_HEIGHT + 2)
             assert_equal(
                 mirror.getblockchaininfo()["matmulvalidationmode"],
                 "trusted",
             )
+
+        self.log.info(
+            "Frontier follows two newly produced P2P-attested blocks"
+        )
+        before_heights = [
+            mirror.getmatmulattestedtip()["signed_frontier"]["height"]
+            for mirror in (mirror_a, mirror_b)
+        ]
+        self.generate(archive, 2, sync_fun=self.no_op)
+        self.wait_until(
+            lambda: all(
+                node.getbestblockhash() == archive.getbestblockhash()
+                for node in (mirror_a, mirror_b)
+            ),
+            timeout=300,
+        )
+        for mirror, before in zip((mirror_a, mirror_b), before_heights):
+            attested = mirror.getmatmulattestedtip()
+            frontier = attested["signed_frontier"]
+            assert frontier["on_active_chain"] is True
+            assert_equal(frontier["blocks_behind"], 0)
+            assert_greater_than(frontier["height"], before)
+            assert_equal(mirror.getblockcount(), archive.getblockcount())
 
         self.log.info("Archive export imports idempotently on both mirrors")
         activation_hash = archive.getblockhash(ACTIVATION_HEIGHT)
@@ -211,11 +254,16 @@ class MatMulTrustedMirrorsTest(BitcoinTestFramework):
             lambda: mirror_a.getblockcount() == old_height + 1,
             timeout=120,
         )
+        # ConnectTip defers unattested Profile-1 without blocking the message
+        # thread on WaitForQuorum, so wait_timeouts may stay 0. The observable
+        # is headers-ahead / blocks-pinned and no ban.
         self.wait_until(
-            lambda: mirror_b.getmatmultrustedstatus()["wait_timeouts"] >= 1,
-            timeout=120,
+            lambda: mirror_b.getblockchaininfo()["headers"] >= old_height + 1,
+            timeout=60,
         )
-        assert_equal(mirror_b.getblockcount(), old_height)
+        info = mirror_b.getblockchaininfo()
+        assert_greater_than_or_equal(info["headers"], old_height + 1)
+        assert_equal(info["blocks"], old_height)
         assert_equal(mirror_b.listbanned(), [])
 
         self.log.info("Restoring a satisfiable quorum retries the same block")

@@ -2067,9 +2067,11 @@ private:
     void FinishMatMulAuthenticatedRelayObservation(
         const uint256& hash, bool exact_replay_authenticated)
         NO_THREAD_SAFETY_ANALYSIS;
-    /** Request Profile-1 attestations only after the associated header/body
-     *  has passed RC admission. This prevents ticketless siblings from
-     *  monopolizing the bounded outstanding-request map. */
+    /** Request Profile-1 attestations for a preferred hash (ActiveTip child,
+     *  short-reorg missing root, or recent active ancestor). Ticketless
+     *  competing siblings still cannot occupy the outstanding-request map.
+     *  Configured nodes skip async ExactReplay GPU; this request is how they
+     *  obtain quorum for ConnectTip and must not be gated on GPU spend. */
     void RequestMatMulTrustedAttestations(const uint256& hash,
                                           NodeId source);
     /**
@@ -3491,6 +3493,11 @@ static uint256 g_configured_claimed_tip_child{};
     // fast-accepts; unattested P2P siblings wait for attestation or (on a
     // trusted mirror) persist without GPU. Local mining still ExactReplays
     // through ContextualCheckBlock / CandidateMining.
+    //
+    // Callers that take this false path MUST still request attestations
+    // for preferred hashes. Skipping GPU must not skip GETMMATTEST: a
+    // trusted mirror then defers ConnectTip forever (qualifier: 0
+    // getmmattest on 5bc1e3d4, stall at pre-activation).
     return false;
 }
 
@@ -7687,7 +7694,12 @@ void PeerManagerImpl::MaybeRequestTrustedMirrorPreferredAttestations(
         return;
     }
     const Consensus::Params& params{m_chainparams.GetConsensus()};
-    if (!params.IsMatMulTrustedReplayAttestationActive(tip->nHeight)) {
+    // The deferred child may be the first attested height. Gating on the
+    // local tip left a trusted mirror stuck at pre-activation (qualifier:
+    // tip=5, archive=12, sending getmmattest 0) because ConnectTip waits
+    // for a quorum this path never requested.
+    if (!params.IsMatMulTrustedReplayAttestationActive(tip->nHeight) &&
+        !params.IsMatMulTrustedReplayAttestationActive(tip->nHeight + 1)) {
         return;
     }
     const CBlockIndex* known{state->pindexBestKnownBlock};
@@ -7714,6 +7726,9 @@ void PeerManagerImpl::MaybeRequestTrustedMirrorPreferredAttestations(
 
     auto request_if_preferred = [&](const CBlockIndex* target) {
         if (target == nullptr) return;
+        if (!params.IsMatMulTrustedReplayAttestationActive(target->nHeight)) {
+            return;
+        }
         if (m_chainman.IsOnParkedReorgBranch(target)) return;
         const bool recent_active_ancestor{
             target->nHeight >= 0 &&
@@ -7886,6 +7901,16 @@ void PeerManagerImpl::RequestMatMulTrustedAttestations(
         const CBlockIndex* index{
             m_chainman.m_blockman.LookupBlockIndex(hash)};
         const int32_t height{index ? index->nHeight : -1};
+        // Already-quorum hashes must not occupy GETMMATTEST tokens. Lookback
+        // of the active tip, plus header-first skip-GPU, used to re-request
+        // the same hash after MMATTEST cleared the in-flight map and drain
+        // the archive's 16-token burst so the deferred child was rate-limited
+        // forever (qualifier linear-chain stall at the next height).
+        if (index != nullptr &&
+            node::matmul_trusted::HasQuorum(hash, height)) {
+            m_matmul_attestation_requested.erase(hash);
+            return;
+        }
         const bool parked{
             index != nullptr && m_chainman.IsOnParkedReorgBranch(index)};
         const bool tip_child{
@@ -8260,6 +8285,7 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
         params.IsMatMulTrustedReplayAttestationActive(index.nHeight)};
 
     bool authenticated_tip_child{false};
+    bool skip_exactreplay_gpu{false};
     std::optional<int64_t> parent_mtp;
     {
         LOCK(cs_main);
@@ -8279,9 +8305,19 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
         }
         authenticated_tip_child = parent == active_tip;
         if (!MatMulMaySpendExactReplayGpu(m_chainman, active_tip, &index)) {
-            return;
+            skip_exactreplay_gpu = true;
+        } else {
+            parent_mtp = parent->GetMedianTimePast();
         }
-        parent_mtp = parent->GetMedianTimePast();
+    }
+    if (skip_exactreplay_gpu) {
+        // Miner GPU prioritization must not suppress GETMMATTEST. The
+        // header is already indexed; RequestMatMulTrustedAttestations
+        // still filters to preferred hashes (tip-child / short reorg).
+        if (params.IsMatMulTrustedReplayAttestationActive(index.nHeight)) {
+            RequestMatMulTrustedAttestations(header.GetHash(), node.GetId());
+        }
+        return;
     }
     if (m_matmul_verify_worker->Contains(header.GetHash())) return;
 
@@ -10133,6 +10169,7 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
     bool acceptance_stable_early_exit{false};
     int32_t exact_reference_height{reference_height};
     bool skip_competing_exactreplay{false};
+    bool request_attestations_without_gpu{false};
     {
         LOCK(cs_main);
         cheap_body_valid = m_chainman.CheckMatMulBlockAdmissionPreconditions(
@@ -10194,7 +10231,10 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
                             // (qualifier sole-child). Extra siblings and
                             // consensus+pubkey miner P2P bodies stay
                             // HEADER_ONLY so local CandidateMining wins.
+                            // Still request GETMMATTEST: ConnectTip waits
+                            // for quorum that ExactReplay GPU used to arm.
                             exact_recompute_required = false;
+                            request_attestations_without_gpu = true;
                             const bool persist_unattested_tip_child{
                                 node::matmul_trusted::IsTrustedMirror() &&
                                 indexed != nullptr &&
@@ -10212,6 +10252,15 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
             }
         }
     }
+    auto maybe_request_attestations_without_gpu = [&] {
+        if (!request_attestations_without_gpu) return;
+        if (!m_chainparams.GetConsensus()
+                 .IsMatMulTrustedReplayAttestationActive(
+                     exact_reference_height)) {
+            return;
+        }
+        RequestMatMulTrustedAttestations(block_hash, node.GetId());
+    };
     if (!cheap_body_valid) {
         LogDebug(BCLog::NET,
                  "Skipping MatMul verification admission for %s hash=%s from peer=%d: cheap body validation failed (%s)\n",
@@ -10224,6 +10273,7 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
                  "Skipping ExactReplay GPU for competing %s hash=%s height=%d from peer=%d (configured P2P sibling or non-tip-child; local mining keeps the device)\n",
                  source, block_hash.ToString(), exact_reference_height, node.GetId());
         admission.state = MatMulBlockAdmission::State::HEADER_ONLY;
+        maybe_request_attestations_without_gpu();
         return true;
     }
     if (!acceptance_reaches_contextual) {
@@ -10250,6 +10300,7 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
                      source, block_hash.ToString(), node.GetId());
             admission.state = MatMulBlockAdmission::State::NO_RECOMPUTE;
         }
+        maybe_request_attestations_without_gpu();
         return true;
     }
 

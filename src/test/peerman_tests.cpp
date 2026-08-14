@@ -1557,6 +1557,124 @@ BOOST_AUTO_TEST_CASE(getmmattest_skips_non_serving_peers)
     BOOST_CHECK(HasQueuedMessageType(mirror, NetMsgType::GETMMATTEST));
 }
 
+// Qualifier on 5bc1e3d4: a trusted mirror whose tip is still the last
+// pre-activation block sent 0 GETMMATTEST, so ConnectTip deferred the
+// activation-height body forever. Skipping ExactReplay GPU on configured
+// nodes must not skip attestation acquisition for that tip-child.
+BOOST_AUTO_TEST_CASE(getmmattest_pre_activation_tip_requests_child)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+
+    node::matmul_trusted::ResetForTest();
+    CKey signer;
+    signer.MakeNewKey(/*fCompressed=*/true);
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256::FromHex(std::string(64, '1')).value();
+    config.replay_authority_context =
+        uint256::FromHex(std::string(64, '2')).value();
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/true, /*serve=*/false,
+        std::chrono::milliseconds{50}, error));
+    BOOST_REQUIRE(node::matmul_trusted::IsTrustedMirror());
+    struct MirrorReset {
+        ~MirrorReset() { node::matmul_trusted::ResetForTest(); }
+    } mirror_reset;
+
+    ConnmanTestMsg& connman = static_cast<ConnmanTestMsg&>(*m_node.connman);
+    PeerManager& peerman = *m_node.peerman;
+
+    const ServiceFlags archive_services{ServiceFlags(
+        NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS |
+        NODE_MATMUL_ATTESTATION_ARCHIVE)};
+    CNode archive{/*id=*/81,
+                  /*sock=*/nullptr,
+                  CAddress{},
+                  /*nKeyedNetGroupIn=*/0,
+                  /*nLocalHostNonceIn=*/0,
+                  CAddress{},
+                  /*addrNameIn=*/"pre-activation-archive",
+                  ConnectionType::OUTBOUND_FULL_RELAY,
+                  /*inbound_onion=*/false,
+                  /*network_key=*/0};
+    connman.Handshake(archive, /*successfully_connected=*/true,
+                      archive_services, archive_services, PROTOCOL_VERSION,
+                      /*relay_txs=*/true);
+    connman.AddTestNode(archive);
+    connman.FlushSendBuffer(archive);
+    struct FinalizePeer {
+        ConnmanTestMsg& connman;
+        PeerManager& peerman;
+        CNode& node;
+        ~FinalizePeer()
+        {
+            peerman.FinalizeNode(node);
+            connman.RemoveTestNode(node);
+        }
+    } finalize{connman, peerman, archive};
+
+    const CBlockIndex* tip{
+        WITH_LOCK(::cs_main, return m_node.chainman->ActiveChain().Tip())};
+    BOOST_REQUIRE(tip != nullptr);
+    SetMockTime(std::chrono::seconds{tip->GetBlockTime() + 1});
+
+    Consensus::Params& consensus = const_cast<Consensus::Params&>(
+        m_node.chainman->GetParams().GetConsensus());
+    const int32_t saved_rc = consensus.nMatMulRCHeight;
+    const int32_t saved_v4 = consensus.nMatMulV4Height;
+    const int32_t saved_bmx4c = consensus.nMatMulBMX4CHeight;
+    const int32_t saved_drlt = consensus.nMatMulDRLTHeight;
+    const int32_t saved_coupled = consensus.nMatMulRCCoupledHeight;
+    struct RestoreHeights {
+        Consensus::Params& params;
+        int32_t rc;
+        int32_t v4;
+        int32_t bmx4c;
+        int32_t drlt;
+        int32_t coupled;
+        ~RestoreHeights()
+        {
+            params.nMatMulRCHeight = rc;
+            params.nMatMulV4Height = v4;
+            params.nMatMulBMX4CHeight = bmx4c;
+            params.nMatMulDRLTHeight = drlt;
+            params.nMatMulRCCoupledHeight = coupled;
+        }
+    } restore_heights{consensus, saved_rc, saved_v4, saved_bmx4c, saved_drlt,
+                      saved_coupled};
+
+    const int32_t activation{tip->nHeight + 1};
+    consensus.nMatMulV4Height = activation;
+    consensus.nMatMulBMX4CHeight = activation;
+    consensus.nMatMulDRLTHeight = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulRCHeight = activation;
+    consensus.nMatMulRCCoupledHeight = std::numeric_limits<int32_t>::max();
+    peerman.SetBestBlock(tip->nHeight, std::chrono::seconds{tip->GetBlockTime()});
+    BOOST_REQUIRE(!consensus.IsMatMulTrustedReplayAttestationActive(tip->nHeight));
+    BOOST_REQUIRE(
+        consensus.IsMatMulTrustedReplayAttestationActive(activation));
+
+    CBlock our_next = node::BlockAssembler{
+        m_node.chainman->ActiveChainstate(), nullptr, {}, m_node}
+                          .CreateNewBlock()
+                          ->block;
+    our_next.hashMerkleRoot = BlockMerkleRoot(our_next);
+    BOOST_REQUIRE(MineHeaderForConsensus(
+        our_next, activation, m_node.chainman->GetConsensus(), 5'000'000,
+        tip->GetMedianTimePast()));
+    std::vector<CBlock> our_headers{CBlock{our_next.GetBlockHeader()}};
+    auto archive_msg{
+        NetMsg::Make(NetMsgType::HEADERS, TX_WITH_WITNESS(our_headers))};
+    BOOST_REQUIRE(connman.ReceiveMsgFrom(archive, std::move(archive_msg)));
+    archive.fPauseSend = false;
+    (void)connman.ProcessMessagesOnce(archive);
+
+    BOOST_CHECK(peerman.SendMessages(&archive));
+    BOOST_CHECK(HasQueuedMessageType(archive, NetMsgType::GETMMATTEST));
+}
+
 BOOST_AUTO_TEST_CASE(getdata_unknown_block_sends_notfound)
 {
     LOCK(NetEventsInterface::g_msgproc_mutex);
