@@ -2730,16 +2730,20 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
 
     DrainMatMulPendingSourceUnpins();
 
-    // Local signer: ExactReplay a HAVE_DATA followed tip-child that was
-    // HEADER_ONLY-skipped or persisted without a verdict. AcceptBlock will
-    // not re-enter ContextualCheckBlock while BLOCK_HAVE_DATA is set, so
-    // this is the catch-up path that can attest 189686+ after 189685.
+    // Local signer: ExactReplay / re-admit a HAVE_DATA followed tip-child
+    // that was HEADER_ONLY-skipped or persisted without connecting.
+    // AcceptBlock used to early-return on BLOCK_HAVE_DATA, and a persisted
+    // BLOCK_EXACT_REPLAY_VERIFIED bit (live 2fd67f18) skipped this catch-up
+    // entirely. Re-process the disk body so ReceivedBlockTransactions can
+    // run and ABC can connect the validator-chain child of the attested tip.
     if (node::matmul_trusted::HasLocalSigner() &&
         m_chainman.GetMatMulValidationMode() ==
             kernel::MatMulValidationMode::CONSENSUS) {
         uint256 reverify_hash;
         int32_t reverify_height{-1};
         std::optional<CBlockHeader> reverify_header;
+        bool need_exact_replay{false};
+        std::shared_ptr<CBlock> replay_block;
         {
             LOCK(cs_main);
             const CBlockIndex* const tip{m_chainman.ActiveChain().Tip()};
@@ -2747,23 +2751,58 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
             if (tip != nullptr && followed != nullptr &&
                 followed->nHeight > tip->nHeight &&
                 followed->GetAncestor(tip->nHeight) == tip) {
-                const CBlockIndex* const child{
-                    followed->GetAncestor(tip->nHeight + 1)};
+                CBlockIndex* const child{const_cast<CBlockIndex*>(
+                    followed->GetAncestor(tip->nHeight + 1))};
                 if (IndexIsFollowedTipChild(m_chainman, tip, child) &&
                     (child->nStatus & BLOCK_HAVE_DATA) != 0 &&
-                    (child->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) == 0) {
+                    (child->nStatus & BLOCK_FAILED_MASK) == 0 &&
+                    !m_chainman.ActiveChain().Contains(child)) {
+                    if (m_chainman.IsOnParkedReorgBranch(child)) {
+                        (void)m_chainman.UnparkReorgBranchContainingBlock(child);
+                    }
                     reverify_hash = child->GetBlockHash();
                     reverify_height = child->nHeight;
                     reverify_header = child->GetBlockHeader();
+                    need_exact_replay =
+                        (child->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) == 0;
+                    m_chainman.ActiveChainstate().TryAddBlockIndexCandidate(child);
+                    replay_block = std::make_shared<CBlock>();
+                    if (!m_chainman.m_blockman.ReadBlock(*replay_block, *child)) {
+                        replay_block.reset();
+                    }
                 }
             }
         }
-        if (reverify_header &&
-            MaybeQueueHistoricalAttestationReverify(
-                reverify_hash, reverify_height, *reverify_header)) {
-            LogInfo("Queueing ExactReplay for followed HAVE_DATA tip-child "
-                    "hash=%s height=%d (validator-chain catch-up)\n",
-                    reverify_hash.ToString(), reverify_height);
+        static std::atomic<int64_t> g_followed_tip_child_replay_at{0};
+        const int64_t now_count{count_seconds(now_s)};
+        const bool due{
+            now_count - g_followed_tip_child_replay_at.load(std::memory_order_relaxed) >=
+            15};
+        if (reverify_header && due) {
+            g_followed_tip_child_replay_at.store(now_count, std::memory_order_relaxed);
+            LogInfo("Followed HAVE_DATA tip-child still unconnected "
+                    "hash=%s height=%d exact_replay=%s have_body=%s; "
+                    "re-admitting for validator-chain catch-up\n",
+                    reverify_hash.ToString(), reverify_height,
+                    need_exact_replay ? "missing" : "persisted",
+                    replay_block ? "yes" : "no");
+            if (need_exact_replay &&
+                MaybeQueueHistoricalAttestationReverify(
+                    reverify_hash, reverify_height, *reverify_header)) {
+                LogInfo("Queueing ExactReplay for followed HAVE_DATA tip-child "
+                        "hash=%s height=%d (validator-chain catch-up)\n",
+                        reverify_hash.ToString(), reverify_height);
+            }
+            if (replay_block) {
+                bool new_block{false};
+                (void)m_chainman.ProcessNewBlock(
+                    replay_block, /*force_processing=*/true,
+                    /*min_pow_checked=*/true, &new_block);
+            } else {
+                BlockValidationState abc_state;
+                (void)m_chainman.ActiveChainstate().ActivateBestChain(
+                    abc_state, nullptr);
+            }
         }
     }
 

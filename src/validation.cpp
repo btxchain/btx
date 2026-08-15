@@ -13364,15 +13364,17 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
     // NOTE: deal better with return value and error conditions for duplicate
     // and unrequested blocks.
     // Live 2026-08-15: HEADER_ONLY / persist-without-GPU left 189686
-    // 2fd67f18 HAVE_DATA but not BLOCK_EXACT_REPLAY_VERIFIED, so this
-    // early return made submitblock "duplicate" and ABC never connected
-    // the validator-chain child of attested 189685. Re-run ContextualCheck
-    // for a requested/forced tip-child that still lacks a verdict.
+    // 2fd67f18 HAVE_DATA. A later header ExactReplay persisted
+    // BLOCK_EXACT_REPLAY_VERIFIED without ReceivedBlockTransactions /
+    // ConnectTip, so submitblock still returned "duplicate" and ABC
+    // never selected the validator-chain child of attested 189685.
+    // Re-enter ContextualCheck + (if needed) ReceivedBlockTransactions
+    // for any requested/forced unconnected tip-child.
     const bool reverify_tip_child{
         fAlreadyHave && fRequested &&
         pindex->pprev != nullptr &&
         pindex->pprev == ActiveTip() &&
-        (pindex->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) == 0 &&
+        !ActiveChain().Contains(pindex) &&
         (pindex->nStatus & BLOCK_FAILED_MASK) == 0};
     if (fAlreadyHave && !reverify_tip_child) return true;
     if (!fRequested) {  // If we didn't ask for it:
@@ -13436,7 +13438,18 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
     // ReceivedBlockTransactions for the same block. (A remote peer cannot
     // trigger this — the message handler is single-threaded — but a concurrent
     // RPC/reindex can.)
-    if (pindex->nStatus & BLOCK_HAVE_DATA) return true;
+    // Followed HAVE_DATA tip-child catch-up: the body is already on disk but
+    // nTx / VALID_TRANSACTIONS may never have been raised. Do not skip
+    // ReceivedBlockTransactions in that case — otherwise ABC cannot select it.
+    if (pindex->nStatus & BLOCK_HAVE_DATA) {
+        if (reverify_tip_child && pindex->nTx == 0) {
+            const FlatFilePos pos{pindex->GetBlockPos()};
+            if (!pos.IsNull()) {
+                ReceivedBlockTransactions(block, pindex, pos);
+            }
+        }
+        return true;
+    }
 
     // Header is valid/has work, merkle tree and segwit merkle tree are good...RELAY NOW
     // (but if it does not build on our best tip, let the SendMessages loop relay it)
