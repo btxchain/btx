@@ -270,4 +270,90 @@ BOOST_AUTO_TEST_CASE(network_inactive_keeps_mining_with_recovery_warning)
     BOOST_CHECK_EQUAL(node::GetMiningChainGuardRecommendedAction(status), "mine_current_tip_and_enable_network");
 }
 
+BOOST_AUTO_TEST_CASE(same_height_hash_split_marks_island_suspect)
+{
+    node::MiningChainGuardOptions options;
+    options.enabled = true;
+
+    auto status = node::EvaluateMiningChainGuard(
+        /*local_tip_height=*/187661,
+        /*initial_block_download=*/false,
+        /*network_active=*/true,
+        std::vector<int>{187661, 187661, 187661},
+        options);
+    BOOST_CHECK(status.healthy);
+    BOOST_CHECK_EQUAL(status.reason, "healthy");
+
+    const std::vector<node::MiningChainGuardPeerSample> peers{
+        {187661, 1000, 1000, "2d85ef534ab6ae21c5981d85b38bbbc9daf4e402b084774bdbf65a967474aad1"},
+        {187661, 1000, 1000, "ad62b638c0ac1b15870bfd8fa949c8d154e9d0dc27c99b64c740f315870120ac"},
+        {187661, 1000, 1000, "ad62b638c0ac1b15870bfd8fa949c8d154e9d0dc27c99b64c740f315870120ac"},
+    };
+    node::ApplyPeerTipHashCheck(
+        status,
+        /*local_tip_height=*/187661,
+        /*local_tip_hash=*/"2d85ef534ab6ae21c5981d85b38bbbc9daf4e402b084774bdbf65a967474aad1",
+        peers);
+
+    BOOST_CHECK(!status.healthy);
+    BOOST_CHECK(status.island_suspect);
+    BOOST_CHECK_EQUAL(status.reason, "peer_tip_hash_mismatch");
+    BOOST_CHECK_EQUAL(status.same_tip_hash_peers, 1);
+    BOOST_CHECK_EQUAL(status.conflicting_tip_hash_peers, 2);
+    BOOST_CHECK_EQUAL(node::GetMiningChainGuardRecommendedAction(status), "check_attested_tip");
+}
+
+BOOST_AUTO_TEST_CASE(matching_tip_hashes_keep_guard_healthy)
+{
+    node::MiningChainGuardOptions options;
+    options.enabled = true;
+
+    auto status = node::EvaluateMiningChainGuard(
+        /*local_tip_height=*/187661,
+        /*initial_block_download=*/false,
+        /*network_active=*/true,
+        std::vector<int>{187661, 187661, 187661},
+        options);
+
+    const std::vector<node::MiningChainGuardPeerSample> peers{
+        {187661, 1000, 1000, "ad62b638c0ac1b15870bfd8fa949c8d154e9d0dc27c99b64c740f315870120ac"},
+        {187661, 1000, 1000, "ad62b638c0ac1b15870bfd8fa949c8d154e9d0dc27c99b64c740f315870120ac"},
+        {187661, 1000, 1000, "ad62b638c0ac1b15870bfd8fa949c8d154e9d0dc27c99b64c740f315870120ac"},
+    };
+    node::ApplyPeerTipHashCheck(
+        status,
+        /*local_tip_height=*/187661,
+        /*local_tip_hash=*/"ad62b638c0ac1b15870bfd8fa949c8d154e9d0dc27c99b64c740f315870120ac",
+        peers);
+
+    BOOST_CHECK(status.healthy);
+    BOOST_CHECK(!status.island_suspect);
+    BOOST_CHECK_EQUAL(status.reason, "healthy");
+    BOOST_CHECK_EQUAL(status.same_tip_hash_peers, 3);
+    BOOST_CHECK_EQUAL(status.conflicting_tip_hash_peers, 0);
+}
+
+BOOST_AUTO_TEST_CASE(insufficient_peers_marks_island_suspect_without_hash_split)
+{
+    node::MiningChainGuardOptions options;
+    options.enabled = true;
+    options.min_peer_count = 3;
+
+    auto status = node::EvaluateMiningChainGuard(
+        /*local_tip_height=*/100,
+        /*initial_block_download=*/false,
+        /*network_active=*/true,
+        std::vector<int>{100},
+        options);
+    BOOST_CHECK_EQUAL(status.reason, "insufficient_peer_consensus");
+
+    node::ApplyPeerTipHashCheck(
+        status,
+        /*local_tip_height=*/100,
+        /*local_tip_hash=*/"aa",
+        {});
+    BOOST_CHECK(status.island_suspect);
+    BOOST_CHECK_EQUAL(status.reason, "insufficient_peer_consensus");
+}
+
 BOOST_AUTO_TEST_SUITE_END()

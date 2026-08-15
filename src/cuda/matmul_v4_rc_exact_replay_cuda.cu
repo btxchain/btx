@@ -352,6 +352,28 @@ __global__ void er_pack_b_panel(const int8_t* __restrict__ B, int8_t* __restrict
     (void)k;
 }
 
+// Byte-exact s8×s8→s32 when cuBLASLt offers no IMMA algorithm for the shape.
+// Ada (sm_89) self-qual attention is M=32 N=64 K=32: heuristics return only
+// SIMT, GetOrCreateShapePlan rejects it, and IMMA-only DeviceGemmS8S8 used to
+// return false → Phase1 0 → null episode digest → miner declines the GPU.
+// Integer, order-independent; all RC products fit int32 (same contract as IMMA).
+__global__ void er_gemm_s8s8_i32(const int8_t* __restrict__ A,
+                                 const int8_t* __restrict__ B,
+                                 int32_t* __restrict__ C,
+                                 uint32_t M, uint32_t N, uint32_t K)
+{
+    const uint32_t col = blockIdx.x * blockDim.x + threadIdx.x;
+    const uint32_t row = blockIdx.y * blockDim.y + threadIdx.y;
+    if (row >= M || col >= N) return;
+    int32_t acc = 0;
+    const size_t arow = static_cast<size_t>(row) * K;
+    for (uint32_t k = 0; k < K; ++k) {
+        acc += static_cast<int32_t>(A[arow + k]) *
+               static_cast<int32_t>(B[static_cast<size_t>(k) * N + col]);
+    }
+    C[static_cast<size_t>(row) * N + col] = acc;
+}
+
 struct DeviceBuf {
     void* p{nullptr};
     size_t bytes{0};
@@ -780,9 +802,18 @@ bool RcExpandMxGenerateDevice(const uint256& seed, uint32_t rows,
                                   uint32_t rows, uint32_t cols, uint32_t inner,
                                   cudaStream_t stream = nullptr)
 {
-    if (!TryLaunchLtImmaGemmS8S8Device(dA, dB, dC, rows, cols, inner, stream)) {
-        return false;
+    if (TryLaunchLtImmaGemmS8S8Device(dA, dB, dC, rows, cols, inner, stream)) {
+        NoteGemm();
+        return true;
     }
+    if (rows == 0 || cols == 0) {
+        NoteGemm();
+        return true;
+    }
+    const dim3 block(16, 16, 1);
+    const dim3 grid((cols + 15u) / 16u, (rows + 15u) / 16u, 1);
+    er_gemm_s8s8_i32<<<grid, block, 0, stream>>>(dA, dB, dC, rows, cols, inner);
+    if (cudaGetLastError() != cudaSuccess) return false;
     NoteGemm();
     return true;
 }
@@ -1546,6 +1577,7 @@ bool TryCudaRcFusedFfnChainImpl(const std::vector<int8_t>& X0, bool weights_shar
                 if (cudaSetDevice(selected_device) != cudaSuccess) return false;
                 device_index = selected_device;
             }
+            DrainStreams();
             if (!compute &&
                 cudaStreamCreateWithFlags(&compute, cudaStreamNonBlocking) != cudaSuccess) {
                 return false;
@@ -1583,6 +1615,12 @@ bool TryCudaRcFusedFfnChainImpl(const std::vector<int8_t>& X0, bool weights_shar
             wdn_bytes = wdn;
             return true;
         }
+        void DrainStreams()
+        {
+            if (h2d) (void)cudaStreamSynchronize(h2d);
+            if (compute) (void)cudaStreamSynchronize(compute);
+            if (d2h) (void)cudaStreamSynchronize(d2h);
+        }
     };
     static std::mutex ws_mu;
     static Workspace ws;
@@ -1610,6 +1648,9 @@ bool TryCudaRcFusedFfnChainImpl(const std::vector<int8_t>& X0, bool weights_shar
         ~WorkspaceStreamDrain()
         {
             if (!armed) return;
+            // Shutdown/cancel: do not join() behind an in-flight fused kernel.
+            // Static workspace is drained by Ensure() before reuse.
+            if (matmul::v4::rc::ExactReplayCancellationRequested()) return;
             if (ws.h2d) (void)cudaStreamSynchronize(ws.h2d);
             if (ws.compute) (void)cudaStreamSynchronize(ws.compute);
             if (ws.d2h) (void)cudaStreamSynchronize(ws.d2h);

@@ -10,6 +10,7 @@
 #include <node/context.h>
 #include <node/matmul_trusted_attestations.h>
 #include <protocol.h>
+#include <pubkey.h>
 #include <rpc/server.h>
 #include <rpc/server_util.h>
 #include <rpc/util.h>
@@ -22,6 +23,15 @@
 #include <vector>
 
 namespace {
+
+UniValue TrustedSignerPubKeysJSON()
+{
+    UniValue keys{UniValue::VARR};
+    for (const auto& pubkey : node::matmul_trusted::TrustedSigners()) {
+        keys.push_back(HexStr(pubkey));
+    }
+    return keys;
+}
 
 std::string EncodeAttestation(
     const matmul::trusted::ExactReplayAttestation& attestation)
@@ -88,6 +98,8 @@ RPCHelpMan getmatmultrustedstatus()
                 {RPCResult::Type::STR_HEX, "replay_authority_context", /*optional=*/true, "Versioned ExactReplay authority context for this configuration"},
                 {RPCResult::Type::NUM, "threshold", ""},
                 {RPCResult::Type::NUM, "trusted_signers", ""},
+                {RPCResult::Type::ARR, "trusted_signer_pubkeys", "Configured compressed secp256k1 pubkeys this node currently trusts",
+                    {{RPCResult::Type::STR_HEX, "", "Compressed pubkey hex"}}},
                 {RPCResult::Type::NUM, "stored_blocks", ""},
                 {RPCResult::Type::NUM, "stored_attestations", ""},
                 {RPCResult::Type::NUM, "blocks_with_quorum", ""},
@@ -142,6 +154,7 @@ RPCHelpMan getmatmultrustedstatus()
                 "trusted_signers",
                 static_cast<uint64_t>(
                     node::matmul_trusted::TrustedSigners().size()));
+            result.pushKV("trusted_signer_pubkeys", TrustedSignerPubKeysJSON());
             result.pushKV(
                 "stored_blocks",
                 static_cast<uint64_t>(stats.stored_blocks));
@@ -426,6 +439,10 @@ RPCHelpMan getfinalityinfo()
             {
                 {RPCResult::Type::STR, "matmul_validation_mode", "consensus, trusted, or none"},
                 {RPCResult::Type::BOOL, "trusted_mirror", ""},
+                {RPCResult::Type::ARR, "trusted_signer_pubkeys", "Configured compressed secp256k1 pubkeys this node currently trusts",
+                    {{RPCResult::Type::STR_HEX, "", "Compressed pubkey hex"}}},
+                {RPCResult::Type::ARR, "warnings", "Operator-visible split/island tells",
+                    {{RPCResult::Type::STR, "", "Warning code"}}},
                 {RPCResult::Type::OBJ, "active_tip", "",
                     {
                         {RPCResult::Type::STR_HEX, "hash", ""},
@@ -506,6 +523,7 @@ RPCHelpMan getfinalityinfo()
                 break;
             }
             result.pushKV("trusted_mirror", node::matmul_trusted::IsTrustedMirror());
+            result.pushKV("trusted_signer_pubkeys", TrustedSignerPubKeysJSON());
             if (tip != nullptr) {
                 UniValue active{UniValue::VOBJ};
                 active.pushKV("hash", tip->GetBlockHash().GetHex());
@@ -634,6 +652,19 @@ RPCHelpMan getfinalityinfo()
                     cm_opts.max_reorg_depth_park.value_or(
                         profile_settings.park_depth)));
             result.pushKV("finality_profile", std::move(profile));
+            UniValue warnings{UniValue::VARR};
+            if (best_header != nullptr && tip != nullptr &&
+                best_header->GetAncestor(tip->nHeight) != tip) {
+                warnings.push_back("best_header_diverged_from_active_tip");
+            }
+            if (node::matmul_trusted::IsConfigured()) {
+                if (const auto frontier{chainman.GetSignedFrontierStatus()};
+                    frontier.available && !frontier.on_active_chain &&
+                    frontier.blocks_behind > 0) {
+                    warnings.push_back("signed_frontier_off_active_chain");
+                }
+            }
+            result.pushKV("warnings", std::move(warnings));
             return result;
         }};
 }

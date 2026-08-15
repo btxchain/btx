@@ -1288,6 +1288,66 @@ BOOST_AUTO_TEST_CASE(rc_exact_replay_cancellation_is_not_consensus_invalid)
     BOOST_CHECK_EQUAL(result.note, "ExactReplay: cancelled");
 }
 
+BOOST_AUTO_TEST_CASE(rc_fused_ffn_honors_cancel_between_tiles)
+{
+    CBlockHeader header{MakeRCHeader(0x54494c4543414e)};
+    const auto params{rc::MakeToyRCEpisodeParams()};
+    header.matmul_digest =
+        rc::RecomputeResidentCurriculumReference(
+            header, params, /*height=*/0);
+    BOOST_REQUIRE(!header.matmul_digest.IsNull());
+
+    std::atomic_bool cancelled{false};
+    rc::ScopedExactReplayCancellation cancellation_scope{&cancelled};
+    lt::ExactGemmBackend backend;
+    backend.gemm_s8s8 = &CancellingOracleGemmS8S8;
+    g_cancel_on_oracle_gemm = &cancelled;
+    const rc::RCExactReplayAcceleration acceleration{
+        .gemm = backend,
+        .backend = "test_cancelling_tiles",
+        .require_device = true,
+        .output_row_tile = 16,
+    };
+    const auto result{
+        rc::VerifyBoundedExactReplayWithAccelerationForTest(
+            header, params, /*height=*/0, acceleration)};
+    g_cancel_on_oracle_gemm = nullptr;
+    BOOST_CHECK(!result.ok);
+    BOOST_CHECK(
+        result.outcome == rc::ExactReplayVerifyOutcome::Cancelled);
+}
+
+BOOST_AUTO_TEST_CASE(rc_ada_selfqual_attention_gemm_fits_int32_alu)
+{
+    // Ada sm_89 self-qual QK^T is M=32 N=64 K=32. IMMA heuristics often
+    // return only SIMT for that shape; the RC DeviceGemmS8S8 ALU fallback
+    // must match the int64 oracle with int32 accumulation.
+    constexpr uint32_t kM = 32;
+    constexpr uint32_t kN = 64;
+    constexpr uint32_t kK = 32;
+    std::vector<int8_t> A(static_cast<size_t>(kM) * kK);
+    std::vector<int8_t> B(static_cast<size_t>(kK) * kN);
+    for (size_t i = 0; i < A.size(); ++i) {
+        A[i] = static_cast<int8_t>((static_cast<int>(i) * 17) % 255 - 128);
+    }
+    for (size_t i = 0; i < B.size(); ++i) {
+        B[i] = static_cast<int8_t>((static_cast<int>(i) * 13) % 255 - 128);
+    }
+    for (uint32_t r = 0; r < kM; ++r) {
+        for (uint32_t c = 0; c < kN; ++c) {
+            int32_t acc32 = 0;
+            int64_t acc64 = 0;
+            for (uint32_t k = 0; k < kK; ++k) {
+                const int32_t a = A[static_cast<size_t>(r) * kK + k];
+                const int32_t b = B[static_cast<size_t>(k) * kN + c];
+                acc32 += a * b;
+                acc64 += static_cast<int64_t>(a) * b;
+            }
+            BOOST_CHECK_EQUAL(static_cast<int64_t>(acc32), acc64);
+        }
+    }
+}
+
 BOOST_AUTO_TEST_CASE(rc_strict_resolver_rejects_self_qualified_nonproduction_backend)
 {
     rc::ClearRCExactReplayAlternateProviders();

@@ -1827,6 +1827,113 @@ BOOST_FIXTURE_TEST_CASE(chainstate_retryable_matmul_error_does_not_spin_activate
     chainman.CheckBlockIndex();
 }
 
+BOOST_FIXTURE_TEST_CASE(chainstate_shutdown_interrupt_does_not_spin_activatebestchain, TestChain100Setup)
+{
+    // PR 105 comments 5301483741 / follow-up: initload ABC held cs_main
+    // on a pending attested child so peers never attached. ConnectTip must
+    // honor m_interrupt (height > 0) as retryable, and ABC must not retry
+    // the same target. The signer peer is not required for this path.
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    Chainstate& chainstate = chainman.ActiveChainstate();
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    auto& action = const_cast<kernel::DeepReorgAction&>(chainman.m_options.deep_reorg_action);
+    auto& park_depth = const_cast<std::optional<uint32_t>&>(chainman.m_options.max_reorg_depth_park);
+    auto& hysteresis_work_margin = const_cast<std::optional<uint32_t>&>(chainman.m_options.reorg_hysteresis_work_margin);
+    struct Restore {
+        Consensus::Params& consensus;
+        int32_t start;
+        kernel::DeepReorgAction& action;
+        kernel::DeepReorgAction saved_action;
+        std::optional<uint32_t>& park_depth;
+        std::optional<uint32_t> saved_park_depth;
+        std::optional<uint32_t>& hysteresis_work_margin;
+        std::optional<uint32_t> saved_hysteresis_work_margin;
+        util::SignalInterrupt& interrupt;
+        ~Restore()
+        {
+            node::matmul_trusted::ResetForTest();
+            consensus.nReorgProtectionStartHeight = start;
+            action = saved_action;
+            park_depth = saved_park_depth;
+            hysteresis_work_margin = saved_hysteresis_work_margin;
+            if (interrupt) {
+                (void)interrupt.reset();
+            }
+        }
+    } restore{consensus, consensus.nReorgProtectionStartHeight,
+              action, action, park_depth, park_depth,
+              hysteresis_work_margin, hysteresis_work_margin, m_interrupt};
+    consensus.nReorgProtectionStartHeight = 10;
+    action = kernel::DeepReorgAction::PARK;
+    park_depth = 100;
+    hysteresis_work_margin = 0;
+
+    const CScript script = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    CBlockIndex* original_tip{WITH_LOCK(::cs_main, return chainstate.m_chain.Tip())};
+    BOOST_REQUIRE(original_tip != nullptr);
+    const uint256 original_hash{original_tip->GetBlockHash()};
+    const int original_height{original_tip->nHeight};
+    CBlockIndex* const original_root{original_tip};
+
+    BlockValidationState state;
+    BOOST_REQUIRE(chainstate.InvalidateBlock(state, original_root));
+    CBlockIndex* competing_tip{nullptr};
+    for (int i = 0; i < 2; ++i) {
+        const CBlock block{CreateAndProcessBlock({}, script)};
+        LOCK(::cs_main);
+        competing_tip = chainman.m_blockman.LookupBlockIndex(block.GetHash());
+    }
+    BOOST_REQUIRE(competing_tip);
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()) == competing_tip);
+
+    {
+        LOCK(::cs_main);
+        chainstate.ResetBlockFailureFlags(original_root);
+        BOOST_REQUIRE(original_tip->nStatus & BLOCK_HAVE_DATA);
+        BOOST_REQUIRE(competing_tip->nChainWork > original_tip->nChainWork);
+    }
+
+    CKey signer;
+    signer.MakeNewKey(/*fCompressed=*/true);
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256::ONE;
+    config.replay_authority_context = uint256::FromHex(std::string(64, 'e')).value();
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    config.local_signer = signer;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/true, /*serve=*/false,
+        std::chrono::milliseconds{50}, error));
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
+                      original_hash, original_height) ==
+                  matmul::trusted::AddResult::Accepted);
+
+    BOOST_REQUIRE(m_interrupt());
+    state = BlockValidationState{};
+    const auto t0{std::chrono::steady_clock::now()};
+    BOOST_REQUIRE(chainstate.ActivateBestChain(state));
+    BOOST_CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds{2});
+    BOOST_CHECK(state.IsValid());
+    BOOST_REQUIRE(m_interrupt.reset());
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK(chainstate.m_chain.Tip() != original_tip);
+        BOOST_CHECK_EQUAL(original_tip->nStatus & BLOCK_FAILED_MASK, 0);
+        BOOST_CHECK(original_tip->IsValid(BLOCK_VALID_TRANSACTIONS));
+        // Lesser-work forks are not kept in setBlockIndexCandidates
+        // (TryAddBlockIndexCandidate). The restart livelock was a pending
+        // same-or-more-work child: ConnectTip honors m_interrupt as
+        // retryable, and ABC must not hold cs_main retrying that target.
+    }
+    state = BlockValidationState{};
+    const auto t1{std::chrono::steady_clock::now()};
+    BOOST_REQUIRE(chainstate.ActivateBestChain(state));
+    BOOST_CHECK(std::chrono::steady_clock::now() - t1 < std::chrono::seconds{2});
+    BOOST_CHECK(state.IsValid());
+    chainman.CheckBlockIndex();
+}
+
 BOOST_FIXTURE_TEST_CASE(chainstate_dual_quorum_sibling_follows_signed_frontier, TestChain100Setup)
 {
     // Live 2026-08-15: signer attested both 189489 siblings; trusted

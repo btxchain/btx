@@ -18,6 +18,7 @@
 #include <cmath>
 #include <cstdint>
 #include <sstream>
+#include <string>
 #include <vector>
 
 namespace node {
@@ -207,6 +208,52 @@ MiningChainGuardStatus EvaluateMiningChainGuard(
     return status;
 }
 
+void ApplyPeerTipHashCheck(
+    MiningChainGuardStatus& status,
+    int local_tip_height,
+    const std::string& local_tip_hash,
+    const std::vector<MiningChainGuardPeerSample>& peers)
+{
+    status.local_tip_hash = local_tip_hash;
+    status.same_tip_hash_peers = 0;
+    status.conflicting_tip_hash_peers = 0;
+
+    if (status.initial_block_download || local_tip_hash.empty() ||
+        local_tip_height < 0) {
+        status.island_suspect =
+            status.reason == "insufficient_peer_consensus" ||
+            status.reason == "insufficient_near_tip_peers";
+        return;
+    }
+
+    for (const auto& peer : peers) {
+        if (peer.hash.empty() || peer.height != local_tip_height) continue;
+        if (peer.hash == local_tip_hash) {
+            ++status.same_tip_hash_peers;
+        } else {
+            ++status.conflicting_tip_hash_peers;
+        }
+    }
+
+    const bool isolated =
+        status.reason == "insufficient_peer_consensus" ||
+        status.reason == "insufficient_near_tip_peers";
+    const bool hash_split = status.conflicting_tip_hash_peers > 0 &&
+                            status.same_tip_hash_peers < status.min_near_tip_peers;
+    status.island_suspect = isolated || hash_split;
+    if (!hash_split || !status.healthy) return;
+    status.healthy = false;
+    status.reason = "peer_tip_hash_mismatch";
+    LogPrintLevel(
+        BCLog::NET,
+        BCLog::Level::Warning,
+        "Mining chain guard island_suspect reason=%s same_tip_hash_peers=%d conflicting_tip_hash_peers=%d local_tip=%d\n",
+        status.reason,
+        status.same_tip_hash_peers,
+        status.conflicting_tip_hash_peers,
+        local_tip_height);
+}
+
 std::vector<int> FilterMiningChainGuardPeerHeights(
     int local_tip_height,
     int64_t now,
@@ -252,8 +299,16 @@ MiningChainGuardStatus GetMiningChainGuardStatus(const NodeContext& node)
     const MiningChainGuardOptions options = GetMiningChainGuardOptions(node);
 
     const bool network_active = node.connman && node.connman->GetNetworkActive();
-    const int local_tip_height =
-        node.chainman ? WITH_LOCK(cs_main, return node.chainman->ActiveChain().Height()) : -1;
+    int local_tip_height{-1};
+    std::string local_tip_hash;
+    if (node.chainman) {
+        LOCK(cs_main);
+        const CBlockIndex* const tip{node.chainman->ActiveChain().Tip()};
+        if (tip != nullptr) {
+            local_tip_height = tip->nHeight;
+            local_tip_hash = tip->GetBlockHash().GetHex();
+        }
+    }
     const bool initial_block_download =
         node.chainman ? node.chainman->IsInitialBlockDownload() : false;
 
@@ -294,6 +349,7 @@ MiningChainGuardStatus GetMiningChainGuardStatus(const NodeContext& node)
         if (peer_height >= 0) {
             MiningChainGuardPeerSample sample;
             sample.height = peer_height;
+            sample.hash = state_stats.m_best_known_block_hash;
             sample.last_block_time = peer_stats.m_last_block_time.count();
             sample.last_block_announcement =
                 TicksSinceEpoch<std::chrono::seconds>(state_stats.m_last_block_announcement);
@@ -307,6 +363,7 @@ MiningChainGuardStatus GetMiningChainGuardStatus(const NodeContext& node)
 
     auto status = EvaluateMiningChainGuard(
         local_tip_height, initial_block_download, network_active, peer_heights, options);
+    ApplyPeerTipHashCheck(status, local_tip_height, local_tip_hash, peer_samples);
     return ApplyDeferredReorgWarning(std::move(status), options, now);
 }
 
@@ -348,6 +405,7 @@ void MaybeRequestMiningChainGuardRecovery(const MiningChainGuardStatus& status, 
         status.reason == "local_tip_ahead_of_peer_median" ||
         status.reason == "insufficient_peer_consensus" ||
         status.reason == "insufficient_near_tip_peers" ||
+        status.reason == "peer_tip_hash_mismatch" ||
         status.reason == "deferred_reorg_candidate" ||
         status.reason == "peer_monitor_unavailable") {
         node.connman->SetTryNewOutboundPeer(true);
@@ -408,6 +466,10 @@ const char* GetMiningChainGuardRecommendedAction(const MiningChainGuardStatus& s
 
     if (status.reason == "local_tip_ahead_of_peer_median") {
         return "propagate_tip";
+    }
+
+    if (status.reason == "peer_tip_hash_mismatch") {
+        return "check_attested_tip";
     }
 
     if (status.reason == "insufficient_peer_consensus" ||

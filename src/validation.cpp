@@ -39,6 +39,7 @@
 #include <policy/rbf.h>
 #include <policy/settings.h>
 #include <policy/truc_policy.h>
+#include <matmul/matmul_v4_rc.h>
 #include <matmul/matmul_v4_rc_stage3_consensus.h>
 #include <matmul/matmul_v4_rc_stage3_producer.h>
 #include <pow.h>
@@ -9282,6 +9283,14 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
         return state.Error(std::string(RETRYABLE_MATMUL_ACTIVATION_PREFIX) +
                            ": trusted attestation quorum Timeout");
     }
+    // Genesis (height 0) must still connect so LoadChainTip can attach the
+    // chain. After that, honor shutdown before ReadBlock / ConnectBlock so
+    // ABC cannot ignore m_interrupt on the first reconnect of a reorg
+    // (live: inner ABC loop held cs_main; version handshakes timed out).
+    if (pindexNew->nHeight > 0 && m_chainman.m_interrupt) {
+        return state.Error(std::string(RETRYABLE_MATMUL_ACTIVATION_PREFIX) +
+                           ": shutdown interrupt");
+    }
     // Read block from disk.
     const auto time_1{SteadyClock::now()};
     std::shared_ptr<const CBlock> pthisBlock;
@@ -9458,6 +9467,7 @@ CBlockIndex* Chainstate::FindMostWorkChain()
 {
     AssertLockHeld(::cs_main);
     std::vector<CBlockIndex*> hysteresis_deferred_candidates;
+    std::set<CBlockIndex*> skipped_this_call;
     const auto restore_hysteresis_deferred_candidates = [&]() {
         for (CBlockIndex* candidate : hysteresis_deferred_candidates) {
             setBlockIndexCandidates.insert(candidate);
@@ -9493,8 +9503,15 @@ CBlockIndex* Chainstate::FindMostWorkChain()
             // child of an attested ancestor is not competing and is left
             // alone. Insert so ConnectTip / CheckBlockIndex see the new
             // tip in the candidate set.
-            pindexNew = abandon;
-            setBlockIndexCandidates.insert(abandon);
+            //
+            // Do not re-insert a candidate this call already skipped.
+            // Erase+continue then FindUniqueCompetingAttestedIndex would
+            // otherwise livelock FindMostWorkChain with cs_main held
+            // (PR 105 comment 5301483741: b-initload 100% CPU, 0 peers).
+            if (skipped_this_call.count(abandon) == 0) {
+                pindexNew = abandon;
+                setBlockIndexCandidates.insert(abandon);
+            }
         }
 
         if (m_chainman.IsOnParkedReorgBranch(pindexNew)) {
@@ -9513,6 +9530,7 @@ CBlockIndex* Chainstate::FindMostWorkChain()
                 m_chainman.IsAttestedAbandonForkCandidate(pindexNew)};
             if (!authority_escape ||
                 !m_chainman.UnparkReorgBranchContainingBlock(pindexNew)) {
+                skipped_this_call.insert(pindexNew);
                 setBlockIndexCandidates.erase(pindexNew);
                 continue;
             }
@@ -9524,6 +9542,7 @@ CBlockIndex* Chainstate::FindMostWorkChain()
             LogWarning("%s: deferring losing-tip extension hash=%s height=%d while authenticated reorg recovery is armed\n",
                        __func__, pindexNew->GetBlockHash().ToString(),
                        pindexNew->nHeight);
+            skipped_this_call.insert(pindexNew);
             setBlockIndexCandidates.erase(pindexNew);
             continue;
         }
@@ -9532,6 +9551,7 @@ CBlockIndex* Chainstate::FindMostWorkChain()
             LogDebug(BCLog::VALIDATION,
                      "FindMostWorkChain: skipping unattested competing candidate hash=%s height=%d\n",
                      pindexNew->GetBlockHash().ToString(), pindexNew->nHeight);
+            skipped_this_call.insert(pindexNew);
             setBlockIndexCandidates.erase(pindexNew);
             continue;
         }
@@ -9632,6 +9652,7 @@ CBlockIndex* Chainstate::FindMostWorkChain()
                          pindexNew->nHeight,
                          attested_sibling->GetBlockHash().ToString(),
                          attested_sibling->nHeight);
+                skipped_this_call.insert(pindexNew);
                 setBlockIndexCandidates.erase(pindexNew);
                 hysteresis_deferred_candidates.push_back(pindexNew);
                 continue;
@@ -10208,6 +10229,7 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
                 // in case snapshot validation is completed during ActivateBestChainStep, the
                 // result of GetRole() changes from BACKGROUND to NORMAL.
                const ChainstateRole chainstate_role{this->GetRole()};
+                CBlockIndex* const tip_before_step{m_chain.Tip()};
                 if (!ActivateBestChainStep(state, pindexMostWork, pblock && pblock->GetHash() == pindexMostWork->GetBlockHash() ? pblock : nullBlockPtr, fInvalidFound, connectTrace)) {
                     // A system error occurred
                     return false;
@@ -10248,6 +10270,22 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
                 //
                 // Break this do-while to ensure we don't advance past the base snapshot.
                 if (m_disabled) {
+                    break;
+                }
+                // No chain movement and not a fork-choice wipe: stop. A
+                // successful ABCStep that neither connects nor invalidates
+                // would otherwise retry forever while tip is worse than
+                // starting_tip (inner comparator), holding cs_main.
+                if (m_chain.Tip() == tip_before_step && !fInvalidFound) {
+                    // Inner do-while exits on an unchanged tip (equal work),
+                    // but the outer loop is `pindexNewTip != pindexMostWork`.
+                    // Leaving the unconnectable target set retries ABC with
+                    // cs_main held (PR 105 comment 5301483741: restart
+                    // livelock on a pending attested child).
+                    LogWarning("ActivateBestChain: no progress toward %s; "
+                               "stopping activation so RPC/net can complete\n",
+                               pindexMostWork->GetBlockHash().ToString());
+                    retryable_matmul_deferred = true;
                     break;
                 }
             } while (!m_chain.Tip() || (starting_tip && CBlockIndexWorkComparator()(m_chain.Tip(), starting_tip)));
@@ -12928,6 +12966,8 @@ static bool ContextualCheckBlock(const CBlock& block,
                         }
                         return true;
                     }
+                    const matmul::v4::rc::ScopedExactReplayCancellation
+                        shutdown_cancel{&chainman.m_interrupt.Flag()};
                     const auto outcome{
                         CheckMatMulProofOfWork_RCOutcome(
                             block, consensusParams, nHeight,

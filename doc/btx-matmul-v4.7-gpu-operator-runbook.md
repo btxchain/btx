@@ -93,7 +93,11 @@ matmultrustedthreshold=1
   reports `getmatmultrustedstatus.configured=false` and stores zero
   attestations, so tooling cannot see the attested tip. Adding the signer key
   does **not** skip ExactReplay; it only lets the node track `MMATTEST` and
-  follow/recover onto the attested chain.
+  follow/recover onto the attested chain. A self-run bridge/archive signing
+  key as the only `-matmultrustedpubkey` follows that key's chain. An
+  unusually high local win rate (near-consecutive blocks) is a mining-alone
+  symptom: check `getmininginfo.chain_guard.island_suspect` and
+  `getfinalityinfo.warnings`.
 - Pool: build only on `getmatmulattestedtip` (or
   `getmatmultrustedstatus.attested_tip`). If `on_active_chain` is false, the
   node is on a competing unattested fork and will auto-reorg; do not stack

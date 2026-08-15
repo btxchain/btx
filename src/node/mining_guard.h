@@ -37,6 +37,7 @@ struct MiningChainGuardPeerSample {
     int height{-1};
     int64_t last_block_time{0};
     int64_t last_block_announcement{0};
+    std::string hash;
 };
 
 struct MiningChainGuardStatus {
@@ -64,6 +65,10 @@ struct MiningChainGuardStatus {
     int32_t last_deferred_fork_height{0};
     int32_t last_deferred_candidate_height{0};
     int64_t last_deferred_unix{0};
+    std::string local_tip_hash;
+    int same_tip_hash_peers{0};
+    int conflicting_tip_hash_peers{0};
+    bool island_suspect{false};
     std::string reason{"disabled"};
 };
 
@@ -77,6 +82,16 @@ MiningChainGuardStatus EvaluateMiningChainGuard(
     bool network_active,
     const std::vector<int>& peer_heights,
     const MiningChainGuardOptions& options);
+
+/** Same-height hash split vs height-only peer agreement (issue #108).
+ *  Marks island_suspect when outbound peers at the local tip height
+ *  advertise a different best-known hash, or when the height-based
+ *  reason already means the node may be mining alone. */
+void ApplyPeerTipHashCheck(
+    MiningChainGuardStatus& status,
+    int local_tip_height,
+    const std::string& local_tip_hash,
+    const std::vector<MiningChainGuardPeerSample>& peers);
 
 std::vector<int> FilterMiningChainGuardPeerHeights(
     int local_tip_height,
