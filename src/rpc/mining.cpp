@@ -259,7 +259,7 @@ static void EnsureMiningTemplateHasActiveTip(
  * Bind getblocktemplate to the attested race when MatMul trusted-replay
  * attestation is configured. BlockAssembler parents only on the active tip,
  * so a unique competing attested HAVE_DATA sibling cannot be adopted here
- * without a silent reorg. Refuse rather than extend the unattested twin.
+ * without a silent reorg. Refuse rather than extend the stranded twin.
  *
  * Unconfigured nodes (-matmultrustedpubkey unset) keep GBT-on-active-tip.
  * Headers-only competitors never qualify (FindUniqueCompetingAttestedIndex
@@ -281,18 +281,15 @@ static void EnsureMatMulAttestedMiningParent(
         consensus.IsMatMulTrustedReplayAttestationActive(tip->nHeight + 1)};
     if (!active_at_tip && !active_at_next) return;
 
-    // 1. Active tip already has quorum: mine on it.
-    if (node::matmul_trusted::HasQuorum(tip->GetBlockHash(), tip->nHeight)) {
-        return;
-    }
-
-    // 2. Linear-chain signer lag: getmatmulattestedtip / signed frontier
-    //    on_active_chain with blocks_behind==0. FindUniqueCompetingAttestedIndex
-    //    is null in that case (attested HAVE_DATA sits on this chain), so GBT
-    //    keeps parenting the active tip. A headers-only competing flood is
-    //    likewise ignored — never parent a headers-only hash.
-    // 3. Unique competing attested HAVE_DATA sibling: do not issue a
-    //    template that extends the unattested active tip.
+    // Linear-chain signer lag: getmatmulattestedtip / signed frontier
+    // on_active_chain with blocks_behind==0. FindUniqueCompetingAttestedIndex
+    // is null (attested HAVE_DATA sits on this chain), so GBT keeps
+    // parenting the active tip. A headers-only competing flood is likewise
+    // ignored — never parent a headers-only hash.
+    // Unique competing attested HAVE_DATA sibling: do not issue a template
+    // that extends the stranded race. That covers an unattested lost twin
+    // and dual-attested same-height siblings (live 2026-08-15: tip had
+    // quorum on the loser while the signed frontier sat on the other fork).
     const CBlockIndex* const attested{
         chainman.FindUniqueCompetingAttestedIndex()};
     if (attested == nullptr || attested == tip) return;
@@ -306,7 +303,7 @@ static void EnsureMatMulAttestedMiningParent(
     throw JSONRPCError(
         RPC_CLIENT_IN_INITIAL_DOWNLOAD,
         strprintf(
-            "Active tip %s (height %d) has no attestation quorum while unique competing attested block %s (height %d) is available with HAVE_DATA. "
+            "Active tip %s (height %d) is not the unique competing attested block %s (height %d) available with HAVE_DATA. "
             "getblocktemplate will not extend the unattested race. Wait for the node to adopt the attested tip, or follow getmatmulattestedtip.",
             tip->GetBlockHash().GetHex(),
             tip->nHeight,
@@ -8796,7 +8793,7 @@ static RPCHelpMan getblocktemplate()
         "It returns data needed to construct a block to work on.\n"
         "For MatMul PoW networks, the template includes matrix seeds and parameters needed for external mining.\n"
         "External miners should solve the MatMul proof using the provided seeds and submit via submitblock.\n"
-        "When -matmultrustedpubkey is configured and Profile-1 attestation is active, a template is not issued on an unattested active tip that has a unique competing attested HAVE_DATA sibling; follow getmatmulattestedtip instead.\n"
+        "When -matmultrustedpubkey is configured and Profile-1 attestation is active, a template is not issued when a unique competing attested HAVE_DATA sibling exists (unattested lost twin or dual-attested short-reorg); follow getmatmulattestedtip instead.\n"
         "For full specification, see BIPs 22, 23, 9, and 145:\n"
         "    https://github.com/bitcoin/bips/blob/master/bip-0022.mediawiki\n"
         "    https://github.com/bitcoin/bips/blob/master/bip-0023.mediawiki\n"

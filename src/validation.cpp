@@ -9480,13 +9480,13 @@ CBlockIndex* Chainstate::FindMostWorkChain()
 
         if (CBlockIndex* abandon{const_cast<CBlockIndex*>(
                 m_chainman.FindUniqueCompetingAttestedIndex())}) {
-            // Unattested active tip, unique competing attested HAVE_DATA:
-            // lost same-height race, attested chain pulled ahead, or
-            // heavier unattested fork. Do not wait for the operator to
-            // invalidateblock. A pending-attestation child of an attested
-            // ancestor is not competing and is left alone. Insert so
-            // ConnectTip / CheckBlockIndex see the new tip in the
-            // candidate set.
+            // Unique competing attested HAVE_DATA: lost same-height race,
+            // attested chain pulled ahead, heavier unattested fork, or
+            // dual-attested siblings with the signed frontier off this
+            // chain (live 2026-08-15). Do not wait for invalidateblock.
+            // A pending-attestation child of an attested ancestor is not
+            // competing and is left alone. Insert so ConnectTip /
+            // CheckBlockIndex see the new tip in the candidate set.
             pindexNew = abandon;
             setBlockIndexCandidates.insert(abandon);
         }
@@ -10970,9 +10970,46 @@ const CBlockIndex* ChainstateManager::FindUniqueCompetingAttestedIndex() const
         return nullptr;
     }
     const CBlockIndex* const tip{m_active_chainstate->m_chain.Tip()};
-    if (tip == nullptr ||
-        node::matmul_trusted::HasQuorum(tip->GetBlockHash(), tip->nHeight)) {
+    if (tip == nullptr) {
         return nullptr;
+    }
+    // Live 2026-08-15: signer attested both 189489 siblings; mirrors
+    // connected the loser (quorum + HAVE_DATA first). The early "tip has
+    // quorum → nullptr" return then froze ABC on unattested children of
+    // that loser while the signed frontier ran 140 blocks up the other
+    // fork. Recover when the frontier sits on a different short-reorg
+    // branch and that fork-child already has HAVE_DATA + quorum.
+    if (node::matmul_trusted::HasQuorum(tip->GetBlockHash(), tip->nHeight)) {
+        const SignedFrontierStatus frontier{GetSignedFrontierStatus()};
+        if (!frontier.hash_known || frontier.on_active_chain) {
+            return nullptr;
+        }
+        const CBlockIndex* const frontier_index{
+            m_blockman.LookupBlockIndex(frontier.hash)};
+        if (frontier_index == nullptr) return nullptr;
+        const CBlockIndex* const lca{
+            LastCommonAncestor(tip, frontier_index)};
+        if (lca == nullptr) return nullptr;
+        const int lca_depth{tip->nHeight - lca->nHeight};
+        if (!node::matmul_trusted::TrustedMirrorIsShortTipReorg(lca_depth)) {
+            return nullptr;
+        }
+        const CBlockIndex* const fork_child{
+            frontier_index->GetAncestor(lca->nHeight + 1)};
+        if (fork_child == nullptr || fork_child == tip ||
+            (fork_child->nStatus & BLOCK_FAILED_MASK) != 0) {
+            return nullptr;
+        }
+        if (!(fork_child->nStatus & BLOCK_HAVE_DATA) ||
+            !fork_child->IsValid(BLOCK_VALID_TRANSACTIONS) ||
+            !fork_child->HaveNumChainTxs()) {
+            return nullptr;
+        }
+        if (!node::matmul_trusted::HasQuorum(
+                fork_child->GetBlockHash(), fork_child->nHeight)) {
+            return nullptr;
+        }
+        return fork_child;
     }
 
     std::vector<const CBlockIndex*> competing;
@@ -12186,7 +12223,8 @@ bool ChainstateManager::PersistMatMulExactReplayVerdict(
             kernel::MatMulValidationMode::CONSENSUS &&
         GetConsensus().IsMatMulTrustedReplayAttestationActive(
             index->nHeight) &&
-        node::matmul_trusted::HasLocalSigner()) {
+        node::matmul_trusted::HasLocalSigner() &&
+        ActiveChain().Contains(index)) {
         const auto result{
             node::matmul_trusted::SignAuthoritative(
                 block_hash, index->nHeight)};

@@ -186,10 +186,15 @@ static constexpr int TRUSTED_MIRROR_ATTESTED_TIP_LOOKBACK{2};
  *  mirror. A short attested tip-race (LCA depth 1–6 with quorum) may replace
  *  an *unattested* tip so a lost same-height sibling can converge.
  *
- *  Never reorg away a tip that already has quorum. Live 2026-08-13: the
- *  signer followed a heavier 4-block competing fork at 187795, signed it,
- *  and every mirror treated that as an attested short race. Competing
- *  then extended as "tip-extending" to 18781x.
+ *  Never reorg away a tip that already has quorum via this gate. Live
+ *  2026-08-13: the signer followed a heavier 4-block competing fork at
+ *  187795, signed it, and every mirror treated that as an attested short
+ *  race. Competing then extended as "tip-extending" to 18781x.
+ *
+ *  Dual-attested same-height siblings (live 2026-08-15: both 189489
+ *  hashes signed, mirrors stranded on the loser) are recovered by
+ *  FindUniqueCompetingAttestedIndex following the signed frontier, not
+ *  by this gate.
  *
  *  A node already sitting on an unattested tip (equal-work lost sibling
  *  or heavier unattested fork) is recovered by

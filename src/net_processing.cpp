@@ -14266,7 +14266,12 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             auto existing{
                 node::matmul_trusted::Get(block_hash, height)};
             if (existing.empty()) {
-                if (locally_exact) {
+                // Live 2026-08-15: both 189489 siblings were on_active_suffix
+                // while the parent was still tip, so GETMMATTEST regenerated
+                // signatures for the loser and the winner. Mirrors that
+                // connected the loser then refused to reorg (quorum tip).
+                // Only sign hashes already on the active chain.
+                if (locally_exact && on_active_chain) {
                     matmul::trusted::ExactReplayAttestation produced;
                     const auto result{
                         node::matmul_trusted::SignAuthoritative(
@@ -14284,7 +14289,11 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                         return;
                     }
                     serve_reason = "regenerated";
-                } else if (header.has_value()) {
+                } else if (locally_exact) {
+                    MaybeLogAttestationServe(
+                        "competing_sibling", block_hash, height,
+                        pfrom.GetId());
+                } else if (header.has_value() && on_active_chain) {
                     // Durable ExactReplay bit missing (e.g. assumevalid IBD).
                     // Queue a rate-limited background ExactReplay; answer on a
                     // later GETMMATTEST once the bit + signature exist.
