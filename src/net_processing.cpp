@@ -2250,9 +2250,10 @@ private:
     void MaybeRequestTrustedMirrorAuthorityHeaders(
         CNode& pto, Peer& peer, std::chrono::microseconds current_time)
         EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex, cs_main);
-    /** Prefer GETMMATTEST for the ActiveTip child and the short-reorg missing
-     *  root on an archive or authority peer's best-known. Never the competing
-     *  1879xx miner fork. Fan-out still skips non-serving destinations. */
+    /** Prefer GETMMATTEST for the ActiveTip child, the short-reorg missing
+     *  body, and the short-reorg fork child (LCA+1) even when bodies are
+     *  already complete. Never the competing 1879xx miner fork. Fan-out
+     *  still skips non-serving destinations. */
     void MaybeRequestTrustedMirrorPreferredAttestations(CNode& pto, Peer& peer)
         EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex, cs_main);
     bool ConsumeMatMulAttestationInboundBudget(
@@ -8147,9 +8148,19 @@ void PeerManagerImpl::MaybeRequestTrustedMirrorPreferredAttestations(
         child = known->GetAncestor(tip->nHeight + 1);
     }
     const CBlockIndex* hole{nullptr};
+    const CBlockIndex* fork_child{nullptr};
     if (short_reorg) {
         const CBlockIndex* lca{LastCommonAncestor(tip, known)};
         hole = FindLowestMissingBody(lca, known, &m_chainman.ActiveChain());
+        // Lost twin race: both bodies are already HAVE_DATA, so hole is
+        // nullptr and the previous scheduler never sent GETMMATTEST for the
+        // attested sibling. recovery_escape needs the local quorum record;
+        // frontier hints do not count. Serve already has recovery_fork_child;
+        // request the competing fork child (LCA+1) so the escape can fire
+        // instead of waiting for +2 unattested work (~2 min of extra twins).
+        if (lca != nullptr && known->nHeight > lca->nHeight) {
+            fork_child = known->GetAncestor(lca->nHeight + 1);
+        }
     }
 
     auto request_if_preferred = [&](const CBlockIndex* target) {
@@ -8176,10 +8187,14 @@ void PeerManagerImpl::MaybeRequestTrustedMirrorPreferredAttestations(
     };
     request_if_preferred(child);
     if (hole != child) request_if_preferred(hole);
+    if (fork_child != child && fork_child != hole) {
+        request_if_preferred(fork_child);
+    }
     // Linear-chain attested tip: signer typically attests ~1 behind. Without
     // these, getmatmulattestations stays empty until a race.
     request_if_preferred(tip);
-    if (tip->pprev != nullptr && tip->pprev != child && tip->pprev != hole) {
+    if (tip->pprev != nullptr && tip->pprev != child && tip->pprev != hole &&
+        tip->pprev != fork_child) {
         request_if_preferred(tip->pprev);
     }
 }

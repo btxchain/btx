@@ -125,6 +125,24 @@ static size_t CountQueuedGetDataForHash(CNode& node, const uint256& hash)
     return n;
 }
 
+static size_t CountQueuedGetMmAttestForHash(CNode& node, const uint256& hash)
+{
+    LOCK(node.cs_vSend);
+    size_t n{0};
+    for (const auto& msg : node.vSendMsg) {
+        if (msg.m_type != NetMsgType::GETMMATTEST) continue;
+        DataStream stream{msg.data};
+        uint256 requested;
+        try {
+            stream >> requested;
+        } catch (const std::ios_base::failure&) {
+            continue;
+        }
+        if (requested == hash) ++n;
+    }
+    return n;
+}
+
 static void mineBlock(const node::NodeContext& node, std::chrono::seconds block_time)
 {
     auto curr_time = GetTime<std::chrono::seconds>();
@@ -4874,6 +4892,138 @@ BOOST_AUTO_TEST_CASE(getmmattest_not_validated_does_not_starve_canonical_serve)
     observer.fPauseSend = false;
     (void)connman.ProcessMessagesOnce(observer);
     BOOST_CHECK(HasQueuedMessageType(observer, NetMsgType::MMATTEST));
+}
+
+// Lost twin race with both bodies already HAVE_DATA: FindLowestMissingBody
+// is nullptr, so the scheduler used to skip GETMMATTEST for the competing
+// sibling. recovery_escape needs the local quorum record; without this
+// request the attested twin waits for +2 work while miners keep extending
+// the loser. Network-wide (extra twins, HEADER_ONLY skips), not a GBT
+// concession. Does not weaken hysteresis for unattested equal-work races.
+BOOST_AUTO_TEST_CASE(getmmattest_lost_twin_complete_bodies_requests_fork_child)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+
+    node::matmul_trusted::ResetForTest();
+    ResetSharedPeermanFixture(m_node);
+    CKey signer;
+    signer.MakeNewKey(/*fCompressed=*/true);
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256::FromHex(std::string(64, '1')).value();
+    config.replay_authority_context =
+        uint256::FromHex(std::string(64, '2')).value();
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/false, /*serve=*/false,
+        std::chrono::milliseconds{50}, error));
+    BOOST_REQUIRE(!node::matmul_trusted::IsTrustedMirror());
+    BOOST_REQUIRE(node::matmul_trusted::IsConfigured());
+    BOOST_REQUIRE(!node::matmul_trusted::HasLocalSigner());
+    struct VerifierReset {
+        ~VerifierReset() { node::matmul_trusted::ResetForTest(); }
+    } verifier_reset;
+
+    auto& mode = const_cast<kernel::MatMulValidationMode&>(
+        m_node.chainman->m_options.matmul_validation_mode);
+    const auto saved_mode{mode};
+    struct RestoreMode {
+        kernel::MatMulValidationMode& mode;
+        kernel::MatMulValidationMode saved;
+        ~RestoreMode() { mode = saved; }
+    } restore_mode{mode, saved_mode};
+    mode = kernel::MatMulValidationMode::CONSENSUS;
+
+    ConnmanTestMsg& connman = static_cast<ConnmanTestMsg&>(*m_node.connman);
+    PeerManager& peerman = *m_node.peerman;
+    peerman.InstallMatMulVerifyOverrideForTest(
+        [&](const CBlock&, int32_t, std::optional<int64_t>) { return true; });
+    struct ClearOverride {
+        PeerManager& peerman;
+        ~ClearOverride() { peerman.InstallMatMulVerifyOverrideForTest({}); }
+    } clear_override{peerman};
+
+    Consensus::Params& consensus = const_cast<Consensus::Params&>(
+        m_node.chainman->GetParams().GetConsensus());
+    auto restore_heights{SaveMatMulHeights(consensus)};
+
+    const CBlockIndex* parent{
+        WITH_LOCK(::cs_main, return m_node.chainman->ActiveChain().Tip())};
+    BOOST_REQUIRE(parent != nullptr);
+    SetMockTime(std::chrono::seconds{parent->GetBlockTime() + 1});
+    ActivateRcAtTip(consensus, *parent);
+    peerman.SetBestBlock(parent->nHeight,
+                         std::chrono::seconds{parent->GetBlockTime()});
+    BOOST_REQUIRE(
+        consensus.IsMatMulTrustedReplayAttestationActive(parent->nHeight + 1));
+
+    CBlock ours{MineTipChild(m_node, *parent, /*extra_time=*/0)};
+    CBlock competing{MineTipChild(m_node, *parent, /*extra_time=*/1)};
+    BOOST_REQUIRE(ours.GetHash() != competing.GetHash());
+    const uint256 competing_hash{competing.GetHash()};
+
+    BOOST_REQUIRE(m_node.chainman->ProcessNewBlock(
+        std::make_shared<const CBlock>(ours), /*force_processing=*/true,
+        /*min_pow_checked=*/true, nullptr));
+    BOOST_REQUIRE(m_node.chainman->ProcessNewBlock(
+        std::make_shared<const CBlock>(competing), /*force_processing=*/true,
+        /*min_pow_checked=*/true, nullptr));
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+
+    {
+        LOCK(::cs_main);
+        const CBlockIndex* tip{m_node.chainman->ActiveChain().Tip()};
+        BOOST_REQUIRE(tip != nullptr);
+        BOOST_CHECK_EQUAL(tip->GetBlockHash(), ours.GetHash());
+        const CBlockIndex* competing_index{
+            m_node.chainman->m_blockman.LookupBlockIndex(competing_hash)};
+        BOOST_REQUIRE(competing_index != nullptr);
+        BOOST_CHECK(competing_index->nStatus & BLOCK_HAVE_DATA);
+        BOOST_CHECK(!m_node.chainman->ActiveChain().Contains(competing_index));
+        BOOST_CHECK(!node::matmul_trusted::HasQuorum(
+            competing_hash, competing_index->nHeight));
+    }
+
+    const ServiceFlags archive_services{ServiceFlags(
+        NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS |
+        NODE_MATMUL_ATTESTATION_ARCHIVE)};
+    CNode archive{/*id=*/402,
+                  /*sock=*/nullptr,
+                  CAddress{PeermanTestService(0x0e00007f), NODE_NETWORK},
+                  /*nKeyedNetGroupIn=*/0x0e,
+                  /*nLocalHostNonceIn=*/0,
+                  CAddress{},
+                  /*addrNameIn=*/"lost-twin-archive",
+                  ConnectionType::OUTBOUND_FULL_RELAY,
+                  /*inbound_onion=*/false,
+                  /*network_key=*/0};
+    connman.Handshake(archive, /*successfully_connected=*/true,
+                      archive_services, archive_services, PROTOCOL_VERSION,
+                      /*relay_txs=*/true);
+    connman.AddTestNode(archive);
+    connman.FlushSendBuffer(archive);
+    struct FinalizeArchive {
+        ConnmanTestMsg& connman;
+        PeerManager& peerman;
+        CNode& node;
+        ~FinalizeArchive()
+        {
+            peerman.FinalizeNode(node);
+            connman.RemoveTestNode(node);
+        }
+    } finalize{connman, peerman, archive};
+
+    std::vector<CBlock> competing_headers{CBlock{competing.GetBlockHeader()}};
+    BOOST_REQUIRE(connman.ReceiveMsgFrom(
+        archive,
+        NetMsg::Make(NetMsgType::HEADERS, TX_WITH_WITNESS(competing_headers))));
+    archive.fPauseSend = false;
+    (void)connman.ProcessMessagesOnce(archive);
+    connman.FlushSendBuffer(archive);
+
+    BOOST_CHECK(peerman.SendMessages(&archive));
+    BOOST_CHECK_GE(CountQueuedGetMmAttestForHash(archive, competing_hash), 1);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
