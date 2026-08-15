@@ -13363,7 +13363,18 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
 
     // NOTE: deal better with return value and error conditions for duplicate
     // and unrequested blocks.
-    if (fAlreadyHave) return true;
+    // Live 2026-08-15: HEADER_ONLY / persist-without-GPU left 189686
+    // 2fd67f18 HAVE_DATA but not BLOCK_EXACT_REPLAY_VERIFIED, so this
+    // early return made submitblock "duplicate" and ABC never connected
+    // the validator-chain child of attested 189685. Re-run ContextualCheck
+    // for a requested/forced tip-child that still lacks a verdict.
+    const bool reverify_tip_child{
+        fAlreadyHave && fRequested &&
+        pindex->pprev != nullptr &&
+        pindex->pprev == ActiveTip() &&
+        (pindex->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) == 0 &&
+        (pindex->nStatus & BLOCK_FAILED_MASK) == 0};
+    if (fAlreadyHave && !reverify_tip_child) return true;
     if (!fRequested) {  // If we didn't ask for it:
         // Followed-chain historical holes (active-tip / snapshot-base
         // ancestors) are less-work by construction and may be pruned

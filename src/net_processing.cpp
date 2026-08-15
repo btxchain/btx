@@ -2724,6 +2724,43 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
 
     DrainMatMulPendingSourceUnpins();
 
+    // Local signer: ExactReplay a HAVE_DATA followed tip-child that was
+    // HEADER_ONLY-skipped or persisted without a verdict. AcceptBlock will
+    // not re-enter ContextualCheckBlock while BLOCK_HAVE_DATA is set, so
+    // this is the catch-up path that can attest 189686+ after 189685.
+    if (node::matmul_trusted::HasLocalSigner() &&
+        m_chainman.GetMatMulValidationMode() ==
+            kernel::MatMulValidationMode::CONSENSUS) {
+        uint256 reverify_hash;
+        int32_t reverify_height{-1};
+        std::optional<CBlockHeader> reverify_header;
+        {
+            LOCK(cs_main);
+            const CBlockIndex* const tip{m_chainman.ActiveChain().Tip()};
+            const CBlockIndex* const followed{m_chainman.m_best_header};
+            if (tip != nullptr && followed != nullptr &&
+                followed->nHeight > tip->nHeight &&
+                followed->GetAncestor(tip->nHeight) == tip) {
+                const CBlockIndex* const child{
+                    followed->GetAncestor(tip->nHeight + 1)};
+                if (IndexIsFollowedTipChild(m_chainman, tip, child) &&
+                    (child->nStatus & BLOCK_HAVE_DATA) != 0 &&
+                    (child->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) == 0) {
+                    reverify_hash = child->GetBlockHash();
+                    reverify_height = child->nHeight;
+                    reverify_header = child->GetBlockHeader();
+                }
+            }
+        }
+        if (reverify_header &&
+            MaybeQueueHistoricalAttestationReverify(
+                reverify_hash, reverify_height, *reverify_header)) {
+            LogInfo("Queueing ExactReplay for followed HAVE_DATA tip-child "
+                    "hash=%s height=%d (validator-chain catch-up)\n",
+                    reverify_hash.ToString(), reverify_height);
+        }
+    }
+
     node::MatMulBlockLifecycle::RetainedBody candidate;
     uint256 candidate_hash;
     // LOCK ORDER: read the tip under cs_main BEFORE taking the store mutex.
@@ -3473,6 +3510,27 @@ static bool TrustedMirrorMayDownloadIndex(
         TrustedMirrorShortTipReorg(tip, candidate));
 }
 
+//! True when `index` is the unique tip-child on the followed header chain
+//! (m_best_header extends the active tip through this hash). Live 2026-08-15:
+//! attested 189685 cfde0dfb had validator-chain child 2fd67f18 at 189686, but
+//! a competing 189686 sibling claimed the ExactReplay slot and 2fd67f18 was
+//! HEADER_ONLY-skipped as "competing near-tip P2P sibling" while peer
+//! 207.56.229.99 had already validated that continuation through 189754.
+[[nodiscard]] static bool IndexIsFollowedTipChild(
+    const ChainstateManager& chainman,
+    const CBlockIndex* tip,
+    const CBlockIndex* index)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    if (tip == nullptr || index == nullptr || index->pprev != tip) return false;
+    if ((index->nStatus & BLOCK_FAILED_MASK) != 0) return false;
+    const CBlockIndex* const followed{chainman.m_best_header};
+    return followed != nullptr &&
+           followed->nHeight >= index->nHeight &&
+           followed->GetAncestor(tip->nHeight) == tip &&
+           followed->GetAncestor(index->nHeight) == index;
+}
+
 //! True if another unattested tip-child already has a body or ExactReplay
 //! verdict. Used so a trusted mirror persists at most one such child.
 [[nodiscard]] static bool ConfiguredTipChildAlreadyHasBody(
@@ -3508,7 +3566,9 @@ static uint256 g_configured_claimed_tip_child{};
 {
     if (tip == nullptr || index == nullptr) return false;
     if (index->pprev != tip) return false;
-    if (ConfiguredTipChildAlreadyHasBody(chainman, tip, index)) {
+    const bool followed_child{IndexIsFollowedTipChild(chainman, tip, index)};
+    if (!followed_child &&
+        ConfiguredTipChildAlreadyHasBody(chainman, tip, index)) {
         return false;
     }
     if (!g_configured_claimed_tip_child.IsNull() &&
@@ -3517,7 +3577,8 @@ static uint256 g_configured_claimed_tip_child{};
             chainman.m_blockman.LookupBlockIndex(
                 g_configured_claimed_tip_child)};
         if (claimed != nullptr && claimed->pprev == tip &&
-            (claimed->nStatus & (BLOCK_FAILED_MASK)) == 0) {
+            (claimed->nStatus & (BLOCK_FAILED_MASK)) == 0 &&
+            !followed_child) {
             return false;
         }
         g_configured_claimed_tip_child.SetNull();
@@ -3573,12 +3634,21 @@ static uint256 g_configured_claimed_tip_child{};
         // (signed frontier), not first-claimed. Unattested competing
         // siblings stay HEADER_ONLY so CandidateMining keeps the device.
         if (index->pprev == tip &&
-            (index->nStatus & BLOCK_FAILED_MASK) == 0 &&
-            node::matmul_trusted::HasQuorum(
-                index->GetBlockHash(), index->nHeight)) {
-            const CBlockIndex* const catch_up{
-                chainman.FindUniqueCompetingAttestedIndex()};
-            if (catch_up == index) return true;
+            (index->nStatus & BLOCK_FAILED_MASK) == 0) {
+            if (node::matmul_trusted::HasQuorum(
+                    index->GetBlockHash(), index->nHeight)) {
+                const CBlockIndex* const catch_up{
+                    chainman.FindUniqueCompetingAttestedIndex()};
+                if (catch_up == index) return true;
+            }
+            // Followed validator-chain tip-child steals the GPU slot from a
+            // competing unattested sibling (live 2026-08-15: 2fd67f18 vs
+            // 14c0d0e4 at 189686). HEADER_ONLY remains for hashes that are
+            // not on m_best_header's tip-extending path.
+            if (IndexIsFollowedTipChild(chainman, tip, index)) {
+                g_configured_claimed_tip_child = index->GetBlockHash();
+                return true;
+            }
         }
         return ClaimConfiguredUnattestedTipChildBody(chainman, tip, index);
     }
@@ -8039,18 +8109,21 @@ void PeerManagerImpl::HistoricalAttestationReverifyLoop()
                 // archive key is configured and the index is already on the
                 // active chain (see PersistMatMulExactReplayVerdict).
                 (void)m_chainman.PersistMatMulExactReplayVerdict(job.hash);
-                const CBlockIndex* const idx{
+                CBlockIndex* const idx{
                     m_chainman.m_blockman.LookupBlockIndex(job.hash)};
                 const CBlockIndex* const tip{m_chainman.ActiveTip()};
                 // Live 2026-08-15: historical ExactReplay authenticated
                 // 189676 and left it HAVE_DATA / unconnected; mint is
                 // Contains-gated so the other signer attested it. ABC must
                 // run so the unique attested tip-child can connect.
+                // Same for a followed HAVE_DATA child that never received
+                // BLOCK_VALID_TRANSACTIONS (HEADER_ONLY persist): insert it
+                // so FindMostWorkChain can select it after the verdict bit.
                 if (idx != nullptr && tip != nullptr &&
                     (idx->nStatus & BLOCK_HAVE_DATA) != 0 &&
-                    idx->IsValid(BLOCK_VALID_TRANSACTIONS) &&
                     idx->HaveNumChainTxs() &&
                     !m_chainman.ActiveChain().Contains(idx)) {
+                    m_chainman.ActiveChainstate().TryAddBlockIndexCandidate(idx);
                     kick_abc = true;
                 }
             }
