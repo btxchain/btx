@@ -1192,6 +1192,11 @@ public:
     {
         return HasMatMulRetainedBodyForTest(hash);
     }
+    void RetryMatMulDeferredBodiesForTest() override
+        EXCLUSIVE_LOCKS_REQUIRED(!cs_main, !NetEventsInterface::g_msgproc_mutex)
+    {
+        RetryMatMulDeferredBodies();
+    }
     void ProcessMessage(CNode& pfrom, const std::string& msg_type, DataStream& vRecv,
                         const std::chrono::microseconds time_received, const std::atomic<bool>& interruptMsgProc) override
         EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_most_recent_block_mutex, !m_headers_presync_mutex, g_msgproc_mutex, !m_tx_download_mutex);

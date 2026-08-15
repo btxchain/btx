@@ -284,6 +284,10 @@ public:
     /** True while a complete body is held for scheduler re-admission. */
     [[nodiscard]] virtual bool HasMatMulRetainedBodyForTest(const uint256& hash) const = 0;
     [[nodiscard]] virtual bool UnitTestHasMatMulRetainedBody(const uint256& hash) const = 0;
+    /** Drive scheduler re-admission of a HAVE_DATA followed tip-child.
+     *  Production calls this from CScheduler, never from SendMessages
+     *  (g_msgproc_mutex). Tests must not hold that mutex. */
+    virtual void RetryMatMulDeferredBodiesForTest() = 0;
 
     /**
      * Evict extra outbound peers. If we think our tip may be stale, connect to an extra outbound.
