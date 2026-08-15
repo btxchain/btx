@@ -85,6 +85,10 @@ VerifyUtxoSnapshotManifest(
     const matmul::trusted::UtxoSnapshotManifest& manifest);
 [[nodiscard]] std::optional<uint256> ChainId();
 [[nodiscard]] bool HasQuorum(const uint256& block_hash, int32_t block_height);
+/** In-memory store only. FindMostWorkChain must not durable-read+verify
+ *  every candidate under cs_main (live archive RPC wedge: ~45s/ABC). */
+[[nodiscard]] bool HasQuorumInMemory(const uint256& block_hash,
+                                     int32_t block_height);
 /** True when a different hash at this height already has quorum (hints). */
 [[nodiscard]] bool HasCompetingQuorum(const uint256& block_hash,
                                       int32_t block_height);
@@ -176,6 +180,23 @@ static constexpr int TRUSTED_MIRROR_ATTESTED_TIP_LOOKBACK{2};
 [[nodiscard]] inline bool TrustedMirrorIsShortTipReorg(int lca_depth)
 {
     return lca_depth > 0 && lca_depth <= TRUSTED_MIRROR_SHORT_REORG_DEPTH;
+}
+
+/** FindUniqueCompetingAttestedIndex adoption gate.
+ *
+ *  Catch-up suffix of the active tip (LCA depth 0, idx above tip) is
+ *  always eligible. Competing forks are short-reorg only (depth 1–6).
+ *  The previous `tip_has_quorum == false` path had no depth bound, so a
+ *  fossil MMATTEST (signer ~1 behind the tip is the normal case) could
+ *  hijack FMWC into a 510-block rollback and starve the attested
+ *  HAVE_DATA tip-child (PR 105 field report 2026-08-15). Deep attested
+ *  recovery stays on the park / MaybeTrackReorgRecovery path. */
+[[nodiscard]] inline bool TrustedMirrorMayAdoptCompetingAttestedIndex(
+    bool attested_suffix_of_active_tip,
+    int lca_depth)
+{
+    return attested_suffix_of_active_tip ||
+           TrustedMirrorIsShortTipReorg(lca_depth);
 }
 
 /** True when `index` is a strict descendant of the active tip (catch-up
@@ -346,17 +367,21 @@ static constexpr int TRUSTED_MIRROR_ATTESTED_TIP_LOOKBACK{2};
 
 /** GETMMATTEST destinations. NODE_MATMUL_ATTESTATION_ARCHIVE is the signer.
  *  Trusted mirrors cache-and-forward signatures they have already accepted
- *  (they cannot SignAuthoritative). A recent valid MMATTEST is the same
- *  proof after the fact. Ordinary miners and nodes with no services still
- *  skip — they have no store. Direct signer addnode must not be required
- *  for functional mining. */
+ *  (they cannot SignAuthoritative). Consensus nodes that track the signer
+ *  set also keep the store (they ExactReplay and accept MMATTEST) and
+ *  must be asked — otherwise archives only query each other, get empty,
+ *  and never connect the attested tip-child. A recent valid MMATTEST is
+ *  the same proof after the fact. Ordinary miners with no CONSENSUS /
+ *  ARCHIVE / MIRROR bit still skip. Direct signer addnode must not be
+ *  required. */
 [[nodiscard]] inline bool PreferGetMmAttestPeer(
     bool has_attestation_archive_bit,
     bool recent_valid_mmattest,
-    bool trusted_mirror = false)
+    bool trusted_mirror = false,
+    bool consensus_node = false)
 {
     return has_attestation_archive_bit || recent_valid_mmattest ||
-           trusted_mirror;
+           trusted_mirror || consensus_node;
 }
 
 struct AttestedFrontierHint {

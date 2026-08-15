@@ -1001,6 +1001,12 @@ bool HasQuorum(const uint256& block_hash, int32_t block_height)
     return valid_signers.size() >= store->Threshold();
 }
 
+bool HasQuorumInMemory(const uint256& block_hash, int32_t block_height)
+{
+    auto store{Store()};
+    return store && store->HasQuorum(block_hash, block_height);
+}
+
 bool HasCompetingQuorum(const uint256& block_hash, int32_t block_height)
 {
     if (block_height < 0 || block_hash.IsNull()) return false;

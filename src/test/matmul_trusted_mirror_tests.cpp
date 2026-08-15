@@ -773,9 +773,27 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(PreferGetMmAttestPeer(
         /*has_attestation_archive_bit=*/false, /*recent_valid_mmattest=*/false,
         /*trusted_mirror=*/true));
+    BOOST_CHECK(PreferGetMmAttestPeer(
+        /*has_attestation_archive_bit=*/false, /*recent_valid_mmattest=*/false,
+        /*trusted_mirror=*/false, /*consensus_node=*/true));
     BOOST_CHECK(!PreferGetMmAttestPeer(
         /*has_attestation_archive_bit=*/false,
         /*recent_valid_mmattest=*/false));
+}
+
+BOOST_AUTO_TEST_CASE(competing_attested_index_rejects_fossil_depth)
+{
+    using node::matmul_trusted::TrustedMirrorMayAdoptCompetingAttestedIndex;
+    using node::matmul_trusted::TRUSTED_MIRROR_SHORT_REORG_DEPTH;
+    BOOST_CHECK(TrustedMirrorMayAdoptCompetingAttestedIndex(
+        /*attested_suffix_of_active_tip=*/true, /*lca_depth=*/0));
+    BOOST_CHECK(TrustedMirrorMayAdoptCompetingAttestedIndex(false, 1));
+    BOOST_CHECK(TrustedMirrorMayAdoptCompetingAttestedIndex(
+        false, TRUSTED_MIRROR_SHORT_REORG_DEPTH));
+    BOOST_CHECK(!TrustedMirrorMayAdoptCompetingAttestedIndex(
+        false, TRUSTED_MIRROR_SHORT_REORG_DEPTH + 1));
+    BOOST_CHECK(!TrustedMirrorMayAdoptCompetingAttestedIndex(false, 510));
+    BOOST_CHECK(!TrustedMirrorMayAdoptCompetingAttestedIndex(false, 0));
 }
 
 BOOST_AUTO_TEST_CASE(tip_extender_capacity_reserved_under_slot_pressure)

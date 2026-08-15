@@ -174,7 +174,7 @@ static constexpr size_t MATMUL_ATTESTATION_TIP_EXTENDING_MAX{8};
 //! Leave one outstanding slot free so a tip-extender can always admit under
 //! backfill pressure (binding tip-first under slot scarcity).
 static constexpr size_t MATMUL_ATTESTATION_TIP_RESERVED{1};
-static constexpr size_t MATMUL_ATTESTATION_RELAY_PEERS{2};
+static constexpr size_t MATMUL_ATTESTATION_RELAY_PEERS{32};
 //! Negative-cache base delay after archive/signer peers stay silent for a hash.
 //! First retry is short so a recovering node with one archive is not stuck at
 //! ~1 block / 60s; exponential still bounds a persistently silent signer.
@@ -8121,7 +8121,10 @@ void PeerManagerImpl::MaybeRequestTrustedMirrorPreferredAttestations(
     const bool trusted_mirror{
         (peer.m_their_services & NODE_MATMUL_TRUSTED_MIRROR) ==
         NODE_MATMUL_TRUSTED_MIRROR};
-    if (!archive_discovery && !trusted_mirror &&
+    const bool consensus_node{
+        (peer.m_their_services & NODE_MATMUL_CONSENSUS) ==
+        NODE_MATMUL_CONSENSUS};
+    if (!archive_discovery && !trusted_mirror && !consensus_node &&
         !IsTrustedMirrorAuthorityPeer(pto.GetId(), peer.m_their_services)) {
         return;
     }
@@ -8411,6 +8414,13 @@ void PeerManagerImpl::RequestMatMulTrustedAttestations(
         const bool preferred{
             node::matmul_trusted::TrustedMirrorPreferGetMmAttest(
                 tip_child, short_reorg, parked, recent_active_ancestor)};
+        // A hash rejected as unattestable during a race must be re-asked
+        // once it is the followed tip-child (field report: sticky
+        // rejected_unattestable=1 blocked re-admission after the signer
+        // jumped branches).
+        if (tip_child || short_reorg) {
+            m_matmul_attestation_backoff.erase(hash);
+        }
 
         const auto admit{EvaluateTrustedMirrorAttestationAdmit(
             hash, index, tip, /*tip_extending=*/tip_child)};
@@ -8624,8 +8634,10 @@ void PeerManagerImpl::RequestMatMulTrustedAttestations(
         const bool trusted_mirror{
             (services & NODE_MATMUL_TRUSTED_MIRROR) ==
             NODE_MATMUL_TRUSTED_MIRROR};
+        const bool consensus_node{
+            (services & NODE_MATMUL_CONSENSUS) == NODE_MATMUL_CONSENSUS};
         if (!node::matmul_trusted::PreferGetMmAttestPeer(
-                archive, recent_success, trusted_mirror)) {
+                archive, recent_success, trusted_mirror, consensus_node)) {
             return;
         }
         MakeAndPushMessage(*target, NetMsgType::GETMMATTEST, hash);
@@ -15074,8 +15086,19 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         }
 
         if (!relay.empty()) {
+            auto serving_peer = [&](CNode* target) {
+                const PeerRef pr{GetPeerRef(target->GetId())};
+                if (!pr) return false;
+                const ServiceFlags services{pr->m_their_services.load()};
+                return (services & NODE_MATMUL_ATTESTATION_ARCHIVE) ==
+                           NODE_MATMUL_ATTESTATION_ARCHIVE ||
+                       (services & NODE_MATMUL_CONSENSUS) ==
+                           NODE_MATMUL_CONSENSUS ||
+                       (services & NODE_MATMUL_TRUSTED_MIRROR) ==
+                           NODE_MATMUL_TRUSTED_MIRROR;
+            };
             size_t relayed{0};
-            m_connman.ForEachNode([&](CNode* target) {
+            auto push = [&](CNode* target) {
                 if (relayed >= MATMUL_ATTESTATION_RELAY_PEERS ||
                     target->GetId() == pfrom.GetId() ||
                     target->GetCommonVersion() < MATMUL_ATTESTATION_VERSION) {
@@ -15084,6 +15107,15 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 MakeAndPushMessage(
                     *target, NetMsgType::MMATTEST, relay);
                 ++relayed;
+            };
+            // Serving peers first so archives/consensus see quorum without
+            // a 2-peer random fanout miss (live: mirrors queried each other,
+            // GETMMATTEST empty, ABC deferred forever).
+            m_connman.ForEachNode([&](CNode* target) {
+                if (serving_peer(target)) push(target);
+            });
+            m_connman.ForEachNode([&](CNode* target) {
+                if (!serving_peer(target)) push(target);
             });
         }
         return;

@@ -1499,9 +1499,10 @@ BOOST_AUTO_TEST_CASE(parked_reorg_suppresses_only_parked_peer_downloads)
                 HasQueuedMessageType(active_peer, NetMsgType::GETDATA));
 }
 
-// GETMMATTEST must reach the signer archive and trusted mirrors that
-// cache-forward accepted signatures. Ordinary consensus miners (no store)
-// are skipped so miss-backoff is not burned on not_serving.
+// GETMMATTEST must reach the signer archive, trusted mirrors, and consensus
+// nodes that keep the attestation store. Ordinary NODE_NETWORK miners (no
+// CONSENSUS/ARCHIVE/MIRROR bit) are skipped so miss-backoff is not burned
+// on not_serving.
 BOOST_AUTO_TEST_CASE(getmmattest_skips_non_serving_peers)
 {
     LOCK(NetEventsInterface::g_msgproc_mutex);
@@ -1531,6 +1532,8 @@ BOOST_AUTO_TEST_CASE(getmmattest_skips_non_serving_peers)
         NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS |
         NODE_MATMUL_ATTESTATION_ARCHIVE)};
     const ServiceFlags miner_services{ServiceFlags(
+        NODE_NETWORK | NODE_WITNESS)};
+    const ServiceFlags consensus_services{ServiceFlags(
         NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS)};
     const ServiceFlags mirror_services{ServiceFlags(
         NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_TRUSTED_MIRROR |
@@ -1566,6 +1569,16 @@ BOOST_AUTO_TEST_CASE(getmmattest_skips_non_serving_peers)
                  ConnectionType::OUTBOUND_FULL_RELAY,
                  /*inbound_onion=*/false,
                  /*network_key=*/0};
+    CNode consensus_peer{/*id=*/74,
+                    /*sock=*/nullptr,
+                    CAddress{},
+                    /*nKeyedNetGroupIn=*/0,
+                    /*nLocalHostNonceIn=*/0,
+                    CAddress{},
+                    /*addrNameIn=*/"consensus-store",
+                    ConnectionType::OUTBOUND_FULL_RELAY,
+                    /*inbound_onion=*/false,
+                    /*network_key=*/0};
     connman.Handshake(archive, /*successfully_connected=*/true,
                       archive_services, archive_services, PROTOCOL_VERSION,
                       /*relay_txs=*/true);
@@ -1573,28 +1586,36 @@ BOOST_AUTO_TEST_CASE(getmmattest_skips_non_serving_peers)
                       miner_services, PROTOCOL_VERSION, /*relay_txs=*/true);
     connman.Handshake(mirror, /*successfully_connected=*/true, mirror_services,
                       mirror_services, PROTOCOL_VERSION, /*relay_txs=*/true);
+    connman.Handshake(consensus_peer, /*successfully_connected=*/true,
+                      consensus_services, consensus_services, PROTOCOL_VERSION,
+                      /*relay_txs=*/true);
     connman.AddTestNode(archive);
     connman.AddTestNode(miner);
     connman.AddTestNode(mirror);
+    connman.AddTestNode(consensus_peer);
     connman.FlushSendBuffer(archive);
     connman.FlushSendBuffer(miner);
     connman.FlushSendBuffer(mirror);
+    connman.FlushSendBuffer(consensus_peer);
     struct FinalizePeers {
         ConnmanTestMsg& connman;
         PeerManager& peerman;
         CNode& first;
         CNode& second;
         CNode& third;
+        CNode& fourth;
         ~FinalizePeers()
         {
             peerman.FinalizeNode(first);
             peerman.FinalizeNode(second);
             peerman.FinalizeNode(third);
+            peerman.FinalizeNode(fourth);
             connman.RemoveTestNode(first);
             connman.RemoveTestNode(second);
             connman.RemoveTestNode(third);
+            connman.RemoveTestNode(fourth);
         }
-    } finalize{connman, peerman, archive, miner, mirror};
+    } finalize{connman, peerman, archive, miner, mirror, consensus_peer};
 
     const CBlockIndex* tip{
         WITH_LOCK(::cs_main, return m_node.chainman->ActiveChain().Tip())};
@@ -1654,10 +1675,12 @@ BOOST_AUTO_TEST_CASE(getmmattest_skips_non_serving_peers)
     BOOST_CHECK(peerman.SendMessages(&archive));
     BOOST_CHECK(peerman.SendMessages(&miner));
     BOOST_CHECK(peerman.SendMessages(&mirror));
+    BOOST_CHECK(peerman.SendMessages(&consensus_peer));
 
     BOOST_CHECK(HasQueuedMessageType(archive, NetMsgType::GETMMATTEST));
     BOOST_CHECK(!HasQueuedMessageType(miner, NetMsgType::GETMMATTEST));
     BOOST_CHECK(HasQueuedMessageType(mirror, NetMsgType::GETMMATTEST));
+    BOOST_CHECK(HasQueuedMessageType(consensus_peer, NetMsgType::GETMMATTEST));
 }
 
 // Qualifier on 5bc1e3d4: a trusted mirror whose tip is still the last

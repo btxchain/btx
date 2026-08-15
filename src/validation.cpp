@@ -9620,7 +9620,7 @@ CBlockIndex* Chainstate::FindMostWorkChain()
                         /*distinct_from_candidate=*/alt != pindexNew && alt != tip,
                         /*same_parent=*/alt->pprev == tip,
                         /*same_height_as_tip_child=*/alt->nHeight == tip->nHeight + 1,
-                        /*has_quorum=*/node::matmul_trusted::HasQuorum(
+                        /*has_quorum=*/node::matmul_trusted::HasQuorumInMemory(
                             alt->GetBlockHash(), alt->nHeight),
                         /*failed=*/(alt->nStatus & BLOCK_FAILED_MASK) != 0)) {
                         return true;
@@ -9633,11 +9633,12 @@ CBlockIndex* Chainstate::FindMostWorkChain()
                         /*distinct_from_candidate=*/alt != pindexNew && alt != tip,
                         /*same_parent=*/alt->pprev == tip->pprev,
                         /*same_height_as_tip_child=*/alt->nHeight == tip->nHeight,
-                        /*has_quorum=*/node::matmul_trusted::HasQuorum(
+                        /*has_quorum=*/node::matmul_trusted::HasQuorumInMemory(
                             alt->GetBlockHash(), alt->nHeight),
                         /*failed=*/(alt->nStatus & BLOCK_FAILED_MASK) != 0);
                 };
                 for (CBlockIndex* alt : setBlockIndexCandidates) {
+                    if (m_chainman.m_interrupt) break;
                     if (consider_attested_tip_child(alt)) {
                         attested_sibling = alt;
                         break;
@@ -11160,19 +11161,17 @@ const CBlockIndex* ChainstateManager::FindUniqueCompetingAttestedIndex() const
         // Pending-attestation extensions of the active chain must not be
         // disconnected: the signer typically attests ~1 behind the tip.
         if (m_active_chainstate->m_chain.Contains(idx)) return;
-        if (tip_has_quorum) {
+        {
             const CBlockIndex* const lca{LastCommonAncestor(tip, idx)};
             if (lca == nullptr) return;
             const int lca_depth{tip->nHeight - lca->nHeight};
-            // Live 2026-08-15: unique attested HAVE_DATA child of an
-            // already-attested tip (LCA depth 0, suffix not yet connected).
-            // Short-reorg is depth 1–6; depth 0 used to be dropped, so ABC
-            // never selected the catch-up child while GBT kept mining a
-            // competing sibling (signer tip 189675, attested 189676).
             const bool attested_suffix{
                 lca == tip && idx->nHeight > tip->nHeight};
-            if (!attested_suffix &&
-                !node::matmul_trusted::TrustedMirrorIsShortTipReorg(lca_depth)) {
+            // Bound competing forks even when the tip has no quorum (signer
+            // typically attests ~1 behind). Unbounded fossil MMATTEST hijacked
+            // FMWC and left the attested HAVE_DATA tip-child unconnected.
+            if (!node::matmul_trusted::TrustedMirrorMayAdoptCompetingAttestedIndex(
+                    attested_suffix, lca_depth)) {
                 return;
             }
         }
