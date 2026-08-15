@@ -1012,7 +1012,7 @@ bool HasCompetingQuorum(const uint256& block_hash, int32_t block_height)
     if (block_height < 0 || block_hash.IsNull()) return false;
     for (const auto& hint : AttestedFrontierHints()) {
         if (hint.height == block_height && hint.hash != block_hash &&
-            !hint.hash.IsNull() && HasQuorum(hint.hash, hint.height)) {
+            !hint.hash.IsNull() && HasQuorumInMemory(hint.hash, hint.height)) {
             return true;
         }
     }

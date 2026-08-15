@@ -106,7 +106,7 @@ class MatMulTrustedMirrorsTest(BitcoinTestFramework):
     def run_test(self):
         archive, mirror_a, mirror_b, verifier = self.nodes
 
-        self.log.info("Trusted mirrors fail closed if configured to sign or serve")
+        self.log.info("Trusted mirrors fail closed if configured to sign")
         self.stop_node(2, expected_stderr=TRUST_WARNING.format(1))
         mirror_b.assert_start_raises_init_error(
             extra_args=self.mirror_args + [
@@ -117,13 +117,20 @@ class MatMulTrustedMirrorsTest(BitcoinTestFramework):
                 + "\nError: Only an independent MatMul consensus validator can load an attestation signing key; remove -matmulattestationsignerkeyfile/-matmulattestationsignerkey from non-consensus nodes."
             ),
         )
-        mirror_b.assert_start_raises_init_error(
-            extra_args=[
-                arg for arg in self.mirror_args
-                if not arg.startswith("-matmulattestationserve=")
-            ] + ["-matmulattestationserve=1"],
-            expected_msg="Error: Only an independent MatMul consensus validator can serve authoritative attestations. Set -matmulattestationserve=0 on non-consensus nodes.",
-        )
+        # Cache-and-forward GETMMATTEST is the archive role. Serving must not
+        # require a local signing key (live: signer GETMMATTEST fan-in wedged
+        # signing while mirrors returned empty).
+        serving_mirror_args = [
+            arg for arg in self.mirror_args
+            if not arg.startswith("-matmulattestationserve=")
+        ] + ["-matmulattestationserve=1"]
+        self.start_node(2, extra_args=serving_mirror_args)
+        serving_services = mirror_b.getnetworkinfo()["localservicesnames"]
+        assert "MATMUL_TRUSTED_MIRROR" in serving_services
+        assert "MATMUL_ATTESTATION_ARCHIVE" in serving_services
+        assert "MATMUL_CONSENSUS" not in serving_services
+        assert_equal(mirror_b.getmatmultrustedstatus()["serves_attestations"], True)
+        self.stop_node(2, expected_stderr=TRUST_WARNING.format(1))
         mirror_b.assert_start_raises_init_error(
             extra_args=[
                 arg for arg in self.mirror_args

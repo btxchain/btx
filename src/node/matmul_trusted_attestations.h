@@ -89,7 +89,8 @@ VerifyUtxoSnapshotManifest(
  *  every candidate under cs_main (live archive RPC wedge: ~45s/ABC). */
 [[nodiscard]] bool HasQuorumInMemory(const uint256& block_hash,
                                      int32_t block_height);
-/** True when a different hash at this height already has quorum (hints). */
+/** True when a different hash at this height already has in-memory quorum
+ *  (frontier hints). Must not durable-read under cs_main. */
 [[nodiscard]] bool HasCompetingQuorum(const uint256& block_hash,
                                       int32_t block_height);
 /**
@@ -365,15 +366,14 @@ static constexpr int TRUSTED_MIRROR_ATTESTED_TIP_LOOKBACK{2};
            recent_active_ancestor;
 }
 
-/** GETMMATTEST destinations. NODE_MATMUL_ATTESTATION_ARCHIVE is the signer.
- *  Trusted mirrors cache-and-forward signatures they have already accepted
- *  (they cannot SignAuthoritative). Consensus nodes that track the signer
- *  set also keep the store (they ExactReplay and accept MMATTEST) and
- *  must be asked — otherwise archives only query each other, get empty,
- *  and never connect the attested tip-child. A recent valid MMATTEST is
- *  the same proof after the fact. Ordinary miners with no CONSENSUS /
- *  ARCHIVE / MIRROR bit still skip. Direct signer addnode must not be
- *  required. */
+/** GETMMATTEST destinations. NODE_MATMUL_ATTESTATION_ARCHIVE means the
+ *  peer answers GETMMATTEST (signer that still serves, or a trusted
+ *  mirror cache-and-forwarding accepted signatures). Trusted mirrors
+ *  cannot SignAuthoritative. Consensus nodes that still serve are a
+ *  fallback; a signer with -matmulattestationserve=0 keeps CONSENSUS
+ *  but replies not_serving without taking cs_main. Ordinary miners
+ *  with no CONSENSUS / ARCHIVE / MIRROR bit still skip. Direct signer
+ *  addnode must not be required. */
 [[nodiscard]] inline bool PreferGetMmAttestPeer(
     bool has_attestation_archive_bit,
     bool recent_valid_mmattest,

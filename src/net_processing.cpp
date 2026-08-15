@@ -11457,7 +11457,6 @@ void PeerManagerImpl::ProcessBlockSync(NodeId nodeid, CNode* node, const std::sh
         if (exact_replay_authenticated &&
             m_chainman.GetMatMulValidationMode() ==
                 kernel::MatMulValidationMode::CONSENSUS &&
-            node::matmul_trusted::ServesAttestations() &&
             node::matmul_trusted::HasLocalSigner()) {
             int32_t exact_height{-1};
             {
@@ -14609,7 +14608,8 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                              refill);
         }
         peer->m_matmul_attestation_last_refill = now;
-        if (!node::matmul_trusted::IsConfigured()) {
+        if (!node::matmul_trusted::IsConfigured() ||
+            !node::matmul_trusted::ServesAttestations()) {
             MaybeLogAttestationServe(
                 "not_serving", block_hash, /*height=*/-1, pfrom.GetId());
             return;
@@ -14657,7 +14657,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 other_on_chain_quorum =
                     at_height != nullptr &&
                     at_height->GetBlockHash() != block_hash &&
-                    node::matmul_trusted::HasQuorum(
+                    node::matmul_trusted::HasQuorumInMemory(
                         at_height->GetBlockHash(), height);
             }
             const bool dual_spread{
