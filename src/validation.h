@@ -1595,10 +1595,10 @@ public:
      * attested index is on the active chain (pending-attestation extension
      * — do not disconnect it) or if two incomparable attested branches exist.
      *
-     * When the active tip already has quorum: still return the signed
-     * frontier's short-reorg fork-child if that child has HAVE_DATA +
-     * quorum and the frontier is not on the active chain. Live 2026-08-15:
-     * dual-attested 189489 siblings stranded trusted mirrors on the loser.
+     * When the active tip already has quorum: still return a unique
+     * competing attested HAVE_DATA short-reorg fork-child (every frontier
+     * hint at a height, not last-writer). Live 2026-08-15: dual-attested
+     * 189489 siblings stranded trusted mirrors on the loser.
      */
     const CBlockIndex* FindUniqueCompetingAttestedIndex() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool IsAttestedAbandonForkCandidate(const CBlockIndex* candidate) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);

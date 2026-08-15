@@ -85,6 +85,9 @@ VerifyUtxoSnapshotManifest(
     const matmul::trusted::UtxoSnapshotManifest& manifest);
 [[nodiscard]] std::optional<uint256> ChainId();
 [[nodiscard]] bool HasQuorum(const uint256& block_hash, int32_t block_height);
+/** True when a different hash at this height already has quorum (hints). */
+[[nodiscard]] bool HasCompetingQuorum(const uint256& block_hash,
+                                      int32_t block_height);
 /**
  * Blocking wait retained for tests and rare sync callers. Trusted-mirror
  * verify workers must NOT use this on the hot path: they park the job and
@@ -229,7 +232,8 @@ static constexpr int TRUSTED_MIRROR_ATTESTED_TIP_LOOKBACK{2};
  *  stale/non-distinct candidate-set entry — as an "attested sibling"
  *  permanently deferred the sole linear tip-child (behind=1, 83 repeats).
  *  Deferral is valid only for a distinct same-height child of the current
- *  tip that still has quorum and is not FAILED. Headers-only + quorum is
+ *  tip — or a same-height attested twin of the tip (live 2026-08-15) —
+ *  that still has quorum and is not FAILED. Headers-only + quorum is
  *  usable (MMATTEST can land before the body); the tip itself is not. */
 [[nodiscard]] inline bool TrustedMirrorAttestedSiblingIsActionable(
     bool distinct_from_candidate,
@@ -331,6 +335,7 @@ struct AttestedFrontierHint {
 [[nodiscard]] std::optional<int32_t> AuthorityPeerTipHint();
 [[nodiscard]] std::optional<uint256> AuthorityPeerTipHintHash();
 [[nodiscard]] std::vector<AttestedFrontierHint> AttestedFrontierHints();
+/** All quorum hashes at a height stay in the hint window (not last-writer). */
 /** Raw high-water: max(highest attested, peer tip hint), if either known. */
 [[nodiscard]] std::optional<int32_t> AuthorityAttestedFrontier();
 void NoteAcceptedAttestationHeight(int32_t height, const uint256& hash = {});

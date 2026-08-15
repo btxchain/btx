@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <chrono>
 #include <iterator>
+#include <optional>
 #include <thread>
 #include <utility>
 
@@ -410,6 +411,13 @@ void MatMulVerifyWorker::SetActiveTip(const uint256& tip_hash,
     }
     // Tip movement can change which parked/queued job should run next.
     m_cv.notify_all();
+}
+
+void MatMulVerifyWorker::SetCappedAuthorityFrontier(
+    std::optional<int32_t> height)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_capped_authority_frontier = height;
 }
 
 void MatMulVerifyWorker::NotifyQuorumReady(const uint256& hash)
@@ -830,9 +838,16 @@ void MatMulVerifyWorker::WorkerLoop()
             // attested high-water (except the tip-extender, which may probe one
             // step ahead) must not consume scarce park slots. Peer-tip hints
             // are unauthenticated competing headers and must not inflate this
-            // bound (live: frontier 187859 vs signer 187791).
-            const auto frontier{
-                node::matmul_trusted::HighestAttestedHeight()};
+            // bound (live: frontier 187859 vs signer 187791). Use the same
+            // capped frontier admit uses, not raw HighestAttestedHeight().
+            std::optional<int32_t> frontier;
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                frontier = m_capped_authority_frontier;
+            }
+            if (!frontier.has_value()) {
+                frontier = node::matmul_trusted::HighestAttestedHeight();
+            }
             if (!tip_extending && frontier.has_value() &&
                 job.height > *frontier) {
                 LogDebug(

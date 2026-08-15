@@ -54,9 +54,10 @@ int32_t g_highest_attested_height{-1};
 //! Soft hint: max best-known height among peers that recently served MMATTEST.
 int32_t g_authority_peer_tip_hint{-1};
 uint256 g_authority_peer_tip_hash{};
-//! Recent attested (height -> hash) so the effective frontier can ignore a
-//! competing/parked high-water mark and still see the signer-chain height.
-std::map<int32_t, uint256> g_attested_by_height;
+//! Recent attested (height -> hashes). Keep every quorum hash at a height,
+//! not last-writer: dual-attested siblings (live 2026-08-15) must both stay
+//! visible to FindUniqueCompetingAttestedIndex after restart.
+std::map<int32_t, std::set<uint256>> g_attested_by_height;
 static constexpr int32_t ATTESTED_FRONTIER_HINT_WINDOW{512};
 
 fs::path g_persist_path;
@@ -385,6 +386,10 @@ bool LoadDurableAttestations(
         std::lock_guard lock{g_mutex};
         g_highest_attested_height =
             std::max(g_highest_attested_height, highest);
+    }
+    for (const auto& [tail_key, attestations] : hot_tail) {
+        (void)attestations;
+        NoteAcceptedAttestationHeight(tail_key.first, tail_key.second);
     }
     LogPrintf("Verified %zu durable MatMul attestation block record(s)\n",
               records);
@@ -996,6 +1001,18 @@ bool HasQuorum(const uint256& block_hash, int32_t block_height)
     return valid_signers.size() >= store->Threshold();
 }
 
+bool HasCompetingQuorum(const uint256& block_hash, int32_t block_height)
+{
+    if (block_height < 0 || block_hash.IsNull()) return false;
+    for (const auto& hint : AttestedFrontierHints()) {
+        if (hint.height == block_height && hint.hash != block_hash &&
+            !hint.hash.IsNull() && HasQuorum(hint.hash, hint.height)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 matmul::trusted::WaitResult WaitForQuorum(
     const uint256& block_hash,
     int32_t block_height,
@@ -1057,9 +1074,10 @@ std::vector<AttestedFrontierHint> AttestedFrontierHints()
 {
     std::lock_guard lock{g_mutex};
     std::vector<AttestedFrontierHint> out;
-    out.reserve(g_attested_by_height.size());
-    for (const auto& [height, hash] : g_attested_by_height) {
-        out.push_back({.hash = hash, .height = height});
+    for (const auto& [height, hashes] : g_attested_by_height) {
+        for (const auto& hash : hashes) {
+            out.push_back({.hash = hash, .height = height});
+        }
     }
     return out;
 }
@@ -1081,7 +1099,7 @@ void NoteAcceptedAttestationHeight(int32_t height, const uint256& hash)
         g_highest_attested_height = height;
     }
     if (!hash.IsNull()) {
-        g_attested_by_height[height] = hash;
+        g_attested_by_height[height].insert(hash);
         const int32_t floor_height{
             g_highest_attested_height - ATTESTED_FRONTIER_HINT_WINDOW};
         while (!g_attested_by_height.empty() &&

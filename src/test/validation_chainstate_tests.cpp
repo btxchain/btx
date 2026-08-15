@@ -1885,11 +1885,14 @@ BOOST_FIXTURE_TEST_CASE(chainstate_dual_quorum_sibling_follows_signed_frontier, 
     BOOST_REQUIRE(node::matmul_trusted::Configure(
         std::move(config), /*trusted_mirror=*/true, /*serve=*/false,
         std::chrono::milliseconds{50}, error));
-    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
-                      original_hash, original_tip->nHeight) ==
-                  matmul::trusted::AddResult::Accepted);
+    // Sign the competing sibling first, then the connected loser, so the
+    // last-writer frontier hint is the on-chain hash. Recovery must still
+    // find the sibling (live 2026-08-15 last-writer hole).
     BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
                       sibling->GetBlockHash(), sibling->nHeight) ==
+                  matmul::trusted::AddResult::Accepted);
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
+                      original_hash, original_tip->nHeight) ==
                   matmul::trusted::AddResult::Accepted);
     {
         LOCK(::cs_main);

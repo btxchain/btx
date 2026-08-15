@@ -5662,6 +5662,9 @@ PeerManagerImpl::PeerManagerImpl(CConnman& connman, AddrMan& addrman,
                     WITH_LOCK(cs_main, return m_chainman.ActiveTip())}) {
                 m_matmul_verify_worker->SetActiveTip(tip->GetBlockHash(),
                                                      tip->nHeight);
+                WITH_LOCK(cs_main,
+                          m_matmul_verify_worker->SetCappedAuthorityFrontier(
+                              CappedAuthorityAttestedFrontier(m_chainman)));
             }
         }
     }
@@ -5766,6 +5769,8 @@ void PeerManagerImpl::ActiveTipChange(const CBlockIndex& new_tip, bool is_ibd)
     if (m_matmul_verify_worker) {
         m_matmul_verify_worker->SetActiveTip(new_tip.GetBlockHash(),
                                              new_tip.nHeight);
+        m_matmul_verify_worker->SetCappedAuthorityFrontier(
+            CappedAuthorityAttestedFrontier(m_chainman));
     }
 
     if (!is_ibd) {
@@ -14222,17 +14227,36 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             const bool on_active_suffix{
                 tip != nullptr && index->nHeight >= tip->nHeight &&
                 index->GetAncestor(tip->nHeight) == tip};
+            const bool followed_suffix{
+                tip != nullptr && followed != nullptr &&
+                followed->GetAncestor(tip->nHeight) == tip &&
+                index->nHeight >= tip->nHeight &&
+                followed->GetAncestor(index->nHeight) == index};
+            bool other_on_chain_quorum{false};
+            if (tip != nullptr && height >= 0 && height <= tip->nHeight) {
+                const CBlockIndex* const at_height{tip->GetAncestor(height)};
+                other_on_chain_quorum =
+                    at_height != nullptr &&
+                    at_height->GetBlockHash() != block_hash &&
+                    node::matmul_trusted::HasQuorum(
+                        at_height->GetBlockHash(), height);
+            }
+            const bool dual_spread{
+                other_on_chain_quorum ||
+                node::matmul_trusted::HasCompetingQuorum(block_hash, height)};
+            const bool recovery_fork_child{
+                m_chainman.IsAttestedAbandonForkCandidate(index)};
             // Serve cached signatures for the active chain, a stored
             // unconnected tip-child, or any header that extends the active
             // tip. m_best_header of the competing 1883xx tree is not
             // "followed" and must not make canonical suffix hashes
             // not_canonical (live: GETMMATTEST 187895 while tip is 187800).
+            // Dual-attested siblings: do not serve the extra hash at a
+            // height once another hash there has quorum, except the unique
+            // competing attested fork-child (stranded loser recovering).
             on_our_followed_chain =
-                on_active_chain || on_active_suffix ||
-                (tip != nullptr && followed != nullptr &&
-                 followed->GetAncestor(tip->nHeight) == tip &&
-                 index->nHeight >= tip->nHeight &&
-                 followed->GetAncestor(index->nHeight) == index);
+                on_active_chain || recovery_fork_child ||
+                ((on_active_suffix || followed_suffix) && !dual_spread);
             locally_exact =
                 !failed && profile1 &&
                 (index->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0;
@@ -14541,6 +14565,10 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                     m_matmul_attestation_backoff.erase(hash);
                     node::matmul_trusted::NoteAuthorityPeerTipHint(
                         expected_height, hash);
+                    if (m_matmul_verify_worker) {
+                        m_matmul_verify_worker->SetCappedAuthorityFrontier(
+                            CappedAuthorityAttestedFrontier(m_chainman));
+                    }
                 }
             } else if (result !=
                        matmul::trusted::AddResult::Duplicate) {

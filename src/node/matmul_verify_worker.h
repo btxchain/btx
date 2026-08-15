@@ -219,6 +219,8 @@ public:
 
     /** Publish the active tip so queued/parked trusted work ranks tip-first. */
     void SetActiveTip(const uint256& tip_hash, int32_t tip_height);
+    /** Admit/park bound matching CappedAuthorityAttestedFrontier. */
+    void SetCappedAuthorityFrontier(std::optional<int32_t> height);
 
     /**
      * A parked trusted-mirror job may proceed: quorum is available for `hash`.
@@ -286,6 +288,7 @@ private:
     size_t m_awaiting_quorum_bytes{0}; // GUARDED_BY(m_mutex)
     uint256 m_tip_hash{}; // GUARDED_BY(m_mutex)
     int32_t m_tip_height{-1}; // GUARDED_BY(m_mutex)
+    std::optional<int32_t> m_capped_authority_frontier{}; // GUARDED_BY(m_mutex)
     uint64_t m_next_sequence{0};          // GUARDED_BY(m_mutex)
     bool m_stopped{false};               // GUARDED_BY(m_mutex)
     std::atomic<bool> m_shutdown{false};

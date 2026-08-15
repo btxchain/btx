@@ -9555,10 +9555,23 @@ CBlockIndex* Chainstate::FindMostWorkChain()
             if (extends_tip && !has_quorum) {
                 auto consider_attested_tip_child = [&](const CBlockIndex* alt) {
                     if (alt == nullptr) return false;
-                    return node::matmul_trusted::TrustedMirrorAttestedSiblingIsActionable(
+                    if (node::matmul_trusted::TrustedMirrorAttestedSiblingIsActionable(
                         /*distinct_from_candidate=*/alt != pindexNew && alt != tip,
                         /*same_parent=*/alt->pprev == tip,
                         /*same_height_as_tip_child=*/alt->nHeight == tip->nHeight + 1,
+                        /*has_quorum=*/node::matmul_trusted::HasQuorum(
+                            alt->GetBlockHash(), alt->nHeight),
+                        /*failed=*/(alt->nStatus & BLOCK_FAILED_MASK) != 0)) {
+                        return true;
+                    }
+                    // Dual-attested same-height siblings (live 2026-08-15):
+                    // unattested children of the quorum loser must not win
+                    // most-work over the attested twin of the tip.
+                    if (tip->pprev == nullptr) return false;
+                    return node::matmul_trusted::TrustedMirrorAttestedSiblingIsActionable(
+                        /*distinct_from_candidate=*/alt != pindexNew && alt != tip,
+                        /*same_parent=*/alt->pprev == tip->pprev,
+                        /*same_height_as_tip_child=*/alt->nHeight == tip->nHeight,
                         /*has_quorum=*/node::matmul_trusted::HasQuorum(
                             alt->GetBlockHash(), alt->nHeight),
                         /*failed=*/(alt->nStatus & BLOCK_FAILED_MASK) != 0);
@@ -10845,14 +10858,33 @@ ChainstateManager::SignedFrontierStatus ChainstateManager::GetSignedFrontierStat
     }
     out.available = true;
     out.height = *frontier_height;
+    const CBlockIndex* const tip{m_active_chainstate->m_chain.Tip()};
+    std::optional<uint256> on_chain_hash;
+    std::optional<uint256> off_chain_hash;
     for (const auto& hint : node::matmul_trusted::AttestedFrontierHints()) {
-        if (hint.height == out.height && !hint.hash.IsNull()) {
-            out.hash = hint.hash;
-            out.hash_known = true;
-            break;
+        if (hint.height != out.height || hint.hash.IsNull()) continue;
+        const CBlockIndex* const frontier_index{
+            m_blockman.LookupBlockIndex(hint.hash)};
+        const bool on_chain{
+            tip != nullptr && frontier_index != nullptr &&
+            tip->nHeight >= frontier_index->nHeight &&
+            tip->GetAncestor(frontier_index->nHeight) == frontier_index};
+        if (on_chain) {
+            if (!on_chain_hash.has_value()) on_chain_hash = hint.hash;
+        } else if (!off_chain_hash.has_value()) {
+            off_chain_hash = hint.hash;
         }
     }
-    const CBlockIndex* const tip{m_active_chainstate->m_chain.Tip()};
+    // Dual-attested same-height siblings: prefer the off-chain hash so
+    // FindUniqueCompetingAttestedIndex is not inverted by last-writer
+    // (live 2026-08-15).
+    if (off_chain_hash.has_value()) {
+        out.hash = *off_chain_hash;
+        out.hash_known = true;
+    } else if (on_chain_hash.has_value()) {
+        out.hash = *on_chain_hash;
+        out.hash_known = true;
+    }
     if (tip != nullptr) {
         for (const CBlockIndex* p{tip}; p != nullptr; p = p->pprev) {
             if (node::matmul_trusted::HasQuorum(
@@ -10977,40 +11009,12 @@ const CBlockIndex* ChainstateManager::FindUniqueCompetingAttestedIndex() const
     // connected the loser (quorum + HAVE_DATA first). The early "tip has
     // quorum → nullptr" return then froze ABC on unattested children of
     // that loser while the signed frontier ran 140 blocks up the other
-    // fork. Recover when the frontier sits on a different short-reorg
-    // branch and that fork-child already has HAVE_DATA + quorum.
-    if (node::matmul_trusted::HasQuorum(tip->GetBlockHash(), tip->nHeight)) {
-        const SignedFrontierStatus frontier{GetSignedFrontierStatus()};
-        if (!frontier.hash_known || frontier.on_active_chain) {
-            return nullptr;
-        }
-        const CBlockIndex* const frontier_index{
-            m_blockman.LookupBlockIndex(frontier.hash)};
-        if (frontier_index == nullptr) return nullptr;
-        const CBlockIndex* const lca{
-            LastCommonAncestor(tip, frontier_index)};
-        if (lca == nullptr) return nullptr;
-        const int lca_depth{tip->nHeight - lca->nHeight};
-        if (!node::matmul_trusted::TrustedMirrorIsShortTipReorg(lca_depth)) {
-            return nullptr;
-        }
-        const CBlockIndex* const fork_child{
-            frontier_index->GetAncestor(lca->nHeight + 1)};
-        if (fork_child == nullptr || fork_child == tip ||
-            (fork_child->nStatus & BLOCK_FAILED_MASK) != 0) {
-            return nullptr;
-        }
-        if (!(fork_child->nStatus & BLOCK_HAVE_DATA) ||
-            !fork_child->IsValid(BLOCK_VALID_TRANSACTIONS) ||
-            !fork_child->HaveNumChainTxs()) {
-            return nullptr;
-        }
-        if (!node::matmul_trusted::HasQuorum(
-                fork_child->GetBlockHash(), fork_child->nHeight)) {
-            return nullptr;
-        }
-        return fork_child;
-    }
+    // fork. When the tip already has quorum, still adopt a unique
+    // competing attested HAVE_DATA index on a short reorg (1–6). Scan
+    // every frontier hint at a height (not last-writer) so a later
+    // loser MMATTEST cannot hide the winner.
+    const bool tip_has_quorum{node::matmul_trusted::HasQuorum(
+        tip->GetBlockHash(), tip->nHeight)};
 
     std::vector<const CBlockIndex*> competing;
     auto consider = [&](const CBlockIndex* idx) {
@@ -11030,6 +11034,14 @@ const CBlockIndex* ChainstateManager::FindUniqueCompetingAttestedIndex() const
         // Pending-attestation extensions of the active chain must not be
         // disconnected: the signer typically attests ~1 behind the tip.
         if (m_active_chainstate->m_chain.Contains(idx)) return;
+        if (tip_has_quorum) {
+            const CBlockIndex* const lca{LastCommonAncestor(tip, idx)};
+            if (lca == nullptr) return;
+            const int lca_depth{tip->nHeight - lca->nHeight};
+            if (!node::matmul_trusted::TrustedMirrorIsShortTipReorg(lca_depth)) {
+                return;
+            }
+        }
         competing.push_back(idx);
     };
     for (const auto& hint : node::matmul_trusted::AttestedFrontierHints()) {
@@ -11054,6 +11066,27 @@ const CBlockIndex* ChainstateManager::FindUniqueCompetingAttestedIndex() const
             return nullptr;
         }
         if (CBlockIndexWorkComparator()(unique, idx)) unique = idx;
+    }
+    if (unique == nullptr) return nullptr;
+    if (tip_has_quorum) {
+        const CBlockIndex* const lca{LastCommonAncestor(tip, unique)};
+        if (lca == nullptr) return nullptr;
+        const CBlockIndex* const fork_child{
+            unique->GetAncestor(lca->nHeight + 1)};
+        if (fork_child == nullptr || fork_child == tip ||
+            (fork_child->nStatus & BLOCK_FAILED_MASK) != 0) {
+            return nullptr;
+        }
+        if (!(fork_child->nStatus & BLOCK_HAVE_DATA) ||
+            !fork_child->IsValid(BLOCK_VALID_TRANSACTIONS) ||
+            !fork_child->HaveNumChainTxs()) {
+            return nullptr;
+        }
+        if (!node::matmul_trusted::HasQuorum(
+                fork_child->GetBlockHash(), fork_child->nHeight)) {
+            return nullptr;
+        }
+        return fork_child;
     }
     // Equal-work attested sibling (lost race) and more-work attested
     // chain (signer pulled ahead) must switch; less-work attested
@@ -11165,7 +11198,9 @@ bool ChainstateManager::IsAutomaticReorgRecoveryCandidate(
             BlockIndexComparable(other, candidate) ||
             BlockIndexDescends(other, active_tip) ||
             (other->nHeight <= active_tip->nHeight &&
-             active_tip->GetAncestor(other->nHeight) == other)) {
+             active_tip->GetAncestor(other->nHeight) == other) ||
+            (other->pprev == candidate->pprev &&
+             other->nHeight == candidate->nHeight)) {
             continue;
         }
         if (trusted) {
@@ -11281,7 +11316,9 @@ bool ChainstateManager::MaybeTrackReorgRecovery(const CBlockIndex* candidate)
                 BlockIndexComparable(other, candidate) ||
                 BlockIndexDescends(other, active_tip) ||
                 (other->nHeight <= active_tip->nHeight &&
-                 active_tip->GetAncestor(other->nHeight) == other)) {
+                 active_tip->GetAncestor(other->nHeight) == other) ||
+                (other->pprev == candidate->pprev &&
+                 other->nHeight == candidate->nHeight)) {
                 continue;
             }
             if (mode == static_cast<uint8_t>(

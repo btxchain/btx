@@ -868,6 +868,29 @@ BOOST_AUTO_TEST_CASE(authority_frontier_tracks_accepted_attestations)
     BOOST_CHECK_EQUAL(hints.back().height, 250);
     BOOST_CHECK(hints.back().hash == block_hi);
 
+    statement.block_hash = uint256::ONE;
+    statement.block_height = 250;
+    const auto att_twin{matmul::trusted::SignStatement(statement, a)};
+    BOOST_REQUIRE(att_twin);
+    BOOST_CHECK(node::matmul_trusted::Add(*att_twin, uint256::ONE, 250) ==
+                matmul::trusted::AddResult::Accepted);
+    const auto dual{node::matmul_trusted::AttestedFrontierHints()};
+    size_t at_250{0};
+    bool saw_hi{false};
+    bool saw_one{false};
+    for (const auto& hint : dual) {
+        if (hint.height != 250) continue;
+        ++at_250;
+        if (hint.hash == block_hi) saw_hi = true;
+        if (hint.hash == uint256::ONE) saw_one = true;
+    }
+    BOOST_CHECK_EQUAL(at_250, 2);
+    BOOST_CHECK(saw_hi);
+    BOOST_CHECK(saw_one);
+    BOOST_CHECK(node::matmul_trusted::HasCompetingQuorum(block_hi, 250));
+    BOOST_CHECK(node::matmul_trusted::HasCompetingQuorum(uint256::ONE, 250));
+    BOOST_CHECK(!node::matmul_trusted::HasCompetingQuorum(block_lo, 100));
+
     // Soft peer-tip hint can raise the raw high-water further.
     node::matmul_trusted::NoteAuthorityPeerTipHint(300);
     BOOST_CHECK_EQUAL(*node::matmul_trusted::AuthorityAttestedFrontier(), 300);
