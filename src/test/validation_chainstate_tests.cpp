@@ -2120,6 +2120,99 @@ BOOST_FIXTURE_TEST_CASE(chainstate_attested_tip_suffix_catchup_is_unique_competi
                 nullptr);
 }
 
+BOOST_FIXTURE_TEST_CASE(chainstate_fmwc_yields_on_attested_suffix_with_header_only_hole, TestChain100Setup)
+{
+    // Live 2026-08-15 (PR 105 comment 5302572644): an attested HAVE_DATA
+    // frontier whose path still had HEADER_ONLY holes was re-inserted by
+    // FindUniqueCompetingAttestedIndex after FindMostWorkChain erased it
+    // for missing data — b-msghand 100% in FindMostWorkChain, cs_main held.
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    Chainstate& chainstate = chainman.ActiveChainstate();
+    auto& mode = const_cast<kernel::MatMulValidationMode&>(
+        chainman.m_options.matmul_validation_mode);
+    const auto saved_mode{mode};
+    struct Restore {
+        kernel::MatMulValidationMode& mode;
+        kernel::MatMulValidationMode saved_mode;
+        ~Restore()
+        {
+            node::matmul_trusted::ResetForTest();
+            mode = saved_mode;
+        }
+    } restore{mode, saved_mode};
+    mode = kernel::MatMulValidationMode::CONSENSUS;
+
+    const CScript script = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    CBlockIndex* parent{WITH_LOCK(::cs_main, return chainstate.m_chain.Tip())};
+    BOOST_REQUIRE(parent != nullptr);
+    const uint256 parent_hash{parent->GetBlockHash()};
+    const int parent_height{parent->nHeight};
+
+    CKey signer;
+    signer.MakeNewKey(/*fCompressed=*/true);
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256::ONE;
+    config.replay_authority_context = uint256::FromHex(std::string(64, 'e')).value();
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    config.local_signer = signer;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/false, /*serve=*/false,
+        std::chrono::milliseconds{50}, error));
+
+    const CBlock child_block{CreateAndProcessBlock({}, script)};
+    const CBlock grand_block{CreateAndProcessBlock({}, script)};
+    CBlockIndex* child{
+        WITH_LOCK(::cs_main, return chainman.m_blockman.LookupBlockIndex(
+                                       child_block.GetHash()))};
+    CBlockIndex* grandchild{
+        WITH_LOCK(::cs_main, return chainman.m_blockman.LookupBlockIndex(
+                                       grand_block.GetHash()))};
+    BOOST_REQUIRE(child != nullptr && grandchild != nullptr);
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()) == grandchild);
+
+    BlockValidationState state;
+    BOOST_REQUIRE(chainstate.InvalidateBlock(state, grandchild));
+    state = BlockValidationState{};
+    BOOST_REQUIRE(chainstate.InvalidateBlock(state, child));
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()->GetBlockHash()) ==
+                  parent_hash);
+    {
+        LOCK(::cs_main);
+        chainstate.ResetBlockFailureFlags(grandchild);
+        chainstate.ResetBlockFailureFlags(child);
+        BOOST_REQUIRE(grandchild->nStatus & BLOCK_HAVE_DATA);
+        grandchild->nStatus &= ~BLOCK_FAILED_MASK;
+        child->nStatus &= ~BLOCK_FAILED_MASK;
+        child->nStatus &= ~BLOCK_HAVE_DATA;
+        child->nDataPos = 0;
+        chainstate.setBlockIndexCandidates.insert(grandchild);
+    }
+
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
+                      parent_hash, parent_height) ==
+                  matmul::trusted::AddResult::Accepted);
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
+                      grandchild->GetBlockHash(), grandchild->nHeight) ==
+                  matmul::trusted::AddResult::Accepted);
+
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(node::matmul_trusted::HasQuorum(
+            parent_hash, parent_height));
+        BOOST_REQUIRE(node::matmul_trusted::HasQuorum(
+            grandchild->GetBlockHash(), grandchild->nHeight));
+        BOOST_CHECK(chainman.FindUniqueCompetingAttestedIndex() == nullptr);
+        const CBlockIndex* most_work{chainstate.FindMostWorkChainForTest()};
+        BOOST_REQUIRE(most_work != nullptr);
+        BOOST_CHECK(most_work == parent || most_work == chainstate.m_chain.Tip());
+        for (int i = 0; i < 32; ++i) {
+            BOOST_REQUIRE(chainstate.FindMostWorkChainForTest() != nullptr);
+        }
+    }
+}
+
 BOOST_FIXTURE_TEST_CASE(chainstate_attested_tip_suffix_catchup_beats_short_reorg_competitor, TestChain100Setup)
 {
     // Live 2026-08-15 after 62721364: FindUniqueCompetingAttestedIndex

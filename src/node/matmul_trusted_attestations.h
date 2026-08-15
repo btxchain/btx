@@ -178,6 +178,39 @@ static constexpr int TRUSTED_MIRROR_ATTESTED_TIP_LOOKBACK{2};
     return lca_depth > 0 && lca_depth <= TRUSTED_MIRROR_SHORT_REORG_DEPTH;
 }
 
+/** True when `index` is a strict descendant of the active tip (catch-up
+ *  suffix). Same-height twins are not this: GetAncestor(tip) is the twin
+ *  itself. The 1879xx competing fork is not this either. Immediate
+ *  tip-children (`index_height == tip_height + 1`) also match; those
+ *  competing siblings stay HEADER_ONLY except the claimed/followed child. */
+[[nodiscard]] inline bool TrustedMirrorIndexExtendsActiveTip(
+    bool has_tip,
+    bool has_index,
+    int32_t index_height,
+    int32_t tip_height,
+    bool index_ancestor_at_tip_is_tip)
+{
+    return has_tip && has_index && index_height > tip_height &&
+           index_ancestor_at_tip_is_tip;
+}
+
+/** Catch-up suffix beyond the immediate tip-child (grandchildren+).
+ *  Trusted mirrors must persist / re-getdata these; HEADER_ONLY-skipping
+ *  them wedges FindMostWorkChain because the tip cannot move. Immediate
+ *  competing siblings are not this. */
+[[nodiscard]] inline bool TrustedMirrorIndexIsCatchUpSuffix(
+    bool has_tip,
+    bool has_index,
+    int32_t index_height,
+    int32_t tip_height,
+    bool index_ancestor_at_tip_is_tip)
+{
+    return TrustedMirrorIndexExtendsActiveTip(
+               has_tip, has_index, index_height, tip_height,
+               index_ancestor_at_tip_is_tip) &&
+           index_height > tip_height + 1;
+}
+
 /** FindMostWorkChain / candidate-set gate for any node that tracks a
  *  configured attestation quorum (trusted mirror, local signer, or
  *  consensus + -matmultrustedpubkey).

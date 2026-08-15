@@ -750,6 +750,7 @@ void BlockManager::PruneOneBlockFile(const int fileNumber)
                 std::multimap<CBlockIndex*, CBlockIndex*>::iterator _it = range.first;
                 range.first++;
                 if (_it->second == pindex) {
+                    m_blocks_unlinked_members.erase(pindex);
                     m_blocks_unlinked.erase(_it);
                 }
             }
@@ -1094,10 +1095,7 @@ void BlockManager::AddUnlinkedBlock(CBlockIndex* block)
     AssertLockHeld(cs_main);
     Assume(block != nullptr);
     Assume(block->nStatus & BLOCK_HAVE_DATA);
-    auto range = m_blocks_unlinked.equal_range(block->pprev);
-    for (auto it = range.first; it != range.second; ++it) {
-        if (it->second == block) return;
-    }
+    if (!m_blocks_unlinked_members.insert(block).second) return;
     m_blocks_unlinked.emplace(block->pprev, block);
 }
 

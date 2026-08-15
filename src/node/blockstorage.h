@@ -33,6 +33,7 @@
 #include <span>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -488,6 +489,10 @@ public:
      * Pruned nodes may have entries where B is missing data.
      */
     std::multimap<CBlockIndex*, CBlockIndex*> m_blocks_unlinked;
+    //! O(1) membership for AddUnlinkedBlock. Live 2026-08-15 (PR 105
+    //! comment 5302629744): same-parent sibling fan-out made the linear
+    //! equal_range dedupe dominate FindMostWorkChain (~46% of b-msghand).
+    std::unordered_set<CBlockIndex*> m_blocks_unlinked_members;
     void AddUnlinkedBlock(CBlockIndex* block) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     std::unique_ptr<BlockTreeDB> m_block_tree_db GUARDED_BY(::cs_main);

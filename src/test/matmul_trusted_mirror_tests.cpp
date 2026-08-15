@@ -656,6 +656,19 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(TrustedMirrorIsShortTipReorg(6));
     BOOST_CHECK(!TrustedMirrorIsShortTipReorg(7));
     BOOST_CHECK(!TrustedMirrorIsShortTipReorg(187975 - 187773));
+    using node::matmul_trusted::TrustedMirrorIndexExtendsActiveTip;
+    using node::matmul_trusted::TrustedMirrorIndexIsCatchUpSuffix;
+    BOOST_CHECK(!TrustedMirrorIndexExtendsActiveTip(
+        /*has_tip=*/false, /*has_index=*/true, 2, 1, true));
+    BOOST_CHECK(!TrustedMirrorIndexExtendsActiveTip(
+        true, true, /*index_height=*/100, /*tip_height=*/100, true));
+    BOOST_CHECK(!TrustedMirrorIndexExtendsActiveTip(
+        true, true, 101, 100, /*index_ancestor_at_tip_is_tip=*/false));
+    BOOST_CHECK(TrustedMirrorIndexExtendsActiveTip(true, true, 101, 100, true));
+    BOOST_CHECK(TrustedMirrorIndexExtendsActiveTip(true, true, 102, 100, true));
+    BOOST_CHECK(!TrustedMirrorIndexIsCatchUpSuffix(true, true, 101, 100, true));
+    BOOST_CHECK(TrustedMirrorIndexIsCatchUpSuffix(true, true, 102, 100, true));
+    BOOST_CHECK(!TrustedMirrorIndexIsCatchUpSuffix(true, true, 102, 100, false));
     using node::matmul_trusted::TrustedMirrorMaySelectMostWorkCandidate;
     BOOST_CHECK(TrustedMirrorMaySelectMostWorkCandidate(
         /*extends_active_tip_chain=*/true, /*short_tip_reorg=*/false,

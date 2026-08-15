@@ -9475,10 +9475,31 @@ CBlockIndex* Chainstate::FindMostWorkChain()
         hysteresis_deferred_candidates.clear();
     };
 
+    // Live 2026-08-15 (PR 105 comments 5302572644 / 5302645714): a
+    // trusted-mirror catch-up rescanned a bounded candidate set inside
+    // ProcessNewBlock with cs_main held, so GETMMATTEST never ran. Cap
+    // skip-continues so ActivateBestChain can yield. Do not treat this as
+    // unbounded set growth: the same hashes were retried (comment
+    // 5302645714).
+    constexpr size_t kFindMostWorkSkipBudget{128};
+    size_t skipped_count{0};
+    // Attestation store cannot change while cs_main is held. Scan once;
+    // re-calling per skip was 20% of the wedged profile (5302629744).
+    CBlockIndex* unique_abandon{const_cast<CBlockIndex*>(
+        m_chainman.FindUniqueCompetingAttestedIndex())};
+
     do {
         if (m_chainman.m_interrupt) {
             restore_hysteresis_deferred_candidates();
             return nullptr;
+        }
+        if (skipped_count >= kFindMostWorkSkipBudget) {
+            LogWarning(
+                "FindMostWorkChain: skip budget exhausted (%u); yielding so "
+                "RPC/net can complete\n",
+                static_cast<unsigned>(skipped_count));
+            restore_hysteresis_deferred_candidates();
+            return m_chain.Tip();
         }
         CBlockIndex *pindexNew = nullptr;
 
@@ -9492,8 +9513,7 @@ CBlockIndex* Chainstate::FindMostWorkChain()
             pindexNew = *it;
         }
 
-        if (CBlockIndex* abandon{const_cast<CBlockIndex*>(
-                m_chainman.FindUniqueCompetingAttestedIndex())}) {
+        if (unique_abandon) {
             // Unique competing attested HAVE_DATA: lost same-height race,
             // attested chain pulled ahead, heavier unattested fork,
             // dual-attested siblings with the signed frontier off this
@@ -9508,9 +9528,9 @@ CBlockIndex* Chainstate::FindMostWorkChain()
             // Erase+continue then FindUniqueCompetingAttestedIndex would
             // otherwise livelock FindMostWorkChain with cs_main held
             // (PR 105 comment 5301483741: b-initload 100% CPU, 0 peers).
-            if (skipped_this_call.count(abandon) == 0) {
-                pindexNew = abandon;
-                setBlockIndexCandidates.insert(abandon);
+            if (skipped_this_call.count(unique_abandon) == 0) {
+                pindexNew = unique_abandon;
+                setBlockIndexCandidates.insert(unique_abandon);
             }
         }
 
@@ -9532,6 +9552,7 @@ CBlockIndex* Chainstate::FindMostWorkChain()
                 !m_chainman.UnparkReorgBranchContainingBlock(pindexNew)) {
                 skipped_this_call.insert(pindexNew);
                 setBlockIndexCandidates.erase(pindexNew);
+                ++skipped_count;
                 continue;
             }
             LogWarning("%s: auto-unparked uniquely attested authority branch hash=%s height=%d (park-escape; unattested heavier rewrites stay parked)\n",
@@ -9544,6 +9565,7 @@ CBlockIndex* Chainstate::FindMostWorkChain()
                        pindexNew->nHeight);
             skipped_this_call.insert(pindexNew);
             setBlockIndexCandidates.erase(pindexNew);
+            ++skipped_count;
             continue;
         }
         if (!TrustedMirrorShouldConsiderMostWorkCandidate(m_chain.Tip(), pindexNew) &&
@@ -9553,6 +9575,7 @@ CBlockIndex* Chainstate::FindMostWorkChain()
                      pindexNew->GetBlockHash().ToString(), pindexNew->nHeight);
             skipped_this_call.insert(pindexNew);
             setBlockIndexCandidates.erase(pindexNew);
+            ++skipped_count;
             continue;
         }
 
@@ -9655,6 +9678,7 @@ CBlockIndex* Chainstate::FindMostWorkChain()
                 skipped_this_call.insert(pindexNew);
                 setBlockIndexCandidates.erase(pindexNew);
                 hysteresis_deferred_candidates.push_back(pindexNew);
+                ++skipped_count;
                 continue;
             }
         }
@@ -9752,6 +9776,7 @@ CBlockIndex* Chainstate::FindMostWorkChain()
                                    hysteresis_work_margin);
                         setBlockIndexCandidates.erase(pindexNew);
                         hysteresis_deferred_candidates.push_back(pindexNew);
+                        ++skipped_count;
                         continue;
                     }
                 }
@@ -9759,6 +9784,13 @@ CBlockIndex* Chainstate::FindMostWorkChain()
             restore_hysteresis_deferred_candidates();
             return pindexNew;
         }
+        // Missing-data / failed-ancestor: do not let
+        // FindUniqueCompetingAttestedIndex re-insert the same unconnectable
+        // HAVE_DATA descendant next iteration (PR 105 comment 5302572644:
+        // b-msghand 100% in FindMostWorkChain, HEADER_ONLY holes on the
+        // path to an attested frontier).
+        skipped_this_call.insert(pindexNew);
+        ++skipped_count;
     } while(true);
 }
 
@@ -11110,6 +11142,21 @@ const CBlockIndex* ChainstateManager::FindUniqueCompetingAttestedIndex() const
                 idx->GetBlockHash(), idx->nHeight)) {
             return;
         }
+        // HEADER_ONLY holes on the path to an attested HAVE_DATA frontier
+        // are unconnectable. Proposing them made FindMostWorkChain
+        // erase+re-insert forever with cs_main held (PR 105 5302572644).
+        {
+            const CBlockIndex* const path_lca{LastCommonAncestor(tip, idx)};
+            if (path_lca == nullptr) return;
+            for (const CBlockIndex* walk{idx->pprev};
+                 walk != nullptr && walk != path_lca; walk = walk->pprev) {
+                if (!(walk->nStatus & BLOCK_HAVE_DATA) ||
+                    !walk->IsValid(BLOCK_VALID_TRANSACTIONS) ||
+                    !walk->HaveNumChainTxs()) {
+                    return;
+                }
+            }
+        }
         // Pending-attestation extensions of the active chain must not be
         // disconnected: the signer typically attests ~1 behind the tip.
         if (m_active_chainstate->m_chain.Contains(idx)) return;
@@ -11765,6 +11812,7 @@ void ChainstateManager::ReceivedBlockTransactions(const CBlock& block, CBlockInd
                 std::multimap<CBlockIndex*, CBlockIndex*>::iterator it = range.first;
                 queue.push_back(it->second);
                 range.first++;
+                m_blockman.m_blocks_unlinked_members.erase(it->second);
                 m_blockman.m_blocks_unlinked.erase(it);
             }
         }

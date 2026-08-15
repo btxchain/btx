@@ -3655,6 +3655,15 @@ static bool TrustedMirrorMayDownloadIndex(
 {
     if (index == nullptr) return false;
     if (IndexIsFollowedTipChild(chainman, tip, index)) return false;
+    // Live 2026-08-15 (PR 105 comment 5302572644): HEADER_ONLY skip of
+    // tip-extending grandchildren froze getdata while the tip could not
+    // move. Immediate competing siblings stay suppressed.
+    if (node::matmul_trusted::TrustedMirrorIndexIsCatchUpSuffix(
+            tip != nullptr, true, index->nHeight,
+            tip != nullptr ? tip->nHeight : 0,
+            tip != nullptr && index->GetAncestor(tip->nHeight) == tip)) {
+        return false;
+    }
     return competing.count(index->GetBlockHash()) != 0 ||
            followed_skip.count(index->GetBlockHash()) != 0;
 }
@@ -10812,10 +10821,20 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
                                 indexed != nullptr &&
                                 ClaimConfiguredUnattestedTipChildBody(
                                     m_chainman, tip, indexed)};
+                            const bool persist_catchup_suffix{
+                                indexed != nullptr && tip != nullptr &&
+                                !m_chainman.IsOnParkedReorgBranch(indexed) &&
+                                node::matmul_trusted::TrustedMirrorIndexIsCatchUpSuffix(
+                                    true, true, indexed->nHeight, tip->nHeight,
+                                    indexed->GetAncestor(tip->nHeight) == tip)};
                             if (persist_unattested_tip_child ||
-                                persist_unrequested_followed) {
+                                persist_unrequested_followed ||
+                                persist_catchup_suffix) {
                                 // Persist without GPU: ConnectTip / background
                                 // chainstate still require quorum for Profile-1.
+                                // Catch-up grandchildren are not competing
+                                // siblings; HEADER_ONLY-skipping them wedges
+                                // the tip (PR 105 comment 5302572644).
                             } else {
                                 skip_competing_exactreplay = true;
                                 header_only_competing_first =
