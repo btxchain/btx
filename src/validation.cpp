@@ -11062,6 +11062,26 @@ const CBlockIndex* ChainstateManager::FindUniqueCompetingAttestedIndex() const
         consider(idx);
     }
 
+    if (tip_has_quorum) {
+        std::vector<const CBlockIndex*> suffix;
+        suffix.reserve(competing.size());
+        for (const CBlockIndex* idx : competing) {
+            const CBlockIndex* const lca{LastCommonAncestor(tip, idx)};
+            if (lca == tip && idx->nHeight > tip->nHeight) {
+                suffix.push_back(idx);
+            }
+        }
+        // Live 2026-08-15: quorum tip 189675 893c7c9b had unique attested
+        // HAVE_DATA child fecb5b4f, but attested HAVE_DATA 19625a1e (child
+        // of competing 189675 1fbccf3f) sat in the short-reorg window.
+        // Uniqueness then bailed, GBT kept mining, and ABC never caught
+        // up. Prefer the attested suffix of this quorum tip over a
+        // short-reorg away from it.
+        if (!suffix.empty()) {
+            competing = std::move(suffix);
+        }
+    }
+
     const CBlockIndex* unique{nullptr};
     for (const CBlockIndex* idx : competing) {
         if (unique == nullptr) {
