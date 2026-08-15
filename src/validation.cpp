@@ -9466,6 +9466,10 @@ CBlockIndex* Chainstate::FindMostWorkChain()
     };
 
     do {
+        if (m_chainman.m_interrupt) {
+            restore_hysteresis_deferred_candidates();
+            return nullptr;
+        }
         CBlockIndex *pindexNew = nullptr;
 
         // Find the best candidate header.
@@ -11261,6 +11265,15 @@ bool ChainstateManager::ShouldDeferLosingTipExtension(
     AssertLockHeld(::cs_main);
     if (!m_reorg_recovery.has_value() || candidate == nullptr ||
         m_active_chainstate == nullptr) {
+        return false;
+    }
+    // Live 2026-08-15: unique attested HAVE_DATA suffix of the current
+    // quorum tip (189676 fecb5b4f) was also classified as a losing-tip
+    // extension because recovery was armed on a competing 189675.
+    // FindMostWorkChain then erased it and looped, wedging ABC / RPC.
+    // Catch-up / unique attested abandon must not be frozen by that
+    // barrier.
+    if (IsAttestedAbandonForkCandidate(candidate)) {
         return false;
     }
     const CBlockIndex* const active_tip{m_active_chainstate->m_chain.Tip()};

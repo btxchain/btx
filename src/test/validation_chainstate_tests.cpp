@@ -2100,6 +2100,7 @@ BOOST_FIXTURE_TEST_CASE(chainstate_attested_tip_suffix_catchup_beats_short_reorg
             child->GetBlockHash(), child->nHeight));
         BOOST_CHECK_EQUAL(chainman.FindUniqueCompetingAttestedIndex(), child);
         BOOST_CHECK(chainman.IsAttestedAbandonForkCandidate(child));
+        BOOST_CHECK(!chainman.ShouldDeferLosingTipExtension(child));
         BOOST_CHECK_EQUAL(chainstate.m_chain.Tip()->GetBlockHash(), parent_hash);
     }
 
