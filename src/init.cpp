@@ -359,6 +359,43 @@ void Shutdown(NodeContext& node)
     // this; calling it again is idempotent. Doing it here covers the path
     // where Shutdown() runs without Interrupt() (failed init / Qt).
     if (node.peerman) node.peerman->StopBackgroundWorkers();
+
+    // Durable chainstate must be recorded BEFORE StopHTTPServer joins RPC
+    // workers. A stuck submitblock / ActivateBestChain drain previously made
+    // that join unbounded, so the final ForceFlushStateToDisk below was never
+    // reached (live 2026-08-15: 17-block reorg, force-kill, in-memory tip not
+    // on disk). Do not SyncWithValidationInterfaceQueue here: that is the
+    // same unbounded wait. ChainStateFlushed callbacks stay asynchronous.
+    auto flush_chainstate_for_shutdown = [&](const char* reason) {
+        if (!node.chainman) return;
+        LOCK(cs_main);
+        for (Chainstate* chainstate : node.chainman->GetAll()) {
+            if (chainstate->CanFlushToDisk()) {
+                chainstate->CoinsDB().DisableNewCompaction();
+                chainstate->ForceFlushStateToDisk();
+            }
+        }
+        if (node.chainman->HasShieldedState()) {
+            const CBlockIndex* const tip{node.chainman->ActiveTip()};
+            if (node.chainman->HasDurableShieldedSnapshotAt(tip)) {
+                LogPrintf("Shutdown: shielded state already sealed at tip height=%d hash=%s (%s)\n",
+                          tip ? tip->nHeight : -1,
+                          tip ? tip->GetBlockHash().ToString() : uint256{}.ToString(),
+                          reason);
+            } else if (!node.chainman->PersistShieldedState(tip)) {
+                LogPrintf("Shutdown: PersistShieldedState failed while sealing shielded tip (%s); "
+                          "next start may rebuild shielded state from chain\n",
+                          reason);
+            } else {
+                LogPrintf("Shutdown: sealed shielded state at tip height=%d hash=%s (%s)\n",
+                          tip ? tip->nHeight : -1,
+                          tip ? tip->GetBlockHash().ToString() : uint256{}.ToString(),
+                          reason);
+            }
+        }
+    };
+    flush_chainstate_for_shutdown("before HTTP worker join");
+
     StopHTTPRPC();
     StopREST();
     StopRPC();
@@ -386,7 +423,7 @@ void Shutdown(NodeContext& node)
     if (node.autoupdate) node.autoupdate->Stop();
     // Join MatMul verify workers while the scheduler is still running.
     // Completions call ProcessBlockSync → ActivateBestChain →
-    // SyncWithValidationInterfaceQueue. Stopping the scheduler first
+    // TrySyncWithValidationInterfaceQueue. Stopping the scheduler first
     // deadlocks b-shutoff against b-mmverify and skips PersistShieldedState.
     if (node.peerman) node.peerman->StopBackgroundWorkers();
     // After everything has been shut down, but before things get flushed, stop the
@@ -420,38 +457,7 @@ void Shutdown(NodeContext& node)
     }
 
     // FlushStateToDisk generates a ChainStateFlushed callback, which we should avoid missing
-    if (node.chainman) {
-        LOCK(cs_main);
-        for (Chainstate* chainstate : node.chainman->GetAll()) {
-            if (chainstate->CanFlushToDisk()) {
-                // FlushStateToDisk already skips CompactFull when m_chainman.m_interrupt
-                // is set. DisableNewCompaction covers Shutdown() without Interrupt()
-                // (failed init / Qt) so a shutdown flush cannot start a new CompactFull.
-                chainstate->CoinsDB().DisableNewCompaction();
-                chainstate->ForceFlushStateToDisk();
-            }
-        }
-        // §11: seal tip-matched shielded state on graceful stop so a leftover
-        // PREPARED/legacy mutation marker cannot force a multi-hour
-        // from-genesis rebuild on the next start. Skip a second full-tree
-        // fsync when ConnectTip already sealed this tip — that rewrite is what
-        // hung archive shutdowns until systemd SIGKILL.
-        if (node.chainman->HasShieldedState()) {
-            const CBlockIndex* const tip{node.chainman->ActiveTip()};
-            if (node.chainman->HasDurableShieldedSnapshotAt(tip)) {
-                LogPrintf("Shutdown: shielded state already sealed at tip height=%d hash=%s; skipping rewrite\n",
-                          tip ? tip->nHeight : -1,
-                          tip ? tip->GetBlockHash().ToString() : uint256{}.ToString());
-            } else if (!node.chainman->PersistShieldedState(tip)) {
-                LogPrintf("Shutdown: PersistShieldedState failed while sealing shielded tip; "
-                          "next start may rebuild shielded state from chain\n");
-            } else {
-                LogPrintf("Shutdown: sealed shielded state at tip height=%d hash=%s\n",
-                          tip ? tip->nHeight : -1,
-                          tip ? tip->GetBlockHash().ToString() : uint256{}.ToString());
-            }
-        }
-    }
+    flush_chainstate_for_shutdown("after scheduler stop");
 
     // After there are no more peers/RPC left to give us new data which may generate
     // CValidationInterface callbacks, flush them...

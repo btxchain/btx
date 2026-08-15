@@ -237,20 +237,25 @@ static constexpr int TRUSTED_MIRROR_ATTESTED_TIP_LOOKBACK{2};
  *  configured attestation quorum (trusted mirror, local signer, or
  *  consensus + -matmultrustedpubkey).
  *
- *  Tip-extending HAVE_DATA must always remain selectable: that is how the
- *  node catches up after a short reorg once the new parent is the tip.
- *  Selection is not the connect gate: TrustedMirrorMustDeferUnattestedConnect
- *  still refuses ConnectTip of an unattested Profile-1 block on a trusted
- *  mirror. A short attested tip-race (LCA depth 1–6 with quorum) may replace
- *  an *unattested* tip so a lost same-height sibling can converge.
+ *  Immediate unattested tip-children stay selectable (HAVE_DATA
+ *  chicken-egg). Unattested grandchildren / pre-built towers are not:
+ *  once the signer connected the wrong twin, the tower became
+ *  "tip-extending" and was attested as a stack (live 2026-08-15 190354
+ *  and the 67-block 190333–190400 fork). Selection is not the connect
+ *  gate: TrustedMirrorMustDeferUnattestedConnect still refuses ConnectTip
+ *  of an unattested Profile-1 block on a trusted mirror. A short attested
+ *  tip-race (LCA depth 1–6 with quorum) may replace an *unattested* tip so
+ *  a lost same-height sibling can converge.
  *
  *  Never reorg away a tip that already has quorum via this gate. Live
  *  2026-08-13: the signer followed a heavier 4-block competing fork at
  *  187795, signed it, and every mirror treated that as an attested short
  *  race. Competing then extended as "tip-extending" to 18781x.
  *
- *  Dual-attested same-height siblings (live 2026-08-15: both 189489
- *  hashes signed, mirrors stranded on the loser) are recovered by
+ *  Never select an unattested candidate that would disconnect a quorum
+ *  ancestor, or that shares a height with a different already-attested
+ *  hash (dual-attest mint). Dual-attested same-height siblings (legacy:
+ *  both 189489 hashes signed) are recovered by
  *  FindUniqueCompetingAttestedIndex following the signed frontier, not
  *  by this gate.
  *
@@ -261,9 +266,16 @@ static constexpr int TRUSTED_MIRROR_ATTESTED_TIP_LOOKBACK{2};
     bool extends_active_tip_chain,
     bool short_tip_reorg,
     bool has_quorum,
-    bool active_tip_has_quorum = false)
+    bool active_tip_has_quorum = false,
+    bool immediate_tip_child = true,
+    bool would_abandon_attested = false,
+    bool competing_attested_height = false)
 {
-    if (extends_active_tip_chain) return true;
+    if (would_abandon_attested && !has_quorum) return false;
+    if (competing_attested_height && !has_quorum) return false;
+    if (extends_active_tip_chain) {
+        return has_quorum || immediate_tip_child;
+    }
     if (active_tip_has_quorum) return false;
     return short_tip_reorg && has_quorum;
 }
@@ -278,6 +290,16 @@ static constexpr int TRUSTED_MIRROR_ATTESTED_TIP_LOOKBACK{2};
     bool has_quorum)
 {
     return trusted_mirror_profile1 && !has_quorum;
+}
+
+/** CONSENSUS signer / configured node: never ConnectTip an unattested
+ *  hash at a height that already has quorum on a different hash. */
+[[nodiscard]] inline bool MustDeferConflictingAttestedHeight(
+    bool configured,
+    bool candidate_has_quorum,
+    bool competing_attested_height)
+{
+    return configured && !candidate_has_quorum && competing_attested_height;
 }
 
 /** True when an alternate index may defer an unattested most-work candidate.

@@ -140,6 +140,8 @@ enum class AddResult : uint8_t {
     UntrustedSigner,
     InvalidSignature,
     NoLocalSigner,
+    /** Local signer already attested a different hash at this height. */
+    HeightOccupied,
 };
 
 [[nodiscard]] std::string_view AddResultName(AddResult result);

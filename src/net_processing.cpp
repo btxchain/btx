@@ -2817,15 +2817,33 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
             LOCK(cs_main);
             const CBlockIndex* const tip{m_chainman.ActiveChain().Tip()};
             const CBlockIndex* const followed{m_chainman.m_best_header};
+            CBlockIndex* child{nullptr};
             if (tip != nullptr && followed != nullptr &&
                 followed->nHeight > tip->nHeight &&
                 followed->GetAncestor(tip->nHeight) == tip) {
-                CBlockIndex* const child{const_cast<CBlockIndex*>(
-                    followed->GetAncestor(tip->nHeight + 1))};
-                if (IndexIsFollowedTipChild(m_chainman, tip, child) &&
-                    (child->nStatus & BLOCK_HAVE_DATA) != 0 &&
-                    (child->nStatus & BLOCK_FAILED_MASK) == 0 &&
-                    !m_chainman.ActiveChain().Contains(child)) {
+                child = const_cast<CBlockIndex*>(
+                    followed->GetAncestor(tip->nHeight + 1));
+            }
+            if ((child == nullptr ||
+                 !m_chainman.IndexIsAttestedChainTipChild(tip, child)) &&
+                node::matmul_trusted::HasLocalSigner() && tip != nullptr) {
+                child = nullptr;
+                for (CBlockIndex* candidate :
+                     m_chainman.ActiveChainstate().setBlockIndexCandidates) {
+                    if (m_chainman.IndexIsAttestedChainTipChild(tip, candidate) &&
+                        (candidate->nStatus & BLOCK_HAVE_DATA) != 0 &&
+                        (candidate->nStatus & BLOCK_FAILED_MASK) == 0 &&
+                        !m_chainman.ActiveChain().Contains(candidate)) {
+                        child = candidate;
+                        break;
+                    }
+                }
+            }
+            if (child != nullptr &&
+                m_chainman.IndexIsAttestedChainTipChild(tip, child) &&
+                (child->nStatus & BLOCK_HAVE_DATA) != 0 &&
+                (child->nStatus & BLOCK_FAILED_MASK) == 0 &&
+                !m_chainman.ActiveChain().Contains(child)) {
                     if (m_chainman.IsOnParkedReorgBranch(child)) {
                         (void)m_chainman.UnparkReorgBranchContainingBlock(child);
                     }
@@ -2840,7 +2858,6 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
                     if (!m_chainman.m_blockman.ReadBlock(*replay_block, *child)) {
                         replay_block.reset();
                     }
-                }
             }
         }
         static std::atomic<int64_t> g_followed_tip_child_replay_at{0};
@@ -3654,6 +3671,7 @@ static bool TrustedMirrorMayDownloadIndex(
     EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
     if (index == nullptr) return false;
+    if (chainman.IndexIsAttestedChainTipChild(tip, index)) return false;
     if (IndexIsFollowedTipChild(chainman, tip, index)) return false;
     // Live 2026-08-15 (PR 105 comment 5302572644): HEADER_ONLY skip of
     // tip-extending grandchildren froze getdata while the tip could not
@@ -3703,6 +3721,10 @@ static uint256 g_configured_claimed_tip_child{};
 {
     if (tip == nullptr || index == nullptr) return false;
     if (index->pprev != tip) return false;
+    if (node::matmul_trusted::HasCompetingQuorum(
+            index->GetBlockHash(), index->nHeight)) {
+        return false;
+    }
     const bool followed_child{IndexIsFollowedTipChild(chainman, tip, index)};
     if (!followed_child &&
         ConfiguredTipChildAlreadyHasBody(chainman, tip, index)) {
@@ -3778,11 +3800,13 @@ static uint256 g_configured_claimed_tip_child{};
                     chainman.FindUniqueCompetingAttestedIndex()};
                 if (catch_up == index) return true;
             }
-            // Followed validator-chain tip-child steals the GPU slot from a
-            // competing unattested sibling (live 2026-08-15: 2fd67f18 vs
-            // 14c0d0e4 at 189686). HEADER_ONLY remains for hashes that are
-            // not on m_best_header's tip-extending path.
-            if (IndexIsFollowedTipChild(chainman, tip, index)) {
+            // Attested-chain tip-child (followed, or the remaining child
+            // when m_best_header sits on a competing fork) steals the GPU
+            // slot from a competing unattested sibling. HEADER_ONLY remains
+            // for hashes that conflict with an existing attestation at this
+            // height or that are not on the attested-chain progress path.
+            if (chainman.IndexIsAttestedChainTipChild(tip, index) &&
+                IndexIsFollowedTipChild(chainman, tip, index)) {
                 g_configured_claimed_tip_child = index->GetBlockHash();
                 return true;
             }
@@ -16974,7 +16998,14 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
 
             // If a snapshot chainstate is in use, we want to find its next blocks
             // before the background chainstate to prioritize getting to network tip.
-            FindNextBlocksToDownload(*peer, get_inflight_budget(), vToDownload, staller, pto->HasPermission(NetPermissionFlags::Download));
+            // noban implies Download, which used to request genesis-era
+            // bodies from NODE_NETWORK_LIMITED-only peers (PR 105 comment
+            // 5304646070: tip=0 assigned height 1, then disconnected on
+            // timeout). Historical fetch still requires a full NODE_NETWORK
+            // peer; Download only relaxes the window for those.
+            FindNextBlocksToDownload(*peer, get_inflight_budget(), vToDownload, staller,
+                /*allow_limited_historical=*/pto->HasPermission(NetPermissionFlags::Download) &&
+                    !IsLimitedPeer(*peer));
             // Defer genesis→snapshot historical downloads while the active
             // (snapshot) chain is still catching up to network tip. Sharing the
             // per-peer inflight budget with background IBD starves tip catch-up

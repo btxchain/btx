@@ -214,6 +214,12 @@ BOOST_AUTO_TEST_CASE(config_validation_and_local_signer)
                 REPLAY_AUTHORITY_CONTEXT);
     BOOST_CHECK(store.LocalSignerPubKey() == keys[0].GetPubKey());
     BOOST_CHECK(!store.HasQuorum(TestHash(0x32), 7));
+    BOOST_CHECK(store.SignLocal(TestHash(0x33), 7) == AddResult::HeightOccupied);
+    BOOST_CHECK(store.SignLocal(TestHash(0x32), 7) == AddResult::Duplicate);
+    // A dual-attest already on the wire must still load. Minting stays refused.
+    BOOST_CHECK(store.Add(MustSign(MakeStatement(chain, TestHash(0x33), 7), keys[0]),
+                         TestHash(0x33), 7) == AddResult::Accepted);
+    BOOST_CHECK(store.SignLocal(TestHash(0x34), 7) == AddResult::HeightOccupied);
 
     auto no_local{MakeConfig(chain, keys, 1)};
     AttestationStore no_local_store{no_local};

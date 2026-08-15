@@ -934,6 +934,13 @@ matmul::trusted::AddResult SignAuthoritative(
 {
     auto store{Store()};
     if (!store) return matmul::trusted::AddResult::NoLocalSigner;
+    // Never mint a second local signature at a height that already has
+    // quorum on a different hash (live 2026-08-15: 94f70747 then a9590c15
+    // at 190354). In-memory hints cover the hot window; SignLocal also
+    // refuses against the store's own buckets.
+    if (HasCompetingQuorum(block_hash, block_height)) {
+        return matmul::trusted::AddResult::HeightOccupied;
+    }
     matmul::trusted::ExactReplayAttestation signed_attestation;
     const auto result{
         store->SignLocal(block_hash, block_height, &signed_attestation)};

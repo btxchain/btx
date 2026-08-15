@@ -88,6 +88,7 @@
 #include <chrono>
 #include <cinttypes>
 #include <deque>
+#include <functional>
 #include <limits>
 #include <list>
 #include <numeric>
@@ -9255,6 +9256,24 @@ static constexpr const char* RETRYABLE_MATMUL_ACTIVATION_PREFIX =
             pindex->GetBlockHash(), pindex->nHeight));
 }
 
+[[nodiscard]] static bool MustDeferConflictingAttestedConnect(
+    const ChainstateManager& chainman, const CBlockIndex* pindex)
+    EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+{
+    if (pindex == nullptr) return false;
+    if (!node::matmul_trusted::IsConfigured()) return false;
+    if (!chainman.GetConsensus().IsMatMulTrustedReplayAttestationActive(
+            pindex->nHeight)) {
+        return false;
+    }
+    const bool has_quorum{node::matmul_trusted::HasQuorum(
+        pindex->GetBlockHash(), pindex->nHeight)};
+    return node::matmul_trusted::MustDeferConflictingAttestedHeight(
+        /*configured=*/true, has_quorum,
+        node::matmul_trusted::HasCompetingQuorum(
+            pindex->GetBlockHash(), pindex->nHeight));
+}
+
 /**
  * Connect a new block to m_chain. pblock is either nullptr or a pointer to a CBlock
  * corresponding to pindexNew, to bypass loading it again from disk.
@@ -9282,6 +9301,14 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
                  pindexNew->GetBlockHash().ToString(), pindexNew->nHeight);
         return state.Error(std::string(RETRYABLE_MATMUL_ACTIVATION_PREFIX) +
                            ": trusted attestation quorum Timeout");
+    }
+    if (MustDeferConflictingAttestedConnect(m_chainman, pindexNew)) {
+        LogDebug(BCLog::VALIDATION,
+                 "ConnectTip: refusing unattested hash=%s height=%d; another "
+                 "hash at this height already has attestation quorum\n",
+                 pindexNew->GetBlockHash().ToString(), pindexNew->nHeight);
+        return state.Error(std::string(RETRYABLE_MATMUL_ACTIVATION_PREFIX) +
+                           ": conflicting attested height");
     }
     // Genesis (height 0) must still connect so LoadChainTip can attach the
     // chain. After that, honor shutdown before ReadBlock / ConnectBlock so
@@ -9453,14 +9480,32 @@ static bool TrustedMirrorShouldConsiderMostWorkCandidate(
     const bool extends_tip{
         candidate->nHeight >= tip->nHeight &&
         candidate->GetAncestor(tip->nHeight) == tip};
+    const bool immediate_tip_child{
+        candidate->pprev == tip &&
+        candidate->nHeight == tip->nHeight + 1};
     const CBlockIndex* lca{LastCommonAncestor(tip, candidate)};
     const int lca_depth{lca != nullptr ? tip->nHeight - lca->nHeight : 0};
+    bool would_abandon_attested{false};
+    if (lca != nullptr && candidate != tip) {
+        for (const CBlockIndex* walk{tip}; walk != nullptr && walk != lca;
+             walk = walk->pprev) {
+            if (node::matmul_trusted::HasQuorumInMemory(
+                    walk->GetBlockHash(), walk->nHeight)) {
+                would_abandon_attested = true;
+                break;
+            }
+        }
+    }
     return node::matmul_trusted::TrustedMirrorMaySelectMostWorkCandidate(
         extends_tip,
         node::matmul_trusted::TrustedMirrorIsShortTipReorg(lca_depth),
         node::matmul_trusted::HasQuorum(
             candidate->GetBlockHash(), candidate->nHeight),
-        node::matmul_trusted::HasQuorum(tip->GetBlockHash(), tip->nHeight));
+        node::matmul_trusted::HasQuorum(tip->GetBlockHash(), tip->nHeight),
+        immediate_tip_child,
+        would_abandon_attested,
+        node::matmul_trusted::HasCompetingQuorum(
+            candidate->GetBlockHash(), candidate->nHeight));
 }
 
 CBlockIndex* Chainstate::FindMostWorkChain()
@@ -9575,6 +9620,15 @@ CBlockIndex* Chainstate::FindMostWorkChain()
                      pindexNew->GetBlockHash().ToString(), pindexNew->nHeight);
             skipped_this_call.insert(pindexNew);
             setBlockIndexCandidates.erase(pindexNew);
+            // Equal-work HAVE_DATA tip-twins stay in the set across the call
+            // (headers-only attested sibling still needs the body later).
+            // Heavier unattested competing towers stay evicted.
+            const bool keep_have_data_tip_twin{
+                m_chain.Tip() != nullptr && pindexNew->pprev == m_chain.Tip() &&
+                pindexNew->nHeight == m_chain.Tip()->nHeight + 1};
+            if (keep_have_data_tip_twin) {
+                hysteresis_deferred_candidates.push_back(pindexNew);
+            }
             ++skipped_count;
             continue;
         }
@@ -9612,7 +9666,9 @@ CBlockIndex* Chainstate::FindMostWorkChain()
             const CBlockIndex* attested_sibling{nullptr};
             const bool consensus_followed_tip_child{
                 !node::matmul_trusted::IsTrustedMirror() &&
-                m_chainman.IndexIsFollowedTipChild(tip, pindexNew)};
+                m_chainman.IndexIsFollowedTipChild(tip, pindexNew) &&
+                !node::matmul_trusted::HasCompetingQuorum(
+                    pindexNew->GetBlockHash(), pindexNew->nHeight)};
             if (extends_tip && !has_quorum && !consensus_followed_tip_child) {
                 auto consider_attested_tip_child = [&](const CBlockIndex* alt) {
                     if (alt == nullptr) return false;
@@ -10151,26 +10207,72 @@ bool ChainstateManager::NotifyHeaderTip()
     return fNotify;
 }
 
-static void LimitValidationInterfaceQueue(ValidationSignals& signals) LOCKS_EXCLUDED(cs_main) {
+//! Backpressure only: a 17-block reorg enqueues more than this many
+//! BlockDisconnected + BlockConnected events, which used to force an
+//! unbounded SyncWithValidationInterfaceQueue in ActivateBestChain.
+static constexpr size_t VALIDATION_INTERFACE_DRAIN_THRESHOLD{10};
+//! Stuck subscribers must not pin ABC / submitblock / shutdown. Five seconds
+//! is enough for a healthy queue to drain a deep-reorg burst; on timeout
+//! activation continues and notifications stay asynchronous.
+static constexpr auto VALIDATION_INTERFACE_DRAIN_TIMEOUT{std::chrono::seconds{5}};
+
+static const char* ValidationQueueSyncResultName(ValidationQueueSyncResult result)
+{
+    switch (result) {
+    case ValidationQueueSyncResult::Completed: return "completed";
+    case ValidationQueueSyncResult::TimedOut: return "timeout";
+    case ValidationQueueSyncResult::Interrupted: return "shutdown";
+    }
+    return "unknown";
+}
+
+static void LimitValidationInterfaceQueue(
+    ValidationSignals& signals,
+    const std::function<bool()>& interrupted) LOCKS_EXCLUDED(cs_main)
+{
     AssertLockNotHeld(cs_main);
 
-    if (signals.CallbacksPending() > 10) {
-        signals.SyncWithValidationInterfaceQueue();
+    if (signals.CallbacksPending() <= VALIDATION_INTERFACE_DRAIN_THRESHOLD) {
+        return;
+    }
+    const auto result{signals.TrySyncWithValidationInterfaceQueue(
+        VALIDATION_INTERFACE_DRAIN_TIMEOUT, interrupted)};
+    if (result != ValidationQueueSyncResult::Completed) {
+        LogWarning("validation-interface queue did not drain (%s, pending=%d); "
+                   "continuing without waiting for subscribers\n",
+                   ValidationQueueSyncResultName(result),
+                   signals.CallbacksPending());
     }
 }
 
 //! Drain the validation-interface queue without holding m_chainstate_mutex.
 //! Syncing while that mutex is held deadlocks against net/RPC ActivateBestChain
-//! (scheduler callbacks vs the thread blocked in Sync).
+//! (scheduler callbacks vs the thread blocked in Sync). A stuck subscriber
+//! must not make this wait unbounded (live 2026-08-15: 17-block reorg hung
+//! submitblock, then Shutdown joined those HTTP workers before the durable
+//! chainstate flush).
 template <typename MutexType>
-static void DrainValidationInterfaceQueue(ValidationSignals& signals, UniqueLock<MutexType>& chainstate_lock)
+static void DrainValidationInterfaceQueue(
+    ValidationSignals& signals,
+    UniqueLock<MutexType>& chainstate_lock,
+    const std::function<bool()>& interrupted)
     LOCKS_EXCLUDED(cs_main)
 {
     AssertLockNotHeld(cs_main);
-    if (signals.CallbacksPending() <= 10) return;
+    if (signals.CallbacksPending() <= VALIDATION_INTERFACE_DRAIN_THRESHOLD) {
+        return;
+    }
     Assert(chainstate_lock.owns_lock());
     REVERSE_LOCK(chainstate_lock);
-    signals.SyncWithValidationInterfaceQueue();
+    const auto result{signals.TrySyncWithValidationInterfaceQueue(
+        VALIDATION_INTERFACE_DRAIN_TIMEOUT, interrupted)};
+    if (result != ValidationQueueSyncResult::Completed) {
+        LogWarning("ActivateBestChain: validation-interface queue did not drain "
+                   "(%s, pending=%d); continuing activation without waiting for "
+                   "subscribers\n",
+                   ValidationQueueSyncResultName(result),
+                   signals.CallbacksPending());
+    }
 }
 
 bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<const CBlock> pblock)
@@ -10210,7 +10312,10 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
         // ActivateBestChain this may lead to a deadlock! We should
         // probably have a DEBUG_LOCKORDER test for this in the future.
         if (m_chainman.m_options.signals) {
-            DrainValidationInterfaceQueue(*m_chainman.m_options.signals, chainstate_lock);
+            DrainValidationInterfaceQueue(
+                *m_chainman.m_options.signals,
+                chainstate_lock,
+                [&] { return bool(m_chainman.m_interrupt); });
             if (WITH_LOCK(::cs_main, return m_disabled)) {
                 LogPrintf("m_disabled is set - this chainstate should not be in operation. "
                     "Please report this as a bug. %s\n", CLIENT_BUGREPORT);
@@ -10601,7 +10706,9 @@ bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex* pinde
     }
     if (m_chainman.m_options.signals) {
         REVERSE_LOCK(chainstate_lock);
-        LimitValidationInterfaceQueue(*m_chainman.m_options.signals);
+        LimitValidationInterfaceQueue(
+            *m_chainman.m_options.signals,
+            [&] { return bool(m_chainman.m_interrupt); });
     }
     return true;
 }
@@ -11388,6 +11495,40 @@ bool ChainstateManager::IndexIsFollowedTipChild(
            followed->nHeight >= index->nHeight &&
            followed->GetAncestor(tip->nHeight) == tip &&
            followed->GetAncestor(index->nHeight) == index;
+}
+
+bool ChainstateManager::BestHeaderExtendsTip(const CBlockIndex* tip) const
+{
+    AssertLockHeld(::cs_main);
+    if (tip == nullptr || m_best_header == nullptr) return false;
+    return m_best_header->nHeight >= tip->nHeight &&
+           m_best_header->GetAncestor(tip->nHeight) == tip;
+}
+
+bool ChainstateManager::IndexIsAttestedChainTipChild(
+    const CBlockIndex* tip, const CBlockIndex* index) const
+{
+    AssertLockHeld(::cs_main);
+    if (tip == nullptr || index == nullptr || index->pprev != tip) return false;
+    if ((index->nStatus & BLOCK_FAILED_MASK) != 0) return false;
+    if (node::matmul_trusted::IsConfigured() &&
+        node::matmul_trusted::HasCompetingQuorum(
+            index->GetBlockHash(), index->nHeight)) {
+        return false;
+    }
+    if (node::matmul_trusted::HasQuorumInMemory(
+            index->GetBlockHash(), index->nHeight)) {
+        return true;
+    }
+    if (IndexIsFollowedTipChild(tip, index)) return true;
+    // Local signer: m_best_header on a competing fork above this tip used
+    // to leave every attested-chain child "unfollowed", so GPU skip +
+    // HEADER_ONLY getdata froze the signer (live 190376 for ~22 min while
+    // a 67-block unattested tower sat on m_best_header).
+    if (!node::matmul_trusted::HasLocalSigner()) return false;
+    return m_best_header != nullptr &&
+           m_best_header->nHeight > tip->nHeight &&
+           m_best_header->GetAncestor(tip->nHeight) != tip;
 }
 
 bool ChainstateManager::ShouldDeferLosingTipExtension(
