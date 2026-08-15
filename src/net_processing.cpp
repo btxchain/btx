@@ -2712,6 +2712,12 @@ void PeerManagerImpl::RefreshMatMulDeferredBodyRetry(
         static_cast<int>(count_seconds(MATMUL_BUDGET_DEFER_COOLDOWN)));
 }
 
+[[nodiscard]] static bool IndexIsFollowedTipChild(
+    const ChainstateManager& chainman,
+    const CBlockIndex* tip,
+    const CBlockIndex* index)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
 void PeerManagerImpl::RetryMatMulDeferredBodies()
 {
     AssertLockNotHeld(cs_main);
