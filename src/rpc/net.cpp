@@ -223,7 +223,12 @@ static RPCHelpMan getpeerinfo()
                     {RPCResult::Type::NUM, "startingheight", "The starting height (block) of the peer"},
                     {RPCResult::Type::NUM, "presynced_headers", "The current height of header pre-synchronization with this peer, or -1 if no low-work sync is in progress"},
                     {RPCResult::Type::NUM, "synced_headers", "The last header we have in common with this peer"},
+                    {RPCResult::Type::STR_HEX, "synced_header_hash", /*optional=*/true, "Hash of that best-known header. Omitted when unknown; never inferred from height alone."},
+                    {RPCResult::Type::STR_HEX, "synced_header_work", /*optional=*/true, "nChainWork of that best-known header, omitted when unknown"},
                     {RPCResult::Type::NUM, "synced_blocks", "The last block we have in common with this peer"},
+                    {RPCResult::Type::NUM, "duplicate_header_bytes", /*optional=*/true, "Already-known header bytes counted in the current no-progress window"},
+                    {RPCResult::Type::NUM, "duplicate_header_msgs", /*optional=*/true, "Already-known header messages counted in the current no-progress window"},
+                    {RPCResult::Type::STR, "duplicate_header_action", /*optional=*/true, "none, skipped, or disconnected"},
                     {RPCResult::Type::ARR, "inflight", "",
                     {
                         {RPCResult::Type::NUM, "n", "The heights of blocks we're currently asking from this peer"},
@@ -338,7 +343,14 @@ static RPCHelpMan getpeerinfo()
         obj.pushKV("startingheight", statestats.m_starting_height);
         obj.pushKV("presynced_headers", statestats.presync_height);
         obj.pushKV("synced_headers", statestats.nSyncHeight);
+        if (!statestats.m_best_known_block_hash.empty()) {
+            obj.pushKV("synced_header_hash", statestats.m_best_known_block_hash);
+            obj.pushKV("synced_header_work", statestats.m_best_known_block_work);
+        }
         obj.pushKV("synced_blocks", statestats.nCommonHeight);
+        obj.pushKV("duplicate_header_bytes", statestats.m_dup_header_bytes);
+        obj.pushKV("duplicate_header_msgs", statestats.m_dup_header_msgs);
+        obj.pushKV("duplicate_header_action", statestats.m_dup_header_action);
         UniValue heights(UniValue::VARR);
         for (const int height : statestats.vHeightInFlight) {
             heights.push_back(height);
@@ -689,6 +701,8 @@ static RPCHelpMan getminingpeermesh()
                         {RPCResult::Type::STR, "subver", "Peer subversion"},
                         {RPCResult::Type::NUM, "startingheight", "Peer starting height"},
                         {RPCResult::Type::NUM, "synced_headers", "Best synced header height for this peer"},
+                        {RPCResult::Type::STR_HEX, "synced_header_hash", /*optional=*/true, "Hash of that header when known; omitted rather than inferred from height"},
+                        {RPCResult::Type::STR_HEX, "synced_header_work", /*optional=*/true, "nChainWork of that header, omitted when the hash is unknown"},
                         {RPCResult::Type::NUM, "synced_blocks", "Best synced block height for this peer"},
                     }},
                 }},
@@ -747,6 +761,10 @@ static RPCHelpMan getminingpeermesh()
         peer.pushKV("subver", stats.cleanSubVer);
         peer.pushKV("startingheight", state_stats.m_starting_height);
         peer.pushKV("synced_headers", state_stats.nSyncHeight);
+        if (!state_stats.m_best_known_block_hash.empty()) {
+            peer.pushKV("synced_header_hash", state_stats.m_best_known_block_hash);
+            peer.pushKV("synced_header_work", state_stats.m_best_known_block_work);
+        }
         peer.pushKV("synced_blocks", state_stats.nCommonHeight);
         active_peers.push_back(std::move(peer));
     }

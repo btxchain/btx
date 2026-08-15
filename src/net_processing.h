@@ -145,6 +145,14 @@ struct CNodeStateStats {
     std::chrono::seconds time_offset{0};
     NodeSeconds m_last_block_announcement;
     int m_misbehavior_score{0};
+    /** Best-known block hash/work for this peer, or empty when unknown.
+     *  Height-only inference is intentionally not used (issue #108). */
+    std::string m_best_known_block_hash;
+    std::string m_best_known_block_work;
+    uint64_t m_dup_header_bytes{0};
+    uint32_t m_dup_header_msgs{0};
+    uint64_t m_dup_header_skipped_bytes{0};
+    std::string m_dup_header_action{"none"};
     /** Internal synchronization-selection snapshots used by regression tests. */
     bool m_preferred_download{false};
     int m_total_preferred_download_peer_count{0};

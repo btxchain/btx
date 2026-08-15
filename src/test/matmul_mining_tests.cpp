@@ -2443,6 +2443,19 @@ BOOST_AUTO_TEST_CASE(pre_v4_service_challenge_omits_and_rejects_added_encoding_p
         "challenge.matmul.encoding_profile");
 }
 
+BOOST_AUTO_TEST_CASE(getfinalityinfo_is_read_only_and_exposes_active_tip)
+{
+    const auto info = CallRPC("getfinalityinfo").get_obj();
+    BOOST_CHECK(info.exists("active_tip"));
+    BOOST_CHECK(info.exists("recovery"));
+    BOOST_CHECK_EQUAL(info.find_value("recovery").get_obj().find_value("state").get_str(), "none");
+    BOOST_CHECK(info.exists("parked_branches"));
+    BOOST_CHECK(info.exists("finality_profile"));
+    BOOST_CHECK_EQUAL(
+        info.find_value("active_tip").get_obj().find_value("hash").get_str(),
+        ActiveTipHash().GetHex());
+}
+
 BOOST_AUTO_TEST_SUITE_END()
 
 class MatMulGbtAttestationBindSetup : public TestChain100Setup {

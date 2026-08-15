@@ -1611,6 +1611,11 @@ BOOST_FIXTURE_TEST_CASE(chainstate_trusted_mirror_defers_unattested_twin_for_hea
         unattested->GetHash(), child_height));
     {
         LOCK(::cs_main);
+        // TRUSTED mirrors must keep proposing parent_tip here. 5e6df697
+        // briefly let the unattested HAVE_DATA twin win most-work because
+        // it was also m_best_header ("followed"). ABC still refused to
+        // connect it; FindMostWorkChain must not propose it (PR 105
+        // comment 5301061876).
         BOOST_CHECK_EQUAL(chainstate.FindMostWorkChainForTest(), parent_tip);
     }
 
@@ -2119,6 +2124,116 @@ BOOST_FIXTURE_TEST_CASE(chainstate_attested_tip_suffix_catchup_beats_short_reorg
     state = BlockValidationState{};
     BOOST_REQUIRE(chainstate.ActivateBestChain(state));
     BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()) == child);
+}
+
+BOOST_FIXTURE_TEST_CASE(chainstate_already_active_unattested_recovers_unique_attested_after_reload, TestChain100Setup)
+{
+    // Issue #106: the competing unattested branch is already the active tip
+    // (pre-finality datadir). Recovery must switch to the uniquely attested
+    // original after a simulated restart, without invalidateblock /
+    // reconsiderblock / preciousblock / reindex as the recovery path.
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    Chainstate& chainstate = chainman.ActiveChainstate();
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    auto& action = const_cast<kernel::DeepReorgAction&>(chainman.m_options.deep_reorg_action);
+    auto& park_depth = const_cast<std::optional<uint32_t>&>(chainman.m_options.max_reorg_depth_park);
+    auto& mode = const_cast<kernel::MatMulValidationMode&>(chainman.m_options.matmul_validation_mode);
+    struct Restore {
+        Consensus::Params& consensus;
+        int32_t start;
+        kernel::DeepReorgAction& action;
+        kernel::DeepReorgAction saved_action;
+        std::optional<uint32_t>& park_depth;
+        std::optional<uint32_t> saved_park_depth;
+        kernel::MatMulValidationMode& mode;
+        kernel::MatMulValidationMode saved_mode;
+        ~Restore()
+        {
+            node::matmul_trusted::ResetForTest();
+            consensus.nReorgProtectionStartHeight = start;
+            action = saved_action;
+            park_depth = saved_park_depth;
+            mode = saved_mode;
+        }
+    } restore{consensus, consensus.nReorgProtectionStartHeight,
+              action, action, park_depth, park_depth, mode, mode};
+    consensus.nReorgProtectionStartHeight = 10;
+    action = kernel::DeepReorgAction::PARK;
+    park_depth = 10;
+    mode = kernel::MatMulValidationMode::TRUSTED;
+
+    const CScript script = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    CBlockIndex* original_tip{WITH_LOCK(::cs_main, return chainstate.m_chain.Tip())};
+    BOOST_REQUIRE(original_tip != nullptr);
+    const uint256 original_hash{original_tip->GetBlockHash()};
+    const int original_height{original_tip->nHeight};
+    CBlockIndex* const original_root{original_tip};
+
+    BlockValidationState state;
+    BOOST_REQUIRE(chainstate.InvalidateBlock(state, original_root));
+    const CBlock competing_block{CreateAndProcessBlock({}, script)};
+    CBlockIndex* competing{WITH_LOCK(::cs_main, return chainman.m_blockman.LookupBlockIndex(competing_block.GetHash()))};
+    BOOST_REQUIRE(competing != nullptr);
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()) == competing);
+
+    {
+        LOCK(::cs_main);
+        chainstate.ResetBlockFailureFlags(original_root);
+        BOOST_REQUIRE(original_tip->nStatus & BLOCK_HAVE_DATA);
+        BOOST_CHECK_EQUAL(chainstate.m_chain.Tip(), competing);
+    }
+
+    CKey signer;
+    signer.MakeNewKey(/*fCompressed=*/true);
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256::ONE;
+    config.replay_authority_context = uint256::FromHex(std::string(64, 'c')).value();
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    config.local_signer = signer;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/true, /*serve=*/false,
+        std::chrono::milliseconds{50}, error));
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
+                      original_hash, original_height) ==
+                  matmul::trusted::AddResult::Accepted);
+    BOOST_CHECK(node::matmul_trusted::HasQuorum(original_hash, original_height));
+    BOOST_CHECK(!node::matmul_trusted::HasQuorum(
+        competing->GetBlockHash(), competing->nHeight));
+
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman.LoadReorgRecoveryRecord());
+        BOOST_CHECK_EQUAL(
+            chainman.FindUniqueCompetingAttestedIndex(), original_tip);
+        BOOST_CHECK(chainman.IsAttestedAbandonForkCandidate(original_tip));
+    }
+
+    state = BlockValidationState{};
+    BOOST_REQUIRE(chainstate.ActivateBestChain(state));
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK_EQUAL(chainstate.m_chain.Tip(), original_tip);
+        BOOST_CHECK(chainman.m_blockman.LookupBlockIndex(competing->GetBlockHash()) !=
+                    nullptr);
+        BOOST_CHECK(!chainstate.m_chain.Contains(competing));
+        BOOST_REQUIRE(chainman.LoadReorgRecoveryRecord());
+        BOOST_CHECK_EQUAL(chainstate.m_chain.Tip(), original_tip);
+    }
+
+    const CBlock next{CreateAndProcessBlock({}, script)};
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
+                      next.GetHash(), original_height + 1) ==
+                  matmul::trusted::AddResult::Accepted);
+    state = BlockValidationState{};
+    BOOST_REQUIRE(chainstate.ActivateBestChain(state));
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK_EQUAL(chainstate.m_chain.Height(), original_height + 1);
+        BOOST_CHECK_EQUAL(chainstate.m_chain.Tip()->pprev, original_tip);
+    }
+    chainman.CheckBlockIndex();
 }
 
 BOOST_AUTO_TEST_SUITE_END()

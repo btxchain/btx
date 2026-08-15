@@ -9547,6 +9547,15 @@ CBlockIndex* Chainstate::FindMostWorkChain()
         // child (getchaintips: height 11 active + height 12 valid-headers,
         // same parent, no competing branch) must stay selectable so
         // ConnectTip can wait for quorum instead of deferring forever.
+        //
+        // CONSENSUS (live 2026-08-15 2fd67f18): a followed HAVE_DATA
+        // tip-child must remain selectable even when an unfollowed
+        // attested sibling exists. TRUSTED mirrors must not use that
+        // bypass: the first HAVE_DATA twin becomes m_best_header, so it
+        // looks "followed", and skipping the overlay proposes the
+        // unattested twin (bfd10a67 / 5e6df697 regression vs 34aeb78b).
+        // ABC still refused to connect it; FindMostWorkChain must not
+        // propose it (GBT and other callers).
         if (node::matmul_trusted::IsConfigured() &&
             m_chain.Tip() != nullptr &&
             m_chainman.GetConsensus().IsMatMulTrustedReplayAttestationActive(
@@ -9558,8 +9567,10 @@ CBlockIndex* Chainstate::FindMostWorkChain()
             const bool has_quorum{node::matmul_trusted::HasQuorum(
                 pindexNew->GetBlockHash(), pindexNew->nHeight)};
             const CBlockIndex* attested_sibling{nullptr};
-            if (extends_tip && !has_quorum &&
-                !m_chainman.IndexIsFollowedTipChild(tip, pindexNew)) {
+            const bool consensus_followed_tip_child{
+                !node::matmul_trusted::IsTrustedMirror() &&
+                m_chainman.IndexIsFollowedTipChild(tip, pindexNew)};
+            if (extends_tip && !has_quorum && !consensus_followed_tip_child) {
                 auto consider_attested_tip_child = [&](const CBlockIndex* alt) {
                     if (alt == nullptr) return false;
                     if (node::matmul_trusted::TrustedMirrorAttestedSiblingIsActionable(
