@@ -13518,7 +13518,7 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
             }
         }
         if (reverify_tip_child) {
-            TryAddBlockIndexCandidate(pindex);
+            ActiveChainstate().TryAddBlockIndexCandidate(pindex);
         }
         return true;
     }
