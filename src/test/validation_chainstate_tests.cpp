@@ -617,6 +617,18 @@ BOOST_FIXTURE_TEST_CASE(chainstate_current_authority_recovers_long_shallow_race_
         losing_extension.nHeight = original_tip->nHeight + 1;
         losing_extension.BuildSkip();
         BOOST_CHECK(chainman.ShouldDeferLosingTipExtension(&losing_extension));
+        // A followed validator-chain child of the live tip must not be frozen
+        // (live 2026-08-15: 2fd67f18). A competing sibling still is.
+        CBlockIndex followed_child;
+        followed_child.pprev = original_tip;
+        followed_child.nHeight = original_tip->nHeight + 1;
+        followed_child.nStatus = BLOCK_VALID_TREE;
+        followed_child.BuildSkip();
+        chainman.SetBestHeader(&followed_child);
+        BOOST_CHECK(chainman.IndexIsFollowedTipChild(original_tip, &followed_child));
+        BOOST_CHECK(!chainman.ShouldDeferLosingTipExtension(&followed_child));
+        BOOST_CHECK(chainman.ShouldDeferLosingTipExtension(&losing_extension));
+        chainman.SetBestHeader(recovery_tip);
 
         recovery_tip->nStatus = saved_recovery_status |
                                 BLOCK_TRUSTED_REPLAY_ATTESTED;

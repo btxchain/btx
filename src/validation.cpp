@@ -9558,7 +9558,8 @@ CBlockIndex* Chainstate::FindMostWorkChain()
             const bool has_quorum{node::matmul_trusted::HasQuorum(
                 pindexNew->GetBlockHash(), pindexNew->nHeight)};
             const CBlockIndex* attested_sibling{nullptr};
-            if (extends_tip && !has_quorum) {
+            if (extends_tip && !has_quorum &&
+                !m_chainman.IndexIsFollowedTipChild(tip, pindexNew)) {
                 auto consider_attested_tip_child = [&](const CBlockIndex* alt) {
                     if (alt == nullptr) return false;
                     if (node::matmul_trusted::TrustedMirrorAttestedSiblingIsActionable(
@@ -10174,6 +10175,14 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
                 }
 
                 if (pindexMostWork == nullptr) {
+                    // Stuck ABC never takes a step, so NormalizeReorgRecovery
+                    // after ActivateBestChainStep never runs. Clear a stale
+                    // record before selecting most-work (live 2026-08-15:
+                    // armed 01:38 recovery kept 2fd67f18 out of the set).
+                    if (this == &m_chainman.ActiveChainstate() &&
+                        !m_chainman.NormalizeReorgRecovery(m_chain.Tip())) {
+                        return state.Error("failed to persist completed reorg recovery transition");
+                    }
                     pindexMostWork = FindMostWorkChain();
                 }
 
@@ -10565,9 +10574,19 @@ void Chainstate::ResetBlockFailureFlags(CBlockIndex *pindex) {
 void Chainstate::TryAddBlockIndexCandidate(CBlockIndex* pindex)
 {
     AssertLockHeld(cs_main);
-    if (m_chainman.IsOnParkedReorgBranch(pindex) ||
-        m_chainman.ShouldDeferLosingTipExtension(pindex) ||
-        !TrustedMirrorShouldConsiderMostWorkCandidate(m_chain.Tip(), pindex)) {
+    const CBlockIndex* const tip{m_chain.Tip()};
+    const bool parked{m_chainman.IsOnParkedReorgBranch(pindex)};
+    const bool defer_losing{m_chainman.ShouldDeferLosingTipExtension(pindex)};
+    const bool consider{TrustedMirrorShouldConsiderMostWorkCandidate(tip, pindex)};
+    if (parked || defer_losing || !consider) {
+        if (pindex != nullptr && tip != nullptr && pindex->pprev == tip) {
+            LogWarning("%s: refusing tip-child hash=%s height=%d parked=%s "
+                       "defer_losing_tip=%s consider_most_work=%s\n",
+                       __func__, pindex->GetBlockHash().ToString(),
+                       pindex->nHeight, parked ? "yes" : "no",
+                       defer_losing ? "yes" : "no",
+                       consider ? "yes" : "no");
+        }
         return;
     }
 
@@ -10575,9 +10594,13 @@ void Chainstate::TryAddBlockIndexCandidate(CBlockIndex* pindex)
     // or more work than our current tip. Attested abandon-fork targets are the
     // exception: they must be selectable while the unattested tip still has
     // more work.
-    if (m_chain.Tip() != nullptr &&
-        setBlockIndexCandidates.value_comp()(pindex, m_chain.Tip()) &&
+    if (tip != nullptr &&
+        setBlockIndexCandidates.value_comp()(pindex, tip) &&
         !m_chainman.IsAttestedAbandonForkCandidate(pindex)) {
+        if (pindex != nullptr && pindex->pprev == tip) {
+            LogWarning("%s: refusing tip-child hash=%s height=%d less_work_than_tip=yes\n",
+                       __func__, pindex->GetBlockHash().ToString(), pindex->nHeight);
+        }
         return;
     }
 
@@ -11259,6 +11282,19 @@ bool ChainstateManager::IsAutomaticReorgRecoveryCandidate(
     return true;
 }
 
+bool ChainstateManager::IndexIsFollowedTipChild(
+    const CBlockIndex* tip, const CBlockIndex* index) const
+{
+    AssertLockHeld(::cs_main);
+    if (tip == nullptr || index == nullptr || index->pprev != tip) return false;
+    if ((index->nStatus & BLOCK_FAILED_MASK) != 0) return false;
+    const CBlockIndex* const followed{m_best_header};
+    return followed != nullptr &&
+           followed->nHeight >= index->nHeight &&
+           followed->GetAncestor(tip->nHeight) == tip &&
+           followed->GetAncestor(index->nHeight) == index;
+}
+
 bool ChainstateManager::ShouldDeferLosingTipExtension(
     const CBlockIndex* candidate) const
 {
@@ -11281,6 +11317,11 @@ bool ChainstateManager::ShouldDeferLosingTipExtension(
         m_blockman.LookupBlockIndex(m_reorg_recovery->losing_tip_hash)};
     const CBlockIndex* const recovery_root{
         m_blockman.LookupBlockIndex(m_reorg_recovery->recovery_root_hash)};
+    // Followed validator-chain tip-child only. A blanket pprev==tip bypass
+    // would also admit competing siblings (live 14c0d0e4 / e80753f4).
+    if (IndexIsFollowedTipChild(active_tip, candidate)) {
+        return false;
+    }
     return active_tip != nullptr && candidate != active_tip &&
            BlockIndexDescends(active_tip, losing_tip) &&
            BlockIndexDescends(candidate, losing_tip) &&
@@ -11510,14 +11551,42 @@ bool ChainstateManager::NormalizeReorgRecovery(const CBlockIndex* active_tip)
                 authenticated_tip->HaveNumChainTxs() &&
                 IsBlockAuthenticated(*authenticated_tip, GetConsensus())))};
 
-    if (recovery_won || !provenance_valid) {
+    // CONSENSUS only. TRUSTED records must keep reconstructing m_best_header
+    // onto authenticated_tip while the authority body is still in flight.
+    // Live 2026-08-15: CONSENSUS recovery armed at 01:38 on 1fbccf3f never
+    // completed; the followed/quorum chain stayed on the "losing" side
+    // through attested 189685, and every later tip-child was deferred.
+    const bool followed_stayed_on_losing_side{
+        m_best_header != nullptr && losing_tip != nullptr &&
+        m_best_header->nHeight > losing_tip->nHeight &&
+        BlockIndexDescends(m_best_header, losing_tip) &&
+        !BlockIndexDescends(m_best_header, recovery_root)};
+    bool quorum_on_losing_side{false};
+    if (active_tip != nullptr && losing_tip != nullptr) {
+        for (const CBlockIndex* walk{active_tip};
+             walk != nullptr && walk->nHeight > losing_tip->nHeight;
+             walk = walk->pprev) {
+            if (node::matmul_trusted::HasQuorum(
+                    walk->GetBlockHash(), walk->nHeight)) {
+                quorum_on_losing_side = true;
+                break;
+            }
+        }
+    }
+    const bool losing_side_now_canonical{
+        !trusted_record && !recovery_won && active_tip != nullptr &&
+        losing_tip != nullptr && BlockIndexDescends(active_tip, losing_tip) &&
+        (quorum_on_losing_side || followed_stayed_on_losing_side)};
+    if (recovery_won || !provenance_valid || losing_side_now_canonical) {
         if (m_blockman.m_block_tree_db &&
             !m_blockman.m_block_tree_db->WriteReorgRecoveryRecord(std::nullopt)) {
             LogError("%s: failed to clear stale reorg recovery record\n", __func__);
             return false;
         }
         LogWarning("%s: cleared %s reorg recovery record\n", __func__,
-                   recovery_won ? "completed" : "stale or unauthenticated");
+                   recovery_won ? "completed"
+                   : losing_side_now_canonical ? "losing-side-became-canonical"
+                                               : "stale or unauthenticated");
         m_reorg_recovery.reset();
         if (!recovery_won) {
             for (Chainstate* chainstate : GetAll()) {
@@ -13447,6 +13516,9 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
             if (!pos.IsNull()) {
                 ReceivedBlockTransactions(block, pindex, pos);
             }
+        }
+        if (reverify_tip_child) {
+            TryAddBlockIndexCandidate(pindex);
         }
         return true;
     }

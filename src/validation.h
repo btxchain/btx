@@ -1562,6 +1562,7 @@ public:
     bool MaybeTrackReorgRecovery(const CBlockIndex* candidate) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool LoadReorgRecoveryRecord() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool NormalizeReorgRecovery(const CBlockIndex* active_tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    [[nodiscard]] bool IndexIsFollowedTipChild(const CBlockIndex* tip, const CBlockIndex* index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool ShouldDeferLosingTipExtension(const CBlockIndex* candidate) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool IsAutomaticReorgRecoveryCandidate(const CBlockIndex* candidate) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /**

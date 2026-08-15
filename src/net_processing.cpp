@@ -2760,6 +2760,7 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
                     if (m_chainman.IsOnParkedReorgBranch(child)) {
                         (void)m_chainman.UnparkReorgBranchContainingBlock(child);
                     }
+                    (void)m_chainman.NormalizeReorgRecovery(tip);
                     reverify_hash = child->GetBlockHash();
                     reverify_height = child->nHeight;
                     reverify_header = child->GetBlockHeader();
@@ -3567,13 +3568,7 @@ static bool TrustedMirrorMayDownloadIndex(
     const CBlockIndex* index)
     EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
-    if (tip == nullptr || index == nullptr || index->pprev != tip) return false;
-    if ((index->nStatus & BLOCK_FAILED_MASK) != 0) return false;
-    const CBlockIndex* const followed{chainman.m_best_header};
-    return followed != nullptr &&
-           followed->nHeight >= index->nHeight &&
-           followed->GetAncestor(tip->nHeight) == tip &&
-           followed->GetAncestor(index->nHeight) == index;
+    return chainman.IndexIsFollowedTipChild(tip, index);
 }
 
 //! True if another unattested tip-child already has a body or ExactReplay
