@@ -767,16 +767,27 @@ void MatMulVerifyWorker::WorkerLoop()
             // admission already skips GPU; this mapping is belt-and-suspenders
             // if a job leaks through. Unconfigured nodes keep the historical
             // CompetingBranch→TipValidation mapping (zombie freeze workaround).
-            const auto device_priority{
-                node::matmul_trusted::IsConfigured()
-                    ? matmul::v4::rc::RCAcceleratorScheduler::
-                          Priority::SpeculativeValidation
-                    : (job.priority == Priority::AuthenticatedTipChild ||
-                       job.priority == Priority::CompetingBranch)
-                          ? matmul::v4::rc::RCAcceleratorScheduler::
-                                Priority::TipValidation
-                          : matmul::v4::rc::RCAcceleratorScheduler::
-                                Priority::SpeculativeValidation};
+            const auto device_priority{[&] {
+                using AccelPriority =
+                    matmul::v4::rc::RCAcceleratorScheduler::Priority;
+                if (!node::matmul_trusted::IsConfigured()) {
+                    return (job.priority == Priority::AuthenticatedTipChild ||
+                            job.priority == Priority::CompetingBranch)
+                               ? AccelPriority::TipValidation
+                               : AccelPriority::SpeculativeValidation;
+                }
+                // Configured nodes must not map *every* pprev==tip sibling
+                // onto TipValidation (69–198 unattested bodies starved
+                // CandidateMining). Unique attested catch-up must: live
+                // 2026-08-15 the signer sat on an attested tip while
+                // CandidateMining held the device and tip_validation stayed 0.
+                if (node::matmul_trusted::HasQuorum(hash, job.height) &&
+                    (job.priority == Priority::AuthenticatedTipChild ||
+                     job.priority == Priority::CompetingBranch)) {
+                    return AccelPriority::TipValidation;
+                }
+                return AccelPriority::SpeculativeValidation;
+            }()};
             const auto episode_params{
                 matmul::v4::rc::ResolveRCEpisodeParams(
                     m_params, job.height)};

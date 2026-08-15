@@ -9481,12 +9481,14 @@ CBlockIndex* Chainstate::FindMostWorkChain()
         if (CBlockIndex* abandon{const_cast<CBlockIndex*>(
                 m_chainman.FindUniqueCompetingAttestedIndex())}) {
             // Unique competing attested HAVE_DATA: lost same-height race,
-            // attested chain pulled ahead, heavier unattested fork, or
+            // attested chain pulled ahead, heavier unattested fork,
             // dual-attested siblings with the signed frontier off this
-            // chain (live 2026-08-15). Do not wait for invalidateblock.
-            // A pending-attestation child of an attested ancestor is not
-            // competing and is left alone. Insert so ConnectTip /
-            // CheckBlockIndex see the new tip in the candidate set.
+            // chain (live 2026-08-15), or the unique attested HAVE_DATA
+            // child of an already-attested tip (catch-up, LCA depth 0).
+            // Do not wait for invalidateblock. A pending-attestation
+            // child of an attested ancestor is not competing and is left
+            // alone. Insert so ConnectTip / CheckBlockIndex see the new
+            // tip in the candidate set.
             pindexNew = abandon;
             setBlockIndexCandidates.insert(abandon);
         }
@@ -11010,7 +11012,8 @@ const CBlockIndex* ChainstateManager::FindUniqueCompetingAttestedIndex() const
     // quorum → nullptr" return then froze ABC on unattested children of
     // that loser while the signed frontier ran 140 blocks up the other
     // fork. When the tip already has quorum, still adopt a unique
-    // competing attested HAVE_DATA index on a short reorg (1–6). Scan
+    // competing attested HAVE_DATA index on a short reorg (1–6) or the
+    // unique attested HAVE_DATA suffix of this tip (catch-up). Scan
     // every frontier hint at a height (not last-writer) so a later
     // loser MMATTEST cannot hide the winner.
     const bool tip_has_quorum{node::matmul_trusted::HasQuorum(
@@ -11038,7 +11041,15 @@ const CBlockIndex* ChainstateManager::FindUniqueCompetingAttestedIndex() const
             const CBlockIndex* const lca{LastCommonAncestor(tip, idx)};
             if (lca == nullptr) return;
             const int lca_depth{tip->nHeight - lca->nHeight};
-            if (!node::matmul_trusted::TrustedMirrorIsShortTipReorg(lca_depth)) {
+            // Live 2026-08-15: unique attested HAVE_DATA child of an
+            // already-attested tip (LCA depth 0, suffix not yet connected).
+            // Short-reorg is depth 1–6; depth 0 used to be dropped, so ABC
+            // never selected the catch-up child while GBT kept mining a
+            // competing sibling (signer tip 189675, attested 189676).
+            const bool attested_suffix{
+                lca == tip && idx->nHeight > tip->nHeight};
+            if (!attested_suffix &&
+                !node::matmul_trusted::TrustedMirrorIsShortTipReorg(lca_depth)) {
                 return;
             }
         }

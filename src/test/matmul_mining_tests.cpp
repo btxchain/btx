@@ -2589,6 +2589,88 @@ BOOST_AUTO_TEST_CASE(getblocktemplate_refuses_unattested_tip_with_attested_sibli
                   unattested_hash);
 }
 
+BOOST_AUTO_TEST_CASE(getblocktemplate_refuses_attested_tip_with_attested_have_data_child)
+{
+    // Live 2026-08-15: GBT kept mining a competing 189676 while the unique
+    // attested HAVE_DATA child of the attested tip sat unconnected.
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    Chainstate& chainstate = chainman.ActiveChainstate();
+    auto& consensus = const_cast<Consensus::Params&>(chainman.GetConsensus());
+    const int32_t saved_v4{consensus.nMatMulV4Height};
+    const int32_t saved_rc{consensus.nMatMulRCHeight};
+    struct Restore {
+        Consensus::Params& consensus;
+        int32_t v4;
+        int32_t rc;
+        ~Restore()
+        {
+            node::matmul_trusted::ResetForTest();
+            consensus.nMatMulV4Height = v4;
+            consensus.nMatMulRCHeight = rc;
+        }
+    } restore{consensus, saved_v4, saved_rc};
+
+    const CScript script = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    CBlockIndex* parent{WITH_LOCK(::cs_main, return chainstate.m_chain.Tip())};
+    BOOST_REQUIRE(parent != nullptr);
+    const uint256 parent_hash{parent->GetBlockHash()};
+    const int parent_height{parent->nHeight};
+
+    CKey signer;
+    signer.MakeNewKey(/*fCompressed=*/true);
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256::ONE;
+    config.replay_authority_context = uint256::FromHex(std::string(64, 'e')).value();
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    config.local_signer = signer;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/false, /*serve=*/false,
+        std::chrono::milliseconds{50}, error));
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
+                      parent_hash, parent_height) ==
+                  matmul::trusted::AddResult::Accepted);
+
+    const CBlock child_block{CreateAndProcessBlock({}, script)};
+    CBlockIndex* child{
+        WITH_LOCK(::cs_main, return chainman.m_blockman.LookupBlockIndex(
+                                       child_block.GetHash()))};
+    BOOST_REQUIRE(child != nullptr);
+    BlockValidationState state;
+    BOOST_REQUIRE(chainstate.InvalidateBlock(state, child));
+    {
+        LOCK(::cs_main);
+        chainstate.ResetBlockFailureFlags(child);
+    }
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
+                      child->GetBlockHash(), child->nHeight) ==
+                  matmul::trusted::AddResult::Accepted);
+
+    consensus.nMatMulV4Height = parent_height;
+    consensus.nMatMulRCHeight = parent_height;
+    BOOST_REQUIRE(consensus.IsMatMulTrustedReplayAttestationActive(parent_height));
+    BOOST_REQUIRE(consensus.IsMatMulTrustedReplayAttestationActive(child->nHeight));
+
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(child->nStatus & BLOCK_HAVE_DATA);
+        BOOST_CHECK_EQUAL(chainman.FindUniqueCompetingAttestedIndex(), child);
+        BOOST_CHECK_EQUAL(chainstate.m_chain.Tip()->GetBlockHash(), parent_hash);
+    }
+
+    const auto err = CallRPCError("getblocktemplate", GBTParams());
+    BOOST_REQUIRE(err.has_value());
+    BOOST_CHECK_EQUAL(
+        err->find_value("code").getInt<int>(), RPC_CLIENT_IN_INITIAL_DOWNLOAD);
+    const std::string message{err->find_value("message").get_str()};
+    BOOST_CHECK(message.find("will not extend the unattested race") != std::string::npos);
+    BOOST_CHECK(message.find(parent_hash.GetHex()) != std::string::npos);
+    BOOST_CHECK(message.find(child->GetBlockHash().GetHex()) != std::string::npos);
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()->GetBlockHash()) ==
+                  parent_hash);
+}
+
 BOOST_AUTO_TEST_SUITE_END()
 
 namespace {

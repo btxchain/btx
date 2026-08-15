@@ -281,15 +281,18 @@ static void EnsureMatMulAttestedMiningParent(
         consensus.IsMatMulTrustedReplayAttestationActive(tip->nHeight + 1)};
     if (!active_at_tip && !active_at_next) return;
 
-    // Linear-chain signer lag: getmatmulattestedtip / signed frontier
-    // on_active_chain with blocks_behind==0. FindUniqueCompetingAttestedIndex
+    // Linear-chain signer lag with the frontier already on this chain:
+    // getmatmulattestedtip on_active_chain, FindUniqueCompetingAttestedIndex
     // is null (attested HAVE_DATA sits on this chain), so GBT keeps
     // parenting the active tip. A headers-only competing flood is likewise
     // ignored — never parent a headers-only hash.
-    // Unique competing attested HAVE_DATA sibling: do not issue a template
-    // that extends the stranded race. That covers an unattested lost twin
-    // and dual-attested same-height siblings (live 2026-08-15: tip had
-    // quorum on the loser while the signed frontier sat on the other fork).
+    // Unique competing attested HAVE_DATA sibling *or* unique attested
+    // HAVE_DATA suffix of an already-attested tip: do not issue a template
+    // that extends the stranded race / mines a competing child. That covers
+    // an unattested lost twin, dual-attested same-height siblings (live
+    // 2026-08-15: tip had quorum on the loser while the signed frontier sat
+    // on the other fork), and catch-up (live 2026-08-15: tip 189675 attested,
+    // unique HAVE_DATA child 189676 attested, GBT kept mining).
     const CBlockIndex* const attested{
         chainman.FindUniqueCompetingAttestedIndex()};
     if (attested == nullptr || attested == tip) return;
@@ -8793,7 +8796,7 @@ static RPCHelpMan getblocktemplate()
         "It returns data needed to construct a block to work on.\n"
         "For MatMul PoW networks, the template includes matrix seeds and parameters needed for external mining.\n"
         "External miners should solve the MatMul proof using the provided seeds and submit via submitblock.\n"
-        "When -matmultrustedpubkey is configured and Profile-1 attestation is active, a template is not issued when a unique competing attested HAVE_DATA sibling exists (unattested lost twin or dual-attested short-reorg); follow getmatmulattestedtip instead.\n"
+        "When -matmultrustedpubkey is configured and Profile-1 attestation is active, a template is not issued when a unique competing attested HAVE_DATA sibling exists (unattested lost twin or dual-attested short-reorg) or when a unique attested HAVE_DATA child of the current tip is waiting to be connected (catch-up); follow getmatmulattestedtip instead.\n"
         "For full specification, see BIPs 22, 23, 9, and 145:\n"
         "    https://github.com/bitcoin/bips/blob/master/bip-0022.mediawiki\n"
         "    https://github.com/bitcoin/bips/blob/master/bip-0023.mediawiki\n"

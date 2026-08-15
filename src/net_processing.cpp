@@ -2156,6 +2156,12 @@ private:
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     void MaybeLogTrustedMirrorStall(int32_t tip_height)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    /** Kick ActivateBestChain when a unique attested HAVE_DATA index is
+     *  selectable (short-reorg sibling or attested tip-suffix catch-up).
+     *  Fetch-stall reconsideration used to reset LastCommonBlock only, so
+     *  a stored attested child of tip never connected (live 2026-08-15). */
+    void MaybeKickAbcForAttestedCatchUp()
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     /** Record an unattestable reject with sticky backoff. Returns true when
      *  this is a newly counted distinct hash (or an expired sticky re-arm). */
     bool NoteTrustedMirrorUnattestableReject(const uint256& hash)
@@ -3365,6 +3371,7 @@ void PeerManagerImpl::MaybeRecoverStalledBlockFetch(std::chrono::microseconds no
             }
         }
     }
+    MaybeKickAbcForAttestedCatchUp();
 }
 
 int64_t PeerManagerImpl::ApproximateBestBlockDepth() const
@@ -3559,8 +3566,20 @@ static uint256 g_configured_claimed_tip_child{};
     if (tip == nullptr || index == nullptr) return false;
     if (node::matmul_trusted::IsTrustedMirror()) return false;
     if (node::matmul_trusted::HasLocalSigner()) {
-        // Followed IBD/catch-up tip-child only. Same-height competing
+        // Unique attested tip-child toward the signed frontier: catch-up
+        // ExactReplay / re-admit even when a competing unattested sibling
+        // already has HAVE_DATA or claimed the GPU slot. Dual-attested
+        // same-height twins still follow FindUniqueCompetingAttestedIndex
+        // (signed frontier), not first-claimed. Unattested competing
         // siblings stay HEADER_ONLY so CandidateMining keeps the device.
+        if (index->pprev == tip &&
+            (index->nStatus & BLOCK_FAILED_MASK) == 0 &&
+            node::matmul_trusted::HasQuorum(
+                index->GetBlockHash(), index->nHeight)) {
+            const CBlockIndex* const catch_up{
+                chainman.FindUniqueCompetingAttestedIndex()};
+            if (catch_up == index) return true;
+        }
         return ClaimConfiguredUnattestedTipChildBody(chainman, tip, index);
     }
     if (index->pprev == tip) return true;
@@ -7596,6 +7615,23 @@ PeerManagerImpl::EvaluateTrustedMirrorAttestationAdmit(
     });
 }
 
+void PeerManagerImpl::MaybeKickAbcForAttestedCatchUp()
+{
+    AssertLockHeld(cs_main);
+    const CBlockIndex* const catch_up{
+        m_chainman.FindUniqueCompetingAttestedIndex()};
+    const CBlockIndex* const tip{m_chainman.ActiveTip()};
+    if (catch_up == nullptr || tip == nullptr || catch_up == tip) return;
+    const auto now{GetTime<std::chrono::microseconds>()};
+    if (m_last_unconnected_abc_kick.count() != 0 &&
+        now < m_last_unconnected_abc_kick +
+                  UNCONNECTED_HAVE_DATA_ABC_KICK_INTERVAL) {
+        return;
+    }
+    m_need_activate_best_chain = true;
+    m_last_unconnected_abc_kick = now;
+}
+
 void PeerManagerImpl::MaybeLogTrustedMirrorStall(int32_t tip_height)
 {
     AssertLockHeld(cs_main);
@@ -7618,6 +7654,7 @@ void PeerManagerImpl::MaybeLogTrustedMirrorStall(int32_t tip_height)
         MATMUL_ATTESTATION_OUTSTANDING_MAX,
         static_cast<unsigned long long>(
             m_matmul_trusted_reject_unattestable));
+    MaybeKickAbcForAttestedCatchUp();
 }
 
 bool PeerManagerImpl::NoteTrustedMirrorUnattestableReject(const uint256& hash)
@@ -7995,16 +8032,42 @@ void PeerManagerImpl::HistoricalAttestationReverifyLoop()
             ok = false;
         }
         if (ok) {
+            bool kick_abc{false};
             {
                 LOCK(cs_main);
                 // Sets BLOCK_EXACT_REPLAY_VERIFIED and signs when a local
-                // archive key is configured (see PersistMatMulExactReplayVerdict).
+                // archive key is configured and the index is already on the
+                // active chain (see PersistMatMulExactReplayVerdict).
                 (void)m_chainman.PersistMatMulExactReplayVerdict(job.hash);
+                const CBlockIndex* const idx{
+                    m_chainman.m_blockman.LookupBlockIndex(job.hash)};
+                const CBlockIndex* const tip{m_chainman.ActiveTip()};
+                // Live 2026-08-15: historical ExactReplay authenticated
+                // 189676 and left it HAVE_DATA / unconnected; mint is
+                // Contains-gated so the other signer attested it. ABC must
+                // run so the unique attested tip-child can connect.
+                if (idx != nullptr && tip != nullptr &&
+                    (idx->nStatus & BLOCK_HAVE_DATA) != 0 &&
+                    idx->IsValid(BLOCK_VALID_TRANSACTIONS) &&
+                    idx->HaveNumChainTxs() &&
+                    !m_chainman.ActiveChain().Contains(idx)) {
+                    kick_abc = true;
+                }
             }
             LogInfo(
                 "historical ExactReplay re-verify succeeded block=%s "
                 "height=%d; attestation available for getmmattest\n",
                 job.hash.ToString(), job.height);
+            if (kick_abc) {
+                BlockValidationState abc_state;
+                if (!m_chainman.ActiveChainstate().ActivateBestChain(
+                        abc_state, nullptr)) {
+                    LogWarning(
+                        "historical ExactReplay re-verify: ActivateBestChain "
+                        "failed for %s (%s)\n",
+                        job.hash.ToString(), abc_state.ToString());
+                }
+            }
         } else {
             LogWarning(
                 "historical ExactReplay re-verify failed block=%s "
