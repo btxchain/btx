@@ -15312,13 +15312,12 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 BanHammeringPeer(pfrom, *peer, "aggressive getmmattest");
             }
         };
-        // Local signers do not serve miner historical GETMMATTEST. Archives
-        // catching up via addnode/manual may fetch cached signatures for
-        // hashes already on this signer's active chain (live 2026-08-16:
-        // window=16 refused 190689 while GPU tip was 190795).
+        // Local signers do not serve miner historical GETMMATTEST. Only
+        // archive / trusted-mirror service bits may fetch cached signatures
+        // for hashes already on this signer's active chain (live 2026-08-16:
+        // window=16 refused nyc1's 190689; then addnode/manual IBD peers at
+        // 185006/190041 consumed every cached token).
         const bool catchup_requester{
-            pfrom.IsManualConn() ||
-            pfrom.HasPermission(NetPermissionFlags::NoBan) ||
             (peer->m_their_services &
              (NODE_MATMUL_ATTESTATION_ARCHIVE |
               NODE_MATMUL_TRUSTED_MIRROR)) != 0};

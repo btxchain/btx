@@ -1250,6 +1250,7 @@ BOOST_AUTO_TEST_CASE(signer_getmmattest_historical_and_hammer_ban)
     BOOST_CHECK(!TrustedSignerMayServeGetMmAttest(true, 187432, 190567));
     BOOST_CHECK(!TrustedSignerMayServeGetMmAttest(true, -1, 190567));
 
+    using node::matmul_trusted::SIGNER_GETMMATTEST_CACHED_CATCHUP_WINDOW;
     using node::matmul_trusted::TrustedSignerMayServeCachedCatchUpGetMmAttest;
     BOOST_CHECK(TrustedSignerMayServeCachedCatchUpGetMmAttest(
         true, /*requester_is_catchup_peer=*/true, /*on_active_chain=*/true,
@@ -1261,6 +1262,17 @@ BOOST_AUTO_TEST_CASE(signer_getmmattest_historical_and_hammer_ban)
         true, true, /*on_active_chain=*/false, 190689, 190795));
     BOOST_CHECK(TrustedSignerMayServeCachedCatchUpGetMmAttest(
         true, false, false, 190795, 190795));
+    // Deep historical probes must not drain signer tokens (live 185006 / 190041).
+    BOOST_CHECK(!TrustedSignerMayServeCachedCatchUpGetMmAttest(
+        true, true, true, 185020, 190801));
+    BOOST_CHECK(!TrustedSignerMayServeCachedCatchUpGetMmAttest(
+        true, true, true, 190041, 190801));
+    BOOST_CHECK(TrustedSignerMayServeCachedCatchUpGetMmAttest(
+        true, true, true, 190801 - SIGNER_GETMMATTEST_CACHED_CATCHUP_WINDOW,
+        190801));
+    BOOST_CHECK(!TrustedSignerMayServeCachedCatchUpGetMmAttest(
+        true, true, true,
+        190801 - SIGNER_GETMMATTEST_CACHED_CATCHUP_WINDOW - 1, 190801));
 
     using node::matmul_trusted::TrustedArchiveMayServeGetMmAttest;
     BOOST_CHECK(TrustedArchiveMayServeGetMmAttest(

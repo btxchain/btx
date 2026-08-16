@@ -13270,7 +13270,7 @@ static bool ContextualCheckBlock(const CBlock& block,
                         }
                         const bool have_quorum{
                             frontier_covers ||
-                            node::matmul_trusted::HasQuorum(
+                            node::matmul_trusted::HasQuorumInMemory(
                                 block.GetHash(), nHeight)};
                         // ExactReplay as MatMul-valid lifts only for a GPU
                         // attestation (quorum or signed-frontier coverage).

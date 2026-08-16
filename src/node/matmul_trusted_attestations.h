@@ -178,6 +178,12 @@ static constexpr int TRUSTED_MIRROR_ATTESTED_TIP_LOOKBACK{2};
  *  Historical scans belong on archives. Hammering a signer with old
  *  hashes is ignored, then banned. */
 static constexpr int SIGNER_GETMMATTEST_SERVE_WINDOW{16};
+/** Cached catch-up GETMMATTEST, beyond the live window, only this far
+ *  behind the signer tip. Live 2026-08-16: after opening cached serve to
+ *  every addnode/manual peer, IBD nodes at ~185006 / ~190041 consumed the
+ *  signer's tokens; nyc1 (84 behind) never appeared in the serve log and
+ *  stayed at ~36s/block ExactReplay. Do not regenerate ExactReplay. */
+static constexpr int SIGNER_GETMMATTEST_CACHED_CATCHUP_WINDOW{256};
 /** Consecutive ignored GETMMATTEST (rate-limited serve or historical
  *  probe on a signer) before the peer is disconnected and banned for
  *  24h. Aggressive P2P is penalized; a silent drop is not enough
@@ -198,24 +204,33 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
     return height + serve_window >= tip_height;
 }
 
-/** Cached MMATTEST for an archive / manual catch-up peer on our active
- *  chain, even outside the live window. Live 2026-08-16: nyc1 asked
- *  GETMMATTEST for 190689 while the GPU tip was 190795; the 16-high
- *  window returned historical_not_served and ConnectTip crawled at
- *  ~37s/block. Do not use this to authorize ExactReplay regeneration. */
+/** Cached MMATTEST for an archive / trusted-mirror catch-up peer on our
+ *  active chain, even outside the live window, while the hash is still
+ *  inside SIGNER_GETMMATTEST_CACHED_CATCHUP_WINDOW of the signer tip.
+ *  Live 2026-08-16: nyc1 asked GETMMATTEST for 190689 while the GPU tip
+ *  was 190795; the 16-high window returned historical_not_served. Opening
+ *  cached serve to every addnode/manual then starved nyc1 (tokens went to
+ *  185006 / 190041 historical probes). Do not authorize ExactReplay. */
 [[nodiscard]] inline bool TrustedSignerMayServeCachedCatchUpGetMmAttest(
     bool has_local_signer,
     bool requester_is_catchup_peer,
     bool on_active_chain,
     int32_t height,
     int32_t tip_height,
-    int serve_window = SIGNER_GETMMATTEST_SERVE_WINDOW)
+    int serve_window = SIGNER_GETMMATTEST_SERVE_WINDOW,
+    int cached_catchup_window = SIGNER_GETMMATTEST_CACHED_CATCHUP_WINDOW)
 {
     if (TrustedSignerMayServeGetMmAttest(
             has_local_signer, height, tip_height, serve_window)) {
         return true;
     }
-    return has_local_signer && requester_is_catchup_peer && on_active_chain;
+    if (!has_local_signer || !requester_is_catchup_peer || !on_active_chain) {
+        return false;
+    }
+    if (height < 0 || tip_height < 0 || cached_catchup_window < 0) {
+        return false;
+    }
+    return height + cached_catchup_window >= tip_height;
 }
 
 /** While a trusted mirror is behind the GPU-signed frontier, historical
