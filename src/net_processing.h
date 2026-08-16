@@ -7,6 +7,7 @@
 #define BITCOIN_NET_PROCESSING_H
 
 #include <net.h>
+#include <node/matmul_trusted_attestations.h>
 #include <node/protocol_version.h>
 #include <threadsafety.h>
 #include <txorphanage.h>
@@ -221,6 +222,11 @@ public:
         //! Relay at most a small authenticated-tip-child candidate set while
         //! ExactReplay is pending; never grants chainwork or mining eligibility.
         bool matmul_rc_provisional_relay{true};
+        //! Uncached historical GETMMATTEST regeneration/reverify window for a
+        //! peer explicitly granted the matmulbackfill permission. Public peers
+        //! retain the fixed 16-block live window.
+        int matmul_attestation_backfill_window{
+            node::matmul_trusted::SIGNER_GETMMATTEST_SERVE_WINDOW};
     };
 
     static std::unique_ptr<PeerManager> make(CConnman& connman, AddrMan& addrman,

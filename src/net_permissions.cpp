@@ -19,6 +19,7 @@ const std::vector<std::string> NET_PERMISSIONS_DOC{
     "mempool (allow requesting BIP35 mempool contents)",
     "download (allow getheaders during IBD, no disconnect after maxuploadtarget limit)",
     "addr (responses to GETADDR avoid hitting the cache and contain random records with the most up-to-date info)",
+    "matmulbackfill (allow uncached historical MatMul attestation requests inside the configured signer backfill window)",
     "forceinbound (when connections are full, attempt to evict a random unprotected inbound peer to open a slot; implies noban)"
 };
 
@@ -58,6 +59,7 @@ static bool TryParsePermissionFlags(const std::string& str, NetPermissionFlags& 
             else if (permission == "all") NetPermissions::AddFlag(flags, NetPermissionFlags::All);
             else if (permission == "relay") NetPermissions::AddFlag(flags, NetPermissionFlags::Relay);
             else if (permission == "addr") NetPermissions::AddFlag(flags, NetPermissionFlags::Addr);
+            else if (permission == "matmulbackfill") NetPermissions::AddFlag(flags, NetPermissionFlags::MatMulAttestationBackfill);
             else if (permission == "forceinbound") NetPermissions::AddFlag(flags, NetPermissionFlags::ForceInbound);
             else if (permission == "in") connection_direction |= ConnectionDirection::In;
             else if (permission == "out") {
@@ -113,6 +115,7 @@ std::vector<std::string> NetPermissions::ToStrings(NetPermissionFlags flags)
     if (NetPermissions::HasFlag(flags, NetPermissionFlags::Mempool)) strings.emplace_back("mempool");
     if (NetPermissions::HasFlag(flags, NetPermissionFlags::Download)) strings.emplace_back("download");
     if (NetPermissions::HasFlag(flags, NetPermissionFlags::Addr)) strings.emplace_back("addr");
+    if (NetPermissions::HasFlag(flags, NetPermissionFlags::MatMulAttestationBackfill)) strings.emplace_back("matmulbackfill");
     return strings;
 }
 

@@ -116,6 +116,11 @@ matmulrcexecution=strict-device
 matmultrustedpubkey=02...compressed-public-key
 matmulattestationsignerkeyfile=/secure/btx/matmul-attestor.wif
 matmulattestationserve=1
+# Optional recovery lane for a mirror that can be farther behind than the
+# public 16-block signer window. Keep the subnet narrow. Use `out` instead of
+# `in` when this archive initiates the connection to the mirror.
+matmulattestationbackfillwindow=1024
+whitelist=in,matmulbackfill@192.0.2.10/32
 # Required when this archive must bootstrap mirrors at every RC height:
 # generic script assumevalid must not skip the archive's local ExactReplay.
 assumevalid=0
@@ -225,6 +230,17 @@ being compromised still does not independently decide a verdict.
 Near-tip and historical full-block downloads request the same signed sidecars.
 An archive can regenerate a historical attestation after restart only where its
 block index durably records its own successful ExactReplay.
+
+Cached canonical attestations are served before the signer window is applied,
+including statements recovered from the durable attestation store after a
+restart. Uncached work remains limited to 16 blocks for public peers. A peer
+with the explicit `matmulbackfill` P2P permission may request uncached work
+inside `-matmulattestationbackfillwindow`; `addnode`, `download`, and `noban`
+do not imply that permission. Use `in,matmulbackfill`, `out,matmulbackfill`, or
+both directions in a narrow `-whitelist` entry according to which side opens
+the connection. Authorized retries still use the per-peer response token bucket
+and the node-wide historical ExactReplay queue, but rate-limit misses do not
+increment the public historical-probe ban counter.
 
 The generic buried MatMul recompute shortcut is deliberately disabled in
 trusted Profile-1 mode: even historical IBD blocks must present the currently

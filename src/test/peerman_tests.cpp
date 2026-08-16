@@ -5687,6 +5687,108 @@ BOOST_AUTO_TEST_CASE(getmmattest_not_validated_does_not_starve_canonical_serve)
     BOOST_CHECK(HasQueuedMessageType(observer, NetMsgType::MMATTEST));
 }
 
+// A signer restart can leave useful historical statements only in the durable
+// attestation store. The public 16-block window limits new signing/reverify
+// work, not retrieval of authority data that is already cached.
+BOOST_AUTO_TEST_CASE(getmmattest_cached_history_precedes_signer_window)
+{
+    node::matmul_trusted::ResetForTest();
+
+    // Build a gap just beyond the public signer window while Profile-1 is
+    // disabled, then activate policy retroactively for the serving check.
+    for (int i = 0;
+         i < node::matmul_trusted::SIGNER_GETMMATTEST_SERVE_WINDOW + 1;
+         ++i) {
+        const CBlockIndex* tip{
+            WITH_LOCK(::cs_main, return m_node.chainman->ActiveChain().Tip())};
+        BOOST_REQUIRE(tip != nullptr);
+        mineBlock(m_node, std::chrono::seconds{tip->GetBlockTime() + 1});
+    }
+
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    ResetSharedPeermanFixture(m_node);
+
+    const CBlockIndex* tip{
+        WITH_LOCK(::cs_main, return m_node.chainman->ActiveChain().Tip())};
+    BOOST_REQUIRE(tip != nullptr);
+    const CBlockIndex* historical{tip->GetAncestor(
+        tip->nHeight -
+        node::matmul_trusted::SIGNER_GETMMATTEST_SERVE_WINDOW - 1)};
+    BOOST_REQUIRE(historical != nullptr);
+
+    Consensus::Params& consensus = const_cast<Consensus::Params&>(
+        m_node.chainman->GetParams().GetConsensus());
+    auto restore_heights{SaveMatMulHeights(consensus)};
+    ActivateRcAtTip(consensus, *historical);
+
+    CKey signer;
+    signer.MakeNewKey(/*fCompressed=*/true);
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256::FromHex(std::string(64, '1')).value();
+    config.replay_authority_context =
+        uint256::FromHex(std::string(64, '2')).value();
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    config.local_signer = signer;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/false, /*serve=*/true,
+        std::chrono::milliseconds{50}, error));
+    struct SignerReset {
+        ~SignerReset() { node::matmul_trusted::ResetForTest(); }
+    } signer_reset;
+
+    matmul::trusted::ExactReplayStatement statement;
+    statement.chain_id = uint256::FromHex(std::string(64, '1')).value();
+    statement.block_hash = historical->GetBlockHash();
+    statement.block_height = historical->nHeight;
+    statement.replay_authority_context =
+        uint256::FromHex(std::string(64, '2')).value();
+    const auto attestation{matmul::trusted::SignStatement(statement, signer)};
+    BOOST_REQUIRE(attestation);
+    BOOST_REQUIRE(node::matmul_trusted::Add(
+        *attestation, historical->GetBlockHash(), historical->nHeight) ==
+                  matmul::trusted::AddResult::Accepted);
+
+    ConnmanTestMsg& connman = static_cast<ConnmanTestMsg&>(*m_node.connman);
+    PeerManager& peerman = *m_node.peerman;
+    const ServiceFlags services{ServiceFlags(
+        NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS)};
+    CNode public_peer{/*id=*/402,
+                      /*sock=*/nullptr,
+                      CAddress{PeermanTestService(0x0e00007f), NODE_NETWORK},
+                      /*nKeyedNetGroupIn=*/0x0e,
+                      /*nLocalHostNonceIn=*/0,
+                      CAddress{},
+                      /*addrNameIn=*/"public-historical-cache-reader",
+                      ConnectionType::INBOUND,
+                      /*inbound_onion=*/false,
+                      /*network_key=*/0};
+    connman.Handshake(public_peer, /*successfully_connected=*/true, services,
+                      services, PROTOCOL_VERSION, /*relay_txs=*/true);
+    connman.AddTestNode(public_peer);
+    connman.FlushSendBuffer(public_peer);
+    struct FinalizePeer {
+        ConnmanTestMsg& connman;
+        PeerManager& peerman;
+        CNode& node;
+        ~FinalizePeer()
+        {
+            peerman.FinalizeNode(node);
+            connman.RemoveTestNode(node);
+        }
+    } finalize{connman, peerman, public_peer};
+
+    BOOST_REQUIRE(connman.ReceiveMsgFrom(
+        public_peer,
+        NetMsg::Make(NetMsgType::GETMMATTEST,
+                     historical->GetBlockHash())));
+    public_peer.fPauseSend = false;
+    (void)connman.ProcessMessagesOnce(public_peer);
+    BOOST_CHECK(HasQueuedMessageType(public_peer, NetMsgType::MMATTEST));
+    BOOST_CHECK(!public_peer.fDisconnect);
+}
+
 // Lost twin race with both bodies already HAVE_DATA: FindLowestMissingBody
 // is nullptr, so the scheduler used to skip GETMMATTEST for the competing
 // sibling. recovery_escape needs the local quorum record; without this

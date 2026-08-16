@@ -2,6 +2,7 @@
 
 #include <common/args.h>
 #include <net_processing.h>
+#include <node/matmul_trusted_attestations.h>
 
 #include <algorithm>
 #include <limits>
@@ -45,6 +46,11 @@ void ApplyArgsManOptions(const ArgsManager& argsman, PeerManager::Options& optio
     if (auto value{argsman.GetBoolArg("-matmulrcheaderfirst")}) options.matmul_rc_header_first = *value;
     if (auto value{argsman.GetBoolArg("-matmulrcadmission")}) options.matmul_rc_admission = *value;
     if (auto value{argsman.GetBoolArg("-matmulrcprovisionalrelay")}) options.matmul_rc_provisional_relay = *value;
+    if (auto value{argsman.GetIntArg("-matmulattestationbackfillwindow")}) {
+        options.matmul_attestation_backfill_window = int(std::clamp<int64_t>(
+            *value, node::matmul_trusted::SIGNER_GETMMATTEST_SERVE_WINDOW,
+            node::matmul_trusted::SIGNER_GETMMATTEST_BACKFILL_WINDOW_MAX));
+    }
 }
 
 } // namespace node

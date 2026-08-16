@@ -24,6 +24,7 @@
 #include <util/translation.h>
 
 #include <array>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -969,6 +970,16 @@ BOOST_AUTO_TEST_CASE(signer_getmmattest_historical_and_hammer_ban)
         true, 190567 - SIGNER_GETMMATTEST_SERVE_WINDOW - 1, 190567));
     BOOST_CHECK(!TrustedSignerMayServeGetMmAttest(true, 187432, 190567));
     BOOST_CHECK(!TrustedSignerMayServeGetMmAttest(true, -1, 190567));
+
+    // A configured privileged window can cover a controlled mirror backfill
+    // without changing the public 16-block policy.
+    BOOST_CHECK(TrustedSignerMayServeGetMmAttest(
+        true, 190407, 190982, /*serve_window=*/600));
+    BOOST_CHECK(!TrustedSignerMayServeGetMmAttest(
+        true, 190407, 190982, /*serve_window=*/574));
+    BOOST_CHECK(TrustedSignerMayServeGetMmAttest(
+        true, std::numeric_limits<int32_t>::max() - 10,
+        std::numeric_limits<int32_t>::max(), /*serve_window=*/16));
 
     BOOST_CHECK(!AggressiveGetMmAttestShouldBan(0));
     BOOST_CHECK(!AggressiveGetMmAttestShouldBan(GETMMATTEST_HAMMER_BAN_AFTER - 1));

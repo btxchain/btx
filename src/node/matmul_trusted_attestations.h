@@ -175,19 +175,23 @@ static constexpr int TRUSTED_MIRROR_SHORT_REORG_DEPTH{6};
  *  tip is visible on a quiet linear chain (signer typically attests ~1
  *  behind). */
 static constexpr int TRUSTED_MIRROR_ATTESTED_TIP_LOOKBACK{2};
-/** Local signers serve GETMMATTEST only inside this live window (tip-N).
- *  Historical scans belong on archives. Hammering a signer with old
- *  hashes is ignored, then banned. */
+/** Local signers serve uncached GETMMATTEST only inside this live window
+ *  (tip-N) for public peers. Cached statements may be served at any canonical
+ *  height. Operators may grant selected peers a larger backfill window. */
 static constexpr int SIGNER_GETMMATTEST_SERVE_WINDOW{16};
+/** Configuration ceiling for a privileged signer backfill window. This is a
+ *  resource-policy bound, not a consensus limit. */
+static constexpr int SIGNER_GETMMATTEST_BACKFILL_WINDOW_MAX{1'000'000};
 /** Consecutive ignored GETMMATTEST (rate-limited serve or historical
  *  probe on a signer) before the peer is disconnected and banned for
  *  24h. Aggressive P2P is penalized; a silent drop is not enough
  *  because the peer can reconnect and keep filling the accept queue. */
 static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
 
-/** Archives serve historical GETMMATTEST. A local signer does not:
- *  only the live tip window. Height above tip (catch-up suffix) is
- *  inside the window. */
+/** Archives serve historical GETMMATTEST. A local signer serves uncached
+ *  requests only within the supplied window. Height above tip (catch-up
+ *  suffix) is inside the window. Cached serving is decided by the caller
+ *  before applying this regeneration/reverify policy. */
 [[nodiscard]] inline bool TrustedSignerMayServeGetMmAttest(
     bool has_local_signer,
     int32_t height,
@@ -196,7 +200,9 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
 {
     if (!has_local_signer) return true;
     if (height < 0 || tip_height < 0 || serve_window < 0) return false;
-    return height + serve_window >= tip_height;
+    // Widen before addition so a configured window cannot overflow int32_t
+    // near the height limit and accidentally reject an in-range request.
+    return static_cast<int64_t>(height) + serve_window >= tip_height;
 }
 
 /** True once ignored GETMMATTEST / inbound MMATTEST floods reach the

@@ -34,7 +34,7 @@ from test_framework.wallet_util import generate_keypair
 ACTIVATION_HEIGHT = 6
 DISABLED_HEIGHT = 2_147_483_647
 # Enough post-activation blocks that catch-up spans many attestation requests.
-HISTORICAL_BLOCKS = 18
+HISTORICAL_BLOCKS = 34
 
 TRUST_WARNING = (
     "Warning: TRUSTED MATMUL MIRROR ACTIVE: this node delegates Profile-1 "
@@ -82,6 +82,10 @@ class MatMulTrustedMirrorBackfillTest(BitcoinTestFramework):
             "-matmulvalidation=consensus",
             f"-matmulattestationsignerkey={signer_wif}",
             "-matmulattestationserve=1",
+            # Public peers retain the 16-block window. Only the explicitly
+            # authorized loopback mirror may trigger deeper regeneration.
+            f"-matmulattestationbackfillwindow={HISTORICAL_BLOCKS + 2}",
+            "-whitelist=in,matmulbackfill@127.0.0.1/32",
         ]
         mirror = common + [
             "-matmulvalidation=trusted",
@@ -127,10 +131,11 @@ class MatMulTrustedMirrorBackfillTest(BitcoinTestFramework):
         assert_equal(authority.getblockcount(), tip_height)
         assert_equal(authority.getbestblockhash(), authority_tip)
         # Do not call getmatmulattestations here: that RPC regenerates on read.
-        # The wiped archive should show an empty in-memory store until P2P asks.
+        # The bounded startup scan may restore/sign the current frontier, but
+        # it must not eagerly repopulate the historical range under test.
         status_before = authority.getmatmultrustedstatus()
-        assert_equal(status_before["stored_attestations"], 0)
-        assert_equal(status_before["stored_blocks"], 0)
+        assert status_before["stored_attestations"] <= 1, status_before
+        assert status_before["stored_blocks"] <= 1, status_before
 
         self.log.info("Start mirror from genesis and connect to the ahead authority")
         self.start_node(1, extra_args=self.mirror_args)

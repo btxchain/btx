@@ -15211,23 +15211,24 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 "not_canonical", block_hash, height, pfrom.GetId());
             return;
         }
-        auto note_ignored = [&](const char* reason) {
+        const bool has_local_signer{
+            node::matmul_trusted::HasLocalSigner()};
+        const bool backfill_peer{pfrom.HasPermission(
+            NetPermissionFlags::MatMulAttestationBackfill)};
+        auto note_ignored = [&](const char* reason, bool punitive = true) {
             MaybeLogAttestationServe(
                 reason, block_hash, height, pfrom.GetId());
+            // An explicitly authorized backfill peer may legitimately retry
+            // while the signer token bucket or ExactReplay worker is full.
+            // Preserve the public hammer ban without turning controlled
+            // recovery traffic into a 24-hour outage.
+            if (!punitive) return;
             peer->m_matmul_protocol_ignored += 1;
             if (node::matmul_trusted::AggressiveGetMmAttestShouldBan(
                     peer->m_matmul_protocol_ignored)) {
                 BanHammeringPeer(pfrom, *peer, "aggressive getmmattest");
             }
         };
-        // Local signers do not serve historical GETMMATTEST. Archives do.
-        // Scanning a signer for old hashes is how the live accept-queue
-        // filled; those peers are ignored, then banned.
-        if (!node::matmul_trusted::TrustedSignerMayServeGetMmAttest(
-                node::matmul_trusted::HasLocalSigner(), height, tip_height)) {
-            note_ignored("historical_not_served");
-            return;
-        }
         // Charge when we actually push MMATTEST. not_canonical /
         // not_validated / empty / reverify probes do not take a token
         // (live 2026-08-15: those probes starved the attested-tip serve).
@@ -15245,7 +15246,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                     return;
                 }
                 if (peer->m_matmul_attestation_request_tokens < 1.0) {
-                    note_ignored("rate_limited");
+                    note_ignored("rate_limited", /*punitive=*/!backfill_peer);
                     LogDebug(BCLog::NET,
                              "Ignoring rate-limited getmmattest from peer=%d\n",
                              pfrom.GetId());
@@ -15260,12 +15261,28 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             };
 
         const char* serve_reason{"cached"};
+        // A cached statement is fixed, cheap authority data. Serve it before
+        // applying the signer regeneration window, including from the durable
+        // store after restart. The response token bucket still bounds egress.
         auto existing{node::matmul_trusted::Get(block_hash, height)};
         if (!existing.empty()) {
             push_mmattest(std::move(existing), serve_reason);
             return;
         }
-        if (node::matmul_trusted::HasLocalSigner()) {
+        const bool inside_public_window{
+            node::matmul_trusted::TrustedSignerMayServeGetMmAttest(
+                has_local_signer, height, tip_height)};
+        const bool inside_backfill_window{
+            backfill_peer &&
+            node::matmul_trusted::TrustedSignerMayServeGetMmAttest(
+                has_local_signer, height, tip_height,
+                m_opts.matmul_attestation_backfill_window)};
+        if (!inside_public_window && !inside_backfill_window) {
+            note_ignored("historical_not_served",
+                         /*punitive=*/!backfill_peer);
+            return;
+        }
+        if (has_local_signer) {
             // Live 2026-08-15: both 189489 siblings were on_active_suffix
             // while the parent was still tip, so GETMMATTEST regenerated
             // signatures for the loser and the winner. Mirrors that
@@ -15273,7 +15290,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             // Only sign hashes already on the active chain.
             if (locally_exact && on_active_chain) {
                 if (peer->m_matmul_attestation_request_tokens < 1.0) {
-                    note_ignored("rate_limited");
+                    note_ignored("rate_limited", /*punitive=*/!backfill_peer);
                     LogDebug(BCLog::NET,
                              "Ignoring rate-limited getmmattest from peer=%d\n",
                              pfrom.GetId());

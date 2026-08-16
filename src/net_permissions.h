@@ -44,6 +44,12 @@ enum class NetPermissionFlags : uint32_t {
     // an inbound slot from this peer
     ForceInbound = (1U << 10) | NoBan,
 
+    // May request uncached historical MatMul attestations inside the
+    // operator-configured signer backfill window. This is deliberately
+    // independent of NoBan/Download: historical ExactReplay regeneration is
+    // a distinct compute authority that must be granted explicitly.
+    MatMulAttestationBackfill = (1U << 11),
+
     // Can query compact filters even if -peerblockfilters is false
     BlockFilters = (1U << 8),
     // Used to avoid an error when All is used to set BlockFilters
@@ -52,7 +58,8 @@ enum class NetPermissionFlags : uint32_t {
     // True if the user did not specifically set fine-grained permissions with
     // the -whitebind or -whitelist configuration options.
     Implicit = (1U << 31),
-    All = BloomFilter | ForceRelay | Relay | NoBan | Mempool | Download | Addr | BlockFilters | ForceInbound,
+    All = BloomFilter | ForceRelay | Relay | NoBan | Mempool | Download | Addr |
+          BlockFilters | ForceInbound | MatMulAttestationBackfill,
 };
 static inline constexpr NetPermissionFlags operator|(NetPermissionFlags a, NetPermissionFlags b)
 {
