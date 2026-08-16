@@ -1071,6 +1071,19 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(ClassifyMsghandPeer(true, false, /*pending_block_serve=*/true) ==
                 MsghandPeerClass::Preferred);
     BOOST_CHECK(ClassifyMsghandPeer(true, false, false) == MsghandPeerClass::Other);
+    using node::matmul_trusted::MsghandPreferLiveGetData;
+    BOOST_CHECK(MsghandPreferLiveGetData(/*queued_getdata=*/true, false));
+    BOOST_CHECK(MsghandPreferLiveGetData(false, /*inflight_getdata_requests=*/true));
+    BOOST_CHECK(!MsghandPreferLiveGetData(false, false));
+    using node::matmul_trusted::TrustedSignerDropMinerIngestWhileGetData;
+    BOOST_CHECK(TrustedSignerDropMinerIngestWhileGetData(
+        /*local_signer=*/true, /*getdata_pending=*/true,
+        /*this_inbound=*/true, /*this_manual=*/false,
+        /*this_has_live_getdata=*/false));
+    BOOST_CHECK(!TrustedSignerDropMinerIngestWhileGetData(
+        true, true, true, false, /*this_has_live_getdata=*/true));
+    BOOST_CHECK(!TrustedSignerDropMinerIngestWhileGetData(
+        true, /*getdata_pending=*/false, true, false, false));
     using node::matmul_trusted::PreferredPeerHandshakePending;
     BOOST_CHECK(PreferredPeerHandshakePending(
         /*handshake_complete=*/false, /*manual_or_outbound=*/true,

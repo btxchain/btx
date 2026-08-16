@@ -861,9 +861,14 @@ public:
     const uint64_t nKeyedNetGroup;
     std::atomic_bool fPauseRecv{false};
     std::atomic_bool fPauseSend{false};
-    /** Sticky: this peer issued GETDATA (archive/fetcher). Msghand prefers
-     *  it over miner inbounds so BLOCK replies are not starved. */
+    /** Sticky: this peer issued GETDATA (archive/fetcher). Used only to
+     *  keep SendMessages (INV) to archives; msghand prefer/skip uses
+     *  live GETDATA (queue or inflight requests), not this bit. Live
+     *  macpro2 2026-08-16: sticky Preferred put every miner that had
+     *  ever fetched into the archive class, GETDATA still 45–224s. */
     std::atomic_bool m_prefer_block_serve{false};
+    /** Live: process-queue GETDATA or unconsumed m_getdata_requests. */
+    std::atomic_bool m_has_getdata_requests{false};
 
     /** Network key used to prevent fingerprinting our node across networks.
      *  Influenced by the network and the bind address (+ bind port for inbounds) */
@@ -1306,6 +1311,14 @@ public:
     void Interrupt() EXCLUSIVE_LOCKS_REQUIRED(!mutexMsgProc);
     bool GetNetworkActive() const { return fNetworkActive; };
     bool GetUseAddrmanOutgoing() const { return m_use_addrman_outgoing; };
+    void SetGetDataServePending(bool pending)
+    {
+        m_getdata_serve_pending.store(pending, std::memory_order_relaxed);
+    }
+    bool GetDataServePending() const
+    {
+        return m_getdata_serve_pending.load(std::memory_order_relaxed);
+    }
     void SetNetworkActive(bool active);
     void OpenNetworkConnection(const CAddress& addrConnect, bool fCountFailure, CSemaphoreGrant&& grant_outbound, const char* strDest, ConnectionType conn_type, bool use_v2transport) EXCLUSIVE_LOCKS_REQUIRED(!m_unused_i2p_sessions_mutex);
     bool CheckIncomingNonce(uint64_t nonce);
@@ -1632,6 +1645,7 @@ private:
 
     std::vector<ListenSocket> vhListenSocket;
     std::atomic<bool> fNetworkActive{true};
+    std::atomic<bool> m_getdata_serve_pending{false};
     bool fAddressesInitialized{false};
     AddrMan& addrman;
     const NetGroupManager& m_netgroupman;

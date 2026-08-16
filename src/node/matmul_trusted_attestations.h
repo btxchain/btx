@@ -688,10 +688,10 @@ enum class MsghandPeerClass : uint8_t {
 };
 
 /** Bound miner (Other) ProcessMessages per msghand loop on a local
- *  signer. Live macpro2 2026-08-16: 100 inbounds each deserialized a
- *  competing BLOCK under cs_main; one loop exceeded the 90s archive
- *  GETDATA timeout. Handshake + Preferred always run in full. */
-static constexpr int SIGNER_MSGHAND_OTHER_PER_LOOP{8};
+ *  signer. Live macpro2 2026-08-16: 8 inbounds each deserialized a
+ *  competing BLOCK under cs_main (~5s) so one loop still exceeded the
+ *  archive GETDATA window. Handshake + live GETDATA always run in full. */
+static constexpr int SIGNER_MSGHAND_OTHER_PER_LOOP{2};
 
 [[nodiscard]] inline MsghandPeerClass ClassifyMsghandPeer(
     bool handshake_complete,
@@ -703,6 +703,31 @@ static constexpr int SIGNER_MSGHAND_OTHER_PER_LOOP{8};
         return MsghandPeerClass::Preferred;
     }
     return MsghandPeerClass::Other;
+}
+
+/** Live GETDATA: still in the process queue or unconsumed getdata
+ *  requests. Sticky "ever fetched" must not be this — miners that
+ *  GETDATA once would stay Preferred forever. */
+[[nodiscard]] inline bool MsghandPreferLiveGetData(
+    bool queued_getdata,
+    bool inflight_getdata_requests)
+{
+    return queued_getdata || inflight_getdata_requests;
+}
+
+/** Local signer: drop miner inbound BLOCK/HEADERS/GETMMATTEST before
+ *  deserialize while any live GETDATA is waiting. */
+[[nodiscard]] inline bool TrustedSignerDropMinerIngestWhileGetData(
+    bool local_signer,
+    bool getdata_pending,
+    bool this_inbound,
+    bool this_manual,
+    bool this_has_live_getdata)
+{
+    if (!local_signer || !getdata_pending) return false;
+    if (this_has_live_getdata) return false;
+    if (!this_inbound || this_manual) return false;
+    return true;
 }
 
 /** A preferred peer (GPU addnode, outbound, or any inbound on a local

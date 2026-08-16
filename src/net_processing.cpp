@@ -12924,11 +12924,20 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         ShouldIgnoreNonAuthorityInboundBlock(pfrom)};
     const bool this_gpu{
         pfrom.IsManualConn() || pfrom.HasPermission(NetPermissionFlags::NoBan)};
+    const bool this_live_getdata{node::matmul_trusted::MsghandPreferLiveGetData(
+        pfrom.HasQueuedProcessMessageType(NetMsgType::GETDATA),
+        pfrom.m_has_getdata_requests.load())};
+    const bool drop_miner_ingest{
+        node::matmul_trusted::TrustedSignerDropMinerIngestWhileGetData(
+            node::matmul_trusted::HasLocalSigner(),
+            m_connman.GetDataServePending(),
+            pfrom.IsInboundConn(), pfrom.IsManualConn(),
+            this_live_getdata)};
     const bool defer_miner_getdata{
         ignore_non_gpu_inbound &&
         !node::matmul_trusted::TrustedMirrorMayServeNonAuthorityGetData(
             this_gpu, m_signed_frontier_catch_up.load(std::memory_order_relaxed))};
-    if (ignore_non_gpu_inbound &&
+    if ((ignore_non_gpu_inbound || drop_miner_ingest) &&
         (msg_type == NetMsgType::BLOCK || msg_type == NetMsgType::HEADERS ||
          msg_type == NetMsgType::CMPCTBLOCK || msg_type == NetMsgType::BLOCKTXN ||
          msg_type == NetMsgType::INV || msg_type == NetMsgType::ADDR ||
@@ -13174,11 +13183,13 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         }
 
         pfrom.m_prefer_block_serve.store(true);
+        pfrom.m_has_getdata_requests.store(true);
 
         {
             LOCK(peer->m_getdata_requests_mutex);
             peer->m_getdata_requests.insert(peer->m_getdata_requests.end(), vInv.begin(), vInv.end());
             ProcessGetData(pfrom, *peer, interruptMsgProc);
+            pfrom.m_has_getdata_requests.store(!peer->m_getdata_requests.empty());
         }
 
         return;
@@ -16249,8 +16260,10 @@ bool PeerManagerImpl::ProcessMessages(CNode* pfrom, std::atomic<bool>& interrupt
         LOCK(peer->m_getdata_requests_mutex);
         if (defer_miner_getdata) {
             peer->m_getdata_requests.clear();
+            pfrom->m_has_getdata_requests.store(false);
         } else if (!peer->m_getdata_requests.empty()) {
             ProcessGetData(*pfrom, *peer, interruptMsgProc);
+            pfrom->m_has_getdata_requests.store(!peer->m_getdata_requests.empty());
         }
     }
 
