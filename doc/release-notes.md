@@ -47,15 +47,15 @@ startup-canary policy record the supported launch classes; each deployed
 binary still self-qualifies its live provider and runtime before advertising
 readiness.
 
-The release assets include a mainnet AssumeUTXO snapshot at height 190467
+The release assets include a mainnet AssumeUTXO snapshot at height 190507
 (file version 9), after Epoch A / Profile-1 activation. Verify the published
 checksums, then load `snapshot.dat` with
 `btx-cli -rpcclienttimeout=0 loadtxoutset /path/to/snapshot.dat` to reduce
 foreground catch-up to the remaining blocks after that height. Strict
 consensus nodes must use this `loadtxoutset` pin rather than attested
 snapshots. The node keeps validating the historical chain in the background.
-The previous 189307 and 179000 pins remain in `m_assumeutxo_data` for older
-binaries.
+The previous 190467, 189307, and 179000 pins remain in `m_assumeutxo_data`
+for older binaries.
 
 # Notable Changes
 

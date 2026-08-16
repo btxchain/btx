@@ -1,0 +1,39 @@
+{
+  "chain": "main",
+  "snapshot_type": "latest",
+  "cli_path": "btx-cli",
+  "rpc_args": [
+    "-datadir=<redacted>"
+  ],
+  "snapshot": {
+    "height": 190507,
+    "txoutset_hash": "2563ecff2b06ef20e592a57deb47d52b4ffe7e1fb1fdda1746adf4f33a9dec81",
+    "nchaintx": 288615,
+    "blockhash": "9142fe23aca98fa3a79c31ed2a0af74d41d0915f9914998e6a40808009496fe5",
+    "path": "snapshot.dat",
+    "sha256": "b388ca72153d51f8b472c71e7ee02e09ac24d0a107f062d82cb688bfc7c1754d",
+    "file_version": 9,
+    "shielded_state_pin": "94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541"
+  },
+  "loadtxoutset_example": "btx-cli -rpcclienttimeout=0 loadtxoutset snapshot.dat",
+  "release_asset_manifest": {
+    "format_version": 1,
+    "chain": "main",
+    "snapshot_type": "latest",
+    "published_name": "snapshot.dat",
+    "filename": "snapshot.dat",
+    "height": 190507,
+    "txoutset_hash": "2563ecff2b06ef20e592a57deb47d52b4ffe7e1fb1fdda1746adf4f33a9dec81",
+    "nchaintx": 288615,
+    "blockhash": "9142fe23aca98fa3a79c31ed2a0af74d41d0915f9914998e6a40808009496fe5",
+    "snapshot_file_version": 9,
+    "snapshot_sha256": "b388ca72153d51f8b472c71e7ee02e09ac24d0a107f062d82cb688bfc7c1754d",
+    "sha256": "b388ca72153d51f8b472c71e7ee02e09ac24d0a107f062d82cb688bfc7c1754d",
+    "snapshot_size_bytes": 452998612,
+    "verification": {
+      "loadtxoutset": "btx-cli -rpcclienttimeout=0 loadtxoutset snapshot.dat",
+      "sha256sum": "b388ca72153d51f8b472c71e7ee02e09ac24d0a107f062d82cb688bfc7c1754d  snapshot.dat"
+    },
+    "shielded_state_pin": "94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541"
+  }
+}
