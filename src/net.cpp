@@ -3566,7 +3566,10 @@ void CConnman::ThreadMessageHandler()
                             pnode->IsInboundConn(), pnode->IsManualConn(),
                             pnode->fSuccessfullyConnected.load(),
                             archive_target)) {
-                    fMoreWork = true;
+                    // Do not set fMoreWork: that busy-spins msghand at
+                    // ~90% with 148 miner inbounds (live nyc1 after the
+                    // skip patch) and wedges RPC. Archives already ran
+                    // in this pass; miners wait for the next wake.
                     continue;
                 }
                 if (local_signer &&

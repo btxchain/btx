@@ -717,13 +717,17 @@ static constexpr int SIGNER_MSGHAND_OTHER_PER_LOOP{2};
     return queued_getdata || inflight_getdata_requests;
 }
 
-/** GPU addnode / outbound, or an inbound that advertised archive/mirror
- *  service bits. Miner CONSENSUS inbounds are not this, even with GETDATA. */
+/** Only peers that advertised ARCHIVE/MIRROR. Live macpro2 2026-08-16T16:33:
+ *  treating every outbound as this drained historical BLOCK to addrman
+ *  peers at height 185000 (sent_block≈50KB) while nyc1 inbound mirror
+ *  got the same ~50KB and 1 body / ~46s. `manual_or_outbound` is kept so
+ *  call sites stay explicit; it must not grant serve-target status. */
 [[nodiscard]] inline bool MsghandPeerIsArchiveServeTarget(
     bool manual_or_outbound,
     bool archive_or_mirror_service)
 {
-    return manual_or_outbound || archive_or_mirror_service;
+    (void)manual_or_outbound;
+    return archive_or_mirror_service;
 }
 
 /** Only archive/GPU GETDATA is Preferred / sets the serve-pending latch.
@@ -736,9 +740,10 @@ static constexpr int SIGNER_MSGHAND_OTHER_PER_LOOP{2};
     return live_getdata && is_archive_serve_target;
 }
 
-/** Local signer: drop miner inbound BLOCK/HEADERS/GETMMATTEST before
- *  deserialize while any *archive* GETDATA is waiting. Miner GETDATA
- *  does not exempt that miner. */
+/** Local signer: drop non-archive BLOCK/HEADERS ingest while any
+ *  archive GETDATA is waiting. Outbound miners too — live signer still
+ *  connected tip from addrman peers (b-mmverify ~45%) during nyc1
+ *  catch-up. Miner GETDATA does not exempt that miner. */
 [[nodiscard]] inline bool TrustedSignerDropMinerIngestWhileGetData(
     bool local_signer,
     bool getdata_pending,
@@ -746,9 +751,10 @@ static constexpr int SIGNER_MSGHAND_OTHER_PER_LOOP{2};
     bool this_manual,
     bool this_is_archive_serve_target)
 {
+    (void)this_inbound;
+    (void)this_manual;
     if (!local_signer || !getdata_pending) return false;
     if (this_is_archive_serve_target) return false;
-    if (!this_inbound || this_manual) return false;
     return true;
 }
 
@@ -785,12 +791,12 @@ static constexpr int SIGNER_MSGHAND_OTHER_PER_LOOP{2};
     return this_peer_handshake_complete;
 }
 
-/** Do not ProcessMessages miner inbounds while we must serve an archive
- *  or while a trusted mirror is catching up to the GPU frontier.
- *  Miner GETDATA does not make that miner a serve target (live 45s/block
- *  after the live-GETDATA patch). Handshake and archive/GPU still run.
- *  Archives (trusted mirrors, not HasLocalSigner) skip miners during
- *  catch-up so GPU BLOCK is not behind 140 miner ProcessMessages. */
+/** Do not ProcessMessages non-archive peers while we must serve an
+ *  archive or while a trusted mirror is catching up to the GPU frontier.
+ *  Must skip outbound miners too: ClassifyMsghandPeer still puts every
+ *  outbound in Preferred, and the inbound-only skip left addrman
+ *  GETDATA on the signer draining BLOCK under cs_main (live 46s/block
+ *  after bd3f6b5f). Handshake and ARCHIVE/MIRROR still run. */
 [[nodiscard]] inline bool SkipMinerProcessMessagesDuringArchiveGetData(
     bool local_signer,
     bool archive_getdata_pending,
@@ -800,27 +806,29 @@ static constexpr int SIGNER_MSGHAND_OTHER_PER_LOOP{2};
     bool this_peer_handshake_complete,
     bool this_is_archive_serve_target)
 {
+    (void)this_peer_inbound;
+    (void)this_peer_manual;
     const bool skip_now{(local_signer && archive_getdata_pending) ||
                         trusted_mirror_catch_up};
     if (!skip_now) return false;
     if (this_is_archive_serve_target) return false;
     if (!this_peer_handshake_complete) return false;
-    if (!this_peer_inbound || this_peer_manual) return false;
     return true;
 }
 
-/** During signed-frontier catch-up, keep a GPU/frontier body source
- *  even after consecutive GETDATA timeouts. Live nyc1 2026-08-16:
- *  3×90s then "disconnecting peer=1027" / peer=225 dropped the only
- *  attested source. `this_peer_is_gpu_or_frontier_source` is a property
- *  of that peer — do not require a summed authority+frontier count of
- *  1, because one GPU is counted in both buckets. */
+/** Keep a GPU/frontier body source after GETDATA timeouts. Live nyc1
+ *  2026-08-16: 3×90s disconnected peer=1027; later behind=1 dropped
+ *  peer=1433 because IsSignedFrontierCatchUp requires behind>=2.
+ *  Last GPU/frontier source is kept regardless of that flag. */
 [[nodiscard]] inline bool KeepCatchupSourceOnDownloadTimeout(
     bool signed_frontier_catch_up,
     bool persistent_timeout,
     bool last_gpu_or_frontier_source)
 {
-    if (last_gpu_or_frontier_source && signed_frontier_catch_up) {
+    // Keep the last GPU even when IsSignedFrontierCatchUp is false
+    // (that helper requires behind>=2 and followed_ahead>=2). Live nyc1
+    // 2026-08-16T16:33:38Z disconnected peer=1433 at behind=1.
+    if (last_gpu_or_frontier_source) {
         return true;
     }
     return signed_frontier_catch_up && !persistent_timeout;
