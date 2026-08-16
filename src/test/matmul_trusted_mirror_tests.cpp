@@ -507,6 +507,17 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
             .in_backoff = false,
         }) == TrustedAttestationAdmit::RejectParkedReorg);
 
+    BOOST_CHECK(
+        EvaluateTrustedAttestationAdmit(TrustedAttestationAdmitView{
+            .tip_extending = false,
+            .extends_active_tip_chain = true,
+            .is_signed_frontier_hash = true,
+            .on_parked_reorg_branch = false,
+            .height = 190788,
+            .authority_frontier = 190666,
+            .in_backoff = false,
+        }) == TrustedAttestationAdmit::Allow);
+
     // Parked deep-reorg branch is never attestable by our policy.
     BOOST_CHECK(
         EvaluateTrustedAttestationAdmit(TrustedAttestationAdmitView{
@@ -881,6 +892,11 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         /*active_tip_child=*/false, /*short_tip_reorg_missing_root=*/false,
         /*on_parked_reorg_branch=*/false, /*recent_active_ancestor=*/false,
         /*followed_body_awaiting_attestation=*/true));
+    BOOST_CHECK(TrustedMirrorPreferGetMmAttest(
+        /*active_tip_child=*/false, /*short_tip_reorg_missing_root=*/false,
+        /*on_parked_reorg_branch=*/false, /*recent_active_ancestor=*/false,
+        /*followed_body_awaiting_attestation=*/false,
+        /*is_signed_frontier_hash=*/true));
     BOOST_CHECK(!TrustedMirrorPreferGetMmAttest(
         /*active_tip_child=*/false, /*short_tip_reorg_missing_root=*/false,
         /*on_parked_reorg_branch=*/true, /*recent_active_ancestor=*/false,
@@ -1233,6 +1249,18 @@ BOOST_AUTO_TEST_CASE(signer_getmmattest_historical_and_hammer_ban)
         true, 190567 - SIGNER_GETMMATTEST_SERVE_WINDOW - 1, 190567));
     BOOST_CHECK(!TrustedSignerMayServeGetMmAttest(true, 187432, 190567));
     BOOST_CHECK(!TrustedSignerMayServeGetMmAttest(true, -1, 190567));
+
+    using node::matmul_trusted::TrustedSignerMayServeCachedCatchUpGetMmAttest;
+    BOOST_CHECK(TrustedSignerMayServeCachedCatchUpGetMmAttest(
+        true, /*requester_is_catchup_peer=*/true, /*on_active_chain=*/true,
+        /*height=*/190689, /*tip_height=*/190795));
+    BOOST_CHECK(!TrustedSignerMayServeCachedCatchUpGetMmAttest(
+        true, /*requester_is_catchup_peer=*/false, /*on_active_chain=*/true,
+        190689, 190795));
+    BOOST_CHECK(!TrustedSignerMayServeCachedCatchUpGetMmAttest(
+        true, true, /*on_active_chain=*/false, 190689, 190795));
+    BOOST_CHECK(TrustedSignerMayServeCachedCatchUpGetMmAttest(
+        true, false, false, 190795, 190795));
 
     using node::matmul_trusted::TrustedArchiveMayServeGetMmAttest;
     BOOST_CHECK(TrustedArchiveMayServeGetMmAttest(

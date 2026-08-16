@@ -8100,6 +8100,10 @@ PeerManagerImpl::EvaluateTrustedMirrorAttestationAdmit(
         (tip == nullptr || !m_chainman.ActiveChain().Contains(index)) &&
         ((index->nStatus & BLOCK_HAVE_DATA) != 0 ||
          m_matmul_block_lifecycle.HasRetainedBody(hash))};
+    const auto frontier_status{m_chainman.GetSignedFrontierStatus()};
+    const bool is_signed_frontier_hash{
+        frontier_status.hash_known && !hash.IsNull() &&
+        frontier_status.hash == hash};
     bool in_backoff{false};
     const auto backoff_it{m_matmul_attestation_backoff.find(hash)};
     if (backoff_it != m_matmul_attestation_backoff.end()) {
@@ -8115,6 +8119,7 @@ PeerManagerImpl::EvaluateTrustedMirrorAttestationAdmit(
         .on_recent_active_ancestor = recent_active_ancestor,
         .followed_body_awaiting_attestation =
             followed_body_awaiting_attestation,
+        .is_signed_frontier_hash = is_signed_frontier_hash,
         .on_parked_reorg_branch = parked,
         .height = index ? index->nHeight : -1,
         .authority_frontier = CappedAuthorityAttestedFrontier(m_chainman),
@@ -8653,11 +8658,16 @@ void PeerManagerImpl::MaybeRequestTrustedMirrorPreferredAttestations(
             !m_chainman.ActiveChain().Contains(target) &&
             ((target->nStatus & BLOCK_HAVE_DATA) != 0 ||
              m_matmul_block_lifecycle.HasRetainedBody(target->GetBlockHash()))};
+        const auto frontier_status{m_chainman.GetSignedFrontierStatus()};
+        const bool is_signed_frontier{
+            frontier_status.hash_known &&
+            frontier_status.hash == target->GetBlockHash()};
         if (!node::matmul_trusted::TrustedMirrorPreferGetMmAttest(
                 target->pprev == tip,
                 TrustedMirrorShortTipReorg(tip, target),
                 /*on_parked_reorg_branch=*/false,
-                recent_active_ancestor, followed_body_awaiting)) {
+                recent_active_ancestor, followed_body_awaiting,
+                is_signed_frontier)) {
             return;
         }
         RequestMatMulTrustedAttestations(target->GetBlockHash(),
@@ -8675,6 +8685,11 @@ void PeerManagerImpl::MaybeRequestTrustedMirrorPreferredAttestations(
     if (tip->pprev != nullptr && tip->pprev != child && tip->pprev != hole &&
         tip->pprev != fork_child) {
         request_if_preferred(tip->pprev);
+    }
+    const auto frontier_status{m_chainman.GetSignedFrontierStatus()};
+    if (frontier_status.hash_known) {
+        request_if_preferred(
+            m_chainman.m_blockman.LookupBlockIndex(frontier_status.hash));
     }
 }
 
@@ -8903,20 +8918,15 @@ void PeerManagerImpl::RequestMatMulTrustedAttestations(
             !m_chainman.ActiveChain().Contains(index) &&
             ((index->nStatus & BLOCK_HAVE_DATA) != 0 ||
              m_matmul_block_lifecycle.HasRetainedBody(hash))};
-        // Slot reservation / signer-absent skip: ActiveTip child OR short
-        // reorg missing root OR recent active ancestor (linear attested tip)
-        // OR a followed HAVE_DATA / retained GPU body waiting for MMATTEST.
-        // Do not pass short_reorg as tip_extending into admit — park must
-        // still win. Competing 1879xx is neither.
+        const auto frontier_status{m_chainman.GetSignedFrontierStatus()};
+        const bool is_signed_frontier{
+            frontier_status.hash_known && frontier_status.hash == hash};
         const bool preferred{
             node::matmul_trusted::TrustedMirrorPreferGetMmAttest(
                 tip_child, short_reorg, parked, recent_active_ancestor,
-                followed_body_awaiting)};
-        // A hash rejected as unattestable during a race must be re-asked
-        // once it is the followed tip-child (field report: sticky
-        // rejected_unattestable=1 blocked re-admission after the signer
-        // jumped branches).
-        if (tip_child || short_reorg || followed_body_awaiting) {
+                followed_body_awaiting, is_signed_frontier)};
+        if (tip_child || short_reorg || followed_body_awaiting ||
+            is_signed_frontier) {
             m_matmul_attestation_backoff.erase(hash);
         }
 
@@ -15302,11 +15312,22 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 BanHammeringPeer(pfrom, *peer, "aggressive getmmattest");
             }
         };
-        // Local signers do not serve historical GETMMATTEST. Archives do.
-        // Scanning a signer for old hashes is how the live accept-queue
-        // filled; those peers are ignored, then banned.
-        if (!node::matmul_trusted::TrustedSignerMayServeGetMmAttest(
-                node::matmul_trusted::HasLocalSigner(), height, tip_height)) {
+        // Local signers do not serve miner historical GETMMATTEST. Archives
+        // catching up via addnode/manual may fetch cached signatures for
+        // hashes already on this signer's active chain (live 2026-08-16:
+        // window=16 refused 190689 while GPU tip was 190795).
+        const bool catchup_requester{
+            pfrom.IsManualConn() ||
+            pfrom.HasPermission(NetPermissionFlags::NoBan) ||
+            (peer->m_their_services &
+             (NODE_MATMUL_ATTESTATION_ARCHIVE |
+              NODE_MATMUL_TRUSTED_MIRROR)) != 0};
+        const bool live_window{
+            node::matmul_trusted::TrustedSignerMayServeGetMmAttest(
+                node::matmul_trusted::HasLocalSigner(), height, tip_height)};
+        if (!node::matmul_trusted::TrustedSignerMayServeCachedCatchUpGetMmAttest(
+                node::matmul_trusted::HasLocalSigner(), catchup_requester,
+                on_active_chain, height, tip_height)) {
             note_ignored("historical_not_served");
             return;
         }
@@ -15350,6 +15371,11 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         auto existing{node::matmul_trusted::Get(block_hash, height)};
         if (!existing.empty()) {
             push_mmattest(std::move(existing), serve_reason);
+            return;
+        }
+        if (!live_window) {
+            MaybeLogAttestationServe(
+                "historical_not_served", block_hash, height, pfrom.GetId());
             return;
         }
         if (node::matmul_trusted::HasLocalSigner()) {

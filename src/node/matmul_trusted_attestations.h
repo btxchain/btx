@@ -198,6 +198,26 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
     return height + serve_window >= tip_height;
 }
 
+/** Cached MMATTEST for an archive / manual catch-up peer on our active
+ *  chain, even outside the live window. Live 2026-08-16: nyc1 asked
+ *  GETMMATTEST for 190689 while the GPU tip was 190795; the 16-high
+ *  window returned historical_not_served and ConnectTip crawled at
+ *  ~37s/block. Do not use this to authorize ExactReplay regeneration. */
+[[nodiscard]] inline bool TrustedSignerMayServeCachedCatchUpGetMmAttest(
+    bool has_local_signer,
+    bool requester_is_catchup_peer,
+    bool on_active_chain,
+    int32_t height,
+    int32_t tip_height,
+    int serve_window = SIGNER_GETMMATTEST_SERVE_WINDOW)
+{
+    if (TrustedSignerMayServeGetMmAttest(
+            has_local_signer, height, tip_height, serve_window)) {
+        return true;
+    }
+    return has_local_signer && requester_is_catchup_peer && on_active_chain;
+}
+
 /** While a trusted mirror is behind the GPU-signed frontier, historical
  *  GETMMATTEST serve is not this node's job: msghand must process BLOCK /
  *  getdata. Same live window as a signer. Caught-up archives still serve
@@ -461,11 +481,13 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
     bool short_tip_reorg_missing_root,
     bool on_parked_reorg_branch = false,
     bool recent_active_ancestor = false,
-    bool followed_body_awaiting_attestation = false)
+    bool followed_body_awaiting_attestation = false,
+    bool is_signed_frontier_hash = false)
 {
     if (on_parked_reorg_branch) return false;
     return active_tip_child || short_tip_reorg_missing_root ||
-           recent_active_ancestor || followed_body_awaiting_attestation;
+           recent_active_ancestor || followed_body_awaiting_attestation ||
+           is_signed_frontier_hash;
 }
 
 /** GETMMATTEST destinations. NODE_MATMUL_ATTESTATION_ARCHIVE means the
@@ -1059,6 +1081,9 @@ struct TrustedAttestationAdmitView {
     //! GPU suffix. Asking the GPU to attest a body it just served is the
     //! intended work. Park still wins.
     bool followed_body_awaiting_attestation{false};
+    //! GPU-signed frontier hash itself. Coverage for the ancestor suffix
+    //! cannot be fetched if this hash is RejectAboveFrontier.
+    bool is_signed_frontier_hash{false};
     bool on_parked_reorg_branch{false};
     int32_t height{-1};
     std::optional<int32_t> authority_frontier{};
@@ -1076,11 +1101,11 @@ struct TrustedAttestationAdmitView {
         return TrustedAttestationAdmit::RejectParkedReorg;
     }
     if (v.short_tip_reorg || v.on_recent_active_ancestor ||
-        v.followed_body_awaiting_attestation) {
+        v.followed_body_awaiting_attestation || v.is_signed_frontier_hash) {
         // Short tip-race reorg, the active tip / last few ancestors so a
-        // linear chain can populate getmatmulattestedtip, or a followed
-        // HAVE_DATA / retained GPU body whose local frontier has not yet
-        // caught the GPU suffix. Park still wins.
+        // linear chain can populate getmatmulattestedtip, a followed
+        // HAVE_DATA / retained GPU body, or the signed-frontier hash
+        // whose quorum covers the ancestor suffix. Park still wins.
         return TrustedAttestationAdmit::Allow;
     }
     // A better-work branch is admissible even though it does not extend our

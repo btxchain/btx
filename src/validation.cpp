@@ -9259,12 +9259,14 @@ static constexpr const char* RETRYABLE_MATMUL_ACTIVATION_PREFIX =
         return false;
     }
     // Lift ConnectTip only for a GPU attestation on this hash: in-memory
-    // quorum, signed-frontier ancestry, or durable verified signatures.
-    // Catch-up height / "from the GPU peer" is not attestation.
+    // quorum or signed-frontier ancestry. Do not durable-read / WaitForQuorum
+    // under cs_main (live "trusted attestation quorum Timeout" at ~37–60s
+    // per block). GETMMATTEST populates in-memory quorum; catch-up height
+    // is not attestation.
     if (chainman.IndexHasTrustedMatMulAuthority(pindex)) return false;
     return node::matmul_trusted::TrustedMirrorMustDeferUnattestedConnect(
         /*trusted_mirror_profile1=*/true,
-        node::matmul_trusted::HasQuorum(
+        node::matmul_trusted::HasQuorumInMemory(
             pindex->GetBlockHash(), pindex->nHeight),
         chainman.IndexIsCoveredBySignedFrontier(pindex));
 }
@@ -9279,7 +9281,7 @@ static constexpr const char* RETRYABLE_MATMUL_ACTIVATION_PREFIX =
             pindex->nHeight)) {
         return false;
     }
-    const bool has_quorum{node::matmul_trusted::HasQuorum(
+    const bool has_quorum{node::matmul_trusted::HasQuorumInMemory(
         pindex->GetBlockHash(), pindex->nHeight)};
     return node::matmul_trusted::MustDeferConflictingAttestedHeight(
         /*configured=*/true, has_quorum,
@@ -9314,7 +9316,7 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
                  "ConnectTip: deferring unattested profile-1 block hash=%s height=%d until attestation quorum\n",
                  pindexNew->GetBlockHash().ToString(), pindexNew->nHeight);
         return state.Error(std::string(RETRYABLE_MATMUL_ACTIVATION_PREFIX) +
-                           ": trusted attestation quorum Timeout");
+                           ": trusted attestation quorum pending");
     }
     if (MustDeferConflictingAttestedConnect(m_chainman, pindexNew)) {
         LogDebug(BCLog::VALIDATION,
@@ -13294,9 +13296,7 @@ static bool ContextualCheckBlock(const CBlock& block,
                         }
                         rc_local_execution_failure = true;
                         rc_execution_detail = strprintf(
-                            "trusted attestation quorum %s",
-                            matmul::trusted::WaitResultName(
-                                matmul::trusted::WaitResult::Timeout));
+                            "trusted attestation quorum pending");
                         return false;
                     }
                     // Consensus-mode node with -matmultrustedpubkey: a verified
