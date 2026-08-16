@@ -768,6 +768,11 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(!TrustedMirrorMustDeferUnattestedConnect(
         /*trusted_mirror_profile1=*/true, /*has_quorum=*/false,
         /*covered_by_signed_frontier=*/true));
+    // Catch-up height is not a GPU attestation: ExactReplay / ConnectTip
+    // stay in place until quorum or signed-frontier coverage.
+    BOOST_CHECK(TrustedMirrorMustDeferUnattestedConnect(
+        /*trusted_mirror_profile1=*/true, /*has_quorum=*/false,
+        /*covered_by_signed_frontier=*/false));
     using node::matmul_trusted::TrustedMirrorFrontierCoversBlock;
     BOOST_CHECK(TrustedMirrorFrontierCoversBlock(
         /*frontier_available=*/true, /*block_height=*/190582,
@@ -791,6 +796,10 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(!MustDeferConflictingAttestedHeight(
         /*configured=*/true, /*candidate_has_quorum=*/false,
         /*competing_attested_height=*/false));
+    BOOST_CHECK(!MustDeferConflictingAttestedHeight(
+        /*configured=*/true, /*candidate_has_quorum=*/false,
+        /*competing_attested_height=*/true,
+        /*covered_by_signed_frontier=*/true));
     using node::matmul_trusted::TrustedMirrorAttestedSiblingIsActionable;
     // Qualifier 3ed2619c: the attested tip / self candidate must not defer
     // a sole linear tip-child.
@@ -914,8 +923,10 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         /*tip_height=*/190617, /*followed_header_height=*/190630,
         /*signed_frontier_height=*/190617, /*tip_leads_to_frontier=*/true), 13);
     using node::matmul_trusted::IsNarrowCatchUpWindowForPolicy;
-    BOOST_CHECK(IsNarrowCatchUpWindowForPolicy(
+    BOOST_CHECK(!IsNarrowCatchUpWindowForPolicy(
         /*ibd=*/false, /*ahead=*/40, /*signed_frontier_catch_up=*/true));
+    BOOST_CHECK(!IsNarrowCatchUpWindowForPolicy(
+        /*ibd=*/false, /*ahead=*/8, /*signed_frontier_catch_up=*/true));
     BOOST_CHECK(!IsNarrowCatchUpWindowForPolicy(
         /*ibd=*/false, /*ahead=*/32, /*signed_frontier_catch_up=*/false));
     BOOST_CHECK(!IsNarrowCatchUpWindowForPolicy(
@@ -935,9 +946,13 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         /*signed_frontier_catch_up=*/true, /*has_archive_bit=*/false,
         /*trusted_mirror_peer=*/true, /*node_network=*/true,
         /*recent_valid_mmattest=*/false, /*manual_or_noban=*/false));
-    BOOST_CHECK(!PreferSignedFrontierCatchUpBlockPeer(
+    BOOST_CHECK(PreferSignedFrontierCatchUpBlockPeer(
         /*signed_frontier_catch_up=*/true, /*has_archive_bit=*/false,
         /*trusted_mirror_peer=*/true, /*node_network=*/false,
+        /*recent_valid_mmattest=*/false, /*manual_or_noban=*/false));
+    BOOST_CHECK(PreferSignedFrontierCatchUpBlockPeer(
+        /*signed_frontier_catch_up=*/true, /*has_archive_bit=*/true,
+        /*trusted_mirror_peer=*/false, /*node_network=*/false,
         /*recent_valid_mmattest=*/false, /*manual_or_noban=*/false));
     BOOST_CHECK(PreferSignedFrontierCatchUpBlockPeer(
         /*signed_frontier_catch_up=*/true, /*has_archive_bit=*/false,
@@ -950,13 +965,78 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     using node::matmul_trusted::SkipNonPreferredSignedFrontierBodyPeer;
     BOOST_CHECK(SkipNonPreferredSignedFrontierBodyPeer(
         /*signed_frontier_catch_up=*/true, /*this_peer_preferred=*/false,
-        /*any_preferred_peer_connected=*/true));
+        /*any_capable_preferred_peer_connected=*/true));
     BOOST_CHECK(!SkipNonPreferredSignedFrontierBodyPeer(
         /*signed_frontier_catch_up=*/true, /*this_peer_preferred=*/false,
-        /*any_preferred_peer_connected=*/false));
+        /*any_capable_preferred_peer_connected=*/false));
     BOOST_CHECK(!SkipNonPreferredSignedFrontierBodyPeer(
         /*signed_frontier_catch_up=*/true, /*this_peer_preferred=*/true,
-        /*any_preferred_peer_connected=*/true));
+        /*any_capable_preferred_peer_connected=*/true));
+    // Idle must still skip miners when a capable archive can serve.
+    BOOST_CHECK(SkipNonPreferredSignedFrontierBodyPeer(
+        /*signed_frontier_catch_up=*/true, /*this_peer_preferred=*/false,
+        /*any_capable_preferred_peer_connected=*/true));
+    using node::matmul_trusted::SignedFrontierBodySourceCanServeCatchUp;
+    BOOST_CHECK(SignedFrontierBodySourceCanServeCatchUp(
+        /*preferred=*/true, /*has_best_known=*/true, /*best_known_height=*/190632,
+        /*tip_height=*/190588, /*best_known_extends_tip=*/true));
+    BOOST_CHECK(!SignedFrontierBodySourceCanServeCatchUp(
+        /*preferred=*/true, /*has_best_known=*/false, /*best_known_height=*/-1,
+        /*tip_height=*/190588, /*best_known_extends_tip=*/false));
+    BOOST_CHECK(!SignedFrontierBodySourceCanServeCatchUp(
+        /*preferred=*/true, /*has_best_known=*/true, /*best_known_height=*/1412,
+        /*tip_height=*/190588, /*best_known_extends_tip=*/false));
+    using node::matmul_trusted::SeedTrustedMirrorGpuBestKnownFromFrontier;
+    BOOST_CHECK(SeedTrustedMirrorGpuBestKnownFromFrontier(
+        /*gpu_authority=*/true, /*signed_frontier_catch_up=*/true,
+        /*best_known_null=*/true, /*seed_extends_tip=*/true,
+        /*seed_height=*/190647, /*tip_height=*/190602));
+    BOOST_CHECK(!SeedTrustedMirrorGpuBestKnownFromFrontier(
+        true, true, /*best_known_null=*/false, true, 190647, 190602));
+    BOOST_CHECK(!SeedTrustedMirrorGpuBestKnownFromFrontier(
+        /*gpu_authority=*/false, true, true, true, 190647, 190602));
+    BOOST_CHECK(!SeedTrustedMirrorGpuBestKnownFromFrontier(
+        true, true, true, /*seed_extends_tip=*/false, 190647, 190602));
+    using node::matmul_trusted::TrustedMirrorPeerIsGpuAuthority;
+    BOOST_CHECK(TrustedMirrorPeerIsGpuAuthority(
+        /*manual_or_noban=*/true, /*recent_valid_configured_mmattest=*/false));
+    BOOST_CHECK(TrustedMirrorPeerIsGpuAuthority(false, true));
+    BOOST_CHECK(!TrustedMirrorPeerIsGpuAuthority(false, false));
+    using node::matmul_trusted::TrustedMirrorGpuAuthorityHandshakeComplete;
+    BOOST_CHECK(TrustedMirrorGpuAuthorityHandshakeComplete(
+        /*is_gpu_authority=*/true, /*version_handshake_complete=*/true));
+    BOOST_CHECK(!TrustedMirrorGpuAuthorityHandshakeComplete(true, false));
+    BOOST_CHECK(!TrustedMirrorGpuAuthorityHandshakeComplete(false, true));
+    using node::matmul_trusted::TrustedMirrorIgnoreNonAuthorityInboundBlock;
+    BOOST_CHECK(TrustedMirrorIgnoreNonAuthorityInboundBlock(
+        /*trusted_mirror=*/true, /*this_peer_is_gpu_authority=*/false,
+        /*authority_only_inbound=*/true));
+    BOOST_CHECK(!TrustedMirrorIgnoreNonAuthorityInboundBlock(true, true, true));
+    BOOST_CHECK(!TrustedMirrorIgnoreNonAuthorityInboundBlock(true, false, false));
+    BOOST_CHECK(!TrustedMirrorIgnoreNonAuthorityInboundBlock(false, false, true));
+    using node::matmul_trusted::TrustedMirrorMayServeNonAuthorityGetData;
+    BOOST_CHECK(TrustedMirrorMayServeNonAuthorityGetData(
+        /*this_peer_is_gpu_authority=*/true, /*catching_up_behind_frontier=*/true));
+    BOOST_CHECK(TrustedMirrorMayServeNonAuthorityGetData(true, false));
+    BOOST_CHECK(!TrustedMirrorMayServeNonAuthorityGetData(false, true));
+    BOOST_CHECK(TrustedMirrorMayServeNonAuthorityGetData(false, false));
+    using node::matmul_trusted::TrustedMirrorGpuMayServeBlocks;
+    BOOST_CHECK(TrustedMirrorGpuMayServeBlocks(
+        /*gpu_authority=*/true, /*has_network_service=*/false));
+    BOOST_CHECK(TrustedMirrorGpuMayServeBlocks(true, true));
+    BOOST_CHECK(!TrustedMirrorGpuMayServeBlocks(false, false));
+    BOOST_CHECK(TrustedMirrorGpuMayServeBlocks(false, true));
+    using node::matmul_trusted::TrustedMirrorKeepFetchingCoveredUnconnected;
+    BOOST_CHECK(TrustedMirrorKeepFetchingCoveredUnconnected(
+        /*signed_frontier_catch_up=*/true,
+        /*unconnected_has_gpu_attestation=*/true));
+    BOOST_CHECK(!TrustedMirrorKeepFetchingCoveredUnconnected(true, false));
+    BOOST_CHECK(!TrustedMirrorKeepFetchingCoveredUnconnected(false, true));
+    using node::matmul_trusted::IsNarrowCatchUpWindowForPolicy;
+    BOOST_CHECK(!IsNarrowCatchUpWindowForPolicy(
+        /*ibd=*/false, /*ahead=*/45, /*signed_frontier_catch_up=*/true));
+    BOOST_CHECK(IsNarrowCatchUpWindowForPolicy(false, 10, false));
+    BOOST_CHECK(!IsNarrowCatchUpWindowForPolicy(/*ibd=*/true, 10, false));
     using node::matmul_trusted::SignedFrontierPreferredCatchUpTimeout;
     BOOST_CHECK_EQUAL(
         SignedFrontierPreferredCatchUpTimeout(std::chrono::milliseconds{60000}).count(),
@@ -964,6 +1044,50 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK_EQUAL(
         SignedFrontierPreferredCatchUpTimeout(std::chrono::milliseconds{50}).count(),
         15);
+    using node::matmul_trusted::TrustedMirrorGpuHandshakeTimeout;
+    BOOST_CHECK_EQUAL(
+        TrustedMirrorGpuHandshakeTimeout(std::chrono::seconds{60}, false).count(),
+        60);
+    BOOST_CHECK_EQUAL(
+        TrustedMirrorGpuHandshakeTimeout(std::chrono::seconds{60}, true).count(),
+        180);
+    BOOST_CHECK_EQUAL(
+        TrustedMirrorGpuHandshakeTimeout(std::chrono::seconds{300}, true).count(),
+        300);
+    BOOST_CHECK_EQUAL(
+        TrustedMirrorGpuHandshakeTimeout(std::chrono::seconds{60}, false,
+                                         /*handshake_incomplete=*/true).count(),
+        180);
+    BOOST_CHECK_EQUAL(
+        TrustedMirrorGpuHandshakeTimeout(std::chrono::seconds{60}, false,
+                                         /*handshake_incomplete=*/false).count(),
+        60);
+    using node::matmul_trusted::ClassifyMsghandPeer;
+    using node::matmul_trusted::MsghandPeerClass;
+    BOOST_CHECK(ClassifyMsghandPeer(false, false) == MsghandPeerClass::Handshake);
+    BOOST_CHECK(ClassifyMsghandPeer(false, true) == MsghandPeerClass::Handshake);
+    BOOST_CHECK(ClassifyMsghandPeer(true, true) == MsghandPeerClass::Preferred);
+    BOOST_CHECK(ClassifyMsghandPeer(true, false) == MsghandPeerClass::Other);
+    using node::matmul_trusted::PreferredPeerHandshakePending;
+    BOOST_CHECK(PreferredPeerHandshakePending(
+        /*handshake_complete=*/false, /*manual_or_outbound=*/true,
+        /*local_signer=*/false));
+    BOOST_CHECK(PreferredPeerHandshakePending(false, false, true));
+    BOOST_CHECK(!PreferredPeerHandshakePending(false, false, false));
+    BOOST_CHECK(!PreferredPeerHandshakePending(true, true, true));
+    using node::matmul_trusted::SkipFullyConnectedInboundDuringPreferredHandshake;
+    BOOST_CHECK(SkipFullyConnectedInboundDuringPreferredHandshake(
+        /*preferred_handshake_pending=*/true, /*this_peer_inbound=*/true,
+        /*this_peer_handshake_complete=*/true, /*this_peer_manual=*/false));
+    BOOST_CHECK(!SkipFullyConnectedInboundDuringPreferredHandshake(
+        true, true, /*this_peer_handshake_complete=*/false, false));
+    BOOST_CHECK(!SkipFullyConnectedInboundDuringPreferredHandshake(
+        true, false, true, false));
+    BOOST_CHECK(!SkipFullyConnectedInboundDuringPreferredHandshake(
+        false, true, true, false));
+    using node::matmul_trusted::SkipExactReplayForGpuAttestation;
+    BOOST_CHECK(SkipExactReplayForGpuAttestation(/*has_valid_gpu_attestation=*/true));
+    BOOST_CHECK(!SkipExactReplayForGpuAttestation(false));
 }
 
 BOOST_AUTO_TEST_CASE(signer_getmmattest_historical_and_hammer_ban)
@@ -985,6 +1109,14 @@ BOOST_AUTO_TEST_CASE(signer_getmmattest_historical_and_hammer_ban)
         true, 190567 - SIGNER_GETMMATTEST_SERVE_WINDOW - 1, 190567));
     BOOST_CHECK(!TrustedSignerMayServeGetMmAttest(true, 187432, 190567));
     BOOST_CHECK(!TrustedSignerMayServeGetMmAttest(true, -1, 190567));
+
+    using node::matmul_trusted::TrustedArchiveMayServeGetMmAttest;
+    BOOST_CHECK(TrustedArchiveMayServeGetMmAttest(
+        /*catching_up_behind_frontier=*/false, 187432, 190567));
+    BOOST_CHECK(TrustedArchiveMayServeGetMmAttest(true, 190568, 190567));
+    BOOST_CHECK(TrustedArchiveMayServeGetMmAttest(
+        true, 190567 - SIGNER_GETMMATTEST_SERVE_WINDOW, 190567));
+    BOOST_CHECK(!TrustedArchiveMayServeGetMmAttest(true, 189308, 190588));
 
     BOOST_CHECK(!AggressiveGetMmAttestShouldBan(0));
     BOOST_CHECK(!AggressiveGetMmAttestShouldBan(GETMMATTEST_HAMMER_BAN_AFTER - 1));

@@ -9258,14 +9258,15 @@ static constexpr const char* RETRYABLE_MATMUL_ACTIVATION_PREFIX =
             pindex->nHeight)) {
         return false;
     }
-    // In-memory frontier ancestry first: a durable HasQuorum miss on every
-    // catch-up block was the live 60s/block archive crawl. The GPU already
-    // attested this path when it signed the frontier hash.
-    if (chainman.IndexIsCoveredBySignedFrontier(pindex)) return false;
+    // Lift ConnectTip only for a GPU attestation on this hash: in-memory
+    // quorum, signed-frontier ancestry, or durable verified signatures.
+    // Catch-up height / "from the GPU peer" is not attestation.
+    if (chainman.IndexHasTrustedMatMulAuthority(pindex)) return false;
     return node::matmul_trusted::TrustedMirrorMustDeferUnattestedConnect(
         /*trusted_mirror_profile1=*/true,
         node::matmul_trusted::HasQuorum(
-            pindex->GetBlockHash(), pindex->nHeight));
+            pindex->GetBlockHash(), pindex->nHeight),
+        chainman.IndexIsCoveredBySignedFrontier(pindex));
 }
 
 [[nodiscard]] static bool MustDeferConflictingAttestedConnect(
@@ -9283,7 +9284,8 @@ static constexpr const char* RETRYABLE_MATMUL_ACTIVATION_PREFIX =
     return node::matmul_trusted::MustDeferConflictingAttestedHeight(
         /*configured=*/true, has_quorum,
         node::matmul_trusted::HasCompetingQuorum(
-            pindex->GetBlockHash(), pindex->nHeight));
+            pindex->GetBlockHash(), pindex->nHeight),
+        chainman.IndexIsCoveredBySignedFrontier(pindex));
 }
 
 /**
@@ -9519,9 +9521,8 @@ static bool TrustedMirrorShouldConsiderMostWorkCandidate(
     return node::matmul_trusted::TrustedMirrorMaySelectMostWorkCandidate(
         extends_tip,
         node::matmul_trusted::TrustedMirrorIsShortTipReorg(lca_depth),
-        node::matmul_trusted::HasQuorum(
-            candidate->GetBlockHash(), candidate->nHeight),
-        node::matmul_trusted::HasQuorum(tip->GetBlockHash(), tip->nHeight),
+        chainman.IndexHasTrustedMatMulAuthority(candidate),
+        chainman.IndexHasTrustedMatMulAuthority(tip),
         immediate_tip_child,
         would_abandon_attested,
         node::matmul_trusted::HasCompetingQuorum(
@@ -9682,8 +9683,8 @@ CBlockIndex* Chainstate::FindMostWorkChain()
             const bool extends_tip{
                 pindexNew->nHeight >= tip->nHeight &&
                 pindexNew->GetAncestor(tip->nHeight) == tip};
-            const bool has_quorum{node::matmul_trusted::HasQuorum(
-                pindexNew->GetBlockHash(), pindexNew->nHeight)};
+            const bool has_quorum{
+                m_chainman.IndexHasTrustedMatMulAuthority(pindexNew)};
             const CBlockIndex* attested_sibling{nullptr};
             const bool consensus_followed_tip_child{
                 !node::matmul_trusted::IsTrustedMirror() &&
@@ -9698,8 +9699,7 @@ CBlockIndex* Chainstate::FindMostWorkChain()
                         /*distinct_from_candidate=*/alt != pindexNew && alt != tip,
                         /*same_parent=*/alt->pprev == tip,
                         /*same_height_as_tip_child=*/alt->nHeight == tip->nHeight + 1,
-                        /*has_quorum=*/node::matmul_trusted::HasQuorumInMemory(
-                            alt->GetBlockHash(), alt->nHeight),
+                        /*has_quorum=*/m_chainman.IndexHasTrustedMatMulAuthority(alt),
                         /*failed=*/(alt->nStatus & BLOCK_FAILED_MASK) != 0)) {
                         return true;
                     }
@@ -9714,8 +9714,7 @@ CBlockIndex* Chainstate::FindMostWorkChain()
                             /*distinct_from_candidate=*/alt != pindexNew && alt != tip,
                             /*same_parent=*/alt->pprev == tip->pprev,
                             /*same_height_as_tip_child=*/alt->nHeight == tip->nHeight,
-                            /*has_quorum=*/node::matmul_trusted::HasQuorumInMemory(
-                                alt->GetBlockHash(), alt->nHeight),
+                            /*has_quorum=*/m_chainman.IndexHasTrustedMatMulAuthority(alt),
                             /*failed=*/(alt->nStatus & BLOCK_FAILED_MASK) != 0);
                     }
                     return false;
@@ -11149,8 +11148,7 @@ ChainstateManager::SignedFrontierStatus ChainstateManager::GetSignedFrontierStat
     }
     if (tip != nullptr) {
         for (const CBlockIndex* p{tip}; p != nullptr; p = p->pprev) {
-            if (node::matmul_trusted::HasQuorum(
-                    p->GetBlockHash(), p->nHeight)) {
+            if (IndexHasTrustedMatMulAuthority(p)) {
                 out.on_chain_attested_height = p->nHeight;
                 break;
             }
@@ -11276,8 +11274,7 @@ const CBlockIndex* ChainstateManager::FindUniqueCompetingAttestedIndex() const
     // unique attested HAVE_DATA suffix of this tip (catch-up). Scan
     // every frontier hint at a height (not last-writer) so a later
     // loser MMATTEST cannot hide the winner.
-    const bool tip_has_quorum{node::matmul_trusted::HasQuorum(
-        tip->GetBlockHash(), tip->nHeight)};
+    const bool tip_has_quorum{IndexHasTrustedMatMulAuthority(tip)};
 
     std::vector<const CBlockIndex*> competing;
     auto consider = [&](const CBlockIndex* idx) {
@@ -11650,6 +11647,19 @@ bool ChainstateManager::IndexIsCoveredBySignedFrontier(const CBlockIndex* index)
         }
     }
     return false;
+}
+
+bool ChainstateManager::IndexHasTrustedMatMulAuthority(const CBlockIndex* index) const
+{
+    AssertLockHeld(::cs_main);
+    if (index == nullptr || (index->nStatus & BLOCK_FAILED_MASK) != 0) {
+        return false;
+    }
+    if (node::matmul_trusted::HasQuorumInMemory(
+            index->GetBlockHash(), index->nHeight)) {
+        return true;
+    }
+    return IndexIsCoveredBySignedFrontier(index);
 }
 
 bool ChainstateManager::IndexLeadsToSignedFrontier(const CBlockIndex* index) const
@@ -13249,15 +13259,21 @@ static bool ContextualCheckBlock(const CBlock& block,
                         bool frontier_covers{false};
                         {
                             LOCK(::cs_main);
+                            const CBlockIndex* const rc_index{
+                                chainman.m_blockman.LookupBlockIndex(
+                                    block.GetHash())};
                             frontier_covers =
-                                chainman.IndexIsCoveredBySignedFrontier(
-                                    chainman.m_blockman.LookupBlockIndex(
-                                        block.GetHash()));
+                                chainman.IndexHasTrustedMatMulAuthority(
+                                    rc_index);
                         }
                         const bool have_quorum{
                             frontier_covers ||
                             node::matmul_trusted::HasQuorum(
                                 block.GetHash(), nHeight)};
+                        // ExactReplay as MatMul-valid lifts only for a GPU
+                        // attestation (quorum or signed-frontier coverage).
+                        // An unattested grandchild / followed hole must not
+                        // skip it. Tip-child persist below is not ConnectTip.
                         if (have_quorum) {
                             CacheMatMulEncDrVerdict(
                                 block.GetHash(), true);
@@ -13268,19 +13284,14 @@ static bool ContextualCheckBlock(const CBlock& block,
                             }
                             return true;
                         }
+                        // Persist a GPU-path tip-child so a signer can getdata
+                        // it before MMATTEST. This is not an ExactReplay skip
+                        // for ConnectTip: TrustedMirrorMustDeferUnattestedConnect
+                        // still refuses activation until quorum or coverage.
                         if (pindexPrev != nullptr &&
                             pindexPrev == chainman.ActiveTip()) {
                             return true;
                         }
-                        bool followed_hole{false};
-                        {
-                            LOCK(::cs_main);
-                            followed_hole =
-                                chainman.IsMatMulFollowedHistoricalHole(
-                                    chainman.m_blockman.LookupBlockIndex(
-                                        block.GetHash()));
-                        }
-                        if (followed_hole) return true;
                         rc_local_execution_failure = true;
                         rc_execution_detail = strprintf(
                             "trusted attestation quorum %s",
@@ -19846,8 +19857,7 @@ void ChainstateManager::RecalculateBestHeader()
     // attested frontier — competing unattested siblings of H are not in
     // that subtree.
     CBlockIndex* attested_frontier{
-        node::matmul_trusted::HasQuorum(active_tip->GetBlockHash(),
-                                        active_tip->nHeight)
+        IndexHasTrustedMatMulAuthority(active_tip)
             ? const_cast<CBlockIndex*>(active_tip)
             : nullptr};
     CBlockIndex* authority_best{nullptr};

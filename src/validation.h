@@ -1581,6 +1581,13 @@ public:
      *  verified the path. Unattested descendants above the frontier are
      *  false. */
     [[nodiscard]] bool IndexIsCoveredBySignedFrontier(const CBlockIndex* index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** Verified in-memory quorum on this hash, *or* ancestry of a hash
+     *  that already has verified in-memory quorum at HighestAttestedHeight.
+     *  Coverage is not a substitute for signatures: IndexIsCoveredBySignedFrontier
+     *  requires HasQuorumInMemory on the frontier (VerifyAttestation against
+     *  the configured GPU keys). Fake / missing / off-path hashes stay false
+     *  so ConnectTip cannot mint an unattested chain. Does not durable-read. */
+    [[nodiscard]] bool IndexHasTrustedMatMulAuthority(const CBlockIndex* index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** True when index is an ancestor of, is, or descends from any stored
      *  quorum hash at HighestAttestedHeight. Unlike
      *  GetSignedFrontierStatus().on_active_chain, this stays true while

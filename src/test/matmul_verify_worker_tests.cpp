@@ -2287,6 +2287,86 @@ BOOST_AUTO_TEST_CASE(rc_accelerator_scheduler_tip_validation_does_not_displace_c
     owner = {};
 }
 
+BOOST_AUTO_TEST_CASE(rc_accelerator_scheduler_starved_mining_outranks_tip_flood)
+{
+    using Scheduler = matmul::v4::rc::RCAcceleratorScheduler;
+    auto& scheduler{matmul::v4::rc::GetRCAcceleratorScheduler()};
+    BOOST_REQUIRE(scheduler.ResetStatsForTest());
+
+#ifdef WIN32
+    _putenv_s("BTX_RC_CANDIDATE_MINING_ANTI_STARVE_MS", "150");
+#else
+    setenv("BTX_RC_CANDIDATE_MINING_ANTI_STARVE_MS", "150", 1);
+#endif
+    struct AntiStarveEnvGuard {
+        ~AntiStarveEnvGuard()
+        {
+#ifdef WIN32
+            _putenv_s("BTX_RC_CANDIDATE_MINING_ANTI_STARVE_MS", "");
+#else
+            unsetenv("BTX_RC_CANDIDATE_MINING_ANTI_STARVE_MS");
+#endif
+        }
+    } anti_starve_env;
+
+    std::atomic_bool owner_cancelled{false};
+    auto owner{scheduler.Acquire(
+        Scheduler::Priority::TipValidation, &owner_cancelled,
+        "tip-storm-owner")};
+    BOOST_REQUIRE(owner);
+
+    std::atomic_bool sibling_a_cancelled{false};
+    std::atomic_bool sibling_a_acquired{false};
+    std::thread sibling_a{[&] {
+        auto lease{scheduler.Acquire(
+            Scheduler::Priority::TipValidation, &sibling_a_cancelled,
+            "sibling-a", nullptr, std::chrono::seconds{30})};
+        sibling_a_acquired.store(
+            static_cast<bool>(lease), std::memory_order_relaxed);
+    }};
+    BOOST_REQUIRE(WaitFor(
+        [&] { return scheduler.GetStats().queue_depth == 1; }));
+    std::atomic_bool sibling_b_cancelled{false};
+    std::thread sibling_b{[&] {
+        auto lease{scheduler.Acquire(
+            Scheduler::Priority::TipValidation, &sibling_b_cancelled,
+            "sibling-b", nullptr, std::chrono::seconds{30})};
+        (void)lease;
+    }};
+    BOOST_REQUIRE(WaitFor(
+        [&] { return scheduler.GetStats().queue_depth == 2; }));
+
+    std::atomic_bool mining_cancelled{false};
+    std::atomic_bool mining_acquired{false};
+    std::thread mining{[&] {
+        auto lease{scheduler.Acquire(
+            Scheduler::Priority::CandidateMining, &mining_cancelled,
+            "submitblock", nullptr, std::chrono::seconds{30})};
+        mining_acquired.store(
+            static_cast<bool>(lease), std::memory_order_relaxed);
+        while (lease &&
+               !mining_cancelled.load(std::memory_order_relaxed)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        }
+    }};
+    BOOST_REQUIRE(WaitFor(
+        [&] { return scheduler.GetStats().queue_depth == 3; }));
+
+    std::this_thread::sleep_for(std::chrono::milliseconds{200});
+    owner = {};
+    BOOST_REQUIRE(WaitFor(
+        [&] { return mining_acquired.load(std::memory_order_relaxed); }));
+    BOOST_CHECK(!sibling_a_acquired.load(std::memory_order_relaxed));
+
+    sibling_a_cancelled.store(true);
+    sibling_b_cancelled.store(true);
+    mining_cancelled.store(true);
+    scheduler.NotifyCancellation();
+    sibling_a.join();
+    sibling_b.join();
+    mining.join();
+}
+
 BOOST_AUTO_TEST_CASE(rc_accelerator_scheduler_queue_deadline_is_bounded)
 {
     using Scheduler = matmul::v4::rc::RCAcceleratorScheduler;

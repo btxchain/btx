@@ -72,9 +72,26 @@ public:
         DEFAULT_CANDIDATE_MINING_MIN_LEASE{
             std::chrono::milliseconds{25000}};
 
+    /**
+     * After this wait, a CandidateMining waiter takes the next free
+     * accelerator turn ahead of TipValidation / Speculative floods.
+     * The min-lease quantum only protects an already-active mining
+     * lease; under a sibling storm mining never becomes active and
+     * submitblock dies at the 90s waiter deadline (-25 "accelerator
+     * scheduler queue"). WinnerReseal still outranks. Override with
+     * BTX_RC_CANDIDATE_MINING_ANTI_STARVE_MS (0 disables).
+     */
+    static constexpr std::chrono::milliseconds
+        DEFAULT_CANDIDATE_MINING_ANTI_STARVE{
+            std::chrono::milliseconds{3000}};
+
     /** Resolve the candidate-mining min-lease quantum (env override aware). */
     [[nodiscard]] static std::chrono::milliseconds
     CandidateMiningMinLeaseQuantum();
+
+    /** Resolve the candidate-mining anti-starve wait (env override aware). */
+    [[nodiscard]] static std::chrono::milliseconds
+    CandidateMiningAntiStarveQuantum();
 
     struct LaneStats {
         uint64_t requests{0};

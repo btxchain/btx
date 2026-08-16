@@ -25,6 +25,7 @@
 #include <netbase.h>
 #include <node/eviction.h>
 #include <node/interface_ui.h>
+#include <node/matmul_trusted_attestations.h>
 #include <protocol.h>
 #include <random.h>
 #include <scheduler.h>
@@ -2341,7 +2342,11 @@ void CConnman::NotifyNumConnectionsChanged()
 
 bool CConnman::ShouldRunInactivityChecks(const CNode& node, std::chrono::seconds now) const
 {
-    return node.m_connected + m_peer_connect_timeout < now;
+    const auto timeout{node::matmul_trusted::TrustedMirrorGpuHandshakeTimeout(
+        m_peer_connect_timeout,
+        node.IsManualConn() || node.HasPermission(NetPermissionFlags::NoBan),
+        !node.fSuccessfullyConnected.load())};
+    return node.m_connected + timeout < now;
 }
 
 bool CConnman::InactivityCheck(const CNode& node) const
@@ -2358,12 +2363,17 @@ bool CConnman::InactivityCheck(const CNode& node) const
     bool has_sent{last_send.count() != 0};
 
     if (!has_received || !has_sent) {
+        const auto timeout{node::matmul_trusted::TrustedMirrorGpuHandshakeTimeout(
+            m_peer_connect_timeout,
+            node.IsManualConn() ||
+                node.HasPermission(NetPermissionFlags::NoBan),
+            !node.fSuccessfullyConnected.load())};
         std::string has_never;
         if (!has_received) has_never += ", never received from peer";
         if (!has_sent) has_never += ", never sent to peer";
         LogDebug(BCLog::NET,
             "socket no message in first %i seconds%s, %s\n",
-            count_seconds(m_peer_connect_timeout),
+            count_seconds(timeout),
             has_never,
             node.DisconnectMsg(fLogIPs)
         );
@@ -3468,20 +3478,64 @@ void CConnman::ThreadMessageHandler()
             // This prevents attacks in which an attacker exploits having multiple
             // consecutive connections in the m_nodes list.
             const NodesSnapshot snap{*this, /*shuffle=*/true};
+            std::vector<CNode*> nodes{snap.Nodes()};
+            // Handshake-incomplete peers first (signer inbounds from
+            // archives are not manual). Then GPU addnode / outbounds.
+            // Shuffle is preserved within each class.
+            std::stable_partition(nodes.begin(), nodes.end(), [](const CNode* p) {
+                return p != nullptr &&
+                       !p->fSuccessfullyConnected.load();
+            });
+            std::stable_partition(nodes.begin(), nodes.end(), [](const CNode* p) {
+                if (p == nullptr) return false;
+                return node::matmul_trusted::ClassifyMsghandPeer(
+                           p->fSuccessfullyConnected.load(),
+                           p->IsManualConn() || !p->IsInboundConn()) !=
+                       node::matmul_trusted::MsghandPeerClass::Other;
+            });
+            bool preferred_handshake_pending{false};
+            const bool local_signer{node::matmul_trusted::HasLocalSigner()};
+            for (const CNode* p : nodes) {
+                if (p == nullptr || p->fDisconnect) continue;
+                if (node::matmul_trusted::PreferredPeerHandshakePending(
+                        p->fSuccessfullyConnected.load(),
+                        p->IsManualConn() || !p->IsInboundConn(),
+                        local_signer)) {
+                    preferred_handshake_pending = true;
+                    break;
+                }
+            }
 
-            for (CNode* pnode : snap.Nodes()) {
+            for (CNode* pnode : nodes) {
                 if (pnode->fDisconnect)
                     continue;
 
                 CpuTimer timer{[&pnode](std::chrono::nanoseconds elapsed) { pnode->m_cpu_time += elapsed; }};
 
-                // Receive messages
+                // Strict -connect archives: do not SendMessages to inbound
+                // miners (addrv2/getheaders/inv). Live nyc1 sent 1.9MB addrv2
+                // + 0.5MB getheaders while GPU BLOCK replies aged out.
+                // Signers: the same skip while an archive inbound is still
+                // in VERSION (live macpro2 2026-08-16, b-msghand ~84%).
+                const bool skip_inbound_send{
+                    (!m_use_addrman_outgoing && pnode->IsInboundConn() &&
+                     !pnode->IsManualConn()) ||
+                    node::matmul_trusted::
+                        SkipFullyConnectedInboundDuringPreferredHandshake(
+                            preferred_handshake_pending,
+                            pnode->IsInboundConn(),
+                            pnode->fSuccessfullyConnected.load(),
+                            pnode->IsManualConn())};
+
                 bool fMoreNodeWork = m_msgproc->ProcessMessages(pnode, flagInterruptMsgProc);
-                fMoreWork |= (fMoreNodeWork && !pnode->fPauseSend);
+                if (!skip_inbound_send) {
+                    fMoreWork |= (fMoreNodeWork && !pnode->fPauseSend);
+                }
                 if (flagInterruptMsgProc)
                     return;
-                // Send messages
-                m_msgproc->SendMessages(pnode);
+                if (!skip_inbound_send) {
+                    m_msgproc->SendMessages(pnode);
+                }
 
                 if (flagInterruptMsgProc)
                     return;

@@ -173,8 +173,34 @@ void RCAcceleratorScheduler::Lease::Release()
 bool RCAcceleratorScheduler::IsFirst(
     const std::shared_ptr<Waiter>& waiter) const
 {
+    const auto now{std::chrono::steady_clock::now()};
+    const auto anti_starve{CandidateMiningAntiStarveQuantum()};
+    const auto mining_starved{
+        [&](const std::shared_ptr<Waiter>& queued_waiter) {
+            return queued_waiter->priority == Priority::CandidateMining &&
+                   anti_starve.count() > 0 &&
+                   now - queued_waiter->queued >= anti_starve;
+        }};
+    const bool any_starved_mining{std::any_of(
+        m_waiters.begin(), m_waiters.end(), mining_starved)};
+    // A starved local mine takes the next free turn ahead of a
+    // TipValidation / Speculative flood. WinnerReseal still outranks.
+    if (any_starved_mining && waiter->priority != Priority::WinnerReseal &&
+        !mining_starved(waiter)) {
+        return false;
+    }
     for (const auto& candidate : m_waiters) {
         if (candidate == waiter) continue;
+        if (mining_starved(waiter)) {
+            if (candidate->priority == Priority::WinnerReseal) {
+                return false;
+            }
+            if (candidate->priority == Priority::CandidateMining &&
+                candidate->sequence < waiter->sequence) {
+                return false;
+            }
+            continue;
+        }
         if (static_cast<uint8_t>(candidate->priority) >
                 static_cast<uint8_t>(waiter->priority) ||
             (candidate->priority == waiter->priority &&
@@ -196,6 +222,19 @@ RCAcceleratorScheduler::CandidateMiningMinLeaseQuantum()
         }
     }
     return DEFAULT_CANDIDATE_MINING_MIN_LEASE;
+}
+
+std::chrono::milliseconds
+RCAcceleratorScheduler::CandidateMiningAntiStarveQuantum()
+{
+    const char* env = std::getenv("BTX_RC_CANDIDATE_MINING_ANTI_STARVE_MS");
+    if (env != nullptr && env[0] != '\0') {
+        int64_t parsed{0};
+        if (ParseInt64(env, &parsed) && parsed >= 0) {
+            return std::chrono::milliseconds{parsed};
+        }
+    }
+    return DEFAULT_CANDIDATE_MINING_ANTI_STARVE;
 }
 
 bool RCAcceleratorScheduler::HasHigherPriorityWaiter(Priority owner) const
@@ -304,14 +343,22 @@ RCAcceleratorScheduler::Acquire(
         // oldest occupant is the flood leftover.
         auto victim{m_waiters.end()};
         for (auto it{m_waiters.begin()}; it != m_waiters.end(); ++it) {
-            if (static_cast<uint8_t>((*it)->priority) >
-                static_cast<uint8_t>(priority)) {
+            // WinnerReseal waiters are never stolen.
+            if ((*it)->priority == Priority::WinnerReseal) {
                 continue;
             }
             // CandidateMining waiters are a reserved lane. A TipValidation
             // sibling flood must not steal them (live miner: own ExactReplay
             // starved at 69–198 same-height siblings, ~9–18% win rate).
             if ((*it)->priority == Priority::CandidateMining) {
+                continue;
+            }
+            // Local CandidateMining may displace a TipValidation flood
+            // leftover so submitblock can enter during a sibling storm.
+            if (static_cast<uint8_t>((*it)->priority) >
+                    static_cast<uint8_t>(priority) &&
+                !(priority == Priority::CandidateMining &&
+                  (*it)->priority == Priority::TipValidation)) {
                 continue;
             }
             if (victim == m_waiters.end() ||
@@ -326,7 +373,11 @@ RCAcceleratorScheduler::Acquire(
             const bool displace_tip_validation_flood{
                 (*victim)->priority == priority &&
                 priority == Priority::TipValidation};
-            if (strictly_lower || displace_tip_validation_flood) {
+            const bool mining_steals_tip_flood{
+                priority == Priority::CandidateMining &&
+                (*victim)->priority == Priority::TipValidation};
+            if (strictly_lower || displace_tip_validation_flood ||
+                mining_steals_tip_flood) {
                 ++m_stats.cancelled_waits;
                 ++m_stats.lanes[LaneIndex((*victim)->priority)]
                       .cancelled_waits;
@@ -482,6 +533,22 @@ RCAcceleratorScheduler::Acquire(
                         std::chrono::duration_cast<
                             std::chrono::milliseconds>(
                             quantum - held));
+                    if (wait_slice.count() <= 0) {
+                        wait_slice = std::chrono::milliseconds{1};
+                    }
+                }
+            }
+        }
+        if (priority == Priority::CandidateMining) {
+            const auto anti_starve{CandidateMiningAntiStarveQuantum()};
+            if (anti_starve.count() > 0) {
+                const auto waited{now - waiter->queued};
+                if (waited < anti_starve) {
+                    wait_slice = std::min(
+                        wait_slice,
+                        std::chrono::duration_cast<
+                            std::chrono::milliseconds>(
+                            anti_starve - waited));
                     if (wait_slice.count() <= 0) {
                         wait_slice = std::chrono::milliseconds{1};
                     }

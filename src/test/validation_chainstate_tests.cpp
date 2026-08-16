@@ -3086,8 +3086,14 @@ BOOST_FIXTURE_TEST_CASE(chainstate_trusted_mirror_connects_frontier_suffix_witho
         chainstate.ResetBlockFailureFlags(first);
         BOOST_CHECK(chainman.IndexIsCoveredBySignedFrontier(first));
         BOOST_CHECK(chainman.IndexIsCoveredBySignedFrontier(last));
+        BOOST_CHECK(chainman.IndexHasTrustedMatMulAuthority(first));
+        BOOST_CHECK(chainman.IndexHasTrustedMatMulAuthority(last));
         BOOST_CHECK(!node::matmul_trusted::TrustedMirrorMustDeferUnattestedConnect(
             /*trusted_mirror_profile1=*/true, /*has_quorum=*/false,
+            /*covered_by_signed_frontier=*/true));
+        BOOST_CHECK(!node::matmul_trusted::MustDeferConflictingAttestedHeight(
+            /*configured=*/true, /*candidate_has_quorum=*/false,
+            /*competing_attested_height=*/true,
             /*covered_by_signed_frontier=*/true));
     }
 
@@ -3100,6 +3106,134 @@ BOOST_FIXTURE_TEST_CASE(chainstate_trusted_mirror_connects_frontier_suffix_witho
         BOOST_CHECK(WITH_LOCK(::cs_main, return chainstate.m_chain.Contains(idx)));
     }
     BOOST_CHECK_LT(std::chrono::duration_cast<std::chrono::seconds>(elapsed).count(), 60);
+    chainman.CheckBlockIndex();
+}
+
+BOOST_FIXTURE_TEST_CASE(chainstate_trusted_mirror_frontier_coverage_fail_closed, TestChain100Setup)
+{
+    // Coverage is not a skip of signatures: no quorum, a key outside the
+    // configured GPU set, and a block above the signed frontier must all
+    // stay disconnected (infinite-mint). Off-path hashes are not covered
+    // (TrustedMirrorFrontierCoversBlock requires frontier ancestry).
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    Chainstate& chainstate = chainman.ActiveChainstate();
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    auto& mode = const_cast<kernel::MatMulValidationMode&>(chainman.m_options.matmul_validation_mode);
+    const int32_t saved_v4{consensus.nMatMulV4Height};
+    const int32_t saved_bmx{consensus.nMatMulBMX4CHeight};
+    const int32_t saved_rc{consensus.nMatMulRCHeight};
+    const auto saved_mode{mode};
+    struct Restore {
+        Consensus::Params& consensus;
+        int32_t v4;
+        int32_t bmx;
+        int32_t rc;
+        kernel::MatMulValidationMode& mode;
+        kernel::MatMulValidationMode saved_mode;
+        ~Restore()
+        {
+            node::matmul_trusted::ResetForTest();
+            consensus.nMatMulV4Height = v4;
+            consensus.nMatMulBMX4CHeight = bmx;
+            consensus.nMatMulRCHeight = rc;
+            mode = saved_mode;
+        }
+    } restore{consensus, saved_v4, saved_bmx, saved_rc, mode, saved_mode};
+
+    const CScript script = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    CBlockIndex* const parent{WITH_LOCK(::cs_main, return chainstate.m_chain.Tip())};
+    BOOST_REQUIRE(parent != nullptr);
+
+    std::vector<CBlockIndex*> suffix;
+    for (int i = 0; i < 3; ++i) {
+        const CBlock block{CreateAndProcessBlock({}, script)};
+        CBlockIndex* idx{WITH_LOCK(::cs_main, {
+            return chainman.m_blockman.LookupBlockIndex(block.GetHash());
+        })};
+        BOOST_REQUIRE(idx != nullptr);
+        suffix.push_back(idx);
+    }
+    CBlockIndex* const first{suffix.front()};
+    CBlockIndex* const last{suffix.back()};
+
+    consensus.nMatMulV4Height = first->nHeight;
+    consensus.nMatMulBMX4CHeight = first->nHeight;
+    consensus.nMatMulRCHeight = first->nHeight;
+
+    BlockValidationState state;
+    BOOST_REQUIRE(chainstate.InvalidateBlock(state, first));
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()) == parent);
+
+    CKey gpu;
+    gpu.MakeNewKey(/*fCompressed=*/true);
+    const uint256 chain_id{uint256::ONE};
+    const uint256 replay_ctx{
+        uint256::FromHex(std::string(64, 'e')).value()};
+    matmul::trusted::StoreConfig config;
+    config.chain_id = chain_id;
+    config.replay_authority_context = replay_ctx;
+    config.trusted_signers = {gpu.GetPubKey()};
+    config.threshold = 1;
+    config.local_signer = gpu;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/true, /*serve=*/false,
+        std::chrono::milliseconds{50}, error));
+    mode = kernel::MatMulValidationMode::TRUSTED;
+
+    {
+        LOCK(::cs_main);
+        chainstate.ResetBlockFailureFlags(first);
+        BOOST_CHECK(!chainman.IndexIsCoveredBySignedFrontier(first));
+        BOOST_CHECK(!chainman.IndexHasTrustedMatMulAuthority(first));
+        BOOST_CHECK(!chainman.IndexHasTrustedMatMulAuthority(last));
+    }
+    state = BlockValidationState{};
+    BOOST_REQUIRE(chainstate.ActivateBestChain(state));
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()) == parent);
+
+    CKey fake;
+    fake.MakeNewKey(/*fCompressed=*/true);
+    BOOST_CHECK_EQUAL(
+        InjectHistoricalAttestation(
+            fake, chain_id, replay_ctx, last->GetBlockHash(), last->nHeight),
+        matmul::trusted::AddResult::UntrustedSigner);
+    BOOST_CHECK(!node::matmul_trusted::HasQuorum(last->GetBlockHash(), last->nHeight));
+    BOOST_CHECK(WITH_LOCK(::cs_main, return !chainman.IndexIsCoveredBySignedFrontier(first)));
+    BOOST_CHECK(WITH_LOCK(::cs_main, return !chainman.IndexHasTrustedMatMulAuthority(last)));
+    state = BlockValidationState{};
+    BOOST_REQUIRE(chainstate.ActivateBestChain(state));
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()) == parent);
+
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
+                      last->GetBlockHash(), last->nHeight) ==
+                  matmul::trusted::AddResult::Accepted);
+    BOOST_CHECK(node::matmul_trusted::HasQuorum(last->GetBlockHash(), last->nHeight));
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK(chainman.IndexIsCoveredBySignedFrontier(first));
+        BOOST_CHECK(chainman.IndexHasTrustedMatMulAuthority(first));
+        BOOST_CHECK(chainman.IndexHasTrustedMatMulAuthority(last));
+        for (CBlockIndex* idx : suffix) {
+            chainstate.TryAddBlockIndexCandidate(idx);
+        }
+    }
+
+    state = BlockValidationState{};
+    BOOST_REQUIRE(chainstate.ActivateBestChain(state));
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()) == last);
+    for (CBlockIndex* idx : suffix) {
+        BOOST_CHECK(WITH_LOCK(::cs_main, return chainstate.m_chain.Contains(idx)));
+    }
+
+    const CBlock above{CreateAndProcessBlock({}, script)};
+    CBlockIndex* const above_idx{WITH_LOCK(::cs_main, {
+        return chainman.m_blockman.LookupBlockIndex(above.GetHash());
+    })};
+    BOOST_REQUIRE(above_idx != nullptr);
+    BOOST_CHECK(WITH_LOCK(::cs_main, return !chainman.IndexIsCoveredBySignedFrontier(above_idx)));
+    BOOST_CHECK(WITH_LOCK(::cs_main, return !chainman.IndexHasTrustedMatMulAuthority(above_idx)));
+    BOOST_CHECK(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()) == last);
     chainman.CheckBlockIndex();
 }
 
