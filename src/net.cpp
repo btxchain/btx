@@ -3480,43 +3480,82 @@ void CConnman::ThreadMessageHandler()
             const NodesSnapshot snap{*this, /*shuffle=*/true};
             std::vector<CNode*> nodes{snap.Nodes()};
             // Handshake-incomplete peers first (signer inbounds from
-            // archives are not manual). Then GPU addnode / outbounds.
-            // Shuffle is preserved within each class.
-            std::stable_partition(nodes.begin(), nodes.end(), [](const CNode* p) {
+            // archives are not manual). Then GPU addnode / outbounds /
+            // archive GETDATA fetchers. Shuffle is preserved within each
+            // class.
+            std::stable_partition(nodes.begin(), nodes.end(), [](CNode* p) {
                 return p != nullptr &&
                        !p->fSuccessfullyConnected.load();
             });
-            std::stable_partition(nodes.begin(), nodes.end(), [](const CNode* p) {
+            std::stable_partition(nodes.begin(), nodes.end(), [](CNode* p) {
                 if (p == nullptr) return false;
+                const bool pending_serve{
+                    p->m_prefer_block_serve.load() ||
+                    p->HasQueuedProcessMessageType(NetMsgType::GETDATA)};
                 return node::matmul_trusted::ClassifyMsghandPeer(
                            p->fSuccessfullyConnected.load(),
-                           p->IsManualConn() || !p->IsInboundConn()) !=
+                           p->IsManualConn() || !p->IsInboundConn(),
+                           pending_serve) !=
                        node::matmul_trusted::MsghandPeerClass::Other;
             });
             bool preferred_handshake_pending{false};
+            bool archive_getdata_pending{false};
             const bool local_signer{node::matmul_trusted::HasLocalSigner()};
-            for (const CNode* p : nodes) {
+            for (CNode* p : nodes) {
                 if (p == nullptr || p->fDisconnect) continue;
                 if (node::matmul_trusted::PreferredPeerHandshakePending(
                         p->fSuccessfullyConnected.load(),
                         p->IsManualConn() || !p->IsInboundConn(),
                         local_signer)) {
                     preferred_handshake_pending = true;
-                    break;
+                }
+                if (p->m_prefer_block_serve.load() ||
+                    p->HasQueuedProcessMessageType(NetMsgType::GETDATA)) {
+                    archive_getdata_pending = true;
                 }
             }
 
+            int others_processed{0};
             for (CNode* pnode : nodes) {
                 if (pnode->fDisconnect)
                     continue;
 
                 CpuTimer timer{[&pnode](std::chrono::nanoseconds elapsed) { pnode->m_cpu_time += elapsed; }};
 
+                const bool needs_serve{
+                    pnode->m_prefer_block_serve.load() ||
+                    pnode->HasQueuedProcessMessageType(NetMsgType::GETDATA)};
+                const auto msghand_class{
+                    node::matmul_trusted::ClassifyMsghandPeer(
+                        pnode->fSuccessfullyConnected.load(),
+                        pnode->IsManualConn() || !pnode->IsInboundConn(),
+                        needs_serve)};
+                if (node::matmul_trusted::
+                        SkipMinerProcessMessagesDuringArchiveGetData(
+                            local_signer, archive_getdata_pending,
+                            pnode->IsInboundConn(), pnode->IsManualConn(),
+                            pnode->fSuccessfullyConnected.load(),
+                            needs_serve)) {
+                    fMoreWork = true;
+                    continue;
+                }
+                if (local_signer &&
+                    msghand_class ==
+                        node::matmul_trusted::MsghandPeerClass::Other &&
+                    others_processed >=
+                        node::matmul_trusted::SIGNER_MSGHAND_OTHER_PER_LOOP) {
+                    fMoreWork = true;
+                    continue;
+                }
+
                 // Strict -connect archives: do not SendMessages to inbound
                 // miners (addrv2/getheaders/inv). Live nyc1 sent 1.9MB addrv2
                 // + 0.5MB getheaders while GPU BLOCK replies aged out.
                 // Signers: the same skip while an archive inbound is still
                 // in VERSION (live macpro2 2026-08-16, b-msghand ~84%).
+                // Do not skip archives that issued GETDATA: they are the
+                // serve target (live: skip applied to them after VERSION
+                // because miners handshake continuously).
                 const bool skip_inbound_send{
                     (!m_use_addrman_outgoing && pnode->IsInboundConn() &&
                      !pnode->IsManualConn()) ||
@@ -3525,9 +3564,15 @@ void CConnman::ThreadMessageHandler()
                             preferred_handshake_pending,
                             pnode->IsInboundConn(),
                             pnode->fSuccessfullyConnected.load(),
-                            pnode->IsManualConn())};
+                            pnode->IsManualConn(),
+                            needs_serve)};
 
                 bool fMoreNodeWork = m_msgproc->ProcessMessages(pnode, flagInterruptMsgProc);
+                if (local_signer &&
+                    msghand_class ==
+                        node::matmul_trusted::MsghandPeerClass::Other) {
+                    ++others_processed;
+                }
                 if (!skip_inbound_send) {
                     fMoreWork |= (fMoreNodeWork && !pnode->fPauseSend);
                 }
@@ -4394,6 +4439,15 @@ void CNode::MarkReceivedMsgsForProcessing()
     m_msg_process_queue.splice(m_msg_process_queue.end(), vRecvMsg);
     m_msg_process_queue_size += nSizeAdded;
     fPauseRecv = m_msg_process_queue_size > m_recv_flood_size;
+}
+
+bool CNode::HasQueuedProcessMessageType(std::string_view msg_type)
+{
+    LOCK(m_msg_process_queue_mutex);
+    for (const auto& msg : m_msg_process_queue) {
+        if (msg.m_type == msg_type) return true;
+    }
+    return false;
 }
 
 std::optional<std::pair<CNetMessage, bool>> CNode::PollMessage()

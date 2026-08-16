@@ -1068,6 +1068,9 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(ClassifyMsghandPeer(false, true) == MsghandPeerClass::Handshake);
     BOOST_CHECK(ClassifyMsghandPeer(true, true) == MsghandPeerClass::Preferred);
     BOOST_CHECK(ClassifyMsghandPeer(true, false) == MsghandPeerClass::Other);
+    BOOST_CHECK(ClassifyMsghandPeer(true, false, /*pending_block_serve=*/true) ==
+                MsghandPeerClass::Preferred);
+    BOOST_CHECK(ClassifyMsghandPeer(true, false, false) == MsghandPeerClass::Other);
     using node::matmul_trusted::PreferredPeerHandshakePending;
     BOOST_CHECK(PreferredPeerHandshakePending(
         /*handshake_complete=*/false, /*manual_or_outbound=*/true,
@@ -1085,6 +1088,30 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         true, false, true, false));
     BOOST_CHECK(!SkipFullyConnectedInboundDuringPreferredHandshake(
         false, true, true, false));
+    BOOST_CHECK(!SkipFullyConnectedInboundDuringPreferredHandshake(
+        true, true, true, false, /*this_peer_needs_serve=*/true));
+    using node::matmul_trusted::SkipMinerProcessMessagesDuringArchiveGetData;
+    BOOST_CHECK(SkipMinerProcessMessagesDuringArchiveGetData(
+        /*local_signer=*/true, /*archive_getdata_pending=*/true,
+        /*this_peer_inbound=*/true, /*this_peer_manual=*/false,
+        /*this_peer_handshake_complete=*/true,
+        /*this_peer_needs_serve=*/false));
+    BOOST_CHECK(!SkipMinerProcessMessagesDuringArchiveGetData(
+        true, true, true, false, true, /*this_peer_needs_serve=*/true));
+    BOOST_CHECK(!SkipMinerProcessMessagesDuringArchiveGetData(
+        true, true, true, false, /*this_peer_handshake_complete=*/false,
+        false));
+    BOOST_CHECK(!SkipMinerProcessMessagesDuringArchiveGetData(
+        /*local_signer=*/false, true, true, false, true, false));
+    BOOST_CHECK(!SkipMinerProcessMessagesDuringArchiveGetData(
+        true, /*archive_getdata_pending=*/false, true, false, true, false));
+    using node::matmul_trusted::KeepCatchupSourceOnDownloadTimeout;
+    BOOST_CHECK(KeepCatchupSourceOnDownloadTimeout(
+        /*signed_frontier_catch_up=*/true, /*persistent_timeout=*/false,
+        /*last_gpu_or_frontier_source=*/false));
+    BOOST_CHECK(!KeepCatchupSourceOnDownloadTimeout(true, true, false));
+    BOOST_CHECK(KeepCatchupSourceOnDownloadTimeout(true, true, true));
+    BOOST_CHECK(!KeepCatchupSourceOnDownloadTimeout(false, true, true));
     using node::matmul_trusted::SkipExactReplayForGpuAttestation;
     BOOST_CHECK(SkipExactReplayForGpuAttestation(/*has_valid_gpu_attestation=*/true));
     BOOST_CHECK(!SkipExactReplayForGpuAttestation(false));

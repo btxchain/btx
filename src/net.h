@@ -45,6 +45,7 @@
 #include <optional>
 #include <queue>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_set>
 #include <vector>
@@ -860,6 +861,9 @@ public:
     const uint64_t nKeyedNetGroup;
     std::atomic_bool fPauseRecv{false};
     std::atomic_bool fPauseSend{false};
+    /** Sticky: this peer issued GETDATA (archive/fetcher). Msghand prefers
+     *  it over miner inbounds so BLOCK replies are not starved. */
+    std::atomic_bool m_prefer_block_serve{false};
 
     /** Network key used to prevent fingerprinting our node across networks.
      *  Influenced by the network and the bind address (+ bind port for inbounds) */
@@ -877,6 +881,12 @@ public:
      * consisting of the message and a bool that indicates if the processing
      * queue has more entries. */
     std::optional<std::pair<CNetMessage, bool>> PollMessage()
+        EXCLUSIVE_LOCKS_REQUIRED(!m_msg_process_queue_mutex);
+
+    /** True if the process queue still holds a message of this type
+     *  (does not consume). Used to prefer archive GETDATA before miner
+     *  BLOCK deserialize on a local signer. */
+    [[nodiscard]] bool HasQueuedProcessMessageType(std::string_view msg_type)
         EXCLUSIVE_LOCKS_REQUIRED(!m_msg_process_queue_mutex);
 
     /** Account for the total size of a sent message in the per msg type connection stats. */

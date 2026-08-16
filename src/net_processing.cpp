@@ -13173,6 +13173,8 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             LogDebug(BCLog::NET, "received getdata for: %s peer=%d\n", vInv[0].ToString(), pfrom.GetId());
         }
 
+        pfrom.m_prefer_block_serve.store(true);
+
         {
             LOCK(peer->m_getdata_requests_mutex);
             peer->m_getdata_requests.insert(peer->m_getdata_requests.end(), vInv.begin(), vInv.end());
@@ -17419,19 +17421,30 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                 // Prefer re-request over disconnect when other download peers
                 // exist: dropping this peer also discards its other useful
                 // in-flight blocks. Still disconnect if this is the only
-                // download peer or the peer keeps timing out.
+                // download peer or the peer keeps timing out — except the
+                // last GPU/frontier source during signed-frontier catch-up
+                // (live nyc1 2026-08-16: 3 timeouts disconnected peer=1027,
+                // the only attested body source).
                 const bool can_rerequest_elsewhere = peers_downloading_before > 1;
                 const bool persistent_timeout =
                     state.m_block_download_timeout_count >= BLOCK_DOWNLOAD_TIMEOUT_DISCONNECT_AFTER;
+                const bool last_gpu_or_frontier_source{
+                    (PeerIsGpuAuthority(pto->GetId(), state) ||
+                     PeerIsSignedFrontierBodySource(pto->GetId(), state)) &&
+                    CountCapableGpuAuthorityPeers() +
+                            CountCapableSignedFrontierBodySources() <=
+                        1};
                 const bool keep_catchup_source{
-                    IsSignedFrontierBodyCatchUp() && !persistent_timeout};
+                    node::matmul_trusted::KeepCatchupSourceOnDownloadTimeout(
+                        IsSignedFrontierBodyCatchUp(), persistent_timeout,
+                        last_gpu_or_frontier_source)};
+                if (keep_catchup_source && last_gpu_or_frontier_source) {
+                    state.m_block_download_timeout_count = 0;
+                }
                 if ((can_rerequest_elsewhere && !persistent_timeout) ||
                     keep_catchup_source) {
                     const bool only_source{
-                        keep_catchup_source &&
-                        CountCapableGpuAuthorityPeers() +
-                                CountCapableSignedFrontierBodySources() <=
-                            1};
+                        keep_catchup_source && last_gpu_or_frontier_source};
                     if (!only_source) {
                         state.m_block_download_paused_until =
                             current_time + BLOCK_DOWNLOAD_TIMEOUT_REREQUEST_COOLDOWN;

@@ -678,19 +678,30 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
 }
 
 /** Msghand visit order. Incomplete VERSION/V2 must run before 100+
- *  miner inbounds (archive -connect) and before signer BLOCK serve. */
+ *  miner inbounds (archive -connect) and before signer BLOCK serve.
+ *  Inbound archives that issued GETDATA are Preferred so ProcessGetData
+ *  runs before miner HEADER_ONLY deserialize. */
 enum class MsghandPeerClass : uint8_t {
     Handshake = 0,
     Preferred = 1,
     Other = 2,
 };
 
+/** Bound miner (Other) ProcessMessages per msghand loop on a local
+ *  signer. Live macpro2 2026-08-16: 100 inbounds each deserialized a
+ *  competing BLOCK under cs_main; one loop exceeded the 90s archive
+ *  GETDATA timeout. Handshake + Preferred always run in full. */
+static constexpr int SIGNER_MSGHAND_OTHER_PER_LOOP{8};
+
 [[nodiscard]] inline MsghandPeerClass ClassifyMsghandPeer(
     bool handshake_complete,
-    bool manual_or_outbound)
+    bool manual_or_outbound,
+    bool pending_block_serve = false)
 {
     if (!handshake_complete) return MsghandPeerClass::Handshake;
-    if (manual_or_outbound) return MsghandPeerClass::Preferred;
+    if (manual_or_outbound || pending_block_serve) {
+        return MsghandPeerClass::Preferred;
+    }
     return MsghandPeerClass::Other;
 }
 
@@ -707,16 +718,56 @@ enum class MsghandPeerClass : uint8_t {
 
 /** Do not SendMessages (BLOCK/addrv2) to fully-connected miner inbounds
  *  while a preferred peer is still handshaking. Live signer 2026-08-16:
- *  b-msghand ~84% serving inbounds, archive recv=0 until 60s timeout. */
+ *  b-msghand ~84% serving inbounds, archive recv=0 until 60s timeout.
+ *
+ *  Never skip the archive we are protecting: after VERSION it is a
+ *  fully-connected inbound, and miners handshake continuously, so the
+ *  four-argument form skipped SendMessages to archives forever (GETDATA
+ *  replies aged out, 3×90s, disconnect GPU). `this_peer_needs_serve` is
+ *  GETDATA queued or a sticky block-fetcher inbound. */
 [[nodiscard]] inline bool SkipFullyConnectedInboundDuringPreferredHandshake(
     bool preferred_handshake_pending,
     bool this_peer_inbound,
     bool this_peer_handshake_complete,
-    bool this_peer_manual)
+    bool this_peer_manual,
+    bool this_peer_needs_serve = false)
 {
     if (!preferred_handshake_pending) return false;
+    if (this_peer_needs_serve) return false;
     if (!this_peer_inbound || this_peer_manual) return false;
     return this_peer_handshake_complete;
+}
+
+/** Local signer: do not ProcessMessages miner inbounds while an archive
+ *  GETDATA is queued. Handshake and serve targets still run. */
+[[nodiscard]] inline bool SkipMinerProcessMessagesDuringArchiveGetData(
+    bool local_signer,
+    bool archive_getdata_pending,
+    bool this_peer_inbound,
+    bool this_peer_manual,
+    bool this_peer_handshake_complete,
+    bool this_peer_needs_serve)
+{
+    if (!local_signer || !archive_getdata_pending) return false;
+    if (this_peer_needs_serve) return false;
+    if (!this_peer_handshake_complete) return false;
+    if (!this_peer_inbound || this_peer_manual) return false;
+    return true;
+}
+
+/** During signed-frontier catch-up, keep the last GPU/frontier body
+ *  source even after consecutive GETDATA timeouts. Live nyc1 2026-08-16:
+ *  3×90s then "disconnecting peer=1027" dropped the only attested
+ *  source; tip froze and RPC stopped answering. */
+[[nodiscard]] inline bool KeepCatchupSourceOnDownloadTimeout(
+    bool signed_frontier_catch_up,
+    bool persistent_timeout,
+    bool last_gpu_or_frontier_source)
+{
+    if (last_gpu_or_frontier_source && signed_frontier_catch_up) {
+        return true;
+    }
+    return signed_frontier_catch_up && !persistent_timeout;
 }
 
 /** CPU ExactReplay is the skip gate only when a valid GPU attestation
