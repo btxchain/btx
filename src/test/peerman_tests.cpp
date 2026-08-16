@@ -5331,6 +5331,173 @@ BOOST_AUTO_TEST_CASE(authenticated_chain_progress_lane_does_not_pace_one_per_min
     BOOST_CHECK(!occupier.fDisconnect);
 }
 
+BOOST_AUTO_TEST_CASE(ticketless_descendant_cooldown_clears_when_parent_activates)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+
+    node::matmul_trusted::ResetForTest();
+    ResetSharedPeermanFixture(m_node);
+    ConnmanTestMsg& connman = static_cast<ConnmanTestMsg&>(*m_node.connman);
+    PeerManager& peerman = *m_node.peerman;
+    m_node.validation_signals->RegisterValidationInterface(&peerman);
+    struct UnregisterPeerman {
+        node::NodeContext& node;
+        PeerManager& peerman;
+        ~UnregisterPeerman()
+        {
+            node.validation_signals->UnregisterValidationInterface(&peerman);
+        }
+    } unregister_peerman{m_node, peerman};
+    ResetGlobalMatMulRCBudgetForTest();
+
+    const CBlockIndex* parent{
+        WITH_LOCK(::cs_main, return m_node.chainman->ActiveChain().Tip())};
+    BOOST_REQUIRE(parent != nullptr);
+    SetMockTime(std::chrono::seconds{parent->GetBlockTime() + 1});
+    peerman.SetBestBlock(parent->nHeight,
+                         std::chrono::seconds{parent->GetBlockTime()});
+
+    Consensus::Params& consensus = const_cast<Consensus::Params&>(
+        m_node.chainman->GetParams().GetConsensus());
+    auto restore_heights{SaveMatMulHeights(consensus)};
+    ActivateRcAtTip(consensus, *parent);
+    consensus.nMatMulRCPeerVerifyBudgetPerMin =
+        std::numeric_limits<uint32_t>::max();
+    consensus.nMatMulRCGlobalVerifyBudgetPerMin =
+        std::numeric_limits<uint32_t>::max();
+
+    PeermanBlockingVerify gate;
+    peerman.InstallMatMulVerifyOverrideForTest(
+        [&](const CBlock&, int32_t, std::optional<int64_t>) {
+            return gate.Run();
+        });
+    struct ClearOverride {
+        PeerManager& peerman;
+        ~ClearOverride() { peerman.InstallMatMulVerifyOverrideForTest({}); }
+    } clear_override{peerman};
+
+    const ServiceFlags services{ServiceFlags(
+        NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS)};
+    CNode source{/*id=*/409,
+                 /*sock=*/nullptr,
+                 CAddress{PeermanTestService(0x1100007f), NODE_NETWORK},
+                 /*nKeyedNetGroupIn=*/0x11,
+                 /*nLocalHostNonceIn=*/0,
+                 CAddress{},
+                 /*addrNameIn=*/"batch-descendant-source",
+                 ConnectionType::OUTBOUND_FULL_RELAY,
+                 /*inbound_onion=*/false,
+                 /*network_key=*/0};
+    connman.Handshake(source, /*successfully_connected=*/true, services,
+                      services, PROTOCOL_VERSION, /*relay_txs=*/true);
+    connman.AddTestNode(source);
+    connman.FlushSendBuffer(source);
+    struct FinalizeSource {
+        ConnmanTestMsg& connman;
+        PeerManager& peerman;
+        CNode& node;
+        ~FinalizeSource()
+        {
+            peerman.FinalizeNode(node);
+            connman.RemoveTestNode(node);
+        }
+    } finalize{connman, peerman, source};
+
+    CBlock first{MineTipChild(m_node, *parent, /*extra_time=*/0)};
+    const uint256 first_hash{first.GetHash()};
+    const auto first_ticket{
+        GrindTicket(first.GetBlockHeader(), consensus.powLimit)};
+    std::vector<CBlock> first_headers{CBlock{first.GetBlockHeader()}};
+    BOOST_REQUIRE(connman.ReceiveMsgFrom(
+        source,
+        NetMsg::Make(NetMsgType::HEADERS, TX_WITH_WITNESS(first_headers))));
+    source.fPauseSend = false;
+    (void)connman.ProcessMessagesOnce(source);
+    connman.FlushSendBuffer(source);
+    BOOST_REQUIRE(connman.ReceiveMsgFrom(
+        source, NetMsg::Make(NetMsgType::RCADMIT, first_ticket)));
+    source.fPauseSend = false;
+    (void)connman.ProcessMessagesOnce(source);
+    connman.FlushSendBuffer(source);
+    BOOST_REQUIRE(connman.ReceiveMsgFrom(
+        source, NetMsg::Make(NetMsgType::BLOCK, TX_WITH_WITNESS(first))));
+    source.fPauseSend = false;
+    (void)connman.ProcessMessagesOnce(source);
+    BOOST_REQUIRE(PeermanWaitFor([&] { return gate.running.load() >= 1; }));
+
+    CBlockIndex* first_index{WITH_LOCK(::cs_main, {
+        return m_node.chainman->m_blockman.LookupBlockIndex(first_hash);
+    })};
+    BOOST_REQUIRE(first_index != nullptr);
+    CBlock second = node::BlockAssembler{
+        m_node.chainman->ActiveChainstate(), nullptr, {}, m_node}
+                        .CreateNewBlock()
+                        ->block;
+    second.hashPrevBlock = first_hash;
+    second.nTime = first.nTime + 1;
+    {
+        CMutableTransaction coinbase{*second.vtx[0]};
+        coinbase.vin[0].scriptSig =
+            CScript() << (parent->nHeight + 2) << OP_0;
+        second.vtx[0] = MakeTransactionRef(coinbase);
+    }
+    second.hashMerkleRoot = BlockMerkleRoot(second);
+    BOOST_REQUIRE(MineHeaderForConsensus(
+        second, parent->nHeight + 2, consensus, 5'000'000,
+        first_index->GetMedianTimePast()));
+    const uint256 second_hash{second.GetHash()};
+    std::vector<CBlock> second_headers{CBlock{second.GetBlockHeader()}};
+    connman.FlushSendBuffer(source);
+    BOOST_REQUIRE(connman.ReceiveMsgFrom(
+        source,
+        NetMsg::Make(NetMsgType::HEADERS, TX_WITH_WITNESS(second_headers))));
+    source.fPauseSend = false;
+    (void)connman.ProcessMessagesOnce(source);
+    connman.FlushSendBuffer(source);
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, {
+        const CBlockIndex* idx{
+            m_node.chainman->m_blockman.LookupBlockIndex(second_hash)};
+        return idx != nullptr && idx->pprev == first_index &&
+               !m_node.chainman->IsOnParkedReorgBranch(idx);
+    }));
+    peerman.MarkMatMulRCBodyDeferredForTest(
+        second_hash, source.nKeyedNetGroup);
+    BOOST_REQUIRE(peerman.IsMatMulRCBodyDeferredForTest(
+        second_hash, source.nKeyedNetGroup));
+
+    gate.Release();
+    BOOST_REQUIRE(PeermanWaitFor([&] { return gate.running.load() == 0; }));
+    BOOST_REQUIRE(PeermanWaitFor([&] {
+        LOCK(::cs_main);
+        const CBlockIndex* idx{
+            m_node.chainman->m_blockman.LookupBlockIndex(first_hash)};
+        return idx != nullptr && m_node.chainman->ActiveChain().Contains(idx);
+    }));
+    BOOST_CHECK(!peerman.IsMatMulRCBodyDeferredForTest(
+        second_hash, source.nKeyedNetGroup));
+
+    connman.FlushSendBuffer(source);
+    bool requested{false};
+    for (int attempt = 0; attempt < 5 && !requested; ++attempt) {
+        BOOST_CHECK(peerman.SendMessages(&source));
+        requested = CountQueuedGetDataForHash(source, second_hash) > 0 ||
+                    HasQueuedMessageType(source, NetMsgType::GETDATA);
+        if (!requested) {
+            CNodeStateStats stats;
+            BOOST_REQUIRE(peerman.GetNodeStateStats(source.GetId(), stats));
+            requested = std::find(
+                            stats.vHeightInFlight.begin(),
+                            stats.vHeightInFlight.end(),
+                            parent->nHeight + 2) !=
+                        stats.vHeightInFlight.end();
+        }
+    }
+    BOOST_CHECK_MESSAGE(
+        requested,
+        "new direct child remained suppressed by its descendant cooldown");
+    BOOST_CHECK(!source.fDisconnect);
+}
+
 BOOST_AUTO_TEST_CASE(duplicate_header_no_progress_flood_disconnects_inbound_peer)
 {
     LOCK(NetEventsInterface::g_msgproc_mutex);

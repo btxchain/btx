@@ -284,6 +284,11 @@ public:
     /** True while a complete body is held for scheduler re-admission. */
     [[nodiscard]] virtual bool HasMatMulRetainedBodyForTest(const uint256& hash) const = 0;
     [[nodiscard]] virtual bool UnitTestHasMatMulRetainedBody(const uint256& hash) const = 0;
+    /** Exercise the per-netgroup ticketless-body cooldown transition. */
+    virtual void MarkMatMulRCBodyDeferredForTest(
+        const uint256& hash, uint64_t keyed_netgroup) = 0;
+    [[nodiscard]] virtual bool IsMatMulRCBodyDeferredForTest(
+        const uint256& hash, uint64_t keyed_netgroup) const = 0;
     /** Drive scheduler re-admission of a HAVE_DATA followed tip-child.
      *  Production calls this from CScheduler, never from SendMessages
      *  (g_msgproc_mutex). Tests must not hold that mutex. */

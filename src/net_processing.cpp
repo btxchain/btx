@@ -1218,6 +1218,16 @@ public:
     {
         return HasMatMulRetainedBodyForTest(hash);
     }
+    void MarkMatMulRCBodyDeferredForTest(
+        const uint256& hash, uint64_t keyed_netgroup) override
+    {
+        MarkMatMulRCBodyDeferred(hash, keyed_netgroup);
+    }
+    bool IsMatMulRCBodyDeferredForTest(
+        const uint256& hash, uint64_t keyed_netgroup) const override
+    {
+        return IsMatMulRCBodyDeferred(hash, keyed_netgroup);
+    }
     void RetryMatMulDeferredBodiesForTest() override
         EXCLUSIVE_LOCKS_REQUIRED(!cs_main, !NetEventsInterface::g_msgproc_mutex)
     {
@@ -6343,6 +6353,36 @@ void PeerManagerImpl::ActiveTipChange(const CBlockIndex& new_tip, bool is_ibd)
     m_header_only_competing.clear();
     m_header_only_followed_skip.clear();
     g_configured_claimed_tip_child.SetNull();
+
+    // A batch-delivered successor was correctly classified as a ticketless
+    // descendant while its parent was still being ExactReplayed. Once that
+    // parent becomes the active tip, the same hash is now the one useful
+    // direct child. Keeping its old per-netgroup cooldown suppresses getdata
+    // for a full minute after every successful block (observed on mainnet at
+    // 190593). Clear only known direct children of the newly active tip.
+    // Competing/non-extending hashes retain their cooldown, and
+    // pending/rate/claim limits still bound each newly eligible delivery.
+    std::set<uint256> newly_direct_children;
+    m_chainman.m_blockman.ForEachBlockChild(
+        *Assert(m_chainman.m_blockman.LookupBlockIndex(new_tip.GetBlockHash())),
+        [&](CBlockIndex& child) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+            AssertLockHeld(::cs_main);
+            if ((child.nStatus & BLOCK_FAILED_MASK) != 0 ||
+                m_chainman.IsOnParkedReorgBranch(&child)) {
+                return;
+            }
+            newly_direct_children.insert(child.GetBlockHash());
+        });
+    for (const uint256& hash : newly_direct_children) {
+        ClearMatMulRCBodyDeferred(hash);
+    }
+    if (!newly_direct_children.empty()) {
+        LogDebug(
+            BCLog::NET,
+            "Active tip progress cleared ticketless-body cooldown for %u "
+            "new direct child candidate(s)\n",
+            static_cast<unsigned>(newly_direct_children.size()));
+    }
 
     // Tip-first trusted-mirror ranking: keep the verify worker's tip cache in
     // lockstep with ActivateBestChain (same sync delivery as SetBestBlock).
