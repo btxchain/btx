@@ -765,6 +765,22 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         /*trusted_mirror_profile1=*/false, /*has_quorum=*/false));
     BOOST_CHECK(!TrustedMirrorMustDeferUnattestedConnect(
         /*trusted_mirror_profile1=*/false, /*has_quorum=*/true));
+    BOOST_CHECK(!TrustedMirrorMustDeferUnattestedConnect(
+        /*trusted_mirror_profile1=*/true, /*has_quorum=*/false,
+        /*covered_by_signed_frontier=*/true));
+    using node::matmul_trusted::TrustedMirrorFrontierCoversBlock;
+    BOOST_CHECK(TrustedMirrorFrontierCoversBlock(
+        /*frontier_available=*/true, /*block_height=*/190582,
+        /*frontier_height=*/190621, /*frontier_descends_from_block=*/true));
+    BOOST_CHECK(!TrustedMirrorFrontierCoversBlock(
+        /*frontier_available=*/true, /*block_height=*/190622,
+        /*frontier_height=*/190621, /*frontier_descends_from_block=*/true));
+    BOOST_CHECK(!TrustedMirrorFrontierCoversBlock(
+        /*frontier_available=*/true, /*block_height=*/190582,
+        /*frontier_height=*/190621, /*frontier_descends_from_block=*/false));
+    BOOST_CHECK(!TrustedMirrorFrontierCoversBlock(
+        /*frontier_available=*/false, /*block_height=*/190582,
+        /*frontier_height=*/190621, /*frontier_descends_from_block=*/true));
     using node::matmul_trusted::MustDeferConflictingAttestedHeight;
     BOOST_CHECK(MustDeferConflictingAttestedHeight(
         /*configured=*/true, /*candidate_has_quorum=*/false,

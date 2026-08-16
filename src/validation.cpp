@@ -9258,6 +9258,10 @@ static constexpr const char* RETRYABLE_MATMUL_ACTIVATION_PREFIX =
             pindex->nHeight)) {
         return false;
     }
+    // In-memory frontier ancestry first: a durable HasQuorum miss on every
+    // catch-up block was the live 60s/block archive crawl. The GPU already
+    // attested this path when it signed the frontier hash.
+    if (chainman.IndexIsCoveredBySignedFrontier(pindex)) return false;
     return node::matmul_trusted::TrustedMirrorMustDeferUnattestedConnect(
         /*trusted_mirror_profile1=*/true,
         node::matmul_trusted::HasQuorum(
@@ -11621,6 +11625,33 @@ bool ChainstateManager::IndexIsOnSignedFrontierChain(const CBlockIndex* index) c
     return index->GetAncestor(frontier->nHeight) == frontier;
 }
 
+bool ChainstateManager::IndexIsCoveredBySignedFrontier(const CBlockIndex* index) const
+{
+    AssertLockHeld(::cs_main);
+    if (index == nullptr || (index->nStatus & BLOCK_FAILED_MASK) != 0) {
+        return false;
+    }
+    if (!node::matmul_trusted::IsConfigured()) return false;
+    const auto frontier_height{node::matmul_trusted::HighestAttestedHeight()};
+    if (!frontier_height.has_value()) return false;
+    if (index->nHeight > *frontier_height) return false;
+    for (const auto& hint : node::matmul_trusted::AttestedFrontierHints()) {
+        if (hint.height != *frontier_height || hint.hash.IsNull()) continue;
+        if (!node::matmul_trusted::HasQuorumInMemory(hint.hash, hint.height)) {
+            continue;
+        }
+        const CBlockIndex* const frontier{
+            m_blockman.LookupBlockIndex(hint.hash)};
+        if (frontier == nullptr) continue;
+        if (node::matmul_trusted::TrustedMirrorFrontierCoversBlock(
+                /*frontier_available=*/true, index->nHeight, frontier->nHeight,
+                frontier->GetAncestor(index->nHeight) == index)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool ChainstateManager::IndexLeadsToSignedFrontier(const CBlockIndex* index) const
 {
     AssertLockHeld(::cs_main);
@@ -12943,7 +12974,8 @@ bool ChainstateManager::CheckMatMulBlockAdmissionPreconditions(
         // holes also have nTx != 0 with !HAVE_DATA. Those Bitcoin Core
         // unrequested anti-DoS gates must not drop a body we already know
         // belongs on the active / snapshot chain.
-        if (!IsMatMulFollowedHistoricalHole(pindex)) {
+        if (!IsMatMulFollowedHistoricalHole(pindex) &&
+            !IndexIsCoveredBySignedFrontier(pindex)) {
             if (pindex->nTx != 0) return true;
             if (ActiveTip() != nullptr && pindex->nChainWork < ActiveTip()->nChainWork) return true;
             if (pindex->nHeight > ActiveHeight() + int(MIN_BLOCKS_TO_KEEP)) return true;
@@ -13210,47 +13242,51 @@ static bool ContextualCheckBlock(const CBlock& block,
                     if (trusted_profile1) {
                         // Never block ProcessNewBlock on attestation quorum.
                         // Tip-extending bodies persist via AcceptBlock so a
-                        // consensus signer can getdata them before quorum;
-                        // ConnectTip still requires HasQuorum. Competing
-                        // (non-tip-parent) deliveries stay retryable Errors.
+                        // consensus signer can getdata them before quorum.
+                        // A GPU-signed frontier covers the ancestor path:
+                        // skip ExactReplay (no durable HasQuorum per block).
+                        // Competing off-frontier deliveries stay retryable.
+                        bool frontier_covers{false};
+                        {
+                            LOCK(::cs_main);
+                            frontier_covers =
+                                chainman.IndexIsCoveredBySignedFrontier(
+                                    chainman.m_blockman.LookupBlockIndex(
+                                        block.GetHash()));
+                        }
                         const bool have_quorum{
+                            frontier_covers ||
                             node::matmul_trusted::HasQuorum(
                                 block.GetHash(), nHeight)};
-                        if (!have_quorum) {
-                            if (pindexPrev != nullptr &&
-                                pindexPrev == chainman.ActiveTip()) {
-                                return true;
+                        if (have_quorum) {
+                            CacheMatMulEncDrVerdict(
+                                block.GetHash(), true);
+                            if (rc_authority != nullptr) {
+                                *rc_authority =
+                                    MatMulRCAuthorityProvenance::
+                                        TRUSTED_SIGNER_QUORUM;
                             }
-                            // Followed-chain historical hole (active-tip
-                            // ancestor or assumeutxo snapshot-base ancestor):
-                            // persist HAVE_DATA without GPU so background
-                            // backfill is not a getdata livelock. ConnectTip
-                            // still requires HasQuorum. Competing off-path
-                            // bodies stay retryable Errors.
-                            bool followed_hole{false};
-                            {
-                                LOCK(::cs_main);
-                                followed_hole =
-                                    chainman.IsMatMulFollowedHistoricalHole(
-                                        chainman.m_blockman.LookupBlockIndex(
-                                            block.GetHash()));
-                            }
-                            if (followed_hole) return true;
-                            rc_local_execution_failure = true;
-                            rc_execution_detail = strprintf(
-                                "trusted attestation quorum %s",
-                                matmul::trusted::WaitResultName(
-                                    matmul::trusted::WaitResult::Timeout));
-                            return false;
+                            return true;
                         }
-                        CacheMatMulEncDrVerdict(
-                            block.GetHash(), true);
-                        if (rc_authority != nullptr) {
-                            *rc_authority =
-                                MatMulRCAuthorityProvenance::
-                                    TRUSTED_SIGNER_QUORUM;
+                        if (pindexPrev != nullptr &&
+                            pindexPrev == chainman.ActiveTip()) {
+                            return true;
                         }
-                        return true;
+                        bool followed_hole{false};
+                        {
+                            LOCK(::cs_main);
+                            followed_hole =
+                                chainman.IsMatMulFollowedHistoricalHole(
+                                    chainman.m_blockman.LookupBlockIndex(
+                                        block.GetHash()));
+                        }
+                        if (followed_hole) return true;
+                        rc_local_execution_failure = true;
+                        rc_execution_detail = strprintf(
+                            "trusted attestation quorum %s",
+                            matmul::trusted::WaitResultName(
+                                matmul::trusted::WaitResult::Timeout));
+                        return false;
                     }
                     // Consensus-mode node with -matmultrustedpubkey: a verified
                     // quorum is fork-choice authority for this hash. Skip the
@@ -13808,7 +13844,8 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
         // unrequested; competing forks, pruned junk, and too-far-ahead
         // spam keep the Bitcoin Core anti-DoS early returns.
         // ReceivedBlockTransactions already accepts a pruned re-download.
-        if (!IsMatMulFollowedHistoricalHole(pindex)) {
+        if (!IsMatMulFollowedHistoricalHole(pindex) &&
+            !IndexIsCoveredBySignedFrontier(pindex)) {
             if (pindex->nTx != 0) return true;    // previously-processed, pruned
             if (!fHasMoreOrSameWork) return true; // Don't process less-work chains
             if (fTooFarAhead) return true;        // Block height is too high

@@ -3843,7 +3843,9 @@ static uint256 g_configured_claimed_tip_child{};
 //! sibling burst will saturate every device and starve CandidateMining
 //! (live 2026-08-14). Split by role:
 //! - Trusted mirror: never P2P ExactReplay. GETMMATTEST + at most one
-//!   persisted unattested tip-child; ConnectTip waits for quorum.
+//!   persisted unattested tip-child; ConnectTip of a GPU-signed frontier
+//!   ancestor does not wait for per-block quorum. Unattested hashes
+//!   above the frontier still wait.
 //! - Local signer/miner: ExactReplay the followed tip-child so this
 //!   node can SignAuthoritative and IBD. Quorum is created here
 //!   (chicken-egg): skipping GPU used to HEADER_ONLY every next IBD
@@ -8164,15 +8166,13 @@ int PeerManagerImpl::CountSignedFrontierBodySources() const
 }
 
 std::chrono::microseconds PeerManagerImpl::CatchUpDownloadTimeoutForPeer(
-    NodeId peer_id, const CNodeState& state) const
+    [[maybe_unused]] NodeId peer_id, [[maybe_unused]] const CNodeState& state) const
 {
     AssertLockHeld(cs_main);
-    if (IsSignedFrontierBodyCatchUp() &&
-        PeerIsSignedFrontierBodySource(peer_id, state)) {
-        return std::chrono::duration_cast<std::chrono::microseconds>(
-            node::matmul_trusted::SignedFrontierPreferredCatchUpTimeout(
-                node::matmul_trusted::WaitTimeout()));
-    }
+    // Bodies on the GPU-signed path are cheap (~400B). Do not wait
+    // WaitTimeout+30s (90s) per getdata: ConnectTip no longer needs
+    // per-block MMATTEST for frontier ancestors, and a silent preferred
+    // peer must failover in BLOCK_CATCHUP_DOWNLOAD_TIMEOUT (15s).
     return std::chrono::duration_cast<std::chrono::microseconds>(
         BLOCK_CATCHUP_DOWNLOAD_TIMEOUT);
 }

@@ -1575,6 +1575,12 @@ public:
      *  persist these bodies even when m_best_header / the active tip sit
      *  on an unattested competing tower. */
     [[nodiscard]] bool IndexIsOnSignedFrontierChain(const CBlockIndex* index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** True when `index` is the GPU-signed frontier hash or an ancestor of
+     *  it (in-memory quorum at HighestAttestedHeight). Trusted mirrors skip
+     *  ExactReplay and ConnectTip-quorum for these: the attestor already
+     *  verified the path. Unattested descendants above the frontier are
+     *  false. */
+    [[nodiscard]] bool IndexIsCoveredBySignedFrontier(const CBlockIndex* index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** True when index is an ancestor of, is, or descends from any stored
      *  quorum hash at HighestAttestedHeight. Unlike
      *  GetSignedFrontierStatus().on_active_chain, this stays true while

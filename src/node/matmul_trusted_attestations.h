@@ -335,13 +335,20 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
 /** ConnectTip / ActivateBestChainStep gate for a trusted Profile-1 node.
  *  Tip-extending HAVE_DATA stays selectable so a consensus signer can
  *  getdata an unattested tip-child (chicken-egg with archives). Quorum
- *  still gates activation: HAVE_DATA must not make an unattested MatMul
- *  block the active tip. */
+ *  still gates activation of hashes the GPU has not attested.
+ *
+ *  A GPU-signed frontier covers every ancestor on that hash's chain:
+ *  the attestor already ExactReplayed those blocks. Dumb mirrors must
+ *  ConnectTip that suffix without per-block MMATTEST / WaitTimeout
+ *  (live archives 2026-08-16 sat ~60–90s/block waiting for signatures
+ *  they did not need). Blocks *above* the frontier stay deferred. */
 [[nodiscard]] inline bool TrustedMirrorMustDeferUnattestedConnect(
     bool trusted_mirror_profile1,
-    bool has_quorum)
+    bool has_quorum,
+    bool covered_by_signed_frontier = false)
 {
-    return trusted_mirror_profile1 && !has_quorum;
+    return trusted_mirror_profile1 && !has_quorum &&
+           !covered_by_signed_frontier;
 }
 
 /** CONSENSUS signer / configured node: never ConnectTip an unattested
@@ -481,6 +488,21 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
     return trusted_mirror && configured &&
            blocks_behind >= stall_headers_ahead &&
            followed_ahead >= stall_headers_ahead;
+}
+
+/** Ancestor of (or equal to) a GPU-signed frontier hash.
+ *  Descendants *above* the frontier are not covered — those still need
+ *  their own quorum. Distinct from IndexIsOnSignedFrontierChain, which
+ *  also returns true for unattested tip-children of the frontier. */
+[[nodiscard]] inline bool TrustedMirrorFrontierCoversBlock(
+    bool frontier_available,
+    int32_t block_height,
+    int32_t frontier_height,
+    bool frontier_descends_from_block)
+{
+    return frontier_available && block_height >= 0 &&
+           frontier_height >= 0 && block_height <= frontier_height &&
+           frontier_descends_from_block;
 }
 
 /** How far catch-up may treat the followed header chain as "ahead".
