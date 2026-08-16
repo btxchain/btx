@@ -343,7 +343,33 @@ static int FollowedChainAhead(const ChainstateManager& chainman,
     };
     consider(chainman.m_best_header);
     consider(peer_best);
-    return best_height - tip->nHeight;
+    const auto frontier{chainman.GetSignedFrontierStatus()};
+    // Ancestor-of-frontier-hash, not IndexLeadsToSignedFrontier: that
+    // helper requires HasQuorumInMemory, so a height+hash hint (peerman
+    // catch-up test, live archives that have seen the frontier header
+    // before the body) would look like a competing fork and skip getdata.
+    bool tip_leads{false};
+    if (frontier.hash_known) {
+        const CBlockIndex* const frontier_index{
+            chainman.m_blockman.LookupBlockIndex(frontier.hash)};
+        if (frontier_index != nullptr) {
+            if (tip->nHeight <= frontier_index->nHeight) {
+                tip_leads = frontier_index->GetAncestor(tip->nHeight) == tip;
+            } else {
+                tip_leads = tip->GetAncestor(frontier_index->nHeight) ==
+                            frontier_index;
+            }
+        }
+    } else if (frontier.available && tip->nHeight < frontier.height) {
+        tip_leads = true;
+    }
+    return node::matmul_trusted::CappedFollowedCatchUpAhead(
+        node::matmul_trusted::IsConfigured(),
+        frontier.available,
+        tip->nHeight,
+        best_height,
+        frontier.height,
+        tip_leads);
 }
 
 /** True when followed-chain headers (or this peer's tip-extending best-known)
@@ -360,17 +386,24 @@ static bool IsCatchUpBlockFetch(const ChainstateManager& chainman,
     return FollowedChainAhead(chainman, peer_best) >= BLOCK_FETCH_STALL_HEADERS_AHEAD;
 }
 
-/** 1-wide inflight + successor reclaim. Not used during IBD, and not used when
- *  followed headers are CATCHUP_NARROW_MAX_AHEAD or more in front — that is
- *  snapshot/long-offline backfill, not a handful of near-tip holes. */
+/** 1-wide inflight + successor reclaim. IBD stays wide. Unattested /
+ *  assumeutxo backfill stays wide when ahead ≥ CATCHUP_NARROW_MAX_AHEAD.
+ *  Signed-frontier HEADER_ONLY catch-up stays 1-wide even past that bound
+ *  (live 2026-08-16: 16-slot + 15s timeout against miners). */
 static bool IsNarrowCatchUpWindow(const ChainstateManager& chainman,
                                   const CBlockIndex* peer_best = nullptr)
     EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
-    if (chainman.IsInitialBlockDownload()) return false;
     const int ahead{FollowedChainAhead(chainman, peer_best)};
-    return ahead >= BLOCK_FETCH_STALL_HEADERS_AHEAD &&
-           ahead < CATCHUP_NARROW_MAX_AHEAD;
+    const auto frontier{chainman.GetSignedFrontierStatus()};
+    return node::matmul_trusted::IsNarrowCatchUpWindowForPolicy(
+        chainman.IsInitialBlockDownload(), ahead,
+        node::matmul_trusted::IsSignedFrontierCatchUp(
+            node::matmul_trusted::IsTrustedMirror(),
+            node::matmul_trusted::IsConfigured(),
+            frontier.blocks_behind, ahead,
+            BLOCK_FETCH_STALL_HEADERS_AHEAD),
+        BLOCK_FETCH_STALL_HEADERS_AHEAD, CATCHUP_NARROW_MAX_AHEAD);
 }
 /** Maximum number of headers to announce when relaying blocks with headers message.*/
 static const unsigned int MAX_BLOCKS_TO_ANNOUNCE = 8;
@@ -1006,6 +1039,10 @@ struct CNodeState {
     /** Whether this peer advertised NODE_MATMUL_ATTESTATION_ARCHIVE (trusted
      *  mirrors may follow its better-work competing branch after a race). */
     bool m_matmul_attestation_archive{false};
+    /** NODE_MATMUL_TRUSTED_MIRROR / NODE_NETWORK from VERSION. Used to pick
+     *  signed-frontier catch-up getdata sources without GetPeerRef. */
+    bool m_matmul_trusted_mirror{false};
+    bool m_node_network{false};
     /** Configured NoBan / addnode. Combined with the archive bit these peers
      *  are treated as attestation-authority for download/header-follow even
      *  before a recent MMATTEST (chicken-egg: the signer cannot prove until
@@ -2251,6 +2288,18 @@ private:
         NodeId peer_id, ServiceFlags services,
         const CBlockIndex* candidate = nullptr) const
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    /** Trusted mirror catching up a HEADER_ONLY suffix to the signed frontier. */
+    [[nodiscard]] bool IsSignedFrontierBodyCatchUp() const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    /** Archive / mirror / manual / recent-MMATTEST NODE_NETWORK peer. */
+    [[nodiscard]] bool PeerIsSignedFrontierBodySource(
+        NodeId peer_id, const CNodeState& state, const Peer* peer = nullptr) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    [[nodiscard]] int CountSignedFrontierBodySources() const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    [[nodiscard]] std::chrono::microseconds CatchUpDownloadTimeoutForPeer(
+        NodeId peer_id, const CNodeState& state) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     /** When an authority peer serves headers on a better/equal-work branch,
      *  move m_best_header onto that branch so the mirror can converge after
      *  losing a same-height race. Parked deep-reorg branches are refused. */
@@ -3323,12 +3372,17 @@ int PeerManagerImpl::ReclaimStaleInFlightBlockRequests(std::chrono::microseconds
     // Collect first: RemoveBlockRequest mutates the lists we are walking.
     std::vector<std::pair<NodeId, uint256>> stale;
     std::chrono::microseconds oldest_reclaimed{0us};
-    const auto reclaim_after = IsCatchUpBlockFetch(m_chainman)
+    const auto reclaim_after_default = IsCatchUpBlockFetch(m_chainman)
                                    ? std::chrono::duration_cast<std::chrono::microseconds>(
                                          BLOCK_CATCHUP_DOWNLOAD_TIMEOUT)
                                    : std::chrono::duration_cast<std::chrono::microseconds>(
                                          BLOCK_INFLIGHT_HARD_RECLAIM_AFTER);
+    const bool signed_frontier_catch_up{IsSignedFrontierBodyCatchUp()};
     for (const auto& [nodeid, state] : m_node_states) {
+        const auto reclaim_after{
+            IsCatchUpBlockFetch(m_chainman)
+                ? CatchUpDownloadTimeoutForPeer(nodeid, state)
+                : reclaim_after_default};
         for (const QueuedBlock& entry : state.vBlocksInFlight) {
             const auto requested_at = entry.requested_at.count() > 0
                                           ? entry.requested_at
@@ -3366,15 +3420,20 @@ int PeerManagerImpl::ReclaimStaleInFlightBlockRequests(std::chrono::microseconds
         RemoveBlockRequest(hash, nodeid);
         peers_reclaimed.insert(nodeid);
     }
-    // Pause every peer we just stripped so the next FindNextBlocksToDownload
-    // pass prefers a different source. Without this, the same silent peer is
-    // immediately re-assigned the freed hashes and the window jams again
-    // within one SendMessages cycle (observed in the jam-recovery functional
-    // test: reclaim → remaining_in_flight=0 → same peer refilled to 16).
+    // Pause stripped peers so the next FindNextBlocksToDownload pass prefers
+    // a different source. Do not pause the only signed-frontier archive/manual
+    // source: that hand-off is what filled 16 miner slots (live 2026-08-16).
+    const int preferred_sources{CountSignedFrontierBodySources()};
     for (NodeId nodeid : peers_reclaimed) {
         if (CNodeState* state = State(nodeid)) {
-            state->m_block_download_paused_until =
-                now + BLOCK_DOWNLOAD_TIMEOUT_REREQUEST_COOLDOWN;
+            const bool keep_only_source{
+                signed_frontier_catch_up &&
+                PeerIsSignedFrontierBodySource(nodeid, *state) &&
+                preferred_sources <= 1};
+            if (!keep_only_source) {
+                state->m_block_download_paused_until =
+                    now + BLOCK_DOWNLOAD_TIMEOUT_REREQUEST_COOLDOWN;
+            }
         }
     }
     ReconcileBlockDownloadAccounting("inflight-reclaim");
@@ -4047,7 +4106,7 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
         count = CATCHUP_BLOCKS_IN_TRANSIT_PER_PEER;
     }
     const auto rerequest_stale_after = catch_up
-        ? std::chrono::duration_cast<std::chrono::microseconds>(BLOCK_CATCHUP_DOWNLOAD_TIMEOUT)
+        ? CatchUpDownloadTimeoutForPeer(peer.m_id, *state)
         : std::chrono::duration_cast<std::chrono::microseconds>(BLOCK_REREQUEST_STALE_AFTER);
     const size_t min_parallel_owners{catch_up ? CATCHUP_MIN_PARALLEL_OWNERS : size_t{1}};
     const ChainRecoveryState recovery{m_chainman.GetChainRecoveryState()};
@@ -4085,6 +4144,17 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
                 static_cast<int>(state->vBlocksInFlight.size()),
                 oldest_inflight_age_s);
     };
+
+    // Live 2026-08-16: signed-frontier HEADER_ONLY catch-up filled 16 getdata
+    // slots from CONSENSUS miners who only had headers, then disconnected the
+    // only download peer at 15s. Prefer archive/mirror/manual sources.
+    if (node::matmul_trusted::SkipNonPreferredSignedFrontierBodyPeer(
+            IsSignedFrontierBodyCatchUp(),
+            PeerIsSignedFrontierBodySource(peer.m_id, *state, &peer),
+            CountSignedFrontierBodySources() > 0)) {
+        log_skip("signed_frontier_prefer_archive");
+        return;
+    }
 
     // Trusted mirrors download along the active tip's chain by default.
     // Competing forks from peers that are neither attestation-authority nor
@@ -7530,6 +7600,12 @@ void PeerManagerImpl::HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, c
     if (nodestate == nullptr || GetTime<std::chrono::microseconds>() < nodestate->m_block_download_paused_until) {
         return;
     }
+    if (node::matmul_trusted::SkipNonPreferredSignedFrontierBodyPeer(
+            IsSignedFrontierBodyCatchUp(),
+            PeerIsSignedFrontierBodySource(pfrom.GetId(), *nodestate, &peer),
+            CountSignedFrontierBodySources() > 0)) {
+        return;
+    }
 
     // Trusted mirrors never direct-fetch an ordinary competing fork that is
     // not the followed best-header chain; those bodies are unattestable and
@@ -8038,6 +8114,69 @@ bool PeerManagerImpl::IsTrustedMirrorAuthorityPeer(
             it->second.replay_authority_context == *authority_context);
 }
 
+bool PeerManagerImpl::IsSignedFrontierBodyCatchUp() const
+{
+    AssertLockHeld(cs_main);
+    const auto frontier{m_chainman.GetSignedFrontierStatus()};
+    return node::matmul_trusted::IsSignedFrontierCatchUp(
+        node::matmul_trusted::IsTrustedMirror(),
+        node::matmul_trusted::IsConfigured(),
+        frontier.blocks_behind, FollowedChainAhead(m_chainman),
+        BLOCK_FETCH_STALL_HEADERS_AHEAD);
+}
+
+bool PeerManagerImpl::PeerIsSignedFrontierBodySource(
+    NodeId peer_id, const CNodeState& state, const Peer* peer) const
+{
+    AssertLockHeld(cs_main);
+    const ServiceFlags services{
+        peer != nullptr ? peer->m_their_services.load() : NODE_NONE};
+    const bool archive{
+        state.m_matmul_attestation_archive ||
+        (services & NODE_MATMUL_ATTESTATION_ARCHIVE) ==
+            NODE_MATMUL_ATTESTATION_ARCHIVE};
+    const bool mirror{
+        state.m_matmul_trusted_mirror ||
+        (services & NODE_MATMUL_TRUSTED_MIRROR) == NODE_MATMUL_TRUSTED_MIRROR};
+    const bool network{
+        state.m_node_network ||
+        (services & NODE_NETWORK) == NODE_NETWORK};
+    bool recent_valid{false};
+    if (const auto it{m_matmul_attestation_peer_success.find(peer_id)};
+        it != m_matmul_attestation_peer_success.end()) {
+        const auto now{GetTime<std::chrono::microseconds>()};
+        recent_valid = now >= it->second.seen_at &&
+                       now - it->second.seen_at <= MATMUL_ATTESTATION_REQUEST_TTL;
+    }
+    return node::matmul_trusted::PreferSignedFrontierCatchUpBlockPeer(
+        /*signed_frontier_catch_up=*/true, archive, mirror, network,
+        recent_valid, state.m_noban || state.m_manual);
+}
+
+int PeerManagerImpl::CountSignedFrontierBodySources() const
+{
+    AssertLockHeld(cs_main);
+    int n{0};
+    for (const auto& [id, state] : m_node_states) {
+        if (PeerIsSignedFrontierBodySource(id, state)) ++n;
+    }
+    return n;
+}
+
+std::chrono::microseconds PeerManagerImpl::CatchUpDownloadTimeoutForPeer(
+    NodeId peer_id, const CNodeState& state) const
+{
+    AssertLockHeld(cs_main);
+    if (IsSignedFrontierBodyCatchUp() &&
+        PeerIsSignedFrontierBodySource(peer_id, state)) {
+        return std::chrono::duration_cast<std::chrono::microseconds>(
+            node::matmul_trusted::SignedFrontierPreferredCatchUpTimeout(
+                node::matmul_trusted::WaitTimeout()));
+    }
+    return std::chrono::duration_cast<std::chrono::microseconds>(
+        BLOCK_CATCHUP_DOWNLOAD_TIMEOUT);
+}
+
 void PeerManagerImpl::MaybeFollowTrustedMirrorAuthorityHeader(
     NodeId peer_id, ServiceFlags services, const CBlockIndex& header)
 {
@@ -8421,8 +8560,10 @@ void PeerManagerImpl::RequestMatMulTrustedAttestations(
     std::vector<NodeId> prefer_peers;
     bool request{false};
     bool asked_preferred_round{false};
+    bool signed_frontier_catch_up{false};
     {
         LOCK(cs_main);
+        signed_frontier_catch_up = IsSignedFrontierBodyCatchUp();
         const auto now{GetTime<std::chrono::microseconds>()};
         const CBlockIndex* tip{m_chainman.ActiveTip()};
         const int32_t tip_height{tip ? tip->nHeight : -1};
@@ -8681,7 +8822,8 @@ void PeerManagerImpl::RequestMatMulTrustedAttestations(
         const bool consensus_node{
             (services & NODE_MATMUL_CONSENSUS) == NODE_MATMUL_CONSENSUS};
         if (!node::matmul_trusted::PreferGetMmAttestPeer(
-                archive, recent_success, trusted_mirror, consensus_node)) {
+                archive, recent_success, trusted_mirror, consensus_node,
+                signed_frontier_catch_up)) {
             return;
         }
         MakeAndPushMessage(*target, NetMsgType::GETMMATTEST, hash);
@@ -11977,6 +12119,11 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             state->m_matmul_attestation_archive =
                 (nServices & NODE_MATMUL_ATTESTATION_ARCHIVE) ==
                 NODE_MATMUL_ATTESTATION_ARCHIVE;
+            state->m_matmul_trusted_mirror =
+                (nServices & NODE_MATMUL_TRUSTED_MIRROR) ==
+                NODE_MATMUL_TRUSTED_MIRROR;
+            state->m_node_network =
+                (nServices & NODE_NETWORK) == NODE_NETWORK;
             m_num_preferred_download_peers += state->fPreferredDownload;
 
             if (require_matmul_consensus && base_preferred && !state->fPreferredDownload) {
@@ -16884,9 +17031,7 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
             const bool catch_up{IsCatchUpBlockFetch(m_chainman, state.pindexBestKnownBlock)};
             if (catch_up) {
                 download_timeout = std::min(
-                    download_timeout,
-                    std::chrono::duration_cast<std::chrono::microseconds>(
-                        BLOCK_CATCHUP_DOWNLOAD_TIMEOUT));
+                    download_timeout, CatchUpDownloadTimeoutForPeer(pto->GetId(), state));
             }
             // Time the head of the queue from when *it* was requested, not from
             // the peer-wide m_downloading_since. m_downloading_since only moves
@@ -16938,13 +17083,24 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                 const bool can_rerequest_elsewhere = peers_downloading_before > 1;
                 const bool persistent_timeout =
                     state.m_block_download_timeout_count >= BLOCK_DOWNLOAD_TIMEOUT_DISCONNECT_AFTER;
-                if (can_rerequest_elsewhere && !persistent_timeout) {
-                    state.m_block_download_paused_until =
-                        current_time + BLOCK_DOWNLOAD_TIMEOUT_REREQUEST_COOLDOWN;
+                const bool keep_frontier_source{
+                    IsSignedFrontierBodyCatchUp() &&
+                    PeerIsSignedFrontierBodySource(pto->GetId(), state, peer.get()) &&
+                    !persistent_timeout};
+                if ((can_rerequest_elsewhere && !persistent_timeout) ||
+                    keep_frontier_source) {
+                    const bool only_source{
+                        keep_frontier_source &&
+                        CountSignedFrontierBodySources() <= 1};
+                    if (!only_source) {
+                        state.m_block_download_paused_until =
+                            current_time + BLOCK_DOWNLOAD_TIMEOUT_REREQUEST_COOLDOWN;
+                    }
                     LogInfo("Timeout downloading block %s (in flight %ds) from peer=%d; "
-                            "releasing for re-request (other download peers=%d, consecutive_timeouts=%d)\n",
+                            "releasing for re-request (other download peers=%d, consecutive_timeouts=%d%s)\n",
                             stuck_hash.ToString(), inflight_secs, pto->GetId(),
-                            peers_downloading_before - 1, state.m_block_download_timeout_count);
+                            peers_downloading_before - 1, state.m_block_download_timeout_count,
+                            keep_frontier_source ? ", keep_frontier_source" : "");
                     // Continue SendMessages so this pass can still allocate
                     // getdata to other peers; do not disconnect.
                 } else {

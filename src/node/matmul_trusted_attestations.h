@@ -301,11 +301,17 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
  *  or heavier unattested fork) is recovered by
  *  FindUniqueCompetingAttestedIndex, not by this gate.
  *
- *  When the signed frontier is off the active chain, do not keep
- *  selecting unattested tip-children: that is the archive crawl that
- *  walked 190333→190346 while attested bodies sat HEADER_ONLY. FindUnique
- *  + getdata of the signed-frontier path recover; this gate must stop
- *  the unattested walk. */
+ *  When the signed frontier is on a competing fork (the active tip does
+ *  not lead to any stored frontier hash), do not keep selecting unattested
+ *  tip-children: that is the archive crawl that walked 190333→190346
+ *  while attested bodies sat HEADER_ONLY. FindUnique + getdata of the
+ *  signed-frontier path recover; this gate must stop the unattested walk.
+ *
+ *  Being *behind* the frontier on the same chain (tip height < frontier
+ *  height, on_active_chain=false as a diagnostic) is catch-up, not a
+ *  competing fork. Live 2026-08-16 miners: that diagnostic was used as
+ *  this gate, TryAdd refused the HEADER_ONLY tip-child, and FMWC spun on
+ *  the 274-block 190333 headers-only tower. */
 [[nodiscard]] inline bool TrustedMirrorMaySelectMostWorkCandidate(
     bool extends_active_tip_chain,
     bool short_tip_reorg,
@@ -314,9 +320,9 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
     bool immediate_tip_child = true,
     bool would_abandon_attested = false,
     bool competing_attested_height = false,
-    bool signed_frontier_off_active_chain = false)
+    bool signed_frontier_on_competing_fork = false)
 {
-    if (signed_frontier_off_active_chain && !has_quorum) return false;
+    if (signed_frontier_on_competing_fork && !has_quorum) return false;
     if (would_abandon_attested && !has_quorum) return false;
     if (competing_attested_height && !has_quorum) return false;
     if (extends_active_tip_chain) {
@@ -446,10 +452,123 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
     bool has_attestation_archive_bit,
     bool recent_valid_mmattest,
     bool trusted_mirror = false,
-    bool consensus_node = false)
+    bool consensus_node = false,
+    bool signed_frontier_catch_up = false)
 {
-    return has_attestation_archive_bit || recent_valid_mmattest ||
-           trusted_mirror || consensus_node;
+    if (has_attestation_archive_bit || recent_valid_mmattest ||
+        trusted_mirror) {
+        return true;
+    }
+    // Live 2026-08-16: trusted-mirror archives sprayed GETMMATTEST at every
+    // NODE_MATMUL_CONSENSUS miner while catching up a HEADER_ONLY suffix.
+    // Those peers have no store (0 replies) and must not occupy miss-backoff
+    // while an archive / signer is the body+attestation source.
+    if (signed_frontier_catch_up) return false;
+    return consensus_node;
+}
+
+/** Trusted mirror catching up a followed HEADER_ONLY suffix to a known
+ *  signed frontier. Not assumeutxo / unattested IBD: those keep the wide
+ *  16-slot window. Live 2026-08-16: ahead≥32 AND 15s catch-up timeout
+ *  filled 16 getdatas from miners who only had headers. */
+[[nodiscard]] inline bool IsSignedFrontierCatchUp(
+    bool trusted_mirror,
+    bool configured,
+    int32_t blocks_behind,
+    int followed_ahead,
+    int stall_headers_ahead = 2)
+{
+    return trusted_mirror && configured &&
+           blocks_behind >= stall_headers_ahead &&
+           followed_ahead >= stall_headers_ahead;
+}
+
+/** How far catch-up may treat the followed header chain as "ahead".
+ *
+ *  Raw tip-extending m_best_header height is the wrong number once a
+ *  signed frontier exists: collapsed difficulty lets miners stack
+ *  unattested HEADER_ONLY children on the attested tip (live signer
+ *  2026-08-16: tip=190617 frontier=190617, m_best_header=190630). That
+ *  kept IsCatchUpBlockFetch / MaybeRecoverStalledBlockFetch in a
+ *  permanent stall (in_flight=0, no_missing_body) and pegged b-msghand
+ *  so the signer could neither mine nor serve bodies.
+ *
+ *  Cap at the signed frontier. A competing fork (tip does not lead to
+ *  the frontier) is not catch-up — FindUnique handles rejoin. */
+[[nodiscard]] inline int CappedFollowedCatchUpAhead(
+    bool configured,
+    bool frontier_available,
+    int tip_height,
+    int followed_header_height,
+    int signed_frontier_height,
+    bool tip_leads_to_frontier)
+{
+    const int raw{std::max(0, followed_header_height - tip_height)};
+    if (!configured || !frontier_available) return raw;
+    if (!tip_leads_to_frontier) return 0;
+    return std::max(0, std::min(followed_header_height, signed_frontier_height) -
+                           tip_height);
+}
+
+/** 1-wide inflight during signed-frontier catch-up even when ahead≥32.
+ *  Unattested/assumeutxo stays: ahead≥2 && ahead<32; IBD is always wide. */
+[[nodiscard]] inline bool IsNarrowCatchUpWindowForPolicy(
+    bool ibd,
+    int ahead,
+    bool signed_frontier_catch_up,
+    int stall_headers_ahead = 2,
+    int narrow_max_ahead = 32)
+{
+    if (ibd) return false;
+    if (ahead < stall_headers_ahead) return false;
+    if (signed_frontier_catch_up) return true;
+    return ahead < narrow_max_ahead;
+}
+
+/** Who may take getdata during signed-frontier catch-up.
+ *  CONSENSUS-only miners gossip HEADER_ONLY — not body sources.
+ *  Manual/noban (connect= signer) and ARCHIVE+NETWORK / MIRROR+NETWORK
+ *  qualify. When signed_frontier_catch_up is false this is not a gate. */
+[[nodiscard]] inline bool PreferSignedFrontierCatchUpBlockPeer(
+    bool signed_frontier_catch_up,
+    bool has_archive_bit,
+    bool trusted_mirror_peer,
+    bool node_network,
+    bool recent_valid_mmattest,
+    bool manual_or_noban)
+{
+    if (!signed_frontier_catch_up) return true;
+    if (manual_or_noban) return true;
+    if (!node_network) return false;
+    return has_archive_bit || trusted_mirror_peer || recent_valid_mmattest;
+}
+
+/** Skip a non-preferred peer for signed-frontier bodies when at least one
+ *  preferred source is connected. If none are connected, fall back so
+ *  catch-up cannot deadlock on exclusive-connect after a disconnect. */
+[[nodiscard]] inline bool SkipNonPreferredSignedFrontierBodyPeer(
+    bool signed_frontier_catch_up,
+    bool this_peer_preferred,
+    bool any_preferred_peer_connected)
+{
+    return signed_frontier_catch_up && !this_peer_preferred &&
+           any_preferred_peer_connected;
+}
+
+/** Download timeout for a preferred archive/manual source during
+ *  signed-frontier catch-up. Must exceed default -matmultrustedwaitms
+ *  (60s) plus a margin: a busy signer/archive holding cs_main for
+ *  ExactReplay cannot serve getdata in the generic 15s catch-up window.
+ *  Miners keep 15s (they should not receive these slots). */
+[[nodiscard]] inline std::chrono::seconds SignedFrontierPreferredCatchUpTimeout(
+    std::chrono::milliseconds wait_timeout)
+{
+    const auto wait_s{
+        std::chrono::duration_cast<std::chrono::seconds>(wait_timeout)};
+    constexpr auto kMin{std::chrono::seconds{15}};
+    constexpr auto kMargin{std::chrono::seconds{30}};
+    if (wait_s < kMin) return kMin;
+    return wait_s + kMargin;
 }
 
 struct AttestedFrontierHint {

@@ -2282,6 +2282,162 @@ BOOST_AUTO_TEST_CASE(long_catchup_uses_wide_download_window)
     peerman.ResetMatMulVerifyAdmissionForTest();
 }
 
+// Live 2026-08-16: trusted-mirror archives 34–59 behind the signed frontier
+// filled 16 getdatas from CONSENSUS miners (HEADER_ONLY gossip), timed out
+// at 15s, and disconnected the only download peer. Prefer the archive peer
+// and keep the 1-wide window even when ahead ≥ 32.
+BOOST_AUTO_TEST_CASE(signed_frontier_catchup_prefers_archive_not_miner)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+
+    node::matmul_trusted::ResetForTest();
+    ResetSharedPeermanFixture(m_node);
+    CKey signer;
+    signer.MakeNewKey(/*fCompressed=*/true);
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256::FromHex(std::string(64, '1')).value();
+    config.replay_authority_context =
+        uint256::FromHex(std::string(64, '2')).value();
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    config.local_signer = signer;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/true, /*serve=*/false,
+        std::chrono::milliseconds{50}, error));
+    BOOST_REQUIRE(node::matmul_trusted::IsTrustedMirror());
+    struct MirrorReset {
+        ~MirrorReset() { node::matmul_trusted::ResetForTest(); }
+    } mirror_reset;
+
+    ChainstateManager& chainman{*Assert(m_node.chainman)};
+    PeerManager& peerman{*Assert(m_node.peerman)};
+    ConnmanTestMsg& connman{static_cast<ConnmanTestMsg&>(*m_node.connman)};
+    const CBlockIndex* starting_tip{
+        WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip())};
+    BOOST_REQUIRE(starting_tip != nullptr);
+    SetMockTime(std::chrono::seconds{starting_tip->GetBlockTime() + 3600});
+    BOOST_REQUIRE(!chainman.IsInitialBlockDownload());
+
+    const uint256 tip_hash{starting_tip->GetBlockHash()};
+    const int32_t tip_height{starting_tip->nHeight};
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(tip_hash, tip_height) ==
+                  matmul::trusted::AddResult::Accepted);
+
+    auto make_header = [&](const CBlockIndex& prev, unsigned int tag) {
+        CBlock block;
+        block.SetNull();
+        block.hashPrevBlock = prev.GetBlockHash();
+        block.hashMerkleRoot = uint256::FromHex(
+            std::string(60, '0') + strprintf("%04x", tag)).value();
+        block.nTime = prev.GetBlockTime() + 1;
+        block.nBits = prev.nBits;
+        block.nVersion = VERSIONBITS_TOP_BITS;
+        BOOST_REQUIRE(MineHeaderForConsensus(
+            block, prev.nHeight + 1, chainman.GetConsensus(), 5'000'000,
+            prev.GetMedianTimePast()));
+        BlockValidationState state;
+        const CBlockHeader header{block.GetBlockHeader()};
+        BOOST_REQUIRE_MESSAGE(chainman.ProcessNewBlockHeaders(
+            {{header}}, /*min_pow_checked=*/true, state), state.ToString());
+        CBlockIndex* index{WITH_LOCK(
+            ::cs_main,
+            return chainman.m_blockman.LookupBlockIndex(block.GetHash()))};
+        BOOST_REQUIRE(index != nullptr);
+        return index;
+    };
+
+    const CBlockIndex* tip{
+        WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip())};
+    std::vector<CBlockIndex*> headers;
+    const CBlockIndex* walk{tip};
+    constexpr int kAhead = 33;
+    for (int i = 0; i < kAhead; ++i) {
+        CBlockIndex* nxt{make_header(*walk, 0xf00u + static_cast<unsigned int>(i))};
+        headers.push_back(nxt);
+        walk = nxt;
+    }
+    BOOST_REQUIRE_EQUAL(headers.size(), static_cast<size_t>(kAhead));
+    node::matmul_trusted::NoteAcceptedAttestationHeight(
+        headers.back()->nHeight, headers.back()->GetBlockHash());
+    {
+        LOCK(::cs_main);
+        const auto frontier{chainman.GetSignedFrontierStatus()};
+        BOOST_REQUIRE(frontier.available);
+        BOOST_CHECK_GE(frontier.blocks_behind, 2);
+        BOOST_CHECK_EQUAL(
+            chainman.m_best_header->nHeight, tip->nHeight + kAhead);
+    }
+
+    const ServiceFlags miner_services{ServiceFlags(
+        NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS)};
+    const ServiceFlags archive_services{ServiceFlags(
+        NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_ATTESTATION_ARCHIVE |
+        NODE_MATMUL_TRUSTED_MIRROR)};
+    CNode miner{/*id=*/196, /*sock=*/nullptr, CAddress{},
+                /*nKeyedNetGroupIn=*/0, /*nLocalHostNonceIn=*/0,
+                CAddress{}, /*addrNameIn=*/"frontier-miner",
+                ConnectionType::OUTBOUND_FULL_RELAY,
+                /*inbound_onion=*/false, /*network_key=*/0};
+    CNode archive{/*id=*/197, /*sock=*/nullptr, CAddress{},
+                  /*nKeyedNetGroupIn=*/1, /*nLocalHostNonceIn=*/0,
+                  CAddress{}, /*addrNameIn=*/"frontier-archive",
+                  ConnectionType::OUTBOUND_FULL_RELAY,
+                  /*inbound_onion=*/false, /*network_key=*/0};
+    connman.Handshake(miner, /*successfully_connected=*/true, miner_services,
+                      miner_services, PROTOCOL_VERSION, /*relay_txs=*/true);
+    connman.Handshake(archive, /*successfully_connected=*/true,
+                      archive_services, archive_services, PROTOCOL_VERSION,
+                      /*relay_txs=*/true);
+    connman.FlushSendBuffer(miner);
+    connman.FlushSendBuffer(archive);
+    struct FinalizePeers {
+        PeerManager& peerman;
+        ConnmanTestMsg& connman;
+        CNode& miner;
+        CNode& archive;
+        ~FinalizePeers()
+        {
+            peerman.FinalizeNode(miner);
+            peerman.FinalizeNode(archive);
+            connman.RemoveTestNode(miner);
+            connman.RemoveTestNode(archive);
+        }
+    } finalize{peerman, connman, miner, archive};
+
+    std::vector<CBlock> hdrs;
+    hdrs.reserve(headers.size());
+    {
+        LOCK(::cs_main);
+        for (CBlockIndex* idx : headers) {
+            hdrs.emplace_back(idx->GetBlockHeader());
+        }
+    }
+    BOOST_REQUIRE(connman.ReceiveMsgFrom(
+        miner, NetMsg::Make(NetMsgType::HEADERS, TX_WITH_WITNESS(hdrs))));
+    miner.fPauseSend = false;
+    (void)connman.ProcessMessagesOnce(miner);
+    BOOST_REQUIRE(connman.ReceiveMsgFrom(
+        archive, NetMsg::Make(NetMsgType::HEADERS, TX_WITH_WITNESS(hdrs))));
+    archive.fPauseSend = false;
+    (void)connman.ProcessMessagesOnce(archive);
+
+    BOOST_CHECK(peerman.SendMessages(&miner));
+    CNodeStateStats miner_stats;
+    BOOST_REQUIRE(peerman.GetNodeStateStats(miner.GetId(), miner_stats));
+    BOOST_CHECK(miner_stats.vHeightInFlight.empty());
+    BOOST_CHECK(!HasQueuedMessageType(miner, NetMsgType::GETDATA));
+
+    BOOST_CHECK(peerman.SendMessages(&archive));
+    CNodeStateStats archive_stats;
+    BOOST_REQUIRE(peerman.GetNodeStateStats(archive.GetId(), archive_stats));
+    BOOST_REQUIRE_EQUAL(archive_stats.vHeightInFlight.size(), 1U);
+    BOOST_CHECK_EQUAL(archive_stats.vHeightInFlight.front(), tip->nHeight + 1);
+    BOOST_CHECK(HasQueuedMessageType(archive, NetMsgType::GETDATA));
+    NeutralizeUnconnectedHeaders(chainman);
+    peerman.ResetMatMulVerifyAdmissionForTest();
+}
+
 BOOST_AUTO_TEST_CASE(have_data_unconnected_does_not_issue_descendant_getdata)
 {
     LOCK(NetEventsInterface::g_msgproc_mutex);

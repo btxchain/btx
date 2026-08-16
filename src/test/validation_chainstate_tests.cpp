@@ -1643,6 +1643,14 @@ BOOST_FIXTURE_TEST_CASE(chainstate_trusted_mirror_defers_unattested_twin_for_hea
         // connect it; FindMostWorkChain must not propose it (PR 105
         // comment 5301061876).
         BOOST_CHECK_EQUAL(chainstate.FindMostWorkChainForTest(), parent_tip);
+        BOOST_CHECK(chainman.IndexLeadsToSignedFrontier(parent_tip));
+        BOOST_CHECK(chainman.IndexLeadsToSignedFrontier(attested_index));
+        BOOST_CHECK(!chainman.GetSignedFrontierStatus().on_active_chain);
+        // HEADER_ONLY attested child + unattested HAVE_DATA twin must not
+        // put FMWC into a skip-budget spin (live 2026-08-16 miner wedge).
+        for (int i = 0; i < 64; ++i) {
+            BOOST_CHECK_EQUAL(chainstate.FindMostWorkChainForTest(), parent_tip);
+        }
     }
 
     BlockValidationState state;
@@ -2966,6 +2974,9 @@ BOOST_FIXTURE_TEST_CASE(chainstate_trusted_mirror_rejoins_deep_signed_frontier, 
         BOOST_REQUIRE(node::matmul_trusted::HasQuorum(
             attested_tip->GetBlockHash(), attested_tip->nHeight));
         BOOST_CHECK(!chainman.GetSignedFrontierStatus().on_active_chain);
+        BOOST_CHECK(chainman.IndexLeadsToSignedFrontier(attested_tip));
+        BOOST_CHECK(chainman.IndexLeadsToSignedFrontier(attested.front()));
+        BOOST_CHECK(!chainman.IndexLeadsToSignedFrontier(unattested_tip));
         BOOST_CHECK(chainman.IndexIsOnSignedFrontierChain(attested_tip));
         BOOST_CHECK(chainman.IndexIsOnSignedFrontierChain(attested.front()));
         BOOST_CHECK(!chainman.IndexIsOnSignedFrontierChain(unattested_tip));
@@ -2977,7 +2988,7 @@ BOOST_FIXTURE_TEST_CASE(chainstate_trusted_mirror_rejoins_deep_signed_frontier, 
             /*has_quorum=*/false, /*active_tip_has_quorum=*/false,
             /*immediate_tip_child=*/true, /*would_abandon_attested=*/false,
             /*competing_attested_height=*/false,
-            /*signed_frontier_off_active_chain=*/true));
+            /*signed_frontier_on_competing_fork=*/true));
     }
 
     state = BlockValidationState{};

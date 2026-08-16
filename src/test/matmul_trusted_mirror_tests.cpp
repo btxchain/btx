@@ -732,20 +732,30 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         /*has_quorum=*/false, /*active_tip_has_quorum=*/true,
         /*immediate_tip_child=*/true, /*would_abandon_attested=*/false,
         /*competing_attested_height=*/true));
-    // Off-chain signed frontier: do not crawl unattested tip-children
-    // (live archives 2026-08-16 at 190333–190346).
+    // Off-chain signed frontier (stranded on a competing fork): do not
+    // crawl unattested tip-children (live archives 2026-08-16 at
+    // 190333–190346). Catch-up *behind* the frontier on the same chain
+    // is not this flag.
     BOOST_CHECK(!TrustedMirrorMaySelectMostWorkCandidate(
         /*extends_active_tip_chain=*/true, /*short_tip_reorg=*/false,
         /*has_quorum=*/false, /*active_tip_has_quorum=*/false,
         /*immediate_tip_child=*/true, /*would_abandon_attested=*/false,
         /*competing_attested_height=*/false,
-        /*signed_frontier_off_active_chain=*/true));
+        /*signed_frontier_on_competing_fork=*/true));
     BOOST_CHECK(TrustedMirrorMaySelectMostWorkCandidate(
         /*extends_active_tip_chain=*/true, /*short_tip_reorg=*/false,
         /*has_quorum=*/true, /*active_tip_has_quorum=*/false,
         /*immediate_tip_child=*/false, /*would_abandon_attested=*/false,
         /*competing_attested_height=*/false,
-        /*signed_frontier_off_active_chain=*/true));
+        /*signed_frontier_on_competing_fork=*/true));
+    // Behind the frontier on the attested chain: still select the
+    // unattested HEADER_ONLY tip-child (live miners 2026-08-16).
+    BOOST_CHECK(TrustedMirrorMaySelectMostWorkCandidate(
+        /*extends_active_tip_chain=*/true, /*short_tip_reorg=*/false,
+        /*has_quorum=*/false, /*active_tip_has_quorum=*/true,
+        /*immediate_tip_child=*/true, /*would_abandon_attested=*/false,
+        /*competing_attested_height=*/false,
+        /*signed_frontier_on_competing_fork=*/false));
     using node::matmul_trusted::TrustedMirrorMustDeferUnattestedConnect;
     BOOST_CHECK(TrustedMirrorMustDeferUnattestedConnect(
         /*trusted_mirror_profile1=*/true, /*has_quorum=*/false));
@@ -843,6 +853,101 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(!PreferGetMmAttestPeer(
         /*has_attestation_archive_bit=*/false,
         /*recent_valid_mmattest=*/false));
+    BOOST_CHECK(!PreferGetMmAttestPeer(
+        /*has_attestation_archive_bit=*/false, /*recent_valid_mmattest=*/false,
+        /*trusted_mirror=*/false, /*consensus_node=*/true,
+        /*signed_frontier_catch_up=*/true));
+    BOOST_CHECK(PreferGetMmAttestPeer(
+        /*has_attestation_archive_bit=*/true, /*recent_valid_mmattest=*/false,
+        /*trusted_mirror=*/false, /*consensus_node=*/false,
+        /*signed_frontier_catch_up=*/true));
+    using node::matmul_trusted::IsSignedFrontierCatchUp;
+    BOOST_CHECK(IsSignedFrontierCatchUp(
+        /*trusted_mirror=*/true, /*configured=*/true,
+        /*blocks_behind=*/34, /*followed_ahead=*/36));
+    BOOST_CHECK(!IsSignedFrontierCatchUp(
+        /*trusted_mirror=*/true, /*configured=*/true,
+        /*blocks_behind=*/0, /*followed_ahead=*/36));
+    BOOST_CHECK(!IsSignedFrontierCatchUp(
+        /*trusted_mirror=*/false, /*configured=*/true,
+        /*blocks_behind=*/34, /*followed_ahead=*/36));
+    BOOST_CHECK(!IsSignedFrontierCatchUp(
+        /*trusted_mirror=*/true, /*configured=*/true,
+        /*blocks_behind=*/34, /*followed_ahead=*/1));
+    using node::matmul_trusted::CappedFollowedCatchUpAhead;
+    // Live signer 2026-08-16: 13 unattested HEADER_ONLY children of the
+    // attested tip must not look like a 13-block catch-up hole.
+    BOOST_CHECK_EQUAL(CappedFollowedCatchUpAhead(
+        /*configured=*/true, /*frontier_available=*/true,
+        /*tip_height=*/190617, /*followed_header_height=*/190630,
+        /*signed_frontier_height=*/190617, /*tip_leads_to_frontier=*/true), 0);
+    BOOST_CHECK_EQUAL(CappedFollowedCatchUpAhead(
+        /*configured=*/true, /*frontier_available=*/true,
+        /*tip_height=*/190575, /*followed_header_height=*/190602,
+        /*signed_frontier_height=*/190611, /*tip_leads_to_frontier=*/true), 27);
+    BOOST_CHECK_EQUAL(CappedFollowedCatchUpAhead(
+        /*configured=*/true, /*frontier_available=*/true,
+        /*tip_height=*/190575, /*followed_header_height=*/190630,
+        /*signed_frontier_height=*/190611, /*tip_leads_to_frontier=*/true), 36);
+    BOOST_CHECK_EQUAL(CappedFollowedCatchUpAhead(
+        /*configured=*/true, /*frontier_available=*/true,
+        /*tip_height=*/190575, /*followed_header_height=*/190630,
+        /*signed_frontier_height=*/190611, /*tip_leads_to_frontier=*/false), 0);
+    BOOST_CHECK_EQUAL(CappedFollowedCatchUpAhead(
+        /*configured=*/false, /*frontier_available=*/false,
+        /*tip_height=*/190617, /*followed_header_height=*/190630,
+        /*signed_frontier_height=*/190617, /*tip_leads_to_frontier=*/true), 13);
+    using node::matmul_trusted::IsNarrowCatchUpWindowForPolicy;
+    BOOST_CHECK(IsNarrowCatchUpWindowForPolicy(
+        /*ibd=*/false, /*ahead=*/40, /*signed_frontier_catch_up=*/true));
+    BOOST_CHECK(!IsNarrowCatchUpWindowForPolicy(
+        /*ibd=*/false, /*ahead=*/32, /*signed_frontier_catch_up=*/false));
+    BOOST_CHECK(!IsNarrowCatchUpWindowForPolicy(
+        /*ibd=*/true, /*ahead=*/40, /*signed_frontier_catch_up=*/true));
+    BOOST_CHECK(IsNarrowCatchUpWindowForPolicy(
+        /*ibd=*/false, /*ahead=*/8, /*signed_frontier_catch_up=*/false));
+    using node::matmul_trusted::PreferSignedFrontierCatchUpBlockPeer;
+    BOOST_CHECK(!PreferSignedFrontierCatchUpBlockPeer(
+        /*signed_frontier_catch_up=*/true, /*has_archive_bit=*/false,
+        /*trusted_mirror_peer=*/false, /*node_network=*/true,
+        /*recent_valid_mmattest=*/false, /*manual_or_noban=*/false));
+    BOOST_CHECK(PreferSignedFrontierCatchUpBlockPeer(
+        /*signed_frontier_catch_up=*/true, /*has_archive_bit=*/true,
+        /*trusted_mirror_peer=*/false, /*node_network=*/true,
+        /*recent_valid_mmattest=*/false, /*manual_or_noban=*/false));
+    BOOST_CHECK(PreferSignedFrontierCatchUpBlockPeer(
+        /*signed_frontier_catch_up=*/true, /*has_archive_bit=*/false,
+        /*trusted_mirror_peer=*/true, /*node_network=*/true,
+        /*recent_valid_mmattest=*/false, /*manual_or_noban=*/false));
+    BOOST_CHECK(!PreferSignedFrontierCatchUpBlockPeer(
+        /*signed_frontier_catch_up=*/true, /*has_archive_bit=*/false,
+        /*trusted_mirror_peer=*/true, /*node_network=*/false,
+        /*recent_valid_mmattest=*/false, /*manual_or_noban=*/false));
+    BOOST_CHECK(PreferSignedFrontierCatchUpBlockPeer(
+        /*signed_frontier_catch_up=*/true, /*has_archive_bit=*/false,
+        /*trusted_mirror_peer=*/false, /*node_network=*/true,
+        /*recent_valid_mmattest=*/false, /*manual_or_noban=*/true));
+    BOOST_CHECK(PreferSignedFrontierCatchUpBlockPeer(
+        /*signed_frontier_catch_up=*/false, /*has_archive_bit=*/false,
+        /*trusted_mirror_peer=*/false, /*node_network=*/true,
+        /*recent_valid_mmattest=*/false, /*manual_or_noban=*/false));
+    using node::matmul_trusted::SkipNonPreferredSignedFrontierBodyPeer;
+    BOOST_CHECK(SkipNonPreferredSignedFrontierBodyPeer(
+        /*signed_frontier_catch_up=*/true, /*this_peer_preferred=*/false,
+        /*any_preferred_peer_connected=*/true));
+    BOOST_CHECK(!SkipNonPreferredSignedFrontierBodyPeer(
+        /*signed_frontier_catch_up=*/true, /*this_peer_preferred=*/false,
+        /*any_preferred_peer_connected=*/false));
+    BOOST_CHECK(!SkipNonPreferredSignedFrontierBodyPeer(
+        /*signed_frontier_catch_up=*/true, /*this_peer_preferred=*/true,
+        /*any_preferred_peer_connected=*/true));
+    using node::matmul_trusted::SignedFrontierPreferredCatchUpTimeout;
+    BOOST_CHECK_EQUAL(
+        SignedFrontierPreferredCatchUpTimeout(std::chrono::milliseconds{60000}).count(),
+        90);
+    BOOST_CHECK_EQUAL(
+        SignedFrontierPreferredCatchUpTimeout(std::chrono::milliseconds{50}).count(),
+        15);
 }
 
 BOOST_AUTO_TEST_CASE(signer_getmmattest_historical_and_hammer_ban)

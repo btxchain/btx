@@ -6824,12 +6824,20 @@ void Chainstate::CheckForkWarningConditions()
         return;
     }
 
+    static const CBlockIndex* logged_invalid{nullptr};
     if (m_chainman.m_best_invalid && m_chainman.m_best_invalid->nChainWork > m_chain.Tip()->nChainWork + (GetBlockProof(*m_chain.Tip()) * 6)) {
-        LogWarning("Found invalid chain more than 6 blocks longer than our best chain. This could be due to database corruption or consensus incompatibility with peers.");
+        // ABC/FMWC can re-enter this every header while a stale invalid
+        // tower (live: 274-block 190333 HEADER_ONLY fork) sits in
+        // m_best_invalid. Log once per invalid tip; warningSet stays armed.
+        if (logged_invalid != m_chainman.m_best_invalid) {
+            LogWarning("Found invalid chain more than 6 blocks longer than our best chain. This could be due to database corruption or consensus incompatibility with peers.");
+            logged_invalid = m_chainman.m_best_invalid;
+        }
         m_chainman.GetNotifications().warningSet(
             kernel::Warning::LARGE_WORK_INVALID_CHAIN,
             _("Warning: Found invalid chain more than 6 blocks longer than our best chain. This could be due to database corruption or consensus incompatibility with peers."));
     } else {
+        logged_invalid = nullptr;
         m_chainman.GetNotifications().warningUnset(kernel::Warning::LARGE_WORK_INVALID_CHAIN);
     }
 }
@@ -9498,8 +9506,12 @@ static bool TrustedMirrorShouldConsiderMostWorkCandidate(
         }
     }
     const auto frontier{chainman.GetSignedFrontierStatus()};
-    const bool signed_frontier_off_chain{
-        frontier.available && !frontier.on_active_chain};
+    // on_active_chain is a "caught up" diagnostic (tip height >= frontier).
+    // Catch-up on the same chain must not be treated as a competing fork:
+    // that refused the HEADER_ONLY tip-child and spun FMWC (live miners
+    // 2026-08-16, 274-block 190333 tower).
+    const bool signed_frontier_on_competing_fork{
+        frontier.available && !chainman.IndexLeadsToSignedFrontier(tip)};
     return node::matmul_trusted::TrustedMirrorMaySelectMostWorkCandidate(
         extends_tip,
         node::matmul_trusted::TrustedMirrorIsShortTipReorg(lca_depth),
@@ -9510,7 +9522,7 @@ static bool TrustedMirrorShouldConsiderMostWorkCandidate(
         would_abandon_attested,
         node::matmul_trusted::HasCompetingQuorum(
             candidate->GetBlockHash(), candidate->nHeight),
-        signed_frontier_off_chain);
+        signed_frontier_on_competing_fork);
 }
 
 CBlockIndex* Chainstate::FindMostWorkChain()
@@ -10780,13 +10792,30 @@ void Chainstate::TryAddBlockIndexCandidate(CBlockIndex* pindex)
     const bool consider{TrustedMirrorShouldConsiderMostWorkCandidate(m_chainman, tip, pindex)};
     if (parked || defer_losing || !consider) {
         if (pindex != nullptr && tip != nullptr && pindex->pprev == tip) {
-            LogWarning("%s: refusing tip-child hash=%s height=%d parked=%s "
-                       "defer_losing_tip=%s consider_most_work=%s\n",
-                       __func__, pindex->GetBlockHash().ToString(),
-                       pindex->nHeight, parked ? "yes" : "no",
-                       defer_losing ? "yes" : "no",
-                       consider ? "yes" : "no");
+            // Live 2026-08-16: HEADER_ONLY tip-child re-announces hit this
+            // every ABC/header and pegged a core. Warn once per hash.
+            static uint256 last_refused{};
+            if (last_refused != pindex->GetBlockHash()) {
+                LogWarning("%s: refusing tip-child hash=%s height=%d parked=%s "
+                           "defer_losing_tip=%s consider_most_work=%s\n",
+                           __func__, pindex->GetBlockHash().ToString(),
+                           pindex->nHeight, parked ? "yes" : "no",
+                           defer_losing ? "yes" : "no",
+                           consider ? "yes" : "no");
+                last_refused = pindex->GetBlockHash();
+            }
         }
+        return;
+    }
+
+    // HEADER_ONLY cannot be connected. Inserting it lets FindMostWorkChain
+    // pick it, hit missing-data, erase, and spin when the net thread
+    // re-TryAdds on every header (live miners 2026-08-16). Getdata first;
+    // ReceivedBlockTransactions re-adds once HAVE_DATA lands.
+    if (pindex != tip &&
+        pindex != m_chainman.GetSnapshotBaseBlock() &&
+        (pindex->nStatus & BLOCK_HAVE_DATA) == 0 &&
+        !pindex->HaveNumChainTxs()) {
         return;
     }
 
@@ -11590,6 +11619,32 @@ bool ChainstateManager::IndexIsOnSignedFrontierChain(const CBlockIndex* index) c
         return frontier->GetAncestor(index->nHeight) == index;
     }
     return index->GetAncestor(frontier->nHeight) == frontier;
+}
+
+bool ChainstateManager::IndexLeadsToSignedFrontier(const CBlockIndex* index) const
+{
+    AssertLockHeld(::cs_main);
+    if (index == nullptr || (index->nStatus & BLOCK_FAILED_MASK) != 0) {
+        return false;
+    }
+    if (!node::matmul_trusted::IsConfigured()) return false;
+    const auto frontier_height{node::matmul_trusted::HighestAttestedHeight()};
+    if (!frontier_height.has_value()) return false;
+    for (const auto& hint : node::matmul_trusted::AttestedFrontierHints()) {
+        if (hint.height != *frontier_height || hint.hash.IsNull()) continue;
+        if (!node::matmul_trusted::HasQuorumInMemory(hint.hash, hint.height)) {
+            continue;
+        }
+        const CBlockIndex* const frontier{
+            m_blockman.LookupBlockIndex(hint.hash)};
+        if (frontier == nullptr) continue;
+        if (index->nHeight <= frontier->nHeight) {
+            if (frontier->GetAncestor(index->nHeight) == index) return true;
+        } else if (index->GetAncestor(frontier->nHeight) == frontier) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool ChainstateManager::ShouldDeferLosingTipExtension(

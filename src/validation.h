@@ -1575,6 +1575,11 @@ public:
      *  persist these bodies even when m_best_header / the active tip sit
      *  on an unattested competing tower. */
     [[nodiscard]] bool IndexIsOnSignedFrontierChain(const CBlockIndex* index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** True when index is an ancestor of, is, or descends from any stored
+     *  quorum hash at HighestAttestedHeight. Unlike
+     *  GetSignedFrontierStatus().on_active_chain, this stays true while
+     *  catching up (tip height < frontier height) on the attested chain. */
+    [[nodiscard]] bool IndexLeadsToSignedFrontier(const CBlockIndex* index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool ShouldDeferLosingTipExtension(const CBlockIndex* candidate) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool IsAutomaticReorgRecoveryCandidate(const CBlockIndex* candidate) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /**
