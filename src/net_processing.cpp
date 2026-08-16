@@ -304,29 +304,6 @@ enum class DupHeaderDisposition : uint8_t {
     Disconnect,
 };
 
-/** Unique next block on the followed (or unique-attested) chain of the live
- *  tip. MMRC-CATCHUP-01: this candidate may bypass per-minute RC rate
- *  counters. Pending-cap, ExactReplay, and competing siblings stay gated. */
-[[nodiscard]] static bool IsAuthenticatedChainProgressCandidate(
-    const ChainstateManager& chainman,
-    const CBlock& block,
-    bool requested) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
-{
-    // `requested` is informational. Selection is the followed tip-child:
-    // competing siblings are never followed, so they keep the 1/min windows.
-    (void)requested;
-    const CBlockIndex* const tip{chainman.ActiveChain().Tip()};
-    if (tip == nullptr || block.hashPrevBlock != tip->GetBlockHash()) {
-        return false;
-    }
-    const CBlockIndex* const index{
-        chainman.m_blockman.LookupBlockIndex(block.GetHash())};
-    if (index == nullptr || (index->nStatus & BLOCK_FAILED_MASK) != 0) {
-        return false;
-    }
-    return chainman.IndexIsFollowedTipChild(tip, index);
-}
-
 /** How far the followed (tip-extending) header chain is ahead of the active
  *  tip. Competing headers-only flood on m_best_header is ignored unless that
  *  header itself extends the tip. `peer_best` is considered only when it too
@@ -3885,6 +3862,44 @@ static uint256 g_configured_claimed_tip_child{};
     }
     g_configured_claimed_tip_child = index->GetBlockHash();
     return true;
+}
+
+/** Unique next block selected for the authenticated live tip.
+ *
+ *  MMRC-CATCHUP-01 normally follows m_best_header. A production node can also
+ *  have m_best_header stranded on a longer invalid/unattested fork while the
+ *  block downloader deliberately walks a different consensus peer's chain
+ *  from the active tip. Requiring IndexIsFollowedTipChild in that state puts
+ *  every retained body back behind the 1/min source window even though the
+ *  accelerator is idle.
+ *
+ *  Permit one requested complete tip-child to claim the progress lane when
+ *  the active parent is already authenticated. The existing claimed-child
+ *  guard keeps siblings rate-limited; it is cleared on ActiveTipChange and a
+ *  failed claimant is replaceable. Header-only speculative work cannot claim
+ *  this fallback because CBlock(header) has no transactions. Pending-cap,
+ *  ExactReplay, ordinary body validation, and chainwork selection are
+ *  unchanged. */
+[[nodiscard]] static bool IsAuthenticatedChainProgressCandidate(
+    const ChainstateManager& chainman,
+    const CBlock& block,
+    bool requested) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    const CBlockIndex* const tip{chainman.ActiveChain().Tip()};
+    if (tip == nullptr || block.hashPrevBlock != tip->GetBlockHash()) {
+        return false;
+    }
+    const CBlockIndex* const index{
+        chainman.m_blockman.LookupBlockIndex(block.GetHash())};
+    if (index == nullptr || (index->nStatus & BLOCK_FAILED_MASK) != 0) {
+        return false;
+    }
+    if (chainman.IndexIsFollowedTipChild(tip, index)) return true;
+    if (!requested || block.vtx.empty() ||
+        tip->nAuthenticatedChainWork != tip->nChainWork) {
+        return false;
+    }
+    return ClaimConfiguredUnattestedTipChildBody(chainman, tip, index);
 }
 
 //! Followed-chain historical hole: ancestor of the active tip or of the

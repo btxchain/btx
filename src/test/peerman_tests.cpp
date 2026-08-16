@@ -3872,6 +3872,19 @@ BOOST_AUTO_TEST_CASE(global_rc_budget_exhaustion_does_not_disconnect_honest_peer
         BOOST_REQUIRE(idx != nullptr);
         BOOST_CHECK_EQUAL(idx->nStatus & BLOCK_HAVE_DATA, 0);
     }
+
+    // Do not leave the blocked ExactReplay worker racing fixture teardown.
+    // The old destructor-only release made this test nondeterministically
+    // mutate the mempool while PeerManagerTestingSetup was checking it.
+    gate.Release();
+    BOOST_REQUIRE(PeermanWaitFor([&] { return gate.running.load() == 0; }));
+    BOOST_REQUIRE(PeermanWaitFor([&] {
+        LOCK(::cs_main);
+        const CBlockIndex* idx{
+            m_node.chainman->m_blockman.LookupBlockIndex(first.GetHash())};
+        return idx != nullptr &&
+               m_node.chainman->ActiveChain().Contains(idx);
+    }));
 }
 
 // EncDr pending-cap miss used to HEADER_ONLY-drop the body and disconnect.
@@ -5051,8 +5064,89 @@ BOOST_AUTO_TEST_CASE(authenticated_chain_progress_lane_does_not_pace_one_per_min
     const CBlockIndex* after_first{
         WITH_LOCK(::cs_main, return m_node.chainman->ActiveChain().Tip())};
     BOOST_REQUIRE(after_first != nullptr);
-    CBlock second{MineTipChild(m_node, *after_first, /*extra_time=*/0)};
-    send_full(occupier, second);
+
+    // Reproduce the production shape that defeated the original progress-lane
+    // test: m_best_header remains on a taller competing fork while root-first
+    // download selects a requested child of the authenticated active tip.
+    CBlock decoy{MineTipChild(m_node, *after_first, /*extra_time=*/0)};
+    CBlock second{MineTipChild(m_node, *after_first, /*extra_time=*/1)};
+    BOOST_REQUIRE(decoy.GetHash() != second.GetHash());
+    std::vector<CBlock> decoy_headers{CBlock{decoy.GetBlockHeader()}};
+    BOOST_REQUIRE(connman.ReceiveMsgFrom(
+        occupier,
+        NetMsg::Make(NetMsgType::HEADERS, TX_WITH_WITNESS(decoy_headers))));
+    occupier.fPauseSend = false;
+    (void)connman.ProcessMessagesOnce(occupier);
+    connman.FlushSendBuffer(occupier);
+    CBlockIndex* decoy_index{WITH_LOCK(::cs_main, {
+        return m_node.chainman->m_blockman.LookupBlockIndex(decoy.GetHash());
+    })};
+    BOOST_REQUIRE(decoy_index != nullptr);
+
+    CBlock decoy_child = node::BlockAssembler{
+        m_node.chainman->ActiveChainstate(), nullptr, {}, m_node}
+                             .CreateNewBlock()
+                             ->block;
+    decoy_child.hashPrevBlock = decoy.GetHash();
+    decoy_child.nTime = decoy.nTime + 1;
+    {
+        CMutableTransaction coinbase{*decoy_child.vtx[0]};
+        coinbase.vin[0].scriptSig =
+            CScript() << (after_first->nHeight + 2) << OP_0;
+        decoy_child.vtx[0] = MakeTransactionRef(coinbase);
+    }
+    decoy_child.hashMerkleRoot = BlockMerkleRoot(decoy_child);
+    BOOST_REQUIRE(MineHeaderForConsensus(
+        decoy_child, after_first->nHeight + 2,
+        m_node.chainman->GetConsensus(), 5'000'000,
+        decoy_index->GetMedianTimePast()));
+    std::vector<CBlock> decoy_child_headers{
+        CBlock{decoy_child.GetBlockHeader()}};
+    BOOST_REQUIRE(connman.ReceiveMsgFrom(
+        occupier,
+        NetMsg::Make(NetMsgType::HEADERS,
+                     TX_WITH_WITNESS(decoy_child_headers))));
+    occupier.fPauseSend = false;
+    (void)connman.ProcessMessagesOnce(occupier);
+    connman.FlushSendBuffer(occupier);
+    CBlockIndex* decoy_child_index{WITH_LOCK(::cs_main, {
+        return m_node.chainman->m_blockman.LookupBlockIndex(
+            decoy_child.GetHash());
+    })};
+    BOOST_REQUIRE(decoy_child_index != nullptr);
+    {
+        LOCK(::cs_main);
+        m_node.chainman->SetBestHeader(decoy_child_index);
+        BOOST_REQUIRE(!m_node.chainman->ActiveChain().Contains(decoy_child_index));
+    }
+
+    const auto second_ticket{
+        GrindTicket(second.GetBlockHeader(), consensus.powLimit)};
+    std::vector<CBlock> second_headers{CBlock{second.GetBlockHeader()}};
+    BOOST_REQUIRE(connman.ReceiveMsgFrom(
+        occupier,
+        NetMsg::Make(NetMsgType::HEADERS, TX_WITH_WITNESS(second_headers))));
+    occupier.fPauseSend = false;
+    (void)connman.ProcessMessagesOnce(occupier);
+    {
+        LOCK(::cs_main);
+        const CBlockIndex* second_index{
+            m_node.chainman->m_blockman.LookupBlockIndex(second.GetHash())};
+        BOOST_REQUIRE(second_index != nullptr);
+        BOOST_REQUIRE(!m_node.chainman->IndexIsFollowedTipChild(
+            after_first, second_index));
+    }
+    connman.FlushSendBuffer(occupier);
+    BOOST_REQUIRE(connman.ReceiveMsgFrom(
+        occupier, NetMsg::Make(NetMsgType::RCADMIT, second_ticket)));
+    occupier.fPauseSend = false;
+    (void)connman.ProcessMessagesOnce(occupier);
+    connman.FlushSendBuffer(occupier);
+    BOOST_REQUIRE(connman.ReceiveMsgFrom(
+        occupier, NetMsg::Make(NetMsgType::BLOCK, TX_WITH_WITNESS(second))));
+    occupier.fPauseSend = false;
+    (void)connman.ProcessMessagesOnce(occupier);
+    connman.FlushSendBuffer(occupier);
     const uint256 second_hash{second.GetHash()};
     BOOST_REQUIRE(PeermanWaitFor([&] {
         LOCK(::cs_main);
