@@ -2852,6 +2852,12 @@ void PeerManagerImpl::RefreshMatMulDeferredBodyRetry(
     const CBlockIndex* index)
     EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
+[[nodiscard]] static bool ClaimConfiguredUnattestedTipChildBody(
+    const ChainstateManager& chainman,
+    const CBlockIndex* tip,
+    const CBlockIndex* index)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
 void PeerManagerImpl::RetryMatMulDeferredBodies()
 {
     AssertLockNotHeld(cs_main);
@@ -2986,6 +2992,103 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
         }
     }
 
+    // A requested catch-up batch can persist successors while the cap-one RC
+    // worker validates its root. After that root activates, the next body is
+    // already HAVE_DATA, so ordinary block download skips it. The historical
+    // reverify selector above normally recovers the child through
+    // m_best_header / an attested frontier, but production can leave
+    // m_best_header on a taller invalid or unattested fork. Seed the ordinary
+    // retained-body admission path from the best chain advertised by a live
+    // peer instead. This keeps all of its existing source accounting, pending
+    // cap, full-body checks and async worker handling.
+    if (!node::matmul_trusted::IsTrustedMirror() &&
+        !node::matmul_trusted::HasLocalSigner() &&
+        m_chainman.GetMatMulValidationMode() ==
+            kernel::MatMulValidationMode::CONSENSUS) {
+        std::shared_ptr<CBlock> progress_block;
+        NodeId progress_source{-1};
+        int32_t progress_height{-1};
+        uint32_t progress_work_units{0};
+        bool selected_consensus_source{false};
+        arith_uint256 selected_source_work{};
+        {
+            LOCK(cs_main);
+            const CBlockIndex* const tip{m_chainman.ActiveTip()};
+            const CBlockIndex* selected{nullptr};
+            if (tip != nullptr &&
+                tip->nAuthenticatedChainWork == tip->nChainWork) {
+                for (const auto& [nodeid, state] : m_node_states) {
+                    const CBlockIndex* const best{
+                        state.pindexBestKnownBlock};
+                    if (best == nullptr || best->nHeight <= tip->nHeight ||
+                        best->GetAncestor(tip->nHeight) != tip) {
+                        continue;
+                    }
+                    const CBlockIndex* const child{
+                        best->GetAncestor(tip->nHeight + 1)};
+                    if (child == nullptr || child->pprev != tip ||
+                        (child->nStatus & BLOCK_HAVE_DATA) == 0 ||
+                        (child->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0 ||
+                        (child->nStatus & BLOCK_FAILED_MASK) != 0 ||
+                        m_chainman.ActiveChain().Contains(child) ||
+                        m_chainman.IsOnParkedReorgBranch(child)) {
+                        continue;
+                    }
+                    const PeerRef peer{GetPeerRef(nodeid)};
+                    if (!peer) continue;
+                    const bool consensus_source{
+                        (peer->m_their_services.load() &
+                         NODE_MATMUL_CONSENSUS) != 0};
+                    const bool better{
+                        selected == nullptr ||
+                        (consensus_source && !selected_consensus_source) ||
+                        (consensus_source == selected_consensus_source &&
+                         best->nChainWork > selected_source_work)};
+                    if (!better) continue;
+                    selected = child;
+                    progress_source = nodeid;
+                    selected_consensus_source = consensus_source;
+                    selected_source_work = best->nChainWork;
+                }
+            }
+            if (selected != nullptr &&
+                !IsMatMulAsyncVerificationPending(
+                    selected->GetBlockHash()) &&
+                !m_matmul_block_lifecycle.HasRetainedBody(
+                    selected->GetBlockHash()) &&
+                ClaimConfiguredUnattestedTipChildBody(
+                    m_chainman, tip, selected)) {
+                progress_block = std::make_shared<CBlock>();
+                if (!m_chainman.m_blockman.ReadBlock(
+                        *progress_block, *selected)) {
+                    progress_block.reset();
+                } else {
+                    progress_height = selected->nHeight;
+                    progress_work_units = MatMulRCWorkUnits(
+                        m_chainparams.GetConsensus(), selected->nHeight);
+                }
+            }
+        }
+        if (progress_block) {
+            const std::shared_ptr<CNode> source{
+                m_connman.GetNodeRef(progress_source)};
+            if (source && !source->fDisconnect &&
+                StoreMatMulDeferredBody(
+                    progress_block->GetHash(), progress_block, *source,
+                    /*force_processing=*/true,
+                    /*min_pow_checked=*/true,
+                    /*is_ibd=*/false, progress_height,
+                    progress_work_units,
+                    std::chrono::steady_clock::duration::zero())) {
+                LogInfo(
+                    "Seeded persisted authenticated-tip child for ExactReplay "
+                    "hash=%s height=%d peer=%d consensus_source=%d\n",
+                    progress_block->GetHash().ToString(), progress_height,
+                    progress_source, selected_consensus_source ? 1 : 0);
+            }
+        }
+    }
+
     node::MatMulBlockLifecycle::RetainedBody candidate;
     uint256 candidate_hash;
     // LOCK ORDER: read the tip under cs_main BEFORE taking the store mutex.
@@ -3005,7 +3108,8 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
         m_matmul_pending_verifications.load(std::memory_order_relaxed) == 0 &&
         m_matmul_rc_pending_verifications.load(std::memory_order_relaxed) == 0};
     const auto retry{m_matmul_block_lifecycle.NextRetry(
-        wanted, node::MatMulBlockLifecycle::Clock::now(), idle_catchup)};
+        wanted, node::MatMulBlockLifecycle::Clock::now(),
+        /*ignore_preferred_retry_delay=*/idle_catchup)};
     if (!retry) return;
     candidate_hash = retry->first;
     candidate = retry->second;
@@ -11087,6 +11191,34 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
                 exact_encdr_profile = params.IsMatMulV4Active(exact_reference_height) &&
                     params.GetMatMulProfileParams(exact_reference_height).commitment ==
                         Consensus::MatMulCommitmentScheme::DIGEST_RECOMPUTE;
+
+                // ProcessNewBlock normally treats HAVE_DATA as a stable early
+                // exit. For a persisted consensus catch-up suffix that is
+                // exactly the child of the now-authenticated active tip, that
+                // shortcut would hide the body forever: download already has
+                // it, while authenticated chainwork cannot advance until
+                // ExactReplay does. RetryMatMulDeferredBodies places only one
+                // peer-advertised direct child into the retained lifecycle;
+                // let that requested retry reach the ordinary async classifier.
+                const bool persisted_authenticated_tip_child{
+                    indexed != nullptr &&
+                    (indexed->nStatus & BLOCK_HAVE_DATA) != 0 &&
+                    (indexed->nStatus &
+                     BLOCK_EXACT_REPLAY_VERIFIED) == 0 &&
+                    exact_encdr_profile &&
+                    m_chainman.GetMatMulValidationMode() ==
+                        kernel::MatMulValidationMode::CONSENSUS &&
+                    m_chainparams.GetConsensus()
+                        .IsMatMulTrustedReplayAttestationActive(
+                            exact_reference_height) &&
+                    prev == m_chainman.ActiveTip() &&
+                    prev->nAuthenticatedChainWork == prev->nChainWork &&
+                    m_matmul_block_lifecycle.HasRetainedBody(
+                        block_hash)};
+                if (persisted_authenticated_tip_child) {
+                    acceptance_reaches_contextual = true;
+                    acceptance_stable_early_exit = false;
+                }
 
                 if (acceptance_reaches_contextual) {
                     bool verdict_pinned{false};

@@ -126,7 +126,28 @@ BOOST_AUTO_TEST_CASE(idle_catchup_ignores_retry_cooldown)
     BOOST_REQUIRE(lifecycle.Retain(hash, Body(8, 50, now), now));
     BOOST_REQUIRE(lifecycle.RefreshRetry(hash, 60s, now));
     BOOST_CHECK(!lifecycle.NextRetry(uint256{}, now + 1s).has_value());
-    BOOST_CHECK(lifecycle.NextRetry(uint256{}, now + 1s, /*ignore_retry_delay=*/true).has_value());
+    BOOST_CHECK(lifecycle.NextRetry(
+        uint256{}, now + 1s,
+        /*ignore_preferred_retry_delay=*/true).has_value());
+}
+
+BOOST_AUTO_TEST_CASE(idle_catchup_keeps_nonpreferred_retry_cooldown)
+{
+    node::MatMulBlockLifecycle lifecycle{1, 100, 10min, 10min};
+    const auto now{node::MatMulBlockLifecycle::Clock::now()};
+    const uint256 hash{
+        uint256::FromHex(std::string(63, '0') + "6").value()};
+    const uint256 different_parent{
+        uint256::FromHex(std::string(63, '0') + "7").value()};
+    BOOST_REQUIRE(lifecycle.Retain(hash, Body(9, 50, now), now));
+    BOOST_REQUIRE(lifecycle.RefreshRetry(hash, 60s, now));
+
+    BOOST_CHECK(!lifecycle.NextRetry(
+        different_parent, now + 1s,
+        /*ignore_preferred_retry_delay=*/true).has_value());
+    BOOST_CHECK(lifecycle.NextRetry(
+        different_parent, now + 60s,
+        /*ignore_preferred_retry_delay=*/true).has_value());
 }
 
 BOOST_AUTO_TEST_CASE(capacity_does_not_evict_active_generation)

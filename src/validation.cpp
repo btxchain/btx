@@ -13156,8 +13156,26 @@ ChainstateManager::ClassifyMatMulEncDrRecompute(const CBlock& block,
     // enqueue and thread MTP into the worker Job. CheckMatMulProofOfWork_V4EncDr
     // still fails closed if a Job somehow lacks MTP at seal heights.
     if (const CBlockIndex* existing = m_blockman.LookupBlockIndex(block.GetHash())) {
-        // Already have the data: AcceptBlock short-circuits before the seam.
-        if (existing->nStatus & BLOCK_HAVE_DATA) return std::nullopt;
+        // Usually, already having the data means AcceptBlock short-circuits
+        // before the ENC-DR seam. There is one recovery exception: a
+        // consensus validator may have persisted a requested catch-up suffix
+        // while an earlier ExactReplay occupied the cap-one worker. Once its
+        // parent becomes the authenticated active tip, the direct child must
+        // be replayable from disk. Otherwise HAVE_DATA makes the body
+        // permanently invisible to both block download and normal admission.
+        const bool persisted_authenticated_tip_child{
+            (existing->nStatus & BLOCK_HAVE_DATA) != 0 &&
+            (existing->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) == 0 &&
+            !block.vtx.empty() &&
+            GetMatMulValidationMode() ==
+                kernel::MatMulValidationMode::CONSENSUS &&
+            params.IsMatMulTrustedReplayAttestationActive(nHeight) &&
+            prev == ActiveTip() &&
+            prev->nAuthenticatedChainWork == prev->nChainWork};
+        if ((existing->nStatus & BLOCK_HAVE_DATA) != 0 &&
+            !persisted_authenticated_tip_child) {
+            return std::nullopt;
+        }
         // Known-invalid: AcceptBlockHeader rejects it for free as "duplicate-invalid".
         // A failed block stores no data (BLOCK_HAVE_DATA stays unset), so without this
         // a re-delivered bad block would be enqueued and fully re-recomputed on EVERY

@@ -4754,6 +4754,177 @@ BOOST_AUTO_TEST_CASE(signer_free_consensus_readmits_persisted_have_data_child)
     }
 }
 
+// Live mainnet 2026-08-16: a requested block batch left H+1 HAVE_DATA but
+// without its ExactReplay bit while m_best_header remained on a competing
+// headers-only fork. Download skipped the body because it was already on
+// disk, and the old restart-recovery selector skipped it because it was not
+// below m_best_header. A connected consensus peer advertising that branch
+// must seed the one direct authenticated-tip child back through the normal
+// retained-body/async worker path.
+BOOST_AUTO_TEST_CASE(signer_free_consensus_replays_persisted_peer_child_off_stale_best_header)
+{
+    node::matmul_trusted::ResetForTest();
+    ResetSharedPeermanFixture(m_node);
+    CKey signer;
+    signer.MakeNewKey(/*fCompressed=*/true);
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256::FromHex(std::string(64, '3')).value();
+    config.replay_authority_context =
+        uint256::FromHex(std::string(64, '4')).value();
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/false, /*serve=*/false,
+        std::chrono::milliseconds{50}, error));
+    BOOST_REQUIRE(!node::matmul_trusted::HasLocalSigner());
+    BOOST_REQUIRE(!node::matmul_trusted::IsTrustedMirror());
+    struct VerifierReset {
+        ~VerifierReset() { node::matmul_trusted::ResetForTest(); }
+    } verifier_reset;
+
+    auto& mode = const_cast<kernel::MatMulValidationMode&>(
+        m_node.chainman->m_options.matmul_validation_mode);
+    const auto saved_mode{mode};
+    struct RestoreMode {
+        kernel::MatMulValidationMode& mode;
+        kernel::MatMulValidationMode saved;
+        ~RestoreMode() { mode = saved; }
+    } restore_mode{mode, saved_mode};
+    mode = kernel::MatMulValidationMode::CONSENSUS;
+
+    PeerManager& peerman = *m_node.peerman;
+    peerman.InstallMatMulVerifyOverrideForTest(
+        [&](const CBlock&, int32_t, std::optional<int64_t>) { return true; });
+    struct ClearOverride {
+        PeerManager& peerman;
+        ~ClearOverride() { peerman.InstallMatMulVerifyOverrideForTest({}); }
+    } clear_override{peerman};
+
+    Consensus::Params& consensus = const_cast<Consensus::Params&>(
+        m_node.chainman->GetParams().GetConsensus());
+    auto restore_heights{SaveMatMulHeights(consensus)};
+    ConnmanTestMsg& connman = static_cast<ConnmanTestMsg&>(*m_node.connman);
+
+    const CBlockIndex* parent{
+        WITH_LOCK(::cs_main, return m_node.chainman->ActiveChain().Tip())};
+    BOOST_REQUIRE(parent != nullptr);
+    SetMockTime(std::chrono::seconds{parent->GetBlockTime() + 1});
+    ActivateRcAtTip(consensus, *parent);
+    peerman.SetBestBlock(parent->nHeight,
+                         std::chrono::seconds{parent->GetBlockTime()});
+
+    const ServiceFlags services{ServiceFlags(
+        NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS)};
+    CNode source{/*id=*/408,
+                 /*sock=*/nullptr,
+                 CAddress{PeermanTestService(0x1000007f), NODE_NETWORK},
+                 /*nKeyedNetGroupIn=*/0x10,
+                 /*nLocalHostNonceIn=*/0,
+                 CAddress{},
+                 /*addrNameIn=*/"persisted-progress-source",
+                 ConnectionType::OUTBOUND_FULL_RELAY,
+                 /*inbound_onion=*/false,
+                 /*network_key=*/0};
+    {
+        LOCK(NetEventsInterface::g_msgproc_mutex);
+        connman.Handshake(source, /*successfully_connected=*/true, services,
+                          services, PROTOCOL_VERSION, /*relay_txs=*/true);
+        connman.AddTestNode(source);
+        connman.FlushSendBuffer(source);
+    }
+    struct FinalizeSource {
+        ConnmanTestMsg& connman;
+        PeerManager& peerman;
+        CNode& node;
+        ~FinalizeSource()
+        {
+            peerman.FinalizeNode(node);
+            connman.RemoveTestNode(node);
+        }
+    } finalize{connman, peerman, source};
+
+    CBlock child{MineTipChild(m_node, *parent, /*extra_time=*/0)};
+    const uint256 child_hash{child.GetHash()};
+    const auto ticket{GrindTicket(child.GetBlockHeader(), consensus.powLimit)};
+    {
+        LOCK(NetEventsInterface::g_msgproc_mutex);
+        std::vector<CBlock> headers{CBlock{child.GetBlockHeader()}};
+        BOOST_REQUIRE(connman.ReceiveMsgFrom(
+            source,
+            NetMsg::Make(NetMsgType::HEADERS, TX_WITH_WITNESS(headers))));
+        source.fPauseSend = false;
+        (void)connman.ProcessMessagesOnce(source);
+        connman.FlushSendBuffer(source);
+        BOOST_REQUIRE(connman.ReceiveMsgFrom(
+            source, NetMsg::Make(NetMsgType::RCADMIT, ticket)));
+        source.fPauseSend = false;
+        (void)connman.ProcessMessagesOnce(source);
+        connman.FlushSendBuffer(source);
+        BOOST_REQUIRE(connman.ReceiveMsgFrom(
+            source, NetMsg::Make(NetMsgType::BLOCK, TX_WITH_WITNESS(child))));
+        source.fPauseSend = false;
+        (void)connman.ProcessMessagesOnce(source);
+        connman.FlushSendBuffer(source);
+    }
+    BOOST_REQUIRE(PeermanWaitFor([&] {
+        LOCK(::cs_main);
+        const CBlockIndex* idx{
+            m_node.chainman->m_blockman.LookupBlockIndex(child_hash)};
+        return idx != nullptr && m_node.chainman->ActiveChain().Contains(idx);
+    }));
+
+    CBlockIndex* child_index{WITH_LOCK(::cs_main, {
+        return m_node.chainman->m_blockman.LookupBlockIndex(child_hash);
+    })};
+    BOOST_REQUIRE(child_index != nullptr);
+    BlockValidationState invalidate_state;
+    BOOST_REQUIRE(m_node.chainman->ActiveChainstate().InvalidateBlock(
+        invalidate_state, child_index));
+    peerman.ResetMatMulVerifyAdmissionForTest();
+    {
+        LOCK(::cs_main);
+        m_node.chainman->ActiveChainstate().ResetBlockFailureFlags(child_index);
+        child_index->nStatus &= ~BLOCK_EXACT_REPLAY_VERIFIED;
+        child_index->nStatus =
+            (child_index->nStatus & ~BLOCK_VALID_MASK) |
+            BLOCK_VALID_TRANSACTIONS;
+        child_index->nAuthenticatedChainWork =
+            parent->nAuthenticatedChainWork;
+        BOOST_REQUIRE(child_index->nStatus & BLOCK_HAVE_DATA);
+        BOOST_REQUIRE(!m_node.chainman->ActiveChain().Contains(child_index));
+    }
+
+    CBlock decoy{MineTipChild(m_node, *parent, /*extra_time=*/1)};
+    BlockValidationState header_state;
+    BOOST_REQUIRE(m_node.chainman->ProcessNewBlockHeaders(
+        {{decoy.GetBlockHeader()}}, /*min_pow_checked=*/true, header_state));
+    {
+        LOCK(::cs_main);
+        CBlockIndex* const decoy_index{
+            m_node.chainman->m_blockman.LookupBlockIndex(decoy.GetHash())};
+        BOOST_REQUIRE(decoy_index != nullptr);
+        m_node.chainman->SetBestHeader(decoy_index);
+        BOOST_REQUIRE(!m_node.chainman->IndexIsFollowedTipChild(
+            parent, child_index));
+    }
+
+    SetMockTime(std::chrono::seconds{parent->GetBlockTime() + 120});
+    peerman.RetryMatMulDeferredBodiesForTest();
+    BOOST_REQUIRE(PeermanWaitFor([&] {
+        LOCK(::cs_main);
+        return (child_index->nStatus &
+                BLOCK_EXACT_REPLAY_VERIFIED) != 0 &&
+               m_node.chainman->ActiveChain().Contains(child_index);
+    }));
+    BOOST_CHECK(!peerman.HasMatMulRetainedBodyForTest(child_hash));
+    {
+        LOCK(::cs_main);
+        m_node.chainman->SetBestHeader(
+            const_cast<CBlockIndex*>(m_node.chainman->ActiveTip()));
+    }
+}
+
 // Running stall 5301685574: a hash recorded as HEADER_ONLY competing must
 // still be getdata'd once it is the followed tip-child. Skip sets used to
 // clear only on ActiveTipChange (`root_header_only_skip`). Populate the

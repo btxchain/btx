@@ -216,18 +216,28 @@ public:
     std::optional<std::pair<uint256, RetainedBody>> NextRetry(
         const uint256& preferred_parent,
         Clock::time_point now = Clock::now(),
-        bool ignore_retry_delay = false)
+        bool ignore_preferred_retry_delay = false)
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         PruneExpiredRetained(now);
         auto selected{m_entries.end()};
         for (auto it = m_entries.begin(); it != m_entries.end(); ++it) {
             const Entry& entry{it->second};
-            if (!entry.body || IsActive(entry.state) ||
-                (!ignore_retry_delay && now < entry.body->retry_not_before)) {
+            if (!entry.body || IsActive(entry.state)) {
                 continue;
             }
-            if (entry.body->block->hashPrevBlock == preferred_parent) {
+            const bool preferred{
+                entry.body->block->hashPrevBlock == preferred_parent};
+            // An idle accelerator may promote only the body which can advance
+            // the current active tip. Ignoring every retained deadline made an
+            // unrelated descendant/competing body re-enter admission once per
+            // scheduler tick, even after RefreshRetry moved its deadline out
+            // by a minute.
+            if (now < entry.body->retry_not_before &&
+                !(ignore_preferred_retry_delay && preferred)) {
+                continue;
+            }
+            if (preferred) {
                 selected = it;
                 break;
             }
