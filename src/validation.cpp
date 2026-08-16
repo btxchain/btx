@@ -9527,7 +9527,16 @@ static bool TrustedMirrorShouldConsiderMostWorkCandidate(
     if (lca != nullptr && candidate != tip) {
         for (const CBlockIndex* walk{tip}; walk != nullptr && walk != lca;
              walk = walk->pprev) {
-            if (node::matmul_trusted::HasQuorumInMemory(
+            // Profile-1 attestations cannot exist before the consensus RC
+            // activation height. Stop at that boundary instead of walking
+            // the pre-RC chain once for every candidate during startup.
+            if (walk->nHeight <
+                chainman.GetConsensus().nMatMulRCHeight) {
+                break;
+            }
+            if (chainman.GetConsensus()
+                    .IsMatMulTrustedReplayAttestationActive(walk->nHeight) &&
+                node::matmul_trusted::HasQuorumInMemory(
                     walk->GetBlockHash(), walk->nHeight)) {
                 would_abandon_attested = true;
                 break;
@@ -10843,6 +10852,25 @@ void Chainstate::TryAddBlockIndexCandidate(CBlockIndex* pindex)
 {
     AssertLockHeld(cs_main);
     const CBlockIndex* const tip{m_chain.Tip()};
+
+    // Reject ordinary lower-work candidates before attestation policy walks
+    // tip ancestry. PopulateBlockIndexCandidates visits the complete block
+    // index at startup; applying the expensive gate first made each active
+    // ancestor walk back from the tip, producing quadratic work. A unique
+    // attested abandon-fork target remains the deliberate exception.
+    if (tip != nullptr &&
+        setBlockIndexCandidates.value_comp()(pindex, tip) &&
+        (m_chain.Contains(pindex) ||
+         !m_chainman.GetConsensus()
+              .IsMatMulTrustedReplayAttestationActive(pindex->nHeight) ||
+         !m_chainman.IsAttestedAbandonForkCandidate(pindex))) {
+        if (pindex != nullptr && pindex->pprev == tip) {
+            LogWarning("%s: refusing tip-child hash=%s height=%d less_work_than_tip=yes\n",
+                       __func__, pindex->GetBlockHash().ToString(), pindex->nHeight);
+        }
+        return;
+    }
+
     const bool parked{m_chainman.IsOnParkedReorgBranch(pindex)};
     const bool defer_losing{m_chainman.ShouldDeferLosingTipExtension(pindex)};
     const bool consider{TrustedMirrorShouldConsiderMostWorkCandidate(m_chainman, tip, pindex)};
@@ -10872,20 +10900,6 @@ void Chainstate::TryAddBlockIndexCandidate(CBlockIndex* pindex)
         pindex != m_chainman.GetSnapshotBaseBlock() &&
         (pindex->nStatus & BLOCK_HAVE_DATA) == 0 &&
         !pindex->HaveNumChainTxs()) {
-        return;
-    }
-
-    // The block only is a candidate for the most-work-chain if it has the same
-    // or more work than our current tip. Attested abandon-fork targets are the
-    // exception: they must be selectable while the unattested tip still has
-    // more work.
-    if (tip != nullptr &&
-        setBlockIndexCandidates.value_comp()(pindex, tip) &&
-        !m_chainman.IsAttestedAbandonForkCandidate(pindex)) {
-        if (pindex != nullptr && pindex->pprev == tip) {
-            LogWarning("%s: refusing tip-child hash=%s height=%d less_work_than_tip=yes\n",
-                       __func__, pindex->GetBlockHash().ToString(), pindex->nHeight);
-        }
         return;
     }
 
