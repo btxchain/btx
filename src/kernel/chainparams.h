@@ -159,6 +159,15 @@ public:
         int64_t pow_target_spacing{10 * 60};
     };
 
+    /** Mainnet-local MatMul RC admission policy. These options change only
+     * resource scheduling and DoS limits; they do not change the ExactReplay
+     * predicate, block validity, chainwork, or wire format. */
+    struct MainNetOptions {
+        std::optional<uint32_t> matmul_rc_max_pending_verifications{};
+        std::optional<uint32_t> matmul_rc_global_verify_budget_per_min{};
+        std::optional<uint32_t> matmul_rc_peer_verify_budget_per_min{};
+    };
+
     /**
      * VersionBitsParameters holds activation parameters
      */
@@ -274,6 +283,7 @@ public:
     static std::unique_ptr<const CChainParams> RegTest(const RegTestOptions& options);
     static std::unique_ptr<const CChainParams> SigNet(const SigNetOptions& options);
     static std::unique_ptr<const CChainParams> Main();
+    static std::unique_ptr<const CChainParams> Main(const MainNetOptions& options);
     static std::unique_ptr<const CChainParams> TestNet();
     static std::unique_ptr<const CChainParams> TestNet4();
     static std::unique_ptr<const CChainParams> ShieldedV2Dev();

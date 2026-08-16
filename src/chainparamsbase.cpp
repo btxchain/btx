@@ -14,6 +14,9 @@
 void SetupChainParamsBaseOptions(ArgsManager& argsman)
 {
     argsman.AddArg("-chain=<chain>", "Use the chain <chain> (default: main). Allowed values: " LIST_CHAIN_NAMES, ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
+    argsman.AddArg("-matmulrcmaxpending=<n>", "Set the mainnet MatMul RC pending ExactReplay job cap in [1,16] (default: 1). Local admission policy only; increasing it permits more concurrent untrusted GPU work.", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
+    argsman.AddArg("-matmulrcglobalverifybudgetpermin=<n>", "Set the mainnet MatMul RC global ExactReplay admission budget in [1,64] jobs/minute (default: 1; catch-up scaling still applies). Local admission policy only.", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
+    argsman.AddArg("-matmulrcpeerverifybudgetpermin=<n>", "Set the mainnet MatMul RC per-peer and per-netgroup ExactReplay admission budget in [1,64] jobs/minute (default: 1). Local admission policy only; increasing it permits one source to consume more GPU time.", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);
     argsman.AddArg("-regtest", "Enter regression test mode, which uses a special chain in which blocks can be solved instantly. "
                  "This is intended for regression testing tools and app development. Equivalent to -chain=regtest.", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CHAINPARAMS);
     argsman.AddArg("-shieldedv2dev", "Use the isolated shieldedv2dev development chain. Equivalent to -chain=shieldedv2dev.", ArgsManager::ALLOW_ANY, OptionsCategory::CHAINPARAMS);

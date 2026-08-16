@@ -674,7 +674,7 @@ static CBlock CreateShieldedV2DevGenesisBlock(uint32_t nTime,
  */
 class CMainParams : public CChainParams {
 public:
-    CMainParams() {
+    explicit CMainParams(const MainNetOptions& options) {
         m_chain_type = ChainType::MAIN;
         consensus.signet_blocks = false;
         consensus.signet_challenge.clear();
@@ -770,6 +770,33 @@ public:
         consensus.nMatMulRCHeight = BTX_MATMUL_V47_EPOCH_A_HEIGHT;
         consensus.nMatMulRCAsertRescaleNum = kRCEpochAAsertRescaleNum;
         consensus.nMatMulRCAsertRescaleDen = kRCEpochAAsertRescaleDen;
+        // Operator-tunable admission policy, deliberately separate from the
+        // fixed Epoch-A predicate above. Defaults remain the conservative
+        // 1/1/1 values in Consensus::Params. Raising these fields changes only
+        // how much untrusted ExactReplay work this process admits.
+        if (options.matmul_rc_max_pending_verifications) {
+            consensus.nMatMulRCMaxPendingVerifications =
+                *options.matmul_rc_max_pending_verifications;
+        }
+        if (options.matmul_rc_global_verify_budget_per_min) {
+            consensus.nMatMulRCGlobalVerifyBudgetPerMin =
+                *options.matmul_rc_global_verify_budget_per_min;
+        }
+        if (options.matmul_rc_peer_verify_budget_per_min) {
+            consensus.nMatMulRCPeerVerifyBudgetPerMin =
+                *options.matmul_rc_peer_verify_budget_per_min;
+        }
+        if (options.matmul_rc_max_pending_verifications ||
+            options.matmul_rc_global_verify_budget_per_min ||
+            options.matmul_rc_peer_verify_budget_per_min) {
+            LogWarning(
+                "Mainnet MatMul RC admission policy overridden: "
+                "max_pending=%u global_budget_per_min=%u "
+                "peer_budget_per_min=%u (local policy; consensus predicate unchanged)\n",
+                consensus.nMatMulRCMaxPendingVerifications,
+                consensus.nMatMulRCGlobalVerifyBudgetPerMin,
+                consensus.nMatMulRCPeerVerifyBudgetPerMin);
+        }
         consensus.nMaxReorgDepth = 12;
         consensus.nReorgProtectionStartHeight = 61'000;
         consensus.nEmptyBlockSubsidyPenaltyHeight = BTX_EMPTY_BLOCK_SUBSIDY_PENALTY_HEIGHT;
@@ -2609,7 +2636,12 @@ std::unique_ptr<const CChainParams> CChainParams::RegTest(const RegTestOptions& 
 
 std::unique_ptr<const CChainParams> CChainParams::Main()
 {
-    return std::make_unique<const CMainParams>();
+    return Main(MainNetOptions{});
+}
+
+std::unique_ptr<const CChainParams> CChainParams::Main(const MainNetOptions& options)
+{
+    return std::make_unique<const CMainParams>(options);
 }
 
 std::unique_ptr<const CChainParams> CChainParams::TestNet()

@@ -26,6 +26,9 @@ using util::SplitString;
 
 namespace {
 
+constexpr uint32_t MAX_MAINNET_MATMUL_RC_PENDING{16};
+constexpr uint32_t MAX_MAINNET_MATMUL_RC_BUDGET_PER_MIN{64};
+
 std::optional<std::vector<uint8_t>> ParseFixedHex(std::string_view value, size_t expected_size)
 {
     const auto no_prefix = util::RemovePrefixView(util::RemovePrefixView(value, "0x"), "0X");
@@ -86,6 +89,20 @@ uint32_t ParseRegTestPositiveUInt32Arg(const ArgsManager& args, const std::strin
     return value;
 }
 
+uint32_t ParseBoundedPositiveUInt32Arg(const ArgsManager& args,
+                                       const std::string& arg_name,
+                                       uint32_t maximum)
+{
+    const auto raw = args.GetArg(arg_name, "");
+    uint32_t value{0};
+    if (!ParseUInt32(raw, &value) || value == 0 || value > maximum) {
+        throw std::runtime_error(strprintf(
+            "Invalid %s value (%s): expected integer in [1,%u].",
+            arg_name, raw, maximum));
+    }
+    return value;
+}
+
 CAmount ParseRegTestNonNegativeMoneyArg(const ArgsManager& args, const std::string& arg_name)
 {
     const auto raw = args.GetArg(arg_name, "");
@@ -105,6 +122,27 @@ bool ParseRegTestBoolArg(const ArgsManager& args, const std::string& arg_name)
 }
 
 } // namespace
+
+void ReadMainNetArgs(const ArgsManager& args, CChainParams::MainNetOptions& options)
+{
+    if (args.IsArgSet("-matmulrcmaxpending")) {
+        options.matmul_rc_max_pending_verifications =
+            ParseBoundedPositiveUInt32Arg(
+                args, "-matmulrcmaxpending", MAX_MAINNET_MATMUL_RC_PENDING);
+    }
+    if (args.IsArgSet("-matmulrcglobalverifybudgetpermin")) {
+        options.matmul_rc_global_verify_budget_per_min =
+            ParseBoundedPositiveUInt32Arg(
+                args, "-matmulrcglobalverifybudgetpermin",
+                MAX_MAINNET_MATMUL_RC_BUDGET_PER_MIN);
+    }
+    if (args.IsArgSet("-matmulrcpeerverifybudgetpermin")) {
+        options.matmul_rc_peer_verify_budget_per_min =
+            ParseBoundedPositiveUInt32Arg(
+                args, "-matmulrcpeerverifybudgetpermin",
+                MAX_MAINNET_MATMUL_RC_BUDGET_PER_MIN);
+    }
+}
 
 void ReadSigNetArgs(const ArgsManager& args, CChainParams::SigNetOptions& options)
 {
@@ -490,9 +528,21 @@ const CChainParams &Params() {
 
 std::unique_ptr<const CChainParams> CreateChainParams(const ArgsManager& args, const ChainType chain)
 {
+    const bool mainnet_rc_policy_set{
+        args.IsArgSet("-matmulrcmaxpending") ||
+        args.IsArgSet("-matmulrcglobalverifybudgetpermin") ||
+        args.IsArgSet("-matmulrcpeerverifybudgetpermin")};
+    if (chain != ChainType::MAIN && mainnet_rc_policy_set) {
+        throw std::runtime_error(
+            "-matmulrcmaxpending, -matmulrcglobalverifybudgetpermin, and "
+            "-matmulrcpeerverifybudgetpermin are mainnet-only options.");
+    }
     switch (chain) {
-    case ChainType::MAIN:
-        return CChainParams::Main();
+    case ChainType::MAIN: {
+        auto opts = CChainParams::MainNetOptions{};
+        ReadMainNetArgs(args, opts);
+        return CChainParams::Main(opts);
+    }
     case ChainType::TESTNET:
         return CChainParams::TestNet();
     case ChainType::TESTNET4:

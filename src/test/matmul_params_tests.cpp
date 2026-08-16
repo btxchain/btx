@@ -14,6 +14,9 @@
 #include <boost/test/unit_test.hpp>
 #include <cstdint>
 #include <limits>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace {
 
@@ -47,6 +50,9 @@ BOOST_AUTO_TEST_CASE(matmul_params_defaults_mainnet)
     BOOST_CHECK_EQUAL(c.nMatMulNoiseRank, 8U);
     BOOST_CHECK_EQUAL(c.nMatMulFieldModulus, 0x7FFFFFFFU);
     BOOST_CHECK_EQUAL(c.nMatMulValidationWindow, 1000U);
+    BOOST_CHECK_EQUAL(c.nMatMulRCMaxPendingVerifications, 1U);
+    BOOST_CHECK_EQUAL(c.nMatMulRCGlobalVerifyBudgetPerMin, 1U);
+    BOOST_CHECK_EQUAL(c.nMatMulRCPeerVerifyBudgetPerMin, 1U);
     BOOST_CHECK_EQUAL(c.nMatMulMaxFutureMtpDriftHeight, 118'482);
     BOOST_CHECK_EQUAL(c.nMatMulMaxFutureMtpDrift, 3'600);
     BOOST_CHECK_EQUAL(c.nMatMulTimewarpReconcileHeight, 125'000);
@@ -55,6 +61,35 @@ BOOST_AUTO_TEST_CASE(matmul_params_defaults_mainnet)
     BOOST_CHECK_EQUAL(c.nMatMulNonceSeedHeight, 125'000);
     BOOST_CHECK(!c.IsMatMulNonceSeedActive(124'999));
     BOOST_CHECK(c.IsMatMulNonceSeedActive(125'000));
+}
+
+BOOST_AUTO_TEST_CASE(matmul_rc_mainnet_admission_policy_overrides)
+{
+    ArgsManager args;
+    args.ForceSetArg("-matmulrcmaxpending", "2");
+    args.ForceSetArg("-matmulrcglobalverifybudgetpermin", "7");
+    args.ForceSetArg("-matmulrcpeerverifybudgetpermin", "8");
+
+    const auto params = CreateChainParams(args, ChainType::MAIN);
+    const auto& consensus = params->GetConsensus();
+    BOOST_CHECK_EQUAL(consensus.nMatMulRCMaxPendingVerifications, 2U);
+    BOOST_CHECK_EQUAL(consensus.nMatMulRCGlobalVerifyBudgetPerMin, 7U);
+    BOOST_CHECK_EQUAL(consensus.nMatMulRCPeerVerifyBudgetPerMin, 8U);
+
+    // These are local mainnet admission controls, not alternate-network or
+    // zero/unbounded escape hatches.
+    BOOST_CHECK_THROW(CreateChainParams(args, ChainType::REGTEST), std::runtime_error);
+
+    for (const auto& [name, value] : std::vector<std::pair<std::string, std::string>>{
+             {"-matmulrcmaxpending", "0"},
+             {"-matmulrcmaxpending", "17"},
+             {"-matmulrcglobalverifybudgetpermin", "65"},
+             {"-matmulrcpeerverifybudgetpermin", "invalid"},
+         }) {
+        ArgsManager invalid;
+        invalid.ForceSetArg(name, value);
+        BOOST_CHECK_THROW(CreateChainParams(invalid, ChainType::MAIN), std::runtime_error);
+    }
 }
 
 BOOST_AUTO_TEST_CASE(matmul_product_payload_requirement_matches_live_network_policy)
