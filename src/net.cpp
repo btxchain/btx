@@ -2118,7 +2118,10 @@ void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
                  addr.ToStringAddrPort());
     }
 
-    // Don't accept connections from banned peers.
+    // Don't accept connections from banned peers. Includes addresses
+    // banned for aggressive P2P (GETMMATTEST / MMATTEST hammering):
+    // that penalty is a real ban, not discouragement, so reconnects
+    // are dropped even when inbound slots are free.
     bool banned = m_banman && m_banman->IsBanned(addr);
     if (!NetPermissions::HasFlag(permission_flags, NetPermissionFlags::NoBan) && banned)
     {

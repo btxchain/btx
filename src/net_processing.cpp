@@ -75,6 +75,7 @@
 #include <optional>
 #include <ranges>
 #include <set>
+#include <string_view>
 #include <thread>
 #include <typeinfo>
 #include <utility>
@@ -929,6 +930,10 @@ struct Peer {
     double m_matmul_attestation_inbound_tokens GUARDED_BY(NetEventsInterface::g_msgproc_mutex){
         MATMUL_ATTESTATION_INBOUND_BURST};
     std::chrono::microseconds m_matmul_attestation_last_refill GUARDED_BY(NetEventsInterface::g_msgproc_mutex){0us};
+    /** Consecutive ignored GETMMATTEST / over-budget MMATTEST. Reset on
+     *  a successful serve or accepted mmattest. Aggressive P2P is
+     *  penalized once this hits GETMMATTEST_HAMMER_BAN_AFTER. */
+    int m_matmul_protocol_ignored GUARDED_BY(NetEventsInterface::g_msgproc_mutex){0};
 
     /** WP-8 / H9/H10: per-peer MMSKETCH ingress token bucket (see
      *  MATMUL_SKETCH_RECV_BUCKET_MAX), same lazy-refill idiom as the serve
@@ -1312,6 +1317,13 @@ private:
      * @return                True if the peer was marked for disconnection in this function
      */
     bool MaybeDiscourageAndDisconnect(CNode& pnode, Peer& peer);
+
+    /** Disconnect and 24h-ban a peer that is hammering attestation P2P
+     *  (GETMMATTEST floods, over-budget MMATTEST). Discourage is not
+     *  enough: those peers can reconnect while inbound slots remain.
+     *  noban / manual peers are not banned; local peers disconnect only.
+     *  Aggressive P2P is penalized. */
+    void BanHammeringPeer(CNode& pnode, Peer& peer, std::string_view reason);
 
     /** Handle a transaction whose result was not MempoolAcceptResult::ResultType::VALID.
      * @param[in]   first_time_failure            Whether we should consider inserting into vExtraTxnForCompact, adding
@@ -14656,6 +14668,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         }
 
         int32_t height{-1};
+        int32_t tip_height{-1};
         bool known{false};
         bool failed{false};
         bool profile1{false};
@@ -14682,6 +14695,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             on_active_chain =
                 m_chainman.ActiveChain().Contains(index);
             const CBlockIndex* const tip{m_chainman.ActiveTip()};
+            if (tip != nullptr) tip_height = tip->nHeight;
             const CBlockIndex* const followed{m_chainman.m_best_header};
             const bool on_active_suffix{
                 tip != nullptr && index->nHeight >= tip->nHeight &&
@@ -14739,13 +14753,28 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 "not_canonical", block_hash, height, pfrom.GetId());
             return;
         }
-        // Charge only when we actually push MMATTEST. not_canonical already
-        // returns above without a token; not_validated / empty / reverify
-        // probes used to charge anyway and then rate_limit the attested tip
-        // (live 2026-08-15: GETMMATTEST 0f7920af height=-1 reason=rate_limited
-        // 2s after UpdateTip 189823, after suffix probes during catch-up).
-        // Cached quorum is never refused: the bucket bounds signing work, not
-        // copies of a signature we already have.
+        auto note_ignored = [&](const char* reason) {
+            MaybeLogAttestationServe(
+                reason, block_hash, height, pfrom.GetId());
+            peer->m_matmul_protocol_ignored += 1;
+            if (node::matmul_trusted::AggressiveGetMmAttestShouldBan(
+                    peer->m_matmul_protocol_ignored)) {
+                BanHammeringPeer(pfrom, *peer, "aggressive getmmattest");
+            }
+        };
+        // Local signers do not serve historical GETMMATTEST. Archives do.
+        // Scanning a signer for old hashes is how the live accept-queue
+        // filled; those peers are ignored, then banned.
+        if (!node::matmul_trusted::TrustedSignerMayServeGetMmAttest(
+                node::matmul_trusted::HasLocalSigner(), height, tip_height)) {
+            note_ignored("historical_not_served");
+            return;
+        }
+        // Charge when we actually push MMATTEST. not_canonical /
+        // not_validated / empty / reverify probes do not take a token
+        // (live 2026-08-15: those probes starved the attested-tip serve).
+        // Cached copies still consume a token: unlimited historical
+        // cache hits were the signer GETMMATTEST flood.
         auto push_mmattest =
             [&](std::vector<matmul::trusted::ExactReplayAttestation> attestations,
                 const char* reason) {
@@ -14757,11 +14786,17 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                         "empty", block_hash, height, pfrom.GetId());
                     return;
                 }
+                if (peer->m_matmul_attestation_request_tokens < 1.0) {
+                    note_ignored("rate_limited");
+                    LogDebug(BCLog::NET,
+                             "Ignoring rate-limited getmmattest from peer=%d\n",
+                             pfrom.GetId());
+                    return;
+                }
+                peer->m_matmul_attestation_request_tokens -= 1.0;
                 MakeAndPushMessage(
                     pfrom, NetMsgType::MMATTEST, attestations);
-                if (peer->m_matmul_attestation_request_tokens >= 1.0) {
-                    peer->m_matmul_attestation_request_tokens -= 1.0;
-                }
+                peer->m_matmul_protocol_ignored = 0;
                 MaybeLogAttestationServe(
                     reason, block_hash, height, pfrom.GetId());
             };
@@ -14780,8 +14815,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             // Only sign hashes already on the active chain.
             if (locally_exact && on_active_chain) {
                 if (peer->m_matmul_attestation_request_tokens < 1.0) {
-                    MaybeLogAttestationServe(
-                        "rate_limited", block_hash, height, pfrom.GetId());
+                    note_ignored("rate_limited");
                     LogDebug(BCLog::NET,
                              "Ignoring rate-limited getmmattest from peer=%d\n",
                              pfrom.GetId());
@@ -14880,6 +14914,11 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 BCLog::NET,
                 "Ignoring rate-limited mmattest count=%u peer=%d\n",
                 count, pfrom.GetId());
+            peer->m_matmul_protocol_ignored += 1;
+            if (node::matmul_trusted::AggressiveGetMmAttestShouldBan(
+                    peer->m_matmul_protocol_ignored)) {
+                BanHammeringPeer(pfrom, *peer, "aggressive mmattest");
+            }
             return;
         }
         peer->m_matmul_attestation_inbound_tokens -=
@@ -14913,8 +14952,14 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 "Ignoring mmattest over source verify budget count=%u "
                 "peer=%d netgroup=%u\n",
                 count, pfrom.GetId(), pfrom.nKeyedNetGroup);
+            peer->m_matmul_protocol_ignored += 1;
+            if (node::matmul_trusted::AggressiveGetMmAttestShouldBan(
+                    peer->m_matmul_protocol_ignored)) {
+                BanHammeringPeer(pfrom, *peer, "aggressive mmattest");
+            }
             return;
         }
+        peer->m_matmul_protocol_ignored = 0;
 
         std::vector<matmul::trusted::ExactReplayAttestation>
             received;
@@ -15675,6 +15720,34 @@ bool PeerManagerImpl::MaybeDiscourageAndDisconnect(CNode& pnode, Peer& peer)
     if (m_banman) m_banman->Discourage(pnode.addr);
     m_connman.DisconnectNode(pnode.addr);
     return true;
+}
+
+void PeerManagerImpl::BanHammeringPeer(CNode& pnode, Peer& peer, std::string_view reason)
+{
+    // Aggressive P2P is penalized. Discourage still allows inbound reconnects
+    // while slots remain; GETMMATTEST hammering of a signer filled the
+    // accept queue that way. Ban for the default 24h window.
+    if (pnode.HasPermission(NetPermissionFlags::NoBan)) {
+        LogPrintf("Warning: not banning noban peer %d for %s\n", peer.m_id,
+                  std::string(reason));
+        return;
+    }
+    if (pnode.IsManualConn()) {
+        LogPrintf("Warning: not banning manually connected peer %d for %s\n",
+                  peer.m_id, std::string(reason));
+        return;
+    }
+    LogInfo("Aggressive P2P is penalized: %s, %s\n", std::string(reason),
+            pnode.DisconnectMsg(fLogIPs));
+    if (pnode.addr.IsLocal()) {
+        LogDebug(BCLog::NET,
+                 "Warning: disconnecting but not banning %s peer %d!\n",
+                 pnode.m_inbound_onion ? "inbound onion" : "local", peer.m_id);
+        pnode.fDisconnect = true;
+        return;
+    }
+    if (m_banman) m_banman->Ban(pnode.addr);
+    m_connman.DisconnectNode(pnode.addr);
 }
 
 bool PeerManagerImpl::ProcessMessages(CNode* pfrom, std::atomic<bool>& interruptMsgProc)

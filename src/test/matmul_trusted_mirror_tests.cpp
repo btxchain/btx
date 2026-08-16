@@ -845,6 +845,32 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         /*recent_valid_mmattest=*/false));
 }
 
+BOOST_AUTO_TEST_CASE(signer_getmmattest_historical_and_hammer_ban)
+{
+    using node::matmul_trusted::AggressiveGetMmAttestShouldBan;
+    using node::matmul_trusted::GETMMATTEST_HAMMER_BAN_AFTER;
+    using node::matmul_trusted::SIGNER_GETMMATTEST_SERVE_WINDOW;
+    using node::matmul_trusted::TrustedSignerMayServeGetMmAttest;
+
+    // Archives serve history. Signers serve only the live window.
+    BOOST_CHECK(TrustedSignerMayServeGetMmAttest(
+        /*has_local_signer=*/false, /*height=*/187432, /*tip_height=*/190567));
+    BOOST_CHECK(TrustedSignerMayServeGetMmAttest(true, 190567, 190567));
+    BOOST_CHECK(TrustedSignerMayServeGetMmAttest(
+        true, 190567 - SIGNER_GETMMATTEST_SERVE_WINDOW, 190567));
+    BOOST_CHECK(TrustedSignerMayServeGetMmAttest(
+        true, 190568, 190567)); // catch-up suffix
+    BOOST_CHECK(!TrustedSignerMayServeGetMmAttest(
+        true, 190567 - SIGNER_GETMMATTEST_SERVE_WINDOW - 1, 190567));
+    BOOST_CHECK(!TrustedSignerMayServeGetMmAttest(true, 187432, 190567));
+    BOOST_CHECK(!TrustedSignerMayServeGetMmAttest(true, -1, 190567));
+
+    BOOST_CHECK(!AggressiveGetMmAttestShouldBan(0));
+    BOOST_CHECK(!AggressiveGetMmAttestShouldBan(GETMMATTEST_HAMMER_BAN_AFTER - 1));
+    BOOST_CHECK(AggressiveGetMmAttestShouldBan(GETMMATTEST_HAMMER_BAN_AFTER));
+    BOOST_CHECK(AggressiveGetMmAttestShouldBan(GETMMATTEST_HAMMER_BAN_AFTER + 8));
+}
+
 BOOST_AUTO_TEST_CASE(competing_attested_index_rejects_fossil_depth)
 {
     using node::matmul_trusted::TrustedMirrorMayAdoptCompetingAttestedIndex;

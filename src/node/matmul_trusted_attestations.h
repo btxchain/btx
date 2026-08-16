@@ -174,6 +174,39 @@ static constexpr int TRUSTED_MIRROR_SHORT_REORG_DEPTH{6};
  *  tip is visible on a quiet linear chain (signer typically attests ~1
  *  behind). */
 static constexpr int TRUSTED_MIRROR_ATTESTED_TIP_LOOKBACK{2};
+/** Local signers serve GETMMATTEST only inside this live window (tip-N).
+ *  Historical scans belong on archives. Hammering a signer with old
+ *  hashes is ignored, then banned. */
+static constexpr int SIGNER_GETMMATTEST_SERVE_WINDOW{16};
+/** Consecutive ignored GETMMATTEST (rate-limited serve or historical
+ *  probe on a signer) before the peer is disconnected and banned for
+ *  24h. Aggressive P2P is penalized; a silent drop is not enough
+ *  because the peer can reconnect and keep filling the accept queue. */
+static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
+
+/** Archives serve historical GETMMATTEST. A local signer does not:
+ *  only the live tip window. Height above tip (catch-up suffix) is
+ *  inside the window. */
+[[nodiscard]] inline bool TrustedSignerMayServeGetMmAttest(
+    bool has_local_signer,
+    int32_t height,
+    int32_t tip_height,
+    int serve_window = SIGNER_GETMMATTEST_SERVE_WINDOW)
+{
+    if (!has_local_signer) return true;
+    if (height < 0 || tip_height < 0 || serve_window < 0) return false;
+    return height + serve_window >= tip_height;
+}
+
+/** True once ignored GETMMATTEST / inbound MMATTEST floods reach the
+ *  ban threshold. Callers must Ban (not only Discourage): discouraged
+ *  peers may still reconnect while inbound slots remain. */
+[[nodiscard]] inline bool AggressiveGetMmAttestShouldBan(
+    int consecutive_ignored,
+    int threshold = GETMMATTEST_HAMMER_BAN_AFTER)
+{
+    return consecutive_ignored >= threshold;
+}
 
 /** LCA(tip, candidate) depth in (0, TRUSTED_MIRROR_SHORT_REORG_DEPTH].
  *  Depth 0 is the tip itself; depth 7+ is the EMERGENCY park window and the
