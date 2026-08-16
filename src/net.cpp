@@ -3481,41 +3481,57 @@ void CConnman::ThreadMessageHandler()
             std::vector<CNode*> nodes{snap.Nodes()};
             // Handshake-incomplete peers first (signer inbounds from
             // archives are not manual). Then GPU addnode / outbounds /
-            // peers with live GETDATA. Sticky "ever fetched" is not
-            // Preferred (miners that GETDATA once starved archives).
+            // inbound ARCHIVE/MIRROR with live GETDATA. Miner GETDATA is
+            // not Preferred (live 1 BLOCK / ~45s after live-GETDATA).
             std::stable_partition(nodes.begin(), nodes.end(), [](CNode* p) {
                 return p != nullptr &&
                        !p->fSuccessfullyConnected.load();
             });
             std::stable_partition(nodes.begin(), nodes.end(), [](CNode* p) {
                 if (p == nullptr) return false;
+                const bool manual_or_outbound{
+                    p->IsManualConn() || !p->IsInboundConn()};
+                const bool archive_target{
+                    node::matmul_trusted::MsghandPeerIsArchiveServeTarget(
+                        manual_or_outbound, p->HasArchiveOrMirrorService())};
                 const bool live_getdata{node::matmul_trusted::MsghandPreferLiveGetData(
                     p->HasQueuedProcessMessageType(NetMsgType::GETDATA),
                     p->m_has_getdata_requests.load())};
                 return node::matmul_trusted::ClassifyMsghandPeer(
                            p->fSuccessfullyConnected.load(),
-                           p->IsManualConn() || !p->IsInboundConn(),
-                           live_getdata) !=
+                           manual_or_outbound,
+                           node::matmul_trusted::MsghandPreferArchiveLiveGetData(
+                               live_getdata, archive_target)) !=
                        node::matmul_trusted::MsghandPeerClass::Other;
             });
             bool preferred_handshake_pending{false};
-            bool live_getdata_pending{false};
+            bool archive_getdata_pending{false};
             const bool local_signer{node::matmul_trusted::HasLocalSigner()};
+            const bool trusted_mirror_catch_up{
+                node::matmul_trusted::IsTrustedMirror() &&
+                GetTrustedMirrorCatchUp()};
             for (CNode* p : nodes) {
                 if (p == nullptr || p->fDisconnect) continue;
+                const bool manual_or_outbound{
+                    p->IsManualConn() || !p->IsInboundConn()};
                 if (node::matmul_trusted::PreferredPeerHandshakePending(
                         p->fSuccessfullyConnected.load(),
-                        p->IsManualConn() || !p->IsInboundConn(),
+                        manual_or_outbound,
                         local_signer)) {
                     preferred_handshake_pending = true;
                 }
-                if (node::matmul_trusted::MsghandPreferLiveGetData(
-                        p->HasQueuedProcessMessageType(NetMsgType::GETDATA),
-                        p->m_has_getdata_requests.load())) {
-                    live_getdata_pending = true;
+                const bool live_getdata{node::matmul_trusted::MsghandPreferLiveGetData(
+                    p->HasQueuedProcessMessageType(NetMsgType::GETDATA),
+                    p->m_has_getdata_requests.load())};
+                if (node::matmul_trusted::MsghandPreferArchiveLiveGetData(
+                        live_getdata,
+                        node::matmul_trusted::MsghandPeerIsArchiveServeTarget(
+                            manual_or_outbound,
+                            p->HasArchiveOrMirrorService()))) {
+                    archive_getdata_pending = true;
                 }
             }
-            SetGetDataServePending(local_signer && live_getdata_pending);
+            SetGetDataServePending(local_signer && archive_getdata_pending);
 
             int others_processed{0};
             for (CNode* pnode : nodes) {
@@ -3524,22 +3540,32 @@ void CConnman::ThreadMessageHandler()
 
                 CpuTimer timer{[&pnode](std::chrono::nanoseconds elapsed) { pnode->m_cpu_time += elapsed; }};
 
+                const bool manual_or_outbound{
+                    pnode->IsManualConn() || !pnode->IsInboundConn()};
+                const bool archive_target{
+                    node::matmul_trusted::MsghandPeerIsArchiveServeTarget(
+                        manual_or_outbound,
+                        pnode->HasArchiveOrMirrorService())};
                 const bool live_getdata{node::matmul_trusted::MsghandPreferLiveGetData(
                     pnode->HasQueuedProcessMessageType(NetMsgType::GETDATA),
                     pnode->m_has_getdata_requests.load())};
+                const bool archive_live_getdata{
+                    node::matmul_trusted::MsghandPreferArchiveLiveGetData(
+                        live_getdata, archive_target)};
                 const bool keep_send{
-                    live_getdata || pnode->m_prefer_block_serve.load()};
+                    archive_target &&
+                    (live_getdata || pnode->m_prefer_block_serve.load())};
                 const auto msghand_class{
                     node::matmul_trusted::ClassifyMsghandPeer(
                         pnode->fSuccessfullyConnected.load(),
-                        pnode->IsManualConn() || !pnode->IsInboundConn(),
-                        live_getdata)};
+                        manual_or_outbound, archive_live_getdata)};
                 if (node::matmul_trusted::
                         SkipMinerProcessMessagesDuringArchiveGetData(
-                            local_signer, live_getdata_pending,
+                            local_signer, archive_getdata_pending,
+                            trusted_mirror_catch_up,
                             pnode->IsInboundConn(), pnode->IsManualConn(),
                             pnode->fSuccessfullyConnected.load(),
-                            live_getdata)) {
+                            archive_target)) {
                     fMoreWork = true;
                     continue;
                 }
@@ -3552,17 +3578,12 @@ void CConnman::ThreadMessageHandler()
                     continue;
                 }
 
-                // Strict -connect archives: do not SendMessages to inbound
-                // miners (addrv2/getheaders/inv). Live nyc1 sent 1.9MB addrv2
-                // + 0.5MB getheaders while GPU BLOCK replies aged out.
-                // Signers: the same skip while an archive inbound is still
-                // in VERSION (live macpro2 2026-08-16, b-msghand ~84%).
-                // Keep SendMessages to sticky fetchers (archives) so INV
-                // continues after a GETDATA burst; do not treat sticky as
-                // live GETDATA (that is what starved serve).
+                // Strict -connect: do not SendMessages to inbound miners.
+                // Still SendMessages to inbound ARCHIVE/MIRROR so GETDATA
+                // BLOCK replies are not stuck behind miner visits.
                 const bool skip_inbound_send{
                     (!m_use_addrman_outgoing && pnode->IsInboundConn() &&
-                     !pnode->IsManualConn()) ||
+                     !pnode->IsManualConn() && !archive_target) ||
                     node::matmul_trusted::
                         SkipFullyConnectedInboundDuringPreferredHandshake(
                             preferred_handshake_pending,

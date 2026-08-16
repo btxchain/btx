@@ -679,8 +679,10 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
 
 /** Msghand visit order. Incomplete VERSION/V2 must run before 100+
  *  miner inbounds (archive -connect) and before signer BLOCK serve.
- *  Inbound archives that issued GETDATA are Preferred so ProcessGetData
- *  runs before miner HEADER_ONLY deserialize. */
+ *  Inbound *archives* with live GETDATA are Preferred. Miner GETDATA
+ *  must not be: live macpro2 2026-08-16 after the live-GETDATA patch,
+ *  miner GETDATA still sat in Preferred, ProcessGetData sent 1 BLOCK
+ *  per visit, one msghand lap was ~45s, nyc1 connected 1 body/cycle. */
 enum class MsghandPeerClass : uint8_t {
     Handshake = 0,
     Preferred = 1,
@@ -690,7 +692,7 @@ enum class MsghandPeerClass : uint8_t {
 /** Bound miner (Other) ProcessMessages per msghand loop on a local
  *  signer. Live macpro2 2026-08-16: 8 inbounds each deserialized a
  *  competing BLOCK under cs_main (~5s) so one loop still exceeded the
- *  archive GETDATA window. Handshake + live GETDATA always run in full. */
+ *  archive GETDATA window. Handshake + archive GETDATA always run. */
 static constexpr int SIGNER_MSGHAND_OTHER_PER_LOOP{2};
 
 [[nodiscard]] inline MsghandPeerClass ClassifyMsghandPeer(
@@ -715,17 +717,37 @@ static constexpr int SIGNER_MSGHAND_OTHER_PER_LOOP{2};
     return queued_getdata || inflight_getdata_requests;
 }
 
+/** GPU addnode / outbound, or an inbound that advertised archive/mirror
+ *  service bits. Miner CONSENSUS inbounds are not this, even with GETDATA. */
+[[nodiscard]] inline bool MsghandPeerIsArchiveServeTarget(
+    bool manual_or_outbound,
+    bool archive_or_mirror_service)
+{
+    return manual_or_outbound || archive_or_mirror_service;
+}
+
+/** Only archive/GPU GETDATA is Preferred / sets the serve-pending latch.
+ *  Miner GETDATA in the same latch put 100 miner fetches in Preferred
+ *  with the archive (live 1 BLOCK / ~45s). */
+[[nodiscard]] inline bool MsghandPreferArchiveLiveGetData(
+    bool live_getdata,
+    bool is_archive_serve_target)
+{
+    return live_getdata && is_archive_serve_target;
+}
+
 /** Local signer: drop miner inbound BLOCK/HEADERS/GETMMATTEST before
- *  deserialize while any live GETDATA is waiting. */
+ *  deserialize while any *archive* GETDATA is waiting. Miner GETDATA
+ *  does not exempt that miner. */
 [[nodiscard]] inline bool TrustedSignerDropMinerIngestWhileGetData(
     bool local_signer,
     bool getdata_pending,
     bool this_inbound,
     bool this_manual,
-    bool this_has_live_getdata)
+    bool this_is_archive_serve_target)
 {
     if (!local_signer || !getdata_pending) return false;
-    if (this_has_live_getdata) return false;
+    if (this_is_archive_serve_target) return false;
     if (!this_inbound || this_manual) return false;
     return true;
 }
@@ -763,18 +785,25 @@ static constexpr int SIGNER_MSGHAND_OTHER_PER_LOOP{2};
     return this_peer_handshake_complete;
 }
 
-/** Local signer: do not ProcessMessages miner inbounds while an archive
- *  GETDATA is queued. Handshake and serve targets still run. */
+/** Do not ProcessMessages miner inbounds while we must serve an archive
+ *  or while a trusted mirror is catching up to the GPU frontier.
+ *  Miner GETDATA does not make that miner a serve target (live 45s/block
+ *  after the live-GETDATA patch). Handshake and archive/GPU still run.
+ *  Archives (trusted mirrors, not HasLocalSigner) skip miners during
+ *  catch-up so GPU BLOCK is not behind 140 miner ProcessMessages. */
 [[nodiscard]] inline bool SkipMinerProcessMessagesDuringArchiveGetData(
     bool local_signer,
     bool archive_getdata_pending,
+    bool trusted_mirror_catch_up,
     bool this_peer_inbound,
     bool this_peer_manual,
     bool this_peer_handshake_complete,
-    bool this_peer_needs_serve)
+    bool this_is_archive_serve_target)
 {
-    if (!local_signer || !archive_getdata_pending) return false;
-    if (this_peer_needs_serve) return false;
+    const bool skip_now{(local_signer && archive_getdata_pending) ||
+                        trusted_mirror_catch_up};
+    if (!skip_now) return false;
+    if (this_is_archive_serve_target) return false;
     if (!this_peer_handshake_complete) return false;
     if (!this_peer_inbound || this_peer_manual) return false;
     return true;

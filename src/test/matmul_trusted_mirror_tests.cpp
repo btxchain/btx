@@ -1079,11 +1079,19 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(TrustedSignerDropMinerIngestWhileGetData(
         /*local_signer=*/true, /*getdata_pending=*/true,
         /*this_inbound=*/true, /*this_manual=*/false,
-        /*this_has_live_getdata=*/false));
+        /*this_is_archive_serve_target=*/false));
     BOOST_CHECK(!TrustedSignerDropMinerIngestWhileGetData(
-        true, true, true, false, /*this_has_live_getdata=*/true));
+        true, true, true, false, /*this_is_archive_serve_target=*/true));
     BOOST_CHECK(!TrustedSignerDropMinerIngestWhileGetData(
         true, /*getdata_pending=*/false, true, false, false));
+    using node::matmul_trusted::MsghandPeerIsArchiveServeTarget;
+    BOOST_CHECK(MsghandPeerIsArchiveServeTarget(/*manual_or_outbound=*/true, false));
+    BOOST_CHECK(MsghandPeerIsArchiveServeTarget(false, /*archive_or_mirror_service=*/true));
+    BOOST_CHECK(!MsghandPeerIsArchiveServeTarget(false, false));
+    using node::matmul_trusted::MsghandPreferArchiveLiveGetData;
+    BOOST_CHECK(MsghandPreferArchiveLiveGetData(/*live_getdata=*/true, /*is_archive_serve_target=*/true));
+    BOOST_CHECK(!MsghandPreferArchiveLiveGetData(true, /*is_archive_serve_target=*/false));
+    BOOST_CHECK(!MsghandPreferArchiveLiveGetData(false, true));
     using node::matmul_trusted::PreferredPeerHandshakePending;
     BOOST_CHECK(PreferredPeerHandshakePending(
         /*handshake_complete=*/false, /*manual_or_outbound=*/true,
@@ -1106,18 +1114,29 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     using node::matmul_trusted::SkipMinerProcessMessagesDuringArchiveGetData;
     BOOST_CHECK(SkipMinerProcessMessagesDuringArchiveGetData(
         /*local_signer=*/true, /*archive_getdata_pending=*/true,
+        /*trusted_mirror_catch_up=*/false,
         /*this_peer_inbound=*/true, /*this_peer_manual=*/false,
         /*this_peer_handshake_complete=*/true,
-        /*this_peer_needs_serve=*/false));
+        /*this_is_archive_serve_target=*/false));
+    // Miner GETDATA must still be skipped (live 45s/block hole).
+    BOOST_CHECK(SkipMinerProcessMessagesDuringArchiveGetData(
+        true, true, false, true, false, true,
+        /*this_is_archive_serve_target=*/false));
     BOOST_CHECK(!SkipMinerProcessMessagesDuringArchiveGetData(
-        true, true, true, false, true, /*this_peer_needs_serve=*/true));
+        true, true, false, true, false, true,
+        /*this_is_archive_serve_target=*/true));
     BOOST_CHECK(!SkipMinerProcessMessagesDuringArchiveGetData(
-        true, true, true, false, /*this_peer_handshake_complete=*/false,
+        true, true, false, true, false,
+        /*this_peer_handshake_complete=*/false, false));
+    BOOST_CHECK(!SkipMinerProcessMessagesDuringArchiveGetData(
+        /*local_signer=*/false, true, /*trusted_mirror_catch_up=*/false,
+        true, false, true, false));
+    BOOST_CHECK(SkipMinerProcessMessagesDuringArchiveGetData(
+        /*local_signer=*/false, false, /*trusted_mirror_catch_up=*/true,
+        true, false, true, false));
+    BOOST_CHECK(!SkipMinerProcessMessagesDuringArchiveGetData(
+        true, /*archive_getdata_pending=*/false, false, true, false, true,
         false));
-    BOOST_CHECK(!SkipMinerProcessMessagesDuringArchiveGetData(
-        /*local_signer=*/false, true, true, false, true, false));
-    BOOST_CHECK(!SkipMinerProcessMessagesDuringArchiveGetData(
-        true, /*archive_getdata_pending=*/false, true, false, true, false));
     using node::matmul_trusted::KeepCatchupSourceOnDownloadTimeout;
     BOOST_CHECK(KeepCatchupSourceOnDownloadTimeout(
         /*signed_frontier_catch_up=*/true, /*persistent_timeout=*/false,

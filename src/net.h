@@ -869,6 +869,18 @@ public:
     std::atomic_bool m_prefer_block_serve{false};
     /** Live: process-queue GETDATA or unconsumed m_getdata_requests. */
     std::atomic_bool m_has_getdata_requests{false};
+    /** VERSION nServices. Msghand prefer/skip uses ARCHIVE/MIRROR bits so
+     *  miner CONSENSUS GETDATA is not Preferred with archives. */
+    std::atomic<uint64_t> m_nServices{0};
+
+    [[nodiscard]] bool HasArchiveOrMirrorService() const
+    {
+        const uint64_t services{m_nServices.load(std::memory_order_relaxed)};
+        return (services & NODE_MATMUL_ATTESTATION_ARCHIVE) ==
+                   NODE_MATMUL_ATTESTATION_ARCHIVE ||
+               (services & NODE_MATMUL_TRUSTED_MIRROR) ==
+                   NODE_MATMUL_TRUSTED_MIRROR;
+    }
 
     /** Network key used to prevent fingerprinting our node across networks.
      *  Influenced by the network and the bind address (+ bind port for inbounds) */
@@ -1319,6 +1331,14 @@ public:
     {
         return m_getdata_serve_pending.load(std::memory_order_relaxed);
     }
+    void SetTrustedMirrorCatchUp(bool catch_up)
+    {
+        m_trusted_mirror_catch_up.store(catch_up, std::memory_order_relaxed);
+    }
+    bool GetTrustedMirrorCatchUp() const
+    {
+        return m_trusted_mirror_catch_up.load(std::memory_order_relaxed);
+    }
     void SetNetworkActive(bool active);
     void OpenNetworkConnection(const CAddress& addrConnect, bool fCountFailure, CSemaphoreGrant&& grant_outbound, const char* strDest, ConnectionType conn_type, bool use_v2transport) EXCLUSIVE_LOCKS_REQUIRED(!m_unused_i2p_sessions_mutex);
     bool CheckIncomingNonce(uint64_t nonce);
@@ -1646,6 +1666,7 @@ private:
     std::vector<ListenSocket> vhListenSocket;
     std::atomic<bool> fNetworkActive{true};
     std::atomic<bool> m_getdata_serve_pending{false};
+    std::atomic<bool> m_trusted_mirror_catch_up{true};
     bool fAddressesInitialized{false};
     AddrMan& addrman;
     const NetGroupManager& m_netgroupman;

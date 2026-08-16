@@ -7188,15 +7188,22 @@ void PeerManagerImpl::ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic
         ++it;
     }
 
-    // Only process one BLOCK item per call, since they're uncommon and can be
-    // expensive to process.
-    if (it != peer.m_getdata_requests.end() && !pfrom.fPauseSend) {
-        const CInv &inv = *it++;
-        if (inv.IsGenBlkMsg()) {
-            ProcessGetBlockData(pfrom, peer, inv);
+    // Miners: one BLOCK per call (DoS / disk). Archive/GPU catch-up: drain
+    // queued bodies until pause/interrupt so 16 GETDATAs are not serialized
+    // at one msghand lap (~45s) each.
+    const bool drain_archive_blocks{
+        node::matmul_trusted::MsghandPeerIsArchiveServeTarget(
+            pfrom.IsManualConn() || !pfrom.IsInboundConn(),
+            pfrom.HasArchiveOrMirrorService())};
+    while (it != peer.m_getdata_requests.end() && !pfrom.fPauseSend) {
+        if (interruptMsgProc) break;
+        if (!it->IsGenBlkMsg()) {
+            ++it;
+            break;
         }
-        // else: If the first item on the queue is an unknown type, we erase it
-        // and continue processing the queue on the next call.
+        const CInv& inv = *it++;
+        ProcessGetBlockData(pfrom, peer, inv);
+        if (!drain_archive_blocks) break;
     }
 
     peer.m_getdata_requests.erase(peer.m_getdata_requests.begin(), it);
@@ -8215,6 +8222,7 @@ bool PeerManagerImpl::IsSignedFrontierBodyCatchUp() const
         frontier.blocks_behind, FollowedChainAhead(m_chainman),
         BLOCK_FETCH_STALL_HEADERS_AHEAD)};
     m_signed_frontier_catch_up.store(catch_up, std::memory_order_relaxed);
+    m_connman.SetTrustedMirrorCatchUp(catch_up);
     return catch_up;
 }
 
@@ -12278,6 +12286,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
 
         pfrom.m_has_all_wanted_services = HasAllDesirableServiceFlags(nServices);
         peer->m_their_services = nServices;
+        pfrom.m_nServices.store(nServices, std::memory_order_relaxed);
         pfrom.SetAddrLocal(addrMe);
         peer->m_starting_height = starting_height;
 
@@ -12924,15 +12933,16 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         ShouldIgnoreNonAuthorityInboundBlock(pfrom)};
     const bool this_gpu{
         pfrom.IsManualConn() || pfrom.HasPermission(NetPermissionFlags::NoBan)};
-    const bool this_live_getdata{node::matmul_trusted::MsghandPreferLiveGetData(
-        pfrom.HasQueuedProcessMessageType(NetMsgType::GETDATA),
-        pfrom.m_has_getdata_requests.load())};
+    const bool this_archive_target{
+        node::matmul_trusted::MsghandPeerIsArchiveServeTarget(
+            pfrom.IsManualConn() || !pfrom.IsInboundConn(),
+            pfrom.HasArchiveOrMirrorService())};
     const bool drop_miner_ingest{
         node::matmul_trusted::TrustedSignerDropMinerIngestWhileGetData(
             node::matmul_trusted::HasLocalSigner(),
             m_connman.GetDataServePending(),
             pfrom.IsInboundConn(), pfrom.IsManualConn(),
-            this_live_getdata)};
+            this_archive_target)};
     const bool defer_miner_getdata{
         ignore_non_gpu_inbound &&
         !node::matmul_trusted::TrustedMirrorMayServeNonAuthorityGetData(
