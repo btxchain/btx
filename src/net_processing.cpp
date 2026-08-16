@@ -3671,6 +3671,7 @@ static bool TrustedMirrorMayDownloadIndex(
     EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
     if (index == nullptr) return false;
+    if (chainman.IndexIsOnSignedFrontierChain(index)) return false;
     if (chainman.IndexIsAttestedChainTipChild(tip, index)) return false;
     if (IndexIsFollowedTipChild(chainman, tip, index)) return false;
     // Live 2026-08-15 (PR 105 comment 5302572644): HEADER_ONLY skip of
@@ -3727,7 +3728,13 @@ static uint256 g_configured_claimed_tip_child{};
     }
     const bool progress_child{
         IndexIsFollowedTipChild(chainman, tip, index) ||
-        chainman.IndexIsAttestedChainTipChild(tip, index)};
+        chainman.IndexIsAttestedChainTipChild(tip, index) ||
+        chainman.IndexIsOnSignedFrontierChain(index)};
+    if (!progress_child &&
+        node::matmul_trusted::HighestAttestedHeight().has_value() &&
+        !chainman.IndexIsOnSignedFrontierChain(tip)) {
+        return false;
+    }
     if (!progress_child &&
         ConfiguredTipChildAlreadyHasBody(chainman, tip, index)) {
         return false;
@@ -10864,14 +10871,22 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
                                 node::matmul_trusted::TrustedMirrorIndexIsCatchUpSuffix(
                                     true, true, indexed->nHeight, tip->nHeight,
                                     indexed->GetAncestor(tip->nHeight) == tip)};
+                            const bool persist_signed_frontier_chain{
+                                indexed != nullptr &&
+                                m_chainman.IndexIsOnSignedFrontierChain(indexed)};
                             if (persist_unattested_tip_child ||
                                 persist_unrequested_followed ||
-                                persist_catchup_suffix) {
+                                persist_catchup_suffix ||
+                                persist_signed_frontier_chain) {
                                 // Persist without GPU: ConnectTip / background
                                 // chainstate still require quorum for Profile-1.
                                 // Catch-up grandchildren are not competing
                                 // siblings; HEADER_ONLY-skipping them wedges
                                 // the tip (PR 105 comment 5302572644).
+                                // Signed-frontier bodies are the attested
+                                // chain even when the active tip / m_best_header
+                                // sit on an unattested competing tower
+                                // (live archives 2026-08-16).
                             } else {
                                 skip_competing_exactreplay = true;
                                 header_only_competing_first =

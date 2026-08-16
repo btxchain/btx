@@ -732,6 +732,20 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         /*has_quorum=*/false, /*active_tip_has_quorum=*/true,
         /*immediate_tip_child=*/true, /*would_abandon_attested=*/false,
         /*competing_attested_height=*/true));
+    // Off-chain signed frontier: do not crawl unattested tip-children
+    // (live archives 2026-08-16 at 190333–190346).
+    BOOST_CHECK(!TrustedMirrorMaySelectMostWorkCandidate(
+        /*extends_active_tip_chain=*/true, /*short_tip_reorg=*/false,
+        /*has_quorum=*/false, /*active_tip_has_quorum=*/false,
+        /*immediate_tip_child=*/true, /*would_abandon_attested=*/false,
+        /*competing_attested_height=*/false,
+        /*signed_frontier_off_active_chain=*/true));
+    BOOST_CHECK(TrustedMirrorMaySelectMostWorkCandidate(
+        /*extends_active_tip_chain=*/true, /*short_tip_reorg=*/false,
+        /*has_quorum=*/true, /*active_tip_has_quorum=*/false,
+        /*immediate_tip_child=*/false, /*would_abandon_attested=*/false,
+        /*competing_attested_height=*/false,
+        /*signed_frontier_off_active_chain=*/true));
     using node::matmul_trusted::TrustedMirrorMustDeferUnattestedConnect;
     BOOST_CHECK(TrustedMirrorMustDeferUnattestedConnect(
         /*trusted_mirror_profile1=*/true, /*has_quorum=*/false));
@@ -844,6 +858,15 @@ BOOST_AUTO_TEST_CASE(competing_attested_index_rejects_fossil_depth)
         false, TRUSTED_MIRROR_SHORT_REORG_DEPTH + 1));
     BOOST_CHECK(!TrustedMirrorMayAdoptCompetingAttestedIndex(false, 510));
     BOOST_CHECK(!TrustedMirrorMayAdoptCompetingAttestedIndex(false, 0));
+    // Signed-frontier chain (live archives 2026-08-16): depth 7+ is not a
+    // fossil when the candidate is the current attested tower.
+    BOOST_CHECK(TrustedMirrorMayAdoptCompetingAttestedIndex(
+        false, TRUSTED_MIRROR_SHORT_REORG_DEPTH + 1,
+        /*on_signed_frontier_chain=*/true));
+    BOOST_CHECK(TrustedMirrorMayAdoptCompetingAttestedIndex(
+        false, 180, /*on_signed_frontier_chain=*/true));
+    BOOST_CHECK(!TrustedMirrorMayAdoptCompetingAttestedIndex(
+        false, 180, /*on_signed_frontier_chain=*/false));
 }
 
 BOOST_AUTO_TEST_CASE(tip_extender_capacity_reserved_under_slot_pressure)

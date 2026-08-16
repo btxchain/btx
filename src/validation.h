@@ -1569,6 +1569,12 @@ public:
      *  height already has quorum. When m_best_header is a competing fork that
      *  does not extend the tip, the remaining tip-child is still progress. */
     [[nodiscard]] bool IndexIsAttestedChainTipChild(const CBlockIndex* tip, const CBlockIndex* index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** True if `index` has in-memory quorum, or sits on the current
+     *  signed-frontier chain (ancestor or descendant of the off-chain
+     *  frontier hash when dual-attested). Trusted mirrors must fetch and
+     *  persist these bodies even when m_best_header / the active tip sit
+     *  on an unattested competing tower. */
+    [[nodiscard]] bool IndexIsOnSignedFrontierChain(const CBlockIndex* index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool ShouldDeferLosingTipExtension(const CBlockIndex* candidate) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool IsAutomaticReorgRecoveryCandidate(const CBlockIndex* candidate) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /**
@@ -1611,6 +1617,11 @@ public:
      * (LCA depth 0, height > tip). That is catch-up, not a reorg: the
      * signed frontier ran ahead while this node still sat on the attested
      * parent (live 2026-08-15: tip 189675, attested HAVE_DATA 189676).
+     *
+     * A unique attested HAVE_DATA index on the current signed-frontier
+     * chain is eligible at any LCA depth. Short-reorg (1–6) still bounds
+     * fossils off that chain. Live 2026-08-16: trusted archives sat 13–180
+     * unattested HAVE_DATA blocks off the attested suffix.
      */
     const CBlockIndex* FindUniqueCompetingAttestedIndex() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool IsAttestedAbandonForkCandidate(const CBlockIndex* candidate) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);

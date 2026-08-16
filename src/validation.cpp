@@ -9470,6 +9470,7 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
 //! verified quorum is fork-choice and skips redundant GPU ExactReplay).
 //! race may replace an unattested tip only.
 static bool TrustedMirrorShouldConsiderMostWorkCandidate(
+    const ChainstateManager& chainman,
     const CBlockIndex* tip, const CBlockIndex* candidate)
     EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
 {
@@ -9496,6 +9497,9 @@ static bool TrustedMirrorShouldConsiderMostWorkCandidate(
             }
         }
     }
+    const auto frontier{chainman.GetSignedFrontierStatus()};
+    const bool signed_frontier_off_chain{
+        frontier.available && !frontier.on_active_chain};
     return node::matmul_trusted::TrustedMirrorMaySelectMostWorkCandidate(
         extends_tip,
         node::matmul_trusted::TrustedMirrorIsShortTipReorg(lca_depth),
@@ -9505,7 +9509,8 @@ static bool TrustedMirrorShouldConsiderMostWorkCandidate(
         immediate_tip_child,
         would_abandon_attested,
         node::matmul_trusted::HasCompetingQuorum(
-            candidate->GetBlockHash(), candidate->nHeight));
+            candidate->GetBlockHash(), candidate->nHeight),
+        signed_frontier_off_chain);
 }
 
 CBlockIndex* Chainstate::FindMostWorkChain()
@@ -9613,7 +9618,7 @@ CBlockIndex* Chainstate::FindMostWorkChain()
             ++skipped_count;
             continue;
         }
-        if (!TrustedMirrorShouldConsiderMostWorkCandidate(m_chain.Tip(), pindexNew) &&
+        if (!TrustedMirrorShouldConsiderMostWorkCandidate(m_chainman, m_chain.Tip(), pindexNew) &&
             !m_chainman.IsAttestedAbandonForkCandidate(pindexNew)) {
             LogDebug(BCLog::VALIDATION,
                      "FindMostWorkChain: skipping unattested competing candidate hash=%s height=%d\n",
@@ -10772,7 +10777,7 @@ void Chainstate::TryAddBlockIndexCandidate(CBlockIndex* pindex)
     const CBlockIndex* const tip{m_chain.Tip()};
     const bool parked{m_chainman.IsOnParkedReorgBranch(pindex)};
     const bool defer_losing{m_chainman.ShouldDeferLosingTipExtension(pindex)};
-    const bool consider{TrustedMirrorShouldConsiderMostWorkCandidate(tip, pindex)};
+    const bool consider{TrustedMirrorShouldConsiderMostWorkCandidate(m_chainman, tip, pindex)};
     if (parked || defer_losing || !consider) {
         if (pindex != nullptr && tip != nullptr && pindex->pprev == tip) {
             LogWarning("%s: refusing tip-child hash=%s height=%d parked=%s "
@@ -11280,11 +11285,16 @@ const CBlockIndex* ChainstateManager::FindUniqueCompetingAttestedIndex() const
             const int lca_depth{tip->nHeight - lca->nHeight};
             const bool attested_suffix{
                 lca == tip && idx->nHeight > tip->nHeight};
+            const bool on_signed_frontier_chain{
+                IndexIsOnSignedFrontierChain(idx)};
             // Bound competing forks even when the tip has no quorum (signer
             // typically attests ~1 behind). Unbounded fossil MMATTEST hijacked
             // FMWC and left the attested HAVE_DATA tip-child unconnected.
+            // The current signed-frontier chain is not a fossil: live
+            // archives sat 13–180 blocks off it on an unattested HAVE_DATA
+            // tower (2026-08-16) and must rejoin.
             if (!node::matmul_trusted::TrustedMirrorMayAdoptCompetingAttestedIndex(
-                    attested_suffix, lca_depth)) {
+                    attested_suffix, lca_depth, on_signed_frontier_chain)) {
                 return;
             }
         }
@@ -11541,6 +11551,45 @@ bool ChainstateManager::IndexIsAttestedChainTipChild(
     return m_best_header != nullptr &&
            m_best_header->nHeight > tip->nHeight &&
            m_best_header->GetAncestor(tip->nHeight) != tip;
+}
+
+bool ChainstateManager::IndexIsOnSignedFrontierChain(const CBlockIndex* index) const
+{
+    AssertLockHeld(::cs_main);
+    if (index == nullptr || (index->nStatus & BLOCK_FAILED_MASK) != 0) {
+        return false;
+    }
+    if (!node::matmul_trusted::IsConfigured()) return false;
+    const auto frontier_height{node::matmul_trusted::HighestAttestedHeight()};
+    if (!frontier_height.has_value()) return false;
+    const CBlockIndex* const tip{
+        m_active_chainstate != nullptr ? m_active_chainstate->m_chain.Tip()
+                                       : nullptr};
+    const CBlockIndex* off_chain{nullptr};
+    const CBlockIndex* on_chain{nullptr};
+    for (const auto& hint : node::matmul_trusted::AttestedFrontierHints()) {
+        if (hint.height != *frontier_height || hint.hash.IsNull()) continue;
+        if (!node::matmul_trusted::HasQuorumInMemory(hint.hash, hint.height)) {
+            continue;
+        }
+        const CBlockIndex* const frontier{
+            m_blockman.LookupBlockIndex(hint.hash)};
+        if (frontier == nullptr) continue;
+        const bool contained{
+            tip != nullptr && tip->nHeight >= frontier->nHeight &&
+            tip->GetAncestor(frontier->nHeight) == frontier};
+        if (contained) {
+            if (on_chain == nullptr) on_chain = frontier;
+        } else if (off_chain == nullptr) {
+            off_chain = frontier;
+        }
+    }
+    const CBlockIndex* const frontier{off_chain != nullptr ? off_chain : on_chain};
+    if (frontier == nullptr) return false;
+    if (index->nHeight <= frontier->nHeight) {
+        return frontier->GetAncestor(index->nHeight) == index;
+    }
+    return index->GetAncestor(frontier->nHeight) == frontier;
 }
 
 bool ChainstateManager::ShouldDeferLosingTipExtension(
@@ -14977,7 +15026,7 @@ void ChainstateManager::CheckBlockIndex()
                         // (FindMostWorkChain / TryAddBlockIndexCandidate).
                         if (!c->m_chainman.IsOnParkedReorgBranch(pindex) &&
                             !c->m_chainman.ShouldDeferLosingTipExtension(pindex) &&
-                            TrustedMirrorShouldConsiderMostWorkCandidate(c->m_chain.Tip(), pindex) &&
+                            TrustedMirrorShouldConsiderMostWorkCandidate(c->m_chainman, c->m_chain.Tip(), pindex) &&
                             (c == &ActiveChainstate() || snap_base->GetAncestor(pindex->nHeight) == pindex)) {
                             assert(c->setBlockIndexCandidates.count(pindex));
                         }
@@ -15029,7 +15078,7 @@ void ChainstateManager::CheckBlockIndex()
                     c->setBlockIndexCandidates.count(pindex) == 0 &&
                     !c->m_chainman.IsOnParkedReorgBranch(pindex) &&
                     !c->m_chainman.ShouldDeferLosingTipExtension(pindex) &&
-                    TrustedMirrorShouldConsiderMostWorkCandidate(c->m_chain.Tip(), pindex)) {
+                    TrustedMirrorShouldConsiderMostWorkCandidate(c->m_chainman, c->m_chain.Tip(), pindex)) {
                     if (pindexFirstInvalid == nullptr) {
                         if (is_active || snap_base->GetAncestor(pindex->nHeight) == pindex) {
                             assert(foundInUnlinked);

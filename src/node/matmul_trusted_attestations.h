@@ -186,18 +186,23 @@ static constexpr int TRUSTED_MIRROR_ATTESTED_TIP_LOOKBACK{2};
 /** FindUniqueCompetingAttestedIndex adoption gate.
  *
  *  Catch-up suffix of the active tip (LCA depth 0, idx above tip) is
- *  always eligible. Competing forks are short-reorg only (depth 1–6).
- *  The previous `tip_has_quorum == false` path had no depth bound, so a
- *  fossil MMATTEST (signer ~1 behind the tip is the normal case) could
- *  hijack FMWC into a 510-block rollback and starve the attested
- *  HAVE_DATA tip-child (PR 105 field report 2026-08-15). Deep attested
- *  recovery stays on the park / MaybeTrackReorgRecovery path. */
+ *  always eligible. Competing forks are short-reorg only (depth 1–6)
+ *  unless `idx` sits on the current signed-frontier chain. Fossils off
+ *  that chain stay bounded: the previous unbounded `tip_has_quorum ==
+ *  false` path let a stale MMATTEST hijack FMWC into a 510-block
+ *  rollback (PR 105 field report 2026-08-15). The signed-frontier
+ *  exception is the live archive recovery path: trusted mirrors crawled
+ *  13–180 unattested HAVE_DATA blocks while the attested suffix was
+ *  HEADER_ONLY, and depth 7+ would otherwise refuse the attested chain
+ *  forever. */
 [[nodiscard]] inline bool TrustedMirrorMayAdoptCompetingAttestedIndex(
     bool attested_suffix_of_active_tip,
-    int lca_depth)
+    int lca_depth,
+    bool on_signed_frontier_chain = false)
 {
     return attested_suffix_of_active_tip ||
-           TrustedMirrorIsShortTipReorg(lca_depth);
+           TrustedMirrorIsShortTipReorg(lca_depth) ||
+           on_signed_frontier_chain;
 }
 
 /** True when `index` is a strict descendant of the active tip (catch-up
@@ -261,7 +266,13 @@ static constexpr int TRUSTED_MIRROR_ATTESTED_TIP_LOOKBACK{2};
  *
  *  A node already sitting on an unattested tip (equal-work lost sibling
  *  or heavier unattested fork) is recovered by
- *  FindUniqueCompetingAttestedIndex, not by this gate. */
+ *  FindUniqueCompetingAttestedIndex, not by this gate.
+ *
+ *  When the signed frontier is off the active chain, do not keep
+ *  selecting unattested tip-children: that is the archive crawl that
+ *  walked 190333→190346 while attested bodies sat HEADER_ONLY. FindUnique
+ *  + getdata of the signed-frontier path recover; this gate must stop
+ *  the unattested walk. */
 [[nodiscard]] inline bool TrustedMirrorMaySelectMostWorkCandidate(
     bool extends_active_tip_chain,
     bool short_tip_reorg,
@@ -269,8 +280,10 @@ static constexpr int TRUSTED_MIRROR_ATTESTED_TIP_LOOKBACK{2};
     bool active_tip_has_quorum = false,
     bool immediate_tip_child = true,
     bool would_abandon_attested = false,
-    bool competing_attested_height = false)
+    bool competing_attested_height = false,
+    bool signed_frontier_off_active_chain = false)
 {
+    if (signed_frontier_off_active_chain && !has_quorum) return false;
     if (would_abandon_attested && !has_quorum) return false;
     if (competing_attested_height && !has_quorum) return false;
     if (extends_active_tip_chain) {
