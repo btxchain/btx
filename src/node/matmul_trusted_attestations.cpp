@@ -99,6 +99,34 @@ struct DurableNamespacePrefix {
 std::unique_ptr<CDBWrapper> g_durable_db;
 std::optional<uint256> g_durable_namespace;
 
+//! Durable/session anti-equivocation index. The bounded hot store cannot by
+//! itself remember a local vote (or an already-complete quorum) after capacity
+//! eviction. Keep only height/hash occupancy, never unverified signatures.
+std::mutex g_signing_occupancy_mutex;
+std::map<int32_t, std::set<uint256>> g_signing_occupied_by_height;
+
+void NoteSigningHeightOccupied(int32_t height, const uint256& hash)
+{
+    if (height < 0 || hash.IsNull()) return;
+    std::lock_guard lock{g_signing_occupancy_mutex};
+    g_signing_occupied_by_height[height].insert(hash);
+}
+
+bool SigningHeightOccupiedByOtherHash(int32_t height, const uint256& hash)
+{
+    std::lock_guard lock{g_signing_occupancy_mutex};
+    const auto it{g_signing_occupied_by_height.find(height)};
+    if (it == g_signing_occupied_by_height.end()) return false;
+    return std::any_of(it->second.begin(), it->second.end(),
+                       [&](const uint256& occupied) { return occupied != hash; });
+}
+
+void ClearSigningHeightOccupancy()
+{
+    std::lock_guard lock{g_signing_occupancy_mutex};
+    g_signing_occupied_by_height.clear();
+}
+
 uint256 AuthorityNamespace(
     const matmul::trusted::AttestationStore& store)
 {
@@ -266,6 +294,7 @@ bool ImportAttestations(
         return false;
     }
     CDBBatch batch{*g_durable_db};
+    std::vector<std::pair<int32_t, uint256>> signing_occupancy;
     for (auto& [key, additions] : durable) {
         std::vector<matmul::trusted::ExactReplayAttestation> existing;
         const auto status{g_durable_db->TryRead(key, existing)};
@@ -285,11 +314,24 @@ bool ImportAttestations(
             error = "durable attestation record exceeds configured signer set";
             return false;
         }
+        const auto local_signer{store->LocalSignerPubKey()};
+        const bool local_signed{
+            local_signer.has_value() &&
+            std::any_of(existing.begin(), existing.end(),
+                        [&](const auto& attestation) {
+                            return attestation.signer == *local_signer;
+                        })};
+        if (local_signed || existing.size() >= store->Threshold()) {
+            signing_occupancy.emplace_back(key.height, key.block_hash);
+        }
         batch.Write(key, existing);
     }
     if (!durable.empty() && !g_durable_db->WriteBatch(batch, true)) {
         error = "failed to migrate durable attestation records";
         return false;
+    }
+    for (const auto& [height, hash] : signing_occupancy) {
+        NoteSigningHeightOccupied(height, hash);
     }
     {
         std::lock_guard lock{g_mutex};
@@ -327,6 +369,8 @@ bool LoadDurableAttestations(
     std::map<TailKey,
              std::vector<matmul::trusted::ExactReplayAttestation>> hot_tail;
     size_t hot_tail_attestations{0};
+    std::map<int32_t, std::set<uint256>> signing_occupancy;
+    const auto local_signer{store->LocalSignerPubKey()};
     for (; cursor->Valid(); cursor->Next()) {
         DurableAttestationKey key;
         if (!cursor->GetKey(key) ||
@@ -359,6 +403,15 @@ bool LoadDurableAttestations(
                 return false;
             }
         }
+        const bool local_signed{
+            local_signer.has_value() &&
+            std::any_of(attestations.begin(), attestations.end(),
+                        [&](const auto& attestation) {
+                            return attestation.signer == *local_signer;
+                        })};
+        if (local_signed || attestations.size() >= store->Threshold()) {
+            signing_occupancy[key.height].insert(key.block_hash);
+        }
         const TailKey tail_key{key.height, key.block_hash};
         hot_tail_attestations += attestations.size();
         hot_tail.emplace(tail_key, std::move(attestations));
@@ -390,6 +443,10 @@ bool LoadDurableAttestations(
     for (const auto& [tail_key, attestations] : hot_tail) {
         (void)attestations;
         NoteAcceptedAttestationHeight(tail_key.first, tail_key.second);
+    }
+    {
+        std::lock_guard lock{g_signing_occupancy_mutex};
+        g_signing_occupied_by_height = std::move(signing_occupancy);
     }
     LogPrintf("Verified %zu durable MatMul attestation block record(s)\n",
               records);
@@ -920,6 +977,9 @@ matmul::trusted::AddResult Add(
     if (result == matmul::trusted::AddResult::Accepted ||
         result == matmul::trusted::AddResult::Duplicate) {
         NoteAcceptedAttestationHeight(expected_height, expected_hash);
+        if (store->HasQuorum(expected_hash, expected_height)) {
+            NoteSigningHeightOccupied(expected_height, expected_hash);
+        }
     }
     if (result == matmul::trusted::AddResult::Accepted) {
         PersistAfterMutation(attestation);
@@ -938,7 +998,8 @@ matmul::trusted::AddResult SignAuthoritative(
     // quorum on a different hash (live 2026-08-15: 94f70747 then a9590c15
     // at 190354). In-memory hints cover the hot window; SignLocal also
     // refuses against the store's own buckets.
-    if (HasCompetingQuorum(block_hash, block_height)) {
+    if (SigningHeightOccupiedByOtherHash(block_height, block_hash) ||
+        HasCompetingQuorum(block_hash, block_height)) {
         return matmul::trusted::AddResult::HeightOccupied;
     }
     matmul::trusted::ExactReplayAttestation signed_attestation;
@@ -951,6 +1012,7 @@ matmul::trusted::AddResult SignAuthoritative(
     if (result == matmul::trusted::AddResult::Accepted ||
         result == matmul::trusted::AddResult::Duplicate) {
         NoteAcceptedAttestationHeight(block_height, block_hash);
+        NoteSigningHeightOccupied(block_height, block_hash);
     }
     if (result == matmul::trusted::AddResult::Accepted) {
         PersistAfterMutation(signed_attestation);
@@ -1161,6 +1223,7 @@ bool OpenPersistence(const fs::path& path, std::string& error)
                 !ResetWal(path, error)) {
                 g_durable_db.reset();
                 g_durable_namespace.reset();
+                ClearSigningHeightOccupancy();
                 return false;
             }
         } catch (const dbwrapper_error& e) {
@@ -1168,6 +1231,7 @@ bool OpenPersistence(const fs::path& path, std::string& error)
                               e.what());
             g_durable_db.reset();
             g_durable_namespace.reset();
+            ClearSigningHeightOccupancy();
             return false;
         }
     }
@@ -1213,6 +1277,7 @@ void ClosePersistence()
         g_durable_db.reset();
         g_durable_namespace.reset();
     }
+    ClearSigningHeightOccupancy();
 }
 
 bool PersistenceEnabled()
@@ -1237,7 +1302,7 @@ bool FlushPersistence(std::string& error)
 }
 
 HistoricalReverifyAdmit TryAdmitHistoricalReverify(
-    const uint256& block_hash)
+    const uint256& block_hash, bool signed_frontier_recovery)
 {
     std::lock_guard lock{g_reverify_mutex};
     RefillReverifyTokensLocked(std::chrono::steady_clock::now());
@@ -1252,10 +1317,14 @@ HistoricalReverifyAdmit TryAdmitHistoricalReverify(
     if (g_reverify_queued.size() >= HistoricalReverifyBudget::QUEUE_MAX) {
         return HistoricalReverifyAdmit::QueueFull;
     }
-    if (g_reverify_tokens < 1.0) {
+    // A cryptographically authenticated, unique signed frontier is not an
+    // unauthenticated GETMMATTEST workload. Let its root-first CONSENSUS
+    // recovery proceed as soon as the single inflight slot is free; the
+    // signature and unique-highest selector bound the work to one branch.
+    if (!signed_frontier_recovery && g_reverify_tokens < 1.0) {
         return HistoricalReverifyAdmit::RateLimited;
     }
-    g_reverify_tokens -= 1.0;
+    if (!signed_frontier_recovery) g_reverify_tokens -= 1.0;
     g_reverify_queued.insert(block_hash);
     return HistoricalReverifyAdmit::Allow;
 }

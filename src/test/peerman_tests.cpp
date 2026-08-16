@@ -1957,7 +1957,7 @@ BOOST_AUTO_TEST_CASE(getdata_unknown_block_sends_notfound)
     BOOST_CHECK(HasQueuedMessageType(peer, NetMsgType::NOTFOUND));
 }
 
-BOOST_AUTO_TEST_CASE(catchup_requests_only_lowest_hole_and_fails_over_silent_peer)
+BOOST_AUTO_TEST_CASE(catchup_hedges_lowest_hole_before_hard_peer_timeout)
 {
     LOCK(NetEventsInterface::g_msgproc_mutex);
 
@@ -1970,12 +1970,21 @@ BOOST_AUTO_TEST_CASE(catchup_requests_only_lowest_hole_and_fails_over_silent_pee
     SetMockTime(std::chrono::seconds{starting_tip->GetBlockTime() + 3600});
     BOOST_REQUIRE(!chainman.IsInitialBlockDownload());
 
-    auto make_header = [&](const CBlockIndex& prev, unsigned char tag) {
+    auto make_header = [&](const CBlockIndex& prev, unsigned char tag,
+                           CBlock* complete_block = nullptr) {
         CBlock block;
-        block.SetNull();
+        if (complete_block != nullptr) {
+            block = node::BlockAssembler{
+                chainman.ActiveChainstate(), nullptr, {}, m_node}
+                        .CreateNewBlock()
+                        ->block;
+            block.hashMerkleRoot = BlockMerkleRoot(block);
+        } else {
+            block.SetNull();
+            block.hashMerkleRoot = uint256::FromHex(
+                std::string(62, '0') + strprintf("%02x", tag)).value();
+        }
         block.hashPrevBlock = prev.GetBlockHash();
-        block.hashMerkleRoot = uint256::FromHex(
-            std::string(62, '0') + strprintf("%02x", tag)).value();
         block.nTime = prev.GetBlockTime() + 1;
         block.nBits = prev.nBits;
         block.nVersion = VERSIONBITS_TOP_BITS;
@@ -1990,6 +1999,7 @@ BOOST_AUTO_TEST_CASE(catchup_requests_only_lowest_hole_and_fails_over_silent_pee
             ::cs_main,
             return chainman.m_blockman.LookupBlockIndex(block.GetHash()))};
         BOOST_REQUIRE(index != nullptr);
+        if (complete_block != nullptr) *complete_block = block;
         return index;
     };
 
@@ -1997,8 +2007,10 @@ BOOST_AUTO_TEST_CASE(catchup_requests_only_lowest_hole_and_fails_over_silent_pee
         WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip())};
     std::vector<CBlockIndex*> headers;
     const CBlockIndex* walk{tip};
+    CBlock first_body;
     for (unsigned char tag = 0xc1; tag <= 0xc6; ++tag) {
-        CBlockIndex* nxt{make_header(*walk, tag)};
+        CBlockIndex* nxt{
+            make_header(*walk, tag, tag == 0xc1 ? &first_body : nullptr)};
         headers.push_back(nxt);
         walk = nxt;
     }
@@ -2071,7 +2083,51 @@ BOOST_AUTO_TEST_CASE(catchup_requests_only_lowest_hole_and_fails_over_silent_pee
     BOOST_REQUIRE_EQUAL(second_stats.vHeightInFlight.size(), 1U);
     BOOST_CHECK_EQUAL(second_stats.vHeightInFlight.front(), tip->nHeight + 1);
 
+    connman.FlushSendBuffer(silent);
     SetMockTime(std::chrono::seconds{GetTime() + 16});
+    BOOST_CHECK(peerman.SendMessages(&silent));
+    CNodeStateStats silent_after_hedge;
+    BOOST_REQUIRE(peerman.GetNodeStateStats(silent.GetId(), silent_after_hedge));
+    // Fifteen seconds is duplicate-request/hedge eligibility, not evidence of
+    // peer failure. Slow archive bodies observed in production arrive beyond
+    // this threshold and must retain their original request ownership.
+    BOOST_REQUIRE_EQUAL(silent_after_hedge.vHeightInFlight.size(), 1U);
+    BOOST_CHECK(!HasQueuedMessageType(silent, NetMsgType::GETDATA));
+    BOOST_CHECK(!silent.fDisconnect);
+
+    // Delivery by one owner of a hedged request must retire every redundant
+    // owner for the same hash. Otherwise the old stale entry immediately
+    // triggers another request to the successful peer and spins forever.
+    connman.FlushSendBuffer(second);
+    BOOST_REQUIRE(connman.ReceiveMsgFrom(
+        second, NetMsg::Make(NetMsgType::BLOCK, TX_WITH_WITNESS(first_body))));
+    second.fPauseSend = false;
+    (void)connman.ProcessMessagesOnce(second);
+    CNodeStateStats silent_after_delivery;
+    CNodeStateStats second_after_delivery;
+    BOOST_REQUIRE(peerman.GetNodeStateStats(silent.GetId(), silent_after_delivery));
+    BOOST_REQUIRE(peerman.GetNodeStateStats(second.GetId(), second_after_delivery));
+    BOOST_CHECK(silent_after_delivery.vHeightInFlight.empty());
+    BOOST_CHECK(second_after_delivery.vHeightInFlight.empty());
+
+    bool first_connected{false};
+    for (int i = 0; i < 10'000 && !first_connected; ++i) {
+        first_connected = WITH_LOCK(
+            ::cs_main, return chainman.ActiveChain().Contains(headers.front()));
+        if (!first_connected) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{2});
+        }
+    }
+    BOOST_REQUIRE(first_connected);
+    connman.FlushSendBuffer(silent);
+    BOOST_CHECK(peerman.SendMessages(&silent));
+    CNodeStateStats silent_second_hole;
+    BOOST_REQUIRE(peerman.GetNodeStateStats(silent.GetId(), silent_second_hole));
+    BOOST_REQUIRE_EQUAL(silent_second_hole.vHeightInFlight.size(), 1U);
+    BOOST_CHECK_EQUAL(silent_second_hole.vHeightInFlight.front(),
+                      tip->nHeight + 2);
+
+    SetMockTime(std::chrono::seconds{GetTime() + 91});
     BOOST_CHECK(peerman.SendMessages(&silent));
     CNodeStateStats silent_after;
     BOOST_REQUIRE(peerman.GetNodeStateStats(silent.GetId(), silent_after));

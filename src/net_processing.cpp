@@ -274,11 +274,15 @@ static constexpr unsigned int CATCHUP_BLOCKS_IN_TRANSIT_PER_PEER = 1;
  *  it (assumeutxo-189307 + 517 headers, IBD already latched false on chainwork
  *  + tip age) the IBD window is required; 1-slot/15s is a near-tip policy. */
 static constexpr int CATCHUP_NARROW_MAX_AHEAD = 32;
-/** Catch-up / IBD getdata failover. Mainnet spacing is 90s, so the ordinary
- *  timeout (90–270s) is longer than operators wait before restarting. A FULL
- *  seed can serve a ~400-byte body in well under a second. Applied during IBD
- *  as well so a long-offline miner failsovers instead of waiting 180s. */
-static constexpr auto BLOCK_CATCHUP_DOWNLOAD_TIMEOUT{15s};
+/** Catch-up / IBD getdata hedging. Once this age is reached another eligible
+ *  peer may also own the request. This is deliberately not a failure deadline:
+ *  production archive bodies have arrived after 15 seconds and disconnecting
+ *  their source caused one-block-per-reconnect churn. */
+static constexpr auto BLOCK_CATCHUP_DOWNLOAD_HEDGE_AFTER{15s};
+/** Hard catch-up body deadline. Keep this separate from the hedge threshold so
+ *  slow but valid archive sources remain connected. Mainnet spacing is 90s;
+ *  one spacing is also the ordinary single-peer timeout. */
+static constexpr auto BLOCK_CATCHUP_DOWNLOAD_HARD_TIMEOUT{90s};
 /** Second FULL peer may take the catch-up hole immediately (bodies are cheap).
  *  A third waits until the existing owners are stale. */
 static constexpr size_t CATCHUP_MIN_PARALLEL_OWNERS = 2;
@@ -1034,6 +1038,9 @@ struct CNodeState {
     //! from this peer. Used to prefer re-request over disconnect, while still
     //! dropping persistently unresponsive peers.
     int m_block_download_timeout_count{0};
+    //! A global stale-request sweep reached the ordinary disconnect threshold.
+    //! SendMessages owns the CNode and performs the disconnect on its next pass.
+    bool m_block_download_disconnect_pending{false};
     //! Whether we consider this a preferred download peer.
     bool fPreferredDownload{false};
     /** Whether this peer advertised NODE_MATMUL_ATTESTATION_ARCHIVE (trusted
@@ -1750,6 +1757,8 @@ private:
         EXCLUSIVE_LOCKS_REQUIRED(!cs_main,
                                  !NetEventsInterface::g_msgproc_mutex);
     std::atomic<std::chrono::seconds> m_matmul_deferred_retry_at{0s};
+    uint256 m_unconnected_replay_last_hash GUARDED_BY(cs_main);
+    int64_t m_unconnected_replay_at GUARDED_BY(cs_main){0};
     /** Last time we probed a peer with getheaders solely to establish
      *  pindexBestKnownBlock, keyed by NodeId. */
     std::map<NodeId, std::chrono::microseconds> m_best_known_probe_at GUARDED_BY(cs_main);
@@ -1869,6 +1878,7 @@ private:
         uint256 hash{};
         int32_t height{-1};
         CBlockHeader header{};
+        bool signed_frontier_recovery{false};
     };
     Mutex m_hist_attest_mutex;
     std::deque<HistoricalAttestationReverifyJob> m_hist_attest_queue
@@ -2050,6 +2060,9 @@ private:
 
     /** Have we requested this block from a specific peer */
     bool IsBlockRequestedFromPeer(const uint256& hash, NodeId peer) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    void RefreshBlockRequestActivity(const uint256& hash, NodeId peer,
+                                     std::chrono::microseconds now)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     /** Remove this block from our tracked requested blocks. Called if:
      *  - the block has been received from a peer
@@ -2244,13 +2257,15 @@ private:
     void RequestMatMulTrustedAttestations(const uint256& hash,
                                           NodeId source);
     /**
-     * Queue a rate-limited background ExactReplay so an archive can later serve
-     * an attestation for a canonical Profile-1 block that lacks a persisted
-     * ExactReplay bit. Never runs on the message thread; never takes cs_main
-     * across the GPU work.
+     * Queue a background ExactReplay so an archive can later serve an
+     * attestation for a canonical Profile-1 block that lacks a persisted bit.
+     * Unauthenticated serve requests use the token bucket; unique signed-
+     * frontier recovery is already authority-bounded but stays single-inflight.
+     * Never runs on the message thread or holds cs_main across GPU work.
      */
     bool MaybeQueueHistoricalAttestationReverify(
-        const uint256& hash, int32_t height, const CBlockHeader& header)
+        const uint256& hash, int32_t height, const CBlockHeader& header,
+        bool signed_frontier_recovery = false)
         EXCLUSIVE_LOCKS_REQUIRED(!m_hist_attest_mutex);
     void EnsureHistoricalAttestationReverifyThread()
         EXCLUSIVE_LOCKS_REQUIRED(m_hist_attest_mutex);
@@ -2733,6 +2748,20 @@ bool PeerManagerImpl::IsBlockRequestedFromPeer(const uint256& hash, NodeId peer)
     return false;
 }
 
+void PeerManagerImpl::RefreshBlockRequestActivity(
+    const uint256& hash, NodeId peer, std::chrono::microseconds now)
+{
+    AssertLockHeld(cs_main);
+    for (auto range = mapBlocksInFlight.equal_range(hash);
+         range.first != range.second; ++range.first) {
+        auto [nodeid, block_it] = range.first->second;
+        if (nodeid == peer) {
+            block_it->requested_at = now;
+            return;
+        }
+    }
+}
+
 std::optional<node::MatMulBlockLifecycle::Token>
 PeerManagerImpl::MarkMatMulAsyncVerification(const uint256& hash)
 {
@@ -2873,6 +2902,8 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
         int32_t reverify_height{-1};
         std::optional<CBlockHeader> reverify_header;
         bool need_exact_replay{false};
+        bool signed_frontier_recovery{false};
+        bool reverify_due{false};
         std::shared_ptr<CBlock> replay_block;
         {
             LOCK(cs_main);
@@ -2900,53 +2931,77 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
                     }
                 }
             }
+            if (child == nullptr && tip != nullptr) {
+                child = const_cast<CBlockIndex*>(
+                    m_chainman.FindNextSignedFrontierExactReplayIndex());
+                signed_frontier_recovery = child != nullptr;
+            }
             if (child != nullptr &&
-                m_chainman.IndexIsAttestedChainTipChild(tip, child) &&
+                (signed_frontier_recovery ||
+                 m_chainman.IndexIsAttestedChainTipChild(tip, child)) &&
                 (child->nStatus & BLOCK_HAVE_DATA) != 0 &&
                 (child->nStatus & BLOCK_FAILED_MASK) == 0 &&
                 !m_chainman.ActiveChain().Contains(child)) {
-                    if (m_chainman.IsOnParkedReorgBranch(child)) {
+                    if (!signed_frontier_recovery &&
+                        m_chainman.IsOnParkedReorgBranch(child)) {
                         (void)m_chainman.UnparkReorgBranchContainingBlock(child);
                     }
-                    (void)m_chainman.NormalizeReorgRecovery(tip);
+                    if (!signed_frontier_recovery) {
+                        (void)m_chainman.NormalizeReorgRecovery(tip);
+                    }
                     reverify_hash = child->GetBlockHash();
                     reverify_height = child->nHeight;
                     reverify_header = child->GetBlockHeader();
                     need_exact_replay =
                         (child->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) == 0;
-                    m_chainman.ActiveChainstate().TryAddBlockIndexCandidate(child);
+                    const int64_t now_count{count_seconds(now_s)};
+                    reverify_due =
+                        m_unconnected_replay_last_hash != reverify_hash ||
+                        now_count - m_unconnected_replay_at >= 15;
+                    if (reverify_due) {
+                        m_unconnected_replay_last_hash = reverify_hash;
+                        m_unconnected_replay_at = now_count;
+                    }
+                    if (!signed_frontier_recovery) {
+                        m_chainman.ActiveChainstate().TryAddBlockIndexCandidate(child);
+                    }
                     replay_block = std::make_shared<CBlock>();
                     if (!m_chainman.m_blockman.ReadBlock(*replay_block, *child)) {
                         replay_block.reset();
                     }
             }
         }
-        static std::atomic<int64_t> g_followed_tip_child_replay_at{0};
-        const int64_t now_count{count_seconds(now_s)};
-        const bool due{
-            now_count - g_followed_tip_child_replay_at.load(std::memory_order_relaxed) >=
-            15};
-        if (reverify_header && due) {
-            g_followed_tip_child_replay_at.store(now_count, std::memory_order_relaxed);
-            LogInfo("Followed HAVE_DATA tip-child still unconnected "
+        if (reverify_header && reverify_due) {
+            LogInfo("%s HAVE_DATA block still unconnected "
                     "hash=%s height=%d exact_replay=%s have_body=%s; "
                     "re-admitting for validator-chain catch-up\n",
+                    signed_frontier_recovery
+                        ? "Signed-frontier recovery"
+                        : "Followed tip-child",
                     reverify_hash.ToString(), reverify_height,
                     need_exact_replay ? "missing" : "persisted",
                     replay_block ? "yes" : "no");
             if (need_exact_replay &&
                 MaybeQueueHistoricalAttestationReverify(
-                    reverify_hash, reverify_height, *reverify_header)) {
-                LogInfo("Queueing ExactReplay for followed HAVE_DATA tip-child "
+                    reverify_hash, reverify_height, *reverify_header,
+                    signed_frontier_recovery)) {
+                LogInfo("Queueing ExactReplay for %s HAVE_DATA block "
                         "hash=%s height=%d (validator-chain catch-up)\n",
+                        signed_frontier_recovery
+                            ? "signed-frontier recovery"
+                            : "followed tip-child",
                         reverify_hash.ToString(), reverify_height);
             }
-            if (replay_block) {
+            // A signed-frontier fork must finish the root-first ExactReplay
+            // phase before ABC sees a partial prefix with enough work to
+            // trigger reorg selection. Otherwise ABC can wait on the suffix
+            // while blocking this scheduler from queueing that suffix.
+            if (replay_block && !need_exact_replay) {
                 bool new_block{false};
                 (void)m_chainman.ProcessNewBlock(
                     replay_block, /*force_processing=*/true,
                     /*min_pow_checked=*/true, &new_block);
-            } else {
+            } else if (!need_exact_replay) {
                 BlockValidationState abc_state;
                 (void)m_chainman.ActiveChainstate().ActivateBestChain(
                     abc_state, nullptr);
@@ -3374,7 +3429,7 @@ int PeerManagerImpl::ReclaimStaleInFlightBlockRequests(std::chrono::microseconds
     std::chrono::microseconds oldest_reclaimed{0us};
     const auto reclaim_after_default = IsCatchUpBlockFetch(m_chainman)
                                    ? std::chrono::duration_cast<std::chrono::microseconds>(
-                                         BLOCK_CATCHUP_DOWNLOAD_TIMEOUT)
+                                         BLOCK_CATCHUP_DOWNLOAD_HARD_TIMEOUT)
                                    : std::chrono::duration_cast<std::chrono::microseconds>(
                                          BLOCK_INFLIGHT_HARD_RECLAIM_AFTER);
     const bool signed_frontier_catch_up{IsSignedFrontierBodyCatchUp()};
@@ -3430,6 +3485,12 @@ int PeerManagerImpl::ReclaimStaleInFlightBlockRequests(std::chrono::microseconds
                 signed_frontier_catch_up &&
                 PeerIsSignedFrontierBodySource(nodeid, *state) &&
                 preferred_sources <= 1};
+            ++state->m_block_download_timeout_count;
+            if (!state->m_manual &&
+                state->m_block_download_timeout_count >=
+                    BLOCK_DOWNLOAD_TIMEOUT_DISCONNECT_AFTER) {
+                state->m_block_download_disconnect_pending = true;
+            }
             if (!keep_only_source) {
                 state->m_block_download_paused_until =
                     now + BLOCK_DOWNLOAD_TIMEOUT_REREQUEST_COOLDOWN;
@@ -3874,7 +3935,7 @@ static uint256 g_configured_claimed_tip_child{};
         // siblings stay HEADER_ONLY so CandidateMining keeps the device.
         if (index->pprev == tip &&
             (index->nStatus & BLOCK_FAILED_MASK) == 0) {
-            if (node::matmul_trusted::HasQuorum(
+            if (node::matmul_trusted::HasQuorumInMemory(
                     index->GetBlockHash(), index->nHeight)) {
                 const CBlockIndex* const catch_up{
                     chainman.FindUniqueCompetingAttestedIndex()};
@@ -4106,7 +4167,7 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
         count = CATCHUP_BLOCKS_IN_TRANSIT_PER_PEER;
     }
     const auto rerequest_stale_after = catch_up
-        ? CatchUpDownloadTimeoutForPeer(peer.m_id, *state)
+        ? std::chrono::duration_cast<std::chrono::microseconds>(BLOCK_CATCHUP_DOWNLOAD_HEDGE_AFTER)
         : std::chrono::duration_cast<std::chrono::microseconds>(BLOCK_REREQUEST_STALE_AFTER);
     const size_t min_parallel_owners{catch_up ? CATCHUP_MIN_PARALLEL_OWNERS : size_t{1}};
     const ChainRecoveryState recovery{m_chainman.GetChainRecoveryState()};
@@ -4322,6 +4383,24 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
         state->pindexLastCommonBlock->nHeight > tip->nHeight &&
         (state->pindexLastCommonBlock->nStatus & BLOCK_HAVE_DATA) != 0 &&
         !m_chainman.ActiveChain().Contains(state->pindexLastCommonBlock)};
+    const bool signed_frontier_body_hole{
+        root_first.lowest_missing != nullptr &&
+        m_chainman.IndexIsOnSignedFrontierChain(
+            root_first.lowest_missing)};
+    const bool signed_frontier_prefix_can_advance{
+        have_data_unconnected && root_first.lowest_missing == nullptr &&
+        state->pindexBestKnownBlock != nullptr &&
+        state->pindexLastCommonBlock != nullptr &&
+        state->pindexBestKnownBlock->nHeight >
+            state->pindexLastCommonBlock->nHeight &&
+        state->pindexBestKnownBlock->GetAncestor(
+            state->pindexLastCommonBlock->nHeight) ==
+            state->pindexLastCommonBlock &&
+        m_chainman.IndexIsOnSignedFrontierChain(
+            state->pindexLastCommonBlock)};
+    const bool signed_frontier_fetch_progress{
+        signed_frontier_body_hole ||
+        signed_frontier_prefix_can_advance};
     if (have_data_unconnected) {
         const auto now_kick{GetTime<std::chrono::microseconds>()};
         if (m_last_unconnected_abc_kick.count() == 0 ||
@@ -4335,7 +4414,7 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
     const char* select_reason{"will_walk"};
     if (state->pindexLastCommonBlock == state->pindexBestKnownBlock) {
         select_reason = "already_at_peer_best";
-    } else if (have_data_unconnected) {
+    } else if (have_data_unconnected && !signed_frontier_fetch_progress) {
         select_reason = "have_data_unconnected";
     } else if (root_first.lowest_missing != nullptr) {
         if (IsBlockRequested(root_first.lowest_missing->GetBlockHash()) &&
@@ -4398,10 +4477,13 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
         log_skip("already_at_peer_best");
         return;
     }
-    if (have_data_unconnected) {
+    if (have_data_unconnected && !signed_frontier_fetch_progress) {
         // Fetching 188109 while 188108 sits HAVE_DATA-but-not-connected cannot
         // advance tip; it only fills inflight. Kick ABC (flag set above) and
-        // wait. Restart's only useful effect was clearing that window.
+        // wait. Restart's only useful effect was clearing that window. A hole
+        // on the unique signed-frontier branch is different: the preceding
+        // ExactReplayed prefix cannot activate until this root-first body and
+        // its authenticated suffix arrive, so keep the missing root fetchable.
         log_skip("have_data_unconnected");
         return;
     }
@@ -4557,6 +4639,16 @@ void PeerManagerImpl::FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, c
 
             // Is block in-flight?
             if (IsBlockRequested(pindex->GetBlockHash())) {
+                // A hedge is useful only when this peer is not already an
+                // owner. BlockRequested() rejects duplicate ownership, but the
+                // caller would still append GETDATA below; once stale, that
+                // produced an unbounded same-peer request loop while the
+                // original entry remained in flight.
+                if (IsBlockRequestedFromPeer(pindex->GetBlockHash(), peer.m_id)) {
+                    if (waitingfor == -1) waitingfor = peer.m_id;
+                    if (nodeStaller) *nodeStaller = waitingfor;
+                    return;
+                }
                 // ... and has the peer holding it gone quiet? A peer that
                 // accepts a getdata and never sends the block would otherwise
                 // pin it forever, because this loop skips anything in
@@ -5469,7 +5561,12 @@ bool PeerManagerImpl::ConsumeMatMulVerificationBudgetForPeer(
                  peer.m_addr.ToStringAddr());
         return true;
     }
-    auto allow_idle_catchup = [&]() -> bool {
+    // Legacy phase-2 catch-up predates the explicit RC progress lane above.
+    // Do not use this for RC: zero pending work is only a concurrency signal,
+    // and allowing any RC source whenever the accelerator becomes idle turns
+    // the per-minute anti-DoS budgets into no rate bound at all. The followed
+    // RC tip-child has the narrowly authenticated progress lane above.
+    auto allow_idle_legacy_catchup = [&]() -> bool {
         if (m_matmul_pending_verifications.load(std::memory_order_relaxed) != 0 ||
             m_matmul_rc_pending_verifications.load(std::memory_order_relaxed) != 0) {
             return false;
@@ -5496,7 +5593,6 @@ bool PeerManagerImpl::ConsumeMatMulVerificationBudgetForPeer(
                     *retry_delay = MatMulRCSourceBudgetRetryDelay(
                         budget_state.budget, netgroup_state.budget, now);
                 }
-                if (allow_idle_catchup()) return true;
                 return false;
             }
             uint32_t global_budget =
@@ -5585,7 +5681,6 @@ bool PeerManagerImpl::ConsumeMatMulVerificationBudgetForPeer(
                 }
                 LogDebug(BCLog::NET, "Global RC verify budget exhausted (%u/min), deferring peer %s\n",
                          global_budget, peer.m_addr.ToStringAddr());
-                if (allow_idle_catchup()) return true;
                 return false;
             }
             return true;
@@ -5607,7 +5702,7 @@ bool PeerManagerImpl::ConsumeMatMulVerificationBudgetForPeer(
                     reference_height, lane)) {
                 source_window_start = saved_window_start;
                 source_count = saved_count;
-                if (allow_idle_catchup()) return true;
+                if (allow_idle_legacy_catchup()) return true;
                 return false;
             }
         }
@@ -5628,7 +5723,7 @@ bool PeerManagerImpl::ConsumeMatMulVerificationBudgetForPeer(
                 global_exhausted = true;
                 LogDebug(BCLog::NET, "Global Phase2 budget exhausted (%u/min), deferring peer %s\n",
                          global_budget, peer.m_addr.ToStringAddr());
-                if (allow_idle_catchup()) return true;
+                if (allow_idle_legacy_catchup()) return true;
                 return false;
             }
         }
@@ -8174,7 +8269,7 @@ std::chrono::microseconds PeerManagerImpl::CatchUpDownloadTimeoutForPeer(
                 node::matmul_trusted::WaitTimeout()));
     }
     return std::chrono::duration_cast<std::chrono::microseconds>(
-        BLOCK_CATCHUP_DOWNLOAD_TIMEOUT);
+        BLOCK_CATCHUP_DOWNLOAD_HARD_TIMEOUT);
 }
 
 void PeerManagerImpl::MaybeFollowTrustedMirrorAuthorityHeader(
@@ -8448,7 +8543,8 @@ void PeerManagerImpl::StopHistoricalAttestationReverify()
 }
 
 bool PeerManagerImpl::MaybeQueueHistoricalAttestationReverify(
-    const uint256& hash, int32_t height, const CBlockHeader& header)
+    const uint256& hash, int32_t height, const CBlockHeader& header,
+    bool signed_frontier_recovery)
 {
     AssertLockNotHeld(cs_main);
     if (m_chainman.GetMatMulValidationMode() !=
@@ -8458,7 +8554,8 @@ bool PeerManagerImpl::MaybeQueueHistoricalAttestationReverify(
         return false;
     }
     const auto admit{
-        node::matmul_trusted::TryAdmitHistoricalReverify(hash)};
+        node::matmul_trusted::TryAdmitHistoricalReverify(
+            hash, signed_frontier_recovery)};
     if (admit != node::matmul_trusted::HistoricalReverifyAdmit::Allow) {
         return false;
     }
@@ -8468,6 +8565,7 @@ bool PeerManagerImpl::MaybeQueueHistoricalAttestationReverify(
             .hash = hash,
             .height = height,
             .header = header,
+            .signed_frontier_recovery = signed_frontier_recovery,
         });
         EnsureHistoricalAttestationReverifyThread();
         m_hist_attest_cv.notify_one();
@@ -8521,11 +8619,16 @@ void PeerManagerImpl::HistoricalAttestationReverifyLoop()
                 // so FindMostWorkChain can select it after the verdict bit.
                 if (idx != nullptr && tip != nullptr &&
                     (idx->nStatus & BLOCK_HAVE_DATA) != 0 &&
-                    idx->HaveNumChainTxs() &&
                     !m_chainman.ActiveChain().Contains(idx)) {
-                    m_chainman.ActiveChainstate().TryAddBlockIndexCandidate(idx);
-                    kick_abc = true;
+                    if (idx->HaveNumChainTxs()) {
+                        m_chainman.ActiveChainstate().TryAddBlockIndexCandidate(idx);
+                        kick_abc = !job.signed_frontier_recovery;
+                    }
                 }
+                // Do not activate an intermediate replay prefix. Once the
+                // complete signed branch is locally authenticated and
+                // processable, the unique-candidate gate provides the single
+                // safe activation point.
             }
             LogInfo(
                 "historical ExactReplay re-verify succeeded block=%s "
@@ -8576,7 +8679,7 @@ void PeerManagerImpl::RequestMatMulTrustedAttestations(
         // the archive's 16-token burst so the deferred child was rate-limited
         // forever (qualifier linear-chain stall at the next height).
         if (index != nullptr &&
-            node::matmul_trusted::HasQuorum(hash, height)) {
+            node::matmul_trusted::HasQuorumInMemory(hash, height)) {
             m_matmul_attestation_requested.erase(hash);
             return;
         }
@@ -10994,7 +11097,7 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
                     if (exact_recompute_required &&
                         node::matmul_trusted::IsConfigured()) {
                         const CBlockIndex* tip{m_chainman.ActiveTip()};
-                        const bool has_quorum{node::matmul_trusted::HasQuorum(
+                        const bool has_quorum{node::matmul_trusted::HasQuorumInMemory(
                             block_hash, exact_reference_height)};
                         if (has_quorum) {
                             // Fast-accept: ProcessNewBlock + cached quorum
@@ -11597,6 +11700,7 @@ void PeerManagerImpl::ProcessBlockSync(NodeId nodeid, CNode* node, const std::sh
     bool new_block{false};
     m_chainman.ProcessNewBlock(block, force_processing, min_pow_checked, &new_block);
     bool exact_replay_authenticated{false};
+    bool quorum_authenticated{false};
     bool terminal_failure{false};
     {
         LOCK(cs_main);
@@ -11608,6 +11712,12 @@ void PeerManagerImpl::ProcessBlockSync(NodeId nodeid, CNode* node, const std::sh
             (index->nStatus & BLOCK_HAVE_DATA) != 0 &&
             (index->nStatus & BLOCK_FAILED_MASK) == 0 &&
             index->IsValid(BLOCK_VALID_SCRIPTS);
+        quorum_authenticated = index != nullptr &&
+            (index->nStatus & BLOCK_HAVE_DATA) != 0 &&
+            (index->nStatus & BLOCK_FAILED_MASK) == 0 &&
+            index->IsValid(BLOCK_VALID_SCRIPTS) &&
+            node::matmul_trusted::HasQuorumInMemory(
+                hash, index->nHeight);
         terminal_failure = index != nullptr &&
             (index->nStatus & BLOCK_FAILED_MASK) != 0;
         // Persist-or-skip-fetch: a delivered followed-chain body that still
@@ -11632,9 +11742,14 @@ void PeerManagerImpl::ProcessBlockSync(NodeId nodeid, CNode* node, const std::sh
     // A duplicate/no-op ProcessNewBlock result is not necessarily terminal:
     // another delivery can still own the asynchronous replay, and a local
     // accelerator failure deliberately leaves the candidate retryable. Keep
-    // that bounded observation until exact local authority succeeds, the
-    // index is permanently failed, or its TTL expires.
-    if (exact_replay_authenticated || terminal_failure) {
+    // that bounded observation until exact local authority succeeds, current
+    // configured quorum has already authorized a scripts-valid stored body,
+    // the index is permanently failed, or its TTL expires. Keeping a body
+    // after quorum accepted it caused an active block to bypass its 60-second
+    // cooldown and re-enter this scheduler every second forever.
+    const bool terminal_authenticated{
+        exact_replay_authenticated || quorum_authenticated};
+    if (terminal_authenticated || terminal_failure) {
         if (lifecycle_token) {
             m_matmul_block_lifecycle.Terminal(*lifecycle_token);
         } else {
@@ -11875,6 +11990,7 @@ void PeerManagerImpl::ProcessCompactBlockTxns(CNode& pfrom, Peer& peer, const Bl
             LOCK(cs_main);
             if (CNodeState* nodestate = State(pfrom.GetId())) {
                 nodestate->m_block_download_timeout_count = 0;
+                nodestate->m_block_download_disconnect_pending = false;
             }
         }
         MaybeRelayProvisionalMatMulRCCompactBlock(
@@ -12542,6 +12658,14 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             Misbehaving(*peer, "malformed or out-of-order blkchunk");
             return;
         }
+        // A negotiated chunk is concrete progress on the outstanding block.
+        // Refresh the ordinary request deadline so catch-up's 90-second hard
+        // timeout does not reclaim a healthy multi-minute chunk stream. The
+        // independent five-minute absolute transfer lifetime still bounds a
+        // slow-loris source.
+        WITH_LOCK(cs_main, RefreshBlockRequestActivity(
+                               expected_hash, pfrom.GetId(),
+                               GetTime<std::chrono::microseconds>()));
         if (result == node::BlockChunkAddResult::ACCEPTED) return;
 
         DropInboundBlockChunks(pfrom.GetId());
@@ -15451,10 +15575,16 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             forceProcessing = IsBlockRequested(hash);
             const bool useful_owned_delivery{
                 IsBlockRequestedFromPeer(hash, pfrom.GetId())};
-            RemoveBlockRequest(hash, pfrom.GetId());
+            // A complete, non-mutated body satisfies every redundant request
+            // for this hash. Keeping an older hedged owner here makes the hash
+            // look permanently in-flight; the next SendMessages pass can then
+            // re-request the same just-delivered body from this peer in a tight
+            // loop because only the responder's fresh entry was retired.
+            RemoveBlockRequest(hash, std::nullopt);
             if (useful_owned_delivery) {
                 if (CNodeState* nodestate = State(pfrom.GetId())) {
                     nodestate->m_block_download_timeout_count = 0;
+                    nodestate->m_block_download_disconnect_pending = false;
                 }
             }
             // Check claimed work on this block against our anti-dos thresholds.
@@ -16473,6 +16603,15 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
 
         CNodeState &state = *State(pto->GetId());
 
+        if (state.m_block_download_disconnect_pending) {
+            LogInfo("Disconnecting persistently unresponsive block source after "
+                    "%d hard timeout(s), %s\n",
+                    state.m_block_download_timeout_count,
+                    pto->DisconnectMsg(fLogIPs));
+            pto->fDisconnect = true;
+            return true;
+        }
+
         // Start block sync
         if (m_chainman.m_best_header == nullptr) {
             m_chainman.SetBestHeader(m_chainman.ActiveChain().Tip());
@@ -17030,8 +17169,8 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                     spacing * BLOCK_DOWNLOAD_TIMEOUT_MAX_MULT));
             const bool catch_up{IsCatchUpBlockFetch(m_chainman, state.pindexBestKnownBlock)};
             if (catch_up) {
-                download_timeout = std::min(
-                    download_timeout, CatchUpDownloadTimeoutForPeer(pto->GetId(), state));
+                download_timeout =
+                    CatchUpDownloadTimeoutForPeer(pto->GetId(), state);
             }
             // Time the head of the queue from when *it* was requested, not from
             // the peer-wide m_downloading_since. m_downloading_since only moves
@@ -17059,8 +17198,12 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                         const auto req_at = entry.requested_at.count() > 0
                                                 ? entry.requested_at
                                                 : state.m_downloading_since;
-                        if (catch_up || req_at.count() == 0 ||
-                            current_time >= req_at + BLOCK_INFLIGHT_HARD_RECLAIM_AFTER) {
+                        const auto stale_after = catch_up
+                            ? CatchUpDownloadTimeoutForPeer(pto->GetId(), state)
+                            : std::chrono::duration_cast<std::chrono::microseconds>(
+                                  BLOCK_INFLIGHT_HARD_RECLAIM_AFTER);
+                        if (req_at.count() == 0 ||
+                            current_time >= req_at + stale_after) {
                             also_stale.push_back(entry.pindex->GetBlockHash());
                         }
                     }
@@ -17076,31 +17219,31 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                     }
                 }
                 ++state.m_block_download_timeout_count;
-                // Prefer re-request over disconnect when other download peers
-                // exist: dropping this peer also discards its other useful
-                // in-flight blocks. Still disconnect if this is the only
-                // download peer or the peer keeps timing out.
-                const bool can_rerequest_elsewhere = peers_downloading_before > 1;
+                // A single hard timeout releases the hash and cools the source;
+                // it is not proof the peer is dead. In particular, disconnecting
+                // the sole/manual archive here destroys the only source from
+                // which the block can be re-requested. Disconnect ordinary peers
+                // only after repeated hard misses; addnode/manual connections
+                // remain available for later requests.
                 const bool persistent_timeout =
                     state.m_block_download_timeout_count >= BLOCK_DOWNLOAD_TIMEOUT_DISCONNECT_AFTER;
                 const bool keep_frontier_source{
                     IsSignedFrontierBodyCatchUp() &&
-                    PeerIsSignedFrontierBodySource(pto->GetId(), state, peer.get()) &&
-                    !persistent_timeout};
-                if ((can_rerequest_elsewhere && !persistent_timeout) ||
-                    keep_frontier_source) {
-                    const bool only_source{
-                        keep_frontier_source &&
-                        CountSignedFrontierBodySources() <= 1};
+                    PeerIsSignedFrontierBodySource(pto->GetId(), state, peer.get())};
+                const bool only_source{
+                    keep_frontier_source &&
+                    CountSignedFrontierBodySources() <= 1};
+                if (!persistent_timeout || pto->IsManualConn()) {
                     if (!only_source) {
                         state.m_block_download_paused_until =
                             current_time + BLOCK_DOWNLOAD_TIMEOUT_REREQUEST_COOLDOWN;
                     }
                     LogInfo("Timeout downloading block %s (in flight %ds) from peer=%d; "
-                            "releasing for re-request (other download peers=%d, consecutive_timeouts=%d%s)\n",
+                            "releasing for re-request (other download peers=%d, consecutive_timeouts=%d, manual=%d%s)\n",
                             stuck_hash.ToString(), inflight_secs, pto->GetId(),
                             peers_downloading_before - 1, state.m_block_download_timeout_count,
-                            keep_frontier_source ? ", keep_frontier_source" : "");
+                            pto->IsManualConn() ? 1 : 0,
+                            only_source ? ", keep_only_frontier_source" : "");
                     // Continue SendMessages so this pass can still allocate
                     // getdata to other peers; do not disconnect.
                 } else {

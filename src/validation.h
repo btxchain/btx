@@ -1580,6 +1580,11 @@ public:
      *  GetSignedFrontierStatus().on_active_chain, this stays true while
      *  catching up (tip height < frontier height) on the attested chain. */
     [[nodiscard]] bool IndexLeadsToSignedFrontier(const CBlockIndex* index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** For a CONSENSUS local signer stranded on an attested twin, return the
+     *  first HAVE_DATA block on the unique, strictly-heavier signed-frontier
+     *  branch that still needs local ExactReplay. The signed statement only
+     *  prioritizes bounded verification; it never authenticates an ancestor. */
+    [[nodiscard]] const CBlockIndex* FindNextSignedFrontierExactReplayIndex() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool ShouldDeferLosingTipExtension(const CBlockIndex* candidate) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool IsAutomaticReorgRecoveryCandidate(const CBlockIndex* candidate) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /**
@@ -1628,7 +1633,11 @@ public:
      * fossils off that chain. Live 2026-08-16: trusted archives sat 13–180
      * unattested HAVE_DATA blocks off the attested suffix.
      */
-    const CBlockIndex* FindUniqueCompetingAttestedIndex() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** Return the unique actionable attested branch, if any. `path_visits`
+     *  is optional diagnostic/test output counting intermediate ancestry
+     *  entries inspected while proving that candidate bodies are complete. */
+    const CBlockIndex* FindUniqueCompetingAttestedIndex(
+        size_t* path_visits = nullptr) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool IsAttestedAbandonForkCandidate(const CBlockIndex* candidate) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     std::optional<node::ReorgRecoveryRecord> GetReorgRecoveryRecord() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
     {

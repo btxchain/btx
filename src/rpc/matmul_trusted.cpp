@@ -197,7 +197,7 @@ RPCHelpMan getmatmultrustedstatus()
                     attested_tip.pushKV(
                         "active_tip_has_quorum",
                         tip != nullptr &&
-                            node::matmul_trusted::HasQuorum(
+                            node::matmul_trusted::HasQuorumInMemory(
                                 tip->GetBlockHash(), tip->nHeight));
                     result.pushKV("attested_tip", std::move(attested_tip));
                 }
@@ -256,7 +256,7 @@ RPCHelpMan getmatmulattestedtip()
                 result.pushKV("active_tip_height", tip->nHeight);
                 result.pushKV(
                     "active_tip_has_quorum",
-                    node::matmul_trusted::HasQuorum(
+                    node::matmul_trusted::HasQuorumInMemory(
                         tip->GetBlockHash(), tip->nHeight));
             }
             if (const CBlockIndex* attested{
@@ -384,6 +384,7 @@ RPCHelpMan submitmatmulattestations()
                     "attestations must contain 1..16 items");
             }
             UniValue out{UniValue::VARR};
+            bool activate_best_chain{false};
             for (const auto& value : values.getValues()) {
                 matmul::trusted::ExactReplayAttestation
                     attestation;
@@ -421,6 +422,28 @@ RPCHelpMan submitmatmulattestations()
                     node::matmul_trusted::HasQuorum(
                         hash, known->height));
                 out.push_back(std::move(item));
+                if (node::matmul_trusted::HasQuorumInMemory(
+                        hash, known->height)) {
+                    LOCK(cs_main);
+                    const CBlockIndex* const index{
+                        chainman.m_blockman.LookupBlockIndex(hash)};
+                    if (index != nullptr) {
+                        if (!chainman.MaybeTrackReorgRecovery(index)) {
+                            LogError("Unable to persist reorg recovery after RPC "
+                                     "MMATTEST quorum block=%s height=%d\n",
+                                     hash.ToString(), known->height);
+                        }
+                        chainman.NotifySignedFrontierStatus();
+                        activate_best_chain = true;
+                    }
+                }
+            }
+            if (activate_best_chain) {
+                BlockValidationState state;
+                if (!chainman.ActiveChainstate().ActivateBestChain(state)) {
+                    LogError("Unable to activate newly attested RPC candidate: %s\n",
+                             state.ToString());
+                }
             }
             return out;
         }};
@@ -534,7 +557,7 @@ RPCHelpMan getfinalityinfo()
                 active.pushKV(
                     "has_quorum",
                     node::matmul_trusted::IsConfigured() &&
-                        node::matmul_trusted::HasQuorum(
+                        node::matmul_trusted::HasQuorumInMemory(
                             tip->GetBlockHash(), tip->nHeight));
                 result.pushKV("active_tip", std::move(active));
             }

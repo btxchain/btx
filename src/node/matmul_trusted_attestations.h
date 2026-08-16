@@ -146,7 +146,8 @@ enum class HistoricalReverifyAdmit : uint8_t {
 };
 
 [[nodiscard]] HistoricalReverifyAdmit TryAdmitHistoricalReverify(
-    const uint256& block_hash);
+    const uint256& block_hash,
+    bool signed_frontier_recovery = false);
 void NoteHistoricalReverifyStarted(const uint256& block_hash);
 void NoteHistoricalReverifyFinished(const uint256& block_hash);
 void ResetHistoricalReverifyBudgetForTest();

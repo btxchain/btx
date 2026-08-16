@@ -49,6 +49,9 @@ C++ exemption is missing this test fails; do not "fix" that by disabling
 consistency checks.
 """
 
+import os
+import shutil
+
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     assert_equal,
@@ -124,14 +127,19 @@ def submit_chain_via_rpc(src, dest, stop_hash=None):
         if stop_hash is not None and blockhash == stop_hash:
             break
         try:
-            dest.getblock(blockhash, False)
-            break
+            known = dest.getblockheader(blockhash, True)
+            if known["confirmations"] > 0:
+                break
+            # HAVE_DATA on an inactive branch is not synchronized state. Keep
+            # walking to the active common ancestor and resubmit root-first so
+            # duplicate-body activation paths are exercised.
+            to_copy.append(blockhash)
         except Exception:
             to_copy.append(blockhash)
-            header = src.getblockheader(blockhash, True)
-            if "previousblockhash" not in header:
-                break
-            blockhash = header["previousblockhash"]
+        header = src.getblockheader(blockhash, True)
+        if "previousblockhash" not in header:
+            break
+        blockhash = header["previousblockhash"]
     for blockhash in reversed(to_copy):
         raw = src.getblock(blockhash, False)
         result = dest.submitblock(raw)
@@ -152,14 +160,16 @@ def submit_attested_chain_via_rpc(src, dest_mirror, stop_hash=None):
         if stop_hash is not None and blockhash == stop_hash:
             break
         try:
-            dest_mirror.getblock(blockhash, False)
-            break
+            known = dest_mirror.getblockheader(blockhash, True)
+            if known["confirmations"] > 0:
+                break
+            to_copy.append(blockhash)
         except Exception:
             to_copy.append(blockhash)
-            header = src.getblockheader(blockhash, True)
-            if "previousblockhash" not in header:
-                break
-            blockhash = header["previousblockhash"]
+        header = src.getblockheader(blockhash, True)
+        if "previousblockhash" not in header:
+            break
+        blockhash = header["previousblockhash"]
     for blockhash in reversed(to_copy):
         raw = src.getblock(blockhash, False)
         atts = src.getmatmulattestations(blockhash)
@@ -389,9 +399,22 @@ class MatMulTrustedMirrorConvergenceTest(BitcoinTestFramework):
         )
 
         self.log.info(
-            "Deep-reorg guard: rewrite deeper than park_depth must stay refused"
+            "Deep-reorg/finality guard: rewrite deeper than park_depth must stay refused"
         )
         self._test_deep_reorg_refusal(authority, mirror, loser)
+
+        # A trusted mirror receives descendants before their individual
+        # attestations while the authority is advancing. The selected catch-up
+        # suffix must be persisted (without activation), not re-requested on
+        # every SendMessages pass. The regression
+        # produced more than 500,000 requests (and a 1.6 GiB debug.log) in this
+        # test; leave ample headroom for future scenario growth while keeping a
+        # deterministic guard against that transport livelock.
+        with open(mirror.debug_log_path, encoding="utf-8", errors="replace") as dl:
+            mirror_log = dl.read()
+        assert "Persisting unattested trusted-mirror catch-up suffix" in mirror_log
+        block_request_count = mirror_log.count("Requesting block ")
+        assert block_request_count < 1000, block_request_count
 
         self.stop_node(0, expected_stderr=INLINE_SIGNER_WARNING)
         self.stop_node(1, expected_stderr=TRUST_WARNING.format(1))
@@ -776,23 +799,55 @@ class MatMulTrustedMirrorConvergenceTest(BitcoinTestFramework):
         self.disconnect_nodes(0, 1)
         # Bring the competing miner onto the authority tip first (consensus path,
         # no attestations required), then rewind to the fork and mine a deep rewrite.
-        submit_chain_via_rpc(authority, loser)
+        # This node may retain an inactive authority body tower while its active
+        # tip is on an earlier test fork. Rewind that active fork to the common
+        # authority ancestor so root-first resubmission can activate known data.
+        while True:
+            loser_tip = loser.getbestblockhash()
+            try:
+                if authority.getblockheader(loser_tip)["confirmations"] > 0:
+                    break
+            except JSONRPCException:
+                pass
+            loser.invalidateblock(loser_tip)
+        submit_attested_chain_via_rpc(authority, loser)
         self.wait_until(lambda: loser.getbestblockhash() == tip_hash, timeout=120)
         while loser.getblockcount() > fork_height:
             loser.invalidateblock(loser.getbestblockhash())
         assert_equal(loser.getbestblockhash(), fork_hash)
+
+        # The normal secondary signer has learned the authority's durable
+        # signatures, so the anti-equivocation guard correctly refuses to sign
+        # a second hash at these heights. The finality test deliberately models
+        # a compromised/cloned signer with no such history: stop it and wipe
+        # only the temporary test attestation store while retaining its block
+        # index at the chosen fork.
+        self.stop_node(2, expected_stderr=INLINE_SIGNER_WARNING)
+        attest_base = os.path.join(
+            loser.datadir_path, "regtest", "matmul_attestations.dat"
+        )
+        for path in (attest_base, attest_base + ".wal", attest_base + ".db"):
+            if os.path.isdir(path):
+                shutil.rmtree(path)
+            elif os.path.exists(path):
+                os.remove(path)
+        self.start_node(2, extra_args=self.archive_args)
+        assert_equal(loser.getbestblockhash(), fork_hash)
+
         competing_len = (tip_height - fork_height) + 3
         self.generate(loser, competing_len, sync_fun=self.no_op)
         assert_greater_than(loser.getblockcount(), tip_height)
         competing_tip = loser.getbestblockhash()
 
-        # Authority is consensus: RPC submit is enough to exercise PARK.
+        # Authority is consensus: RPC submit makes the competing bodies
+        # available to either signer-finality filtering or PARK.
         submit_chain_via_rpc(loser, authority, stop_hash=fork_hash)
         assert_equal(authority.getbestblockhash(), tip_hash)
         assert_equal(authority.getblockcount(), tip_height)
 
-        # Mirror: deliver competing bodies with attestations so ActivateBestChain
-        # actually considers the rewrite and must PARK it.
+        # Mirror: deliver competing bodies with attestations. A conflicting
+        # signer-height record may stop them before PARK; otherwise PARK must
+        # refuse the rewrite.
         submit_attested_chain_via_rpc(loser, mirror, stop_hash=fork_hash)
         assert_equal(mirror.getbestblockhash(), tip_hash)
         assert_equal(mirror.getblockcount(), tip_height)
@@ -805,9 +860,26 @@ class MatMulTrustedMirrorConvergenceTest(BitcoinTestFramework):
 
         auth_rp = authority.getdifficultyhealth(5)["reorg_protection"]
         mirror_rp = mirror.getdifficultyhealth(5)["reorg_protection"]
-        assert_greater_than_or_equal(auth_rp["rejected_reorgs"], rejected_before + 1)
-        assert_greater_than_or_equal(
-            mirror_rp["rejected_reorgs"], mirror_rejected_before + 1
+        # A configured signer may reject the conflicting signed-height tower
+        # before FindMostWorkChain reaches PARK. Both outcomes are correct:
+        # PARK increments rejected_reorgs; signer finality leaves the fully
+        # downloaded branch at valid-headers and never makes it active.
+        auth_competing = auth_tips.get(competing_tip)
+        mirror_tips = {t["hash"]: t for t in mirror.getchaintips()}
+        mirror_competing = mirror_tips.get(competing_tip)
+        assert (
+            auth_rp["rejected_reorgs"] >= rejected_before + 1
+            or (
+                auth_competing is not None
+                and auth_competing["status"] in ("valid-headers", "headers-only")
+            )
+        )
+        assert (
+            mirror_rp["rejected_reorgs"] >= mirror_rejected_before + 1
+            or (
+                mirror_competing is not None
+                and mirror_competing["status"] in ("valid-headers", "headers-only")
+            )
         )
         assert_equal(auth_rp["parking_enabled"], True)
         assert_equal(mirror_rp["parking_enabled"], True)

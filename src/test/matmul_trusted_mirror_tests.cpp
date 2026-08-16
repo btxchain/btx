@@ -1609,6 +1609,55 @@ BOOST_AUTO_TEST_CASE(durable_history_is_namespaced_across_signer_rotation)
     BOOST_CHECK(node::matmul_trusted::HasQuorum(block, 51));
 }
 
+BOOST_AUTO_TEST_CASE(durable_local_signer_cannot_equivocate_after_hot_cache_eviction)
+{
+    RuntimeReset reset;
+    const CKey signer{NewKey()};
+    const uint256 chain{Hex256('4')};
+    const uint256 context{Hex256('5')};
+    const uint256 first{Hex256('6')};
+    const uint256 next{Hex256('7')};
+    const uint256 conflicting{Hex256('8')};
+    const fs::path archive{
+        m_args.GetDataDirNet() / "matmul_attestations_anti_equivocation.dat"};
+
+    auto configure = [&] {
+        matmul::trusted::StoreConfig config;
+        config.chain_id = chain;
+        config.replay_authority_context = context;
+        config.trusted_signers = {signer.GetPubKey()};
+        config.threshold = 1;
+        config.max_blocks = 1;
+        config.max_attestations = 1;
+        config.local_signer = signer;
+        std::string error;
+        BOOST_REQUIRE(node::matmul_trusted::Configure(
+            std::move(config), /*trusted_mirror=*/false,
+            /*serve=*/true, std::chrono::milliseconds{50}, error));
+    };
+
+    configure();
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::OpenPersistence(archive, error));
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(first, 42) ==
+                  matmul::trusted::AddResult::Accepted);
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(next, 43) ==
+                  matmul::trusted::AddResult::Accepted);
+    BOOST_CHECK(!node::matmul_trusted::HasQuorumInMemory(first, 42));
+    BOOST_REQUIRE(node::matmul_trusted::FlushPersistence(error));
+
+    node::matmul_trusted::ResetForTest();
+    configure();
+    error.clear();
+    BOOST_REQUIRE(node::matmul_trusted::OpenPersistence(archive, error));
+    // The one-entry hot cache contains height 43 after restart. The durable
+    // anti-equivocation index must still remember the local vote at height 42.
+    BOOST_CHECK(!node::matmul_trusted::HasQuorumInMemory(first, 42));
+    BOOST_CHECK(node::matmul_trusted::HasQuorum(first, 42));
+    BOOST_CHECK(node::matmul_trusted::SignAuthoritative(conflicting, 42) ==
+                matmul::trusted::AddResult::HeightOccupied);
+}
+
 BOOST_AUTO_TEST_CASE(durable_worker_checkpoints_wal_under_sustained_history)
 {
     RuntimeReset reset;
@@ -1809,6 +1858,14 @@ BOOST_AUTO_TEST_CASE(historical_reverify_is_rate_limited)
         node::matmul_trusted::HistoricalReverifyQueuedForTest(), 0U);
     BOOST_CHECK_EQUAL(
         node::matmul_trusted::HistoricalReverifyInflightForTest(), 0U);
+    // A unique signed-frontier recovery is already authenticated and remains
+    // serialized by the inflight cap, so it does not wait for the
+    // unauthenticated GETMMATTEST token refill.
+    BOOST_CHECK(
+        node::matmul_trusted::TryAdmitHistoricalReverify(
+            c, /*signed_frontier_recovery=*/true) ==
+        node::matmul_trusted::HistoricalReverifyAdmit::Allow);
+    node::matmul_trusted::NoteHistoricalReverifyFinished(c);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
