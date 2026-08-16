@@ -755,10 +755,12 @@ static constexpr int SIGNER_MSGHAND_OTHER_PER_LOOP{8};
     return true;
 }
 
-/** During signed-frontier catch-up, keep the last GPU/frontier body
- *  source even after consecutive GETDATA timeouts. Live nyc1 2026-08-16:
- *  3×90s then "disconnecting peer=1027" dropped the only attested
- *  source; tip froze and RPC stopped answering. */
+/** During signed-frontier catch-up, keep a GPU/frontier body source
+ *  even after consecutive GETDATA timeouts. Live nyc1 2026-08-16:
+ *  3×90s then "disconnecting peer=1027" / peer=225 dropped the only
+ *  attested source. `this_peer_is_gpu_or_frontier_source` is a property
+ *  of that peer — do not require a summed authority+frontier count of
+ *  1, because one GPU is counted in both buckets. */
 [[nodiscard]] inline bool KeepCatchupSourceOnDownloadTimeout(
     bool signed_frontier_catch_up,
     bool persistent_timeout,

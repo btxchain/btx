@@ -17428,12 +17428,13 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                 const bool can_rerequest_elsewhere = peers_downloading_before > 1;
                 const bool persistent_timeout =
                     state.m_block_download_timeout_count >= BLOCK_DOWNLOAD_TIMEOUT_DISCONNECT_AFTER;
+                // Do not sum GPU-authority + frontier-source counts: the
+                // live GPU is both, so the sum is 2 and the keep-source
+                // gate never fired (nyc1 2026-08-16T15:41Z, peer=225
+                // disconnected after 3 timeouts with download_peers_was=1).
                 const bool last_gpu_or_frontier_source{
-                    (PeerIsGpuAuthority(pto->GetId(), state) ||
-                     PeerIsSignedFrontierBodySource(pto->GetId(), state)) &&
-                    CountCapableGpuAuthorityPeers() +
-                            CountCapableSignedFrontierBodySources() <=
-                        1};
+                    PeerIsGpuAuthority(pto->GetId(), state) ||
+                    PeerIsSignedFrontierBodySource(pto->GetId(), state)};
                 const bool keep_catchup_source{
                     node::matmul_trusted::KeepCatchupSourceOnDownloadTimeout(
                         IsSignedFrontierBodyCatchUp(), persistent_timeout,
