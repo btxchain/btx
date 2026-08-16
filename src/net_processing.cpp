@@ -2239,7 +2239,8 @@ private:
         const uint256& hash, bool exact_replay_authenticated)
         NO_THREAD_SAFETY_ANALYSIS;
     /** Request Profile-1 attestations for a preferred hash (ActiveTip child,
-     *  short-reorg missing root, or recent active ancestor). Ticketless
+     *  short-reorg missing root, recent active ancestor, or followed
+     *  HAVE_DATA / retained GPU body awaiting MMATTEST). Ticketless
      *  competing siblings still cannot occupy the outstanding-request map.
      *  Configured nodes skip async ExactReplay GPU; this request is how they
      *  obtain quorum for ConnectTip and must not be gated on GPU spend. */
@@ -4402,6 +4403,10 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
             m_need_activate_best_chain = true;
             m_last_unconnected_abc_kick = now_kick;
         }
+        if (this_peer_frontier_source) {
+            RequestMatMulTrustedAttestations(
+                state->pindexLastCommonBlock->GetBlockHash(), peer.m_id);
+        }
     }
 
     const char* select_reason{"will_walk"};
@@ -4489,7 +4494,12 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
         // Same stall as HAVE_DATA-unconnected: the followed-chain body is
         // already in the lifecycle store (pending-cap / budget / ticketless
         // retry). Re-getdata of this hash or its successors cannot connect
-        // until the scheduler re-admits.
+        // until the scheduler re-admits. GETMMATTEST the retained hash so
+        // quorum can lift ConnectTip without waiting for the 1s retry loop.
+        if (this_peer_frontier_source) {
+            RequestMatMulTrustedAttestations(
+                root_first.lowest_missing->GetBlockHash(), peer.m_id);
+        }
         log_skip("root_retained_body");
         return;
     }
@@ -8085,6 +8095,11 @@ PeerManagerImpl::EvaluateTrustedMirrorAttestationAdmit(
         tip->nHeight - index->nHeight <=
             node::matmul_trusted::TRUSTED_MIRROR_ATTESTED_TIP_LOOKBACK &&
         tip->GetAncestor(index->nHeight) == index};
+    const bool followed_body_awaiting_attestation{
+        extends_active_tip_chain && index != nullptr &&
+        (tip == nullptr || !m_chainman.ActiveChain().Contains(index)) &&
+        ((index->nStatus & BLOCK_HAVE_DATA) != 0 ||
+         m_matmul_block_lifecycle.HasRetainedBody(hash))};
     bool in_backoff{false};
     const auto backoff_it{m_matmul_attestation_backoff.find(hash)};
     if (backoff_it != m_matmul_attestation_backoff.end()) {
@@ -8098,6 +8113,8 @@ PeerManagerImpl::EvaluateTrustedMirrorAttestationAdmit(
         .better_work_reorg_candidate = better_work_reorg_candidate,
         .on_recovery_branch = on_recovery_branch,
         .on_recent_active_ancestor = recent_active_ancestor,
+        .followed_body_awaiting_attestation =
+            followed_body_awaiting_attestation,
         .on_parked_reorg_branch = parked,
         .height = index ? index->nHeight : -1,
         .authority_frontier = CappedAuthorityAttestedFrontier(m_chainman),
@@ -8583,8 +8600,24 @@ void PeerManagerImpl::MaybeRequestTrustedMirrorPreferredAttestations(
     }
 
     const CBlockIndex* child{nullptr};
+    const CBlockIndex* followed_hole{nullptr};
     if (extends_tip && known->nHeight > tip->nHeight) {
         child = known->GetAncestor(tip->nHeight + 1);
+        for (int height = tip->nHeight + 1; height <= known->nHeight;
+             ++height) {
+            const CBlockIndex* idx{known->GetAncestor(height)};
+            if (idx == nullptr) break;
+            if (m_chainman.ActiveChain().Contains(idx)) continue;
+            if ((idx->nStatus & BLOCK_HAVE_DATA) != 0 ||
+                m_matmul_block_lifecycle.HasRetainedBody(
+                    idx->GetBlockHash())) {
+                followed_hole = idx;
+                break;
+            }
+            // First unconnected header without a body: GETMMATTEST the
+            // tip-child below; do not scan a HEADER_ONLY miner suffix.
+            break;
+        }
     }
     const CBlockIndex* hole{nullptr};
     const CBlockIndex* fork_child{nullptr};
@@ -8614,18 +8647,25 @@ void PeerManagerImpl::MaybeRequestTrustedMirrorPreferredAttestations(
             tip->nHeight - target->nHeight <=
                 node::matmul_trusted::TRUSTED_MIRROR_ATTESTED_TIP_LOOKBACK &&
             tip->GetAncestor(target->nHeight) == target};
+        const bool followed_body_awaiting{
+            target->nHeight >= tip->nHeight &&
+            target->GetAncestor(tip->nHeight) == tip &&
+            !m_chainman.ActiveChain().Contains(target) &&
+            ((target->nStatus & BLOCK_HAVE_DATA) != 0 ||
+             m_matmul_block_lifecycle.HasRetainedBody(target->GetBlockHash()))};
         if (!node::matmul_trusted::TrustedMirrorPreferGetMmAttest(
                 target->pprev == tip,
                 TrustedMirrorShortTipReorg(tip, target),
                 /*on_parked_reorg_branch=*/false,
-                recent_active_ancestor)) {
+                recent_active_ancestor, followed_body_awaiting)) {
             return;
         }
         RequestMatMulTrustedAttestations(target->GetBlockHash(),
                                          pto.GetId());
     };
+    request_if_preferred(followed_hole);
     request_if_preferred(child);
-    if (hole != child) request_if_preferred(hole);
+    if (hole != child && hole != followed_hole) request_if_preferred(hole);
     if (fork_child != child && fork_child != hole) {
         request_if_preferred(fork_child);
     }
@@ -8818,12 +8858,16 @@ void PeerManagerImpl::RequestMatMulTrustedAttestations(
 
     std::set<NodeId> skip_peers;
     std::vector<NodeId> prefer_peers;
+    std::set<NodeId> gpu_peers;
     bool request{false};
     bool asked_preferred_round{false};
     bool signed_frontier_catch_up{false};
     {
         LOCK(cs_main);
         signed_frontier_catch_up = IsSignedFrontierBodyCatchUp();
+        for (const auto& [id, st] : m_node_states) {
+            if (PeerIsGpuAuthority(id, st)) gpu_peers.insert(id);
+        }
         const auto now{GetTime<std::chrono::microseconds>()};
         const CBlockIndex* tip{m_chainman.ActiveTip()};
         const int32_t tip_height{tip ? tip->nHeight : -1};
@@ -8852,18 +8896,27 @@ void PeerManagerImpl::RequestMatMulTrustedAttestations(
             tip->nHeight - index->nHeight <=
                 node::matmul_trusted::TRUSTED_MIRROR_ATTESTED_TIP_LOOKBACK &&
             tip->GetAncestor(index->nHeight) == index};
+        const bool followed_body_awaiting{
+            tip != nullptr && index != nullptr &&
+            index->nHeight >= tip->nHeight &&
+            index->GetAncestor(tip->nHeight) == tip &&
+            !m_chainman.ActiveChain().Contains(index) &&
+            ((index->nStatus & BLOCK_HAVE_DATA) != 0 ||
+             m_matmul_block_lifecycle.HasRetainedBody(hash))};
         // Slot reservation / signer-absent skip: ActiveTip child OR short
-        // reorg missing root OR recent active ancestor (linear attested tip).
+        // reorg missing root OR recent active ancestor (linear attested tip)
+        // OR a followed HAVE_DATA / retained GPU body waiting for MMATTEST.
         // Do not pass short_reorg as tip_extending into admit — park must
         // still win. Competing 1879xx is neither.
         const bool preferred{
             node::matmul_trusted::TrustedMirrorPreferGetMmAttest(
-                tip_child, short_reorg, parked, recent_active_ancestor)};
+                tip_child, short_reorg, parked, recent_active_ancestor,
+                followed_body_awaiting)};
         // A hash rejected as unattestable during a race must be re-asked
         // once it is the followed tip-child (field report: sticky
         // rejected_unattestable=1 blocked re-admission after the signer
         // jumped branches).
-        if (tip_child || short_reorg) {
+        if (tip_child || short_reorg || followed_body_awaiting) {
             m_matmul_attestation_backoff.erase(hash);
         }
 
@@ -9083,7 +9136,7 @@ void PeerManagerImpl::RequestMatMulTrustedAttestations(
             (services & NODE_MATMUL_CONSENSUS) == NODE_MATMUL_CONSENSUS};
         if (!node::matmul_trusted::PreferGetMmAttestPeer(
                 archive, recent_success, trusted_mirror, consensus_node,
-                signed_frontier_catch_up)) {
+                signed_frontier_catch_up, gpu_peers.count(id) != 0)) {
             return;
         }
         MakeAndPushMessage(*target, NetMsgType::GETMMATTEST, hash);
@@ -11329,8 +11382,18 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
         return true;
     }
     if (persist_gpu_body_awaiting_attestation) {
-        LogInfo("Retaining GPU body hash=%s height=%d from peer=%d pending MMATTEST (not HEADER_ONLY)\n",
-                block_hash.ToString(), exact_reference_height, node.GetId());
+        // Wait for MMATTEST rather than re-admitting this body every 1s
+        // (live 2026-08-16: 1Hz "Retaining GPU body" livelock after a
+        // 2s GPU burst). Quorum RefreshRetry(0) re-admits immediately.
+        admission.retry_delay = node::matmul_trusted::WaitTimeout();
+        if (!m_matmul_block_lifecycle.HasRetainedBody(block_hash)) {
+            LogInfo("Retaining GPU body hash=%s height=%d from peer=%d pending MMATTEST (not HEADER_ONLY)\n",
+                    block_hash.ToString(), exact_reference_height, node.GetId());
+        } else {
+            LogDebug(BCLog::NET,
+                     "Retaining GPU body hash=%s height=%d from peer=%d pending MMATTEST (already held)\n",
+                     block_hash.ToString(), exact_reference_height, node.GetId());
+        }
         admission.state = MatMulBlockAdmission::State::RETAIN_FOR_RETRY;
         admission.retain_as_requested = true;
         admission.reference_height = exact_reference_height;
@@ -15632,6 +15695,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                     // stay suppressed.
                     m_header_only_competing.erase(hash);
                     m_header_only_followed_skip.erase(hash);
+                    m_need_activate_best_chain = true;
                     // Quorum is the first point at which a trusted header can
                     // safely arm the shallow-race recovery barrier. Do this
                     // before its body arrives so the losing local tip cannot
@@ -15653,6 +15717,8 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 // Same-netgroup HEADER_ONLY cooldown must not keep the now-
                 // authenticated hash unfetchable after the skip set is cleared.
                 ClearMatMulRCBodyDeferred(hash);
+                (void)m_matmul_block_lifecycle.RefreshRetry(
+                    hash, std::chrono::seconds{0});
                 wake_block_fetch = true;
                 // Wake any parked trusted-mirror verify job. Do this outside
                 // cs_main: NotifyQuorumReady only touches the worker mutex.

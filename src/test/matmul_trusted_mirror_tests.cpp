@@ -483,6 +483,30 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
             .in_backoff = false,
         }) == TrustedAttestationAdmit::RejectAboveFrontier);
 
+    // Followed HAVE_DATA / retained GPU body above the lagging local
+    // frontier must still GETMMATTEST (live 2026-08-16: retain then
+    // RejectAboveFrontier left tip frozen while bodies sat on disk).
+    BOOST_CHECK(
+        EvaluateTrustedAttestationAdmit(TrustedAttestationAdmitView{
+            .tip_extending = false,
+            .extends_active_tip_chain = true,
+            .followed_body_awaiting_attestation = true,
+            .on_parked_reorg_branch = false,
+            .height = 190668,
+            .authority_frontier = 190666,
+            .in_backoff = false,
+        }) == TrustedAttestationAdmit::Allow);
+    BOOST_CHECK(
+        EvaluateTrustedAttestationAdmit(TrustedAttestationAdmitView{
+            .tip_extending = false,
+            .extends_active_tip_chain = true,
+            .followed_body_awaiting_attestation = true,
+            .on_parked_reorg_branch = true,
+            .height = 190668,
+            .authority_frontier = 190666,
+            .in_backoff = false,
+        }) == TrustedAttestationAdmit::RejectParkedReorg);
+
     // Parked deep-reorg branch is never attestable by our policy.
     BOOST_CHECK(
         EvaluateTrustedAttestationAdmit(TrustedAttestationAdmitView{
@@ -853,6 +877,14 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(TrustedMirrorPreferGetMmAttest(
         /*active_tip_child=*/false, /*short_tip_reorg_missing_root=*/false,
         /*on_parked_reorg_branch=*/false, /*recent_active_ancestor=*/true));
+    BOOST_CHECK(TrustedMirrorPreferGetMmAttest(
+        /*active_tip_child=*/false, /*short_tip_reorg_missing_root=*/false,
+        /*on_parked_reorg_branch=*/false, /*recent_active_ancestor=*/false,
+        /*followed_body_awaiting_attestation=*/true));
+    BOOST_CHECK(!TrustedMirrorPreferGetMmAttest(
+        /*active_tip_child=*/false, /*short_tip_reorg_missing_root=*/false,
+        /*on_parked_reorg_branch=*/true, /*recent_active_ancestor=*/false,
+        /*followed_body_awaiting_attestation=*/true));
     BOOST_CHECK(!TrustedMirrorPreferGetMmAttest(
         /*active_tip_child=*/false, /*short_tip_reorg_missing_root=*/false,
         /*on_parked_reorg_branch=*/true, /*recent_active_ancestor=*/true));
@@ -882,6 +914,10 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         /*has_attestation_archive_bit=*/false, /*recent_valid_mmattest=*/false,
         /*trusted_mirror=*/false, /*consensus_node=*/true,
         /*signed_frontier_catch_up=*/true));
+    BOOST_CHECK(PreferGetMmAttestPeer(
+        /*has_attestation_archive_bit=*/false, /*recent_valid_mmattest=*/false,
+        /*trusted_mirror=*/false, /*consensus_node=*/true,
+        /*signed_frontier_catch_up=*/true, /*gpu_attestor=*/true));
     BOOST_CHECK(PreferGetMmAttestPeer(
         /*has_attestation_archive_bit=*/true, /*recent_valid_mmattest=*/false,
         /*trusted_mirror=*/false, /*consensus_node=*/false,

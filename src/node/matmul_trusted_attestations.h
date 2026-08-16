@@ -453,17 +453,19 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
 
 /** Preferred GETMMATTEST work on a trusted mirror: the ActiveTip child, or
  *  the missing root of a short tip-race reorg (sibling of tip / first hole
- *  on the authority peer's best-known). Competing headers at 1879xx are
- *  neither. Parked deep-reorg branches never prefer. */
+ *  on the authority peer's best-known), or a followed-chain HAVE_DATA /
+ *  retained GPU body still waiting for MMATTEST. Competing headers at
+ *  1879xx are neither. Parked deep-reorg branches never prefer. */
 [[nodiscard]] inline bool TrustedMirrorPreferGetMmAttest(
     bool active_tip_child,
     bool short_tip_reorg_missing_root,
     bool on_parked_reorg_branch = false,
-    bool recent_active_ancestor = false)
+    bool recent_active_ancestor = false,
+    bool followed_body_awaiting_attestation = false)
 {
     if (on_parked_reorg_branch) return false;
     return active_tip_child || short_tip_reorg_missing_root ||
-           recent_active_ancestor;
+           recent_active_ancestor || followed_body_awaiting_attestation;
 }
 
 /** GETMMATTEST destinations. NODE_MATMUL_ATTESTATION_ARCHIVE means the
@@ -479,7 +481,8 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
     bool recent_valid_mmattest,
     bool trusted_mirror = false,
     bool consensus_node = false,
-    bool signed_frontier_catch_up = false)
+    bool signed_frontier_catch_up = false,
+    bool gpu_attestor = false)
 {
     if (has_attestation_archive_bit || recent_valid_mmattest ||
         trusted_mirror) {
@@ -488,7 +491,10 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
     // Live 2026-08-16: trusted-mirror archives sprayed GETMMATTEST at every
     // NODE_MATMUL_CONSENSUS miner while catching up a HEADER_ONLY suffix.
     // Those peers have no store (0 replies) and must not occupy miss-backoff
-    // while an archive / signer is the body+attestation source.
+    // while an archive / signer is the body+attestation source. The GPU
+    // attestor is that source even when its advertised bits are CONSENSUS
+    // only (no ARCHIVE) and catch-up would otherwise skip consensus_node.
+    if (gpu_attestor) return true;
     if (signed_frontier_catch_up) return false;
     return consensus_node;
 }
@@ -1047,6 +1053,12 @@ struct TrustedAttestationAdmitView {
     //! Linear-chain GETMMATTEST so getmatmulattestedtip is populated without
     //! waiting for a race. Park still wins.
     bool on_recent_active_ancestor{false};
+    //! HAVE_DATA or retained GPU body on the followed (extends-active-tip)
+    //! chain. Live 2026-08-16: after GPU retain, GETMMATTEST was
+    //! RejectAboveFrontier because the archive's signed frontier lags the
+    //! GPU suffix. Asking the GPU to attest a body it just served is the
+    //! intended work. Park still wins.
+    bool followed_body_awaiting_attestation{false};
     bool on_parked_reorg_branch{false};
     int32_t height{-1};
     std::optional<int32_t> authority_frontier{};
@@ -1063,9 +1075,12 @@ struct TrustedAttestationAdmitView {
     if (v.on_parked_reorg_branch) {
         return TrustedAttestationAdmit::RejectParkedReorg;
     }
-    if (v.short_tip_reorg || v.on_recent_active_ancestor) {
-        // Short tip-race reorg, or the active tip / last few ancestors so a
-        // linear chain can populate getmatmulattestedtip. Park still wins.
+    if (v.short_tip_reorg || v.on_recent_active_ancestor ||
+        v.followed_body_awaiting_attestation) {
+        // Short tip-race reorg, the active tip / last few ancestors so a
+        // linear chain can populate getmatmulattestedtip, or a followed
+        // HAVE_DATA / retained GPU body whose local frontier has not yet
+        // caught the GPU suffix. Park still wins.
         return TrustedAttestationAdmit::Allow;
     }
     // A better-work branch is admissible even though it does not extend our
