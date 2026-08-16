@@ -3499,7 +3499,9 @@ void CConnman::ThreadMessageHandler()
                     p->m_has_getdata_requests.load())};
                 return node::matmul_trusted::ClassifyMsghandPeer(
                            p->fSuccessfullyConnected.load(),
-                           manual_or_outbound,
+                           node::matmul_trusted::MsghandTreatAsOutboundPreferred(
+                               node::matmul_trusted::HasLocalSigner(),
+                               manual_or_outbound),
                            node::matmul_trusted::MsghandPreferArchiveLiveGetData(
                                live_getdata, archive_target)) !=
                        node::matmul_trusted::MsghandPeerClass::Other;
@@ -3558,7 +3560,9 @@ void CConnman::ThreadMessageHandler()
                 const auto msghand_class{
                     node::matmul_trusted::ClassifyMsghandPeer(
                         pnode->fSuccessfullyConnected.load(),
-                        manual_or_outbound, archive_live_getdata)};
+                        node::matmul_trusted::MsghandTreatAsOutboundPreferred(
+                            local_signer, manual_or_outbound),
+                        archive_live_getdata)};
                 if (node::matmul_trusted::
                         SkipMinerProcessMessagesDuringArchiveGetData(
                             local_signer, archive_getdata_pending,

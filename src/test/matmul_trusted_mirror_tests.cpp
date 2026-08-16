@@ -1082,7 +1082,7 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         /*this_is_archive_serve_target=*/false));
     BOOST_CHECK(!TrustedSignerDropMinerIngestWhileGetData(
         true, true, true, false, /*this_is_archive_serve_target=*/true));
-    BOOST_CHECK(!TrustedSignerDropMinerIngestWhileGetData(
+    BOOST_CHECK(TrustedSignerDropMinerIngestWhileGetData(
         true, /*getdata_pending=*/false, true, false, false));
     // Outbound / manual miners must also drop ingest while archives fetch.
     BOOST_CHECK(TrustedSignerDropMinerIngestWhileGetData(
@@ -1140,7 +1140,7 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(SkipMinerProcessMessagesDuringArchiveGetData(
         /*local_signer=*/false, false, /*trusted_mirror_catch_up=*/true,
         true, false, true, false));
-    BOOST_CHECK(!SkipMinerProcessMessagesDuringArchiveGetData(
+    BOOST_CHECK(SkipMinerProcessMessagesDuringArchiveGetData(
         true, /*archive_getdata_pending=*/false, false, true, false, true,
         false));
     // Outbound miners are Preferred in msghand order; they must still skip.
@@ -1159,6 +1159,23 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     using node::matmul_trusted::SkipExactReplayForGpuAttestation;
     BOOST_CHECK(SkipExactReplayForGpuAttestation(/*has_valid_gpu_attestation=*/true));
     BOOST_CHECK(!SkipExactReplayForGpuAttestation(false));
+    using node::matmul_trusted::MsghandTreatAsOutboundPreferred;
+    BOOST_CHECK(!MsghandTreatAsOutboundPreferred(/*local_signer=*/true, true));
+    BOOST_CHECK(MsghandTreatAsOutboundPreferred(false, /*manual_or_outbound=*/true));
+    BOOST_CHECK(!MsghandTreatAsOutboundPreferred(false, false));
+    using node::matmul_trusted::IsTrustedMirrorMsghandCatchUp;
+    BOOST_CHECK(IsTrustedMirrorMsghandCatchUp(true, true, /*blocks_behind=*/0,
+                                             /*followed_ahead_uncapped=*/112));
+    BOOST_CHECK(IsTrustedMirrorMsghandCatchUp(true, true, 7, 0));
+    BOOST_CHECK(!IsTrustedMirrorMsghandCatchUp(true, true, 0, 0));
+    BOOST_CHECK(!IsTrustedMirrorMsghandCatchUp(false, true, 0, 112));
+    using node::matmul_trusted::TrustedMirrorRetainGpuBodyAwaitingAttestation;
+    BOOST_CHECK(TrustedMirrorRetainGpuBodyAwaitingAttestation(
+        true, /*from_gpu_attestor=*/true, /*has_quorum=*/false));
+    BOOST_CHECK(!TrustedMirrorRetainGpuBodyAwaitingAttestation(
+        true, true, /*has_quorum=*/true));
+    BOOST_CHECK(!TrustedMirrorRetainGpuBodyAwaitingAttestation(
+        true, /*from_gpu_attestor=*/false, false));
 }
 
 BOOST_AUTO_TEST_CASE(signer_getmmattest_historical_and_hammer_ban)

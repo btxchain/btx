@@ -707,6 +707,18 @@ static constexpr int SIGNER_MSGHAND_OTHER_PER_LOOP{2};
     return MsghandPeerClass::Other;
 }
 
+/** Local signer: outbounds are not Preferred. Live macpro2 after
+ *  9ceffddf still 1 body / ~46s because ClassifyMsghandPeer treated
+ *  every addrman outbound as Preferred and skip waited for GETDATA
+ *  already in m_msg_process_queue. */
+[[nodiscard]] inline bool MsghandTreatAsOutboundPreferred(
+    bool local_signer,
+    bool manual_or_outbound)
+{
+    if (local_signer) return false;
+    return manual_or_outbound;
+}
+
 /** Live GETDATA: still in the process queue or unconsumed getdata
  *  requests. Sticky "ever fetched" must not be this — miners that
  *  GETDATA once would stay Preferred forever. */
@@ -753,7 +765,8 @@ static constexpr int SIGNER_MSGHAND_OTHER_PER_LOOP{2};
 {
     (void)this_inbound;
     (void)this_manual;
-    if (!local_signer || !getdata_pending) return false;
+    (void)getdata_pending;
+    if (!local_signer) return false;
     if (this_is_archive_serve_target) return false;
     return true;
 }
@@ -808,8 +821,8 @@ static constexpr int SIGNER_MSGHAND_OTHER_PER_LOOP{2};
 {
     (void)this_peer_inbound;
     (void)this_peer_manual;
-    const bool skip_now{(local_signer && archive_getdata_pending) ||
-                        trusted_mirror_catch_up};
+    (void)archive_getdata_pending;
+    const bool skip_now{local_signer || trusted_mirror_catch_up};
     if (!skip_now) return false;
     if (this_is_archive_serve_target) return false;
     if (!this_peer_handshake_complete) return false;
@@ -832,6 +845,33 @@ static constexpr int SIGNER_MSGHAND_OTHER_PER_LOOP{2};
         return true;
     }
     return signed_frontier_catch_up && !persistent_timeout;
+}
+
+/** Archive msghand skip while bodies lag the GPU followed headers, not
+ *  only while signed-frontier blocks_behind>=2. Live nyc1 2026-08-16
+ *  after 190666: behind=0 so skip died, 148 miners pegged b-msghand,
+ *  suffix headers sat at 190779 with have_data_unconnected. Capped
+ *  FollowedChainAhead is 0 at the frontier; pass uncapped tip-extending
+ *  ahead. */
+[[nodiscard]] inline bool IsTrustedMirrorMsghandCatchUp(
+    bool trusted_mirror,
+    bool configured,
+    int32_t blocks_behind,
+    int followed_ahead_uncapped)
+{
+    return trusted_mirror && configured &&
+           (blocks_behind > 0 || followed_ahead_uncapped > 0);
+}
+
+/** GPU-attestor body without local quorum: persist, GETMMATTEST, do not
+ *  HEADER_ONLY-drop (live re-getdata then 102s timeout). Connect only
+ *  once attestation covers the hash. */
+[[nodiscard]] inline bool TrustedMirrorRetainGpuBodyAwaitingAttestation(
+    bool trusted_mirror,
+    bool from_gpu_attestor,
+    bool has_quorum)
+{
+    return trusted_mirror && from_gpu_attestor && !has_quorum;
 }
 
 /** CPU ExactReplay is the skip gate only when a valid GPU attestation

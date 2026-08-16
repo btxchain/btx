@@ -6847,7 +6847,9 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
             }
         }
     } // release cs_main before calling ActivateBestChain
-    if (need_activate_chain) {
+    // Local signer: do not ExactReplay on the GETDATA path (live ~46s/body
+    // while b-mmverify held cs_main). Serve HAVE_DATA or NOTFOUND.
+    if (need_activate_chain && !node::matmul_trusted::HasLocalSigner()) {
         BlockValidationState state;
         if (!m_chainman.ActiveChainstate().ActivateBestChain(state, a_recent_block)) {
             LogDebug(BCLog::NET, "failed to activate chain (%s)\n", state.ToString());
@@ -8216,13 +8218,26 @@ bool PeerManagerImpl::IsSignedFrontierBodyCatchUp() const
 {
     AssertLockHeld(cs_main);
     const auto frontier{m_chainman.GetSignedFrontierStatus()};
+    const int followed_ahead{FollowedChainAhead(m_chainman)};
+    const CBlockIndex* tip{m_chainman.ActiveChain().Tip()};
+    int followed_ahead_uncapped{0};
+    if (tip != nullptr && m_chainman.m_best_header != nullptr &&
+        m_chainman.m_best_header->nHeight >= tip->nHeight &&
+        m_chainman.m_best_header->GetAncestor(tip->nHeight) == tip) {
+        followed_ahead_uncapped =
+            m_chainman.m_best_header->nHeight - tip->nHeight;
+    }
     const bool catch_up{node::matmul_trusted::IsSignedFrontierCatchUp(
         node::matmul_trusted::IsTrustedMirror(),
         node::matmul_trusted::IsConfigured(),
-        frontier.blocks_behind, FollowedChainAhead(m_chainman),
+        frontier.blocks_behind, followed_ahead,
         BLOCK_FETCH_STALL_HEADERS_AHEAD)};
     m_signed_frontier_catch_up.store(catch_up, std::memory_order_relaxed);
-    m_connman.SetTrustedMirrorCatchUp(catch_up);
+    m_connman.SetTrustedMirrorCatchUp(
+        node::matmul_trusted::IsTrustedMirrorMsghandCatchUp(
+            node::matmul_trusted::IsTrustedMirror(),
+            node::matmul_trusted::IsConfigured(),
+            frontier.blocks_behind, followed_ahead_uncapped));
     return catch_up;
 }
 
@@ -11194,6 +11209,10 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
     bool request_attestations_without_gpu{false};
     bool header_only_competing_first{false};
     bool persist_unrequested_followed{false};
+    bool persist_gpu_body_awaiting_attestation{false};
+    const bool from_gpu_attestor{
+        node.IsManualConn() ||
+        node.HasPermission(NetPermissionFlags::NoBan)};
     {
         LOCK(cs_main);
         cheap_body_valid = m_chainman.CheckMatMulBlockAdmissionPreconditions(
@@ -11249,6 +11268,14 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
                             // (in-memory quorum or signed-frontier coverage).
                             // Catch-up height is not attestation.
                             exact_recompute_required = false;
+                        } else if (node::matmul_trusted::
+                                       TrustedMirrorRetainGpuBodyAwaitingAttestation(
+                                           node::matmul_trusted::IsTrustedMirror(),
+                                           from_gpu_attestor,
+                                           /*has_quorum=*/false)) {
+                            exact_recompute_required = false;
+                            request_attestations_without_gpu = true;
+                            persist_gpu_body_awaiting_attestation = true;
                         } else if (indexed == nullptr ||
                                    !MatMulMaySpendExactReplayGpu(
                                        m_chainman, tip, indexed)) {
@@ -11298,6 +11325,15 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
                      source, block_hash.ToString(), exact_reference_height, node.GetId());
         }
         admission.state = MatMulBlockAdmission::State::HEADER_ONLY;
+        maybe_request_attestations_without_gpu();
+        return true;
+    }
+    if (persist_gpu_body_awaiting_attestation) {
+        LogInfo("Retaining GPU body hash=%s height=%d from peer=%d pending MMATTEST (not HEADER_ONLY)\n",
+                block_hash.ToString(), exact_reference_height, node.GetId());
+        admission.state = MatMulBlockAdmission::State::RETAIN_FOR_RETRY;
+        admission.retain_as_requested = true;
+        admission.reference_height = exact_reference_height;
         maybe_request_attestations_without_gpu();
         return true;
     }
