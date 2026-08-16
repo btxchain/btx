@@ -929,7 +929,12 @@ public:
     /** Ensures we have a genesis block in the block tree, possibly writing one to disk. */
     bool LoadGenesisBlock();
 
-    void TryAddBlockIndexCandidate(CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    /** Consider adding an index to the most-work candidate set. The optional
+     * trusted_path_visits counter is a deterministic test/diagnostic seam for
+     * the trusted-mirror competing-suffix audit. */
+    void TryAddBlockIndexCandidate(CBlockIndex* pindex,
+                                   size_t* trusted_path_visits = nullptr)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     void PruneBlockIndexCandidates();
 

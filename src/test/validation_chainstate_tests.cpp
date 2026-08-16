@@ -2508,6 +2508,130 @@ BOOST_FIXTURE_TEST_CASE(chainstate_competing_attested_scan_skips_active_ancestor
     BOOST_CHECK_EQUAL(path_visits, 0U);
 }
 
+BOOST_FIXTURE_TEST_CASE(chainstate_trusted_candidate_scan_skips_active_ancestors_and_stops_at_activation, TestChain100Setup)
+{
+    // Live 2026-08-16: changing a trusted mirror from 1-of-1 to 1-of-2
+    // selected an empty authority namespace. Startup then called
+    // TryAddBlockIndexCandidate for every active-chain index. The trusted
+    // policy walked from tip to each ancestor looking for quorum, including
+    // pre-activation history, producing O(height^2) work while the RPC only
+    // reported "Loading block index".
+    ChainstateManager& chainman{*Assert(m_node.chainman)};
+    Chainstate& chainstate{chainman.ActiveChainstate()};
+    auto& consensus{const_cast<Consensus::Params&>(Params().GetConsensus())};
+    auto& mode{const_cast<kernel::MatMulValidationMode&>(
+        chainman.m_options.matmul_validation_mode)};
+    struct Restore {
+        Consensus::Params& consensus;
+        int32_t v4_height;
+        int32_t rc_height;
+        int32_t coupled_height;
+        uint32_t rc_profile;
+        kernel::MatMulValidationMode& mode;
+        kernel::MatMulValidationMode saved_mode;
+        ~Restore()
+        {
+            node::matmul_trusted::ResetForTest();
+            consensus.nMatMulV4Height = v4_height;
+            consensus.nMatMulRCHeight = rc_height;
+            consensus.nMatMulRCCoupledHeight = coupled_height;
+            consensus.nMatMulRCProfile = rc_profile;
+            mode = saved_mode;
+        }
+    } restore{consensus, consensus.nMatMulV4Height,
+              consensus.nMatMulRCHeight,
+              consensus.nMatMulRCCoupledHeight,
+              consensus.nMatMulRCProfile, mode, mode};
+
+    CBlockIndex* const original_tip{
+        WITH_LOCK(::cs_main, return chainstate.m_chain.Tip())};
+    BOOST_REQUIRE(original_tip != nullptr);
+    BOOST_REQUIRE(original_tip->nHeight >= 10);
+    CBlockIndex* const original_fork_child{WITH_LOCK(
+        ::cs_main,
+        return chainstate.m_chain[original_tip->nHeight - 4])};
+    CBlockIndex* const fork_point{original_fork_child->pprev};
+    BOOST_REQUIRE(fork_point != nullptr);
+
+    BlockValidationState state;
+    BOOST_REQUIRE(chainstate.InvalidateBlock(state, original_fork_child));
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()) ==
+                  fork_point);
+    const CScript script{
+        GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()))};
+    for (int i = 0; i < 5; ++i) {
+        (void)CreateAndProcessBlock({}, script);
+    }
+    CBlockIndex* const alternate_tip{
+        WITH_LOCK(::cs_main, return chainstate.m_chain.Tip())};
+    BOOST_REQUIRE(alternate_tip != nullptr);
+    BOOST_REQUIRE_EQUAL(alternate_tip->nHeight, original_tip->nHeight);
+    BOOST_REQUIRE(alternate_tip != original_tip);
+    {
+        LOCK(::cs_main);
+        chainstate.ResetBlockFailureFlags(original_fork_child);
+        BOOST_REQUIRE_EQUAL(chainstate.m_chain.Tip(), alternate_tip);
+        BOOST_REQUIRE_EQUAL(
+            LastCommonAncestor(alternate_tip, original_tip), fork_point);
+    }
+
+    CKey signer;
+    signer.MakeNewKey(/*fCompressed=*/true);
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256::ONE;
+    config.replay_authority_context =
+        uint256::FromHex(std::string(64, '8')).value();
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/true, /*serve=*/false,
+        std::chrono::milliseconds{50}, error));
+    mode = kernel::MatMulValidationMode::TRUSTED;
+    consensus.nMatMulRCCoupledHeight =
+        std::numeric_limits<int32_t>::max();
+    consensus.nMatMulRCProfile = 1;
+
+    // Active ancestors require no competing-suffix audit, even when they are
+    // inside the attestation regime and the store contains no quorum records.
+    consensus.nMatMulV4Height = 1;
+    consensus.nMatMulRCHeight = 1;
+    size_t path_visits{std::numeric_limits<size_t>::max()};
+    {
+        LOCK(::cs_main);
+        chainstate.TryAddBlockIndexCandidate(
+            chainstate.m_chain[1], &path_visits);
+    }
+    BOOST_CHECK_EQUAL(path_visits, 0U);
+
+    // A genuinely competing candidate below activation does not scan the
+    // active suffix for governing quorum records.
+    const int32_t after_candidate{original_tip->nHeight + 1};
+    consensus.nMatMulV4Height = after_candidate;
+    consensus.nMatMulRCHeight = after_candidate;
+    path_visits = std::numeric_limits<size_t>::max();
+    {
+        LOCK(::cs_main);
+        chainstate.TryAddBlockIndexCandidate(original_tip, &path_visits);
+    }
+    BOOST_CHECK_EQUAL(path_visits, 0U);
+
+    // Once the candidate is in the Profile-1 regime, inspect only the active
+    // suffix at or above activation. The fork point is deliberately older.
+    const int32_t activation{alternate_tip->nHeight - 2};
+    BOOST_REQUIRE(fork_point->nHeight < activation);
+    consensus.nMatMulV4Height = activation;
+    consensus.nMatMulRCHeight = activation;
+    path_visits = std::numeric_limits<size_t>::max();
+    {
+        LOCK(::cs_main);
+        chainstate.TryAddBlockIndexCandidate(original_tip, &path_visits);
+    }
+    BOOST_CHECK_EQUAL(
+        path_visits,
+        static_cast<size_t>(alternate_tip->nHeight - activation + 1));
+}
+
 BOOST_FIXTURE_TEST_CASE(chainstate_already_active_unattested_recovers_unique_attested_after_reload, TestChain100Setup)
 {
     // Issue #106: the competing unattested branch is already the active tip

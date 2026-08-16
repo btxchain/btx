@@ -9508,13 +9508,20 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
 //! race may replace an unattested tip only.
 static bool TrustedMirrorShouldConsiderMostWorkCandidate(
     const ChainstateManager& chainman,
-    const CBlockIndex* tip, const CBlockIndex* candidate)
+    const CBlockIndex* tip, const CBlockIndex* candidate,
+    size_t* path_visits = nullptr)
     EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
 {
+    if (path_visits != nullptr) *path_visits = 0;
     if (!node::matmul_trusted::IsConfigured()) {
         return true;
     }
     if (tip == nullptr || candidate == nullptr || candidate == tip) return true;
+    const Consensus::Params& consensus{chainman.GetConsensus()};
+    // This policy is also called outside TryAddBlockIndexCandidate. Keep its
+    // own O(1) active-ancestor guard so no caller can accidentally restore the
+    // startup O(height^2) tip-to-ancestor quorum scan.
+    if (chainman.ActiveChain().Contains(candidate)) return true;
     const bool extends_tip{
         candidate->nHeight >= tip->nHeight &&
         candidate->GetAncestor(tip->nHeight) == tip};
@@ -9525,18 +9532,13 @@ static bool TrustedMirrorShouldConsiderMostWorkCandidate(
     const int lca_depth{lca != nullptr ? tip->nHeight - lca->nHeight : 0};
     bool would_abandon_attested{false};
     if (lca != nullptr && candidate != tip) {
-        for (const CBlockIndex* walk{tip}; walk != nullptr && walk != lca;
+        for (const CBlockIndex* walk{tip};
+             walk != nullptr && walk != lca &&
+             consensus.IsMatMulTrustedReplayAttestationActive(
+                 walk->nHeight);
              walk = walk->pprev) {
-            // Profile-1 attestations cannot exist before the consensus RC
-            // activation height. Stop at that boundary instead of walking
-            // the pre-RC chain once for every candidate during startup.
-            if (walk->nHeight <
-                chainman.GetConsensus().nMatMulRCHeight) {
-                break;
-            }
-            if (chainman.GetConsensus()
-                    .IsMatMulTrustedReplayAttestationActive(walk->nHeight) &&
-                node::matmul_trusted::HasQuorumInMemory(
+            if (path_visits != nullptr) ++*path_visits;
+            if (node::matmul_trusted::HasQuorumInMemory(
                     walk->GetBlockHash(), walk->nHeight)) {
                 would_abandon_attested = true;
                 break;
@@ -10848,9 +10850,11 @@ void Chainstate::ResetBlockFailureFlags(CBlockIndex *pindex) {
     }
 }
 
-void Chainstate::TryAddBlockIndexCandidate(CBlockIndex* pindex)
+void Chainstate::TryAddBlockIndexCandidate(
+    CBlockIndex* pindex, size_t* trusted_path_visits)
 {
     AssertLockHeld(cs_main);
+    if (trusted_path_visits != nullptr) *trusted_path_visits = 0;
     const CBlockIndex* const tip{m_chain.Tip()};
 
     // Reject ordinary lower-work candidates before attestation policy walks
@@ -10873,7 +10877,8 @@ void Chainstate::TryAddBlockIndexCandidate(CBlockIndex* pindex)
 
     const bool parked{m_chainman.IsOnParkedReorgBranch(pindex)};
     const bool defer_losing{m_chainman.ShouldDeferLosingTipExtension(pindex)};
-    const bool consider{TrustedMirrorShouldConsiderMostWorkCandidate(m_chainman, tip, pindex)};
+    const bool consider{TrustedMirrorShouldConsiderMostWorkCandidate(
+        m_chainman, tip, pindex, trusted_path_visits)};
     if (parked || defer_losing || !consider) {
         if (pindex != nullptr && tip != nullptr && pindex->pprev == tip) {
             // Live 2026-08-16: HEADER_ONLY tip-child re-announces hit this
