@@ -9666,7 +9666,8 @@ CBlockIndex* Chainstate::FindMostWorkChain()
             const CBlockIndex* attested_sibling{nullptr};
             const bool consensus_followed_tip_child{
                 !node::matmul_trusted::IsTrustedMirror() &&
-                m_chainman.IndexIsFollowedTipChild(tip, pindexNew) &&
+                (m_chainman.IndexIsAttestedChainTipChild(tip, pindexNew) ||
+                 m_chainman.IndexIsFollowedTipChild(tip, pindexNew)) &&
                 !node::matmul_trusted::HasCompetingQuorum(
                     pindexNew->GetBlockHash(), pindexNew->nHeight)};
             if (extends_tip && !has_quorum && !consensus_followed_tip_child) {
@@ -9683,15 +9684,20 @@ CBlockIndex* Chainstate::FindMostWorkChain()
                     }
                     // Dual-attested same-height siblings (live 2026-08-15):
                     // unattested children of the quorum loser must not win
-                    // most-work over the attested twin of the tip.
-                    if (tip->pprev == nullptr) return false;
-                    return node::matmul_trusted::TrustedMirrorAttestedSiblingIsActionable(
-                        /*distinct_from_candidate=*/alt != pindexNew && alt != tip,
-                        /*same_parent=*/alt->pprev == tip->pprev,
-                        /*same_height_as_tip_child=*/alt->nHeight == tip->nHeight,
-                        /*has_quorum=*/node::matmul_trusted::HasQuorumInMemory(
-                            alt->GetBlockHash(), alt->nHeight),
-                        /*failed=*/(alt->nStatus & BLOCK_FAILED_MASK) != 0);
+                    // most-work over the attested twin of the tip. TRUSTED
+                    // mirrors only: a CONSENSUS signer must still ExactReplay
+                    // the child of its own attested tip (live 190376).
+                    if (node::matmul_trusted::IsTrustedMirror()) {
+                        if (tip->pprev == nullptr) return false;
+                        return node::matmul_trusted::TrustedMirrorAttestedSiblingIsActionable(
+                            /*distinct_from_candidate=*/alt != pindexNew && alt != tip,
+                            /*same_parent=*/alt->pprev == tip->pprev,
+                            /*same_height_as_tip_child=*/alt->nHeight == tip->nHeight,
+                            /*has_quorum=*/node::matmul_trusted::HasQuorumInMemory(
+                                alt->GetBlockHash(), alt->nHeight),
+                            /*failed=*/(alt->nStatus & BLOCK_FAILED_MASK) != 0);
+                    }
+                    return false;
                 };
                 for (CBlockIndex* alt : setBlockIndexCandidates) {
                     if (m_chainman.m_interrupt) break;
@@ -11308,6 +11314,12 @@ const CBlockIndex* ChainstateManager::FindUniqueCompetingAttestedIndex() const
         // short-reorg away from it.
         if (!suffix.empty()) {
             competing = std::move(suffix);
+        } else if (node::matmul_trusted::HasLocalSigner() &&
+                   !node::matmul_trusted::IsTrustedMirror()) {
+            // CONSENSUS signer: do not abandon an already-attested tip for
+            // a dual-attested short-reorg twin (live 190354 reversal).
+            // Trusted mirrors still recover toward the signed frontier.
+            return nullptr;
         }
     }
 

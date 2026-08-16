@@ -3725,8 +3725,10 @@ static uint256 g_configured_claimed_tip_child{};
             index->GetBlockHash(), index->nHeight)) {
         return false;
     }
-    const bool followed_child{IndexIsFollowedTipChild(chainman, tip, index)};
-    if (!followed_child &&
+    const bool progress_child{
+        IndexIsFollowedTipChild(chainman, tip, index) ||
+        chainman.IndexIsAttestedChainTipChild(tip, index)};
+    if (!progress_child &&
         ConfiguredTipChildAlreadyHasBody(chainman, tip, index)) {
         return false;
     }
@@ -3737,7 +3739,7 @@ static uint256 g_configured_claimed_tip_child{};
                 g_configured_claimed_tip_child)};
         if (claimed != nullptr && claimed->pprev == tip &&
             (claimed->nStatus & (BLOCK_FAILED_MASK)) == 0 &&
-            !followed_child) {
+            !progress_child) {
             return false;
         }
         g_configured_claimed_tip_child.SetNull();
@@ -3800,13 +3802,12 @@ static uint256 g_configured_claimed_tip_child{};
                     chainman.FindUniqueCompetingAttestedIndex()};
                 if (catch_up == index) return true;
             }
-            // Attested-chain tip-child (followed, or the remaining child
-            // when m_best_header sits on a competing fork) steals the GPU
-            // slot from a competing unattested sibling. HEADER_ONLY remains
-            // for hashes that conflict with an existing attestation at this
-            // height or that are not on the attested-chain progress path.
-            if (chainman.IndexIsAttestedChainTipChild(tip, index) &&
-                IndexIsFollowedTipChild(chainman, tip, index)) {
+            // Attested-chain tip-child steals the GPU even when
+            // m_best_header sits on a competing fork (live 190376:
+            // Followed was false, HEADER_ONLY skip waited for an
+            // MMATTEST only this signer can mint). Competing unattested
+            // siblings stay HEADER_ONLY.
+            if (chainman.IndexIsAttestedChainTipChild(tip, index)) {
                 g_configured_claimed_tip_child = index->GetBlockHash();
                 return true;
             }
