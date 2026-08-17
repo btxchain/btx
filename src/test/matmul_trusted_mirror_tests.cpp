@@ -808,6 +808,40 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(TrustedMirrorMustDeferUnattestedConnect(
         /*trusted_mirror_profile1=*/true, /*has_quorum=*/false,
         /*covered_by_signed_frontier=*/false));
+    using node::matmul_trusted::TrustedMirrorPreferCoveredConnectCandidate;
+    BOOST_CHECK(TrustedMirrorPreferCoveredConnectCandidate(
+        /*trusted_mirror=*/true, /*extends_active_tip=*/true,
+        /*have_data_connectable=*/true, /*covered_or_quorum=*/true));
+    BOOST_CHECK(!TrustedMirrorPreferCoveredConnectCandidate(
+        false, true, true, true));
+    BOOST_CHECK(!TrustedMirrorPreferCoveredConnectCandidate(
+        true, /*extends_active_tip=*/false, true, true));
+    BOOST_CHECK(!TrustedMirrorPreferCoveredConnectCandidate(
+        true, true, /*have_data_connectable=*/false, true));
+    BOOST_CHECK(!TrustedMirrorPreferCoveredConnectCandidate(
+        true, true, true, /*covered_or_quorum=*/false));
+    using node::matmul_trusted::TrustedMirrorMostWorkYieldsUnattestedTower;
+    BOOST_CHECK(TrustedMirrorMostWorkYieldsUnattestedTower(
+        /*trusted_mirror=*/true, /*have_attested_connectable=*/false,
+        /*have_immediate_have_data_tip_child=*/false));
+    BOOST_CHECK(!TrustedMirrorMostWorkYieldsUnattestedTower(
+        true, /*have_attested_connectable=*/true, false));
+    BOOST_CHECK(!TrustedMirrorMostWorkYieldsUnattestedTower(
+        true, false, /*have_immediate_have_data_tip_child=*/true));
+    BOOST_CHECK(!TrustedMirrorMostWorkYieldsUnattestedTower(
+        /*trusted_mirror=*/false, false, false));
+    using node::matmul_trusted::TrustedMirrorSkipUnattestedClaimedWorkTower;
+    BOOST_CHECK(TrustedMirrorSkipUnattestedClaimedWorkTower(
+        /*trusted_mirror=*/true, /*leads_to_signed_frontier=*/false,
+        /*immediate_tip_child=*/false, /*unique_abandon_target=*/false));
+    BOOST_CHECK(!TrustedMirrorSkipUnattestedClaimedWorkTower(
+        true, /*leads_to_signed_frontier=*/true, false, false));
+    BOOST_CHECK(!TrustedMirrorSkipUnattestedClaimedWorkTower(
+        true, false, /*immediate_tip_child=*/true, false));
+    BOOST_CHECK(!TrustedMirrorSkipUnattestedClaimedWorkTower(
+        true, false, false, /*unique_abandon_target=*/true));
+    BOOST_CHECK(!TrustedMirrorSkipUnattestedClaimedWorkTower(
+        /*trusted_mirror=*/false, false, false, false));
     using node::matmul_trusted::TrustedMirrorFrontierCoversBlock;
     BOOST_CHECK(TrustedMirrorFrontierCoversBlock(
         /*frontier_available=*/true, /*block_height=*/190582,
@@ -975,9 +1009,9 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         /*tip_height=*/190617, /*followed_header_height=*/190630,
         /*signed_frontier_height=*/190617, /*tip_leads_to_frontier=*/true), 13);
     using node::matmul_trusted::IsNarrowCatchUpWindowForPolicy;
-    BOOST_CHECK(!IsNarrowCatchUpWindowForPolicy(
+    BOOST_CHECK(IsNarrowCatchUpWindowForPolicy(
         /*ibd=*/false, /*ahead=*/40, /*signed_frontier_catch_up=*/true));
-    BOOST_CHECK(!IsNarrowCatchUpWindowForPolicy(
+    BOOST_CHECK(IsNarrowCatchUpWindowForPolicy(
         /*ibd=*/false, /*ahead=*/8, /*signed_frontier_catch_up=*/true));
     BOOST_CHECK(!IsNarrowCatchUpWindowForPolicy(
         /*ibd=*/false, /*ahead=*/32, /*signed_frontier_catch_up=*/false));
@@ -1014,19 +1048,41 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         /*signed_frontier_catch_up=*/false, /*has_archive_bit=*/false,
         /*trusted_mirror_peer=*/false, /*node_network=*/true,
         /*recent_valid_mmattest=*/false, /*manual_or_noban=*/false));
+    // A miner that relayed one MMATTEST is not an exclusive body source
+    // (live nyc1 peer=94305: 16-wide HEADER_ONLY getdata, tip+1 timeout).
+    BOOST_CHECK(!PreferSignedFrontierCatchUpBlockPeer(
+        /*signed_frontier_catch_up=*/true, /*has_archive_bit=*/false,
+        /*trusted_mirror_peer=*/false, /*node_network=*/true,
+        /*recent_valid_mmattest=*/true, /*manual_or_noban=*/false));
+    // Inbound archives are served, not used as catch-up GETDATA sources.
+    BOOST_CHECK(!PreferSignedFrontierCatchUpBlockPeer(
+        /*signed_frontier_catch_up=*/true, /*has_archive_bit=*/true,
+        /*trusted_mirror_peer=*/false, /*node_network=*/true,
+        /*recent_valid_mmattest=*/false, /*manual_or_noban=*/false,
+        /*outbound=*/false));
+    BOOST_CHECK(PreferSignedFrontierCatchUpBlockPeer(
+        /*signed_frontier_catch_up=*/true, /*has_archive_bit=*/true,
+        /*trusted_mirror_peer=*/false, /*node_network=*/true,
+        /*recent_valid_mmattest=*/false, /*manual_or_noban=*/false,
+        /*outbound=*/true));
+    BOOST_CHECK(PreferSignedFrontierCatchUpBlockPeer(
+        /*signed_frontier_catch_up=*/true, /*has_archive_bit=*/false,
+        /*trusted_mirror_peer=*/false, /*node_network=*/false,
+        /*recent_valid_mmattest=*/false, /*manual_or_noban=*/true,
+        /*outbound=*/false));
     using node::matmul_trusted::SkipNonPreferredSignedFrontierBodyPeer;
     BOOST_CHECK(SkipNonPreferredSignedFrontierBodyPeer(
         /*signed_frontier_catch_up=*/true, /*this_peer_preferred=*/false,
         /*any_capable_preferred_peer_connected=*/true));
-    BOOST_CHECK(!SkipNonPreferredSignedFrontierBodyPeer(
+    // Hung GPU must not fall through to inbound miners.
+    BOOST_CHECK(SkipNonPreferredSignedFrontierBodyPeer(
         /*signed_frontier_catch_up=*/true, /*this_peer_preferred=*/false,
         /*any_capable_preferred_peer_connected=*/false));
     BOOST_CHECK(!SkipNonPreferredSignedFrontierBodyPeer(
         /*signed_frontier_catch_up=*/true, /*this_peer_preferred=*/true,
         /*any_capable_preferred_peer_connected=*/true));
-    // Idle must still skip miners when a capable archive can serve.
-    BOOST_CHECK(SkipNonPreferredSignedFrontierBodyPeer(
-        /*signed_frontier_catch_up=*/true, /*this_peer_preferred=*/false,
+    BOOST_CHECK(!SkipNonPreferredSignedFrontierBodyPeer(
+        /*signed_frontier_catch_up=*/false, /*this_peer_preferred=*/false,
         /*any_capable_preferred_peer_connected=*/true));
     using node::matmul_trusted::SignedFrontierBodySourceCanServeCatchUp;
     BOOST_CHECK(SignedFrontierBodySourceCanServeCatchUp(
@@ -1038,17 +1094,94 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(!SignedFrontierBodySourceCanServeCatchUp(
         /*preferred=*/true, /*has_best_known=*/true, /*best_known_height=*/1412,
         /*tip_height=*/190588, /*best_known_extends_tip=*/false));
+    BOOST_CHECK(!SignedFrontierBodySourceCanServeCatchUp(
+        /*preferred=*/true, /*has_best_known=*/true, /*best_known_height=*/190632,
+        /*tip_height=*/190588, /*best_known_extends_tip=*/true,
+        /*version_handshake_complete=*/false));
+    BOOST_CHECK(!SignedFrontierBodySourceCanServeCatchUp(
+        /*preferred=*/true, /*has_best_known=*/true, /*best_known_height=*/190632,
+        /*tip_height=*/190588, /*best_known_extends_tip=*/true,
+        /*version_handshake_complete=*/true, /*starting_height=*/190588));
+    BOOST_CHECK(!SignedFrontierBodySourceCanServeCatchUp(
+        /*preferred=*/true, /*has_best_known=*/true, /*best_known_height=*/190632,
+        /*tip_height=*/190588, /*best_known_extends_tip=*/true,
+        /*version_handshake_complete=*/true, /*starting_height=*/-1));
+    BOOST_CHECK(SignedFrontierBodySourceCanServeCatchUp(
+        /*preferred=*/true, /*has_best_known=*/true, /*best_known_height=*/190632,
+        /*tip_height=*/190588, /*best_known_extends_tip=*/true,
+        /*version_handshake_complete=*/true, /*starting_height=*/190632));
+    using node::matmul_trusted::SignedFrontierPeerHadCatchUpBodiesAtConnect;
+    BOOST_CHECK(!SignedFrontierPeerHadCatchUpBodiesAtConnect(-1, 190781));
+    BOOST_CHECK(!SignedFrontierPeerHadCatchUpBodiesAtConnect(190781, 190781));
+    BOOST_CHECK(SignedFrontierPeerHadCatchUpBodiesAtConnect(190858, 190781));
+    using node::matmul_trusted::ShouldDropInFlightForRootFirstRerequest;
+    BOOST_CHECK(!ShouldDropInFlightForRootFirstRerequest(
+        /*already_requested=*/true, /*all_owners_stale=*/false));
+    BOOST_CHECK(ShouldDropInFlightForRootFirstRerequest(true, true));
+    BOOST_CHECK(!ShouldDropInFlightForRootFirstRerequest(false, true));
     using node::matmul_trusted::SeedTrustedMirrorGpuBestKnownFromFrontier;
     BOOST_CHECK(SeedTrustedMirrorGpuBestKnownFromFrontier(
-        /*gpu_authority=*/true, /*signed_frontier_catch_up=*/true,
-        /*best_known_null=*/true, /*seed_extends_tip=*/true,
+        /*signed_frontier_catch_up=*/true,
+        /*best_known_usable_for_catch_up=*/false, /*seed_extends_tip=*/true,
         /*seed_height=*/190647, /*tip_height=*/190602));
     BOOST_CHECK(!SeedTrustedMirrorGpuBestKnownFromFrontier(
-        true, true, /*best_known_null=*/false, true, 190647, 190602));
+        true, /*best_known_usable_for_catch_up=*/true, true, 190647, 190602));
     BOOST_CHECK(!SeedTrustedMirrorGpuBestKnownFromFrontier(
-        /*gpu_authority=*/false, true, true, true, 190647, 190602));
+        /*signed_frontier_catch_up=*/false, false, true, 190647, 190602));
     BOOST_CHECK(!SeedTrustedMirrorGpuBestKnownFromFrontier(
-        true, true, true, /*seed_extends_tip=*/false, 190647, 190602));
+        true, false, /*seed_extends_tip=*/false, 190647, 190602));
+    BOOST_CHECK(!SeedTrustedMirrorGpuBestKnownFromFrontier(
+        true, false, true, 190647, 190602,
+        /*version_handshake_complete=*/false));
+    BOOST_CHECK(!SeedTrustedMirrorGpuBestKnownFromFrontier(
+        true, false, true, 190647, 190602,
+        /*version_handshake_complete=*/true, /*may_seed_this_peer=*/false));
+    using node::matmul_trusted::SignedFrontierMaySeedBestKnownFromFrontier;
+    BOOST_CHECK(SignedFrontierMaySeedBestKnownFromFrontier(
+        /*gpu_manual_or_noban=*/true, /*outbound=*/false,
+        /*archive_or_mirror=*/false, /*starting_height=*/-1,
+        /*tip_height=*/190781));
+    BOOST_CHECK(!SignedFrontierMaySeedBestKnownFromFrontier(
+        false, /*outbound=*/false, /*archive_or_mirror=*/true, 190858, 190781));
+    BOOST_CHECK(!SignedFrontierMaySeedBestKnownFromFrontier(
+        false, /*outbound=*/true, /*archive_or_mirror=*/false, 190858, 190781));
+    BOOST_CHECK(!SignedFrontierMaySeedBestKnownFromFrontier(
+        false, true, true, /*starting_height=*/190781, /*tip_height=*/190781));
+    BOOST_CHECK(SignedFrontierMaySeedBestKnownFromFrontier(
+        false, true, true, /*starting_height=*/190858, /*tip_height=*/190781));
+    using node::matmul_trusted::SignedFrontierMayRequestCatchUpGetData;
+    BOOST_CHECK(SignedFrontierMayRequestCatchUpGetData(
+        /*signed_frontier_catch_up=*/false, /*gpu_manual_or_noban=*/false,
+        /*outbound=*/false, /*archive_or_mirror=*/false,
+        /*version_handshake_complete=*/false));
+    BOOST_CHECK(!SignedFrontierMayRequestCatchUpGetData(
+        true, /*gpu_manual_or_noban=*/true, true, false,
+        /*version_handshake_complete=*/false));
+    BOOST_CHECK(SignedFrontierMayRequestCatchUpGetData(
+        true, /*gpu_manual_or_noban=*/true, /*outbound=*/false, false,
+        /*version_handshake_complete=*/true));
+    BOOST_CHECK(!SignedFrontierMayRequestCatchUpGetData(
+        true, /*gpu_manual_or_noban=*/true, true, false, true,
+        /*starting_height=*/190767, /*tip_height=*/190816));
+    BOOST_CHECK(SignedFrontierMayRequestCatchUpGetData(
+        true, /*gpu_manual_or_noban=*/true, false, false, true,
+        /*starting_height=*/190899, /*tip_height=*/190816));
+    BOOST_CHECK(!SignedFrontierMayRequestCatchUpGetData(
+        true, false, /*outbound=*/false, /*archive_or_mirror=*/true, true,
+        /*starting_height=*/190858, /*tip_height=*/190781));
+    BOOST_CHECK(!SignedFrontierMayRequestCatchUpGetData(
+        true, false, /*outbound=*/true, /*archive_or_mirror=*/false, true,
+        190858, 190781));
+    BOOST_CHECK(!SignedFrontierMayRequestCatchUpGetData(
+        true, false, true, true, true,
+        /*starting_height=*/190781, /*tip_height=*/190781));
+    BOOST_CHECK(SignedFrontierMayRequestCatchUpGetData(
+        true, false, true, true, true,
+        /*starting_height=*/190858, /*tip_height=*/190781));
+    using node::matmul_trusted::SignedFrontierVersionHandshakeComplete;
+    BOOST_CHECK(!SignedFrontierVersionHandshakeComplete(-1));
+    BOOST_CHECK(SignedFrontierVersionHandshakeComplete(0));
+    BOOST_CHECK(SignedFrontierVersionHandshakeComplete(190858));
     using node::matmul_trusted::TrustedMirrorPeerIsGpuAuthority;
     BOOST_CHECK(TrustedMirrorPeerIsGpuAuthority(
         /*manual_or_noban=*/true, /*recent_valid_configured_mmattest=*/false));
@@ -1066,18 +1199,39 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(!TrustedMirrorIgnoreNonAuthorityInboundBlock(true, true, true));
     BOOST_CHECK(!TrustedMirrorIgnoreNonAuthorityInboundBlock(true, false, false));
     BOOST_CHECK(!TrustedMirrorIgnoreNonAuthorityInboundBlock(false, false, true));
+    BOOST_CHECK(!TrustedMirrorIgnoreNonAuthorityInboundBlock(
+        true, false, true, /*this_inbound=*/false));
+    BOOST_CHECK(TrustedMirrorIgnoreNonAuthorityInboundBlock(
+        true, false, true, /*this_inbound=*/true));
+    using node::matmul_trusted::TrustedMirrorMayAcceptPeerBlockBody;
+    BOOST_CHECK(TrustedMirrorMayAcceptPeerBlockBody(
+        /*this_gpu=*/true, /*this_inbound=*/true, /*this_archive_or_mirror=*/false));
+    BOOST_CHECK(TrustedMirrorMayAcceptPeerBlockBody(true, false, false));
+    BOOST_CHECK(TrustedMirrorMayAcceptPeerBlockBody(
+        false, /*this_inbound=*/false, /*this_archive_or_mirror=*/true));
+    BOOST_CHECK(!TrustedMirrorMayAcceptPeerBlockBody(
+        false, /*this_inbound=*/true, /*this_archive_or_mirror=*/true));
+    BOOST_CHECK(!TrustedMirrorMayAcceptPeerBlockBody(false, true, false));
+    BOOST_CHECK(!TrustedMirrorMayAcceptPeerBlockBody(false, false, false));
     using node::matmul_trusted::TrustedMirrorMayServeNonAuthorityGetData;
     BOOST_CHECK(TrustedMirrorMayServeNonAuthorityGetData(
         /*this_peer_is_gpu_authority=*/true, /*catching_up_behind_frontier=*/true));
     BOOST_CHECK(TrustedMirrorMayServeNonAuthorityGetData(true, false));
     BOOST_CHECK(!TrustedMirrorMayServeNonAuthorityGetData(false, true));
     BOOST_CHECK(TrustedMirrorMayServeNonAuthorityGetData(false, false));
+    BOOST_CHECK(TrustedMirrorMayServeNonAuthorityGetData(
+        /*this_peer_is_gpu_authority=*/false, /*catching_up_behind_frontier=*/true,
+        /*this_archive_or_mirror=*/true));
+    BOOST_CHECK(TrustedMirrorMayServeNonAuthorityGetData(false, true, true));
     using node::matmul_trusted::TrustedMirrorGpuMayServeBlocks;
     BOOST_CHECK(TrustedMirrorGpuMayServeBlocks(
         /*gpu_authority=*/true, /*has_network_service=*/false));
     BOOST_CHECK(TrustedMirrorGpuMayServeBlocks(true, true));
     BOOST_CHECK(!TrustedMirrorGpuMayServeBlocks(false, false));
     BOOST_CHECK(TrustedMirrorGpuMayServeBlocks(false, true));
+    BOOST_CHECK(!TrustedMirrorGpuMayServeBlocks(
+        /*gpu_authority=*/true, /*has_network_service=*/false,
+        /*version_handshake_complete=*/false));
     using node::matmul_trusted::TrustedMirrorKeepFetchingCoveredUnconnected;
     BOOST_CHECK(TrustedMirrorKeepFetchingCoveredUnconnected(
         /*signed_frontier_catch_up=*/true,
@@ -1085,7 +1239,7 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(!TrustedMirrorKeepFetchingCoveredUnconnected(true, false));
     BOOST_CHECK(!TrustedMirrorKeepFetchingCoveredUnconnected(false, true));
     using node::matmul_trusted::IsNarrowCatchUpWindowForPolicy;
-    BOOST_CHECK(!IsNarrowCatchUpWindowForPolicy(
+    BOOST_CHECK(IsNarrowCatchUpWindowForPolicy(
         /*ibd=*/false, /*ahead=*/45, /*signed_frontier_catch_up=*/true));
     BOOST_CHECK(IsNarrowCatchUpWindowForPolicy(false, 10, false));
     BOOST_CHECK(!IsNarrowCatchUpWindowForPolicy(/*ibd=*/true, 10, false));
@@ -1096,6 +1250,18 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK_EQUAL(
         SignedFrontierPreferredCatchUpTimeout(std::chrono::milliseconds{50}).count(),
         15);
+    using node::matmul_trusted::SignedFrontierCatchUpUsesGpuTimeout;
+    BOOST_CHECK(SignedFrontierCatchUpUsesGpuTimeout(
+        /*manual_or_noban=*/true, /*version_handshake_complete=*/true));
+    BOOST_CHECK(!SignedFrontierCatchUpUsesGpuTimeout(true, false));
+    BOOST_CHECK(!SignedFrontierCatchUpUsesGpuTimeout(false, true));
+    using node::matmul_trusted::KeepGpuSignedFrontierInFlightPipeline;
+    BOOST_CHECK(KeepGpuSignedFrontierInFlightPipeline(
+        /*signed_frontier_catch_up=*/true, /*manual_or_noban=*/true,
+        /*version_handshake_complete=*/true));
+    BOOST_CHECK(!KeepGpuSignedFrontierInFlightPipeline(true, true, false));
+    BOOST_CHECK(!KeepGpuSignedFrontierInFlightPipeline(true, false, true));
+    BOOST_CHECK(!KeepGpuSignedFrontierInFlightPipeline(false, true, true));
     using node::matmul_trusted::TrustedMirrorGpuHandshakeTimeout;
     BOOST_CHECK_EQUAL(
         TrustedMirrorGpuHandshakeTimeout(std::chrono::seconds{60}, false).count(),
@@ -1114,6 +1280,16 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         TrustedMirrorGpuHandshakeTimeout(std::chrono::seconds{60}, false,
                                          /*handshake_incomplete=*/false).count(),
         60);
+    BOOST_CHECK_EQUAL(
+        TrustedMirrorGpuHandshakeTimeout(std::chrono::seconds{60}, true,
+                                         /*handshake_incomplete=*/true,
+                                         /*never_received=*/true).count(),
+        15);
+    BOOST_CHECK_EQUAL(
+        TrustedMirrorGpuHandshakeTimeout(std::chrono::seconds{60}, true,
+                                         /*handshake_incomplete=*/true,
+                                         /*never_received=*/false).count(),
+        180);
     using node::matmul_trusted::ClassifyMsghandPeer;
     using node::matmul_trusted::MsghandPeerClass;
     BOOST_CHECK(ClassifyMsghandPeer(false, false) == MsghandPeerClass::Handshake);
@@ -1228,6 +1404,8 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         true, true, /*has_quorum=*/true));
     BOOST_CHECK(!TrustedMirrorRetainGpuBodyAwaitingAttestation(
         true, /*from_gpu_attestor=*/false, false));
+    BOOST_CHECK_EQUAL(
+        node::matmul_trusted::GPU_RETAIN_ATTESTATION_RETRY.count(), 2);
 }
 
 BOOST_AUTO_TEST_CASE(signer_getmmattest_historical_and_hammer_ban)
@@ -1310,6 +1488,11 @@ BOOST_AUTO_TEST_CASE(competing_attested_index_rejects_fossil_depth)
         false, 180, /*on_signed_frontier_chain=*/true));
     BOOST_CHECK(!TrustedMirrorMayAdoptCompetingAttestedIndex(
         false, 180, /*on_signed_frontier_chain=*/false));
+    using node::matmul_trusted::TrustedMirrorAttestedHintIsActiveAncestor;
+    BOOST_CHECK(TrustedMirrorAttestedHintIsActiveAncestor(
+        /*on_active_chain=*/true, /*lca_is_index=*/false));
+    BOOST_CHECK(TrustedMirrorAttestedHintIsActiveAncestor(false, true));
+    BOOST_CHECK(!TrustedMirrorAttestedHintIsActiveAncestor(false, false));
 }
 
 BOOST_AUTO_TEST_CASE(tip_extender_capacity_reserved_under_slot_pressure)

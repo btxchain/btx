@@ -2342,10 +2342,13 @@ void CConnman::NotifyNumConnectionsChanged()
 
 bool CConnman::ShouldRunInactivityChecks(const CNode& node, std::chrono::seconds now) const
 {
+    const bool handshake_incomplete{!node.fSuccessfullyConnected.load()};
+    const bool never_received{node.m_last_recv.load().count() == 0};
     const auto timeout{node::matmul_trusted::TrustedMirrorGpuHandshakeTimeout(
         m_peer_connect_timeout,
         node.IsManualConn() || node.HasPermission(NetPermissionFlags::NoBan),
-        !node.fSuccessfullyConnected.load())};
+        handshake_incomplete,
+        never_received)};
     return node.m_connected + timeout < now;
 }
 
@@ -2363,20 +2366,27 @@ bool CConnman::InactivityCheck(const CNode& node) const
     bool has_sent{last_send.count() != 0};
 
     if (!has_received || !has_sent) {
+        const bool handshake_incomplete{!node.fSuccessfullyConnected.load()};
         const auto timeout{node::matmul_trusted::TrustedMirrorGpuHandshakeTimeout(
             m_peer_connect_timeout,
             node.IsManualConn() ||
                 node.HasPermission(NetPermissionFlags::NoBan),
-            !node.fSuccessfullyConnected.load())};
+            handshake_incomplete,
+            /*never_received=*/!has_received)};
         std::string has_never;
         if (!has_received) has_never += ", never received from peer";
         if (!has_sent) has_never += ", never sent to peer";
-        LogDebug(BCLog::NET,
-            "socket no message in first %i seconds%s, %s\n",
-            count_seconds(timeout),
-            has_never,
-            node.DisconnectMsg(fLogIPs)
-        );
+        if (handshake_incomplete && !has_received) {
+            LogInfo("trusted mirror: dropping handshake-dead peer=%d timeout=%is%s\n",
+                    node.GetId(), count_seconds(timeout), has_never);
+        } else {
+            LogDebug(BCLog::NET,
+                "socket no message in first %i seconds%s, %s\n",
+                count_seconds(timeout),
+                has_never,
+                node.DisconnectMsg(fLogIPs)
+            );
+        }
         return true;
     }
 
@@ -3381,8 +3391,10 @@ void CConnman::ThreadOpenAddedConnections()
         std::erase_if(logged_connected, [&](const auto& node) { return !current_added_nodes.contains(node); });
         // See if any reconnections are desired.
         PerformReconnections();
-        // Retry every 60 seconds if a connection was attempted, otherwise two seconds
-        if (!interruptNet.sleep_for(std::chrono::seconds(tried ? 60 : 2)))
+        // Retry every 15 seconds if a connection was attempted, otherwise two
+        // seconds. 60s left a handshake-dead -connect sitting until the
+        // added-node thread woke (live nyc1: bytesrecv=0, GETDATA in_flight=0).
+        if (!interruptNet.sleep_for(std::chrono::seconds(tried ? 15 : 2)))
             return;
     }
 }
@@ -3590,7 +3602,8 @@ void CConnman::ThreadMessageHandler()
                 // BLOCK replies are not stuck behind miner visits.
                 const bool skip_inbound_send{
                     (!m_use_addrman_outgoing && pnode->IsInboundConn() &&
-                     !pnode->IsManualConn() && !archive_target) ||
+                     !pnode->IsManualConn() && !archive_target &&
+                     pnode->fSuccessfullyConnected.load()) ||
                     node::matmul_trusted::
                         SkipFullyConnectedInboundDuringPreferredHandshake(
                             preferred_handshake_pending,

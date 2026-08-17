@@ -2385,10 +2385,12 @@ BOOST_AUTO_TEST_CASE(signed_frontier_catchup_prefers_archive_not_miner)
                   ConnectionType::OUTBOUND_FULL_RELAY,
                   /*inbound_onion=*/false, /*network_key=*/0};
     connman.Handshake(miner, /*successfully_connected=*/true, miner_services,
-                      miner_services, PROTOCOL_VERSION, /*relay_txs=*/true);
+                      miner_services, PROTOCOL_VERSION, /*relay_txs=*/true,
+                      /*starting_height=*/tip->nHeight + kAhead);
     connman.Handshake(archive, /*successfully_connected=*/true,
                       archive_services, archive_services, PROTOCOL_VERSION,
-                      /*relay_txs=*/true);
+                      /*relay_txs=*/true,
+                      /*starting_height=*/tip->nHeight + kAhead);
     connman.FlushSendBuffer(miner);
     connman.FlushSendBuffer(archive);
     struct FinalizePeers {

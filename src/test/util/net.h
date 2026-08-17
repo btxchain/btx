@@ -88,7 +88,8 @@ struct ConnmanTestMsg : public CConnman {
                    ServiceFlags remote_services,
                    ServiceFlags local_services,
                    int32_t version,
-                   bool relay_txs)
+                   bool relay_txs,
+                   int32_t starting_height = 0)
         EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex);
 
     bool ProcessMessagesOnce(CNode& node) EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex)

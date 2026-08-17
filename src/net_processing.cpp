@@ -386,9 +386,10 @@ static bool IsCatchUpBlockFetch(const ChainstateManager& chainman,
     return FollowedChainAhead(chainman, peer_best) >= BLOCK_FETCH_STALL_HEADERS_AHEAD;
 }
 
-/** Signed-frontier HEADER_ONLY catch-up pipelines bodies: the GPU
- *  signature already covers the ancestor path, so 1-wide serial getdata
- *  is the 60s/block crawl. Unattested near-tip holes stay 1-wide. */
+/** Signed-frontier HEADER_ONLY catch-up is root-first 1-wide: the GPU
+ *  signature already covers the ancestor path, so tip+1 is O(1) accept.
+ *  A 16-wide newest-first window was the live 34–100s/block stall.
+ *  Unattested near-tip holes stay 1-wide. */
 static bool IsNarrowCatchUpWindow(const ChainstateManager& chainman,
                                   const CBlockIndex* peer_best = nullptr)
     EXCLUSIVE_LOCKS_REQUIRED(cs_main)
@@ -765,8 +766,17 @@ struct Peer {
      * Most peers use headers-first syncing, which doesn't use this mechanism */
     uint256 m_continuation_block GUARDED_BY(m_block_inv_mutex) {};
 
-    /** Set to true once initial VERSION message was sent (only relevant for outbound peers). */
+    /** Set to true once initial VERSION message was sent (outbound and inbound). */
     bool m_outbound_version_message_sent GUARDED_BY(NetEventsInterface::g_msgproc_mutex){false};
+
+    /** CNodeState fields captured in InitializeNode so the net thread can
+     *  skip cs_main when ConnectTip holds it (live GPU: inbound archives
+     *  TCP-complete then sit at bytesrecv=0). */
+    uint64_t m_init_keyed_netgroup{0};
+    bool m_init_noban{false};
+    bool m_init_manual{false};
+    bool m_init_inbound{false};
+    std::atomic<bool> m_node_state_pending{false};
 
     /** This peer's reported block height when we connected */
     std::atomic<int> m_starting_height{-1};
@@ -1042,12 +1052,18 @@ struct CNodeState {
      *  signed-frontier catch-up getdata sources without GetPeerRef. */
     bool m_matmul_trusted_mirror{false};
     bool m_node_network{false};
+    /** VERSION nStartingHeight. -1 until handshake. Used to decide whether
+     *  a preferred archive actually had the catch-up suffix at connect. */
+    int m_starting_height{-1};
     /** Configured NoBan / addnode. Combined with the archive bit these peers
      *  are treated as attestation-authority for download/header-follow even
      *  before a recent MMATTEST (chicken-egg: the signer cannot prove until
      *  we follow its chain). */
     bool m_noban{false};
     bool m_manual{false};
+    /** Inbound vs our outbound. Signed-frontier GETDATA is GPU or OUR
+     *  outbound archive/mirror only; inbound miners are never sources. */
+    bool m_inbound{false};
     /** Whether this peer wants invs or cmpctblocks (when possible) for block announcements. */
     bool m_requested_hb_cmpctblocks{false};
     /** Whether this peer will send us cmpctblocks if we request them. */
@@ -1270,6 +1286,10 @@ private:
     /** Get a shared pointer to the Peer object and remove it from m_peer_map.
      *  May return an empty shared_ptr if the Peer object can't be found. */
     PeerRef RemovePeer(NodeId id) EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
+
+    /** Insert m_node_states if InitializeNode deferred it to avoid blocking
+     *  the net thread on cs_main. */
+    void EnsureNodeState(Peer& peer) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     /** Mark a peer as misbehaving, which will cause it to be disconnected and its
      *  address discouraged. */
@@ -2044,6 +2064,13 @@ private:
         size_t min_parallel_owners = 1)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
+    /** True when every in-flight owner of `hash` is missing a stamp or older
+     *  than `stale_after`. Empty map is false (nothing to drop). */
+    bool BlockInFlightFullyStale(
+        const uint256& hash, std::chrono::microseconds now,
+        std::chrono::microseconds stale_after) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
     /** Have we requested this block from an outbound peer */
     bool IsBlockRequestedFromOutbound(const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main, !m_peer_mutex);
 
@@ -2315,6 +2342,11 @@ private:
     [[nodiscard]] bool ShouldIgnoreNonAuthorityInboundBlock(const CNode& pfrom) const;
     [[nodiscard]] std::chrono::microseconds CatchUpDownloadTimeoutForPeer(
         NodeId peer_id, const CNodeState& state) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    /** Signed-frontier GETDATA: handshake-complete GPU, or our outbound
+     *  archive/mirror that was ahead at VERSION. */
+    [[nodiscard]] bool PeerMaySignedFrontierCatchUpGetData(
+        const Peer& peer, const CNodeState& state) const
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     /** When an authority peer serves headers on a better/equal-work branch,
      *  move m_best_header onto that branch so the mirror can converge after
@@ -2730,6 +2762,21 @@ bool PeerManagerImpl::MayDuplicateStaleBlockRequest(const uint256& hash,
         return true;
     }
     return !any_fresh;
+}
+
+bool PeerManagerImpl::BlockInFlightFullyStale(const uint256& hash,
+                                             std::chrono::microseconds now,
+                                             std::chrono::microseconds stale_after) const
+{
+    auto range = mapBlocksInFlight.equal_range(hash);
+    if (range.first == range.second) return false;
+    for (auto it = range.first; it != range.second; ++it) {
+        const auto requested_at = it->second.second->requested_at;
+        if (requested_at.count() != 0 && now - requested_at < stale_after) {
+            return false;
+        }
+    }
+    return true;
 }
 
 bool PeerManagerImpl::IsBlockRequestedFromOutbound(const uint256& hash)
@@ -3405,14 +3452,15 @@ int PeerManagerImpl::ReclaimStaleInFlightBlockRequests(std::chrono::microseconds
             IsCatchUpBlockFetch(m_chainman)
                 ? CatchUpDownloadTimeoutForPeer(nodeid, state)
                 : reclaim_after_default};
-        // GPU-signed catch-up inflight is attested-path work. One UpdateTip
-        // must not reclaim the other 15 covered getdatas (live nyc1 2026-08-16:
-        // fetch-progress-backstop dropped 12–15 slots at 104–136s while the
-        // GPU still had the bodies). Keep them until the 180s hard cap.
+        // GPU-signed catch-up inflight is attested-path work. Do not keep a
+        // 180s pipeline on a miner that only relayed MMATTEST (live nyc1
+        // peer=94305: 15 HEADER_ONLY getdatas, tip+1 never arrived). Only
+        // the operator-configured GPU (manual/noban) is kept that long.
         const bool keep_gpu_pipeline{
-            signed_frontier_catch_up &&
-            (PeerIsGpuAuthority(nodeid, state) ||
-             PeerIsSignedFrontierBodySource(nodeid, state))};
+            node::matmul_trusted::KeepGpuSignedFrontierInFlightPipeline(
+                signed_frontier_catch_up, state.m_manual || state.m_noban,
+                node::matmul_trusted::SignedFrontierVersionHandshakeComplete(
+                    state.m_starting_height))};
         const auto gpu_reclaim_after{
             std::chrono::duration_cast<std::chrono::microseconds>(
                 BLOCK_INFLIGHT_HARD_RECLAIM_AFTER)};
@@ -4145,7 +4193,11 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
     const CBlockIndex* tip{m_chainman.ActiveChain().Tip()};
     const bool catch_up{IsCatchUpBlockFetch(m_chainman, state->pindexBestKnownBlock)};
     const bool narrow_window{IsNarrowCatchUpWindow(m_chainman, state->pindexBestKnownBlock)};
-    if (narrow_window && count > CATCHUP_BLOCKS_IN_TRANSIT_PER_PEER) {
+    // Root-first 1-wide for signed-frontier catch-up too (preferred GPU
+    // and archive sources). Live nyc1 filled 16 newest hashes from a
+    // miner-as-GPU and never gotdata tip+1.
+    if ((narrow_window || IsSignedFrontierBodyCatchUp()) &&
+        count > CATCHUP_BLOCKS_IN_TRANSIT_PER_PEER) {
         count = CATCHUP_BLOCKS_IN_TRANSIT_PER_PEER;
     }
     const auto rerequest_stale_after = catch_up
@@ -4188,20 +4240,10 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
                 oldest_inflight_age_s);
     };
 
-    // GPU attestor is the only inbound body source while catching up, even
-    // before that peer has completed VERSION. Miner HEADERS otherwise peg
-    // msghand and the GPU -connect never reaches InitializeNode.
-    if (node::matmul_trusted::TrustedMirrorIgnoreNonAuthorityInboundBlock(
-            node::matmul_trusted::IsTrustedMirror(),
-            PeerIsGpuAuthority(peer.m_id, *state),
-            /*authority_only_inbound=*/true)) {
-        log_skip("gpu_authority_only");
-        return;
-    }
-    // Live 2026-08-16: signed-frontier HEADER_ONLY catch-up filled 16 getdata
-    // slots from CONSENSUS miners who only had headers, then disconnected the
-    // only download peer at 15s. Prefer archive/mirror/manual sources when
-    // the GPU attestor is not connected.
+    // Inbound BLOCK/HEADERS stay GPU-only (ShouldIgnoreNonAuthorityInboundBlock).
+    // Catch-up GETDATA is GPU or OUR outbound attested archives only —
+    // never inbound miners, never inbound archive-bit peers, never a
+    // hung -connect with no VERSION.
     const bool this_peer_frontier_source{
         PeerIsSignedFrontierBodySource(peer.m_id, *state, &peer)};
     if (node::matmul_trusted::SkipNonPreferredSignedFrontierBodyPeer(
@@ -4211,10 +4253,13 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
         log_skip("signed_frontier_prefer_archive");
         return;
     }
-    // Miners gossip HEADER_ONLY. A 16-wide getdata window on them is the
-    // live 1-block/minute stall: one body maybe arrives, the rest time out
-    // together, and the only download peer is disconnected.
-    if (IsSignedFrontierBodyCatchUp() && !this_peer_frontier_source &&
+    if (!PeerMaySignedFrontierCatchUpGetData(peer, *state)) {
+        log_skip("signed_frontier_not_getdata_source");
+        return;
+    }
+    // Preferred sources are already clamped to 1-wide above. Keep this
+    // as a belt-and-suspenders cap if a later mutation raises `count`.
+    if (IsSignedFrontierBodyCatchUp() &&
         count > CATCHUP_BLOCKS_IN_TRANSIT_PER_PEER) {
         count = CATCHUP_BLOCKS_IN_TRANSIT_PER_PEER;
     }
@@ -4359,18 +4404,18 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
         state->pindexLastCommonBlock, state->pindexBestKnownBlock, tip,
         &m_chainman.ActiveChain())};
     state->pindexLastCommonBlock = root_first.last_common;
-    if (root_first.clamped && root_first.lowest_missing != nullptr &&
+        if (root_first.clamped && root_first.lowest_missing != nullptr &&
         !IsHeaderOnlyFetchSuppressed(m_chainman, tip, root_first.lowest_missing,
                                      m_header_only_competing,
                                      m_header_only_followed_skip) &&
         !m_matmul_block_lifecycle.HasRetainedBody(root_first.lowest_missing->GetBlockHash()) &&
-        IsBlockRequested(root_first.lowest_missing->GetBlockHash()) &&
-        MayDuplicateStaleBlockRequest(root_first.lowest_missing->GetBlockHash(),
-                                      now_for_diag, rerequest_stale_after,
-                                      min_parallel_owners)) {
-        // Only drop stale/ownerless reservations past the hole. A fresh
-        // in-flight getdata is the catch-up in progress (live 2026-08-16:
-        // clamp deleted the next covered body every UpdateTip, in_flight=0).
+        node::matmul_trusted::ShouldDropInFlightForRootFirstRerequest(
+            IsBlockRequested(root_first.lowest_missing->GetBlockHash()),
+            BlockInFlightFullyStale(root_first.lowest_missing->GetBlockHash(),
+                                    now_for_diag, rerequest_stale_after))) {
+        // Drop only fully-stale reservations. MayDuplicate(owners<2) used
+        // to fire here and cancel a fresh GPU GETDATA; the body then arrived
+        // unsolicited and was ticket-dropped (live nyc1 2026-08-16).
         RemoveBlockRequest(root_first.lowest_missing->GetBlockHash(), std::nullopt);
     }
 
@@ -4807,15 +4852,6 @@ void PeerManagerImpl::UpdateLastBlockAnnounceTime(NodeId node, int64_t time_in_s
 void PeerManagerImpl::InitializeNode(const CNode& node, ServiceFlags our_services)
 {
     NodeId nodeid = node.GetId();
-    {
-        LOCK(cs_main); // For m_node_states
-        auto it{m_node_states.try_emplace(m_node_states.end(), nodeid)};
-        it->second.m_keyed_netgroup = node.nKeyedNetGroup;
-        it->second.m_noban = node.HasPermission(NetPermissionFlags::NoBan);
-        it->second.m_manual = node.IsManualConn();
-    }
-    WITH_LOCK(m_tx_download_mutex, m_txdownloadman.CheckIsEmpty(nodeid));
-
     if (NetPermissions::HasFlag(node.m_permission_flags, NetPermissionFlags::BloomFilter)) {
         our_services = static_cast<ServiceFlags>(our_services | NODE_BLOOM);
     }
@@ -4824,10 +4860,47 @@ void PeerManagerImpl::InitializeNode(const CNode& node, ServiceFlags our_service
     }
 
     PeerRef peer = std::make_shared<Peer>(nodeid, our_services, node.IsInboundConn(), node.addr);
+    peer->m_init_keyed_netgroup = node.nKeyedNetGroup;
+    peer->m_init_noban = node.HasPermission(NetPermissionFlags::NoBan);
+    peer->m_init_manual = node.IsManualConn();
+    peer->m_init_inbound = node.IsInboundConn();
+    {
+        // Net thread (accept / -connect) must not wait on cs_main: ConnectTip
+        // / ExactReplay on the GPU signer holds it for minutes, so InitializeNode
+        // blocked AcceptConnection and inbound archives sat at bytesrecv=0.
+        TRY_LOCK(cs_main, lock);
+        if (lock) {
+            auto it{m_node_states.try_emplace(m_node_states.end(), nodeid)};
+            it->second.m_keyed_netgroup = peer->m_init_keyed_netgroup;
+            it->second.m_noban = peer->m_init_noban;
+            it->second.m_manual = peer->m_init_manual;
+            it->second.m_inbound = peer->m_init_inbound;
+            peer->m_node_state_pending.store(false, std::memory_order_release);
+        } else {
+            peer->m_node_state_pending.store(true, std::memory_order_release);
+            LogInfo("deferred node-state init peer=%d (cs_main busy); not blocking net thread\n",
+                    nodeid);
+        }
+    }
+    WITH_LOCK(m_tx_download_mutex, m_txdownloadman.CheckIsEmpty(nodeid));
     {
         LOCK(m_peer_mutex);
         m_peer_map.emplace_hint(m_peer_map.end(), nodeid, peer);
     }
+}
+
+void PeerManagerImpl::EnsureNodeState(Peer& peer)
+{
+    if (State(peer.m_id) != nullptr) {
+        peer.m_node_state_pending.store(false, std::memory_order_release);
+        return;
+    }
+    auto it{m_node_states.try_emplace(m_node_states.end(), peer.m_id)};
+    it->second.m_keyed_netgroup = peer.m_init_keyed_netgroup;
+    it->second.m_noban = peer.m_init_noban;
+    it->second.m_manual = peer.m_init_manual;
+    it->second.m_inbound = peer.m_init_inbound;
+    peer.m_node_state_pending.store(false, std::memory_order_release);
 }
 
 void PeerManagerImpl::ReattemptInitialBroadcast(CScheduler& scheduler)
@@ -4869,18 +4942,15 @@ void PeerManagerImpl::FinalizeNode(const CNode& node)
     NodeId nodeid = node.GetId();
     {
     LOCK(cs_main);
-    {
-        // We remove the PeerRef from g_peer_map here, but we don't always
-        // destruct the Peer. Sometimes another thread is still holding a
-        // PeerRef, so the refcount is >= 1. Be careful not to do any
-        // processing here that assumes Peer won't be changed before it's
-        // destructed.
-        PeerRef peer = RemovePeer(nodeid);
-        assert(peer != nullptr);
-        m_wtxid_relay_peers -= peer->m_wtxid_relay;
-        assert(m_wtxid_relay_peers >= 0);
-    }
+    PeerRef peer = RemovePeer(nodeid);
+    assert(peer != nullptr);
+    m_wtxid_relay_peers -= peer->m_wtxid_relay;
+    assert(m_wtxid_relay_peers >= 0);
     CNodeState *state = State(nodeid);
+    if (state == nullptr) {
+        EnsureNodeState(*peer);
+        state = State(nodeid);
+    }
     assert(state != nullptr);
 
     if (state->fSyncStarted)
@@ -7700,18 +7770,17 @@ void PeerManagerImpl::HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, c
     if (nodestate == nullptr || GetTime<std::chrono::microseconds>() < nodestate->m_block_download_paused_until) {
         return;
     }
-    if (node::matmul_trusted::TrustedMirrorIgnoreNonAuthorityInboundBlock(
-            node::matmul_trusted::IsTrustedMirror(),
-            PeerIsGpuAuthority(pfrom.GetId(), *nodestate),
-            /*authority_only_inbound=*/true)) {
-        return;
-    }
     const bool this_peer_frontier_source{
         PeerIsSignedFrontierBodySource(pfrom.GetId(), *nodestate, &peer)};
     if (node::matmul_trusted::SkipNonPreferredSignedFrontierBodyPeer(
             IsSignedFrontierBodyCatchUp(),
             this_peer_frontier_source,
             CountCapableSignedFrontierBodySources() > 0)) {
+        return;
+    }
+    // Do not use the inbound-ignore gate here: that would also skip OUR
+    // outbound archive GETDATA. Still skip inbound miners via MayRequest.
+    if (!PeerMaySignedFrontierCatchUpGetData(peer, *nodestate)) {
         return;
     }
 
@@ -7760,23 +7829,24 @@ void PeerManagerImpl::HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, c
             last_header.GetAncestor(tip_for_work->nHeight) == tip_for_work};
         const bool narrow_window{IsNarrowCatchUpWindow(
             m_chainman, nodestate->pindexBestKnownBlock)};
+        const bool signed_frontier_catch_up{IsSignedFrontierBodyCatchUp()};
+        const bool root_first_catch_up{narrow_window || signed_frontier_catch_up};
         // Catch-up must not fill 16 newest hashes of a competing headers-only
         // flood. Existing trusted-mirror / claimed-work filters above stay.
-        if (narrow_window && !extends_active_tip) {
+        if (root_first_catch_up && !extends_active_tip) {
             return;
         }
-        if (narrow_window && tip_for_work != nullptr) {
+        if (root_first_catch_up && tip_for_work != nullptr) {
             ReclaimCatchupSuccessorRequests(tip_for_work->nHeight + 1,
                                             "headers-direct-fetch-catchup");
         }
         const unsigned int fetch_cap{
-            (narrow_window ||
-             (IsSignedFrontierBodyCatchUp() && !this_peer_frontier_source))
+            root_first_catch_up
                 ? CATCHUP_BLOCKS_IN_TRANSIT_PER_PEER
                 : MAX_BLOCKS_IN_TRANSIT_PER_PEER};
         std::vector<const CBlockIndex*> vToFetch;
         const CBlockIndex* pindexWalk{&last_header};
-        if (narrow_window) {
+        if (root_first_catch_up) {
             // Walk the full path to the tip and keep the lowest missing hole.
             // Collecting MAX_BLOCKS_IN_TRANSIT_PER_PEER newest then reversing
             // would request tip+N-15 instead of tip+1 when N>16.
@@ -8286,9 +8356,11 @@ bool PeerManagerImpl::PeerIsSignedFrontierBodySource(
         recent_valid = now >= it->second.seen_at &&
                        now - it->second.seen_at <= MATMUL_ATTESTATION_REQUEST_TTL;
     }
+    const bool outbound{
+        peer != nullptr ? !peer->m_is_inbound : !state.m_inbound};
     return node::matmul_trusted::PreferSignedFrontierCatchUpBlockPeer(
         /*signed_frontier_catch_up=*/true, archive, mirror, network,
-        recent_valid, state.m_noban || state.m_manual);
+        recent_valid, state.m_noban || state.m_manual, outbound);
 }
 
 int PeerManagerImpl::CountSignedFrontierBodySources() const
@@ -8318,7 +8390,10 @@ int PeerManagerImpl::CountCapableSignedFrontierBodySources() const
                 : -1};
         if (node::matmul_trusted::SignedFrontierBodySourceCanServeCatchUp(
                 preferred, state.pindexBestKnownBlock != nullptr, best_height,
-                tip_height, extends)) {
+                tip_height, extends,
+                node::matmul_trusted::SignedFrontierVersionHandshakeComplete(
+                    state.m_starting_height),
+                state.m_starting_height)) {
             ++n;
         }
     }
@@ -8345,12 +8420,10 @@ int PeerManagerImpl::CountCapableGpuAuthorityPeers() const
     AssertLockHeld(cs_main);
     int n{0};
     for (const auto& [id, state] : m_node_states) {
-        const bool handshake{
-            state.m_node_network || state.m_matmul_attestation_archive ||
-            state.m_matmul_trusted_mirror ||
-            state.pindexBestKnownBlock != nullptr};
         if (node::matmul_trusted::TrustedMirrorGpuAuthorityHandshakeComplete(
-                PeerIsGpuAuthority(id, state), handshake)) {
+                PeerIsGpuAuthority(id, state),
+                node::matmul_trusted::SignedFrontierVersionHandshakeComplete(
+                    state.m_starting_height))) {
             ++n;
         }
     }
@@ -8366,27 +8439,54 @@ bool PeerManagerImpl::ShouldIgnoreNonAuthorityInboundBlock(const CNode& pfrom) c
     if (!node::matmul_trusted::IsTrustedMirror()) return false;
     const bool this_gpu{
         pfrom.IsManualConn() || pfrom.HasPermission(NetPermissionFlags::NoBan)};
-    // Trusted-GPU mode: only GPU attestors may deliver inbound blocks.
-    // Do not wait for VERSION; miners must not hold the message thread.
+    // Trusted-GPU mode: only GPU attestors may push unsolicited blocks/headers.
+    // Outbound archive GETDATA replies are not this inbound gate.
     return node::matmul_trusted::TrustedMirrorIgnoreNonAuthorityInboundBlock(
-        /*trusted_mirror=*/true, this_gpu, /*authority_only_inbound=*/true);
+        /*trusted_mirror=*/true, this_gpu, /*authority_only_inbound=*/true,
+        pfrom.IsInboundConn());
 }
 
 std::chrono::microseconds PeerManagerImpl::CatchUpDownloadTimeoutForPeer(
     NodeId peer_id, const CNodeState& state) const
 {
     AssertLockHeld(cs_main);
-    // Live nyc1 2026-08-16: GPU had 1da9f7b9 (height 190605) and 16 getdata
-    // slots were assigned; fetch-stall-backstop reclaimed them at 15s with
-    // blockrecv=0. Preferred/GPU sources need WaitTimeout+30s (90s).
-    if (PeerIsGpuAuthority(peer_id, state) ||
-        PeerIsSignedFrontierBodySource(peer_id, state)) {
+    (void)peer_id;
+    // 90s only for a handshake-complete GPU (manual/noban). Hung -connect
+    // and outbound archives keep 15s so a silent source failsovers.
+    if (node::matmul_trusted::SignedFrontierCatchUpUsesGpuTimeout(
+            state.m_manual || state.m_noban,
+            node::matmul_trusted::SignedFrontierVersionHandshakeComplete(
+                state.m_starting_height))) {
         return std::chrono::duration_cast<std::chrono::microseconds>(
             node::matmul_trusted::SignedFrontierPreferredCatchUpTimeout(
                 node::matmul_trusted::WaitTimeout()));
     }
     return std::chrono::duration_cast<std::chrono::microseconds>(
         BLOCK_CATCHUP_DOWNLOAD_TIMEOUT);
+}
+
+bool PeerManagerImpl::PeerMaySignedFrontierCatchUpGetData(
+    const Peer& peer, const CNodeState& state) const
+{
+    AssertLockHeld(cs_main);
+    const CBlockIndex* const tip{m_chainman.ActiveTip()};
+    const int tip_height{tip != nullptr ? tip->nHeight : 0};
+    const ServiceFlags services{peer.m_their_services.load()};
+    const bool archive_or_mirror{
+        state.m_matmul_attestation_archive || state.m_matmul_trusted_mirror ||
+        (services & NODE_MATMUL_ATTESTATION_ARCHIVE) ==
+            NODE_MATMUL_ATTESTATION_ARCHIVE ||
+        (services & NODE_MATMUL_TRUSTED_MIRROR) == NODE_MATMUL_TRUSTED_MIRROR};
+    const int starting{
+        state.m_starting_height >= 0 ? state.m_starting_height
+                                     : peer.m_starting_height.load()};
+    return node::matmul_trusted::SignedFrontierMayRequestCatchUpGetData(
+        IsSignedFrontierBodyCatchUp(),
+        state.m_manual || state.m_noban,
+        !state.m_inbound && !peer.m_is_inbound,
+        archive_or_mirror,
+        node::matmul_trusted::SignedFrontierVersionHandshakeComplete(starting),
+        starting, tip_height);
 }
 
 void PeerManagerImpl::MaybeFollowTrustedMirrorAuthorityHeader(
@@ -8472,13 +8572,23 @@ void PeerManagerImpl::MaybeSeedGpuSignedFrontierBestKnown(
     const bool extends{
         seed != nullptr && seed->nHeight > tip->nHeight &&
         seed->GetAncestor(tip->nHeight) == tip};
+    const bool best_known_usable{
+        state.pindexBestKnownBlock != nullptr &&
+        state.pindexBestKnownBlock->nHeight > tip->nHeight &&
+        state.pindexBestKnownBlock->GetAncestor(tip->nHeight) == tip};
     if (!node::matmul_trusted::SeedTrustedMirrorGpuBestKnownFromFrontier(
-            PeerIsGpuAuthority(peer_id, state),
             IsSignedFrontierBodyCatchUp(),
-            state.pindexBestKnownBlock == nullptr,
+            best_known_usable,
             extends,
             seed != nullptr ? seed->nHeight : -1,
-            tip->nHeight)) {
+            tip->nHeight,
+            node::matmul_trusted::SignedFrontierVersionHandshakeComplete(
+                state.m_starting_height),
+            node::matmul_trusted::SignedFrontierMaySeedBestKnownFromFrontier(
+                state.m_manual || state.m_noban, !state.m_inbound,
+                state.m_matmul_attestation_archive ||
+                    state.m_matmul_trusted_mirror,
+                state.m_starting_height, tip->nHeight))) {
         return;
     }
     state.pindexBestKnownBlock = seed;
@@ -8500,7 +8610,8 @@ void PeerManagerImpl::MaybeRequestTrustedMirrorAuthorityHeaders(
         const bool gpu{gpu_state != nullptr &&
                        PeerIsGpuAuthority(pto.GetId(), *gpu_state)};
         if (!node::matmul_trusted::TrustedMirrorGpuMayServeBlocks(
-                gpu, CanServeBlocks(peer))) {
+                gpu, CanServeBlocks(peer),
+                /*version_handshake_complete=*/peer.m_starting_height.load() >= 0)) {
             return;
         }
     }
@@ -9167,6 +9278,11 @@ void PeerManagerImpl::RequestMatMulTrustedAttestations(
     m_connman.ForEachNode([&](CNode* target) {
         consider(target);
     });
+    if (!asked_now.empty()) {
+        LogInfo("GETMMATTEST send hash=%s peers=%zu catch_up=%d\n",
+                hash.ToString(), asked_now.size(),
+                signed_frontier_catch_up);
+    }
 
     {
         LOCK(cs_main);
@@ -11395,7 +11511,8 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
         // Wait for MMATTEST rather than re-admitting this body every 1s
         // (live 2026-08-16: 1Hz "Retaining GPU body" livelock after a
         // 2s GPU burst). Quorum RefreshRetry(0) re-admits immediately.
-        admission.retry_delay = node::matmul_trusted::WaitTimeout();
+        admission.retry_delay =
+            node::matmul_trusted::GPU_RETAIN_ATTESTATION_RETRY;
         if (!m_matmul_block_lifecycle.HasRetainedBody(block_hash)) {
             LogInfo("Retaining GPU body hash=%s height=%d from peer=%d pending MMATTEST (not HEADER_ONLY)\n",
                     block_hash.ToString(), exact_reference_height, node.GetId());
@@ -12366,9 +12483,10 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         }
 
         // Inbound peers send us their version message when they connect.
-        // We send our version message in response.
-        if (pfrom.IsInboundConn()) {
+        // We send our version message in response (unless SendMessages already did).
+        if (pfrom.IsInboundConn() && !peer->m_outbound_version_message_sent) {
             PushNodeVersion(pfrom, *peer);
+            peer->m_outbound_version_message_sent = true;
         }
 
         // Change version
@@ -12463,6 +12581,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 NODE_MATMUL_TRUSTED_MIRROR;
             state->m_node_network =
                 (nServices & NODE_NETWORK) == NODE_NETWORK;
+            state->m_starting_height = starting_height;
             m_num_preferred_download_peers += state->fPreferredDownload;
 
             if (require_matmul_consensus && base_preferred &&
@@ -13034,10 +13153,10 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         return;
     }
 
-    // Trusted-GPU mode: drop miner-delivered BLOCK/HEADERS/INV before
-    // deserialize. Only GPU attestors may provide inbound blocks.
-    // GETDATA is outbound-fetch: drop it only while catching up so miner
-    // block-serve cannot starve GPU ingest (nyc1 2026-08-16, 94% msghand).
+    // Trusted-GPU mode: drop miner-delivered BLOCK/HEADERS/INV/CMPCTBLOCK
+    // before deserialize. GPU is the only inbound block source. Solicited
+    // GETDATA replies are expected only from GPU or OUR outbound
+    // archive/mirror peers — not inbound miners, not inbound archive-bit.
     const bool ignore_non_gpu_inbound{
         ShouldIgnoreNonAuthorityInboundBlock(pfrom)};
     const bool this_gpu{
@@ -13055,17 +13174,31 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
     const bool defer_miner_getdata{
         ignore_non_gpu_inbound &&
         !node::matmul_trusted::TrustedMirrorMayServeNonAuthorityGetData(
-            this_gpu, m_signed_frontier_catch_up.load(std::memory_order_relaxed))};
-    if ((ignore_non_gpu_inbound || drop_miner_ingest) &&
+            this_gpu, m_signed_frontier_catch_up.load(std::memory_order_relaxed),
+            this_archive_target)};
+    const bool accept_catchup_ingest{
+        !node::matmul_trusted::IsTrustedMirror() ||
+        node::matmul_trusted::TrustedMirrorMayAcceptPeerBlockBody(
+            this_gpu, pfrom.IsInboundConn(),
+            pfrom.HasArchiveOrMirrorService())};
+    if (!accept_catchup_ingest &&
         (msg_type == NetMsgType::BLOCK || msg_type == NetMsgType::HEADERS ||
          msg_type == NetMsgType::CMPCTBLOCK || msg_type == NetMsgType::BLOCKTXN ||
-         msg_type == NetMsgType::INV || msg_type == NetMsgType::ADDR ||
-         msg_type == NetMsgType::ADDRV2 || msg_type == NetMsgType::GETMMATTEST ||
-         msg_type == NetMsgType::MMATTEST || msg_type == NetMsgType::TX ||
-         msg_type == NetMsgType::GETHEADERS || msg_type == NetMsgType::GETBLOCKS ||
-         msg_type == NetMsgType::MEMPOOL || msg_type == NetMsgType::FEEFILTER)) {
+         msg_type == NetMsgType::INV)) {
         static std::atomic<bool> logged_ignore{false};
         if (!logged_ignore.exchange(true)) {
+            LogInfo("Ignoring non-authority inbound %s (GPU attestors are the only inbound block source, peer=%d)\n",
+                    SanitizeString(msg_type), pfrom.GetId());
+        }
+        return;
+    }
+    if ((ignore_non_gpu_inbound || drop_miner_ingest) &&
+        (msg_type == NetMsgType::ADDR || msg_type == NetMsgType::ADDRV2 ||
+         msg_type == NetMsgType::TX ||
+         msg_type == NetMsgType::GETHEADERS || msg_type == NetMsgType::GETBLOCKS ||
+         msg_type == NetMsgType::MEMPOOL || msg_type == NetMsgType::FEEFILTER)) {
+        static std::atomic<bool> logged_miner{false};
+        if (!logged_miner.exchange(true)) {
             LogInfo("Ignoring non-authority inbound %s (GPU attestors are the only inbound block source, peer=%d)\n",
                     SanitizeString(msg_type), pfrom.GetId());
         }
@@ -13075,6 +13208,16 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         static std::atomic<bool> logged_getdata{false};
         if (!logged_getdata.exchange(true)) {
             LogInfo("Deferring non-authority GETDATA while catching up to GPU-signed frontier (peer=%d)\n",
+                    pfrom.GetId());
+        }
+        return;
+    }
+    if (msg_type == NetMsgType::GETMMATTEST &&
+        m_signed_frontier_catch_up.load(std::memory_order_relaxed) &&
+        !this_gpu) {
+        static std::atomic<bool> logged_getmm{false};
+        if (!logged_getmm.exchange(true)) {
+            LogInfo("Deferring inbound GETMMATTEST while catching up to GPU-signed frontier (peer=%d)\n",
                     pfrom.GetId());
         }
         return;
@@ -13947,7 +14090,11 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             return;
         }
 
-        if (ShouldIgnoreNonAuthorityInboundBlock(pfrom)) {
+        if (ShouldIgnoreNonAuthorityInboundBlock(pfrom) &&
+            !node::matmul_trusted::TrustedMirrorMayAcceptPeerBlockBody(
+                pfrom.IsManualConn() ||
+                    pfrom.HasPermission(NetPermissionFlags::NoBan),
+                pfrom.IsInboundConn(), pfrom.HasArchiveOrMirrorService())) {
             LogDebug(BCLog::CMPCTBLOCK,
                      "Ignoring non-authority compact block %s peer=%d (GPU authority is the only inbound source)\n",
                      cmpctblock.header.GetHash().ToString(), pfrom.GetId());
@@ -15844,7 +15991,11 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             return;
         }
 
-        if (ShouldIgnoreNonAuthorityInboundBlock(pfrom)) {
+        if (ShouldIgnoreNonAuthorityInboundBlock(pfrom) &&
+            !node::matmul_trusted::TrustedMirrorMayAcceptPeerBlockBody(
+                pfrom.IsManualConn() ||
+                    pfrom.HasPermission(NetPermissionFlags::NoBan),
+                pfrom.IsInboundConn(), pfrom.HasArchiveOrMirrorService())) {
             LogDebug(BCLog::NET,
                      "Ignoring non-authority headers count=%u peer=%d (GPU authority is the only inbound source)\n",
                      nCount, pfrom.GetId());
@@ -15891,7 +16042,12 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
 
         LogDebug(BCLog::NET, "received block %s peer=%d\n", pblock->GetHash().ToString(), pfrom.GetId());
 
-        const bool ignore_non_authority{ShouldIgnoreNonAuthorityInboundBlock(pfrom)};
+        const bool ignore_non_authority{
+            ShouldIgnoreNonAuthorityInboundBlock(pfrom) &&
+            !node::matmul_trusted::TrustedMirrorMayAcceptPeerBlockBody(
+                pfrom.IsManualConn() ||
+                    pfrom.HasPermission(NetPermissionFlags::NoBan),
+                pfrom.IsInboundConn(), pfrom.HasArchiveOrMirrorService())};
         if (ignore_non_authority) {
             LogDebug(BCLog::NET,
                      "Ignoring non-authority block %s peer=%d (GPU authority is the only inbound source)\n",
@@ -16380,6 +16536,10 @@ bool PeerManagerImpl::ProcessMessages(CNode* pfrom, std::atomic<bool>& interrupt
 
     PeerRef peer = GetPeerRef(pfrom->GetId());
     if (peer == nullptr) return false;
+    if (peer->m_node_state_pending.load(std::memory_order_acquire)) {
+        LOCK(cs_main);
+        EnsureNodeState(*peer);
+    }
 
     // For outbound connections, ensure that the initial VERSION message
     // has been sent first before processing any incoming messages
@@ -16388,11 +16548,16 @@ bool PeerManagerImpl::ProcessMessages(CNode* pfrom, std::atomic<bool>& interrupt
     const bool ignore_non_authority{ShouldIgnoreNonAuthorityInboundBlock(*pfrom)};
     const bool this_gpu{
         pfrom->IsManualConn() || pfrom->HasPermission(NetPermissionFlags::NoBan)};
+    const bool this_archive{
+        node::matmul_trusted::MsghandPeerIsArchiveServeTarget(
+            pfrom->IsManualConn() || !pfrom->IsInboundConn(),
+            pfrom->HasArchiveOrMirrorService())};
     const bool defer_miner_getdata{
         ignore_non_authority &&
         !node::matmul_trusted::TrustedMirrorMayServeNonAuthorityGetData(
             this_gpu,
-            m_signed_frontier_catch_up.load(std::memory_order_relaxed))};
+            m_signed_frontier_catch_up.load(std::memory_order_relaxed),
+            this_archive)};
     {
         LOCK(peer->m_getdata_requests_mutex);
         if (defer_miner_getdata) {
@@ -16905,14 +17070,20 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
 
     PeerRef peer = GetPeerRef(pto->GetId());
     if (!peer) return false;
+    if (peer->m_node_state_pending.load(std::memory_order_acquire)) {
+        LOCK(cs_main);
+        EnsureNodeState(*peer);
+    }
     const Consensus::Params& consensusParams = m_chainparams.GetConsensus();
 
     // We must call MaybeDiscourageAndDisconnect first, to ensure that we'll
     // disconnect misbehaving peers even before the version handshake is complete.
     if (MaybeDiscourageAndDisconnect(*pto, *peer)) return true;
 
-    // Initiate version handshake for outbound connections
-    if (!pto->IsInboundConn() && !peer->m_outbound_version_message_sent) {
+    // Send VERSION for outbound and inbound. Waiting for ProcessMessages to
+    // reply to inbound VERSION blocked GPU archives: msghand sat in ConnectTip
+    // and the net thread could not emit a reply.
+    if (!peer->m_outbound_version_message_sent) {
         PushNodeVersion(*pto, *peer);
         peer->m_outbound_version_message_sent = true;
     }
@@ -17691,7 +17862,9 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
         const bool should_request_blocks_from_peer{
             node::matmul_trusted::TrustedMirrorGpuMayServeBlocks(
                 PeerIsGpuAuthority(pto->GetId(), state),
-                CanServeBlocks(*peer)) &&
+                CanServeBlocks(*peer),
+                /*version_handshake_complete=*/peer->m_starting_height.load() >= 0) &&
+            PeerMaySignedFrontierCatchUpGetData(*peer, state) &&
             can_request_blocks_from_peer &&
             ShouldRequestBlocksFromMatMulPeer(
                 // Fetching is not validating: an ordinary peer may relay a
@@ -17721,8 +17894,11 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                 // ineligible peers and sent one investigation down the wrong
                 // path. Report it only as a trailing hint.
                 const char* reason = !node::matmul_trusted::TrustedMirrorGpuMayServeBlocks(
-                    PeerIsGpuAuthority(pto->GetId(), state), CanServeBlocks(*peer))
+                    PeerIsGpuAuthority(pto->GetId(), state), CanServeBlocks(*peer),
+                    /*version_handshake_complete=*/peer->m_starting_height.load() >= 0)
                     ? "cannot_serve_blocks"
+                    : !PeerMaySignedFrontierCatchUpGetData(*peer, state)
+                          ? "signed_frontier_not_getdata_source"
                     : !can_request_blocks_from_peer ? "peer_download_paused"
                     : (m_chainman.IsInitialBlockDownload() &&
                        !(sync_blocks_and_headers_from_peer && !IsLimitedPeer(*peer)))

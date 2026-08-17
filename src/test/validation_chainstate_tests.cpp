@@ -3098,6 +3098,7 @@ BOOST_FIXTURE_TEST_CASE(chainstate_trusted_mirror_connects_frontier_suffix_witho
     }
 
     const auto t0{std::chrono::steady_clock::now()};
+    chainman.ResetTrustedMirrorExactReplayInvocationsForTest();
     state = BlockValidationState{};
     BOOST_REQUIRE(chainstate.ActivateBestChain(state));
     const auto elapsed{std::chrono::steady_clock::now() - t0};
@@ -3105,6 +3106,7 @@ BOOST_FIXTURE_TEST_CASE(chainstate_trusted_mirror_connects_frontier_suffix_witho
     for (CBlockIndex* idx : suffix) {
         BOOST_CHECK(WITH_LOCK(::cs_main, return chainstate.m_chain.Contains(idx)));
     }
+    BOOST_CHECK_EQUAL(chainman.TrustedMirrorExactReplayInvocationsForTest(), 0);
     BOOST_CHECK_LT(std::chrono::duration_cast<std::chrono::seconds>(elapsed).count(), 60);
     chainman.CheckBlockIndex();
 }
@@ -3234,6 +3236,90 @@ BOOST_FIXTURE_TEST_CASE(chainstate_trusted_mirror_frontier_coverage_fail_closed,
     BOOST_CHECK(WITH_LOCK(::cs_main, return !chainman.IndexIsCoveredBySignedFrontier(above_idx)));
     BOOST_CHECK(WITH_LOCK(::cs_main, return !chainman.IndexHasTrustedMatMulAuthority(above_idx)));
     BOOST_CHECK(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()) == last);
+    chainman.CheckBlockIndex();
+}
+
+BOOST_FIXTURE_TEST_CASE(chainstate_trusted_mirror_covered_connecttip_skips_exact_replay, TestChain100Setup)
+{
+    // Covered ConnectTip must not invoke ExactReplay. Live nyc1 2026-08-17:
+    // accept-path path=frontier already skipped MatMul; ConnectTip of a
+    // 1-tx suffix block must stay script/UTXO-only.
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    Chainstate& chainstate = chainman.ActiveChainstate();
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    auto& mode = const_cast<kernel::MatMulValidationMode&>(chainman.m_options.matmul_validation_mode);
+    const int32_t saved_v4{consensus.nMatMulV4Height};
+    const int32_t saved_bmx{consensus.nMatMulBMX4CHeight};
+    const int32_t saved_rc{consensus.nMatMulRCHeight};
+    const auto saved_mode{mode};
+    struct Restore {
+        Consensus::Params& consensus;
+        int32_t v4;
+        int32_t bmx;
+        int32_t rc;
+        kernel::MatMulValidationMode& mode;
+        kernel::MatMulValidationMode saved_mode;
+        ~Restore()
+        {
+            node::matmul_trusted::ResetForTest();
+            consensus.nMatMulV4Height = v4;
+            consensus.nMatMulBMX4CHeight = bmx;
+            consensus.nMatMulRCHeight = rc;
+            mode = saved_mode;
+        }
+    } restore{consensus, saved_v4, saved_bmx, saved_rc, mode, saved_mode};
+
+    const CScript script = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    CBlockIndex* const parent{WITH_LOCK(::cs_main, return chainstate.m_chain.Tip())};
+    BOOST_REQUIRE(parent != nullptr);
+
+    const CBlock block{CreateAndProcessBlock({}, script)};
+    CBlockIndex* const child{WITH_LOCK(::cs_main, {
+        return chainman.m_blockman.LookupBlockIndex(block.GetHash());
+    })};
+    BOOST_REQUIRE(child != nullptr);
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()) == child);
+
+    consensus.nMatMulV4Height = child->nHeight;
+    consensus.nMatMulBMX4CHeight = child->nHeight;
+    consensus.nMatMulRCHeight = child->nHeight;
+    BOOST_REQUIRE(consensus.IsMatMulTrustedReplayAttestationActive(child->nHeight));
+
+    BlockValidationState state;
+    BOOST_REQUIRE(chainstate.InvalidateBlock(state, child));
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()) == parent);
+
+    CKey signer;
+    signer.MakeNewKey(/*fCompressed=*/true);
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256::ONE;
+    config.replay_authority_context = uint256::FromHex(std::string(64, 'f')).value();
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    config.local_signer = signer;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/true, /*serve=*/false,
+        std::chrono::milliseconds{50}, error));
+    mode = kernel::MatMulValidationMode::TRUSTED;
+    BOOST_REQUIRE(node::matmul_trusted::IsTrustedMirror());
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
+                      child->GetBlockHash(), child->nHeight) ==
+                  matmul::trusted::AddResult::Accepted);
+    {
+        LOCK(::cs_main);
+        chainstate.ResetBlockFailureFlags(child);
+        BOOST_CHECK(chainman.IndexHasTrustedMatMulAuthority(child));
+        BOOST_CHECK(!node::matmul_trusted::TrustedMirrorMustDeferUnattestedConnect(
+            /*trusted_mirror_profile1=*/true, /*has_quorum=*/true,
+            /*covered_by_signed_frontier=*/true));
+    }
+
+    chainman.ResetTrustedMirrorExactReplayInvocationsForTest();
+    state = BlockValidationState{};
+    BOOST_REQUIRE(chainstate.ActivateBestChain(state));
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()) == child);
+    BOOST_CHECK_EQUAL(chainman.TrustedMirrorExactReplayInvocationsForTest(), 0);
     chainman.CheckBlockIndex();
 }
 

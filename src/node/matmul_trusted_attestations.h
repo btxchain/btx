@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <limits>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -288,6 +289,18 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
            on_signed_frontier_chain;
 }
 
+/** Skip FindUniqueCompetingAttestedIndex's HEADER_ONLY-hole pprev walk.
+ *  If `idx` is already on the active chain, LastCommonAncestor(tip, idx)
+ *  is `idx`. Walking `idx->pprev` until that LCA never hits `idx` and
+ *  runs to genesis (live nyc1: 512 frontier hints × ~190k = ~19s
+ *  FindMostWorkChain, GPU VERSION starved, in_flight=0). */
+[[nodiscard]] inline bool TrustedMirrorAttestedHintIsActiveAncestor(
+    bool on_active_chain,
+    bool lca_is_index)
+{
+    return on_active_chain || lca_is_index;
+}
+
 /** True when `index` is a strict descendant of the active tip (catch-up
  *  suffix). Same-height twins are not this: GetAncestor(tip) is the twin
  *  itself. The 1879xx competing fork is not this either. Immediate
@@ -398,6 +411,51 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
 {
     return trusted_mirror_profile1 && !has_quorum &&
            !covered_by_signed_frontier;
+}
+
+/** FindMostWorkChain may return this candidate without scanning a heavier
+ *  unattested HEADER_ONLY / claimed-work tower. Covered HAVE_DATA on a
+ *  trusted-mirror tip-extension is the millisecond ConnectTip path; walking
+ *  headers=191013 vs an attested frontier was the live 25–60s stall after
+ *  `matmul accept-path path=frontier ms=0.0`. */
+[[nodiscard]] inline bool TrustedMirrorPreferCoveredConnectCandidate(
+    bool trusted_mirror,
+    bool extends_active_tip,
+    bool have_data_connectable,
+    bool covered_or_quorum)
+{
+    return trusted_mirror && extends_active_tip && have_data_connectable &&
+           covered_or_quorum;
+}
+
+/** Trusted-mirror FindMostWorkChain is attested-GPU selection, not
+ *  Bitcoin most-work among miner header towers. When nothing attested
+ *  (or the next GPU tip-child body) is connectable, yield immediately
+ *  so SendMessages can GETDATA. Other attested attestor forks stay in
+ *  the candidate set for the next ABC step — cooperative, not a second
+ *  cs_main walker. */
+[[nodiscard]] inline bool TrustedMirrorMostWorkYieldsUnattestedTower(
+    bool trusted_mirror,
+    bool have_attested_connectable,
+    bool have_immediate_have_data_tip_child)
+{
+    return trusted_mirror && !have_attested_connectable &&
+           !have_immediate_have_data_tip_child;
+}
+
+/** Evict a competing claimed-work tower from FindMostWorkChain without
+ *  walking its HEADER_ONLY parents (AddUnlinkedBlock / missing-data).
+ *  Immediate tip-children and the unique attested-abandon target stay. */
+[[nodiscard]] inline bool TrustedMirrorSkipUnattestedClaimedWorkTower(
+    bool trusted_mirror,
+    bool leads_to_signed_frontier,
+    bool immediate_tip_child,
+    bool unique_abandon_target)
+{
+    if (!trusted_mirror) return false;
+    if (unique_abandon_target) return false;
+    if (immediate_tip_child) return false;
+    return !leads_to_signed_frontier;
 }
 
 /** CONSENSUS signer / configured node: never ConnectTip an unattested
@@ -594,10 +652,13 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
                            tip_height);
 }
 
-/** Wide inflight on the GPU-signed path: ConnectTip no longer waits
- *  per-block ExactReplay, so serial 1-wide getdata is the live 60s/block
- *  crawl (archives 2026-08-16). Unattested/assumeutxo stays 1-wide while
- *  ahead is below narrow_max_ahead. IBD is always wide. */
+/** Root-first 1-wide getdata while catching up. Live nyc1 2026-08-16:
+ *  treating signed-frontier catch-up as *wide* walked HeadersDirectFetch
+ *  from last_header and filled 16 newest hashes (190841/190842) while
+ *  tip+1 (190777) sat HEADER_ONLY; those slots then timed out at ~100s.
+ *  GPU attestation already covers the ancestor path, so the body at
+ *  tip+1 is O(1) accept — serial root-first is body-download speed,
+ *  not ExactReplay. Unattested near-tip holes stay 1-wide. IBD is wide. */
 [[nodiscard]] inline bool IsNarrowCatchUpWindowForPolicy(
     bool ibd,
     int ahead,
@@ -607,16 +668,18 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
 {
     if (ibd) return false;
     if (ahead < stall_headers_ahead) return false;
-    if (signed_frontier_catch_up) return false;
+    if (signed_frontier_catch_up) return true;
     return ahead < narrow_max_ahead;
 }
 
 /** Who may take getdata during signed-frontier catch-up.
- *  CONSENSUS-only miners gossip HEADER_ONLY — not body sources.
- *  Manual/noban (connect= signer), ARCHIVE, MIRROR, or a recent valid
- *  MMATTEST qualify. NODE_NETWORK is not required: NETWORK_LIMITED
- *  archives still serve the last ~288 blocks, which covers near-tip
- *  GPU-frontier catch-up. When signed_frontier_catch_up is false this
+ *  Preferred sources: (1) the GPU connection (manual/noban, inbound FROM
+ *  the signer or outbound -connect TO it), (2) OUR outbound connections
+ *  to NODE_MATMUL_ATTESTATION_ARCHIVE / NODE_MATMUL_TRUSTED_MIRROR.
+ *  Inbound miners and inbound archive-bit peers are not GETDATA sources
+ *  (live nyc1: seeding BestKnown onto every handshake inbound and asking
+ *  them for tip+1 is the wrong direction). A recent valid MMATTEST does
+ *  *not* qualify a miner. When signed_frontier_catch_up is false this
  *  is not a gate. */
 [[nodiscard]] inline bool PreferSignedFrontierCatchUpBlockPeer(
     bool signed_frontier_catch_up,
@@ -624,60 +687,137 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
     bool trusted_mirror_peer,
     bool node_network,
     bool recent_valid_mmattest,
-    bool manual_or_noban)
+    bool manual_or_noban,
+    bool outbound = true)
 {
+    (void)recent_valid_mmattest;
+    (void)node_network;
     if (!signed_frontier_catch_up) return true;
     if (manual_or_noban) return true;
-    if (has_archive_bit || trusted_mirror_peer || recent_valid_mmattest) {
+    if (outbound && (has_archive_bit || trusted_mirror_peer)) {
         return true;
     }
-    (void)node_network;
     return false;
 }
 
+/** VERSION finished: starting_height is set from the VERSION message
+ *  (-1 until then). Service bits / seeded BestKnown must not stand in
+ *  for a hung -connect (bytesrecv=0). */
+[[nodiscard]] inline bool SignedFrontierVersionHandshakeComplete(
+    int starting_height)
+{
+    return starting_height >= 0;
+}
+
 /** Preferred source actually knows the catch-up suffix (headers that
- *  extend the active tip). Handshake-only addnode / IBD mirrors must
- *  not count: that skipped miners while nobody could serve (live
- *  archives 2026-08-16). */
+ *  extend the active tip) *and* has finished VERSION. Handshake-only
+ *  addnode / seeded BestKnown with empty services must not count: that
+ *  skipped archives while the GPU -connect sat at bytesrecv=0 (live
+ *  nyc1 2026-08-16 after root-first: in_flight=0, sent_getdata=0). */
+[[nodiscard]] inline bool SignedFrontierPeerHadCatchUpBodiesAtConnect(
+    int starting_height,
+    int tip_height)
+{
+    // No VERSION: cannot serve. A peer whose VERSION height is at or behind
+    // our tip does not have the HEADER_ONLY suffix (live nyc1 2026-08-16:
+    // sibling archives were preferred-capable from headers alone, GETDATA
+    // timed out, miners were skipped).
+    return starting_height > tip_height;
+}
+
 [[nodiscard]] inline bool SignedFrontierBodySourceCanServeCatchUp(
     bool preferred,
     bool has_best_known,
     int best_known_height,
     int tip_height,
-    bool best_known_extends_tip)
+    bool best_known_extends_tip,
+    bool version_handshake_complete = true,
+    int starting_height = std::numeric_limits<int>::max())
 {
+    if (!version_handshake_complete) return false;
+    if (!SignedFrontierPeerHadCatchUpBodiesAtConnect(starting_height,
+                                                     tip_height)) {
+        return false;
+    }
     return preferred && has_best_known && best_known_height > tip_height &&
            best_known_extends_tip;
 }
 
-/** GPU -connect VERSION does not set pindexBestKnownBlock. getheaders from
- *  m_best_header asks for *new* headers; the HEADER_ONLY catch-up suffix is
- *  already on disk. Seed BestKnown from the signed frontier so FindNextBlocks
- *  can issue getdata (live nyc1 2026-08-16: GPU VERACK, in_flight=0). */
-[[nodiscard]] inline bool SeedTrustedMirrorGpuBestKnownFromFrontier(
-    bool gpu_authority,
-    bool signed_frontier_catch_up,
-    bool best_known_null,
-    bool seed_extends_tip,
-    int seed_height,
+/** Who may receive a signed-frontier BestKnown seed. GPU (manual/noban)
+ *  in either direction after VERSION, or OUR outbound archive/mirror
+ *  that advertised ahead of tip. Never inbound miners / inbound
+ *  archive-bit peers (that "seed everyone inbound" path asked them for
+ *  tip+1; they timed out and flapped in_flight). */
+[[nodiscard]] inline bool SignedFrontierMaySeedBestKnownFromFrontier(
+    bool gpu_manual_or_noban,
+    bool outbound,
+    bool archive_or_mirror,
+    int starting_height,
     int tip_height)
 {
-    return gpu_authority && signed_frontier_catch_up && best_known_null &&
-           seed_extends_tip && seed_height > tip_height;
+    if (gpu_manual_or_noban) return true;
+    if (!outbound || !archive_or_mirror) return false;
+    return SignedFrontierPeerHadCatchUpBodiesAtConnect(starting_height,
+                                                       tip_height);
 }
 
-/** Skip a non-preferred peer for signed-frontier bodies when at least one
- *  *capable* preferred source is connected. Handshake-only preferred
- *  peers do not count (see SignedFrontierBodySourceCanServeCatchUp).
- *  Idle (in_flight=0) still skips miners: giving them the 16-wide window
- *  is the live 1-block/minute stall (HEADER_ONLY, 45s timeout, disconnect). */
+/** GPU -connect VERSION does not set pindexBestKnownBlock. getheaders from
+ *  m_best_header asks for *new* headers; the HEADER_ONLY catch-up suffix is
+ *  already on disk. Seed BestKnown from the signed frontier only on GPU
+ *  or outbound attested archives (see SignedFrontierMaySeedBestKnownFromFrontier).
+ *  A competing BestKnown (headers=191013 vs frontier) must be overwritten. */
+[[nodiscard]] inline bool SeedTrustedMirrorGpuBestKnownFromFrontier(
+    bool signed_frontier_catch_up,
+    bool best_known_usable_for_catch_up,
+    bool seed_extends_tip,
+    int seed_height,
+    int tip_height,
+    bool version_handshake_complete = true,
+    bool may_seed_this_peer = true)
+{
+    if (!version_handshake_complete) return false;
+    if (!may_seed_this_peer) return false;
+    if (best_known_usable_for_catch_up) return false;
+    return signed_frontier_catch_up && seed_extends_tip &&
+           seed_height > tip_height;
+}
+
+/** Issue catch-up GETDATA only to handshake-complete GPU, or to our
+ *  outbound archive/mirror that was ahead at VERSION. Hung -connect
+ *  (no VERSION) must not occupy a slot or block those outbounds. */
+[[nodiscard]] inline bool SignedFrontierMayRequestCatchUpGetData(
+    bool signed_frontier_catch_up,
+    bool gpu_manual_or_noban,
+    bool outbound,
+    bool archive_or_mirror,
+    bool version_handshake_complete,
+    int starting_height = std::numeric_limits<int>::max(),
+    int tip_height = std::numeric_limits<int>::min())
+{
+    if (!signed_frontier_catch_up) return true;
+    if (!version_handshake_complete) return false;
+    // Manual/noban includes sibling archive -connect, not only the GPU.
+    // Live nyc1 2026-08-17: GETDATA for tip+1 went to a behind sibling
+    // (VERSION height 190767 vs tip 190816) and occupied the 1-wide slot.
+    if (!gpu_manual_or_noban && (!outbound || !archive_or_mirror)) {
+        return false;
+    }
+    return SignedFrontierPeerHadCatchUpBodiesAtConnect(starting_height,
+                                                       tip_height);
+}
+
+/** Skip miners / inbound archives during signed-frontier catch-up.
+ *  Do not wait for a capable preferred peer: a hung GPU -connect must
+ *  not fall through to inbound miners. Preferred GPU / outbound
+ *  archives are never skipped. `any_capable` is retained so call sites
+ *  stay explicit; it is not a gate. */
 [[nodiscard]] inline bool SkipNonPreferredSignedFrontierBodyPeer(
     bool signed_frontier_catch_up,
     bool this_peer_preferred,
     bool any_capable_preferred_peer_connected)
 {
-    return signed_frontier_catch_up && !this_peer_preferred &&
-           any_capable_preferred_peer_connected;
+    (void)any_capable_preferred_peer_connected;
+    return signed_frontier_catch_up && !this_peer_preferred;
 }
 
 /** Operator-configured GPU attestor: addnode/connect= / noban, or a peer
@@ -703,16 +843,26 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
  *  60s -peertimeout before VERSION/VERACK (live nyc1 2026-08-16:
  *  "version handshake timeout" after "post-quantum hybrid rekey
  *  complete", then a new TCP id every 10–60s with ver=0 /
- *  bytesrecv=0). Manual/noban GPU attestors and any peer still in
- *  VERSION/V2 DETECTING get at least 180s. Archives are inbound on
- *  the signer, so the incomplete-handshake clause is required there;
- *  manual_or_noban alone does not cover them. Fully connected peers
- *  keep the configured timeout. */
+ *  bytesrecv=0). Incomplete handshake that has received bytes
+ *  (PQ rekey) still gets at least 180s. Incomplete handshake with
+ *  zero bytes received is a dead TCP: 15s so a hung -connect can
+ *  recycle. Archives are inbound on the signer, so the incomplete
+ *  handshake clause is required there; manual_or_noban alone does
+ *  not cover them. Fully connected peers keep the configured
+ *  timeout. */
 [[nodiscard]] inline std::chrono::seconds TrustedMirrorGpuHandshakeTimeout(
     std::chrono::seconds configured_timeout,
     bool manual_or_noban,
-    bool handshake_incomplete = false)
+    bool handshake_incomplete = false,
+    bool never_received = false)
 {
+    // Dead TCP: VERSION sent, zero bytes back. 180s existed to survive
+    // FindMostWorkChain holding cs_main (~19s). That path is ~65ms now;
+    // a bytesrecv=0 addnode must recycle so catch-up GETDATA can run.
+    if (handshake_incomplete && never_received) {
+        constexpr auto kDead{std::chrono::seconds{15}};
+        return std::min(configured_timeout, kDead);
+    }
     if (!manual_or_noban && !handshake_incomplete) {
         return configured_timeout;
     }
@@ -917,6 +1067,11 @@ static constexpr int SIGNER_MSGHAND_OTHER_PER_LOOP{2};
     return trusted_mirror && from_gpu_attestor && !has_quorum;
 }
 
+/** Retry delay after retaining a GPU body that still lacks quorum.
+ *  WaitTimeout (60s) was the live 34–60s/block crawl when MMATTEST
+ *  RefreshRetry(0) missed. 2s is past the 1Hz retain livelock. */
+static constexpr auto GPU_RETAIN_ATTESTATION_RETRY{std::chrono::seconds{2}};
+
 /** CPU ExactReplay is the skip gate only when a valid GPU attestation
  *  already covers the hash (in-memory quorum or signed-frontier
  *  ancestry). Catch-up height is not attestation; unattested hashes
@@ -939,32 +1094,67 @@ static constexpr int SIGNER_MSGHAND_OTHER_PER_LOOP{2};
 [[nodiscard]] inline bool TrustedMirrorIgnoreNonAuthorityInboundBlock(
     bool trusted_mirror,
     bool this_peer_is_gpu_authority,
-    bool authority_only_inbound)
+    bool authority_only_inbound,
+    bool this_inbound = true)
 {
+    if (!this_inbound) return false;
     return trusted_mirror && !this_peer_is_gpu_authority &&
            authority_only_inbound;
+}
+
+/** Solicited catch-up bodies: GPU (either direction) or OUR outbound
+ *  archive/mirror. Inbound from anyone else — including an archive
+ *  service bit — is dropped before deserialize. An inbound miner
+ *  answering GETDATA is not the catch-up path. */
+[[nodiscard]] inline bool TrustedMirrorMayAcceptPeerBlockBody(
+    bool this_gpu,
+    bool this_inbound,
+    bool this_archive_or_mirror)
+{
+    if (this_gpu) return true;
+    if (!this_inbound && this_archive_or_mirror) return true;
+    return false;
 }
 
 /** Non-GPU peers may GETDATA from a trusted mirror only once it is no
  *  longer catching up to the signed frontier. Live nyc1 2026-08-16:
  *  serving miner GETDATA during catch-up produced 2.3MB BLOCK replies
- *  and pegged msghand at 94% so GPU bodies aged out. */
+ *  and pegged msghand at 94% so GPU bodies aged out.
+ *  Sibling ARCHIVE/MIRROR peers are the exception: they must be able to
+ *  fetch bodies this node already has while we still catch up to the GPU. */
 [[nodiscard]] inline bool TrustedMirrorMayServeNonAuthorityGetData(
     bool this_peer_is_gpu_authority,
-    bool catching_up_behind_frontier)
+    bool catching_up_behind_frontier,
+    bool this_archive_or_mirror = false)
 {
     if (this_peer_is_gpu_authority) return true;
+    if (this_archive_or_mirror) return true;
     return !catching_up_behind_frontier;
 }
 
 /** GPU attestor is the body source even if VERSION omitted NODE_NETWORK.
  *  Live archives 2026-08-16: CanServeBlocks gated getdata off after
- *  handshake when services were empty / NETWORK_LIMITED-only. */
+ *  handshake when services were empty / NETWORK_LIMITED-only.
+ *  Handshake-incomplete addnode (bytesrecv=0, startingheight=-1) must
+ *  not occupy the only getdata slot. */
 [[nodiscard]] inline bool TrustedMirrorGpuMayServeBlocks(
     bool gpu_authority,
-    bool has_network_service)
+    bool has_network_service,
+    bool version_handshake_complete = true)
 {
+    if (!version_handshake_complete) return false;
     return gpu_authority || has_network_service;
+}
+
+/** Root-first must not delete a fresh GETDATA because a second peer is
+ *  eligible as a parallel owner. Live nyc1 2026-08-16: MayDuplicate
+ *  (owners<2) called RemoveBlockRequest(nullopt); the GPU BLOCK then
+ *  arrived unsolicited (forceProcessing=false) and was ticket-dropped. */
+[[nodiscard]] inline bool ShouldDropInFlightForRootFirstRerequest(
+    bool already_requested,
+    bool all_owners_stale)
+{
+    return already_requested && all_owners_stale;
 }
 
 /** Covered HAVE_DATA sitting one height above tip must not freeze the
@@ -981,7 +1171,8 @@ static constexpr int SIGNER_MSGHAND_OTHER_PER_LOOP{2};
  *  signed-frontier catch-up. Must exceed default -matmultrustedwaitms
  *  (60s) plus a margin: a busy signer/archive holding cs_main for
  *  ExactReplay cannot serve getdata in the generic 15s catch-up window.
- *  Miners keep 15s (they should not receive these slots). */
+ *  90s is only for a handshake-complete GPU (manual/noban). Others
+ *  keep 15s. */
 [[nodiscard]] inline std::chrono::seconds SignedFrontierPreferredCatchUpTimeout(
     std::chrono::milliseconds wait_timeout)
 {
@@ -991,6 +1182,28 @@ static constexpr int SIGNER_MSGHAND_OTHER_PER_LOOP{2};
     constexpr auto kMargin{std::chrono::seconds{30}};
     if (wait_s < kMin) return kMin;
     return wait_s + kMargin;
+}
+
+/** 90s catch-up timeout: operator GPU with a completed VERSION only.
+ *  Hung -connect (manual, starting_height=-1) keeps the 15s miner
+ *  window so it cannot pin the pipeline. */
+[[nodiscard]] inline bool SignedFrontierCatchUpUsesGpuTimeout(
+    bool manual_or_noban,
+    bool version_handshake_complete)
+{
+    return manual_or_noban && version_handshake_complete;
+}
+
+/** 180s inflight reclaim for GPU catch-up: handshake-complete
+ *  manual/noban only. A VERSION-empty addnode must not keep a 180s
+ *  pipeline while outbound archives could serve tip+1. */
+[[nodiscard]] inline bool KeepGpuSignedFrontierInFlightPipeline(
+    bool signed_frontier_catch_up,
+    bool manual_or_noban,
+    bool version_handshake_complete)
+{
+    return signed_frontier_catch_up && manual_or_noban &&
+           version_handshake_complete;
 }
 
 struct AttestedFrontierHint {

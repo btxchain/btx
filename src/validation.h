@@ -1586,7 +1586,8 @@ public:
      *  Coverage is not a substitute for signatures: IndexIsCoveredBySignedFrontier
      *  requires HasQuorumInMemory on the frontier (VerifyAttestation against
      *  the configured GPU keys). Fake / missing / off-path hashes stay false
-     *  so ConnectTip cannot mint an unattested chain. Does not durable-read. */
+     *  so ConnectTip cannot mint an unattested chain. Does not durable-read
+     *  (live ABC ~45s/candidate under cs_main). */
     [[nodiscard]] bool IndexHasTrustedMatMulAuthority(const CBlockIndex* index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** True when index is an ancestor of, is, or descends from any stored
      *  quorum hash at HighestAttestedHeight. Unlike
@@ -2159,6 +2160,8 @@ public:
      *  MatMul ExactReplay incomplete Error (no GPU). Tests must clear this. */
     void SetRetryableMatMulConnectFailureForTest(bool enable);
     [[nodiscard]] int RetryableMatMulConnectFailureAttemptsForTest() const;
+    void ResetTrustedMirrorExactReplayInvocationsForTest();
+    [[nodiscard]] int TrustedMirrorExactReplayInvocationsForTest() const;
 
     [[nodiscard]] std::optional<shielded::registry::ShieldedAccountRegistrySnapshot>
     ExportShieldedAccountRegistrySnapshot(
