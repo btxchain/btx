@@ -1,7 +1,8 @@
-BTX version 0.33.3 is a candidate package for operators to install. It
-has not been published as a GitHub release.
+BTX version 0.33.3 is released from:
 
-This candidate lands Phase 1 of the GPU-verified full-node transition:
+  <https://github.com/btxchain/btx/releases>
+
+This release lands Phase 1 of the GPU-verified full-node transition:
 the mainnet MatMul ASERT dump floor, P2P catch-up so CPU archives can
 follow a GPU attestor, and removal of local extra-work pins now that
 compact `F` is consensus. Epoch A remains at height 185000. See
@@ -18,13 +19,16 @@ To receive release and update notifications, please subscribe to:
 # How to Upgrade
 
 Shut down the previous node cleanly, wait for it to exit, and replace
-its `btxd`, `btx-cli`, and related binaries with the v0.33.3 candidate
-binaries. Back up wallets and configuration before upgrading.
+its `btxd`, `btx-cli`, and related binaries with the v0.33.3 binaries.
+Back up wallets and configuration before upgrading.
 
-This candidate changes consensus at height 191714. Every validating node
+This release changes consensus at height 191714. Every validating node
 on the attested chain must complete the upgrade before that height is
 mined. A 191714 block produced under the pre-floor `nBits` is invalid
-under the new rule.
+under the new rule. The dump-floor height was pulled forward from the
+earlier 200000 schedule so installing this binary does not leave a
+multi-day window of easy ASERT `nBits` (lottery twins / difficulty
+collapse) before the clamp. Compact `F` is unchanged.
 
 # Compatibility
 
@@ -34,7 +38,7 @@ at and above height 185000. That Epoch-A tuple is unchanged.
 
 From height 191714, header `nBits` cannot be easier than compact
 `0x1f0a3d70`. Nodes that have not upgraded will still accept that harder
-target, but they will also accept easier `nBits` that this candidate
+target, but they will also accept easier `nBits` that this release
 rejects. Mixed versions at 191714 therefore split the attested chain.
 Upgrade before that height is mined.
 
@@ -53,7 +57,7 @@ This is Phase 1 of the topology in
 inflation and keep public CPU seeds able to follow the attested chain.
 It is not a new consensus epoch. Epochs B–D remain separately reviewed.
 
-Still 1-of-1 attestation in this candidate. M-of-N is already in the
+Still 1-of-1 attestation in this release. M-of-N is already in the
 binary: repeat `-matmultrustedpubkey=<hex>` for distinct compressed
 secp256k1 keys and set `-matmultrustedthreshold=M` with
 `1 <= M <= N`. Phase 2 is adding GPUs and raising `M`. Phase 3 is
@@ -77,12 +81,12 @@ back toward historical `powLimit`. Historical `powLimit` is not mutated.
 
 Public `getblocktemplate` `bits`/`target` follow `GetNextWorkRequired`.
 Local extra-work pins (`-signermintargetcompact`) are removed in this
-candidate because `F` is now consensus.
+release because `F` is now consensus.
 
-The production golden manifest will re-seal source slots `[7]`
-(revision) and `[8]` (tree fingerprint) after the logic commit. Digest
-slot `[4]` is unchanged (`b4777985…`). That reseal is a fingerprint of
-the landing tree, not a MatMul change.
+The production golden manifest re-seals source slots `[7]` (revision)
+and `[8]` (tree fingerprint) after the logic commit. Digest slot `[4]`
+is unchanged (`b4777985…`). That reseal is a fingerprint of the landing
+tree, not a MatMul change.
 
 ## P2P catch-up for CPU archives and GPU attestors
 
@@ -123,9 +127,9 @@ bounded attestation cache has dropped the original bucket.
   authority.
 - Trusted CPU archives and RPC mirrors are not independently validating
   full nodes. Do not describe or expose them as such.
-- M-of-N is compiled in, but this candidate does not add attestor GPUs
+- M-of-N is compiled in, but this release does not add attestor GPUs
   or raise `M`. That is Phase 2.
-- Public seeds are not converted to GPU ExactReplay in this candidate.
+- Public seeds are not converted to GPU ExactReplay in this release.
   That is Phase 3.
 
 # Credits

@@ -1,7 +1,4 @@
-Draft notes for the v0.33.3 candidate that operators will install (not
-yet published) are in `doc/release-notes/release-notes-0.33.3.md`.
-
-BTX version 0.33.2 is released from:
+BTX version 0.33.3 is released from:
 
   <https://github.com/btxchain/btx/releases>
 
