@@ -8665,17 +8665,6 @@ void PeerManagerImpl::MaybeSeedGpuSignedFrontierBestKnown(
             }
         }
     }
-    // Restart empties HasQuorumInMemory, so the covered-frontier walk finds
-    // nothing. RecalculateBestHeader still followed the HEADER_ONLY suffix;
-    // seed BestKnown from that so GETDATA is 1-wide to the GPU instead of
-    // a 16-wide miner spray (live archives 2026-08-17: sent_getdata=0).
-    if (seed == nullptr) {
-        const CBlockIndex* const followed{m_chainman.m_best_header};
-        if (followed != nullptr && followed->nHeight > tip->nHeight &&
-            followed->GetAncestor(tip->nHeight) == tip) {
-            seed = followed;
-        }
-    }
     // RecalculateBestHeader now follows the HEADER_ONLY suffix of the active
     // tip even when HasQuorumInMemory is empty (archive restart). The signed
     // frontier hash is often still unknown or not yet in the index, so the
