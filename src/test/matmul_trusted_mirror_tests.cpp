@@ -1488,6 +1488,34 @@ BOOST_AUTO_TEST_CASE(competing_attested_index_rejects_fossil_depth)
         false, 180, /*on_signed_frontier_chain=*/true));
     BOOST_CHECK(!TrustedMirrorMayAdoptCompetingAttestedIndex(
         false, 180, /*on_signed_frontier_chain=*/false));
+    using node::matmul_trusted::ConsensusSignerMayAbandonQuorumTipForSignedFrontier;
+    // Same-height dual-quorum twin: keep 190354 (do not flip-flop).
+    BOOST_CHECK(!ConsensusSignerMayAbandonQuorumTipForSignedFrontier(
+        /*unique_on_signed_frontier_chain=*/true, /*unique_height=*/191323,
+        /*tip_height=*/191323));
+    BOOST_CHECK(!ConsensusSignerMayAbandonQuorumTipForSignedFrontier(
+        false, 191338, 191323));
+    // Signed frontier pulled ahead on the competing fork (live 2026-08-17
+    // miner: self-mined losing twin 191323, frontier 191338+).
+    BOOST_CHECK(ConsensusSignerMayAbandonQuorumTipForSignedFrontier(
+        true, 191338, 191323));
+    BOOST_CHECK(ConsensusSignerMayAbandonQuorumTipForSignedFrontier(
+        true, 191365, 191323));
+    using node::matmul_trusted::IndependentConsensusMaySpendExactReplayGpu;
+    constexpr int32_t kNearTip{3};
+    BOOST_CHECK(IndependentConsensusMaySpendExactReplayGpu(
+        /*pprev_is_tip=*/true, /*on_or_extends_active_tip=*/false, 101, 100,
+        kNearTip, /*covered_by_attestation=*/false));
+    BOOST_CHECK(IndependentConsensusMaySpendExactReplayGpu(
+        false, /*on_or_extends_active_tip=*/true, 102, 100, kNearTip, false));
+    BOOST_CHECK(!IndependentConsensusMaySpendExactReplayGpu(
+        false, true, 104, 100, kNearTip, false));
+    // Competing unattested twin at the same height: off the device.
+    BOOST_CHECK(!IndependentConsensusMaySpendExactReplayGpu(
+        false, false, 191323, 191323, kNearTip, false));
+    BOOST_CHECK(IndependentConsensusMaySpendExactReplayGpu(
+        false, false, 191323, 191323, kNearTip,
+        /*covered_by_attestation=*/true));
     using node::matmul_trusted::TrustedMirrorAttestedHintIsActiveAncestor;
     BOOST_CHECK(TrustedMirrorAttestedHintIsActiveAncestor(
         /*on_active_chain=*/true, /*lca_is_index=*/false));

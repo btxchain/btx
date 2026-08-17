@@ -11562,9 +11562,26 @@ const CBlockIndex* ChainstateManager::FindUniqueCompetingAttestedIndex() const
         } else if (node::matmul_trusted::HasLocalSigner() &&
                    !node::matmul_trusted::IsTrustedMirror()) {
             // CONSENSUS signer: do not abandon an already-attested tip for
-            // a dual-attested short-reorg twin (live 190354 reversal).
-            // Trusted mirrors still recover toward the signed frontier.
-            return nullptr;
+            // a dual-attested same-height twin (live 190354 reversal).
+            // If the signed frontier has moved onto a competing fork
+            // ahead of this tip, that is a self-mined losing twin, not a
+            // twin flip — recover without invalidateblock (live
+            // 2026-08-17 miner: 191323 vs frontier 191338+). Trusted
+            // mirrors still recover toward the signed frontier.
+            std::vector<const CBlockIndex*> frontier_ahead;
+            frontier_ahead.reserve(competing.size());
+            for (const CBlockIndex* idx : competing) {
+                if (node::matmul_trusted::
+                        ConsensusSignerMayAbandonQuorumTipForSignedFrontier(
+                            IndexIsOnSignedFrontierChain(idx), idx->nHeight,
+                            tip->nHeight)) {
+                    frontier_ahead.push_back(idx);
+                }
+            }
+            if (frontier_ahead.empty()) {
+                return nullptr;
+            }
+            competing = std::move(frontier_ahead);
         }
     }
 
@@ -11586,6 +11603,21 @@ const CBlockIndex* ChainstateManager::FindUniqueCompetingAttestedIndex() const
     }
     if (unique == nullptr) return nullptr;
     if (tip_has_quorum) {
+        // Nominating only the same-height fork-child (189675 catch-up
+        // shape) pins a self-signed losing twin: ABC then tries a
+        // dual-quorum flip that CONSENSUS (190354) and TRUSTED-follow
+        // (live 2026-08-17, after flipping matmulvalidation=trusted with
+        // the local store still holding the self-signed hash) both
+        // refuse. If the signed frontier is already ahead on that fork,
+        // adopt the frontier itself so ActivateBestChain can reorg the
+        // whole attested branch without operator invalidateblock / store
+        // wipe.
+        if (node::matmul_trusted::
+                ConsensusSignerMayAbandonQuorumTipForSignedFrontier(
+                    IndexIsOnSignedFrontierChain(unique), unique->nHeight,
+                    tip->nHeight)) {
+            return unique;
+        }
         const CBlockIndex* const lca{LastCommonAncestor(tip, unique)};
         if (lca == nullptr) return nullptr;
         const CBlockIndex* const fork_child{

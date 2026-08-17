@@ -289,6 +289,48 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
            on_signed_frontier_chain;
 }
 
+/** Quorum tip vs signed frontier that has pulled ahead on a competing fork.
+ *
+ *  Same-height dual-quorum twins must not flip-flop (live 190354
+ *  CONSENSUS reversal). When the signed frontier is strictly ahead,
+ *  FindUnique must nominate that frontier — not the same-height
+ *  fork-child. Returning the fork-child forced a dual-quorum switch
+ *  that both CONSENSUS and TRUSTED refuse, pinning a self-signed losing
+ *  twin (live 2026-08-17 miner: consensus at 191323 / 191397, then
+ *  `-matmulvalidation=trusted` still stuck, blocks_behind=7, until the
+ *  local attestation store was moved aside).
+ */
+[[nodiscard]] inline bool ConsensusSignerMayAbandonQuorumTipForSignedFrontier(
+    bool unique_on_signed_frontier_chain,
+    int32_t unique_height,
+    int32_t tip_height)
+{
+    return unique_on_signed_frontier_chain && unique_height > tip_height;
+}
+
+/** Independent consensus ExactReplay GPU (no local signer, not trusted
+ *  mirror). Followed tip-children and the near-tip IBD window stay
+ *  on-device. Competing unattested twins must not: live 2026-08-17 miner
+ *  mode 1 filled the scheduler (workspace=5164972400B, waiter deadline)
+ *  and froze CandidateMining. Competing hashes covered by the signed
+ *  frontier / quorum still replay so ConnectTip can take the lottery
+ *  winner. */
+[[nodiscard]] inline bool IndependentConsensusMaySpendExactReplayGpu(
+    bool pprev_is_tip,
+    bool on_or_extends_active_tip,
+    int32_t index_height,
+    int32_t tip_height,
+    int32_t near_tip_depth,
+    bool covered_by_attestation)
+{
+    if (pprev_is_tip) return true;
+    if (on_or_extends_active_tip) {
+        return index_height >= tip_height - 2 &&
+               index_height <= tip_height + near_tip_depth;
+    }
+    return covered_by_attestation;
+}
+
 /** Skip FindUniqueCompetingAttestedIndex's HEADER_ONLY-hole pprev walk.
  *  If `idx` is already on the active chain, LastCommonAncestor(tip, idx)
  *  is `idx`. Walking `idx->pprev` until that LCA never hits `idx` and
@@ -362,7 +404,10 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
  *
  *  A node already sitting on an unattested tip (equal-work lost sibling
  *  or heavier unattested fork) is recovered by
- *  FindUniqueCompetingAttestedIndex, not by this gate.
+ *  FindUniqueCompetingAttestedIndex, not by this gate. A CONSENSUS local
+ *  signer whose tip already has quorum (self-mined losing twin) is also
+ *  recovered there when the signed frontier has pulled ahead on the
+ *  competing fork — not by this gate, and not by operator invalidateblock.
  *
  *  When the signed frontier is on a competing fork (the active tip does
  *  not lead to any stored frontier hash), do not keep selecting unattested

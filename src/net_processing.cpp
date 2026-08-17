@@ -3949,7 +3949,11 @@ static uint256 g_configured_claimed_tip_child{};
 //!   Competing P2P siblings stay off the device so CandidateMining
 //!   keeps it.
 //! - Independent consensus verifier (pubkey optional, no local signer):
-//!   ExactReplay P2P tip-children and the near-tip IBD window.
+//!   ExactReplay followed tip-children and the near-tip IBD window on
+//!   the active chain. Competing unattested twins stay off the device
+//!   (live 2026-08-17 miner: scheduler queue full, workspace=5.1GB).
+//!   Attested / signed-frontier competing hashes still ExactReplay so
+//!   ConnectTip can take the lottery winner.
 //! Qualifier on d43eea4a / b83b79a6: treating every IsConfigured() node
 //! like a miner left a consensus-no-signer node at height 0 (242 bodies
 //! admitted, 0 UpdateTip) while trusted mirrors on the same archive
@@ -3990,9 +3994,17 @@ static uint256 g_configured_claimed_tip_child{};
         }
         return ClaimConfiguredUnattestedTipChildBody(chainman, tip, index);
     }
-    if (index->pprev == tip) return true;
-    return index->nHeight >= tip->nHeight - 2 &&
-           index->nHeight <= tip->nHeight + MATMUL_RC_NEAR_TIP_DEPTH;
+    const bool on_or_extends_tip{
+        (index->nHeight < tip->nHeight &&
+         tip->GetAncestor(index->nHeight) == index) ||
+        (index->nHeight > tip->nHeight &&
+         index->GetAncestor(tip->nHeight) == tip)};
+    const bool covered{
+        chainman.IndexIsOnSignedFrontierChain(index) ||
+        chainman.IndexHasTrustedMatMulAuthority(index)};
+    return node::matmul_trusted::IndependentConsensusMaySpendExactReplayGpu(
+        index->pprev == tip, on_or_extends_tip, index->nHeight, tip->nHeight,
+        MATMUL_RC_NEAR_TIP_DEPTH, covered);
 }
 
 static bool AuthorityFrontierIndexUsable(
