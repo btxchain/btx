@@ -191,15 +191,14 @@ static constexpr int32_t BTX_MATMUL_V47_EPOCH_A_HEIGHT{185'000};
 //
 //   τ 3600 → 14400 at H+1 so an 11-hour stall dumps ~4× instead of ~2000×.
 //
-// H was 222000 when tip was 191531 (~10 d at 30s). The cheap-era lottery is
-// still live (diff ~4e-7, ~24k headers-only tips). The operator-controlled
-// GPU signer can enforce the new nBits as soon as this fleet is on one
-// fingerprint, so do not leave a 10-day window. Do not retune F.
+// Consensus activation is height 200000 (half-life lengthening at 200001).
+// Do not retune F. nBits stays exact-match until then; pre-activation
+// lottery mitigation is local fork-choice only (emergency/archive reorg
+// park, randomtiebreak, fleet miners off).
 //
-// H = 198000. From tip ~191629 that is ~6370 blocks ≈ 35 h at 20s
-// (≈ 53 h at 30s, ≈ 6.6 d at 90s). If this sits again, bump H — do not
-// chase live bits.
-static constexpr int32_t BTX_MATMUL_POW_LIMIT_UPGRADE_HEIGHT{198'000};
+// From tip ~191713 that is ~8287 blocks ≈ 46 h at 20s (≈ 69 h at 30s,
+// ≈ 8.6 d at 90s).
+static constexpr int32_t BTX_MATMUL_POW_LIMIT_UPGRADE_HEIGHT{200'000};
 
 // MatMul v4.2 / ENC-BMX4C construction invariants (spec §8.1/§8.2). No-op when
 // the profile is unset (nMatMulBMX4CHeight == INT32_MAX = disabled); when a

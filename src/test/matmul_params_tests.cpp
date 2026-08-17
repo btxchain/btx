@@ -90,8 +90,8 @@ BOOST_AUTO_TEST_CASE(matmul_mainnet_prehash_fairness_upgrade_matches_asert_upgra
     const auto main_params = CreateChainParams(EmptyArgs(), ChainType::MAIN);
     const auto& main_consensus = main_params->GetConsensus();
 
-    BOOST_CHECK_EQUAL(main_consensus.nMatMulAsertHalfLifeUpgradeHeight, 198'001);
-    BOOST_CHECK_EQUAL(main_consensus.nMatMulPowLimitUpgradeHeight, 198'000);
+    BOOST_CHECK_EQUAL(main_consensus.nMatMulAsertHalfLifeUpgradeHeight, 200'001);
+    BOOST_CHECK_EQUAL(main_consensus.nMatMulPowLimitUpgradeHeight, 200'000);
     BOOST_CHECK_EQUAL(main_consensus.nMatMulPreHashEpsilonBitsUpgradeHeight, 50'000);
     BOOST_CHECK_EQUAL(GetMatMulPreHashEpsilonBitsForHeight(main_consensus, 49'999), 10U);
     BOOST_CHECK_EQUAL(GetMatMulPreHashEpsilonBitsForHeight(main_consensus, 50'000), 18U);
