@@ -1581,10 +1581,20 @@ public:
      *  on an unattested competing tower. */
     [[nodiscard]] bool IndexIsOnSignedFrontierChain(const CBlockIndex* index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** True when index is an ancestor of, is, or descends from any stored
-     *  quorum hash at HighestAttestedHeight. Unlike
+     *  non-failed quorum hash at the highest usable attested height. Unlike
      *  GetSignedFrontierStatus().on_active_chain, this stays true while
      *  catching up (tip height < frontier height) on the attested chain. */
     [[nodiscard]] bool IndexLeadsToSignedFrontier(const CBlockIndex* index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** Highest quorum-attested height that can still participate in local policy.
+     *  Explicitly failed/invalidateblock descendants remain in the durable
+     *  attestation audit store but must not steer candidate selection. An
+     *  unknown quorum hash remains usable so header/body catch-up stays
+     *  fail-closed until the block index can classify it. */
+    [[nodiscard]] std::optional<int32_t> HighestUsableAttestedHeight() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** Same-height quorum on another hash, excluding hashes whose block index
+     *  is explicitly failed. Unknown hashes remain competing until learned. */
+    [[nodiscard]] bool HasUsableCompetingQuorum(const uint256& block_hash,
+                                                int32_t block_height) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** For a CONSENSUS local signer stranded on an attested twin, return the
      *  first HAVE_DATA block on the unique, strictly-heavier signed-frontier
      *  branch that still needs local ExactReplay. The signed statement only
@@ -1599,8 +1609,9 @@ public:
      */
     const CBlockIndex* FindBestKnownAttestedIndex() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /**
-     * Signed-frontier diagnostic. Highest stored quorum height (no HAVE_DATA
-     * required) versus the highest quorum ancestor of the active tip.
+     * Signed-frontier diagnostic. Highest non-failed stored quorum height (no
+     * HAVE_DATA required) versus the highest quorum ancestor of the active tip.
+     * Failed frontier records remain retained in the attestation audit store.
      * getmatmulattestedtip.hash only sees HAVE_DATA on this chain, so a
      * stranded fork reports on_active_chain=true there; this does not.
      */

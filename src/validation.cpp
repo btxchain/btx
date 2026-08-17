@@ -9292,7 +9292,7 @@ static constexpr const char* RETRYABLE_MATMUL_ACTIVATION_PREFIX =
         pindex->GetBlockHash(), pindex->nHeight)};
     return node::matmul_trusted::MustDeferConflictingAttestedHeight(
         /*configured=*/true, has_quorum,
-        node::matmul_trusted::HasCompetingQuorum(
+        chainman.HasUsableCompetingQuorum(
             pindex->GetBlockHash(), pindex->nHeight));
 }
 
@@ -9560,7 +9560,7 @@ static bool TrustedMirrorShouldConsiderMostWorkCandidate(
         node::matmul_trusted::HasQuorumInMemory(tip->GetBlockHash(), tip->nHeight),
         immediate_tip_child,
         would_abandon_attested,
-        node::matmul_trusted::HasCompetingQuorum(
+        chainman.HasUsableCompetingQuorum(
             candidate->GetBlockHash(), candidate->nHeight),
         signed_frontier_on_competing_fork);
 }
@@ -9745,7 +9745,7 @@ CBlockIndex* Chainstate::FindMostWorkChain()
                 !node::matmul_trusted::IsTrustedMirror() &&
                 (m_chainman.IndexIsAttestedChainTipChild(tip, pindexNew) ||
                  m_chainman.IndexIsFollowedTipChild(tip, pindexNew)) &&
-                !node::matmul_trusted::HasCompetingQuorum(
+                !m_chainman.HasUsableCompetingQuorum(
                     pindexNew->GetBlockHash(), pindexNew->nHeight)};
             if (extends_tip && !has_quorum && !consensus_followed_tip_child) {
                 auto consider_attested_tip_child = [&](const CBlockIndex* alt) {
@@ -11185,7 +11185,7 @@ ChainstateManager::SignedFrontierStatus ChainstateManager::GetSignedFrontierStat
     if (!node::matmul_trusted::IsConfigured() || m_active_chainstate == nullptr) {
         return out;
     }
-    const auto frontier_height{node::matmul_trusted::HighestAttestedHeight()};
+    const auto frontier_height{HighestUsableAttestedHeight()};
     if (!frontier_height.has_value()) {
         return out;
     }
@@ -11199,6 +11199,10 @@ ChainstateManager::SignedFrontierStatus ChainstateManager::GetSignedFrontierStat
         if (hint.height != out.height || hint.hash.IsNull()) continue;
         const CBlockIndex* const frontier_index{
             m_blockman.LookupBlockIndex(hint.hash)};
+        if (frontier_index != nullptr &&
+            (frontier_index->nStatus & BLOCK_FAILED_MASK) != 0) {
+            continue;
+        }
         const bool on_chain{
             tip != nullptr && frontier_index != nullptr &&
             tip->nHeight >= frontier_index->nHeight &&
@@ -11235,6 +11239,7 @@ ChainstateManager::SignedFrontierStatus ChainstateManager::GetSignedFrontierStat
             const CBlockIndex* const hinted{
                 m_blockman.LookupBlockIndex(hint.hash)};
             if (hinted != nullptr &&
+                (hinted->nStatus & BLOCK_FAILED_MASK) == 0 &&
                 tip->GetAncestor(hint.height) == hinted) {
                 out.on_chain_attested_height = hint.height;
             }
@@ -11428,7 +11433,7 @@ const CBlockIndex* ChainstateManager::FindUniqueCompetingAttestedIndex(
     // current branch appear ambiguous forever. Preserve fail-closed behavior
     // when two distinct hashes have quorum at the highest height; only a unique
     // known frontier is allowed to dominate older incomparable hints.
-    const auto highest_attested{node::matmul_trusted::HighestAttestedHeight()};
+    const auto highest_attested{HighestUsableAttestedHeight()};
     std::vector<const CBlockIndex*> highest_frontiers;
     if (highest_attested.has_value()) {
         for (const auto& hint : node::matmul_trusted::AttestedFrontierHints()) {
@@ -11789,8 +11794,7 @@ bool ChainstateManager::IndexIsAttestedChainTipChild(
     if (tip == nullptr || index == nullptr || index->pprev != tip) return false;
     if ((index->nStatus & BLOCK_FAILED_MASK) != 0) return false;
     if (node::matmul_trusted::IsConfigured() &&
-        node::matmul_trusted::HasCompetingQuorum(
-            index->GetBlockHash(), index->nHeight)) {
+        HasUsableCompetingQuorum(index->GetBlockHash(), index->nHeight)) {
         return false;
     }
     if (node::matmul_trusted::HasQuorumInMemory(
@@ -11815,7 +11819,7 @@ bool ChainstateManager::IndexIsOnSignedFrontierChain(const CBlockIndex* index) c
         return false;
     }
     if (!node::matmul_trusted::IsConfigured()) return false;
-    const auto frontier_height{node::matmul_trusted::HighestAttestedHeight()};
+    const auto frontier_height{HighestUsableAttestedHeight()};
     if (!frontier_height.has_value()) return false;
     const CBlockIndex* const tip{
         m_active_chainstate != nullptr ? m_active_chainstate->m_chain.Tip()
@@ -11829,7 +11833,10 @@ bool ChainstateManager::IndexIsOnSignedFrontierChain(const CBlockIndex* index) c
         }
         const CBlockIndex* const frontier{
             m_blockman.LookupBlockIndex(hint.hash)};
-        if (frontier == nullptr) continue;
+        if (frontier == nullptr ||
+            (frontier->nStatus & BLOCK_FAILED_MASK) != 0) {
+            continue;
+        }
         const bool contained{
             tip != nullptr && tip->nHeight >= frontier->nHeight &&
             tip->GetAncestor(frontier->nHeight) == frontier};
@@ -11854,7 +11861,7 @@ bool ChainstateManager::IndexLeadsToSignedFrontier(const CBlockIndex* index) con
         return false;
     }
     if (!node::matmul_trusted::IsConfigured()) return false;
-    const auto frontier_height{node::matmul_trusted::HighestAttestedHeight()};
+    const auto frontier_height{HighestUsableAttestedHeight()};
     if (!frontier_height.has_value()) return false;
     for (const auto& hint : node::matmul_trusted::AttestedFrontierHints()) {
         if (hint.height != *frontier_height || hint.hash.IsNull()) continue;
@@ -11863,12 +11870,74 @@ bool ChainstateManager::IndexLeadsToSignedFrontier(const CBlockIndex* index) con
         }
         const CBlockIndex* const frontier{
             m_blockman.LookupBlockIndex(hint.hash)};
-        if (frontier == nullptr) continue;
+        if (frontier == nullptr ||
+            (frontier->nStatus & BLOCK_FAILED_MASK) != 0) {
+            continue;
+        }
         if (index->nHeight <= frontier->nHeight) {
             if (frontier->GetAncestor(index->nHeight) == index) return true;
         } else if (index->GetAncestor(frontier->nHeight) == frontier) {
             return true;
         }
+    }
+    return false;
+}
+
+std::optional<int32_t>
+ChainstateManager::HighestUsableAttestedHeight() const
+{
+    AssertLockHeld(::cs_main);
+    if (!node::matmul_trusted::IsConfigured()) return std::nullopt;
+
+    std::optional<int32_t> highest;
+    bool saw_hash_hint{false};
+    for (const auto& hint : node::matmul_trusted::AttestedFrontierHints()) {
+        if (hint.height < 0 || hint.hash.IsNull()) continue;
+        saw_hash_hint = true;
+        if (!node::matmul_trusted::HasQuorumInMemory(
+                hint.hash, hint.height)) {
+            continue;
+        }
+        const CBlockIndex* const index{
+            m_blockman.LookupBlockIndex(hint.hash)};
+        // Unknown quorum hashes remain policy-relevant so a valid authority
+        // announcement can lead header/body catch-up. Only an explicit local
+        // failure decision makes retained authority history non-actionable.
+        if (index != nullptr &&
+            (index->nStatus & BLOCK_FAILED_MASK) != 0) {
+            continue;
+        }
+        if (!highest.has_value() || hint.height > *highest) {
+            highest = hint.height;
+        }
+    }
+    // Preserve legacy height-only frontier hints when no hash can be
+    // classified. Once hash hints exist, all-failed means no usable frontier.
+    if (!highest.has_value() && !saw_hash_hint) {
+        return node::matmul_trusted::HighestAttestedHeight();
+    }
+    return highest;
+}
+
+bool ChainstateManager::HasUsableCompetingQuorum(
+    const uint256& block_hash, int32_t block_height) const
+{
+    AssertLockHeld(::cs_main);
+    if (block_height < 0 || block_hash.IsNull()) return false;
+    for (const auto& hint : node::matmul_trusted::AttestedFrontierHints()) {
+        if (hint.height != block_height || hint.hash.IsNull() ||
+            hint.hash == block_hash ||
+            !node::matmul_trusted::HasQuorumInMemory(
+                hint.hash, hint.height)) {
+            continue;
+        }
+        const CBlockIndex* const competing{
+            m_blockman.LookupBlockIndex(hint.hash)};
+        if (competing != nullptr &&
+            (competing->nStatus & BLOCK_FAILED_MASK) != 0) {
+            continue;
+        }
+        return true;
     }
     return false;
 }
@@ -11885,7 +11954,7 @@ ChainstateManager::FindNextSignedFrontierExactReplayIndex() const
         return nullptr;
     }
     const CBlockIndex* const tip{m_active_chainstate->m_chain.Tip()};
-    const auto highest{node::matmul_trusted::HighestAttestedHeight()};
+    const auto highest{HighestUsableAttestedHeight()};
     if (tip == nullptr || !highest.has_value()) return nullptr;
 
     // Fail closed if the highest signed height names two known hashes. A
@@ -13637,7 +13706,7 @@ static bool ContextualCheckBlock(const CBlock& block,
                                     best_header->GetAncestor(index->nHeight) ==
                                         index &&
                                     !chainman.IsOnParkedReorgBranch(index) &&
-                                    !node::matmul_trusted::HasCompetingQuorum(
+                                    !chainman.HasUsableCompetingQuorum(
                                         block.GetHash(), nHeight);
                             }
                             if (followed_hole || followed_catchup_suffix) {

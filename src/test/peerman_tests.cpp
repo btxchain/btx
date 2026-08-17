@@ -2414,8 +2414,10 @@ BOOST_AUTO_TEST_CASE(signed_frontier_catchup_prefers_archive_not_miner)
         walk = nxt;
     }
     BOOST_REQUIRE_EQUAL(headers.size(), static_cast<size_t>(kAhead));
-    node::matmul_trusted::NoteAcceptedAttestationHeight(
-        headers.back()->nHeight, headers.back()->GetBlockHash());
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
+                      headers.back()->GetBlockHash(),
+                      headers.back()->nHeight) ==
+                  matmul::trusted::AddResult::Accepted);
     {
         LOCK(::cs_main);
         const auto frontier{chainman.GetSignedFrontierStatus()};

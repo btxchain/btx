@@ -3945,7 +3945,7 @@ static uint256 g_configured_claimed_tip_child{};
 {
     if (tip == nullptr || index == nullptr) return false;
     if (index->pprev != tip) return false;
-    if (node::matmul_trusted::HasCompetingQuorum(
+    if (chainman.HasUsableCompetingQuorum(
             index->GetBlockHash(), index->nHeight)) {
         return false;
     }
@@ -3954,7 +3954,7 @@ static uint256 g_configured_claimed_tip_child{};
         chainman.IndexIsAttestedChainTipChild(tip, index) ||
         chainman.IndexIsOnSignedFrontierChain(index)};
     if (!progress_child &&
-        node::matmul_trusted::HighestAttestedHeight().has_value() &&
+        chainman.HighestUsableAttestedHeight().has_value() &&
         !chainman.IndexIsOnSignedFrontierChain(tip)) {
         return false;
     }
@@ -15174,7 +15174,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             }
             const bool dual_spread{
                 other_on_chain_quorum ||
-                node::matmul_trusted::HasCompetingQuorum(block_hash, height)};
+                m_chainman.HasUsableCompetingQuorum(block_hash, height)};
             const bool recovery_fork_child{
                 m_chainman.IsAttestedAbandonForkCandidate(index)};
             // Serve cached signatures for the active chain, a stored
