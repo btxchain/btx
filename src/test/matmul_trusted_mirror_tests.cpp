@@ -985,6 +985,21 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(!IsSignedFrontierCatchUp(
         /*trusted_mirror=*/true, /*configured=*/true,
         /*blocks_behind=*/34, /*followed_ahead=*/1));
+    // Restart: no in-memory frontier, HEADER_ONLY suffix already followed.
+    BOOST_CHECK(IsSignedFrontierCatchUp(
+        /*trusted_mirror=*/true, /*configured=*/true,
+        /*blocks_behind=*/0, /*followed_ahead=*/98,
+        /*stall_headers_ahead=*/2, /*frontier_available=*/false));
+    BOOST_CHECK(!IsSignedFrontierCatchUp(
+        /*trusted_mirror=*/true, /*configured=*/true,
+        /*blocks_behind=*/0, /*followed_ahead=*/1,
+        /*stall_headers_ahead=*/2, /*frontier_available=*/false));
+    // Known frontier at the tip: miner HEADER_ONLY children stay 16-wide IBD,
+    // not 1-wide catch-up (would spray GETDATA at miners).
+    BOOST_CHECK(!IsSignedFrontierCatchUp(
+        /*trusted_mirror=*/true, /*configured=*/true,
+        /*blocks_behind=*/0, /*followed_ahead=*/36,
+        /*stall_headers_ahead=*/2, /*frontier_available=*/true));
     using node::matmul_trusted::CappedFollowedCatchUpAhead;
     // Live signer 2026-08-16: 13 unattested HEADER_ONLY children of the
     // attested tip must not look like a 13-block catch-up hole.
@@ -1123,7 +1138,7 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(SeedTrustedMirrorGpuBestKnownFromFrontier(
         /*signed_frontier_catch_up=*/true,
         /*best_known_usable_for_catch_up=*/false, /*seed_extends_tip=*/true,
-        /*seed_height=*/190647, /*tip_height=*/190602));
+        /*seed_height=*/191690, /*tip_height=*/191592));
     BOOST_CHECK(!SeedTrustedMirrorGpuBestKnownFromFrontier(
         true, /*best_known_usable_for_catch_up=*/true, true, 190647, 190602));
     BOOST_CHECK(!SeedTrustedMirrorGpuBestKnownFromFrontier(

@@ -648,20 +648,31 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
     return consensus_node;
 }
 
-/** Trusted mirror catching up a followed HEADER_ONLY suffix to a known
- *  signed frontier. Not assumeutxo / unattested IBD: those keep the wide
- *  16-slot window. Live 2026-08-16: ahead≥32 AND 15s catch-up timeout
- *  filled 16 getdatas from miners who only had headers. */
+/** Trusted mirror catching up a followed HEADER_ONLY suffix.
+ *
+ *  Not assumeutxo / unattested IBD: those keep the wide 16-slot window.
+ *  Live 2026-08-16: ahead≥32 AND 15s catch-up timeout filled 16 getdatas
+ *  from miners who only had headers — keep this 1-wide and GPU-only.
+ *
+ *  A known frontier with blocks_behind=0 plus miner HEADER_ONLY children
+ *  is not catch-up (live signer: tip==frontier, m_best_header +13).
+ *  After restart the in-memory store is empty (frontier_available=false)
+ *  while a GPU suffix already sits HEADER_ONLY in the index — that IS
+ *  catch-up (live archives 2026-08-17: headers=191690, sent_getdata=0). */
 [[nodiscard]] inline bool IsSignedFrontierCatchUp(
     bool trusted_mirror,
     bool configured,
     int32_t blocks_behind,
     int followed_ahead,
-    int stall_headers_ahead = 2)
+    int stall_headers_ahead = 2,
+    bool frontier_available = true)
 {
-    return trusted_mirror && configured &&
-           blocks_behind >= stall_headers_ahead &&
-           followed_ahead >= stall_headers_ahead;
+    if (!trusted_mirror || !configured) return false;
+    if (followed_ahead < stall_headers_ahead) return false;
+    if (frontier_available) {
+        return blocks_behind >= stall_headers_ahead;
+    }
+    return true;
 }
 
 /** Ancestor of (or equal to) a GPU-signed frontier hash.
