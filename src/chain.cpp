@@ -11,8 +11,6 @@
 #include <algorithm>
 #include <deque>
 #include <functional>
-#include <unordered_map>
-#include <vector>
 
 std::string CBlockFileInfo::ToString() const
 {
@@ -164,13 +162,19 @@ bool IsBlockAuthenticated(const CBlockIndex& block, const Consensus::Params& par
     // legacy nChainWork exactly). At and above the fork, a header's work is only
     // authenticated once its body arrived and the height-selected MatMul
     // authority passed (Profile-1 RC uses ExactReplay). That is precisely the
-    // point at which the index reaches BLOCK_VALID_TRANSACTIONS:
-    // ContextualCheckBlock finishes the MatMul check before
-    // ReceivedBlockTransactions raises validity. A block that failed validation
-    // can never authenticate.
+    // point at which the index reaches BLOCK_VALID_TRANSACTIONS. In trusted
+    // replay mode, transaction validity is deliberately not enough by itself:
+    // signer configuration is local policy and can change across restart, so
+    // an explicit authority-provenance bit must still be present under the
+    // current configuration.
     if (!params.IsMatMulV4Active(block.nHeight)) return true;
     if (block.nStatus & BLOCK_FAILED_MASK) return false;
     if ((block.nStatus & BLOCK_VALID_MASK) < BLOCK_VALID_TRANSACTIONS) return false;
+    if (params.IsMatMulTrustedReplayAttestationActive(block.nHeight) &&
+        (block.nStatus & (BLOCK_EXACT_REPLAY_VERIFIED |
+                          BLOCK_TRUSTED_REPLAY_ATTESTED)) == 0) {
+        return false;
+    }
 
     // Authentication is a contiguous-prefix property, not a count of
     // independently verified bodies. A child body can arrive and pass the
@@ -206,9 +210,9 @@ arith_uint256 GetTrustAdjustedChainWork(const CBlockIndex& block, unsigned int u
     // broken, an unsigned arith_uint256 underflow would wrap to ~2^256 and, via the
     // std::min below, mis-rank an unauthenticated chain UPWARD. std::min pins it to 0.
     const arith_uint256 unauth{block.nChainWork - std::min(block.nChainWork, block.nAuthenticatedChainWork)};
-    // Production passes a zero allowance, so possibly forged tip nBits cannot
-    // add any preference before body verification. Keep the generic calculation
-    // here for deterministic policy-unit coverage.
+    // Production passes a bounded allowance: a short unverified suffix may earn
+    // limited preference so a lost same-height race can be chased, but a forged
+    // tip's nBits cannot buy unbounded ranking before body verification.
     arith_uint256 allowance{GetBlockProof(block)};
     allowance *= unauth_allowance_blocks;
     return block.nAuthenticatedChainWork + std::min(unauth, allowance);
@@ -225,12 +229,11 @@ bool PreferTrustAdjustedHeader(const CBlockIndex& current, const CBlockIndex& ca
         return current_adjusted < candidate_adjusted;
     }
 
-    // With the production zero allowance every unauthenticated suffix is on the
-    // same authenticated-work plateau as its last verified ancestor. Never let
+    // Equal adjusted work: either both fully authenticated (legacy tie → keep
+    // current), or both sit on the same allowance-capped plateau. Never let
     // unordered block-index iteration choose an arbitrary, possibly
-    // millions-of-headers-deep member of that plateau as m_best_header. Keep
-    // legacy/full-body ties unchanged; for a tie involving unauthenticated work,
-    // prefer the most authenticated and then the shallowest claimed suffix.
+    // millions-of-headers-deep member of that plateau as m_best_header. Prefer
+    // the most authenticated and then the shallowest claimed suffix.
     const bool current_has_unauth = current.nAuthenticatedChainWork < current.nChainWork;
     const bool candidate_has_unauth = candidate.nAuthenticatedChainWork < candidate.nChainWork;
     if (!current_has_unauth && !candidate_has_unauth) return false;
@@ -249,29 +252,21 @@ bool PreferTrustAdjustedHeader(const CBlockIndex& current, const CBlockIndex& ca
 void PropagateAuthenticatedChainWorkDescendants(
     CBlockIndex& root,
     const Consensus::Params& params,
-    std::function<void(std::function<void(CBlockIndex&)>)> for_each_index)
+    const std::function<void(
+        CBlockIndex&,
+        const std::function<void(CBlockIndex&)>&)>& for_each_child,
+    const std::function<void(CBlockIndex&)>& on_updated)
 {
-    // Build a parent→children adjacency from the live block index, then BFS
-    // from `root` so every descendant inherits the updated authenticated base.
-    // Called rarely (body promotion), so an O(N) index scan is acceptable.
-    std::unordered_map<CBlockIndex*, std::vector<CBlockIndex*>> children;
-    for_each_index([&](CBlockIndex& idx) {
-        if (idx.pprev != nullptr) {
-            children[idx.pprev].push_back(&idx);
-        }
-    });
-
     std::deque<CBlockIndex*> queue;
     queue.push_back(&root);
     while (!queue.empty()) {
         CBlockIndex* parent = queue.front();
         queue.pop_front();
-        const auto it = children.find(parent);
-        if (it == children.end()) continue;
-        for (CBlockIndex* child : it->second) {
-            UpdateAuthenticatedChainWork(*child, params);
-            queue.push_back(child);
-        }
+        for_each_child(*parent, [&](CBlockIndex& child) {
+            UpdateAuthenticatedChainWork(child, params);
+            if (on_updated) on_updated(child);
+            queue.push_back(&child);
+        });
     }
 }
 
@@ -309,4 +304,86 @@ const CBlockIndex* LastCommonAncestor(const CBlockIndex* pa, const CBlockIndex* 
     // Eventually all chain branches meet at the genesis block.
     assert(pa == pb);
     return pa;
+}
+
+static bool HasUsableBlockBody(const CBlockIndex* pindex, const CChain* active_chain)
+{
+    if (pindex == nullptr) return false;
+    if (pindex->nStatus & BLOCK_HAVE_DATA) return true;
+    return active_chain != nullptr && active_chain->Contains(pindex);
+}
+
+const CBlockIndex* FindLowestMissingBody(const CBlockIndex* start,
+                                         const CBlockIndex* best_known,
+                                         const CChain* active_chain)
+{
+    if (best_known == nullptr) return nullptr;
+    if (start == nullptr) {
+        // No known common point: treat genesis/parent of best_known's full
+        // ancestry as the scan base by walking from height 0.
+        start = best_known->GetAncestor(0);
+    }
+    // start must be an ancestor of best_known (caller re-derives via LCA).
+    if (best_known->GetAncestor(start->nHeight) != start) {
+        start = LastCommonAncestor(start, best_known);
+    }
+    if (start == best_known) return nullptr;
+
+    for (int height = start->nHeight + 1; height <= best_known->nHeight; ++height) {
+        const CBlockIndex* pindex{best_known->GetAncestor(height)};
+        if (!HasUsableBlockBody(pindex, active_chain)) {
+            return pindex;
+        }
+    }
+    return nullptr;
+}
+
+LastCommonRootFirstResult ClampLastCommonToRootFirst(const CBlockIndex* last_common,
+                                                     const CBlockIndex* best_known,
+                                                     const CBlockIndex* tip,
+                                                     const CChain* active_chain)
+{
+    LastCommonRootFirstResult out;
+    assert(best_known != nullptr);
+    assert(tip != nullptr);
+
+    // True fork point with our tip — never start a competing-chain walk above this
+    // without first proving every followed-chain body from here is present.
+    const CBlockIndex* tip_lca{LastCommonAncestor(tip, best_known)};
+    out.last_common = last_common != nullptr
+                          ? LastCommonAncestor(last_common, best_known)
+                          : tip_lca;
+
+    // Prefer tip_lca when the stored pointer is not on the tip↔best_known fork
+    // path (should already be corrected by the LCA above, but be defensive).
+    if (out.last_common != tip_lca &&
+        tip_lca->GetAncestor(out.last_common->nHeight) != out.last_common &&
+        out.last_common->GetAncestor(tip_lca->nHeight) != tip_lca) {
+        out.last_common = tip_lca;
+        out.clamped = true;
+        out.reason = "rederived_tip_lca";
+    }
+
+    // If last_common is below tip_lca, raise to the real fork.
+    if (out.last_common->nHeight < tip_lca->nHeight) {
+        out.last_common = tip_lca;
+        out.clamped = true;
+        out.reason = "raised_to_tip_lca";
+    }
+
+    out.lowest_missing = FindLowestMissingBody(tip_lca, best_known, active_chain);
+    if (out.lowest_missing == nullptr) {
+        if (!out.clamped) out.reason = "ok_no_missing";
+        return out;
+    }
+
+    // Parent of the lowest hole is the latest safe common point.
+    const CBlockIndex* safe{out.lowest_missing->pprev};
+    assert(safe != nullptr);
+    if (out.last_common->nHeight >= out.lowest_missing->nHeight) {
+        out.last_common = safe;
+        out.clamped = true;
+        out.reason = "clamped_past_missing_root";
+    }
+    return out;
 }

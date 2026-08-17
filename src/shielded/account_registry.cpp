@@ -17,6 +17,7 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 
 namespace shielded::registry {
@@ -42,6 +43,18 @@ constexpr std::string_view TAG_NULLIFIER_LEAF{"BTX_SMILE_ACCOUNT_NULLIFIER_LEAF_
 constexpr std::string_view TAG_NULLIFIER_NODE{"BTX_SMILE_ACCOUNT_NULLIFIER_NODE_V1"};
 constexpr std::string_view TAG_STATE_COMMITMENT{"BTX_SMILE_ACCOUNT_BLOCK_STATE_COMMITMENT_V1"};
 constexpr uint8_t DB_ACCOUNT_REGISTRY_PAYLOAD{'P'};
+constexpr uint8_t DB_ACCOUNT_REGISTRY_PAYLOAD_CONTENT{'Q'};
+
+using PayloadBatchEntry =
+    std::tuple<uint64_t, uint256, std::vector<uint8_t>>;
+using ContentPayloadKey =
+    std::pair<std::pair<uint8_t, uint64_t>, uint256>;
+
+ContentPayloadKey MakeContentPayloadKey(uint64_t leaf_index,
+                                        const uint256& commitment)
+{
+    return {{DB_ACCOUNT_REGISTRY_PAYLOAD_CONTENT, leaf_index}, commitment};
+}
 
 std::mutex g_registry_payload_store_mutex;
 std::shared_ptr<PayloadStore> g_registry_payload_store;
@@ -898,35 +911,25 @@ struct PayloadStore
     }
 
     [[nodiscard]] bool WritePayloadBatch(
-        const std::vector<std::pair<uint64_t, std::vector<uint8_t>>>& payloads,
+        const std::vector<PayloadBatchEntry>& payloads,
         bool sync)
     {
         std::lock_guard<std::mutex> lock(mutex);
         CDBBatch batch(*db);
-        for (const auto& [leaf_index, payload] : payloads) {
-            batch.Write(std::make_pair(DB_ACCOUNT_REGISTRY_PAYLOAD, leaf_index), payload);
+        for (const auto& [leaf_index, commitment, payload] : payloads) {
+            // Content-bind the payload key. Reorgs reuse leaf indices, and an
+            // index-only overwrite before PREPARED would corrupt the still-
+            // committed source snapshot in the crash-before-marker window.
+            batch.Write(MakeContentPayloadKey(leaf_index, commitment),
+                        payload);
         }
         return db->WriteBatch(batch, /*fSync=*/sync);
     }
 
-    [[nodiscard]] bool ErasePayloadRange(uint64_t start, uint64_t end)
-    {
-        if (start >= end) return true;
-        std::lock_guard<std::mutex> lock(mutex);
-        CDBBatch batch(*db);
-        for (uint64_t leaf_index = start; leaf_index < end; ++leaf_index) {
-            batch.Erase(std::make_pair(DB_ACCOUNT_REGISTRY_PAYLOAD, leaf_index));
-        }
-        if (!db->WriteBatch(batch, /*fSync=*/true)) {
-            return false;
-        }
-        db->Compact();
-        return true;
-    }
-
     [[nodiscard]] bool PruneToSize(uint64_t size)
     {
-        std::vector<std::pair<uint8_t, uint64_t>> stale_keys;
+        std::vector<std::pair<uint8_t, uint64_t>> stale_legacy_keys;
+        std::vector<ContentPayloadKey> stale_content_keys;
         std::lock_guard<std::mutex> lock(mutex);
         std::unique_ptr<CDBIterator> cursor{db->NewIterator()};
         cursor->Seek(std::make_pair(DB_ACCOUNT_REGISTRY_PAYLOAD, uint64_t{0}));
@@ -936,15 +939,28 @@ struct PayloadStore
                 break;
             }
             if (key.second >= size) {
-                stale_keys.push_back(key);
+                stale_legacy_keys.push_back(key);
             }
             cursor->Next();
         }
-        if (stale_keys.empty()) {
-            return true;
+        cursor->Seek(MakeContentPayloadKey(0, uint256{}));
+        while (cursor->Valid()) {
+            ContentPayloadKey key;
+            if (!cursor->GetKey(key) ||
+                key.first.first != DB_ACCOUNT_REGISTRY_PAYLOAD_CONTENT) {
+                break;
+            }
+            if (key.first.second >= size) {
+                stale_content_keys.push_back(key);
+            }
+            cursor->Next();
         }
+        if (stale_legacy_keys.empty() && stale_content_keys.empty()) return true;
         CDBBatch batch(*db);
-        for (const auto& key : stale_keys) {
+        for (const auto& key : stale_legacy_keys) {
+            batch.Erase(key);
+        }
+        for (const auto& key : stale_content_keys) {
             batch.Erase(key);
         }
         if (!db->WriteBatch(batch, /*fSync=*/true)) {
@@ -954,14 +970,21 @@ struct PayloadStore
         return true;
     }
 
-    [[nodiscard]] std::optional<std::vector<uint8_t>> ReadPayload(uint64_t leaf_index) const
+    [[nodiscard]] std::optional<std::vector<uint8_t>> ReadPayload(
+        uint64_t leaf_index, const uint256& commitment) const
     {
         std::lock_guard<std::mutex> lock(mutex);
         std::vector<uint8_t> payload;
-        if (!db->Read(std::make_pair(DB_ACCOUNT_REGISTRY_PAYLOAD, leaf_index), payload)) {
-            return std::nullopt;
+        if (db->Read(MakeContentPayloadKey(leaf_index, commitment),
+                     payload)) {
+            return payload;
         }
-        return payload;
+        // Read legacy index-only stores for in-place migration. Every new
+        // write uses the content-bound key above.
+        if (db->Read(std::make_pair(DB_ACCOUNT_REGISTRY_PAYLOAD, leaf_index), payload)) {
+            return payload;
+        }
+        return std::nullopt;
     }
 
     std::unique_ptr<CDBWrapper> db;
@@ -1030,7 +1053,8 @@ std::optional<std::vector<uint8_t>> ShieldedAccountRegistryState::LoadPayloadByt
     if (!m_payload_store) {
         return std::nullopt;
     }
-    return m_payload_store->ReadPayload(entry.leaf_index);
+    return m_payload_store->ReadPayload(entry.leaf_index,
+                                        entry.account_leaf_commitment);
 }
 
 bool ShieldedAccountRegistryState::LoadFromSnapshot(const ShieldedAccountRegistrySnapshot& snapshot)
@@ -1039,7 +1063,7 @@ bool ShieldedAccountRegistryState::LoadFromSnapshot(const ShieldedAccountRegistr
 
     std::vector<StoredEntry> restored_entries;
     restored_entries.reserve(snapshot.entries.size());
-    std::vector<std::pair<uint64_t, std::vector<uint8_t>>> payload_batch;
+    std::vector<PayloadBatchEntry> payload_batch;
     if (m_payload_store) {
         payload_batch.reserve(snapshot.entries.size());
     }
@@ -1049,7 +1073,9 @@ bool ShieldedAccountRegistryState::LoadFromSnapshot(const ShieldedAccountRegistr
             return false;
         }
         if (m_payload_store) {
-            payload_batch.emplace_back(entry.leaf_index, entry.account_leaf_payload);
+            payload_batch.emplace_back(entry.leaf_index,
+                                       entry.account_leaf_commitment,
+                                       entry.account_leaf_payload);
         }
         restored_entries.push_back(StoredEntry{
             .leaf_index = entry.leaf_index,
@@ -1101,6 +1127,28 @@ bool ShieldedAccountRegistryState::Append(Span<const ShieldedAccountLeaf> accoun
                                           std::vector<uint64_t>* inserted_indices,
                                           bool sync_payload_store)
 {
+    return AppendInternal(account_leaves,
+                          inserted_indices,
+                          sync_payload_store,
+                          /*defer_payload_store=*/false);
+}
+
+bool ShieldedAccountRegistryState::AppendPrepared(
+    Span<const ShieldedAccountLeaf> account_leaves,
+    std::vector<uint64_t>* inserted_indices)
+{
+    return AppendInternal(account_leaves,
+                          inserted_indices,
+                          /*sync_payload_store=*/false,
+                          /*defer_payload_store=*/true);
+}
+
+bool ShieldedAccountRegistryState::AppendInternal(
+    Span<const ShieldedAccountLeaf> account_leaves,
+    std::vector<uint64_t>* inserted_indices,
+    bool sync_payload_store,
+    bool defer_payload_store)
+{
     if (account_leaves.empty()) return true;
     if (m_entries.size() + account_leaves.size() > MAX_REGISTRY_ENTRIES) {
         return false;
@@ -1118,7 +1166,7 @@ bool ShieldedAccountRegistryState::Append(Span<const ShieldedAccountLeaf> accoun
 
     std::vector<StoredEntry> new_entries;
     new_entries.reserve(account_leaves.size());
-    std::vector<std::pair<uint64_t, std::vector<uint8_t>>> payload_batch;
+    std::vector<PayloadBatchEntry> payload_batch;
     if (m_payload_store) {
         payload_batch.reserve(account_leaves.size());
     }
@@ -1138,8 +1186,10 @@ bool ShieldedAccountRegistryState::Append(Span<const ShieldedAccountLeaf> accoun
         }
         entry.account_leaf_payload = SerializeShieldedAccountLeafPayload(leaf);
         if (!entry.IsValid()) return false;
-        if (m_payload_store) {
-            payload_batch.emplace_back(entry.leaf_index, entry.account_leaf_payload);
+        if (m_payload_store && !defer_payload_store) {
+            payload_batch.emplace_back(entry.leaf_index,
+                                       entry.account_leaf_commitment,
+                                       entry.account_leaf_payload);
         }
         if (inserted_indices != nullptr) {
             new_indices.push_back(entry.leaf_index);
@@ -1149,8 +1199,9 @@ bool ShieldedAccountRegistryState::Append(Span<const ShieldedAccountLeaf> accoun
             .account_leaf_commitment = entry.account_leaf_commitment,
             .entry_commitment = ComputeShieldedAccountRegistryEntryCommitment(entry),
             .spent = entry.spent,
-            .inline_payload = m_payload_store ? std::vector<uint8_t>{}
-                                              : std::move(entry.account_leaf_payload),
+            .inline_payload = m_payload_store && !defer_payload_store
+                ? std::vector<uint8_t>{}
+                : std::move(entry.account_leaf_payload),
         });
     }
 
@@ -1165,6 +1216,81 @@ bool ShieldedAccountRegistryState::Append(Span<const ShieldedAccountLeaf> accoun
                      std::make_move_iterator(new_entries.begin()),
                      std::make_move_iterator(new_entries.end()));
     return true;
+}
+
+bool ShieldedAccountRegistryState::CommitPreparedPayloads(bool sync_payload_store)
+{
+    if (!m_payload_store) return true;
+
+    std::vector<PayloadBatchEntry> payload_batch;
+    for (const auto& entry : m_entries) {
+        if (!entry.inline_payload.empty()) {
+            payload_batch.emplace_back(entry.leaf_index,
+                                       entry.account_leaf_commitment,
+                                       entry.inline_payload);
+        }
+    }
+    if (payload_batch.empty()) return true;
+    if (!m_payload_store->WritePayloadBatch(payload_batch, sync_payload_store)) {
+        return false;
+    }
+    for (auto& entry : m_entries) {
+        entry.inline_payload.clear();
+        entry.inline_payload.shrink_to_fit();
+    }
+    return true;
+}
+
+std::optional<std::vector<ShieldedAccountRegistryEntry>>
+ShieldedAccountRegistryState::ExportPreparedPayloadEntries() const
+{
+    std::vector<ShieldedAccountRegistryEntry> prepared;
+    for (const auto& entry : m_entries) {
+        if (entry.inline_payload.empty()) continue;
+        ShieldedAccountRegistryEntry exported;
+        exported.leaf_index = entry.leaf_index;
+        exported.account_leaf_commitment = entry.account_leaf_commitment;
+        exported.account_leaf_payload = entry.inline_payload;
+        exported.spent = entry.spent;
+        if (!exported.IsValid() ||
+            ComputeShieldedAccountRegistryEntryCommitment(exported) !=
+                entry.entry_commitment) {
+            return std::nullopt;
+        }
+        prepared.push_back(std::move(exported));
+    }
+    return prepared;
+}
+
+bool ShieldedAccountRegistryState::CommitJournaledPayloads(
+    Span<const ShieldedAccountRegistryEntry> payload_entries,
+    bool sync_payload_store)
+{
+    if (payload_entries.empty()) return true;
+    if (!m_payload_store) return false;
+
+    std::vector<PayloadBatchEntry> payload_batch;
+    payload_batch.reserve(payload_entries.size());
+    std::set<uint64_t> seen_indices;
+    for (const auto& entry : payload_entries) {
+        if (!entry.IsValid() || entry.spent ||
+            entry.leaf_index >= m_entries.size() ||
+            !seen_indices.insert(entry.leaf_index).second) {
+            return false;
+        }
+        const auto& expected = m_entries[entry.leaf_index];
+        if (expected.leaf_index != entry.leaf_index ||
+            expected.account_leaf_commitment != entry.account_leaf_commitment ||
+            expected.entry_commitment !=
+                ComputeShieldedAccountRegistryEntryCommitment(entry) ||
+            expected.spent != entry.spent) {
+            return false;
+        }
+        payload_batch.emplace_back(entry.leaf_index,
+                                   entry.account_leaf_commitment,
+                                   entry.account_leaf_payload);
+    }
+    return m_payload_store->WritePayloadBatch(payload_batch, sync_payload_store);
 }
 
 bool ShieldedAccountRegistryState::Truncate(size_t size, PayloadPruneMode prune_mode)

@@ -466,6 +466,21 @@ BOOST_AUTO_TEST_CASE(netpermissions_test)
     BOOST_CHECK(NetWhitelistPermissions::TryParse("in,out,bloom@1.2.3.4", whitelistPermissions, connection_direction, error));
     BOOST_CHECK_EQUAL(connection_direction, ConnectionDirection::Both);
 
+    // A bare "out" replaces the inbound default rather than adding to it.
+    // Combined with noban, promote to both directions so inbound miners
+    // get the MatMul near-tip bypass. out,relay stays outbound-only.
+    BOOST_CHECK(NetWhitelistPermissions::TryParse("out,noban@1.2.3.4", whitelistPermissions, connection_direction, error));
+    BOOST_CHECK_EQUAL(whitelistPermissions.m_flags, NetPermissionFlags::NoBan);
+    BOOST_CHECK_EQUAL(connection_direction, ConnectionDirection::Both);
+    BOOST_CHECK(connection_direction & ConnectionDirection::In);
+    BOOST_CHECK(NetWhitelistPermissions::TryParse("out,relay@1.2.3.4", whitelistPermissions, connection_direction, error));
+    BOOST_CHECK_EQUAL(connection_direction, ConnectionDirection::Out);
+    BOOST_CHECK(!(connection_direction & ConnectionDirection::In));
+    BOOST_CHECK(NetWhitelistPermissions::TryParse("in,out,noban@1.2.3.4", whitelistPermissions, connection_direction, error));
+    BOOST_CHECK_EQUAL(whitelistPermissions.m_flags, NetPermissionFlags::NoBan);
+    BOOST_CHECK_EQUAL(connection_direction, ConnectionDirection::Both);
+    BOOST_CHECK(connection_direction & ConnectionDirection::In);
+
     const auto strings = NetPermissions::ToStrings(NetPermissionFlags::All);
     BOOST_CHECK_EQUAL(strings.size(), 8U);
     BOOST_CHECK(std::find(strings.begin(), strings.end(), "blockfilters") != strings.end());

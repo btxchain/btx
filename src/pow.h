@@ -215,6 +215,10 @@ bool CheckMatMulProofOfWork_Phase1(const CBlockHeader& block, const Consensus::P
  *  silently weakening current difficulty at some future height) and defensively
  *  per-block inside MatMulAsert. */
 bool ValidateMatMulAsertParams(const Consensus::Params& params, int32_t next_height);
+/** ASERT clamp in effect when computing nBits for @p next_height. Historical
+ *  powLimit before nMatMulPowLimitUpgradeHeight; powLimitUpgrade at/after it.
+ *  CheckProofOfWork must keep using consensus.powLimit. */
+arith_uint256 MatMulAsertPowLimitForNextHeight(const Consensus::Params& params, int32_t next_height);
 /** AUDIT D3: reduce a one-time ASERT rescale ratio num/den to lowest terms; return
  *  false (and leave outputs unspecified) unless it is strictly positive AND both
  *  reduced terms fit in uint32. Prevents ScaleTargetByTimespan's independent
@@ -503,6 +507,7 @@ std::optional<bool> PinCachedMatMulEncDrVerdict(const uint256& block_hash);
 /** Pin a verdict already established by an exact recomputation. */
 void PinMatMulEncDrVerdict(const uint256& block_hash, bool valid);
 void UnpinMatMulEncDrVerdict(const uint256& block_hash);
+void ResetMatMulEncDrVerdictsForTest();
 /** Scope one assumevalid-trust decision across admission -> validation. Unlike
  *  a verdict pin this does not claim an exact recomputation occurred; it only
  *  preserves the trust decision the block would have consumed atomically. */
@@ -722,9 +727,14 @@ private:
 
 bool ConsumeGlobalMatMulPhase2Budget(uint32_t max_global_per_minute, uint32_t count, std::chrono::steady_clock::time_point now, MatMulPhase2BudgetLane lane = MatMulPhase2BudgetLane::ExpensiveVerification);
 bool ConsumeGlobalMatMulRCBudget(uint32_t max_global_per_minute, uint32_t count, std::chrono::steady_clock::time_point now);
+/** Time until the current process-wide RC budget window refills. Zero means
+ *  the next charge can be retried immediately. */
+std::chrono::steady_clock::duration GlobalMatMulRCBudgetRetryDelay(std::chrono::steady_clock::time_point now);
 /** Roll back an RC budget debit only when admission failed before work began.
  *  `charged_at` prevents a delayed rollback from decrementing a later window. */
 void RefundGlobalMatMulRCBudget(uint32_t count, std::chrono::steady_clock::time_point charged_at);
+/** Clear the process-wide RC global window so peerman tests can isolate DoS-F2. */
+void ResetGlobalMatMulRCBudgetForTest();
 MatMulSolvePipelineStats ProbeMatMulSolvePipelineStats();
 void ResetMatMulSolvePipelineStats();
 MatMulGpuPreHashScanStats ProbeMatMulGpuPreHashScanStats();

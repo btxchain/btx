@@ -8,6 +8,7 @@
 #include <primitives/block.h>
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
@@ -60,6 +61,23 @@ namespace node {
 class MatMulVerifyWorker
 {
 public:
+    /** Trusted mirrors wait for signatures rather than consuming a compute
+     * lane. Bound that retained-body state independently from the expensive
+     * replay queue so a missing signer cannot monopolize the default cap-one
+     * RC verifier or turn full block deliveries into unbounded memory. */
+    static constexpr size_t MAX_AWAITING_QUORUM_JOBS{16};
+    static constexpr size_t MAX_AWAITING_QUORUM_BYTES{128U * 1024U * 1024U};
+
+    /** Worker-local cooldown after a retryable ExactReplay cancel/failure.
+     *  Cancellation is not a consensus verdict, but immediately invoking
+     *  retryable_failure lets net_processing re-admit the same hash into a
+     *  cancel→retry tight loop (live: ~310% CPU, shallow invalidateblock
+     *  stuck in ActivateBestChain). Same spirit as the 5s attestation-miss
+     *  base; this map is owned here so the worker can fail-closed even when
+     *  the caller retries synchronously from the completion thread. */
+    static constexpr std::chrono::seconds CANCEL_RETRY_BACKOFF_BASE{5};
+    static constexpr int CANCEL_RETRY_BACKOFF_MAX_EXP{6};
+
     enum class Priority : uint8_t {
         Background = 0,
         CompetingBranch = 1,
@@ -108,6 +126,11 @@ public:
         //! leaving the block retryable; it must not punish a peer or pin a
         //! negative verdict.
         std::function<void()> retryable_failure;
+        //! Expensive-lifecycle transition hooks. These are resource-owner
+        //! callbacks, not observers: net_processing uses them to advance the
+        //! generation that owns the retained body/cancel token/pending lease.
+        std::function<void()> on_started;
+        std::function<void()> on_parked;
         //! Header-only jobs begin digest-only ExactReplay while the body is
         //! still transferring/reconstructing. Exactly one of block/header is
         //! populated.
@@ -118,6 +141,10 @@ public:
         //! stores it outside `completion` so one bounded equal-priority
         //! handoff can transfer ownership without opening a second slot.
         std::shared_ptr<void> rc_pending_lease;
+        //! Serialized full-body bytes retained while this job awaits quorum.
+        //! Header-only jobs use zero. This is charged against the dedicated
+        //! awaiting-quorum byte cap, not the compute pending-work cap.
+        size_t retained_body_bytes{0};
         //! Header-only speculative quota/set ownership. Transferred to another
         //! header or released when the handoff target is a complete body.
         std::shared_ptr<void> rc_speculative_lease;
@@ -154,8 +181,11 @@ public:
      *  same-hash job or a failed JoinOnly as permission to run Q*-scale work
      *  synchronously on the P2P message thread. An authenticated-tip child
      *  preempts lower-priority in-flight speculation so a valid admission
-     *  ticket cannot reserve the sole device lane indefinitely. Threads are
-     *  started lazily. */
+     *  ticket cannot reserve the sole device lane indefinitely. A body-holding
+     *  CompetingBranch / AuthenticatedTipChild already running ExactReplay is
+     *  never preempted by a later header-only AuthenticatedTipChild. Same-hash
+     *  re-enqueue after a retryable cancel is Deferred until the worker-local
+     *  backoff expires. Threads are started lazily. */
     EnqueueResult Enqueue(
         Job& job,
         EnqueueMode mode = EnqueueMode::JoinOrEnqueue);
@@ -170,12 +200,33 @@ public:
         const CBlockHeader& replacement,
         int32_t height) const;
 
+    /** Replace the pure-verify callback used by unit tests. WorkerLoop
+     *  snapshots the override under m_mutex when dequeuing, so a later
+     *  install cannot tear a running call. Prefer installing before the
+     *  first enqueue so the stall is in place before header-first work. */
+    void InstallVerifyOverrideForTest(
+        std::function<bool(const CBlock&, int32_t, std::optional<int64_t>)> verify);
+
     /** Cancel queued/running speculative work for one header hash. */
     bool Cancel(const uint256& hash);
 
     /** Cancel every job selected by a tip/reorg-aware predicate. */
     size_t CancelIf(const std::function<bool(const CBlockHeader&, int32_t)>& predicate);
+    /** Drop leftover ExactReplay work between shared-fixture peerman cases
+     *  without permanently stopping the worker. */
+    void CancelAllForTest();
     [[nodiscard]] bool Contains(const uint256& hash) const;
+
+    /** Publish the active tip so queued/parked trusted work ranks tip-first. */
+    void SetActiveTip(const uint256& tip_hash, int32_t tip_height);
+    /** Admit/park bound matching CappedAuthorityAttestedFrontier. */
+    void SetCappedAuthorityFrontier(std::optional<int32_t> height);
+
+    /**
+     * A parked trusted-mirror job may proceed: quorum is available for `hash`.
+     * Never blocks; safe to call from the message thread without cs_main.
+     */
+    void NotifyQuorumReady(const uint256& hash);
 
     /** Stop accepting jobs; queued-not-started jobs receive retryable cleanup
      *  but no consensus completion; join in-flight jobs. Idempotent. */
@@ -183,6 +234,11 @@ public:
 
     //! Test introspection: current queued (not yet started) job count.
     size_t QueueDepthForTest() const;
+    //! Test introspection: jobs parked awaiting an attestation quorum.
+    size_t AwaitingQuorumForTest() const;
+    //! Test introspection: same-hash re-enqueue is Deferred until this clears.
+    [[nodiscard]] bool CancelRetryBackoffActiveForTest(
+        const uint256& hash) const;
 
 private:
     struct Pending {
@@ -194,21 +250,54 @@ private:
         //! Once a full block joins a header-first replay, tip churn may no
         //! longer cancel the shared computation and discard body validation.
         bool body_joined{false};
+        //! When set, this job is parked awaiting attestation quorum and must
+        //! not occupy a worker thread. Deadline is steady_clock.
+        std::optional<std::chrono::steady_clock::time_point>
+            awaiting_quorum_deadline{};
     };
 
-    [[nodiscard]] static bool HigherPriority(const Pending& lhs, const Pending& rhs);
+    [[nodiscard]] bool HigherPriority(const Pending& lhs,
+                                      const Pending& rhs) const;
     void WorkerLoop();
+    /** Move expired/cancelled parked jobs out of the awaiting set. Caller
+     *  invokes retryable callbacks WITHOUT holding m_mutex. */
+    void TakeExpiredAwaitingQuorum(
+        std::vector<std::shared_ptr<Pending>>& expired);
+    [[nodiscard]] std::optional<std::chrono::steady_clock::time_point>
+    NextAwaitingDeadline() const;
+    void FinishRetryablePending(const std::shared_ptr<Pending>& pending);
+    /** True once a full body owns this job: tip-header churn must not cancel
+     *  the in-flight ExactReplay or discard a completed body verdict. */
+    [[nodiscard]] static bool ProtectsBodyReplay(const Pending& pending);
+    void ArmCancelRetryBackoff(const uint256& hash);
+    [[nodiscard]] bool UnderCancelRetryBackoff(const uint256& hash) const;
+    void ClearCancelRetryBackoff(const uint256& hash);
+    void PruneCancelRetryBackoff();
 
     const Consensus::Params& m_params;
-    const std::function<bool(const CBlock&, int32_t, std::optional<int64_t>)> m_verify_override;
+    std::function<bool(const CBlock&, int32_t, std::optional<int64_t>)> m_verify_override;
     const uint32_t m_max_threads;
 
     mutable std::mutex m_mutex;
     std::condition_variable m_cv;
     std::vector<std::shared_ptr<Pending>> m_queue; // GUARDED_BY(m_mutex)
     std::map<uint256, std::shared_ptr<Pending>> m_pending; // GUARDED_BY(m_mutex)
+    //! Parked trusted-mirror jobs: waiting for M-of-N quorum without binding a
+    //! worker thread. Still present in m_pending.
+    std::map<uint256, std::shared_ptr<Pending>> m_awaiting_quorum; // GUARDED_BY(m_mutex)
+    size_t m_awaiting_quorum_bytes{0}; // GUARDED_BY(m_mutex)
+    uint256 m_tip_hash{}; // GUARDED_BY(m_mutex)
+    int32_t m_tip_height{-1}; // GUARDED_BY(m_mutex)
+    std::optional<int32_t> m_capped_authority_frontier{}; // GUARDED_BY(m_mutex)
     uint64_t m_next_sequence{0};          // GUARDED_BY(m_mutex)
     bool m_stopped{false};               // GUARDED_BY(m_mutex)
+    std::atomic<bool> m_shutdown{false};
+    struct CancelRetryBackoff {
+        std::chrono::steady_clock::time_point not_before{};
+        int consecutive{0};
+    };
+    std::map<uint256, CancelRetryBackoff>
+        m_cancel_retry_backoff; // GUARDED_BY(m_mutex)
     std::vector<std::thread> m_threads;  // GUARDED_BY(m_mutex); lazily started on Enqueue
 };
 

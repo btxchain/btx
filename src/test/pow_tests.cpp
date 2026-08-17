@@ -942,8 +942,51 @@ BOOST_AUTO_TEST_CASE(ChainParams_MAIN_matmul_activation)
     BOOST_CHECK_EQUAL(consensus.nMatMulAsertRetune2Height, std::numeric_limits<int32_t>::max());
     BOOST_CHECK_EQUAL(consensus.nMatMulAsertRetune2TargetNum, 1U);
     BOOST_CHECK_EQUAL(consensus.nMatMulAsertRetune2TargetDen, 1U);
-    BOOST_CHECK_EQUAL(consensus.nMatMulAsertHalfLifeUpgradeHeight, std::numeric_limits<int32_t>::max());
-    BOOST_CHECK_EQUAL(consensus.nMatMulAsertHalfLifeUpgrade, 3'600);
+    BOOST_CHECK_EQUAL(consensus.nMatMulAsertHalfLifeUpgradeHeight, 191'715);
+    BOOST_CHECK_EQUAL(consensus.nMatMulAsertHalfLifeUpgrade, 14'400);
+    BOOST_CHECK_EQUAL(consensus.nMatMulPowLimitUpgradeHeight, 191'714);
+    BOOST_CHECK_EQUAL(UintToArith256(consensus.powLimit).GetCompact(), 0x2066c154U);
+    BOOST_CHECK_EQUAL(UintToArith256(consensus.powLimitUpgrade).GetCompact(), 0x1f0a3d70U);
+    BOOST_CHECK(UintToArith256(consensus.powLimitUpgrade) < UintToArith256(consensus.powLimit));
+    BOOST_CHECK(MatMulAsertPowLimitForNextHeight(consensus, 191'713) == UintToArith256(consensus.powLimit));
+    BOOST_CHECK(MatMulAsertPowLimitForNextHeight(consensus, 191'714) == UintToArith256(consensus.powLimitUpgrade));
+    BOOST_CHECK(MatMulAsertPowLimitForNextHeight(consensus, 191'715) == UintToArith256(consensus.powLimitUpgrade));
+    // Floor sits in the 8e-7–1.5e-6 GetDifficulty band (hard end) and is
+    // strictly harder than the 1e-7 flood boundary. Compact round-trips.
+    {
+        const uint32_t floor_bits = UintToArith256(consensus.powLimitUpgrade).GetCompact();
+        BOOST_CHECK_EQUAL(floor_bits, 0x1f0a3d70U);
+        arith_uint256 decoded{};
+        bool negative{false};
+        bool overflow{false};
+        decoded.SetCompact(floor_bits, &negative, &overflow);
+        BOOST_CHECK(!negative);
+        BOOST_CHECK(!overflow);
+        BOOST_CHECK(decoded == UintToArith256(consensus.powLimitUpgrade));
+        const int nShift = static_cast<int>((floor_bits >> 24) & 0xff);
+        double dDiff = static_cast<double>(0x0000ffff) / static_cast<double>(floor_bits & 0x00ffffff);
+        int shift = nShift;
+        while (shift < 29) {
+            dDiff *= 256.0;
+            ++shift;
+        }
+        while (shift > 29) {
+            dDiff /= 256.0;
+            --shift;
+        }
+        BOOST_CHECK(dDiff > 8.0e-7);
+        BOOST_CHECK(dDiff <= 1.5e-6);
+        BOOST_CHECK(dDiff > 1.0e-7);
+        const double p_hit = static_cast<double>(floor_bits & 0x00ffffff) / 4294967296.0;
+        const double episodes_per_90s_5060ti = 90.0 / 12.3;
+        const double expected_block_s = 90.0 / (episodes_per_90s_5060ti * p_hit);
+        BOOST_CHECK(p_hit < 2.0e-4);
+        BOOST_CHECK(expected_block_s > 3600.0);
+        BOOST_REQUIRE(DeriveTarget(0x2066c154U, consensus.powLimit).has_value());
+        BOOST_REQUIRE(DeriveTarget(floor_bits, consensus.powLimit).has_value());
+        BOOST_CHECK(!DeriveTarget(0x2066c154U, consensus.powLimitUpgrade).has_value());
+        BOOST_CHECK(CheckProofOfWork(uint256{}, 0x2066c154U, consensus));
+    }
     BOOST_CHECK_EQUAL(consensus.nMatMulMaxFutureMtpDriftHeight, 118'482);
     BOOST_CHECK_EQUAL(consensus.nMatMulMaxFutureMtpDrift, 3'600);
     BOOST_CHECK(!consensus.IsMatMulMaxFutureMtpDriftActive(118'481));
@@ -2360,10 +2403,10 @@ BOOST_AUTO_TEST_CASE(ChainParams_MAIN_hardening_anchor_consistency)
 
     BOOST_CHECK_EQUAL(
         consensus.nMinimumChainWork.GetHex(),
-        "00000000000000000000000000000000000000000000000000029d454fe795d2");
+        "00000000000000000000000000000000000000000000000000030b4f85e66df7");
     BOOST_CHECK_EQUAL(
         consensus.defaultAssumeValid.GetHex(),
-        "2dd1d545b1b5e76c28b4414ebe0c22b1ba9d3ebd88662fbd1b9e4d0cf6693933");
+        "0a51fccfd75d2051e94be1a8cc5abff8b86ac53d0cc134680f286fe769aa2129");
     BOOST_CHECK_EQUAL(params->AssumedBlockchainSize(), 120U);
     BOOST_CHECK_EQUAL(params->AssumedChainStateSize(), 1U);
     BOOST_CHECK_EQUAL(params->TxData().nTime, 1785786086);
@@ -2371,17 +2414,28 @@ BOOST_AUTO_TEST_CASE(ChainParams_MAIN_hardening_anchor_consistency)
     BOOST_CHECK_CLOSE(params->TxData().dTxRate, 0.015165177474, 0.000001);
 
     const auto& checkpoints = params->Checkpoints().mapCheckpoints;
-    BOOST_REQUIRE_EQUAL(checkpoints.size(), 2U);
+    BOOST_REQUIRE_EQUAL(checkpoints.size(), 4U);
     const auto it_0 = checkpoints.find(0);
     BOOST_REQUIRE(it_0 != checkpoints.end());
     BOOST_CHECK_EQUAL(
         it_0->second.GetHex(),
         "75a998a39d2d6e25a9ca7de2cc659309c4105839c06cd435ba2b1aabf0fa4601");
-    const auto it_anchor = checkpoints.find(179000);
-    BOOST_REQUIRE(it_anchor != checkpoints.end());
+    const auto it_179000 = checkpoints.find(179000);
+    BOOST_REQUIRE(it_179000 != checkpoints.end());
     BOOST_CHECK_EQUAL(
-        it_anchor->second.GetHex(),
+        it_179000->second.GetHex(),
         "2dd1d545b1b5e76c28b4414ebe0c22b1ba9d3ebd88662fbd1b9e4d0cf6693933");
+    const auto it_185000 = checkpoints.find(185000);
+    BOOST_REQUIRE(it_185000 != checkpoints.end());
+    BOOST_CHECK_EQUAL(
+        it_185000->second.GetHex(),
+        "f03a7af21d20f67a5efecfb8b0b3e5e1b91efa208b385419470c59450f2afb8b");
+    const auto it_186000 = checkpoints.find(186000);
+    BOOST_REQUIRE(it_186000 != checkpoints.end());
+    BOOST_CHECK_EQUAL(
+        it_186000->second.GetHex(),
+        "0a51fccfd75d2051e94be1a8cc5abff8b86ac53d0cc134680f286fe769aa2129");
+    BOOST_CHECK_EQUAL(std::prev(checkpoints.end())->first, 186000);
 
     const auto assumeutxo_55000 = params->AssumeutxoForHeight(55000);
     BOOST_REQUIRE(assumeutxo_55000.has_value());
@@ -2599,12 +2653,69 @@ BOOST_AUTO_TEST_CASE(ChainParams_MAIN_hardening_anchor_consistency)
         assumeutxo_179000->shielded_state_commitment.GetHex(),
         "74a131a91f71cb7e488c1826eb3d5676802a586bddb8082b33356568d7def0b5");
 
+    const auto assumeutxo_189307 = params->AssumeutxoForHeight(189307);
+    BOOST_REQUIRE(assumeutxo_189307.has_value());
+    BOOST_CHECK_EQUAL(assumeutxo_189307->height, 189307);
+    BOOST_CHECK_EQUAL(
+        assumeutxo_189307->hash_serialized.ToString(),
+        "48da3da953130984036435da93847ebe7d1a20fc5464d789b07f49b79178e074");
+    BOOST_CHECK_EQUAL(assumeutxo_189307->m_chain_tx_count, 287404U);
+    BOOST_CHECK_EQUAL(
+        assumeutxo_189307->blockhash.GetHex(),
+        "bd8c44a30103613a34ac271b7cfffb4334b70aae9c41cf12831d98a98313e6c8");
+    BOOST_CHECK_EQUAL(
+        assumeutxo_189307->shielded_state_commitment.GetHex(),
+        "94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541");
+
+    const auto assumeutxo_190467 = params->AssumeutxoForHeight(190467);
+    BOOST_REQUIRE(assumeutxo_190467.has_value());
+    BOOST_CHECK_EQUAL(assumeutxo_190467->height, 190467);
+    BOOST_CHECK_EQUAL(
+        assumeutxo_190467->hash_serialized.ToString(),
+        "6ec3e0f1c6377962012e31c030a54e481ff419929d6beae0c2f3aaae82429d3a");
+    BOOST_CHECK_EQUAL(assumeutxo_190467->m_chain_tx_count, 288575U);
+    BOOST_CHECK_EQUAL(
+        assumeutxo_190467->blockhash.GetHex(),
+        "5799b5a4dd00a86947305239341896b595c33684e168216963516acf1cc312da");
+    BOOST_CHECK_EQUAL(
+        assumeutxo_190467->shielded_state_commitment.GetHex(),
+        "94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541");
+
+    const auto assumeutxo_190507 = params->AssumeutxoForHeight(190507);
+    BOOST_REQUIRE(assumeutxo_190507.has_value());
+    BOOST_CHECK_EQUAL(assumeutxo_190507->height, 190507);
+    BOOST_CHECK_EQUAL(
+        assumeutxo_190507->hash_serialized.ToString(),
+        "2563ecff2b06ef20e592a57deb47d52b4ffe7e1fb1fdda1746adf4f33a9dec81");
+    BOOST_CHECK_EQUAL(assumeutxo_190507->m_chain_tx_count, 288615U);
+    BOOST_CHECK_EQUAL(
+        assumeutxo_190507->blockhash.GetHex(),
+        "9142fe23aca98fa3a79c31ed2a0af74d41d0915f9914998e6a40808009496fe5");
+    BOOST_CHECK_EQUAL(
+        assumeutxo_190507->shielded_state_commitment.GetHex(),
+        "94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541");
+
+    const auto assumeutxo_191266 = params->AssumeutxoForHeight(191266);
+    BOOST_REQUIRE(assumeutxo_191266.has_value());
+    BOOST_CHECK_EQUAL(assumeutxo_191266->height, 191266);
+    BOOST_CHECK_EQUAL(
+        assumeutxo_191266->hash_serialized.ToString(),
+        "05be21ac1772c4ae806eec8994fd82f0082b4004ccbedb606dcdfd3c71ae2a68");
+    BOOST_CHECK_EQUAL(assumeutxo_191266->m_chain_tx_count, 289382U);
+    BOOST_CHECK_EQUAL(
+        assumeutxo_191266->blockhash.GetHex(),
+        "de6e3c9db527970c13b2ba834c19ff8f4d8829aee0c93ba6cde3a5039504efa8");
+    BOOST_CHECK_EQUAL(
+        assumeutxo_191266->shielded_state_commitment.GetHex(),
+        "94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541");
+
     const auto snapshot_heights = params->GetAvailableSnapshotHeights();
-    BOOST_REQUIRE_EQUAL(snapshot_heights.size(), 21U);
+    BOOST_REQUIRE_EQUAL(snapshot_heights.size(), 25U);
     BOOST_CHECK(std::is_sorted(snapshot_heights.begin(), snapshot_heights.end()));
     BOOST_CHECK_EQUAL(snapshot_heights.front(), 55000);
-    BOOST_CHECK_EQUAL(snapshot_heights.back(), 179000);
-    BOOST_CHECK_GE(snapshot_heights.back(), std::prev(checkpoints.end())->first);
+    BOOST_CHECK_EQUAL(snapshot_heights.back(), 191266);
+    // Checkpoints may trail assumeutxo (186000 checkpoint vs 191266 snapshot);
+    // keep both anchors consistent with chainparams rather than forcing parity.
 }
 
 BOOST_AUTO_TEST_CASE(HasValidProofOfWork_matmul_phase1_checks)
@@ -3437,14 +3548,19 @@ BOOST_AUTO_TEST_CASE(matmul_solve_extends_prefetch_queue_for_tuned_multi_nonce_b
     ScopedAsyncPipelineEnv async_env;
     ScopedBatchSizeEnv batch_size_env("2");
     ScopedPrefetchDepthEnv prefetch_depth_env("2");
-    ScopedBackendEnv backend_env("metal");
-    ScopedSolverThreadsEnv solver_threads_env("8");
+    // Keep the single-lane SolveMatMul path: a parallel fan-out returns before
+    // the async prefetch queue is populated, which would vacate the assertions
+    // below. Threads=1 is required to exercise the prefetch machinery itself.
+    ScopedSolverThreadsEnv solver_threads_env("1");
 
     auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
     consensus.fMatMulPOW = true;
-    consensus.nMatMulDimension = 512;
-    consensus.nMatMulTranscriptBlockSize = 16;
-    consensus.nMatMulNoiseRank = 8;
+    // Prefetch/batch wiring is independent of production matrix size; keep the
+    // digest work cheap so Debug builds finish. Batch size / prefetch depth are
+    // forced via env above.
+    consensus.nMatMulDimension = 16;
+    consensus.nMatMulTranscriptBlockSize = 8;
+    consensus.nMatMulNoiseRank = 4;
     consensus.nMatMulPreHashEpsilonBits = 0;
     consensus.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
 
@@ -3461,7 +3577,8 @@ BOOST_AUTO_TEST_CASE(matmul_solve_extends_prefetch_queue_for_tuned_multi_nonce_b
     candidate.seed_b = DeterministicMatMulSeed(candidate.hashPrevBlock, /*height=*/0, /*which=*/1);
     candidate.matmul_digest.SetNull();
 
-    uint64_t max_tries{4096};
+    // Impossible target: only enough attempts to fill prefetch_depth batches.
+    uint64_t max_tries{8};
     ResetMatMulSolvePipelineStats();
     const bool solved = SolveMatMul(candidate, consensus, max_tries);
     BOOST_CHECK(!solved);
@@ -3507,7 +3624,9 @@ BOOST_AUTO_TEST_CASE(matmul_solve_uses_two_nonce_batches_for_metal_product_minin
     candidate.seed_b = DeterministicMatMulSeed(candidate.hashPrevBlock, /*height=*/0, /*which=*/1);
     candidate.matmul_digest.SetNull();
 
-    uint64_t max_tries{4096};
+    // Impossible target: policy/batch selection is observable after a handful
+    // of attempts. Keep the try budget small so Debug + n=512 stays runnable.
+    uint64_t max_tries{4};
     ResetMatMulSolvePipelineStats();
     const bool solved = SolveMatMul(candidate, consensus, max_tries, /*block_height=*/61'000);
     BOOST_CHECK(!solved);

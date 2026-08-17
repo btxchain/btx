@@ -102,17 +102,17 @@ class HeadersSyncTest(BitcoinTestFramework):
         self.restart_node(0, extra_args=["-matmulvalidation=consensus", "-disablewallet=1"])
         best_block_hash = int(self.nodes[0].getbestblockhash(), 16)
 
-        self.log.info("Verify that a non-consensus outbound peer is not accepted as the initial sync peer")
+        self.log.info("Verify that a non-consensus outbound peer remains usable for initial headers sync")
         non_consensus_peer = self.nodes[0].add_outbound_p2p_connection(
             P2PInterface(),
             p2p_idx=0,
             connection_type="outbound-full-relay",
-            wait_for_disconnect=True,
             services=P2P_SERVICES & ~NODE_MATMUL_CONSENSUS,
         )
-        assert not non_consensus_peer.is_connected
-        with p2p_lock:
-            assert "getheaders" not in non_consensus_peer.last_message
+        non_consensus_peer.wait_for_getheaders(block_hash=best_block_hash)
+        non_consensus_peer.send_message(msg_headers())
+        non_consensus_peer.peer_disconnect()
+        non_consensus_peer.wait_for_disconnect()
 
         self.log.info("Verify that a NODE_MATMUL_CONSENSUS peer is accepted for initial sync")
         consensus_peer = self.nodes[0].add_outbound_p2p_connection(

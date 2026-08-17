@@ -4,7 +4,6 @@
 
 #include <node/chainstatemanager_args.h>
 
-#include <arith_uint256.h>
 #include <common/args.h>
 #include <common/system.h>
 #include <logging.h>
@@ -13,7 +12,6 @@
 #include <tinyformat.h>
 #include <uint256.h>
 #include <util/result.h>
-#include <util/strencodings.h>
 #include <util/translation.h>
 #include <validation.h>
 

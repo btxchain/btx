@@ -537,6 +537,8 @@ BOOST_AUTO_TEST_CASE(headers_sync_state_presync_survives_v4_bmx4c_and_half_life_
     consensus.nMatMulAsertRetune2Height = std::numeric_limits<int32_t>::max();
     consensus.nMatMulAsertHalfLifeUpgradeHeight = 50'040;
     consensus.nMatMulAsertHalfLifeUpgrade = consensus.nMatMulAsertHalfLife * 2;
+    consensus.nMatMulPowLimitUpgradeHeight = std::numeric_limits<int32_t>::max();
+    consensus.powLimitUpgrade = uint256{};
     consensus.nMatMulV4Height = 50'080;
     consensus.nMatMulV4AsertRescaleNum = 1;
     consensus.nMatMulV4AsertRescaleDen = 1;

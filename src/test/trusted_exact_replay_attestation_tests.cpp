@@ -214,6 +214,12 @@ BOOST_AUTO_TEST_CASE(config_validation_and_local_signer)
                 REPLAY_AUTHORITY_CONTEXT);
     BOOST_CHECK(store.LocalSignerPubKey() == keys[0].GetPubKey());
     BOOST_CHECK(!store.HasQuorum(TestHash(0x32), 7));
+    BOOST_CHECK(store.SignLocal(TestHash(0x33), 7) == AddResult::HeightOccupied);
+    BOOST_CHECK(store.SignLocal(TestHash(0x32), 7) == AddResult::Duplicate);
+    // A dual-attest already on the wire must still load. Minting stays refused.
+    BOOST_CHECK(store.Add(MustSign(MakeStatement(chain, TestHash(0x33), 7), keys[0]),
+                         TestHash(0x33), 7) == AddResult::Accepted);
+    BOOST_CHECK(store.SignLocal(TestHash(0x34), 7) == AddResult::HeightOccupied);
 
     auto no_local{MakeConfig(chain, keys, 1)};
     AttestationStore no_local_store{no_local};
@@ -448,6 +454,26 @@ BOOST_AUTO_TEST_CASE(sequential_quorums_advance_beyond_capacity)
     BOOST_CHECK_EQUAL(stats.evicted_blocks, BLOCK_COUNT - 2);
     BOOST_CHECK_EQUAL(stats.capacity_rejections, 0);
     BOOST_CHECK_EQUAL(stats.quorum_transitions, BLOCK_COUNT);
+}
+
+BOOST_AUTO_TEST_CASE(export_all_and_durable_retention_skips_ttl)
+{
+    const auto keys{MakeKeys(1)};
+    auto config{MakeConfig(TestHash(0x41), keys, /*threshold=*/1)};
+    config.ttl = 1ms;
+    AttestationStore store{config};
+    store.SetDurableRetention(true);
+
+    const uint256 block{TestHash(0x42)};
+    BOOST_REQUIRE(store.Add(MustSign(MakeStatement(TestHash(0x41), block, 7),
+                                     keys[0]),
+                            block, 7) == AddResult::Accepted);
+    std::this_thread::sleep_for(5ms);
+    // WaitForQuorum would prune under TTL; durable retention must keep it.
+    BOOST_CHECK(store.HasQuorum(block, 7));
+    const auto exported{store.ExportAll()};
+    BOOST_REQUIRE_EQUAL(exported.size(), 1U);
+    BOOST_CHECK(exported[0].statement.block_hash == block);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

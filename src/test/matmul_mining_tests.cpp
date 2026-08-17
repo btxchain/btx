@@ -2,16 +2,21 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <addresstype.h>
 #include <chain.h>
 #include <consensus/merkle.h>
 #include <common/system.h>
 #include <consensus/consensus.h>
+#include <consensus/validation.h>
 #include <interfaces/mining.h>
 #include <kernel/chainstatemanager_opts.h>
+#include <key.h>
 #include <matmul/matmul_pow.h>
 #include <net.h>
+#include <node/matmul_trusted_attestations.h>
 #include <node/miner.h>
 #include <pow.h>
+#include <rpc/protocol.h>
 #include <rpc/server.h>
 #include <serialize.h>
 #include <streams.h>
@@ -24,6 +29,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include <charconv>
+#include <chrono>
 #include <limits>
 #include <optional>
 #include <stdexcept>
@@ -649,6 +655,61 @@ BOOST_AUTO_TEST_CASE(generateblock_mines_valid_matmul_block)
     BOOST_CHECK_EQUAL(header.find_value("matmul_digest").get_str().size(), 64U);
 }
 
+// Verbose getblockheader must work for headers-only index entries: operators
+// walk competing branches via this RPC, and requiring the body made the node
+// look like it lacked the header entirely ("Block not available").
+BOOST_AUTO_TEST_CASE(getblockheader_verbose_works_for_headers_only_entry)
+{
+    SetMiningChainGuard(false);
+    const auto& consensus = m_node.chainman->GetConsensus();
+    BOOST_REQUIRE(consensus.fMatMulPOW);
+
+    const auto generated = CallRPC("generateblock", GenerateBlockParams(/*submit=*/true)).get_obj();
+    const std::string hash = generated.find_value("hash").get_str();
+    const auto parsed = uint256::FromHex(hash);
+    BOOST_REQUIRE(parsed.has_value());
+    const uint256 block_hash = *parsed;
+
+    // Snapshot MatMul header fields while the body is still present.
+    UniValue header_params{UniValue::VARR};
+    header_params.push_back(hash);
+    header_params.push_back(true);
+    const auto full = CallRPC("getblockheader", UniValue{header_params}).get_obj();
+    const std::string digest = full.find_value("matmul_digest").get_str();
+    const std::string seed_a = full.find_value("seed_a").get_str();
+    const std::string seed_b = full.find_value("seed_b").get_str();
+    const int64_t matmul_dim = full.find_value("matmul_dim").getInt<int64_t>();
+    const std::string prev = full.find_value("previousblockhash").get_str();
+    BOOST_CHECK(full.exists("nTx"));
+
+    {
+        LOCK(cs_main);
+        CBlockIndex* index = m_node.chainman->m_blockman.LookupBlockIndex(block_hash);
+        BOOST_REQUIRE(index != nullptr);
+        BOOST_REQUIRE(index->nStatus & BLOCK_HAVE_DATA);
+        index->nStatus &= ~BLOCK_HAVE_DATA;
+        BOOST_REQUIRE(!(index->nStatus & BLOCK_HAVE_DATA));
+    }
+
+    // Verbose must not throw "Block not available"; PoW fields stay readable.
+    const auto headers_only = CallRPC("getblockheader", std::move(header_params)).get_obj();
+    BOOST_CHECK_EQUAL(headers_only.find_value("hash").get_str(), hash);
+    BOOST_CHECK_EQUAL(headers_only.find_value("matmul_digest").get_str(), digest);
+    BOOST_CHECK_EQUAL(headers_only.find_value("seed_a").get_str(), seed_a);
+    BOOST_CHECK_EQUAL(headers_only.find_value("seed_b").get_str(), seed_b);
+    BOOST_CHECK_EQUAL(headers_only.find_value("matmul_dim").getInt<int64_t>(), matmul_dim);
+    BOOST_CHECK_EQUAL(headers_only.find_value("previousblockhash").get_str(), prev);
+    // nTx is body-derived; omit rather than emit a misleading 0.
+    BOOST_CHECK(!headers_only.exists("nTx"));
+
+    // Non-verbose hex form continues to work.
+    UniValue hex_params{UniValue::VARR};
+    hex_params.push_back(hash);
+    hex_params.push_back(false);
+    const auto header_hex = CallRPC("getblockheader", std::move(hex_params)).get_str();
+    BOOST_CHECK_GE(header_hex.size(), 160U);
+}
+
 // TEST: submitblock_accepts_valid_matmul_block
 BOOST_AUTO_TEST_CASE(submitblock_accepts_valid_matmul_block)
 {
@@ -810,11 +871,11 @@ BOOST_AUTO_TEST_CASE(difficulty_health_reports_nonzero_best_header_lag)
         synthetic_best_header.nHeight =
             m_node.chainman->ActiveHeight() + 4;
         synthetic_best_header.pprev = original_best_header;
-        m_node.chainman->m_best_header = &synthetic_best_header;
+        m_node.chainman->SetBestHeader(&synthetic_best_header);
         struct BestHeaderRestore {
             ChainstateManager& chainman;
             CBlockIndex* original;
-            ~BestHeaderRestore() { chainman.m_best_header = original; }
+            ~BestHeaderRestore() { chainman.SetBestHeader(original); }
         } restore{*m_node.chainman, original_best_header};
 
         // Keep cs_main held until the RPC has consumed the synthetic height.
@@ -961,14 +1022,14 @@ BOOST_AUTO_TEST_CASE(matmul_service_profile_reports_measured_runtime_and_network
     BOOST_CHECK_EQUAL(reorg_protection.find_value("current_tip_height").getInt<int>(), ActiveHeight());
     BOOST_CHECK_EQUAL(reorg_protection.find_value("start_height").getInt<int>(), 0);
     BOOST_CHECK_EQUAL(reorg_protection.find_value("warn_depth").getInt<int>(), static_cast<int>(emergency_profile.warn_depth));
-    BOOST_CHECK(!reorg_protection.find_value("parking_enabled").get_bool());
-    BOOST_CHECK(reorg_protection.find_value("follows_most_work").get_bool());
-    BOOST_CHECK_EQUAL(reorg_protection.find_value("park_depth").getInt<int>(), 0);
+    BOOST_CHECK(reorg_protection.find_value("parking_enabled").get_bool());
+    BOOST_CHECK(!reorg_protection.find_value("follows_most_work").get_bool());
+    BOOST_CHECK_EQUAL(reorg_protection.find_value("park_depth").getInt<int>(), 6);
     BOOST_CHECK_EQUAL(reorg_protection.find_value("local_finality_depth").getInt<int>(), static_cast<int>(emergency_profile.finality_depth));
     BOOST_CHECK_EQUAL(reorg_protection.find_value("hysteresis_depth").getInt<int>(), static_cast<int>(emergency_profile.hysteresis_depth));
     BOOST_CHECK_EQUAL(reorg_protection.find_value("hysteresis_work_margin").getInt<int>(), static_cast<int>(emergency_profile.hysteresis_work_margin));
     BOOST_CHECK_EQUAL(reorg_protection.find_value("locally_finalized_height").getInt<int>(), 0);
-    BOOST_CHECK_EQUAL(reorg_protection.find_value("max_reorg_depth").getInt<int>(), 0);
+    BOOST_CHECK_EQUAL(reorg_protection.find_value("max_reorg_depth").getInt<int>(), 6);
     const int64_t expected_consensus_max_reorg_depth{
         consensus.nMaxReorgDepth != std::numeric_limits<uint32_t>::max()
             ? static_cast<int64_t>(consensus.nMaxReorgDepth)
@@ -977,7 +1038,7 @@ BOOST_AUTO_TEST_CASE(matmul_service_profile_reports_measured_runtime_and_network
     BOOST_CHECK_EQUAL(reorg_protection.find_value("rejected_reorgs").getInt<uint64_t>(), 1U);
     BOOST_CHECK_EQUAL(reorg_protection.find_value("deepest_rejected_reorg_depth").getInt<int>(), 248);
     BOOST_CHECK_EQUAL(reorg_protection.find_value("last_rejected_reorg_depth").getInt<int>(), 248);
-    BOOST_CHECK_EQUAL(reorg_protection.find_value("last_rejected_max_reorg_depth").getInt<int>(), 0);
+    BOOST_CHECK_EQUAL(reorg_protection.find_value("last_rejected_max_reorg_depth").getInt<int>(), 6);
     BOOST_CHECK_EQUAL(reorg_protection.find_value("deferred_reorgs").getInt<uint64_t>(), 0U);
     BOOST_CHECK_EQUAL(reorg_protection.find_value("deepest_deferred_reorg_depth").getInt<int>(), 0);
     BOOST_CHECK_EQUAL(reorg_protection.find_value("last_deferred_required_work_margin").getInt<int>(), 0);
@@ -2380,6 +2441,247 @@ BOOST_AUTO_TEST_CASE(pre_v4_service_challenge_omits_and_rejects_added_encoding_p
     BOOST_CHECK_EQUAL(
         rejected.find_value("mismatch_field").get_str(),
         "challenge.matmul.encoding_profile");
+}
+
+BOOST_AUTO_TEST_CASE(getfinalityinfo_is_read_only_and_exposes_active_tip)
+{
+    const auto info = CallRPC("getfinalityinfo").get_obj();
+    BOOST_CHECK(info.exists("active_tip"));
+    BOOST_CHECK(info.exists("recovery"));
+    BOOST_CHECK_EQUAL(info.find_value("recovery").get_obj().find_value("state").get_str(), "none");
+    BOOST_CHECK(info.exists("parked_branches"));
+    BOOST_CHECK(info.exists("finality_profile"));
+    BOOST_CHECK_EQUAL(
+        info.find_value("active_tip").get_obj().find_value("hash").get_str(),
+        ActiveTipHash().GetHex());
+}
+
+BOOST_AUTO_TEST_SUITE_END()
+
+class MatMulGbtAttestationBindSetup : public TestChain100Setup {
+public:
+    MatMulGbtAttestationBindSetup()
+    {
+        m_node.mining = interfaces::MakeMining(m_node);
+    }
+
+    UniValue CallRPC(const std::string& method, UniValue params = UniValue{UniValue::VARR})
+    {
+        JSONRPCRequest request;
+        request.context = &m_node;
+        request.strMethod = method;
+        request.params = std::move(params);
+        if (RPCIsInWarmup(nullptr)) SetRPCWarmupFinished();
+        try {
+            return tableRPC.execute(request);
+        } catch (const UniValue& obj_error) {
+            throw std::runtime_error{obj_error.find_value("message").get_str()};
+        }
+    }
+
+    std::optional<UniValue> CallRPCError(
+        const std::string& method, UniValue params = UniValue{UniValue::VARR})
+    {
+        JSONRPCRequest request;
+        request.context = &m_node;
+        request.strMethod = method;
+        request.params = std::move(params);
+        if (RPCIsInWarmup(nullptr)) SetRPCWarmupFinished();
+        try {
+            (void)tableRPC.execute(request);
+            return std::nullopt;
+        } catch (const UniValue& obj_error) {
+            return obj_error;
+        }
+    }
+
+    static UniValue GBTParams()
+    {
+        UniValue rules{UniValue::VARR};
+        rules.push_back("segwit");
+        UniValue req{UniValue::VOBJ};
+        req.pushKV("rules", std::move(rules));
+        UniValue params{UniValue::VARR};
+        params.push_back(std::move(req));
+        return params;
+    }
+};
+
+BOOST_FIXTURE_TEST_SUITE(matmul_gbt_attestation_bind_tests, MatMulGbtAttestationBindSetup)
+
+BOOST_AUTO_TEST_CASE(getblocktemplate_refuses_unattested_tip_with_attested_sibling)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    Chainstate& chainstate = chainman.ActiveChainstate();
+    auto& consensus = const_cast<Consensus::Params&>(chainman.GetConsensus());
+    const int32_t saved_v4{consensus.nMatMulV4Height};
+    const int32_t saved_rc{consensus.nMatMulRCHeight};
+    struct Restore {
+        Consensus::Params& consensus;
+        int32_t v4;
+        int32_t rc;
+        ~Restore()
+        {
+            node::matmul_trusted::ResetForTest();
+            consensus.nMatMulV4Height = v4;
+            consensus.nMatMulRCHeight = rc;
+        }
+    } restore{consensus, saved_v4, saved_rc};
+
+    const CScript script = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    CBlockIndex* original_tip{WITH_LOCK(::cs_main, return chainstate.m_chain.Tip())};
+    BOOST_REQUIRE(original_tip != nullptr);
+    const uint256 unattested_hash{original_tip->GetBlockHash()};
+    const int unattested_height{original_tip->nHeight};
+
+    BlockValidationState state;
+    BOOST_REQUIRE(chainstate.InvalidateBlock(state, original_tip));
+    const CBlock sibling_block{CreateAndProcessBlock({}, script)};
+    CBlockIndex* sibling{
+        WITH_LOCK(::cs_main, return chainman.m_blockman.LookupBlockIndex(sibling_block.GetHash()))};
+    BOOST_REQUIRE(sibling != nullptr);
+    state = BlockValidationState{};
+    BOOST_REQUIRE(chainstate.InvalidateBlock(state, sibling));
+    {
+        LOCK(::cs_main);
+        chainstate.ResetBlockFailureFlags(original_tip);
+    }
+    state = BlockValidationState{};
+    BOOST_REQUIRE(chainstate.ActivateBestChain(state));
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()->GetBlockHash()) ==
+                  unattested_hash);
+
+    consensus.nMatMulV4Height = unattested_height;
+    consensus.nMatMulRCHeight = unattested_height;
+    BOOST_REQUIRE(consensus.IsMatMulTrustedReplayAttestationActive(unattested_height));
+
+    // Unconfigured nodes keep GBT-on-active-tip, even on an unattested twin.
+    BOOST_REQUIRE(!node::matmul_trusted::IsConfigured());
+    {
+        const auto tmpl = CallRPC("getblocktemplate", GBTParams()).get_obj();
+        BOOST_CHECK_EQUAL(tmpl.find_value("previousblockhash").get_str(), unattested_hash.GetHex());
+    }
+
+    CKey signer;
+    signer.MakeNewKey(/*fCompressed=*/true);
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256::ONE;
+    config.replay_authority_context = uint256::FromHex(std::string(64, 'd')).value();
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    config.local_signer = signer;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/false, /*serve=*/false,
+        std::chrono::milliseconds{50}, error));
+    BOOST_REQUIRE(node::matmul_trusted::IsConfigured());
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
+                      sibling->GetBlockHash(), sibling->nHeight) ==
+                  matmul::trusted::AddResult::Accepted);
+
+    {
+        LOCK(::cs_main);
+        chainstate.ResetBlockFailureFlags(sibling);
+        BOOST_REQUIRE(sibling->nStatus & BLOCK_HAVE_DATA);
+        BOOST_REQUIRE(sibling->IsValid(BLOCK_VALID_TRANSACTIONS));
+        BOOST_CHECK(!node::matmul_trusted::HasQuorum(unattested_hash, unattested_height));
+        BOOST_CHECK_EQUAL(chainman.FindUniqueCompetingAttestedIndex(), sibling);
+        BOOST_CHECK_EQUAL(chainstate.m_chain.Tip()->GetBlockHash(), unattested_hash);
+    }
+
+    const auto err = CallRPCError("getblocktemplate", GBTParams());
+    BOOST_REQUIRE(err.has_value());
+    BOOST_CHECK_EQUAL(
+        err->find_value("code").getInt<int>(), RPC_CLIENT_IN_INITIAL_DOWNLOAD);
+    const std::string message{err->find_value("message").get_str()};
+    BOOST_CHECK(message.find("will not extend the unattested race") != std::string::npos);
+    BOOST_CHECK(message.find("getmatmulattestedtip") != std::string::npos);
+    BOOST_CHECK(message.find(unattested_hash.GetHex()) != std::string::npos);
+    BOOST_CHECK(message.find(sibling->GetBlockHash().GetHex()) != std::string::npos);
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()->GetBlockHash()) ==
+                  unattested_hash);
+}
+
+BOOST_AUTO_TEST_CASE(getblocktemplate_refuses_attested_tip_with_attested_have_data_child)
+{
+    // Live 2026-08-15: GBT kept mining a competing 189676 while the unique
+    // attested HAVE_DATA child of the attested tip sat unconnected.
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    Chainstate& chainstate = chainman.ActiveChainstate();
+    auto& consensus = const_cast<Consensus::Params&>(chainman.GetConsensus());
+    const int32_t saved_v4{consensus.nMatMulV4Height};
+    const int32_t saved_rc{consensus.nMatMulRCHeight};
+    struct Restore {
+        Consensus::Params& consensus;
+        int32_t v4;
+        int32_t rc;
+        ~Restore()
+        {
+            node::matmul_trusted::ResetForTest();
+            consensus.nMatMulV4Height = v4;
+            consensus.nMatMulRCHeight = rc;
+        }
+    } restore{consensus, saved_v4, saved_rc};
+
+    const CScript script = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    CBlockIndex* parent{WITH_LOCK(::cs_main, return chainstate.m_chain.Tip())};
+    BOOST_REQUIRE(parent != nullptr);
+    const uint256 parent_hash{parent->GetBlockHash()};
+    const int parent_height{parent->nHeight};
+
+    CKey signer;
+    signer.MakeNewKey(/*fCompressed=*/true);
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256::ONE;
+    config.replay_authority_context = uint256::FromHex(std::string(64, 'e')).value();
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    config.local_signer = signer;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/false, /*serve=*/false,
+        std::chrono::milliseconds{50}, error));
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
+                      parent_hash, parent_height) ==
+                  matmul::trusted::AddResult::Accepted);
+
+    const CBlock child_block{CreateAndProcessBlock({}, script)};
+    CBlockIndex* child{
+        WITH_LOCK(::cs_main, return chainman.m_blockman.LookupBlockIndex(
+                                       child_block.GetHash()))};
+    BOOST_REQUIRE(child != nullptr);
+    BlockValidationState state;
+    BOOST_REQUIRE(chainstate.InvalidateBlock(state, child));
+    {
+        LOCK(::cs_main);
+        chainstate.ResetBlockFailureFlags(child);
+    }
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
+                      child->GetBlockHash(), child->nHeight) ==
+                  matmul::trusted::AddResult::Accepted);
+
+    consensus.nMatMulV4Height = parent_height;
+    consensus.nMatMulRCHeight = parent_height;
+    BOOST_REQUIRE(consensus.IsMatMulTrustedReplayAttestationActive(parent_height));
+    BOOST_REQUIRE(consensus.IsMatMulTrustedReplayAttestationActive(child->nHeight));
+
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(child->nStatus & BLOCK_HAVE_DATA);
+        BOOST_CHECK_EQUAL(chainman.FindUniqueCompetingAttestedIndex(), child);
+        BOOST_CHECK_EQUAL(chainstate.m_chain.Tip()->GetBlockHash(), parent_hash);
+    }
+
+    const auto err = CallRPCError("getblocktemplate", GBTParams());
+    BOOST_REQUIRE(err.has_value());
+    BOOST_CHECK_EQUAL(
+        err->find_value("code").getInt<int>(), RPC_CLIENT_IN_INITIAL_DOWNLOAD);
+    const std::string message{err->find_value("message").get_str()};
+    BOOST_CHECK(message.find("will not extend the unattested race") != std::string::npos);
+    BOOST_CHECK(message.find(parent_hash.GetHex()) != std::string::npos);
+    BOOST_CHECK(message.find(child->GetBlockHash().GetHex()) != std::string::npos);
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()->GetBlockHash()) ==
+                  parent_hash);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

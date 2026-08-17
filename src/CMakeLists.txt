@@ -9,6 +9,15 @@ include_directories(${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR})
 
 if(APPLE)
   option(BTX_ENABLE_METAL "Enable optional Metal acceleration helpers for BTX utilities" ON)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    set(BTX_ACCELERATE_DEFAULT ON)
+  else()
+    # Current Apple Accelerate headers require Clang vector-extension
+    # semantics and do not compile with GCC. Keep the portable scalar path
+    # available so the supported GCC audit build can run on macOS too.
+    set(BTX_ACCELERATE_DEFAULT OFF)
+  endif()
+  option(BTX_ENABLE_ACCELERATE "Enable optional Apple Accelerate MatMul helper" ${BTX_ACCELERATE_DEFAULT})
   function(find_btx_apple_framework out_var framework_name)
     set(framework_hints)
     if(CMAKE_OSX_SYSROOT)
@@ -119,12 +128,16 @@ option(BTX_CUDA_SM100_NATIVE
 # links OpenXLA directly. OFF keeps registration and all launches fail-closed.
 option(BTX_ENABLE_TPU_PJRT "Enable the external Google Cloud TPU PJRT provider ABI" OFF)
 option(BTX_ENABLE_TRAINIUM_NEURON "Enable the external AWS Neuron/NRT bounded-exact provider ABI" OFF)
-set(BTX_CUDA_RUNTIME_LIBRARY_DEFAULT "Shared")
+# Empty means auto-select after find_package(CUDAToolkit): Static when
+# CUDA::cudart_static exists so packaged btxd does not need libcudart.so.* on
+# the loader path. Shared remains an explicit override (-DBTX_CUDA_RUNTIME_LIBRARY=Shared).
+# If the caller already set CMAKE_CUDA_RUNTIME_LIBRARY, honor that as the default.
+set(BTX_CUDA_RUNTIME_LIBRARY_DEFAULT "")
 if(DEFINED CMAKE_CUDA_RUNTIME_LIBRARY AND NOT CMAKE_CUDA_RUNTIME_LIBRARY STREQUAL "")
   set(BTX_CUDA_RUNTIME_LIBRARY_DEFAULT "${CMAKE_CUDA_RUNTIME_LIBRARY}")
 endif()
 set(BTX_CUDA_RUNTIME_LIBRARY_ALLOWED_VALUES Shared Static)
-set(BTX_CUDA_RUNTIME_LIBRARY "${BTX_CUDA_RUNTIME_LIBRARY_DEFAULT}" CACHE STRING "CUDA runtime library linkage for the experimental CUDA backend: Shared or Static")
+set(BTX_CUDA_RUNTIME_LIBRARY "${BTX_CUDA_RUNTIME_LIBRARY_DEFAULT}" CACHE STRING "CUDA runtime library linkage for the experimental CUDA backend: Shared or Static. Empty auto-selects Static when CUDA::cudart_static is available.")
 set_property(CACHE BTX_CUDA_RUNTIME_LIBRARY PROPERTY STRINGS Shared Static)
 
 if(BTX_CUDA_SM120_MXFP4_NATIVE AND NOT BTX_ENABLE_CUDA_EXPERIMENTAL)
@@ -145,7 +158,7 @@ if(BTX_ENABLE_CUDA_EXPERIMENTAL)
   include(${PROJECT_SOURCE_DIR}/cmake/BTXCudaSm100.cmake)
   btx_cuda_reject_feature_qualified_archs(BTX_CUDA_ARCHITECTURES)
   set(CMAKE_CUDA_ARCHITECTURES "${BTX_CUDA_ARCHITECTURES}" CACHE STRING "CUDA architectures for compiler detection and BTX CUDA targets" FORCE)
-  if(NOT BTX_CUDA_RUNTIME_LIBRARY IN_LIST BTX_CUDA_RUNTIME_LIBRARY_ALLOWED_VALUES)
+  if(NOT BTX_CUDA_RUNTIME_LIBRARY STREQUAL "" AND NOT BTX_CUDA_RUNTIME_LIBRARY IN_LIST BTX_CUDA_RUNTIME_LIBRARY_ALLOWED_VALUES)
     message(FATAL_ERROR "BTX_CUDA_RUNTIME_LIBRARY must be Shared or Static")
   endif()
   enable_language(CUDA)
@@ -158,6 +171,18 @@ if(BTX_ENABLE_CUDA_EXPERIMENTAL)
     list(APPEND CMAKE_CUDA_COMPILE_FEATURES cuda_std_20)
   endif()
   find_package(CUDAToolkit REQUIRED)
+  if(BTX_CUDA_RUNTIME_LIBRARY STREQUAL "")
+    if(TARGET CUDA::cudart_static)
+      set(BTX_CUDA_RUNTIME_LIBRARY "Static")
+      message(STATUS "BTX_CUDA_RUNTIME_LIBRARY defaulting to Static (CUDA::cudart_static available)")
+    else()
+      set(BTX_CUDA_RUNTIME_LIBRARY "Shared")
+      message(STATUS "BTX_CUDA_RUNTIME_LIBRARY defaulting to Shared (CUDA::cudart_static not available)")
+    endif()
+  endif()
+  if(NOT BTX_CUDA_RUNTIME_LIBRARY IN_LIST BTX_CUDA_RUNTIME_LIBRARY_ALLOWED_VALUES)
+    message(FATAL_ERROR "BTX_CUDA_RUNTIME_LIBRARY must be Shared or Static")
+  endif()
   if(BTX_CUDA_RUNTIME_LIBRARY STREQUAL "Static" AND NOT TARGET CUDA::cudart_static)
     message(FATAL_ERROR "BTX_CUDA_RUNTIME_LIBRARY=Static requires CUDA::cudart_static from the selected CUDA toolkit.")
   endif()
@@ -620,6 +645,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_v4_rc_accel_policy.cpp
   matmul/matmul_v4_rc_accelerator_scheduler.cpp
   matmul/trusted_exact_replay_attestation.cpp
+  matmul/trusted_utxo_snapshot_attestation.cpp
   matmul/matmul_v4_rc_coupled.cpp
   matmul/matmul_v4_rc_packed_bank.cpp
   matmul/matmul_v4_rc_coupled_device.cpp
@@ -943,9 +969,10 @@ target_link_libraries(bitcoin_common
     $<TARGET_NAME_IF_EXISTS:USDT::headers>
     $<$<PLATFORM_ID:Windows>:ws2_32>
 )
-if(APPLE)
+if(APPLE AND BTX_ENABLE_ACCELERATE)
   find_btx_apple_framework(BTX_ACCELERATE_FRAMEWORK Accelerate)
   target_link_libraries(bitcoin_common PRIVATE ${BTX_ACCELERATE_FRAMEWORK})
+  target_compile_definitions(bitcoin_common PRIVATE BTX_HAVE_ACCELERATE=1)
 endif()
 
 # OpenMP for the multi-threaded Fp3 recursive prover (composition/quotient
@@ -1796,6 +1823,8 @@ add_library(bitcoin_node STATIC EXCLUDE_FROM_ALL
   node/transaction.cpp
   node/txdownloadman_impl.cpp
   node/txreconciliation.cpp
+  node/attested_utxo_snapshot.cpp
+  node/attested_utxo_snapshot_p2p.cpp
   node/utxo_snapshot.cpp
   node/warnings.cpp
   noui.cpp

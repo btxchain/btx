@@ -667,6 +667,64 @@ BOOST_AUTO_TEST_CASE(assumeutxo_snapshot_header_compatibility)
         nullptr, &snapshot, true));
 }
 
+BOOST_AUTO_TEST_CASE(attested_snapshot_header_compatibility)
+{
+    const uint256 h_genesis{
+        uint256::FromHex(std::string(64, '1')).value()};
+    const uint256 h_fork{
+        uint256::FromHex(std::string(64, '2')).value()};
+    const uint256 h_snap{
+        uint256::FromHex(std::string(64, '3')).value()};
+    const uint256 h_comp{
+        uint256::FromHex(std::string(64, '4')).value()};
+
+    CBlockIndex genesis;
+    genesis.phashBlock = &h_genesis;
+    genesis.nHeight = 0;
+    genesis.nChainWork = 1;
+    genesis.nAuthenticatedChainWork = 1;
+
+    CBlockIndex fork;
+    fork.phashBlock = &h_fork;
+    fork.pprev = &genesis;
+    fork.nHeight = 1;
+    fork.nChainWork = 5;
+    fork.nAuthenticatedChainWork = 5;
+    fork.BuildSkip();
+
+    CBlockIndex snapshot;
+    snapshot.phashBlock = &h_snap;
+    snapshot.pprev = &fork;
+    snapshot.nHeight = 2;
+    snapshot.nChainWork = 8;
+    snapshot.nAuthenticatedChainWork = 5;
+    snapshot.BuildSkip();
+
+    CBlockIndex competing;
+    competing.phashBlock = &h_comp;
+    competing.pprev = &fork;
+    competing.nHeight = 2;
+    competing.nChainWork = 100;
+    competing.nAuthenticatedChainWork = 5;
+    competing.BuildSkip();
+
+    BOOST_CHECK(IsAttestedSnapshotHeaderCompatible(&snapshot, &snapshot));
+    BOOST_CHECK(IsAttestedSnapshotHeaderCompatible(&snapshot, &fork));
+    // Live shape: claimed-heaviest competing headers, same authenticated
+    // work as the fork, no quorum.
+    BOOST_CHECK(IsAttestedSnapshotHeaderCompatible(&competing, &snapshot));
+    BOOST_CHECK(!IsAttestedSnapshotHeaderCompatible(nullptr, &snapshot));
+
+    CBlockIndex auth_competing;
+    auth_competing.phashBlock = &h_comp;
+    auth_competing.pprev = &fork;
+    auth_competing.nHeight = 2;
+    auth_competing.nChainWork = 100;
+    auth_competing.nAuthenticatedChainWork = 40;
+    auth_competing.BuildSkip();
+    BOOST_CHECK(!IsAttestedSnapshotHeaderCompatible(&auth_competing, &snapshot));
+}
+
 BOOST_AUTO_TEST_CASE(test_regtest_assumeutxo_functional_harness_override)
 {
     ArgsManager harness_args;
@@ -725,6 +783,10 @@ BOOST_AUTO_TEST_CASE(test_mainnet_assumeutxo_snapshot_metadata)
         155'700,
         176'600,
         179'000,
+        189'307,
+        190'467,
+        190'507,
+        191'266,
     };
 
     BOOST_REQUIRE_EQUAL(snapshot_heights.size(), expected_snapshot_heights.size());
@@ -754,6 +816,10 @@ BOOST_AUTO_TEST_CASE(test_mainnet_assumeutxo_snapshot_metadata)
     BOOST_CHECK(params->AssumeutxoForHeight(155'700));
     BOOST_CHECK(params->AssumeutxoForHeight(176'600));
     BOOST_CHECK(params->AssumeutxoForHeight(179'000));
+    BOOST_CHECK(params->AssumeutxoForHeight(189'307));
+    BOOST_CHECK(params->AssumeutxoForHeight(190'467));
+    BOOST_CHECK(params->AssumeutxoForHeight(190'507));
+    BOOST_CHECK(params->AssumeutxoForHeight(191'266));
     BOOST_CHECK(!params->AssumeutxoForHeight(50'000));
     BOOST_CHECK(!params->AssumeutxoForHeight(0));
 }

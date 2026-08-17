@@ -77,12 +77,21 @@ static bool TryParsePermissionFlags(const std::string& str, NetPermissionFlags& 
         readen++;
     }
 
-    // By default, whitelist only applies to incoming connections
+    // By default, whitelist only applies to incoming connections.
+    // A bare "out" replaces that default rather than adding to it. Combined
+    // with NoBan that used to leave inbound miners unprotected — they are
+    // the peers that announce a heavier tip and need the MatMul near-tip
+    // verify-budget / rcadmit / download-preference bypass. Promote
+    // out,noban to both directions. out,relay and out,bloom stay outbound.
     if (connection_direction == ConnectionDirection::None) {
         connection_direction = ConnectionDirection::In;
     } else if (flags == NetPermissionFlags::None) {
         error = strprintf(_("Only direction was set, no permissions: '%s'"), str);
         return false;
+    }
+    if (NetPermissions::HasFlag(flags, NetPermissionFlags::NoBan) &&
+        connection_direction == ConnectionDirection::Out) {
+        connection_direction = ConnectionDirection::Both;
     }
 
     output = flags;

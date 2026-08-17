@@ -25,6 +25,7 @@
 #include <netbase.h>
 #include <node/eviction.h>
 #include <node/interface_ui.h>
+#include <node/matmul_trusted_attestations.h>
 #include <protocol.h>
 #include <random.h>
 #include <scheduler.h>
@@ -94,6 +95,17 @@ static constexpr std::chrono::seconds MAX_UPLOAD_TIMEFRAME{60 * 60 * 24};
 
 // A random time period (0 to 1 seconds) is added to feeler connections to prevent synchronization.
 static constexpr auto FEELER_SLEEP_WINDOW{1s};
+
+/** Soft-prefer addrman peers advertising any of these bits when we currently
+ *  have zero such outbounds. Not a required set: GetDesirableServiceFlags
+ *  stays NODE_NETWORK|NODE_WITNESS (MatMul VERSION bits are unverified). */
+static constexpr ServiceFlags MATMUL_PREFERRED_OUTBOUND_SERVICES{ServiceFlags(
+    NODE_MATMUL_TRUSTED_MIRROR | NODE_MATMUL_ATTESTATION_ARCHIVE |
+    NODE_MATMUL_CONSENSUS)};
+/** Bounded retries of otherwise-valid NODE_NETWORK addresses while looking
+ *  for a MatMul-capable outbound. After this many tries, accept any valid
+ *  peer so self-heal / DNS still works. Feelers are not filtered. */
+static constexpr int MATMUL_OUTBOUND_PREFERENCE_TRIES = 50;
 
 /** Frequency to attempt extra connections to reachable networks we're not connected to yet **/
 static constexpr auto EXTRA_NETWORK_PEER_INTERVAL{5min};
@@ -1745,7 +1757,8 @@ bool V2Transport::SetMessageToSend(CSerializedNetMsg& msg) noexcept
     // and BIP324Cipher::Encrypt would SILENTLY TRUNCATE it, corrupting the wire length and
     // desyncing the entire encrypted stream. Such a message must instead propagate via compact
     // blocks (cmpctblock + blocktxn fragments, each well under the cap) or the v1 transport, so it
-    // never legitimately reaches this point for a v2 peer (see net_processing block-serving path).
+    // never legitimately reaches this point for a v2 peer (see the negotiated
+    // bounded chunk path in net_processing block serving).
     //
     // Handling: DROP the message (return true to consume it) rather than truncate it. Two rejected
     // alternatives:
@@ -2106,7 +2119,10 @@ void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
                  addr.ToStringAddrPort());
     }
 
-    // Don't accept connections from banned peers.
+    // Don't accept connections from banned peers. Includes addresses
+    // banned for aggressive P2P (GETMMATTEST / MMATTEST hammering):
+    // that penalty is a real ban, not discouragement, so reconnects
+    // are dropped even when inbound slots are free.
     bool banned = m_banman && m_banman->IsBanned(addr);
     if (!NetPermissions::HasFlag(permission_flags, NetPermissionFlags::NoBan) && banned)
     {
@@ -2326,7 +2342,14 @@ void CConnman::NotifyNumConnectionsChanged()
 
 bool CConnman::ShouldRunInactivityChecks(const CNode& node, std::chrono::seconds now) const
 {
-    return node.m_connected + m_peer_connect_timeout < now;
+    const bool handshake_incomplete{!node.fSuccessfullyConnected.load()};
+    const bool never_received{node.m_last_recv.load().count() == 0};
+    const auto timeout{node::matmul_trusted::TrustedMirrorGpuHandshakeTimeout(
+        m_peer_connect_timeout,
+        node.IsManualConn() || node.HasPermission(NetPermissionFlags::NoBan),
+        handshake_incomplete,
+        never_received)};
+    return node.m_connected + timeout < now;
 }
 
 bool CConnman::InactivityCheck(const CNode& node) const
@@ -2343,15 +2366,27 @@ bool CConnman::InactivityCheck(const CNode& node) const
     bool has_sent{last_send.count() != 0};
 
     if (!has_received || !has_sent) {
+        const bool handshake_incomplete{!node.fSuccessfullyConnected.load()};
+        const auto timeout{node::matmul_trusted::TrustedMirrorGpuHandshakeTimeout(
+            m_peer_connect_timeout,
+            node.IsManualConn() ||
+                node.HasPermission(NetPermissionFlags::NoBan),
+            handshake_incomplete,
+            /*never_received=*/!has_received)};
         std::string has_never;
         if (!has_received) has_never += ", never received from peer";
         if (!has_sent) has_never += ", never sent to peer";
-        LogDebug(BCLog::NET,
-            "socket no message in first %i seconds%s, %s\n",
-            count_seconds(m_peer_connect_timeout),
-            has_never,
-            node.DisconnectMsg(fLogIPs)
-        );
+        if (handshake_incomplete && !has_received) {
+            LogInfo("trusted mirror: dropping handshake-dead peer=%d timeout=%is%s\n",
+                    node.GetId(), count_seconds(timeout), has_never);
+        } else {
+            LogDebug(BCLog::NET,
+                "socket no message in first %i seconds%s, %s\n",
+                count_seconds(timeout),
+                has_never,
+                node.DisconnectMsg(fLogIPs)
+            );
+        }
         return true;
     }
 
@@ -2984,6 +3019,7 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect, Spa
         int nOutboundBlockRelay = 0;
         int outbound_privacy_network_peers = 0;
         std::set<std::vector<unsigned char>> outbound_ipv46_peer_netgroups;
+        bool have_matmul_outbound = false;
 
         {
             LOCK(m_nodes_mutex);
@@ -3005,6 +3041,9 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect, Spa
                     case ConnectionType::MANUAL:
                     case ConnectionType::OUTBOUND_FULL_RELAY:
                     case ConnectionType::BLOCK_RELAY:
+                        if ((pnode->addr.nServices & MATMUL_PREFERRED_OUTBOUND_SERVICES) != 0) {
+                            have_matmul_outbound = true;
+                        }
                         const CAddress address{pnode->addr};
                         if (address.IsTor() || address.IsI2P() || address.IsCJDNS()) {
                             // Since our addrman-groups for these networks are
@@ -3208,6 +3247,16 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect, Spa
                 continue;
             }
 
+            // Soft-prefer MatMul-capable peers when none of our persistent
+            // outbounds advertise those bits. Skip non-preferred addresses a
+            // bounded number of times, then accept any valid NODE_NETWORK
+            // peer. Feelers and anchors keep existing selection.
+            if (!fFeeler && !anchor && !have_matmul_outbound &&
+                nTries < MATMUL_OUTBOUND_PREFERENCE_TRIES &&
+                (addr.nServices & MATMUL_PREFERRED_OUTBOUND_SERVICES) == 0) {
+                continue;
+            }
+
             addrConnect = addr;
             break;
         }
@@ -3342,8 +3391,10 @@ void CConnman::ThreadOpenAddedConnections()
         std::erase_if(logged_connected, [&](const auto& node) { return !current_added_nodes.contains(node); });
         // See if any reconnections are desired.
         PerformReconnections();
-        // Retry every 60 seconds if a connection was attempted, otherwise two seconds
-        if (!interruptNet.sleep_for(std::chrono::seconds(tried ? 60 : 2)))
+        // Retry every 15 seconds if a connection was attempted, otherwise two
+        // seconds. 60s left a handshake-dead -connect sitting until the
+        // added-node thread woke (live nyc1: bytesrecv=0, GETDATA in_flight=0).
+        if (!interruptNet.sleep_for(std::chrono::seconds(tried ? 15 : 2)))
             return;
     }
 }
@@ -3439,20 +3490,142 @@ void CConnman::ThreadMessageHandler()
             // This prevents attacks in which an attacker exploits having multiple
             // consecutive connections in the m_nodes list.
             const NodesSnapshot snap{*this, /*shuffle=*/true};
+            std::vector<CNode*> nodes{snap.Nodes()};
+            // Handshake-incomplete peers first (signer inbounds from
+            // archives are not manual). Then GPU addnode / outbounds /
+            // inbound ARCHIVE/MIRROR with live GETDATA. Miner GETDATA is
+            // not Preferred (live 1 BLOCK / ~45s after live-GETDATA).
+            std::stable_partition(nodes.begin(), nodes.end(), [](CNode* p) {
+                return p != nullptr &&
+                       !p->fSuccessfullyConnected.load();
+            });
+            std::stable_partition(nodes.begin(), nodes.end(), [](CNode* p) {
+                if (p == nullptr) return false;
+                const bool manual_or_outbound{
+                    p->IsManualConn() || !p->IsInboundConn()};
+                const bool archive_target{
+                    node::matmul_trusted::MsghandPeerIsArchiveServeTarget(
+                        manual_or_outbound, p->HasArchiveOrMirrorService())};
+                const bool live_getdata{node::matmul_trusted::MsghandPreferLiveGetData(
+                    p->HasQueuedProcessMessageType(NetMsgType::GETDATA),
+                    p->m_has_getdata_requests.load())};
+                return node::matmul_trusted::ClassifyMsghandPeer(
+                           p->fSuccessfullyConnected.load(),
+                           node::matmul_trusted::MsghandTreatAsOutboundPreferred(
+                               node::matmul_trusted::HasLocalSigner(),
+                               manual_or_outbound),
+                           node::matmul_trusted::MsghandPreferArchiveLiveGetData(
+                               live_getdata, archive_target)) !=
+                       node::matmul_trusted::MsghandPeerClass::Other;
+            });
+            bool preferred_handshake_pending{false};
+            bool archive_getdata_pending{false};
+            const bool local_signer{node::matmul_trusted::HasLocalSigner()};
+            const bool trusted_mirror_catch_up{
+                node::matmul_trusted::IsTrustedMirror() &&
+                GetTrustedMirrorCatchUp()};
+            for (CNode* p : nodes) {
+                if (p == nullptr || p->fDisconnect) continue;
+                const bool manual_or_outbound{
+                    p->IsManualConn() || !p->IsInboundConn()};
+                if (node::matmul_trusted::PreferredPeerHandshakePending(
+                        p->fSuccessfullyConnected.load(),
+                        manual_or_outbound,
+                        local_signer)) {
+                    preferred_handshake_pending = true;
+                }
+                const bool live_getdata{node::matmul_trusted::MsghandPreferLiveGetData(
+                    p->HasQueuedProcessMessageType(NetMsgType::GETDATA),
+                    p->m_has_getdata_requests.load())};
+                if (node::matmul_trusted::MsghandPreferArchiveLiveGetData(
+                        live_getdata,
+                        node::matmul_trusted::MsghandPeerIsArchiveServeTarget(
+                            manual_or_outbound,
+                            p->HasArchiveOrMirrorService()))) {
+                    archive_getdata_pending = true;
+                }
+            }
+            SetGetDataServePending(local_signer && archive_getdata_pending);
 
-            for (CNode* pnode : snap.Nodes()) {
+            int others_processed{0};
+            for (CNode* pnode : nodes) {
                 if (pnode->fDisconnect)
                     continue;
 
                 CpuTimer timer{[&pnode](std::chrono::nanoseconds elapsed) { pnode->m_cpu_time += elapsed; }};
 
-                // Receive messages
+                const bool manual_or_outbound{
+                    pnode->IsManualConn() || !pnode->IsInboundConn()};
+                const bool archive_target{
+                    node::matmul_trusted::MsghandPeerIsArchiveServeTarget(
+                        manual_or_outbound,
+                        pnode->HasArchiveOrMirrorService())};
+                const bool live_getdata{node::matmul_trusted::MsghandPreferLiveGetData(
+                    pnode->HasQueuedProcessMessageType(NetMsgType::GETDATA),
+                    pnode->m_has_getdata_requests.load())};
+                const bool archive_live_getdata{
+                    node::matmul_trusted::MsghandPreferArchiveLiveGetData(
+                        live_getdata, archive_target)};
+                const bool keep_send{
+                    archive_target &&
+                    (live_getdata || pnode->m_prefer_block_serve.load())};
+                const auto msghand_class{
+                    node::matmul_trusted::ClassifyMsghandPeer(
+                        pnode->fSuccessfullyConnected.load(),
+                        node::matmul_trusted::MsghandTreatAsOutboundPreferred(
+                            local_signer, manual_or_outbound),
+                        archive_live_getdata)};
+                if (node::matmul_trusted::
+                        SkipMinerProcessMessagesDuringArchiveGetData(
+                            local_signer, archive_getdata_pending,
+                            trusted_mirror_catch_up,
+                            pnode->IsInboundConn(), pnode->IsManualConn(),
+                            pnode->fSuccessfullyConnected.load(),
+                            archive_target)) {
+                    // Do not set fMoreWork: that busy-spins msghand at
+                    // ~90% with 148 miner inbounds (live nyc1 after the
+                    // skip patch) and wedges RPC. Archives already ran
+                    // in this pass; miners wait for the next wake.
+                    continue;
+                }
+                if (local_signer &&
+                    msghand_class ==
+                        node::matmul_trusted::MsghandPeerClass::Other &&
+                    others_processed >=
+                        node::matmul_trusted::SIGNER_MSGHAND_OTHER_PER_LOOP) {
+                    fMoreWork = true;
+                    continue;
+                }
+
+                // Strict -connect: do not SendMessages to inbound miners.
+                // Still SendMessages to inbound ARCHIVE/MIRROR so GETDATA
+                // BLOCK replies are not stuck behind miner visits.
+                const bool skip_inbound_send{
+                    (!m_use_addrman_outgoing && pnode->IsInboundConn() &&
+                     !pnode->IsManualConn() && !archive_target &&
+                     pnode->fSuccessfullyConnected.load()) ||
+                    node::matmul_trusted::
+                        SkipFullyConnectedInboundDuringPreferredHandshake(
+                            preferred_handshake_pending,
+                            pnode->IsInboundConn(),
+                            pnode->fSuccessfullyConnected.load(),
+                            pnode->IsManualConn(),
+                            keep_send)};
+
                 bool fMoreNodeWork = m_msgproc->ProcessMessages(pnode, flagInterruptMsgProc);
-                fMoreWork |= (fMoreNodeWork && !pnode->fPauseSend);
+                if (local_signer &&
+                    msghand_class ==
+                        node::matmul_trusted::MsghandPeerClass::Other) {
+                    ++others_processed;
+                }
+                if (!skip_inbound_send) {
+                    fMoreWork |= (fMoreNodeWork && !pnode->fPauseSend);
+                }
                 if (flagInterruptMsgProc)
                     return;
-                // Send messages
-                m_msgproc->SendMessages(pnode);
+                if (!skip_inbound_send) {
+                    m_msgproc->SendMessages(pnode);
+                }
 
                 if (flagInterruptMsgProc)
                     return;
@@ -3464,6 +3637,39 @@ void CConnman::ThreadMessageHandler()
             condMsgProc.wait_until(lock, std::chrono::steady_clock::now() + std::chrono::milliseconds(100), [this]() EXCLUSIVE_LOCKS_REQUIRED(mutexMsgProc) { return fMsgProcWake; });
         }
         fMsgProcWake = false;
+    }
+}
+
+void CConnman::ThreadArchiveBlockServe()
+{
+    AssertLockNotHeld(NetEventsInterface::g_msgproc_mutex);
+
+    while (!flagInterruptMsgProc) {
+        bool cs_main_busy{false};
+        if (m_msgproc) {
+            cs_main_busy = m_msgproc->ServeArchiveBlockGetData(flagInterruptMsgProc);
+        }
+        if (flagInterruptMsgProc) break;
+        if (cs_main_busy) {
+            // ServeArchiveBlockGetData already waited on
+            // WaitCsMainReleasedForMatMulRecompute (ExactReplay notify, or
+            // 250ms ConnectTip poll). Retry immediately.
+            continue;
+        }
+
+        WAIT_LOCK(m_archive_serve_mutex, lock);
+        if (flagInterruptMsgProc) break;
+        if (GetDataServePending()) {
+            m_archive_serve_cv.wait_for(
+                lock, node::matmul_trusted::ARCHIVE_BLOCK_SERVE_WAIT_PENDING,
+                [this] { return flagInterruptMsgProc.load(); });
+        } else {
+            m_archive_serve_cv.wait_for(
+                lock, node::matmul_trusted::ARCHIVE_BLOCK_SERVE_WAIT_IDLE,
+                [this] {
+                    return flagInterruptMsgProc.load() || GetDataServePending();
+                });
+        }
     }
 }
 
@@ -3801,6 +4007,16 @@ bool CConnman::Start(CScheduler& scheduler, const Options& connOptions)
     // Process messages
     threadMessageHandler = std::thread(&util::TraceThread, "msghand", [this] { ThreadMessageHandler(); });
 
+    // Historical BLOCK replies for ARCHIVE/MIRROR must not wait for
+    // ExactReplay on msghand (live nyc1 12–15s/block). Only the local
+    // signer starts this worker; msghand remains the fallback.
+    if (node::matmul_trusted::HasLocalSigner()) {
+        m_archive_block_serve_running.store(true, std::memory_order_relaxed);
+        threadArchiveBlockServe = std::thread(&util::TraceThread, "archserve", [this] {
+            ThreadArchiveBlockServe();
+        });
+    }
+
     if (m_i2p_sam_session) {
         threadI2PAcceptIncoming =
             std::thread(&util::TraceThread, "i2paccept", [this] { ThreadI2PAcceptIncoming(); });
@@ -3840,6 +4056,7 @@ void CConnman::Interrupt()
         flagInterruptMsgProc = true;
     }
     condMsgProc.notify_all();
+    m_archive_serve_cv.notify_all();
 
     interruptNet();
     g_socks5_interrupt();
@@ -3862,6 +4079,10 @@ void CConnman::StopThreads()
     if (threadI2PAcceptIncoming.joinable()) {
         threadI2PAcceptIncoming.join();
     }
+    if (threadArchiveBlockServe.joinable()) {
+        threadArchiveBlockServe.join();
+    }
+    m_archive_block_serve_running.store(false, std::memory_order_relaxed);
     if (threadMessageHandler.joinable())
         threadMessageHandler.join();
     if (threadOpenConnections.joinable())
@@ -4313,6 +4534,15 @@ void CNode::MarkReceivedMsgsForProcessing()
     fPauseRecv = m_msg_process_queue_size > m_recv_flood_size;
 }
 
+bool CNode::HasQueuedProcessMessageType(std::string_view msg_type)
+{
+    LOCK(m_msg_process_queue_mutex);
+    for (const auto& msg : m_msg_process_queue) {
+        if (msg.m_type == msg_type) return true;
+    }
+    return false;
+}
+
 std::optional<std::pair<CNetMessage, bool>> CNode::PollMessage()
 {
     LOCK(m_msg_process_queue_mutex);
@@ -4390,6 +4620,19 @@ bool CConnman::ForNode(NodeId id, std::function<bool(CNode* pnode)> func)
         }
     }
     return found != nullptr && NodeFullyConnected(found) && func(found);
+}
+
+std::shared_ptr<CNode> CConnman::GetNodeRef(NodeId id)
+{
+    LOCK(m_nodes_mutex);
+    for (CNode* node : m_nodes) {
+        if (node->GetId() != id || !NodeFullyConnected(node)) continue;
+        node->AddRef();
+        return std::shared_ptr<CNode>(node, [](CNode* owned) {
+            owned->Release();
+        });
+    }
+    return {};
 }
 
 CSipHasher CConnman::GetDeterministicRandomizer(uint64_t id) const

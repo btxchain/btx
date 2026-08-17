@@ -157,6 +157,7 @@ public:
 
     void Erase(const uint256& block_hash);
     void Prune(std::chrono::steady_clock::time_point now);
+    void Clear();
     [[nodiscard]] size_t Size() const
     {
         return m_validated_entries.size() + m_unknown_entries.size();
@@ -197,6 +198,39 @@ private:
 };
 
 /**
+ * Closed livelock disposition for a ticketless RC body.
+ *
+ * Followed historical holes persist without ExactReplay GPU (HAVE_DATA;
+ * ConnectTip still waits for quorum). A tip-child persists without GPU on
+ * mirrors/signers, and is retained on independent consensus until a ticket
+ * or requested retry can run ExactReplay. Competing near-tip siblings stay
+ * HEADER_ONLY with a per-peer non-refreshing cooldown so one ticketless
+ * source cannot censor every peer or steal miner GPU.
+ */
+enum class TicketlessRCBodyAction : uint8_t {
+    PersistWithoutGpu,
+    RetainUntilTicketOrRetry,
+    HeaderOnlyPerPeerCooldown,
+};
+
+[[nodiscard]] constexpr TicketlessRCBodyAction ClassifyTicketlessRCBody(
+    bool followed_historical_hole,
+    bool tip_child,
+    bool persist_without_exactreplay_gpu) noexcept
+{
+    if (followed_historical_hole) {
+        return TicketlessRCBodyAction::PersistWithoutGpu;
+    }
+    if (!tip_child) {
+        return TicketlessRCBodyAction::HeaderOnlyPerPeerCooldown;
+    }
+    if (persist_without_exactreplay_gpu) {
+        return TicketlessRCBodyAction::PersistWithoutGpu;
+    }
+    return TicketlessRCBodyAction::RetainUntilTicketOrRetry;
+}
+
+/**
  * Bounded cooldown for RC bodies that arrived before a usable admission
  * sidecar. The first deferral owns the deadline: duplicate deliveries cannot
  * refresh it and thereby suppress an honest source indefinitely.
@@ -228,15 +262,15 @@ public:
      *  FindNextBlocksToDownload for all sources. Non-refresh bounds a single
      *  window but not renewal, so re-sending once per cooldown approximated
      *  continuous suppression of a specific near-tip hash. Scoping the key to
-     *  the delivering peer keeps the anti-busy-loop property while leaving
-     *  every other source immediately eligible. */
+     *  the delivering netgroup keeps the anti-busy-loop property while
+     *  surviving reconnects and leaving independent sources eligible. */
     [[nodiscard]] bool Mark(
         const uint256& block_hash,
-        int64_t peer_id,
+        uint64_t keyed_netgroup,
         std::chrono::steady_clock::time_point now);
     [[nodiscard]] bool Contains(
         const uint256& block_hash,
-        int64_t peer_id,
+        uint64_t keyed_netgroup,
         std::chrono::steady_clock::time_point now);
     /** Erase every peer's cooldown for this hash (admission succeeded or
      *  validation reached a terminal verdict, so no source needs holding off). */
@@ -249,7 +283,7 @@ private:
     void Prune(std::chrono::steady_clock::time_point now);
 
     Config m_config;
-    std::map<std::pair<uint256, int64_t>, std::chrono::steady_clock::time_point> m_deadlines;
+    std::map<std::pair<uint256, uint64_t>, std::chrono::steady_clock::time_point> m_deadlines;
 };
 
 } // namespace node

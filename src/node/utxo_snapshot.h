@@ -10,6 +10,7 @@
 #include <consensus/amount.h>
 #include <kernel/chainparams.h>
 #include <kernel/cs_main.h>
+#include <matmul/trusted_utxo_snapshot_attestation.h>
 #include <serialize.h>
 #include <shielded/bundle.h>
 #include <shielded/unshield_velocity.h>
@@ -232,6 +233,16 @@ public:
 //! chainstate directory with this filename present within it.
 const fs::path SNAPSHOT_BLOCKHASH_FILENAME{"base_blockhash"};
 
+//! Optional sidecar written only for attested-fast-forward snapshots. Holds the
+//! operator-quorum AssumeutxoData that replaces the chainparams pin for load and
+//! for background completion after restart.
+const fs::path SNAPSHOT_ATTESTED_ASSUMEUTXO_FILENAME{"attested_assumeutxo"};
+
+struct VerifiedAttestedSnapshotData {
+    AssumeutxoData assumeutxo;
+    matmul::trusted::UtxoSnapshotManifest manifest;
+};
+
 //! Write out the blockhash of the snapshot base block that was used to construct
 //! this chainstate. This value is read in during subsequent initializations and
 //! used to reconstruct snapshot-based chainstates.
@@ -242,6 +253,17 @@ bool WriteSnapshotBaseBlockhash(Chainstate& snapshot_chainstate)
 //! chainstate.
 std::optional<uint256> ReadSnapshotBaseBlockhash(fs::path chaindir)
     EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+//! Persist/load the attested AssumeutxoData override used by trusted mirrors.
+bool WriteAttestedAssumeutxoData(
+    Chainstate& snapshot_chainstate,
+    const matmul::trusted::UtxoSnapshotManifest& manifest)
+    EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+std::optional<VerifiedAttestedSnapshotData> ReadAttestedAssumeutxoData(
+    fs::path chaindir)
+    EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+/** Distinguish no sidecar from a present sidecar that failed verification. */
+[[nodiscard]] bool AttestedAssumeutxoDataExists(const fs::path& chaindir);
 
 //! Suffix appended to the chainstate (leveldb) dir when created based upon
 //! a snapshot.

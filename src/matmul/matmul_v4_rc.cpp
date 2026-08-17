@@ -1102,6 +1102,10 @@ bool FusedFfnLayer(const std::vector<int8_t>& X, const std::vector<int8_t>& W_up
                    uint32_t row_begin = 0)
 {
     if (proof_sink == nullptr && dispatch.gemm.rc_fused_ffn != nullptr) {
+        if (ExactReplayCancellationRequested()) {
+            out.clear();
+            return false;
+        }
         bool fused_ok = false;
         try {
             fused_ok = dispatch.gemm.rc_fused_ffn(
@@ -1148,6 +1152,10 @@ bool FusedFfnLayer(const std::vector<int8_t>& X, const std::vector<int8_t>& W_up
         // up-projection scratch falls from multi-GiB to tens of MiB.
         std::vector<int8_t> H(static_cast<size_t>(b_seq) * d_ff);
         for (uint32_t row0 = 0; row0 < b_seq; row0 += requested_tile) {
+            if (ExactReplayCancellationRequested()) {
+                out.clear();
+                return false;
+            }
             const uint32_t rows = std::min(requested_tile, b_seq - row0);
             std::vector<int8_t> x_tile(
                 X.begin() + static_cast<size_t>(row0) * d_model,
@@ -1165,6 +1173,10 @@ bool FusedFfnLayer(const std::vector<int8_t>& X, const std::vector<int8_t>& W_up
 
         out.resize(static_cast<size_t>(b_seq) * d_model);
         for (uint32_t row0 = 0; row0 < b_seq; row0 += requested_tile) {
+            if (ExactReplayCancellationRequested()) {
+                out.clear();
+                return false;
+            }
             const uint32_t rows = std::min(requested_tile, b_seq - row0);
             std::vector<int8_t> h_tile(
                 H.begin() + static_cast<size_t>(row0) * d_ff,

@@ -110,6 +110,7 @@ static std::string serviceFlagToStr(size_t bit)
     case NODE_MALICIOUS:       return "MALICIOUS?";
     case NODE_DANDELION:       return "DANDELION";
     case NODE_MATMUL_ATTESTATION_ARCHIVE: return "MATMUL_ATTESTATION_ARCHIVE";
+    case NODE_ATTESTED_UTXO_SNAPSHOT: return "ATTESTED_UTXO_SNAPSHOT";
     // Not using default, so we get warned when a case is missing
     }
 

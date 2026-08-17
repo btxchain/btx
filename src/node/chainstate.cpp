@@ -11,6 +11,7 @@
 #include <kernel/caches.h>
 #include <logging.h>
 #include <node/blockstorage.h>
+#include <node/matmul_trusted_attestations.h>
 #include <sync.h>
 #include <threadsafety.h>
 #include <tinyformat.h>
@@ -130,8 +131,26 @@ static ChainstateLoadResult CompleteChainstateInitialization(
     // modifying nSequenceId. CBlockIndex objects are shared by all chainstates
     // and nSequenceId participates in the candidate-set comparator, so changing
     // it while any candidate set is populated is undefined behavior.
+    LogPrintf("Populating block index candidates (%u headers)\n",
+              static_cast<unsigned>(chainman.BlockIndex().size()));
     for (Chainstate* chainstate : chainman.GetAll()) {
         chainstate->PopulateBlockIndexCandidates();
+    }
+    LogPrintf("Populated block index candidates\n");
+
+    // LoadBlockIndex ranks m_best_header by PreferTrustAdjustedHeader. A
+    // configured node that already has an active tip (snapshot or IBD) must
+    // not keep a competing unattested flood as the download target across
+    // restart; RecalculateBestHeader reapplies the tip-chain overlay.
+    if (node::matmul_trusted::IsConfigured() &&
+        chainman.ActiveChain().Tip() != nullptr) {
+        LogPrintf("Recalculating best header under trusted MatMul overlay\n");
+        chainman.RecalculateBestHeader();
+        LogPrintf("Recalculated best header hash=%s height=%d\n",
+                  chainman.m_best_header
+                      ? chainman.m_best_header->GetBlockHash().ToString()
+                      : "null",
+                  chainman.m_best_header ? chainman.m_best_header->nHeight : -1);
     }
 
     auto chainstates{chainman.GetAll()};

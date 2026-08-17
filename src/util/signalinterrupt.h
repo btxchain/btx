@@ -33,6 +33,8 @@ public:
     [[nodiscard]] bool operator()();
     [[nodiscard]] bool reset();
     [[nodiscard]] bool wait();
+    //! Latch ExactReplay / CUDA kernels can poll without copying the flag.
+    [[nodiscard]] const std::atomic<bool>& Flag() const { return m_flag; }
 
 private:
     std::atomic<bool> m_flag;

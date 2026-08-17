@@ -3,6 +3,11 @@
 Canonical transition and activation policy:
 [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md).
 
+CPU archives following GPU attestors are Phases 1–2 of the operator path to a
+fully GPU-verified seed layer. Phase 3 drops trusted-mode on those hosts once
+they ExactReplay locally. See
+[`btx-gpu-verified-network-transition.md`](btx-gpu-verified-network-transition.md).
+
 ## Purpose and trust boundary
 
 MatMul Profile 1 ExactReplay is intentionally expensive. A deployment that
@@ -256,7 +261,10 @@ btx-cli submitmatmulattestations '["<serialized-attestation>", ...]'
 
 `exportmatmulattestations` and `importmatmulattestations` are aliases for those
 commands. `getmatmultrustedstatus` reports role, threshold, retained objects,
-quorums, rejects, duplicates, and timeouts.
+quorums, rejects, duplicates, timeouts, and `attested_tip` when a quorum is
+known. `getmatmulattestedtip` is the dedicated pool/tooling RPC (height+hash,
+whether it sits on the active chain, and whether the active tip itself has
+quorum).
 
 ## P2P and resource limits
 

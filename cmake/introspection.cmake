@@ -274,6 +274,7 @@ if(NOT MSVC)
   # Check for ARMv8 SHA-NI intrinsics.
   set(ARM_SHANI_CXXFLAGS -march=armv8-a+crypto)
   check_cxx_source_compiles_with_flags([[
+    #include <arm_acle.h>
     #include <arm_neon.h>
 
     #if defined(__clang__)

@@ -6,6 +6,7 @@
 #define BTX_MATMUL_TRUSTED_EXACT_REPLAY_ATTESTATION_H
 
 #include <key.h>
+#include <matmul/trusted_utxo_snapshot_attestation.h>
 #include <pubkey.h>
 #include <serialize.h>
 #include <uint256.h>
@@ -139,6 +140,8 @@ enum class AddResult : uint8_t {
     UntrustedSigner,
     InvalidSignature,
     NoLocalSigner,
+    /** Local signer already attested a different hash at this height. */
+    HeightOccupied,
 };
 
 [[nodiscard]] std::string_view AddResultName(AddResult result);
@@ -197,12 +200,32 @@ public:
         int32_t block_height,
         ExactReplayAttestation* produced = nullptr);
 
+    /**
+     * Sign an attested-fast-forward UTXO snapshot statement with the optional
+     * local key. Does not store the signature; callers assemble manifests.
+     */
+    [[nodiscard]] std::optional<UtxoSnapshotSignature> SignUtxoSnapshot(
+        const UtxoSnapshotStatement& statement) const;
+
     [[nodiscard]] bool HasQuorum(const uint256& block_hash,
                                  int32_t block_height) const;
 
     /** Return all valid unique-signer attestations currently held. */
     [[nodiscard]] std::vector<ExactReplayAttestation> GetAttestations(
         const uint256& block_hash, int32_t block_height) const;
+
+    /**
+     * Snapshot every retained attestation (for durable archive flush).
+     * Order is height/hash ascending; callers may rewrite a bounded disk file.
+     */
+    [[nodiscard]] std::vector<ExactReplayAttestation> ExportAll() const;
+
+    /**
+     * When true, wall-clock TTL pruning is disabled. Capacity eviction still
+     * applies. Used when a durable datadir archive backs the store so a
+     * restart cannot silently drop recent authority signatures.
+     */
+    void SetDurableRetention(bool durable);
 
     /**
      * Wait for quorum, cancellation, or timeout.
@@ -228,6 +251,11 @@ public:
         return m_config.replay_authority_context;
     }
     [[nodiscard]] size_t Threshold() const { return m_config.threshold; }
+    [[nodiscard]] size_t MaxBlocks() const { return m_config.max_blocks; }
+    [[nodiscard]] size_t MaxAttestations() const
+    {
+        return m_config.max_attestations;
+    }
     [[nodiscard]] const std::set<CPubKey>& TrustedSigners() const
     {
         return m_trusted_signers;
@@ -280,6 +308,7 @@ private:
     std::map<BlockKey, Bucket> m_buckets;
     size_t m_attestation_count{0};
     StoreStats m_stats;
+    bool m_durable_retention{false};
 };
 
 } // namespace matmul::trusted

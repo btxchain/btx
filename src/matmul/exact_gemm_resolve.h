@@ -96,6 +96,9 @@ struct ResolvedRCExactGemm {
 /** Test hook: clear the F5 resolve/self-qual cache (process-local). */
 void ResetRCExactGemmResolveCacheForTest();
 
+/** Test hook: overwrite the last RC resolve snapshot (does not run devices). */
+void SetLastRCExactGemmResolutionForTest(ResolvedRCExactGemm status);
+
 /** Build an injectable ExactMxProjectionBackend for miner-local B̂·V.
  *  ResolveBackend() wires CUDA/HIP LaunchProjectedRightMx, Metal
  *  TryLaunchLtMetalMxProjectRight, or Ascend TryLaunchLtCubeMxProjectRight.

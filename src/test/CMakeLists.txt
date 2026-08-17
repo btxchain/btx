@@ -73,15 +73,19 @@ add_executable(test_btx
   matmul_noise_tests.cpp
   matmul_pow_tests.cpp
   matmul_verify_worker_tests.cpp
+  matmul_block_lifecycle_tests.cpp
   matmul_trusted_mirror_tests.cpp
   matmul_rc_admission_tests.cpp
   trusted_exact_replay_attestation_tests.cpp
+  trusted_utxo_snapshot_attestation_tests.cpp
+  attested_utxo_snapshot_p2p_tests.cpp
   matmul_accelerated_solver_tests.cpp
   matmul_backend_capabilities_tests.cpp
   matmul_metal_tests.cpp
   matmul_transcript_tests.cpp
   matmul_validation_tests.cpp
   matmul_chainwork_auth_tests.cpp
+  matmul_gpu_verified_transition_tests.cpp
   matmul_trust_model_tests.cpp
   matmul_dgw_tests.cpp
   matmul_unified_activation_tests.cpp
@@ -389,6 +393,7 @@ add_executable(test_btx
   ml_kem_tests.cpp
   lattice_poly_tests.cpp
   lattice_polyvec_tests.cpp
+  lastcommon_root_first_tests.cpp
   note_encryption_tests.cpp
   shielded_merkle_serialization_tests.cpp
   shielded_merkle_tests.cpp

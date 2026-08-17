@@ -63,6 +63,7 @@
 #include <walletinitinterface.h>
 
 #include <algorithm>
+#include <cstring>
 #include <functional>
 #include <ios>
 #include <limits>
@@ -373,10 +374,63 @@ TestingSetup::TestingSetup(
     }
 }
 
+namespace {
+
+bool ExtraArgsContainPrefix(const std::vector<const char*>& args, const char* prefix)
+{
+    const size_t n = std::strlen(prefix);
+    for (const char* arg : args) {
+        if (arg != nullptr && std::strncmp(arg, prefix, n) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Regtest activates v4/BMX4C/DRLT at height 100 and RC Profile-1 at 101 by
+// default, with nMatMulV4Dimension=256. TestChain100Setup mines
+// COINBASE_MATURITY (==100) blocks, so every fixture would otherwise pay for
+// at least one 256-dim DRLT/BMX4C SolveMatMul plus any subsequent RC
+// ExactReplay blocks. In Debug + DEBUG_LOCKORDER that cost makes suites like
+// validation_chainstatemanager_tests effectively unrunnable. Defer those
+// activations past the fixture chain unless the caller opts in explicitly.
+TestOpts WithCheapMatMulFixtureDefaults(TestOpts opts)
+{
+    std::vector<const char*> injected;
+    injected.reserve(4);
+
+    // Keep v4/BMX4C unified: inject both or neither.
+    if (!ExtraArgsContainPrefix(opts.extra_args, "-regtestmatmulv4height=") &&
+        !ExtraArgsContainPrefix(opts.extra_args, "-regtestbmx4cheight=")) {
+        injected.push_back("-regtestmatmulv4height=2147483647");
+        injected.push_back("-regtestbmx4cheight=2147483647");
+    }
+    if (!ExtraArgsContainPrefix(opts.extra_args, "-regtestdrltheight=")) {
+        injected.push_back("-regtestdrltheight=2147483647");
+    }
+    // Do not inject a unified RC override: that would clobber a caller's
+    // -regtestrcheight / -regtestrccoupledheight. Coupled stays INT_MAX by
+    // default on regtest.
+    if (!ExtraArgsContainPrefix(opts.extra_args, "-regtestrcheight=") &&
+        !ExtraArgsContainPrefix(opts.extra_args, "-regtestrccoupledheight=") &&
+        !ExtraArgsContainPrefix(opts.extra_args, "-regtestrcunifiedheight=")) {
+        injected.push_back("-regtestrcheight=2147483647");
+    }
+
+    if (!injected.empty()) {
+        opts.extra_args = Cat(injected, opts.extra_args);
+    }
+    return opts;
+}
+
+} // namespace
+
 TestChain100Setup::TestChain100Setup(
     const ChainType chain_type,
     TestOpts opts)
-    : TestingSetup{ChainType::REGTEST, opts}
+    : TestingSetup{ChainType::REGTEST,
+                   opts.defer_expensive_matmul ? WithCheapMatMulFixtureDefaults(std::move(opts))
+                                               : std::move(opts)}
 {
     SetMockTime(1598887952);
     constexpr std::array<unsigned char, 32> vchKey = {

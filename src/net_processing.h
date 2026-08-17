@@ -13,15 +13,20 @@
 #include <validationinterface.h>
 
 #include <chrono>
+#include <functional>
+#include <optional>
 
 class AddrMan;
+class CBlock;
 class CChainParams;
 class CTxMemPool;
 class ChainstateManager;
+class uint256;
 
 namespace Dandelion { class DandelionManager; }
 
 namespace node {
+class AttestedUTXOSnapshotP2P;
 class Warnings;
 } // namespace node
 
@@ -77,8 +82,11 @@ constexpr bool IsMatMulPeerEligibleForSync(
 }
 
 /** Whether this SendMessages pass may allocate block-download work to a peer.
- * The dynamic MatMul eligibility input is part of both the IBD and near-tip
- * paths, so an ordinary peer cannot bypass the activated tier requirement. */
+ *
+ * Production call sites pass peer_is_eligible=true: the MatMul consensus tier
+ * is a PREFERENCE (fPreferredDownload), never a getdata gate. The parameter
+ * remains so unit tests can assert the helper's combinatorial shape without
+ * regressing the preference-only call site. */
 constexpr bool ShouldRequestBlocksFromMatMulPeer(
     bool can_serve_blocks,
     bool peer_is_eligible,
@@ -137,6 +145,14 @@ struct CNodeStateStats {
     std::chrono::seconds time_offset{0};
     NodeSeconds m_last_block_announcement;
     int m_misbehavior_score{0};
+    /** Best-known block hash/work for this peer, or empty when unknown.
+     *  Height-only inference is intentionally not used (issue #108). */
+    std::string m_best_known_block_hash;
+    std::string m_best_known_block_work;
+    uint64_t m_dup_header_bytes{0};
+    uint32_t m_dup_header_msgs{0};
+    uint64_t m_dup_header_skipped_bytes{0};
+    std::string m_dup_header_action{"none"};
     /** Internal synchronization-selection snapshots used by regression tests. */
     bool m_preferred_download{false};
     int m_total_preferred_download_peer_count{0};
@@ -151,6 +167,8 @@ struct PeerManagerInfo {
     bool ignores_incoming_txs{false};
     int min_smile_v2_version{MIN_SMILE_V2_PROTOCOL_VERSION};
     int smile_v2_enforcement_height{SMILE_V2_ENFORCEMENT_HEIGHT};
+    int min_matmul_rc_version{MIN_MATMUL_RC_PROTOCOL_VERSION};
+    int matmul_rc_enforcement_height{MATMUL_RC_ENFORCEMENT_HEIGHT};
 };
 
 class PeerManager : public CValidationInterface, public NetEventsInterface
@@ -181,6 +199,14 @@ public:
         int min_smile_v2_version{MIN_SMILE_V2_PROTOCOL_VERSION};
         //! Chain height at which SMILE v2 protocol version enforcement activates.
         int smile_v2_enforcement_height{SMILE_V2_ENFORCEMENT_HEIGHT};
+        //! Minimum protocol version required to follow the MatMul v4.7 Epoch-A
+        //! chain. Peers below this are disconnected once the tip is past
+        //! matmul_rc_enforcement_height. Overridable via -minmatmulrcversion.
+        int min_matmul_rc_version{MIN_MATMUL_RC_PROTOCOL_VERSION};
+        //! Chain height at which Epoch-A protocol version enforcement activates.
+        //! Default MATMUL_RC_ENFORCEMENT_HEIGHT is INT32_MAX (off). Overridable
+        //! via -matmulrcenforcementheight.
+        int matmul_rc_enforcement_height{MATMUL_RC_ENFORCEMENT_HEIGHT};
         //! WP-7 / C5: whether the v4.4 ENC-DR reference recompute for P2P block
         //! deliveries may run on a bounded off-thread worker pool instead of the
         //! message-handler thread. Only effective when the MatMul v4 fork height
@@ -215,6 +241,21 @@ public:
     /** Begin running background tasks, should only be called once */
     virtual void StartScheduledTasks(CScheduler& scheduler) = 0;
 
+    /**
+     * Serve queued BLOCK GETDATA for ARCHIVE/MIRROR peers without
+     * g_msgproc_mutex so ExactReplay on msghand cannot stall catch-up.
+     * @return true if cs_main was busy.
+     */
+    bool ServeArchiveBlockGetData(std::atomic<bool>& interrupt) override = 0;
+
+    /**
+     * Join the MatMul verify worker while the validation scheduler is still
+     * running. In-flight completions call ProcessBlockSync / ActivateBestChain,
+     * which drain the scheduler queue. Stopping the scheduler first deadlocks
+     * b-shutoff vs b-mmverify and skips PersistShieldedState.
+     */
+    virtual void StopBackgroundWorkers() = 0;
+
     /** Get statistics from node state */
     virtual bool GetNodeStateStats(NodeId nodeid, CNodeStateStats& stats) const = 0;
     virtual void LimitOrphanTxSize(uint32_t nMaxOrphans) = 0;
@@ -239,6 +280,22 @@ public:
     /* Public for unit testing. */
     virtual void UnitTestMisbehaving(NodeId peer_id) = 0;
 
+    /** Stall ExactReplay in peerman tests so a header-first job occupies the
+     *  cap-one lease long enough for a subsequent body to take the handoff
+     *  path. No-op when the async worker was not constructed. */
+    virtual void InstallMatMulVerifyOverrideForTest(
+        std::function<bool(const CBlock&, int32_t, std::optional<int64_t>)> verify) = 0;
+    /** Drop leftover speculative/pending ExactReplay leases between cases that
+     *  share one RegTestingSetup. */
+    virtual void ResetMatMulVerifyAdmissionForTest() = 0;
+    /** True while a complete body is held for scheduler re-admission. */
+    [[nodiscard]] virtual bool HasMatMulRetainedBodyForTest(const uint256& hash) const = 0;
+    [[nodiscard]] virtual bool UnitTestHasMatMulRetainedBody(const uint256& hash) const = 0;
+    /** Drive scheduler re-admission of a HAVE_DATA followed tip-child.
+     *  Production calls this from CScheduler, never from SendMessages
+     *  (g_msgproc_mutex). Tests must not hold that mutex. */
+    virtual void RetryMatMulDeferredBodiesForTest() = 0;
+
     /**
      * Evict extra outbound peers. If we think our tip may be stale, connect to an extra outbound.
      * Public for unit testing.
@@ -248,6 +305,16 @@ public:
     /** Process a single message from a peer. Public for fuzz testing */
     virtual void ProcessMessage(CNode& pfrom, const std::string& msg_type, DataStream& vRecv,
                                 const std::chrono::microseconds time_received, const std::atomic<bool>& interruptMsgProc) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex) = 0;
+
+    /** Peers advertising NODE_ATTESTED_UTXO_SNAPSHOT. */
+    [[nodiscard]] virtual std::vector<NodeId> GetAttestedUTXOSnapshotPeers() const = 0;
+    /** Send getutxomanif to peer (block_hash null = any offer). */
+    [[nodiscard]] virtual bool RequestAttestedUTXOManifest(NodeId peer_id, const uint256& block_hash) = 0;
+    /** Send getutxochunk to peer. */
+    [[nodiscard]] virtual bool RequestAttestedUTXOChunk(NodeId peer_id, const uint256& block_hash, uint32_t chunk_index) = 0;
+    /** Coordinator owned by this peer-manager/node instance. */
+    [[nodiscard]] virtual node::AttestedUTXOSnapshotP2P&
+    AttestedUTXOSnapshotCoordinator() = 0;
 
     /** This function is used for testing the stale tip eviction logic, see denialofservice_tests.cpp */
     virtual void UpdateLastBlockAnnounceTime(NodeId node, int64_t time_in_seconds) = 0;

@@ -100,17 +100,17 @@ BOOST_AUTO_TEST_CASE(deferred_body_cooldown_is_non_refreshing_and_expires)
         std::chrono::seconds{1'000}}};
     const uint256 hash{1};
 
-    BOOST_CHECK(cooldowns.Mark(hash, /*peer_id=*/1, start));
-    BOOST_CHECK(cooldowns.Contains(hash, /*peer_id=*/1, start + std::chrono::seconds{59}));
+    BOOST_CHECK(cooldowns.Mark(hash, /*keyed_netgroup=*/1, start));
+    BOOST_CHECK(cooldowns.Contains(hash, /*keyed_netgroup=*/1, start + std::chrono::seconds{59}));
 
     // A malicious duplicate immediately before expiry cannot extend the
     // process-wide suppression window for an honest source.
-    BOOST_CHECK(!cooldowns.Mark(hash, /*peer_id=*/1, start + std::chrono::seconds{59}));
-    BOOST_CHECK(!cooldowns.Contains(hash, /*peer_id=*/1, start + std::chrono::seconds{60}));
+    BOOST_CHECK(!cooldowns.Mark(hash, /*keyed_netgroup=*/1, start + std::chrono::seconds{59}));
+    BOOST_CHECK(!cooldowns.Contains(hash, /*keyed_netgroup=*/1, start + std::chrono::seconds{60}));
     BOOST_CHECK_EQUAL(cooldowns.Size(start + std::chrono::seconds{60}), 0U);
 
     // Once expired, the same hash may acquire one fresh bounded cooldown.
-    BOOST_CHECK(cooldowns.Mark(hash, /*peer_id=*/1, start + std::chrono::seconds{60}));
+    BOOST_CHECK(cooldowns.Mark(hash, /*keyed_netgroup=*/1, start + std::chrono::seconds{60}));
 }
 
 BOOST_AUTO_TEST_CASE(deferred_body_cooldown_is_bounded_and_explicitly_clearable)
@@ -125,20 +125,20 @@ BOOST_AUTO_TEST_CASE(deferred_body_cooldown_is_bounded_and_explicitly_clearable)
     const uint256 second{2};
     const uint256 third{3};
 
-    BOOST_REQUIRE(cooldowns.Mark(first, /*peer_id=*/1, start));
-    BOOST_REQUIRE(cooldowns.Mark(second, /*peer_id=*/1, start + std::chrono::seconds{1}));
+    BOOST_REQUIRE(cooldowns.Mark(first, /*keyed_netgroup=*/1, start));
+    BOOST_REQUIRE(cooldowns.Mark(second, /*keyed_netgroup=*/1, start + std::chrono::seconds{1}));
     BOOST_CHECK_EQUAL(cooldowns.Size(start + std::chrono::seconds{1}), 2U);
 
     // Capacity evicts the oldest deadline rather than growing on arbitrary
     // hashes. The newer entry and newly installed entry remain active.
-    BOOST_REQUIRE(cooldowns.Mark(third, /*peer_id=*/1, start + std::chrono::seconds{2}));
-    BOOST_CHECK(!cooldowns.Contains(first, /*peer_id=*/1, start + std::chrono::seconds{2}));
-    BOOST_CHECK(cooldowns.Contains(second, /*peer_id=*/1, start + std::chrono::seconds{2}));
-    BOOST_CHECK(cooldowns.Contains(third, /*peer_id=*/1, start + std::chrono::seconds{2}));
+    BOOST_REQUIRE(cooldowns.Mark(third, /*keyed_netgroup=*/1, start + std::chrono::seconds{2}));
+    BOOST_CHECK(!cooldowns.Contains(first, /*keyed_netgroup=*/1, start + std::chrono::seconds{2}));
+    BOOST_CHECK(cooldowns.Contains(second, /*keyed_netgroup=*/1, start + std::chrono::seconds{2}));
+    BOOST_CHECK(cooldowns.Contains(third, /*keyed_netgroup=*/1, start + std::chrono::seconds{2}));
 
     // Valid ticket/body admission and terminal verdicts use this erase path.
     cooldowns.Erase(second);
-    BOOST_CHECK(!cooldowns.Contains(second, /*peer_id=*/1, start + std::chrono::seconds{2}));
+    BOOST_CHECK(!cooldowns.Contains(second, /*keyed_netgroup=*/1, start + std::chrono::seconds{2}));
     BOOST_CHECK_EQUAL(cooldowns.Size(start + std::chrono::seconds{2}), 1U);
     cooldowns.Clear();
     BOOST_CHECK_EQUAL(cooldowns.Size(start + std::chrono::seconds{2}), 0U);
@@ -511,28 +511,88 @@ BOOST_AUTO_TEST_CASE(quarantine_rate_limits_and_counters_are_exact)
 }
 
 
-BOOST_AUTO_TEST_CASE(deferred_cooldown_is_scoped_to_the_delivering_peer)
+BOOST_AUTO_TEST_CASE(deferred_cooldown_is_scoped_to_reconnect_resistant_netgroup)
 {
     // An unsolicited ticketless body reaches the deferral path with
     // force_processing=false. Keyed by hash alone, that one delivery would gate
     // FindNextBlocksToDownload for EVERY peer, turning "here is the block" into
     // "you may not download this block" -- renewable once per cooldown. Scoping
-    // to the delivering peer keeps the anti-busy-loop property without letting
-    // one source censor a hash node-wide.
+    // to the delivering keyed netgroup keeps the anti-busy-loop property
+    // without letting one source censor a hash node-wide or bypass the hold by
+    // disconnecting and acquiring a fresh ephemeral NodeId.
     node::RCDeferredBodyCooldowns cooldowns;
     const uint256 hash{uint256::ONE};
     const auto start{std::chrono::steady_clock::now()};
 
-    BOOST_CHECK(cooldowns.Mark(hash, /*peer_id=*/1, start));
-    BOOST_CHECK(cooldowns.Contains(hash, /*peer_id=*/1, start));
-    // Every other peer stays immediately eligible for the same block.
-    BOOST_CHECK(!cooldowns.Contains(hash, /*peer_id=*/2, start));
-    BOOST_CHECK(cooldowns.Mark(hash, /*peer_id=*/2, start));
+    constexpr uint64_t source_netgroup{11};
+    constexpr uint64_t independent_netgroup{22};
+    BOOST_CHECK(cooldowns.Mark(hash, source_netgroup, start));
+    BOOST_CHECK(cooldowns.Contains(hash, source_netgroup, start));
+    // Reconnection changes NodeId but retains the keyed netgroup: still held.
+    BOOST_CHECK(!cooldowns.Mark(hash, source_netgroup, start));
+    BOOST_CHECK(cooldowns.Contains(hash, source_netgroup, start));
+    // An independent source stays immediately eligible for the same block.
+    BOOST_CHECK(!cooldowns.Contains(hash, independent_netgroup, start));
+    BOOST_CHECK(cooldowns.Mark(hash, independent_netgroup, start));
 
     // A terminal verdict clears the hash for all peers, not just one.
     cooldowns.Erase(hash);
-    BOOST_CHECK(!cooldowns.Contains(hash, /*peer_id=*/1, start));
-    BOOST_CHECK(!cooldowns.Contains(hash, /*peer_id=*/2, start));
+    BOOST_CHECK(!cooldowns.Contains(hash, source_netgroup, start));
+    BOOST_CHECK(!cooldowns.Contains(hash, independent_netgroup, start));
+}
+
+BOOST_AUTO_TEST_CASE(ticketless_followed_chain_persists_or_retains_competing_stays_header_only)
+{
+    // Closed livelock: a delivered followed historical hole always persists
+    // (HAVE_DATA, no ExactReplay GPU). A tip-child persists on mirrors/signers
+    // and is retained on independent consensus until ticket/retry. Competing
+    // siblings keep HEADER_ONLY + per-peer cooldown so one netgroup cannot
+    // censor an independent source or steal miner GPU.
+    BOOST_CHECK(
+        node::ClassifyTicketlessRCBody(
+            /*followed_historical_hole=*/true,
+            /*tip_child=*/false,
+            /*persist_without_exactreplay_gpu=*/false) ==
+        node::TicketlessRCBodyAction::PersistWithoutGpu);
+    BOOST_CHECK(
+        node::ClassifyTicketlessRCBody(
+            /*followed_historical_hole=*/true,
+            /*tip_child=*/false,
+            /*persist_without_exactreplay_gpu=*/true) ==
+        node::TicketlessRCBodyAction::PersistWithoutGpu);
+    BOOST_CHECK(
+        node::ClassifyTicketlessRCBody(
+            /*followed_historical_hole=*/false,
+            /*tip_child=*/true,
+            /*persist_without_exactreplay_gpu=*/true) ==
+        node::TicketlessRCBodyAction::PersistWithoutGpu);
+    BOOST_CHECK(
+        node::ClassifyTicketlessRCBody(
+            /*followed_historical_hole=*/false,
+            /*tip_child=*/true,
+            /*persist_without_exactreplay_gpu=*/false) ==
+        node::TicketlessRCBodyAction::RetainUntilTicketOrRetry);
+    BOOST_CHECK(
+        node::ClassifyTicketlessRCBody(
+            /*followed_historical_hole=*/false,
+            /*tip_child=*/false,
+            /*persist_without_exactreplay_gpu=*/true) ==
+        node::TicketlessRCBodyAction::HeaderOnlyPerPeerCooldown);
+    BOOST_CHECK(
+        node::ClassifyTicketlessRCBody(
+            /*followed_historical_hole=*/false,
+            /*tip_child=*/false,
+            /*persist_without_exactreplay_gpu=*/false) ==
+        node::TicketlessRCBodyAction::HeaderOnlyPerPeerCooldown);
+
+    node::RCDeferredBodyCooldowns cooldowns;
+    const uint256 competing{uint256::ONE};
+    const auto start{std::chrono::steady_clock::now()};
+    constexpr uint64_t source_netgroup{11};
+    constexpr uint64_t independent_netgroup{22};
+    BOOST_REQUIRE(cooldowns.Mark(competing, source_netgroup, start));
+    BOOST_CHECK(cooldowns.Contains(competing, source_netgroup, start));
+    BOOST_CHECK(!cooldowns.Contains(competing, independent_netgroup, start));
 }
 
 

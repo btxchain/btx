@@ -250,7 +250,7 @@ mkdir -p "$OUTDIR"
 ###########################
 
 # CONFIGFLAGS
-BASE_CONFIGFLAGS="-DREDUCE_EXPORTS=ON -DBUILD_BENCH=OFF -DBUILD_GUI_TESTS=OFF -DBUILD_FUZZ_BINARY=OFF"
+BASE_CONFIGFLAGS="-DREDUCE_EXPORTS=ON -DBUILD_BENCH=OFF -DBUILD_GUI_TESTS=OFF -DBUILD_FUZZ_BINARY=OFF -DBUILD_UTIL=ON"
 # Ship ZMQ notifications in release binaries. WITH_ZMQ defaults OFF in CMakeLists.txt,
 # so without this flag the released btxd ignores -zmqpub* settings and reports
 # that it was built without ZMQ support. zeromq is already part of the depends set.
@@ -508,7 +508,7 @@ esac
           -DBUILD_KERNEL_LIB=OFF \
           -DBUILD_TESTS=OFF \
           -DBUILD_TX=OFF \
-          -DBUILD_UTIL=OFF \
+          -DBUILD_UTIL=ON \
           -DBUILD_UTIL_CHAINSTATE=OFF \
           -DBUILD_WALLET_TOOL=OFF \
           -DBUILD_SHARED_LIBS=ON -DBUILD_BITCOINCONSENSUS_LIB=ON

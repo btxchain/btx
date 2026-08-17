@@ -8,11 +8,15 @@
 #include <consensus/params.h>
 #include <init.h>
 #include <matmul/exact_gemm_resolve.h>
+#include <matmul/matmul_v4_lt.h>
+#include <matmul/matmul_v4_rc_selfqual.h>
 #include <test/util/setup_common.h>
 
 #include <boost/test/unit_test.hpp>
 
 #include <limits>
+#include <string>
+#include <vector>
 
 namespace rc = matmul::v4::rc;
 
@@ -438,6 +442,100 @@ BOOST_AUTO_TEST_CASE(canary_header_is_deterministic_and_nonce_bound)
     const CBlockHeader unsupported{
         rc::MakeRCProductionCanaryHeader(unsupported_epoch, 11)};
     BOOST_CHECK_EQUAL(unsupported.matmul_dim, 0U);
+}
+
+// Self-qual digest/GEMM mismatch must surface as itself on the canary and
+// getmatmulinfo-style resolution snapshot — not as a generic policy refusal.
+BOOST_AUTO_TEST_CASE(selfqual_digest_mismatch_surfaces_distinct_canary_reason)
+{
+    matmul_v4::accel::ResetRCExactGemmResolveCacheForTest();
+    rc::ResetRCProductionCanaryForTest();
+
+    matmul_v4::accel::ResolvedRCExactGemm fake;
+    fake.requested = "cuda";
+    fake.provider = "cpu";
+    fake.reason = "episode_digest_mismatch_backend_vs_cpu";
+    fake.policy = "ProductionPreferred";
+    fake.qualification_scope = "none";
+    fake.device_requested = true;
+    fake.self_qualified = false;
+    fake.automatic_policy_eligible = false;
+    matmul_v4::accel::SetLastRCExactGemmResolutionForTest(fake);
+
+    Consensus::Params consensus{Params().GetConsensus()};
+    consensus.nMatMulRCHeight = 500'000;
+    consensus.nMatMulRCProfile = 1;
+    consensus.fMatMulRCUseToyDims = false;
+    consensus.nMatMulV4Dimension = 4096;
+
+    const auto status{rc::RunRCProductionStartupCanary(
+        "cpu", {}, consensus, consensus.nMatMulRCHeight)};
+    BOOST_CHECK(status.outcome == rc::RCProductionCanaryOutcome::DigestMismatch);
+    BOOST_CHECK_EQUAL(status.reason, "episode_digest_mismatch_backend_vs_cpu");
+    BOOST_CHECK_EQUAL(
+        rc::RCProductionCanaryOutcomeName(status.outcome), "digest_mismatch");
+    BOOST_CHECK(!status.attempted);
+    BOOST_CHECK(!status.passed);
+    BOOST_CHECK(!status.activation_ready);
+
+    const auto snapshot{matmul_v4::accel::ProbeLastRCExactGemmResolution()};
+    BOOST_CHECK(snapshot.resolved);
+    BOOST_CHECK_EQUAL(snapshot.reason, "episode_digest_mismatch_backend_vs_cpu");
+    BOOST_CHECK(!snapshot.self_qualified);
+
+    matmul_v4::accel::ResetRCExactGemmResolveCacheForTest();
+}
+
+BOOST_AUTO_TEST_CASE(selfqual_gemm_mismatch_gate_preserves_deficit_reason)
+{
+    matmul_v4::accel::ResetRCExactGemmResolveCacheForTest();
+
+    matmul::v4::lt::ExactGemmBackend bad;
+    bad.gemm_s8s8 = +[](const std::vector<int8_t>& /*L*/,
+                        const std::vector<int8_t>& /*R*/, uint32_t rows,
+                        uint32_t inner, uint32_t cols,
+                        std::vector<int32_t>& out) -> bool {
+        out.assign(static_cast<size_t>(rows) * cols, 0x7fff0001);
+        return true;
+    };
+    bad.gemm_s32s8 = +[](const std::vector<int32_t>& /*L*/,
+                         const std::vector<int8_t>& /*R*/, uint32_t rows,
+                         uint32_t inner, uint32_t cols,
+                         std::vector<int32_t>& out) -> bool {
+        out.assign(static_cast<size_t>(rows) * cols, 0x7fff0001);
+        return true;
+    };
+
+    const auto gated{matmul_v4::accel::GateExactGemmWithRCSelfQualCached(
+        bad, "unit_test_wrong_gemm", /*epoch=*/-1)};
+    BOOST_CHECK(gated.gemm_s8s8 == nullptr);
+
+    // Resolve path must prefer the concrete deficit over the generic label.
+    matmul_v4::accel::ResolvedRCExactGemm fake;
+    fake.requested = "cuda";
+    fake.provider = "cpu";
+    fake.reason = "gemm_s8s8_mismatch_vs_cpu_exactgemm";
+    fake.policy = "ProductionPreferred";
+    fake.self_qualified = false;
+    fake.automatic_policy_eligible = false;
+    matmul_v4::accel::SetLastRCExactGemmResolutionForTest(fake);
+
+    Consensus::Params consensus{Params().GetConsensus()};
+    consensus.nMatMulRCHeight = 500'000;
+    consensus.nMatMulRCProfile = 1;
+    consensus.fMatMulRCUseToyDims = false;
+    consensus.nMatMulV4Dimension = 4096;
+    const auto status{rc::RunRCProductionStartupCanary(
+        "cpu", {}, consensus, consensus.nMatMulRCHeight)};
+    BOOST_CHECK(status.outcome == rc::RCProductionCanaryOutcome::DigestMismatch);
+    BOOST_CHECK_EQUAL(status.reason, "gemm_s8s8_mismatch_vs_cpu_exactgemm");
+
+    // Confirm ProbeRCSelfQual itself names the GEMM mismatch (gate input).
+    const auto st{rc::ProbeRCSelfQual(bad)};
+    BOOST_CHECK(!st.mining_accelerator_ok);
+    BOOST_CHECK_EQUAL(st.deficit_reason, "gemm_s8s8_mismatch_vs_cpu_exactgemm");
+
+    matmul_v4::accel::ResetRCExactGemmResolveCacheForTest();
 }
 
 BOOST_AUTO_TEST_SUITE_END()

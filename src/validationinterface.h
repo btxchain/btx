@@ -11,11 +11,18 @@
 #include <primitives/transaction.h> // CTransaction(Ref)
 #include <sync.h>
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <vector>
+
+enum class ValidationQueueSyncResult {
+    Completed,
+    TimedOut,
+    Interrupted,
+};
 
 namespace util {
 class TaskRunnerInterface;
@@ -224,8 +231,24 @@ public:
      *         promise.set_value();
      *     });
      *     promise.get_future().wait();
+     *
+     * Unbounded. Only for tests, index catch-up, and other callers that
+     * genuinely cannot proceed until every earlier notification finishes.
+     * Activation, RPC, networking, and shutdown must use
+     * TrySyncWithValidationInterfaceQueue instead: a stuck subscriber
+     * otherwise pins those threads forever (live 2026-08-15 17-block reorg).
      */
     void SyncWithValidationInterfaceQueue() LOCKS_EXCLUDED(cs_main);
+
+    /**
+     * Bounded queue synchronization. Inserts a sentinel and waits until it
+     * runs, `timeout` elapses, or `interrupted` returns true. The sentinel
+     * stays queued if this returns early, so a blocked subscriber cannot
+     * use-after-free the waiter. Does not change callback ordering.
+     */
+    [[nodiscard]] ValidationQueueSyncResult TrySyncWithValidationInterfaceQueue(
+        std::chrono::milliseconds timeout,
+        std::function<bool()> interrupted = {}) LOCKS_EXCLUDED(cs_main);
 
     void UpdatedBlockTip(const CBlockIndex *, const CBlockIndex *, bool fInitialDownload);
     void ActiveTipChange(const CBlockIndex&, bool);

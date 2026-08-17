@@ -70,7 +70,10 @@ std::string DefaultBackendRequest()
 #if defined(__APPLE__)
     return "metal";
 #else
-    return "cpu";
+    // Prefer auto-select on Linux so CUDA/HIP/Ascend hosts mine on accelerator
+    // without BTX_MATMUL_BACKEND=… by hand. ResolveBackend() fails closed to
+    // CPU when no bit-exact INT8 path exists — local mining policy only.
+    return "auto";
 #endif
 }
 

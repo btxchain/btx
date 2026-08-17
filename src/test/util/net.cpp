@@ -25,7 +25,8 @@ void ConnmanTestMsg::Handshake(CNode& node,
                                ServiceFlags remote_services,
                                ServiceFlags local_services,
                                int32_t version,
-                               bool relay_txs)
+                               bool relay_txs,
+                               int32_t starting_height)
 {
     auto& peerman{static_cast<PeerManager&>(*m_msgproc)};
     auto& connman{*this};
@@ -45,7 +46,7 @@ void ConnmanTestMsg::Handshake(CNode& node,
                 CNetAddr::V1(CService{}),                       // ignored
                 uint64_t{1},                                    // dummy nonce
                 std::string{},                                  // dummy subver
-                int32_t{},                                      // dummy starting_height
+                starting_height,
                 relay_txs),
     };
 

@@ -21,6 +21,10 @@
 #include <validation.h>
 #include <validationinterface.h>
 
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <mutex>
 #include <thread>
 
 using node::BlockAssembler;
@@ -352,6 +356,109 @@ BOOST_AUTO_TEST_CASE(mempool_locks_reorg)
         // We can join the other thread, which returns when the reorg was successful
         rpc_thread.join();
     }
+}
+
+BOOST_AUTO_TEST_CASE(try_sync_validation_queue_timeout)
+{
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool release{false};
+    m_node.validation_signals->CallFunctionInValidationInterfaceQueue([&] {
+        std::unique_lock lock{mutex};
+        cv.wait(lock, [&] { return release; });
+    });
+
+    const auto started{std::chrono::steady_clock::now()};
+    const auto result{m_node.validation_signals->TrySyncWithValidationInterfaceQueue(
+        std::chrono::milliseconds{200})};
+    BOOST_CHECK(result == ValidationQueueSyncResult::TimedOut);
+    BOOST_CHECK(std::chrono::steady_clock::now() - started < std::chrono::seconds{2});
+
+    {
+        std::lock_guard lock{mutex};
+        release = true;
+    }
+    cv.notify_all();
+    BOOST_CHECK(
+        m_node.validation_signals->TrySyncWithValidationInterfaceQueue(
+            std::chrono::seconds{5}) == ValidationQueueSyncResult::Completed);
+}
+
+BOOST_AUTO_TEST_CASE(activatebestchain_does_not_block_on_stuck_subscriber)
+{
+    // Live 2026-08-15: a 17-block reorg onto the validator branch connected
+    // back to the starting height, then ActivateBestChain drained the
+    // validation-interface queue with an unbounded wait. A stuck subscriber
+    // pinned submitblock / ProcessNewBlock and Shutdown never reached the
+    // durable flush. Drain now times out and activation must continue.
+    bool ignored;
+    auto ProcessBlock = [&](const std::shared_ptr<const CBlock>& block) {
+        return Assert(m_node.chainman)->ProcessNewBlock(
+            block, /*force_processing=*/true, /*min_pow_checked=*/true,
+            /*new_block=*/&ignored);
+    };
+
+    BOOST_REQUIRE(ProcessBlock(std::make_shared<CBlock>(Params().GenesisBlock())));
+    const auto split{GoodBlock(Params().GenesisBlock().GetHash())};
+    BOOST_REQUIRE(ProcessBlock(split));
+
+    std::shared_ptr<const CBlock> last_a{split};
+    for (int i = 0; i < 11; ++i) {
+        last_a = GoodBlock(last_a->GetHash());
+        BOOST_REQUIRE(ProcessBlock(last_a));
+    }
+
+    struct BlockingDisconnectSubscriber final : public CValidationInterface {
+        std::atomic<bool> entered{false};
+        std::mutex mutex;
+        std::condition_variable cv;
+        bool release{false};
+
+        void BlockDisconnected(
+            const std::shared_ptr<const CBlock>&,
+            const CBlockIndex*) override
+        {
+            entered = true;
+            std::unique_lock lock{mutex};
+            cv.wait(lock, [&] { return release; });
+        }
+    };
+    auto sub{std::make_shared<BlockingDisconnectSubscriber>()};
+    m_node.validation_signals->RegisterSharedValidationInterface(sub);
+
+    std::vector<std::shared_ptr<const CBlock>> branch_b;
+    auto last_b{GoodBlock(split->GetHash())};
+    branch_b.push_back(last_b);
+    // One extra block past branch A so most-work is still ahead after ABC
+    // reconnects to the starting height and would otherwise drain.
+    for (int i = 0; i < 12; ++i) {
+        last_b = GoodBlock(last_b->GetHash());
+        branch_b.push_back(last_b);
+    }
+
+    const auto started{std::chrono::steady_clock::now()};
+    for (const auto& block : branch_b) {
+        BOOST_REQUIRE(ProcessBlock(block));
+    }
+    const auto elapsed{std::chrono::steady_clock::now() - started};
+    BOOST_CHECK_MESSAGE(
+        elapsed < std::chrono::seconds{20},
+        "ProcessNewBlock remained blocked on a stuck validation subscriber");
+    BOOST_CHECK(sub->entered);
+    BOOST_CHECK_EQUAL(
+        last_b->GetHash(),
+        WITH_LOCK(Assert(m_node.chainman)->GetMutex(),
+                  return m_node.chainman->ActiveChain().Tip()->GetBlockHash()));
+
+    {
+        std::lock_guard lock{sub->mutex};
+        sub->release = true;
+    }
+    sub->cv.notify_all();
+    m_node.validation_signals->UnregisterSharedValidationInterface(sub);
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
 }
 
 BOOST_AUTO_TEST_CASE(witness_commitment_index)

@@ -29,7 +29,7 @@ get_directory_property(precious_variables CACHE_VARIABLES)
 set(CLIENT_NAME "BTX")
 set(CLIENT_VERSION_MAJOR 0)
 set(CLIENT_VERSION_MINOR 33)
-set(CLIENT_VERSION_BUILD 2)
+set(CLIENT_VERSION_BUILD 3)
 set(CLIENT_VERSION_RC 0)
 set(CLIENT_VERSION_IS_RELEASE "true")
 set(COPYRIGHT_YEAR "2026")
@@ -105,7 +105,9 @@ option(BUILD_BITCOINCONSENSUS_LIB "Build libbtxconsensus library (legacy pkg/lib
 
 option(BUILD_TESTS "Build test_btx executable (legacy build target: test_bitcoin)." ON)
 option(BUILD_TX "Build btx-tx executable (legacy alias: bitcoin-tx)." ${BUILD_TESTS})
-option(BUILD_UTIL "Build btx-util executable (legacy alias: bitcoin-util)." ${BUILD_TESTS})
+# Independent of BUILD_TESTS so gcc13/native archives with -DBUILD_TESTS=OFF
+# still ship btx-util. BUILD_FOR_FUZZING forces this OFF below.
+option(BUILD_UTIL "Build btx-util executable (legacy alias: bitcoin-util)." ON)
 
 option(BUILD_UTIL_CHAINSTATE "Build experimental btx-chainstate executable (legacy target: bitcoin-chainstate)." OFF)
 option(BUILD_KERNEL_LIB "Build experimental libbtxkernel library (legacy/internal target: bitcoinkernel)." ${BUILD_UTIL_CHAINSTATE})

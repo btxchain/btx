@@ -14,10 +14,19 @@ NVIDIA driver and a supported NVIDIA GPU.
 | `linux-x86_64-cuda12` | `x86_64-linux-gnu-cuda12` | CUDA 12 | CUDA 12.9.1 |
 | `linux-x86_64-cuda13` | `x86_64-linux-gnu-cuda13` | CUDA 13 | CUDA 13.2.0 |
 
-The CUDA runtime is statically linked into the CUDA archives. The packaged
-binaries should not have dynamic `libcudart.so`, `libcuda.so`, `libcublas.so`,
-or CUDA `RPATH`/`RUNPATH` entries. The target host still supplies the NVIDIA
-driver stack, including `libcuda.so.1`.
+The CUDA runtime is statically linked into the CUDA archives when the toolkit
+provides `CUDA::cudart_static`. Native CUDA tarballs should be built with
+`-DBTX_CUDA_RUNTIME_LIBRARY=Static` (the experimental CUDA backend now
+auto-selects Static when that target exists; Shared remains an explicit
+override). That removes `libcudart.so.13` (and any `libcudart.so.*`) from the
+loader path. The NVIDIA driver is still required (`libcuda.so.1`).
+
+Guix CUDA builds already pass `-DCMAKE_CUDA_RUNTIME_LIBRARY=Static
+-DBTX_CUDA_RUNTIME_LIBRARY=Static`. Packaged binaries should not have dynamic
+`libcudart.so`, `libcuda.so`, or CUDA `RPATH`/`RUNPATH` entries.
+`libcublasLt` may remain a dynamic dependency of the experimental MatMul CUDA
+backend — a remaining `libcublasLt.so.*` NEEDED entry is expected and is not
+fixed by the cudart-static change.
 
 `cudaRuntimeGetVersion()` reports the statically linked CUDA runtime line, while
 `cudaDriverGetVersion()` reports the installed NVIDIA driver API level. These

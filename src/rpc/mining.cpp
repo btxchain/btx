@@ -42,6 +42,7 @@
 #include <net.h>
 #include <net_processing.h>
 #include <node/context.h>
+#include <node/matmul_trusted_attestations.h>
 #include <node/miner.h>
 #include <node/mining_guard.h>
 #include <node/warnings.h>
@@ -252,6 +253,65 @@ static void EnsureMiningTemplateHasActiveTip(
     if (chainman.ActiveChain().Tip() == nullptr) {
         throw JSONRPCError(RPC_CLIENT_IN_INITIAL_DOWNLOAD, CLIENT_NAME " has no active tip yet");
     }
+}
+
+/**
+ * Bind getblocktemplate to the attested race when MatMul trusted-replay
+ * attestation is configured. BlockAssembler parents only on the active tip,
+ * so a unique competing attested HAVE_DATA sibling cannot be adopted here
+ * without a silent reorg. Refuse rather than extend the stranded twin.
+ *
+ * Unconfigured nodes (-matmultrustedpubkey unset) keep GBT-on-active-tip.
+ * Headers-only competitors never qualify (FindUniqueCompetingAttestedIndex
+ * requires HAVE_DATA + fully validated txs).
+ */
+static void EnsureMatMulAttestedMiningParent(
+    const ChainstateManager& chainman) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    if (!node::matmul_trusted::IsConfigured()) return;
+
+    const CBlockIndex* const tip{chainman.ActiveChain().Tip()};
+    if (tip == nullptr) return;
+
+    const Consensus::Params& consensus{chainman.GetConsensus()};
+    const bool active_at_tip{
+        consensus.IsMatMulTrustedReplayAttestationActive(tip->nHeight)};
+    const bool active_at_next{
+        tip->nHeight < std::numeric_limits<int32_t>::max() &&
+        consensus.IsMatMulTrustedReplayAttestationActive(tip->nHeight + 1)};
+    if (!active_at_tip && !active_at_next) return;
+
+    // Linear-chain signer lag with the frontier already on this chain:
+    // getmatmulattestedtip on_active_chain, FindUniqueCompetingAttestedIndex
+    // is null (attested HAVE_DATA sits on this chain), so GBT keeps
+    // parenting the active tip. A headers-only competing flood is likewise
+    // ignored — never parent a headers-only hash.
+    // Unique competing attested HAVE_DATA sibling *or* unique attested
+    // HAVE_DATA suffix of an already-attested tip: do not issue a template
+    // that extends the stranded race / mines a competing child. That covers
+    // an unattested lost twin, dual-attested same-height siblings (live
+    // 2026-08-15: tip had quorum on the loser while the signed frontier sat
+    // on the other fork), and catch-up (live 2026-08-15: tip 189675 attested,
+    // unique HAVE_DATA child 189676 attested, GBT kept mining).
+    const CBlockIndex* const attested{
+        chainman.FindUniqueCompetingAttestedIndex()};
+    if (attested == nullptr || attested == tip) return;
+
+    if (!(attested->nStatus & BLOCK_HAVE_DATA) ||
+        !attested->IsValid(BLOCK_VALID_TRANSACTIONS) ||
+        !attested->HaveNumChainTxs()) {
+        return;
+    }
+
+    throw JSONRPCError(
+        RPC_CLIENT_IN_INITIAL_DOWNLOAD,
+        strprintf(
+            "Active tip %s (height %d) is not the unique competing attested block %s (height %d) available with HAVE_DATA. "
+            "getblocktemplate will not extend the unattested race. Wait for the node to adopt the attested tip, or follow getmatmulattestedtip.",
+            tip->GetBlockHash().GetHex(),
+            tip->nHeight,
+            attested->GetBlockHash().GetHex(),
+            attested->nHeight));
 }
 
 /**
@@ -1282,6 +1342,11 @@ static UniValue BuildForkHealthSummary(ChainstateManager& chainman) EXCLUSIVE_LO
     if (validated_fork_branch_length >= 2) {
         observations.push_back("validated_fork_branch_depth_ge_2");
     }
+    const CBlockIndex* const best_header = chainman.m_best_header;
+    if (active_tip != nullptr && best_header != nullptr &&
+        best_header->GetAncestor(active_tip->nHeight) != active_tip) {
+        observations.push_back("best_header_diverged_from_active_tip");
+    }
 
     UniValue obj(UniValue::VOBJ);
     obj.pushKV("active_height", active_tip != nullptr ? active_tip->nHeight : -1);
@@ -1705,6 +1770,14 @@ static UniValue BuildBackendRuntimeProfile(
             "capacity_rejections", scheduler.capacity_rejections);
         rc_scheduler.pushKV(
             "preemption_requests", scheduler.preemption_requests);
+        rc_scheduler.pushKV(
+            "preemption_deferred", scheduler.preemption_deferred);
+        rc_scheduler.pushKV(
+            "combined_authority_miner_degraded",
+            scheduler.combined_authority_miner_degraded);
+        rc_scheduler.pushKV(
+            "candidate_mining_min_lease_ms",
+            scheduler.candidate_mining_min_lease_ms);
         rc_scheduler.pushKV(
             "release_invariant_violations",
             scheduler.release_invariant_violations);
@@ -5396,6 +5469,10 @@ static UniValue MiningChainGuardToJSON(const node::MiningChainGuardStatus& statu
     chain_guard.pushKV("last_deferred_fork_height", status.last_deferred_fork_height);
     chain_guard.pushKV("last_deferred_candidate_height", status.last_deferred_candidate_height);
     chain_guard.pushKV("last_deferred_unix", status.last_deferred_unix);
+    chain_guard.pushKV("local_tip_hash", status.local_tip_hash);
+    chain_guard.pushKV("same_tip_hash_peers", status.same_tip_hash_peers);
+    chain_guard.pushKV("conflicting_tip_hash_peers", status.conflicting_tip_hash_peers);
+    chain_guard.pushKV("island_suspect", status.island_suspect);
     return chain_guard;
 }
 
@@ -5530,7 +5607,7 @@ static bool GenerateBlock(ChainstateManager& chainman, CBlock&& block, uint64_t&
                 next_height,
                 &abort_mining,
                 freivalds_payload_out,
-                nullptr,
+                /*share_target_override=*/nullptr,
                 parent_median_time_past)) {
             cleanup_watcher();
             if (max_tries == 0 || chainman.m_interrupt) return false;
@@ -6021,7 +6098,7 @@ static RPCHelpMan getmininginfo()
                             {RPCResult::Type::BOOL, "initial_block_download", "Whether the local node is still in initial block download"},
                             {RPCResult::Type::BOOL, "network_active", "Whether P2P networking is active"},
                             {RPCResult::Type::BOOL, "should_pause_mining", "Compatibility field retained for older pool software; v0.32.12+ guard recovery keeps it false and reports risk through healthy/reason/recommended_action"},
-                            {RPCResult::Type::STR, "recommended_action", "Recommended miner action: continue, continue_with_warning, wait_for_tip, mine_current_tip_and_catch_up, mine_current_tip_and_enable_network, add_outbound_peers, propagate_tip, or mine_current_tip"},
+                            {RPCResult::Type::STR, "recommended_action", "Recommended miner action: continue, continue_with_warning, wait_for_tip, mine_current_tip_and_catch_up, mine_current_tip_and_enable_network, add_outbound_peers, propagate_tip, check_attested_tip, or mine_current_tip"},
                             {RPCResult::Type::STR, "reason", "Current guard decision reason"},
                             {RPCResult::Type::NUM, "local_tip", "Current local active-chain height"},
                             {RPCResult::Type::NUM, "peer_count", "Outbound peers considered for the guard decision"},
@@ -6043,6 +6120,10 @@ static RPCHelpMan getmininginfo()
                             {RPCResult::Type::NUM, "last_deferred_fork_height", "Fork height for the most recent deferred candidate, or -1"},
                             {RPCResult::Type::NUM, "last_deferred_candidate_height", "Candidate tip height for the most recent deferred candidate, or -1"},
                             {RPCResult::Type::NUM_TIME, "last_deferred_unix", "Unix timestamp when the most recent deferred candidate was observed, or 0"},
+                            {RPCResult::Type::STR_HEX, "local_tip_hash", "Active tip hash compared against outbound peers' best-known hashes"},
+                            {RPCResult::Type::NUM, "same_tip_hash_peers", "Outbound peers whose best-known block hash equals the local tip"},
+                            {RPCResult::Type::NUM, "conflicting_tip_hash_peers", "Outbound peers at the local tip height whose best-known hash differs"},
+                            {RPCResult::Type::BOOL, "island_suspect", "True when same-height peer hashes disagree or too few outbound peers exist to rule out mining-alone"},
                         }},
                         {RPCResult::Type::OBJ, "fork_health", "Compact chain-tip pressure summary for mining monitors; advisory only and never a mining pause condition",
                         {
@@ -6233,6 +6314,9 @@ static RPCHelpMan getmininginfo()
                                 {RPCResult::Type::NUM, "queue_rejections", "Requests refused by global or per-lane waiter limits"},
                                 {RPCResult::Type::NUM, "capacity_rejections", "Requests refused because the declared workspace exceeds provider capacity"},
                                 {RPCResult::Type::NUM, "preemption_requests", "Higher-priority requests that asked the current owner to cancel"},
+                                {RPCResult::Type::NUM, "preemption_deferred", "Tip/reseal preemption attempts delayed by the CandidateMining min-lease quantum"},
+                                {RPCResult::Type::BOOL, "combined_authority_miner_degraded", "True after tip/reseal contended with CandidateMining on this process; combined authority+miner is throughput-degraded"},
+                                {RPCResult::Type::NUM, "candidate_mining_min_lease_ms", "Min CandidateMining lease hold before yielding to higher priority (BTX_RC_CANDIDATE_MINING_LEASE_MS)"},
                                 {RPCResult::Type::NUM, "release_invariant_violations", "Invalid/double/mismatched lease release attempts; any nonzero value is a fatal integrity signal"},
                                 {RPCResult::Type::NUM, "queue_depth", "Current accelerator waiters"},
                                 {RPCResult::Type::NUM, "queue_high_water", "Maximum accelerator waiters"},
@@ -6753,7 +6837,7 @@ static RPCHelpMan getmatmulchallenge()
                             {RPCResult::Type::BOOL, "initial_block_download", "Whether the local node is still in initial block download"},
                             {RPCResult::Type::BOOL, "network_active", "Whether P2P networking is active"},
                             {RPCResult::Type::BOOL, "should_pause_mining", "Compatibility field retained for older pool software; v0.32.12+ guard recovery keeps it false and reports risk through healthy/reason/recommended_action"},
-                            {RPCResult::Type::STR, "recommended_action", "Recommended miner action: continue, continue_with_warning, wait_for_tip, mine_current_tip_and_catch_up, mine_current_tip_and_enable_network, add_outbound_peers, propagate_tip, or mine_current_tip"},
+                            {RPCResult::Type::STR, "recommended_action", "Recommended miner action: continue, continue_with_warning, wait_for_tip, mine_current_tip_and_catch_up, mine_current_tip_and_enable_network, add_outbound_peers, propagate_tip, check_attested_tip, or mine_current_tip"},
                             {RPCResult::Type::STR, "reason", "Current guard decision reason"},
                             {RPCResult::Type::NUM, "local_tip", "Current local active-chain height"},
                             {RPCResult::Type::NUM, "peer_count", "Outbound peers considered for the guard decision"},
@@ -6775,6 +6859,10 @@ static RPCHelpMan getmatmulchallenge()
                             {RPCResult::Type::NUM, "last_deferred_fork_height", "Fork height for the most recent deferred candidate, or -1"},
                             {RPCResult::Type::NUM, "last_deferred_candidate_height", "Candidate tip height for the most recent deferred candidate, or -1"},
                             {RPCResult::Type::NUM_TIME, "last_deferred_unix", "Unix timestamp when the most recent deferred candidate was observed, or 0"},
+                            {RPCResult::Type::STR_HEX, "local_tip_hash", "Active tip hash compared against outbound peers' best-known hashes"},
+                            {RPCResult::Type::NUM, "same_tip_hash_peers", "Outbound peers whose best-known block hash equals the local tip"},
+                            {RPCResult::Type::NUM, "conflicting_tip_hash_peers", "Outbound peers at the local tip height whose best-known hash differs"},
+                            {RPCResult::Type::BOOL, "island_suspect", "True when same-height peer hashes disagree or too few outbound peers exist to rule out mining-alone"},
                         }},
                         {RPCResult::Type::STR_HEX, "bits", "Compact target"},
                         {RPCResult::Type::NUM, "difficulty", "Difficulty"},
@@ -7167,7 +7255,7 @@ static RPCHelpMan getmatmulchallengeprofile()
                             {RPCResult::Type::BOOL, "initial_block_download", "Whether the local node is still in initial block download"},
                             {RPCResult::Type::BOOL, "network_active", "Whether P2P networking is active"},
                             {RPCResult::Type::BOOL, "should_pause_mining", "Compatibility field retained for older pool software; v0.32.12+ guard recovery keeps it false and reports risk through healthy/reason/recommended_action"},
-                            {RPCResult::Type::STR, "recommended_action", "Recommended miner action: continue, continue_with_warning, wait_for_tip, mine_current_tip_and_catch_up, mine_current_tip_and_enable_network, add_outbound_peers, propagate_tip, or mine_current_tip"},
+                            {RPCResult::Type::STR, "recommended_action", "Recommended miner action: continue, continue_with_warning, wait_for_tip, mine_current_tip_and_catch_up, mine_current_tip_and_enable_network, add_outbound_peers, propagate_tip, check_attested_tip, or mine_current_tip"},
                             {RPCResult::Type::STR, "reason", "Current guard decision reason"},
                             {RPCResult::Type::NUM, "local_tip", "Current local active-chain height"},
                             {RPCResult::Type::NUM, "peer_count", "Outbound peers considered for the guard decision"},
@@ -7189,6 +7277,10 @@ static RPCHelpMan getmatmulchallengeprofile()
                             {RPCResult::Type::NUM, "last_deferred_fork_height", "Fork height for the most recent deferred candidate, or -1"},
                             {RPCResult::Type::NUM, "last_deferred_candidate_height", "Candidate tip height for the most recent deferred candidate, or -1"},
                             {RPCResult::Type::NUM_TIME, "last_deferred_unix", "Unix timestamp when the most recent deferred candidate was observed, or 0"},
+                            {RPCResult::Type::STR_HEX, "local_tip_hash", "Active tip hash compared against outbound peers' best-known hashes"},
+                            {RPCResult::Type::NUM, "same_tip_hash_peers", "Outbound peers whose best-known block hash equals the local tip"},
+                            {RPCResult::Type::NUM, "conflicting_tip_hash_peers", "Outbound peers at the local tip height whose best-known hash differs"},
+                            {RPCResult::Type::BOOL, "island_suspect", "True when same-height peer hashes disagree or too few outbound peers exist to rule out mining-alone"},
                         }},
                         {RPCResult::Type::STR_HEX, "bits", "Compact target"},
                         {RPCResult::Type::NUM, "difficulty", "Difficulty"},
@@ -8725,6 +8817,7 @@ static RPCHelpMan getblocktemplate()
         "It returns data needed to construct a block to work on.\n"
         "For MatMul PoW networks, the template includes matrix seeds and parameters needed for external mining.\n"
         "External miners should solve the MatMul proof using the provided seeds and submit via submitblock.\n"
+        "When -matmultrustedpubkey is configured and Profile-1 attestation is active, a template is not issued when a unique competing attested HAVE_DATA sibling exists (unattested lost twin or dual-attested short-reorg) or when a unique attested HAVE_DATA child of the current tip is waiting to be connected (catch-up); follow getmatmulattestedtip instead.\n"
         "For full specification, see BIPs 22, 23, 9, and 145:\n"
         "    https://github.com/bitcoin/bips/blob/master/bip-0022.mediawiki\n"
         "    https://github.com/bitcoin/bips/blob/master/bip-0023.mediawiki\n"
@@ -8919,7 +9012,7 @@ static RPCHelpMan getblocktemplate()
                     {RPCResult::Type::BOOL, "initial_block_download", "Whether the local node is still in initial block download"},
                     {RPCResult::Type::BOOL, "network_active", "Whether P2P networking is active"},
                     {RPCResult::Type::BOOL, "should_pause_mining", "Compatibility field retained for older pool software; v0.32.12+ guard recovery keeps it false and reports risk through healthy/reason/recommended_action"},
-                    {RPCResult::Type::STR, "recommended_action", "Recommended miner action: continue, continue_with_warning, wait_for_tip, mine_current_tip_and_catch_up, mine_current_tip_and_enable_network, add_outbound_peers, propagate_tip, or mine_current_tip"},
+                    {RPCResult::Type::STR, "recommended_action", "Recommended miner action: continue, continue_with_warning, wait_for_tip, mine_current_tip_and_catch_up, mine_current_tip_and_enable_network, add_outbound_peers, propagate_tip, check_attested_tip, or mine_current_tip"},
                     {RPCResult::Type::STR, "reason", "Current guard decision reason"},
                     {RPCResult::Type::NUM, "local_tip", "Current local active-chain height"},
                     {RPCResult::Type::NUM, "peer_count", "Outbound peers considered for the guard decision"},
@@ -8941,6 +9034,10 @@ static RPCHelpMan getblocktemplate()
                     {RPCResult::Type::NUM, "last_deferred_fork_height", "Fork height for the most recent deferred candidate, or -1"},
                     {RPCResult::Type::NUM, "last_deferred_candidate_height", "Candidate tip height for the most recent deferred candidate, or -1"},
                     {RPCResult::Type::NUM_TIME, "last_deferred_unix", "Unix timestamp when the most recent deferred candidate was observed, or 0"},
+                    {RPCResult::Type::STR_HEX, "local_tip_hash", "Active tip hash compared against outbound peers' best-known hashes"},
+                    {RPCResult::Type::NUM, "same_tip_hash_peers", "Outbound peers whose best-known block hash equals the local tip"},
+                    {RPCResult::Type::NUM, "conflicting_tip_hash_peers", "Outbound peers at the local tip height whose best-known hash differs"},
+                    {RPCResult::Type::BOOL, "island_suspect", "True when same-height peer hashes disagree or too few outbound peers exist to rule out mining-alone"},
                 }},
                 {RPCResult::Type::STR_HEX, "signet_challenge", /*optional=*/true, "Only on signet"},
                 {RPCResult::Type::STR_HEX, "default_witness_commitment", /*optional=*/true, "a valid witness commitment for the unmodified block template"},
@@ -9132,6 +9229,7 @@ static RPCHelpMan getblocktemplate()
     }
     const auto chain_guard_status = node::GetMiningChainGuardStatus(node);
     node::MaybeRequestMiningChainGuardRecovery(chain_guard_status, node);
+    EnsureMatMulAttestedMiningParent(chainman);
 
     // Update block
     static uint256 pindexPrevHash;

@@ -7,10 +7,13 @@
 
 #include <node/matmul_verify_worker.h>
 #include <node/matmul_rc_admission.h>
+#include <node/matmul_trusted_attestations.h>
 #include <matmul/matmul_v4_rc_accelerator_scheduler.h>
+#include <matmul/trusted_exact_replay_attestation.h>
 
 #include <chainparams.h>
 #include <consensus/params.h>
+#include <key.h>
 #include <matmul/exact_gemm_resolve.h>
 #include <matmul/matmul_v4_lt.h>
 #include <matmul/matmul_v4_rc.h>
@@ -85,6 +88,16 @@ struct BlockingVerify {
         }
         cv.notify_all();
     }
+};
+
+struct PendingLeaseProbe {
+    explicit PendingLeaseProbe(std::atomic<int>& live_in) : live{live_in}
+    {
+        ++live;
+    }
+    ~PendingLeaseProbe() { --live; }
+
+    std::atomic<int>& live;
 };
 
 //! Sentinel standing in for the RAII pending-verification slot: counts
@@ -779,6 +792,132 @@ BOOST_AUTO_TEST_CASE(full_body_is_not_preempted_by_authenticated_tip)
         WaitFor([&] { return body_completions.load() == 1; }));
 }
 
+BOOST_AUTO_TEST_CASE(body_competing_branch_survives_header_tip_child_spam)
+{
+    const Consensus::Params& params = Params().GetConsensus();
+    BlockingVerify gate;
+    std::atomic<int> body_completions{0};
+    std::atomic<int> body_retryable{0};
+    std::atomic<int> header_retryable{0};
+    auto body_cancelled{std::make_shared<std::atomic_bool>(false)};
+    MatMulVerifyWorker worker{
+        params, /*max_threads=*/1,
+        [&](const CBlock&, int32_t, std::optional<int64_t>) {
+            return gate.Run();
+        }};
+
+    const auto body{MakeBlock(200)};
+    const uint256 body_hash{body->GetHash()};
+    MatMulVerifyWorker::Job body_job{
+        .block = body,
+        .height = 100,
+        .completion = [&](bool ok) {
+            BOOST_CHECK(ok);
+            ++body_completions;
+        },
+        .retryable_failure = [&] { ++body_retryable; },
+        .priority = MatMulVerifyWorker::Priority::CompetingBranch,
+        .cancelled = body_cancelled,
+    };
+    BOOST_REQUIRE(EnqueueAccepted(worker.Enqueue(body_job)));
+    BOOST_REQUIRE(WaitFor([&] { return gate.running.load() == 1; }));
+
+    constexpr int kSpam{32};
+    for (int i = 0; i < kSpam; ++i) {
+        MatMulVerifyWorker::Job header_job{
+            .height = 101,
+            .retryable_failure = [&] { ++header_retryable; },
+            .header = std::make_shared<CBlockHeader>(
+                MakeBlock(300 + i)->GetBlockHeader()),
+            .priority =
+                MatMulVerifyWorker::Priority::AuthenticatedTipChild,
+        };
+        BOOST_REQUIRE(EnqueueAccepted(worker.Enqueue(header_job)));
+        BOOST_CHECK(
+            !body_cancelled->load(std::memory_order_relaxed));
+    }
+    BOOST_CHECK_EQUAL(body_retryable.load(), 0);
+    BOOST_CHECK(!worker.CancelRetryBackoffActiveForTest(body_hash));
+    BOOST_CHECK(worker.Contains(body_hash));
+
+    gate.Release();
+    BOOST_REQUIRE(WaitFor([&] { return body_completions.load() == 1; }));
+    BOOST_CHECK_EQUAL(body_retryable.load(), 0);
+    BOOST_CHECK(
+        !body_cancelled->load(std::memory_order_relaxed));
+    BOOST_CHECK(!worker.CancelRetryBackoffActiveForTest(body_hash));
+    worker.Stop();
+    BOOST_CHECK_EQUAL(body_completions.load(), 1);
+    BOOST_CHECK_EQUAL(body_retryable.load(), 0);
+}
+
+BOOST_AUTO_TEST_CASE(cancelled_exact_replay_same_hash_has_retry_backoff)
+{
+    const Consensus::Params& params = Params().GetConsensus();
+    BlockingVerify gate;
+    std::atomic<int> retryable{0};
+    std::atomic<int> verdicts{0};
+    MatMulVerifyWorker worker{
+        params, /*max_threads=*/1,
+        [&](const CBlock&, int32_t, std::optional<int64_t>) {
+            return gate.Run();
+        }};
+
+    const auto block{MakeBlock(400)};
+    const uint256 hash{block->GetHash()};
+    auto cancelled{std::make_shared<std::atomic_bool>(false)};
+    MatMulVerifyWorker::Job header_job{
+        .height = 100,
+        .completion = [&](bool) { ++verdicts; },
+        .retryable_failure = [&] { ++retryable; },
+        .header = std::make_shared<CBlockHeader>(
+            block->GetBlockHeader()),
+        .priority = MatMulVerifyWorker::Priority::CompetingBranch,
+        .cancelled = cancelled,
+    };
+    BOOST_REQUIRE(EnqueueAccepted(worker.Enqueue(header_job)));
+    BOOST_REQUIRE(WaitFor([&] { return gate.running.load() == 1; }));
+
+    MatMulVerifyWorker::Job tip_job{
+        .height = 100,
+        .header = std::make_shared<CBlockHeader>(
+            MakeBlock(401)->GetBlockHeader()),
+        .priority =
+            MatMulVerifyWorker::Priority::AuthenticatedTipChild,
+    };
+    BOOST_REQUIRE(EnqueueAccepted(worker.Enqueue(tip_job)));
+    BOOST_CHECK(cancelled->load(std::memory_order_relaxed));
+    gate.Release();
+    BOOST_REQUIRE(WaitFor([&] { return retryable.load() == 1; }));
+    BOOST_CHECK_EQUAL(verdicts.load(), 0);
+    BOOST_CHECK(worker.CancelRetryBackoffActiveForTest(hash));
+
+    MatMulVerifyWorker::Job immediate_retry{
+        .height = 100,
+        .completion = [&](bool) { ++verdicts; },
+        .retryable_failure = [&] { ++retryable; },
+        .header = std::make_shared<CBlockHeader>(
+            block->GetBlockHeader()),
+        .priority = MatMulVerifyWorker::Priority::CompetingBranch,
+    };
+    BOOST_CHECK(
+        worker.Enqueue(immediate_retry) ==
+        MatMulVerifyWorker::EnqueueResult::Deferred);
+    BOOST_CHECK(immediate_retry.header != nullptr);
+    BOOST_CHECK(immediate_retry.completion);
+    BOOST_CHECK_EQUAL(retryable.load(), 1);
+
+    MatMulVerifyWorker::Job other_hash{
+        .height = 100,
+        .header = std::make_shared<CBlockHeader>(
+            MakeBlock(402)->GetBlockHeader()),
+        .priority = MatMulVerifyWorker::Priority::CompetingBranch,
+    };
+    BOOST_CHECK(EnqueueAccepted(worker.Enqueue(other_hash)));
+    worker.Stop();
+    BOOST_CHECK_EQUAL(verdicts.load(), 0);
+}
+
 BOOST_AUTO_TEST_CASE(body_does_not_join_already_cancelled_header)
 {
     const Consensus::Params& params = Params().GetConsensus();
@@ -1441,6 +1580,15 @@ BOOST_AUTO_TEST_CASE(rc_accelerator_scheduler_prioritizes_and_preempts)
     auto& scheduler{matmul::v4::rc::GetRCAcceleratorScheduler()};
     BOOST_REQUIRE(scheduler.ResetStatsForTest());
 
+    // Disable the CandidateMining min-lease quantum so this unit test still
+    // asserts immediate tip preemption. Production defaults to a non-zero
+    // quantum (see BTX_RC_CANDIDATE_MINING_LEASE_MS).
+#ifdef WIN32
+    _putenv_s("BTX_RC_CANDIDATE_MINING_LEASE_MS", "0");
+#else
+    setenv("BTX_RC_CANDIDATE_MINING_LEASE_MS", "0", 1);
+#endif
+
     std::atomic_bool candidate_cancelled{false};
     auto candidate{scheduler.Acquire(
         Scheduler::Priority::CandidateMining, &candidate_cancelled,
@@ -1497,6 +1645,12 @@ BOOST_AUTO_TEST_CASE(rc_accelerator_scheduler_prioritizes_and_preempts)
     BOOST_CHECK_EQUAL(stats.preemption_requests, 1U);
     BOOST_CHECK_GE(stats.queue_high_water, 3U);
     BOOST_CHECK(!stats.active);
+
+#ifdef WIN32
+    _putenv_s("BTX_RC_CANDIDATE_MINING_LEASE_MS", "");
+#else
+    unsetenv("BTX_RC_CANDIDATE_MINING_LEASE_MS");
+#endif
 }
 
 BOOST_AUTO_TEST_CASE(rc_accelerator_scheduler_cancelled_wait_is_retryable)
@@ -1734,6 +1888,12 @@ BOOST_AUTO_TEST_CASE(
     auto& scheduler{matmul::v4::rc::GetRCAcceleratorScheduler()};
     BOOST_REQUIRE(scheduler.ResetStatsForTest());
 
+#ifdef WIN32
+    _putenv_s("BTX_RC_CANDIDATE_MINING_LEASE_MS", "0");
+#else
+    setenv("BTX_RC_CANDIDATE_MINING_LEASE_MS", "0", 1);
+#endif
+
     // CI-scale contention rehearsal: repeatedly occupy the candidate lane,
     // enqueue one request from every validation/reseal class, then verify
     // priority handoff and exact ownership release. This is deterministic and
@@ -1798,6 +1958,64 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(stats.completions, rounds * 4);
     BOOST_CHECK_EQUAL(stats.release_invariant_violations, 0U);
     BOOST_CHECK_GE(stats.preemption_requests, rounds);
+
+#ifdef WIN32
+    _putenv_s("BTX_RC_CANDIDATE_MINING_LEASE_MS", "");
+#else
+    unsetenv("BTX_RC_CANDIDATE_MINING_LEASE_MS");
+#endif
+}
+
+BOOST_AUTO_TEST_CASE(
+    rc_accelerator_scheduler_candidate_mining_min_lease_quantum)
+{
+    using Scheduler = matmul::v4::rc::RCAcceleratorScheduler;
+    auto& scheduler{matmul::v4::rc::GetRCAcceleratorScheduler()};
+    BOOST_REQUIRE(scheduler.ResetStatsForTest());
+
+#ifdef WIN32
+    _putenv_s("BTX_RC_CANDIDATE_MINING_LEASE_MS", "200");
+#else
+    setenv("BTX_RC_CANDIDATE_MINING_LEASE_MS", "200", 1);
+#endif
+
+    std::atomic_bool candidate_cancelled{false};
+    auto candidate{scheduler.Acquire(
+        Scheduler::Priority::CandidateMining, &candidate_cancelled,
+        "candidate-quantum")};
+    BOOST_REQUIRE(candidate);
+
+    std::atomic_bool tip_cancelled{false};
+    std::atomic_bool tip_acquired{false};
+    std::thread tip{[&] {
+        auto lease{scheduler.Acquire(
+            Scheduler::Priority::TipValidation, &tip_cancelled,
+            "tip-quantum")};
+        tip_acquired.store(static_cast<bool>(lease),
+                           std::memory_order_relaxed);
+    }};
+
+    BOOST_REQUIRE(WaitFor(
+        [&] { return scheduler.GetStats().queue_depth == 1; }));
+    // Within the quantum, tip must wait and must not cancel mining yet.
+    std::this_thread::sleep_for(std::chrono::milliseconds{50});
+    BOOST_CHECK(!candidate_cancelled.load(std::memory_order_relaxed));
+    BOOST_CHECK_GE(scheduler.GetStats().preemption_deferred, 1U);
+    BOOST_CHECK(scheduler.GetStats().combined_authority_miner_degraded);
+
+    BOOST_REQUIRE(WaitFor([&] {
+        return candidate_cancelled.load(std::memory_order_relaxed);
+    }));
+    candidate = {};
+    tip.join();
+    BOOST_CHECK(tip_acquired.load(std::memory_order_relaxed));
+    BOOST_CHECK_GE(scheduler.GetStats().preemption_requests, 1U);
+
+#ifdef WIN32
+    _putenv_s("BTX_RC_CANDIDATE_MINING_LEASE_MS", "");
+#else
+    unsetenv("BTX_RC_CANDIDATE_MINING_LEASE_MS");
+#endif
 }
 
 BOOST_AUTO_TEST_CASE(
@@ -1940,6 +2158,215 @@ BOOST_AUTO_TEST_CASE(
     scheduler.ConfigureWorkspaceCapacity("", 0);
 }
 
+BOOST_AUTO_TEST_CASE(rc_accelerator_scheduler_tip_validation_displaces_oldest_same_lane)
+{
+    using Scheduler = matmul::v4::rc::RCAcceleratorScheduler;
+    auto& scheduler{matmul::v4::rc::GetRCAcceleratorScheduler()};
+    BOOST_REQUIRE(scheduler.ResetStatsForTest());
+
+    std::atomic_bool owner_cancelled{false};
+    auto owner{scheduler.Acquire(
+        Scheduler::Priority::CandidateMining, &owner_cancelled,
+        "mining-owner")};
+    BOOST_REQUIRE(owner);
+
+    std::atomic_bool first_cancelled{false};
+    std::atomic_bool first_acquired{true};
+    std::thread first{[&] {
+        auto lease{scheduler.Acquire(
+            Scheduler::Priority::TipValidation, &first_cancelled,
+            "sibling-a", nullptr, std::chrono::seconds{30})};
+        first_acquired.store(static_cast<bool>(lease),
+                             std::memory_order_relaxed);
+    }};
+    BOOST_REQUIRE(WaitFor(
+        [&] { return scheduler.GetStats().queue_depth == 1; }));
+    std::atomic_bool second_cancelled{false};
+    std::thread second{[&] {
+        auto lease{scheduler.Acquire(
+            Scheduler::Priority::TipValidation, &second_cancelled,
+            "sibling-b", nullptr, std::chrono::seconds{30})};
+        (void)lease;
+    }};
+    BOOST_REQUIRE(WaitFor(
+        [&] { return scheduler.GetStats().queue_depth == 2; }));
+
+    std::atomic_bool third_cancelled{false};
+    std::thread third{[&] {
+        auto lease{scheduler.Acquire(
+            Scheduler::Priority::TipValidation, &third_cancelled,
+            "attested-child", nullptr, std::chrono::seconds{30})};
+        (void)lease;
+    }};
+    BOOST_REQUIRE(WaitFor(
+        [&] { return scheduler.GetStats().cancelled_waits >= 1; }));
+
+    first_cancelled.store(true);
+    second_cancelled.store(true);
+    third_cancelled.store(true);
+    scheduler.NotifyCancellation();
+    first.join();
+    second.join();
+    third.join();
+    owner = {};
+    BOOST_CHECK(!first_acquired.load(std::memory_order_relaxed));
+}
+
+BOOST_AUTO_TEST_CASE(rc_accelerator_scheduler_tip_validation_does_not_displace_candidate_mining)
+{
+    using Scheduler = matmul::v4::rc::RCAcceleratorScheduler;
+    auto& scheduler{matmul::v4::rc::GetRCAcceleratorScheduler()};
+    BOOST_REQUIRE(scheduler.ResetStatsForTest());
+
+    std::atomic_bool owner_cancelled{false};
+    auto owner{scheduler.Acquire(
+        Scheduler::Priority::TipValidation, &owner_cancelled,
+        "tip-owner")};
+    BOOST_REQUIRE(owner);
+
+    std::atomic_bool mining_cancelled{false};
+    std::atomic_bool mining_acquired{false};
+    std::thread mining{[&] {
+        auto lease{scheduler.Acquire(
+            Scheduler::Priority::CandidateMining, &mining_cancelled,
+            "own-candidate", nullptr, std::chrono::seconds{30})};
+        mining_acquired.store(static_cast<bool>(lease),
+                              std::memory_order_relaxed);
+    }};
+    BOOST_REQUIRE(WaitFor(
+        [&] { return scheduler.GetStats().queue_depth == 1; }));
+
+    std::atomic_bool sibling_a_cancelled{false};
+    std::thread sibling_a{[&] {
+        auto lease{scheduler.Acquire(
+            Scheduler::Priority::TipValidation, &sibling_a_cancelled,
+            "sibling-a", nullptr, std::chrono::seconds{30})};
+        (void)lease;
+    }};
+    BOOST_REQUIRE(WaitFor(
+        [&] { return scheduler.GetStats().queue_depth == 2; }));
+    std::atomic_bool sibling_b_cancelled{false};
+    std::thread sibling_b{[&] {
+        auto lease{scheduler.Acquire(
+            Scheduler::Priority::TipValidation, &sibling_b_cancelled,
+            "sibling-b", nullptr, std::chrono::seconds{30})};
+        (void)lease;
+    }};
+    BOOST_REQUIRE(WaitFor(
+        [&] { return scheduler.GetStats().queue_depth == 3; }));
+
+    // TipValidation lane is full (2 waiters) plus a CandidateMining waiter.
+    // A third sibling may displace the oldest TipValidation leftover, but
+    // must not steal the mining waiter.
+    std::atomic_bool sibling_c_cancelled{false};
+    std::thread sibling_c{[&] {
+        auto lease{scheduler.Acquire(
+            Scheduler::Priority::TipValidation, &sibling_c_cancelled,
+            "sibling-c", nullptr, std::chrono::seconds{30})};
+        (void)lease;
+    }};
+    BOOST_REQUIRE(WaitFor(
+        [&] { return scheduler.GetStats().cancelled_waits >= 1; }));
+    BOOST_CHECK_EQUAL(scheduler.GetStats().queue_depth, 3U);
+    BOOST_CHECK_EQUAL(
+        scheduler.GetStats()
+            .lanes[static_cast<size_t>(Scheduler::Priority::CandidateMining)]
+            .cancelled_waits,
+        0U);
+    BOOST_CHECK(!mining_acquired.load(std::memory_order_relaxed));
+
+    mining_cancelled.store(true);
+    sibling_a_cancelled.store(true);
+    sibling_b_cancelled.store(true);
+    sibling_c_cancelled.store(true);
+    scheduler.NotifyCancellation();
+    mining.join();
+    sibling_a.join();
+    sibling_b.join();
+    sibling_c.join();
+    owner = {};
+}
+
+BOOST_AUTO_TEST_CASE(rc_accelerator_scheduler_starved_mining_outranks_tip_flood)
+{
+    using Scheduler = matmul::v4::rc::RCAcceleratorScheduler;
+    auto& scheduler{matmul::v4::rc::GetRCAcceleratorScheduler()};
+    BOOST_REQUIRE(scheduler.ResetStatsForTest());
+
+#ifdef WIN32
+    _putenv_s("BTX_RC_CANDIDATE_MINING_ANTI_STARVE_MS", "150");
+#else
+    setenv("BTX_RC_CANDIDATE_MINING_ANTI_STARVE_MS", "150", 1);
+#endif
+    struct AntiStarveEnvGuard {
+        ~AntiStarveEnvGuard()
+        {
+#ifdef WIN32
+            _putenv_s("BTX_RC_CANDIDATE_MINING_ANTI_STARVE_MS", "");
+#else
+            unsetenv("BTX_RC_CANDIDATE_MINING_ANTI_STARVE_MS");
+#endif
+        }
+    } anti_starve_env;
+
+    std::atomic_bool owner_cancelled{false};
+    auto owner{scheduler.Acquire(
+        Scheduler::Priority::TipValidation, &owner_cancelled,
+        "tip-storm-owner")};
+    BOOST_REQUIRE(owner);
+
+    std::atomic_bool sibling_a_cancelled{false};
+    std::atomic_bool sibling_a_acquired{false};
+    std::thread sibling_a{[&] {
+        auto lease{scheduler.Acquire(
+            Scheduler::Priority::TipValidation, &sibling_a_cancelled,
+            "sibling-a", nullptr, std::chrono::seconds{30})};
+        sibling_a_acquired.store(
+            static_cast<bool>(lease), std::memory_order_relaxed);
+    }};
+    BOOST_REQUIRE(WaitFor(
+        [&] { return scheduler.GetStats().queue_depth == 1; }));
+    std::atomic_bool sibling_b_cancelled{false};
+    std::thread sibling_b{[&] {
+        auto lease{scheduler.Acquire(
+            Scheduler::Priority::TipValidation, &sibling_b_cancelled,
+            "sibling-b", nullptr, std::chrono::seconds{30})};
+        (void)lease;
+    }};
+    BOOST_REQUIRE(WaitFor(
+        [&] { return scheduler.GetStats().queue_depth == 2; }));
+
+    std::atomic_bool mining_cancelled{false};
+    std::atomic_bool mining_acquired{false};
+    std::thread mining{[&] {
+        auto lease{scheduler.Acquire(
+            Scheduler::Priority::CandidateMining, &mining_cancelled,
+            "submitblock", nullptr, std::chrono::seconds{30})};
+        mining_acquired.store(
+            static_cast<bool>(lease), std::memory_order_relaxed);
+        while (lease &&
+               !mining_cancelled.load(std::memory_order_relaxed)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        }
+    }};
+    BOOST_REQUIRE(WaitFor(
+        [&] { return scheduler.GetStats().queue_depth == 3; }));
+
+    std::this_thread::sleep_for(std::chrono::milliseconds{200});
+    owner = {};
+    BOOST_REQUIRE(WaitFor(
+        [&] { return mining_acquired.load(std::memory_order_relaxed); }));
+    BOOST_CHECK(!sibling_a_acquired.load(std::memory_order_relaxed));
+
+    sibling_a_cancelled.store(true);
+    sibling_b_cancelled.store(true);
+    mining_cancelled.store(true);
+    scheduler.NotifyCancellation();
+    sibling_a.join();
+    sibling_b.join();
+    mining.join();
+}
+
 BOOST_AUTO_TEST_CASE(rc_accelerator_scheduler_queue_deadline_is_bounded)
 {
     using Scheduler = matmul::v4::rc::RCAcceleratorScheduler;
@@ -1973,6 +2400,295 @@ BOOST_AUTO_TEST_CASE(rc_accelerator_scheduler_queue_deadline_is_bounded)
             Scheduler::Priority::SpeculativeValidation)].timed_out_waits,
         1U);
     owner = {};
+}
+
+BOOST_AUTO_TEST_CASE(trusted_mirror_parks_without_blocking_other_jobs)
+{
+    using namespace std::chrono_literals;
+    node::matmul_trusted::ResetForTest();
+    const CKey signer{[] {
+        CKey key;
+        key.MakeNewKey(/*fCompressed=*/true);
+        return key;
+    }()};
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256::ONE;
+    config.replay_authority_context =
+        uint256::FromHex(std::string(64, 'a')).value();
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    config.local_signer = signer;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/true,
+        /*serve=*/false, /*wait_timeout=*/50ms, error));
+
+    auto params{MakeProfile1ActiveParams()};
+
+    std::atomic<int> completed{0};
+    std::atomic<int> deferred{0};
+    std::atomic<int> pending_leases{0};
+    MatMulVerifyWorker worker{params, /*max_threads=*/1};
+
+    const uint256 tip_hash{uint256::ONE};
+    worker.SetActiveTip(tip_hash, /*tip_height=*/100);
+
+    auto enqueue_trusted = [&](uint32_t salt, int32_t height,
+                               const uint256& prev) {
+        auto block{std::make_shared<CBlock>(*MakeBlock(salt))};
+        block->hashPrevBlock = prev;
+        MatMulVerifyWorker::Job job{
+            .block = block,
+            .height = height,
+            .parent_median_time_past = 1,
+            .completion =
+                [&](bool ok) {
+                    if (ok) ++completed;
+                },
+            .retryable_failure = [&] { ++deferred; },
+            .priority = height == 101
+                            ? MatMulVerifyWorker::Priority::
+                                  AuthenticatedTipChild
+                            : MatMulVerifyWorker::Priority::
+                                  CompetingBranch,
+            .rc_pending_lease =
+                std::make_shared<PendingLeaseProbe>(pending_leases),
+            .retained_body_bytes = 1024,
+        };
+        BOOST_REQUIRE(EnqueueAccepted(worker.Enqueue(job)));
+    };
+
+    // Below-tip backfill and a tip-extender both lack quorum: both must park
+    // concurrently on a single worker thread (no serial 50ms+50ms stall).
+    enqueue_trusted(/*salt=*/1, /*height=*/50, /*prev=*/uint256::ZERO);
+    enqueue_trusted(/*salt=*/2, /*height=*/101, /*prev=*/tip_hash);
+
+    BOOST_REQUIRE(WaitFor(
+        [&] { return worker.AwaitingQuorumForTest() >= 2; }, 2s));
+    BOOST_CHECK_EQUAL(worker.AwaitingQuorumForTest(), 2U);
+    BOOST_CHECK_EQUAL(completed.load(), 0);
+    BOOST_CHECK_EQUAL(deferred.load(), 0);
+    // Signature waits must not retain the cap-one expensive replay lease.
+    // This is the production admission stall the parked-worker change alone
+    // did not fix.
+    BOOST_CHECK_EQUAL(pending_leases.load(), 0);
+
+    // Quorum for the tip-extender only: it must complete while backfill stays
+    // parked (or later times out retryably).
+    {
+        auto tip_child{std::make_shared<CBlock>(*MakeBlock(2))};
+        tip_child->hashPrevBlock = tip_hash;
+        matmul::trusted::ExactReplayAttestation produced;
+        BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
+                          tip_child->GetHash(), 101, &produced) ==
+                      matmul::trusted::AddResult::Accepted);
+        worker.NotifyQuorumReady(tip_child->GetHash());
+    }
+
+    BOOST_REQUIRE(WaitFor([&] { return completed.load() >= 1; }, 2s));
+    BOOST_CHECK_EQUAL(completed.load(), 1);
+    // Backfill should still be awaiting or have timed out retryably — never
+    // accepted without quorum.
+    BOOST_REQUIRE(WaitFor(
+        [&] {
+            return deferred.load() >= 1 ||
+                   worker.AwaitingQuorumForTest() >= 1;
+        },
+        2s));
+    BOOST_CHECK_EQUAL(completed.load(), 1);
+
+    worker.Stop();
+    node::matmul_trusted::ResetForTest();
+}
+
+BOOST_AUTO_TEST_CASE(trusted_mirror_awaiting_quorum_pool_is_bounded)
+{
+    using namespace std::chrono_literals;
+    node::matmul_trusted::ResetForTest();
+    const CKey signer{[] {
+        CKey key;
+        key.MakeNewKey(/*fCompressed=*/true);
+        return key;
+    }()};
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256::ONE;
+    config.replay_authority_context =
+        uint256::FromHex(std::string(64, 'a')).value();
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/true,
+        /*serve=*/false, /*wait_timeout=*/5s, error));
+
+    auto params{MakeProfile1ActiveParams()};
+    std::atomic<int> deferred{0};
+    std::atomic<int> pending_leases{0};
+    MatMulVerifyWorker worker{params, /*max_threads=*/1};
+    const uint256 tip_hash{uint256::ONE};
+    worker.SetActiveTip(tip_hash, /*tip_height=*/100);
+
+    for (size_t i = 0;
+         i < MatMulVerifyWorker::MAX_AWAITING_QUORUM_JOBS + 1; ++i) {
+        auto block{std::make_shared<CBlock>(
+            *MakeBlock(static_cast<uint32_t>(100 + i)))};
+        block->hashPrevBlock = tip_hash;
+        MatMulVerifyWorker::Job job{
+            .block = block,
+            .height = 101,
+            .parent_median_time_past = 1,
+            .retryable_failure = [&] { ++deferred; },
+            .priority = MatMulVerifyWorker::Priority::
+                AuthenticatedTipChild,
+            .rc_pending_lease =
+                std::make_shared<PendingLeaseProbe>(pending_leases),
+            .retained_body_bytes = 1,
+        };
+        BOOST_REQUIRE(EnqueueAccepted(worker.Enqueue(job)));
+    }
+
+    BOOST_REQUIRE(WaitFor(
+        [&] {
+            return worker.AwaitingQuorumForTest() ==
+                       MatMulVerifyWorker::MAX_AWAITING_QUORUM_JOBS &&
+                   deferred.load() >= 1;
+        },
+        2s));
+    BOOST_CHECK_EQUAL(
+        worker.AwaitingQuorumForTest(),
+        MatMulVerifyWorker::MAX_AWAITING_QUORUM_JOBS);
+    BOOST_CHECK_EQUAL(pending_leases.load(), 0);
+
+    worker.Stop();
+    node::matmul_trusted::ResetForTest();
+}
+
+BOOST_AUTO_TEST_CASE(trusted_mirror_park_timeout_is_retryable_not_accept)
+{
+    using namespace std::chrono_literals;
+    node::matmul_trusted::ResetForTest();
+    const CKey signer{[] {
+        CKey key;
+        key.MakeNewKey(/*fCompressed=*/true);
+        return key;
+    }()};
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256::ONE;
+    config.replay_authority_context =
+        uint256::FromHex(std::string(64, 'a')).value();
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/true,
+        /*serve=*/false, /*wait_timeout=*/20ms, error));
+
+    auto params{MakeProfile1ActiveParams()};
+
+    std::atomic<int> completed{0};
+    std::atomic<int> deferred{0};
+    MatMulVerifyWorker worker{params, /*max_threads=*/1};
+    worker.SetActiveTip(uint256::ONE, 10);
+
+    auto block{std::make_shared<CBlock>(*MakeBlock(9))};
+    block->hashPrevBlock = uint256::ONE;
+    MatMulVerifyWorker::Job job{
+        .block = block,
+        .height = 11,
+        .parent_median_time_past = 1,
+        .completion = [&](bool) { ++completed; },
+        .retryable_failure = [&] { ++deferred; },
+        .priority =
+            MatMulVerifyWorker::Priority::AuthenticatedTipChild,
+    };
+    BOOST_REQUIRE(EnqueueAccepted(worker.Enqueue(job)));
+    BOOST_REQUIRE(WaitFor([&] { return deferred.load() >= 1; }, 2s));
+    BOOST_CHECK_EQUAL(completed.load(), 0);
+    BOOST_CHECK_EQUAL(deferred.load(), 1);
+    BOOST_CHECK(!node::matmul_trusted::HasQuorum(block->GetHash(), 11));
+
+    worker.Stop();
+    node::matmul_trusted::ResetForTest();
+}
+
+BOOST_AUTO_TEST_CASE(trusted_mirror_above_frontier_does_not_consume_park_slot)
+{
+    using namespace std::chrono_literals;
+    node::matmul_trusted::ResetForTest();
+    const CKey signer{[] {
+        CKey key;
+        key.MakeNewKey(/*fCompressed=*/true);
+        return key;
+    }()};
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256::ONE;
+    config.replay_authority_context =
+        uint256::FromHex(std::string(64, 'a')).value();
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    config.local_signer = signer;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/true,
+        /*serve=*/false, /*wait_timeout=*/2s, error));
+
+    // Establish an authority frontier below the competing heights.
+    matmul::trusted::ExactReplayAttestation frontier_att;
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
+                      uint256::ONE, /*block_height=*/100,
+                      &frontier_att) ==
+                  matmul::trusted::AddResult::Accepted);
+    BOOST_REQUIRE(
+        node::matmul_trusted::AuthorityAttestedFrontier().has_value());
+    BOOST_CHECK_EQUAL(
+        *node::matmul_trusted::AuthorityAttestedFrontier(), 100);
+
+    auto params{MakeProfile1ActiveParams()};
+    std::atomic<int> completed{0};
+    std::atomic<int> deferred{0};
+    MatMulVerifyWorker worker{params, /*max_threads=*/1};
+    const uint256 tip_hash{uint256::ONE};
+    worker.SetActiveTip(tip_hash, /*tip_height=*/90);
+
+    // Competing block above frontier, not tip-extending: must not park.
+    auto above{std::make_shared<CBlock>(*MakeBlock(7))};
+    above->hashPrevBlock = uint256::ZERO;
+    MatMulVerifyWorker::Job above_job{
+        .block = above,
+        .height = 150,
+        .parent_median_time_past = 1,
+        .completion = [&](bool) { ++completed; },
+        .retryable_failure = [&] { ++deferred; },
+        .priority = MatMulVerifyWorker::Priority::CompetingBranch,
+    };
+    BOOST_REQUIRE(EnqueueAccepted(worker.Enqueue(above_job)));
+
+    // Tip-extender at tip+1 still parks (serviceable under reservation).
+    auto tip_child{std::make_shared<CBlock>(*MakeBlock(8))};
+    tip_child->hashPrevBlock = tip_hash;
+    MatMulVerifyWorker::Job tip_job{
+        .block = tip_child,
+        .height = 91,
+        .parent_median_time_past = 1,
+        .completion = [&](bool) { ++completed; },
+        .retryable_failure = [&] { ++deferred; },
+        .priority =
+            MatMulVerifyWorker::Priority::AuthenticatedTipChild,
+    };
+    BOOST_REQUIRE(EnqueueAccepted(worker.Enqueue(tip_job)));
+
+    BOOST_REQUIRE(WaitFor(
+        [&] {
+            return deferred.load() >= 1 &&
+                   worker.AwaitingQuorumForTest() >= 1;
+        },
+        2s));
+    BOOST_CHECK_EQUAL(worker.AwaitingQuorumForTest(), 1U);
+    BOOST_CHECK_EQUAL(completed.load(), 0);
+    BOOST_CHECK(!node::matmul_trusted::HasQuorum(above->GetHash(), 150));
+
+    worker.Stop();
+    node::matmul_trusted::ResetForTest();
 }
 
 BOOST_AUTO_TEST_SUITE_END()

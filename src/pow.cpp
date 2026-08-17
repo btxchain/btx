@@ -1130,6 +1130,11 @@ bool IsMatMulAsertHalfLifeUpgradeConfigured(const Consensus::Params& params)
     return !IsDisabledHeight(params.nMatMulAsertHalfLifeUpgradeHeight);
 }
 
+bool IsMatMulPowLimitUpgradeConfigured(const Consensus::Params& params)
+{
+    return !IsDisabledHeight(params.nMatMulPowLimitUpgradeHeight);
+}
+
 bool IsMatMulPreHashEpsilonBitsUpgradeConfigured(const Consensus::Params& params)
 {
     return !IsDisabledHeight(params.nMatMulPreHashEpsilonBitsUpgradeHeight);
@@ -1191,6 +1196,11 @@ int32_t LatestMatMulAsertPreUpgradeAnchorHeight(const CBlockIndex* pindexLast, c
         pindexLast->nHeight >= params.nMatMulRCCoupledHeight &&
         params.nMatMulRCCoupledHeight > anchor_height) {
         anchor_height = params.nMatMulRCCoupledHeight;
+    }
+    if (!IsDisabledHeight(params.nMatMulPowLimitUpgradeHeight) &&
+        pindexLast->nHeight >= params.nMatMulPowLimitUpgradeHeight &&
+        params.nMatMulPowLimitUpgradeHeight > anchor_height) {
+        anchor_height = params.nMatMulPowLimitUpgradeHeight;
     }
     return anchor_height;
 }
@@ -1499,7 +1509,9 @@ bool ValidateMatMulAsertParams(const Consensus::Params& params, int32_t next_hei
         const auto shadowed_by_earlier = [&](int32_t h) -> bool {
             return (!IsDisabledHeight(params.nMatMulAsertHeight) && h == params.nMatMulAsertHeight) ||
                    (!IsDisabledHeight(params.nMatMulAsertRetuneHeight) && h == params.nMatMulAsertRetuneHeight) ||
-                   (!IsDisabledHeight(params.nMatMulAsertRetune2Height) && h == params.nMatMulAsertRetune2Height);
+                   (!IsDisabledHeight(params.nMatMulAsertRetune2Height) && h == params.nMatMulAsertRetune2Height) ||
+                   (!IsDisabledHeight(params.nMatMulPowLimitUpgradeHeight) &&
+                    h == params.nMatMulPowLimitUpgradeHeight);
         };
         if (!IsDisabledHeight(params.nMatMulV4Height) &&
             params.nMatMulV4AsertRescaleNum != params.nMatMulV4AsertRescaleDen &&
@@ -1608,6 +1620,44 @@ bool ValidateMatMulAsertParams(const Consensus::Params& params, int32_t next_hei
             return false;
         }
     }
+    if (IsMatMulPowLimitUpgradeConfigured(params)) {
+        const int32_t h{params.nMatMulPowLimitUpgradeHeight};
+        if (h <= params.nMatMulAsertHeight) {
+            LogWarning("MatMulAsert: powLimitUpgrade height=%d must be above ASERT activation=%d at height %d, invalid immutable ASERT config (fatal at construction; runtime fail-closed)\n",
+                       h, params.nMatMulAsertHeight, next_height);
+            return false;
+        }
+        const auto strictly_after = [&](int32_t other) {
+            return IsDisabledHeight(other) || h > other;
+        };
+        if (!strictly_after(params.nMatMulAsertRetuneHeight) ||
+            !strictly_after(params.nMatMulAsertRetune2Height) ||
+            !strictly_after(params.nMatMulV4Height) ||
+            !strictly_after(params.nMatMulBMX4CHeight) ||
+            !strictly_after(params.nMatMulDRLTHeight) ||
+            !strictly_after(params.nMatMulRCHeight) ||
+            !strictly_after(params.nMatMulRCCoupledHeight)) {
+            LogWarning("MatMulAsert: powLimitUpgrade height=%d collides with or precedes a live ASERT/profile arm at height %d, invalid immutable ASERT config (fatal at construction; runtime fail-closed)\n",
+                       h, next_height);
+            return false;
+        }
+        const arith_uint256 historical{UintToArith256(params.powLimit)};
+        const arith_uint256 upgraded{UintToArith256(params.powLimitUpgrade)};
+        if (upgraded == 0 || upgraded >= historical) {
+            LogWarning("MatMulAsert: powLimitUpgrade must be strictly harder than historical powLimit at height %d, invalid immutable ASERT config (fatal at construction; runtime fail-closed)\n",
+                       next_height);
+            return false;
+        }
+        bool negative{false};
+        bool overflow{false};
+        arith_uint256 decoded{};
+        decoded.SetCompact(upgraded.GetCompact(), &negative, &overflow);
+        if (negative || overflow || decoded == 0) {
+            LogWarning("MatMulAsert: powLimitUpgrade is not a valid compact target at height %d, invalid immutable ASERT config (fatal at construction; runtime fail-closed)\n",
+                       next_height);
+            return false;
+        }
+    }
     if (IsMatMulAsertHalfLifeUpgradeConfigured(params)) {
         if (params.nMatMulAsertHalfLifeUpgrade <= 0) {
             LogWarning("MatMulAsert: half-life upgrade value=%lld is invalid at height %d, invalid immutable ASERT config (fatal at construction; runtime fail-closed)\n",
@@ -1621,6 +1671,9 @@ bool ValidateMatMulAsertParams(const Consensus::Params& params, int32_t next_hei
         }
         if (retune2_enabled) {
             latest_pre_upgrade_anchor = std::max(latest_pre_upgrade_anchor, params.nMatMulAsertRetune2Height);
+        }
+        if (IsMatMulPowLimitUpgradeConfigured(params)) {
+            latest_pre_upgrade_anchor = std::max(latest_pre_upgrade_anchor, params.nMatMulPowLimitUpgradeHeight);
         }
         // Audit C4: do NOT fold the v4/BMX4C rescale heights into this guard. The
         // anchor is now selected monotonically (ResolveMatMulAsertHalfLifeInfo takes
@@ -1636,6 +1689,20 @@ bool ValidateMatMulAsertParams(const Consensus::Params& params, int32_t next_hei
         }
     }
     return true;
+}
+
+arith_uint256 MatMulAsertPowLimitForNextHeight(const Consensus::Params& params, int32_t next_height)
+{
+    const arith_uint256 historical{UintToArith256(params.powLimit)};
+    if (next_height < 0 || IsDisabledHeight(params.nMatMulPowLimitUpgradeHeight) ||
+        next_height < params.nMatMulPowLimitUpgradeHeight) {
+        return historical;
+    }
+    const arith_uint256 upgraded{UintToArith256(params.powLimitUpgrade)};
+    if (upgraded == 0 || upgraded >= historical) {
+        return historical;
+    }
+    return upgraded;
 }
 
 namespace {
@@ -2468,9 +2535,9 @@ arith_uint256 CalculateMatMulAsertTarget(
     int64_t time_diff,
     int64_t height_diff,
     int64_t half_life,
-    const Consensus::Params& params)
+    const Consensus::Params& params,
+    const arith_uint256& pow_limit)
 {
-    const arith_uint256 pow_limit{UintToArith256(params.powLimit)};
     if (anchor_target == 0 || anchor_target > pow_limit) {
         return pow_limit;
     }
@@ -2748,13 +2815,13 @@ unsigned int DarkGravityWaveLegacy(const CBlockIndex* pindexLast, const Consensu
 unsigned int MatMulAsert(const CBlockIndex* pindexLast, const Consensus::Params& params)
 {
     assert(pindexLast != nullptr);
-    const arith_uint256 pow_limit{UintToArith256(params.powLimit)};
 
     const int64_t next_height64 = static_cast<int64_t>(pindexLast->nHeight) + 1;
     if (next_height64 < 0 || next_height64 > std::numeric_limits<int32_t>::max()) {
-        return pow_limit.GetCompact();
+        return UintToArith256(params.powLimit).GetCompact();
     }
     const int32_t next_height = static_cast<int32_t>(next_height64);
+    const arith_uint256 pow_limit{MatMulAsertPowLimitForNextHeight(params, next_height)};
 
     // Fast-mining bootstrap phase: hold fixed genesis-derived difficulty.
     // This replaces the former DGW-based warmup/transition logic.
@@ -2943,6 +3010,14 @@ unsigned int MatMulAsert(const CBlockIndex* pindexLast, const Consensus::Params&
         return coup_target.GetCompact();
     }
 
+    if (!IsDisabledHeight(params.nMatMulPowLimitUpgradeHeight) &&
+        next_height == params.nMatMulPowLimitUpgradeHeight) {
+        arith_uint256 parent_target{};
+        parent_target.SetCompact(pindexLast->nBits);
+        parent_target = ClampRetargetResult(parent_target, pow_limit);
+        return parent_target.GetCompact();
+    }
+
     if (next_height == params.nMatMulAsertHalfLifeUpgradeHeight) {
         arith_uint256 parent_target{};
         parent_target.SetCompact(pindexLast->nBits);
@@ -3000,7 +3075,8 @@ unsigned int MatMulAsert(const CBlockIndex* pindexLast, const Consensus::Params&
         time_diff,
         height_diff,
         half_life_info.current_half_life_s,
-        params);
+        params,
+        pow_limit);
     return next_target.GetCompact();
 }
 } // namespace
@@ -5048,6 +5124,15 @@ void UnpinMatMulEncDrAssumeValidTrust(const uint256& block_hash)
     if (--it->second == 0) g_matmul_encdr_assumevalid_trust_pins.erase(it);
 }
 
+void ResetMatMulEncDrVerdictsForTest()
+{
+    std::lock_guard<std::mutex> lock(g_matmul_encdr_verdict_mutex);
+    g_matmul_encdr_verdicts.clear();
+    g_matmul_encdr_verdict_fifo.clear();
+    g_matmul_encdr_verdict_pins.clear();
+    g_matmul_encdr_assumevalid_trust_pins.clear();
+}
+
 bool MatMulV4PayloadMatchesCommitment(const CBlock& block)
 {
     // Distinguishes a v4 body mutation (payload does not reconstruct the
@@ -5500,6 +5585,27 @@ bool ConsumeGlobalMatMulRCBudget(uint32_t max_global_per_minute, uint32_t count,
     }
     g_matmul_global_rc_this_minute += count;
     return true;
+}
+
+std::chrono::steady_clock::duration GlobalMatMulRCBudgetRetryDelay(
+    std::chrono::steady_clock::time_point now)
+{
+    using namespace std::chrono;
+    const int64_t now_sec = duration_cast<seconds>(now.time_since_epoch()).count();
+
+    LOCK(g_matmul_global_rc_mutex);
+    if (g_matmul_global_rc_window_start_sec == 0 ||
+        now_sec - g_matmul_global_rc_window_start_sec >= 60) {
+        return steady_clock::duration::zero();
+    }
+    return seconds{60 - (now_sec - g_matmul_global_rc_window_start_sec)};
+}
+
+void ResetGlobalMatMulRCBudgetForTest()
+{
+    LOCK(g_matmul_global_rc_mutex);
+    g_matmul_global_rc_this_minute = 0;
+    g_matmul_global_rc_window_start_sec = 0;
 }
 
 void RefundGlobalMatMulRCBudget(
@@ -7313,7 +7419,11 @@ static bool SolveMatMulV4RC(CBlockHeader& block,
                 if (!accelerator_lease) {
                     LogPrintf(
                         "SolveMatMulV4RC: candidate accelerator wait "
-                        "cancelled at nonce=%llu\n",
+                        "cancelled at nonce=%llu "
+                        "(combined authority+miner is degraded under tip "
+                        "validation contention; see "
+                        "rc_accelerator_scheduler.combined_authority_miner_degraded "
+                        "and BTX_RC_CANDIDATE_MINING_LEASE_MS)\n",
                         static_cast<unsigned long long>(
                             block.nNonce64));
                     RegisterMatMulSolveRuntimeSample(
@@ -8029,13 +8139,40 @@ bool SolveMatMul(CBlockHeader& block, const Consensus::Params& params, uint64_t&
                     product_digest_active);
             // The top-level call owns the pipeline diagnostic stats; workers (worker-context true)
             // never touch them, so the parallel state reported here is the one that sticks.
+            //
+            // Async-prepare / prefetch used to be unconditionally forced off here, which
+            // made BTX_MATMUL_PIPELINE_ASYNC / BTX_MATMUL_PREPARE_WORKERS /
+            // BTX_MATMUL_PREPARE_PREFETCH_DEPTH inert. Default stays conservative (off)
+            // unless those env vars are set; then reuse the same resolvers as the
+            // legacy SolveMatMul path.
+            //
+            // NOTE (Epoch-A / mining throughput): at Epoch-A heights
+            // pre_hash_epsilon_bits == 0, so gpu_nonce_seed_scan_enabled stays false and
+            // batch_size collapses to 1. Whether epsilon 0 is intentional is a consensus
+            // question — do NOT change consensus epsilon here. This block only restores
+            // env-configurable async prepare.
+            const char* async_env = std::getenv("BTX_MATMUL_PIPELINE_ASYNC");
+            const char* prepare_workers_env = std::getenv("BTX_MATMUL_PREPARE_WORKERS");
+            const char* prefetch_depth_env = std::getenv("BTX_MATMUL_PREPARE_PREFETCH_DEPTH");
+            const bool pipeline_env_configured =
+                (async_env != nullptr && async_env[0] != '\0') ||
+                (prepare_workers_env != nullptr && prepare_workers_env[0] != '\0') ||
+                (prefetch_depth_env != nullptr && prefetch_depth_env[0] != '\0');
+            const bool async_prepare_enabled = pipeline_env_configured &&
+                ShouldEnableAsyncPrepare(active_backend, nonce_seed_batch_size);
+            const uint32_t prefetch_depth = async_prepare_enabled
+                ? ResolvePreparePrefetchDepth(active_backend, nonce_seed_batch_size)
+                : 1U;
             g_matmul_parallel_solver_enabled.store(parallel_solver_enabled, std::memory_order_relaxed);
             g_matmul_parallel_solver_threads.store(
                 parallel_solver_enabled ? solver_threads : 1U, std::memory_order_relaxed);
-            g_matmul_async_prepare_enabled.store(false, std::memory_order_relaxed);
+            g_matmul_async_prepare_enabled.store(async_prepare_enabled, std::memory_order_relaxed);
             g_matmul_cpu_confirm_candidates.store(false, std::memory_order_relaxed);
-            g_matmul_prefetch_depth.store(1U, std::memory_order_relaxed);
+            g_matmul_prefetch_depth.store(prefetch_depth == 0 ? 1U : prefetch_depth, std::memory_order_relaxed);
             g_matmul_batch_size.store(nonce_seed_batch_size, std::memory_order_relaxed);
+            if (async_prepare_enabled) {
+                GetMatMulPrepareExecutor();
+            }
             if (parallel_solver_enabled) {
                 return SolveMatMulParallel(
                     block, params, max_tries, block_height, abort_flag,

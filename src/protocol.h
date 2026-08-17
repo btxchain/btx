@@ -136,6 +136,12 @@ inline constexpr const char* HEADERS{"headers"};
  * The block message transmits a single serialized block.
  */
 inline constexpr const char* BLOCK{"block"};
+/** Negotiate version 1 of bounded full-block chunk relay. */
+inline constexpr const char* SENDBLKCHNK{"sendblkchnk"};
+/** Hashed geometry for a chunked full-block response to GETDATA. */
+inline constexpr const char* BLKCHNKMAN{"blkchnkman"};
+/** One sequential, bounded full-block payload chunk. */
+inline constexpr const char* BLKCHUNK{"blkchunk"};
 /**
  * The getaddr message requests an addr message from the receiving node,
  * preferably one with lots of IP addresses of other receiving nodes.
@@ -360,6 +366,27 @@ inline constexpr const char* RCCARRIER{"rccarrier"};
  * and adds no bytes to the block/header.
  */
 inline constexpr const char* RCADMIT{"rcadmit"};
+/**
+ * Request the attested UTXO snapshot manifest for block_hash (null = any local
+ * offer). Response is utxomanifest. Manifest-first so importers verify M-of-N
+ * quorum before downloading the multi-GB body. Sync acceleration only.
+ */
+inline constexpr const char* GETUTXOMANIF{"getutxomanif"};
+/**
+ * Carries an offered attested UTXO snapshot manifest plus body metadata
+ * (file size, chunk size/count, whole-file hash). Not consensus.
+ */
+inline constexpr const char* UTXOMANIFEST{"utxomanifest"};
+/**
+ * Request one chunk of an offered attested UTXO snapshot body.
+ * Payload: block_hash, chunk_index.
+ */
+inline constexpr const char* GETUTXOCHUNK{"getutxochunk"};
+/**
+ * One chunk of an attested UTXO snapshot body with per-chunk SHA256d.
+ * Payload: block_hash, chunk_index, chunk_hash, data.
+ */
+inline constexpr const char* UTXOCHUNK{"utxochunk"};
 }; // namespace NetMsgType
 
 /** All known message types (see above). Keep this in the same order as the list of messages above. */
@@ -380,6 +407,9 @@ inline const std::array ALL_NET_MESSAGE_TYPES{std::to_array<std::string>({
     NetMsgType::SHIELDEDDATA,
     NetMsgType::HEADERS,
     NetMsgType::BLOCK,
+    NetMsgType::SENDBLKCHNK,
+    NetMsgType::BLKCHNKMAN,
+    NetMsgType::BLKCHUNK,
     NetMsgType::GETADDR,
     NetMsgType::MEMPOOL,
     NetMsgType::PING,
@@ -411,6 +441,10 @@ inline const std::array ALL_NET_MESSAGE_TYPES{std::to_array<std::string>({
     NetMsgType::GETRCCARRIER,
     NetMsgType::RCCARRIER,
     NetMsgType::RCADMIT,
+    NetMsgType::GETUTXOMANIF,
+    NetMsgType::UTXOMANIFEST,
+    NetMsgType::GETUTXOCHUNK,
+    NetMsgType::UTXOCHUNK,
 })};
 
 /** nServices flags */
@@ -477,6 +511,11 @@ enum ServiceFlags : uint64_t {
     // trusted ExactReplay attestations. This provider hint is distinct from
     // NODE_MATMUL_TRUSTED_MIRROR, the consumer/non-independent role.
     NODE_MATMUL_ATTESTATION_ARCHIVE = (1ULL << 31),
+
+    // Node can serve an operator-quorum attested UTXO snapshot over P2P
+    // (manifest + chunked body). Advertisement only; serving does not require
+    // being a signer — any host holding the files may offer them.
+    NODE_ATTESTED_UTXO_SNAPSHOT = (1ULL << 32),
 };
 
 /**

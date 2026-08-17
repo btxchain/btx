@@ -59,6 +59,21 @@ struct ConnmanTestMsg : public CConnman {
         if (node.IsManualOrFullOutboundConn()) ++m_network_conn_counts[node.addr.GetNetwork()];
     }
 
+    /** Drop a stack-allocated test peer from m_nodes without deleting it. */
+    void RemoveTestNode(CNode& node)
+    {
+        LOCK(m_nodes_mutex);
+        auto it{std::find(m_nodes.begin(), m_nodes.end(), &node)};
+        if (it == m_nodes.end()) return;
+        if (node.IsManualOrFullOutboundConn()) {
+            const Network net{node.addr.GetNetwork()};
+            if (m_network_conn_counts[net] > 0) {
+                --m_network_conn_counts[net];
+            }
+        }
+        m_nodes.erase(it);
+    }
+
     void ClearTestNodes()
     {
         LOCK(m_nodes_mutex);
@@ -73,7 +88,8 @@ struct ConnmanTestMsg : public CConnman {
                    ServiceFlags remote_services,
                    ServiceFlags local_services,
                    int32_t version,
-                   bool relay_txs)
+                   bool relay_txs,
+                   int32_t starting_height = 0)
         EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex);
 
     bool ProcessMessagesOnce(CNode& node) EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex)

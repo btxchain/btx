@@ -9,13 +9,30 @@
  * network protocol versioning
  */
 
-static const int PROTOCOL_VERSION = 800001;
+//! Bumped to 800002 for MatMul v4.7 Epoch-A (RC ExactReplay). Nodes that do not
+//! enforce the Epoch-A work transition extend a legacy chain that sealed nodes
+//! reject, so they need to be distinguishable at the handshake.
+static const int PROTOCOL_VERSION = 800002;
 
 //! initial proto version, to be increased after version/verack negotiation
 static const int INIT_PROTO_VERSION = 209;
 
 //! disconnect from peers older than this proto version
 static const int MIN_PEER_PROTO_VERSION = 800001;
+
+//! Minimum protocol version required to follow the MatMul v4.7 Epoch-A chain.
+//! Peers below this version are disconnected once the tip passes
+//! MATMUL_RC_ENFORCEMENT_HEIGHT. Non-updated nodes extend the legacy chain and
+//! their headers violate the Epoch-A work transition; keeping them connected
+//! wastes peer slots and confuses pool operators reading peer heights.
+static const int MIN_MATMUL_RC_PROTOCOL_VERSION = 800002;
+
+//! Chain height at which Epoch-A protocol version enforcement activates.
+//! Default is INT32_MAX (disabled): every peer on the network still advertises
+//! 800001 today, so shipping an early enforcement height would partition any
+//! upgraded node from the rest of the network. Operators may lower this via
+//! -matmulrcenforcementheight once upgrades are coordinated.
+static const int MATMUL_RC_ENFORCEMENT_HEIGHT = 2147483647; // INT32_MAX
 
 //! Minimum protocol version required for SMILE v2 shielded transactions.
 //! Peers below this version are disconnected after SMILE_V2_ENFORCEMENT_HEIGHT
@@ -40,6 +57,17 @@ static const int SHORT_IDS_BLOCKS_VERSION = 70014;
 
 //! not banning for invalid compact blocks starts with this version
 static const int INVALID_CB_NO_BAN_VERSION = 70015;
+
+//! Signed Profile-1 ExactReplay attestation relay (getmmattest/mmattest) is
+//! available from this version onward.
+//!
+//! MUST be a fixed introduction version, never PROTOCOL_VERSION. Gating this
+//! feature on PROTOCOL_VERSION is self-referential: GetCommonVersion() is
+//! min(ours, theirs), so the moment PROTOCOL_VERSION is bumped ahead of the
+//! network every peer fails the check, a trusted mirror stops sending
+//! getmmattest entirely, receives no attestations, and stalls permanently.
+//! That regression was observed on mainnet 2026-08-11 (accepted=0, rejected=0).
+static const int MATMUL_ATTESTATION_VERSION = 800001;
 
 //! "wtxidrelay" command for wtxid-based relay starts with this version
 static const int WTXID_RELAY_VERSION = 70016;

@@ -14,6 +14,8 @@
 #include <crypto/chacha20poly1305.h>
 #include <hash.h>
 #include <key_io.h>
+#include <node/chainstate.h>
+#include <node/kernel_notifications.h>
 #include <policy/policy.h>
 #include <pqkey.h>
 #include <primitives/transaction.h>
@@ -35,8 +37,10 @@
 #include <test/util/shielded_account_registry_test_util.h>
 #include <test/util/txmempool.h>
 #include <uint256.h>
+#include <util/fs.h>
 #include <util/translation.h>
 #include <validation.h>
+#include <validationinterface.h>
 
 #include <boost/test/unit_test.hpp>
 
@@ -171,6 +175,14 @@ TestOpts MakeRecoveryRebuildOpts()
     return opts;
 }
 
+TestOpts MakeRecoveryWriteFaultOpts()
+{
+    TestOpts opts = MakeRecoveryRebuildOpts();
+    opts.coins_db_in_memory = false;
+    opts.block_tree_db_in_memory = false;
+    return opts;
+}
+
 struct RecoveryExitChainSetup : public TestChain100Setup {
     RecoveryExitChainSetup() : TestChain100Setup(ChainType::REGTEST, MakeRecoveryOpts()) {}
 };
@@ -181,6 +193,12 @@ struct RecoveryExitVelocitySetup : public TestChain100Setup {
 
 struct RecoveryExitRebuildSetup : public TestChain100Setup {
     RecoveryExitRebuildSetup() : TestChain100Setup(ChainType::REGTEST, MakeRecoveryRebuildOpts()) {}
+};
+
+struct RecoveryExitWriteFaultSetup : public TestChain100Setup {
+    RecoveryExitWriteFaultSetup() : TestChain100Setup(ChainType::REGTEST, MakeRecoveryWriteFaultOpts()) {}
+
+    void ExerciseWriteFailure(ShieldedTransitionWriteSeam seam);
 };
 
 CScript RecoveryExitDefaultScript()
@@ -451,6 +469,121 @@ CMutableTransaction BuildLegacyShieldOnlyTx(TestChain100Setup& setup,
     return tx;
 }
 
+void RecoveryExitWriteFaultSetup::ExerciseWriteFailure(
+    ShieldedTransitionWriteSeam seam)
+{
+    const ReVectors& vectors = Vectors();
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    while (WITH_LOCK(cs_main, return chainman.ActiveChain().Height()) <
+           kRebuildSunsetHeight - 2) {
+        CreateAndProcessBlock({}, CScript() << OP_TRUE,
+                              /*chainstate=*/nullptr,
+                              /*use_mempool=*/false);
+    }
+
+    std::vector<CTransactionRef> funding_txs;
+    funding_txs.reserve(kRebuildFundingCount);
+    for (int i = 0; i < kRebuildFundingCount; ++i) {
+        funding_txs.push_back(m_coinbase_txns.at(i));
+    }
+    const CMutableTransaction shield_tx =
+        BuildLegacyShieldOnlyTx(*this, funding_txs, kRecoverFee);
+    CreateAndProcessBlock({shield_tx}, CScript() << OP_TRUE,
+                          /*chainstate=*/nullptr,
+                          /*use_mempool=*/false);
+
+    const CMutableTransaction recovery_tx = BuildRecoveryExitTx();
+    const CBlock recovery_block =
+        CreateBlock({recovery_tx}, CScript() << OP_TRUE,
+                    chainman.ActiveChainstate(), /*use_mempool=*/false);
+    const uint256 target_hash = recovery_block.GetHash();
+    CBlockIndex* target_index{nullptr};
+    {
+        LOCK(cs_main);
+        BlockValidationState accept_state;
+        bool new_block{false};
+        BOOST_REQUIRE(chainman.AcceptBlock(
+            std::make_shared<const CBlock>(recovery_block), accept_state,
+            &target_index, /*fRequested=*/true, /*dbp=*/nullptr, &new_block,
+            /*min_pow_checked=*/true));
+        BOOST_REQUIRE(accept_state.IsValid());
+        BOOST_REQUIRE(new_block);
+        BOOST_REQUIRE(target_index != nullptr);
+        for (Chainstate* cs : chainman.GetAll()) cs->ForceFlushStateToDisk();
+    }
+
+    bool injected{false};
+    {
+        LOCK(cs_main);
+        chainman.SetShieldedTransitionWriteFaultHookForTest(
+            [&](ShieldedTransitionWriteSeam current) {
+                if (!injected && current == seam) {
+                    injected = true;
+                    return true;
+                }
+                return false;
+            });
+    }
+    Assert(m_node.notifications)->m_shutdown_on_fatal_error = false;
+    BlockValidationState activation_state;
+    BOOST_CHECK(!chainman.ActiveChainstate().ActivateBestChain(
+        activation_state, std::make_shared<const CBlock>(recovery_block)));
+    BOOST_REQUIRE(injected);
+    BOOST_CHECK(activation_state.IsError());
+    {
+        LOCK(cs_main);
+        chainman.SetShieldedTransitionWriteFaultHookForTest({});
+        BOOST_CHECK_EQUAL(target_index->nStatus & BLOCK_FAILED_MASK, 0U);
+        BOOST_CHECK(chainman.ReadShieldedMutationMarker().has_value());
+    }
+
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    const fs::path datadir = chainman.m_options.datadir;
+    {
+        LOCK(cs_main);
+        chainman.ResetChainstates();
+        m_node.chainman.reset();
+        m_node.notifications = std::make_unique<node::KernelNotifications>(
+            Assert(m_node.shutdown_request), m_node.exit_status,
+            *Assert(m_node.warnings));
+        const ChainstateManager::Options chainman_opts{
+            .chainparams = ::Params(),
+            .datadir = datadir,
+            .shielded_startup_audit = false,
+            .fast_shielded_startup = true,
+            .notifications = *m_node.notifications,
+            .signals = m_node.validation_signals.get(),
+        };
+        const node::BlockManager::Options blockman_opts{
+            .chainparams = chainman_opts.chainparams,
+            .blocks_dir = m_args.GetBlocksDirPath(),
+            .notifications = chainman_opts.notifications,
+            .block_tree_db_params = DBParams{
+                .path = datadir / "blocks" / "index",
+                .cache_bytes = m_kernel_cache_sizes.block_tree_db,
+                .memory_only = m_block_tree_db_in_memory,
+            },
+        };
+        m_node.chainman = std::make_unique<ChainstateManager>(
+            *Assert(m_node.shutdown_signal), chainman_opts, blockman_opts);
+    }
+    ChainstateManager& restarted = *Assert(m_node.chainman);
+    LoadVerifyActivateChainstate();
+    {
+        LOCK(cs_main);
+        BOOST_REQUIRE(restarted.EnsureShieldedStateInitialized());
+        BOOST_REQUIRE(restarted.ActiveTip() != nullptr);
+        BOOST_CHECK_EQUAL(restarted.ActiveTip()->GetBlockHash(), target_hash);
+        CBlockIndex* restarted_target =
+            restarted.m_blockman.LookupBlockIndex(target_hash);
+        BOOST_REQUIRE(restarted_target != nullptr);
+        BOOST_CHECK_EQUAL(restarted_target->nStatus & BLOCK_FAILED_MASK, 0U);
+        BOOST_CHECK(restarted.IsShieldedNullifierSpent(vectors.nullifier));
+        BOOST_CHECK(restarted.IsShieldedRecoveryExitCommitmentRetired(vectors.cm));
+        BOOST_CHECK(!restarted.ReadShieldedMutationMarker().has_value());
+    }
+}
+
 } // namespace
 
 BOOST_AUTO_TEST_SUITE(recovery_exit_chain_tests)
@@ -461,6 +594,137 @@ BOOST_AUTO_TEST_CASE(recovery_exit_charges_policy_verify_units)
 
     BOOST_CHECK_GT(GetShieldedPolicyWeight(tx), GetTransactionWeight(tx));
     BOOST_CHECK_GE(GetShieldedRelayVirtualSize(tx), 1'600'000);
+}
+
+BOOST_FIXTURE_TEST_CASE(recovery_exit_nullifier_write_failure_is_fatal_and_restart_safe,
+                        RecoveryExitWriteFaultSetup)
+{
+    ExerciseWriteFailure(ShieldedTransitionWriteSeam::NULLIFIERS);
+}
+
+BOOST_FIXTURE_TEST_CASE(recovery_exit_commitment_write_failure_is_fatal_and_restart_safe,
+                        RecoveryExitWriteFaultSetup)
+{
+    ExerciseWriteFailure(ShieldedTransitionWriteSeam::RECOVERY_EXITS);
+}
+
+BOOST_FIXTURE_TEST_CASE(recovery_exit_short_fork_redo_preserves_shared_retirements,
+                        RecoveryExitWriteFaultSetup)
+{
+    const ReVectors& v = Vectors();
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    while (WITH_LOCK(cs_main, return chainman.ActiveChain().Height()) <
+           kRebuildSunsetHeight - 1) {
+        CreateAndProcessBlock({}, CScript() << OP_TRUE,
+                              /*chainstate=*/nullptr,
+                              /*use_mempool=*/false);
+    }
+    {
+        LOCK(cs_main);
+        BOOST_REQUIRE(chainman.EnsureShieldedStateInitialized());
+        BOOST_REQUIRE(chainman.SetShieldedPoolBalanceForTest(2 * v.note.value));
+    }
+
+    const CMutableTransaction recovery_tx = BuildRecoveryExitTx();
+    const CBlock old_block =
+        CreateAndProcessBlock({recovery_tx}, CScript() << OP_TRUE,
+                              /*chainstate=*/nullptr,
+                              /*use_mempool=*/false);
+
+    shielded::ShieldedMerkleTree old_tree;
+    std::vector<uint256> old_anchor_roots;
+    uint256 old_tip_hash;
+    int32_t old_tip_height{-1};
+    CAmount old_balance{0};
+    std::optional<uint256> old_digest;
+    std::optional<shielded::registry::ShieldedAccountRegistryPersistedSnapshot>
+        old_registry;
+    std::vector<uint256> old_registry_roots;
+    {
+        LOCK(cs_main);
+        BOOST_REQUIRE(chainman.ActiveTip() != nullptr);
+        BOOST_REQUIRE_EQUAL(chainman.ActiveTip()->GetBlockHash(),
+                            old_block.GetHash());
+        BOOST_REQUIRE(chainman.IsShieldedNullifierSpent(v.nullifier));
+        BOOST_REQUIRE(chainman.IsShieldedRecoveryExitCommitmentRetired(v.cm));
+        BOOST_REQUIRE(chainman.ReadPersistedShieldedState(
+            old_tree, old_anchor_roots, old_tip_hash, old_tip_height,
+            old_balance, old_digest, old_registry, &old_registry_roots));
+    }
+
+    CBlockIndex* old_index = WITH_LOCK(
+        cs_main, return chainman.m_blockman.LookupBlockIndex(old_block.GetHash()));
+    BOOST_REQUIRE(old_index != nullptr);
+    BlockValidationState invalidate_state;
+    BOOST_REQUIRE(chainman.ActiveChainstate().InvalidateBlock(
+        invalidate_state, old_index));
+    BOOST_REQUIRE(invalidate_state.IsValid());
+
+    const CMutableTransaction alternate_recovery_tx =
+        BuildRecoveryExitTx(kRecoverFee + 1);
+    const CBlock alternate_block =
+        CreateAndProcessBlock({alternate_recovery_tx}, CScript() << OP_TRUE,
+                              /*chainstate=*/nullptr,
+                              /*use_mempool=*/false);
+    BOOST_REQUIRE_NE(alternate_block.GetHash(), old_tip_hash);
+
+    const fs::path datadir = chainman.m_options.datadir;
+    {
+        LOCK(cs_main);
+        BOOST_REQUIRE(chainman.ActiveTip() != nullptr);
+        BOOST_REQUIRE_EQUAL(chainman.ActiveTip()->GetBlockHash(),
+                            alternate_block.GetHash());
+        BOOST_REQUIRE(chainman.IsShieldedNullifierSpent(v.nullifier));
+        BOOST_REQUIRE(chainman.IsShieldedRecoveryExitCommitmentRetired(v.cm));
+        for (Chainstate* cs : chainman.GetAll()) cs->ForceFlushStateToDisk();
+        BOOST_REQUIRE(chainman.WritePersistedShieldedState(
+            old_tree, old_anchor_roots, old_tip_hash, old_tip_height,
+            old_balance, old_digest, old_registry, old_registry_roots));
+    }
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+
+    {
+        LOCK(cs_main);
+        chainman.ResetChainstates();
+        old_tree = shielded::ShieldedMerkleTree{
+            shielded::ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY};
+        m_node.chainman.reset();
+        m_node.notifications = std::make_unique<node::KernelNotifications>(
+            Assert(m_node.shutdown_request), m_node.exit_status,
+            *Assert(m_node.warnings));
+        const ChainstateManager::Options chainman_opts{
+            .chainparams = ::Params(),
+            .datadir = datadir,
+            .shielded_startup_audit = false,
+            .fast_shielded_startup = true,
+            .notifications = *m_node.notifications,
+            .signals = m_node.validation_signals.get(),
+        };
+        const node::BlockManager::Options blockman_opts{
+            .chainparams = chainman_opts.chainparams,
+            .blocks_dir = m_args.GetBlocksDirPath(),
+            .notifications = chainman_opts.notifications,
+            .block_tree_db_params = DBParams{
+                .path = datadir / "blocks" / "index",
+                .cache_bytes = m_kernel_cache_sizes.block_tree_db,
+                .memory_only = m_block_tree_db_in_memory,
+            },
+        };
+        m_node.chainman = std::make_unique<ChainstateManager>(
+            *Assert(m_node.shutdown_signal), chainman_opts, blockman_opts);
+    }
+    ChainstateManager& restarted = *Assert(m_node.chainman);
+    LoadVerifyActivateChainstate();
+    {
+        LOCK(cs_main);
+        BOOST_REQUIRE(restarted.EnsureShieldedStateInitialized());
+        BOOST_REQUIRE(restarted.ActiveTip() != nullptr);
+        BOOST_CHECK_EQUAL(restarted.ActiveTip()->GetBlockHash(),
+                          alternate_block.GetHash());
+        BOOST_CHECK(restarted.IsShieldedNullifierSpent(v.nullifier));
+        BOOST_CHECK(restarted.IsShieldedRecoveryExitCommitmentRetired(v.cm));
+        BOOST_CHECK(!restarted.ReadShieldedMutationMarker().has_value());
+    }
 }
 
 BOOST_FIXTURE_TEST_CASE(recovery_exit_mined_block_debits_pool_and_retires_identifiers, RecoveryExitChainSetup)

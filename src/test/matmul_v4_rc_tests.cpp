@@ -26,6 +26,7 @@
 #include <cuda/matmul_v4_rc_exact_replay_cuda.h>
 #include <pow.h>
 #include <primitives/block.h>
+#include <node/matmul_rc_admission.h>
 #include <span.h>
 #include <test/util/setup_common.h>
 #include <uint256.h>
@@ -1285,6 +1286,66 @@ BOOST_AUTO_TEST_CASE(rc_exact_replay_cancellation_is_not_consensus_invalid)
     BOOST_CHECK(
         result.outcome == rc::ExactReplayVerifyOutcome::Cancelled);
     BOOST_CHECK_EQUAL(result.note, "ExactReplay: cancelled");
+}
+
+BOOST_AUTO_TEST_CASE(rc_fused_ffn_honors_cancel_between_tiles)
+{
+    CBlockHeader header{MakeRCHeader(0x54494c4543414e)};
+    const auto params{rc::MakeToyRCEpisodeParams()};
+    header.matmul_digest =
+        rc::RecomputeResidentCurriculumReference(
+            header, params, /*height=*/0);
+    BOOST_REQUIRE(!header.matmul_digest.IsNull());
+
+    std::atomic_bool cancelled{false};
+    rc::ScopedExactReplayCancellation cancellation_scope{&cancelled};
+    lt::ExactGemmBackend backend;
+    backend.gemm_s8s8 = &CancellingOracleGemmS8S8;
+    g_cancel_on_oracle_gemm = &cancelled;
+    const rc::RCExactReplayAcceleration acceleration{
+        .gemm = backend,
+        .backend = "test_cancelling_tiles",
+        .require_device = true,
+        .output_row_tile = 16,
+    };
+    const auto result{
+        rc::VerifyBoundedExactReplayWithAccelerationForTest(
+            header, params, /*height=*/0, acceleration)};
+    g_cancel_on_oracle_gemm = nullptr;
+    BOOST_CHECK(!result.ok);
+    BOOST_CHECK(
+        result.outcome == rc::ExactReplayVerifyOutcome::Cancelled);
+}
+
+BOOST_AUTO_TEST_CASE(rc_ada_selfqual_attention_gemm_fits_int32_alu)
+{
+    // Ada sm_89 self-qual QK^T is M=32 N=64 K=32. IMMA heuristics often
+    // return only SIMT for that shape; the RC DeviceGemmS8S8 ALU fallback
+    // must match the int64 oracle with int32 accumulation.
+    constexpr uint32_t kM = 32;
+    constexpr uint32_t kN = 64;
+    constexpr uint32_t kK = 32;
+    std::vector<int8_t> A(static_cast<size_t>(kM) * kK);
+    std::vector<int8_t> B(static_cast<size_t>(kK) * kN);
+    for (size_t i = 0; i < A.size(); ++i) {
+        A[i] = static_cast<int8_t>((static_cast<int>(i) * 17) % 255 - 128);
+    }
+    for (size_t i = 0; i < B.size(); ++i) {
+        B[i] = static_cast<int8_t>((static_cast<int>(i) * 13) % 255 - 128);
+    }
+    for (uint32_t r = 0; r < kM; ++r) {
+        for (uint32_t c = 0; c < kN; ++c) {
+            int32_t acc32 = 0;
+            int64_t acc64 = 0;
+            for (uint32_t k = 0; k < kK; ++k) {
+                const int32_t a = A[static_cast<size_t>(r) * kK + k];
+                const int32_t b = B[static_cast<size_t>(k) * kN + c];
+                acc32 += a * b;
+                acc64 += static_cast<int64_t>(a) * b;
+            }
+            BOOST_CHECK_EQUAL(static_cast<int64_t>(acc32), acc64);
+        }
+    }
 }
 
 BOOST_AUTO_TEST_CASE(rc_strict_resolver_rejects_self_qualified_nonproduction_backend)
@@ -2642,6 +2703,101 @@ BOOST_AUTO_TEST_CASE(rc_enqueue_refund_receipt_rolls_source_counters_back_once)
         netgroup_budget.expensive_rc_verifications_this_minute, 0U);
     // Do not leak this process-global test debit into later suites.
     RefundGlobalMatMulRCBudget(kWorkUnits, charged_at);
+}
+
+BOOST_AUTO_TEST_CASE(handoff_peer_budget_miss_restores_ticket_and_refunds_debit)
+{
+    Consensus::Params p;
+    p.nMatMulV4Height = 1;
+    p.nMatMulRCHeight = 1;
+    p.fMatMulRCUseToyDims = true;
+    p.nMatMulRCPeerVerifyBudgetPerMin = 1;
+    constexpr int32_t kHeight{100};
+
+    MatMulPeerVerificationBudget address_budget;
+    MatMulPeerVerificationBudget netgroup_budget;
+    const auto now{std::chrono::steady_clock::now()};
+    BOOST_REQUIRE(ConsumeMatMulRCSourceVerifyBudgets(
+        address_budget, netgroup_budget, p, /*verification_count=*/1, now,
+        /*is_ibd=*/false, kHeight));
+    BOOST_CHECK(!ConsumeMatMulRCSourceVerifyBudgets(
+        address_budget, netgroup_budget, p, /*verification_count=*/1, now,
+        /*is_ibd=*/false, kHeight));
+    BOOST_CHECK_EQUAL(
+        address_budget.expensive_rc_verifications_this_minute, 1U);
+
+    CBlockHeader header;
+    header.nVersion = 4;
+    header.nTime = 1'900'000'000;
+    header.nBits = 0x207fffff;
+    header.hashPrevBlock = uint256{1};
+    header.hashMerkleRoot = uint256{2};
+    arith_uint256 limit;
+    limit.SetCompact(0x207fffff);
+    const uint256 regtest_limit{ArithToUint256(limit)};
+    node::RCAdmissionTicket ticket{header.GetHash(), 0};
+    uint64_t tries{2'000'000};
+    BOOST_REQUIRE(node::GrindRCAdmissionTicket(
+        header, regtest_limit, ticket, tries));
+
+    node::RCAdmissionStore store{{
+        .max_entries = 4,
+        .max_entries_per_netgroup = 2,
+    }};
+    constexpr uint64_t netgroup{0x51};
+    BOOST_REQUIRE(store.RememberKnown(
+        ticket, header, netgroup, regtest_limit, now) ==
+        node::RCAdmissionStore::RememberResult::Stored);
+    node::RCAdmissionTicket accepted;
+    BOOST_REQUIRE(store.Consume(
+        header, netgroup, regtest_limit, now, &accepted));
+
+    // Model the handoff miss: ticket already consumed, peer budget refuses a
+    // second debit. Restore the sidecar and leave source counters unchanged
+    // (the miss never charged). A later honest retry must be able to Consume.
+    BOOST_REQUIRE(store.RestoreConsumed(
+        accepted, header, netgroup, regtest_limit, now));
+    BOOST_CHECK(store.Consume(header, netgroup, regtest_limit, now));
+
+    MatMulRCVerificationBudgetDebit debit{
+        .verification_count = 1,
+        .charged_at = now,
+        .refundable = true,
+    };
+    const auto refund{TakeMatMulRCVerificationBudgetRefund(debit)};
+    BOOST_REQUIRE(refund);
+    RefundMatMulRCPeerVerifyBudget(
+        address_budget, refund->verification_count, refund->charged_at);
+    RefundMatMulRCPeerVerifyBudget(
+        netgroup_budget, refund->verification_count, refund->charged_at);
+    BOOST_CHECK_EQUAL(
+        address_budget.expensive_rc_verifications_this_minute, 0U);
+    BOOST_CHECK_EQUAL(
+        netgroup_budget.expensive_rc_verifications_this_minute, 0U);
+    BOOST_CHECK(!TakeMatMulRCVerificationBudgetRefund(debit));
+}
+
+BOOST_AUTO_TEST_CASE(rc_global_budget_retry_delay_tracks_current_window)
+{
+    using namespace std::chrono_literals;
+
+    const auto charged_at{std::chrono::steady_clock::now()};
+    BOOST_REQUIRE(ConsumeGlobalMatMulRCBudget(
+        /*max_global_per_minute=*/1, /*count=*/1, charged_at));
+
+    const auto still_limited_at{charged_at + 10s};
+    BOOST_CHECK(!ConsumeGlobalMatMulRCBudget(
+        /*max_global_per_minute=*/1, /*count=*/1, still_limited_at));
+    const auto retry_delay{GlobalMatMulRCBudgetRetryDelay(still_limited_at)};
+    BOOST_CHECK_GE(retry_delay, 49s);
+    BOOST_CHECK_LE(retry_delay, 50s);
+
+    BOOST_CHECK_EQUAL(
+        GlobalMatMulRCBudgetRetryDelay(charged_at + 60s),
+        std::chrono::steady_clock::duration::zero());
+
+    // Do not leak this process-global test debit into later suites.
+    RefundGlobalMatMulRCBudget(/*count=*/1, charged_at);
 }
 
 // --- Stage H required-test scaffolding (final-form build spec) -------------

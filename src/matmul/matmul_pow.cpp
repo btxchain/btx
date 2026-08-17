@@ -10,7 +10,7 @@
 #include <primitives/block.h>
 #include <span.h>
 
-#if defined(__APPLE__)
+#if defined(BTX_HAVE_ACCELERATE)
 #include <Accelerate/Accelerate.h>
 #endif
 
@@ -35,7 +35,7 @@ bool IsValidConfig(const PowConfig& config)
 LowRankProductProfile BuildLowRankProductProfile(uint32_t rows, uint32_t inner_dim, uint32_t cols)
 {
     LowRankProductProfile profile;
-#if defined(__APPLE__)
+#if defined(BTX_HAVE_ACCELERATE)
     profile.accelerate_compiled = true;
     const char* env = std::getenv("BTX_MATMUL_AMX_EXPERIMENT");
     const bool force_disable = env != nullptr && env[0] == '0';
@@ -86,7 +86,7 @@ Matrix LowRankProductScalar(const Matrix& left, const Matrix& right, uint64_t* o
     return out;
 }
 
-#if defined(__APPLE__)
+#if defined(BTX_HAVE_ACCELERATE)
 field::Element ReduceMersenne128(unsigned __int128 value)
 {
     constexpr unsigned __int128 kModulus = static_cast<unsigned __int128>(field::MODULUS);
@@ -185,7 +185,7 @@ Matrix LowRankProduct(const Matrix& left, const Matrix& right, uint64_t* op_coun
     assert(left.cols() == right.rows());
     const auto profile = BuildLowRankProductProfile(left.rows(), left.cols(), right.cols());
 
-#if defined(__APPLE__)
+#if defined(BTX_HAVE_ACCELERATE)
     if (profile.accelerate_active && !g_accelerate_disabled.load(std::memory_order_relaxed)) {
         Matrix result = LowRankProductAccelerateSplit16(left, right, op_count);
 

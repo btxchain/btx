@@ -9,6 +9,7 @@ Note: some template filenames in `contrib/init` still use legacy
 `btxd`/`btx-cli` (legacy aliases remain available for compatibility).
 
     contrib/init/bitcoind.service:    systemd service unit configuration
+    contrib/init/btx-miner@.service:  systemd miner template (BindsTo=btxd.service)
     contrib/init/bitcoind.openrc:     OpenRC compatible SysV style init script
     contrib/init/bitcoind.openrcconf: OpenRC conf.d file
     contrib/init/bitcoind.conf:       Upstart service configuration file
@@ -109,6 +110,15 @@ Installing this .service file consists of just copying it to
 
 To test, run `systemctl start bitcoind` and to enable for system startup run
 `systemctl enable bitcoind`
+
+`contrib/init/btxd.service` sets `TimeoutStopSec=3600` so a graceful stop can
+finish shielded seal and any in-flight chainstate CompactFull (live archive
+nodes use a 1 hour stop timeout). Do not leave this at 600s on fresh installs.
+
+`contrib/init/btx-miner@.service` is a miner worker template with
+`BindsTo=btxd.service` and `After=btxd.service`. Live GPU signers that run as
+a user unit (`systemctl --user start btx-miner@1`) should drop in the same
+`BindsTo=btxd.service` against the user-level `btxd.service`.
 
 NOTE: When installing for systemd in Debian/Ubuntu the .service file needs to be copied to the /lib/systemd/system directory instead.
 

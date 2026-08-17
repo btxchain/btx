@@ -45,6 +45,7 @@
 #include <optional>
 #include <queue>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_set>
 #include <vector>
@@ -413,15 +414,16 @@ public:
     /** Whether upon disconnections, a reconnect with V1 is warranted. */
     virtual bool ShouldReconnectV1() const noexcept = 0;
 
-    /** WP-8 / C4 residual: the largest msg.data payload this transport can
+    /** The largest msg.data payload this transport can
      *  currently emit as ONE message. V1 carries up to the block-bearing
      *  ceiling (MAX_BLOCK_MESSAGE_LENGTH, 24 MB); a single V2/BIP324 packet is
      *  physically capped by its 3-byte contents-length field (~16 MB) and the
      *  send path DROPS anything larger rather than desyncing the cipher
      *  stream. Block-serving code must consult this bound BEFORE composing a
-     *  block/blocktxn message so an oversized payload is routed (compact
-     *  block / NOTFOUND) instead of silently vanishing. Call from the message
-     *  handler thread (same discipline as GetInfo()). */
+     *  block/blocktxn message so an oversized payload is routed through the
+     *  negotiated bounded chunk encoding (or NOTFOUND for legacy peers)
+     *  instead of silently vanishing. Call from the message handler thread
+     *  (same discipline as GetInfo()). */
     virtual size_t MaxSendablePayloadBytes() const noexcept = 0;
 };
 
@@ -859,6 +861,26 @@ public:
     const uint64_t nKeyedNetGroup;
     std::atomic_bool fPauseRecv{false};
     std::atomic_bool fPauseSend{false};
+    /** Sticky: this peer issued GETDATA (archive/fetcher). Used only to
+     *  keep SendMessages (INV) to archives; msghand prefer/skip uses
+     *  live GETDATA (queue or inflight requests), not this bit. Live
+     *  macpro2 2026-08-16: sticky Preferred put every miner that had
+     *  ever fetched into the archive class, GETDATA still 45–224s. */
+    std::atomic_bool m_prefer_block_serve{false};
+    /** Live: process-queue GETDATA or unconsumed m_getdata_requests. */
+    std::atomic_bool m_has_getdata_requests{false};
+    /** VERSION nServices. Msghand prefer/skip uses ARCHIVE/MIRROR bits so
+     *  miner CONSENSUS GETDATA is not Preferred with archives. */
+    std::atomic<uint64_t> m_nServices{0};
+
+    [[nodiscard]] bool HasArchiveOrMirrorService() const
+    {
+        const uint64_t services{m_nServices.load(std::memory_order_relaxed)};
+        return (services & NODE_MATMUL_ATTESTATION_ARCHIVE) ==
+                   NODE_MATMUL_ATTESTATION_ARCHIVE ||
+               (services & NODE_MATMUL_TRUSTED_MIRROR) ==
+                   NODE_MATMUL_TRUSTED_MIRROR;
+    }
 
     /** Network key used to prevent fingerprinting our node across networks.
      *  Influenced by the network and the bind address (+ bind port for inbounds) */
@@ -876,6 +898,12 @@ public:
      * consisting of the message and a bool that indicates if the processing
      * queue has more entries. */
     std::optional<std::pair<CNetMessage, bool>> PollMessage()
+        EXCLUSIVE_LOCKS_REQUIRED(!m_msg_process_queue_mutex);
+
+    /** True if the process queue still holds a message of this type
+     *  (does not consume). Used to prefer archive GETDATA before miner
+     *  BLOCK deserialize on a local signer. */
+    [[nodiscard]] bool HasQueuedProcessMessageType(std::string_view msg_type)
         EXCLUSIVE_LOCKS_REQUIRED(!m_msg_process_queue_mutex);
 
     /** Account for the total size of a sent message in the per msg type connection stats. */
@@ -1193,6 +1221,18 @@ public:
     */
     virtual bool SendMessages(CNode* pnode) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex) = 0;
 
+    /**
+     * Serve queued BLOCK GETDATA for ARCHIVE/MIRROR peers without
+     * g_msgproc_mutex so ExactReplay on msghand cannot stall catch-up.
+     * @return true if cs_main was busy (caller should wait, not spin).
+     */
+    virtual bool ServeArchiveBlockGetData(std::atomic<bool>& interrupt)
+        EXCLUSIVE_LOCKS_REQUIRED(!g_msgproc_mutex)
+    {
+        (void)interrupt;
+        return false;
+    }
+
 
 protected:
     /**
@@ -1295,19 +1335,58 @@ public:
     void Interrupt() EXCLUSIVE_LOCKS_REQUIRED(!mutexMsgProc);
     bool GetNetworkActive() const { return fNetworkActive; };
     bool GetUseAddrmanOutgoing() const { return m_use_addrman_outgoing; };
+    void SetGetDataServePending(bool pending)
+    {
+        const bool was{m_getdata_serve_pending.exchange(pending, std::memory_order_relaxed)};
+        if (pending && !was) {
+            m_archive_serve_cv.notify_all();
+        }
+    }
+    bool GetDataServePending() const
+    {
+        return m_getdata_serve_pending.load(std::memory_order_relaxed);
+    }
+    [[nodiscard]] bool ArchiveBlockServeRunning() const
+    {
+        return m_archive_block_serve_running.load(std::memory_order_relaxed);
+    }
+    /** Test-only: pretend the ArchiveBlockServe worker is running so
+     *  msghand skips archive block GETDATA without starting a thread. */
+    void SetArchiveBlockServeRunningForTest(bool running)
+    {
+        m_archive_block_serve_running.store(running, std::memory_order_relaxed);
+    }
+    void SetTrustedMirrorCatchUp(bool catch_up)
+    {
+        m_trusted_mirror_catch_up.store(catch_up, std::memory_order_relaxed);
+    }
+    bool GetTrustedMirrorCatchUp() const
+    {
+        return m_trusted_mirror_catch_up.load(std::memory_order_relaxed);
+    }
     void SetNetworkActive(bool active);
     void OpenNetworkConnection(const CAddress& addrConnect, bool fCountFailure, CSemaphoreGrant&& grant_outbound, const char* strDest, ConnectionType conn_type, bool use_v2transport) EXCLUSIVE_LOCKS_REQUIRED(!m_unused_i2p_sessions_mutex);
     bool CheckIncomingNonce(uint64_t nonce);
     void ASMapHealthCheck();
 
-    // alias for thread safety annotations only, not defined
-    RecursiveMutex& GetNodesMutex() const LOCK_RETURNED(m_nodes_mutex);
+    /** Accessor for thread-safety annotations and AssertLockNotHeld/Held. */
+    RecursiveMutex& GetNodesMutex() const LOCK_RETURNED(m_nodes_mutex) { return m_nodes_mutex; }
 
     bool ForNode(NodeId id, std::function<bool(CNode* pnode)> func);
+    /** Return a lifetime-pinned fully-connected node without retaining
+     * m_nodes_mutex while the caller performs validation work. */
+    std::shared_ptr<CNode> GetNodeRef(NodeId id)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
 
     void PushMessage(CNode* pnode, CSerializedNetMsg&& msg) EXCLUSIVE_LOCKS_REQUIRED(!m_total_bytes_sent_mutex);
 
     using NodeFn = std::function<void(CNode*)>;
+    /** Iterate fully-connected peers under m_nodes_mutex.
+     *
+     * Canonical lock order vs cs_main is cs_main before m_nodes_mutex
+     * (getnetworkinfo, NewPoWValidBlock, EvictExtraOutboundPeers). Callbacks
+     * must not acquire cs_main unless the caller already holds it; taking
+     * cs_main from inside this callback is an ABBA inversion. */
     void ForEachNode(const NodeFn& func)
     {
         LOCK(m_nodes_mutex);
@@ -1467,6 +1546,7 @@ private:
     void ProcessAddrFetch() EXCLUSIVE_LOCKS_REQUIRED(!m_addr_fetches_mutex, !m_unused_i2p_sessions_mutex);
     void ThreadOpenConnections(std::vector<std::string> connect, Span<const std::string> seed_nodes) EXCLUSIVE_LOCKS_REQUIRED(!m_addr_fetches_mutex, !m_added_nodes_mutex, !m_nodes_mutex, !m_unused_i2p_sessions_mutex, !m_reconnections_mutex);
     void ThreadMessageHandler() EXCLUSIVE_LOCKS_REQUIRED(!mutexMsgProc);
+    void ThreadArchiveBlockServe();
     void ThreadI2PAcceptIncoming();
     void AcceptConnection(const ListenSocket& hListenSocket);
 
@@ -1611,6 +1691,8 @@ private:
 
     std::vector<ListenSocket> vhListenSocket;
     std::atomic<bool> fNetworkActive{true};
+    std::atomic<bool> m_getdata_serve_pending{false};
+    std::atomic<bool> m_trusted_mirror_catch_up{true};
     bool fAddressesInitialized{false};
     AddrMan& addrman;
     const NetGroupManager& m_netgroupman;
@@ -1741,6 +1823,10 @@ private:
     std::thread threadOpenAddedConnections;
     std::thread threadOpenConnections;
     std::thread threadMessageHandler;
+    std::thread threadArchiveBlockServe;
+    Mutex m_archive_serve_mutex;
+    std::condition_variable m_archive_serve_cv;
+    std::atomic<bool> m_archive_block_serve_running{false};
     std::thread threadI2PAcceptIncoming;
 
     /** flag for deciding to connect to an extra outbound peer,

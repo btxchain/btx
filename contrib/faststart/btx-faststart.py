@@ -608,7 +608,24 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.environ.get("BTX_FASTSTART_MATMUL_SERVICE_CHALLENGE_FILE"),
         help="Optional shared file path for MatMul service challenge redemption state",
     )
-    parser.add_argument("--keep-snapshot", action="store_true", help="Keep the downloaded snapshot after loadtxoutset")
+    parser.add_argument(
+        "--keep-snapshot",
+        dest="keep_snapshot",
+        action="store_true",
+        default=True,
+        help="Keep the downloaded snapshot after loadtxoutset (default). "
+        "An unclean stop can leave shielded_state ahead of a snapshot-base "
+        "tip; reloading snapshot.dat is the cheap recovery that does not "
+        "re-download blocks/.",
+    )
+    parser.add_argument(
+        "--discard-snapshot",
+        dest="keep_snapshot",
+        action="store_false",
+        help="Delete the downloaded snapshot after a confirmed loadtxoutset. "
+        "Removes the cheap assumeutxo recovery path if shielded_state later "
+        "needs a snapshot reload.",
+    )
     parser.add_argument("--poll-secs", type=int, default=5, help="Seconds between getchainstates polls")
     parser.add_argument("--rpc-wait-secs", type=int, default=120, help="Seconds to wait for RPC readiness")
     parser.add_argument(
@@ -683,7 +700,9 @@ def main(argv: list[str]) -> int:
         print("loadtxoutset result:")
         print(json.dumps(load_result, indent=2))
 
-    if not args.keep_snapshot:
+    if args.keep_snapshot:
+        print(f"keeping snapshot for assumeutxo recovery: {snapshot_path}")
+    else:
         snapshot_path.unlink(missing_ok=True)
 
     monitor_chainstates(cli_cmd, args.poll_secs, args.follow)

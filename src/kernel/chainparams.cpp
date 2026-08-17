@@ -169,6 +169,33 @@ static constexpr int64_t kRCEpochAAsertRescaleDen{1};
 // Keep all three Epoch-A heights bound to this single constant so that a later
 // update cannot create a digest-only v4/BMX4C interval.
 static constexpr int32_t BTX_MATMUL_V47_EPOCH_A_HEIGHT{185'000};
+// Height-gated ASERT dump floor + half-life lengthening. Hard fork in
+// GetNextWorkRequired (bad-diffbits is exact match). Historical powLimit is
+// never mutated.
+//
+// Floor compact frozen 2026-08-15 (do not chase live bits):
+//   F = compact 0x1f0a3d70 (uint256 000a3d70…, GetDifficulty ≈ 1.490e-6).
+//   Hard end of the empirical 8e-7–1.5e-6 band. Below ~1e-7 a 3090/5060 Ti
+//   swarm mints a valid body per card per interval (lottery). Around 1.7e-6
+//   the miner already saw 1–3 siblings (PoW ranks).
+//
+//   The rejected 12× historical powLimit (0x2008901c, ≈ 6.96e-9) is still
+//   inside the flood band. Do not restore it.
+//
+//   5060 Ti is the validation/signer reference, not the intended 90s miner:
+//   p = 0x0a3d70 / 2^32 ≈ 1.56e-4, so one 12.3s episode expects ~22 h/block
+//   at the clamp. A garage of 16× 3090s (~32s/episode) is still hours, not
+//   a sibling storm. Datacenter episode-rate holds ~90s and ASERT climbs.
+//   Episode shape is unchanged, so verify cost on the 5060 Ti stays one
+//   ExactReplay (~12–32s) at any nBits.
+//
+//   τ 3600 → 14400 at H+1 so an 11-hour stall dumps ~4× instead of ~2000×.
+//
+// Consensus dump floor at the next mainnet block after the attested
+// 191713 parent. Do not retune F. Half-life lengthening is H+1 so a stall
+// after the floor cannot unwind 11 half-lives back toward historical
+// powLimit. See doc/btx-gpu-verified-network-transition.md.
+static constexpr int32_t BTX_MATMUL_POW_LIMIT_UPGRADE_HEIGHT{191'714};
 
 // MatMul v4.2 / ENC-BMX4C construction invariants (spec §8.1/§8.2). No-op when
 // the profile is unset (nMatMulBMX4CHeight == INT32_MAX = disabled); when a
@@ -694,6 +721,10 @@ public:
         // throughput telemetry (~3.53 bps, ~0.283s over a 30s run) to target
         // the configured fast-phase SLA (~0.25s mean) on this host profile.
         consensus.powLimit = uint256{"66c1540000000000000000000000000000000000000000000000000000000000"};
+        // Compact 0x1f0a3d70. Do not mutate powLimit — old easy nBits must
+        // remain DeriveTarget-decodable. See BTX_MATMUL_POW_LIMIT_UPGRADE_HEIGHT.
+        consensus.nMatMulPowLimitUpgradeHeight = BTX_MATMUL_POW_LIMIT_UPGRADE_HEIGHT;
+        consensus.powLimitUpgrade = uint256{"000a3d7000000000000000000000000000000000000000000000000000000000"};
         consensus.nPowTargetTimespan = 14 * 24 * 60 * 60; // two weeks
         consensus.nPowTargetSpacing = 90;
         consensus.fPowAllowMinDifficultyBlocks = false;
@@ -796,15 +827,15 @@ public:
         consensus.nMatMulAsertHeight = 50'000;
         consensus.nMatMulAsertHalfLife = 3'600;
         consensus.nMatMulAsertBootstrapFactor = 180;
-        // No retune or half-life upgrade needed — fresh chain starts with
-        // the target 3,600s half-life directly.
         consensus.nMatMulAsertRetuneHeight = std::numeric_limits<int32_t>::max();
         consensus.nMatMulAsertRetuneHardeningFactor = 1;
         consensus.nMatMulAsertRetune2Height = std::numeric_limits<int32_t>::max();
         consensus.nMatMulAsertRetune2TargetNum = 1;
         consensus.nMatMulAsertRetune2TargetDen = 1;
-        consensus.nMatMulAsertHalfLifeUpgradeHeight = std::numeric_limits<int32_t>::max();
-        consensus.nMatMulAsertHalfLifeUpgrade = 3'600;
+        // Lengthen τ only after the dump floor is locked, so a stall cannot
+        // unwind 11 half-lives (~2000×) back toward historical powLimit.
+        consensus.nMatMulAsertHalfLifeUpgradeHeight = BTX_MATMUL_POW_LIMIT_UPGRADE_HEIGHT + 1;
+        consensus.nMatMulAsertHalfLifeUpgrade = 14'400;
         // Height 118,482 is approximately six hours from the observed public
         // tip near 118,242 at the 90-second target spacing, while bounding
         // future-dated timestamp shocks to one ASERT half-life.
@@ -876,9 +907,10 @@ public:
         // Mainnet anchor refreshed on 2026-08-04 at height 179'000 from a
         // synced archival node so stale history below the current public
         // release floor is rejected quickly.
-        consensus.nMinimumChainWork = uint256{"00000000000000000000000000000000000000000000000000029d454fe795d2"};
+        // Refreshed to the work at height 186000, the new checkpoint anchor.
+        consensus.nMinimumChainWork = uint256{"00000000000000000000000000000000000000000000000000030b4f85e66df7"};
         // Assume signatures valid up to the same anchored block to speed sync.
-        consensus.defaultAssumeValid = uint256{"2dd1d545b1b5e76c28b4414ebe0c22b1ba9d3ebd88662fbd1b9e4d0cf6693933"};
+        consensus.defaultAssumeValid = uint256{"0a51fccfd75d2051e94be1a8cc5abff8b86ac53d0cc134680f286fe769aa2129"};
 
         /**
          * The message start string is designed to be unlikely to occur in normal data.
@@ -943,6 +975,24 @@ public:
             {
                 {0, uint256{"75a998a39d2d6e25a9ca7de2cc659309c4105839c06cd435ba2b1aabf0fa4601"}},
                 {179000, uint256{"2dd1d545b1b5e76c28b4414ebe0c22b1ba9d3ebd88662fbd1b9e4d0cf6693933"}},
+                // MatMul v4.7 Epoch-A activation. Non-upgraded nodes extend a
+                // legacy chain past this height; checkpointing it rejects them
+                // explicitly at the first header instead of surfacing a cryptic
+                // work-transition error, and stops fresh syncs from being led
+                // onto a pre-fork chain by a legacy majority.
+                {185000, uint256{"f03a7af21d20f67a5efecfb8b0b3e5e1b91efa208b385419470c59450f2afb8b"}},
+                // Post-activation anchor. A competing branch diverges from the
+                // canonical chain at ~185544, above the 185000 checkpoint, and
+                // is ~800 blocks long. nMaxReorgDepth (12) already stops any
+                // running node being reorged onto it, but that rule says
+                // nothing about a node syncing from scratch, which simply
+                // follows the heaviest valid chain it is offered. Without an
+                // anchor above the divergence a fresh sync could settle on the
+                // competing branch. Checkpointing 186000 rejects anything
+                // forking below it, closing that window; the height is ~300
+                // blocks behind the tip, far beyond nMaxReorgDepth, so it
+                // cannot pin a block that might still legitimately reorg.
+                {186000, uint256{"0a51fccfd75d2051e94be1a8cc5abff8b86ac53d0cc134680f286fe769aa2129"}},
             }
         };
         m_assumeutxo_data = {
@@ -1101,6 +1151,38 @@ public:
                 .m_chain_tx_count = 274'878,
                 .blockhash = consteval_ctor(uint256{"2dd1d545b1b5e76c28b4414ebe0c22b1ba9d3ebd88662fbd1b9e4d0cf6693933"}),
                 .shielded_state_commitment = uint256{"74a131a91f71cb7e488c1826eb3d5676802a586bddb8082b33356568d7def0b5"},
+            },
+            {
+                // main assumeutxo snapshot at height 189'307 (snapshot v9)
+                .height = 189'307,
+                .hash_serialized = AssumeutxoHash{uint256{"48da3da953130984036435da93847ebe7d1a20fc5464d789b07f49b79178e074"}},
+                .m_chain_tx_count = 287'404,
+                .blockhash = consteval_ctor(uint256{"bd8c44a30103613a34ac271b7cfffb4334b70aae9c41cf12831d98a98313e6c8"}),
+                .shielded_state_commitment = uint256{"94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541"},
+            },
+            {
+                // main assumeutxo snapshot at height 190'467 (snapshot v9)
+                .height = 190'467,
+                .hash_serialized = AssumeutxoHash{uint256{"6ec3e0f1c6377962012e31c030a54e481ff419929d6beae0c2f3aaae82429d3a"}},
+                .m_chain_tx_count = 288'575,
+                .blockhash = consteval_ctor(uint256{"5799b5a4dd00a86947305239341896b595c33684e168216963516acf1cc312da"}),
+                .shielded_state_commitment = uint256{"94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541"},
+            },
+            {
+                // main assumeutxo snapshot at height 190'507 (snapshot v9)
+                .height = 190'507,
+                .hash_serialized = AssumeutxoHash{uint256{"2563ecff2b06ef20e592a57deb47d52b4ffe7e1fb1fdda1746adf4f33a9dec81"}},
+                .m_chain_tx_count = 288'615,
+                .blockhash = consteval_ctor(uint256{"9142fe23aca98fa3a79c31ed2a0af74d41d0915f9914998e6a40808009496fe5"}),
+                .shielded_state_commitment = uint256{"94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541"},
+            },
+            {
+                // main assumeutxo snapshot at height 191'266 (snapshot v9)
+                .height = 191'266,
+                .hash_serialized = AssumeutxoHash{uint256{"05be21ac1772c4ae806eec8994fd82f0082b4004ccbedb606dcdfd3c71ae2a68"}},
+                .m_chain_tx_count = 289'382,
+                .blockhash = consteval_ctor(uint256{"de6e3c9db527970c13b2ba834c19ff8f4d8829aee0c93ba6cde3a5039504efa8"}),
+                .shielded_state_commitment = uint256{"94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541"},
             },
         };
         chainTxData = ChainTxData{
@@ -1997,6 +2079,17 @@ public:
             consensus.nMatMulRCGlobalVerifyBudgetPerMin = std::numeric_limits<uint32_t>::max();
             consensus.nMatMulRCPeerVerifyBudgetPerMin = std::numeric_limits<uint32_t>::max();
         }
+        // Test-only EncDr / RC pending-cap overrides. RC is applied after the
+        // unthrottle above so a functional test can still exhaust the cap
+        // without enlarging production defaults.
+        if (opts.matmul_max_pending_verifications.has_value()) {
+            consensus.nMatMulMaxPendingVerifications =
+                *opts.matmul_max_pending_verifications;
+        }
+        if (opts.matmul_rc_max_pending_verifications.has_value()) {
+            consensus.nMatMulRCMaxPendingVerifications =
+                *opts.matmul_rc_max_pending_verifications;
+        }
         // v4.4-LT Q* Phase B: explicit regtest override in either direction.
         // Regtest defaults to seal mode, while =0 retains a Phase-A fixture.
         // Enabling remains meaningful only together with a live DRLT height.
@@ -2235,6 +2328,8 @@ public:
             opts.matmul_rc_profile.has_value() ||
             (opts.matmul_lt_seal_as_pow.has_value() && !functional_harness_seal_override) ||
             opts.matmul_lt_max_pending_verifications.has_value() ||
+            opts.matmul_max_pending_verifications.has_value() ||
+            opts.matmul_rc_max_pending_verifications.has_value() ||
             opts.matmul_flat_sketch_replay ||
             opts.matmul_proof_assumevalid_min_age.has_value() ||
             opts.shielded_tx_binding_activation_height.has_value() ||

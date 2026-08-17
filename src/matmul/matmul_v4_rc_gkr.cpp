@@ -5031,8 +5031,8 @@ ExactReplayVerifyResult SchedulerAdmissionFailure(
         "accelerator_scheduler_admission_failed";
     result.operator_recovery =
         "retry after the bounded accelerator queue drains; inspect scheduler queue/capacity telemetry";
-    result.note = "ExactReplay: accelerator scheduler queue deadline or capacity limit reached (workspace=" +
-        std::to_string(workspace_bytes) + "B); block remains retryable";
+    result.note = "ExactReplay: accelerator scheduler queue full, waiter deadline, or workspace capacity (workspace=" +
+        std::to_string(workspace_bytes) + "B); block remains retryable; inspect rc_accelerator_scheduler queue_rejections/timed_out_waits/capacity_rejections";
     return result;
 }
 

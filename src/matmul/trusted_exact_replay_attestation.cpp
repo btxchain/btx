@@ -158,6 +158,7 @@ std::string_view AddResultName(AddResult result)
     case AddResult::UntrustedSigner: return "untrusted-signer";
     case AddResult::InvalidSignature: return "invalid-signature";
     case AddResult::NoLocalSigner: return "no-local-signer";
+    case AddResult::HeightOccupied: return "height-occupied";
     }
     return "unknown";
 }
@@ -274,6 +275,10 @@ AddResult AttestationStore::Add(
             ++m_stats.duplicates;
             return AddResult::Duplicate;
         }
+        // Add() stores signatures that already exist (P2P, disk, historical
+        // dual-attest). Refusing a local-key second hash here would brick
+        // recovery from a past dual-sign already on the network. Minting a
+        // new local signature is SignLocal / SignAuthoritative.
         const size_t existing_signatures{
             existing_bucket == m_buckets.end()
                 ? 0
@@ -315,6 +320,22 @@ AddResult AttestationStore::SignLocal(
         ++m_stats.rejected;
         return AddResult::NoLocalSigner;
     }
+    {
+        std::lock_guard lock{m_mutex};
+        const CPubKey local_pk{m_config.local_signer->GetPubKey()};
+        for (auto it = m_buckets.lower_bound(BlockKey{block_height, uint256{}});
+             it != m_buckets.end() && it->first.height == block_height; ++it) {
+            if (it->first.hash == block_hash) continue;
+            const bool local_signed{
+                it->second.attestations.count(local_pk) != 0};
+            const bool other_quorum{
+                it->second.attestations.size() >= m_config.threshold};
+            if (local_signed || other_quorum) {
+                ++m_stats.rejected;
+                return AddResult::HeightOccupied;
+            }
+        }
+    }
     ExactReplayStatement statement;
     statement.chain_id = m_config.chain_id;
     statement.block_hash = block_hash;
@@ -333,6 +354,18 @@ AddResult AttestationStore::SignLocal(
         *produced = std::move(*attestation);
     }
     return result;
+}
+
+std::optional<UtxoSnapshotSignature> AttestationStore::SignUtxoSnapshot(
+    const UtxoSnapshotStatement& statement) const
+{
+    if (!m_config.local_signer.has_value()) return std::nullopt;
+    if (statement.chain_id != m_config.chain_id) return std::nullopt;
+    if (statement.replay_authority_context !=
+        m_config.replay_authority_context) {
+        return std::nullopt;
+    }
+    return SignUtxoSnapshotStatement(statement, *m_config.local_signer);
 }
 
 bool AttestationStore::HasQuorum(const uint256& block_hash,
@@ -364,6 +397,27 @@ std::vector<ExactReplayAttestation> AttestationStore::GetAttestations(
 {
     std::lock_guard lock{m_mutex};
     return GetAttestationsLocked(BlockKey{block_height, block_hash});
+}
+
+std::vector<ExactReplayAttestation> AttestationStore::ExportAll() const
+{
+    std::lock_guard lock{m_mutex};
+    std::vector<ExactReplayAttestation> out;
+    out.reserve(m_attestation_count);
+    for (const auto& [key, bucket] : m_buckets) {
+        (void)key;
+        for (const auto& [signer, attestation] : bucket.attestations) {
+            (void)signer;
+            out.push_back(attestation);
+        }
+    }
+    return out;
+}
+
+void AttestationStore::SetDurableRetention(bool durable)
+{
+    std::lock_guard lock{m_mutex};
+    m_durable_retention = durable;
 }
 
 WaitResult AttestationStore::WaitForQuorum(
@@ -415,6 +469,7 @@ void AttestationStore::EraseLocked(
 
 void AttestationStore::PruneExpiredLocked(Clock::time_point now)
 {
+    if (m_durable_retention) return;
     for (auto it = m_buckets.begin(); it != m_buckets.end();) {
         if (now - it->second.updated < m_config.ttl) {
             ++it;

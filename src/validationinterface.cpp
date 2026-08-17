@@ -16,6 +16,7 @@
 #include <util/check.h>
 #include <util/task_runner.h>
 
+#include <chrono>
 #include <future>
 #include <unordered_map>
 #include <utility>
@@ -153,6 +154,42 @@ void ValidationSignals::SyncWithValidationInterfaceQueue()
         promise.set_value();
     });
     promise.get_future().wait();
+}
+
+ValidationQueueSyncResult ValidationSignals::TrySyncWithValidationInterfaceQueue(
+    std::chrono::milliseconds timeout,
+    std::function<bool()> interrupted)
+{
+    AssertLockNotHeld(cs_main);
+    // Shared so a timeout/interrupt return cannot destroy the promise before
+    // the sentinel runs (the waiter is gone; the queued callback is not).
+    auto promise{std::make_shared<std::promise<void>>()};
+    std::future<void> future{promise->get_future()};
+    CallFunctionInValidationInterfaceQueue([promise] {
+        promise->set_value();
+    });
+
+    const auto deadline{std::chrono::steady_clock::now() + timeout};
+    while (true) {
+        if (future.wait_for(std::chrono::milliseconds{0}) ==
+            std::future_status::ready) {
+            return ValidationQueueSyncResult::Completed;
+        }
+        if (interrupted && interrupted()) {
+            return ValidationQueueSyncResult::Interrupted;
+        }
+        const auto now{std::chrono::steady_clock::now()};
+        if (now >= deadline) {
+            return ValidationQueueSyncResult::TimedOut;
+        }
+        const auto remaining{
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - now)};
+        const auto slice{std::min(remaining, std::chrono::milliseconds{100})};
+        if (future.wait_for(slice) == std::future_status::ready) {
+            return ValidationQueueSyncResult::Completed;
+        }
+    }
 }
 
 // Use a macro instead of a function for conditional logging to prevent

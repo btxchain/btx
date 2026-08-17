@@ -632,6 +632,75 @@ BOOST_AUTO_TEST_CASE(registry_persisted_snapshot_requires_payload_store_and_full
     ShieldedAccountRegistryState::ResetPayloadStore();
 }
 
+BOOST_AUTO_TEST_CASE(registry_prepared_append_does_not_publish_payload_before_commit)
+{
+    RegistryPayloadStoreGuard payload_store_guard(
+        m_path_root / "registry_payload_store_prepared_transition");
+
+    const auto direct_leaf = BuildDirectSendAccountLeaf(MakeDirectOutput(0x89));
+    BOOST_REQUIRE(direct_leaf.has_value());
+    const std::vector<ShieldedAccountLeaf> leaves{*direct_leaf};
+
+    ShieldedAccountRegistryState projected =
+        ShieldedAccountRegistryState::WithConfiguredPayloadStore();
+    BOOST_REQUIRE(projected.AppendPrepared(
+        Span<const ShieldedAccountLeaf>{leaves.data(), leaves.size()}));
+    BOOST_REQUIRE(projected.MaterializeEntry(0).has_value());
+
+    const auto prepared_snapshot = projected.ExportPersistedSnapshot();
+    BOOST_REQUIRE(prepared_snapshot.IsValid());
+    auto before_commit = ShieldedAccountRegistryState::RestorePersisted(prepared_snapshot);
+    BOOST_REQUIRE(before_commit.has_value());
+    BOOST_CHECK(!before_commit->CanMaterializeAllEntries());
+
+    BOOST_REQUIRE(projected.CommitPreparedPayloads());
+    auto after_commit = ShieldedAccountRegistryState::RestorePersisted(prepared_snapshot);
+    BOOST_REQUIRE(after_commit.has_value());
+    BOOST_CHECK(after_commit->CanMaterializeAllEntries());
+    BOOST_CHECK_EQUAL(after_commit->Root(), projected.Root());
+}
+
+BOOST_AUTO_TEST_CASE(registry_reorg_payload_batch_cannot_overwrite_committed_source)
+{
+    RegistryPayloadStoreGuard payload_store_guard(
+        m_path_root / "registry_payload_store_reorg_content_keys");
+
+    const auto old_leaf = BuildDirectSendAccountLeaf(MakeDirectOutput(0x8a));
+    const auto new_leaf = BuildDirectSendAccountLeaf(MakeDirectOutput(0x8b));
+    BOOST_REQUIRE(old_leaf.has_value());
+    BOOST_REQUIRE(new_leaf.has_value());
+
+    ShieldedAccountRegistryState source =
+        ShieldedAccountRegistryState::WithConfiguredPayloadStore();
+    const std::vector<ShieldedAccountLeaf> old_leaves{*old_leaf};
+    BOOST_REQUIRE(source.Append(
+        Span<const ShieldedAccountLeaf>{old_leaves.data(), old_leaves.size()}));
+    const auto source_snapshot = source.ExportPersistedSnapshot();
+
+    ShieldedAccountRegistryState target = source;
+    BOOST_REQUIRE(target.Truncate(
+        0, ShieldedAccountRegistryState::PayloadPruneMode::KEEP));
+    const std::vector<ShieldedAccountLeaf> new_leaves{*new_leaf};
+    BOOST_REQUIRE(target.AppendPrepared(
+        Span<const ShieldedAccountLeaf>{new_leaves.data(), new_leaves.size()}));
+    const auto target_snapshot = target.ExportPersistedSnapshot();
+
+    // This is the mandated crash window: target payload is durable, PREPARED
+    // is not. The source snapshot at the same leaf index must remain readable.
+    BOOST_REQUIRE(target.CommitPreparedPayloads());
+    auto restored_source =
+        ShieldedAccountRegistryState::RestorePersisted(source_snapshot);
+    auto restored_target =
+        ShieldedAccountRegistryState::RestorePersisted(target_snapshot);
+    BOOST_REQUIRE(restored_source.has_value());
+    BOOST_REQUIRE(restored_target.has_value());
+    BOOST_CHECK(restored_source->CanMaterializeAllEntries());
+    BOOST_CHECK(restored_target->CanMaterializeAllEntries());
+    BOOST_CHECK_EQUAL(restored_source->Root(), source.Root());
+    BOOST_CHECK_EQUAL(restored_target->Root(), target.Root());
+    BOOST_CHECK_NE(restored_source->Root(), restored_target->Root());
+}
+
 BOOST_AUTO_TEST_CASE(registry_truncate_prunes_externalized_payloads)
 {
     RegistryPayloadStoreGuard payload_store_guard(m_path_root / "registry_payload_store_truncate_prune");
@@ -768,10 +837,16 @@ BOOST_AUTO_TEST_CASE(registry_truncate_physically_compacts_externalized_payload_
     }
     ShieldedAccountRegistryState::ResetPayloadStore();
 
-    constexpr uint8_t DB_ACCOUNT_REGISTRY_PAYLOAD{static_cast<uint8_t>('P')};
-    const auto stale_range_begin = std::make_pair(DB_ACCOUNT_REGISTRY_PAYLOAD, uint64_t{8});
-    const auto stale_range_end =
-        std::make_pair(DB_ACCOUNT_REGISTRY_PAYLOAD, std::numeric_limits<uint64_t>::max());
+    // New payloads are keyed by (leaf index, commitment) so an uncommitted
+    // reorg candidate cannot overwrite the payload of the committed branch.
+    // Measure the content-addressed key range which Truncate() must reclaim.
+    constexpr uint8_t DB_ACCOUNT_REGISTRY_PAYLOAD_CONTENT{static_cast<uint8_t>('Q')};
+    const auto stale_range_begin = std::make_pair(
+        std::make_pair(DB_ACCOUNT_REGISTRY_PAYLOAD_CONTENT, uint64_t{8}), uint256{});
+    const auto stale_range_end = std::make_pair(
+        std::make_pair(DB_ACCOUNT_REGISTRY_PAYLOAD_CONTENT,
+                       std::numeric_limits<uint64_t>::max()),
+        uint256{});
     size_t stale_bytes_before{0};
     {
         CDBWrapper db({.path = db_path,

@@ -423,29 +423,35 @@ void UpdateAuthenticatedChainWork(CBlockIndex& block, const Consensus::Params& p
 
 /** WP-8 / C1/H2: claimed chain work clamped for peer-selection / anti-DoS use.
  *  Returns nAuthenticatedChainWork plus min(unauthenticated suffix work,
- *  unauth_allowance_blocks * GetBlockProof(block)). Production passes a zero
- *  allowance: an unverified MatMul suffix receives no work-based preference,
- *  even when it is only one header deep. Pre-fork (and for any fully
- *  body-validated chain) nAuthenticatedChainWork == nChainWork, so this returns
- *  EXACTLY nChainWork — call sites routed through it are behavior-identical
- *  while the MatMul v4 fork is disabled. The explicit parameter remains for
- *  deterministic policy-unit coverage; production callers use the constant
- *  below. */
+ *  unauth_allowance_blocks * GetBlockProof(block)). Production passes a small
+ *  bounded allowance (see TRUST_ADJUSTED_WORK_ALLOWANCE_BLOCKS): enough for a
+ *  competing headers-only branch to briefly outrank a losing authenticated tip
+ *  so bodies can be chased and real authenticated work can decide, but never
+ *  enough for a forged header flood to claim unbounded preference. Pre-fork
+ *  (and for any fully body-validated chain) nAuthenticatedChainWork ==
+ *  nChainWork, so this returns EXACTLY nChainWork — call sites routed through
+ *  it are behavior-identical while the MatMul v4 fork is disabled. The
+ *  explicit parameter remains for deterministic policy-unit coverage;
+ *  production callers use the constant below. */
 arith_uint256 GetTrustAdjustedChainWork(const CBlockIndex& block, unsigned int unauth_allowance_blocks);
 
 /** Production unauthenticated-work allowance used for best-header selection
- *  and peer trust decisions. Zero is deliberate: header download may continue,
- *  but no claimed MatMul work affects preference before body verification.
- *  Kept here so validation, blockstorage, and net_processing share the same
- *  fail-closed policy. */
-inline constexpr unsigned int TRUST_ADJUSTED_WORK_ALLOWANCE_BLOCKS = 0;
+ *  and peer trust decisions. Equal to the EMERGENCY park_depth (6): a node that
+ *  lost a same-height race can prefer a competing headers-only branch far
+ *  enough to download and authenticate bodies, after which authenticated work
+ *  alone decides. A forged suffix still cannot outrank an already-
+ *  authenticated branch of park_depth+ blocks. This only ranks chase targets;
+ *  ActivateBestChain PARK still refuses deep rewrites. Kept here so
+ *  validation, blockstorage, and net_processing share the same bound. */
+inline constexpr unsigned int TRUST_ADJUSTED_WORK_ALLOWANCE_BLOCKS = 6;
 
 /** True iff `candidate` should replace `current` as best header under the
- *  trust-adjusted work metric. With the production zero allowance this is
- *  authenticated work only. Tied unauthenticated branches prefer more
- *  authenticated work and then the shallowest suffix, so even one unverified
- *  header cannot displace its authenticated parent on claimed work.
- *  Pre-MatMul-fork/full-body ties retain legacy behavior. */
+ *  trust-adjusted work metric. Production uses a bounded unauth allowance so a
+ *  short competing headers-only suffix can displace a losing tip for chase.
+ *  Tied branches (both at the allowance cap, or fully authenticated) prefer
+ *  more authenticated work and then the shallowest claimed suffix, so a
+ *  million-header forged plateau cannot pin m_best_header. Pre-MatMul-fork /
+ *  full-body ties retain legacy behavior. */
 [[nodiscard]] bool PreferTrustAdjustedHeader(const CBlockIndex& current,
                                              const CBlockIndex& candidate,
                                              unsigned int unauth_allowance_blocks = TRUST_ADJUSTED_WORK_ALLOWANCE_BLOCKS);
@@ -455,11 +461,19 @@ inline constexpr unsigned int TRUST_ADJUSTED_WORK_ALLOWANCE_BLOCKS = 0;
  *  Header-only children contribute zero authenticated proof but must inherit
  *  the updated parent authenticated base; without this walk a forged long
  *  header branch can keep a stale (too-low) authenticated sum after a
- *  genuine body promotion lower in the tree. */
+ *  genuine body promotion lower in the tree.
+ *
+ *  `for_each_child` must enumerate only the direct children of its first
+ *  argument. BlockManager maintains that adjacency incrementally, keeping a
+ *  normal ordered body promotion proportional to the affected subtree instead
+ *  of rebuilding the complete block-index graph under cs_main. */
 void PropagateAuthenticatedChainWorkDescendants(
     CBlockIndex& root,
     const Consensus::Params& params,
-    std::function<void(std::function<void(CBlockIndex&)>)> for_each_index);
+    const std::function<void(
+        CBlockIndex&,
+        const std::function<void(CBlockIndex&)>&)>& for_each_child,
+    const std::function<void(CBlockIndex&)>& on_updated = {});
 
 /** Return the time it would take to redo the work difference between from and to, assuming the current hashrate corresponds to the difficulty at tip, in seconds. */
 int64_t GetBlockProofEquivalentTime(const CBlockIndex& to, const CBlockIndex& from, const CBlockIndex& tip, const Consensus::Params&);
@@ -616,6 +630,45 @@ public:
     /** Find the earliest block with timestamp equal or greater than the given time and height equal or greater than the given height. */
     CBlockIndex* FindEarliestAtLeast(int64_t nTime, int height) const;
 };
+
+/**
+ * First block strictly above `start` on `best_known`'s ancestor chain that does
+ * not yet have a usable body: neither BLOCK_HAVE_DATA nor contained in
+ * `active_chain` (when provided). Returns nullptr when every block through
+ * `best_known` is present.
+ *
+ * Used by block-download selection to keep walks root-first: a higher body on
+ * disk (or a sibling on the active chain) must not hide a lower hole.
+ */
+const CBlockIndex* FindLowestMissingBody(const CBlockIndex* start,
+                                         const CBlockIndex* best_known,
+                                         const CChain* active_chain);
+
+/**
+ * Result of re-deriving pindexLastCommonBlock so the download walk cannot start
+ * past a missing body on the followed (best-known) chain.
+ */
+struct LastCommonRootFirstResult {
+    const CBlockIndex* last_common{nullptr};
+    const CBlockIndex* lowest_missing{nullptr};
+    bool clamped{false};
+    /** Stable reason token for production logs / tests. */
+    const char* reason{"ok"};
+};
+
+/**
+ * Clamp `last_common` so it never sits at or past a missing body on
+ * `best_known`'s chain. Re-derives against `LastCommonAncestor(tip, best_known)`
+ * when a desync is detected (HaveNumChainTxs can outlive BLOCK_HAVE_DATA after
+ * prune/partial loss, so a monotonic LastCommon drag leaves holes unrequested).
+ *
+ * `last_common` may be null (caller still bootstrapping). `tip` and
+ * `best_known` must be non-null.
+ */
+LastCommonRootFirstResult ClampLastCommonToRootFirst(const CBlockIndex* last_common,
+                                                     const CBlockIndex* best_known,
+                                                     const CBlockIndex* tip,
+                                                     const CChain* active_chain);
 
 /** Get a locator for a block index entry. */
 CBlockLocator GetLocator(const CBlockIndex* index);

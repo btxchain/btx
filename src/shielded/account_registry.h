@@ -420,6 +420,31 @@ public:
     [[nodiscard]] bool Append(Span<const ShieldedAccountLeaf> account_leaves,
                               std::vector<uint64_t>* inserted_indices = nullptr,
                               bool sync_payload_store = true);
+    /**
+     * Append entries to a projected transition without mutating the shared
+     * payload database. The new payloads remain inline until the caller first
+     * exports the complete PREPARED intent and then commits the append-only
+     * payload batch. The durable ordering is payload batch -> PREPARED marker
+     * -> auxiliary mutations -> final state pin/marker clear. A crash before
+     * the marker therefore leaves only an unreachable suffix, which restart
+     * prunes back to the still-committed registry snapshot.
+     */
+    [[nodiscard]] bool AppendPrepared(Span<const ShieldedAccountLeaf> account_leaves,
+                                      std::vector<uint64_t>* inserted_indices = nullptr);
+    /** Atomically persist payloads retained by AppendPrepared(), before PREPARED. */
+    [[nodiscard]] bool CommitPreparedPayloads(bool sync_payload_store = true);
+    /**
+     * Return only the payload-bearing suffix retained by AppendPrepared().
+     * These complete entries are embedded in the PREPARED transition journal
+     * as defense-in-depth redo data. std::nullopt means an internal invariant
+     * failure; an engaged empty vector means the transition adds no payload.
+     */
+    [[nodiscard]] std::optional<std::vector<ShieldedAccountRegistryEntry>>
+    ExportPreparedPayloadEntries() const;
+    /** Validate and durably publish payloads carried by a PREPARED journal. */
+    [[nodiscard]] bool CommitJournaledPayloads(
+        Span<const ShieldedAccountRegistryEntry> payload_entries,
+        bool sync_payload_store = true);
     [[nodiscard]] bool Truncate(size_t size,
                                 PayloadPruneMode prune_mode = PayloadPruneMode::PRUNE);
     [[nodiscard]] std::optional<uint64_t> FindLeafIndexByCommitment(
@@ -465,6 +490,10 @@ private:
     [[nodiscard]] bool LoadFromSnapshot(const ShieldedAccountRegistrySnapshot& snapshot);
     [[nodiscard]] bool LoadFromPersistedSnapshot(
         const ShieldedAccountRegistryPersistedSnapshot& snapshot);
+    [[nodiscard]] bool AppendInternal(Span<const ShieldedAccountLeaf> account_leaves,
+                                      std::vector<uint64_t>* inserted_indices,
+                                      bool sync_payload_store,
+                                      bool defer_payload_store);
     [[nodiscard]] std::optional<std::vector<uint8_t>> LoadPayloadBytes(uint64_t leaf_index) const;
     void AttachConfiguredPayloadStore();
 

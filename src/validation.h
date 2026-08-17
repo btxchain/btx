@@ -19,6 +19,7 @@
 #include <kernel/chainparams.h>
 #include <kernel/chainstatemanager_opts.h>
 #include <kernel/cs_main.h> // IWYU pragma: export
+#include <matmul/trusted_utxo_snapshot_attestation.h>
 #include <node/blockstorage.h>
 #include <policy/feerate.h>
 #include <policy/packages.h>
@@ -45,6 +46,7 @@
 #include <versionbits.h>
 
 #include <atomic>
+#include <chrono>
 #include <deque>
 #include <map>
 #include <memory>
@@ -72,6 +74,46 @@ struct AssumeutxoData;
 enum class ShieldedAutoRepairKind {
     ANCHOR_HISTORY,
     STATE_REBUILD,
+};
+
+/**
+ * Durable shielded-transition write boundaries exposed only to deterministic
+ * failure tests. Production code has no installed hook.
+ */
+enum class ShieldedTransitionWriteSeam {
+    ACCOUNT_PAYLOAD,
+    PREPARED_MARKER,
+    NULLIFIERS,
+    RECOVERY_EXITS,
+    SETTLEMENT_ANCHORS,
+    NETTING_MANIFESTS,
+    UNSHIELD_VELOCITY,
+    POOL_BALANCE,
+    PERSISTED_STATE,
+    NULLIFIER_ACCUMULATOR,
+    STATE_PIN,
+    MARKER_CLEAR,
+};
+
+/**
+ * Chainstate-owned view of divergence and recovery. Header acquisition, body
+ * scheduling, verification admission, and activation should consult this
+ * common state instead of independently inferring whether the followed branch
+ * is actionable.
+ */
+enum class ChainRecoveryPhase {
+    CONVERGED,
+    CHASING,
+    RECOVERING_REORG,
+    PARKED_NEEDS_OPERATOR,
+};
+
+struct ChainRecoveryState {
+    ChainRecoveryPhase phase{ChainRecoveryPhase::CONVERGED};
+    const CBlockIndex* followed_target{nullptr};
+    const CBlockIndex* fork{nullptr};
+    uint32_t reorg_depth{0};
+    const char* reason{"converged"};
 };
 
 using ShieldedAutoRepairGeneration = std::tuple<uint256, uint64_t, uint256>;
@@ -530,6 +572,38 @@ bool TestBlockValidity(BlockValidationState& state,
                        bool fCheckPOW = true,
                        bool fCheckMerkleRoot = true) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
+/**
+ * ExactReplay / Stage-3 CUDA wait lock-hygiene.
+ *
+ * ContextualCheckBlock drops cs_main for the whole recompute via
+ * CsMainScopedRelease. Archive GETDATA serve threads should wait here, then
+ * TRY_LOCK(cs_main) and send historical BLOCKs during that window:
+ *
+ *   if (WaitCsMainReleasedForMatMulRecompute(timeout)) {
+ *       TRY_LOCK(::cs_main, lock);
+ *       if (lock) { serve historical BLOCK bodies; }
+ *   }
+ *
+ * NotifyCsMainReleasedForMatMulRecompute is invoked by CsMainScopedRelease on
+ * construct (after LEAVE_CRITICAL_SECTION). Default is a no-op when nobody
+ * is waiting (atomic waiter count short-circuits the condition_variable).
+ * Wait returns true if cs_main is currently released for recompute, or
+ * becomes so before timeout.
+ */
+void NotifyCsMainReleasedForMatMulRecompute();
+[[nodiscard]] bool WaitCsMainReleasedForMatMulRecompute(std::chrono::milliseconds timeout);
+/** True while CsMainScopedRelease holds the ExactReplay unlock window. */
+[[nodiscard]] bool IsCsMainReleasedForMatMulRecompute();
+
+/**
+ * Test hook invoked inside CsMainScopedRelease after cs_main is dropped, on
+ * the ContextualCheckBlock ExactReplay / ENC-DR path. Return a verdict to
+ * skip the real CUDA/CPU recompute; return nullopt to run the real
+ * predicate. Tests must clear this (pass an empty function).
+ */
+void SetMatMulExactReplayUnderReleasedCsMainHookForTest(
+    std::function<std::optional<bool>()> hook);
+
 /** Check with the proof of work on each blockheader matches the value in nBits */
 bool HasValidProofOfWork(const std::vector<CBlockHeader>& headers, const Consensus::Params& consensusParams);
 
@@ -928,6 +1002,14 @@ public:
         return m_mempool ? &m_mempool->cs : nullptr;
     }
 
+    /** Test-only: expose most-work selection so regressions can assert a sole
+     *  linear tip-child is not deferred by a stale attested parent in the
+     *  candidate set (qualifier 3ed2619c). */
+    CBlockIndex* FindMostWorkChainForTest() EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+    {
+        return FindMostWorkChain();
+    }
+
 private:
     bool ActivateBestChainStep(BlockValidationState& state, CBlockIndex* pindexMostWork, const std::shared_ptr<const CBlock>& pblock, bool& fInvalidFound, ConnectTrace& connectTrace) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool->cs);
     bool ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew, const std::shared_ptr<const CBlock>& pblock, ConnectTrace& connectTrace, DisconnectedBlockTransactions& disconnectpool) EXCLUSIVE_LOCKS_REQUIRED(cs_main, m_mempool->cs);
@@ -1005,6 +1087,14 @@ bool IsAssumeUtxoSnapshotHeaderCompatible(
     const CBlockIndex* snapshot_start_block,
     bool known_assumeutxo_hash);
 
+/** Attested-snapshot ancestry. Same-chain as m_best_header always passes.
+ *  A divergent claimed-heaviest header is allowed only when that header has
+ *  no quorum and no extra authenticated work past the fork (headers-only
+ *  1883xx flood vs attested 187798). Two attested histories refuse. */
+bool IsAttestedSnapshotHeaderCompatible(
+    const CBlockIndex* best_header,
+    const CBlockIndex* snapshot_start_block);
+
 /**
  * Provides an interface for creating and interacting with one or two
  * chainstates: an IBD chainstate generated by downloading blocks, and
@@ -1065,12 +1155,28 @@ private:
     //! prevent code from using the pointer while deleting it.
     std::unique_ptr<Chainstate> m_snapshot_chainstate GUARDED_BY(::cs_main);
 
+    //! Operator-quorum AssumeutxoData for an attested-fast-forward snapshot.
+    //! When set, it replaces chainparams pins for load-time hash checks and
+    //! for MaybeCompleteSnapshotValidation after restart.
+    std::optional<AssumeutxoData> m_attested_assumeutxo GUARDED_BY(::cs_main);
+
     //! Points to either the ibd or snapshot chainstate; indicates our
     //! most-work chain.
     Chainstate* m_active_chainstate GUARDED_BY(::cs_main) {nullptr};
 
     CBlockIndex* m_best_invalid GUARDED_BY(::cs_main){nullptr};
     std::set<uint256> m_parked_reorg_branch_roots GUARDED_BY(::cs_main);
+    std::optional<node::ReorgRecoveryRecord> m_reorg_recovery GUARDED_BY(::cs_main);
+    /**
+     * Authenticated/quorum branch tips used by exceptional shallow-race
+     * recovery. Maintained incrementally so each received body does not scan
+     * the complete block index for a best/unique recovery branch.
+     */
+    std::set<CBlockIndex*, node::CBlockIndexWorkComparator>
+        m_reorg_authenticated_candidate_tips GUARDED_BY(::cs_main);
+
+    void NoteAuthenticatedRecoveryCandidate(CBlockIndex* candidate)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /** The last header for which a headerTip notification was issued. */
     CBlockIndex* m_last_notified_header GUARDED_BY(GetMutex()){nullptr};
@@ -1087,7 +1193,8 @@ private:
     [[nodiscard]] util::Result<void> PopulateAndValidateSnapshot(
         Chainstate& snapshot_chainstate,
         AutoFile& coins_file,
-        const node::SnapshotMetadata& metadata);
+        const node::SnapshotMetadata& metadata,
+        const AssumeutxoData* attested_au);
 
     /**
      * If a block header hasn't already been seen, call CheckBlockHeader on it, ensure
@@ -1146,12 +1253,22 @@ private:
     //! v0.32.0 defense-in-depth: trailing-window net-unshield log enforcing the egress velocity cap.
     ShieldedUnshieldVelocity m_shielded_unshield_velocity GUARDED_BY(::cs_main);
     bool m_shielded_state_initialized GUARDED_BY(::cs_main){false};
+    //! Last tip whose shielded snapshot, pin, and marker were actually written
+    //! by PersistShieldedState. Shutdown skips a second full-tree fsync when
+    //! this still matches ActiveTip(); a crash leaves it unset so the next
+    //! start uses on-disk state.
+    std::optional<uint256> m_last_persisted_shielded_tip_hash GUARDED_BY(::cs_main);
     std::optional<ShieldedAutoRepairGeneration> m_last_shielded_anchor_auto_repair_generation GUARDED_BY(::cs_main);
     std::optional<ShieldedAutoRepairGeneration> m_last_shielded_state_rebuild_generation GUARDED_BY(::cs_main);
     uint64_t m_shielded_anchor_auto_repair_attempts GUARDED_BY(::cs_main){0};
     uint64_t m_shielded_state_rebuild_attempts GUARDED_BY(::cs_main){0};
     std::function<void(ShieldedAutoRepairKind)> m_shielded_auto_repair_hook_for_test
         GUARDED_BY(::cs_main);
+    std::function<bool(ShieldedTransitionWriteSeam)>
+        m_shielded_transition_write_fault_hook_for_test GUARDED_BY(::cs_main);
+
+    [[nodiscard]] bool InjectShieldedTransitionWriteFailureForTest(
+        ShieldedTransitionWriteSeam seam) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     //! Timers and counters used for benchmarking validation in both background
     //! and active chainstates.
@@ -1226,15 +1343,23 @@ public:
         bool* assumevalid_trusted = nullptr) const
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
-    /** Persist a successful header-derived ExactReplay verdict without
-     *  promoting block validity or authenticated chainwork. */
+    /** Persist a successful header-derived ExactReplay verdict. Does not
+     *  raise BLOCK_VALID_* by itself. Recomputes authenticated chain work
+     *  for this block's lineage so GETHEADERS and trust-adjusted ranking
+     *  see the ExactReplayed prefix (body-first then replay left work stale). */
     bool PersistMatMulExactReplayVerdict(const uint256& block_hash)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /** Record that the current process observed a valid configured M-of-N
-     *  quorum. Persisted solely for operator audit; validation never consumes
-     *  this bit as authority after restart/config rotation. */
+     *  quorum (trusted mirrors, or a consensus node with a local signer).
+     *  Also promotes authenticated chain work. Restart still clears the bit
+     *  unless durable quorum is still present under the current config. */
     bool PersistMatMulTrustedReplayAttestation(const uint256& block_hash)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** Recompute nAuthenticatedChainWork from genesis to `index`, then
+     *  propagate to descendants from the first changed ancestor. */
+    void RefreshAuthenticatedChainWork(CBlockIndex& index)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /** Cheap complete-block checks that must pass before P2P admission charges
@@ -1243,12 +1368,23 @@ public:
      *  does not execute the MatMul phase-2/ENC-DR predicate itself. A valid
      *  previously-unseen header is idempotently accepted/indexed here so its
      *  nChainWork is available and the same unrequested gates as AcceptBlock
-     *  can be evaluated exactly before admission. */
+     *  can be evaluated exactly before admission. Followed-chain historical
+     *  holes (active-tip or snapshot-base ancestors) bypass the unrequested
+     *  nTx / less-work / height / min-chainwork early exits so a delivered
+     *  body is persisted; competing forks keep the Bitcoin Core anti-DoS gates. */
     bool CheckMatMulBlockAdmissionPreconditions(const CBlock& block,
                                                 BlockValidationState& state,
                                                 bool force_processing,
                                                 bool min_pow_checked,
                                                 bool& reaches_contextual_check)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** Ancestor of the active tip or of GetSnapshotBaseBlock(). These bodies
+     *  must persist without ExactReplay GPU even when unrequested: the
+     *  less-work anti-DoS gate is true of every ancestor, pruned holes have
+     *  nTx != 0 without HAVE_DATA, and HEADER_ONLY dropping them is an
+     *  unbounded re-getdata loop. Competing forks are not followed holes. */
+    bool IsMatMulFollowedHistoricalHole(const CBlockIndex* index) const
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /**
@@ -1334,6 +1470,12 @@ public:
 
     /** Best header we've seen so far (used for getheaders queries' starting points). */
     CBlockIndex* m_best_header GUARDED_BY(::cs_main){nullptr};
+    /**
+     * Lock-free publication of the exact height currently owned by
+     * m_best_header. Unlike a peer height hint this value is reversible: an
+     * invalidate/reconsider/reorg rescan may move it backwards.
+     */
+    std::atomic<int32_t> m_best_followed_header_height{-1};
 
     //! The total number of bytes available for us to use across all in-memory
     //! coins caches. This will be split somehow across chainstates.
@@ -1359,13 +1501,25 @@ public:
     //! - Initialize an unused Chainstate.
     //! - Load its `CoinsViews` contents from `coins_file`.
     //! - Verify that the hash of the resulting coinsdb matches the expected hash
-    //!   per assumeutxo chain parameters.
+    //!   per assumeutxo chain parameters, or per attested_au when provided.
     //! - Wait for our headers chain to include the base block of the snapshot.
     //! - "Fast forward" the tip of the new chainstate to the base of the snapshot.
     //! - Move the new chainstate to `m_snapshot_chainstate` and make it our
     //!   ChainstateActive().
+    //!
+    //! When attested_manifest is set, the chainparams pin is replaced by the
+    //! AssumeutxoData authenticated by that complete operator-quorum manifest.
+    //! Callers must have already authenticated the manifest (trusted-mirror
+    //! M-of-N). Consensus nodes must not use this
+    //! path. The snapshot base may sit off the claimed-heaviest header chain
+    //! when that chain is unauthenticated competing work; see
+    //! IsAttestedSnapshotHeaderCompatible. The compiled-in assumeutxo work
+    //! escape hatch is not available.
     [[nodiscard]] util::Result<CBlockIndex*> ActivateSnapshot(
-        AutoFile& coins_file, const node::SnapshotMetadata& metadata, bool in_memory);
+        AutoFile& coins_file,
+        const node::SnapshotMetadata& metadata,
+        bool in_memory,
+        const std::optional<matmul::trusted::UtxoSnapshotManifest>& attested_manifest = std::nullopt);
 
     //! Once the background validation chainstate has reached the height which
     //! is the base of the UTXO snapshot in use, compare its coins to ensure
@@ -1424,12 +1578,117 @@ public:
     /** Guess verification progress (as a fraction between 0.0=genesis and 1.0=current tip). */
     double GuessVerificationProgress(const CBlockIndex* pindex) const;
 
+    [[nodiscard]] ChainRecoveryState GetChainRecoveryState() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
     const CBlockIndex* FindParkedReorgBranchRoot(const CBlockIndex* pindex) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool IsOnParkedReorgBranch(const CBlockIndex* pindex) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool ParkReorgBranch(CBlockIndex* branch_root) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool UnparkReorgBranchContainingBlock(const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /**
+     * Remove stale persisted park roots that cannot safely apply to the current
+     * policy or active chain. On persistence failure, leave the in-memory set
+     * unchanged and return false.
+     */
+    bool NormalizeParkedReorgBranches(const CBlockIndex* active_tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     std::vector<uint256> GetParkedReorgBranchRoots() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool PersistParkedReorgBranches() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /**
+     * Observe a fully body-validated divergent block and, when it identifies a
+     * unique authenticated branch inside the PARK allowance, durably arm
+     * automatic recovery before the local losing tip can grow the reorg past
+     * that allowance. Also releases a previously parked recovery branch once
+     * its stored data is sufficient for safe activation.
+     */
+    bool MaybeTrackReorgRecovery(const CBlockIndex* candidate) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    bool LoadReorgRecoveryRecord() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    bool NormalizeReorgRecovery(const CBlockIndex* active_tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    [[nodiscard]] bool IndexIsFollowedTipChild(const CBlockIndex* tip, const CBlockIndex* index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    [[nodiscard]] bool BestHeaderExtendsTip(const CBlockIndex* tip) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** Tip-child that continues the attested chain for the local signer.
+     *  Followed (m_best_header) children qualify unless another hash at this
+     *  height already has quorum. When m_best_header is a competing fork that
+     *  does not extend the tip, the remaining tip-child is still progress. */
+    [[nodiscard]] bool IndexIsAttestedChainTipChild(const CBlockIndex* tip, const CBlockIndex* index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** True if `index` has in-memory quorum, or sits on the current
+     *  signed-frontier chain (ancestor or descendant of the off-chain
+     *  frontier hash when dual-attested). Trusted mirrors must fetch and
+     *  persist these bodies even when m_best_header / the active tip sit
+     *  on an unattested competing tower. */
+    [[nodiscard]] bool IndexIsOnSignedFrontierChain(const CBlockIndex* index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** True when `index` is the GPU-signed frontier hash or an ancestor of
+     *  it (in-memory quorum at HighestAttestedHeight). Trusted mirrors skip
+     *  ExactReplay and ConnectTip-quorum for these: the attestor already
+     *  verified the path. Unattested descendants above the frontier are
+     *  false. */
+    [[nodiscard]] bool IndexIsCoveredBySignedFrontier(const CBlockIndex* index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** Verified in-memory quorum on this hash, *or* ancestry of a hash
+     *  that already has verified in-memory quorum at HighestAttestedHeight.
+     *  Coverage is not a substitute for signatures: IndexIsCoveredBySignedFrontier
+     *  requires HasQuorumInMemory on the frontier (VerifyAttestation against
+     *  the configured GPU keys). Fake / missing / off-path hashes stay false
+     *  so ConnectTip cannot mint an unattested chain. Does not durable-read
+     *  (live ABC ~45s/candidate under cs_main). */
+    [[nodiscard]] bool IndexHasTrustedMatMulAuthority(const CBlockIndex* index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** True when index is an ancestor of, is, or descends from any stored
+     *  quorum hash at HighestAttestedHeight. Unlike
+     *  GetSignedFrontierStatus().on_active_chain, this stays true while
+     *  catching up (tip height < frontier height) on the attested chain. */
+    [[nodiscard]] bool IndexLeadsToSignedFrontier(const CBlockIndex* index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    bool ShouldDeferLosingTipExtension(const CBlockIndex* candidate) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    bool IsAutomaticReorgRecoveryCandidate(const CBlockIndex* candidate) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /**
+     * Highest-work HAVE_DATA block this node has a current quorum for.
+     * Used by getmatmulattestedtip. May be an ancestor of the active tip
+     * (linear chain, signer ~1 behind) or a competing branch.
+     */
+    const CBlockIndex* FindBestKnownAttestedIndex() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /**
+     * Signed-frontier diagnostic. Highest stored quorum height (no HAVE_DATA
+     * required) versus the highest quorum ancestor of the active tip.
+     * getmatmulattestedtip.hash only sees HAVE_DATA on this chain, so a
+     * stranded fork reports on_active_chain=true there; this does not.
+     */
+    struct SignedFrontierStatus {
+        bool available{false};
+        int32_t height{-1};
+        uint256 hash{};
+        bool hash_known{false};
+        bool on_active_chain{false};
+        int32_t on_chain_attested_height{-1};
+        int32_t blocks_behind{0};
+    };
+    SignedFrontierStatus GetSignedFrontierStatus() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    void NotifySignedFrontierStatus() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /**
+     * Unique competing attested HAVE_DATA tip to adopt.
+     *
+     * When the active tip has no quorum: abandon a lost race (equal-work
+     * attested sibling) or a heavier unattested fork. Empty if the only
+     * attested index is on the active chain (pending-attestation extension
+     * — do not disconnect it) or if two incomparable attested branches exist.
+     *
+     * When the active tip already has quorum: still return a unique
+     * competing attested HAVE_DATA short-reorg fork-child (every frontier
+     * hint at a height, not last-writer). Live 2026-08-15: dual-attested
+     * 189489 siblings stranded trusted mirrors on the loser.
+     *
+     * Also return the unique attested HAVE_DATA suffix child of that tip
+     * (LCA depth 0, height > tip). That is catch-up, not a reorg: the
+     * signed frontier ran ahead while this node still sat on the attested
+     * parent (live 2026-08-15: tip 189675, attested HAVE_DATA 189676).
+     *
+     * A unique attested HAVE_DATA index on the current signed-frontier
+     * chain is eligible at any LCA depth. Short-reorg (1–6) still bounds
+     * fossils off that chain. Live 2026-08-16: trusted archives sat 13–180
+     * unattested HAVE_DATA blocks off the attested suffix.
+     */
+    const CBlockIndex* FindUniqueCompetingAttestedIndex() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    bool IsAttestedAbandonForkCandidate(const CBlockIndex* candidate) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    std::optional<node::ReorgRecoveryRecord> GetReorgRecoveryRecord() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        return m_reorg_recovery;
+    }
 
     /**
      * Import blocks from an external file
@@ -1602,6 +1861,22 @@ public:
     //! header in our block-index not known to be invalid, recalculate it.
     void RecalculateBestHeader() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
+    /** Publish a new authoritative followed header and its exact height. */
+    void SetBestHeader(CBlockIndex* best_header) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        AssertLockHeld(::cs_main);
+        m_best_header = best_header;
+        m_best_followed_header_height.store(
+            best_header != nullptr ? best_header->nHeight : -1,
+            std::memory_order_release);
+    }
+
+    /** Exact accepted followed-header height for lock-free liveness budgets. */
+    [[nodiscard]] int32_t BestFollowedHeaderHeight() const noexcept
+    {
+        return m_best_followed_header_height.load(std::memory_order_acquire);
+    }
+
     bool m_script_check_queue_enabled{true};
 
     CCheckQueue<CScriptCheck>& GetCheckQueue() { return m_script_check_queue; }
@@ -1723,6 +1998,11 @@ public:
     [[nodiscard]] bool InsertShieldedRecoveryExitCommitmentsForTest(const std::vector<uint256>& commitments)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
+    /** Test hook: append account-registry leaves, rebuild views, and persist a trusted pin. */
+    [[nodiscard]] bool AppendShieldedAccountRegistryForTest(
+        Span<const shielded::registry::ShieldedAccountLeaf> leaves)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
     /** Test/diagnostic hook to inject persisted settlement anchors into the live shielded store. */
     [[nodiscard]] bool InsertShieldedSettlementAnchorsForTest(const std::vector<uint256>& anchors)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
@@ -1830,8 +2110,15 @@ public:
     [[nodiscard]] bool RebuildShieldedAccountRegistryHistory(const Chainstate& chainstate,
                                                              const CBlockIndex* tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
-    /** Persist active shielded state for restart recovery. */
-    [[nodiscard]] bool PersistShieldedState(const CBlockIndex* tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** Persist active shielded state for restart recovery. When
+     *  fast_startup_trusted is false, revoke the audit credential before
+     *  publishing imported/pre-audit state. */
+    [[nodiscard]] bool PersistShieldedState(const CBlockIndex* tip,
+                                            bool fast_startup_trusted = true) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** True when PersistShieldedState already sealed this tip in this process. */
+    [[nodiscard]] bool HasDurableShieldedSnapshotAt(const CBlockIndex* tip) const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /** Read the persisted shielded restart snapshot for testing and diagnostics. */
     [[nodiscard]] bool ReadPersistedShieldedState(
@@ -1859,11 +2146,33 @@ public:
         std::vector<uint256> account_registry_roots = {})
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
+    struct ShieldedSnapshotPinPolicy {
+        /** Signed/compiled pin that the fully imported state must match. */
+        std::optional<uint256> required_pin;
+        /** Publish the computed pin as a restart credential before commit. */
+        bool persist_accepted_pin;
+        /**
+         * Optional activation transaction. The loader returns a callback that
+         * must receive true only after all snapshot discovery metadata is
+         * durable; false restores and reopens the previous shielded state.
+         */
+        std::function<bool(bool)>* deferred_completion{nullptr};
+    };
+
     /** Load shielded state from a BTX assumeutxo snapshot section. */
     [[nodiscard]] util::Result<void> LoadShieldedSnapshotSection(
         AutoFile& file,
         const node::ShieldedSnapshotSectionHeader& header,
         const CBlockIndex* tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    [[nodiscard]] util::Result<void> LoadShieldedSnapshotSection(
+        AutoFile& file,
+        const node::ShieldedSnapshotSectionHeader& header,
+        const CBlockIndex* tip,
+        ShieldedSnapshotPinPolicy pin_policy) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** Filesystem-only crash-recovery hook for snapshot transaction tests. */
+    [[nodiscard]] static bool RecoverInterruptedShieldedSnapshotForTest(
+        const fs::path& datadir);
 
     /** Rebuild the active shielded state from the active chain tip. */
     [[nodiscard]] bool RebuildShieldedStateFromActiveChain() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
@@ -1878,6 +2187,22 @@ public:
 
     /** Run the installed automatic shielded repair test hook, if any. */
     void RunShieldedAutoRepairHookForTest(ShieldedAutoRepairKind kind) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** Install a deterministic write-boundary failure hook. Tests must clear
+     *  this hook before simulating restart recovery. */
+    void SetShieldedTransitionWriteFaultHookForTest(
+        std::function<bool(ShieldedTransitionWriteSeam)> hook)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        m_shielded_transition_write_fault_hook_for_test = std::move(hook);
+    }
+
+    /** Test-only: make ActivateBestChainStep fail ConnectTip with a retryable
+     *  MatMul ExactReplay incomplete Error (no GPU). Tests must clear this. */
+    void SetRetryableMatMulConnectFailureForTest(bool enable);
+    [[nodiscard]] int RetryableMatMulConnectFailureAttemptsForTest() const;
+    void ResetTrustedMirrorExactReplayInvocationsForTest();
+    [[nodiscard]] int TrustedMirrorExactReplayInvocationsForTest() const;
 
     [[nodiscard]] std::optional<shielded::registry::ShieldedAccountRegistrySnapshot>
     ExportShieldedAccountRegistrySnapshot(

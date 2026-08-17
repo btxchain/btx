@@ -60,6 +60,10 @@ struct TestOpts {
     bool setup_net{true};
     bool setup_validation_interface{true};
     bool min_validation_cache{false}; // Equivalent of -maxsigcachebytes=0
+    //! When true (default), TestChain100Setup defers regtest v4/RC activation
+    //! past the fixture chain so Debug builds stay runnable. Snapshot/assumeutxo
+    //! fixtures that need the canned height-110 metadata must set this false.
+    bool defer_expensive_matmul{true};
 };
 
 /** Basic testing setup.

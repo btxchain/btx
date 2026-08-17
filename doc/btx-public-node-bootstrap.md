@@ -174,3 +174,16 @@ REQ="$(jq -nc --arg d "$DESC" '[{desc:$d, timestamp:"now", active:false}]')"
 
 For external/mainnet mining (`getblocktemplate` + `submitblock`), configure the
 miner/pool coinbase destination to the same multisig-derived payout address.
+
+A mining/submit node must also:
+
+- run `-blocksonly=0` (otherwise winning blocks often never reach the signer);
+- set `-matmultrustedpubkey=<signer>` and `-matmultrustedthreshold` even in
+  `-matmulvalidation=consensus` so `getmatmulattestedtip` is populated
+  (ExactReplay is unchanged);
+- build templates on that attested tip and never stack unattested candidates.
+
+See [`btx-matmul-v4.7-gpu-operator-runbook.md`](btx-matmul-v4.7-gpu-operator-runbook.md)
+section "Mining on the attested chain". Canonical rate is gated by the signer's
+ExactReplay/attestation throughput, not by hashrate. 1-of-1 is a single point
+of failure.

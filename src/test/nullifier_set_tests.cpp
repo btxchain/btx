@@ -831,6 +831,31 @@ BOOST_AUTO_TEST_CASE(shielded_mutation_marker_roundtrip_and_clear)
     BOOST_CHECK(!ns.ReadMutationMarker().has_value());
 }
 
+BOOST_AUTO_TEST_CASE(shielded_mutation_marker_rejects_oversized_payload_count_before_allocation)
+{
+    shielded::ShieldedMerkleTree prepared_tree;
+    const auto prepared_digest = prepared_tree.CommitmentIndexDigest();
+    BOOST_REQUIRE(prepared_digest.has_value());
+    shielded::registry::ShieldedAccountRegistryPersistedSnapshot prepared_registry_snapshot;
+    BOOST_REQUIRE(prepared_registry_snapshot.IsValid());
+
+    // Encode the fixed v3 prefix by hand and append a non-allocating malformed
+    // CompactSize count. Decoding must fail at the count boundary rather than
+    // asking std::vector to allocate attacker/corruption-controlled storage.
+    DataStream encoded;
+    encoded << ShieldedStateMutationMarker::PREPARED_TRANSITION_VERSION;
+    encoded << GetRandHash() << int32_t{61'000};
+    encoded << ShieldedStateMutationMarker::PREPARED_STAGE;
+    encoded << GetRandHash() << int32_t{60'999};
+    encoded << prepared_tree << CAmount{42} << *prepared_digest;
+    encoded << prepared_registry_snapshot;
+    WriteCompactSize(encoded, shielded::registry::MAX_REGISTRY_ENTRIES + 1);
+
+    ShieldedStateMutationMarker decoded;
+    BOOST_CHECK_THROW(encoded >> decoded, std::ios_base::failure);
+    BOOST_CHECK(decoded.prepared_target_snapshot.journaled_account_payloads.empty());
+}
+
 BOOST_AUTO_TEST_CASE(shielded_mutation_marker_invalid_payload_forces_recovery_sentinel)
 {
     const std::filesystem::path db_path = m_args.GetDataDirNet() / "test_nf_mutation_marker_invalid";

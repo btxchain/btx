@@ -40,6 +40,7 @@ from test_framework.messages import (
     COIN,
     from_hex,
     msg_block,
+    msg_headers,
 )
 from test_framework.p2p import P2PInterface
 from test_framework.script import OP_TRUE
@@ -139,7 +140,9 @@ class BlockchainTest(BitcoinTestFramework):
             'matmulvalidationmode',
             'mediantime',
             'pruned',
+            'shielded_retention',
             'size_on_disk',
+            'snapshot_sync',
             'target',
             'time',
             'verificationprogress',
@@ -492,6 +495,29 @@ class BlockchainTest(BitcoinTestFramework):
 
         assert 'previousblockhash' not in node.getblockheader(node.getblockhash(0))
         assert 'nextblockhash' not in node.getblockheader(node.getbestblockhash())
+
+        # Headers-only tips must still return usable verbose JSON (no body read).
+        # MatMul rejects submitheader, so deliver the header over P2P instead.
+        self.log.info("Test getblockheader verbose on headers-only entry")
+        tip_hash = node.getbestblockhash()
+        tip = node.getblock(tip_hash)
+        block_time = tip['time'] + 1
+        orphan = create_block(int(tip_hash, 16), create_coinbase(tip['height'] + 1, nValue=100), block_time)
+        orphan.solve()
+        peer = node.add_p2p_connection(P2PInterface())
+        peer.send_and_ping(msg_headers([CBlockHeader(orphan)]))
+        tips = [t for t in node.getchaintips() if t['hash'] == orphan.hash]
+        assert_equal(len(tips), 1)
+        assert_equal(tips[0]['status'], 'headers-only')
+        assert_raises_rpc_error(-1, "Block not available (not fully downloaded)", node.getblock, orphan.hash)
+        headers_only = node.getblockheader(orphan.hash, True)
+        assert_equal(headers_only['hash'], orphan.hash)
+        assert_equal(headers_only['previousblockhash'], tip_hash)
+        assert_equal(headers_only['height'], tip['height'] + 1)
+        assert 'nTx' not in headers_only  # body unknown; do not emit misleading 0
+        # Non-verbose still works for the same headers-only entry.
+        assert_is_hex_string(node.getblockheader(orphan.hash, False))
+        peer.peer_disconnect()
 
     def _test_getdifficulty(self):
         self.log.info("Test getdifficulty")

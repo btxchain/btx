@@ -1,0 +1,32 @@
+# It is not recommended to modify this file in-place, because it will
+# be overwritten during package upgrades. If you want to add further
+# options or overwrite existing ones then use
+# $ systemctl edit btx-miner@
+# See "man systemd.service" for details.
+#
+# Live GPU signer deployments use user systemd
+# (`systemctl --user start btx-miner@1`). Drop in the same
+# BindsTo=btxd.service against the user-level btxd.service so the signer
+# stops when the node stops. This repository copy is the packager
+# template only; do not SSH-change production macpro2 units from this file.
+
+[Unit]
+Description=BTX miner worker %i
+Documentation=https://github.com/btxchain/btx/blob/main/doc/init.md
+# BindsTo stops this miner when btxd stops or is restarted. Wants= is not
+# required for that stop coupling.
+BindsTo=btxd.service
+After=btxd.service
+
+[Service]
+Type=simple
+Restart=on-failure
+# Instance %i is an operator-defined worker id (GPU index / signer slot).
+# Override ExecStart via drop-in or EnvironmentFile for the live GPU signer.
+EnvironmentFile=-/etc/btx/miner-%i.conf
+ExecStart=/usr/libexec/btx/start-live-mining.sh --foreground --datadir=/var/lib/btxd --conf=/etc/btx/btx.conf
+User=btx
+Group=btx
+
+[Install]
+WantedBy=multi-user.target
