@@ -989,4 +989,109 @@ BOOST_AUTO_TEST_CASE(asert_missing_anchor_fails_closed_to_hardest_target)
     BOOST_CHECK_NE(observed, powlimit_bits);
 }
 
+BOOST_AUTO_TEST_CASE(asert_powlimit_upgrade_does_not_change_pre_activation_nbits)
+{
+    auto upgraded = MatMulRetargetParams();
+    upgraded.nFastMineHeight = 361;
+    upgraded.nMatMulAsertHeight = 361;
+    upgraded.powLimit = uint256{"66c1540000000000000000000000000000000000000000000000000000000000"};
+    upgraded.powLimitUpgrade = uint256{"08901c0000000000000000000000000000000000000000000000000000000000"};
+    upgraded.nMatMulPowLimitUpgradeHeight = 366;
+
+    auto control = upgraded;
+    control.nMatMulPowLimitUpgradeHeight = std::numeric_limits<int32_t>::max();
+
+    std::vector<CBlockIndex> blocks(366);
+    SeedFixedDifficultyChain(blocks, 0x1f00ffffU, 1'700'000'000, 90);
+
+    CBlockHeader activation{};
+    activation.nTime = blocks[360].GetBlockTime() + 1;
+    blocks[361].nHeight = 361;
+    blocks[361].nBits = GetNextWorkRequired(&blocks[360], &activation, upgraded);
+    blocks[361].nTime = activation.nTime;
+    blocks[361].pprev = &blocks[360];
+    BOOST_CHECK_EQUAL(blocks[361].nBits, GetNextWorkRequired(&blocks[360], &activation, control));
+    for (int h = 362; h <= 365; ++h) {
+        AppendSimulatedBlock(upgraded, blocks, h, 90);
+        CBlockHeader hdr{};
+        hdr.nTime = blocks[h].nTime;
+        BOOST_CHECK_EQUAL(blocks[h].nBits, GetNextWorkRequired(&blocks[h - 1], &hdr, control));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(asert_powlimit_upgrade_clamps_easy_parent_and_inherits_harder)
+{
+    auto params = MatMulRetargetParams();
+    params.nFastMineHeight = 361;
+    params.nMatMulAsertHeight = 361;
+    params.powLimit = uint256{"66c1540000000000000000000000000000000000000000000000000000000000"};
+    params.powLimitUpgrade = uint256{"08901c0000000000000000000000000000000000000000000000000000000000"};
+    params.nMatMulPowLimitUpgradeHeight = 366;
+    const arith_uint256 upgrade_target = UintToArith256(params.powLimitUpgrade);
+
+    std::vector<CBlockIndex> blocks(367);
+    SeedFixedDifficultyChain(blocks, UintToArith256(params.powLimit).GetCompact(), 1'700'000'000, 90);
+    CBlockHeader activation{};
+    activation.nTime = blocks[360].GetBlockTime() + 1;
+    blocks[361].nHeight = 361;
+    blocks[361].nBits = GetNextWorkRequired(&blocks[360], &activation, params);
+    blocks[361].nTime = activation.nTime;
+    blocks[361].pprev = &blocks[360];
+    for (int h = 362; h <= 365; ++h) {
+        AppendSimulatedBlock(params, blocks, h, 90);
+    }
+
+    CBlockHeader at_h{};
+    at_h.nTime = blocks[365].GetBlockTime() + 90;
+    const uint32_t saved = blocks[365].nBits;
+    blocks[365].nBits = UintToArith256(params.powLimit).GetCompact();
+    const arith_uint256 snapped = DecodeTarget(GetNextWorkRequired(&blocks[365], &at_h, params));
+    BOOST_CHECK_EQUAL(snapped, upgrade_target);
+
+    blocks[365].nBits = 0x1f00ffffU;
+    const arith_uint256 parent_hard = DecodeTarget(blocks[365].nBits);
+    BOOST_REQUIRE(parent_hard < upgrade_target);
+    const arith_uint256 inherited = DecodeTarget(GetNextWorkRequired(&blocks[365], &at_h, params));
+    BOOST_CHECK_EQUAL(inherited, parent_hard);
+    blocks[365].nBits = saved;
+}
+
+BOOST_AUTO_TEST_CASE(asert_powlimit_upgrade_reanchors_and_cannot_ease_below_new_floor)
+{
+    auto params = MatMulRetargetParams();
+    params.nFastMineHeight = 361;
+    params.nMatMulAsertHeight = 361;
+    params.powLimit = uint256{"66c1540000000000000000000000000000000000000000000000000000000000"};
+    params.powLimitUpgrade = uint256{"08901c0000000000000000000000000000000000000000000000000000000000"};
+    params.nMatMulPowLimitUpgradeHeight = 366;
+    const arith_uint256 upgrade_target = UintToArith256(params.powLimitUpgrade);
+
+    std::vector<CBlockIndex> blocks(368);
+    SeedFixedDifficultyChain(blocks, 0x1f00ffffU, 1'700'000'000, 90);
+    CBlockHeader activation{};
+    activation.nTime = blocks[360].GetBlockTime() + 1;
+    blocks[361].nHeight = 361;
+    blocks[361].nBits = GetNextWorkRequired(&blocks[360], &activation, params);
+    blocks[361].nTime = activation.nTime;
+    blocks[361].pprev = &blocks[360];
+    for (int h = 362; h <= 366; ++h) {
+        AppendSimulatedBlock(params, blocks, h, 90);
+    }
+
+    const uint32_t saved_365 = blocks[365].nBits;
+    blocks[365].nBits = UintToArith256(params.powLimit).GetCompact();
+    CBlockHeader after{};
+    after.nTime = blocks[366].GetBlockTime() + 90;
+    const arith_uint256 post = DecodeTarget(GetNextWorkRequired(&blocks[366], &after, params));
+    blocks[365].nBits = saved_365;
+    BOOST_CHECK_EQUAL(post, DecodeTarget(GetNextWorkRequired(&blocks[366], &after, params)));
+
+    AppendSimulatedBlock(params, blocks, 367, 90);
+    blocks[367].nTime = blocks[366].GetBlockTime() + 90 * 10'000;
+    after.nTime = blocks[367].GetBlockTime() + 90;
+    const arith_uint256 eased = DecodeTarget(GetNextWorkRequired(&blocks[367], &after, params));
+    BOOST_CHECK_EQUAL(eased, upgrade_target);
+    BOOST_CHECK(eased < UintToArith256(params.powLimit));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

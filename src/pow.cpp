@@ -1130,6 +1130,11 @@ bool IsMatMulAsertHalfLifeUpgradeConfigured(const Consensus::Params& params)
     return !IsDisabledHeight(params.nMatMulAsertHalfLifeUpgradeHeight);
 }
 
+bool IsMatMulPowLimitUpgradeConfigured(const Consensus::Params& params)
+{
+    return !IsDisabledHeight(params.nMatMulPowLimitUpgradeHeight);
+}
+
 bool IsMatMulPreHashEpsilonBitsUpgradeConfigured(const Consensus::Params& params)
 {
     return !IsDisabledHeight(params.nMatMulPreHashEpsilonBitsUpgradeHeight);
@@ -1191,6 +1196,11 @@ int32_t LatestMatMulAsertPreUpgradeAnchorHeight(const CBlockIndex* pindexLast, c
         pindexLast->nHeight >= params.nMatMulRCCoupledHeight &&
         params.nMatMulRCCoupledHeight > anchor_height) {
         anchor_height = params.nMatMulRCCoupledHeight;
+    }
+    if (!IsDisabledHeight(params.nMatMulPowLimitUpgradeHeight) &&
+        pindexLast->nHeight >= params.nMatMulPowLimitUpgradeHeight &&
+        params.nMatMulPowLimitUpgradeHeight > anchor_height) {
+        anchor_height = params.nMatMulPowLimitUpgradeHeight;
     }
     return anchor_height;
 }
@@ -1499,7 +1509,9 @@ bool ValidateMatMulAsertParams(const Consensus::Params& params, int32_t next_hei
         const auto shadowed_by_earlier = [&](int32_t h) -> bool {
             return (!IsDisabledHeight(params.nMatMulAsertHeight) && h == params.nMatMulAsertHeight) ||
                    (!IsDisabledHeight(params.nMatMulAsertRetuneHeight) && h == params.nMatMulAsertRetuneHeight) ||
-                   (!IsDisabledHeight(params.nMatMulAsertRetune2Height) && h == params.nMatMulAsertRetune2Height);
+                   (!IsDisabledHeight(params.nMatMulAsertRetune2Height) && h == params.nMatMulAsertRetune2Height) ||
+                   (!IsDisabledHeight(params.nMatMulPowLimitUpgradeHeight) &&
+                    h == params.nMatMulPowLimitUpgradeHeight);
         };
         if (!IsDisabledHeight(params.nMatMulV4Height) &&
             params.nMatMulV4AsertRescaleNum != params.nMatMulV4AsertRescaleDen &&
@@ -1608,6 +1620,44 @@ bool ValidateMatMulAsertParams(const Consensus::Params& params, int32_t next_hei
             return false;
         }
     }
+    if (IsMatMulPowLimitUpgradeConfigured(params)) {
+        const int32_t h{params.nMatMulPowLimitUpgradeHeight};
+        if (h <= params.nMatMulAsertHeight) {
+            LogWarning("MatMulAsert: powLimitUpgrade height=%d must be above ASERT activation=%d at height %d, invalid immutable ASERT config (fatal at construction; runtime fail-closed)\n",
+                       h, params.nMatMulAsertHeight, next_height);
+            return false;
+        }
+        const auto strictly_after = [&](int32_t other) {
+            return IsDisabledHeight(other) || h > other;
+        };
+        if (!strictly_after(params.nMatMulAsertRetuneHeight) ||
+            !strictly_after(params.nMatMulAsertRetune2Height) ||
+            !strictly_after(params.nMatMulV4Height) ||
+            !strictly_after(params.nMatMulBMX4CHeight) ||
+            !strictly_after(params.nMatMulDRLTHeight) ||
+            !strictly_after(params.nMatMulRCHeight) ||
+            !strictly_after(params.nMatMulRCCoupledHeight)) {
+            LogWarning("MatMulAsert: powLimitUpgrade height=%d collides with or precedes a live ASERT/profile arm at height %d, invalid immutable ASERT config (fatal at construction; runtime fail-closed)\n",
+                       h, next_height);
+            return false;
+        }
+        const arith_uint256 historical{UintToArith256(params.powLimit)};
+        const arith_uint256 upgraded{UintToArith256(params.powLimitUpgrade)};
+        if (upgraded == 0 || upgraded >= historical) {
+            LogWarning("MatMulAsert: powLimitUpgrade must be strictly harder than historical powLimit at height %d, invalid immutable ASERT config (fatal at construction; runtime fail-closed)\n",
+                       next_height);
+            return false;
+        }
+        bool negative{false};
+        bool overflow{false};
+        arith_uint256 decoded{};
+        decoded.SetCompact(upgraded.GetCompact(), &negative, &overflow);
+        if (negative || overflow || decoded == 0) {
+            LogWarning("MatMulAsert: powLimitUpgrade is not a valid compact target at height %d, invalid immutable ASERT config (fatal at construction; runtime fail-closed)\n",
+                       next_height);
+            return false;
+        }
+    }
     if (IsMatMulAsertHalfLifeUpgradeConfigured(params)) {
         if (params.nMatMulAsertHalfLifeUpgrade <= 0) {
             LogWarning("MatMulAsert: half-life upgrade value=%lld is invalid at height %d, invalid immutable ASERT config (fatal at construction; runtime fail-closed)\n",
@@ -1621,6 +1671,9 @@ bool ValidateMatMulAsertParams(const Consensus::Params& params, int32_t next_hei
         }
         if (retune2_enabled) {
             latest_pre_upgrade_anchor = std::max(latest_pre_upgrade_anchor, params.nMatMulAsertRetune2Height);
+        }
+        if (IsMatMulPowLimitUpgradeConfigured(params)) {
+            latest_pre_upgrade_anchor = std::max(latest_pre_upgrade_anchor, params.nMatMulPowLimitUpgradeHeight);
         }
         // Audit C4: do NOT fold the v4/BMX4C rescale heights into this guard. The
         // anchor is now selected monotonically (ResolveMatMulAsertHalfLifeInfo takes
@@ -1636,6 +1689,20 @@ bool ValidateMatMulAsertParams(const Consensus::Params& params, int32_t next_hei
         }
     }
     return true;
+}
+
+arith_uint256 MatMulAsertPowLimitForNextHeight(const Consensus::Params& params, int32_t next_height)
+{
+    const arith_uint256 historical{UintToArith256(params.powLimit)};
+    if (next_height < 0 || IsDisabledHeight(params.nMatMulPowLimitUpgradeHeight) ||
+        next_height < params.nMatMulPowLimitUpgradeHeight) {
+        return historical;
+    }
+    const arith_uint256 upgraded{UintToArith256(params.powLimitUpgrade)};
+    if (upgraded == 0 || upgraded >= historical) {
+        return historical;
+    }
+    return upgraded;
 }
 
 namespace {
@@ -2468,9 +2535,9 @@ arith_uint256 CalculateMatMulAsertTarget(
     int64_t time_diff,
     int64_t height_diff,
     int64_t half_life,
-    const Consensus::Params& params)
+    const Consensus::Params& params,
+    const arith_uint256& pow_limit)
 {
-    const arith_uint256 pow_limit{UintToArith256(params.powLimit)};
     if (anchor_target == 0 || anchor_target > pow_limit) {
         return pow_limit;
     }
@@ -2748,13 +2815,13 @@ unsigned int DarkGravityWaveLegacy(const CBlockIndex* pindexLast, const Consensu
 unsigned int MatMulAsert(const CBlockIndex* pindexLast, const Consensus::Params& params)
 {
     assert(pindexLast != nullptr);
-    const arith_uint256 pow_limit{UintToArith256(params.powLimit)};
 
     const int64_t next_height64 = static_cast<int64_t>(pindexLast->nHeight) + 1;
     if (next_height64 < 0 || next_height64 > std::numeric_limits<int32_t>::max()) {
-        return pow_limit.GetCompact();
+        return UintToArith256(params.powLimit).GetCompact();
     }
     const int32_t next_height = static_cast<int32_t>(next_height64);
+    const arith_uint256 pow_limit{MatMulAsertPowLimitForNextHeight(params, next_height)};
 
     // Fast-mining bootstrap phase: hold fixed genesis-derived difficulty.
     // This replaces the former DGW-based warmup/transition logic.
@@ -2943,6 +3010,14 @@ unsigned int MatMulAsert(const CBlockIndex* pindexLast, const Consensus::Params&
         return coup_target.GetCompact();
     }
 
+    if (!IsDisabledHeight(params.nMatMulPowLimitUpgradeHeight) &&
+        next_height == params.nMatMulPowLimitUpgradeHeight) {
+        arith_uint256 parent_target{};
+        parent_target.SetCompact(pindexLast->nBits);
+        parent_target = ClampRetargetResult(parent_target, pow_limit);
+        return parent_target.GetCompact();
+    }
+
     if (next_height == params.nMatMulAsertHalfLifeUpgradeHeight) {
         arith_uint256 parent_target{};
         parent_target.SetCompact(pindexLast->nBits);
@@ -3000,7 +3075,8 @@ unsigned int MatMulAsert(const CBlockIndex* pindexLast, const Consensus::Params&
         time_diff,
         height_diff,
         half_life_info.current_half_life_s,
-        params);
+        params,
+        pow_limit);
     return next_target.GetCompact();
 }
 } // namespace

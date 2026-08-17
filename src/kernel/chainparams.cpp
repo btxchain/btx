@@ -169,6 +169,36 @@ static constexpr int64_t kRCEpochAAsertRescaleDen{1};
 // Keep all three Epoch-A heights bound to this single constant so that a later
 // update cannot create a digest-only v4/BMX4C interval.
 static constexpr int32_t BTX_MATMUL_V47_EPOCH_A_HEIGHT{185'000};
+// Height-gated ASERT dump floor + half-life lengthening. Hard fork in
+// GetNextWorkRequired (bad-diffbits is exact match). Historical powLimit is
+// never mutated.
+//
+// Floor compact frozen 2026-08-15 (do not chase live bits):
+//   F = compact 0x1f0a3d70 (uint256 000a3d70…, GetDifficulty ≈ 1.490e-6).
+//   Hard end of the empirical 8e-7–1.5e-6 band. Below ~1e-7 a 3090/5060 Ti
+//   swarm mints a valid body per card per interval (lottery). Around 1.7e-6
+//   the miner already saw 1–3 siblings (PoW ranks).
+//
+//   The rejected 12× historical powLimit (0x2008901c, ≈ 6.96e-9) is still
+//   inside the flood band. Do not restore it.
+//
+//   5060 Ti is the validation/signer reference, not the intended 90s miner:
+//   p = 0x0a3d70 / 2^32 ≈ 1.56e-4, so one 12.3s episode expects ~22 h/block
+//   at the clamp. A garage of 16× 3090s (~32s/episode) is still hours, not
+//   a sibling storm. Datacenter episode-rate holds ~90s and ASERT climbs.
+//   Episode shape is unchanged, so verify cost on the 5060 Ti stays one
+//   ExactReplay (~12–32s) at any nBits.
+//
+//   τ 3600 → 14400 at H+1 so an 11-hour stall dumps ~4× instead of ~2000×.
+//
+// H was 200000 when tip was 189675 (~10.8 d at 90s). The PR sat through the
+// 190852–191128 powLimit lottery (277 floor blocks, ~20s median). Tip at
+// freeze is ~191531; 200000 would be ~2 d at observed 20s spacing. Bump H,
+// do not retune F.
+//
+// H = 222000. From tip 191531 that is 30469 blocks ≈ 7.0 d at 20s
+// (≈ 31.7 d at 90s). If this sits again, bump H — do not chase live bits.
+static constexpr int32_t BTX_MATMUL_POW_LIMIT_UPGRADE_HEIGHT{222'000};
 
 // MatMul v4.2 / ENC-BMX4C construction invariants (spec §8.1/§8.2). No-op when
 // the profile is unset (nMatMulBMX4CHeight == INT32_MAX = disabled); when a
@@ -694,6 +724,10 @@ public:
         // throughput telemetry (~3.53 bps, ~0.283s over a 30s run) to target
         // the configured fast-phase SLA (~0.25s mean) on this host profile.
         consensus.powLimit = uint256{"66c1540000000000000000000000000000000000000000000000000000000000"};
+        // Compact 0x1f0a3d70. Do not mutate powLimit — old easy nBits must
+        // remain DeriveTarget-decodable. See BTX_MATMUL_POW_LIMIT_UPGRADE_HEIGHT.
+        consensus.nMatMulPowLimitUpgradeHeight = BTX_MATMUL_POW_LIMIT_UPGRADE_HEIGHT;
+        consensus.powLimitUpgrade = uint256{"000a3d7000000000000000000000000000000000000000000000000000000000"};
         consensus.nPowTargetTimespan = 14 * 24 * 60 * 60; // two weeks
         consensus.nPowTargetSpacing = 90;
         consensus.fPowAllowMinDifficultyBlocks = false;
@@ -796,15 +830,15 @@ public:
         consensus.nMatMulAsertHeight = 50'000;
         consensus.nMatMulAsertHalfLife = 3'600;
         consensus.nMatMulAsertBootstrapFactor = 180;
-        // No retune or half-life upgrade needed — fresh chain starts with
-        // the target 3,600s half-life directly.
         consensus.nMatMulAsertRetuneHeight = std::numeric_limits<int32_t>::max();
         consensus.nMatMulAsertRetuneHardeningFactor = 1;
         consensus.nMatMulAsertRetune2Height = std::numeric_limits<int32_t>::max();
         consensus.nMatMulAsertRetune2TargetNum = 1;
         consensus.nMatMulAsertRetune2TargetDen = 1;
-        consensus.nMatMulAsertHalfLifeUpgradeHeight = std::numeric_limits<int32_t>::max();
-        consensus.nMatMulAsertHalfLifeUpgrade = 3'600;
+        // Lengthen τ only after the dump floor is locked, so a stall cannot
+        // unwind 11 half-lives (~2000×) back toward historical powLimit.
+        consensus.nMatMulAsertHalfLifeUpgradeHeight = BTX_MATMUL_POW_LIMIT_UPGRADE_HEIGHT + 1;
+        consensus.nMatMulAsertHalfLifeUpgrade = 14'400;
         // Height 118,482 is approximately six hours from the observed public
         // tip near 118,242 at the 90-second target spacing, while bounding
         // future-dated timestamp shocks to one ASERT half-life.

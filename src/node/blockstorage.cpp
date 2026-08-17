@@ -391,6 +391,8 @@ uint256 ComputeMatMulReplayAuthorityContext(const CChainParams& params)
            << consensus.nMatMulAsertRetune2TargetDen
            << consensus.nMatMulAsertHalfLifeUpgradeHeight
            << consensus.nMatMulAsertHalfLifeUpgrade
+           << consensus.nMatMulPowLimitUpgradeHeight
+           << consensus.powLimitUpgrade
            << consensus.nMatMulMaxFutureMtpDriftHeight
            << consensus.nMatMulMaxFutureMtpDrift
            << consensus.nMatMulTimewarpReconcileHeight

@@ -942,8 +942,51 @@ BOOST_AUTO_TEST_CASE(ChainParams_MAIN_matmul_activation)
     BOOST_CHECK_EQUAL(consensus.nMatMulAsertRetune2Height, std::numeric_limits<int32_t>::max());
     BOOST_CHECK_EQUAL(consensus.nMatMulAsertRetune2TargetNum, 1U);
     BOOST_CHECK_EQUAL(consensus.nMatMulAsertRetune2TargetDen, 1U);
-    BOOST_CHECK_EQUAL(consensus.nMatMulAsertHalfLifeUpgradeHeight, std::numeric_limits<int32_t>::max());
-    BOOST_CHECK_EQUAL(consensus.nMatMulAsertHalfLifeUpgrade, 3'600);
+    BOOST_CHECK_EQUAL(consensus.nMatMulAsertHalfLifeUpgradeHeight, 222'001);
+    BOOST_CHECK_EQUAL(consensus.nMatMulAsertHalfLifeUpgrade, 14'400);
+    BOOST_CHECK_EQUAL(consensus.nMatMulPowLimitUpgradeHeight, 222'000);
+    BOOST_CHECK_EQUAL(UintToArith256(consensus.powLimit).GetCompact(), 0x2066c154U);
+    BOOST_CHECK_EQUAL(UintToArith256(consensus.powLimitUpgrade).GetCompact(), 0x1f0a3d70U);
+    BOOST_CHECK(UintToArith256(consensus.powLimitUpgrade) < UintToArith256(consensus.powLimit));
+    BOOST_CHECK(MatMulAsertPowLimitForNextHeight(consensus, 221'999) == UintToArith256(consensus.powLimit));
+    BOOST_CHECK(MatMulAsertPowLimitForNextHeight(consensus, 222'000) == UintToArith256(consensus.powLimitUpgrade));
+    BOOST_CHECK(MatMulAsertPowLimitForNextHeight(consensus, 222'001) == UintToArith256(consensus.powLimitUpgrade));
+    // Floor sits in the 8e-7–1.5e-6 GetDifficulty band (hard end) and is
+    // strictly harder than the 1e-7 flood boundary. Compact round-trips.
+    {
+        const uint32_t floor_bits = UintToArith256(consensus.powLimitUpgrade).GetCompact();
+        BOOST_CHECK_EQUAL(floor_bits, 0x1f0a3d70U);
+        arith_uint256 decoded{};
+        bool negative{false};
+        bool overflow{false};
+        decoded.SetCompact(floor_bits, &negative, &overflow);
+        BOOST_CHECK(!negative);
+        BOOST_CHECK(!overflow);
+        BOOST_CHECK(decoded == UintToArith256(consensus.powLimitUpgrade));
+        const int nShift = static_cast<int>((floor_bits >> 24) & 0xff);
+        double dDiff = static_cast<double>(0x0000ffff) / static_cast<double>(floor_bits & 0x00ffffff);
+        int shift = nShift;
+        while (shift < 29) {
+            dDiff *= 256.0;
+            ++shift;
+        }
+        while (shift > 29) {
+            dDiff /= 256.0;
+            --shift;
+        }
+        BOOST_CHECK(dDiff > 8.0e-7);
+        BOOST_CHECK(dDiff <= 1.5e-6);
+        BOOST_CHECK(dDiff > 1.0e-7);
+        const double p_hit = static_cast<double>(floor_bits & 0x00ffffff) / 4294967296.0;
+        const double episodes_per_90s_5060ti = 90.0 / 12.3;
+        const double expected_block_s = 90.0 / (episodes_per_90s_5060ti * p_hit);
+        BOOST_CHECK(p_hit < 2.0e-4);
+        BOOST_CHECK(expected_block_s > 3600.0);
+        BOOST_REQUIRE(DeriveTarget(0x2066c154U, consensus.powLimit).has_value());
+        BOOST_REQUIRE(DeriveTarget(floor_bits, consensus.powLimit).has_value());
+        BOOST_CHECK(!DeriveTarget(0x2066c154U, consensus.powLimitUpgrade).has_value());
+        BOOST_CHECK(CheckProofOfWork(uint256{}, 0x2066c154U, consensus));
+    }
     BOOST_CHECK_EQUAL(consensus.nMatMulMaxFutureMtpDriftHeight, 118'482);
     BOOST_CHECK_EQUAL(consensus.nMatMulMaxFutureMtpDrift, 3'600);
     BOOST_CHECK(!consensus.IsMatMulMaxFutureMtpDriftActive(118'481));

@@ -215,6 +215,10 @@ bool CheckMatMulProofOfWork_Phase1(const CBlockHeader& block, const Consensus::P
  *  silently weakening current difficulty at some future height) and defensively
  *  per-block inside MatMulAsert. */
 bool ValidateMatMulAsertParams(const Consensus::Params& params, int32_t next_height);
+/** ASERT clamp in effect when computing nBits for @p next_height. Historical
+ *  powLimit before nMatMulPowLimitUpgradeHeight; powLimitUpgrade at/after it.
+ *  CheckProofOfWork must keep using consensus.powLimit. */
+arith_uint256 MatMulAsertPowLimitForNextHeight(const Consensus::Params& params, int32_t next_height);
 /** AUDIT D3: reduce a one-time ASERT rescale ratio num/den to lowest terms; return
  *  false (and leave outputs unspecified) unless it is strictly positive AND both
  *  reduced terms fit in uint32. Prevents ScaleTargetByTimespan's independent

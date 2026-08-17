@@ -187,6 +187,22 @@ BOOST_AUTO_TEST_CASE(matmul_replay_authority_context_binds_profile_and_height)
     BOOST_CHECK(changed_asert_activation != baseline);
 
     ++consensus.nMatMulAsertHeight;
+    {
+        // Regtest default is INT32_MAX; do not ++ a disabled height.
+        const auto saved_h{consensus.nMatMulPowLimitUpgradeHeight};
+        consensus.nMatMulPowLimitUpgradeHeight = 1;
+        const uint256 changed_powlimit_upgrade_height{
+            node::ComputeMatMulReplayAuthorityContext(*params)};
+        BOOST_CHECK(changed_powlimit_upgrade_height != baseline);
+        consensus.nMatMulPowLimitUpgradeHeight = saved_h;
+    }
+    const auto saved_limit{consensus.powLimitUpgrade};
+    consensus.powLimitUpgrade = uint256{1};
+    const uint256 changed_powlimit_upgrade{
+        node::ComputeMatMulReplayAuthorityContext(*params)};
+    BOOST_CHECK(changed_powlimit_upgrade != baseline);
+    consensus.powLimitUpgrade = saved_limit;
+
     ++consensus.nMatMulProductDigestHeight;
     const uint256 changed_legacy_digest_activation{
         node::ComputeMatMulReplayAuthorityContext(*params)};

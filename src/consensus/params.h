@@ -311,6 +311,13 @@ struct Params {
     BIP9Deployment vDeployments[MAX_VERSION_BITS_DEPLOYMENTS];
     /** Proof of work parameters */
     uint256 powLimit;
+    /** Height-gated harder MatMul ASERT clamp (smaller max target). Historical
+     *  powLimit is never mutated: DeriveTarget / CheckProofOfWork keep decoding
+     *  old easy nBits. At and above this height, ASERT ClampRetargetResult uses
+     *  powLimitUpgrade. INT32_MAX disables. This is a mining-difficulty floor,
+     *  not an ExactReplay episode change: 5060 Ti class remains a verifier. */
+    int32_t nMatMulPowLimitUpgradeHeight{std::numeric_limits<int32_t>::max()};
+    uint256 powLimitUpgrade{};
     bool fPowAllowMinDifficultyBlocks;
     /**
       * Enforce BIP94 timewarp attack mitigation. On testnet4 this also enforces
