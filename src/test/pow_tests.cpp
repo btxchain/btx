@@ -942,15 +942,15 @@ BOOST_AUTO_TEST_CASE(ChainParams_MAIN_matmul_activation)
     BOOST_CHECK_EQUAL(consensus.nMatMulAsertRetune2Height, std::numeric_limits<int32_t>::max());
     BOOST_CHECK_EQUAL(consensus.nMatMulAsertRetune2TargetNum, 1U);
     BOOST_CHECK_EQUAL(consensus.nMatMulAsertRetune2TargetDen, 1U);
-    BOOST_CHECK_EQUAL(consensus.nMatMulAsertHalfLifeUpgradeHeight, 222'001);
+    BOOST_CHECK_EQUAL(consensus.nMatMulAsertHalfLifeUpgradeHeight, 198'001);
     BOOST_CHECK_EQUAL(consensus.nMatMulAsertHalfLifeUpgrade, 14'400);
-    BOOST_CHECK_EQUAL(consensus.nMatMulPowLimitUpgradeHeight, 222'000);
+    BOOST_CHECK_EQUAL(consensus.nMatMulPowLimitUpgradeHeight, 198'000);
     BOOST_CHECK_EQUAL(UintToArith256(consensus.powLimit).GetCompact(), 0x2066c154U);
     BOOST_CHECK_EQUAL(UintToArith256(consensus.powLimitUpgrade).GetCompact(), 0x1f0a3d70U);
     BOOST_CHECK(UintToArith256(consensus.powLimitUpgrade) < UintToArith256(consensus.powLimit));
-    BOOST_CHECK(MatMulAsertPowLimitForNextHeight(consensus, 221'999) == UintToArith256(consensus.powLimit));
-    BOOST_CHECK(MatMulAsertPowLimitForNextHeight(consensus, 222'000) == UintToArith256(consensus.powLimitUpgrade));
-    BOOST_CHECK(MatMulAsertPowLimitForNextHeight(consensus, 222'001) == UintToArith256(consensus.powLimitUpgrade));
+    BOOST_CHECK(MatMulAsertPowLimitForNextHeight(consensus, 197'999) == UintToArith256(consensus.powLimit));
+    BOOST_CHECK(MatMulAsertPowLimitForNextHeight(consensus, 198'000) == UintToArith256(consensus.powLimitUpgrade));
+    BOOST_CHECK(MatMulAsertPowLimitForNextHeight(consensus, 198'001) == UintToArith256(consensus.powLimitUpgrade));
     // Floor sits in the 8e-7–1.5e-6 GetDifficulty band (hard end) and is
     // strictly harder than the 1e-7 flood boundary. Compact round-trips.
     {

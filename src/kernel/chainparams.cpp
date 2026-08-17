@@ -191,14 +191,15 @@ static constexpr int32_t BTX_MATMUL_V47_EPOCH_A_HEIGHT{185'000};
 //
 //   τ 3600 → 14400 at H+1 so an 11-hour stall dumps ~4× instead of ~2000×.
 //
-// H was 200000 when tip was 189675 (~10.8 d at 90s). The PR sat through the
-// 190852–191128 powLimit lottery (277 floor blocks, ~20s median). Tip at
-// freeze is ~191531; 200000 would be ~2 d at observed 20s spacing. Bump H,
-// do not retune F.
+// H was 222000 when tip was 191531 (~10 d at 30s). The cheap-era lottery is
+// still live (diff ~4e-7, ~24k headers-only tips). The operator-controlled
+// GPU signer can enforce the new nBits as soon as this fleet is on one
+// fingerprint, so do not leave a 10-day window. Do not retune F.
 //
-// H = 222000. From tip 191531 that is 30469 blocks ≈ 7.0 d at 20s
-// (≈ 31.7 d at 90s). If this sits again, bump H — do not chase live bits.
-static constexpr int32_t BTX_MATMUL_POW_LIMIT_UPGRADE_HEIGHT{222'000};
+// H = 198000. From tip ~191629 that is ~6370 blocks ≈ 35 h at 20s
+// (≈ 53 h at 30s, ≈ 6.6 d at 90s). If this sits again, bump H — do not
+// chase live bits.
+static constexpr int32_t BTX_MATMUL_POW_LIMIT_UPGRADE_HEIGHT{198'000};
 
 // MatMul v4.2 / ENC-BMX4C construction invariants (spec §8.1/§8.2). No-op when
 // the profile is unset (nMatMulBMX4CHeight == INT32_MAX = disabled); when a

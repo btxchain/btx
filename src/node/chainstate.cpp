@@ -131,6 +131,7 @@ static ChainstateLoadResult CompleteChainstateInitialization(
     // modifying nSequenceId. CBlockIndex objects are shared by all chainstates
     // and nSequenceId participates in the candidate-set comparator, so changing
     // it while any candidate set is populated is undefined behavior.
+    LogPrintf("Populating block index candidates\n");
     for (Chainstate* chainstate : chainman.GetAll()) {
         chainstate->PopulateBlockIndexCandidates();
     }
@@ -141,7 +142,13 @@ static ChainstateLoadResult CompleteChainstateInitialization(
     // restart; RecalculateBestHeader reapplies the tip-chain overlay.
     if (node::matmul_trusted::IsConfigured() &&
         chainman.ActiveChain().Tip() != nullptr) {
+        LogPrintf("Recalculating best header under trusted MatMul overlay\n");
         chainman.RecalculateBestHeader();
+        LogPrintf("Recalculated best header hash=%s height=%d\n",
+                  chainman.m_best_header
+                      ? chainman.m_best_header->GetBlockHash().ToString()
+                      : "null",
+                  chainman.m_best_header ? chainman.m_best_header->nHeight : -1);
     }
 
     auto chainstates{chainman.GetAll()};

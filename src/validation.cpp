@@ -20165,6 +20165,7 @@ void ChainstateManager::RecalculateBestHeader()
     SetBestHeader(ActiveChain().Tip());
     if (!node::matmul_trusted::IsConfigured() || active_tip == nullptr) {
         for (auto& entry : m_blockman.m_block_index) {
+            if (m_interrupt) return;
             if (entry.second.nStatus & BLOCK_FAILED_MASK) continue;
             // Authenticated-work selection with a bounded unauth allowance: a short
             // unverified MatMul suffix may displace a losing tip for chase, but a
@@ -20187,25 +20188,32 @@ void ChainstateManager::RecalculateBestHeader()
     // overlay after attested snapshot load: nAuthenticatedChainWork often
     // covers only the first attested child (headers=H+1) while H+2..H+N
     // stay HEADER_ONLY, so m_best_header stalls and getblockchaininfo
-    // rewinds (follow_forward: 11 < 18). Snap to the furthest HasQuorum
-    // descendant of the active tip, then to the unique suffix of that
-    // attested frontier — competing unattested siblings of H are not in
-    // that subtree.
+    // rewinds (follow_forward: 11 < 18). Snap to the furthest in-memory
+    // quorum descendant of the active tip, then to the unique suffix of
+    // that attested frontier — competing unattested siblings of H are not
+    // in that subtree.
+    //
+    // Must not call durable HasQuorum here. FindMostWorkChain already learned
+    // that disk-verify under cs_main wedges RPC (~45s/ABC). A replay-context
+    // change plus a near-tip twin flood makes every miss re-verify an old
+    // attestation that cannot pass the new context — live archive startup
+    // hung >20 min at 100% CPU after "Loaded best chain".
     CBlockIndex* attested_frontier{
         IndexHasTrustedMatMulAuthority(active_tip)
             ? const_cast<CBlockIndex*>(active_tip)
             : nullptr};
     CBlockIndex* authority_best{nullptr};
     for (auto& [_, candidate] : m_blockman.m_block_index) {
+        if (m_interrupt) return;
         if ((candidate.nStatus & BLOCK_FAILED_MASK) ||
-            IsOnParkedReorgBranch(&candidate) ||
-            candidate.nHeight < active_tip->nHeight) {
+            candidate.nHeight < active_tip->nHeight ||
+            IsOnParkedReorgBranch(&candidate)) {
             continue;
         }
 
         if (BlockIndexDescends(&candidate, active_tip)) {
-            if (node::matmul_trusted::HasQuorum(candidate.GetBlockHash(),
-                                                candidate.nHeight)) {
+            if (node::matmul_trusted::HasQuorumInMemory(candidate.GetBlockHash(),
+                                                        candidate.nHeight)) {
                 if (attested_frontier == nullptr ||
                     CBlockIndexWorkComparator()(attested_frontier, &candidate)) {
                     attested_frontier = &candidate;
@@ -20219,7 +20227,7 @@ void ChainstateManager::RecalculateBestHeader()
         for (const CBlockIndex* cursor = &candidate;
              cursor != nullptr && cursor->nHeight >= active_tip->nHeight;
              cursor = cursor->pprev) {
-            if (node::matmul_trusted::HasQuorum(
+            if (node::matmul_trusted::HasQuorumInMemory(
                     cursor->GetBlockHash(), cursor->nHeight)) {
                 has_authority_ancestor = true;
                 break;
@@ -20234,6 +20242,7 @@ void ChainstateManager::RecalculateBestHeader()
     if (attested_frontier != nullptr) {
         CBlockIndex* followed{attested_frontier};
         for (auto& [_, candidate] : m_blockman.m_block_index) {
+            if (m_interrupt) return;
             if ((candidate.nStatus & BLOCK_FAILED_MASK) ||
                 IsOnParkedReorgBranch(&candidate) ||
                 !BlockIndexDescends(&candidate, attested_frontier)) {
