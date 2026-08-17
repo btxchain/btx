@@ -3949,11 +3949,13 @@ static uint256 g_configured_claimed_tip_child{};
 //!   Competing P2P siblings stay off the device so CandidateMining
 //!   keeps it.
 //! - Independent consensus verifier (pubkey optional, no local signer):
-//!   ExactReplay followed tip-children and the near-tip IBD window on
-//!   the active chain. Competing unattested twins stay off the device
-//!   (live 2026-08-17 miner: scheduler queue full, workspace=5.1GB).
-//!   Attested / signed-frontier competing hashes still ExactReplay so
-//!   ConnectTip can take the lottery winner.
+//!   ExactReplay attested / signed-frontier hashes and already-canonical
+//!   near-tip holes. Unattested tip-children stay off the device — every
+//!   `pprev==tip` sibling is a twin-lottery body (live consensus miner:
+//!   found a large fraction, won ~0 canonical because ExactReplay of
+//!   P2P twins occupied the 2-slot accelerator ahead of submitblock).
+//!   GETMMATTEST first; ConnectTip ExactReplays the attested winner.
+//!   Local submitblock is CandidateMining, not this path.
 //! Qualifier on d43eea4a / b83b79a6: treating every IsConfigured() node
 //! like a miner left a consensus-no-signer node at height 0 (242 bodies
 //! admitted, 0 UpdateTip) while trusted mirrors on the same archive

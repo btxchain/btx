@@ -1503,11 +1503,21 @@ BOOST_AUTO_TEST_CASE(competing_attested_index_rejects_fossil_depth)
         true, 191365, 191323));
     using node::matmul_trusted::IndependentConsensusMaySpendExactReplayGpu;
     constexpr int32_t kNearTip{3};
-    BOOST_CHECK(IndependentConsensusMaySpendExactReplayGpu(
+    // Unattested pprev==tip is a competing twin. Off the device so
+    // CandidateMining / submitblock can use the accelerator.
+    BOOST_CHECK(!IndependentConsensusMaySpendExactReplayGpu(
         /*pprev_is_tip=*/true, /*on_or_extends_active_tip=*/false, 101, 100,
         kNearTip, /*covered_by_attestation=*/false));
     BOOST_CHECK(IndependentConsensusMaySpendExactReplayGpu(
-        false, /*on_or_extends_active_tip=*/true, 102, 100, kNearTip, false));
+        true, false, 101, 100, kNearTip, /*covered_by_attestation=*/true));
+    // Already-canonical near-tip hole: still on-device for IBD.
+    BOOST_CHECK(IndependentConsensusMaySpendExactReplayGpu(
+        false, /*on_or_extends_active_tip=*/true, 99, 100, kNearTip, false));
+    BOOST_CHECK(IndependentConsensusMaySpendExactReplayGpu(
+        false, true, 100, 100, kNearTip, false));
+    // Unattested pull-ahead (another twin slot): off the device.
+    BOOST_CHECK(!IndependentConsensusMaySpendExactReplayGpu(
+        false, true, 102, 100, kNearTip, false));
     BOOST_CHECK(!IndependentConsensusMaySpendExactReplayGpu(
         false, true, 104, 100, kNearTip, false));
     // Competing unattested twin at the same height: off the device.

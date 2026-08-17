@@ -309,12 +309,18 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
 }
 
 /** Independent consensus ExactReplay GPU (no local signer, not trusted
- *  mirror). Followed tip-children and the near-tip IBD window stay
- *  on-device. Competing unattested twins must not: live 2026-08-17 miner
- *  mode 1 filled the scheduler (workspace=5164972400B, waiter deadline)
- *  and froze CandidateMining. Competing hashes covered by the signed
+ *  mirror). Competing unattested twins must not take the device: live
+ *  2026-08-17 miner mode 1 filled the scheduler (workspace=5164972400B)
+ *  and froze CandidateMining. A later consensus miner on e6249edd still
+ *  lost the near-tip lottery because `pprev==tip` admitted every
+ *  unattested sibling (~50 bodies/height) and ExactReplay'd them ahead
+ *  of local submitblock.
+ *
+ *  Local submitblock uses CandidateMining, not this P2P admission path.
+ *  Independent consensus follows attestation: unattested tip-children
+ *  stay off-device (GETMMATTEST first). Hashes covered by the signed
  *  frontier / quorum still replay so ConnectTip can take the lottery
- *  winner. */
+ *  winner. Already-canonical near-tip holes stay on-device for IBD. */
 [[nodiscard]] inline bool IndependentConsensusMaySpendExactReplayGpu(
     bool pprev_is_tip,
     bool on_or_extends_active_tip,
@@ -323,12 +329,15 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
     int32_t near_tip_depth,
     bool covered_by_attestation)
 {
-    if (pprev_is_tip) return true;
+    if (covered_by_attestation) return true;
+    // Unattested pprev==tip is the twin storm. Do not ExactReplay a
+    // competing sibling just because it extends the tip.
+    if (pprev_is_tip) return false;
     if (on_or_extends_active_tip) {
-        return index_height >= tip_height - 2 &&
-               index_height <= tip_height + near_tip_depth;
+        return index_height >= tip_height - near_tip_depth &&
+               index_height <= tip_height;
     }
-    return covered_by_attestation;
+    return false;
 }
 
 /** Skip FindUniqueCompetingAttestedIndex's HEADER_ONLY-hole pprev walk.
