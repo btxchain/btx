@@ -498,27 +498,18 @@ MatMulReplayContextMigration ReconcileMatMulReplayAuthorityContext(
     AssertLockHeld(::cs_main);
     const bool context_matches{
         persisted_context.has_value() && *persisted_context == current_context};
-    if (!context_matches) {
-        // First scan only. Returning REINDEX_REQUIRED must leave both the
-        // in-memory index and dirty set untouched so startup cannot partially
-        // migrate a datadir it is about to reject. Only a locally completed
-        // ExactReplay verdict can make historical chainwork depend on the old
-        // authority context. Trusted-attestation bits are audit metadata and
-        // are safe (and required) to clear below.
-        for (const CBlockIndex* index : indices) {
-            if (index != nullptr &&
-                (index->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0) {
-                return {
-                    MatMulReplayContextDisposition::REINDEX_REQUIRED,
-                    0};
-            }
-        }
-    }
 
     size_t cleared_trusted{0};
+    size_t cleared_exact{0};
     for (CBlockIndex* index : indices) {
         if (index == nullptr) {
             continue;
+        }
+        if (!context_matches &&
+            (index->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0) {
+            index->nStatus &= ~BLOCK_EXACT_REPLAY_VERIFIED;
+            dirty_indices.insert(index);
+            ++cleared_exact;
         }
         // Trusted attestations are local-policy authority. Preserve the bit
         // only if the durable archive can still prove quorum under the current
@@ -539,7 +530,8 @@ MatMulReplayContextMigration ReconcileMatMulReplayAuthorityContext(
         context_matches
             ? MatMulReplayContextDisposition::MATCHED
             : MatMulReplayContextDisposition::MIGRATED,
-        cleared_trusted};
+        cleared_trusted,
+        cleared_exact};
 }
 
 void RecomputeMatMulAuthenticatedChainWork(
@@ -1146,21 +1138,16 @@ bool BlockManager::LoadBlockIndexDB(
             all_indices, persisted_replay_context,
             current_replay_context, m_dirty_blockindex)};
     if (replay_migration.disposition ==
-        MatMulReplayContextDisposition::REINDEX_REQUIRED) {
-        LogError(
-            "MatMul replay authority context changed while persisted replay "
-            "authority exists; restart with -reindex to revalidate blocks "
-            "under the current consensus predicate\n");
-        return false;
-    }
-    if (replay_migration.disposition ==
         MatMulReplayContextDisposition::MIGRATED) {
         m_pending_matmul_replay_context = current_replay_context;
         LogPrintf(
             "MatMul replay authority context initialized/changed; "
-            "no persisted replay authority required revalidation\n");
+            "cleared_exact_replay=%u cleared_trusted=%u (no -reindex)\n",
+            static_cast<unsigned>(replay_migration.cleared_exact_replay_status),
+            static_cast<unsigned>(replay_migration.cleared_trusted_status));
     }
-    if (replay_migration.cleared_trusted_status != 0) {
+    if (replay_migration.cleared_trusted_status != 0 ||
+        replay_migration.cleared_exact_replay_status != 0) {
         // LoadBlockIndex derived authenticated work before current signer
         // provenance was reconciled. Demote the changed blocks and every
         // descendant parent-first before ChainstateManager selects its best
@@ -1225,7 +1212,8 @@ bool BlockManager::LoadBlockIndexDB(
     // A crash before this point leaves the old/missing context, so the next
     // startup repeats the migration instead of trusting partially cleared data.
     if ((m_pending_matmul_replay_context.has_value() ||
-         replay_migration.cleared_trusted_status != 0) &&
+         replay_migration.cleared_trusted_status != 0 ||
+         replay_migration.cleared_exact_replay_status != 0) &&
         !WriteBlockIndexDB()) {
         return false;
     }

@@ -206,21 +206,22 @@ struct MatMulReplayContextMigration {
     MatMulReplayContextDisposition disposition{
         MatMulReplayContextDisposition::MATCHED};
     size_t cleared_trusted_status{0};
+    size_t cleared_exact_replay_status{0};
 };
 
 /**
  * Reconcile persisted replay authority with the current consensus context.
  *
- * A missing/mismatched context may be adopted only when no persisted replay
- * authority exists. Once an authority bit has been written, the block may also
- * have been promoted to BLOCK_VALID_TRANSACTIONS/SCRIPTS and contributed
- * authenticated chainwork under the old predicate; clearing only the authority
- * bit cannot undo that state safely. Such a datadir must be reindexed.
+ * A missing/mismatched context is adopted by clearing cached ExactReplay and
+ * trusted-attestation bits and recomputing authenticated chainwork. A future
+ * height-gated powLimit / tau change is bound into the hasher so mixed
+ * binaries fail closed, but it does not change the historical ExactReplay
+ * episode shape; forcing -reindex on the GPU signer (live 2026-08-17) was
+ * the wrong recovery. Bodies stay on disk; verdicts are recomputed on use.
  *
  * With a matching context, ExactReplay authority is preserved and local-policy
  * trusted-attestation status is preserved only when the current durable archive
- * still proves quorum. The reindex-required result is detected before any index
- * or dirty-set mutation.
+ * still proves quorum.
  */
 [[nodiscard]] MatMulReplayContextMigration ReconcileMatMulReplayAuthorityContext(
     std::span<CBlockIndex* const> indices,

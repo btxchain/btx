@@ -77,7 +77,7 @@ BOOST_AUTO_TEST_CASE(matmul_replay_authority_context_matching_preserves_exact)
     BOOST_CHECK(dirty.count(&trusted));
 }
 
-BOOST_AUTO_TEST_CASE(matmul_replay_authority_context_mismatch_requires_reindex)
+BOOST_AUTO_TEST_CASE(matmul_replay_authority_context_mismatch_clears_exact_replay)
 {
     LOCK(cs_main);
     CBlockIndex exact;
@@ -90,11 +90,15 @@ BOOST_AUTO_TEST_CASE(matmul_replay_authority_context_mismatch_requires_reindex)
     const auto migration{node::ReconcileMatMulReplayAuthorityContext(
         indices, uint256{2}, uint256{1}, dirty)};
     BOOST_CHECK(migration.disposition ==
-                node::MatMulReplayContextDisposition::REINDEX_REQUIRED);
-    BOOST_CHECK_EQUAL(migration.cleared_trusted_status, 0U);
-    BOOST_CHECK(exact.nStatus & BLOCK_EXACT_REPLAY_VERIFIED);
-    BOOST_CHECK(trusted.nStatus & BLOCK_TRUSTED_REPLAY_ATTESTED);
-    BOOST_CHECK(dirty.empty());
+                node::MatMulReplayContextDisposition::MIGRATED);
+    BOOST_CHECK_EQUAL(migration.cleared_exact_replay_status, 1U);
+    BOOST_CHECK_EQUAL(migration.cleared_trusted_status, 1U);
+    BOOST_CHECK(!(exact.nStatus & BLOCK_EXACT_REPLAY_VERIFIED));
+    BOOST_CHECK(exact.nStatus & BLOCK_VALID_SCRIPTS);
+    BOOST_CHECK(!(trusted.nStatus & BLOCK_TRUSTED_REPLAY_ATTESTED));
+    BOOST_CHECK_EQUAL(dirty.size(), 2U);
+    BOOST_CHECK(dirty.count(&exact));
+    BOOST_CHECK(dirty.count(&trusted));
 }
 
 BOOST_AUTO_TEST_CASE(matmul_replay_authority_context_mismatch_without_authority_migrates)
