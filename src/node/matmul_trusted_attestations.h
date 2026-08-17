@@ -94,6 +94,10 @@ VerifyUtxoSnapshotManifest(
  *  (frontier hints). Must not durable-read under cs_main. */
 [[nodiscard]] bool HasCompetingQuorum(const uint256& block_hash,
                                       int32_t block_height);
+/** True when this process already signed a different hash at this height.
+ *  In-memory map from durable load and local Sign; no LevelDB read. */
+[[nodiscard]] bool HasLocalSignatureAtHeight(const uint256& block_hash,
+                                             int32_t block_height);
 /**
  * Blocking wait retained for tests and rare sync callers. Trusted-mirror
  * verify workers must NOT use this on the hot path: they park the job and
@@ -1198,15 +1202,44 @@ static constexpr auto GPU_RETAIN_ATTESTATION_RETRY{std::chrono::seconds{2}};
     return has_valid_gpu_attestation;
 }
 
+/** GETHEADERS serve gate. Bitcoin compared nChainWork to nMinimumChainWork.
+ *  Using only stale nAuthenticatedChainWork left an ExactReplay-valid
+ *  attestor returning empty HEADERS, so CPU archives could not catch up.
+ *  Serve when the peer has Download permission, the active tip has a
+ *  configured attestation quorum, or claimed chain work meets the minimum. */
+[[nodiscard]] inline bool MayServeGetHeaders(
+    bool download_permission,
+    bool tip_has_quorum,
+    bool chain_work_meets_minimum)
+{
+    return download_permission || tip_has_quorum || chain_work_meets_minimum;
+}
+
+/** CPU seeds must keep pulling headers from a GPU attestor after the
+ *  VERSION height. A one-shot BestKnown seed at connect must not stop
+ *  GETHEADERS for blocks the attestor mints later. */
+[[nodiscard]] inline bool TrustedMirrorShouldRequestAuthorityHeaders(
+    bool gpu_authority,
+    int32_t tip_height,
+    int32_t target_height)
+{
+    if (tip_height < target_height) return true;
+    return gpu_authority && tip_height >= 0;
+}
+
 /** Archives connected to a GPU attestor (1-of-1 or M-of-N): only those
  *  GPU nodes may deliver inbound BLOCK/HEADERS. Everyone else is
  *  outbound-only (they may fetch blocks from this node). That keeps
  *  archives from spending traffic/CPU on ExactReplay they cannot run.
  *
+ *  Pass `trusted_mirror` true for a trusted-mode archive **or** a
+ *  consensus node with a local signing key (the attestor). Random inbound
+ *  miner BLOCK/HEADERS must not steal ExactReplay from that GPU.
+ *
  *  `authority_only_inbound` is true whenever this node is in trusted-GPU
- *  mode (configured keys / trusted mirror), including strict -connect.
- *  The live check must not take cs_main: taking the lock per miner
- *  addrv2/inv/headers pegged b-msghand (nyc1 2026-08-16, 85% CPU). */
+ *  mode (configured keys / trusted mirror / local signer), including
+ *  strict -connect. The live check must not take cs_main: taking the lock
+ *  per miner addrv2/inv/headers pegged msghand CPU. */
 [[nodiscard]] inline bool TrustedMirrorIgnoreNonAuthorityInboundBlock(
     bool trusted_mirror,
     bool this_peer_is_gpu_authority,

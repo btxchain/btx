@@ -47,6 +47,13 @@ work statement are preserved across the transition. See the
 [canonical transition roadmap](doc/btx-matmul-v4.7-transition-roadmap.md)
 and [ExactReplay launch-candidate gates](doc/matmul-v4-exact-replay-launch-candidate.md).
 
+While Epoch A still uses ExactReplay as consensus authority, public CPU
+archives follow GPU attestors so the seed layer does not need a GPU on every
+host. That topology is temporary. The operator path to a fully GPU-verified
+full-node network (consensus dump floor → M-of-N attestors → GPU seeds that
+ExactReplay themselves) is
+[doc/btx-gpu-verified-network-transition.md](doc/btx-gpu-verified-network-transition.md).
+
 Pre-sunset shielded launch status: the reset-chain Smile-only surface was live
 on `main` before the v0.32 sunset. `DIRECT_SMILE` was the default direct
 shielded spend backend, shared-ring `BATCH_SMILE` ingress was the bridge-in
@@ -127,6 +134,7 @@ Current ring-size roadmap:
 
 ## Table of Contents
 
+- [GPU-verified network (three-phase)](#gpu-verified-network-three-phase)
 - [Chain Parameters](#chain-parameters)
 - [MatMul Proof of Work](#matmul-proof-of-work)
 - [Post-Quantum Cryptography](#post-quantum-cryptography)
@@ -145,6 +153,37 @@ Current ring-size roadmap:
 - [Architecture](#architecture)
 - [Contributing](#contributing)
 - [License](#license)
+
+---
+
+## GPU-verified network (three-phase)
+
+Profile 1 ExactReplay is the Epoch-A consensus check. It needs a qualified
+GPU. Public IBD/RPC seeds can stay on ordinary VPS hardware only by **trusting
+signed ExactReplay verdicts** from GPU attestors. That is an explicit
+operator-trust topology, not independent validation.
+
+The project is moving that seed layer to GPU ExactReplay in three releases so
+the public network does not take on unsustainable GPU infra before difficulty,
+peering, and attestor diversity can carry it:
+
+1. **Consensus dump floor + CPU seeds still follow one attestor.** Mainnet
+   `nBits` cannot go easier than compact `0x1f0a3d70` from height **191714**
+   (ASERT half-life 14400 at 191715). P2P catch-up is fixed so CPU archives
+   can pull headers and attestations from the GPU. Still 1-of-1.
+2. **Add GPU attestors (M-of-N).** Repeat `-matmultrustedpubkey`, raise
+   `-matmultrustedthreshold`. Archives stay CPU. Independent miners keep
+   talking to seeds. Adding `N` with `M=1` is only availability; `M≥2` is
+   what removes a single key as PoW authority.
+3. **Convert public seeds to GPU full nodes.** Each converted host runs
+   `-matmulvalidation=consensus` and ExactReplays. Trusted-mode on those
+   boxes goes away. CPU wallets and explorers can remain light.
+
+Full contract, roll order, and what is *not* dropped (Epochs B–D, light
+clients, `nBits` as difficulty):
+[doc/btx-gpu-verified-network-transition.md](doc/btx-gpu-verified-network-transition.md).
+Trusted-mirror mechanics:
+[doc/btx-matmul-trusted-rpc-mirrors.md](doc/btx-matmul-trusted-rpc-mirrors.md).
 
 ---
 

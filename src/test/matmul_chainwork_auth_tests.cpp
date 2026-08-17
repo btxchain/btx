@@ -804,4 +804,28 @@ BOOST_AUTO_TEST_CASE(trusted_replay_provenance_demotion_recomputes_descendants)
                       pre_fork->nAuthenticatedChainWork.GetHex());
 }
 
+BOOST_AUTO_TEST_CASE(exact_replay_bit_promotes_authenticated_work)
+{
+    LOCK(::cs_main);
+    Consensus::Params params = ParamsWithFork(1);
+    params.nMatMulRCHeight = 1;
+    params.nMatMulRCProfile = 1;
+    params.nMatMulRCCoupledHeight = std::numeric_limits<int32_t>::max();
+
+    Chain chain;
+    CBlockIndex* parent = chain.Add(ST_AUTHENTICATED | BLOCK_EXACT_REPLAY_VERIFIED);
+    CBlockIndex* child = chain.Add(ST_AUTHENTICATED);
+    chain.Recompute(params);
+
+    BOOST_REQUIRE(params.IsMatMulTrustedReplayAttestationActive(child->nHeight));
+    BOOST_CHECK(!IsBlockAuthenticated(*child, params));
+    const arith_uint256 before{child->nAuthenticatedChainWork};
+    BOOST_CHECK_EQUAL(before.GetHex(), parent->nAuthenticatedChainWork.GetHex());
+
+    child->nStatus |= BLOCK_EXACT_REPLAY_VERIFIED;
+    UpdateAuthenticatedChainWork(*child, params);
+    BOOST_CHECK(IsBlockAuthenticated(*child, params));
+    BOOST_CHECK(child->nAuthenticatedChainWork > before);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

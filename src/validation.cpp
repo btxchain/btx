@@ -12284,6 +12284,55 @@ bool ChainstateManager::LoadReorgRecoveryRecord()
     return true;
 }
 
+void ChainstateManager::RefreshAuthenticatedChainWork(CBlockIndex& index)
+{
+    AssertLockHeld(::cs_main);
+    // Parent-first, but stop once the parent prefix is already fully
+    // authenticated. Walking genesis→tip on every GETMMATTEST persist
+    // under cs_main is O(height) and stalls msghand. A stale hole still
+    // walks until nAuthenticatedChainWork == nChainWork (upgrade repair).
+    std::vector<CBlockIndex*> lineage;
+    for (CBlockIndex* walk{&index}; walk != nullptr; walk = walk->pprev) {
+        lineage.push_back(walk);
+        if (walk->pprev != nullptr &&
+            walk->pprev->nAuthenticatedChainWork == walk->pprev->nChainWork) {
+            break;
+        }
+    }
+    std::reverse(lineage.begin(), lineage.end());
+    CBlockIndex* first_changed{nullptr};
+    const Consensus::Params& params{GetConsensus()};
+    for (CBlockIndex* walk : lineage) {
+        const arith_uint256 old_work{walk->nAuthenticatedChainWork};
+        UpdateAuthenticatedChainWork(*walk, params);
+        if (first_changed == nullptr &&
+            walk->nAuthenticatedChainWork != old_work) {
+            first_changed = walk;
+        }
+    }
+    if (first_changed == nullptr) return;
+    auto consider_best_header = [this](CBlockIndex& candidate)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+        AssertLockHeld(::cs_main);
+        if (candidate.nStatus & BLOCK_FAILED_MASK) return;
+        NoteAuthenticatedRecoveryCandidate(&candidate);
+        if (m_best_header == nullptr ||
+            PreferTrustAdjustedHeader(*m_best_header, candidate)) {
+            SetBestHeader(&candidate);
+        }
+    };
+    consider_best_header(*first_changed);
+    PropagateAuthenticatedChainWorkDescendants(
+        *first_changed, params,
+        [this](CBlockIndex& parent,
+               const std::function<void(CBlockIndex&)>& visit)
+            EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+            AssertLockHeld(::cs_main);
+            m_blockman.ForEachBlockChild(parent, visit);
+        },
+        consider_best_header);
+}
+
 /** Mark a block as having its data received and checked (up to BLOCK_VALID_TRANSACTIONS). */
 void ChainstateManager::ReceivedBlockTransactions(const CBlock& block, CBlockIndex* pindexNew, const FlatFilePos& pos)
 {
@@ -12801,29 +12850,6 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block,
     if (block.nBits != GetNextWorkRequired(pindexPrev, &block, consensusParams))
         return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "bad-diffbits", "incorrect proof of work");
 
-    // Local GPU-attestor extra-work pin (NOT consensus). Header nBits stay on
-    // GetNextWorkRequired so archives do not see bad-diffbits. This node
-    // additionally requires matmul_digest to meet a harder measured target.
-    // BLOCK_HEADER_LOW_WORK: do not ban peers that submit consensus-valid easy work.
-    if (fCheckPOW && consensusParams.fMatMulPOW) {
-        if (auto extra_target = MaybeLocalExtraWorkTarget(
-                block.nBits,
-                consensusParams.powLimit,
-                chainman.m_options.signer_min_target_compact,
-                chainman.m_options.signer_extra_work_from_height,
-                nHeight)) {
-            if (UintToArith256(block.matmul_digest) > *extra_target) {
-                LogPrintf("signer extra-work: height=%d hash=%s digest exceeds local compact 0x%08x\n",
-                          nHeight,
-                          block.GetHash().ToString(),
-                          *chainman.m_options.signer_min_target_compact);
-                return state.Invalid(BlockValidationResult::BLOCK_HEADER_LOW_WORK,
-                                     "local-extra-work",
-                                     "matmul digest does not meet local signer extra-work target");
-            }
-        }
-    }
-
     // HeaderPoW bit-26 self-describing wire was WITHDRAWN: bit 26 was previously
     // legal, so gating 182↔186 parse / GetHash on it forks pre-activation peers.
     // Until a height-contextual wire design lands, do not require or forbid the
@@ -13146,6 +13172,7 @@ bool ChainstateManager::PersistMatMulExactReplayVerdict(
                 matmul::trusted::AddResultName(result));
         }
     }
+    RefreshAuthenticatedChainWork(*index);
     return true;
 }
 
@@ -13155,10 +13182,17 @@ bool ChainstateManager::PersistMatMulTrustedReplayAttestation(
     AssertLockHeld(::cs_main);
     CBlockIndex* index{m_blockman.LookupBlockIndex(block_hash)};
     if (index == nullptr || (index->nStatus & BLOCK_FAILED_MASK) ||
-        GetMatMulValidationMode() !=
-            kernel::MatMulValidationMode::TRUSTED ||
         !GetConsensus().IsMatMulTrustedReplayAttestationActive(
             index->nHeight)) {
+        return false;
+    }
+    const auto mode{GetMatMulValidationMode()};
+    const bool trusted{
+        mode == kernel::MatMulValidationMode::TRUSTED};
+    const bool consensus_signer{
+        mode == kernel::MatMulValidationMode::CONSENSUS &&
+        node::matmul_trusted::HasLocalSigner()};
+    if (!trusted && !consensus_signer) {
         return false;
     }
     index->nStatus |= BLOCK_TRUSTED_REPLAY_ATTESTED;
@@ -13166,6 +13200,7 @@ bool ChainstateManager::PersistMatMulTrustedReplayAttestation(
     // Deliberately do not populate the replay memo here. The worker populated
     // its process-local memo only after verifying current-config signatures;
     // this persistent audit bit must never recreate that authority.
+    RefreshAuthenticatedChainWork(*index);
     return true;
 }
 

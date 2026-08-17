@@ -11,6 +11,9 @@ live-tip-runway gates close.
 Canonical transition and activation policy:
 [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md).
 
+Public CPU seeds following GPU attestors, then M-of-N attestors, then GPU
+full nodes: [`btx-gpu-verified-network-transition.md`](btx-gpu-verified-network-transition.md).
+
 ## Roles and policy
 
 Production Profile 1 mining requires a qualified device for both candidate

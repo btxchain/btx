@@ -7,6 +7,7 @@ Use these docs first when you need the live post-`61000` hardening status,
 security closeout, or future-upgrade boundary:
 
 - [MatMul v4.7 Consensus Transition Roadmap](btx-matmul-v4.7-transition-roadmap.md)
+- [GPU-verified full nodes: three-phase transition](btx-gpu-verified-network-transition.md)
 - [MatMul v4 ExactReplay Launch Candidate](matmul-v4-exact-replay-launch-candidate.md)
 - [BTX Security Documentation](security/README.md)
 - [BTX Post-Launch Optimization Roadmap](btx-postlaunch-optimization-roadmap.md)

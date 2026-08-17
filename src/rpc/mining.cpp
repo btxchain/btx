@@ -5600,25 +5600,6 @@ static bool GenerateBlock(ChainstateManager& chainman, CBlock&& block, uint64_t&
             ShouldIncludeMatMulFreivaldsPayloadForMining(next_height, consensus);
         std::vector<uint32_t>* freivalds_payload_out = include_freivalds_payload ? &block.matrix_c_data : nullptr;
 
-        // Keep header nBits on consensus ASERT. If this node has a local
-        // extra-work pin, grind the tighter digest target so generatetoaddress
-        // (the GPU mine-loop) actually produces blocks the attestor will accept.
-        std::optional<uint256> extra_work_digest_target;
-        const uint256* digest_target_override = nullptr;
-        if (auto extra_target = MaybeLocalExtraWorkTarget(
-                block.nBits,
-                consensus.powLimit,
-                chainman.m_options.signer_min_target_compact,
-                chainman.m_options.signer_extra_work_from_height,
-                next_height)) {
-            extra_work_digest_target = ArithToUint256(*extra_target);
-            digest_target_override = &*extra_work_digest_target;
-            LogPrintf("signer extra-work: GenerateBlock height=%d grinding compact 0x%08x (header nBits 0x%08x)\n",
-                      next_height,
-                      extra_target->GetCompact(),
-                      block.nBits);
-        }
-
         if (!SolveMatMul(
                 block,
                 consensus,
@@ -5626,7 +5607,7 @@ static bool GenerateBlock(ChainstateManager& chainman, CBlock&& block, uint64_t&
                 next_height,
                 &abort_mining,
                 freivalds_payload_out,
-                digest_target_override,
+                /*share_target_override=*/nullptr,
                 parent_median_time_past)) {
             cleanup_watcher();
             if (max_tries == 0 || chainman.m_interrupt) return false;
@@ -9414,17 +9395,6 @@ static UniValue TemplateToJSON(
     }
 
     arith_uint256 hashTarget = arith_uint256().SetCompact(block_header.nBits);
-    // Keep GBT "bits" on consensus nBits. If this node has a local extra-work
-    // pin, tighten only the 256-bit "target" so cooperative miners grind the
-    // extra digest work this attestor will actually accept.
-    if (auto extra_target = MaybeLocalExtraWorkTarget(
-            block_header.nBits,
-            consensusParams.powLimit,
-            chainman.m_options.signer_min_target_compact,
-            chainman.m_options.signer_extra_work_from_height,
-            next_height)) {
-        hashTarget = *extra_target;
-    }
     const bool kawpow_active = consensusParams.fKAWPOW && next_height >= consensusParams.nKAWPOWHeight;
     const bool matmul_active = consensusParams.fMatMulPOW;
 

@@ -2340,8 +2340,9 @@ private:
     /** GPU attestors with a completed VERSION handshake. */
     [[nodiscard]] int CountCapableGpuAuthorityPeers() const
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
-    /** Trusted-mirror archive: drop inbound bodies/headers from non-authority.
-     *  Unlocked on purpose: the live stall was this check taking cs_main. */
+    /** Trusted-mirror archive or local signer: drop inbound bodies/headers
+     *  from non-authority. Unlocked on purpose: the live stall was this
+     *  check taking cs_main. */
     [[nodiscard]] bool ShouldIgnoreNonAuthorityInboundBlock(const CNode& pfrom) const;
     [[nodiscard]] std::chrono::microseconds CatchUpDownloadTimeoutForPeer(
         NodeId peer_id, const CNodeState& state) const
@@ -8528,14 +8529,15 @@ int PeerManagerImpl::CountCapableGpuAuthorityPeers() const
 
 bool PeerManagerImpl::ShouldIgnoreNonAuthorityInboundBlock(const CNode& pfrom) const
 {
-    // No cs_main. After the deserialize-skip patch, nyc1 still pegged
-    // b-msghand at 85% because this predicate took cs_main and iterated
-    // every peer for each miner addrv2/inv/headers. SendMessages never
-    // issued getdata (in_flight=0, stall every 60s, tip frozen).
-    if (!node::matmul_trusted::IsTrustedMirror()) return false;
+    // No cs_main. Taking the lock per miner addrv2/inv/headers pegged
+    // msghand and froze GETDATA. Trusted mirrors and local signers both
+    // ignore unsolicited inbound BLOCK/HEADERS from non-authority peers.
+    const bool authority_node{
+        node::matmul_trusted::IsTrustedMirror() ||
+        node::matmul_trusted::HasLocalSigner()};
+    if (!authority_node) return false;
     const bool this_gpu{
         pfrom.IsManualConn() || pfrom.HasPermission(NetPermissionFlags::NoBan)};
-    // Trusted-GPU mode: only GPU attestors may push unsolicited blocks/headers.
     // Outbound archive GETDATA replies are not this inbound gate.
     return node::matmul_trusted::TrustedMirrorIgnoreNonAuthorityInboundBlock(
         /*trusted_mirror=*/true, this_gpu, /*authority_only_inbound=*/true,
@@ -8773,7 +8775,15 @@ void PeerManagerImpl::MaybeRequestTrustedMirrorAuthorityHeaders(
     if (starting > tip_height) {
         target_height = std::max(target_height, starting);
     }
-    if (tip_height >= target_height) return;
+    {
+        const CNodeState* const gpu_state{State(pto.GetId())};
+        const bool gpu{gpu_state != nullptr &&
+                       PeerIsGpuAuthority(pto.GetId(), *gpu_state)};
+        if (!node::matmul_trusted::TrustedMirrorShouldRequestAuthorityHeaders(
+                gpu, tip_height, target_height)) {
+            return;
+        }
+    }
 
     auto& last{m_trusted_mirror_authority_headers_at[pto.GetId()]};
     if (last.count() != 0 &&
@@ -13299,8 +13309,15 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         !node::matmul_trusted::TrustedMirrorMayServeNonAuthorityGetData(
             this_gpu, m_signed_frontier_catch_up.load(std::memory_order_relaxed),
             this_archive_target)};
+    // GPU attestors and trusted mirrors only ingest from a GPU attestor or
+    // from our outbound archive GETDATA replies. `!IsTrustedMirror()` used
+    // to skip this for local signers, so outbound miner INV/HEADERS still
+    // stole ExactReplay (lottery nBits until the dump floor).
+    const bool authority_ingest{
+        node::matmul_trusted::IsTrustedMirror() ||
+        node::matmul_trusted::HasLocalSigner()};
     const bool accept_catchup_ingest{
-        !node::matmul_trusted::IsTrustedMirror() ||
+        !authority_ingest ||
         node::matmul_trusted::TrustedMirrorMayAcceptPeerBlockBody(
             this_gpu, pfrom.IsInboundConn(),
             pfrom.HasArchiveOrMirrorService())};
@@ -13887,11 +13904,31 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         // being fed a bogus chain when we started up for the first time and
         // getting partitioned off the honest network for serving that chain to
         // others.
-        // WP-8 site 6: compare AUTHENTICATED tip work against the minimum-work
-        // serve gate (identical to nChainWork today — the active tip is fully
-        // validated; hardening against assumed states only).
-        if (m_chainman.ActiveTip() == nullptr ||
-                (m_chainman.ActiveTip()->nAuthenticatedChainWork < m_chainman.MinimumChainWork() && !pfrom.HasPermission(NetPermissionFlags::Download))) {
+        // Do not use stale nAuthenticatedChainWork as the only gate: an
+        // ExactReplay-valid attestor with a quorum tip must still serve
+        // GETHEADERS to CPU archives. Download permission keeps the
+        // operator override. Claimed nChainWork is the Bitcoin-like floor.
+        // Tip quorum is in-memory only (HasQuorumInMemory): durable
+        // LevelDB under cs_main hung archive startup on RecalculateBestHeader.
+        const CBlockIndex* const tip{m_chainman.ActiveTip()};
+        const bool download{
+            pfrom.HasPermission(NetPermissionFlags::Download)};
+        const bool tip_quorum{
+            tip != nullptr &&
+            node::matmul_trusted::HasQuorumInMemory(
+                tip->GetBlockHash(), tip->nHeight)};
+        // Consensus attestors: claimed nChainWork (they ExactReplay).
+        // Trusted mirrors without quorum: authenticated work only, so an
+        // easy-ASERT dump cannot become the headers we advertise.
+        const bool enough_work{
+            tip != nullptr &&
+            ((tip_quorum || !node::matmul_trusted::IsTrustedMirror())
+                 ? tip->nChainWork >= m_chainman.MinimumChainWork()
+                 : tip->nAuthenticatedChainWork >=
+                       m_chainman.MinimumChainWork())};
+        if (tip == nullptr ||
+            !node::matmul_trusted::MayServeGetHeaders(
+                download, tip_quorum, enough_work)) {
             LogDebug(BCLog::NET, "Ignoring getheaders from peer=%d because active chain has too little work; sending empty response\n", pfrom.GetId());
             // Just respond with an empty headers message, to tell the peer to
             // go away but not treat us as unresponsive.
@@ -15690,6 +15727,11 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                         matmul::trusted::AddResultName(result));
                     return;
                 }
+                {
+                    LOCK(cs_main);
+                    (void)m_chainman.PersistMatMulTrustedReplayAttestation(
+                        block_hash);
+                }
                 serve_reason = locally_exact ? "regenerated" : "catchup_regen";
             } else if (locally_exact) {
                 MaybeLogAttestationServe(
@@ -15730,6 +15772,11 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                             block_hash.ToString(), height,
                             matmul::trusted::AddResultName(result));
                         return;
+                    }
+                    {
+                        LOCK(cs_main);
+                        (void)m_chainman.PersistMatMulTrustedReplayAttestation(
+                            block_hash);
                     }
                     serve_reason = "attested_no_replay";
                 } else if (MaybeQueueHistoricalAttestationReverify(

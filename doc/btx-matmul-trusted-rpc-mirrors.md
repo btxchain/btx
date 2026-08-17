@@ -3,6 +3,11 @@
 Canonical transition and activation policy:
 [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md).
 
+CPU archives following GPU attestors are Phases 1–2 of the operator path to a
+fully GPU-verified seed layer. Phase 3 drops trusted-mode on those hosts once
+they ExactReplay locally. See
+[`btx-gpu-verified-network-transition.md`](btx-gpu-verified-network-transition.md).
+
 ## Purpose and trust boundary
 
 MatMul Profile 1 ExactReplay is intentionally expensive. A deployment that

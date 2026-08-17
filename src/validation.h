@@ -1343,15 +1343,23 @@ public:
         bool* assumevalid_trusted = nullptr) const
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
-    /** Persist a successful header-derived ExactReplay verdict without
-     *  promoting block validity or authenticated chainwork. */
+    /** Persist a successful header-derived ExactReplay verdict. Does not
+     *  raise BLOCK_VALID_* by itself. Recomputes authenticated chain work
+     *  for this block's lineage so GETHEADERS and trust-adjusted ranking
+     *  see the ExactReplayed prefix (body-first then replay left work stale). */
     bool PersistMatMulExactReplayVerdict(const uint256& block_hash)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /** Record that the current process observed a valid configured M-of-N
-     *  quorum. Persisted solely for operator audit; validation never consumes
-     *  this bit as authority after restart/config rotation. */
+     *  quorum (trusted mirrors, or a consensus node with a local signer).
+     *  Also promotes authenticated chain work. Restart still clears the bit
+     *  unless durable quorum is still present under the current config. */
     bool PersistMatMulTrustedReplayAttestation(const uint256& block_hash)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** Recompute nAuthenticatedChainWork from genesis to `index`, then
+     *  propagate to descendants from the first changed ancestor. */
+    void RefreshAuthenticatedChainWork(CBlockIndex& index)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /** Cheap complete-block checks that must pass before P2P admission charges

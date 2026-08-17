@@ -191,14 +191,11 @@ static constexpr int32_t BTX_MATMUL_V47_EPOCH_A_HEIGHT{185'000};
 //
 //   τ 3600 → 14400 at H+1 so an 11-hour stall dumps ~4× instead of ~2000×.
 //
-// Consensus activation is height 200000 (half-life lengthening at 200001).
-// Do not retune F. nBits stays exact-match until then; pre-activation
-// lottery mitigation is local fork-choice only (emergency/archive reorg
-// park, randomtiebreak, fleet miners off).
-//
-// From tip ~191713 that is ~8287 blocks ≈ 46 h at 20s (≈ 69 h at 30s,
-// ≈ 8.6 d at 90s).
-static constexpr int32_t BTX_MATMUL_POW_LIMIT_UPGRADE_HEIGHT{200'000};
+// Consensus dump floor at the next mainnet block after the attested
+// 191713 parent. Do not retune F. Half-life lengthening is H+1 so a stall
+// after the floor cannot unwind 11 half-lives back toward historical
+// powLimit. See doc/btx-gpu-verified-network-transition.md.
+static constexpr int32_t BTX_MATMUL_POW_LIMIT_UPGRADE_HEIGHT{191'714};
 
 // MatMul v4.2 / ENC-BMX4C construction invariants (spec §8.1/§8.2). No-op when
 // the profile is unset (nMatMulBMX4CHeight == INT32_MAX = disabled); when a

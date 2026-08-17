@@ -12,6 +12,10 @@ This document records the transition contract and the evidence still required
 to close the Epoch-A gates (§4). Consensus source schedules the transition;
 documentation does not authorize it.
 
+Operator topology while Epoch A ExactReplay is still consensus authority
+(CPU archives → M-of-N GPU attestors → GPU full nodes):
+[btx-gpu-verified-network-transition.md](btx-gpu-verified-network-transition.md).
+
 ## 1. Naming and scope
 
 **MatMul v4.7** is the name of the complete transition architecture in this

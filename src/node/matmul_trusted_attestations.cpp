@@ -58,6 +58,9 @@ uint256 g_authority_peer_tip_hash{};
 //! not last-writer: dual-attested siblings (live 2026-08-15) must both stay
 //! visible to FindUniqueCompetingAttestedIndex after restart.
 std::map<int32_t, std::set<uint256>> g_attested_by_height;
+//! Height -> hash this process's local key already signed. Survives hot-cache
+//! eviction; populated at durable load and on each local Sign. First hash wins.
+std::map<int32_t, uint256> g_local_signed_hash_by_height;
 static constexpr int32_t ATTESTED_FRONTIER_HINT_WINDOW{512};
 
 fs::path g_persist_path;
@@ -208,6 +211,8 @@ bool ImportAttestations(
     size_t prior_authority{0};
     int32_t highest{-1};
     const uint256 authority_namespace{AuthorityNamespace(*store)};
+    const auto local_pk{store->LocalSignerPubKey()};
+    std::map<int32_t, uint256> local_signed;
     std::map<DurableAttestationKey,
              std::vector<matmul::trusted::ExactReplayAttestation>> durable;
     for (size_t index{0}; index < loaded.size(); ++index) {
@@ -255,6 +260,10 @@ bool ImportAttestations(
         }
         ++accepted;
         highest = std::max(highest, attestation.statement.block_height);
+        if (local_pk.has_value() && attestation.signer == *local_pk) {
+            local_signed.emplace(attestation.statement.block_height,
+                                 attestation.statement.block_hash);
+        }
         durable[DurableAttestationKey{
             .authority_namespace = authority_namespace,
             .height = attestation.statement.block_height,
@@ -295,6 +304,9 @@ bool ImportAttestations(
         std::lock_guard lock{g_mutex};
         g_highest_attested_height =
             std::max(g_highest_attested_height, highest);
+        for (const auto& [height, hash] : local_signed) {
+            g_local_signed_hash_by_height.emplace(height, hash);
+        }
     }
     LogPrintf("Loaded %zu MatMul ExactReplay attestation(s) from %s\n",
               accepted, fs::PathToString(source));
@@ -318,6 +330,8 @@ bool LoadDurableAttestations(
         .authority_namespace = authority_namespace});
     size_t records{0};
     int32_t highest{-1};
+    const auto local_pk{store->LocalSignerPubKey()};
+    std::map<int32_t, uint256> local_signed;
     // Verify the complete namespace, but hydrate only the newest cache-sized
     // tail. Adding every historical record to a full bounded store makes each
     // later insertion scan the entire cache for an eviction candidate.
@@ -358,6 +372,9 @@ bool LoadDurableAttestations(
                     matmul::trusted::VerifyResultName(verified));
                 return false;
             }
+            if (local_pk.has_value() && attestation.signer == *local_pk) {
+                local_signed.emplace(key.height, key.block_hash);
+            }
         }
         const TailKey tail_key{key.height, key.block_hash};
         hot_tail_attestations += attestations.size();
@@ -386,6 +403,9 @@ bool LoadDurableAttestations(
         std::lock_guard lock{g_mutex};
         g_highest_attested_height =
             std::max(g_highest_attested_height, highest);
+        for (const auto& [height, hash] : local_signed) {
+            g_local_signed_hash_by_height.emplace(height, hash);
+        }
     }
     for (const auto& [tail_key, attestations] : hot_tail) {
         (void)attestations;
@@ -839,6 +859,7 @@ void Reset()
     g_authority_peer_tip_hint = -1;
     g_authority_peer_tip_hash.SetNull();
     g_attested_by_height.clear();
+    g_local_signed_hash_by_height.clear();
     g_persist_enabled = false;
     g_persist_path.clear();
 }
@@ -937,8 +958,10 @@ matmul::trusted::AddResult SignAuthoritative(
     // Never mint a second local signature at a height that already has
     // quorum on a different hash (live 2026-08-15: 94f70747 then a9590c15
     // at 190354). In-memory hints cover the hot window; SignLocal also
-    // refuses against the store's own buckets.
-    if (HasCompetingQuorum(block_hash, block_height)) {
+    // refuses against the store's own buckets. The local-signed height map
+    // survives hot-cache eviction (durable load + each local Sign).
+    if (HasCompetingQuorum(block_hash, block_height) ||
+        HasLocalSignatureAtHeight(block_hash, block_height)) {
         return matmul::trusted::AddResult::HeightOccupied;
     }
     matmul::trusted::ExactReplayAttestation signed_attestation;
@@ -951,6 +974,10 @@ matmul::trusted::AddResult SignAuthoritative(
     if (result == matmul::trusted::AddResult::Accepted ||
         result == matmul::trusted::AddResult::Duplicate) {
         NoteAcceptedAttestationHeight(block_height, block_hash);
+        if (block_height >= 0 && !block_hash.IsNull()) {
+            std::lock_guard lock{g_mutex};
+            g_local_signed_hash_by_height.emplace(block_height, block_hash);
+        }
     }
     if (result == matmul::trusted::AddResult::Accepted) {
         PersistAfterMutation(signed_attestation);
@@ -1024,6 +1051,17 @@ bool HasCompetingQuorum(const uint256& block_hash, int32_t block_height)
         }
     }
     return false;
+}
+
+bool HasLocalSignatureAtHeight(const uint256& block_hash, int32_t block_height)
+{
+    if (block_height < 0 || block_hash.IsNull()) return false;
+    std::lock_guard lock{g_mutex};
+    const auto it{g_local_signed_hash_by_height.find(block_height)};
+    if (it == g_local_signed_hash_by_height.end() || it->second.IsNull()) {
+        return false;
+    }
+    return it->second != block_hash;
 }
 
 matmul::trusted::WaitResult WaitForQuorum(

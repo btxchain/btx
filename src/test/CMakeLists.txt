@@ -85,6 +85,7 @@ add_executable(test_btx
   matmul_transcript_tests.cpp
   matmul_validation_tests.cpp
   matmul_chainwork_auth_tests.cpp
+  matmul_gpu_verified_transition_tests.cpp
   matmul_trust_model_tests.cpp
   matmul_dgw_tests.cpp
   matmul_unified_activation_tests.cpp
