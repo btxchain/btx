@@ -2652,12 +2652,26 @@ BOOST_AUTO_TEST_CASE(ChainParams_MAIN_hardening_anchor_consistency)
         assumeutxo_190507->shielded_state_commitment.GetHex(),
         "94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541");
 
+    const auto assumeutxo_191266 = params->AssumeutxoForHeight(191266);
+    BOOST_REQUIRE(assumeutxo_191266.has_value());
+    BOOST_CHECK_EQUAL(assumeutxo_191266->height, 191266);
+    BOOST_CHECK_EQUAL(
+        assumeutxo_191266->hash_serialized.ToString(),
+        "05be21ac1772c4ae806eec8994fd82f0082b4004ccbedb606dcdfd3c71ae2a68");
+    BOOST_CHECK_EQUAL(assumeutxo_191266->m_chain_tx_count, 289382U);
+    BOOST_CHECK_EQUAL(
+        assumeutxo_191266->blockhash.GetHex(),
+        "de6e3c9db527970c13b2ba834c19ff8f4d8829aee0c93ba6cde3a5039504efa8");
+    BOOST_CHECK_EQUAL(
+        assumeutxo_191266->shielded_state_commitment.GetHex(),
+        "94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541");
+
     const auto snapshot_heights = params->GetAvailableSnapshotHeights();
-    BOOST_REQUIRE_EQUAL(snapshot_heights.size(), 24U);
+    BOOST_REQUIRE_EQUAL(snapshot_heights.size(), 25U);
     BOOST_CHECK(std::is_sorted(snapshot_heights.begin(), snapshot_heights.end()));
     BOOST_CHECK_EQUAL(snapshot_heights.front(), 55000);
-    BOOST_CHECK_EQUAL(snapshot_heights.back(), 190507);
-    // Checkpoints may trail assumeutxo (186000 checkpoint vs 190507 snapshot);
+    BOOST_CHECK_EQUAL(snapshot_heights.back(), 191266);
+    // Checkpoints may trail assumeutxo (186000 checkpoint vs 191266 snapshot);
     // keep both anchors consistent with chainparams rather than forcing parity.
 }
 
