@@ -10979,6 +10979,15 @@ void Chainstate::TryAddBlockIndexCandidate(CBlockIndex* pindex)
 {
     AssertLockHeld(cs_main);
     const CBlockIndex* const tip{m_chain.Tip()};
+    // Active-chain ancestors are never connectable candidates (strictly less
+    // work than tip). Running parked / defer / TrustedMirror / unique-attested
+    // scans on all ~190k of them made archive startup hang after
+    // "Populating block index candidates" (live nyc1 2026-08-17, 100% CPU
+    // for >5 min). FindUniqueCompetingAttestedIndex is O(frontier hints).
+    if (tip != nullptr && pindex != nullptr && pindex != tip &&
+        m_chain.Contains(pindex)) {
+        return;
+    }
     const bool parked{m_chainman.IsOnParkedReorgBranch(pindex)};
     const bool defer_losing{m_chainman.ShouldDeferLosingTipExtension(pindex)};
     const bool consider{TrustedMirrorShouldConsiderMostWorkCandidate(m_chainman, tip, pindex)};
@@ -11648,8 +11657,15 @@ bool ChainstateManager::IsAttestedAbandonForkCandidate(
     const CBlockIndex* candidate) const
 {
     AssertLockHeld(::cs_main);
-    return candidate != nullptr &&
-           candidate == FindUniqueCompetingAttestedIndex();
+    if (candidate == nullptr || m_active_chainstate == nullptr) {
+        return false;
+    }
+    const CBlockIndex* const tip{m_active_chainstate->m_chain.Tip()};
+    if (tip != nullptr && candidate != tip &&
+        m_active_chainstate->m_chain.Contains(candidate)) {
+        return false;
+    }
+    return candidate == FindUniqueCompetingAttestedIndex();
 }
 
 void ChainstateManager::NoteAuthenticatedRecoveryCandidate(CBlockIndex* candidate)

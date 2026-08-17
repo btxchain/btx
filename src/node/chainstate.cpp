@@ -135,6 +135,7 @@ static ChainstateLoadResult CompleteChainstateInitialization(
     for (Chainstate* chainstate : chainman.GetAll()) {
         chainstate->PopulateBlockIndexCandidates();
     }
+    LogPrintf("Populated block index candidates\n");
 
     // LoadBlockIndex ranks m_best_header by PreferTrustAdjustedHeader. A
     // configured node that already has an active tip (snapshot or IBD) must
