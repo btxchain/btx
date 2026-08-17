@@ -945,6 +945,29 @@ static constexpr int SIGNER_MSGHAND_OTHER_PER_LOOP{2};
     return live_getdata && is_archive_serve_target;
 }
 
+/** Local signer: msghand leaves archive/mirror *block* GETDATA queued for
+ *  ArchiveBlockServe. TX GETDATA stays on msghand. Miner GETDATA is never
+ *  skipped (1-BLOCK-per-visit). If the worker is not running, msghand is
+ *  the fallback serve path. */
+[[nodiscard]] inline bool MsghandSkipArchiveBlockGetData(
+    bool local_signer,
+    bool archive_serve_worker_running,
+    bool is_archive_serve_target)
+{
+    return local_signer && archive_serve_worker_running &&
+           is_archive_serve_target;
+}
+
+/** ArchiveBlockServe wait bounds.
+ *  Busy: TRY_LOCK(cs_main) failed (ConnectTip / other holders). Wait on
+ *  WaitCsMainReleasedForMatMulRecompute so ExactReplay's CsMainScopedRelease
+ *  wakes the worker immediately; 250ms is only the poll fallback when the
+ *  holder is not ExactReplay (ConnectTip does not notify). Pending/Idle are
+ *  GETDATA-queue waits, not ExactReplay. */
+static constexpr auto ARCHIVE_BLOCK_SERVE_WAIT_BUSY{std::chrono::milliseconds{250}};
+static constexpr auto ARCHIVE_BLOCK_SERVE_WAIT_PENDING{std::chrono::milliseconds{10}};
+static constexpr auto ARCHIVE_BLOCK_SERVE_WAIT_IDLE{std::chrono::milliseconds{50}};
+
 /** Local signer: drop non-archive BLOCK/HEADERS ingest while any
  *  archive GETDATA is waiting. Outbound miners too — live signer still
  *  connected tip from addrman peers (b-mmverify ~45%) during nyc1

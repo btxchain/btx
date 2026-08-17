@@ -6,6 +6,7 @@
 #include <chainparams.h>
 #include <consensus/validation.h>
 #include <node/kernel_notifications.h>
+#include <node/miner.h>
 #include <matmul/trusted_exact_replay_attestation.h>
 #include <node/matmul_trusted_attestations.h>
 #include <node/warnings.h>
@@ -21,10 +22,12 @@
 #include <util/mempressure.h>
 #include <validation.h>
 
+#include <atomic>
 #include <memory>
 #include <optional>
 #include <chrono>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <boost/test/unit_test.hpp>
@@ -3321,6 +3324,78 @@ BOOST_FIXTURE_TEST_CASE(chainstate_trusted_mirror_covered_connecttip_skips_exact
     BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()) == child);
     BOOST_CHECK_EQUAL(chainman.TrustedMirrorExactReplayInvocationsForTest(), 0);
     chainman.CheckBlockIndex();
+}
+
+BOOST_FIXTURE_TEST_CASE(chainstate_exact_replay_drops_cs_main_for_recompute, TestChain100Setup)
+{
+    // TestBlockValidity ExactReplay must drop cs_main for the whole CUDA wait
+    // so an archive GETDATA serve thread can TRY_LOCK(cs_main) during it.
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    Chainstate& chainstate = chainman.ActiveChainstate();
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    const int32_t saved_v4{consensus.nMatMulV4Height};
+    const int32_t saved_bmx{consensus.nMatMulBMX4CHeight};
+    const int32_t saved_rc{consensus.nMatMulRCHeight};
+    const int32_t saved_lt{consensus.nMatMulDRLTHeight};
+    struct Restore {
+        Consensus::Params& consensus;
+        int32_t v4;
+        int32_t bmx;
+        int32_t rc;
+        int32_t lt;
+        ~Restore()
+        {
+            SetMatMulExactReplayUnderReleasedCsMainHookForTest(nullptr);
+            consensus.nMatMulV4Height = v4;
+            consensus.nMatMulBMX4CHeight = bmx;
+            consensus.nMatMulRCHeight = rc;
+            consensus.nMatMulDRLTHeight = lt;
+        }
+    } restore{consensus, saved_v4, saved_bmx, saved_rc, saved_lt};
+
+    const int next_height{
+        WITH_LOCK(::cs_main, return chainstate.m_chain.Height()) + 1};
+    consensus.nMatMulV4Height = next_height;
+    consensus.nMatMulBMX4CHeight = next_height;
+    consensus.nMatMulDRLTHeight = next_height;
+    consensus.nMatMulRCHeight = next_height;
+
+    node::BlockAssembler::Options options;
+    options.coinbase_output_script = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    options.test_block_validity = false;
+    const CBlock block{
+        node::BlockAssembler{chainstate, nullptr, options, m_node}.CreateNewBlock()->block};
+
+    std::atomic<bool> waiter_got_lock{false};
+    std::atomic<bool> hook_saw_unlocked{false};
+    SetMatMulExactReplayUnderReleasedCsMainHookForTest([&]() -> std::optional<bool> {
+        AssertLockNotHeld(::cs_main);
+        hook_saw_unlocked.store(true, std::memory_order_release);
+        BOOST_CHECK(IsCsMainReleasedForMatMulRecompute());
+        for (int i = 0; i < 200 && !waiter_got_lock.load(std::memory_order_acquire); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{10});
+        }
+        return true;
+    });
+
+    std::thread waiter([&] {
+        BOOST_CHECK(WaitCsMainReleasedForMatMulRecompute(std::chrono::seconds{5}));
+        TRY_LOCK(::cs_main, lock);
+        if (lock) {
+            waiter_got_lock.store(true, std::memory_order_release);
+        }
+    });
+
+    BlockValidationState state;
+    {
+        LOCK(::cs_main);
+        (void)TestBlockValidity(state, Params(), chainstate, block,
+                                chainstate.m_chain.Tip(),
+                                /*fCheckPOW=*/true, /*fCheckMerkleRoot=*/false);
+    }
+    waiter.join();
+    BOOST_CHECK(hook_saw_unlocked.load(std::memory_order_acquire));
+    BOOST_CHECK(waiter_got_lock.load(std::memory_order_acquire));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

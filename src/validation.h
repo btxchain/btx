@@ -46,6 +46,7 @@
 #include <versionbits.h>
 
 #include <atomic>
+#include <chrono>
 #include <deque>
 #include <map>
 #include <memory>
@@ -570,6 +571,38 @@ bool TestBlockValidity(BlockValidationState& state,
                        CBlockIndex* pindexPrev,
                        bool fCheckPOW = true,
                        bool fCheckMerkleRoot = true) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
+/**
+ * ExactReplay / Stage-3 CUDA wait lock-hygiene.
+ *
+ * ContextualCheckBlock drops cs_main for the whole recompute via
+ * CsMainScopedRelease. Archive GETDATA serve threads should wait here, then
+ * TRY_LOCK(cs_main) and send historical BLOCKs during that window:
+ *
+ *   if (WaitCsMainReleasedForMatMulRecompute(timeout)) {
+ *       TRY_LOCK(::cs_main, lock);
+ *       if (lock) { serve historical BLOCK bodies; }
+ *   }
+ *
+ * NotifyCsMainReleasedForMatMulRecompute is invoked by CsMainScopedRelease on
+ * construct (after LEAVE_CRITICAL_SECTION). Default is a no-op when nobody
+ * is waiting (atomic waiter count short-circuits the condition_variable).
+ * Wait returns true if cs_main is currently released for recompute, or
+ * becomes so before timeout.
+ */
+void NotifyCsMainReleasedForMatMulRecompute();
+[[nodiscard]] bool WaitCsMainReleasedForMatMulRecompute(std::chrono::milliseconds timeout);
+/** True while CsMainScopedRelease holds the ExactReplay unlock window. */
+[[nodiscard]] bool IsCsMainReleasedForMatMulRecompute();
+
+/**
+ * Test hook invoked inside CsMainScopedRelease after cs_main is dropped, on
+ * the ContextualCheckBlock ExactReplay / ENC-DR path. Return a verdict to
+ * skip the real CUDA/CPU recompute; return nullopt to run the real
+ * predicate. Tests must clear this (pass an empty function).
+ */
+void SetMatMulExactReplayUnderReleasedCsMainHookForTest(
+    std::function<std::optional<bool>()> hook);
 
 /** Check with the proof of work on each blockheader matches the value in nBits */
 bool HasValidProofOfWork(const std::vector<CBlockHeader>& headers, const Consensus::Params& consensusParams);

@@ -87,10 +87,12 @@
 #include <cassert>
 #include <chrono>
 #include <cinttypes>
+#include <condition_variable>
 #include <deque>
 #include <functional>
 #include <limits>
 #include <list>
+#include <mutex>
 #include <numeric>
 #include <optional>
 #include <ranges>
@@ -7541,6 +7543,12 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     // is enforced in ContextualCheckBlockHeader(); we wouldn't want to
     // re-enforce that rule here (at least until we make it impossible for
     // the clock to go backward).
+    //
+    // CheckBlock is context-free Phase-1 header PoW only. ExactReplay / ENC-DR
+    // CUDA lives in ContextualCheckBlock (AcceptBlock / TestBlockValidity) and
+    // MUST NOT start here: ConnectBlock holds cs_main for the whole UTXO
+    // connect. BLOCK_EXACT_REPLAY_VERIFIED / the ENC-DR memo already skipped
+    // duplicate ExactReplay at admission; never re-enter CUDA under this lock.
     if (!CheckBlock(block, state, params.GetConsensus(), !fJustCheck, !fJustCheck)) {
         if (state.GetResult() == BlockValidationResult::BLOCK_MUTATED) {
             // We don't write down blocks to disk if they may have been
@@ -12326,7 +12334,11 @@ void ChainstateManager::ReceivedBlockTransactions(const CBlock& block, CBlockInd
 
 static bool CheckBlockHeader(const CBlockHeader& block, BlockValidationState& state, const Consensus::Params& consensusParams, bool fCheckPOW = true)
 {
-    // Check proof of work matches claimed amount
+    // Check proof of work matches claimed amount.
+    // Intentionally Phase-1 only. Do not call CheckMatMulProofOfWork_V4EncDr /
+    // CheckMatMulProofOfWork_RC* from this context-free path: ConnectBlock and
+    // ProcessNewBlock hold cs_main across CheckBlock. ExactReplay is
+    // ContextualCheckBlock-only and releases cs_main for the CUDA wait.
     if (fCheckPOW) {
         if (consensusParams.fMatMulPOW) {
             if (!CheckMatMulProofOfWork_Phase1(block, consensusParams)) {
@@ -12911,6 +12923,23 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block,
 }
 
 namespace {
+std::mutex g_cs_main_matmul_recompute_mutex;
+std::condition_variable g_cs_main_matmul_recompute_cv;
+std::atomic<int> g_cs_main_matmul_recompute_waiters{0};
+std::atomic<bool> g_cs_main_released_for_matmul_recompute{false};
+std::function<std::optional<bool>()> g_matmul_exact_replay_under_released_cs_main_hook;
+
+[[nodiscard]] bool MatMulExactReplayUnderReleasedCsMainHookInstalled()
+{
+    return static_cast<bool>(g_matmul_exact_replay_under_released_cs_main_hook);
+}
+
+[[nodiscard]] std::optional<bool> RunMatMulExactReplayUnderReleasedCsMainHook()
+{
+    if (!g_matmul_exact_replay_under_released_cs_main_hook) return std::nullopt;
+    return g_matmul_exact_replay_under_released_cs_main_hook();
+}
+
 /** G.1: RAII scoped release of an already-held cs_main for the duration of an
  *  expensive, chainstate-INDEPENDENT computation, re-acquiring on scope exit
  *  (including on exception). Used to run the v4.4 ENC-DR reference recompute —
@@ -12923,14 +12952,66 @@ namespace {
  *  mutations are to the sketch cache and the phase2-budget counter, each under
  *  its OWN mutex), and only a pure bool crosses the release boundary. cs_main
  *  must be the innermost-held critical section at construction (it is, at the
- *  ENC-DR recompute point in ContextualCheckBlock). */
+ *  ENC-DR recompute point in ContextualCheckBlock).
+ *
+ *  On construct this notifies WaitCsMainReleasedForMatMulRecompute waiters so
+ *  an archive GETDATA serve thread can TRY_LOCK(cs_main) for the whole CUDA
+ *  wait. The released flag stays true until just before re-acquire. */
 struct CsMainScopedRelease {
-    CsMainScopedRelease() NO_THREAD_SAFETY_ANALYSIS { LEAVE_CRITICAL_SECTION(::cs_main); }
-    ~CsMainScopedRelease() NO_THREAD_SAFETY_ANALYSIS { ENTER_CRITICAL_SECTION(::cs_main); }
+    CsMainScopedRelease() NO_THREAD_SAFETY_ANALYSIS
+    {
+        LEAVE_CRITICAL_SECTION(::cs_main);
+        // Nested cs_main would make this window fake (LEAVE only drops one
+        // recursive level). DEBUG_LOCKORDER builds abort if that happens.
+        AssertLockNotHeld(::cs_main);
+        NotifyCsMainReleasedForMatMulRecompute();
+    }
+    ~CsMainScopedRelease() NO_THREAD_SAFETY_ANALYSIS
+    {
+        g_cs_main_released_for_matmul_recompute.store(false, std::memory_order_release);
+        ENTER_CRITICAL_SECTION(::cs_main);
+    }
     CsMainScopedRelease(const CsMainScopedRelease&) = delete;
     CsMainScopedRelease& operator=(const CsMainScopedRelease&) = delete;
 };
 } // namespace
+
+void NotifyCsMainReleasedForMatMulRecompute()
+{
+    g_cs_main_released_for_matmul_recompute.store(true, std::memory_order_release);
+    if (g_cs_main_matmul_recompute_waiters.load(std::memory_order_acquire) == 0) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_cs_main_matmul_recompute_mutex);
+    }
+    g_cs_main_matmul_recompute_cv.notify_all();
+}
+
+bool WaitCsMainReleasedForMatMulRecompute(std::chrono::milliseconds timeout)
+{
+    if (g_cs_main_released_for_matmul_recompute.load(std::memory_order_acquire)) {
+        return true;
+    }
+    g_cs_main_matmul_recompute_waiters.fetch_add(1, std::memory_order_acq_rel);
+    std::unique_lock<std::mutex> lock(g_cs_main_matmul_recompute_mutex);
+    const bool ok = g_cs_main_matmul_recompute_cv.wait_for(lock, timeout, [] {
+        return g_cs_main_released_for_matmul_recompute.load(std::memory_order_acquire);
+    });
+    g_cs_main_matmul_recompute_waiters.fetch_sub(1, std::memory_order_acq_rel);
+    return ok;
+}
+
+bool IsCsMainReleasedForMatMulRecompute()
+{
+    return g_cs_main_released_for_matmul_recompute.load(std::memory_order_acquire);
+}
+
+void SetMatMulExactReplayUnderReleasedCsMainHookForTest(
+    std::function<std::optional<bool>()> hook)
+{
+    g_matmul_exact_replay_under_released_cs_main_hook = std::move(hook);
+}
 
 bool ChainstateManager::IsMatMulRecomputeAssumeValidTrusted(const CBlockIndex* pindex_self, int nHeight) const
 {
@@ -13264,17 +13345,12 @@ static bool ContextualCheckBlock(const CBlock& block,
                                  const ChainstateManager& chainman,
                                  const CBlockIndex* pindexPrev,
                                  bool fCheckPOW = true,
-                                 // E: gates whether the ENC-DR recompute below is permitted to
-                                 // release cs_main (see CsMainScopedRelease). AcceptBlock (the hot
-                                 // P2P path) passes true so the O(W) recompute never serializes
-                                 // under the global lock. TestBlockValidity passes false: it holds
-                                 // a stack-local CCoinsViewCache/CBlockIndex and a
-                                 // pindexPrev==Tip() precondition ACROSS this call and then runs
-                                 // ConnectBlock against them, so a mid-call tip advance by a
-                                 // concurrent thread must not be possible. Holding cs_main across
-                                 // the recompute is harmless there (not the hot path, and its
-                                 // fCheckPOW=true callers are single-threaded).
-                                 bool may_release_cs_main = true,
+                                 // ExactReplay / Stage-3 always drop cs_main (CsMainScopedRelease)
+                                 // for the CUDA wait. Callers still pass this to document that
+                                 // dummy chainstate must not be live across the window.
+                                 // TestBlockValidity constructs CCoinsViewCache/CBlockIndex AFTER
+                                 // this call and re-asserts pindexPrev==Tip().
+                                 [[maybe_unused]] bool may_release_cs_main = true,
                                  MatMulRCAuthorityProvenance* rc_authority = nullptr) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
 {
     AssertLockHeld(::cs_main);
@@ -13328,13 +13404,8 @@ static bool ContextualCheckBlock(const CBlock& block,
                     }
                     matmul::v4::rc::RCStage3AttachmentStatus stage3_status;
                     std::string stage3_why;
-                    if (may_release_cs_main) {
+                    {
                         CsMainScopedRelease release_cs_main_for_stage3;
-                        stage3_status =
-                            matmul::v4::rc::VerifyRCStage3ConsensusAttachment(
-                                block, consensusParams, nHeight,
-                                ArithToUint256(*target), &stage3_why);
-                    } else {
                         stage3_status =
                             matmul::v4::rc::VerifyRCStage3ConsensusAttachment(
                                 block, consensusParams, nHeight,
@@ -13450,13 +13521,12 @@ static bool ContextualCheckBlock(const CBlock& block,
                         // GPU attestation (in-memory quorum or signed-frontier
                         // ancestry) is the only MatMul-valid lift. Tip-child
                         // persist is AcceptBlock only; ConnectTip still waits
-                        // for quorum/coverage. Capture tip-child under cs_main
-                        // — ActiveTip() after CsMainScopedRelease is a race.
+                        // for quorum/coverage. This branch runs with cs_main
+                        // held (no CUDA wait, so no CsMainScopedRelease).
                         const auto t0{SteadyClock::now()};
                         bool frontier_covers{false};
                         bool tip_child{false};
                         {
-                            LOCK(::cs_main);
                             const CBlockIndex* const rc_index{
                                 chainman.m_blockman.LookupBlockIndex(
                                     block.GetHash())};
@@ -13554,7 +13624,13 @@ static bool ContextualCheckBlock(const CBlock& block,
                         &winner_authority_provider)};
                 const CBlockIndex* exact_index{
                     chainman.m_blockman.LookupBlockIndex(block.GetHash())};
-                if (winner_reseal_authority) {
+                const bool test_hook_forces_release{
+                    MatMulExactReplayUnderReleasedCsMainHookInstalled()};
+                if (trusted_profile1 && !test_hook_forces_release) {
+                    // No CUDA on this path: keep cs_main so we do not wake
+                    // archive GETDATA waiters for a fake unlock window.
+                    encdr_ok = check_rc();
+                } else if (!test_hook_forces_release && winner_reseal_authority) {
                     // This consumes exactly one process-local epsilon-zero
                     // result produced by the strict winner reseal. It skips
                     // only the duplicate replay: the function continues to
@@ -13571,7 +13647,8 @@ static bool ContextualCheckBlock(const CBlock& block,
                         "block=%s height=%d provider=%s\n",
                         block.GetHash().ToString(), nHeight,
                         winner_authority_provider);
-                } else if (exact_index != nullptr &&
+                } else if (!test_hook_forces_release &&
+                    exact_index != nullptr &&
                     (exact_index->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) &&
                     // A durable bit must never outrank a recorded failure.
                     !(exact_index->nStatus & BLOCK_FAILED_MASK)) {
@@ -13586,7 +13663,11 @@ static bool ContextualCheckBlock(const CBlock& block,
                             MatMulRCAuthorityProvenance::
                                 LOCAL_EXACT_REPLAY;
                     }
-                } else if (const auto memo{LookupMatMulEncDrVerdict(block.GetHash())}) {
+                } else if (const auto memo{
+                               test_hook_forces_release
+                                   ? std::optional<bool>{}
+                                   : LookupMatMulEncDrVerdict(block.GetHash())};
+                           memo.has_value()) {
                     // WP-7 / C5: the async verify worker (net_processing's
                     // node::MatMulVerifyWorker) already ran the pure ENC-DR
                     // predicate for this header off-thread and memoized the
@@ -13608,43 +13689,33 @@ static bool ContextualCheckBlock(const CBlock& block,
                             : MatMulRCAuthorityProvenance::
                                   LOCAL_EXACT_REPLAY;
                     }
-                } else if (may_release_cs_main) {
+                } else {
+                    // Always drop cs_main for the CUDA / ExactReplay wait.
+                    // TestBlockValidity constructs its dummy view AFTER this
+                    // call so the unlock window cannot race CoinsTip().
+                    // Snapshot parent MTP under cs_main before the release:
+                    // GetMedianTimePast reads CBlockIndex timestamps.
+                    const std::optional<int64_t> parent_mtp =
+                        pindexPrev != nullptr
+                            ? std::optional<int64_t>{pindexPrev->GetMedianTimePast()}
+                            : std::nullopt;
                     CsMainScopedRelease release_cs_main_for_recompute;
                     // DO NOT add cs_main-requiring code in this scope: TSA still
                     // believes cs_main is held here (the RAII guard is
                     // NO_THREAD_SAFETY_ANALYSIS), so a guarded call would compile
                     // yet run unlocked. Keep it to the single pure recompute.
-                    // Parent MTP is a pure scalar from pindexPrev (already
-                    // resolved under cs_main above); Phase B seal-as-PoW needs
-                    // it for sibling-slot V3 seed re-derivation (LT-Q2).
-                    const std::optional<int64_t> parent_mtp =
-                        pindexPrev != nullptr
-                            ? std::optional<int64_t>{pindexPrev->GetMedianTimePast()}
-                            : std::nullopt;
-                    if (consensusParams.IsMatMulRCCoupledActive(nHeight)) {
-                        encdr_ok = CheckMatMulProofOfWork_RCCoupled(block, consensusParams, nHeight);
-                    } else if (consensusParams.IsMatMulRCActive(nHeight)) {
-                        encdr_ok = check_rc();
+                    if (const auto fake{
+                            RunMatMulExactReplayUnderReleasedCsMainHook()}) {
+                        encdr_ok = *fake;
                     } else {
-                        encdr_ok = CheckMatMulProofOfWork_V4EncDr(block, consensusParams, nHeight,
-                                                                  parent_mtp);
-                    }
-                } else {
-                    // E: TestBlockValidity path — keep cs_main held across the
-                    // recompute so the caller's Tip()-pinned viewNew/indexDummy
-                    // cannot be invalidated by a concurrent tip advance. The
-                    // verdict is identical; only the locking discipline differs.
-                    const std::optional<int64_t> parent_mtp =
-                        pindexPrev != nullptr
-                            ? std::optional<int64_t>{pindexPrev->GetMedianTimePast()}
-                            : std::nullopt;
-                    if (consensusParams.IsMatMulRCCoupledActive(nHeight)) {
-                        encdr_ok = CheckMatMulProofOfWork_RCCoupled(block, consensusParams, nHeight);
-                    } else if (consensusParams.IsMatMulRCActive(nHeight)) {
-                        encdr_ok = check_rc();
-                    } else {
-                        encdr_ok = CheckMatMulProofOfWork_V4EncDr(block, consensusParams, nHeight,
-                                                                  parent_mtp);
+                        if (consensusParams.IsMatMulRCCoupledActive(nHeight)) {
+                            encdr_ok = CheckMatMulProofOfWork_RCCoupled(block, consensusParams, nHeight);
+                        } else if (consensusParams.IsMatMulRCActive(nHeight)) {
+                            encdr_ok = check_rc();
+                        } else {
+                            encdr_ok = CheckMatMulProofOfWork_V4EncDr(block, consensusParams, nHeight,
+                                                                      parent_mtp);
+                        }
                     }
                 }
                 if (rc_local_execution_failure) {
@@ -14264,12 +14335,15 @@ bool TestBlockValidity(BlockValidationState& state,
     if (pindexPrev->nHeight == std::numeric_limits<int>::max()) {
         return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "bad-blk-height-overflow", "block height overflow");
     }
-    CCoinsViewCache viewNew(&chainstate.CoinsTip());
-    uint256 block_hash(block.GetHash());
-    CBlockIndex indexDummy(block);
-    indexDummy.pprev = pindexPrev;
-    indexDummy.nHeight = pindexPrev->nHeight + 1;
-    indexDummy.phashBlock = &block_hash;
+
+    // Snapshot pindexPrev identity before any ExactReplay unlock window.
+    // Dummy CCoinsViewCache / CBlockIndex are constructed AFTER ContextualCheckBlock
+    // so they cannot race a concurrent tip advance while cs_main is released
+    // for the CUDA wait. fCheckPOW=false never ExactReplays; the split is
+    // still applied so ConnectBlock always sees a post-window tip.
+    const uint256 prev_hash{pindexPrev->GetBlockHash()};
+    const int prev_height{pindexPrev->nHeight};
+    const int64_t prev_mtp{pindexPrev->GetMedianTimePast()};
 
     // NOTE: CheckBlockHeader is called by CheckBlock
     if (!ContextualCheckBlockHeader(block, state, chainstate.m_blockman, chainstate.m_chainman, pindexPrev, fCheckPOW)) {
@@ -14280,14 +14354,39 @@ bool TestBlockValidity(BlockValidationState& state,
         LogError("%s: Consensus::CheckBlock: %s\n", __func__, state.ToString());
         return false;
     }
-    // E: pass may_release_cs_main=false. TestBlockValidity holds viewNew /
-    // indexDummy and the pindexPrev==Tip() precondition across this call and
-    // ConnectBlock below, so ContextualCheckBlock must NOT release cs_main
-    // mid-call even on the fCheckPOW=true ENC-DR recompute branch.
-    if (!ContextualCheckBlock(block, state, chainstate.m_chainman, pindexPrev, fCheckPOW, /*may_release_cs_main=*/false)) {
+
+    // ExactReplay (if any) copies the block and may drop cs_main for the
+    // whole CUDA wait. Parent MTP is captured inside ContextualCheckBlock
+    // before CsMainScopedRelease from the live pindexPrev snapshot above.
+    const CBlock* block_for_contextual = &block;
+    std::optional<CBlock> block_copy;
+    if (fCheckPOW) {
+        block_copy.emplace(block);
+        block_for_contextual = &*block_copy;
+    }
+    if (!ContextualCheckBlock(*block_for_contextual, state, chainstate.m_chainman, pindexPrev, fCheckPOW,
+                              /*may_release_cs_main=*/true)) {
         LogError("%s: Consensus::ContextualCheckBlock: %s\n", __func__, state.ToString());
         return false;
     }
+
+    if (pindexPrev != chainstate.m_chain.Tip() ||
+        pindexPrev->GetBlockHash() != prev_hash ||
+        pindexPrev->nHeight != prev_height ||
+        pindexPrev->GetMedianTimePast() != prev_mtp) {
+        LogDebug(BCLog::VALIDATION, "%s: pindexPrev moved during ExactReplay unlock window (height=%d, hash=%s)\n",
+                 __func__, pindexPrev->nHeight, pindexPrev->GetBlockHash().GetHex());
+        return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "bad-prevblk-not-tip",
+            "pindexPrev is not the current chain tip");
+    }
+
+    CCoinsViewCache viewNew(&chainstate.CoinsTip());
+    uint256 block_hash(block.GetHash());
+    CBlockIndex indexDummy(block);
+    indexDummy.pprev = pindexPrev;
+    indexDummy.nHeight = pindexPrev->nHeight + 1;
+    indexDummy.phashBlock = &block_hash;
+
     if (!chainstate.ConnectBlock(block, state, &indexDummy, viewNew, true)) {
         return false;
     }

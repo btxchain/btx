@@ -1221,6 +1221,18 @@ public:
     */
     virtual bool SendMessages(CNode* pnode) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex) = 0;
 
+    /**
+     * Serve queued BLOCK GETDATA for ARCHIVE/MIRROR peers without
+     * g_msgproc_mutex so ExactReplay on msghand cannot stall catch-up.
+     * @return true if cs_main was busy (caller should wait, not spin).
+     */
+    virtual bool ServeArchiveBlockGetData(std::atomic<bool>& interrupt)
+        EXCLUSIVE_LOCKS_REQUIRED(!g_msgproc_mutex)
+    {
+        (void)interrupt;
+        return false;
+    }
+
 
 protected:
     /**
@@ -1325,11 +1337,24 @@ public:
     bool GetUseAddrmanOutgoing() const { return m_use_addrman_outgoing; };
     void SetGetDataServePending(bool pending)
     {
-        m_getdata_serve_pending.store(pending, std::memory_order_relaxed);
+        const bool was{m_getdata_serve_pending.exchange(pending, std::memory_order_relaxed)};
+        if (pending && !was) {
+            m_archive_serve_cv.notify_all();
+        }
     }
     bool GetDataServePending() const
     {
         return m_getdata_serve_pending.load(std::memory_order_relaxed);
+    }
+    [[nodiscard]] bool ArchiveBlockServeRunning() const
+    {
+        return m_archive_block_serve_running.load(std::memory_order_relaxed);
+    }
+    /** Test-only: pretend the ArchiveBlockServe worker is running so
+     *  msghand skips archive block GETDATA without starting a thread. */
+    void SetArchiveBlockServeRunningForTest(bool running)
+    {
+        m_archive_block_serve_running.store(running, std::memory_order_relaxed);
     }
     void SetTrustedMirrorCatchUp(bool catch_up)
     {
@@ -1521,6 +1546,7 @@ private:
     void ProcessAddrFetch() EXCLUSIVE_LOCKS_REQUIRED(!m_addr_fetches_mutex, !m_unused_i2p_sessions_mutex);
     void ThreadOpenConnections(std::vector<std::string> connect, Span<const std::string> seed_nodes) EXCLUSIVE_LOCKS_REQUIRED(!m_addr_fetches_mutex, !m_added_nodes_mutex, !m_nodes_mutex, !m_unused_i2p_sessions_mutex, !m_reconnections_mutex);
     void ThreadMessageHandler() EXCLUSIVE_LOCKS_REQUIRED(!mutexMsgProc);
+    void ThreadArchiveBlockServe();
     void ThreadI2PAcceptIncoming();
     void AcceptConnection(const ListenSocket& hListenSocket);
 
@@ -1797,6 +1823,10 @@ private:
     std::thread threadOpenAddedConnections;
     std::thread threadOpenConnections;
     std::thread threadMessageHandler;
+    std::thread threadArchiveBlockServe;
+    Mutex m_archive_serve_mutex;
+    std::condition_variable m_archive_serve_cv;
+    std::atomic<bool> m_archive_block_serve_running{false};
     std::thread threadI2PAcceptIncoming;
 
     /** flag for deciding to connect to an extra outbound peer,

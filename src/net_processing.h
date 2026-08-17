@@ -242,6 +242,13 @@ public:
     virtual void StartScheduledTasks(CScheduler& scheduler) = 0;
 
     /**
+     * Serve queued BLOCK GETDATA for ARCHIVE/MIRROR peers without
+     * g_msgproc_mutex so ExactReplay on msghand cannot stall catch-up.
+     * @return true if cs_main was busy.
+     */
+    bool ServeArchiveBlockGetData(std::atomic<bool>& interrupt) override = 0;
+
+    /**
      * Join the MatMul verify worker while the validation scheduler is still
      * running. In-flight completions call ProcessBlockSync / ActivateBestChain,
      * which drain the scheduler queue. Stopping the scheduler first deadlocks

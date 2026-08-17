@@ -3640,6 +3640,39 @@ void CConnman::ThreadMessageHandler()
     }
 }
 
+void CConnman::ThreadArchiveBlockServe()
+{
+    AssertLockNotHeld(NetEventsInterface::g_msgproc_mutex);
+
+    while (!flagInterruptMsgProc) {
+        bool cs_main_busy{false};
+        if (m_msgproc) {
+            cs_main_busy = m_msgproc->ServeArchiveBlockGetData(flagInterruptMsgProc);
+        }
+        if (flagInterruptMsgProc) break;
+        if (cs_main_busy) {
+            // ServeArchiveBlockGetData already waited on
+            // WaitCsMainReleasedForMatMulRecompute (ExactReplay notify, or
+            // 250ms ConnectTip poll). Retry immediately.
+            continue;
+        }
+
+        WAIT_LOCK(m_archive_serve_mutex, lock);
+        if (flagInterruptMsgProc) break;
+        if (GetDataServePending()) {
+            m_archive_serve_cv.wait_for(
+                lock, node::matmul_trusted::ARCHIVE_BLOCK_SERVE_WAIT_PENDING,
+                [this] { return flagInterruptMsgProc.load(); });
+        } else {
+            m_archive_serve_cv.wait_for(
+                lock, node::matmul_trusted::ARCHIVE_BLOCK_SERVE_WAIT_IDLE,
+                [this] {
+                    return flagInterruptMsgProc.load() || GetDataServePending();
+                });
+        }
+    }
+}
+
 void CConnman::ThreadI2PAcceptIncoming()
 {
     static constexpr auto err_wait_begin = 1s;
@@ -3974,6 +4007,16 @@ bool CConnman::Start(CScheduler& scheduler, const Options& connOptions)
     // Process messages
     threadMessageHandler = std::thread(&util::TraceThread, "msghand", [this] { ThreadMessageHandler(); });
 
+    // Historical BLOCK replies for ARCHIVE/MIRROR must not wait for
+    // ExactReplay on msghand (live nyc1 12–15s/block). Only the local
+    // signer starts this worker; msghand remains the fallback.
+    if (node::matmul_trusted::HasLocalSigner()) {
+        m_archive_block_serve_running.store(true, std::memory_order_relaxed);
+        threadArchiveBlockServe = std::thread(&util::TraceThread, "archserve", [this] {
+            ThreadArchiveBlockServe();
+        });
+    }
+
     if (m_i2p_sam_session) {
         threadI2PAcceptIncoming =
             std::thread(&util::TraceThread, "i2paccept", [this] { ThreadI2PAcceptIncoming(); });
@@ -4013,6 +4056,7 @@ void CConnman::Interrupt()
         flagInterruptMsgProc = true;
     }
     condMsgProc.notify_all();
+    m_archive_serve_cv.notify_all();
 
     interruptNet();
     g_socks5_interrupt();
@@ -4035,6 +4079,10 @@ void CConnman::StopThreads()
     if (threadI2PAcceptIncoming.joinable()) {
         threadI2PAcceptIncoming.join();
     }
+    if (threadArchiveBlockServe.joinable()) {
+        threadArchiveBlockServe.join();
+    }
+    m_archive_block_serve_running.store(false, std::memory_order_relaxed);
     if (threadMessageHandler.joinable())
         threadMessageHandler.join();
     if (threadOpenConnections.joinable())

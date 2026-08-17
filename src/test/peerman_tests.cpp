@@ -54,6 +54,19 @@ static bool HasQueuedMessageType(CNode& node, const std::string& msg_type)
                        });
 }
 
+static size_t CountQueuedMessageType(CNode& node, const std::string& msg_type)
+{
+    LOCK(node.cs_vSend);
+    if (node.vSendMsg.empty()) {
+        const auto& [bytes, _more, transport_type] =
+            node.m_transport->GetBytesToSend(false);
+        return (!bytes.empty() && transport_type == msg_type) ? 1 : 0;
+    }
+    return static_cast<size_t>(std::count_if(
+        node.vSendMsg.begin(), node.vSendMsg.end(),
+        [&](const CSerializedNetMsg& msg) { return msg.m_type == msg_type; }));
+}
+
 
 // Shared RegTestingSetup: earlier cases (catch-up, have_data) leave
 // headers-only forks in m_block_index. MatMulTreatAsIbdForBudget is
@@ -1211,8 +1224,11 @@ BOOST_AUTO_TEST_CASE(trusted_mirror_divergent_tip_follows_authority_headers)
     const ServiceFlags authority_services{ServiceFlags(
         NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS |
         NODE_MATMUL_ATTESTATION_ARCHIVE)};
+    // Outbound sibling archive/mirror: trusted mirrors drop HEADERS/BLOCK
+    // from ordinary miners (GPU or our outbound ARCHIVE/MIRROR only).
     const ServiceFlags ordinary_services{ServiceFlags(
-        NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS)};
+        NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS |
+        NODE_MATMUL_ATTESTATION_ARCHIVE | NODE_MATMUL_TRUSTED_MIRROR)};
 
     CNode authority{/*id=*/61,
                     /*sock=*/nullptr,
@@ -2761,7 +2777,7 @@ BOOST_AUTO_TEST_CASE(unrequested_followed_tip_child_persists_without_gpu)
     CNode peer{/*id=*/97, /*sock=*/nullptr, CAddress{},
                /*nKeyedNetGroupIn=*/0, /*nLocalHostNonceIn=*/0,
                CAddress{}, /*addrNameIn=*/"unreq-followed-tip-child",
-               ConnectionType::INBOUND,
+               ConnectionType::MANUAL,
                /*inbound_onion=*/false, /*network_key=*/0};
     connman.Handshake(peer, /*successfully_connected=*/true, services,
                       services, PROTOCOL_VERSION, /*relay_txs=*/true);
@@ -3595,6 +3611,7 @@ BOOST_AUTO_TEST_CASE(catchup_grandchild_persists_on_trusted_mirror)
         uint256::FromHex(std::string(64, '2')).value();
     config.trusted_signers = {signer.GetPubKey()};
     config.threshold = 1;
+    config.local_signer = signer;
     std::string error;
     BOOST_REQUIRE(node::matmul_trusted::Configure(
         std::move(config), /*trusted_mirror=*/true, /*serve=*/false,
@@ -3672,9 +3689,18 @@ BOOST_AUTO_TEST_CASE(catchup_grandchild_persists_on_trusted_mirror)
     (void)connman.ProcessMessagesOnce(peer);
     connman.FlushSendBuffer(peer);
 
+    // Admission HEADER_ONLY-skips unattested catch-up suffixes. Attest first
+    // so the grandchild persists without ExactReplay (GPU is the attestor).
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
+                      child.GetHash(), tip->nHeight + 1) ==
+                  matmul::trusted::AddResult::Accepted);
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
+                      grandchild_hash, tip->nHeight + 2) ==
+                  matmul::trusted::AddResult::Accepted);
+
     {
         DebugLogHelper no_header_only(
-            "skipped ExactReplay GPU (competing near-tip P2P sibling",
+            "no GPU attestation; body not connected; GETMMATTEST then re-getdata",
             [](const std::string* line) {
                 if (line != nullptr) {
                     throw std::runtime_error(
@@ -4214,7 +4240,7 @@ BOOST_AUTO_TEST_CASE(encdr_competing_sibling_does_not_steal_miner_gpu)
     (void)connman.ProcessMessagesOnce(peer);
 
     {
-        ASSERT_DEBUG_LOG("skipped ExactReplay GPU (competing near-tip P2P sibling");
+        ASSERT_DEBUG_LOG("no GPU attestation; body not connected; GETMMATTEST then re-getdata");
         BOOST_REQUIRE(connman.ReceiveMsgFrom(
             peer, NetMsg::Make(NetMsgType::BLOCK, TX_WITH_WITNESS(competing))));
         peer.fPauseSend = false;
@@ -5331,6 +5357,154 @@ BOOST_AUTO_TEST_CASE(getmmattest_lost_twin_complete_bodies_requests_fork_child)
 
     BOOST_CHECK(peerman.SendMessages(&archive));
     BOOST_CHECK_GE(CountQueuedGetMmAttestForHash(archive, competing_hash), 1);
+}
+
+BOOST_AUTO_TEST_CASE(archive_block_serve_helpers_and_gates_unchanged)
+{
+    using node::matmul_trusted::MsghandPreferArchiveLiveGetData;
+    using node::matmul_trusted::MsghandSkipArchiveBlockGetData;
+    using node::matmul_trusted::MsghandPeerIsArchiveServeTarget;
+    using node::matmul_trusted::SignedFrontierPeerHadCatchUpBodiesAtConnect;
+    using node::matmul_trusted::TrustedMirrorGpuHandshakeTimeout;
+
+    BOOST_CHECK(MsghandPeerIsArchiveServeTarget(true, true));
+    BOOST_CHECK(!MsghandPeerIsArchiveServeTarget(true, false));
+    BOOST_CHECK(MsghandPreferArchiveLiveGetData(true, true));
+    BOOST_CHECK(!MsghandPreferArchiveLiveGetData(true, false));
+    BOOST_CHECK(!MsghandSkipArchiveBlockGetData(
+        /*local_signer=*/true, /*worker=*/false, /*archive=*/true));
+    BOOST_CHECK(MsghandSkipArchiveBlockGetData(true, true, true));
+    BOOST_CHECK(!MsghandSkipArchiveBlockGetData(true, true, /*archive=*/false));
+    BOOST_CHECK(!MsghandSkipArchiveBlockGetData(
+        /*local_signer=*/false, true, true));
+
+    // (c) behind-sibling starting_height gate: VERSION height must exceed tip.
+    BOOST_CHECK(!SignedFrontierPeerHadCatchUpBodiesAtConnect(
+        /*starting_height=*/190767, /*tip_height=*/190816));
+    BOOST_CHECK(SignedFrontierPeerHadCatchUpBodiesAtConnect(190858, 190781));
+    BOOST_CHECK(!SignedFrontierPeerHadCatchUpBodiesAtConnect(190781, 190781));
+
+    // (d) handshake-dead timeouts: 15s never-received, 180s incomplete-with-recv.
+    BOOST_CHECK_EQUAL(
+        TrustedMirrorGpuHandshakeTimeout(std::chrono::seconds{60}, true,
+                                         /*handshake_incomplete=*/true,
+                                         /*never_received=*/true)
+            .count(),
+        15);
+    BOOST_CHECK_EQUAL(
+        TrustedMirrorGpuHandshakeTimeout(std::chrono::seconds{60}, true,
+                                         /*handshake_incomplete=*/true,
+                                         /*never_received=*/false)
+            .count(),
+        180);
+}
+
+BOOST_AUTO_TEST_CASE(archive_getdata_worker_serves_block_without_double_send)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+
+    node::matmul_trusted::ResetForTest();
+    ResetSharedPeermanFixture(m_node);
+    CKey signer;
+    signer.MakeNewKey(/*fCompressed=*/true);
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256::FromHex(std::string(64, '1')).value();
+    config.replay_authority_context =
+        uint256::FromHex(std::string(64, '2')).value();
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    config.local_signer = signer;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/false, /*serve=*/false,
+        std::chrono::milliseconds{50}, error));
+    BOOST_REQUIRE(node::matmul_trusted::HasLocalSigner());
+    struct SignerReset {
+        ~SignerReset() { node::matmul_trusted::ResetForTest(); }
+    } signer_reset;
+
+    ChainstateManager& chainman{*Assert(m_node.chainman)};
+    PeerManager& peerman{*Assert(m_node.peerman)};
+    ConnmanTestMsg& connman{static_cast<ConnmanTestMsg&>(*m_node.connman)};
+    const CBlockIndex* tip{
+        WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip())};
+    BOOST_REQUIRE(tip != nullptr);
+    BOOST_REQUIRE(tip->nStatus & BLOCK_HAVE_DATA);
+    const uint256 tip_hash{tip->GetBlockHash()};
+
+    const ServiceFlags miner_services{ServiceFlags(
+        NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS)};
+    const ServiceFlags archive_services{ServiceFlags(
+        NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_ATTESTATION_ARCHIVE |
+        NODE_MATMUL_TRUSTED_MIRROR)};
+    CNode miner{/*id=*/501, /*sock=*/nullptr, CAddress{},
+                /*nKeyedNetGroupIn=*/0, /*nLocalHostNonceIn=*/0,
+                CAddress{}, /*addrNameIn=*/"archive-serve-miner",
+                ConnectionType::INBOUND,
+                /*inbound_onion=*/false, /*network_key=*/0};
+    CNode archive{/*id=*/502, /*sock=*/nullptr, CAddress{},
+                  /*nKeyedNetGroupIn=*/1, /*nLocalHostNonceIn=*/0,
+                  CAddress{}, /*addrNameIn=*/"archive-serve-archive",
+                  ConnectionType::INBOUND,
+                  /*inbound_onion=*/false, /*network_key=*/0};
+    connman.Handshake(miner, /*successfully_connected=*/true, miner_services,
+                      miner_services, PROTOCOL_VERSION, /*relay_txs=*/true);
+    connman.Handshake(archive, /*successfully_connected=*/true,
+                      archive_services, archive_services, PROTOCOL_VERSION,
+                      /*relay_txs=*/true);
+    connman.AddTestNode(miner);
+    connman.AddTestNode(archive);
+    connman.FlushSendBuffer(miner);
+    connman.FlushSendBuffer(archive);
+    struct FinalizePeers {
+        PeerManager& peerman;
+        ConnmanTestMsg& connman;
+        CNode& miner;
+        CNode& archive;
+        ~FinalizePeers()
+        {
+            peerman.FinalizeNode(miner);
+            peerman.FinalizeNode(archive);
+            connman.RemoveTestNode(miner);
+            connman.RemoveTestNode(archive);
+            connman.SetArchiveBlockServeRunningForTest(false);
+        }
+    } finalize{peerman, connman, miner, archive};
+
+    std::vector<CInv> inv{{MSG_BLOCK | MSG_WITNESS_FLAG, tip_hash}};
+
+    // Fallback: worker not running, msghand still serves archive GETDATA.
+    BOOST_REQUIRE(connman.ReceiveMsgFrom(
+        archive, NetMsg::Make(NetMsgType::GETDATA, inv)));
+    archive.fPauseSend = false;
+    (void)connman.ProcessMessagesOnce(archive);
+    BOOST_CHECK_EQUAL(CountQueuedMessageType(archive, NetMsgType::BLOCK), 1U);
+    connman.FlushSendBuffer(archive);
+
+    // Worker running: msghand leaves archive BLOCK queued; miner still 1-wide.
+    connman.SetArchiveBlockServeRunningForTest(true);
+    BOOST_REQUIRE(connman.ReceiveMsgFrom(
+        archive, NetMsg::Make(NetMsgType::GETDATA, inv)));
+    archive.fPauseSend = false;
+    (void)connman.ProcessMessagesOnce(archive);
+    BOOST_CHECK_EQUAL(CountQueuedMessageType(archive, NetMsgType::BLOCK), 0U);
+
+    BOOST_REQUIRE(connman.ReceiveMsgFrom(
+        miner, NetMsg::Make(NetMsgType::GETDATA, inv)));
+    miner.fPauseSend = false;
+    (void)connman.ProcessMessagesOnce(miner);
+    BOOST_CHECK_EQUAL(CountQueuedMessageType(miner, NetMsgType::BLOCK), 1U);
+
+    std::atomic<bool> interrupt{false};
+    BOOST_CHECK(!peerman.ServeArchiveBlockGetData(interrupt));
+    BOOST_CHECK_EQUAL(CountQueuedMessageType(archive, NetMsgType::BLOCK), 1U);
+    BOOST_CHECK_EQUAL(CountQueuedMessageType(miner, NetMsgType::BLOCK), 1U);
+
+    // Dual path must not double-send.
+    (void)connman.ProcessMessagesOnce(archive);
+    BOOST_CHECK(!peerman.ServeArchiveBlockGetData(interrupt));
+    BOOST_CHECK_EQUAL(CountQueuedMessageType(archive, NetMsgType::BLOCK), 1U);
+    BOOST_CHECK_EQUAL(CountQueuedMessageType(miner, NetMsgType::BLOCK), 1U);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

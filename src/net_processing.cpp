@@ -77,6 +77,7 @@
 #include <set>
 #include <string_view>
 #include <thread>
+#include <vector>
 #include <typeinfo>
 #include <utility>
 
@@ -1198,6 +1199,8 @@ public:
         EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_most_recent_block_mutex, !m_headers_presync_mutex, g_msgproc_mutex, !m_tx_download_mutex);
     bool SendMessages(CNode* pto) override
         EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_most_recent_block_mutex, g_msgproc_mutex, !m_tx_download_mutex);
+    bool ServeArchiveBlockGetData(std::atomic<bool>& interrupt) override
+        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_most_recent_block_mutex, !NetEventsInterface::g_msgproc_mutex);
 
     /** Implement PeerManager */
     void StartScheduledTasks(CScheduler& scheduler) override;
@@ -2536,8 +2539,13 @@ private:
      */
     bool BlockRequestAllowed(const CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     bool AlreadyHaveBlock(const uint256& block_hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
-    void ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& inv)
-        EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex, !m_most_recent_block_mutex);
+    enum class GetBlockDataOutcome {
+        Done,
+        CsMainBusy,
+    };
+    GetBlockDataOutcome ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& inv,
+                                            bool try_cs_main, bool hold_g_msgproc)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_most_recent_block_mutex);
 
     /**
      * Validation logic for compact filters request handling.
@@ -6898,7 +6906,8 @@ std::optional<uint256> PeerManagerImpl::ExpireInboundBlockChunks(
     return hash;
 }
 
-void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& inv)
+PeerManagerImpl::GetBlockDataOutcome PeerManagerImpl::ProcessGetBlockData(
+    CNode& pfrom, Peer& peer, const CInv& inv, bool try_cs_main, bool hold_g_msgproc)
 {
     std::shared_ptr<const CBlock> a_recent_block;
     std::shared_ptr<const CBlockHeaderAndShortTxIDs> a_recent_compact_block;
@@ -6913,7 +6922,8 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
 
     bool need_activate_chain = false;
     {
-        LOCK(cs_main);
+        UniqueLock lock(MaybeCheckNotHeld(cs_main), "cs_main", __FILE__, __LINE__, try_cs_main);
+        if (!lock) return GetBlockDataOutcome::CsMainBusy;
         const CBlockIndex* pindex = m_chainman.m_blockman.LookupBlockIndex(inv.hash);
         if (pindex) {
             if (pindex->HaveNumChainTxs() && !pindex->IsValid(BLOCK_VALID_SCRIPTS) &&
@@ -6929,7 +6939,9 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
     } // release cs_main before calling ActivateBestChain
     // Local signer: do not ExactReplay on the GETDATA path (live ~46s/body
     // while b-mmverify held cs_main). Serve HAVE_DATA or NOTFOUND.
-    if (need_activate_chain && !node::matmul_trusted::HasLocalSigner()) {
+    // The archive worker never ActivateBestChain (ExactReplay belongs on
+    // validation / msghand, not the GETDATA serve thread).
+    if (need_activate_chain && !node::matmul_trusted::HasLocalSigner() && hold_g_msgproc) {
         BlockValidationState state;
         if (!m_chainman.ActiveChainstate().ActivateBestChain(state, a_recent_block)) {
             LogDebug(BCLog::NET, "failed to activate chain (%s)\n", state.ToString());
@@ -6945,16 +6957,17 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
         MakeAndPushMessage(pfrom, NetMsgType::NOTFOUND, vNotFound);
     };
     {
-        LOCK(cs_main);
+        UniqueLock lock(MaybeCheckNotHeld(cs_main), "cs_main", __FILE__, __LINE__, try_cs_main);
+        if (!lock) return GetBlockDataOutcome::CsMainBusy;
         pindex = m_chainman.m_blockman.LookupBlockIndex(inv.hash);
         if (!pindex) {
             send_block_notfound();
-            return;
+            return GetBlockDataOutcome::Done;
         }
         if (!BlockRequestAllowed(pindex)) {
             LogDebug(BCLog::NET, "%s: ignoring request from peer=%i for old block that isn't in the main chain\n", __func__, pfrom.GetId());
             send_block_notfound();
-            return;
+            return GetBlockDataOutcome::Done;
         }
         // disconnect node in case we have reached the outbound limit for serving historical blocks
         if (m_connman.OutboundTargetReached(true) &&
@@ -6964,7 +6977,7 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
             LogDebug(BCLog::NET, "historical block serving limit reached, %s\n", pfrom.DisconnectMsg(fLogIPs));
             send_block_notfound();
             pfrom.fDisconnect = true;
-            return;
+            return GetBlockDataOutcome::Done;
         }
         tip = m_chainman.ActiveChain().Tip();
         // Avoid leaking prune-height by never sending blocks below the NODE_NETWORK_LIMITED threshold
@@ -6975,13 +6988,13 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
             //disconnect node and prevent it from stalling (would otherwise wait for the missing block)
             send_block_notfound();
             pfrom.fDisconnect = true;
-            return;
+            return GetBlockDataOutcome::Done;
         }
         // Pruned nodes may have deleted the block, so check whether
         // it's available before trying to send.
         if (!(pindex->nStatus & BLOCK_HAVE_DATA)) {
             send_block_notfound();
-            return;
+            return GetBlockDataOutcome::Done;
         }
         can_direct_fetch = CanDirectFetch();
         block_pos = pindex->GetBlockPos();
@@ -7040,7 +7053,8 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
     // block that arrives right after. Only fires for plain block downloads
     // (IsMsgBlk/IsMsgWitnessBlk); filtered/merkle requests are not the profile-2
     // block-download path. All anti-amplification gating is inside ServeMatMulCarrier.
-    if ((inv.IsMsgBlk() || inv.IsMsgWitnessBlk())) {
+    // The archive worker does not hold g_msgproc_mutex (token buckets); skip.
+    if (hold_g_msgproc && (inv.IsMsgBlk() || inv.IsMsgWitnessBlk())) {
         (void)ServeMatMulCarrier(pfrom, peer, pindex->GetBlockHash(), /*is_reply=*/false);
     }
 
@@ -7059,16 +7073,16 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
             }
             send_block_notfound();
             pfrom.fDisconnect = true;
-            return;
+            return GetBlockDataOutcome::Done;
         }
         if (block_data.size() > max_sendable) {
             const size_t block_size{block_data.size()};
-            if (SendChunkedBlock(pfrom, peer, pindex->GetBlockHash(),
+            if (hold_g_msgproc && SendChunkedBlock(pfrom, peer, pindex->GetBlockHash(),
                                  std::move(block_data))) {
-                return;
+                return GetBlockDataOutcome::Done;
             }
             send_oversize_notfound(block_size);
-            return;
+            return GetBlockDataOutcome::Done;
         }
         MakeAndPushMessage(pfrom, NetMsgType::BLOCK, Span{block_data});
         // Don't set pblock as we've sent the block
@@ -7083,7 +7097,7 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
             }
             send_block_notfound();
             pfrom.fDisconnect = true;
-            return;
+            return GetBlockDataOutcome::Done;
         }
         pblock = pblockRead;
     }
@@ -7093,22 +7107,22 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
             // having a sub-24MB bound, so V1 peers pay nothing new.
             if (max_sendable < MAX_BLOCK_MESSAGE_LENGTH &&
                 ::GetSerializeSize(TX_NO_WITNESS_WITH_SHIELDED(*pblock)) > max_sendable) {
-                if (send_chunked_serialized(
+                if (hold_g_msgproc && send_chunked_serialized(
                         TX_NO_WITNESS_WITH_SHIELDED(*pblock))) {
-                    return;
+                    return GetBlockDataOutcome::Done;
                 }
                 send_oversize_notfound(::GetSerializeSize(TX_NO_WITNESS_WITH_SHIELDED(*pblock)));
-                return;
+                return GetBlockDataOutcome::Done;
             }
             MakeAndPushMessage(pfrom, NetMsgType::BLOCK, TX_NO_WITNESS_WITH_SHIELDED(*pblock));
         } else if (inv.IsMsgWitnessBlk()) {
             if (max_sendable < MAX_BLOCK_MESSAGE_LENGTH &&
                 ::GetSerializeSize(TX_WITH_WITNESS(*pblock)) > max_sendable) {
-                if (send_chunked_serialized(TX_WITH_WITNESS(*pblock))) {
-                    return;
+                if (hold_g_msgproc && send_chunked_serialized(TX_WITH_WITNESS(*pblock))) {
+                    return GetBlockDataOutcome::Done;
                 }
                 send_oversize_notfound(::GetSerializeSize(TX_WITH_WITNESS(*pblock)));
-                return;
+                return GetBlockDataOutcome::Done;
             }
             MakeAndPushMessage(pfrom, NetMsgType::BLOCK, TX_WITH_WITNESS(*pblock));
         } else if (inv.IsMsgFilteredBlk() || inv.IsMsgFilteredWitnessBlk()) {
@@ -7145,7 +7159,8 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
             // they won't have a useful mempool to match against a compact block,
             // and we don't feel like constructing the object for them, so
             // instead we respond with the full, non-compact block.
-            if (!requires_product_payload &&
+            // Worker path: m_rng is g_msgproc_mutex-guarded; send full BLOCK.
+            if (hold_g_msgproc && !requires_product_payload &&
                 can_direct_fetch &&
                 pindex->nHeight >= tip->nHeight - MAX_CMPCTBLOCK_DEPTH) {
                 if (a_recent_compact_block && a_recent_compact_block->header.GetHash() == pindex->GetBlockHash()) {
@@ -7165,14 +7180,14 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
                     ::GetSerializeSize(TX_WITH_WITNESS(*pblock)) <= max_sendable};
                 if (full_block_fits) {
                     MakeAndPushMessage(pfrom, NetMsgType::BLOCK, TX_WITH_WITNESS(*pblock));
-                } else if (send_chunked_serialized(TX_WITH_WITNESS(*pblock))) {
-                    return;
-                } else if (!requires_product_payload) {
+                } else if (hold_g_msgproc && send_chunked_serialized(TX_WITH_WITNESS(*pblock))) {
+                    return GetBlockDataOutcome::Done;
+                } else if (hold_g_msgproc && !requires_product_payload) {
                     CBlockHeaderAndShortTxIDs cmpctblock{*pblock, m_rng.rand64()};
                     MakeAndPushMessage(pfrom, NetMsgType::CMPCTBLOCK, cmpctblock);
                 } else {
                     send_oversize_notfound(::GetSerializeSize(TX_WITH_WITNESS(*pblock)));
-                    return;
+                    return GetBlockDataOutcome::Done;
                 }
             }
         }
@@ -7191,6 +7206,7 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
             peer.m_continuation_block.SetNull();
         }
     }
+    return GetBlockDataOutcome::Done;
 }
 
 CTransactionRef PeerManagerImpl::FindTxForGetData(const Peer::TxRelay& tx_relay, const GenTxid& gtxid)
@@ -7272,20 +7288,29 @@ void PeerManagerImpl::ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic
 
     // Miners: one BLOCK per call (DoS / disk). Archive/GPU catch-up: drain
     // queued bodies until pause/interrupt so 16 GETDATAs are not serialized
-    // at one msghand lap (~45s) each.
+    // at one msghand lap (~45s) each. When ArchiveBlockServe is running,
+    // leave archive block invs queued for that worker (msghand stays on TX).
     const bool drain_archive_blocks{
         node::matmul_trusted::MsghandPeerIsArchiveServeTarget(
             pfrom.IsManualConn() || !pfrom.IsInboundConn(),
             pfrom.HasArchiveOrMirrorService())};
-    while (it != peer.m_getdata_requests.end() && !pfrom.fPauseSend) {
-        if (interruptMsgProc) break;
-        if (!it->IsGenBlkMsg()) {
-            ++it;
-            break;
+    const bool skip_archive_blocks{
+        node::matmul_trusted::MsghandSkipArchiveBlockGetData(
+            node::matmul_trusted::HasLocalSigner(),
+            m_connman.ArchiveBlockServeRunning(),
+            drain_archive_blocks)};
+    if (!skip_archive_blocks) {
+        while (it != peer.m_getdata_requests.end() && !pfrom.fPauseSend) {
+            if (interruptMsgProc) break;
+            if (!it->IsGenBlkMsg()) {
+                ++it;
+                break;
+            }
+            const CInv& inv = *it++;
+            (void)ProcessGetBlockData(pfrom, peer, inv, /*try_cs_main=*/false,
+                                      /*hold_g_msgproc=*/true);
+            if (!drain_archive_blocks) break;
         }
-        const CInv& inv = *it++;
-        ProcessGetBlockData(pfrom, peer, inv);
-        if (!drain_archive_blocks) break;
     }
 
     peer.m_getdata_requests.erase(peer.m_getdata_requests.begin(), it);
@@ -7308,6 +7333,63 @@ void PeerManagerImpl::ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic
         MakeAndPushMessage(pfrom, NetMsgType::NOTFOUND, vNotFound);
     }
 }
+
+namespace {
+bool PeerManagerImpl::ServeArchiveBlockGetData(std::atomic<bool>& interrupt)
+{
+    AssertLockNotHeld(cs_main);
+    if (m_stopping.load(std::memory_order_acquire)) return false;
+
+    bool cs_main_busy{false};
+    std::vector<NodeId> ids;
+    m_connman.ForEachNode([&](CNode* pnode) {
+        if (pnode == nullptr) return;
+        if (!pnode->HasArchiveOrMirrorService()) return;
+        if (!pnode->m_has_getdata_requests.load()) return;
+        ids.push_back(pnode->GetId());
+    });
+    for (const NodeId id : ids) {
+        if (interrupt || m_stopping.load(std::memory_order_acquire)) break;
+        const std::shared_ptr<CNode> pnode{m_connman.GetNodeRef(id)};
+        if (!pnode) continue;
+
+        PeerRef peer{GetPeerRef(pnode->GetId())};
+        if (!peer) continue;
+
+        LOCK(peer->m_getdata_requests_mutex);
+        if (peer->m_getdata_requests.empty()) {
+            pnode->m_has_getdata_requests.store(false);
+            continue;
+        }
+        auto it{peer->m_getdata_requests.begin()};
+        while (it != peer->m_getdata_requests.end() && it->IsGenTxMsg()) {
+            ++it;
+        }
+        const auto first_block{it};
+        while (it != peer->m_getdata_requests.end() && !pnode->fPauseSend &&
+               it->IsGenBlkMsg()) {
+            if (interrupt) break;
+            const GetBlockDataOutcome outcome{ProcessGetBlockData(
+                *pnode, *peer, *it, /*try_cs_main=*/true,
+                /*hold_g_msgproc=*/false)};
+            if (outcome == GetBlockDataOutcome::CsMainBusy) {
+                cs_main_busy = true;
+                break;
+            }
+            ++it;
+        }
+        peer->m_getdata_requests.erase(first_block, it);
+        pnode->m_has_getdata_requests.store(!peer->m_getdata_requests.empty());
+    }
+    if (cs_main_busy) {
+        // ExactReplay CsMainScopedRelease notifies this CV. ConnectTip does
+        // not; the timeout is only that poll fallback.
+        (void)WaitCsMainReleasedForMatMulRecompute(
+            node::matmul_trusted::ARCHIVE_BLOCK_SERVE_WAIT_BUSY);
+    }
+    return cs_main_busy;
+}
+} // namespace
 
 uint32_t PeerManagerImpl::GetFetchFlags(const Peer& peer) const
 {
@@ -13453,6 +13535,13 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             ProcessGetData(pfrom, *peer, interruptMsgProc);
             pfrom.m_has_getdata_requests.store(!peer->m_getdata_requests.empty());
         }
+        if (node::matmul_trusted::MsghandPeerIsArchiveServeTarget(
+                pfrom.IsManualConn() || !pfrom.IsInboundConn(),
+                pfrom.HasArchiveOrMirrorService()) &&
+            node::matmul_trusted::HasLocalSigner() &&
+            pfrom.m_has_getdata_requests.load()) {
+            m_connman.SetGetDataServePending(true);
+        }
 
         return;
     }
@@ -16558,6 +16647,11 @@ bool PeerManagerImpl::ProcessMessages(CNode* pfrom, std::atomic<bool>& interrupt
             this_gpu,
             m_signed_frontier_catch_up.load(std::memory_order_relaxed),
             this_archive)};
+    const bool skip_archive_blocks{
+        node::matmul_trusted::MsghandSkipArchiveBlockGetData(
+            node::matmul_trusted::HasLocalSigner(),
+            m_connman.ArchiveBlockServeRunning(),
+            this_archive)};
     {
         LOCK(peer->m_getdata_requests_mutex);
         if (defer_miner_getdata) {
@@ -16566,6 +16660,9 @@ bool PeerManagerImpl::ProcessMessages(CNode* pfrom, std::atomic<bool>& interrupt
         } else if (!peer->m_getdata_requests.empty()) {
             ProcessGetData(*pfrom, *peer, interruptMsgProc);
             pfrom->m_has_getdata_requests.store(!peer->m_getdata_requests.empty());
+            if (skip_archive_blocks && pfrom->m_has_getdata_requests.load()) {
+                m_connman.SetGetDataServePending(true);
+            }
         }
     }
 
@@ -16580,7 +16677,12 @@ bool PeerManagerImpl::ProcessMessages(CNode* pfrom, std::atomic<bool>& interrupt
     // and prevents m_getdata_requests to grow unbounded
     {
         LOCK(peer->m_getdata_requests_mutex);
-        if (!defer_miner_getdata && !peer->m_getdata_requests.empty()) return true;
+        if (!defer_miner_getdata && !peer->m_getdata_requests.empty()) {
+            // Worker-owned archive BLOCK GETDATA must not monopolize msghand
+            // (skip PollMessage / VERSION). TX leftover or miner GETDATA still
+            // need another visit; fPauseSend also retries.
+            if (!skip_archive_blocks || pfrom->fPauseSend) return true;
+        }
     }
 
     // Don't bother if send buffer is too full to respond anyway
@@ -16613,7 +16715,10 @@ bool PeerManagerImpl::ProcessMessages(CNode* pfrom, std::atomic<bool>& interrupt
         if (interruptMsgProc) return false;
         {
             LOCK(peer->m_getdata_requests_mutex);
-            if (!defer_miner_getdata && !peer->m_getdata_requests.empty()) fMoreWork = true;
+            if (!defer_miner_getdata && !peer->m_getdata_requests.empty() &&
+                (!skip_archive_blocks || pfrom->fPauseSend)) {
+                fMoreWork = true;
+            }
         }
         // Does this peer has an orphan ready to reconsider?
         // (Note: we may have provided a parent for an orphan provided
