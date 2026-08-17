@@ -211,7 +211,10 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
  *  Live 2026-08-16: nyc1 asked GETMMATTEST for 190689 while the GPU tip
  *  was 190795; the 16-high window returned historical_not_served. Opening
  *  cached serve to every addnode/manual then starved nyc1 (tokens went to
- *  185006 / 190041 historical probes). Do not authorize ExactReplay. */
+ *  185006 / 190041 historical probes). Do not authorize ExactReplay.
+ *
+ *  An empty hot/durable cache is not a refuse: see
+ *  TrustedSignerMayRegenerateCatchUpGetMmAttest. */
 [[nodiscard]] inline bool TrustedSignerMayServeCachedCatchUpGetMmAttest(
     bool has_local_signer,
     bool requester_is_catchup_peer,
@@ -232,6 +235,31 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
         return false;
     }
     return height + cached_catchup_window >= tip_height;
+}
+
+/** Empty-cache regeneration after CachedCatchUp admitted the request.
+ *  SignAuthoritative only — never ExactReplay (that saturates the signer
+ *  and the uplink). Live 2026-08-17: GPU restart left 191593 unsigned;
+ *  !live_window refused regen; nyc1 had the body and stayed at 191592.
+ *  The 256-high window and archive/mirror bit stay fail-closed so IBD
+ *  185006 / 190041 probes cannot drain tokens. */
+[[nodiscard]] inline bool TrustedSignerMayRegenerateCatchUpGetMmAttest(
+    bool has_local_signer,
+    bool requester_is_catchup_peer,
+    bool on_active_chain,
+    int32_t height,
+    int32_t tip_height,
+    int serve_window = SIGNER_GETMMATTEST_SERVE_WINDOW,
+    int cached_catchup_window = SIGNER_GETMMATTEST_CACHED_CATCHUP_WINDOW)
+{
+    // Live window already regenerates via the ExactReplay-verified path.
+    if (TrustedSignerMayServeGetMmAttest(
+            has_local_signer, height, tip_height, serve_window)) {
+        return false;
+    }
+    return TrustedSignerMayServeCachedCatchUpGetMmAttest(
+        has_local_signer, requester_is_catchup_peer, on_active_chain,
+        height, tip_height, serve_window, cached_catchup_window);
 }
 
 /** While a trusted mirror is behind the GPU-signed frontier, historical

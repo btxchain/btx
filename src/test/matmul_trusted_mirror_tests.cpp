@@ -1466,6 +1466,26 @@ BOOST_AUTO_TEST_CASE(signer_getmmattest_historical_and_hammer_ban)
     BOOST_CHECK(!TrustedSignerMayServeCachedCatchUpGetMmAttest(
         true, true, true,
         190801 - SIGNER_GETMMATTEST_CACHED_CATCHUP_WINDOW - 1, 190801));
+    // Live 2026-08-17: nyc1 191593 vs GPU 191713 (120 behind, cache empty).
+    BOOST_CHECK(TrustedSignerMayServeCachedCatchUpGetMmAttest(
+        true, true, true, 191593, 191713));
+
+    using node::matmul_trusted::TrustedSignerMayRegenerateCatchUpGetMmAttest;
+    BOOST_CHECK(TrustedSignerMayRegenerateCatchUpGetMmAttest(
+        true, true, true, /*height=*/191593, /*tip_height=*/191713));
+    BOOST_CHECK(!TrustedSignerMayRegenerateCatchUpGetMmAttest(
+        true, true, true, 191713, 191713)); // live window
+    BOOST_CHECK(!TrustedSignerMayRegenerateCatchUpGetMmAttest(
+        true, /*requester_is_catchup_peer=*/false, true, 191593, 191713));
+    BOOST_CHECK(!TrustedSignerMayRegenerateCatchUpGetMmAttest(
+        true, true, /*on_active_chain=*/false, 191593, 191713));
+    BOOST_CHECK(!TrustedSignerMayRegenerateCatchUpGetMmAttest(
+        /*has_local_signer=*/false, true, true, 191593, 191713));
+    // IBD historical probes must not regenerate (token / uplink starvation).
+    BOOST_CHECK(!TrustedSignerMayRegenerateCatchUpGetMmAttest(
+        true, true, true, 185020, 190801));
+    BOOST_CHECK(!TrustedSignerMayRegenerateCatchUpGetMmAttest(
+        true, true, true, 190041, 190801));
 
     using node::matmul_trusted::TrustedArchiveMayServeGetMmAttest;
     BOOST_CHECK(TrustedArchiveMayServeGetMmAttest(

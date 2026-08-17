@@ -15649,7 +15649,11 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             push_mmattest(std::move(existing), serve_reason);
             return;
         }
-        if (!live_window) {
+        const bool catchup_regen{
+            node::matmul_trusted::TrustedSignerMayRegenerateCatchUpGetMmAttest(
+                node::matmul_trusted::HasLocalSigner(), catchup_requester,
+                on_active_chain, height, tip_height)};
+        if (!live_window && !catchup_regen) {
             MaybeLogAttestationServe(
                 "historical_not_served", block_hash, height, pfrom.GetId());
             return;
@@ -15660,7 +15664,9 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             // signatures for the loser and the winner. Mirrors that
             // connected the loser then refused to reorg (quorum tip).
             // Only sign hashes already on the active chain.
-            if (locally_exact && on_active_chain) {
+            // Catch-up regen (live 2026-08-17): empty cache after signer
+            // restart; SignAuthoritative without ExactReplay.
+            if ((locally_exact || catchup_regen) && on_active_chain) {
                 if (peer->m_matmul_attestation_request_tokens < 1.0) {
                     note_ignored("rate_limited");
                     LogDebug(BCLog::NET,
@@ -15684,7 +15690,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                         matmul::trusted::AddResultName(result));
                     return;
                 }
-                serve_reason = "regenerated";
+                serve_reason = locally_exact ? "regenerated" : "catchup_regen";
             } else if (locally_exact) {
                 MaybeLogAttestationServe(
                     "competing_sibling", block_hash, height,
