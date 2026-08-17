@@ -403,7 +403,7 @@ static bool IsNarrowCatchUpWindow(const ChainstateManager& chainman,
             node::matmul_trusted::IsTrustedMirror(),
             node::matmul_trusted::IsConfigured(),
             frontier.blocks_behind, ahead,
-            BLOCK_FETCH_STALL_HEADERS_AHEAD),
+            BLOCK_FETCH_STALL_HEADERS_AHEAD, frontier.available),
         BLOCK_FETCH_STALL_HEADERS_AHEAD, CATCHUP_NARROW_MAX_AHEAD);
 }
 /** Maximum number of headers to announce when relaying blocks with headers message.*/
@@ -8419,7 +8419,7 @@ bool PeerManagerImpl::IsSignedFrontierBodyCatchUp() const
         node::matmul_trusted::IsTrustedMirror(),
         node::matmul_trusted::IsConfigured(),
         frontier.blocks_behind, followed_ahead,
-        BLOCK_FETCH_STALL_HEADERS_AHEAD)};
+        BLOCK_FETCH_STALL_HEADERS_AHEAD, frontier.available)};
     m_signed_frontier_catch_up.store(catch_up, std::memory_order_relaxed);
     m_connman.SetTrustedMirrorCatchUp(
         node::matmul_trusted::IsTrustedMirrorMsghandCatchUp(
@@ -8665,6 +8665,35 @@ void PeerManagerImpl::MaybeSeedGpuSignedFrontierBestKnown(
             }
         }
     }
+    // Restart empties HasQuorumInMemory, so the covered-frontier walk finds
+    // nothing. RecalculateBestHeader still followed the HEADER_ONLY suffix;
+    // seed BestKnown from that so GETDATA is 1-wide to the GPU instead of
+    // a 16-wide miner spray (live archives 2026-08-17: sent_getdata=0).
+    if (seed == nullptr) {
+        const CBlockIndex* const followed{m_chainman.m_best_header};
+        if (followed != nullptr && followed->nHeight > tip->nHeight &&
+            followed->GetAncestor(tip->nHeight) == tip) {
+            seed = followed;
+        }
+    }
+    // RecalculateBestHeader now follows the HEADER_ONLY suffix of the active
+    // tip even when HasQuorumInMemory is empty (archive restart). The signed
+    // frontier hash is often still unknown or not yet in the index, so the
+    // coverage walk above finds nothing and BestKnown stays unset — GETDATA
+    // never starts (live 2026-08-17: headers=191690, sent_getdata=0). Seed
+    // from m_best_header only when no in-index frontier exists; a current
+    // frontier at the tip must not pull unattested miner children (190630).
+    if (seed == nullptr) {
+        const bool frontier_in_index{
+            st.hash_known &&
+            m_chainman.m_blockman.LookupBlockIndex(st.hash) != nullptr};
+        const CBlockIndex* best{m_chainman.m_best_header};
+        if (!frontier_in_index && best != nullptr &&
+            best->nHeight > tip->nHeight &&
+            best->GetAncestor(tip->nHeight) == tip) {
+            seed = best;
+        }
+    }
     const bool extends{
         seed != nullptr && seed->nHeight > tip->nHeight &&
         seed->GetAncestor(tip->nHeight) == tip};
@@ -8673,7 +8702,7 @@ void PeerManagerImpl::MaybeSeedGpuSignedFrontierBestKnown(
         state.pindexBestKnownBlock->nHeight > tip->nHeight &&
         state.pindexBestKnownBlock->GetAncestor(tip->nHeight) == tip};
     if (!node::matmul_trusted::SeedTrustedMirrorGpuBestKnownFromFrontier(
-            IsSignedFrontierBodyCatchUp(),
+            IsSignedFrontierBodyCatchUp() || extends,
             best_known_usable,
             extends,
             seed != nullptr ? seed->nHeight : -1,
