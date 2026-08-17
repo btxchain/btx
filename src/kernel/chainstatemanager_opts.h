@@ -221,6 +221,13 @@ struct ChainstateManagerOpts {
     //! Required extra work margin expressed in current-tip block equivalents.
     //! Zero disables the hysteresis margin.
     std::optional<uint32_t> reorg_hysteresis_work_margin{};
+    //! Local GPU-attestor extra-work pin (NOT consensus). Compact nBits of the
+    //! minimum difficulty the MatMul digest must meet, while header nBits stay
+    //! on GetNextWorkRequired. Unset = disabled.
+    std::optional<uint32_t> signer_min_target_compact{};
+    //! Height at which signer_min_target_compact begins. Required when the
+    //! compact pin is set so already-connected easier blocks remain loadable.
+    std::optional<int32_t> signer_extra_work_from_height{};
     DBOptions coins_db{};
     CoinsViewOptions coins_view{};
     Notifications& notifications;

@@ -3536,6 +3536,22 @@ std::optional<arith_uint256> DeriveTarget(unsigned int nBits, const uint256 pow_
     return bnTarget;
 }
 
+std::optional<arith_uint256> MaybeLocalExtraWorkTarget(
+    unsigned int consensus_nbits,
+    const uint256& pow_limit,
+    std::optional<uint32_t> min_compact,
+    std::optional<int32_t> from_height,
+    int height)
+{
+    if (!min_compact.has_value()) return std::nullopt;
+    if (height < from_height.value_or(0)) return std::nullopt;
+    const auto local{DeriveTarget(*min_compact, pow_limit)};
+    const auto consensus{DeriveTarget(consensus_nbits, pow_limit)};
+    if (!local || !consensus) return std::nullopt;
+    if (*local >= *consensus) return std::nullopt;
+    return local;
+}
+
 bool CheckProofOfWorkImpl(uint256 hash, unsigned int nBits, const Consensus::Params& params)
 {
     auto bnTarget{DeriveTarget(nBits, params.powLimit)};

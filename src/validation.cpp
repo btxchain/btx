@@ -12801,6 +12801,29 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block,
     if (block.nBits != GetNextWorkRequired(pindexPrev, &block, consensusParams))
         return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "bad-diffbits", "incorrect proof of work");
 
+    // Local GPU-attestor extra-work pin (NOT consensus). Header nBits stay on
+    // GetNextWorkRequired so archives do not see bad-diffbits. This node
+    // additionally requires matmul_digest to meet a harder measured target.
+    // BLOCK_HEADER_LOW_WORK: do not ban peers that submit consensus-valid easy work.
+    if (fCheckPOW && consensusParams.fMatMulPOW) {
+        if (auto extra_target = MaybeLocalExtraWorkTarget(
+                block.nBits,
+                consensusParams.powLimit,
+                chainman.m_options.signer_min_target_compact,
+                chainman.m_options.signer_extra_work_from_height,
+                nHeight)) {
+            if (UintToArith256(block.matmul_digest) > *extra_target) {
+                LogPrintf("signer extra-work: height=%d hash=%s digest exceeds local compact 0x%08x\n",
+                          nHeight,
+                          block.GetHash().ToString(),
+                          *chainman.m_options.signer_min_target_compact);
+                return state.Invalid(BlockValidationResult::BLOCK_HEADER_LOW_WORK,
+                                     "local-extra-work",
+                                     "matmul digest does not meet local signer extra-work target");
+            }
+        }
+    }
+
     // HeaderPoW bit-26 self-describing wire was WITHDRAWN: bit 26 was previously
     // legal, so gating 182↔186 parse / GetHash on it forks pre-activation peers.
     // Until a height-contextual wire design lands, do not require or forbid the

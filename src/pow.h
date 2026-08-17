@@ -41,6 +41,21 @@ struct ExactGemmBackend;
  */
 std::optional<arith_uint256> DeriveTarget(unsigned int nBits, const uint256 pow_limit);
 
+//! Local signer extra-work pin. NOT consensus.
+//!
+//! When `min_compact` is set and `height` is at or above `from_height`, return
+//! the compact target if and only if it is strictly harder (numerically smaller)
+//! than the consensus nBits target. Callers keep header nBits on GetNextWorkRequired
+//! and additionally require `matmul_digest <=` this tighter target.
+//! Returns nullopt when the pin is unset, not yet active, invalid, or not harder
+//! than consensus (so it can never weaken PoW).
+std::optional<arith_uint256> MaybeLocalExtraWorkTarget(
+    unsigned int consensus_nbits,
+    const uint256& pow_limit,
+    std::optional<uint32_t> min_compact,
+    std::optional<int32_t> from_height,
+    int height);
+
 struct MatMulPeerVerificationBudget {
     // Access is externally synchronized in net_processing by peer-specific locks.
     // Cheap header-batch work and expensive complete-block work intentionally

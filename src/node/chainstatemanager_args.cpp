@@ -10,6 +10,7 @@
 #include <logging.h>
 #include <node/coins_view_args.h>
 #include <node/database_args.h>
+#include <pow.h>
 #include <tinyformat.h>
 #include <uint256.h>
 #include <util/result.h>
@@ -167,6 +168,50 @@ util::Result<void> ApplyArgsManOptions(const ArgsManager& args, ChainstateManage
         }
         opts.reorg_hysteresis_work_margin =
             static_cast<uint32_t>(std::min<int64_t>(*value, std::numeric_limits<uint32_t>::max()));
+    }
+
+    if (auto value{args.GetArg("-signermintargetcompact")}) {
+        std::string hex = *value;
+        if (hex.size() >= 2 && hex[0] == '0' && (hex[1] == 'x' || hex[1] == 'X')) {
+            hex = hex.substr(2);
+        }
+        if (hex.size() != 8) {
+            return util::Error{Untranslated(strprintf(
+                "Invalid -signermintargetcompact value (%s), expected 8 hex digits (compact nBits)", *value))};
+        }
+        uint32_t compact = 0;
+        for (char c : hex) {
+            const int digit = HexDigit(c);
+            if (digit < 0) {
+                return util::Error{Untranslated(strprintf(
+                    "Invalid -signermintargetcompact value (%s), expected 8 hex digits (compact nBits)", *value))};
+            }
+            compact = (compact << 4) | static_cast<uint32_t>(digit);
+        }
+        if (!DeriveTarget(compact, opts.chainparams.GetConsensus().powLimit)) {
+            return util::Error{Untranslated(strprintf(
+                "Invalid -signermintargetcompact value (%s), compact target is negative, zero, overflowed, or exceeds powLimit", *value))};
+        }
+        opts.signer_min_target_compact = compact;
+    }
+
+    if (auto value{args.GetIntArg("-signerextraworkfromheight")}) {
+        if (*value < 0) {
+            return util::Error{Untranslated(strprintf(
+                "Invalid -signerextraworkfromheight value (%d), must be at least 0", *value))};
+        }
+        opts.signer_extra_work_from_height =
+            static_cast<int32_t>(std::min<int64_t>(*value, std::numeric_limits<int32_t>::max()));
+    }
+
+    if (opts.signer_min_target_compact.has_value() != opts.signer_extra_work_from_height.has_value()) {
+        return util::Error{Untranslated(
+            "-signermintargetcompact and -signerextraworkfromheight must be set together")};
+    }
+    if (opts.signer_min_target_compact.has_value()) {
+        LogInfo("Local signer extra-work pin enabled (NOT consensus): compact=0x%08x fromheight=%d\n",
+                *opts.signer_min_target_compact,
+                *opts.signer_extra_work_from_height);
     }
 
     ReadDatabaseArgs(args, opts.coins_db);
