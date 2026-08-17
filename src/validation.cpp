@@ -10990,19 +10990,17 @@ void Chainstate::TryAddBlockIndexCandidate(CBlockIndex* pindex)
     }
     const bool parked{m_chainman.IsOnParkedReorgBranch(pindex)};
     const bool defer_losing{m_chainman.ShouldDeferLosingTipExtension(pindex)};
-    const bool consider{TrustedMirrorShouldConsiderMostWorkCandidate(m_chainman, tip, pindex)};
-    if (parked || defer_losing || !consider) {
+    if (parked || defer_losing) {
         if (pindex != nullptr && tip != nullptr && pindex->pprev == tip) {
             // Live 2026-08-16: HEADER_ONLY tip-child re-announces hit this
             // every ABC/header and pegged a core. Warn once per hash.
             static uint256 last_refused{};
             if (last_refused != pindex->GetBlockHash()) {
                 LogWarning("%s: refusing tip-child hash=%s height=%d parked=%s "
-                           "defer_losing_tip=%s consider_most_work=%s\n",
+                           "defer_losing_tip=%s consider_most_work=n/a\n",
                            __func__, pindex->GetBlockHash().ToString(),
                            pindex->nHeight, parked ? "yes" : "no",
-                           defer_losing ? "yes" : "no",
-                           consider ? "yes" : "no");
+                           defer_losing ? "yes" : "no");
                 last_refused = pindex->GetBlockHash();
             }
         }
@@ -11023,13 +11021,30 @@ void Chainstate::TryAddBlockIndexCandidate(CBlockIndex* pindex)
     // The block only is a candidate for the most-work-chain if it has the same
     // or more work than our current tip. Attested abandon-fork targets are the
     // exception: they must be selectable while the unattested tip still has
-    // more work.
+    // more work. Check this before TrustedMirrorShouldConsiderMostWorkCandidate:
+    // cheap-era twin bodies are valid-tx / less-work and were paying a full
+    // unique-attested rescan per index during populate.
     if (tip != nullptr &&
         setBlockIndexCandidates.value_comp()(pindex, tip) &&
         !m_chainman.IsAttestedAbandonForkCandidate(pindex)) {
         if (pindex != nullptr && pindex->pprev == tip) {
             LogWarning("%s: refusing tip-child hash=%s height=%d less_work_than_tip=yes\n",
                        __func__, pindex->GetBlockHash().ToString(), pindex->nHeight);
+        }
+        return;
+    }
+
+    const bool consider{TrustedMirrorShouldConsiderMostWorkCandidate(m_chainman, tip, pindex)};
+    if (!consider) {
+        if (pindex != nullptr && tip != nullptr && pindex->pprev == tip) {
+            static uint256 last_refused{};
+            if (last_refused != pindex->GetBlockHash()) {
+                LogWarning("%s: refusing tip-child hash=%s height=%d parked=no "
+                           "defer_losing_tip=no consider_most_work=no\n",
+                           __func__, pindex->GetBlockHash().ToString(),
+                           pindex->nHeight);
+                last_refused = pindex->GetBlockHash();
+            }
         }
         return;
     }
@@ -14984,6 +14999,12 @@ void Chainstate::PopulateBlockIndexCandidates()
 {
     AssertLockHeld(::cs_main);
     const CBlockIndex* active_snapshot_base{m_chainman.GetSnapshotBaseBlock()};
+    const CBlockIndex* const tip{m_chain.Tip()};
+    // One scan. TryAdd used to call FindUniqueCompetingAttestedIndex for every
+    // valid-tx index (canonical ancestors + cheap-era twin bodies), which hung
+    // archive startup for minutes after "Populating block index candidates".
+    const CBlockIndex* const unique_attested{
+        m_chainman.FindUniqueCompetingAttestedIndex()};
 
     for (CBlockIndex* pindex : m_blockman.GetAllBlockIndices()) {
         // An assumeutxo chainstate needs its own snapshot base as an immediate
@@ -14997,11 +15018,16 @@ void Chainstate::PopulateBlockIndexCandidates()
             !pindex->pprev->HaveNumChainTxs()};
         if (background_snapshot_base_parent_unprocessed) continue;
 
-        if (pindex == SnapshotBase() ||
-            (pindex->IsValid(BLOCK_VALID_TRANSACTIONS) &&
-             (pindex->HaveNumChainTxs() || pindex->pprev == nullptr))) {
-            TryAddBlockIndexCandidate(pindex);
+        if (pindex != SnapshotBase() &&
+            !(pindex->IsValid(BLOCK_VALID_TRANSACTIONS) &&
+              (pindex->HaveNumChainTxs() || pindex->pprev == nullptr))) {
+            continue;
         }
+        if (tip != nullptr && pindex != tip && pindex != unique_attested &&
+            setBlockIndexCandidates.value_comp()(pindex, tip)) {
+            continue;
+        }
+        TryAddBlockIndexCandidate(pindex);
     }
 }
 

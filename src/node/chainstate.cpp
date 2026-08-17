@@ -131,7 +131,8 @@ static ChainstateLoadResult CompleteChainstateInitialization(
     // modifying nSequenceId. CBlockIndex objects are shared by all chainstates
     // and nSequenceId participates in the candidate-set comparator, so changing
     // it while any candidate set is populated is undefined behavior.
-    LogPrintf("Populating block index candidates\n");
+    LogPrintf("Populating block index candidates (%u headers)\n",
+              static_cast<unsigned>(chainman.BlockIndex().size()));
     for (Chainstate* chainstate : chainman.GetAll()) {
         chainstate->PopulateBlockIndexCandidates();
     }
