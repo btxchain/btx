@@ -20240,10 +20240,14 @@ void ChainstateManager::RecalculateBestHeader()
     // change plus a near-tip twin flood makes every miss re-verify an old
     // attestation that cannot pass the new context — live archive startup
     // hung >20 min at 100% CPU after "Loaded best chain".
-    CBlockIndex* attested_frontier{
-        IndexHasTrustedMatMulAuthority(active_tip)
-            ? const_cast<CBlockIndex*>(active_tip)
-            : nullptr};
+    //
+    // Always origin the suffix walk at the active tip. Requiring
+    // IndexHasTrustedMatMulAuthority(tip) left m_best_header pinned to the
+    // connected tip after restart: HasQuorumInMemory is empty until the GPU
+    // reconnects, so a HEADER_ONLY GPU suffix already in the index was never
+    // followed (live archives 2026-08-17: 98 headers-only, sent_getdata=0).
+    // Competing forks still need current-config in-memory quorum below.
+    CBlockIndex* attested_frontier{const_cast<CBlockIndex*>(active_tip)};
     CBlockIndex* authority_best{nullptr};
     for (auto& [_, candidate] : m_blockman.m_block_index) {
         if (m_interrupt) return;

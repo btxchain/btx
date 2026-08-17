@@ -3269,6 +3269,91 @@ BOOST_FIXTURE_TEST_CASE(chainstate_trusted_mirror_connects_frontier_suffix_witho
     chainman.CheckBlockIndex();
 }
 
+BOOST_FIXTURE_TEST_CASE(chainstate_recalculate_best_header_follows_unattested_tip_suffix, TestChain100Setup)
+{
+    // Live archives 2026-08-17 after e2c92315: RecalculateBestHeader required
+    // in-memory quorum on the active tip before walking HEADER_ONLY
+    // descendants. Restart empties that store, so m_best_header stayed at
+    // the connected tip while a 98-block GPU suffix sat headers-only and
+    // sent_getdata stayed 0. Follow the unique suffix of the active tip
+    // even without quorum; competing forks still need current-config quorum.
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    Chainstate& chainstate = chainman.ActiveChainstate();
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    auto& mode = const_cast<kernel::MatMulValidationMode&>(chainman.m_options.matmul_validation_mode);
+    const int32_t saved_v4{consensus.nMatMulV4Height};
+    const int32_t saved_bmx{consensus.nMatMulBMX4CHeight};
+    const int32_t saved_rc{consensus.nMatMulRCHeight};
+    const auto saved_mode{mode};
+    struct Restore {
+        Consensus::Params& consensus;
+        int32_t v4;
+        int32_t bmx;
+        int32_t rc;
+        kernel::MatMulValidationMode& mode;
+        kernel::MatMulValidationMode saved_mode;
+        ~Restore()
+        {
+            node::matmul_trusted::ResetForTest();
+            consensus.nMatMulV4Height = v4;
+            consensus.nMatMulBMX4CHeight = bmx;
+            consensus.nMatMulRCHeight = rc;
+            mode = saved_mode;
+        }
+    } restore{consensus, saved_v4, saved_bmx, saved_rc, mode, saved_mode};
+
+    const CScript script = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    CBlockIndex* const parent{WITH_LOCK(::cs_main, return chainstate.m_chain.Tip())};
+    BOOST_REQUIRE(parent != nullptr);
+
+    std::vector<CBlockIndex*> suffix;
+    for (int i = 0; i < 3; ++i) {
+        const CBlock block{CreateAndProcessBlock({}, script)};
+        CBlockIndex* idx{WITH_LOCK(::cs_main, {
+            return chainman.m_blockman.LookupBlockIndex(block.GetHash());
+        })};
+        BOOST_REQUIRE(idx != nullptr);
+        suffix.push_back(idx);
+    }
+    CBlockIndex* const first{suffix.front()};
+    CBlockIndex* const last{suffix.back()};
+
+    consensus.nMatMulV4Height = first->nHeight;
+    consensus.nMatMulBMX4CHeight = first->nHeight;
+    consensus.nMatMulRCHeight = first->nHeight;
+
+    BlockValidationState state;
+    BOOST_REQUIRE(chainstate.InvalidateBlock(state, first));
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()) == parent);
+
+    CKey gpu;
+    gpu.MakeNewKey(/*fCompressed=*/true);
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256::ONE;
+    config.replay_authority_context = uint256::FromHex(std::string(64, 'a')).value();
+    config.trusted_signers = {gpu.GetPubKey()};
+    config.threshold = 1;
+    config.local_signer = gpu;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/true, /*serve=*/false,
+        std::chrono::milliseconds{50}, error));
+    mode = kernel::MatMulValidationMode::TRUSTED;
+
+    {
+        LOCK(::cs_main);
+        chainstate.ResetBlockFailureFlags(first);
+        BOOST_CHECK(!chainman.IndexHasTrustedMatMulAuthority(parent));
+        BOOST_CHECK(!chainman.IndexHasTrustedMatMulAuthority(last));
+        chainman.SetBestHeader(parent);
+        chainman.RecalculateBestHeader();
+        BOOST_REQUIRE(chainman.m_best_header != nullptr);
+        BOOST_CHECK_EQUAL(chainman.m_best_header, last);
+        BOOST_CHECK_EQUAL(chainman.m_best_header->GetAncestor(parent->nHeight), parent);
+    }
+    chainman.CheckBlockIndex();
+}
+
 BOOST_FIXTURE_TEST_CASE(chainstate_trusted_mirror_frontier_coverage_fail_closed, TestChain100Setup)
 {
     // Coverage is not a skip of signatures: no quorum, a key outside the
