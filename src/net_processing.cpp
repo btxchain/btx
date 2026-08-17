@@ -8567,6 +8567,15 @@ bool PeerManagerImpl::PeerMaySignedFrontierCatchUpGetData(
     AssertLockHeld(cs_main);
     const CBlockIndex* const tip{m_chainman.ActiveTip()};
     const int tip_height{tip != nullptr ? tip->nHeight : 0};
+    // Compare VERSION height to the followed HEADER_ONLY suffix, not the
+    // connected tip. Sibling -connect archives can be ahead of our tip and
+    // still lack the suffix bodies (live nyc1 2026-08-17: GPU 191713 vs
+    // siblings 191685/191687 while m_best_header=191690; GETDATA went to
+    // siblings, inflight=0).
+    const int followed_height{
+        m_chainman.m_best_header != nullptr
+            ? m_chainman.m_best_header->nHeight
+            : tip_height};
     const ServiceFlags services{peer.m_their_services.load()};
     const bool archive_or_mirror{
         state.m_matmul_attestation_archive || state.m_matmul_trusted_mirror ||
@@ -8582,7 +8591,7 @@ bool PeerManagerImpl::PeerMaySignedFrontierCatchUpGetData(
         !state.m_inbound && !peer.m_is_inbound,
         archive_or_mirror,
         node::matmul_trusted::SignedFrontierVersionHandshakeComplete(starting),
-        starting, tip_height);
+        starting, followed_height);
 }
 
 void PeerManagerImpl::MaybeFollowTrustedMirrorAuthorityHeader(
