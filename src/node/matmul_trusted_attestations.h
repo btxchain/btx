@@ -816,10 +816,38 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
     int tip_height)
 {
     // No VERSION: cannot serve. A peer whose VERSION height is at or behind
-    // our tip does not have the HEADER_ONLY suffix (live nyc1 2026-08-16:
-    // sibling archives were preferred-capable from headers alone, GETDATA
-    // timed out, miners were skipped).
+    // our *active* tip does not have tip+1 at handshake (live nyc1
+    // 2026-08-16: sibling archives were preferred-capable from headers
+    // alone, GETDATA timed out, miners were skipped).
+    // Compare to the connected tip, never to m_best_header: miner
+    // HEADER_ONLY children stacked on the attested tip made
+    // starting_height > followed_header fail while the peer still had
+    // every body from tip+1 through the signed frontier (live GPU-archive
+    // catch-up 2026-08-19: VERSION 194111 vs m_best_header 194116, tip
+    // 189534, inflight=0).
     return starting_height > tip_height;
+}
+
+/** Root-first catch-up GETDATA asks for active-tip+1, not m_best_header.
+ *  VERSION is a handshake snapshot (lower bound on bodies the peer *had*),
+ *  not a live connected height. After this node climbs past that snapshot,
+ *  a still-connected archive whose BestKnown extends our tip can still
+ *  serve historical tip+1 (live 2026-08-19: VERSION 194111, tip 194121,
+ *  BestKnown 194160, stall recovery logged every 60s with inflight=0).
+ *  Behind-sibling VERSION < tip with no extending BestKnown stays refused
+ *  (live nyc1 2026-08-17: 190767 vs 190816). */
+[[nodiscard]] inline bool SignedFrontierPeerMayServeCatchUpTipPlusOne(
+    int starting_height,
+    int active_tip_height,
+    int best_known_height = std::numeric_limits<int>::min(),
+    bool best_known_extends_tip = false)
+{
+    if (starting_height < 0) return false;
+    if (SignedFrontierPeerHadCatchUpBodiesAtConnect(starting_height,
+                                                    active_tip_height)) {
+        return true;
+    }
+    return best_known_extends_tip && best_known_height > active_tip_height;
 }
 
 [[nodiscard]] inline bool SignedFrontierBodySourceCanServeCatchUp(
@@ -832,8 +860,9 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
     int starting_height = std::numeric_limits<int>::max())
 {
     if (!version_handshake_complete) return false;
-    if (!SignedFrontierPeerHadCatchUpBodiesAtConnect(starting_height,
-                                                     tip_height)) {
+    if (!SignedFrontierPeerMayServeCatchUpTipPlusOne(
+            starting_height, tip_height, best_known_height,
+            best_known_extends_tip)) {
         return false;
     }
     return preferred && has_best_known && best_known_height > tip_height &&
@@ -880,8 +909,10 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
 }
 
 /** Issue catch-up GETDATA only to handshake-complete GPU, or to our
- *  outbound archive/mirror that was ahead at VERSION. Hung -connect
- *  (no VERSION) must not occupy a slot or block those outbounds. */
+ *  outbound archive/mirror. Hung -connect (no VERSION) must not occupy
+ *  a slot or block those outbounds. `tip_height` is the *active* tip:
+ *  root-first asks for tip+1, so miner HEADER_ONLY children on
+ *  m_best_header must not raise the VERSION bar. */
 [[nodiscard]] inline bool SignedFrontierMayRequestCatchUpGetData(
     bool signed_frontier_catch_up,
     bool gpu_manual_or_noban,
@@ -889,7 +920,9 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
     bool archive_or_mirror,
     bool version_handshake_complete,
     int starting_height = std::numeric_limits<int>::max(),
-    int tip_height = std::numeric_limits<int>::min())
+    int tip_height = std::numeric_limits<int>::min(),
+    int best_known_height = std::numeric_limits<int>::min(),
+    bool best_known_extends_tip = false)
 {
     if (!signed_frontier_catch_up) return true;
     if (!version_handshake_complete) return false;
@@ -899,8 +932,9 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
     if (!gpu_manual_or_noban && (!outbound || !archive_or_mirror)) {
         return false;
     }
-    return SignedFrontierPeerHadCatchUpBodiesAtConnect(starting_height,
-                                                       tip_height);
+    return SignedFrontierPeerMayServeCatchUpTipPlusOne(
+        starting_height, tip_height, best_known_height,
+        best_known_extends_tip);
 }
 
 /** Skip miners / inbound archives during signed-frontier catch-up.
@@ -1333,14 +1367,18 @@ static constexpr auto GPU_RETAIN_ATTESTATION_RETRY{std::chrono::seconds{2}};
     return wait_s + kMargin;
 }
 
-/** 90s catch-up timeout: operator GPU with a completed VERSION only.
- *  Hung -connect (manual, starting_height=-1) keeps the 15s miner
- *  window so it cannot pin the pipeline. */
+/** 90s catch-up timeout: operator GPU/noban whose VERSION still shows
+ *  bodies past our active tip. Hung -connect (starting_height=-1) and
+ *  stale-handshake archives we have climbed past keep 15s so a behind
+ *  sibling cannot pin the 1-wide slot for 90s. */
 [[nodiscard]] inline bool SignedFrontierCatchUpUsesGpuTimeout(
     bool manual_or_noban,
-    bool version_handshake_complete)
+    bool version_handshake_complete,
+    int starting_height = std::numeric_limits<int>::max(),
+    int active_tip_height = std::numeric_limits<int>::min())
 {
-    return manual_or_noban && version_handshake_complete;
+    if (!manual_or_noban || !version_handshake_complete) return false;
+    return starting_height > active_tip_height;
 }
 
 /** 180s inflight reclaim for GPU catch-up: handshake-complete

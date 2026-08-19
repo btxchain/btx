@@ -1113,7 +1113,10 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         /*preferred=*/true, /*has_best_known=*/true, /*best_known_height=*/190632,
         /*tip_height=*/190588, /*best_known_extends_tip=*/true,
         /*version_handshake_complete=*/false));
-    BOOST_CHECK(!SignedFrontierBodySourceCanServeCatchUp(
+    // VERSION == tip is not "had bodies past tip at connect", but BestKnown
+    // extending the active tip still lets us GETDATA tip+1 (handshake snapshot
+    // is stale once we have climbed; hung-connect starting=-1 stays refused).
+    BOOST_CHECK(SignedFrontierBodySourceCanServeCatchUp(
         /*preferred=*/true, /*has_best_known=*/true, /*best_known_height=*/190632,
         /*tip_height=*/190588, /*best_known_extends_tip=*/true,
         /*version_handshake_complete=*/true, /*starting_height=*/190588));
@@ -1193,6 +1196,30 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(SignedFrontierMayRequestCatchUpGetData(
         true, false, true, true, true,
         /*starting_height=*/190858, /*tip_height=*/190781));
+    using node::matmul_trusted::SignedFrontierPeerMayServeCatchUpTipPlusOne;
+    // Miner HEADER_ONLY tower above the active tip must not gate GETDATA.
+    // VERSION 194111 is behind m_best_header 194116 but ahead of tip 189534.
+    BOOST_CHECK(SignedFrontierMayRequestCatchUpGetData(
+        true, /*gpu_manual_or_noban=*/true, true, true, true,
+        /*starting_height=*/194111, /*tip_height=*/189534));
+    BOOST_CHECK(SignedFrontierPeerMayServeCatchUpTipPlusOne(
+        /*starting_height=*/194111, /*active_tip_height=*/189534));
+    BOOST_CHECK(!SignedFrontierPeerMayServeCatchUpTipPlusOne(194111, 194116));
+    // Climbed past handshake snapshot; BestKnown still extends the active tip.
+    BOOST_CHECK(SignedFrontierMayRequestCatchUpGetData(
+        true, true, true, true, true,
+        /*starting_height=*/194111, /*tip_height=*/194121,
+        /*best_known_height=*/194160, /*best_known_extends_tip=*/true));
+    BOOST_CHECK(SignedFrontierPeerMayServeCatchUpTipPlusOne(
+        194111, 194121, 194160, true));
+    // Behind sibling: VERSION < tip, BestKnown does not extend past tip.
+    BOOST_CHECK(!SignedFrontierMayRequestCatchUpGetData(
+        true, true, true, true, true,
+        /*starting_height=*/190767, /*tip_height=*/190816,
+        /*best_known_height=*/190767, /*best_known_extends_tip=*/false));
+    BOOST_CHECK(!SignedFrontierPeerMayServeCatchUpTipPlusOne(
+        190767, 190816, 190767, false));
+    BOOST_CHECK(!SignedFrontierPeerMayServeCatchUpTipPlusOne(-1, 190781, 190858, true));
     using node::matmul_trusted::SignedFrontierVersionHandshakeComplete;
     BOOST_CHECK(!SignedFrontierVersionHandshakeComplete(-1));
     BOOST_CHECK(SignedFrontierVersionHandshakeComplete(0));
@@ -1284,6 +1311,10 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         /*manual_or_noban=*/true, /*version_handshake_complete=*/true));
     BOOST_CHECK(!SignedFrontierCatchUpUsesGpuTimeout(true, false));
     BOOST_CHECK(!SignedFrontierCatchUpUsesGpuTimeout(false, true));
+    BOOST_CHECK(!SignedFrontierCatchUpUsesGpuTimeout(
+        true, true, /*starting_height=*/194111, /*active_tip_height=*/194121));
+    BOOST_CHECK(SignedFrontierCatchUpUsesGpuTimeout(
+        true, true, /*starting_height=*/194111, /*active_tip_height=*/189534));
     using node::matmul_trusted::KeepGpuSignedFrontierInFlightPipeline;
     BOOST_CHECK(KeepGpuSignedFrontierInFlightPipeline(
         /*signed_frontier_catch_up=*/true, /*manual_or_noban=*/true,
