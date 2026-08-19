@@ -12204,6 +12204,13 @@ void PeerManagerImpl::ProcessBlockSync(NodeId nodeid, CNode* node, const std::sh
             index->IsValid(BLOCK_VALID_SCRIPTS);
         terminal_failure = index != nullptr &&
             (index->nStatus & BLOCK_FAILED_MASK) != 0;
+        if (node::matmul_trusted::ShouldAdvanceBestKnownFromPeerBody(
+                index != nullptr, terminal_failure,
+                index != nullptr &&
+                    (index->nStatus & BLOCK_HAVE_DATA) != 0) &&
+            State(nodeid) != nullptr) {
+            UpdateBlockAvailability(nodeid, hash);
+        }
         // Persist-or-skip-fetch: a delivered followed-chain body that still
         // lacks HAVE_DATA must not re-enter FindNextBlocks until the tip
         // moves. True anti-DoS HEADER_ONLY never reaches ProcessNewBlock.
@@ -16006,6 +16013,17 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             const auto result{
                 node::matmul_trusted::Add(
                     attestation, hash, expected_height)};
+            // Per-connection BestKnown: MMATTEST is how 1-of-2 attestors
+            // prove the live tip after they stop announcing headers at
+            // each other.
+            if (node::matmul_trusted::ShouldAdvanceBestKnownFromMmAttest(
+                    known_profile1, /*header_failed=*/false, result)) {
+                LOCK(cs_main);
+                if (State(pfrom.GetId()) != nullptr) {
+                    UpdateBlockAvailability(pfrom.GetId(), hash);
+                }
+                wake_block_fetch = true;
+            }
             if (result ==
                 matmul::trusted::AddResult::Accepted) {
                 relay.push_back(attestation);
