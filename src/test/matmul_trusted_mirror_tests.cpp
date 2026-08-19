@@ -1220,6 +1220,28 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(!SignedFrontierPeerMayServeCatchUpTipPlusOne(
         190767, 190816, 190767, false));
     BOOST_CHECK(!SignedFrontierPeerMayServeCatchUpTipPlusOne(-1, 190781, 190858, true));
+    using node::matmul_trusted::ShouldAdvanceBestKnownFromMmAttest;
+    using node::matmul_trusted::ShouldAdvanceBestKnownFromPeerBody;
+    using matmul::trusted::AddResult;
+    BOOST_CHECK(ShouldAdvanceBestKnownFromMmAttest(
+        true, false, AddResult::Accepted));
+    BOOST_CHECK(ShouldAdvanceBestKnownFromMmAttest(
+        true, false, AddResult::Duplicate));
+    BOOST_CHECK(!ShouldAdvanceBestKnownFromMmAttest(
+        true, false, AddResult::Capacity));
+    BOOST_CHECK(!ShouldAdvanceBestKnownFromMmAttest(
+        true, false, AddResult::InvalidSignature));
+    BOOST_CHECK(!ShouldAdvanceBestKnownFromMmAttest(
+        true, false, AddResult::UntrustedSigner));
+    BOOST_CHECK(!ShouldAdvanceBestKnownFromMmAttest(
+        /*known_profile1=*/false, false, AddResult::Accepted));
+    BOOST_CHECK(!ShouldAdvanceBestKnownFromMmAttest(
+        true, /*header_failed=*/true, AddResult::Accepted));
+    BOOST_CHECK(ShouldAdvanceBestKnownFromPeerBody(
+        /*have_index=*/true, /*header_failed=*/false, /*have_data=*/true));
+    BOOST_CHECK(!ShouldAdvanceBestKnownFromPeerBody(true, true, true));
+    BOOST_CHECK(!ShouldAdvanceBestKnownFromPeerBody(true, false, false));
+    BOOST_CHECK(!ShouldAdvanceBestKnownFromPeerBody(false, false, true));
     using node::matmul_trusted::SignedFrontierVersionHandshakeComplete;
     BOOST_CHECK(!SignedFrontierVersionHandshakeComplete(-1));
     BOOST_CHECK(SignedFrontierVersionHandshakeComplete(0));

@@ -850,6 +850,34 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
     return best_known_extends_tip && best_known_height > active_tip_height;
 }
 
+/** A valid Accepted/Duplicate MMATTEST for a known non-failed Profile-1
+ *  header proves the peer has that hash. BestKnown used to move only on
+ *  INV/HEADERS/CMPCTBLOCK, so a 1-of-2 attestor that only relayed
+ *  attestations and bodies stayed pinned at the last header announcement.
+ *  That made FindNextBlocks skip the peer, CHAIN_SYNC_TIMEOUT treat it as
+ *  an old chain, and catch-up GETDATA/GETMMATTEST use a stale pointer.
+ *  Rejected / unknown / failed headers must not advance it (competing
+ *  HEADER_ONLY towers stay untrusted). */
+[[nodiscard]] inline bool ShouldAdvanceBestKnownFromMmAttest(
+    bool known_profile1,
+    bool header_failed,
+    matmul::trusted::AddResult result)
+{
+    if (!known_profile1 || header_failed) return false;
+    return result == matmul::trusted::AddResult::Accepted ||
+           result == matmul::trusted::AddResult::Duplicate;
+}
+
+/** A connected, non-failed body also proves availability. HEADER_ONLY,
+ *  deferred, mutated, or failed deliveries must not move BestKnown. */
+[[nodiscard]] inline bool ShouldAdvanceBestKnownFromPeerBody(
+    bool have_index,
+    bool header_failed,
+    bool have_data)
+{
+    return have_index && !header_failed && have_data;
+}
+
 [[nodiscard]] inline bool SignedFrontierBodySourceCanServeCatchUp(
     bool preferred,
     bool has_best_known,
