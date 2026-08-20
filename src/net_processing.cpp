@@ -4269,6 +4269,28 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
     // hung -connect with no VERSION.
     const bool this_peer_frontier_source{
         PeerIsSignedFrontierBodySource(peer.m_id, *state, &peer)};
+    const bool this_peer_gpu{PeerIsGpuAuthority(peer.m_id, *state)};
+    const int32_t attestor_park{node::matmul_trusted::AttestorDriftYieldDepth(
+        m_chainman.m_options.max_reorg_depth_park.value_or(
+            kernel::GetReorgProtectionProfileSettings(
+                m_chainman.m_options.reorg_protection_profile)
+                .park_depth))};
+    const auto signed_frontier{m_chainman.GetSignedFrontierStatus()};
+    const bool yield_to_this_peer{
+        node::matmul_trusted::AttestorShouldYieldToPeerAttestedChain(
+            node::matmul_trusted::HasLocalSigner(),
+            this_peer_gpu,
+            static_cast<int32_t>(tip_height),
+            state->pindexBestKnownBlock != nullptr
+                ? state->pindexBestKnownBlock->nHeight
+                : -1,
+            attestor_park)};
+    const bool yield_to_frontier{
+        node::matmul_trusted::AttestorShouldYieldToSignedFrontier(
+            node::matmul_trusted::HasLocalSigner(),
+            signed_frontier.blocks_behind,
+            attestor_park)};
+    const bool attestor_yielding{yield_to_this_peer || yield_to_frontier};
     if (node::matmul_trusted::SkipNonPreferredSignedFrontierBodyPeer(
             IsSignedFrontierBodyCatchUp(),
             this_peer_frontier_source,
@@ -4337,7 +4359,8 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
     // node-wide freeze and prevents the active branch from making progress.
     if (recovery.phase == ChainRecoveryPhase::PARKED_NEEDS_OPERATOR &&
         state->pindexBestKnownBlock != nullptr &&
-        m_chainman.IsOnParkedReorgBranch(state->pindexBestKnownBlock)) {
+        m_chainman.IsOnParkedReorgBranch(state->pindexBestKnownBlock) &&
+        !yield_to_this_peer) {
         log_skip(recovery.reason);
         return;
     }
@@ -4371,7 +4394,8 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
                         state->pindexBestKnownBlock),
                     tip,
                     state->pindexBestKnownBlock)};
-            if (!recovery_target && !configured_attested_race) {
+            if (!recovery_target && !configured_attested_race &&
+                !yield_to_this_peer) {
                 log_skip("competing_not_active_tip_chain");
                 return;
             }
@@ -4471,7 +4495,8 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
             m_need_activate_best_chain = true;
             m_last_unconnected_abc_kick = now_kick;
         }
-        if (this_peer_frontier_source) {
+        if (this_peer_frontier_source ||
+            (attestor_yielding && this_peer_gpu)) {
             RequestMatMulTrustedAttestations(
                 state->pindexLastCommonBlock->GetBlockHash(), peer.m_id);
         }
@@ -4556,20 +4581,47 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
             return;
         }
     }
-    if (root_first.lowest_missing != nullptr &&
-        m_matmul_block_lifecycle.HasRetainedBody(
-            root_first.lowest_missing->GetBlockHash())) {
-        // Same stall as HAVE_DATA-unconnected: the followed-chain body is
-        // already in the lifecycle store (pending-cap / budget / ticketless
-        // retry). Re-getdata of this hash or its successors cannot connect
-        // until the scheduler re-admits. GETMMATTEST the retained hash so
-        // quorum can lift ConnectTip without waiting for the 1s retry loop.
-        if (this_peer_frontier_source) {
-            RequestMatMulTrustedAttestations(
-                root_first.lowest_missing->GetBlockHash(), peer.m_id);
+    if (root_first.lowest_missing != nullptr) {
+        const uint256 missing_hash{root_first.lowest_missing->GetBlockHash()};
+        const bool on_winner{
+            m_chainman.IndexIsOnSignedFrontierChain(
+                root_first.lowest_missing) ||
+            m_chainman.IndexLeadsToSignedFrontier(
+                root_first.lowest_missing) ||
+            (state->pindexBestKnownBlock != nullptr &&
+             state->pindexBestKnownBlock->GetAncestor(
+                 root_first.lowest_missing->nHeight) ==
+                 root_first.lowest_missing)};
+        const bool header_failed{
+            (root_first.lowest_missing->nStatus & BLOCK_FAILED_MASK) != 0};
+        const bool catch_up_target{
+            node::matmul_trusted::AttestorYieldHashIsCatchUpTarget(
+                attestor_yielding, on_winner, header_failed)};
+        if (catch_up_target) {
+            m_header_only_competing.erase(missing_hash);
+            m_header_only_followed_skip.erase(missing_hash);
         }
-        log_skip("root_retained_body");
-        return;
+        if (m_matmul_block_lifecycle.HasRetainedBody(missing_hash)) {
+            // Same stall as HAVE_DATA-unconnected: the followed-chain body is
+            // already in the lifecycle store (pending-cap / budget / ticketless
+            // retry). Re-getdata of this hash or its successors cannot connect
+            // until the scheduler re-admits. GETMMATTEST the retained hash so
+            // quorum can lift ConnectTip without waiting for the 1s retry loop.
+            // Local signers never arm signed-frontier catch-up, so also
+            // RefreshRetry(0) when yielding to the longer attested GPU.
+            if (node::matmul_trusted::AttestorYieldMustReadmitRetainedBody(
+                    attestor_yielding, true, catch_up_target)) {
+                (void)m_matmul_block_lifecycle.RefreshRetry(
+                    missing_hash, std::chrono::seconds{0});
+                m_need_activate_best_chain = true;
+            }
+            if (this_peer_frontier_source ||
+                (attestor_yielding && this_peer_gpu && catch_up_target)) {
+                RequestMatMulTrustedAttestations(missing_hash, peer.m_id);
+            }
+            log_skip("root_retained_body");
+            return;
+        }
     }
 
     const CBlockIndex *pindexWalk = state->pindexLastCommonBlock;
@@ -9127,6 +9179,7 @@ void PeerManagerImpl::RequestMatMulTrustedAttestations(
     bool request{false};
     bool asked_preferred_round{false};
     bool signed_frontier_catch_up{false};
+    bool attestor_yielding{false};
     {
         LOCK(cs_main);
         signed_frontier_catch_up = IsSignedFrontierBodyCatchUp();
@@ -9139,14 +9192,63 @@ void PeerManagerImpl::RequestMatMulTrustedAttestations(
         const CBlockIndex* index{
             m_chainman.m_blockman.LookupBlockIndex(hash)};
         const int32_t height{index ? index->nHeight : -1};
+        const int32_t attestor_park{
+            node::matmul_trusted::AttestorDriftYieldDepth(
+                m_chainman.m_options.max_reorg_depth_park.value_or(
+                    kernel::GetReorgProtectionProfileSettings(
+                        m_chainman.m_options.reorg_protection_profile)
+                        .park_depth))};
+        const auto frontier_status_yield{m_chainman.GetSignedFrontierStatus()};
+        bool source_gpu{false};
+        int32_t source_best_h{-1};
+        if (const CNodeState* src_state{State(source)}; src_state != nullptr) {
+            source_gpu = PeerIsGpuAuthority(source, *src_state);
+            if (src_state->pindexBestKnownBlock != nullptr) {
+                source_best_h = src_state->pindexBestKnownBlock->nHeight;
+            }
+        }
+        attestor_yielding =
+            node::matmul_trusted::AttestorShouldYieldToSignedFrontier(
+                node::matmul_trusted::HasLocalSigner(),
+                frontier_status_yield.blocks_behind,
+                attestor_park) ||
+            node::matmul_trusted::AttestorShouldYieldToPeerAttestedChain(
+                node::matmul_trusted::HasLocalSigner(),
+                source_gpu, tip_height, source_best_h, attestor_park);
+        bool on_winner_or_frontier{false};
+        if (index != nullptr) {
+            on_winner_or_frontier =
+                m_chainman.IndexIsOnSignedFrontierChain(index) ||
+                m_chainman.IndexLeadsToSignedFrontier(index);
+            if (!on_winner_or_frontier && source_best_h >= 0) {
+                if (const CNodeState* src_state{State(source)};
+                    src_state != nullptr &&
+                    src_state->pindexBestKnownBlock != nullptr &&
+                    src_state->pindexBestKnownBlock->GetAncestor(
+                        index->nHeight) == index) {
+                    on_winner_or_frontier = true;
+                }
+            }
+        }
+        if (!node::matmul_trusted::AttestorYieldShouldRequestGetMmAttest(
+                attestor_yielding, on_winner_or_frontier)) {
+            return;
+        }
+        if (attestor_yielding && on_winner_or_frontier) {
+            m_matmul_attestation_backoff.erase(hash);
+        }
         // Already-quorum hashes must not occupy GETMMATTEST tokens. Lookback
         // of the active tip, plus header-first skip-GPU, used to re-request
         // the same hash after MMATTEST cleared the in-flight map and drain
         // the archive's 16-token burst so the deferred child was rate-limited
         // forever (qualifier linear-chain stall at the next height).
+        // RefreshRetry(0) so a retained body that already has authority is
+        // re-admitted instead of sitting in root_retained_body.
         if (index != nullptr &&
             m_chainman.IndexHasTrustedMatMulAuthority(index)) {
             m_matmul_attestation_requested.erase(hash);
+            (void)m_matmul_block_lifecycle.RefreshRetry(
+                hash, std::chrono::seconds{0});
             return;
         }
         const bool parked{
@@ -9394,6 +9496,10 @@ void PeerManagerImpl::RequestMatMulTrustedAttestations(
             NODE_MATMUL_TRUSTED_MIRROR};
         const bool consensus_node{
             (services & NODE_MATMUL_CONSENSUS) == NODE_MATMUL_CONSENSUS};
+        if (!node::matmul_trusted::AttestorYieldPreferGetMmAttestPeer(
+                attestor_yielding, gpu_peers.count(id) != 0)) {
+            return;
+        }
         if (!node::matmul_trusted::PreferGetMmAttestPeer(
                 archive, recent_success, trusted_mirror, consensus_node,
                 signed_frontier_catch_up, gpu_peers.count(id) != 0)) {

@@ -878,6 +878,100 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
     return have_index && !header_failed && have_data;
 }
 
+/**
+ * Attestor↔attestor drift yield (1-of-2 / M-of-N GPU signers).
+ *
+ * Local signers are not trusted mirrors, so IsSignedFrontierCatchUp never
+ * arms on them. After two GPUs sit on the same tip they also stop
+ * announcing headers; even with BestKnown advancing from MMATTEST/body,
+ * the loser can sit on root_retained_body with in_flight=0 while GETMMATTEST
+ * tokens go to competing HEADER_ONLY twins (live 2026-08-20: tip 194828,
+ * canonical 194829 retained, peer BestKnown 194851, rejected_unattestable
+ * 239). Once the gap reaches the operator park depth the longer attested
+ * / BestKnown side wins. The loser immediately re-admits the retained
+ * canonical body and GETMMATTEST/GETDATA that suffix from the winning GPU
+ * only. Public / miner peers and failed / off-path hashes stay refused.
+ */
+static constexpr int32_t ATTESTOR_DRIFT_YIELD_DEPTH{6};
+
+/** Resolve the yield threshold. Disabled / unset park uses the EMERGENCY
+ *  default of 6 so a 1-block race does not force a yield. */
+[[nodiscard]] inline int32_t AttestorDriftYieldDepth(uint32_t configured_park)
+{
+    if (configured_park == 0 ||
+        configured_park == std::numeric_limits<uint32_t>::max()) {
+        return ATTESTOR_DRIFT_YIELD_DEPTH;
+    }
+    if (configured_park > static_cast<uint32_t>(
+            std::numeric_limits<int32_t>::max())) {
+        return ATTESTOR_DRIFT_YIELD_DEPTH;
+    }
+    return static_cast<int32_t>(configured_park);
+}
+
+/** This GPU peer is at least `park_depth` ahead of our tip. */
+[[nodiscard]] inline bool AttestorShouldYieldToPeerAttestedChain(
+    bool local_signer,
+    bool peer_is_gpu_attestor,
+    int32_t local_tip_height,
+    int32_t peer_known_height,
+    int32_t park_depth)
+{
+    if (!local_signer || !peer_is_gpu_attestor) return false;
+    if (park_depth <= 0 || local_tip_height < 0 || peer_known_height < 0) {
+        return false;
+    }
+    return peer_known_height >= local_tip_height + park_depth;
+}
+
+/** Signed frontier (any stored quorum) has pulled ahead by park depth. */
+[[nodiscard]] inline bool AttestorShouldYieldToSignedFrontier(
+    bool local_signer,
+    int32_t blocks_behind,
+    int32_t park_depth)
+{
+    if (!local_signer || park_depth <= 0 || blocks_behind < 0) return false;
+    return blocks_behind >= park_depth;
+}
+
+/** Canonical hole on the winner / signed-frontier chain. Competing
+ *  same-height HEADER_ONLY twins are not this. */
+[[nodiscard]] inline bool AttestorYieldHashIsCatchUpTarget(
+    bool yielding,
+    bool on_winner_or_signed_frontier_chain,
+    bool header_failed)
+{
+    return yielding && on_winner_or_signed_frontier_chain && !header_failed;
+}
+
+/** GETMMATTEST destinations while yielding: GPU attestors only. */
+[[nodiscard]] inline bool AttestorYieldPreferGetMmAttestPeer(
+    bool yielding,
+    bool gpu_attestor)
+{
+    if (!yielding) return true;
+    return gpu_attestor;
+}
+
+/** While yielding, request only the winner's attested suffix. */
+[[nodiscard]] inline bool AttestorYieldShouldRequestGetMmAttest(
+    bool yielding,
+    bool on_winner_or_signed_frontier_chain)
+{
+    if (!yielding) return true;
+    return on_winner_or_signed_frontier_chain;
+}
+
+/** Re-admit the retained canonical body now (retry delay 0) instead of
+ *  sitting in root_retained_body while the winner walks away. */
+[[nodiscard]] inline bool AttestorYieldMustReadmitRetainedBody(
+    bool yielding,
+    bool have_retained_body,
+    bool hash_is_catch_up_target)
+{
+    return yielding && have_retained_body && hash_is_catch_up_target;
+}
+
 [[nodiscard]] inline bool SignedFrontierBodySourceCanServeCatchUp(
     bool preferred,
     bool has_best_known,
