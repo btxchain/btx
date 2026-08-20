@@ -175,6 +175,29 @@ peering, and attestor diversity can carry it:
    `-matmultrustedthreshold`. Archives stay CPU. Independent miners keep
    talking to seeds. Adding `N` with `M=1` is only availability; `M≥2` is
    what removes a single key as PoW authority.
+
+The live mainnet pin (1-of-2) is published below. GPU attestors and the
+CPU archives that follow them return the same set from
+`getmatmultrustedstatus` / `getfinalityinfo` (`trusted_signer_pubkeys`,
+`threshold`). P2P seed connect does **not** push keys — miners pin this
+set at bootstrap, then confirm it on local RPC after joining
+`node.btx.dev` / `node.btxchain.org` / `node.btx.tools`.
+
+```ini
+# Mainnet ExactReplay attestors. Public keys only — never a signer WIF.
+matmultrustedpubkey=03d90c148db37da28ce47ce15bade88a177728d663da4bc9ba765943b7d4e4f0aa
+matmultrustedpubkey=0224e80df33697385b54b3c69bae1f097f533c0c43e93c29f73ee97319d4a5e04c
+matmultrustedthreshold=1
+```
+
+```bash
+btx-cli getmatmultrustedstatus
+# configured=true, threshold=1, trusted_signer_pubkeys = the two hex keys above
+```
+
+A miner that omits this pin cannot see `getmatmulattestedtip` and
+`getblocktemplate` may extend an unattested orphan. Do not load
+`-matmulattestationsignerkeyfile` on a miner.
 3. **Convert public seeds to GPU full nodes.** Each converted host runs
    `-matmulvalidation=consensus` and ExactReplays. Trusted-mode on those
    boxes goes away. CPU wallets and explorers can remain light.
@@ -1077,6 +1100,28 @@ ADDR=$(./build/bin/btx-cli -regtest -rpcwallet=miner getnewaddress)
 # -> 200.00000000 (10 blocks x 20 BTX)
 ```
 
+### Attestor pin (mainnet mining bootstrap)
+
+After the node is up and peering with the public seed/archive mesh, treat
+the attestor set as a normal bootstrap check — same class of pin as DNS
+seeds, not a secret:
+
+1. Join the published seeds (`dnsseed=1`, `addnode=node.btx.dev:19335`, …).
+2. Have the two `-matmultrustedpubkey` lines and `-matmultrustedthreshold=1`
+   in `btx.conf` (miner fast-start writes them).
+3. Ping local RPC: `getmatmultrustedstatus` must show `configured=true`
+   and the same `trusted_signer_pubkeys` / `threshold` the archives and
+   GPU attestors return. `getfinalityinfo` repeats the pubs.
+4. Then call `getblocktemplate`. A unique attested child of tip means
+   follow `getmatmulattestedtip` instead of grinding an unattested twin.
+
+P2P `addnode` / DNS seeds do not serve RPC. You confirm the pin on **your**
+`btx-cli`, or on an archive/attestor RPC you already control. Do not take
+signer pubs from a random remote RPC.
+
+`contrib/faststart` `--preset miner` writes this pin and checks it after
+RPC is ready. `contrib/devtools/gen-btx-node-conf.sh` writes it too.
+
 ### Production Mining (getblocktemplate)
 
 ```bash
@@ -1137,6 +1182,8 @@ contrib/mining/backup-wallet.sh \
 | Command | Description |
 |---|---|
 | `getmininginfo` | Current mining state, difficulty, algorithm |
+| `getmatmultrustedstatus` | Attestor pin (`trusted_signer_pubkeys`, `threshold`) and attested tip |
+| `getmatmulattestedtip` | Highest-work block with quorum (GBT parent) |
 | `getblocktemplate` | Block template for external mining |
 | `submitblock` | Submit a solved block |
 | `generatetoaddress` | Mine N blocks (regtest/testnet) |
