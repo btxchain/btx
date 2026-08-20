@@ -24,6 +24,7 @@
 #include <util/translation.h>
 
 #include <array>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -1488,6 +1489,82 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         true, /*from_gpu_attestor=*/false, false));
     BOOST_CHECK_EQUAL(
         node::matmul_trusted::GPU_RETAIN_ATTESTATION_RETRY.count(), 2);
+}
+
+BOOST_AUTO_TEST_CASE(attestor_drift_yield_follows_longer_attested_chain)
+{
+    using node::matmul_trusted::ATTESTOR_DRIFT_YIELD_DEPTH;
+    using node::matmul_trusted::AttestorDriftYieldDepth;
+    using node::matmul_trusted::AttestorShouldYieldToPeerAttestedChain;
+    using node::matmul_trusted::AttestorShouldYieldToSignedFrontier;
+    using node::matmul_trusted::AttestorYieldHashIsCatchUpTarget;
+    using node::matmul_trusted::AttestorYieldMustReadmitRetainedBody;
+    using node::matmul_trusted::AttestorYieldPreferGetMmAttestPeer;
+    using node::matmul_trusted::AttestorYieldShouldRequestGetMmAttest;
+
+    BOOST_CHECK_EQUAL(ATTESTOR_DRIFT_YIELD_DEPTH, 6);
+    BOOST_CHECK_EQUAL(AttestorDriftYieldDepth(6), 6);
+    BOOST_CHECK_EQUAL(AttestorDriftYieldDepth(12), 12);
+    BOOST_CHECK_EQUAL(AttestorDriftYieldDepth(0), ATTESTOR_DRIFT_YIELD_DEPTH);
+    BOOST_CHECK_EQUAL(
+        AttestorDriftYieldDepth(std::numeric_limits<uint32_t>::max()),
+        ATTESTOR_DRIFT_YIELD_DEPTH);
+
+    constexpr int32_t kPark{6};
+    // Live 2026-08-20: loser tip 194828, winner BestKnown 194851.
+    BOOST_CHECK(AttestorShouldYieldToPeerAttestedChain(
+        /*local_signer=*/true, /*peer_is_gpu_attestor=*/true,
+        /*local_tip_height=*/194828, /*peer_known_height=*/194851, kPark));
+    BOOST_CHECK(!AttestorShouldYieldToPeerAttestedChain(
+        true, true, 194828, 194833, kPark));
+    BOOST_CHECK(AttestorShouldYieldToPeerAttestedChain(
+        true, true, 194828, 194834, kPark));
+    BOOST_CHECK(!AttestorShouldYieldToPeerAttestedChain(
+        /*local_signer=*/false, true, 194828, 194851, kPark));
+    BOOST_CHECK(!AttestorShouldYieldToPeerAttestedChain(
+        true, /*peer_is_gpu_attestor=*/false, 194828, 194851, kPark));
+    BOOST_CHECK(!AttestorShouldYieldToPeerAttestedChain(
+        true, true, /*local_tip_height=*/-1, 194851, kPark));
+    BOOST_CHECK(!AttestorShouldYieldToPeerAttestedChain(
+        true, true, 194828, /*peer_known_height=*/-1, kPark));
+    BOOST_CHECK(!AttestorShouldYieldToPeerAttestedChain(
+        true, true, 194828, 194851, /*park_depth=*/0));
+
+    BOOST_CHECK(AttestorShouldYieldToSignedFrontier(
+        /*local_signer=*/true, /*blocks_behind=*/23, kPark));
+    BOOST_CHECK(!AttestorShouldYieldToSignedFrontier(true, 5, kPark));
+    BOOST_CHECK(AttestorShouldYieldToSignedFrontier(true, 6, kPark));
+    BOOST_CHECK(!AttestorShouldYieldToSignedFrontier(
+        /*local_signer=*/false, 23, kPark));
+    BOOST_CHECK(!AttestorShouldYieldToSignedFrontier(true, -1, kPark));
+
+    // Canonical 194829 on the winner chain: catch-up target.
+    BOOST_CHECK(AttestorYieldHashIsCatchUpTarget(
+        /*yielding=*/true, /*on_winner_or_signed_frontier_chain=*/true,
+        /*header_failed=*/false));
+    // Competing same-height HEADER_ONLY twin: not a target.
+    BOOST_CHECK(!AttestorYieldHashIsCatchUpTarget(true, false, false));
+    BOOST_CHECK(!AttestorYieldHashIsCatchUpTarget(
+        true, true, /*header_failed=*/true));
+    BOOST_CHECK(!AttestorYieldHashIsCatchUpTarget(
+        /*yielding=*/false, true, false));
+
+    BOOST_CHECK(AttestorYieldPreferGetMmAttestPeer(
+        /*yielding=*/false, /*gpu_attestor=*/false));
+    BOOST_CHECK(!AttestorYieldPreferGetMmAttestPeer(true, false));
+    BOOST_CHECK(AttestorYieldPreferGetMmAttestPeer(true, true));
+
+    BOOST_CHECK(AttestorYieldShouldRequestGetMmAttest(
+        /*yielding=*/false, /*on_winner_or_signed_frontier_chain=*/false));
+    BOOST_CHECK(!AttestorYieldShouldRequestGetMmAttest(true, false));
+    BOOST_CHECK(AttestorYieldShouldRequestGetMmAttest(true, true));
+
+    BOOST_CHECK(AttestorYieldMustReadmitRetainedBody(
+        /*yielding=*/true, /*have_retained_body=*/true,
+        /*hash_is_catch_up_target=*/true));
+    BOOST_CHECK(!AttestorYieldMustReadmitRetainedBody(false, true, true));
+    BOOST_CHECK(!AttestorYieldMustReadmitRetainedBody(true, false, true));
+    BOOST_CHECK(!AttestorYieldMustReadmitRetainedBody(true, true, false));
 }
 
 BOOST_AUTO_TEST_CASE(signer_getmmattest_historical_and_hammer_ban)
