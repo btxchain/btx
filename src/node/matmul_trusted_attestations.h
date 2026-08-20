@@ -634,19 +634,39 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
  *  the missing root of a short tip-race reorg (sibling of tip / first hole
  *  on the authority peer's best-known), or a followed-chain HAVE_DATA /
  *  retained GPU body still waiting for MMATTEST. Competing headers at
- *  1879xx are neither. Parked deep-reorg branches never prefer. */
+ *  1879xx are neither. Parked deep-reorg branches never prefer.
+ *
+ *  During signed-frontier catch-up the moving frontier hash and a recent
+ *  active ancestor are not preferred. Live 2026-08-20: a trusted mirror
+ *  sat at tip 194727 (needed_height=194728) with catch_up=1 while
+ *  GETMMATTEST send hammered mid-suffix 194999 (stale frontier) and the
+ *  current frontier (no_such_block), so tip+1 never got a slot. */
 [[nodiscard]] inline bool TrustedMirrorPreferGetMmAttest(
     bool active_tip_child,
     bool short_tip_reorg_missing_root,
     bool on_parked_reorg_branch = false,
     bool recent_active_ancestor = false,
     bool followed_body_awaiting_attestation = false,
-    bool is_signed_frontier_hash = false)
+    bool is_signed_frontier_hash = false,
+    bool signed_frontier_catch_up = false)
 {
     if (on_parked_reorg_branch) return false;
-    return active_tip_child || short_tip_reorg_missing_root ||
-           recent_active_ancestor || followed_body_awaiting_attestation ||
-           is_signed_frontier_hash;
+    const bool hole{active_tip_child || short_tip_reorg_missing_root ||
+                    followed_body_awaiting_attestation};
+    if (signed_frontier_catch_up) return hole;
+    return hole || recent_active_ancestor || is_signed_frontier_hash;
+}
+
+/** Catch-up must not allocate a GETMMATTEST slot for a non-hole hash.
+ *  Non-preferred requests still occupied 16 mid-suffix slots (live
+ *  2026-08-20: outstanding_slots=16/1024, rejected_unattestable climbing)
+ *  while 194728 sat HEADER_ONLY with local quorum and in_flight=0. */
+[[nodiscard]] inline bool TrustedMirrorCatchUpShouldRequestGetMmAttest(
+    bool signed_frontier_catch_up,
+    bool preferred)
+{
+    if (!signed_frontier_catch_up) return true;
+    return preferred;
 }
 
 /** GETMMATTEST destinations. NODE_MATMUL_ATTESTATION_ARCHIVE means the

@@ -944,6 +944,51 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(!TrustedMirrorPreferGetMmAttest(
         /*active_tip_child=*/false, /*short_tip_reorg_missing_root=*/true,
         /*on_parked_reorg_branch=*/true));
+    // Catch-up: only the first hole. Frontier / ancestor preference is
+    // near-tip work and was the live 194999 GETMMATTEST hammer.
+    BOOST_CHECK(TrustedMirrorPreferGetMmAttest(
+        /*active_tip_child=*/true, /*short_tip_reorg_missing_root=*/false,
+        /*on_parked_reorg_branch=*/false, /*recent_active_ancestor=*/false,
+        /*followed_body_awaiting_attestation=*/false,
+        /*is_signed_frontier_hash=*/false,
+        /*signed_frontier_catch_up=*/true));
+    BOOST_CHECK(TrustedMirrorPreferGetMmAttest(
+        /*active_tip_child=*/false, /*short_tip_reorg_missing_root=*/true,
+        /*on_parked_reorg_branch=*/false, /*recent_active_ancestor=*/false,
+        /*followed_body_awaiting_attestation=*/false,
+        /*is_signed_frontier_hash=*/false,
+        /*signed_frontier_catch_up=*/true));
+    BOOST_CHECK(TrustedMirrorPreferGetMmAttest(
+        /*active_tip_child=*/false, /*short_tip_reorg_missing_root=*/false,
+        /*on_parked_reorg_branch=*/false, /*recent_active_ancestor=*/false,
+        /*followed_body_awaiting_attestation=*/true,
+        /*is_signed_frontier_hash=*/false,
+        /*signed_frontier_catch_up=*/true));
+    BOOST_CHECK(!TrustedMirrorPreferGetMmAttest(
+        /*active_tip_child=*/false, /*short_tip_reorg_missing_root=*/false,
+        /*on_parked_reorg_branch=*/false, /*recent_active_ancestor=*/false,
+        /*followed_body_awaiting_attestation=*/false,
+        /*is_signed_frontier_hash=*/true,
+        /*signed_frontier_catch_up=*/true));
+    BOOST_CHECK(!TrustedMirrorPreferGetMmAttest(
+        /*active_tip_child=*/false, /*short_tip_reorg_missing_root=*/false,
+        /*on_parked_reorg_branch=*/false, /*recent_active_ancestor=*/true,
+        /*followed_body_awaiting_attestation=*/false,
+        /*is_signed_frontier_hash=*/false,
+        /*signed_frontier_catch_up=*/true));
+    BOOST_CHECK(!TrustedMirrorPreferGetMmAttest(
+        /*active_tip_child=*/true, /*short_tip_reorg_missing_root=*/false,
+        /*on_parked_reorg_branch=*/true, /*recent_active_ancestor=*/false,
+        /*followed_body_awaiting_attestation=*/false,
+        /*is_signed_frontier_hash=*/false,
+        /*signed_frontier_catch_up=*/true));
+    using node::matmul_trusted::TrustedMirrorCatchUpShouldRequestGetMmAttest;
+    BOOST_CHECK(TrustedMirrorCatchUpShouldRequestGetMmAttest(
+        /*signed_frontier_catch_up=*/false, /*preferred=*/false));
+    BOOST_CHECK(TrustedMirrorCatchUpShouldRequestGetMmAttest(
+        /*signed_frontier_catch_up=*/true, /*preferred=*/true));
+    BOOST_CHECK(!TrustedMirrorCatchUpShouldRequestGetMmAttest(
+        /*signed_frontier_catch_up=*/true, /*preferred=*/false));
     using node::matmul_trusted::PreferGetMmAttestPeer;
     BOOST_CHECK(PreferGetMmAttestPeer(
         /*has_attestation_archive_bit=*/true, /*recent_valid_mmattest=*/false));

@@ -8917,7 +8917,7 @@ void PeerManagerImpl::MaybeRequestTrustedMirrorPreferredAttestations(
                 TrustedMirrorShortTipReorg(tip, target),
                 /*on_parked_reorg_branch=*/false,
                 recent_active_ancestor, followed_body_awaiting,
-                is_signed_frontier)) {
+                is_signed_frontier, IsSignedFrontierBodyCatchUp())) {
             return;
         }
         RequestMatMulTrustedAttestations(target->GetBlockHash(),
@@ -9174,9 +9174,17 @@ void PeerManagerImpl::RequestMatMulTrustedAttestations(
         const bool preferred{
             node::matmul_trusted::TrustedMirrorPreferGetMmAttest(
                 tip_child, short_reorg, parked, recent_active_ancestor,
-                followed_body_awaiting, is_signed_frontier)};
+                followed_body_awaiting, is_signed_frontier,
+                signed_frontier_catch_up)};
+        if (!node::matmul_trusted::TrustedMirrorCatchUpShouldRequestGetMmAttest(
+                signed_frontier_catch_up, preferred)) {
+            // Drop a stale frontier / mid-suffix token so TTL refresh
+            // cannot keep GETMMATTEST-sending it (live 194999 hammer).
+            m_matmul_attestation_requested.erase(hash);
+            return;
+        }
         if (tip_child || short_reorg || followed_body_awaiting ||
-            is_signed_frontier) {
+            (is_signed_frontier && !signed_frontier_catch_up)) {
             m_matmul_attestation_backoff.erase(hash);
         }
 
