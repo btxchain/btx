@@ -62,12 +62,22 @@ addnode=node.btxchain.org:19335
 addnode=node.btx.tools:19335
 addnode=146.190.179.86:19335
 addnode=164.90.246.229:19335
+
+# Published mainnet ExactReplay attestors (public keys only).
+# Same set GPU attestors and following archives return from
+# getmatmultrustedstatus / getfinalityinfo. P2P seeds do not push keys.
+matmultrustedpubkey=03d90c148db37da28ce47ce15bade88a177728d663da4bc9ba765943b7d4e4f0aa
+matmultrustedpubkey=0224e80df33697385b54b3c69bae1f097f533c0c43e93c29f73ee97319d4a5e04c
+matmultrustedthreshold=1
 ```
 
 Notes:
 
 - `19335` is the BTX mainnet P2P port.
 - `19334` is the BTX mainnet default RPC port.
+- After `btxd` is up, `btx-cli getmatmultrustedstatus` must show
+  `configured=true` and the two pubkeys above. That is the mining/archive
+  bootstrap pin (same RPC GPU attestors and following archives serve).
 - `addnode=` seeds initial peers while preserving broader peer discovery.
 - the current public DNS bootstrap set is `node.btx.dev`,
   `node.btxchain.org`, and `node.btx.tools`; direct IP addnodes are optional
