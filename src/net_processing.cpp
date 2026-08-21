@@ -487,6 +487,9 @@ static constexpr auto MATMUL_ASYNC_VERIFY_STALE_AFTER{10min};
  *  maximum; runtime code shortens it to the actual remaining window whenever a
  *  peer/global RC budget already has a known refill time. */
 static constexpr auto MATMUL_BUDGET_DEFER_COOLDOWN{60s};
+/** Losing-twin fossils must not win NextRetry every cooldown while the
+ *  signed frontier is off-chain (live 2026-08-20, 45+ min wedge). */
+static constexpr auto MATMUL_FRONTIER_OFFCHAIN_FOSSIL_RETRY{10min};
 static constexpr auto MATMUL_BUDGET_DEFER_RETRY_FLOOR{1s};
 /** Pending-work saturation is capacity pressure, not a rate-window miss. */
 static constexpr auto MATMUL_PENDING_RETRY_COOLDOWN{1s};
@@ -2922,6 +2925,16 @@ void PeerManagerImpl::RefreshMatMulDeferredBodyRetry(
     const CBlockIndex* index)
     EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
+[[nodiscard]] static bool IndexIsShortReorgAttestedForkChild(
+    const ChainstateManager& chainman,
+    const CBlockIndex* tip,
+    const CBlockIndex* index)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
+[[nodiscard]] static const CBlockIndex* FindShortReorgAttestedForkChild(
+    const ChainstateManager& chainman)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
 void PeerManagerImpl::RetryMatMulDeferredBodies()
 {
     AssertLockNotHeld(cs_main);
@@ -2997,6 +3010,32 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
                     if (!m_chainman.m_blockman.ReadBlock(*replay_block, *child)) {
                         replay_block.reset();
                     }
+            } else if (const CBlockIndex* const fork_child{
+                           FindShortReorgAttestedForkChild(m_chainman)};
+                       fork_child != nullptr &&
+                       (fork_child->nStatus & BLOCK_HAVE_DATA) != 0 &&
+                       (fork_child->nStatus & BLOCK_FAILED_MASK) == 0) {
+                    // Live 2026-08-20: m_best_header stayed on the unattested
+                    // equal-work twin so the followed tip-child path never
+                    // fired. Re-admit the attested sibling (LCA+1).
+                    if (m_chainman.IsOnParkedReorgBranch(fork_child)) {
+                        (void)m_chainman.UnparkReorgBranchContainingBlock(
+                            fork_child);
+                    }
+                    (void)m_chainman.NormalizeReorgRecovery(tip);
+                    reverify_hash = fork_child->GetBlockHash();
+                    reverify_height = fork_child->nHeight;
+                    reverify_header = fork_child->GetBlockHeader();
+                    need_exact_replay =
+                        (fork_child->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) == 0 &&
+                        !node::matmul_trusted::SkipExactReplayForGpuAttestation(
+                            m_chainman.IndexHasTrustedMatMulAuthority(fork_child));
+                    m_chainman.ActiveChainstate().TryAddBlockIndexCandidate(
+                        const_cast<CBlockIndex*>(fork_child));
+                    replay_block = std::make_shared<CBlock>();
+                    if (!m_chainman.m_blockman.ReadBlock(*replay_block, *fork_child)) {
+                        replay_block.reset();
+                    }
             }
         }
         static std::atomic<int64_t> g_followed_tip_child_replay_at{0};
@@ -3043,10 +3082,24 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
     // unresponsive, and nothing is logged. Observed on a live archive
     // 2026-08-11: 65 threads, 59 in futex wait, no log output for 28 minutes,
     // requiring SIGKILL. Never hold the store mutex while acquiring cs_main.
-    const uint256 wanted{WITH_LOCK(cs_main,
-        return m_chainman.ActiveChain().Tip()
-                   ? m_chainman.ActiveChain().Tip()->GetBlockHash()
-                   : uint256{})};
+    uint256 wanted{};
+    uint256 fork_child_hash{};
+    bool frontier_off_chain{false};
+    {
+        LOCK(cs_main);
+        const CBlockIndex* const tip{m_chainman.ActiveChain().Tip()};
+        if (tip != nullptr) wanted = tip->GetBlockHash();
+        const auto frontier{m_chainman.GetSignedFrontierStatus()};
+        frontier_off_chain = frontier.available && !frontier.on_active_chain;
+        if (const CBlockIndex* const fork{
+                FindShortReorgAttestedForkChild(m_chainman)};
+            fork != nullptr && fork->pprev != nullptr) {
+            // NextRetry matches hashPrevBlock. The attested sibling's
+            // parent is the LCA, not the losing tip (live 195603).
+            wanted = fork->pprev->GetBlockHash();
+            fork_child_hash = fork->GetBlockHash();
+        }
+    }
     const bool idle_catchup{
         m_matmul_pending_verifications.load(std::memory_order_relaxed) == 0 &&
         m_matmul_rc_pending_verifications.load(std::memory_order_relaxed) == 0};
@@ -3056,6 +3109,30 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
     candidate_hash = retry->first;
     candidate = retry->second;
     if (!candidate.block) return;
+    if (frontier_off_chain && candidate_hash != fork_child_hash) {
+        bool allow{false};
+        {
+            LOCK(cs_main);
+            const CBlockIndex* const tip{m_chainman.ActiveTip()};
+            const CBlockIndex* const idx{
+                m_chainman.m_blockman.LookupBlockIndex(candidate_hash)};
+            allow = node::matmul_trusted::ShouldRetryBudgetDeferredWhileFrontierOffChain(
+                /*frontier_off_active_chain=*/true,
+                IndexIsShortReorgAttestedForkChild(m_chainman, tip, idx),
+                m_chainman.IndexIsOnSignedFrontierChain(idx),
+                IndexIsFollowedTipChild(m_chainman, tip, idx));
+        }
+        if (!allow) {
+            if (m_matmul_block_lifecycle.RefreshRetry(
+                    candidate_hash, MATMUL_FRONTIER_OFFCHAIN_FOSSIL_RETRY)) {
+                LogDebug(BCLog::NET,
+                         "Deferring off-frontier budget-deferred fossil %s "
+                         "while signed frontier is off the active chain\n",
+                         candidate_hash.ToString());
+            }
+            return;
+        }
+    }
 
     // Prefer the original source so permission, address and keyed-netgroup
     // accounting stay charged. If that peer is gone, replay locally: waiting
@@ -3827,6 +3904,60 @@ static bool TrustedMirrorMayDownloadIndex(
 //! clear only on ActiveTipChange. Live 2026-08-15 09:14Z: signer tip
 //! 189834, followed 189835 child skipped (`root_header_only_skip`),
 //! GBT kept templating 189835, and no newer attestation was signed.
+[[nodiscard]] static bool IndexIsShortReorgAttestedForkChild(
+    const ChainstateManager& chainman,
+    const CBlockIndex* tip,
+    const CBlockIndex* index)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    if (tip == nullptr || index == nullptr || index == tip) return false;
+    if ((index->nStatus & BLOCK_FAILED_MASK) != 0) return false;
+    if (chainman.IsOnParkedReorgBranch(index)) return false;
+    const bool on_active{
+        index->nHeight <= tip->nHeight &&
+        tip->GetAncestor(index->nHeight) == index};
+    if (on_active) return false;
+    const CBlockIndex* const lca{LastCommonAncestor(tip, index)};
+    if (lca == nullptr || index->pprev != lca) return false;
+    const bool covered{
+        chainman.IndexIsOnSignedFrontierChain(index) ||
+        chainman.IndexHasTrustedMatMulAuthority(index)};
+    return node::matmul_trusted::ConsensusMaySpendExactReplayGpuForShortReorgForkChild(
+        node::matmul_trusted::IsConfigured(),
+        chainman.IndexHasTrustedMatMulAuthority(tip),
+        covered,
+        /*index_is_tip=*/false,
+        tip->nHeight - lca->nHeight,
+        /*is_immediate_fork_child=*/true,
+        /*index_on_active_chain=*/false,
+        node::matmul_trusted::HasCompetingQuorum(
+            index->GetBlockHash(), index->nHeight),
+        /*on_parked=*/false);
+}
+
+[[nodiscard]] static const CBlockIndex* FindShortReorgAttestedForkChild(
+    const ChainstateManager& chainman)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    const CBlockIndex* const tip{chainman.ActiveTip()};
+    if (tip == nullptr) return nullptr;
+    const auto frontier{chainman.GetSignedFrontierStatus()};
+    if (!frontier.available || !frontier.hash_known || frontier.on_active_chain) {
+        return nullptr;
+    }
+    const CBlockIndex* const frontier_index{
+        chainman.m_blockman.LookupBlockIndex(frontier.hash)};
+    if (frontier_index == nullptr) return nullptr;
+    const CBlockIndex* const lca{LastCommonAncestor(tip, frontier_index)};
+    if (lca == nullptr) return nullptr;
+    const CBlockIndex* const fork_child{
+        frontier_index->GetAncestor(lca->nHeight + 1)};
+    if (!IndexIsShortReorgAttestedForkChild(chainman, tip, fork_child)) {
+        return nullptr;
+    }
+    return fork_child;
+}
+
 [[nodiscard]] static bool IsHeaderOnlyFetchSuppressed(
     const ChainstateManager& chainman,
     const CBlockIndex* tip,
@@ -3836,6 +3967,7 @@ static bool TrustedMirrorMayDownloadIndex(
     EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
     if (index == nullptr) return false;
+    if (IndexIsShortReorgAttestedForkChild(chainman, tip, index)) return false;
     if (chainman.IndexHasTrustedMatMulAuthority(index)) return false;
     if (chainman.IndexIsOnSignedFrontierChain(index)) return false;
     if (chainman.IndexIsAttestedChainTipChild(tip, index)) return false;
@@ -3970,6 +4102,13 @@ static uint256 g_configured_claimed_tip_child{};
 {
     if (tip == nullptr || index == nullptr) return false;
     if (node::matmul_trusted::IsTrustedMirror()) return false;
+    // Live 2026-08-20: local-signer ExactReplay required pprev==tip, so the
+    // attested equal-work sibling (LCA+1) was HEADER_ONLY-skipped and the
+    // node sat inflight=0 / GPU 0% for 45+ minutes.
+    if (IndexIsShortReorgAttestedForkChild(chainman, tip, index)) {
+        g_configured_claimed_tip_child = index->GetBlockHash();
+        return true;
+    }
     if (node::matmul_trusted::HasLocalSigner()) {
         // Unique attested tip-child toward the signed frontier: catch-up
         // ExactReplay / re-admit even when a competing unattested sibling
@@ -8969,7 +9108,7 @@ void PeerManagerImpl::MaybeRequestTrustedMirrorPreferredAttestations(
                 TrustedMirrorShortTipReorg(tip, target),
                 /*on_parked_reorg_branch=*/false,
                 recent_active_ancestor, followed_body_awaiting,
-                is_signed_frontier)) {
+                is_signed_frontier, IsSignedFrontierBodyCatchUp())) {
             return;
         }
         RequestMatMulTrustedAttestations(target->GetBlockHash(),
@@ -9276,9 +9415,17 @@ void PeerManagerImpl::RequestMatMulTrustedAttestations(
         const bool preferred{
             node::matmul_trusted::TrustedMirrorPreferGetMmAttest(
                 tip_child, short_reorg, parked, recent_active_ancestor,
-                followed_body_awaiting, is_signed_frontier)};
+                followed_body_awaiting, is_signed_frontier,
+                signed_frontier_catch_up)};
+        if (!node::matmul_trusted::TrustedMirrorCatchUpShouldRequestGetMmAttest(
+                signed_frontier_catch_up, preferred)) {
+            // Drop a stale frontier / mid-suffix token so TTL refresh
+            // cannot keep GETMMATTEST-sending it (sfo3 a3e41371@194999).
+            m_matmul_attestation_requested.erase(hash);
+            return;
+        }
         if (tip_child || short_reorg || followed_body_awaiting ||
-            is_signed_frontier) {
+            (is_signed_frontier && !signed_frontier_catch_up)) {
             m_matmul_attestation_backoff.erase(hash);
         }
 

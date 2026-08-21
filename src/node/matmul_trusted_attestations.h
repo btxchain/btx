@@ -372,6 +372,48 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
     return false;
 }
 
+/** Equal-work lost twin (live 2026-08-20 consensus node): unattested tip
+ *  at H, attested sibling at H, signed frontier HEADER_ONLY at H+N.
+ *  The winner's pprev is the LCA, not the current tip, so the local-signer
+ *  ExactReplay gate (pprev==tip) HEADER_ONLY-skipped it forever. Spend GPU
+ *  only for the immediate attested fork-child of a short reorg (depth 1–6)
+ *  while the tip itself has no quorum. Dual-attested same-height twins,
+ *  parked branches, fossils, and already-canonical ancestors stay off. */
+[[nodiscard]] inline bool ConsensusMaySpendExactReplayGpuForShortReorgForkChild(
+    bool configured,
+    bool tip_has_quorum,
+    bool index_covered_by_attestation,
+    bool index_is_tip,
+    int lca_depth,
+    bool is_immediate_fork_child,
+    bool index_on_active_chain,
+    bool has_competing_quorum,
+    bool on_parked)
+{
+    if (!configured || index_is_tip || on_parked || index_on_active_chain) {
+        return false;
+    }
+    if (tip_has_quorum || has_competing_quorum) return false;
+    if (!index_covered_by_attestation || !is_immediate_fork_child) return false;
+    return TrustedMirrorIsShortTipReorg(lca_depth);
+}
+
+/** While the signed frontier is off the active chain, budget-deferred
+ *  retry may only re-admit the attested fork-child / frontier path.
+ *  Historical losing twins (live 195579/195599/195601) occupied admission
+ *  every 20s–2min with GPU at 0% and inflight=0. */
+[[nodiscard]] inline bool ShouldRetryBudgetDeferredWhileFrontierOffChain(
+    bool frontier_off_active_chain,
+    bool hash_is_short_reorg_attested_fork_child,
+    bool hash_on_signed_frontier_chain,
+    bool hash_is_followed_tip_child)
+{
+    if (!frontier_off_active_chain) return true;
+    return hash_is_short_reorg_attested_fork_child ||
+           hash_on_signed_frontier_chain ||
+           hash_is_followed_tip_child;
+}
+
 /** Skip FindUniqueCompetingAttestedIndex's HEADER_ONLY-hole pprev walk.
  *  If `idx` is already on the active chain, LastCommonAncestor(tip, idx)
  *  is `idx`. Walking `idx->pprev` until that LCA never hits `idx` and
@@ -634,19 +676,39 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
  *  the missing root of a short tip-race reorg (sibling of tip / first hole
  *  on the authority peer's best-known), or a followed-chain HAVE_DATA /
  *  retained GPU body still waiting for MMATTEST. Competing headers at
- *  1879xx are neither. Parked deep-reorg branches never prefer. */
+ *  1879xx are neither. Parked deep-reorg branches never prefer.
+ *
+ *  During signed-frontier catch-up the moving frontier hash and a recent
+ *  active ancestor are not preferred. Live sfo3 2026-08-20: catch_up=1,
+ *  needed_height=194728, GETMMATTEST send hammered mid-suffix 194999
+ *  (stale frontier) and the current frontier (no_such_block) so tip+1
+ *  never got a slot. */
 [[nodiscard]] inline bool TrustedMirrorPreferGetMmAttest(
     bool active_tip_child,
     bool short_tip_reorg_missing_root,
     bool on_parked_reorg_branch = false,
     bool recent_active_ancestor = false,
     bool followed_body_awaiting_attestation = false,
-    bool is_signed_frontier_hash = false)
+    bool is_signed_frontier_hash = false,
+    bool signed_frontier_catch_up = false)
 {
     if (on_parked_reorg_branch) return false;
-    return active_tip_child || short_tip_reorg_missing_root ||
-           recent_active_ancestor || followed_body_awaiting_attestation ||
-           is_signed_frontier_hash;
+    const bool hole{active_tip_child || short_tip_reorg_missing_root ||
+                    followed_body_awaiting_attestation};
+    if (signed_frontier_catch_up) return hole;
+    return hole || recent_active_ancestor || is_signed_frontier_hash;
+}
+
+/** Catch-up must not allocate a GETMMATTEST slot for a non-hole hash.
+ *  Non-preferred requests still occupied 16 mid-suffix slots on sfo3
+ *  (outstanding_slots=16/1024, rejected_unattestable climbing) while
+ *  194728 sat HEADER_ONLY with local quorum and in_flight=0. */
+[[nodiscard]] inline bool TrustedMirrorCatchUpShouldRequestGetMmAttest(
+    bool signed_frontier_catch_up,
+    bool preferred)
+{
+    if (!signed_frontier_catch_up) return true;
+    return preferred;
 }
 
 /** GETMMATTEST destinations. NODE_MATMUL_ATTESTATION_ARCHIVE means the
