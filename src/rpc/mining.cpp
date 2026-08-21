@@ -1899,6 +1899,12 @@ static UniValue BuildBackendRuntimeProfile(
             matmul::v4::rc::RCAcceleratorScheduler::Priority;
         UniValue lanes(UniValue::VOBJ);
         lanes.pushKV(
+            "active_tip_validation",
+            lane_object(scheduler.lanes[
+                static_cast<size_t>(RCPriority::ActiveTipValidation)],
+                scheduler.lane_queue_limits[
+                    static_cast<size_t>(RCPriority::ActiveTipValidation)]));
+        lanes.pushKV(
             "candidate_mining",
             lane_object(scheduler.lanes[
                 static_cast<size_t>(RCPriority::CandidateMining)],
@@ -6388,7 +6394,7 @@ static RPCHelpMan getmininginfo()
                                 {RPCResult::Type::NUM, "authenticated_relay_samples", "Locally ExactReplay-authenticated header-to-body transport samples"},
                                 {RPCResult::Type::NUM, "last_authenticated_relay_s", "Most recent authenticated header-to-body transport interval"},
                                 {RPCResult::Type::NUM, "max_authenticated_relay_s", "Maximum authenticated header-to-body transport interval"},
-                                {RPCResult::Type::OBJ_DYN, "lanes", "Per-priority candidate, reseal, tip-validation, and speculative queue/execution telemetry",
+                                {RPCResult::Type::OBJ_DYN, "lanes", "Per-priority active-tip validation, candidate, reseal, generic tip-validation, and speculative queue/execution telemetry",
                                 {
                                     {RPCResult::Type::OBJ, "lane", "One scheduler lane",
                                     {

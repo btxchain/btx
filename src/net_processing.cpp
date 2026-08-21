@@ -10267,6 +10267,7 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
         params.IsMatMulTrustedReplayAttestationActive(index.nHeight)};
 
     bool authenticated_tip_child{false};
+    bool active_tip_validation{false};
     bool skip_exactreplay_gpu{false};
     std::optional<int64_t> parent_mtp;
     {
@@ -10295,6 +10296,14 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
             skip_exactreplay_gpu = true;
         } else {
             parent_mtp = parent->GetMedianTimePast();
+            // Header admission has already completed the cheap contextual
+            // checks and MatMulMaySpendExactReplayGpu selected at most one
+            // configured tip child. Only the unique followed successor may
+            // interrupt CandidateMining; racing siblings keep the ordinary
+            // bounded validation priorities.
+            active_tip_validation = authenticated_tip_child &&
+                IsAuthenticatedChainProgressCandidate(
+                    m_chainman, CBlock{header}, /*requested=*/true);
         }
     }
     if (skip_exactreplay_gpu) {
@@ -10408,8 +10417,11 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
                 },
                 .header =
                     std::make_shared<const CBlockHeader>(header),
-                .priority = node::MatMulVerifyWorker::Priority::
-                    AuthenticatedTipChild,
+                .priority = active_tip_validation
+                    ? node::MatMulVerifyWorker::Priority::
+                          ActiveTipValidation
+                    : node::MatMulVerifyWorker::Priority::
+                          AuthenticatedTipChild,
             };
             if (m_matmul_verify_worker
                     ->HandoffAuthenticatedTip(replacement) ==
@@ -10558,9 +10570,11 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
             ClearMatMulRCBodyDeferred(hash);
         },
         .header = std::make_shared<const CBlockHeader>(header),
-        .priority = authenticated_tip_child
-            ? node::MatMulVerifyWorker::Priority::AuthenticatedTipChild
-            : node::MatMulVerifyWorker::Priority::CompetingBranch,
+        .priority = active_tip_validation
+            ? node::MatMulVerifyWorker::Priority::ActiveTipValidation
+            : authenticated_tip_child
+                ? node::MatMulVerifyWorker::Priority::AuthenticatedTipChild
+                : node::MatMulVerifyWorker::Priority::CompetingBranch,
         .rc_pending_lease = rc_pending_slot,
         .rc_speculative_lease = speculative_slot,
         .retarget_speculative_lease =
@@ -12063,11 +12077,27 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                     if (parent != nullptr &&
                         parent->nAuthenticatedChainWork ==
                             parent->nChainWork) {
-                        priority = parent == active_tip
-                            ? node::MatMulVerifyWorker::Priority::
-                                  AuthenticatedTipChild
-                            : node::MatMulVerifyWorker::Priority::
-                                  CompetingBranch;
+                        if (parent == active_tip) {
+                            // Complete-body admission already ran CheckBlock,
+                            // AcceptBlockHeader, and the contextual body-only
+                            // checks. Preserve the sibling-flood guard by
+                            // granting immediate mining preemption only to the
+                            // unique followed child of this authenticated tip.
+                            const bool prechecked{
+                                matmul_admission.state !=
+                                MatMulBlockAdmission::State::NOT_PRECHECKED};
+                            priority = prechecked &&
+                                    IsAuthenticatedChainProgressCandidate(
+                                        m_chainman, *block,
+                                        force_processing)
+                                ? node::MatMulVerifyWorker::Priority::
+                                      ActiveTipValidation
+                                : node::MatMulVerifyWorker::Priority::
+                                      AuthenticatedTipChild;
+                        } else {
+                            priority = node::MatMulVerifyWorker::Priority::
+                                CompetingBranch;
+                        }
                     }
                 }
                 // Both callbacks must share source_pin by copy. An init-capture

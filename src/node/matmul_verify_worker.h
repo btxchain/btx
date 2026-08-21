@@ -82,6 +82,9 @@ public:
         Background = 0,
         CompetingBranch = 1,
         AuthenticatedTipChild = 2,
+        //! Unique followed child selected to advance the authenticated tip.
+        //! The accelerator scheduler may immediately preempt CandidateMining.
+        ActiveTipValidation = 3,
     };
 
     enum class EnqueueMode : uint8_t {
@@ -182,8 +185,8 @@ public:
      *  synchronously on the P2P message thread. An authenticated-tip child
      *  preempts lower-priority in-flight speculation so a valid admission
      *  ticket cannot reserve the sole device lane indefinitely. A body-holding
-     *  CompetingBranch / AuthenticatedTipChild already running ExactReplay is
-     *  never preempted by a later header-only AuthenticatedTipChild. Same-hash
+     *  CompetingBranch / tip-child already running ExactReplay is never
+     *  preempted by a later header-only tip-child. Same-hash
      *  re-enqueue after a retryable cancel is Deferred until the worker-local
      *  backoff expires. Threads are started lazily. */
     EnqueueResult Enqueue(

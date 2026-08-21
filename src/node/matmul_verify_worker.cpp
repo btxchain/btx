@@ -26,6 +26,18 @@
 
 namespace node {
 
+namespace {
+
+bool IsTipChildPriority(MatMulVerifyWorker::Priority priority)
+{
+    return priority ==
+               MatMulVerifyWorker::Priority::AuthenticatedTipChild ||
+           priority ==
+               MatMulVerifyWorker::Priority::ActiveTipValidation;
+}
+
+} // namespace
+
 MatMulVerifyWorker::MatMulVerifyWorker(const Consensus::Params& params, uint32_t max_threads,
                                        std::function<bool(const CBlock&, int32_t, std::optional<int64_t>)> verify_for_test)
     : m_params{params},
@@ -97,7 +109,7 @@ MatMulVerifyWorker::EnqueueResult MatMulVerifyWorker::Enqueue(
         if (UnderCancelRetryBackoff(hash)) {
             return EnqueueResult::Deferred;
         }
-        if (job.priority == Priority::AuthenticatedTipChild &&
+        if (IsTipChildPriority(job.priority) &&
             (!job.cancelled ||
              !job.cancelled->load(std::memory_order_relaxed))) {
             // A valid admission ticket buys a bounded verification attempt,
@@ -124,13 +136,11 @@ MatMulVerifyWorker::EnqueueResult MatMulVerifyWorker::Enqueue(
                 }
                 const bool lower_priority{
                     static_cast<uint8_t>(pending->job.priority) <
-                    static_cast<uint8_t>(
-                        Priority::AuthenticatedTipChild)};
+                    static_cast<uint8_t>(job.priority)};
                 const bool body_preempts_equal_speculation{
                     job.block && pending->job.IsHeaderOnly() &&
                     !pending->body_joined &&
-                    pending->job.priority ==
-                        Priority::AuthenticatedTipChild};
+                    pending->job.priority == job.priority};
                 if (!lower_priority &&
                     !body_preempts_equal_speculation) {
                     continue;
@@ -164,7 +174,7 @@ MatMulVerifyWorker::HandoffAuthenticatedTip(Job& replacement)
 {
     Assume((replacement.block != nullptr) !=
            (replacement.header != nullptr));
-    if (replacement.priority != Priority::AuthenticatedTipChild) {
+    if (!IsTipChildPriority(replacement.priority)) {
         return HandoffResult::Deferred;
     }
     const CBlockHeader& replacement_header{replacement.GetHeader()};
@@ -183,8 +193,7 @@ MatMulVerifyWorker::HandoffAuthenticatedTip(Job& replacement)
             if (hash == replacement_hash ||
                 ProtectsBodyReplay(*pending) ||
                 !pending->job.IsHeaderOnly() ||
-                pending->job.priority !=
-                    Priority::AuthenticatedTipChild ||
+                !IsTipChildPriority(pending->job.priority) ||
                 !pending->job.equal_priority_handoff_available ||
                 !pending->job.rc_pending_lease ||
                 pending->job.cancelled->load(
@@ -272,8 +281,7 @@ bool MatMulVerifyWorker::CanHandoffAuthenticatedTip(
         if (hash != replacement_hash &&
             !ProtectsBodyReplay(*pending) &&
             pending->job.IsHeaderOnly() &&
-            pending->job.priority ==
-                Priority::AuthenticatedTipChild &&
+            IsTipChildPriority(pending->job.priority) &&
             pending->job.equal_priority_handoff_available &&
             pending->job.rc_pending_lease &&
             !pending->job.cancelled->load(
@@ -570,17 +578,28 @@ void MatMulVerifyWorker::PruneCancelRetryBackoff()
 bool MatMulVerifyWorker::HigherPriority(const Pending& lhs,
                                         const Pending& rhs) const
 {
+    const auto effective_priority{[&](const Pending& pending) {
+        const Priority priority{pending.job.priority};
+        if (priority == Priority::ActiveTipValidation &&
+            pending.job.GetHeader().hashPrevBlock != m_tip_hash) {
+            // The followed-child decision is a snapshot taken at admission.
+            // Once its parent is no longer the active tip, retain the work but
+            // drop its exceptional queue rank.
+            return Priority::AuthenticatedTipChild;
+        }
+        return priority;
+    }};
     const auto left{node::matmul_trusted::MakeTrustedWorkRank(
         lhs.job.GetHeader().hashPrevBlock == m_tip_hash,
         lhs.job.height,
         m_tip_height,
-        static_cast<uint8_t>(lhs.job.priority),
+        static_cast<uint8_t>(effective_priority(lhs)),
         lhs.sequence)};
     const auto right{node::matmul_trusted::MakeTrustedWorkRank(
         rhs.job.GetHeader().hashPrevBlock == m_tip_hash,
         rhs.job.height,
         m_tip_height,
-        static_cast<uint8_t>(rhs.job.priority),
+        static_cast<uint8_t>(effective_priority(rhs)),
         rhs.sequence)};
     return node::matmul_trusted::PreferTrustedWork(left, right);
 }
@@ -759,7 +778,7 @@ void MatMulVerifyWorker::WorkerLoop()
             // CompetingBranch to TipValidation keeps async verify from being
             // starved by CandidateMining while still ranking below an authenticated
             // tip-child via the worker's own Priority ordering.
-            // Configured nodes must not map *any* async worker job onto
+            // Configured nodes must not map *every* async worker job onto
             // TipValidation: AuthenticatedTipChild is every `pprev==tip`
             // sibling at an unattested racing tip, so 69–198 same-height
             // bodies occupied both GPU slots and starved CandidateMining /
@@ -770,8 +789,12 @@ void MatMulVerifyWorker::WorkerLoop()
             const auto device_priority{[&] {
                 using AccelPriority =
                     matmul::v4::rc::RCAcceleratorScheduler::Priority;
+                if (job.priority == Priority::ActiveTipValidation &&
+                    tip_extending) {
+                    return AccelPriority::ActiveTipValidation;
+                }
                 if (!node::matmul_trusted::IsConfigured()) {
-                    return (job.priority == Priority::AuthenticatedTipChild ||
+                    return (IsTipChildPriority(job.priority) ||
                             job.priority == Priority::CompetingBranch)
                                ? AccelPriority::TipValidation
                                : AccelPriority::SpeculativeValidation;
@@ -782,7 +805,7 @@ void MatMulVerifyWorker::WorkerLoop()
                 // 2026-08-15 the signer sat on an attested tip while
                 // CandidateMining held the device and tip_validation stayed 0.
                 if (node::matmul_trusted::HasQuorum(hash, job.height) &&
-                    (job.priority == Priority::AuthenticatedTipChild ||
+                    (IsTipChildPriority(job.priority) ||
                      job.priority == Priority::CompetingBranch)) {
                     return AccelPriority::TipValidation;
                 }
