@@ -945,6 +945,51 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(!TrustedMirrorPreferGetMmAttest(
         /*active_tip_child=*/false, /*short_tip_reorg_missing_root=*/true,
         /*on_parked_reorg_branch=*/true));
+    // Catch-up: only the first hole. Frontier / ancestor preference is
+    // near-tip work and was the live 194999 GETMMATTEST hammer.
+    BOOST_CHECK(TrustedMirrorPreferGetMmAttest(
+        /*active_tip_child=*/true, /*short_tip_reorg_missing_root=*/false,
+        /*on_parked_reorg_branch=*/false, /*recent_active_ancestor=*/false,
+        /*followed_body_awaiting_attestation=*/false,
+        /*is_signed_frontier_hash=*/false,
+        /*signed_frontier_catch_up=*/true));
+    BOOST_CHECK(TrustedMirrorPreferGetMmAttest(
+        /*active_tip_child=*/false, /*short_tip_reorg_missing_root=*/true,
+        /*on_parked_reorg_branch=*/false, /*recent_active_ancestor=*/false,
+        /*followed_body_awaiting_attestation=*/false,
+        /*is_signed_frontier_hash=*/false,
+        /*signed_frontier_catch_up=*/true));
+    BOOST_CHECK(TrustedMirrorPreferGetMmAttest(
+        /*active_tip_child=*/false, /*short_tip_reorg_missing_root=*/false,
+        /*on_parked_reorg_branch=*/false, /*recent_active_ancestor=*/false,
+        /*followed_body_awaiting_attestation=*/true,
+        /*is_signed_frontier_hash=*/false,
+        /*signed_frontier_catch_up=*/true));
+    BOOST_CHECK(!TrustedMirrorPreferGetMmAttest(
+        /*active_tip_child=*/false, /*short_tip_reorg_missing_root=*/false,
+        /*on_parked_reorg_branch=*/false, /*recent_active_ancestor=*/false,
+        /*followed_body_awaiting_attestation=*/false,
+        /*is_signed_frontier_hash=*/true,
+        /*signed_frontier_catch_up=*/true));
+    BOOST_CHECK(!TrustedMirrorPreferGetMmAttest(
+        /*active_tip_child=*/false, /*short_tip_reorg_missing_root=*/false,
+        /*on_parked_reorg_branch=*/false, /*recent_active_ancestor=*/true,
+        /*followed_body_awaiting_attestation=*/false,
+        /*is_signed_frontier_hash=*/false,
+        /*signed_frontier_catch_up=*/true));
+    BOOST_CHECK(!TrustedMirrorPreferGetMmAttest(
+        /*active_tip_child=*/true, /*short_tip_reorg_missing_root=*/false,
+        /*on_parked_reorg_branch=*/true, /*recent_active_ancestor=*/false,
+        /*followed_body_awaiting_attestation=*/false,
+        /*is_signed_frontier_hash=*/false,
+        /*signed_frontier_catch_up=*/true));
+    using node::matmul_trusted::TrustedMirrorCatchUpShouldRequestGetMmAttest;
+    BOOST_CHECK(TrustedMirrorCatchUpShouldRequestGetMmAttest(
+        /*signed_frontier_catch_up=*/false, /*preferred=*/false));
+    BOOST_CHECK(TrustedMirrorCatchUpShouldRequestGetMmAttest(
+        /*signed_frontier_catch_up=*/true, /*preferred=*/true));
+    BOOST_CHECK(!TrustedMirrorCatchUpShouldRequestGetMmAttest(
+        /*signed_frontier_catch_up=*/true, /*preferred=*/false));
     using node::matmul_trusted::PreferGetMmAttestPeer;
     BOOST_CHECK(PreferGetMmAttestPeer(
         /*has_attestation_archive_bit=*/true, /*recent_valid_mmattest=*/false));
@@ -1705,6 +1750,51 @@ BOOST_AUTO_TEST_CASE(competing_attested_index_rejects_fossil_depth)
     BOOST_CHECK(IndependentConsensusMaySpendExactReplayGpu(
         false, false, 191323, 191323, kNearTip,
         /*covered_by_attestation=*/true));
+    using node::matmul_trusted::ConsensusMaySpendExactReplayGpuForShortReorgForkChild;
+    // Live 2026-08-20: unattested tip 195603 489884e4, attested sibling
+    // b8971871 (LCA depth 1), signed frontier 195635 HEADER_ONLY.
+    BOOST_CHECK(ConsensusMaySpendExactReplayGpuForShortReorgForkChild(
+        /*configured=*/true, /*tip_has_quorum=*/false,
+        /*index_covered_by_attestation=*/true, /*index_is_tip=*/false,
+        /*lca_depth=*/1, /*is_immediate_fork_child=*/true,
+        /*index_on_active_chain=*/false, /*has_competing_quorum=*/false,
+        /*on_parked=*/false));
+    BOOST_CHECK(!ConsensusMaySpendExactReplayGpuForShortReorgForkChild(
+        true, /*tip_has_quorum=*/true, true, false, 1, true, false, false,
+        false));
+    BOOST_CHECK(!ConsensusMaySpendExactReplayGpuForShortReorgForkChild(
+        true, false, /*index_covered_by_attestation=*/false, false, 1, true,
+        false, false, false));
+    BOOST_CHECK(!ConsensusMaySpendExactReplayGpuForShortReorgForkChild(
+        true, false, true, false, 1, /*is_immediate_fork_child=*/false,
+        false, false, false));
+    BOOST_CHECK(!ConsensusMaySpendExactReplayGpuForShortReorgForkChild(
+        true, false, true, false, 1, true, /*index_on_active_chain=*/true,
+        false, false));
+    BOOST_CHECK(!ConsensusMaySpendExactReplayGpuForShortReorgForkChild(
+        true, false, true, false, 1, true, false,
+        /*has_competing_quorum=*/true, false));
+    BOOST_CHECK(!ConsensusMaySpendExactReplayGpuForShortReorgForkChild(
+        true, false, true, false, 1, true, false, false, /*on_parked=*/true));
+    BOOST_CHECK(!ConsensusMaySpendExactReplayGpuForShortReorgForkChild(
+        true, false, true, false, /*lca_depth=*/0, true, false, false,
+        false));
+    BOOST_CHECK(!ConsensusMaySpendExactReplayGpuForShortReorgForkChild(
+        true, false, true, false, /*lca_depth=*/7, true, false, false,
+        false));
+    using node::matmul_trusted::ShouldRetryBudgetDeferredWhileFrontierOffChain;
+    BOOST_CHECK(ShouldRetryBudgetDeferredWhileFrontierOffChain(
+        /*frontier_off_active_chain=*/false, /*fork_child=*/false,
+        /*on_frontier=*/false, /*followed_tip_child=*/false));
+    BOOST_CHECK(ShouldRetryBudgetDeferredWhileFrontierOffChain(
+        true, /*hash_is_short_reorg_attested_fork_child=*/true, false, false));
+    BOOST_CHECK(ShouldRetryBudgetDeferredWhileFrontierOffChain(
+        true, false, /*hash_on_signed_frontier_chain=*/true, false));
+    BOOST_CHECK(ShouldRetryBudgetDeferredWhileFrontierOffChain(
+        true, false, false, /*hash_is_followed_tip_child=*/true));
+    // Historical losing twins 195579/195599/195601.
+    BOOST_CHECK(!ShouldRetryBudgetDeferredWhileFrontierOffChain(
+        true, false, false, false));
     using node::matmul_trusted::TrustedMirrorAttestedHintIsActiveAncestor;
     BOOST_CHECK(TrustedMirrorAttestedHintIsActiveAncestor(
         /*on_active_chain=*/true, /*lca_is_index=*/false));
