@@ -213,7 +213,11 @@ operator policy.
 For a first-run bootstrap before mining or service bring-up, see
 [`contrib/faststart`](../faststart). Those entry points fetch the matching
 snapshot, run `loadtxoutset`, and watch `getchainstates` until the bootstrap
-chainstate clears.
+chainstate clears. Miner/service presets also pin the published mainnet
+attestor pubkeys and, on mainnet, check `getmatmultrustedstatus` after RPC
+is ready so `getblocktemplate` follows the attested tip. That check is
+local RPC after you have joined the seed/archive mesh; P2P seeds do not
+advertise the key set.
 
 Stop:
 

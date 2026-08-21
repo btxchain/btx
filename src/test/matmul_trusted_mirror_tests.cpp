@@ -24,6 +24,7 @@
 #include <util/translation.h>
 
 #include <array>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -944,6 +945,51 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(!TrustedMirrorPreferGetMmAttest(
         /*active_tip_child=*/false, /*short_tip_reorg_missing_root=*/true,
         /*on_parked_reorg_branch=*/true));
+    // Catch-up: only the first hole. Frontier / ancestor preference is
+    // near-tip work and was the live 194999 GETMMATTEST hammer.
+    BOOST_CHECK(TrustedMirrorPreferGetMmAttest(
+        /*active_tip_child=*/true, /*short_tip_reorg_missing_root=*/false,
+        /*on_parked_reorg_branch=*/false, /*recent_active_ancestor=*/false,
+        /*followed_body_awaiting_attestation=*/false,
+        /*is_signed_frontier_hash=*/false,
+        /*signed_frontier_catch_up=*/true));
+    BOOST_CHECK(TrustedMirrorPreferGetMmAttest(
+        /*active_tip_child=*/false, /*short_tip_reorg_missing_root=*/true,
+        /*on_parked_reorg_branch=*/false, /*recent_active_ancestor=*/false,
+        /*followed_body_awaiting_attestation=*/false,
+        /*is_signed_frontier_hash=*/false,
+        /*signed_frontier_catch_up=*/true));
+    BOOST_CHECK(TrustedMirrorPreferGetMmAttest(
+        /*active_tip_child=*/false, /*short_tip_reorg_missing_root=*/false,
+        /*on_parked_reorg_branch=*/false, /*recent_active_ancestor=*/false,
+        /*followed_body_awaiting_attestation=*/true,
+        /*is_signed_frontier_hash=*/false,
+        /*signed_frontier_catch_up=*/true));
+    BOOST_CHECK(!TrustedMirrorPreferGetMmAttest(
+        /*active_tip_child=*/false, /*short_tip_reorg_missing_root=*/false,
+        /*on_parked_reorg_branch=*/false, /*recent_active_ancestor=*/false,
+        /*followed_body_awaiting_attestation=*/false,
+        /*is_signed_frontier_hash=*/true,
+        /*signed_frontier_catch_up=*/true));
+    BOOST_CHECK(!TrustedMirrorPreferGetMmAttest(
+        /*active_tip_child=*/false, /*short_tip_reorg_missing_root=*/false,
+        /*on_parked_reorg_branch=*/false, /*recent_active_ancestor=*/true,
+        /*followed_body_awaiting_attestation=*/false,
+        /*is_signed_frontier_hash=*/false,
+        /*signed_frontier_catch_up=*/true));
+    BOOST_CHECK(!TrustedMirrorPreferGetMmAttest(
+        /*active_tip_child=*/true, /*short_tip_reorg_missing_root=*/false,
+        /*on_parked_reorg_branch=*/true, /*recent_active_ancestor=*/false,
+        /*followed_body_awaiting_attestation=*/false,
+        /*is_signed_frontier_hash=*/false,
+        /*signed_frontier_catch_up=*/true));
+    using node::matmul_trusted::TrustedMirrorCatchUpShouldRequestGetMmAttest;
+    BOOST_CHECK(TrustedMirrorCatchUpShouldRequestGetMmAttest(
+        /*signed_frontier_catch_up=*/false, /*preferred=*/false));
+    BOOST_CHECK(TrustedMirrorCatchUpShouldRequestGetMmAttest(
+        /*signed_frontier_catch_up=*/true, /*preferred=*/true));
+    BOOST_CHECK(!TrustedMirrorCatchUpShouldRequestGetMmAttest(
+        /*signed_frontier_catch_up=*/true, /*preferred=*/false));
     using node::matmul_trusted::PreferGetMmAttestPeer;
     BOOST_CHECK(PreferGetMmAttestPeer(
         /*has_attestation_archive_bit=*/true, /*recent_valid_mmattest=*/false));
@@ -1113,7 +1159,10 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         /*preferred=*/true, /*has_best_known=*/true, /*best_known_height=*/190632,
         /*tip_height=*/190588, /*best_known_extends_tip=*/true,
         /*version_handshake_complete=*/false));
-    BOOST_CHECK(!SignedFrontierBodySourceCanServeCatchUp(
+    // VERSION == tip is not "had bodies past tip at connect", but BestKnown
+    // extending the active tip still lets us GETDATA tip+1 (handshake snapshot
+    // is stale once we have climbed; hung-connect starting=-1 stays refused).
+    BOOST_CHECK(SignedFrontierBodySourceCanServeCatchUp(
         /*preferred=*/true, /*has_best_known=*/true, /*best_known_height=*/190632,
         /*tip_height=*/190588, /*best_known_extends_tip=*/true,
         /*version_handshake_complete=*/true, /*starting_height=*/190588));
@@ -1193,6 +1242,52 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(SignedFrontierMayRequestCatchUpGetData(
         true, false, true, true, true,
         /*starting_height=*/190858, /*tip_height=*/190781));
+    using node::matmul_trusted::SignedFrontierPeerMayServeCatchUpTipPlusOne;
+    // Miner HEADER_ONLY tower above the active tip must not gate GETDATA.
+    // VERSION 194111 is behind m_best_header 194116 but ahead of tip 189534.
+    BOOST_CHECK(SignedFrontierMayRequestCatchUpGetData(
+        true, /*gpu_manual_or_noban=*/true, true, true, true,
+        /*starting_height=*/194111, /*tip_height=*/189534));
+    BOOST_CHECK(SignedFrontierPeerMayServeCatchUpTipPlusOne(
+        /*starting_height=*/194111, /*active_tip_height=*/189534));
+    BOOST_CHECK(!SignedFrontierPeerMayServeCatchUpTipPlusOne(194111, 194116));
+    // Climbed past handshake snapshot; BestKnown still extends the active tip.
+    BOOST_CHECK(SignedFrontierMayRequestCatchUpGetData(
+        true, true, true, true, true,
+        /*starting_height=*/194111, /*tip_height=*/194121,
+        /*best_known_height=*/194160, /*best_known_extends_tip=*/true));
+    BOOST_CHECK(SignedFrontierPeerMayServeCatchUpTipPlusOne(
+        194111, 194121, 194160, true));
+    // Behind sibling: VERSION < tip, BestKnown does not extend past tip.
+    BOOST_CHECK(!SignedFrontierMayRequestCatchUpGetData(
+        true, true, true, true, true,
+        /*starting_height=*/190767, /*tip_height=*/190816,
+        /*best_known_height=*/190767, /*best_known_extends_tip=*/false));
+    BOOST_CHECK(!SignedFrontierPeerMayServeCatchUpTipPlusOne(
+        190767, 190816, 190767, false));
+    BOOST_CHECK(!SignedFrontierPeerMayServeCatchUpTipPlusOne(-1, 190781, 190858, true));
+    using node::matmul_trusted::ShouldAdvanceBestKnownFromMmAttest;
+    using node::matmul_trusted::ShouldAdvanceBestKnownFromPeerBody;
+    using matmul::trusted::AddResult;
+    BOOST_CHECK(ShouldAdvanceBestKnownFromMmAttest(
+        true, false, AddResult::Accepted));
+    BOOST_CHECK(ShouldAdvanceBestKnownFromMmAttest(
+        true, false, AddResult::Duplicate));
+    BOOST_CHECK(!ShouldAdvanceBestKnownFromMmAttest(
+        true, false, AddResult::Capacity));
+    BOOST_CHECK(!ShouldAdvanceBestKnownFromMmAttest(
+        true, false, AddResult::InvalidSignature));
+    BOOST_CHECK(!ShouldAdvanceBestKnownFromMmAttest(
+        true, false, AddResult::UntrustedSigner));
+    BOOST_CHECK(!ShouldAdvanceBestKnownFromMmAttest(
+        /*known_profile1=*/false, false, AddResult::Accepted));
+    BOOST_CHECK(!ShouldAdvanceBestKnownFromMmAttest(
+        true, /*header_failed=*/true, AddResult::Accepted));
+    BOOST_CHECK(ShouldAdvanceBestKnownFromPeerBody(
+        /*have_index=*/true, /*header_failed=*/false, /*have_data=*/true));
+    BOOST_CHECK(!ShouldAdvanceBestKnownFromPeerBody(true, true, true));
+    BOOST_CHECK(!ShouldAdvanceBestKnownFromPeerBody(true, false, false));
+    BOOST_CHECK(!ShouldAdvanceBestKnownFromPeerBody(false, false, true));
     using node::matmul_trusted::SignedFrontierVersionHandshakeComplete;
     BOOST_CHECK(!SignedFrontierVersionHandshakeComplete(-1));
     BOOST_CHECK(SignedFrontierVersionHandshakeComplete(0));
@@ -1284,6 +1379,10 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         /*manual_or_noban=*/true, /*version_handshake_complete=*/true));
     BOOST_CHECK(!SignedFrontierCatchUpUsesGpuTimeout(true, false));
     BOOST_CHECK(!SignedFrontierCatchUpUsesGpuTimeout(false, true));
+    BOOST_CHECK(!SignedFrontierCatchUpUsesGpuTimeout(
+        true, true, /*starting_height=*/194111, /*active_tip_height=*/194121));
+    BOOST_CHECK(SignedFrontierCatchUpUsesGpuTimeout(
+        true, true, /*starting_height=*/194111, /*active_tip_height=*/189534));
     using node::matmul_trusted::KeepGpuSignedFrontierInFlightPipeline;
     BOOST_CHECK(KeepGpuSignedFrontierInFlightPipeline(
         /*signed_frontier_catch_up=*/true, /*manual_or_noban=*/true,
@@ -1437,6 +1536,82 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         node::matmul_trusted::GPU_RETAIN_ATTESTATION_RETRY.count(), 2);
 }
 
+BOOST_AUTO_TEST_CASE(attestor_drift_yield_follows_longer_attested_chain)
+{
+    using node::matmul_trusted::ATTESTOR_DRIFT_YIELD_DEPTH;
+    using node::matmul_trusted::AttestorDriftYieldDepth;
+    using node::matmul_trusted::AttestorShouldYieldToPeerAttestedChain;
+    using node::matmul_trusted::AttestorShouldYieldToSignedFrontier;
+    using node::matmul_trusted::AttestorYieldHashIsCatchUpTarget;
+    using node::matmul_trusted::AttestorYieldMustReadmitRetainedBody;
+    using node::matmul_trusted::AttestorYieldPreferGetMmAttestPeer;
+    using node::matmul_trusted::AttestorYieldShouldRequestGetMmAttest;
+
+    BOOST_CHECK_EQUAL(ATTESTOR_DRIFT_YIELD_DEPTH, 6);
+    BOOST_CHECK_EQUAL(AttestorDriftYieldDepth(6), 6);
+    BOOST_CHECK_EQUAL(AttestorDriftYieldDepth(12), 12);
+    BOOST_CHECK_EQUAL(AttestorDriftYieldDepth(0), ATTESTOR_DRIFT_YIELD_DEPTH);
+    BOOST_CHECK_EQUAL(
+        AttestorDriftYieldDepth(std::numeric_limits<uint32_t>::max()),
+        ATTESTOR_DRIFT_YIELD_DEPTH);
+
+    constexpr int32_t kPark{6};
+    // Live 2026-08-20: loser tip 194828, winner BestKnown 194851.
+    BOOST_CHECK(AttestorShouldYieldToPeerAttestedChain(
+        /*local_signer=*/true, /*peer_is_gpu_attestor=*/true,
+        /*local_tip_height=*/194828, /*peer_known_height=*/194851, kPark));
+    BOOST_CHECK(!AttestorShouldYieldToPeerAttestedChain(
+        true, true, 194828, 194833, kPark));
+    BOOST_CHECK(AttestorShouldYieldToPeerAttestedChain(
+        true, true, 194828, 194834, kPark));
+    BOOST_CHECK(!AttestorShouldYieldToPeerAttestedChain(
+        /*local_signer=*/false, true, 194828, 194851, kPark));
+    BOOST_CHECK(!AttestorShouldYieldToPeerAttestedChain(
+        true, /*peer_is_gpu_attestor=*/false, 194828, 194851, kPark));
+    BOOST_CHECK(!AttestorShouldYieldToPeerAttestedChain(
+        true, true, /*local_tip_height=*/-1, 194851, kPark));
+    BOOST_CHECK(!AttestorShouldYieldToPeerAttestedChain(
+        true, true, 194828, /*peer_known_height=*/-1, kPark));
+    BOOST_CHECK(!AttestorShouldYieldToPeerAttestedChain(
+        true, true, 194828, 194851, /*park_depth=*/0));
+
+    BOOST_CHECK(AttestorShouldYieldToSignedFrontier(
+        /*local_signer=*/true, /*blocks_behind=*/23, kPark));
+    BOOST_CHECK(!AttestorShouldYieldToSignedFrontier(true, 5, kPark));
+    BOOST_CHECK(AttestorShouldYieldToSignedFrontier(true, 6, kPark));
+    BOOST_CHECK(!AttestorShouldYieldToSignedFrontier(
+        /*local_signer=*/false, 23, kPark));
+    BOOST_CHECK(!AttestorShouldYieldToSignedFrontier(true, -1, kPark));
+
+    // Canonical 194829 on the winner chain: catch-up target.
+    BOOST_CHECK(AttestorYieldHashIsCatchUpTarget(
+        /*yielding=*/true, /*on_winner_or_signed_frontier_chain=*/true,
+        /*header_failed=*/false));
+    // Competing same-height HEADER_ONLY twin: not a target.
+    BOOST_CHECK(!AttestorYieldHashIsCatchUpTarget(true, false, false));
+    BOOST_CHECK(!AttestorYieldHashIsCatchUpTarget(
+        true, true, /*header_failed=*/true));
+    BOOST_CHECK(!AttestorYieldHashIsCatchUpTarget(
+        /*yielding=*/false, true, false));
+
+    BOOST_CHECK(AttestorYieldPreferGetMmAttestPeer(
+        /*yielding=*/false, /*gpu_attestor=*/false));
+    BOOST_CHECK(!AttestorYieldPreferGetMmAttestPeer(true, false));
+    BOOST_CHECK(AttestorYieldPreferGetMmAttestPeer(true, true));
+
+    BOOST_CHECK(AttestorYieldShouldRequestGetMmAttest(
+        /*yielding=*/false, /*on_winner_or_signed_frontier_chain=*/false));
+    BOOST_CHECK(!AttestorYieldShouldRequestGetMmAttest(true, false));
+    BOOST_CHECK(AttestorYieldShouldRequestGetMmAttest(true, true));
+
+    BOOST_CHECK(AttestorYieldMustReadmitRetainedBody(
+        /*yielding=*/true, /*have_retained_body=*/true,
+        /*hash_is_catch_up_target=*/true));
+    BOOST_CHECK(!AttestorYieldMustReadmitRetainedBody(false, true, true));
+    BOOST_CHECK(!AttestorYieldMustReadmitRetainedBody(true, false, true));
+    BOOST_CHECK(!AttestorYieldMustReadmitRetainedBody(true, true, false));
+}
+
 BOOST_AUTO_TEST_CASE(signer_getmmattest_historical_and_hammer_ban)
 {
     using node::matmul_trusted::AggressiveGetMmAttestShouldBan;
@@ -1575,6 +1750,51 @@ BOOST_AUTO_TEST_CASE(competing_attested_index_rejects_fossil_depth)
     BOOST_CHECK(IndependentConsensusMaySpendExactReplayGpu(
         false, false, 191323, 191323, kNearTip,
         /*covered_by_attestation=*/true));
+    using node::matmul_trusted::ConsensusMaySpendExactReplayGpuForShortReorgForkChild;
+    // Live 2026-08-20: unattested tip 195603 489884e4, attested sibling
+    // b8971871 (LCA depth 1), signed frontier 195635 HEADER_ONLY.
+    BOOST_CHECK(ConsensusMaySpendExactReplayGpuForShortReorgForkChild(
+        /*configured=*/true, /*tip_has_quorum=*/false,
+        /*index_covered_by_attestation=*/true, /*index_is_tip=*/false,
+        /*lca_depth=*/1, /*is_immediate_fork_child=*/true,
+        /*index_on_active_chain=*/false, /*has_competing_quorum=*/false,
+        /*on_parked=*/false));
+    BOOST_CHECK(!ConsensusMaySpendExactReplayGpuForShortReorgForkChild(
+        true, /*tip_has_quorum=*/true, true, false, 1, true, false, false,
+        false));
+    BOOST_CHECK(!ConsensusMaySpendExactReplayGpuForShortReorgForkChild(
+        true, false, /*index_covered_by_attestation=*/false, false, 1, true,
+        false, false, false));
+    BOOST_CHECK(!ConsensusMaySpendExactReplayGpuForShortReorgForkChild(
+        true, false, true, false, 1, /*is_immediate_fork_child=*/false,
+        false, false, false));
+    BOOST_CHECK(!ConsensusMaySpendExactReplayGpuForShortReorgForkChild(
+        true, false, true, false, 1, true, /*index_on_active_chain=*/true,
+        false, false));
+    BOOST_CHECK(!ConsensusMaySpendExactReplayGpuForShortReorgForkChild(
+        true, false, true, false, 1, true, false,
+        /*has_competing_quorum=*/true, false));
+    BOOST_CHECK(!ConsensusMaySpendExactReplayGpuForShortReorgForkChild(
+        true, false, true, false, 1, true, false, false, /*on_parked=*/true));
+    BOOST_CHECK(!ConsensusMaySpendExactReplayGpuForShortReorgForkChild(
+        true, false, true, false, /*lca_depth=*/0, true, false, false,
+        false));
+    BOOST_CHECK(!ConsensusMaySpendExactReplayGpuForShortReorgForkChild(
+        true, false, true, false, /*lca_depth=*/7, true, false, false,
+        false));
+    using node::matmul_trusted::ShouldRetryBudgetDeferredWhileFrontierOffChain;
+    BOOST_CHECK(ShouldRetryBudgetDeferredWhileFrontierOffChain(
+        /*frontier_off_active_chain=*/false, /*fork_child=*/false,
+        /*on_frontier=*/false, /*followed_tip_child=*/false));
+    BOOST_CHECK(ShouldRetryBudgetDeferredWhileFrontierOffChain(
+        true, /*hash_is_short_reorg_attested_fork_child=*/true, false, false));
+    BOOST_CHECK(ShouldRetryBudgetDeferredWhileFrontierOffChain(
+        true, false, /*hash_on_signed_frontier_chain=*/true, false));
+    BOOST_CHECK(ShouldRetryBudgetDeferredWhileFrontierOffChain(
+        true, false, false, /*hash_is_followed_tip_child=*/true));
+    // Historical losing twins 195579/195599/195601.
+    BOOST_CHECK(!ShouldRetryBudgetDeferredWhileFrontierOffChain(
+        true, false, false, false));
     using node::matmul_trusted::TrustedMirrorAttestedHintIsActiveAncestor;
     BOOST_CHECK(TrustedMirrorAttestedHintIsActiveAncestor(
         /*on_active_chain=*/true, /*lca_is_index=*/false));
