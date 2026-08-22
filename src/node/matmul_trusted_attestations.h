@@ -1250,6 +1250,16 @@ static constexpr int SIGNER_MSGHAND_OTHER_PER_LOOP{2};
     return archive_or_mirror_service;
 }
 
+/** Peers in a declared MatMul chain role may receive and request chain
+ * inventory. This does not make a CONSENSUS peer an archive BLOCK-serve
+ * priority target or an authorized inbound block source. */
+[[nodiscard]] inline bool MsghandPeerMayReceiveChainInventory(
+    bool archive_or_mirror_service,
+    bool matmul_consensus_service)
+{
+    return archive_or_mirror_service || matmul_consensus_service;
+}
+
 /** GETHEADERS/GETBLOCKS from an archive, mirror, or consensus peer ask this
  * node to serve chain inventory; they do not ingest an untrusted chain. Keep
  * the non-authority control-message filter for peers outside those roles, but

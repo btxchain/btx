@@ -3560,6 +3560,10 @@ void CConnman::ThreadMessageHandler()
                     node::matmul_trusted::MsghandPeerIsArchiveServeTarget(
                         manual_or_outbound,
                         pnode->HasArchiveOrMirrorService())};
+                const bool consensus_target{pnode->HasMatMulConsensusService()};
+                const bool chain_inventory_target{
+                    node::matmul_trusted::MsghandPeerMayReceiveChainInventory(
+                        archive_target, consensus_target)};
                 const bool live_getdata{node::matmul_trusted::MsghandPreferLiveGetData(
                     pnode->HasQueuedProcessMessageType(NetMsgType::GETDATA),
                     pnode->m_has_getdata_requests.load())};
@@ -3567,8 +3571,9 @@ void CConnman::ThreadMessageHandler()
                     node::matmul_trusted::MsghandPreferArchiveLiveGetData(
                         live_getdata, archive_target)};
                 const bool keep_send{
-                    archive_target &&
-                    (live_getdata || pnode->m_prefer_block_serve.load())};
+                    (archive_target &&
+                     (live_getdata || pnode->m_prefer_block_serve.load())) ||
+                    consensus_target};
                 const auto msghand_class{
                     node::matmul_trusted::ClassifyMsghandPeer(
                         pnode->fSuccessfullyConnected.load(),
@@ -3597,12 +3602,12 @@ void CConnman::ThreadMessageHandler()
                     continue;
                 }
 
-                // Strict -connect: do not SendMessages to inbound miners.
-                // Still SendMessages to inbound ARCHIVE/MIRROR so GETDATA
-                // BLOCK replies are not stuck behind miner visits.
+                // Strict -connect: do not SendMessages to ordinary inbound
+                // miners. Keep chain inventory flowing to declared MatMul
+                // roles; only ARCHIVE/MIRROR receives BLOCK-serve priority.
                 const bool skip_inbound_send{
                     (!m_use_addrman_outgoing && pnode->IsInboundConn() &&
-                     !pnode->IsManualConn() && !archive_target &&
+                     !pnode->IsManualConn() && !chain_inventory_target &&
                      pnode->fSuccessfullyConnected.load()) ||
                     node::matmul_trusted::
                         SkipFullyConnectedInboundDuringPreferredHandshake(

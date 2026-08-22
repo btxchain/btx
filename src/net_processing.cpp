@@ -13608,7 +13608,8 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
     const bool chain_inventory_request{
         msg_type == NetMsgType::GETHEADERS || msg_type == NetMsgType::GETBLOCKS};
     const bool chain_service_peer{
-        this_archive_target || pfrom.HasMatMulConsensusService()};
+        node::matmul_trusted::MsghandPeerMayReceiveChainInventory(
+            this_archive_target, pfrom.HasMatMulConsensusService())};
     if (node::matmul_trusted::MsghandDropNonAuthorityControlMessage(
             ignore_non_gpu_inbound || drop_miner_ingest,
             chain_service_peer, chain_inventory_request) &&
