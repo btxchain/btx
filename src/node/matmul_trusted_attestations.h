@@ -1353,7 +1353,9 @@ static constexpr auto ARCHIVE_BLOCK_SERVE_WAIT_IDLE{std::chrono::milliseconds{50
  *  Must skip outbound miners too: ClassifyMsghandPeer still puts every
  *  outbound in Preferred, and the inbound-only skip left addrman
  *  GETDATA on the signer draining BLOCK under cs_main (live 46s/block
- *  after bd3f6b5f). Handshake and ARCHIVE/MIRROR still run. */
+ *  after bd3f6b5f). Handshake and ARCHIVE/MIRROR still run. An idle signer
+ *  must resume its bounded Other visits so verifier PING/GETHEADERS are not
+ *  starved; the separate ingest filter still rejects their block data. */
 [[nodiscard]] inline bool SkipMinerProcessMessagesDuringArchiveGetData(
     bool local_signer,
     bool archive_getdata_pending,
@@ -1365,8 +1367,8 @@ static constexpr auto ARCHIVE_BLOCK_SERVE_WAIT_IDLE{std::chrono::milliseconds{50
 {
     (void)this_peer_inbound;
     (void)this_peer_manual;
-    (void)archive_getdata_pending;
-    const bool skip_now{local_signer || trusted_mirror_catch_up};
+    const bool skip_now{
+        (local_signer && archive_getdata_pending) || trusted_mirror_catch_up};
     if (!skip_now) return false;
     if (this_is_archive_serve_target) return false;
     if (!this_peer_handshake_complete) return false;

@@ -1507,7 +1507,10 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(SkipMinerProcessMessagesDuringArchiveGetData(
         /*local_signer=*/false, false, /*trusted_mirror_catch_up=*/true,
         true, false, true, false));
-    BOOST_CHECK(SkipMinerProcessMessagesDuringArchiveGetData(
+    // Once archive service is idle, bounded Other visits must resume so a
+    // consensus verifier can complete PING/GETHEADERS without becoming an
+    // authorized block source.
+    BOOST_CHECK(!SkipMinerProcessMessagesDuringArchiveGetData(
         true, /*archive_getdata_pending=*/false, false, true, false, true,
         false));
     // Outbound miners are Preferred in msghand order; they must still skip.
