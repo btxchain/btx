@@ -270,9 +270,9 @@ class MatMulTrustedMirrorConvergenceTest(BitcoinTestFramework):
         authority, mirror, loser, relay = self.nodes
 
         self.log.info("Bring up shared tip through Profile-1 activation")
-        self.connect_nodes(0, 1)
-        self.connect_nodes(0, 2)
-        self.connect_nodes(0, 3)
+        self.connect_nodes(1, 0)
+        self.connect_nodes(2, 0)
+        self.connect_nodes(3, 0)
         fork_height = ACTIVATION_HEIGHT + 2
         self.generate(authority, fork_height, sync_fun=self.no_op)
         self.wait_until(
@@ -491,9 +491,9 @@ class MatMulTrustedMirrorConvergenceTest(BitcoinTestFramework):
         self._disconnect_all()
 
         # Align everyone on the post-convergence tip, then create a fresh race.
-        self.connect_nodes(0, 1)
-        self.connect_nodes(0, 2)
-        self.connect_nodes(0, 3)
+        self.connect_nodes(1, 0)
+        self.connect_nodes(2, 0)
+        self.connect_nodes(3, 0)
         tip_hash = authority.getbestblockhash()
         self.wait_until(
             lambda: mirror.getbestblockhash() == tip_hash
@@ -607,9 +607,9 @@ class MatMulTrustedMirrorConvergenceTest(BitcoinTestFramework):
         """
         self._disconnect_all()
 
-        self.connect_nodes(0, 1)
-        self.connect_nodes(0, 2)
-        self.connect_nodes(0, 3)
+        self.connect_nodes(1, 0)
+        self.connect_nodes(2, 0)
+        self.connect_nodes(3, 0)
         tip_hash = authority.getbestblockhash()
         self.wait_until(
             lambda: mirror.getbestblockhash() == tip_hash
@@ -755,7 +755,7 @@ class MatMulTrustedMirrorConvergenceTest(BitcoinTestFramework):
         self._disconnect_all()
 
         # Grow a settled tip well above park_depth so a deep rewrite is possible.
-        self.connect_nodes(0, 1)
+        self.connect_nodes(1, 0)
         self.generate(authority, PARK_DEPTH + 3, sync_fun=self.no_op)
         self.wait_until(
             lambda: mirror.getbestblockhash() == authority.getbestblockhash(),
