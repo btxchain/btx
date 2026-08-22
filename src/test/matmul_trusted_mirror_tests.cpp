@@ -1450,6 +1450,17 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(MsghandPeerIsArchiveServeTarget(true, /*archive_or_mirror_service=*/true));
     BOOST_CHECK(MsghandPeerIsArchiveServeTarget(false, /*archive_or_mirror_service=*/true));
     BOOST_CHECK(!MsghandPeerIsArchiveServeTarget(false, false));
+    using node::matmul_trusted::MsghandDropNonAuthorityControlMessage;
+    BOOST_CHECK(!MsghandDropNonAuthorityControlMessage(
+        /*restrict_non_authority=*/false, false, false));
+    BOOST_CHECK(MsghandDropNonAuthorityControlMessage(
+        true, /*is_archive_serve_target=*/false,
+        /*is_chain_inventory_request=*/true));
+    BOOST_CHECK(MsghandDropNonAuthorityControlMessage(
+        true, /*is_archive_serve_target=*/true,
+        /*is_chain_inventory_request=*/false));
+    BOOST_CHECK(!MsghandDropNonAuthorityControlMessage(
+        true, true, /*is_chain_inventory_request=*/true));
     using node::matmul_trusted::MsghandPreferArchiveLiveGetData;
     BOOST_CHECK(MsghandPreferArchiveLiveGetData(/*live_getdata=*/true, /*is_archive_serve_target=*/true));
     BOOST_CHECK(!MsghandPreferArchiveLiveGetData(true, /*is_archive_serve_target=*/false));

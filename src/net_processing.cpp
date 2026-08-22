@@ -13599,7 +13599,11 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         }
         return;
     }
-    if ((ignore_non_gpu_inbound || drop_miner_ingest) &&
+    const bool chain_inventory_request{
+        msg_type == NetMsgType::GETHEADERS || msg_type == NetMsgType::GETBLOCKS};
+    if (node::matmul_trusted::MsghandDropNonAuthorityControlMessage(
+            ignore_non_gpu_inbound || drop_miner_ingest,
+            this_archive_target, chain_inventory_request) &&
         (msg_type == NetMsgType::ADDR || msg_type == NetMsgType::ADDRV2 ||
          msg_type == NetMsgType::TX ||
          msg_type == NetMsgType::GETHEADERS || msg_type == NetMsgType::GETBLOCKS ||
