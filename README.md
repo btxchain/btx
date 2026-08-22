@@ -190,6 +190,12 @@ matmultrustedpubkey=0224e80df33697385b54b3c69bae1f097f533c0c43e93c29f73ee97319d4
 matmultrustedthreshold=1
 ```
 
+This pin makes the signed frontier visible while the default
+`matmulvalidation=consensus` mode continues to ExactReplay locally. Selecting
+`matmulvalidation=trusted` is a separate operator decision: with threshold 1,
+either listed signer becomes sufficient PoW authority for that node and local
+ExactReplay is skipped. Fast-start does not make that choice automatically.
+
 ```bash
 btx-cli getmatmultrustedstatus
 # configured=true, threshold=1, trusted_signer_pubkeys = the two hex keys above
@@ -1109,6 +1115,8 @@ seeds, not a secret:
 1. Join the published seeds (`dnsseed=1`, `addnode=node.btx.dev:19335`, …).
 2. Have the two `-matmultrustedpubkey` lines and `-matmultrustedthreshold=1`
    in `btx.conf` (miner fast-start writes them).
+   Keep `-matmulvalidation=consensus` unless you have explicitly accepted the
+   threshold-1 trusted-mirror topology.
 3. Ping local RPC: `getmatmultrustedstatus` must show `configured=true`
    and the same `trusted_signer_pubkeys` / `threshold` the archives and
    GPU attestors return. `getfinalityinfo` repeats the pubs.
@@ -1121,6 +1129,9 @@ signer pubs from a random remote RPC.
 
 `contrib/faststart` `--preset miner` writes this pin and checks it after
 RPC is ready. `contrib/devtools/gen-btx-node-conf.sh` writes it too.
+Both paths keep `matmulvalidation=consensus`. Trusted mode is a separate
+operator opt-in that replaces local ExactReplay; with threshold 1, either
+configured signer is sufficient authority for that node.
 
 ### Production Mining (getblocktemplate)
 

@@ -18,22 +18,25 @@ BOOST_AUTO_TEST_SUITE(matmul_block_lifecycle_tests)
 
 namespace {
 
-std::shared_ptr<const CBlock> BlockWithNonce(uint32_t nonce)
+std::shared_ptr<const CBlock> BlockWithNonce(uint32_t nonce,
+                                             uint256 parent = {})
 {
     auto block{std::make_shared<CBlock>()};
     block->nVersion = 1;
     block->nTime = 1;
     block->nBits = 1;
     block->nNonce = nonce;
+    block->hashPrevBlock = parent;
     return block;
 }
 
 node::MatMulBlockLifecycle::RetainedBody Body(uint32_t nonce,
                                                size_t bytes,
-                                               std::chrono::steady_clock::time_point retry)
+                                               std::chrono::steady_clock::time_point retry,
+                                               uint256 parent = {})
 {
     return {
-        .block = BlockWithNonce(nonce),
+        .block = BlockWithNonce(nonce, parent),
         .retry_not_before = retry,
         .bytes = bytes,
     };
@@ -127,6 +130,46 @@ BOOST_AUTO_TEST_CASE(idle_catchup_ignores_retry_cooldown)
     BOOST_REQUIRE(lifecycle.RefreshRetry(hash, 60s, now));
     BOOST_CHECK(!lifecycle.NextRetry(uint256{}, now + 1s).has_value());
     BOOST_CHECK(lifecycle.NextRetry(uint256{}, now + 1s, /*ignore_retry_delay=*/true).has_value());
+}
+
+BOOST_AUTO_TEST_CASE(off_frontier_catchup_skips_cooled_fossil_for_attested_sibling)
+{
+    node::MatMulBlockLifecycle lifecycle{2, 200, 45min, 10min};
+    const auto now{node::MatMulBlockLifecycle::Clock::now()};
+    const uint256 parent{
+        uint256::FromHex(std::string(63, '0') + "f").value()};
+    const uint256 first_hash{BlockWithNonce(9, parent)->GetHash()};
+    const uint256 second_hash{BlockWithNonce(10, parent)->GetHash()};
+    const bool first_sorts_first{first_hash < second_hash};
+    const uint32_t fossil_nonce{first_sorts_first ? 9U : 10U};
+    const uint32_t attested_nonce{first_sorts_first ? 10U : 9U};
+    const uint256 fossil_hash{first_sorts_first ? first_hash : second_hash};
+    const uint256 attested_hash{first_sorts_first ? second_hash : first_hash};
+
+    BOOST_REQUIRE(lifecycle.Retain(
+        fossil_hash, Body(fossil_nonce, 50, now, parent), now));
+    BOOST_REQUIRE(lifecycle.Retain(
+        attested_hash, Body(attested_nonce, 50, now, parent), now + 1s));
+
+    const auto first{lifecycle.NextDeferredCatchUpRetry(
+        parent, now + 2s, /*idle_catchup=*/true,
+        /*frontier_off_active_chain=*/false)};
+    BOOST_REQUIRE(first);
+    BOOST_CHECK(first->first == fossil_hash);
+
+    BOOST_REQUIRE(lifecycle.RefreshRetry(fossil_hash, 10min, now + 2s));
+
+    const auto recovery{lifecycle.NextDeferredCatchUpRetry(
+        parent, now + 3s, /*idle_catchup=*/true,
+        /*frontier_off_active_chain=*/true)};
+    BOOST_REQUIRE(recovery);
+    BOOST_CHECK(recovery->first == attested_hash);
+
+    const auto ordinary_idle{lifecycle.NextDeferredCatchUpRetry(
+        parent, now + 3s, /*idle_catchup=*/true,
+        /*frontier_off_active_chain=*/false)};
+    BOOST_REQUIRE(ordinary_idle);
+    BOOST_CHECK(ordinary_idle->first == fossil_hash);
 }
 
 BOOST_AUTO_TEST_CASE(capacity_does_not_evict_active_generation)

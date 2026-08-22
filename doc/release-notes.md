@@ -1,4 +1,4 @@
-BTX version 0.33.4rc1 is staged from:
+BTX version 0.33.4rc1 is an evaluation candidate staged from:
 
   <https://github.com/btxchain/btx>
 
@@ -9,6 +9,10 @@ rule are unchanged. Nodes that remain on 0.33.3 stay consensus-valid.
 lost-twin ExactReplay so attestors, archives, and miners follow the
 attested tip without wedging.
 
+This is not a final release or a fleet rollout artifact. Do not install it on
+production miners, merchant infrastructure, or custodial observers. Final
+release qualification remains separate from this RC build.
+
 Please report bugs using the issue tracker at GitHub:
 
   <https://github.com/btxchain/btx/issues>
@@ -17,16 +21,16 @@ To receive release and update notifications, please subscribe to:
 
   <https://btx.dev/>
 
-# How to Upgrade
+# How to Evaluate This RC
 
-Shut down the previous node cleanly, wait for it to exit, and replace
-its `btxd`, `btx-cli`, and related binaries with the v0.33.4 binaries.
-Back up wallets and configuration before upgrading.
+Use an isolated non-production host and a separate datadir. Preserve exact
+source and artifact fingerprints with the test receipt. Do not replace a
+production node's `btxd`, `btx-cli`, configuration, or datadir with this RC.
 
-This release does **not** change consensus parameters. Installing it is
-not required to stay on the attested chain after 191714. It is
-recommended for attestors, public archives, and miners that follow the
-signed frontier.
+This RC does **not** change consensus parameters. Installing it is not required
+to stay on the attested chain after 191714. The fixes are intended for
+attestors, public archives, and miners that follow the signed frontier, but
+deployment waits for a separately qualified final release.
 
 # Compatibility
 
@@ -80,5 +84,15 @@ Public #111 does not exist on btxchain/btx; the post-0.33.3 stack is
 
 # Consensus
 
-Unchanged from 0.33.3. Do not retune `F`, ASERT, or `powLimit` in this
-release.
+Unchanged from 0.33.3. Do not retune `F`, ASERT, or `powLimit` in this RC.
+
+# Fast-start trust policy
+
+Mainnet fast-start configs publish two signer keys at threshold 1 so consensus
+nodes can observe the signed frontier. The generated miner and service presets
+remain in `matmulvalidation=consensus`; local ExactReplay remains authoritative.
+Non-main configs omit the mainnet keys and threshold.
+
+`matmulvalidation=trusted` is an explicit operator-trust topology, not a speed
+setting. It replaces local Profile 1 ExactReplay with signed-quorum acceptance.
+At threshold 1, either configured signer can authorize work for that node.

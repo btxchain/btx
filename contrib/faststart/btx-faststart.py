@@ -43,6 +43,19 @@ MAINNET_ATTESTOR_PUBKEYS = (
 )
 MAINNET_ATTESTOR_THRESHOLD = 1
 
+# Mainnet nodes may track the published signed frontier while retaining local
+# ExactReplay as the authority. Trusted validation is a separate, explicit
+# operator choice; it must never be emitted by a convenience preset.
+MAINNET_ATTESTOR_TRACKING_CONF = [
+    "# Published 1-of-2 mainnet attestor pin. Confirm after RPC is up:",
+    "#   btx-cli getmatmultrustedstatus",
+    "# Consensus remains local ExactReplay; trusted mode requires explicit opt-in.",
+    "matmulvalidation=consensus",
+    f"matmultrustedpubkey={MAINNET_ATTESTOR_PUBKEYS[0]}",
+    f"matmultrustedpubkey={MAINNET_ATTESTOR_PUBKEYS[1]}",
+    f"matmultrustedthreshold={MAINNET_ATTESTOR_THRESHOLD}",
+]
+
 PRESET_CONF = {
     "miner": [
         "server=1",
@@ -54,13 +67,6 @@ PRESET_CONF = {
         "addnode=node.btx.dev:19335",
         "addnode=node.btxchain.org:19335",
         "addnode=node.btx.tools:19335",
-        "# Published 1-of-2 attestor pin. Confirm after RPC is up:",
-        "#   btx-cli getmatmultrustedstatus",
-        "# P2P seeds do not push these keys. Do not load a signer WIF.",
-        "matmulvalidation=trusted",
-        f"matmultrustedpubkey={MAINNET_ATTESTOR_PUBKEYS[0]}",
-        f"matmultrustedpubkey={MAINNET_ATTESTOR_PUBKEYS[1]}",
-        f"matmultrustedthreshold={MAINNET_ATTESTOR_THRESHOLD}",
         "prune=4096",
         "blockfilterindex=1",
         "coinstatsindex=1",
@@ -82,10 +88,6 @@ PRESET_CONF = {
         "addnode=node.btx.dev:19335",
         "addnode=node.btxchain.org:19335",
         "addnode=node.btx.tools:19335",
-        "# Same published attestor pin the miner preset uses.",
-        f"matmultrustedpubkey={MAINNET_ATTESTOR_PUBKEYS[0]}",
-        f"matmultrustedpubkey={MAINNET_ATTESTOR_PUBKEYS[1]}",
-        f"matmultrustedthreshold={MAINNET_ATTESTOR_THRESHOLD}",
         "prune=0",
         "txindex=1",
         "blockfilterindex=1",
@@ -265,6 +267,8 @@ def write_preset_conf(
     if chain != "main":
         lines.append(f"[{chain}]")
     lines.extend(PRESET_CONF[preset])
+    if chain == "main":
+        lines.extend(MAINNET_ATTESTOR_TRACKING_CONF)
     if extra_lines:
         lines.extend(extra_lines)
     conf_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -320,7 +324,7 @@ def rpc_json(cmd: list[str], method: str, *params: str) -> dict[str, Any]:
 
 
 def verify_mainnet_attestor_pin(cli_cmd: list[str]) -> None:
-    """Confirm local RPC matches the published archive/attestor key set."""
+    """Confirm local RPC retains consensus mode and the published signer set."""
     status = rpc_json(cli_cmd, "getmatmultrustedstatus")
     have = {str(key).lower() for key in status.get("trusted_signer_pubkeys") or []}
     want = {key.lower() for key in MAINNET_ATTESTOR_PUBKEYS}
@@ -337,10 +341,18 @@ def verify_mainnet_attestor_pin(cli_cmd: list[str]) -> None:
             "getmatmultrustedstatus.threshold does not match the published "
             f"mainnet pin {MAINNET_ATTESTOR_THRESHOLD}; got {threshold}."
         )
+    chain_info = rpc_json(cli_cmd, "getblockchaininfo")
+    validation_mode = str(chain_info.get("matmulvalidationmode") or "").lower()
+    if validation_mode != "consensus":
+        raise RuntimeError(
+            "generated fast-start policy requires matmulvalidationmode=consensus; "
+            f"got {validation_mode or 'missing'}. Trusted mode replaces local "
+            "ExactReplay and requires a separate explicit operator decision."
+        )
     print(
         "attestor pin ok: configured="
         f"{status.get('configured')} threshold={threshold} "
-        f"pubkeys={len(have)}"
+        f"pubkeys={len(have)} mode={validation_mode}"
     )
 
 

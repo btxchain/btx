@@ -81,6 +81,8 @@ maxmempool=300
 # GPU attestors and following archives return this from
 # getmatmultrustedstatus / getfinalityinfo after you join the seed mesh.
 # P2P addnode/DNS does not push keys. Do not load a signer WIF here.
+# Tracking the signed frontier does not replace local ExactReplay.
+matmulvalidation=consensus
 matmultrustedpubkey=03d90c148db37da28ce47ce15bade88a177728d663da4bc9ba765943b7d4e4f0aa
 matmultrustedpubkey=0224e80df33697385b54b3c69bae1f097f533c0c43e93c29f73ee97319d4a5e04c
 matmultrustedthreshold=1

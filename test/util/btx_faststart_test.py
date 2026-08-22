@@ -81,6 +81,61 @@ class BTXFaststartTest(unittest.TestCase):
             self.assertIn("rpcbind=127.0.0.1", text)
             self.assertTrue(text.rstrip().endswith("txindex=1"))
 
+    def test_faststart_attestor_policy_is_mainnet_only_and_consensus_default(self):
+        chains = ("main", "regtest", "testnet", "testnet4", "signet")
+        for preset in ("miner", "service"):
+            for chain in chains:
+                with self.subTest(preset=preset, chain=chain):
+                    with tempfile.TemporaryDirectory() as tmpdir:
+                        conf_path = self.module.write_preset_conf(
+                            pathlib.Path(tmpdir), preset, chain
+                        )
+                        text = conf_path.read_text(encoding="utf-8")
+
+                    self.assertNotIn("matmulvalidation=trusted", text)
+                    if chain == "main":
+                        self.assertIn("matmulvalidation=consensus", text)
+                        self.assertEqual(
+                            text.count("matmultrustedpubkey="),
+                            len(self.module.MAINNET_ATTESTOR_PUBKEYS),
+                        )
+                        self.assertIn(
+                            f"matmultrustedthreshold={self.module.MAINNET_ATTESTOR_THRESHOLD}",
+                            text,
+                        )
+                    else:
+                        self.assertNotIn("matmultrustedpubkey=", text)
+                        self.assertNotIn("matmultrustedthreshold=", text)
+
+    def test_verify_mainnet_attestor_pin_rejects_trusted_runtime_override(self):
+        status = {
+            "configured": True,
+            "trusted_signer_pubkeys": list(self.module.MAINNET_ATTESTOR_PUBKEYS),
+            "threshold": self.module.MAINNET_ATTESTOR_THRESHOLD,
+        }
+        with mock.patch.object(
+            self.module,
+            "rpc_json",
+            side_effect=[status, {"matmulvalidationmode": "trusted"}],
+        ):
+            with self.assertRaisesRegex(RuntimeError, "requires matmulvalidationmode=consensus"):
+                self.module.verify_mainnet_attestor_pin(["btx-cli"])
+
+    def test_verify_mainnet_attestor_pin_accepts_consensus_runtime(self):
+        status = {
+            "configured": True,
+            "trusted_signer_pubkeys": list(self.module.MAINNET_ATTESTOR_PUBKEYS),
+            "threshold": self.module.MAINNET_ATTESTOR_THRESHOLD,
+        }
+        output = io.StringIO()
+        with mock.patch.object(
+            self.module,
+            "rpc_json",
+            side_effect=[status, {"matmulvalidationmode": "consensus"}],
+        ), contextlib.redirect_stdout(output):
+            self.module.verify_mainnet_attestor_pin(["btx-cli"])
+        self.assertIn("mode=consensus", output.getvalue())
+
     def test_require_snapshot_sha256_rejects_missing_hash_by_default(self):
         with self.assertRaisesRegex(KeyError, "missing snapshot_sha256/sha256"):
             self.module.require_snapshot_sha256(

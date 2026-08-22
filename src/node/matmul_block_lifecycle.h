@@ -240,6 +240,28 @@ public:
         return std::make_pair(selected->first, *selected->second.body);
     }
 
+    /**
+     * Select deferred catch-up work without allowing idle-mode urgency to
+     * defeat an off-frontier retention cooldown.
+     *
+     * Ordinary idle catch-up may bypass retry delays to keep the verifier
+     * occupied. Once the signed frontier is off the active chain, however,
+     * those delays distinguish an ineligible losing fossil from the attested
+     * sibling that can restore the frontier. Ignoring both delays lets the
+     * lower-sorted fossil win every pass until its retention TTL expires.
+     */
+    std::optional<std::pair<uint256, RetainedBody>> NextDeferredCatchUpRetry(
+        const uint256& preferred_parent,
+        Clock::time_point now,
+        bool idle_catchup,
+        bool frontier_off_active_chain)
+    {
+        return NextRetry(
+            preferred_parent, now,
+            /*ignore_retry_delay=*/idle_catchup &&
+                !frontier_off_active_chain);
+    }
+
     bool RefreshRetry(const uint256& hash, Clock::duration delay,
                       Clock::time_point now = Clock::now())
     {

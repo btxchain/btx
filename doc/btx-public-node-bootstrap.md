@@ -66,6 +66,7 @@ addnode=164.90.246.229:19335
 # Published mainnet ExactReplay attestors (public keys only).
 # Same set GPU attestors and following archives return from
 # getmatmultrustedstatus / getfinalityinfo. P2P seeds do not push keys.
+matmulvalidation=consensus
 matmultrustedpubkey=03d90c148db37da28ce47ce15bade88a177728d663da4bc9ba765943b7d4e4f0aa
 matmultrustedpubkey=0224e80df33697385b54b3c69bae1f097f533c0c43e93c29f73ee97319d4a5e04c
 matmultrustedthreshold=1
@@ -78,6 +79,9 @@ Notes:
 - After `btxd` is up, `btx-cli getmatmultrustedstatus` must show
   `configured=true` and the two pubkeys above. That is the mining/archive
   bootstrap pin (same RPC GPU attestors and following archives serve).
+- The signer pin tracks the signed frontier in consensus mode. Switching to
+  `matmulvalidation=trusted` skips local ExactReplay; threshold 1 lets either
+  listed signer authorize Profile 1 work and requires explicit risk acceptance.
 - `addnode=` seeds initial peers while preserving broader peer discovery.
 - the current public DNS bootstrap set is `node.btx.dev`,
   `node.btxchain.org`, and `node.btx.tools`; direct IP addnodes are optional
