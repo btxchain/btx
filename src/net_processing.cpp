@@ -11828,7 +11828,13 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
                         ? body_reaches_expensive && encdr.has_value()
                         : requires_expensive_verification && body_reaches_expensive;
                     if (exact_recompute_required &&
-                        node::matmul_trusted::IsConfigured()) {
+                        node::matmul_trusted::IsConfigured() &&
+                        params.IsMatMulTrustedReplayAttestationActive(
+                            exact_reference_height)) {
+                        // Below activation, attestations cannot exist. Keep
+                        // the ordinary local replay path instead of retaining
+                        // the body forever while the request helper correctly
+                        // refuses to send an impossible GETMMATTEST.
                         const CBlockIndex* tip{m_chainman.ActiveTip()};
                         const bool has_quorum{
                             indexed != nullptr
