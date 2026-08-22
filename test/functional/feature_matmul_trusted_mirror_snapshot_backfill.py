@@ -137,7 +137,9 @@ class MatMulTrustedMirrorSnapshotBackfillTest(BitcoinTestFramework):
 
     def setup_network(self):
         self.setup_nodes()
-        self.connect_nodes(0, 1)
+        # The mirror must initiate its archive connection. Archive service bits
+        # alone do not authorize an unsolicited inbound block source.
+        self.connect_nodes(1, 0)
         self.sync_all()
 
     def _push_headers(self, dest, hashes, src, *, services, with_attestations):
@@ -146,7 +148,14 @@ class MatMulTrustedMirrorSnapshotBackfillTest(BitcoinTestFramework):
         headers = [
             from_hex(CBlockHeader(), src.getblockheader(h, False)) for h in hashes
         ]
-        peer = dest.add_p2p_connection(P2PInterface(), services=services)
+        # Model the production topology: the mirror chooses the archive. An
+        # inbound peer cannot self-authorize merely by advertising ARCHIVE.
+        peer = dest.add_outbound_p2p_connection(
+            P2PInterface(),
+            p2p_idx=0,
+            connection_type="outbound-full-relay",
+            services=services,
+        )
         if not with_attestations:
             peer.send_and_ping(msg_headers(headers=headers))
             peer.peer_disconnect()
