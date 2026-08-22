@@ -25,8 +25,8 @@ from GPU attestors (`-matmulvalidation=trusted` plus `-matmultrustedpubkey`).
 That topology is a **stopgap**, not the destination. A trusted mirror is not an
 independently validating full node: compromise of `M` attestation keys can make
 that operator's mirrors accept false MatMul work. Independent
-`-matmulvalidation=consensus` nodes already ignore those signatures as
-authority.
+`-matmulvalidation=consensus` nodes ignore those signatures as authority only
+when no trusted signer quorum is configured.
 
 The destination is: every node that claims to be a full node ExactReplays on a
 GPU. CPU boxes remain light clients, wallets, or explorers. Attestation becomes

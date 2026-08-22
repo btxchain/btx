@@ -88,11 +88,13 @@ Unchanged from 0.33.3. Do not retune `F`, ASERT, or `powLimit` in this RC.
 
 # Fast-start trust policy
 
-Mainnet fast-start configs publish two signer keys at threshold 1 so consensus
-nodes can observe the signed frontier. The generated miner and service presets
-remain in `matmulvalidation=consensus`; local ExactReplay remains authoritative.
-Non-main configs omit the mainnet keys and threshold.
+Fast-start miner and service presets emit `matmulvalidation=consensus` with no
+trusted signer keys or threshold on any chain. After startup they verify that
+`getmatmultrustedstatus` is unconfigured, keeping local ExactReplay
+authoritative.
 
-`matmulvalidation=trusted` is an explicit operator-trust topology, not a speed
-setting. It replaces local Profile 1 ExactReplay with signed-quorum acceptance.
-At threshold 1, either configured signer can authorize work for that node.
+Configuring trusted signer keys is an explicit operator-trust topology, not a
+tracking-only setting. A verified quorum can replace local Profile 1 ExactReplay
+even when `matmulvalidation=consensus`; `matmulvalidation=trusted` additionally
+makes missing quorum a retryable gate. At threshold 1, either configured signer
+can authorize work for that node.

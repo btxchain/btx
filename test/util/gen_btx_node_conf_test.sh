@@ -21,6 +21,15 @@ MANAGED_CONF="${TMP_DIR}/archival-managed-local.conf"
 "${SCRIPT}" archival strict-connect > "${STRICT_CONF}"
 "${SCRIPT}" archival managed-direct local > "${MANAGED_CONF}"
 
+# Every generated topology remains independently validating by default.
+for conf in "${FAST_CONF}" "${ARCH_CONF}" "${STRICT_CONF}" "${MANAGED_CONF}"; do
+  [[ "$(rg -c '^matmulvalidation=consensus$' "${conf}")" == "1" ]]
+  if rg -q '^matmultrusted(pubkey|threshold)=' "${conf}"; then
+    echo "unexpected MatMul signer authority in generated config: ${conf}" >&2
+    exit 1
+  fi
+done
+
 # Fast/scalable profile checks.
 rg -q '^prune=4096$' "${FAST_CONF}"
 rg -q '^dnsseed=1$' "${FAST_CONF}"

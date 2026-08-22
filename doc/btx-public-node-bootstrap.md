@@ -63,13 +63,8 @@ addnode=node.btx.tools:19335
 addnode=146.190.179.86:19335
 addnode=164.90.246.229:19335
 
-# Published mainnet ExactReplay attestors (public keys only).
-# Same set GPU attestors and following archives return from
-# getmatmultrustedstatus / getfinalityinfo. P2P seeds do not push keys.
+# Independent validation: no trusted signer authority is configured.
 matmulvalidation=consensus
-matmultrustedpubkey=03d90c148db37da28ce47ce15bade88a177728d663da4bc9ba765943b7d4e4f0aa
-matmultrustedpubkey=0224e80df33697385b54b3c69bae1f097f533c0c43e93c29f73ee97319d4a5e04c
-matmultrustedthreshold=1
 ```
 
 Notes:
@@ -77,11 +72,11 @@ Notes:
 - `19335` is the BTX mainnet P2P port.
 - `19334` is the BTX mainnet default RPC port.
 - After `btxd` is up, `btx-cli getmatmultrustedstatus` must show
-  `configured=true` and the two pubkeys above. That is the mining/archive
-  bootstrap pin (same RPC GPU attestors and following archives serve).
-- The signer pin tracks the signed frontier in consensus mode. Switching to
-  `matmulvalidation=trusted` skips local ExactReplay; threshold 1 lets either
-  listed signer authorize Profile 1 work and requires explicit risk acceptance.
+  `configured=false`, threshold 0, and no trusted signer pubkeys.
+- Adding any `matmultrustedpubkey`/threshold quorum delegates Profile 1
+  acceptance authority: a verified quorum skips local ExactReplay even in
+  `matmulvalidation=consensus`. Keep signer-backed operation in a separately
+  reviewed operator config.
 - `addnode=` seeds initial peers while preserving broader peer discovery.
 - the current public DNS bootstrap set is `node.btx.dev`,
   `node.btxchain.org`, and `node.btx.tools`; direct IP addnodes are optional
@@ -192,10 +187,12 @@ miner/pool coinbase destination to the same multisig-derived payout address.
 A mining/submit node must also:
 
 - run `-blocksonly=0` (otherwise winning blocks often never reach the signer);
-- set `-matmultrustedpubkey=<signer>` and `-matmultrustedthreshold` even in
-  `-matmulvalidation=consensus` so `getmatmulattestedtip` is populated
-  (ExactReplay is unchanged);
-- build templates on that attested tip and never stack unattested candidates.
+- either remain independently validating with no signer keys, or explicitly
+  accept that setting `-matmultrustedpubkey=<signer>` and
+  `-matmultrustedthreshold` grants that quorum acceptance authority even in
+  `-matmulvalidation=consensus`;
+- when using that signer-authority topology, build templates on the attested tip
+  and never stack unattested candidates.
 
 See [`btx-matmul-v4.7-gpu-operator-runbook.md`](btx-matmul-v4.7-gpu-operator-runbook.md)
 section "Mining on the attested chain". Canonical rate is gated by the signer's

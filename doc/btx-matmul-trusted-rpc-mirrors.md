@@ -71,19 +71,20 @@ Operators should compare `attestation_version` and
 and mirror before admitting traffic. A mismatch is a configuration/release
 error and the affected mirror will reject those attestations.
 
-The live mainnet attestor pin (public keys, threshold 1) is published in
-the repository README and written by miner/archive bootstrap
-(`contrib/faststart`, `gen-btx-node-conf.sh`). `getmatmultrustedstatus`
-and `getfinalityinfo` on GPU attestors and following archives return
-`trusted_signer_pubkeys` / `threshold` for that same set. P2P seed
-connect does not advertise keys; miners pin them locally and confirm on
-RPC after joining the seed mesh. Do not load a signer WIF on a miner.
+The live mainnet signer set (public keys, threshold 1) is published in the
+repository README for operators who intentionally choose signer-backed
+authority. Generic miner/archive bootstrap (`contrib/faststart`,
+`gen-btx-node-conf.sh`) configures no signer keys or threshold. P2P seed connect
+does not advertise keys. Do not load a signer WIF on a miner.
 
 ## Roles and service capabilities
 
-- `-matmulvalidation=consensus` performs local authority as before. With a
-  signing key and serving enabled, it may advertise
+- `-matmulvalidation=consensus` with no configured trusted signer quorum
+  performs local ExactReplay authority. With a signing key and serving enabled,
+  it may advertise
   `NODE_MATMUL_ATTESTATION_ARCHIVE`.
+- Configuring a trusted signer quorum grants it acceptance authority even in
+  consensus mode; a quorum-authenticated block can skip local ExactReplay.
 - `-matmulvalidation=trusted` performs the trusted-mirror policy, advertises
   `NODE_MATMUL_TRUSTED_MIRROR`, and never advertises
   `NODE_MATMUL_CONSENSUS`.

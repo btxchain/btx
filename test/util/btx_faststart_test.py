@@ -81,7 +81,7 @@ class BTXFaststartTest(unittest.TestCase):
             self.assertIn("rpcbind=127.0.0.1", text)
             self.assertTrue(text.rstrip().endswith("txindex=1"))
 
-    def test_faststart_attestor_policy_is_mainnet_only_and_consensus_default(self):
+    def test_faststart_presets_keep_independent_consensus_on_every_chain(self):
         chains = ("main", "regtest", "testnet", "testnet4", "signet")
         for preset in ("miner", "service"):
             for chain in chains:
@@ -93,48 +93,127 @@ class BTXFaststartTest(unittest.TestCase):
                         text = conf_path.read_text(encoding="utf-8")
 
                     self.assertNotIn("matmulvalidation=trusted", text)
-                    if chain == "main":
-                        self.assertIn("matmulvalidation=consensus", text)
-                        self.assertEqual(
-                            text.count("matmultrustedpubkey="),
-                            len(self.module.MAINNET_ATTESTOR_PUBKEYS),
-                        )
-                        self.assertIn(
-                            f"matmultrustedthreshold={self.module.MAINNET_ATTESTOR_THRESHOLD}",
-                            text,
-                        )
-                    else:
-                        self.assertNotIn("matmultrustedpubkey=", text)
-                        self.assertNotIn("matmultrustedthreshold=", text)
+                    self.assertEqual(text.count("matmulvalidation=consensus"), 1)
+                    self.assertNotIn("matmultrustedpubkey=", text)
+                    self.assertNotIn("matmultrustedthreshold=", text)
 
-    def test_verify_mainnet_attestor_pin_rejects_trusted_runtime_override(self):
+    def test_reject_authority_daemon_args_before_launch(self):
+        for daemon_arg in (
+            "-matmulvalidation=trusted",
+            "-matmultrustedpubkey=02aa",
+            "-matmultrustedthreshold=1",
+        ):
+            with self.subTest(daemon_arg=daemon_arg):
+                with self.assertRaisesRegex(RuntimeError, "independent|signer authority"):
+                    self.module.reject_authority_daemon_args([daemon_arg])
+
+        self.module.reject_authority_daemon_args(["-matmulvalidation=consensus"])
+
+    def test_verify_independent_policy_rejects_trusted_runtime_override(self):
+        with mock.patch.object(
+            self.module,
+            "rpc_json",
+            return_value={"matmulvalidationmode": "trusted"},
+        ):
+            with self.assertRaisesRegex(RuntimeError, "requires matmulvalidationmode=consensus"):
+                self.module.verify_independent_matmul_policy(["btx-cli"])
+
+    def test_verify_independent_policy_rejects_signers_in_consensus_mode(self):
         status = {
             "configured": True,
-            "trusted_signer_pubkeys": list(self.module.MAINNET_ATTESTOR_PUBKEYS),
-            "threshold": self.module.MAINNET_ATTESTOR_THRESHOLD,
+            "trusted_signer_pubkeys": ["02aa"],
+            "threshold": 1,
         }
         with mock.patch.object(
             self.module,
             "rpc_json",
-            side_effect=[status, {"matmulvalidationmode": "trusted"}],
+            side_effect=[{"matmulvalidationmode": "consensus"}, status],
         ):
-            with self.assertRaisesRegex(RuntimeError, "requires matmulvalidationmode=consensus"):
-                self.module.verify_mainnet_attestor_pin(["btx-cli"])
+            with self.assertRaisesRegex(RuntimeError, "signer quorums bypass local ExactReplay"):
+                self.module.verify_independent_matmul_policy(["btx-cli"])
 
-    def test_verify_mainnet_attestor_pin_accepts_consensus_runtime(self):
+    def test_verify_independent_policy_accepts_unconfigured_consensus(self):
         status = {
-            "configured": True,
-            "trusted_signer_pubkeys": list(self.module.MAINNET_ATTESTOR_PUBKEYS),
-            "threshold": self.module.MAINNET_ATTESTOR_THRESHOLD,
+            "configured": False,
+            "trusted_signer_pubkeys": [],
+            "threshold": 0,
         }
         output = io.StringIO()
         with mock.patch.object(
             self.module,
             "rpc_json",
-            side_effect=[status, {"matmulvalidationmode": "consensus"}],
+            side_effect=[{"matmulvalidationmode": "consensus"}, status],
         ), contextlib.redirect_stdout(output):
-            self.module.verify_mainnet_attestor_pin(["btx-cli"])
-        self.assertIn("mode=consensus", output.getvalue())
+            self.module.verify_independent_matmul_policy(["btx-cli"])
+        self.assertIn("configured=False", output.getvalue())
+
+    def test_main_stops_daemon_it_started_when_runtime_policy_is_unsafe(self):
+        with tempfile.TemporaryDirectory() as tmpdir, mock.patch.object(
+            self.module,
+            "snapshot_from_args",
+            return_value=(
+                "https://example.invalid/snapshot.dat",
+                "ab" * 32,
+                "snapshot.dat",
+                {},
+            ),
+        ), mock.patch.object(
+            self.module, "require_snapshot_sha256"
+        ), mock.patch.object(
+            self.module, "run_quiet"
+        ), mock.patch.object(
+            self.module, "wait_for_rpc_ready"
+        ), mock.patch.object(
+            self.module,
+            "verify_independent_matmul_policy",
+            side_effect=RuntimeError("unsafe runtime policy"),
+        ), mock.patch.object(
+            self.module.subprocess, "run"
+        ) as run:
+            run.side_effect = [mock.Mock(returncode=1), mock.Mock(returncode=0)]
+
+            with self.assertRaisesRegex(RuntimeError, "unsafe runtime policy"):
+                self.module.main(
+                    [
+                        "service",
+                        "--chain=main",
+                        f"--datadir={pathlib.Path(tmpdir) / 'node'}",
+                    ]
+                )
+
+            self.assertEqual(run.call_count, 2)
+            self.assertEqual(run.call_args_list[-1].args[0][-1], "stop")
+
+    def test_main_does_not_stop_existing_daemon_when_runtime_policy_is_unsafe(self):
+        with tempfile.TemporaryDirectory() as tmpdir, mock.patch.object(
+            self.module,
+            "snapshot_from_args",
+            return_value=(
+                "https://example.invalid/snapshot.dat",
+                "ab" * 32,
+                "snapshot.dat",
+                {},
+            ),
+        ), mock.patch.object(
+            self.module, "require_snapshot_sha256"
+        ), mock.patch.object(
+            self.module,
+            "verify_independent_matmul_policy",
+            side_effect=RuntimeError("unsafe runtime policy"),
+        ), mock.patch.object(
+            self.module.subprocess, "run", return_value=mock.Mock(returncode=0)
+        ) as run:
+            with self.assertRaisesRegex(RuntimeError, "unsafe runtime policy"):
+                self.module.main(
+                    [
+                        "service",
+                        "--chain=main",
+                        f"--datadir={pathlib.Path(tmpdir) / 'node'}",
+                    ]
+                )
+
+            self.assertEqual(run.call_count, 1)
+            self.assertEqual(run.call_args_list[0].args[0][-1], "getblockcount")
 
     def test_require_snapshot_sha256_rejects_missing_hash_by_default(self):
         with self.assertRaisesRegex(KeyError, "missing snapshot_sha256/sha256"):
@@ -523,6 +602,7 @@ class BTXFaststartTest(unittest.TestCase):
         original_snapshot_superseded_by_active_chain = self.module.snapshot_superseded_by_active_chain
         original_monitor_chainstates = self.module.monitor_chainstates
         original_rpc_json = self.module.rpc_json
+        original_verify_independent_matmul_policy = self.module.verify_independent_matmul_policy
         try:
             with tempfile.TemporaryDirectory() as tmpdir:
                 datadir = pathlib.Path(tmpdir) / "node"
@@ -547,6 +627,7 @@ class BTXFaststartTest(unittest.TestCase):
                 self.module.wait_for_snapshot_header = lambda *args, **kwargs: None
                 self.module.snapshot_superseded_by_active_chain = lambda *args, **kwargs: True
                 self.module.monitor_chainstates = lambda *args, **kwargs: None
+                self.module.verify_independent_matmul_policy = lambda *args, **kwargs: None
 
                 def fake_rpc_json(_cmd, method, *params):
                     seen_methods.append(method)
@@ -577,6 +658,7 @@ class BTXFaststartTest(unittest.TestCase):
             self.module.snapshot_superseded_by_active_chain = original_snapshot_superseded_by_active_chain
             self.module.monitor_chainstates = original_monitor_chainstates
             self.module.rpc_json = original_rpc_json
+            self.module.verify_independent_matmul_policy = original_verify_independent_matmul_policy
 
     def test_main_treats_mid_load_snapshot_supersession_as_non_fatal(self):
         original_run = self.module.subprocess.run
@@ -587,6 +669,7 @@ class BTXFaststartTest(unittest.TestCase):
         original_snapshot_superseded_by_active_chain = self.module.snapshot_superseded_by_active_chain
         original_monitor_chainstates = self.module.monitor_chainstates
         original_rpc_json = self.module.rpc_json
+        original_verify_independent_matmul_policy = self.module.verify_independent_matmul_policy
         try:
             with tempfile.TemporaryDirectory() as tmpdir:
                 datadir = pathlib.Path(tmpdir) / "node"
@@ -610,6 +693,7 @@ class BTXFaststartTest(unittest.TestCase):
                 self.module.wait_for_snapshot_header = lambda *args, **kwargs: None
                 self.module.snapshot_superseded_by_active_chain = lambda *args, **kwargs: False
                 self.module.monitor_chainstates = lambda *args, **kwargs: None
+                self.module.verify_independent_matmul_policy = lambda *args, **kwargs: None
 
                 def fake_rpc_json(_cmd, method, *params):
                     if method == "loadtxoutset":
@@ -643,6 +727,7 @@ class BTXFaststartTest(unittest.TestCase):
             self.module.snapshot_superseded_by_active_chain = original_snapshot_superseded_by_active_chain
             self.module.monitor_chainstates = original_monitor_chainstates
             self.module.rpc_json = original_rpc_json
+            self.module.verify_independent_matmul_policy = original_verify_independent_matmul_policy
 
 
 if __name__ == "__main__":

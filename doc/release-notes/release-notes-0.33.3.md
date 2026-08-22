@@ -122,9 +122,9 @@ bounded attestation cache has dropped the original bucket.
 # Known Limitations
 
 - Phase 1 remains 1-of-1. Compromise of that single attestation key can
-  make configured trusted mirrors accept false MatMul work. Independent
-  `-matmulvalidation=consensus` nodes ignore those signatures as
-  authority.
+  make any node configured with that trusted signer quorum accept false MatMul
+  work, including in `-matmulvalidation=consensus`. Only consensus nodes with
+  no trusted signer quorum remain independently validating.
 - Trusted CPU archives and RPC mirrors are not independently validating
   full nodes. Do not describe or expose them as such.
 - M-of-N is compiled in, but this release does not add attestor GPUs

@@ -86,25 +86,20 @@ miningchainguard=1
 miningminoutboundpeers=0
 miningminsyncedoutboundpeers=0
 miningmaxheaderlag=8
-# Published 1-of-2 mainnet attestor pin (same set archives/attestors return
-# from getmatmultrustedstatus). Tracking does not replace local ExactReplay.
+# Independent validation: no trusted signer authority is configured.
 matmulvalidation=consensus
-matmultrustedpubkey=03d90c148db37da28ce47ce15bade88a177728d663da4bc9ba765943b7d4e4f0aa
-matmultrustedpubkey=0224e80df33697385b54b3c69bae1f097f533c0c43e93c29f73ee97319d4a5e04c
-matmultrustedthreshold=1
 ```
 
-After the daemon is up and peering with the public seeds, confirm the pin
-on local RPC (`getmatmultrustedstatus` → `trusted_signer_pubkeys` and
-`threshold`). That is the mining-bootstrap check; do not scrape signer
-pubs from a random remote RPC. Do not load a signer WIF on a miner.
+After the daemon is up, local RPC `getmatmultrustedstatus` must report
+`configured=false`, threshold 0, and no trusted signer pubkeys. This confirms
+that local ExactReplay remains the authority. Do not load a signer WIF on a
+miner.
 
-The generated preset never selects `matmulvalidation=trusted`. Trusted mode is
-an explicit operator-trust topology: at threshold 1, either published signer
-can authorize Profile 1 work for that node and local ExactReplay is skipped.
-Only choose it through a separately reviewed configuration decision. Mainnet
-is the only chain that receives this published signer set; regtest, testnet,
-testnet4, and signet configs omit the keys and threshold.
+The generated presets never select `matmulvalidation=trusted` or configure
+signer keys/thresholds on any chain. Adding a signer quorum grants it authority
+to authorize Profile 1 work without local ExactReplay even while the displayed
+mode remains `consensus`. Use signer-backed operation only through a separately
+reviewed, operator-managed configuration.
 
 Use DNS names rather than hard-coded peer IP addresses in configs and runbooks.
 Peer IPs can change or disappear; DNS bootstrap names can be updated without

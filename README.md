@@ -176,34 +176,35 @@ peering, and attestor diversity can carry it:
    talking to seeds. Adding `N` with `M=1` is only availability; `M≥2` is
    what removes a single key as PoW authority.
 
-The live mainnet pin (1-of-2) is published below. GPU attestors and the
-CPU archives that follow them return the same set from
+The live mainnet signer set (1-of-2) is published below. GPU attestors and the
+CPU archives that intentionally follow them return the same set from
 `getmatmultrustedstatus` / `getfinalityinfo` (`trusted_signer_pubkeys`,
-`threshold`). P2P seed connect does **not** push keys — miners pin this
-set at bootstrap, then confirm it on local RPC after joining
-`node.btx.dev` / `node.btxchain.org` / `node.btx.tools`.
+`threshold`). P2P seed connect does **not** push keys. Configuring this set is
+an explicit delegation of MatMul acceptance authority, not a routine bootstrap
+or tracking-only setting.
 
 ```ini
-# Mainnet ExactReplay attestors. Public keys only — never a signer WIF.
+# OPTIONAL signer authority. Public keys only — never a signer WIF.
 matmultrustedpubkey=03d90c148db37da28ce47ce15bade88a177728d663da4bc9ba765943b7d4e4f0aa
 matmultrustedpubkey=0224e80df33697385b54b3c69bae1f097f533c0c43e93c29f73ee97319d4a5e04c
 matmultrustedthreshold=1
 ```
 
-This pin makes the signed frontier visible while the default
-`matmulvalidation=consensus` mode continues to ExactReplay locally. Selecting
-`matmulvalidation=trusted` is a separate operator decision: with threshold 1,
-either listed signer becomes sufficient PoW authority for that node and local
-ExactReplay is skipped. Fast-start does not make that choice automatically.
+When these keys are configured, a verified threshold quorum can authorize a
+block without local ExactReplay even in `matmulvalidation=consensus`. With
+threshold 1, either listed signer becomes sufficient PoW authority for that
+node. `matmulvalidation=trusted` also makes missing quorum a retryable gate, but
+it is not the boundary at which signer authority begins. Fast-start and the
+public config generator therefore emit no signer keys or threshold.
 
 ```bash
 btx-cli getmatmultrustedstatus
-# configured=true, threshold=1, trusted_signer_pubkeys = the two hex keys above
+# Independent default: configured=false, threshold=0, trusted_signer_pubkeys=[]
 ```
 
-A miner that omits this pin cannot see `getmatmulattestedtip` and
-`getblocktemplate` may extend an unattested orphan. Do not load
-`-matmulattestationsignerkeyfile` on a miner.
+A miner that intentionally accepts the signer-authority topology can configure
+the published set and use `getmatmulattestedtip` to avoid extending an
+unattested orphan. Do not load `-matmulattestationsignerkeyfile` on a miner.
 3. **Convert public seeds to GPU full nodes.** Each converted host runs
    `-matmulvalidation=consensus` and ExactReplays. Trusted-mode on those
    boxes goes away. CPU wallets and explorers can remain light.
@@ -1106,32 +1107,35 @@ ADDR=$(./build/bin/btx-cli -regtest -rpcwallet=miner getnewaddress)
 # -> 200.00000000 (10 blocks x 20 BTX)
 ```
 
-### Attestor pin (mainnet mining bootstrap)
+### Optional signer authority (mainnet mining)
 
-After the node is up and peering with the public seed/archive mesh, treat
-the attestor set as a normal bootstrap check — same class of pin as DNS
-seeds, not a secret:
+The generated miner configuration is independently validating: it sets
+`matmulvalidation=consensus` and configures no trusted signer quorum. After RPC
+is ready, `getmatmultrustedstatus` must report `configured=false`, threshold 0,
+and no trusted signer pubkeys.
+
+If a miner must follow the signed frontier, treat that as a separate trust
+decision rather than a normal bootstrap step:
 
 1. Join the published seeds (`dnsseed=1`, `addnode=node.btx.dev:19335`, …).
-2. Have the two `-matmultrustedpubkey` lines and `-matmultrustedthreshold=1`
-   in `btx.conf` (miner fast-start writes them).
-   Keep `-matmulvalidation=consensus` unless you have explicitly accepted the
-   threshold-1 trusted-mirror topology.
-3. Ping local RPC: `getmatmultrustedstatus` must show `configured=true`
+2. Explicitly accept that the configured quorum can authorize blocks without
+   local ExactReplay, including in `matmulvalidation=consensus`.
+3. Add the reviewed `-matmultrustedpubkey` set and threshold in a separate
+   operator-managed config.
+4. Ping local RPC: `getmatmultrustedstatus` must show `configured=true`
    and the same `trusted_signer_pubkeys` / `threshold` the archives and
    GPU attestors return. `getfinalityinfo` repeats the pubs.
-4. Then call `getblocktemplate`. A unique attested child of tip means
+5. Then call `getblocktemplate`. A unique attested child of tip means
    follow `getmatmulattestedtip` instead of grinding an unattested twin.
 
 P2P `addnode` / DNS seeds do not serve RPC. You confirm the pin on **your**
 `btx-cli`, or on an archive/attestor RPC you already control. Do not take
 signer pubs from a random remote RPC.
 
-`contrib/faststart` `--preset miner` writes this pin and checks it after
-RPC is ready. `contrib/devtools/gen-btx-node-conf.sh` writes it too.
-Both paths keep `matmulvalidation=consensus`. Trusted mode is a separate
-operator opt-in that replaces local ExactReplay; with threshold 1, either
-configured signer is sufficient authority for that node.
+`contrib/faststart` `--preset miner` and
+`contrib/devtools/gen-btx-node-conf.sh` deliberately write no signer authority.
+Fast-start checks the unconfigured state after RPC is ready and refuses signer
+or trusted-mode daemon overrides.
 
 ### Production Mining (getblocktemplate)
 

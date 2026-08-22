@@ -92,12 +92,13 @@ matmultrustedthreshold=1
 - `-blocksonly=0`: a mining/submit node must relay aggressively. With
   `-blocksonly=1` winning blocks often never reach the signer (signer tip stuck
   at yours minus one) and every win orphans.
-- `-matmultrustedpubkey` + `-matmultrustedthreshold`: a plain consensus node
-  reports `getmatmultrustedstatus.configured=false` and stores zero
-  attestations, so tooling cannot see the attested tip. Adding the signer key
-  does **not** skip ExactReplay; it only lets the node track `MMATTEST` and
-  follow/recover onto the attested chain. A self-run bridge/archive signing
-  key as the only `-matmultrustedpubkey` follows that key's chain. An
+- `-matmultrustedpubkey` + `-matmultrustedthreshold`: a plain, unconfigured
+  consensus node reports `getmatmultrustedstatus.configured=false` and stores
+  zero attestations, so tooling cannot see the attested tip. Adding the signer
+  quorum delegates acceptance authority: a quorum-authenticated block skips
+  local ExactReplay even though the mode remains `consensus`. A self-run
+  bridge/archive signing key as the only `-matmultrustedpubkey` follows that
+  key's chain. An
   unusually high local win rate (near-consecutive blocks) is a mining-alone
   symptom: check `getmininginfo.chain_guard.island_suspect` and
   `getfinalityinfo.warnings`.

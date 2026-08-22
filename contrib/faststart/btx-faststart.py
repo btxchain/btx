@@ -35,25 +35,13 @@ GITHUB_API_BASE = "https://api.github.com"
 GITHUB_JSON_ACCEPT = "application/vnd.github+json"
 GITHUB_BINARY_ACCEPT = "application/octet-stream"
 
-# Published mainnet ExactReplay attestors (public keys only). Archives and
-# GPU attestors return this same set from getmatmultrustedstatus.
-MAINNET_ATTESTOR_PUBKEYS = (
-    "03d90c148db37da28ce47ce15bade88a177728d663da4bc9ba765943b7d4e4f0aa",
-    "0224e80df33697385b54b3c69bae1f097f533c0c43e93c29f73ee97319d4a5e04c",
-)
-MAINNET_ATTESTOR_THRESHOLD = 1
-
-# Mainnet nodes may track the published signed frontier while retaining local
-# ExactReplay as the authority. Trusted validation is a separate, explicit
-# operator choice; it must never be emitted by a convenience preset.
-MAINNET_ATTESTOR_TRACKING_CONF = [
-    "# Published 1-of-2 mainnet attestor pin. Confirm after RPC is up:",
-    "#   btx-cli getmatmultrustedstatus",
-    "# Consensus remains local ExactReplay; trusted mode requires explicit opt-in.",
+# Configured signer quorums are acceptance authority even in consensus mode.
+# Convenience presets must therefore remain unconfigured so local ExactReplay
+# stays authoritative. Signer-backed operation requires a separate manual
+# configuration and an explicit trust decision.
+INDEPENDENT_MATMUL_VALIDATION_CONF = [
+    "# Independent validation: no trusted signer authority is configured.",
     "matmulvalidation=consensus",
-    f"matmultrustedpubkey={MAINNET_ATTESTOR_PUBKEYS[0]}",
-    f"matmultrustedpubkey={MAINNET_ATTESTOR_PUBKEYS[1]}",
-    f"matmultrustedthreshold={MAINNET_ATTESTOR_THRESHOLD}",
 ]
 
 PRESET_CONF = {
@@ -104,6 +92,11 @@ MIRRORED_RPC_CONNECTION_ARGS = (
     "-rpcpassword",
     "-rpccookiefile",
 )
+
+MATMUL_AUTHORITY_OPTIONS = {
+    "matmultrustedpubkey",
+    "matmultrustedthreshold",
+}
 
 
 def sha256_file(path: Path) -> str:
@@ -267,8 +260,7 @@ def write_preset_conf(
     if chain != "main":
         lines.append(f"[{chain}]")
     lines.extend(PRESET_CONF[preset])
-    if chain == "main":
-        lines.extend(MAINNET_ATTESTOR_TRACKING_CONF)
+    lines.extend(INDEPENDENT_MATMUL_VALIDATION_CONF)
     if extra_lines:
         lines.extend(extra_lines)
     conf_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -311,6 +303,24 @@ def mirrored_cli_rpc_args(daemon_args: list[str]) -> list[str]:
     return mirrored
 
 
+def reject_authority_daemon_args(daemon_args: list[str]) -> None:
+    """Reject command-line overrides that defeat the independent preset."""
+    for raw_arg in daemon_args:
+        option, separator, value = raw_arg.lstrip("-").partition("=")
+        option = option.lower()
+        if option in MATMUL_AUTHORITY_OPTIONS:
+            raise RuntimeError(
+                f"--daemon-arg={raw_arg} configures signer authority; "
+                "fast-start presets require independent ExactReplay."
+            )
+        if option == "matmulvalidation" and (
+            not separator or value.lower() != "consensus"
+        ):
+            raise RuntimeError(
+                f"--daemon-arg={raw_arg} overrides independent consensus validation."
+            )
+
+
 def run_quiet(cmd: list[str], *, stdout=None, stderr=None) -> None:
     subprocess.run(cmd, check=True, stdout=stdout, stderr=stderr, text=True)
 
@@ -323,35 +333,29 @@ def rpc_json(cmd: list[str], method: str, *params: str) -> dict[str, Any]:
     return json.loads(output)
 
 
-def verify_mainnet_attestor_pin(cli_cmd: list[str]) -> None:
-    """Confirm local RPC retains consensus mode and the published signer set."""
-    status = rpc_json(cli_cmd, "getmatmultrustedstatus")
-    have = {str(key).lower() for key in status.get("trusted_signer_pubkeys") or []}
-    want = {key.lower() for key in MAINNET_ATTESTOR_PUBKEYS}
-    if have != want:
-        raise RuntimeError(
-            "getmatmultrustedstatus.trusted_signer_pubkeys does not match the "
-            f"published mainnet attestor pin {sorted(want)}; got {sorted(have)}. "
-            "P2P seeds do not advertise this set — it is pinned in miner/service "
-            "bootstrap and must match GPU attestors and following archives."
-        )
-    threshold = int(status.get("threshold") or 0)
-    if threshold != MAINNET_ATTESTOR_THRESHOLD:
-        raise RuntimeError(
-            "getmatmultrustedstatus.threshold does not match the published "
-            f"mainnet pin {MAINNET_ATTESTOR_THRESHOLD}; got {threshold}."
-        )
+def verify_independent_matmul_policy(cli_cmd: list[str]) -> None:
+    """Confirm the generated preset retained independent ExactReplay authority."""
     chain_info = rpc_json(cli_cmd, "getblockchaininfo")
     validation_mode = str(chain_info.get("matmulvalidationmode") or "").lower()
     if validation_mode != "consensus":
         raise RuntimeError(
             "generated fast-start policy requires matmulvalidationmode=consensus; "
-            f"got {validation_mode or 'missing'}. Trusted mode replaces local "
-            "ExactReplay and requires a separate explicit operator decision."
+            f"got {validation_mode or 'missing'}."
+        )
+
+    status = rpc_json(cli_cmd, "getmatmultrustedstatus")
+    have = {str(key).lower() for key in status.get("trusted_signer_pubkeys") or []}
+    threshold = int(status.get("threshold") or 0)
+    configured = bool(status.get("configured"))
+    if configured or have or threshold != 0:
+        raise RuntimeError(
+            "generated fast-start policy requires no configured MatMul signer "
+            "authority; signer quorums bypass local ExactReplay even when "
+            "matmulvalidationmode=consensus."
         )
     print(
-        "attestor pin ok: configured="
-        f"{status.get('configured')} threshold={threshold} "
+        "independent MatMul policy ok: configured="
+        f"{configured} threshold={threshold} "
         f"pubkeys={len(have)} mode={validation_mode}"
     )
 
@@ -699,6 +703,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str]) -> int:
     args = build_parser().parse_args(argv)
+    reject_authority_daemon_args(list(args.daemon_arg))
     datadir = Path(args.datadir).expanduser()
     workdir = datadir / "faststart"
     workdir.mkdir(parents=True, exist_ok=True)
@@ -726,15 +731,27 @@ def main(argv: list[str]) -> int:
     )
     daemon = daemon_cmd(args.btxd, datadir, conf_path, args.chain, list(args.daemon_arg))
 
+    started_daemon = False
     if subprocess.run([*cli_cmd, "getblockcount"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True).returncode != 0:
         if args.no_start_daemon:
             raise RuntimeError("RPC is not ready and --no-start-daemon was provided")
         print(f"starting daemon with preset '{args.preset}'")
         run_quiet(daemon)
         wait_for_rpc_ready(cli_cmd, args.rpc_wait_secs)
+        started_daemon = True
 
-    if args.chain == "main":
-        verify_mainnet_attestor_pin(cli_cmd)
+    try:
+        verify_independent_matmul_policy(cli_cmd)
+    except Exception:
+        if started_daemon:
+            subprocess.run(
+                [*cli_cmd, "stop"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+        raise
 
     print(f"downloading snapshot: {snapshot_url}")
     download_snapshot(snapshot_url, snapshot_path, snapshot_sha256)
