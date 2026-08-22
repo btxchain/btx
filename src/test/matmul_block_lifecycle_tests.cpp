@@ -25,6 +25,7 @@ std::shared_ptr<const CBlock> BlockWithNonce(uint32_t nonce,
     block->nVersion = 1;
     block->nTime = 1;
     block->nBits = 1;
+    block->nNonce64 = nonce;
     block->nNonce = nonce;
     block->hashPrevBlock = parent;
     return block;
@@ -140,6 +141,7 @@ BOOST_AUTO_TEST_CASE(off_frontier_catchup_skips_cooled_fossil_for_attested_sibli
         uint256::FromHex(std::string(63, '0') + "f").value()};
     const uint256 first_hash{BlockWithNonce(9, parent)->GetHash()};
     const uint256 second_hash{BlockWithNonce(10, parent)->GetHash()};
+    BOOST_REQUIRE(first_hash != second_hash);
     const bool first_sorts_first{first_hash < second_hash};
     const uint32_t fossil_nonce{first_sorts_first ? 9U : 10U};
     const uint32_t attested_nonce{first_sorts_first ? 10U : 9U};
