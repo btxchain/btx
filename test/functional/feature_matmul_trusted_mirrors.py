@@ -159,7 +159,7 @@ class MatMulTrustedMirrorsTest(BitcoinTestFramework):
         # Mainnet warns for this topology but does not impose a 2-of-2 floor.
         self.start_node(2, self.mirror_args)
 
-        self.connect_nodes(0, 2)
+        self.connect_nodes(2, 0)
 
         archive_services = archive.getnetworkinfo()["localservicesnames"]
         assert "MATMUL_ATTESTATION_ARCHIVE" in archive_services
@@ -311,7 +311,7 @@ class MatMulTrustedMirrorsTest(BitcoinTestFramework):
         old_height = mirror_b.getblockcount()
         self.stop_node(2, expected_stderr=TRUST_WARNING.format(1))
         self.start_node(2, self.insufficient_quorum_args)
-        self.connect_nodes(0, 2)
+        self.connect_nodes(2, 0)
         self.generate(archive, 1, sync_fun=self.no_op)
         self.wait_until(
             lambda: mirror_a.getblockcount() == old_height + 1,
@@ -332,7 +332,7 @@ class MatMulTrustedMirrorsTest(BitcoinTestFramework):
         self.log.info("Restoring a satisfiable quorum retries the same block")
         self.stop_node(2, expected_stderr=TRUST_WARNING.format(2))
         self.start_node(2, self.mirror_args)
-        self.connect_nodes(0, 2)
+        self.connect_nodes(2, 0)
         self.wait_until(
             lambda: mirror_b.getbestblockhash()
             == archive.getbestblockhash(),
