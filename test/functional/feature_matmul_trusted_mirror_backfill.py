@@ -20,6 +20,7 @@ Coverage:
 
 import os
 import re
+import shutil
 import time
 
 from test_framework.test_framework import BitcoinTestFramework
@@ -114,15 +115,21 @@ class MatMulTrustedMirrorBackfillTest(BitcoinTestFramework):
         assert_greater_than_or_equal(len(before), 1)
 
         self.log.info(
-            "Wipe matmul_attestations.dat and restart authority so historical "
-            "GETMMATTEST must regenerate across many heights"
+            "Wipe the durable MatMul attestation store and restart authority "
+            "so historical GETMMATTEST must regenerate across many heights"
         )
         self.stop_node(0, expected_stderr=INLINE_SIGNER_WARNING)
         attest_path = os.path.join(
             authority.datadir_path, "regtest", "matmul_attestations.dat"
         )
+        attest_db_path = attest_path + ".db"
+        attest_wal_path = attest_path + ".wal"
         assert os.path.exists(attest_path), attest_path
+        assert os.path.isdir(attest_db_path), attest_db_path
+        assert os.path.exists(attest_wal_path), attest_wal_path
         os.remove(attest_path)
+        os.remove(attest_wal_path)
+        shutil.rmtree(attest_db_path)
         self.start_node(0, extra_args=self.archive_args)
         assert_equal(authority.getblockcount(), tip_height)
         assert_equal(authority.getbestblockhash(), authority_tip)
