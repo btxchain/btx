@@ -882,6 +882,12 @@ public:
                    NODE_MATMUL_TRUSTED_MIRROR;
     }
 
+    [[nodiscard]] bool HasMatMulConsensusService() const
+    {
+        const uint64_t services{m_nServices.load(std::memory_order_relaxed)};
+        return (services & NODE_MATMUL_CONSENSUS) == NODE_MATMUL_CONSENSUS;
+    }
+
     /** Network key used to prevent fingerprinting our node across networks.
      *  Influenced by the network and the bind address (+ bind port for inbounds) */
     const uint64_t m_network_key;

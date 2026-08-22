@@ -1454,11 +1454,13 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(!MsghandDropNonAuthorityControlMessage(
         /*restrict_non_authority=*/false, false, false));
     BOOST_CHECK(MsghandDropNonAuthorityControlMessage(
-        true, /*is_archive_serve_target=*/false,
+        true, /*is_chain_service_peer=*/false,
         /*is_chain_inventory_request=*/true));
     BOOST_CHECK(MsghandDropNonAuthorityControlMessage(
-        true, /*is_archive_serve_target=*/true,
+        true, /*is_chain_service_peer=*/true,
         /*is_chain_inventory_request=*/false));
+    // ARCHIVE, MIRROR, and MATMUL_CONSENSUS callers all use the true role;
+    // serving their chain inventory does not authorize inbound block data.
     BOOST_CHECK(!MsghandDropNonAuthorityControlMessage(
         true, true, /*is_chain_inventory_request=*/true));
     using node::matmul_trusted::MsghandPreferArchiveLiveGetData;

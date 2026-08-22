@@ -1250,17 +1250,17 @@ static constexpr int SIGNER_MSGHAND_OTHER_PER_LOOP{2};
     return archive_or_mirror_service;
 }
 
-/** GETHEADERS/GETBLOCKS from an archive or mirror peer ask this node to
- * serve chain inventory; they do not ingest an untrusted chain. Keep the
- * non-authority control-message filter for miners, but do not strand a
- * trusted mirror that connects inbound to an ahead archive. */
+/** GETHEADERS/GETBLOCKS from an archive, mirror, or consensus peer ask this
+ * node to serve chain inventory; they do not ingest an untrusted chain. Keep
+ * the non-authority control-message filter for peers outside those roles, but
+ * do not strand a trusted mirror or independent consensus verifier. */
 [[nodiscard]] inline bool MsghandDropNonAuthorityControlMessage(
     bool restrict_non_authority,
-    bool is_archive_serve_target,
+    bool is_chain_service_peer,
     bool is_chain_inventory_request)
 {
     if (!restrict_non_authority) return false;
-    return !(is_archive_serve_target && is_chain_inventory_request);
+    return !(is_chain_service_peer && is_chain_inventory_request);
 }
 
 /** Only archive/GPU GETDATA is Preferred / sets the serve-pending latch.
