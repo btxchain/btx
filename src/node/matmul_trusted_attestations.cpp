@@ -51,6 +51,10 @@ bool g_serve_attestations{false};
 std::chrono::milliseconds g_wait_timeout{60'000};
 //! Highest height of a configured-signer attestation observed this process.
 int32_t g_highest_attested_height{-1};
+//! Highest height of an attestation bucket that met configured quorum.
+//! Keep this separate from the raw diagnostic high-water above: a lone valid
+//! signer at a far-future height must not evict lower quorum recovery hints.
+int32_t g_highest_quorum_attested_height{-1};
 //! Soft hint: max best-known height among peers that recently served MMATTEST.
 int32_t g_authority_peer_tip_hint{-1};
 uint256 g_authority_peer_tip_hash{};
@@ -875,6 +879,7 @@ void Reset()
     g_serve_attestations = false;
     g_wait_timeout = std::chrono::milliseconds{60'000};
     g_highest_attested_height = -1;
+    g_highest_quorum_attested_height = -1;
     g_authority_peer_tip_hint = -1;
     g_authority_peer_tip_hash.SetNull();
     g_attested_by_height.clear();
@@ -1174,10 +1179,14 @@ void NoteAcceptedAttestationHeight(int32_t height, const uint256& hash)
     if (height > g_highest_attested_height) {
         g_highest_attested_height = height;
     }
+    if (height > g_highest_quorum_attested_height) {
+        g_highest_quorum_attested_height = height;
+    }
     if (!hash.IsNull()) {
         g_attested_by_height[height].insert(hash);
         const int32_t floor_height{
-            g_highest_attested_height - ATTESTED_FRONTIER_HINT_WINDOW};
+            g_highest_quorum_attested_height -
+            ATTESTED_FRONTIER_HINT_WINDOW};
         while (!g_attested_by_height.empty() &&
                g_attested_by_height.begin()->first < floor_height) {
             g_attested_by_height.erase(g_attested_by_height.begin());

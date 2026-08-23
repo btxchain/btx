@@ -455,6 +455,44 @@ BOOST_AUTO_TEST_CASE(partial_quorum_is_never_accepted)
     BOOST_REQUIRE_EQUAL(hints.size(), 1U);
     BOOST_CHECK(hints[0].hash == block);
     BOOST_CHECK_EQUAL(hints[0].height, 42);
+
+    // A genuine but partial signature far beyond the retention window remains
+    // a raw scheduling/diagnostic observation. It must not evict the lower
+    // quorum-backed recovery hint.
+    const uint256 far_future{Hex256('f')};
+    statement.block_hash = far_future;
+    statement.block_height = 1066;
+    const auto future_a{matmul::trusted::SignStatement(statement, a)};
+    BOOST_REQUIRE(future_a);
+    BOOST_CHECK(node::matmul_trusted::Add(*future_a, far_future, 1066) ==
+                matmul::trusted::AddResult::Accepted);
+    BOOST_CHECK(!node::matmul_trusted::HasQuorum(far_future, 1066));
+    BOOST_REQUIRE(node::matmul_trusted::AuthorityAttestedFrontier());
+    BOOST_CHECK_EQUAL(
+        *node::matmul_trusted::AuthorityAttestedFrontier(), 1066);
+
+    // Completing another ordinary quorum after the partial is the operation
+    // that used to prune against the raw high-water and erase both legitimate
+    // hints.
+    const uint256 next_quorum{Hex256('1')};
+    statement.block_hash = next_quorum;
+    statement.block_height = 43;
+    const auto next_a{matmul::trusted::SignStatement(statement, a)};
+    const auto next_b{matmul::trusted::SignStatement(statement, b)};
+    BOOST_REQUIRE(next_a);
+    BOOST_REQUIRE(next_b);
+    BOOST_CHECK(node::matmul_trusted::Add(*next_a, next_quorum, 43) ==
+                matmul::trusted::AddResult::Accepted);
+    BOOST_CHECK(!node::matmul_trusted::HasQuorum(next_quorum, 43));
+    BOOST_CHECK(node::matmul_trusted::Add(*next_b, next_quorum, 43) ==
+                matmul::trusted::AddResult::Accepted);
+    BOOST_CHECK(node::matmul_trusted::HasQuorum(next_quorum, 43));
+    const auto retained{node::matmul_trusted::AttestedFrontierHints()};
+    BOOST_REQUIRE_EQUAL(retained.size(), 2U);
+    BOOST_CHECK(retained[0].hash == block);
+    BOOST_CHECK_EQUAL(retained[0].height, 42);
+    BOOST_CHECK(retained[1].hash == next_quorum);
+    BOOST_CHECK_EQUAL(retained[1].height, 43);
 }
 
 BOOST_AUTO_TEST_CASE(wait_timeout_clamp_rejects_insane_values)
@@ -2422,7 +2460,7 @@ BOOST_AUTO_TEST_CASE(legacy_migration_restores_only_quorum_frontier_hints)
     const auto snapshot_b{sign(snapshot_quorum, 71, b)};
     const auto split_a{sign(split_quorum, 72, a)};
     const auto split_b{sign(split_quorum, 72, b)};
-    const auto partial_a{sign(partial, 73, a)};
+    const auto partial_a{sign(partial, 1000, a)};
 
     // The legacy snapshot contains one complete threshold-2 bucket, one half
     // of a second bucket, and a separate partial bucket that must not become a
@@ -2465,7 +2503,10 @@ BOOST_AUTO_TEST_CASE(legacy_migration_restores_only_quorum_frontier_hints)
 
     BOOST_CHECK(node::matmul_trusted::HasQuorum(snapshot_quorum, 71));
     BOOST_CHECK(node::matmul_trusted::HasQuorum(split_quorum, 72));
-    BOOST_CHECK(!node::matmul_trusted::HasQuorum(partial, 73));
+    BOOST_CHECK(!node::matmul_trusted::HasQuorum(partial, 1000));
+    BOOST_REQUIRE(node::matmul_trusted::AuthorityAttestedFrontier());
+    BOOST_CHECK_EQUAL(
+        *node::matmul_trusted::AuthorityAttestedFrontier(), 1000);
     const auto hints{node::matmul_trusted::AttestedFrontierHints()};
     BOOST_REQUIRE_EQUAL(hints.size(), 2U);
     bool saw_snapshot{false};
