@@ -850,14 +850,12 @@ void MatMulVerifyWorker::WorkerLoop()
             // step ahead) must not consume scarce park slots. Peer-tip hints
             // are unauthenticated competing headers and must not inflate this
             // bound (live: frontier 187859 vs signer 187791). Use the same
-            // capped frontier admit uses, not raw HighestAttestedHeight().
+            // capped frontier admit uses. No raw historical fallback is safe:
+            // the operator may have invalidated its highest signed index.
             std::optional<int32_t> frontier;
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
                 frontier = m_capped_authority_frontier;
-            }
-            if (!frontier.has_value()) {
-                frontier = node::matmul_trusted::HighestAttestedHeight();
             }
             if (!tip_extending && frontier.has_value() &&
                 job.height > *frontier) {

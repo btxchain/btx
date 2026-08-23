@@ -2649,6 +2649,7 @@ BOOST_AUTO_TEST_CASE(trusted_mirror_above_frontier_does_not_consume_park_slot)
     MatMulVerifyWorker worker{params, /*max_threads=*/1};
     const uint256 tip_hash{uint256::ONE};
     worker.SetActiveTip(tip_hash, /*tip_height=*/90);
+    worker.SetCappedAuthorityFrontier(/*height=*/100);
 
     // Competing block above frontier, not tip-extending: must not park.
     auto above{std::make_shared<CBlock>(*MakeBlock(7))};

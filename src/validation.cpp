@@ -11330,6 +11330,26 @@ bool BlockIndexDescends(const CBlockIndex* block, const CBlockIndex* ancestor)
 
 } // namespace
 
+std::optional<int32_t> ChainstateManager::HighestUsableSignedFrontierHeight() const
+{
+    AssertLockHeld(::cs_main);
+    std::optional<int32_t> highest;
+    for (const auto& hint : node::matmul_trusted::AttestedFrontierHints()) {
+        if (hint.height < 0 || hint.hash.IsNull()) continue;
+        const CBlockIndex* const index{m_blockman.LookupBlockIndex(hint.hash)};
+        if (!node::matmul_trusted::TrustedMirrorAttestedFrontierHintUsable(
+                /*hash_present=*/true,
+                /*index_known=*/index != nullptr,
+                /*index_failed=*/index != nullptr &&
+                    (index->nStatus & BLOCK_FAILED_MASK) != 0)) {
+            continue;
+        }
+        highest = highest.has_value() ? std::max(*highest, hint.height)
+                                      : std::optional<int32_t>{hint.height};
+    }
+    return highest;
+}
+
 ChainstateManager::SignedFrontierStatus ChainstateManager::GetSignedFrontierStatus() const
 {
     AssertLockHeld(::cs_main);
@@ -11338,27 +11358,10 @@ ChainstateManager::SignedFrontierStatus ChainstateManager::GetSignedFrontierStat
         return out;
     }
     const auto frontier_hints{node::matmul_trusted::AttestedFrontierHints()};
-    int32_t usable_frontier_height{-1};
-    for (const auto& hint : frontier_hints) {
-        if (hint.height < 0 || hint.hash.IsNull()) continue;
-        const CBlockIndex* const index{m_blockman.LookupBlockIndex(hint.hash)};
-        // An unknown signed hash is a legitimate catch-up target. A known
-        // failed hash is operator-retired and must not remain a high-water
-        // catch-up target merely because attestation history is monotonic.
-        if (!node::matmul_trusted::TrustedMirrorAttestedFrontierHintUsable(
-                /*hash_present=*/true,
-                /*index_known=*/index != nullptr,
-                /*index_failed=*/index != nullptr &&
-                    (index->nStatus & BLOCK_FAILED_MASK) != 0)) {
-            continue;
-        }
-        usable_frontier_height = std::max(usable_frontier_height, hint.height);
-    }
-    if (usable_frontier_height < 0) {
-        return out;
-    }
+    const auto usable_frontier_height{HighestUsableSignedFrontierHeight()};
+    if (!usable_frontier_height.has_value()) return out;
     out.available = true;
-    out.height = usable_frontier_height;
+    out.height = *usable_frontier_height;
     const CBlockIndex* const tip{m_active_chainstate->m_chain.Tip()};
     std::optional<uint256> on_chain_hash;
     std::optional<uint256> off_chain_hash;
@@ -11893,7 +11896,7 @@ bool ChainstateManager::IndexIsOnSignedFrontierChain(const CBlockIndex* index) c
         return false;
     }
     if (!node::matmul_trusted::IsConfigured()) return false;
-    const auto frontier_height{node::matmul_trusted::HighestAttestedHeight()};
+    const auto frontier_height{HighestUsableSignedFrontierHeight()};
     if (!frontier_height.has_value()) return false;
     const CBlockIndex* const tip{
         m_active_chainstate != nullptr ? m_active_chainstate->m_chain.Tip()
@@ -11935,7 +11938,7 @@ bool ChainstateManager::IndexIsCoveredBySignedFrontier(const CBlockIndex* index)
         return false;
     }
     if (!node::matmul_trusted::IsConfigured()) return false;
-    const auto frontier_height{node::matmul_trusted::HighestAttestedHeight()};
+    const auto frontier_height{HighestUsableSignedFrontierHeight()};
     if (!frontier_height.has_value()) return false;
     if (index->nHeight > *frontier_height) return false;
     for (const auto& hint : node::matmul_trusted::AttestedFrontierHints()) {
@@ -12006,7 +12009,7 @@ bool ChainstateManager::IndexLeadsToSignedFrontier(const CBlockIndex* index) con
         return false;
     }
     if (!node::matmul_trusted::IsConfigured()) return false;
-    const auto frontier_height{node::matmul_trusted::HighestAttestedHeight()};
+    const auto frontier_height{HighestUsableSignedFrontierHeight()};
     if (!frontier_height.has_value()) return false;
     for (const auto& hint : node::matmul_trusted::AttestedFrontierHints()) {
         if (hint.height != *frontier_height || hint.hash.IsNull()) continue;

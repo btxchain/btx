@@ -2456,6 +2456,129 @@ BOOST_AUTO_TEST_CASE(signed_frontier_catchup_prefers_archive_not_miner)
     peerman.ResetMatMulVerifyAdmissionForTest();
 }
 
+// Operator invalidation retires a known failed signed high-water for every
+// live policy path. The raw attestation high-water remains audit history, but
+// the lower valid signed tip must still cover/lead the active chain and allow
+// a fresh immediate child to make progress.
+BOOST_AUTO_TEST_CASE(invalidated_signed_high_water_falls_back_to_valid_tip)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+
+    node::matmul_trusted::ResetForTest();
+    ResetSharedPeermanFixture(m_node);
+    CKey signer;
+    signer.MakeNewKey(/*fCompressed=*/true);
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256::FromHex(std::string(64, '3')).value();
+    config.replay_authority_context =
+        uint256::FromHex(std::string(64, '4')).value();
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    config.local_signer = signer;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/true, /*serve=*/false,
+        std::chrono::milliseconds{50}, error));
+    struct MirrorReset {
+        ~MirrorReset() { node::matmul_trusted::ResetForTest(); }
+    } mirror_reset;
+
+    ChainstateManager& chainman{*Assert(m_node.chainman)};
+    PeerManager& peerman{*Assert(m_node.peerman)};
+    const CBlockIndex* tip{
+        WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip())};
+    BOOST_REQUIRE(tip != nullptr);
+    SetMockTime(std::chrono::seconds{tip->GetBlockTime() + 1});
+    const uint256 tip_hash{tip->GetBlockHash()};
+    const int32_t tip_height{tip->nHeight};
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(tip_hash, tip_height) ==
+                  matmul::trusted::AddResult::Accepted);
+
+    auto index_tip_child = [&](unsigned int tag) {
+        CBlock block;
+        block.SetNull();
+        block.hashPrevBlock = tip_hash;
+        block.hashMerkleRoot = uint256::FromHex(
+            std::string(60, '0') + strprintf("%04x", tag)).value();
+        block.nTime = tip->GetBlockTime() + 1;
+        block.nBits = tip->nBits;
+        block.nVersion = VERSIONBITS_TOP_BITS;
+        BOOST_REQUIRE(MineHeaderForConsensus(
+            block, tip_height + 1, chainman.GetConsensus(), 5'000'000,
+            tip->GetMedianTimePast()));
+        BlockValidationState state;
+        BOOST_REQUIRE_MESSAGE(chainman.ProcessNewBlockHeaders(
+            {{block.GetBlockHeader()}}, /*min_pow_checked=*/true, state),
+            state.ToString());
+        CBlockIndex* index{WITH_LOCK(
+            ::cs_main,
+            return chainman.m_blockman.LookupBlockIndex(block.GetHash()))};
+        BOOST_REQUIRE(index != nullptr);
+        return index;
+    };
+
+    CBlockIndex* invalidated{index_tip_child(/*tag=*/0xa100)};
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
+                      invalidated->GetBlockHash(), invalidated->nHeight) ==
+                  matmul::trusted::AddResult::Accepted);
+    const auto raw_high_water{node::matmul_trusted::HighestAttestedHeight()};
+    BOOST_REQUIRE(raw_high_water.has_value());
+    BOOST_REQUIRE_EQUAL(*raw_high_water, invalidated->nHeight);
+    const auto usable_before{WITH_LOCK(
+        ::cs_main, return chainman.HighestUsableSignedFrontierHeight())};
+    BOOST_REQUIRE(usable_before.has_value());
+    BOOST_REQUIRE_EQUAL(*usable_before, invalidated->nHeight);
+
+    // This shared-fixture helper applies the same failed-index state used by
+    // operator invalidation and resets best-header to the active tip.
+    NeutralizeUnconnectedHeaders(chainman);
+    BOOST_REQUIRE(WITH_LOCK(
+        ::cs_main,
+        return (invalidated->nStatus & BLOCK_FAILED_MASK) != 0));
+
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE_EQUAL(
+            *node::matmul_trusted::HighestAttestedHeight(),
+            invalidated->nHeight);
+        const auto usable{chainman.HighestUsableSignedFrontierHeight()};
+        BOOST_REQUIRE(usable.has_value());
+        BOOST_CHECK_EQUAL(*usable, tip_height);
+        const auto frontier{chainman.GetSignedFrontierStatus()};
+        BOOST_REQUIRE(frontier.available);
+        BOOST_CHECK_EQUAL(frontier.height, tip_height);
+        BOOST_CHECK(frontier.hash_known);
+        BOOST_CHECK(frontier.hash == tip_hash);
+        BOOST_CHECK(frontier.on_active_chain);
+        BOOST_CHECK_EQUAL(frontier.blocks_behind, 0);
+        BOOST_CHECK(chainman.IndexIsOnSignedFrontierChain(tip));
+        BOOST_CHECK(chainman.IndexIsCoveredBySignedFrontier(tip));
+        BOOST_CHECK(chainman.IndexLeadsToSignedFrontier(tip));
+    }
+
+    CBlockIndex* replacement{index_tip_child(/*tag=*/0xa101)};
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK(!chainman.HasUsableCompetingTrustedMatMulAuthority(
+            replacement));
+        BOOST_CHECK(chainman.IndexIsAttestedChainTipChild(tip, replacement));
+        const bool frontier_competes{
+            !chainman.IndexLeadsToSignedFrontier(tip)};
+        BOOST_CHECK(node::matmul_trusted::TrustedMirrorMaySelectMostWorkCandidate(
+            /*extends_active_tip_chain=*/true,
+            /*short_tip_reorg=*/false,
+            /*has_quorum=*/false,
+            /*active_tip_has_quorum=*/true,
+            /*immediate_tip_child=*/true,
+            /*would_abandon_attested=*/false,
+            /*competing_attested_height=*/false,
+            frontier_competes));
+    }
+
+    NeutralizeUnconnectedHeaders(chainman);
+    peerman.ResetMatMulVerifyAdmissionForTest();
+}
+
 BOOST_AUTO_TEST_CASE(have_data_unconnected_does_not_issue_descendant_getdata)
 {
     LOCK(NetEventsInterface::g_msgproc_mutex);

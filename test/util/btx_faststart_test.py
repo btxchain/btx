@@ -100,6 +100,8 @@ class BTXFaststartTest(unittest.TestCase):
     def test_reject_authority_daemon_args_before_launch(self):
         for daemon_arg in (
             "-matmulvalidation=trusted",
+            "-matmulattestationsignerkeyfile=/tmp/operator-key",
+            "-matmulattestationsignerkey",
             "-matmultrustedpubkey=02aa",
             "-matmultrustedthreshold=1",
         ):
@@ -112,6 +114,8 @@ class BTXFaststartTest(unittest.TestCase):
     def test_reject_process_and_config_routing_overrides_before_launch(self):
         for daemon_arg in (
             "-conf=/tmp/other.conf",
+            "-confrw=/tmp/authority.conf",
+            "-noconfrw",
             "-datadir=/tmp/other-node",
             "-includeconf=authority.conf",
             "-chain=regtest",

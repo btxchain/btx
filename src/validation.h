@@ -1605,6 +1605,10 @@ public:
     bool NormalizeReorgRecovery(const CBlockIndex* active_tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     [[nodiscard]] bool IndexIsFollowedTipChild(const CBlockIndex* tip, const CBlockIndex* index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     [[nodiscard]] bool BestHeaderExtendsTip(const CBlockIndex* tip) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** Highest signed frontier that remains usable for live policy. Unknown
+     *  signed hashes remain catch-up targets; known failed indexes are
+     *  operator-retired. Raw attestation high-water remains historical data. */
+    [[nodiscard]] std::optional<int32_t> HighestUsableSignedFrontierHeight() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** Tip-child that continues the attested chain for the local signer.
      *  Followed (m_best_header) children qualify unless another hash at this
      *  height already has quorum. When m_best_header is a competing fork that
@@ -1617,13 +1621,14 @@ public:
      *  on an unattested competing tower. */
     [[nodiscard]] bool IndexIsOnSignedFrontierChain(const CBlockIndex* index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** True when `index` is the GPU-signed frontier hash or an ancestor of
-     *  it (in-memory quorum at HighestAttestedHeight). Trusted mirrors skip
+     *  it (in-memory quorum at HighestUsableSignedFrontierHeight). Trusted mirrors skip
      *  ExactReplay and ConnectTip-quorum for these: the attestor already
      *  verified the path. Unattested descendants above the frontier are
      *  false. */
     [[nodiscard]] bool IndexIsCoveredBySignedFrontier(const CBlockIndex* index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** Verified in-memory quorum on this hash, *or* ancestry of a hash
-     *  that already has verified in-memory quorum at HighestAttestedHeight.
+     *  that already has verified in-memory quorum at the highest usable
+     *  signed frontier.
      *  Coverage is not a substitute for signatures: IndexIsCoveredBySignedFrontier
      *  requires HasQuorumInMemory on the frontier (VerifyAttestation against
      *  the configured GPU keys). Fake / missing / off-path hashes stay false
@@ -1636,7 +1641,7 @@ public:
      *  pin mining, activation, or body admission. */
     [[nodiscard]] bool HasUsableCompetingTrustedMatMulAuthority(const CBlockIndex* index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** True when index is an ancestor of, is, or descends from any stored
-     *  quorum hash at HighestAttestedHeight. Unlike
+     *  quorum hash at HighestUsableSignedFrontierHeight. Unlike
      *  GetSignedFrontierStatus().on_active_chain, this stays true while
      *  catching up (tip height < frontier height) on the attested chain. */
     [[nodiscard]] bool IndexLeadsToSignedFrontier(const CBlockIndex* index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);

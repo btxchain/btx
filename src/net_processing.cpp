@@ -4042,7 +4042,7 @@ static uint256 g_configured_claimed_tip_child{};
         chainman.IndexIsOnSignedFrontierChain(index) ||
         chainman.IndexHasTrustedMatMulAuthority(index)};
     if (!progress_child &&
-        node::matmul_trusted::HighestAttestedHeight().has_value() &&
+        chainman.HighestUsableSignedFrontierHeight().has_value() &&
         !chainman.IndexIsOnSignedFrontierChain(tip) &&
         !chainman.IndexHasTrustedMatMulAuthority(tip)) {
         return false;
@@ -4169,6 +4169,9 @@ static bool AuthorityFrontierIndexUsable(
     EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
     if (height < 0) return false;
+    if (index != nullptr && (index->nStatus & BLOCK_FAILED_MASK) != 0) {
+        return false;
+    }
     if (index == nullptr) {
         // Height-only hint: never raise past the tip. Competing headers are
         // typically above tip (live 187859 vs signer 187791 / tip 187773).
@@ -4207,15 +4210,6 @@ static std::optional<int32_t> CappedAuthorityAttestedFrontier(
                                             : std::optional<int32_t>{hint.height};
         }
     }
-    if (!attested.has_value()) {
-        if (const auto height{node::matmul_trusted::HighestAttestedHeight()}) {
-            if (AuthorityFrontierIndexUsable(
-                    chainman, tip, /*index=*/nullptr, *height)) {
-                attested = height;
-            }
-        }
-    }
-
     std::optional<int32_t> hint;
     if (const auto height{node::matmul_trusted::AuthorityPeerTipHint()}) {
         const uint256 hash{

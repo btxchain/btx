@@ -94,6 +94,8 @@ MIRRORED_RPC_CONNECTION_ARGS = (
 )
 
 MATMUL_AUTHORITY_OPTIONS = {
+    "matmulattestationsignerkey",
+    "matmulattestationsignerkeyfile",
     "matmultrustedpubkey",
     "matmultrustedthreshold",
 }
@@ -104,6 +106,7 @@ MATMUL_AUTHORITY_OPTIONS = {
 FASTSTART_OWNED_DAEMON_OPTIONS = {
     "chain",
     "conf",
+    "confrw",
     "datadir",
     "includeconf",
     "regtest",
