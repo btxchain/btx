@@ -1558,9 +1558,10 @@ static constexpr auto GPU_RETAIN_ATTESTATION_RETRY{std::chrono::seconds{2}};
            connected_height == attested_height;
 }
 
-/** Unknown signed hashes remain valid header catch-up targets. Once an
- *  operator has marked a known index failed, its durable provenance is history
- *  rather than a usable catch-up high-water mark. */
+/** Unknown quorum-signed hashes remain valid header catch-up targets. A
+ *  partial M-of-N signature set is history, not live frontier authority. Once
+ *  an operator marks a known index failed, its quorum provenance is likewise
+ *  retired from the usable catch-up high-water mark. */
 [[nodiscard]] inline bool TrustedMirrorAttestedFrontierHintUsable(
     bool hash_present,
     bool index_known,
@@ -1675,6 +1676,8 @@ struct AttestedFrontierHint {
 /** All quorum hashes at a height stay in the hint window (not last-writer). */
 /** Raw high-water: max(highest attested, peer tip hint), if either known. */
 [[nodiscard]] std::optional<int32_t> AuthorityAttestedFrontier();
+/** Record a threshold-confirmed frontier. Production callers must establish
+ *  HasQuorum first; direct test callers use this to inject modeled quorum. */
 void NoteAcceptedAttestationHeight(int32_t height, const uint256& hash = {});
 void NoteAuthorityPeerTipHint(int32_t height, const uint256& hash = {});
 

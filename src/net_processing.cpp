@@ -4204,8 +4204,14 @@ static std::optional<int32_t> CappedAuthorityAttestedFrontier(
 
     std::optional<int32_t> attested;
     for (const auto& hint : node::matmul_trusted::AttestedFrontierHints()) {
-        if (AuthorityFrontierIndexUsable(
-                chainman, tip, lookup(hint.hash), hint.height)) {
+        const CBlockIndex* const index{lookup(hint.hash)};
+        if (node::matmul_trusted::TrustedMirrorAttestedFrontierHintUsable(
+                /*hash_present=*/!hint.hash.IsNull(),
+                /*index_known=*/index != nullptr,
+                /*index_failed=*/index != nullptr &&
+                    (index->nStatus & BLOCK_FAILED_MASK) != 0) &&
+            AuthorityFrontierIndexUsable(
+                chainman, tip, index, hint.height)) {
             attested = attested.has_value() ? std::max(*attested, hint.height)
                                             : std::optional<int32_t>{hint.height};
         }

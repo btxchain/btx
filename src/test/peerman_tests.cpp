@@ -2466,15 +2466,19 @@ BOOST_AUTO_TEST_CASE(invalidated_signed_high_water_falls_back_to_valid_tip)
 
     node::matmul_trusted::ResetForTest();
     ResetSharedPeermanFixture(m_node);
-    CKey signer;
-    signer.MakeNewKey(/*fCompressed=*/true);
+    CKey signer_a;
+    CKey signer_b;
+    signer_a.MakeNewKey(/*fCompressed=*/true);
+    signer_b.MakeNewKey(/*fCompressed=*/true);
+    const uint256 chain_id{
+        uint256::FromHex(std::string(64, '3')).value()};
+    const uint256 replay_context{
+        uint256::FromHex(std::string(64, '4')).value()};
     matmul::trusted::StoreConfig config;
-    config.chain_id = uint256::FromHex(std::string(64, '3')).value();
-    config.replay_authority_context =
-        uint256::FromHex(std::string(64, '4')).value();
-    config.trusted_signers = {signer.GetPubKey()};
-    config.threshold = 1;
-    config.local_signer = signer;
+    config.chain_id = chain_id;
+    config.replay_authority_context = replay_context;
+    config.trusted_signers = {signer_a.GetPubKey(), signer_b.GetPubKey()};
+    config.threshold = 2;
     std::string error;
     BOOST_REQUIRE(node::matmul_trusted::Configure(
         std::move(config), /*trusted_mirror=*/true, /*serve=*/false,
@@ -2491,8 +2495,27 @@ BOOST_AUTO_TEST_CASE(invalidated_signed_high_water_falls_back_to_valid_tip)
     SetMockTime(std::chrono::seconds{tip->GetBlockTime() + 1});
     const uint256 tip_hash{tip->GetBlockHash()};
     const int32_t tip_height{tip->nHeight};
-    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(tip_hash, tip_height) ==
-                  matmul::trusted::AddResult::Accepted);
+
+    auto add_signature = [&](const uint256& hash, int32_t height,
+                             const CKey& signer) {
+        matmul::trusted::ExactReplayStatement statement;
+        statement.chain_id = chain_id;
+        statement.block_hash = hash;
+        statement.block_height = height;
+        statement.replay_authority_context = replay_context;
+        const auto attestation{
+            matmul::trusted::SignStatement(statement, signer)};
+        BOOST_REQUIRE(attestation.has_value());
+        BOOST_REQUIRE(node::matmul_trusted::Add(
+                          *attestation, hash, height) ==
+                      matmul::trusted::AddResult::Accepted);
+    };
+    auto add_quorum = [&](const uint256& hash, int32_t height) {
+        add_signature(hash, height, signer_a);
+        add_signature(hash, height, signer_b);
+        BOOST_REQUIRE(node::matmul_trusted::HasQuorumInMemory(hash, height));
+    };
+    add_quorum(tip_hash, tip_height);
 
     auto index_tip_child = [&](unsigned int tag) {
         CBlock block;
@@ -2518,9 +2541,7 @@ BOOST_AUTO_TEST_CASE(invalidated_signed_high_water_falls_back_to_valid_tip)
     };
 
     CBlockIndex* invalidated{index_tip_child(/*tag=*/0xa100)};
-    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
-                      invalidated->GetBlockHash(), invalidated->nHeight) ==
-                  matmul::trusted::AddResult::Accepted);
+    add_quorum(invalidated->GetBlockHash(), invalidated->nHeight);
     const auto raw_high_water{node::matmul_trusted::HighestAttestedHeight()};
     BOOST_REQUIRE(raw_high_water.has_value());
     BOOST_REQUIRE_EQUAL(*raw_high_water, invalidated->nHeight);
@@ -2557,8 +2578,20 @@ BOOST_AUTO_TEST_CASE(invalidated_signed_high_water_falls_back_to_valid_tip)
     }
 
     CBlockIndex* replacement{index_tip_child(/*tag=*/0xa101)};
+    add_signature(replacement->GetBlockHash(), replacement->nHeight, signer_a);
+    BOOST_REQUIRE(!node::matmul_trusted::HasQuorumInMemory(
+        replacement->GetBlockHash(), replacement->nHeight));
+    const auto partial_hints{node::matmul_trusted::AttestedFrontierHints()};
+    BOOST_CHECK(std::none_of(
+        partial_hints.begin(), partial_hints.end(),
+        [&](const auto& hint) {
+            return hint.hash == replacement->GetBlockHash();
+        }));
     {
         LOCK(::cs_main);
+        const auto usable{chainman.HighestUsableSignedFrontierHeight()};
+        BOOST_REQUIRE(usable.has_value());
+        BOOST_CHECK_EQUAL(*usable, tip_height);
         BOOST_CHECK(!chainman.HasUsableCompetingTrustedMatMulAuthority(
             replacement));
         BOOST_CHECK(chainman.IndexIsAttestedChainTipChild(tip, replacement));
@@ -2573,6 +2606,23 @@ BOOST_AUTO_TEST_CASE(invalidated_signed_high_water_falls_back_to_valid_tip)
             /*would_abandon_attested=*/false,
             /*competing_attested_height=*/false,
             frontier_competes));
+    }
+
+    add_signature(replacement->GetBlockHash(), replacement->nHeight, signer_b);
+    BOOST_REQUIRE(node::matmul_trusted::HasQuorumInMemory(
+        replacement->GetBlockHash(), replacement->nHeight));
+    {
+        LOCK(::cs_main);
+        const auto usable{chainman.HighestUsableSignedFrontierHeight()};
+        BOOST_REQUIRE(usable.has_value());
+        BOOST_CHECK_EQUAL(*usable, replacement->nHeight);
+        const auto frontier{chainman.GetSignedFrontierStatus()};
+        BOOST_REQUIRE(frontier.available);
+        BOOST_CHECK_EQUAL(frontier.height, replacement->nHeight);
+        BOOST_CHECK(frontier.hash_known);
+        BOOST_CHECK(frontier.hash == replacement->GetBlockHash());
+        BOOST_CHECK(!frontier.on_active_chain);
+        BOOST_CHECK(chainman.IndexIsOnSignedFrontierChain(replacement));
     }
 
     NeutralizeUnconnectedHeaders(chainman);

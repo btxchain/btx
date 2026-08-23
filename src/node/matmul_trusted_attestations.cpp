@@ -152,6 +152,13 @@ std::shared_ptr<matmul::trusted::AttestationStore> Store()
     return g_store;
 }
 
+void NoteObservedAttestationHeight(int32_t height)
+{
+    if (height < 0) return;
+    std::lock_guard lock{g_mutex};
+    g_highest_attested_height = std::max(g_highest_attested_height, height);
+}
+
 void RefillReverifyTokensLocked(
     std::chrono::steady_clock::time_point now)
 {
@@ -409,7 +416,9 @@ bool LoadDurableAttestations(
     }
     for (const auto& [tail_key, attestations] : hot_tail) {
         (void)attestations;
-        NoteAcceptedAttestationHeight(tail_key.first, tail_key.second);
+        if (store->HasQuorum(tail_key.second, tail_key.first)) {
+            NoteAcceptedAttestationHeight(tail_key.first, tail_key.second);
+        }
     }
     LogPrintf("Verified %zu durable MatMul attestation block record(s)\n",
               records);
@@ -936,11 +945,14 @@ matmul::trusted::AddResult Add(
     auto store{Store()};
     if (!store) return matmul::trusted::AddResult::UntrustedSigner;
     const auto result{store->Add(attestation, expected_hash, expected_height)};
-    // Accepted and Duplicate both prove a configured signer attested this
-    // height; advance the local frontier high-water mark either way.
+    // Individual signatures remain durable history but cannot raise live
+    // frontier policy until the configured threshold is present.
     if (result == matmul::trusted::AddResult::Accepted ||
         result == matmul::trusted::AddResult::Duplicate) {
-        NoteAcceptedAttestationHeight(expected_height, expected_hash);
+        NoteObservedAttestationHeight(expected_height);
+        if (store->HasQuorum(expected_hash, expected_height)) {
+            NoteAcceptedAttestationHeight(expected_height, expected_hash);
+        }
     }
     if (result == matmul::trusted::AddResult::Accepted) {
         PersistAfterMutation(attestation);
@@ -973,7 +985,10 @@ matmul::trusted::AddResult SignAuthoritative(
     }
     if (result == matmul::trusted::AddResult::Accepted ||
         result == matmul::trusted::AddResult::Duplicate) {
-        NoteAcceptedAttestationHeight(block_height, block_hash);
+        NoteObservedAttestationHeight(block_height);
+        if (store->HasQuorum(block_hash, block_height)) {
+            NoteAcceptedAttestationHeight(block_height, block_hash);
+        }
         if (block_height >= 0 && !block_hash.IsNull()) {
             std::lock_guard lock{g_mutex};
             g_local_signed_hash_by_height.emplace(block_height, block_hash);

@@ -438,13 +438,23 @@ BOOST_AUTO_TEST_CASE(partial_quorum_is_never_accepted)
     statement.block_height = 42;
     statement.replay_authority_context = Hex256('e');
     const auto att_a{matmul::trusted::SignStatement(statement, a)};
+    const auto att_b{matmul::trusted::SignStatement(statement, b)};
     BOOST_REQUIRE(att_a);
+    BOOST_REQUIRE(att_b);
     BOOST_CHECK(node::matmul_trusted::Add(*att_a, block, 42) ==
                 matmul::trusted::AddResult::Accepted);
     BOOST_CHECK(!node::matmul_trusted::HasQuorum(block, 42));
+    BOOST_CHECK(node::matmul_trusted::AttestedFrontierHints().empty());
     BOOST_CHECK(node::matmul_trusted::WaitForQuorum(
                     block, 42, [] { return false; }) ==
                 matmul::trusted::WaitResult::Timeout);
+    BOOST_CHECK(node::matmul_trusted::Add(*att_b, block, 42) ==
+                matmul::trusted::AddResult::Accepted);
+    BOOST_CHECK(node::matmul_trusted::HasQuorum(block, 42));
+    const auto hints{node::matmul_trusted::AttestedFrontierHints()};
+    BOOST_REQUIRE_EQUAL(hints.size(), 1U);
+    BOOST_CHECK(hints[0].hash == block);
+    BOOST_CHECK_EQUAL(hints[0].height, 42);
 }
 
 BOOST_AUTO_TEST_CASE(wait_timeout_clamp_rejects_insane_values)
