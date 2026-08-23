@@ -1352,6 +1352,28 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         /*this_gpu=*/true, /*this_inbound=*/true,
         /*this_archive_or_mirror=*/false,
         /*signed_header_response=*/false, /*is_headers=*/false));
+    using node::matmul_trusted::TrustedMirrorSignedHeaderResponseMatches;
+    BOOST_CHECK(TrustedMirrorSignedHeaderResponseMatches(
+        /*grant_pending=*/true, /*unexpired=*/true,
+        /*chain_contiguous=*/true, /*ends_at_attested_hash=*/true,
+        /*attested_height=*/191714, /*connected_height=*/191714));
+    BOOST_CHECK(!TrustedMirrorSignedHeaderResponseMatches(
+        false, true, true, true, 191714, 191714));
+    BOOST_CHECK(!TrustedMirrorSignedHeaderResponseMatches(
+        true, false, true, true, 191714, 191714));
+    BOOST_CHECK(!TrustedMirrorSignedHeaderResponseMatches(
+        true, true, false, true, 191714, 191714));
+    BOOST_CHECK(!TrustedMirrorSignedHeaderResponseMatches(
+        true, true, true, false, 191714, 191714));
+    BOOST_CHECK(!TrustedMirrorSignedHeaderResponseMatches(
+        true, true, true, true, 191714, 191713));
+    using node::matmul_trusted::TrustedMirrorAttestedFrontierHintUsable;
+    BOOST_CHECK(TrustedMirrorAttestedFrontierHintUsable(
+        /*hash_present=*/true, /*index_known=*/false,
+        /*index_failed=*/false));
+    BOOST_CHECK(TrustedMirrorAttestedFrontierHintUsable(true, true, false));
+    BOOST_CHECK(!TrustedMirrorAttestedFrontierHintUsable(true, true, true));
+    BOOST_CHECK(!TrustedMirrorAttestedFrontierHintUsable(false, false, false));
     using node::matmul_trusted::TrustedMirrorMayServeNonAuthorityGetData;
     BOOST_CHECK(TrustedMirrorMayServeNonAuthorityGetData(
         /*this_peer_is_gpu_authority=*/true, /*catching_up_behind_frontier=*/true));

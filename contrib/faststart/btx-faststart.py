@@ -98,6 +98,21 @@ MATMUL_AUTHORITY_OPTIONS = {
     "matmultrustedthreshold",
 }
 
+# These options select which process/configuration the helper starts. Allowing
+# a later --daemon-arg to replace them would bypass the generated independent
+# preset before the runtime policy check can run.
+FASTSTART_OWNED_DAEMON_OPTIONS = {
+    "chain",
+    "conf",
+    "datadir",
+    "includeconf",
+    "regtest",
+    "settings",
+    "signet",
+    "testnet",
+    "testnet4",
+}
+
 
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
@@ -303,11 +318,46 @@ def mirrored_cli_rpc_args(daemon_args: list[str]) -> list[str]:
     return mirrored
 
 
+def local_daemon_cleanup_cmd(
+    cli: str,
+    datadir: Path,
+    conf: Path,
+    chain: str,
+    daemon_args: list[str],
+) -> list[str]:
+    """Address only the local daemon this process launched.
+
+    User CLI arguments may intentionally attach normal RPC work to another
+    node. They must never influence failure cleanup. Preserve daemon-selected
+    local RPC port/credentials, discard any mirrored rpcconnect target, and pin
+    loopback last so cleanup fails closed instead of stopping a remote node.
+    """
+    local_rpc_args = []
+    for arg in mirrored_cli_rpc_args(daemon_args):
+        option = arg.lstrip("-").partition("=")[0].lower()
+        if option != "rpcconnect":
+            local_rpc_args.append(arg)
+    return rpc_base_cmd(
+        cli,
+        datadir,
+        conf,
+        chain,
+        [*local_rpc_args, "-rpcconnect=127.0.0.1"],
+    )
+
+
 def reject_authority_daemon_args(daemon_args: list[str]) -> None:
     """Reject command-line overrides that defeat the independent preset."""
     for raw_arg in daemon_args:
         option, separator, value = raw_arg.lstrip("-").partition("=")
         option = option.lower()
+        if option.startswith("no") and option[2:] in FASTSTART_OWNED_DAEMON_OPTIONS:
+            option = option[2:]
+        if option in FASTSTART_OWNED_DAEMON_OPTIONS:
+            raise RuntimeError(
+                f"--daemon-arg={raw_arg} overrides fast-start process/config routing; "
+                "use the helper's dedicated chain/datadir options instead."
+            )
         if option in MATMUL_AUTHORITY_OPTIONS:
             raise RuntimeError(
                 f"--daemon-arg={raw_arg} configures signer authority; "
@@ -730,6 +780,13 @@ def main(argv: list[str]) -> int:
         [*mirrored_cli_rpc_args(list(args.daemon_arg)), *list(args.cli_arg)],
     )
     daemon = daemon_cmd(args.btxd, datadir, conf_path, args.chain, list(args.daemon_arg))
+    cleanup_cli_cmd = local_daemon_cleanup_cmd(
+        args.btx_cli,
+        datadir,
+        conf_path,
+        args.chain,
+        list(args.daemon_arg),
+    )
 
     started_daemon = False
     if subprocess.run([*cli_cmd, "getblockcount"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True).returncode != 0:
@@ -745,7 +802,7 @@ def main(argv: list[str]) -> int:
     except Exception:
         if started_daemon:
             subprocess.run(
-                [*cli_cmd, "stop"],
+                [*cleanup_cli_cmd, "stop"],
                 check=False,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,

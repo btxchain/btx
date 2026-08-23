@@ -792,10 +792,16 @@ struct Peer {
     /** Whether a ping has been requested by the user */
     std::atomic<bool> m_ping_queued{false};
 
-    /** Deadline for accepting HEADERS from this inbound peer after it sent a
-     *  configured-signer-valid attestation for an as-yet-unknown header. This
-     *  is deliberately header-only; a public attestation is not body authority. */
-    std::atomic<std::chrono::microseconds> m_signed_header_response_until{0us};
+    struct SignedHeaderResponseGrant {
+        uint256 expected_hash{};
+        int32_t expected_height{-1};
+        std::chrono::microseconds expires_at{0us};
+    };
+    /** One request-bound HEADERS response after this peer supplied a valid
+     *  configured-signer attestation for an unknown header. A public
+     *  attestation is replayable, so this grant is exact-target and one-shot. */
+    std::optional<SignedHeaderResponseGrant> m_signed_header_response
+        GUARDED_BY(NetEventsInterface::g_msgproc_mutex);
 
     /** Whether this peer relays txs via wtxid */
     std::atomic<bool> m_wtxid_relay{false};
@@ -13604,16 +13610,20 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
     const bool authority_ingest{
         node::matmul_trusted::IsTrustedMirror() ||
         node::matmul_trusted::HasLocalSigner()};
-    const auto signed_header_until{
-        peer->m_signed_header_response_until.load(std::memory_order_relaxed)};
     const auto message_time{GetTime<std::chrono::microseconds>()};
-    const bool signed_header_response{
-        signed_header_until.count() > 0 && message_time <= signed_header_until};
+    bool signed_header_response_pending{false};
+    if (peer->m_signed_header_response) {
+        if (message_time <= peer->m_signed_header_response->expires_at) {
+            signed_header_response_pending = true;
+        } else {
+            peer->m_signed_header_response.reset();
+        }
+    }
     const bool accept_catchup_ingest{
         !authority_ingest ||
         node::matmul_trusted::TrustedMirrorMayAcceptPeerBlockMessage(
             this_gpu, pfrom.IsInboundConn(),
-            pfrom.HasArchiveOrMirrorService(), signed_header_response,
+            pfrom.HasArchiveOrMirrorService(), signed_header_response_pending,
             msg_type == NetMsgType::HEADERS)};
     if (!accept_catchup_ingest &&
         (msg_type == NetMsgType::BLOCK || msg_type == NetMsgType::HEADERS ||
@@ -16255,15 +16265,6 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                             attestation, *chain_id, *authority, hash,
                             attestation.statement.block_height, signers)};
                         if (verified == matmul::trusted::VerifyResult::Valid) {
-                            // This signature is sufficient to authenticate the
-                            // bounded HEADERS response we are about to request,
-                            // but never BLOCK/INV ingest. Without this grant the
-                            // pre-deserialize inbound gate drops that response,
-                            // leaving the unknown header permanently unknown.
-                            peer->m_signed_header_response_until.store(
-                                GetTime<std::chrono::microseconds>() +
-                                    MATMUL_ATTESTATION_REQUEST_TTL,
-                                std::memory_order_relaxed);
                             CBlockLocator locator;
                             {
                                 LOCK(cs_main);
@@ -16272,7 +16273,23 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                                 }
                             }
                             if (!locator.vHave.empty() &&
-                                MaybeSendGetHeaders(pfrom, locator, *peer)) {
+                                !peer->m_signed_header_response) {
+                                // A newly connected peer commonly has a generic
+                                // GETHEADERS request already in flight. Emit a
+                                // separate exact-stop request here; the normal
+                                // two-minute throttle must not strand the signed
+                                // target, while one live grant prevents duplicate
+                                // exact requests. Consume the grant on the first
+                                // HEADERS message, valid or not.
+                                MakeAndPushMessage(
+                                    pfrom, NetMsgType::GETHEADERS, locator, hash);
+                                peer->m_last_getheaders_timestamp = NodeClock::now();
+                                peer->m_signed_header_response =
+                                    Peer::SignedHeaderResponseGrant{
+                                        hash,
+                                        attestation.statement.block_height,
+                                        GetTime<std::chrono::microseconds>() +
+                                            MATMUL_ATTESTATION_REQUEST_TTL};
                                 LogDebug(
                                     BCLog::NET,
                                     "mmattest for unknown block=%s height=%d "
@@ -16284,7 +16301,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                                 LogDebug(
                                     BCLog::NET,
                                     "mmattest for unknown block=%s height=%d "
-                                    "from trusted signer; headers already in-flight peer=%d\n",
+                                    "from trusted signer; exact signed headers already in-flight peer=%d\n",
                                     hash.ToString(),
                                     attestation.statement.block_height,
                                     pfrom.GetId());
@@ -16466,6 +16483,15 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
 
     if (msg_type == NetMsgType::HEADERS)
     {
+        std::optional<Peer::SignedHeaderResponseGrant> signed_header_grant;
+        if (ShouldIgnoreNonAuthorityInboundBlock(pfrom) &&
+            peer->m_signed_header_response) {
+            signed_header_grant = *peer->m_signed_header_response;
+            // Consume on the first HEADERS message even if parsing later
+            // rejects it. Malformed input cannot preserve a reusable grant.
+            peer->m_signed_header_response.reset();
+        }
+
         // Ignore headers received while importing
         if (m_chainman.m_blockman.LoadingBlocks()) {
             LogDebug(BCLog::NET, "Unexpected headers message received from peer %d\n", pfrom.GetId());
@@ -16493,6 +16519,38 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         if (!vRecv.empty()) {
             Misbehaving(*peer, strprintf("trailing data after headers = %u bytes", vRecv.size()));
             return;
+        }
+
+        bool signed_header_response{false};
+        if (signed_header_grant) {
+            const auto& grant{*signed_header_grant};
+            bool chain_contiguous{!headers.empty()};
+            for (size_t i{1}; chain_contiguous && i < headers.size(); ++i) {
+                chain_contiguous =
+                    headers[i].hashPrevBlock == headers[i - 1].GetHash();
+            }
+            int32_t connected_height{-1};
+            if (chain_contiguous) {
+                LOCK(cs_main);
+                const CBlockIndex* parent{
+                    m_chainman.m_blockman.LookupBlockIndex(
+                        headers.front().hashPrevBlock)};
+                if (parent != nullptr &&
+                    !(parent->nStatus & BLOCK_FAILED_MASK) &&
+                    headers.size() <= static_cast<size_t>(
+                        std::numeric_limits<int32_t>::max() - parent->nHeight)) {
+                    connected_height =
+                        parent->nHeight + static_cast<int32_t>(headers.size());
+                }
+            }
+            signed_header_response =
+                node::matmul_trusted::TrustedMirrorSignedHeaderResponseMatches(
+                    /*grant_pending=*/true,
+                    message_time <= grant.expires_at,
+                    chain_contiguous,
+                    !headers.empty() &&
+                        headers.back().GetHash() == grant.expected_hash,
+                    grant.expected_height, connected_height);
         }
 
         if (ShouldIgnoreNonAuthorityInboundBlock(pfrom) &&

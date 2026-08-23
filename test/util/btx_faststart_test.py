@@ -109,6 +109,20 @@ class BTXFaststartTest(unittest.TestCase):
 
         self.module.reject_authority_daemon_args(["-matmulvalidation=consensus"])
 
+    def test_reject_process_and_config_routing_overrides_before_launch(self):
+        for daemon_arg in (
+            "-conf=/tmp/other.conf",
+            "-datadir=/tmp/other-node",
+            "-includeconf=authority.conf",
+            "-chain=regtest",
+            "-regtest=1",
+            "-noregtest",
+            "-settings=/tmp/other-settings.json",
+        ):
+            with self.subTest(daemon_arg=daemon_arg):
+                with self.assertRaisesRegex(RuntimeError, "process/config routing"):
+                    self.module.reject_authority_daemon_args([daemon_arg])
+
     def test_verify_independent_policy_rejects_trusted_runtime_override(self):
         with mock.patch.object(
             self.module,
@@ -182,7 +196,71 @@ class BTXFaststartTest(unittest.TestCase):
                 )
 
             self.assertEqual(run.call_count, 2)
-            self.assertEqual(run.call_args_list[-1].args[0][-1], "stop")
+            cleanup_cmd = run.call_args_list[-1].args[0]
+            self.assertEqual(cleanup_cmd[-1], "stop")
+            self.assertIn("-rpcconnect=127.0.0.1", cleanup_cmd)
+
+    def test_main_never_routes_started_daemon_cleanup_to_cli_rpc_target(self):
+        remote_target = "-rpcconnect=203.0.113.10"
+        with tempfile.TemporaryDirectory() as tmpdir, mock.patch.object(
+            self.module,
+            "snapshot_from_args",
+            return_value=(
+                "https://example.invalid/snapshot.dat",
+                "ab" * 32,
+                "snapshot.dat",
+                {},
+            ),
+        ), mock.patch.object(
+            self.module, "require_snapshot_sha256"
+        ), mock.patch.object(
+            self.module, "run_quiet"
+        ), mock.patch.object(
+            self.module, "wait_for_rpc_ready"
+        ), mock.patch.object(
+            self.module,
+            "verify_independent_matmul_policy",
+            side_effect=RuntimeError("unsafe runtime policy"),
+        ), mock.patch.object(
+            self.module.subprocess, "run"
+        ) as run:
+            run.side_effect = [mock.Mock(returncode=1), mock.Mock(returncode=0)]
+
+            with self.assertRaisesRegex(RuntimeError, "unsafe runtime policy"):
+                self.module.main(
+                    [
+                        "service",
+                        "--chain=main",
+                        f"--datadir={pathlib.Path(tmpdir) / 'node'}",
+                        f"--cli-arg={remote_target}",
+                    ]
+                )
+
+            self.assertEqual(run.call_count, 2)
+            readiness_cmd = run.call_args_list[0].args[0]
+            cleanup_cmd = run.call_args_list[-1].args[0]
+            self.assertIn(remote_target, readiness_cmd)
+            self.assertEqual(cleanup_cmd[-1], "stop")
+            self.assertIn("-rpcconnect=127.0.0.1", cleanup_cmd)
+            self.assertNotIn(remote_target, cleanup_cmd)
+
+    def test_local_cleanup_discards_mirrored_rpcconnect(self):
+        cleanup_cmd = self.module.local_daemon_cleanup_cmd(
+            "btx-cli",
+            pathlib.Path("/tmp/local-node"),
+            pathlib.Path("/tmp/local-node/faststart/faststart.conf"),
+            "main",
+            [
+                "-rpcconnect=198.51.100.20",
+                "-rpcport=21934",
+                "-rpcuser=local-user",
+            ],
+        )
+
+        self.assertEqual(cleanup_cmd[-1], "-rpcconnect=127.0.0.1")
+        self.assertIn("-rpcport=21934", cleanup_cmd)
+        self.assertIn("-rpcuser=local-user", cleanup_cmd)
+        self.assertNotIn("-rpcconnect=198.51.100.20", cleanup_cmd)
 
     def test_main_does_not_stop_existing_daemon_when_runtime_policy_is_unsafe(self):
         with tempfile.TemporaryDirectory() as tmpdir, mock.patch.object(

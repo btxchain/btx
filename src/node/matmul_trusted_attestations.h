@@ -1526,8 +1526,10 @@ static constexpr auto GPU_RETAIN_ATTESTATION_RETRY{std::chrono::seconds{2}};
 
 /** A valid configured-signer attestation can arrive before its header. In
  *  that case the node asks the same peer for headers, so the inbound filter
- *  must admit that signed, time-bounded HEADERS response. It never authorizes
- *  BLOCK, INV, CMPCTBLOCK, or BLOCKTXN ingest. */
+ *  may admit the single request-bound HEADERS response. The caller proves the
+ *  response is unexpired, contiguous from a known parent, ends at the signed
+ *  hash, and resolves to the signed height. It never authorizes BLOCK, INV,
+ *  CMPCTBLOCK, or BLOCKTXN ingest. */
 [[nodiscard]] inline bool TrustedMirrorMayAcceptPeerBlockMessage(
     bool this_gpu,
     bool this_inbound,
@@ -1538,6 +1540,33 @@ static constexpr auto GPU_RETAIN_ATTESTATION_RETRY{std::chrono::seconds{2}};
     return TrustedMirrorMayAcceptPeerBlockBody(
                this_gpu, this_inbound, this_archive_or_mirror) ||
            (signed_header_response && is_headers);
+}
+
+/** Match the one-shot response to an MMATTEST-triggered GETHEADERS request.
+ *  A public signer attestation is replayable, so neither a timer nor peer
+ *  identity alone is authority for arbitrary header ingestion. */
+[[nodiscard]] inline bool TrustedMirrorSignedHeaderResponseMatches(
+    bool grant_pending,
+    bool unexpired,
+    bool chain_contiguous,
+    bool ends_at_attested_hash,
+    int32_t attested_height,
+    int32_t connected_height)
+{
+    return grant_pending && unexpired && chain_contiguous &&
+           ends_at_attested_hash && attested_height >= 0 &&
+           connected_height == attested_height;
+}
+
+/** Unknown signed hashes remain valid header catch-up targets. Once an
+ *  operator has marked a known index failed, its durable provenance is history
+ *  rather than a usable catch-up high-water mark. */
+[[nodiscard]] inline bool TrustedMirrorAttestedFrontierHintUsable(
+    bool hash_present,
+    bool index_known,
+    bool index_failed)
+{
+    return hash_present && (!index_known || !index_failed);
 }
 
 /** Non-GPU peers may GETDATA from a trusted mirror only once it is no

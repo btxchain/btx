@@ -1649,8 +1649,9 @@ public:
      */
     const CBlockIndex* FindBestKnownAttestedIndex() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /**
-     * Signed-frontier diagnostic. Highest stored quorum height (no HAVE_DATA
-     * required) versus the highest quorum ancestor of the active tip.
+     * Signed-frontier diagnostic. Highest usable stored quorum height (no
+     * HAVE_DATA required, but known failed hashes are operator-retired) versus
+     * the highest quorum ancestor of the active tip.
      * getmatmulattestedtip.hash only sees HAVE_DATA on this chain, so a
      * stranded fork reports on_active_chain=true there; this does not.
      */

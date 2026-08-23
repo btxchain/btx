@@ -11337,21 +11337,40 @@ ChainstateManager::SignedFrontierStatus ChainstateManager::GetSignedFrontierStat
     if (!node::matmul_trusted::IsConfigured() || m_active_chainstate == nullptr) {
         return out;
     }
-    const auto frontier_height{node::matmul_trusted::HighestAttestedHeight()};
-    if (!frontier_height.has_value()) {
+    const auto frontier_hints{node::matmul_trusted::AttestedFrontierHints()};
+    int32_t usable_frontier_height{-1};
+    for (const auto& hint : frontier_hints) {
+        if (hint.height < 0 || hint.hash.IsNull()) continue;
+        const CBlockIndex* const index{m_blockman.LookupBlockIndex(hint.hash)};
+        // An unknown signed hash is a legitimate catch-up target. A known
+        // failed hash is operator-retired and must not remain a high-water
+        // catch-up target merely because attestation history is monotonic.
+        if (!node::matmul_trusted::TrustedMirrorAttestedFrontierHintUsable(
+                /*hash_present=*/true,
+                /*index_known=*/index != nullptr,
+                /*index_failed=*/index != nullptr &&
+                    (index->nStatus & BLOCK_FAILED_MASK) != 0)) {
+            continue;
+        }
+        usable_frontier_height = std::max(usable_frontier_height, hint.height);
+    }
+    if (usable_frontier_height < 0) {
         return out;
     }
     out.available = true;
-    out.height = *frontier_height;
+    out.height = usable_frontier_height;
     const CBlockIndex* const tip{m_active_chainstate->m_chain.Tip()};
     std::optional<uint256> on_chain_hash;
     std::optional<uint256> off_chain_hash;
-    for (const auto& hint : node::matmul_trusted::AttestedFrontierHints()) {
+    for (const auto& hint : frontier_hints) {
         if (hint.height != out.height || hint.hash.IsNull()) continue;
         const CBlockIndex* const frontier_index{
             m_blockman.LookupBlockIndex(hint.hash)};
-        if (frontier_index == nullptr ||
-            (frontier_index->nStatus & BLOCK_FAILED_MASK) != 0) {
+        if (frontier_index == nullptr) {
+            if (!off_chain_hash.has_value()) off_chain_hash = hint.hash;
+            continue;
+        }
+        if ((frontier_index->nStatus & BLOCK_FAILED_MASK) != 0) {
             continue;
         }
         const bool on_chain{

@@ -106,9 +106,33 @@ class MatMulHandoffBudgetRetainTest(BitcoinTestFramework):
 
         competing_block = from_hex(CBlock(), competing_hex)
         competing_block.rehash()
+        followed_header = from_hex(
+            CBlockHeader(), archive.getblockheader(followed_hash, False)
+        )
         peer = mirror.add_p2p_connection(P2PInterface())
-        # Authenticate the bounded HEADERS response before announcing the
-        # sibling. This does not authorize BLOCK ingest from the inbound peer.
+        # A valid public attestation must not become a reusable peer-wide
+        # HEADERS capability. An unrelated first response consumes the grant;
+        # the signed target sent afterward on the same connection stays out of
+        # the index.
+        peer.send_and_ping(
+            msg_generic(
+                b"mmattest",
+                ser_compact_size(len(competing_atts))
+                + b"".join(bytes.fromhex(att) for att in competing_atts),
+            )
+        )
+        peer.send_and_ping(msg_headers(headers=[followed_header]))
+        peer.send_message(msg_headers(headers=[CBlockHeader(competing_block)]))
+        peer.sync_with_ping(timeout=20)
+        tips = {tip["hash"]: tip for tip in mirror.getchaintips()}
+        assert competing_hash not in tips
+        peer.peer_disconnect()
+        mirror.disconnect_p2ps()
+
+        # A fresh exact-stop request on a new peer authorizes precisely one
+        # contiguous response ending at the signed hash. It still does not
+        # authorize a BLOCK body from that inbound peer.
+        peer = mirror.add_p2p_connection(P2PInterface())
         peer.send_and_ping(
             msg_generic(
                 b"mmattest",

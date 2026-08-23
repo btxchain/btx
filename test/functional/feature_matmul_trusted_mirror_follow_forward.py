@@ -178,11 +178,9 @@ class MatMulTrustedMirrorFollowForwardTest(BitcoinTestFramework):
             dest.disconnect_p2ps()
             return
 
-        proof_pos = next(
-            i
-            for i, blockhash in enumerate(hashes)
-            if src.getblockheader(blockhash)["height"] >= ACTIVATION_HEIGHT
-        )
+        # Match the exact stop hash in the MMATTEST-triggered GETHEADERS
+        # request. A mid-branch proof must not authorize a longer batch.
+        proof_pos = len(hashes) - 1
         proof_atts = src.getmatmulattestations(hashes[proof_pos])
         assert_greater_than_or_equal(len(proof_atts), 1)
         peer.send_and_ping(

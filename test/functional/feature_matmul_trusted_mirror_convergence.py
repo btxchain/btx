@@ -452,12 +452,9 @@ class MatMulTrustedMirrorConvergenceTest(BitcoinTestFramework):
             from_hex(CBlockHeader(), authority.getblockheader(h, False))
             for h in hashes
         ]
-        mirror_height = mirror.getblockcount()
-        proof_pos = next(
-            i
-            for i, blockhash in enumerate(hashes)
-            if authority.getblockheader(blockhash)["height"] >= mirror_height
-        )
+        # The attestation-triggered GETHEADERS request uses this exact hash as
+        # its stop target, so the synthetic response must end there too.
+        proof_pos = len(hashes) - 1
 
         peer = mirror.add_p2p_connection(P2PInterface(), services=ARCHIVE_SERVICES)
         proof_atts = authority.getmatmulattestations(hashes[proof_pos])
