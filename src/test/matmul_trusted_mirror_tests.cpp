@@ -2392,6 +2392,97 @@ BOOST_AUTO_TEST_CASE(attestations_survive_simulated_restart)
     }
 }
 
+BOOST_AUTO_TEST_CASE(legacy_migration_restores_only_quorum_frontier_hints)
+{
+    RuntimeReset reset;
+    const CKey a{NewKey()};
+    const CKey b{NewKey()};
+    const uint256 chain{Hex256('1')};
+    const uint256 context{Hex256('2')};
+    const uint256 snapshot_quorum{Hex256('3')};
+    const uint256 split_quorum{Hex256('4')};
+    const uint256 partial{Hex256('5')};
+    const fs::path archive{
+        m_args.GetDataDirNet() / "matmul_attestations_legacy_quorum.dat"};
+    const fs::path wal{archive + ".wal"};
+
+    auto sign = [&](const uint256& block, int32_t height, const CKey& signer) {
+        matmul::trusted::ExactReplayStatement statement;
+        statement.chain_id = chain;
+        statement.block_hash = block;
+        statement.block_height = height;
+        statement.replay_authority_context = context;
+        const auto attestation{
+            matmul::trusted::SignStatement(statement, signer)};
+        BOOST_REQUIRE(attestation.has_value());
+        return *attestation;
+    };
+
+    const auto snapshot_a{sign(snapshot_quorum, 71, a)};
+    const auto snapshot_b{sign(snapshot_quorum, 71, b)};
+    const auto split_a{sign(split_quorum, 72, a)};
+    const auto split_b{sign(split_quorum, 72, b)};
+    const auto partial_a{sign(partial, 73, a)};
+
+    // The legacy snapshot contains one complete threshold-2 bucket, one half
+    // of a second bucket, and a separate partial bucket that must not become a
+    // recovery frontier hint.
+    constexpr char archive_magic[16] = "BTX_MMATTEST_V1";
+    DataStream encoded_archive;
+    encoded_archive.write(
+        AsBytes(Span{archive_magic, sizeof(archive_magic)}));
+    encoded_archive << uint64_t{4};
+    encoded_archive << snapshot_a << snapshot_b << split_a << partial_a;
+    BOOST_REQUIRE(WriteBinaryFile(
+        archive,
+        std::string{reinterpret_cast<const char*>(encoded_archive.data()),
+                    encoded_archive.size()}));
+
+    // The legacy WAL completes quorum for the split bucket during the same
+    // first OpenPersistence call.
+    constexpr char wal_magic[16] = "BTX_MMAT_WAL_V1";
+    DataStream encoded_wal;
+    encoded_wal.write(AsBytes(Span{wal_magic, sizeof(wal_magic)}));
+    DataStream wal_record;
+    wal_record << split_b;
+    encoded_wal << static_cast<uint32_t>(wal_record.size());
+    encoded_wal.write(Span{wal_record.data(), wal_record.size()});
+    BOOST_REQUIRE(WriteBinaryFile(
+        wal,
+        std::string{reinterpret_cast<const char*>(encoded_wal.data()),
+                    encoded_wal.size()}));
+
+    matmul::trusted::StoreConfig config;
+    config.chain_id = chain;
+    config.replay_authority_context = context;
+    config.trusted_signers = {a.GetPubKey(), b.GetPubKey()};
+    config.threshold = 2;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/true,
+        /*serve=*/false, std::chrono::milliseconds{50}, error));
+    BOOST_REQUIRE(node::matmul_trusted::OpenPersistence(archive, error));
+
+    BOOST_CHECK(node::matmul_trusted::HasQuorum(snapshot_quorum, 71));
+    BOOST_CHECK(node::matmul_trusted::HasQuorum(split_quorum, 72));
+    BOOST_CHECK(!node::matmul_trusted::HasQuorum(partial, 73));
+    const auto hints{node::matmul_trusted::AttestedFrontierHints()};
+    BOOST_REQUIRE_EQUAL(hints.size(), 2U);
+    bool saw_snapshot{false};
+    bool saw_split{false};
+    for (const auto& hint : hints) {
+        if (hint.height == 71 && hint.hash == snapshot_quorum) {
+            saw_snapshot = true;
+        }
+        if (hint.height == 72 && hint.hash == split_quorum) {
+            saw_split = true;
+        }
+        BOOST_CHECK(hint.hash != partial);
+    }
+    BOOST_CHECK(saw_snapshot);
+    BOOST_CHECK(saw_split);
+}
+
 BOOST_AUTO_TEST_CASE(durable_history_outlives_bounded_hot_cache)
 {
     RuntimeReset reset;

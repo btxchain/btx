@@ -315,6 +315,16 @@ bool ImportAttestations(
             g_local_signed_hash_by_height.emplace(height, hash);
         }
     }
+    // Flat V1 archives and WALs are imported after the durable database's
+    // startup scan. Rebuild live recovery hints now, but only for buckets that
+    // satisfy the configured threshold after this import. A WAL signature may
+    // complete quorum with a signature imported from the flat snapshot.
+    for (const auto& [key, attestations] : durable) {
+        (void)attestations;
+        if (store->HasQuorum(key.block_hash, key.height)) {
+            NoteAcceptedAttestationHeight(key.height, key.block_hash);
+        }
+    }
     LogPrintf("Loaded %zu MatMul ExactReplay attestation(s) from %s\n",
               accepted, fs::PathToString(source));
     if (prior_authority != 0) {
