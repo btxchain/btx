@@ -17,7 +17,8 @@ must remain getdata-eligible (p2p_unrequested_blocks.py).
 This test:
   - loads an attested snapshot so pre-snapshot hashes are followed holes
     (ancestors of the snapshot tip) with no HAVE_DATA
-  - pushes those bodies unrequested over P2P and requires HAVE_DATA
+  - pushes those bodies unrequested over an operator-authorized P2P source and
+    requires HAVE_DATA
   - pushes an unrequested low-work competing fork and requires it is NOT
     persisted
   - reconnects to the archive and requires <20 Requesting-block log lines
@@ -39,7 +40,6 @@ from test_framework.util import (
     assert_equal,
     assert_greater_than,
     assert_greater_than_or_equal,
-    assert_raises_rpc_error,
 )
 from test_framework.authproxy import JSONRPCException
 from test_framework.wallet_util import generate_keypair
@@ -134,6 +134,10 @@ class MatMulUnrequestedFollowedPersistTest(BitcoinTestFramework):
         mirror = common + [
             "-matmulvalidation=trusted",
             "-matmulattestationserve=0",
+            # The synthetic inbound P2P below represents an explicitly
+            # operator-authorized authority source. An archive service bit by
+            # itself must never authorize inbound block bodies.
+            "-whitelist=noban@127.0.0.1",
         ]
         self.archive_args = archive
         self.mirror_args = mirror
@@ -141,7 +145,9 @@ class MatMulUnrequestedFollowedPersistTest(BitcoinTestFramework):
 
     def setup_network(self):
         self.setup_nodes()
-        self.connect_nodes(0, 1)
+        # The trusted mirror explicitly selects its authority as an outbound
+        # source; unsolicited inbound block delivery is intentionally gated.
+        self.connect_nodes(1, 0)
         self.sync_all()
 
     def _push_headers(self, dest, hashes, src, *, services, with_attestations):
@@ -161,7 +167,6 @@ class MatMulUnrequestedFollowedPersistTest(BitcoinTestFramework):
             for i, blockhash in enumerate(hashes)
             if src.getblockheader(blockhash)["height"] >= ACTIVATION_HEIGHT
         )
-        peer.send_and_ping(msg_headers(headers=headers[: proof_pos + 1]))
         proof_atts = src.getmatmulattestations(hashes[proof_pos])
         assert_greater_than_or_equal(len(proof_atts), 1)
         peer.send_and_ping(
@@ -171,12 +176,9 @@ class MatMulUnrequestedFollowedPersistTest(BitcoinTestFramework):
                 + b"".join(bytes.fromhex(att) for att in proof_atts),
             )
         )
-        if proof_pos + 1 < len(headers):
-            peer.send_and_ping(msg_headers(headers=headers[proof_pos + 1 :]))
+        peer.send_and_ping(msg_headers(headers=headers))
         remaining = []
-        for i, blockhash in enumerate(hashes):
-            if i == proof_pos:
-                continue
+        for blockhash in hashes:
             if src.getblockheader(blockhash)["height"] < ACTIVATION_HEIGHT:
                 continue
             atts = src.getmatmulattestations(blockhash)
@@ -294,15 +296,12 @@ class MatMulUnrequestedFollowedPersistTest(BitcoinTestFramework):
         genesis = int("0x" + archive.getblockhash(0), 0)
         competing = create_block(genesis, create_coinbase(1), int(time.time()) + 50)
         competing.solve()
-        peer.send_and_ping(msg_block(competing))
-        assert_raises_rpc_error(
-            -1,
-            "Block not available (not fully downloaded)",
-            mirror.getblock,
-            competing.hash,
-        )
+        peer.send_message(msg_block(competing))
+        # The claimed-work/header checks may disconnect this explicitly
+        # authorized test peer; either way the junk body must never persist.
+        peer.wait_for_disconnect(timeout=20)
+        assert not body_available(mirror, competing.hash)
 
-        peer.peer_disconnect()
         mirror.disconnect_p2ps()
 
         self.log.info("Reconnect; followed hashes must not unbounded re-getdata")

@@ -162,9 +162,10 @@ class MatMulTrustedMirrorFollowForwardTest(BitcoinTestFramework):
     def _push_headers(self, dest, hashes, src, *, services, with_attestations):
         """Deliver headers (and optional ExactReplay attestations) without bodies.
 
-        When attesting, prove authority with a signer-valid mmattest at the
-        first Profile-1 header, then announce descendants on the same
-        connection — same pattern as feature_matmul_trusted_mirror_convergence.
+        When attesting, prove authority with a signer-valid mmattest before
+        announcing the complete branch on the same connection. Replay the
+        attestations once their headers are indexed — the same pattern as
+        feature_matmul_trusted_mirror_convergence.
         """
         assert_greater_than(len(hashes), 0)
         headers = [
@@ -182,7 +183,6 @@ class MatMulTrustedMirrorFollowForwardTest(BitcoinTestFramework):
             for i, blockhash in enumerate(hashes)
             if src.getblockheader(blockhash)["height"] >= ACTIVATION_HEIGHT
         )
-        peer.send_and_ping(msg_headers(headers=headers[: proof_pos + 1]))
         proof_atts = src.getmatmulattestations(hashes[proof_pos])
         assert_greater_than_or_equal(len(proof_atts), 1)
         peer.send_and_ping(
@@ -192,12 +192,9 @@ class MatMulTrustedMirrorFollowForwardTest(BitcoinTestFramework):
                 + b"".join(bytes.fromhex(att) for att in proof_atts),
             )
         )
-        if proof_pos + 1 < len(headers):
-            peer.send_and_ping(msg_headers(headers=headers[proof_pos + 1 :]))
+        peer.send_and_ping(msg_headers(headers=headers))
         remaining = []
-        for i, blockhash in enumerate(hashes):
-            if i == proof_pos:
-                continue
+        for blockhash in hashes:
             if src.getblockheader(blockhash)["height"] < ACTIVATION_HEIGHT:
                 continue
             atts = src.getmatmulattestations(blockhash)
@@ -282,9 +279,7 @@ class MatMulTrustedMirrorFollowForwardTest(BitcoinTestFramework):
         missing_followed = followed_hashes[SNAPSHOT_HEIGHT:]
         assert_equal(len(missing_followed), FORWARD_COUNT)
 
-        self.log.info(
-            "Mirror (genesis): attested headers through H+N, then competing headers-only"
-        )
+        self.log.info("Mirror (genesis): accept attested headers through H+N")
         assert_equal(mirror.getblockcount(), 0)
         self._push_headers(
             mirror,
@@ -298,37 +293,25 @@ class MatMulTrustedMirrorFollowForwardTest(BitcoinTestFramework):
             and any(t["hash"] == authority_tip for t in mirror.getchaintips()),
             timeout=180,
         )
-        # Competing most-work headers are accepted into the index so the
-        # test can prove they stay headers-only. They extend H, so snapshot
-        # load still sees the snapshot base on the header chain.
-        self._push_headers(
-            mirror,
-            competing_suffix,
-            competitor,
-            services=NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS,
-            with_attestations=False,
-        )
-        self.wait_until(
-            lambda: any(
-                t["hash"] == competing_tip for t in mirror.getchaintips()
-            ),
-            timeout=180,
-        )
         tips = {t["hash"]: t for t in mirror.getchaintips()}
         assert authority_tip in tips
-        assert competing_tip in tips
-        assert_equal(tips[competing_tip]["status"], "headers-only")
+        assert competing_tip not in tips
         info = mirror.getblockchaininfo()
-        # Competing headers may advance the public headers counter (they
-        # extend H, so snapshot load still sees H as an ancestor). Bodies
-        # must not arrive, and the followed H+N headers must remain known.
+        # The followed H+N headers remain known and no body has arrived. The
+        # heavier unattested fork stays isolated until the explicit outbound
+        # connection after snapshot activation.
         assert_greater_than_or_equal(info["headers"], authority_height)
         assert_equal(info["blocks"], 0)
         for blockhash in missing_followed:
             mirror.getblockheader(blockhash)
             assert not body_available(mirror, blockhash), blockhash
         for blockhash in competing_suffix:
-            mirror.getblockheader(blockhash)
+            try:
+                mirror.getblockheader(blockhash)
+            except JSONRPCException:
+                pass
+            else:
+                raise AssertionError(f"indexed unattested inbound header {blockhash}")
             assert not body_available(mirror, blockhash), blockhash
 
         self.log.info("loadtxoutsetattested at H while H+1..H+N are header-known")

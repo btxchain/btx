@@ -1630,6 +1630,11 @@ public:
      *  so ConnectTip cannot mint an unattested chain. Does not durable-read
      *  (live ABC ~45s/candidate under cs_main). */
     [[nodiscard]] bool IndexHasTrustedMatMulAuthority(const CBlockIndex* index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /** A different hash at this height has in-memory quorum and has not been
+     *  explicitly invalidated. Unknown signed hashes remain conservative
+     *  competitors until their headers arrive; known failed indexes do not
+     *  pin mining, activation, or body admission. */
+    [[nodiscard]] bool HasUsableCompetingTrustedMatMulAuthority(const CBlockIndex* index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** True when index is an ancestor of, is, or descends from any stored
      *  quorum hash at HighestAttestedHeight. Unlike
      *  GetSignedFrontierStatus().on_active_chain, this stays true while

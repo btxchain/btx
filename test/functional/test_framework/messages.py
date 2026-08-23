@@ -2151,6 +2151,24 @@ class msg_getmmsketch:
         return "msg_getmmsketch(block_hash=%064x)" % self.block_hash
 
 
+class msg_getmmattest:
+    """Request ExactReplay attestations for one block hash."""
+    __slots__ = ("block_hash",)
+    msgtype = b"getmmattest"
+
+    def __init__(self, block_hash=0):
+        self.block_hash = block_hash
+
+    def deserialize(self, f):
+        self.block_hash = deser_uint256(f)
+
+    def serialize(self):
+        return ser_uint256(self.block_hash)
+
+    def __repr__(self):
+        return "msg_getmmattest(block_hash=%064x)" % self.block_hash
+
+
 class msg_mmsketch:
     """Carry the full self-authenticating 8*m^2 sketch-cache payload for one block
     (v4.4 ENC-DR, tension-resolution §4.3). Payload: 32-byte block hash followed by

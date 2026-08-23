@@ -1337,6 +1337,21 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         false, /*this_inbound=*/true, /*this_archive_or_mirror=*/true));
     BOOST_CHECK(!TrustedMirrorMayAcceptPeerBlockBody(false, true, false));
     BOOST_CHECK(!TrustedMirrorMayAcceptPeerBlockBody(false, false, false));
+    using node::matmul_trusted::TrustedMirrorMayAcceptPeerBlockMessage;
+    BOOST_CHECK(TrustedMirrorMayAcceptPeerBlockMessage(
+        /*this_gpu=*/false, /*this_inbound=*/true,
+        /*this_archive_or_mirror=*/false,
+        /*signed_header_response=*/true, /*is_headers=*/true));
+    BOOST_CHECK(!TrustedMirrorMayAcceptPeerBlockMessage(
+        false, true, false, /*signed_header_response=*/true,
+        /*is_headers=*/false));
+    BOOST_CHECK(!TrustedMirrorMayAcceptPeerBlockMessage(
+        false, true, false, /*signed_header_response=*/false,
+        /*is_headers=*/true));
+    BOOST_CHECK(TrustedMirrorMayAcceptPeerBlockMessage(
+        /*this_gpu=*/true, /*this_inbound=*/true,
+        /*this_archive_or_mirror=*/false,
+        /*signed_header_response=*/false, /*is_headers=*/false));
     using node::matmul_trusted::TrustedMirrorMayServeNonAuthorityGetData;
     BOOST_CHECK(TrustedMirrorMayServeNonAuthorityGetData(
         /*this_peer_is_gpu_authority=*/true, /*catching_up_behind_frontier=*/true));
@@ -1514,6 +1529,9 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(SkipMinerProcessMessagesDuringArchiveGetData(
         /*local_signer=*/false, false, /*trusted_mirror_catch_up=*/true,
         true, false, true, false));
+    BOOST_CHECK(!SkipMinerProcessMessagesDuringArchiveGetData(
+        /*local_signer=*/false, false, /*trusted_mirror_catch_up=*/true,
+        true, /*this_peer_manual=*/true, true, false));
     // Once archive service is idle, bounded Other visits must resume so a
     // consensus verifier can complete PING/GETHEADERS without becoming an
     // authorized block source.
@@ -1716,23 +1734,54 @@ BOOST_AUTO_TEST_CASE(competing_attested_index_rejects_fossil_depth)
     using node::matmul_trusted::TrustedMirrorMayAdoptCompetingAttestedIndex;
     using node::matmul_trusted::TRUSTED_MIRROR_SHORT_REORG_DEPTH;
     BOOST_CHECK(TrustedMirrorMayAdoptCompetingAttestedIndex(
-        /*attested_suffix_of_active_tip=*/true, /*lca_depth=*/0));
-    BOOST_CHECK(TrustedMirrorMayAdoptCompetingAttestedIndex(false, 1));
+        /*attested_suffix_of_active_tip=*/true, /*lca_depth=*/0,
+        /*on_signed_frontier_chain=*/false,
+        /*signed_frontier_hash_known=*/false));
     BOOST_CHECK(TrustedMirrorMayAdoptCompetingAttestedIndex(
-        false, TRUSTED_MIRROR_SHORT_REORG_DEPTH));
+        false, 1, /*on_signed_frontier_chain=*/false,
+        /*signed_frontier_hash_known=*/false));
+    BOOST_CHECK(TrustedMirrorMayAdoptCompetingAttestedIndex(
+        false, TRUSTED_MIRROR_SHORT_REORG_DEPTH,
+        /*on_signed_frontier_chain=*/false,
+        /*signed_frontier_hash_known=*/false));
     BOOST_CHECK(!TrustedMirrorMayAdoptCompetingAttestedIndex(
-        false, TRUSTED_MIRROR_SHORT_REORG_DEPTH + 1));
-    BOOST_CHECK(!TrustedMirrorMayAdoptCompetingAttestedIndex(false, 510));
-    BOOST_CHECK(!TrustedMirrorMayAdoptCompetingAttestedIndex(false, 0));
+        false, TRUSTED_MIRROR_SHORT_REORG_DEPTH + 1,
+        /*on_signed_frontier_chain=*/false,
+        /*signed_frontier_hash_known=*/false));
+    BOOST_CHECK(!TrustedMirrorMayAdoptCompetingAttestedIndex(
+        false, 510, /*on_signed_frontier_chain=*/false,
+        /*signed_frontier_hash_known=*/false));
+    BOOST_CHECK(!TrustedMirrorMayAdoptCompetingAttestedIndex(
+        false, 0, /*on_signed_frontier_chain=*/false,
+        /*signed_frontier_hash_known=*/false));
+    // A previously signed short fork or suffix remains authenticated evidence,
+    // but it cannot pull the node away from a different concrete highest
+    // signed-frontier chain.
+    BOOST_CHECK(!TrustedMirrorMayAdoptCompetingAttestedIndex(
+        false, 1, /*on_signed_frontier_chain=*/false,
+        /*signed_frontier_hash_known=*/true));
+    BOOST_CHECK(!TrustedMirrorMayAdoptCompetingAttestedIndex(
+        /*attested_suffix_of_active_tip=*/true, /*lca_depth=*/0,
+        /*on_signed_frontier_chain=*/false,
+        /*signed_frontier_hash_known=*/true));
     // Signed-frontier chain (live archives 2026-08-16): depth 7+ is not a
     // fossil when the candidate is the current attested tower.
     BOOST_CHECK(TrustedMirrorMayAdoptCompetingAttestedIndex(
         false, TRUSTED_MIRROR_SHORT_REORG_DEPTH + 1,
-        /*on_signed_frontier_chain=*/true));
+        /*on_signed_frontier_chain=*/true,
+        /*signed_frontier_hash_known=*/true));
     BOOST_CHECK(TrustedMirrorMayAdoptCompetingAttestedIndex(
-        false, 180, /*on_signed_frontier_chain=*/true));
+        false, 180, /*on_signed_frontier_chain=*/true,
+        /*signed_frontier_hash_known=*/true));
+    // A signed deep branch is still validity provenance, but explicit PARK is
+    // operator finality policy and must not be silently auto-unparked.
     BOOST_CHECK(!TrustedMirrorMayAdoptCompetingAttestedIndex(
-        false, 180, /*on_signed_frontier_chain=*/false));
+        false, 180, /*on_signed_frontier_chain=*/true,
+        /*signed_frontier_hash_known=*/true,
+        /*on_parked_reorg_branch=*/true));
+    BOOST_CHECK(!TrustedMirrorMayAdoptCompetingAttestedIndex(
+        false, 180, /*on_signed_frontier_chain=*/false,
+        /*signed_frontier_hash_known=*/false));
     using node::matmul_trusted::ConsensusSignerMayAbandonQuorumTipForSignedFrontier;
     // Same-height dual-quorum twin: keep 190354 (do not flip-flop).
     BOOST_CHECK(!ConsensusSignerMayAbandonQuorumTipForSignedFrontier(

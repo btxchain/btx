@@ -792,6 +792,11 @@ struct Peer {
     /** Whether a ping has been requested by the user */
     std::atomic<bool> m_ping_queued{false};
 
+    /** Deadline for accepting HEADERS from this inbound peer after it sent a
+     *  configured-signer-valid attestation for an as-yet-unknown header. This
+     *  is deliberately header-only; a public attestation is not body authority. */
+    std::atomic<std::chrono::microseconds> m_signed_header_response_until{0us};
+
     /** Whether this peer relays txs via wtxid */
     std::atomic<bool> m_wtxid_relay{false};
     /** Whether this peer explicitly negotiated bounded block chunk relay. */
@@ -2911,7 +2916,9 @@ void PeerManagerImpl::RefreshMatMulDeferredBodyRetry(
     const uint256& hash, const char* reason)
 {
     if (!m_matmul_block_lifecycle.RefreshRetry(
-            hash, MATMUL_BUDGET_DEFER_COOLDOWN)) return;
+            hash, MATMUL_BUDGET_DEFER_COOLDOWN,
+            node::MatMulBlockLifecycle::Clock::now(),
+            /*idle_retry_allowed=*/false)) return;
     LogDebug(
         BCLog::NET,
         "Retaining deferred body %s after %s; next retry in %ds\n",
@@ -3931,8 +3938,7 @@ static bool TrustedMirrorMayDownloadIndex(
         tip->nHeight - lca->nHeight,
         /*is_immediate_fork_child=*/true,
         /*index_on_active_chain=*/false,
-        node::matmul_trusted::HasCompetingQuorum(
-            index->GetBlockHash(), index->nHeight),
+        chainman.HasUsableCompetingTrustedMatMulAuthority(index),
         /*on_parked=*/false);
 }
 
@@ -4021,8 +4027,7 @@ static uint256 g_configured_claimed_tip_child{};
 {
     if (tip == nullptr || index == nullptr) return false;
     if (index->pprev != tip) return false;
-    if (node::matmul_trusted::HasCompetingQuorum(
-            index->GetBlockHash(), index->nHeight)) {
+    if (chainman.HasUsableCompetingTrustedMatMulAuthority(index)) {
         return false;
     }
     const bool progress_child{
@@ -12451,17 +12456,23 @@ void PeerManagerImpl::ProcessBlockSync(NodeId nodeid, CNode* node, const std::sh
     bool new_block{false};
     m_chainman.ProcessNewBlock(block, force_processing, min_pow_checked, &new_block);
     bool exact_replay_authenticated{false};
+    bool trusted_replay_authenticated{false};
     bool terminal_failure{false};
     {
         LOCK(cs_main);
         const uint256 hash{block->GetHash()};
         const CBlockIndex* index{
             m_chainman.m_blockman.LookupBlockIndex(hash)};
-        exact_replay_authenticated = index != nullptr &&
-            (index->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0 &&
+        const bool valid_body{index != nullptr &&
             (index->nStatus & BLOCK_HAVE_DATA) != 0 &&
             (index->nStatus & BLOCK_FAILED_MASK) == 0 &&
-            index->IsValid(BLOCK_VALID_SCRIPTS);
+            index->IsValid(BLOCK_VALID_SCRIPTS)};
+        exact_replay_authenticated = valid_body &&
+            (index->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0;
+        trusted_replay_authenticated = valid_body &&
+            m_chainman.GetMatMulValidationMode() ==
+                kernel::MatMulValidationMode::TRUSTED &&
+            m_chainman.IndexHasTrustedMatMulAuthority(index);
         terminal_failure = index != nullptr &&
             (index->nStatus & BLOCK_FAILED_MASK) != 0;
         if (node::matmul_trusted::ShouldAdvanceBestKnownFromPeerBody(
@@ -12493,9 +12504,13 @@ void PeerManagerImpl::ProcessBlockSync(NodeId nodeid, CNode* node, const std::sh
     // A duplicate/no-op ProcessNewBlock result is not necessarily terminal:
     // another delivery can still own the asynchronous replay, and a local
     // accelerator failure deliberately leaves the candidate retryable. Keep
-    // that bounded observation until exact local authority succeeds, the
-    // index is permanently failed, or its TTL expires.
-    if (exact_replay_authenticated || terminal_failure) {
+    // that bounded observation until current-mode MatMul authority succeeds,
+    // the index is permanently failed, or its TTL expires. Trusted mode has no
+    // BLOCK_EXACT_REPLAY_VERIFIED bit by design; requiring it retained every
+    // successfully connected quorum-authenticated body forever.
+    const bool matmul_authenticated{
+        exact_replay_authenticated || trusted_replay_authenticated};
+    if (matmul_authenticated || terminal_failure) {
         if (lifecycle_token) {
             m_matmul_block_lifecycle.Terminal(*lifecycle_token);
         } else {
@@ -12508,7 +12523,7 @@ void PeerManagerImpl::ProcessBlockSync(NodeId nodeid, CNode* node, const std::sh
         RefreshMatMulDeferredBodyRetry(
             block->GetHash(), "non-terminal replay result");
     }
-    if (new_block || exact_replay_authenticated) {
+    if (new_block || matmul_authenticated) {
         if (exact_replay_authenticated &&
             m_chainman.GetMatMulValidationMode() ==
                 kernel::MatMulValidationMode::CONSENSUS &&
@@ -13589,11 +13604,17 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
     const bool authority_ingest{
         node::matmul_trusted::IsTrustedMirror() ||
         node::matmul_trusted::HasLocalSigner()};
+    const auto signed_header_until{
+        peer->m_signed_header_response_until.load(std::memory_order_relaxed)};
+    const auto message_time{GetTime<std::chrono::microseconds>()};
+    const bool signed_header_response{
+        signed_header_until.count() > 0 && message_time <= signed_header_until};
     const bool accept_catchup_ingest{
         !authority_ingest ||
-        node::matmul_trusted::TrustedMirrorMayAcceptPeerBlockBody(
+        node::matmul_trusted::TrustedMirrorMayAcceptPeerBlockMessage(
             this_gpu, pfrom.IsInboundConn(),
-            pfrom.HasArchiveOrMirrorService())};
+            pfrom.HasArchiveOrMirrorService(), signed_header_response,
+            msg_type == NetMsgType::HEADERS)};
     if (!accept_catchup_ingest &&
         (msg_type == NetMsgType::BLOCK || msg_type == NetMsgType::HEADERS ||
          msg_type == NetMsgType::CMPCTBLOCK || msg_type == NetMsgType::BLOCKTXN ||
@@ -15860,7 +15881,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             }
             const bool dual_spread{
                 other_on_chain_quorum ||
-                node::matmul_trusted::HasCompetingQuorum(block_hash, height)};
+                m_chainman.HasUsableCompetingTrustedMatMulAuthority(index)};
             const bool recovery_fork_child{
                 m_chainman.IsAttestedAbandonForkCandidate(index)};
             // Serve cached signatures for the active chain, a stored
@@ -16234,6 +16255,15 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                             attestation, *chain_id, *authority, hash,
                             attestation.statement.block_height, signers)};
                         if (verified == matmul::trusted::VerifyResult::Valid) {
+                            // This signature is sufficient to authenticate the
+                            // bounded HEADERS response we are about to request,
+                            // but never BLOCK/INV ingest. Without this grant the
+                            // pre-deserialize inbound gate drops that response,
+                            // leaving the unknown header permanently unknown.
+                            peer->m_signed_header_response_until.store(
+                                GetTime<std::chrono::microseconds>() +
+                                    MATMUL_ATTESTATION_REQUEST_TTL,
+                                std::memory_order_relaxed);
                             CBlockLocator locator;
                             {
                                 LOCK(cs_main);
@@ -16466,10 +16496,11 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         }
 
         if (ShouldIgnoreNonAuthorityInboundBlock(pfrom) &&
-            !node::matmul_trusted::TrustedMirrorMayAcceptPeerBlockBody(
+            !node::matmul_trusted::TrustedMirrorMayAcceptPeerBlockMessage(
                 pfrom.IsManualConn() ||
                     pfrom.HasPermission(NetPermissionFlags::NoBan),
-                pfrom.IsInboundConn(), pfrom.HasArchiveOrMirrorService())) {
+                pfrom.IsInboundConn(), pfrom.HasArchiveOrMirrorService(),
+                signed_header_response, /*is_headers=*/true)) {
             LogDebug(BCLog::NET,
                      "Ignoring non-authority headers count=%u peer=%d (GPU authority is the only inbound source)\n",
                      nCount, pfrom.GetId());

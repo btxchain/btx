@@ -19,7 +19,9 @@ from test_framework.messages import (
     CBlockHeader,
     from_hex,
     msg_block,
+    msg_generic,
     msg_headers,
+    ser_compact_size,
 )
 from test_framework.p2p import P2PInterface
 from test_framework.test_framework import BitcoinTestFramework
@@ -37,10 +39,10 @@ REQUESTING_BLOCK_RE = re.compile(
 
 class MatMulHandoffBudgetRetainTest(BitcoinTestFramework):
     def set_test_params(self):
-        self.num_nodes = 2
+        self.num_nodes = 3
         self.setup_clean_chain = True
-        signer_wif, signer_pub = generate_keypair(wif=True)
-        self.signer_pub = signer_pub.hex()
+        archive_wif, archive_pub = generate_keypair(wif=True)
+        competitor_wif, competitor_pub = generate_keypair(wif=True)
         common = [
             "-test=matmulstrict",
             "-test=matmuldgw",
@@ -58,7 +60,8 @@ class MatMulHandoffBudgetRetainTest(BitcoinTestFramework):
             "-regtestrctoydims=1",
             "-regtestmatmulltsealaspow=0",
             "-regtestmatmulv4dimension=128",
-            f"-matmultrustedpubkey={self.signer_pub}",
+            f"-matmultrustedpubkey={archive_pub.hex()}",
+            f"-matmultrustedpubkey={competitor_pub.hex()}",
             "-matmultrustedthreshold=1",
             "-matmultrustedwaitms=30000",
         ]
@@ -66,7 +69,7 @@ class MatMulHandoffBudgetRetainTest(BitcoinTestFramework):
             common
             + [
                 "-matmulvalidation=consensus",
-                f"-matmulattestationsignerkey={signer_wif}",
+                f"-matmulattestationsignerkey={archive_wif}",
                 "-matmulattestationserve=1",
             ],
             common
@@ -74,29 +77,45 @@ class MatMulHandoffBudgetRetainTest(BitcoinTestFramework):
                 "-matmulvalidation=trusted",
                 "-matmulattestationserve=0",
             ],
+            common
+            + [
+                "-matmulvalidation=consensus",
+                f"-matmulattestationsignerkey={competitor_wif}",
+                "-matmulattestationserve=1",
+            ],
         ]
 
     def run_test(self):
-        archive, mirror = self.nodes
+        archive, mirror, competitor = self.nodes
         self.generate(archive, ACTIVATION_HEIGHT + 2)
         self.sync_blocks()
-        tip_hash = archive.getbestblockhash()
         self.disconnect_nodes(0, 1)
+        self.disconnect_nodes(1, 2)
 
-        competing_hash = self.generate(archive, 1, sync_fun=self.no_op)[0]
-        competing_hex = archive.getblock(competing_hash, 0)
-        archive.invalidateblock(competing_hash)
+        competing_hash = self.generate(competitor, 1, sync_fun=self.no_op)[0]
+        competing_hex = competitor.getblock(competing_hash, 0)
+        competing_atts = competitor.getmatmulattestations(competing_hash)
+        assert_greater_than(len(competing_atts), 0)
         followed_hash = self.generate(archive, 1, sync_fun=self.no_op)[0]
         assert followed_hash != competing_hash
         assert_equal(archive.getbestblockhash(), followed_hash)
 
-        self.connect_nodes(0, 1)
-        self.sync_blocks()
+        self.connect_nodes(1, 0)
+        self.sync_blocks(nodes=(archive, mirror))
         assert_equal(mirror.getbestblockhash(), followed_hash)
 
         competing_block = from_hex(CBlock(), competing_hex)
         competing_block.rehash()
         peer = mirror.add_p2p_connection(P2PInterface())
+        # Authenticate the bounded HEADERS response before announcing the
+        # sibling. This does not authorize BLOCK ingest from the inbound peer.
+        peer.send_and_ping(
+            msg_generic(
+                b"mmattest",
+                ser_compact_size(len(competing_atts))
+                + b"".join(bytes.fromhex(att) for att in competing_atts),
+            )
+        )
         peer.send_message(msg_headers(headers=[CBlockHeader(competing_block)]))
         peer.sync_with_ping(timeout=20)
         peer.send_message(msg_block(competing_block))
@@ -134,6 +153,14 @@ class MatMulHandoffBudgetRetainTest(BitcoinTestFramework):
                 "ExactReplay to a configured threshold of 1 signer(s). It validates "
                 "block bodies and scripts but is not an independent full consensus "
                 "validator."
+            ),
+        )
+        self.stop_node(
+            2,
+            expected_stderr=(
+                "Warning: -matmulattestationsignerkey exposes an online signing key "
+                "through process/config surfaces; use a permission-restricted "
+                "-matmulattestationsignerkeyfile."
             ),
         )
 

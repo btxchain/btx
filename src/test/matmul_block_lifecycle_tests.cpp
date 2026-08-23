@@ -133,6 +133,24 @@ BOOST_AUTO_TEST_CASE(idle_catchup_ignores_retry_cooldown)
     BOOST_CHECK(lifecycle.NextRetry(uint256{}, now + 1s, /*ignore_retry_delay=*/true).has_value());
 }
 
+BOOST_AUTO_TEST_CASE(idle_catchup_respects_post_failure_cooldown)
+{
+    node::MatMulBlockLifecycle lifecycle{1, 100, 10min, 10min};
+    const auto now{node::MatMulBlockLifecycle::Clock::now()};
+    const uint256 hash{
+        uint256::FromHex(std::string(63, '0') + "6").value()};
+    BOOST_REQUIRE(lifecycle.Retain(hash, Body(9, 50, now), now));
+    BOOST_REQUIRE(lifecycle.RefreshRetry(
+        hash, 60s, now, /*idle_retry_allowed=*/false));
+
+    BOOST_CHECK(!lifecycle.NextDeferredCatchUpRetry(
+        uint256{}, now + 1s, /*idle_catchup=*/true,
+        /*frontier_off_active_chain=*/false).has_value());
+    BOOST_CHECK(lifecycle.NextDeferredCatchUpRetry(
+        uint256{}, now + 60s, /*idle_catchup=*/true,
+        /*frontier_off_active_chain=*/false).has_value());
+}
+
 BOOST_AUTO_TEST_CASE(off_frontier_catchup_skips_cooled_fossil_for_attested_sibling)
 {
     node::MatMulBlockLifecycle lifecycle{2, 200, 45min, 10min};

@@ -49,6 +49,10 @@ C++ exemption is missing this test fails; do not "fix" that by disabling
 consistency checks.
 """
 
+import os
+import shutil
+import time
+
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     assert_equal,
@@ -140,11 +144,14 @@ def submit_chain_via_rpc(src, dest, stop_hash=None):
         )
 
 
-def submit_attested_chain_via_rpc(src, dest_mirror, stop_hash=None):
-    """Push Profile-1 blocks + their ExactReplay attestations onto a trusted mirror.
+def submit_attested_chain_via_rpc(src, dest_node, stop_hash=None):
+    """Push Profile-1 blocks + their ExactReplay attestations onto a node.
 
     submitblock fails closed without an existing quorum; after the first attempt
     the block is known so attestations can be imported, then submitblock retries.
+    This also makes delivery deterministic when a consensus node has signer
+    policy configured and would otherwise leave one-shot RPC submissions as
+    headers while ExactReplay completes asynchronously.
     """
     blockhash = src.getbestblockhash()
     to_copy = []
@@ -152,7 +159,7 @@ def submit_attested_chain_via_rpc(src, dest_mirror, stop_hash=None):
         if stop_hash is not None and blockhash == stop_hash:
             break
         try:
-            dest_mirror.getblock(blockhash, False)
+            dest_node.getblock(blockhash, False)
             break
         except Exception:
             to_copy.append(blockhash)
@@ -165,13 +172,13 @@ def submit_attested_chain_via_rpc(src, dest_mirror, stop_hash=None):
         atts = src.getmatmulattestations(blockhash)
         assert_greater_than_or_equal(len(atts), 1)
         try:
-            dest_mirror.submitblock(raw)
+            dest_node.submitblock(raw)
         except JSONRPCException as exc:
             if "quorum" not in str(exc):
                 raise
-        imported = dest_mirror.submitmatmulattestations(atts)
+        imported = dest_node.submitmatmulattestations(atts)
         assert imported[0]["quorum"] is True
-        result = dest_mirror.submitblock(raw)
+        result = dest_node.submitblock(raw)
         assert result in (None, "duplicate", "inconclusive"), (
             f"attested submitblock({blockhash}) -> {result}"
         )
@@ -265,6 +272,25 @@ class MatMulTrustedMirrorConvergenceTest(BitcoinTestFramework):
             lambda: mirror.getbestblockhash() == blockhash,
             timeout=timeout,
         )
+
+    def _wait_for_stable_tip(
+        self, node, blockhash, height, *, timeout=300, stable_for=1.0
+    ):
+        """Require the same expected hash and height across a reorg interval."""
+        stable_since = None
+
+        def stable():
+            nonlocal stable_since
+            info = node.getblockchaininfo()
+            if info["bestblockhash"] != blockhash or info["blocks"] != height:
+                stable_since = None
+                return False
+            now = time.monotonic()
+            if stable_since is None:
+                stable_since = now
+            return now - stable_since >= stable_for
+
+        self.wait_until(stable, timeout=timeout)
 
     def run_test(self):
         authority, mirror, loser, relay = self.nodes
@@ -403,9 +429,11 @@ class MatMulTrustedMirrorConvergenceTest(BitcoinTestFramework):
     ):
         """Select an authority branch without letting that peer serve bodies.
 
-        VERSION services are discovery hints only. Establish peer authority by
-        delivering a signer-verified attestation at or above the mirror's active
-        height, then announce its still-new descendants on the same connection.
+        VERSION services are discovery hints only. Establish header-response
+        authority by delivering a signer-verified attestation at or above the
+        mirror's active height, then announce the complete branch on the same
+        connection. Replay the attestations after their headers are indexed so
+        normal exact-branch authority and quorum can be recorded.
         The peer is disconnected after all branch attestations are delivered,
         clearing its direct-fetch requests; later bodies therefore have to come
         from the separately asserted non-archive relay.
@@ -432,8 +460,6 @@ class MatMulTrustedMirrorConvergenceTest(BitcoinTestFramework):
         )
 
         peer = mirror.add_p2p_connection(P2PInterface(), services=ARCHIVE_SERVICES)
-        peer.send_and_ping(msg_headers(headers=headers[: proof_pos + 1]))
-
         proof_atts = authority.getmatmulattestations(hashes[proof_pos])
         assert_greater_than_or_equal(len(proof_atts), 1)
         peer.send_and_ping(
@@ -443,14 +469,10 @@ class MatMulTrustedMirrorConvergenceTest(BitcoinTestFramework):
                 + b"".join(bytes.fromhex(att) for att in proof_atts),
             )
         )
-
-        if proof_pos + 1 < len(headers):
-            peer.send_and_ping(msg_headers(headers=headers[proof_pos + 1 :]))
+        peer.send_and_ping(msg_headers(headers=headers))
 
         remaining_atts = []
-        for i, blockhash in enumerate(hashes):
-            if i == proof_pos:
-                continue
+        for blockhash in hashes:
             atts = authority.getmatmulattestations(blockhash)
             assert_greater_than_or_equal(len(atts), 1)
             remaining_atts.extend(bytes.fromhex(att) for att in atts)
@@ -539,14 +561,31 @@ class MatMulTrustedMirrorConvergenceTest(BitcoinTestFramework):
             authority, mirror, fork_hash, authority_tip
         )
         self.wait_until(
-            lambda: mirror.getblockchaininfo()["headers"] >= authority_height,
+            lambda: mirror.getblockchaininfo()["matmul_signed_frontier"][
+                "height"
+            ]
+            >= authority_height,
             timeout=180,
+        )
+        # Importing the new signed frontier can wake one retained stale
+        # same-parent fossil before its post-failure cooldown is refreshed.
+        # Let that bounded replay settle back to the fully connected losing
+        # tip. The historical bug repeats the fossil indefinitely and fails
+        # this wait; the fixed lifecycle returns to the stranded pre-relay
+        # state without operator action.
+        self._wait_for_stable_tip(
+            mirror, stranded_tip, stranded_height, timeout=60
         )
         info = mirror.getblockchaininfo()
         assert_equal(info["blocks"], stranded_height)
         assert_equal(info["bestblockhash"], stranded_tip)
-        assert_greater_than_or_equal(info["headers"], authority_height)
-        headers_ahead = info["headers"] - info["blocks"]
+        assert_equal(info["matmul_signed_frontier"]["hash"], authority_tip)
+        assert_greater_than_or_equal(
+            info["matmul_signed_frontier"]["height"], authority_height
+        )
+        headers_ahead = (
+            info["matmul_signed_frontier"]["height"] - info["blocks"]
+        )
         if extensions > TRUST_ADJUSTED_WORK_ALLOWANCE:
             assert_greater_than(headers_ahead, TRUST_ADJUSTED_WORK_ALLOWANCE)
 
@@ -556,9 +595,8 @@ class MatMulTrustedMirrorConvergenceTest(BitcoinTestFramework):
         # the followed best-header chain → bodies download → tip moves.
         # Claimed-work download: even when headers_ahead > allowance, tip must
         # advance without invalidateblock / restart.
-        self.wait_until(
-            lambda: mirror.getbestblockhash() == authority_tip,
-            timeout=300,
+        self._wait_for_stable_tip(
+            mirror, authority_tip, authority_height, timeout=300
         )
         assert_equal(mirror.getblockcount(), authority_height)
 
@@ -632,9 +670,10 @@ class MatMulTrustedMirrorConvergenceTest(BitcoinTestFramework):
         assert_equal(loser.getblockcount(), fork_height + PARK_DEPTH)
 
         # Six lower roots after the winning sibling, then twelve higher bodies.
-        # This makes both the winning branch length and the observable
-        # headers-minus-blocks gap exceed ten once the mirror is on the
-        # PARK_DEPTH losing branch.
+        # This makes both the winning branch length and the signed-frontier
+        # minus active-block gap exceed ten once the mirror is on the
+        # PARK_DEPTH losing branch. m_best_header may remain trust-adjusted
+        # below that frontier until the missing roots authenticate.
         self.generate(
             authority,
             MISSING_ROOT_COUNT + HIGHER_BODY_COUNT,
@@ -688,13 +727,20 @@ class MatMulTrustedMirrorConvergenceTest(BitcoinTestFramework):
             authority, mirror, fork_hash, authority_tip
         )
         self.wait_until(
-            lambda: mirror.getblockchaininfo()["headers"] >= authority_height,
+            lambda: mirror.getblockchaininfo()["matmul_signed_frontier"][
+                "height"
+            ]
+            >= authority_height,
             timeout=180,
         )
         info = mirror.getblockchaininfo()
         assert_equal(info["blocks"], stranded_height)
         assert_equal(info["bestblockhash"], stranded_tip)
-        assert_greater_than(info["headers"] - info["blocks"], 10)
+        assert_equal(info["matmul_signed_frontier"]["hash"], authority_tip)
+        assert_equal(info["matmul_signed_frontier"]["on_active_chain"], False)
+        assert_greater_than(
+            info["matmul_signed_frontier"]["height"] - info["blocks"], 10
+        )
 
         # Plant ONLY the higher bodies so LastCommon is tempted past the hole.
         # Headers are already known; submitblock stores HAVE_DATA even when the
@@ -730,8 +776,12 @@ class MatMulTrustedMirrorConvergenceTest(BitcoinTestFramework):
         pre = mirror.getblockchaininfo()
         assert_equal(pre["blocks"], stranded_height)
         assert_equal(pre["bestblockhash"], stranded_tip)
-        assert_greater_than_or_equal(pre["headers"], authority_height)
-        assert_greater_than(pre["headers"] - pre["blocks"], 10)
+        assert_greater_than_or_equal(
+            pre["matmul_signed_frontier"]["height"], authority_height
+        )
+        assert_greater_than(
+            pre["matmul_signed_frontier"]["height"] - pre["blocks"], 10
+        )
         # Re-read every planted block immediately before the network recovery
         # trigger. This is the acceptance proof that the mirror already holds
         # the upper branch data while its active tip remains on the losing fork.
@@ -774,10 +824,46 @@ class MatMulTrustedMirrorConvergenceTest(BitcoinTestFramework):
             f"Build competing branch from height {fork_height} deeper than park_depth={PARK_DEPTH}"
         )
         self.disconnect_nodes(0, 1)
-        # Bring the competing miner onto the authority tip first (consensus path,
-        # no attestations required), then rewind to the fork and mine a deep rewrite.
-        submit_chain_via_rpc(authority, loser)
+        # The helper miner may still be on a fork from the preceding relay
+        # scenario. Rewind that disposable setup branch to its common ancestor
+        # before copying the settled authority chain; asking reorg protection to
+        # cross the old deep fork would test (and correctly trigger) PARK while
+        # merely preparing this test's actual deep-rewrite candidate.
+        while loser.getbestblockhash() != authority.getblockhash(
+            loser.getblockcount()
+        ):
+            loser.invalidateblock(loser.getbestblockhash())
+        shared_hash = loser.getbestblockhash()
+        assert_greater_than_or_equal(fork_height, loser.getblockcount())
+        # Bring the competing miner onto the authority tip first. Its prior
+        # scenarios may already have the canonical headers without bodies, so
+        # import the authority attestations as well as the blocks instead of
+        # waiting for asynchronous ExactReplay merely to prepare the fixture.
+        submit_attested_chain_via_rpc(authority, loser, stop_hash=shared_hash)
         self.wait_until(lambda: loser.getbestblockhash() == tip_hash, timeout=120)
+
+        # The RPC preparation above necessarily imports the authority's signed
+        # frontier into this disposable competing miner. Isolate the finality
+        # fixture from that setup authority before asking the helper to build a
+        # conflicting branch: preserve its block data, but clear only its
+        # durable attestation store. The authority and mirror under test remain
+        # live throughout; their no-restart recovery guarantee was exercised by
+        # the preceding scenarios.
+        self.stop_node(2, expected_stderr=INLINE_SIGNER_WARNING)
+        attest_path = os.path.join(
+            loser.datadir_path, "regtest", "matmul_attestations.dat"
+        )
+        attest_db_path = attest_path + ".db"
+        attest_wal_path = attest_path + ".wal"
+        assert os.path.exists(attest_path), attest_path
+        assert os.path.isdir(attest_db_path), attest_db_path
+        assert os.path.exists(attest_wal_path), attest_wal_path
+        os.remove(attest_path)
+        os.remove(attest_wal_path)
+        shutil.rmtree(attest_db_path)
+        self.start_node(2, extra_args=self.archive_args)
+        assert_equal(loser.getbestblockhash(), tip_hash)
+
         while loser.getblockcount() > fork_height:
             loser.invalidateblock(loser.getbestblockhash())
         assert_equal(loser.getbestblockhash(), fork_hash)
@@ -786,8 +872,11 @@ class MatMulTrustedMirrorConvergenceTest(BitcoinTestFramework):
         assert_greater_than(loser.getblockcount(), tip_height)
         competing_tip = loser.getbestblockhash()
 
-        # Authority is consensus: RPC submit is enough to exercise PARK.
-        submit_chain_via_rpc(loser, authority, stop_hash=fork_hash)
+        # Deliver both bodies and their signer provenance deterministically.
+        # The authority still verifies under its configured consensus mode; the
+        # imported quorum only makes the competing fork actionable enough for
+        # ActivateBestChain to exercise the explicit PARK boundary.
+        submit_attested_chain_via_rpc(loser, authority, stop_hash=fork_hash)
         assert_equal(authority.getbestblockhash(), tip_hash)
         assert_equal(authority.getblockcount(), tip_height)
 

@@ -303,22 +303,35 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
  *
  *  Catch-up suffix of the active tip (LCA depth 0, idx above tip) is
  *  always eligible. Competing forks are short-reorg only (depth 1–6)
- *  unless `idx` sits on the current signed-frontier chain. Fossils off
- *  that chain stay bounded: the previous unbounded `tip_has_quorum ==
- *  false` path let a stale MMATTEST hijack FMWC into a 510-block
- *  rollback (PR 105 field report 2026-08-15). The signed-frontier
- *  exception is the live archive recovery path: trusted mirrors crawled
- *  13–180 unattested HAVE_DATA blocks while the attested suffix was
- *  HEADER_ONLY, and depth 7+ would otherwise refuse the attested chain
- *  forever. */
+ *  unless `idx` sits on the current signed-frontier chain. Once a concrete
+ *  highest signed-frontier hash is known, an older off-frontier quorum
+ *  remains validity provenance but is no longer a fork-choice signal.
+ *  Re-adopting one made duplicate canonical block delivery oscillate back
+ *  to a stale height-33 twin while the frontier advanced through 35–48
+ *  during trusted-mirror convergence.
+ *
+ *  Fossils off the current frontier also stay bounded: the previous
+ *  unbounded `tip_has_quorum == false` path let a stale MMATTEST hijack
+ *  FMWC into a 510-block rollback (PR 105 field report 2026-08-15). The
+ *  signed-frontier exception is the live archive recovery path: trusted
+ *  mirrors crawled 13–180 unattested HAVE_DATA blocks while the attested
+ *  suffix was HEADER_ONLY. That exception remains subject to an explicit
+ *  parked-branch boundary; only an operator may release a deep rewrite once
+ *  local PARK policy has recorded it. */
 [[nodiscard]] inline bool TrustedMirrorMayAdoptCompetingAttestedIndex(
     bool attested_suffix_of_active_tip,
     int lca_depth,
-    bool on_signed_frontier_chain = false)
+    bool on_signed_frontier_chain,
+    bool signed_frontier_hash_known,
+    bool on_parked_reorg_branch = false)
 {
-    return attested_suffix_of_active_tip ||
-           TrustedMirrorIsShortTipReorg(lca_depth) ||
-           on_signed_frontier_chain;
+    // PARK is an explicit operator finality boundary. A current signer quorum
+    // authenticates ExactReplay validity, but must not silently unpark a deep
+    // rewrite and turn validity provenance into an override of local policy.
+    if (on_parked_reorg_branch) return false;
+    if (on_signed_frontier_chain) return true;
+    if (signed_frontier_hash_known) return false;
+    return attested_suffix_of_active_tip || TrustedMirrorIsShortTipReorg(lca_depth);
 }
 
 /** Quorum tip vs signed frontier that has pulled ahead on a competing fork.
@@ -1365,7 +1378,10 @@ static constexpr auto ARCHIVE_BLOCK_SERVE_WAIT_IDLE{std::chrono::milliseconds{50
  *  GETDATA on the signer draining BLOCK under cs_main (live 46s/block
  *  after bd3f6b5f). Handshake and ARCHIVE/MIRROR still run. An idle signer
  *  must resume its bounded Other visits so verifier PING/GETHEADERS are not
- *  starved; the separate ingest filter still rejects their block data. */
+ *  starved; the separate ingest filter still rejects their block data.
+ *  A trusted mirror must continue reading an operator-selected manual peer:
+ *  its ingest filter already treats that peer as an explicit catch-up body
+ *  source, and skipping it here strands followed-chain recovery forever. */
 [[nodiscard]] inline bool SkipMinerProcessMessagesDuringArchiveGetData(
     bool local_signer,
     bool archive_getdata_pending,
@@ -1376,11 +1392,11 @@ static constexpr auto ARCHIVE_BLOCK_SERVE_WAIT_IDLE{std::chrono::milliseconds{50
     bool this_is_archive_serve_target)
 {
     (void)this_peer_inbound;
-    (void)this_peer_manual;
     const bool skip_now{
         (local_signer && archive_getdata_pending) || trusted_mirror_catch_up};
     if (!skip_now) return false;
     if (this_is_archive_serve_target) return false;
+    if (trusted_mirror_catch_up && this_peer_manual) return false;
     if (!this_peer_handshake_complete) return false;
     return true;
 }
@@ -1506,6 +1522,22 @@ static constexpr auto GPU_RETAIN_ATTESTATION_RETRY{std::chrono::seconds{2}};
     if (this_gpu) return true;
     if (!this_inbound && this_archive_or_mirror) return true;
     return false;
+}
+
+/** A valid configured-signer attestation can arrive before its header. In
+ *  that case the node asks the same peer for headers, so the inbound filter
+ *  must admit that signed, time-bounded HEADERS response. It never authorizes
+ *  BLOCK, INV, CMPCTBLOCK, or BLOCKTXN ingest. */
+[[nodiscard]] inline bool TrustedMirrorMayAcceptPeerBlockMessage(
+    bool this_gpu,
+    bool this_inbound,
+    bool this_archive_or_mirror,
+    bool signed_header_response,
+    bool is_headers)
+{
+    return TrustedMirrorMayAcceptPeerBlockBody(
+               this_gpu, this_inbound, this_archive_or_mirror) ||
+           (signed_header_response && is_headers);
 }
 
 /** Non-GPU peers may GETDATA from a trusted mirror only once it is no

@@ -63,6 +63,10 @@ public:
         bool is_ibd{false};
         int32_t reference_height{std::numeric_limits<int32_t>::max()};
         uint32_t work_units{0};
+        /** Initial budget deferrals may keep an idle verifier occupied before
+         *  their window expires. Once an attempted replay makes no progress,
+         *  its refreshed cooldown is causal backoff and must not be bypassed. */
+        bool idle_retry_allowed{true};
     };
 
     struct Token {
@@ -224,7 +228,8 @@ public:
         for (auto it = m_entries.begin(); it != m_entries.end(); ++it) {
             const Entry& entry{it->second};
             if (!entry.body || IsActive(entry.state) ||
-                (!ignore_retry_delay && now < entry.body->retry_not_before)) {
+                ((!ignore_retry_delay || !entry.body->idle_retry_allowed) &&
+                 now < entry.body->retry_not_before)) {
                 continue;
             }
             if (entry.body->block->hashPrevBlock == preferred_parent) {
@@ -263,12 +268,14 @@ public:
     }
 
     bool RefreshRetry(const uint256& hash, Clock::duration delay,
-                      Clock::time_point now = Clock::now())
+                      Clock::time_point now = Clock::now(),
+                      bool idle_retry_allowed = true)
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         const auto it{m_entries.find(hash)};
         if (it == m_entries.end() || !it->second.body) return false;
         it->second.body->retry_not_before = now + delay;
+        it->second.body->idle_retry_allowed = idle_retry_allowed;
         return true;
     }
 

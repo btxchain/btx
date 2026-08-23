@@ -9293,8 +9293,7 @@ static constexpr const char* RETRYABLE_MATMUL_ACTIVATION_PREFIX =
         pindex->GetBlockHash(), pindex->nHeight)};
     return node::matmul_trusted::MustDeferConflictingAttestedHeight(
         /*configured=*/true, has_quorum,
-        node::matmul_trusted::HasCompetingQuorum(
-            pindex->GetBlockHash(), pindex->nHeight),
+        chainman.HasUsableCompetingTrustedMatMulAuthority(pindex),
         chainman.IndexIsCoveredBySignedFrontier(pindex));
 }
 
@@ -9549,8 +9548,12 @@ static bool TrustedMirrorShouldConsiderMostWorkCandidate(
     // Catch-up on the same chain must not be treated as a competing fork:
     // that refused the HEADER_ONLY tip-child and spun FMWC (live miners
     // 2026-08-16, 274-block 190333 tower).
+    // A height-only frontier cannot prove a competing branch. This occurs
+    // after an operator invalidates the highest signed block: its durable
+    // attestation may remain as validity history, but the failed index must
+    // not pin fork choice or block a fresh tip child.
     const bool signed_frontier_on_competing_fork{
-        frontier.available && !chainman.IndexLeadsToSignedFrontier(tip)};
+        frontier.hash_known && !chainman.IndexLeadsToSignedFrontier(tip)};
     return node::matmul_trusted::TrustedMirrorMaySelectMostWorkCandidate(
         extends_tip,
         node::matmul_trusted::TrustedMirrorIsShortTipReorg(lca_depth),
@@ -9558,8 +9561,7 @@ static bool TrustedMirrorShouldConsiderMostWorkCandidate(
         chainman.IndexHasTrustedMatMulAuthority(tip),
         immediate_tip_child,
         would_abandon_attested,
-        node::matmul_trusted::HasCompetingQuorum(
-            candidate->GetBlockHash(), candidate->nHeight),
+        chainman.HasUsableCompetingTrustedMatMulAuthority(candidate),
         signed_frontier_on_competing_fork);
 }
 
@@ -9685,8 +9687,8 @@ CBlockIndex* Chainstate::FindMostWorkChain()
                 /*configured_profile1=*/true,
                 /*candidate_extends_tip=*/true,
                 m_chainman.IndexHasTrustedMatMulAuthority(tip_child),
-                node::matmul_trusted::HasCompetingQuorum(
-                    tip_child->GetBlockHash(), tip_child->nHeight))) {
+                m_chainman.HasUsableCompetingTrustedMatMulAuthority(
+                    tip_child))) {
             restore_hysteresis_deferred_candidates();
             setBlockIndexCandidates.insert(tip_child);
             return tip_child;
@@ -9857,8 +9859,8 @@ CBlockIndex* Chainstate::FindMostWorkChain()
                 !node::matmul_trusted::IsTrustedMirror() &&
                 (m_chainman.IndexIsAttestedChainTipChild(tip, pindexNew) ||
                  m_chainman.IndexIsFollowedTipChild(tip, pindexNew)) &&
-                !node::matmul_trusted::HasCompetingQuorum(
-                    pindexNew->GetBlockHash(), pindexNew->nHeight)};
+                !m_chainman.HasUsableCompetingTrustedMatMulAuthority(
+                    pindexNew)};
             if (extends_tip && !has_quorum && !consensus_followed_tip_child) {
                 auto consider_attested_tip_child = [&](const CBlockIndex* alt) {
                     if (alt == nullptr) return false;
@@ -10193,9 +10195,18 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
         const bool warn =
             warn_depth != kernel::REORG_PROTECTION_DEPTH_DISABLED &&
             reorg_depth > static_cast<int>(warn_depth);
+        // The durable automatic recovery coordinator is deliberately bounded
+        // to park_depth. A bare attested-abandon candidate may identify the
+        // current signed frontier at any depth; it may bypass shallow
+        // hysteresis, but never an explicit deep-reorg PARK boundary.
+        const bool automatic_recovery_escape{
+            m_chainman.IsAutomaticReorgRecoveryCandidate(pindexMostWork)};
+        const bool attested_shallow_escape{
+            m_chainman.IsAttestedAbandonForkCandidate(pindexMostWork) &&
+            (park_depth == kernel::REORG_PROTECTION_DEPTH_DISABLED ||
+             reorg_depth <= static_cast<int>(park_depth))};
         const bool recovery_escape{
-            m_chainman.IsAutomaticReorgRecoveryCandidate(pindexMostWork) ||
-            m_chainman.IsAttestedAbandonForkCandidate(pindexMostWork)};
+            automatic_recovery_escape || attested_shallow_escape};
         const bool park =
             cm_opts.deep_reorg_action == kernel::DeepReorgAction::PARK &&
             park_depth != kernel::REORG_PROTECTION_DEPTH_DISABLED &&
@@ -11339,8 +11350,12 @@ ChainstateManager::SignedFrontierStatus ChainstateManager::GetSignedFrontierStat
         if (hint.height != out.height || hint.hash.IsNull()) continue;
         const CBlockIndex* const frontier_index{
             m_blockman.LookupBlockIndex(hint.hash)};
+        if (frontier_index == nullptr ||
+            (frontier_index->nStatus & BLOCK_FAILED_MASK) != 0) {
+            continue;
+        }
         const bool on_chain{
-            tip != nullptr && frontier_index != nullptr &&
+            tip != nullptr &&
             tip->nHeight >= frontier_index->nHeight &&
             tip->GetAncestor(frontier_index->nHeight) == frontier_index};
         if (on_chain) {
@@ -11492,6 +11507,7 @@ const CBlockIndex* ChainstateManager::FindUniqueCompetingAttestedIndex() const
     // every frontier hint at a height (not last-writer) so a later
     // loser MMATTEST cannot hide the winner.
     const bool tip_has_quorum{IndexHasTrustedMatMulAuthority(tip)};
+    const SignedFrontierStatus signed_frontier{GetSignedFrontierStatus()};
 
     std::vector<const CBlockIndex*> competing;
     auto consider = [&](const CBlockIndex* idx) {
@@ -11553,7 +11569,9 @@ const CBlockIndex* ChainstateManager::FindUniqueCompetingAttestedIndex() const
             // archives sat 13–180 blocks off it on an unattested HAVE_DATA
             // tower (2026-08-16) and must rejoin.
             if (!node::matmul_trusted::TrustedMirrorMayAdoptCompetingAttestedIndex(
-                    attested_suffix, lca_depth, on_signed_frontier_chain)) {
+                    attested_suffix, lca_depth, on_signed_frontier_chain,
+                    signed_frontier.hash_known,
+                    IsOnParkedReorgBranch(idx))) {
                 return;
             }
         }
@@ -11831,8 +11849,7 @@ bool ChainstateManager::IndexIsAttestedChainTipChild(
     if (tip == nullptr || index == nullptr || index->pprev != tip) return false;
     if ((index->nStatus & BLOCK_FAILED_MASK) != 0) return false;
     if (node::matmul_trusted::IsConfigured() &&
-        node::matmul_trusted::HasCompetingQuorum(
-            index->GetBlockHash(), index->nHeight)) {
+        HasUsableCompetingTrustedMatMulAuthority(index)) {
         return false;
     }
     if (node::matmul_trusted::HasQuorumInMemory(
@@ -11871,7 +11888,10 @@ bool ChainstateManager::IndexIsOnSignedFrontierChain(const CBlockIndex* index) c
         }
         const CBlockIndex* const frontier{
             m_blockman.LookupBlockIndex(hint.hash)};
-        if (frontier == nullptr) continue;
+        if (frontier == nullptr ||
+            (frontier->nStatus & BLOCK_FAILED_MASK) != 0) {
+            continue;
+        }
         const bool contained{
             tip != nullptr && tip->nHeight >= frontier->nHeight &&
             tip->GetAncestor(frontier->nHeight) == frontier};
@@ -11906,7 +11926,10 @@ bool ChainstateManager::IndexIsCoveredBySignedFrontier(const CBlockIndex* index)
         }
         const CBlockIndex* const frontier{
             m_blockman.LookupBlockIndex(hint.hash)};
-        if (frontier == nullptr) continue;
+        if (frontier == nullptr ||
+            (frontier->nStatus & BLOCK_FAILED_MASK) != 0) {
+            continue;
+        }
         if (node::matmul_trusted::TrustedMirrorFrontierCoversBlock(
                 /*frontier_available=*/true, index->nHeight, frontier->nHeight,
                 frontier->GetAncestor(index->nHeight) == index)) {
@@ -11929,6 +11952,34 @@ bool ChainstateManager::IndexHasTrustedMatMulAuthority(const CBlockIndex* index)
     return IndexIsCoveredBySignedFrontier(index);
 }
 
+bool ChainstateManager::HasUsableCompetingTrustedMatMulAuthority(
+    const CBlockIndex* index) const
+{
+    AssertLockHeld(::cs_main);
+    if (index == nullptr || index->nHeight < 0 ||
+        index->GetBlockHash().IsNull()) {
+        return false;
+    }
+    for (const auto& hint : node::matmul_trusted::AttestedFrontierHints()) {
+        if (hint.height != index->nHeight || hint.hash.IsNull() ||
+            hint.hash == index->GetBlockHash() ||
+            !node::matmul_trusted::HasQuorumInMemory(
+                hint.hash, hint.height)) {
+            continue;
+        }
+        const CBlockIndex* const competing{
+            m_blockman.LookupBlockIndex(hint.hash)};
+        // A configured-signer proof for an unknown header is conservatively
+        // competing. Once the operator has explicitly invalidated a known
+        // index, however, its retained provenance cannot veto a replacement.
+        if (competing == nullptr ||
+            (competing->nStatus & BLOCK_FAILED_MASK) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool ChainstateManager::IndexLeadsToSignedFrontier(const CBlockIndex* index) const
 {
     AssertLockHeld(::cs_main);
@@ -11945,7 +11996,10 @@ bool ChainstateManager::IndexLeadsToSignedFrontier(const CBlockIndex* index) con
         }
         const CBlockIndex* const frontier{
             m_blockman.LookupBlockIndex(hint.hash)};
-        if (frontier == nullptr) continue;
+        if (frontier == nullptr ||
+            (frontier->nStatus & BLOCK_FAILED_MASK) != 0) {
+            continue;
+        }
         if (index->nHeight <= frontier->nHeight) {
             if (frontier->GetAncestor(index->nHeight) == index) return true;
         } else if (index->GetAncestor(frontier->nHeight) == frontier) {

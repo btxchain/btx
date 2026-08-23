@@ -384,6 +384,7 @@ RPCHelpMan submitmatmulattestations()
                     "attestations must contain 1..16 items");
             }
             UniValue out{UniValue::VARR};
+            bool activate_best_chain{false};
             for (const auto& value : values.getValues()) {
                 matmul::trusted::ExactReplayAttestation
                     attestation;
@@ -416,11 +417,54 @@ RPCHelpMan submitmatmulattestations()
                     "result",
                     matmul::trusted::AddResultName(
                         add_result));
-                item.pushKV(
-                    "quorum",
+                const bool has_quorum{
                     node::matmul_trusted::HasQuorum(
-                        hash, known->height));
+                        hash, known->height)};
+                item.pushKV("quorum", has_quorum);
                 out.push_back(std::move(item));
+                if (has_quorum) {
+                    LOCK(cs_main);
+                    CBlockIndex* const index{
+                        chainman.m_blockman.LookupBlockIndex(hash)};
+                    if (index == nullptr ||
+                        (index->nStatus & BLOCK_FAILED_MASK)) {
+                        continue;
+                    }
+                    // Match the P2P MMATTEST quorum transition. A block body
+                    // may already have been persisted while the previous
+                    // frontier made TryAddBlockIndexCandidate reject it. The
+                    // quorum changes that fork-choice result; reinsert the
+                    // now-actionable candidate before a duplicate submitblock
+                    // reaches CheckBlockIndex.
+                    if (!chainman.MaybeTrackReorgRecovery(index)) {
+                        throw JSONRPCError(
+                            RPC_DATABASE_ERROR,
+                            strprintf(
+                                "Unable to persist reorg recovery after "
+                                "attestation quorum for %s",
+                                hash.ToString()));
+                    }
+                    if ((index->nStatus & BLOCK_HAVE_DATA) != 0 &&
+                        index->IsValid(BLOCK_VALID_TRANSACTIONS) &&
+                        index->HaveNumChainTxs() &&
+                        !chainman.ActiveChain().Contains(index)) {
+                        chainman.ActiveChainstate()
+                            .TryAddBlockIndexCandidate(index);
+                        activate_best_chain = true;
+                    }
+                    chainman.NotifySignedFrontierStatus();
+                }
+            }
+            if (activate_best_chain) {
+                BlockValidationState state;
+                if (!chainman.ActiveChainstate().ActivateBestChain(
+                        state, nullptr)) {
+                    throw JSONRPCError(
+                        RPC_VERIFY_ERROR,
+                        strprintf(
+                            "Unable to activate attested candidate: %s",
+                            state.ToString()));
+                }
             }
             return out;
         }};
