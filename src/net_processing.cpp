@@ -3992,6 +3992,14 @@ static bool TrustedMirrorMayDownloadIndex(
     const bool competing_headers_pulled_ahead{
         pulled_ahead(competing_best) || pulled_ahead(chainman.m_best_header) ||
         pulled_ahead(chainman.m_best_claimed_header)};
+    const bool height_occupied{
+        (active_at_h != nullptr && active_at_h != index &&
+         node::matmul_trusted::HasQuorumInMemory(active_at_h->GetBlockHash(),
+                                                 active_at_h->nHeight)) ||
+        node::matmul_trusted::HasCompetingQuorum(index->GetBlockHash(),
+                                                 index->nHeight) ||
+        node::matmul_trusted::HasLocalSignatureAtHeight(index->GetBlockHash(),
+                                                        index->nHeight)};
     return node::matmul_trusted::HeaderOnlyMustFetchLostTwinPath(
         node::matmul_trusted::HasLocalSigner(),
         node::matmul_trusted::IsTrustedMirror(),
@@ -3999,7 +4007,7 @@ static bool TrustedMirrorMayDownloadIndex(
         (index->nStatus & BLOCK_FAILED_MASK) != 0, index->nHeight,
         tip->nHeight, same_parent, lca_depth,
         index->nChainWork >= tip->nChainWork, parent_has_data_or_is_lca,
-        competing_headers_pulled_ahead);
+        competing_headers_pulled_ahead, height_occupied);
 }
 
 [[nodiscard]] static bool IsHeaderOnlyFetchSuppressed(
@@ -9014,6 +9022,27 @@ void PeerManagerImpl::MaybeSeedLocalSignerLostTwinBestKnown(
         claimed->GetAncestor(tip->nHeight) != tip &&
         TrustedMirrorShortTipReorg(tip, claimed) &&
         claimed->nChainWork >= tip->nChainWork};
+    bool fork_child_occupied{false};
+    if (claimed_competing) {
+        const CBlockIndex* const lca{LastCommonAncestor(tip, claimed)};
+        if (lca != nullptr) {
+            const CBlockIndex* const child{
+                claimed->GetAncestor(lca->nHeight + 1)};
+            if (child != nullptr) {
+                const CBlockIndex* const active_at{
+                    tip->GetAncestor(child->nHeight)};
+                fork_child_occupied =
+                    (active_at != nullptr && active_at != child &&
+                     node::matmul_trusted::HasQuorumInMemory(
+                         active_at->GetBlockHash(),
+                         active_at->nHeight)) ||
+                    node::matmul_trusted::HasCompetingQuorum(
+                        child->GetBlockHash(), child->nHeight) ||
+                    node::matmul_trusted::HasLocalSignatureAtHeight(
+                        child->GetBlockHash(), child->nHeight);
+            }
+        }
+    }
     if (!node::matmul_trusted::SeedLocalSignerLostTwinBestKnown(
             node::matmul_trusted::HasLocalSigner(),
             node::matmul_trusted::IsTrustedMirror(),
@@ -9022,7 +9051,8 @@ void PeerManagerImpl::MaybeSeedLocalSignerLostTwinBestKnown(
             tip != nullptr ? tip->nHeight : 0,
             claimed != nullptr ? claimed->nHeight : -1,
             claimed_competing,
-            claimed_competing)) {
+            claimed_competing,
+            fork_child_occupied)) {
         return;
     }
     state.pindexBestKnownBlock = claimed;
@@ -9099,7 +9129,21 @@ void PeerManagerImpl::MaybeRequestTrustedMirrorAuthorityHeaders(
         current_time - last < TRUSTED_MIRROR_AUTHORITY_HEADERS_INTERVAL) {
         return;
     }
-    const CBlockIndex* start{tip->pprev ? tip->pprev : tip};
+    const CBlockIndex* start{tip};
+    const CBlockIndex* best{m_chainman.m_best_header};
+    if (node::matmul_trusted::TrustedMirrorAuthorityHeadersFollowBest(
+            tip_height, best != nullptr ? best->nHeight : -1,
+            best != nullptr && best->nHeight >= tip_height &&
+                best->GetAncestor(tip_height) == tip)) {
+        start = best;
+    } else if (const CBlockIndex* claimed{m_chainman.m_best_claimed_header};
+               node::matmul_trusted::TrustedMirrorAuthorityHeadersFollowBest(
+                   tip_height, claimed != nullptr ? claimed->nHeight : -1,
+                   claimed != nullptr && claimed->nHeight >= tip_height &&
+                       claimed->GetAncestor(tip_height) == tip)) {
+        start = claimed;
+    }
+    if (start != nullptr && start->pprev) start = start->pprev;
     if (!MaybeSendGetHeaders(pto, GetLocator(start), peer)) {
         return;
     }

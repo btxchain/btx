@@ -481,6 +481,16 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
  *  also pins m_best_header to the attested tip, so pulled-ahead must come
  *  from peer BestKnown *or* the claimed-work (unadjusted) header.
  *
+ *  Depth-2 cousin (PR 117 review): after the unsigned fork-child at H-1
+ *  has a body, the equal-height HEADER_ONLY twin at H is not same-parent
+ *  (its parent is the fork-child). Fetch it once competing headers have
+ *  pulled ahead, or descendants stay stuck on parent_has_data_or_is_lca.
+ *
+ *  Never fetch (or ExactReplay) a twin whose height already has quorum on
+ *  a different hash. SignAuthoritative is HeightOccupied; overlay will not
+ *  reorg the attested tip. Live 2026-08-24: GETDATA looped on 8b5da5a5 at
+ *  199295 (select=root_in_flight) while both GPUs needed to mine 199298.
+ *
  *  A lone EncDr competing sibling with no descendant headers stays off
  *  the device. This is fetch + ExactReplay, not ConnectTip: equal-work
  *  does not reorg; more-work HAVE_DATA on the twin fork does. */
@@ -497,10 +507,12 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
     int lca_depth,
     bool better_or_equal_work,
     bool parent_has_data_or_is_lca,
-    bool competing_headers_pulled_ahead)
+    bool competing_headers_pulled_ahead,
+    bool competing_quorum_at_index = false)
 {
     if (!has_local_signer || is_trusted_mirror) return false;
     if (!has_tip || !has_index || index_is_tip || index_failed) return false;
+    if (competing_quorum_at_index) return false;
     // Twin of the tip or of an ancestor. Do not require work >= current
     // tip: an ancestor twin has less chainwork once the attested chain
     // has moved. The pulled-ahead competing fork supplies more work.
@@ -514,6 +526,17 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
                parent_has_data_or_is_lca;
     }
     if (index_height < tip_height) {
+        return competing_headers_pulled_ahead &&
+               TrustedMirrorIsShortTipReorg(lca_depth) &&
+               parent_has_data_or_is_lca;
+    }
+    // Equal-height cousin (fork at H-2): same_parent is false because the
+    // twin's parent is the unsigned fork-child, not the attested parent.
+    // After that fork-child has a body (or is the LCA), fetch this block so
+    // pulled-ahead descendants are not stuck on parent_has_data_or_is_lca.
+    // Live shape asked on PR 117: tip H, equal-work twin at H, LCA H-2.
+    if (index_height == tip_height) {
+        if (!better_or_equal_work) return false;
         return competing_headers_pulled_ahead &&
                TrustedMirrorIsShortTipReorg(lca_depth) &&
                parent_has_data_or_is_lca;
@@ -534,12 +557,14 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
     int tip_height,
     int claimed_height,
     bool claimed_is_short_reorg_competing_fork,
-    bool claimed_work_ge_tip)
+    bool claimed_work_ge_tip,
+    bool fork_child_height_occupied = false)
 {
     if (!has_local_signer || is_trusted_mirror) return false;
     if (!best_known_unset) return false;
     if (starting_height <= tip_height) return false;
     if (claimed_height <= tip_height) return false;
+    if (fork_child_height_occupied) return false;
     return claimed_is_short_reorg_competing_fork && claimed_work_ge_tip;
 }
 
@@ -1527,6 +1552,18 @@ static constexpr auto GPU_RETAIN_ATTESTATION_RETRY{std::chrono::seconds{2}};
 {
     if (tip_height < target_height) return true;
     return gpu_authority && tip_height >= 0;
+}
+
+/** Continue getheaders from the HEADER_ONLY tip-chain frontier, not the
+ *  connected tip. Locator-from-tip replays the first 2000 headers forever
+ *  while IBD cannot ConnectTip (fresh trusted-mirror 2026-08-24: one
+ *  headers batch, then 38+ min quiet, synced_headers=-1). */
+[[nodiscard]] inline bool TrustedMirrorAuthorityHeadersFollowBest(
+    int32_t tip_height,
+    int32_t best_height,
+    bool best_extends_tip)
+{
+    return best_extends_tip && best_height > tip_height;
 }
 
 /** Archives connected to a GPU attestor (1-of-1 or M-of-N): only those

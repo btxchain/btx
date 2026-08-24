@@ -740,6 +740,11 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         /*same_parent=*/true, /*lca_depth=*/1, /*better_or_equal_work=*/true,
         /*parent_has_data_or_is_lca=*/true,
         /*competing_headers_pulled_ahead=*/true));
+    // Live HeightOccupied: a different hash at 199295 already has quorum.
+    // Fetching 8b5da5a5 cannot be signed and wedges GETDATA as root_in_flight.
+    BOOST_CHECK(!HeaderOnlyMustFetchLostTwinPath(
+        true, false, true, true, false, false, 199295, 199295, true, 1, true,
+        true, true, /*competing_quorum_at_index=*/true));
     BOOST_CHECK(!HeaderOnlyMustFetchLostTwinPath(
         true, false, true, true, false, false, 199295, 199295, true, 1, true,
         true, /*competing_headers_pulled_ahead=*/false));
@@ -751,7 +756,7 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         199295, true, 1, true, true, true));
     BOOST_CHECK(!HeaderOnlyMustFetchLostTwinPath(
         true, false, true, true, false, false, 199295, 199295,
-        /*same_parent=*/false, 1, true, true, true));
+        /*same_parent=*/false, /*lca_depth=*/7, true, true, true));
     BOOST_CHECK(!HeaderOnlyMustFetchLostTwinPath(
         true, false, true, true, false, false, 199295, 199295, true, 1,
         /*better_or_equal_work=*/false, true, true));
@@ -774,6 +779,9 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         /*claimed_is_short_reorg_competing_fork=*/true,
         /*claimed_work_ge_tip=*/true));
     BOOST_CHECK(!SeedLocalSignerLostTwinBestKnown(
+        true, false, true, 199309, 199297, 199309, true, true,
+        /*fork_child_height_occupied=*/true));
+    BOOST_CHECK(!SeedLocalSignerLostTwinBestKnown(
         true, false, /*best_known_unset=*/false, 199309, 199297, 199309, true,
         true));
     BOOST_CHECK(!SeedLocalSignerLostTwinBestKnown(
@@ -794,6 +802,9 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         /*competing_headers_pulled_ahead=*/true));
     BOOST_CHECK(!HeaderOnlyMustFetchLostTwinPath(
         true, false, true, true, false, false, 199295, 199297, true, 3, false,
+        true, true, /*competing_quorum_at_index=*/true));
+    BOOST_CHECK(!HeaderOnlyMustFetchLostTwinPath(
+        true, false, true, true, false, false, 199295, 199297, true, 3, false,
         true, /*competing_headers_pulled_ahead=*/false));
     // Intermediate competing 199296 after the twin body exists.
     BOOST_CHECK(HeaderOnlyMustFetchLostTwinPath(
@@ -804,6 +815,24 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(!HeaderOnlyMustFetchLostTwinPath(
         true, false, true, true, false, false, 199296, 199297, false, 3, false,
         /*parent_has_data_or_is_lca=*/false, true));
+    // PR 117 review: depth-2 cousin. Tip H, equal-work twin at H, LCA H-2.
+    // The twin is not same-parent; fetch it once the fork-child has a body.
+    BOOST_CHECK(HeaderOnlyMustFetchLostTwinPath(
+        true, false, true, true, false, false, /*index_height=*/199297,
+        /*tip_height=*/199297, /*same_parent=*/false, /*lca_depth=*/2,
+        /*better_or_equal_work=*/true, /*parent_has_data_or_is_lca=*/true,
+        /*competing_headers_pulled_ahead=*/true));
+    BOOST_CHECK(!HeaderOnlyMustFetchLostTwinPath(
+        true, false, true, true, false, false, 199297, 199297, false, 2, true,
+        /*parent_has_data_or_is_lca=*/false, true));
+    BOOST_CHECK(!HeaderOnlyMustFetchLostTwinPath(
+        true, false, true, true, false, false, 199297, 199297, false, 2, true,
+        true, /*competing_headers_pulled_ahead=*/false));
+    // Fork-child at H-1 is still the same-parent ancestor twin of attested H-1.
+    BOOST_CHECK(HeaderOnlyMustFetchLostTwinPath(
+        true, false, true, true, false, false, /*index_height=*/199296,
+        /*tip_height=*/199297, /*same_parent=*/true, /*lca_depth=*/2,
+        /*better_or_equal_work=*/false, true, true));
     using node::matmul_trusted::TrustedMirrorMaySelectMostWorkCandidate;
     BOOST_CHECK(TrustedMirrorMaySelectMostWorkCandidate(
         /*extends_active_tip_chain=*/true, /*short_tip_reorg=*/false,
@@ -1403,6 +1432,12 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(TrustedMirrorShouldRequestAuthorityHeaders(
         /*gpu_authority=*/true, 191713, 191713));
     BOOST_CHECK(TrustedMirrorShouldRequestAuthorityHeaders(true, 191713, 191690));
+    using node::matmul_trusted::TrustedMirrorAuthorityHeadersFollowBest;
+    BOOST_CHECK(TrustedMirrorAuthorityHeadersFollowBest(
+        /*tip_height=*/0, /*best_height=*/2076, /*best_extends_tip=*/true));
+    BOOST_CHECK(!TrustedMirrorAuthorityHeadersFollowBest(0, 0, true));
+    BOOST_CHECK(!TrustedMirrorAuthorityHeadersFollowBest(
+        199297, 199309, /*best_extends_tip=*/false));
     using node::matmul_trusted::TrustedMirrorMayAcceptPeerBlockBody;
     BOOST_CHECK(TrustedMirrorMayAcceptPeerBlockBody(
         /*this_gpu=*/true, /*this_inbound=*/true, /*this_archive_or_mirror=*/false));
