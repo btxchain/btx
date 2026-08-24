@@ -728,6 +728,44 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(!TrustedMirrorIndexIsCatchUpSuffix(true, true, 101, 100, true));
     BOOST_CHECK(TrustedMirrorIndexIsCatchUpSuffix(true, true, 102, 100, true));
     BOOST_CHECK(!TrustedMirrorIndexIsCatchUpSuffix(true, true, 102, 100, false));
+    using node::matmul_trusted::HeaderOnlyMustFetchLostTwinPath;
+    // Live 2026-08-24: attested 199295, HEADER_ONLY twin 8b5da5a5, miners
+    // extended to 199300. Local signer must fetch the twin. Trusted
+    // mirrors keep skip. Lone EncDr sibling (no pulled-ahead headers) stays
+    // off the device.
+    BOOST_CHECK(HeaderOnlyMustFetchLostTwinPath(
+        /*has_local_signer=*/true, /*is_trusted_mirror=*/false,
+        /*has_tip=*/true, /*has_index=*/true, /*index_is_tip=*/false,
+        /*index_failed=*/false, /*index_height=*/199295, /*tip_height=*/199295,
+        /*same_parent=*/true, /*lca_depth=*/1, /*better_or_equal_work=*/true,
+        /*parent_has_data_or_is_lca=*/true,
+        /*competing_headers_pulled_ahead=*/true));
+    BOOST_CHECK(!HeaderOnlyMustFetchLostTwinPath(
+        true, false, true, true, false, false, 199295, 199295, true, 1, true,
+        true, /*competing_headers_pulled_ahead=*/false));
+    BOOST_CHECK(!HeaderOnlyMustFetchLostTwinPath(
+        /*has_local_signer=*/false, false, true, true, false, false, 199295,
+        199295, true, 1, true, true, true));
+    BOOST_CHECK(!HeaderOnlyMustFetchLostTwinPath(
+        true, /*is_trusted_mirror=*/true, true, true, false, false, 199295,
+        199295, true, 1, true, true, true));
+    BOOST_CHECK(!HeaderOnlyMustFetchLostTwinPath(
+        true, false, true, true, false, false, 199295, 199295,
+        /*same_parent=*/false, 1, true, true, true));
+    BOOST_CHECK(!HeaderOnlyMustFetchLostTwinPath(
+        true, false, true, true, false, false, 199295, 199295, true, 1,
+        /*better_or_equal_work=*/false, true, true));
+    // Better-work child of the twin after the twin body exists (199296).
+    BOOST_CHECK(HeaderOnlyMustFetchLostTwinPath(
+        true, false, true, true, false, false, /*index_height=*/199296,
+        /*tip_height=*/199295, /*same_parent=*/false, /*lca_depth=*/1, true,
+        /*parent_has_data_or_is_lca=*/true, false));
+    BOOST_CHECK(!HeaderOnlyMustFetchLostTwinPath(
+        true, false, true, true, false, false, 199296, 199295, false, 1, true,
+        /*parent_has_data_or_is_lca=*/false, false));
+    BOOST_CHECK(!HeaderOnlyMustFetchLostTwinPath(
+        true, false, true, true, false, false, 199296, 199295, false,
+        /*lca_depth=*/7, true, true, false));
     using node::matmul_trusted::TrustedMirrorMaySelectMostWorkCandidate;
     BOOST_CHECK(TrustedMirrorMaySelectMostWorkCandidate(
         /*extends_active_tip_chain=*/true, /*short_tip_reorg=*/false,

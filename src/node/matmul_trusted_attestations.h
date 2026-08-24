@@ -459,6 +459,47 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
            index_height > tip_height + 1;
 }
 
+/** Live 2026-08-24 HEADER_ONLY stall: attested tip at H (199295 33c834f8),
+ *  equal-work HEADER_ONLY twin at H (8b5da5a5, same parent), miners
+ *  extended the twin to H+N (headers-only 199300+, branchlen 6+),
+ *  select=root_header_only_skip in_flight=0. GETMMATTEST on the twin is
+ *  not_canonical (chicken-egg). ExactReplay required pprev==tip and
+ *  ConsensusMaySpendExactReplayGpuForShortReorgForkChild refuses when the
+ *  tip already has quorum, so the body was never fetched or replayed.
+ *
+ *  Local signer only (trusted mirrors keep skip until the attestor signs):
+ *  fetch the same-height same-parent twin once a peer's BestKnown has
+ *  already pulled ahead on that fork, then each better-work descendant
+ *  whose parent already has a body, while LCA depth is a short reorg
+ *  (1–6). A lone EncDr competing sibling with no descendant headers stays
+ *  off the device. This is fetch + ExactReplay, not ConnectTip: equal-work
+ *  does not reorg; more-work HAVE_DATA on the twin fork does. */
+[[nodiscard]] inline bool HeaderOnlyMustFetchLostTwinPath(
+    bool has_local_signer,
+    bool is_trusted_mirror,
+    bool has_tip,
+    bool has_index,
+    bool index_is_tip,
+    bool index_failed,
+    int32_t index_height,
+    int32_t tip_height,
+    bool same_parent,
+    int lca_depth,
+    bool better_or_equal_work,
+    bool parent_has_data_or_is_lca,
+    bool competing_headers_pulled_ahead)
+{
+    if (!has_local_signer || is_trusted_mirror) return false;
+    if (!has_tip || !has_index || index_is_tip || index_failed) return false;
+    if (!better_or_equal_work) return false;
+    if (index_height == tip_height && same_parent) {
+        return competing_headers_pulled_ahead;
+    }
+    return TrustedMirrorIsShortTipReorg(lca_depth) &&
+           index_height > tip_height &&
+           parent_has_data_or_is_lca;
+}
+
 /** FindMostWorkChain / candidate-set gate for any node that tracks a
  *  configured attestation quorum (trusted mirror, local signer, or
  *  consensus + -matmultrustedpubkey).

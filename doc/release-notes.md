@@ -69,6 +69,18 @@ HEADER_ONLY on the attested winner because ExactReplay required
 attested sibling across that short reorg and cools budget-deferred
 fossils while the frontier is off-chain.
 
+## HEADER_ONLY equal-work lost twin GETDATA (2026-08-24)
+
+When two equal-work children share a parent and the local signer already
+attested one of them, the HEADER_ONLY skip set suppressed `GETDATA` for
+the unattested twin (`select=root_header_only_skip`, `in_flight=0`).
+`GETMMATTEST` on that hash returns `not_canonical`, so archives could not
+unstick the signer. Local signers now fetch that twin once a peer's
+BestKnown has already extended it, ExactReplay it, and then fetch each
+better-work descendant whose parent has a body, bounded to short-reorg
+depth 1–6. Trusted mirrors still skip until the attestor signs. A lone
+competing sibling with no descendant headers stays off the miner GPU.
+
 # Included public work
 
 - btxchain/btx #105 — 0.33.3 network stability (already released)
