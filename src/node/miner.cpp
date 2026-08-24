@@ -819,14 +819,21 @@ int64_t GetMinimumTime(const CBlockIndex* pindexPrev, const Consensus::Params& c
 
 std::optional<int64_t> GetMaximumTime(const CBlockIndex* pindexPrev, const Consensus::Params& consensus_params)
 {
-    auto max_time{consensus_params.MatMulFutureBlockTimeLimit(pindexPrev->GetMedianTimePast())};
+    int height{0};
+    const bool have_height{TryGetNextBlockHeight(pindexPrev->nHeight, height)};
+    std::optional<int64_t> max_time;
+    if (have_height && consensus_params.IsMatMulStallRecoveryActive(height)) {
+        max_time = consensus_params.MaxMatMulAllowedBlockTime(
+            height, pindexPrev->GetBlockTime(), pindexPrev->GetMedianTimePast());
+    } else {
+        max_time = consensus_params.MatMulFutureBlockTimeLimit(pindexPrev->GetMedianTimePast());
+    }
     if (!max_time.has_value()) return max_time;
     // a5 fix: keep the miner's upper bound consistent with the reconciled consensus rule -- never
     // below the BIP94 timewarp floor -- so an honest miner can always produce a valid timestamp at
     // a drift-cap activation boundary instead of self-rejecting (UpdateTime would otherwise emit a
     // min_time above the raw cap). Mirrors the gated reconciliation in ContextualCheckBlockHeader.
-    int height{0};
-    if (TryGetNextBlockHeight(pindexPrev->nHeight, height) &&
+    if (have_height &&
         consensus_params.IsMatMulTimewarpReconcileActive(height) &&
         EnforceTimewarpProtectionAtHeight(consensus_params, height)) {
         max_time = std::max<int64_t>(*max_time, pindexPrev->GetBlockTime() - MAX_TIMEWARP);

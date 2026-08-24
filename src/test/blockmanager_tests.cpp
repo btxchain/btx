@@ -305,6 +305,40 @@ BOOST_AUTO_TEST_CASE(matmul_replay_episode_shape_fingerprint_tracks_resolved_sha
                 baseline_shape);
 }
 
+//! EncDr stall-recovery knobs select nBits and the per-block nTime cap after
+//! a flag day. Each must move replay_authority_context so a node with the
+//! height set and a node without it cannot report the same context.
+BOOST_AUTO_TEST_CASE(matmul_replay_authority_context_binds_encdr_stall_recovery)
+{
+    auto params{CreateChainParams(ArgsManager{}, ChainType::REGTEST)};
+    auto& consensus{const_cast<Consensus::Params&>(params->GetConsensus())};
+    const uint256 baseline{node::ComputeMatMulReplayAuthorityContext(*params)};
+
+    const auto check_field_bound{[&](const char* what, auto& field, auto delta) {
+        const auto saved{field};
+        field = static_cast<std::remove_reference_t<decltype(field)>>(field + delta);
+        BOOST_CHECK_MESSAGE(
+            node::ComputeMatMulReplayAuthorityContext(*params) != baseline,
+            std::string{"replay authority context ignores predicate-relevant field: "} + what);
+        field = saved;
+        BOOST_CHECK(node::ComputeMatMulReplayAuthorityContext(*params) == baseline);
+    }};
+
+    {
+        const auto saved{consensus.nMatMulStallRecoveryHeight};
+        consensus.nMatMulStallRecoveryHeight = 199299;
+        BOOST_CHECK_MESSAGE(
+            node::ComputeMatMulReplayAuthorityContext(*params) != baseline,
+            "replay authority context ignores nMatMulStallRecoveryHeight");
+        consensus.nMatMulStallRecoveryHeight = saved;
+        BOOST_CHECK(node::ComputeMatMulReplayAuthorityContext(*params) == baseline);
+    }
+    check_field_bound("nMatMulStallRecoveryAsertNum", consensus.nMatMulStallRecoveryAsertNum, 1);
+    check_field_bound("nMatMulStallRecoveryAsertDen", consensus.nMatMulStallRecoveryAsertDen, 1);
+    check_field_bound("nMatMulMaxBlockTimeAdvance", consensus.nMatMulMaxBlockTimeAdvance, 1);
+    check_field_bound("nMatMulAsertClampedMinInterval", consensus.nMatMulAsertClampedMinInterval, 1);
+}
+
 BOOST_AUTO_TEST_CASE(blockmanager_find_block_pos)
 {
     const auto params {CreateChainParams(ArgsManager{}, ChainType::MAIN)};

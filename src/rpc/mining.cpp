@@ -401,6 +401,11 @@ static UniValue MiningTimePolicyToJSON(const Consensus::Params& consensus,
     policy.pushKV("future_mtp_mining_policy_active", max_time.has_value());
     policy.pushKV("future_mtp_limit_height", consensus.nMatMulMaxFutureMtpDriftHeight);
     policy.pushKV("future_mtp_limit_seconds", consensus.nMatMulMaxFutureMtpDrift);
+    policy.pushKV("stall_recovery_height", consensus.nMatMulStallRecoveryHeight);
+    policy.pushKV("stall_recovery_active", consensus.IsMatMulStallRecoveryActive(next_height));
+    policy.pushKV("parent_time_advance_seconds", consensus.nMatMulMaxBlockTimeAdvance);
+    policy.pushKV("asert_rescale_num", static_cast<uint64_t>(consensus.nMatMulStallRecoveryAsertNum));
+    policy.pushKV("asert_rescale_den", static_cast<uint64_t>(consensus.nMatMulStallRecoveryAsertDen));
     if (max_time.has_value()) {
         policy.pushKV("maxtime", *max_time);
     }
@@ -6417,6 +6422,11 @@ static RPCHelpMan getmininginfo()
                             {RPCResult::Type::BOOL, "future_mtp_mining_policy_active", "Whether local mining should clamp to the MTP future-drift limit"},
                             {RPCResult::Type::NUM, "future_mtp_limit_height", "The activation height for the MTP future-drift limit"},
                             {RPCResult::Type::NUM, "future_mtp_limit_seconds", "The permitted drift above previous median-time-past"},
+                            {RPCResult::Type::NUM, "stall_recovery_height", "Flag-day height for EncDr stall-recovery (unset = INT32_MAX)"},
+                            {RPCResult::Type::BOOL, "stall_recovery_active", "Whether per-block nTime advance and clamped ASERT credit apply to the next block"},
+                            {RPCResult::Type::NUM, "parent_time_advance_seconds", "Max nTime-prev.nTime after stall recovery"},
+                            {RPCResult::Type::NUM, "asert_rescale_num", "One-shot ASERT target numerator at stall-recovery height"},
+                            {RPCResult::Type::NUM, "asert_rescale_den", "One-shot ASERT target denominator at stall-recovery height"},
                             {RPCResult::Type::NUM_TIME, "maxtime", /*optional=*/true, "The maximum allowed next block timestamp"},
                             {RPCResult::Type::BOOL, "curtime_clamped", "Whether the selected timestamp was clamped to the policy maximum"},
                             {RPCResult::Type::STR, "recommended_action", "Recommended miner action: continue or clamp_time"},
@@ -6834,6 +6844,11 @@ static RPCHelpMan getmatmulchallenge()
                             {RPCResult::Type::BOOL, "future_mtp_mining_policy_active", "Whether local mining should clamp to the MTP future-drift limit"},
                             {RPCResult::Type::NUM, "future_mtp_limit_height", "The activation height for the MTP future-drift limit"},
                             {RPCResult::Type::NUM, "future_mtp_limit_seconds", "The permitted drift above previous median-time-past"},
+                            {RPCResult::Type::NUM, "stall_recovery_height", "Flag-day height for EncDr stall-recovery (unset = INT32_MAX)"},
+                            {RPCResult::Type::BOOL, "stall_recovery_active", "Whether per-block nTime advance and clamped ASERT credit apply to the next block"},
+                            {RPCResult::Type::NUM, "parent_time_advance_seconds", "Max nTime-prev.nTime after stall recovery"},
+                            {RPCResult::Type::NUM, "asert_rescale_num", "One-shot ASERT target numerator at stall-recovery height"},
+                            {RPCResult::Type::NUM, "asert_rescale_den", "One-shot ASERT target denominator at stall-recovery height"},
                             {RPCResult::Type::NUM_TIME, "maxtime", /*optional=*/true, "The maximum allowed next block timestamp"},
                             {RPCResult::Type::BOOL, "curtime_clamped", "Whether the selected timestamp was clamped to the policy maximum"},
                             {RPCResult::Type::STR, "recommended_action", "Recommended miner action: continue or clamp_time"},
@@ -7252,6 +7267,11 @@ static RPCHelpMan getmatmulchallengeprofile()
                             {RPCResult::Type::BOOL, "future_mtp_mining_policy_active", "Whether local mining should clamp to the MTP future-drift limit"},
                             {RPCResult::Type::NUM, "future_mtp_limit_height", "The activation height for the MTP future-drift limit"},
                             {RPCResult::Type::NUM, "future_mtp_limit_seconds", "The permitted drift above previous median-time-past"},
+                            {RPCResult::Type::NUM, "stall_recovery_height", "Flag-day height for EncDr stall-recovery (unset = INT32_MAX)"},
+                            {RPCResult::Type::BOOL, "stall_recovery_active", "Whether per-block nTime advance and clamped ASERT credit apply to the next block"},
+                            {RPCResult::Type::NUM, "parent_time_advance_seconds", "Max nTime-prev.nTime after stall recovery"},
+                            {RPCResult::Type::NUM, "asert_rescale_num", "One-shot ASERT target numerator at stall-recovery height"},
+                            {RPCResult::Type::NUM, "asert_rescale_den", "One-shot ASERT target denominator at stall-recovery height"},
                             {RPCResult::Type::NUM_TIME, "maxtime", /*optional=*/true, "The maximum allowed next block timestamp"},
                             {RPCResult::Type::BOOL, "curtime_clamped", "Whether the selected timestamp was clamped to the policy maximum"},
                             {RPCResult::Type::STR, "recommended_action", "Recommended miner action: continue or clamp_time"},
@@ -8924,6 +8944,11 @@ static RPCHelpMan getblocktemplate()
                     {RPCResult::Type::BOOL, "future_mtp_mining_policy_active", "Whether local mining should clamp to the MTP future-drift limit"},
                     {RPCResult::Type::NUM, "future_mtp_limit_height", "The activation height for the MTP future-drift limit"},
                     {RPCResult::Type::NUM, "future_mtp_limit_seconds", "The permitted drift above previous median-time-past"},
+                    {RPCResult::Type::NUM, "stall_recovery_height", "Flag-day height for EncDr stall-recovery (unset = INT32_MAX)"},
+                    {RPCResult::Type::BOOL, "stall_recovery_active", "Whether per-block nTime advance and clamped ASERT credit apply to the next block"},
+                    {RPCResult::Type::NUM, "parent_time_advance_seconds", "Max nTime-prev.nTime after stall recovery"},
+                    {RPCResult::Type::NUM, "asert_rescale_num", "One-shot ASERT target numerator at stall-recovery height"},
+                    {RPCResult::Type::NUM, "asert_rescale_den", "One-shot ASERT target denominator at stall-recovery height"},
                     {RPCResult::Type::NUM_TIME, "maxtime", /*optional=*/true, "The maximum allowed next block timestamp"},
                     {RPCResult::Type::BOOL, "curtime_clamped", "Whether the template timestamp was clamped to the policy maximum"},
                     {RPCResult::Type::STR, "recommended_action", "Recommended miner action: continue or clamp_time"},

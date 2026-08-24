@@ -528,6 +528,23 @@ struct ScopedFutureMtpDriftConsensus
     }
 };
 
+struct ScopedStallRecoveryConsensus
+{
+    Consensus::Params& consensus;
+    int32_t height;
+    uint32_t num;
+    uint32_t den;
+    int64_t advance;
+
+    ~ScopedStallRecoveryConsensus()
+    {
+        consensus.nMatMulStallRecoveryHeight = height;
+        consensus.nMatMulStallRecoveryAsertNum = num;
+        consensus.nMatMulStallRecoveryAsertDen = den;
+        consensus.nMatMulMaxBlockTimeAdvance = advance;
+    }
+};
+
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(miner_tests, MinerTestingSetup)
@@ -1440,6 +1457,41 @@ BOOST_AUTO_TEST_CASE(update_time_clamps_to_future_mtp_policy)
     SetMockTime(0);
 }
 
+BOOST_AUTO_TEST_CASE(update_time_clamps_to_parent_advance_after_stall_recovery)
+{
+    auto consensus{m_node.chainman->GetConsensus()};
+    consensus.fMatMulPOW = true;
+    consensus.nMatMulMaxFutureMtpDriftHeight = 0;
+    consensus.nMatMulMaxFutureMtpDrift = 3'600;
+    consensus.nMatMulStallRecoveryHeight = 11;
+    consensus.nMatMulMaxBlockTimeAdvance = 1'080;
+
+    auto chain{MakeIndexChain(/*count=*/11, /*start_time=*/1'700'000'000, /*spacing=*/90)};
+    const CBlockIndex* tip{&chain.back()};
+    const auto max_time{node::GetMaximumTime(tip, consensus)};
+    BOOST_REQUIRE(max_time.has_value());
+    const int64_t parent_cap{tip->GetBlockTime() + 1'080};
+    const int64_t mtp_cap{tip->GetMedianTimePast() + 3'600};
+    BOOST_CHECK_LT(parent_cap, mtp_cap);
+    BOOST_CHECK_EQUAL(*max_time, parent_cap);
+    BOOST_CHECK_EQUAL(*consensus.MaxMatMulAllowedBlockTime(
+                          11, tip->GetBlockTime(), tip->GetMedianTimePast()),
+                      parent_cap);
+
+    auto before_recovery{consensus};
+    before_recovery.nMatMulStallRecoveryHeight = 12;
+    const auto policy_before{node::GetMaximumTime(tip, before_recovery)};
+    BOOST_REQUIRE(policy_before.has_value());
+    BOOST_CHECK_EQUAL(*policy_before, mtp_cap);
+
+    CBlockHeader header{};
+    header.nTime = parent_cap + 600;
+    SetMockTime(parent_cap + 600);
+    node::UpdateTime(&header, consensus, tip);
+    BOOST_CHECK_EQUAL(header.GetBlockTime(), parent_cap);
+    SetMockTime(0);
+}
+
 BOOST_AUTO_TEST_CASE(a5_timewarp_drift_reconciliation_prevents_boundary_halt)
 {
     // a5 fix: at a drift-cap activation boundary an unprotected predecessor can carry a blocktime
@@ -1532,6 +1584,54 @@ BOOST_AUTO_TEST_CASE(test_block_validity_rejects_future_mtp_drift)
     BOOST_CHECK(!valid);
     BOOST_CHECK(state.IsInvalid());
     BOOST_CHECK_EQUAL(state.GetRejectReason(), "time-mtp-too-new");
+}
+
+BOOST_AUTO_TEST_CASE(test_block_validity_rejects_parent_time_advance)
+{
+    auto mining{MakeMining()};
+    BlockAssembler::Options options;
+    options.coinbase_output_script = CScript{} << OP_TRUE;
+    std::unique_ptr<BlockTemplate> block_template{mining->createNewBlock(options)};
+    BOOST_REQUIRE(block_template);
+    CBlock block{block_template->getBlock()};
+
+    BlockValidationState state;
+    bool valid{false};
+    {
+        LOCK(cs_main);
+        CBlockIndex* tip{m_node.chainman->ActiveChain().Tip()};
+        BOOST_REQUIRE(tip != nullptr);
+        auto& consensus{const_cast<Consensus::Params&>(m_node.chainman->GetConsensus())};
+        ScopedFutureMtpDriftConsensus scoped_mtp{
+            consensus,
+            consensus.nMatMulMaxFutureMtpDriftHeight,
+            consensus.nMatMulMaxFutureMtpDrift};
+        ScopedStallRecoveryConsensus scoped_recovery{
+            consensus,
+            consensus.nMatMulStallRecoveryHeight,
+            consensus.nMatMulStallRecoveryAsertNum,
+            consensus.nMatMulStallRecoveryAsertDen,
+            consensus.nMatMulMaxBlockTimeAdvance};
+        consensus.nMatMulMaxFutureMtpDriftHeight = 0;
+        consensus.nMatMulMaxFutureMtpDrift = 3'600;
+        consensus.nMatMulStallRecoveryHeight = tip->nHeight + 1;
+        consensus.nMatMulMaxBlockTimeAdvance = 60;
+        block.nTime = tip->GetBlockTime() + 61;
+        BOOST_REQUIRE_LT(block.nTime, tip->GetMedianTimePast() + consensus.nMatMulMaxFutureMtpDrift);
+        SetMockTime(block.nTime);
+        valid = TestBlockValidity(state,
+                                  m_node.chainman->GetParams(),
+                                  m_node.chainman->ActiveChainstate(),
+                                  block,
+                                  tip,
+                                  /*fCheckPOW=*/false,
+                                  /*fCheckMerkleRoot=*/false);
+        SetMockTime(0);
+    }
+
+    BOOST_CHECK(!valid);
+    BOOST_CHECK(state.IsInvalid());
+    BOOST_CHECK_EQUAL(state.GetRejectReason(), "time-parent-too-new");
 }
 
 BOOST_AUTO_TEST_CASE(height_overflow_guards)

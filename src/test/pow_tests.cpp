@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <arith_uint256.h>
 #include <chain.h>
 #include <chainparams.h>
 #include <common/args.h>
@@ -942,6 +943,15 @@ BOOST_AUTO_TEST_CASE(ChainParams_MAIN_matmul_activation)
     BOOST_CHECK_EQUAL(consensus.nMatMulAsertRetune2Height, std::numeric_limits<int32_t>::max());
     BOOST_CHECK_EQUAL(consensus.nMatMulAsertRetune2TargetNum, 1U);
     BOOST_CHECK_EQUAL(consensus.nMatMulAsertRetune2TargetDen, 1U);
+    BOOST_CHECK_EQUAL(consensus.nMatMulStallRecoveryHeight, 199'299);
+    BOOST_CHECK_EQUAL(consensus.nMatMulStallRecoveryAsertNum, 1U);
+    BOOST_CHECK_EQUAL(consensus.nMatMulStallRecoveryAsertDen, 1U);
+    BOOST_CHECK_EQUAL(consensus.nMatMulMaxBlockTimeAdvance, 1'080);
+    BOOST_CHECK_EQUAL(consensus.nMatMulAsertClampedMinInterval, 0);
+    BOOST_CHECK(!consensus.IsMatMulStallRecoveryActive(199297));
+    BOOST_CHECK(!consensus.IsMatMulStallRecoveryActive(199298));
+    BOOST_CHECK(consensus.IsMatMulStallRecoveryActive(199299));
+    BOOST_CHECK(consensus.IsMatMulStallRecoveryActive(199300));
     BOOST_CHECK_EQUAL(consensus.nMatMulAsertHalfLifeUpgradeHeight, 191'715);
     BOOST_CHECK_EQUAL(consensus.nMatMulAsertHalfLifeUpgrade, 14'400);
     BOOST_CHECK_EQUAL(consensus.nMatMulPowLimitUpgradeHeight, 191'714);
@@ -1067,6 +1077,136 @@ BOOST_AUTO_TEST_CASE(ChainParams_MAIN_historical_asert_boundary_matches_live_cha
     BOOST_CHECK_EQUAL(GetNextWorkRequired(&block_50000, &block_50001_header, consensus), 0x2064fe91U);
 }
 
+BOOST_AUTO_TEST_CASE(encdr_stall_recovery_parent_advance_and_clamped_asert)
+{
+    auto consensus = CreateChainParams(*m_node.args, ChainType::REGTEST)->GetConsensus();
+    consensus.fMatMulPOW = true;
+    consensus.fPowNoRetargeting = false;
+    consensus.fPowAllowMinDifficultyBlocks = false;
+    consensus.nFastMineHeight = 0;
+    consensus.nMatMulAsertHeight = 0;
+    consensus.nMatMulAsertHalfLife = 14'400;
+    consensus.nMatMulAsertBootstrapFactor = 1;
+    consensus.nMatMulAsertRetuneHeight = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulAsertRetune2Height = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulAsertHalfLifeUpgradeHeight = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulPowLimitUpgradeHeight = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulV4Height = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulBMX4CHeight = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulDRLTHeight = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulRCHeight = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulRCCoupledHeight = std::numeric_limits<int32_t>::max();
+    consensus.nMatMulMaxFutureMtpDriftHeight = 0;
+    consensus.nMatMulMaxFutureMtpDrift = 1'000'000;
+    consensus.nMatMulStallRecoveryHeight = 8;
+    consensus.nMatMulStallRecoveryAsertNum = 1;
+    consensus.nMatMulStallRecoveryAsertDen = 1;
+    consensus.nMatMulMaxBlockTimeAdvance = 30;
+    consensus.nMatMulAsertClampedMinInterval = 90;
+    BOOST_REQUIRE(ValidateMatMulAsertParams(consensus, consensus.nMatMulAsertHeight));
+    BOOST_CHECK(consensus.IsMatMulStallRecoveryActive(8));
+    BOOST_CHECK(!consensus.IsMatMulStallRecoveryActive(7));
+    BOOST_CHECK_EQUAL(*consensus.MaxMatMulParentTimeAdvance(8, 1'700'000'000), 1'700'000'030);
+    BOOST_CHECK(!consensus.MaxMatMulParentTimeAdvance(7, 1'700'000'000).has_value());
+    BOOST_CHECK_EQUAL(*consensus.MaxMatMulAllowedBlockTime(8, 1'700'000'000, 1'699'500'000), 1'700'000'030);
+
+    constexpr int kBlocks = 16;
+    std::vector<CBlockIndex> blocks(kBlocks);
+    const uint32_t bits{0x1f00ffffU};
+    for (int i = 0; i < kBlocks; ++i) {
+        blocks[i].nHeight = i;
+        blocks[i].nTime = 1'700'000'000 + static_cast<int64_t>(i) * 90;
+        blocks[i].nBits = bits;
+        blocks[i].pprev = (i == 0) ? nullptr : &blocks[i - 1];
+        blocks[i].BuildSkip();
+    }
+
+    CBlockHeader hdr{};
+    const uint32_t at_recovery = GetNextWorkRequired(&blocks[7], &hdr, consensus);
+    BOOST_CHECK_EQUAL(at_recovery, bits);
+
+    consensus.nMatMulStallRecoveryAsertNum = 2;
+    consensus.nMatMulStallRecoveryAsertDen = 1;
+    const uint32_t dumped = GetNextWorkRequired(&blocks[7], &hdr, consensus);
+    BOOST_CHECK_NE(dumped, at_recovery);
+    arith_uint256 pre_target{};
+    pre_target.SetCompact(at_recovery);
+    arith_uint256 dumped_target{};
+    dumped_target.SetCompact(dumped);
+    BOOST_CHECK(dumped_target > pre_target);
+    consensus.nMatMulStallRecoveryAsertNum = 1;
+
+    auto fill_chain = [&](std::vector<CBlockIndex>& chain, int64_t t8, int64_t t9) {
+        for (int i = 0; i < kBlocks; ++i) {
+            chain[i].nHeight = i;
+            if (i == 8) {
+                chain[i].nTime = t8;
+            } else if (i == 9) {
+                chain[i].nTime = t9;
+            } else {
+                chain[i].nTime = 1'700'000'000 + static_cast<int64_t>(i) * 90;
+            }
+            chain[i].nBits = bits;
+            chain[i].pprev = (i == 0) ? nullptr : &chain[i - 1];
+            chain[i].BuildSkip();
+        }
+    };
+
+    constexpr int64_t t7{1'700'000'000 + 7 * 90};
+    std::vector<CBlockIndex> clamped(kBlocks);
+    fill_chain(clamped, t7 + 30, t7 + 60);
+    std::vector<CBlockIndex> on_time(kBlocks);
+    fill_chain(on_time, t7 + 30, t7 + 120);
+    std::vector<CBlockIndex> under_cap(kBlocks);
+    fill_chain(under_cap, t7 + 30, t7 + 59);
+
+    const uint32_t after_clamped = GetNextWorkRequired(&clamped[9], &hdr, consensus);
+    const uint32_t after_on_time = GetNextWorkRequired(&on_time[9], &hdr, consensus);
+    const uint32_t after_under_cap = GetNextWorkRequired(&under_cap[9], &hdr, consensus);
+    BOOST_CHECK_EQUAL(after_clamped, after_on_time);
+    BOOST_CHECK_NE(after_under_cap, after_on_time);
+    arith_uint256 on_time_target{};
+    on_time_target.SetCompact(after_on_time);
+    arith_uint256 under_target{};
+    under_target.SetCompact(after_under_cap);
+    BOOST_CHECK(under_target < on_time_target);
+
+    constexpr int kLong = 80;
+    std::vector<CBlockIndex> long_chain(kLong);
+    for (int i = 0; i < kLong; ++i) {
+        long_chain[i].nHeight = i;
+        long_chain[i].nBits = bits;
+        long_chain[i].pprev = (i == 0) ? nullptr : &long_chain[i - 1];
+        if (i <= 7) {
+            long_chain[i].nTime = 1'700'000'000 + static_cast<int64_t>(i) * 90;
+        } else if (i == 8) {
+            long_chain[i].nTime = t7 + 30;
+        } else {
+            long_chain[i].nTime = long_chain[i - 1].nTime + 30;
+        }
+        long_chain[i].BuildSkip();
+    }
+    const uint32_t long_bits = GetNextWorkRequired(&long_chain[kLong - 1], &hdr, consensus);
+    for (auto& block : long_chain) {
+        block.nMatMulClampedAsertCreditKey = 0;
+        block.nMatMulClampedAsertCredit = 0;
+    }
+    BOOST_CHECK_EQUAL(GetNextWorkRequired(&long_chain[kLong - 1], &hdr, consensus), long_bits);
+    BOOST_CHECK(long_chain[kLong - 1].nMatMulClampedAsertCreditKey != 0);
+    BOOST_CHECK_EQUAL(GetNextWorkRequired(&long_chain[kLong - 1], &hdr, consensus), long_bits);
+
+    auto collide = consensus;
+    collide.nMatMulAsertRetune2Height = 8;
+    BOOST_CHECK(!ValidateMatMulAsertParams(collide, 0));
+    collide.nMatMulAsertRetune2Height = std::numeric_limits<int32_t>::max();
+    collide.nMatMulAsertHeight = 8;
+    collide.nFastMineHeight = 8;
+    BOOST_CHECK(!ValidateMatMulAsertParams(collide, 8));
+    auto zero_num = consensus;
+    zero_num.nMatMulStallRecoveryAsertNum = 0;
+    BOOST_CHECK(!ValidateMatMulAsertParams(zero_num, 0));
+}
+
 BOOST_AUTO_TEST_CASE(ChainParams_MAIN_genesis_header_fields_frozen)
 {
     const auto params = CreateChainParams(*m_node.args, ChainType::MAIN);
@@ -1111,6 +1251,12 @@ BOOST_AUTO_TEST_CASE(ChainParams_REGTEST_matmul_activation)
     BOOST_CHECK_EQUAL(consensus.nMatMulAsertRetune2Height, std::numeric_limits<int32_t>::max());
     BOOST_CHECK_EQUAL(consensus.nMatMulAsertRetune2TargetNum, 1U);
     BOOST_CHECK_EQUAL(consensus.nMatMulAsertRetune2TargetDen, 1U);
+    BOOST_CHECK_EQUAL(consensus.nMatMulStallRecoveryHeight, std::numeric_limits<int32_t>::max());
+    BOOST_CHECK_EQUAL(consensus.nMatMulStallRecoveryAsertNum, 1U);
+    BOOST_CHECK_EQUAL(consensus.nMatMulStallRecoveryAsertDen, 1U);
+    BOOST_CHECK_EQUAL(consensus.nMatMulMaxBlockTimeAdvance, 1'080);
+    BOOST_CHECK_EQUAL(consensus.nMatMulAsertClampedMinInterval, 0);
+    BOOST_CHECK(!consensus.IsMatMulStallRecoveryActive(0));
     BOOST_CHECK_EQUAL(consensus.nMatMulAsertHalfLifeUpgradeHeight, std::numeric_limits<int32_t>::max());
     BOOST_CHECK_EQUAL(consensus.nMatMulAsertHalfLifeUpgrade, 14'400);
     BOOST_CHECK_EQUAL(consensus.nMatMulPreHashEpsilonBits, 0U);

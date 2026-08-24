@@ -358,7 +358,9 @@ uint256 ComputeMatMulReplayAuthorityContext(const CChainParams& params)
     //   v2 -> v3: bound the ENC_RC §R.7 scheduled-scaling knobs that feed
     //             ConsensusRCEpisodeParamsForHeight, plus a derived
     //             episode-shape fingerprint (see below).
-    static constexpr uint32_t SCHEMA_VERSION{3};
+    //   v3 -> v4: bind EncDr stall-recovery schedule (flag height, rescale,
+    //             per-block parent nTime cap, clamped ASERT min interval).
+    static constexpr uint32_t SCHEMA_VERSION{4};
     const Consensus::Params& consensus{params.GetConsensus()};
     HashWriter hasher;
     hasher << std::string{"BTX_MATMUL_REPLAY_AUTHORITY_CONTEXT"}
@@ -396,6 +398,11 @@ uint256 ComputeMatMulReplayAuthorityContext(const CChainParams& params)
            << consensus.nMatMulMaxFutureMtpDriftHeight
            << consensus.nMatMulMaxFutureMtpDrift
            << consensus.nMatMulTimewarpReconcileHeight
+           << consensus.nMatMulStallRecoveryHeight
+           << consensus.nMatMulStallRecoveryAsertNum
+           << consensus.nMatMulStallRecoveryAsertDen
+           << consensus.nMatMulMaxBlockTimeAdvance
+           << consensus.nMatMulAsertClampedMinInterval
            << consensus.fMatMulPOW
            << consensus.fSkipMatMulValidation
            << consensus.nMatMulDimension

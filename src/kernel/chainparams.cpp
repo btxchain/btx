@@ -832,6 +832,14 @@ public:
         consensus.nMatMulAsertRetune2Height = std::numeric_limits<int32_t>::max();
         consensus.nMatMulAsertRetune2TargetNum = 1;
         consensus.nMatMulAsertRetune2TargetDen = 1;
+        // EncDr stall recovery (199297 incident). Flag day 199299, 1/1 inherit
+        // (no dump). 199298 stays pre-recovery bits so the live EncDr lottery
+        // remains valid. Any reachable height is a hard fork (ASERT re-anchor).
+        consensus.nMatMulStallRecoveryHeight = 199'299;
+        consensus.nMatMulStallRecoveryAsertNum = 1;
+        consensus.nMatMulStallRecoveryAsertDen = 1;
+        consensus.nMatMulMaxBlockTimeAdvance = 1'080;
+        consensus.nMatMulAsertClampedMinInterval = 0;
         // Lengthen τ only after the dump floor is locked, so a stall cannot
         // unwind 11 half-lives (~2000×) back toward historical powLimit.
         consensus.nMatMulAsertHalfLifeUpgradeHeight = BTX_MATMUL_POW_LIMIT_UPGRADE_HEIGHT + 1;
@@ -1329,6 +1337,15 @@ public:
         consensus.nMatMulAsertRetune2Height = std::numeric_limits<int32_t>::max();
         consensus.nMatMulAsertRetune2TargetNum = 1;
         consensus.nMatMulAsertRetune2TargetDen = 1;
+        // EncDr stall recovery (199297 incident). Height unset until flag day.
+        // Set nMatMulStallRecoveryHeight together with num/den (dump 199298
+        // by putting the flag day at 199298). 1/1 = inherit parent bits, but
+        // any reachable height is still a hard fork (ASERT re-anchor).
+        consensus.nMatMulStallRecoveryHeight = std::numeric_limits<int32_t>::max();
+        consensus.nMatMulStallRecoveryAsertNum = 1;
+        consensus.nMatMulStallRecoveryAsertDen = 1;
+        consensus.nMatMulMaxBlockTimeAdvance = 1'080;
+        consensus.nMatMulAsertClampedMinInterval = 0;
         consensus.nMatMulAsertHalfLifeUpgradeHeight = std::numeric_limits<int32_t>::max();
         consensus.nMatMulAsertHalfLifeUpgrade = 3'600;
         // Hardened pre-hash epsilon (18 bits) active from ASERT activation.
@@ -1513,6 +1530,15 @@ public:
         consensus.nMatMulAsertRetune2Height = std::numeric_limits<int32_t>::max();
         consensus.nMatMulAsertRetune2TargetNum = 1;
         consensus.nMatMulAsertRetune2TargetDen = 1;
+        // EncDr stall recovery (199297 incident). Height unset until flag day.
+        // Set nMatMulStallRecoveryHeight together with num/den (dump 199298
+        // by putting the flag day at 199298). 1/1 = inherit parent bits, but
+        // any reachable height is still a hard fork (ASERT re-anchor).
+        consensus.nMatMulStallRecoveryHeight = std::numeric_limits<int32_t>::max();
+        consensus.nMatMulStallRecoveryAsertNum = 1;
+        consensus.nMatMulStallRecoveryAsertDen = 1;
+        consensus.nMatMulMaxBlockTimeAdvance = 1'080;
+        consensus.nMatMulAsertClampedMinInterval = 0;
         consensus.nMatMulAsertHalfLifeUpgradeHeight = std::numeric_limits<int32_t>::max();
         consensus.nMatMulAsertHalfLifeUpgrade = 3'600;
         // Hardened pre-hash epsilon (18 bits) active from ASERT activation.
@@ -1732,6 +1758,15 @@ public:
         consensus.nMatMulAsertRetune2Height = std::numeric_limits<int32_t>::max();
         consensus.nMatMulAsertRetune2TargetNum = 1;
         consensus.nMatMulAsertRetune2TargetDen = 1;
+        // EncDr stall recovery (199297 incident). Height unset until flag day.
+        // Set nMatMulStallRecoveryHeight together with num/den (dump 199298
+        // by putting the flag day at 199298). 1/1 = inherit parent bits, but
+        // any reachable height is still a hard fork (ASERT re-anchor).
+        consensus.nMatMulStallRecoveryHeight = std::numeric_limits<int32_t>::max();
+        consensus.nMatMulStallRecoveryAsertNum = 1;
+        consensus.nMatMulStallRecoveryAsertDen = 1;
+        consensus.nMatMulMaxBlockTimeAdvance = 1'080;
+        consensus.nMatMulAsertClampedMinInterval = 0;
         consensus.nMatMulAsertHalfLifeUpgradeHeight = std::numeric_limits<int32_t>::max();
         consensus.nMatMulAsertHalfLifeUpgrade = 3'600;
         // Hardened pre-hash epsilon (18 bits) active from ASERT activation.
@@ -1963,6 +1998,11 @@ public:
         // ASERT activates at nFastMineHeight (0 for regtest = immediate).
         consensus.nMatMulAsertHeight = 0;
         consensus.nMatMulAsertHalfLife = 14'400;
+        consensus.nMatMulStallRecoveryHeight = std::numeric_limits<int32_t>::max();
+        consensus.nMatMulStallRecoveryAsertNum = 1;
+        consensus.nMatMulStallRecoveryAsertDen = 1;
+        consensus.nMatMulMaxBlockTimeAdvance = 1'080;
+        consensus.nMatMulAsertClampedMinInterval = 0;
         if (opts.matmul_dgw) {
             consensus.fPowNoRetargeting = false;
             consensus.fPowAllowMinDifficultyBlocks = false;

@@ -1,13 +1,14 @@
-BTX version 0.33.4rc1 is staged from:
+BTX version 0.33.4 is tagged from:
 
   <https://github.com/btxchain/btx>
 
-This is a **non-consensus** refinement on the 0.33.3 line. Compact `F`,
-ASERT, `powLimit`, Epoch A (height 185000), and the 191714 dump-floor
-rule are unchanged. Nodes that remain on 0.33.3 stay consensus-valid.
-0.33.4 fixes signed-frontier catch-up, attestor BestKnown, and equal-work
-lost-twin ExactReplay so attestors, archives, and miners follow the
-attested tip without wedging.
+This release includes the 0.33.3 network-stability line plus EncDr stall
+recovery at mainnet height **199299** (`num/den = 1/1`). Compact `F`,
+`powLimit`, Epoch A (height 185000), and the 191714 dump-floor rule are
+unchanged. Nodes that remain on 0.33.3 stay valid through **199298** and
+must upgrade **before 199299**. 0.33.4 also fixes signed-frontier catch-up,
+attestor BestKnown, equal-work lost-twin ExactReplay, unique EncDr templates,
+and HeightOccupied GETDATA skip.
 
 Please report bugs using the issue tracker at GitHub:
 
@@ -23,10 +24,10 @@ Shut down the previous node cleanly, wait for it to exit, and replace
 its `btxd`, `btx-cli`, and related binaries with the v0.33.4 binaries.
 Back up wallets and configuration before upgrading.
 
-This release does **not** change consensus parameters. Installing it is
-not required to stay on the attested chain after 191714. It is
-recommended for attestors, public archives, and miners that follow the
-signed frontier.
+This release **does** change consensus at mainnet height 199299 (`1/1`
+re-anchor plus the 1080s parent nTime cap). Installing it is required to
+stay on the attested chain **from 199299**. It is recommended immediately
+for attestors, public archives, and miners that follow the signed frontier.
 
 # Compatibility
 
@@ -81,6 +82,13 @@ better-work descendant whose parent has a body, bounded to short-reorg
 depth 1–6. Trusted mirrors still skip until the attestor signs. A lone
 competing sibling with no descendant headers stays off the miner GPU.
 
+## EncDr stall recovery at 199299 (public #119)
+
+Mainnet flag day **199299**, `num/den = 1/1` (copy parent bits, re-anchor ASERT).
+Per-block `nTime` may not advance more than 1080s from the parent. Cap-sat
+headers get clamped ASERT credit. 199298 is **not** dumped. Upgrade before
+199299. See #117 for unique EncDr templates and HeightOccupied GETDATA skip.
+
 # Included public work
 
 - btxchain/btx #105 — 0.33.3 network stability (already released)
@@ -92,5 +100,13 @@ Public #111 does not exist on btxchain/btx; the post-0.33.3 stack is
 
 # Consensus
 
-Unchanged from 0.33.3. Do not retune `F`, ASERT, or `powLimit` in this
-release.
+Mainnet EncDr stall recovery activates at height **199299** with `num/den = 1/1`
+(inherit parent bits, no dump). Height **199298** is unchanged from 0.33.3 so
+the live EncDr lottery stays valid. Installing v0.33.4 is a **mandatory
+unsignalled upgrade before 199299 exists**. Unupgraded nodes keep the 191715
+ASERT anchor and `bad-diffbits` on every height at and above 199299.
+
+Do not retune `F` or `powLimit` in this release. The five recovery knobs are
+bound into `replay_authority_context` (schema 4). Clamped ASERT credit is
+cached on `CBlockIndex` so header-sync cost does not grow with
+`(tip - flag_day)`.

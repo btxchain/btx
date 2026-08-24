@@ -894,6 +894,23 @@ BOOST_AUTO_TEST_CASE(asert_retune_family_collision_rejected_fail_closed)
         p.nMatMulAsertRetune2TargetDen = 1;
         BOOST_CHECK(GetNextWorkRequired(&blocks.back(), &next, p) != hardest_bits);
     }
+    // Stall-recovery dump colliding with retune2 is rejected even at 1/1
+    // because the recovery branch is later in the cascade and would be skipped.
+    {
+        auto p = base;
+        p.nMatMulAsertRetune2Height = 12;
+        p.nMatMulAsertRetune2TargetNum = 1;
+        p.nMatMulAsertRetune2TargetDen = 1;
+        p.nMatMulStallRecoveryHeight = 12;
+        p.nMatMulStallRecoveryAsertNum = 2;
+        p.nMatMulStallRecoveryAsertDen = 1;
+        BOOST_CHECK(!ValidateMatMulAsertParams(p, 10));
+        BOOST_CHECK_EQUAL(GetNextWorkRequired(&blocks.back(), &next, p), hardest_bits);
+        p.nMatMulStallRecoveryAsertNum = 0;
+        p.nMatMulStallRecoveryHeight = 16;
+        BOOST_CHECK(!ValidateMatMulAsertParams(p, 10));
+        BOOST_CHECK_EQUAL(GetNextWorkRequired(&blocks.back(), &next, p), hardest_bits);
+    }
 }
 
 // Mainnet launch vector: fast phase active before boundary, ASERT activates at nFastMineHeight.
