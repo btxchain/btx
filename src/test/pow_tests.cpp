@@ -943,13 +943,15 @@ BOOST_AUTO_TEST_CASE(ChainParams_MAIN_matmul_activation)
     BOOST_CHECK_EQUAL(consensus.nMatMulAsertRetune2Height, std::numeric_limits<int32_t>::max());
     BOOST_CHECK_EQUAL(consensus.nMatMulAsertRetune2TargetNum, 1U);
     BOOST_CHECK_EQUAL(consensus.nMatMulAsertRetune2TargetDen, 1U);
-    BOOST_CHECK_EQUAL(consensus.nMatMulStallRecoveryHeight, std::numeric_limits<int32_t>::max());
+    BOOST_CHECK_EQUAL(consensus.nMatMulStallRecoveryHeight, 199'299);
     BOOST_CHECK_EQUAL(consensus.nMatMulStallRecoveryAsertNum, 1U);
     BOOST_CHECK_EQUAL(consensus.nMatMulStallRecoveryAsertDen, 1U);
     BOOST_CHECK_EQUAL(consensus.nMatMulMaxBlockTimeAdvance, 1'080);
     BOOST_CHECK_EQUAL(consensus.nMatMulAsertClampedMinInterval, 0);
     BOOST_CHECK(!consensus.IsMatMulStallRecoveryActive(199297));
-    BOOST_CHECK(!consensus.IsMatMulStallRecoveryActive(std::numeric_limits<int32_t>::max()));
+    BOOST_CHECK(!consensus.IsMatMulStallRecoveryActive(199298));
+    BOOST_CHECK(consensus.IsMatMulStallRecoveryActive(199299));
+    BOOST_CHECK(consensus.IsMatMulStallRecoveryActive(199300));
     BOOST_CHECK_EQUAL(consensus.nMatMulAsertHalfLifeUpgradeHeight, 191'715);
     BOOST_CHECK_EQUAL(consensus.nMatMulAsertHalfLifeUpgrade, 14'400);
     BOOST_CHECK_EQUAL(consensus.nMatMulPowLimitUpgradeHeight, 191'714);

@@ -865,10 +865,10 @@ struct Params {
     // ever RAISES the upper bound (a relaxation confined to otherwise-unmineable blocks), so it
     // is flag-day gated to keep upgraded/non-upgraded nodes in agreement until activation.
     int32_t nMatMulTimewarpReconcileHeight{std::numeric_limits<int32_t>::max()};
-    // EncDr stall recovery (live 2026-08-24 height 199297). Unset (INT32_MAX)
-    // until operators pick a flag day. Setting a reachable height is a
-    // mandatory unsignalled hard fork even at num/den 1/1: the rescale is
-    // ratio-gated, the ASERT re-anchor is not. At that height:
+    // EncDr stall recovery (live 2026-08-24 height 199297). Struct default
+    // is INT32_MAX (inert). Mainnet chainparams sets 199299 with num/den 1/1.
+    // Setting a reachable height is a mandatory unsignalled hard fork even
+    // at num/den 1/1: the rescale is ratio-gated, the ASERT re-anchor is not.
     //   1. one-shot ASERT rescale parent_target * num/den, then re-anchor
     //   2. per-block nTime cap (nMatMulMaxBlockTimeAdvance) so one header
     //      cannot consume the whole MTP+3600 window
