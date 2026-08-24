@@ -1169,6 +1169,30 @@ BOOST_AUTO_TEST_CASE(encdr_stall_recovery_parent_advance_and_clamped_asert)
     under_target.SetCompact(after_under_cap);
     BOOST_CHECK(under_target < on_time_target);
 
+    constexpr int kLong = 80;
+    std::vector<CBlockIndex> long_chain(kLong);
+    for (int i = 0; i < kLong; ++i) {
+        long_chain[i].nHeight = i;
+        long_chain[i].nBits = bits;
+        long_chain[i].pprev = (i == 0) ? nullptr : &long_chain[i - 1];
+        if (i <= 7) {
+            long_chain[i].nTime = 1'700'000'000 + static_cast<int64_t>(i) * 90;
+        } else if (i == 8) {
+            long_chain[i].nTime = t7 + 30;
+        } else {
+            long_chain[i].nTime = long_chain[i - 1].nTime + 30;
+        }
+        long_chain[i].BuildSkip();
+    }
+    const uint32_t long_bits = GetNextWorkRequired(&long_chain[kLong - 1], &hdr, consensus);
+    for (auto& block : long_chain) {
+        block.nMatMulClampedAsertCreditKey = 0;
+        block.nMatMulClampedAsertCredit = 0;
+    }
+    BOOST_CHECK_EQUAL(GetNextWorkRequired(&long_chain[kLong - 1], &hdr, consensus), long_bits);
+    BOOST_CHECK(long_chain[kLong - 1].nMatMulClampedAsertCreditKey != 0);
+    BOOST_CHECK_EQUAL(GetNextWorkRequired(&long_chain[kLong - 1], &hdr, consensus), long_bits);
+
     auto collide = consensus;
     collide.nMatMulAsertRetune2Height = 8;
     BOOST_CHECK(!ValidateMatMulAsertParams(collide, 0));

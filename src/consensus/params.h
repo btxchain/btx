@@ -866,14 +866,17 @@ struct Params {
     // is flag-day gated to keep upgraded/non-upgraded nodes in agreement until activation.
     int32_t nMatMulTimewarpReconcileHeight{std::numeric_limits<int32_t>::max()};
     // EncDr stall recovery (live 2026-08-24 height 199297). Unset (INT32_MAX)
-    // until operators pick a flag day. At that height:
+    // until operators pick a flag day. Setting a reachable height is a
+    // mandatory unsignalled hard fork even at num/den 1/1: the rescale is
+    // ratio-gated, the ASERT re-anchor is not. At that height:
     //   1. one-shot ASERT rescale parent_target * num/den, then re-anchor
     //   2. per-block nTime cap (nMatMulMaxBlockTimeAdvance) so one header
     //      cannot consume the whole MTP+3600 window
     //   3. ASERT credits at least nMatMulAsertClampedMinInterval (or
     //      nPowTargetSpacing if 0) for a block whose nTime sat at the cap,
     //      so a leftover ~13s clamp cannot look "too fast" and harden bits.
-    // num/den default 1/1 = no dump. Set those when choosing the flag day.
+    // num/den default 1/1 = inherit parent bits (no dump). These five knobs
+    // are hashed into ComputeMatMulReplayAuthorityContext (SCHEMA_VERSION 4).
     int32_t nMatMulStallRecoveryHeight{std::numeric_limits<int32_t>::max()};
     uint32_t nMatMulStallRecoveryAsertNum{1};
     uint32_t nMatMulStallRecoveryAsertDen{1};

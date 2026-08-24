@@ -92,5 +92,14 @@ Public #111 does not exist on btxchain/btx; the post-0.33.3 stack is
 
 # Consensus
 
-Unchanged from 0.33.3. Do not retune `F`, ASERT, or `powLimit` in this
-release.
+Unchanged from 0.33.3 while `nMatMulStallRecoveryHeight` stays `INT32_MAX`.
+Do not retune `F`, ASERT, or `powLimit` in this release.
+
+PR 119 ships an **inert** EncDr stall-recovery package. Setting a reachable
+`nMatMulStallRecoveryHeight` is a **mandatory unsignalled hard fork**,
+including `num/den = 1/1`: the one-shot rescale is ratio-gated, the ASERT
+re-anchor is not. Unupgraded nodes keep the 191715 anchor and disagree on
+`nBits` for every height above the flag (`bad-diffbits`). The five recovery
+knobs are bound into `replay_authority_context` (schema 4). Clamped ASERT
+credit is cached on `CBlockIndex` so header-sync cost does not grow with
+`(tip - flag_day)`.

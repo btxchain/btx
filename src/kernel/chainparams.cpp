@@ -834,7 +834,8 @@ public:
         consensus.nMatMulAsertRetune2TargetDen = 1;
         // EncDr stall recovery (199297 incident). Height unset until flag day.
         // Set nMatMulStallRecoveryHeight together with num/den (dump 199298
-        // by putting the flag day at 199298). 1/1 = inherit parent bits.
+        // by putting the flag day at 199298). 1/1 = inherit parent bits, but
+        // any reachable height is still a hard fork (ASERT re-anchor).
         consensus.nMatMulStallRecoveryHeight = std::numeric_limits<int32_t>::max();
         consensus.nMatMulStallRecoveryAsertNum = 1;
         consensus.nMatMulStallRecoveryAsertDen = 1;
@@ -1339,7 +1340,8 @@ public:
         consensus.nMatMulAsertRetune2TargetDen = 1;
         // EncDr stall recovery (199297 incident). Height unset until flag day.
         // Set nMatMulStallRecoveryHeight together with num/den (dump 199298
-        // by putting the flag day at 199298). 1/1 = inherit parent bits.
+        // by putting the flag day at 199298). 1/1 = inherit parent bits, but
+        // any reachable height is still a hard fork (ASERT re-anchor).
         consensus.nMatMulStallRecoveryHeight = std::numeric_limits<int32_t>::max();
         consensus.nMatMulStallRecoveryAsertNum = 1;
         consensus.nMatMulStallRecoveryAsertDen = 1;
@@ -1531,7 +1533,8 @@ public:
         consensus.nMatMulAsertRetune2TargetDen = 1;
         // EncDr stall recovery (199297 incident). Height unset until flag day.
         // Set nMatMulStallRecoveryHeight together with num/den (dump 199298
-        // by putting the flag day at 199298). 1/1 = inherit parent bits.
+        // by putting the flag day at 199298). 1/1 = inherit parent bits, but
+        // any reachable height is still a hard fork (ASERT re-anchor).
         consensus.nMatMulStallRecoveryHeight = std::numeric_limits<int32_t>::max();
         consensus.nMatMulStallRecoveryAsertNum = 1;
         consensus.nMatMulStallRecoveryAsertDen = 1;
@@ -1758,7 +1761,8 @@ public:
         consensus.nMatMulAsertRetune2TargetDen = 1;
         // EncDr stall recovery (199297 incident). Height unset until flag day.
         // Set nMatMulStallRecoveryHeight together with num/den (dump 199298
-        // by putting the flag day at 199298). 1/1 = inherit parent bits.
+        // by putting the flag day at 199298). 1/1 = inherit parent bits, but
+        // any reachable height is still a hard fork (ASERT re-anchor).
         consensus.nMatMulStallRecoveryHeight = std::numeric_limits<int32_t>::max();
         consensus.nMatMulStallRecoveryAsertNum = 1;
         consensus.nMatMulStallRecoveryAsertDen = 1;

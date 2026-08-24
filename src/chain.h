@@ -237,6 +237,13 @@ public:
     //! (memory only) Maximum nTime in the chain up to and including this block.
     unsigned int nTimeMax{0};
 
+    //! (memory only) Cached MatMulAsertClampedTimeCredit from the stall-recovery
+    //! re-anchor through this block. Key 0 is invalid. Filled from
+    //! GetNextWorkRequired so a 2000-header HEADERS message is O(headers)
+    //! after the ancestor fill, not O(headers * (tip - flag_day) * MTP).
+    mutable uint64_t nMatMulClampedAsertCreditKey{0};
+    mutable int64_t nMatMulClampedAsertCredit{0};
+
     explicit CBlockIndex(const CBlockHeader& block)
         : nVersion{block.nVersion},
           hashMerkleRoot{block.hashMerkleRoot},

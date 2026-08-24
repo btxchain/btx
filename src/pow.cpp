@@ -1214,6 +1214,30 @@ int32_t LatestMatMulAsertPreUpgradeAnchorHeight(const CBlockIndex* pindexLast, c
 // ~13s past the parent. ASERT then treated that interval as "too fast" and
 // would harden. Credit each post-recovery cap-sat block up to the min
 // interval so a clamp cannot look faster than on-time.
+//
+// Cache the prefix sum on CBlockIndex. After the re-anchor the walk would
+// otherwise be (tip - flag_day) * GetMedianTimePast() on every
+// GetNextWorkRequired, including CalculateClaimedHeadersWork's per-header
+// loop (PR 119 review). Key includes nTime and the schedule knobs so tests
+// that rewrite timestamps or params do not reuse a stale prefix.
+static uint64_t ClampedAsertCreditCacheKey(const CBlockIndex& block,
+                                           int32_t recovery_height,
+                                           int64_t max_advance,
+                                           int64_t min_interval)
+{
+    uint64_t key = 0x9e3779b97f4a7c15ULL;
+    const auto mix = [&](uint64_t v) {
+        key ^= v + 0x9e3779b97f4a7c15ULL + (key << 6) + (key >> 2);
+    };
+    mix(static_cast<uint32_t>(recovery_height));
+    mix(static_cast<uint64_t>(max_advance));
+    mix(static_cast<uint64_t>(min_interval));
+    mix(block.nTime);
+    mix(static_cast<uint32_t>(block.nHeight));
+    if (key == 0) key = 1;
+    return key;
+}
+
 int64_t MatMulAsertClampedTimeCredit(const CBlockIndex* pindexLast,
                                      const CBlockIndex* anchor,
                                      const Consensus::Params& params)
@@ -1223,25 +1247,48 @@ int64_t MatMulAsertClampedTimeCredit(const CBlockIndex* pindexLast,
     const int64_t min_interval{params.MatMulAsertClampedMinIntervalSeconds()};
     if (min_interval <= 0) return 0;
 
-    int64_t credit{0};
+    const int32_t recovery_height{params.nMatMulStallRecoveryHeight};
+    const int64_t max_advance{params.nMatMulMaxBlockTimeAdvance};
+    const auto key_for = [&](const CBlockIndex& block) {
+        return ClampedAsertCreditCacheKey(block, recovery_height, max_advance, min_interval);
+    };
+
+    std::vector<const CBlockIndex*> uncached;
     const CBlockIndex* pindex{pindexLast};
+    int64_t credit{0};
     while (pindex != nullptr && pindex != anchor &&
-           pindex->nHeight >= params.nMatMulStallRecoveryHeight) {
-        const CBlockIndex* const prev{pindex->pprev};
+           pindex->nHeight >= recovery_height) {
+        const uint64_t key{key_for(*pindex)};
+        if (pindex->nMatMulClampedAsertCreditKey == key) {
+            credit = pindex->nMatMulClampedAsertCredit;
+            break;
+        }
+        uncached.push_back(pindex);
+        pindex = pindex->pprev;
+    }
+
+    for (auto it = uncached.rbegin(); it != uncached.rend(); ++it) {
+        const CBlockIndex* const block{*it};
+        const CBlockIndex* const prev{block->pprev};
         if (prev == nullptr) break;
         const auto max_time{params.MaxMatMulAllowedBlockTime(
-            pindex->nHeight, prev->GetBlockTime(), prev->GetMedianTimePast())};
-        if (max_time.has_value() && pindex->GetBlockTime() >= *max_time) {
-            int64_t actual{pindex->GetBlockTime() - prev->GetBlockTime()};
+            block->nHeight, prev->GetBlockTime(), prev->GetMedianTimePast())};
+        if (max_time.has_value() && block->GetBlockTime() >= *max_time) {
+            int64_t actual{block->GetBlockTime() - prev->GetBlockTime()};
             if (actual < 0) actual = 0;
             if (actual < min_interval) {
                 if (credit > std::numeric_limits<int64_t>::max() - (min_interval - actual)) {
-                    return std::numeric_limits<int64_t>::max();
+                    credit = std::numeric_limits<int64_t>::max();
+                } else {
+                    credit += min_interval - actual;
                 }
-                credit += min_interval - actual;
             }
         }
-        pindex = prev;
+        block->nMatMulClampedAsertCredit = credit;
+        block->nMatMulClampedAsertCreditKey = key_for(*block);
+        if (credit == std::numeric_limits<int64_t>::max()) {
+            return credit;
+        }
     }
     return credit;
 }
