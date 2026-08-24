@@ -1190,7 +1190,12 @@ std::shared_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
     coinbaseTx.vout.resize(1);
     coinbaseTx.vout[0].scriptPubKey = m_options.coinbase_output_script;
     coinbaseTx.vout[0].nValue = nFees + GetBlockSubsidyForBlock(nHeight, *pblock, pindexPrev, chainparams.GetConsensus());
-    coinbaseTx.vin[0].scriptSig = CScript() << nHeight << OP_0;
+    // BIP34 height, then a per-template extra nonce. CreateNewBlock previously
+    // used a fixed OP_0 and reset nNonce64 to 0, so a clamped nTime + frozen
+    // mempool made every bounded generatetoaddress replay the same EncDr
+    // nonce window. Extra nonce changes the merkle root (and therefore the
+    // MatMul seeds) even when nTime cannot advance.
+    coinbaseTx.vin[0].scriptSig = CScript() << nHeight << FastRandomContext().rand64();
     pblock->vtx[0] = MakeTransactionRef(std::move(coinbaseTx));
     pblocktemplate->vchCoinbaseCommitment = m_chainstate.m_chainman.GenerateCoinbaseCommitment(*pblock, pindexPrev);
     pblocktemplate->vTxFees[0] = -nFees;
@@ -1203,7 +1208,9 @@ std::shared_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
     UpdateTime(pblock, chainparams.GetConsensus(), pindexPrev);
     pblock->nBits          = GetNextWorkRequired(pindexPrev, pblock, chainparams.GetConsensus());
     pblock->nNonce         = 0;
-    pblock->nNonce64       = 0;
+    // EncDr seeds bind nNonce64. Starting every template at 0 made two
+    // attestors grind the same nonce window after future-MTP clamped nTime.
+    pblock->nNonce64       = FastRandomContext().rand64();
     pblock->mix_hash.SetNull();
     if (chainparams.GetConsensus().fMatMulPOW) {
         // MatMul v4 (spec §I.3, §J#9): at and above nMatMulV4Height the

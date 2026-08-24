@@ -1313,7 +1313,7 @@ while true; do
 
   tmp_out="$(mktemp)"
   tmp_err="$(mktemp)"
-  if rpc_wallet_cli generatetoaddress 1 "${ADDRESS}" >"${tmp_out}" 2>"${tmp_err}"; then
+  if rpc_wallet_cli -rpcclienttimeout=0 generatetoaddress 1 "${ADDRESS}" >"${tmp_out}" 2>"${tmp_err}"; then
     append_file_if_present "${tmp_out}" "${LOG}"
   else
     append_file_if_present "${tmp_out}" "${LOG}"

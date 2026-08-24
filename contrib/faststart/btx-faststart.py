@@ -35,6 +35,14 @@ GITHUB_API_BASE = "https://api.github.com"
 GITHUB_JSON_ACCEPT = "application/vnd.github+json"
 GITHUB_BINARY_ACCEPT = "application/octet-stream"
 
+# Published mainnet ExactReplay attestors (public keys only). Archives and
+# GPU attestors return this same set from getmatmultrustedstatus.
+MAINNET_ATTESTOR_PUBKEYS = (
+    "03d90c148db37da28ce47ce15bade88a177728d663da4bc9ba765943b7d4e4f0aa",
+    "0224e80df33697385b54b3c69bae1f097f533c0c43e93c29f73ee97319d4a5e04c",
+)
+MAINNET_ATTESTOR_THRESHOLD = 1
+
 PRESET_CONF = {
     "miner": [
         "server=1",
@@ -46,6 +54,13 @@ PRESET_CONF = {
         "addnode=node.btx.dev:19335",
         "addnode=node.btxchain.org:19335",
         "addnode=node.btx.tools:19335",
+        "# Published 1-of-2 attestor pin. Confirm after RPC is up:",
+        "#   btx-cli getmatmultrustedstatus",
+        "# P2P seeds do not push these keys. Do not load a signer WIF.",
+        "matmulvalidation=trusted",
+        f"matmultrustedpubkey={MAINNET_ATTESTOR_PUBKEYS[0]}",
+        f"matmultrustedpubkey={MAINNET_ATTESTOR_PUBKEYS[1]}",
+        f"matmultrustedthreshold={MAINNET_ATTESTOR_THRESHOLD}",
         "prune=4096",
         "blockfilterindex=1",
         "coinstatsindex=1",
@@ -67,6 +82,10 @@ PRESET_CONF = {
         "addnode=node.btx.dev:19335",
         "addnode=node.btxchain.org:19335",
         "addnode=node.btx.tools:19335",
+        "# Same published attestor pin the miner preset uses.",
+        f"matmultrustedpubkey={MAINNET_ATTESTOR_PUBKEYS[0]}",
+        f"matmultrustedpubkey={MAINNET_ATTESTOR_PUBKEYS[1]}",
+        f"matmultrustedthreshold={MAINNET_ATTESTOR_THRESHOLD}",
         "prune=0",
         "txindex=1",
         "blockfilterindex=1",
@@ -298,6 +317,31 @@ def rpc_json(cmd: list[str], method: str, *params: str) -> dict[str, Any]:
     except subprocess.CalledProcessError as exc:
         raise RuntimeError(f"{method} failed:\n{exc.output}") from exc
     return json.loads(output)
+
+
+def verify_mainnet_attestor_pin(cli_cmd: list[str]) -> None:
+    """Confirm local RPC matches the published archive/attestor key set."""
+    status = rpc_json(cli_cmd, "getmatmultrustedstatus")
+    have = {str(key).lower() for key in status.get("trusted_signer_pubkeys") or []}
+    want = {key.lower() for key in MAINNET_ATTESTOR_PUBKEYS}
+    if have != want:
+        raise RuntimeError(
+            "getmatmultrustedstatus.trusted_signer_pubkeys does not match the "
+            f"published mainnet attestor pin {sorted(want)}; got {sorted(have)}. "
+            "P2P seeds do not advertise this set — it is pinned in miner/service "
+            "bootstrap and must match GPU attestors and following archives."
+        )
+    threshold = int(status.get("threshold") or 0)
+    if threshold != MAINNET_ATTESTOR_THRESHOLD:
+        raise RuntimeError(
+            "getmatmultrustedstatus.threshold does not match the published "
+            f"mainnet pin {MAINNET_ATTESTOR_THRESHOLD}; got {threshold}."
+        )
+    print(
+        "attestor pin ok: configured="
+        f"{status.get('configured')} threshold={threshold} "
+        f"pubkeys={len(have)}"
+    )
 
 
 def wait_for_rpc_ready(cli_cmd: list[str], timeout_secs: int) -> None:
@@ -676,6 +720,9 @@ def main(argv: list[str]) -> int:
         print(f"starting daemon with preset '{args.preset}'")
         run_quiet(daemon)
         wait_for_rpc_ready(cli_cmd, args.rpc_wait_secs)
+
+    if args.chain == "main":
+        verify_mainnet_attestor_pin(cli_cmd)
 
     print(f"downloading snapshot: {snapshot_url}")
     download_snapshot(snapshot_url, snapshot_path, snapshot_sha256)

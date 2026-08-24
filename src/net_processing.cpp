@@ -487,6 +487,9 @@ static constexpr auto MATMUL_ASYNC_VERIFY_STALE_AFTER{10min};
  *  maximum; runtime code shortens it to the actual remaining window whenever a
  *  peer/global RC budget already has a known refill time. */
 static constexpr auto MATMUL_BUDGET_DEFER_COOLDOWN{60s};
+/** Losing-twin fossils must not win NextRetry every cooldown while the
+ *  signed frontier is off-chain (live 2026-08-20, 45+ min wedge). */
+static constexpr auto MATMUL_FRONTIER_OFFCHAIN_FOSSIL_RETRY{10min};
 static constexpr auto MATMUL_BUDGET_DEFER_RETRY_FLOOR{1s};
 /** Pending-work saturation is capacity pressure, not a rate-window miss. */
 static constexpr auto MATMUL_PENDING_RETRY_COOLDOWN{1s};
@@ -2367,6 +2370,11 @@ private:
      *  catch-up, seed it from the on-disk HEADER_ONLY frontier. */
     void MaybeSeedGpuSignedFrontierBestKnown(NodeId peer_id, CNodeState& state)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    /** Local signer: if EncDr miners advertised a height above the attested
+     *  tip but never set BestKnown (synced_headers=-1 after restart), seed
+     *  from the claimed-work competing fork so lost-twin GETDATA can start. */
+    void MaybeSeedLocalSignerLostTwinBestKnown(NodeId peer_id, CNodeState& state)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     /** Prefer GETMMATTEST for the ActiveTip child, the short-reorg missing
      *  body, and the short-reorg fork child (LCA+1) even when bodies are
      *  already complete. Never the competing 1879xx miner fork. Fan-out
@@ -2922,6 +2930,16 @@ void PeerManagerImpl::RefreshMatMulDeferredBodyRetry(
     const CBlockIndex* index)
     EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
+[[nodiscard]] static bool IndexIsShortReorgAttestedForkChild(
+    const ChainstateManager& chainman,
+    const CBlockIndex* tip,
+    const CBlockIndex* index)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
+[[nodiscard]] static const CBlockIndex* FindShortReorgAttestedForkChild(
+    const ChainstateManager& chainman)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
 void PeerManagerImpl::RetryMatMulDeferredBodies()
 {
     AssertLockNotHeld(cs_main);
@@ -2997,6 +3015,32 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
                     if (!m_chainman.m_blockman.ReadBlock(*replay_block, *child)) {
                         replay_block.reset();
                     }
+            } else if (const CBlockIndex* const fork_child{
+                           FindShortReorgAttestedForkChild(m_chainman)};
+                       fork_child != nullptr &&
+                       (fork_child->nStatus & BLOCK_HAVE_DATA) != 0 &&
+                       (fork_child->nStatus & BLOCK_FAILED_MASK) == 0) {
+                    // Live 2026-08-20: m_best_header stayed on the unattested
+                    // equal-work twin so the followed tip-child path never
+                    // fired. Re-admit the attested sibling (LCA+1).
+                    if (m_chainman.IsOnParkedReorgBranch(fork_child)) {
+                        (void)m_chainman.UnparkReorgBranchContainingBlock(
+                            fork_child);
+                    }
+                    (void)m_chainman.NormalizeReorgRecovery(tip);
+                    reverify_hash = fork_child->GetBlockHash();
+                    reverify_height = fork_child->nHeight;
+                    reverify_header = fork_child->GetBlockHeader();
+                    need_exact_replay =
+                        (fork_child->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) == 0 &&
+                        !node::matmul_trusted::SkipExactReplayForGpuAttestation(
+                            m_chainman.IndexHasTrustedMatMulAuthority(fork_child));
+                    m_chainman.ActiveChainstate().TryAddBlockIndexCandidate(
+                        const_cast<CBlockIndex*>(fork_child));
+                    replay_block = std::make_shared<CBlock>();
+                    if (!m_chainman.m_blockman.ReadBlock(*replay_block, *fork_child)) {
+                        replay_block.reset();
+                    }
             }
         }
         static std::atomic<int64_t> g_followed_tip_child_replay_at{0};
@@ -3043,10 +3087,24 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
     // unresponsive, and nothing is logged. Observed on a live archive
     // 2026-08-11: 65 threads, 59 in futex wait, no log output for 28 minutes,
     // requiring SIGKILL. Never hold the store mutex while acquiring cs_main.
-    const uint256 wanted{WITH_LOCK(cs_main,
-        return m_chainman.ActiveChain().Tip()
-                   ? m_chainman.ActiveChain().Tip()->GetBlockHash()
-                   : uint256{})};
+    uint256 wanted{};
+    uint256 fork_child_hash{};
+    bool frontier_off_chain{false};
+    {
+        LOCK(cs_main);
+        const CBlockIndex* const tip{m_chainman.ActiveChain().Tip()};
+        if (tip != nullptr) wanted = tip->GetBlockHash();
+        const auto frontier{m_chainman.GetSignedFrontierStatus()};
+        frontier_off_chain = frontier.available && !frontier.on_active_chain;
+        if (const CBlockIndex* const fork{
+                FindShortReorgAttestedForkChild(m_chainman)};
+            fork != nullptr && fork->pprev != nullptr) {
+            // NextRetry matches hashPrevBlock. The attested sibling's
+            // parent is the LCA, not the losing tip (live 195603).
+            wanted = fork->pprev->GetBlockHash();
+            fork_child_hash = fork->GetBlockHash();
+        }
+    }
     const bool idle_catchup{
         m_matmul_pending_verifications.load(std::memory_order_relaxed) == 0 &&
         m_matmul_rc_pending_verifications.load(std::memory_order_relaxed) == 0};
@@ -3056,6 +3114,30 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
     candidate_hash = retry->first;
     candidate = retry->second;
     if (!candidate.block) return;
+    if (frontier_off_chain && candidate_hash != fork_child_hash) {
+        bool allow{false};
+        {
+            LOCK(cs_main);
+            const CBlockIndex* const tip{m_chainman.ActiveTip()};
+            const CBlockIndex* const idx{
+                m_chainman.m_blockman.LookupBlockIndex(candidate_hash)};
+            allow = node::matmul_trusted::ShouldRetryBudgetDeferredWhileFrontierOffChain(
+                /*frontier_off_active_chain=*/true,
+                IndexIsShortReorgAttestedForkChild(m_chainman, tip, idx),
+                m_chainman.IndexIsOnSignedFrontierChain(idx),
+                IndexIsFollowedTipChild(m_chainman, tip, idx));
+        }
+        if (!allow) {
+            if (m_matmul_block_lifecycle.RefreshRetry(
+                    candidate_hash, MATMUL_FRONTIER_OFFCHAIN_FOSSIL_RETRY)) {
+                LogDebug(BCLog::NET,
+                         "Deferring off-frontier budget-deferred fossil %s "
+                         "while signed frontier is off the active chain\n",
+                         candidate_hash.ToString());
+            }
+            return;
+        }
+    }
 
     // Prefer the original source so permission, address and keyed-netgroup
     // accounting stay charged. If that peer is gone, replay locally: waiting
@@ -3695,6 +3777,7 @@ void PeerManagerImpl::MaybeRecoverStalledBlockFetch(std::chrono::microseconds no
     // bodies are still missing on a competing fork.
     for (auto& [nodeid, state] : m_node_states) {
         MaybeSeedGpuSignedFrontierBestKnown(nodeid, state);
+        MaybeSeedLocalSignerLostTwinBestKnown(nodeid, state);
         if (state.pindexBestKnownBlock != nullptr &&
             state.pindexBestKnownBlock->nHeight >= tip->nHeight + BLOCK_FETCH_STALL_HEADERS_AHEAD &&
             state.pindexBestKnownBlock->GetAncestor(tip->nHeight) == tip) {
@@ -3827,26 +3910,133 @@ static bool TrustedMirrorMayDownloadIndex(
 //! clear only on ActiveTipChange. Live 2026-08-15 09:14Z: signer tip
 //! 189834, followed 189835 child skipped (`root_header_only_skip`),
 //! GBT kept templating 189835, and no newer attestation was signed.
+[[nodiscard]] static bool IndexIsShortReorgAttestedForkChild(
+    const ChainstateManager& chainman,
+    const CBlockIndex* tip,
+    const CBlockIndex* index)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    if (tip == nullptr || index == nullptr || index == tip) return false;
+    if ((index->nStatus & BLOCK_FAILED_MASK) != 0) return false;
+    if (chainman.IsOnParkedReorgBranch(index)) return false;
+    const bool on_active{
+        index->nHeight <= tip->nHeight &&
+        tip->GetAncestor(index->nHeight) == index};
+    if (on_active) return false;
+    const CBlockIndex* const lca{LastCommonAncestor(tip, index)};
+    if (lca == nullptr || index->pprev != lca) return false;
+    const bool covered{
+        chainman.IndexIsOnSignedFrontierChain(index) ||
+        chainman.IndexHasTrustedMatMulAuthority(index)};
+    return node::matmul_trusted::ConsensusMaySpendExactReplayGpuForShortReorgForkChild(
+        node::matmul_trusted::IsConfigured(),
+        chainman.IndexHasTrustedMatMulAuthority(tip),
+        covered,
+        /*index_is_tip=*/false,
+        tip->nHeight - lca->nHeight,
+        /*is_immediate_fork_child=*/true,
+        /*index_on_active_chain=*/false,
+        node::matmul_trusted::HasCompetingQuorum(
+            index->GetBlockHash(), index->nHeight),
+        /*on_parked=*/false);
+}
+
+[[nodiscard]] static const CBlockIndex* FindShortReorgAttestedForkChild(
+    const ChainstateManager& chainman)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    const CBlockIndex* const tip{chainman.ActiveTip()};
+    if (tip == nullptr) return nullptr;
+    const auto frontier{chainman.GetSignedFrontierStatus()};
+    if (!frontier.available || !frontier.hash_known || frontier.on_active_chain) {
+        return nullptr;
+    }
+    const CBlockIndex* const frontier_index{
+        chainman.m_blockman.LookupBlockIndex(frontier.hash)};
+    if (frontier_index == nullptr) return nullptr;
+    const CBlockIndex* const lca{LastCommonAncestor(tip, frontier_index)};
+    if (lca == nullptr) return nullptr;
+    const CBlockIndex* const fork_child{
+        frontier_index->GetAncestor(lca->nHeight + 1)};
+    if (!IndexIsShortReorgAttestedForkChild(chainman, tip, fork_child)) {
+        return nullptr;
+    }
+    return fork_child;
+}
+
+[[nodiscard]] static bool IndexIsHeaderOnlyLostTwinPath(
+    const ChainstateManager& chainman,
+    const CBlockIndex* tip,
+    const CBlockIndex* index,
+    const CBlockIndex* competing_best)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    if (tip == nullptr || index == nullptr) return false;
+    const CBlockIndex* const lca{LastCommonAncestor(tip, index)};
+    // Twin of the active-chain block at this height (current tip or ancestor).
+    const CBlockIndex* const active_at_h{
+        index->nHeight <= tip->nHeight ? tip->GetAncestor(index->nHeight)
+                                       : nullptr};
+    const bool same_parent{
+        active_at_h != nullptr && active_at_h != index &&
+        index->pprev != nullptr && active_at_h->pprev == index->pprev};
+    const int lca_depth{lca != nullptr ? tip->nHeight - lca->nHeight : 0};
+    const bool parent_has_data_or_is_lca{
+        index->pprev == nullptr ||
+        (lca != nullptr && index->pprev == lca) ||
+        ((index->pprev->nStatus & BLOCK_HAVE_DATA) != 0)};
+    const auto pulled_ahead = [&](const CBlockIndex* best) {
+        return best != nullptr && best->nHeight > tip->nHeight &&
+               best->GetAncestor(index->nHeight) == index;
+    };
+    const bool competing_headers_pulled_ahead{
+        pulled_ahead(competing_best) || pulled_ahead(chainman.m_best_header) ||
+        pulled_ahead(chainman.m_best_claimed_header)};
+    const bool height_occupied{
+        (active_at_h != nullptr && active_at_h != index &&
+         node::matmul_trusted::HasQuorumInMemory(active_at_h->GetBlockHash(),
+                                                 active_at_h->nHeight)) ||
+        node::matmul_trusted::HasCompetingQuorum(index->GetBlockHash(),
+                                                 index->nHeight) ||
+        node::matmul_trusted::HasLocalSignatureAtHeight(index->GetBlockHash(),
+                                                        index->nHeight)};
+    return node::matmul_trusted::HeaderOnlyMustFetchLostTwinPath(
+        node::matmul_trusted::HasLocalSigner(),
+        node::matmul_trusted::IsTrustedMirror(),
+        /*has_tip=*/true, /*has_index=*/true, index == tip,
+        (index->nStatus & BLOCK_FAILED_MASK) != 0, index->nHeight,
+        tip->nHeight, same_parent, lca_depth,
+        index->nChainWork >= tip->nChainWork, parent_has_data_or_is_lca,
+        competing_headers_pulled_ahead, height_occupied);
+}
+
 [[nodiscard]] static bool IsHeaderOnlyFetchSuppressed(
     const ChainstateManager& chainman,
     const CBlockIndex* tip,
     const CBlockIndex* index,
     const std::set<uint256>& competing,
-    const std::set<uint256>& followed_skip)
+    const std::set<uint256>& followed_skip,
+    const CBlockIndex* peer_best_known = nullptr)
     EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
     if (index == nullptr) return false;
+    if (IndexIsShortReorgAttestedForkChild(chainman, tip, index)) return false;
     if (chainman.IndexHasTrustedMatMulAuthority(index)) return false;
     if (chainman.IndexIsOnSignedFrontierChain(index)) return false;
     if (chainman.IndexIsAttestedChainTipChild(tip, index)) return false;
     if (IndexIsFollowedTipChild(chainman, tip, index)) return false;
     // Live 2026-08-15 (PR 105 comment 5302572644): HEADER_ONLY skip of
     // tip-extending grandchildren froze getdata while the tip could not
-    // move. Immediate competing siblings stay suppressed.
+    // move. Immediate competing siblings stay suppressed, except the
+    // equal-work lost twin that miners already extended (live 2026-08-24
+    // 199295 8b5da5a5 / 199300 headers, select=root_header_only_skip).
     if (node::matmul_trusted::TrustedMirrorIndexIsCatchUpSuffix(
             tip != nullptr, true, index->nHeight,
             tip != nullptr ? tip->nHeight : 0,
             tip != nullptr && index->GetAncestor(tip->nHeight) == tip)) {
+        return false;
+    }
+    if (IndexIsHeaderOnlyLostTwinPath(chainman, tip, index, peer_best_known)) {
         return false;
     }
     return competing.count(index->GetBlockHash()) != 0 ||
@@ -3965,11 +4155,31 @@ static uint256 g_configured_claimed_tip_child{};
 [[nodiscard]] static bool MatMulMaySpendExactReplayGpu(
     const ChainstateManager& chainman,
     const CBlockIndex* tip,
-    const CBlockIndex* index)
+    const CBlockIndex* index,
+    const CBlockIndex* peer_best_known = nullptr)
     EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
     if (tip == nullptr || index == nullptr) return false;
     if (node::matmul_trusted::IsTrustedMirror()) return false;
+    // Live 2026-08-20: local-signer ExactReplay required pprev==tip, so the
+    // attested equal-work sibling (LCA+1) was HEADER_ONLY-skipped and the
+    // node sat inflight=0 / GPU 0% for 45+ minutes.
+    if (IndexIsShortReorgAttestedForkChild(chainman, tip, index)) {
+        g_configured_claimed_tip_child = index->GetBlockHash();
+        return true;
+    }
+    // Live 2026-08-24: attested tip 199295 33c834f8, unattested HEADER_ONLY
+    // twin 8b5da5a5 (pprev is LCA, not tip). GETDATA skip + no ExactReplay
+    // left inflight=0 while miners extended the twin. Spend GPU on that
+    // one lost-twin path so the signer can attest; lone EncDr siblings
+    // without a pulled-ahead header fork stay off the device.
+    if (IndexIsHeaderOnlyLostTwinPath(chainman, tip, index, peer_best_known)) {
+        g_configured_claimed_tip_child = index->GetBlockHash();
+        LogInfo("MatMul ExactReplay lost-twin path hash=%s height=%d "
+                "(HEADER_ONLY skip would have wedged GETDATA)\n",
+                index->GetBlockHash().ToString(), index->nHeight);
+        return true;
+    }
     if (node::matmul_trusted::HasLocalSigner()) {
         // Unique attested tip-child toward the signed frontier: catch-up
         // ExactReplay / re-admit even when a competing unattested sibling
@@ -4212,6 +4422,7 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
     // Make sure pindexBestKnownBlock is up to date, we'll need it.
     ProcessBlockAvailability(peer.m_id);
     MaybeSeedGpuSignedFrontierBestKnown(peer.m_id, *state);
+    MaybeSeedLocalSignerLostTwinBestKnown(peer.m_id, *state);
 
     const CBlockIndex* tip{m_chainman.ActiveChain().Tip()};
     const bool catch_up{IsCatchUpBlockFetch(m_chainman, state->pindexBestKnownBlock)};
@@ -4269,6 +4480,28 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
     // hung -connect with no VERSION.
     const bool this_peer_frontier_source{
         PeerIsSignedFrontierBodySource(peer.m_id, *state, &peer)};
+    const bool this_peer_gpu{PeerIsGpuAuthority(peer.m_id, *state)};
+    const int32_t attestor_park{node::matmul_trusted::AttestorDriftYieldDepth(
+        m_chainman.m_options.max_reorg_depth_park.value_or(
+            kernel::GetReorgProtectionProfileSettings(
+                m_chainman.m_options.reorg_protection_profile)
+                .park_depth))};
+    const auto signed_frontier{m_chainman.GetSignedFrontierStatus()};
+    const bool yield_to_this_peer{
+        node::matmul_trusted::AttestorShouldYieldToPeerAttestedChain(
+            node::matmul_trusted::HasLocalSigner(),
+            this_peer_gpu,
+            static_cast<int32_t>(tip_height),
+            state->pindexBestKnownBlock != nullptr
+                ? state->pindexBestKnownBlock->nHeight
+                : -1,
+            attestor_park)};
+    const bool yield_to_frontier{
+        node::matmul_trusted::AttestorShouldYieldToSignedFrontier(
+            node::matmul_trusted::HasLocalSigner(),
+            signed_frontier.blocks_behind,
+            attestor_park)};
+    const bool attestor_yielding{yield_to_this_peer || yield_to_frontier};
     if (node::matmul_trusted::SkipNonPreferredSignedFrontierBodyPeer(
             IsSignedFrontierBodyCatchUp(),
             this_peer_frontier_source,
@@ -4337,7 +4570,8 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
     // node-wide freeze and prevents the active branch from making progress.
     if (recovery.phase == ChainRecoveryPhase::PARKED_NEEDS_OPERATOR &&
         state->pindexBestKnownBlock != nullptr &&
-        m_chainman.IsOnParkedReorgBranch(state->pindexBestKnownBlock)) {
+        m_chainman.IsOnParkedReorgBranch(state->pindexBestKnownBlock) &&
+        !yield_to_this_peer) {
         log_skip(recovery.reason);
         return;
     }
@@ -4371,7 +4605,12 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
                         state->pindexBestKnownBlock),
                     tip,
                     state->pindexBestKnownBlock)};
-            if (!recovery_target && !configured_attested_race) {
+            const bool local_signer_lost_twin{
+                node::matmul_trusted::HasLocalSigner() &&
+                TrustedMirrorShortTipReorg(tip, state->pindexBestKnownBlock) &&
+                state->pindexBestKnownBlock->nChainWork >= tip->nChainWork};
+            if (!recovery_target && !configured_attested_race &&
+                !yield_to_this_peer && !local_signer_lost_twin) {
                 log_skip("competing_not_active_tip_chain");
                 return;
             }
@@ -4430,7 +4669,8 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
         if (root_first.clamped && root_first.lowest_missing != nullptr &&
         !IsHeaderOnlyFetchSuppressed(m_chainman, tip, root_first.lowest_missing,
                                      m_header_only_competing,
-                                     m_header_only_followed_skip) &&
+                                     m_header_only_followed_skip,
+                                     state->pindexBestKnownBlock) &&
         !m_matmul_block_lifecycle.HasRetainedBody(root_first.lowest_missing->GetBlockHash()) &&
         node::matmul_trusted::ShouldDropInFlightForRootFirstRerequest(
             IsBlockRequested(root_first.lowest_missing->GetBlockHash()),
@@ -4471,7 +4711,8 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
             m_need_activate_best_chain = true;
             m_last_unconnected_abc_kick = now_kick;
         }
-        if (this_peer_frontier_source) {
+        if (this_peer_frontier_source ||
+            (attestor_yielding && this_peer_gpu)) {
             RequestMatMulTrustedAttestations(
                 state->pindexLastCommonBlock->GetBlockHash(), peer.m_id);
         }
@@ -4504,7 +4745,8 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
                                 : "root_budget_deferred";
         } else if (IsHeaderOnlyFetchSuppressed(m_chainman, tip, root_first.lowest_missing,
                                                m_header_only_competing,
-                                               m_header_only_followed_skip)) {
+                                               m_header_only_followed_skip,
+                                               state->pindexBestKnownBlock)) {
             select_reason = "root_header_only_skip";
         } else {
             select_reason = root_first.clamped ? "clamped_request_root" : "request_root";
@@ -4556,20 +4798,47 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
             return;
         }
     }
-    if (root_first.lowest_missing != nullptr &&
-        m_matmul_block_lifecycle.HasRetainedBody(
-            root_first.lowest_missing->GetBlockHash())) {
-        // Same stall as HAVE_DATA-unconnected: the followed-chain body is
-        // already in the lifecycle store (pending-cap / budget / ticketless
-        // retry). Re-getdata of this hash or its successors cannot connect
-        // until the scheduler re-admits. GETMMATTEST the retained hash so
-        // quorum can lift ConnectTip without waiting for the 1s retry loop.
-        if (this_peer_frontier_source) {
-            RequestMatMulTrustedAttestations(
-                root_first.lowest_missing->GetBlockHash(), peer.m_id);
+    if (root_first.lowest_missing != nullptr) {
+        const uint256 missing_hash{root_first.lowest_missing->GetBlockHash()};
+        const bool on_winner{
+            m_chainman.IndexIsOnSignedFrontierChain(
+                root_first.lowest_missing) ||
+            m_chainman.IndexLeadsToSignedFrontier(
+                root_first.lowest_missing) ||
+            (state->pindexBestKnownBlock != nullptr &&
+             state->pindexBestKnownBlock->GetAncestor(
+                 root_first.lowest_missing->nHeight) ==
+                 root_first.lowest_missing)};
+        const bool header_failed{
+            (root_first.lowest_missing->nStatus & BLOCK_FAILED_MASK) != 0};
+        const bool catch_up_target{
+            node::matmul_trusted::AttestorYieldHashIsCatchUpTarget(
+                attestor_yielding, on_winner, header_failed)};
+        if (catch_up_target) {
+            m_header_only_competing.erase(missing_hash);
+            m_header_only_followed_skip.erase(missing_hash);
         }
-        log_skip("root_retained_body");
-        return;
+        if (m_matmul_block_lifecycle.HasRetainedBody(missing_hash)) {
+            // Same stall as HAVE_DATA-unconnected: the followed-chain body is
+            // already in the lifecycle store (pending-cap / budget / ticketless
+            // retry). Re-getdata of this hash or its successors cannot connect
+            // until the scheduler re-admits. GETMMATTEST the retained hash so
+            // quorum can lift ConnectTip without waiting for the 1s retry loop.
+            // Local signers never arm signed-frontier catch-up, so also
+            // RefreshRetry(0) when yielding to the longer attested GPU.
+            if (node::matmul_trusted::AttestorYieldMustReadmitRetainedBody(
+                    attestor_yielding, true, catch_up_target)) {
+                (void)m_matmul_block_lifecycle.RefreshRetry(
+                    missing_hash, std::chrono::seconds{0});
+                m_need_activate_best_chain = true;
+            }
+            if (this_peer_frontier_source ||
+                (attestor_yielding && this_peer_gpu && catch_up_target)) {
+                RequestMatMulTrustedAttestations(missing_hash, peer.m_id);
+            }
+            log_skip("root_retained_body");
+            return;
+        }
     }
 
     const CBlockIndex *pindexWalk = state->pindexLastCommonBlock;
@@ -4700,7 +4969,8 @@ void PeerManagerImpl::FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, c
             // never unsuppressed the tip-child.
             if (IsHeaderOnlyFetchSuppressed(m_chainman, tip, pindex,
                                            m_header_only_competing,
-                                           m_header_only_followed_skip)) {
+                                           m_header_only_followed_skip,
+                                           state->pindexBestKnownBlock)) {
                 continue;
             }
 
@@ -7930,8 +8200,18 @@ void PeerManagerImpl::HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, c
         const bool root_first_catch_up{narrow_window || signed_frontier_catch_up};
         // Catch-up must not fill 16 newest hashes of a competing headers-only
         // flood. Existing trusted-mirror / claimed-work filters above stay.
+        // Local-signer lost-twin recovery (live 2026-08-24): miners already
+        // extended an equal-work HEADER_ONLY sibling; walk that short reorg
+        // root-first instead of aborting.
         if (root_first_catch_up && !extends_active_tip) {
-            return;
+            const bool local_signer_lost_twin{
+                node::matmul_trusted::HasLocalSigner() &&
+                !node::matmul_trusted::IsTrustedMirror() &&
+                TrustedMirrorShortTipReorg(tip_for_work, &last_header) &&
+                last_header.nChainWork >= tip_for_work->nChainWork};
+            if (!local_signer_lost_twin) {
+                return;
+            }
         }
         if (root_first_catch_up && tip_for_work != nullptr) {
             ReclaimCatchupSuccessorRequests(tip_for_work->nHeight + 1,
@@ -7952,7 +8232,8 @@ void PeerManagerImpl::HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, c
                 if (!(pindexWalk->nStatus & BLOCK_HAVE_DATA) &&
                     !IsHeaderOnlyFetchSuppressed(m_chainman, tip_for_work, pindexWalk,
                                                  m_header_only_competing,
-                                                 m_header_only_followed_skip) &&
+                                                 m_header_only_followed_skip,
+                                                 &last_header) &&
                     !m_matmul_block_lifecycle.HasRetainedBody(pindexWalk->GetBlockHash()) &&
                     (!DeploymentActiveAt(*pindexWalk, m_chainman, Consensus::DEPLOYMENT_SEGWIT) ||
                      CanServeWitnesses(peer))) {
@@ -7971,7 +8252,8 @@ void PeerManagerImpl::HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, c
                         !IsBlockRequested(pindexWalk->GetBlockHash()) &&
                         !IsHeaderOnlyFetchSuppressed(m_chainman, tip_for_work, pindexWalk,
                                                      m_header_only_competing,
-                                                     m_header_only_followed_skip) &&
+                                                     m_header_only_followed_skip,
+                                                     &last_header) &&
                         !m_matmul_block_lifecycle.HasRetainedBody(pindexWalk->GetBlockHash()) &&
                         (!DeploymentActiveAt(*pindexWalk, m_chainman, Consensus::DEPLOYMENT_SEGWIT) || CanServeWitnesses(peer))) {
                     // We don't have this block, and it's not yet in flight.
@@ -8549,12 +8831,15 @@ std::chrono::microseconds PeerManagerImpl::CatchUpDownloadTimeoutForPeer(
 {
     AssertLockHeld(cs_main);
     (void)peer_id;
-    // 90s only for a handshake-complete GPU (manual/noban). Hung -connect
-    // and outbound archives keep 15s so a silent source failsovers.
+    const CBlockIndex* const tip{m_chainman.ActiveTip()};
+    const int tip_height{tip != nullptr ? tip->nHeight : 0};
+    // 90s only when VERSION still shows bodies past our *active* tip.
+    // Stale handshake (we climbed past VERSION) and hung -connect keep 15s.
     if (node::matmul_trusted::SignedFrontierCatchUpUsesGpuTimeout(
             state.m_manual || state.m_noban,
             node::matmul_trusted::SignedFrontierVersionHandshakeComplete(
-                state.m_starting_height))) {
+                state.m_starting_height),
+            state.m_starting_height, tip_height)) {
         return std::chrono::duration_cast<std::chrono::microseconds>(
             node::matmul_trusted::SignedFrontierPreferredCatchUpTimeout(
                 node::matmul_trusted::WaitTimeout()));
@@ -8569,15 +8854,18 @@ bool PeerManagerImpl::PeerMaySignedFrontierCatchUpGetData(
     AssertLockHeld(cs_main);
     const CBlockIndex* const tip{m_chainman.ActiveTip()};
     const int tip_height{tip != nullptr ? tip->nHeight : 0};
-    // Compare VERSION height to the followed HEADER_ONLY suffix, not the
-    // connected tip. Sibling -connect archives can be ahead of our tip and
-    // still lack the suffix bodies (live nyc1 2026-08-17: GPU 191713 vs
-    // siblings 191685/191687 while m_best_header=191690; GETDATA went to
-    // siblings, inflight=0).
-    const int followed_height{
-        m_chainman.m_best_header != nullptr
-            ? m_chainman.m_best_header->nHeight
-            : tip_height};
+    // Root-first GETDATA is tip+1. Compare VERSION / BestKnown to the
+    // active tip, never to m_best_header: miner HEADER_ONLY children
+    // above the signed frontier made every archive fail
+    // starting_height > followed_header (live 2026-08-19: VERSION 194111,
+    // m_best_header 194116, tip 189534, inflight=0, stall loop no-op).
+    const int best_known_height{
+        state.pindexBestKnownBlock != nullptr
+            ? state.pindexBestKnownBlock->nHeight
+            : std::numeric_limits<int>::min()};
+    const bool best_known_extends_tip{
+        tip != nullptr && state.pindexBestKnownBlock != nullptr &&
+        state.pindexBestKnownBlock->GetAncestor(tip_height) == tip};
     const ServiceFlags services{peer.m_their_services.load()};
     const bool archive_or_mirror{
         state.m_matmul_attestation_archive || state.m_matmul_trusted_mirror ||
@@ -8593,7 +8881,7 @@ bool PeerManagerImpl::PeerMaySignedFrontierCatchUpGetData(
         !state.m_inbound && !peer.m_is_inbound,
         archive_or_mirror,
         node::matmul_trusted::SignedFrontierVersionHandshakeComplete(starting),
-        starting, followed_height);
+        starting, tip_height, best_known_height, best_known_extends_tip);
 }
 
 void PeerManagerImpl::MaybeFollowTrustedMirrorAuthorityHeader(
@@ -8722,6 +9010,57 @@ void PeerManagerImpl::MaybeSeedGpuSignedFrontierBestKnown(
             peer_id, seed->nHeight, tip->nHeight);
 }
 
+void PeerManagerImpl::MaybeSeedLocalSignerLostTwinBestKnown(
+    NodeId peer_id, CNodeState& state)
+{
+    AssertLockHeld(cs_main);
+    const CBlockIndex* const tip{m_chainman.ActiveChain().Tip()};
+    const CBlockIndex* const claimed{m_chainman.m_best_claimed_header};
+    const bool claimed_competing{
+        tip != nullptr && claimed != nullptr &&
+        claimed->nHeight > tip->nHeight &&
+        claimed->GetAncestor(tip->nHeight) != tip &&
+        TrustedMirrorShortTipReorg(tip, claimed) &&
+        claimed->nChainWork >= tip->nChainWork};
+    bool fork_child_occupied{false};
+    if (claimed_competing) {
+        const CBlockIndex* const lca{LastCommonAncestor(tip, claimed)};
+        if (lca != nullptr) {
+            const CBlockIndex* const child{
+                claimed->GetAncestor(lca->nHeight + 1)};
+            if (child != nullptr) {
+                const CBlockIndex* const active_at{
+                    tip->GetAncestor(child->nHeight)};
+                fork_child_occupied =
+                    (active_at != nullptr && active_at != child &&
+                     node::matmul_trusted::HasQuorumInMemory(
+                         active_at->GetBlockHash(),
+                         active_at->nHeight)) ||
+                    node::matmul_trusted::HasCompetingQuorum(
+                        child->GetBlockHash(), child->nHeight) ||
+                    node::matmul_trusted::HasLocalSignatureAtHeight(
+                        child->GetBlockHash(), child->nHeight);
+            }
+        }
+    }
+    if (!node::matmul_trusted::SeedLocalSignerLostTwinBestKnown(
+            node::matmul_trusted::HasLocalSigner(),
+            node::matmul_trusted::IsTrustedMirror(),
+            state.pindexBestKnownBlock == nullptr,
+            state.m_starting_height,
+            tip != nullptr ? tip->nHeight : 0,
+            claimed != nullptr ? claimed->nHeight : -1,
+            claimed_competing,
+            claimed_competing,
+            fork_child_occupied)) {
+        return;
+    }
+    state.pindexBestKnownBlock = claimed;
+    LogInfo("Seeded local-signer peer=%d best-known to claimed-work fork "
+            "height=%d (lost-twin recovery, tip=%d)\n",
+            peer_id, claimed->nHeight, tip->nHeight);
+}
+
 void PeerManagerImpl::MaybeRequestTrustedMirrorAuthorityHeaders(
     CNode& pto, Peer& peer, std::chrono::microseconds current_time)
 {
@@ -8790,7 +9129,21 @@ void PeerManagerImpl::MaybeRequestTrustedMirrorAuthorityHeaders(
         current_time - last < TRUSTED_MIRROR_AUTHORITY_HEADERS_INTERVAL) {
         return;
     }
-    const CBlockIndex* start{tip->pprev ? tip->pprev : tip};
+    const CBlockIndex* start{tip};
+    const CBlockIndex* best{m_chainman.m_best_header};
+    if (node::matmul_trusted::TrustedMirrorAuthorityHeadersFollowBest(
+            tip_height, best != nullptr ? best->nHeight : -1,
+            best != nullptr && best->nHeight >= tip_height &&
+                best->GetAncestor(tip_height) == tip)) {
+        start = best;
+    } else if (const CBlockIndex* claimed{m_chainman.m_best_claimed_header};
+               node::matmul_trusted::TrustedMirrorAuthorityHeadersFollowBest(
+                   tip_height, claimed != nullptr ? claimed->nHeight : -1,
+                   claimed != nullptr && claimed->nHeight >= tip_height &&
+                       claimed->GetAncestor(tip_height) == tip)) {
+        start = claimed;
+    }
+    if (start != nullptr && start->pprev) start = start->pprev;
     if (!MaybeSendGetHeaders(pto, GetLocator(start), peer)) {
         return;
     }
@@ -8911,7 +9264,7 @@ void PeerManagerImpl::MaybeRequestTrustedMirrorPreferredAttestations(
                 TrustedMirrorShortTipReorg(tip, target),
                 /*on_parked_reorg_branch=*/false,
                 recent_active_ancestor, followed_body_awaiting,
-                is_signed_frontier)) {
+                is_signed_frontier, IsSignedFrontierBodyCatchUp())) {
             return;
         }
         RequestMatMulTrustedAttestations(target->GetBlockHash(),
@@ -9121,6 +9474,7 @@ void PeerManagerImpl::RequestMatMulTrustedAttestations(
     bool request{false};
     bool asked_preferred_round{false};
     bool signed_frontier_catch_up{false};
+    bool attestor_yielding{false};
     {
         LOCK(cs_main);
         signed_frontier_catch_up = IsSignedFrontierBodyCatchUp();
@@ -9133,14 +9487,63 @@ void PeerManagerImpl::RequestMatMulTrustedAttestations(
         const CBlockIndex* index{
             m_chainman.m_blockman.LookupBlockIndex(hash)};
         const int32_t height{index ? index->nHeight : -1};
+        const int32_t attestor_park{
+            node::matmul_trusted::AttestorDriftYieldDepth(
+                m_chainman.m_options.max_reorg_depth_park.value_or(
+                    kernel::GetReorgProtectionProfileSettings(
+                        m_chainman.m_options.reorg_protection_profile)
+                        .park_depth))};
+        const auto frontier_status_yield{m_chainman.GetSignedFrontierStatus()};
+        bool source_gpu{false};
+        int32_t source_best_h{-1};
+        if (const CNodeState* src_state{State(source)}; src_state != nullptr) {
+            source_gpu = PeerIsGpuAuthority(source, *src_state);
+            if (src_state->pindexBestKnownBlock != nullptr) {
+                source_best_h = src_state->pindexBestKnownBlock->nHeight;
+            }
+        }
+        attestor_yielding =
+            node::matmul_trusted::AttestorShouldYieldToSignedFrontier(
+                node::matmul_trusted::HasLocalSigner(),
+                frontier_status_yield.blocks_behind,
+                attestor_park) ||
+            node::matmul_trusted::AttestorShouldYieldToPeerAttestedChain(
+                node::matmul_trusted::HasLocalSigner(),
+                source_gpu, tip_height, source_best_h, attestor_park);
+        bool on_winner_or_frontier{false};
+        if (index != nullptr) {
+            on_winner_or_frontier =
+                m_chainman.IndexIsOnSignedFrontierChain(index) ||
+                m_chainman.IndexLeadsToSignedFrontier(index);
+            if (!on_winner_or_frontier && source_best_h >= 0) {
+                if (const CNodeState* src_state{State(source)};
+                    src_state != nullptr &&
+                    src_state->pindexBestKnownBlock != nullptr &&
+                    src_state->pindexBestKnownBlock->GetAncestor(
+                        index->nHeight) == index) {
+                    on_winner_or_frontier = true;
+                }
+            }
+        }
+        if (!node::matmul_trusted::AttestorYieldShouldRequestGetMmAttest(
+                attestor_yielding, on_winner_or_frontier)) {
+            return;
+        }
+        if (attestor_yielding && on_winner_or_frontier) {
+            m_matmul_attestation_backoff.erase(hash);
+        }
         // Already-quorum hashes must not occupy GETMMATTEST tokens. Lookback
         // of the active tip, plus header-first skip-GPU, used to re-request
         // the same hash after MMATTEST cleared the in-flight map and drain
         // the archive's 16-token burst so the deferred child was rate-limited
         // forever (qualifier linear-chain stall at the next height).
+        // RefreshRetry(0) so a retained body that already has authority is
+        // re-admitted instead of sitting in root_retained_body.
         if (index != nullptr &&
             m_chainman.IndexHasTrustedMatMulAuthority(index)) {
             m_matmul_attestation_requested.erase(hash);
+            (void)m_matmul_block_lifecycle.RefreshRetry(
+                hash, std::chrono::seconds{0});
             return;
         }
         const bool parked{
@@ -9168,9 +9571,17 @@ void PeerManagerImpl::RequestMatMulTrustedAttestations(
         const bool preferred{
             node::matmul_trusted::TrustedMirrorPreferGetMmAttest(
                 tip_child, short_reorg, parked, recent_active_ancestor,
-                followed_body_awaiting, is_signed_frontier)};
+                followed_body_awaiting, is_signed_frontier,
+                signed_frontier_catch_up)};
+        if (!node::matmul_trusted::TrustedMirrorCatchUpShouldRequestGetMmAttest(
+                signed_frontier_catch_up, preferred)) {
+            // Drop a stale frontier / mid-suffix token so TTL refresh
+            // cannot keep GETMMATTEST-sending it (sfo3 a3e41371@194999).
+            m_matmul_attestation_requested.erase(hash);
+            return;
+        }
         if (tip_child || short_reorg || followed_body_awaiting ||
-            is_signed_frontier) {
+            (is_signed_frontier && !signed_frontier_catch_up)) {
             m_matmul_attestation_backoff.erase(hash);
         }
 
@@ -9388,6 +9799,10 @@ void PeerManagerImpl::RequestMatMulTrustedAttestations(
             NODE_MATMUL_TRUSTED_MIRROR};
         const bool consensus_node{
             (services & NODE_MATMUL_CONSENSUS) == NODE_MATMUL_CONSENSUS};
+        if (!node::matmul_trusted::AttestorYieldPreferGetMmAttestPeer(
+                attestor_yielding, gpu_peers.count(id) != 0)) {
+            return;
+        }
         if (!node::matmul_trusted::PreferGetMmAttestPeer(
                 archive, recent_success, trusted_mirror, consensus_node,
                 signed_frontier_catch_up, gpu_peers.count(id) != 0)) {
@@ -9555,7 +9970,12 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
             return;
         }
         authenticated_tip_child = parent == active_tip;
-        if (!MatMulMaySpendExactReplayGpu(m_chainman, active_tip, &index)) {
+        const CBlockIndex* peer_best{
+            State(node.GetId()) != nullptr
+                ? State(node.GetId())->pindexBestKnownBlock
+                : nullptr};
+        if (!MatMulMaySpendExactReplayGpu(m_chainman, active_tip, &index,
+                                          peer_best)) {
             skip_exactreplay_gpu = true;
         } else {
             parent_mtp = parent->GetMedianTimePast();
@@ -11570,6 +11990,11 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
                     if (exact_recompute_required &&
                         node::matmul_trusted::IsConfigured()) {
                         const CBlockIndex* tip{m_chainman.ActiveTip()};
+                        const CNodeState* peer_state{State(node.GetId())};
+                        const CBlockIndex* peer_best{
+                            peer_state != nullptr
+                                ? peer_state->pindexBestKnownBlock
+                                : nullptr};
                         const bool has_quorum{
                             indexed != nullptr
                                 ? m_chainman.IndexHasTrustedMatMulAuthority(indexed)
@@ -11590,7 +12015,7 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
                             persist_gpu_body_awaiting_attestation = true;
                         } else if (indexed == nullptr ||
                                    !MatMulMaySpendExactReplayGpu(
-                                       m_chainman, tip, indexed)) {
+                                       m_chainman, tip, indexed, peer_best)) {
                             // Unattested P2P bodies keep the ExactReplay gate.
                             // HEADER_ONLY + GETMMATTEST until a GPU
                             // attestation covers the hash. Do not persist a
@@ -12198,6 +12623,13 @@ void PeerManagerImpl::ProcessBlockSync(NodeId nodeid, CNode* node, const std::sh
             index->IsValid(BLOCK_VALID_SCRIPTS);
         terminal_failure = index != nullptr &&
             (index->nStatus & BLOCK_FAILED_MASK) != 0;
+        if (node::matmul_trusted::ShouldAdvanceBestKnownFromPeerBody(
+                index != nullptr, terminal_failure,
+                index != nullptr &&
+                    (index->nStatus & BLOCK_HAVE_DATA) != 0) &&
+            State(nodeid) != nullptr) {
+            UpdateBlockAvailability(nodeid, hash);
+        }
         // Persist-or-skip-fetch: a delivered followed-chain body that still
         // lacks HAVE_DATA must not re-enter FindNextBlocks until the tip
         // moves. True anti-DoS HEADER_ONLY never reaches ProcessNewBlock.
@@ -12715,6 +13147,8 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             state->m_node_network =
                 (nServices & NODE_NETWORK) == NODE_NETWORK;
             state->m_starting_height = starting_height;
+            MaybeSeedGpuSignedFrontierBestKnown(pfrom.GetId(), *state);
+            MaybeSeedLocalSignerLostTwinBestKnown(pfrom.GetId(), *state);
             m_num_preferred_download_peers += state->fPreferredDownload;
 
             if (require_matmul_consensus && base_preferred &&
@@ -16000,6 +16434,17 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             const auto result{
                 node::matmul_trusted::Add(
                     attestation, hash, expected_height)};
+            // Per-connection BestKnown: MMATTEST is how 1-of-2 attestors
+            // prove the live tip after they stop announcing headers at
+            // each other.
+            if (node::matmul_trusted::ShouldAdvanceBestKnownFromMmAttest(
+                    known_profile1, /*header_failed=*/false, result)) {
+                LOCK(cs_main);
+                if (State(pfrom.GetId()) != nullptr) {
+                    UpdateBlockAvailability(pfrom.GetId(), hash);
+                }
+                wake_block_fetch = true;
+            }
             if (result ==
                 matmul::trusted::AddResult::Accepted) {
                 relay.push_back(attestation);

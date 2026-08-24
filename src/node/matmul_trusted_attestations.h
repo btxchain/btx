@@ -372,6 +372,48 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
     return false;
 }
 
+/** Equal-work lost twin (live 2026-08-20 consensus node): unattested tip
+ *  at H, attested sibling at H, signed frontier HEADER_ONLY at H+N.
+ *  The winner's pprev is the LCA, not the current tip, so the local-signer
+ *  ExactReplay gate (pprev==tip) HEADER_ONLY-skipped it forever. Spend GPU
+ *  only for the immediate attested fork-child of a short reorg (depth 1–6)
+ *  while the tip itself has no quorum. Dual-attested same-height twins,
+ *  parked branches, fossils, and already-canonical ancestors stay off. */
+[[nodiscard]] inline bool ConsensusMaySpendExactReplayGpuForShortReorgForkChild(
+    bool configured,
+    bool tip_has_quorum,
+    bool index_covered_by_attestation,
+    bool index_is_tip,
+    int lca_depth,
+    bool is_immediate_fork_child,
+    bool index_on_active_chain,
+    bool has_competing_quorum,
+    bool on_parked)
+{
+    if (!configured || index_is_tip || on_parked || index_on_active_chain) {
+        return false;
+    }
+    if (tip_has_quorum || has_competing_quorum) return false;
+    if (!index_covered_by_attestation || !is_immediate_fork_child) return false;
+    return TrustedMirrorIsShortTipReorg(lca_depth);
+}
+
+/** While the signed frontier is off the active chain, budget-deferred
+ *  retry may only re-admit the attested fork-child / frontier path.
+ *  Historical losing twins (live 195579/195599/195601) occupied admission
+ *  every 20s–2min with GPU at 0% and inflight=0. */
+[[nodiscard]] inline bool ShouldRetryBudgetDeferredWhileFrontierOffChain(
+    bool frontier_off_active_chain,
+    bool hash_is_short_reorg_attested_fork_child,
+    bool hash_on_signed_frontier_chain,
+    bool hash_is_followed_tip_child)
+{
+    if (!frontier_off_active_chain) return true;
+    return hash_is_short_reorg_attested_fork_child ||
+           hash_on_signed_frontier_chain ||
+           hash_is_followed_tip_child;
+}
+
 /** Skip FindUniqueCompetingAttestedIndex's HEADER_ONLY-hole pprev walk.
  *  If `idx` is already on the active chain, LastCommonAncestor(tip, idx)
  *  is `idx`. Walking `idx->pprev` until that LCA never hits `idx` and
@@ -415,6 +457,115 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
                has_tip, has_index, index_height, tip_height,
                index_ancestor_at_tip_is_tip) &&
            index_height > tip_height + 1;
+}
+
+/** Live 2026-08-24 HEADER_ONLY stall: attested tip at H (199295 33c834f8),
+ *  equal-work HEADER_ONLY twin at H (8b5da5a5, same parent), miners
+ *  extended the twin to H+N (headers-only 199300+, branchlen 6+),
+ *  select=root_header_only_skip in_flight=0. GETMMATTEST on the twin is
+ *  not_canonical (chicken-egg). ExactReplay required pprev==tip and
+ *  ConsensusMaySpendExactReplayGpuForShortReorgForkChild refuses when the
+ *  tip already has quorum, so the body was never fetched or replayed.
+ *
+ *  Local signer only (trusted mirrors keep skip until the attestor signs):
+ *  fetch the same-parent twin of the active-chain block at this height
+ *  (the current tip *or* an ancestor) once competing headers have already
+ *  pulled ahead on that fork, then each descendant whose parent already
+ *  has a body, while LCA depth is a short reorg (1–6).
+ *
+ *  Live 2026-08-24 after 199296–199297 were attested: the unsigned twin
+ *  stayed at 199295 while miners extended it to 199309+. Comparing only
+ *  `index_height == tip_height` and `nChainWork >= tip` left
+ *  select=root_header_only_skip (lowest missing is the ancestor twin,
+ *  which has *less* work than the moved tip). Overlay RecalculateBestHeader
+ *  also pins m_best_header to the attested tip, so pulled-ahead must come
+ *  from peer BestKnown *or* the claimed-work (unadjusted) header.
+ *
+ *  Depth-2 cousin (PR 117 review): after the unsigned fork-child at H-1
+ *  has a body, the equal-height HEADER_ONLY twin at H is not same-parent
+ *  (its parent is the fork-child). Fetch it once competing headers have
+ *  pulled ahead, or descendants stay stuck on parent_has_data_or_is_lca.
+ *
+ *  Never fetch (or ExactReplay) a twin whose height already has quorum on
+ *  a different hash. SignAuthoritative is HeightOccupied; overlay will not
+ *  reorg the attested tip. Live 2026-08-24: GETDATA looped on 8b5da5a5 at
+ *  199295 (select=root_in_flight) while both GPUs needed to mine 199298.
+ *
+ *  A lone EncDr competing sibling with no descendant headers stays off
+ *  the device. This is fetch + ExactReplay, not ConnectTip: equal-work
+ *  does not reorg; more-work HAVE_DATA on the twin fork does. */
+[[nodiscard]] inline bool HeaderOnlyMustFetchLostTwinPath(
+    bool has_local_signer,
+    bool is_trusted_mirror,
+    bool has_tip,
+    bool has_index,
+    bool index_is_tip,
+    bool index_failed,
+    int32_t index_height,
+    int32_t tip_height,
+    bool same_parent,
+    int lca_depth,
+    bool better_or_equal_work,
+    bool parent_has_data_or_is_lca,
+    bool competing_headers_pulled_ahead,
+    bool competing_quorum_at_index = false)
+{
+    if (!has_local_signer || is_trusted_mirror) return false;
+    if (!has_tip || !has_index || index_is_tip || index_failed) return false;
+    if (competing_quorum_at_index) return false;
+    // Twin of the tip or of an ancestor. Do not require work >= current
+    // tip: an ancestor twin has less chainwork once the attested chain
+    // has moved. The pulled-ahead competing fork supplies more work.
+    if (same_parent && index_height <= tip_height) {
+        if (index_height == tip_height && !better_or_equal_work) return false;
+        return competing_headers_pulled_ahead;
+    }
+    if (index_height > tip_height) {
+        if (!better_or_equal_work) return false;
+        return TrustedMirrorIsShortTipReorg(lca_depth) &&
+               parent_has_data_or_is_lca;
+    }
+    if (index_height < tip_height) {
+        return competing_headers_pulled_ahead &&
+               TrustedMirrorIsShortTipReorg(lca_depth) &&
+               parent_has_data_or_is_lca;
+    }
+    // Equal-height cousin (fork at H-2): same_parent is false because the
+    // twin's parent is the unsigned fork-child, not the attested parent.
+    // After that fork-child has a body (or is the LCA), fetch this block so
+    // pulled-ahead descendants are not stuck on parent_has_data_or_is_lca.
+    // Live shape asked on PR 117: tip H, equal-work twin at H, LCA H-2.
+    if (index_height == tip_height) {
+        if (!better_or_equal_work) return false;
+        return competing_headers_pulled_ahead &&
+               TrustedMirrorIsShortTipReorg(lca_depth) &&
+               parent_has_data_or_is_lca;
+    }
+    return false;
+}
+
+/** After restart, EncDr miners advertise VERSION height above the attested
+ *  tip but never complete header sync (synced_headers=-1). Overlay
+ *  RecalculateBestHeader pins m_best_header, so BestKnown stays unset and
+ *  FindNextBlocksToDownload logs no_best_known. Seed BestKnown from the
+ *  local claimed-work competing fork so GETDATA can start. */
+[[nodiscard]] inline bool SeedLocalSignerLostTwinBestKnown(
+    bool has_local_signer,
+    bool is_trusted_mirror,
+    bool best_known_unset,
+    int starting_height,
+    int tip_height,
+    int claimed_height,
+    bool claimed_is_short_reorg_competing_fork,
+    bool claimed_work_ge_tip,
+    bool fork_child_height_occupied = false)
+{
+    if (!has_local_signer || is_trusted_mirror) return false;
+    if (!best_known_unset) return false;
+    if (starting_height <= tip_height) return false;
+    if (claimed_height <= tip_height) return false;
+    if (fork_child_height_occupied) return false;
+    return claimed_is_short_reorg_competing_fork && claimed_work_ge_tip;
 }
 
 /** FindMostWorkChain / candidate-set gate for any node that tracks a
@@ -634,19 +785,39 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
  *  the missing root of a short tip-race reorg (sibling of tip / first hole
  *  on the authority peer's best-known), or a followed-chain HAVE_DATA /
  *  retained GPU body still waiting for MMATTEST. Competing headers at
- *  1879xx are neither. Parked deep-reorg branches never prefer. */
+ *  1879xx are neither. Parked deep-reorg branches never prefer.
+ *
+ *  During signed-frontier catch-up the moving frontier hash and a recent
+ *  active ancestor are not preferred. Live sfo3 2026-08-20: catch_up=1,
+ *  needed_height=194728, GETMMATTEST send hammered mid-suffix 194999
+ *  (stale frontier) and the current frontier (no_such_block) so tip+1
+ *  never got a slot. */
 [[nodiscard]] inline bool TrustedMirrorPreferGetMmAttest(
     bool active_tip_child,
     bool short_tip_reorg_missing_root,
     bool on_parked_reorg_branch = false,
     bool recent_active_ancestor = false,
     bool followed_body_awaiting_attestation = false,
-    bool is_signed_frontier_hash = false)
+    bool is_signed_frontier_hash = false,
+    bool signed_frontier_catch_up = false)
 {
     if (on_parked_reorg_branch) return false;
-    return active_tip_child || short_tip_reorg_missing_root ||
-           recent_active_ancestor || followed_body_awaiting_attestation ||
-           is_signed_frontier_hash;
+    const bool hole{active_tip_child || short_tip_reorg_missing_root ||
+                    followed_body_awaiting_attestation};
+    if (signed_frontier_catch_up) return hole;
+    return hole || recent_active_ancestor || is_signed_frontier_hash;
+}
+
+/** Catch-up must not allocate a GETMMATTEST slot for a non-hole hash.
+ *  Non-preferred requests still occupied 16 mid-suffix slots on sfo3
+ *  (outstanding_slots=16/1024, rejected_unattestable climbing) while
+ *  194728 sat HEADER_ONLY with local quorum and in_flight=0. */
+[[nodiscard]] inline bool TrustedMirrorCatchUpShouldRequestGetMmAttest(
+    bool signed_frontier_catch_up,
+    bool preferred)
+{
+    if (!signed_frontier_catch_up) return true;
+    return preferred;
 }
 
 /** GETMMATTEST destinations. NODE_MATMUL_ATTESTATION_ARCHIVE means the
@@ -816,10 +987,160 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
     int tip_height)
 {
     // No VERSION: cannot serve. A peer whose VERSION height is at or behind
-    // our tip does not have the HEADER_ONLY suffix (live nyc1 2026-08-16:
-    // sibling archives were preferred-capable from headers alone, GETDATA
-    // timed out, miners were skipped).
+    // our *active* tip does not have tip+1 at handshake (live nyc1
+    // 2026-08-16: sibling archives were preferred-capable from headers
+    // alone, GETDATA timed out, miners were skipped).
+    // Compare to the connected tip, never to m_best_header: miner
+    // HEADER_ONLY children stacked on the attested tip made
+    // starting_height > followed_header fail while the peer still had
+    // every body from tip+1 through the signed frontier (live GPU-archive
+    // catch-up 2026-08-19: VERSION 194111 vs m_best_header 194116, tip
+    // 189534, inflight=0).
     return starting_height > tip_height;
+}
+
+/** Root-first catch-up GETDATA asks for active-tip+1, not m_best_header.
+ *  VERSION is a handshake snapshot (lower bound on bodies the peer *had*),
+ *  not a live connected height. After this node climbs past that snapshot,
+ *  a still-connected archive whose BestKnown extends our tip can still
+ *  serve historical tip+1 (live 2026-08-19: VERSION 194111, tip 194121,
+ *  BestKnown 194160, stall recovery logged every 60s with inflight=0).
+ *  Behind-sibling VERSION < tip with no extending BestKnown stays refused
+ *  (live nyc1 2026-08-17: 190767 vs 190816). */
+[[nodiscard]] inline bool SignedFrontierPeerMayServeCatchUpTipPlusOne(
+    int starting_height,
+    int active_tip_height,
+    int best_known_height = std::numeric_limits<int>::min(),
+    bool best_known_extends_tip = false)
+{
+    if (starting_height < 0) return false;
+    if (SignedFrontierPeerHadCatchUpBodiesAtConnect(starting_height,
+                                                    active_tip_height)) {
+        return true;
+    }
+    return best_known_extends_tip && best_known_height > active_tip_height;
+}
+
+/** A valid Accepted/Duplicate MMATTEST for a known non-failed Profile-1
+ *  header proves the peer has that hash. BestKnown used to move only on
+ *  INV/HEADERS/CMPCTBLOCK, so a 1-of-2 attestor that only relayed
+ *  attestations and bodies stayed pinned at the last header announcement.
+ *  That made FindNextBlocks skip the peer, CHAIN_SYNC_TIMEOUT treat it as
+ *  an old chain, and catch-up GETDATA/GETMMATTEST use a stale pointer.
+ *  Rejected / unknown / failed headers must not advance it (competing
+ *  HEADER_ONLY towers stay untrusted). */
+[[nodiscard]] inline bool ShouldAdvanceBestKnownFromMmAttest(
+    bool known_profile1,
+    bool header_failed,
+    matmul::trusted::AddResult result)
+{
+    if (!known_profile1 || header_failed) return false;
+    return result == matmul::trusted::AddResult::Accepted ||
+           result == matmul::trusted::AddResult::Duplicate;
+}
+
+/** A connected, non-failed body also proves availability. HEADER_ONLY,
+ *  deferred, mutated, or failed deliveries must not move BestKnown. */
+[[nodiscard]] inline bool ShouldAdvanceBestKnownFromPeerBody(
+    bool have_index,
+    bool header_failed,
+    bool have_data)
+{
+    return have_index && !header_failed && have_data;
+}
+
+/**
+ * Attestor↔attestor drift yield (1-of-2 / M-of-N GPU signers).
+ *
+ * Local signers are not trusted mirrors, so IsSignedFrontierCatchUp never
+ * arms on them. After two GPUs sit on the same tip they also stop
+ * announcing headers; even with BestKnown advancing from MMATTEST/body,
+ * the loser can sit on root_retained_body with in_flight=0 while GETMMATTEST
+ * tokens go to competing HEADER_ONLY twins (live 2026-08-20: tip 194828,
+ * canonical 194829 retained, peer BestKnown 194851, rejected_unattestable
+ * 239). Once the gap reaches the operator park depth the longer attested
+ * / BestKnown side wins. The loser immediately re-admits the retained
+ * canonical body and GETMMATTEST/GETDATA that suffix from the winning GPU
+ * only. Public / miner peers and failed / off-path hashes stay refused.
+ */
+static constexpr int32_t ATTESTOR_DRIFT_YIELD_DEPTH{6};
+
+/** Resolve the yield threshold. Disabled / unset park uses the EMERGENCY
+ *  default of 6 so a 1-block race does not force a yield. */
+[[nodiscard]] inline int32_t AttestorDriftYieldDepth(uint32_t configured_park)
+{
+    if (configured_park == 0 ||
+        configured_park == std::numeric_limits<uint32_t>::max()) {
+        return ATTESTOR_DRIFT_YIELD_DEPTH;
+    }
+    if (configured_park > static_cast<uint32_t>(
+            std::numeric_limits<int32_t>::max())) {
+        return ATTESTOR_DRIFT_YIELD_DEPTH;
+    }
+    return static_cast<int32_t>(configured_park);
+}
+
+/** This GPU peer is at least `park_depth` ahead of our tip. */
+[[nodiscard]] inline bool AttestorShouldYieldToPeerAttestedChain(
+    bool local_signer,
+    bool peer_is_gpu_attestor,
+    int32_t local_tip_height,
+    int32_t peer_known_height,
+    int32_t park_depth)
+{
+    if (!local_signer || !peer_is_gpu_attestor) return false;
+    if (park_depth <= 0 || local_tip_height < 0 || peer_known_height < 0) {
+        return false;
+    }
+    return peer_known_height >= local_tip_height + park_depth;
+}
+
+/** Signed frontier (any stored quorum) has pulled ahead by park depth. */
+[[nodiscard]] inline bool AttestorShouldYieldToSignedFrontier(
+    bool local_signer,
+    int32_t blocks_behind,
+    int32_t park_depth)
+{
+    if (!local_signer || park_depth <= 0 || blocks_behind < 0) return false;
+    return blocks_behind >= park_depth;
+}
+
+/** Canonical hole on the winner / signed-frontier chain. Competing
+ *  same-height HEADER_ONLY twins are not this. */
+[[nodiscard]] inline bool AttestorYieldHashIsCatchUpTarget(
+    bool yielding,
+    bool on_winner_or_signed_frontier_chain,
+    bool header_failed)
+{
+    return yielding && on_winner_or_signed_frontier_chain && !header_failed;
+}
+
+/** GETMMATTEST destinations while yielding: GPU attestors only. */
+[[nodiscard]] inline bool AttestorYieldPreferGetMmAttestPeer(
+    bool yielding,
+    bool gpu_attestor)
+{
+    if (!yielding) return true;
+    return gpu_attestor;
+}
+
+/** While yielding, request only the winner's attested suffix. */
+[[nodiscard]] inline bool AttestorYieldShouldRequestGetMmAttest(
+    bool yielding,
+    bool on_winner_or_signed_frontier_chain)
+{
+    if (!yielding) return true;
+    return on_winner_or_signed_frontier_chain;
+}
+
+/** Re-admit the retained canonical body now (retry delay 0) instead of
+ *  sitting in root_retained_body while the winner walks away. */
+[[nodiscard]] inline bool AttestorYieldMustReadmitRetainedBody(
+    bool yielding,
+    bool have_retained_body,
+    bool hash_is_catch_up_target)
+{
+    return yielding && have_retained_body && hash_is_catch_up_target;
 }
 
 [[nodiscard]] inline bool SignedFrontierBodySourceCanServeCatchUp(
@@ -832,8 +1153,9 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
     int starting_height = std::numeric_limits<int>::max())
 {
     if (!version_handshake_complete) return false;
-    if (!SignedFrontierPeerHadCatchUpBodiesAtConnect(starting_height,
-                                                     tip_height)) {
+    if (!SignedFrontierPeerMayServeCatchUpTipPlusOne(
+            starting_height, tip_height, best_known_height,
+            best_known_extends_tip)) {
         return false;
     }
     return preferred && has_best_known && best_known_height > tip_height &&
@@ -880,8 +1202,10 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
 }
 
 /** Issue catch-up GETDATA only to handshake-complete GPU, or to our
- *  outbound archive/mirror that was ahead at VERSION. Hung -connect
- *  (no VERSION) must not occupy a slot or block those outbounds. */
+ *  outbound archive/mirror. Hung -connect (no VERSION) must not occupy
+ *  a slot or block those outbounds. `tip_height` is the *active* tip:
+ *  root-first asks for tip+1, so miner HEADER_ONLY children on
+ *  m_best_header must not raise the VERSION bar. */
 [[nodiscard]] inline bool SignedFrontierMayRequestCatchUpGetData(
     bool signed_frontier_catch_up,
     bool gpu_manual_or_noban,
@@ -889,7 +1213,9 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
     bool archive_or_mirror,
     bool version_handshake_complete,
     int starting_height = std::numeric_limits<int>::max(),
-    int tip_height = std::numeric_limits<int>::min())
+    int tip_height = std::numeric_limits<int>::min(),
+    int best_known_height = std::numeric_limits<int>::min(),
+    bool best_known_extends_tip = false)
 {
     if (!signed_frontier_catch_up) return true;
     if (!version_handshake_complete) return false;
@@ -899,8 +1225,9 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
     if (!gpu_manual_or_noban && (!outbound || !archive_or_mirror)) {
         return false;
     }
-    return SignedFrontierPeerHadCatchUpBodiesAtConnect(starting_height,
-                                                       tip_height);
+    return SignedFrontierPeerMayServeCatchUpTipPlusOne(
+        starting_height, tip_height, best_known_height,
+        best_known_extends_tip);
 }
 
 /** Skip miners / inbound archives during signed-frontier catch-up.
@@ -1227,6 +1554,18 @@ static constexpr auto GPU_RETAIN_ATTESTATION_RETRY{std::chrono::seconds{2}};
     return gpu_authority && tip_height >= 0;
 }
 
+/** Continue getheaders from the HEADER_ONLY tip-chain frontier, not the
+ *  connected tip. Locator-from-tip replays the first 2000 headers forever
+ *  while IBD cannot ConnectTip (fresh trusted-mirror 2026-08-24: one
+ *  headers batch, then 38+ min quiet, synced_headers=-1). */
+[[nodiscard]] inline bool TrustedMirrorAuthorityHeadersFollowBest(
+    int32_t tip_height,
+    int32_t best_height,
+    bool best_extends_tip)
+{
+    return best_extends_tip && best_height > tip_height;
+}
+
 /** Archives connected to a GPU attestor (1-of-1 or M-of-N): only those
  *  GPU nodes may deliver inbound BLOCK/HEADERS. Everyone else is
  *  outbound-only (they may fetch blocks from this node). That keeps
@@ -1333,14 +1672,18 @@ static constexpr auto GPU_RETAIN_ATTESTATION_RETRY{std::chrono::seconds{2}};
     return wait_s + kMargin;
 }
 
-/** 90s catch-up timeout: operator GPU with a completed VERSION only.
- *  Hung -connect (manual, starting_height=-1) keeps the 15s miner
- *  window so it cannot pin the pipeline. */
+/** 90s catch-up timeout: operator GPU/noban whose VERSION still shows
+ *  bodies past our active tip. Hung -connect (starting_height=-1) and
+ *  stale-handshake archives we have climbed past keep 15s so a behind
+ *  sibling cannot pin the 1-wide slot for 90s. */
 [[nodiscard]] inline bool SignedFrontierCatchUpUsesGpuTimeout(
     bool manual_or_noban,
-    bool version_handshake_complete)
+    bool version_handshake_complete,
+    int starting_height = std::numeric_limits<int>::max(),
+    int active_tip_height = std::numeric_limits<int>::min())
 {
-    return manual_or_noban && version_handshake_complete;
+    if (!manual_or_noban || !version_handshake_complete) return false;
+    return starting_height > active_tip_height;
 }
 
 /** 180s inflight reclaim for GPU catch-up: handshake-complete
