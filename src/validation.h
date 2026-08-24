@@ -1471,6 +1471,15 @@ public:
     /** Best header we've seen so far (used for getheaders queries' starting points). */
     CBlockIndex* m_best_header GUARDED_BY(::cs_main){nullptr};
     /**
+     * Most-work TREE-valid header, including unattested competing forks.
+     * Overlay RecalculateBestHeader / PreferTrustAdjustedHeader pin
+     * m_best_header to the attested tip; lost-twin GETDATA still needs to
+     * know that miners already extended a HEADER_ONLY sibling (live
+     * 2026-08-24: headers-only 199309 vs attested 199297). Never use this
+     * as the download target or getheaders locator.
+     */
+    CBlockIndex* m_best_claimed_header GUARDED_BY(::cs_main){nullptr};
+    /**
      * Lock-free publication of the exact height currently owned by
      * m_best_header. Unlike a peer height hint this value is reversible: an
      * invalidate/reconsider/reorg rescan may move it backwards.
@@ -1869,6 +1878,17 @@ public:
         m_best_followed_header_height.store(
             best_header != nullptr ? best_header->nHeight : -1,
             std::memory_order_release);
+    }
+
+    /** Track most-work claimed header (unattested competing forks included). */
+    void MaybeUpdateBestClaimedHeader(CBlockIndex* pindex) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        AssertLockHeld(::cs_main);
+        if (pindex == nullptr || (pindex->nStatus & BLOCK_FAILED_MASK)) return;
+        if (m_best_claimed_header == nullptr ||
+            pindex->nChainWork > m_best_claimed_header->nChainWork) {
+            m_best_claimed_header = pindex;
+        }
     }
 
     /** Exact accepted followed-header height for lock-free liveness budgets. */

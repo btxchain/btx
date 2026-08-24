@@ -14065,6 +14065,7 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
     }
     CBlockIndex* const prev_best{m_best_header};
     CBlockIndex* pindex{m_blockman.AddToBlockIndex(block, m_best_header)};
+    MaybeUpdateBestClaimedHeader(pindex);
 
     // PreferTrustAdjustedHeader's unauth allowance is denominated in the
     // candidate's own nBits. A high-difficulty stale fork (live 1883xx)
@@ -15123,9 +15124,11 @@ bool ChainstateManager::LoadBlockIndex()
             if (pindex->nStatus & BLOCK_FAILED_MASK && (!m_best_invalid || pindex->nChainWork > m_best_invalid->nChainWork)) {
                 m_best_invalid = pindex;
             }
-            if (pindex->IsValid(BLOCK_VALID_TREE) &&
-                (m_best_header == nullptr || PreferTrustAdjustedHeader(*m_best_header, *pindex))) {
-                SetBestHeader(pindex);
+            if (pindex->IsValid(BLOCK_VALID_TREE)) {
+                MaybeUpdateBestClaimedHeader(pindex);
+                if (m_best_header == nullptr || PreferTrustAdjustedHeader(*m_best_header, *pindex)) {
+                    SetBestHeader(pindex);
+                }
             }
         }
         SetBestHeader(m_best_header);
@@ -20263,10 +20266,15 @@ void ChainstateManager::RecalculateBestHeader()
     AssertLockHeld(cs_main);
     const CBlockIndex* const active_tip{ActiveChain().Tip()};
     SetBestHeader(ActiveChain().Tip());
+    m_best_claimed_header = nullptr;
+    if (active_tip != nullptr) {
+        MaybeUpdateBestClaimedHeader(const_cast<CBlockIndex*>(active_tip));
+    }
     if (!node::matmul_trusted::IsConfigured() || active_tip == nullptr) {
         for (auto& entry : m_blockman.m_block_index) {
             if (m_interrupt) return;
             if (entry.second.nStatus & BLOCK_FAILED_MASK) continue;
+            MaybeUpdateBestClaimedHeader(&entry.second);
             // Authenticated-work selection with a bounded unauth allowance: a short
             // unverified MatMul suffix may displace a losing tip for chase, but a
             // forged flood beyond the allowance cannot outrank authenticated work.
@@ -20310,8 +20318,11 @@ void ChainstateManager::RecalculateBestHeader()
     for (auto& [_, candidate] : m_blockman.m_block_index) {
         if (m_interrupt) return;
         if ((candidate.nStatus & BLOCK_FAILED_MASK) ||
-            candidate.nHeight < active_tip->nHeight ||
             IsOnParkedReorgBranch(&candidate)) {
+            continue;
+        }
+        MaybeUpdateBestClaimedHeader(&candidate);
+        if (candidate.nHeight < active_tip->nHeight) {
             continue;
         }
 

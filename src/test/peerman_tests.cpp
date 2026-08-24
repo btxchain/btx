@@ -95,6 +95,7 @@ static void NeutralizeUnconnectedHeaders(ChainstateManager& chainman)
         walk->nAuthenticatedChainWork = walk->nChainWork;
     }
     chainman.SetBestHeader(tip);
+    chainman.m_best_claimed_header = tip;
 }
 
 static void ResetSharedPeermanFixture(node::NodeContext& node)
@@ -4472,6 +4473,201 @@ BOOST_AUTO_TEST_CASE(local_signer_fetches_header_only_lost_twin_after_headers_pu
         m_node.chainman->SetBestHeader(
             const_cast<CBlockIndex*>(m_node.chainman->ActiveTip()));
     }
+}
+
+// Live 2026-08-24: after the signer attested 199296–199297, the unsigned
+// twin at 199295 had less work than the new tip. Skip-set re-filled on the
+// next EncDr body and GETDATA stayed root_header_only_skip. Fetch the
+// ancestor twin once competing headers are already ahead of the moved tip.
+BOOST_AUTO_TEST_CASE(local_signer_fetches_ancestor_lost_twin_after_tip_moved)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+
+    node::matmul_trusted::ResetForTest();
+    ResetSharedPeermanFixture(m_node);
+    CKey signer;
+    signer.MakeNewKey(/*fCompressed=*/true);
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256::FromHex(std::string(64, '1')).value();
+    config.replay_authority_context =
+        uint256::FromHex(std::string(64, '2')).value();
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    config.local_signer = signer;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/false, /*serve=*/true,
+        std::chrono::milliseconds{50}, error));
+    BOOST_REQUIRE(node::matmul_trusted::HasLocalSigner());
+    struct SignerReset {
+        ~SignerReset() { node::matmul_trusted::ResetForTest(); }
+    } signer_reset;
+
+    ConnmanTestMsg& connman = static_cast<ConnmanTestMsg&>(*m_node.connman);
+    PeerManager& peerman = *m_node.peerman;
+    peerman.InstallMatMulVerifyOverrideForTest(
+        [&](const CBlock&, int32_t, std::optional<int64_t>) { return true; });
+    struct ClearOverride {
+        PeerManager& peerman;
+        ~ClearOverride() { peerman.InstallMatMulVerifyOverrideForTest({}); }
+    } clear_override{peerman};
+
+    Consensus::Params& consensus = const_cast<Consensus::Params&>(
+        m_node.chainman->GetParams().GetConsensus());
+    auto restore_heights{SaveMatMulHeights(consensus)};
+
+    const CBlockIndex* parent{
+        WITH_LOCK(::cs_main, return m_node.chainman->ActiveChain().Tip())};
+    BOOST_REQUIRE(parent != nullptr);
+    SetMockTime(std::chrono::seconds{parent->GetBlockTime() + 1});
+    ActivateRcAtTip(consensus, *parent);
+    peerman.SetBestBlock(parent->nHeight,
+                         std::chrono::seconds{parent->GetBlockTime()});
+
+    CBlock adopted{MineTipChild(m_node, *parent, /*extra_time=*/0)};
+    CBlock competing{MineTipChild(m_node, *parent, /*extra_time=*/1)};
+    const uint256 competing_hash{competing.GetHash()};
+    BOOST_REQUIRE(m_node.chainman->ProcessNewBlock(
+        std::make_shared<const CBlock>(adopted), /*force_processing=*/true,
+        /*min_pow_checked=*/true, nullptr));
+    if (!node::matmul_trusted::HasQuorum(adopted.GetHash(),
+                                         parent->nHeight + 1)) {
+        BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
+                          adopted.GetHash(), parent->nHeight + 1) ==
+                      matmul::trusted::AddResult::Accepted);
+    }
+    const CBlockIndex* after_adopted{
+        WITH_LOCK(::cs_main, return m_node.chainman->ActiveChain().Tip())};
+    CBlock adopted2{MineTipChild(m_node, *after_adopted, /*extra_time=*/0)};
+    BOOST_REQUIRE(m_node.chainman->ProcessNewBlock(
+        std::make_shared<const CBlock>(adopted2), /*force_processing=*/true,
+        /*min_pow_checked=*/true, nullptr));
+    if (!node::matmul_trusted::HasQuorum(adopted2.GetHash(),
+                                         parent->nHeight + 2)) {
+        BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
+                          adopted2.GetHash(), parent->nHeight + 2) ==
+                      matmul::trusted::AddResult::Accepted);
+    }
+    BOOST_CHECK_EQUAL(
+        WITH_LOCK(::cs_main,
+                  return m_node.chainman->ActiveChain().Tip()->nHeight),
+        parent->nHeight + 2);
+
+    CBlock grandchild = node::BlockAssembler{
+        m_node.chainman->ActiveChainstate(), nullptr, {}, m_node}
+                            .CreateNewBlock()
+                            ->block;
+    grandchild.hashPrevBlock = competing.GetHash();
+    grandchild.nTime = competing.nTime + 1;
+    {
+        CMutableTransaction coinbase{*grandchild.vtx[0]};
+        coinbase.vin[0].scriptSig = CScript() << (parent->nHeight + 2) << OP_0;
+        grandchild.vtx[0] = MakeTransactionRef(coinbase);
+    }
+    grandchild.hashMerkleRoot = BlockMerkleRoot(grandchild);
+    BOOST_REQUIRE(MineHeaderForConsensus(
+        grandchild, parent->nHeight + 2, m_node.chainman->GetConsensus(),
+        5'000'000, competing.GetBlockTime()));
+
+    CBlock great = node::BlockAssembler{
+        m_node.chainman->ActiveChainstate(), nullptr, {}, m_node}
+                       .CreateNewBlock()
+                       ->block;
+    great.hashPrevBlock = grandchild.GetHash();
+    great.nTime = grandchild.nTime + 1;
+    {
+        CMutableTransaction coinbase{*great.vtx[0]};
+        coinbase.vin[0].scriptSig = CScript() << (parent->nHeight + 3) << OP_0;
+        great.vtx[0] = MakeTransactionRef(coinbase);
+    }
+    great.hashMerkleRoot = BlockMerkleRoot(great);
+    BOOST_REQUIRE(MineHeaderForConsensus(
+        great, parent->nHeight + 3, m_node.chainman->GetConsensus(),
+        5'000'000, grandchild.GetBlockTime()));
+
+    const ServiceFlags services{ServiceFlags(
+        NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS |
+        NODE_MATMUL_ATTESTATION_ARCHIVE)};
+    CNode peer{/*id=*/225,
+               /*sock=*/nullptr,
+               CAddress{PeermanTestService(0x1900007f), NODE_NETWORK},
+               /*nKeyedNetGroupIn=*/0x19,
+               /*nLocalHostNonceIn=*/0,
+               CAddress{},
+               /*addrNameIn=*/"ancestor-lost-twin",
+               ConnectionType::OUTBOUND_FULL_RELAY,
+               /*inbound_onion=*/false,
+               /*network_key=*/0};
+    connman.Handshake(peer, /*successfully_connected=*/true, services, services,
+                      PROTOCOL_VERSION, /*relay_txs=*/true,
+                      /*starting_height=*/parent->nHeight + 10);
+    connman.AddTestNode(peer);
+    connman.FlushSendBuffer(peer);
+    peer.fPauseSend = false;
+    struct FinalizePeer {
+        ConnmanTestMsg& connman;
+        PeerManager& peerman;
+        CNode& node;
+        ~FinalizePeer()
+        {
+            peerman.FinalizeNode(node);
+            connman.RemoveTestNode(node);
+        }
+    } finalize{connman, peerman, peer};
+
+    std::vector<CBlock> fork_headers{CBlock{competing.GetBlockHeader()},
+                                     CBlock{grandchild.GetBlockHeader()},
+                                     CBlock{great.GetBlockHeader()}};
+    BOOST_REQUIRE(connman.ReceiveMsgFrom(
+        peer, NetMsg::Make(NetMsgType::HEADERS, TX_WITH_WITNESS(fork_headers))));
+    peer.fPauseSend = false;
+    (void)connman.ProcessMessagesOnce(peer);
+
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE_MESSAGE(
+            m_node.chainman->m_blockman.LookupBlockIndex(competing_hash) != nullptr,
+            "competing header not in index");
+        BOOST_REQUIRE_MESSAGE(
+            m_node.chainman->m_blockman.LookupBlockIndex(great.GetHash()) != nullptr,
+            "great header not in index");
+        const auto* tip{m_node.chainman->ActiveChain().Tip()};
+        const auto* claimed{m_node.chainman->m_best_claimed_header};
+        BOOST_REQUIRE(tip != nullptr);
+        BOOST_REQUIRE_MESSAGE(
+            claimed != nullptr && claimed->nHeight > tip->nHeight,
+            strprintf("claimed height %d tip %d",
+                      claimed ? claimed->nHeight : -1, tip->nHeight));
+    }
+
+    bool fetched{false};
+    {
+        CNodeStateStats stats;
+        BOOST_REQUIRE(peerman.GetNodeStateStats(peer.GetId(), stats));
+        if (CountQueuedGetDataForHash(peer, competing_hash) > 0 ||
+            HasQueuedMessageType(peer, NetMsgType::GETDATA) ||
+            std::find(stats.vHeightInFlight.begin(), stats.vHeightInFlight.end(),
+                      parent->nHeight + 1) != stats.vHeightInFlight.end()) {
+            fetched = true;
+        }
+    }
+    for (int i = 0; i < 10 && !fetched; ++i) {
+        (void)peerman.SendMessages(&peer);
+        if (CountQueuedGetDataForHash(peer, competing_hash) > 0 ||
+            HasQueuedMessageType(peer, NetMsgType::GETDATA)) {
+            fetched = true;
+            break;
+        }
+        CNodeStateStats stats;
+        BOOST_REQUIRE(peerman.GetNodeStateStats(peer.GetId(), stats));
+        if (std::find(stats.vHeightInFlight.begin(), stats.vHeightInFlight.end(),
+                      parent->nHeight + 1) != stats.vHeightInFlight.end()) {
+            fetched = true;
+            break;
+        }
+        connman.FlushSendBuffer(peer);
+    }
+    BOOST_CHECK(fetched);
 }
 
 // Consensus + local signing key must ExactReplay the followed tip-child so

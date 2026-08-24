@@ -468,11 +468,21 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
  *  tip already has quorum, so the body was never fetched or replayed.
  *
  *  Local signer only (trusted mirrors keep skip until the attestor signs):
- *  fetch the same-height same-parent twin once a peer's BestKnown has
- *  already pulled ahead on that fork, then each better-work descendant
- *  whose parent already has a body, while LCA depth is a short reorg
- *  (1–6). A lone EncDr competing sibling with no descendant headers stays
- *  off the device. This is fetch + ExactReplay, not ConnectTip: equal-work
+ *  fetch the same-parent twin of the active-chain block at this height
+ *  (the current tip *or* an ancestor) once competing headers have already
+ *  pulled ahead on that fork, then each descendant whose parent already
+ *  has a body, while LCA depth is a short reorg (1–6).
+ *
+ *  Live 2026-08-24 after 199296–199297 were attested: the unsigned twin
+ *  stayed at 199295 while miners extended it to 199309+. Comparing only
+ *  `index_height == tip_height` and `nChainWork >= tip` left
+ *  select=root_header_only_skip (lowest missing is the ancestor twin,
+ *  which has *less* work than the moved tip). Overlay RecalculateBestHeader
+ *  also pins m_best_header to the attested tip, so pulled-ahead must come
+ *  from peer BestKnown *or* the claimed-work (unadjusted) header.
+ *
+ *  A lone EncDr competing sibling with no descendant headers stays off
+ *  the device. This is fetch + ExactReplay, not ConnectTip: equal-work
  *  does not reorg; more-work HAVE_DATA on the twin fork does. */
 [[nodiscard]] inline bool HeaderOnlyMustFetchLostTwinPath(
     bool has_local_signer,
@@ -491,13 +501,46 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
 {
     if (!has_local_signer || is_trusted_mirror) return false;
     if (!has_tip || !has_index || index_is_tip || index_failed) return false;
-    if (!better_or_equal_work) return false;
-    if (index_height == tip_height && same_parent) {
+    // Twin of the tip or of an ancestor. Do not require work >= current
+    // tip: an ancestor twin has less chainwork once the attested chain
+    // has moved. The pulled-ahead competing fork supplies more work.
+    if (same_parent && index_height <= tip_height) {
+        if (index_height == tip_height && !better_or_equal_work) return false;
         return competing_headers_pulled_ahead;
     }
-    return TrustedMirrorIsShortTipReorg(lca_depth) &&
-           index_height > tip_height &&
-           parent_has_data_or_is_lca;
+    if (index_height > tip_height) {
+        if (!better_or_equal_work) return false;
+        return TrustedMirrorIsShortTipReorg(lca_depth) &&
+               parent_has_data_or_is_lca;
+    }
+    if (index_height < tip_height) {
+        return competing_headers_pulled_ahead &&
+               TrustedMirrorIsShortTipReorg(lca_depth) &&
+               parent_has_data_or_is_lca;
+    }
+    return false;
+}
+
+/** After restart, EncDr miners advertise VERSION height above the attested
+ *  tip but never complete header sync (synced_headers=-1). Overlay
+ *  RecalculateBestHeader pins m_best_header, so BestKnown stays unset and
+ *  FindNextBlocksToDownload logs no_best_known. Seed BestKnown from the
+ *  local claimed-work competing fork so GETDATA can start. */
+[[nodiscard]] inline bool SeedLocalSignerLostTwinBestKnown(
+    bool has_local_signer,
+    bool is_trusted_mirror,
+    bool best_known_unset,
+    int starting_height,
+    int tip_height,
+    int claimed_height,
+    bool claimed_is_short_reorg_competing_fork,
+    bool claimed_work_ge_tip)
+{
+    if (!has_local_signer || is_trusted_mirror) return false;
+    if (!best_known_unset) return false;
+    if (starting_height <= tip_height) return false;
+    if (claimed_height <= tip_height) return false;
+    return claimed_is_short_reorg_competing_fork && claimed_work_ge_tip;
 }
 
 /** FindMostWorkChain / candidate-set gate for any node that tracks a

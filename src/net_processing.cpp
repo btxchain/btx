@@ -2370,6 +2370,11 @@ private:
      *  catch-up, seed it from the on-disk HEADER_ONLY frontier. */
     void MaybeSeedGpuSignedFrontierBestKnown(NodeId peer_id, CNodeState& state)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+    /** Local signer: if EncDr miners advertised a height above the attested
+     *  tip but never set BestKnown (synced_headers=-1 after restart), seed
+     *  from the claimed-work competing fork so lost-twin GETDATA can start. */
+    void MaybeSeedLocalSignerLostTwinBestKnown(NodeId peer_id, CNodeState& state)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     /** Prefer GETMMATTEST for the ActiveTip child, the short-reorg missing
      *  body, and the short-reorg fork child (LCA+1) even when bodies are
      *  already complete. Never the competing 1879xx miner fork. Fan-out
@@ -3772,6 +3777,7 @@ void PeerManagerImpl::MaybeRecoverStalledBlockFetch(std::chrono::microseconds no
     // bodies are still missing on a competing fork.
     for (auto& [nodeid, state] : m_node_states) {
         MaybeSeedGpuSignedFrontierBestKnown(nodeid, state);
+        MaybeSeedLocalSignerLostTwinBestKnown(nodeid, state);
         if (state.pindexBestKnownBlock != nullptr &&
             state.pindexBestKnownBlock->nHeight >= tip->nHeight + BLOCK_FETCH_STALL_HEADERS_AHEAD &&
             state.pindexBestKnownBlock->GetAncestor(tip->nHeight) == tip) {
@@ -3967,7 +3973,13 @@ static bool TrustedMirrorMayDownloadIndex(
 {
     if (tip == nullptr || index == nullptr) return false;
     const CBlockIndex* const lca{LastCommonAncestor(tip, index)};
-    const bool same_parent{tip->pprev != nullptr && index->pprev == tip->pprev};
+    // Twin of the active-chain block at this height (current tip or ancestor).
+    const CBlockIndex* const active_at_h{
+        index->nHeight <= tip->nHeight ? tip->GetAncestor(index->nHeight)
+                                       : nullptr};
+    const bool same_parent{
+        active_at_h != nullptr && active_at_h != index &&
+        index->pprev != nullptr && active_at_h->pprev == index->pprev};
     const int lca_depth{lca != nullptr ? tip->nHeight - lca->nHeight : 0};
     const bool parent_has_data_or_is_lca{
         index->pprev == nullptr ||
@@ -3978,7 +3990,8 @@ static bool TrustedMirrorMayDownloadIndex(
                best->GetAncestor(index->nHeight) == index;
     };
     const bool competing_headers_pulled_ahead{
-        pulled_ahead(competing_best) || pulled_ahead(chainman.m_best_header)};
+        pulled_ahead(competing_best) || pulled_ahead(chainman.m_best_header) ||
+        pulled_ahead(chainman.m_best_claimed_header)};
     return node::matmul_trusted::HeaderOnlyMustFetchLostTwinPath(
         node::matmul_trusted::HasLocalSigner(),
         node::matmul_trusted::IsTrustedMirror(),
@@ -4401,6 +4414,7 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
     // Make sure pindexBestKnownBlock is up to date, we'll need it.
     ProcessBlockAvailability(peer.m_id);
     MaybeSeedGpuSignedFrontierBestKnown(peer.m_id, *state);
+    MaybeSeedLocalSignerLostTwinBestKnown(peer.m_id, *state);
 
     const CBlockIndex* tip{m_chainman.ActiveChain().Tip()};
     const bool catch_up{IsCatchUpBlockFetch(m_chainman, state->pindexBestKnownBlock)};
@@ -8988,6 +9002,35 @@ void PeerManagerImpl::MaybeSeedGpuSignedFrontierBestKnown(
             peer_id, seed->nHeight, tip->nHeight);
 }
 
+void PeerManagerImpl::MaybeSeedLocalSignerLostTwinBestKnown(
+    NodeId peer_id, CNodeState& state)
+{
+    AssertLockHeld(cs_main);
+    const CBlockIndex* const tip{m_chainman.ActiveChain().Tip()};
+    const CBlockIndex* const claimed{m_chainman.m_best_claimed_header};
+    const bool claimed_competing{
+        tip != nullptr && claimed != nullptr &&
+        claimed->nHeight > tip->nHeight &&
+        claimed->GetAncestor(tip->nHeight) != tip &&
+        TrustedMirrorShortTipReorg(tip, claimed) &&
+        claimed->nChainWork >= tip->nChainWork};
+    if (!node::matmul_trusted::SeedLocalSignerLostTwinBestKnown(
+            node::matmul_trusted::HasLocalSigner(),
+            node::matmul_trusted::IsTrustedMirror(),
+            state.pindexBestKnownBlock == nullptr,
+            state.m_starting_height,
+            tip != nullptr ? tip->nHeight : 0,
+            claimed != nullptr ? claimed->nHeight : -1,
+            claimed_competing,
+            claimed_competing)) {
+        return;
+    }
+    state.pindexBestKnownBlock = claimed;
+    LogInfo("Seeded local-signer peer=%d best-known to claimed-work fork "
+            "height=%d (lost-twin recovery, tip=%d)\n",
+            peer_id, claimed->nHeight, tip->nHeight);
+}
+
 void PeerManagerImpl::MaybeRequestTrustedMirrorAuthorityHeaders(
     CNode& pto, Peer& peer, std::chrono::microseconds current_time)
 {
@@ -13060,6 +13103,8 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             state->m_node_network =
                 (nServices & NODE_NETWORK) == NODE_NETWORK;
             state->m_starting_height = starting_height;
+            MaybeSeedGpuSignedFrontierBestKnown(pfrom.GetId(), *state);
+            MaybeSeedLocalSignerLostTwinBestKnown(pfrom.GetId(), *state);
             m_num_preferred_download_peers += state->fPreferredDownload;
 
             if (require_matmul_consensus && base_preferred &&
