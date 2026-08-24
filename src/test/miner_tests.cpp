@@ -1291,6 +1291,29 @@ void MinerTestingSetup::TestShieldedAnchorTemplateCleanup(const CScript& scriptP
     }
 }
 
+BOOST_AUTO_TEST_CASE(CreateNewBlock_extra_nonce_unique_templates)
+{
+    auto mining{MakeMining()};
+    BOOST_REQUIRE(mining);
+
+    CScript scriptPubKey = CScript() << OP_TRUE;
+    BlockAssembler::Options options;
+    options.coinbase_output_script = scriptPubKey;
+
+    auto first = mining->createNewBlock(options);
+    auto second = mining->createNewBlock(options);
+    BOOST_REQUIRE(first);
+    BOOST_REQUIRE(second);
+
+    const CBlock a{first->getBlock()};
+    const CBlock b{second->getBlock()};
+    BOOST_REQUIRE(!a.vtx.empty());
+    BOOST_REQUIRE(!b.vtx.empty());
+    BOOST_CHECK(a.vtx[0]->vin[0].scriptSig != b.vtx[0]->vin[0].scriptSig);
+    BOOST_CHECK(BlockMerkleRoot(a) != BlockMerkleRoot(b));
+    BOOST_CHECK(a.nNonce64 != b.nNonce64);
+}
+
 // NOTE: These tests rely on CreateNewBlock doing its own self-validation!
 BOOST_AUTO_TEST_CASE(CreateNewBlock_validity)
 {

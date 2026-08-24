@@ -84,6 +84,7 @@
 #include <cmath>
 #include <limits>
 #include <map>
+#include <mutex>
 #include <numeric>
 #include <set>
 #include <thread>
@@ -5503,6 +5504,13 @@ static RPCHelpMan getnetworkhashps()
 
 static bool GenerateBlock(ChainstateManager& chainman, CBlock&& block, uint64_t& max_tries, std::shared_ptr<const CBlock>& block_out, bool process_new_block, const NodeContext* node_context = nullptr)
 {
+    // One EncDr generate at a time. Overlapping generatetoaddress calls
+    // ping-pong on the RC accelerator (queue wait ≈ episode time) and a
+    // 900s CLI timeout then starts a third job. Combined miners must not
+    // serialize two 7s episodes into one 14s nonce.
+    static std::mutex generate_block_mutex;
+    const std::lock_guard<std::mutex> generate_lock{generate_block_mutex};
+
     block_out.reset();
     block.hashMerkleRoot = BlockMerkleRoot(block);
     const auto& consensus = chainman.GetConsensus();
