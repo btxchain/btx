@@ -1202,7 +1202,48 @@ int32_t LatestMatMulAsertPreUpgradeAnchorHeight(const CBlockIndex* pindexLast, c
         params.nMatMulPowLimitUpgradeHeight > anchor_height) {
         anchor_height = params.nMatMulPowLimitUpgradeHeight;
     }
+    if (!IsDisabledHeight(params.nMatMulStallRecoveryHeight) &&
+        pindexLast->nHeight >= params.nMatMulStallRecoveryHeight &&
+        params.nMatMulStallRecoveryHeight > anchor_height) {
+        anchor_height = params.nMatMulStallRecoveryHeight;
+    }
     return anchor_height;
+}
+
+// Live 2026-08-24: after 199297 ate MTP+3600, the next header was clamped
+// ~13s past the parent. ASERT then treated that interval as "too fast" and
+// would harden. Credit each post-recovery cap-sat block up to the min
+// interval so a clamp cannot look faster than on-time.
+int64_t MatMulAsertClampedTimeCredit(const CBlockIndex* pindexLast,
+                                     const CBlockIndex* anchor,
+                                     const Consensus::Params& params)
+{
+    if (pindexLast == nullptr || anchor == nullptr) return 0;
+    if (!params.IsMatMulStallRecoveryActive(pindexLast->nHeight)) return 0;
+    const int64_t min_interval{params.MatMulAsertClampedMinIntervalSeconds()};
+    if (min_interval <= 0) return 0;
+
+    int64_t credit{0};
+    const CBlockIndex* pindex{pindexLast};
+    while (pindex != nullptr && pindex != anchor &&
+           pindex->nHeight >= params.nMatMulStallRecoveryHeight) {
+        const CBlockIndex* const prev{pindex->pprev};
+        if (prev == nullptr) break;
+        const auto max_time{params.MaxMatMulAllowedBlockTime(
+            pindex->nHeight, prev->GetBlockTime(), prev->GetMedianTimePast())};
+        if (max_time.has_value() && pindex->GetBlockTime() >= *max_time) {
+            int64_t actual{pindex->GetBlockTime() - prev->GetBlockTime()};
+            if (actual < 0) actual = 0;
+            if (actual < min_interval) {
+                if (credit > std::numeric_limits<int64_t>::max() - (min_interval - actual)) {
+                    return std::numeric_limits<int64_t>::max();
+                }
+                credit += min_interval - actual;
+            }
+        }
+        pindex = prev;
+    }
+    return credit;
 }
 
 MatMulAsertHalfLifeInfo ResolveMatMulAsertHalfLifeInfo(
@@ -1284,6 +1325,54 @@ bool ValidateMatMulAsertParams(const Consensus::Params& params, int32_t next_hei
         LogWarning("MatMulAsert: retune2 ratio is invalid (num=%u den=%u) at height %d, invalid immutable ASERT config (fatal at construction; runtime fail-closed)\n",
                    params.nMatMulAsertRetune2TargetNum, params.nMatMulAsertRetune2TargetDen, next_height);
         return false;
+    }
+    if (params.nMatMulStallRecoveryAsertNum == 0 || params.nMatMulStallRecoveryAsertDen == 0) {
+        LogWarning("MatMulAsert: stall-recovery ratio is invalid (num=%u den=%u) at height %d, invalid immutable ASERT config (fatal at construction; runtime fail-closed)\n",
+                   params.nMatMulStallRecoveryAsertNum, params.nMatMulStallRecoveryAsertDen, next_height);
+        return false;
+    }
+    {
+        uint32_t rec_n, rec_d;
+        if (!ReduceRescaleRatioToU32(params.nMatMulStallRecoveryAsertNum,
+                                     params.nMatMulStallRecoveryAsertDen, rec_n, rec_d)) {
+            LogWarning("MatMulAsert: stall-recovery rescale ratio is invalid (num=%u den=%u; must reduce to a 32-bit rational) at height %d, failing closed\n",
+                       params.nMatMulStallRecoveryAsertNum, params.nMatMulStallRecoveryAsertDen, next_height);
+            return false;
+        }
+    }
+    if (params.nMatMulMaxBlockTimeAdvance < 0) {
+        LogWarning("MatMulAsert: nMatMulMaxBlockTimeAdvance=%lld is negative at height %d, failing closed\n",
+                   static_cast<long long>(params.nMatMulMaxBlockTimeAdvance), next_height);
+        return false;
+    }
+    if (params.nMatMulAsertClampedMinInterval < 0) {
+        LogWarning("MatMulAsert: nMatMulAsertClampedMinInterval=%lld is negative at height %d, failing closed\n",
+                   static_cast<long long>(params.nMatMulAsertClampedMinInterval), next_height);
+        return false;
+    }
+    if (!IsDisabledHeight(params.nMatMulStallRecoveryHeight)) {
+        if (params.nMatMulStallRecoveryHeight < params.nMatMulAsertHeight) {
+            LogWarning("MatMulAsert: stall-recovery height=%d is below ASERT activation=%d at height %d, failing closed\n",
+                       params.nMatMulStallRecoveryHeight, params.nMatMulAsertHeight, next_height);
+            return false;
+        }
+        const auto collides = [&](int32_t other) {
+            return !IsDisabledHeight(other) && other == params.nMatMulStallRecoveryHeight;
+        };
+        if (collides(params.nMatMulAsertHeight) ||
+            collides(params.nMatMulAsertRetuneHeight) ||
+            collides(params.nMatMulAsertRetune2Height) ||
+            collides(params.nMatMulV4Height) ||
+            collides(params.nMatMulBMX4CHeight) ||
+            collides(params.nMatMulDRLTHeight) ||
+            collides(params.nMatMulRCHeight) ||
+            collides(params.nMatMulRCCoupledHeight) ||
+            collides(params.nMatMulPowLimitUpgradeHeight) ||
+            collides(params.nMatMulAsertHalfLifeUpgradeHeight)) {
+            LogWarning("MatMulAsert: stall-recovery height=%d collides with another one-shot ASERT rescale at height %d, failing closed\n",
+                       params.nMatMulStallRecoveryHeight, next_height);
+            return false;
+        }
     }
     {
         // AUDIT D3: the ratio must be strictly positive AND reduce to a 32-bit
@@ -1497,7 +1586,8 @@ bool ValidateMatMulAsertParams(const Consensus::Params& params, int32_t next_hei
 
     // Audit C5: the MatMulAsert cascade dispatches special one-time-rescale
     // heights in a fixed order (asert -> retune -> retune2 -> v4 -> bmx4c ->
-    // drlt -> rc -> coupled) and returns on the FIRST match. Profile-equality
+    // drlt -> rc -> coupled -> powlimit -> half-life -> stall-recovery) and
+    // returns on the FIRST match. Profile-equality
     // guards deliberately hand a unified height to its designated live owner.
     // Otherwise a NON-inert (!= 1/1) rescale whose height collides with an
     // EARLIER branch would be silently shadowed.
@@ -1511,7 +1601,9 @@ bool ValidateMatMulAsertParams(const Consensus::Params& params, int32_t next_hei
                    (!IsDisabledHeight(params.nMatMulAsertRetuneHeight) && h == params.nMatMulAsertRetuneHeight) ||
                    (!IsDisabledHeight(params.nMatMulAsertRetune2Height) && h == params.nMatMulAsertRetune2Height) ||
                    (!IsDisabledHeight(params.nMatMulPowLimitUpgradeHeight) &&
-                    h == params.nMatMulPowLimitUpgradeHeight);
+                    h == params.nMatMulPowLimitUpgradeHeight) ||
+                   (!IsDisabledHeight(params.nMatMulStallRecoveryHeight) &&
+                    h == params.nMatMulStallRecoveryHeight);
         };
         if (!IsDisabledHeight(params.nMatMulV4Height) &&
             params.nMatMulV4AsertRescaleNum != params.nMatMulV4AsertRescaleDen &&
@@ -3025,6 +3117,20 @@ unsigned int MatMulAsert(const CBlockIndex* pindexLast, const Consensus::Params&
         return parent_target.GetCompact();
     }
 
+    if (!IsDisabledHeight(params.nMatMulStallRecoveryHeight) &&
+        next_height == params.nMatMulStallRecoveryHeight) {
+        arith_uint256 parent_target{};
+        parent_target.SetCompact(pindexLast->nBits);
+        uint32_t rec_n, rec_d;
+        if (!ReduceRescaleRatioToU32(params.nMatMulStallRecoveryAsertNum,
+                                     params.nMatMulStallRecoveryAsertDen, rec_n, rec_d)) {
+            return MatMulAsertFailClosedBits();
+        }
+        arith_uint256 recovery_target = ScaleTargetByTimespan(parent_target, rec_n, rec_d);
+        recovery_target = ClampRetargetResult(recovery_target, pow_limit);
+        return recovery_target.GetCompact();
+    }
+
     // ASERT anchor:
     // - base anchor is first ASERT block (activation block itself)
     // - after optional target retunes, re-anchor on the latest retune block to
@@ -3069,10 +3175,19 @@ unsigned int MatMulAsert(const CBlockIndex* pindexLast, const Consensus::Params&
         return MatMulAsertFailClosedBits();
     }
     const int64_t time_diff = pindexLast->GetBlockTime() - anchor->GetBlockTime();
+    const int64_t clamped_credit = MatMulAsertClampedTimeCredit(pindexLast, anchor, params);
+    int64_t asert_time_diff = time_diff;
+    if (clamped_credit > 0) {
+        if (asert_time_diff > std::numeric_limits<int64_t>::max() - clamped_credit) {
+            asert_time_diff = std::numeric_limits<int64_t>::max();
+        } else {
+            asert_time_diff += clamped_credit;
+        }
+    }
     const int64_t height_diff = static_cast<int64_t>(pindexLast->nHeight) - anchor->nHeight;
     const arith_uint256 next_target = CalculateMatMulAsertTarget(
         anchor_target,
-        time_diff,
+        asert_time_diff,
         height_diff,
         half_life_info.current_half_life_s,
         params,

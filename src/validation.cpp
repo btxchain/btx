@@ -12984,7 +12984,8 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block,
         return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "time-timewarp-attack", "block's timestamp is too early for BIP94 timewarp protection");
     }
 
-    if (auto max_time{consensusParams.MaxMatMulFutureBlockTime(nHeight, pindexPrev->GetMedianTimePast())};
+    if (auto max_time{consensusParams.MaxMatMulAllowedBlockTime(
+            nHeight, pindexPrev->GetBlockTime(), pindexPrev->GetMedianTimePast())};
         max_time.has_value()) {
         // a5 fix: never enforce a future-time cap below the BIP94 timewarp floor, or the legal
         // timestamp window can invert at the drift-cap activation boundary and wedge the chain.
@@ -12994,6 +12995,15 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block,
             max_time = std::max<int64_t>(*max_time, pindexPrev->GetBlockTime() - MAX_TIMEWARP);
         }
         if (block.GetBlockTime() > *max_time) {
+            const auto mtp_cap{consensusParams.MaxMatMulFutureBlockTime(
+                nHeight, pindexPrev->GetMedianTimePast())};
+            const auto parent_cap{consensusParams.MaxMatMulParentTimeAdvance(
+                nHeight, pindexPrev->GetBlockTime())};
+            if (parent_cap.has_value() && block.GetBlockTime() > *parent_cap &&
+                (!mtp_cap.has_value() || *parent_cap <= *mtp_cap)) {
+                return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "time-parent-too-new",
+                                     "block timestamp advances too far from the previous block");
+            }
             return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "time-mtp-too-new", "block timestamp too far ahead of median time past");
         }
     }

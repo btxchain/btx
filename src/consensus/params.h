@@ -865,6 +865,20 @@ struct Params {
     // ever RAISES the upper bound (a relaxation confined to otherwise-unmineable blocks), so it
     // is flag-day gated to keep upgraded/non-upgraded nodes in agreement until activation.
     int32_t nMatMulTimewarpReconcileHeight{std::numeric_limits<int32_t>::max()};
+    // EncDr stall recovery (live 2026-08-24 height 199297). Unset (INT32_MAX)
+    // until operators pick a flag day. At that height:
+    //   1. one-shot ASERT rescale parent_target * num/den, then re-anchor
+    //   2. per-block nTime cap (nMatMulMaxBlockTimeAdvance) so one header
+    //      cannot consume the whole MTP+3600 window
+    //   3. ASERT credits at least nMatMulAsertClampedMinInterval (or
+    //      nPowTargetSpacing if 0) for a block whose nTime sat at the cap,
+    //      so a leftover ~13s clamp cannot look "too fast" and harden bits.
+    // num/den default 1/1 = no dump. Set those when choosing the flag day.
+    int32_t nMatMulStallRecoveryHeight{std::numeric_limits<int32_t>::max()};
+    uint32_t nMatMulStallRecoveryAsertNum{1};
+    uint32_t nMatMulStallRecoveryAsertDen{1};
+    int64_t nMatMulMaxBlockTimeAdvance{1'080}; // 12 * 90s target spacing
+    int64_t nMatMulAsertClampedMinInterval{0}; // 0 = use nPowTargetSpacing
     // Block capacity.
     uint32_t nMaxBlockWeight{24'000'000};
     uint32_t nMaxBlockSerializedSize{24'000'000};
@@ -1273,6 +1287,38 @@ struct Params {
             height >= 0 &&
             nMatMulTimewarpReconcileHeight != std::numeric_limits<int32_t>::max() &&
             height >= nMatMulTimewarpReconcileHeight;
+    }
+    bool IsMatMulStallRecoveryActive(int32_t height) const
+    {
+        return fMatMulPOW &&
+            height >= 0 &&
+            nMatMulStallRecoveryHeight != std::numeric_limits<int32_t>::max() &&
+            height >= nMatMulStallRecoveryHeight;
+    }
+    std::optional<int64_t> MaxMatMulParentTimeAdvance(int32_t height, int64_t prev_block_time) const
+    {
+        if (!IsMatMulStallRecoveryActive(height) || nMatMulMaxBlockTimeAdvance <= 0) {
+            return std::nullopt;
+        }
+        if (prev_block_time > std::numeric_limits<int64_t>::max() - nMatMulMaxBlockTimeAdvance) {
+            return std::numeric_limits<int64_t>::max();
+        }
+        return prev_block_time + nMatMulMaxBlockTimeAdvance;
+    }
+    std::optional<int64_t> MaxMatMulAllowedBlockTime(int32_t height,
+                                                    int64_t prev_block_time,
+                                                    int64_t prev_median_time_past) const
+    {
+        const auto mtp_cap{MaxMatMulFutureBlockTime(height, prev_median_time_past)};
+        const auto parent_cap{MaxMatMulParentTimeAdvance(height, prev_block_time)};
+        if (!mtp_cap.has_value()) return parent_cap;
+        if (!parent_cap.has_value()) return mtp_cap;
+        return *mtp_cap < *parent_cap ? *mtp_cap : *parent_cap;
+    }
+    int64_t MatMulAsertClampedMinIntervalSeconds() const
+    {
+        if (nMatMulAsertClampedMinInterval > 0) return nMatMulAsertClampedMinInterval;
+        return nPowTargetSpacing;
     }
     std::optional<int64_t> MaxMatMulFutureBlockTime(int32_t height, int64_t prev_median_time_past) const
     {
