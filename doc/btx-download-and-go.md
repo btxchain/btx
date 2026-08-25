@@ -1,10 +1,11 @@
 # BTX Download-and-Go Guide
 
-> **Release/activation boundary:** a build that contains MatMul v4.7 code has
-> not activated it. Use only a published release whose network parameters and
-> release notes explicitly name an activation height. The implementation PR
-> keeps all heights disabled. Epoch A is Profile 1 ExactReplay; Profile 2 and
-> proof authority occur only in later, separately reviewed epochs. See
+> **Current line:** [v0.33.4.2](https://github.com/btxchain/btx/releases/tag/v0.33.4.2)
+> on `main`. Epoch A is live at height 185000. EncDr stall recovery is active
+> from 199299. Fast-start snapshot:
+> [assumeutxo-199299](https://github.com/btxchain/btx/releases/tag/assumeutxo-199299).
+> Use `loadtxoutset` (not `loadtxoutsetattested`) on a fresh chainstate.
+> v0.33.4.1 cannot load that pin. Epochs B–D remain disabled. See
 > [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md).
 
 This guide is the shortest path from a precompiled BTX binary to:
@@ -31,7 +32,7 @@ export GH_TOKEN="$(<github.key)"  # only needed for private GitHub releases
 
 python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx \
-  --release-tag v0.33.0 \
+  --release-tag v0.33.4.2 \
   --preset miner \
   --datadir="$HOME/.btx"
 ```
@@ -43,7 +44,7 @@ fast-start bootstrap succeeds:
 ```bash
 python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx \
-  --release-tag v0.33.2 \
+  --release-tag v0.33.4.2 \
   --preset miner \
   --datadir="$HOME/.btx" \
   --start-mining
@@ -83,7 +84,7 @@ progress on stderr and prints a clean JSON summary on stdout:
 ```bash
 SETUP_JSON="$(python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx \
-  --release-tag v0.33.0 \
+  --release-tag v0.33.4.2 \
   --preset miner \
   --datadir="$HOME/.btx" \
   --json)"

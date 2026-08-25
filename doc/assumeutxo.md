@@ -7,6 +7,12 @@ For notes on the design of Assumeutxo, please refer to [the design doc](/doc/des
 
 ## Loading a snapshot
 
+The current `main` pin is height **199299** on v0.33.4.2. Download
+[assumeutxo-199299](https://github.com/btxchain/btx/releases/tag/assumeutxo-199299)
+(`snapshot.dat` SHA256 `3c9e52ff053cd183af239dfce42cd57d007bdf530fd48ba9783623662d15070f`).
+Use `loadtxoutset` on a fresh chainstate. Do not use `loadtxoutsetattested`.
+Stock v0.33.4.1 cannot load this height.
+
 BTX release snapshots are published as a small bundle:
 
 - `snapshot.dat`: the UTXO snapshot to load

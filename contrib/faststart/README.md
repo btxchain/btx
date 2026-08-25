@@ -1,12 +1,12 @@
 # BTX Fast-Start Validating Nodes
 
 Fast-start changes sync mechanics, not consensus activation or verification
-authority. The proposed MatMul v4.7 implementation keeps all heights disabled.
-At future Epochs A/B, a near-tip claimed block still requires Profile 1
-ExactReplay even when historical state was bootstrapped from a snapshot;
-checkpoint/assumeutxo trust must be disclosed rather than described as replay
-of all history. Profile 2 is reserved for a later proof-authoritative epoch.
-See
+authority. Current `main` is **v0.33.4.2**: Epoch A (height 185000) is live,
+and the compiled assumeutxo pin is height **199299**. A near-tip claimed block
+still requires Profile 1 ExactReplay even when historical state was bootstrapped
+from a snapshot; checkpoint/assumeutxo trust must be disclosed rather than
+described as replay of all history. Profile 2 is reserved for a later
+proof-authoritative epoch. See
 [`doc/btx-matmul-v4.7-transition-roadmap.md`](../../doc/btx-matmul-v4.7-transition-roadmap.md).
 
 This directory contains the first-run bootstrap wrapper for operators who want
@@ -154,7 +154,7 @@ One-shot install + bootstrap
 ```bash
 python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx \
-  --release-tag v0.33.0 \
+  --release-tag v0.33.4.2 \
   --preset service \
   --datadir="$HOME/.btx-service"
 ```
@@ -166,7 +166,7 @@ command:
 ```bash
 python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx \
-  --release-tag v0.33.2 \
+  --release-tag v0.33.4.2 \
   --preset miner \
   --datadir="$HOME/.btx" \
   --start-mining
@@ -213,7 +213,7 @@ handing off to mining or service automation:
 ```bash
 SETUP_JSON="$(python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx \
-  --release-tag v0.33.0 \
+  --release-tag v0.33.4.2 \
   --preset miner \
   --datadir="$HOME/.btx" \
   --json)"

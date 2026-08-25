@@ -13,21 +13,33 @@ active from genesis, enforces reduced-data transaction constraints (BIP
 This repository contains the full node implementation, wallet, mining
 infrastructure, and test suites.
 
-## MatMul v4.7 transition — Epoch A release candidate
+## Current release — v0.33.4.2
 
-This branch carries the MatMul v4.7 transition and an **Epoch-A release
-candidate**. The candidate contains one atomic `nMatMulV4Height = nMatMulBMX4CHeight =
-nMatMulRCHeight = H_A` tuple and both ratification constants; testnet and
-signet heights remain disabled, as do Epochs B–D, DRLT, and coupled RC. The
-numeric `H_A` and one-time RC ASERT coefficient in `src/kernel/chainparams.cpp`
-are candidate values. Release preparation must first settle the tuple and
-recompute at least 96 hours of runway from the live tip, freeze that source,
-and then run the exact-final-binary CUDA+Metal and ASERT confirmation campaigns
-without changing it. The finite height and true flags are technically live if this source is
-merged unchanged; review status does not make them inert. This draft remains
-NO-GO for merge or release until the exact-final evidence and activation review
-pass; any tuple change repeats the freeze and evidence. It must not be described
-as already deployed or shipped.
+`main` is tagged **v0.33.4.2** (seal `c892f1a7`, freeze `400953c2`). Epoch A
+Profile 1 ExactReplay is live on mainnet at height **185000**. EncDr stall
+recovery is active from height **199299** (`num/den = 1/1`). The compiled
+assumeutxo pin is height **199299**.
+
+- [Release notes](doc/release-notes.md)
+- [GitHub release](https://github.com/btxchain/btx/releases/tag/v0.33.4.2) — Linux CPU, Linux CUDA, macOS arm64 Metal
+- [AssumeUTXO snapshot 199299](https://github.com/btxchain/btx/releases/tag/assumeutxo-199299) (`snapshot.dat` SHA256 `3c9e52ff053cd183af239dfce42cd57d007bdf530fd48ba9783623662d15070f`)
+
+Catch-up on a **fresh** chainstate with this binary (v0.33.4.1 cannot load the
+199299 pin):
+
+```bash
+btx-cli -rpcclienttimeout=0 loadtxoutset snapshot.dat
+```
+
+Use `loadtxoutset`, not `loadtxoutsetattested`. Mine the next block only on
+attested parent `f12a27d01a4b5a1710efa4497adf6f4c7da311d1c7b4f6a79cbf80f0b3110ec5`.
+
+## MatMul v4.7 transition
+
+Mainnet Epoch A uses one atomic `nMatMulV4Height = nMatMulBMX4CHeight =
+nMatMulRCHeight = 185000` tuple. Testnet and signet heights remain disabled, as
+do Epochs B–D, DRLT, and coupled RC. EncDr ExactReplay digest is unchanged
+(`b4777985…`).
 
 The transition deliberately separates verification authority from workload
 size:
@@ -40,7 +52,7 @@ size:
 4. **Epoch D:** Profile 2 with succinct-proof authority, activated at a
    separate height with its own workload/difficulty calibration.
 
-Profile 1 is therefore the ExactReplay launch candidate. Profile 2 is retained
+Profile 1 is the live ExactReplay epoch. Profile 2 is retained
 for the later proof-authoritative workload; it is not a routine-replay
 requirement for Epoch A. The 182-byte digest-only header and header-derived
 work statement are preserved across the transition. See the
@@ -61,7 +73,7 @@ path, registry state committed full shielded account-leaf payloads, and
 consumed-leaf tx witnesses were lean on wire while full nodes recovered
 `CompactPublicAccount` state from authenticated consensus data.
 
-Current v0.33.0 behavior: after block `125000`, consensus disables
+Current mainnet behavior: after block `125000`, consensus disables
 new shielded credits, private shielded-output appends, bridge ingress/control
 rollover, and re-shielding. Retained production surfaces are balance/viewing,
 legacy recovery accounting, and permitted transparent exits of existing shielded
@@ -134,6 +146,7 @@ Current ring-size roadmap:
 
 ## Table of Contents
 
+- [Current release — v0.33.4.2](#current-release--v03342)
 - [GPU-verified network (three-phase)](#gpu-verified-network-three-phase)
 - [Chain Parameters](#chain-parameters)
 - [MatMul Proof of Work](#matmul-proof-of-work)
@@ -258,7 +271,7 @@ multiplication — is the same operation that dominates GPU and TPU workloads fo
 AI/ML training and inference, making the mining hardware directly reusable for
 productive computation.
 
-> **MatMul v4.7 Resident Curriculum transition — Epoch A release candidate.**
+> **MatMul v4.7 Resident Curriculum — Epoch A is live at height 185000.**
 > The implementation preserves the 182-byte digest-only header and a
 > header-derived work statement, but divides the consensus change into four
 > separately activated epochs:
@@ -481,7 +494,7 @@ For the full PQ specification and tutorials, see:
 
 BTX includes a **shielded transaction pool** active from genesis on all
 networks. Shielded transactions hide sender, receiver, and amount using
-lattice-based zero-knowledge proofs. In v0.33.0, coinbase auto-shielding is
+lattice-based zero-knowledge proofs. Coinbase auto-shielding is
 opt-in (default off; `-autoshieldcoinbase=1`) so mined rewards stay as
 post-quantum transparent outputs unless an operator chooses to shield.
 
@@ -514,7 +527,7 @@ As of `2026-03-23`, the pre-sunset reset-chain launch architecture was:
 - legacy MatRiCT and receipt-backed ingress retained only as non-launch
   residual tooling.
 
-v0.33.0 retains the block-`125000` production sunset rules:
+Mainnet retains the block-`125000` production sunset rules:
 new shielded credits, private shielded-output appends, bridge ingress/control
 transactions, rollover/rebalance, and re-shielding are disabled by consensus.
 Existing shielded balances remain visible/accounted, and strict transparent
@@ -801,7 +814,9 @@ historical sync finishes.
 
 Fast-start support in the current tree:
 
-- `main`: supported with published assumeutxo metadata baked into the binaries
+- `main`: supported; v0.33.4.2 compiles assumeutxo height **199299**
+  (`f12a27d0…`). Load `https://github.com/btxchain/btx/releases/download/assumeutxo-199299/snapshot.dat`
+  with `loadtxoutset` on a fresh chainstate.
 - `regtest`: supported for default-consensus development and CI flows
 - `testnet`, `testnet4`, and `signet`: snapshot tooling exists, but there are no compiled assumeutxo entries yet, so fast-start bootstrap is not currently supported there
 
@@ -812,7 +827,7 @@ export GH_TOKEN="$(<github.key)"  # only needed for private GitHub releases
 
 python3 contrib/faststart/btx-agent-setup.py \
   --repo btxchain/btx \
-  --release-tag v0.33.0 \
+  --release-tag v0.33.4.2 \
   --preset service \
   --datadir="$HOME/.btx"
 ```
@@ -887,9 +902,9 @@ minimumchainwork=0
 retainshieldedcommitmentindex=1
 dnsseed=1
 fixedseeds=1
+addnode=node.btx.dev:19335
+addnode=node.btxchain.org:19335
 addnode=node.btx.tools:19335
-addnode=146.190.179.86:19335
-addnode=164.90.246.229:19335
 ```
 
 Or generate a profile automatically:

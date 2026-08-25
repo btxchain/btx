@@ -30,7 +30,9 @@ stored in git. It is published as a GitHub prerelease asset.
 
 ## Operator load
 
-Requires a binary that includes this height in `m_assumeutxo_data`.
+Requires **v0.33.4.2** (or later) so this height is in `m_assumeutxo_data`.
+v0.33.4.1 cannot load it. Binaries:
+https://github.com/btxchain/btx/releases/tag/v0.33.4.2
 
 ```bash
 curl -L -o snapshot.dat https://github.com/btxchain/btx/releases/download/assumeutxo-199299/snapshot.dat

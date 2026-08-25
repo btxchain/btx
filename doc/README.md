@@ -51,14 +51,12 @@ service-profile, or release-publication workflow:
 - [Mining Operator Helpers](../contrib/mining/README.md)
 - [Fast-Start Validating Node Helpers](../contrib/faststart/README.md)
 
-The MatMul v4.7 branch is an Epoch-A implementation candidate, not an
-activation authorization. The exact-final golden and ASERT evidence must be
-reviewed before a live mainnet `H_A` is selected and ratified. Epoch A uses
-Profile 1 with ExactReplay authority and optional shadow proofs; Epoch B
-requires both a durable proof and ExactReplay; Epoch C makes the Profile 1
-proof authoritative; and only Epoch D selects Profile 2 with proof authority.
-Epochs B–D each require a separate review and remain disabled, as do the
-testnet/signet heights.
+Current `main` is **v0.33.4.2**. Epoch A is live on mainnet at height 185000
+(Profile 1 ExactReplay authority, optional shadow proofs). EncDr stall recovery
+is active from 199299. Epoch B requires both a durable proof and ExactReplay;
+Epoch C makes the Profile 1 proof authoritative; and only Epoch D selects
+Profile 2 with proof authority. Epochs B–D each require a separate review and
+remain disabled, as do the testnet/signet heights.
 
 The release automation docs above cover the one-command local release cut
 (`scripts/release/cut_release.py`) and the local validation matrix used before
