@@ -1,0 +1,41 @@
+{
+  "chain": "main",
+  "snapshot_type": "latest",
+  "cli_path": "btx-cli",
+  "rpc_args": [
+    "-datadir=<redacted>"
+  ],
+  "snapshot": {
+    "height": 199299,
+    "txoutset_hash": "db9e83156602927315d108a1ebce230b30eb78832e69db1947a21f5b5f2b8bf6",
+    "nchaintx": 298981,
+    "blockhash": "f12a27d01a4b5a1710efa4497adf6f4c7da311d1c7b4f6a79cbf80f0b3110ec5",
+    "path": "snapshot.dat",
+    "sha256": "3c9e52ff053cd183af239dfce42cd57d007bdf530fd48ba9783623662d15070f",
+    "file_version": 9,
+    "shielded_state_pin": "94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541"
+  },
+  "loadtxoutset_example": "btx-cli -rpcclienttimeout=0 loadtxoutset snapshot.dat",
+  "release_asset_manifest": {
+    "format_version": 1,
+    "chain": "main",
+    "snapshot_type": "latest",
+    "published_name": "snapshot.dat",
+    "filename": "snapshot.dat",
+    "height": 199299,
+    "txoutset_hash": "db9e83156602927315d108a1ebce230b30eb78832e69db1947a21f5b5f2b8bf6",
+    "nchaintx": 298981,
+    "blockhash": "f12a27d01a4b5a1710efa4497adf6f4c7da311d1c7b4f6a79cbf80f0b3110ec5",
+    "snapshot_file_version": 9,
+    "snapshot_sha256": "3c9e52ff053cd183af239dfce42cd57d007bdf530fd48ba9783623662d15070f",
+    "sha256": "3c9e52ff053cd183af239dfce42cd57d007bdf530fd48ba9783623662d15070f",
+    "snapshot_size_bytes": 452893568,
+    "verification": {
+      "loadtxoutset": "btx-cli -rpcclienttimeout=0 loadtxoutset snapshot.dat",
+      "sha256sum": "3c9e52ff053cd183af239dfce42cd57d007bdf530fd48ba9783623662d15070f  snapshot.dat"
+    },
+    "asset_url": "https://github.com/btxchain/btx/releases/download/assumeutxo-199299/snapshot.dat",
+    "url": "https://github.com/btxchain/btx/releases/download/assumeutxo-199299/snapshot.dat",
+    "shielded_state_pin": "94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541"
+  }
+}
