@@ -466,6 +466,10 @@ static constexpr size_t MATMUL_DEFERRED_BODY_MAX_BYTES{128 * 1024 * 1024};
  *  45 minutes covers ~245 blocks of deferred ExactReplay. */
 static constexpr auto MATMUL_DEFERRED_BODY_MAX_AGE{45min};
 
+//! Claimed unique unattested tip-child for ExactReplay GPU. File-static so
+//! ResetMatMulVerifyAdmissionForTest can clear it between shared-fixture cases.
+static uint256 g_configured_claimed_tip_child{};
+
 /** True when the validated tip lags known headers. The previous "+10" threshold
  *  left 2–10 block gaps on the tiny steady-state verify budget, which then
  *  disconnected the only peers holding those bodies. */
@@ -1257,6 +1261,15 @@ public:
     {
         m_matmul_rc_speculative_pending.store(0, std::memory_order_relaxed);
         m_matmul_rc_pending_verifications.store(0, std::memory_order_relaxed);
+        m_matmul_deferred_retry_at.store(0s);
+        m_followed_tip_child_replay_at.store(0, std::memory_order_relaxed);
+        g_configured_claimed_tip_child.SetNull();
+        m_matmul_block_lifecycle.ClearForTest();
+        {
+            LOCK(cs_main);
+            m_header_only_competing.clear();
+            m_header_only_followed_skip.clear();
+        }
         {
             LOCK(m_matmul_rc_admission_mutex);
             m_matmul_rc_admission_store.Clear();
@@ -1801,6 +1814,7 @@ private:
         EXCLUSIVE_LOCKS_REQUIRED(!cs_main,
                                  !NetEventsInterface::g_msgproc_mutex);
     std::atomic<std::chrono::seconds> m_matmul_deferred_retry_at{0s};
+    std::atomic<int64_t> m_followed_tip_child_replay_at{0};
     /** Last time we probed a peer with getheaders solely to establish
      *  pindexBestKnownBlock, keyed by NodeId. */
     std::map<NodeId, std::chrono::microseconds> m_best_known_probe_at GUARDED_BY(cs_main);
@@ -3018,7 +3032,8 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
                     followed->GetAncestor(tip->nHeight + 1));
             }
             if ((child == nullptr ||
-                 !m_chainman.IndexIsAttestedChainTipChild(tip, child)) &&
+                 !(m_chainman.IndexIsFollowedTipChild(tip, child) ||
+                   m_chainman.IndexIsAttestedChainTipChild(tip, child))) &&
                 node::matmul_trusted::HasLocalSigner() && tip != nullptr) {
                 child = nullptr;
                 for (CBlockIndex* candidate :
@@ -3033,7 +3048,8 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
                 }
             }
             if (child != nullptr &&
-                m_chainman.IndexIsAttestedChainTipChild(tip, child) &&
+                (m_chainman.IndexIsFollowedTipChild(tip, child) ||
+                 m_chainman.IndexIsAttestedChainTipChild(tip, child)) &&
                 (child->nStatus & BLOCK_HAVE_DATA) != 0 &&
                 (child->nStatus & BLOCK_FAILED_MASK) == 0 &&
                 !m_chainman.ActiveChain().Contains(child)) {
@@ -3083,13 +3099,12 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
                     }
             }
         }
-        static std::atomic<int64_t> g_followed_tip_child_replay_at{0};
         const int64_t now_count{count_seconds(now_s)};
         const bool due{
-            now_count - g_followed_tip_child_replay_at.load(std::memory_order_relaxed) >=
+            now_count - m_followed_tip_child_replay_at.load(std::memory_order_relaxed) >=
             15};
         if (reverify_header && due) {
-            g_followed_tip_child_replay_at.store(now_count, std::memory_order_relaxed);
+            m_followed_tip_child_replay_at.store(now_count, std::memory_order_relaxed);
             LogInfo("Followed HAVE_DATA tip-child still unconnected "
                     "hash=%s height=%d exact_replay=%s have_body=%s; "
                     "re-admitting for validator-chain catch-up\n",
@@ -4109,7 +4124,6 @@ static bool TrustedMirrorMayDownloadIndex(
 //! body without GPU (trusted mirror) or spend ExactReplay GPU (local
 //! signer IBD / catch-up). Extra siblings stay HEADER_ONLY so a concurrent
 //! burst cannot enqueue 80 ExactReplays.
-static uint256 g_configured_claimed_tip_child{};
 
 [[nodiscard]] static bool ClaimConfiguredUnattestedTipChildBody(
     const ChainstateManager& chainman,
@@ -4246,7 +4260,8 @@ static uint256 g_configured_claimed_tip_child{};
                 chainman.FindUniqueCompetingAttestedIndex()};
             if (catch_up == index) return true;
         }
-        if (chainman.IndexIsAttestedChainTipChild(tip, index)) {
+        if (chainman.IndexIsFollowedTipChild(tip, index) ||
+            chainman.IndexIsAttestedChainTipChild(tip, index)) {
             g_configured_claimed_tip_child = index->GetBlockHash();
             return true;
         }

@@ -15,6 +15,9 @@ else
   JOBS=4
 fi
 
-cmake -S "${ROOT_DIR}" -B "${BUILD_DIR}" -DBUILD_TESTS=ON -DBUILD_UTIL=ON "$@"
+# WITH_ZMQ defaults ON in CMakeLists.txt; pass it explicitly so a stale cache
+# cannot silently drop notifications the way 0.33.4.2 native tarballs did.
+# Callers may still override with -DWITH_ZMQ=OFF (last -D wins).
+cmake -S "${ROOT_DIR}" -B "${BUILD_DIR}" -DBUILD_TESTS=ON -DBUILD_UTIL=ON -DWITH_ZMQ=ON "$@"
 # Build the full configured graph so every CTest target exists in CI.
 cmake --build "${BUILD_DIR}" -j"${JOBS}"

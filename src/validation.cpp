@@ -12142,12 +12142,15 @@ bool ChainstateManager::IndexIsAttestedChainTipChild(
             index->GetBlockHash(), index->nHeight)) {
         return true;
     }
-    if (IndexIsFollowedTipChild(tip, index)) return true;
+    // Followed is IndexIsFollowedTipChild. Callers already OR both
+    // (HEADER_ONLY skip, GETDATA, ExactReplay). Treating followed as
+    // attested here made unprivileged consensus report an unattested
+    // followed twin as attested whenever m_best_header sat on it.
+    if (!node::matmul_trusted::HasLocalSigner()) return false;
     // Local signer: m_best_header on a competing fork above this tip used
     // to leave every attested-chain child "unfollowed", so GPU skip +
     // HEADER_ONLY getdata froze the signer (live 190376 for ~22 min while
     // a 67-block unattested tower sat on m_best_header).
-    if (!node::matmul_trusted::HasLocalSigner()) return false;
     return m_best_header != nullptr &&
            m_best_header->nHeight > tip->nHeight &&
            m_best_header->GetAncestor(tip->nHeight) != tip;

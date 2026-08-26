@@ -57,6 +57,15 @@ void ResetForTest();
 [[nodiscard]] bool IsTrustedMirror();
 [[nodiscard]] bool ServesAttestations();
 [[nodiscard]] bool HasLocalSigner();
+/** Default for -matmulattestationserve. A plain consensus node (no local
+ *  signing key, not -matmulvalidation=trusted) must not answer GETMMATTEST;
+ *  that is the live isolation default so public fan-in cannot serialize
+ *  cs_main on the only signer. A local WIF or trusted-mirror mode opts in. */
+[[nodiscard]] inline constexpr bool DefaultMatMulAttestationServe(
+    bool has_local_signer, bool trusted_mirror)
+{
+    return has_local_signer || trusted_mirror;
+}
 [[nodiscard]] std::chrono::milliseconds WaitTimeout();
 [[nodiscard]] size_t Threshold();
 [[nodiscard]] std::vector<CPubKey> TrustedSigners();

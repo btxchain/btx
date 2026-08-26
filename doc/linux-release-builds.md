@@ -28,6 +28,12 @@ Guix CUDA builds already pass `-DCMAKE_CUDA_RUNTIME_LIBRARY=Static
 backend — a remaining `libcublasLt.so.*` NEEDED entry is expected and is not
 fixed by the cudart-static change.
 
+All three Linux/macOS release flavors (CPU, CUDA, Metal) must configure
+`-DWITH_ZMQ=ON`. After linking, `python3 scripts/release/verify_release_btxd.py bin/btxd`
+must pass (`ldd` shows `libzmq` on Linux; macOS uses static `libzmq.a`). CMake
+must print `ZeroMQ .............................. ON`. A `btxd` that still
+contains `-zmqpubhashblock` strings without linking libzmq must not ship.
+
 `cudaRuntimeGetVersion()` reports the statically linked CUDA runtime line, while
 `cudaDriverGetVersion()` reports the installed NVIDIA driver API level. These
 values can differ; for example, the CUDA 12 build can report runtime `12.9`

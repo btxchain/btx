@@ -251,9 +251,9 @@ mkdir -p "$OUTDIR"
 
 # CONFIGFLAGS
 BASE_CONFIGFLAGS="-DREDUCE_EXPORTS=ON -DBUILD_BENCH=OFF -DBUILD_GUI_TESTS=OFF -DBUILD_FUZZ_BINARY=OFF -DBUILD_UTIL=ON"
-# Ship ZMQ notifications in release binaries. WITH_ZMQ defaults OFF in CMakeLists.txt,
-# so without this flag the released btxd ignores -zmqpub* settings and reports
-# that it was built without ZMQ support. zeromq is already part of the depends set.
+# Ship ZMQ notifications in release binaries. WITH_ZMQ now defaults ON, but
+# pass it explicitly so a stale cache cannot drop it the way 0.33.4.2 native
+# tarballs did. zeromq is already part of the depends set.
 BASE_CONFIGFLAGS="$BASE_CONFIGFLAGS -DWITH_ZMQ=ON"
 BASE_CONFIGFLAGS="$BASE_CONFIGFLAGS -DCMAKE_SKIP_BUILD_RPATH=TRUE"  # check-symbols is fussy about rpath and we don't need it
 

@@ -1576,8 +1576,9 @@ bool AppInitParameterInteraction(const ArgsManager& args)
         args.GetIntArg("-matmultrustedwaitms", 60'000)};
     const bool serve_attestations{
         args.GetBoolArg("-matmulattestationserve",
-                        has_local_attestation_signer ||
-                            trusted_mirror_mode)};
+                        node::matmul_trusted::DefaultMatMulAttestationServe(
+                            has_local_attestation_signer,
+                            trusted_mirror_mode))};
     if (matmul_validation_mode != "consensus" &&
         has_local_attestation_signer) {
         return InitError(_("Only an independent MatMul consensus validator can load an attestation signing key; remove -matmulattestationsignerkeyfile/-matmulattestationsignerkey from non-consensus nodes."));

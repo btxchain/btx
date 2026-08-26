@@ -64,6 +64,10 @@ struct TestOpts {
     //! past the fixture chain so Debug builds stay runnable. Snapshot/assumeutxo
     //! fixtures that need the canned height-110 metadata must set this false.
     bool defer_expensive_matmul{true};
+    //! Freeze CreateNewBlock extra nonce / nNonce64 so canned assumeutxo@110
+    //! matches across processes. Off by default: competing empty twins at the
+    //! same height under clamped nTime need a unique extra nonce.
+    bool freeze_coinbase_extra_nonce{false};
 };
 
 /** Basic testing setup.
@@ -255,6 +259,7 @@ struct TestChain100Setup : public TestingSetup {
 
     std::vector<CTransactionRef> m_coinbase_txns; // For convenience, coinbase transactions
     CKey coinbaseKey; // private/public key needed to spend coinbase transactions
+    bool m_freeze_coinbase_extra_nonce{false};
 };
 
 /**

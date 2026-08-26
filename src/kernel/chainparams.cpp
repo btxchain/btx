@@ -2483,7 +2483,7 @@ public:
         if (!custom_consensus) {
             m_assumeutxo_data = {
                 {
-                    // Deterministic TestChain100Setup Phase-A functional-harness
+                    // Deterministic TestChain100Setup Phase-B unit-test
                     // snapshot metadata at height 110.
                     .height = 110,
                     .hash_serialized = AssumeutxoHash{uint256{"c35580bfd4f6c2ab69a8b1ac446962e5aacb164dc13e237867bd2170b91d7c98"}},

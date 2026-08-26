@@ -1694,10 +1694,17 @@ public:
     bool NormalizeReorgRecovery(const CBlockIndex* active_tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     [[nodiscard]] bool IndexIsFollowedTipChild(const CBlockIndex* tip, const CBlockIndex* index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     [[nodiscard]] bool BestHeaderExtendsTip(const CBlockIndex* tip) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
-    /** Tip-child that continues the attested chain for the local signer.
-     *  Followed (m_best_header) children qualify unless another hash at this
-     *  height already has quorum. When m_best_header is a competing fork that
-     *  does not extend the tip, the remaining tip-child is still progress. */
+    /** Tip-child that continues a pin-attested chain.
+     *
+     *  True when this hash already has in-memory quorum. Followed
+     *  (`m_best_header`) is IndexIsFollowedTipChild, not this predicate:
+     *  unprivileged consensus ExactReplays a followed unattested twin via
+     *  that path, and must not treat "followed" as "attested".
+     *
+     *  Local-signer exception: when `m_best_header` sits on a competing
+     *  fork that does not extend the tip, the remaining tip-child is still
+     *  progress (live 190376 freeze). Competing-quorum deny stays behind
+     *  PinMayDenyAttestedChainTipChild (trusted pin / local signer). */
     [[nodiscard]] bool IndexIsAttestedChainTipChild(const CBlockIndex* tip, const CBlockIndex* index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** True if `index` has in-memory quorum, or sits on the current
      *  signed-frontier chain (ancestor or descendant of the off-chain

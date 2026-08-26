@@ -20,6 +20,7 @@ import tarfile
 import tempfile
 from pathlib import Path
 import zipfile
+import importlib.util
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -179,6 +180,21 @@ def ensure_input_file(path: Path, label: str) -> Path:
     return path
 
 
+def verify_shipped_btxd(btxd_path: Path) -> None:
+    """Refuse to package a btxd that advertises ZMQ without linking it."""
+    script = Path(__file__).with_name("verify_release_btxd.py")
+    spec = importlib.util.spec_from_file_location("verify_release_btxd", script)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"unable to load {script}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    kind = module.classify(btxd_path)
+    if kind == "other":
+        # Unit-test stubs are not ELF/Mach-O. Real release binaries must be.
+        return
+    module.verify_btxd(btxd_path)
+
+
 def resolve_btx_util_path(explicit_path: Path | None, btxd_path: Path, btx_cli_path: Path, exe_suffix: str) -> Path:
     if explicit_path is not None:
         return ensure_input_file(explicit_path, "btx-util binary")
@@ -233,6 +249,8 @@ def stage_release_tree(
             f"btx-util{config['exe_suffix']}",
         ),
     ]
+    verify_shipped_btxd(btxd_path)
+
     for source, dest_name in binary_pairs:
         wrapper = wrapper_payload(dest_name.removesuffix(config["exe_suffix"]), platform_id)
         if wrapper is None:

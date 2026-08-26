@@ -3528,4 +3528,97 @@ BOOST_AUTO_TEST_CASE(blocklist_init_fail_closed_below_threshold)
                 std::string::npos);
 }
 
+BOOST_AUTO_TEST_CASE(matmulattestationserve_default_off_without_signer_or_trusted)
+{
+    using node::matmul_trusted::DefaultMatMulAttestationServe;
+    BOOST_CHECK(!DefaultMatMulAttestationServe(
+        /*has_local_signer=*/false, /*trusted_mirror=*/false));
+    BOOST_CHECK(DefaultMatMulAttestationServe(true, false));
+    BOOST_CHECK(DefaultMatMulAttestationServe(false, true));
+    BOOST_CHECK(DefaultMatMulAttestationServe(true, true));
+
+    // Plain consensus, no pin, no WIF, serve unset → not configured, not serving.
+    {
+        RuntimeReset reset;
+        ArgsManager args;
+        args.ForceSetArg("-matmulvalidation", "consensus");
+        InitErrorCapture capture;
+        BOOST_REQUIRE(AppInitParameterInteraction(args));
+        BOOST_CHECK(capture.LastError().empty());
+        BOOST_CHECK(!node::matmul_trusted::IsConfigured());
+        BOOST_CHECK(!node::matmul_trusted::HasLocalSigner());
+        BOOST_CHECK(!node::matmul_trusted::IsTrustedMirror());
+        BOOST_CHECK(!node::matmul_trusted::ServesAttestations());
+    }
+
+    // Consensus + telemetry pin, no local WIF, serve unset → default 0.
+    {
+        RuntimeReset reset;
+        ArgsManager args;
+        args.ForceSetArg("-matmulvalidation", "consensus");
+        UniValue keys{UniValue::VARR};
+        keys.push_back(HexPubKey(NewKey()));
+        args.ForceSetArgV("-matmultrustedpubkey", keys);
+        InitErrorCapture capture;
+        BOOST_REQUIRE(AppInitParameterInteraction(args));
+        std::string error;
+        BOOST_REQUIRE(node::matmul_trusted::FinalizeConfiguration(error));
+        BOOST_CHECK(node::matmul_trusted::IsConfigured());
+        BOOST_CHECK(!node::matmul_trusted::HasLocalSigner());
+        BOOST_CHECK(!node::matmul_trusted::IsTrustedMirror());
+        BOOST_CHECK(!node::matmul_trusted::ServesAttestations());
+    }
+
+    // Local signing key, serve unset → default 1.
+    {
+        RuntimeReset reset;
+        const CKey signer{NewKey()};
+        ArgsManager args;
+        args.ForceSetArg("-matmulvalidation", "consensus");
+        args.ForceSetArg("-matmulattestationsignerkey", EncodeSecret(signer));
+        InitErrorCapture capture;
+        BOOST_REQUIRE(AppInitParameterInteraction(args));
+        std::string error;
+        BOOST_REQUIRE(node::matmul_trusted::FinalizeConfiguration(error));
+        BOOST_CHECK(node::matmul_trusted::HasLocalSigner());
+        BOOST_CHECK(!node::matmul_trusted::IsTrustedMirror());
+        BOOST_CHECK(node::matmul_trusted::ServesAttestations());
+    }
+
+    // Trusted mirror, serve unset → default 1.
+    {
+        RuntimeReset reset;
+        ArgsManager args;
+        args.ForceSetArg("-matmulvalidation", "trusted");
+        UniValue keys{UniValue::VARR};
+        keys.push_back(HexPubKey(NewKey()));
+        keys.push_back(HexPubKey(NewKey()));
+        args.ForceSetArgV("-matmultrustedpubkey", keys);
+        args.ForceSetArg("-matmultrustedthreshold", 2);
+        InitErrorCapture capture;
+        BOOST_REQUIRE(AppInitParameterInteraction(args));
+        std::string error;
+        BOOST_REQUIRE(node::matmul_trusted::FinalizeConfiguration(error));
+        BOOST_CHECK(node::matmul_trusted::IsTrustedMirror());
+        BOOST_CHECK(!node::matmul_trusted::HasLocalSigner());
+        BOOST_CHECK(node::matmul_trusted::ServesAttestations());
+    }
+
+    // Consensus signer may isolate: explicit serve=0 with a local WIF.
+    {
+        RuntimeReset reset;
+        const CKey signer{NewKey()};
+        ArgsManager args;
+        args.ForceSetArg("-matmulvalidation", "consensus");
+        args.ForceSetArg("-matmulattestationsignerkey", EncodeSecret(signer));
+        args.ForceSetArg("-matmulattestationserve", "0");
+        InitErrorCapture capture;
+        BOOST_REQUIRE(AppInitParameterInteraction(args));
+        std::string error;
+        BOOST_REQUIRE(node::matmul_trusted::FinalizeConfiguration(error));
+        BOOST_CHECK(node::matmul_trusted::HasLocalSigner());
+        BOOST_CHECK(!node::matmul_trusted::ServesAttestations());
+    }
+}
+
 BOOST_AUTO_TEST_SUITE_END()

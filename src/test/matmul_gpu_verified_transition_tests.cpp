@@ -308,6 +308,8 @@ BOOST_AUTO_TEST_CASE(consensus_without_signer_does_not_park_bypass)
     BOOST_CHECK(UnprivilegedNodeIgnoresDualQuorumPin(false, false));
     BOOST_CHECK(!UnprivilegedNodeIgnoresDualQuorumPin(/*trusted_mirror=*/true, false));
     BOOST_CHECK(!UnprivilegedNodeIgnoresDualQuorumPin(false, /*has_local_signer=*/true));
+    // Predicate only. Production fork choice is
+    // validation_chainstate_tests/chainstate_consensus_gold_standard_ignores_cleared_attestations.
     BOOST_CHECK(DualQuorumSameHeightTwinsFailClosed(
         /*tip_has_quorum=*/true, /*competing_same_height_has_quorum=*/true,
         /*signed_frontier_strictly_ahead=*/false));

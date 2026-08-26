@@ -8,6 +8,13 @@ Release Process
 * Update release candidate version in `CMakeLists.txt` (`CLIENT_VERSION_RC`).
 * Update manpages (after rebuilding the binaries), see [gen-manpages.py](/contrib/devtools/README.md#gen-manpagespy).
 * Update `btx.conf` template content and commit changes if they exist, see [gen-bitcoin-conf.sh](/contrib/devtools/README.md#gen-bitcoin-confsh).
+* **ZMQ is required on every shipped `btxd`.** Configure CPU, CUDA, and Metal
+  release trees with `-DWITH_ZMQ=ON` (the CMake default is ON; pass it anyway).
+  After the link, run `python3 scripts/release/verify_release_btxd.py <btxd>`:
+  Linux `ldd` must show `libzmq`; macOS must statically link `libzmq.a` (no
+  Homebrew zmq dylib). CMake's configure summary must print `ZeroMQ ... ON`.
+  Do not ship a binary that contains `-zmqpubhashblock` strings without linking
+  libzmq — that is the 0.33.4.2 failure shape.
 
 ### Before every major and minor release
 

@@ -216,6 +216,17 @@ public:
         return true;
     }
 
+    /** Drop every retained body and attempt. Shared peerman fixtures must
+     *  call this between cases so leftover RUNNING/BODY_RETAINED entries
+     *  cannot fill capacity or starve the next Retain. */
+    void ClearForTest()
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        while (!m_entries.empty()) {
+            EraseEntry(m_entries.begin());
+        }
+    }
+
     std::optional<std::pair<uint256, RetainedBody>> NextRetry(
         const uint256& preferred_parent,
         Clock::time_point now = Clock::now(),
