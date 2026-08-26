@@ -216,6 +216,52 @@ archive signers and configure the mirrors with all three public keys, keeping
 2-of-3 one provider being offline no longer stalls the mirrors, and one key
 being compromised still does not independently decide a verdict.
 
+## Bootstrapping a new mirror
+
+**Obtain the header chain and load the AssumeUTXO snapshot before running the
+node as a trusted mirror.** Starting a fresh datadir directly in
+`-matmulvalidation=trusted` leaves it parked at height 0.
+
+A mirror follows the signed frontier, and with an empty datadir there is no
+frontier to follow. It cannot raise one by asking peers either, because a
+peer's advertised height is replaced by the local signed-frontier height when
+its best-known block is seeded. On a fresh mainnet datadir that produces one
+header batch and then a permanent stall, logged once a minute:
+
+```text
+Seeded GPU peer=7 best-known to signed frontier height=2000 (tip=0 HEADER_ONLY catch-up)
+Block fetch stall detected: tip=0 best_header_ahead=2000 peer_best_ahead=2000 in_flight=0 peers_downloading=0
+```
+
+`peer_best_ahead` equals `best_header_ahead` even when connected peers are
+advertising a tip tens of thousands of blocks higher.
+
+`loadtxoutset` cannot break the tie, because it requires the snapshot's base
+block header to already be in the index:
+
+```text
+Unable to load UTXO snapshot: The base block header (<hash>) must appear in
+the headers chain. Make sure all headers are syncing, and call loadtxoutset
+again.
+```
+
+Header supply is the part that surprises operators. A fresh mirror only
+requests headers from, and only accepts headers from, peers it treats as
+authority. In a field test on 2026-08-26 against mainnet, with fourteen peers
+connected, every peer advertising `NODE_MATMUL_ATTESTATION_ARCHIVE` answered
+`getheaders` with zero bytes, including one that also advertised
+`NODE_MATMUL_CONSENSUS`. The only peers that answered advertised
+`NODE_MATMUL_CONSENSUS` and no archive bit, and their headers were then
+dropped as non-authority. Plan a mirror's bootstrap around an archive you
+control, as in the `connect=` example above, rather than around public peer
+discovery.
+
+Switching `-matmulvalidation` between `consensus` and `trusted` does not by
+itself change the persisted replay authority context, so it does not trigger
+the reindex path described under **Persistence and key rotation**. That context
+follows the configured signer set: measured byte-identical in both modes for
+the same three keys on v0.33.4.2. Changing the signer set still does change it.
+
 ## Lifecycle
 
 1. The archive runs authoritative local ExactReplay.
