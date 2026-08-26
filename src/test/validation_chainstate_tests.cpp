@@ -4014,17 +4014,24 @@ BOOST_FIXTURE_TEST_CASE(chainstate_cadence_hold_production_origin_selection, Tes
     BOOST_CHECK_EQUAL(chainman.GetCadenceHoldAllowedHeight(tip, restart_now), extra0);
     BOOST_CHECK(chainman.CadenceHoldShouldHold(tip, dump, restart_now, 0, false));
 
-    // Snapshot catch-up: disk followed headers disarm. Live gossip does not.
-    chainman.SetCadenceHoldFromSnapshotForTest(true);
-    BOOST_REQUIRE(dump->GetAncestor(tip_h) == tip);
-    BOOST_CHECK_EQUAL(chainman.GetCadenceHoldAllowedHeight(tip, restart_now),
-                      std::numeric_limits<int>::max());
-    BOOST_CHECK(!chainman.CadenceHoldShouldHold(tip, dump, restart_now, 0, false));
-    dump->nTimeReceived = restart_now;
-    BOOST_CHECK_EQUAL(chainman.GetCadenceHoldAllowedHeight(tip, restart_now), extra0);
-    BOOST_CHECK(chainman.CadenceHoldShouldHold(tip, dump, restart_now, 0, false));
-    dump->nTimeReceived = 0;
-    chainman.SetCadenceHoldFromSnapshotForTest(false);
+    // Snapshot catch-up: production reads m_from_snapshot_blockhash on the
+    // active chainstate (set at construction), not a test-only disarm flag.
+    Chainstate snapshot_stub(/*mempool=*/nullptr, chainman.m_blockman, chainman,
+                             tip->GetBlockHash());
+    BOOST_REQUIRE(snapshot_stub.m_from_snapshot_blockhash.has_value());
+    snapshot_stub.m_chain.SetTip(*tip);
+    {
+        ChainstateManager::UseChainstateAsActiveForTest active_snapshot{chainman, snapshot_stub};
+        BOOST_REQUIRE(chainman.ActiveChainstate().m_from_snapshot_blockhash.has_value());
+        BOOST_REQUIRE(dump->GetAncestor(tip_h) == tip);
+        BOOST_CHECK_EQUAL(chainman.GetCadenceHoldAllowedHeight(tip, restart_now),
+                          std::numeric_limits<int>::max());
+        BOOST_CHECK(!chainman.CadenceHoldShouldHold(tip, dump, restart_now, 0, false));
+        dump->nTimeReceived = restart_now;
+        BOOST_CHECK_EQUAL(chainman.GetCadenceHoldAllowedHeight(tip, restart_now), extra0);
+        BOOST_CHECK(chainman.CadenceHoldShouldHold(tip, dump, restart_now, 0, false));
+        dump->nTimeReceived = 0;
+    }
 
     // Anchor monotonic: off-chain best-header must not fold; extra from arm.
     chainman.ResetCadenceHoldStateForTest();

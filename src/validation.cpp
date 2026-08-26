@@ -11331,11 +11331,8 @@ int ChainstateManager::GetCadenceHoldAllowedHeight(const CBlockIndex* tip, int64
     // 6.3: snapshot catch-up toward already-indexed (disk) followed
     // headers is not a withheld dump. Live-gossip best-header does not
     // take this path (nTimeReceived > 0).
-    const bool from_snapshot{
-        (m_active_chainstate != nullptr &&
-         m_active_chainstate->m_from_snapshot_blockhash.has_value()) ||
-        m_cadence_hold_from_snapshot_for_test};
-    if (from_snapshot &&
+    if (m_active_chainstate != nullptr &&
+        m_active_chainstate->m_from_snapshot_blockhash.has_value() &&
         m_best_header != nullptr &&
         kernel::CadenceHoldSnapshotCatchUpDisarms(
             /*from_snapshot=*/true,
@@ -11437,13 +11434,20 @@ void ChainstateManager::ResetCadenceHoldStateForTest()
     m_last_tip_connect_time.reset();
     m_last_tip_connect_mono.reset();
     m_cadence_hold_logged_allowed.reset();
-    m_cadence_hold_from_snapshot_for_test = false;
 }
 
-void ChainstateManager::SetCadenceHoldFromSnapshotForTest(bool from_snapshot)
+ChainstateManager::UseChainstateAsActiveForTest::UseChainstateAsActiveForTest(
+    ChainstateManager& chainman, Chainstate& stub)
+    : m_chainman(chainman), m_saved(chainman.m_active_chainstate)
 {
     AssertLockHeld(::cs_main);
-    m_cadence_hold_from_snapshot_for_test = from_snapshot;
+    m_chainman.m_active_chainstate = &stub;
+}
+
+ChainstateManager::UseChainstateAsActiveForTest::~UseChainstateAsActiveForTest()
+{
+    AssertLockHeld(::cs_main);
+    m_chainman.m_active_chainstate = m_saved;
 }
 
 void ChainstateManager::NotifyCadenceHold(const bilingual_str& alarm, int allowed_height)
