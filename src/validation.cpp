@@ -11331,8 +11331,11 @@ int ChainstateManager::GetCadenceHoldAllowedHeight(const CBlockIndex* tip, int64
     // 6.3: snapshot catch-up toward already-indexed (disk) followed
     // headers is not a withheld dump. Live-gossip best-header does not
     // take this path (nTimeReceived > 0).
-    if (m_active_chainstate != nullptr &&
-        m_active_chainstate->m_from_snapshot_blockhash.has_value() &&
+    const bool from_snapshot{
+        (m_active_chainstate != nullptr &&
+         m_active_chainstate->m_from_snapshot_blockhash.has_value()) ||
+        m_cadence_hold_from_snapshot_for_test};
+    if (from_snapshot &&
         m_best_header != nullptr &&
         kernel::CadenceHoldSnapshotCatchUpDisarms(
             /*from_snapshot=*/true,
@@ -11423,6 +11426,24 @@ void ChainstateManager::NoteTipConnected(int64_t now)
     AssertLockHeld(::cs_main);
     m_last_tip_connect_time = now;
     m_last_tip_connect_mono = CadenceHoldMonotonicNowSeconds();
+}
+
+void ChainstateManager::ResetCadenceHoldStateForTest()
+{
+    AssertLockHeld(::cs_main);
+    m_cadence_hold_anchor_height.reset();
+    m_cadence_hold_anchor_time.reset();
+    m_cadence_hold_anchor_mono.reset();
+    m_last_tip_connect_time.reset();
+    m_last_tip_connect_mono.reset();
+    m_cadence_hold_logged_allowed.reset();
+    m_cadence_hold_from_snapshot_for_test = false;
+}
+
+void ChainstateManager::SetCadenceHoldFromSnapshotForTest(bool from_snapshot)
+{
+    AssertLockHeld(::cs_main);
+    m_cadence_hold_from_snapshot_for_test = from_snapshot;
 }
 
 void ChainstateManager::NotifyCadenceHold(const bilingual_str& alarm, int allowed_height)

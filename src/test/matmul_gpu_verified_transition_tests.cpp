@@ -179,6 +179,9 @@ BOOST_AUTO_TEST_CASE(cadence_hold_closes_live_tip_extension_burst)
     using kernel::CadenceHoldUsesHeaderArrivalAsExtra;
     using kernel::CadenceHoldHonestTrickleIsNakamoto;
     using kernel::CadenceHoldIdleAllowedIsBounded;
+    // Constexpr predicate only. Production origin selection is
+    // ChainstateManager::GetCadenceHoldAllowedHeight (see
+    // validation_chainstate_tests/chainstate_cadence_hold_production_origin_selection).
     BOOST_CHECK(!CadenceHoldUsesHeaderArrivalAsExtra());
     BOOST_CHECK(CadenceHoldHonestTrickleIsNakamoto());
     // Header pre-aging must not manufacture a usable first-seen span.

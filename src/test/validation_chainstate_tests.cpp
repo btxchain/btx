@@ -3,8 +3,10 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 //
 #include <addresstype.h>
+#include <chain.h>
 #include <chainparams.h>
 #include <consensus/validation.h>
+#include <kernel/chainstatemanager_opts.h>
 #include <node/blockstorage.h>
 #include <node/kernel_notifications.h>
 #include <node/miner.h>
@@ -21,10 +23,12 @@
 #include <uint256.h>
 #include <util/check.h>
 #include <util/mempressure.h>
+#include <util/time.h>
 #include <validation.h>
 
 #include <array>
 #include <atomic>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <chrono>
@@ -57,6 +61,23 @@ namespace {
         return matmul::trusted::AddResult::InvalidSigner;
     }
     return node::matmul_trusted::Add(*attestation, block_hash, height);
+}
+
+//! Unindexed dump headers (not in BlockManager). GetAncestor walks pprev.
+//! Hijack 2.2: attacker-chosen nTime + nTimeReceived==0 must not become extra.
+CBlockIndex* BuildUnindexedDump(std::array<CBlockIndex, 40>& nodes, CBlockIndex* tip,
+                                int64_t attacker_nTime)
+{
+    CBlockIndex* prev = tip;
+    for (auto& node : nodes) {
+        node.pprev = prev;
+        node.nHeight = prev->nHeight + 1;
+        node.nTime = static_cast<unsigned int>(attacker_nTime);
+        node.nTimeReceived = 0;
+        node.nTimeBodyReceived = 0;
+        prev = &node;
+    }
+    return prev;
 }
 
 //! Live 2026-08-17 miner: a node that SignAuthoritative'd its own losing
@@ -3884,6 +3905,148 @@ BOOST_FIXTURE_TEST_CASE(chainstate_exact_replay_drops_cs_main_for_recompute, Tes
     waiter.join();
     BOOST_CHECK(hook_saw_unlocked.load(std::memory_order_acquire));
     BOOST_CHECK(waiter_got_lock.load(std::memory_order_acquire));
+}
+
+//! Production cadence extra is last ConnectTip / hold-anchor / now,now — not
+//! dump-header nTime or nTimeReceived. Helper arithmetic in
+//! matmul_gpu_verified_transition_tests does not select origin_time.
+BOOST_FIXTURE_TEST_CASE(chainstate_cadence_hold_production_origin_selection, TestChain100Setup)
+{
+    using kernel::DEFAULT_CADENCE_BURST_MAX;
+    using kernel::CadenceHoldIdleAllowedIsBounded;
+
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    Chainstate& chainstate = chainman.ActiveChainstate();
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    auto& burst_max = const_cast<uint32_t&>(chainman.m_options.cadence_burst_max);
+    const int64_t saved_mock{GetMockTime().count()};
+    struct Restore {
+        Consensus::Params& consensus;
+        int32_t reorg_start;
+        uint32_t& burst_max;
+        uint32_t saved_burst;
+        ChainstateManager& chainman;
+        CBlockIndex* saved_best_header;
+        CBlockIndex* tip;
+        uint32_t saved_nTime;
+        int64_t saved_nTimeReceived;
+        int64_t saved_nTimeBodyReceived;
+        int64_t saved_mock;
+        ~Restore()
+        {
+            consensus.nReorgProtectionStartHeight = reorg_start;
+            burst_max = saved_burst;
+            chainman.m_best_header = saved_best_header;
+            if (tip != nullptr) {
+                tip->nTime = saved_nTime;
+                tip->nTimeReceived = saved_nTimeReceived;
+                tip->nTimeBodyReceived = saved_nTimeBodyReceived;
+            }
+            SetMockTime(saved_mock);
+        }
+    };
+
+    LOCK(::cs_main);
+    CBlockIndex* tip = chainstate.m_chain.Tip();
+    BOOST_REQUIRE(tip != nullptr);
+    Restore restore{consensus, consensus.nReorgProtectionStartHeight,
+                    burst_max, burst_max, chainman, chainman.m_best_header, tip,
+                    tip->nTime, tip->nTimeReceived, tip->nTimeBodyReceived,
+                    saved_mock};
+
+    consensus.nReorgProtectionStartHeight = 10;
+    burst_max = DEFAULT_CADENCE_BURST_MAX;
+    SetMockTime(static_cast<int64_t>(tip->nTime) + 1);
+    BOOST_REQUIRE(!chainman.IsInitialBlockDownload());
+    const int64_t spacing{consensus.nPowTargetSpacing};
+    BOOST_REQUIRE(spacing > 0);
+    const int tip_h{tip->nHeight};
+    const int extra0{tip_h + static_cast<int>(DEFAULT_CADENCE_BURST_MAX)};
+
+    std::array<CBlockIndex, 40> dump_nodes{};
+    const int64_t now0{GetTime()};
+    const int64_t attacker_nTime{now0 - 80 * spacing};
+    CBlockIndex* const dump{BuildUnindexedDump(dump_nodes, tip, attacker_nTime)};
+    BOOST_REQUIRE_EQUAL(dump->nHeight, tip_h + 40);
+    BOOST_REQUIRE_EQUAL(dump->GetAncestor(tip_h), tip);
+
+    // Default first-look: extra=0 (now,now). ConnectTip history is cleared so
+    // mining the fixture chain cannot leak last-connect into this branch.
+    chainman.ResetCadenceHoldStateForTest();
+    chainman.m_best_header = tip;
+    BOOST_CHECK_EQUAL(chainman.GetCadenceHoldAllowedHeight(tip, now0), extra0);
+    BOOST_CHECK_EQUAL(dump_nodes[2].nHeight, extra0);
+    BOOST_CHECK(!chainman.CadenceHoldShouldHold(tip, &dump_nodes[2], now0, /*fork_depth=*/0, false));
+    BOOST_CHECK(chainman.CadenceHoldShouldHold(tip, &dump_nodes[3], now0, 0, false));
+    BOOST_CHECK(!chainman.CadenceHoldShouldHold(tip, tip, now0, 0, false));
+    BOOST_CHECK(chainman.CadenceHoldShouldHold(tip, dump, now0, 0, false));
+    BOOST_CHECK(!chainman.CadenceHoldShouldHold(tip, dump, now0, 0, /*recovery_escape=*/true));
+
+    // (c) Idle > 2×spacing: bounded extra from last ConnectTip, never INT_MAX.
+    chainman.NoteTipConnected(now0);
+    const int64_t idle_now{now0 + 2 * spacing + 1};
+    SetMockTime(idle_now);
+    const int idle_allowed{chainman.GetCadenceHoldAllowedHeight(tip, idle_now)};
+    BOOST_CHECK_NE(idle_allowed, std::numeric_limits<int>::max());
+    BOOST_CHECK(CadenceHoldIdleAllowedIsBounded(
+        idle_allowed, tip_h, DEFAULT_CADENCE_BURST_MAX, /*extra_spacings=*/2));
+    BOOST_CHECK(chainman.CadenceHoldShouldHold(tip, dump, idle_now, 0, false));
+
+    // Idle just inside 2×spacing stays extra=0 (now,now), not the idle branch.
+    SetMockTime(now0 + 2 * spacing);
+    BOOST_CHECK_EQUAL(chainman.GetCadenceHoldAllowedHeight(tip, now0 + 2 * spacing), extra0);
+
+    // (b) Restart: empty last-connect stays extra=0 even after a long pause.
+    // Attacker-chosen tip nTime must not be credited as origin.
+    chainman.ResetCadenceHoldStateForTest();
+    tip->nTime = static_cast<unsigned int>(attacker_nTime);
+    tip->nTimeReceived = 0;
+    tip->nTimeBodyReceived = 0;
+    const int64_t restart_now{now0 + 10'000};
+    SetMockTime(restart_now);
+    BOOST_CHECK_EQUAL(chainman.GetCadenceHoldAllowedHeight(tip, restart_now), extra0);
+    BOOST_CHECK(chainman.CadenceHoldShouldHold(tip, dump, restart_now, 0, false));
+
+    // (a) Dump header with attacker nTime and nTimeReceived==0 must not widen
+    // allowed height. Production extra does not read m_best_header times.
+    chainman.m_best_header = dump;
+    BOOST_CHECK_EQUAL(dump->nTimeReceived, 0);
+    BOOST_CHECK_EQUAL(chainman.GetCadenceHoldAllowedHeight(tip, restart_now), extra0);
+    BOOST_CHECK(chainman.CadenceHoldShouldHold(tip, dump, restart_now, 0, false));
+
+    // Snapshot catch-up: disk followed headers disarm. Live gossip does not.
+    chainman.SetCadenceHoldFromSnapshotForTest(true);
+    BOOST_REQUIRE(dump->GetAncestor(tip_h) == tip);
+    BOOST_CHECK_EQUAL(chainman.GetCadenceHoldAllowedHeight(tip, restart_now),
+                      std::numeric_limits<int>::max());
+    BOOST_CHECK(!chainman.CadenceHoldShouldHold(tip, dump, restart_now, 0, false));
+    dump->nTimeReceived = restart_now;
+    BOOST_CHECK_EQUAL(chainman.GetCadenceHoldAllowedHeight(tip, restart_now), extra0);
+    BOOST_CHECK(chainman.CadenceHoldShouldHold(tip, dump, restart_now, 0, false));
+    dump->nTimeReceived = 0;
+    chainman.SetCadenceHoldFromSnapshotForTest(false);
+
+    // Anchor monotonic: off-chain best-header must not fold; extra from arm.
+    chainman.ResetCadenceHoldStateForTest();
+    SetMockTime(now0);
+    chainman.m_best_header = dump;
+    chainman.ArmCadenceHoldAnchor(tip, now0);
+    SetMockTime(now0 + spacing);
+    BOOST_CHECK_EQUAL(chainman.GetCadenceHoldAllowedHeight(tip, now0 + spacing),
+                      extra0 + 1);
+
+    // Anchor fold: followed header on the active chain drops the pin so the
+    // next burst re-arms from the live tip (extra=0 while last-connect is fresh).
+    chainman.ResetCadenceHoldStateForTest();
+    SetMockTime(now0);
+    chainman.m_best_header = tip;
+    chainman.NoteTipConnected(now0);
+    chainman.ArmCadenceHoldAnchor(tip, now0);
+    BOOST_CHECK_EQUAL(chainman.GetCadenceHoldAllowedHeight(tip, now0), extra0);
+    SetMockTime(now0 + spacing);
+    BOOST_CHECK_EQUAL(chainman.GetCadenceHoldAllowedHeight(tip, now0 + spacing), extra0);
+
+    chainman.m_best_header = restore.saved_best_header;
 }
 
 BOOST_AUTO_TEST_SUITE_END()

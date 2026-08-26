@@ -1179,6 +1179,9 @@ private:
     mutable std::optional<int64_t> m_last_tip_connect_time GUARDED_BY(::cs_main);
     mutable std::optional<int64_t> m_last_tip_connect_mono GUARDED_BY(::cs_main);
     mutable std::optional<int> m_cadence_hold_logged_allowed GUARDED_BY(::cs_main);
+    //! Test-only: treat this node as a snapshot chainstate for cadence hold.
+    //! Production also disarms when m_from_snapshot_blockhash is set.
+    mutable bool m_cadence_hold_from_snapshot_for_test GUARDED_BY(::cs_main){false};
     std::optional<node::ReorgRecoveryRecord> m_reorg_recovery GUARDED_BY(::cs_main);
     /**
      * Authenticated/quorum branch tips used by exceptional shallow-race
@@ -1663,6 +1666,11 @@ public:
     void NotifyCadenceHold(const bilingual_str& alarm, int allowed_height)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     void NoteTipConnected(int64_t now)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    //! Test-only: drop hold-anchor and last-ConnectTip so restart / idle /
+    //! dump-header origin selection can be driven without mining a new chain.
+    void ResetCadenceHoldStateForTest() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    void SetCadenceHoldFromSnapshotForTest(bool from_snapshot)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /**
