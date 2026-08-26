@@ -27,6 +27,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <string_view>
 #include <utility>
@@ -43,13 +44,25 @@ util::Result<void> ApplyArgsManOptions(const ArgsManager& argsman, MemPoolLimits
 {
     mempool_limits.ancestor_count = argsman.GetIntArg("-limitancestorcount", mempool_limits.ancestor_count);
 
-    if (auto err = argsman.AssignIntArgToVar<decltype(mempool_limits.ancestor_size_vbytes), {.min = 0, .multiplier = 1'000}>("-limitancestorsize", mempool_limits.ancestor_size_vbytes); !err) {
+    // AppleClang rejects designated NTTP arguments (`{ .min = 0, ... }` as a
+    // template argument). Name the options as ordinary constexpr aggregates.
+    using AncestorSize = decltype(mempool_limits.ancestor_size_vbytes);
+    static constexpr ArgsManager::AssignIntArgToVarOptions<AncestorSize> kAncestorSizeOpts{
+        .min = 0,
+        .multiplier = 1'000,
+    };
+    if (auto err = argsman.AssignIntArgToVar<AncestorSize, kAncestorSizeOpts>("-limitancestorsize", mempool_limits.ancestor_size_vbytes); !err) {
         return err;
     }
 
     mempool_limits.descendant_count = argsman.GetIntArg("-limitdescendantcount", mempool_limits.descendant_count);
 
-    if (auto err = argsman.AssignIntArgToVar<decltype(mempool_limits.descendant_size_vbytes), {.min = 0, .multiplier = 1'000}>("-limitdescendantsize", mempool_limits.descendant_size_vbytes); !err) {
+    using DescendantSize = decltype(mempool_limits.descendant_size_vbytes);
+    static constexpr ArgsManager::AssignIntArgToVarOptions<DescendantSize> kDescendantSizeOpts{
+        .min = 0,
+        .multiplier = 1'000,
+    };
+    if (auto err = argsman.AssignIntArgToVar<DescendantSize, kDescendantSizeOpts>("-limitdescendantsize", mempool_limits.descendant_size_vbytes); !err) {
         return err;
     }
 

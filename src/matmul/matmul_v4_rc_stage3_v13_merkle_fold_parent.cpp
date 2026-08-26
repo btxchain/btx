@@ -2168,7 +2168,8 @@ OrdinaryHashProductV1 BuildOrdinaryHashProductV1(
         priors;
     for (const auto& key :
          prior_outputs) {
-        const auto [row, lane] = key;
+        const uint32_t row{key.first};
+        const uint32_t lane{key.second};
         if (row >= out.plan.task_rows ||
             lane >=
                 alg_hash::kAlgHashT) {
@@ -3181,8 +3182,9 @@ OrdinaryFoldProductV1 BuildOrdinaryFoldProductV1(
                 {layout.odd_index,
                  row.odd_index},
             }};
-        for (const auto& [target, address] :
-             u32_aliases) {
+        for (const auto& alias : u32_aliases) {
+            const uint32_t target{alias.first};
+            const uint32_t address{alias.second};
             const uint32_t source =
                 source_columns.at(address);
             AddConstraint(

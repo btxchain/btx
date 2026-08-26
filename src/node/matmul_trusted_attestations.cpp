@@ -175,7 +175,7 @@ std::mutex g_persist_worker_mutex;
 std::mutex g_persist_io_mutex;
 std::condition_variable g_persist_worker_cv;
 std::deque<matmul::trusted::ExactReplayAttestation> g_persist_pending;
-std::jthread g_persist_worker;
+std::thread g_persist_worker;
 uint64_t g_persist_queued{0};
 uint64_t g_persist_completed{0};
 bool g_persist_stop{false};
@@ -858,8 +858,13 @@ void PersistAfterMutation(
     g_persist_worker_cv.notify_all();
 }
 
+void StopPersistenceWorker();
+
 void StartPersistenceWorker(const fs::path& path)
 {
+    // Apple libc++ on the macOS 15 SDK still lacks std::jthread. The worker
+    // already has g_persist_stop; join the previous thread before replacing it.
+    StopPersistenceWorker();
     {
         std::lock_guard lock{g_persist_worker_mutex};
         g_persist_pending.clear();
@@ -868,17 +873,15 @@ void StartPersistenceWorker(const fs::path& path)
         g_persist_stop = false;
         g_persist_worker_error.clear();
     }
-    g_persist_worker = std::jthread{[path](std::stop_token stop_token) {
+    g_persist_worker = std::thread{[path] {
         while (true) {
             std::vector<matmul::trusted::ExactReplayAttestation> batch;
             {
                 std::unique_lock lock{g_persist_worker_mutex};
                 g_persist_worker_cv.wait(lock, [&] {
-                    return stop_token.stop_requested() || g_persist_stop ||
-                           !g_persist_pending.empty();
+                    return g_persist_stop || !g_persist_pending.empty();
                 });
-                if (g_persist_pending.empty() &&
-                    (stop_token.stop_requested() || g_persist_stop)) {
+                if (g_persist_pending.empty() && g_persist_stop) {
                     return;
                 }
                 if (g_persist_pending.empty()) continue;

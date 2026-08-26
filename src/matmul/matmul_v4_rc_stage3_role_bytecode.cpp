@@ -670,16 +670,18 @@ bool BuildRCStage3ExtractMixProgramTable(
             b.Mul(branch, b.Sub(branch, one));
         b.Mul(boolean, boolean);
     });
-    for (const auto [target, first] : {
-             std::pair{
+    for (const auto& bits : {
+             std::pair<uint32_t, uint32_t>{
                  kRCStage3ExtractMixU,
                  kRCStage3ExtractMixUBits},
-             std::pair{
+             std::pair<uint32_t, uint32_t>{
                  kRCStage3ExtractMixQ,
                  kRCStage3ExtractMixQBits},
-             std::pair{
+             std::pair<uint32_t, uint32_t>{
                  kRCStage3ExtractMixV,
                  kRCStage3ExtractMixVBits}}) {
+        const uint32_t target{bits.first};
+        const uint32_t first{bits.second};
         Append(out, 1, [target, first](ProgramBuilder& b) {
             const uint32_t value = b.Current(target);
             b.Sub(

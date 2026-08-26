@@ -13,6 +13,7 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <limits>
@@ -180,6 +181,10 @@ BOOST_AUTO_TEST_CASE(rc_peak_ready_derived_never_compiled_eq_ready)
     BOOST_CHECK(!empty.peak_ready);
     BOOST_CHECK(!empty.production_qualified);
     BOOST_CHECK(!empty.deficit.empty());
+    BOOST_CHECK_EQUAL(empty.deficit.rfind("peak_ready_prerequisites_incomplete:", 0), 0);
+    BOOST_CHECK_EQUAL(std::count(empty.deficit.begin(), empty.deficit.end(), ','), 19);
+    BOOST_CHECK(empty.deficit.find("v3_config_selected") != std::string::npos);
+    BOOST_CHECK(empty.deficit.find("production_readiness_tests_pass") != std::string::npos);
 
     // Compiled alone is NOT ready.
     rc::RCEpisodePeakBits bits;

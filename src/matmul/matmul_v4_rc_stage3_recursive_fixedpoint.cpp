@@ -5325,7 +5325,7 @@ AttachNormalizedAlgAirCodecDecoderV1(
             append(std::move(canonical));
         }
     }
-    for (const auto [lane, expected] :
+    for (const auto& header_len :
          std::array<std::pair<uint32_t, uint32_t>, 2>{
              std::pair<uint32_t, uint32_t>{
                  3, out.map.codec_bytes},
@@ -5337,6 +5337,8 @@ AttachNormalizedAlgAirCodecDecoderV1(
             "exact_length_header";
         header.kind = aq::AirKind::kFirstRow;
         header.alg_degree = 1;
+        const uint32_t lane{header_len.first};
+        const uint32_t expected{header_len.second};
         const uint32_t source =
             proof_bus.layout.Field(lane);
         header.eval =
@@ -23342,7 +23344,7 @@ AttachConstraintBytecodeInterpreterImpl(
                     cur[layout.Value(0)],
                     cur[layout.constant]));
         });
-    for (const auto [kind, opcode] :
+    for (const auto& binary :
          std::array<std::pair<uint32_t,
                               constraint_bytecode::Opcode>,
                     3>{
@@ -23358,6 +23360,8 @@ AttachConstraintBytecodeInterpreterImpl(
                  static_cast<uint32_t>(
                      InterpreterRowKind::Mul),
                  constraint_bytecode::Opcode::Mul}}) {
+        const uint32_t kind{binary.first};
+        const auto opcode{binary.second};
         add(
             "stage3.fixedpoint.bytecode.binary",
             aq::AirKind::kEverywhere,
@@ -23396,7 +23400,7 @@ AttachConstraintBytecodeInterpreterImpl(
             const std::vector<Fp3>& cur) {
             return cur[layout.Value(7)];
         };
-    for (const auto [kind, port] :
+    for (const auto& alias :
          std::array<std::pair<uint32_t, uint32_t>, 6>{
              std::pair{current_kind, 3U},
              std::pair{next_kind, 3U},
@@ -23413,6 +23417,8 @@ AttachConstraintBytecodeInterpreterImpl(
                  static_cast<uint32_t>(
                      InterpreterRowKind::Mul),
                  2U}}) {
+        const uint32_t kind{alias.first};
+        const uint32_t port{alias.second};
         add(
             "stage3.fixedpoint.bytecode.result_alias",
             aq::AirKind::kEverywhere, 3,

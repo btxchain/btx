@@ -3618,13 +3618,15 @@ cb::ProgramTable BuildDeepVmProgramTableV1(
                     e.Current(accumulator));
             });
     }
-    for (const auto [after, before] :
+    for (const auto& chain :
          {std::pair{l.u_after, l.u_before},
           std::pair{l.v1_after, l.v1_before},
           std::pair{l.v2_after, l.v2_before}}) {
+        const uint32_t after{chain.first};
+        const uint32_t before{chain.second};
         AppendBytecodeProgramKindV1(
             table, aq::AirKind::kTransition,
-            [=](BytecodeExprV1& e) {
+            [l, after, before](BytecodeExprV1& e) {
                 e.Mul(
                     e.Current(l.deep_chain),
                     e.Sub(
@@ -6592,8 +6594,9 @@ ProductV1 BuildProductV1(
         }
         first_tag[first] = Fp3::One();
         last_tag[last] = Fp3::One();
-        for (const auto& [column, canonical] :
-             view.cs->preprocessed) {
+        for (const auto& prep : view.cs->preprocessed) {
+            const uint32_t column{prep.first};
+            const auto& canonical{prep.second};
             const uint32_t expected =
                 expected_cursor++;
             std::copy(

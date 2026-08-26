@@ -1626,8 +1626,10 @@ bool CopyUnifiedPhase(
     }
     for (uint32_t fixed = 0;
          fixed < phase_cs.preprocessed.size(); ++fixed) {
-        const auto& [local_column, values] =
+        const auto& binding =
             phase_cs.preprocessed[fixed];
+        const uint32_t local_column{binding.first};
+        const auto& values{binding.second};
         if (local_column >= phase_cs.n_columns ||
             values.size() < active_rows) {
             return false;

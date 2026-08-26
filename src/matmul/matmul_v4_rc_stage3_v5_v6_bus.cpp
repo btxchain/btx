@@ -5401,8 +5401,9 @@ bool SamePublicCoreConstraintSchedule(
                 "split_rap_public_core_constraint");
         }
     }
-    for (const auto& [column, values] :
-         public_core.preprocessed) {
+    for (const auto& prep : public_core.preprocessed) {
+        const uint32_t column{prep.first};
+        const auto& values{prep.second};
         const auto found =
             std::find_if(
                 full_prefix.preprocessed.begin(),

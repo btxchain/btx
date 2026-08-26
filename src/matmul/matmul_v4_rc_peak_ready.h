@@ -5,7 +5,9 @@
 #ifndef BTX_MATMUL_MATMUL_V4_RC_PEAK_READY_H
 #define BTX_MATMUL_MATMUL_V4_RC_PEAK_READY_H
 
+#include <cstddef>
 #include <cstdint>
+#include <iterator>
 #include <string>
 
 // Derived peak_ready — never set manually by callers.
@@ -51,6 +53,67 @@ struct RCPeakReadyStatus {
     std::string deficit;
 };
 
+/** Comma-separated names of the production_qualified bits that are still false.
+ *  Empty if and only if every bit is true. Prefix is kept so existing log
+ *  greps for peak_ready_prerequisites_incomplete still match. */
+[[nodiscard]] inline std::string FormatPeakReadyDeficit(const RCPeakReadyInputs& in)
+{
+    static constexpr const char* kNames[] = {
+        "v3_config_selected",
+        "production_dimensions",
+        "full_page_schedule",
+        "real_m128_workload",
+        "canonical_packed_bank",
+        "native_provider_linked",
+        "arch_backend_selected",
+        "exactness_selfqual_ok",
+        "bank_genuinely_resident",
+        "native_tensor_executed",
+        "full_device_pipeline",
+        "no_per_barrier_host_sync",
+        "no_cpu_fallback",
+        "no_dense_int8_as_native",
+        "no_scalar_cuda_as_native",
+        "device_event_timing",
+        "cpu_gpu_byte_exact",
+        "production_provenance_recorded",
+        "corruption_gate_ok",
+        "production_readiness_tests_pass",
+    };
+    const bool kValues[] = {
+        in.v3_config_selected,
+        in.production_dimensions,
+        in.full_page_schedule,
+        in.real_m128_workload,
+        in.canonical_packed_bank,
+        in.native_provider_linked,
+        in.arch_backend_selected,
+        in.exactness_selfqual_ok,
+        in.bank_genuinely_resident,
+        in.native_tensor_executed,
+        in.full_device_pipeline,
+        in.no_per_barrier_host_sync,
+        in.no_cpu_fallback,
+        in.no_dense_int8_as_native,
+        in.no_scalar_cuda_as_native,
+        in.device_event_timing,
+        in.cpu_gpu_byte_exact,
+        in.production_provenance_recorded,
+        in.corruption_gate_ok,
+        in.production_readiness_tests_pass,
+    };
+    static_assert(std::size(kNames) == 20);
+    static_assert(std::size(kValues) == 20);
+    std::string missing;
+    for (size_t i = 0; i < std::size(kNames); ++i) {
+        if (kValues[i]) continue;
+        if (!missing.empty()) missing.push_back(',');
+        missing += kNames[i];
+    }
+    if (missing.empty()) return {};
+    return std::string("peak_ready_prerequisites_incomplete:") + missing;
+}
+
 [[nodiscard]] inline RCPeakReadyStatus DeriveRCPeakReady(const RCPeakReadyInputs& in)
 {
     RCPeakReadyStatus st;
@@ -62,18 +125,9 @@ struct RCPeakReadyStatus {
     st.resident = in.bank_genuinely_resident;
     st.full_pipeline_device = in.full_device_pipeline;
     st.device_timed = in.device_event_timing;
-    st.production_qualified =
-        in.v3_config_selected && in.production_dimensions && in.full_page_schedule &&
-        in.real_m128_workload && in.canonical_packed_bank && in.native_provider_linked &&
-        in.arch_backend_selected && in.exactness_selfqual_ok && in.bank_genuinely_resident &&
-        in.native_tensor_executed && in.full_device_pipeline && in.no_per_barrier_host_sync &&
-        in.no_cpu_fallback && in.no_dense_int8_as_native && in.no_scalar_cuda_as_native &&
-        in.device_event_timing && in.cpu_gpu_byte_exact && in.production_provenance_recorded &&
-        in.corruption_gate_ok && in.production_readiness_tests_pass;
+    st.deficit = FormatPeakReadyDeficit(in);
+    st.production_qualified = st.deficit.empty();
     st.peak_ready = st.production_qualified;
-    if (!st.peak_ready) {
-        st.deficit = "peak_ready_prerequisites_incomplete";
-    }
     return st;
 }
 

@@ -1644,10 +1644,12 @@ ProductV1 BuildProductV1(
                     cur[accumulator]);
             });
     }
-    for (const auto [after, before] :
+    for (const auto& chain :
          {std::pair{l.u_after, l.u_before},
           std::pair{l.v1_after, l.v1_before},
           std::pair{l.v2_after, l.v2_before}}) {
+        const uint32_t after{chain.first};
+        const uint32_t before{chain.second};
         AddConstraint(
             out.cs, "stage3.v11.deep_vm.deep_chain",
             aq::AirKind::kTransition, 2,

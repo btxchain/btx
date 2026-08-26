@@ -1100,8 +1100,9 @@ ProductV1 BuildProductV1(
             {out.layout.origin,
              out.layout.expected_origin},
         }};
-    for (const auto& [value, expected] :
-         route_pairs) {
+    for (const auto& route : route_pairs) {
+        const uint32_t value{route.first};
+        const uint32_t expected{route.second};
         Add(
             out.cs,
             "semantic_recursive:route_pin",
@@ -1126,8 +1127,9 @@ ProductV1 BuildProductV1(
             {out.layout.transcript_base,
              out.layout.expected_transcript_base},
         }};
-    for (const auto& [value, expected] :
-         common_pairs) {
+    for (const auto& common : common_pairs) {
+        const uint32_t value{common.first};
+        const uint32_t expected{common.second};
         for (uint32_t word = 0;
              word < kWordsV1; ++word) {
             Add(
