@@ -12287,7 +12287,11 @@ bool ChainstateManager::MaybeTrackReorgRecovery(const CBlockIndex* candidate)
             return true;
         }
         const int depth{active_tip->nHeight - fork->nHeight};
-        if (depth <= 0 || depth > static_cast<int>(park_depth)) return true;
+        // PARK fires on depth > park_depth. Work-based recovery arms only
+        // for 1 <= depth <= park_depth. Do not extend this window: a
+        // dump-and-run rewrite that ExactReplays itself would auto-unpark.
+        // Trusted mirrors still unpark via IsAttestedAbandonForkCandidate.
+        if (!kernel::WorkBasedReorgRecoveryMayArm(depth, park_depth)) return true;
 
         // A cadence-violating burst must not arm the recovery barrier: that
         // barrier was CadenceHoldShouldHold's recovery_escape and also freezes
@@ -12483,8 +12487,8 @@ bool ChainstateManager::NormalizeReorgRecovery(const CBlockIndex* active_tip)
         valid_mode &&
         m_options.deep_reorg_action == kernel::DeepReorgAction::PARK &&
         park_depth != kernel::REORG_PROTECTION_DEPTH_DISABLED &&
-        record.initial_reorg_depth > 0 &&
-        record.initial_reorg_depth <= park_depth &&
+        kernel::WorkBasedReorgRecoveryMayArm(
+            static_cast<int>(record.initial_reorg_depth), park_depth) &&
         fork != nullptr && losing_tip != nullptr && recovery_root != nullptr &&
         authenticated_tip != nullptr && recovery_root->pprev == fork &&
         BlockIndexDescends(losing_tip, fork) &&

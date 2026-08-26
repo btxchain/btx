@@ -2755,9 +2755,11 @@ void CConnman::ThreadDNSAddressSeed()
                     }
                     addrman.Add(vAdd, resolveSource);
                 } else {
-                    // If the seed does not support a subdomain with our desired service bits,
-                    // we make an ADDR_FETCH connection to the DNS resolved peer address for the
-                    // base dns seed domain in chainparams
+                    // If the seed does not support a subdomain with our desired service bits
+                    // (SeedsServiceFlags is NODE_NETWORK|WITNESS|SHIELDED, not
+                    // DISCOVERY), we make an ADDR_FETCH connection to the DNS
+                    // resolved peer address for the base dns seed domain in
+                    // chainparams. That is how discovery relays are reached.
                     AddAddrFetch(seed);
                 }
             }

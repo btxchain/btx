@@ -2699,7 +2699,15 @@ arith_uint256 CalculateMatMulAsertTarget(
 
     const int64_t target_spacing = params.nPowTargetSpacing;
 
-    // aserti3-2d exponent:
+    // aserti3-2d-shaped exponent. Spec aserti3-2d measures time_diff from
+    // the anchor's *parent*, which spans height_diff+1 intervals and is
+    // why (height_diff + 1) is correct there. This tree measures time_diff
+    // from the activation/re-anchor *block itself* (see GetNextWorkRequired
+    // below), so the pairing compares N intervals of real time against N+1
+    // of ideal time. That is a constant ~0.43% harder target at every
+    // re-anchor (2^(-nPowTargetSpacing / half_life); measured 0.43% at
+    // mainnet 199299→199300). Do not "fix" the pairing here: it is shipped
+    // mainnet behavior. 0.34 must not add another ASERT re-anchor.
     //   exponent = ((time_diff - target_spacing * (height_diff + 1)) * 2^16) / half_life
     const __int128 ideal_delta = static_cast<__int128>(target_spacing) *
         static_cast<__int128>(height_diff + 1);
@@ -3221,6 +3229,10 @@ unsigned int MatMulAsert(const CBlockIndex* pindexLast, const Consensus::Params&
         // UP to powLimit, so it can only ever harden, never weaken, difficulty.
         return MatMulAsertFailClosedBits();
     }
+    // Elapsed time is from the re-anchor *block itself*, not its parent.
+    // Paired with height_diff+1 in CalculateMatMulAsertTarget that is a
+    // known ~0.43% first-block hardening artifact. Do not switch to
+    // anchor->pprev without a consensus reseal (0.34 will not reseal).
     const int64_t time_diff = pindexLast->GetBlockTime() - anchor->GetBlockTime();
     const int64_t clamped_credit = MatMulAsertClampedTimeCredit(pindexLast, anchor, params);
     int64_t asert_time_diff = time_diff;

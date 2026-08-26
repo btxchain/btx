@@ -189,6 +189,10 @@ inline constexpr ReorgProtectionProfileSettings GetReorgProtectionProfileSetting
 //! Default EMERGENCY: PARK, park_depth=6. recovery_escape is
 //! IsAutomaticReorgRecoveryCandidate || IsAttestedAbandonForkCandidate.
 //! A 151-block unattested rewrite parks; a 1–5 block race still connects.
+//! IsAutomaticReorgRecoveryCandidate only fires when a recovery record was
+//! armed (WorkBasedReorgRecoveryMayArm). Those two predicates are mutually
+//! exclusive on purpose: parked depth is operator-only on consensus miners
+//! (dump-and-run). Trusted mirrors may still IsAttestedAbandonForkCandidate.
 [[nodiscard]] inline constexpr bool DeepReorgShouldPark(
     DeepReorgAction action,
     uint32_t park_depth,
@@ -199,6 +203,20 @@ inline constexpr ReorgProtectionProfileSettings GetReorgProtectionProfileSetting
            park_depth != REORG_PROTECTION_DEPTH_DISABLED &&
            reorg_depth > static_cast<int>(park_depth) &&
            !recovery_escape;
+}
+
+//! Work-based automatic reorg recovery (CONSENSUS nAuthenticatedChainWork)
+//! arms only for 1 <= depth <= park_depth. PARK fires on depth > park_depth.
+//! Do not extend this window: a dump-and-run rewrite that ExactReplays
+//! itself would then auto-unpark. Consensus miners unpark parked branches
+//! with reconsiderblock. Trusted mirrors still have attested abandon.
+[[nodiscard]] inline constexpr bool WorkBasedReorgRecoveryMayArm(
+    int reorg_depth,
+    uint32_t park_depth)
+{
+    return park_depth != REORG_PROTECTION_DEPTH_DISABLED &&
+           reorg_depth > 0 &&
+           reorg_depth <= static_cast<int>(park_depth);
 }
 
 //! Highest connected ancestor whose nTime is not in the future. After a

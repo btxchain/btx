@@ -596,8 +596,9 @@ static uint32_t LimitMatMulRCCatchupScaleToScheduler(uint32_t requested_scale)
 /** Retain reconnect-resistant MatMul verification budgets for this duration. */
 static constexpr auto MATMUL_ADDR_BUDGET_RETENTION{10min};
 /** Header-first ExactReplay is a small near-tip lane, not an IBD/backfill
- * engine. More peers or forged branches must not expand Metal concurrency. */
-static constexpr uint32_t MATMUL_RC_SPECULATIVE_LIMIT{3};
+ * engine. More peers or forged branches must not expand Metal concurrency.
+ * Speculative pending cap is MatMulSpeculativeRcPendingLimit (1), not a
+ * pin-gated 3-slot allowance. */
 static constexpr int32_t MATMUL_RC_NEAR_TIP_DEPTH{3};
 static constexpr uint32_t MATMUL_RC_PROVISIONAL_RELAY_PEERS{2};
 static constexpr uint64_t MATMUL_RC_ADMISSION_MAX_GRIND_TRIES{4'000'000};
@@ -4199,6 +4200,9 @@ static uint256 g_configured_claimed_tip_child{};
 //! admitted, 0 UpdateTip) while trusted mirrors on the same archive
 //! reached 14. Trusted-mirror callers that take the false path still
 //! GETMMATTEST preferred hashes. Consensus miners ExactReplay.
+//! Twin-storm HEADER_ONLY (this function returning false) is a GPU
+//! budget, not a pin feature: AdmitMatMulBlockVerification must call it
+//! even when !IsConfigured() (ExactReplayAdmissionThrottleApplies).
 [[nodiscard]] static bool MatMulMaySpendExactReplayGpu(
     const ChainstateManager& chainman,
     const CBlockIndex* tip,
@@ -10203,8 +10207,8 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
     uint32_t pending{m_matmul_rc_speculative_pending.load(
         std::memory_order_relaxed)};
     const uint32_t speculative_limit{
-        node::matmul_trusted::IsConfigured() ? 1u
-                                             : MATMUL_RC_SPECULATIVE_LIMIT};
+        node::matmul_trusted::MatMulSpeculativeRcPendingLimit(
+            node::matmul_trusted::IsConfigured())};
     do {
         if (pending >= speculative_limit) return;
     } while (!m_matmul_rc_speculative_pending.compare_exchange_weak(
@@ -12242,8 +12246,15 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
                         m_chainman.IsOnParkedReorgBranch(indexed)) {
                         exact_recompute_required = false;
                         skip_competing_exactreplay = true;
-                    } else if (exact_recompute_required &&
-                        node::matmul_trusted::IsConfigured()) {
+                    } else if (node::matmul_trusted::
+                                   ExactReplayAdmissionThrottleApplies(
+                                       exact_recompute_required,
+                                       node::matmul_trusted::IsConfigured())) {
+                        // Pin skip / retain stay behind IsTrustedMirror.
+                        // MatMulMaySpendExactReplayGpu (twin HEADER_ONLY)
+                        // must run for consensus miners with no pin: gating
+                        // this whole block on IsConfigured() ExactReplay'd
+                        // every sibling (live 2026-08-14 GPU starve).
                         const CBlockIndex* tip{m_chainman.ActiveTip()};
                         const CNodeState* peer_state{State(node.GetId())};
                         const CBlockIndex* peer_best{
@@ -12260,8 +12271,8 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
                                 node::matmul_trusted::IsTrustedMirror())) {
                             // CPU archives skip ExactReplay when the pin
                             // already covers this hash. Consensus miners
-                            // (IsConfigured but not trusted) still ExactReplay:
-                            // a secp signature is not MatMul work (C16/A02).
+                            // still ExactReplay: a secp signature is not
+                            // MatMul work (C16/A02).
                             exact_recompute_required = false;
                         } else if (node::matmul_trusted::
                                        TrustedMirrorRetainGpuBodyAwaitingAttestation(

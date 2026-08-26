@@ -9,6 +9,13 @@ compiled from `nodes_main.txt`. Use this workflow when you intentionally want
 to regenerate the fixed seed table after verifying which public bootstrap nodes
 are still serving current BTX peers.
 
+**Release checklist.** A two-entry fallback that is a subset of the DNS
+set is not a fallback. Target 6–8 recently-active, ASN-diverse reachable
+nodes (not all one hosting provider, not all the same people who sign
+releases). Each DNS seeder should return many A and AAAA records, not
+one. Do not invent operators or unpublished IPs in `nodes_main.txt`.
+Do not put `NODE_MATMUL_DISCOVERY` into `SeedsServiceFlags()`.
+
 Update `PATTERN_AGENT` and `MIN_BLOCKS` in `makeseeds.py` as the BTX network
 version/height evolves.
 

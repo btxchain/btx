@@ -541,6 +541,11 @@ std::vector<std::string> serviceFlagsToStr(uint64_t flags);
  * If the return value is changed, contrib/seeds/makeseeds.py
  * should be updated appropriately to filter for nodes with
  * desired service flags (compatible with our new flags).
+ *
+ * NODE_MATMUL_DISCOVERY is intentionally absent. DNS x-subdomain bootstrap
+ * must still resolve NODE_NETWORK archives/miners. Discovery relays are
+ * reached via the empty-x ADDR_FETCH fallback (net.cpp), not by putting
+ * DISCOVERY into this mask (that combination makes DNS bootstrap worse).
  */
 constexpr ServiceFlags SeedsServiceFlags() { return ServiceFlags(NODE_NETWORK | NODE_WITNESS | NODE_SHIELDED); }
 

@@ -957,6 +957,34 @@ static constexpr auto GETMMATTEST_HISTORICAL_TOKEN_REFILL{std::chrono::seconds{4
     return peer_advertises_consensus && short_reorg && peer_work_ge_tip;
 }
 
+/** Twin-storm ExactReplay HEADER_ONLY throttle is a consensus-miner GPU
+ *  budget (live 2026-08-14), not a pin feature. Open attestor keys must
+ *  not populate HasQuorum to keep this armed. */
+[[nodiscard]] inline constexpr bool ExactReplayGpuThrottleRequiresPin()
+{
+    return false;
+}
+
+/** AdmitMatMulBlockVerification must HEADER_ONLY extra twins whenever
+ *  ExactReplay is required, including consensus miners with no
+ *  -matmultrustedpubkey. Pin-only paths (skip, retain GPU body,
+ *  GETMMATTEST) stay behind IsTrustedMirror / IsConfigured. */
+[[nodiscard]] inline constexpr bool ExactReplayAdmissionThrottleApplies(
+    bool exact_recompute_required,
+    bool /*pin_configured*/)
+{
+    return exact_recompute_required;
+}
+
+/** Near-tip speculative EncDr RC pending cap. Do not raise this when
+ *  -matmultrustedpubkey is absent: that was the unconfigured twin-storm
+ *  leak (3 speculative slots vs 1 for a pinned miner). */
+[[nodiscard]] inline constexpr uint32_t MatMulSpeculativeRcPendingLimit(
+    bool /*pin_configured*/)
+{
+    return 1;
+}
+
 /** GETMMATTEST / pin quorum is a ConnectTip gate only on trusted mirrors.
  *  Consensus miners ConnectTip after ExactReplay; waiting for an archive
  *  signature is archive authority. */

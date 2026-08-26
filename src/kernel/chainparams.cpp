@@ -915,7 +915,13 @@ public:
         // Mainnet anchor refreshed on 2026-08-04 at height 179'000 from a
         // synced archival node so stale history below the current public
         // release floor is rejected quickly.
-        // Refreshed to the work at height 186000, the new checkpoint anchor.
+        // Refreshed to the work at height 186000, the current checkpoint
+        // anchor. That height has drifted ~13k behind the live tip (was
+        // ~300 when added). Refresh on the next release cadence: a hash
+        // ~100–300 behind a settled tip (beyond park_depth 6 / finality
+        // 72). Do not checkpoint the EncDr stall-recovery flag day
+        // (199299) while it is still in the live tip band. nMinimumChainWork
+        // / defaultAssumeValid stay keyed to the same checkpoint until then.
         consensus.nMinimumChainWork = uint256{"00000000000000000000000000000000000000000000000000030b4f85e66df7"};
         // Assume signatures valid up to the same anchored block to speed sync.
         consensus.defaultAssumeValid = uint256{"0a51fccfd75d2051e94be1a8cc5abff8b86ac53d0cc134680f286fe769aa2129"};
@@ -972,13 +978,18 @@ public:
         // are not chain oracles and must not be GPU attestors. Keep DNS
         // names, not hard-coded IPs, so rotation does not require a binary
         // update. Never list the canonical signer.
+        // Operator checklist (not this binary): 6–8 seeds across distinct
+        // ASNs, many A/AAAA per seeder, regenerate chainparamsseeds.h from
+        // a crawl (contrib/seeds). Do not invent seed operators here.
         vSeeds.clear();
         vSeeds.emplace_back("node.btx.dev.");
         vSeeds.emplace_back("node.btxchain.org.");
         vSeeds.emplace_back("node.btx.tools.");
 
-        // Fixed seeds mirror the public BTX infrastructure endpoints so nodes
-        // can still bootstrap if DNS seed lookups are unavailable.
+        // Fixed seeds are a DNS-failure fallback. They must be regenerated
+        // from an ASN-diverse crawl (contrib/seeds); a two-entry subset of
+        // the same DNS set is not a fallback. Do not add unpublished IPs
+        // here.
         vFixedSeeds = std::vector<uint8_t>{std::begin(chainparams_seed_main), std::end(chainparams_seed_main)};
 
         checkpointData = {
@@ -1001,9 +1012,15 @@ public:
                 // follows the heaviest valid chain it is offered. Without an
                 // anchor above the divergence a fresh sync could settle on the
                 // competing branch. Checkpointing 186000 rejects anything
-                // forking below it, closing that window; the height is ~300
-                // blocks behind the tip, far beyond park_depth 6, so it
-                // cannot pin a block that might still legitimately reorg.
+                // forking below it, closing that window. When added, the
+                // height was ~300 blocks behind the tip, far beyond
+                // park_depth 6, so it cannot pin a block that might still
+                // legitimately reorg. The live tip has since walked ~13k
+                // past this anchor; IBD above 186000 is work-only until the
+                // next release refreshes the checkpoint (see nMinimumChainWork
+                // comment). assumeutxo 199299 is the UTXO snapshot pin, not
+                // a header checkpoint — do not copy that hash here while it
+                // sits in the live tip band.
                 {186000, uint256{"0a51fccfd75d2051e94be1a8cc5abff8b86ac53d0cc134680f286fe769aa2129"}},
             }
         };

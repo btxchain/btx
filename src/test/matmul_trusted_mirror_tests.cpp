@@ -2088,6 +2088,17 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         false, /*peer_advertises_consensus=*/false, true, true));
     BOOST_CHECK(!ConsensusMinerMayFetchCompetingShortReorg(
         false, true, /*short_reorg=*/false, true));
+    using node::matmul_trusted::ExactReplayGpuThrottleRequiresPin;
+    using node::matmul_trusted::ExactReplayAdmissionThrottleApplies;
+    using node::matmul_trusted::MatMulSpeculativeRcPendingLimit;
+    BOOST_CHECK(!ExactReplayGpuThrottleRequiresPin());
+    BOOST_CHECK(ExactReplayAdmissionThrottleApplies(
+        /*exact_recompute_required=*/true, /*pin_configured=*/false));
+    BOOST_CHECK(ExactReplayAdmissionThrottleApplies(true, true));
+    BOOST_CHECK(!ExactReplayAdmissionThrottleApplies(false, false));
+    BOOST_CHECK(!ExactReplayAdmissionThrottleApplies(false, true));
+    BOOST_CHECK_EQUAL(MatMulSpeculativeRcPendingLimit(false), 1u);
+    BOOST_CHECK_EQUAL(MatMulSpeculativeRcPendingLimit(true), 1u);
     using node::matmul_trusted::MsghandTreatAsOutboundPreferred;
     BOOST_CHECK(!MsghandTreatAsOutboundPreferred(/*local_signer=*/true, true));
     BOOST_CHECK(MsghandTreatAsOutboundPreferred(false, /*manual_or_outbound=*/true));

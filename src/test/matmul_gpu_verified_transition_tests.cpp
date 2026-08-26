@@ -102,6 +102,19 @@ BOOST_AUTO_TEST_CASE(emergency_park_closes_dump_and_run_reorg)
     BOOST_CHECK(archive.action == DeepReorgAction::WARN);
     BOOST_CHECK_EQUAL(archive.park_depth, REORG_PROTECTION_DEPTH_DISABLED);
     BOOST_CHECK(!DeepReorgShouldPark(archive.action, archive.park_depth, 151, false));
+
+    using kernel::WorkBasedReorgRecoveryMayArm;
+    // Shallow races may arm work-based unpark. Parked depth must not:
+    // dump-and-run that ExactReplays itself would auto-connect.
+    BOOST_CHECK(WorkBasedReorgRecoveryMayArm(/*reorg_depth=*/1, /*park_depth=*/6));
+    BOOST_CHECK(WorkBasedReorgRecoveryMayArm(6, 6));
+    BOOST_CHECK(!WorkBasedReorgRecoveryMayArm(7, 6));
+    BOOST_CHECK(!WorkBasedReorgRecoveryMayArm(151, 6));
+    BOOST_CHECK(!WorkBasedReorgRecoveryMayArm(0, 6));
+    BOOST_CHECK(!WorkBasedReorgRecoveryMayArm(-1, 6));
+    BOOST_CHECK(!WorkBasedReorgRecoveryMayArm(151, REORG_PROTECTION_DEPTH_DISABLED));
+    BOOST_CHECK(DeepReorgShouldPark(DeepReorgAction::PARK, 6, 7, false));
+    BOOST_CHECK(!WorkBasedReorgRecoveryMayArm(7, 6));
 }
 
 BOOST_AUTO_TEST_CASE(cadence_hold_closes_live_tip_extension_burst)
@@ -294,6 +307,12 @@ BOOST_AUTO_TEST_CASE(consensus_without_signer_does_not_park_bypass)
         false, true, true, true));
     BOOST_CHECK(!ConsensusMinerMayFetchCompetingShortReorg(
         false, false, true, true));
+    using node::matmul_trusted::ExactReplayGpuThrottleRequiresPin;
+    using node::matmul_trusted::ExactReplayAdmissionThrottleApplies;
+    using node::matmul_trusted::MatMulSpeculativeRcPendingLimit;
+    BOOST_CHECK(!ExactReplayGpuThrottleRequiresPin());
+    BOOST_CHECK(ExactReplayAdmissionThrottleApplies(true, false));
+    BOOST_CHECK_EQUAL(MatMulSpeculativeRcPendingLimit(false), 1u);
 }
 
 BOOST_AUTO_TEST_CASE(may_serve_getheaders_quorum_or_work_or_download)
