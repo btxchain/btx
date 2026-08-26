@@ -209,7 +209,6 @@ static OutboundPeerDiagnosticsSummary CollectOutboundPeerDiagnostics(
         diag.addr = OutboundPeerAddrLabel(stats);
         diag.connection_type = ConnectionTypeAsString(stats.m_conn_type);
         diag.manual = stats.m_conn_type == ConnectionType::MANUAL;
-        diag.starting_height = stats.m_starting_height;
         diag.last_block_time = stats.m_last_block_time.count();
 
         if (diag.manual) {
@@ -219,6 +218,11 @@ static OutboundPeerDiagnosticsSummary CollectOutboundPeerDiagnostics(
         if (peerman != nullptr) {
             CNodeStateStats statestats;
             if (peerman->GetNodeStateStats(stats.nodeid, statestats)) {
+                // VERSION height belongs to peer-manager state. CNodeStats is
+                // value-initialized by CConnman but CNode::CopyStats does not
+                // populate its legacy m_starting_height member, which made
+                // getdifficultyhealth disagree with getpeerinfo and report 0.
+                diag.starting_height = statestats.m_starting_height;
                 diag.sync_height = statestats.nSyncHeight;
                 diag.common_height = statestats.nCommonHeight;
                 diag.presync_height = statestats.presync_height;

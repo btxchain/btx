@@ -34,12 +34,28 @@ class BTXDifficultyHealthRPCTest(BitcoinTestFramework):
     def run_test(self):
         node = self.nodes[0]
         node_other = self.nodes[1]
-        self.generate(node, 8)
+
+        def mirror_generated_blocks(block_hashes):
+            for block_hash in block_hashes:
+                result = node_other.submitblock(node.getblock(block_hash, 0))
+                assert result in (None, "duplicate")
+
+        self.disconnect_nodes(0, 1)
+        generated = self.generate(node, 8, sync_fun=lambda: None)
+        mirror_generated_blocks(generated)
+
+        # Connect after both nodes have advanced so the VERSION height is
+        # nonzero. This catches getdifficultyhealth accidentally reading the
+        # value-initialized CNodeStats field instead of peer-manager state.
+        self.connect_nodes(0, 1)
         self.sync_all()
 
         health = node.getdifficultyhealth(5)
         network_info = node.getnetworkinfo()
         peerinfo = node.getpeerinfo()
+        outbound_peerinfo = {
+            peer["addr"]: peer for peer in peerinfo if not peer["inbound"]
+        }
         outbound_peers = len([peer for peer in peerinfo if not peer["inbound"]])
         assert_equal(health["chain"], "regtest")
         assert_equal(health["algorithm"], "matmul")
@@ -72,6 +88,12 @@ class BTXDifficultyHealthRPCTest(BitcoinTestFramework):
             assert "sync_lag" in peer
             assert "last_block_announcement" in peer
             assert "counts_as_synced_outbound" in peer
+            assert peer["addr"] in outbound_peerinfo
+            assert_greater_than(outbound_peerinfo[peer["addr"]]["startingheight"], 0)
+            assert_equal(
+                peer["starting_height"],
+                outbound_peerinfo[peer["addr"]]["startingheight"],
+            )
         assert_equal(health["network"]["header_lag"], 0)
         mining_info = node.getmininginfo()
         assert_equal(health["reorg_protection"]["enabled"], False)
@@ -348,9 +370,15 @@ class BTXDifficultyHealthRPCTest(BitcoinTestFramework):
         addr_a = get_generate_key().p2wpkh_addr
         addr_b = get_generate_key().p2wpkh_addr
         addr_c = get_generate_key().p2wpkh_addr
-        self.generatetoaddress(node, 3, addr_a, 1_000_000)
-        self.generatetoaddress(node, 2, addr_b, 1_000_000)
-        self.generatetoaddress(node, 1, addr_c, 1_000_000)
+        mirror_generated_blocks(self.generatetoaddress(
+            node, 3, addr_a, 1_000_000, sync_fun=lambda: None,
+        ))
+        mirror_generated_blocks(self.generatetoaddress(
+            node, 2, addr_b, 1_000_000, sync_fun=lambda: None,
+        ))
+        mirror_generated_blocks(self.generatetoaddress(
+            node, 1, addr_c, 1_000_000, sync_fun=lambda: None,
+        ))
 
         distribution = node.getdifficultyhealth(6)["reward_distribution"]
         assert_equal(distribution["count"], 6)
@@ -383,8 +411,9 @@ class BTXDifficultyHealthRPCTest(BitcoinTestFramework):
         for _ in range(4):
             spaced_time += 180
             node.setmocktime(spaced_time)
-            self.generatetoaddress(node, 1, addr_a, 1_000_000)
-        self.sync_all()
+            mirror_generated_blocks(self.generatetoaddress(
+                node, 1, addr_a, 1_000_000, sync_fun=lambda: None,
+            ))
         node.setmocktime(0)
         node_other.setmocktime(0)
 
