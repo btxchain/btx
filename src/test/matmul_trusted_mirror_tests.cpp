@@ -2726,7 +2726,7 @@ BOOST_AUTO_TEST_CASE(authority_header_preference_rescues_divergent_tip)
     using node::matmul_trusted::TrustedMirrorAuthorityHeaderView;
     using node::matmul_trusted::TrustedMirrorMayDownloadCompetingBranch;
 
-    // Non-authority competing fork must still be refused (fra1 regression).
+    // Non-authority competing fork must still be refused (archive-A regression).
     BOOST_CHECK(!PreferTrustedMirrorAuthorityHeader(TrustedMirrorAuthorityHeaderView{
         .from_authority_peer = false,
         .extends_active_tip_chain = false,

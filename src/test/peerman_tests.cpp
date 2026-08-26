@@ -912,7 +912,7 @@ BOOST_AUTO_TEST_CASE(matmul_consensus_tier_compact_block_boundary_policy)
 // Regression: a trusted mirror whose attestation authority is ahead must
 // advance m_best_header along the tip chain when the authority serves
 // headers, and must not let competing-branch headers from ordinary peers
-// displace that frontier (fra1: headers==blocks frozen while competing
+// displace that frontier (archive-A: headers==blocks frozen while competing
 // headers at 186270+ arrived continuously).
 BOOST_AUTO_TEST_CASE(trusted_mirror_authority_headers_advance_best_header)
 {

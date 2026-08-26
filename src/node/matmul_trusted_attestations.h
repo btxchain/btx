@@ -454,6 +454,17 @@ static constexpr auto GETMMATTEST_HISTORICAL_TOKEN_REFILL{std::chrono::seconds{4
     return trusted_mirror || has_local_signer;
 }
 
+/** Hijack 3.1 CLOSED for unprivileged consensus: dual-quorum pin twins
+ *  are not fork choice. FindUnique returns nullptr unless this process
+ *  is a trusted mirror or holds a local attestor WIF. */
+[[nodiscard]] inline bool UnprivilegedNodeIgnoresDualQuorumPin(
+    bool trusted_mirror,
+    bool has_local_signer)
+{
+    return !PinSteersFindUniqueCompetingAttestedIndex(
+        trusted_mirror, has_local_signer);
+}
+
 /** Mainnet trusted mirrors skip ExactReplay. M<2 or N<2 is a single stolen
  *  WIF hijacking the archive. 0.34 refuses that topology unless the operator
  *  passes -allowsinglekeytrustedmirror=1 (logged, alarming). Regtest/testnet
@@ -1050,7 +1061,7 @@ static constexpr auto GETMMATTEST_HISTORICAL_TOKEN_REFILL{std::chrono::seconds{4
  *  a trusted mirror defers any unattested one. If that unattested child is
  *  also the heaviest candidate, ActivateBestChain stops on quorum Timeout
  *  and never tries an attested sibling already in the set. Live 2026-08-14
- *  fra1: tip 187931, attested a18786b0 at 187932, ABC looping 39c12144
+ *  archive-A: tip 187931, attested a18786b0 at 187932, ABC looping 39c12144
  *  (unattested twin) so advertised seed height froze while the signer
  *  kept moving.
  *
@@ -2582,7 +2593,7 @@ struct TrustedMirrorAuthorityHeaderView {
  * Used to widen competing-branch *download* to any peer that has the recovery
  * chain after authority header-follow selected it. Fetching is not trusting;
  * acceptance still requires M-of-N. Random competing forks that never became
- * m_best_header cannot qualify, preserving the fra1 inflight-DoS bound.
+ * m_best_header cannot qualify, preserving the archive-A inflight-DoS bound.
  */
 [[nodiscard]] inline bool TrustedMirrorOnFollowedHeaderChain(
     bool best_header_known,

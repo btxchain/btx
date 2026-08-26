@@ -319,6 +319,43 @@ template <typename Node>
     return body_first_seen_span_s > 0 ? body_first_seen_span_s : -1;
 }
 
+//! Hijack 2.2 CLOSED: production CadenceHoldShouldHold extra is wall-clock
+//! from this node's tip / hold anchor. Header-arrival first-seen must not
+//! feed it. CadenceFirstSeenLooksLikeDump is diagnostic only — do not OR
+//! it into a permanent freeze.
+[[nodiscard]] inline constexpr bool CadenceHoldUsesHeaderArrivalAsExtra()
+{
+    return false;
+}
+
+//! Hijack 2.3 ACCEPT-WITH-DOC: after burst_max, extra is +1 per
+//! nPowTargetSpacing. A withheld majority trickling at that rate is
+//! Nakamoto. Holding it forever would be a finality gadget. Do not
+//! "fix" with reseal, header-PoW, or HasQuorum.
+[[nodiscard]] inline constexpr bool CadenceHoldHonestTrickleIsNakamoto()
+{
+    return true;
+}
+
+//! Hijack 2.4: idle extra is burst + floor(idle/spacing), never INT_MAX.
+//! Empty restart stays extra=0 (fail-closed). Persist first-seen is not
+//! 0.34 state; extra=0 is stricter than a dump window.
+[[nodiscard]] inline constexpr bool CadenceHoldIdleAllowedIsBounded(
+    int allowed_height,
+    int tip_height,
+    uint32_t burst_max,
+    int extra_spacings)
+{
+    if (burst_max == 0) {
+        return allowed_height == std::numeric_limits<int>::max();
+    }
+    if (allowed_height == std::numeric_limits<int>::max()) return false;
+    const int64_t expect{static_cast<int64_t>(tip_height) +
+                         static_cast<int64_t>(burst_max) + extra_spacings};
+    if (expect >= std::numeric_limits<int>::max()) return false;
+    return allowed_height == static_cast<int>(expect);
+}
+
 //! Cadence recovery_escape is pin-follow on trusted mirrors only.
 //! Consensus miners ExactReplay: an attested withheld dump still holds
 //! (ordering: cadence precedes unkeyed quorum connect). PARK still uses

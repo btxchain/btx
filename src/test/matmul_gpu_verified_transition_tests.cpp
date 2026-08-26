@@ -176,6 +176,25 @@ BOOST_AUTO_TEST_CASE(cadence_hold_closes_live_tip_extension_burst)
     BOOST_CHECK(!CadenceHoldRestartLeavesHoldArmed(false, true));
     BOOST_CHECK(!CadenceHoldRestartLeavesHoldArmed(true, false));
 
+    using kernel::CadenceHoldUsesHeaderArrivalAsExtra;
+    using kernel::CadenceHoldHonestTrickleIsNakamoto;
+    using kernel::CadenceHoldIdleAllowedIsBounded;
+    BOOST_CHECK(!CadenceHoldUsesHeaderArrivalAsExtra());
+    BOOST_CHECK(CadenceHoldHonestTrickleIsNakamoto());
+    // Header pre-aging must not manufacture a usable first-seen span.
+    BOOST_CHECK_EQUAL(CadenceUsableFirstSeenSpan(/*header=*/80 * spacing, /*body=*/0), -1);
+    // Honest 90s trickle: extra = burst + 1 after one spacing, not a freeze.
+    BOOST_CHECK_EQUAL(CadenceHoldAllowedHeight(tip_h, tip_t, tip_t + spacing, spacing, burst),
+                      tip_h + static_cast<int>(burst) + 1);
+    BOOST_CHECK(CadenceHoldIdleAllowedIsBounded(
+        CadenceHoldAllowedHeight(tip_h, tip_t, tip_t + 2 * spacing, spacing, burst),
+        tip_h, burst, /*extra_spacings=*/2));
+    BOOST_CHECK(CadenceHoldIdleAllowedIsBounded(
+        CadenceHoldAllowedHeight(tip_h, tip_t, tip_t, spacing, burst),
+        tip_h, burst, /*extra_spacings=*/0));
+    BOOST_CHECK_NE(CadenceHoldAllowedHeight(tip_h, tip_t, tip_t + 180, spacing, burst),
+                   std::numeric_limits<int>::max());
+
     // 6.3 snapshot catch-up: disk followed headers only. Live gossip does not disarm.
     using kernel::CadenceHoldSnapshotCatchUpDisarms;
     BOOST_CHECK(CadenceHoldSnapshotCatchUpDisarms(
@@ -279,6 +298,25 @@ BOOST_AUTO_TEST_CASE(consensus_without_signer_does_not_park_bypass)
 
     BOOST_CHECK(!PinSteersFindUniqueCompetingAttestedIndex(
         /*trusted_mirror=*/false, /*has_local_signer=*/false));
+    using node::matmul_trusted::UnprivilegedNodeIgnoresDualQuorumPin;
+    using node::matmul_trusted::DualQuorumSameHeightTwinsFailClosed;
+    using node::matmul_trusted::DualQuorumIncomparableFailClosed;
+    using node::matmul_trusted::MainnetTrustedMirrorRefusesSingleKey;
+    BOOST_CHECK(UnprivilegedNodeIgnoresDualQuorumPin(false, false));
+    BOOST_CHECK(!UnprivilegedNodeIgnoresDualQuorumPin(/*trusted_mirror=*/true, false));
+    BOOST_CHECK(!UnprivilegedNodeIgnoresDualQuorumPin(false, /*has_local_signer=*/true));
+    BOOST_CHECK(DualQuorumSameHeightTwinsFailClosed(
+        /*tip_has_quorum=*/true, /*competing_same_height_has_quorum=*/true,
+        /*signed_frontier_strictly_ahead=*/false));
+    BOOST_CHECK(!DualQuorumSameHeightTwinsFailClosed(true, true, true));
+    BOOST_CHECK(DualQuorumIncomparableFailClosed(true, true));
+    BOOST_CHECK(MainnetTrustedMirrorRefusesSingleKey(
+        /*trusted_mirror=*/true, /*mainnet=*/true, /*n_signers=*/2,
+        /*threshold=*/1, /*allow_single_key_override=*/false));
+    BOOST_CHECK(!MainnetTrustedMirrorRefusesSingleKey(
+        true, true, 2, 2, false));
+    BOOST_CHECK(!MainnetTrustedMirrorRefusesSingleKey(
+        /*trusted_mirror=*/false, true, 1, 1, false));
     BOOST_CHECK(!SkipExactReplayForGpuAttestation(
         /*has_attestation=*/true, /*trusted_mirror=*/false));
     // Pin quorum on a consensus miner is telemetry, not an ExactReplay skip.

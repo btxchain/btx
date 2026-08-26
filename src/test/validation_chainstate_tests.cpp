@@ -1562,7 +1562,7 @@ BOOST_FIXTURE_TEST_CASE(chainstate_trusted_mirror_persists_unattested_tip_child_
 
 BOOST_FIXTURE_TEST_CASE(chainstate_trusted_mirror_connects_attested_sibling_not_heavier_unattested, TestChain100Setup)
 {
-    // Live 2026-08-14 fra1: two tip-children of 187931. Attested a18786b0
+    // Live 2026-08-14 archive-A: two tip-children of 187931. Attested a18786b0
     // sat in the candidate set while FindMostWorkChain kept returning
     // unattested 39c12144. ConnectTip deferred that one, ABC stopped, and
     // the advertised seed height froze at the parent.
@@ -1677,7 +1677,7 @@ BOOST_FIXTURE_TEST_CASE(chainstate_trusted_mirror_connects_attested_sibling_not_
 BOOST_FIXTURE_TEST_CASE(chainstate_trusted_mirror_defers_unattested_twin_for_headers_only_attested_sibling, TestChain100Setup)
 {
     // Mirror of chainstate_trusted_mirror_connects_attested_sibling_not_heavier_unattested
-    // with the attested twin headers-only. Live fra1: MMATTEST can land before
+    // with the attested twin headers-only. Live archive-A: MMATTEST can land before
     // the body, so the sibling is absent from setBlockIndexCandidates.
     // FindMostWorkChain must still defer the unattested HAVE_DATA twin rather
     // than ConnectTip-timeout it and freeze the advertised height.
