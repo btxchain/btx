@@ -11805,6 +11805,14 @@ ChainstateManager::SignedFrontierStatus ChainstateManager::GetSignedFrontierStat
         if (hint.height != out.height || hint.hash.IsNull()) continue;
         const CBlockIndex* const frontier_index{
             m_blockman.LookupBlockIndex(hint.hash)};
+        // Invalidation is the operator's resolution of an ambiguous
+        // dual-attested fork. Keep the durable attestation for audit, but do
+        // not let its failed block index continue to displace the active,
+        // attested sibling in signed-frontier reporting or catch-up policy.
+        if (frontier_index != nullptr &&
+            (frontier_index->nStatus & BLOCK_FAILED_MASK) != 0) {
+            continue;
+        }
         const bool on_chain{
             tip != nullptr && frontier_index != nullptr &&
             tip->nHeight >= frontier_index->nHeight &&
@@ -12367,7 +12375,10 @@ bool ChainstateManager::IndexIsOnSignedFrontierChain(const CBlockIndex* index) c
         }
         const CBlockIndex* const frontier{
             m_blockman.LookupBlockIndex(hint.hash)};
-        if (frontier == nullptr) continue;
+        if (frontier == nullptr ||
+            (frontier->nStatus & BLOCK_FAILED_MASK) != 0) {
+            continue;
+        }
         const bool contained{
             tip != nullptr && tip->nHeight >= frontier->nHeight &&
             tip->GetAncestor(frontier->nHeight) == frontier};
@@ -12402,7 +12413,10 @@ bool ChainstateManager::IndexIsCoveredBySignedFrontier(const CBlockIndex* index)
         }
         const CBlockIndex* const frontier{
             m_blockman.LookupBlockIndex(hint.hash)};
-        if (frontier == nullptr) continue;
+        if (frontier == nullptr ||
+            (frontier->nStatus & BLOCK_FAILED_MASK) != 0) {
+            continue;
+        }
         if (node::matmul_trusted::TrustedMirrorFrontierCoversBlock(
                 /*frontier_available=*/true, index->nHeight, frontier->nHeight,
                 frontier->GetAncestor(index->nHeight) == index)) {
@@ -12441,7 +12455,10 @@ bool ChainstateManager::IndexLeadsToSignedFrontier(const CBlockIndex* index) con
         }
         const CBlockIndex* const frontier{
             m_blockman.LookupBlockIndex(hint.hash)};
-        if (frontier == nullptr) continue;
+        if (frontier == nullptr ||
+            (frontier->nStatus & BLOCK_FAILED_MASK) != 0) {
+            continue;
+        }
         if (index->nHeight <= frontier->nHeight) {
             if (frontier->GetAncestor(index->nHeight) == index) return true;
         } else if (index->GetAncestor(frontier->nHeight) == frontier) {

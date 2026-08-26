@@ -2322,6 +2322,32 @@ BOOST_FIXTURE_TEST_CASE(chainstate_dual_quorum_sibling_follows_signed_frontier, 
     state = BlockValidationState{};
     BOOST_REQUIRE(chainstate.ActivateBestChain(state));
     BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()) == sibling);
+
+    // The off-chain hash remains the diagnostic frontier while both quorum
+    // siblings are valid. Once the operator invalidates that sibling, its
+    // durable attestation remains audit evidence but must no longer displace
+    // the active attested hash in signed-frontier reporting or policy.
+    {
+        LOCK(::cs_main);
+        const auto dual{chainman.GetSignedFrontierStatus()};
+        BOOST_REQUIRE(dual.hash_known);
+        BOOST_CHECK_EQUAL(dual.hash, original_hash);
+        BOOST_CHECK(!dual.on_active_chain);
+    }
+    state = BlockValidationState{};
+    BOOST_REQUIRE(chainstate.InvalidateBlock(state, original_tip));
+    {
+        LOCK(::cs_main);
+        const auto resolved{chainman.GetSignedFrontierStatus()};
+        BOOST_REQUIRE(resolved.hash_known);
+        BOOST_CHECK_EQUAL(resolved.hash, sibling->GetBlockHash());
+        BOOST_CHECK(resolved.on_active_chain);
+        BOOST_CHECK_EQUAL(resolved.on_chain_attested_height, sibling->nHeight);
+        BOOST_CHECK_EQUAL(resolved.blocks_behind, 0);
+        BOOST_CHECK(chainman.IndexIsOnSignedFrontierChain(sibling));
+        BOOST_CHECK(chainman.IndexIsCoveredBySignedFrontier(sibling));
+        BOOST_CHECK(chainman.IndexLeadsToSignedFrontier(sibling));
+    }
 }
 
 BOOST_FIXTURE_TEST_CASE(chainstate_attested_tip_suffix_catchup_is_unique_competing, TestChain100Setup)
