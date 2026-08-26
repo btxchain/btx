@@ -15,6 +15,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <map>
 #include <mutex>
@@ -29,8 +30,11 @@ namespace matmul::trusted {
  * Operator-trust sidecar for a successful MatMul v4 Profile 1 ExactReplay.
  *
  * These statements are not consensus proofs, do not change a block's hash or
- * validity, and are meaningful only to nodes explicitly configured to trust an
- * M-of-N signer set. The chain identifier MUST be that chain's genesis hash.
+ * validity, and are not CheckBlock / header objects. A pinned M-of-N set
+ * (`-matmultrustedpubkey`) remains sufficient authority for CPU archives.
+ * When open attestors are enabled, additional GPUs may speak; they count as
+ * authority only after local admission on a hash that already has pin quorum.
+ * The chain identifier MUST be that chain's genesis hash.
  */
 struct ExactReplayStatement {
     static constexpr uint8_t CURRENT_VERSION{2};
@@ -85,6 +89,58 @@ struct ExactReplayAttestation {
 [[nodiscard]] std::optional<ExactReplayAttestation> SignStatement(
     const ExactReplayStatement& statement, const CKey& signer);
 
+/**
+ * Watchtower refutation: the signer asserts ExactReplay *failed* for this
+ * statement. Same statement fields as a success attestation; different
+ * domain. Not a consensus object. A pin-member refutation blocks open
+ * quorum on that hash; pin quorum is unchanged (1-of-N pin still wins).
+ */
+struct ExactReplayRefutation {
+    ExactReplayStatement statement{};
+    CPubKey signer{};
+    std::vector<unsigned char> signature{};
+
+    SERIALIZE_METHODS(ExactReplayRefutation, obj)
+    {
+        READWRITE(obj.statement, obj.signer, obj.signature);
+    }
+
+    friend bool operator==(const ExactReplayRefutation&,
+                           const ExactReplayRefutation&) = default;
+};
+
+[[nodiscard]] uint256 RefutationHash(const ExactReplayStatement& statement);
+
+[[nodiscard]] std::optional<ExactReplayRefutation> SignRefutation(
+    const ExactReplayStatement& statement, const CKey& signer);
+
+/** Compiled (height, hash, log_root) pin. Not wired into chainparams until a
+ *  log root is stable; same moral status as assumeutxo. */
+struct CompiledAttestationLogPin {
+    int32_t height{-1};
+    uint256 block_hash{};
+    uint256 log_root{};
+    uint64_t tree_size{0};
+};
+
+struct AttestationLogHead {
+    uint64_t tree_size{0};
+    uint256 root{};
+};
+
+struct AttestationLogProof {
+    uint64_t index{0};
+    uint256 leaf{};
+    uint256 root{};
+    std::vector<uint256> branch{};
+};
+
+[[nodiscard]] uint256 ComputeAttestationLogRoot(
+    const std::vector<uint256>& leaves);
+[[nodiscard]] std::vector<uint256> ComputeAttestationLogBranch(
+    const std::vector<uint256>& leaves, uint64_t index);
+[[nodiscard]] bool VerifyAttestationLogInclusion(const AttestationLogProof& proof);
+
 enum class VerifyResult : uint8_t {
     Valid,
     UnsupportedVersion,
@@ -115,6 +171,55 @@ enum class VerifyResult : uint8_t {
     int32_t expected_height,
     const std::set<CPubKey>& trusted_signers);
 
+/**
+ * Cryptographic and contextual checks only. Does not consult membership.
+ * A valid-unpinned statement is a rumor until the local pin admits it.
+ */
+[[nodiscard]] VerifyResult VerifyAttestationCrypto(
+    const ExactReplayAttestation& attestation,
+    const uint256& expected_chain_id,
+    const uint256& expected_replay_authority_context,
+    const uint256& expected_hash,
+    int32_t expected_height);
+
+[[nodiscard]] VerifyResult VerifyRefutationCrypto(
+    const ExactReplayRefutation& refutation,
+    const uint256& expected_chain_id,
+    const uint256& expected_replay_authority_context,
+    const uint256& expected_hash,
+    int32_t expected_height);
+
+/** Open-quorum default: max(pin M, 2) so one newly-admitted key cannot
+ *  replace the pin. Pass 0 in StoreConfig.open_threshold to use this. */
+[[nodiscard]] constexpr size_t DefaultOpenThreshold(size_t pin_threshold)
+{
+    return pin_threshold > 2 ? pin_threshold : 2;
+}
+
+/** Directory / refute / log caps. 0 in StoreConfig uses these. */
+inline constexpr size_t DEFAULT_MAX_ADMITTED_OPEN{256};
+inline constexpr size_t DEFAULT_MAX_OPEN_SIGNED_HEIGHTS{4096};
+inline constexpr size_t DEFAULT_MAX_OPEN_SIGNED_ENTRIES{4096};
+inline constexpr size_t DEFAULT_MAX_OPEN_SIGNERS_PER_HEIGHT{256};
+inline constexpr size_t DEFAULT_MAX_FROZEN_OPEN{4096};
+inline constexpr size_t DEFAULT_MAX_REFUTATIONS{4096};
+inline constexpr size_t DEFAULT_MAX_LOG_LEAVES{8192};
+inline constexpr size_t DEFAULT_MAX_WINDOW_CHALLENGES{16};
+/** Runtime + config blocklist cap. Emergency lists stay tiny. */
+inline constexpr size_t DEFAULT_MAX_BLOCKED_SIGNERS{256};
+
+/**
+ * True when at least `threshold` pin members remain unblocked.
+ * Constructor and runtime AddBlocklistedSigner refuse states that would
+ * make this false (fail-closed: a CPU archive never starts or runs with
+ * an M it cannot actually reach).
+ */
+[[nodiscard]] inline bool PinQuorumIsReachable(
+    size_t unblocked_pin_members, size_t threshold) noexcept
+{
+    return threshold > 0 && unblocked_pin_members >= threshold;
+}
+
 struct StoreConfig {
     uint256 chain_id{};
     uint256 replay_authority_context{};
@@ -124,6 +229,36 @@ struct StoreConfig {
     size_t max_attestations{16384};
     std::chrono::milliseconds ttl{std::chrono::hours{24}};
     std::optional<CKey> local_signer{};
+    /** When true, valid-unpinned statements are heard and keys that co-sign
+     *  a pin-quorum hash are listed as admitted. They do not enter HasQuorum.
+     *  Default false keeps unit tests closed. */
+    bool open_attestors{false};
+    /** Distinct pinned-or-admitted votes for the directory open-quorum
+     *  signal. 0 = DefaultOpenThreshold. Not MatMul authority. */
+    size_t open_threshold{0};
+    size_t max_heard_attestations{4096};
+    /** 0 = DEFAULT_MAX_ADMITTED_OPEN. Extra co-signers stay Heard. */
+    size_t max_admitted_open{0};
+    /** 0 = DEFAULT_MAX_OPEN_SIGNED_HEIGHTS. Oldest heights pruned. */
+    size_t max_open_signed_heights{0};
+    /** 0 = DEFAULT_MAX_OPEN_SIGNED_ENTRIES. Total (height,signer) pairs. */
+    size_t max_open_signed_entries{0};
+    /** 0 = DEFAULT_MAX_OPEN_SIGNERS_PER_HEIGHT. Tip-height Sybil cap. */
+    size_t max_open_signers_per_height{0};
+    /** 0 = DEFAULT_MAX_FROZEN_OPEN. Oldest frozen keys evicted. */
+    size_t max_frozen_open{0};
+    /** 0 = DEFAULT_MAX_REFUTATIONS. Oldest (height,hash) buckets pruned. */
+    size_t max_refutations{0};
+    /** 0 = DEFAULT_MAX_LOG_LEAVES. Oldest leaves dropped. */
+    size_t max_log_leaves{0};
+    /** 0 = DEFAULT_MAX_WINDOW_CHALLENGES. Oldest challenges dropped. */
+    size_t max_window_challenges{0};
+    /**
+     * Config-forced attestation key blocklist. Overlap with trusted_signers
+     * is legal and is the point: a still-listed pin member becomes inert.
+     * Runtime RPC adds are stored separately and persist across restart.
+     */
+    std::vector<CPubKey> blocklist{};
 };
 
 enum class AddResult : uint8_t {
@@ -142,9 +277,28 @@ enum class AddResult : uint8_t {
     NoLocalSigner,
     /** Local signer already attested a different hash at this height. */
     HeightOccupied,
+    /** Cryptographically valid, stored as directory, not authority. */
+    Heard,
+    /** Open key previously equivocated (same height, two hashes). */
+    FrozenSigner,
+    /** First observed open-key equivocation; key is now frozen. */
+    Equivocation,
+    /** Signer is on the operator attestation blocklist. */
+    BlocklistedSigner,
 };
 
 [[nodiscard]] std::string_view AddResultName(AddResult result);
+
+enum class BlocklistResult : uint8_t {
+    Blocked,
+    Duplicate,
+    WouldDisablePinQuorum,
+    LocalSigner,
+    Invalid,
+    Capacity,
+};
+
+[[nodiscard]] std::string_view BlocklistResultName(BlocklistResult result);
 
 enum class WaitResult : uint8_t {
     Quorum,
@@ -166,9 +320,14 @@ struct StoreStats {
     uint64_t wait_quorums{0};
     uint64_t wait_timeouts{0};
     uint64_t wait_cancellations{0};
+    uint64_t heard{0};
+    uint64_t equivocations{0};
     size_t stored_blocks{0};
     size_t stored_attestations{0};
     size_t blocks_with_quorum{0};
+    size_t heard_attestations{0};
+    size_t admitted_open{0};
+    size_t frozen_open{0};
 };
 
 /**
@@ -178,6 +337,12 @@ struct StoreStats {
  * Its caller decides whether an operator-configured mirror may use quorum as a
  * substitute for local ExactReplay. Each bucket is keyed by both height and
  * hash, and each configured signer contributes at most one vote.
+ *
+ * HasQuorum is PinQuorum only (M-of-N of `-matmultrustedpubkey`). That is
+ * the sole SkipExactReplay / signed-frontier / trusted-mirror authority.
+ * Open attestors may speak and be listed after co-signing a pin-quorum
+ * hash; they must not become MatMul PoW for CPU archives or consensus+pin
+ * miners. Stolen open keys therefore cannot mint fake work for those nodes.
  */
 class AttestationStore
 {
@@ -209,6 +374,28 @@ public:
 
     [[nodiscard]] bool HasQuorum(const uint256& block_hash,
                                  int32_t block_height) const;
+
+    /**
+     * Directory signal only. Never SkipExactReplay, never signed-frontier.
+     * True when open attestors are enabled and enough pinned-or-admitted
+     * unfrozen keys signed this hash, unless a pin member refuted it.
+     */
+    [[nodiscard]] bool HasOpenQuorum(const uint256& block_hash,
+                                     int32_t block_height) const;
+
+    /**
+     * Evaluate pin quorum from a caller-supplied set (durable miss path).
+     * Only cryptographically valid pin votes count.
+     */
+    [[nodiscard]] bool HasQuorumFromAttestations(
+        const std::vector<ExactReplayAttestation>& attestations,
+        const uint256& block_hash,
+        int32_t block_height) const;
+
+    [[nodiscard]] AddResult AddRefutation(
+        const ExactReplayRefutation& refutation,
+        const uint256& expected_hash,
+        int32_t expected_height);
 
     /** Return all valid unique-signer attestations currently held. */
     [[nodiscard]] std::vector<ExactReplayAttestation> GetAttestations(
@@ -261,6 +448,58 @@ public:
         return m_trusted_signers;
     }
     [[nodiscard]] std::optional<CPubKey> LocalSignerPubKey() const;
+    [[nodiscard]] bool OpenAttestorsEnabled() const
+    {
+        return m_config.open_attestors;
+    }
+    [[nodiscard]] size_t OpenSignedHeightCount() const;
+    [[nodiscard]] size_t OpenSignedEntryCount() const;
+    [[nodiscard]] size_t OpenThreshold() const
+    {
+        return m_config.open_threshold;
+    }
+    [[nodiscard]] size_t MaxVotesPerBlock() const;
+    [[nodiscard]] bool IsPinnedSigner(const CPubKey& pubkey) const;
+    [[nodiscard]] bool IsAdmittedOpenSigner(const CPubKey& pubkey) const;
+    [[nodiscard]] bool IsFrozenOpenSigner(const CPubKey& pubkey) const;
+    [[nodiscard]] bool IsAuthoritySigner(const CPubKey& pubkey) const;
+    [[nodiscard]] bool IsBlocked(const CPubKey& pubkey) const;
+    [[nodiscard]] std::set<CPubKey> BlockedSigners() const;
+    [[nodiscard]] std::set<CPubKey> ConfigBlockedSigners() const;
+    [[nodiscard]] std::set<CPubKey> RuntimeBlockedSigners() const;
+    [[nodiscard]] size_t UnblockedPinMembers() const;
+    [[nodiscard]] bool PinQuorumReachable() const;
+    /**
+     * Manual emergency excision. Never auto-populated. Refuses without
+     * applying when the add would leave fewer than M unblocked pin members,
+     * or when the key is this process's local signer. No runtime remove:
+     * unblocking a runtime add requires editing the persisted record.
+     */
+    [[nodiscard]] BlocklistResult AddBlocklistedSigner(const CPubKey& pubkey);
+    /** Merge persisted runtime blocks. Returns false if a key would
+     *  disable pin quorum, block the local signer, or overflow the cap. */
+    [[nodiscard]] bool RestoreRuntimeBlocked(std::set<CPubKey> blocked);
+    [[nodiscard]] std::set<CPubKey> AdmittedOpenSigners() const;
+    [[nodiscard]] std::set<CPubKey> FrozenOpenSigners() const;
+    [[nodiscard]] std::vector<ExactReplayAttestation> GetHeard(
+        const uint256& block_hash, int32_t block_height) const;
+    [[nodiscard]] std::vector<ExactReplayAttestation> ExportHeard() const;
+    [[nodiscard]] std::vector<ExactReplayRefutation> GetRefutations(
+        const uint256& block_hash, int32_t block_height) const;
+    [[nodiscard]] AttestationLogHead LogHead() const;
+    [[nodiscard]] std::optional<AttestationLogProof> LogInclusionProof(
+        const uint256& statement_hash) const;
+    void RestoreOpenAttestors(std::set<CPubKey> admitted,
+                              std::set<CPubKey> frozen);
+    void AdmitOpenSigner(const CPubKey& pubkey);
+
+    struct WindowReplayChallenge {
+        int32_t height{-1};
+        uint256 block_hash{};
+    };
+    void ChallengeWindowReplay(int32_t height, const uint256& block_hash);
+    [[nodiscard]] std::vector<WindowReplayChallenge> WindowReplayChallenges() const;
+    [[nodiscard]] bool WindowReplayAnswered(const CPubKey& pubkey) const;
 
 private:
     using Clock = std::chrono::steady_clock;
@@ -283,7 +522,30 @@ private:
     };
 
     [[nodiscard]] static AddResult ToAddResult(VerifyResult result);
+    [[nodiscard]] size_t PinVotesLocked(const Bucket& bucket) const;
+    [[nodiscard]] size_t AuthorityVotesLocked(const Bucket& bucket) const;
+    [[nodiscard]] bool PinQuorumLocked(const Bucket& bucket) const;
+    [[nodiscard]] bool OpenQuorumLocked(const BlockKey& key,
+                                        const Bucket& bucket) const;
+    [[nodiscard]] bool HasQuorumLocked(const BlockKey& key,
+                                       const Bucket& bucket) const;
+    [[nodiscard]] bool WouldReachQuorumLocked(const BlockKey& key,
+                                              const CPubKey& signer) const;
+    [[nodiscard]] bool IsBlockedLocked(const CPubKey& pubkey) const;
+    [[nodiscard]] size_t UnblockedPinMembersLocked() const;
+    void DropHeardLocked(const CPubKey& pubkey);
+    void AdmitOpenLocked(const CPubKey& pubkey);
+    void FreezeOpenLocked(const CPubKey& pubkey);
+    void AdmitHeardOnHashLocked(const BlockKey& key, Clock::time_point now);
+    [[nodiscard]] AddResult StoreHeardLocked(
+        const ExactReplayAttestation& attestation, Clock::time_point now);
+    void AppendLogLeafLocked(const uint256& leaf);
     void PruneExpiredLocked(Clock::time_point now);
+    void PruneOpenDirectoryLocked();
+    [[nodiscard]] size_t OpenSignedEntryCountLocked() const;
+    void RefreshPinRefutedLocked(const BlockKey& key);
+    void CapRefutationsLocked();
+    void CapFrozenOpenLocked();
     /**
      * Make room for one additional signature.
      *
@@ -300,15 +562,42 @@ private:
     [[nodiscard]] std::vector<ExactReplayAttestation> GetAttestationsLocked(
         const BlockKey& key) const;
 
+    struct HeardKey {
+        int32_t height{-1};
+        uint256 hash{};
+        CPubKey signer{};
+
+        friend bool operator<(const HeardKey& a, const HeardKey& b)
+        {
+            if (a.height != b.height) return a.height < b.height;
+            if (a.hash != b.hash) return a.hash < b.hash;
+            return a.signer < b.signer;
+        }
+    };
+
     StoreConfig m_config;
     std::set<CPubKey> m_trusted_signers;
+    std::set<CPubKey> m_blocked_config;
 
     mutable std::mutex m_mutex;
+    std::set<CPubKey> m_blocked;
     std::condition_variable m_changed;
     std::map<BlockKey, Bucket> m_buckets;
+    std::map<HeardKey, ExactReplayAttestation> m_heard;
+    std::map<HeardKey, Clock::time_point> m_heard_updated;
+    std::set<CPubKey> m_admitted_open;
+    std::set<CPubKey> m_frozen_open;
+    std::deque<CPubKey> m_frozen_open_order;
+    std::map<int32_t, std::map<CPubKey, uint256>> m_open_signed_at_height;
+    std::map<BlockKey, std::map<CPubKey, ExactReplayRefutation>> m_refutations;
+    std::set<BlockKey> m_pin_refuted;
+    std::vector<uint256> m_log_leaves;
+    std::vector<WindowReplayChallenge> m_window_challenges;
     size_t m_attestation_count{0};
     StoreStats m_stats;
     bool m_durable_retention{false};
+    /** Heights this process SignLocal'd. Relayed copies of local_pk do not count. */
+    std::map<int32_t, uint256> m_local_minted_hash_by_height;
 };
 
 } // namespace matmul::trusted

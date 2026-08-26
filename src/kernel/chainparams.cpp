@@ -967,9 +967,11 @@ public:
         fDefaultConsistencyChecks = false;
         m_is_mockable_chain = false;
 
-        // Live bootstrap DNS seeds for mainnet peer discovery. Keep these as
-        // DNS names, not hard-coded IPs, so archive-node rotation does not
-        // require a binary update.
+        // Live bootstrap DNS names for mainnet peer *introduction*. In 0.34
+        // these hosts should run -matmulvalidation=relay (ADDR only). They
+        // are not chain oracles and must not be GPU attestors. Keep DNS
+        // names, not hard-coded IPs, so rotation does not require a binary
+        // update. Never list the canonical signer.
         vSeeds.clear();
         vSeeds.emplace_back("node.btx.dev.");
         vSeeds.emplace_back("node.btxchain.org.");
@@ -991,14 +993,16 @@ public:
                 {185000, uint256{"f03a7af21d20f67a5efecfb8b0b3e5e1b91efa208b385419470c59450f2afb8b"}},
                 // Post-activation anchor. A competing branch diverges from the
                 // canonical chain at ~185544, above the 185000 checkpoint, and
-                // is ~800 blocks long. nMaxReorgDepth (12) already stops any
-                // running node being reorged onto it, but that rule says
+                // is ~800 blocks long. EMERGENCY park_depth 6 already stops any
+                // running default node being reorged onto it (nMaxReorgDepth
+                // is a prune-retention window, not a fork-choice cap), but
+                // that rule says
                 // nothing about a node syncing from scratch, which simply
                 // follows the heaviest valid chain it is offered. Without an
                 // anchor above the divergence a fresh sync could settle on the
                 // competing branch. Checkpointing 186000 rejects anything
                 // forking below it, closing that window; the height is ~300
-                // blocks behind the tip, far beyond nMaxReorgDepth, so it
+                // blocks behind the tip, far beyond park_depth 6, so it
                 // cannot pin a block that might still legitimately reorg.
                 {186000, uint256{"0a51fccfd75d2051e94be1a8cc5abff8b86ac53d0cc134680f286fe769aa2129"}},
             }

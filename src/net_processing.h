@@ -13,6 +13,7 @@
 #include <validationinterface.h>
 
 #include <chrono>
+#include <cstdint>
 #include <functional>
 #include <optional>
 
@@ -169,6 +170,9 @@ struct PeerManagerInfo {
     int smile_v2_enforcement_height{SMILE_V2_ENFORCEMENT_HEIGHT};
     int min_matmul_rc_version{MIN_MATMUL_RC_PROTOCOL_VERSION};
     int matmul_rc_enforcement_height{MATMUL_RC_ENFORCEMENT_HEIGHT};
+    //! Recent-network VERSION height watermark on a discovery relay. Raised
+    //! by outbound/manual miners, archives, or trusted mirrors. -1 if none.
+    int32_t discovery_archive_reported_height{-1};
 };
 
 class PeerManager : public CValidationInterface, public NetEventsInterface

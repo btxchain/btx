@@ -6,11 +6,13 @@
 
 #include <common/args.h>
 #include <common/system.h>
+#include <kernel/chainstatemanager_opts.h>
 #include <logging.h>
 #include <node/coins_view_args.h>
 #include <node/database_args.h>
 #include <tinyformat.h>
 #include <uint256.h>
+#include <util/chaintype.h>
 #include <util/result.h>
 #include <util/translation.h>
 #include <validation.h>
@@ -81,13 +83,15 @@ util::Result<void> ApplyArgsManOptions(const ArgsManager& args, ChainstateManage
             opts.matmul_validation_mode = kernel::MatMulValidationMode::CONSENSUS;
         } else if (*value == "trusted") {
             opts.matmul_validation_mode = kernel::MatMulValidationMode::TRUSTED;
+        } else if (*value == "relay") {
+            opts.matmul_validation_mode = kernel::MatMulValidationMode::RELAY;
         } else if (*value == "economic") {
             opts.matmul_validation_mode = kernel::MatMulValidationMode::ECONOMIC;
         } else if (*value == "spv") {
             opts.matmul_validation_mode = kernel::MatMulValidationMode::SPV;
         } else {
             return util::Error{Untranslated(strprintf(
-                "Invalid -matmulvalidation value (%s). Valid values: consensus, trusted, economic, spv", *value))};
+                "Invalid -matmulvalidation value (%s). Valid values: consensus, trusted, relay, economic, spv", *value))};
         }
     }
 
@@ -112,8 +116,9 @@ util::Result<void> ApplyArgsManOptions(const ArgsManager& args, ChainstateManage
     }
 
     // Deep-reorg defense. These are PER-NODE, NON-CONSENSUS fork-choice
-    // controls. The named profile supplies warn/finality/hysteresis depths;
-    // manual parking remains an explicit opt-in.
+    // controls. The named profile supplies warn/finality/hysteresis depths
+    // and the default action. EMERGENCY (the default profile) PARKs rewrites
+    // deeper than 6; -parkdeepreorg=0/1 overrides the action.
     if (auto value{args.GetArg("-reorgprotectionprofile")}) {
         const auto profile = ParseReorgProtectionProfile(*value);
         if (!profile) {
@@ -129,6 +134,11 @@ util::Result<void> ApplyArgsManOptions(const ArgsManager& args, ChainstateManage
     if (auto value{args.GetBoolArg("-parkdeepreorg")}) {
         opts.deep_reorg_action = *value ? kernel::DeepReorgAction::PARK
                                         : kernel::DeepReorgAction::WARN;
+    }
+
+    if (opts.deep_reorg_action != kernel::DeepReorgAction::PARK) {
+        LogWarning("Deep-reorg parking is disabled (profile=%s). This node will auto-follow rewrites deeper than the emergency PARK depth of 6. Dump-and-run resistance requires the default emergency profile without -parkdeepreorg=0. See doc/design/0.34-operator-safeguards.md.\n",
+                   kernel::ReorgProtectionProfileName(opts.reorg_protection_profile));
     }
 
     if (auto value{args.GetIntArg("-maxreorgdepthwarn")}) {
@@ -165,6 +175,26 @@ util::Result<void> ApplyArgsManOptions(const ArgsManager& args, ChainstateManage
         }
         opts.reorg_hysteresis_work_margin =
             static_cast<uint32_t>(std::min<int64_t>(*value, std::numeric_limits<uint32_t>::max()));
+    }
+
+    // Cadence burst hold. Local policy, not consensus. Default-on only for
+    // mainnet emergency so regtest/unit mining is not throttled. 0 disables.
+    if (auto value{args.GetIntArg("-cadenceburstmax")}) {
+        if (*value < 0) {
+            return util::Error{Untranslated(strprintf(
+                "Invalid -cadenceburstmax value (%d), must be at least 0", *value))};
+        }
+        opts.cadence_burst_max = static_cast<uint32_t>(
+            std::min<int64_t>(*value, 1024));
+    } else if (opts.chainparams.GetChainType() == ChainType::MAIN &&
+               opts.reorg_protection_profile == kernel::ReorgProtectionProfile::EMERGENCY) {
+        opts.cadence_burst_max = kernel::DEFAULT_CADENCE_BURST_MAX;
+    }
+
+    if (opts.chainparams.GetChainType() == ChainType::MAIN &&
+        opts.reorg_protection_profile == kernel::ReorgProtectionProfile::EMERGENCY &&
+        opts.cadence_burst_max == 0) {
+        LogWarning("Cadence burst hold is disabled (-cadenceburstmax=0). A rented-hashpower dump can jump this node's live tip by tens of future-stamped blocks in seconds. See doc/design/0.34-dump-and-run-reorg.md.\n");
     }
 
     ReadDatabaseArgs(args, opts.coins_db);

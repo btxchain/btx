@@ -14,6 +14,8 @@ Related:
 - [`btx-matmul-v4.7-gpu-operator-runbook.md`](btx-matmul-v4.7-gpu-operator-runbook.md) —
   GPU validator and miner policy
 - [`btx-public-node-bootstrap.md`](btx-public-node-bootstrap.md) — public seeds
+- [`design/0.34-discovery-relay.md`](design/0.34-discovery-relay.md) — 0.34
+  public DNS/addnode hosts are ADDR-only discovery relays, not GPU oracles
 
 ## Why this exists
 
@@ -125,31 +127,43 @@ This is a **federated attestor set**, not “anyone with a GPU is a signer.”
 Admission of new keys is an operator process until there is a real key
 ceremony.
 
-## Phase 3 — GPU seeds, drop trusted-mode on full nodes
+## Phase 3 — Public seeds become discovery relays; GPU full nodes stay off DNS
 
-**Goal:** every public full node ExactReplays. Trusted attestation is no
-longer the seed layer's source of truth.
+**Goal:** the public DNS/`addnode` layer stops being MatMul authority.
+Archives follow GPU attestors via the pin. Permissionless miners ExactReplay.
+Public introduction hosts only point at other nodes.
 
-Convert one archive at a time: GPU in, `-matmulvalidation=consensus`, drop
-that host's trusted-key requirement, confirm it stays on the MatMul chain,
-then the next. Do not flip every public seed in one window.
+Putting a GPU on every public seed would keep those IPs as chain oracles and
+keep GETMMATTEST / IBD load on the same machines. That is the opposite of
+decentralization.
+
+Convert one public seed at a time: `-matmulvalidation=relay`,
+`-disablewallet=1`, drop pin / GETMMATTEST / `NODE_NETWORK`, confirm
+`MATMUL_DISCOVERY` is advertised, then the next. Do not flip every public
+introduction host in one window. GPU attestors stay `-discover=0` and out
+of DNS.
 
 What goes away on those hosts:
 
-- `-matmulvalidation=trusted`
-- The special “this box only follows a named signer” role
-- Local extra-work pins (`-signermintargetcompact` is removed; `nBits` carries `F`)
+- `-matmulvalidation=trusted` (and any pin)
+- `NODE_NETWORK` / `NODE_MATMUL_*` authority bits
+- `GETMMATTEST` request and serve
+- Treating `getbestblockhash` on the seed as the chain
 
 What stays:
 
-- Mining wherever there is hashrate (validation GPU ≠ miner GPU)
+- Mining wherever there is hashrate (validation GPU ≠ miner GPU; miners are
+  `consensus`, not relays)
 - Optional attestations for phones, CPU explorers, and other non-validating
-  clients
+  clients (served by archives, not by relays)
 - The Epoch B–D proof roadmap, which is how ExactReplay later becomes an
   audit instead of consensus authority
 
-A CPU VPS that remains a public seed still needs an attestor set. Getting rid
-of the federation means **no validating node is CPU**.
+A CPU VPS that remains a **validating** public node still needs a GPU or
+must be honestly named a light client (`trusted` + pin). A CPU VPS that is
+only a DNS/addnode pointer runs `relay` and is not a validator.
+
+See [`design/0.34-discovery-relay.md`](design/0.34-discovery-relay.md).
 
 ## What this does not change
 

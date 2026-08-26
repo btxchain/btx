@@ -6815,6 +6815,16 @@ bool ChainstateManager::IsInitialBlockDownload() const
     return false;
 }
 
+bool ChainstateManager::IbdSuppressesBlockAnnounce() const
+{
+    AssertLockHeld(cs_main);
+    const CBlockIndex* const tip{ActiveChain().Tip()};
+    return kernel::IbdShouldSuppressBlockAnnounce(
+        m_blockman.LoadingBlocks(),
+        tip != nullptr,
+        tip != nullptr && tip->nChainWork >= MinimumChainWork());
+}
+
 void Chainstate::CheckForkWarningConditions()
 {
     AssertLockHeld(cs_main);
@@ -6842,6 +6852,35 @@ void Chainstate::CheckForkWarningConditions()
         logged_invalid = nullptr;
         m_chainman.GetNotifications().warningUnset(kernel::Warning::LARGE_WORK_INVALID_CHAIN);
     }
+}
+
+void ChainstateManager::NoteRejectedDivergentPowHeader(const uint256& hash, int header_height)
+{
+    AssertLockHeld(cs_main);
+    if (hash == m_last_rejected_divergent_pow_hash) {
+        return;
+    }
+    const Consensus::Params& consensus{GetConsensus()};
+    const bool configured{
+        consensus.nMatMulStallRecoveryHeight !=
+        std::numeric_limits<int32_t>::max()};
+    if (!node::matmul_trusted::DivergentPowForkShouldWarn(
+            configured, consensus.nMatMulStallRecoveryHeight, header_height,
+            "bad-diffbits")) {
+        return;
+    }
+    m_rejected_divergent_pow_headers.fetch_add(1, std::memory_order_relaxed);
+    m_last_rejected_divergent_pow_hash = hash;
+    const auto msg{strprintf(
+        "This node rejected a header at height %d for incorrect proof-of-work "
+        "bits (bad-diffbits, hash %s). EncDr stall-recovery nBits start at "
+        "height %d. Explorers listing a falling-difficulty chain above that "
+        "height are on a rejected fork, not this node's live chain.",
+        header_height, hash.ToString(), consensus.nMatMulStallRecoveryHeight)};
+    LogWarning("%s", msg);
+    GetNotifications().warningSet(
+        kernel::Warning::MATMUL_DIVERGENT_POW_FORK, Untranslated(msg),
+        /*update=*/true);
 }
 
 // Called both upon regular invalid block discovery *and* InvalidateBlock
@@ -9292,7 +9331,7 @@ static constexpr const char* RETRYABLE_MATMUL_ACTIVATION_PREFIX =
     const bool has_quorum{node::matmul_trusted::HasQuorumInMemory(
         pindex->GetBlockHash(), pindex->nHeight)};
     return node::matmul_trusted::MustDeferConflictingAttestedHeight(
-        /*configured=*/true, has_quorum,
+        node::matmul_trusted::IsTrustedMirror(), has_quorum,
         node::matmul_trusted::HasCompetingQuorum(
             pindex->GetBlockHash(), pindex->nHeight),
         chainman.IndexIsCoveredBySignedFrontier(pindex));
@@ -9325,6 +9364,16 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
         return state.Error(std::string(RETRYABLE_MATMUL_ACTIVATION_PREFIX) +
                            ": trusted attestation quorum pending");
     }
+    if (m_chainman.IsDiscoveryRelay() && pindexNew->nHeight > 0) {
+        // Not retryable: this node never becomes a chain oracle. Do not
+        // invalidate the block so a later consensus/trusted conversion of
+        // the same datadir can still connect it. Height 0 must still
+        // connect so LoadChainTip can attach genesis.
+        LogDebug(BCLog::VALIDATION,
+                 "ConnectTip: discovery relay refuses to activate hash=%s height=%d\n",
+                 pindexNew->GetBlockHash().ToString(), pindexNew->nHeight);
+        return state.Error("discovery relay is not a chain oracle");
+    }
     if (MustDeferConflictingAttestedConnect(m_chainman, pindexNew)) {
         LogDebug(BCLog::VALIDATION,
                  "ConnectTip: refusing unattested hash=%s height=%d; another "
@@ -9332,6 +9381,19 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
                  pindexNew->GetBlockHash().ToString(), pindexNew->nHeight);
         return state.Error(std::string(RETRYABLE_MATMUL_ACTIVATION_PREFIX) +
                            ": conflicting attested height");
+    }
+    if (pindexNew->nHeight > 0) {
+        const int cadence_allowed{
+            m_chainman.GetCadenceHoldAllowedHeight(m_chain.Tip(), GetTime())};
+        if (pindexNew->nHeight > cadence_allowed) {
+            LogDebug(BCLog::VALIDATION,
+                     "ConnectTip: cadence hold hash=%s height=%d allowed=%d tip=%d\n",
+                     pindexNew->GetBlockHash().ToString(), pindexNew->nHeight,
+                     cadence_allowed,
+                     m_chain.Tip() ? m_chain.Tip()->nHeight : -1);
+            return state.Error(std::string(RETRYABLE_MATMUL_ACTIVATION_PREFIX) +
+                               ": cadence hold");
+        }
     }
     const auto connect_t0{SteadyClock::now()};
     const bool covered_fast_path{
@@ -9492,6 +9554,7 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
                 pindexNew->GetBlockHash().ToString(), pindexNew->nHeight,
                 Ticks<MillisecondsDouble>(SteadyClock::now() - connect_t0));
     }
+    m_chainman.NoteTipConnected(GetTime());
     return true;
 }
 
@@ -9499,17 +9562,25 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
  * Return the tip of the chain with the most work in it, that isn't
  * known to be invalid (it's however far from certain to be valid).
  */
-//! Nodes that track a configured attestation quorum must not let a heavier
-//! competing fork occupy FindMostWorkChain. That includes trusted mirrors,
-//! the local signer, and consensus miners with -matmultrustedpubkey (they
-//! ExactReplay unattested tip-children and their own mining candidates; a
-//! verified quorum is fork-choice and skips redundant GPU ExactReplay).
+//! Trusted-mirror Profile-1 nodes must not let a heavier unattested fork
+//! occupy FindMostWorkChain (CPU-archive weak subjectivity). Consensus
+//! miners (with or without -matmultrustedpubkey) rank by ExactReplay-
+//! authenticated chainwork; the pin is telemetry. Local signers may use
+//! FindUniqueCompetingAttestedIndex for lost-twin recovery.
+//! Gold standard: only trusted mirrors skip ExactReplay on pin quorum
+//! (CPU archives cannot GPU-verify). Consensus miners ExactReplay ConnectTip
+//! even when the pin already signed. FMWC attested steering is trusted-mirror
+//! only. See doc/design/0.34-ai-native-bitcoin.md.
 //! race may replace an unattested tip only.
 static bool TrustedMirrorShouldConsiderMostWorkCandidate(
     const ChainstateManager& chainman,
     const CBlockIndex* tip, const CBlockIndex* candidate)
     EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
 {
+    if (!node::matmul_trusted::TrustedMirrorPinSteersForkChoice(
+            node::matmul_trusted::IsTrustedMirror())) {
+        return true;
+    }
     if (!node::matmul_trusted::IsConfigured()) {
         return true;
     }
@@ -9566,6 +9637,9 @@ static bool TrustedMirrorShouldConsiderMostWorkCandidate(
 CBlockIndex* Chainstate::FindMostWorkChain()
 {
     AssertLockHeld(::cs_main);
+    if (m_chainman.IsDiscoveryRelay()) {
+        return m_chain.Tip();
+    }
     std::vector<CBlockIndex*> hysteresis_deferred_candidates;
     std::set<CBlockIndex*> skipped_this_call;
     const auto restore_hysteresis_deferred_candidates = [&]() {
@@ -9592,7 +9666,7 @@ CBlockIndex* Chainstate::FindMostWorkChain()
     // among miner header towers. Take a covered HAVE_DATA suffix or the
     // one unique attested abandon target immediately. Other attested
     // attestor forks wait for the next ABC step. Unattested claimed-work
-    // (live nyc1 headers=191013) is not walked under cs_main.
+    // (live public CPU archive headers=191013) is not walked under cs_main.
     if (node::matmul_trusted::IsTrustedMirror() && m_chain.Tip() != nullptr) {
         const CBlockIndex* const tip{m_chain.Tip()};
         auto covered_connectable = [&](CBlockIndex* cand) -> CBlockIndex* {
@@ -9625,7 +9699,7 @@ CBlockIndex* Chainstate::FindMostWorkChain()
         };
         CBlockIndex* covered{covered_connectable(unique_abandon)};
         // Only tip-extending HAVE_DATA. Do not call coverage on the whole
-        // candidate set (live nyc1: 17s FMWC, most_work=tip, GPU VERSION
+        // candidate set (live public CPU archive: 17s FMWC, most_work=tip, GPU VERSION
         // starved). HEADER_ONLY claimed-work is not connectable.
         for (CBlockIndex* cand : setBlockIndexCandidates) {
             if (m_chainman.m_interrupt) break;
@@ -9682,7 +9756,7 @@ CBlockIndex* Chainstate::FindMostWorkChain()
         }
         if (tip_child != nullptr &&
             !node::matmul_trusted::TrustedMirrorDeferUnattestedMostWorkForAttestedSibling(
-                /*configured_profile1=*/true,
+                node::matmul_trusted::IsTrustedMirror(),
                 /*candidate_extends_tip=*/true,
                 m_chainman.IndexHasTrustedMatMulAuthority(tip_child),
                 node::matmul_trusted::HasCompetingQuorum(
@@ -9822,27 +9896,14 @@ CBlockIndex* Chainstate::FindMostWorkChain()
             continue;
         }
 
-        // Configured Profile-1 nodes: do not let an unattested descendant
-        // win most-work over a distinct attested tip-child. On a trusted
-        // mirror ConnectTip would defer the unattested one and ABC would
-        // stop, freezing the advertised height at the parent. Headers-only
-        // attested siblings still count: they are often absent from
-        // setBlockIndexCandidates (HAVE_DATA / HaveNumChainTxs gated).
-        // Qualifier 3ed2619c: the active tip is always in the candidate
-        // set and usually has quorum. It is not a sibling. A sole linear
-        // child (getchaintips: height 11 active + height 12 valid-headers,
-        // same parent, no competing branch) must stay selectable so
-        // ConnectTip can wait for quorum instead of deferring forever.
-        //
-        // CONSENSUS (live 2026-08-15 2fd67f18): a followed HAVE_DATA
-        // tip-child must remain selectable even when an unfollowed
-        // attested sibling exists. TRUSTED mirrors must not use that
-        // bypass: the first HAVE_DATA twin becomes m_best_header, so it
-        // looks "followed", and skipping the overlay proposes the
-        // unattested twin (bfd10a67 / 5e6df697 regression vs 34aeb78b).
-        // ABC still refused to connect it; FindMostWorkChain must not
-        // propose it (GBT and other callers).
-        if (node::matmul_trusted::IsConfigured() &&
+        // Trusted-mirror Profile-1: do not let an unattested descendant
+        // win most-work over a distinct attested tip-child. ConnectTip
+        // would defer the unattested one and ABC would stop, freezing the
+        // advertised height at the parent. Consensus miners do not use this
+        // overlay: ExactReplay is validity; the pin is not fork choice.
+        if (node::matmul_trusted::TrustedMirrorPinSteersForkChoice(
+                node::matmul_trusted::IsTrustedMirror()) &&
+            node::matmul_trusted::IsConfigured() &&
             m_chain.Tip() != nullptr &&
             m_chainman.GetConsensus().IsMatMulTrustedReplayAttestationActive(
                 pindexNew->nHeight)) {
@@ -10000,10 +10061,9 @@ CBlockIndex* Chainstate::FindMostWorkChain()
                 hysteresis_work_margin > 0 &&
                 !recovery_escape) {
                 const int reorg_depth = old_tip->nHeight - fork->nHeight;
-                const bool candidate_would_park =
-                    cm_opts.deep_reorg_action == kernel::DeepReorgAction::PARK &&
-                    park_depth != kernel::REORG_PROTECTION_DEPTH_DISABLED &&
-                    reorg_depth > static_cast<int>(park_depth);
+                const bool candidate_would_park = kernel::DeepReorgShouldPark(
+                    cm_opts.deep_reorg_action, park_depth, reorg_depth,
+                    /*recovery_escape=*/false);
                 const arith_uint256 tip_work = GetBlockProof(*old_tip);
                 if (!candidate_would_park &&
                     reorg_depth > static_cast<int>(hysteresis_depth) &&
@@ -10170,9 +10230,9 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
     //     depth must carry extra work before this node auto-switches to them.
     //   - Keep following most-work automatically once the branch satisfies the
     //     extra-work rule, avoiding an unattended-miner/manual-review stall.
-    //   - Allow explicit operator parking with -parkdeepreorg=1 and
-    //     -maxreorgdepthpark=N for deployments that intentionally prefer a
-    //     local halt over automatic convergence.
+    //   - Default EMERGENCY profile PARKs rewrites deeper than 6
+    //     (2026-08-10/11 dump-and-run). Override with -parkdeepreorg=0 to
+    //     warn-and-follow, or -maxreorgdepthpark=N to change the depth.
     //
     // Profiles are explicit because one overloaded "max reorg" value is too
     // crude for a fragmented network: mining needs early warning, wallets and
@@ -10196,11 +10256,8 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
         const bool recovery_escape{
             m_chainman.IsAutomaticReorgRecoveryCandidate(pindexMostWork) ||
             m_chainman.IsAttestedAbandonForkCandidate(pindexMostWork)};
-        const bool park =
-            cm_opts.deep_reorg_action == kernel::DeepReorgAction::PARK &&
-            park_depth != kernel::REORG_PROTECTION_DEPTH_DISABLED &&
-            reorg_depth > static_cast<int>(park_depth) &&
-            !recovery_escape;
+        const bool park = kernel::DeepReorgShouldPark(
+            cm_opts.deep_reorg_action, park_depth, reorg_depth, recovery_escape);
 
         if (warn || park) {
             RecordRejectedReorgDepth(
@@ -10259,6 +10316,59 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
         }
     }
 
+    // Cadence burst hold (local policy, not consensus). PARK already owns
+    // reorg_depth > park_depth. A live-tip EXTENSION has reorg_depth == 0 so
+    // park never fires; a renter can dump 40–80 valid blocks in seconds.
+    // Horizon is a wall-clock anchor, not attacker-chosen nTime. Competing
+    // dumps are judged by the claimed header tip (GETDATA may only have
+    // delivered a prefix). Do not erase the candidate.
+    int cadence_allowed{
+        m_chainman.GetCadenceHoldAllowedHeight(pindexOldTip, GetTime())};
+    if (pindexOldTip != nullptr &&
+        pindexMostWork != nullptr &&
+        pindexOldTip->nHeight >= consensus_params.nReorgProtectionStartHeight) {
+        const int hold_fork_depth{
+            pindexFork ? pindexOldTip->nHeight - pindexFork->nHeight : 0};
+        // Cadence precedes unkeyed quorum connect on consensus miners
+        // (attested withheld dump still holds). Trusted mirrors may
+        // escape: following the pin is the archive contract. PARK still
+        // uses IsAttestedAbandonForkCandidate independently.
+        const bool hold_recovery_escape{
+            kernel::CadenceHoldQuorumMayEscape(
+                node::matmul_trusted::IsTrustedMirror(),
+                m_chainman.IsAttestedAbandonForkCandidate(pindexMostWork))};
+        const CBlockIndex* hold_target{pindexMostWork};
+        if (hold_fork_depth > 0) {
+            const CBlockIndex* const bh{m_chainman.m_best_header};
+            if (bh != nullptr && pindexFork != nullptr &&
+                bh->nHeight > hold_target->nHeight &&
+                bh->GetAncestor(pindexFork->nHeight) == pindexFork &&
+                !m_chain.Contains(bh)) {
+                hold_target = bh;
+            }
+        }
+        if (m_chainman.CadenceHoldShouldHold(pindexOldTip, hold_target, GetTime(),
+                                            hold_fork_depth, hold_recovery_escape)) {
+            m_chainman.ArmCadenceHoldAnchor(pindexOldTip, GetTime());
+            cadence_allowed = m_chainman.GetCadenceHoldAllowedHeight(
+                pindexOldTip, GetTime());
+            const bilingual_str alarm = strprintf(
+                _("Cadence burst hold: candidate height %d would jump the live tip (%d) "
+                  "faster than the %d-second block cadence (burst_max=%u, allowed_height=%d). "
+                  "Holding ConnectTip/GETDATA until wall-clock catches up. Local policy, "
+                  "not a consensus invalidity."),
+                hold_target->nHeight, pindexOldTip->nHeight,
+                static_cast<int>(consensus_params.nPowTargetSpacing),
+                m_chainman.m_options.cadence_burst_max, cadence_allowed);
+            m_chainman.NotifyCadenceHold(alarm, cadence_allowed);
+            if (hold_fork_depth > 0) {
+                // Competing shallow dump: do not disconnect the live tip.
+                return true;
+            }
+            // Extension: fall through and clamp the connect loop.
+        }
+    }
+
     // Disconnect active blocks which are no longer in the best chain.
     bool fBlocksDisconnected = false;
     DisconnectedBlockTransactions disconnectpool{MAX_DISCONNECTED_TX_POOL_BYTES};
@@ -10285,6 +10395,13 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
         // Don't iterate the entire list of potential improvements toward the best tip, as we likely only need
         // a few blocks along the way.
         int nTargetHeight = std::min(nHeight + 32, pindexMostWork->nHeight);
+        if (cadence_allowed < nTargetHeight) {
+            nTargetHeight = cadence_allowed;
+        }
+        if (nTargetHeight <= nHeight) {
+            fContinue = false;
+            break;
+        }
         vpindexToConnect.clear();
         vpindexToConnect.reserve(nTargetHeight - nHeight);
         CBlockIndex* pindexIter = pindexMostWork->GetAncestor(nTargetHeight);
@@ -10982,7 +11099,7 @@ void Chainstate::TryAddBlockIndexCandidate(CBlockIndex* pindex)
     // Active-chain ancestors are never connectable candidates (strictly less
     // work than tip). Running parked / defer / TrustedMirror / unique-attested
     // scans on all ~190k of them made archive startup hang after
-    // "Populating block index candidates" (live nyc1 2026-08-17, 100% CPU
+    // "Populating block index candidates" (live public CPU archive 2026-08-17, 100% CPU
     // for >5 min). FindUniqueCompetingAttestedIndex is O(frontier hints).
     if (tip != nullptr && pindex != nullptr && pindex != tip &&
         m_chain.Contains(pindex)) {
@@ -11184,6 +11301,140 @@ bool ChainstateManager::PersistParkedReorgBranches()
     AssertLockHeld(::cs_main);
     if (!m_blockman.m_block_tree_db) return true;
     return m_blockman.m_block_tree_db->WriteParkedReorgBranches(m_parked_reorg_branch_roots);
+}
+
+namespace {
+int64_t CadenceHoldMonotonicNowSeconds()
+{
+    // Tests drive extra with SetMockTime / GetTime(). Production extra
+    // uses MockableSteadyClock so NTP cannot shorten a hold (6.1).
+    if (GetMockTime().count() != 0) {
+        return GetTime();
+    }
+    return TicksSinceEpoch<std::chrono::seconds>(MockableSteadyClock::now());
+}
+} // namespace
+
+int ChainstateManager::GetCadenceHoldAllowedHeight(const CBlockIndex* tip, int64_t now) const
+{
+    AssertLockHeld(::cs_main);
+    if (m_options.cadence_burst_max == 0 || tip == nullptr) {
+        return std::numeric_limits<int>::max();
+    }
+    if (IsInitialBlockDownload()) return std::numeric_limits<int>::max();
+    if (tip->nHeight < GetConsensus().nReorgProtectionStartHeight) {
+        return std::numeric_limits<int>::max();
+    }
+    const int64_t spacing{GetConsensus().nPowTargetSpacing};
+    if (spacing <= 0) return std::numeric_limits<int>::max();
+
+    // 6.3: snapshot catch-up toward already-indexed (disk) followed
+    // headers is not a withheld dump. Live-gossip best-header does not
+    // take this path (nTimeReceived > 0).
+    if (m_active_chainstate != nullptr &&
+        m_active_chainstate->m_from_snapshot_blockhash.has_value() &&
+        m_best_header != nullptr &&
+        kernel::CadenceHoldSnapshotCatchUpDisarms(
+            /*from_snapshot=*/true,
+            m_best_header->GetAncestor(tip->nHeight) == tip,
+            m_best_header->nTimeReceived == 0) &&
+        m_best_header->nHeight > tip->nHeight) {
+        return std::numeric_limits<int>::max();
+    }
+
+    // Fold the anchor once the followed header is on the active chain so
+    // the next burst re-arms from the new live tip.
+    if (m_cadence_hold_anchor_height.has_value() && m_best_header != nullptr &&
+        m_active_chainstate != nullptr &&
+        m_active_chainstate->m_chain.Contains(m_best_header)) {
+        m_cadence_hold_anchor_height.reset();
+        m_cadence_hold_anchor_time.reset();
+        m_cadence_hold_anchor_mono.reset();
+    }
+
+    if (m_cadence_hold_anchor_height.has_value() &&
+        m_cadence_hold_anchor_time.has_value()) {
+        const int64_t extra_now{CadenceHoldMonotonicNowSeconds()};
+        const int64_t extra_origin{m_cadence_hold_anchor_mono.value_or(
+            *m_cadence_hold_anchor_time)};
+        return kernel::CadenceHoldAllowedHeight(
+            *m_cadence_hold_anchor_height, extra_origin, extra_now,
+            spacing, m_options.cadence_burst_max);
+    }
+
+    // First-look: extra=0 from wall clock. Do not credit attacker-chosen
+    // block nTime. Idle longer than 2×spacing uses bounded monotonic extra
+    // from last ConnectTip (never INT_MAX — nTime-forged dump after a
+    // pause). Restart: empty last-connect stays extra=0.
+    if (!kernel::CadenceHoldRestartLeavesHoldArmed(
+            tip->nTimeReceived == 0 && tip->nTimeBodyReceived == 0,
+            !m_last_tip_connect_mono.has_value() &&
+                !m_last_tip_connect_time.has_value()) &&
+        m_last_tip_connect_mono.has_value()) {
+        const int64_t extra_now{CadenceHoldMonotonicNowSeconds()};
+        const int64_t extra_origin{*m_last_tip_connect_mono};
+        // Idle longer than 2×spacing: bounded monotonic credit (burst +
+        // extra from last ConnectTip), never INT_MAX. nTime-forged dump
+        // after a 180s pause used to fail-open (2.1/2.4/2.6). Honest
+        // partition catch-up still advances 1/90s of idle + burst_max.
+        if (extra_now > extra_origin + 2 * spacing) {
+            return kernel::CadenceHoldAllowedHeight(
+                tip->nHeight, extra_origin, extra_now, spacing,
+                m_options.cadence_burst_max);
+        }
+    }
+    return kernel::CadenceHoldAllowedHeight(
+        tip->nHeight, now, now, spacing, m_options.cadence_burst_max);
+}
+
+bool ChainstateManager::CadenceHoldShouldHold(const CBlockIndex* tip, const CBlockIndex* candidate,
+                                              int64_t now, int fork_depth, bool recovery_escape) const
+{
+    AssertLockHeld(::cs_main);
+    if (m_options.cadence_burst_max == 0 || tip == nullptr || candidate == nullptr) {
+        return false;
+    }
+    if (IsInitialBlockDownload()) return false;
+    if (tip->nHeight < GetConsensus().nReorgProtectionStartHeight) return false;
+    const uint32_t park_depth{
+        m_options.max_reorg_depth_park.value_or(
+            kernel::GetReorgProtectionProfileSettings(m_options.reorg_protection_profile).park_depth)};
+    if (park_depth != kernel::REORG_PROTECTION_DEPTH_DISABLED &&
+        fork_depth > static_cast<int>(park_depth)) {
+        return false;
+    }
+    if (recovery_escape) return false;
+    const int allowed{GetCadenceHoldAllowedHeight(tip, now)};
+    if (allowed == std::numeric_limits<int>::max()) return false;
+    return candidate->nHeight > allowed;
+}
+
+void ChainstateManager::ArmCadenceHoldAnchor(const CBlockIndex* tip, int64_t now)
+{
+    AssertLockHeld(::cs_main);
+    if (tip == nullptr || m_cadence_hold_anchor_height.has_value()) return;
+    m_cadence_hold_anchor_height = tip->nHeight;
+    m_cadence_hold_anchor_time = now;
+    m_cadence_hold_anchor_mono = CadenceHoldMonotonicNowSeconds();
+}
+
+void ChainstateManager::NoteTipConnected(int64_t now)
+{
+    AssertLockHeld(::cs_main);
+    m_last_tip_connect_time = now;
+    m_last_tip_connect_mono = CadenceHoldMonotonicNowSeconds();
+}
+
+void ChainstateManager::NotifyCadenceHold(const bilingual_str& alarm, int allowed_height)
+{
+    AssertLockHeld(::cs_main);
+    GetNotifications().warningSet(
+        kernel::Warning::CADENCE_HOLD_DETECTED, alarm, /*update=*/true);
+    if (!m_cadence_hold_logged_allowed.has_value() ||
+        *m_cadence_hold_logged_allowed != allowed_height) {
+        LogWarning("%s\n", alarm.original);
+        m_cadence_hold_logged_allowed = allowed_height;
+    }
 }
 
 bool ChainstateManager::ParkReorgBranch(CBlockIndex* branch_root)
@@ -11478,6 +11729,14 @@ const CBlockIndex* ChainstateManager::FindUniqueCompetingAttestedIndex() const
     if (!node::matmul_trusted::IsConfigured() || m_active_chainstate == nullptr) {
         return nullptr;
     }
+    // Consensus+pin with no local WIF: pin is telemetry. A stolen pin key
+    // must not steer fork choice (unique_abandon / GBT parent). Trusted
+    // mirrors and local signers keep the recovery / archive-follow path.
+    if (!node::matmul_trusted::PinSteersFindUniqueCompetingAttestedIndex(
+            node::matmul_trusted::IsTrustedMirror(),
+            node::matmul_trusted::HasLocalSigner())) {
+        return nullptr;
+    }
     const CBlockIndex* const tip{m_active_chainstate->m_chain.Tip()};
     if (tip == nullptr) {
         return nullptr;
@@ -11507,7 +11766,7 @@ const CBlockIndex* ChainstateManager::FindUniqueCompetingAttestedIndex() const
         // On-chain attested ancestors are not competing. Do this before
         // the HEADER_ONLY-hole pprev walk: LastCommonAncestor(tip, idx)
         // is idx, so walking idx->pprev never hits the LCA and runs to
-        // genesis (live nyc1 2026-08-16: 512 hints × ~190k = ~19s FMWC).
+        // genesis (live public CPU archive 2026-08-16: 512 hints × ~190k = ~19s FMWC).
         if (node::matmul_trusted::TrustedMirrorAttestedHintIsActiveAncestor(
                 m_active_chainstate->m_chain.Contains(idx),
                 /*lca_is_index=*/false)) {
@@ -11603,6 +11862,13 @@ const CBlockIndex* ChainstateManager::FindUniqueCompetingAttestedIndex() const
                 }
             }
             if (frontier_ahead.empty()) {
+                if (node::matmul_trusted::DualQuorumSameHeightTwinsFailClosed(
+                        tip_has_quorum,
+                        /*competing_same_height_has_quorum=*/true,
+                        /*signed_frontier_strictly_ahead=*/false)) {
+                    LogWarning("matmul: dual-quorum same-height twins at tip height %d; fail-closed, stranded-twin guard stays armed\n",
+                               tip->nHeight);
+                }
                 return nullptr;
             }
             competing = std::move(frontier_ahead);
@@ -11621,6 +11887,15 @@ const CBlockIndex* ChainstateManager::FindUniqueCompetingAttestedIndex() const
         }
         if (BlockIndexDescends(unique, idx)) continue;
         if (!BlockIndexComparable(unique, idx)) {
+            if (node::matmul_trusted::DualQuorumIncomparableFailClosed(
+                    IndexHasTrustedMatMulAuthority(unique) &&
+                        IndexHasTrustedMatMulAuthority(idx),
+                    /*incomparable=*/true)) {
+                LogWarning("matmul: dual-quorum incomparable siblings heights %d/%d hashes %s / %s; fail-closed (no unique competing attested index)\n",
+                           unique->nHeight, idx->nHeight,
+                           unique->GetBlockHash().ToString(),
+                           idx->GetBlockHash().ToString());
+            }
             return nullptr;
         }
         if (CBlockIndexWorkComparator()(unique, idx)) unique = idx;
@@ -11831,6 +12106,9 @@ bool ChainstateManager::IndexIsAttestedChainTipChild(
     if (tip == nullptr || index == nullptr || index->pprev != tip) return false;
     if ((index->nStatus & BLOCK_FAILED_MASK) != 0) return false;
     if (node::matmul_trusted::IsConfigured() &&
+        node::matmul_trusted::PinMayDenyAttestedChainTipChild(
+            node::matmul_trusted::IsTrustedMirror(),
+            node::matmul_trusted::HasLocalSigner()) &&
         node::matmul_trusted::HasCompetingQuorum(
             index->GetBlockHash(), index->nHeight)) {
         return false;
@@ -12010,6 +12288,22 @@ bool ChainstateManager::MaybeTrackReorgRecovery(const CBlockIndex* candidate)
         }
         const int depth{active_tip->nHeight - fork->nHeight};
         if (depth <= 0 || depth > static_cast<int>(park_depth)) return true;
+
+        // A cadence-violating burst must not arm the recovery barrier: that
+        // barrier was CadenceHoldShouldHold's recovery_escape and also freezes
+        // honest losing-tip extensions while the dump drips.
+        {
+            const CBlockIndex* claimed{candidate};
+            if (m_best_header != nullptr &&
+                m_best_header->nHeight > claimed->nHeight &&
+                m_best_header->GetAncestor(fork->nHeight) == fork) {
+                claimed = m_best_header;
+            }
+            if (CadenceHoldShouldHold(active_tip, claimed, GetTime(), depth,
+                                      /*recovery_escape=*/false)) {
+                return true;
+            }
+        }
 
         uint8_t mode;
         if (m_options.matmul_validation_mode ==
@@ -12354,6 +12648,9 @@ void ChainstateManager::ReceivedBlockTransactions(const CBlock& block, CBlockInd
     pindexNew->nDataPos = pos.nPos;
     pindexNew->nUndoPos = 0;
     pindexNew->nStatus |= BLOCK_HAVE_DATA;
+    if (pindexNew->nTimeBodyReceived == 0) {
+        pindexNew->nTimeBodyReceived = GetTime();
+    }
     if (DeploymentActiveAt(*pindexNew, *this, Consensus::DEPLOYMENT_SEGWIT)) {
         pindexNew->nStatus |= BLOCK_OPT_WITNESS;
     }
@@ -13196,13 +13493,14 @@ bool ChainstateManager::PersistMatMulTrustedReplayAttestation(
             index->nHeight)) {
         return false;
     }
-    const auto mode{GetMatMulValidationMode()};
-    const bool trusted{
-        mode == kernel::MatMulValidationMode::TRUSTED};
-    const bool consensus_signer{
-        mode == kernel::MatMulValidationMode::CONSENSUS &&
-        node::matmul_trusted::HasLocalSigner()};
-    if (!trusted && !consensus_signer) {
+    // CPU-archive audit bit. Consensus miners (including consensus+WIF)
+    // must not mint nAuthenticatedChainWork from a pin signature or a
+    // Heard open key: IsBlockAuthenticated treats this bit as MatMul
+    // authority. Pin coverage of *this* hash is required so GETMMATTEST
+    // Heard serve cannot launder a non-pin local WIF.
+    if (!node::matmul_trusted::MayPersistTrustedReplayAttestationBit(
+            node::matmul_trusted::IsTrustedMirror(),
+            IndexHasTrustedMatMulAuthority(index))) {
         return false;
     }
     index->nStatus |= BLOCK_TRUSTED_REPLAY_ATTESTED;
@@ -13699,24 +13997,10 @@ static bool ContextualCheckBlock(const CBlock& block,
                             "trusted attestation quorum pending");
                         return false;
                     }
-                    // Consensus-mode node with -matmultrustedpubkey: a verified
-                    // quorum is fork-choice authority for this hash. Skip the
-                    // redundant local ExactReplay so mining + a sibling flood
-                    // cannot wedge the 2-slot accelerator. Unattested
-                    // tip-children and our own candidates still ExactReplay.
-                    if (node::matmul_trusted::IsConfigured() &&
-                        consensusParams.IsMatMulTrustedReplayAttestationActive(
-                            nHeight) &&
-                        node::matmul_trusted::HasQuorum(
-                            block.GetHash(), nHeight)) {
-                        CacheMatMulEncDrVerdict(block.GetHash(), true);
-                        if (rc_authority != nullptr) {
-                            *rc_authority =
-                                MatMulRCAuthorityProvenance::
-                                    TRUSTED_SIGNER_QUORUM;
-                        }
-                        return true;
-                    }
+                    // Consensus + pin: still ExactReplay. Pin quorum is
+                    // telemetry / archive skip (trusted_profile1 above), not
+                    // PoW. Sibling-flood defense is the 2-slot accelerator
+                    // and HEADER_ONLY twin policy, not someone else's ECDSA.
                     if (node::matmul_trusted::IsTrustedMirror()) {
                         g_trusted_mirror_exact_replay_invocations.fetch_add(1);
                         LogWarning("matmul trusted mirror ExactReplay invoked hash=%s height=%d (unreachable on profile-1)\n",
@@ -14027,6 +14311,12 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
         }
         if (!ContextualCheckBlockHeader(block, state, m_blockman, *this, pindexPrev)) {
             LogDebug(BCLog::VALIDATION, "%s: Consensus::ContextualCheckBlockHeader: %s, %s\n", __func__, hash.ToString(), state.ToString());
+            if (state.GetRejectReason() == "bad-diffbits") {
+                const int header_height{pindexPrev->nHeight == std::numeric_limits<int>::max()
+                                            ? std::numeric_limits<int>::max()
+                                            : pindexPrev->nHeight + 1};
+                NoteRejectedDivergentPowHeader(hash, header_height);
+            }
             return false;
         }
 
@@ -14072,6 +14362,36 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
     if (!min_pow_checked) {
         LogDebug(BCLog::VALIDATION, "%s: not adding new block header %s, missing anti-dos proof-of-work validation\n", __func__, hash.ToString());
         return state.Invalid(BlockValidationResult::BLOCK_HEADER_LOW_WORK, "too-little-chainwork");
+    }
+    // Competing unauthenticated HEADER_ONLY flood: do not store towers
+    // farther than local-finality above the active tip. Not invalid —
+    // ProcessNewBlockHeaders stops the batch. Followed-chain dumps stay
+    // indexed so cadence hold can see them.
+    if (hash != GetConsensus().hashGenesisBlock) {
+        BlockMap::iterator mi_prev{m_blockman.m_block_index.find(block.hashPrevBlock)};
+        if (mi_prev != m_blockman.m_block_index.end()) {
+            CBlockIndex* pindexPrev = &mi_prev->second;
+            const CBlockIndex* const tip{ActiveChain().Tip()};
+            if (tip != nullptr) {
+                const int header_height{NextBlockHeightOrLimit(pindexPrev->nHeight)};
+                const bool extends_tip{
+                    header_height >= tip->nHeight &&
+                    (pindexPrev == tip ||
+                     pindexPrev->GetAncestor(tip->nHeight) == tip)};
+                const bool attested_or_frontier{
+                    node::matmul_trusted::HasQuorum(hash, header_height) ||
+                    IndexIsCoveredBySignedFrontier(pindexPrev)};
+                if (kernel::UnauthenticatedHeaderLeadExceeded(
+                        tip->nHeight, header_height, extends_tip,
+                        attested_or_frontier, IsInitialBlockDownload())) {
+                    LogDebug(BCLog::VALIDATION,
+                             "skipping unauthenticated header lead %s height=%d tip=%d\n",
+                             hash.ToString(), header_height, tip->nHeight);
+                    if (ppindex) *ppindex = pindexPrev;
+                    return true;
+                }
+            }
+        }
     }
     CBlockIndex* const prev_best{m_best_header};
     CBlockIndex* pindex{m_blockman.AddToBlockIndex(block, m_best_header)};
@@ -14159,8 +14479,16 @@ bool ChainstateManager::ProcessNewBlockHeaders(std::span<const CBlockHeader> hea
             if (!accepted) {
                 return false;
             }
+            if (pindex == nullptr) {
+                return false;
+            }
             if (ppindex) {
                 *ppindex = pindex;
+            }
+            // Lead-cap skip returns the prev index (hash mismatch). Stop
+            // the batch without invalidating the peer.
+            if (pindex->GetBlockHash() != header.GetHash()) {
+                break;
             }
         }
     }
@@ -14219,6 +14547,13 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
 
     if (!accepted_header)
         return false;
+
+    // Lead-cap skip returns the previous index with success so the
+    // headers batch can stop. Do not run CheckBlock against that parent
+    // (would stamp BLOCK_FAILED_VALID on the wrong index).
+    if (pindex == nullptr || pindex->GetBlockHash() != block.GetHash()) {
+        return true;
+    }
 
     // Check all requested blocks that we do not already have for validity and
     // save them to disk. Skip processing of unrequested blocks as an anti-DoS
@@ -14334,8 +14669,18 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
     }
 
     // Header is valid/has work, merkle tree and segwit merkle tree are good...RELAY NOW
-    // (but if it does not build on our best tip, let the SendMessages loop relay it)
-    if (!IsInitialBlockDownload() && ActiveTip() == pindex->pprev && m_options.signals) {
+    // (but if it does not build on our best tip, let the SendMessages loop relay it).
+    // Do not use IsInitialBlockDownload() here: AcceptBlock runs before ConnectTip,
+    // so a newly mined block whose parent is older than -maxtipage would skip
+    // compact-block relay even when nChainWork is already sufficient (stall
+    // recovery / restarted miner). Historical catch-up still suppresses.
+    if (kernel::MayFastRelayNewTipChild(
+            ActiveTip() == pindex->pprev,
+            m_blockman.LoadingBlocks(),
+            ActiveTip() != nullptr,
+            ActiveTip() != nullptr &&
+                ActiveTip()->nChainWork >= MinimumChainWork()) &&
+        m_options.signals) {
         m_options.signals->NewPoWValidBlock(pindex, pblock);
     }
 
@@ -20346,6 +20691,12 @@ void ChainstateManager::RecalculateBestHeader()
             }
             continue;
         }
+        // Pin-steered competing forks may displace m_best_header only on
+        // trusted mirrors (CPU archives). Consensus miners advertise the
+        // ExactReplay-valid tip branch (T50).
+        if (!node::matmul_trusted::IsTrustedMirror()) {
+            continue;
+        }
         if (candidate.nChainWork < active_tip->nChainWork) continue;
 
         bool has_authority_ancestor{false};
@@ -20381,9 +20732,10 @@ void ChainstateManager::RecalculateBestHeader()
         }
         SetBestHeader(followed);
     }
-    if (authority_best != nullptr) {
+    if (authority_best != nullptr &&
+        node::matmul_trusted::IsTrustedMirror()) {
         // Current quorum is stronger than peer provenance and therefore may
-        // displace the active-tip branch on reconstruction.
+        // displace the active-tip branch on reconstruction — mirrors only.
         SetBestHeader(authority_best);
     }
 }

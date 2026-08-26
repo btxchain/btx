@@ -518,14 +518,17 @@ MatMulReplayContextMigration ReconcileMatMulReplayAuthorityContext(
             dirty_indices.insert(index);
             ++cleared_exact;
         }
-        // Trusted attestations are local-policy authority. Preserve the bit
-        // only if the durable archive can still prove quorum under the current
-        // chain id, replay context, signer set, and threshold. Add() verifies
-        // every restored signature against that complete current context.
+        // Trusted attestations are local-policy authority for CPU archives.
+        // Preserve the bit only on a trusted mirror whose durable archive
+        // still proves pin quorum under the current chain id, replay
+        // context, signer set, and threshold. Consensus miners (including
+        // a datadir that flipped mirror→consensus) must not keep
+        // pin-minted nAuthenticatedChainWork.
         if ((index->nStatus & BLOCK_TRUSTED_REPLAY_ATTESTED) == 0) {
             continue;
         }
-        if (index->phashBlock != nullptr &&
+        if (node::matmul_trusted::IsTrustedMirror() &&
+            index->phashBlock != nullptr &&
             node::matmul_trusted::HasQuorum(index->GetBlockHash(), index->nHeight)) {
             continue;
         }
@@ -698,6 +701,9 @@ CBlockIndex* BlockManager::AddToBlockIndex(const CBlockHeader& block, CBlockInde
     // to avoid miners withholding blocks but broadcasting headers, to get a
     // competitive advantage.
     pindexNew->nSequenceId = SEQ_ID_INIT_FROM_DISK;
+    // First-seen is this node's wall clock, not attacker nTime. Disk-loaded
+    // indexes keep nTimeReceived=0 (InsertBlockIndex / LoadBlockIndexGuts).
+    pindexNew->nTimeReceived = GetTime();
 
     pindexNew->phashBlock = &((*mi).first);
     BlockMap::iterator miPrev = m_block_index.find(block.hashPrevBlock);

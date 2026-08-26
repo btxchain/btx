@@ -224,4 +224,42 @@ BOOST_AUTO_TEST_CASE(have_data_unconnected_child_does_not_hide_next_hole)
     BOOST_CHECK(result.last_common->nHeight > active.Height());
 }
 
+BOOST_AUTO_TEST_CASE(first_hole_survives_sibling_header_flood)
+{
+    // 1.4 / 4.2: a flood of HEADER_ONLY siblings at the hole height must
+    // not hide the canonical lowest missing body. Restart-only recovery
+    // is a test failure — ClampLastCommonToRootFirst must still name it.
+    ChainFixture f;
+    CBlockIndex* genesis = f.Add(nullptr, 0);
+    ChainFixture::MarkHaveData(genesis, /*have_chain_txs=*/true);
+
+    std::vector<CBlockIndex*> followed;
+    followed.push_back(genesis);
+    for (int h = 1; h <= 4; ++h) {
+        CBlockIndex* idx = f.Add(followed.back(), h);
+        if (h <= 2) {
+            ChainFixture::MarkHaveData(idx, /*have_chain_txs=*/true);
+        }
+        followed.push_back(idx);
+    }
+
+    for (int i = 0; i < 32; ++i) {
+        f.Add(followed[2], 3); // HEADER_ONLY twins of the first hole
+    }
+
+    CChain active;
+    active.SetTip(*followed[2]);
+
+    const LastCommonRootFirstResult result = ClampLastCommonToRootFirst(
+        /*last_common=*/followed[2],
+        /*best_known=*/followed[4],
+        /*tip=*/followed[2],
+        &active);
+
+    BOOST_REQUIRE(result.lowest_missing != nullptr);
+    BOOST_CHECK_EQUAL(result.lowest_missing->nHeight, 3);
+    BOOST_CHECK(result.lowest_missing == followed[3]);
+    BOOST_CHECK_EQUAL(result.last_common->nHeight, 2);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

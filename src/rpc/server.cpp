@@ -414,6 +414,79 @@ bool IsDeprecatedRPCEnabled(const std::string& method)
     return find(enabled_methods.begin(), enabled_methods.end(), method) != enabled_methods.end();
 }
 
+bool IsRpcControlMethod(std::string_view method)
+{
+    return method == "stop" || method == "uptime" || method == "getrpcinfo" ||
+           method == "help" || method == "getmemoryinfo";
+}
+
+std::optional<std::string> PeekJsonRpcMethod(std::string_view body)
+{
+    UniValue val;
+    if (val.read(std::string{body})) {
+        if (!val.isObject() || !val.exists("method") || !val["method"].isStr()) {
+            return std::nullopt;
+        }
+        return val["method"].get_str();
+    }
+    auto trimmed{body};
+    while (!trimmed.empty() &&
+           (trimmed.front() == ' ' || trimmed.front() == '\t' ||
+            trimmed.front() == '\n' || trimmed.front() == '\r')) {
+        trimmed.remove_prefix(1);
+    }
+    if (trimmed.empty() || trimmed.front() == '[') return std::nullopt;
+
+    // Truncated object: only a depth-1 "method" key (immediately inside
+    // the root object) classifies the control lane. Nested params must
+    // not steal stop/uptime onto httpworker.ctrl.
+    int depth{0};
+    bool in_string{false};
+    bool escape{false};
+    for (size_t i = 0; i < trimmed.size(); ++i) {
+        const char c{trimmed[i]};
+        if (in_string) {
+            if (escape) {
+                escape = false;
+                continue;
+            }
+            if (c == '\\') {
+                escape = true;
+                continue;
+            }
+            if (c == '"') in_string = false;
+            continue;
+        }
+        if (c == '"') {
+            if (depth == 1 && i + 8 <= trimmed.size() &&
+                trimmed.substr(i, 8) == "\"method\"") {
+                auto rest{trimmed.substr(i + 8)};
+                const auto colon{rest.find(':')};
+                if (colon == std::string_view::npos) return std::nullopt;
+                rest = rest.substr(colon + 1);
+                while (!rest.empty() &&
+                       (rest.front() == ' ' || rest.front() == '\t' ||
+                        rest.front() == '\n' || rest.front() == '\r')) {
+                    rest.remove_prefix(1);
+                }
+                if (rest.empty() || rest.front() != '"') return std::nullopt;
+                rest.remove_prefix(1);
+                const auto end{rest.find('"')};
+                if (end == std::string_view::npos || end == 0) return std::nullopt;
+                return std::string{rest.substr(0, end)};
+            }
+            in_string = true;
+            continue;
+        }
+        if (c == '{' || c == '[') {
+            ++depth;
+        } else if ((c == '}' || c == ']') && depth > 0) {
+            --depth;
+        }
+    }
+    return std::nullopt;
+}
+
 UniValue JSONRPCExec(const JSONRPCRequest& jreq, bool catch_errors)
 {
     UniValue result;

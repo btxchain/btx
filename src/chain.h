@@ -234,6 +234,19 @@ public:
     //! belonging to the best chain which overwrite it to SEQ_ID_BEST_CHAIN_FROM_DISK{0}.
     int32_t nSequenceId{SEQ_ID_INIT_FROM_DISK};
 
+    //! (memory only) Wall-clock first-seen of this header on this node.
+    //! 0 means unknown (loaded from disk). Never serialized. Cadence hold
+    //! extra is wall-clock from OUR tip, not this field. ASERT still
+    //! reads nTime only. Header pre-aging must not be treated as usable
+    //! first-seen — see nTimeBodyReceived.
+    int64_t nTimeReceived{0};
+
+    //! (memory only) Wall-clock first arrival of a usable body
+    //! (BLOCK_HAVE_DATA). 0 means unknown (header-only or disk load).
+    //! Never serialized. CadenceFirstSeen / usable-chain predicates key
+    //! on this, not nTimeReceived.
+    int64_t nTimeBodyReceived{0};
+
     //! (memory only) Maximum nTime in the chain up to and including this block.
     unsigned int nTimeMax{0};
 

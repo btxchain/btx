@@ -36,8 +36,8 @@ bool CheckTransaction(const CTransaction& tx, TxValidationState& state)
         }
 
         std::set<Nullifier> nullifiers;
-        for (const auto& spend : bundle.shielded_inputs) {
-            if (!nullifiers.insert(spend.nullifier).second) {
+        for (const auto& nullifier : CollectShieldedNullifiers(bundle)) {
+            if (!nullifiers.insert(nullifier).second) {
                 return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-shielded-nullifier-duplicate");
             }
         }

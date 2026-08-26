@@ -6,10 +6,10 @@ BOOTSTRAP_MODE="${2:-discover}"
 MANAGED_NODE_NAME="${3:-}"
 
 case "${PROFILE}" in
-  fast|archival)
+  fast|archival|discovery)
     ;;
   *)
-    echo "usage: $0 [fast|archival] [discover|strict-connect|managed-direct] [local|fra|nyc|sfo]" >&2
+    echo "usage: $0 [fast|archival|discovery] [discover|strict-connect|managed-direct] [local|fra|nyc|sfo]" >&2
     exit 1
     ;;
 esac
@@ -76,15 +76,35 @@ retainshieldedcommitmentindex=1
 # Runtime defaults
 dbcache=4096
 maxmempool=300
+EOF
+
+if [[ "${PROFILE}" == "discovery" ]]; then
+  cat <<'EOF'
+
+# 0.34 public discovery relay: ADDR introduction only. Not MatMul
+# authority, not a chain-tip oracle, not GETMMATTEST. Archives follow
+# GPU attestors via the pin; this host only points at other nodes.
+# Do not put GPU attestor IPs in addnode/DNS. See
+# doc/design/0.34-discovery-relay.md.
+matmulvalidation=relay
+disablewallet=1
+EOF
+else
+  cat <<'EOF'
 
 # Published mainnet ExactReplay attestors (public keys only).
 # GPU attestors and following archives return this from
 # getmatmultrustedstatus / getfinalityinfo after you join the seed mesh.
 # P2P addnode/DNS does not push keys. Do not load a signer WIF here.
+# Live pin is 1-of-2 (telemetry on consensus miners). 0.34 trusted mainnet
+# archives refuse M<2 unless -allowsinglekeytrustedmirror=1; raise this to 2
+# only after both attestors sign every height. See
+# doc/design/0.34-operator-safeguards.md.
 matmultrustedpubkey=03d90c148db37da28ce47ce15bade88a177728d663da4bc9ba765943b7d4e4f0aa
 matmultrustedpubkey=0224e80df33697385b54b3c69bae1f097f533c0c43e93c29f73ee97319d4a5e04c
 matmultrustedthreshold=1
 EOF
+fi
 
 if [[ "${BOOTSTRAP_MODE}" == "discover" ]]; then
   cat <<'EOF'
@@ -136,10 +156,17 @@ if [[ "${PROFILE}" == "fast" ]]; then
 # Fast node profile (recommended for most operators)
 prune=4096
 EOF
-else
+elif [[ "${PROFILE}" == "archival" ]]; then
   cat <<'EOF'
 
 # Archival profile (full historical block bodies)
 prune=0
+EOF
+else
+  cat <<'EOF'
+
+# Discovery relay: not a block source. Prune is unused for IBD serving
+# (NODE_NETWORK is withheld); keep a small datadir.
+prune=550
 EOF
 fi

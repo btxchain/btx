@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -16,7 +17,10 @@ namespace matmul::trusted {
 namespace {
 
 constexpr char HASH_DOMAIN[] = "BTX_TRUSTED_EXACT_REPLAY_ATTESTATION_V2";
+constexpr char REFUTATION_DOMAIN[] = "BTX_TRUSTED_EXACT_REPLAY_REFUTATION_V1";
+constexpr char LOG_NODE_DOMAIN[] = "BTX_MMATTEST_LOG_NODE_V1";
 constexpr auto WAIT_POLL_INTERVAL = std::chrono::milliseconds{25};
+constexpr size_t MAX_OPEN_VOTES_PER_BLOCK{256};
 
 bool IsCanonicalSigner(const CPubKey& pubkey)
 {
@@ -56,6 +60,48 @@ bool IsStrictDERSignature(const std::vector<unsigned char>& signature)
     return len_r + len_s + 6 == signature.size();
 }
 
+VerifyResult VerifyStatementFields(const ExactReplayStatement& statement,
+                                   const uint256& expected_chain_id,
+                                   const uint256& expected_replay_authority_context,
+                                   const uint256& expected_hash,
+                                   int32_t expected_height)
+{
+    if (statement.version != ExactReplayStatement::CURRENT_VERSION) {
+        return VerifyResult::UnsupportedVersion;
+    }
+    if (statement.chain_id != expected_chain_id) return VerifyResult::WrongChain;
+    if (statement.block_hash != expected_hash) return VerifyResult::WrongBlock;
+    if (statement.block_height < 0 ||
+        statement.block_height != expected_height) {
+        return VerifyResult::WrongHeight;
+    }
+    if (statement.matmul_major != ExactReplayStatement::MATMUL_V4 ||
+        statement.profile != ExactReplayStatement::PROFILE_1) {
+        return VerifyResult::WrongMatMulContext;
+    }
+    if (statement.replay_authority_context !=
+        expected_replay_authority_context) {
+        return VerifyResult::WrongReplayAuthorityContext;
+    }
+    return VerifyResult::Valid;
+}
+
+bool SignatureValid(const CPubKey& signer,
+                    const uint256& hash,
+                    const std::vector<unsigned char>& signature)
+{
+    return IsStrictDERSignature(signature) &&
+           CPubKey::CheckLowS(signature) &&
+           signer.Verify(hash, signature);
+}
+
+uint256 LogNodeHash(const uint256& left, const uint256& right)
+{
+    HashWriter hasher;
+    hasher << std::string{LOG_NODE_DOMAIN} << left << right;
+    return hasher.GetHash();
+}
+
 } // namespace
 
 uint256 StatementHash(const ExactReplayStatement& statement)
@@ -82,6 +128,128 @@ std::optional<ExactReplayAttestation> SignStatement(
     return attestation;
 }
 
+uint256 RefutationHash(const ExactReplayStatement& statement)
+{
+    HashWriter hasher;
+    hasher << std::string{REFUTATION_DOMAIN};
+    hasher << statement;
+    return hasher.GetHash();
+}
+
+std::optional<ExactReplayRefutation> SignRefutation(
+    const ExactReplayStatement& statement, const CKey& signer)
+{
+    if (!signer.IsValid() || !signer.IsCompressed()) return std::nullopt;
+    const CPubKey pubkey{signer.GetPubKey()};
+    if (!IsCanonicalSigner(pubkey)) return std::nullopt;
+
+    ExactReplayRefutation refutation;
+    refutation.statement = statement;
+    refutation.signer = pubkey;
+    if (!signer.Sign(RefutationHash(statement), refutation.signature)) {
+        return std::nullopt;
+    }
+    return refutation;
+}
+
+uint256 ComputeAttestationLogRoot(const std::vector<uint256>& leaves)
+{
+    if (leaves.empty()) return uint256{};
+    std::vector<uint256> level{leaves};
+    while (level.size() > 1) {
+        if (level.size() % 2 != 0) level.emplace_back();
+        std::vector<uint256> next;
+        next.reserve(level.size() / 2);
+        for (size_t i = 0; i < level.size(); i += 2) {
+            next.push_back(LogNodeHash(level[i], level[i + 1]));
+        }
+        level = std::move(next);
+    }
+    return level.front();
+}
+
+std::vector<uint256> ComputeAttestationLogBranch(
+    const std::vector<uint256>& leaves, uint64_t index)
+{
+    std::vector<uint256> branch;
+    if (leaves.empty() || index >= leaves.size()) return branch;
+    std::vector<uint256> level{leaves};
+    size_t pos{static_cast<size_t>(index)};
+    while (level.size() > 1) {
+        if (level.size() % 2 != 0) level.emplace_back();
+        const size_t sibling{pos ^ 1U};
+        branch.push_back(level[sibling]);
+        std::vector<uint256> next;
+        next.reserve(level.size() / 2);
+        for (size_t i = 0; i < level.size(); i += 2) {
+            next.push_back(LogNodeHash(level[i], level[i + 1]));
+        }
+        level = std::move(next);
+        pos /= 2;
+    }
+    return branch;
+}
+
+bool VerifyAttestationLogInclusion(const AttestationLogProof& proof)
+{
+    if (proof.branch.empty() && proof.leaf != proof.root) {
+        return proof.leaf == proof.root && !proof.leaf.IsNull();
+    }
+    uint256 hash{proof.leaf};
+    uint64_t pos{proof.index};
+    for (const auto& sibling : proof.branch) {
+        if ((pos & 1U) == 0) {
+            hash = LogNodeHash(hash, sibling);
+        } else {
+            hash = LogNodeHash(sibling, hash);
+        }
+        pos /= 2;
+    }
+    return hash == proof.root && !proof.root.IsNull();
+}
+
+VerifyResult VerifyAttestationCrypto(
+    const ExactReplayAttestation& attestation,
+    const uint256& expected_chain_id,
+    const uint256& expected_replay_authority_context,
+    const uint256& expected_hash,
+    int32_t expected_height)
+{
+    const auto fields{VerifyStatementFields(
+        attestation.statement, expected_chain_id,
+        expected_replay_authority_context, expected_hash, expected_height)};
+    if (fields != VerifyResult::Valid) return fields;
+    if (!IsCanonicalSigner(attestation.signer)) {
+        return VerifyResult::InvalidSigner;
+    }
+    if (!SignatureValid(attestation.signer, StatementHash(attestation.statement),
+                        attestation.signature)) {
+        return VerifyResult::InvalidSignature;
+    }
+    return VerifyResult::Valid;
+}
+
+VerifyResult VerifyRefutationCrypto(
+    const ExactReplayRefutation& refutation,
+    const uint256& expected_chain_id,
+    const uint256& expected_replay_authority_context,
+    const uint256& expected_hash,
+    int32_t expected_height)
+{
+    const auto fields{VerifyStatementFields(
+        refutation.statement, expected_chain_id,
+        expected_replay_authority_context, expected_hash, expected_height)};
+    if (fields != VerifyResult::Valid) return fields;
+    if (!IsCanonicalSigner(refutation.signer)) {
+        return VerifyResult::InvalidSigner;
+    }
+    if (!SignatureValid(refutation.signer, RefutationHash(refutation.statement),
+                        refutation.signature)) {
+        return VerifyResult::InvalidSignature;
+    }
+    return VerifyResult::Valid;
+}
+
 VerifyResult VerifyAttestation(
     const ExactReplayAttestation& attestation,
     const uint256& expected_chain_id,
@@ -91,33 +259,18 @@ VerifyResult VerifyAttestation(
     const std::set<CPubKey>& trusted_signers)
 {
     const auto& statement{attestation.statement};
-    if (statement.version != ExactReplayStatement::CURRENT_VERSION) {
-        return VerifyResult::UnsupportedVersion;
-    }
-    if (statement.chain_id != expected_chain_id) return VerifyResult::WrongChain;
-    if (statement.block_hash != expected_hash) return VerifyResult::WrongBlock;
-    if (statement.block_height < 0 ||
-        statement.block_height != expected_height) {
-        return VerifyResult::WrongHeight;
-    }
-    if (statement.matmul_major != ExactReplayStatement::MATMUL_V4 ||
-        statement.profile != ExactReplayStatement::PROFILE_1) {
-        return VerifyResult::WrongMatMulContext;
-    }
-    if (statement.replay_authority_context !=
-        expected_replay_authority_context) {
-        return VerifyResult::WrongReplayAuthorityContext;
-    }
+    const auto fields{VerifyStatementFields(
+        statement, expected_chain_id, expected_replay_authority_context,
+        expected_hash, expected_height)};
+    if (fields != VerifyResult::Valid) return fields;
     if (!IsCanonicalSigner(attestation.signer)) {
         return VerifyResult::InvalidSigner;
     }
     if (trusted_signers.count(attestation.signer) == 0) {
         return VerifyResult::UntrustedSigner;
     }
-    if (!IsStrictDERSignature(attestation.signature) ||
-        !CPubKey::CheckLowS(attestation.signature) ||
-        !attestation.signer.Verify(StatementHash(statement),
-                                   attestation.signature)) {
+    if (!SignatureValid(attestation.signer, StatementHash(statement),
+                        attestation.signature)) {
         return VerifyResult::InvalidSignature;
     }
     return VerifyResult::Valid;
@@ -159,6 +312,24 @@ std::string_view AddResultName(AddResult result)
     case AddResult::InvalidSignature: return "invalid-signature";
     case AddResult::NoLocalSigner: return "no-local-signer";
     case AddResult::HeightOccupied: return "height-occupied";
+    case AddResult::Heard: return "heard";
+    case AddResult::FrozenSigner: return "frozen-signer";
+    case AddResult::Equivocation: return "equivocation";
+    case AddResult::BlocklistedSigner: return "blocklisted-signer";
+    }
+    return "unknown";
+}
+
+std::string_view BlocklistResultName(BlocklistResult result)
+{
+    switch (result) {
+    case BlocklistResult::Blocked: return "blocked";
+    case BlocklistResult::Duplicate: return "duplicate";
+    case BlocklistResult::WouldDisablePinQuorum:
+        return "would-disable-pin-quorum";
+    case BlocklistResult::LocalSigner: return "local-signer";
+    case BlocklistResult::Invalid: return "invalid";
+    case BlocklistResult::Capacity: return "capacity";
     }
     return "unknown";
 }
@@ -203,6 +374,26 @@ AttestationStore::AttestationStore(StoreConfig config)
         throw std::invalid_argument{
             "trusted ExactReplay threshold must be between one and N"};
     }
+    if (m_config.blocklist.size() > DEFAULT_MAX_BLOCKED_SIGNERS) {
+        throw std::invalid_argument{
+            "attestation blocklist exceeds the maximum number of keys"};
+    }
+    for (const auto& blocked : m_config.blocklist) {
+        if (!IsCanonicalSigner(blocked)) {
+            throw std::invalid_argument{
+                "attestation blocklist entries must be valid compressed keys"};
+        }
+        if (!m_blocked_config.insert(blocked).second ||
+            !m_blocked.insert(blocked).second) {
+            throw std::invalid_argument{
+                "attestation blocklist contains a duplicate"};
+        }
+    }
+    if (!PinQuorumIsReachable(UnblockedPinMembersLocked(),
+                              m_config.threshold)) {
+        throw std::invalid_argument{
+            "attestation blocklist leaves fewer than M unblocked trusted signers"};
+    }
     if (m_config.max_blocks == 0 ||
         m_config.max_attestations < m_config.threshold) {
         throw std::invalid_argument{
@@ -221,11 +412,59 @@ AttestationStore::AttestationStore(StoreConfig config)
     }
     if (m_config.local_signer.has_value()) {
         const auto& key{*m_config.local_signer};
-        if (!key.IsValid() || !key.IsCompressed() ||
-            m_trusted_signers.count(key.GetPubKey()) == 0) {
+        if (!key.IsValid() || !key.IsCompressed()) {
+            throw std::invalid_argument{
+                "local ExactReplay signer must be a valid compressed key"};
+        }
+        if (m_trusted_signers.count(key.GetPubKey()) == 0 &&
+            !m_config.open_attestors) {
             throw std::invalid_argument{
                 "local ExactReplay signer must be a configured compressed key"};
         }
+        if (m_blocked.count(key.GetPubKey()) != 0) {
+            throw std::invalid_argument{
+                "local ExactReplay signer must not be on the attestation blocklist"};
+        }
+    }
+    if (m_config.open_attestors) {
+        if (m_config.open_threshold == 0) {
+            m_config.open_threshold = DefaultOpenThreshold(m_config.threshold);
+        }
+        if (m_config.open_threshold < 1) {
+            throw std::invalid_argument{
+                "open ExactReplay threshold must be at least one"};
+        }
+        if (m_config.max_heard_attestations == 0) {
+            throw std::invalid_argument{
+                "open ExactReplay heard-store capacity must be positive"};
+        }
+    } else {
+        m_config.open_threshold = 0;
+    }
+    if (m_config.max_admitted_open == 0) {
+        m_config.max_admitted_open = DEFAULT_MAX_ADMITTED_OPEN;
+    }
+    if (m_config.max_open_signed_heights == 0) {
+        m_config.max_open_signed_heights = DEFAULT_MAX_OPEN_SIGNED_HEIGHTS;
+    }
+    if (m_config.max_open_signed_entries == 0) {
+        m_config.max_open_signed_entries = DEFAULT_MAX_OPEN_SIGNED_ENTRIES;
+    }
+    if (m_config.max_open_signers_per_height == 0) {
+        m_config.max_open_signers_per_height =
+            DEFAULT_MAX_OPEN_SIGNERS_PER_HEIGHT;
+    }
+    if (m_config.max_frozen_open == 0) {
+        m_config.max_frozen_open = DEFAULT_MAX_FROZEN_OPEN;
+    }
+    if (m_config.max_refutations == 0) {
+        m_config.max_refutations = DEFAULT_MAX_REFUTATIONS;
+    }
+    if (m_config.max_log_leaves == 0) {
+        m_config.max_log_leaves = DEFAULT_MAX_LOG_LEAVES;
+    }
+    if (m_config.max_window_challenges == 0) {
+        m_config.max_window_challenges = DEFAULT_MAX_WINDOW_CHALLENGES;
     }
 }
 
@@ -249,25 +488,330 @@ AddResult AttestationStore::ToAddResult(VerifyResult result)
     return AddResult::InvalidSignature;
 }
 
+size_t AttestationStore::PinVotesLocked(const Bucket& bucket) const
+{
+    size_t votes{0};
+    for (const auto& [pubkey, attestation] : bucket.attestations) {
+        (void)attestation;
+        if (m_trusted_signers.count(pubkey) != 0 &&
+            !IsBlockedLocked(pubkey)) {
+            ++votes;
+        }
+    }
+    return votes;
+}
+
+size_t AttestationStore::AuthorityVotesLocked(const Bucket& bucket) const
+{
+    size_t votes{0};
+    for (const auto& [pubkey, attestation] : bucket.attestations) {
+        (void)attestation;
+        if (m_frozen_open.count(pubkey) != 0) continue;
+        if (IsBlockedLocked(pubkey)) continue;
+        if (m_trusted_signers.count(pubkey) != 0 ||
+            m_admitted_open.count(pubkey) != 0) {
+            ++votes;
+        }
+    }
+    return votes;
+}
+
+bool AttestationStore::PinQuorumLocked(const Bucket& bucket) const
+{
+    return PinVotesLocked(bucket) >= m_config.threshold;
+}
+
+bool AttestationStore::OpenQuorumLocked(const BlockKey& key,
+                                        const Bucket& bucket) const
+{
+    if (!m_config.open_attestors) return false;
+    if (m_pin_refuted.count(key) != 0) return false;
+    return AuthorityVotesLocked(bucket) >= m_config.open_threshold;
+}
+
+bool AttestationStore::HasQuorumLocked(const BlockKey& key,
+                                       const Bucket& bucket) const
+{
+    (void)key;
+    return PinQuorumLocked(bucket);
+}
+
+bool AttestationStore::WouldReachQuorumLocked(const BlockKey& key,
+                                              const CPubKey& signer) const
+{
+    if (m_trusted_signers.count(signer) == 0) return false;
+    if (IsBlockedLocked(signer)) return false;
+    const auto it{m_buckets.find(key)};
+    const bool already{
+        it != m_buckets.end() && HasQuorumLocked(key, it->second)};
+    if (already) return false;
+    const size_t pin{
+        (it == m_buckets.end() ? 0 : PinVotesLocked(it->second)) + 1};
+    return pin >= m_config.threshold;
+}
+
+bool AttestationStore::IsBlockedLocked(const CPubKey& pubkey) const
+{
+    return m_blocked.count(pubkey) != 0;
+}
+
+size_t AttestationStore::UnblockedPinMembersLocked() const
+{
+    size_t unblocked{0};
+    for (const auto& signer : m_trusted_signers) {
+        if (!IsBlockedLocked(signer)) ++unblocked;
+    }
+    return unblocked;
+}
+
+void AttestationStore::DropHeardLocked(const CPubKey& pubkey)
+{
+    for (auto it = m_heard.begin(); it != m_heard.end();) {
+        if (it->first.signer == pubkey) {
+            m_heard_updated.erase(it->first);
+            it = m_heard.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+void AttestationStore::AdmitOpenLocked(const CPubKey& pubkey)
+{
+    if (m_trusted_signers.count(pubkey) != 0) return;
+    if (m_frozen_open.count(pubkey) != 0) return;
+    if (IsBlockedLocked(pubkey)) return;
+    if (!IsCanonicalSigner(pubkey)) return;
+    if (m_admitted_open.count(pubkey) != 0) return;
+    if (m_admitted_open.size() >= m_config.max_admitted_open) return;
+    m_admitted_open.insert(pubkey);
+}
+
+void AttestationStore::FreezeOpenLocked(const CPubKey& pubkey)
+{
+    if (m_trusted_signers.count(pubkey) != 0) return;
+    if (m_frozen_open.insert(pubkey).second) {
+        m_frozen_open_order.push_back(pubkey);
+        CapFrozenOpenLocked();
+    }
+    m_admitted_open.erase(pubkey);
+    for (auto it = m_buckets.begin(); it != m_buckets.end();) {
+        auto att_it{it->second.attestations.find(pubkey)};
+        if (att_it == it->second.attestations.end()) {
+            ++it;
+            continue;
+        }
+        it->second.attestations.erase(att_it);
+        if (m_attestation_count > 0) --m_attestation_count;
+        if (it->second.attestations.empty()) {
+            it = m_buckets.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    for (auto it = m_heard.begin(); it != m_heard.end();) {
+        if (it->first.signer == pubkey) {
+            m_heard_updated.erase(it->first);
+            it = m_heard.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+void AttestationStore::AdmitHeardOnHashLocked(const BlockKey& key,
+                                              Clock::time_point now)
+{
+    (void)now;
+    for (const auto& [heard_key, attestation] : m_heard) {
+        (void)attestation;
+        if (heard_key.height != key.height || heard_key.hash != key.hash) {
+            continue;
+        }
+        AdmitOpenLocked(heard_key.signer);
+    }
+}
+
+AddResult AttestationStore::StoreHeardLocked(
+    const ExactReplayAttestation& attestation, Clock::time_point now)
+{
+    const HeardKey heard_key{attestation.statement.block_height,
+                             attestation.statement.block_hash,
+                             attestation.signer};
+    if (m_heard.count(heard_key) != 0) {
+        // Already directory. Duplicate is reserved for pin-bucket
+        // re-relays so it cannot promote the signed frontier.
+        return AddResult::Heard;
+    }
+    while (m_heard.size() >= m_config.max_heard_attestations &&
+           !m_heard.empty()) {
+        auto oldest{m_heard_updated.begin()};
+        for (auto it = m_heard_updated.begin(); it != m_heard_updated.end();
+             ++it) {
+            if (it->second < oldest->second) oldest = it;
+        }
+        m_heard.erase(oldest->first);
+        m_heard_updated.erase(oldest);
+    }
+    m_heard.emplace(heard_key, attestation);
+    m_heard_updated.emplace(heard_key, now);
+    ++m_stats.heard;
+    return AddResult::Heard;
+}
+
+void AttestationStore::AppendLogLeafLocked(const uint256& leaf)
+{
+    m_log_leaves.push_back(leaf);
+    while (m_log_leaves.size() > m_config.max_log_leaves) {
+        m_log_leaves.erase(m_log_leaves.begin());
+    }
+}
+
+void AttestationStore::PruneOpenDirectoryLocked()
+{
+    while (m_open_signed_at_height.size() > m_config.max_open_signed_heights &&
+           !m_open_signed_at_height.empty()) {
+        m_open_signed_at_height.erase(m_open_signed_at_height.begin());
+    }
+    while (OpenSignedEntryCountLocked() > m_config.max_open_signed_entries &&
+           !m_open_signed_at_height.empty()) {
+        m_open_signed_at_height.erase(m_open_signed_at_height.begin());
+    }
+}
+
+size_t AttestationStore::OpenSignedEntryCountLocked() const
+{
+    size_t n{0};
+    for (const auto& [height, signers] : m_open_signed_at_height) {
+        n += signers.size();
+    }
+    return n;
+}
+
+size_t AttestationStore::OpenSignedHeightCount() const
+{
+    std::lock_guard lock{m_mutex};
+    return m_open_signed_at_height.size();
+}
+
+size_t AttestationStore::OpenSignedEntryCount() const
+{
+    std::lock_guard lock{m_mutex};
+    return OpenSignedEntryCountLocked();
+}
+
+void AttestationStore::RefreshPinRefutedLocked(const BlockKey& key)
+{
+    const auto it{m_refutations.find(key)};
+    if (it == m_refutations.end()) {
+        m_pin_refuted.erase(key);
+        return;
+    }
+    size_t pin_votes{0};
+    for (const auto& [pubkey, refutation] : it->second) {
+        (void)refutation;
+        if (m_trusted_signers.count(pubkey) != 0 &&
+            !IsBlockedLocked(pubkey)) {
+            ++pin_votes;
+        }
+    }
+    if (pin_votes >= m_config.threshold) {
+        m_pin_refuted.insert(key);
+    } else {
+        m_pin_refuted.erase(key);
+    }
+}
+
+void AttestationStore::CapRefutationsLocked()
+{
+    while (m_refutations.size() > m_config.max_refutations &&
+           !m_refutations.empty()) {
+        auto oldest{m_refutations.begin()};
+        const BlockKey dropped{oldest->first};
+        m_refutations.erase(oldest);
+        m_pin_refuted.erase(dropped);
+    }
+}
+
+void AttestationStore::CapFrozenOpenLocked()
+{
+    while (m_frozen_open.size() > m_config.max_frozen_open &&
+           !m_frozen_open_order.empty()) {
+        const CPubKey oldest{m_frozen_open_order.front()};
+        m_frozen_open_order.pop_front();
+        m_frozen_open.erase(oldest);
+    }
+}
+
 AddResult AttestationStore::Add(
     const ExactReplayAttestation& attestation,
     const uint256& expected_hash,
     int32_t expected_height)
 {
-    const VerifyResult verified{VerifyAttestation(
+    const VerifyResult crypto{VerifyAttestationCrypto(
         attestation, m_config.chain_id, m_config.replay_authority_context,
-        expected_hash, expected_height, m_trusted_signers)};
-    if (verified != VerifyResult::Valid) {
+        expected_hash, expected_height)};
+    if (crypto != VerifyResult::Valid) {
         std::lock_guard lock{m_mutex};
         ++m_stats.rejected;
-        return ToAddResult(verified);
+        return ToAddResult(crypto);
     }
 
     const BlockKey key{expected_height, expected_hash};
     const auto now{Clock::now()};
+    AddResult result{AddResult::Accepted};
     {
         std::lock_guard lock{m_mutex};
         PruneExpiredLocked(now);
+
+        if (IsBlockedLocked(attestation.signer)) {
+            ++m_stats.rejected;
+            return AddResult::BlocklistedSigner;
+        }
+
+        const bool pinned{m_trusted_signers.count(attestation.signer) != 0};
+
+        if (!pinned) {
+            if (!m_config.open_attestors) {
+                ++m_stats.rejected;
+                return AddResult::UntrustedSigner;
+            }
+            if (m_frozen_open.count(attestation.signer) != 0) {
+                ++m_stats.rejected;
+                return AddResult::FrozenSigner;
+            }
+            auto height_it{m_open_signed_at_height.find(expected_height)};
+            if (height_it != m_open_signed_at_height.end()) {
+                auto& signed_at{height_it->second};
+                const auto existing_hash{signed_at.find(attestation.signer)};
+                if (existing_hash != signed_at.end() &&
+                    existing_hash->second != expected_hash) {
+                    FreezeOpenLocked(attestation.signer);
+                    ++m_stats.equivocations;
+                    ++m_stats.rejected;
+                    return AddResult::Equivocation;
+                }
+                if (existing_hash != signed_at.end() ||
+                    signed_at.size() < m_config.max_open_signers_per_height) {
+                    signed_at[attestation.signer] = expected_hash;
+                }
+            } else if (m_config.max_open_signers_per_height > 0) {
+                m_open_signed_at_height[expected_height][attestation.signer] =
+                    expected_hash;
+            }
+            PruneOpenDirectoryLocked();
+
+            const auto existing_bucket{m_buckets.find(key)};
+            const bool pin_quorum_already{
+                existing_bucket != m_buckets.end() &&
+                PinQuorumLocked(existing_bucket->second)};
+            if (pin_quorum_already) {
+                AdmitOpenLocked(attestation.signer);
+            }
+            result = StoreHeardLocked(attestation, now);
+            return result;
+        }
+
         const auto existing_bucket{m_buckets.find(key)};
         if (existing_bucket != m_buckets.end() &&
             existing_bucket->second.attestations.count(attestation.signer) !=
@@ -279,13 +823,8 @@ AddResult AttestationStore::Add(
         // dual-attest). Refusing a local-key second hash here would brick
         // recovery from a past dual-sign already on the network. Minting a
         // new local signature is SignLocal / SignAuthoritative.
-        const size_t existing_signatures{
-            existing_bucket == m_buckets.end()
-                ? 0
-                : existing_bucket->second.attestations.size()};
         const bool incoming_reaches_quorum{
-            existing_signatures < m_config.threshold &&
-            existing_signatures + 1 >= m_config.threshold};
+            WouldReachQuorumLocked(key, attestation.signer)};
         if (!MakeRoomLocked(key, incoming_reaches_quorum)) {
             ++m_stats.rejected;
             ++m_stats.capacity_rejections;
@@ -299,15 +838,21 @@ AddResult AttestationStore::Add(
         bucket.attestations.emplace(attestation.signer, attestation);
         ++m_attestation_count;
         ++m_stats.accepted;
-        if (!bucket.quorum_counted &&
-            bucket.attestations.size() >= m_config.threshold) {
-            bucket.quorum_counted = true;
+        AppendLogLeafLocked(StatementHash(attestation.statement));
+        if (pinned && PinQuorumLocked(bucket)) {
+            AdmitHeardOnHashLocked(key, now);
+        }
+        auto after{m_buckets.find(key)};
+        if (after != m_buckets.end() && !after->second.quorum_counted &&
+            HasQuorumLocked(key, after->second)) {
+            after->second.quorum_counted = true;
             ++m_stats.quorum_transitions;
         }
         (void)inserted;
+        result = AddResult::Accepted;
     }
     m_changed.notify_all();
-    return AddResult::Accepted;
+    return result;
 }
 
 AddResult AttestationStore::SignLocal(
@@ -323,14 +868,23 @@ AddResult AttestationStore::SignLocal(
     {
         std::lock_guard lock{m_mutex};
         const CPubKey local_pk{m_config.local_signer->GetPubKey()};
+        if (IsBlockedLocked(local_pk)) {
+            ++m_stats.rejected;
+            return AddResult::BlocklistedSigner;
+        }
         for (auto it = m_buckets.lower_bound(BlockKey{block_height, uint256{}});
              it != m_buckets.end() && it->first.height == block_height; ++it) {
             if (it->first.hash == block_hash) continue;
-            const bool local_signed{
-                it->second.attestations.count(local_pk) != 0};
-            const bool other_quorum{
-                it->second.attestations.size() >= m_config.threshold};
-            if (local_signed || other_quorum) {
+            const bool other_quorum{HasQuorumLocked(it->first, it->second)};
+            const auto minted{m_local_minted_hash_by_height.find(block_height)};
+            const bool minted_other_hash{
+                minted != m_local_minted_hash_by_height.end() &&
+                minted->second != block_hash};
+            // Relayed copies of this node's pubkey (stolen-WIF MMATTEST) must
+            // not occupy the mint slot. Only a competing *quorum* or a hash
+            // this process already SignLocal'd refuses. Otherwise one stolen
+            // pin key jams the honest attestor and freezes every M=2 mirror.
+            if (minted_other_hash || other_quorum) {
                 ++m_stats.rejected;
                 return AddResult::HeightOccupied;
             }
@@ -349,8 +903,13 @@ AddResult AttestationStore::SignLocal(
         return AddResult::InvalidSigner;
     }
     const AddResult result{Add(*attestation, block_hash, block_height)};
+    if (result == AddResult::Accepted || result == AddResult::Duplicate) {
+        std::lock_guard lock{m_mutex};
+        m_local_minted_hash_by_height.emplace(block_height, block_hash);
+    }
     if (produced != nullptr &&
-        (result == AddResult::Accepted || result == AddResult::Duplicate)) {
+        (result == AddResult::Accepted || result == AddResult::Duplicate ||
+         result == AddResult::Heard)) {
         *produced = std::move(*attestation);
     }
     return result;
@@ -360,6 +919,12 @@ std::optional<UtxoSnapshotSignature> AttestationStore::SignUtxoSnapshot(
     const UtxoSnapshotStatement& statement) const
 {
     if (!m_config.local_signer.has_value()) return std::nullopt;
+    {
+        std::lock_guard lock{m_mutex};
+        if (IsBlockedLocked(m_config.local_signer->GetPubKey())) {
+            return std::nullopt;
+        }
+    }
     if (statement.chain_id != m_config.chain_id) return std::nullopt;
     if (statement.replay_authority_context !=
         m_config.replay_authority_context) {
@@ -373,8 +938,65 @@ bool AttestationStore::HasQuorum(const uint256& block_hash,
 {
     std::lock_guard lock{m_mutex};
     const auto it{m_buckets.find(BlockKey{block_height, block_hash})};
-    return it != m_buckets.end() &&
-           it->second.attestations.size() >= m_config.threshold;
+    return it != m_buckets.end() && HasQuorumLocked(it->first, it->second);
+}
+
+bool AttestationStore::HasOpenQuorum(const uint256& block_hash,
+                                     int32_t block_height) const
+{
+    std::lock_guard lock{m_mutex};
+    if (!m_config.open_attestors) return false;
+    const BlockKey key{block_height, block_hash};
+    if (m_pin_refuted.count(key) != 0) return false;
+    std::set<CPubKey> votes;
+    const auto it{m_buckets.find(key)};
+    if (it != m_buckets.end()) {
+        for (const auto& [pubkey, attestation] : it->second.attestations) {
+            (void)attestation;
+            if (m_frozen_open.count(pubkey) != 0) continue;
+            if (IsBlockedLocked(pubkey)) continue;
+            if (m_trusted_signers.count(pubkey) != 0 ||
+                m_admitted_open.count(pubkey) != 0) {
+                votes.insert(pubkey);
+            }
+        }
+    }
+    for (const auto& [heard_key, attestation] : m_heard) {
+        (void)attestation;
+        if (heard_key.height != block_height || heard_key.hash != block_hash) {
+            continue;
+        }
+        if (m_frozen_open.count(heard_key.signer) != 0) continue;
+        if (IsBlockedLocked(heard_key.signer)) continue;
+        if (m_admitted_open.count(heard_key.signer) != 0) {
+            votes.insert(heard_key.signer);
+        }
+    }
+    return votes.size() >= m_config.open_threshold;
+}
+
+bool AttestationStore::HasQuorumFromAttestations(
+    const std::vector<ExactReplayAttestation>& attestations,
+    const uint256& block_hash,
+    int32_t block_height) const
+{
+    std::set<CPubKey> pin_votes;
+    {
+        std::lock_guard lock{m_mutex};
+        for (const auto& attestation : attestations) {
+            if (VerifyAttestationCrypto(
+                    attestation, m_config.chain_id,
+                    m_config.replay_authority_context, block_hash,
+                    block_height) != VerifyResult::Valid) {
+                continue;
+            }
+            if (m_trusted_signers.count(attestation.signer) != 0 &&
+                !IsBlockedLocked(attestation.signer)) {
+                pin_votes.insert(attestation.signer);
+            }
+        }
+    }
+    return pin_votes.size() >= m_config.threshold;
 }
 
 std::vector<ExactReplayAttestation> AttestationStore::GetAttestationsLocked(
@@ -436,7 +1058,7 @@ WaitResult AttestationStore::WaitForQuorum(
         PruneExpiredLocked(Clock::now());
         const auto bucket{m_buckets.find(key)};
         if (bucket != m_buckets.end() &&
-            bucket->second.attestations.size() >= m_config.threshold) {
+            HasQuorumLocked(key, bucket->second)) {
             if (quorum != nullptr) *quorum = GetAttestationsLocked(key);
             ++m_stats.wait_quorums;
             return WaitResult::Quorum;
@@ -496,8 +1118,7 @@ bool AttestationStore::MakeRoomLocked(
         auto oldest_partial{m_buckets.end()};
         for (auto it = m_buckets.begin(); it != m_buckets.end(); ++it) {
             if (!(it->first < incoming) && !(incoming < it->first)) continue;
-            if (it->second.attestations.size() >=
-                m_config.threshold) {
+            if (HasQuorumLocked(it->first, it->second)) {
                 continue;
             }
             if (oldest_partial == m_buckets.end() ||
@@ -520,8 +1141,8 @@ bool AttestationStore::MakeRoomLocked(
                 if (!(it->first < incoming) && !(incoming < it->first)) {
                     continue;
                 }
-                if (it->second.attestations.size() <
-                    m_config.threshold) {
+                if (it->second.attestations.size() == 0) continue;
+                if (!HasQuorumLocked(it->first, it->second)) {
                     continue;
                 }
                 if (oldest_quorum == m_buckets.end() ||
@@ -548,8 +1169,7 @@ bool AttestationStore::MakeRoomLocked(
             static_cast<size_t>(std::count_if(
                 m_buckets.begin(), m_buckets.end(),
                 [this](const auto& entry) {
-                    return entry.second.attestations.size() <
-                           m_config.threshold;
+                    return !HasQuorumLocked(entry.first, entry.second);
                 })) +
             (incoming_exists ? 0 : 1)};
         const size_t staged_signatures{
@@ -594,7 +1214,7 @@ size_t AttestationStore::QuorumBlockCountLocked() const
     return std::count_if(
         m_buckets.begin(), m_buckets.end(),
         [this](const auto& entry) {
-            return entry.second.attestations.size() >= m_config.threshold;
+            return HasQuorumLocked(entry.first, entry.second);
         });
 }
 
@@ -605,6 +1225,9 @@ StoreStats AttestationStore::GetStats() const
     stats.stored_blocks = m_buckets.size();
     stats.stored_attestations = m_attestation_count;
     stats.blocks_with_quorum = QuorumBlockCountLocked();
+    stats.heard_attestations = m_heard.size();
+    stats.admitted_open = m_admitted_open.size();
+    stats.frozen_open = m_frozen_open.size();
     return stats;
 }
 
@@ -612,6 +1235,311 @@ std::optional<CPubKey> AttestationStore::LocalSignerPubKey() const
 {
     if (!m_config.local_signer.has_value()) return std::nullopt;
     return m_config.local_signer->GetPubKey();
+}
+
+size_t AttestationStore::MaxVotesPerBlock() const
+{
+    if (!m_config.open_attestors) return m_trusted_signers.size();
+    return m_trusted_signers.size() + MAX_OPEN_VOTES_PER_BLOCK;
+}
+
+bool AttestationStore::IsPinnedSigner(const CPubKey& pubkey) const
+{
+    return m_trusted_signers.count(pubkey) != 0;
+}
+
+bool AttestationStore::IsAdmittedOpenSigner(const CPubKey& pubkey) const
+{
+    std::lock_guard lock{m_mutex};
+    return m_admitted_open.count(pubkey) != 0;
+}
+
+bool AttestationStore::IsFrozenOpenSigner(const CPubKey& pubkey) const
+{
+    std::lock_guard lock{m_mutex};
+    return m_frozen_open.count(pubkey) != 0;
+}
+
+bool AttestationStore::IsAuthoritySigner(const CPubKey& pubkey) const
+{
+    std::lock_guard lock{m_mutex};
+    return m_trusted_signers.count(pubkey) != 0 && !IsBlockedLocked(pubkey);
+}
+
+bool AttestationStore::IsBlocked(const CPubKey& pubkey) const
+{
+    std::lock_guard lock{m_mutex};
+    return IsBlockedLocked(pubkey);
+}
+
+std::set<CPubKey> AttestationStore::BlockedSigners() const
+{
+    std::lock_guard lock{m_mutex};
+    return m_blocked;
+}
+
+std::set<CPubKey> AttestationStore::ConfigBlockedSigners() const
+{
+    std::lock_guard lock{m_mutex};
+    return m_blocked_config;
+}
+
+std::set<CPubKey> AttestationStore::RuntimeBlockedSigners() const
+{
+    std::lock_guard lock{m_mutex};
+    std::set<CPubKey> runtime;
+    for (const auto& pubkey : m_blocked) {
+        if (m_blocked_config.count(pubkey) == 0) runtime.insert(pubkey);
+    }
+    return runtime;
+}
+
+size_t AttestationStore::UnblockedPinMembers() const
+{
+    std::lock_guard lock{m_mutex};
+    return UnblockedPinMembersLocked();
+}
+
+bool AttestationStore::PinQuorumReachable() const
+{
+    std::lock_guard lock{m_mutex};
+    return PinQuorumIsReachable(UnblockedPinMembersLocked(),
+                                m_config.threshold);
+}
+
+BlocklistResult AttestationStore::AddBlocklistedSigner(const CPubKey& pubkey)
+{
+    if (!IsCanonicalSigner(pubkey)) return BlocklistResult::Invalid;
+    {
+        std::lock_guard lock{m_mutex};
+        if (m_config.local_signer.has_value() &&
+            m_config.local_signer->GetPubKey() == pubkey) {
+            return BlocklistResult::LocalSigner;
+        }
+        if (IsBlockedLocked(pubkey)) return BlocklistResult::Duplicate;
+        if (m_blocked.size() >= DEFAULT_MAX_BLOCKED_SIGNERS) {
+            return BlocklistResult::Capacity;
+        }
+        if (m_trusted_signers.count(pubkey) != 0) {
+            const size_t unblocked_after{UnblockedPinMembersLocked() - 1};
+            if (!PinQuorumIsReachable(unblocked_after, m_config.threshold)) {
+                return BlocklistResult::WouldDisablePinQuorum;
+            }
+        }
+        m_blocked.insert(pubkey);
+        m_admitted_open.erase(pubkey);
+        DropHeardLocked(pubkey);
+    }
+    m_changed.notify_all();
+    return BlocklistResult::Blocked;
+}
+
+bool AttestationStore::RestoreRuntimeBlocked(std::set<CPubKey> blocked)
+{
+    for (const auto& pubkey : blocked) {
+        if (!IsCanonicalSigner(pubkey)) continue;
+        const BlocklistResult result{AddBlocklistedSigner(pubkey)};
+        if (result == BlocklistResult::WouldDisablePinQuorum ||
+            result == BlocklistResult::LocalSigner ||
+            result == BlocklistResult::Capacity) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::set<CPubKey> AttestationStore::AdmittedOpenSigners() const
+{
+    std::lock_guard lock{m_mutex};
+    return m_admitted_open;
+}
+
+std::set<CPubKey> AttestationStore::FrozenOpenSigners() const
+{
+    std::lock_guard lock{m_mutex};
+    return m_frozen_open;
+}
+
+std::vector<ExactReplayAttestation> AttestationStore::GetHeard(
+    const uint256& block_hash, int32_t block_height) const
+{
+    std::lock_guard lock{m_mutex};
+    std::vector<ExactReplayAttestation> out;
+    for (const auto& [key, attestation] : m_heard) {
+        if (key.height == block_height && key.hash == block_hash) {
+            out.push_back(attestation);
+        }
+    }
+    return out;
+}
+
+std::vector<ExactReplayAttestation> AttestationStore::ExportHeard() const
+{
+    std::lock_guard lock{m_mutex};
+    std::vector<ExactReplayAttestation> out;
+    out.reserve(m_heard.size());
+    for (const auto& [key, attestation] : m_heard) {
+        (void)key;
+        out.push_back(attestation);
+    }
+    return out;
+}
+
+std::vector<ExactReplayRefutation> AttestationStore::GetRefutations(
+    const uint256& block_hash, int32_t block_height) const
+{
+    std::lock_guard lock{m_mutex};
+    std::vector<ExactReplayRefutation> out;
+    const auto it{m_refutations.find(BlockKey{block_height, block_hash})};
+    if (it == m_refutations.end()) return out;
+    out.reserve(it->second.size());
+    for (const auto& [signer, refutation] : it->second) {
+        (void)signer;
+        out.push_back(refutation);
+    }
+    return out;
+}
+
+AttestationLogHead AttestationStore::LogHead() const
+{
+    std::lock_guard lock{m_mutex};
+    AttestationLogHead head;
+    head.tree_size = m_log_leaves.size();
+    head.root = ComputeAttestationLogRoot(m_log_leaves);
+    return head;
+}
+
+std::optional<AttestationLogProof> AttestationStore::LogInclusionProof(
+    const uint256& statement_hash) const
+{
+    std::lock_guard lock{m_mutex};
+    for (size_t i = 0; i < m_log_leaves.size(); ++i) {
+        if (m_log_leaves[i] != statement_hash) continue;
+        AttestationLogProof proof;
+        proof.index = i;
+        proof.leaf = statement_hash;
+        proof.branch = ComputeAttestationLogBranch(m_log_leaves, i);
+        proof.root = ComputeAttestationLogRoot(m_log_leaves);
+        return proof;
+    }
+    return std::nullopt;
+}
+
+void AttestationStore::RestoreOpenAttestors(std::set<CPubKey> admitted,
+                                            std::set<CPubKey> frozen)
+{
+    std::lock_guard lock{m_mutex};
+    m_frozen_open.clear();
+    m_frozen_open_order.clear();
+    for (const auto& pubkey : frozen) {
+        if (m_frozen_open.insert(pubkey).second) {
+            m_frozen_open_order.push_back(pubkey);
+        }
+    }
+    CapFrozenOpenLocked();
+    m_admitted_open.clear();
+    for (const auto& pubkey : admitted) {
+        AdmitOpenLocked(pubkey);
+    }
+    for (const auto& pubkey : m_frozen_open) {
+        m_admitted_open.erase(pubkey);
+    }
+}
+
+void AttestationStore::AdmitOpenSigner(const CPubKey& pubkey)
+{
+    std::lock_guard lock{m_mutex};
+    AdmitOpenLocked(pubkey);
+}
+
+void AttestationStore::ChallengeWindowReplay(int32_t height,
+                                             const uint256& block_hash)
+{
+    std::lock_guard lock{m_mutex};
+    for (const auto& existing : m_window_challenges) {
+        if (existing.height == height && existing.block_hash == block_hash) {
+            return;
+        }
+    }
+    m_window_challenges.push_back(WindowReplayChallenge{height, block_hash});
+    while (m_window_challenges.size() > m_config.max_window_challenges) {
+        m_window_challenges.erase(m_window_challenges.begin());
+    }
+}
+
+std::vector<AttestationStore::WindowReplayChallenge>
+AttestationStore::WindowReplayChallenges() const
+{
+    std::lock_guard lock{m_mutex};
+    return m_window_challenges;
+}
+
+bool AttestationStore::WindowReplayAnswered(const CPubKey& pubkey) const
+{
+    std::lock_guard lock{m_mutex};
+    if (m_window_challenges.empty()) return true;
+    for (const auto& challenge : m_window_challenges) {
+        const auto bucket{
+            m_buckets.find(BlockKey{challenge.height, challenge.block_hash})};
+        if (bucket != m_buckets.end() &&
+            bucket->second.attestations.count(pubkey) != 0) {
+            continue;
+        }
+        bool heard{false};
+        for (const auto& [key, attestation] : m_heard) {
+            (void)attestation;
+            if (key.height == challenge.height &&
+                key.hash == challenge.block_hash && key.signer == pubkey) {
+                heard = true;
+                break;
+            }
+        }
+        if (!heard) return false;
+    }
+    return true;
+}
+
+AddResult AttestationStore::AddRefutation(
+    const ExactReplayRefutation& refutation,
+    const uint256& expected_hash,
+    int32_t expected_height)
+{
+    const VerifyResult crypto{VerifyRefutationCrypto(
+        refutation, m_config.chain_id, m_config.replay_authority_context,
+        expected_hash, expected_height)};
+    if (crypto != VerifyResult::Valid) {
+        std::lock_guard lock{m_mutex};
+        ++m_stats.rejected;
+        return ToAddResult(crypto);
+    }
+    {
+        std::lock_guard lock{m_mutex};
+        if (IsBlockedLocked(refutation.signer)) {
+            ++m_stats.rejected;
+            return AddResult::BlocklistedSigner;
+        }
+        const bool pinned{m_trusted_signers.count(refutation.signer) != 0};
+        if (!pinned) {
+            if (!m_config.open_attestors ||
+                m_admitted_open.count(refutation.signer) == 0 ||
+                m_frozen_open.count(refutation.signer) != 0) {
+                ++m_stats.rejected;
+                return AddResult::UntrustedSigner;
+            }
+        }
+        const BlockKey key{expected_height, expected_hash};
+        auto& bucket{m_refutations[key]};
+        if (bucket.count(refutation.signer) != 0) {
+            ++m_stats.duplicates;
+            return AddResult::Duplicate;
+        }
+        bucket.emplace(refutation.signer, refutation);
+        RefreshPinRefutedLocked(key);
+        CapRefutationsLocked();
+        ++m_stats.accepted;
+    }
+    m_changed.notify_all();
+    return AddResult::Accepted;
 }
 
 } // namespace matmul::trusted

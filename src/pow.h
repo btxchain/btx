@@ -706,6 +706,12 @@ bool CanStartMatMulVerification(uint32_t pending_verifications, uint32_t work_un
                                 const Consensus::Params& params, int32_t reference_height = -1);
 bool CanStartMatMulRCVerification(uint32_t pending_verifications, uint32_t work_units,
                                   const Consensus::Params& params, int32_t reference_height = -1);
+/** Competing (non-AuthenticatedTipChild) ExactReplay must leave
+ *  MATMUL_RESERVED_AUTHENTICATED_TIP_CHILD_SLOTS of the RC pending cap free
+ *  so junk twins cannot starve honest tip-children (freeze-DoS M1). */
+inline constexpr uint32_t MATMUL_RESERVED_AUTHENTICATED_TIP_CHILD_SLOTS{1};
+bool CanStartCompetingMatMulRCVerification(uint32_t pending_verifications, uint32_t work_units,
+                                           const Consensus::Params& params, int32_t reference_height = -1);
 /** Clock-injected accounting for the independent process-wide Phase-2 lanes.
  *  External synchronization is required; the production singleton is guarded
  *  by its global mutex, while tests instantiate a local tracker. */

@@ -251,25 +251,58 @@ static OutboundPeerDiagnosticsSummary CollectOutboundPeerDiagnostics(
 static void EnsureMiningTemplateHasActiveTip(
     const ChainstateManager& chainman) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
-    if (chainman.ActiveChain().Tip() == nullptr) {
+    const CBlockIndex* const tip{chainman.ActiveChain().Tip()};
+    if (tip == nullptr) {
         throw JSONRPCError(RPC_CLIENT_IN_INITIAL_DOWNLOAD, CLIENT_NAME " has no active tip yet");
+    }
+    // Historical catch-up (loading / insufficient nMinimumChainWork): refuse
+    // so a node cannot mine from genesis or mid-reindex. Age-only IBD (tip
+    // older than -maxtipage on a work-sufficient chain) must still issue a
+    // template — otherwise stall-recovery miners are deadlocked until they
+    // raise -maxtipage. Announcement of that block is not suppressed (see
+    // IbdShouldSuppressBlockAnnounce). Confirm getblockchaininfo.initialblockdownload
+    // is false on nodes participating in stalled-chain mining.
+    if (kernel::MiningTemplateShouldRefuseIbd(
+            chainman.m_blockman.LoadingBlocks(),
+            /*has_tip=*/true,
+            tip->nChainWork >= chainman.MinimumChainWork())) {
+        throw JSONRPCError(
+            RPC_CLIENT_IN_INITIAL_DOWNLOAD,
+            CLIENT_NAME " is still downloading initial blocks (insufficient chain work or loading). "
+            "getblocktemplate is refused until the node has a work-sufficient tip.");
+    }
+    if (chainman.IsInitialBlockDownload()) {
+        static std::atomic<bool> logged_age_only{false};
+        if (!logged_age_only.exchange(true)) {
+            LogWarning(
+                "getblocktemplate: node is in IBD because the tip is older than -maxtipage "
+                "(default 24h). A stalled chain looks like IBD after restart. The template "
+                "is still issued and the block will be announced. Miners on a stalled chain "
+                "should raise -maxtipage until getblockchaininfo.initialblockdownload is false.\n");
+        }
     }
 }
 
 /**
- * Bind getblocktemplate to the attested race when MatMul trusted-replay
- * attestation is configured. BlockAssembler parents only on the active tip,
- * so a unique competing attested HAVE_DATA sibling cannot be adopted here
- * without a silent reorg. Refuse rather than extend the stranded twin.
+ * Bind getblocktemplate to the attested race on trusted mirrors only.
+ * BlockAssembler parents only on the active tip, so a unique competing
+ * attested HAVE_DATA sibling cannot be adopted here without a silent reorg.
+ * Refuse rather than extend the stranded twin.
  *
- * Unconfigured nodes (-matmultrustedpubkey unset) keep GBT-on-active-tip.
+ * Consensus miners (even with -matmultrustedpubkey) keep GBT-on-active-tip:
+ * ExactReplay is validity; the pin is not a mining coordinator.
+ * Unconfigured nodes keep GBT-on-active-tip.
  * Headers-only competitors never qualify (FindUniqueCompetingAttestedIndex
  * requires HAVE_DATA + fully validated txs).
  */
 static void EnsureMatMulAttestedMiningParent(
     const ChainstateManager& chainman) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
-    if (!node::matmul_trusted::IsConfigured()) return;
+    if (!node::matmul_trusted::MatMulAttestedMiningParentRequired(
+            node::matmul_trusted::IsTrustedMirror(),
+            node::matmul_trusted::IsConfigured())) {
+        return;
+    }
 
     const CBlockIndex* const tip{chainman.ActiveChain().Tip()};
     if (tip == nullptr) return;
@@ -8845,7 +8878,7 @@ static RPCHelpMan getblocktemplate()
         "It returns data needed to construct a block to work on.\n"
         "For MatMul PoW networks, the template includes matrix seeds and parameters needed for external mining.\n"
         "External miners should solve the MatMul proof using the provided seeds and submit via submitblock.\n"
-        "When -matmultrustedpubkey is configured and Profile-1 attestation is active, a template is not issued when a unique competing attested HAVE_DATA sibling exists (unattested lost twin or dual-attested short-reorg) or when a unique attested HAVE_DATA child of the current tip is waiting to be connected (catch-up); follow getmatmulattestedtip instead.\n"
+        "When -matmulvalidation=trusted and -matmultrustedpubkey is configured and Profile-1 attestation is active, a template is not issued when a unique competing attested HAVE_DATA sibling exists (unattested lost twin or dual-attested short-reorg) or when a unique attested HAVE_DATA child of the current tip is waiting to be connected (catch-up); follow getmatmulattestedtip instead. Consensus miners (including consensus+pin) still receive a template on the ExactReplay-valid tip.\n"
         "For full specification, see BIPs 22, 23, 9, and 145:\n"
         "    https://github.com/bitcoin/bips/blob/master/bip-0022.mediawiki\n"
         "    https://github.com/bitcoin/bips/blob/master/bip-0023.mediawiki\n"
@@ -9086,6 +9119,11 @@ static RPCHelpMan getblocktemplate()
     ChainstateManager& chainman = EnsureChainman(node);
     Mining& miner = EnsureMining(node);
     LOCK(cs_main);
+    if (chainman.IsDiscoveryRelay()) {
+        throw JSONRPCError(
+            RPC_METHOD_NOT_FOUND,
+            "This node is a discovery relay (-matmulvalidation=relay), not a chain oracle. getblocktemplate is refused. Mine on a -matmulvalidation=consensus node that ExactReplays.");
+    }
     uint256 tip{CHECK_NONFATAL(miner.getTip()).value().hash};
 
     BlockAssembler::Options options;
@@ -9725,6 +9763,12 @@ static RPCHelpMan submitblock()
     EnforceBlockHexSizeLimit(block_hex, "hexdata");
 
     EnsureAnyNodeContext(request.context);
+    ChainstateManager& chainman_gate = EnsureAnyChainman(request.context);
+    if (chainman_gate.IsDiscoveryRelay()) {
+        throw JSONRPCError(
+            RPC_MISC_ERROR,
+            "This node is a discovery relay (-matmulvalidation=relay), not a chain oracle. submitblock is refused.");
+    }
 
     std::shared_ptr<CBlock> blockptr = std::make_shared<CBlock>();
     CBlock& block = *blockptr;

@@ -5412,6 +5412,13 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_args, BasicTestingSetup)
     BOOST_CHECK_EQUAL(*max_reorg_opts.local_finality_depth, 120U);
     BOOST_CHECK_EQUAL(*max_reorg_opts.reorg_hysteresis_depth, 4U);
     BOOST_CHECK_EQUAL(*max_reorg_opts.reorg_hysteresis_work_margin, 3U);
+
+    // Cadence hold: BasicTestingSetup is MAIN + emergency, so default is on.
+    BOOST_CHECK_EQUAL(get_valid_opts({}).cadence_burst_max, kernel::DEFAULT_CADENCE_BURST_MAX);
+    BOOST_CHECK_EQUAL(get_valid_opts({"-cadenceburstmax=5"}).cadence_burst_max, 5U);
+    BOOST_CHECK_EQUAL(get_valid_opts({"-cadenceburstmax=0"}).cadence_burst_max, 0U);
+    BOOST_CHECK_EQUAL(get_valid_opts({"-reorgprotectionprofile=archive"}).cadence_burst_max, 0U);
+    BOOST_CHECK(!get_opts({"-cadenceburstmax=-1"}));
     BOOST_CHECK(!get_opts({"-reorgprotectionprofile=invalid"}));
     BOOST_CHECK(!get_opts({"-maxreorgdepthwarn=0"}));
     BOOST_CHECK(!get_opts({"-maxreorgdepthwarn=-1"}));
@@ -5433,6 +5440,7 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_args, BasicTestingSetup)
     BOOST_CHECK_EQUAL(get_valid_opts({}).matmul_validation_mode, kernel::MatMulValidationMode::CONSENSUS);
     BOOST_CHECK_EQUAL(get_valid_opts({"-matmulvalidation=consensus"}).matmul_validation_mode, kernel::MatMulValidationMode::CONSENSUS);
     BOOST_CHECK_EQUAL(get_valid_opts({"-matmulvalidation=trusted"}).matmul_validation_mode, kernel::MatMulValidationMode::TRUSTED);
+    BOOST_CHECK_EQUAL(get_valid_opts({"-matmulvalidation=relay"}).matmul_validation_mode, kernel::MatMulValidationMode::RELAY);
     BOOST_CHECK_EQUAL(get_valid_opts({"-matmulvalidation=economic"}).matmul_validation_mode, kernel::MatMulValidationMode::ECONOMIC);
     BOOST_CHECK_EQUAL(get_valid_opts({"-matmulvalidation=spv"}).matmul_validation_mode, kernel::MatMulValidationMode::SPV);
     BOOST_CHECK(!get_opts({"-matmulvalidation=invalid"}));

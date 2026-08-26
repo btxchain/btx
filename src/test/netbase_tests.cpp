@@ -644,10 +644,15 @@ BOOST_AUTO_TEST_CASE(islikelycrossnetworkport)
 BOOST_AUTO_TEST_CASE(serviceflags_matmul_names)
 {
     const uint64_t flags = static_cast<uint64_t>(NODE_MATMUL_CONSENSUS) |
-        static_cast<uint64_t>(NODE_MATMUL_ECONOMIC);
+        static_cast<uint64_t>(NODE_MATMUL_ECONOMIC) |
+        static_cast<uint64_t>(NODE_MATMUL_DISCOVERY);
     const auto names = serviceFlagsToStr(flags);
     BOOST_CHECK(std::find(names.begin(), names.end(), "MATMUL_CONSENSUS") != names.end());
     BOOST_CHECK(std::find(names.begin(), names.end(), "MATMUL_ECONOMIC") != names.end());
+    BOOST_CHECK(std::find(names.begin(), names.end(), "MATMUL_DISCOVERY") != names.end());
+    BOOST_CHECK(MayHaveUsefulAddressDB(NODE_MATMUL_DISCOVERY));
+    BOOST_CHECK(MayHaveUsefulAddressDB(NODE_NETWORK));
+    BOOST_CHECK(!MayHaveUsefulAddressDB(NODE_NONE));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

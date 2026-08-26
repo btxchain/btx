@@ -276,4 +276,24 @@ BOOST_AUTO_TEST_CASE(retained_body_is_skip_fetch_until_terminal)
     BOOST_CHECK(!lifecycle.HasRetainedBody(hash));
 }
 
+BOOST_AUTO_TEST_CASE(pinned_progress_body_survives_sibling_flood)
+{
+    node::MatMulBlockLifecycle lifecycle{2, 200, 10min, 10min};
+    const auto now{node::MatMulBlockLifecycle::Clock::now()};
+    const uint256 hole{
+        uint256::FromHex(std::string(63, '0') + "a").value()};
+    auto pinned{Body(10, 50, now)};
+    pinned.pin_progress = true;
+    BOOST_REQUIRE(lifecycle.Retain(hole, std::move(pinned), now));
+    const uint256 junk{
+        uint256::FromHex(std::string(63, '0') + "b").value()};
+    BOOST_REQUIRE(lifecycle.Retain(junk, Body(11, 50, now + 1s), now + 1s));
+    const uint256 junk2{
+        uint256::FromHex(std::string(63, '0') + "c").value()};
+    BOOST_REQUIRE(lifecycle.Retain(junk2, Body(12, 50, now + 2s), now + 2s));
+    BOOST_CHECK(lifecycle.HasRetainedBody(hole));
+    BOOST_CHECK(!lifecycle.HasRetainedBody(junk));
+    BOOST_CHECK(lifecycle.HasRetainedBody(junk2));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

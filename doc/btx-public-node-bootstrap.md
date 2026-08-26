@@ -57,6 +57,9 @@ prune=0
 minimumchainwork=0
 dnsseed=1
 fixedseeds=1
+# 0.34: these DNS names should run -matmulvalidation=relay (ADDR only).
+# They are not chain oracles and must not be GPU attestors. IBD comes from
+# archives/miners the relay introduces. See doc/design/0.34-discovery-relay.md.
 addnode=node.btx.dev:19335
 addnode=node.btxchain.org:19335
 addnode=node.btx.tools:19335
@@ -78,7 +81,10 @@ Notes:
 - After `btxd` is up, `btx-cli getmatmultrustedstatus` must show
   `configured=true` and the two pubkeys above. That is the mining/archive
   bootstrap pin (same RPC GPU attestors and following archives serve).
-- `addnode=` seeds initial peers while preserving broader peer discovery.
+- `addnode=` introduces peers while preserving broader discovery. In 0.34
+  those hosts are discovery relays (`-matmulvalidation=relay`), not MatMul
+  authority. Do not treat `getbestblockhash` on a public seed as the chain.
+  GPU attestors stay off DNS/`addnode`.
 - the current public DNS bootstrap set is `node.btx.dev`,
   `node.btxchain.org`, and `node.btx.tools`; direct IP addnodes are optional
   archive-node hints for controlled troubleshooting

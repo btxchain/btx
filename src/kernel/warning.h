@@ -17,6 +17,16 @@ enum class Warning {
     //! This is a loud alarm only; it never changes consensus. See the deep-reorg
     //! handling in Chainstate::ActivateBestChainStep.
     DEEP_REORG_DETECTED,
+    //! A live-tip header burst would connect faster than nPowTargetSpacing
+    //! (90s) allows. Local cadence hold: GETDATA/ConnectTip are paced; the
+    //! headers stay valid. See CadenceHoldShouldHold.
+    CADENCE_HOLD_DETECTED,
+    //! A peer advertised a header whose nBits do not match this node's
+    //! EncDr stall-recovery GetNextWorkRequired. Rejected before the header
+    //! is indexed, so LARGE_WORK_INVALID_CHAIN cannot fire. Explorers on
+    //! that fork can look like the live chain; this warning makes the split
+    //! visible. See DivergentPowForkShouldWarn.
+    MATMUL_DIVERGENT_POW_FORK,
     //! Strict-device consensus validation has no qualified runtime provider.
     //! Unlike a transient log line, this remains visible through the standard
     //! RPC warnings array, the GUI status, and -alertnotify until the process

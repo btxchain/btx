@@ -11,6 +11,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <set>
 #include <stdexcept>
 #include <thread>
 #include <vector>
@@ -160,6 +161,19 @@ BOOST_AUTO_TEST_CASE(statement_signature_serialization_and_context)
                     altered, chain, REPLAY_AUTHORITY_CONTEXT, block, 123,
                     trusted) ==
                 VerifyResult::WrongReplayAuthorityContext);
+    // 3.4: old-context flood is rejected on statement fields BEFORE secp.
+    // A garbage signature must not change the result to InvalidSignature.
+    {
+        auto cheap{attestation};
+        cheap.statement.replay_authority_context = TestHash(0x25);
+        cheap.signature = {0x00, 0x01, 0x02};
+        BOOST_CHECK(VerifyAttestationCrypto(cheap, chain, REPLAY_AUTHORITY_CONTEXT,
+                                            block, 123) ==
+                    VerifyResult::WrongReplayAuthorityContext);
+        BOOST_CHECK(VerifyAttestation(cheap, chain, REPLAY_AUTHORITY_CONTEXT, block,
+                                      123, trusted) ==
+                    VerifyResult::WrongReplayAuthorityContext);
+    }
     // Even a verifier configured for the altered context rejects the original
     // signature: the V2 domain signs the context bytes themselves.
     BOOST_CHECK(VerifyAttestation(
@@ -220,6 +234,18 @@ BOOST_AUTO_TEST_CASE(config_validation_and_local_signer)
     BOOST_CHECK(store.Add(MustSign(MakeStatement(chain, TestHash(0x33), 7), keys[0]),
                          TestHash(0x33), 7) == AddResult::Accepted);
     BOOST_CHECK(store.SignLocal(TestHash(0x34), 7) == AddResult::HeightOccupied);
+
+    // Relayed stolen-WIF vote on a competing hash must not jam SignLocal.
+    // M=2: one pin vote is not quorum, so the honest attestor still signs.
+    const auto keys_m2{MakeKeys(2)};
+    auto config_m2{MakeConfig(chain, keys_m2, 2)};
+    config_m2.local_signer = keys_m2[0];
+    AttestationStore store_m2{config_m2};
+    BOOST_CHECK(store_m2.Add(MustSign(MakeStatement(chain, TestHash(0x40), 8), keys_m2[0]),
+                             TestHash(0x40), 8) == AddResult::Accepted);
+    BOOST_CHECK(store_m2.SignLocal(TestHash(0x41), 8) == AddResult::Accepted);
+    BOOST_CHECK(!store_m2.HasQuorum(TestHash(0x40), 8));
+    BOOST_CHECK(!store_m2.HasQuorum(TestHash(0x41), 8));
 
     auto no_local{MakeConfig(chain, keys, 1)};
     AttestationStore no_local_store{no_local};
@@ -474,6 +500,530 @@ BOOST_AUTO_TEST_CASE(export_all_and_durable_retention_skips_ttl)
     const auto exported{store.ExportAll()};
     BOOST_REQUIRE_EQUAL(exported.size(), 1U);
     BOOST_CHECK(exported[0].statement.block_hash == block);
+}
+
+BOOST_AUTO_TEST_CASE(verify_crypto_splits_membership)
+{
+    const auto keys{MakeKeys(2)};
+    const uint256 chain{TestHash(0x51)};
+    const uint256 block{TestHash(0x52)};
+    const auto attestation{MustSign(MakeStatement(chain, block, 9), keys[0])};
+    const std::set<CPubKey> pin{keys[1].GetPubKey()};
+
+    BOOST_CHECK(VerifyAttestationCrypto(
+                    attestation, chain, REPLAY_AUTHORITY_CONTEXT, block, 9) ==
+                VerifyResult::Valid);
+    BOOST_CHECK(VerifyAttestation(
+                    attestation, chain, REPLAY_AUTHORITY_CONTEXT, block, 9,
+                    pin) == VerifyResult::UntrustedSigner);
+}
+
+BOOST_AUTO_TEST_CASE(open_pin_quorum_remains_sufficient)
+{
+    const auto keys{MakeKeys(2)};
+    const uint256 chain{TestHash(0x61)};
+    const uint256 block{TestHash(0x62)};
+    auto config{MakeConfig(chain, keys, /*threshold=*/1)};
+    config.open_attestors = true;
+    config.open_threshold = 2;
+    AttestationStore store{config};
+
+    BOOST_REQUIRE(store.Add(MustSign(MakeStatement(chain, block, 11), keys[0]),
+                            block, 11) == AddResult::Accepted);
+    BOOST_CHECK(store.HasQuorum(block, 11));
+    BOOST_CHECK_EQUAL(store.OpenThreshold(), 2);
+}
+
+BOOST_AUTO_TEST_CASE(open_sybil_never_admits_or_quorum)
+{
+    const auto pin{MakeKeys(2)};
+    const auto sybil{MakeKeys(3)};
+    const uint256 chain{TestHash(0x71)};
+    const uint256 honest{TestHash(0x72)};
+    const uint256 fake{TestHash(0x73)};
+    auto config{MakeConfig(chain, pin, /*threshold=*/1)};
+    config.open_attestors = true;
+    config.open_threshold = 2;
+    AttestationStore store{config};
+
+    BOOST_REQUIRE(store.Add(MustSign(MakeStatement(chain, honest, 20), pin[0]),
+                            honest, 20) == AddResult::Accepted);
+    BOOST_CHECK(store.HasQuorum(honest, 20));
+
+    for (const auto& key : sybil) {
+        BOOST_CHECK(store.Add(MustSign(MakeStatement(chain, fake, 21), key),
+                              fake, 21) == AddResult::Heard);
+    }
+    BOOST_CHECK(!store.HasQuorum(fake, 21));
+    BOOST_CHECK(store.AdmittedOpenSigners().empty());
+    BOOST_CHECK_EQUAL(store.GetHeard(fake, 21).size(), 3);
+}
+
+BOOST_AUTO_TEST_CASE(open_admission_then_open_quorum)
+{
+    const auto pin{MakeKeys(2)};
+    const auto open{MakeKeys(2)};
+    const uint256 chain{TestHash(0x81)};
+    const uint256 genesis_attested{TestHash(0x82)};
+    const uint256 next{TestHash(0x83)};
+    auto config{MakeConfig(chain, pin, /*threshold=*/1)};
+    config.open_attestors = true;
+    config.open_threshold = 2;
+    AttestationStore store{config};
+
+    BOOST_REQUIRE(
+        store.Add(MustSign(MakeStatement(chain, genesis_attested, 30), pin[0]),
+                  genesis_attested, 30) == AddResult::Accepted);
+    BOOST_CHECK(store.Add(MustSign(MakeStatement(chain, genesis_attested, 30),
+                                   open[0]),
+                          genesis_attested, 30) == AddResult::Heard);
+    BOOST_CHECK(store.Add(MustSign(MakeStatement(chain, genesis_attested, 30),
+                                   open[1]),
+                          genesis_attested, 30) == AddResult::Heard);
+    BOOST_CHECK_EQUAL(store.AdmittedOpenSigners().size(), 2);
+    BOOST_CHECK(store.HasQuorum(genesis_attested, 30));
+    BOOST_CHECK(store.HasOpenQuorum(genesis_attested, 30));
+
+    BOOST_CHECK(store.Add(MustSign(MakeStatement(chain, next, 31), open[0]),
+                          next, 31) == AddResult::Heard);
+    BOOST_CHECK(store.Add(MustSign(MakeStatement(chain, next, 31), open[1]),
+                          next, 31) == AddResult::Heard);
+    BOOST_CHECK(store.HasOpenQuorum(next, 31));
+    BOOST_CHECK(!store.HasQuorum(next, 31));
+}
+
+BOOST_AUTO_TEST_CASE(open_heard_rereplay_stays_heard)
+{
+    const auto pin{MakeKeys(1)};
+    const auto open{MakeKeys(1)};
+    const uint256 chain{TestHash(0x91)};
+    const uint256 block{TestHash(0x92)};
+    auto config{MakeConfig(chain, pin, /*threshold=*/1)};
+    config.open_attestors = true;
+    AttestationStore store{config};
+    const auto heard{MustSign(MakeStatement(chain, block, 40), open[0])};
+    BOOST_CHECK(store.Add(heard, block, 40) == AddResult::Heard);
+    BOOST_CHECK(store.Add(heard, block, 40) == AddResult::Heard);
+    BOOST_CHECK_EQUAL(store.GetStats().duplicates, 0);
+}
+
+BOOST_AUTO_TEST_CASE(open_heard_then_pin_completes_admits)
+{
+    const auto pin{MakeKeys(1)};
+    const auto extra{MakeKeys(1)};
+    const uint256 chain{TestHash(0x91)};
+    const uint256 block{TestHash(0x92)};
+    auto config{MakeConfig(chain, pin, /*threshold=*/1)};
+    config.open_attestors = true;
+    config.open_threshold = 2;
+    AttestationStore store{config};
+
+    BOOST_CHECK(store.Add(MustSign(MakeStatement(chain, block, 40), extra[0]),
+                          block, 40) == AddResult::Heard);
+    BOOST_CHECK(store.AdmittedOpenSigners().empty());
+    BOOST_REQUIRE(store.Add(MustSign(MakeStatement(chain, block, 40), pin[0]),
+                            block, 40) == AddResult::Accepted);
+    BOOST_CHECK(store.IsAdmittedOpenSigner(extra[0].GetPubKey()));
+    BOOST_CHECK(store.HasQuorum(block, 40));
+    BOOST_CHECK_EQUAL(store.GetHeard(block, 40).size(), 1);
+}
+
+BOOST_AUTO_TEST_CASE(open_equivocation_freezes_key)
+{
+    const auto pin{MakeKeys(1)};
+    const auto extra{MakeKeys(1)};
+    const uint256 chain{TestHash(0xa1)};
+    const uint256 first{TestHash(0xa2)};
+    const uint256 twin{TestHash(0xa3)};
+    auto config{MakeConfig(chain, pin, /*threshold=*/1)};
+    config.open_attestors = true;
+    AttestationStore store{config};
+
+    BOOST_REQUIRE(store.Add(MustSign(MakeStatement(chain, first, 50), pin[0]),
+                            first, 50) == AddResult::Accepted);
+    BOOST_REQUIRE(store.Add(MustSign(MakeStatement(chain, first, 50), extra[0]),
+                            first, 50) == AddResult::Heard);
+    BOOST_CHECK(store.IsAdmittedOpenSigner(extra[0].GetPubKey()));
+    BOOST_CHECK(store.Add(MustSign(MakeStatement(chain, twin, 50), extra[0]),
+                          twin, 50) == AddResult::Equivocation);
+    BOOST_CHECK(store.IsFrozenOpenSigner(extra[0].GetPubKey()));
+    BOOST_CHECK(!store.IsAdmittedOpenSigner(extra[0].GetPubKey()));
+    BOOST_CHECK(store.Add(MustSign(MakeStatement(chain, twin, 51), extra[0]),
+                          twin, 51) == AddResult::FrozenSigner);
+}
+
+BOOST_AUTO_TEST_CASE(pin_refutation_blocks_open_quorum_only)
+{
+    const auto pin{MakeKeys(2)};
+    const auto extra{MakeKeys(2)};
+    const uint256 chain{TestHash(0xb1)};
+    const uint256 boot{TestHash(0xb2)};
+    const uint256 lunatic{TestHash(0xb3)};
+    auto config{MakeConfig(chain, pin, /*threshold=*/1)};
+    config.open_attestors = true;
+    config.open_threshold = 2;
+    AttestationStore store{config};
+
+    BOOST_REQUIRE(store.Add(MustSign(MakeStatement(chain, boot, 60), pin[0]),
+                            boot, 60) == AddResult::Accepted);
+    BOOST_REQUIRE(store.Add(MustSign(MakeStatement(chain, boot, 60), extra[0]),
+                            boot, 60) == AddResult::Heard);
+    BOOST_REQUIRE(store.Add(MustSign(MakeStatement(chain, boot, 60), extra[1]),
+                            boot, 60) == AddResult::Heard);
+
+    BOOST_REQUIRE(store.Add(MustSign(MakeStatement(chain, lunatic, 61), extra[0]),
+                            lunatic, 61) == AddResult::Heard);
+    BOOST_REQUIRE(store.Add(MustSign(MakeStatement(chain, lunatic, 61), extra[1]),
+                            lunatic, 61) == AddResult::Heard);
+    BOOST_CHECK(store.HasOpenQuorum(lunatic, 61));
+    BOOST_CHECK(!store.HasQuorum(lunatic, 61));
+
+    auto refute{SignRefutation(MakeStatement(chain, lunatic, 61), pin[1])};
+    BOOST_REQUIRE(refute.has_value());
+    BOOST_CHECK(store.AddRefutation(*refute, lunatic, 61) == AddResult::Accepted);
+    BOOST_CHECK(!store.HasOpenQuorum(lunatic, 61));
+    BOOST_CHECK(!store.HasQuorum(lunatic, 61));
+
+    BOOST_REQUIRE(store.Add(MustSign(MakeStatement(chain, lunatic, 61), pin[0]),
+                            lunatic, 61) == AddResult::Accepted);
+    BOOST_CHECK(store.HasQuorum(lunatic, 61));
+}
+
+BOOST_AUTO_TEST_CASE(pin_refutation_requires_pin_threshold)
+{
+    const auto pin{MakeKeys(2)};
+    const auto extra{MakeKeys(2)};
+    const uint256 chain{TestHash(0xb4)};
+    const uint256 boot{TestHash(0xb5)};
+    const uint256 lunatic{TestHash(0xb6)};
+    auto config{MakeConfig(chain, pin, /*threshold=*/2)};
+    config.open_attestors = true;
+    config.open_threshold = 2;
+    AttestationStore store{config};
+
+    BOOST_REQUIRE(store.Add(MustSign(MakeStatement(chain, boot, 70), pin[0]),
+                            boot, 70) == AddResult::Accepted);
+    BOOST_REQUIRE(store.Add(MustSign(MakeStatement(chain, boot, 70), pin[1]),
+                            boot, 70) == AddResult::Accepted);
+    BOOST_REQUIRE(store.Add(MustSign(MakeStatement(chain, boot, 70), extra[0]),
+                            boot, 70) == AddResult::Heard);
+    BOOST_REQUIRE(store.Add(MustSign(MakeStatement(chain, boot, 70), extra[1]),
+                            boot, 70) == AddResult::Heard);
+    BOOST_REQUIRE(store.Add(MustSign(MakeStatement(chain, lunatic, 71), extra[0]),
+                            lunatic, 71) == AddResult::Heard);
+    BOOST_REQUIRE(store.Add(MustSign(MakeStatement(chain, lunatic, 71), extra[1]),
+                            lunatic, 71) == AddResult::Heard);
+    BOOST_CHECK(store.HasOpenQuorum(lunatic, 71));
+
+    auto first{SignRefutation(MakeStatement(chain, lunatic, 71), pin[0])};
+    BOOST_REQUIRE(first.has_value());
+    BOOST_CHECK(store.AddRefutation(*first, lunatic, 71) == AddResult::Accepted);
+    BOOST_CHECK(store.HasOpenQuorum(lunatic, 71));
+
+    auto second{SignRefutation(MakeStatement(chain, lunatic, 71), pin[1])};
+    BOOST_REQUIRE(second.has_value());
+    BOOST_CHECK(store.AddRefutation(*second, lunatic, 71) == AddResult::Accepted);
+    BOOST_CHECK(!store.HasOpenQuorum(lunatic, 71));
+}
+
+BOOST_AUTO_TEST_CASE(open_directory_caps_admitted_and_signed_heights)
+{
+    const auto pin{MakeKeys(1)};
+    const auto extra{MakeKeys(3)};
+    const uint256 chain{TestHash(0xc4)};
+    const uint256 boot{TestHash(0xc5)};
+    auto config{MakeConfig(chain, pin, /*threshold=*/1)};
+    config.open_attestors = true;
+    config.open_threshold = 2;
+    config.max_admitted_open = 1;
+    config.max_open_signed_heights = 2;
+    AttestationStore store{config};
+
+    BOOST_REQUIRE(store.Add(MustSign(MakeStatement(chain, boot, 80), pin[0]),
+                            boot, 80) == AddResult::Accepted);
+    BOOST_CHECK(store.Add(MustSign(MakeStatement(chain, boot, 80), extra[0]),
+                          boot, 80) == AddResult::Heard);
+    BOOST_CHECK(store.Add(MustSign(MakeStatement(chain, boot, 80), extra[1]),
+                          boot, 80) == AddResult::Heard);
+    BOOST_CHECK_EQUAL(store.AdmittedOpenSigners().size(), 1);
+    BOOST_CHECK(store.IsAdmittedOpenSigner(extra[0].GetPubKey()));
+    BOOST_CHECK(!store.IsAdmittedOpenSigner(extra[1].GetPubKey()));
+
+    const uint256 h1{TestHash(0xc6)};
+    const uint256 h2{TestHash(0xc7)};
+    const uint256 h3{TestHash(0xc8)};
+    BOOST_CHECK(store.Add(MustSign(MakeStatement(chain, h1, 81), extra[2]),
+                          h1, 81) == AddResult::Heard);
+    BOOST_CHECK(store.Add(MustSign(MakeStatement(chain, h2, 82), extra[2]),
+                          h2, 82) == AddResult::Heard);
+    BOOST_CHECK(store.Add(MustSign(MakeStatement(chain, h3, 83), extra[2]),
+                          h3, 83) == AddResult::Heard);
+    const uint256 h1_twin{TestHash(0xc9)};
+    // Height 81 was pruned by the signed-height cap, so a second hash at
+    // that height is not an equivocation.
+    BOOST_CHECK(store.Add(MustSign(MakeStatement(chain, h1_twin, 81), extra[2]),
+                          h1_twin, 81) == AddResult::Heard);
+    BOOST_CHECK(!store.IsFrozenOpenSigner(extra[2].GetPubKey()));
+}
+
+BOOST_AUTO_TEST_CASE(open_signed_entries_capped_at_one_height)
+{
+    const auto pin{MakeKeys(1)};
+    const auto extra{MakeKeys(4)};
+    const uint256 chain{TestHash(0xd0)};
+    const uint256 tip{TestHash(0xd1)};
+    auto config{MakeConfig(chain, pin, /*threshold=*/1)};
+    config.open_attestors = true;
+    config.max_open_signers_per_height = 2;
+    config.max_open_signed_entries = 3;
+    config.max_open_signed_heights = 16;
+    AttestationStore store{config};
+
+    BOOST_REQUIRE(store.Add(MustSign(MakeStatement(chain, tip, 100), pin[0]),
+                            tip, 100) == AddResult::Accepted);
+    BOOST_CHECK(store.Add(MustSign(MakeStatement(chain, tip, 100), extra[0]),
+                          tip, 100) == AddResult::Heard);
+    BOOST_CHECK(store.Add(MustSign(MakeStatement(chain, tip, 100), extra[1]),
+                          tip, 100) == AddResult::Heard);
+    BOOST_CHECK_EQUAL(store.OpenSignedEntryCount(), 2);
+    // Third distinct open signer at the same height is heard but not
+    // recorded, so a later twin is not an equivocation.
+    BOOST_CHECK(store.Add(MustSign(MakeStatement(chain, tip, 100), extra[2]),
+                          tip, 100) == AddResult::Heard);
+    BOOST_CHECK_EQUAL(store.OpenSignedEntryCount(), 2);
+    const uint256 twin{TestHash(0xd2)};
+    BOOST_CHECK(store.Add(MustSign(MakeStatement(chain, twin, 100), extra[2]),
+                          twin, 100) == AddResult::Heard);
+    BOOST_CHECK(!store.IsFrozenOpenSigner(extra[2].GetPubKey()));
+
+    const uint256 h2{TestHash(0xd3)};
+    BOOST_CHECK(store.Add(MustSign(MakeStatement(chain, h2, 101), extra[3]),
+                          h2, 101) == AddResult::Heard);
+    BOOST_CHECK_LE(store.OpenSignedEntryCount(), 3);
+}
+
+BOOST_AUTO_TEST_CASE(frozen_open_set_is_capped)
+{
+    const auto pin{MakeKeys(1)};
+    const auto extra{MakeKeys(4)};
+    const uint256 chain{TestHash(0xe0)};
+    auto config{MakeConfig(chain, pin, /*threshold=*/1)};
+    config.open_attestors = true;
+    config.max_frozen_open = 2;
+    config.max_open_signers_per_height = 16;
+    AttestationStore store{config};
+    const uint256 a{TestHash(0xe1)};
+    const uint256 b{TestHash(0xe2)};
+    for (size_t i = 0; i < extra.size(); ++i) {
+        const int32_t height{static_cast<int32_t>(210 + i)};
+        BOOST_CHECK(store.Add(MustSign(MakeStatement(chain, a, height), extra[i]),
+                              a, height) == AddResult::Heard);
+        BOOST_CHECK(store.Add(MustSign(MakeStatement(chain, b, height), extra[i]),
+                              b, height) == AddResult::Equivocation);
+    }
+    BOOST_CHECK_EQUAL(store.FrozenOpenSigners().size(), 2);
+}
+
+BOOST_AUTO_TEST_CASE(refutation_map_is_capped)
+{
+    const auto pin{MakeKeys(1)};
+    const uint256 chain{TestHash(0xd4)};
+    auto config{MakeConfig(chain, pin, /*threshold=*/1)};
+    config.max_refutations = 2;
+    AttestationStore store{config};
+    for (int32_t height = 90; height < 94; ++height) {
+        const uint256 hash{TestHash(static_cast<uint8_t>(height))};
+        auto refute{SignRefutation(MakeStatement(chain, hash, height), pin[0])};
+        BOOST_REQUIRE(refute.has_value());
+        BOOST_CHECK(store.AddRefutation(*refute, hash, height) ==
+                    AddResult::Accepted);
+    }
+    const uint256 first{TestHash(90)};
+    auto replay{SignRefutation(MakeStatement(chain, first, 90), pin[0])};
+    BOOST_REQUIRE(replay.has_value());
+    // Oldest bucket was pruned; the same signer can store that height again.
+    BOOST_CHECK(store.AddRefutation(*replay, first, 90) == AddResult::Accepted);
+}
+
+BOOST_AUTO_TEST_CASE(open_local_signer_need_not_be_pinned)
+{
+    const auto pin{MakeKeys(1)};
+    const auto local{MakeKeys(1)};
+    auto config{MakeConfig(TestHash(0xc1), pin, /*threshold=*/1)};
+    config.open_attestors = true;
+    config.local_signer = local[0];
+    AttestationStore store{config};
+    BOOST_CHECK(store.LocalSignerPubKey() == local[0].GetPubKey());
+    ExactReplayAttestation produced;
+    BOOST_CHECK(store.SignLocal(TestHash(0xc2), 7, &produced) == AddResult::Heard);
+    BOOST_CHECK(produced.signer == local[0].GetPubKey());
+}
+
+BOOST_AUTO_TEST_CASE(attestation_transparency_log_inclusion)
+{
+    const auto keys{MakeKeys(1)};
+    const uint256 chain{TestHash(0xd1)};
+    auto config{MakeConfig(chain, keys, /*threshold=*/1)};
+    AttestationStore store{config};
+    const auto first{MustSign(MakeStatement(chain, TestHash(0xd2), 1), keys[0])};
+    const auto second{MustSign(MakeStatement(chain, TestHash(0xd3), 2), keys[0])};
+    BOOST_REQUIRE(store.Add(first, TestHash(0xd2), 1) == AddResult::Accepted);
+    BOOST_REQUIRE(store.Add(second, TestHash(0xd3), 2) == AddResult::Accepted);
+    const auto head{store.LogHead()};
+    BOOST_CHECK_EQUAL(head.tree_size, 2);
+    const auto proof{store.LogInclusionProof(StatementHash(first.statement))};
+    BOOST_REQUIRE(proof.has_value());
+    BOOST_CHECK(VerifyAttestationLogInclusion(*proof));
+    BOOST_CHECK(proof->root == head.root);
+}
+
+BOOST_AUTO_TEST_CASE(window_replay_challenge_directory)
+{
+    const auto keys{MakeKeys(1)};
+    const uint256 chain{TestHash(0xe1)};
+    const uint256 block{TestHash(0xe2)};
+    auto config{MakeConfig(chain, keys, /*threshold=*/1)};
+    AttestationStore store{config};
+    store.ChallengeWindowReplay(8, block);
+    BOOST_CHECK(!store.WindowReplayAnswered(keys[0].GetPubKey()));
+    BOOST_REQUIRE(store.Add(MustSign(MakeStatement(chain, block, 8), keys[0]),
+                            block, 8) == AddResult::Accepted);
+    BOOST_CHECK(store.WindowReplayAnswered(keys[0].GetPubKey()));
+}
+
+BOOST_AUTO_TEST_CASE(blocklist_rejects_pinned_votes_even_if_in_pin)
+{
+    const auto keys{MakeKeys(3)};
+    const uint256 chain{TestHash(0xf1)};
+    const uint256 block{TestHash(0xf2)};
+    auto config{MakeConfig(chain, keys, /*threshold=*/2)};
+    config.blocklist = {keys[0].GetPubKey()};
+    AttestationStore store{config};
+    BOOST_CHECK(store.IsBlocked(keys[0].GetPubKey()));
+    BOOST_CHECK(!store.IsAuthoritySigner(keys[0].GetPubKey()));
+    BOOST_CHECK(store.IsAuthoritySigner(keys[1].GetPubKey()));
+    BOOST_CHECK_EQUAL(store.UnblockedPinMembers(), 2U);
+    BOOST_CHECK(store.PinQuorumReachable());
+    BOOST_CHECK(store.Add(MustSign(MakeStatement(chain, block, 9), keys[0]),
+                          block, 9) == AddResult::BlocklistedSigner);
+    BOOST_CHECK(store.Add(MustSign(MakeStatement(chain, block, 9), keys[1]),
+                          block, 9) == AddResult::Accepted);
+    BOOST_CHECK(!store.HasQuorum(block, 9));
+    BOOST_CHECK(store.Add(MustSign(MakeStatement(chain, block, 9), keys[2]),
+                          block, 9) == AddResult::Accepted);
+    BOOST_CHECK(store.HasQuorum(block, 9));
+}
+
+BOOST_AUTO_TEST_CASE(blocklist_fail_closed_config)
+{
+    const auto keys{MakeKeys(2)};
+    auto too_small{MakeConfig(TestHash(0xf3), keys, /*threshold=*/2)};
+    too_small.blocklist = {keys[0].GetPubKey()};
+    BOOST_CHECK_THROW(AttestationStore{too_small}, std::invalid_argument);
+
+    auto both_blocked{MakeConfig(TestHash(0xf4), keys, /*threshold=*/1)};
+    both_blocked.blocklist = {keys[0].GetPubKey(), keys[1].GetPubKey()};
+    BOOST_CHECK_THROW(AttestationStore{both_blocked}, std::invalid_argument);
+
+    const auto three{MakeKeys(3)};
+    auto ok{MakeConfig(TestHash(0xf5), three, /*threshold=*/2)};
+    ok.blocklist = {three[0].GetPubKey()};
+    BOOST_CHECK_NO_THROW(AttestationStore{ok});
+
+    auto local_blocked{MakeConfig(TestHash(0xf6), three, /*threshold=*/2)};
+    local_blocked.blocklist = {three[2].GetPubKey()};
+    local_blocked.local_signer = three[2];
+    BOOST_CHECK_THROW(AttestationStore{local_blocked}, std::invalid_argument);
+}
+
+BOOST_AUTO_TEST_CASE(blocklist_open_admission_and_heard_rejected)
+{
+    const auto pin{MakeKeys(1)};
+    const auto open{MakeKeys(2)};
+    const uint256 chain{TestHash(0xf7)};
+    const uint256 boot{TestHash(0xf8)};
+    auto config{MakeConfig(chain, pin, /*threshold=*/1)};
+    config.open_attestors = true;
+    config.open_threshold = 2;
+    config.blocklist = {open[0].GetPubKey()};
+    AttestationStore store{config};
+    BOOST_REQUIRE(store.Add(MustSign(MakeStatement(chain, boot, 40), pin[0]),
+                            boot, 40) == AddResult::Accepted);
+    BOOST_CHECK(store.Add(MustSign(MakeStatement(chain, boot, 40), open[0]),
+                          boot, 40) == AddResult::BlocklistedSigner);
+    BOOST_CHECK(store.GetHeard(boot, 40).empty());
+    BOOST_CHECK(!store.IsAdmittedOpenSigner(open[0].GetPubKey()));
+    store.AdmitOpenSigner(open[0].GetPubKey());
+    BOOST_CHECK(!store.IsAdmittedOpenSigner(open[0].GetPubKey()));
+    std::set<CPubKey> admitted{open[0].GetPubKey(), open[1].GetPubKey()};
+    store.RestoreOpenAttestors(admitted, {});
+    BOOST_CHECK(!store.IsAdmittedOpenSigner(open[0].GetPubKey()));
+    BOOST_CHECK(store.IsAdmittedOpenSigner(open[1].GetPubKey()));
+}
+
+BOOST_AUTO_TEST_CASE(blocklist_runtime_add_fail_closed_and_open_quorum)
+{
+    const auto pin{MakeKeys(2)};
+    const auto open{MakeKeys(1)};
+    const uint256 chain{TestHash(0xf9)};
+    const uint256 boot{TestHash(0xfa)};
+    auto config{MakeConfig(chain, pin, /*threshold=*/2)};
+    config.open_attestors = true;
+    config.open_threshold = 3;
+    AttestationStore store{config};
+    BOOST_CHECK(store.AddBlocklistedSigner(pin[0].GetPubKey()) ==
+                BlocklistResult::WouldDisablePinQuorum);
+    BOOST_CHECK(!store.IsBlocked(pin[0].GetPubKey()));
+    BOOST_REQUIRE(store.Add(MustSign(MakeStatement(chain, boot, 50), pin[0]),
+                            boot, 50) == AddResult::Accepted);
+    BOOST_REQUIRE(store.Add(MustSign(MakeStatement(chain, boot, 50), pin[1]),
+                            boot, 50) == AddResult::Accepted);
+    BOOST_CHECK(store.HasQuorum(boot, 50));
+    BOOST_REQUIRE(store.Add(MustSign(MakeStatement(chain, boot, 50), open[0]),
+                            boot, 50) == AddResult::Heard);
+    BOOST_CHECK(store.IsAdmittedOpenSigner(open[0].GetPubKey()));
+    BOOST_CHECK(store.HasOpenQuorum(boot, 50));
+    BOOST_CHECK(store.AddBlocklistedSigner(open[0].GetPubKey()) ==
+                BlocklistResult::Blocked);
+    BOOST_CHECK(!store.IsAdmittedOpenSigner(open[0].GetPubKey()));
+    BOOST_CHECK(!store.HasOpenQuorum(boot, 50));
+    BOOST_CHECK(store.GetHeard(boot, 50).empty());
+    BOOST_CHECK(store.AddBlocklistedSigner(open[0].GetPubKey()) ==
+                BlocklistResult::Duplicate);
+}
+
+BOOST_AUTO_TEST_CASE(blocklist_durable_miss_and_refute_and_local)
+{
+    const auto keys{MakeKeys(3)};
+    const uint256 chain{TestHash(0xfb)};
+    const uint256 block{TestHash(0xfc)};
+    auto config{MakeConfig(chain, keys, /*threshold=*/2)};
+    config.blocklist = {keys[0].GetPubKey()};
+    config.local_signer = keys[1];
+    AttestationStore store{config};
+    const auto blocked_att{
+        MustSign(MakeStatement(chain, block, 60), keys[0])};
+    const auto honest_att{
+        MustSign(MakeStatement(chain, block, 60), keys[1])};
+    BOOST_CHECK(!store.HasQuorumFromAttestations(
+        {blocked_att, honest_att}, block, 60));
+    const auto second{
+        MustSign(MakeStatement(chain, block, 60), keys[2])};
+    BOOST_CHECK(store.HasQuorumFromAttestations(
+        {blocked_att, honest_att, second}, block, 60));
+
+    auto refute{SignRefutation(MakeStatement(chain, block, 60), keys[0])};
+    BOOST_REQUIRE(refute.has_value());
+    BOOST_CHECK(store.AddRefutation(*refute, block, 60) ==
+                AddResult::BlocklistedSigner);
+
+    BOOST_CHECK(store.SignLocal(block, 60) == AddResult::Accepted);
+    auto blocked_local{MakeConfig(chain, keys, /*threshold=*/2)};
+    blocked_local.local_signer = keys[1];
+    AttestationStore live{blocked_local};
+    BOOST_CHECK(live.AddBlocklistedSigner(keys[1].GetPubKey()) ==
+                BlocklistResult::LocalSigner);
+    BOOST_CHECK(!live.IsBlocked(keys[1].GetPubKey()));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

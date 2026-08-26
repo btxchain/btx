@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <httpserver.h>
+#include <rpc/server.h>
 #include <test/util/setup_common.h>
 
 #include <boost/test/unit_test.hpp>
@@ -39,4 +40,14 @@ BOOST_AUTO_TEST_CASE(test_query_parameters)
     uri = "/rest/endpoint/someresource.json&p1=v1&p2=v2%";
     BOOST_CHECK_EXCEPTION(GetQueryParameterFromUri(uri.c_str(), "p1"), std::runtime_error, HasReason("URI parsing failed, it likely contained RFC 3986 invalid characters"));
 }
+
+BOOST_AUTO_TEST_CASE(rpc_control_method_peek)
+{
+    BOOST_CHECK(IsRpcControlMethod("stop"));
+    BOOST_CHECK(IsRpcControlMethod("getrpcinfo"));
+    BOOST_CHECK(!IsRpcControlMethod("getblockchaininfo"));
+    BOOST_CHECK_EQUAL(*PeekJsonRpcMethod(R"({"method":"stop","params":[]})"), "stop");
+    BOOST_CHECK(!PeekJsonRpcMethod(R"([{"method":"stop"}])"));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

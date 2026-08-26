@@ -15,6 +15,7 @@
 #include <net_types.h> // For banmap_t
 #include <netbase.h>
 #include <node/context.h>
+#include <node/discovery_relay.h>
 #include <node/mining_guard.h>
 #include <node/protocol_version.h>
 #include <node/warnings.h>
@@ -80,17 +81,7 @@ const std::vector<std::string> TRANSPORT_TYPE_DOC{
 
 static std::string MatMulValidationModeToString(kernel::MatMulValidationMode mode)
 {
-    switch (mode) {
-    case kernel::MatMulValidationMode::CONSENSUS:
-        return "consensus";
-    case kernel::MatMulValidationMode::TRUSTED:
-        return "trusted";
-    case kernel::MatMulValidationMode::ECONOMIC:
-        return "economic";
-    case kernel::MatMulValidationMode::SPV:
-        return "spv";
-    }
-    return "unknown";
+    return kernel::MatMulValidationModeName(mode);
 }
 
 static UniValue AddedNodeInfoToJSON(const AddedNodeInfo& info)
@@ -1026,7 +1017,10 @@ static RPCHelpMan getnetworkinfo()
                         {
                             {RPCResult::Type::STR, "SERVICE_NAME", "the service name"},
                         }},
-                        {RPCResult::Type::STR, "matmulvalidationmode", "MatMul validation tier mode: consensus (independent full-node tier), trusted (operator-trusted signed-quorum mirror), economic (Phase 1 only), or spv"},
+                        {RPCResult::Type::STR, "matmulvalidationmode", "MatMul validation tier: consensus, trusted, relay (discovery/ADDR only), economic, or spv"},
+                        {RPCResult::Type::BOOL, "discovery_relay", "True when this node introduces peers and is not a chain-tip oracle"},
+                        {RPCResult::Type::BOOL, "chain_oracle", "False on a discovery relay"},
+                        {RPCResult::Type::NUM, "discovery_archive_reported_height", "Recent-network VERSION height watermark used for GETADDR introduction (miners, archives, or trusted mirrors); -1 if none"},
                         {RPCResult::Type::BOOL, "localrelay", "true if transaction relay is requested from peers"},
                         {RPCResult::Type::NUM, "timeoffset", "the time offset"},
                         {RPCResult::Type::NUM, "connections", "the total number of connections"},
@@ -1088,6 +1082,8 @@ static RPCHelpMan getnetworkinfo()
     }
     if (node.chainman) {
         obj.pushKV("matmulvalidationmode", MatMulValidationModeToString(node.chainman->GetMatMulValidationMode()));
+        obj.pushKV("discovery_relay", node.chainman->IsDiscoveryRelay());
+        obj.pushKV("chain_oracle", kernel::MatMulModeIsChainAuthority(node.chainman->GetMatMulValidationMode()));
     }
     if (node.peerman) {
         auto peerman_info{node.peerman->GetInfo()};
@@ -1095,6 +1091,8 @@ static RPCHelpMan getnetworkinfo()
         obj.pushKV("timeoffset", Ticks<std::chrono::seconds>(peerman_info.median_outbound_time_offset));
         obj.pushKV("min_smile_v2_version", peerman_info.min_smile_v2_version);
         obj.pushKV("smile_v2_enforcement_height", peerman_info.smile_v2_enforcement_height);
+        obj.pushKV("discovery_archive_reported_height",
+                   peerman_info.discovery_archive_reported_height);
     }
     if (node.connman) {
         obj.pushKV("networkactive", node.connman->GetNetworkActive());
@@ -1349,6 +1347,15 @@ static RPCHelpMan getnodeaddresses()
     UniValue ret(UniValue::VARR);
 
     for (const CAddress& addr : vAddr) {
+        const uint64_t services{static_cast<uint64_t>(addr.nServices)};
+        if (node::discovery_relay::ServicesLookLikeServingGpuAttestor(services) ||
+            node::discovery_relay::IsHiddenNetAddr(addr)) {
+            continue;
+        }
+        if (node.chainman && node.chainman->IsDiscoveryRelay() &&
+            !node::discovery_relay::MayAdvertiseAddress(services)) {
+            continue;
+        }
         UniValue obj(UniValue::VOBJ);
         obj.pushKV("time", int64_t{TicksSinceEpoch<std::chrono::seconds>(addr.nTime)});
         obj.pushKV("services", (uint64_t)addr.nServices);

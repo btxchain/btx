@@ -8,6 +8,12 @@ security closeout, or future-upgrade boundary:
 
 - [MatMul v4.7 Consensus Transition Roadmap](btx-matmul-v4.7-transition-roadmap.md)
 - [GPU-verified full nodes: three-phase transition](btx-gpu-verified-network-transition.md)
+- [0.34 open attestor framework (local design study)](design/0.34-open-attestor-framework.md)
+- [0.34 release phases — CPU-archive continuity, decentralized ExactReplay, attestor sunset](design/0.34-release-phases.md)
+- [0.34 attestation key blocklist (manual emergency excision)](design/0.34-attestor-key-blocklist.md)
+- [0.34 gold standard: ExactReplay, not attestation](design/0.34-ai-native-bitcoin.md)
+- [0.34 operator safeguards — hijack/stall runbook](design/0.34-operator-safeguards.md)
+- [0.34 discovery relay — public seeds stop being authority](design/0.34-discovery-relay.md)
 - [MatMul v4 ExactReplay Launch Candidate](matmul-v4-exact-replay-launch-candidate.md)
 - [BTX Security Documentation](security/README.md)
 - [BTX Post-Launch Optimization Roadmap](btx-postlaunch-optimization-roadmap.md)

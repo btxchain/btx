@@ -5805,6 +5805,23 @@ bool CanStartMatMulRCVerification(uint32_t pending_verifications, uint32_t work_
     return pending_verifications <= cap - work_units;
 }
 
+bool CanStartCompetingMatMulRCVerification(uint32_t pending_verifications, uint32_t work_units,
+                                           const Consensus::Params& params, int32_t reference_height)
+{
+    if (!params.IsMatMulRCFamilyActive(reference_height)) return false;
+    if (work_units == 0) return true;
+    const uint32_t cap = EffectiveMatMulRCMaxPendingVerifications(params, reference_height);
+    if (cap == 0) return false;
+    if (cap == std::numeric_limits<uint32_t>::max()) {
+        return CanStartMatMulRCVerification(pending_verifications, work_units, params, reference_height);
+    }
+    if (cap <= MATMUL_RESERVED_AUTHENTICATED_TIP_CHILD_SLOTS) return false;
+    const uint32_t competing_cap{cap - MATMUL_RESERVED_AUTHENTICATED_TIP_CHILD_SLOTS};
+    if (work_units > competing_cap) return false;
+    if (pending_verifications > std::numeric_limits<uint32_t>::max() - work_units) return false;
+    return pending_verifications <= competing_cap - work_units;
+}
+
 uint32_t EffectiveMatMulMaxPendingVerifications(const Consensus::Params& params, int32_t reference_height)
 {
     if (!IsDisabledHeight(params.nMatMulDRLTHeight) && params.IsDRLTActive(reference_height)) {
