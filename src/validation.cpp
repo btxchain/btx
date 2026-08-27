@@ -17703,16 +17703,15 @@ ShieldedSnapshotSectionHeader ChainstateManager::GetShieldedSnapshotSectionHeade
 {
     AssertLockHeld(::cs_main);
 
-    // Past nShieldedPoolDisableHeight the node does not open shielded stores.
-    // Dump the canonical closed frozen section (zero live counts) rather than
-    // walking LevelDB that is not open. Pre-close dumps keep the exact walk.
+    // Past nShieldedPoolDisableHeight the assumeutxo payload is the canonical
+    // closed frozen section (zero live counts). Do not walk live stores even
+    // when -shieldedstate=1 has them open: dumps from default nodes and from
+    // historical-store nodes must agree, and walking a null iterator was
+    // throwing "Failed to count BTX recovery-exit commitments for snapshot"
+    // on every default 0.34 node at/past the disable height.
     if (tip != nullptr &&
-        GetConsensus().IsShieldedPoolDisabled(tip->nHeight) &&
-        !HasShieldedState()) {
-        if (m_options.force_shielded_state) {
-            throw std::runtime_error("Failed to count BTX recovery-exit commitments for snapshot");
-        }
-        LogPrintf("GetShieldedSnapshotSectionHeader: emitting closed frozen shielded section at height %d (stores not open)\n",
+        GetConsensus().IsShieldedPoolDisabled(tip->nHeight)) {
+        LogPrintf("GetShieldedSnapshotSectionHeader: emitting closed frozen shielded section at height %d\n",
                   tip->nHeight);
         return ShieldedSnapshotSectionHeader{};
     }
@@ -17773,12 +17772,7 @@ bool ChainstateManager::AppendShieldedSnapshotPayload(
     (void)chainstate;
 
     if (tip != nullptr &&
-        GetConsensus().IsShieldedPoolDisabled(tip->nHeight) &&
-        !HasShieldedState()) {
-        if (m_options.force_shielded_state) {
-            error = "Failed to serialize BTX recovery-exit commitments";
-            return false;
-        }
+        GetConsensus().IsShieldedPoolDisabled(tip->nHeight)) {
         if (!header.IsClosedFrozenSection()) {
             error = "Closed shielded snapshot header is not a frozen zero-count section";
             return false;

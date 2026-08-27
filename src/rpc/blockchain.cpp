@@ -4201,57 +4201,19 @@ UniValue WriteUTXOSnapshot(
         afile << *shielded_section;
 
         LOCK(::cs_main);
-        const auto& shielded_tree = chainstate.m_chainman.GetShieldedMerkleTree();
-        for (uint64_t pos = 0; pos < shielded_tree.Size(); ++pos) {
-            const auto commitment = shielded_tree.CommitmentAt(pos);
-            if (!commitment.has_value()) {
-                throw std::ios_base::failure(strprintf("Missing BTX shielded commitment at position %u", pos));
-            }
-            afile << *commitment;
+        std::string shielded_error;
+        if (!chainstate.m_chainman.AppendShieldedSnapshotPayload(
+                afile, *shielded_section, chainstate, tip, shielded_error)) {
+            throw std::ios_base::failure(shielded_error);
         }
-        if (!chainstate.m_chainman.ForEachShieldedNullifier([&](const Nullifier& nf) {
-                afile << nf;
-                return true;
-            })) {
-            throw std::ios_base::failure("Failed to serialize BTX shielded nullifiers");
+        // Closed post-disable dumps pin the empty frozen section (same
+        // 94343b76… value as 55000 through 199300). Live pre-close dumps
+        // still hash the stores that produced the section.
+        if (shielded_section->IsClosedFrozenSection()) {
+            shielded_state_pin = chainstate.m_chainman.ComputeClosedShieldedSnapshotStatePin();
+        } else {
+            shielded_state_pin = chainstate.m_chainman.ComputeShieldedSnapshotStatePin();
         }
-        uint64_t written_recovery_exit_commitments{0};
-        if (!chainstate.m_chainman.ForEachShieldedRecoveryExitCommitment([&](const uint256& commitment) {
-                afile << commitment;
-                ++written_recovery_exit_commitments;
-                return true;
-            })) {
-            throw std::ios_base::failure("Failed to serialize BTX recovery-exit commitments");
-        }
-        CHECK_NONFATAL(written_recovery_exit_commitments ==
-                       shielded_section->m_recovery_exit_commitment_count);
-        if (!chainstate.m_chainman.ForEachShieldedSettlementAnchor([&](const uint256& anchor) {
-                afile << anchor;
-                return true;
-            })) {
-            throw std::ios_base::failure("Failed to serialize BTX shielded settlement anchors");
-        }
-        if (!chainstate.m_chainman.ForEachShieldedNettingManifestState(
-                [&](const ConfirmedNettingManifestState& manifest_state) {
-                afile << manifest_state;
-                return true;
-            })) {
-            throw std::ios_base::failure("Failed to serialize BTX shielded netting manifests");
-        }
-        const auto account_registry_snapshot =
-            chainstate.m_chainman.ExportShieldedAccountRegistrySnapshot(chainstate, tip);
-        if (!account_registry_snapshot.has_value()) {
-            throw std::ios_base::failure("Failed to serialize BTX shielded account-registry entries");
-        }
-        CHECK_NONFATAL(account_registry_snapshot->entries.size() ==
-                       shielded_section->m_account_registry_entry_count);
-        for (const auto& entry : account_registry_snapshot->entries) {
-            afile << entry;
-        }
-        // DS-3: compute the consensus shielded-state pin from the same live shielded state that produced
-        // this section (still under cs_main), using the exact helper ActivateSnapshot verifies against,
-        // so an operator can copy it verbatim into AssumeutxoData.shielded_state_commitment without drift.
-        shielded_state_pin = chainstate.m_chainman.ComputeShieldedSnapshotStatePin();
     }
 
     if (afile.fclose() != 0) {

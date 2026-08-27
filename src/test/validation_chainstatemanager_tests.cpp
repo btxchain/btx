@@ -29,6 +29,7 @@
 #include <test/util/shielded_v2_egress_fixture.h>
 #include <test/util/validation.h>
 #include <uint256.h>
+#include <univalue.h>
 #include <util/fs.h>
 #include <util/readwritefile.h>
 #include <util/result.h>
@@ -5723,6 +5724,33 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_skips_shielded_state_after_pool_disabl
     const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
     CreateAndProcessBlock({}, script_pub_key);
     BOOST_CHECK(WITH_LOCK(::cs_main, return !chainman.HasShieldedState()));
+}
+
+BOOST_FIXTURE_TEST_CASE(dumptxoutset_succeeds_on_default_node_after_pool_disable, ShieldedPoolClosedStartupSetup)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainman.GetConsensus().IsShieldedPoolDisabled(chainman.ActiveHeight())));
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return !chainman.HasShieldedState()));
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainman.EnsureShieldedStateInitialized()));
+
+    const fs::path snapshot_path{m_path_root / "closed_dump.dat"};
+    FILE* outfile{fsbridge::fopen(snapshot_path, "wb")};
+    BOOST_REQUIRE(outfile != nullptr);
+    AutoFile auto_outfile{outfile};
+
+    UniValue result;
+    BOOST_REQUIRE_NO_THROW(
+        result = CreateUTXOSnapshot(m_node, chainman.ActiveChainstate(),
+                                    std::move(auto_outfile), snapshot_path,
+                                    snapshot_path));
+    BOOST_REQUIRE(result.exists("shielded_state_pin"));
+    const auto closed_pin{
+        WITH_LOCK(::cs_main, return chainman.ComputeClosedShieldedSnapshotStatePin())};
+    BOOST_REQUIRE(closed_pin.has_value());
+    BOOST_CHECK_EQUAL(result["shielded_state_pin"].get_str(), closed_pin->GetHex());
+    BOOST_CHECK_EQUAL(
+        closed_pin->GetHex(),
+        "94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541");
 }
 
 BOOST_FIXTURE_TEST_CASE(chainstatemanager_force_shielded_state_after_pool_disable, ShieldedPoolClosedForcedStateSetup)
