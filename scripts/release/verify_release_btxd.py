@@ -203,12 +203,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Exit 0 on non-ELF/Mach-O inputs (unit-test stubs only).",
     )
     args = parser.parse_args(argv)
-    status = 0
+    failures = 0
     for raw in args.binaries:
         path = raw.expanduser().resolve()
         if not path.is_file():
             print(f"verify_release_btxd: FAIL missing {path}", file=sys.stderr)
-            status = 1
+            failures += 1
             continue
         kind = classify(path)
         if kind == "other":
@@ -216,17 +216,23 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"verify_release_btxd: SKIP non-binary {path}")
                 continue
             print(f"verify_release_btxd: FAIL {path}: not an ELF or Mach-O binary", file=sys.stderr)
-            status = 1
+            failures += 1
             continue
         try:
             how = verify_binary(path)
         except VerifyError as exc:
             print(f"verify_release_btxd: FAIL {exc}", file=sys.stderr)
-            status = 1
+            failures += 1
             continue
         print(f"verify_release_btxd: PASS {path} ({how})")
-    return status
+    if failures:
+        # Last line must be FAIL. A mixed btxd-FAIL + btx-cli-PASS used to
+        # end on PASS, which a wrapper that inspects the last line (or a
+        # pipeline without pipefail) treats as green — the 111/122 miss.
+        print(f"verify_release_btxd: FAIL {failures} binary(ies)", file=sys.stderr)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    sys.exit(main())

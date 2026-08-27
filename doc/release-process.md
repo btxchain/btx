@@ -333,6 +333,7 @@ false until the corresponding campaign bits are actually set.
     - `python3 test/util/btx_agent_setup_test.py`
     - `python3 test/util/publish_github_release_test.py`
     - `python3 test/util/sign_release_bundle_test.py`
+    - `python3 test/util/verify_release_btxd_test.py`
     - `python3 test/functional/feature_assumeutxo.py --configfile=<build>/test/config.ini --cachedir=<cache-dir>`
     - `python3 test/functional/rpc_btx_difficulty_health.py --configfile=<build>/test/config.ini`
     - targeted restart/snapshot coverage in `test_btx` such as `validation_tests` and `validation_chainstatemanager_tests`

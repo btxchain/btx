@@ -6,6 +6,8 @@ from __future__ import annotations
 import importlib.util
 import pathlib
 import struct
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -98,6 +100,64 @@ class VerifyReleaseBtxdTest(unittest.TestCase):
             with self.assertRaises(self.mod.VerifyError) as caught:
                 self.mod.verify_binary(path)
             self.assertIn("Homebrew", str(caught.exception))
+
+    def _write_03342_shaped_elf(self, path: pathlib.Path) -> None:
+        # ELF magic so classify() is linux; hidden-arg string without the
+        # ENABLE_ZMQ help text — the v0.33.3 / v0.33.4.2 CPU tarball shape.
+        path.write_bytes(b"\x7fELF" + b"\x00" * 12 + b"-zmqpubhashblock\x00")
+
+    def test_cli_exits_nonzero_on_03342_shaped_elf(self) -> None:
+        """The gate is decorative if FAIL prints and the process still exits 0."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            btxd = pathlib.Path(tmpdir) / "btxd"
+            self._write_03342_shaped_elf(btxd)
+            proc = subprocess.run(
+                [sys.executable, str(SCRIPT), str(btxd)],
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(
+                proc.returncode, 0,
+                f"FAIL must be a non-zero exit; stdout={proc.stdout!r} stderr={proc.stderr!r}",
+            )
+            self.assertIn(b"FAIL", proc.stderr)
+            self.assertIn(b"ENABLE_ZMQ help text", proc.stderr)
+            self.assertEqual(self.mod.main([str(btxd)]), 1)
+
+    def test_cli_mixed_btxd_fail_cli_pass_still_exits_nonzero(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            btxd = pathlib.Path(tmpdir) / "btxd"
+            cli = pathlib.Path(tmpdir) / "btx-cli"
+            self._write_03342_shaped_elf(btxd)
+            # Linux btx-cli is portability-only: an ELF with no ZMQ help is OK.
+            cli.write_bytes(b"\x7fELF" + b"\x00" * 16)
+            proc = subprocess.run(
+                [sys.executable, str(SCRIPT), str(btxd), str(cli)],
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(proc.returncode, 0, proc.stderr.decode())
+            combined = proc.stdout + proc.stderr
+            last = [ln for ln in combined.splitlines() if ln.strip()][-1]
+            self.assertIn(b"FAIL", last)
+            self.assertEqual(self.mod.main([str(btxd), str(cli)]), 1)
+
+    def test_cli_legacy_03342_cpu_tarball_exits_nonzero(self) -> None:
+        if not LEGACY_CPU.is_file():
+            self.skipTest("0.33.4.2 cpu tarball not on this host")
+        import tarfile
+
+        with tarfile.open(LEGACY_CPU) as archive, tempfile.TemporaryDirectory() as tmpdir:
+            archive.extract("btxd", tmpdir)
+            btxd = pathlib.Path(tmpdir) / "btxd"
+            proc = subprocess.run(
+                [sys.executable, str(SCRIPT), str(btxd)],
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(proc.returncode, 0, proc.stderr.decode())
+            self.assertIn(b"FAIL", proc.stderr)
+            self.assertIn(b"ENABLE_ZMQ help text", proc.stderr)
 
 
 if __name__ == "__main__":
