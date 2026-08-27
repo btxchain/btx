@@ -1516,7 +1516,9 @@ static constexpr int32_t ATTESTOR_DRIFT_YIELD_DEPTH{6};
  *  m_best_header asks for *new* headers; the HEADER_ONLY catch-up suffix is
  *  already on disk. Seed BestKnown from the signed frontier only on GPU
  *  or outbound attested archives (see SignedFrontierMaySeedBestKnownFromFrontier).
- *  A competing BestKnown (headers=191013 vs frontier) must be overwritten. */
+ *  The assignment site must still refuse to LOWER an already-higher peer
+ *  BestKnown (TrustedMirrorSeedRaisesBestKnown): a competing *lower*
+ *  BestKnown may be replaced, a higher one must not. */
 [[nodiscard]] inline bool SeedTrustedMirrorGpuBestKnownFromFrontier(
     bool signed_frontier_catch_up,
     bool best_known_usable_for_catch_up,
@@ -1972,6 +1974,59 @@ static constexpr auto GPU_RETAIN_ATTESTATION_RETRY{std::chrono::seconds{2}};
     if (!this_inbound) return false;
     return trusted_mirror && !this_peer_is_gpu_authority &&
            authority_only_inbound;
+}
+
+/** Compiled weak-subjectivity ceiling: last checkpoint vs highest AssumeUTXO
+ *  pin. A fresh mirror must be able to learn headers up to that height from
+ *  whoever actually serves them (PR 124 / MendeMatthias, 2026-08-26). */
+[[nodiscard]] inline int WeakSubjectivityBootstrapHeight(
+    int last_checkpoint_height,
+    int highest_assumeutxo_height)
+{
+    return last_checkpoint_height > highest_assumeutxo_height
+               ? last_checkpoint_height
+               : highest_assumeutxo_height;
+}
+
+/** Field 2026-08-26 (MendeMatthias / easyNode, v0.33.4.2): a fresh trusted
+ *  mirror at tip=0 dropped HEADERS from NODE_MATMUL_CONSENSUS peers because
+ *  ShouldIgnoreNonAuthorityInboundBlock treats HEADERS like BLOCK. Every
+ *  NODE_MATMUL_ATTESTATION_ARCHIVE peer then answered getheaders with zero
+ *  bytes, so the only offered headers were the ones this gate threw away.
+ *  loadtxoutset cannot rescue that: the snapshot base header must already
+ *  be in the index.
+ *
+ *  Authority rules are about which BODIES this node trusts, not about how
+ *  it learns the header chain. nMinimumChainWork and compiled checkpoints
+ *  still bound those headers. Do not use this exception for BLOCK,
+ *  CMPCTBLOCK, or BLOCKTXN. Once the active tip reaches the compiled
+ *  checkpoint / AssumeUTXO pin, HEADERS go back to the body-authority
+ *  rule. */
+[[nodiscard]] inline bool TrustedMirrorIgnoreNonAuthorityInboundHeaders(
+    bool ignore_non_authority_block,
+    int tip_height,
+    int weak_subjectivity_bootstrap_height)
+{
+    if (!ignore_non_authority_block) return false;
+    if (tip_height < weak_subjectivity_bootstrap_height) return false;
+    return true;
+}
+
+/** Same incident: MaybeSeedGpuSignedFrontierBestKnown used to assign
+ *  `state.pindexBestKnownBlock = seed` unconditionally. On a fresh mirror
+ *  BestKnown was null (headers dropped), so the helper's
+ *  best_known_usable_for_catch_up guard was false, and the seed was the
+ *  local signed-frontier height (2000). That pinned the download target:
+ *  peer_best_ahead == best_header_ahead, in_flight=0, stall logged once a
+ *  minute. Seeding a LOWER value than a peer's real BestKnown is never
+ *  correct; only raise, or fill a null. */
+[[nodiscard]] inline bool TrustedMirrorSeedRaisesBestKnown(
+    bool have_current_best_known,
+    int current_best_known_height,
+    int seed_height)
+{
+    if (!have_current_best_known) return true;
+    return seed_height > current_best_known_height;
 }
 
 /** Solicited catch-up bodies: GPU (either direction) or OUR outbound

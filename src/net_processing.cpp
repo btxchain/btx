@@ -2381,8 +2381,13 @@ private:
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
     /** Trusted-mirror archive or local signer: drop inbound bodies/headers
      *  from non-authority. Unlocked on purpose: the live stall was this
-     *  check taking cs_main. */
+     *  check taking cs_main. HEADERS during weak-subjectivity bootstrap
+     *  use ShouldIgnoreNonAuthorityInboundHeaders instead. */
     [[nodiscard]] bool ShouldIgnoreNonAuthorityInboundBlock(const CNode& pfrom) const;
+    /** Same inbound-authority rule as BLOCK, except HEADERS are accepted
+     *  while the active tip is still below the compiled checkpoint /
+     *  AssumeUTXO pin. Uses m_best_height so it does not take cs_main. */
+    [[nodiscard]] bool ShouldIgnoreNonAuthorityInboundHeaders(const CNode& pfrom) const;
     [[nodiscard]] std::chrono::microseconds CatchUpDownloadTimeoutForPeer(
         NodeId peer_id, const CNodeState& state) const
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
@@ -4538,10 +4543,11 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
                 oldest_inflight_age_s);
     };
 
-    // Inbound BLOCK/HEADERS stay GPU-only (ShouldIgnoreNonAuthorityInboundBlock).
-    // Catch-up GETDATA is GPU or OUR outbound attested archives only —
-    // never inbound miners, never inbound archive-bit peers, never a
-    // hung -connect with no VERSION.
+    // Inbound BLOCK stays GPU-only (ShouldIgnoreNonAuthorityInboundBlock).
+    // HEADERS during weak-subjectivity bootstrap are the exception; see
+    // ShouldIgnoreNonAuthorityInboundHeaders. Catch-up GETDATA is GPU or
+    // OUR outbound attested archives only — never inbound miners, never
+    // inbound archive-bit peers, never a hung -connect with no VERSION.
     const bool this_peer_frontier_source{
         PeerIsSignedFrontierBodySource(peer.m_id, *state, &peer)};
     const bool this_peer_gpu{PeerIsGpuAuthority(peer.m_id, *state)};
@@ -9006,7 +9012,9 @@ bool PeerManagerImpl::ShouldIgnoreNonAuthorityInboundBlock(const CNode& pfrom) c
 {
     // No cs_main. Taking the lock per miner addrv2/inv/headers pegged
     // msghand and froze GETDATA. Trusted mirrors and local signers both
-    // ignore unsolicited inbound BLOCK/HEADERS from non-authority peers.
+    // ignore unsolicited inbound BLOCK from non-authority peers. HEADERS
+    // during weak-subjectivity bootstrap use
+    // ShouldIgnoreNonAuthorityInboundHeaders instead.
     const bool authority_node{
         node::matmul_trusted::IsTrustedMirror() ||
         node::matmul_trusted::HasLocalSigner()};
@@ -9017,6 +9025,22 @@ bool PeerManagerImpl::ShouldIgnoreNonAuthorityInboundBlock(const CNode& pfrom) c
     return node::matmul_trusted::TrustedMirrorIgnoreNonAuthorityInboundBlock(
         /*trusted_mirror=*/true, this_gpu, /*authority_only_inbound=*/true,
         pfrom.IsInboundConn());
+}
+
+bool PeerManagerImpl::ShouldIgnoreNonAuthorityInboundHeaders(const CNode& pfrom) const
+{
+    // PR 124 / MendeMatthias 2026-08-26: a fresh trusted mirror at tip=0
+    // dropped inbound HEADERS from NODE_MATMUL_CONSENSUS peers, archives
+    // served zero header bytes, and MaybeSeedGpuSignedFrontierBestKnown
+    // then pinned BestKnown to the local signed-frontier height. Header
+    // acquisition during weak-subjectivity bootstrap is not a body-trust
+    // decision; BLOCK/CMPCTBLOCK stay on ShouldIgnoreNonAuthorityInboundBlock.
+    return node::matmul_trusted::TrustedMirrorIgnoreNonAuthorityInboundHeaders(
+        ShouldIgnoreNonAuthorityInboundBlock(pfrom),
+        m_best_height.load(std::memory_order_relaxed),
+        node::matmul_trusted::WeakSubjectivityBootstrapHeight(
+            m_chainparams.Checkpoints().GetHeight(),
+            m_chainparams.HighestAssumeutxoHeight()));
 }
 
 std::chrono::microseconds PeerManagerImpl::CatchUpDownloadTimeoutForPeer(
@@ -9196,6 +9220,25 @@ void PeerManagerImpl::MaybeSeedGpuSignedFrontierBestKnown(
                 state.m_matmul_attestation_archive ||
                     state.m_matmul_trusted_mirror,
                 state.m_starting_height, tip->nHeight))) {
+        return;
+    }
+    // Issue 124 / MendeMatthias 2026-08-26: do not assign BestKnown
+    // unconditionally. A fresh trusted mirror dropped non-authority HEADERS,
+    // BestKnown stayed null, and this seed was the local signed-frontier
+    // height (2000) while peers advertised 199300+. That pinned the download
+    // target forever (peer_best_ahead == best_header_ahead, in_flight=0,
+    // stall once a minute). Only fill a null or RAISE. Never pin a higher
+    // peer BestKnown down to a lower local frontier.
+    if (state.pindexBestKnownBlock != nullptr &&
+        seed->nHeight <= state.pindexBestKnownBlock->nHeight) {
+        return;
+    }
+    if (!node::matmul_trusted::TrustedMirrorSeedRaisesBestKnown(
+            state.pindexBestKnownBlock != nullptr,
+            state.pindexBestKnownBlock != nullptr
+                ? state.pindexBestKnownBlock->nHeight
+                : -1,
+            seed->nHeight)) {
         return;
     }
     state.pindexBestKnownBlock = seed;
@@ -14102,11 +14145,16 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         return;
     }
 
-    // Trusted-GPU mode: drop miner-delivered BLOCK/HEADERS/INV/CMPCTBLOCK
-    // before deserialize unless (a) GPU / outbound archive, (b) CONSENSUS
-    // miner INV/HEADERS/CMPCTBLOCK so archives can persist a unique lost
-    // twin for hidden GPU signers, or (c) a solicited GETDATA reply from
-    // that miner. Unsolicited inbound miner BLOCK floods stay dropped.
+    // Trusted-GPU mode: drop miner-delivered BLOCK/INV/CMPCTBLOCK before
+    // deserialize unless (a) GPU / outbound archive, (b) CONSENSUS miner
+    // INV/HEADERS/CMPCTBLOCK so archives can persist a unique lost twin
+    // for hidden GPU signers, or (c) a solicited GETDATA reply from that
+    // miner. HEADERS are not a body-trust decision: during weak-subjectivity
+    // bootstrap (tip below checkpoint / AssumeUTXO) they use
+    // ShouldIgnoreNonAuthorityInboundHeaders so a fresh mirror can learn the
+    // header chain when archives answer getheaders with zero bytes
+    // (PR 124 / MendeMatthias 2026-08-26). Unsolicited inbound miner BLOCK
+    // floods stay dropped.
     const bool ignore_non_gpu_inbound{
         ShouldIgnoreNonAuthorityInboundBlock(pfrom)};
     const bool this_gpu{
@@ -14156,10 +14204,15 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             this_gpu, pfrom.IsInboundConn(),
             pfrom.HasArchiveOrMirrorService()) ||
         ingest_inbound_miner_announce || ingest_inbound_miner_block};
-    if (!accept_catchup_ingest &&
-        (msg_type == NetMsgType::BLOCK || msg_type == NetMsgType::HEADERS ||
-         msg_type == NetMsgType::CMPCTBLOCK || msg_type == NetMsgType::BLOCKTXN ||
-         msg_type == NetMsgType::INV)) {
+    const bool drop_headers_before_deserialize{
+        msg_type == NetMsgType::HEADERS &&
+        ShouldIgnoreNonAuthorityInboundHeaders(pfrom) &&
+        !accept_catchup_ingest};
+    const bool drop_bodies_before_deserialize{
+        !accept_catchup_ingest &&
+        (msg_type == NetMsgType::BLOCK || msg_type == NetMsgType::CMPCTBLOCK ||
+         msg_type == NetMsgType::BLOCKTXN || msg_type == NetMsgType::INV)};
+    if (drop_headers_before_deserialize || drop_bodies_before_deserialize) {
         static std::atomic<bool> logged_ignore{false};
         if (!logged_ignore.exchange(true)) {
             LogInfo("Ignoring non-authority inbound %s (GPU attestors are the only inbound block source, peer=%d)\n",
@@ -17250,7 +17303,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             return;
         }
 
-        if (ShouldIgnoreNonAuthorityInboundBlock(pfrom) &&
+        if (ShouldIgnoreNonAuthorityInboundHeaders(pfrom) &&
             !node::matmul_trusted::TrustedMirrorMayAcceptPeerBlockBody(
                 pfrom.IsManualConn() ||
                     pfrom.HasPermission(NetPermissionFlags::NoBan),

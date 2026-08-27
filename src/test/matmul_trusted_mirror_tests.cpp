@@ -1724,6 +1724,44 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         true, false, true, /*this_inbound=*/false));
     BOOST_CHECK(TrustedMirrorIgnoreNonAuthorityInboundBlock(
         true, false, true, /*this_inbound=*/true));
+    using node::matmul_trusted::WeakSubjectivityBootstrapHeight;
+    using node::matmul_trusted::TrustedMirrorIgnoreNonAuthorityInboundHeaders;
+    using node::matmul_trusted::TrustedMirrorSeedRaisesBestKnown;
+    // Mainnet: checkpoint 186000, AssumeUTXO 199299 → ceiling 199299.
+    BOOST_CHECK_EQUAL(WeakSubjectivityBootstrapHeight(186000, 199299), 199299);
+    BOOST_CHECK_EQUAL(WeakSubjectivityBootstrapHeight(186000, 0), 186000);
+    BOOST_CHECK_EQUAL(WeakSubjectivityBootstrapHeight(0, 61010), 61010);
+    BOOST_CHECK_EQUAL(
+        WeakSubjectivityBootstrapHeight(
+            Params().Checkpoints().GetHeight(),
+            Params().HighestAssumeutxoHeight()),
+        199299);
+    // Fresh mirror tip=0 must ingest HEADERS (the 2026-08-26 deadlock).
+    BOOST_CHECK(!TrustedMirrorIgnoreNonAuthorityInboundHeaders(
+        /*ignore_non_authority_block=*/true, /*tip_height=*/0,
+        /*weak_subjectivity_bootstrap_height=*/199299));
+    BOOST_CHECK(!TrustedMirrorIgnoreNonAuthorityInboundHeaders(
+        true, /*tip_height=*/-1, 199299));
+    BOOST_CHECK(!TrustedMirrorIgnoreNonAuthorityInboundHeaders(
+        true, /*tip_height=*/199298, 199299));
+    BOOST_CHECK(TrustedMirrorIgnoreNonAuthorityInboundHeaders(
+        true, /*tip_height=*/199299, 199299));
+    BOOST_CHECK(TrustedMirrorIgnoreNonAuthorityInboundHeaders(
+        true, /*tip_height=*/199300, 199299));
+    BOOST_CHECK(!TrustedMirrorIgnoreNonAuthorityInboundHeaders(
+        /*ignore_non_authority_block=*/false, /*tip_height=*/0, 199299));
+    BOOST_CHECK(!TrustedMirrorIgnoreNonAuthorityInboundHeaders(
+        false, /*tip_height=*/199300, 199299));
+    // Null BestKnown may be filled; a higher peer BestKnown must not be
+    // pinned down to the local signed-frontier seed.
+    BOOST_CHECK(TrustedMirrorSeedRaisesBestKnown(
+        /*have_current_best_known=*/false, /*current_best_known_height=*/-1,
+        /*seed_height=*/2000));
+    BOOST_CHECK(!TrustedMirrorSeedRaisesBestKnown(
+        /*have_current_best_known=*/true, /*current_best_known_height=*/199300,
+        /*seed_height=*/2000));
+    BOOST_CHECK(TrustedMirrorSeedRaisesBestKnown(true, /*current=*/100, 2000));
+    BOOST_CHECK(!TrustedMirrorSeedRaisesBestKnown(true, /*current=*/2000, 2000));
     using node::matmul_trusted::MayServeGetHeaders;
     BOOST_CHECK(MayServeGetHeaders(
         /*download_permission=*/true, /*tip_has_quorum=*/false,

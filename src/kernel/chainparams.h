@@ -142,6 +142,17 @@ public:
     {
         return FindFirst(m_assumeutxo_data, [&](const auto& d) { return d.blockhash == blockhash; });
     }
+    /** Highest compiled AssumeUTXO pin, or 0 when none. Paired with
+     *  Checkpoints().GetHeight() as the weak-subjectivity header-bootstrap
+     *  ceiling (see TrustedMirrorIgnoreNonAuthorityInboundHeaders). */
+    int HighestAssumeutxoHeight() const
+    {
+        int height{0};
+        for (const auto& snapshot : m_assumeutxo_data) {
+            if (snapshot.height > height) height = snapshot.height;
+        }
+        return height;
+    }
     bool AssumeutxoHashMatches(const AssumeutxoData& data, const uint256& actual_hash) const
     {
         return (m_is_mockable_chain && data.hash_serialized == AssumeutxoHash{uint256{}}) ||

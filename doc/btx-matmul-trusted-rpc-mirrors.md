@@ -238,11 +238,69 @@ coverage. It is not production closure evidence and must not be relabeled as
 such. Generate production evidence only after source, activation parameters,
 and final binaries are frozen.
 
-For fault tolerance on top of the compromise floor, deploy three independent
+For fault tolerance on the compromise floor, deploy three independent
 archive signers and configure the mirrors with all three public keys, keeping
 `matmultrustedthreshold=2`. The mirrors can connect to all providers; with
 2-of-3 one provider being offline no longer stalls the mirrors, and one key
 being compromised still does not independently decide a verdict.
+
+## Bootstrapping a new mirror
+
+A fresh `-matmulvalidation=trusted` datadir used to park at height 0. That
+was a code deadlock, not an operator-procedure requirement. Found and
+reproduced by MendeMatthias (easyNode / easyBTX) on 2026-08-26 against
+v0.33.4.2 (`c892f1a7`), with fourteen peers connected:
+
+- Every `NODE_MATMUL_ATTESTATION_ARCHIVE` peer answered `getheaders` with
+  **zero** header bytes, including one that also advertised
+  `NODE_MATMUL_CONSENSUS`.
+- The only peers that served headers advertised `NODE_MATMUL_CONSENSUS`
+  and no archive bit (2000-header batches). Those headers were then
+  dropped as non-authority.
+- `MaybeSeedGpuSignedFrontierBestKnown` assigned
+  `state.pindexBestKnownBlock = seed` unconditionally, pinning BestKnown
+  to the local signed-frontier height (2000) while connected peers
+  advertised 199300+. The node logged this once a minute, indefinitely:
+
+```text
+Seeded GPU peer=7 best-known to signed frontier height=2000 (tip=0 HEADER_ONLY catch-up)
+Block fetch stall detected: tip=0 best_header_ahead=2000 peer_best_ahead=2000 in_flight=0 peers_downloading=0
+```
+
+`loadtxoutset` cannot break that tie. The AssumeUTXO base header
+(`f12a27d0…` at height 199299) must already be in the index:
+
+```text
+Unable to load UTXO snapshot: The base block header
+(f12a27d01a4b5a1710efa4497adf6f4c7da311d1c7b4f6a79cbf80f0b3110ec5)
+must appear in the headers chain.
+```
+
+0.34 fixes both halves. While the active tip is below
+`max(last checkpoint, highest compiled AssumeUTXO pin)` (mainnet
+186000 / 199299 → 199299), inbound **HEADERS** are accepted from any
+peer. That is how a fresh node learns the header chain when archives
+serve nothing. **BLOCK / CMPCTBLOCK / BLOCKTXN stay authority-only** —
+header acquisition is not a body-trust decision. The frontier seed
+assigns BestKnown only when it *raises* the peer's target; it never
+pins a higher advertised height down to the local seed.
+
+You do not need an operator-controlled archive to bootstrap headers.
+An archive you control is still the right body source once headers
+exist, and the `connect=` example above still applies for that. Public
+header supply plus `loadtxoutset` of the compiled 199299 snapshot is
+enough to get a mirror onto the attested chain.
+
+If you still see the stall signatures above, you are on a pre-0.34
+binary (or the tip is already past the compiled pin and a different
+bug is in play).
+
+Switching `-matmulvalidation` between `consensus` and `trusted` does
+not by itself change the persisted replay authority context, so it
+does not trigger the reindex path described under **Persistence and
+key rotation**. That context follows the configured signer set:
+measured byte-identical in both modes for the same three keys on
+v0.33.4.2. Changing the signer set still does change it.
 
 ## Lifecycle
 
