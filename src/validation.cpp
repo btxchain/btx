@@ -17667,6 +17667,19 @@ bool ChainstateManager::EstablishesClosedShieldedState(const CBlockIndex* tip) c
 std::optional<uint256> ChainstateManager::ComputeClosedShieldedSnapshotStatePin() const
 {
     AssertLockHeld(::cs_main);
+    // Mainnet freeze pin is the compiled assumeutxo shielded_state_commitment
+    // at nShieldedPoolDisableHeight (94343b76… from 189307 through 199300).
+    // Default-node dumps have no live stores; hashing a synthetic empty tree
+    // (e802781d…) would disagree with loadtxoutset and with dumps taken while
+    // -shieldedstate=1 still had historical LevelDB open.
+    const int32_t disable{GetConsensus().nShieldedPoolDisableHeight};
+    if (disable != std::numeric_limits<int32_t>::max()) {
+        if (const auto au = GetParams().AssumeutxoForHeight(disable)) {
+            if (!au->shielded_state_commitment.IsNull()) {
+                return au->shielded_state_commitment;
+            }
+        }
+    }
     const shielded::ShieldedMerkleTree empty_tree{
         shielded::ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY};
     const shielded::registry::ShieldedAccountRegistryState empty_registry;

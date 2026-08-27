@@ -2076,7 +2076,10 @@ public:
     [[nodiscard]] bool EstablishesClosedShieldedState(const CBlockIndex* tip) const
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
-    /** Consensus pin for the closed (empty, post-disable) shielded section. */
+    /** Consensus pin for the closed (empty, post-disable) shielded section.
+     *  Mainnet returns the compiled assumeutxo pin at nShieldedPoolDisableHeight
+     *  so default-node dumps match loadtxoutset. Unpinned networks hash the
+     *  empty frozen section. */
     [[nodiscard]] std::optional<uint256> ComputeClosedShieldedSnapshotStatePin() const
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 

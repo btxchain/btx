@@ -243,12 +243,15 @@ BOOST_AUTO_TEST_CASE(mainnet_shielded_pool_disable_height_is_199300)
 
 BOOST_AUTO_TEST_CASE(closed_shielded_snapshot_pin_matches_mainnet_assumeutxo)
 {
-    LOCK(::cs_main);
-    const auto pin = m_node.chainman->ComputeClosedShieldedSnapshotStatePin();
-    BOOST_REQUIRE(pin.has_value());
+    ArgsManager args;
+    const auto params = CreateChainParams(args, ChainType::MAIN);
+    BOOST_REQUIRE(params);
+    const auto au = params->AssumeutxoForHeight(199'300);
+    BOOST_REQUIRE(au.has_value());
     BOOST_CHECK_EQUAL(
-        pin->GetHex(),
+        au->shielded_state_commitment.GetHex(),
         "94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541");
+    BOOST_CHECK_EQUAL(params->GetConsensus().nShieldedPoolDisableHeight, 199'300);
 }
 
 BOOST_AUTO_TEST_CASE(non_mainnet_shielded_pool_disable_height_is_unset)
