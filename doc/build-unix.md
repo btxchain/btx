@@ -232,9 +232,13 @@ Optional port mapping library (see: `-DWITH_MINIUPNPC=ON`):
 
     sudo apt install libminiupnpc-dev
 
-ZMQ-enabled binaries are compiled with `-DWITH_ZMQ=ON` and require the following dependency:
+ZMQ is on by default (`-DWITH_ZMQ=ON`) and requires:
 
     sudo apt-get install libzmq3-dev
+
+Release `btxd` binaries must pass `python3 scripts/release/verify_release_btxd.py <btxd>`
+(`ldd` must show `libzmq`). A binary that still contains `-zmqpubhashblock` strings
+but does not link `libzmq` is the 0.33.4.2 failure shape and must not ship.
 
 User-Space, Statically Defined Tracing (USDT) dependencies:
 

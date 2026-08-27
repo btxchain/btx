@@ -403,7 +403,7 @@ bool BuildConstraintSystemV1(
         std::move(expected_multiplicity));
     out.preprocessed_pin_ood = true;
 
-    for (const auto [value, expected] :
+    for (const auto& pin :
          std::array<std::pair<uint32_t, uint32_t>, 5>{{
              {layout.edge_role, layout.expected_role},
              {layout.edge_event, layout.expected_event},
@@ -413,6 +413,8 @@ bool BuildConstraintSystemV1(
              {layout.edge_multiplicity,
               layout.expected_multiplicity},
          }}) {
+        const uint32_t value{pin.first};
+        const uint32_t expected{pin.second};
         AddConstraint(
             out,
             "stage3.v14_fused.edge_metadata",

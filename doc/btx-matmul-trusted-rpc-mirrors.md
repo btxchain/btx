@@ -59,12 +59,39 @@ height, and header hash are otherwise unchanged.
 Signatures use canonical compressed secp256k1 keys and strict DER/low-S ECDSA.
 The store verifies the statement against the local block index and configured
 chain before counting it. A signer contributes at most one vote to a block,
-and quorum is `M` distinct members of the configured `N` keys.
+and quorum is `M` distinct members of the configured `N` keys. That pin
+path is **always sufficient**.
 
-Wrong-chain, wrong-height, wrong-hash, wrong-authority-context, non-member,
-duplicate, malformed, and invalid signatures do not count. Relayers have no
-authority: an attestation can arrive from any peer because only the configured
-signature matters.
+When `-matmulopenattestors=1` (default 0; opt-in directory), additional
+GPUs may gossip valid ExactReplay statements with their own keys. Those
+statements are **heard**, not authority. After a key co-signs a pin-quorum
+hash it is listed as admitted in `getmatmulattestors` so operators can
+choose to add it to `-matmultrustedpubkey` (Phase 2). Admitted keys do not
+SkipExactReplay and do not move signed-frontier fork choice. Equivocation
+freezes an open key in that directory.
+
+ExactReplay skip is a 2×2 of `(trusted_mirror, pin_quorum_covers_hash)`:
+
+| trusted mirror | pin quorum | Skip ExactReplay |
+|---|---|---|
+| no | no | replay |
+| no | yes | replay (consensus never skips because a pin signed) |
+| yes | no | replay (unattested hashes still wait/replay) |
+| yes | yes | skip (CPU archive; weak subjectivity) |
+
+`HistoricalExactReplayCoveredByPinQuorum(trusted_mirror, direct_quorum,
+frontier_covers)` may skip CUDA regen when serving GETMMATTEST: any role
+on direct pin quorum, trusted mirrors also on signed-frontier ancestry.
+That is a serve budget, not validity; skip never writes
+`BLOCK_EXACT_REPLAY_VERIFIED`. FMWC attested steering and getblocktemplate
+attested-race refusal apply to trusted mirrors only. Consensus miners mine
+the ExactReplay-valid tip. `FindUniqueCompetingAttestedIndex` is
+trusted-mirror or local-signer recovery only.
+
+Wrong-chain, wrong-height, wrong-hash, wrong-authority-context, non-member
+(when open attestors are off), duplicate, malformed, and invalid signatures
+do not count. Relayers have no authority: an attestation can arrive from any
+peer because only the signature and local admission rules matter.
 
 Operators should compare `attestation_version` and
 `replay_authority_context` from `getmatmultrustedstatus` across every archive
@@ -97,25 +124,26 @@ Trusted mode is accepted on mainnet only with a valid signer set and threshold,
 and only for RC Profile 1. Profile 2 statements cannot be produced or consumed
 by this protocol. `economic` and `spv` remain prohibited on mainnet.
 
-**A single-key (1-of-1) mainnet mirror is supported and starts, but the node
-warns loudly at startup. Two or more distinct signers with
-`-matmultrustedthreshold=2` is strongly recommended.** Above the Profile-1 activation height
-the quorum does not accelerate the MatMul proof-of-work check, it replaces it,
-so a 1-of-1 mirror would make one key that node's sole proof-of-work authority:
-whoever holds or steals it could make the node accept MatMul-invalid blocks,
-with no second signer able to disagree. Repeating the same public key is
-rejected on every chain, since a repeated key raises N without adding an
-independent authority. Test networks (testnet/signet/regtest) still permit
-1-of-1 for rehearsals and functional tests.
+**0.34 refuses a single-key (1-of-1 or 1-of-N) mainnet trusted mirror** unless
+the operator passes `-allowsinglekeytrustedmirror=1`. Two distinct signers
+with `-matmultrustedthreshold=2` is the production floor. Above the Profile-1
+activation height the quorum does not accelerate the MatMul proof-of-work
+check, it replaces it, so a 1-of-1 mirror would make one key that node's sole
+proof-of-work authority: whoever holds or steals it could make the node accept
+MatMul-invalid blocks, with no second signer able to disagree. Repeating the
+same public key is rejected on every chain, since a repeated key raises N
+without adding an independent authority. Test networks (testnet/signet/regtest)
+still permit 1-of-1 for rehearsals and functional tests. Consensus+pin keeps
+1-of-1 as telemetry (ExactReplay is unchanged). See
+[`design/0.34-operator-safeguards.md`](design/0.34-operator-safeguards.md).
 
 ## Example: two GPU archives and three HA RPC mirrors
 
 Two independent archives are the recommended minimum production topology, not
-a protocol-enforced mainnet floor. A supported 1-of-1 mirror is a single point
-of proof-of-work authority: whoever holds or steals that key can make that
-mirror accept MatMul-invalid blocks with no second signer to disagree. That is
-the operator's risk to take knowingly, which is why the node warns rather than
-refusing to start.
+a protocol-enforced mainnet floor. A 1-of-1 mirror is a single point of
+proof-of-work authority: whoever holds or steals that key can make that
+mirror accept MatMul-invalid blocks with no second signer to disagree.
+0.34 refuses that topology on mainnet unless `-allowsinglekeytrustedmirror=1`.
 
 Generate a dedicated online attestation key per archive. Put each WIF on its
 own GPU archive in a permission-restricted file. Distribute only the compressed
@@ -210,11 +238,69 @@ coverage. It is not production closure evidence and must not be relabeled as
 such. Generate production evidence only after source, activation parameters,
 and final binaries are frozen.
 
-For fault tolerance on top of the compromise floor, deploy three independent
+For fault tolerance on the compromise floor, deploy three independent
 archive signers and configure the mirrors with all three public keys, keeping
 `matmultrustedthreshold=2`. The mirrors can connect to all providers; with
 2-of-3 one provider being offline no longer stalls the mirrors, and one key
 being compromised still does not independently decide a verdict.
+
+## Bootstrapping a new mirror
+
+A fresh `-matmulvalidation=trusted` datadir used to park at height 0. That
+was a code deadlock, not an operator-procedure requirement. Found and
+reproduced by MendeMatthias (easyNode / easyBTX) on 2026-08-26 against
+v0.33.4.2 (`c892f1a7`), with fourteen peers connected:
+
+- Every `NODE_MATMUL_ATTESTATION_ARCHIVE` peer answered `getheaders` with
+  **zero** header bytes, including one that also advertised
+  `NODE_MATMUL_CONSENSUS`.
+- The only peers that served headers advertised `NODE_MATMUL_CONSENSUS`
+  and no archive bit (2000-header batches). Those headers were then
+  dropped as non-authority.
+- `MaybeSeedGpuSignedFrontierBestKnown` assigned
+  `state.pindexBestKnownBlock = seed` unconditionally, pinning BestKnown
+  to the local signed-frontier height (2000) while connected peers
+  advertised 199300+. The node logged this once a minute, indefinitely:
+
+```text
+Seeded GPU peer=7 best-known to signed frontier height=2000 (tip=0 HEADER_ONLY catch-up)
+Block fetch stall detected: tip=0 best_header_ahead=2000 peer_best_ahead=2000 in_flight=0 peers_downloading=0
+```
+
+`loadtxoutset` cannot break that tie. The AssumeUTXO base header
+(`f12a27d0…` at height 199299) must already be in the index:
+
+```text
+Unable to load UTXO snapshot: The base block header
+(f12a27d01a4b5a1710efa4497adf6f4c7da311d1c7b4f6a79cbf80f0b3110ec5)
+must appear in the headers chain.
+```
+
+0.34 fixes both halves. While the active tip is below
+`max(last checkpoint, highest compiled AssumeUTXO pin)` (mainnet
+186000 / 199299 → 199299), inbound **HEADERS** are accepted from any
+peer. That is how a fresh node learns the header chain when archives
+serve nothing. **BLOCK / CMPCTBLOCK / BLOCKTXN stay authority-only** —
+header acquisition is not a body-trust decision. The frontier seed
+assigns BestKnown only when it *raises* the peer's target; it never
+pins a higher advertised height down to the local seed.
+
+You do not need an operator-controlled archive to bootstrap headers.
+An archive you control is still the right body source once headers
+exist, and the `connect=` example above still applies for that. Public
+header supply plus `loadtxoutset` of the compiled 199299 snapshot is
+enough to get a mirror onto the attested chain.
+
+If you still see the stall signatures above, you are on a pre-0.34
+binary (or the tip is already past the compiled pin and a different
+bug is in play).
+
+Switching `-matmulvalidation` between `consensus` and `trusted` does
+not by itself change the persisted replay authority context, so it
+does not trigger the reindex path described under **Persistence and
+key rotation**. That context follows the configured signer set:
+measured byte-identical in both modes for the same three keys on
+v0.33.4.2. Changing the signer set still does change it.
 
 ## Lifecycle
 
@@ -250,10 +336,13 @@ validation provenance, never inferred from a successful contextual check.
 
 The mirror's attestation store and replay memo are deliberately process-local.
 The block index may retain
-`BLOCK_TRUSTED_REPLAY_ATTESTED` for operator audit, but that bit is never read
-as authority after restart. New blocks, and historical blocks that validation
-actually revisits, must fetch/import signatures satisfying the current signer
-set and threshold.
+`BLOCK_TRUSTED_REPLAY_ATTESTED` for operator audit **and** (on a trusted
+mirror only) as the in-process authenticated-chainwork bit for hashes the
+current pin covers. Consensus miners never persist that bit; they write
+`BLOCK_EXACT_REPLAY_VERIFIED` after local ExactReplay. After restart the
+trusted bit is never read as authority. New blocks, and historical blocks that
+validation actually revisits, must fetch/import signatures satisfying the
+current signer set and threshold.
 
 Already-connected `BLOCK_VALID_SCRIPTS` chainstate is not automatically
 replayed merely because the process restarted. Therefore signer/threshold
@@ -316,6 +405,14 @@ without treating the referenced block as invalid.
 - If a GPU/provider is unhealthy, stop archive attestation service until the
   validator again completes authoritative ExactReplay. Never sign from a
   trusted mirror or from a device failure.
+- **Emergency hijack (manual):** `-matmulattestationblocklist=<hex>` at
+  start, or `addmatmulattestationblocklist` at runtime, cuts a compromised
+  pin or pool key out of attestation authority without a pin re-roll.
+  Fail-closed: the node refuses a block that would leave fewer than M
+  unblocked pin members. There is no auto-ban from peer counts, heard
+  volume, or open-attestor majority (those are Sybil). Runtime adds persist
+  across restart; unblocking a persisted key is an operator edit of the
+  durable record, not an RPC.
 - If mirrors stall, recover or replace an archive signer, reconnect providers,
   or import a bundle. Missing quorum is retryable and source-neutral.
 - To regain independent validation, restart a node with

@@ -49,6 +49,12 @@ auto consteval_ctor(auto&& input) { return input; }
 
 static constexpr int32_t BTX_SHIELDED_SUNSET_HEIGHT{125'000};
 static constexpr int32_t BTX_SHIELDED_POOL_CREDIT_DISABLE_HEIGHT{BTX_SHIELDED_SUNSET_HEIGHT};
+// 0.34: close the shielded pool at the live tip. Operator set this to
+// 199300 (pro6000 tip at freeze). Ingress has been consensus-disabled
+// since sunset/128000; egress is already zero. Historical blocks below
+// this height still validate. At/after it both directions are invalid
+// and nodes skip shielded state unless -shieldedstate=1.
+static constexpr int32_t BTX_SHIELDED_POOL_DISABLE_HEIGHT{199'300};
 static constexpr int32_t BTX_SHIELDED_DIRECT_SEND_PUBLIC_FLOW_DISABLE_HEIGHT{128'000};
 // Future consensus-bundle activation point for post-sunset zero-output V2_SEND
 // exact exits. Keep disabled until the release that coordinates this with the
@@ -880,6 +886,7 @@ public:
         consensus.nShieldedBridgeTagActivationHeight = 61'000;
         consensus.nShieldedSmileRiceCodecDisableHeight = 61'000;
         consensus.nShieldedMatRiCTDisableHeight = 61'000;
+        consensus.nShieldedPoolDisableHeight = BTX_SHIELDED_POOL_DISABLE_HEIGHT;
         consensus.nShieldedSpendPathRecoveryActivationHeight = 88'000;
         consensus.nShieldedPQ128UpgradeHeight = std::numeric_limits<int32_t>::max();
         consensus.nShieldedPoolCreditDisableHeight = BTX_SHIELDED_POOL_CREDIT_DISABLE_HEIGHT;
@@ -915,7 +922,13 @@ public:
         // Mainnet anchor refreshed on 2026-08-04 at height 179'000 from a
         // synced archival node so stale history below the current public
         // release floor is rejected quickly.
-        // Refreshed to the work at height 186000, the new checkpoint anchor.
+        // Refreshed to the work at height 186000, the current checkpoint
+        // anchor. That height has drifted ~13k behind the live tip (was
+        // ~300 when added). Refresh on the next release cadence: a hash
+        // ~100–300 behind a settled tip (beyond park_depth 6 / finality
+        // 72). Do not checkpoint the EncDr stall-recovery flag day
+        // (199299) while it is still in the live tip band. nMinimumChainWork
+        // / defaultAssumeValid stay keyed to the same checkpoint until then.
         consensus.nMinimumChainWork = uint256{"00000000000000000000000000000000000000000000000000030b4f85e66df7"};
         // Assume signatures valid up to the same anchored block to speed sync.
         consensus.defaultAssumeValid = uint256{"0a51fccfd75d2051e94be1a8cc5abff8b86ac53d0cc134680f286fe769aa2129"};
@@ -967,16 +980,23 @@ public:
         fDefaultConsistencyChecks = false;
         m_is_mockable_chain = false;
 
-        // Live bootstrap DNS seeds for mainnet peer discovery. Keep these as
-        // DNS names, not hard-coded IPs, so archive-node rotation does not
-        // require a binary update.
+        // Live bootstrap DNS names for mainnet peer *introduction*. In 0.34
+        // these hosts should run -matmulvalidation=relay (ADDR only). They
+        // are not chain oracles and must not be GPU attestors. Keep DNS
+        // names, not hard-coded IPs, so rotation does not require a binary
+        // update. Never list the canonical signer.
+        // Operator checklist (not this binary): 6–8 seeds across distinct
+        // ASNs, many A/AAAA per seeder, regenerate chainparamsseeds.h from
+        // a crawl (contrib/seeds). Do not invent seed operators here.
         vSeeds.clear();
         vSeeds.emplace_back("node.btx.dev.");
         vSeeds.emplace_back("node.btxchain.org.");
         vSeeds.emplace_back("node.btx.tools.");
 
-        // Fixed seeds mirror the public BTX infrastructure endpoints so nodes
-        // can still bootstrap if DNS seed lookups are unavailable.
+        // Fixed seeds are a DNS-failure fallback. They must be regenerated
+        // from an ASN-diverse crawl (contrib/seeds); a two-entry subset of
+        // the same DNS set is not a fallback. Do not add unpublished IPs
+        // here.
         vFixedSeeds = std::vector<uint8_t>{std::begin(chainparams_seed_main), std::end(chainparams_seed_main)};
 
         checkpointData = {
@@ -991,15 +1011,23 @@ public:
                 {185000, uint256{"f03a7af21d20f67a5efecfb8b0b3e5e1b91efa208b385419470c59450f2afb8b"}},
                 // Post-activation anchor. A competing branch diverges from the
                 // canonical chain at ~185544, above the 185000 checkpoint, and
-                // is ~800 blocks long. nMaxReorgDepth (12) already stops any
-                // running node being reorged onto it, but that rule says
+                // is ~800 blocks long. EMERGENCY park_depth 6 already stops any
+                // running default node being reorged onto it (nMaxReorgDepth
+                // is a prune-retention window, not a fork-choice cap), but
+                // that rule says
                 // nothing about a node syncing from scratch, which simply
                 // follows the heaviest valid chain it is offered. Without an
                 // anchor above the divergence a fresh sync could settle on the
                 // competing branch. Checkpointing 186000 rejects anything
-                // forking below it, closing that window; the height is ~300
-                // blocks behind the tip, far beyond nMaxReorgDepth, so it
-                // cannot pin a block that might still legitimately reorg.
+                // forking below it, closing that window. When added, the
+                // height was ~300 blocks behind the tip, far beyond
+                // park_depth 6, so it cannot pin a block that might still
+                // legitimately reorg. The live tip has since walked ~13k
+                // past this anchor; IBD above 186000 is work-only until the
+                // next release refreshes the checkpoint (see nMinimumChainWork
+                // comment). assumeutxo 199299 is the UTXO snapshot pin, not
+                // a header checkpoint — do not copy that hash here while it
+                // sits in the live tip band.
                 {186000, uint256{"0a51fccfd75d2051e94be1a8cc5abff8b86ac53d0cc134680f286fe769aa2129"}},
             }
         };
@@ -1374,6 +1402,7 @@ public:
         consensus.nShieldedBridgeTagActivationHeight = 61'000;
         consensus.nShieldedSmileRiceCodecDisableHeight = 61'000;
         consensus.nShieldedMatRiCTDisableHeight = 61'000;
+        consensus.nShieldedPoolDisableHeight = std::numeric_limits<int32_t>::max();
         consensus.nShieldedSpendPathRecoveryActivationHeight = 88'000;
         consensus.nShieldedPQ128UpgradeHeight = std::numeric_limits<int32_t>::max();
         consensus.nShieldedPoolCreditDisableHeight = BTX_SHIELDED_POOL_CREDIT_DISABLE_HEIGHT;
@@ -1567,6 +1596,7 @@ public:
         consensus.nShieldedBridgeTagActivationHeight = 61'000;
         consensus.nShieldedSmileRiceCodecDisableHeight = 61'000;
         consensus.nShieldedMatRiCTDisableHeight = 61'000;
+        consensus.nShieldedPoolDisableHeight = std::numeric_limits<int32_t>::max();
         consensus.nShieldedSpendPathRecoveryActivationHeight = 88'000;
         consensus.nShieldedPQ128UpgradeHeight = std::numeric_limits<int32_t>::max();
         consensus.nShieldedPoolCreditDisableHeight = BTX_SHIELDED_POOL_CREDIT_DISABLE_HEIGHT;
@@ -1795,6 +1825,7 @@ public:
         consensus.nShieldedBridgeTagActivationHeight = 61'000;
         consensus.nShieldedSmileRiceCodecDisableHeight = 61'000;
         consensus.nShieldedMatRiCTDisableHeight = 61'000;
+        consensus.nShieldedPoolDisableHeight = std::numeric_limits<int32_t>::max();
         consensus.nShieldedSpendPathRecoveryActivationHeight = 88'000;
         consensus.nShieldedPQ128UpgradeHeight = std::numeric_limits<int32_t>::max();
         consensus.nShieldedPoolCreditDisableHeight = BTX_SHIELDED_POOL_CREDIT_DISABLE_HEIGHT;
@@ -2252,6 +2283,8 @@ public:
             opts.shielded_smile_rice_codec_disable_height.value_or(0);  // Activate at genesis for instant regtest
         consensus.nShieldedMatRiCTDisableHeight =
             opts.shielded_matrict_disable_height.value_or(0);  // Activate at genesis for instant regtest
+        consensus.nShieldedPoolDisableHeight =
+            opts.shielded_pool_disable_height.value_or(std::numeric_limits<int32_t>::max());
         consensus.nShieldedSpendPathRecoveryActivationHeight =
             opts.shielded_spend_path_recovery_activation_height.value_or(0);  // Activate at genesis for instant regtest
         consensus.nShieldedC002ActivationHeight =
@@ -2384,6 +2417,7 @@ public:
             opts.shielded_bridge_tag_activation_height.has_value() ||
             opts.shielded_smile_rice_codec_disable_height.has_value() ||
             opts.shielded_matrict_disable_height.has_value() ||
+            opts.shielded_pool_disable_height.has_value() ||
             opts.shielded_spend_path_recovery_activation_height.has_value() ||
             opts.shielded_c002_activation_height.has_value() ||
             opts.shielded_unshield_velocity_activation_height.has_value() ||
@@ -2462,7 +2496,7 @@ public:
         if (!custom_consensus) {
             m_assumeutxo_data = {
                 {
-                    // Deterministic TestChain100Setup Phase-A functional-harness
+                    // Deterministic TestChain100Setup Phase-B unit-test
                     // snapshot metadata at height 110.
                     .height = 110,
                     .hash_serialized = AssumeutxoHash{uint256{"c35580bfd4f6c2ab69a8b1ac446962e5aacb164dc13e237867bd2170b91d7c98"}},
@@ -2583,6 +2617,7 @@ public:
         consensus.nShieldedBridgeTagActivationHeight = 61'000;
         consensus.nShieldedSmileRiceCodecDisableHeight = 61'000;
         consensus.nShieldedMatRiCTDisableHeight = 61'000;
+        consensus.nShieldedPoolDisableHeight = std::numeric_limits<int32_t>::max();
         consensus.nShieldedSpendPathRecoveryActivationHeight = 88'000;
         consensus.nShieldedPQ128UpgradeHeight = std::numeric_limits<int32_t>::max();
         consensus.nShieldedPoolCreditDisableHeight = BTX_SHIELDED_POOL_CREDIT_DISABLE_HEIGHT;

@@ -2572,9 +2572,10 @@ BOOST_AUTO_TEST_CASE(getblocktemplate_refuses_unattested_tip_with_attested_sibli
     config.local_signer = signer;
     std::string error;
     BOOST_REQUIRE(node::matmul_trusted::Configure(
-        std::move(config), /*trusted_mirror=*/false, /*serve=*/false,
+        std::move(config), /*trusted_mirror=*/true, /*serve=*/false,
         std::chrono::milliseconds{50}, error));
     BOOST_REQUIRE(node::matmul_trusted::IsConfigured());
+    BOOST_REQUIRE(node::matmul_trusted::IsTrustedMirror());
     BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
                       sibling->GetBlockHash(), sibling->nHeight) ==
                   matmul::trusted::AddResult::Accepted);
@@ -2639,8 +2640,9 @@ BOOST_AUTO_TEST_CASE(getblocktemplate_refuses_attested_tip_with_attested_have_da
     config.local_signer = signer;
     std::string error;
     BOOST_REQUIRE(node::matmul_trusted::Configure(
-        std::move(config), /*trusted_mirror=*/false, /*serve=*/false,
+        std::move(config), /*trusted_mirror=*/true, /*serve=*/false,
         std::chrono::milliseconds{50}, error));
+    BOOST_REQUIRE(node::matmul_trusted::IsTrustedMirror());
     BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
                       parent_hash, parent_height) ==
                   matmul::trusted::AddResult::Accepted);

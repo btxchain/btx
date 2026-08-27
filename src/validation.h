@@ -1166,6 +1166,19 @@ private:
 
     CBlockIndex* m_best_invalid GUARDED_BY(::cs_main){nullptr};
     std::set<uint256> m_parked_reorg_branch_roots GUARDED_BY(::cs_main);
+    //! Wall-clock cadence-hold anchor. Height is the live tip when the hold
+    //! first armed; time is GetTime() then — not a block timestamp. Attackers
+    //! who stamp nTime <= now cannot re-roll the horizon by connecting.
+    mutable std::optional<int> m_cadence_hold_anchor_height GUARDED_BY(::cs_main);
+    mutable std::optional<int64_t> m_cadence_hold_anchor_time GUARDED_BY(::cs_main);
+    //! MockableSteadyClock seconds at arm. Extra uses this so NTP cannot
+    //! shorten a hold. Tests with SetMockTime still use unix GetTime().
+    mutable std::optional<int64_t> m_cadence_hold_anchor_mono GUARDED_BY(::cs_main);
+    //! Wall-clock of the last successful ConnectTip. Stale-disarm must not
+    //! use paced-dump first-seen (headers arrived together hours ago).
+    mutable std::optional<int64_t> m_last_tip_connect_time GUARDED_BY(::cs_main);
+    mutable std::optional<int64_t> m_last_tip_connect_mono GUARDED_BY(::cs_main);
+    mutable std::optional<int> m_cadence_hold_logged_allowed GUARDED_BY(::cs_main);
     std::optional<node::ReorgRecoveryRecord> m_reorg_recovery GUARDED_BY(::cs_main);
     /**
      * Authenticated/quorum branch tips used by exceptional shallow-race
@@ -1253,6 +1266,7 @@ private:
     //! v0.32.0 defense-in-depth: trailing-window net-unshield log enforcing the egress velocity cap.
     ShieldedUnshieldVelocity m_shielded_unshield_velocity GUARDED_BY(::cs_main);
     bool m_shielded_state_initialized GUARDED_BY(::cs_main){false};
+    bool m_logged_shielded_state_skip GUARDED_BY(::cs_main){false};
     //! Last tip whose shielded snapshot, pin, and marker were actually written
     //! by PersistShieldedState. Shutdown skips a second full-tree fsync when
     //! this still matches ActiveTip(); a crash leaves it unset so the next
@@ -1300,7 +1314,27 @@ public:
     const arith_uint256& MinimumChainWork() const { return *Assert(m_options.minimum_chain_work); }
     const uint256& AssumedValidBlock() const { return *Assert(m_options.assumed_valid_block); }
     kernel::MatMulValidationMode GetMatMulValidationMode() const { return m_options.matmul_validation_mode; }
+    bool IsDiscoveryRelay() const
+    {
+        return kernel::MatMulModeIsDiscoveryRelay(m_options.matmul_validation_mode);
+    }
     kernel::Notifications& GetNotifications() const { return m_options.notifications; };
+
+    /** Count + warning for headers rejected as bad-diffbits at/after EncDr
+     *  stall-recovery. Not indexed — explorers on that fork otherwise look
+     *  like the live chain. */
+    void NoteRejectedDivergentPowHeader(const uint256& hash, int header_height)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    uint64_t GetRejectedDivergentPowHeaderCount() const
+    {
+        return m_rejected_divergent_pow_headers.load(std::memory_order_relaxed);
+    }
+    std::optional<uint256> GetLastRejectedDivergentPowHeader() const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        if (m_last_rejected_divergent_pow_hash.IsNull()) return std::nullopt;
+        return m_last_rejected_divergent_pow_hash;
+    }
 
     /** WP-7: v4.4 ENC-DR assumevalid buried-recompute trust predicate, factored
      *  verbatim out of ContextualCheckBlock (its (2) ASSUMEVALID BURIED-RECOMPUTE
@@ -1350,9 +1384,10 @@ public:
     bool PersistMatMulExactReplayVerdict(const uint256& block_hash)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
-    /** Record that the current process observed a valid configured M-of-N
-     *  quorum (trusted mirrors, or a consensus node with a local signer).
-     *  Also promotes authenticated chain work. Restart still clears the bit
+    /** Record that a trusted mirror observed pin coverage of this hash.
+     *  Promotes authenticated chain work for CPU archives only. Consensus
+     *  miners never persist this bit (ExactReplay writes
+     *  BLOCK_EXACT_REPLAY_VERIFIED instead). Restart still clears the bit
      *  unless durable quorum is still present under the current config. */
     bool PersistMatMulTrustedReplayAttestation(const uint256& block_hash)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
@@ -1479,6 +1514,10 @@ public:
      * as the download target or getheaders locator.
      */
     CBlockIndex* m_best_claimed_header GUARDED_BY(::cs_main){nullptr};
+    //! Headers rejected for bad-diffbits at/after stall-recovery. Memory
+    //! only; the invalid tower is not stored.
+    std::atomic<uint64_t> m_rejected_divergent_pow_headers{0};
+    uint256 m_last_rejected_divergent_pow_hash GUARDED_BY(::cs_main){};
     /**
      * Lock-free publication of the exact height currently owned by
      * m_best_header. Unlike a peer height hint this value is reversible: an
@@ -1584,6 +1623,12 @@ public:
     /** Check whether we are doing an initial block download (synchronizing from disk or network) */
     bool IsInitialBlockDownload() const;
 
+    /** True only for historical catch-up IBD (loading / no tip / insufficient
+     *  nMinimumChainWork). Age-only IBD (tip older than -maxtipage on a
+     *  work-sufficient chain) must still announce: a stalled restart would
+     *  otherwise hide a unique mined tip until GETDATA. */
+    bool IbdSuppressesBlockAnnounce() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
     /** Guess verification progress (as a fraction between 0.0=genesis and 1.0=current tip). */
     double GuessVerificationProgress(const CBlockIndex* pindex) const;
 
@@ -1602,6 +1647,42 @@ public:
     std::vector<uint256> GetParkedReorgBranchRoots() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     bool PersistParkedReorgBranches() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
+    //! Highest height ConnectTip/GETDATA may reach at wall-clock `now` under
+    //! cadence hold. INT_MAX when the hold is disarmed (disabled, IBD, stale
+    //! tip, below nReorgProtectionStartHeight).
+    [[nodiscard]] int GetCadenceHoldAllowedHeight(const CBlockIndex* tip, int64_t now) const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    //! True when a live-tip burst (extension or shallow competing dump) should
+    //! hold rather than connect. PARK owns reorg_depth > park_depth.
+    [[nodiscard]] bool CadenceHoldShouldHold(const CBlockIndex* tip, const CBlockIndex* candidate,
+                                             int64_t now, int fork_depth, bool recovery_escape) const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    //! Pin the horizon to this tip's height and wall-clock `now`. No-op if
+    //! already armed. Cleared when best-header is on the active chain.
+    void ArmCadenceHoldAnchor(const CBlockIndex* tip, int64_t now)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    void NotifyCadenceHold(const bilingual_str& alarm, int allowed_height)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    void NoteTipConnected(int64_t now)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    //! Test-only: drop hold-anchor and last-ConnectTip so restart / idle /
+    //! dump-header origin selection can be driven without mining a new chain.
+    void ResetCadenceHoldStateForTest() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    //! Test-only RAII: point ActiveChainstate() at `stub` so production
+    //! cadence-hold reads a real m_from_snapshot_blockhash. Restores the
+    //! prior pointer. `stub` must outlive this object.
+    class [[nodiscard]] UseChainstateAsActiveForTest
+    {
+        ChainstateManager& m_chainman;
+        Chainstate* m_saved;
+    public:
+        UseChainstateAsActiveForTest(ChainstateManager& chainman, Chainstate& stub)
+            EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+        ~UseChainstateAsActiveForTest() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+        UseChainstateAsActiveForTest(const UseChainstateAsActiveForTest&) = delete;
+        UseChainstateAsActiveForTest& operator=(const UseChainstateAsActiveForTest&) = delete;
+    };
+
     /**
      * Observe a fully body-validated divergent block and, when it identifies a
      * unique authenticated branch inside the PARK allowance, durably arm
@@ -1614,10 +1695,17 @@ public:
     bool NormalizeReorgRecovery(const CBlockIndex* active_tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     [[nodiscard]] bool IndexIsFollowedTipChild(const CBlockIndex* tip, const CBlockIndex* index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     [[nodiscard]] bool BestHeaderExtendsTip(const CBlockIndex* tip) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
-    /** Tip-child that continues the attested chain for the local signer.
-     *  Followed (m_best_header) children qualify unless another hash at this
-     *  height already has quorum. When m_best_header is a competing fork that
-     *  does not extend the tip, the remaining tip-child is still progress. */
+    /** Tip-child that continues a pin-attested chain.
+     *
+     *  True when this hash already has in-memory quorum. Followed
+     *  (`m_best_header`) is IndexIsFollowedTipChild, not this predicate:
+     *  unprivileged consensus ExactReplays a followed unattested twin via
+     *  that path, and must not treat "followed" as "attested".
+     *
+     *  Local-signer exception: when `m_best_header` sits on a competing
+     *  fork that does not extend the tip, the remaining tip-child is still
+     *  progress (live 190376 freeze). Competing-quorum deny stays behind
+     *  PinMayDenyAttestedChainTipChild (trusted pin / local signer). */
     [[nodiscard]] bool IndexIsAttestedChainTipChild(const CBlockIndex* tip, const CBlockIndex* index) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /** True if `index` has in-memory quorum, or sits on the current
      *  signed-frontier chain (ancestor or descendant of the off-chain
@@ -1908,6 +1996,10 @@ public:
      * the active chain if needed.
      */
     [[nodiscard]] bool EnsureShieldedStateInitialized() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** True when this node should open nullifiers/commitments/account_registry.
+     *  False past nShieldedPoolDisableHeight unless -shieldedstate=1. */
+    [[nodiscard]] bool ShouldMaintainShieldedState() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /** Return true if shielded state has been initialized for the active chain. */
     [[nodiscard]] bool HasShieldedState() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main)

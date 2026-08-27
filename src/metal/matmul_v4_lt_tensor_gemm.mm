@@ -145,6 +145,8 @@ bool EnvFlagDisabled(const char* name)
     return env != nullptr && env[0] == '0';
 }
 
+// Reporting / golden-row selection only. Mining admission is
+// IsLtTensorOpsGemmAvailable() (SelfTestTensorOpsOnce), not this string match.
 LtMetalArchNameClass ClassifyFromDeviceName(const std::string& name)
 {
     auto has = [&](const char* needle) {

@@ -8,6 +8,247 @@ Release Process
 * Update release candidate version in `CMakeLists.txt` (`CLIENT_VERSION_RC`).
 * Update manpages (after rebuilding the binaries), see [gen-manpages.py](/contrib/devtools/README.md#gen-manpagespy).
 * Update `btx.conf` template content and commit changes if they exist, see [gen-bitcoin-conf.sh](/contrib/devtools/README.md#gen-bitcoin-confsh).
+* **ZMQ is required on every shipped `btxd`.** Configure CPU, CUDA, and Metal
+  release trees with `-DWITH_ZMQ=ON` (the CMake default is ON; pass it anyway).
+  After the link, run `python3 scripts/release/verify_release_btxd.py <btxd> <btx-cli>`:
+  Linux `ldd` must show `libzmq`; macOS must statically link `libzmq.a`,
+  `libevent_*.a`, and `libomp.a` — `otool -L` must show **zero** `/opt/homebrew`
+  or `/usr/local/opt` paths on both binaries. A Homebrew `libevent`/`libomp`
+  dylib is not a shippable public artifact. CMake's configure summary must
+  print `ZeroMQ ... ON` and, on macOS, `Libevent linkage ... static:`.
+  Do not ship a binary that contains `-zmqpubhashblock` strings without linking
+  libzmq — that is issues
+  [#111](https://github.com/btxchain/btx/issues/111) (v0.33.3, closed by
+  recutting one tarball while CMake still defaulted OFF) and
+  [#122](https://github.com/btxchain/btx/issues/122) (v0.33.4.2 Linux CPU,
+  the identical miss). Default ON plus this check is the durable fix;
+  recutting one archive was not.
+* Complete the Profile-1 ExactReplay golden corpus and seal described below.
+  Any change under `CMakeLists.txt`, `cmake/`, `src/`, or `contrib/matmul-v4/`
+  (except the inert manifest `.data` file) invalidates the previous seal.
+
+## Profile-1 ExactReplay golden corpus and seal
+
+0.34 is meant to be a final reference a third party can release from without
+access to the original machines or keys. Guix (`contrib/guix/`) builds the
+binaries; this section is the missing piece: how an outside maintainer
+re-measures ExactReplay goldens and cuts the next seal. The corpus driver
+(`contrib/matmul-v4/multi-gpu-golden-corpus.sh`) contains no WIF, keys, or
+credentials. Policy detail lives in
+[btx-matmul-v4.7-production-golden-policy.md](btx-matmul-v4.7-production-golden-policy.md).
+
+### When a re-seal is required
+
+Re-seal after **any BUILD_RELEVANT change**. The fingerprint is SHA-256 of
+`git ls-tree -r --full-tree <revision> -- CMakeLists.txt cmake src contrib/matmul-v4`
+with the single exclusion
+`src/matmul/matmul_v4_rc_production_golden_manifest.data`.
+That file is inert manifest bytes (CMake emits a numeric array; C++ parses a
+strict schema), so excluding it is the only way sealing is not a fixed point.
+Any other change in that scope — including a one-line compile fix — moves the
+fingerprint and burns any corpus already recorded against the previous freeze.
+
+CPU ExactReplay is not an independent production golden. The required cohort is
+**CUDA**. Metal and HIP are optional; if supplied they must match exactly.
+
+### Ordering: prove builds, then freeze, then measure
+
+Do not cut a freeze and then discover that a target host cannot compile it.
+
+1. Compile **every** release target on **every** corpus host until each is
+   clean: `matmul-v4-rc-harness`, `btxd`, and `btx-cli`, all with
+   `-DWITH_ZMQ=ON`. A first-ever Metal build of a tree often surfaces AppleClang
+   errors (OpenMP structured-binding captures, designated NTTP arguments) that
+   GCC/nvcc already accepted. Each of those fixes is BUILD_RELEVANT.
+2. Only when every host has linked those three binaries, commit the freeze
+   `F`, push it, and confirm the working tree is clean on BUILD_RELEVANT paths.
+3. Compute the fingerprint of `F` (must be identical on every host):
+
+   ```bash
+   F="$(git rev-parse HEAD)"
+   git ls-tree -r --full-tree "$F" -- CMakeLists.txt cmake src contrib/matmul-v4 \
+     | grep -v "$(printf '\t')src/matmul/matmul_v4_rc_production_golden_manifest.data$" \
+     | sha256sum   # macOS: shasum -a 256
+   ```
+
+4. Then run the corpora against that `F` and fingerprint. Never start a corpus
+   against a freeze that is still accumulating compile fixes.
+
+Freeze-then-discover-then-re-freeze discards every episode already measured.
+The in-tree verifiers will also reject a dirty harness recorded under a clean
+revision: the corpus script refuses a dirty BUILD_RELEVANT working tree.
+
+Before the seal commit, both verifiers are **expected to FAIL** (stale
+manifest revision / "build-relevant code changed after the measured freeze").
+That is the pre-seal state, not a green light to skip them.
+
+### Hardware a maintainer needs
+
+| Backend | What you need | Notes |
+|---|---|---|
+| CUDA | Linux x86_64, NVIDIA GPU compute capability ≥ 8.0, a driver that matches the toolkit used to compile the harness, `nvcc` | 0.34 goldens were measured on Blackwell `sm_120` (RTX 5060 Ti class). Ampere/Ada may seal if the production path stays device-native (zero CPU fallback) and the digests match Metal. See [linux-release-builds.md](linux-release-builds.md). |
+| Metal | Apple Silicon (arm64, M1 or later), macOS 14/15, Xcode clang, Homebrew `cmake` `ninja` `libomp` `zeromq` `boost` `libevent` | M1 works; newer chips are faster. If another `btxd` is already running on that Mac, compile the freeze tree at `-j1` so you do not starve it. |
+| HIP | Optional. Only if you want a third provider in the cohort. | Must byte-match CUDA and Metal when present. |
+| CPU | Not accepted as an independent production golden. | Portable ExactReplay remains the diagnostic oracle. |
+
+Two hosts may run their corpora in parallel. They must pass the **same**
+`--source-revision` (full 40-character `F`) and **same**
+`--source-tree-fingerprint`. `validate_artifact` / the corpus merger reject
+the whole run on `source_revision_mismatch` if those strings differ.
+
+### Environment gotchas
+
+**Apple Silicon / Homebrew**
+
+```bash
+export PATH="/opt/homebrew/bin:/usr/bin:$PATH"
+export PKG_CONFIG_PATH="/opt/homebrew/lib/pkgconfig"
+export CMAKE_PREFIX_PATH="/opt/homebrew"
+cmake -S . -B build-metal -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_PREFIX_PATH=/opt/homebrew \
+  -DWITH_ZMQ=ON \
+  -DBTX_ENABLE_METAL=ON \
+  -DBUILD_GUI=OFF -DBUILD_BENCH=OFF
+```
+
+Without `PKG_CONFIG_PATH` and `CMAKE_PREFIX_PATH`, CMake reports ZeroMQ
+missing even when `brew install zeromq` succeeded. Prefer static `libzmq.a`
+(CMake already does this on Apple) so the shipped `btxd` has **no Homebrew
+zmq dylib**. Libevent and libomp must be static too (`libevent_core.a`,
+`libomp.a`) — a dylib under `/opt/homebrew` will not launch on a clean Mac.
+Verify:
+
+```bash
+otool -L build-metal/bin/btxd | grep homebrew   # must print nothing
+otool -L build-metal/bin/btx-cli | grep homebrew
+otool -L build-metal/bin/btxd | grep -i zmq     # must print nothing (static)
+strings build-metal/bin/btxd | grep -F 'Enable publish hash block'
+python3 scripts/release/verify_release_btxd.py \
+  build-metal/bin/btxd build-metal/bin/btx-cli
+```
+
+AppleClang with `-fopenmp` cannot capture structured bindings in lambdas
+("capturing a structured binding is not yet supported in OpenMP"). Copy the
+binding to an ordinary local (`uint32_t column{item.first};`) before the
+lambda. AppleClang also rejects designated initializers as non-type template
+arguments (`AssignIntArgToVar<T, {.min = 0}>`); name a `constexpr` options
+object instead. The macOS 15 SDK libc++ still lacks `std::jthread` /
+`std::stop_token`; use `std::thread` plus an explicit stop flag.
+
+**Linux CUDA**
+
+Pass `-DWITH_ZMQ=ON`. `pkg-config --exists libzmq` must succeed in the same
+environment that runs cmake (a user-local `libzmq.pc` is invisible unless
+`PKG_CONFIG_PATH` is set). After link:
+
+```bash
+ldd build-cuda/bin/btxd | grep zmq    # must show libzmq
+python3 scripts/release/verify_release_btxd.py build-cuda/bin/btxd
+```
+
+Do not `SIGKILL` a production `btxd` to free a GPU. Nice the corpus
+(`nice -n 10`) if a live node shares the device.
+
+### Exact corpus invocation
+
+On each backend host, from a **clean** checkout of freeze `F`, with a harness
+built from that checkout:
+
+```bash
+F=<40-char freeze commit>
+FP=<64-char fingerprint of F>
+OUT=doc/evidence/multi-gpu-profile1-goldens-YYYY-MM-DD
+
+# CUDA host
+contrib/matmul-v4/multi-gpu-golden-corpus.sh \
+  --harness build-cuda/bin/matmul-v4-rc-harness \
+  --backends cuda \
+  --episodes 8 \
+  --canary-nonce-start 1 \
+  --source-revision "$F" \
+  --source-tree-fingerprint "$FP" \
+  --out-dir "$OUT" \
+  --allow-partial
+
+# Metal host (same F, same FP, same OUT name; copy CUDA raw JSON in or copy
+# Metal raw JSON back — the merger reads OUT/raw/profile1-{cuda,metal}-8.json)
+contrib/matmul-v4/multi-gpu-golden-corpus.sh \
+  --harness build-metal/bin/matmul-v4-rc-harness \
+  --backends metal \
+  --episodes 8 \
+  --canary-nonce-start 1 \
+  --source-revision "$F" \
+  --source-tree-fingerprint "$FP" \
+  --out-dir "$OUT" \
+  --allow-partial
+```
+
+`--allow-partial` is only legal while a **single** backend is still running.
+Once both `raw/profile1-cuda-8.json` and `raw/profile1-metal-8.json` sit in the
+same `$OUT` (copy with `scp`; do not edit JSON), rebuild the comparison
+**without** `--allow-partial`:
+
+```bash
+contrib/matmul-v4/multi-gpu-golden-corpus.sh \
+  --compare-only \
+  --episodes 8 \
+  --canary-nonce-start 1 \
+  --source-revision "$F" \
+  --source-tree-fingerprint "$FP" \
+  --out-dir "$OUT"
+```
+
+The comparison must report `complete_multi_gpu_match=true`,
+`allow_partial=false`, `required_for_manifest=["cuda"]`. Never
+hand-edit `source_revision` / `source_tree_fingerprint` in a JSON to make a
+verifier pass — that falsifies evidence. If a compile fix landed after `F`,
+go back to step 1 and cut a new freeze.
+
+### Seal commit
+
+One commit `S` after `F`. `S` may change only:
+
+* `src/matmul/matmul_v4_rc_production_golden_manifest.data`
+* files under `doc/` (the corpus JSON, `multi-gpu-digest-compare.json`, READMEs)
+
+`git diff --name-only F..S` on BUILD_RELEVANT paths must be exactly the
+manifest. `F` must be an ancestor of `S`. Then, on a **clean** tree:
+
+```bash
+python3 contrib/matmul-v4/verify-production-golden-seal.py seal --root .
+python3 contrib/matmul-v4/verify-evidence-provenance.py --strict
+```
+
+Both must print PASS. `--strict` fails unbound fingerprints, revisions that
+are not ancestors of HEAD, and stale historical exclusions. Do not commit `S`
+until both pass. Do not tag or announce a release from a tree whose seal
+verifiers fail.
+
+### GPU qualification diagnostics
+
+`production_qualified` / `peak_ready` is the AND of twenty bits on
+`RCPeakReadyInputs` (`src/matmul/matmul_v4_rc_peak_ready.h`). A failure used
+to yield only the string `peak_ready_prerequisites_incomplete`.
+`DeriveRCPeakReady` now sets `deficit` to
+
+`peak_ready_prerequisites_incomplete:<comma-separated false bits>`
+
+so a maintainer can see which of the twenty conditions failed. The names are:
+
+`v3_config_selected`, `production_dimensions`, `full_page_schedule`,
+`real_m128_workload`, `canonical_packed_bank`, `native_provider_linked`,
+`arch_backend_selected`, `exactness_selfqual_ok`, `bank_genuinely_resident`,
+`native_tensor_executed`, `full_device_pipeline`, `no_per_barrier_host_sync`,
+`no_cpu_fallback`, `no_dense_int8_as_native`, `no_scalar_cuda_as_native`,
+`device_event_timing`, `cpu_gpu_byte_exact`, `production_provenance_recorded`,
+`corruption_gate_ok`, `production_readiness_tests_pass`.
+
+Inspect them by calling `FormatPeakReadyDeficit` / reading
+`RCPeakReadyStatus.deficit` (datacenter probe logs concatenate this string).
+An empty `deficit` is the only qualified state. `compiled == ready` is never
+allowed: `MakeRCPeakReadyInputsFromEpisode` leaves several production latches
+false until the corresponding campaign bits are actually set.
 
 ### Before every major and minor release
 
@@ -92,6 +333,7 @@ Release Process
     - `python3 test/util/btx_agent_setup_test.py`
     - `python3 test/util/publish_github_release_test.py`
     - `python3 test/util/sign_release_bundle_test.py`
+    - `python3 test/util/verify_release_btxd_test.py`
     - `python3 test/functional/feature_assumeutxo.py --configfile=<build>/test/config.ini --cachedir=<cache-dir>`
     - `python3 test/functional/rpc_btx_difficulty_health.py --configfile=<build>/test/config.ini`
     - targeted restart/snapshot coverage in `test_btx` such as `validation_tests` and `validation_chainstatemanager_tests`
@@ -149,7 +391,9 @@ The remaining sections in this document are preserved as upstream reference
 material. They are useful when cross-checking historical maintainer workflows,
 but they are not the primary BTX release instructions. For BTX releases, treat
 `doc/btx-github-release-automation.md`, `doc/btx-download-and-go.md`, and
-`contrib/faststart/README.md` as the active operator-facing docs.
+`contrib/faststart/README.md` as the active operator-facing docs, and treat
+the Profile-1 ExactReplay golden corpus and seal section above as a BTX
+release gate (it is not upstream Bitcoin Core material).
 
 ## Building
 

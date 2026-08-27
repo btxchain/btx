@@ -1749,7 +1749,7 @@ Current status:
   - remote install `64.003s`, source upload `9.104s`, prepare `3.923s`,
     configure `15.445s`, build `1049.381s`, inner campaign `104.521s`,
     bundle `3.083s`, artifact download `4.557s`;
-  - DigitalOcean resource class `s-2vcpu-4gb-amd` in `sfo3`; estimated cost
+  - DigitalOcean resource class `s-2vcpu-4gb-amd` in archive-B; estimated cost
     `0.015`; successful-run teardown confirmed for both droplet and firewall;
 - Definition-of-Done item 8 is now closed as far as this repository can prove
   it locally or on repo-operated disposable infrastructure: the only remaining

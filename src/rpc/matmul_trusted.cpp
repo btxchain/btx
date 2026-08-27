@@ -19,18 +19,60 @@
 #include <util/strencodings.h>
 #include <validation.h>
 
+#include <set>
 #include <string>
 #include <vector>
 
+using node::NodeContext;
+
 namespace {
 
-UniValue TrustedSignerPubKeysJSON()
+UniValue PubKeysJSON(const std::vector<CPubKey>& pubkeys)
 {
     UniValue keys{UniValue::VARR};
-    for (const auto& pubkey : node::matmul_trusted::TrustedSigners()) {
+    for (const auto& pubkey : pubkeys) {
         keys.push_back(HexStr(pubkey));
     }
     return keys;
+}
+
+UniValue TrustedSignerPubKeysJSON()
+{
+    return PubKeysJSON(node::matmul_trusted::TrustedSigners());
+}
+
+CPubKey ParseCompressedPubKeyHex(const std::string& encoded)
+{
+    if (!IsHex(encoded)) {
+        throw JSONRPCError(
+            RPC_INVALID_ADDRESS_OR_KEY,
+            "Pubkey must be compressed secp256k1 hex");
+    }
+    const CPubKey pubkey{ParseHex(encoded)};
+    if (!pubkey.IsCompressed() || !pubkey.IsFullyValid()) {
+        throw JSONRPCError(
+            RPC_INVALID_ADDRESS_OR_KEY,
+            "Pubkey must be a valid compressed secp256k1 key");
+    }
+    return pubkey;
+}
+
+UniValue BlocklistStatusJSON()
+{
+    UniValue result{UniValue::VOBJ};
+    result.pushKV("blocked_pubkeys",
+                  PubKeysJSON(node::matmul_trusted::BlockedSigners()));
+    result.pushKV(
+        "unblocked_pin_members",
+        static_cast<uint64_t>(node::matmul_trusted::UnblockedPinMembers()));
+    result.pushKV(
+        "threshold",
+        static_cast<uint64_t>(node::matmul_trusted::Threshold()));
+    result.pushKV("pin_quorum_reachable",
+                  node::matmul_trusted::PinQuorumReachable());
+    result.pushKV("fail_closed", true);
+    result.pushKV("persisted", node::matmul_trusted::PersistenceEnabled());
+    return result;
 }
 
 std::string EncodeAttestation(
@@ -91,15 +133,34 @@ RPCHelpMan getmatmultrustedstatus()
         RPCResult{RPCResult::Type::OBJ, "", "",
             {
                 {RPCResult::Type::BOOL, "configured", ""},
+                {RPCResult::Type::STR, "matmul_validation_mode", /*optional=*/true, "consensus, trusted, relay, economic, or spv when chainstate is available"},
                 {RPCResult::Type::BOOL, "trusted_mirror", ""},
+                {RPCResult::Type::BOOL, "discovery_relay", "True when -matmulvalidation=relay: ADDR introduction only, not MatMul authority"},
+                {RPCResult::Type::BOOL, "chain_oracle", "True only for consensus and trusted modes. False on a discovery relay."},
                 {RPCResult::Type::BOOL, "serves_attestations", ""},
                 {RPCResult::Type::BOOL, "local_signer", ""},
+                {RPCResult::Type::BOOL, "single_key_pin", "True when configured M<2 or N<2. On a trusted mirror this is ExactReplay-skip authority; on consensus+pin it is telemetry only."},
+                {RPCResult::Type::BOOL, "single_key_trusted_authority", "Trusted mirror whose quorum can skip ExactReplay with one key (N<2 or M<2)"},
+                {RPCResult::Type::BOOL, "collocated_signer_pin", "Local attestation WIF is also a pin member in a single-key or trusted-mirror topology (stolen keyfile amplifier)"},
                 {RPCResult::Type::NUM, "attestation_version", ""},
                 {RPCResult::Type::STR_HEX, "replay_authority_context", /*optional=*/true, "Versioned ExactReplay authority context for this configuration"},
                 {RPCResult::Type::NUM, "threshold", ""},
                 {RPCResult::Type::NUM, "trusted_signers", ""},
-                {RPCResult::Type::ARR, "trusted_signer_pubkeys", "Configured compressed secp256k1 pubkeys this node currently trusts",
+                {RPCResult::Type::ARR, "trusted_signer_pubkeys", "Configured compressed secp256k1 pubkeys this node currently trusts (the pin). Always sufficient for quorum when M-of-N is met.",
                     {{RPCResult::Type::STR_HEX, "", "Compressed pubkey hex"}}},
+                {RPCResult::Type::BOOL, "open_attestors", "Whether valid-unpinned attestations are heard and may be admitted after co-signing a pin-quorum hash"},
+                {RPCResult::Type::NUM, "open_threshold", "Distinct pinned-or-admitted unfrozen votes required for open quorum (0 when open attestors are disabled)"},
+                {RPCResult::Type::ARR, "admitted_open_pubkeys", "Open keys admitted locally after co-signing a pin-quorum hash",
+                    {{RPCResult::Type::STR_HEX, "", "Compressed pubkey hex"}}},
+                {RPCResult::Type::ARR, "frozen_open_pubkeys", "Open keys frozen for equivocation (same height, two hashes)",
+                    {{RPCResult::Type::STR_HEX, "", "Compressed pubkey hex"}}},
+                {RPCResult::Type::ARR, "blocked_pubkeys", "Operator attestation blocklist; inert even if still in the pin",
+                    {{RPCResult::Type::STR_HEX, "", "Compressed pubkey hex"}}},
+                {RPCResult::Type::NUM, "unblocked_pin_members", "Pin members not on the blocklist"},
+                {RPCResult::Type::BOOL, "pin_quorum_reachable", "Whether unblocked pin members still meet M"},
+                {RPCResult::Type::NUM, "heard_attestations", "Valid-unpinned statements retained as directory, not authority"},
+                {RPCResult::Type::NUM, "log_tree_size", "Append-only attestation transparency-log leaf count (hot cache)"},
+                {RPCResult::Type::STR_HEX, "log_root", /*optional=*/true, "Merkle root of the local attestation transparency log"},
                 {RPCResult::Type::NUM, "stored_blocks", ""},
                 {RPCResult::Type::NUM, "stored_attestations", ""},
                 {RPCResult::Type::NUM, "blocks_with_quorum", ""},
@@ -132,12 +193,52 @@ RPCHelpMan getmatmultrustedstatus()
             result.pushKV(
                 "trusted_mirror",
                 node::matmul_trusted::IsTrustedMirror());
+            {
+                NodeContext& node = EnsureAnyNodeContext(request.context);
+                if (node.chainman) {
+                    const auto mode{node.chainman->GetMatMulValidationMode()};
+                    result.pushKV("matmul_validation_mode",
+                                  kernel::MatMulValidationModeName(mode));
+                    result.pushKV(
+                        "discovery_relay",
+                        kernel::MatMulModeIsDiscoveryRelay(mode));
+                    result.pushKV(
+                        "chain_oracle",
+                        kernel::MatMulModeIsChainAuthority(mode));
+                } else {
+                    result.pushKV("discovery_relay", false);
+                    result.pushKV("chain_oracle", false);
+                }
+            }
             result.pushKV(
                 "serves_attestations",
                 node::matmul_trusted::ServesAttestations());
             result.pushKV(
                 "local_signer",
                 node::matmul_trusted::HasLocalSigner());
+            const size_t n_signers{node::matmul_trusted::TrustedSigners().size()};
+            const size_t threshold{node::matmul_trusted::Threshold()};
+            const bool trusted_mirror{node::matmul_trusted::IsTrustedMirror()};
+            const bool configured{node::matmul_trusted::IsConfigured()};
+            bool signer_in_pin{false};
+            if (const auto local{node::matmul_trusted::LocalSigner()}) {
+                signer_in_pin = node::matmul_trusted::IsAuthoritySigner(*local);
+            }
+            result.pushKV(
+                "single_key_pin",
+                configured && (n_signers < 2 || threshold < 2));
+            result.pushKV(
+                "single_key_trusted_authority",
+                node::matmul_trusted::TrustedMirrorIsSingleKeyAuthority(
+                    trusted_mirror, n_signers, threshold));
+            result.pushKV(
+                "collocated_signer_pin",
+                node::matmul_trusted::CollocatedSignerPinIsHijackAmplifier(
+                    trusted_mirror,
+                    node::matmul_trusted::HasLocalSigner(),
+                    signer_in_pin,
+                    n_signers,
+                    threshold));
             result.pushKV(
                 "attestation_version",
                 matmul::trusted::ExactReplayStatement::CURRENT_VERSION);
@@ -155,6 +256,39 @@ RPCHelpMan getmatmultrustedstatus()
                 static_cast<uint64_t>(
                     node::matmul_trusted::TrustedSigners().size()));
             result.pushKV("trusted_signer_pubkeys", TrustedSignerPubKeysJSON());
+            result.pushKV(
+                "open_attestors",
+                node::matmul_trusted::OpenAttestorsEnabled());
+            result.pushKV(
+                "open_threshold",
+                static_cast<uint64_t>(
+                    node::matmul_trusted::OpenThreshold()));
+            result.pushKV(
+                "admitted_open_pubkeys",
+                PubKeysJSON(node::matmul_trusted::AdmittedOpenSigners()));
+            result.pushKV(
+                "frozen_open_pubkeys",
+                PubKeysJSON(node::matmul_trusted::FrozenOpenSigners()));
+            result.pushKV(
+                "blocked_pubkeys",
+                PubKeysJSON(node::matmul_trusted::BlockedSigners()));
+            result.pushKV(
+                "unblocked_pin_members",
+                static_cast<uint64_t>(
+                    node::matmul_trusted::UnblockedPinMembers()));
+            result.pushKV(
+                "pin_quorum_reachable",
+                node::matmul_trusted::PinQuorumReachable());
+            result.pushKV(
+                "heard_attestations",
+                static_cast<uint64_t>(stats.heard_attestations));
+            {
+                const auto log_head{node::matmul_trusted::LogHead()};
+                result.pushKV("log_tree_size", log_head.tree_size);
+                if (log_head.tree_size != 0) {
+                    result.pushKV("log_root", log_head.root.GetHex());
+                }
+            }
             result.pushKV(
                 "stored_blocks",
                 static_cast<uint64_t>(stats.stored_blocks));
@@ -204,9 +338,14 @@ RPCHelpMan getmatmultrustedstatus()
             }
             result.pushKV(
                 "warning",
-                node::matmul_trusted::IsTrustedMirror()
-                    ? "Operator-trusted mirror: signed M-of-N attestations replace local ExactReplay; this is not independent full validation."
-                    : "");
+                node::matmul_trusted::TrustedMirrorIsSingleKeyAuthority(
+                    node::matmul_trusted::IsTrustedMirror(),
+                    node::matmul_trusted::TrustedSigners().size(),
+                    node::matmul_trusted::Threshold())
+                    ? "Single-key trusted mirror: the attestation quorum replaces ExactReplay. A stolen WIF can make this node accept MatMul-invalid blocks. Mainnet requires M=2 unless -allowsinglekeytrustedmirror=1."
+                    : (node::matmul_trusted::IsTrustedMirror()
+                           ? "Operator-trusted mirror: signed M-of-N attestations replace local ExactReplay; this is not independent full validation."
+                           : ""));
             return result;
         }};
 }
@@ -216,9 +355,11 @@ RPCHelpMan getmatmulattestedtip()
     return RPCHelpMan{
         "getmatmulattestedtip",
         "Return the highest-work block this node currently has a configured "
-        "attestation quorum for. Intended for pool/tooling authors: mine on "
-        "this hash (or its descendant) and abandon a heavier unattested fork. "
-        "Requires -matmultrustedpubkey (and typically -matmultrustedthreshold). "
+        "attestation quorum for. Telemetry for trusted-mirror and archive "
+        "operators. Consensus miners mine the ExactReplay-valid tip; do not "
+        "treat this hash as a requirement to abandon a heavier unattested "
+        "fork. Requires -matmultrustedpubkey (and typically "
+        "-matmultrustedthreshold). "
         "On a quiet linear chain the signer often attests ~1 behind the active "
         "tip, so this may lag getbestblockhash by one block.\n",
         {},
@@ -426,6 +567,161 @@ RPCHelpMan submitmatmulattestations()
         }};
 }
 
+RPCHelpMan getmatmulattestors()
+{
+    return RPCHelpMan{
+        "getmatmulattestors",
+        "Directory of this node's pin, admitted open attestors, frozen keys, "
+        "and heard-but-unpinned GPU statements. Heard keys are not trust. "
+        "Never apply a peer's key list as membership.\n",
+        {},
+        RPCResult{RPCResult::Type::OBJ, "", "",
+            {
+                {RPCResult::Type::BOOL, "configured", ""},
+                {RPCResult::Type::BOOL, "open_attestors", ""},
+                {RPCResult::Type::NUM, "threshold", "Pin M-of-N threshold"},
+                {RPCResult::Type::NUM, "open_threshold", ""},
+                {RPCResult::Type::ARR, "pinned_pubkeys", "Local -matmultrustedpubkey set",
+                    {{RPCResult::Type::STR_HEX, "", "Compressed pubkey hex"}}},
+                {RPCResult::Type::ARR, "admitted_open_pubkeys", "Admitted after co-signing a pin-quorum hash",
+                    {{RPCResult::Type::STR_HEX, "", "Compressed pubkey hex"}}},
+                {RPCResult::Type::ARR, "frozen_open_pubkeys", "Equivocating open keys",
+                    {{RPCResult::Type::STR_HEX, "", "Compressed pubkey hex"}}},
+                {RPCResult::Type::ARR, "blocked_pubkeys", "Operator attestation blocklist",
+                    {{RPCResult::Type::STR_HEX, "", "Compressed pubkey hex"}}},
+                {RPCResult::Type::NUM, "unblocked_pin_members", "Pin members not on the blocklist"},
+                {RPCResult::Type::BOOL, "pin_quorum_reachable", "Whether unblocked pin members still meet M"},
+                {RPCResult::Type::ARR, "heard_pubkeys", "Valid-unpinned keys not yet admitted",
+                    {{RPCResult::Type::STR_HEX, "", "Compressed pubkey hex"}}},
+                {RPCResult::Type::NUM, "log_tree_size", ""},
+                {RPCResult::Type::STR_HEX, "log_root", /*optional=*/true, ""},
+            }},
+        RPCExamples{HelpExampleCli("getmatmulattestors", "")},
+        [](const RPCHelpMan&, const JSONRPCRequest&) {
+            UniValue result{UniValue::VOBJ};
+            result.pushKV("configured", node::matmul_trusted::IsConfigured());
+            result.pushKV(
+                "open_attestors",
+                node::matmul_trusted::OpenAttestorsEnabled());
+            result.pushKV(
+                "threshold",
+                static_cast<uint64_t>(node::matmul_trusted::Threshold()));
+            result.pushKV(
+                "open_threshold",
+                static_cast<uint64_t>(node::matmul_trusted::OpenThreshold()));
+            result.pushKV("pinned_pubkeys", TrustedSignerPubKeysJSON());
+            result.pushKV(
+                "admitted_open_pubkeys",
+                PubKeysJSON(node::matmul_trusted::AdmittedOpenSigners()));
+            result.pushKV(
+                "frozen_open_pubkeys",
+                PubKeysJSON(node::matmul_trusted::FrozenOpenSigners()));
+            result.pushKV(
+                "blocked_pubkeys",
+                PubKeysJSON(node::matmul_trusted::BlockedSigners()));
+            result.pushKV(
+                "unblocked_pin_members",
+                static_cast<uint64_t>(
+                    node::matmul_trusted::UnblockedPinMembers()));
+            result.pushKV(
+                "pin_quorum_reachable",
+                node::matmul_trusted::PinQuorumReachable());
+            std::set<CPubKey> heard_keys;
+            for (const auto& attestation :
+                 node::matmul_trusted::HeardAttestations()) {
+                heard_keys.insert(attestation.signer);
+            }
+            result.pushKV(
+                "heard_pubkeys",
+                PubKeysJSON({heard_keys.begin(), heard_keys.end()}));
+            const auto log_head{node::matmul_trusted::LogHead()};
+            result.pushKV("log_tree_size", log_head.tree_size);
+            if (log_head.tree_size != 0) {
+                result.pushKV("log_root", log_head.root.GetHex());
+            }
+            return result;
+        }};
+}
+
+RPCHelpMan submitmatmulrefutation()
+{
+    return RPCHelpMan{
+        "submitmatmulrefutation",
+        "Submit a watchtower ExactReplay-failed statement. A pin-member "
+        "refutation blocks open quorum on that hash; pin quorum is unchanged.\n",
+        {
+            {"refutation", RPCArg::Type::STR_HEX, RPCArg::Optional::NO,
+             "Serialized ExactReplayRefutation hex"},
+        },
+        RPCResult{RPCResult::Type::OBJ, "", "",
+            {
+                {RPCResult::Type::STR, "result", "Add result name"},
+                {RPCResult::Type::BOOL, "quorum", "Whether the hash still has authority quorum"},
+            }},
+        RPCExamples{HelpExampleCli("submitmatmulrefutation", "\"hex\"")},
+        [](const RPCHelpMan& self, const JSONRPCRequest& request) {
+            if (!node::matmul_trusted::IsConfigured()) {
+                throw JSONRPCError(
+                    RPC_MISC_ERROR,
+                    "MatMul attestation store is not configured");
+            }
+            const std::string hex{self.Arg<std::string>("refutation")};
+            matmul::trusted::ExactReplayRefutation refutation;
+            if (!IsHex(hex)) {
+                throw JSONRPCError(
+                    RPC_DESERIALIZATION_ERROR, "Malformed refutation");
+            }
+            try {
+                DataStream encoded{ParseHex(hex)};
+                encoded >> refutation;
+                if (!encoded.empty()) {
+                    throw JSONRPCError(
+                        RPC_DESERIALIZATION_ERROR, "Malformed refutation");
+                }
+            } catch (const std::ios_base::failure&) {
+                throw JSONRPCError(
+                    RPC_DESERIALIZATION_ERROR, "Malformed refutation");
+            }
+            const uint256 hash{refutation.statement.block_hash};
+            ChainstateManager& chainman{EnsureAnyChainman(request.context)};
+            bool known_profile1{false};
+            {
+                LOCK(cs_main);
+                const CBlockIndex* const index{
+                    chainman.m_blockman.LookupBlockIndex(hash)};
+                const bool have_index{index != nullptr};
+                const bool failed{
+                    have_index &&
+                    (index->nStatus & BLOCK_FAILED_MASK) != 0};
+                const bool profile1{
+                    have_index &&
+                    chainman.GetConsensus()
+                        .IsMatMulTrustedReplayAttestationActive(
+                            index->nHeight)};
+                const bool height_matches{
+                    have_index &&
+                    index->nHeight == refutation.statement.block_height};
+                known_profile1 =
+                    node::matmul_trusted::MmAttestRefuteKnownProfile1Block(
+                        have_index, failed, profile1, height_matches);
+            }
+            if (!known_profile1) {
+                throw JSONRPCError(
+                    RPC_INVALID_ADDRESS_OR_KEY,
+                    "Unknown, failed, non-Profile-1, or height-mismatched block");
+            }
+            const int32_t height{refutation.statement.block_height};
+            const auto add_result{
+                node::matmul_trusted::AddRefutation(refutation, hash, height)};
+            UniValue result{UniValue::VOBJ};
+            result.pushKV(
+                "result", matmul::trusted::AddResultName(add_result));
+            result.pushKV(
+                "quorum", node::matmul_trusted::HasQuorum(hash, height));
+            return result;
+        }};
+}
+
 RPCHelpMan getfinalityinfo()
 {
     return RPCHelpMan{
@@ -437,11 +733,20 @@ RPCHelpMan getfinalityinfo()
         {},
         RPCResult{RPCResult::Type::OBJ, "", "",
             {
-                {RPCResult::Type::STR, "matmul_validation_mode", "consensus, trusted, or none"},
+                {RPCResult::Type::STR, "matmul_validation_mode", "consensus, trusted, relay, economic, or spv"},
+                {RPCResult::Type::BOOL, "discovery_relay", "True when this node only introduces peers"},
+                {RPCResult::Type::BOOL, "chain_oracle", "False on a discovery relay; this host's tip is not MatMul authority"},
                 {RPCResult::Type::BOOL, "trusted_mirror", ""},
                 {RPCResult::Type::ARR, "trusted_signer_pubkeys", "Configured compressed secp256k1 pubkeys this node currently trusts",
                     {{RPCResult::Type::STR_HEX, "", "Compressed pubkey hex"}}},
-                {RPCResult::Type::ARR, "warnings", "Operator-visible split/island tells",
+                {RPCResult::Type::NUM, "threshold", "Configured pin M. 0 when unconfigured."},
+                {RPCResult::Type::NUM, "unblocked_pin_members", ""},
+                {RPCResult::Type::BOOL, "pin_quorum_reachable", ""},
+                {RPCResult::Type::BOOL, "open_attestors", ""},
+                {RPCResult::Type::BOOL, "single_key_pin", ""},
+                {RPCResult::Type::BOOL, "single_key_trusted_authority", ""},
+                {RPCResult::Type::BOOL, "collocated_signer_pin", ""},
+                {RPCResult::Type::ARR, "warnings", "Operator-visible split/island/hijack tells",
                     {{RPCResult::Type::STR, "", "Warning code"}}},
                 {RPCResult::Type::OBJ, "active_tip", "",
                     {
@@ -493,11 +798,15 @@ RPCHelpMan getfinalityinfo()
                         {RPCResult::Type::STR_HEX, "authenticated_tip_hash", /*optional=*/true, ""},
                         {RPCResult::Type::NUM, "initial_reorg_depth", /*optional=*/true, ""},
                     }},
-                {RPCResult::Type::OBJ, "finality_profile", "",
+                {RPCResult::Type::STR, "finality", "Always \"none\". ExactReplay is authority; signatures are a sidecar."},
+                {RPCResult::Type::OBJ, "finality_profile", "Fork-choice park/warn profile; not signature-granted finality.",
                     {
                         {RPCResult::Type::STR, "profile", ""},
+                        {RPCResult::Type::STR, "action", "park or warn"},
+                        {RPCResult::Type::BOOL, "parking_enabled", "False when -parkdeepreorg=0 or a non-emergency profile is selected"},
+                        {RPCResult::Type::BOOL, "follows_most_work", "True when deep rewrites are not parked"},
                         {RPCResult::Type::NUM, "warn_depth", ""},
-                        {RPCResult::Type::NUM, "park_depth", ""},
+                        {RPCResult::Type::NUM, "park_depth", "0 when parking is disabled"},
                     }},
             }},
         RPCExamples{HelpExampleCli("getfinalityinfo", "")},
@@ -508,22 +817,50 @@ RPCHelpMan getfinalityinfo()
             const CBlockIndex* const best_header{chainman.m_best_header};
             UniValue result{UniValue::VOBJ};
             const auto mode{chainman.GetMatMulValidationMode()};
-            switch (mode) {
-            case kernel::MatMulValidationMode::CONSENSUS:
-                result.pushKV("matmul_validation_mode", "consensus");
-                break;
-            case kernel::MatMulValidationMode::TRUSTED:
-                result.pushKV("matmul_validation_mode", "trusted");
-                break;
-            case kernel::MatMulValidationMode::ECONOMIC:
-                result.pushKV("matmul_validation_mode", "economic");
-                break;
-            case kernel::MatMulValidationMode::SPV:
-                result.pushKV("matmul_validation_mode", "spv");
-                break;
-            }
+            result.pushKV("matmul_validation_mode",
+                          kernel::MatMulValidationModeName(mode));
+            result.pushKV("discovery_relay",
+                          kernel::MatMulModeIsDiscoveryRelay(mode));
+            result.pushKV("chain_oracle",
+                          kernel::MatMulModeIsChainAuthority(mode));
             result.pushKV("trusted_mirror", node::matmul_trusted::IsTrustedMirror());
             result.pushKV("trusted_signer_pubkeys", TrustedSignerPubKeysJSON());
+            {
+                const size_t n_signers{node::matmul_trusted::TrustedSigners().size()};
+                const size_t threshold{node::matmul_trusted::Threshold()};
+                const bool trusted_mirror{node::matmul_trusted::IsTrustedMirror()};
+                const bool configured{node::matmul_trusted::IsConfigured()};
+                bool signer_in_pin{false};
+                if (const auto local{node::matmul_trusted::LocalSigner()}) {
+                    signer_in_pin = node::matmul_trusted::IsAuthoritySigner(*local);
+                }
+                result.pushKV("threshold", static_cast<uint64_t>(threshold));
+                result.pushKV(
+                    "unblocked_pin_members",
+                    static_cast<uint64_t>(
+                        node::matmul_trusted::UnblockedPinMembers()));
+                result.pushKV(
+                    "pin_quorum_reachable",
+                    node::matmul_trusted::PinQuorumReachable());
+                result.pushKV(
+                    "open_attestors",
+                    node::matmul_trusted::OpenAttestorsEnabled());
+                result.pushKV(
+                    "single_key_pin",
+                    configured && (n_signers < 2 || threshold < 2));
+                result.pushKV(
+                    "single_key_trusted_authority",
+                    node::matmul_trusted::TrustedMirrorIsSingleKeyAuthority(
+                        trusted_mirror, n_signers, threshold));
+                result.pushKV(
+                    "collocated_signer_pin",
+                    node::matmul_trusted::CollocatedSignerPinIsHijackAmplifier(
+                        trusted_mirror,
+                        node::matmul_trusted::HasLocalSigner(),
+                        signer_in_pin,
+                        n_signers,
+                        threshold));
+            }
             if (tip != nullptr) {
                 UniValue active{UniValue::VOBJ};
                 active.pushKV("hash", tip->GetBlockHash().GetHex());
@@ -636,11 +973,22 @@ RPCHelpMan getfinalityinfo()
             const auto profile_settings{
                 kernel::GetReorgProtectionProfileSettings(
                     cm_opts.reorg_protection_profile)};
+            result.pushKV("finality", "none");
             UniValue profile{UniValue::VOBJ};
             profile.pushKV(
                 "profile",
                 kernel::ReorgProtectionProfileName(
                     cm_opts.reorg_protection_profile));
+            const uint32_t park_depth{
+                cm_opts.max_reorg_depth_park.value_or(
+                    profile_settings.park_depth)};
+            const bool park{
+                cm_opts.deep_reorg_action == kernel::DeepReorgAction::PARK};
+            const bool parking_enabled{
+                park && park_depth != kernel::REORG_PROTECTION_DEPTH_DISABLED};
+            profile.pushKV("action", park ? "park" : "warn");
+            profile.pushKV("parking_enabled", parking_enabled);
+            profile.pushKV("follows_most_work", !parking_enabled);
             profile.pushKV(
                 "warn_depth",
                 static_cast<int64_t>(
@@ -648,11 +996,12 @@ RPCHelpMan getfinalityinfo()
                         profile_settings.warn_depth)));
             profile.pushKV(
                 "park_depth",
-                static_cast<int64_t>(
-                    cm_opts.max_reorg_depth_park.value_or(
-                        profile_settings.park_depth)));
+                parking_enabled ? static_cast<int64_t>(park_depth) : 0);
             result.pushKV("finality_profile", std::move(profile));
             UniValue warnings{UniValue::VARR};
+            if (kernel::MatMulModeIsDiscoveryRelay(mode)) {
+                warnings.push_back("not_a_chain_oracle");
+            }
             if (best_header != nullptr && tip != nullptr &&
                 best_header->GetAncestor(tip->nHeight) != tip) {
                 warnings.push_back("best_header_diverged_from_active_tip");
@@ -664,8 +1013,128 @@ RPCHelpMan getfinalityinfo()
                     warnings.push_back("signed_frontier_off_active_chain");
                 }
             }
+            if (node::matmul_trusted::TrustedMirrorIsSingleKeyAuthority(
+                    node::matmul_trusted::IsTrustedMirror(),
+                    node::matmul_trusted::TrustedSigners().size(),
+                    node::matmul_trusted::Threshold())) {
+                warnings.push_back("single_key_trusted_authority");
+            }
+            {
+                bool signer_in_pin{false};
+                if (const auto local{node::matmul_trusted::LocalSigner()}) {
+                    signer_in_pin = node::matmul_trusted::IsAuthoritySigner(*local);
+                }
+                if (node::matmul_trusted::CollocatedSignerPinIsHijackAmplifier(
+                        node::matmul_trusted::IsTrustedMirror(),
+                        node::matmul_trusted::HasLocalSigner(),
+                        signer_in_pin,
+                        node::matmul_trusted::TrustedSigners().size(),
+                        node::matmul_trusted::Threshold())) {
+                    warnings.push_back("collocated_signer_pin");
+                }
+            }
+            if (!parking_enabled) {
+                warnings.push_back("deep_reorg_parking_disabled");
+            }
+            if (node::matmul_trusted::OpenAttestorsEnabled()) {
+                warnings.push_back("open_attestors_enabled");
+            }
+            if (node::matmul_trusted::IsConfigured() &&
+                node::matmul_trusted::UnblockedPinMembers() <=
+                    node::matmul_trusted::Threshold()) {
+                warnings.push_back("no_spare_pin_member");
+            }
             result.pushKV("warnings", std::move(warnings));
             return result;
+        }};
+}
+
+RPCHelpMan addmatmulattestationblocklist()
+{
+    return RPCHelpMan{
+        "addmatmulattestationblocklist",
+        "Manually block an attestation public key. The key becomes inert for "
+        "pin votes, open admission, refutations, and IsAuthoritySigner even if "
+        "it remains in -matmultrustedpubkey. Refused without applying when the "
+        "add would leave fewer than M unblocked pin members, or when the key is "
+        "this node's local signer. Never auto-populated from peer or attestor "
+        "counts.\n",
+        {
+            {"pubkey", RPCArg::Type::STR_HEX, RPCArg::Optional::NO,
+             "Compressed secp256k1 public key hex"},
+        },
+        RPCResult{RPCResult::Type::OBJ, "", "",
+            {
+                {RPCResult::Type::BOOL, "added", "Whether the key was newly blocked"},
+                {RPCResult::Type::STR, "result", "blocked|duplicate|would-disable-pin-quorum|local-signer|invalid|capacity"},
+                {RPCResult::Type::ARR, "blocked_pubkeys", "",
+                    {{RPCResult::Type::STR_HEX, "", "Compressed pubkey hex"}}},
+                {RPCResult::Type::NUM, "unblocked_pin_members", ""},
+                {RPCResult::Type::NUM, "threshold", ""},
+                {RPCResult::Type::BOOL, "pin_quorum_reachable", ""},
+                {RPCResult::Type::BOOL, "fail_closed", ""},
+                {RPCResult::Type::STR, "persist_error", /*optional=*/true, ""},
+            }},
+        RPCExamples{HelpExampleCli("addmatmulattestationblocklist", "\"02..\"")},
+        [](const RPCHelpMan& self, const JSONRPCRequest&) {
+            if (!node::matmul_trusted::IsConfigured()) {
+                throw JSONRPCError(
+                    RPC_MISC_ERROR,
+                    "MatMul attestation store is not configured");
+            }
+            const CPubKey pubkey{
+                ParseCompressedPubKeyHex(self.Arg<std::string>("pubkey"))};
+            std::string persist_error;
+            const auto result{
+                node::matmul_trusted::AddBlocklistedSigner(
+                    pubkey, persist_error)};
+            if (result == matmul::trusted::BlocklistResult::WouldDisablePinQuorum ||
+                result == matmul::trusted::BlocklistResult::LocalSigner ||
+                result == matmul::trusted::BlocklistResult::Capacity ||
+                result == matmul::trusted::BlocklistResult::Invalid) {
+                throw JSONRPCError(
+                    RPC_INVALID_PARAMETER,
+                    std::string{matmul::trusted::BlocklistResultName(result)});
+            }
+            UniValue out{BlocklistStatusJSON()};
+            out.pushKV(
+                "added",
+                result == matmul::trusted::BlocklistResult::Blocked);
+            out.pushKV(
+                "result",
+                matmul::trusted::BlocklistResultName(result));
+            if (!persist_error.empty()) {
+                out.pushKV("persist_error", persist_error);
+            }
+            return out;
+        }};
+}
+
+RPCHelpMan listmatmulattestationblocklist()
+{
+    return RPCHelpMan{
+        "listmatmulattestationblocklist",
+        "List the operator attestation key blocklist and whether the remaining "
+        "unblocked pin still meets M.\n",
+        {},
+        RPCResult{RPCResult::Type::OBJ, "", "",
+            {
+                {RPCResult::Type::ARR, "blocked_pubkeys", "",
+                    {{RPCResult::Type::STR_HEX, "", "Compressed pubkey hex"}}},
+                {RPCResult::Type::NUM, "unblocked_pin_members", ""},
+                {RPCResult::Type::NUM, "threshold", ""},
+                {RPCResult::Type::BOOL, "pin_quorum_reachable", ""},
+                {RPCResult::Type::BOOL, "fail_closed", "Always true: the node refuses a block that would drop unblocked pin members below M"},
+                {RPCResult::Type::BOOL, "persisted", "Whether the durable attestation database is open"},
+            }},
+        RPCExamples{HelpExampleCli("listmatmulattestationblocklist", "")},
+        [](const RPCHelpMan&, const JSONRPCRequest&) {
+            if (!node::matmul_trusted::IsConfigured()) {
+                throw JSONRPCError(
+                    RPC_MISC_ERROR,
+                    "MatMul attestation store is not configured");
+            }
+            return BlocklistStatusJSON();
         }};
 }
 
@@ -676,15 +1145,19 @@ void RegisterMatMulTrustedRPCCommands(CRPCTable& table)
     static const CRPCCommand commands[]{
         {"mining", &getmatmultrustedstatus},
         {"mining", &getmatmulattestedtip},
+        {"mining", &getmatmulattestors},
+        {"mining", &addmatmulattestationblocklist},
+        {"mining", &listmatmulattestationblocklist},
         {"blockchain", &getfinalityinfo},
         {"mining", &getmatmulattestations},
         {"mining", &submitmatmulattestations},
+        {"mining", &submitmatmulrefutation},
     };
     for (const auto& command : commands) {
         table.appendCommand(command.name, &command);
     }
     table.appendCommand(
-        "exportmatmulattestations", &commands[3]);
+        "exportmatmulattestations", &commands[4]);
     table.appendCommand(
-        "importmatmulattestations", &commands[4]);
+        "importmatmulattestations", &commands[5]);
 }

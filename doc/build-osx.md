@@ -127,14 +127,28 @@ brew install miniupnpc
 
 #### ZMQ Dependencies
 
-Support for ZMQ notifications requires the following dependency.
-Skip if you do not need ZMQ functionality.
+ZMQ is **required** for every shipped `btxd` (`-DWITH_ZMQ=ON`, the CMake
+default). Install:
 
 ``` bash
 brew install zeromq
 ```
 
-Check out the [further configuration](#further-configuration) section for more information.
+Apple Silicon Homebrew is not on CMake's default search path. Configure with:
+
+``` bash
+export PKG_CONFIG_PATH="/opt/homebrew/lib/pkgconfig"
+cmake -B build -DCMAKE_PREFIX_PATH=/opt/homebrew -DWITH_ZMQ=ON
+```
+
+CMake prefers static `libzmq.a`, `libevent_*.a`, and `libomp.a` on macOS so
+the tarball has no Homebrew load commands. After linking,
+`otool -L build/bin/btxd` and `otool -L build/bin/btx-cli` must not list
+`/opt/homebrew`, must not list `libzmq` as a dylib, and
+`python3 scripts/release/verify_release_btxd.py build/bin/btxd build/bin/btx-cli`
+must pass. `strings build/bin/btxd` must contain `Enable publish hash block`
+— `-zmqpubhashblock` in the binary without that help text is the 0.33.4.2
+silent-publish failure.
 
 For more information on ZMQ, see: [zmq.md](zmq.md)
 

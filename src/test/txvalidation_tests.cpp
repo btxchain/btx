@@ -3087,6 +3087,61 @@ BOOST_FIXTURE_TEST_CASE(block_rejects_non_credit_v2_lifecycle_at_sunset_height, 
     ExpectBlockRejected(*this, block, "bad-shielded-sunset-non-exit");
 }
 
+BOOST_FIXTURE_TEST_CASE(block_rejects_shielded_egress_at_pool_disable_height, TestChain100Setup)
+{
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    const ScopedConsensusHeightOverride restore_pool{
+        consensus.nShieldedPoolDisableHeight, consensus.nShieldedPoolDisableHeight};
+    consensus.nShieldedPoolDisableHeight = std::numeric_limits<int32_t>::max();
+    const auto fixture = BuildV2DirectSendChainFixture(*this, &consensus);
+    BOOST_REQUIRE(fixture.built.tx.shielded_bundle.HasShieldedInputs());
+
+    consensus.nShieldedPoolDisableHeight =
+        WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Height() + 1);
+    const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    const CBlock block =
+        CreateBlock({fixture.built.tx}, script_pub_key, m_node.chainman->ActiveChainstate());
+    ExpectBlockRejected(*this, block, "bad-shielded-pool-disabled-egress");
+}
+
+BOOST_FIXTURE_TEST_CASE(block_rejects_shielded_ingress_at_pool_disable_height, TestChain100Setup)
+{
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    const ScopedConsensusHeightOverride restore_pool{
+        consensus.nShieldedPoolDisableHeight, consensus.nShieldedPoolDisableHeight};
+    consensus.nShieldedPoolDisableHeight = std::numeric_limits<int32_t>::max();
+    const auto fixture = BuildV2IngressChainFixture(*this);
+    BOOST_REQUIRE(fixture.built.tx.shielded_bundle.GetTransactionFamily() ==
+                  shielded::v2::TransactionFamily::V2_INGRESS_BATCH);
+
+    consensus.nShieldedPoolDisableHeight =
+        WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Height() + 1);
+    const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    const CBlock block =
+        CreateBlock({fixture.built.tx}, script_pub_key, m_node.chainman->ActiveChainstate());
+    ExpectBlockRejected(*this, block, "bad-shielded-pool-disabled-ingress");
+}
+
+BOOST_FIXTURE_TEST_CASE(block_accepts_pre_pool_disable_shielded_ingress_and_egress, TestChain100Setup)
+{
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    const ScopedConsensusHeightOverride restore_pool{
+        consensus.nShieldedPoolDisableHeight, consensus.nShieldedPoolDisableHeight};
+    consensus.nShieldedPoolDisableHeight = std::numeric_limits<int32_t>::max();
+    const auto send_fixture = BuildV2DirectSendChainFixture(*this, &consensus);
+    BOOST_REQUIRE(send_fixture.built.tx.shielded_bundle.HasShieldedInputs());
+    BOOST_REQUIRE(send_fixture.built.tx.shielded_bundle.HasShieldedOutputs());
+
+    const int32_t next_height =
+        WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Height() + 1);
+    consensus.nShieldedPoolDisableHeight = next_height + 10;
+    BOOST_REQUIRE(!consensus.IsShieldedPoolDisabled(next_height));
+    const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    const CBlock block =
+        CreateBlock({send_fixture.built.tx}, script_pub_key, m_node.chainman->ActiveChainstate());
+    ExpectBlockAccepted(*this, block);
+}
+
 BOOST_FIXTURE_TEST_CASE(mempool_evicts_non_exit_shielded_transaction_when_sunset_height_becomes_next_block, TestChain100Setup)
 {
     // A non-exit shielded tx (here a z->z private transfer: value_balance == fee, no transparent

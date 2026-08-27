@@ -7,6 +7,7 @@
 #include <hash.h>
 
 #include <limits>
+#include <tuple>
 
 namespace matmul::v4::rc::gated_ctl_alias {
 namespace {
@@ -258,9 +259,14 @@ bool BuildConstraintSystemV1(
               "gated_ctl.lane2.first",
               "gated_ctl.lane2.transition",
               "gated_ctl.lane2.last"}}) {
-        const auto [
-            inverse, term, running, term_name, first_name,
-            transition_name, last_name] = lane;
+        // AppleClang 16 + OpenMP cannot capture structured bindings in lambdas.
+        const uint32_t inverse{std::get<0>(lane)};
+        const uint32_t term{std::get<1>(lane)};
+        const uint32_t running{std::get<2>(lane)};
+        const char* const term_name{std::get<3>(lane)};
+        const char* const first_name{std::get<4>(lane)};
+        const char* const transition_name{std::get<5>(lane)};
+        const char* const last_name{std::get<6>(lane)};
         Add(
             out,
             term_name,

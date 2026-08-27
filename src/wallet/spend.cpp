@@ -331,7 +331,8 @@ void CoinsResult::Clear() {
 
 void CoinsResult::Erase(const std::unordered_set<COutPoint, SaltedOutpointHasher>& coins_to_remove)
 {
-    for (auto& [type, vec] : coins) {
+    for (auto& coin_entry : coins) {
+        auto& vec = coin_entry.second;
         auto remove_it = std::remove_if(vec.begin(), vec.end(), [&](const COutput& coin) {
             // remove it if it's on the set
             if (coins_to_remove.count(coin.outpoint) == 0) return false;

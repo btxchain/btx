@@ -28,8 +28,8 @@ get_directory_property(precious_variables CACHE_VARIABLES)
 #=============================
 set(CLIENT_NAME "BTX")
 set(CLIENT_VERSION_MAJOR 0)
-set(CLIENT_VERSION_MINOR 33)
-set(CLIENT_VERSION_BUILD 4)
+set(CLIENT_VERSION_MINOR 34)
+set(CLIENT_VERSION_BUILD 0)
 set(CLIENT_VERSION_RC 0)
 set(CLIENT_VERSION_IS_RELEASE "true")
 set(COPYRIGHT_YEAR "2026")
@@ -201,9 +201,25 @@ if(WITH_MINIUPNPC)
   find_package(MiniUPnPc MODULE REQUIRED)
 endif()
 
-option(WITH_ZMQ "Enable ZMQ notifications." OFF)
+# Default ON. Community issues #111 (v0.33.3, jarekpiot) and #122
+# (v0.33.4.2 Linux CPU tarball, same reporter): CMake's historical default
+# OFF plus a native tarball that forgot -DWITH_ZMQ=ON shipped btxd that
+# advertised -zmqpubhashblock, linked no libzmq, omitted getzmqnotifications,
+# and did not fail startup. #111 was closed by recutting that one tarball;
+# the default stayed OFF, which is why the identical miss shipped again as
+# #122. Durable fix: default ON, find_package REQUIRED, and the
+# ldd/otool gate in scripts/release/verify_release_btxd.py / doc/release-process.md.
+# Release builds still pass -DWITH_ZMQ=ON explicitly. Fuzzing forces this
+# OFF below.
+option(WITH_ZMQ "Enable ZMQ notifications." ON)
 if(WITH_ZMQ)
   find_package(ZeroMQ 4.0.0 MODULE REQUIRED)
+endif()
+if(APPLE AND WITH_ZMQ AND ZMQ_LINKAGE AND ZMQ_LINKAGE MATCHES "^shared")
+  message(FATAL_ERROR
+    "WITH_ZMQ=ON on macOS resolved a shared libzmq. Release btxd must "
+    "statically link libzmq.a (Homebrew: brew install zeromq). A dylib load "
+    "command is the 0.33.4.2 failure shape on any Mac without that keg.")
 endif()
 
 option(WITH_USDT "Enable tracepoints for Userspace, Statically Defined Tracing." OFF)
@@ -848,6 +864,16 @@ message("  external signer ..................... ${ENABLE_EXTERNAL_SIGNER}")
 message("  tor subprocess ...................... ${ENABLE_TOR_SUBPROCESS}")
 message("  port mapping using UPnP ............. ${WITH_MINIUPNPC}")
 message("  ZeroMQ .............................. ${WITH_ZMQ}")
+if(WITH_ZMQ AND ZMQ_LINKAGE)
+  message("   - linkage .......................... ${ZMQ_LINKAGE}")
+endif()
+if(LIBEVENT_LINKAGE)
+  message("  Libevent linkage .................... ${LIBEVENT_LINKAGE}")
+endif()
+if(BUILD_DAEMON AND NOT WITH_ZMQ AND NOT BUILD_FOR_FUZZING)
+  list(APPEND configure_warnings
+    "WITH_ZMQ is OFF: btxd will accept -zmqpub* and publish nothing. Release builds must configure -DWITH_ZMQ=ON and pass scripts/release/verify_release_btxd.py.")
+endif()
 message("  USDT tracing ........................ ${WITH_USDT}")
 message("  QR code (GUI) ....................... ${WITH_QRENCODE}")
 message("  DBus (GUI) .......................... ${WITH_DBUS}")

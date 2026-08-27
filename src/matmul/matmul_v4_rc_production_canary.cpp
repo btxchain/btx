@@ -436,10 +436,13 @@ std::string ReadPublicSysctlString(const char* name)
 bool RCProductionGoldenManifestCohortValid(
     const std::vector<RCProductionGoldenManifestEntry>& manifest)
 {
-    if (manifest.size() < 2) return false;
+    // This line ships the classes it measured. CUDA is required. Metal (and
+    // HIP) rows are optional: a fork adds them to *its* manifest after it
+    // measures. Requiring Metal here forced either a name-class blessing or a
+    // third-party submission, both of which 0.34 exists to stop.
+    if (manifest.empty()) return false;
     const auto& reference{manifest.front()};
     bool has_cuda{false};
-    bool has_metal{false};
     std::set<std::pair<std::string, std::string>> provider_classes;
     for (const auto& entry : manifest) {
         if (!entry.independently_reproduced || entry.expected_digest.IsNull() ||
@@ -470,9 +473,8 @@ bool RCProductionGoldenManifestCohortValid(
             entry.provider_class.device_architecture)};
         if (!provider_classes.insert(provider_class).second) return false;
         has_cuda = has_cuda || entry.provider_class.provider_family == "cuda";
-        has_metal = has_metal || entry.provider_class.provider_family == "metal";
     }
-    return has_cuda && has_metal;
+    return has_cuda;
 }
 
 bool RCProductionGoldenManifestMatchesBuild(

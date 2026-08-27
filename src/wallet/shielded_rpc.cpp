@@ -8697,7 +8697,9 @@ RPCHelpMan z_sendmany()
             if (!explicit_fee) {
                 CAmount estimated_fee{0};
                 for (int attempt = 0; attempt < MAX_SHIELDED_FEE_CONVERGENCE_ATTEMPTS; ++attempt) {
-                    const auto [shielded_recipients, transparent_recipients] = materialize_recipients(estimated_fee);
+                    const auto recipients = materialize_recipients(estimated_fee);
+                    const auto& shielded_recipients{recipients.first};
+                    const auto& transparent_recipients{recipients.second};
                     std::string selection_error;
                     const auto selection = WITH_LOCK(
                         pwallet->m_shielded_wallet->cs_shielded,
@@ -8745,7 +8747,9 @@ RPCHelpMan z_sendmany()
                     try {
                         for (int attempt = 0; attempt < MAX_SHIELDED_FEE_CONVERGENCE_ATTEMPTS; ++attempt) {
                             release_reservations();
-                            const auto [shielded_recipients, transparent_recipients] = materialize_recipients(fee);
+                            const auto recipients = materialize_recipients(fee);
+                            const auto& shielded_recipients{recipients.first};
+                            const auto& transparent_recipients{recipients.second};
 
                             std::optional<CMutableTransaction> mtx;
                             std::string create_error;

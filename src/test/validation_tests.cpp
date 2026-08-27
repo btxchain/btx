@@ -210,6 +210,51 @@ BOOST_AUTO_TEST_CASE(regtest_shielded_matrict_disable_height_rejects_negative)
     BOOST_CHECK_THROW(CreateChainParams(args, ChainType::REGTEST), std::runtime_error);
 }
 
+BOOST_AUTO_TEST_CASE(regtest_shielded_pool_disable_height_override)
+{
+    ArgsManager args;
+    args.ForceSetArg("-regtestshieldedpooldisableheight", "201");
+
+    const auto params = CreateChainParams(args, ChainType::REGTEST);
+    BOOST_REQUIRE(params);
+    BOOST_CHECK_EQUAL(params->GetConsensus().nShieldedPoolDisableHeight, 201);
+    BOOST_CHECK(!params->GetConsensus().IsShieldedPoolDisabled(200));
+    BOOST_CHECK(params->GetConsensus().IsShieldedPoolDisabled(201));
+}
+
+BOOST_AUTO_TEST_CASE(regtest_shielded_pool_disable_height_rejects_negative)
+{
+    ArgsManager args;
+    args.ForceSetArg("-regtestshieldedpooldisableheight", "-1");
+    BOOST_CHECK_THROW(CreateChainParams(args, ChainType::REGTEST), std::runtime_error);
+}
+
+BOOST_AUTO_TEST_CASE(mainnet_shielded_pool_disable_height_is_199300)
+{
+    ArgsManager args;
+    const auto params = CreateChainParams(args, ChainType::MAIN);
+    BOOST_REQUIRE(params);
+    const auto& consensus = params->GetConsensus();
+    BOOST_CHECK_EQUAL(consensus.nShieldedPoolDisableHeight, 199'300);
+    BOOST_CHECK(!consensus.IsShieldedPoolDisabled(199'299));
+    BOOST_CHECK(consensus.IsShieldedPoolDisabled(199'300));
+    BOOST_CHECK(consensus.IsShieldedPoolDisabled(199'301));
+}
+
+BOOST_AUTO_TEST_CASE(non_mainnet_shielded_pool_disable_height_is_unset)
+{
+    ArgsManager args;
+    for (const auto chain : {ChainType::TESTNET, ChainType::TESTNET4, ChainType::SIGNET,
+                             ChainType::REGTEST, ChainType::SHIELDEDV2DEV}) {
+        const auto params = CreateChainParams(args, chain);
+        BOOST_REQUIRE(params);
+        const auto& consensus = params->GetConsensus();
+        BOOST_CHECK_EQUAL(consensus.nShieldedPoolDisableHeight, std::numeric_limits<int32_t>::max());
+        BOOST_CHECK(!consensus.IsShieldedPoolDisabled(199'300));
+        BOOST_CHECK(!consensus.IsShieldedPoolDisabled(std::numeric_limits<int32_t>::max()));
+    }
+}
+
 BOOST_AUTO_TEST_CASE(regtest_shielded_spend_path_recovery_activation_height_default)
 {
     ArgsManager args;

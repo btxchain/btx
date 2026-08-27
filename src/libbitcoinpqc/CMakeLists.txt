@@ -189,6 +189,42 @@ elseif(SPHINCSPLUS_VARIANT STREQUAL "shake-a64")
     target_compile_definitions(bitcoinpqc PRIVATE SPHINCSPLUS_VARIANT_SHAKE_A64=1)
 endif()
 
+# Not a cosmetic ld warning. SPHINCS+ uses SUPERCOP crypto_sign_* names.
+# Static libsodium.a (macOS ZMQ) exports the same identifiers for Ed25519.
+# ld keeps the first: shipped Metal btxd resolved crypto_sign_seed_keypair
+# as a 4-byte branch to crypto_sign_ed25519_seed_keypair, sitting in a
+# contiguous libsodium run. The production caller is:
+#   CPQKey::MakeNewKey (src/pqkey.cpp)
+#     -> bitcoin_pqc_keygen
+#     -> slh_dsa_shake_128s_keygen (src/slh_dsa/keygen.c)
+#     -> crypto_sign_seed_keypair   // expects SPHINCS-128s, not Ed25519
+# src/pq/ does not call the unprefixed name. Dilithium already uses
+# pqcrystals_* via DILITHIUM_NAMESPACE. Same .a on Linux resolved SPHINCS
+# (definition + caller both in libbitcoinpqc.a); macOS static sodium won
+# first — platform-dependent keygen. Do not "fix" this by reordering
+# sodium after PQC: that would steal ZMQ's Curve. Prefix SPHINCS+ and
+# slh_dsa TUs only.
+set(_btx_spx_rename
+  crypto_sign_seed_keypair=btx_spx_crypto_sign_seed_keypair
+  crypto_sign_keypair=btx_spx_crypto_sign_keypair
+  crypto_sign_signature=btx_spx_crypto_sign_signature
+  crypto_sign_verify=btx_spx_crypto_sign_verify
+  crypto_sign_secretkeybytes=btx_spx_crypto_sign_secretkeybytes
+  crypto_sign_publickeybytes=btx_spx_crypto_sign_publickeybytes
+  crypto_sign_bytes=btx_spx_crypto_sign_bytes
+  crypto_sign_seedbytes=btx_spx_crypto_sign_seedbytes
+  crypto_sign_open=btx_spx_crypto_sign_open
+  crypto_sign=btx_spx_crypto_sign
+)
+set_source_files_properties(
+  ${SLH_DSA_SOURCES}
+  src/slh_dsa/utils.c
+  src/slh_dsa/keygen.c
+  src/slh_dsa/sign.c
+  src/slh_dsa/verify.c
+  PROPERTIES COMPILE_DEFINITIONS "${_btx_spx_rename}"
+)
+
 # PQ primitives are extremely compute-heavy; keep this target optimized even in
 # debug builds to avoid CI timeouts and pathological wallet test runtimes.
 if(NOT MSVC)

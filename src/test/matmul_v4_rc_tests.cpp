@@ -2585,6 +2585,19 @@ BOOST_AUTO_TEST_CASE(rc_dos_admission_separate_from_v4_lt)
     BOOST_CHECK(CanStartMatMulRCVerification(/*pending=*/0, /*work_units=*/1, p, 100));
     BOOST_CHECK(!CanStartMatMulRCVerification(/*pending=*/1, /*work_units=*/1, p, 100));
     BOOST_CHECK(!CanStartMatMulRCVerification(/*pending=*/0, /*work_units=*/1, p, 49));
+    // Cap=1 (one job) is monopolizable. Competing ExactReplay must not take
+    // the only slot: the reserved AuthenticatedTipChild lane is the whole cap.
+    BOOST_CHECK(!CanStartCompetingMatMulRCVerification(/*pending=*/0, /*work_units=*/1, p, 100));
+    BOOST_CHECK(!CanStartCompetingMatMulRCVerification(/*pending=*/0, /*work_units=*/1, p, 49));
+
+    p.nMatMulRCMaxPendingVerifications = 16;
+    BOOST_CHECK_EQUAL(EffectiveMatMulRCMaxPendingVerifications(p, 100), 16U);
+    BOOST_CHECK(CanStartCompetingMatMulRCVerification(/*pending=*/0, /*work_units=*/1, p, 100));
+    BOOST_CHECK(CanStartCompetingMatMulRCVerification(/*pending=*/14, /*work_units=*/1, p, 100));
+    BOOST_CHECK(!CanStartCompetingMatMulRCVerification(/*pending=*/15, /*work_units=*/1, p, 100));
+    BOOST_CHECK(CanStartMatMulRCVerification(/*pending=*/15, /*work_units=*/1, p, 100));
+    BOOST_CHECK(!CanStartMatMulRCVerification(/*pending=*/16, /*work_units=*/1, p, 100));
+    p.nMatMulRCMaxPendingVerifications = 1;
 
     // Consensus dims, PROFILE 1 (ExactReplay authority): work units scale by
     // TotalRCEpisodeMacs / 2^40 (~129 after fused FFN).
@@ -2598,6 +2611,10 @@ BOOST_AUTO_TEST_CASE(rc_dos_admission_separate_from_v4_lt)
     BOOST_CHECK(CanStartMatMulRCVerification(0, wu, p, 100));
     BOOST_CHECK(!CanStartMatMulRCVerification(1, wu, p, 100));
     BOOST_CHECK(!CanStartMatMulRCVerification(0, wu + 1, p, 100));
+    // Production default is one RC job (cap == wu). Competing ExactReplay
+    // must not occupy that job: a stolen ticket would otherwise freeze the
+    // authenticated tip-child behind a 12s junk replay.
+    BOOST_CHECK(!CanStartCompetingMatMulRCVerification(0, wu, p, 100));
 
     // Consensus dims, PROFILE 2 (datacenter): the sampled carrier is only a
     // precheck. Until Stage 3 is complete, ExactReplay remains authoritative,

@@ -8,7 +8,7 @@
 # (`systemctl --user start btx-miner@1`). Drop in the same
 # BindsTo=btxd.service against the user-level btxd.service so the signer
 # stops when the node stops. This repository copy is the packager
-# template only; do not SSH-change production macpro2 units from this file.
+# template only; do not SSH-change production gpu-signer units from this file.
 
 [Unit]
 Description=BTX miner worker %i

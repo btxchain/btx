@@ -98,6 +98,15 @@ using util::MakeUnorderedList;
 
 namespace {
 
+void EnsureNotDiscoveryRelay(const ChainstateManager& chainman)
+{
+    if (chainman.IsDiscoveryRelay()) {
+        throw JSONRPCError(
+            RPC_MISC_ERROR,
+            "This node is a discovery relay (-matmulvalidation=relay), not a chain oracle.");
+    }
+}
+
 static constexpr int64_t SNAPSHOT_TARGET_DAYS{7};
 static constexpr int64_t SECONDS_PER_DAY{24 * 60 * 60};
 
@@ -353,6 +362,7 @@ static RPCHelpMan getblockcount()
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
     ChainstateManager& chainman = EnsureAnyChainman(request.context);
+    EnsureNotDiscoveryRelay(chainman);
     LOCK(cs_main);
     return chainman.ActiveChain().Height();
 },
@@ -373,6 +383,7 @@ static RPCHelpMan getbestblockhash()
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
 {
     ChainstateManager& chainman = EnsureAnyChainman(request.context);
+    EnsureNotDiscoveryRelay(chainman);
     LOCK(cs_main);
     return chainman.ActiveChain().Tip()->GetBlockHash().GetHex();
 },
@@ -618,6 +629,7 @@ static RPCHelpMan getblockfrompeer()
 {
     const NodeContext& node = EnsureAnyNodeContext(request.context);
     ChainstateManager& chainman = EnsureChainman(node);
+    EnsureNotDiscoveryRelay(chainman);
     PeerManager& peerman = EnsurePeerman(node);
 
     const uint256& block_hash{ParseHashV(request.params[0], "blockhash")};
@@ -1907,17 +1919,7 @@ static void SoftForkDescPushBack(const CBlockIndex* blockindex, UniValue& softfo
 
 static std::string MatMulValidationModeToString(kernel::MatMulValidationMode mode)
 {
-    switch (mode) {
-    case kernel::MatMulValidationMode::CONSENSUS:
-        return "consensus";
-    case kernel::MatMulValidationMode::TRUSTED:
-        return "trusted";
-    case kernel::MatMulValidationMode::ECONOMIC:
-        return "economic";
-    case kernel::MatMulValidationMode::SPV:
-        return "spv";
-    }
-    return "unknown";
+    return kernel::MatMulValidationModeName(mode);
 }
 
 // used by rest.cpp:rest_chaininfo, so cannot be static
@@ -1940,7 +1942,16 @@ RPCHelpMan getblockchaininfo()
                 {RPCResult::Type::NUM_TIME, "mediantime", "The median block time expressed in " + UNIX_EPOCH_TIME},
                 {RPCResult::Type::NUM, "verificationprogress", "estimate of verification progress [0..1]"},
                 {RPCResult::Type::BOOL, "initialblockdownload", "(debug information) estimate of whether this node is in Initial Block Download mode"},
-                {RPCResult::Type::STR, "matmulvalidationmode", "MatMul validation tier mode: consensus (independent full node), trusted (operator-trusted signed-quorum mirror), economic (Phase 1 only), or spv"},
+                {RPCResult::Type::STR, "matmulvalidationmode", "MatMul validation tier: consensus, trusted, relay (discovery/ADDR only), economic, or spv"},
+                {RPCResult::Type::BOOL, "discovery_relay", "True when this node introduces peers and is not a chain-tip oracle"},
+                {RPCResult::Type::BOOL, "chain_oracle", "False on a discovery relay. Do not treat bestblockhash as MatMul authority."},
+                {RPCResult::Type::OBJ, "matmul_pow", "EncDr stall-recovery and rejected-fork diagnostics. Explorers on a falling-difficulty chain above stall_recovery_height are not this node's live chain.",
+                    {
+                        {RPCResult::Type::NUM, "stall_recovery_height", "Height at which EncDr stall-recovery nBits inherit (199299 on mainnet). INT_MAX means not configured."},
+                        {RPCResult::Type::BOOL, "stall_recovery_active", "Whether stall-recovery nBits apply at the current tip height"},
+                        {RPCResult::Type::NUM, "rejected_divergent_pow_headers", "Count of headers this process rejected for bad-diffbits at/after stall_recovery_height. Those headers are not indexed."},
+                        {RPCResult::Type::STR_HEX, "last_rejected_divergent_pow_hash", /*optional=*/true, "Most recently rejected bad-diffbits header hash, if any"},
+                    }},
                 {RPCResult::Type::OBJ, "matmul_signed_frontier", /*optional=*/true,
                  "Present when -matmultrustedpubkey is configured. Highest height this node has a current-key quorum for, including hashes it has not fetched. Distinguishes a stranded fork from a paused signer: getmatmulattestedtip.hash only sees HAVE_DATA on this chain.",
                     {
@@ -2005,6 +2016,21 @@ RPCHelpMan getblockchaininfo()
     obj.pushKV("verificationprogress", chainman.GuessVerificationProgress(&tip));
     obj.pushKV("initialblockdownload", chainman.IsInitialBlockDownload());
     obj.pushKV("matmulvalidationmode", MatMulValidationModeToString(chainman.GetMatMulValidationMode()));
+    obj.pushKV("discovery_relay", chainman.IsDiscoveryRelay());
+    obj.pushKV("chain_oracle", kernel::MatMulModeIsChainAuthority(chainman.GetMatMulValidationMode()));
+    {
+        const Consensus::Params& consensus{chainman.GetConsensus()};
+        UniValue pow{UniValue::VOBJ};
+        pow.pushKV("stall_recovery_height", consensus.nMatMulStallRecoveryHeight);
+        pow.pushKV("stall_recovery_active",
+                   consensus.IsMatMulStallRecoveryActive(height));
+        pow.pushKV("rejected_divergent_pow_headers",
+                   static_cast<uint64_t>(chainman.GetRejectedDivergentPowHeaderCount()));
+        if (const auto last{chainman.GetLastRejectedDivergentPowHeader()}) {
+            pow.pushKV("last_rejected_divergent_pow_hash", last->GetHex());
+        }
+        obj.pushKV("matmul_pow", std::move(pow));
+    }
     if (const auto frontier{chainman.GetSignedFrontierStatus()};
         frontier.available) {
         UniValue signed_frontier{UniValue::VOBJ};
@@ -4319,6 +4345,7 @@ static RPCHelpMan loadtxoutset()
 
     NodeContext& node = EnsureAnyNodeContext(request.context);
     ChainstateManager& chainman = EnsureChainman(node);
+    EnsureNotDiscoveryRelay(chainman);
     const fs::path path{AbsPathForConfigVal(EnsureArgsman(node), fs::u8path(self.Arg<std::string>("path")))};
 
     FILE* file{fsbridge::fopen(path, "rb")};
@@ -4721,6 +4748,7 @@ static RPCHelpMan loadtxoutsetattested()
     EnsureNotWalletRestricted(request);
     NodeContext& node = EnsureAnyNodeContext(request.context);
     ChainstateManager& chainman = EnsureChainman(node);
+    EnsureNotDiscoveryRelay(chainman);
     const ArgsManager& args{EnsureArgsman(node)};
 
     if (!node::matmul_trusted::IsTrustedMirror()) {
@@ -4842,6 +4870,7 @@ static RPCHelpMan offerattestedutxosnapshot()
     EnsureNotWalletRestricted(request);
     NodeContext& node = EnsureAnyNodeContext(request.context);
     PeerManager& peerman = EnsurePeerman(node);
+    EnsureNotDiscoveryRelay(EnsureChainman(node));
     const ArgsManager& args{EnsureArgsman(node)};
     const fs::path path{
         AbsPathForConfigVal(args, fs::u8path(self.Arg<std::string>("path")))};

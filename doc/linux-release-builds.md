@@ -23,10 +23,25 @@ loader path. The NVIDIA driver is still required (`libcuda.so.1`).
 
 Guix CUDA builds already pass `-DCMAKE_CUDA_RUNTIME_LIBRARY=Static
 -DBTX_CUDA_RUNTIME_LIBRARY=Static`. Packaged binaries should not have dynamic
-`libcudart.so`, `libcuda.so`, or CUDA `RPATH`/`RUNPATH` entries.
-`libcublasLt` may remain a dynamic dependency of the experimental MatMul CUDA
-backend — a remaining `libcublasLt.so.*` NEEDED entry is expected and is not
-fixed by the cudart-static change.
+`libcudart.so`, `libcuda.so`, or CUDA `RPATH`/`RUNPATH` entries from the
+link step. `libcublasLt` remains a dynamic dependency of the experimental
+MatMul CUDA backend and is **not** part of the NVIDIA driver. A CUDA
+tarball that ships only `btxd` fails at launch with
+`libcublasLt.so.13: cannot open shared object file`. Native CUDA
+archives must run `scripts/release/bundle_cuda_runtime_libs.py` so
+`libcublasLt` (and its CUDA-toolkit siblings) sit next to `btxd` with
+`$ORIGIN` rpath. `python3 scripts/release/verify_release_btxd.py` then
+executes `btxd -version` and requires exit 0; that is the gate that
+catches a missing CUDA runtime.
+
+The NVIDIA driver is still required on the target (`libcuda.so.1`). Do
+not bundle `libcuda.so.*`.
+
+All three Linux/macOS release flavors (CPU, CUDA, Metal) must configure
+`-DWITH_ZMQ=ON`. After linking, `python3 scripts/release/verify_release_btxd.py bin/btxd`
+must pass (`ldd` shows `libzmq` on Linux; macOS uses static `libzmq.a`). CMake
+must print `ZeroMQ .............................. ON`. A `btxd` that still
+contains `-zmqpubhashblock` strings without linking libzmq must not ship.
 
 `cudaRuntimeGetVersion()` reports the statically linked CUDA runtime line, while
 `cudaDriverGetVersion()` reports the installed NVIDIA driver API level. These

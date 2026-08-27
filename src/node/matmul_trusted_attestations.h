@@ -16,6 +16,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <uint256.h>
@@ -56,9 +57,37 @@ void ResetForTest();
 [[nodiscard]] bool IsTrustedMirror();
 [[nodiscard]] bool ServesAttestations();
 [[nodiscard]] bool HasLocalSigner();
+/** Default for -matmulattestationserve. A plain consensus node (no local
+ *  signing key, not -matmulvalidation=trusted) must not answer GETMMATTEST;
+ *  that is the live isolation default so public fan-in cannot serialize
+ *  cs_main on the only signer. A local WIF or trusted-mirror mode opts in. */
+[[nodiscard]] inline constexpr bool DefaultMatMulAttestationServe(
+    bool has_local_signer, bool trusted_mirror)
+{
+    return has_local_signer || trusted_mirror;
+}
 [[nodiscard]] std::chrono::milliseconds WaitTimeout();
 [[nodiscard]] size_t Threshold();
 [[nodiscard]] std::vector<CPubKey> TrustedSigners();
+[[nodiscard]] bool OpenAttestorsEnabled();
+[[nodiscard]] size_t OpenThreshold();
+[[nodiscard]] std::vector<CPubKey> AdmittedOpenSigners();
+[[nodiscard]] std::vector<CPubKey> FrozenOpenSigners();
+[[nodiscard]] bool IsAuthoritySigner(const CPubKey& pubkey);
+[[nodiscard]] bool IsBlocked(const CPubKey& pubkey);
+[[nodiscard]] std::vector<CPubKey> BlockedSigners();
+[[nodiscard]] std::vector<CPubKey> ConfigBlockedSigners();
+[[nodiscard]] std::vector<CPubKey> RuntimeBlockedSigners();
+[[nodiscard]] size_t UnblockedPinMembers();
+[[nodiscard]] bool PinQuorumReachable();
+[[nodiscard]] matmul::trusted::BlocklistResult AddBlocklistedSigner(
+    const CPubKey& pubkey, std::string& persist_error);
+[[nodiscard]] std::vector<matmul::trusted::ExactReplayAttestation> HeardAttestations();
+[[nodiscard]] matmul::trusted::AttestationLogHead LogHead();
+[[nodiscard]] matmul::trusted::AddResult AddRefutation(
+    const matmul::trusted::ExactReplayRefutation& refutation,
+    const uint256& expected_hash,
+    int32_t expected_height);
 [[nodiscard]] std::optional<CPubKey> LocalSigner();
 [[nodiscard]] std::optional<uint256> ReplayAuthorityContext();
 
@@ -148,10 +177,11 @@ enum class HistoricalReverifyAdmit : uint8_t {
     QueueFull,
     AlreadyQueued,
     InflightFull,
+    LiveGpuBusy,
 };
 
 [[nodiscard]] HistoricalReverifyAdmit TryAdmitHistoricalReverify(
-    const uint256& block_hash);
+    const uint256& block_hash, bool live_gpu_busy = false);
 void NoteHistoricalReverifyStarted(const uint256& block_hash);
 void NoteHistoricalReverifyFinished(const uint256& block_hash);
 void ResetHistoricalReverifyBudgetForTest();
@@ -186,7 +216,7 @@ static constexpr int SIGNER_GETMMATTEST_SERVE_WINDOW{16};
 /** Cached catch-up GETMMATTEST, beyond the live window, only this far
  *  behind the signer tip. Live 2026-08-16: after opening cached serve to
  *  every addnode/manual peer, IBD nodes at ~185006 / ~190041 consumed the
- *  signer's tokens; nyc1 (84 behind) never appeared in the serve log and
+ *  signer's tokens; a public CPU archive (84 behind) never appeared in the serve log and
  *  stayed at ~36s/block ExactReplay. Do not regenerate ExactReplay. */
 static constexpr int SIGNER_GETMMATTEST_CACHED_CATCHUP_WINDOW{256};
 /** Consecutive ignored GETMMATTEST (rate-limited serve or historical
@@ -194,6 +224,16 @@ static constexpr int SIGNER_GETMMATTEST_CACHED_CATCHUP_WINDOW{256};
  *  24h. Aggressive P2P is penalized; a silent drop is not enough
  *  because the peer can reconnect and keep filling the accept queue. */
 static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
+
+/** Per-peer GETMMATTEST serve tokens. Live (tip-adjacent) and historical
+ *  must not share a bucket: live 2026-08-16 IBD probes at 185006 / 190041
+ *  spent the signer's 16 live tokens so a public CPU archive never received tip MMATTEST.
+ *  Classification is height vs tip (GetMmAttestIsLiveWindow), independent
+ *  of HasLocalSigner — archives were treating every height as live. */
+static constexpr double GETMMATTEST_LIVE_REQUEST_BURST{16.0};
+static constexpr double GETMMATTEST_HISTORICAL_REQUEST_BURST{4.0};
+static constexpr auto GETMMATTEST_LIVE_TOKEN_REFILL{std::chrono::seconds{1}};
+static constexpr auto GETMMATTEST_HISTORICAL_TOKEN_REFILL{std::chrono::seconds{4}};
 
 /** Archives serve historical GETMMATTEST. A local signer does not:
  *  only the live tip window. Height above tip (catch-up suffix) is
@@ -209,12 +249,59 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
     return height + serve_window >= tip_height;
 }
 
+/** Height is inside the live GETMMATTEST window (tip-adjacent or catch-up
+ *  suffix). Independent of HasLocalSigner so archives charge live vs
+ *  historical tokens the same way signers do. */
+[[nodiscard]] inline bool GetMmAttestIsLiveWindow(
+    int32_t height,
+    int32_t tip_height,
+    int serve_window = SIGNER_GETMMATTEST_SERVE_WINDOW)
+{
+    return TrustedSignerMayServeGetMmAttest(
+        /*has_local_signer=*/true, height, tip_height, serve_window);
+}
+
+/** Spend one serve token from the live or historical bucket. Returns
+ *  false when that bucket is empty (caller logs rate_limited). */
+[[nodiscard]] inline bool GetMmAttestConsumeRequestToken(
+    bool live_window, double& live_tokens, double& historical_tokens)
+{
+    double& bucket{live_window ? live_tokens : historical_tokens};
+    if (bucket < 1.0) return false;
+    bucket -= 1.0;
+    return true;
+}
+
+[[nodiscard]] inline bool GetMmAttestHasRequestToken(
+    bool live_window, double live_tokens, double historical_tokens)
+{
+    return (live_window ? live_tokens : historical_tokens) >= 1.0;
+}
+
+/** Deferral (live GPU busy, queue/rate) must not increment the GETMMATTEST
+ *  hammer counter. That is our scarcity, not peer abuse. */
+[[nodiscard]] inline bool HistoricalReverifyAdmitIsDeferral(
+    HistoricalReverifyAdmit admit)
+{
+    switch (admit) {
+    case HistoricalReverifyAdmit::LiveGpuBusy:
+    case HistoricalReverifyAdmit::RateLimited:
+    case HistoricalReverifyAdmit::QueueFull:
+    case HistoricalReverifyAdmit::InflightFull:
+    case HistoricalReverifyAdmit::AlreadyQueued:
+        return true;
+    case HistoricalReverifyAdmit::Allow:
+        return false;
+    }
+    return false;
+}
+
 /** Cached MMATTEST for an archive / trusted-mirror catch-up peer on our
  *  active chain, even outside the live window, while the hash is still
  *  inside SIGNER_GETMMATTEST_CACHED_CATCHUP_WINDOW of the signer tip.
- *  Live 2026-08-16: nyc1 asked GETMMATTEST for 190689 while the GPU tip
+ *  Live 2026-08-16: a public CPU archive asked GETMMATTEST for 190689 while the GPU tip
  *  was 190795; the 16-high window returned historical_not_served. Opening
- *  cached serve to every addnode/manual then starved nyc1 (tokens went to
+ *  cached serve to every addnode/manual then starved a public CPU archive (tokens went to
  *  185006 / 190041 historical probes). Do not authorize ExactReplay.
  *
  *  An empty hot/durable cache is not a refuse: see
@@ -244,7 +331,7 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
 /** Empty-cache regeneration after CachedCatchUp admitted the request.
  *  SignAuthoritative only — never ExactReplay (that saturates the signer
  *  and the uplink). Live 2026-08-17: GPU restart left 191593 unsigned;
- *  !live_window refused regen; nyc1 had the body and stayed at 191592.
+ *  !live_window refused regen; a public CPU archive had the body and stayed at 191592.
  *  The 256-high window and archive/mirror bit stay fail-closed so IBD
  *  185006 / 190041 probes cannot drain tokens. */
 [[nodiscard]] inline bool TrustedSignerMayRegenerateCatchUpGetMmAttest(
@@ -340,6 +427,93 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
     return unique_on_signed_frontier_chain && unique_height > tip_height;
 }
 
+/** Threshold=1 over 2 keys: either signer is a full quorum. Two
+ *  incomparable hashes that both have pin quorum must not elect a
+ *  unique competing index (no silent flip, stranded-twin guard stays
+ *  armed). Caller must log; returning true is fail-closed. */
+[[nodiscard]] inline bool DualQuorumIncomparableFailClosed(
+    bool both_have_quorum,
+    bool incomparable)
+{
+    return both_have_quorum && incomparable;
+}
+
+/** Same-height dual-quorum twins: CONSENSUS signer stays on the
+ *  already-attested tip unless the signed frontier has pulled strictly
+ *  ahead. Empty frontier_ahead is fail-closed, not "pick either". */
+[[nodiscard]] inline bool DualQuorumSameHeightTwinsFailClosed(
+    bool tip_has_quorum,
+    bool competing_same_height_has_quorum,
+    bool signed_frontier_strictly_ahead)
+{
+    return tip_has_quorum && competing_same_height_has_quorum &&
+           !signed_frontier_strictly_ahead;
+}
+
+/** Who may let the pin steer FindUniqueCompetingAttestedIndex.
+ *
+ *  Trusted mirrors follow the pin (CPU-archive contract). Local signers
+ *  recover a self-mined losing twin. Consensus+pin with no WIF must not:
+ *  a foreign pin would otherwise buy fork choice without ExactReplay
+ *  majority (gold-standard hard test). */
+[[nodiscard]] inline bool PinSteersFindUniqueCompetingAttestedIndex(
+    bool trusted_mirror,
+    bool has_local_signer)
+{
+    return trusted_mirror || has_local_signer;
+}
+
+/** Hijack 3.1 CLOSED for unprivileged consensus: dual-quorum pin twins
+ *  are not fork choice. FindUnique returns nullptr unless this process
+ *  is a trusted mirror or holds a local attestor WIF. */
+[[nodiscard]] inline bool UnprivilegedNodeIgnoresDualQuorumPin(
+    bool trusted_mirror,
+    bool has_local_signer)
+{
+    return !PinSteersFindUniqueCompetingAttestedIndex(
+        trusted_mirror, has_local_signer);
+}
+
+/** Mainnet trusted mirrors skip ExactReplay. M<2 or N<2 is a single stolen
+ *  WIF hijacking the archive. 0.34 refuses that topology unless the operator
+ *  passes -allowsinglekeytrustedmirror=1 (logged, alarming). Regtest/testnet
+ *  keep 1-of-1 for harnesses. Consensus+pin is telemetry and is not refused. */
+[[nodiscard]] inline bool MainnetTrustedMirrorRefusesSingleKey(
+    bool trusted_mirror,
+    bool mainnet,
+    size_t n_signers,
+    int64_t threshold,
+    bool allow_single_key_override)
+{
+    if (!trusted_mirror || !mainnet) return false;
+    if (n_signers >= 2 && threshold >= 2) return false;
+    return !allow_single_key_override;
+}
+
+[[nodiscard]] inline bool TrustedMirrorIsSingleKeyAuthority(
+    bool trusted_mirror,
+    size_t n_signers,
+    size_t threshold)
+{
+    return trusted_mirror && (n_signers < 2 || threshold < 2);
+}
+
+/** GPU attestor in an M≥2 pin is the intended topology. A trusted mirror
+ *  that also holds a pin WIF, or a consensus miner whose WIF is the only
+ *  pin member, is a hijack amplifier: one stolen keyfile buys skip and
+ *  SignAuthoritative / FindUnique recovery. */
+[[nodiscard]] inline bool CollocatedSignerPinIsHijackAmplifier(
+    bool trusted_mirror,
+    bool has_local_signer,
+    bool signer_in_pin,
+    size_t n_signers,
+    size_t threshold)
+{
+    if (!has_local_signer || !signer_in_pin) return false;
+    if (!trusted_mirror && n_signers >= 2 && threshold >= 2) return false;
+    return true;
+}
+
 /** Independent consensus ExactReplay GPU (no local signer, not trusted
  *  mirror). Competing unattested twins must not take the device: live
  *  2026-08-17 miner mode 1 filled the scheduler (workspace=5164972400B)
@@ -349,9 +523,11 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
  *  of local submitblock.
  *
  *  Local submitblock uses CandidateMining, not this P2P admission path.
- *  Independent consensus follows attestation: unattested tip-children
- *  stay off-device (GETMMATTEST first). Hashes covered by the signed
- *  frontier / quorum still replay so ConnectTip can take the lottery
+ *  This helper is historical / pull-ahead DoS only: unattested pprev==tip
+ *  returns false so an 80-twin burst cannot occupy every slot. The unique
+ *  unattested tip-child ExactReplay path is ClaimConfigured /
+ *  ConsensusMayClaimUnattestedTipChildBody — pin quorum must not veto it.
+ *  Covered hashes still replay so ConnectTip can take an already-attested
  *  winner. Already-canonical near-tip holes stay on-device for IBD. */
 [[nodiscard]] inline bool IndependentConsensusMaySpendExactReplayGpu(
     bool pprev_is_tip,
@@ -359,8 +535,12 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
     int32_t index_height,
     int32_t tip_height,
     int32_t near_tip_depth,
-    bool covered_by_attestation)
+    bool covered_by_attestation,
+    bool on_parked = false)
 {
+    // Parked dump-and-run branches must not re-occupy the device after
+    // ActivateBestChain already refused the rewrite.
+    if (on_parked) return false;
     if (covered_by_attestation) return true;
     // Unattested pprev==tip is the twin storm. Do not ExactReplay a
     // competing sibling just because it extends the tip.
@@ -417,7 +597,7 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
 /** Skip FindUniqueCompetingAttestedIndex's HEADER_ONLY-hole pprev walk.
  *  If `idx` is already on the active chain, LastCommonAncestor(tip, idx)
  *  is `idx`. Walking `idx->pprev` until that LCA never hits `idx` and
- *  runs to genesis (live nyc1: 512 frontier hints × ~190k = ~19s
+ *  runs to genesis (live public CPU archive: 512 frontier hints × ~190k = ~19s
  *  FindMostWorkChain, GPU VERSION starved, in_flight=0). */
 [[nodiscard]] inline bool TrustedMirrorAttestedHintIsActiveAncestor(
     bool on_active_chain,
@@ -467,11 +647,13 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
  *  ConsensusMaySpendExactReplayGpuForShortReorgForkChild refuses when the
  *  tip already has quorum, so the body was never fetched or replayed.
  *
- *  Local signer only (trusted mirrors keep skip until the attestor signs):
- *  fetch the same-parent twin of the active-chain block at this height
- *  (the current tip *or* an ancestor) once competing headers have already
- *  pulled ahead on that fork, then each descendant whose parent already
- *  has a body, while LCA depth is a short reorg (1–6).
+ *  Local signer *or* trusted archive: fetch the same-parent twin of the
+ *  active-chain block at this height (the current tip *or* an ancestor)
+ *  once competing headers have already pulled ahead on that fork, then
+ *  each descendant whose parent already has a body, while LCA depth is a
+ *  short reorg (1–6). Archives persist HAVE_DATA so hidden GPU signers
+ *  can GETDATA the body; they still do not ExactReplay (pin skip).
+ *  Independent consensus miners without a local signer keep skip.
  *
  *  Live 2026-08-24 after 199296–199297 were attested: the unsigned twin
  *  stayed at 199295 while miners extended it to 199309+. Comparing only
@@ -510,7 +692,7 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
     bool competing_headers_pulled_ahead,
     bool competing_quorum_at_index = false)
 {
-    if (!has_local_signer || is_trusted_mirror) return false;
+    if (!has_local_signer && !is_trusted_mirror) return false;
     if (!has_tip || !has_index || index_is_tip || index_failed) return false;
     if (competing_quorum_at_index) return false;
     // Twin of the tip or of an ancestor. Do not require work >= current
@@ -518,7 +700,8 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
     // has moved. The pulled-ahead competing fork supplies more work.
     if (same_parent && index_height <= tip_height) {
         if (index_height == tip_height && !better_or_equal_work) return false;
-        return competing_headers_pulled_ahead;
+        return competing_headers_pulled_ahead &&
+               TrustedMirrorIsShortTipReorg(lca_depth);
     }
     if (index_height > tip_height) {
         if (!better_or_equal_work) return false;
@@ -548,7 +731,9 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
  *  tip but never complete header sync (synced_headers=-1). Overlay
  *  RecalculateBestHeader pins m_best_header, so BestKnown stays unset and
  *  FindNextBlocksToDownload logs no_best_known. Seed BestKnown from the
- *  local claimed-work competing fork so GETDATA can start. */
+ *  local claimed-work competing fork so GETDATA can start. Local signer
+ *  and trusted archive (the latter so signers can GETDATA the persisted
+ *  body). Independent consensus miners without a local signer keep skip. */
 [[nodiscard]] inline bool SeedLocalSignerLostTwinBestKnown(
     bool has_local_signer,
     bool is_trusted_mirror,
@@ -560,7 +745,7 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
     bool claimed_work_ge_tip,
     bool fork_child_height_occupied = false)
 {
-    if (!has_local_signer || is_trusted_mirror) return false;
+    if (!has_local_signer && !is_trusted_mirror) return false;
     if (!best_known_unset) return false;
     if (starting_height <= tip_height) return false;
     if (claimed_height <= tip_height) return false;
@@ -695,10 +880,13 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
     return !leads_to_signed_frontier;
 }
 
-/** CONSENSUS signer / configured node: never ConnectTip an unattested
- *  hash at a height that already has quorum on a different hash. */
+/** Trusted-mirror ConnectTip: never activate an unattested hash at a
+ *  height that already has pin quorum on a different hash.
+ *
+ *  Consensus miners (with or without a pin) must not use this gate:
+ *  ExactReplay is validity; a foreign signature is not PoW. */
 [[nodiscard]] inline bool MustDeferConflictingAttestedHeight(
-    bool configured,
+    bool trusted_mirror,
     bool candidate_has_quorum,
     bool competing_attested_height,
     bool covered_by_signed_frontier = false)
@@ -707,7 +895,150 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
     // quorum at the same height must not block the attested path. The
     // competing hash itself is not covered (GetAncestor fails).
     if (covered_by_signed_frontier) return false;
-    return configured && !candidate_has_quorum && competing_attested_height;
+    return trusted_mirror && !candidate_has_quorum && competing_attested_height;
+}
+
+/** Pin M-of-N may steer FindMostWorkChain / GBT only on a trusted mirror
+ *  (CPU archive; no local ExactReplay). Consensus miners ExactReplay. */
+[[nodiscard]] inline bool TrustedMirrorPinSteersForkChoice(bool trusted_mirror)
+{
+    return trusted_mirror;
+}
+
+/** Competing pin quorum / signed-frontier walk may stop ExactReplay of an
+ *  unattested tip-child only on a trusted mirror (CPU archives follow the
+ *  pin). Consensus miners ExactReplay one unique unattested tip-child; a
+ *  foreign GETMMATTEST is not a GPU-admission oracle. */
+[[nodiscard]] inline bool PinMayVetoUnattestedTipChildGpu(bool trusted_mirror)
+{
+    return trusted_mirror;
+}
+
+/** Gold-standard unique tip-child claim for a consensus miner. Extra
+ *  siblings stay off-device via already_claimed / sibling_has_body (twin
+ *  storm). Competing pin quorum is not an argument: archives must not
+ *  pick which body this node ExactReplays. */
+[[nodiscard]] inline bool ConsensusMayClaimUnattestedTipChildBody(
+    bool pprev_is_tip,
+    bool failed,
+    bool already_claimed_other_hash,
+    bool progress_child,
+    bool sibling_already_has_body)
+{
+    if (!pprev_is_tip || failed) return false;
+    if (!progress_child && sibling_already_has_body) return false;
+    if (already_claimed_other_hash && !progress_child) return false;
+    return true;
+}
+
+/** Trusted-mirror persist/follow: keep competing-quorum and off-frontier
+ *  gates so CPU archives do not walk an unattested tower. */
+[[nodiscard]] inline bool TrustedMirrorMayClaimUnattestedTipChildBody(
+    bool pprev_is_tip,
+    bool failed,
+    bool competing_quorum,
+    bool progress_child,
+    bool attested_height_exists,
+    bool tip_on_attested_chain,
+    bool already_claimed_other_hash,
+    bool sibling_already_has_body)
+{
+    if (!pprev_is_tip || failed) return false;
+    if (competing_quorum) return false;
+    if (!progress_child && attested_height_exists && !tip_on_attested_chain) {
+        return false;
+    }
+    if (!progress_child && sibling_already_has_body) return false;
+    if (already_claimed_other_hash && !progress_child) return false;
+    return true;
+}
+
+/** Competing pin quorum may deny "attested tip-child" only for trusted
+ *  mirrors (follow the pin) and local signers (HeightOccupied: do not
+ *  ExactReplay the followed twin the pin already occupied). Independent
+ *  consensus miners ExactReplay their followed child regardless. */
+[[nodiscard]] inline bool PinMayDenyAttestedChainTipChild(
+    bool trusted_mirror,
+    bool has_local_signer)
+{
+    return trusted_mirror || has_local_signer;
+}
+
+/** Public miners may GETDATA a short competing fork from other consensus
+ *  peers. Archives are not required. Depth is the existing short-reorg
+ *  bound so a headers-only tower cannot fill inflight. */
+[[nodiscard]] inline bool ConsensusMinerMayFetchCompetingShortReorg(
+    bool trusted_mirror,
+    bool peer_advertises_consensus,
+    bool short_reorg,
+    bool peer_work_ge_tip)
+{
+    if (trusted_mirror) return false;
+    return peer_advertises_consensus && short_reorg && peer_work_ge_tip;
+}
+
+/** Twin-storm ExactReplay HEADER_ONLY throttle is a consensus-miner GPU
+ *  budget (live 2026-08-14), not a pin feature. Open attestor keys must
+ *  not populate HasQuorum to keep this armed. */
+[[nodiscard]] inline constexpr bool ExactReplayGpuThrottleRequiresPin()
+{
+    return false;
+}
+
+/** AdmitMatMulBlockVerification must HEADER_ONLY extra twins whenever
+ *  ExactReplay is required, including consensus miners with no
+ *  -matmultrustedpubkey. Pin-only paths (skip, retain GPU body,
+ *  GETMMATTEST) stay behind IsTrustedMirror / IsConfigured. */
+[[nodiscard]] inline constexpr bool ExactReplayAdmissionThrottleApplies(
+    bool exact_recompute_required,
+    bool /*pin_configured*/)
+{
+    return exact_recompute_required;
+}
+
+/** Near-tip speculative EncDr RC pending cap. Do not raise this when
+ *  -matmultrustedpubkey is absent: that was the unconfigured twin-storm
+ *  leak (3 speculative slots vs 1 for a pinned miner). */
+[[nodiscard]] inline constexpr uint32_t MatMulSpeculativeRcPendingLimit(
+    bool /*pin_configured*/)
+{
+    return 1;
+}
+
+/** GETMMATTEST / pin quorum is a ConnectTip gate only on trusted mirrors.
+ *  Consensus miners ConnectTip after ExactReplay; waiting for an archive
+ *  signature is archive authority. */
+[[nodiscard]] inline bool GetMmAttestIsConnectTipValidityGate(bool trusted_mirror)
+{
+    return trusted_mirror;
+}
+
+/** NODE_MATMUL_ATTESTATION_ARCHIVE is a body-store / GETMMATTEST cache
+ *  discovery hint. It is never fork choice and never a GETDATA gate. */
+[[nodiscard]] inline bool ArchiveServiceBitIsValidityRequirement()
+{
+    return false;
+}
+
+/** ABC kick for HAVE_DATA sitting above tip. Trusted mirrors wait for pin
+ *  quorum (ConnectTip would defer). Consensus miners kick without a
+ *  signature: ConnectTip ExactReplays. */
+[[nodiscard]] inline bool UnconnectedHaveDataMayKickAbc(
+    bool trusted_mirror,
+    bool unconnected_has_pin_quorum,
+    [[maybe_unused]] bool unconnected_exact_replay_verified)
+{
+    if (trusted_mirror) return unconnected_has_pin_quorum;
+    return true;
+}
+
+/** getblocktemplate binds to the attested race only for trusted mirrors.
+ *  Consensus+pin still issues a template on the ExactReplay-valid tip. */
+[[nodiscard]] inline bool MatMulAttestedMiningParentRequired(
+    bool trusted_mirror,
+    bool configured)
+{
+    return trusted_mirror && configured;
 }
 
 /** True when an alternate index may defer an unattested most-work candidate.
@@ -731,14 +1062,15 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
            same_height_as_tip_child && has_quorum && !failed;
 }
 
-/** FindMostWorkChain overlay for configured Profile-1 nodes (trusted
- *  mirrors and consensus miners with -matmultrustedpubkey).
+/** FindMostWorkChain overlay for trusted-mirror Profile-1 nodes.
+ *  Consensus miners rank by ExactReplay-authenticated chainwork; the pin
+ *  is telemetry, not a sibling-deferral oracle.
  *
  *  Tip-children stay selectable (HAVE_DATA chicken-egg), but ConnectTip on
  *  a trusted mirror defers any unattested one. If that unattested child is
  *  also the heaviest candidate, ActivateBestChain stops on quorum Timeout
  *  and never tries an attested sibling already in the set. Live 2026-08-14
- *  fra1: tip 187931, attested a18786b0 at 187932, ABC looping 39c12144
+ *  archive-A: tip 187931, attested a18786b0 at 187932, ABC looping 39c12144
  *  (unattested twin) so advertised seed height froze while the signer
  *  kept moving.
  *
@@ -788,7 +1120,7 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
  *  1879xx are neither. Parked deep-reorg branches never prefer.
  *
  *  During signed-frontier catch-up the moving frontier hash and a recent
- *  active ancestor are not preferred. Live sfo3 2026-08-20: catch_up=1,
+ *  active ancestor are not preferred. Live public CPU archive 2026-08-20: catch_up=1,
  *  needed_height=194728, GETMMATTEST send hammered mid-suffix 194999
  *  (stale frontier) and the current frontier (no_such_block) so tip+1
  *  never got a slot. */
@@ -809,7 +1141,7 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
 }
 
 /** Catch-up must not allocate a GETMMATTEST slot for a non-hole hash.
- *  Non-preferred requests still occupied 16 mid-suffix slots on sfo3
+ *  Non-preferred requests still occupied 16 mid-suffix slots on a public CPU archive
  *  (outstanding_slots=16/1024, rejected_unattestable climbing) while
  *  194728 sat HEADER_ONLY with local quorum and in_flight=0. */
 [[nodiscard]] inline bool TrustedMirrorCatchUpShouldRequestGetMmAttest(
@@ -920,7 +1252,7 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
                            tip_height);
 }
 
-/** Root-first 1-wide getdata while catching up. Live nyc1 2026-08-16:
+/** Root-first 1-wide getdata while catching up. Live public CPU archive 2026-08-16:
  *  treating signed-frontier catch-up as *wide* walked HeadersDirectFetch
  *  from last_header and filled 16 newest hashes (190841/190842) while
  *  tip+1 (190777) sat HEADER_ONLY; those slots then timed out at ~100s.
@@ -945,7 +1277,7 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
  *  the signer or outbound -connect TO it), (2) OUR outbound connections
  *  to NODE_MATMUL_ATTESTATION_ARCHIVE / NODE_MATMUL_TRUSTED_MIRROR.
  *  Inbound miners and inbound archive-bit peers are not GETDATA sources
- *  (live nyc1: seeding BestKnown onto every handshake inbound and asking
+ *  (live public CPU archive: seeding BestKnown onto every handshake inbound and asking
  *  them for tip+1 is the wrong direction). A recent valid MMATTEST does
  *  *not* qualify a miner. When signed_frontier_catch_up is false this
  *  is not a gate. */
@@ -981,13 +1313,13 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
  *  extend the active tip) *and* has finished VERSION. Handshake-only
  *  addnode / seeded BestKnown with empty services must not count: that
  *  skipped archives while the GPU -connect sat at bytesrecv=0 (live
- *  nyc1 2026-08-16 after root-first: in_flight=0, sent_getdata=0). */
+ *  a public CPU archive 2026-08-16 after root-first: in_flight=0, sent_getdata=0). */
 [[nodiscard]] inline bool SignedFrontierPeerHadCatchUpBodiesAtConnect(
     int starting_height,
     int tip_height)
 {
     // No VERSION: cannot serve. A peer whose VERSION height is at or behind
-    // our *active* tip does not have tip+1 at handshake (live nyc1
+    // our *active* tip does not have tip+1 at handshake (live public CPU archive
     // 2026-08-16: sibling archives were preferred-capable from headers
     // alone, GETDATA timed out, miners were skipped).
     // Compare to the connected tip, never to m_best_header: miner
@@ -1006,7 +1338,7 @@ static constexpr int GETMMATTEST_HAMMER_BAN_AFTER{32};
  *  serve historical tip+1 (live 2026-08-19: VERSION 194111, tip 194121,
  *  BestKnown 194160, stall recovery logged every 60s with inflight=0).
  *  Behind-sibling VERSION < tip with no extending BestKnown stays refused
- *  (live nyc1 2026-08-17: 190767 vs 190816). */
+ *  (live public CPU archive 2026-08-17: 190767 vs 190816). */
 [[nodiscard]] inline bool SignedFrontierPeerMayServeCatchUpTipPlusOne(
     int starting_height,
     int active_tip_height,
@@ -1184,7 +1516,9 @@ static constexpr int32_t ATTESTOR_DRIFT_YIELD_DEPTH{6};
  *  m_best_header asks for *new* headers; the HEADER_ONLY catch-up suffix is
  *  already on disk. Seed BestKnown from the signed frontier only on GPU
  *  or outbound attested archives (see SignedFrontierMaySeedBestKnownFromFrontier).
- *  A competing BestKnown (headers=191013 vs frontier) must be overwritten. */
+ *  The assignment site must still refuse to LOWER an already-higher peer
+ *  BestKnown (TrustedMirrorSeedRaisesBestKnown): a competing *lower*
+ *  BestKnown may be replaced, a higher one must not. */
 [[nodiscard]] inline bool SeedTrustedMirrorGpuBestKnownFromFrontier(
     bool signed_frontier_catch_up,
     bool best_known_usable_for_catch_up,
@@ -1220,7 +1554,7 @@ static constexpr int32_t ATTESTOR_DRIFT_YIELD_DEPTH{6};
     if (!signed_frontier_catch_up) return true;
     if (!version_handshake_complete) return false;
     // Manual/noban includes sibling archive -connect, not only the GPU.
-    // Live nyc1 2026-08-17: GETDATA for tip+1 went to a behind sibling
+    // Live public CPU archive 2026-08-17: GETDATA for tip+1 went to a behind sibling
     // (VERSION height 190767 vs tip 190816) and occupied the 1-wide slot.
     if (!gpu_manual_or_noban && (!outbound || !archive_or_mirror)) {
         return false;
@@ -1264,7 +1598,7 @@ static constexpr int32_t ATTESTOR_DRIFT_YIELD_DEPTH{6};
 }
 
 /** PQ v2 hybrid rekey plus FindMostWork CPU can exceed the default
- *  60s -peertimeout before VERSION/VERACK (live nyc1 2026-08-16:
+ *  60s -peertimeout before VERSION/VERACK (live public CPU archive 2026-08-16:
  *  "version handshake timeout" after "post-quantum hybrid rekey
  *  complete", then a new TCP id every 10–60s with ver=0 /
  *  bytesrecv=0). Incomplete handshake that has received bytes
@@ -1297,9 +1631,9 @@ static constexpr int32_t ATTESTOR_DRIFT_YIELD_DEPTH{6};
 /** Msghand visit order. Incomplete VERSION/V2 must run before 100+
  *  miner inbounds (archive -connect) and before signer BLOCK serve.
  *  Inbound *archives* with live GETDATA are Preferred. Miner GETDATA
- *  must not be: live macpro2 2026-08-16 after the live-GETDATA patch,
+ *  must not be: live GPU attestor 2026-08-16 after the live-GETDATA patch,
  *  miner GETDATA still sat in Preferred, ProcessGetData sent 1 BLOCK
- *  per visit, one msghand lap was ~45s, nyc1 connected 1 body/cycle. */
+ *  per visit, one msghand lap was ~45s, a public CPU archive connected 1 body/cycle. */
 enum class MsghandPeerClass : uint8_t {
     Handshake = 0,
     Preferred = 1,
@@ -1307,7 +1641,7 @@ enum class MsghandPeerClass : uint8_t {
 };
 
 /** Bound miner (Other) ProcessMessages per msghand loop on a local
- *  signer. Live macpro2 2026-08-16: 8 inbounds each deserialized a
+ *  signer. Live GPU attestor 2026-08-16: 8 inbounds each deserialized a
  *  competing BLOCK under cs_main (~5s) so one loop still exceeded the
  *  archive GETDATA window. Handshake + archive GETDATA always run. */
 static constexpr int SIGNER_MSGHAND_OTHER_PER_LOOP{2};
@@ -1324,7 +1658,7 @@ static constexpr int SIGNER_MSGHAND_OTHER_PER_LOOP{2};
     return MsghandPeerClass::Other;
 }
 
-/** Local signer: outbounds are not Preferred. Live macpro2 after
+/** Local signer: outbounds are not Preferred. Live GPU attestor after
  *  9ceffddf still 1 body / ~46s because ClassifyMsghandPeer treated
  *  every addrman outbound as Preferred and skip waited for GETDATA
  *  already in m_msg_process_queue. */
@@ -1346,9 +1680,9 @@ static constexpr int SIGNER_MSGHAND_OTHER_PER_LOOP{2};
     return queued_getdata || inflight_getdata_requests;
 }
 
-/** Only peers that advertised ARCHIVE/MIRROR. Live macpro2 2026-08-16T16:33:
+/** Only peers that advertised ARCHIVE/MIRROR. Live GPU attestor 2026-08-16T16:33:
  *  treating every outbound as this drained historical BLOCK to addrman
- *  peers at height 185000 (sent_block≈50KB) while nyc1 inbound mirror
+ *  peers at height 185000 (sent_block≈50KB) while public CPU archive inbound mirror
  *  got the same ~50KB and 1 body / ~46s. `manual_or_outbound` is kept so
  *  call sites stay explicit; it must not grant serve-target status. */
 [[nodiscard]] inline bool MsghandPeerIsArchiveServeTarget(
@@ -1394,7 +1728,7 @@ static constexpr auto ARCHIVE_BLOCK_SERVE_WAIT_IDLE{std::chrono::milliseconds{50
 
 /** Local signer: drop non-archive BLOCK/HEADERS ingest while any
  *  archive GETDATA is waiting. Outbound miners too — live signer still
- *  connected tip from addrman peers (b-mmverify ~45%) during nyc1
+ *  connected tip from addrman peers (b-mmverify ~45%) during public CPU archive
  *  catch-up. Miner GETDATA does not exempt that miner. */
 [[nodiscard]] inline bool TrustedSignerDropMinerIngestWhileGetData(
     bool local_signer,
@@ -1469,7 +1803,7 @@ static constexpr auto ARCHIVE_BLOCK_SERVE_WAIT_IDLE{std::chrono::milliseconds{50
     return true;
 }
 
-/** Keep a GPU/frontier body source after GETDATA timeouts. Live nyc1
+/** Keep a GPU/frontier body source after GETDATA timeouts. Live public CPU archive
  *  2026-08-16: 3×90s disconnected peer=1027; later behind=1 dropped
  *  peer=1433 because IsSignedFrontierCatchUp requires behind>=2.
  *  Last GPU/frontier source is kept regardless of that flag. */
@@ -1479,7 +1813,7 @@ static constexpr auto ARCHIVE_BLOCK_SERVE_WAIT_IDLE{std::chrono::milliseconds{50
     bool last_gpu_or_frontier_source)
 {
     // Keep the last GPU even when IsSignedFrontierCatchUp is false
-    // (that helper requires behind>=2 and followed_ahead>=2). Live nyc1
+    // (that helper requires behind>=2 and followed_ahead>=2). Live public CPU archive
     // 2026-08-16T16:33:38Z disconnected peer=1433 at behind=1.
     if (last_gpu_or_frontier_source) {
         return true;
@@ -1488,7 +1822,7 @@ static constexpr auto ARCHIVE_BLOCK_SERVE_WAIT_IDLE{std::chrono::milliseconds{50
 }
 
 /** Archive msghand skip while bodies lag the GPU followed headers, not
- *  only while signed-frontier blocks_behind>=2. Live nyc1 2026-08-16
+ *  only while signed-frontier blocks_behind>=2. Live public CPU archive 2026-08-16
  *  after 190666: behind=0 so skip died, 148 miners pegged b-msghand,
  *  suffix headers sat at 190779 with have_data_unconnected. Capped
  *  FollowedChainAhead is 0 at the frontier; pass uncapped tip-extending
@@ -1519,14 +1853,66 @@ static constexpr auto ARCHIVE_BLOCK_SERVE_WAIT_IDLE{std::chrono::milliseconds{50
  *  RefreshRetry(0) missed. 2s is past the 1Hz retain livelock. */
 static constexpr auto GPU_RETAIN_ATTESTATION_RETRY{std::chrono::seconds{2}};
 
-/** CPU ExactReplay is the skip gate only when a valid GPU attestation
- *  already covers the hash (in-memory quorum or signed-frontier
- *  ancestry). Catch-up height is not attestation; unattested hashes
- *  still replay. */
+/** ConnectTip / lost-twin ExactReplay skip.
+ *
+ *  CPU archives (trusted mirrors) skip when pin quorum already covers the
+ *  hash. Consensus miners never skip because a foreign signature exists:
+ *  attestation is not PoW. Catch-up height is not attestation; unattested
+ *  hashes still replay on every role. */
 [[nodiscard]] inline bool SkipExactReplayForGpuAttestation(
-    bool has_valid_gpu_attestation)
+    bool has_valid_gpu_attestation,
+    bool trusted_mirror)
 {
-    return has_valid_gpu_attestation;
+    return trusted_mirror && has_valid_gpu_attestation;
+}
+
+/** GETMMATTEST historical regen / signer CUDA budget. Not validity.
+ *
+ *  Direct pin quorum may skip CUDA regen on any role (the pin already
+ *  covers this hash). Signed-frontier *ancestry* may skip only on a
+ *  trusted mirror: consensus must still ExactReplay ancestors so a
+ *  skip cannot be laundered into BLOCK_EXACT_REPLAY_VERIFIED. */
+[[nodiscard]] inline bool HistoricalExactReplayCoveredByPinQuorum(
+    bool trusted_mirror,
+    bool direct_quorum,
+    bool frontier_covers)
+{
+    return direct_quorum || (trusted_mirror && frontier_covers);
+}
+
+/** MMATREFUTE is store-only telemetry. Accept only a known, non-failed
+ *  Profile-1 header whose index height matches the statement, so a flood
+ *  of fake (height, hash) pairs cannot grow m_refutations. */
+[[nodiscard]] inline bool MmAttestRefuteKnownProfile1Block(
+    bool have_index,
+    bool failed,
+    bool profile1_active,
+    bool height_matches)
+{
+    return have_index && !failed && profile1_active && height_matches;
+}
+
+/** BLOCK_TRUSTED_REPLAY_ATTESTED may mint nAuthenticatedChainWork only on
+ *  a trusted mirror for a hash the pin already covers. Consensus+WIF
+ *  GETMMATTEST serve-budget skip and Heard open-WIF serves must not write
+ *  the bit: IsBlockAuthenticated treats it as MatMul authority. */
+[[nodiscard]] inline bool MayPersistTrustedReplayAttestationBit(
+    bool trusted_mirror,
+    bool pin_covers_this_hash)
+{
+    return trusted_mirror && pin_covers_this_hash;
+}
+
+/** GETMMATTEST / post-ExactReplay push may serve a locally signed
+ *  statement that landed as Heard (open WIF outside the pin). Heard is
+ *  directory, not HasQuorum; refusing it as sign_failed made independent
+ *  GPU attestors unable to answer GETMMATTEST. */
+[[nodiscard]] inline bool SignAuthoritativeServesGetMmAttest(
+    matmul::trusted::AddResult result)
+{
+    return result == matmul::trusted::AddResult::Accepted ||
+           result == matmul::trusted::AddResult::Duplicate ||
+           result == matmul::trusted::AddResult::Heard;
 }
 
 /** GETHEADERS serve gate. Bitcoin compared nChainWork to nMinimumChainWork.
@@ -1590,6 +1976,59 @@ static constexpr auto GPU_RETAIN_ATTESTATION_RETRY{std::chrono::seconds{2}};
            authority_only_inbound;
 }
 
+/** Compiled weak-subjectivity ceiling: last checkpoint vs highest AssumeUTXO
+ *  pin. A fresh mirror must be able to learn headers up to that height from
+ *  whoever actually serves them (PR 124 / MendeMatthias, 2026-08-26). */
+[[nodiscard]] inline int WeakSubjectivityBootstrapHeight(
+    int last_checkpoint_height,
+    int highest_assumeutxo_height)
+{
+    return last_checkpoint_height > highest_assumeutxo_height
+               ? last_checkpoint_height
+               : highest_assumeutxo_height;
+}
+
+/** Field 2026-08-26 (MendeMatthias / easyNode, v0.33.4.2): a fresh trusted
+ *  mirror at tip=0 dropped HEADERS from NODE_MATMUL_CONSENSUS peers because
+ *  ShouldIgnoreNonAuthorityInboundBlock treats HEADERS like BLOCK. Every
+ *  NODE_MATMUL_ATTESTATION_ARCHIVE peer then answered getheaders with zero
+ *  bytes, so the only offered headers were the ones this gate threw away.
+ *  loadtxoutset cannot rescue that: the snapshot base header must already
+ *  be in the index.
+ *
+ *  Authority rules are about which BODIES this node trusts, not about how
+ *  it learns the header chain. nMinimumChainWork and compiled checkpoints
+ *  still bound those headers. Do not use this exception for BLOCK,
+ *  CMPCTBLOCK, or BLOCKTXN. Once the active tip reaches the compiled
+ *  checkpoint / AssumeUTXO pin, HEADERS go back to the body-authority
+ *  rule. */
+[[nodiscard]] inline bool TrustedMirrorIgnoreNonAuthorityInboundHeaders(
+    bool ignore_non_authority_block,
+    int tip_height,
+    int weak_subjectivity_bootstrap_height)
+{
+    if (!ignore_non_authority_block) return false;
+    if (tip_height < weak_subjectivity_bootstrap_height) return false;
+    return true;
+}
+
+/** Same incident: MaybeSeedGpuSignedFrontierBestKnown used to assign
+ *  `state.pindexBestKnownBlock = seed` unconditionally. On a fresh mirror
+ *  BestKnown was null (headers dropped), so the helper's
+ *  best_known_usable_for_catch_up guard was false, and the seed was the
+ *  local signed-frontier height (2000). That pinned the download target:
+ *  peer_best_ahead == best_header_ahead, in_flight=0, stall logged once a
+ *  minute. Seeding a LOWER value than a peer's real BestKnown is never
+ *  correct; only raise, or fill a null. */
+[[nodiscard]] inline bool TrustedMirrorSeedRaisesBestKnown(
+    bool have_current_best_known,
+    int current_best_known_height,
+    int seed_height)
+{
+    if (!have_current_best_known) return true;
+    return seed_height > current_best_known_height;
+}
+
 /** Solicited catch-up bodies: GPU (either direction) or OUR outbound
  *  archive/mirror. Inbound from anyone else — including an archive
  *  service bit — is dropped before deserialize. An inbound miner
@@ -1604,8 +2043,77 @@ static constexpr auto GPU_RETAIN_ATTESTATION_RETRY{std::chrono::seconds{2}};
     return false;
 }
 
+/** GPU IPs are hidden. Consensus miners connect inbound to archives,
+ *  not to signers. Live 0.33.4.x: 199298/199300 ExactReplayed on a miner
+ *  never reached the signers because archives dropped inbound INV/HEADERS
+ *  before deserialize (PR 117 is signer-side fetch of a body the archives
+ *  never stored). Allow CONSENSUS announcements (inbound or outbound) so
+ *  archives can GETDATA + persist HAVE_DATA. Discovery-only and ADDR_FETCH
+ *  stay out. Unsolicited BLOCK still uses TrustedMirrorMayAcceptPeerBlockBody
+ *  unless AuthorityMayAcceptInboundMinerSolicitedBlock.
+ *
+ *  Ingesting miner INV/HEADERS is not enough when the miner is in age-only
+ *  IBD: they will not unsolicited-announce (see IbdShouldSuppressBlockAnnounce).
+ *  Outbound miner is `inbound=false`; this predicate ignores direction. */
+[[nodiscard]] inline bool AuthorityMayIngestInboundMinerAnnouncement(
+    bool authority_node,
+    bool inbound,
+    bool discovery_only,
+    bool addr_fetch,
+    bool announce_msg)
+{
+    (void)inbound;
+    if (!announce_msg) return false;
+    if (!authority_node) return true;
+    if (addr_fetch || discovery_only) return false;
+    return true;
+}
+
+/** Solicited GETDATA reply from a CONSENSUS miner (inbound or outbound).
+ *  `inflight` means this peer currently has at least one hash in
+ *  mapBlocksInFlight — do not deserialize unsolicited miner BLOCK floods. */
+[[nodiscard]] inline bool AuthorityMayAcceptInboundMinerSolicitedBlock(
+    bool authority_node,
+    bool inbound,
+    bool discovery_only,
+    bool addr_fetch,
+    bool peer_has_block_in_flight)
+{
+    (void)inbound;
+    if (!authority_node) return true;
+    if (addr_fetch || discovery_only) return false;
+    return peer_has_block_in_flight;
+}
+
+/** Trusted archive: persist one unattested lost-twin / unique tip-child
+ *  HAVE_DATA so hidden GPU signers can GETDATA it. Not ExactReplay, not
+ *  ConnectTip. Pin quorum already covering the hash does not need persist. */
+[[nodiscard]] inline bool TrustedMirrorRetainLostTwinBodyForSignerFetch(
+    bool trusted_mirror,
+    bool has_quorum,
+    bool lost_twin_or_unique_tip_child)
+{
+    return trusted_mirror && !has_quorum && lost_twin_or_unique_tip_child;
+}
+
+/** EncDr stall-recovery split: luckypool-style pre-recovery nBits is
+ *  rejected before AddToBlockIndex, so LARGE_WORK_INVALID_CHAIN never
+ *  fires and explorers on that fork look like the live chain. Warn when
+ *  stall recovery is configured and a header at/after that height fails
+ *  bad-diffbits. Do not store the invalid tower. */
+[[nodiscard]] inline bool DivergentPowForkShouldWarn(
+    bool stall_recovery_configured,
+    int32_t stall_recovery_height,
+    int header_height,
+    std::string_view reject_reason)
+{
+    if (!stall_recovery_configured) return false;
+    if (reject_reason != "bad-diffbits") return false;
+    return header_height >= stall_recovery_height;
+}
+
 /** Non-GPU peers may GETDATA from a trusted mirror only once it is no
- *  longer catching up to the signed frontier. Live nyc1 2026-08-16:
+ *  longer catching up to the signed frontier. Live public CPU archive 2026-08-16:
  *  serving miner GETDATA during catch-up produced 2.3MB BLOCK replies
  *  and pegged msghand at 94% so GPU bodies aged out.
  *  Sibling ARCHIVE/MIRROR peers are the exception: they must be able to
@@ -1635,7 +2143,7 @@ static constexpr auto GPU_RETAIN_ATTESTATION_RETRY{std::chrono::seconds{2}};
 }
 
 /** Root-first must not delete a fresh GETDATA because a second peer is
- *  eligible as a parallel owner. Live nyc1 2026-08-16: MayDuplicate
+ *  eligible as a parallel owner. Live public CPU archive 2026-08-16: MayDuplicate
  *  (owners<2) called RemoveBlockRequest(nullopt); the GPU BLOCK then
  *  arrived unsolicited (forceProcessing=false) and was ticket-dropped. */
 [[nodiscard]] inline bool ShouldDropInFlightForRootFirstRerequest(
@@ -1643,6 +2151,26 @@ static constexpr auto GPU_RETAIN_ATTESTATION_RETRY{std::chrono::seconds{2}};
     bool all_owners_stale)
 {
     return already_requested && all_owners_stale;
+}
+
+/** §7 invariant: no peer / Sybil set may suppress the canonical
+ *  first-hole GETDATA beyond one bounded retry. Missing stamps count
+ *  as stale so restart is not the recovery path. */
+[[nodiscard]] inline bool CanonicalFirstHoleMayReassign(
+    bool already_requested,
+    bool all_owners_stale_or_missing_stamp)
+{
+    return !already_requested || all_owners_stale_or_missing_stamp;
+}
+
+/** 3.3: a later descendant attestation (signed frontier covering this
+ *  ancestor) is a bounded recovery route after the missing height
+ *  falls outside the live GETMMATTEST window. Never a ConnectTip dead
+ *  end — MustDeferConflictingAttestedHeight yields. */
+[[nodiscard]] inline bool DescendantSignedFrontierRecoversExpiredHeight(
+    bool covered_by_signed_frontier)
+{
+    return covered_by_signed_frontier;
 }
 
 /** Covered HAVE_DATA sitting one height above tip must not freeze the
@@ -1653,6 +2181,23 @@ static constexpr auto GPU_RETAIN_ATTESTATION_RETRY{std::chrono::seconds{2}};
     bool unconnected_has_gpu_attestation)
 {
     return signed_frontier_catch_up && unconnected_has_gpu_attestation;
+}
+
+/** Descendant GETDATA while a HAVE_DATA body sits unconnected.
+ *  Trusted mirrors: pin-covered signed-frontier catch-up only.
+ *  Consensus miners: ExactReplay-verified is enough — do not wait for
+ *  archive GETMMATTEST to unstick the window. */
+[[nodiscard]] inline bool KeepFetchingWhileUnconnectedHaveData(
+    bool trusted_mirror,
+    bool signed_frontier_catch_up,
+    bool unconnected_has_pin_quorum,
+    bool unconnected_exact_replay_verified)
+{
+    if (trusted_mirror) {
+        return TrustedMirrorKeepFetchingCoveredUnconnected(
+            signed_frontier_catch_up, unconnected_has_pin_quorum);
+    }
+    return unconnected_exact_replay_verified;
 }
 
 /** Download timeout for a preferred archive/manual source during
@@ -2112,7 +2657,7 @@ struct TrustedMirrorAuthorityHeaderView {
  * Used to widen competing-branch *download* to any peer that has the recovery
  * chain after authority header-follow selected it. Fetching is not trusting;
  * acceptance still requires M-of-N. Random competing forks that never became
- * m_best_header cannot qualify, preserving the fra1 inflight-DoS bound.
+ * m_best_header cannot qualify, preserving the archive-A inflight-DoS bound.
  */
 [[nodiscard]] inline bool TrustedMirrorOnFollowedHeaderChain(
     bool best_header_known,
@@ -2185,6 +2730,16 @@ struct TrustedRejectStickyView {
 {
     if (!v.already_cached) return true;
     return !v.window_active;
+}
+
+//! Negative cache for unattestable GETMMATTEST hashes. A competing
+//! HEADER_ONLY flood must not grow this map without bound (s4 M-4.3a).
+static constexpr size_t MATMUL_ATTESTATION_BACKOFF_MAX{4096};
+
+[[nodiscard]] inline constexpr bool AttestationBackoffMapMustEvict(
+    size_t map_size, size_t max_size = MATMUL_ATTESTATION_BACKOFF_MAX)
+{
+    return max_size > 0 && map_size >= max_size;
 }
 
 } // namespace node::matmul_trusted

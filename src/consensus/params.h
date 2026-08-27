@@ -855,6 +855,12 @@ struct Params {
     // may not be more than nMatMulMaxFutureMtpDrift seconds ahead of the
     // previous block's median-time-past. This bounds ASERT's response to a
     // single future-dated block without changing the ASERT formula itself.
+    // This MTP+3600 cap is the *easing ceiling* after a hashrate withdrawal:
+    // GetMedianTimePast is the median of eleven, so t(n) <= MTP(n-1)+3600
+    // forces mean advance over six blocks to at most 600s (~6.7× the 90s
+    // target). nMatMulMaxBlockTimeAdvance (+1080) is a per-block transient
+    // and is the wrong dial if this pair is ever revisited. Do not change
+    // either constant in 0.34 (no consensus reseal).
     int32_t nMatMulMaxFutureMtpDriftHeight{std::numeric_limits<int32_t>::max()};
     int64_t nMatMulMaxFutureMtpDrift{3'600};
     // a5 fix: at/above this height the future-MTP-drift upper bound is reconciled with the
@@ -898,6 +904,12 @@ struct Params {
     int32_t nShieldedBridgeTagActivationHeight{std::numeric_limits<int32_t>::max()};
     int32_t nShieldedSmileRiceCodecDisableHeight{std::numeric_limits<int32_t>::max()};
     int32_t nShieldedMatRiCTDisableHeight{std::numeric_limits<int32_t>::max()};
+    /** Close the shielded pool in both directions. At/after this height a block
+     *  that spends a shielded note (egress / unshield) or creates a new shielded
+     *  output (ingress) is invalid. Historical blocks below the height validate
+     *  as before. Default int32 max leaves the pool open (regtest). Mainnet
+     *  sets an explicit flag-day. See IsShieldedPoolDisabled. */
+    int32_t nShieldedPoolDisableHeight{std::numeric_limits<int32_t>::max()};
     int32_t nShieldedSpendPathRecoveryActivationHeight{std::numeric_limits<int32_t>::max()};
     /** C-002 shielded proof + SLH-DSA/FIPS-205 activation height. Mainnet default
      *  remains 123,000; regtest may lower this to exercise boundary behavior
@@ -1312,6 +1324,7 @@ struct Params {
                                                     int64_t prev_block_time,
                                                     int64_t prev_median_time_past) const
     {
+        // Binding sustained cap is MTP+nMatMulMaxFutureMtpDrift, not parent+1080.
         const auto mtp_cap{MaxMatMulFutureBlockTime(height, prev_median_time_past)};
         const auto parent_cap{MaxMatMulParentTimeAdvance(height, prev_block_time)};
         if (!mtp_cap.has_value()) return parent_cap;
@@ -1363,6 +1376,12 @@ struct Params {
         return height >= 0 &&
             nShieldedMatRiCTDisableHeight != std::numeric_limits<int32_t>::max() &&
             height >= nShieldedMatRiCTDisableHeight;
+    }
+    bool IsShieldedPoolDisabled(int32_t height) const
+    {
+        return height >= 0 &&
+            nShieldedPoolDisableHeight != std::numeric_limits<int32_t>::max() &&
+            height >= nShieldedPoolDisableHeight;
     }
     bool IsShieldedSpendPathRecoveryActive(int32_t height) const
     {

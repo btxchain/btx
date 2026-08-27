@@ -8,6 +8,7 @@
 #include <hash.h>
 #include <key_io.h>
 #include <logging.h>
+#include <pubkey.h>
 #include <span.h>
 #include <streams.h>
 #include <support/cleanse.h>
@@ -65,6 +66,9 @@ static constexpr int32_t ATTESTED_FRONTIER_HINT_WINDOW{512};
 
 fs::path g_persist_path;
 bool g_persist_enabled{false};
+bool g_open_state_dirty{false};
+std::chrono::steady_clock::time_point g_open_state_last_persist{};
+constexpr auto OPEN_STATE_PERSIST_DEBOUNCE{std::chrono::seconds{1}};
 
 struct DurableAttestationKey {
     static constexpr uint8_t PREFIX{'a'};
@@ -94,6 +98,47 @@ struct DurableNamespacePrefix {
     SERIALIZE_METHODS(DurableNamespacePrefix, obj)
     {
         READWRITE(obj.prefix, obj.authority_namespace);
+    }
+};
+
+struct DurableOpenStateKey {
+    static constexpr uint8_t PREFIX{'o'};
+    uint8_t prefix{PREFIX};
+    uint256 authority_namespace{};
+
+    SERIALIZE_METHODS(DurableOpenStateKey, obj)
+    {
+        READWRITE(obj.prefix, obj.authority_namespace);
+    }
+};
+
+struct DurableOpenState {
+    std::vector<CPubKey> admitted{};
+    std::vector<CPubKey> frozen{};
+
+    SERIALIZE_METHODS(DurableOpenState, obj)
+    {
+        READWRITE(obj.admitted, obj.frozen);
+    }
+};
+
+struct DurableBlocklistKey {
+    static constexpr uint8_t PREFIX{'b'};
+    uint8_t prefix{PREFIX};
+    uint256 chain_id{};
+
+    SERIALIZE_METHODS(DurableBlocklistKey, obj)
+    {
+        READWRITE(obj.prefix, obj.chain_id);
+    }
+};
+
+struct DurableBlocklistState {
+    std::vector<CPubKey> blocked{};
+
+    SERIALIZE_METHODS(DurableBlocklistState, obj)
+    {
+        READWRITE(obj.blocked);
     }
 };
 
@@ -130,7 +175,7 @@ std::mutex g_persist_worker_mutex;
 std::mutex g_persist_io_mutex;
 std::condition_variable g_persist_worker_cv;
 std::deque<matmul::trusted::ExactReplayAttestation> g_persist_pending;
-std::jthread g_persist_worker;
+std::thread g_persist_worker;
 uint64_t g_persist_queued{0};
 uint64_t g_persist_completed{0};
 bool g_persist_stop{false};
@@ -202,6 +247,104 @@ bool ResetLegacyArchive(const fs::path& path, std::string& error)
     return AtomicWriteBytes(path, Span{encoded.data(), encoded.size()}, error);
 }
 
+bool LoadOpenAttestorState(
+    const std::shared_ptr<matmul::trusted::AttestationStore>& store)
+{
+    if (!g_durable_db || !g_durable_namespace.has_value() || !store ||
+        !store->OpenAttestorsEnabled()) {
+        return true;
+    }
+    DurableOpenState state;
+    const auto status{g_durable_db->TryRead(
+        DurableOpenStateKey{.authority_namespace = *g_durable_namespace},
+        state)};
+    if (status.status == CDBWrapper::ReadStatus::Code::NOT_FOUND) return true;
+    if (status.status != CDBWrapper::ReadStatus::Code::OK) return false;
+    std::set<CPubKey> admitted{state.admitted.begin(), state.admitted.end()};
+    std::set<CPubKey> frozen{state.frozen.begin(), state.frozen.end()};
+    store->RestoreOpenAttestors(std::move(admitted), std::move(frozen));
+    return true;
+}
+
+bool PersistOpenAttestorState(
+    const std::shared_ptr<matmul::trusted::AttestationStore>& store,
+    std::string& error,
+    bool force)
+{
+    if (!store || !store->OpenAttestorsEnabled()) return true;
+    if (!g_durable_db || !g_durable_namespace.has_value()) return true;
+    const auto now{std::chrono::steady_clock::now()};
+    if (!force && g_open_state_last_persist.time_since_epoch().count() != 0 &&
+        now - g_open_state_last_persist < OPEN_STATE_PERSIST_DEBOUNCE) {
+        g_open_state_dirty = true;
+        return true;
+    }
+    DurableOpenState state;
+    const auto admitted{store->AdmittedOpenSigners()};
+    const auto frozen{store->FrozenOpenSigners()};
+    state.admitted.assign(admitted.begin(), admitted.end());
+    state.frozen.assign(frozen.begin(), frozen.end());
+    // Debounced writes skip fsync so a Heard flood cannot stall the WAL.
+    // force=true (shutdown / Reset) still syncs.
+    if (!g_durable_db->Write(
+            DurableOpenStateKey{.authority_namespace = *g_durable_namespace},
+            state, /*fSync=*/force)) {
+        error = "failed to persist open-attestor admission state";
+        g_open_state_dirty = true;
+        return false;
+    }
+    g_open_state_dirty = false;
+    g_open_state_last_persist = now;
+    return true;
+}
+
+bool PersistOpenAttestorState(
+    const std::shared_ptr<matmul::trusted::AttestationStore>& store,
+    std::string& error)
+{
+    return PersistOpenAttestorState(store, error, /*force=*/false);
+}
+
+bool LoadBlocklistState(
+    const std::shared_ptr<matmul::trusted::AttestationStore>& store,
+    std::string& error)
+{
+    if (!g_durable_db || !store) return true;
+    DurableBlocklistState state;
+    const auto status{g_durable_db->TryRead(
+        DurableBlocklistKey{.chain_id = store->ChainId()}, state)};
+    if (status.status == CDBWrapper::ReadStatus::Code::NOT_FOUND) return true;
+    if (status.status != CDBWrapper::ReadStatus::Code::OK) {
+        error = "failed to read persisted attestation blocklist";
+        return false;
+    }
+    std::set<CPubKey> blocked{state.blocked.begin(), state.blocked.end()};
+    if (!store->RestoreRuntimeBlocked(std::move(blocked)) ||
+        !store->PinQuorumReachable()) {
+        error = "persisted attestation blocklist leaves fewer than M unblocked pin members or would block the local signer";
+        return false;
+    }
+    return true;
+}
+
+bool PersistBlocklistState(
+    const std::shared_ptr<matmul::trusted::AttestationStore>& store,
+    std::string& error)
+{
+    if (!store) return true;
+    if (!g_durable_db) return true;
+    DurableBlocklistState state;
+    const auto runtime{store->RuntimeBlockedSigners()};
+    state.blocked.assign(runtime.begin(), runtime.end());
+    if (!g_durable_db->Write(
+            DurableBlocklistKey{.chain_id = store->ChainId()},
+            state, /*fSync=*/true)) {
+        error = "failed to persist attestation blocklist";
+        return false;
+    }
+    return true;
+}
+
 bool ImportAttestations(
     const std::shared_ptr<matmul::trusted::AttestationStore>& store,
     std::vector<matmul::trusted::ExactReplayAttestation> loaded,
@@ -217,10 +360,18 @@ bool ImportAttestations(
              std::vector<matmul::trusted::ExactReplayAttestation>> durable;
     for (size_t index{0}; index < loaded.size(); ++index) {
         const auto& attestation{loaded[index]};
-        const auto verified{matmul::trusted::VerifyAttestation(
-            attestation, store->ChainId(), store->ReplayAuthorityContext(),
-            attestation.statement.block_hash,
-            attestation.statement.block_height, store->TrustedSigners())};
+        const auto verified{store->OpenAttestorsEnabled()
+                                ? matmul::trusted::VerifyAttestationCrypto(
+                                      attestation, store->ChainId(),
+                                      store->ReplayAuthorityContext(),
+                                      attestation.statement.block_hash,
+                                      attestation.statement.block_height)
+                                : matmul::trusted::VerifyAttestation(
+                                      attestation, store->ChainId(),
+                                      store->ReplayAuthorityContext(),
+                                      attestation.statement.block_hash,
+                                      attestation.statement.block_height,
+                                      store->TrustedSigners())};
         if (verified != matmul::trusted::VerifyResult::Valid) {
             // Flat V1 archives/WALs predate authority namespaces. Preserve
             // intentional chain/context/signer rotation by ignoring a
@@ -249,9 +400,13 @@ bool ImportAttestations(
         const auto result{store->Add(
             attestation, attestation.statement.block_hash,
             attestation.statement.block_height)};
+        if (result == matmul::trusted::AddResult::BlocklistedSigner) {
+            continue;
+        }
         if (result != matmul::trusted::AddResult::Accepted &&
             result != matmul::trusted::AddResult::Duplicate &&
-            result != matmul::trusted::AddResult::Capacity) {
+            result != matmul::trusted::AddResult::Capacity &&
+            result != matmul::trusted::AddResult::Heard) {
             error = strprintf(
                 "attestation archive record %zu from %s was rejected: %s",
                 index, fs::PathToString(source),
@@ -259,10 +414,19 @@ bool ImportAttestations(
             return false;
         }
         ++accepted;
-        highest = std::max(highest, attestation.statement.block_height);
-        if (local_pk.has_value() && attestation.signer == *local_pk) {
-            local_signed.emplace(attestation.statement.block_height,
-                                 attestation.statement.block_hash);
+        if (store->HasQuorum(attestation.statement.block_hash,
+                             attestation.statement.block_height)) {
+            highest = std::max(highest, attestation.statement.block_height);
+            if (local_pk.has_value()) {
+                for (const auto& vote :
+                     store->GetAttestations(attestation.statement.block_hash,
+                                            attestation.statement.block_height)) {
+                    if (vote.signer == *local_pk) {
+                        local_signed.emplace(attestation.statement.block_height,
+                                             attestation.statement.block_hash);
+                    }
+                }
+            }
         }
         durable[DurableAttestationKey{
             .authority_namespace = authority_namespace,
@@ -290,7 +454,7 @@ bool ImportAttestations(
                 existing.push_back(std::move(item));
             }
         }
-        if (existing.size() > store->TrustedSigners().size()) {
+        if (existing.size() > store->MaxVotesPerBlock()) {
             error = "durable attestation record exceeds configured signer set";
             return false;
         }
@@ -350,7 +514,7 @@ bool LoadDurableAttestations(
         }
         std::vector<matmul::trusted::ExactReplayAttestation> attestations;
         if (!cursor->GetValue(attestations) || attestations.empty() ||
-            attestations.size() > store->TrustedSigners().size()) {
+            attestations.size() > store->MaxVotesPerBlock()) {
             error = "durable attestation database contains a malformed record";
             return false;
         }
@@ -362,21 +526,55 @@ bool LoadDurableAttestations(
                 error = "durable attestation database key/value mismatch";
                 return false;
             }
-            const auto verified{matmul::trusted::VerifyAttestation(
-                attestation, store->ChainId(),
-                store->ReplayAuthorityContext(), key.block_hash, key.height,
-                store->TrustedSigners())};
+            const auto verified{store->OpenAttestorsEnabled()
+                                    ? matmul::trusted::VerifyAttestationCrypto(
+                                          attestation, store->ChainId(),
+                                          store->ReplayAuthorityContext(),
+                                          key.block_hash, key.height)
+                                    : matmul::trusted::VerifyAttestation(
+                                          attestation, store->ChainId(),
+                                          store->ReplayAuthorityContext(),
+                                          key.block_hash, key.height,
+                                          store->TrustedSigners())};
             if (verified != matmul::trusted::VerifyResult::Valid) {
-                error = strprintf(
-                    "durable attestation database record rejected: %s",
-                    matmul::trusted::VerifyResultName(verified));
-                return false;
+                if (store->OpenAttestorsEnabled() ||
+                    verified != matmul::trusted::VerifyResult::UntrustedSigner) {
+                    error = strprintf(
+                        "durable attestation database record rejected: %s",
+                        matmul::trusted::VerifyResultName(verified));
+                    return false;
+                }
+                continue;
             }
-            if (local_pk.has_value() && attestation.signer == *local_pk) {
-                local_signed.emplace(key.height, key.block_hash);
+        }
+        if (store->OpenAttestorsEnabled()) {
+            size_t pin_votes{0};
+            for (const auto& attestation : attestations) {
+                if (store->TrustedSigners().count(attestation.signer) != 0) {
+                    ++pin_votes;
+                }
+            }
+            if (pin_votes >= store->Threshold()) {
+                for (const auto& attestation : attestations) {
+                    if (store->TrustedSigners().count(attestation.signer) == 0) {
+                        store->AdmitOpenSigner(attestation.signer);
+                    }
+                }
             }
         }
         const TailKey tail_key{key.height, key.block_hash};
+        const bool pin_quorum{store->HasQuorumFromAttestations(
+            attestations, key.block_hash, key.height)};
+        if (pin_quorum) {
+            highest = std::max(highest, key.height);
+            if (local_pk.has_value()) {
+                for (const auto& attestation : attestations) {
+                    if (attestation.signer == *local_pk) {
+                        local_signed.emplace(key.height, key.block_hash);
+                    }
+                }
+            }
+        }
         hot_tail_attestations += attestations.size();
         hot_tail.emplace(tail_key, std::move(attestations));
         while (hot_tail.size() > store->MaxBlocks() ||
@@ -384,13 +582,18 @@ bool LoadDurableAttestations(
             hot_tail_attestations -= hot_tail.begin()->second.size();
             hot_tail.erase(hot_tail.begin());
         }
-        highest = std::max(highest, key.height);
         ++records;
     }
     for (const auto& [tail_key, attestations] : hot_tail) {
         for (const auto& attestation : attestations) {
             const auto result{store->Add(attestation, tail_key.second,
                                          tail_key.first)};
+            if (result == matmul::trusted::AddResult::Heard ||
+                result == matmul::trusted::AddResult::UntrustedSigner ||
+                result == matmul::trusted::AddResult::FrozenSigner ||
+                result == matmul::trusted::AddResult::BlocklistedSigner) {
+                continue;
+            }
             if (result != matmul::trusted::AddResult::Accepted &&
                 result != matmul::trusted::AddResult::Duplicate) {
                 error = strprintf("durable hot-cache import rejected: %s",
@@ -408,7 +611,10 @@ bool LoadDurableAttestations(
         }
     }
     for (const auto& [tail_key, attestations] : hot_tail) {
-        (void)attestations;
+        if (!store->HasQuorumFromAttestations(attestations, tail_key.second,
+                                              tail_key.first)) {
+            continue;
+        }
         NoteAcceptedAttestationHeight(tail_key.first, tail_key.second);
     }
     LogPrintf("Verified %zu durable MatMul attestation block record(s)\n",
@@ -652,8 +858,13 @@ void PersistAfterMutation(
     g_persist_worker_cv.notify_all();
 }
 
+void StopPersistenceWorker();
+
 void StartPersistenceWorker(const fs::path& path)
 {
+    // Apple libc++ on the macOS 15 SDK still lacks std::jthread. The worker
+    // already has g_persist_stop; join the previous thread before replacing it.
+    StopPersistenceWorker();
     {
         std::lock_guard lock{g_persist_worker_mutex};
         g_persist_pending.clear();
@@ -662,17 +873,15 @@ void StartPersistenceWorker(const fs::path& path)
         g_persist_stop = false;
         g_persist_worker_error.clear();
     }
-    g_persist_worker = std::jthread{[path](std::stop_token stop_token) {
+    g_persist_worker = std::thread{[path] {
         while (true) {
             std::vector<matmul::trusted::ExactReplayAttestation> batch;
             {
                 std::unique_lock lock{g_persist_worker_mutex};
                 g_persist_worker_cv.wait(lock, [&] {
-                    return stop_token.stop_requested() || g_persist_stop ||
-                           !g_persist_pending.empty();
+                    return g_persist_stop || !g_persist_pending.empty();
                 });
-                if (g_persist_pending.empty() &&
-                    (stop_token.stop_requested() || g_persist_stop)) {
+                if (g_persist_pending.empty() && g_persist_stop) {
                     return;
                 }
                 if (g_persist_pending.empty()) continue;
@@ -833,11 +1042,20 @@ bool FinalizeConfiguration(std::string& error)
             return false;
         }
         const CPubKey local_pubkey{key.GetPubKey()};
-        if (std::find(staged->config.trusted_signers.begin(),
+        const bool already_pinned{
+            std::find(staged->config.trusted_signers.begin(),
                       staged->config.trusted_signers.end(),
-                      local_pubkey) ==
-            staged->config.trusted_signers.end()) {
-            staged->config.trusted_signers.push_back(local_pubkey);
+                      local_pubkey) !=
+            staged->config.trusted_signers.end()};
+        if (!already_pinned) {
+            // Independent GPU attestors keep a pin that already meets M and
+            // sign as an open key. A WIF still seeds or completes the pin
+            // when it is empty or below threshold.
+            if (!(staged->config.open_attestors &&
+                  staged->config.trusted_signers.size() >=
+                      staged->config.threshold)) {
+                staged->config.trusted_signers.push_back(local_pubkey);
+            }
         }
         staged->config.local_signer = std::move(key);
     }
@@ -862,6 +1080,8 @@ void Reset()
     g_local_signed_hash_by_height.clear();
     g_persist_enabled = false;
     g_persist_path.clear();
+    g_open_state_dirty = false;
+    g_open_state_last_persist = {};
 }
 
 void ResetForTest()
@@ -915,6 +1135,119 @@ std::vector<CPubKey> TrustedSigners()
     return {store->TrustedSigners().begin(), store->TrustedSigners().end()};
 }
 
+bool OpenAttestorsEnabled()
+{
+    auto store{Store()};
+    return store && store->OpenAttestorsEnabled();
+}
+
+size_t OpenThreshold()
+{
+    auto store{Store()};
+    return store ? store->OpenThreshold() : 0;
+}
+
+std::vector<CPubKey> AdmittedOpenSigners()
+{
+    auto store{Store()};
+    if (!store) return {};
+    const auto admitted{store->AdmittedOpenSigners()};
+    return {admitted.begin(), admitted.end()};
+}
+
+std::vector<CPubKey> FrozenOpenSigners()
+{
+    auto store{Store()};
+    if (!store) return {};
+    const auto frozen{store->FrozenOpenSigners()};
+    return {frozen.begin(), frozen.end()};
+}
+
+bool IsAuthoritySigner(const CPubKey& pubkey)
+{
+    auto store{Store()};
+    return store && store->IsAuthoritySigner(pubkey);
+}
+
+bool IsBlocked(const CPubKey& pubkey)
+{
+    auto store{Store()};
+    return store && store->IsBlocked(pubkey);
+}
+
+std::vector<CPubKey> BlockedSigners()
+{
+    auto store{Store()};
+    if (!store) return {};
+    const auto blocked{store->BlockedSigners()};
+    return {blocked.begin(), blocked.end()};
+}
+
+std::vector<CPubKey> ConfigBlockedSigners()
+{
+    auto store{Store()};
+    if (!store) return {};
+    const auto blocked{store->ConfigBlockedSigners()};
+    return {blocked.begin(), blocked.end()};
+}
+
+std::vector<CPubKey> RuntimeBlockedSigners()
+{
+    auto store{Store()};
+    if (!store) return {};
+    const auto blocked{store->RuntimeBlockedSigners()};
+    return {blocked.begin(), blocked.end()};
+}
+
+size_t UnblockedPinMembers()
+{
+    auto store{Store()};
+    return store ? store->UnblockedPinMembers() : 0;
+}
+
+bool PinQuorumReachable()
+{
+    auto store{Store()};
+    return store && store->PinQuorumReachable();
+}
+
+matmul::trusted::BlocklistResult AddBlocklistedSigner(
+    const CPubKey& pubkey, std::string& persist_error)
+{
+    persist_error.clear();
+    auto store{Store()};
+    if (!store) return matmul::trusted::BlocklistResult::Invalid;
+    const auto result{store->AddBlocklistedSigner(pubkey)};
+    if (result == matmul::trusted::BlocklistResult::Blocked) {
+        std::lock_guard io_lock{g_persist_io_mutex};
+        (void)PersistBlocklistState(store, persist_error);
+    }
+    return result;
+}
+
+std::vector<matmul::trusted::ExactReplayAttestation> HeardAttestations()
+{
+    auto store{Store()};
+    if (!store) return {};
+    return store->ExportHeard();
+}
+
+matmul::trusted::AttestationLogHead LogHead()
+{
+    auto store{Store()};
+    return store ? store->LogHead() : matmul::trusted::AttestationLogHead{};
+}
+
+matmul::trusted::AddResult AddRefutation(
+    const matmul::trusted::ExactReplayRefutation& refutation,
+    const uint256& expected_hash,
+    int32_t expected_height)
+{
+    auto store{Store()};
+    if (!store) return matmul::trusted::AddResult::UntrustedSigner;
+    return store->AddRefutation(refutation, expected_hash, expected_height);
+}
+
 std::optional<CPubKey> LocalSigner()
 {
     auto store{Store()};
@@ -936,14 +1269,24 @@ matmul::trusted::AddResult Add(
     auto store{Store()};
     if (!store) return matmul::trusted::AddResult::UntrustedSigner;
     const auto result{store->Add(attestation, expected_hash, expected_height)};
-    // Accepted and Duplicate both prove a configured signer attested this
-    // height; advance the local frontier high-water mark either way.
-    if (result == matmul::trusted::AddResult::Accepted ||
-        result == matmul::trusted::AddResult::Duplicate) {
+    // Signed-frontier high-water is pin *quorum* only. A single stolen pin
+    // vote must not inflate g_highest_attested_height / GETDATA preference.
+    if ((result == matmul::trusted::AddResult::Accepted ||
+         result == matmul::trusted::AddResult::Duplicate) &&
+        store->IsAuthoritySigner(attestation.signer) &&
+        store->HasQuorum(expected_hash, expected_height)) {
         NoteAcceptedAttestationHeight(expected_height, expected_hash);
     }
     if (result == matmul::trusted::AddResult::Accepted) {
         PersistAfterMutation(attestation);
+    }
+    if (store->OpenAttestorsEnabled() &&
+        (result == matmul::trusted::AddResult::Accepted ||
+         result == matmul::trusted::AddResult::Equivocation ||
+         result == matmul::trusted::AddResult::Heard)) {
+        std::string persist_error;
+        std::lock_guard io_lock{g_persist_io_mutex};
+        (void)PersistOpenAttestorState(store, persist_error);
     }
     return result;
 }
@@ -968,12 +1311,17 @@ matmul::trusted::AddResult SignAuthoritative(
     const auto result{
         store->SignLocal(block_hash, block_height, &signed_attestation)};
     if (produced && (result == matmul::trusted::AddResult::Accepted ||
-                     result == matmul::trusted::AddResult::Duplicate)) {
+                     result == matmul::trusted::AddResult::Duplicate ||
+                     result == matmul::trusted::AddResult::Heard)) {
         *produced = signed_attestation;
     }
     if (result == matmul::trusted::AddResult::Accepted ||
         result == matmul::trusted::AddResult::Duplicate) {
-        NoteAcceptedAttestationHeight(block_height, block_hash);
+        const auto local_pk{store->LocalSignerPubKey()};
+        if (local_pk && store->IsAuthoritySigner(*local_pk) &&
+            store->HasQuorum(block_hash, block_height)) {
+            NoteAcceptedAttestationHeight(block_height, block_hash);
+        }
         if (block_height >= 0 && !block_hash.IsNull()) {
             std::lock_guard lock{g_mutex};
             g_local_signed_hash_by_height.emplace(block_height, block_hash);
@@ -1000,8 +1348,15 @@ matmul::trusted::UtxoSnapshotVerifyResult VerifyUtxoSnapshotManifest(
     if (!store) {
         return matmul::trusted::UtxoSnapshotVerifyResult::ThresholdNotMet;
     }
+    matmul::trusted::UtxoSnapshotManifest filtered{manifest};
+    filtered.signatures.clear();
+    const auto blocked{store->BlockedSigners()};
+    for (const auto& signature : manifest.signatures) {
+        if (blocked.count(signature.signer) != 0) continue;
+        filtered.signatures.push_back(signature);
+    }
     return matmul::trusted::VerifyUtxoSnapshotManifestSelfConsistent(
-        manifest, store->ChainId(), store->ReplayAuthorityContext(),
+        filtered, store->ChainId(), store->ReplayAuthorityContext(),
         store->TrustedSigners(), store->Threshold());
 }
 
@@ -1022,17 +1377,8 @@ bool HasQuorum(const uint256& block_hash, int32_t block_height)
     // is disk-backed and queried only on a miss so restart provenance does not
     // disappear after max_blocks blocks.
     const auto historical{ReadDurableAttestations(block_hash, block_height)};
-    std::set<CPubKey> valid_signers;
-    for (const auto& attestation : historical) {
-        if (matmul::trusted::VerifyAttestation(
-                attestation, store->ChainId(),
-                store->ReplayAuthorityContext(), block_hash, block_height,
-                store->TrustedSigners()) ==
-            matmul::trusted::VerifyResult::Valid) {
-            valid_signers.insert(attestation.signer);
-        }
-    }
-    return valid_signers.size() >= store->Threshold();
+    return store->HasQuorumFromAttestations(historical, block_hash,
+                                           block_height);
 }
 
 bool HasQuorumInMemory(const uint256& block_hash, int32_t block_height)
@@ -1192,7 +1538,9 @@ bool OpenPersistence(const fs::path& path, std::string& error)
                 .obfuscate = false,
             });
             g_durable_namespace = AuthorityNamespace(*store);
-            if (!LoadDurableAttestations(store, error) ||
+            if (!LoadBlocklistState(store, error) ||
+                !LoadOpenAttestorState(store) ||
+                !LoadDurableAttestations(store, error) ||
                 !LoadPersistenceSnapshot(store, path, error) ||
                 !LoadWal(store, path, error) ||
                 !ResetLegacyArchive(path, error) ||
@@ -1247,7 +1595,12 @@ void ClosePersistence()
     }
     StopPersistenceWorker();
     {
+        auto store{Store()};
         std::lock_guard io_lock{g_persist_io_mutex};
+        if (g_open_state_dirty && store) {
+            std::string error;
+            (void)PersistOpenAttestorState(store, error, /*force=*/true);
+        }
         g_durable_db.reset();
         g_durable_namespace.reset();
     }
@@ -1275,9 +1628,12 @@ bool FlushPersistence(std::string& error)
 }
 
 HistoricalReverifyAdmit TryAdmitHistoricalReverify(
-    const uint256& block_hash)
+    const uint256& block_hash, bool live_gpu_busy)
 {
     std::lock_guard lock{g_reverify_mutex};
+    if (live_gpu_busy) {
+        return HistoricalReverifyAdmit::LiveGpuBusy;
+    }
     RefillReverifyTokensLocked(std::chrono::steady_clock::now());
     if (g_reverify_queued.count(block_hash) != 0 ||
         g_reverify_inflight.count(block_hash) != 0) {

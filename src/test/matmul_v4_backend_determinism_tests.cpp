@@ -333,20 +333,21 @@ BOOST_AUTO_TEST_CASE(hip_classifier_admits_cdna_mfma_only)
     BOOST_CHECK(!ClassifyHipDevice("sm_90").admissible);
 }
 
-BOOST_AUTO_TEST_CASE(metal_classifier_admits_m5_int8_tensorops_only)
+BOOST_AUTO_TEST_CASE(metal_classifier_admits_int8_tensorops_capability)
 {
     using matmul_v4::backend::ClassifyMetalDevice;
 
-    // Pre-M5 GPU / ANE-only: no exact integer tensor path (§K.1, §O.1).
-    const auto pre_m5 = ClassifyMetalDevice(false);
-    BOOST_CHECK(!pre_m5.admissible);
-    BOOST_CHECK_EQUAL(pre_m5.reason, "no_integer_tensor_path_verification_only");
+    // Failed / absent TensorOps self-test: verification-only. Name class is
+    // not this predicate.
+    const auto no_tensorops = ClassifyMetalDevice(false);
+    BOOST_CHECK(!no_tensorops.admissible);
+    BOOST_CHECK_EQUAL(no_tensorops.reason, "no_integer_tensor_path_verification_only");
 
-    // M5-class Metal 4 INT8 TensorOps: admissible, self-test still required.
-    const auto m5 = ClassifyMetalDevice(true);
-    BOOST_CHECK(m5.admissible);
-    BOOST_CHECK(m5.self_test_required);
-    BOOST_CHECK_EQUAL(m5.reason, "metal4_int8_tensorops_m5_class");
+    // Byte-exact Metal 4 INT8 TensorOps: admissible, self-test still required.
+    const auto tensorops = ClassifyMetalDevice(true);
+    BOOST_CHECK(tensorops.admissible);
+    BOOST_CHECK(tensorops.self_test_required);
+    BOOST_CHECK_EQUAL(tensorops.reason, "metal4_int8_tensorops");
 }
 
 BOOST_AUTO_TEST_CASE(ascend_classifier_admits_950_cube_candidates)

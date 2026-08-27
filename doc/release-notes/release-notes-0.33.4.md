@@ -10,8 +10,10 @@ must upgrade **before 199299**. 0.33.4 also fixes signed-frontier catch-up,
 attestor BestKnown, equal-work lost-twin ExactReplay, unique EncDr templates,
 and HeightOccupied GETDATA skip.
 
-The current binary line on `main` is **v0.33.4.2** (assumeutxo pin at 199299
-plus provenance reseal). See [release-notes.md](../release-notes.md).
+The last 0.33.4.x binary line is **v0.33.4.2** (assumeutxo pin at 199299
+plus provenance reseal). See
+[release-notes-0.33.4.2.md](release-notes-0.33.4.2.md). 0.34 notes live in
+[release-notes.md](../release-notes.md).
 
 Please report bugs using the issue tracker at GitHub:
 

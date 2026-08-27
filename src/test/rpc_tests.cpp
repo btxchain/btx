@@ -817,4 +817,33 @@ BOOST_AUTO_TEST_CASE(rpc_arg_helper)
     CheckRpc(params, UniValue{JSON(R"([5, "hello", 4, "test", true, 1.23, "world"])")}, check_positional);
 }
 
+BOOST_AUTO_TEST_CASE(rpc_control_method_classifier)
+{
+    BOOST_CHECK(IsRpcControlMethod("stop"));
+    BOOST_CHECK(IsRpcControlMethod("uptime"));
+    BOOST_CHECK(IsRpcControlMethod("getrpcinfo"));
+    BOOST_CHECK(IsRpcControlMethod("help"));
+    BOOST_CHECK(IsRpcControlMethod("getmemoryinfo"));
+    BOOST_CHECK(!IsRpcControlMethod("getblockchaininfo"));
+    BOOST_CHECK(!IsRpcControlMethod("getblocktemplate"));
+    BOOST_CHECK(!IsRpcControlMethod(""));
+    BOOST_CHECK_EQUAL(*PeekJsonRpcMethod(
+                          R"({"jsonrpc":"1.0","id":"x","method":"stop","params":[]})"),
+                      "stop");
+    BOOST_CHECK_EQUAL(*PeekJsonRpcMethod(
+                          R"({"method":"uptime"})"),
+                      "uptime");
+    BOOST_CHECK_EQUAL(*PeekJsonRpcMethod(
+                          R"({"jsonrpc":"1.0","id":"x","method":"getrpcinfo")"),
+                      "getrpcinfo");
+    BOOST_CHECK(!PeekJsonRpcMethod(R"([{"method":"stop"}])"));
+    BOOST_CHECK(!PeekJsonRpcMethod(""));
+    // Nested params must not classify the control lane (truncated body).
+    BOOST_CHECK(!PeekJsonRpcMethod(
+        R"({"params":{"method":"stop"},"id":1)"));
+    BOOST_CHECK_EQUAL(*PeekJsonRpcMethod(
+                          R"({"params":{"method":"getblockchaininfo"},"method":"stop")"),
+                      "stop");
+}
+
 BOOST_AUTO_TEST_SUITE_END()

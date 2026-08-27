@@ -20,3 +20,8 @@ target_link_libraries(bitcoin_zmq
     zeromq
     Boost::headers
 )
+# Linux gcc-13 + libzmq.so + libnorm.so.1: do not add -lstdc++ / PUBLIC stdc++
+# here. That looks like the C++ runtime and gets stripped; it also resolves
+# to gcc-13's libstdc++.so which lacks __cxa_call_terminate@CXXABI_1.3.15.
+# The actual lever is -Wl,--unresolved-symbols=ignore-in-shared-libs on the
+# linux archive-group executables in src/CMakeLists.txt.

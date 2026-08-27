@@ -211,9 +211,11 @@ btx-cli getmatmultrustedstatus
 A miner that omits this pin cannot see `getmatmulattestedtip` and
 `getblocktemplate` may extend an unattested orphan. Do not load
 `-matmulattestationsignerkeyfile` on a miner.
-3. **Convert public seeds to GPU full nodes.** Each converted host runs
-   `-matmulvalidation=consensus` and ExactReplays. Trusted-mode on those
-   boxes goes away. CPU wallets and explorers can remain light.
+3. **Convert public seeds to discovery relays.** Each public DNS/`addnode`
+   host runs `-matmulvalidation=relay`: ADDR only, no pin, no GETMMATTEST,
+   no `NODE_NETWORK`. Archives follow GPU attestors via the pin; GPU
+   attestors stay off DNS (`-discover=0`). See
+   [doc/design/0.34-discovery-relay.md](doc/design/0.34-discovery-relay.md).
 
 Full contract, roll order, and what is *not* dropped (Epochs B–D, light
 clients, `nBits` as difficulty):

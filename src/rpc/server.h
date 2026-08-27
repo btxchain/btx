@@ -11,8 +11,10 @@
 
 #include <functional>
 #include <map>
+#include <optional>
 #include <stdint.h>
 #include <string>
+#include <string_view>
 
 #include <univalue.h>
 
@@ -176,6 +178,14 @@ public:
 };
 
 bool IsDeprecatedRPCEnabled(const std::string& method);
+
+/** Methods that must run even when every ordinary HTTP worker is blocked
+ *  on cs_main (live: unattested tip wedged all 18 b-httpworker; uptime /
+ *  getrpcinfo / stop could not be delivered). */
+[[nodiscard]] bool IsRpcControlMethod(std::string_view method);
+/** Extract JSON-RPC "method" from a request body or a truncated peek.
+ *  Object requests only; batches return nullopt (stay on the ordinary queue). */
+[[nodiscard]] std::optional<std::string> PeekJsonRpcMethod(std::string_view body);
 
 extern CRPCTable tableRPC;
 

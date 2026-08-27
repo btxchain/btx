@@ -12,6 +12,7 @@
 #include <netbase.h>
 #include <node/interface_ui.h>
 #include <rpc/protocol.h> // For HTTP status codes
+#include <rpc/server.h>
 #include <sync.h>
 #include <util/check.h>
 #include <util/signalinterrupt.h>
@@ -19,6 +20,7 @@
 #include <util/threadnames.h>
 #include <util/translation.h>
 
+#include <algorithm>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
@@ -145,6 +147,9 @@ static struct evhttp* eventHTTP = nullptr;
 static std::vector<CSubNet> rpc_allow_subnets;
 //! Work queue for handling longer requests off the event loop thread
 static std::unique_ptr<WorkQueue<HTTPClosure>> g_work_queue{nullptr};
+//! Reserved lane for stop/uptime/getrpcinfo so they complete while ordinary
+//! workers are blocked on cs_main.
+static std::unique_ptr<WorkQueue<HTTPClosure>> g_control_work_queue{nullptr};
 //! Handlers for (sub)paths
 static GlobalMutex g_httppathhandlers_mutex;
 static std::vector<HTTPPathHandler> pathHandlers GUARDED_BY(g_httppathhandlers_mutex);
@@ -324,11 +329,21 @@ static void http_request_cb(struct evhttp_request* req, void* arg)
         }
     }
 
-    // Dispatch to worker thread
+    // Dispatch to worker thread. Control RPCs (stop/uptime/getrpcinfo) use a
+    // reserved queue so they complete while ordinary workers sit on cs_main.
     if (i != iend) {
         std::unique_ptr<HTTPWorkItem> item(new HTTPWorkItem(std::move(hreq), path, i->handler));
-        assert(g_work_queue);
-        if (g_work_queue->Enqueue(item.get())) {
+        WorkQueue<HTTPClosure>* queue{g_work_queue.get()};
+        if (g_control_work_queue &&
+            item->req->GetRequestMethod() == HTTPRequest::POST) {
+            const std::string peek{item->req->PeekBody(4096)};
+            if (const auto method{PeekJsonRpcMethod(peek)};
+                method && IsRpcControlMethod(*method)) {
+                queue = g_control_work_queue.get();
+            }
+        }
+        assert(queue);
+        if (queue->Enqueue(item.get())) {
             item.release(); /* if true, queue took ownership */
         } else {
             LogPrintf("WARNING: request rejected because http work queue depth exceeded, it can be increased with the -rpcworkqueue= setting\n");
@@ -583,6 +598,10 @@ bool InitHTTPServer(const util::SignalInterrupt& interrupt)
     LogDebug(BCLog::HTTP, "creating work queue of depth %d\n", workQueueDepth);
 
     g_work_queue = std::make_unique<WorkQueue<HTTPClosure>>(workQueueDepth);
+    const int control_depth{
+        std::max((long)DEFAULT_HTTP_CONTROL_WORKQUEUE, 1L)};
+    g_control_work_queue = std::make_unique<WorkQueue<HTTPClosure>>(control_depth);
+    LogDebug(BCLog::HTTP, "creating control work queue of depth %d\n", control_depth);
     // transfer ownership to eventBase/HTTP via .release()
     eventBase = base_ctr.release();
     eventHTTP = http_ctr.release();
@@ -603,12 +622,17 @@ static std::vector<std::thread> g_thread_http_workers;
 void StartHTTPServer()
 {
     int rpcThreads = std::max((long)gArgs.GetIntArg("-rpcthreads", DEFAULT_HTTP_THREADS), 1L);
-    LogInfo("Starting HTTP server with %d worker threads\n", rpcThreads);
+    LogInfo("Starting HTTP server with %d worker threads plus %d control thread\n",
+            rpcThreads, DEFAULT_HTTP_CONTROL_THREADS);
     g_thread_http = std::thread(ThreadHTTP, eventBase);
 
     for (int i = 0; i < rpcThreads; i++) {
         g_thread_http_workers.emplace_back(HTTPWorkQueueRun, g_work_queue.get(), i);
     }
+    g_thread_http_workers.emplace_back([] {
+        util::ThreadRename("httpworker.ctrl");
+        g_control_work_queue->Run();
+    });
 }
 
 void InterruptHTTPServer()
@@ -620,6 +644,9 @@ void InterruptHTTPServer()
     }
     if (g_work_queue) {
         g_work_queue->Interrupt();
+    }
+    if (g_control_work_queue) {
+        g_control_work_queue->Interrupt();
     }
 }
 
@@ -664,6 +691,7 @@ void StopHTTPServer()
         eventBase = nullptr;
     }
     g_work_queue.reset();
+    g_control_work_queue.reset();
     LogDebug(BCLog::HTTP, "Stopped HTTP server\n");
 }
 
@@ -742,6 +770,17 @@ std::string HTTPRequest::ReadBody()
     std::string rv(data, size);
     evbuffer_drain(buf, size);
     return rv;
+}
+
+std::string HTTPRequest::PeekBody(size_t max_bytes) const
+{
+    struct evbuffer* buf = evhttp_request_get_input_buffer(req);
+    if (!buf) return "";
+    const size_t size{std::min(evbuffer_get_length(buf), max_bytes)};
+    if (size == 0) return "";
+    const char* data{reinterpret_cast<const char*>(evbuffer_pullup(buf, size))};
+    if (!data) return "";
+    return std::string(data, size);
 }
 
 void HTTPRequest::WriteHeader(const std::string& hdr, const std::string& value)

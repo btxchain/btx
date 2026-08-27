@@ -316,6 +316,10 @@ inline constexpr const char* GETMMATTEST{"getmmattest"};
  * Receivers validate the domain, chain, height, hash, configured signer set,
  * signature, uniqueness, and M-of-N threshold before using a quorum. */
 inline constexpr const char* MMATTEST{"mmattest"};
+/** Watchtower ExactReplay-failed statement. Policy data, never consensus.
+ * Pin-member refutations block open quorum on that hash; pin quorum is
+ * unchanged. Unknown to pre-0.34 peers (ignored). */
+inline constexpr const char* MMATREFUTE{"mmatrefute"};
 /**
  * mmsketch carries the full self-authenticating sketch-cache payload for one
  * block, in response to a `getmmsketch`. Payload:
@@ -438,6 +442,7 @@ inline const std::array ALL_NET_MESSAGE_TYPES{std::to_array<std::string>({
     NetMsgType::MMSKETCH,
     NetMsgType::GETMMATTEST,
     NetMsgType::MMATTEST,
+    NetMsgType::MMATREFUTE,
     NetMsgType::GETRCCARRIER,
     NetMsgType::RCCARRIER,
     NetMsgType::RCADMIT,
@@ -516,6 +521,12 @@ enum ServiceFlags : uint64_t {
     // (manifest + chunked body). Advertisement only; serving does not require
     // being a signer — any host holding the files may offer them.
     NODE_ATTESTED_UTXO_SNAPSHOT = (1ULL << 32),
+
+    // 0.34 discovery / introduction node. ADDR only: not MatMul authority,
+    // not a block-chain source, not GETMMATTEST. Public DNS/addnode hosts
+    // advertise this instead of NODE_MATMUL_CONSENSUS / TRUSTED_MIRROR /
+    // ATTESTATION_ARCHIVE so they stop being chain oracles.
+    NODE_MATMUL_DISCOVERY = (1ULL << 33),
 };
 
 /**
@@ -530,6 +541,11 @@ std::vector<std::string> serviceFlagsToStr(uint64_t flags);
  * If the return value is changed, contrib/seeds/makeseeds.py
  * should be updated appropriately to filter for nodes with
  * desired service flags (compatible with our new flags).
+ *
+ * NODE_MATMUL_DISCOVERY is intentionally absent. DNS x-subdomain bootstrap
+ * must still resolve NODE_NETWORK archives/miners. Discovery relays are
+ * reached via the empty-x ADDR_FETCH fallback (net.cpp), not by putting
+ * DISCOVERY into this mask (that combination makes DNS bootstrap worse).
  */
 constexpr ServiceFlags SeedsServiceFlags() { return ServiceFlags(NODE_NETWORK | NODE_WITNESS | NODE_SHIELDED); }
 
@@ -539,7 +555,8 @@ constexpr ServiceFlags SeedsServiceFlags() { return ServiceFlags(NODE_NETWORK | 
  */
 static inline bool MayHaveUsefulAddressDB(ServiceFlags services)
 {
-    return (services & NODE_NETWORK) || (services & NODE_NETWORK_LIMITED);
+    return (services & NODE_NETWORK) || (services & NODE_NETWORK_LIMITED) ||
+           (services & NODE_MATMUL_DISCOVERY);
 }
 
 /** A CService with information about it as peer */

@@ -16,8 +16,9 @@
 #     --backends cuda \
 #     --out-dir doc/evidence/multi-gpu-profile1-goldens-YYYY-MM-DD
 #
-# Optional: --backends cuda,metal,hip. CUDA+Metal are the required independent
-# launch cohort; HIP is optional, but when supplied it must match exactly.
+# Optional: --backends cuda,metal,hip. CUDA is the required independent
+# launch cohort for this tree; Metal and HIP are optional, but when supplied
+# they must match exactly.
 # Use --compare-only to rebuild a comparison from sanitized artifacts already
 # present under OUT_DIR/raw without executing a backend on the current host.
 #
@@ -436,7 +437,7 @@ for be in backends[1:]:
             if record.get(field) != ref_record.get(field) or record.get(field) is None:
                 mismatches.append({"nonce": n, "backend": be, "reason": f"{field}_mismatch"})
 
-required = {"cuda", "metal"}
+required = {"cuda"}
 present = set(backends)
 cuda_metal_present = {"cuda", "metal"}.issubset(present)
 cuda_metal_failures = [
@@ -490,7 +491,8 @@ payload = {
         for be in backends
     },
     "notes": [
-        "Production goldens require byte-identical ExactReplay digests across CUDA and Metal for the same frozen canary headers.",
+        "This tree ships the classes it measured (CUDA). Additional Metal/HIP rows are added by the builder that measured them.",
+        "When more than one GPU backend is present they must be byte-identical on the same frozen canary headers.",
         "HIP remains an optional provider; any supplied HIP corpus must match the required cohort exactly.",
         "CPU ExactReplay is not an accepted independent reproduction path for Epoch-A production goldens.",
         "Every required artifact is bound to the exact clean revision embedded in its harness binary and a raw provider implementation consistent with its declared backend family.",
@@ -513,7 +515,7 @@ print(json.dumps({"wrote": str(out_path), "cuda_metal_match": cuda_metal_match, 
 if mismatches or coverage_failures:
     raise SystemExit("header/digest/coverage mismatch across backends")
 if not complete_match and not allow_partial:
-    raise SystemExit("incomplete multi-GPU set (need cuda+metal with matching digests)")
+    raise SystemExit("incomplete production-golden set (need cuda with matching digests)")
 PY
 
 # Re-parse the raw artifacts through the release-grade validator.  The legacy
@@ -549,13 +551,14 @@ Status: **non-authorizing corpus-runner output**. Inspect
 artifact does not change consensus parameters, ratification flags, or the
 committed production manifest. The release gate closes only after CUDA and
 Metal reproduce the exact final clean code freeze and the reviewed seal is
-committed through \`CommittedRCProductionGoldenManifest()\`.
+committed through \`CommittedRCProductionGoldenManifest()\`. This tree
+ships CUDA; additional Metal rows are added by the builder that measured them.
 
 ## Policy
 
-Independent reproduction for Epoch-A production goldens is **cross-GPU-backend**
-(CUDA and Metal) ExactReplay on identical frozen canary headers. HIP is an
-optional provider whose submitted evidence must also match. Portable CPU
+Independent reproduction for Epoch-A production goldens is GPU ExactReplay
+on identical frozen canary headers. This tree requires CUDA; Metal and HIP
+are optional providers whose submitted evidence must also match. Portable CPU
 oracle reproduction is not required for this GPU-optimized chain.
 
 ## Artifact

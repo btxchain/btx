@@ -66,7 +66,7 @@ delegates to:
 | CPU | always (consensus reference) | — |
 | CUDA | IMMA-capable, compute capability ≥ 7.5: Turing sm_75, Ampere sm_80/86, Ada sm_89, Hopper sm_90, Blackwell sm_10x/12x | Volta sm_70/72 (FP16-only tensor cores), all pre-tensor parts (Pascal, CMP 30HX/TU116-class) |
 | HIP/ROCm | CDNA MFMA: gfx908 (MI100), gfx90a (MI200), gfx940/941/942 (MI300), gfx950 (MI350) | GCN/Vega (gfx900/906 — no matrix cores), RDNA gfx10xx/11xx/12xx (WMMA not qualified pending golden vectors) |
-| Metal | Apple M5-class GPU Neural Accelerator with Metal 4 INT8 TensorOps (OS 26.4+) | Every pre-M5 GPU; the ANE (its "INT8" dequantizes to FP16 — no exact integer path) |
+| Metal | Byte-exact Metal 4 INT8 TensorOps self-test (`IsLtTensorOpsGemmAvailable`). Name class selects the golden row. | Failed self-test (ALU-only, ANE FP16 dequant). Mining also needs a row for the reported class in **that** binary's manifest. |
 
 FP-anything (FP16/BF16/FP8, or any floating accumulate) is **never**
 admissible — floating accumulation rounds per partial sum and is not

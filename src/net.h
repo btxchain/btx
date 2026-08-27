@@ -864,7 +864,7 @@ public:
     /** Sticky: this peer issued GETDATA (archive/fetcher). Used only to
      *  keep SendMessages (INV) to archives; msghand prefer/skip uses
      *  live GETDATA (queue or inflight requests), not this bit. Live
-     *  macpro2 2026-08-16: sticky Preferred put every miner that had
+     *  GPU attestor 2026-08-16: sticky Preferred put every miner that had
      *  ever fetched into the archive class, GETDATA still 45–224s. */
     std::atomic_bool m_prefer_block_serve{false};
     /** Live: process-queue GETDATA or unconsumed m_getdata_requests. */

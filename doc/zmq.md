@@ -47,10 +47,18 @@ operation.
 
 ## Enabling
 
-By default, the ZeroMQ feature is not automatically compiled.
-To enable, use `-DWITH_ZMQ=ON` when configuring the build system:
+ZeroMQ is **on by default**. `CMakeLists.txt` sets `option(WITH_ZMQ ... ON)`
+because native 0.33.4.2 tarballs configured without `-DWITH_ZMQ=ON` and shipped
+a `btxd` that still contained `-zmqpubhashblock` strings (hidden args) while
+`ldd` showed no `libzmq`. Pool operators got silence, not an error.
 
-    $ cmake -B build -DWITH_ZMQ=ON
+Release configure lines must still pass `-DWITH_ZMQ=ON` explicitly, and every
+shipped `btxd` must pass `scripts/release/verify_release_btxd.py` (Linux: `ldd`
+shows `libzmq`; macOS: static `libzmq.a` / `libevent_*.a` / `libomp.a`, no
+Homebrew dylibs on `btxd` or `btx-cli`). Disable only
+for fuzzing or a deliberate developer build:
+
+    $ cmake -B build -DWITH_ZMQ=OFF
 
 To actually enable operation, one must set the appropriate options on
 the command line or in the configuration file.

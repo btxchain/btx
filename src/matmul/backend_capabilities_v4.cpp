@@ -105,12 +105,14 @@ Eligibility MetalEligibility()
             .reason = probe.reason,
         };
     }
-    // §O.1: only M5-class devices expose Metal 4 INT8 TensorOps (s8xs8->s32).
-    // IsLtTensorOpsGemmAvailable is true ONLY after ExactGemmS8S8 self-qual
-    // (never from ALU shaders alone). M4-class stays verification-only.
+    // Admission is capability, not a marketing-string class. ClassifyFromDeviceName
+    // (name.find("M5") etc.) stays for reporting and for selecting which golden
+    // row applies. IsLtTensorOpsGemmAvailable() -> SelfTestTensorOpsOnce() already
+    // proves the property ExactReplay depends on: it builds 32x32 INT8 operands,
+    // computes ExactGemmS8S8 on CPU, runs the same on GPU, and fails closed unless
+    // gpu == cpu exactly, then repeats with a 64x16 panel. ALU shaders never pass.
     const auto arch = matmul_v4::metal::ProbeLtMetalArch();
     const bool has_metal4_int8_tensor_ops =
-        arch.name_class == matmul_v4::metal::LtMetalArchNameClass::M5Class &&
         matmul_v4::metal::IsLtTensorOpsGemmAvailable();
     Eligibility eligibility = ClassifyMetalDevice(has_metal4_int8_tensor_ops);
     eligibility.reason = std::string{eligibility.reason} + ":arch=" + arch.name_class_string;
@@ -519,16 +521,18 @@ Eligibility ClassifyMetalDevice(bool has_metal4_int8_tensor_ops)
     };
 
     if (!has_metal4_int8_tensor_ops) {
-        // Pre-M5 GPUs have no matrix units; the ANE's "INT8" dequantizes to
-        // FP16 internally — no exact integer accumulate (§K.1, §O.1).
+        // No byte-exact s8xs8->s32 TensorOps path (ALU-only, ANE FP16
+        // dequant, failed self-test). Verification-only until the device
+        // passes SelfTestTensorOpsOnce. Name class is not this gate.
         eligibility.reason = "no_integer_tensor_path_verification_only";
         return eligibility;
     }
 
-    // M5-class GPU Neural Accelerator, Metal 4 INT8 TensorOps (s8xs8->s32,
-    // OS 26.4+). Admissible pending the mandatory §N.3-v self-test.
+    // Metal 4 INT8 TensorOps self-qualified against the CPU ExactGemm
+    // reference. Mining still requires a matching golden row for the
+    // reported device class (ClassifyFromDeviceName).
     eligibility.admissible = true;
-    eligibility.reason = "metal4_int8_tensorops_m5_class";
+    eligibility.reason = "metal4_int8_tensorops";
     return eligibility;
 }
 

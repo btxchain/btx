@@ -63,6 +63,9 @@ public:
         bool is_ibd{false};
         int32_t reference_height{std::numeric_limits<int32_t>::max()};
         uint32_t work_units{0};
+        //! Canonical first-hole / followed tip-child: OldestEvictable skips
+        //! these so a sibling-body flood cannot drop the progress body (4.2).
+        bool pin_progress{false};
     };
 
     struct Token {
@@ -211,6 +214,17 @@ public:
             entry.updated_at = now;
         }
         return true;
+    }
+
+    /** Drop every retained body and attempt. Shared peerman fixtures must
+     *  call this between cases so leftover RUNNING/BODY_RETAINED entries
+     *  cannot fill capacity or starve the next Retain. */
+    void ClearForTest()
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        while (!m_entries.empty()) {
+            EraseEntry(m_entries.begin());
+        }
     }
 
     std::optional<std::pair<uint256, RetainedBody>> NextRetry(
@@ -540,7 +554,7 @@ private:
         auto oldest{m_entries.end()};
         for (auto it = m_entries.begin(); it != m_entries.end(); ++it) {
             if (it->first == protected_hash || !it->second.body ||
-                IsActive(it->second.state)) {
+                IsActive(it->second.state) || it->second.body->pin_progress) {
                 continue;
             }
             if (oldest == m_entries.end() ||

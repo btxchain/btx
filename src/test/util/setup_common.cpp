@@ -38,6 +38,7 @@
 #include <rpc/register.h>
 #include <rpc/server.h>
 #include <scheduler.h>
+#include <script/script.h>
 #include <script/sigcache.h>
 #include <streams.h>
 #include <test/util/mining.h>
@@ -270,14 +271,22 @@ ChainTestingSetup::ChainTestingSetup(const ChainType chainType, TestOpts opts)
             chainman_opts.script_execution_cache_bytes = 0;
             chainman_opts.signature_cache_bytes = 0;
         }
+        // extra_args land on m_node.args (gArgs), not m_args. Honor the
+        // shielded-state skip/force flags used past nShieldedPoolDisableHeight.
+        if (auto value{m_node.args->GetBoolArg("-shieldedstate")}) {
+            chainman_opts.force_shielded_state = *value;
+        }
+        if (auto value{m_node.args->GetBoolArg("-resetshieldedstate")}) {
+            chainman_opts.reset_shielded_state = *value;
+        }
         // Honor the deep-reorg defense options from extra_args so tests can
         // exercise explicit PARK and default WARN/hysteresis paths (see
         // ApplyArgsManOptions / ActivateBestChainStep).
-        if (auto value{m_args.GetBoolArg("-parkdeepreorg")}) {
+        if (auto value{m_node.args->GetBoolArg("-parkdeepreorg")}) {
             chainman_opts.deep_reorg_action = *value ? kernel::DeepReorgAction::PARK
                                                      : kernel::DeepReorgAction::WARN;
         }
-        if (auto value{m_args.GetIntArg("-maxreorgdepthwarn")}) {
+        if (auto value{m_node.args->GetIntArg("-maxreorgdepthwarn")}) {
             if (*value >= 1) {
                 chainman_opts.max_reorg_depth_warn = static_cast<uint32_t>(
                     std::min<int64_t>(*value, std::numeric_limits<uint32_t>::max()));
@@ -429,8 +438,9 @@ TestChain100Setup::TestChain100Setup(
     const ChainType chain_type,
     TestOpts opts)
     : TestingSetup{ChainType::REGTEST,
-                   opts.defer_expensive_matmul ? WithCheapMatMulFixtureDefaults(std::move(opts))
-                                               : std::move(opts)}
+                   opts.defer_expensive_matmul ? WithCheapMatMulFixtureDefaults(opts)
+                                               : opts},
+      m_freeze_coinbase_extra_nonce{opts.freeze_coinbase_extra_nonce}
 {
     SetMockTime(1598887952);
     constexpr std::array<unsigned char, 32> vchKey = {
@@ -469,6 +479,20 @@ CBlock TestChain100Setup::CreateBlock(
     CBlock block = BlockAssembler{chainstate, nullptr, options, m_node}.CreateNewBlock()->block;
 
     Assert(block.vtx.size() == 1);
+    // Production CreateNewBlock randomizes extra nonce / nNonce64 so EncDr
+    // can grind unique templates under clamped nTime. Opt-in freeze is only
+    // for canned assumeutxo@110 (RANDOM_CTX_SEED is per-process). Do not
+    // freeze globally: gold-standard twins at the same height would collide.
+    if (m_freeze_coinbase_extra_nonce) {
+        const CBlockIndex* prev_block{WITH_LOCK(::cs_main, {
+            return m_node.chainman->m_blockman.LookupBlockIndex(block.hashPrevBlock);
+        })};
+        const int32_t height{prev_block ? prev_block->nHeight + 1 : 0};
+        CMutableTransaction coinbase{*block.vtx[0]};
+        coinbase.vin[0].scriptSig = CScript() << height << OP_0;
+        block.vtx[0] = MakeTransactionRef(std::move(coinbase));
+        block.nNonce64 = 0;
+    }
     for (const CMutableTransaction& tx : txns) {
         block.vtx.push_back(MakeTransactionRef(tx));
     }

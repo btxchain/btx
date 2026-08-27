@@ -302,11 +302,11 @@ def main() -> int:
             )
 
         # A populated production manifest is more than another provenance
-        # string.  It is a release seal over an exact CUDA+Metal corpus and a
-        # freeze commit.  Validate the raw artifacts, canonical headers,
-        # provider metadata, harness identities, and freeze -> seal ancestry as
-        # one atomic gate.  Historical fixture repositories without the
-        # manifest are intentionally unaffected.
+        # string.  It is a release seal over a measured CUDA corpus (Metal
+        # optional) and a freeze commit.  Validate the raw artifacts, canonical
+        # headers, provider metadata, harness identities, and freeze -> seal
+        # ancestry as one atomic gate.  Historical fixture repositories without
+        # the manifest are intentionally unaffected.
         production_manifest = root / PRODUCTION_MANIFEST
         if production_manifest.is_file():
             seal_script = Path(__file__).with_name(

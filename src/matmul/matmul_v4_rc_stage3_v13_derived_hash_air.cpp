@@ -778,7 +778,7 @@ bool BuildConstraintSystemV1(
                 };
             out.constraints.push_back(std::move(selected));
         }
-        for (const auto [column, allowed] :
+        for (const auto& pin :
              std::array<std::pair<uint32_t, uint32_t>, 5>{{
                  {layout.Low(lane),
                   layout.SourceActive(lane)},
@@ -791,6 +791,8 @@ bool BuildConstraintSystemV1(
                  {layout.SelectedValue(lane),
                   layout.SelectedSource(lane)},
              }}) {
+            const uint32_t column{pin.first};
+            const uint32_t allowed{pin.second};
             aq::AirConstraint<Fp3> zero;
             zero.name =
                 "stage3.v13_hash.inactive_source_zero";

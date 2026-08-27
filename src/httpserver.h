@@ -20,10 +20,17 @@ class SignalInterrupt;
 static const int DEFAULT_HTTP_THREADS=16;
 
 /**
+ * Extra dedicated worker for control RPCs (stop/uptime/getrpcinfo/help).
+ * Ordinary -rpcthreads workers can all block on cs_main; this lane must not.
+ */
+static const int DEFAULT_HTTP_CONTROL_THREADS=1;
+
+/**
  * The default value for `-rpcworkqueue`. This is the maximum depth of the work queue,
  * we don't allocate this number of work queue items upfront.
  */
 static const int DEFAULT_HTTP_WORKQUEUE=256;
+static const int DEFAULT_HTTP_CONTROL_WORKQUEUE=32;
 
 static const int DEFAULT_HTTP_SERVER_TIMEOUT=600;
 
@@ -122,6 +129,12 @@ public:
      * Repeated calls will return an empty string.
      */
     std::string ReadBody();
+
+    /**
+     * Peek at the start of the request body without consuming it.
+     * Used to classify control RPCs onto a reserved HTTP worker.
+     */
+    std::string PeekBody(size_t max_bytes) const;
 
     /**
      * Write output header.

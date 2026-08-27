@@ -34,11 +34,11 @@
 //                        GCN (gfx900/gfx906) has no matrix cores; RDNA WMMA
 //                        parts are verification-only until they pass the
 //                        cross-vendor golden vectors (§B.6, Appendix C-3).
-//   - METAL            : admissible iff the device is Apple M5-class, i.e. a
-//                        GPU Neural Accelerator with Metal 4 INT8 TensorOps
-//                        (s8xs8->s32, OS 26.4+). Pre-M5 GPUs and the ANE
-//                        (which dequantizes INT8 to FP16) have no integer
-//                        tensor path -> verification-only (§K.1, §O.1).
+//   - METAL            : admissible iff IsLtTensorOpsGemmAvailable() — the
+//                        byte-exact TensorOps self-test against CPU ExactGemm.
+//                        Device-name class (m4_class / m5_class) is reporting
+//                        and golden-row selection, not this gate. ANE / ALU-only
+//                        paths fail the self-test and stay verification-only.
 //   - ASCEND (昇腾)    : admissible iff CANN linked (BTX_HAVE_CANN), NPU present,
 //                        Ascend 950-class SoC, AND ExactGemmS8S8 self-qual passed.
 //                        Without CANN (default CI): fail-closed / disabled_by_build.
@@ -147,9 +147,8 @@ Eligibility ClassifyCudaDevice(uint32_t cc_major, uint32_t cc_minor);
 //! target strings ("gfx90a:sramecc+:xnack-"); feature suffixes are ignored.
 Eligibility ClassifyHipDevice(std::string_view gcn_arch_name);
 
-//! Metal: admissible iff the device attests Metal 4 INT8 TensorOps
-//! (M5-class GPU Neural Accelerator, s8xs8->s32). Pre-M5 / ANE-only devices
-//! pass false and are verification-only.
+//! Metal: admissible iff the device attests Metal 4 INT8 TensorOps via the
+//! byte-exact self-test. Name class is not an admission gate.
 Eligibility ClassifyMetalDevice(bool has_metal4_int8_tensor_ops);
 
 //! Ascend/CANN: candidate iff SoC indicates Ascend 950-class Cube INT8.

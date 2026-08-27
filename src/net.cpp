@@ -23,6 +23,7 @@
 #include <net_permissions.h>
 #include <netaddress.h>
 #include <netbase.h>
+#include <node/discovery_relay.h>
 #include <node/eviction.h>
 #include <node/interface_ui.h>
 #include <node/matmul_trusted_attestations.h>
@@ -2349,6 +2350,14 @@ bool CConnman::ShouldRunInactivityChecks(const CNode& node, std::chrono::seconds
         node.IsManualConn() || node.HasPermission(NetPermissionFlags::NoBan),
         handshake_incomplete,
         never_received)};
+    if (node::discovery_relay::DiscoverySlowlorisShouldRelease(
+            node.IsInboundConn(),
+            node::discovery_relay::ServicesAreDiscoveryOnly(
+                node.m_nServices.load(std::memory_order_relaxed)),
+            node.fSuccessfullyConnected.load(),
+            now - node.m_connected)) {
+        return true;
+    }
     return node.m_connected + timeout < now;
 }
 
@@ -2361,6 +2370,17 @@ bool CConnman::InactivityCheck(const CNode& node) const
     const auto last_recv{node.m_last_recv.load()};
 
     if (!ShouldRunInactivityChecks(node, now)) return false;
+
+    if (node::discovery_relay::DiscoverySlowlorisShouldRelease(
+            node.IsInboundConn(),
+            node::discovery_relay::ServicesAreDiscoveryOnly(
+                node.m_nServices.load(std::memory_order_relaxed)),
+            node.fSuccessfullyConnected.load(),
+            now - node.m_connected)) {
+        LogInfo("discovery: dropping incomplete inbound discovery-only peer=%d age=%is\n",
+                node.GetId(), count_seconds(now - node.m_connected));
+        return true;
+    }
 
     bool has_received{last_recv.count() != 0};
     bool has_sent{last_send.count() != 0};
@@ -2735,9 +2755,11 @@ void CConnman::ThreadDNSAddressSeed()
                     }
                     addrman.Add(vAdd, resolveSource);
                 } else {
-                    // If the seed does not support a subdomain with our desired service bits,
-                    // we make an ADDR_FETCH connection to the DNS resolved peer address for the
-                    // base dns seed domain in chainparams
+                    // If the seed does not support a subdomain with our desired service bits
+                    // (SeedsServiceFlags is NODE_NETWORK|WITNESS|SHIELDED, not
+                    // DISCOVERY), we make an ADDR_FETCH connection to the DNS
+                    // resolved peer address for the base dns seed domain in
+                    // chainparams. That is how discovery relays are reached.
                     AddAddrFetch(seed);
                 }
             }
@@ -3393,7 +3415,7 @@ void CConnman::ThreadOpenAddedConnections()
         PerformReconnections();
         // Retry every 15 seconds if a connection was attempted, otherwise two
         // seconds. 60s left a handshake-dead -connect sitting until the
-        // added-node thread woke (live nyc1: bytesrecv=0, GETDATA in_flight=0).
+        // added-node thread woke (live public CPU archive: bytesrecv=0, GETDATA in_flight=0).
         if (!interruptNet.sleep_for(std::chrono::seconds(tried ? 15 : 2)))
             return;
     }
@@ -3583,7 +3605,7 @@ void CConnman::ThreadMessageHandler()
                             pnode->fSuccessfullyConnected.load(),
                             archive_target)) {
                     // Do not set fMoreWork: that busy-spins msghand at
-                    // ~90% with 148 miner inbounds (live nyc1 after the
+                    // ~90% with 148 miner inbounds (live public CPU archive after the
                     // skip patch) and wedges RPC. Archives already ran
                     // in this pass; miners wait for the next wake.
                     continue;
@@ -4008,7 +4030,7 @@ bool CConnman::Start(CScheduler& scheduler, const Options& connOptions)
     threadMessageHandler = std::thread(&util::TraceThread, "msghand", [this] { ThreadMessageHandler(); });
 
     // Historical BLOCK replies for ARCHIVE/MIRROR must not wait for
-    // ExactReplay on msghand (live nyc1 12–15s/block). Only the local
+    // ExactReplay on msghand (live public CPU archive 12–15s/block). Only the local
     // signer starts this worker; msghand remains the fallback.
     if (node::matmul_trusted::HasLocalSigner()) {
         m_archive_block_serve_running.store(true, std::memory_order_relaxed);
