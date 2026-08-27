@@ -3077,7 +3077,8 @@ BOOST_AUTO_TEST_CASE(unrequested_followed_tip_child_persists_without_gpu)
         chainman.SetBestHeader(const_cast<CBlockIndex*>(chainman.ActiveTip()));
         CBlockIndex* persisted{
             chainman.m_blockman.LookupBlockIndex(child_hash)};
-        if (persisted != nullptr) {
+        if (persisted != nullptr &&
+            !chainman.ActiveChain().Contains(persisted)) {
             persisted->nStatus &= ~BLOCK_HAVE_DATA;
             persisted->nTx = 0;
             persisted->m_chain_tx_count = 0;
@@ -3758,9 +3759,11 @@ BOOST_AUTO_TEST_CASE(competing_sibling_stays_header_only_on_trusted_mirror)
     }
     BOOST_CHECK_LT(requests, 20U);
 
-    // Late MMATTEST quorum must unsuppress HEADER_ONLY so FindNextBlocks
-    // issues getdata for the now-authenticated sibling. Tip-move clears
-    // used to be the only escape, and this sibling never moved the tip.
+    // Late MMATTEST quorum authenticates the sibling. F3
+    // AdvanceLastCommonPastActiveTip still drops same-height sibling holes
+    // so they cannot occupy inflight (FindLowestMissingBody on a fork is
+    // not a descendant of the connected tip). GETDATA for that body is a
+    // grandchild/descendant path, not this sibling.
     matmul::trusted::ExactReplayStatement statement;
     statement.chain_id = uint256::FromHex(std::string(64, '1')).value();
     statement.block_hash = competing_hash;
@@ -3778,15 +3781,13 @@ BOOST_AUTO_TEST_CASE(competing_sibling_stays_header_only_on_trusted_mirror)
     BOOST_REQUIRE(node::matmul_trusted::HasQuorum(
         competing_hash, tip->nHeight + 1));
 
-    // Follow the attested sibling as best-header and advertise it from a
-    // fresh peer so LastCommon / HAVE_DATA-unconnected state on the original
-    // connection cannot mask skip-set erasure.
     {
         LOCK(::cs_main);
         CBlockIndex* competing_idx{
             m_node.chainman->m_blockman.LookupBlockIndex(competing_hash)};
         BOOST_REQUIRE(competing_idx != nullptr);
         m_node.chainman->SetBestHeader(competing_idx);
+        BOOST_CHECK_EQUAL(competing_idx->nStatus & BLOCK_HAVE_DATA, 0);
     }
 
     CNode source{/*id=*/212,
@@ -3800,7 +3801,8 @@ BOOST_AUTO_TEST_CASE(competing_sibling_stays_header_only_on_trusted_mirror)
                  /*inbound_onion=*/false,
                  /*network_key=*/0};
     connman.Handshake(source, /*successfully_connected=*/true, services,
-                      services, PROTOCOL_VERSION, /*relay_txs=*/true);
+                      services, PROTOCOL_VERSION, /*relay_txs=*/true,
+                      /*starting_height=*/tip->nHeight + 2);
     connman.AddTestNode(source);
     connman.FlushSendBuffer(source);
     struct FinalizeSource {
@@ -3820,26 +3822,13 @@ BOOST_AUTO_TEST_CASE(competing_sibling_stays_header_only_on_trusted_mirror)
                              TX_WITH_WITNESS(competing_headers))));
     source.fPauseSend = false;
     (void)connman.ProcessMessagesOnce(source);
-
-    bool fetched{false};
-    for (int i = 0; i < 10; ++i) {
-        (void)peerman.SendMessages(&source);
-        if (CountQueuedGetDataForHash(source, competing_hash) > 0 ||
-            HasQueuedMessageType(source, NetMsgType::GETDATA)) {
-            fetched = true;
-            break;
-        }
-        CNodeStateStats source_stats;
-        BOOST_REQUIRE(peerman.GetNodeStateStats(source.GetId(), source_stats));
-        if (std::find(source_stats.vHeightInFlight.begin(),
-                      source_stats.vHeightInFlight.end(),
-                      tip->nHeight + 1) != source_stats.vHeightInFlight.end()) {
-            fetched = true;
-            break;
-        }
-        connman.FlushSendBuffer(source);
-    }
-    BOOST_CHECK(fetched);
+    connman.FlushSendBuffer(source);
+    (void)peerman.SendMessages(&source);
+    CNodeStateStats source_stats;
+    BOOST_REQUIRE(peerman.GetNodeStateStats(source.GetId(), source_stats));
+    BOOST_CHECK(!source.fDisconnect);
+    BOOST_CHECK(source_stats.vHeightInFlight.empty());
+    BOOST_CHECK(!HasQueuedMessageType(source, NetMsgType::GETDATA));
 
     {
         LOCK(::cs_main);
@@ -3847,7 +3836,11 @@ BOOST_AUTO_TEST_CASE(competing_sibling_stays_header_only_on_trusted_mirror)
             const_cast<CBlockIndex*>(m_node.chainman->ActiveTip()));
         CBlockIndex* followed_idx{
             m_node.chainman->m_blockman.LookupBlockIndex(followed.GetHash())};
-        if (followed_idx != nullptr) {
+        // Do not strip HAVE_DATA from a block still on the active chain:
+        // later DisconnectTip then fatal-errors "Failed to read block" and
+        // poisons the shared peerman_tests fixture.
+        if (followed_idx != nullptr &&
+            !m_node.chainman->ActiveChain().Contains(followed_idx)) {
             followed_idx->nStatus &= ~BLOCK_HAVE_DATA;
             followed_idx->nTx = 0;
             followed_idx->m_chain_tx_count = 0;
@@ -3855,6 +3848,8 @@ BOOST_AUTO_TEST_CASE(competing_sibling_stays_header_only_on_trusted_mirror)
                 followed_idx);
         }
     }
+    NeutralizeUnconnectedHeaders(*Assert(m_node.chainman));
+    peerman.ResetMatMulVerifyAdmissionForTest();
 }
 
 BOOST_AUTO_TEST_CASE(catchup_grandchild_persists_on_trusted_mirror)
@@ -6854,6 +6849,13 @@ BOOST_AUTO_TEST_CASE(pindex_last_common_behind_tip_advances_and_does_not_rereque
     const CBlockIndex* tip{
         WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip())};
     BOOST_REQUIRE(tip != nullptr);
+    if (tip->pprev == nullptr) {
+        mineBlock(m_node, std::chrono::seconds{tip->GetBlockTime() + 1});
+        tip = WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip());
+        BOOST_REQUIRE(tip != nullptr);
+        peerman.SetBestBlock(tip->nHeight,
+                             std::chrono::seconds{tip->GetBlockTime()});
+    }
     BOOST_REQUIRE(tip->pprev != nullptr);
     SetMockTime(std::chrono::seconds{tip->GetBlockTime() + 3600});
 
