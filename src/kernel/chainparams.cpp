@@ -49,6 +49,12 @@ auto consteval_ctor(auto&& input) { return input; }
 
 static constexpr int32_t BTX_SHIELDED_SUNSET_HEIGHT{125'000};
 static constexpr int32_t BTX_SHIELDED_POOL_CREDIT_DISABLE_HEIGHT{BTX_SHIELDED_SUNSET_HEIGHT};
+// 0.34: close the shielded pool at the live tip. Operator set this to
+// 199300 (pro6000 tip at freeze). Ingress has been consensus-disabled
+// since sunset/128000; egress is already zero. Historical blocks below
+// this height still validate. At/after it both directions are invalid
+// and nodes skip shielded state unless -shieldedstate=1.
+static constexpr int32_t BTX_SHIELDED_POOL_DISABLE_HEIGHT{199'300};
 static constexpr int32_t BTX_SHIELDED_DIRECT_SEND_PUBLIC_FLOW_DISABLE_HEIGHT{128'000};
 // Future consensus-bundle activation point for post-sunset zero-output V2_SEND
 // exact exits. Keep disabled until the release that coordinates this with the
@@ -880,6 +886,7 @@ public:
         consensus.nShieldedBridgeTagActivationHeight = 61'000;
         consensus.nShieldedSmileRiceCodecDisableHeight = 61'000;
         consensus.nShieldedMatRiCTDisableHeight = 61'000;
+        consensus.nShieldedPoolDisableHeight = BTX_SHIELDED_POOL_DISABLE_HEIGHT;
         consensus.nShieldedSpendPathRecoveryActivationHeight = 88'000;
         consensus.nShieldedPQ128UpgradeHeight = std::numeric_limits<int32_t>::max();
         consensus.nShieldedPoolCreditDisableHeight = BTX_SHIELDED_POOL_CREDIT_DISABLE_HEIGHT;
@@ -1395,6 +1402,7 @@ public:
         consensus.nShieldedBridgeTagActivationHeight = 61'000;
         consensus.nShieldedSmileRiceCodecDisableHeight = 61'000;
         consensus.nShieldedMatRiCTDisableHeight = 61'000;
+        consensus.nShieldedPoolDisableHeight = std::numeric_limits<int32_t>::max();
         consensus.nShieldedSpendPathRecoveryActivationHeight = 88'000;
         consensus.nShieldedPQ128UpgradeHeight = std::numeric_limits<int32_t>::max();
         consensus.nShieldedPoolCreditDisableHeight = BTX_SHIELDED_POOL_CREDIT_DISABLE_HEIGHT;
@@ -1588,6 +1596,7 @@ public:
         consensus.nShieldedBridgeTagActivationHeight = 61'000;
         consensus.nShieldedSmileRiceCodecDisableHeight = 61'000;
         consensus.nShieldedMatRiCTDisableHeight = 61'000;
+        consensus.nShieldedPoolDisableHeight = std::numeric_limits<int32_t>::max();
         consensus.nShieldedSpendPathRecoveryActivationHeight = 88'000;
         consensus.nShieldedPQ128UpgradeHeight = std::numeric_limits<int32_t>::max();
         consensus.nShieldedPoolCreditDisableHeight = BTX_SHIELDED_POOL_CREDIT_DISABLE_HEIGHT;
@@ -1816,6 +1825,7 @@ public:
         consensus.nShieldedBridgeTagActivationHeight = 61'000;
         consensus.nShieldedSmileRiceCodecDisableHeight = 61'000;
         consensus.nShieldedMatRiCTDisableHeight = 61'000;
+        consensus.nShieldedPoolDisableHeight = std::numeric_limits<int32_t>::max();
         consensus.nShieldedSpendPathRecoveryActivationHeight = 88'000;
         consensus.nShieldedPQ128UpgradeHeight = std::numeric_limits<int32_t>::max();
         consensus.nShieldedPoolCreditDisableHeight = BTX_SHIELDED_POOL_CREDIT_DISABLE_HEIGHT;
@@ -2273,6 +2283,8 @@ public:
             opts.shielded_smile_rice_codec_disable_height.value_or(0);  // Activate at genesis for instant regtest
         consensus.nShieldedMatRiCTDisableHeight =
             opts.shielded_matrict_disable_height.value_or(0);  // Activate at genesis for instant regtest
+        consensus.nShieldedPoolDisableHeight =
+            opts.shielded_pool_disable_height.value_or(std::numeric_limits<int32_t>::max());
         consensus.nShieldedSpendPathRecoveryActivationHeight =
             opts.shielded_spend_path_recovery_activation_height.value_or(0);  // Activate at genesis for instant regtest
         consensus.nShieldedC002ActivationHeight =
@@ -2405,6 +2417,7 @@ public:
             opts.shielded_bridge_tag_activation_height.has_value() ||
             opts.shielded_smile_rice_codec_disable_height.has_value() ||
             opts.shielded_matrict_disable_height.has_value() ||
+            opts.shielded_pool_disable_height.has_value() ||
             opts.shielded_spend_path_recovery_activation_height.has_value() ||
             opts.shielded_c002_activation_height.has_value() ||
             opts.shielded_unshield_velocity_activation_height.has_value() ||
@@ -2604,6 +2617,7 @@ public:
         consensus.nShieldedBridgeTagActivationHeight = 61'000;
         consensus.nShieldedSmileRiceCodecDisableHeight = 61'000;
         consensus.nShieldedMatRiCTDisableHeight = 61'000;
+        consensus.nShieldedPoolDisableHeight = std::numeric_limits<int32_t>::max();
         consensus.nShieldedSpendPathRecoveryActivationHeight = 88'000;
         consensus.nShieldedPQ128UpgradeHeight = std::numeric_limits<int32_t>::max();
         consensus.nShieldedPoolCreditDisableHeight = BTX_SHIELDED_POOL_CREDIT_DISABLE_HEIGHT;

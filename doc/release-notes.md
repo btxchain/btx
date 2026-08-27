@@ -61,16 +61,24 @@ pin must reach tip from a cold start on ExactReplay, keep advancing
 across a signed-frontier stall without operator action, and recover
 without a restart, with every privileged peer absent or hostile.
 
-## Archives are pointers, not authority
+## Archives validate independently; relays are the pointers
+
+Public DNS / `addnode` hosts (`node.btx.dev`, `node.btxchain.org`,
+`node.btx.tools`) run `-matmulvalidation=relay`: ADDR-only discovery,
+not MatMul authority, not a chain-tip oracle. `init.cpp` hard-`InitError`s
+if a relay is given a pin, signing key, GETMMATTEST serve, attestation
+blocklist, or open attestors.
+
+CPU archives with a full chain run `-matmulvalidation=consensus`. They
+ExactReplay independently. They need no pin, no signers, and no
+threshold. That is the decentralized outcome: archives are independent
+validators, not pin followers.
 
 `MatMulModeIsChainAuthority()` returns true **only** for `CONSENSUS`
 and `TRUSTED`. `RELAY` is excluded
 (`src/kernel/chainstatemanager_opts.h`). That predicate is the
 `chain_oracle` field on `getblockchaininfo` and `getpeerinfo`, so an
 operator can verify a discovery relay reports `chain_oracle: false`.
-`init.cpp` hard-`InitError`s if a relay is given a pin, signing key,
-GETMMATTEST serve, attestation blocklist, or open attestors, so a
-relay cannot accidentally become authority.
 
 ## Validators are optional, not required
 
@@ -83,11 +91,89 @@ gold-standard litmus passes; `SkipExactReplayForGpuAttestation` is
 skips; and production accepted blocks network-wide while the signer
 had attested nothing past 199300.
 
+## Trusted-mirror M=2 is a guard against single-key oracles
+
+`MainnetTrustedMirrorRefusesSingleKey` fires **only** when
+`-matmulvalidation=trusted` on mainnet
+(`src/node/matmul_trusted_attestations.h`). A consensus node is never
+refused. A relay node is never refused. On
+`-matmulvalidation=consensus` the pin is telemetry and never skips
+ExactReplay. This is the existing mainnet rule, not a 0.34 deadlock
+on archives.
+
+It exists because in trusted mode the quorum **replaces** the MatMul
+proof-of-work check above the Profile-1 activation height, so a 1-of-1
+quorum makes a single WIF that node's sole PoW authority: steal the
+key and the node accepts MatMul-invalid blocks. The M=2 floor is a
+guard **against** single-key oracles, not a requirement to run a
+trusted mirror, and it does not deadlock an archive that validates
+with ExactReplay.
+
+Do not pass `-allowsinglekeytrustedmirror=1` to start a public
+archive. If a host refuses because it is configured trusted with
+threshold 1, switch it to `-matmulvalidation=consensus`. The override
+is the single-stolen-key hijack surface this rule removes.
+
+A CPU host with no qualified ExactReplay provider cannot start
+`-matmulvalidation=consensus` either. That is a different fail-closed
+(`RefuseUnverifiableMatMulConsensusStartup`): Profile-1 needs a
+self-qualified accelerator, not a stolen-WIF skip. Do not pass
+`-allowunverifiablematmulconsensus=1` on unattended nodes. Public DNS
+seeds on CPU run `-matmulvalidation=relay`. A trusted archive still
+needs an M-of-N pin, which is not this M=2 startup guard's job to
+invent.
+
 The one honest limit: `-matmulvalidation=trusted` nodes still depend
 on the pin. The startup warning already says they are **not an
 independent full consensus validator**. That is a hardware limit
 (CPU-only machines that physically cannot ExactReplay), not a
 governance one.
+
+## Shielded pool closed at height 199300
+
+At height **199300** (the live tip at this freeze) the shielded pool is
+closed in both directions. That is a consensus flag-day
+(`nShieldedPoolDisableHeight`), the same idiom as
+`nShieldedSmileRiceCodecDisableHeight` /
+`nShieldedMatRiCTDisableHeight`. Blocks **below** 199300 validate
+exactly as they do today — rewriting history would fail IBD. At and
+after 199300:
+
+* shielded **egress** (unshield / spend) is rejected — the remaining
+  pool balance (~9,688.79 BTX) is treated as burned, after public
+  warning;
+* shielded **ingress** (new shielded output) is also rejected, so
+  nobody can deposit into a pool they can never leave.
+
+This release closes the pool immediately rather than at a future
+height. Ingress has already been consensus-disabled for tens of
+thousands of blocks (`nShieldedPoolCreditDisableHeight` follows
+`BTX_SHIELDED_SUNSET_HEIGHT`; `nShieldedDirectSendPublicFlowDisableHeight`
+is 128000). Egress over the 960-block window 198341–199301 was
+**zero** (`getshieldedstateinfo.velocity_window_egress`). The pool is
+inert; 0.34 makes that consensus and drops the dormant-pool attack
+surface.
+
+Once egress is disabled, shielded state is no longer needed for
+**consensus going forward**. The nullifier set exists to stop
+double-spends of shielded notes: if no note can ever be spent, no
+nullifier can ever be presented. The commitment tree exists to prove
+membership for a spend: no spends, no membership proofs. A dormant
+pool is pure attack surface, and shielded counterfeiting is invisible
+until exit.
+
+Nodes therefore **stop opening** the three shielded LevelDB stores
+(`nullifiers`, `commitments`, `account_registry`) by default once the
+active tip is at or past 199300. That is the startup saving: no
+rebuild, no wasted disk. Explorers and indexers that still want the
+historical view pass `-shieldedstate=1`. The code paths are not
+deleted; they still validate history below the flag-day.
+
+A local attestor WIF used to be turned into a pubkey in
+`AppInitParameterInteraction`, which runs before `ECC_Start`. That
+null-dereferenced `secp256k1_context_sign` (~1.2s kernel SEGV, not
+shielded warmup / RPC `-28`). The WIF is now staged and derived in
+`FinalizeConfiguration` after ECC exists.
 
 ## Fork self-sufficiency (goldens are a local mining belt)
 

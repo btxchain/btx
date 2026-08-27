@@ -193,6 +193,7 @@ def verify_shipped_btxd(btxd_path: Path) -> None:
         # Unit-test stubs are not ELF/Mach-O. Real release binaries must be.
         return
     module.verify_binary(btxd_path)
+    module.verify_launch(btxd_path)
 
 
 def verify_shipped_macos_cli(btx_cli_path: Path) -> None:

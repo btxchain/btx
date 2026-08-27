@@ -539,6 +539,11 @@ struct ChainstateManagerOpts {
     //! clean full rebuild from local block data. Supported replacement for the manual "move shielded_state
     //! aside" recovery; intended to be passed once (e.g. -resetshieldedstate) then removed.
     bool reset_shielded_state{false};
+    //! Opt in to opening nullifiers / commitments / account_registry after
+    //! nShieldedPoolDisableHeight. Default off once the active tip is at or
+    //! past that height: spends are consensus-invalid, so the stores are not
+    //! required. Explorers and indexers pass -shieldedstate=1.
+    bool force_shielded_state{false};
     //! DS-3 compatibility gate: optionally allow loading an assumeutxo snapshot whose shielded section has no
     //! consensus pin (AssumeutxoData.shielded_state_commitment) for its height. The shielded section
     //! (pool balance + nullifier set + commitment tree) is attacker-supplied and otherwise unvalidated,

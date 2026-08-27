@@ -2,7 +2,7 @@
 # Copyright (c) 2026 The BTX developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or https://opensource.org/licenses/mit-license.php.
-"""Fail-closed ZMQ and macOS-portability check for shipped binaries.
+"""Fail-closed ZMQ, portability, and launch check for shipped binaries.
 
 0.33.4.2 advertised -zmqpubhashblock (hidden-arg strings) with no libzmq
 linked. Pool operators got silence. This gate requires the ENABLE_ZMQ help
@@ -16,8 +16,15 @@ LC_LOAD_DYLIB under /opt/homebrew or /usr/local/opt (libevent, libomp,
 libzmq, sqlite from the keg, ...) is a ship-blocker. System
 (/usr/lib, /System/Library) load commands are expected.
 
-Pass btxd (ZMQ + portability) and btx-cli (portability only) as separate
-arguments. Do not stage a tarball that fails either.
+The 0.34 CUDA tarball shipped a btxd that would not start:
+`libcublasLt.so.13: cannot open shared object file`. ldd/ZMQ checks do
+not catch that. After the static checks, this gate runs `btxd -version`
+and requires exit 0. Bundle CUDA runtime libs with `$ORIGIN` rpath
+(see `bundle_cuda_runtime_libs.py`) so that launch succeeds without a
+toolkit install.
+
+Pass btxd (ZMQ + portability + launch) and btx-cli (portability only)
+as separate arguments. Do not stage a tarball that fails either.
 """
 
 from __future__ import annotations
@@ -184,6 +191,38 @@ def verify_binary(path: Path) -> str:
     raise VerifyError(f"{path}: not an ELF or Mach-O binary (refusing to ship an untyped file)")
 
 
+def is_daemon(path: Path) -> bool:
+    return path.name.lower().startswith("btxd")
+
+
+def verify_launch(path: Path, timeout: float = 30.0) -> None:
+    """Refuse a binary that cannot even print its version.
+
+    The CUDA 0.34 packaging miss (`libcublasLt.so.13` missing) failed here
+    and was invisible to the ZMQ/ldd checks.
+    """
+    try:
+        result = subprocess.run(
+            [str(path), "-version"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise VerifyError(f"{path}: cannot execute: {exc}") from exc
+    except PermissionError as exc:
+        raise VerifyError(f"{path}: cannot execute: {exc}") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise VerifyError(f"{path}: `{path.name} -version` timed out after {timeout}s") from exc
+    if result.returncode != 0:
+        err = (result.stderr or result.stdout or "").strip()
+        raise VerifyError(
+            f"{path}: `{path.name} -version` exited {result.returncode} (need 0)"
+            + (f": {err}" if err else "")
+        )
+
+
 def verify_btxd(path: Path) -> str:
     """Back-compat for package_release_archive and unit tests."""
     return verify_binary(path)
@@ -220,6 +259,9 @@ def main(argv: list[str] | None = None) -> int:
             continue
         try:
             how = verify_binary(path)
+            if is_daemon(path):
+                verify_launch(path)
+                how = f"{how}+launch"
         except VerifyError as exc:
             print(f"verify_release_btxd: FAIL {exc}", file=sys.stderr)
             failures += 1

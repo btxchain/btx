@@ -628,6 +628,7 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-fastshieldedstartup", "Zero-downtime restart: when matching persisted shielded state is available at startup, restore it without forcing the full cross-chain shielded audit (default: 1). The persisted state reaching the restore path already had its frontier root/size matched to the tip and its commitment index/anchor windows validated; settlement/netting metadata may still be synchronized from available blocks, and per-block consensus still runs on newly connected blocks. Set to 0 to force the thorough full-chain drift sync + audit on every restart.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-shieldedstartupaudit", "Audit restored shielded state against historical block data during startup (default: 1). Applies when -fastshieldedstartup is disabled or cannot be taken: set to 0 to keep the persisted-state drift sync but skip the cross-chain audit. Consensus checks still run for newly connected blocks.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-resetshieldedstate", "One-shot repair: wipe the on-disk shielded_state directory at startup and force a single clean rebuild of shielded validation state from local block data (default: 0). Supported replacement for manually moving shielded_state aside when a prior shielded rebuild was interrupted/corrupted; block files and wallets are untouched. Pass once, let the rebuild finish (watch the 'RebuildShieldedState: replaying ...' progress lines), then remove it. Requires intact local block data; if blocks are pruned/corrupt use a snapshot or -reindex instead.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-shieldedstate", "Open the shielded LevelDB stores (nullifiers, commitments, account_registry) even after nShieldedPoolDisableHeight (default: 0, auto). Past the pool-disable flag-day those stores are not required for consensus: spends are invalid, so nullifiers and membership proofs cannot be presented. Explorers and indexers that still want the historical view pass -shieldedstate=1.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-allowunpinnedshieldedsnapshot", "Allow loadtxoutset to load an assumeutxo snapshot whose shielded section (pool balance + nullifier set + commitment tree) has no consensus pin for its height (default: 0). An unpinned shielded section is trusted from the snapshot source and not validated against a consensus pin; set to 1 only for explicitly trusted repair/bootstrap material.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-reorgprotectionprofile=<mode>", "Per-node reorg/finality profile: emergency (default), standard, miner (alias for standard), archive, balanced, or strict. Emergency parks rewrites deeper than 6 blocks; standard/strict warn after 3-block rewrites, balanced warns after 12, and archive alarms after 72. Use -parkdeepreorg=0 to disable emergency parking. This is local fork-choice policy, not block validity.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-parkdeepreorg", "Per-node deep-reorg parking action override (NON-CONSENSUS). When 1 and -maxreorgdepthpark/profile park depth is set, the node refuses to auto-switch to a branch deeper than that depth and stays on its current tip pending operator action. When 0, it follows the automated fork-choice policy and only alarms/defers by hysteresis. When unset, the selected profile decides (the default emergency profile parks beyond depth 6).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -1680,22 +1681,14 @@ bool AppInitParameterInteraction(const ArgsManager& args)
                 _("This consensus node tracks a 1-of-1 MatMul attestation quorum on mainnet (%u signer(s), threshold %d). Local ExactReplay remains the MatMul validity check; the pin does not steer FindMostWorkChain or getblocktemplate. The pin is telemetry (GETMMATTEST serve, directory) and local-signer lost-twin recovery only. A stolen pin key cannot make this node skip GPU. Configure additional independent signers (M-of-N) before using the same keys on a trusted-mirror archive."),
                 preliminary_signer_capacity, trusted_threshold));
         }
-        if (has_local_attestation_signer) {
-            const CKey decoded{DecodeSecret(signer_text)};
-            const bool signer_in_pin{
-                decoded.IsValid() &&
-                std::find(trusted_signers.begin(), trusted_signers.end(),
-                          decoded.GetPubKey()) != trusted_signers.end()};
-            if (node::matmul_trusted::CollocatedSignerPinIsHijackAmplifier(
-                    trusted_mirror_mode,
-                    /*has_local_signer=*/true,
-                    signer_in_pin,
-                    trusted_signers.size(),
-                    static_cast<size_t>(std::max<int64_t>(trusted_threshold, 0))) &&
-                chainparams.GetChainType() == ChainType::MAIN) {
-                InitWarning(_("This node's attestation signing key is also a pin member in a single-key or trusted-mirror topology. A stolen keyfile hijacks SignAuthoritative and, on a trusted mirror, ExactReplay skip. Prefer a distinct M=2 pin from the miner WIF."));
-            }
-        }
+        // Do not DecodeSecret/GetPubKey here. AppInitParameterInteraction
+        // runs before bitcoind constructs ECC_Context (bitcoind.cpp).
+        // CKey::GetPubKey() calls secp256k1_ec_pubkey_create with a null
+        // secp256k1_context_sign and SIGSEGVs at address 0 — macpro2 0.34
+        // CUDA start, 2026-08-27, kernel: segfault at 0 in
+        // secp256k1_ec_pubkey_create. Stage the WIF; derive the pubkey in
+        // FinalizeConfiguration after ECC_Start. The collocated-signer
+        // warning is emitted from AppInitMain once the store exists.
         matmul::trusted::StoreConfig config;
         config.chain_id = chainparams.GenesisBlock().GetHash();
         config.replay_authority_context =
@@ -2630,6 +2623,22 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
             _("Invalid MatMul trusted-attestation configuration: %s"),
             trusted_attestation_error));
     }
+    if (chainparams.GetChainType() == ChainType::MAIN &&
+        node::matmul_trusted::HasLocalSigner()) {
+        const auto local_pk{node::matmul_trusted::LocalSigner()};
+        const auto pin{node::matmul_trusted::TrustedSigners()};
+        const bool signer_in_pin{
+            local_pk.has_value() &&
+            std::find(pin.begin(), pin.end(), *local_pk) != pin.end()};
+        if (node::matmul_trusted::CollocatedSignerPinIsHijackAmplifier(
+                node::matmul_trusted::IsTrustedMirror(),
+                /*has_local_signer=*/true,
+                signer_in_pin,
+                pin.size(),
+                node::matmul_trusted::Threshold())) {
+            InitWarning(_("This node's attestation signing key is also a pin member in a single-key or trusted-mirror topology. A stolen keyfile hijacks SignAuthoritative and, on a trusted mirror, ExactReplay skip. Prefer a distinct M=2 pin from the miner WIF."));
+        }
+    }
     if (node::matmul_trusted::IsConfigured()) {
         std::string persist_error;
         if (!node::matmul_trusted::OpenPersistence(
@@ -3211,7 +3220,9 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
 
     {
         LOCK(cs_main);
-        uiInterface.InitMessage(_("Initializing shielded state…"));
+        if (chainman.ShouldMaintainShieldedState()) {
+            uiInterface.InitMessage(_("Initializing shielded state…"));
+        }
         if (!chainman.EnsureShieldedStateInitialized()) {
             return InitError(Untranslated("Failed to initialize shielded state database."));
         }

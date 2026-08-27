@@ -270,6 +270,63 @@ std::atomic<int64_t> g_reorg_protection_last_deferred_unix{0};
     return false;
 }
 
+[[nodiscard]] bool RejectDisabledShieldedPool(const CTransaction& tx,
+                                              const Consensus::Params& consensus,
+                                              int32_t validation_height,
+                                              std::string& reject_reason)
+{
+    if (!tx.HasShieldedBundle() || !consensus.IsShieldedPoolDisabled(validation_height)) {
+        return true;
+    }
+    const CShieldedBundle& bundle = tx.GetShieldedBundle();
+    if (const auto family = bundle.GetTransactionFamily()) {
+        switch (*family) {
+        case shielded::v2::TransactionFamily::V2_INGRESS_BATCH:
+        case shielded::v2::TransactionFamily::V2_REBALANCE:
+            reject_reason = "bad-shielded-pool-disabled-ingress";
+            return false;
+        case shielded::v2::TransactionFamily::V2_SEND:
+        case shielded::v2::TransactionFamily::V2_EGRESS_BATCH:
+        case shielded::v2::TransactionFamily::V2_SPEND_PATH_RECOVERY:
+        case shielded::v2::TransactionFamily::V2_RECOVERY_EXIT:
+            reject_reason = "bad-shielded-pool-disabled-egress";
+            return false;
+        case shielded::v2::TransactionFamily::V2_SETTLEMENT_ANCHOR:
+        case shielded::v2::TransactionFamily::V2_GENERIC:
+        case shielded::v2::TransactionFamily::V2_LIFECYCLE:
+            reject_reason = "bad-shielded-pool-disabled";
+            return false;
+        }
+    }
+    // Spends are the burn: if no note can ever be spent, no nullifier can be
+    // presented and the commitment tree is not needed for membership proofs.
+    if (bundle.HasShieldedInputs()) {
+        reject_reason = "bad-shielded-pool-disabled-egress";
+        return false;
+    }
+    // Deposits into a pool nobody can leave would keep destroying user funds.
+    if (bundle.HasShieldedOutputs()) {
+        reject_reason = "bad-shielded-pool-disabled-ingress";
+        return false;
+    }
+    std::string value_balance_reject;
+    const auto value_balance = TryGetShieldedStateValueBalance(bundle, value_balance_reject);
+    if (!value_balance.has_value()) {
+        reject_reason = value_balance_reject;
+        return false;
+    }
+    if (*value_balance > 0) {
+        reject_reason = "bad-shielded-pool-disabled-egress";
+        return false;
+    }
+    if (*value_balance < 0) {
+        reject_reason = "bad-shielded-pool-disabled-ingress";
+        return false;
+    }
+    reject_reason = "bad-shielded-pool-disabled";
+    return false;
+}
+
 // Derive the (commitment, nullifier) a V2_RECOVERY_EXIT bundle retires, deterministically from its
 // revealed payload. Used identically by ConnectBlock (validate + collect) and DisconnectBlock (undo), so
 // the same note retires the same two identifiers on connect and disconnect. Returns false if the bundle
@@ -507,6 +564,9 @@ std::atomic<int64_t> g_reorg_protection_last_deferred_unix{0};
                                                      int32_t validation_height,
                                                      std::string& reject_reason)
 {
+    if (!RejectDisabledShieldedPool(tx, consensus, validation_height, reject_reason)) {
+        return false;
+    }
     if (!RejectShieldedSunsetViolation(tx, consensus, validation_height, reject_reason)) {
         return false;
     }
@@ -3764,6 +3824,7 @@ bool CrossesShieldedMempoolHeightGate(const Consensus::Params& consensus,
            crosses(consensus.nShieldedBridgeTagActivationHeight) ||
            crosses(consensus.nShieldedSmileRiceCodecDisableHeight) ||
            crosses(consensus.nShieldedMatRiCTDisableHeight) ||
+           crosses(consensus.nShieldedPoolDisableHeight) ||
            crosses(consensus.nShieldedSpendPathRecoveryActivationHeight) ||
            crosses(consensus.nShieldedC002ActivationHeight) ||
            crosses(consensus.nShieldedPQ128UpgradeHeight) ||
@@ -4181,8 +4242,10 @@ void RemoveStaleShieldedAnchorMempoolTransactions(CTxMemPool& pool,
     AssertLockHeld(::cs_main);
     AssertLockHeld(pool.cs);
 
-    const bool shielded_state_ready = chainman.EnsureShieldedStateInitialized();
     const int32_t validation_height = chainman.ActiveChain().Height() + 1;
+    const bool pool_closed = chainman.GetConsensus().IsShieldedPoolDisabled(validation_height);
+    const bool shielded_state_ready =
+        pool_closed ? false : chainman.EnsureShieldedStateInitialized();
     const auto stale_anchor_filter = [&](CTxMemPool::txiter it) EXCLUSIVE_LOCKS_REQUIRED(pool.cs, ::cs_main) {
         const CTransaction& tx = it->GetTx();
         if (tx.HasShieldedBundle()) {
@@ -4888,6 +4951,10 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
         if (::GetSerializeSize(TX_WITH_WITNESS(tx)) > consensus.nMaxShieldedTxSize) {
             return state.Invalid(TxValidationResult::TX_CONSENSUS, "bad-shielded-tx-size");
         }
+        std::string height_gate_reject;
+        if (!RejectShieldedHeightGateViolation(tx, consensus, next_block_height, height_gate_reject)) {
+            return state.Invalid(TxValidationResult::TX_CONSENSUS, height_gate_reject);
+        }
 
         if (!m_active_chainstate.m_chainman.EnsureShieldedStateInitialized()) {
             return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "shielded-state-init-failed");
@@ -4910,10 +4977,6 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
                                  "bad-shielded-v2-egress-anchor-mempool-conflict");
         }
         const CShieldedBundle& bundle = tx.GetShieldedBundle();
-        std::string height_gate_reject;
-        if (!RejectShieldedHeightGateViolation(tx, consensus, next_block_height, height_gate_reject)) {
-            return state.Invalid(TxValidationResult::TX_CONSENSUS, height_gate_reject);
-        }
         for (const auto& nullifier : CollectShieldedNullifiers(bundle)) {
             if (!m_subpackage.m_package_shielded_nullifiers.insert(nullifier).second) {
                 return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "bad-shielded-nullifier-package-conflict");
@@ -7174,6 +7237,7 @@ DisconnectResult Chainstate::DisconnectBlock(const CBlock& block, const CBlockIn
     const bool block_updates_shielded_velocity{
         m_chainman.GetConsensus().IsShieldedUnshieldVelocityCapActive(pindex->nHeight)};
     if (apply_shielded_state && this == &m_chainman.ActiveChainstate() &&
+        !m_chainman.GetConsensus().IsShieldedPoolDisabled(pindex->nHeight) &&
         (block_has_shielded_bundle || block_updates_shielded_velocity)) {
         if (!m_chainman.EnsureShieldedStateInitialized()) {
             return DISCONNECT_FAILED;
@@ -7778,6 +7842,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         params.GetConsensus().IsShieldedUnshieldVelocityCapActive(pindex->nHeight)};
     const bool enforce_shielded_consensus{
         apply_shielded_state && this == &m_chainman.ActiveChainstate() &&
+        !params.GetConsensus().IsShieldedPoolDisabled(pindex->nHeight) &&
         (block_has_shielded_bundle || block_updates_shielded_velocity)};
     if (enforce_shielded_consensus) {
         if (!m_chainman.EnsureShieldedStateInitialized()) {
@@ -18405,6 +18470,20 @@ ChainstateManager::ExportShieldedAccountRegistrySnapshot(
     return snapshot;
 }
 
+bool ChainstateManager::ShouldMaintainShieldedState() const
+{
+    AssertLockHeld(::cs_main);
+    if (m_options.force_shielded_state || m_options.reset_shielded_state) {
+        return true;
+    }
+    if (m_active_chainstate == nullptr) {
+        return true;
+    }
+    const CBlockIndex* const tip = m_active_chainstate->m_chain.Tip();
+    const int32_t height = tip ? tip->nHeight : 0;
+    return !GetConsensus().IsShieldedPoolDisabled(height);
+}
+
 bool ChainstateManager::EnsureShieldedStateInitialized()
 {
     AssertLockHeld(::cs_main);
@@ -18414,6 +18493,19 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
     if (m_active_chainstate == nullptr) {
         LogPrintf("EnsureShieldedStateInitialized: no active chainstate\n");
         return false;
+    }
+    if (!ShouldMaintainShieldedState()) {
+        if (!m_logged_shielded_state_skip) {
+            const CBlockIndex* const tip = m_active_chainstate->m_chain.Tip();
+            LogPrintf("EnsureShieldedStateInitialized: not opening shielded state "
+                      "(nShieldedPoolDisableHeight=%d tip=%d). Pass -shieldedstate=1 "
+                      "to load historical nullifiers/commitments/account_registry.\n",
+                      GetConsensus().nShieldedPoolDisableHeight,
+                      tip ? tip->nHeight : -1);
+            m_logged_shielded_state_skip = true;
+        }
+        GetNotifications().progress(bilingual_str{}, 100, false);
+        return true;
     }
     if (!RecoverInterruptedShieldedSnapshotTransaction(m_options.datadir)) {
         GetNotifications().fatalError(_(

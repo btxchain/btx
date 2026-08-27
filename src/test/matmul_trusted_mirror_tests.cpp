@@ -3608,6 +3608,11 @@ BOOST_AUTO_TEST_CASE(matmulattestationserve_default_off_without_signer_or_truste
     }
 
     // Local signing key, serve unset → default 1.
+    // Regression: AppInitParameterInteraction used to call CKey::GetPubKey()
+    // on this WIF before bitcoind constructed ECC_Context. That null-derefs
+    // secp256k1_context_sign (macpro2 0.34, kernel segfault at 0 in
+    // secp256k1_ec_pubkey_create, ~1.2s after start). Staging must not
+    // derive the pubkey; FinalizeConfiguration does that after ECC_Start.
     {
         RuntimeReset reset;
         const CKey signer{NewKey()};

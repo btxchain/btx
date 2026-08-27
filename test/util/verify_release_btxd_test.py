@@ -159,6 +159,21 @@ class VerifyReleaseBtxdTest(unittest.TestCase):
             self.assertIn(b"FAIL", proc.stderr)
             self.assertIn(b"ENABLE_ZMQ help text", proc.stderr)
 
+    def test_launch_requires_exit_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            failing = pathlib.Path(tmpdir) / "btxd"
+            failing.write_text("#!/bin/sh\necho missing libcublasLt.so.13 >&2\nexit 127\n", encoding="utf-8")
+            failing.chmod(0o755)
+            with self.assertRaises(self.mod.VerifyError) as caught:
+                self.mod.verify_launch(failing)
+            self.assertIn("exited 127", str(caught.exception))
+            self.assertIn("libcublasLt", str(caught.exception))
+
+            ok = pathlib.Path(tmpdir) / "btxd.ok"
+            ok.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            ok.chmod(0o755)
+            self.mod.verify_launch(ok)
+
 
 if __name__ == "__main__":
     unittest.main()

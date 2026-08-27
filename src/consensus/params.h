@@ -904,6 +904,12 @@ struct Params {
     int32_t nShieldedBridgeTagActivationHeight{std::numeric_limits<int32_t>::max()};
     int32_t nShieldedSmileRiceCodecDisableHeight{std::numeric_limits<int32_t>::max()};
     int32_t nShieldedMatRiCTDisableHeight{std::numeric_limits<int32_t>::max()};
+    /** Close the shielded pool in both directions. At/after this height a block
+     *  that spends a shielded note (egress / unshield) or creates a new shielded
+     *  output (ingress) is invalid. Historical blocks below the height validate
+     *  as before. Default int32 max leaves the pool open (regtest). Mainnet
+     *  sets an explicit flag-day. See IsShieldedPoolDisabled. */
+    int32_t nShieldedPoolDisableHeight{std::numeric_limits<int32_t>::max()};
     int32_t nShieldedSpendPathRecoveryActivationHeight{std::numeric_limits<int32_t>::max()};
     /** C-002 shielded proof + SLH-DSA/FIPS-205 activation height. Mainnet default
      *  remains 123,000; regtest may lower this to exercise boundary behavior
@@ -1370,6 +1376,12 @@ struct Params {
         return height >= 0 &&
             nShieldedMatRiCTDisableHeight != std::numeric_limits<int32_t>::max() &&
             height >= nShieldedMatRiCTDisableHeight;
+    }
+    bool IsShieldedPoolDisabled(int32_t height) const
+    {
+        return height >= 0 &&
+            nShieldedPoolDisableHeight != std::numeric_limits<int32_t>::max() &&
+            height >= nShieldedPoolDisableHeight;
     }
     bool IsShieldedSpendPathRecoveryActive(int32_t height) const
     {

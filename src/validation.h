@@ -1266,6 +1266,7 @@ private:
     //! v0.32.0 defense-in-depth: trailing-window net-unshield log enforcing the egress velocity cap.
     ShieldedUnshieldVelocity m_shielded_unshield_velocity GUARDED_BY(::cs_main);
     bool m_shielded_state_initialized GUARDED_BY(::cs_main){false};
+    bool m_logged_shielded_state_skip GUARDED_BY(::cs_main){false};
     //! Last tip whose shielded snapshot, pin, and marker were actually written
     //! by PersistShieldedState. Shutdown skips a second full-tree fsync when
     //! this still matches ActiveTip(); a crash leaves it unset so the next
@@ -1995,6 +1996,10 @@ public:
      * the active chain if needed.
      */
     [[nodiscard]] bool EnsureShieldedStateInitialized() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** True when this node should open nullifiers/commitments/account_registry.
+     *  False past nShieldedPoolDisableHeight unless -shieldedstate=1. */
+    [[nodiscard]] bool ShouldMaintainShieldedState() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /** Return true if shielded state has been initialized for the active chain. */
     [[nodiscard]] bool HasShieldedState() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main)

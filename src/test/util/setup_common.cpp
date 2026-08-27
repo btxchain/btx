@@ -271,14 +271,22 @@ ChainTestingSetup::ChainTestingSetup(const ChainType chainType, TestOpts opts)
             chainman_opts.script_execution_cache_bytes = 0;
             chainman_opts.signature_cache_bytes = 0;
         }
+        // extra_args land on m_node.args (gArgs), not m_args. Honor the
+        // shielded-state skip/force flags used past nShieldedPoolDisableHeight.
+        if (auto value{m_node.args->GetBoolArg("-shieldedstate")}) {
+            chainman_opts.force_shielded_state = *value;
+        }
+        if (auto value{m_node.args->GetBoolArg("-resetshieldedstate")}) {
+            chainman_opts.reset_shielded_state = *value;
+        }
         // Honor the deep-reorg defense options from extra_args so tests can
         // exercise explicit PARK and default WARN/hysteresis paths (see
         // ApplyArgsManOptions / ActivateBestChainStep).
-        if (auto value{m_args.GetBoolArg("-parkdeepreorg")}) {
+        if (auto value{m_node.args->GetBoolArg("-parkdeepreorg")}) {
             chainman_opts.deep_reorg_action = *value ? kernel::DeepReorgAction::PARK
                                                      : kernel::DeepReorgAction::WARN;
         }
-        if (auto value{m_args.GetIntArg("-maxreorgdepthwarn")}) {
+        if (auto value{m_node.args->GetIntArg("-maxreorgdepthwarn")}) {
             if (*value >= 1) {
                 chainman_opts.max_reorg_depth_warn = static_cast<uint32_t>(
                     std::min<int64_t>(*value, std::numeric_limits<uint32_t>::max()));

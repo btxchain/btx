@@ -214,6 +214,10 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
         options.shielded_matrict_disable_height =
             ParseRegTestNonNegativeInt32Arg(args, "-regtestshieldedmatrictdisableheight");
     }
+    if (args.IsArgSet("-regtestshieldedpooldisableheight")) {
+        options.shielded_pool_disable_height =
+            ParseRegTestNonNegativeInt32Arg(args, "-regtestshieldedpooldisableheight");
+    }
     if (args.IsArgSet("-regtestshieldedspendpathrecoveryactivationheight")) {
         options.shielded_spend_path_recovery_activation_height =
             ParseRegTestNonNegativeInt32Arg(args, "-regtestshieldedspendpathrecoveryactivationheight");

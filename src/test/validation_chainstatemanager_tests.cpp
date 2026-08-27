@@ -1037,6 +1037,24 @@ struct PoolCreditRetunePersistedTestChain100Setup : TestChain100Setup
     }
 };
 
+struct ShieldedPoolClosedStartupSetup : TestChain100Setup
+{
+    ShieldedPoolClosedStartupSetup()
+        : TestChain100Setup(ChainType::REGTEST,
+                            {.extra_args = {"-regtestshieldedpooldisableheight=0"}})
+    {
+    }
+};
+
+struct ShieldedPoolClosedForcedStateSetup : TestChain100Setup
+{
+    ShieldedPoolClosedForcedStateSetup()
+        : TestChain100Setup(ChainType::REGTEST,
+                            {.extra_args = {"-regtestshieldedpooldisableheight=0", "-shieldedstate=1"}})
+    {
+    }
+};
+
 struct RecoveryExitFastStartupPersistedTestChain100Setup : TestChain100Setup
 {
     RecoveryExitFastStartupPersistedTestChain100Setup()
@@ -5462,11 +5480,37 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager_args, BasicTestingSetup)
     BOOST_CHECK_EQUAL(get_valid_opts({"-resetshieldedstate=1"}).reset_shielded_state, true);
     BOOST_CHECK_EQUAL(get_valid_opts({"-resetshieldedstate=0"}).reset_shielded_state, false);
 
+    BOOST_CHECK_EQUAL(get_valid_opts({}).force_shielded_state, false);
+    BOOST_CHECK_EQUAL(get_valid_opts({"-shieldedstate"}).force_shielded_state, true);
+    BOOST_CHECK_EQUAL(get_valid_opts({"-shieldedstate=1"}).force_shielded_state, true);
+    BOOST_CHECK_EQUAL(get_valid_opts({"-shieldedstate=0"}).force_shielded_state, false);
+
     // The cross-chain startup audit is on by default (applies on the non-fast path).
     BOOST_CHECK_EQUAL(get_valid_opts({}).shielded_startup_audit, true);
     BOOST_CHECK_EQUAL(get_valid_opts({"-shieldedstartupaudit"}).shielded_startup_audit, true);
     BOOST_CHECK_EQUAL(get_valid_opts({"-shieldedstartupaudit=1"}).shielded_startup_audit, true);
     BOOST_CHECK_EQUAL(get_valid_opts({"-shieldedstartupaudit=0"}).shielded_startup_audit, false);
+}
+
+BOOST_FIXTURE_TEST_CASE(chainstatemanager_skips_shielded_state_after_pool_disable, ShieldedPoolClosedStartupSetup)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainman.GetConsensus().IsShieldedPoolDisabled(chainman.ActiveHeight())));
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return !chainman.ShouldMaintainShieldedState()));
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainman.EnsureShieldedStateInitialized()));
+    BOOST_CHECK(WITH_LOCK(::cs_main, return !chainman.HasShieldedState()));
+    const auto script_pub_key = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    CreateAndProcessBlock({}, script_pub_key);
+    BOOST_CHECK(WITH_LOCK(::cs_main, return !chainman.HasShieldedState()));
+}
+
+BOOST_FIXTURE_TEST_CASE(chainstatemanager_force_shielded_state_after_pool_disable, ShieldedPoolClosedForcedStateSetup)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainman.GetConsensus().IsShieldedPoolDisabled(chainman.ActiveHeight())));
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainman.ShouldMaintainShieldedState()));
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, return chainman.EnsureShieldedStateInitialized()));
+    BOOST_CHECK(WITH_LOCK(::cs_main, return chainman.HasShieldedState()));
 }
 
 BOOST_AUTO_TEST_SUITE_END()
