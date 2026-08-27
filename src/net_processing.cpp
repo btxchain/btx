@@ -14242,11 +14242,19 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
     // the structural dependence 0.34 exists to remove. Address flooding stays
     // bounded by the token bucket above (MAX_ADDR_TO_SEND,
     // MAX_ADDR_RATE_PER_SECOND, MAX_ADDR_PROCESSING_TOKEN_BUCKET), so no
-    // protection is lost. TX / GETHEADERS / GETBLOCKS / MEMPOOL / FEEFILTER
-    // stay dropped: those are chain and mempool ingest, not peer discovery.
+    // protection is lost.
+    //
+    // Direction-of-data (PR 124 follow-up / MendeMatthias 2026-08-27): inbound
+    // requests we answer are always safe. GETHEADERS and GETBLOCKS ask us to
+    // SERVE; the bytes flow out. Serving a header or an inventory to a
+    // stranger cannot hijack consensus, reorg us, or feed us a bad chain.
+    // Dropping them made every authority-mode archive refuse header queries
+    // and useless as a bootstrap source — the archives-as-authority behaviour
+    // 0.34 exists to remove. TX / MEMPOOL / FEEFILTER stay dropped: those are
+    // inbound chain and mempool data we would ACCEPT, which is what authority
+    // rules govern.
     if ((ignore_non_gpu_inbound || drop_miner_ingest) &&
         (msg_type == NetMsgType::TX ||
-         msg_type == NetMsgType::GETHEADERS || msg_type == NetMsgType::GETBLOCKS ||
          msg_type == NetMsgType::MEMPOOL || msg_type == NetMsgType::FEEFILTER)) {
         static std::atomic<bool> logged_miner{false};
         if (!logged_miner.exchange(true)) {

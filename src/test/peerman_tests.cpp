@@ -71,6 +71,24 @@ static size_t CountQueuedMessageType(CNode& node, const std::string& msg_type)
         [&](const CSerializedNetMsg& msg) { return msg.m_type == msg_type; }));
 }
 
+static size_t CountQueuedHeaderBlocks(CNode& node)
+{
+    LOCK(node.cs_vSend);
+    size_t n{0};
+    for (const auto& msg : node.vSendMsg) {
+        if (msg.m_type != NetMsgType::HEADERS) continue;
+        DataStream stream{msg.data};
+        std::vector<CBlock> headers;
+        try {
+            stream >> TX_WITH_WITNESS(headers);
+        } catch (const std::ios_base::failure&) {
+            continue;
+        }
+        n += headers.size();
+    }
+    return n;
+}
+
 
 // Shared RegTestingSetup: earlier cases (catch-up, have_data) leave
 // headers-only forks in m_block_index. MatMulTreatAsIbdForBudget is
@@ -6922,6 +6940,94 @@ BOOST_AUTO_TEST_CASE(live_shape_199300_converges_toward_199328)
     NeutralizeUnconnectedHeaders(chainman);
     peerman.ResetMatMulVerifyAdmissionForTest();
 }
+
+// PR 124 follow-up / MendeMatthias 2026-08-27: GETHEADERS and GETBLOCKS are
+// inbound SERVES, not ingest. An authority-mode node must answer GETHEADERS
+// from a non-authority inbound peer with a non-empty HEADERS message.
+// Assert by queued message bytes/count, not LogDebug("sending getheaders").
+BOOST_AUTO_TEST_CASE(authority_mode_serves_getheaders_to_inbound_non_authority)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+
+    node::matmul_trusted::ResetForTest();
+    ResetSharedPeermanFixture(m_node);
+    CKey signer;
+    signer.MakeNewKey(/*fCompressed=*/true);
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256::FromHex(std::string(64, '1')).value();
+    config.replay_authority_context =
+        uint256::FromHex(std::string(64, '2')).value();
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/true, /*serve=*/false,
+        std::chrono::milliseconds{50}, error));
+    BOOST_REQUIRE(node::matmul_trusted::IsTrustedMirror());
+    struct MirrorReset {
+        ~MirrorReset() { node::matmul_trusted::ResetForTest(); }
+    } mirror_reset;
+
+    const CBlockIndex* start_tip{
+        WITH_LOCK(::cs_main, return m_node.chainman->ActiveChain().Tip())};
+    BOOST_REQUIRE(start_tip != nullptr);
+    for (int i = 0; i < 3; ++i) {
+        mineBlock(m_node, std::chrono::seconds{start_tip->GetBlockTime() + 1 + i});
+    }
+    {
+        LOCK(::cs_main);
+        CBlockIndex* tip{const_cast<CBlockIndex*>(m_node.chainman->ActiveTip())};
+        BOOST_REQUIRE(tip != nullptr);
+        for (CBlockIndex* walk{tip}; walk != nullptr; walk = walk->pprev) {
+            walk->nAuthenticatedChainWork = walk->nChainWork;
+        }
+    }
+
+    ConnmanTestMsg& connman = static_cast<ConnmanTestMsg&>(*m_node.connman);
+    PeerManager& peerman = *m_node.peerman;
+    const ServiceFlags ordinary_services{ServiceFlags(NODE_NETWORK | NODE_WITNESS)};
+    CNode inbound{/*id=*/410,
+                  /*sock=*/nullptr,
+                  CAddress{PeermanTestService(0x2a00007f), NODE_NETWORK},
+                  /*nKeyedNetGroupIn=*/0x2a,
+                  /*nLocalHostNonceIn=*/0,
+                  CAddress{},
+                  /*addrNameIn=*/"inbound-bootstrap",
+                  ConnectionType::INBOUND,
+                  /*inbound_onion=*/false,
+                  /*network_key=*/0};
+    connman.Handshake(inbound, /*successfully_connected=*/true, ordinary_services,
+                      ordinary_services, PROTOCOL_VERSION, /*relay_txs=*/true);
+    connman.AddTestNode(inbound);
+    connman.FlushSendBuffer(inbound);
+    struct FinalizeInbound {
+        ConnmanTestMsg& connman;
+        PeerManager& peerman;
+        CNode& node;
+        ~FinalizeInbound()
+        {
+            peerman.FinalizeNode(node);
+            connman.RemoveTestNode(node);
+        }
+    } finalize{connman, peerman, inbound};
+
+    const uint256 genesis_hash{WITH_LOCK(
+        ::cs_main, return m_node.chainman->ActiveChain()[0]->GetBlockHash())};
+    CBlockLocator locator{std::vector<uint256>{genesis_hash}};
+    inbound.fPauseSend = false;
+    BOOST_REQUIRE(connman.ReceiveMsgFrom(
+        inbound, NetMsg::Make(NetMsgType::GETHEADERS, locator, uint256{})));
+    inbound.fPauseSend = false;
+    (void)connman.ProcessMessagesOnce(inbound);
+
+    BOOST_CHECK_GE(CountQueuedMessageType(inbound, NetMsgType::HEADERS), 1U);
+    BOOST_REQUIRE_MESSAGE(
+        CountQueuedHeaderBlocks(inbound) > 0,
+        "authority-mode node must serve a non-empty HEADERS reply to inbound "
+        "GETHEADERS; dropping GETHEADERS as ingest is the 199300 stall "
+        "(PR 124 / MendeMatthias)");
+}
+
 BOOST_AUTO_TEST_SUITE_END()
 
 // Fresh RegTestingSetup is genesis (tip=0), matching the 2026-08-26 field
@@ -7154,6 +7260,5 @@ BOOST_AUTO_TEST_CASE(fresh_mirror_deadlock_empty_archive_consensus_headers_and_r
 
     peerman.ResetMatMulVerifyAdmissionForTest();
 }
-
 
 BOOST_AUTO_TEST_SUITE_END()
