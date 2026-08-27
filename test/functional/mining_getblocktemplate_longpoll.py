@@ -6,6 +6,7 @@
 
 import random
 import threading
+import time
 
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import get_rpc_proxy
@@ -72,6 +73,32 @@ class GetBlockTemplateLPTest(BitcoinTestFramework):
         # after one minute, every 10 seconds the mempool is probed, so in 80 seconds it should have returned
         thr.join(60 + 20)
         assert not thr.is_alive()
+
+        self.log.info("F5: stalled longpoll returns within the 60s lifetime instead of hanging")
+        thr = LongpollThread(self.nodes[0])
+        with self.nodes[0].assert_debug_log(["ThreadRPCServer method=getblocktemplate"], timeout=3):
+            thr.start()
+        thr.join(70)
+        assert not thr.is_alive(), "getblocktemplate longpoll must return within ~60s on a stalled chain"
+
+        self.log.info("F6: GBT longpolls cannot take every RPC worker")
+        self.restart_node(0, extra_args=["-acceptnonstdtxn=1", "-rpcthreads=4"])
+        template = self.nodes[0].getblocktemplate({'rules': ['segwit']})
+        lpid = template['longpollid']
+        threads = []
+        for i in range(8):
+            node = get_rpc_proxy(self.nodes[0].url, 10 + i, timeout=70, coveragedir=self.nodes[0].coverage_dir)
+            t = threading.Thread(
+                target=lambda n=node: n.getblocktemplate({'longpollid': lpid, 'rules': ['segwit']}),
+                daemon=True)
+            threads.append(t)
+            t.start()
+        time.sleep(1)
+        # Unrelated RPC must still answer while a long-poll waiter is parked.
+        assert self.nodes[0].getblockcount() >= 10
+        for t in threads:
+            t.join(70)
+            assert not t.is_alive()
 
 if __name__ == '__main__':
     GetBlockTemplateLPTest(__file__).main()

@@ -354,6 +354,7 @@ add_executable(test_btx
   pq_timing_tests.cpp
   pq_mining_template_tests.cpp
   miner_tests.cpp
+  gbt_longpoll_tests.cpp
   miniminer_tests.cpp
   miniscript_tests.cpp
   multisig_tests.cpp
