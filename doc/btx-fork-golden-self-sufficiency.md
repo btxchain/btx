@@ -45,3 +45,30 @@ The CUDA `sm_120` cohort this line measured, the seal scripts, and
 [`btx-matmul-v4.7-production-golden-policy.md`](btx-matmul-v4.7-production-golden-policy.md)
 describe how **this** line reseals **this** binary. Forks copy the
 scripts; they do not send the JSON back.
+
+## Add a Metal (or HIP) row in four minutes
+
+On the machine that has the device, at **your** freeze commit `F` with
+fingerprint `FP(F)`:
+
+```bash
+contrib/matmul-v4/multi-gpu-golden-corpus.sh \
+  --harness build-metal/bin/matmul-v4-rc-harness \
+  --backends metal \
+  --source-revision "$F" \
+  --source-tree-fingerprint "$FP" \
+  --out-dir doc/evidence/multi-gpu-profile1-goldens-metal-$(date +%Y%m%d)
+```
+
+Then add one line to `src/matmul/matmul_v4_rc_production_golden_manifest.data`
+for that class (`m5_class`, `m4_class`, …), commit the evidence plus the
+`.data` file, and run:
+
+```bash
+python3 contrib/matmul-v4/verify-production-golden-seal.py seal --root .
+python3 contrib/matmul-v4/verify-evidence-provenance.py --strict
+```
+
+Do not open a PR against this repository whose purpose is “please bless
+our golden.”
+
