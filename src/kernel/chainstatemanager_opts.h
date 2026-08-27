@@ -23,7 +23,17 @@ class CChainParams;
 class ValidationSignals;
 
 static constexpr bool DEFAULT_CHECKPOINTS_ENABLED{true};
-static constexpr auto DEFAULT_MAX_TIP_AGE{24h};
+// IBD-LIVE-01 (audit 2026-08-27): BTX blocks may legitimately remain unchanged
+// for more than 24 hours while the network works through a high-cost MatMul
+// candidate or a coordinated chain recovery. With a 24h default, every node
+// restarting on that valid tip re-enters IBD -- which also disarms the cadence
+// hold (see in_ibd below), exempts the unauthenticated-header-lead cap, and
+// feeds the mining chain guard. Observed live 2026-08-27: the GPU signer
+// reported initialblockdownload=true on a 55h-old canonical tip while peers
+// were ahead. Keep such nodes in normal relay mode by default; operators can
+// still select a stricter freshness policy with -maxtipage. Node policy only:
+// no change to validity, ExactReplay, chainwork, fork choice, or timestamps.
+static constexpr auto DEFAULT_MAX_TIP_AGE{30 * 24h};
 // Two workers provided the best end-to-end result in BTX's cold-restart
 // persisted-UTXO benchmark. More workers remain available through
 // -prevoutfetchthreads, but can regress fast storage through scheduling and
@@ -391,10 +401,10 @@ template <typename Node>
 
 //! Historical catch-up IBD: still loading blocks, no tip, or nChainWork
 //! below nMinimumChainWork. Distinct from age-only IBD (tip older than
-//! -maxtipage). A stalled chain whose tip is two days old looks like IBD
-//! after restart even when this node is fully caught up; suppressing INV
-//! then hides a unique mined block until someone GETDATAs it. Do not use
-//! IsInitialBlockDownload() as the announce/GBT gate — that conflates
+//! -maxtipage). A stalled chain whose tip exceeds -maxtipage looks like
+//! IBD after restart even when this node is fully caught up; suppressing
+//! INV then hides a unique mined block until someone GETDATAs it. Do not
+//! use IsInitialBlockDownload() as the announce/GBT gate — that conflates
 //! the two. Fee filter MAX_MONEY may still follow IsInitialBlockDownload
 //! so remote age-only IBD remains observable.
 [[nodiscard]] inline constexpr bool IbdIsHistoricalCatchUp(
@@ -425,7 +435,7 @@ template <typename Node>
 }
 
 //! in_ibd && not historical catch-up ⇒ the only remaining IBD reason is
-//! tip nTime older than -maxtipage (default 24h).
+//! tip nTime older than -maxtipage (default 30 days).
 [[nodiscard]] inline constexpr bool IbdIsAgeOnlyStaleTip(
     bool in_ibd,
     bool loading_blocks,

@@ -61,6 +61,34 @@ pin must reach tip from a cold start on ExactReplay, keep advancing
 across a signed-frontier stall without operator action, and recover
 without a restart, with every privileged peer absent or hostile.
 
+## Archives are pointers, not authority
+
+`MatMulModeIsChainAuthority()` returns true **only** for `CONSENSUS`
+and `TRUSTED`. `RELAY` is excluded
+(`src/kernel/chainstatemanager_opts.h`). That predicate is the
+`chain_oracle` field on `getblockchaininfo` and `getpeerinfo`, so an
+operator can verify a discovery relay reports `chain_oracle: false`.
+`init.cpp` hard-`InitError`s if a relay is given a pin, signing key,
+GETMMATTEST serve, attestation blocklist, or open attestors, so a
+relay cannot accidentally become authority.
+
+## Validators are optional, not required
+
+A consensus node with **no** `-matmultrustedpubkey` gets an INFO log,
+not a warning or error: it cannot see or follow the attested tip, and
+`ExactReplay is unchanged`. It validates fully and independently with
+zero validator config. That is corroborated three ways: the
+gold-standard litmus passes; `SkipExactReplayForGpuAttestation` is
+`trusted_mirror && has_valid_gpu_attestation`, so consensus never
+skips; and production accepted blocks network-wide while the signer
+had attested nothing past 199300.
+
+The one honest limit: `-matmulvalidation=trusted` nodes still depend
+on the pin. The startup warning already says they are **not an
+independent full consensus validator**. That is a hardware limit
+(CPU-only machines that physically cannot ExactReplay), not a
+governance one.
+
 ## Fork self-sufficiency (goldens are a local mining belt)
 
 The production golden manifest is how **this binary** refuses to mine
@@ -70,6 +98,69 @@ add a row to **their** manifest, rebuild, and reseal. Other nodes
 ExactReplay the resulting blocks. Do not send golden JSON to this
 repository for blessing. See
 [btx-fork-golden-self-sufficiency.md](btx-fork-golden-self-sufficiency.md).
+
+## Header availability, BestKnown `-1`, and IBD (three fixes, one symptom)
+
+A reporter showed archive `getpeerinfo` rows with `sync_height=-1`,
+`common_height=-1`, `sync_lag=-1`, and
+`counts_as_synced_outbound=false`, and concluded the node was in IBD
+and therefore not broadcasting. The effect is right; the cause is one
+step off, and it matters because **three different 0.34 fixes** are
+involved.
+
+`nSyncHeight` / `nCommonHeight` are filled from
+`pindexBestKnownBlock` / `pindexLastCommonBlock`
+(`net_processing.cpp` around the getpeerinfo stats). **`-1` means
+BestKnown is null** — `UpdateBlockAvailability` never ran for that
+peer because we never accepted a header from it. IBD and those `-1`s
+are **parallel symptoms** of headers never being learned, not cause
+and effect. `counts_as_synced_outbound=false` follows from the same
+null BestKnown.
+
+This class was already measured: `net_processing.cpp` documents
+**2026-08-11, 26 of 66 peers at `synced_headers=-1`, 11 advertising
+heights above our tip**, and already has a rate-limited `getheaders`
+probe when BestKnown is null. 0.34 closes the holes that left that
+probe as the only recovery path.
+
+1. **`ShouldIgnoreNonAuthorityInboundHeaders` (`1de42d67`).** A trusted
+   mirror was dropping non-authority `HEADERS`, so BestKnown never got
+   set. Header acquisition during weak-subjectivity bootstrap is not a
+   body-trust decision; `BLOCK` / `CMPCTBLOCK` stay authority-only.
+2. **Raise-only BestKnown seeding (`1de42d67`).**
+   `MaybeSeedGpuSignedFrontierBestKnown` used to overwrite a peer's
+   real BestKnown with the lower local signed frontier, pinning
+   `peer_best_ahead == best_header_ahead` with `in_flight=0`. Seeding
+   may only fill a null or raise.
+3. **`DEFAULT_MAX_TIP_AGE` 24h → `30 * 24h` (IBD-LIVE-01).** A node
+   whose validated tip is canonical but older than a day used to
+   re-enter IBD after every restart. Production confirmed it the same
+   day: a GPU signer reported `initialblockdownload=true` on a
+   55-hour-old tip at height 199300 while peers were ahead. False IBD
+   is not an RPC cosmetic: it suppresses tx announcement, Dandelion,
+   and self-advertisement; it also disarms the cadence hold, exempts
+   the unauthenticated-header-lead cap, and trips the mining chain
+   guard (`after initial_block_download`). Operators who want a
+   stricter window still set `-maxtipage`. `btxd -help-debug` reports
+   `default: 2592000`. The functional test does **not** mine 30 days in
+   the past and does **not** wait on P2P `sync_all` for mocktime-offset
+   blocks (that timestamp gap does not converge: node1 receives
+   headers and never advances). The compiled default is the help-debug
+   string. Stay/leave IBD is exercised with explicit 1- and 2-hour
+   `-maxtipage` values by `submitblock` onto the IBD node.
+
+**Raising `maxtipage` alone does not populate `sync_height` /
+`common_height`.** That is the header-availability fix (1–2). The
+IBD-LIVE-01 audit says the same: increasing `maxtipage` must not be
+treated as a substitute for validated header exchange and block-body
+request handling. If you deploy expecting the 30-day default to clear
+`-1` rows and headers are still dropped for some other reason, the
+release did not fail — you are looking at the wrong fix.
+
+Tip age is node policy, not consensus. It becomes a weaker standalone
+freshness signal. That is the intended tradeoff under a high-cost
+MatMul stall, mitigated by minimum chainwork, validated headers,
+authenticated MatMul chainwork, and peer diversity.
 
 ## ZMQ on by default (issues 111 and 122)
 

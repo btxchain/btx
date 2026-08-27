@@ -276,7 +276,7 @@ static void EnsureMiningTemplateHasActiveTip(
         if (!logged_age_only.exchange(true)) {
             LogWarning(
                 "getblocktemplate: node is in IBD because the tip is older than -maxtipage "
-                "(default 24h). A stalled chain looks like IBD after restart. The template "
+                "(default 30 days). A stalled chain looks like IBD after restart. The template "
                 "is still issued and the block will be announced. Miners on a stalled chain "
                 "should raise -maxtipage until getblockchaininfo.initialblockdownload is false.\n");
         }
