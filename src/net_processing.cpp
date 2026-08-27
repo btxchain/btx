@@ -31,6 +31,7 @@
 #include <node/matmul_rc_admission.h>
 #include <node/matmul_trusted_attestations.h>
 #include <node/discovery_relay.h>
+#include <node/header_sync.h>
 #include <node/matmul_verify_worker.h>
 #include <node/timeoffsets.h>
 #include <node/txdownloadman.h>
@@ -4740,8 +4741,11 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
     // still-missing lower root on the followed chain while higher bodies (or
     // active-chain siblings) tempt the pointer forward. Re-derive against the
     // tip LCA and clamp so the walk always (re)considers the lowest hole.
-    const LastCommonRootFirstResult root_first{ClampLastCommonToRootFirst(
+    const LastCommonRootFirstResult root_first_clamped{ClampLastCommonToRootFirst(
         state->pindexLastCommonBlock, state->pindexBestKnownBlock, tip,
+        &m_chainman.ActiveChain())};
+    const LastCommonRootFirstResult root_first{AdvanceLastCommonPastActiveTip(
+        root_first_clamped, tip, state->pindexBestKnownBlock,
         &m_chainman.ActiveChain())};
     state->pindexLastCommonBlock = root_first.last_common;
         if (root_first.lowest_missing != nullptr &&
@@ -5056,6 +5060,15 @@ void PeerManagerImpl::FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, c
                     (pindex->nStatus & BLOCK_HAVE_DATA || activeChain->Contains(pindex))) {
                     state->pindexLastCommonBlock = pindex;
                 }
+                continue;
+            }
+
+            // 0.34.1 F3: do not occupy inflight with a same-height (or lower)
+            // competitor of the connected tip. That pin is what kept
+            // mapBlocksInFlight non-empty and shut the inverted preferred-peer
+            // header-sync hatch.
+            if (tip != nullptr && pindex->nHeight <= tip->nHeight &&
+                activeChain != nullptr && !activeChain->Contains(pindex)) {
                 continue;
             }
 
@@ -18643,27 +18656,35 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
             // sufficient; an ordinary peer can still relay valid blocks, which
             // we validate ourselves regardless of who sent them.
         }
-        if (state.fPreferredDownload && consensus_ok) {
+        const CBlockIndex* tip_for_headers{m_chainman.ActiveChain().Tip()};
+        const bool tip_is_stale{
+            m_chainman.m_best_header != nullptr &&
+            m_chainman.m_best_header->Time() <= NodeClock::now() - 24h};
+        const bool headers_in_flight{
+            peer->m_last_getheaders_timestamp != NodeClock::time_point{} &&
+            NodeClock::now() - peer->m_last_getheaders_timestamp <= HEADERS_RESPONSE_TIME};
+        const bool must_probe{node::HeaderSyncMustProbe(
+            tip_for_headers != nullptr ? tip_for_headers->nHeight : -1,
+            peer->m_starting_height.load(),
+            state.pindexBestKnownBlock == nullptr,
+            tip_is_stale,
+            headers_in_flight)};
+
+        // F1/F2: a peer advertising above our tip with no best-known is
+        // enough to request headers. fPreferredDownload remains a
+        // preference, never a gate. Do not consult preferred-peer count.
+        if (must_probe) {
+            sync_blocks_and_headers_from_peer = true;
+        } else if (state.fPreferredDownload && consensus_ok) {
             sync_blocks_and_headers_from_peer = true;
         } else if (CanServeBlocks(*peer) && !pto->IsAddrFetchConn()) {
-            // Typically this is an inbound peer. If we don't have any outbound
-            // peers, or if we aren't downloading any blocks from such peers,
-            // then allow block downloads from this peer, too.
-            // We prefer downloading blocks from outbound peers to avoid
-            // putting undue load on (say) some home user who is just making
-            // outbound connections to the network, but if our only source of
-            // the latest blocks is from an inbound peer, we have to be sure to
-            // eventually download it (and not just wait indefinitely for an
-            // outbound peer to have it).
-            //
-            // In MatMul consensus mode we still deprioritize peers that cannot
-            // serve/validate the MatMul chain, but a peer that DOES advertise
-            // NODE_MATMUL_CONSENSUS (or is NoBan-whitelisted) is exactly what we
-            // want to sync from, even inbound. Mirror the fPreferredDownload
-            // gate above so that a node whose only source of blocks is an
-            // inbound consensus-tier peer does not stall forever (which would
-            // also suppress the low-work anti-DoS headers path for that peer).
-            if (m_num_preferred_download_peers == 0 || mapBlocksInFlight.empty()) {
+            // Typically this is an inbound peer. Allow block downloads from
+            // it when we are not already downloading from anyone. The
+            // previous hatch also opened when m_num_preferred_download_peers
+            // == 0; that is inverted — 0.34 giving a miner 62 CONSENSUS
+            // peers closed the only path out. Preferred count is never a
+            // gate (same principle as MaybeSendGetHeaders).
+            if (mapBlocksInFlight.empty()) {
                 sync_blocks_and_headers_from_peer = true;
             }
         }
@@ -18679,11 +18700,14 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
             // activation handoff never reaches a consensus-tier peer. When no preferred
             // peers are connected (CPU-only / scarce GPU), ordinary peers may still claim
             // the slot so header sync cannot deadlock.
-            const bool near_tip_headers{
-                m_chainman.m_best_header->Time() > NodeClock::now() - 24h};
+            //
+            // F1: near_tip_headers may gate *sync-slot preference*. It must
+            // not block all header requests. must_probe sends getheaders
+            // without claiming the scarce IBD slot.
+            const bool near_tip_headers{!tip_is_stale};
             const bool may_claim_initial_sync_slot{
                 nSyncStarted == 0 && sync_blocks_and_headers_from_peer};
-            if (may_claim_initial_sync_slot || near_tip_headers) {
+            if (may_claim_initial_sync_slot || near_tip_headers || must_probe) {
                 const CBlockIndex* pindexStart = m_chainman.m_best_header;
                 /* If possible, start at the block preceding the currently
                    best known header.  This ensures that we always get a
@@ -18697,21 +18721,23 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                 if (MaybeSendGetHeaders(*pto, GetLocator(pindexStart), *peer)) {
                     LogDebug(BCLog::NET, "initial getheaders (%d) to peer=%d (startheight:%d)\n", pindexStart->nHeight, pto->GetId(), peer->m_starting_height);
 
-                    const auto target_spacing = std::max<int64_t>(
-                        1,
-                        count_milliseconds(TargetSpacingForTip(m_chainman.m_best_header, consensusParams)));
-                    const auto expected_headers = std::max<int64_t>(
-                        1,
-                        Ticks<std::chrono::milliseconds>(NodeClock::now() - m_chainman.m_best_header->Time()) / target_spacing);
-                    state.fSyncStarted = true;
-                    peer->m_headers_sync_timeout = current_time + HEADERS_DOWNLOAD_TIMEOUT_BASE +
-                        (
-                         // Convert HEADERS_DOWNLOAD_TIMEOUT_PER_HEADER to microseconds before scaling
-                         // to maintain precision
-                         std::chrono::microseconds{HEADERS_DOWNLOAD_TIMEOUT_PER_HEADER} *
-                         expected_headers
-                        );
-                    nSyncStarted++;
+                    if (may_claim_initial_sync_slot || near_tip_headers) {
+                        const auto target_spacing = std::max<int64_t>(
+                            1,
+                            count_milliseconds(TargetSpacingForTip(m_chainman.m_best_header, consensusParams)));
+                        const auto expected_headers = std::max<int64_t>(
+                            1,
+                            Ticks<std::chrono::milliseconds>(NodeClock::now() - m_chainman.m_best_header->Time()) / target_spacing);
+                        state.fSyncStarted = true;
+                        peer->m_headers_sync_timeout = current_time + HEADERS_DOWNLOAD_TIMEOUT_BASE +
+                            (
+                             // Convert HEADERS_DOWNLOAD_TIMEOUT_PER_HEADER to microseconds before scaling
+                             // to maintain precision
+                             std::chrono::microseconds{HEADERS_DOWNLOAD_TIMEOUT_PER_HEADER} *
+                             expected_headers
+                            );
+                        nSyncStarted++;
+                    }
                 }
             }
         }
@@ -18737,25 +18763,52 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
         // known block for it, ask once, rate-limited per peer. This is the same
         // message the sync peer already gets, not a new protocol burden, and it
         // is bounded by BEST_KNOWN_PROBE_INTERVAL per peer.
+        //
+        // F4: log the declined path so a zero-send is observable rather than
+        // inferred from debug.log string counts (debug=net is often off).
+        auto log_probe_declined = [&](const char* reason) {
+            LogDebug(BCLog::NET,
+                     "best-known probe declined peer=%d reason=%s advertised=%d "
+                     "tip=%d best_known=%s\n",
+                     pto->GetId(), reason, peer->m_starting_height.load(),
+                     tip_for_headers != nullptr ? tip_for_headers->nHeight : -1,
+                     state.pindexBestKnownBlock != nullptr ? "set" : "null");
+        };
         if (state.pindexBestKnownBlock == nullptr && CanServeBlocks(*peer) &&
             !m_chainman.m_blockman.LoadingBlocks() && !pto->IsAddrFetchConn()) {
             const CBlockIndex* tip{m_chainman.ActiveChain().Tip()};
-            if (tip != nullptr && peer->m_starting_height > tip->nHeight) {
+            if (tip == nullptr) {
+                log_probe_declined("no_local_tip");
+            } else if (!must_probe) {
+                log_probe_declined("starting_not_above_tip");
+            } else {
                 auto& last_probe{m_best_known_probe_at[pto->GetId()]};
-                if (last_probe.count() == 0 ||
-                    current_time - last_probe > BEST_KNOWN_PROBE_INTERVAL) {
+                if (last_probe.count() != 0 &&
+                    current_time - last_probe <= BEST_KNOWN_PROBE_INTERVAL) {
+                    log_probe_declined("probe_interval");
+                } else {
                     const CBlockIndex* start{m_chainman.m_best_header};
                     if (start != nullptr && start->pprev) start = start->pprev;
-                    if (start != nullptr &&
-                        MaybeSendGetHeaders(*pto, GetLocator(start), *peer)) {
+                    if (start == nullptr) {
+                        log_probe_declined("no_locator_start");
+                    } else if (MaybeSendGetHeaders(*pto, GetLocator(start), *peer)) {
                         last_probe = current_time;
                         LogDebug(BCLog::NET,
                                  "best-known probe: getheaders to peer=%d "
                                  "(advertised %d, our tip %d)\n",
                                  pto->GetId(), peer->m_starting_height, tip->nHeight);
+                    } else {
+                        log_probe_declined("getheaders_in_flight");
                     }
                 }
             }
+        } else if (state.pindexBestKnownBlock == nullptr &&
+                   tip_for_headers != nullptr &&
+                   peer->m_starting_height.load() > tip_for_headers->nHeight) {
+            const char* reason = !CanServeBlocks(*peer) ? "cannot_serve_blocks" :
+                                 m_chainman.m_blockman.LoadingBlocks() ? "loading_blocks" :
+                                 pto->IsAddrFetchConn() ? "addr_fetch" : "unknown";
+            log_probe_declined(reason);
         }
 
         // Trusted mirrors: actively pull tip-chain headers from attestation
