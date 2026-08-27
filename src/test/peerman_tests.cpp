@@ -6760,6 +6760,11 @@ BOOST_AUTO_TEST_CASE(stale_tip_with_inflight_and_forty_peers_sends_getheaders)
                           "F1: stale tip + nSyncStarted!=0 + inflight + 40 "
                           "peers above tip must still send getheaders");
 
+    // GETHEADERS is still in the V1 transport (sock=null optimistic write).
+    // Drain it before ReceiveMsgFrom reuses the same transport for HEADERS.
+    connman.FlushSendBuffer(*peers.front());
+    peers.front()->fPauseSend = false;
+
     std::vector<CBlockIndex*> suffix;
     const CBlockIndex* walk{tip};
     for (unsigned int tag = 0xd0; tag < 0xd0 + 6; ++tag) {
