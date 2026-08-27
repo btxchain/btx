@@ -5,8 +5,9 @@ reach tip and keep advancing on ExactReplay alone.
 
 `CLIENT_VERSION` in this tree is **0.34.1**. The `v0.34` tag and 0.34.0
 seal remain the pool-close cut. This follow-up is the header-sync,
-mining-mesh, and closed-snapshot-dump release; its seal and tarballs land
-when freeze A is measured. Git describe on `main` remains the 0.33.4.2
+mining-mesh, and closed-snapshot-dump release. Freeze `F` is recorded in
+[0.34.1-freeze.md](evidence/0.34.1-freeze.md); seal and tarballs follow
+the corpus. Git describe on `main` remains the 0.33.4.2
 line until 0.34.1 merges
 ([release-notes-0.33.4.2.md](release-notes/release-notes-0.33.4.2.md)).
 
