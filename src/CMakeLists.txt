@@ -1697,6 +1697,23 @@ function(target_link_btx_linux_archive_group target)
       ${ARGN}
       -Wl,--end-group
     )
+    # WITH_ZMQ + gcc-13: do NOT "fix" this with -lstdc++ and do not strip
+    # the flag below as redundant with the implicit C++ runtime.
+    #
+    # Ubuntu libzmq.so DT_NEEDED libnorm.so.1, which wants
+    # __cxa_call_terminate@CXXABI_1.3.15. That versioned symbol lives in
+    # the distro libstdc++.so.6.0.35. g++-13's -lstdc++ resolves to
+    # /usr/lib/gcc/x86_64-linux-gnu/13/libstdc++.so (SONAME still
+    # libstdc++.so.6) which does not export CXXABI_1.3.15.
+    # external_lib_interface adds -Wl,--no-undefined, so ld then fails
+    # the btxd link even though runtime ldd already loads the distro
+    # libstdc++. A second distro .so.6 on the command line is dropped
+    # (duplicate SONAME); --as-needed drops it too. The durable lever is
+    # to not require DSO-internal undefs to resolve at our exe link.
+    if(WITH_ZMQ)
+      target_link_options(${target} PRIVATE
+        -Wl,--unresolved-symbols=ignore-in-shared-libs)
+    endif()
   else()
     target_link_libraries(${target} ${ARGN})
   endif()

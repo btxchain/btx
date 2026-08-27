@@ -6610,7 +6610,23 @@ BOOST_AUTO_TEST_SUITE_END()
 // requires a finished-IBD latch.
 BOOST_FIXTURE_TEST_SUITE(peerman_trusted_mirror_bootstrap_tests, RegTestingSetup)
 
-BOOST_AUTO_TEST_CASE(fresh_mirror_learns_headers_when_archives_serve_none)
+// PR 124 / MendeMatthias 2026-08-26. This is the field deadlock, not a
+// truth table over WeakSubjectivityBootstrapHeight /
+// TrustedMirrorSeedRaisesBestKnown /
+// TrustedMirrorIgnoreNonAuthorityInboundHeaders. Those predicates were
+// all individually fine. The stall was the INTERACTION:
+//   1. NODE_MATMUL_ATTESTATION_ARCHIVE peers answer getheaders with
+//      zero bytes,
+//   2. NODE_MATMUL_CONSENSUS peers serve HEADERS which
+//      ShouldIgnoreNonAuthorityInboundHeaders must ACCEPT below the
+//      bootstrap pin (treating HEADERS like BLOCK drops them),
+//   3. MaybeSeedGpuSignedFrontierBestKnown then used to assign
+//      pindexBestKnownBlock = seed unconditionally, pinning BestKnown
+//      to the local signed-frontier height so peer_best_ahead ==
+//      best_header_ahead and in_flight=0.
+// Reverting only (2) or only (3) restores the stall while the
+// predicate tests in matmul_trusted_mirror_tests.cpp still pass.
+BOOST_AUTO_TEST_CASE(fresh_mirror_deadlock_empty_archive_consensus_headers_and_raise_only_bestknown)
 {
     LOCK(NetEventsInterface::g_msgproc_mutex);
 
@@ -6623,6 +6639,7 @@ BOOST_AUTO_TEST_CASE(fresh_mirror_learns_headers_when_archives_serve_none)
         uint256::FromHex(std::string(64, '2')).value();
     config.trusted_signers = {signer.GetPubKey()};
     config.threshold = 1;
+    config.local_signer = signer;
     std::string error;
     BOOST_REQUIRE(node::matmul_trusted::Configure(
         std::move(config), /*trusted_mirror=*/true, /*serve=*/false,
@@ -6647,6 +6664,28 @@ BOOST_AUTO_TEST_CASE(fresh_mirror_learns_headers_when_archives_serve_none)
                          std::chrono::seconds{genesis->GetBlockTime()});
     SetMockTime(std::chrono::seconds{genesis->GetBlockTime() + 3600});
 
+    auto make_indexed_header = [&](const CBlockIndex& prev, unsigned int tag) {
+        CBlock block;
+        block.SetNull();
+        block.hashPrevBlock = prev.GetBlockHash();
+        block.hashMerkleRoot = uint256::FromHex(
+            std::string(60, '0') + strprintf("%04x", tag)).value();
+        block.nTime = prev.GetBlockTime() + 1;
+        block.nBits = prev.nBits;
+        block.nVersion = VERSIONBITS_TOP_BITS;
+        BOOST_REQUIRE(MineHeaderForConsensus(
+            block, prev.nHeight + 1, chainman.GetConsensus(), 5'000'000,
+            prev.GetMedianTimePast()));
+        BlockValidationState state;
+        const CBlockHeader header{block.GetBlockHeader()};
+        BOOST_REQUIRE_MESSAGE(chainman.ProcessNewBlockHeaders(
+            {{header}}, /*min_pow_checked=*/true, state), state.ToString());
+        CBlockIndex* index{WITH_LOCK(
+            ::cs_main,
+            return chainman.m_blockman.LookupBlockIndex(block.GetHash()))};
+        BOOST_REQUIRE(index != nullptr);
+        return index;
+    };
     auto make_unindexed_header = [&](const uint256& prev_hash, int prev_height,
                                      int64_t prev_time, uint32_t nBits,
                                      int64_t mtp, unsigned int tag) {
@@ -6663,88 +6702,135 @@ BOOST_AUTO_TEST_CASE(fresh_mirror_learns_headers_when_archives_serve_none)
         return block;
     };
 
-    std::vector<CBlock> offered;
-    offered.push_back(make_unindexed_header(
-        genesis->GetBlockHash(), genesis->nHeight, genesis->GetBlockTime(),
-        genesis->nBits, genesis->GetMedianTimePast(), 0xc01u));
-    for (int i = 1; i < 6; ++i) {
-        offered.push_back(make_unindexed_header(
-            offered.back().GetHash(), genesis->nHeight + i, offered.back().nTime,
-            offered.back().nBits, genesis->GetMedianTimePast(),
-            0xc01u + static_cast<unsigned int>(i)));
+    // Local signed frontier at height 3 (field: 2000). HEADER_ONLY in the
+    // index so MaybeSeedGpuSignedFrontierBestKnown has a seed to pin to.
+    const CBlockIndex* walk{genesis};
+    CBlockIndex* frontier{nullptr};
+    for (int i = 0; i < 3; ++i) {
+        frontier = make_indexed_header(*walk, 0xa10u + static_cast<unsigned int>(i));
+        walk = frontier;
     }
-    BOOST_REQUIRE_EQUAL(offered.size(), 6U);
-    const uint256 last_hash{offered.back().GetHash()};
+    BOOST_REQUIRE(frontier != nullptr);
+    BOOST_REQUIRE_EQUAL(frontier->nHeight, 3);
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
+                      frontier->GetBlockHash(), frontier->nHeight) ==
+                  matmul::trusted::AddResult::Accepted);
+    node::matmul_trusted::NoteAcceptedAttestationHeight(
+        frontier->nHeight, frontier->GetBlockHash());
+
+    constexpr int kAdvertisedHeight{10};
+    std::vector<CBlock> consensus_headers;
+    uint256 prev_hash{frontier->GetBlockHash()};
+    int prev_height{frontier->nHeight};
+    int64_t prev_time{frontier->GetBlockTime()};
+    const uint32_t nBits{frontier->nBits};
+    const int64_t mtp{frontier->GetMedianTimePast()};
+    for (int h = 4; h <= kAdvertisedHeight; ++h) {
+        consensus_headers.push_back(make_unindexed_header(
+            prev_hash, prev_height, prev_time, nBits, mtp,
+            0xc00u + static_cast<unsigned int>(h)));
+        prev_hash = consensus_headers.back().GetHash();
+        prev_height = h;
+        prev_time = consensus_headers.back().nTime;
+    }
+    BOOST_REQUIRE_EQUAL(consensus_headers.size(), 7U);
+    const uint256 last_hash{consensus_headers.back().GetHash()};
     BOOST_REQUIRE(WITH_LOCK(
         ::cs_main,
         return chainman.m_blockman.LookupBlockIndex(last_hash) == nullptr));
 
-    // Outbound archive answers getheaders with zero bytes (the field stall).
-    // Inbound discovery-only is the peer for which
-    // AuthorityMayIngestInboundMinerAnnouncement is false, so the only
-    // remaining path is the weak-subjectivity HEADERS exception. The live
-    // incident used NODE_MATMUL_CONSENSUS peers; on 0.34 those already pass
-    // the lost-twin announce ingest.
     const ServiceFlags archive_services{ServiceFlags(
         NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_ATTESTATION_ARCHIVE |
         NODE_MATMUL_TRUSTED_MIRROR)};
-    const ServiceFlags discovery_services{ServiceFlags(NODE_MATMUL_DISCOVERY)};
+    const ServiceFlags consensus_services{ServiceFlags(
+        NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS)};
     CNode archive{/*id=*/701, /*sock=*/nullptr, CAddress{},
                   /*nKeyedNetGroupIn=*/0, /*nLocalHostNonceIn=*/0,
                   CAddress{}, /*addrNameIn=*/"bootstrap-empty-archive",
                   ConnectionType::OUTBOUND_FULL_RELAY,
                   /*inbound_onion=*/false, /*network_key=*/0};
-    CNode discovery{/*id=*/702, /*sock=*/nullptr, CAddress{},
+    CNode consensus{/*id=*/702, /*sock=*/nullptr, CAddress{},
                     /*nKeyedNetGroupIn=*/1, /*nLocalHostNonceIn=*/0,
-                    CAddress{}, /*addrNameIn=*/"bootstrap-discovery",
+                    CAddress{}, /*addrNameIn=*/"bootstrap-consensus-headers",
                     ConnectionType::INBOUND,
                     /*inbound_onion=*/false, /*network_key=*/0};
     connman.Handshake(archive, /*successfully_connected=*/true,
                       archive_services, archive_services, PROTOCOL_VERSION,
-                      /*relay_txs=*/true, /*starting_height=*/0);
-    connman.Handshake(discovery, /*successfully_connected=*/true,
-                      discovery_services, discovery_services, PROTOCOL_VERSION,
-                      /*relay_txs=*/true, /*starting_height=*/6);
+                      /*relay_txs=*/true, /*starting_height=*/kAdvertisedHeight);
+    connman.Handshake(consensus, /*successfully_connected=*/true,
+                      consensus_services, consensus_services, PROTOCOL_VERSION,
+                      /*relay_txs=*/true, /*starting_height=*/kAdvertisedHeight);
     BOOST_REQUIRE(!archive.fDisconnect);
-    BOOST_REQUIRE(!discovery.fDisconnect);
+    BOOST_REQUIRE(!consensus.fDisconnect);
     connman.AddTestNode(archive);
-    connman.AddTestNode(discovery);
+    connman.AddTestNode(consensus);
     connman.FlushSendBuffer(archive);
-    connman.FlushSendBuffer(discovery);
+    connman.FlushSendBuffer(consensus);
     struct FinalizeBootstrap {
         PeerManager& peerman;
         ConnmanTestMsg& connman;
         CNode& archive;
-        CNode& discovery;
+        CNode& consensus;
         ~FinalizeBootstrap()
         {
             peerman.FinalizeNode(archive);
-            peerman.FinalizeNode(discovery);
+            peerman.FinalizeNode(consensus);
             connman.RemoveTestNode(archive);
-            connman.RemoveTestNode(discovery);
+            connman.RemoveTestNode(consensus);
         }
-    } finalize{peerman, connman, archive, discovery};
+    } finalize{peerman, connman, archive, consensus};
 
+    // (1) Archives serve nothing — the field getheaders zero-byte reply.
     std::vector<CBlock> empty;
     BOOST_REQUIRE(connman.ReceiveMsgFrom(
         archive, NetMsg::Make(NetMsgType::HEADERS, TX_WITH_WITNESS(empty))));
     archive.fPauseSend = false;
     (void)connman.ProcessMessagesOnce(archive);
 
+    // (2) CONSENSUS HEADERS must be accepted via
+    // ShouldIgnoreNonAuthorityInboundHeaders, not dropped as BLOCK.
     BOOST_REQUIRE(connman.ReceiveMsgFrom(
-        discovery, NetMsg::Make(NetMsgType::HEADERS, TX_WITH_WITNESS(offered))));
-    discovery.fPauseSend = false;
-    (void)connman.ProcessMessagesOnce(discovery);
+        consensus,
+        NetMsg::Make(NetMsgType::HEADERS, TX_WITH_WITNESS(consensus_headers))));
+    consensus.fPauseSend = false;
+    (void)connman.ProcessMessagesOnce(consensus);
 
     const CBlockIndex* indexed{WITH_LOCK(
         ::cs_main, return chainman.m_blockman.LookupBlockIndex(last_hash))};
-    BOOST_REQUIRE(indexed != nullptr);
-    BOOST_CHECK_EQUAL(indexed->nHeight, 6);
+    BOOST_REQUIRE_MESSAGE(
+        indexed != nullptr,
+        "CONSENSUS HEADERS below the bootstrap pin must be indexed; "
+        "reverting ShouldIgnoreNonAuthorityInboundHeaders to the BLOCK "
+        "predicate restores the 2026-08-26 deadlock");
+    BOOST_CHECK_EQUAL(indexed->nHeight, kAdvertisedHeight);
     BOOST_CHECK_EQUAL(
-        WITH_LOCK(::cs_main, return chainman.m_best_header->nHeight), 6);
-    CNodeStateStats discovery_stats;
-    BOOST_REQUIRE(peerman.GetNodeStateStats(discovery.GetId(), discovery_stats));
-    BOOST_CHECK_EQUAL(discovery_stats.nSyncHeight, 6);
+        WITH_LOCK(::cs_main, return chainman.m_best_header->nHeight),
+        kAdvertisedHeight);
+
+    CNodeStateStats after_headers;
+    BOOST_REQUIRE(peerman.GetNodeStateStats(consensus.GetId(), after_headers));
+    BOOST_CHECK_EQUAL(after_headers.nSyncHeight, kAdvertisedHeight);
+
+    // (3) Seeding pindexBestKnownBlock from the local frontier must not
+    // lower this peer's already-higher BestKnown.
+    BOOST_CHECK(peerman.SendMessages(&consensus));
+    CNodeStateStats after_seed;
+    BOOST_REQUIRE(peerman.GetNodeStateStats(consensus.GetId(), after_seed));
+    BOOST_CHECK_EQUAL(after_seed.nSyncHeight, kAdvertisedHeight);
+    BOOST_CHECK_NE(after_seed.nSyncHeight, frontier->nHeight);
+
+    BOOST_CHECK(peerman.SendMessages(&archive));
+    CNodeStateStats archive_after;
+    BOOST_REQUIRE(peerman.GetNodeStateStats(archive.GetId(), archive_after));
+    // Stall shape was tip=0, best_header_ahead==peer_best_ahead==frontier,
+    // in_flight=0. After the interaction, BestKnown stays at the advertised
+    // height and a download is actually in flight.
+    BOOST_CHECK_NE(archive_after.nSyncHeight, frontier->nHeight);
+    BOOST_REQUIRE_MESSAGE(
+        !after_seed.vHeightInFlight.empty() ||
+            !archive_after.vHeightInFlight.empty(),
+        "in_flight=0 with BestKnown pinned to the local frontier is the "
+        "field stall; the node must request at least one body");
 
     peerman.ResetMatMulVerifyAdmissionForTest();
 }

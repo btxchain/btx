@@ -99,14 +99,46 @@ Issue 122 stays open until a published 0.34 artifact demonstrates
 `getzmqnotifications` and a live `zmqpubhashblock` notification. Do not
 treat this notes file as that demonstration.
 
+## SLH-DSA keygen vs libsodium Ed25519
+
+Not cosmetic. SPHINCS+ used the SUPERCOP name `crypto_sign_seed_keypair`.
+macOS statically links `libsodium.a` for ZMQ; that archive exports the
+same name as a 4-byte tail-call into Ed25519. `CPQKey::MakeNewKey` →
+`bitcoin_pqc_keygen` → `slh_dsa_shake_128s_keygen` called that name and
+expected a post-quantum keypair. Linux pulled the SPHINCS definition
+from `libbitcoinpqc.a`; macOS kept sodium first — platform-dependent
+keygen. 0.34 prefixes the SPHINCS / `slh_dsa` TUs (`btx_spx_*`).
+Dilithium was already `pqcrystals_*`. Reordering the link to put PQC
+first would steal ZMQ's Curve; do not do that.
+
 ## Trusted-mirror bootstrap deadlock (PR 124)
 
-Found and reproduced by **MendeMatthias** (easyNode / easyBTX) on
-2026-08-26 against v0.33.4.2. A fresh `-matmulvalidation=trusted`
-datadir parked at height 0: archive peers answered `getheaders` with
-zero bytes, `NODE_MATMUL_CONSENSUS` peers offered the only headers and
-those were dropped as non-authority, and
-`MaybeSeedGpuSignedFrontierBestKnown` then pinned BestKnown to the
+This is not an operator nicety. Without `1de42d67`, ordinary users on
+**new Apple Silicon** get a node that never syncs.
+
+**MendeMatthias** (easyNode / easyBTX) found and reproduced it on
+2026-08-26 against v0.33.4.2, and then explained *why* it showed up
+for their users at all: easyNode tries `-matmulvalidation=consensus`
+on every start and only falls back to a trusted mirror when `btxd`
+itself refuses. That refuse happens when Apple silicon self-qualifies
+but matches no golden row — today, **M5**. M1 through M4 stay in
+consensus mode and never hit the deadlock. The causal chain is:
+
+M5 self-qualifies → no `m5_class` manifest row → `btxd` refuses
+consensus → the app falls back to trusted mirror → a **fresh datadir**
+hits the bootstrap deadlock and parks at height 0 forever.
+
+Their words: the population this deadlock was hitting is **fresh
+installs, not operators**. The M5 golden gap and the bootstrap
+deadlock are the same incident, not two unrelated reports. An
+`m5_class` row in a fork's own manifest would also remove the fallback
+that triggers the deadlock; we will not add that row here (see
+[btx-fork-golden-self-sufficiency.md](btx-fork-golden-self-sufficiency.md)).
+
+A fresh `-matmulvalidation=trusted` datadir parked at height 0: archive
+peers answered `getheaders` with zero bytes, `NODE_MATMUL_CONSENSUS`
+peers offered the only headers and those were dropped as non-authority,
+and `MaybeSeedGpuSignedFrontierBestKnown` then pinned BestKnown to the
 local signed-frontier height (2000) while peers advertised 199300+.
 The stall log was:
 
@@ -135,10 +167,13 @@ for a binary we used to ship, not an ecosystem ruling, and 0.34 does
 not reseal it as a production mining backend.
 
 An M5 can self-qualify and still die on `canary=missing_golden`
-because this tree has no `m5_class` row (MendeMatthias, PR 123). We
-will not add that row ourselves. A fork that wants M5 mining adds it
-to its own manifest. CUDA `sm_120` remains the production mining
-cohort for this line.
+because this tree has no `m5_class` row (MendeMatthias, PR 123). That
+refuse is what pushes easyNode/easyBTX onto the trusted-mirror path
+and into the bootstrap deadlock above. We will not add the row
+ourselves. A fork that ships an installer (including easyNode) adds
+`m5_class` to **its** manifest, rebuilds, and reseals; its users then
+mine consensus on M5 without waiting on this repository. CUDA `sm_120`
+remains the production mining cohort for this line.
 
 # Fast-start snapshot
 
