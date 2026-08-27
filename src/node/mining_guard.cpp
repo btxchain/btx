@@ -48,6 +48,11 @@ const std::vector<std::string>& DefaultMiningPeerMesh()
     return default_mesh;
 }
 
+void ResetMiningChainGuardMeshRefreshForTest()
+{
+    g_last_default_mesh_refresh.store(0);
+}
+
 MiningChainGuardOptions GetMiningChainGuardOptions(const NodeContext& node)
 {
     MiningChainGuardOptions options;
@@ -57,6 +62,7 @@ MiningChainGuardOptions GetMiningChainGuardOptions(const NodeContext& node)
 
     if (!node.args) {
         options.enabled = default_enabled;
+        options.peer_mesh = DefaultMiningPeerMesh();
         return options;
     }
 
@@ -64,6 +70,15 @@ MiningChainGuardOptions GetMiningChainGuardOptions(const NodeContext& node)
         node.args->IsArgSet("-miningchainguard") || node.args->IsArgNegated("-miningchainguard");
     options.enabled = node.args->GetBoolArg("-miningchainguard", default_enabled);
     options.refresh_default_mesh = node.args->GetBoolArg("-miningchainguarddefaultmesh", true);
+    if (node.args->IsArgNegated("-miningpeermesh")) {
+        options.peer_mesh.clear();
+    } else if (node.args->IsArgSet("-miningpeermesh")) {
+        // Replace, do not append: operators must be able to opt out of the
+        // compiled operator domains.
+        options.peer_mesh = node.args->GetArgs("-miningpeermesh");
+    } else {
+        options.peer_mesh = DefaultMiningPeerMesh();
+    }
     options.min_peer_count = std::max<int>(
         1,
         static_cast<int>(node.args->GetIntArg(
@@ -422,7 +437,7 @@ void MaybeRequestMiningChainGuardRecovery(const MiningChainGuardStatus& status, 
             if (now - last >= options.mesh_refresh_seconds) {
                 const bool use_v2transport = node.connman->GetLocalServices() & NODE_P2P_V2;
                 int added{0};
-                for (const auto& peer : DefaultMiningPeerMesh()) {
+                for (const auto& peer : options.peer_mesh) {
                     if (node.connman->AddNode({peer, use_v2transport})) {
                         ++added;
                     }
@@ -430,8 +445,8 @@ void MaybeRequestMiningChainGuardRecovery(const MiningChainGuardStatus& status, 
                 LogPrintLevel(
                     BCLog::NET,
                     BCLog::Level::Info,
-                    "Mining chain guard refreshed default peer mesh (%u peers, %d newly added) after %s\n",
-                    static_cast<unsigned>(DefaultMiningPeerMesh().size()),
+                    "Mining chain guard refreshed configured peer mesh (%u peers, %d newly added) after %s\n",
+                    static_cast<unsigned>(options.peer_mesh.size()),
                     added,
                     DescribeMiningChainGuardStatus(status));
             }

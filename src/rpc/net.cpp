@@ -654,14 +654,14 @@ static RPCHelpMan getminingpeermesh()
 {
     return RPCHelpMan{"getminingpeermesh",
         "\nReturns the runtime peer mesh used by mining operators to keep a node connected to canonical peers.\n"
-        "This reports the built-in bootstrap mesh, current addnode entries, and active peer health.\n",
+        "This reports the configured mining-guard mesh (-miningpeermesh, or compiled defaults when unset), current addnode entries, and active peer health.\n",
         {
             {"node", RPCArg::Type::STR, RPCArg::DefaultHint{"all nodes"}, "If provided, only report matching added/active peer entries."},
         },
         RPCResult{
             RPCResult::Type::OBJ, "", "",
             {
-                {RPCResult::Type::ARR, "default_nodes", "Built-in public bootstrap nodes suitable for mining mesh refresh",
+                {RPCResult::Type::ARR, "default_nodes", "Configured mining-guard mesh (compiled defaults unless -miningpeermesh replaces them)",
                 {
                     {RPCResult::Type::STR, "node", "host:port"},
                 }},
@@ -718,7 +718,8 @@ static RPCHelpMan getminingpeermesh()
 
     UniValue result(UniValue::VOBJ);
     UniValue defaults(UniValue::VARR);
-    for (const auto& seed : node::DefaultMiningPeerMesh()) {
+    const auto mesh_options = node::GetMiningChainGuardOptions(node);
+    for (const auto& seed : mesh_options.peer_mesh) {
         if (matches_filter(seed)) defaults.push_back(seed);
     }
     result.pushKV("default_nodes", std::move(defaults));
@@ -872,9 +873,9 @@ static RPCHelpMan removeminingpeermeshnode()
 static RPCHelpMan refreshminingpeermesh()
 {
     return RPCHelpMan{"refreshminingpeermesh",
-        "\nQueues connection attempts to the default mining mesh and/or current runtime addnode entries.\n",
+        "\nQueues connection attempts to the configured mining mesh and/or current runtime addnode entries.\n",
         {
-            {"include_defaults", RPCArg::Type::BOOL, RPCArg::Default{true}, "Try the built-in public mining mesh"},
+            {"include_defaults", RPCArg::Type::BOOL, RPCArg::Default{true}, "Try the configured mining mesh (-miningpeermesh, or compiled defaults when unset)"},
             {"include_added", RPCArg::Type::BOOL, RPCArg::Default{true}, "Try current runtime addnode entries"},
             {"v2transport", RPCArg::Type::BOOL, RPCArg::DefaultHint{"set by -v2transport"}, "Attempt BIP324 v2 transport for default nodes"},
         },
@@ -906,8 +907,8 @@ static RPCHelpMan refreshminingpeermesh()
 
     std::set<std::string> nodes;
     if (include_defaults) {
-        const auto& defaults = node::DefaultMiningPeerMesh();
-        nodes.insert(defaults.begin(), defaults.end());
+        const auto mesh = node::GetMiningChainGuardOptions(node).peer_mesh;
+        nodes.insert(mesh.begin(), mesh.end());
     }
     if (include_added) {
         for (const AddedNodeInfo& info : connman.GetAddedNodeInfo(/*include_connected=*/false)) {
