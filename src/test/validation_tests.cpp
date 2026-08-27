@@ -241,6 +241,19 @@ BOOST_AUTO_TEST_CASE(mainnet_shielded_pool_disable_height_is_199300)
     BOOST_CHECK(consensus.IsShieldedPoolDisabled(199'301));
 }
 
+BOOST_AUTO_TEST_CASE(closed_shielded_snapshot_pin_matches_mainnet_assumeutxo)
+{
+    ArgsManager args;
+    const auto params = CreateChainParams(args, ChainType::MAIN);
+    BOOST_REQUIRE(params);
+    const auto au = params->AssumeutxoForHeight(199'300);
+    BOOST_REQUIRE(au.has_value());
+    BOOST_CHECK_EQUAL(
+        au->shielded_state_commitment.GetHex(),
+        "94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541");
+    BOOST_CHECK_EQUAL(params->GetConsensus().nShieldedPoolDisableHeight, 199'300);
+}
+
 BOOST_AUTO_TEST_CASE(non_mainnet_shielded_pool_disable_height_is_unset)
 {
     ArgsManager args;
@@ -833,6 +846,7 @@ BOOST_AUTO_TEST_CASE(test_mainnet_assumeutxo_snapshot_metadata)
         190'507,
         191'266,
         199'299,
+        199'300,
     };
 
     BOOST_REQUIRE_EQUAL(snapshot_heights.size(), expected_snapshot_heights.size());
@@ -867,6 +881,7 @@ BOOST_AUTO_TEST_CASE(test_mainnet_assumeutxo_snapshot_metadata)
     BOOST_CHECK(params->AssumeutxoForHeight(190'507));
     BOOST_CHECK(params->AssumeutxoForHeight(191'266));
     BOOST_CHECK(params->AssumeutxoForHeight(199'299));
+    BOOST_CHECK(params->AssumeutxoForHeight(199'300));
     BOOST_CHECK(!params->AssumeutxoForHeight(50'000));
     BOOST_CHECK(!params->AssumeutxoForHeight(0));
 }

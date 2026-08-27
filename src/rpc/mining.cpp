@@ -42,6 +42,7 @@
 #include <net.h>
 #include <net_processing.h>
 #include <node/context.h>
+#include <node/gbt_longpoll.h>
 #include <node/matmul_trusted_attestations.h>
 #include <node/miner.h>
 #include <node/mining_guard.h>
@@ -9263,17 +9264,43 @@ static RPCHelpMan getblocktemplate()
         // Release lock while waiting
         LEAVE_CRITICAL_SECTION(cs_main);
         {
-            MillisecondsDouble checktxtime{std::chrono::minutes(1)};
-            while (tip == hashWatchedChain && IsRPCRunning()) {
-                std::optional<BlockRef> maybe_tip{miner.waitTipChanged(hashWatchedChain, checktxtime)};
-                // Node is shutting down
-                if (!maybe_tip) break;
-                tip = maybe_tip->hash;
-                // Timeout: Check transactions for update
-                // without holding the mempool lock to avoid deadlocks
-                if (mempool.GetTransactionsUpdated() != nTransactionsUpdatedLastLP)
-                    break;
-                checktxtime = std::chrono::seconds(10);
+            // F5/F6: on a stalled chain neither tip nor mempool nor shutdown
+            // ever fire, so the old loop parked one HTTP worker forever at 0%
+            // CPU. Bound the wait to 60s and cap concurrent waiters at
+            // rpcthreads/4 so GBT cannot take the whole pool. F7 (unwind on
+            // client disconnect via evhttp closecb) is not wired here:
+            // JSONRPCRequest has no HTTPRequest*.
+            static std::atomic<int> gbt_longpoll_waiters{0};
+            const ArgsManager& lp_args{EnsureArgsman(node)};
+            const int rpcthreads{std::max(
+                1,
+                static_cast<int>(lp_args.GetIntArg(
+                    "-rpcthreads", node::GBT_LONGPOLL_DEFAULT_RPCTHREADS)))};
+            node::GbtLongPollWaiterSlot waiter{
+                gbt_longpoll_waiters, node::GbtLongPollWaiterCap(rpcthreads)};
+            if (waiter.TryAcquire()) {
+                const auto started{std::chrono::steady_clock::now()};
+                MillisecondsDouble checktxtime{std::chrono::minutes(1)};
+                while (tip == hashWatchedChain && IsRPCRunning()) {
+                    const auto now{std::chrono::steady_clock::now()};
+                    if (node::GbtLongPollLifetimeExpired(started, now)) break;
+                    const auto remaining{std::chrono::duration_cast<std::chrono::milliseconds>(
+                        node::GBT_LONGPOLL_LIFETIME - (now - started))};
+                    const auto slice{std::min(
+                        std::chrono::duration_cast<std::chrono::milliseconds>(checktxtime),
+                        remaining)};
+                    if (slice.count() <= 0) break;
+                    std::optional<BlockRef> maybe_tip{
+                        miner.waitTipChanged(hashWatchedChain, slice)};
+                    // Node is shutting down
+                    if (!maybe_tip) break;
+                    tip = maybe_tip->hash;
+                    // Timeout: Check transactions for update
+                    // without holding the mempool lock to avoid deadlocks
+                    if (mempool.GetTransactionsUpdated() != nTransactionsUpdatedLastLP)
+                        break;
+                    checktxtime = std::chrono::seconds(10);
+                }
             }
         }
         ENTER_CRITICAL_SECTION(cs_main);

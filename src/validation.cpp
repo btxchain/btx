@@ -1771,6 +1771,8 @@ template <typename Spend>
     if (unshield_velocity) unshield_velocity->Clear();
     if (tip == nullptr) return true;
 
+    chainstate.m_chainman.NoteRebuildShieldedStateForTest();
+
     std::vector<const CBlockIndex*> chain;
     chain.reserve(tip->nHeight + 1);
     for (const CBlockIndex* pindex = tip; pindex != nullptr; pindex = pindex->pprev) {
@@ -1972,7 +1974,7 @@ template <typename Spend>
     if (chainstate.m_blockman.IsBlockPruned(index)) {
         return false;
     }
-    if ((index.nStatus & BLOCK_HAVE_DATA) == 0 &&
+    if (index.nFile < 0 ||
         index.nDataPos < node::BLOCK_SERIALIZATION_HEADER_SIZE) {
         return false;
     }
@@ -2007,6 +2009,26 @@ template <typename Spend>
         }
     }
     return true;
+}
+
+[[nodiscard]] static const CBlockIndex* FirstUnavailableShieldedDirectRebuildBlock(
+    const Chainstate& chainstate,
+    const CBlockIndex* tip) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+{
+    AssertLockHeld(::cs_main);
+
+    for (const CBlockIndex* cursor = tip; cursor != nullptr; cursor = cursor->pprev) {
+        // The destructive rebuild below calls BlockManager::ReadBlock(index), whose
+        // CBlockIndex::GetBlockPos() deliberately discards nFile/nDataPos unless
+        // BLOCK_HAVE_DATA is set. Do not use ShieldedRebuildBlockAvailable() here:
+        // that broader predicate also admits retained fallback positions for
+        // ReadShieldedRebuildBlock(), which this destructive reader does not use.
+        if ((cursor->nStatus & BLOCK_HAVE_DATA) == 0 ||
+            !ShieldedRebuildBlockAvailable(chainstate, *cursor)) {
+            return cursor;
+        }
+    }
+    return nullptr;
 }
 
 [[nodiscard]] static bool RebuildRecentShieldedUnshieldVelocity(const Chainstate& chainstate,
@@ -2279,6 +2301,12 @@ static void RefreshShieldedValidationSnapshots(
     const uint256& work_id) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
 {
     AssertLockHeld(::cs_main);
+    if (!chainman.ShouldMaintainShieldedState()) {
+        LogPrintf("%s: skipping shielded state rebuild for %s (pool closed; pass -shieldedstate=1 to audit from genesis)\n",
+                  context,
+                  work_id.ToString());
+        return false;
+    }
     if (!chainman.MarkShieldedAutoRepairAttempt(ShieldedAutoRepairKind::STATE_REBUILD)) {
         LogPrintf("%s: skipping shielded state rebuild for %s at unchanged shielded state generation\n",
                   context,
@@ -17448,6 +17476,11 @@ bool ChainstateManager::RebuildShieldedStateFromActiveChain()
     if (m_active_chainstate == nullptr) {
         return false;
     }
+    if (!ShouldMaintainShieldedState()) {
+        LogPrintf("RebuildShieldedStateFromActiveChain: skipping O(chain) replay (pool closed at height %d; pass -shieldedstate=1 to rebuild from genesis)\n",
+                  m_active_chainstate->m_chain.Tip() ? m_active_chainstate->m_chain.Tip()->nHeight : -1);
+        return false;
+    }
 
     const fs::path shielded_db_path = m_options.datadir / "shielded_state" / "nullifiers";
     const CBlockIndex* const tip = m_active_chainstate->m_chain.Tip();
@@ -17623,11 +17656,79 @@ bool ChainstateManager::InjectShieldedTransitionWriteFailureForTest(
            m_shielded_transition_write_fault_hook_for_test(seam);
 }
 
+bool ChainstateManager::EstablishesClosedShieldedState(const CBlockIndex* tip) const
+{
+    AssertLockHeld(::cs_main);
+    return tip != nullptr &&
+           GetConsensus().IsShieldedPoolDisabled(tip->nHeight) &&
+           !m_options.force_shielded_state;
+}
+
+std::optional<uint256> ChainstateManager::ComputeClosedShieldedSnapshotStatePin() const
+{
+    AssertLockHeld(::cs_main);
+    // Mainnet freeze pin is the compiled assumeutxo shielded_state_commitment
+    // at nShieldedPoolDisableHeight (94343b76… from 189307 through 199300).
+    // Default-node dumps have no live stores; hashing a synthetic empty tree
+    // (e802781d…) would disagree with loadtxoutset and with dumps taken while
+    // -shieldedstate=1 still had historical LevelDB open.
+    const int32_t disable{GetConsensus().nShieldedPoolDisableHeight};
+    if (disable != std::numeric_limits<int32_t>::max()) {
+        if (const auto au = GetParams().AssumeutxoForHeight(disable)) {
+            if (!au->shielded_state_commitment.IsNull()) {
+                return au->shielded_state_commitment;
+            }
+        }
+    }
+    const shielded::ShieldedMerkleTree empty_tree{
+        shielded::ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY};
+    const shielded::registry::ShieldedAccountRegistryState empty_registry;
+    const std::vector<uint256> empty_recovery;
+    const std::vector<uint256> empty_anchors;
+    const std::vector<ConfirmedNettingManifestState> empty_manifests;
+
+    shielded::registry::ShieldedStateCommitment commitment;
+    commitment.note_commitment_root = empty_tree.Root();
+    commitment.account_registry_root = empty_registry.Root();
+    commitment.nullifier_root = shielded::registry::ComputeNullifierSetCommitment({});
+    HashWriter bridge_commitment;
+    bridge_commitment << std::string{"BTX_SHIELDED_BRIDGE_STATE_COMMITMENT_V2"}
+                      << empty_recovery
+                      << empty_anchors
+                      << empty_manifests;
+    commitment.bridge_settlement_root = bridge_commitment.GetSHA256();
+    if (!commitment.IsValid()) return std::nullopt;
+
+    HashWriter pin;
+    pin << std::string{"BTX_ShieldedSnapshotStatePin_V3"}
+        << commitment.note_commitment_root
+        << commitment.account_registry_root
+        << commitment.nullifier_root
+        << commitment.bridge_settlement_root
+        << CAmount{0}
+        << ShieldedUnshieldVelocity{};
+    return pin.GetSHA256();
+}
+
 ShieldedSnapshotSectionHeader ChainstateManager::GetShieldedSnapshotSectionHeader(
     const Chainstate& chainstate,
     const CBlockIndex* tip) const
 {
     AssertLockHeld(::cs_main);
+
+    // Past nShieldedPoolDisableHeight the assumeutxo payload is the canonical
+    // closed frozen section (zero live counts). Do not walk live stores even
+    // when -shieldedstate=1 has them open: dumps from default nodes and from
+    // historical-store nodes must agree, and walking a null iterator was
+    // throwing "Failed to count BTX recovery-exit commitments for snapshot"
+    // on every default 0.34 node at/past the disable height.
+    if (tip != nullptr &&
+        GetConsensus().IsShieldedPoolDisabled(tip->nHeight)) {
+        LogPrintf("GetShieldedSnapshotSectionHeader: emitting closed frozen shielded section at height %d\n",
+                  tip->nHeight);
+        return ShieldedSnapshotSectionHeader{};
+    }
+
     ShieldedSnapshotSectionHeader header;
     header.m_commitment_count = m_shielded_merkle_tree.Size();
     header.m_nullifier_count = m_shielded_nullifiers ? m_shielded_nullifiers->CountNullifiers() : 0;
@@ -17671,6 +17772,85 @@ ShieldedSnapshotSectionHeader ChainstateManager::GetShieldedSnapshotSectionHeade
     header.m_account_registry_roots.assign(account_registry_roots.begin(),
                                            account_registry_roots.end());
     return header;
+}
+
+bool ChainstateManager::AppendShieldedSnapshotPayload(
+    AutoFile& file,
+    const ShieldedSnapshotSectionHeader& header,
+    const Chainstate& chainstate,
+    const CBlockIndex* tip,
+    std::string& error)
+{
+    AssertLockHeld(::cs_main);
+    (void)chainstate;
+
+    if (tip != nullptr &&
+        GetConsensus().IsShieldedPoolDisabled(tip->nHeight)) {
+        if (!header.IsClosedFrozenSection()) {
+            error = "Closed shielded snapshot header is not a frozen zero-count section";
+            return false;
+        }
+        return true;
+    }
+
+    const auto& shielded_tree = GetShieldedMerkleTree();
+    for (uint64_t pos = 0; pos < shielded_tree.Size(); ++pos) {
+        const auto commitment = shielded_tree.CommitmentAt(pos);
+        if (!commitment.has_value()) {
+            error = strprintf("Missing BTX shielded commitment at position %u", pos);
+            return false;
+        }
+        file << *commitment;
+    }
+    if (!ForEachShieldedNullifier([&](const Nullifier& nf) {
+            file << nf;
+            return true;
+        })) {
+        error = "Failed to serialize BTX shielded nullifiers";
+        return false;
+    }
+    uint64_t written_recovery_exit_commitments{0};
+    if (!ForEachShieldedRecoveryExitCommitment([&](const uint256& commitment) {
+            file << commitment;
+            ++written_recovery_exit_commitments;
+            return true;
+        })) {
+        error = "Failed to serialize BTX recovery-exit commitments";
+        return false;
+    }
+    if (written_recovery_exit_commitments != header.m_recovery_exit_commitment_count) {
+        error = "Recovery-exit commitment count mismatch during shielded capture";
+        return false;
+    }
+    if (!ForEachShieldedSettlementAnchor([&](const uint256& anchor) {
+            file << anchor;
+            return true;
+        })) {
+        error = "Failed to serialize BTX shielded settlement anchors";
+        return false;
+    }
+    if (!ForEachShieldedNettingManifestState(
+            [&](const ConfirmedNettingManifestState& manifest_state) {
+                file << manifest_state;
+                return true;
+            })) {
+        error = "Failed to serialize BTX shielded netting manifests";
+        return false;
+    }
+    const auto account_registry_snapshot =
+        ExportShieldedAccountRegistrySnapshot(chainstate, tip);
+    if (!account_registry_snapshot.has_value()) {
+        error = "Failed to serialize BTX shielded account-registry entries";
+        return false;
+    }
+    if (account_registry_snapshot->entries.size() != header.m_account_registry_entry_count) {
+        error = "Account-registry entry count mismatch during shielded capture";
+        return false;
+    }
+    for (const auto& entry : account_registry_snapshot->entries) {
+        file << entry;
+    }
+    return true;
 }
 
 std::optional<shielded::registry::ShieldedStateCommitment> ChainstateManager::GetShieldedStateCommitment() const
@@ -18496,12 +18676,12 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
     }
     if (!ShouldMaintainShieldedState()) {
         if (!m_logged_shielded_state_skip) {
-            const CBlockIndex* const tip = m_active_chainstate->m_chain.Tip();
+            const CBlockIndex* const skip_tip = m_active_chainstate->m_chain.Tip();
             LogPrintf("EnsureShieldedStateInitialized: not opening shielded state "
                       "(nShieldedPoolDisableHeight=%d tip=%d). Pass -shieldedstate=1 "
                       "to load historical nullifiers/commitments/account_registry.\n",
                       GetConsensus().nShieldedPoolDisableHeight,
-                      tip ? tip->nHeight : -1);
+                      skip_tip ? skip_tip->nHeight : -1);
             m_logged_shielded_state_skip = true;
         }
         GetNotifications().progress(bilingual_str{}, 100, false);
@@ -18514,12 +18694,25 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
     }
 
     GetNotifications().progress(_("Initializing shielded state…"), 0, false);
+    const CBlockIndex* const tip = m_active_chainstate->m_chain.Tip();
 
     // -resetshieldedstate: supported one-shot repair. Wipe the whole shielded_state directory before
     // any DB is opened so a stale in-flight mutation marker or a partially-rebuilt/corrupt store cannot
     // wedge startup; the normal path below then opens fresh stores and does one clean full rebuild from
     // local block data. Block files and wallets are untouched.
     if (m_options.reset_shielded_state) {
+        if (const CBlockIndex* missing =
+                FirstUnavailableShieldedDirectRebuildBlock(*m_active_chainstate, tip)) {
+            LogPrintf("EnsureShieldedStateInitialized: -resetshieldedstate requires a full chain rebuild, "
+                      "but block data is unavailable at height=%d hash=%s (status=%08x file=%d pos=%u); "
+                      "refusing to wipe shielded_state. Restore full block history before retrying.\n",
+                      missing->nHeight,
+                      missing->GetBlockHash().ToString(),
+                      missing->nStatus,
+                      missing->nFile,
+                      missing->nDataPos);
+            return false;
+        }
         const fs::path shielded_state_dir = m_options.datadir / "shielded_state";
         LogPrintf("EnsureShieldedStateInitialized: -resetshieldedstate set; wiping %s to force a clean rebuild\n",
                   fs::PathToString(shielded_state_dir));
@@ -18553,7 +18746,6 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
                                                             8 << 20,
                                                             /*memory_only=*/false,
                                                             /*wipe_data=*/false);
-    const CBlockIndex* const tip = m_active_chainstate->m_chain.Tip();
     bool startup_shielded_repair_performed{false};
     // Recent anchor / account-registry root windows are derived from the tip frontier + the last
     // SHIELDED_ANCHOR_DEPTH blocks. Refreshing those windows is cheap and does not invalidate the
@@ -18675,21 +18867,31 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
     auto persisted_mutation_marker = m_shielded_nullifiers->ReadMutationMarker();
     auto rebuild_from_chain = [&]() EXCLUSIVE_LOCKS_REQUIRED(::cs_main) -> bool {
         AssertLockHeld(::cs_main);
-        // Wipe is irreversible. A snapshot-bootstrapped node has no blocks
-        // below GetSnapshotBaseBlock(); walking genesis OpenBlockFile-fails
-        // after destroying hundreds of MB of otherwise recoverable state
-        // (assumeutxo brick after unclean stop). Check first.
-        if (!ShieldedFullRebuildBlocksAvailable(*m_active_chainstate, tip)) {
+        // This is the destructive boundary: the persistent nullifier and account-registry stores
+        // are wiped below. Check every required block body here, rather than relying on each caller
+        // to remember the guard.
+        // AssumeUTXO nodes legitimately lack pre-snapshot bodies; a persisted-tip mismatch after an
+        // abrupt restart must therefore preserve the only recoverable copy of shielded state and fail
+        // closed instead of wiping it before ReadBlock discovers FlatFilePos(-1, 0).
+        // FirstUnavailable requires BLOCK_HAVE_DATA. ShieldedFullRebuildBlocksAvailable admits
+        // leftover nFile/nDataPos without that flag (the fallback reader), which is exactly
+        // the crash-window metadata that zeroed production nodes.
+        if (const CBlockIndex* missing =
+                FirstUnavailableShieldedDirectRebuildBlock(*m_active_chainstate, tip)) {
             const CBlockIndex* const snap{GetSnapshotBaseBlock()};
-            LogError("EnsureShieldedStateInitialized: fused shielded rebuild "
-                     "needs block files this node does not have (active tip "
-                     "height=%d hash=%s snapshot_base height=%d). Refusing to "
-                     "wipe shielded_state. Reload the assumeutxo snapshot "
-                     "while snapshot.dat is still on disk, or restore "
-                     "shielded_state from backup.\n",
-                     tip ? tip->nHeight : -1,
-                     tip ? tip->GetBlockHash().ToString() : uint256{}.ToString(),
-                     snap ? snap->nHeight : -1);
+            LogPrintf("EnsureShieldedStateInitialized: refusing destructive full shielded rebuild at "
+                      "active height=%d hash=%s because required block data is unavailable at "
+                      "height=%d hash=%s (status=%08x file=%d pos=%u); persistent nullifier and "
+                      "account-registry stores were left intact (snapshot_base height=%d). Restore "
+                      "full block history or load a matching authenticated shielded snapshot.\n",
+                      tip ? tip->nHeight : -1,
+                      tip ? tip->GetBlockHash().ToString() : uint256{}.ToString(),
+                      missing->nHeight,
+                      missing->GetBlockHash().ToString(),
+                      missing->nStatus,
+                      missing->nFile,
+                      missing->nDataPos,
+                      snap ? snap->nHeight : -1);
             return false;
         }
         m_shielded_nullifiers.reset();
@@ -19282,7 +19484,7 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
     std::vector<uint256> persisted_account_registry_roots;
     const bool preserve_snapshot_bridge_metadata_extras =
         m_shielded_nullifiers->ReadSnapshotBridgeMetadataHint();
-    if (tip != nullptr &&
+    const bool persisted_state_available = tip != nullptr &&
         m_shielded_nullifiers->ReadPersistedState(
             persisted_tree,
             persisted_anchor_roots,
@@ -19291,9 +19493,12 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
             persisted_balance,
             persisted_commitment_index_digest,
             persisted_account_registry_snapshot,
-            &persisted_account_registry_roots) &&
+            &persisted_account_registry_roots);
+    const bool persisted_state_matches_tip =
+        persisted_state_available && tip != nullptr &&
         persisted_tip_hash == tip->GetBlockHash() &&
-        persisted_tip_height == tip->nHeight) {
+        persisted_tip_height == tip->nHeight;
+    if (persisted_state_matches_tip) {
         if (!m_shielded_pool_balance.SetBalance(persisted_balance)) {
             return false;
         }
@@ -19495,6 +19700,22 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
             auto rebuild_account_registry_from_chain =
                 [&](const char* reason) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) -> bool {
                     AssertLockHeld(::cs_main);
+                    if (const CBlockIndex* missing =
+                            FirstUnavailableShieldedDirectRebuildBlock(*m_active_chainstate, tip)) {
+                        LogPrintf("EnsureShieldedStateInitialized: refusing destructive account-registry "
+                                  "rebuild at active height=%d hash=%s because required block data is "
+                                  "unavailable at height=%d hash=%s (status=%08x file=%d pos=%u); the "
+                                  "persistent account-registry store was left intact. Restore full "
+                                  "block history before retrying.\n",
+                                  tip ? tip->nHeight : -1,
+                                  tip ? tip->GetBlockHash().ToString() : uint256{}.ToString(),
+                                  missing->nHeight,
+                                  missing->GetBlockHash().ToString(),
+                                  missing->nStatus,
+                                  missing->nFile,
+                                  missing->nDataPos);
+                        return false;
+                    }
                     LogPrintf("EnsureShieldedStateInitialized: %s at height=%d hash=%s; rebuilding account registry from chain\n",
                               reason,
                               persisted_tip_height,
@@ -20337,6 +20558,20 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
                       tip->nHeight,
                       tip->GetBlockHash().ToString());
         }
+    }
+
+    if (persisted_state_available && tip != nullptr && !persisted_state_matches_tip) {
+        LogPrintf("EnsureShieldedStateInitialized: persisted shielded tip mismatch: persisted "
+                  "height=%d hash=%s, active chainstate height=%d hash=%s. Exact-tip restore is "
+                  "required; refusing to accept mismatched shielded state and requesting a full "
+                  "chain-derived rebuild.\n",
+                  persisted_tip_height,
+                  persisted_tip_hash.ToString(),
+                  tip->nHeight,
+                  tip->GetBlockHash().ToString());
+    } else if (!persisted_state_available) {
+        LogPrintf("EnsureShieldedStateInitialized: no readable persisted shielded restart state; "
+                  "a full chain-derived rebuild is required.\n");
     }
 
     if (!rebuild_from_chain()) {

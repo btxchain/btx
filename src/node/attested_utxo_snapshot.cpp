@@ -107,6 +107,16 @@ bool CaptureShieldedSection(Chainstate& chainstate,
             chainstate.m_chainman.GetShieldedSnapshotSectionHeader(chainstate, tip)};
         out << header;
 
+        if (header.IsClosedFrozenSection()) {
+            const auto pin = chainstate.m_chainman.ComputeClosedShieldedSnapshotStatePin();
+            if (!pin) {
+                error = "Failed to compute closed shielded state pin";
+                return false;
+            }
+            shielded_state_pin = *pin;
+            return true;
+        }
+
         const auto& shielded_tree = chainstate.m_chainman.GetShieldedMerkleTree();
         for (uint64_t pos = 0; pos < shielded_tree.Size(); ++pos) {
             const auto commitment = shielded_tree.CommitmentAt(pos);

@@ -387,3 +387,30 @@ LastCommonRootFirstResult ClampLastCommonToRootFirst(const CBlockIndex* last_com
     }
     return out;
 }
+
+LastCommonRootFirstResult AdvanceLastCommonPastActiveTip(LastCommonRootFirstResult in,
+                                                         const CBlockIndex* tip,
+                                                         const CBlockIndex* best_known,
+                                                         const CChain* active_chain)
+{
+    if (tip == nullptr || in.last_common == nullptr) return in;
+    if (in.last_common->nHeight >= tip->nHeight) return in;
+
+    LastCommonRootFirstResult out = in;
+    out.last_common = tip;
+    out.clamped = true;
+    out.reason = "advanced_past_active_tip";
+    if (best_known == nullptr) {
+        out.lowest_missing = nullptr;
+        return out;
+    }
+    out.lowest_missing = FindLowestMissingBody(tip, best_known, active_chain);
+    // FindLowestMissingBody LCAs `tip` with `best_known`, so a sibling fork
+    // still yields a hole at or below the connected tip. That is the live
+    // pin; drop it. Keep only descendants of the connected tip.
+    if (out.lowest_missing != nullptr &&
+        out.lowest_missing->GetAncestor(tip->nHeight) != tip) {
+        out.lowest_missing = nullptr;
+    }
+    return out;
+}

@@ -690,6 +690,20 @@ LastCommonRootFirstResult ClampLastCommonToRootFirst(const CBlockIndex* last_com
                                                      const CBlockIndex* tip,
                                                      const CChain* active_chain);
 
+/**
+ * 0.34.1 F3: if last_common sits strictly behind the connected tip, snap it
+ * to the tip so FindNextBlocksToDownload cannot pin GETDATA on a same-height
+ * competitor forever (live: last_common=199299, tip=199300,
+ * lowest_missing=twin of the active tip).
+ *
+ * A hole that is not a descendant of `tip` is dropped. Descendants of the
+ * connected tip (the way forward) are re-derived from `tip`.
+ */
+LastCommonRootFirstResult AdvanceLastCommonPastActiveTip(LastCommonRootFirstResult in,
+                                                         const CBlockIndex* tip,
+                                                         const CBlockIndex* best_known,
+                                                         const CChain* active_chain);
+
 /** Get a locator for a block index entry. */
 CBlockLocator GetLocator(const CBlockIndex* index);
 

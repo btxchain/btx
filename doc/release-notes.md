@@ -3,10 +3,12 @@ public DNS hosts are not chain-tip oracles, and a node with no pin
 membership, no attestor key, and no trusted-mirror pin must be able to
 reach tip and keep advancing on ExactReplay alone.
 
-`CLIENT_VERSION` in this tree is **0.34.0**. The `v0.34` tag, golden
-seal, and the three release tarballs are not this file — they land when
-the merge checklist in PR 123 is actually green. Until then Git describe
-on `main` remains the 0.33.4.2 line
+`CLIENT_VERSION` in this tree is **0.34.1**. The `v0.34` tag and 0.34.0
+seal remain the pool-close cut. This follow-up is the header-sync,
+mining-mesh, and closed-snapshot-dump release. Freeze `F` is recorded in
+[0.34.1-freeze.md](evidence/0.34.1-freeze.md); seal and tarballs follow
+the corpus. Git describe on `main` remains the 0.33.4.2
+line until 0.34.1 merges
 ([release-notes-0.33.4.2.md](release-notes/release-notes-0.33.4.2.md)).
 
 Please report bugs using the issue tracker at GitHub:
@@ -40,6 +42,48 @@ the 191714 `nBits` dump floor, EncDr stall recovery at **199299**
 unchanged.
 
 # Notable Changes
+
+## Notice to trusted-mirror operators: repoint or move to consensus
+
+If you run `-matmulvalidation=trusted`, read this before upgrading to
+v0.34.1.
+
+**The pin is your choice, not ours.** There is no compiled-in signer key
+anywhere in this tree — `grep` `chainparams.cpp` and you will not find one.
+Your `-matmultrustedpubkey` entries and your `-matmultrustedthreshold` are
+config lines you own. They point at whichever GPU nodes *you* decided to
+trust. If that is currently the original operator's keys, it is because those
+were the keys that existed, not because the software prefers them.
+
+**We are stepping back.** After v0.34.1 the original operator no longer
+commits to running attestation signers. Nodes in `trusted` mode follow a pin;
+if the keys you have listed stop signing, your node stops advancing. That is
+not a defect, it is what delegated validation means.
+
+**Your options, in order of preference:**
+
+1. **Move to `-matmulvalidation=consensus`.** This is the real fix. A consensus
+   node needs no pin, no signers, and no threshold — it accepts a block because
+   *this node* ExactReplay'd it. It requires a GPU that passes the byte-exact
+   TensorOps self-test. No permission from anyone is involved.
+2. **Repoint the pin at signers you actually trust.** Any GPU node running a
+   local signing key can attest. Configure two independent ones and keep
+   `-matmultrustedthreshold=2`. Mainnet refuses a 1-of-1 quorum for good
+   reason: a single stolen key would be sole proof-of-work authority for your
+   node.
+3. **Revoke specific keys without changing your pin** using
+   `-matmulattestationblocklist=<hex>`. Attestations from a blocked key are
+   never counted, even if the key is still listed. It is fail-closed: a block
+   that would leave you below your own threshold is refused.
+
+**What a trusted mirror is not.** The startup banner says it plainly — a
+trusted mirror performs ordinary block, body, and script validation but
+delegates the Profile-1 ExactReplay verdict to a configured quorum. It is not
+an independently validating full node. That is a reasonable trade for a
+CPU-only machine. It should be a deliberate choice, not an inherited default.
+
+Consensus miners and GPU full nodes are unaffected by any of this. They never
+consult a pin.
 
 ## ExactReplay is the gold standard
 
@@ -127,7 +171,8 @@ The one honest limit: `-matmulvalidation=trusted` nodes still depend
 on the pin. The startup warning already says they are **not an
 independent full consensus validator**. That is a hardware limit
 (CPU-only machines that physically cannot ExactReplay), not a
-governance one.
+governance one. After v0.34.1 that pin is yours to keep, repoint, or
+leave: see [Notice to trusted-mirror operators](#notice-to-trusted-mirror-operators-repoint-or-move-to-consensus).
 
 ## Shielded pool closed at height 199300
 
@@ -344,7 +389,7 @@ Block fetch stall detected: tip=0 best_header_ahead=2000 peer_best_ahead=2000 in
 already be in the index.
 
 0.34 accepts inbound **HEADERS** from any peer while the active tip is
-below `max(last checkpoint, highest AssumeUTXO pin)` (mainnet 199299),
+below `max(last checkpoint, highest AssumeUTXO pin)` (mainnet 199300),
 and the frontier seed only *raises* BestKnown. Bodies stay
 authority-only. You do not need an operator-controlled archive to
 learn the header chain. See
@@ -379,18 +424,21 @@ classes, or future versions. How to freeze, measure, seal, and ship:
 
 # Fast-start snapshot
 
-Unchanged from 0.33.4.2. Published assumeutxo pin (v9):
-[assumeutxo-199299](https://github.com/btxchain/btx/releases/tag/assumeutxo-199299)
+Published assumeutxo pin (v9, shielded pool closed):
+[assumeutxo-199300](https://github.com/btxchain/btx/releases/tag/assumeutxo-199300)
 
-- height **199299**, blockhash `f12a27d01a4b5a1710efa4497adf6f4c7da311d1c7b4f6a79cbf80f0b3110ec5`
-- `txoutset_hash` `db9e83156602927315d108a1ebce230b30eb78832e69db1947a21f5b5f2b8bf6`
-- `snapshot.dat` SHA256 `3c9e52ff053cd183af239dfce42cd57d007bdf530fd48ba9783623662d15070f`
+- height **199300**, blockhash `ff80e6299692a63345674a23b0638658c737529d12e78fc7f42afb3812afc9eb`
+- `txoutset_hash` `eb73aed769a9ef5b8f6c9cc4002388e49e4818a1e4cc6cd9d87e107aed5a1352`
+- `snapshot.dat` SHA256 `b7ee1459dead9fdb4ed4ee524a6faa66aa0a43ef5280cec00f841289df08e48a`
+- `nchaintx` 298984, size 452893894 bytes
+- `shielded_state_commitment` `94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541`
 
 ```bash
 btx-cli -rpcclienttimeout=0 loadtxoutset snapshot.dat
 ```
 
 Use `loadtxoutset`, not `loadtxoutsetattested`. Fresh chainstate only.
+v0.34.0 cannot load this height; v0.34.1 can.
 A 0.34 trusted mirror can now ingest the header chain from public
 peers first; 0.33.4.2 could not (see the bootstrap deadlock above).
 

@@ -4,8 +4,16 @@
 
 #include <node/mining_guard.h>
 
+#include <net.h>
+#include <rpc/server.h>
+#include <test/util/setup_common.h>
+#include <univalue.h>
+
 #include <boost/test/unit_test.hpp>
 
+#include <algorithm>
+#include <set>
+#include <string>
 #include <vector>
 
 BOOST_AUTO_TEST_SUITE(mining_chain_guard_tests)
@@ -354,6 +362,58 @@ BOOST_AUTO_TEST_CASE(insufficient_peers_marks_island_suspect_without_hash_split)
         {});
     BOOST_CHECK(status.island_suspect);
     BOOST_CHECK_EQUAL(status.reason, "insufficient_peer_consensus");
+}
+
+BOOST_FIXTURE_TEST_CASE(miningpeermesh_replaces_defaults_and_rpc_reports_it, TestingSetup)
+{
+    node::ResetMiningChainGuardMeshRefreshForTest();
+
+    UniValue mesh{UniValue::VARR};
+    mesh.push_back("fork.example:19335");
+    mesh.push_back("other.example:19335");
+    m_node.args->ForceSetArg("-miningchainguard", "1");
+    m_node.args->ForceSetArg("-miningchainguarddefaultmesh", "1");
+    m_node.args->ForceSetArg("-miningchainguardmeshrefreshseconds", "1");
+    m_node.args->ForceSetArgV("-miningpeermesh", mesh);
+
+    const auto options = node::GetMiningChainGuardOptions(m_node);
+    BOOST_REQUIRE_EQUAL(options.peer_mesh.size(), 2U);
+    BOOST_CHECK_EQUAL(options.peer_mesh[0], "fork.example:19335");
+    BOOST_CHECK_EQUAL(options.peer_mesh[1], "other.example:19335");
+    for (const auto& def : node::DefaultMiningPeerMesh()) {
+        BOOST_CHECK(std::find(options.peer_mesh.begin(), options.peer_mesh.end(), def) ==
+                    options.peer_mesh.end());
+    }
+
+    node::MiningChainGuardStatus status;
+    status.enabled = true;
+    status.healthy = false;
+    status.network_active = true;
+    status.reason = "insufficient_peer_consensus";
+    node::MaybeRequestMiningChainGuardRecovery(status, m_node);
+
+    std::set<std::string> added;
+    for (const auto& info : m_node.connman->GetAddedNodeInfo(/*include_connected=*/true)) {
+        added.insert(info.m_params.m_added_node);
+    }
+    BOOST_CHECK(added.count("fork.example:19335"));
+    BOOST_CHECK(added.count("other.example:19335"));
+    for (const auto& def : node::DefaultMiningPeerMesh()) {
+        BOOST_CHECK_MESSAGE(!added.count(def),
+                            "override must not enroll compiled operator domain " + def);
+    }
+
+    JSONRPCRequest request;
+    request.context = &m_node;
+    request.strMethod = "getminingpeermesh";
+    request.params = UniValue(UniValue::VARR);
+    if (RPCIsInWarmup(nullptr)) SetRPCWarmupFinished();
+    const UniValue result = tableRPC.execute(request);
+    const UniValue& reported = result.find_value("default_nodes");
+    BOOST_REQUIRE(reported.isArray());
+    BOOST_REQUIRE_EQUAL(reported.size(), 2U);
+    BOOST_CHECK_EQUAL(reported[0].get_str(), "fork.example:19335");
+    BOOST_CHECK_EQUAL(reported[1].get_str(), "other.example:19335");
 }
 
 BOOST_AUTO_TEST_SUITE_END()

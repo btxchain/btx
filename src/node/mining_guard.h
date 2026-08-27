@@ -31,6 +31,9 @@ struct MiningChainGuardOptions {
     int stale_peer_seconds{DEFAULT_MINING_CHAIN_GUARD_STALE_PEER_SECONDS};
     int deferred_reorg_watch_seconds{DEFAULT_MINING_CHAIN_GUARD_DEFERRED_REORG_WATCH_SECONDS};
     int mesh_refresh_seconds{DEFAULT_MINING_CHAIN_GUARD_MESH_REFRESH_SECONDS};
+    /** Hosts the mining guard will AddNode() when the mesh degrades.
+     *  Compiled defaults unless -miningpeermesh replaces the list. */
+    std::vector<std::string> peer_mesh;
 };
 
 struct MiningChainGuardPeerSample {
@@ -75,6 +78,9 @@ struct MiningChainGuardStatus {
 const std::vector<std::string>& DefaultMiningPeerMesh();
 
 MiningChainGuardOptions GetMiningChainGuardOptions(const NodeContext& node);
+
+/** Test-only: allow MaybeRequestMiningChainGuardRecovery to enroll immediately. */
+void ResetMiningChainGuardMeshRefreshForTest();
 
 MiningChainGuardStatus EvaluateMiningChainGuard(
     int local_tip_height,

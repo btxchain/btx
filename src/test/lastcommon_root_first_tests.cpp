@@ -7,6 +7,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include <memory>
+#include <string>
 #include <vector>
 
 BOOST_AUTO_TEST_SUITE(lastcommon_root_first_tests)
@@ -260,6 +261,42 @@ BOOST_AUTO_TEST_CASE(first_hole_survives_sibling_header_flood)
     BOOST_CHECK_EQUAL(result.lowest_missing->nHeight, 3);
     BOOST_CHECK(result.lowest_missing == followed[3]);
     BOOST_CHECK_EQUAL(result.last_common->nHeight, 2);
+}
+
+BOOST_AUTO_TEST_CASE(last_common_behind_tip_advances_past_same_height_twin)
+{
+    // Live 0.34 pin: last_common=199299, tip=199300, lowest_missing=twin of
+    // the active tip. F3 must snap last_common onto the connected tip and
+    // drop the competitor so GETDATA cannot occupy inflight forever.
+    ChainFixture f;
+    CBlockIndex* genesis = f.Add(nullptr, 0);
+    ChainFixture::MarkHaveData(genesis, /*have_chain_txs=*/true);
+    CBlockIndex* tip = f.Add(genesis, 1);
+    ChainFixture::MarkHaveData(tip, /*have_chain_txs=*/true);
+    CBlockIndex* twin = f.Add(genesis, 1);
+
+    CChain active;
+    active.SetTip(*tip);
+
+    const LastCommonRootFirstResult clamped = ClampLastCommonToRootFirst(
+        /*last_common=*/genesis,
+        /*best_known=*/twin,
+        /*tip=*/tip,
+        &active);
+    BOOST_REQUIRE(clamped.last_common != nullptr);
+    BOOST_CHECK_EQUAL(clamped.last_common->nHeight, 0);
+    BOOST_REQUIRE(clamped.lowest_missing != nullptr);
+    BOOST_CHECK_EQUAL(clamped.lowest_missing->nHeight, 1);
+    BOOST_CHECK(clamped.lowest_missing == twin);
+
+    const LastCommonRootFirstResult advanced = AdvanceLastCommonPastActiveTip(
+        clamped, tip, twin, &active);
+    BOOST_CHECK(advanced.clamped);
+    BOOST_CHECK_EQUAL(std::string(advanced.reason), "advanced_past_active_tip");
+    BOOST_REQUIRE(advanced.last_common != nullptr);
+    BOOST_CHECK_EQUAL(advanced.last_common->nHeight, 1);
+    BOOST_CHECK(advanced.last_common == tip);
+    BOOST_CHECK(advanced.lowest_missing == nullptr);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
