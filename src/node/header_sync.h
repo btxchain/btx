@@ -12,11 +12,21 @@ namespace node {
 /**
  * True when we must send getheaders to learn a peer's best block.
  *
- * True iff the peer advertises above our local tip and we have no
- * best-known block for it. `tip_is_stale` and `headers_in_flight` are
- * accepted so callers can pass the live SendMessages snapshot; they are
- * never gates. Never consults preferred-peer count, IBD, or MatMul
- * service bits (0.34.1 F1).
+ * True iff we have no best-known block for the peer and it advertises
+ * above our local tip -- or, when our tip is STALE, at our tip or above
+ * it. On a stalled chain every peer sits at exactly our height, so the
+ * strict > form never probed anyone: peer tips stayed unknown
+ * (synced_headers=-1), and the mining chain guard -- which counts only
+ * peers with a KNOWN tip -- reported peer_count=0 /
+ * insufficient_peer_consensus with dozens of live connections (measured
+ * 2026-08-27 on macpro2: 82 connections, peer_count 0). Learning a
+ * same-height peer's tip is one rate-limited getheaders
+ * (BEST_KNOWN_PROBE_INTERVAL) and is a read; it cannot feed us a chain
+ * we would not validate.
+ *
+ * `headers_in_flight` is accepted so callers can pass the live
+ * SendMessages snapshot; it is never a gate. Never consults
+ * preferred-peer count, IBD, or MatMul service bits (0.34.1 F1).
  */
 [[nodiscard]] inline bool HeaderSyncMustProbe(
     int32_t local_tip_height,
@@ -25,9 +35,11 @@ namespace node {
     bool tip_is_stale,
     bool headers_in_flight)
 {
-    (void)tip_is_stale;
     (void)headers_in_flight;
-    return best_known_is_null && peer_starting_height > local_tip_height;
+    if (!best_known_is_null) return false;
+    if (peer_starting_height > local_tip_height) return true;
+    return tip_is_stale && local_tip_height >= 0 &&
+           peer_starting_height >= local_tip_height;
 }
 
 } // namespace node
