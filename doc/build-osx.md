@@ -141,9 +141,14 @@ export PKG_CONFIG_PATH="/opt/homebrew/lib/pkgconfig"
 cmake -B build -DCMAKE_PREFIX_PATH=/opt/homebrew -DWITH_ZMQ=ON
 ```
 
-CMake prefers static `libzmq.a` on macOS so the tarball has no Homebrew zmq
-dylib. After linking, `otool -L build/bin/btxd` must not list `libzmq`, and
-`python3 scripts/release/verify_release_btxd.py build/bin/btxd` must pass.
+CMake prefers static `libzmq.a`, `libevent_*.a`, and `libomp.a` on macOS so
+the tarball has no Homebrew load commands. After linking,
+`otool -L build/bin/btxd` and `otool -L build/bin/btx-cli` must not list
+`/opt/homebrew`, must not list `libzmq` as a dylib, and
+`python3 scripts/release/verify_release_btxd.py build/bin/btxd build/bin/btx-cli`
+must pass. `strings build/bin/btxd` must contain `Enable publish hash block`
+— `-zmqpubhashblock` in the binary without that help text is the 0.33.4.2
+silent-publish failure.
 
 For more information on ZMQ, see: [zmq.md](zmq.md)
 

@@ -54,7 +54,8 @@ a `btxd` that still contained `-zmqpubhashblock` strings (hidden args) while
 
 Release configure lines must still pass `-DWITH_ZMQ=ON` explicitly, and every
 shipped `btxd` must pass `scripts/release/verify_release_btxd.py` (Linux: `ldd`
-shows `libzmq`; macOS: static `libzmq.a`, no Homebrew zmq dylib). Disable only
+shows `libzmq`; macOS: static `libzmq.a` / `libevent_*.a` / `libomp.a`, no
+Homebrew dylibs on `btxd` or `btx-cli`). Disable only
 for fuzzing or a deliberate developer build:
 
     $ cmake -B build -DWITH_ZMQ=OFF

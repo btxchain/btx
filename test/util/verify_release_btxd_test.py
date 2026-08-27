@@ -64,8 +64,40 @@ class VerifyReleaseBtxdTest(unittest.TestCase):
             path.write_bytes(macho + b"Enable publish hash block")
             self.assertEqual(self.mod.classify(path), "macho")
             with self.assertRaises(self.mod.VerifyError) as caught:
-                self.mod.verify_macos(path)
+                self.mod.verify_macos(path, require_zmq=True)
             self.assertIn("libzmq", str(caught.exception))
+
+    def test_macho_homebrew_libevent_is_rejected(self) -> None:
+        name = b"/opt/homebrew/opt/libevent/lib/libevent_core-2.1.7.dylib\x00"
+        name_off = 24
+        cmdsize = (name_off + len(name) + 7) & ~7
+        lc = struct.pack("<IIIIII", 0xC, cmdsize, name_off, 0, 0, 0) + name
+        lc += b"\x00" * (cmdsize - len(lc))
+        header = struct.pack("<IIIIIIII", 0xFEEDFACF, 0x0100000C, 0, 2, 1, len(lc), 0, 0)
+        macho = header + lc
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = pathlib.Path(tmpdir) / "btxd"
+            path.write_bytes(macho + b"Enable publish hash block")
+            with self.assertRaises(self.mod.VerifyError) as caught:
+                self.mod.verify_macos(path, require_zmq=True)
+            self.assertIn("Homebrew", str(caught.exception))
+            self.assertIn("libevent", str(caught.exception))
+
+    def test_cli_skips_zmq_help_but_rejects_homebrew(self) -> None:
+        name = b"/opt/homebrew/opt/libomp/lib/libomp.dylib\x00"
+        name_off = 24
+        cmdsize = (name_off + len(name) + 7) & ~7
+        lc = struct.pack("<IIIIII", 0xC, cmdsize, name_off, 0, 0, 0) + name
+        lc += b"\x00" * (cmdsize - len(lc))
+        header = struct.pack("<IIIIIIII", 0xFEEDFACF, 0x0100000C, 0, 2, 1, len(lc), 0, 0)
+        macho = header + lc
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = pathlib.Path(tmpdir) / "btx-cli"
+            path.write_bytes(macho)
+            self.assertFalse(self.mod.requires_zmq(path))
+            with self.assertRaises(self.mod.VerifyError) as caught:
+                self.mod.verify_binary(path)
+            self.assertIn("Homebrew", str(caught.exception))
 
 
 if __name__ == "__main__":

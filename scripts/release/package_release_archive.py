@@ -192,7 +192,22 @@ def verify_shipped_btxd(btxd_path: Path) -> None:
     if kind == "other":
         # Unit-test stubs are not ELF/Mach-O. Real release binaries must be.
         return
-    module.verify_btxd(btxd_path)
+    module.verify_binary(btxd_path)
+
+
+def verify_shipped_macos_cli(btx_cli_path: Path) -> None:
+    """Refuse Homebrew dylibs in btx-cli (same portability bar as btxd)."""
+    script = Path(__file__).with_name("verify_release_btxd.py")
+    spec = importlib.util.spec_from_file_location("verify_release_btxd", script)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"unable to load {script}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    kind = module.classify(btx_cli_path)
+    if kind == "other":
+        return
+    if kind == "macho":
+        module.verify_binary(btx_cli_path)
 
 
 def resolve_btx_util_path(explicit_path: Path | None, btxd_path: Path, btx_cli_path: Path, exe_suffix: str) -> Path:
@@ -250,6 +265,7 @@ def stage_release_tree(
         ),
     ]
     verify_shipped_btxd(btxd_path)
+    verify_shipped_macos_cli(btx_cli_path)
 
     for source, dest_name in binary_pairs:
         wrapper = wrapper_payload(dest_name.removesuffix(config["exe_suffix"]), platform_id)

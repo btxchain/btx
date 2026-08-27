@@ -208,6 +208,12 @@ option(WITH_ZMQ "Enable ZMQ notifications." ON)
 if(WITH_ZMQ)
   find_package(ZeroMQ 4.0.0 MODULE REQUIRED)
 endif()
+if(APPLE AND WITH_ZMQ AND ZMQ_LINKAGE AND ZMQ_LINKAGE MATCHES "^shared")
+  message(FATAL_ERROR
+    "WITH_ZMQ=ON on macOS resolved a shared libzmq. Release btxd must "
+    "statically link libzmq.a (Homebrew: brew install zeromq). A dylib load "
+    "command is the 0.33.4.2 failure shape on any Mac without that keg.")
+endif()
 
 option(WITH_USDT "Enable tracepoints for Userspace, Statically Defined Tracing." OFF)
 if(WITH_USDT)
@@ -853,6 +859,9 @@ message("  port mapping using UPnP ............. ${WITH_MINIUPNPC}")
 message("  ZeroMQ .............................. ${WITH_ZMQ}")
 if(WITH_ZMQ AND ZMQ_LINKAGE)
   message("   - linkage .......................... ${ZMQ_LINKAGE}")
+endif()
+if(LIBEVENT_LINKAGE)
+  message("  Libevent linkage .................... ${LIBEVENT_LINKAGE}")
 endif()
 if(BUILD_DAEMON AND NOT WITH_ZMQ AND NOT BUILD_FOR_FUZZING)
   list(APPEND configure_warnings

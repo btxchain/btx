@@ -10,9 +10,12 @@ Release Process
 * Update `btx.conf` template content and commit changes if they exist, see [gen-bitcoin-conf.sh](/contrib/devtools/README.md#gen-bitcoin-confsh).
 * **ZMQ is required on every shipped `btxd`.** Configure CPU, CUDA, and Metal
   release trees with `-DWITH_ZMQ=ON` (the CMake default is ON; pass it anyway).
-  After the link, run `python3 scripts/release/verify_release_btxd.py <btxd>`:
-  Linux `ldd` must show `libzmq`; macOS must statically link `libzmq.a` (no
-  Homebrew zmq dylib). CMake's configure summary must print `ZeroMQ ... ON`.
+  After the link, run `python3 scripts/release/verify_release_btxd.py <btxd> <btx-cli>`:
+  Linux `ldd` must show `libzmq`; macOS must statically link `libzmq.a`,
+  `libevent_*.a`, and `libomp.a` — `otool -L` must show **zero** `/opt/homebrew`
+  or `/usr/local/opt` paths on both binaries. A Homebrew `libevent`/`libomp`
+  dylib is not a shippable public artifact. CMake's configure summary must
+  print `ZeroMQ ... ON` and, on macOS, `Libevent linkage ... static:`.
   Do not ship a binary that contains `-zmqpubhashblock` strings without linking
   libzmq — that is the 0.33.4.2 failure shape.
 * Complete the Profile-1 ExactReplay golden corpus and seal described below.
@@ -107,11 +110,17 @@ cmake -S . -B build-metal -G Ninja \
 Without `PKG_CONFIG_PATH` and `CMAKE_PREFIX_PATH`, CMake reports ZeroMQ
 missing even when `brew install zeromq` succeeded. Prefer static `libzmq.a`
 (CMake already does this on Apple) so the shipped `btxd` has **no Homebrew
-zmq dylib**. Verify:
+zmq dylib**. Libevent and libomp must be static too (`libevent_core.a`,
+`libomp.a`) — a dylib under `/opt/homebrew` will not launch on a clean Mac.
+Verify:
 
 ```bash
-otool -L build-metal/bin/btxd | grep -i zmq   # must print nothing
-python3 scripts/release/verify_release_btxd.py build-metal/bin/btxd
+otool -L build-metal/bin/btxd | grep homebrew   # must print nothing
+otool -L build-metal/bin/btx-cli | grep homebrew
+otool -L build-metal/bin/btxd | grep -i zmq     # must print nothing (static)
+strings build-metal/bin/btxd | grep -F 'Enable publish hash block'
+python3 scripts/release/verify_release_btxd.py \
+  build-metal/bin/btxd build-metal/bin/btx-cli
 ```
 
 AppleClang with `-fopenmp` cannot capture structured bindings in lambdas

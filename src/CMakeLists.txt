@@ -981,44 +981,49 @@ endif()
 # consumer of bitcoin_common (node + test binaries). The pragmas are guarded
 # by _OPENMP, so a build without OpenMP falls back to the serial loops.
 find_package(OpenMP)
-if(OpenMP_CXX_FOUND)
-  target_link_libraries(bitcoin_common PUBLIC OpenMP::OpenMP_CXX)
-elseif(APPLE AND CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
-  # AppleClang does not ship an OpenMP runtime and CMake's FindOpenMP cannot
-  # infer the driver flag/runtime pairing supplied by Homebrew libomp. Detect
-  # that standard installation explicitly so an otherwise fully capable M-
-  # series prover does not silently run every Stage-3 loop on one CPU core.
+if(APPLE AND CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
+  # AppleClang first, even if FindOpenMP later grows a dylib hit. Homebrew's
+  # libomp.dylib is an /opt/homebrew load command; a downloadable tarball
+  # will not launch on a Mac without that keg. AppleClang does not ship a
+  # runtime, so detect the keg's static archive explicitly.
   find_path(BTX_APPLE_LIBOMP_INCLUDE_DIR omp.h
     HINTS
       /opt/homebrew/opt/libomp
       /usr/local/opt/libomp
     PATH_SUFFIXES include
   )
-  find_library(BTX_APPLE_LIBOMP_LIBRARY NAMES omp
-    HINTS
-      /opt/homebrew/opt/libomp
-      /usr/local/opt/libomp
-    PATH_SUFFIXES lib
-  )
-  if(BTX_APPLE_LIBOMP_INCLUDE_DIR AND BTX_APPLE_LIBOMP_LIBRARY)
-    add_library(btx_apple_openmp INTERFACE)
-    target_compile_options(btx_apple_openmp INTERFACE
-      $<$<COMPILE_LANGUAGE:CXX>:-Xpreprocessor>
-      $<$<COMPILE_LANGUAGE:CXX>:-fopenmp>
-    )
-    target_include_directories(btx_apple_openmp SYSTEM INTERFACE
-      ${BTX_APPLE_LIBOMP_INCLUDE_DIR}
-    )
-    target_link_libraries(btx_apple_openmp INTERFACE
-      ${BTX_APPLE_LIBOMP_LIBRARY}
-    )
-    target_link_libraries(bitcoin_common PUBLIC btx_apple_openmp)
-    message(STATUS
-      "Using AppleClang OpenMP runtime: ${BTX_APPLE_LIBOMP_LIBRARY}")
-  else()
-    message(STATUS
-      "AppleClang OpenMP unavailable; Stage-3 prover loops are serial")
+  set(BTX_APPLE_LIBOMP_LIBRARY "")
+  foreach(_omp_a IN ITEMS
+      /opt/homebrew/opt/libomp/lib/libomp.a
+      /usr/local/opt/libomp/lib/libomp.a)
+    if(EXISTS "${_omp_a}")
+      set(BTX_APPLE_LIBOMP_LIBRARY "${_omp_a}")
+      break()
+    endif()
+  endforeach()
+  if(NOT BTX_APPLE_LIBOMP_INCLUDE_DIR OR NOT BTX_APPLE_LIBOMP_LIBRARY)
+    message(FATAL_ERROR
+      "macOS release builds require static libomp.a plus omp.h "
+      "(Homebrew: brew install libomp). Linking libomp.dylib puts an "
+      "/opt/homebrew load command in btxd and the tarball will not launch "
+      "on a clean Mac.")
   endif()
+  add_library(btx_apple_openmp INTERFACE)
+  target_compile_options(btx_apple_openmp INTERFACE
+    $<$<COMPILE_LANGUAGE:CXX>:-Xpreprocessor>
+    $<$<COMPILE_LANGUAGE:CXX>:-fopenmp>
+  )
+  target_include_directories(btx_apple_openmp SYSTEM INTERFACE
+    ${BTX_APPLE_LIBOMP_INCLUDE_DIR}
+  )
+  target_link_libraries(btx_apple_openmp INTERFACE
+    ${BTX_APPLE_LIBOMP_LIBRARY}
+  )
+  target_link_libraries(bitcoin_common PUBLIC btx_apple_openmp)
+  message(STATUS
+    "Using AppleClang OpenMP runtime (static): ${BTX_APPLE_LIBOMP_LIBRARY}")
+elseif(OpenMP_CXX_FOUND)
+  target_link_libraries(bitcoin_common PUBLIC OpenMP::OpenMP_CXX)
 endif()
 
 # Shielded pool and proof implementation shared by node and wallet targets.
