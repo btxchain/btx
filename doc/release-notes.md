@@ -3,10 +3,11 @@ public DNS hosts are not chain-tip oracles, and a node with no pin
 membership, no attestor key, and no trusted-mirror pin must be able to
 reach tip and keep advancing on ExactReplay alone.
 
-`CLIENT_VERSION` in this tree is **0.34.0**. The `v0.34` tag, golden
-seal, and the three release tarballs are not this file — they land when
-the merge checklist in PR 123 is actually green. Until then Git describe
-on `main` remains the 0.33.4.2 line
+`CLIENT_VERSION` in this tree is **0.34.1**. The `v0.34` tag and 0.34.0
+seal remain the pool-close cut. This follow-up is the header-sync,
+mining-mesh, and closed-snapshot-dump release; its seal and tarballs land
+when freeze A is measured. Git describe on `main` remains the 0.33.4.2
+line until 0.34.1 merges
 ([release-notes-0.33.4.2.md](release-notes/release-notes-0.33.4.2.md)).
 
 Please report bugs using the issue tracker at GitHub:
