@@ -1,14 +1,41 @@
+# STOP: 0.34.1 partitions nodes from mainnet. Do not run it.
+
+**v0.34.1 is an accidental consensus hard fork.** Commit `1c87fcd6`
+(PR 119) set `consensus.nMatMulStallRecoveryHeight = 199299` in
+`CMainParams` after that height had already been mined. The comment
+above that line said any reachable height is a hard fork. 0.34.1
+recomputes a different ASERT target for every majority header after
+199299, `CalculateClaimedHeadersWork` returns `nullopt`, and
+`net_processing.cpp` disconnects the peer. Measured: majority 199299
+`a71e0c1c` claims `1e27264f` (plain ASERT); 0.34.1 carries `1e2b22b5`
+(re-anchored). About 21 of 94 reachable peers ran 0.34.1 and were
+stranded; 73 never left the real chain.
+
+**v0.34.2 withdraws that re-anchor.** `nMatMulStallRecoveryHeight` is
+`INT_MAX` again. **Replacing the binary alone does not rejoin.** An
+already-split chainstate will not reorg on restart. After installing
+0.34.2, operators must also `invalidateblock` their first post-fork
+block (reversible with `reconsiderblock`). On the measured 0.34.1
+branch that block is height 199295,
+`33c834f8056aca85a8591a304fe52affebe2770d6027e79845765547f8dfae82`.
+Confirm with `getchaintips` before invalidating.
+
+This split was made visible by per-peer byte tables and chaintips from
+**MendeMatthias**, **jarekpiot**, **Jpp-matata**, and **dixonping**.
+
+---
+
 BTX 0.34 is the decentralization release: consensus miners ExactReplay,
 public DNS hosts are not chain-tip oracles, and a node with no pin
 membership, no attestor key, and no trusted-mirror pin must be able to
 reach tip and keep advancing on ExactReplay alone.
 
-`CLIENT_VERSION` in this tree is **0.34.1**. The `v0.34` tag and 0.34.0
-seal remain the pool-close cut. This follow-up is the header-sync,
-mining-mesh, and closed-snapshot-dump release. Freeze `F` is recorded in
-[0.34.1-freeze.md](evidence/0.34.1-freeze.md); seal and tarballs follow
+`CLIENT_VERSION` in this tree is **0.34.2**. The `v0.34` tag and 0.34.0
+seal remain the pool-close cut. 0.34.1 is withdrawn: it partitions
+nodes from mainnet. Freeze `F` is recorded in
+[0.34.2-freeze.md](evidence/0.34.2-freeze.md); seal and tarballs follow
 the corpus. Git describe on `main` remains the 0.33.4.2
-line until 0.34.1 merges
+line until 0.34 merges
 ([release-notes-0.33.4.2.md](release-notes/release-notes-0.33.4.2.md)).
 
 Please report bugs using the issue tracker at GitHub:
@@ -21,10 +48,29 @@ To receive release and update notifications, please subscribe to:
 
 # How to Upgrade
 
-Shut down the previous node cleanly, wait for it to exit, and replace
-its `btxd`, `btx-cli`, and related binaries with the v0.34 binaries.
-Back up wallets and configuration before upgrading. Keep Metal
-`.metallib` files next to `btxd`.
+**If you are on 0.34.1, binary replacement is not enough.** Install
+0.34.2, start the node, then invalidate your first post-fork block:
+
+```
+btx-cli getchaintips
+btx-cli invalidateblock <hash of the first block on your 0.34.1 branch>
+```
+
+That `invalidateblock` is reversible with `reconsiderblock`. Do not
+invalidate from a still-running 0.34.1 binary: that binary still
+rejects the majority chain. Upgrade first, then invalidate.
+
+On the fork measured on macpro2 the first post-fork block is height
+199295, hash
+`33c834f8056aca85a8591a304fe52affebe2770d6027e79845765547f8dfae82`.
+Your hash may differ; use `getchaintips`.
+
+If you never ran 0.34.1 (you stayed on the majority chain), replace
+the binaries as usual: shut down cleanly, wait for exit, install
+0.34.2. No `invalidateblock` is required.
+
+Keep Metal `.metallib` files next to `btxd`. Back up wallets and
+configuration before upgrading.
 
 Tarball SHA256s are filled in when the three assets are staged (Linux
 CPU, Linux CUDA, macOS arm64 Metal). Every shipped `btxd` is linked
@@ -37,9 +83,11 @@ with ZMQ (`ldd` shows `libzmq` on Linux; macOS statically links
 Same platform and epoch matrix as 0.33.4.2: Linux, macOS 13+, Windows
 10+. Mainnet remains on MatMul v3 below height 185000; Epoch-A Profile 1
 ExactReplay applies at and above height 185000. Compact `F`, `powLimit`,
-the 191714 `nBits` dump floor, EncDr stall recovery at **199299**
-(`num/den = 1/1`), and the compiled AssumeUTXO pin at 199299 are
-unchanged.
+the 191714 `nBits` dump floor, and the compiled AssumeUTXO pin at 199300
+are unchanged. **EncDr stall recovery at 199299 is withdrawn** — that
+flag day shipped in 0.34.1 after the height was already mined and
+partitioned the network. `nMatMulStallRecoveryHeight` is `INT_MAX`;
+`num/den` stay `1/1`.
 
 # Notable Changes
 
@@ -454,7 +502,9 @@ peers first; 0.33.4.2 could not (see the bootstrap deadlock above).
 
 # Consensus
 
-Mainnet EncDr stall recovery remains active at height **199299** with
+Mainnet EncDr stall recovery at height **199299** is **withdrawn**.
+0.34.1 set `nMatMulStallRecoveryHeight = 199299` after that height was
+already mined; that is a hard fork. 0.34.2 sets it to `INT_MAX` with
 `num/den = 1/1`. Do not retune `F` or `powLimit` in this release. The
 five recovery knobs stay bound into `replay_authority_context`
 (schema 4). ExactReplay remains consensus; the canary is not.
