@@ -1990,7 +1990,11 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(SkipMinerProcessMessagesDuringArchiveGetData(
         /*local_signer=*/false, false, /*trusted_mirror_catch_up=*/true,
         true, false, true, false));
-    BOOST_CHECK(SkipMinerProcessMessagesDuringArchiveGetData(
+    // A signer with NO archive GETDATA pending must NOT skip: the
+    // unconditional form starved every non-ARCHIVE/MIRROR peer of all
+    // message processing (0 header bytes served to consensus peers,
+    // measured live 2026-08-27).
+    BOOST_CHECK(!SkipMinerProcessMessagesDuringArchiveGetData(
         true, /*archive_getdata_pending=*/false, false, true, false, true,
         false));
     // Outbound miners are Preferred in msghand order; they must still skip.

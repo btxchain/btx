@@ -1795,8 +1795,19 @@ static constexpr auto ARCHIVE_BLOCK_SERVE_WAIT_IDLE{std::chrono::milliseconds{50
 {
     (void)this_peer_inbound;
     (void)this_peer_manual;
-    (void)archive_getdata_pending;
-    const bool skip_now{local_signer || trusted_mirror_catch_up};
+    // The signer-side skip is gated on archive GETDATA actually being
+    // pending. Discarding archive_getdata_pending here turned this into
+    // an unconditional skip of every fully-handshaked non-ARCHIVE/MIRROR
+    // peer on any local-signer node: their queued messages (GETHEADERS,
+    // HEADERS announcements, PONG, ...) were never dispatched, so an
+    // authority-mode node served header bytes only to ARCHIVE/MIRROR
+    // service-bit peers and starved plain consensus peers forever
+    // (measured 2026-08-27 on macpro2: recv.getheaders>0 with
+    // sent.headers==0 for every no-bit / CONSENSUS-only peer). Serving
+    // headers is a read; authority rules govern which BODIES we trust,
+    // not who may ask us questions.
+    const bool skip_now{(local_signer && archive_getdata_pending) ||
+                        trusted_mirror_catch_up};
     if (!skip_now) return false;
     if (this_is_archive_serve_target) return false;
     if (!this_peer_handshake_complete) return false;
