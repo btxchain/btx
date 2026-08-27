@@ -1727,7 +1727,7 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     using node::matmul_trusted::WeakSubjectivityBootstrapHeight;
     using node::matmul_trusted::TrustedMirrorIgnoreNonAuthorityInboundHeaders;
     using node::matmul_trusted::TrustedMirrorSeedRaisesBestKnown;
-    // Mainnet: checkpoint 186000, AssumeUTXO 199299 → ceiling 199299.
+    // Mainnet: checkpoint 186000, AssumeUTXO 199300 → ceiling 199300.
     BOOST_CHECK_EQUAL(WeakSubjectivityBootstrapHeight(186000, 199299), 199299);
     BOOST_CHECK_EQUAL(WeakSubjectivityBootstrapHeight(186000, 0), 186000);
     BOOST_CHECK_EQUAL(WeakSubjectivityBootstrapHeight(0, 61010), 61010);
@@ -1735,7 +1735,7 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         WeakSubjectivityBootstrapHeight(
             Params().Checkpoints().GetHeight(),
             Params().HighestAssumeutxoHeight()),
-        199299);
+        199300);
     // Fresh mirror tip=0 must ingest HEADERS (the 2026-08-26 deadlock).
     BOOST_CHECK(!TrustedMirrorIgnoreNonAuthorityInboundHeaders(
         /*ignore_non_authority_block=*/true, /*tip_height=*/0,
