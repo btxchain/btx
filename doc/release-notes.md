@@ -101,15 +101,31 @@ treat this notes file as that demonstration.
 
 ## SLH-DSA keygen vs libsodium Ed25519
 
-Not cosmetic. SPHINCS+ used the SUPERCOP name `crypto_sign_seed_keypair`.
-macOS statically links `libsodium.a` for ZMQ; that archive exports the
-same name as a 4-byte tail-call into Ed25519. `CPQKey::MakeNewKey` →
-`bitcoin_pqc_keygen` → `slh_dsa_shake_128s_keygen` called that name and
-expected a post-quantum keypair. Linux pulled the SPHINCS definition
-from `libbitcoinpqc.a`; macOS kept sodium first — platform-dependent
-keygen. 0.34 prefixes the SPHINCS / `slh_dsa` TUs (`btx_spx_*`).
-Dilithium was already `pqcrystals_*`. Reordering the link to put PQC
-first would steal ZMQ's Curve; do not do that.
+`ecf3ca9f` fixed a **macOS-only silent PQ-to-classical keygen downgrade**
+introduced by statically linking `libsodium.a` for ZMQ portability.
+SPHINCS+ used the SUPERCOP name `crypto_sign_seed_keypair`; sodium
+exports the same name as a 4-byte tail-call into Ed25519. Wallet
+`CPQKey::MakeNewKey` → `bitcoin_pqc_keygen` →
+`slh_dsa_shake_128s_keygen` called that name and expected a
+post-quantum keypair. Linux resolved SPHINCS from `libbitcoinpqc.a`;
+macOS kept sodium first. 0.34 prefixes the SPHINCS / `slh_dsa` TUs
+(`btx_spx_*`). Dilithium was already `pqcrystals_*`. Reordering the
+link to put PQC first would steal ZMQ Curve; do not do that.
+
+**Consensus was never affected.** Mainnet
+`GetBlockScriptFlags` sets `SCRIPT_VERIFY_REJECT_LEGACY_SIGS` whenever
+`fEnforceP2MROnlyOutputs` is true (it is, from genesis).
+`EvalChecksig` then returns `SCRIPT_ERR_BAD_OPCODE` for
+BASE / WITNESS_V0 / TAPSCRIPT. PQ signing is
+`OP_CHECKSIG_MLDSA` / `OP_CHECKSIG_SLHDSA` under `SigVersion::P2MR`.
+libsodium is not a consensus or signing primitive; it arrives
+transitively via libzmq for CurveZMQ transport.
+
+If you generated SLH-DSA keys on a macOS `btxd`/`btx-qt` built before
+`ecf3ca9f` with static libsodium, treat those keys as **not**
+post-quantum and generate new ones on a prefixed binary. Linux
+keygen was already SPHINCS. Existing chain signatures were never
+Ed25519.
 
 ## Trusted-mirror bootstrap deadlock (PR 124)
 
