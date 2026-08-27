@@ -1,0 +1,47 @@
+# Fork self-sufficiency for ExactReplay goldens
+
+0.34 treats the production golden manifest as a **local mining-admission
+belt**, not as a network blessing and not as a submission process run by
+the original maintainers.
+
+## What ExactReplay is
+
+Consensus is `CheckMatMulProofOfWork_RC` / ExactReplay on **this node**.
+A block is valid because this node recomputed it, not because a golden
+JSON exists in our tree. The canary / sealed corpus is a local gate so
+that *this binary* refuses to **mine** on a backend it has not measured.
+It is not a consensus rule, and it is not a hardware-approval registry.
+
+## What a fork does
+
+A fork that wants to admit a new mining backend (a new CUDA `sm_*` row,
+a Metal `m5_class` row, HIP, …) adds that row to **its**
+`src/matmul/matmul_v4_rc_production_golden_manifest.data`, rebuilds, and
+reseals against **its** freeze. Other nodes on the same consensus rules
+ExactReplay the resulting blocks regardless of whose manifest produced
+them.
+
+Do not open a PR against this repository whose purpose is “please bless
+our golden.” That would re-centralize mining admission in whoever merges
+the row. Fork, measure, ship.
+
+## What this tree will not do
+
+- It will not add an `m5_class` row on behalf of the community. Mining
+  admission for Apple Silicon is M5-only in `ClassifyMetalDevice`
+  (`has_metal4_int8_tensor_ops` requires `LtMetalArchNameClass::M5Class`).
+  M4-class stays verification-only. The historical `metal-m4` manifest
+  row is our hygiene for a binary we used to ship, not an ecosystem
+  ruling; 0.34 does not reseal it as a production mining backend.
+- It will not accept goldens measured on hardware that
+  `ClassifyMetalDevice` already marks verification-only and then treat
+  that as a classification fix. Classification and the manifest row are
+  different questions; mixing them is how an M5 self-quals and then
+  dies on `canary=missing_golden` (MendeMatthias, 2026-08-26, PR 123).
+
+## What stays in this repository
+
+The CUDA `sm_120` cohort, the seal scripts, and
+[`btx-matmul-v4.7-production-golden-policy.md`](btx-matmul-v4.7-production-golden-policy.md)
+describe how **this** line reseals **this** binary. Forks copy the
+scripts; they do not send the JSON back.

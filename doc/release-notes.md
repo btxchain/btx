@@ -1,17 +1,13 @@
-BTX version 0.33.4.2 is tagged from:
+BTX 0.34 is the decentralization release: consensus miners ExactReplay,
+public DNS hosts are not chain-tip oracles, and a node with no pin
+membership, no attestor key, and no trusted-mirror pin must be able to
+reach tip and keep advancing on ExactReplay alone.
 
-  <https://github.com/btxchain/btx/releases/tag/v0.33.4.2>
-
-This is the current line on `main`. CLIENT_VERSION remains 0.33.4. Git describe
-is **v0.33.4.2** (seal `c892f1a7`, freeze `400953c2`, fingerprint
-`a427fb12c69841ed082e7d7604b17beaac8749932b50c646747ebf81d0309928`). EncDr
-ExactReplay digest is unchanged (`b4777985…`).
-
-0.33.4.2 is 0.33.4.1 plus the compiled **assumeutxo pin at height 199299**
-(public #121) and a provenance reseal so CUDA attestors pass the GPU canary.
-Consensus at 199299 is the same 1/1 stall-recovery as v0.33.4.1. Compact `F`,
-`powLimit`, Epoch A (height 185000), and the 191714 dump-floor rule are
-unchanged.
+`CLIENT_VERSION` in this tree is **0.34.0**. The `v0.34` tag, golden
+seal, and the three release tarballs are not this file — they land when
+the merge checklist in PR 123 is actually green. Until then Git describe
+on `main` remains the 0.33.4.2 line
+([release-notes-0.33.4.2.md](release-notes/release-notes-0.33.4.2.md)).
 
 Please report bugs using the issue tracker at GitHub:
 
@@ -24,24 +20,111 @@ To receive release and update notifications, please subscribe to:
 # How to Upgrade
 
 Shut down the previous node cleanly, wait for it to exit, and replace
-its `btxd`, `btx-cli`, and related binaries with the v0.33.4.2 binaries.
-Back up wallets and configuration before upgrading. Keep Metal `.metallib`
-files next to `btxd`.
+its `btxd`, `btx-cli`, and related binaries with the v0.34 binaries.
+Back up wallets and configuration before upgrading. Keep Metal
+`.metallib` files next to `btxd`.
 
-| Asset | SHA256 |
-|---|---|
-| [linux-x86_64-cpu](https://github.com/btxchain/btx/releases/download/v0.33.4.2/btx-0.33.4.2-linux-x86_64-cpu.tar.gz) | `aecd0725a6799b2f7fa765521e592f8645512a2f80856f90384d248e054523a5` |
-| [linux-x86_64-cuda](https://github.com/btxchain/btx/releases/download/v0.33.4.2/btx-0.33.4.2-linux-x86_64-cuda.tar.gz) | `3a1b27552ab442cc92d2575e770423a895eedaa6a607d5ffbbadedc546b9ee98` |
-| [macos-arm64-metal](https://github.com/btxchain/btx/releases/download/v0.33.4.2/btx-0.33.4.2-macos-arm64-metal.tar.gz) | `d8c3e816aa012cb014bd1810d9134466c4d4539f7137c101903740e012d02eec` |
+Tarball SHA256s are filled in when the three assets are staged (Linux
+CPU, Linux CUDA, macOS arm64 Metal). Every shipped `btxd` is linked
+with ZMQ (`ldd` shows `libzmq` on Linux; macOS statically links
+`libzmq.a`). 0.33.4.2 native tarballs were configured without
+`-DWITH_ZMQ=ON` and advertised `-zmqpubhashblock` while publishing
+nothing. CMake's default is now ON; release builds still pass
+`-DWITH_ZMQ=ON` explicitly. See
+[release-process.md](release-process.md).
 
-Checksums: [SHA256SUMS](https://github.com/btxchain/btx/releases/download/v0.33.4.2/SHA256SUMS).
+# Compatibility
 
-v0.33.4.1 cannot `loadtxoutset` the 199299 snapshot. CUDA attestors must use
-this sealed build, not unsealed `v0.33.4`.
+Same platform and epoch matrix as 0.33.4.2: Linux, macOS 13+, Windows
+10+. Mainnet remains on MatMul v3 below height 185000; Epoch-A Profile 1
+ExactReplay applies at and above height 185000. Compact `F`, `powLimit`,
+the 191714 `nBits` dump floor, EncDr stall recovery at **199299**
+(`num/den = 1/1`), and the compiled AssumeUTXO pin at 199299 are
+unchanged.
+
+# Notable Changes
+
+## ExactReplay is the gold standard
+
+`-matmulvalidation=consensus` (the default) accepts and produces
+blocks because **this node** ExactReplay'd them. Pin quorum may skip
+GPU work and steer FMWC/GBT **only** on trusted CPU archives
+(`-matmulvalidation=trusted`). Heard `MMATTEST` never moves BestKnown,
+the signed frontier, or GETDATA on a consensus miner.
+
+Public DNS / `addnode` hosts become ADDR-only discovery relays
+(`-matmulvalidation=relay`): not MatMul authority, not a chain-tip
+oracle, not GETMMATTEST. Independent consensus miners no longer treat
+archive GETMMATTEST or a competing pin quorum as a validity or
+GPU-admission oracle. Unique unattested tip-children ExactReplay.
+
+The unprivileged-node rule replaces the old operator-fleet gate: a
+node holding no pin membership, no attestor key, and no trusted-mirror
+pin must reach tip from a cold start on ExactReplay, keep advancing
+across a signed-frontier stall without operator action, and recover
+without a restart, with every privileged peer absent or hostile.
+
+## Fork self-sufficiency (goldens are a local mining belt)
+
+The production golden manifest is how **this binary** refuses to mine
+on a backend it has not measured. It is not a hardware-approval
+registry and it is not consensus. Forks that want a new mining backend
+add a row to **their** manifest, rebuild, and reseal. Other nodes
+ExactReplay the resulting blocks. Do not send golden JSON to this
+repository for blessing. See
+[btx-fork-golden-self-sufficiency.md](btx-fork-golden-self-sufficiency.md).
+
+## ZMQ on by default
+
+`WITH_ZMQ` defaults to ON. A release `btxd` that contains
+`-zmqpubhashblock` strings must actually link libzmq.
+`scripts/release/verify_release_btxd.py` checks this.
+
+## Trusted-mirror bootstrap deadlock (PR 124)
+
+Found and reproduced by **MendeMatthias** (easyNode / easyBTX) on
+2026-08-26 against v0.33.4.2. A fresh `-matmulvalidation=trusted`
+datadir parked at height 0: archive peers answered `getheaders` with
+zero bytes, `NODE_MATMUL_CONSENSUS` peers offered the only headers and
+those were dropped as non-authority, and
+`MaybeSeedGpuSignedFrontierBestKnown` then pinned BestKnown to the
+local signed-frontier height (2000) while peers advertised 199300+.
+The stall log was:
+
+```text
+Seeded GPU peer=7 best-known to signed frontier height=2000 (tip=0 HEADER_ONLY catch-up)
+Block fetch stall detected: tip=0 best_header_ahead=2000 peer_best_ahead=2000 in_flight=0
+```
+
+`loadtxoutset` cannot rescue that: the snapshot base header must
+already be in the index.
+
+0.34 accepts inbound **HEADERS** from any peer while the active tip is
+below `max(last checkpoint, highest AssumeUTXO pin)` (mainnet 199299),
+and the frontier seed only *raises* BestKnown. Bodies stay
+authority-only. You do not need an operator-controlled archive to
+learn the header chain. See
+[btx-matmul-trusted-rpc-mirrors.md](btx-matmul-trusted-rpc-mirrors.md)
+§ Bootstrapping a new mirror.
+
+## Metal is verification-only pending a fork `m5_class` row
+
+`ClassifyMetalDevice` admits mining only on M5-class Metal 4 INT8
+TensorOps. M4-class stays verification-only. The historical
+`metal-m4` golden was measured on Apple M4 Max; that is our hygiene
+for a binary we used to ship, not an ecosystem ruling, and 0.34 does
+not reseal it as a production mining backend.
+
+An M5 can self-qualify and still die on `canary=missing_golden`
+because this tree has no `m5_class` row (MendeMatthias, PR 123). We
+will not add that row ourselves. A fork that wants M5 mining adds it
+to its own manifest. CUDA `sm_120` remains the production mining
+cohort for this line.
 
 # Fast-start snapshot
 
-Published assumeutxo pin (v9): [assumeutxo-199299](https://github.com/btxchain/btx/releases/tag/assumeutxo-199299)
+Unchanged from 0.33.4.2. Published assumeutxo pin (v9):
+[assumeutxo-199299](https://github.com/btxchain/btx/releases/tag/assumeutxo-199299)
 
 - height **199299**, blockhash `f12a27d01a4b5a1710efa4497adf6f4c7da311d1c7b4f6a79cbf80f0b3110ec5`
 - `txoutset_hash` `db9e83156602927315d108a1ebce230b30eb78832e69db1947a21f5b5f2b8bf6`
@@ -52,103 +135,22 @@ btx-cli -rpcclienttimeout=0 loadtxoutset snapshot.dat
 ```
 
 Use `loadtxoutset`, not `loadtxoutsetattested`. Fresh chainstate only.
-
-# Compatibility
-
-Same platform and epoch matrix as 0.33.3: Linux, macOS 13+, Windows 10+.
-Mainnet remains on MatMul v3 below height 185000; Epoch-A Profile 1
-ExactReplay applies at and above height 185000. That Epoch-A tuple is
-unchanged. The 191714 `nBits` dump floor (`0x1f0a3d70`) is unchanged.
-
-# Notable Changes
-
-## AssumeUTXO pin at 199299 (public #121)
-
-The previous public pin was 191266, which is below many catching-up tips and
-cannot be loaded there. v0.33.4.2 compiles the stall-recovery flag-day
-snapshot so a fresh node can `loadtxoutset` onto the attested chain without
-ExactReplay-ing thousands of EncDr bodies.
-
-## EncDr stall recovery at 199299 (public #119)
-
-Mainnet flag day **199299**, `num/den = 1/1` (copy parent bits, re-anchor ASERT).
-Per-block `nTime` may not advance more than 1080s from the parent. Cap-sat
-headers get clamped ASERT credit. 199298 is **not** dumped. See #117 for unique
-EncDr templates and HeightOccupied GETDATA skip.
-
-## Provenance reseal (public #120, then 0.33.4.2)
-
-GPU attestors refuse an unsealed tree (`build_provenance_mismatch`). v0.33.4.1
-resealed after the 199299 bake; v0.33.4.2 resealed after the assumeutxo pin.
-ExactReplay digest unchanged.
-
-## HEADER_ONLY equal-work lost twin GETDATA (public #117)
-
-When two equal-work children share a parent and the local signer already
-attested one of them, the HEADER_ONLY skip set suppressed `GETDATA` for
-the unattested twin (`select=root_header_only_skip`, `in_flight=0`).
-`GETMMATTEST` on that hash returns `not_canonical`, so archives could not
-unstick the signer. Local signers now fetch that twin once a peer's
-BestKnown has already extended it, ExactReplay it, and then fetch each
-better-work descendant whose parent has a body, bounded to short-reorg
-depth 1–6. Trusted mirrors still skip until the attestor signs. A lone
-competing sibling with no descendant headers stays off the miner GPU.
-
-## Signed-frontier GETDATA vs the active tip (public #112)
-
-Catch-up `GETDATA` compared the next needed body against `m_best_header`.
-When headers ran ahead of the attested active tip, that comparison
-skipped the hole at `tip+1` and left archives HEADER_ONLY with
-`in_flight=0`. Catch-up now compares against the active tip.
-
-During signed-frontier catch-up, `GETMMATTEST` is issued only for the
-first hole rather than a stale mid-suffix height. That unsticks
-archives that already had a local quorum header but no body.
-
-## Attestor BestKnown from MMATTEST (public #113)
-
-Attestors now advance peer BestKnown from `MMATTEST` and from connected
-bodies, so the signed frontier is not parked on a stale header while
-the attested chain has already moved.
-
-## Park-depth yield to the longer attested attestor (public #113)
-
-After park-depth drift, a shorter local attestor yields to the longer
-attested peer instead of mining or following the losing equal-work
-branch.
-
-## Lost-twin ExactReplay of the attested sibling (public #113)
-
-When two equal-work children share a parent and the local signer
-ExactReplay'd the later unattested twin, the node could remain
-HEADER_ONLY on the attested winner because ExactReplay required
-`pprev==tip` and retry preferred fossils. 0.33.4 ExactReplays the
-attested sibling across that short reorg and cools budget-deferred
-fossils while the frontier is off-chain.
+A 0.34 trusted mirror can now ingest the header chain from public
+peers first; 0.33.4.2 could not (see the bootstrap deadlock above).
 
 # Included public work
 
-- btxchain/btx #105 — 0.33.3 network stability (already released)
-- btxchain/btx #112 — catch-up GETDATA vs active tip; GETMMATTEST first hole
-- btxchain/btx #113 — BestKnown, attestor yield, lost-twin ExactReplay
-- btxchain/btx #117 — HEADER_ONLY lost-twin GETDATA
-- btxchain/btx #119 — EncDr stall recovery at 199299
-- btxchain/btx #120 — provenance reseal after the 199299 bake
-- btxchain/btx #121 — assumeutxo pin at 199299
-
-Public #111 does not exist on btxchain/btx; the post-0.33.3 stack is
-#112 and #113.
+- btxchain/btx #123 — 0.34 ExactReplay gold standard, discovery relays,
+  archive-authority split
+- btxchain/btx #124 — trusted-mirror bootstrap deadlock (HEADERS during
+  weak-subjectivity sync; seed-raises-only BestKnown). Credit:
+  MendeMatthias
+- prior `main` line: #105, #112, #113, #117, #119, #120, #121
+  (0.33.3–0.33.4.2)
 
 # Consensus
 
-Mainnet EncDr stall recovery is active at height **199299** with `num/den = 1/1`
-(inherit parent bits, no dump). Nodes below 0.33.4 keep the 191715 ASERT
-anchor and `bad-diffbits` on every height at and above 199299.
-
-Do not retune `F` or `powLimit` in this release. The five recovery knobs are
-bound into `replay_authority_context` (schema 4). Clamped ASERT credit is
-cached on `CBlockIndex` so header-sync cost does not grow with
-`(tip - flag_day)`.
-
-Mine 199300 only on attested parent
-`f12a27d01a4b5a1710efa4497adf6f4c7da311d1c7b4f6a79cbf80f0b3110ec5`.
+Mainnet EncDr stall recovery remains active at height **199299** with
+`num/den = 1/1`. Do not retune `F` or `powLimit` in this release. The
+five recovery knobs stay bound into `replay_authority_context`
+(schema 4). ExactReplay remains consensus; the canary is not.
