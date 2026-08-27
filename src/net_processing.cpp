@@ -14220,9 +14220,19 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         }
         return;
     }
+    // ADDR/ADDRV2 are deliberately NOT dropped here. Same principle as the
+    // PR 124 HEADERS fix above: authority rules govern which BODIES this node
+    // trusts, not how it learns the header chain -- nor how it learns of PEERS.
+    // Dropping address gossip does not protect consensus; it starves addrman,
+    // so an attestor or trusted mirror stops hearing of new peers from
+    // non-authority sources and narrows to the set it already knew. That is
+    // the structural dependence 0.34 exists to remove. Address flooding stays
+    // bounded by the token bucket above (MAX_ADDR_TO_SEND,
+    // MAX_ADDR_RATE_PER_SECOND, MAX_ADDR_PROCESSING_TOKEN_BUCKET), so no
+    // protection is lost. TX / GETHEADERS / GETBLOCKS / MEMPOOL / FEEFILTER
+    // stay dropped: those are chain and mempool ingest, not peer discovery.
     if ((ignore_non_gpu_inbound || drop_miner_ingest) &&
-        (msg_type == NetMsgType::ADDR || msg_type == NetMsgType::ADDRV2 ||
-         msg_type == NetMsgType::TX ||
+        (msg_type == NetMsgType::TX ||
          msg_type == NetMsgType::GETHEADERS || msg_type == NetMsgType::GETBLOCKS ||
          msg_type == NetMsgType::MEMPOOL || msg_type == NetMsgType::FEEFILTER)) {
         static std::atomic<bool> logged_miner{false};
