@@ -201,9 +201,16 @@ if(WITH_MINIUPNPC)
   find_package(MiniUPnPc MODULE REQUIRED)
 endif()
 
-# Default ON. 0.33.4.2 native tarballs configured without -DWITH_ZMQ=ON, so
-# btxd advertised -zmqpubhashblock and linked no libzmq. Release builds still
-# pass -DWITH_ZMQ=ON explicitly. Fuzzing forces this OFF below.
+# Default ON. Community issues #111 (v0.33.3, jarekpiot) and #122
+# (v0.33.4.2 Linux CPU tarball, same reporter): CMake's historical default
+# OFF plus a native tarball that forgot -DWITH_ZMQ=ON shipped btxd that
+# advertised -zmqpubhashblock, linked no libzmq, omitted getzmqnotifications,
+# and did not fail startup. #111 was closed by recutting that one tarball;
+# the default stayed OFF, which is why the identical miss shipped again as
+# #122. Durable fix: default ON, find_package REQUIRED, and the
+# ldd/otool gate in scripts/release/verify_release_btxd.py / doc/release-process.md.
+# Release builds still pass -DWITH_ZMQ=ON explicitly. Fuzzing forces this
+# OFF below.
 option(WITH_ZMQ "Enable ZMQ notifications." ON)
 if(WITH_ZMQ)
   find_package(ZeroMQ 4.0.0 MODULE REQUIRED)

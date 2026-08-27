@@ -27,11 +27,8 @@ Back up wallets and configuration before upgrading. Keep Metal
 Tarball SHA256s are filled in when the three assets are staged (Linux
 CPU, Linux CUDA, macOS arm64 Metal). Every shipped `btxd` is linked
 with ZMQ (`ldd` shows `libzmq` on Linux; macOS statically links
-`libzmq.a`). 0.33.4.2 native tarballs were configured without
-`-DWITH_ZMQ=ON` and advertised `-zmqpubhashblock` while publishing
-nothing. CMake's default is now ON; release builds still pass
-`-DWITH_ZMQ=ON` explicitly. See
-[release-process.md](release-process.md).
+`libzmq.a`). See [#111](https://github.com/btxchain/btx/issues/111) and
+[#122](https://github.com/btxchain/btx/issues/122) below.
 
 # Compatibility
 
@@ -74,11 +71,33 @@ ExactReplay the resulting blocks. Do not send golden JSON to this
 repository for blessing. See
 [btx-fork-golden-self-sufficiency.md](btx-fork-golden-self-sufficiency.md).
 
-## ZMQ on by default
+## ZMQ on by default (issues 111 and 122)
 
-`WITH_ZMQ` defaults to ON. A release `btxd` that contains
-`-zmqpubhashblock` strings must actually link libzmq.
-`scripts/release/verify_release_btxd.py` checks this.
+jarekpiot reported this twice. [#111](https://github.com/btxchain/btx/issues/111)
+was the v0.33.3 Linux tarball: `zmqpub*` accepted and ignored,
+`getzmqnotifications` absent, no startup failure, a block-explorer
+indexer stalled while `btxd` looked healthy. That issue was **closed by
+recutting one tarball** with `-DWITH_ZMQ=ON`. CMake's default stayed
+OFF. There was no package-time `ldd`/`otool` gate. So the same class of
+miss shipped again as [#122](https://github.com/btxchain/btx/issues/122)
+in the v0.33.4.2 Linux CPU tarball (`btx-0.33.4.2-linux-x86_64-cpu.tar.gz`,
+SHA256 `aecd0725…`, matching our `SHA256SUMS`). CUDA and Metal 0.33.4.2
+trees had passed `-DWITH_ZMQ=ON`; the CPU tree had not.
+
+0.34's durable fix, not another one-off recut:
+
+- `option(WITH_ZMQ … ON)` so a forgotten `-DWITH_ZMQ=ON` is no longer
+  silent compile-out (`e5cd937a`).
+- `find_package(ZeroMQ … REQUIRED)` when the option is on.
+- `scripts/release/verify_release_btxd.py` refuses a `btxd` whose help
+  text advertises ZMQ without a real libzmq link, and on macOS refuses
+  any `/opt/homebrew` load command.
+- [release-process.md](release-process.md) makes that `ldd`/`otool`
+  check mandatory before a tarball is staged.
+
+Issue 122 stays open until a published 0.34 artifact demonstrates
+`getzmqnotifications` and a live `zmqpubhashblock` notification. Do not
+treat this notes file as that demonstration.
 
 ## Trusted-mirror bootstrap deadlock (PR 124)
 

@@ -17,7 +17,12 @@ Release Process
   dylib is not a shippable public artifact. CMake's configure summary must
   print `ZeroMQ ... ON` and, on macOS, `Libevent linkage ... static:`.
   Do not ship a binary that contains `-zmqpubhashblock` strings without linking
-  libzmq — that is the 0.33.4.2 failure shape.
+  libzmq — that is issues
+  [#111](https://github.com/btxchain/btx/issues/111) (v0.33.3, closed by
+  recutting one tarball while CMake still defaulted OFF) and
+  [#122](https://github.com/btxchain/btx/issues/122) (v0.33.4.2 Linux CPU,
+  the identical miss). Default ON plus this check is the durable fix;
+  recutting one archive was not.
 * Complete the Profile-1 ExactReplay golden corpus and seal described below.
   Any change under `CMakeLists.txt`, `cmake/`, `src/`, or `contrib/matmul-v4/`
   (except the inert manifest `.data` file) invalidates the previous seal.
