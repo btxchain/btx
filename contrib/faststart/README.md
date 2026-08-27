@@ -50,11 +50,11 @@ paths, see [BTX Mining Node Snapshot Runbook](../../doc/btx-mining-node-snapshot
 Presets
 
 - `miner` keeps the node in a compact, mining-friendly state:
-  `prune=4096`, `blockfilterindex=1`, `coinstatsindex=1`,
+  `prune=4096`, `blockfilterindex=1`,
   `retainshieldedcommitmentindex=1`, and conservative outbound-peer floors for
   mining.
 - `service` keeps the node in a service-oriented state:
-  `prune=0`, `txindex=1`, `blockfilterindex=1`, `coinstatsindex=1`, and
+  `prune=0`, `txindex=1`, `blockfilterindex=1`, and
   `retainshieldedcommitmentindex=1`.
 
 BTX now treats retained shielded commitment indexing as the normal
@@ -78,7 +78,6 @@ addnode=node.btxchain.org:19335
 addnode=node.btx.tools:19335
 prune=4096
 blockfilterindex=1
-coinstatsindex=1
 # keep shielded commitment index on disk (faster restart; default).
 retainshieldedcommitmentindex=1
 # chain guard reports mining risk and self-heals peers; it does not stop work.
