@@ -1,27 +1,127 @@
 # BTX Node
 
 BTX is a post-quantum, AI-infrastructure-friendly blockchain derived from an
-earlier Bitcoin Knots v29.2 codebase. It replaces
-Bitcoin's SHA-256d proof of work with **MatMul PoW** — a novel consensus
-mechanism based on matrix multiplication over a finite field — adds
-**post-quantum transaction signatures** via witness v2 P2MR outputs, provides a
-**shielded transaction pool** with lattice-based confidential transactions
-active from genesis, enforces reduced-data transaction constraints (BIP
-110-style) from genesis, and implements **Dandelion++ transaction relay** (BIP
-156) for network-layer anonymity.
+earlier Bitcoin Knots v29.2 codebase. It replaces Bitcoin's SHA-256d proof of
+work with **MatMul PoW** — matrix multiplication over a finite field — adds
+**post-quantum transaction signatures** via witness v2 P2MR outputs, enforces
+reduced-data transaction constraints (BIP 110-style) from genesis, and
+implements **Dandelion++ transaction relay** (BIP 156) for network-layer
+anonymity.
+
+A **shielded transaction pool** with lattice-based confidential transactions
+operated from genesis and was **closed at height 199300**. The remaining
+shielded balance is treated as burned. Nodes past that height do not maintain
+shielded state. Do not read this tree as shipping a live shielded pool.
 
 This repository contains the full node implementation, wallet, mining
 infrastructure, and test suites.
 
-## Current release — v0.33.4.2
+## 0.34.1 is the base reference. This is a handover.
 
-`main` is tagged **v0.33.4.2** (seal `c892f1a7`, freeze `400953c2`). Epoch A
-Profile 1 ExactReplay is live on mainnet at height **185000**. EncDr stall
-recovery is active from height **199299** (`num/den = 1/1`). The compiled
-assumeutxo pin is height **199299**.
+**v0.34.1 is the base reference implementation.** Further enhancements,
+features, and releases are expected to come from **community forks and
+modifications, not from this repository.** That is a handover, not a roadmap.
+
+The two documents that make the handover real, rather than a slogan:
+
+- [doc/btx-fork-golden-self-sufficiency.md](doc/btx-fork-golden-self-sufficiency.md)
+  — how a fork adds its own ExactReplay golden, reseals against its own freeze,
+  and mines without asking this line to bless a device.
+- [doc/release-process.md](doc/release-process.md) — how a third party cuts
+  the next seal, corpus, and tarballs from this code without the original
+  machines or keys.
+
+### What makes that claim verifiable
+
+1. **A consensus node validates independently.** With no pin, no signers, and
+   no threshold configured, it accepts a block because **this node
+   ExactReplay'd it**, never because a key signed it.
+2. **Archives are ADDR-only pointers.** They run `-matmulvalidation=relay`,
+   report `chain_oracle=false`, and refuse to start if handed a pin, a key, a
+   serve flag, a blocklist, or open attestors.
+3. **Mining admission is a byte-exact TensorOps self-test**, not a
+   device-name string. Any hardware that proves byte-exact INT8→INT32 GEMM
+   qualifies, regardless of vendor.
+4. **The golden manifest is a local mining-admission belt, not a network
+   blessing.** A fork adds its own row, rebuilds, reseals against **its**
+   freeze, and other nodes ExactReplay the resulting blocks regardless of
+   whose manifest produced them. Do not ask this repository to bless a
+   golden.
+5. **`-miningpeermesh`** means the mining peer set is no longer hardcoded to
+   operator domains. When set, it replaces the compiled list entirely.
+6. **Observed in production:** the network produced and accepted blocks up to
+   **199328** while both operator nodes sat at **199300**. Consensus formed
+   without us.
+
+### What is still ours (say this plainly)
+
+A handover document that hides remaining dependencies is not a handover.
+
+- **Bootstrap still depends on operator-run hosts.** The three DNS seeds
+  (`node.btx.dev`, `node.btxchain.org`, `node.btx.tools`) and **both** compiled
+  fixed seeds in `src/chainparamsseeds.h` resolve to operator-run machines.
+  New-node introduction currently goes through us. The fix is community-run
+  seeds across distinct ASNs, regenerated into `chainparamsseeds.h`. That is
+  an invitation, not a future operator deliverable from this repo.
+- **Trusted-mode nodes follow a pin they configured, not a compiled-in key.**
+  That mode is opt-in and only for CPU-only machines that cannot ExactReplay.
+  After v0.34.1 the original operator does not commit to running signers; see
+  [Notice to trusted-mirror operators](#notice-to-trusted-mirror-operators-repoint-or-move-to-consensus).
+  Consensus miners and GPU full nodes do not use it.
+
+### Notice to trusted-mirror operators: repoint or move to consensus
+
+If you run `-matmulvalidation=trusted`, read this before upgrading.
+
+**The pin is your choice, not ours.** There is no compiled-in signer key
+anywhere in this tree — `grep` `chainparams.cpp` and you will not find one.
+Your `-matmultrustedpubkey` entries and your `-matmultrustedthreshold` are
+config lines you own. They point at whichever GPU nodes *you* decided to
+trust. If that is currently the original operator's keys, it is because those
+were the keys that existed, not because the software prefers them.
+
+**We are stepping back.** After v0.34.1 the original operator no longer
+commits to running attestation signers. Nodes in `trusted` mode follow a pin;
+if the keys you have listed stop signing, your node stops advancing. That is
+not a defect, it is what delegated validation means.
+
+**Your options, in order of preference:**
+
+1. **Move to `-matmulvalidation=consensus`.** This is the real fix. A consensus
+   node needs no pin, no signers, and no threshold — it accepts a block because
+   *this node* ExactReplay'd it. It requires a GPU that passes the byte-exact
+   TensorOps self-test. No permission from anyone is involved.
+2. **Repoint the pin at signers you actually trust.** Any GPU node running a
+   local signing key can attest. Configure two independent ones and keep
+   `-matmultrustedthreshold=2`. Mainnet refuses a 1-of-1 quorum for good
+   reason: a single stolen key would be sole proof-of-work authority for your
+   node.
+3. **Revoke specific keys without changing your pin** using
+   `-matmulattestationblocklist=<hex>`. Attestations from a blocked key are
+   never counted, even if the key is still listed. It is fail-closed: a block
+   that would leave you below your own threshold is refused.
+
+**What a trusted mirror is not.** The startup banner says it plainly — a
+trusted mirror performs ordinary block, body, and script validation but
+delegates the Profile-1 ExactReplay verdict to a configured quorum. It is not
+an independently validating full node. That is a reasonable trade for a
+CPU-only machine. It should be a deliberate choice, not an inherited default.
+
+Consensus miners and GPU full nodes are unaffected by any of this. They never
+consult a pin.
+
+## Current release — v0.34.1
+
+**v0.34.1** is the reference cut of this tree. Seal and freeze hashes are
+written when the tag is sealed (see
+[doc/release-process.md](doc/release-process.md)). The previous tag is
+**v0.34** (seal `dc46dee2`, freeze `ecfaa6c9`). Epoch A Profile 1 ExactReplay
+is live on mainnet at height **185000**. EncDr stall recovery is active from
+height **199299** (`num/den = 1/1`). The shielded pool is closed at height
+**199300**. The compiled assumeutxo pin is height **199299**.
 
 - [Release notes](doc/release-notes.md)
-- [GitHub release](https://github.com/btxchain/btx/releases/tag/v0.33.4.2) — Linux CPU, Linux CUDA, macOS arm64 Metal
+- [GitHub releases](https://github.com/btxchain/btx/releases) — Linux CPU, Linux CUDA, macOS arm64 Metal
 - [AssumeUTXO snapshot 199299](https://github.com/btxchain/btx/releases/tag/assumeutxo-199299) (`snapshot.dat` SHA256 `3c9e52ff053cd183af239dfce42cd57d007bdf530fd48ba9783623662d15070f`)
 
 Catch-up on a **fresh** chainstate with this binary (v0.33.4.1 cannot load the
@@ -61,92 +161,23 @@ and [ExactReplay launch-candidate gates](doc/matmul-v4-exact-replay-launch-candi
 
 While Epoch A still uses ExactReplay as consensus authority, public CPU
 archives follow GPU attestors so the seed layer does not need a GPU on every
-host. That topology is temporary. The operator path to a fully GPU-verified
-full-node network (consensus dump floor → M-of-N attestors → GPU seeds that
-ExactReplay themselves) is
+host. Continuing that topology is community-fork work; this repository is the
+0.34.1 reference, not a schedule of further operator releases. Historical
+notes live in
 [doc/btx-gpu-verified-network-transition.md](doc/btx-gpu-verified-network-transition.md).
 
-Pre-sunset shielded launch status: the reset-chain Smile-only surface was live
-on `main` before the v0.32 sunset. `DIRECT_SMILE` was the default direct
-shielded spend backend, shared-ring `BATCH_SMILE` ingress was the bridge-in
-path, registry state committed full shielded account-leaf payloads, and
-consumed-leaf tx witnesses were lean on wire while full nodes recovered
-`CompactPublicAccount` state from authenticated consensus data.
-
-Current mainnet behavior: after block `125000`, consensus disables
-new shielded credits, private shielded-output appends, bridge ingress/control
-rollover, and re-shielding. Retained production surfaces are balance/viewing,
-legacy recovery accounting, and permitted transparent exits of existing shielded
-value. From block `128000`, proofless transparent-funded `V2_SEND` public-flow
-shielding is also disabled.
-
-Current measured launch-surface figures on the pre-`61000` baseline surface:
-
-- headline mixed L1 launch blend: `199` direct `1x2 v2_send` +
-  `3,064` transparent `1-in/2-out witness_v2_p2mr` per `24 MB` block at a
-  `50/50` block-space split, or `3,263 tx/block` and about `36.26 TPS`
-- proofless deposit `v2_send` (prefork compatibility only; not part of the
-  post-`61000` direct-send readiness surface): `19,172` tx bytes, `221 ms`
-  sample build, `1,251 tx/block`
-- live wallet direct send `1x2`: `60,218` tx bytes,
-  `22.71 s` sample wallet first-prove, `398 tx/block`
-- canonical redesign-report `1x2`: `60,110` tx bytes, `51,099` proof bytes,
-  `10.20 s` build median, `304.26 ms` verify median, `399 tx/block`
-- direct send `2x2`: `70,272` tx bytes, `61,091` proof bytes,
-  `7.29 s` build median, `481.09 ms` verify median, `341 tx/block`
-- direct send `2x4`: `101,918` tx bytes, `84,111` proof bytes,
-  `5.09 s` build median, `538.55 ms` verify median, `235 tx/block`
-- mixed unshield `v2_send` (prefork compatibility only; post-`61000` unshield
-  moves to bridge/egress): `44,330` tx bytes, `10.88 s` sample build,
-  `541 tx/block`
-- ingress `63 leaves / 8 spends / 8 proof shards / 1 reserve`: `312,364`
-  tx bytes, `281,622` proof bytes, `109.86 s` build median,
-  `5.69 s` verify median, `76 tx/block`
-- egress `32x32`: `470,168` tx bytes, `433` proof bytes,
-  `463.14 ms` full pipeline median, `9.99 ms` verify median, `51 tx/block`
-
-Current `main` already includes the account-registry activation, the remaining
-wallet transaction-family transition onto `v2_send`, and the future-proofed
-settlement slack for later bridge/L2 soft-fork tightening. The settlement-side
-upgrade lane now lives on the existing bridge/proof envelope:
-
-- `BridgeBatchStatement version = 5`
-- `BridgeBatchCommitment version = 3`
-- `BridgeBatchAggregateCommitment`
-- `ProofEnvelope.extension_digest`
-
-That means later settlement upgrades can tighten semantics around
-`action_root`, `data_availability_root`, `recovery_or_exit_root`,
-`extension_flags`, `policy_commitment`, and `extension_digest` without first
-inventing a new outer settlement object. Post-launch hard-fork-only size/TPS
-optimization work remains tracked in
-[doc/btx-smile-v2-optimization-tracker-2026-03-21.md](doc/btx-smile-v2-optimization-tracker-2026-03-21.md)
-and the stable follow-on roadmap in
-[doc/btx-postlaunch-optimization-roadmap.md](doc/btx-postlaunch-optimization-roadmap.md).
-The merged account-registry activation work is documented in
-[doc/btx-smile-v2-shielded-account-registry-redesign-2026-03-22.md](doc/btx-smile-v2-shielded-account-registry-redesign-2026-03-22.md).
-The merged future-proofed settlement work is documented in
-[doc/btx-smile-v2-future-proofed-settlement-tdd-2026-03-23.md](doc/btx-smile-v2-future-proofed-settlement-tdd-2026-03-23.md).
-Wave 3 also adds a shared proof-redesign gate via
-`smile2_proof_redesign_framework_tests/*` and
-`gen_smile2_proof_redesign_report` so every future proof-object rewrite is
-checked against one consistent correctness / tamper / size / runtime baseline.
-
-Current ring-size roadmap:
-
-- launch defaults to `RING_SIZE = 8` for better base-layer capacity;
-- operators can already raise the configured ring size within the supported
-  `8..32` range on the current wire / consensus surface without a hard fork or
-  transaction-family change;
-- the longer-term throughput path is still aggregated settlement above L1, not
-  relying only on progressively larger direct rings.
-- the `61000` shielded hardening fork, security closeout, and later PQ-128
-  upgrade lane are documented in
-  [doc/security/README.md](doc/security/README.md).
+**Shielded pool (closed).** The pool operated from genesis. At height
+**199300** it is closed in both directions: no new shielded credits, no
+shielded spends, remaining balance treated as burned. Nodes past that height
+do not maintain shielded state. Pre-close history (125000/128000 sunset rules,
+Smile v2 launch figures, ring-size notes) is documentation of a finished
+feature, not a live surface. See [Shielded Pool](#shielded-pool).
 
 ## Table of Contents
 
-- [Current release — v0.33.4.2](#current-release--v03342)
+- [0.34.1 is the base reference. This is a handover.](#0341-is-the-base-reference-this-is-a-handover)
+- [Notice to trusted-mirror operators: repoint or move to consensus](#notice-to-trusted-mirror-operators-repoint-or-move-to-consensus)
+- [Current release — v0.34.1](#current-release--v0341)
 - [GPU-verified network (three-phase)](#gpu-verified-network-three-phase)
 - [Chain Parameters](#chain-parameters)
 - [MatMul Proof of Work](#matmul-proof-of-work)
@@ -170,6 +201,9 @@ Current ring-size roadmap:
 ---
 
 ## GPU-verified network (three-phase)
+
+That three-phase topology is **community-fork work**. This repository is the
+0.34.1 reference, not a schedule of further operator releases.
 
 Profile 1 ExactReplay is the Epoch-A consensus check. It needs a qualified
 GPU. Public IBD/RPC seeds can stay on ordinary VPS hardware only by **trusting
@@ -494,11 +528,13 @@ For the full PQ specification and tutorials, see:
 
 ## Shielded Pool
 
-BTX includes a **shielded transaction pool** active from genesis on all
-networks. Shielded transactions hide sender, receiver, and amount using
-lattice-based zero-knowledge proofs. Coinbase auto-shielding is
-opt-in (default off; `-autoshieldcoinbase=1`) so mined rewards stay as
-post-quantum transparent outputs unless an operator chooses to shield.
+BTX **had** a shielded transaction pool, active from genesis, using
+lattice-based zero-knowledge proofs. **As of height 199300 the pool is
+closed in both directions.** The remaining shielded balance is treated as
+burned. Nodes past that height do not maintain shielded state, do not
+accept shielded transactions, and do not run shielded proving or
+verification as live work. Coinbase auto-shielding is inert on mainnet
+past the close (`-autoshieldcoinbase` does not reopen the pool).
 
 The shielded pool's value soundness is covered by a tiered formal-verification
 suite — an accounting firewall (turnstile / supply floor / velocity cap), the
@@ -529,13 +565,9 @@ As of `2026-03-23`, the pre-sunset reset-chain launch architecture was:
 - legacy MatRiCT and receipt-backed ingress retained only as non-launch
   residual tooling.
 
-Mainnet retains the block-`125000` production sunset rules:
-new shielded credits, private shielded-output appends, bridge ingress/control
-transactions, rollover/rebalance, and re-shielding are disabled by consensus.
-Existing shielded balances remain visible/accounted, and strict transparent
-exit/recovery paths remain the supported direction. From block `128000`,
-proofless transparent-funded `V2_SEND` public-flow shielding is disabled as a
-cleanup boundary.
+Those pre-close sunset rules (block `125000` / `128000`) are historical.
+**Height 199300 is the close:** both directions disabled, remaining
+balance burned, no shielded state on nodes past that height.
 
 The hard-fork launch protocol is final for this chain. Larger recursive CT
 anonymity sets are not part of that protocol and are explicitly rejected by
@@ -1459,14 +1491,18 @@ The RPC surface also supports:
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines, coding
-style, and the PR review process.
+**v0.34.1 is the reference. Further features and releases are expected from
+community forks, not from this repository.** See the handover at the top of
+this file, then
+[doc/btx-fork-golden-self-sufficiency.md](doc/btx-fork-golden-self-sufficiency.md)
+and [doc/release-process.md](doc/release-process.md).
 
-1. Fork the repository
-2. Create a feature branch
-3. Make changes with tests
-4. Run `scripts/test_btx_parallel.sh build-btx` to verify
-5. Submit a pull request
+Do not open a PR against this repository whose purpose is “please bless our
+golden” or “please ship our next feature as an official release.” Fork,
+measure, seal, ship.
+
+Coding style for anyone working in a fork still lives in
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 

@@ -41,6 +41,48 @@ unchanged.
 
 # Notable Changes
 
+## Notice to trusted-mirror operators: repoint or move to consensus
+
+If you run `-matmulvalidation=trusted`, read this before upgrading to
+v0.34.1.
+
+**The pin is your choice, not ours.** There is no compiled-in signer key
+anywhere in this tree — `grep` `chainparams.cpp` and you will not find one.
+Your `-matmultrustedpubkey` entries and your `-matmultrustedthreshold` are
+config lines you own. They point at whichever GPU nodes *you* decided to
+trust. If that is currently the original operator's keys, it is because those
+were the keys that existed, not because the software prefers them.
+
+**We are stepping back.** After v0.34.1 the original operator no longer
+commits to running attestation signers. Nodes in `trusted` mode follow a pin;
+if the keys you have listed stop signing, your node stops advancing. That is
+not a defect, it is what delegated validation means.
+
+**Your options, in order of preference:**
+
+1. **Move to `-matmulvalidation=consensus`.** This is the real fix. A consensus
+   node needs no pin, no signers, and no threshold — it accepts a block because
+   *this node* ExactReplay'd it. It requires a GPU that passes the byte-exact
+   TensorOps self-test. No permission from anyone is involved.
+2. **Repoint the pin at signers you actually trust.** Any GPU node running a
+   local signing key can attest. Configure two independent ones and keep
+   `-matmultrustedthreshold=2`. Mainnet refuses a 1-of-1 quorum for good
+   reason: a single stolen key would be sole proof-of-work authority for your
+   node.
+3. **Revoke specific keys without changing your pin** using
+   `-matmulattestationblocklist=<hex>`. Attestations from a blocked key are
+   never counted, even if the key is still listed. It is fail-closed: a block
+   that would leave you below your own threshold is refused.
+
+**What a trusted mirror is not.** The startup banner says it plainly — a
+trusted mirror performs ordinary block, body, and script validation but
+delegates the Profile-1 ExactReplay verdict to a configured quorum. It is not
+an independently validating full node. That is a reasonable trade for a
+CPU-only machine. It should be a deliberate choice, not an inherited default.
+
+Consensus miners and GPU full nodes are unaffected by any of this. They never
+consult a pin.
+
 ## ExactReplay is the gold standard
 
 `-matmulvalidation=consensus` (the default) accepts and produces
@@ -127,7 +169,8 @@ The one honest limit: `-matmulvalidation=trusted` nodes still depend
 on the pin. The startup warning already says they are **not an
 independent full consensus validator**. That is a hardware limit
 (CPU-only machines that physically cannot ExactReplay), not a
-governance one.
+governance one. After v0.34.1 that pin is yours to keep, repoint, or
+leave: see [Notice to trusted-mirror operators](#notice-to-trusted-mirror-operators-repoint-or-move-to-consensus).
 
 ## Shielded pool closed at height 199300
 
