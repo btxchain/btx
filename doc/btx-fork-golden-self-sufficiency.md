@@ -27,21 +27,21 @@ the row. Fork, measure, ship.
 
 ## What this tree will not do
 
-- It will not add an `m5_class` row on behalf of the community. Mining
-  admission for Apple Silicon is M5-only in `ClassifyMetalDevice`
-  (`has_metal4_int8_tensor_ops` requires `LtMetalArchNameClass::M5Class`).
-  M4-class stays verification-only. The historical `metal-m4` manifest
-  row is our hygiene for a binary we used to ship, not an ecosystem
-  ruling; 0.34 does not reseal it as a production mining backend.
-- It will not accept goldens measured on hardware that
-  `ClassifyMetalDevice` already marks verification-only and then treat
-  that as a classification fix. Classification and the manifest row are
-  different questions; mixing them is how an M5 self-quals and then
-  dies on `canary=missing_golden` (MendeMatthias, 2026-08-26, PR 123).
+- It will not add an `m5_class` row on behalf of the community. Metal
+  admission is the TensorOps self-test; the golden row is selected by
+  the reported class (`ClassifyFromDeviceName`). This tree ships CUDA
+  `sm_120`. A Metal miner adds **their** class row to **their**
+  manifest. That is how easyNode ships M5 mining today.
+- It will not accept goldens measured on hardware that failed the
+  TensorOps self-test and then treat that as a classification fix.
+  Classification (capability) and the manifest row (measured class)
+  are different questions; mixing them is how an M5 self-quals and
+  then dies on `canary=missing_golden` (MendeMatthias, 2026-08-26,
+  PR 123). Adding the row in **your** freeze is the fix.
 
 ## What stays in this repository
 
-The CUDA `sm_120` cohort, the seal scripts, and
+The CUDA `sm_120` cohort this line measured, the seal scripts, and
 [`btx-matmul-v4.7-production-golden-policy.md`](btx-matmul-v4.7-production-golden-policy.md)
 describe how **this** line reseals **this** binary. Forks copy the
 scripts; they do not send the JSON back.

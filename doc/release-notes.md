@@ -174,22 +174,31 @@ learn the header chain. See
 [btx-matmul-trusted-rpc-mirrors.md](btx-matmul-trusted-rpc-mirrors.md)
 § Bootstrapping a new mirror.
 
-## Metal is verification-only pending a fork `m5_class` row
+## Metal mining is a row you add
 
-`ClassifyMetalDevice` admits mining only on M5-class Metal 4 INT8
-TensorOps. M4-class stays verification-only. The historical
-`metal-m4` golden was measured on Apple M4 Max; that is our hygiene
-for a binary we used to ship, not an ecosystem ruling, and 0.34 does
-not reseal it as a production mining backend.
+Admission is the byte-exact TensorOps self-test
+(`IsLtTensorOpsGemmAvailable` / `SelfTestTensorOpsOnce`), not a
+device-name string. Mining then requires a golden row for **your**
+reported class (`m4_class`, `m5_class`, …). This tree publishes the
+classes **we** measured (CUDA `sm_120`). To mine on Metal, add a row
+to your copy of
+`src/matmul/matmul_v4_rc_production_golden_manifest.data`, rebuild,
+and reseal — about four minutes with
+[`contrib/matmul-v4/multi-gpu-golden-corpus.sh`](../contrib/matmul-v4/multi-gpu-golden-corpus.sh)
+`--backends metal`. Step-by-step:
+[btx-fork-golden-self-sufficiency.md](btx-fork-golden-self-sufficiency.md).
 
-An M5 can self-qualify and still die on `canary=missing_golden`
-because this tree has no `m5_class` row (MendeMatthias, PR 123). That
-refuse is what pushes easyNode/easyBTX onto the trusted-mirror path
-and into the bootstrap deadlock above. We will not add the row
-ourselves. A fork that ships an installer (including easyNode) adds
-`m5_class` to **its** manifest, rebuilds, and reseals; its users then
-mine consensus on M5 without waiting on this repository. CUDA `sm_120`
-remains the production mining cohort for this line.
+easyNode / easyBTX (and any other installer) ships its own `m5_class`
+row in **its** freeze. Users get M5 Metal mining without waiting on
+this repository. That is the design, not a pending caveat.
+
+## 0.34 is the reference release
+
+Further releases should be **built by the community from this code**,
+not requested from us. We are not the gate for goldens, hardware
+classes, or future versions. How to freeze, measure, seal, and ship:
+[release-process.md](release-process.md) and
+[btx-fork-golden-self-sufficiency.md](btx-fork-golden-self-sufficiency.md).
 
 # Fast-start snapshot
 

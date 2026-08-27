@@ -89,32 +89,24 @@ std::vector<rc::RCProductionGoldenManifestEntry> GoldenCohort()
 
 BOOST_AUTO_TEST_CASE(committed_manifest_is_a_valid_single_freeze_cohort)
 {
-    // This case previously pinned the manifest as EMPTY, which was the correct
-    // guard while no CUDA+Metal cohort existed at one code freeze. The Epoch-A
-    // activation populated it, so the guard now pins the property that made
-    // populating it legitimate: a structurally valid cohort whose two entries
-    // agree on workload and provenance and differ only in provider.
+    // Pins the property that made populating the manifest legitimate: a
+    // structurally valid cohort that includes CUDA, agrees on workload and
+    // provenance, and uses one row per provider class. Metal is optional.
     const auto& manifest{rc::CommittedRCProductionGoldenManifest()};
-    BOOST_REQUIRE_EQUAL(manifest.size(), 2U);
+    BOOST_REQUIRE(!manifest.empty());
     BOOST_CHECK(rc::RCProductionGoldenManifestCohortValid(manifest));
 
-    const auto& a{manifest.front()};
-    const auto& b{manifest.back()};
-    // One cuda entry and one metal entry -- the two-provider requirement cannot
-    // be satisfied by naming one vendor's silicon twice.
-    BOOST_CHECK(a.provider_class.provider_family != b.provider_class.provider_family);
-    // Same freeze on both halves. This is the equivalence rule that every
-    // earlier corpus in this branch failed; digest equality alone never was it.
-    BOOST_CHECK_EQUAL(a.source_revision, b.source_revision);
-    BOOST_CHECK_EQUAL(a.source_tree_fingerprint, b.source_tree_fingerprint);
-    // Same workload...
-    BOOST_CHECK_EQUAL(a.header_nonce, b.header_nonce);
-    BOOST_CHECK(a.expected_digest == b.expected_digest);
-    // ...but genuinely distinct binaries, one per architecture.
-    BOOST_CHECK(a.harness_sha256 != b.harness_sha256);
+    const auto& reference{manifest.front()};
+    bool has_cuda{false};
     for (const auto& entry : manifest) {
+        if (entry.provider_class.provider_family == "cuda") has_cuda = true;
         BOOST_CHECK(entry.independently_reproduced);
+        BOOST_CHECK_EQUAL(entry.source_revision, reference.source_revision);
+        BOOST_CHECK_EQUAL(entry.source_tree_fingerprint, reference.source_tree_fingerprint);
+        BOOST_CHECK_EQUAL(entry.header_nonce, reference.header_nonce);
+        BOOST_CHECK(entry.expected_digest == reference.expected_digest);
     }
+    BOOST_CHECK(has_cuda);
 }
 
 BOOST_AUTO_TEST_CASE(data_only_manifest_parser_is_strict_and_inert)
@@ -130,6 +122,15 @@ BOOST_AUTO_TEST_CASE(data_only_manifest_parser_is_strict_and_inert)
     const auto parsed{rc::ParseRCProductionGoldenManifestData(valid)};
     BOOST_REQUIRE_EQUAL(parsed.size(), 2U);
     BOOST_CHECK(rc::RCProductionGoldenManifestCohortValid(parsed));
+
+    const std::string cuda_only{
+        "BTX_RC_PRODUCTION_GOLDEN_V1\n"
+        "cuda-entry|cuda|sm_120|1|" + std::string(64, '1') +
+        "|1|doc/evidence/corpus|" + std::string(40, '2') + "|" +
+        std::string(64, '3') + "|" + std::string(64, '4') + "\n"};
+    const auto cuda_parsed{rc::ParseRCProductionGoldenManifestData(cuda_only)};
+    BOOST_REQUIRE_EQUAL(cuda_parsed.size(), 1U);
+    BOOST_CHECK(rc::RCProductionGoldenManifestCohortValid(cuda_parsed));
 
     // The excluded file is converted to byte literals before this parser sees
     // it. Code-like text, extra fields, and malformed hex must only produce an
@@ -338,7 +339,8 @@ BOOST_AUTO_TEST_CASE(golden_cohort_rejects_missing_or_divergent_backend)
 {
     auto cohort{GoldenCohort()};
     BOOST_CHECK(rc::RCProductionGoldenManifestCohortValid(cohort));
-    BOOST_CHECK(!rc::RCProductionGoldenManifestCohortValid({cohort[0]}));
+    BOOST_CHECK(rc::RCProductionGoldenManifestCohortValid({cohort[0]}));
+    BOOST_CHECK(!rc::RCProductionGoldenManifestCohortValid({cohort[1]}));
 
     auto divergent{cohort};
     divergent[1].expected_digest = NonNullDigest(0x43);

@@ -49,7 +49,7 @@ Any other change in that scope — including a one-line compile fix — moves th
 fingerprint and burns any corpus already recorded against the previous freeze.
 
 CPU ExactReplay is not an independent production golden. The required cohort is
-**CUDA and Metal**. HIP is optional; if supplied it must match exactly.
+**CUDA**. Metal and HIP are optional; if supplied they must match exactly.
 
 ### Ordering: prove builds, then freeze, then measure
 
@@ -200,7 +200,7 @@ contrib/matmul-v4/multi-gpu-golden-corpus.sh \
 ```
 
 The comparison must report `complete_multi_gpu_match=true`,
-`allow_partial=false`, `required_for_manifest=["cuda","metal"]`. Never
+`allow_partial=false`, `required_for_manifest=["cuda"]`. Never
 hand-edit `source_revision` / `source_tree_fingerprint` in a JSON to make a
 verifier pass — that falsifies evidence. If a compile fix landed after `F`,
 go back to step 1 and cut a new freeze.

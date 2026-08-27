@@ -339,7 +339,9 @@ def comparison_payload(
                         {"nonce": expected["header_nonce"], "backend": artifact.backend, "reason": f"{field}_mismatch"}
                     )
     present = {artifact.backend for artifact in artifacts}
-    complete = {"cuda", "metal"}.issubset(present) and not mismatches
+    required = {"cuda"}
+    complete = required.issubset(present) and not mismatches
+    cuda_metal = {"cuda", "metal"}.issubset(present) and not mismatches
     payload = {
         "evidence_kind": "multi_gpu_profile1_exactreplay_golden_compare",
         "schema_version": 2,
@@ -350,9 +352,9 @@ def comparison_payload(
         "per_episode_consensus_macs": PER_EPISODE_MACS,
         "backends_requested": [artifact.backend for artifact in artifacts],
         "backends_succeeded": [artifact.backend for artifact in artifacts],
-        "required_for_manifest": ["cuda", "metal"],
+        "required_for_manifest": ["cuda"],
         "complete_multi_gpu_match": complete,
-        "cuda_metal_match": complete,
+        "cuda_metal_match": cuda_metal,
         "allow_partial": allow_partial,
         "mismatches": mismatches,
         "coverage_failures": [],
@@ -420,7 +422,7 @@ def compare_command(args: argparse.Namespace) -> int:
     require(not payload["mismatches"], "header/digest mismatch across backends")
     require(
         payload["complete_multi_gpu_match"] or args.allow_partial,
-        "incomplete multi-GPU set (need cuda+metal with matching digests)",
+        "incomplete production-golden set (need cuda with matching digests)",
     )
     return 0
 
@@ -446,7 +448,7 @@ def parse_manifest(path: Path) -> list[ManifestEntry]:
     require("\r" not in text, f"{path}: manifest must use LF line endings")
     lines = text.splitlines()
     require(lines and lines[0] == MANIFEST_MAGIC, f"{path}: wrong manifest magic")
-    require(len(lines) >= 3, f"{path}: CUDA and Metal entries are required")
+    require(len(lines) >= 2, f"{path}: a CUDA entry is required")
     entries: list[ManifestEntry] = []
     for line_number, line in enumerate(lines[1:], 2):
         fields = line.split("|")
@@ -470,7 +472,9 @@ def parse_manifest(path: Path) -> list[ManifestEntry]:
         entries.append(ManifestEntry(identifier, family, architecture, nonce, digest, evidence, revision, fingerprint, harness))
     require(len({entry.identifier for entry in entries}) == len(entries), f"{path}: duplicate entry id")
     require(len({entry.family for entry in entries}) == len(entries), f"{path}: duplicate provider family")
-    require({entry.family for entry in entries} == {"cuda", "metal"}, f"{path}: manifest must contain exactly CUDA and Metal")
+    families = {entry.family for entry in entries}
+    require("cuda" in families, f"{path}: manifest must contain CUDA")
+    require(families <= {"cuda", "metal", "hip"}, f"{path}: unsupported provider family in cohort")
     require(len({entry.evidence_path for entry in entries}) == 1, f"{path}: provider entries must name one corpus")
     require(len({entry.revision for entry in entries}) == 1, f"{path}: provider revisions disagree")
     require(len({entry.fingerprint for entry in entries}) == 1, f"{path}: provider fingerprints disagree")
@@ -538,6 +542,7 @@ def seal_command(args: argparse.Namespace) -> int:
     compare_relative = corpus_relative / "multi-gpu-digest-compare.json"
     require_tracked_clean(root, compare_relative)
     comparison = load_json(root / compare_relative)
+    families = {entry.family for entry in entries}
     for field, expected in (
         ("evidence_kind", "multi_gpu_profile1_exactreplay_golden_compare"),
         ("schema_version", 2),
@@ -546,15 +551,18 @@ def seal_command(args: argparse.Namespace) -> int:
         ("canary_nonce_start", 1),
         ("episodes", 8),
         ("per_episode_consensus_macs", PER_EPISODE_MACS),
-        ("required_for_manifest", ["cuda", "metal"]),
+        ("required_for_manifest", ["cuda"]),
         ("complete_multi_gpu_match", True),
-        ("cuda_metal_match", True),
         ("allow_partial", False),
         ("mismatches", []),
         ("coverage_failures", []),
     ):
         require(comparison.get(field) == expected, f"{compare_relative}: {field} mismatch")
-    require(set(comparison.get("backends_succeeded", [])) == {"cuda", "metal"}, f"{compare_relative}: incomplete provider cohort")
+    succeeded = set(comparison.get("backends_succeeded", []))
+    require("cuda" in succeeded, f"{compare_relative}: CUDA provider missing")
+    require(families <= succeeded, f"{compare_relative}: manifest families missing from comparison")
+    if "metal" in families:
+        require(comparison.get("cuda_metal_match") is True, f"{compare_relative}: cuda_metal_match mismatch")
     by_backend = comparison.get("by_backend")
     require(isinstance(by_backend, dict), f"{compare_relative}: missing by_backend")
 
@@ -593,7 +601,8 @@ def seal_command(args: argparse.Namespace) -> int:
 
     print(
         "verify-production-golden-seal: PASS "
-        f"freeze={revision} seal={head} corpus={corpus_relative} providers=cuda,metal"
+        f"freeze={revision} seal={head} corpus={corpus_relative} "
+        f"providers={','.join(sorted(families))}"
     )
     return 0
 

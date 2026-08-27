@@ -48,7 +48,7 @@ ParseRCProductionGoldenManifestData(std::string_view encoded)
 {
     if (!encoded.empty() && encoded.back() == '\n') encoded.remove_suffix(1);
     const std::vector<std::string> lines{util::SplitString(encoded, '\n')};
-    if (lines.size() < 3 || lines.front() != MANIFEST_MAGIC) return {};
+    if (lines.size() < 2 || lines.front() != MANIFEST_MAGIC) return {};
 
     std::vector<RCProductionGoldenManifestEntry> manifest;
     manifest.reserve(lines.size() - 1);

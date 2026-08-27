@@ -147,11 +147,11 @@ private:
 
 /** Reviewed production goldens compiled into this source revision.
  *
- * Epoch-A production goldens require byte-identical ExactReplay digests on the
- * same frozen canary headers across the two independently implemented launch
- * providers, CUDA and Metal. Portable CPU is not an accepted independent
- * reproduction path. HIP remains supported, but is not required to authorize
- * the reviewed CUDA/Metal launch corpus.
+ * This tree ships the classes it measured (CUDA). Additional provider rows
+ * (Metal class, HIP, …) are added by the builder that measured them, in that
+ * builder's manifest, then resealed. Portable CPU is not an accepted
+ * independent reproduction path. Extra families present in a cohort must
+ * byte-match the CUDA digest.
  */
 [[nodiscard]] const std::vector<RCProductionGoldenManifestEntry>&
 CommittedRCProductionGoldenManifest();
@@ -161,7 +161,7 @@ CommittedRCProductionGoldenManifest();
 [[nodiscard]] std::vector<RCProductionGoldenManifestEntry>
 ParseRCProductionGoldenManifestData(std::string_view encoded);
 
-/** Require one coherent independently reproduced CUDA+Metal cohort. */
+/** Require one coherent independently reproduced CUDA cohort; other families optional. */
 [[nodiscard]] bool RCProductionGoldenManifestCohortValid(
     const std::vector<RCProductionGoldenManifestEntry>& manifest);
 
