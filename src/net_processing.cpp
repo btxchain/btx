@@ -13296,6 +13296,28 @@ void PeerManagerImpl::ProcessCompactBlockTxns(CNode& pfrom, Peer& peer, const Bl
     return;
 }
 
+//! Rate-limited logging for dropped or deferred non-authority messages.
+//! These were one-shot per process (a single static bool shared by every
+//! message type), so after the first drop of ANY type every later drop of
+//! every type was silent -- which is how the header-serving starvation went
+//! unnoticed. Log at most once per message type per 10 minutes instead.
+static bool ShouldLogIgnoredNonAuthorityMsg(const std::string& msg_type)
+{
+    static Mutex s_ignored_log_mutex;
+    static std::map<std::string, std::chrono::steady_clock::time_point>
+        s_last_logged GUARDED_BY(s_ignored_log_mutex);
+    constexpr auto LOG_INTERVAL{std::chrono::minutes{10}};
+    const auto now{std::chrono::steady_clock::now()};
+    LOCK(s_ignored_log_mutex);
+    const auto [it, inserted] = s_last_logged.try_emplace(msg_type, now);
+    if (inserted) return true;
+    if (now - it->second >= LOG_INTERVAL) {
+        it->second = now;
+        return true;
+    }
+    return false;
+}
+
 void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, DataStream& vRecv,
                                      const std::chrono::microseconds time_received,
                                      const std::atomic<bool>& interruptMsgProc)
@@ -14226,8 +14248,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         (msg_type == NetMsgType::BLOCK || msg_type == NetMsgType::CMPCTBLOCK ||
          msg_type == NetMsgType::BLOCKTXN || msg_type == NetMsgType::INV)};
     if (drop_headers_before_deserialize || drop_bodies_before_deserialize) {
-        static std::atomic<bool> logged_ignore{false};
-        if (!logged_ignore.exchange(true)) {
+        if (ShouldLogIgnoredNonAuthorityMsg(msg_type)) {
             LogInfo("Ignoring non-authority inbound %s (GPU attestors are the only inbound block source, peer=%d)\n",
                     SanitizeString(msg_type), pfrom.GetId());
         }
@@ -14242,30 +14263,35 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
     // the structural dependence 0.34 exists to remove. Address flooding stays
     // bounded by the token bucket above (MAX_ADDR_TO_SEND,
     // MAX_ADDR_RATE_PER_SECOND, MAX_ADDR_PROCESSING_TOKEN_BUCKET), so no
-    // protection is lost.
+    // protection is lost. TX / MEMPOOL / FEEFILTER stay dropped: those are
+    // chain and mempool INGEST.
     //
-    // Direction-of-data (PR 124 follow-up / MendeMatthias 2026-08-27): inbound
-    // requests we answer are always safe. GETHEADERS and GETBLOCKS ask us to
-    // SERVE; the bytes flow out. Serving a header or an inventory to a
-    // stranger cannot hijack consensus, reorg us, or feed us a bad chain.
-    // Dropping them made every authority-mode archive refuse header queries
-    // and useless as a bootstrap source — the archives-as-authority behaviour
-    // 0.34 exists to remove. TX / MEMPOOL / FEEFILTER stay dropped: those are
-    // inbound chain and mempool data we would ACCEPT, which is what authority
-    // rules govern.
+    // GETHEADERS and GETBLOCKS are deliberately NOT dropped. The distinction
+    // that matters is the DIRECTION OF DATA, not the message category. Those
+    // two are inbound REQUESTS asking us to SERVE, and the bytes flow OUT of
+    // this node, not in. Answering a header or inventory query cannot hijack
+    // our consensus, cannot reorg us and cannot feed us a bad chain -- it is a
+    // read. Authority rules govern which BODIES this node TRUSTS; a node
+    // serving headers trusts nothing.
+    //
+    // Dropping them made every authority-mode node refuse to answer header
+    // queries, so a peer asking for headers got silence, its single in-flight
+    // getheaders was never satisfied, and no tip anywhere advanced. Measured
+    // 2026-08-27: a fresh node connected only to one of our archives sent
+    // getheaders and received 0 header bytes, parking at height 0. Reported
+    // externally on PR 124 by MendeMatthias, who measured 0 header bytes
+    // returned across 11,604 requests to our archives.
     if ((ignore_non_gpu_inbound || drop_miner_ingest) &&
         (msg_type == NetMsgType::TX ||
          msg_type == NetMsgType::MEMPOOL || msg_type == NetMsgType::FEEFILTER)) {
-        static std::atomic<bool> logged_miner{false};
-        if (!logged_miner.exchange(true)) {
+        if (ShouldLogIgnoredNonAuthorityMsg(msg_type)) {
             LogInfo("Ignoring non-authority inbound %s (GPU attestors are the only inbound block source, peer=%d)\n",
                     SanitizeString(msg_type), pfrom.GetId());
         }
         return;
     }
     if (msg_type == NetMsgType::GETDATA && defer_miner_getdata) {
-        static std::atomic<bool> logged_getdata{false};
-        if (!logged_getdata.exchange(true)) {
+        if (ShouldLogIgnoredNonAuthorityMsg(msg_type)) {
             LogInfo("Deferring non-authority GETDATA while catching up to GPU-signed frontier (peer=%d)\n",
                     pfrom.GetId());
         }
@@ -14274,8 +14300,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
     if (msg_type == NetMsgType::GETMMATTEST &&
         m_signed_frontier_catch_up.load(std::memory_order_relaxed) &&
         !this_gpu) {
-        static std::atomic<bool> logged_getmm{false};
-        if (!logged_getmm.exchange(true)) {
+        if (ShouldLogIgnoredNonAuthorityMsg(msg_type)) {
             LogInfo("Deferring inbound GETMMATTEST while catching up to GPU-signed frontier (peer=%d)\n",
                     pfrom.GetId());
         }
@@ -19318,23 +19343,31 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
         if (state.fSyncStarted && peer->m_headers_sync_timeout < std::chrono::microseconds::max()) {
             // Detect whether this is a stalling initial-headers-sync peer
             if (m_chainman.m_best_header->Time() <= NodeClock::now() - 24h) {
-                if (current_time > peer->m_headers_sync_timeout && nSyncStarted == 1 && (m_num_preferred_download_peers - state.fPreferredDownload >= 1)) {
+                if (current_time > peer->m_headers_sync_timeout) {
                     // Disconnect a peer (without NetPermissionFlags::NoBan permission) if it is our only sync peer,
                     // and we have others we could be using instead.
                     // Note: If all our peers are inbound, then we won't
                     // disconnect our sync peer for stalling; we have bigger
                     // problems if we can't get any outbound peers.
-                    if (!pto->HasPermission(NetPermissionFlags::NoBan)) {
+                    if (nSyncStarted == 1 &&
+                        (m_num_preferred_download_peers - state.fPreferredDownload >= 1) &&
+                        !pto->HasPermission(NetPermissionFlags::NoBan)) {
                         LogInfo("Timeout downloading headers, %s\n", pto->DisconnectMsg(fLogIPs));
                         pto->fDisconnect = true;
                         return true;
                     } else {
-                        LogInfo("Timeout downloading headers from noban peer, not %s\n", pto->DisconnectMsg(fLogIPs));
-                        // Reset the headers sync state so that we have a
-                        // chance to try downloading from a different peer.
-                        // Note: this will also result in at least one more
-                        // getheaders message to be sent to
+                        // F2: a non-delivering peer must not hold the initial
+                        // sync slot forever. Previously the timeout was only
+                        // evaluated when nSyncStarted == 1 AND another
+                        // preferred download peer existed, so a slot holder
+                        // that never delivered was never timed out, and
+                        // may_claim_initial_sync_slot stayed false for every
+                        // other peer (measured 2026-08-27: nSyncStarted != 0
+                        // with in_flight_global=0 on a stale tip). Reclaim the
+                        // slot in place so another peer can claim it. This
+                        // also results in at least one more getheaders to
                         // this peer (eventually).
+                        LogInfo("Timeout downloading headers, reclaiming sync slot, not %s\n", pto->DisconnectMsg(fLogIPs));
                         state.fSyncStarted = false;
                         nSyncStarted--;
                         peer->m_headers_sync_timeout = 0us;
