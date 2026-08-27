@@ -71,22 +71,62 @@ static size_t CountQueuedMessageType(CNode& node, const std::string& msg_type)
         [&](const CSerializedNetMsg& msg) { return msg.m_type == msg_type; }));
 }
 
+// HEADERS wire is compact-size count + each 80-byte header + vtx count 0.
+// Same parse as PeerManager::ProcessMessage(HEADERS). Do not deserialize as
+// vector<CBlock>: that is not the receive path, and a throw looks like
+// "served zero headers" even when the bytes are on the wire.
+static size_t CountHeadersInPayload(Span<const uint8_t> payload)
+{
+    if (payload.empty()) return 0;
+    DataStream stream{payload};
+    try {
+        const uint64_t n_count{ReadCompactSize(stream)};
+        for (uint64_t i = 0; i < n_count; ++i) {
+            CBlockHeader header;
+            stream >> header;
+            if (ReadCompactSize(stream) != 0) return 0;
+        }
+        return static_cast<size_t>(n_count);
+    } catch (const std::ios_base::failure&) {
+        return 0;
+    }
+}
+
 static size_t CountQueuedHeaderBlocks(CNode& node)
 {
     LOCK(node.cs_vSend);
     size_t n{0};
     for (const auto& msg : node.vSendMsg) {
         if (msg.m_type != NetMsgType::HEADERS) continue;
-        DataStream stream{msg.data};
-        std::vector<CBlock> headers;
-        try {
-            stream >> TX_WITH_WITNESS(headers);
-        } catch (const std::ios_base::failure&) {
-            continue;
-        }
-        n += headers.size();
+        n += CountHeadersInPayload(msg.data);
     }
-    return n;
+    if (n > 0) return n;
+
+    // sock=null tests: PushMessage optimistic-write moves the message into
+    // V1Transport and erases vSendMsg. GetBytesToSend is the 24-byte V1
+    // header until MarkBytesSent; empty HEADERS is nMessageSize == 1.
+    const auto& [bytes, _more, transport_type] =
+        node.m_transport->GetBytesToSend(false);
+    if (bytes.empty() || transport_type != NetMsgType::HEADERS) return n;
+    if (bytes.size() == CMessageHeader::HEADER_SIZE) {
+        DataStream hdr_stream{bytes};
+        try {
+            CMessageHeader hdr;
+            hdr_stream >> hdr;
+            if (hdr.nMessageSize <= 1) return 0;
+            if (hdr.nMessageSize >= 3 && (hdr.nMessageSize - 3) % 81 == 0 &&
+                (hdr.nMessageSize - 3) / 81 >= 253) {
+                return (hdr.nMessageSize - 3) / 81;
+            }
+            if ((hdr.nMessageSize - 1) % 81 == 0) {
+                return (hdr.nMessageSize - 1) / 81;
+            }
+            return 1;
+        } catch (const std::ios_base::failure&) {
+            return 0;
+        }
+    }
+    return CountHeadersInPayload(bytes);
 }
 
 
