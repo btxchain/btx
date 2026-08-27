@@ -1267,6 +1267,7 @@ private:
     ShieldedUnshieldVelocity m_shielded_unshield_velocity GUARDED_BY(::cs_main);
     bool m_shielded_state_initialized GUARDED_BY(::cs_main){false};
     bool m_logged_shielded_state_skip GUARDED_BY(::cs_main){false};
+    mutable uint64_t m_rebuild_shielded_state_calls_for_test GUARDED_BY(::cs_main){0};
     //! Last tip whose shielded snapshot, pin, and marker were actually written
     //! by PersistShieldedState. Shutdown skips a second full-tree fsync when
     //! this still matches ActiveTip(); a crash leaves it unset so the next
@@ -2069,6 +2070,25 @@ public:
         const Chainstate& chainstate,
         const CBlockIndex* tip) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
+    /** Snapshot tip is at/past nShieldedPoolDisableHeight and this node is
+     *  not requested to keep historical shielded stores (-shieldedstate=1).
+     *  Load/dump then use the closed frozen section instead of LevelDB. */
+    [[nodiscard]] bool EstablishesClosedShieldedState(const CBlockIndex* tip) const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** Consensus pin for the closed (empty, post-disable) shielded section. */
+    [[nodiscard]] std::optional<uint256> ComputeClosedShieldedSnapshotStatePin() const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** Write shielded snapshot payload matching `header`. Closed frozen
+     *  sections write no body. Pre-close sections walk live stores. */
+    [[nodiscard]] bool AppendShieldedSnapshotPayload(
+        AutoFile& file,
+        const node::ShieldedSnapshotSectionHeader& header,
+        const Chainstate& chainstate,
+        const CBlockIndex* tip,
+        std::string& error) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
     /** Export the current shielded state commitment scaffold for testing and tooling. */
     [[nodiscard]] std::optional<shielded::registry::ShieldedStateCommitment> GetShieldedStateCommitment() const
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
@@ -2288,6 +2308,21 @@ public:
 
     /** Rebuild the active shielded state from the active chain tip. */
     [[nodiscard]] bool RebuildShieldedStateFromActiveChain() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** Test hook: how many times RebuildShieldedState (O(chain) replay) ran. */
+    [[nodiscard]] uint64_t GetRebuildShieldedStateCallCountForTest() const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        return m_rebuild_shielded_state_calls_for_test;
+    }
+    void NoteRebuildShieldedStateForTest() EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        ++m_rebuild_shielded_state_calls_for_test;
+    }
+    void ResetRebuildShieldedStateCallCountForTest() EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        m_rebuild_shielded_state_calls_for_test = 0;
+    }
 
     /** Test hook to inspect bounded automatic shielded repair attempts. */
     [[nodiscard]] uint64_t GetShieldedAutoRepairAttemptCountForTest(ShieldedAutoRepairKind kind) const

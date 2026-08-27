@@ -146,6 +146,21 @@ public:
     CAmount m_pool_balance{0};
     ShieldedUnshieldVelocity m_unshield_velocity;
 
+    //! True when this header is the post-close frozen section: no live
+    //! shielded payload. A node loading a snapshot at or past
+    //! nShieldedPoolDisableHeight uses this encoding and must not open or
+    //! rebuild shielded_state.
+    [[nodiscard]] bool IsClosedFrozenSection() const
+    {
+        return m_commitment_count == 0 &&
+               m_nullifier_count == 0 &&
+               m_recovery_exit_commitment_count == 0 &&
+               m_settlement_anchor_count == 0 &&
+               m_netting_manifest_count == 0 &&
+               m_account_registry_entry_count == 0 &&
+               m_pool_balance == 0;
+    }
+
     template <typename Stream>
     inline void Serialize(Stream& s) const
     {

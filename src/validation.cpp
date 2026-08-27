@@ -1771,6 +1771,8 @@ template <typename Spend>
     if (unshield_velocity) unshield_velocity->Clear();
     if (tip == nullptr) return true;
 
+    chainstate.m_chainman.NoteRebuildShieldedStateForTest();
+
     std::vector<const CBlockIndex*> chain;
     chain.reserve(tip->nHeight + 1);
     for (const CBlockIndex* pindex = tip; pindex != nullptr; pindex = pindex->pprev) {
@@ -2279,6 +2281,12 @@ static void RefreshShieldedValidationSnapshots(
     const uint256& work_id) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
 {
     AssertLockHeld(::cs_main);
+    if (!chainman.ShouldMaintainShieldedState()) {
+        LogPrintf("%s: skipping shielded state rebuild for %s (pool closed; pass -shieldedstate=1 to audit from genesis)\n",
+                  context,
+                  work_id.ToString());
+        return false;
+    }
     if (!chainman.MarkShieldedAutoRepairAttempt(ShieldedAutoRepairKind::STATE_REBUILD)) {
         LogPrintf("%s: skipping shielded state rebuild for %s at unchanged shielded state generation\n",
                   context,
@@ -17448,6 +17456,11 @@ bool ChainstateManager::RebuildShieldedStateFromActiveChain()
     if (m_active_chainstate == nullptr) {
         return false;
     }
+    if (!ShouldMaintainShieldedState()) {
+        LogPrintf("RebuildShieldedStateFromActiveChain: skipping O(chain) replay (pool closed at height %d; pass -shieldedstate=1 to rebuild from genesis)\n",
+                  m_active_chainstate->m_chain.Tip() ? m_active_chainstate->m_chain.Tip()->nHeight : -1);
+        return false;
+    }
 
     const fs::path shielded_db_path = m_options.datadir / "shielded_state" / "nullifiers";
     const CBlockIndex* const tip = m_active_chainstate->m_chain.Tip();
@@ -17623,11 +17636,67 @@ bool ChainstateManager::InjectShieldedTransitionWriteFailureForTest(
            m_shielded_transition_write_fault_hook_for_test(seam);
 }
 
+bool ChainstateManager::EstablishesClosedShieldedState(const CBlockIndex* tip) const
+{
+    AssertLockHeld(::cs_main);
+    return tip != nullptr &&
+           GetConsensus().IsShieldedPoolDisabled(tip->nHeight) &&
+           !m_options.force_shielded_state;
+}
+
+std::optional<uint256> ChainstateManager::ComputeClosedShieldedSnapshotStatePin() const
+{
+    AssertLockHeld(::cs_main);
+    const shielded::ShieldedMerkleTree empty_tree{
+        shielded::ShieldedMerkleTree::IndexStorageMode::MEMORY_ONLY};
+    const shielded::registry::ShieldedAccountRegistryState empty_registry;
+    const std::vector<uint256> empty_recovery;
+    const std::vector<uint256> empty_anchors;
+    const std::vector<ConfirmedNettingManifestState> empty_manifests;
+
+    shielded::registry::ShieldedStateCommitment commitment;
+    commitment.note_commitment_root = empty_tree.Root();
+    commitment.account_registry_root = empty_registry.Root();
+    commitment.nullifier_root = shielded::registry::ComputeNullifierSetCommitment({});
+    HashWriter bridge_commitment;
+    bridge_commitment << std::string{"BTX_SHIELDED_BRIDGE_STATE_COMMITMENT_V2"}
+                      << empty_recovery
+                      << empty_anchors
+                      << empty_manifests;
+    commitment.bridge_settlement_root = bridge_commitment.GetSHA256();
+    if (!commitment.IsValid()) return std::nullopt;
+
+    HashWriter pin;
+    pin << std::string{"BTX_ShieldedSnapshotStatePin_V3"}
+        << commitment.note_commitment_root
+        << commitment.account_registry_root
+        << commitment.nullifier_root
+        << commitment.bridge_settlement_root
+        << CAmount{0}
+        << ShieldedUnshieldVelocity{};
+    return pin.GetSHA256();
+}
+
 ShieldedSnapshotSectionHeader ChainstateManager::GetShieldedSnapshotSectionHeader(
     const Chainstate& chainstate,
     const CBlockIndex* tip) const
 {
     AssertLockHeld(::cs_main);
+
+    // Past nShieldedPoolDisableHeight the node does not open shielded stores.
+    // Dump the canonical closed frozen section (zero live counts) rather than
+    // walking LevelDB that is not open. Pre-close dumps keep the exact walk.
+    if (tip != nullptr &&
+        GetConsensus().IsShieldedPoolDisabled(tip->nHeight) &&
+        !HasShieldedState()) {
+        if (m_options.force_shielded_state) {
+            throw std::runtime_error("Failed to count BTX recovery-exit commitments for snapshot");
+        }
+        LogPrintf("GetShieldedSnapshotSectionHeader: emitting closed frozen shielded section at height %d (stores not open)\n",
+                  tip->nHeight);
+        return ShieldedSnapshotSectionHeader{};
+    }
+
     ShieldedSnapshotSectionHeader header;
     header.m_commitment_count = m_shielded_merkle_tree.Size();
     header.m_nullifier_count = m_shielded_nullifiers ? m_shielded_nullifiers->CountNullifiers() : 0;
@@ -17671,6 +17740,90 @@ ShieldedSnapshotSectionHeader ChainstateManager::GetShieldedSnapshotSectionHeade
     header.m_account_registry_roots.assign(account_registry_roots.begin(),
                                            account_registry_roots.end());
     return header;
+}
+
+bool ChainstateManager::AppendShieldedSnapshotPayload(
+    AutoFile& file,
+    const ShieldedSnapshotSectionHeader& header,
+    const Chainstate& chainstate,
+    const CBlockIndex* tip,
+    std::string& error)
+{
+    AssertLockHeld(::cs_main);
+    (void)chainstate;
+
+    if (tip != nullptr &&
+        GetConsensus().IsShieldedPoolDisabled(tip->nHeight) &&
+        !HasShieldedState()) {
+        if (m_options.force_shielded_state) {
+            error = "Failed to serialize BTX recovery-exit commitments";
+            return false;
+        }
+        if (!header.IsClosedFrozenSection()) {
+            error = "Closed shielded snapshot header is not a frozen zero-count section";
+            return false;
+        }
+        return true;
+    }
+
+    const auto& shielded_tree = GetShieldedMerkleTree();
+    for (uint64_t pos = 0; pos < shielded_tree.Size(); ++pos) {
+        const auto commitment = shielded_tree.CommitmentAt(pos);
+        if (!commitment.has_value()) {
+            error = strprintf("Missing BTX shielded commitment at position %u", pos);
+            return false;
+        }
+        file << *commitment;
+    }
+    if (!ForEachShieldedNullifier([&](const Nullifier& nf) {
+            file << nf;
+            return true;
+        })) {
+        error = "Failed to serialize BTX shielded nullifiers";
+        return false;
+    }
+    uint64_t written_recovery_exit_commitments{0};
+    if (!ForEachShieldedRecoveryExitCommitment([&](const uint256& commitment) {
+            file << commitment;
+            ++written_recovery_exit_commitments;
+            return true;
+        })) {
+        error = "Failed to serialize BTX recovery-exit commitments";
+        return false;
+    }
+    if (written_recovery_exit_commitments != header.m_recovery_exit_commitment_count) {
+        error = "Recovery-exit commitment count mismatch during shielded capture";
+        return false;
+    }
+    if (!ForEachShieldedSettlementAnchor([&](const uint256& anchor) {
+            file << anchor;
+            return true;
+        })) {
+        error = "Failed to serialize BTX shielded settlement anchors";
+        return false;
+    }
+    if (!ForEachShieldedNettingManifestState(
+            [&](const ConfirmedNettingManifestState& manifest_state) {
+                file << manifest_state;
+                return true;
+            })) {
+        error = "Failed to serialize BTX shielded netting manifests";
+        return false;
+    }
+    const auto account_registry_snapshot =
+        ExportShieldedAccountRegistrySnapshot(chainstate, tip);
+    if (!account_registry_snapshot.has_value()) {
+        error = "Failed to serialize BTX shielded account-registry entries";
+        return false;
+    }
+    if (account_registry_snapshot->entries.size() != header.m_account_registry_entry_count) {
+        error = "Account-registry entry count mismatch during shielded capture";
+        return false;
+    }
+    for (const auto& entry : account_registry_snapshot->entries) {
+        file << entry;
+    }
+    return true;
 }
 
 std::optional<shielded::registry::ShieldedStateCommitment> ChainstateManager::GetShieldedStateCommitment() const
