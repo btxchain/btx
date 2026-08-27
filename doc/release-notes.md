@@ -388,7 +388,7 @@ Block fetch stall detected: tip=0 best_header_ahead=2000 peer_best_ahead=2000 in
 already be in the index.
 
 0.34 accepts inbound **HEADERS** from any peer while the active tip is
-below `max(last checkpoint, highest AssumeUTXO pin)` (mainnet 199299),
+below `max(last checkpoint, highest AssumeUTXO pin)` (mainnet 199300),
 and the frontier seed only *raises* BestKnown. Bodies stay
 authority-only. You do not need an operator-controlled archive to
 learn the header chain. See
@@ -423,18 +423,21 @@ classes, or future versions. How to freeze, measure, seal, and ship:
 
 # Fast-start snapshot
 
-Unchanged from 0.33.4.2. Published assumeutxo pin (v9):
-[assumeutxo-199299](https://github.com/btxchain/btx/releases/tag/assumeutxo-199299)
+Published assumeutxo pin (v9, shielded pool closed):
+[assumeutxo-199300](https://github.com/btxchain/btx/releases/tag/assumeutxo-199300)
 
-- height **199299**, blockhash `f12a27d01a4b5a1710efa4497adf6f4c7da311d1c7b4f6a79cbf80f0b3110ec5`
-- `txoutset_hash` `db9e83156602927315d108a1ebce230b30eb78832e69db1947a21f5b5f2b8bf6`
-- `snapshot.dat` SHA256 `3c9e52ff053cd183af239dfce42cd57d007bdf530fd48ba9783623662d15070f`
+- height **199300**, blockhash `ff80e6299692a63345674a23b0638658c737529d12e78fc7f42afb3812afc9eb`
+- `txoutset_hash` `eb73aed769a9ef5b8f6c9cc4002388e49e4818a1e4cc6cd9d87e107aed5a1352`
+- `snapshot.dat` SHA256 `b7ee1459dead9fdb4ed4ee524a6faa66aa0a43ef5280cec00f841289df08e48a`
+- `nchaintx` 298984, size 452893894 bytes
+- `shielded_state_commitment` `94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541`
 
 ```bash
 btx-cli -rpcclienttimeout=0 loadtxoutset snapshot.dat
 ```
 
 Use `loadtxoutset`, not `loadtxoutsetattested`. Fresh chainstate only.
+v0.34.0 cannot load this height; v0.34.1 can.
 A 0.34 trusted mirror can now ingest the header chain from public
 peers first; 0.33.4.2 could not (see the bootstrap deadlock above).
 
