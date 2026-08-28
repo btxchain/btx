@@ -175,4 +175,13 @@ BOOST_AUTO_TEST_CASE(initial_sync_prefers_checkpoint_anchor_and_skips_low_work_f
         false, false, true));
 }
 
+BOOST_AUTO_TEST_CASE(far_behind_yields_gpu_protect)
+{
+    BOOST_CHECK(!node::CatchUpFarBehindYieldsGpuProtect(32));
+    BOOST_CHECK(!node::CatchUpFarBehindYieldsGpuProtect(199));
+    BOOST_CHECK(node::CatchUpFarBehindYieldsGpuProtect(200));
+    BOOST_CHECK(node::CatchUpFarBehindYieldsGpuProtect(1136));
+    BOOST_CHECK(node::FollowedHeaderSuffixNeedsDownloadFailover(199336, 1136));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

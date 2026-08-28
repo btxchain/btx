@@ -1500,6 +1500,23 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         /*ibd=*/true, /*ahead=*/40, /*signed_frontier_catch_up=*/true));
     BOOST_CHECK(IsNarrowCatchUpWindowForPolicy(
         /*ibd=*/false, /*ahead=*/8, /*signed_frontier_catch_up=*/false));
+    BOOST_CHECK(!IsNarrowCatchUpWindowForPolicy(
+        /*ibd=*/false, /*ahead=*/40, /*signed_frontier_catch_up=*/true,
+        /*stall_headers_ahead=*/2, /*narrow_max_ahead=*/32,
+        /*far_behind_yield=*/200, /*uncapped_ahead=*/1136));
+    BOOST_CHECK(!IsNarrowCatchUpWindowForPolicy(
+        /*ibd=*/false, /*ahead=*/8, /*signed_frontier_catch_up=*/false,
+        2, 32, 200, /*uncapped_ahead=*/200));
+    using node::matmul_trusted::PersistFollowedSuffixBodyWithoutGpu;
+    BOOST_CHECK(PersistFollowedSuffixBodyWithoutGpu(
+        /*trusted_mirror=*/false, /*extends_active_tip=*/true,
+        /*pprev_is_tip=*/false, /*index_height=*/199338, /*tip_height=*/199336));
+    BOOST_CHECK(!PersistFollowedSuffixBodyWithoutGpu(
+        false, true, /*pprev_is_tip=*/true, 199337, 199336));
+    BOOST_CHECK(!PersistFollowedSuffixBodyWithoutGpu(
+        /*trusted_mirror=*/true, true, false, 199338, 199336));
+    BOOST_CHECK(!PersistFollowedSuffixBodyWithoutGpu(
+        false, /*extends_active_tip=*/false, false, 199338, 199336));
     using node::matmul_trusted::PreferSignedFrontierCatchUpBlockPeer;
     BOOST_CHECK(!PreferSignedFrontierCatchUpBlockPeer(
         /*signed_frontier_catch_up=*/true, /*has_archive_bit=*/false,

@@ -143,6 +143,19 @@ namespace node {
     return uncapped_followed_ahead >= stall_headers_ahead;
 }
 
+/** GPU-protect 1-wide / HEADER_ONLY competing must yield when the node is
+ *  this far behind the followed header tip. A signer that cannot sync is
+ *  worse than a signer whose GPU is briefly busy. Live 0.34.5: 1136-deep
+ *  suffix, 1 block/min network, 1-wide can never catch up. */
+inline constexpr int CATCHUP_FAR_BEHIND_YIELD{200};
+
+[[nodiscard]] inline bool CatchUpFarBehindYieldsGpuProtect(
+    int uncapped_followed_ahead,
+    int far_behind_yield = CATCHUP_FAR_BEHIND_YIELD)
+{
+    return uncapped_followed_ahead >= far_behind_yield;
+}
+
 [[nodiscard]] inline bool HeaderSyncMustProbe(
     int32_t local_tip_height,
     int32_t peer_starting_height,

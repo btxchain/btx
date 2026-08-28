@@ -1345,18 +1345,45 @@ static constexpr auto GETMMATTEST_HISTORICAL_TOKEN_REFILL{std::chrono::seconds{4
  *  tip+1 (190777) sat HEADER_ONLY; those slots then timed out at ~100s.
  *  GPU attestation already covers the ancestor path, so the body at
  *  tip+1 is O(1) accept — serial root-first is body-download speed,
- *  not ExactReplay. Unattested near-tip holes stay 1-wide. IBD is wide. */
+ *  not ExactReplay. Unattested near-tip holes stay 1-wide. IBD is wide.
+ *  Far-behind (uncapped ahead >= far_behind_yield) yields 1-wide: a
+ *  signer that cannot sync is worse than a briefly busy GPU. Pass
+ *  uncapped ahead separately — capped FollowedChainAhead is 0 at a
+ *  local signer whose frontier==tip while a HEADER_ONLY suffix is
+ *  hundreds deep. */
 [[nodiscard]] inline bool IsNarrowCatchUpWindowForPolicy(
     bool ibd,
     int ahead,
     bool signed_frontier_catch_up,
     int stall_headers_ahead = 2,
-    int narrow_max_ahead = 32)
+    int narrow_max_ahead = 32,
+    int far_behind_yield = 200,
+    int uncapped_ahead = -1)
 {
     if (ibd) return false;
     if (ahead < stall_headers_ahead) return false;
+    const int yield_ahead{uncapped_ahead >= 0 ? uncapped_ahead : ahead};
+    if (far_behind_yield > 0 && yield_ahead >= far_behind_yield) return false;
     if (signed_frontier_catch_up) return true;
     return ahead < narrow_max_ahead;
+}
+
+/** Persist a followed-chain descendant (height > tip, ancestor at tip is
+ *  the tip) as HAVE_DATA without occupying ExactReplay. ConnectTip still
+ *  ExactReplays in root-first order. Immediate tip-children stay on the
+ *  ExactReplay / HEADER_ONLY twin-storm path. Trusted mirrors keep their
+ *  GETMMATTEST persist path. */
+[[nodiscard]] inline bool PersistFollowedSuffixBodyWithoutGpu(
+    bool trusted_mirror,
+    bool extends_active_tip,
+    bool pprev_is_tip,
+    int32_t index_height,
+    int32_t tip_height)
+{
+    if (trusted_mirror) return false;
+    if (!extends_active_tip) return false;
+    if (pprev_is_tip) return false;
+    return index_height > tip_height;
 }
 
 /** Who may take getdata during signed-frontier catch-up.
