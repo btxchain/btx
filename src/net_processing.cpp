@@ -1578,6 +1578,12 @@ private:
     /** Send `addr` messages on a regular schedule. */
     void MaybeSendAddr(CNode& node, Peer& peer, std::chrono::microseconds current_time) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
 
+    /** Flush m_addrs_to_send now. GETADDR on a discovery relay must not
+     *  wait for AVG_ADDRESS_BROADCAST_INTERVAL: SendMessages also returns
+     *  before MaybeSendAddr until VERACK, and ADDR_FETCH clients time out
+     *  after 10*30s. */
+    void SendQueuedAddresses(CNode& node, Peer& peer) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
+
     /** Send a single `sendheaders` message, after we have completed headers sync with a peer. */
     void MaybeSendSendHeaders(CNode& node, Peer& peer) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
 
@@ -13844,6 +13850,52 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                         std::memory_order_relaxed)))) {
                 m_addrman.Good(pfrom.addr);
             }
+        } else if (m_chainman.IsDiscoveryRelay() &&
+                   pfrom.addr.IsRoutable() &&
+                   !node::discovery_relay::ServicesLookLikeServingGpuAttestor(
+                       static_cast<uint64_t>(nServices))) {
+            // Inbound handshake is the only view a public seed has of the
+            // live network (measured: 97% inbound). Stock Core never
+            // Good()s inbounds; that left 45 tip-class peers connected
+            // and absent from addrman. Record the peer we already have a
+            // TCP handshake with, never their ADDR gossip.
+            std::unordered_map<NodeId, int> starting_heights;
+            {
+                LOCK(m_peer_mutex);
+                starting_heights.reserve(m_peer_map.size());
+                for (const auto& [id, connected] : m_peer_map) {
+                    starting_heights.emplace(
+                        id,
+                        connected->m_starting_height.load(
+                            std::memory_order_relaxed));
+                }
+            }
+            starting_heights[pfrom.GetId()] = starting_height;
+            std::vector<int32_t> network_heights;
+            m_connman.ForEachNode([&](CNode* pnode) {
+                if (pnode == nullptr || pnode->fDisconnect) return;
+                if ((pnode->m_nServices.load(std::memory_order_relaxed) &
+                     NODE_NETWORK) == 0) {
+                    return;
+                }
+                const auto it{starting_heights.find(pnode->GetId())};
+                if (it == starting_heights.end()) return;
+                network_heights.push_back(it->second);
+            });
+            const int32_t watermark{
+                node::discovery_relay::EffectiveIntroductionWatermark(
+                    m_discovery_archive_reported_height.load(
+                        std::memory_order_relaxed),
+                    network_heights)};
+            if (node::discovery_relay::MayRetainInboundHandshake(
+                    /*inbound=*/true, /*routable=*/true,
+                    static_cast<uint64_t>(nServices), starting_height,
+                    watermark)) {
+                CAddress advertised{pfrom.addr, nServices, Now<NodeSeconds>()};
+                m_addrman.Add({advertised}, advertised);
+                m_addrman.Good(advertised);
+                m_addrman.SetServices(advertised, nServices);
+            }
         }
 
         const auto mapped_as{m_connman.GetMappedAS(pfrom.addr)};
@@ -14363,8 +14415,18 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
     }
 
     if (!pfrom.fSuccessfullyConnected) {
-        LogDebug(BCLog::NET, "Unsupported message \"%s\" prior to verack from peer=%d\n", SanitizeString(msg_type), pfrom.GetId());
-        return;
+        // Discovery relays must answer GETADDR that arrives with VERACK in
+        // the same burst. bytesrecv counted 157 GETADDRs; only 30 ever
+        // reached this handler because the rest hit this gate. SetupAddressRelay
+        // for inbound is not armed at VERSION (outbound only).
+        const bool discovery_getaddr{
+            m_chainman.IsDiscoveryRelay() &&
+            msg_type == NetMsgType::GETADDR &&
+            pfrom.nVersion != 0};
+        if (!discovery_getaddr) {
+            LogDebug(BCLog::NET, "Unsupported message \"%s\" prior to verack from peer=%d\n", SanitizeString(msg_type), pfrom.GetId());
+            return;
+        }
     }
 
     // Trusted-GPU mode: drop miner-delivered BLOCK/INV/CMPCTBLOCK before
@@ -17791,7 +17853,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 peer->m_addrs_to_send.end());
         }
         if (m_chainman.IsDiscoveryRelay()) {
-            const int32_t watermark{
+            const int32_t archive_watermark{
                 m_discovery_archive_reported_height.load(
                     std::memory_order_relaxed)};
             std::unordered_map<NodeId, int> starting_heights;
@@ -17805,28 +17867,46 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                             std::memory_order_relaxed));
                 }
             }
+            std::vector<int32_t> network_heights;
             m_connman.ForEachNode([&](CNode* pnode) {
                 if (pnode == nullptr || pnode->fDisconnect) return;
-                if (!node::discovery_relay::MayLearnAddressFromPeer(
-                        pnode->IsInboundConn(), pnode->IsManualConn(),
-                        pnode->IsAddrFetchConn())) {
+                if ((pnode->m_nServices.load(std::memory_order_relaxed) &
+                     NODE_NETWORK) == 0) {
                     return;
                 }
+                const auto it{starting_heights.find(pnode->GetId())};
+                if (it == starting_heights.end()) return;
+                network_heights.push_back(it->second);
+            });
+            const int32_t watermark{
+                node::discovery_relay::EffectiveIntroductionWatermark(
+                    archive_watermark, network_heights)};
+            m_connman.ForEachNode([&](CNode* pnode) {
+                if (pnode == nullptr || pnode->fDisconnect) return;
+                if (pnode->GetId() == pfrom.GetId()) return;
                 const uint64_t services{
                     static_cast<uint64_t>(pnode->m_nServices.load(
                         std::memory_order_relaxed))};
+                const auto height_it{starting_heights.find(pnode->GetId())};
+                if (height_it == starting_heights.end()) return;
+                if (!node::discovery_relay::MayAdvertiseConnectedPeer(
+                        services, height_it->second, watermark)) {
+                    return;
+                }
                 if (!node::discovery_relay::MayAdvertiseEndpoint(
                         services, pnode->addr)) {
                     return;
                 }
-                const auto height_it{starting_heights.find(pnode->GetId())};
-                if (height_it == starting_heights.end()) return;
-                if (!node::discovery_relay::PeerLooksOnRecentNetwork(
-                        height_it->second, watermark)) {
-                    return;
-                }
-                PushAddress(*peer, pnode->addr);
+                CAddress advertised{
+                    pnode->addr, ServiceFlags(services), Now<NodeSeconds>()};
+                PushAddress(*peer, advertised);
             });
+        }
+        const size_t queued{peer->m_addrs_to_send.size()};
+        SendQueuedAddresses(pfrom, *peer);
+        if (m_chainman.IsDiscoveryRelay()) {
+            LogInfo("discovery relay: GETADDR reply %u addresses peer=%d\n",
+                    queued, pfrom.GetId());
         }
         return;
     }
@@ -18531,6 +18611,31 @@ void PeerManagerImpl::MaybeSendPing(CNode& node_to, Peer& peer, std::chrono::mic
     }
 }
 
+void PeerManagerImpl::SendQueuedAddresses(CNode& node, Peer& peer)
+{
+    if (!peer.m_addr_relay_enabled) return;
+    if (!Assume(peer.m_addrs_to_send.size() <= MAX_ADDR_TO_SEND)) {
+        peer.m_addrs_to_send.resize(MAX_ADDR_TO_SEND);
+    }
+    auto addr_already_known = [&peer](const CAddress& addr) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex) {
+        bool ret = peer.m_addr_known->contains(addr.GetKey());
+        if (!ret) peer.m_addr_known->insert(addr.GetKey());
+        return ret;
+    };
+    peer.m_addrs_to_send.erase(std::remove_if(peer.m_addrs_to_send.begin(), peer.m_addrs_to_send.end(), addr_already_known),
+                           peer.m_addrs_to_send.end());
+    if (peer.m_addrs_to_send.empty()) return;
+    if (peer.m_wants_addrv2) {
+        MakeAndPushMessage(node, NetMsgType::ADDRV2, CAddress::V2_NETWORK(peer.m_addrs_to_send));
+    } else {
+        MakeAndPushMessage(node, NetMsgType::ADDR, CAddress::V1_NETWORK(peer.m_addrs_to_send));
+    }
+    peer.m_addrs_to_send.clear();
+    if (peer.m_addrs_to_send.capacity() > 40) {
+        peer.m_addrs_to_send.shrink_to_fit();
+    }
+}
+
 void PeerManagerImpl::MaybeSendAddr(CNode& node, Peer& peer, std::chrono::microseconds current_time)
 {
     // Nothing to do for non-address-relay peers
@@ -18560,37 +18665,7 @@ void PeerManagerImpl::MaybeSendAddr(CNode& node, Peer& peer, std::chrono::micros
     if (current_time <= peer.m_next_addr_send) return;
 
     peer.m_next_addr_send = current_time + m_rng.rand_exp_duration(AVG_ADDRESS_BROADCAST_INTERVAL);
-
-    if (!Assume(peer.m_addrs_to_send.size() <= MAX_ADDR_TO_SEND)) {
-        // Should be impossible since we always check size before adding to
-        // m_addrs_to_send. Recover by trimming the vector.
-        peer.m_addrs_to_send.resize(MAX_ADDR_TO_SEND);
-    }
-
-    // Remove addr records that the peer already knows about, and add new
-    // addrs to the m_addr_known filter on the same pass.
-    auto addr_already_known = [&peer](const CAddress& addr) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex) {
-        bool ret = peer.m_addr_known->contains(addr.GetKey());
-        if (!ret) peer.m_addr_known->insert(addr.GetKey());
-        return ret;
-    };
-    peer.m_addrs_to_send.erase(std::remove_if(peer.m_addrs_to_send.begin(), peer.m_addrs_to_send.end(), addr_already_known),
-                           peer.m_addrs_to_send.end());
-
-    // No addr messages to send
-    if (peer.m_addrs_to_send.empty()) return;
-
-    if (peer.m_wants_addrv2) {
-        MakeAndPushMessage(node, NetMsgType::ADDRV2, CAddress::V2_NETWORK(peer.m_addrs_to_send));
-    } else {
-        MakeAndPushMessage(node, NetMsgType::ADDR, CAddress::V1_NETWORK(peer.m_addrs_to_send));
-    }
-    peer.m_addrs_to_send.clear();
-
-    // we only send the big addr message once
-    if (peer.m_addrs_to_send.capacity() > 40) {
-        peer.m_addrs_to_send.shrink_to_fit();
-    }
+    SendQueuedAddresses(node, peer);
 }
 
 void PeerManagerImpl::MaybeSendSendHeaders(CNode& node, Peer& peer)
@@ -18780,6 +18855,14 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
     if (pto->fDisconnect) return true;
 
     MaybeSendAddr(*pto, *peer, current_time);
+
+    // Discovery relays introduce peers. They do not sync headers, probe
+    // BestKnown, or occupy cs_main per inbound on the GETADDR path. With
+    // ~170 inbounds that theater delayed ADDR replies past ADDR_FETCH's
+    // 5-minute timeout.
+    if (m_chainman.IsDiscoveryRelay()) {
+        return true;
+    }
 
     MaybeSendSendHeaders(*pto, *peer);
 

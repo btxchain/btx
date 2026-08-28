@@ -3028,6 +3028,16 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect, Spa
                 addrman.Add(seed_addrs, local);
                 add_fixed_seeds = false;
                 LogPrintf("Added %d fixed seeds from reachable networks.\n", seed_addrs.size());
+                // Compiled seeds are discovery relays (no NODE_NETWORK).
+                // ConvertSeeds stamps SeedsServiceFlags() so addrman tries
+                // them as full outbound, then VERSION disconnects
+                // (200000908 vs 00000009). Queue ADDR_FETCH so GETADDR can
+                // run; HandshakeKeepsDiscoveryPeer keeps the hop.
+                for (const CAddress& seed_addr : seed_addrs) {
+                    AddAddrFetch(seed_addr.ToStringAddrPort());
+                }
+                LogPrintf("Queued %d fixed seeds as addr-fetch (discovery relays lack NODE_NETWORK).\n",
+                          seed_addrs.size());
             }
         }
 

@@ -507,9 +507,31 @@ BOOST_AUTO_TEST_CASE(discovery_relay_addr_policy_hides_gpu_attestors)
 
     BOOST_CHECK(HandshakeKeepsDiscoveryPeer(
         /*addr_fetch=*/true, NODE_MATMUL_DISCOVERY));
-    BOOST_CHECK(!HandshakeKeepsDiscoveryPeer(
+    BOOST_CHECK(HandshakeKeepsDiscoveryPeer(
         /*addr_fetch=*/false, NODE_MATMUL_DISCOVERY));
     BOOST_CHECK(!HandshakeKeepsDiscoveryPeer(true, NODE_NETWORK | NODE_WITNESS));
+
+    BOOST_CHECK_EQUAL(RobustConnectedWatermark({}), -1);
+    BOOST_CHECK_EQUAL(RobustConnectedWatermark({199400}), 199400);
+    BOOST_CHECK_EQUAL(RobustConnectedWatermark({199400, 199390}), 199390);
+    BOOST_CHECK_EQUAL(
+        RobustConnectedWatermark({999999, 199400, 199390, 185109}), 199390);
+    BOOST_CHECK_EQUAL(EffectiveIntroductionWatermark(-1, {199400, 199390, 199380}),
+                      199380);
+    BOOST_CHECK_EQUAL(EffectiveIntroductionWatermark(199350, {199400, 199390, 199380}),
+                      199380);
+    BOOST_CHECK(MayAdvertiseConnectedPeer(
+        NODE_NETWORK | NODE_WITNESS, 199400, 199390));
+    BOOST_CHECK(!MayAdvertiseConnectedPeer(
+        NODE_NETWORK | NODE_WITNESS, 185109, 199390));
+    BOOST_CHECK(!MayAdvertiseConnectedPeer(NODE_MATMUL_DISCOVERY, 199400, 199390));
+    BOOST_CHECK(MayRetainInboundHandshake(
+        /*inbound=*/true, /*routable=*/true, NODE_NETWORK | NODE_WITNESS,
+        199400, 199390));
+    BOOST_CHECK(!MayRetainInboundHandshake(
+        /*inbound=*/false, true, NODE_NETWORK | NODE_WITNESS, 199400, 199390));
+    BOOST_CHECK(!MayRetainInboundHandshake(
+        true, /*routable=*/false, NODE_NETWORK | NODE_WITNESS, 199400, 199390));
 
     BOOST_CHECK(ServicesAreDiscoveryOnly(NODE_MATMUL_DISCOVERY));
     BOOST_CHECK(!ServicesAreDiscoveryOnly(
