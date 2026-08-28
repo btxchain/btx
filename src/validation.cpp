@@ -21072,6 +21072,22 @@ std::optional<int> ChainstateManager::GetSnapshotBaseHeight() const
     return base ? std::make_optional(base->nHeight) : std::nullopt;
 }
 
+void ChainstateManager::EnsureBestHeaderNotBehindConnectedTip()
+{
+    AssertLockHeld(cs_main);
+    CBlockIndex* tip{ActiveChain().Tip()};
+    if (tip == nullptr) return;
+    if (m_best_header == nullptr) {
+        SetBestHeader(tip);
+        return;
+    }
+    const bool follows_tip{m_best_header->nHeight >= tip->nHeight &&
+                           m_best_header->GetAncestor(tip->nHeight) == tip};
+    if (!follows_tip && m_best_header->nHeight < tip->nHeight) {
+        SetBestHeader(tip);
+    }
+}
+
 void ChainstateManager::RecalculateBestHeader()
 {
     AssertLockHeld(cs_main);
@@ -21083,7 +21099,10 @@ void ChainstateManager::RecalculateBestHeader()
     }
     if (!node::matmul_trusted::IsConfigured() || active_tip == nullptr) {
         for (auto& entry : m_blockman.m_block_index) {
-            if (m_interrupt) return;
+            if (m_interrupt) {
+                EnsureBestHeaderNotBehindConnectedTip();
+                return;
+            }
             if (entry.second.nStatus & BLOCK_FAILED_MASK) continue;
             MaybeUpdateBestClaimedHeader(&entry.second);
             // Authenticated-work selection with a bounded unauth allowance: a short
@@ -21093,6 +21112,7 @@ void ChainstateManager::RecalculateBestHeader()
                 SetBestHeader(&entry.second);
             }
         }
+        EnsureBestHeaderNotBehindConnectedTip();
         return;
     }
 
@@ -21127,7 +21147,10 @@ void ChainstateManager::RecalculateBestHeader()
     CBlockIndex* attested_frontier{const_cast<CBlockIndex*>(active_tip)};
     CBlockIndex* authority_best{nullptr};
     for (auto& [_, candidate] : m_blockman.m_block_index) {
-        if (m_interrupt) return;
+        if (m_interrupt) {
+            EnsureBestHeaderNotBehindConnectedTip();
+            return;
+        }
         if ((candidate.nStatus & BLOCK_FAILED_MASK) ||
             IsOnParkedReorgBranch(&candidate)) {
             continue;
@@ -21174,7 +21197,10 @@ void ChainstateManager::RecalculateBestHeader()
     if (attested_frontier != nullptr) {
         CBlockIndex* followed{attested_frontier};
         for (auto& [_, candidate] : m_blockman.m_block_index) {
-            if (m_interrupt) return;
+            if (m_interrupt) {
+                EnsureBestHeaderNotBehindConnectedTip();
+                return;
+            }
             if ((candidate.nStatus & BLOCK_FAILED_MASK) ||
                 IsOnParkedReorgBranch(&candidate) ||
                 !BlockIndexDescends(&candidate, attested_frontier)) {
@@ -21194,6 +21220,7 @@ void ChainstateManager::RecalculateBestHeader()
         // displace the active-tip branch on reconstruction — mirrors only.
         SetBestHeader(authority_best);
     }
+    EnsureBestHeaderNotBehindConnectedTip();
 }
 
 bool ChainstateManager::ValidatedSnapshotCleanup()
