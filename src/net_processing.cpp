@@ -4098,6 +4098,57 @@ static bool TrustedMirrorMayDownloadIndex(
         competing_headers_pulled_ahead, height_occupied);
 }
 
+//! True when `index` sits on a strictly heavier competing header chain
+//! (BestKnown / claimed work > tip, fork below tip). Live 2026-08-28:
+//! headers accepted to 199384, lowest_missing=199299, then
+//! select=root_header_only_skip because the first body was HEADER_ONLY'd.
+[[nodiscard]] static bool IndexIsOnHeavierCompetingFork(
+    const ChainstateManager& chainman,
+    const CBlockIndex* tip,
+    const CBlockIndex* index,
+    const CBlockIndex* peer_best)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    if (tip == nullptr || index == nullptr) return false;
+    if ((index->nStatus & BLOCK_FAILED_MASK) != 0) return false;
+    if (chainman.ActiveChain().Contains(index)) return false;
+    auto on_heavier = [&](const CBlockIndex* best) {
+        if (best == nullptr) return false;
+        if (best->GetAncestor(index->nHeight) != index) return false;
+        const bool extends_tip{
+            best->nHeight >= tip->nHeight &&
+            best->GetAncestor(tip->nHeight) == tip};
+        return node::matmul_trusted::ConsensusMinerMayFetchCompetingHeavierFork(
+            node::matmul_trusted::IsTrustedMirror(),
+            extends_tip,
+            best->nChainWork > tip->nChainWork);
+    };
+    return on_heavier(peer_best) ||
+           on_heavier(chainman.m_best_header) ||
+           on_heavier(chainman.m_best_claimed_header);
+}
+
+//! Next connectable hole on that fork: the LCA+1 child, or any descendant
+//! whose parent already has HAVE_DATA. Extra EncDr twins stay off-device.
+[[nodiscard]] static bool IndexIsHeavierCompetingForkNextHole(
+    const ChainstateManager& chainman,
+    const CBlockIndex* tip,
+    const CBlockIndex* index,
+    const CBlockIndex* peer_best)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    if (!IndexIsOnHeavierCompetingFork(chainman, tip, index, peer_best)) {
+        return false;
+    }
+    const CBlockIndex* const lca{LastCommonAncestor(tip, index)};
+    const bool immediate_fork_child{lca != nullptr && index->pprev == lca};
+    const bool parent_has_data{
+        index->pprev != nullptr &&
+        (index->pprev->nStatus & BLOCK_HAVE_DATA) != 0};
+    return node::matmul_trusted::HeavierCompetingForkHoleMayExactReplay(
+        /*may_fetch=*/true, immediate_fork_child, parent_has_data);
+}
+
 [[nodiscard]] static bool IsHeaderOnlyFetchSuppressed(
     const ChainstateManager& chainman,
     const CBlockIndex* tip,
@@ -4125,6 +4176,14 @@ static bool TrustedMirrorMayDownloadIndex(
         return false;
     }
     if (IndexIsHeaderOnlyLostTwinPath(chainman, tip, index, peer_best_known)) {
+        return false;
+    }
+    // Live 2026-08-28: AdvanceLastCommon already kept lowest_missing at
+    // 199299 (select was never no_missing_body). HEADER_ONLY then put the
+    // hash in m_header_only_competing and FindNextBlocks skipped it forever
+    // while peer 275's BestKnown sat at 199384. A node that accepted those
+    // headers must still GETDATA the fork child.
+    if (IndexIsOnHeavierCompetingFork(chainman, tip, index, peer_best_known)) {
         return false;
     }
     return competing.count(index->GetBlockHash()) != 0 ||
@@ -4275,6 +4334,13 @@ static bool TrustedMirrorMayDownloadIndex(
         g_configured_claimed_tip_child = index->GetBlockHash();
         LogInfo("MatMul ExactReplay lost-twin path hash=%s height=%d "
                 "(HEADER_ONLY skip would have wedged GETDATA)\n",
+                index->GetBlockHash().ToString(), index->nHeight);
+        return true;
+    }
+    if (IndexIsHeavierCompetingForkNextHole(chainman, tip, index, peer_best_known)) {
+        g_configured_claimed_tip_child = index->GetBlockHash();
+        LogInfo("MatMul ExactReplay heavier competing-fork hole hash=%s "
+                "height=%d (HEADER_ONLY skip would have wedged GETDATA)\n",
                 index->GetBlockHash().ToString(), index->nHeight);
         return true;
     }
@@ -4713,9 +4779,14 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
                         NODE_MATMUL_CONSENSUS,
                     TrustedMirrorShortTipReorg(tip, state->pindexBestKnownBlock),
                     state->pindexBestKnownBlock->nChainWork >= tip->nChainWork)};
+            const bool heavier_competing_fork{
+                node::matmul_trusted::ConsensusMinerMayFetchCompetingHeavierFork(
+                    node::matmul_trusted::IsTrustedMirror(),
+                    /*extends_tip=*/false,
+                    state->pindexBestKnownBlock->nChainWork > tip->nChainWork)};
             if (!recovery_target && !configured_attested_race &&
                 !yield_to_this_peer && !local_signer_lost_twin &&
-                !consensus_peer_short_reorg) {
+                !consensus_peer_short_reorg && !heavier_competing_fork) {
                 log_skip("competing_not_active_tip_chain");
                 return;
             }
@@ -5092,10 +5163,19 @@ void PeerManagerImpl::FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, c
             // 0.34.1 F3: do not occupy inflight with a same-height (or lower)
             // competitor of the connected tip. That pin is what kept
             // mapBlocksInFlight non-empty and shut the inverted preferred-peer
-            // header-sync hatch.
+            // header-sync hatch. Equal-work EncDr twins stay skipped.
+            // Strictly heavier competing forks must still GETDATA the hole
+            // at or below tip (live 2026-08-28: 199304 vs tip 199312).
             if (tip != nullptr && pindex->nHeight <= tip->nHeight &&
                 activeChain != nullptr && !activeChain->Contains(pindex)) {
-                continue;
+                const bool heavier_fork_hole{
+                    state->pindexBestKnownBlock != nullptr &&
+                    state->pindexBestKnownBlock->nChainWork > tip->nChainWork &&
+                    state->pindexBestKnownBlock->GetAncestor(pindex->nHeight) ==
+                        pindex};
+                if (!heavier_fork_hole) {
+                    continue;
+                }
             }
 
             // Intentionally HEADER_ONLY competing near-tip sibling, or a
@@ -8334,6 +8414,8 @@ bool PeerManagerImpl::MaybeSendGetHeaders(CNode& pfrom, const CBlockLocator& loc
     if (current_time - peer.m_last_getheaders_timestamp > HEADERS_RESPONSE_TIME) {
         MakeAndPushMessage(pfrom, NetMsgType::GETHEADERS, locator, uint256());
         peer.m_last_getheaders_timestamp = current_time;
+        LogInfo("sending getheaders (%zu locator hashes) peer=%d\n",
+                locator.vHave.size(), pfrom.GetId());
         return true;
     }
     return false;
@@ -8425,7 +8507,12 @@ void PeerManagerImpl::HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, c
                 !node::matmul_trusted::IsTrustedMirror() &&
                 TrustedMirrorShortTipReorg(tip_for_work, &last_header) &&
                 last_header.nChainWork >= tip_for_work->nChainWork};
-            if (!local_signer_lost_twin) {
+            const bool heavier_competing_fork{
+                node::matmul_trusted::ConsensusMinerMayFetchCompetingHeavierFork(
+                    node::matmul_trusted::IsTrustedMirror(),
+                    /*extends_tip=*/false,
+                    last_header.nChainWork > tip_for_work->nChainWork)};
+            if (!local_signer_lost_twin && !heavier_competing_fork) {
                 return;
             }
         }
@@ -12324,6 +12411,7 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
     bool persist_unrequested_followed{false};
     bool persist_gpu_body_awaiting_attestation{false};
     bool persist_lost_twin_for_signer{false};
+    bool persist_heavier_competing_fork{false};
     const bool from_gpu_attestor{
         node.IsManualConn() ||
         node.HasPermission(NetPermissionFlags::NoBan)};
@@ -12447,16 +12535,26 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
                                    !MatMulMaySpendExactReplayGpu(
                                        m_chainman, tip, indexed, peer_best)) {
                             // Extra twins / trusted-mirror pin-follow: do not
-                            // ExactReplay. HEADER_ONLY. Trusted mirrors
-                            // GETMMATTEST; consensus miners do not treat
-                            // GETMMATTEST as a validity wait — the unique
-                            // tip-child took ClaimConfigured above.
-                            exact_recompute_required = false;
-                            request_attestations_without_gpu = true;
-                            skip_competing_exactreplay = true;
-                            header_only_competing_first =
-                                m_header_only_competing.insert(block_hash)
-                                    .second;
+                            // ExactReplay. HEADER_ONLY — except a strictly
+                            // heavier competing fork whose headers we already
+                            // accepted (live 2026-08-28: 199299–199384
+                            // discarded, then root_header_only_skip forever).
+                            // Persist HAVE_DATA so ActivateBestChain can
+                            // ExactReplay at ConnectTip; do not occupy the
+                            // skip set.
+                            if (indexed != nullptr &&
+                                IndexIsOnHeavierCompetingFork(
+                                    m_chainman, tip, indexed, peer_best)) {
+                                exact_recompute_required = false;
+                                persist_heavier_competing_fork = true;
+                            } else {
+                                exact_recompute_required = false;
+                                request_attestations_without_gpu = true;
+                                skip_competing_exactreplay = true;
+                                header_only_competing_first =
+                                    m_header_only_competing.insert(block_hash)
+                                        .second;
+                            }
                         }
                     }
                 }
@@ -12519,6 +12617,14 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
         admission.state = MatMulBlockAdmission::State::NO_RECOMPUTE;
         admission.retain_as_requested = true;
         maybe_request_attestations_without_gpu();
+        return true;
+    }
+    if (persist_heavier_competing_fork) {
+        LogInfo("Persisting heavier competing-fork body hash=%s height=%d "
+                "from peer=%d (not HEADER_ONLY)\n",
+                block_hash.ToString(), exact_reference_height, node.GetId());
+        admission.state = MatMulBlockAdmission::State::NO_RECOMPUTE;
+        admission.retain_as_requested = true;
         return true;
     }
     if (persist_unrequested_followed) {
@@ -18791,6 +18897,8 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
         const bool headers_in_flight{
             peer->m_last_getheaders_timestamp != NodeClock::time_point{} &&
             NodeClock::now() - peer->m_last_getheaders_timestamp <= HEADERS_RESPONSE_TIME};
+        const bool best_known_extends_tip{node::HeaderSyncBestKnownExtendsTip(
+            state.pindexBestKnownBlock, tip_for_headers)};
         const bool must_probe{node::HeaderSyncMustProbe(
             tip_for_headers != nullptr ? tip_for_headers->nHeight : -1,
             peer->m_starting_height.load(),
@@ -18799,7 +18907,8 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
             headers_in_flight,
             state.pindexBestKnownBlock != nullptr
                 ? state.pindexBestKnownBlock->nHeight
-                : -1)};
+                : -1,
+            best_known_extends_tip)};
 
         // F1/F2: a peer advertising above our tip with no best-known is
         // enough to request headers. fPreferredDownload remains a
@@ -18832,13 +18941,16 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
             // peers are connected (CPU-only / scarce GPU), ordinary peers may still claim
             // the slot so header sync cannot deadlock.
             //
-            // F1: near_tip_headers may gate *sync-slot preference*. It must
-            // not block all header requests. must_probe sends getheaders
-            // without claiming the scarce IBD slot.
+            // Sync-slot getheaders only. must_probe is hoisted to the fan-out
+            // probe below: it must fire for a peer that already holds
+            // fSyncStarted and for a peer that lacks NODE_NETWORK
+            // (CanServeBlocks). Nesting it here made HeaderSyncMustProbe's
+            // true result unreachable (live 2026-08-28: getheaders=0 against
+            // peers advertising hundreds ahead).
             const bool near_tip_headers{!tip_is_stale};
             const bool may_claim_initial_sync_slot{
                 nSyncStarted == 0 && sync_blocks_and_headers_from_peer};
-            if (may_claim_initial_sync_slot || near_tip_headers || must_probe) {
+            if (may_claim_initial_sync_slot || near_tip_headers) {
                 const CBlockIndex* pindexStart = HeaderSyncLocatorIndex(m_chainman);
                 /* If possible, start at the block preceding the currently
                    best known header.  This ensures that we always get a
@@ -18851,7 +18963,13 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                     pindexStart = pindexStart->pprev;
                 if (pindexStart != nullptr &&
                     MaybeSendGetHeaders(*pto, GetLocator(pindexStart), *peer)) {
-                    LogDebug(BCLog::NET, "initial getheaders (%d) to peer=%d (startheight:%d)\n", pindexStart->nHeight, pto->GetId(), peer->m_starting_height);
+                    if (must_probe) {
+                        LogInfo("initial getheaders (%d) to peer=%d (startheight:%d)\n",
+                                pindexStart->nHeight, pto->GetId(),
+                                peer->m_starting_height.load());
+                    } else {
+                        LogDebug(BCLog::NET, "initial getheaders (%d) to peer=%d (startheight:%d)\n", pindexStart->nHeight, pto->GetId(), peer->m_starting_height);
+                    }
 
                     if (may_claim_initial_sync_slot || near_tip_headers) {
                         const auto target_spacing = std::max<int64_t>(
@@ -18896,6 +19014,10 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
         // message the sync peer already gets, not a new protocol burden, and it
         // is bounded by BEST_KNOWN_PROBE_INTERVAL per peer.
         //
+        // Independent of the IBD sync slot and of NODE_NETWORK: headers are
+        // cheap and self-validating. CanServeBlocks remains a getdata
+        // preference. MaybeSendGetHeaders rate-limits by HEADERS_RESPONSE_TIME.
+        //
         // F4: log the declined path so a zero-send is observable rather than
         // inferred from debug.log string counts (debug=net is often off).
         auto log_probe_declined = [&](const char* reason) {
@@ -18906,8 +19028,8 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                      tip_for_headers != nullptr ? tip_for_headers->nHeight : -1,
                      state.pindexBestKnownBlock != nullptr ? "set" : "null");
         };
-        if (must_probe && CanServeBlocks(*peer) &&
-            !m_chainman.m_blockman.LoadingBlocks() && !pto->IsAddrFetchConn()) {
+        if (must_probe && !m_chainman.m_blockman.LoadingBlocks() &&
+            !pto->IsAddrFetchConn()) {
             const CBlockIndex* tip{m_chainman.ActiveChain().Tip()};
             if (tip == nullptr) {
                 log_probe_declined("no_local_tip");
@@ -18923,18 +19045,18 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                         log_probe_declined("no_locator_start");
                     } else if (MaybeSendGetHeaders(*pto, GetLocator(start), *peer)) {
                         last_probe = current_time;
-                        LogDebug(BCLog::NET,
-                                 "best-known probe: getheaders to peer=%d "
-                                 "(advertised %d, our tip %d)\n",
-                                 pto->GetId(), peer->m_starting_height, tip->nHeight);
+                        LogInfo("best-known probe: getheaders to peer=%d "
+                                "(advertised %d, our tip %d, best_known_extends=%s)\n",
+                                pto->GetId(), peer->m_starting_height.load(),
+                                tip->nHeight,
+                                best_known_extends_tip ? "yes" : "no");
                     } else {
                         log_probe_declined("getheaders_in_flight");
                     }
                 }
             }
         } else if (must_probe) {
-            const char* reason = !CanServeBlocks(*peer) ? "cannot_serve_blocks" :
-                                 m_chainman.m_blockman.LoadingBlocks() ? "loading_blocks" :
+            const char* reason = m_chainman.m_blockman.LoadingBlocks() ? "loading_blocks" :
                                  pto->IsAddrFetchConn() ? "addr_fetch" : "unknown";
             log_probe_declined(reason);
         }

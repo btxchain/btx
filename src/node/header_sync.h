@@ -37,6 +37,22 @@ namespace node {
 }
 
 /**
+ * Whether `best_known` is a descendant of the connected tip (including
+ * the tip itself). Null is not an extension: treating it as one sealed
+ * minority-tip nodes out of getheaders whenever a caller omitted the
+ * explicit BestKnown-is-null flag (live 0.34.4: default
+ * `best_known_extends_tip=true` plus `pindexBestKnownBlock==nullptr`
+ * counted as extending).
+ */
+[[nodiscard]] inline bool HeaderSyncBestKnownExtendsTip(
+    const CBlockIndex* best_known, const CBlockIndex* active_tip)
+{
+    if (best_known == nullptr || active_tip == nullptr) return false;
+    if (best_known->nHeight < active_tip->nHeight) return false;
+    return best_known->GetAncestor(active_tip->nHeight) == active_tip;
+}
+
+/**
  * True when we must send getheaders to learn a peer's best block.
  *
  * True iff we have no best-known block for the peer and it advertises
@@ -60,6 +76,12 @@ namespace node {
  * advertised above us must still be probed: otherwise getheaders
  * stops after the first duplicate batch and we never learn tip+1.
  *
+ * `best_known_extends_tip` is false when BestKnown sits on a competing
+ * fork (GetAncestor(tip) != tip). Height-alone treated that peer as
+ * already "ahead" and sent zero getheaders (live 0.34.4: tip 199310 on
+ * 8b5da5a5, BestKnown 199382 on 33c834f8, peer VERSION 199523, unauth
+ * lead cap 72). A competing BestKnown is not an extension of our tip.
+ *
  * VERSION is a handshake snapshot. When the tip is stale, also probe
  * peers who advertised *below* us (live 0.34.3: 57 peers at
  * 199294–199309, the only peer above us on the 0.34.1 fork).
@@ -70,11 +92,13 @@ namespace node {
     bool best_known_is_null,
     bool tip_is_stale,
     bool headers_in_flight,
-    int32_t best_known_height = -1)
+    int32_t best_known_height = -1,
+    bool best_known_extends_tip = false)
 {
     (void)headers_in_flight;
     const auto known_not_ahead = [&] {
         if (best_known_is_null) return true;
+        if (!best_known_extends_tip) return true;
         return best_known_height <= local_tip_height;
     };
     if (peer_starting_height > local_tip_height) {
