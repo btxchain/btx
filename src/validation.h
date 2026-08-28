@@ -1969,13 +1969,16 @@ public:
     //! header in our block-index not known to be invalid, recalculate it.
     void RecalculateBestHeader() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
-    /** Snap m_best_header onto a valid index at or above ActiveTip.
-     *  Two live stalls share this gap: PreferTrustAdjustedHeader can leave
-     *  best_header on an authenticated ancestor *below* the connected tip
-     *  (0.34.3: headers=199024, blocks=199310), or *on an invalidateblock'd
-     *  suffix that still descends from the tip* (Case B snapshot: tip=199300,
-     *  headers=199303 failed, best_header_ahead=3, in_flight=0). Competing
-     *  valid forks ahead of the tip are left alone. */
+    /** Floor m_best_header at ActiveTip; do not pin it there.
+     *  PreferTrustAdjustedHeader can leave best_header on an authenticated
+     *  ancestor *below* the connected tip (0.34.3: headers=199024,
+     *  blocks=199310), or on an invalidateblock'd suffix that still
+     *  descends from the tip (Case B). Those snap up (or off the failed
+     *  branch) to the connected tip. A heavier *valid disconnected* fork
+     *  above the tip must remain (or become) m_best_header so headers
+     *  and GETDATA chase it (jarekpiot: 0.34.4 pin, headers==blocks
+     *  while getchaintips showed 0d5ffded@199398). Trusted mirrors do
+     *  not take that promotion. */
     void EnsureBestHeaderNotBehindConnectedTip() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /** Publish a new authoritative followed header and its exact height. */

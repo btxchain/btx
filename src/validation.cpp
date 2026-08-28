@@ -14628,10 +14628,12 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
     // PreferTrustAdjustedHeader's unauth allowance is denominated in the
     // candidate's own nBits. A high-difficulty stale fork (live 1883xx)
     // therefore outranks the ASERT-floor attested suffix, and AddToBlockIndex
-    // writes that into m_best_header. Configured nodes (trusted mirrors and
-    // consensus+pubkey) must not keep that choice: competing better-work
-    // branches are followed only from attestation-authority peers in
-    // net_processing. Blocks still require M-of-N quorum.
+    // writes that into m_best_header. Trusted mirrors must not keep a random
+    // competing promotion (authority peers steer via
+    // PreferTrustedMirrorAuthorityHeader). Consensus miners / GPU authorities
+    // must keep a strictly heavier valid disconnected fork: undoing it here
+    // is what pinned m_best_header to the connected tip after 0.34.4
+    // (jarekpiot: headers==blocks, getchaintips on the heavier tower).
     if (node::matmul_trusted::IsConfigured() && pindex != nullptr) {
         const CBlockIndex* tip{ActiveChain().Tip()};
         if (tip != nullptr) {
@@ -14646,7 +14648,18 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
                 prev_best != nullptr &&
                 pindex->nHeight > prev_best->nHeight &&
                 pindex->GetAncestor(prev_best->nHeight) == prev_best};
-            if (node::matmul_trusted::PreferTrustedMirrorTipChainHeader({
+            const bool failed{
+                (pindex->nStatus & BLOCK_FAILED_MASK) != 0 ||
+                !pindex->IsValid(BLOCK_VALID_TREE)};
+            const bool heavier_disconnected{
+                node::matmul_trusted::ConsensusMinerMayFollowHeavierDisconnectedHeader(
+                    node::matmul_trusted::IsTrustedMirror(), extends_tip,
+                    failed, IsOnParkedReorgBranch(pindex),
+                    pindex->nChainWork > tip->nChainWork,
+                    pindex->nHeight >= tip->nHeight)};
+            if (heavier_disconnected) {
+                SetBestHeader(pindex);
+            } else if (node::matmul_trusted::PreferTrustedMirrorTipChainHeader({
                     .extends_active_tip_chain = extends_tip,
                     .on_parked_reorg_branch = IsOnParkedReorgBranch(pindex),
                     .candidate_height = pindex->nHeight,
@@ -21085,8 +21098,8 @@ void ChainstateManager::EnsureBestHeaderNotBehindConnectedTip()
     if (tip == nullptr) return;
     if (m_best_header == nullptr) {
         SetBestHeader(tip);
-        return;
     }
+    if (m_best_header == nullptr) return;
 
     // BLOCK_FAILED_MASK covers FAILED_VALID and FAILED_CHILD. Do not call
     // RecalculateBestHeader from here: that function returns through this
@@ -21098,10 +21111,33 @@ void ChainstateManager::EnsureBestHeaderNotBehindConnectedTip()
                            m_best_header->GetAncestor(tip->nHeight) == tip};
     if (failed_branch) {
         SetBestHeader(tip);
+    } else if (!follows_tip && m_best_header->nHeight < tip->nHeight) {
+        SetBestHeader(tip);
+    }
+
+    // Floor, do not pin. SendMessages calls this every message: a valid
+    // heavier disconnected claimed header must become m_best_header so
+    // getblockchaininfo.headers and GETDATA chase that tower. Trusted
+    // mirrors stay on the authority-steered path.
+    if (node::matmul_trusted::IsTrustedMirror()) return;
+    CBlockIndex* claimed{m_best_claimed_header};
+    if (claimed == nullptr) claimed = m_best_header;
+    if (claimed == nullptr || claimed == m_best_header) return;
+    const bool claimed_failed{
+        (claimed->nStatus & BLOCK_FAILED_MASK) != 0 ||
+        !claimed->IsValid(BLOCK_VALID_TREE)};
+    const bool claimed_extends_tip{
+        claimed->nHeight >= tip->nHeight &&
+        claimed->GetAncestor(tip->nHeight) == tip};
+    if (!node::matmul_trusted::ConsensusMinerMayFollowHeavierDisconnectedHeader(
+            /*trusted_mirror=*/false, claimed_extends_tip, claimed_failed,
+            IsOnParkedReorgBranch(claimed),
+            claimed->nChainWork > tip->nChainWork,
+            claimed->nHeight >= tip->nHeight)) {
         return;
     }
-    if (!follows_tip && m_best_header->nHeight < tip->nHeight) {
-        SetBestHeader(tip);
+    if (claimed->nChainWork > m_best_header->nChainWork) {
+        SetBestHeader(claimed);
     }
 }
 

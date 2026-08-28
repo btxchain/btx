@@ -20,17 +20,25 @@ namespace node {
  * 286 blocks behind the active chain, and the only peer advertising above
  * us answers from the 0.34.1 fork (33c834f8) in a hot loop.
  *
- * Use the connected tip when best_header is behind it or on a competing
- * fork that does not extend it. Keep a HEADER_ONLY suffix that already
- * extends the tip so we still ask for tip+N+1.
+ * Use the connected tip when best_header is behind it, or on a competing
+ * fork that is not strictly heavier. Keep a HEADER_ONLY suffix that
+ * already extends the tip so we still ask for tip+N+1. A heavier valid
+ * disconnected fork above the tip is the locator origin (jarekpiot:
+ * chasing 0d5ffded@199398 must not restart at the losing connected tip).
  */
 [[nodiscard]] inline const CBlockIndex* HeaderSyncLocatorStart(
     const CBlockIndex* best_header, const CBlockIndex* active_tip)
 {
     if (active_tip == nullptr) return best_header;
-    if (best_header != nullptr &&
-        best_header->nHeight >= active_tip->nHeight &&
+    if (best_header == nullptr) return active_tip;
+    if (best_header->nHeight >= active_tip->nHeight &&
         best_header->GetAncestor(active_tip->nHeight) == active_tip) {
+        return best_header;
+    }
+    if (best_header->nHeight < active_tip->nHeight) {
+        return active_tip;
+    }
+    if (best_header->nChainWork > active_tip->nChainWork) {
         return best_header;
     }
     return active_tip;

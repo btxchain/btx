@@ -40,6 +40,30 @@ BOOST_AUTO_TEST_CASE(locator_start_keeps_suffix_that_extends_the_tip)
     BOOST_CHECK_EQUAL(node::HeaderSyncLocatorStart(&fork, &tip), &tip);
 }
 
+BOOST_AUTO_TEST_CASE(locator_start_chases_heavier_disconnected_fork)
+{
+    // jarekpiot 2026-08-28: m_best_header on 0d5ffded@199398 must be the
+    // locator origin, not the losing connected tip at 199326.
+    CBlockIndex tip;
+    tip.nHeight = 10;
+    tip.nChainWork = arith_uint256{1};
+    CBlockIndex other_parent;
+    other_parent.nHeight = 10;
+    other_parent.nChainWork = arith_uint256{1};
+    CBlockIndex fork;
+    fork.nHeight = 11;
+    fork.pprev = &other_parent;
+    fork.nChainWork = arith_uint256{2};
+    BOOST_CHECK(fork.GetAncestor(10) != &tip);
+    BOOST_CHECK_EQUAL(node::HeaderSyncLocatorStart(&fork, &tip), &fork);
+
+    CBlockIndex lighter;
+    lighter.nHeight = 11;
+    lighter.pprev = &other_parent;
+    lighter.nChainWork = arith_uint256{1};
+    BOOST_CHECK_EQUAL(node::HeaderSyncLocatorStart(&lighter, &tip), &tip);
+}
+
 BOOST_AUTO_TEST_CASE(must_probe_table)
 {
     // starting > tip, BestKnown null

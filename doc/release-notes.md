@@ -224,7 +224,16 @@ build then **exited** at startup, which looked like the same failure.
 
 - `must_probe` hoist (`8b0b0425`) plus BestKnown must **extend the tip**
   (`0fdd8739`).
-- Best-header guard (`EnsureBestHeaderNotBehindConnectedTip`, 0.34.4).
+- Best-header **floor**, not pin (`EnsureBestHeaderNotBehindConnectedTip`).
+  Never sit below the connected tip (0.34.3 headers-below-blocks). **Must**
+  sit on a heavier valid disconnected fork above it. 0.34.4 collapsed
+  those: **jarekpiot** reproduced on sealed v0.34.4 with no
+  `invalidateblock` — GPU authority on `8b5da5a5@199326`, ingested
+  `33c834f8` tower `0d5ffded@199398` (work `030b4fd9e7bfad` vs
+  `030b4fd97ff51b`), `getchaintips` showed the branchtip,
+  `headers==blocks`, `best_header_ahead=0`,
+  `competing_not_active_tip_chain`. The IsConfigured overlay was undoing
+  every competing promotion. `getblockfrompeer` cannot override a pin.
 - Park split (`ed52178e`): GETDATA of a heavier fork is not follow.
   Depth-6 park stays wired. Stale-heavier is **not** `recovery_escape`.
 - Discovery-relay retention and GETADDR (`ab15f616`):

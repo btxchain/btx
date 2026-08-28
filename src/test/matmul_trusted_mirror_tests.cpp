@@ -2162,6 +2162,23 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         false, false, /*peer_work_gt_tip=*/false));
     BOOST_CHECK(!ConsensusMinerMayFetchCompetingHeavierFork(
         /*trusted_mirror=*/true, false, true));
+    using node::matmul_trusted::ConsensusMinerMayFollowHeavierDisconnectedHeader;
+    BOOST_CHECK(ConsensusMinerMayFollowHeavierDisconnectedHeader(
+        /*trusted_mirror=*/false, /*extends_tip=*/false,
+        /*failed_or_invalid=*/false, /*parked=*/false,
+        /*candidate_work_gt_tip=*/true, /*candidate_height_ge_tip=*/true));
+    BOOST_CHECK(!ConsensusMinerMayFollowHeavierDisconnectedHeader(
+        /*trusted_mirror=*/true, false, false, false, true, true));
+    BOOST_CHECK(!ConsensusMinerMayFollowHeavierDisconnectedHeader(
+        false, /*extends_tip=*/true, false, false, true, true));
+    BOOST_CHECK(!ConsensusMinerMayFollowHeavierDisconnectedHeader(
+        false, false, /*failed_or_invalid=*/true, false, true, true));
+    BOOST_CHECK(!ConsensusMinerMayFollowHeavierDisconnectedHeader(
+        false, false, false, /*parked=*/true, true, true));
+    BOOST_CHECK(!ConsensusMinerMayFollowHeavierDisconnectedHeader(
+        false, false, false, false, /*candidate_work_gt_tip=*/false, true));
+    BOOST_CHECK(!ConsensusMinerMayFollowHeavierDisconnectedHeader(
+        false, false, false, false, true, /*candidate_height_ge_tip=*/false));
     using node::matmul_trusted::HeavierCompetingForkHoleMayExactReplay;
     BOOST_CHECK(HeavierCompetingForkHoleMayExactReplay(
         /*may_fetch=*/true, /*is_immediate_fork_child=*/true,

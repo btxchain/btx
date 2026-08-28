@@ -998,6 +998,30 @@ static constexpr auto GETMMATTEST_HISTORICAL_TOKEN_REFILL{std::chrono::seconds{4
     return peer_work_gt_tip;
 }
 
+/** m_best_header may sit on a heavier valid disconnected fork above the
+ *  connected tip. 0.34.4's EnsureBestHeaderNotBehindConnectedTip floored
+ *  a behind ancestor (headers-below-blocks) by snapping to ActiveTip,
+ *  then AcceptBlockHeader's IsConfigured overlay undid every competing
+ *  promotion, so the floor became a pin: getchaintips showed the tower
+ *  while getblockchaininfo.headers stayed equal to blocks
+ *  (jarekpiot 2026-08-28: 8b5da5a5@199326 vs 0d5ffded@199398,
+ *  best_header_ahead=0, competing_not_active_tip_chain). Trusted mirrors
+ *  keep authority-steered follow. Parked / failed / below-tip stay out. */
+[[nodiscard]] inline bool ConsensusMinerMayFollowHeavierDisconnectedHeader(
+    bool trusted_mirror,
+    bool extends_tip,
+    bool failed_or_invalid,
+    bool parked,
+    bool candidate_work_gt_tip,
+    bool candidate_height_ge_tip)
+{
+    if (trusted_mirror) return false;
+    if (extends_tip) return false;
+    if (failed_or_invalid || parked) return false;
+    if (!candidate_height_ge_tip) return false;
+    return candidate_work_gt_tip;
+}
+
 /** ExactReplay only the next connectable hole on that fork (LCA+1, or a
  *  descendant whose parent already has HAVE_DATA). Higher HEADER_ONLY
  *  bodies persist without GPU so an 86-block burst cannot occupy the

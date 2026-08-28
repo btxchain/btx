@@ -7524,6 +7524,119 @@ BOOST_AUTO_TEST_CASE(heavier_competing_fork_n_plus_72_getdata_fork_child)
     node::matmul_trusted::ResetForTest();
 }
 
+BOOST_AUTO_TEST_CASE(best_header_follows_heavier_disconnected_fork_not_pinned_to_tip)
+{
+    // jarekpiot 2026-08-28, sealed v0.34.4, GPU authority, never ran
+    // invalidateblock: minority 8b5da5a5@199326, ingested 33c834f8 tower
+    // to 0d5ffded@199398 (branchlen 104, more nChainWork), getchaintips
+    // showed the branchtip, getblockchaininfo headers==blocks because
+    // EnsureBestHeaderNotBehindConnectedTip + the IsConfigured overlay
+    // pinned m_best_header to the connected tip. Floor, do not pin.
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    node::matmul_trusted::ResetForTest();
+    CKey signer;
+    signer.MakeNewKey(/*fCompressed=*/true);
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256::FromHex(std::string(64, '1')).value();
+    config.replay_authority_context =
+        uint256::FromHex(std::string(64, '2')).value();
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/false, /*serve=*/false,
+        std::chrono::milliseconds{50}, error));
+    BOOST_REQUIRE(node::matmul_trusted::IsConfigured());
+    BOOST_REQUIRE(!node::matmul_trusted::IsTrustedMirror());
+    struct VerifierReset {
+        ~VerifierReset() { node::matmul_trusted::ResetForTest(); }
+    } verifier_reset;
+
+    ResetSharedPeermanFixture(m_node);
+    ChainstateManager& chainman{*Assert(m_node.chainman)};
+    PeerManager& peerman{*Assert(m_node.peerman)};
+    ConnmanTestMsg& connman{static_cast<ConnmanTestMsg&>(*m_node.connman)};
+
+    const CBlockIndex* fork_root{
+        WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip())};
+    BOOST_REQUIRE(fork_root != nullptr);
+    for (int i = 0; i < 8; ++i) {
+        mineBlock(m_node, std::chrono::seconds{fork_root->GetBlockTime() + 1 + i});
+    }
+    const CBlockIndex* tip{
+        WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip())};
+    BOOST_REQUIRE(tip != nullptr);
+    BOOST_REQUIRE_EQUAL(tip->nHeight, fork_root->nHeight + 8);
+    {
+        LOCK(::cs_main);
+        for (CBlockIndex* walk{const_cast<CBlockIndex*>(tip)}; walk != nullptr;
+             walk = walk->pprev) {
+            walk->nAuthenticatedChainWork = walk->nChainWork;
+        }
+        chainman.SetBestHeader(const_cast<CBlockIndex*>(tip));
+        peerman.SetBestBlock(tip->nHeight,
+                             std::chrono::seconds{tip->GetBlockTime()});
+    }
+
+    std::vector<CBlockIndex*> fork;
+    const CBlockIndex* walk{fork_root};
+    for (unsigned int tag = 0xb0; tag < 0xb0 + 16; ++tag) {
+        fork.push_back(MakePeermanHeaderChild(chainman, *walk, tag));
+        walk = fork.back();
+    }
+    BOOST_REQUIRE_EQUAL(fork.size(), 16U);
+    BOOST_CHECK(WITH_LOCK(::cs_main, return fork.back()->nChainWork > tip->nChainWork));
+    BOOST_CHECK(WITH_LOCK(::cs_main, return fork.back()->GetAncestor(tip->nHeight) != tip));
+
+    WITH_LOCK(::cs_main, {
+        BOOST_CHECK_MESSAGE(
+            chainman.m_best_header == fork.back(),
+            "configured GPU authority must keep m_best_header on the heavier "
+            "disconnected tower after ingest, not undo it back to the tip");
+        chainman.SetBestHeader(const_cast<CBlockIndex*>(tip));
+        BOOST_CHECK_EQUAL(chainman.m_best_header, tip);
+        chainman.EnsureBestHeaderNotBehindConnectedTip();
+        BOOST_CHECK_EQUAL(chainman.m_best_header, fork.back());
+        BOOST_CHECK_GT(chainman.m_best_header->nHeight, tip->nHeight);
+    });
+
+    SetMockTime(std::chrono::seconds{tip->GetBlockTime() + 55 * 3600});
+    BOOST_REQUIRE(!chainman.IsInitialBlockDownload());
+
+    const ServiceFlags services{ServiceFlags(
+        NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS)};
+    CNode peer{/*id=*/5500, /*sock=*/nullptr, CAddress{},
+               /*nKeyedNetGroupIn=*/5500, /*nLocalHostNonceIn=*/0,
+               CAddress{}, /*addrNameIn=*/"jarekpiot-heavier-tower",
+               ConnectionType::OUTBOUND_FULL_RELAY,
+               /*inbound_onion=*/false, /*network_key=*/0};
+    connman.Handshake(peer, /*successfully_connected=*/true, services, services,
+                      PROTOCOL_VERSION, /*relay_txs=*/true,
+                      /*starting_height=*/fork.back()->nHeight);
+    connman.FlushSendBuffer(peer);
+
+    std::vector<CBlock> hdrs;
+    hdrs.reserve(fork.size());
+    for (CBlockIndex* idx : fork) hdrs.emplace_back(idx->GetBlockHeader());
+    BOOST_REQUIRE(connman.ReceiveMsgFrom(
+        peer, NetMsg::Make(NetMsgType::HEADERS, TX_WITH_WITNESS(hdrs))));
+    peer.fPauseSend = false;
+    (void)connman.ProcessMessagesOnce(peer);
+    connman.FlushSendBuffer(peer);
+
+    SetMockTime(std::chrono::seconds{GetTime() + 180});
+    BOOST_CHECK(peerman.SendMessages(&peer));
+    BOOST_CHECK_EQUAL(
+        WITH_LOCK(::cs_main, return chainman.m_best_header), fork.back());
+    BOOST_REQUIRE_MESSAGE(
+        CountQueuedGetDataForHash(peer, fork.front()->GetBlockHash()) > 0,
+        "heavier disconnected tower must still be GETDATA'd after Ensure");
+
+    peerman.FinalizeNode(peer);
+    NeutralizeUnconnectedHeaders(chainman);
+    peerman.ResetMatMulVerifyAdmissionForTest();
+}
+
 BOOST_AUTO_TEST_CASE(must_probe_getheaders_without_sync_slot_or_network)
 {
     // Live 2026-08-28: HeaderSyncMustProbe was true (VERSION 199546 vs tip

@@ -354,6 +354,11 @@ BOOST_AUTO_TEST_CASE(consensus_without_signer_does_not_park_bypass)
     BOOST_CHECK(ConsensusMinerMayFetchCompetingHeavierFork(false, false, true));
     BOOST_CHECK(!ConsensusMinerMayFetchCompetingHeavierFork(true, false, true));
     BOOST_CHECK(!ConsensusMinerMayFetchCompetingHeavierFork(false, true, true));
+    using node::matmul_trusted::ConsensusMinerMayFollowHeavierDisconnectedHeader;
+    BOOST_CHECK(ConsensusMinerMayFollowHeavierDisconnectedHeader(
+        false, false, false, false, true, true));
+    BOOST_CHECK(!ConsensusMinerMayFollowHeavierDisconnectedHeader(
+        true, false, false, false, true, true));
     using node::matmul_trusted::ConsensusMinerMayReorgPastParkForStaleHeavierFork;
     BOOST_CHECK(ConsensusMinerMayReorgPastParkForStaleHeavierFork(
         false, false, true, true));
