@@ -4820,8 +4820,19 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
     // cannot reorg to it without the missing undo data. Once background
     // validation finishes, those peers are useful again without a restart.
     const CBlockIndex* snap_base{m_chainman.GetSnapshotBaseBlock()};
-    if (snap_base && !m_chainman.IsSnapshotValidated() &&
-        state->pindexBestKnownBlock->GetAncestor(snap_base->nHeight) != snap_base) {
+    const CBlockIndex* const snap_tip{tip};
+    const bool peer_has_snap_base{
+        snap_base != nullptr && state->pindexBestKnownBlock != nullptr &&
+        state->pindexBestKnownBlock->GetAncestor(snap_base->nHeight) ==
+            snap_base};
+    const bool peer_extends_active_tip{
+        snap_tip != nullptr && state->pindexBestKnownBlock != nullptr &&
+        state->pindexBestKnownBlock->nHeight >= snap_tip->nHeight &&
+        state->pindexBestKnownBlock->GetAncestor(snap_tip->nHeight) ==
+            snap_tip};
+    if (SnapshotUnvalidatedPeerLacksBase(
+            snap_base != nullptr, m_chainman.IsSnapshotValidated(),
+            peer_has_snap_base, peer_extends_active_tip)) {
         LogDebug(BCLog::NET, "Not downloading blocks from peer=%d, which doesn't have the snapshot block in its best chain.\n", peer.m_id);
         log_skip("snapshot_base_missing");
         return;

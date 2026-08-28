@@ -234,6 +234,14 @@ build then **exited** at startup, which looked like the same failure.
   `headers==blocks`, `best_header_ahead=0`,
   `competing_not_active_tip_chain`. The IsConfigured overlay was undoing
   every competing promotion. `getblockfrompeer` cannot override a pin.
+- Snapshot `loadtxoutset` closed loop (**MendeMatthias**, line-level on
+  v0.34.4, no fork, no invalid blocks): `ShouldFetchBackgroundSnapshotBlocks`
+  required `active >= best_header-1` (199300 vs 199303 never assigned
+  background capacity), so `MaybeCompleteSnapshotValidation` stayed SKIPPED,
+  `IsSnapshotValidated` stayed false, and `snapshot_base_missing` skipped
+  GETDATA. Height gap, not invalidity. Background fetch no longer waits on
+  that one-block proximity; a peer whose BestKnown extends the active tip
+  is not skipped. Fast-start docs recommend `loadtxoutset`.
 - Park split (`ed52178e`): GETDATA of a heavier fork is not follow.
   Depth-6 park stays wired. Stale-heavier is **not** `recovery_escape`.
 - Discovery-relay retention and GETADDR (`ab15f616`):

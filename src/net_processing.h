@@ -54,9 +54,14 @@ static constexpr size_t MAX_SHIELDED_TX_RELAY_BYTES_PER_SECOND{500'000};
 static constexpr size_t MAX_SHIELDEDDATA_REQUESTS_PER_SECOND{8};
 
 /** Whether scarce per-peer block-download capacity may be assigned to the
- * assumeutxo background chain. The active snapshot chain must first be out of
- * IBD and within one block of the best known header; the IBD latch alone can
- * clear based on chainwork and tip age while a fresh snapshot is still behind. */
+ * assumeutxo background chain. The active snapshot chain must first be out
+ * of IBD. A height gap vs m_best_header is not a gate: requiring
+ * active_height >= best_header_height - 1 left loadtxoutset nodes with
+ * active 199300 and headers 199303 never assigning background capacity,
+ * so MaybeCompleteSnapshotValidation stayed SKIPPED, IsSnapshotValidated
+ * stayed false, and FindNextBlocks could skip every peer (MendeMatthias,
+ * v0.34.4, no fork, no invalid blocks). Active-chain FindNextBlocks still
+ * runs first and takes inflight budget. */
 constexpr bool ShouldFetchBackgroundSnapshotBlocks(
     bool background_sync,
     bool limited_peer,
@@ -64,8 +69,24 @@ constexpr bool ShouldFetchBackgroundSnapshotBlocks(
     int active_height,
     int best_header_height)
 {
+    (void)active_height;
     return background_sync && !limited_peer && !initial_block_download &&
-        best_header_height >= 0 && active_height >= best_header_height - 1;
+        best_header_height >= 0;
+}
+
+/** Competing BestKnown that does not contain the snapshot base cannot be
+ *  downloaded until background validation finishes (no undo). A peer
+ *  whose BestKnown extends the active tip is serving our snapshot chain
+ *  and must not be skipped — that skip was gate 3 of the closed loop. */
+constexpr bool SnapshotUnvalidatedPeerLacksBase(
+    bool has_snapshot_base,
+    bool snapshot_validated,
+    bool peer_best_contains_snapshot_base,
+    bool peer_best_extends_active_tip)
+{
+    if (!has_snapshot_base || snapshot_validated) return false;
+    if (peer_best_extends_active_tip) return false;
+    return !peer_best_contains_snapshot_base;
 }
 
 /** Whether a connected peer remains eligible for block/header synchronization
