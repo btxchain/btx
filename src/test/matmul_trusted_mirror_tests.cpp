@@ -2130,6 +2130,40 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         false, /*peer_advertises_consensus=*/false, true, true));
     BOOST_CHECK(!ConsensusMinerMayFetchCompetingShortReorg(
         false, true, /*short_reorg=*/false, true));
+    using node::matmul_trusted::ConsensusMinerMayFetchCompetingHeavierFork;
+    BOOST_CHECK(ConsensusMinerMayFetchCompetingHeavierFork(
+        /*trusted_mirror=*/false, /*extends_tip=*/false,
+        /*peer_work_gt_tip=*/true));
+    BOOST_CHECK(!ConsensusMinerMayFetchCompetingHeavierFork(
+        false, /*extends_tip=*/true, true));
+    BOOST_CHECK(!ConsensusMinerMayFetchCompetingHeavierFork(
+        false, false, /*peer_work_gt_tip=*/false));
+    BOOST_CHECK(!ConsensusMinerMayFetchCompetingHeavierFork(
+        /*trusted_mirror=*/true, false, true));
+    using node::matmul_trusted::HeavierCompetingForkHoleMayExactReplay;
+    BOOST_CHECK(HeavierCompetingForkHoleMayExactReplay(
+        /*may_fetch=*/true, /*is_immediate_fork_child=*/true,
+        /*parent_has_data=*/false));
+    BOOST_CHECK(HeavierCompetingForkHoleMayExactReplay(true, false, true));
+    BOOST_CHECK(!HeavierCompetingForkHoleMayExactReplay(true, false, false));
+    BOOST_CHECK(!HeavierCompetingForkHoleMayExactReplay(false, true, true));
+    using node::matmul_trusted::ConsensusMinerMayReorgPastParkForStaleHeavierFork;
+    using node::matmul_trusted::ConsensusMinerTipStaleVsDirectFetchWindow;
+    BOOST_CHECK(ConsensusMinerMayReorgPastParkForStaleHeavierFork(
+        /*trusted_mirror=*/false, /*extends_tip=*/false,
+        /*work_gt=*/true, /*tip_stale=*/true));
+    BOOST_CHECK(!ConsensusMinerMayReorgPastParkForStaleHeavierFork(
+        false, false, true, /*tip_stale=*/false));
+    BOOST_CHECK(!ConsensusMinerMayReorgPastParkForStaleHeavierFork(
+        false, /*extends_tip=*/true, true, true));
+    BOOST_CHECK(!ConsensusMinerMayReorgPastParkForStaleHeavierFork(
+        /*trusted_mirror=*/true, false, true, true));
+    BOOST_CHECK(!ConsensusMinerMayReorgPastParkForStaleHeavierFork(
+        false, false, /*work_gt=*/false, true));
+    BOOST_CHECK(ConsensusMinerTipStaleVsDirectFetchWindow(
+        /*tip_time=*/1000, /*now=*/1000 + 20 * 90, /*spacing=*/90));
+    BOOST_CHECK(!ConsensusMinerTipStaleVsDirectFetchWindow(
+        1000, 1000 + 20 * 90 - 1, 90));
     using node::matmul_trusted::ExactReplayGpuThrottleRequiresPin;
     using node::matmul_trusted::ExactReplayAdmissionThrottleApplies;
     using node::matmul_trusted::MatMulSpeculativeRcPendingLimit;

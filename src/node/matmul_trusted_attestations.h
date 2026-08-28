@@ -977,6 +977,67 @@ static constexpr auto GETMMATTEST_HISTORICAL_TOKEN_REFILL{std::chrono::seconds{4
     return peer_advertises_consensus && short_reorg && peer_work_ge_tip;
 }
 
+/** Public miners / archives may GETDATA a competing fork whose claimed
+ *  nChainWork is strictly above the active tip. Equal-work EncDr twins
+ *  stay on the short-reorg path (1–6). Trusted mirrors keep their own
+ *  authority / short-reorg gates.
+ *
+ *  Live 2026-08-28: after invalidate 33c834f8, macpro2 sat at 199310 on
+ *  8b5da5a5 while a headers-only fork (LCA 199294, 88 headers, at the
+ *  72-block unauth lead cap) had more claimed work and peers advertised
+ *  199523. competing_not_active_tip_chain skipped GETDATA because the
+ *  fork was deeper than short-reorg. reconsiderblock 33c834f8 could not
+ *  connect bodies that were never requested. */
+[[nodiscard]] inline bool ConsensusMinerMayFetchCompetingHeavierFork(
+    bool trusted_mirror,
+    bool extends_tip,
+    bool peer_work_gt_tip)
+{
+    if (trusted_mirror) return false;
+    if (extends_tip) return false;
+    return peer_work_gt_tip;
+}
+
+/** ExactReplay only the next connectable hole on that fork (LCA+1, or a
+ *  descendant whose parent already has HAVE_DATA). Higher HEADER_ONLY
+ *  bodies persist without GPU so an 86-block burst cannot occupy the
+ *  device; GETDATA of the remaining holes is unsuppressed separately. */
+[[nodiscard]] inline bool HeavierCompetingForkHoleMayExactReplay(
+    bool may_fetch,
+    bool is_immediate_fork_child,
+    bool parent_has_data)
+{
+    if (!may_fetch) return false;
+    return is_immediate_fork_child || parent_has_data;
+}
+
+/** Same 20×nPowTargetSpacing window as PeerManagerImpl::CanDirectFetch.
+ *  A tip older than that is catching up, not fending off a live dump. */
+[[nodiscard]] inline bool ConsensusMinerTipStaleVsDirectFetchWindow(
+    int64_t tip_time,
+    int64_t now,
+    int64_t spacing)
+{
+    if (spacing <= 0) return false;
+    return now >= tip_time + 20 * spacing;
+}
+
+/** EMERGENCY park_depth=6 would refuse the live 18-block reorg onto
+ *  33c834f8 even after GETDATA filled the heavier fork. Escape only when
+ *  the local tip is already stale (CanDirectFetch false) so a live miner
+ *  still parks a 7+ block dump. Trusted mirrors keep attested-abandon. */
+[[nodiscard]] inline bool ConsensusMinerMayReorgPastParkForStaleHeavierFork(
+    bool trusted_mirror,
+    bool candidate_extends_tip,
+    bool candidate_work_gt_tip,
+    bool tip_stale)
+{
+    if (trusted_mirror) return false;
+    if (candidate_extends_tip) return false;
+    if (!tip_stale) return false;
+    return candidate_work_gt_tip;
+}
+
 /** Twin-storm ExactReplay HEADER_ONLY throttle is a consensus-miner GPU
  *  budget (live 2026-08-14), not a pin feature. Open attestor keys must
  *  not populate HasQuorum to keep this armed. */
