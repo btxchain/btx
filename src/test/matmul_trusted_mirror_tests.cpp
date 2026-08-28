@@ -2160,6 +2160,14 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         /*trusted_mirror=*/true, false, true, true));
     BOOST_CHECK(!ConsensusMinerMayReorgPastParkForStaleHeavierFork(
         false, false, /*work_gt=*/false, true));
+    // Predicate true must not be passed as recovery_escape: park still
+    // fires at the measured dump-and-run depths (and at live branchlen 90).
+    BOOST_CHECK(kernel::DeepReorgShouldPark(
+        kernel::DeepReorgAction::PARK, 6, 8, /*recovery_escape=*/false));
+    BOOST_CHECK(kernel::DeepReorgShouldPark(
+        kernel::DeepReorgAction::PARK, 6, 151, false));
+    BOOST_CHECK(kernel::DeepReorgShouldPark(
+        kernel::DeepReorgAction::PARK, 6, 90, false));
     BOOST_CHECK(ConsensusMinerTipStaleVsDirectFetchWindow(
         /*tip_time=*/1000, /*now=*/1000 + 20 * 90, /*spacing=*/90));
     BOOST_CHECK(!ConsensusMinerTipStaleVsDirectFetchWindow(

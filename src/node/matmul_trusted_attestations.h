@@ -1022,10 +1022,12 @@ static constexpr auto GETMMATTEST_HISTORICAL_TOKEN_REFILL{std::chrono::seconds{4
     return now >= tip_time + 20 * spacing;
 }
 
-/** EMERGENCY park_depth=6 would refuse the live 18-block reorg onto
- *  33c834f8 even after GETDATA filled the heavier fork. Escape only when
- *  the local tip is already stale (CanDirectFetch false) so a live miner
- *  still parks a 7+ block dump. Trusted mirrors keep attested-abandon. */
+/** NOT wired into DeepReorgShouldPark / FindMostWorkChain. GETDATA of a
+ *  heavier competing fork is net_processing; follow past park_depth=6 is
+ *  operator reconsiderblock. Passing this as recovery_escape would
+ *  auto-follow a stale-tip dump (live 2026-08-28: 90-header 199384 fork;
+ *  measured 2026-08-10/11 rented-hashpower parks were 151- and 8-deep).
+ *  Predicate kept so tests prove the split: true here must not mean follow. */
 [[nodiscard]] inline bool ConsensusMinerMayReorgPastParkForStaleHeavierFork(
     bool trusted_mirror,
     bool candidate_extends_tip,

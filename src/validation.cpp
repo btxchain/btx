@@ -10208,20 +10208,12 @@ CBlockIndex* Chainstate::FindMostWorkChain()
             // same candidate escape PARK; applying hysteresis here first would
             // make the escape unreachable when the branch is only one-work-unit
             // ahead (the normal already-have-data recovery case).
-            const bool stale_heavier_escape{
-                old_tip != nullptr &&
-                node::matmul_trusted::ConsensusMinerMayReorgPastParkForStaleHeavierFork(
-                    node::matmul_trusted::IsTrustedMirror(),
-                    pindexNew->nHeight >= old_tip->nHeight &&
-                        pindexNew->GetAncestor(old_tip->nHeight) == old_tip,
-                    pindexNew->nChainWork > old_tip->nChainWork,
-                    node::matmul_trusted::ConsensusMinerTipStaleVsDirectFetchWindow(
-                        old_tip->GetBlockTime(), GetTime(),
-                        consensus_params.nPowTargetSpacing))};
+            // Do not OR in ConsensusMinerMayReorgPastParkForStaleHeavierFork:
+            // GETDATA of a heavier fork (77283c72) must not auto-follow past
+            // park_depth=6 (2026-08-10/11 dump-and-run, 151- and 8-deep).
             const bool recovery_escape{
                 m_chainman.IsAutomaticReorgRecoveryCandidate(pindexNew) ||
-                m_chainman.IsAttestedAbandonForkCandidate(pindexNew) ||
-                stale_heavier_escape};
+                m_chainman.IsAttestedAbandonForkCandidate(pindexNew)};
             if (old_tip != nullptr &&
                 fork != nullptr &&
                 fork != old_tip &&
@@ -10429,21 +10421,12 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
         const bool warn =
             warn_depth != kernel::REORG_PROTECTION_DEPTH_DISABLED &&
             reorg_depth > static_cast<int>(warn_depth);
-        const bool stale_heavier_escape{
-            pindexOldTip != nullptr &&
-            node::matmul_trusted::ConsensusMinerMayReorgPastParkForStaleHeavierFork(
-                node::matmul_trusted::IsTrustedMirror(),
-                pindexMostWork->nHeight >= pindexOldTip->nHeight &&
-                    pindexMostWork->GetAncestor(pindexOldTip->nHeight) ==
-                        pindexOldTip,
-                pindexMostWork->nChainWork > pindexOldTip->nChainWork,
-                node::matmul_trusted::ConsensusMinerTipStaleVsDirectFetchWindow(
-                    pindexOldTip->GetBlockTime(), GetTime(),
-                    consensus_params.nPowTargetSpacing))};
+        // Fetch (GETDATA) of a heavier competing fork is not follow.
+        // recovery_escape stays the attested/automatic shallow-race pair;
+        // a stale tip plus more claimed work must still park at depth > 6.
         const bool recovery_escape{
             m_chainman.IsAutomaticReorgRecoveryCandidate(pindexMostWork) ||
-            m_chainman.IsAttestedAbandonForkCandidate(pindexMostWork) ||
-            stale_heavier_escape};
+            m_chainman.IsAttestedAbandonForkCandidate(pindexMostWork)};
         const bool park = kernel::DeepReorgShouldPark(
             cm_opts.deep_reorg_action, park_depth, reorg_depth, recovery_escape);
 
