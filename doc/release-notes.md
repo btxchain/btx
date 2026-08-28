@@ -222,6 +222,22 @@ build then **exited** at startup, which looked like the same failure.
 
 **Kept (genuine):**
 
+- Initial-sync peer selection (**MendeMatthias**, sealed v0.34.4, network
+  healthy at 200131): a fresh node sat at `headers=0 blocks=0` for 45
+  minutes with 7 low-work disconnects because the scarce `nSyncStarted`
+  slot went to peers parked at 128530 / 185109 / 189611 (23–29 MB of
+  headers) while the peer advertising the actual tip received 90 bytes
+  of `getheaders` and one request. Presync ended below the height-186000
+  `nMinimumChainWork` checkpoint. IBD now prefers peers whose VERSION
+  height is at or above that checkpoint, and de-prioritizes any address
+  that already failed a low-work headers sync.
+- `RecalculateBestHeader` for independent validators (**MendeMatthias**).
+  Both production call sites (startup after `LoadBlockIndex`, and
+  `ActivateSnapshot`) were gated on `matmul_trusted::IsConfigured()`,
+  which is false for the recommended `-matmulvalidation=consensus` with
+  no `-matmultrustedpubkey`. The only path that can lower `m_best_header`
+  therefore never ran on the configuration we tell people to use. It is
+  always invoked when there is an active tip.
 - `must_probe` hoist (`8b0b0425`) plus BestKnown must **extend the tip**
   (`0fdd8739`).
 - Best-header **floor**, not pin (`EnsureBestHeaderNotBehindConnectedTip`).

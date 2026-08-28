@@ -16906,12 +16906,11 @@ util::Result<CBlockIndex*> ChainstateManager::ActivateSnapshot(
     candidate_sets_cleared = false;
 
     // LoadBlockIndex / AddToBlockIndex may have left m_best_header on a
-    // claimed-heaviest 1883xx flood. Configured nodes must chase the snapshot
-    // tip-chain (and any already-known attested suffix) rather than that
-    // flood, or IBD downloads the competing tree after a successful load.
-    if (node::matmul_trusted::IsConfigured()) {
-        RecalculateBestHeader();
-    }
+    // claimed-heaviest 1883xx flood. Recalculate onto the snapshot tip-chain
+    // (and any already-known suffix) rather than that flood. Do not gate on
+    // IsConfigured(): independent validators must be able to lower
+    // m_best_header after loadtxoutset (MendeMatthias).
+    RecalculateBestHeader();
 
     LogPrintf("[snapshot] successfully activated snapshot %s\n", base_blockhash.ToString());
     LogPrintf("[snapshot] (%.2f MB)\n",
@@ -21107,11 +21106,9 @@ void ChainstateManager::EnsureBestHeaderNotBehindConnectedTip()
     const bool failed_branch{
         (m_best_header->nStatus & BLOCK_FAILED_MASK) != 0 ||
         !m_best_header->IsValid(BLOCK_VALID_TREE)};
-    const bool follows_tip{m_best_header->nHeight >= tip->nHeight &&
-                           m_best_header->GetAncestor(tip->nHeight) == tip};
     if (failed_branch) {
         SetBestHeader(tip);
-    } else if (!follows_tip && m_best_header->nHeight < tip->nHeight) {
+    } else if (m_best_header->nHeight < tip->nHeight) {
         SetBestHeader(tip);
     }
 
@@ -21144,6 +21141,10 @@ void ChainstateManager::EnsureBestHeaderNotBehindConnectedTip()
 void ChainstateManager::RecalculateBestHeader()
 {
     AssertLockHeld(cs_main);
+    // Callers must invoke this regardless of IsConfigured(). Independent
+    // validators (-matmulvalidation=consensus, no -matmultrustedpubkey)
+    // are the recommended config and have IsConfigured()==false; they still
+    // need the only path that can lower m_best_header (MendeMatthias).
     const CBlockIndex* const active_tip{ActiveChain().Tip()};
     SetBestHeader(ActiveChain().Tip());
     m_best_claimed_header = nullptr;
