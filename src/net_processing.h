@@ -320,6 +320,10 @@ public:
      *  Production calls this from CScheduler, never from SendMessages
      *  (g_msgproc_mutex). Tests must not hold that mutex. */
     virtual void RetryMatMulDeferredBodiesForTest() = 0;
+    /** Issue 116: mint via PersistMatMulExactReplayVerdict (header-first /
+     *  historical ExactReplay) and gossip MMATTEST without ProcessBlockSync.
+     *  Only pushes a signature this process just produced. */
+    virtual void PersistExactReplayVerdictAndRelayForTest(const uint256& hash) = 0;
 
     /** Session-lived: this address already failed a low-work headers
      *  presync. A reconnect must not reclaim the scarce initial-sync slot

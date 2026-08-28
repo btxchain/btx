@@ -1399,6 +1399,11 @@ public:
     {
         RetryMatMulDeferredBodies();
     }
+    void PersistExactReplayVerdictAndRelayForTest(const uint256& hash) override
+        EXCLUSIVE_LOCKS_REQUIRED(!cs_main)
+    {
+        PersistExactReplayVerdictAndRelay(hash);
+    }
     void NoteLowWorkHeadersSyncFailureForTest(const CNetAddr& addr) override
         EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex)
     {
@@ -2472,6 +2477,18 @@ private:
         EXCLUSIVE_LOCKS_REQUIRED(m_hist_attest_mutex);
     void HistoricalAttestationReverifyLoop();
     void StopHistoricalAttestationReverify();
+    /** Gossip a locally signed ExactReplay attestation (site-A MMATTEST
+     *  push). Caller must not hold cs_main. No-op when `produced` is empty
+     *  (SignAuthoritative did not run, or did not fill). Never used for
+     *  inbound peer attestations. */
+    void RelayLocalExactReplayAttestation(
+        matmul::trusted::ExactReplayAttestation produced)
+        LOCKS_EXCLUDED(cs_main);
+    /** Persist a local ExactReplay verdict and gossip if this process just
+     *  signed. Shared by header-first / historical Persist callers and the
+     *  issue-116 unit test. */
+    void PersistExactReplayVerdictAndRelay(const uint256& hash)
+        LOCKS_EXCLUDED(cs_main);
     void MaybeLogAttestationServe(const char* reason,
                                   const uint256& hash,
                                   int32_t height,
@@ -10282,6 +10299,7 @@ void PeerManagerImpl::HistoricalAttestationReverifyLoop()
         }
         if (ok) {
             bool kick_abc{false};
+            matmul::trusted::ExactReplayAttestation produced;
             {
                 LOCK(cs_main);
                 // Serve-budget skip is not a local ExactReplay. Writing
@@ -10295,7 +10313,8 @@ void PeerManagerImpl::HistoricalAttestationReverifyLoop()
                             job.hash);
                     }
                 } else {
-                    (void)m_chainman.PersistMatMulExactReplayVerdict(job.hash);
+                    (void)m_chainman.PersistMatMulExactReplayVerdict(
+                        job.hash, &produced);
                     CBlockIndex* const idx{
                         m_chainman.m_blockman.LookupBlockIndex(job.hash)};
                     const CBlockIndex* const tip{m_chainman.ActiveTip()};
@@ -10313,9 +10332,13 @@ void PeerManagerImpl::HistoricalAttestationReverifyLoop()
                     }
                 }
             }
+            // Issue 116: Persist used to mint and return without a push, so
+            // a GETMMATTEST-triggered ExactReplay was stored and mirrors
+            // never saw MMATTEST. Gossip after dropping cs_main.
+            RelayLocalExactReplayAttestation(std::move(produced));
             LogInfo(
                 "historical ExactReplay re-verify succeeded block=%s "
-                "height=%d; attestation available for getmmattest\n",
+                "height=%d; local attestation gossiped when signed\n",
                 job.hash.ToString(), job.height);
             if (kick_abc) {
                 BlockValidationState abc_state;
@@ -10952,17 +10975,21 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
                     [this, hash, height = index.nHeight](bool ok) {
                         ClearMatMulRCBodyDeferred(hash);
                         if (!ok) return;
-                        LOCK(cs_main);
-                        if (node::matmul_trusted::IsTrustedMirror() &&
-                            m_chainparams.GetConsensus()
-                                .IsMatMulTrustedReplayAttestationActive(
-                                    height)) {
-                            (void)m_chainman
-                                .PersistMatMulTrustedReplayAttestation(hash);
-                        } else {
-                            (void)m_chainman
-                                .PersistMatMulExactReplayVerdict(hash);
+                        matmul::trusted::ExactReplayAttestation produced;
+                        {
+                            LOCK(cs_main);
+                            if (node::matmul_trusted::IsTrustedMirror() &&
+                                m_chainparams.GetConsensus()
+                                    .IsMatMulTrustedReplayAttestationActive(
+                                        height)) {
+                                (void)m_chainman
+                                    .PersistMatMulTrustedReplayAttestation(hash);
+                            } else {
+                                (void)m_chainman.PersistMatMulExactReplayVerdict(
+                                    hash, &produced);
+                            }
                         }
+                        RelayLocalExactReplayAttestation(std::move(produced));
                     },
                 .retryable_failure = [this, hash] {
                     ClearMatMulRCBodyDeferred(hash);
@@ -11105,15 +11132,20 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
             [this, hash, height = index.nHeight](bool ok) {
                 ClearMatMulRCBodyDeferred(hash);
                 if (!ok) return;
-                LOCK(cs_main);
-                if (node::matmul_trusted::IsTrustedMirror() &&
-                    m_chainparams.GetConsensus()
-                        .IsMatMulTrustedReplayAttestationActive(height)) {
-                    (void)m_chainman
-                        .PersistMatMulTrustedReplayAttestation(hash);
-                } else {
-                    (void)m_chainman.PersistMatMulExactReplayVerdict(hash);
+                matmul::trusted::ExactReplayAttestation produced;
+                {
+                    LOCK(cs_main);
+                    if (node::matmul_trusted::IsTrustedMirror() &&
+                        m_chainparams.GetConsensus()
+                            .IsMatMulTrustedReplayAttestationActive(height)) {
+                        (void)m_chainman
+                            .PersistMatMulTrustedReplayAttestation(hash);
+                    } else {
+                        (void)m_chainman.PersistMatMulExactReplayVerdict(
+                            hash, &produced);
+                    }
                 }
+                RelayLocalExactReplayAttestation(std::move(produced));
             },
         .retryable_failure = [this, hash] {
             ClearMatMulRCBodyDeferred(hash);
@@ -12656,17 +12688,23 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                         // pipeline handles accept/reject identically to the
                         // synchronous path.
                         if (encdr_ok) {
-                            LOCK(cs_main);
-                            if (node::matmul_trusted::IsTrustedMirror() &&
-                                m_chainparams.GetConsensus()
-                                    .IsMatMulTrustedReplayAttestationActive(
-                                        authority_height)) {
-                                (void)m_chainman
-                                    .PersistMatMulTrustedReplayAttestation(hash);
-                            } else {
-                                (void)m_chainman
-                                    .PersistMatMulExactReplayVerdict(hash);
+                            matmul::trusted::ExactReplayAttestation produced;
+                            {
+                                LOCK(cs_main);
+                                if (node::matmul_trusted::IsTrustedMirror() &&
+                                    m_chainparams.GetConsensus()
+                                        .IsMatMulTrustedReplayAttestationActive(
+                                            authority_height)) {
+                                    (void)m_chainman
+                                        .PersistMatMulTrustedReplayAttestation(hash);
+                                } else {
+                                    (void)m_chainman.PersistMatMulExactReplayVerdict(
+                                        hash, &produced);
+                                }
                             }
+                            // Issue 116: persist-path mint must gossip even
+                            // if ProcessBlockSync later skips site A.
+                            RelayLocalExactReplayAttestation(std::move(produced));
                         }
                         PinMatMulEncDrVerdict(hash, encdr_ok);
                         ProcessBlockSync(nodeid, /*node=*/nullptr, block,
@@ -13657,6 +13695,35 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
     return true;
 }
 
+void PeerManagerImpl::RelayLocalExactReplayAttestation(
+    matmul::trusted::ExactReplayAttestation produced)
+{
+    AssertLockNotHeld(cs_main);
+    // Only a signature this process just created via SignAuthoritative.
+    // Inbound MMATTEST relay is a separate path and must not use this.
+    if (produced.signature.empty() || !produced.signer.IsValid()) {
+        return;
+    }
+    std::vector<matmul::trusted::ExactReplayAttestation> message{
+        std::move(produced)};
+    m_connman.ForEachNode([&](CNode* target) {
+        if (target->GetCommonVersion() >= MATMUL_ATTESTATION_VERSION) {
+            MakeAndPushMessage(*target, NetMsgType::MMATTEST, message);
+        }
+    });
+}
+
+void PeerManagerImpl::PersistExactReplayVerdictAndRelay(const uint256& hash)
+{
+    AssertLockNotHeld(cs_main);
+    matmul::trusted::ExactReplayAttestation produced;
+    {
+        LOCK(cs_main);
+        (void)m_chainman.PersistMatMulExactReplayVerdict(hash, &produced);
+    }
+    RelayLocalExactReplayAttestation(std::move(produced));
+}
+
 void PeerManagerImpl::ProcessBlockSync(NodeId nodeid, CNode* node, const std::shared_ptr<const CBlock>& block,
                                        bool force_processing, bool min_pow_checked,
                                        const std::function<void()>& post_process,
@@ -13758,18 +13825,7 @@ void PeerManagerImpl::ProcessBlockSync(NodeId nodeid, CNode* node, const std::sh
                         block->GetHash(), exact_height,
                         &produced)};
                 if (node::matmul_trusted::SignAuthoritativeServesGetMmAttest(result)) {
-                    std::vector<
-                        matmul::trusted::ExactReplayAttestation>
-                        message{std::move(produced)};
-                    m_connman.ForEachNode([&](CNode* target) {
-                        if (target->GetCommonVersion() >=
-                            MATMUL_ATTESTATION_VERSION) {
-                            MakeAndPushMessage(
-                                *target,
-                                NetMsgType::MMATTEST,
-                                message);
-                        }
-                    });
+                    RelayLocalExactReplayAttestation(std::move(produced));
                 } else {
                     LogWarning(
                         "Failed to create MatMul ExactReplay "

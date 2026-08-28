@@ -6938,6 +6938,137 @@ BOOST_AUTO_TEST_CASE(signer_serve_zero_pushes_new_attestations_refuses_getmmatte
     }
 }
 
+// Issue 116: PersistMatMulExactReplayVerdict used to SignAuthoritative and
+// return without MMATTEST, so a GETMMATTEST-triggered / header-first ExactReplay
+// was stored and never announced. ProcessNewBlock here is AcceptBlock Persist
+// without ProcessBlockSync (no site A). The helper is the production persist
+// path header-first and historical reverify now share.
+BOOST_AUTO_TEST_CASE(exact_replay_persist_path_pushes_mmattest)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+
+    node::matmul_trusted::ResetForTest();
+    ResetSharedPeermanFixture(m_node);
+    CKey signer;
+    signer.MakeNewKey(/*fCompressed=*/true);
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256::FromHex(std::string(64, '1')).value();
+    config.replay_authority_context =
+        uint256::FromHex(std::string(64, '2')).value();
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    config.local_signer = signer;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/false, /*serve=*/false,
+        std::chrono::milliseconds{50}, error));
+    BOOST_REQUIRE(node::matmul_trusted::HasLocalSigner());
+    BOOST_REQUIRE(!node::matmul_trusted::ServesAttestations());
+    struct SignerReset {
+        ~SignerReset() { node::matmul_trusted::ResetForTest(); }
+    } signer_reset;
+
+    auto& mode = const_cast<kernel::MatMulValidationMode&>(
+        m_node.chainman->m_options.matmul_validation_mode);
+    const auto saved_mode{mode};
+    struct RestoreMode {
+        kernel::MatMulValidationMode& mode;
+        kernel::MatMulValidationMode saved;
+        ~RestoreMode() { mode = saved; }
+    } restore_mode{mode, saved_mode};
+    mode = kernel::MatMulValidationMode::CONSENSUS;
+
+    ConnmanTestMsg& connman = static_cast<ConnmanTestMsg&>(*m_node.connman);
+    PeerManager& peerman = *m_node.peerman;
+    peerman.InstallMatMulVerifyOverrideForTest(
+        [&](const CBlock&, int32_t, std::optional<int64_t>) { return true; });
+    struct ClearOverride {
+        PeerManager& peerman;
+        ~ClearOverride() { peerman.InstallMatMulVerifyOverrideForTest({}); }
+    } clear_override{peerman};
+
+    Consensus::Params& consensus = const_cast<Consensus::Params&>(
+        m_node.chainman->GetParams().GetConsensus());
+    auto restore_heights{SaveMatMulHeights(consensus)};
+
+    const CBlockIndex* parent{
+        WITH_LOCK(::cs_main, return m_node.chainman->ActiveChain().Tip())};
+    BOOST_REQUIRE(parent != nullptr);
+    SetMockTime(std::chrono::seconds{parent->GetBlockTime() + 1});
+    ActivateRcAtTip(consensus, *parent);
+    peerman.SetBestBlock(parent->nHeight,
+                         std::chrono::seconds{parent->GetBlockTime()});
+    BOOST_REQUIRE(
+        consensus.IsMatMulTrustedReplayAttestationActive(parent->nHeight + 1));
+
+    CBlock child{MineTipChild(m_node, *parent, /*extra_time=*/0)};
+    const uint256 child_hash{child.GetHash()};
+
+    const ServiceFlags services{ServiceFlags(
+        NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS)};
+    CNode peer{/*id=*/404,
+               /*sock=*/nullptr,
+               CAddress{PeermanTestService(0x1000007f), NODE_NETWORK},
+               /*nKeyedNetGroupIn=*/0x10,
+               /*nLocalHostNonceIn=*/0,
+               CAddress{},
+               /*addrNameIn=*/"persist-path-observer",
+               ConnectionType::OUTBOUND_FULL_RELAY,
+               /*inbound_onion=*/false,
+               /*network_key=*/0};
+    connman.Handshake(peer, /*successfully_connected=*/true, services, services,
+                      PROTOCOL_VERSION, /*relay_txs=*/true);
+    connman.AddTestNode(peer);
+    connman.FlushSendBuffer(peer);
+    struct FinalizePeer {
+        ConnmanTestMsg& connman;
+        PeerManager& peerman;
+        CNode& node;
+        ~FinalizePeer()
+        {
+            peerman.FinalizeNode(node);
+            connman.RemoveTestNode(node);
+        }
+    } finalize{connman, peerman, peer};
+
+    BOOST_REQUIRE(m_node.chainman->ProcessNewBlock(
+        std::make_shared<const CBlock>(child), /*force_processing=*/true,
+        /*min_pow_checked=*/true, nullptr));
+    BOOST_REQUIRE(PeermanWaitFor([&] {
+        LOCK(::cs_main);
+        const CBlockIndex* idx{
+            m_node.chainman->m_blockman.LookupBlockIndex(child_hash)};
+        return idx != nullptr &&
+               (idx->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0 &&
+               m_node.chainman->ActiveChain().Contains(idx);
+    }));
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    BOOST_CHECK(!HasQueuedMessageType(peer, NetMsgType::MMATTEST));
+
+    peerman.PersistExactReplayVerdictAndRelayForTest(child_hash);
+    BOOST_REQUIRE(PeermanWaitFor(
+        [&] { return HasQueuedMessageType(peer, NetMsgType::MMATTEST); }));
+    BOOST_CHECK(node::matmul_trusted::HasQuorum(child_hash, parent->nHeight + 1));
+
+    CBlockIndex* connected{WITH_LOCK(::cs_main, {
+        CBlockIndex* idx{
+            m_node.chainman->m_blockman.LookupBlockIndex(child_hash)};
+        return (idx != nullptr && m_node.chainman->ActiveChain().Contains(idx))
+                   ? idx
+                   : nullptr;
+    })};
+    if (connected != nullptr) {
+        BlockValidationState invalidate_state;
+        (void)m_node.chainman->ActiveChainstate().InvalidateBlock(
+            invalidate_state, connected);
+    }
+    {
+        LOCK(::cs_main);
+        m_node.chainman->SetBestHeader(
+            const_cast<CBlockIndex*>(m_node.chainman->ActiveTip()));
+    }
+}
+
 // IBD miners scanning history must not pull MMATTEST off the signer uplink.
 // Consecutive historical_not_served GETMMATTEST disconnects and 24h-bans.
 BOOST_AUTO_TEST_CASE(getmmattest_historical_scan_ignored_then_banned)

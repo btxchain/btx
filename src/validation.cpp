@@ -13681,7 +13681,8 @@ bool ChainstateManager::IsMatMulRecomputeAssumeValidTrusted(const CBlockIndex* p
 }
 
 bool ChainstateManager::PersistMatMulExactReplayVerdict(
-    const uint256& block_hash)
+    const uint256& block_hash,
+    matmul::trusted::ExactReplayAttestation* produced)
 {
     AssertLockHeld(::cs_main);
     CBlockIndex* index{m_blockman.LookupBlockIndex(block_hash)};
@@ -13697,11 +13698,8 @@ bool ChainstateManager::PersistMatMulExactReplayVerdict(
         ActiveChain().Contains(index)) {
         const auto result{
             node::matmul_trusted::SignAuthoritative(
-                block_hash, index->nHeight)};
-        if (result !=
-                matmul::trusted::AddResult::Accepted &&
-            result !=
-                matmul::trusted::AddResult::Duplicate) {
+                block_hash, index->nHeight, produced)};
+        if (!node::matmul_trusted::SignAuthoritativeServesGetMmAttest(result)) {
             LogWarning(
                 "Unable to create local ExactReplay attestation "
                 "block=%s height=%d result=%s\n",

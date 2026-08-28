@@ -71,6 +71,12 @@ struct PrecomputedTransactionData;
 struct LockPoints;
 struct AssumeutxoData;
 
+namespace matmul {
+namespace trusted {
+struct ExactReplayAttestation;
+}
+}
+
 enum class ShieldedAutoRepairKind {
     ANCHOR_HISTORY,
     STATE_REBUILD,
@@ -1391,8 +1397,14 @@ public:
     /** Persist a successful header-derived ExactReplay verdict. Does not
      *  raise BLOCK_VALID_* by itself. Recomputes authenticated chain work
      *  for this block's lineage so GETHEADERS and trust-adjusted ranking
-     *  see the ExactReplayed prefix (body-first then replay left work stale). */
-    bool PersistMatMulExactReplayVerdict(const uint256& block_hash)
+     *  see the ExactReplayed prefix (body-first then replay left work stale).
+     *  When this process has a local signer and the index is on the active
+     *  chain, SignAuthoritative may fill `produced`. The caller must gossip
+     *  that attestation after releasing cs_main (validation does not push
+     *  P2P). Never publish an attestation this process did not just sign. */
+    bool PersistMatMulExactReplayVerdict(
+        const uint256& block_hash,
+        matmul::trusted::ExactReplayAttestation* produced = nullptr)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /** Record that a trusted mirror observed pin coverage of this hash.
