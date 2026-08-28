@@ -7524,6 +7524,48 @@ BOOST_AUTO_TEST_CASE(heavier_competing_fork_n_plus_72_getdata_fork_child)
     node::matmul_trusted::ResetForTest();
 }
 
+BOOST_AUTO_TEST_CASE(best_header_follows_headers_only_suffix_not_pinned_to_tip)
+{
+    // macpro2 0.34.5: getchaintips 200258 headers-only branchlen=944 while
+    // getblockchaininfo headers==blocks. Same-chain suffix must be the
+    // download target. ConnectTip is unchanged.
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    node::matmul_trusted::ResetForTest();
+    BOOST_REQUIRE(!node::matmul_trusted::IsConfigured());
+    ResetSharedPeermanFixture(m_node);
+    ChainstateManager& chainman{*Assert(m_node.chainman)};
+    const CBlockIndex* tip{
+        WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip())};
+    BOOST_REQUIRE(tip != nullptr);
+
+    std::vector<CBlockIndex*> suffix;
+    const CBlockIndex* walk{tip};
+    for (unsigned int tag = 0xd0; tag < 0xd0 + 20; ++tag) {
+        suffix.push_back(MakePeermanHeaderChild(chainman, *walk, tag));
+        walk = suffix.back();
+    }
+    BOOST_REQUIRE_EQUAL(suffix.size(), 20U);
+    BOOST_CHECK(WITH_LOCK(::cs_main, {
+        return suffix.back()->nChainWork > tip->nChainWork &&
+               suffix.back()->GetAncestor(tip->nHeight) == tip;
+    }));
+
+    WITH_LOCK(::cs_main, {
+        BOOST_CHECK_MESSAGE(
+            chainman.m_best_header == suffix.back(),
+            "ingesting a 20-header same-chain suffix must leave m_best_header "
+            "on that tip, not the connected block");
+        chainman.SetBestHeader(const_cast<CBlockIndex*>(tip));
+        BOOST_CHECK_EQUAL(chainman.m_best_header, tip);
+        chainman.EnsureBestHeaderNotBehindConnectedTip();
+        BOOST_CHECK_EQUAL(chainman.m_best_header, suffix.back());
+        chainman.SetBestHeader(const_cast<CBlockIndex*>(tip));
+        chainman.RecalculateBestHeader();
+        BOOST_CHECK_EQUAL(chainman.m_best_header, suffix.back());
+        BOOST_CHECK_GT(chainman.m_best_header->nHeight, tip->nHeight);
+    });
+}
+
 BOOST_AUTO_TEST_CASE(best_header_follows_heavier_disconnected_fork_not_pinned_to_tip)
 {
     // jarekpiot 2026-08-28, sealed v0.34.4, GPU authority, never ran

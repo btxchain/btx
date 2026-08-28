@@ -1962,6 +1962,8 @@ RPCHelpMan getblockchaininfo()
                         {RPCResult::Type::NUM, "blocks_behind", "max(0, height - on_chain_attested_height). Zero on a healthy linear chain; large with on_active_chain=false is a stranded fork"},
                     }},
                 {RPCResult::Type::STR_HEX, "chainwork", "total amount of work in active chain, in hexadecimal"},
+                {RPCResult::Type::NUM, "validationepoch", "compiled block-validation epoch; bumped when consensus-relevant validation changes"},
+                {RPCResult::Type::NUM, "invalidmarksclearedonupgrade", "BLOCK_FAILED_* index entries cleared on this start because the stored epoch was older"},
                 {RPCResult::Type::NUM, "size_on_disk", "the estimated size of the block and undo files on disk"},
                 {RPCResult::Type::BOOL, "pruned", "if the blocks are subject to pruning"},
                 {RPCResult::Type::NUM, "pruneheight", /*optional=*/true, "height of the last block pruned, plus one (only present if pruning is enabled)"},
@@ -2045,6 +2047,9 @@ RPCHelpMan getblockchaininfo()
         obj.pushKV("matmul_signed_frontier", std::move(signed_frontier));
     }
     obj.pushKV("chainwork", tip.nChainWork.GetHex());
+    obj.pushKV("validationepoch", static_cast<uint64_t>(chainman.GetBlockValidationEpoch()));
+    obj.pushKV("invalidmarksclearedonupgrade",
+               static_cast<uint64_t>(chainman.InvalidMarksClearedOnUpgrade()));
     obj.pushKV("size_on_disk", chainman.m_blockman.CalculateCurrentUsage());
     obj.pushKV("pruned", chainman.m_blockman.IsPruneMode());
     if (chainman.m_blockman.IsPruneMode()) {

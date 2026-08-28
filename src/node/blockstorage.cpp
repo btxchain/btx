@@ -61,6 +61,7 @@ static constexpr uint8_t DB_PRUNE_LOCK{'L'};
 static constexpr uint8_t DB_PARKED_REORG_BRANCHES{'g'};
 static constexpr uint8_t DB_REORG_RECOVERY_RECORD{'G'};
 static constexpr uint8_t DB_MATMUL_REPLAY_CONTEXT{'M'};
+static constexpr uint8_t DB_VALIDATION_EPOCH{'e'};
 // Keys used in previous version that might still be found in the DB:
 // BlockTreeDB::DB_TXINDEX_BLOCK{'T'};
 // BlockTreeDB::DB_TXINDEX{'t'}
@@ -192,6 +193,16 @@ bool BlockTreeDB::LoadPruneLocks(std::unordered_map<std::string, node::PruneLock
     }
 
     return true;
+}
+
+bool BlockTreeDB::WriteValidationEpoch(uint32_t epoch)
+{
+    return Write(DB_VALIDATION_EPOCH, epoch);
+}
+
+bool BlockTreeDB::ReadValidationEpoch(uint32_t& epoch)
+{
+    return Read(DB_VALIDATION_EPOCH, epoch);
 }
 
 bool BlockTreeDB::WriteFlag(const std::string& name, bool fValue)
@@ -724,7 +735,7 @@ CBlockIndex* BlockManager::AddToBlockIndex(const CBlockHeader& block, CBlockInde
     // Prefer authenticated work for best-header selection, with a bounded
     // unauth allowance so a short competing headers-only suffix can displace a
     // losing tip for chase (matching net_processing peer decisions).
-    if (best_header == nullptr || PreferTrustAdjustedHeader(*best_header, *pindexNew)) {
+    if (best_header == nullptr || PreferMostWorkHeader(*best_header, *pindexNew)) {
         best_header = pindexNew;
     }
 

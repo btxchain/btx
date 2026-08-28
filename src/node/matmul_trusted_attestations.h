@@ -998,15 +998,15 @@ static constexpr auto GETMMATTEST_HISTORICAL_TOKEN_REFILL{std::chrono::seconds{4
     return peer_work_gt_tip;
 }
 
-/** m_best_header may sit on a heavier valid disconnected fork above the
- *  connected tip. 0.34.4's EnsureBestHeaderNotBehindConnectedTip floored
- *  a behind ancestor (headers-below-blocks) by snapping to ActiveTip,
- *  then AcceptBlockHeader's IsConfigured overlay undid every competing
- *  promotion, so the floor became a pin: getchaintips showed the tower
- *  while getblockchaininfo.headers stayed equal to blocks
- *  (jarekpiot 2026-08-28: 8b5da5a5@199326 vs 0d5ffded@199398,
- *  best_header_ahead=0, competing_not_active_tip_chain). Trusted mirrors
- *  keep authority-steered follow. Parked / failed / below-tip stay out. */
+/** m_best_header may sit on a heavier valid header above the connected
+ *  tip — a competing fork OR a same-chain headers-only suffix.
+ *  0.34.4's EnsureBestHeaderNotBehindConnectedTip floored a behind
+ *  ancestor by snapping to ActiveTip, then the overlay undid competing
+ *  promotions (jarekpiot). 0.34.5 also vetoed extends_tip, which pinned
+ *  headers==blocks while a 944-deep more-work suffix grew in the index
+ *  (macpro2 2026-08-28). Download targeting is not ConnectTip: parked /
+ *  failed / below-tip stay out; trusted mirrors keep authority-steered
+ *  follow. `extends_tip` is informational. */
 [[nodiscard]] inline bool ConsensusMinerMayFollowHeavierDisconnectedHeader(
     bool trusted_mirror,
     bool extends_tip,
@@ -1015,8 +1015,8 @@ static constexpr auto GETMMATTEST_HISTORICAL_TOKEN_REFILL{std::chrono::seconds{4
     bool candidate_work_gt_tip,
     bool candidate_height_ge_tip)
 {
+    (void)extends_tip;
     if (trusted_mirror) return false;
-    if (extends_tip) return false;
     if (failed_or_invalid || parked) return false;
     if (!candidate_height_ge_tip) return false;
     return candidate_work_gt_tip;

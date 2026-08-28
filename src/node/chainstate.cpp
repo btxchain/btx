@@ -138,7 +138,13 @@ static ChainstateLoadResult CompleteChainstateInitialization(
     }
     LogPrintf("Populated block index candidates\n");
 
-    // LoadBlockIndex ranks m_best_header by PreferTrustAdjustedHeader.
+    // 0.34.0–0.34.4 wrote BLOCK_FAILED_* with buggy validation. Those marks
+    // persist across binary upgrades and hide the canonical chain from the
+    // fixed code. Clear them before RecalculateBestHeader so the heaviest
+    // valid header is eligible. ConnectTip still fully re-validates.
+    chainman.MaybeClearStaleInvalidMarksForValidationEpoch();
+
+    // LoadBlockIndex ranks m_best_header by most nChainWork.
     // RecalculateBestHeader is the only path that can lower it. Do not gate
     // that on IsConfigured(): independent validators
     // (-matmulvalidation=consensus, no -matmultrustedpubkey) are exactly

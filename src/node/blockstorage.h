@@ -104,6 +104,8 @@ public:
     bool WriteReorgRecoveryRecord(const std::optional<node::ReorgRecoveryRecord>& record);
     bool ReadReorgRecoveryRecord(std::optional<node::ReorgRecoveryRecord>& record);
     bool ReadMatMulReplayContext(uint256& context);
+    bool WriteValidationEpoch(uint32_t epoch);
+    bool ReadValidationEpoch(uint32_t& epoch);
     bool WriteFlag(const std::string& name, bool fValue);
     bool ReadFlag(const std::string& name, bool& fValue);
     bool LoadBlockIndexGuts(const Consensus::Params& consensusParams, std::function<CBlockIndex*(const uint256&)> insertBlockIndex, const util::SignalInterrupt& interrupt)

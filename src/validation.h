@@ -1535,6 +1535,7 @@ public:
      * invalidate/reconsider/reorg rescan may move it backwards.
      */
     std::atomic<int32_t> m_best_followed_header_height{-1};
+    uint32_t m_invalid_marks_cleared_on_upgrade{0};
 
     //! The total number of bytes available for us to use across all in-memory
     //! coins caches. This will be split somehow across chainstates.
@@ -2255,6 +2256,21 @@ public:
      * chain so ActivateBestChain() can retry them under the current rules.
      */
     void AutoReconsiderShieldedInvalidBlocksAfterConsensusRetune() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /**
+     * If the on-disk validation epoch is older than BLOCK_VALIDATION_EPOCH,
+     * clear every BLOCK_FAILED_* mark and persist the new epoch. Poisoned
+     * marks from 0.34.0–0.34.4 otherwise hide the canonical chain from
+     * current validation. Clearing only schedules re-validation; ConnectTip
+     * still runs header PoW, ASERT, ExactReplay, and scripts in full.
+     */
+    void MaybeClearStaleInvalidMarksForValidationEpoch() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    [[nodiscard]] uint32_t GetBlockValidationEpoch() const { return BLOCK_VALIDATION_EPOCH; }
+    [[nodiscard]] uint32_t InvalidMarksClearedOnUpgrade() const
+    {
+        return m_invalid_marks_cleared_on_upgrade;
+    }
 
     /** Return true once per active tip for each automatic shielded repair class. */
     [[nodiscard]] bool MarkShieldedAutoRepairAttempt(ShieldedAutoRepairKind kind)

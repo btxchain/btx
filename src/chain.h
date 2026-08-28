@@ -476,6 +476,30 @@ inline constexpr unsigned int TRUST_ADJUSTED_WORK_ALLOWANCE_BLOCKS = 6;
                                              const CBlockIndex& candidate,
                                              unsigned int unauth_allowance_blocks = TRUST_ADJUSTED_WORK_ALLOWANCE_BLOCKS);
 
+/** Download / getheaders locator ranking: most nChainWork, then highest
+ *  height, then hash. This is not fork choice. ConnectTip still fully
+ *  validates every body. PreferTrustAdjustedHeader's 6-block unauth cap
+ *  left m_best_header on the connected tip while a 944-deep headers-only
+ *  suffix sat in the index (macpro2 0.34.5: headers==blocks, lockstep). */
+[[nodiscard]] inline bool PreferMostWorkHeader(const CBlockIndex& current,
+                                               const CBlockIndex& candidate)
+{
+    if (candidate.nStatus & BLOCK_FAILED_MASK) return false;
+    if (current.nChainWork != candidate.nChainWork) {
+        return current.nChainWork < candidate.nChainWork;
+    }
+    if (current.nHeight != candidate.nHeight) {
+        return current.nHeight < candidate.nHeight;
+    }
+    return candidate.GetBlockHash() < current.GetBlockHash();
+}
+
+/** Bump whenever consensus-relevant validation changes that may have
+ *  written BLOCK_FAILED_* incorrectly. Missing stored epoch is 0
+ *  (every 0.34.0–0.34.4 datadir). 0.34.5 is epoch 1: those nodes
+ *  auto-clear poisoned invalid marks on first start. */
+inline constexpr uint32_t BLOCK_VALIDATION_EPOCH = 1;
+
 /** After an ancestor's authenticated work changes, re-derive
  *  nAuthenticatedChainWork for every known descendant in parent-first order.
  *  Header-only children contribute zero authenticated proof but must inherit

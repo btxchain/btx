@@ -5,6 +5,8 @@
 #include <addresstype.h>
 #include <chain.h>
 #include <chainparams.h>
+#include <consensus/amount.h>
+#include <consensus/merkle.h>
 #include <consensus/validation.h>
 #include <kernel/chainstatemanager_opts.h>
 #include <node/blockstorage.h>
@@ -13,11 +15,13 @@
 #include <matmul/trusted_exact_replay_attestation.h>
 #include <node/matmul_trusted_attestations.h>
 #include <node/warnings.h>
+#include <primitives/transaction.h>
 #include <random.h>
 #include <rpc/blockchain.h>
 #include <sync.h>
 #include <test/util/chainstate.h>
 #include <test/util/coins.h>
+#include <test/util/mining.h>
 #include <test/util/random.h>
 #include <test/util/setup_common.h>
 #include <uint256.h>
@@ -4435,6 +4439,173 @@ BOOST_FIXTURE_TEST_CASE(chainstate_consensus_gold_standard_ignores_cleared_attes
         return CaptureConsensusGoldStandardChoice(chainman, chainstate, fork_watch);
     })};
     CheckGoldStandardUnchanged(short_attested_with, short_attested_without);
+}
+
+BOOST_FIXTURE_TEST_CASE(validation_epoch_clears_poisoned_valid_marks, TestChain100Setup)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    Chainstate& chainstate = chainman.ActiveChainstate();
+    const CScript script = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    auto& hysteresis = const_cast<std::optional<uint32_t>&>(
+        chainman.m_options.reorg_hysteresis_work_margin);
+    hysteresis = 0;
+
+    const CBlockIndex* original_tip{nullptr};
+    for (int i = 0; i < 3; ++i) {
+        CreateAndProcessBlock({}, script);
+    }
+    {
+        LOCK(::cs_main);
+        original_tip = chainstate.m_chain.Tip();
+        BOOST_REQUIRE(original_tip != nullptr);
+    }
+    const uint256 original_hash = original_tip->GetBlockHash();
+    const int original_height = original_tip->nHeight;
+    CBlockIndex* invalidate_at{WITH_LOCK(::cs_main, {
+        return chainstate.m_chain[original_height - 2];
+    })};
+    BOOST_REQUIRE(invalidate_at != nullptr);
+
+    BlockValidationState inval;
+    BOOST_REQUIRE(chainstate.InvalidateBlock(inval, invalidate_at));
+    CreateAndProcessBlock({}, script);
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainstate.m_chain.Tip() != nullptr);
+        BOOST_CHECK_NE(chainstate.m_chain.Tip()->GetBlockHash(), original_hash);
+        BOOST_CHECK(invalidate_at->nStatus & BLOCK_FAILED_MASK);
+        BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->WriteValidationEpoch(0));
+        chainman.MaybeClearStaleInvalidMarksForValidationEpoch();
+        BOOST_CHECK_EQUAL(invalidate_at->nStatus & BLOCK_FAILED_MASK, 0U);
+        BOOST_CHECK_GE(chainman.InvalidMarksClearedOnUpgrade(), 1U);
+        uint32_t stored{0};
+        BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->ReadValidationEpoch(stored));
+        BOOST_CHECK_EQUAL(stored, BLOCK_VALIDATION_EPOCH);
+    }
+    BlockValidationState abc;
+    BOOST_REQUIRE(chainstate.ActivateBestChain(abc));
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK_EQUAL(chainstate.m_chain.Tip()->GetBlockHash(), original_hash);
+        BOOST_CHECK_EQUAL(chainstate.m_chain.Height(), original_height);
+        BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->WriteValidationEpoch(0));
+        chainman.MaybeClearStaleInvalidMarksForValidationEpoch();
+        BlockValidationState again;
+        BOOST_REQUIRE(chainstate.InvalidateBlock(again, invalidate_at));
+        BOOST_CHECK(invalidate_at->nStatus & BLOCK_FAILED_MASK);
+        chainman.MaybeClearStaleInvalidMarksForValidationEpoch();
+        BOOST_CHECK(invalidate_at->nStatus & BLOCK_FAILED_MASK);
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(validation_epoch_rerejects_genuinely_invalid, TestChain100Setup)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    Chainstate& chainstate = chainman.ActiveChainstate();
+    const CScript script = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    const CBlockIndex* const tip{
+        WITH_LOCK(::cs_main, return chainstate.m_chain.Tip())};
+    BOOST_REQUIRE(tip != nullptr);
+    const uint256 tip_hash = tip->GetBlockHash();
+
+    CBlock bad = CreateBlock({}, script, chainstate);
+    {
+        CMutableTransaction cb{*bad.vtx[0]};
+        cb.vout[0].nValue += 50 * COIN;
+        bad.vtx[0] = MakeTransactionRef(std::move(cb));
+    }
+    RegenerateCommitments(bad, chainman);
+    BOOST_REQUIRE(MineHeaderForConsensus(
+        bad, static_cast<uint32_t>(tip->nHeight + 1),
+        Params().GetConsensus(), 5'000'000,
+        std::optional<int64_t>{tip->GetMedianTimePast()}));
+
+    bool new_block{false};
+    (void)chainman.ProcessNewBlock(
+        std::make_shared<const CBlock>(bad), /*force_processing=*/true,
+        /*min_pow_checked=*/true, &new_block);
+    CBlockIndex* bad_index{WITH_LOCK(::cs_main, {
+        return chainman.m_blockman.LookupBlockIndex(bad.GetHash());
+    })};
+    BOOST_REQUIRE(bad_index != nullptr);
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK(bad_index->nStatus & BLOCK_FAILED_MASK);
+        BOOST_CHECK_EQUAL(chainstate.m_chain.Tip()->GetBlockHash(), tip_hash);
+        BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->WriteValidationEpoch(0));
+        chainman.MaybeClearStaleInvalidMarksForValidationEpoch();
+        BOOST_CHECK_EQUAL(bad_index->nStatus & BLOCK_FAILED_MASK, 0U);
+    }
+    BlockValidationState abc;
+    BOOST_REQUIRE(chainstate.ActivateBestChain(abc));
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK_EQUAL(chainstate.m_chain.Tip()->GetBlockHash(), tip_hash);
+        BOOST_CHECK(bad_index->nStatus & BLOCK_FAILED_MASK);
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(validation_epoch_heals_poisoned_fork_shape, TestChain100Setup)
+{
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    Chainstate& chainstate = chainman.ActiveChainstate();
+    const CScript script = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    auto& hysteresis = const_cast<std::optional<uint32_t>&>(
+        chainman.m_options.reorg_hysteresis_work_margin);
+    hysteresis = 0;
+
+    std::vector<uint256> canonical;
+    for (int i = 0; i < 8; ++i) {
+        canonical.push_back(CreateAndProcessBlock({}, script).GetHash());
+    }
+    const uint256 heavy_hash = canonical.back();
+    CBlockIndex* heavy_tip{WITH_LOCK(::cs_main, {
+        return chainman.m_blockman.LookupBlockIndex(heavy_hash);
+    })};
+    BOOST_REQUIRE(heavy_tip != nullptr);
+    CBlockIndex* poison_root{WITH_LOCK(::cs_main, {
+        return chainstate.m_chain[heavy_tip->nHeight - 7];
+    })};
+    BOOST_REQUIRE(poison_root != nullptr);
+
+    BlockValidationState inval;
+    BOOST_REQUIRE(chainstate.InvalidateBlock(inval, poison_root));
+    CreateAndProcessBlock({}, script);
+    CreateAndProcessBlock({}, script);
+    CBlock decoy = CreateAndProcessBlock({}, script);
+    CBlockIndex* decoy_index{WITH_LOCK(::cs_main, {
+        return chainman.m_blockman.LookupBlockIndex(decoy.GetHash());
+    })};
+    BOOST_REQUIRE(decoy_index != nullptr);
+    BlockValidationState decoy_inval;
+    BOOST_REQUIRE(chainstate.InvalidateBlock(decoy_inval, decoy_index));
+    CreateAndProcessBlock({}, script);
+
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK_NE(chainstate.m_chain.Tip()->GetBlockHash(), heavy_hash);
+        BOOST_CHECK(poison_root->nStatus & BLOCK_FAILED_MASK);
+        BOOST_CHECK(decoy_index->nStatus & BLOCK_FAILED_MASK);
+        BOOST_CHECK(heavy_tip->nStatus & BLOCK_FAILED_MASK);
+        BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->WriteValidationEpoch(0));
+        chainman.MaybeClearStaleInvalidMarksForValidationEpoch();
+        BOOST_CHECK_EQUAL(poison_root->nStatus & BLOCK_FAILED_MASK, 0U);
+        BOOST_CHECK_EQUAL(heavy_tip->nStatus & BLOCK_FAILED_MASK, 0U);
+        chainman.RecalculateBestHeader();
+        BOOST_REQUIRE(chainman.m_best_header != nullptr);
+        BOOST_CHECK(PreferMostWorkHeader(*chainstate.m_chain.Tip(),
+                                         *chainman.m_best_header) ||
+                    chainman.m_best_header == heavy_tip ||
+                    chainman.m_best_header->GetAncestor(heavy_tip->nHeight) ==
+                        heavy_tip);
+    }
+    BlockValidationState abc;
+    BOOST_REQUIRE(chainstate.ActivateBestChain(abc));
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK_EQUAL(chainstate.m_chain.Tip()->GetBlockHash(), heavy_hash);
+        BOOST_CHECK_GE(chainman.m_best_header->nHeight, heavy_tip->nHeight);
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

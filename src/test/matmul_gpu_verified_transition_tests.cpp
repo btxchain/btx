@@ -357,6 +357,8 @@ BOOST_AUTO_TEST_CASE(consensus_without_signer_does_not_park_bypass)
     using node::matmul_trusted::ConsensusMinerMayFollowHeavierDisconnectedHeader;
     BOOST_CHECK(ConsensusMinerMayFollowHeavierDisconnectedHeader(
         false, false, false, false, true, true));
+    BOOST_CHECK(ConsensusMinerMayFollowHeavierDisconnectedHeader(
+        false, /*extends_tip=*/true, false, false, true, true));
     BOOST_CHECK(!ConsensusMinerMayFollowHeavierDisconnectedHeader(
         true, false, false, false, true, true));
     using node::matmul_trusted::ConsensusMinerMayReorgPastParkForStaleHeavierFork;

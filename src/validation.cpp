@@ -12839,7 +12839,7 @@ void ChainstateManager::RefreshAuthenticatedChainWork(CBlockIndex& index)
         if (candidate.nStatus & BLOCK_FAILED_MASK) return;
         NoteAuthenticatedRecoveryCandidate(&candidate);
         if (m_best_header == nullptr ||
-            PreferTrustAdjustedHeader(*m_best_header, candidate)) {
+            PreferMostWorkHeader(*m_best_header, candidate)) {
             SetBestHeader(&candidate);
         }
     };
@@ -12900,7 +12900,7 @@ void ChainstateManager::ReceivedBlockTransactions(const CBlock& block, CBlockInd
             if (candidate.nStatus & BLOCK_FAILED_MASK) return;
             NoteAuthenticatedRecoveryCandidate(&candidate);
             if (m_best_header == nullptr ||
-                PreferTrustAdjustedHeader(*m_best_header, candidate)) {
+                PreferMostWorkHeader(*m_best_header, candidate)) {
                 SetBestHeader(&candidate);
             }
         };
@@ -15722,7 +15722,7 @@ bool ChainstateManager::LoadBlockIndex()
             }
             if (pindex->IsValid(BLOCK_VALID_TREE)) {
                 MaybeUpdateBestClaimedHeader(pindex);
-                if (m_best_header == nullptr || PreferTrustAdjustedHeader(*m_best_header, *pindex)) {
+                if (m_best_header == nullptr || PreferMostWorkHeader(*m_best_header, *pindex)) {
                     SetBestHeader(pindex);
                 }
             }
@@ -17541,6 +17541,65 @@ void ChainstateManager::AutoReconsiderShieldedInvalidBlocksAfterConsensusRetune(
         },
         "AutoReconsiderShieldedInvalidBlocksAfterConsensusRetune",
         "after shielded pool-credit disable height retune");
+}
+
+void ChainstateManager::MaybeClearStaleInvalidMarksForValidationEpoch()
+{
+    AssertLockHeld(::cs_main);
+    if (!m_blockman.m_block_tree_db) return;
+
+    uint32_t stored{0};
+    const bool have_stored{
+        m_blockman.m_block_tree_db->ReadValidationEpoch(stored)};
+    if (have_stored && stored >= BLOCK_VALIDATION_EPOCH) {
+        return;
+    }
+
+    uint32_t cleared{0};
+    for (auto& [_, block_index] : m_blockman.m_block_index) {
+        if ((block_index.nStatus & BLOCK_FAILED_MASK) == 0) continue;
+        block_index.nStatus &= ~BLOCK_FAILED_MASK;
+        m_blockman.m_dirty_blockindex.insert(&block_index);
+        m_failed_blocks.erase(&block_index);
+        if (&block_index == m_best_invalid) {
+            m_best_invalid = nullptr;
+        }
+        ++cleared;
+        if (!block_index.IsValid(BLOCK_VALID_TRANSACTIONS) ||
+            !block_index.HaveNumChainTxs() ||
+            IsOnParkedReorgBranch(&block_index)) {
+            continue;
+        }
+        for (Chainstate* chainstate : GetAll()) {
+            chainstate->TryAddBlockIndexCandidate(&block_index);
+        }
+    }
+    m_invalid_marks_cleared_on_upgrade = cleared;
+
+    // Persist nStatus first, then the epoch. Crash between these two
+    // re-runs the heal (stored epoch still old). Epoch-first would skip
+    // the heal with marks still on disk.
+    if (!m_blockman.WriteBlockIndexDB()) {
+        LogError("%s: failed to persist cleared BLOCK_FAILED_* marks "
+                 "(stored_epoch=%u compiled_epoch=%u cleared=%u)\n",
+                 __func__, stored, BLOCK_VALIDATION_EPOCH, cleared);
+        return;
+    }
+    if (!m_blockman.m_block_tree_db->WriteValidationEpoch(BLOCK_VALIDATION_EPOCH)) {
+        LogError("%s: failed to persist validation epoch %u after clearing "
+                 "%u BLOCK_FAILED_* mark(s)\n",
+                 __func__, BLOCK_VALIDATION_EPOCH, cleared);
+        return;
+    }
+    if (cleared > 0) {
+        LogWarning("validation epoch %u -> %u: cleared BLOCK_FAILED_* on %u "
+                   "index entries so current validation can re-decide (full "
+                   "ConnectBlock; genuinely invalid blocks are re-marked)\n",
+                   stored, BLOCK_VALIDATION_EPOCH, cleared);
+    } else {
+        LogPrintf("validation epoch %u -> %u: no BLOCK_FAILED_* marks to clear\n",
+                  stored, BLOCK_VALIDATION_EPOCH);
+    }
 }
 
 bool ChainstateManager::MarkShieldedAutoRepairAttempt(ShieldedAutoRepairKind kind)
@@ -21106,16 +21165,24 @@ void ChainstateManager::EnsureBestHeaderNotBehindConnectedTip()
     const bool failed_branch{
         (m_best_header->nStatus & BLOCK_FAILED_MASK) != 0 ||
         !m_best_header->IsValid(BLOCK_VALID_TREE)};
+    // Floor only an ancestor of the connected tip (headers-below-blocks).
+    // Never use nHeight < tip alone: that would clamp a heavier competing
+    // fork. Never assign the tip when a higher-work header is already
+    // selected (macpro2 0.34.5: 944-deep headers-only suffix).
+    const bool behind_on_active{
+        m_best_header->nHeight <= tip->nHeight &&
+        tip->GetAncestor(m_best_header->nHeight) == m_best_header};
     if (failed_branch) {
         SetBestHeader(tip);
-    } else if (m_best_header->nHeight < tip->nHeight) {
+    } else if (behind_on_active && m_best_header != tip &&
+               m_best_header->nChainWork <= tip->nChainWork) {
         SetBestHeader(tip);
     }
 
     // Floor, do not pin. SendMessages calls this every message: a valid
-    // heavier disconnected claimed header must become m_best_header so
-    // getblockchaininfo.headers and GETDATA chase that tower. Trusted
-    // mirrors stay on the authority-steered path.
+    // heavier header — competing fork OR same-chain headers-only suffix —
+    // must become m_best_header so GETDATA can sprint. Trusted mirrors stay
+    // on the authority-steered path.
     if (node::matmul_trusted::IsTrustedMirror()) return;
     CBlockIndex* claimed{m_best_claimed_header};
     if (claimed == nullptr) claimed = m_best_header;
@@ -21159,10 +21226,10 @@ void ChainstateManager::RecalculateBestHeader()
             }
             if (entry.second.nStatus & BLOCK_FAILED_MASK) continue;
             MaybeUpdateBestClaimedHeader(&entry.second);
-            // Authenticated-work selection with a bounded unauth allowance: a short
-            // unverified MatMul suffix may displace a losing tip for chase, but a
-            // forged flood beyond the allowance cannot outrank authenticated work.
-            if (m_best_header == nullptr || PreferTrustAdjustedHeader(*m_best_header, entry.second)) {
+            // Download locators must rank by nChainWork. The 6-block unauth
+            // allowance left m_best_header on the connected tip while a
+            // 944-deep more-work headers-only suffix sat in the index.
+            if (m_best_header == nullptr || PreferMostWorkHeader(*m_best_header, entry.second)) {
                 SetBestHeader(&entry.second);
             }
         }
