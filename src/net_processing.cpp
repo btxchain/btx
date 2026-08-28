@@ -337,13 +337,12 @@ enum class DupHeaderDisposition : uint8_t {
     return chainman.IndexIsFollowedTipChild(tip, index);
 }
 
-/** How far the followed (tip-extending) header chain is ahead of the active
- *  tip. Competing headers-only flood on m_best_header is ignored unless that
- *  header itself extends the tip. `peer_best` is considered only when it too
- *  extends the tip, so an attested-chain peer can still put a miner 125
- *  behind into catch-up. */
-static int FollowedChainAhead(const ChainstateManager& chainman,
-                              const CBlockIndex* peer_best = nullptr)
+/** Tip-extending header lead with no signed-frontier cap. A configured GPU
+ *  sitting on its own frontier still has a HEADER_ONLY suffix (live 0.34.5:
+ *  blocks=199334, headers=200297). Capped FollowedChainAhead is 0 there, so
+ *  download timeout / parallel-owner failover must use this number. */
+static int UncappedFollowedChainAhead(const ChainstateManager& chainman,
+                                      const CBlockIndex* peer_best = nullptr)
     EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
     const CBlockIndex* tip{chainman.ActiveChain().Tip()};
@@ -357,6 +356,21 @@ static int FollowedChainAhead(const ChainstateManager& chainman,
     };
     consider(chainman.m_best_header);
     consider(peer_best);
+    return best_height - tip->nHeight;
+}
+
+/** How far the followed (tip-extending) header chain is ahead of the active
+ *  tip. Competing headers-only flood on m_best_header is ignored unless that
+ *  header itself extends the tip. `peer_best` is considered only when it too
+ *  extends the tip, so an attested-chain peer can still put a miner 125
+ *  behind into catch-up. */
+static int FollowedChainAhead(const ChainstateManager& chainman,
+                              const CBlockIndex* peer_best = nullptr)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    const CBlockIndex* tip{chainman.ActiveChain().Tip()};
+    if (tip == nullptr) return 0;
+    int best_height{tip->nHeight + UncappedFollowedChainAhead(chainman, peer_best)};
     const auto frontier{chainman.GetSignedFrontierStatus()};
     // Ancestor-of-frontier-hash, not IndexLeadsToSignedFrontier: that
     // helper requires HasQuorumInMemory, so a height+hash hint (peerman
@@ -398,6 +412,20 @@ static bool IsCatchUpBlockFetch(const ChainstateManager& chainman,
 {
     if (chainman.ActiveChain().Tip() == nullptr) return false;
     return FollowedChainAhead(chainman, peer_best) >= BLOCK_FETCH_STALL_HEADERS_AHEAD;
+}
+
+/** True when a silent getdata peer must not pin the followed hole. Includes
+ *  the live signer shape: capped catch-up ahead is 0 while an unattested
+ *  HEADER_ONLY suffix is hundreds of blocks long. */
+static bool DownloadFailoverCatchUp(const ChainstateManager& chainman,
+                                    const CBlockIndex* peer_best = nullptr)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    if (IsCatchUpBlockFetch(chainman, peer_best)) return true;
+    const CBlockIndex* tip{chainman.ActiveChain().Tip()};
+    return node::FollowedHeaderSuffixNeedsDownloadFailover(
+        tip != nullptr ? tip->nHeight : -1,
+        UncappedFollowedChainAhead(chainman, peer_best));
 }
 
 /** Signed-frontier HEADER_ONLY catch-up is root-first 1-wide: the GPU
@@ -2601,6 +2629,17 @@ private:
     int ReclaimStaleInFlightBlockRequests(std::chrono::microseconds now, const char* reason)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
+    /** Walk every peer's in-flight queue (not only `pto`) and release
+     *  requests past their per-request deadline. Root-first
+     *  select=root_in_flight used to skip FindNextBlocks without ever
+     *  evaluating the owner-only timeout, so a single silent peer pinned
+     *  the followed hole forever (live 0.34.5: getblockfrompeer to a
+     *  different peer advanced tip; the next hole re-wedged). Pauses the
+     *  silent peer so the same SendMessages pass can GETDATA another
+     *  peer. Disconnects after repeated timeouts. */
+    int ExpireOverdueBlockDownloads(std::chrono::microseconds now)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
     /** During catch-up, free in-flight requests above `keep_through_height` so
      *  a silent seed cannot pin 16 successors while the lowest hole (or an
      *  unconnected HAVE_DATA parent) never arrives. Restart's only useful
@@ -3659,7 +3698,7 @@ int PeerManagerImpl::ReclaimStaleInFlightBlockRequests(std::chrono::microseconds
     // Collect first: RemoveBlockRequest mutates the lists we are walking.
     std::vector<std::pair<NodeId, uint256>> stale;
     std::chrono::microseconds oldest_reclaimed{0us};
-    const auto reclaim_after_default = IsCatchUpBlockFetch(m_chainman)
+    const auto reclaim_after_default = DownloadFailoverCatchUp(m_chainman)
                                    ? std::chrono::duration_cast<std::chrono::microseconds>(
                                          BLOCK_CATCHUP_DOWNLOAD_TIMEOUT)
                                    : std::chrono::duration_cast<std::chrono::microseconds>(
@@ -3667,8 +3706,10 @@ int PeerManagerImpl::ReclaimStaleInFlightBlockRequests(std::chrono::microseconds
     const bool signed_frontier_catch_up{IsSignedFrontierBodyCatchUp()};
     for (const auto& [nodeid, state] : m_node_states) {
         const auto reclaim_after{
-            IsCatchUpBlockFetch(m_chainman)
-                ? CatchUpDownloadTimeoutForPeer(nodeid, state)
+            DownloadFailoverCatchUp(m_chainman)
+                ? std::min(CatchUpDownloadTimeoutForPeer(nodeid, state),
+                           std::chrono::duration_cast<std::chrono::microseconds>(
+                               BLOCK_CATCHUP_DOWNLOAD_TIMEOUT))
                 : reclaim_after_default};
         // GPU-signed catch-up inflight is attested-path work. Do not keep a
         // 180s pipeline on a miner that only relayed MMATTEST (live public CPU archive
@@ -3747,6 +3788,92 @@ int PeerManagerImpl::ReclaimStaleInFlightBlockRequests(std::chrono::microseconds
     return static_cast<int>(stale.size());
 }
 
+int PeerManagerImpl::ExpireOverdueBlockDownloads(std::chrono::microseconds now)
+{
+    AssertLockHeld(cs_main);
+
+    ReconcileBlockDownloadAccounting("overdue-expire");
+
+    const bool suffix_failover{DownloadFailoverCatchUp(m_chainman)};
+    const auto followed_deadline{
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            BLOCK_CATCHUP_DOWNLOAD_TIMEOUT)};
+    const auto default_deadline{
+        suffix_failover
+            ? followed_deadline
+            : std::chrono::duration_cast<std::chrono::microseconds>(
+                  BLOCK_REREQUEST_STALE_AFTER)};
+
+    std::vector<std::pair<NodeId, uint256>> overdue;
+    std::vector<int> overdue_height;
+    std::vector<int> overdue_age_s;
+    for (const auto& [nodeid, state] : m_node_states) {
+        for (const QueuedBlock& entry : state.vBlocksInFlight) {
+            if (entry.pindex == nullptr) continue;
+            const auto requested_at = entry.requested_at.count() > 0
+                                          ? entry.requested_at
+                                          : state.m_downloading_since;
+            const bool untimestamped = requested_at.count() == 0;
+            const auto age = untimestamped ? default_deadline : now - requested_at;
+            if (!untimestamped && now < requested_at + default_deadline) {
+                continue;
+            }
+            overdue.emplace_back(nodeid, entry.pindex->GetBlockHash());
+            overdue_height.push_back(entry.pindex->nHeight);
+            overdue_age_s.push_back(static_cast<int>(
+                count_seconds(std::chrono::duration_cast<std::chrono::seconds>(age))));
+        }
+    }
+    if (overdue.empty()) return 0;
+
+    std::set<NodeId> paused;
+    std::set<NodeId> disconnect;
+    for (size_t i = 0; i < overdue.size(); ++i) {
+        const NodeId nodeid{overdue[i].first};
+        const uint256& hash{overdue[i].second};
+        RemoveBlockRequest(hash, nodeid);
+        CNodeState* state{State(nodeid)};
+        if (state == nullptr) continue;
+        ++state->m_block_download_timeout_count;
+        const bool persistent{
+            state->m_block_download_timeout_count >=
+            BLOCK_DOWNLOAD_TIMEOUT_DISCONNECT_AFTER};
+        // Pause so this silent peer cannot win the next GETDATA race for
+        // the same hole (or the next tip+1 after ConnectTip). Manual/noban
+        // stay connected; ordinary stallers disconnect after 3 misses.
+        state->m_block_download_paused_until =
+            now + (persistent ? MANUAL_PEER_BLOCK_DOWNLOAD_COOLDOWN
+                              : BLOCK_DOWNLOAD_TIMEOUT_REREQUEST_COOLDOWN);
+        paused.insert(nodeid);
+        if (persistent && !state->m_manual && !state->m_noban) {
+            const bool last_gpu_or_frontier_source{
+                PeerIsGpuAuthority(nodeid, *state) ||
+                PeerIsSignedFrontierBodySource(nodeid, *state)};
+            if (!node::matmul_trusted::KeepCatchupSourceOnDownloadTimeout(
+                    IsSignedFrontierBodyCatchUp(), persistent,
+                    last_gpu_or_frontier_source)) {
+                disconnect.insert(nodeid);
+            }
+        }
+        LogInfo("Block download deadline: releasing %s (height %d) from "
+                "silent peer=%d after %ds; paused for re-request from a "
+                "different peer (consecutive_timeouts=%d%s)\n",
+                hash.ToString(), overdue_height[i], nodeid, overdue_age_s[i],
+                state->m_block_download_timeout_count,
+                disconnect.count(nodeid) ? ", disconnecting" : "");
+    }
+
+    for (NodeId nodeid : disconnect) {
+        m_connman.ForNode(nodeid, [](CNode* pnode) {
+            pnode->fDisconnect = true;
+            return true;
+        });
+    }
+
+    ReconcileBlockDownloadAccounting("overdue-expire-after");
+    return static_cast<int>(overdue.size());
+}
+
 int PeerManagerImpl::ReclaimCatchupSuccessorRequests(int keep_through_height, const char* reason)
 {
     AssertLockHeld(cs_main);
@@ -3818,6 +3945,10 @@ void PeerManagerImpl::MaybeRecoverStalledBlockFetch(std::chrono::microseconds no
     const int ahead{std::max(best_ahead, peer_ahead)};
 
     if (ahead < BLOCK_FETCH_STALL_HEADERS_AHEAD) {
+        // Capped ahead can be 0 while a HEADER_ONLY suffix is in flight
+        // (live signer: frontier==tip, headers=tip+960). Still expire
+        // overdue getdata; otherwise select=root_in_flight never times out.
+        ExpireOverdueBlockDownloads(now);
         m_block_fetch_idle_since = 0us;
         return;
     }
@@ -3909,9 +4040,9 @@ void PeerManagerImpl::MaybeRecoverStalledBlockFetch(std::chrono::microseconds no
             state.pindexBestKnownBlock->nHeight >= tip->nHeight + BLOCK_FETCH_STALL_HEADERS_AHEAD &&
             state.pindexBestKnownBlock->GetAncestor(tip->nHeight) == tip) {
             state.pindexLastCommonBlock = nullptr;
-            if (state.m_block_download_paused_until > now) {
-                state.m_block_download_paused_until = now;
-            }
+            // Do not unpause a download-timeout staller. Clearing the
+            // cooldown here let the same silent peer win the next GETDATA
+            // race (live 0.34.5: one getblockfrompeer, then re-wedge).
         }
     }
     MaybeKickAbcForAttestedCatchUp();
@@ -4626,7 +4757,7 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
     MaybeSeedLocalSignerLostTwinBestKnown(peer.m_id, *state);
 
     const CBlockIndex* tip{m_chainman.ActiveChain().Tip()};
-    const bool catch_up{IsCatchUpBlockFetch(m_chainman, state->pindexBestKnownBlock)};
+    const bool catch_up{DownloadFailoverCatchUp(m_chainman, state->pindexBestKnownBlock)};
     const bool narrow_window{IsNarrowCatchUpWindow(m_chainman, state->pindexBestKnownBlock)};
     // Root-first 1-wide for signed-frontier catch-up too (preferred GPU
     // and archive sources). Live public CPU archive filled 16 newest hashes from a
@@ -4636,7 +4767,8 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
         count = CATCHUP_BLOCKS_IN_TRANSIT_PER_PEER;
     }
     const auto rerequest_stale_after = catch_up
-        ? CatchUpDownloadTimeoutForPeer(peer.m_id, *state)
+        ? std::chrono::duration_cast<std::chrono::microseconds>(
+              BLOCK_CATCHUP_DOWNLOAD_TIMEOUT)
         : std::chrono::duration_cast<std::chrono::microseconds>(BLOCK_REREQUEST_STALE_AFTER);
     const size_t min_parallel_owners{catch_up ? CATCHUP_MIN_PARALLEL_OWNERS : size_t{1}};
     const ChainRecoveryState recovery{m_chainman.GetChainRecoveryState()};
@@ -5254,6 +5386,15 @@ void PeerManagerImpl::FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, c
 
             // Is block in-flight?
             if (IsBlockRequested(pindex->GetBlockHash())) {
+                // Do not re-GETDATA the same silent peer: that would look
+                // like progress while still pinning the hole to a non-deliverer
+                // (live 0.34.5: one getdata, never retried elsewhere until
+                // getblockfrompeer). Another peer must take the duplicate.
+                if (IsBlockRequestedFromPeer(pindex->GetBlockHash(), peer.m_id)) {
+                    if (waitingfor == -1) waitingfor = peer.m_id;
+                    if (nodeStaller) *nodeStaller = waitingfor;
+                    return;
+                }
                 // ... and has the peer holding it gone quiet? A peer that
                 // accepts a getdata and never sends the block would otherwise
                 // pin it forever, because this loop skips anything in
@@ -10967,7 +11108,10 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
         }
         // A headers message with no headers cannot be an announcement, so assume
         // it is a response to our last getheaders request, if there is one.
-        peer.m_last_getheaders_timestamp = {};
+        // Stamp now (do not clear): clearing let must_probe immediately
+        // re-send and monopolise b-msghand (live 0.34.5: 171 getheaders/sec
+        // to one peer).
+        peer.m_last_getheaders_timestamp = NodeClock::now();
         return;
     }
 
@@ -11110,17 +11254,13 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
                     peer.m_should_discourage = true;
                 }
                 pfrom.fDisconnect = true;
-            } else if (peer.m_starting_height.load() > tip_height) {
-                const CBlockIndex* start{WITH_LOCK(cs_main, return HeaderSyncLocatorIndex(m_chainman))};
-                if (start != nullptr && start->pprev) start = start->pprev;
-                if (start != nullptr) {
-                    MaybeSendGetHeaders(pfrom, GetLocator(start), peer);
-                }
             } else {
                 // Connecting duplicates cleared the 2-minute gate at
-                // m_last_getheaders_timestamp. Restore it so SendMessages
-                // cannot hot-loop the same locator (live 0.34.3 + 0.34.1
-                // fork peer: hundreds of getheaders/sec from 199023).
+                // m_last_getheaders_timestamp. Do not immediately
+                // MaybeSendGetHeaders even when VERSION is above tip: that
+                // was the live probe spam (must_probe send → already-known
+                // suffix reply → send again, four getheaders/sec). Restore
+                // the gate. Further probes belong to SendMessages.
                 peer.m_last_getheaders_timestamp = NodeClock::now();
             }
             return;
@@ -18996,6 +19136,7 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
         // m_best_header on an authenticated ancestor below the connected
         // tip (live 0.34.3: headers=199024, blocks=199310).
         m_chainman.EnsureBestHeaderNotBehindConnectedTip();
+        ExpireOverdueBlockDownloads(current_time);
 
         // Stalled-chain restart: IsInitialBlockDownload stays true when the
         // tip is older than -maxtipage even if nChainWork is sufficient.
@@ -19128,7 +19269,10 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
             }
         }
 
-        if (!state.fSyncStarted && CanServeBlocks(*peer) && !m_chainman.m_blockman.LoadingBlocks()) {
+        if (!state.fSyncStarted && CanServeBlocks(*peer) && !m_chainman.m_blockman.LoadingBlocks() &&
+            !node::HeaderSyncAdvertisedHeightUnusable(
+                tip_for_headers != nullptr ? tip_for_headers->nHeight : -1,
+                peer->m_starting_height.load())) {
             // Only actively request headers from a single peer, unless we're close to today.
             //
             // Preference-only handoff: after an ordinary peer loses fPreferredDownload at
@@ -19195,6 +19339,7 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                 if (pindexStart != nullptr &&
                     MaybeSendGetHeaders(*pto, GetLocator(pindexStart), *peer)) {
                     if (must_probe) {
+                        m_best_known_probe_at[pto->GetId()] = current_time;
                         LogInfo("initial getheaders (%d) to peer=%d (startheight:%d)\n",
                                 pindexStart->nHeight, pto->GetId(),
                                 peer->m_starting_height.load());
@@ -19658,10 +19803,12 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                     std::chrono::duration_cast<std::chrono::microseconds>(BLOCK_DOWNLOAD_TIMEOUT_MIN)),
                 std::chrono::duration_cast<std::chrono::microseconds>(
                     spacing * BLOCK_DOWNLOAD_TIMEOUT_MAX_MULT));
-            const bool catch_up{IsCatchUpBlockFetch(m_chainman, state.pindexBestKnownBlock)};
+            const bool catch_up{DownloadFailoverCatchUp(m_chainman, state.pindexBestKnownBlock)};
             if (catch_up) {
                 download_timeout = std::min(
-                    download_timeout, CatchUpDownloadTimeoutForPeer(pto->GetId(), state));
+                    download_timeout,
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        BLOCK_CATCHUP_DOWNLOAD_TIMEOUT));
             }
             // Time the head of the queue from when *it* was requested, not from
             // the peer-wide m_downloading_since. m_downloading_since only moves

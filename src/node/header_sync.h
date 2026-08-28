@@ -7,6 +7,7 @@
 
 #include <chain.h>
 
+#include <chrono>
 #include <cstdint>
 
 namespace node {
@@ -90,10 +91,58 @@ namespace node {
  * 8b5da5a5, BestKnown 199382 on 33c834f8, peer VERSION 199523, unauth
  * lead cap 72). A competing BestKnown is not an extension of our tip.
  *
- * VERSION is a handshake snapshot. When the tip is stale, also probe
- * peers who advertised *below* us (live 0.34.3: 57 peers at
- * 199294–199309, the only peer above us on the 0.34.1 fork).
+ * VERSION is a handshake snapshot. Peers advertising height 0 / unset
+ * or below our connected tip are never probed (live 0.34.5: 171
+ * getheaders/sec to one peer, including height-0 advertisers). Same-
+ * height peers are still probed when the tip is stale so we can learn
+ * tip+1.
  */
+[[nodiscard]] inline bool HeaderSyncAdvertisedHeightUnusable(
+    int32_t local_tip_height,
+    int32_t peer_starting_height)
+{
+    // Unset VERSION (-1) is not a tip to chase. Height 0 is genesis:
+    // skip it only once we ourselves are past genesis (live 0.34.5:
+    // probes to peers advertising 0). A peer behind our connected tip
+    // cannot supply the HEADER_ONLY suffix we are downloading.
+    if (peer_starting_height < 0) return true;
+    if (peer_starting_height == 0 && local_tip_height > 0) return true;
+    if (local_tip_height > 0 && peer_starting_height < local_tip_height) {
+        return true;
+    }
+    return false;
+}
+
+/**
+ * Per-peer best-known probe pacing. `have_prior_probe` is false until
+ * this peer has been asked. Elapsed time is not reset when headers
+ * arrive — that was the live spam (duplicate suffix replies cleared
+ * m_last_getheaders_timestamp and immediately re-sent).
+ */
+[[nodiscard]] inline bool HeaderSyncProbeIntervalElapsed(
+    bool have_prior_probe,
+    std::chrono::microseconds since_prior,
+    std::chrono::microseconds min_interval)
+{
+    if (!have_prior_probe) return true;
+    return since_prior > min_interval;
+}
+
+/**
+ * Uncapped tip-extending header lead vs the signed-frontier cap used
+ * for 1-wide catch-up. A GPU at its own frontier with a 947-block
+ * HEADER_ONLY suffix has capped ahead=0, so IsCatchUpBlockFetch is
+ * false; download timeout / parallel-owner failover must still run.
+ */
+[[nodiscard]] inline bool FollowedHeaderSuffixNeedsDownloadFailover(
+    int tip_height,
+    int uncapped_followed_ahead,
+    int stall_headers_ahead = 2)
+{
+    if (tip_height < 0) return false;
+    return uncapped_followed_ahead >= stall_headers_ahead;
+}
+
 [[nodiscard]] inline bool HeaderSyncMustProbe(
     int32_t local_tip_height,
     int32_t peer_starting_height,
@@ -104,6 +153,10 @@ namespace node {
     bool best_known_extends_tip = false)
 {
     (void)headers_in_flight;
+    if (HeaderSyncAdvertisedHeightUnusable(local_tip_height,
+                                           peer_starting_height)) {
+        return false;
+    }
     const auto known_not_ahead = [&] {
         if (best_known_is_null) return true;
         if (!best_known_extends_tip) return true;

@@ -92,13 +92,42 @@ BOOST_AUTO_TEST_CASE(must_probe_table)
                                            /*best_known_extends_tip=*/true));
     // VERSION below tip, not stale: do not probe (pre-eb9ef0ef + same-height)
     BOOST_CHECK(!node::HeaderSyncMustProbe(199310, 199294, true, false, false));
-    // VERSION below tip, stale: probe (live 0.34.3: 57 peers at 199294–199309)
-    BOOST_CHECK(node::HeaderSyncMustProbe(199310, 199294, true, true, false));
-    // BestKnown pinned at tip, starting below, stale: still probe for tip+1
-    BOOST_CHECK(node::HeaderSyncMustProbe(199310, 199294, false, true, false,
+    // VERSION below tip, even when stale: do not probe (live 0.34.5 skip)
+    BOOST_CHECK(!node::HeaderSyncMustProbe(199310, 199294, true, true, false));
+    BOOST_CHECK(!node::HeaderSyncMustProbe(199310, 199294, false, true, false,
                                           /*best_known_height=*/199310));
+    // height 0 / unset never probes
+    BOOST_CHECK(!node::HeaderSyncMustProbe(199310, 0, true, true, false));
+    BOOST_CHECK(!node::HeaderSyncMustProbe(199310, -1, true, true, false));
     // same-height stale, BestKnown null
     BOOST_CHECK(node::HeaderSyncMustProbe(199310, 199310, true, true, false));
+}
+
+BOOST_AUTO_TEST_CASE(probe_interval_and_suffix_failover_helpers)
+{
+    using namespace std::chrono;
+    BOOST_CHECK(node::HeaderSyncProbeIntervalElapsed(
+        /*have_prior=*/false, 0us, 2min));
+    BOOST_CHECK(!node::HeaderSyncProbeIntervalElapsed(
+        true, 1s, 2min));
+    BOOST_CHECK(!node::HeaderSyncProbeIntervalElapsed(
+        true, 2min, 2min));
+    BOOST_CHECK(node::HeaderSyncProbeIntervalElapsed(
+        true, 2min + 1s, 2min));
+
+    BOOST_CHECK(!node::FollowedHeaderSuffixNeedsDownloadFailover(
+        /*tip=*/199334, /*uncapped_ahead=*/0));
+    BOOST_CHECK(!node::FollowedHeaderSuffixNeedsDownloadFailover(199334, 1));
+    BOOST_CHECK(node::FollowedHeaderSuffixNeedsDownloadFailover(199334, 2));
+    BOOST_CHECK(node::FollowedHeaderSuffixNeedsDownloadFailover(199334, 960));
+    BOOST_CHECK(!node::FollowedHeaderSuffixNeedsDownloadFailover(-1, 960));
+    BOOST_CHECK(node::HeaderSyncAdvertisedHeightUnusable(199334, 0));
+    BOOST_CHECK(node::HeaderSyncAdvertisedHeightUnusable(199334, -1));
+    BOOST_CHECK(node::HeaderSyncAdvertisedHeightUnusable(199334, 199300));
+    BOOST_CHECK(!node::HeaderSyncAdvertisedHeightUnusable(199334, 199334));
+    BOOST_CHECK(!node::HeaderSyncAdvertisedHeightUnusable(199334, 200294));
+    BOOST_CHECK(!node::HeaderSyncAdvertisedHeightUnusable(0, 0));
+    BOOST_CHECK(!node::HeaderSyncAdvertisedHeightUnusable(-1, 0));
 }
 
 BOOST_AUTO_TEST_CASE(initial_sync_prefers_checkpoint_anchor_and_skips_low_work_failures)
