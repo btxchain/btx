@@ -4441,6 +4441,15 @@ BOOST_FIXTURE_TEST_CASE(chainstate_consensus_gold_standard_ignores_cleared_attes
     CheckGoldStandardUnchanged(short_attested_with, short_attested_without);
 }
 
+static void StripManualInvalidationBits(ChainstateManager& chainman)
+    EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+{
+    for (auto& [_, idx] : chainman.m_blockman.m_block_index) {
+        if ((idx.nStatus & BLOCK_MANUALLY_INVALIDATED) == 0) continue;
+        idx.nStatus &= ~BLOCK_MANUALLY_INVALIDATED;
+    }
+}
+
 BOOST_FIXTURE_TEST_CASE(validation_epoch_clears_poisoned_valid_marks, TestChain100Setup)
 {
     ChainstateManager& chainman = *Assert(m_node.chainman);
@@ -4474,13 +4483,15 @@ BOOST_FIXTURE_TEST_CASE(validation_epoch_clears_poisoned_valid_marks, TestChain1
         BOOST_REQUIRE(chainstate.m_chain.Tip() != nullptr);
         BOOST_CHECK_NE(chainstate.m_chain.Tip()->GetBlockHash(), original_hash);
         BOOST_CHECK(invalidate_at->nStatus & BLOCK_FAILED_MASK);
+        BOOST_CHECK(invalidate_at->nStatus & BLOCK_MANUALLY_INVALIDATED);
+        StripManualInvalidationBits(chainman);
         BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->WriteValidationEpoch(0));
-        chainman.MaybeClearStaleInvalidMarksForValidationEpoch();
+        BOOST_REQUIRE(chainman.MaybeClearStaleInvalidMarksForValidationEpoch());
         BOOST_CHECK_EQUAL(invalidate_at->nStatus & BLOCK_FAILED_MASK, 0U);
         BOOST_CHECK_GE(chainman.InvalidMarksClearedOnUpgrade(), 1U);
         uint32_t stored{0};
         BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->ReadValidationEpoch(stored));
-        BOOST_CHECK_EQUAL(stored, BLOCK_VALIDATION_EPOCH);
+        BOOST_CHECK_EQUAL(stored, chainman.GetBlockValidationEpoch());
     }
     BlockValidationState abc;
     BOOST_REQUIRE(chainstate.ActivateBestChain(abc));
@@ -4488,13 +4499,14 @@ BOOST_FIXTURE_TEST_CASE(validation_epoch_clears_poisoned_valid_marks, TestChain1
         LOCK(::cs_main);
         BOOST_CHECK_EQUAL(chainstate.m_chain.Tip()->GetBlockHash(), original_hash);
         BOOST_CHECK_EQUAL(chainstate.m_chain.Height(), original_height);
-        BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->WriteValidationEpoch(0));
-        chainman.MaybeClearStaleInvalidMarksForValidationEpoch();
         BlockValidationState again;
         BOOST_REQUIRE(chainstate.InvalidateBlock(again, invalidate_at));
         BOOST_CHECK(invalidate_at->nStatus & BLOCK_FAILED_MASK);
-        chainman.MaybeClearStaleInvalidMarksForValidationEpoch();
+        BOOST_CHECK(invalidate_at->nStatus & BLOCK_MANUALLY_INVALIDATED);
+        BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->WriteValidationEpoch(0));
+        BOOST_REQUIRE(chainman.MaybeClearStaleInvalidMarksForValidationEpoch());
         BOOST_CHECK(invalidate_at->nStatus & BLOCK_FAILED_MASK);
+        BOOST_CHECK(invalidate_at->nStatus & BLOCK_MANUALLY_INVALIDATED);
     }
 }
 
@@ -4510,36 +4522,39 @@ BOOST_FIXTURE_TEST_CASE(validation_epoch_rerejects_genuinely_invalid, TestChain1
 
     CBlock bad = CreateBlock({}, script, chainstate);
     {
-        CMutableTransaction cb{*bad.vtx[0]};
-        cb.vout[0].nValue += 50 * COIN;
-        bad.vtx[0] = MakeTransactionRef(std::move(cb));
+        CMutableTransaction extra{*bad.vtx[0]};
+        bad.vtx.push_back(MakeTransactionRef(std::move(extra)));
     }
-    RegenerateCommitments(bad, chainman);
+    node::RegenerateCommitments(bad, chainman);
     BOOST_REQUIRE(MineHeaderForConsensus(
         bad, static_cast<uint32_t>(tip->nHeight + 1),
         Params().GetConsensus(), 5'000'000,
         std::optional<int64_t>{tip->GetMedianTimePast()}));
 
-    bool new_block{false};
-    (void)chainman.ProcessNewBlock(
-        std::make_shared<const CBlock>(bad), /*force_processing=*/true,
-        /*min_pow_checked=*/true, &new_block);
-    CBlockIndex* bad_index{WITH_LOCK(::cs_main, {
-        return chainman.m_blockman.LookupBlockIndex(bad.GetHash());
-    })};
-    BOOST_REQUIRE(bad_index != nullptr);
     {
         LOCK(::cs_main);
+        CBlockIndex* bad_index{
+            chainman.m_blockman.AddToBlockIndex(bad, chainman.m_best_header)};
+        BOOST_REQUIRE(bad_index != nullptr);
+        const FlatFilePos pos{
+            chainman.m_blockman.WriteBlock(bad, bad_index->nHeight)};
+        BOOST_REQUIRE(!pos.IsNull());
+        chainman.ReceivedBlockTransactions(bad, bad_index, pos);
+        bad_index->nStatus |= BLOCK_FAILED_VALID;
+        chainman.m_failed_blocks.insert(bad_index);
+        BOOST_CHECK(bad_index->nStatus & BLOCK_HAVE_DATA);
+        BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->WriteValidationEpoch(0));
+        BOOST_REQUIRE(chainman.MaybeClearStaleInvalidMarksForValidationEpoch());
         BOOST_CHECK(bad_index->nStatus & BLOCK_FAILED_MASK);
         BOOST_CHECK_EQUAL(chainstate.m_chain.Tip()->GetBlockHash(), tip_hash);
-        BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->WriteValidationEpoch(0));
-        chainman.MaybeClearStaleInvalidMarksForValidationEpoch();
-        BOOST_CHECK_EQUAL(bad_index->nStatus & BLOCK_FAILED_MASK, 0U);
     }
     BlockValidationState abc;
     BOOST_REQUIRE(chainstate.ActivateBestChain(abc));
     {
         LOCK(::cs_main);
+        CBlockIndex* bad_index{
+            chainman.m_blockman.LookupBlockIndex(bad.GetHash())};
+        BOOST_REQUIRE(bad_index != nullptr);
         BOOST_CHECK_EQUAL(chainstate.m_chain.Tip()->GetBlockHash(), tip_hash);
         BOOST_CHECK(bad_index->nStatus & BLOCK_FAILED_MASK);
     }
@@ -4587,8 +4602,9 @@ BOOST_FIXTURE_TEST_CASE(validation_epoch_heals_poisoned_fork_shape, TestChain100
         BOOST_CHECK(poison_root->nStatus & BLOCK_FAILED_MASK);
         BOOST_CHECK(decoy_index->nStatus & BLOCK_FAILED_MASK);
         BOOST_CHECK(heavy_tip->nStatus & BLOCK_FAILED_MASK);
+        StripManualInvalidationBits(chainman);
         BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->WriteValidationEpoch(0));
-        chainman.MaybeClearStaleInvalidMarksForValidationEpoch();
+        BOOST_REQUIRE(chainman.MaybeClearStaleInvalidMarksForValidationEpoch());
         BOOST_CHECK_EQUAL(poison_root->nStatus & BLOCK_FAILED_MASK, 0U);
         BOOST_CHECK_EQUAL(heavy_tip->nStatus & BLOCK_FAILED_MASK, 0U);
         chainman.RecalculateBestHeader();

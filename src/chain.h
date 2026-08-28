@@ -147,6 +147,12 @@ enum BlockStatus : uint32_t {
     //! unlike BLOCK_EXACT_REPLAY_VERIFIED it MUST NOT short-circuit validation
     //! after restart because the configured signer set/threshold may change.
     BLOCK_TRUSTED_REPLAY_ATTESTED = 512,
+
+    //! Operator invalidateblock. Independent of BLOCK_FAILED_MASK so a
+    //! validation-epoch bump can clear poisoned FAILED marks without
+    //! resurrecting a fork the operator deliberately killed. Cleared only
+    //! by explicit reconsiderblock. Bit 512 is BLOCK_TRUSTED_REPLAY_ATTESTED.
+    BLOCK_MANUALLY_INVALIDATED   = 1024,
 };
 
 /** The block chain is a tree shaped structure starting with the
@@ -494,10 +500,13 @@ inline constexpr unsigned int TRUST_ADJUSTED_WORK_ALLOWANCE_BLOCKS = 6;
     return candidate.GetBlockHash() < current.GetBlockHash();
 }
 
-/** Bump whenever consensus-relevant validation changes that may have
- *  written BLOCK_FAILED_* incorrectly. Missing stored epoch is 0
- *  (every 0.34.0–0.34.4 datadir). 0.34.5 is epoch 1: those nodes
- *  auto-clear poisoned invalid marks on first start. */
+/** Compile-time constant. Bump only in the release whose validation
+ *  actually changed. Missing stored epoch is 0 (every 0.34.0–0.34.4
+ *  datadir). Never derived from chain state, never RPC-settable.
+ *  0.34.5 is epoch 1: clear non-manual FAILED marks, re-run
+ *  CheckBlockHeader/ContextualCheckBlockHeader and (when HAVE_DATA)
+ *  CheckBlock/ContextualCheckBlock, remake genuine invalids, then
+ *  persist the new epoch in the same block-tree batch. */
 inline constexpr uint32_t BLOCK_VALIDATION_EPOCH = 1;
 
 /** After an ancestor's authenticated work changes, re-derive

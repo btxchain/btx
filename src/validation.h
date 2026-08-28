@@ -1536,6 +1536,11 @@ public:
      */
     std::atomic<int32_t> m_best_followed_header_height{-1};
     uint32_t m_invalid_marks_cleared_on_upgrade{0};
+    uint32_t m_compiled_validation_epoch{BLOCK_VALIDATION_EPOCH};
+    //! When true, IsMatMulRecomputeAssumeValidTrusted is false. Epoch
+    //! revalidation must not honor buried-recompute trust for blocks the
+    //! previous binary rejected.
+    bool m_untrusted_epoch_revalidation{false};
 
     //! The total number of bytes available for us to use across all in-memory
     //! coins caches. This will be split somehow across chainstates.
@@ -2258,15 +2263,24 @@ public:
     void AutoReconsiderShieldedInvalidBlocksAfterConsensusRetune() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /**
-     * If the on-disk validation epoch is older than BLOCK_VALIDATION_EPOCH,
-     * clear every BLOCK_FAILED_* mark and persist the new epoch. Poisoned
-     * marks from 0.34.0–0.34.4 otherwise hide the canonical chain from
-     * current validation. Clearing only schedules re-validation; ConnectTip
-     * still runs header PoW, ASERT, ExactReplay, and scripts in full.
+     * If the on-disk validation epoch is older than the compiled epoch (or a
+     * pending-revalidation marker is set), clear non-manual BLOCK_FAILED_*
+     * marks on the heaviest-work lineage, re-run CheckBlockHeader /
+     * ContextualCheckBlockHeader and (when BLOCK_HAVE_DATA) CheckBlock /
+     * ContextualCheckBlock with assumevalid trust disabled, remake genuine
+     * invalids, unpark branches that were FAILED and now re-validated, and
+     * persist nStatus + epoch + parked roots in one block-tree batch.
+     * ConnectBlock does not re-run ContextualCheck*; a flags-only clear
+     * would accept a block the old binary rejected for ExactReplay/ASERT.
+     * BLOCK_MANUALLY_INVALIDATED (invalidateblock) is never cleared here.
      */
-    void MaybeClearStaleInvalidMarksForValidationEpoch() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    [[nodiscard]] bool MaybeClearStaleInvalidMarksForValidationEpoch() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
-    [[nodiscard]] uint32_t GetBlockValidationEpoch() const { return BLOCK_VALIDATION_EPOCH; }
+    [[nodiscard]] uint32_t GetBlockValidationEpoch() const { return m_compiled_validation_epoch; }
+    void SetCompiledValidationEpochForTest(uint32_t epoch)
+    {
+        m_compiled_validation_epoch = epoch;
+    }
     [[nodiscard]] uint32_t InvalidMarksClearedOnUpgrade() const
     {
         return m_invalid_marks_cleared_on_upgrade;

@@ -11154,14 +11154,14 @@ bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex* pinde
         // and be left unable to start as they have no tip candidates (as there
         // are no blocks that meet the "have data and are not invalid per
         // nStatus" criteria for inclusion in setBlockIndexCandidates).
-        invalid_walk_tip->nStatus |= BLOCK_FAILED_VALID;
+        invalid_walk_tip->nStatus |= BLOCK_FAILED_VALID | BLOCK_MANUALLY_INVALIDATED;
         m_blockman.m_dirty_blockindex.insert(invalid_walk_tip);
         setBlockIndexCandidates.erase(invalid_walk_tip);
         TryAddBlockIndexCandidate(invalid_walk_tip->pprev);
         if (invalid_walk_tip == to_mark_failed->pprev && (to_mark_failed->nStatus & BLOCK_FAILED_VALID)) {
             // We only want to mark the last disconnected block as BLOCK_FAILED_VALID; its children
             // need to be BLOCK_FAILED_CHILD instead.
-            to_mark_failed->nStatus = (to_mark_failed->nStatus ^ BLOCK_FAILED_VALID) | BLOCK_FAILED_CHILD;
+            to_mark_failed->nStatus = (to_mark_failed->nStatus ^ BLOCK_FAILED_VALID) | BLOCK_FAILED_CHILD | BLOCK_MANUALLY_INVALIDATED;
             m_blockman.m_dirty_blockindex.insert(to_mark_failed);
         }
 
@@ -11191,7 +11191,7 @@ bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex* pinde
         }
 
         // Mark pindex (or the last disconnected block) as invalid, even when it never was in the main chain
-        to_mark_failed->nStatus |= BLOCK_FAILED_VALID;
+        to_mark_failed->nStatus |= BLOCK_FAILED_VALID | BLOCK_MANUALLY_INVALIDATED;
         m_blockman.m_dirty_blockindex.insert(to_mark_failed);
         setBlockIndexCandidates.erase(to_mark_failed);
         m_chainman.m_failed_blocks.insert(to_mark_failed);
@@ -11245,9 +11245,10 @@ void Chainstate::SetBlockFailureFlags(CBlockIndex* invalid_block)
 {
     AssertLockHeld(cs_main);
 
+    const uint32_t manual{invalid_block->nStatus & BLOCK_MANUALLY_INVALIDATED};
     for (auto& [_, block_index] : m_blockman.m_block_index) {
         if (invalid_block != &block_index && block_index.GetAncestor(invalid_block->nHeight) == invalid_block) {
-            block_index.nStatus = (block_index.nStatus & ~BLOCK_FAILED_VALID) | BLOCK_FAILED_CHILD;
+            block_index.nStatus = (block_index.nStatus & ~BLOCK_FAILED_VALID) | BLOCK_FAILED_CHILD | manual;
             m_blockman.m_dirty_blockindex.insert(&block_index);
         }
     }
@@ -11261,7 +11262,7 @@ void Chainstate::ResetBlockFailureFlags(CBlockIndex *pindex) {
     // Remove the invalidity flag from this block and all its descendants.
     for (auto& [_, block_index] : m_blockman.m_block_index) {
         if ((block_index.nStatus & BLOCK_FAILED_MASK) && block_index.GetAncestor(nHeight) == pindex) {
-            block_index.nStatus &= ~BLOCK_FAILED_MASK;
+            block_index.nStatus &= ~(BLOCK_FAILED_MASK | BLOCK_MANUALLY_INVALIDATED);
             m_blockman.m_dirty_blockindex.insert(&block_index);
             if (block_index.IsValid(BLOCK_VALID_TRANSACTIONS) &&
                 block_index.HaveNumChainTxs() &&
@@ -11280,7 +11281,7 @@ void Chainstate::ResetBlockFailureFlags(CBlockIndex *pindex) {
     // Remove the invalidity flag from all ancestors too.
     while (pindex != nullptr) {
         if (pindex->nStatus & BLOCK_FAILED_MASK) {
-            pindex->nStatus &= ~BLOCK_FAILED_MASK;
+            pindex->nStatus &= ~(BLOCK_FAILED_MASK | BLOCK_MANUALLY_INVALIDATED);
             m_blockman.m_dirty_blockindex.insert(pindex);
             m_chainman.m_failed_blocks.erase(pindex);
         }
@@ -13668,6 +13669,7 @@ bool ChainstateManager::IsMatMulRecomputeAssumeValidTrusted(const CBlockIndex* p
     // Behavior must stay bit-identical to the historical in-line predicate: a
     // null pindex_self, unset -assumevalid, or missing best header always mean
     // "not trusted" (=> the recompute runs).
+    if (m_untrusted_epoch_revalidation) return false;
     if (AssumedValidBlock().IsNull() || m_best_header == nullptr || pindex_self == nullptr) return false;
     const auto av_it = m_blockman.m_block_index.find(AssumedValidBlock());
     if (av_it == m_blockman.m_block_index.end()) return false;
@@ -14144,6 +14146,7 @@ static bool ContextualCheckBlock(const CBlock& block,
                     nHeight)};
             const bool recompute_assumevalid_trusted =
                 !trusted_profile1 &&
+                !chainman.m_untrusted_epoch_revalidation &&
                 (chainman.IsMatMulRecomputeAssumeValidTrusted(
                     chainman.m_blockman.LookupBlockIndex(block.GetHash()), nHeight) ||
                 // P2P admission may have made the same trust decision under
@@ -15709,6 +15712,13 @@ bool ChainstateManager::LoadBlockIndex()
         }
 
         m_blockman.ScanAndUnlinkAlreadyPrunedFiles();
+
+        // 0.34.0–0.34.4 wrote BLOCK_FAILED_* that can hide the canonical
+        // chain. Re-run ContextualCheck* here — ConnectBlock does not —
+        // before this loop seeds m_best_invalid / m_best_header.
+        if (!MaybeClearStaleInvalidMarksForValidationEpoch()) {
+            return false;
+        }
 
         std::vector<CBlockIndex*> vSortedByHeight{m_blockman.GetAllBlockIndices()};
         std::sort(vSortedByHeight.begin(), vSortedByHeight.end(),
@@ -17543,63 +17553,226 @@ void ChainstateManager::AutoReconsiderShieldedInvalidBlocksAfterConsensusRetune(
         "after shielded pool-credit disable height retune");
 }
 
-void ChainstateManager::MaybeClearStaleInvalidMarksForValidationEpoch()
+bool ChainstateManager::MaybeClearStaleInvalidMarksForValidationEpoch()
 {
     AssertLockHeld(::cs_main);
-    if (!m_blockman.m_block_tree_db) return;
+    if (!m_blockman.m_block_tree_db) return true;
 
+    bool pending{false};
+    if (!m_blockman.m_block_tree_db->ReadValidationEpochPending(pending)) {
+        LogError("%s: failed to read validation-epoch pending marker\n", __func__);
+        return false;
+    }
     uint32_t stored{0};
     const bool have_stored{
         m_blockman.m_block_tree_db->ReadValidationEpoch(stored)};
-    if (have_stored && stored >= BLOCK_VALIDATION_EPOCH) {
-        return;
+    if (!pending && have_stored && stored >= m_compiled_validation_epoch) {
+        return true;
+    }
+    if (pending && have_stored && stored >= m_compiled_validation_epoch) {
+        return m_blockman.m_block_tree_db->WriteValidationEpochPending(false);
     }
 
-    uint32_t cleared{0};
+    if (!m_blockman.m_block_tree_db->WriteValidationEpochPending(true)) {
+        LogError("%s: failed to persist validation-epoch pending marker "
+                 "(stored_epoch=%u compiled_epoch=%u)\n",
+                 __func__, stored, m_compiled_validation_epoch);
+        return false;
+    }
+
+    auto has_manual = [](const CBlockIndex* pindex) {
+        for (const CBlockIndex* walk{pindex}; walk != nullptr; walk = walk->pprev) {
+            if (walk->nStatus & BLOCK_MANUALLY_INVALIDATED) return true;
+        }
+        return false;
+    };
+    auto more_work = [](const CBlockIndex& current, const CBlockIndex& candidate) {
+        if (current.nChainWork != candidate.nChainWork) {
+            return current.nChainWork < candidate.nChainWork;
+        }
+        if (current.nHeight != candidate.nHeight) {
+            return current.nHeight < candidate.nHeight;
+        }
+        return candidate.GetBlockHash() < current.GetBlockHash();
+    };
+
+    CBlockIndex* best_work{nullptr};
+    for (auto& [_, block_index] : m_blockman.m_block_index) {
+        if (has_manual(&block_index)) continue;
+        if ((block_index.nStatus & BLOCK_VALID_MASK) < BLOCK_VALID_TREE) continue;
+        if (best_work == nullptr || more_work(*best_work, block_index)) {
+            best_work = &block_index;
+        }
+    }
+
+    std::vector<CBlockIndex*> to_revalidate;
+    uint32_t skipped_manual{0};
     for (auto& [_, block_index] : m_blockman.m_block_index) {
         if ((block_index.nStatus & BLOCK_FAILED_MASK) == 0) continue;
+        if (has_manual(&block_index)) {
+            ++skipped_manual;
+            continue;
+        }
+        if (best_work == nullptr ||
+            best_work->GetAncestor(block_index.nHeight) != &block_index) {
+            continue;
+        }
         block_index.nStatus &= ~BLOCK_FAILED_MASK;
         m_blockman.m_dirty_blockindex.insert(&block_index);
         m_failed_blocks.erase(&block_index);
-        if (&block_index == m_best_invalid) {
-            m_best_invalid = nullptr;
-        }
-        ++cleared;
-        if (!block_index.IsValid(BLOCK_VALID_TRANSACTIONS) ||
-            !block_index.HaveNumChainTxs() ||
-            IsOnParkedReorgBranch(&block_index)) {
-            continue;
+        to_revalidate.push_back(&block_index);
+        LogPrintf("%s: clearing failure flags for block %s at height=%d "
+                  "validation-epoch upgrade\n",
+                  __func__, block_index.GetBlockHash().ToString(),
+                  block_index.nHeight);
+    }
+    m_best_invalid = nullptr;
+    m_invalid_marks_cleared_on_upgrade = static_cast<uint32_t>(to_revalidate.size());
+
+    std::sort(to_revalidate.begin(), to_revalidate.end(),
+              node::CBlockIndexHeightOnlyComparator{});
+
+    auto mark_failed_valid = [&](CBlockIndex* pindex) {
+        pindex->nStatus = (pindex->nStatus & ~BLOCK_FAILED_CHILD) | BLOCK_FAILED_VALID;
+        m_blockman.m_dirty_blockindex.insert(pindex);
+        m_failed_blocks.insert(pindex);
+        if (m_best_invalid == nullptr || pindex->nChainWork > m_best_invalid->nChainWork) {
+            m_best_invalid = pindex;
         }
         for (Chainstate* chainstate : GetAll()) {
-            chainstate->TryAddBlockIndexCandidate(&block_index);
+            chainstate->setBlockIndexCandidates.erase(pindex);
+        }
+        for (auto& [_, desc] : m_blockman.m_block_index) {
+            if (&desc == pindex) continue;
+            if (desc.GetAncestor(pindex->nHeight) != pindex) continue;
+            desc.nStatus = (desc.nStatus & ~BLOCK_FAILED_VALID) | BLOCK_FAILED_CHILD;
+            m_blockman.m_dirty_blockindex.insert(&desc);
+            m_failed_blocks.erase(&desc);
+            for (Chainstate* chainstate : GetAll()) {
+                chainstate->setBlockIndexCandidates.erase(&desc);
+            }
+        }
+    };
+
+    struct UntrustedEpochRevalidation {
+        ChainstateManager& m_chainman;
+        explicit UntrustedEpochRevalidation(ChainstateManager& chainman) : m_chainman(chainman)
+        {
+            m_chainman.m_untrusted_epoch_revalidation = true;
+        }
+        ~UntrustedEpochRevalidation() { m_chainman.m_untrusted_epoch_revalidation = false; }
+    };
+    UntrustedEpochRevalidation untrusted{*this};
+
+    uint32_t remade{0};
+    for (CBlockIndex* pindex : to_revalidate) {
+        if (m_interrupt) return false;
+        if (pindex->nStatus & BLOCK_FAILED_MASK) continue;
+
+        const CBlockHeader header{pindex->GetBlockHeader()};
+        BlockValidationState header_state;
+        if (!CheckBlockHeader(header, header_state, GetConsensus()) ||
+            (pindex->pprev != nullptr &&
+             !ContextualCheckBlockHeader(header, header_state, m_blockman, *this,
+                                         pindex->pprev))) {
+            LogWarning("%s: re-marked %s height=%d after header re-check (%s)\n",
+                       __func__, pindex->GetBlockHash().ToString(), pindex->nHeight,
+                       header_state.ToString());
+            mark_failed_valid(pindex);
+            ++remade;
+            continue;
+        }
+
+        if ((pindex->nStatus & BLOCK_HAVE_DATA) == 0) continue;
+        if (m_active_chainstate == nullptr) {
+            LogWarning("%s: re-marked %s height=%d: HAVE_DATA but no chainstate "
+                       "to read the body\n",
+                       __func__, pindex->GetBlockHash().ToString(), pindex->nHeight);
+            mark_failed_valid(pindex);
+            ++remade;
+            continue;
+        }
+        CBlock block;
+        BlockValidationState body_state;
+        if (!ReadShieldedRebuildBlock(*m_active_chainstate, *pindex, block) ||
+            !CheckBlock(block, body_state, GetConsensus()) ||
+            !ContextualCheckBlock(block, body_state, *this, pindex->pprev,
+                                  /*fCheckPOW=*/true,
+                                  /*may_release_cs_main=*/true)) {
+            LogWarning("%s: re-marked %s height=%d after body re-check (%s)\n",
+                       __func__, pindex->GetBlockHash().ToString(), pindex->nHeight,
+                       body_state.ToString());
+            mark_failed_valid(pindex);
+            ++remade;
         }
     }
-    m_invalid_marks_cleared_on_upgrade = cleared;
 
-    // Persist nStatus first, then the epoch. Crash between these two
-    // re-runs the heal (stored epoch still old). Epoch-first would skip
-    // the heal with marks still on disk.
-    if (!m_blockman.WriteBlockIndexDB()) {
-        LogError("%s: failed to persist cleared BLOCK_FAILED_* marks "
-                 "(stored_epoch=%u compiled_epoch=%u cleared=%u)\n",
-                 __func__, stored, BLOCK_VALIDATION_EPOCH, cleared);
-        return;
+    m_failed_blocks.clear();
+    m_best_invalid = nullptr;
+    for (auto& [_, block_index] : m_blockman.m_block_index) {
+        if (block_index.nStatus & BLOCK_FAILED_VALID) {
+            m_failed_blocks.insert(&block_index);
+        }
+        if ((block_index.nStatus & BLOCK_FAILED_MASK) &&
+            (m_best_invalid == nullptr ||
+             block_index.nChainWork > m_best_invalid->nChainWork)) {
+            m_best_invalid = &block_index;
+        }
     }
-    if (!m_blockman.m_block_tree_db->WriteValidationEpoch(BLOCK_VALIDATION_EPOCH)) {
-        LogError("%s: failed to persist validation epoch %u after clearing "
-                 "%u BLOCK_FAILED_* mark(s)\n",
-                 __func__, BLOCK_VALIDATION_EPOCH, cleared);
-        return;
+
+    uint32_t unparked{0};
+    for (CBlockIndex* pindex : to_revalidate) {
+        if (pindex->nStatus & BLOCK_FAILED_MASK) continue;
+        const CBlockIndex* root{FindParkedReorgBranchRoot(pindex)};
+        if (root == nullptr) continue;
+        const uint256 root_hash{root->GetBlockHash()};
+        if (!m_parked_reorg_branch_roots.erase(root_hash)) continue;
+        ++unparked;
+        LogWarning("%s: unparking reorg branch root %s height=%d "
+                   "(was FAILED, re-validated under epoch %u)\n",
+                   __func__, root_hash.ToString(), root->nHeight,
+                   m_compiled_validation_epoch);
     }
-    if (cleared > 0) {
-        LogWarning("validation epoch %u -> %u: cleared BLOCK_FAILED_* on %u "
-                   "index entries so current validation can re-decide (full "
-                   "ConnectBlock; genuinely invalid blocks are re-marked)\n",
-                   stored, BLOCK_VALIDATION_EPOCH, cleared);
-    } else {
-        LogPrintf("validation epoch %u -> %u: no BLOCK_FAILED_* marks to clear\n",
-                  stored, BLOCK_VALIDATION_EPOCH);
+
+    for (const uint256& parked : m_parked_reorg_branch_roots) {
+        LogPrintf("%s: leaving parked reorg branch %s "
+                  "(not previously FAILED, or operator-invalid)\n",
+                  __func__, parked.ToString());
     }
+
+    if (m_active_chainstate != nullptr &&
+        m_active_chainstate->m_chain.Tip() != nullptr) {
+        for (CBlockIndex* pindex : to_revalidate) {
+            if (pindex->nStatus & BLOCK_FAILED_MASK) continue;
+            if (!pindex->IsValid(BLOCK_VALID_TRANSACTIONS) ||
+                !pindex->HaveNumChainTxs()) {
+                continue;
+            }
+            for (Chainstate* chainstate : GetAll()) {
+                chainstate->TryAddBlockIndexCandidate(pindex);
+            }
+        }
+    }
+
+    RecalculateBestHeader();
+
+    if (!m_blockman.WriteBlockIndexDB(m_compiled_validation_epoch,
+                                      /*validation_epoch_pending=*/false,
+                                      &m_parked_reorg_branch_roots)) {
+        LogError("%s: failed to persist epoch-%u revalidation "
+                 "(stored_epoch=%u cleared=%u remade=%u unparked=%u)\n",
+                 __func__, m_compiled_validation_epoch, stored,
+                 m_invalid_marks_cleared_on_upgrade, remade, unparked);
+        return false;
+    }
+    LogWarning("validation epoch %u -> %u: cleared %u BLOCK_FAILED_* mark(s) "
+               "on the heaviest-work lineage, re-checked headers/bodies, "
+               "re-marked %u, unparked %u, left %u operator-invalid; "
+               "ActivateBestChain follows after LoadChainTip\n",
+               stored, m_compiled_validation_epoch,
+               m_invalid_marks_cleared_on_upgrade, remade, unparked,
+               skipped_manual);
+    return true;
 }
 
 bool ChainstateManager::MarkShieldedAutoRepairAttempt(ShieldedAutoRepairKind kind)
