@@ -1,0 +1,113 @@
+{
+  "evidence_kind": "multi_gpu_profile1_exactreplay_golden_compare",
+  "schema_version": 2,
+  "tip_sha": "ae3aef695d5f156bb3ae6ee38abface9f40c3259",
+  "source_tree_fingerprint": "18a8271cbc100b7324e7d7af8de3700d5b70f32d02ea9bd8fbbc54a5e10050e7",
+  "canary_nonce_start": 1,
+  "episodes": 8,
+  "per_episode_consensus_macs": 141149805215744,
+  "backends_requested": [
+    "cuda",
+    "metal"
+  ],
+  "backends_succeeded": [
+    "cuda",
+    "metal"
+  ],
+  "required_for_manifest": [
+    "cuda"
+  ],
+  "complete_multi_gpu_match": true,
+  "cuda_metal_match": true,
+  "allow_partial": false,
+  "mismatches": [],
+  "coverage_failures": [],
+  "by_backend": {
+    "cuda": {
+      "n": 8,
+      "raw": "profile1-cuda-8.json",
+      "artifact_sha256": "a8a393f2d4b442fcadd9f1cf051c4f43123107136b1f6320c879bb5cae309f1d",
+      "all_consensus_macs_on_device": true,
+      "cpu_gemm_fallbacks": 0,
+      "source_revision": "ae3aef695d5f156bb3ae6ee38abface9f40c3259",
+      "embedded_source_revision": "ae3aef695d5f156bb3ae6ee38abface9f40c3259",
+      "embedded_source_dirty": false,
+      "source_tree_fingerprint": "18a8271cbc100b7324e7d7af8de3700d5b70f32d02ea9bd8fbbc54a5e10050e7",
+      "harness_sha256": "b48da45ad5c088bf2cbc91ae07430034bf568483bccd4b848b95e066156d0aa4",
+      "provider": "cuda_rc_exact_fused_extract",
+      "backend_requested": "cuda",
+      "provider_identity": {
+        "provider_family": "cuda",
+        "device_architecture": "sm_120",
+        "driver_identity": "13030",
+        "runtime_identity": "13030",
+        "complete": true,
+        "reason": "complete"
+      },
+      "digests_by_nonce": {
+        "1": "b4777985d4f2621d0b9c119f4188ac7d80158fc92560ade96cc7a3fd8cfae953",
+        "2": "d5ca4a68a259c6494128993d752104e6ec4ddf9551e5bc1ee2aeb61dc60264aa",
+        "3": "d95d122ad36c749e4a71e6aa449e566c2e0cd5c6d59105b7324d2aaeb063bf7f",
+        "4": "0fd1b4a52c59fabf035b6c47f4c87be01f2eaa7b4834eb9e8bd7dd93b28766c7",
+        "5": "197d83c30a8090be3ad881c3baf423790c7dffeb529470e384f4712fc1c7853f",
+        "6": "dd73fd8532f72659dc75fe38a6623fbde07f7dcfb24c02a32837b67885402698",
+        "7": "b85b555946eaa351666044aed7a57724b8e3a694d7e27f50f21d44f6f566140b",
+        "8": "5a9041c96f0adeb5bba90d01ae88f4919fd708d41613361b3d3e12d9aea8415a"
+      },
+      "header_sha256_by_nonce": {
+        "1": "02437a1ad6bc77051d75e8388822ce3334a2657d138cb4fbf4b7a947d531505f",
+        "2": "61c7ed8c9c4c07321d153ab9aa7ec2702924f2c46adc220c0d977fdc45d7af38",
+        "3": "b63cea84b6de0c6b46668f0c4cbd0ecc6d201636a46395389caccbc86c669db5",
+        "4": "1b25901f7f42211ecb8bfa3279548856cadafe612a9582ab7b82e3eb952433fb",
+        "5": "e02b4cd201d2c4c6e3379c27f45750165068c92fcf6d087647a727d609c06702",
+        "6": "0f65bbad4ba90ee15c8596006a65fa8c338c752d9865e055a442159471ad035c",
+        "7": "6fa683a5c6babf4c76a8a1adfb5306defb62187c4b917c1e788e66577be4005d",
+        "8": "726bb868a6cd7fe3e5c8d90157fdd2acbaeaa5ecdd7fbb2fc319efe436487b60"
+      }
+    },
+    "metal": {
+      "n": 8,
+      "raw": "profile1-metal-8.json",
+      "artifact_sha256": "c632e2dd6ecb9a46144a1b0d50e20f043eddbbd6bb2fa7137931fe49ce9af952",
+      "all_consensus_macs_on_device": true,
+      "cpu_gemm_fallbacks": 0,
+      "source_revision": "ae3aef695d5f156bb3ae6ee38abface9f40c3259",
+      "embedded_source_revision": "ae3aef695d5f156bb3ae6ee38abface9f40c3259",
+      "embedded_source_dirty": false,
+      "source_tree_fingerprint": "18a8271cbc100b7324e7d7af8de3700d5b70f32d02ea9bd8fbbc54a5e10050e7",
+      "harness_sha256": "fff5de5a84adf7ddec1983d09137dfbdbcddec21a4d2cbde3199f886112ca393",
+      "provider": "metal_int8_mpp_tensorops_fused_extract",
+      "backend_requested": "metal",
+      "provider_identity": {
+        "provider_family": "metal",
+        "device_architecture": "m4_class",
+        "driver_identity": "25F84",
+        "runtime_identity": "25.5.0",
+        "complete": true,
+        "reason": "complete"
+      },
+      "digests_by_nonce": {
+        "1": "b4777985d4f2621d0b9c119f4188ac7d80158fc92560ade96cc7a3fd8cfae953",
+        "2": "d5ca4a68a259c6494128993d752104e6ec4ddf9551e5bc1ee2aeb61dc60264aa",
+        "3": "d95d122ad36c749e4a71e6aa449e566c2e0cd5c6d59105b7324d2aaeb063bf7f",
+        "4": "0fd1b4a52c59fabf035b6c47f4c87be01f2eaa7b4834eb9e8bd7dd93b28766c7",
+        "5": "197d83c30a8090be3ad881c3baf423790c7dffeb529470e384f4712fc1c7853f",
+        "6": "dd73fd8532f72659dc75fe38a6623fbde07f7dcfb24c02a32837b67885402698",
+        "7": "b85b555946eaa351666044aed7a57724b8e3a694d7e27f50f21d44f6f566140b",
+        "8": "5a9041c96f0adeb5bba90d01ae88f4919fd708d41613361b3d3e12d9aea8415a"
+      },
+      "header_sha256_by_nonce": {
+        "1": "02437a1ad6bc77051d75e8388822ce3334a2657d138cb4fbf4b7a947d531505f",
+        "2": "61c7ed8c9c4c07321d153ab9aa7ec2702924f2c46adc220c0d977fdc45d7af38",
+        "3": "b63cea84b6de0c6b46668f0c4cbd0ecc6d201636a46395389caccbc86c669db5",
+        "4": "1b25901f7f42211ecb8bfa3279548856cadafe612a9582ab7b82e3eb952433fb",
+        "5": "e02b4cd201d2c4c6e3379c27f45750165068c92fcf6d087647a727d609c06702",
+        "6": "0f65bbad4ba90ee15c8596006a65fa8c338c752d9865e055a442159471ad035c",
+        "7": "6fa683a5c6babf4c76a8a1adfb5306defb62187c4b917c1e788e66577be4005d",
+        "8": "726bb868a6cd7fe3e5c8d90157fdd2acbaeaa5ecdd7fbb2fc319efe436487b60"
+      }
+    }
+  },
+  "authorizes_activation": false,
+  "authorizes_activation_reason": "digest agreement across providers only; this tool does not read consensus parameters, ratification flags, or the committed manifest"
+}
