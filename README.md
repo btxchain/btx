@@ -116,24 +116,25 @@ consult a pin.
 written when the tag is sealed (see
 [doc/release-process.md](doc/release-process.md)). The previous tag is
 **v0.34** (seal `dc46dee2`, freeze `ecfaa6c9`). Epoch A Profile 1 ExactReplay
-is live on mainnet at height **185000**. EncDr stall recovery is active from
-height **199299** (`num/den = 1/1`). The shielded pool is closed at height
-**199300**. The compiled assumeutxo pin is height **199300**.
+is live on mainnet at height **185000**. EncDr stall recovery at height
+**199299** is withdrawn. The shielded pool is closed at height
+**199300**. The compiled assumeutxo pin is height **191266** (the 199299 and
+199300 pins were on the withdrawn 0.34.1 branch and are removed; see
+[#127](https://github.com/btxchain/btx/issues/127)).
 
 - [Release notes](doc/release-notes.md)
 - [GitHub releases](https://github.com/btxchain/btx/releases) — Linux CPU, Linux CUDA, macOS arm64 Metal
-- [AssumeUTXO snapshot 199300](https://github.com/btxchain/btx/releases/tag/assumeutxo-199300) (`snapshot.dat` SHA256 `b7ee1459dead9fdb4ed4ee524a6faa66aa0a43ef5280cec00f841289df08e48a`)
-- [AssumeUTXO snapshot 199299](https://github.com/btxchain/btx/releases/tag/assumeutxo-199299) (`snapshot.dat` SHA256 `3c9e52ff053cd183af239dfce42cd57d007bdf530fd48ba9783623662d15070f`)
+- [AssumeUTXO snapshot 191266](https://github.com/btxchain/btx/releases/tag/assumeutxo-191266) (`snapshot.dat` SHA256 `6ca84f9ce0bde6d0e4c17503f544bf293743c67b37881833f9a0e1f3adee504e`)
 
-Catch-up on a **fresh** chainstate with this binary (v0.34.0 cannot load the
-199300 pin):
+Catch-up on a **fresh** chainstate (`loadtxoutset` of assumeutxo-199300 /
+assumeutxo-199299 is rejected):
 
 ```bash
 btx-cli -rpcclienttimeout=0 loadtxoutset snapshot.dat
 ```
 
-Use `loadtxoutset`, not `loadtxoutsetattested`. Mine the next block only on
-attested parent `ff80e6299692a63345674a23b0638658c737529d12e78fc7f42afb3812afc9eb`.
+Use `loadtxoutset`, not `loadtxoutsetattested`. Do not mine on parent
+`ff80e629…` — that hash is not on the majority chain.
 
 ## MatMul v4.7 transition
 
@@ -849,9 +850,11 @@ historical sync finishes.
 
 Fast-start support in the current tree:
 
-- `main`: supported; v0.34.1 compiles assumeutxo height **199300**
-  (`ff80e629…`). Load `https://github.com/btxchain/btx/releases/download/assumeutxo-199300/snapshot.dat`
-  with `loadtxoutset` on a fresh chainstate.
+- `main`: supported; compiled assumeutxo heights through **191266**
+  (`de6e3c9d…`). Load `https://github.com/btxchain/btx/releases/download/assumeutxo-191266/snapshot.dat`
+  with `loadtxoutset` on a fresh chainstate. Do **not** load
+  assumeutxo-199300 (`ff80e629…`) or assumeutxo-199299 (`f12a27d0…`);
+  those bases are on the withdrawn 0.34.1 branch and 0.34.5 rejects them.
 - `regtest`: supported for default-consensus development and CI flows
 - `testnet`, `testnet4`, and `signet`: snapshot tooling exists, but there are no compiled assumeutxo entries yet, so fast-start bootstrap is not currently supported there
 

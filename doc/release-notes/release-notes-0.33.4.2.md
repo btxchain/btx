@@ -41,6 +41,11 @@ this sealed build, not unsealed `v0.33.4`.
 
 # Fast-start snapshot
 
+**Do not load this pin.** assumeutxo-199299 (`f12a27d0…`) is on the
+withdrawn 0.34.1 branch ([issue 127](https://github.com/btxchain/btx/issues/127)).
+Use [assumeutxo-191266](https://github.com/btxchain/btx/releases/tag/assumeutxo-191266)
+or sync from genesis. Historical 0.33.4.2 text follows.
+
 Published assumeutxo pin (v9): [assumeutxo-199299](https://github.com/btxchain/btx/releases/tag/assumeutxo-199299)
 
 - height **199299**, blockhash `f12a27d01a4b5a1710efa4497adf6f4c7da311d1c7b4f6a79cbf80f0b3110ec5`

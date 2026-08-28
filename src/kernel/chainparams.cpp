@@ -1033,9 +1033,10 @@ public:
                 // legitimately reorg. The live tip has since walked ~13k
                 // past this anchor; IBD above 186000 is work-only until the
                 // next release refreshes the checkpoint (see nMinimumChainWork
-                // comment). assumeutxo 199300 is the UTXO snapshot pin, not
-                // a header checkpoint — do not copy that hash here while it
-                // sits in the live tip band.
+                // comment). Do not compile an assumeutxo base above this
+                // checkpoint unless that height is itself checkpointed to the
+                // majority hash — 199299/199300 were the withdrawn 0.34.1
+                // branch (issue 127).
                 {186000, uint256{"0a51fccfd75d2051e94be1a8cc5abff8b86ac53d0cc134680f286fe769aa2129"}},
             }
         };
@@ -1228,22 +1229,13 @@ public:
                 .blockhash = consteval_ctor(uint256{"de6e3c9db527970c13b2ba834c19ff8f4d8829aee0c93ba6cde3a5039504efa8"}),
                 .shielded_state_commitment = uint256{"94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541"},
             },
-            {
-                // main assumeutxo snapshot at height 199'299 (snapshot v9)
-                .height = 199'299,
-                .hash_serialized = AssumeutxoHash{uint256{"db9e83156602927315d108a1ebce230b30eb78832e69db1947a21f5b5f2b8bf6"}},
-                .m_chain_tx_count = 298'981,
-                .blockhash = consteval_ctor(uint256{"f12a27d01a4b5a1710efa4497adf6f4c7da311d1c7b4f6a79cbf80f0b3110ec5"}),
-                .shielded_state_commitment = uint256{"94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541"},
-            },
-            {
-                // main assumeutxo snapshot at height 199'300 (snapshot v9, shielded pool closed)
-                .height = 199'300,
-                .hash_serialized = AssumeutxoHash{uint256{"eb73aed769a9ef5b8f6c9cc4002388e49e4818a1e4cc6cd9d87e107aed5a1352"}},
-                .m_chain_tx_count = 298'984,
-                .blockhash = consteval_ctor(uint256{"ff80e6299692a63345674a23b0638658c737529d12e78fc7f42afb3812afc9eb"}),
-                .shielded_state_commitment = uint256{"94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541"},
-            },
+            // 199299 (f12a27d0) and 199300 (ff80e629) were dumped from the
+            // withdrawn 0.34.1 branch. Last common majority block is 199298
+            // (be78622c…). loadtxoutset of those bases strands the node;
+            // 0.34.3 then refuses the reorg that would disconnect the
+            // snapshot. Removed in 0.34.5 (issue 127). Do not re-add an
+            // assumeutxo at height >= 199299 unless that height is also a
+            // matching checkpoint on the majority chain.
         };
         chainTxData = ChainTxData{
             .nTime = 1785786086,

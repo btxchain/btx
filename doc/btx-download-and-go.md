@@ -1,12 +1,11 @@
 # BTX Download-and-Go Guide
 
-> **Current line:** [v0.33.4.2](https://github.com/btxchain/btx/releases/tag/v0.33.4.2)
-> on `main`. Epoch A is live at height 185000. EncDr stall recovery is active
-> from 199299. Fast-start snapshot:
-> [assumeutxo-199299](https://github.com/btxchain/btx/releases/tag/assumeutxo-199299).
+> **Current line:** see [release notes](release-notes.md). Epoch A is live
+> at height 185000. EncDr stall recovery at 199299 is withdrawn. Fast-start
+> snapshot: [assumeutxo-191266](https://github.com/btxchain/btx/releases/tag/assumeutxo-191266).
+> Do not load assumeutxo-199299 / assumeutxo-199300 (withdrawn 0.34.1 branch,
+> [issue 127](https://github.com/btxchain/btx/issues/127)).
 > Use `loadtxoutset` (not `loadtxoutsetattested`) on a fresh chainstate.
-> v0.33.4.1 cannot load that pin. Epochs B–D remain disabled. See
-> [`btx-matmul-v4.7-transition-roadmap.md`](btx-matmul-v4.7-transition-roadmap.md).
 
 This guide is the shortest path from a precompiled BTX binary to:
 

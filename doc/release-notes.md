@@ -1,6 +1,13 @@
 # STOP: 0.34.1 partitions nodes. 0.34.2 deadlocks. 0.34.3 stalls with
 # headers below blocks. 0.34.4 closed that header gap. 0.34.5 is the
 # sealed binary that actually bootstraps.
+#
+# Do not load assumeutxo-199300 or assumeutxo-199299. Those compiled
+# bases (ff80e629 / f12a27d0) sit on the withdrawn 0.34.1 branch, not
+# the majority chain (issue 127). A node that already loaded one will
+# not start on 0.34.5; wipe the datadir and sync from genesis (or load
+# assumeutxo-191266 on a fresh datadir). There is no invalidateblock
+# rescue.
 
 **Do not `invalidateblock` 33c834f8.** The live chain **descends from**
 `33c834f8056aca85a8591a304fe52affebe2770d6027e79845765547f8dfae82` at
@@ -139,26 +146,19 @@ If you never ran 0.34.1 and never invalidated 33c834f8, skip Case A.
 ## Case B — fork-rejoin, AssumeUTXO snapshot: do **not** `invalidateblock`
 
 If this node loaded the compiled AssumeUTXO snapshot at height 199300
-(`chainstate_snapshot/` exists), the first post-fork block 199299 sits
-**below** the snapshot base. That base has a block body but no undo
-data — it was never connected. `invalidateblock` of 199299 (and
-`reconsiderblock` of the majority chain) used to hit
-`DisconnectBlock: ReadBlockUndo nFile=-1`, then `Failed to disconnect
-block`, then abort. 0.34.3 refuses that reorg with a clear RPC error
-and leaves the node running.
+(`ff80e629…`) or 199299 (`f12a27d0…`), you are on the withdrawn 0.34.1
+branch. 0.34.3 refuses `invalidateblock` of that snapshot base (no undo
+data). **0.34.5 removes those compiled entries** and will refuse to start
+if `chainstate_snapshot/` still names those hashes.
 
-**Do not invalidateblock.** The background chainstate already follows
-the majority chain with complete undo data. Workaround, confirmed on a
-live miner:
+**There is no in-place rescue.** Wipe the datadir and sync from genesis,
+or load [assumeutxo-191266](https://github.com/btxchain/btx/releases/tag/assumeutxo-191266)
+on a **fresh** chainstate. Do not keep `chainstate_snapshot/` from the
+bad pin. Do not `invalidateblock`.
 
-1. Stop `btxd` cleanly (`btx-cli stop`; wait for exit).
-2. Remove the `chainstate_snapshot/` directory from the datadir.
-3. Start once so the background chainstate becomes active. If prompted,
-   allow a shielded rebuild.
-4. Stop cleanly and start again.
-
-Then the node is on the majority chain. Case A `invalidateblock` is
-not needed after this fallback.
+Old 0.34.3 workaround (stop, remove `chainstate_snapshot/`, start twice)
+only helps if the background chainstate never connected the withdrawn
+fork. Treat it as unreliable; a full resync is the supported recovery.
 
 ## Case C — unauthenticated suffix (0.34.2 deadlock): `invalidateblock` is harmful
 
@@ -204,7 +204,7 @@ Linux. See [#111](https://github.com/btxchain/btx/issues/111) and
 Same platform and epoch matrix as 0.33.4.2: Linux, macOS 13+, Windows
 10+. Mainnet remains on MatMul v3 below height 185000; Epoch-A Profile 1
 ExactReplay applies at and above height 185000. Compact `F`, `powLimit`,
-the 191714 `nBits` dump floor, and the compiled AssumeUTXO pin at 199300
+the 191714 `nBits` dump floor, and the compiled AssumeUTXO pin at 191266
 are unchanged. **EncDr stall recovery at 199299 is withdrawn** — that
 flag day shipped in 0.34.1 after the height was already mined and
 partitioned the network. `nMatMulStallRecoveryHeight` is `INT_MAX`;
@@ -814,23 +814,25 @@ classes, or future versions. How to freeze, measure, seal, and ship:
 
 # Fast-start snapshot
 
-Published assumeutxo pin (v9, shielded pool closed):
-[assumeutxo-199300](https://github.com/btxchain/btx/releases/tag/assumeutxo-199300)
+**Withdrawn:** [assumeutxo-199300](https://github.com/btxchain/btx/releases/tag/assumeutxo-199300)
+(`ff80e629…`) and [assumeutxo-199299](https://github.com/btxchain/btx/releases/tag/assumeutxo-199299)
+(`f12a27d0…`) are on the withdrawn 0.34.1 branch. Do not load them.
+0.34.5 no longer compiles those bases (`loadtxoutset` will reject them).
+Issue [#127](https://github.com/btxchain/btx/issues/127).
 
-- height **199300**, blockhash `ff80e6299692a63345674a23b0638658c737529d12e78fc7f42afb3812afc9eb`
-- `txoutset_hash` `eb73aed769a9ef5b8f6c9cc4002388e49e4818a1e4cc6cd9d87e107aed5a1352`
-- `snapshot.dat` SHA256 `b7ee1459dead9fdb4ed4ee524a6faa66aa0a43ef5280cec00f841289df08e48a`
-- `nchaintx` 298984, size 452893894 bytes
-- `shielded_state_commitment` `94343b766b39c0ea2d92d83323f77b5ccc5e775d99b34b01f5fa6400f2354541`
+Still compiled and on the majority chain (below the 199299 split):
+
+- [assumeutxo-191266](https://github.com/btxchain/btx/releases/tag/assumeutxo-191266)
+  (`snapshot.dat` SHA256 `6ca84f9ce0bde6d0e4c17503f544bf293743c67b37881833f9a0e1f3adee504e`)
+- height **191266**, blockhash `de6e3c9db527970c13b2ba834c19ff8f4d8829aee0c93ba6cde3a5039504efa8`
 
 ```bash
 btx-cli -rpcclienttimeout=0 loadtxoutset snapshot.dat
 ```
 
 Use `loadtxoutset`, not `loadtxoutsetattested`. Fresh chainstate only.
-v0.34.0 cannot load this height; v0.34.1 can.
-A 0.34 trusted mirror can now ingest the header chain from public
-peers first; 0.33.4.2 could not (see the bootstrap deadlock above).
+Or sync from genesis. A replacement pin near 199300 will not ship until
+that height is checkpointed on the majority hash.
 
 # Included public work
 

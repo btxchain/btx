@@ -18015,16 +18015,28 @@ std::optional<uint256> ChainstateManager::ComputeClosedShieldedSnapshotStatePin(
 {
     AssertLockHeld(::cs_main);
     // Mainnet freeze pin is the compiled assumeutxo shielded_state_commitment
-    // at nShieldedPoolDisableHeight (94343b76… from 189307 through 199300).
+    // (94343b76… from 189307 through 191266; the withdrawn 199300 pin is gone).
     // Default-node dumps have no live stores; hashing a synthetic empty tree
     // (e802781d…) would disagree with loadtxoutset and with dumps taken while
     // -shieldedstate=1 still had historical LevelDB open.
     const int32_t disable{GetConsensus().nShieldedPoolDisableHeight};
     if (disable != std::numeric_limits<int32_t>::max()) {
-        if (const auto au = GetParams().AssumeutxoForHeight(disable)) {
-            if (!au->shielded_state_commitment.IsNull()) {
-                return au->shielded_state_commitment;
+        auto pin_from_height = [this](int height) -> std::optional<uint256> {
+            if (const auto au = GetParams().AssumeutxoForHeight(height)) {
+                if (!au->shielded_state_commitment.IsNull()) {
+                    return au->shielded_state_commitment;
+                }
             }
+            return std::nullopt;
+        };
+        if (auto pin = pin_from_height(disable)) return pin;
+        // 0.34.5 withdrew the 199300 assumeutxo pin (issue 127: that base
+        // sits on the withdrawn 0.34.1 branch). The closed-pool commitment
+        // is unchanged; use the highest remaining compiled snapshot that
+        // still carries it (191266, 94343b76…).
+        const auto heights = GetParams().GetAvailableSnapshotHeights();
+        for (auto it = heights.rbegin(); it != heights.rend(); ++it) {
+            if (auto pin = pin_from_height(*it)) return pin;
         }
     }
     const shielded::ShieldedMerkleTree empty_tree{
