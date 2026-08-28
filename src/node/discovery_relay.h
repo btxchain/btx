@@ -230,15 +230,20 @@ inline constexpr int MAX_INBOUND_DISCOVERY_ONLY{4};
 
 //! Connected peer is on the recent GPU-reported network if its VERSION
 //! height is within RECENT_HEIGHT_LAG of the watermark. No GETMMATTEST.
-//! No pin. No FindMostWorkChain. When no miner/archive has reported yet,
-//! a connected peer with a completed VERSION still qualifies so addnode'd
-//! public miners can bootstrap introduction without an archive.
+//! No pin. No FindMostWorkChain.
+//!
+//! Watermark < 0 means no miner/archive sample yet. Passing every
+//! versioned peer in that case made seed GETADDR introduction vacuous
+//! (measured: discovery_archive_reported_height=-1, every inbound
+//! classified "recent"). Fail closed; callers that have connected
+//! NODE_NETWORK peers must pass EffectiveIntroductionWatermark first
+//! (addnode'd miners bootstrap from that, not from this -1 hatch).
 [[nodiscard]] inline bool PeerLooksOnRecentNetwork(int32_t peer_starting_height,
                                                    int32_t archive_reported_height,
                                                    int32_t max_lag = RECENT_HEIGHT_LAG)
 {
     if (peer_starting_height < 0) return false;
-    if (archive_reported_height < 0) return true;
+    if (archive_reported_height < 0) return false;
     if (max_lag < 0) return false;
     const int64_t delta{
         static_cast<int64_t>(peer_starting_height) -

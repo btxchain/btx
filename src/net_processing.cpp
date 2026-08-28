@@ -6623,8 +6623,14 @@ void PeerManagerImpl::MaybePunishNodeForBlock(NodeId nodeid, const BlockValidati
                   state.GetDebugMessage());
 
         if (punishment == MatMulPhase2Punishment::BAN) {
-            HandleDoSPunishment(m_connman, nodeid, MATMUL_PHASE2_BAN_MISBEHAVIOR, "matmul block");
-            DisconnectNodeNow(m_connman, nodeid);
+            // HandleDoSPunishment only disconnects outbound (PunishInvalidBlocks)
+            // and never calls BanMan, so a BAN decision was a reconnectable
+            // disconnect. BanHammeringPeer is the 24h BanMan path used for
+            // GETMMATTEST hammering.
+            m_connman.ForNode(nodeid, [&](CNode* node) {
+                BanHammeringPeer(*node, *peer, "matmul phase2 forged proof");
+                return true;
+            });
             return;
         }
 
@@ -10478,8 +10484,10 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
             return;
         }
         const CBlockIndex* parent{index.pprev};
-        if (parent == nullptr ||
-            parent->nAuthenticatedChainWork != parent->nChainWork) {
+        if (!node::RCAdmitParentEligible(
+                parent != nullptr, parent == active_tip,
+                parent != nullptr &&
+                    parent->nAuthenticatedChainWork == parent->nChainWork)) {
             return;
         }
         authenticated_tip_child = parent == active_tip;
@@ -16389,10 +16397,12 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                     pindex->nHeight >= active_tip->nHeight - 2 &&
                     pindex->nHeight <=
                         active_tip->nHeight + MATMUL_RC_NEAR_TIP_DEPTH};
-                const bool eligible_parent{
+                const bool eligible_parent{node::RCAdmitParentEligible(
+                    pindex->pprev != nullptr,
+                    active_tip != nullptr && pindex->pprev == active_tip,
                     pindex->pprev != nullptr &&
-                    pindex->pprev->nAuthenticatedChainWork ==
-                        pindex->pprev->nChainWork};
+                        pindex->pprev->nAuthenticatedChainWork ==
+                            pindex->pprev->nChainWork)};
                 const bool unverified{
                     (pindex->nStatus &
                      (BLOCK_FAILED_MASK | BLOCK_EXACT_REPLAY_VERIFIED)) == 0 &&

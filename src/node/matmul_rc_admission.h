@@ -230,6 +230,21 @@ enum class TicketlessRCBodyAction : uint8_t {
     return TicketlessRCBodyAction::RetainUntilTicketOrRetry;
 }
 
+/** RCADMIT / header-first ExactReplay may proceed when the parent is the
+ *  active tip, even if nAuthenticatedChainWork lags nChainWork. Requiring
+ *  equality made the v0.34.2 deadlock: the sidecar was ignored, the body
+ *  was RETAIN_FOR_RETRY forever, and the one-job cap never ExactReplayed
+ *  (jarekpiot; peerman_tests/linear_tip_child_replays_when_authenticated_work_lags). */
+[[nodiscard]] constexpr bool RCAdmitParentEligible(
+    bool has_parent,
+    bool parent_is_active_tip,
+    bool parent_auth_equals_chain_work) noexcept
+{
+    if (!has_parent) return false;
+    if (parent_is_active_tip) return true;
+    return parent_auth_equals_chain_work;
+}
+
 /**
  * Bounded cooldown for RC bodies that arrived before a usable admission
  * sidecar. The first deferral owns the deadline: duplicate deliveries cannot
