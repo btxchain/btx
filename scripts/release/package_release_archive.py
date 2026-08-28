@@ -181,13 +181,23 @@ def ensure_input_file(path: Path, label: str) -> Path:
 
 
 def verify_shipped_btxd(btxd_path: Path) -> None:
-    """Refuse to package a btxd that advertises ZMQ without linking it."""
+    """Refuse to package a btxd that advertises ZMQ without linking it.
+
+    The path must be the real ELF/Mach-O (build-tree bin/btxd, or already
+    libexec/btxd.real). A packaged #!/bin/sh wrapper is not a binary; ldd
+    and otool on it pass vacuously.
+    """
     script = Path(__file__).with_name("verify_release_btxd.py")
     spec = importlib.util.spec_from_file_location("verify_release_btxd", script)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"unable to load {script}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    if module.is_shell_wrapper(btxd_path):
+        raise RuntimeError(
+            f"{btxd_path}: pass the real ELF/Mach-O (build/bin/btxd or "
+            "libexec/btxd.real), not the packaged bin/btxd wrapper"
+        )
     kind = module.classify(btxd_path)
     if kind == "other":
         # Unit-test stubs are not ELF/Mach-O. Real release binaries must be.

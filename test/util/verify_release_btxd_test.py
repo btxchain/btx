@@ -175,5 +175,47 @@ class VerifyReleaseBtxdTest(unittest.TestCase):
             self.mod.verify_launch(ok)
 
 
+    def test_shell_wrapper_without_real_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bindir = pathlib.Path(tmpdir) / "bin"
+            bindir.mkdir()
+            wrapper = bindir / "btxd"
+            wrapper.write_text("#!/bin/sh\nexec ../libexec/btxd.real \"$@\"\n", encoding="utf-8")
+            wrapper.chmod(0o755)
+            self.assertTrue(self.mod.is_shell_wrapper(wrapper))
+            with self.assertRaises(self.mod.VerifyError) as caught:
+                self.mod.resolve_verify_target(wrapper)
+            self.assertIn("libexec", str(caught.exception))
+            self.assertIn("wrapper", str(caught.exception).lower())
+            proc = subprocess.run(
+                [sys.executable, str(SCRIPT), str(wrapper)],
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(proc.returncode, 0, proc.stderr.decode())
+            self.assertIn(b"FAIL", proc.stderr)
+            self.assertIn(b"wrapper", proc.stderr.lower())
+
+    def test_shell_wrapper_resolves_to_libexec_real(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            bindir = root / "bin"
+            libexec = root / "libexec"
+            bindir.mkdir()
+            libexec.mkdir()
+            wrapper = bindir / "btxd"
+            wrapper.write_text("#!/bin/sh\nexec ../libexec/btxd.real \"$@\"\n", encoding="utf-8")
+            real = libexec / "btxd.real"
+            real.write_bytes(b"\x7fELF" + b"\x00" * 16)
+            self.assertEqual(self.mod.resolve_verify_target(wrapper), real)
+            self.assertTrue(self.mod.is_daemon(real))
+            self.assertTrue(self.mod.requires_zmq(real))
+
+    def test_is_daemon_recognizes_btxd_real(self) -> None:
+        self.assertTrue(self.mod.is_daemon(pathlib.Path("libexec/btxd.real")))
+        self.assertFalse(self.mod.is_daemon(pathlib.Path("libexec/btx-cli.real")))
+        self.assertFalse(self.mod.requires_zmq(pathlib.Path("libexec/btx-cli.real")))
+
+
 if __name__ == "__main__":
     unittest.main()

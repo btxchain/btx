@@ -53,9 +53,12 @@ a `btxd` that still contained `-zmqpubhashblock` strings (hidden args) while
 `ldd` showed no `libzmq`. Pool operators got silence, not an error.
 
 Release configure lines must still pass `-DWITH_ZMQ=ON` explicitly, and every
-shipped `btxd` must pass `scripts/release/verify_release_btxd.py` (Linux: `ldd`
+shipped `btxd` must pass `scripts/release/verify_release_btxd.py` against the
+**real binary** (`libexec/btxd.real` in a published tarball; `bin/btxd` in a
+build tree). Since 0.34.1 packaged `bin/btxd` is a `#!/bin/sh` wrapper:
+`ldd bin/btxd` / `otool -L bin/btxd` are vacuous. Linux `ldd libexec/btxd.real`
 shows `libzmq`; macOS: static `libzmq.a` / `libevent_*.a` / `libomp.a`, no
-Homebrew dylibs on `btxd` or `btx-cli`). Disable only
+Homebrew dylibs. Disable only
 for fuzzing or a deliberate developer build:
 
     $ cmake -B build -DWITH_ZMQ=OFF

@@ -706,9 +706,11 @@ bool CanStartMatMulVerification(uint32_t pending_verifications, uint32_t work_un
                                 const Consensus::Params& params, int32_t reference_height = -1);
 bool CanStartMatMulRCVerification(uint32_t pending_verifications, uint32_t work_units,
                                   const Consensus::Params& params, int32_t reference_height = -1);
-/** Competing (non-AuthenticatedTipChild) ExactReplay must leave
- *  MATMUL_RESERVED_AUTHENTICATED_TIP_CHILD_SLOTS of the RC pending cap free
- *  so junk twins cannot starve honest tip-children (freeze-DoS M1). */
+/** Historical name: competing ExactReplay used to subtract this many raw
+ *  work units from the RC pending cap. That arithmetic is wrong when a job
+ *  is `work_units` (typically the whole cap). CanStartCompeting now
+ *  reserves one JOB when the cap can hold more than one, and shares the
+ *  single-job cap when idle so a followed tip-child is not starved. */
 inline constexpr uint32_t MATMUL_RESERVED_AUTHENTICATED_TIP_CHILD_SLOTS{1};
 bool CanStartCompetingMatMulRCVerification(uint32_t pending_verifications, uint32_t work_units,
                                            const Consensus::Params& params, int32_t reference_height = -1);

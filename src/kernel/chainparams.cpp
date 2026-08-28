@@ -838,10 +838,18 @@ public:
         consensus.nMatMulAsertRetune2Height = std::numeric_limits<int32_t>::max();
         consensus.nMatMulAsertRetune2TargetNum = 1;
         consensus.nMatMulAsertRetune2TargetDen = 1;
-        // EncDr stall recovery (199297 incident). Flag day 199299, 1/1 inherit
-        // (no dump). 199298 stays pre-recovery bits so the live EncDr lottery
-        // remains valid. Any reachable height is a hard fork (ASERT re-anchor).
-        consensus.nMatMulStallRecoveryHeight = 199'299;
+        // EncDr stall recovery (199297 incident): WITHDRAWN 2026-08-28.
+        // Flag day 199299 shipped in 0.34.1 AFTER height 199299 was already
+        // mined past, while ~75% of reachable peers stayed on pre-recovery
+        // rules; the warning above ("any reachable height is a hard fork")
+        // came true and split the network at 199295/199299. Measured
+        // 2026-08-27 (CLAIMED-WORK-DIAG on macpro2): first divergence is
+        // exactly height 199299 -- majority branch 199299 a71e0c1c claimed
+        // 1e27264f = plain-ASERT value; re-anchored rules demanded 1e26e130
+        // -- and the majority chain validates cleanly with the re-anchor
+        // disabled. Operator decision: rejoin the majority chain. Disabled
+        // with the same idiom as testnet/regtest; num/den stay 1/1.
+        consensus.nMatMulStallRecoveryHeight = std::numeric_limits<int32_t>::max();
         consensus.nMatMulStallRecoveryAsertNum = 1;
         consensus.nMatMulStallRecoveryAsertDen = 1;
         consensus.nMatMulMaxBlockTimeAdvance = 1'080;

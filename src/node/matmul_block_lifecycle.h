@@ -66,6 +66,9 @@ public:
         //! Canonical first-hole / followed tip-child: OldestEvictable skips
         //! these so a sibling-body flood cannot drop the progress body (4.2).
         bool pin_progress{false};
+        //! Non-terminal deferrals since this body was last freshly retained.
+        //! RefreshRetry increments; TerminalRequeue resets.
+        uint32_t deferral_count{0};
     };
 
     struct Token {
@@ -261,6 +264,46 @@ public:
         const auto it{m_entries.find(hash)};
         if (it == m_entries.end() || !it->second.body) return false;
         it->second.body->retry_not_before = now + delay;
+        ++it->second.body->deferral_count;
+        return true;
+    }
+
+    uint32_t RetainedDeferralCount(const uint256& hash) const
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        const auto it{m_entries.find(hash)};
+        if (it == m_entries.end() || !it->second.body) return 0;
+        return it->second.body->deferral_count;
+    }
+
+    /**
+     * Drop a stale inactive retained generation and re-install the body
+     * as a fresh retry. Repeated non-terminal deferral used to leave the
+     * same entry in BODY_RETAINED forever; after a few cycles the
+     * scheduler must requeue rather than spin.
+     */
+    bool TerminalRequeue(const uint256& hash, Clock::duration delay,
+                         Clock::time_point now = Clock::now())
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        const auto it{m_entries.find(hash)};
+        if (it == m_entries.end() || !it->second.body ||
+            IsActive(it->second.state)) {
+            return false;
+        }
+        RetainedBody body{*it->second.body};
+        EraseEntry(it);
+        body.deferral_count = 0;
+        body.stored_at = now;
+        body.retry_not_before = now + delay;
+        auto [nit, inserted] = m_entries.try_emplace(hash);
+        (void)inserted;
+        Entry& entry{nit->second};
+        entry.body = std::move(body);
+        m_retained_bytes += entry.body->bytes;
+        entry.state = State::BODY_RETAINED;
+        entry.updated_at = now;
+        entry.generation = 0;
         return true;
     }
 

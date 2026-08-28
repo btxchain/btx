@@ -38,9 +38,13 @@ The NVIDIA driver is still required on the target (`libcuda.so.1`). Do
 not bundle `libcuda.so.*`.
 
 All three Linux/macOS release flavors (CPU, CUDA, Metal) must configure
-`-DWITH_ZMQ=ON`. After linking, `python3 scripts/release/verify_release_btxd.py bin/btxd`
-must pass (`ldd` shows `libzmq` on Linux; macOS uses static `libzmq.a`). CMake
-must print `ZeroMQ .............................. ON`. A `btxd` that still
+`-DWITH_ZMQ=ON`. After linking, `python3 scripts/release/verify_release_btxd.py`
+must pass against the **real binary**: `build/bin/btxd` in a build tree, or
+`libexec/btxd.real` in a published tarball (`ldd` shows `libzmq` on Linux;
+macOS uses static `libzmq.a`). Since 0.34.1, packaged `bin/btxd` is a
+`#!/bin/sh` wrapper — `ldd bin/btxd` / `otool -L bin/btxd` return nothing
+and are not a verification. CMake must print
+`ZeroMQ .............................. ON`. A `btxd` that still
 contains `-zmqpubhashblock` strings without linking libzmq must not ship.
 
 `cudaRuntimeGetVersion()` reports the statically linked CUDA runtime line, while

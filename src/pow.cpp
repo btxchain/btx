@@ -5827,8 +5827,22 @@ bool CanStartCompetingMatMulRCVerification(uint32_t pending_verifications, uint3
     if (cap == std::numeric_limits<uint32_t>::max()) {
         return CanStartMatMulRCVerification(pending_verifications, work_units, params, reference_height);
     }
-    if (cap <= MATMUL_RESERVED_AUTHENTICATED_TIP_CHILD_SLOTS) return false;
-    const uint32_t competing_cap{cap - MATMUL_RESERVED_AUTHENTICATED_TIP_CHILD_SLOTS};
+    // Reserve one full JOB of headroom (work_units, not one raw unit) for the
+    // authenticated tip-child, and only when the cap can hold more than one
+    // job. The previous arithmetic subtracted
+    // MATMUL_RESERVED_AUTHENTICATED_TIP_CHILD_SLOTS (= 1 work unit) from a cap
+    // denominated in work units, so with the default
+    // nMatMulRCMaxPendingVerifications=1 the competing lane capacity was
+    // cap-1 < work_units and no competing block could EVER reserve a slot
+    // (work_units > competing_cap held unconditionally). Combined with the
+    // authenticated-equality lane test this deferred even followed tip-child
+    // bodies forever (live 2026-08-28, consensus nodes frozen one block past
+    // the last attested height). With a single-job cap the competing lane now
+    // shares the slot when idle; the followed tip-child still has the full
+    // cap on its own lane and is RETAINed (never dropped) if it must wait
+    // one replay.
+    const uint32_t reserved{cap > work_units ? work_units : 0};
+    const uint32_t competing_cap{cap - reserved};
     if (work_units > competing_cap) return false;
     if (pending_verifications > std::numeric_limits<uint32_t>::max() - work_units) return false;
     return pending_verifications <= competing_cap - work_units;

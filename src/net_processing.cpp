@@ -508,8 +508,13 @@ static constexpr auto MATMUL_BUDGET_DEFER_COOLDOWN{60s};
  *  signed frontier is off-chain (live 2026-08-20, 45+ min wedge). */
 static constexpr auto MATMUL_FRONTIER_OFFCHAIN_FOSSIL_RETRY{10min};
 static constexpr auto MATMUL_BUDGET_DEFER_RETRY_FLOOR{1s};
-/** Pending-work saturation is capacity pressure, not a rate-window miss. */
+/** Pending-work saturation is capacity pressure, not a rate-window miss.
+ *  Cap-reached RETAIN_FOR_RETRY uses the budget refill instead of this
+ *  1s floor so consensus nodes do not spin at 1-2Hz. */
 static constexpr auto MATMUL_PENDING_RETRY_COOLDOWN{1s};
+/** After this many non-terminal deferrals, drop the live attempt and
+ *  requeue the retained body on the budget-refill schedule. */
+static constexpr uint32_t MATMUL_DEFER_TERMINAL_REQUEUE_AFTER{3};
 
 /** A block request older than this may be duplicated to another peer.
  *
@@ -566,6 +571,16 @@ static std::chrono::steady_clock::duration MatMulBudgetWindowRetryDelay(
         return std::chrono::steady_clock::duration::zero();
     }
     return std::chrono::minutes{1} - (now - window_start);
+}
+
+static std::chrono::steady_clock::duration MatMulBudgetRefillRetryDelay(
+    std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now())
+{
+    const auto remaining{GlobalMatMulRCBudgetRetryDelay(now)};
+    if (remaining <= std::chrono::steady_clock::duration::zero()) {
+        return MATMUL_BUDGET_DEFER_COOLDOWN;
+    }
+    return ClampMatMulBudgetDeferredDelay(remaining);
 }
 
 static std::chrono::steady_clock::duration MatMulRCSourceBudgetRetryDelay(
@@ -2241,9 +2256,9 @@ private:
         bool retain_as_requested{false};
         //! Scheduler re-admission delay for RETAIN_FOR_RETRY. Peer-budget
         //! handoff misses wait for the per-minute window; pending-cap misses
-        //! retry as soon as the occupying job can finish.
+        //! wait for the same refill rather than spinning at 1-2Hz.
         std::chrono::steady_clock::duration retry_delay{
-            MATMUL_PENDING_RETRY_COOLDOWN};
+            MATMUL_BUDGET_DEFER_COOLDOWN};
     };
 
     /** Process a new block. Perform any post-processing housekeeping.
@@ -2973,13 +2988,24 @@ void PeerManagerImpl::EraseMatMulDeferredBody(const uint256& hash)
 void PeerManagerImpl::RefreshMatMulDeferredBodyRetry(
     const uint256& hash, const char* reason)
 {
-    if (!m_matmul_block_lifecycle.RefreshRetry(
-            hash, MATMUL_BUDGET_DEFER_COOLDOWN)) return;
+    const auto delay{MatMulBudgetRefillRetryDelay()};
+    if (m_matmul_block_lifecycle.RetainedDeferralCount(hash) + 1 >=
+            MATMUL_DEFER_TERMINAL_REQUEUE_AFTER &&
+        m_matmul_block_lifecycle.TerminalRequeue(hash, delay)) {
+        LogInfo("Requeueing deferred body %s after repeated deferral (%s); "
+                "next retry in %ds\n",
+                hash.ToString(), reason,
+                static_cast<int>(std::chrono::duration_cast<std::chrono::seconds>(
+                    delay).count()));
+        return;
+    }
+    if (!m_matmul_block_lifecycle.RefreshRetry(hash, delay)) return;
     LogDebug(
         BCLog::NET,
         "Retaining deferred body %s after %s; next retry in %ds\n",
         hash.ToString(), reason,
-        static_cast<int>(count_seconds(MATMUL_BUDGET_DEFER_COOLDOWN)));
+        static_cast<int>(std::chrono::duration_cast<std::chrono::seconds>(
+            delay).count()));
 }
 
 [[nodiscard]] static bool IndexIsFollowedTipChild(
@@ -11700,7 +11726,7 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
             MatMulBlockAdmission::State::RETAIN_FOR_RETRY) {
         const auto retry_delay{matmul_admission.retry_delay.count() > 0
                                    ? matmul_admission.retry_delay
-                                   : MATMUL_PENDING_RETRY_COOLDOWN};
+                                   : MatMulBudgetRefillRetryDelay()};
         {
             LOCK(cs_main);
             NoteMatMulBudgetDeferred(
@@ -11708,14 +11734,23 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                 std::chrono::duration_cast<std::chrono::microseconds>(
                     retry_delay));
         }
-        const bool retained{StoreMatMulDeferredBody(
-            hash, block, node,
-            force_processing || matmul_admission.retain_as_requested,
-            min_pow_checked,
-            matmul_admission.is_ibd,
-            matmul_admission.reference_height,
-            matmul_admission.work_units,
-            retry_delay)};
+        bool retained{true};
+        if (is_retained_retry) {
+            // Body is already in the lifecycle store. Re-Store would reset
+            // deferral_count and hide TerminalRequeue. Refresh on the
+            // budget-refill schedule instead of 1-2Hz.
+            RefreshMatMulDeferredBodyRetry(
+                hash, "retained re-admission still deferred");
+        } else {
+            retained = StoreMatMulDeferredBody(
+                hash, block, node,
+                force_processing || matmul_admission.retain_as_requested,
+                min_pow_checked,
+                matmul_admission.is_ibd,
+                matmul_admission.reference_height,
+                matmul_admission.work_units,
+                retry_delay);
+        }
         if (!retained) {
             if (matmul_admission.retain_as_requested) {
                 // Capacity: do not HEADER_ONLY-drop the only followed-chain
@@ -12627,11 +12662,29 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
         {
             LOCK(cs_main);
             const CBlockIndex* active_tip{m_chainman.ActiveTip()};
+            // A direct child of the active tip is the followed chain by
+            // definition: every connected ancestor already passed PoW,
+            // ExactReplay and script validation. Requiring the tip's
+            // nAuthenticatedChainWork to equal its nChainWork made this lane
+            // conditional on a perfect attestation history; one historical
+            // block connected without attestation coverage demoted every
+            // future tip-child to the competing lane, and with the default
+            // nMatMulRCMaxPendingVerifications=1 that lane had zero capacity
+            // (work_units > cap - reserved always held), so the followed
+            // tip-child body deferred forever. Live 2026-08-27/28: consensus
+            // nodes froze exactly one block past the last attested height
+            // (jarekpiot on tag v0.34.2; independently confirmed on macpro2).
+            // The competing-lane reservation still protects the followed
+            // lane from competing bodies; verification itself is unchanged.
             direct_authenticated_tip_child =
                 active_tip != nullptr &&
-                block.hashPrevBlock == active_tip->GetBlockHash() &&
-                active_tip->nAuthenticatedChainWork ==
-                    active_tip->nChainWork;
+                block.hashPrevBlock == active_tip->GetBlockHash();
+        }
+        if (direct_authenticated_tip_child) {
+            LogDebug(BCLog::NET,
+                     "Admit %s hash=%s as direct authenticated tip-child "
+                     "peer=%d\n",
+                     source, block_hash.ToString(), node.GetId());
         }
     }
     // RC admission tickets are an ephemeral near-tip anti-DoS policy, not
@@ -12932,26 +12985,29 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
             UnmarkMatMulAsyncVerification(*lifecycle_token);
         }
         restore_accepted_ticket();
-        LogDebug(
-            BCLog::NET,
-            "Deferring peer=%d: MatMul pending verification cap reached (%s)\n",
-            node.GetId(), source);
+        LogInfo(
+            "Deferring peer=%d: MatMul pending verification cap reached (%s) "
+            "diag: rc_profile=%d tip_child_lane=%d work=%u rc_pending=%u "
+            "encdr_pending=%u rc_cap=%u encdr_cap=%u ref_height=%d\n",
+            node.GetId(), source, rc_profile ? 1 : 0,
+            direct_authenticated_tip_child ? 1 : 0, work,
+            m_matmul_rc_pending_verifications.load(std::memory_order_relaxed),
+            m_matmul_pending_verifications.load(std::memory_order_relaxed),
+            EffectiveMatMulRCMaxPendingVerifications(params, exact_reference_height),
+            EffectiveMatMulMaxPendingVerifications(params, exact_reference_height),
+            exact_reference_height);
         // An admitted speculative header or a slow full replay can occupy the
         // complete pending cap (RC or EncDr). A later honest body is not
         // evidence of abuse: the cap is ours, not proof of peer misbehavior,
         // and the body already paid bandwidth. Retain it and let the scheduler
-        // re-admit after capacity clears. HEADER_ONLY-dropping a followed-chain
-        // EncDr body created the same getdata/body livelock the RC path closed.
-        // Competing near-tip siblings never reach this reserve: they already
-        // took HEADER_ONLY so miner GPU / trusted-mirror sole-child persist is
-        // not flooded. Disconnect only if StoreMatMulDeferredBody cannot hold
-        // the body (RETAIN_FOR_RETRY handler).
+        // re-admit after the budget window refills, not at 1-2Hz.
         admission.state = MatMulBlockAdmission::State::RETAIN_FOR_RETRY;
         admission.is_ibd = is_ibd;
         admission.encdr_profile = exact_encdr_profile;
         admission.rc_profile = rc_profile;
         admission.reference_height = exact_reference_height;
         admission.work_units = work;
+        admission.retry_delay = MatMulBudgetRefillRetryDelay();
         return true;
     }
     if (rc_profile) {
@@ -14243,10 +14299,18 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         msg_type == NetMsgType::HEADERS &&
         ShouldIgnoreNonAuthorityInboundHeaders(pfrom) &&
         !accept_catchup_ingest};
-    const bool drop_bodies_before_deserialize{
-        !accept_catchup_ingest &&
-        (msg_type == NetMsgType::BLOCK || msg_type == NetMsgType::CMPCTBLOCK ||
-         msg_type == NetMsgType::BLOCKTXN || msg_type == NetMsgType::INV)};
+    // G2: BLOCK / CMPCTBLOCK / BLOCKTXN / INV are no longer dropped before
+    // deserialize on authority-mode nodes. A block body is self-validating
+    // -- it passes ExactReplay, PoW and script rules or it does not -- so
+    // refusing to PARSE one from a non-attestor protects nothing (same
+    // reasoning as the 0.34.1 GETHEADERS serving fix). Refusing them made
+    // GPU attestors the only inbound block source for every node holding a
+    // signing key: the node announced a header and then never accepted a
+    // body for it. Admission budgets, rcadmit tickets and the HEADER_ONLY
+    // competing classification remain the anti-DoS layer for what we do
+    // with the parsed body. TX / MEMPOOL / FEEFILTER ingest drops below
+    // are unchanged.
+    const bool drop_bodies_before_deserialize{false};
     if (drop_headers_before_deserialize || drop_bodies_before_deserialize) {
         if (ShouldLogIgnoredNonAuthorityMsg(msg_type)) {
             LogInfo("Ignoring non-authority inbound %s (GPU attestors are the only inbound block source, peer=%d)\n",
