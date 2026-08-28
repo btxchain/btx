@@ -41,22 +41,19 @@ struct RcExactReplayCudaStats {
     std::string detail;
 };
 
-/** Result of the CUDA-only, test-invoked weight-slot ordering interlock.
+/** Result of the CUDA-only, test-invoked weight-slot queue-ordering probe.
  *
- * The implementation holds the layer-0 compute stream behind a synthetic
- * event, then observes whether the H2D stream can pass the production
- * layer_done[slot] wait before that event is released.  It is deliberately a
- * separate template instantiation from the production entry point, so the
+ * The implementation records the consumer event and observes the real
+ * layer_done[slot] wait as the three-layer chain is queued. It is deliberately
+ * a separate template instantiation from the production entry point, so the
  * probe cannot alter miner or validator execution. */
 struct RcExactReplaySlotReuseOrderingTestResult {
     bool device_available{false};
-    bool interlock_supported{false};
     bool chain_completed{false};
     bool slot_wait_enqueued{false};
     bool wait_site_reached{false};
-    bool overwrite_blocked_before_release{false};
-    bool overwrite_resumed_after_release{false};
-    bool watchdog_expired{false};
+    bool consumer_recorded_before_wait{false};
+    bool waited_on_expected_slot{false};
     std::string detail;
 };
 

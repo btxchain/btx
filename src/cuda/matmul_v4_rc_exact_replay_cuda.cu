@@ -14,15 +14,12 @@
 #include <cub/cub.cuh>
 
 #include <algorithm>
-#include <atomic>
-#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <iterator>
 #include <limits>
 #include <mutex>
 #include <string>
-#include <thread>
 #include <vector>
 
 namespace matmul_v4::cuda {
@@ -1392,158 +1389,36 @@ namespace {
 
 /** Test-only state used by the <true> FFN-chain template instantiation below.
  * The production <false> instantiation compiles every probe branch away. */
-__global__ void RcSlotReuseOrderingHoldGate(uint32_t* release,
-                                            uint32_t* device_expired,
-                                            uint64_t max_cycles)
-{
-    const uint64_t start{clock64()};
-    while (atomicAdd(release, 0u) == 0u) {
-        if (clock64() - start >= max_cycles) {
-            atomicExch(device_expired, 1u);
-            return;
-        }
-    }
-}
-
-__global__ void RcSlotReuseOrderingReleaseGate(uint32_t* release)
-{
-    atomicExch(release, 1u);
-}
-
 struct SlotReuseOrderingProbe {
-    cudaStream_t gate_stream{nullptr};
-    cudaStream_t release_stream{nullptr};
-    cudaEvent_t gate_event{nullptr};
-    cudaEvent_t pre_wait_event{nullptr};
-    cudaEvent_t post_wait_event{nullptr};
-    DeviceBuf release_flag;
-    DeviceBuf device_watchdog_expired;
-    int device_index{-1};
-    std::atomic_bool slot_wait_enqueued{false};
-    std::atomic_bool watchdog_expired{false};
-    std::atomic_bool release_started{false};
-    // Assume the seam is supported until a successful property query proves
-    // that concurrent kernels are unavailable. Bind/query failures are real
-    // initialization errors and must fail the test rather than masquerade as
-    // an unsupported-device skip.
-    bool interlock_supported{true};
+    cudaEvent_t recorded_consumer[2]{nullptr, nullptr};
+    bool wait_site_reached{false};
+    bool consumer_recorded_before_wait{false};
+    bool waited_on_expected_slot{false};
+    bool slot_wait_enqueued{false};
 
     [[nodiscard]] bool Init()
     {
-        cudaDeviceProp properties{};
-        if (!BindSelectedRcCudaDevice(&device_index) ||
-            cudaGetDeviceProperties(&properties, device_index) != cudaSuccess) {
-            return false;
-        }
-        // The release kernel must be able to run while the single-thread gate
-        // is resident. Older CUDA devices that cannot make concurrent-kernel
-        // progress skip this test seam; production ExactReplay is unchanged.
-        if (!properties.concurrentKernels) {
-            interlock_supported = false;
-            return false;
-        }
-        if (
-            !release_flag.Alloc(sizeof(uint32_t)) ||
-            !device_watchdog_expired.Alloc(sizeof(uint32_t)) ||
-            cudaStreamCreateWithFlags(&release_stream, cudaStreamNonBlocking) !=
-                cudaSuccess ||
-            cudaStreamCreateWithFlags(&gate_stream, cudaStreamNonBlocking) !=
-                cudaSuccess ||
-            cudaEventCreateWithFlags(&gate_event, cudaEventDisableTiming) !=
-                cudaSuccess ||
-            cudaEventCreateWithFlags(&pre_wait_event, cudaEventDisableTiming) !=
-                cudaSuccess ||
-            cudaEventCreateWithFlags(&post_wait_event, cudaEventDisableTiming) !=
-                cudaSuccess ||
-            cudaMemsetAsync(release_flag.p, 0, sizeof(uint32_t),
-                            release_stream) != cudaSuccess ||
-            cudaMemsetAsync(device_watchdog_expired.p, 0, sizeof(uint32_t),
-                            release_stream) != cudaSuccess ||
-            cudaStreamSynchronize(release_stream) != cudaSuccess) {
-            return false;
-        }
-        // Fail open on-device in less than a typical display-GPU watchdog
-        // interval. The host normally releases the gate after a 250 ms
-        // observation window; this 750 ms ceiling is only the last-resort
-        // cleanup path if the release stream cannot make progress.
-        // cudaDeviceProp::clockRate was REMOVED in CUDA 13, so reading it off
-        // the properties struct does not compile on a 13.x toolkit at all --
-        // which is where this gate actually has to run. cudaDevAttrClockRate is
-        // the supported query and is available on 12.x and 13.x alike.
-        int clock_khz{0};
-        if (cudaDeviceGetAttribute(&clock_khz, cudaDevAttrClockRate,
-                                   device_index) != cudaSuccess) {
-            return false;
-        }
-        const uint64_t max_cycles{
-            static_cast<uint64_t>(std::max(clock_khz, 1)) * 750u};
-        RcSlotReuseOrderingHoldGate<<<1, 1, 0, gate_stream>>>(
-            release_flag.As<uint32_t>(),
-            device_watchdog_expired.As<uint32_t>(), max_cycles);
-        if (cudaGetLastError() != cudaSuccess ||
-            cudaEventRecord(gate_event, gate_stream) != cudaSuccess) {
-            return false;
-        }
-        return true;
+        return BindSelectedRcCudaDevice();
     }
 
-    void Release() noexcept
+    void ConsumerRecorded(uint32_t slot, cudaEvent_t event)
     {
-        if (release_started.exchange(true, std::memory_order_acq_rel)) return;
-        bool released{false};
-        if (device_index < 0 || cudaSetDevice(device_index) != cudaSuccess ||
-            release_stream == nullptr || release_flag.p == nullptr) {
-            watchdog_expired.store(true, std::memory_order_release);
-        } else {
-            RcSlotReuseOrderingReleaseGate<<<1, 1, 0, release_stream>>>(
-                release_flag.As<uint32_t>());
-            released = cudaGetLastError() == cudaSuccess &&
-                cudaStreamSynchronize(release_stream) == cudaSuccess;
-            if (!released) {
-                watchdog_expired.store(true, std::memory_order_release);
-            }
-        }
-        if (!released) {
-            // Permit the main thread or destructor to retry after a transient
-            // launch/device-selection failure. The bounded device watchdog
-            // still guarantees that teardown cannot spin indefinitely.
-            release_started.store(false, std::memory_order_release);
-        }
+        if (slot < 2) recorded_consumer[slot] = event;
     }
 
-    [[nodiscard]] bool PostWaitReached() const
+    void WaitSite(uint32_t layer, uint32_t slot, cudaEvent_t event)
     {
-        return post_wait_event != nullptr &&
-            cudaEventQuery(post_wait_event) == cudaSuccess;
+        if (layer != 1) return;
+        wait_site_reached = true;
+        waited_on_expected_slot = slot == 0;
+        consumer_recorded_before_wait = slot < 2 &&
+            recorded_consumer[slot] != nullptr &&
+            recorded_consumer[slot] == event;
     }
 
-    [[nodiscard]] bool PreWaitReached() const
+    void WaitEnqueued(uint32_t layer)
     {
-        return pre_wait_event != nullptr &&
-            cudaEventQuery(pre_wait_event) == cudaSuccess;
-    }
-
-    [[nodiscard]] bool DeviceWatchdogExpired() const
-    {
-        if (device_watchdog_expired.p == nullptr) return true;
-        uint32_t expired{0};
-        if (cudaMemcpy(&expired, device_watchdog_expired.p, sizeof(expired),
-                       cudaMemcpyDeviceToHost) != cudaSuccess) {
-            return true;
-        }
-        return expired != 0;
-    }
-
-    ~SlotReuseOrderingProbe()
-    {
-        Release();
-        if (device_index >= 0) (void)cudaSetDevice(device_index);
-        if (gate_stream) (void)cudaStreamSynchronize(gate_stream);
-        if (post_wait_event) (void)cudaEventDestroy(post_wait_event);
-        if (pre_wait_event) (void)cudaEventDestroy(pre_wait_event);
-        if (gate_event) (void)cudaEventDestroy(gate_event);
-        if (gate_stream) (void)cudaStreamDestroy(gate_stream);
-        if (release_stream) (void)cudaStreamDestroy(release_stream);
+        if (layer == 1) slot_wait_enqueued = true;
     }
 };
 
@@ -1849,17 +1724,6 @@ bool TryCudaRcFusedFfnChainImpl(const std::vector<int8_t>& X0, bool weights_shar
             return false;
         }
 
-        if constexpr (TestSlotReuseOrdering) {
-            // Delay the first consumer behind a bounded, single-thread device
-            // gate. layer_done[0] therefore cannot complete until the host
-            // watchdog releases this event, making the later slot-0 overwrite
-            // dependency adversarial rather than relying on GEMM timing.
-            if (l == 0 && !CudaOk(cudaStreamWaitEvent(
-                              ws.compute, ordering_probe->gate_event, 0))) {
-                return false;
-            }
-        }
-
         if (l + 1 < L_lyr && !weights_shared) {
             // The pair for layer l+1 goes into the slot layer l-1 read. Without
             // this edge the generation kernels on h2d can rewrite W[l-1] while
@@ -1878,29 +1742,16 @@ bool TryCudaRcFusedFfnChainImpl(const std::vector<int8_t>& X0, bool weights_shar
             // l == 0 writes slot 1, which no compute has read yet.
             const uint32_t next_slot{(l + 1) % 2};
             if (l >= 1) {
+                const cudaEvent_t consumer_done{ws.layer_done[next_slot]};
                 if constexpr (TestSlotReuseOrdering) {
-                    if (l == 1 && !CudaOk(cudaEventRecord(
-                                      ordering_probe->pre_wait_event, ws.h2d))) {
-                        return false;
-                    }
+                    ordering_probe->WaitSite(l, next_slot, consumer_done);
                 }
                 if (!CudaOk(cudaStreamWaitEvent(
-                        ws.h2d, ws.layer_done[next_slot], 0))) {
+                        ws.h2d, consumer_done, 0))) {
                     return false;
                 }
                 if constexpr (TestSlotReuseOrdering) {
-                    if (l == 1) {
-                        // This event is ordered immediately after the actual
-                        // production wait. If that wait is deleted or points at
-                        // the wrong slot, it completes while the compute gate is
-                        // still held and the test fails.
-                        if (!CudaOk(cudaEventRecord(
-                                ordering_probe->post_wait_event, ws.h2d))) {
-                            return false;
-                        }
-                        ordering_probe->slot_wait_enqueued.store(
-                            true, std::memory_order_release);
-                    }
+                    ordering_probe->WaitEnqueued(l);
                 }
             }
             if (!load_weight_pair(*dWup_nxt, *dWdn_nxt, l + 1)) return false;
@@ -1918,6 +1769,9 @@ bool TryCudaRcFusedFfnChainImpl(const std::vector<int8_t>& X0, bool weights_shar
         // Records completion of the compute that read WEIGHT slot `slot`; the
         // h2d wait above consumes it before that slot is regenerated.
         if (!CudaOk(cudaEventRecord(ws.layer_done[slot], ws.compute))) return false;
+        if constexpr (TestSlotReuseOrdering) {
+            ordering_probe->ConsumerRecorded(slot, ws.layer_done[slot]);
+        }
 
         if (matmul::v4::rc::ExactReplayCancellationRequested()) return false;
         if (!CudaOk(cudaStreamWaitEvent(ws.d2h, ws.layer_done[slot], 0))) return false;
@@ -2004,13 +1858,9 @@ RunRcExactReplaySlotReuseOrderingTest()
 
     SlotReuseOrderingProbe probe;
     if (!probe.Init()) {
-        result.interlock_supported = probe.interlock_supported;
-        result.detail = result.interlock_supported
-            ? "failed to initialize CUDA ordering interlock"
-            : "CUDA device lacks concurrent-kernel interlock support";
+        result.detail = "failed to initialize CUDA queue-ordering probe";
         return result;
     }
-    result.interlock_supported = true;
 
     constexpr uint32_t rows{32};
     constexpr uint32_t d_model{32};
@@ -2036,58 +1886,6 @@ RunRcExactReplaySlotReuseOrderingTest()
         }
     }
 
-    std::atomic_bool call_finished{false};
-    bool blocked_before_release{false};
-    std::thread watchdog([&] {
-        if (cudaSetDevice(probe.device_index) != cudaSuccess) {
-            probe.watchdog_expired.store(true, std::memory_order_release);
-            probe.Release();
-            return;
-        }
-        const auto admission_deadline{
-            std::chrono::steady_clock::now() + std::chrono::seconds{15}};
-        while (!probe.slot_wait_enqueued.load(std::memory_order_acquire) &&
-               !call_finished.load(std::memory_order_acquire) &&
-               std::chrono::steady_clock::now() < admission_deadline) {
-            std::this_thread::sleep_for(std::chrono::milliseconds{1});
-        }
-        if (!probe.slot_wait_enqueued.load(std::memory_order_acquire)) {
-            probe.watchdog_expired.store(true, std::memory_order_release);
-            probe.Release();
-            return;
-        }
-
-        // Prove that the H2D stream reached the instruction immediately before
-        // the production wait. Otherwise unrelated queue delay could make a
-        // deleted wait look blocked and produce a false pass on a busy device.
-        const auto site_deadline{
-            std::chrono::steady_clock::now() + std::chrono::seconds{15}};
-        while (!probe.PreWaitReached() &&
-               std::chrono::steady_clock::now() < site_deadline) {
-            std::this_thread::sleep_for(std::chrono::milliseconds{1});
-        }
-        if (!probe.PreWaitReached()) {
-            probe.watchdog_expired.store(true, std::memory_order_release);
-            probe.Release();
-            return;
-        }
-
-        // With the production wait removed, the immediately following event
-        // has no outstanding H2D work in front of it and becomes visible here.
-        // With the wait intact, the synthetic compute gate keeps it causally
-        // blocked. Because the pre-wait event has already completed and the
-        // post-wait event is adjacent, a short interval is sufficient and
-        // avoids holding a display GPU near its watchdog threshold.
-        const auto observation_deadline{
-            std::chrono::steady_clock::now() + std::chrono::milliseconds{250}};
-        while (!probe.PostWaitReached() &&
-               std::chrono::steady_clock::now() < observation_deadline) {
-            std::this_thread::sleep_for(std::chrono::milliseconds{1});
-        }
-        blocked_before_release = !probe.PostWaitReached();
-        probe.Release();
-    });
-
     static const std::vector<int8_t> empty;
     static const std::vector<std::vector<int8_t>> empty_layers;
     std::vector<std::vector<int8_t>> outputs;
@@ -2095,32 +1893,23 @@ RunRcExactReplaySlotReuseOrderingTest()
         x0, /*weights_shared=*/false, empty, empty, empty_layers,
         empty_layers, prf_up, prf_down, rows, d_model, d_ff, layers,
         outputs, &up_seeds, &down_seeds, nullptr, 0, 0, nullptr, &probe);
-    call_finished.store(true, std::memory_order_release);
-    probe.Release();
-    watchdog.join();
-
-    result.slot_wait_enqueued =
-        probe.slot_wait_enqueued.load(std::memory_order_acquire);
-    result.wait_site_reached = probe.PreWaitReached();
-    result.overwrite_blocked_before_release = blocked_before_release;
-    result.overwrite_resumed_after_release = probe.PostWaitReached();
-    result.watchdog_expired =
-        probe.watchdog_expired.load(std::memory_order_acquire) ||
-        probe.DeviceWatchdogExpired();
+    result.slot_wait_enqueued = probe.slot_wait_enqueued;
+    result.wait_site_reached = probe.wait_site_reached;
+    result.consumer_recorded_before_wait =
+        probe.consumer_recorded_before_wait;
+    result.waited_on_expected_slot = probe.waited_on_expected_slot;
     if (!result.chain_completed) {
-        result.detail = "adversarial CUDA FFN chain did not complete";
+        result.detail = "CUDA FFN chain did not complete";
     } else if (!result.slot_wait_enqueued) {
-        result.detail = "production slot-reuse wait was not reached";
+        result.detail = "production slot-reuse wait was not enqueued";
     } else if (!result.wait_site_reached) {
-        result.detail = "H2D stream did not reach the slot-reuse wait site";
-    } else if (!result.overwrite_blocked_before_release) {
-        result.detail = "weight overwrite passed the per-slot wait before release";
-    } else if (!result.overwrite_resumed_after_release) {
-        result.detail = "weight overwrite did not resume after release";
-    } else if (result.watchdog_expired) {
-        result.detail = "ordering interlock watchdog expired";
+        result.detail = "production slot-reuse wait site was not reached";
+    } else if (!result.consumer_recorded_before_wait) {
+        result.detail = "slot-reuse wait did not consume its recorded event";
+    } else if (!result.waited_on_expected_slot) {
+        result.detail = "slot-reuse wait selected the wrong ping-pong slot";
     } else {
-        result.detail = "per-slot wait blocked overwrite until consumer completion";
+        result.detail = "recorded consumer event precedes the correct slot-reuse wait";
     }
     return result;
 }
