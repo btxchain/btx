@@ -607,7 +607,7 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-matmulvalidation=<mode>", "Select MatMul transcript verification mode: consensus (default), trusted, relay, economic, or spv. trusted performs ordinary block/body/script validation but replaces local Profile-1 ExactReplay with an explicitly configured M-of-N signed archive-validator quorum; it is an operator-trusted mirror, not an independently validating full node. relay is the 0.34 public discovery node: ADDR only, not MatMul authority, not a chain-tip oracle, and it never requests or serves GETMMATTEST. Mainnet allows consensus, trusted, and relay. Economic/SPV still skip MatMul authority and remain forbidden on mainnet.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-discoveryrelayhideaddr=<ip>", "Do not learn, GETADDR, or getnodeaddresses this IP. Repeatable. Use on discovery relays and trusted archives to hide GPU attestor addresses that advertise CONSENSUS without ARCHIVE (serve=0). Relays InitError if -addnode/-connect/-seednode targets a hidden address.", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-matmulrcexecution=<mode>", "Select local MatMul RC ExactReplay execution: strict-device requires a production-qualified device and forbids CPU fallback; auto-fallback permits device-to-CPU fallback for pre-activation/testing; cpu-diagnostic explicitly runs the portable oracle (default: strict-device on a chain with a finite RC activation height, auto-fallback while RC activation is disabled). Only strict-device with a currently qualified production provider advertises NODE_MATMUL_CONSENSUS.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-allowunverifiablematmulconsensus", "Allow a consensus-mode node to start on a production chain even when no qualified MatMul ExactReplay provider is available (default: 0). The same fail-closed path is taken when a local source build moved the BUILD_RELEVANT fingerprint: the production canary returns build_provenance_mismatch and the process exits rather than degrading. Reseal goldens against the new fingerprint, or pass this flag only as a supervised diagnostic escape. The node cannot cross the RC activation boundary until a provider is ready. Unsafe for unattended nodes.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-allowunverifiablematmulconsensus", "Deprecated no-op. 0.34.5 starts consensus mode without a qualified ExactReplay provider (CPU tarball, source build whose fingerprint moved, GPU canary miss). The node warns, withholds NODE_MATMUL_CONSENSUS, and cannot cross the RC body boundary until a provider is ready. Kept so existing btx.conf lines are not InitError. Do not treat this flag as making ExactReplay optional for mining.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmultrustedpubkey=<hex>", "Compressed secp256k1 public key trusted to attest successful Profile-1 ExactReplay. Repeat for N signers; each must be distinct. Required with -matmulvalidation=trusted. Mainnet trusted mirrors require at least 2 independent signers and M=2 (a 1-of-1 quorum is ExactReplay skip authority). Pass -allowsinglekeytrustedmirror=1 only as an explicit transition override.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmultrustedthreshold=<n>", "Required distinct trusted signatures (M) for one block, 1..N (default: 1). On mainnet with -matmulvalidation=trusted, M<2 or N<2 is refused: above the Profile-1 activation height the quorum replaces the MatMul proof-of-work check, so a 1-of-1 quorum makes one key the node's sole proof-of-work authority. Override with -allowsinglekeytrustedmirror=1. On -matmulvalidation=consensus the pin is telemetry and never skips ExactReplay. Configure 2 independent signers with M=2.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-allowsinglekeytrustedmirror", "Allow a mainnet trusted mirror to start with N<2 or M<2 (default: 0). That topology is a single stolen WIF hijacking ExactReplay skip. Transition override only; logged and alarming. Consensus+pin is never refused for 1-of-1 (the pin is telemetry).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -1311,14 +1311,19 @@ bool RefuseUnverifiableMatMulConsensusStartup(
     bool strict_device_ready,
     bool allow_unverifiable_startup)
 {
-    const auto& consensus{chainparams.GetConsensus()};
-    const bool production_rc_epoch_configured{
-        consensus.nMatMulRCHeight != std::numeric_limits<int32_t>::max() &&
-        !consensus.fMatMulRCUseToyDims};
-    return production_rc_epoch_configured &&
-           validation_mode == "consensus" &&
-           !strict_device_ready &&
-           !allow_unverifiable_startup;
+    // 0.34.5: an ordinary operator (CPU tarball, or `git clone && cmake
+    // --build` of a tag whose fingerprint no longer matches the sealed
+    // goldens) must be able to start. Exiting here made a fresh datadir
+    // indistinguishable from a seed/discovery failure, and it made every
+    // source build require a diagnostic flag. Mining and
+    // NODE_MATMUL_CONSENSUS stay fail-closed in the caller; this predicate
+    // no longer aborts startup. Arguments are kept so tests can name the
+    // historical inputs.
+    (void)chainparams;
+    (void)validation_mode;
+    (void)strict_device_ready;
+    (void)allow_unverifiable_startup;
+    return false;
 }
 
 MatMulRCRuntimeReprobeResult RunUnavailableMatMulRCRuntimeReprobe(
@@ -2529,27 +2534,23 @@ static bool InitializeMatMulRCReadinessPostDaemon(
     if (RefuseUnverifiableMatMulConsensusStartup(
             chainparams, matmul_validation_mode, rc_strict_device_ready,
             args.GetBoolArg("-allowunverifiablematmulconsensus", false))) {
+        // Unreachable after 0.34.5 (predicate always false). Kept so a
+        // future fail-closed restore does not lose the operator-facing text.
         return InitError(strprintf(
             _("MatMul consensus startup refused: no qualified ExactReplay "
               "provider is ready (provider=%s, reason=%s, "
-              "workspace_required=%llu, workspace_capacity=%llu). A local "
-              "source build that moved the BUILD_RELEVANT fingerprint fails "
-              "the production canary (build_provenance_mismatch) and takes "
-              "this path: reseal goldens against the new fingerprint, or "
-              "use -allowunverifiablematmulconsensus=1 only for supervised "
-              "diagnostics. Provide a qualified accelerator, run as a trusted "
-              "archive (-matmulvalidation=trusted with an M-of-N pin), run as "
-              "a discovery relay (-matmulvalidation=relay) if this host only "
-              "introduces peers. Economic/SPV remain forbidden on mainnet."),
+              "workspace_required=%llu, workspace_capacity=%llu)."),
             rc_provider, rc_resolution_reason,
             static_cast<unsigned long long>(rc_workspace_required_bytes),
             static_cast<unsigned long long>(rc_workspace_capacity_bytes)));
     }
     if (unverifiable_consensus) {
         LogPrintf(
-            "MatMul RC UNSAFE OVERRIDE: this node has NO qualified ExactReplay device "
+            "MatMul RC DEGRADED START: this node has NO qualified ExactReplay device "
             "(provider=%s reason=%s) and is running -matmulvalidation=consensus. "
-            "It will validate normally up to the Epoch-A activation height and "
+            "Startup is allowed so a CPU tarball and a source build can join "
+            "discovery and header-sync; NODE_MATMUL_CONSENSUS is withheld. "
+            "The node will validate normally up to the Epoch-A activation height and "
             "then STALL one block below it, deferring every MatMul block with "
             "\"ExactReplay: local execution failed\". Choose one:\n"
             "  (a) provide a qualified GPU (see the operator runbook; a Profile-1 "
@@ -2558,7 +2559,9 @@ static bool InitializeMatMulRCReadinessPostDaemon(
             "plus -matmultrustedpubkey=<signer> (repeat for N signers) and "
             "-matmultrustedthreshold=<M>, which replaces local ExactReplay with "
             "a signed archive-validator quorum. A trusted mirror is NOT an "
-            "independently validating full node.\n",
+            "independently validating full node.\n"
+            "  (c) if this is a source build whose fingerprint moved, reseal "
+            "goldens (doc/release-process.md) so mining admission can pass.\n",
             rc_provider, rc_resolution_reason,
             static_cast<unsigned long long>(rc_workspace_required_bytes));
     }

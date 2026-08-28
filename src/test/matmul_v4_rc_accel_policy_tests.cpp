@@ -345,14 +345,16 @@ BOOST_AUTO_TEST_CASE(rc_execution_default_is_activation_aware_and_test_safe)
     BOOST_CHECK_EQUAL(DefaultMatMulRCExecutionMode(*testnet), "auto-fallback");
 }
 
-BOOST_AUTO_TEST_CASE(unverifiable_production_consensus_startup_fails_closed)
+BOOST_AUTO_TEST_CASE(unverifiable_production_consensus_startup_degrades_not_exits)
 {
     ArgsManager empty;
     const auto main{CreateChainParams(empty, ChainType::MAIN)};
     const auto regtest{CreateChainParams(empty, ChainType::REGTEST)};
     const auto testnet{CreateChainParams(empty, ChainType::TESTNET)};
 
-    BOOST_CHECK(RefuseUnverifiableMatMulConsensusStartup(
+    // 0.34.5: a CPU tarball / moved-fingerprint source build must start.
+    // Mining and NODE_MATMUL_CONSENSUS stay fail-closed elsewhere.
+    BOOST_CHECK(!RefuseUnverifiableMatMulConsensusStartup(
         *main, "consensus", /*strict_device_ready=*/false,
         /*allow_unverifiable_startup=*/false));
     BOOST_CHECK(!RefuseUnverifiableMatMulConsensusStartup(
@@ -365,8 +367,6 @@ BOOST_AUTO_TEST_CASE(unverifiable_production_consensus_startup_fails_closed)
         *main, "consensus", /*strict_device_ready=*/false,
         /*allow_unverifiable_startup=*/true));
 
-    // Toy-dimension regtest and a network without a finite RC epoch remain
-    // runnable without production accelerator hardware.
     BOOST_CHECK(!RefuseUnverifiableMatMulConsensusStartup(
         *regtest, "consensus", /*strict_device_ready=*/false,
         /*allow_unverifiable_startup=*/false));

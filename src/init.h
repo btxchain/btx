@@ -100,8 +100,12 @@ bool StartIndexBackgroundSync(node::NodeContext& node);
  */
 std::string DefaultMatMulRCExecutionMode(const CChainParams& chainparams);
 
-/** Return true when a production RC consensus node would be unable to verify
- * the first activated block and startup has not been explicitly overridden. */
+/** Historically returned true when a production RC consensus node could not
+ * verify the first activated block and `-allowunverifiablematmulconsensus`
+ * was unset. 0.34.5 never refuses that case: the node starts, warns, withholds
+ * NODE_MATMUL_CONSENSUS, and stalls at the RC boundary. Mining remains
+ * fail-closed (canary / self-qualification). The predicate is kept so tests
+ * pin the documented degrade path. */
 bool RefuseUnverifiableMatMulConsensusStartup(
     const CChainParams& chainparams,
     const std::string& validation_mode,

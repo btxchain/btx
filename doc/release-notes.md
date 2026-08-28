@@ -1,5 +1,6 @@
 # STOP: 0.34.1 partitions nodes. 0.34.2 deadlocks. 0.34.3 stalls with
-# headers below blocks. 0.34.4 closed that header gap.
+# headers below blocks. 0.34.4 closed that header gap. 0.34.5 is the
+# sealed binary that actually bootstraps.
 
 **Do not `invalidateblock` 33c834f8.** The live chain **descends from**
 `33c834f8056aca85a8591a304fe52affebe2770d6027e79845765547f8dfae82` at
@@ -65,18 +66,16 @@ public DNS hosts are not chain-tip oracles, and a node with no pin
 membership, no attestor key, and no trusted-mirror pin must be able to
 reach tip and keep advancing on ExactReplay alone.
 
-`CLIENT_VERSION` in this tree is still **0.34.4** until the next freeze.
+`CLIENT_VERSION` in this tree is **0.34.5** once the freeze lands.
 The `v0.34` tag and 0.34.0 seal remain the pool-close cut. 0.34.1 is
 withdrawn: it partitions nodes from mainnet. 0.34.2 is withdrawn for
 consensus nodes: it deadlocks one block past the last attestation.
 0.34.3 is withdrawn for the headers-below-blocks stall. 0.34.4 closed
-that header gap; install a binary that includes this competing-fork
-follow-up to actually request the chain miners are on. Freeze `F` for
-0.34.4 is recorded in [0.34.4-freeze.md](evidence/0.34.4-freeze.md).
-A later freeze/seal is required before shipping this commit: any
-`src/` change moves the BUILD_RELEVANT fingerprint. Git describe on
-`main` remains the 0.33.4.2 line until 0.34 merges
-([release-notes-0.33.4.2.md](release-notes/release-notes-0.33.4.2.md)).
+that header gap but compiled-in seeds were disconnected for missing
+`NODE_NETWORK`, and a CPU tarball / source build **exited** instead of
+starting. 0.34.5 is the sealed follow-up: keep discovery relays, answer
+GETADDR, start without a diagnostic flag, fetch a heavier fork without
+following it past park depth 6.
 
 Please report bugs using the issue tracker at GitHub, and when you
 have a diagnosis, bring the patch:
@@ -180,15 +179,14 @@ competing-fork follow-up (0.34.4 closed the header gap; it did not
 request the heavier 33c834f8 fork). Keep Metal `.metallib` files next
 to `btxd`. Back up wallets and configuration before upgrading.
 
-**Building 0.34.4+ from source is not a drop-in for the sealed tarball.**
+**Building 0.34.5 from source starts; it does not mine until resealed.**
 Compiling moves the BUILD_RELEVANT fingerprint. The production canary
-then fails `build_provenance_mismatch`, ExactReplay is not
-self-qualified, and `-matmulvalidation=consensus` **exits**
-(`RefuseUnverifiableMatMulConsensusStartup`) rather than degrading.
-That is fail-closed, not a soft warning. Either reseal goldens against
-the new fingerprint (see [release-process.md](release-process.md)) or
-start with `-allowunverifiablematmulconsensus=1` as a **supervised**
-escape. Do not put that flag on an unattended public node.
+then fails `build_provenance_mismatch` and ExactReplay is not
+self-qualified, so `NODE_MATMUL_CONSENSUS` is withheld. The process
+**starts** (`MatMul RC DEGRADED START`), can discover peers and sync
+headers, and stalls at the RC body boundary. Reseal goldens against
+the new fingerprint (see [release-process.md](release-process.md)).
+`-allowunverifiablematmulconsensus` is a deprecated no-op.
 
 Tarball SHA256s are filled in when the three assets are staged (Linux
 CPU, Linux CUDA, macOS arm64 Metal). Every shipped `btxd` is linked
@@ -213,6 +211,44 @@ partitioned the network. `nMatMulStallRecoveryHeight` is `INT_MAX`;
 `num/den` stay `1/1`.
 
 # Notable Changes
+
+## 0.34.5: sealed bootstrap (this release)
+
+This is the sealed binary. 0.34.4 tarballs did not let a third party
+join: compiled seeds advertised `NODE_MATMUL_DISCOVERY` without
+`NODE_NETWORK`, consensus nodes disconnected them, and GETADDR on the
+relays was ~157 received / 30 answered. A CPU tarball and any source
+build then **exited** at startup, which looked like the same failure.
+
+**Kept (genuine):**
+
+- `must_probe` hoist (`8b0b0425`) plus BestKnown must **extend the tip**
+  (`0fdd8739`).
+- Best-header guard (`EnsureBestHeaderNotBehindConnectedTip`, 0.34.4).
+- Park split (`ed52178e`): GETDATA of a heavier fork is not follow.
+  Depth-6 park stays wired. Stale-heavier is **not** `recovery_escape`.
+- Discovery-relay retention and GETADDR (`ab15f616`):
+  `HandshakeKeepsDiscoveryPeer` keeps `NODE_MATMUL_DISCOVERY` on full
+  outbound, not only ADDR_FETCH; relays `Good` recent inbound NETWORK
+  peers, answer GETADDR immediately, extra-push connected useful peers.
+- Doc correction: do **not** `invalidateblock` 33c834f8. Recover with
+  `reconsiderblock` if you already did.
+- Consensus/CPU/source-build **starts** without
+  `-allowunverifiablematmulconsensus` (deprecated no-op). Mining stays
+  fail-closed until canary=passed.
+
+**Dropped (invalidateblock workarounds, never shipped):**
+
+- Uncommitted island-skip / reserved RC lane / retained-body GETDATA
+  fallthrough. Those existed to drag bodies of a chain we had marked
+  invalid. After `reconsiderblock`, park either refuses (correct) or
+  the hole is ordinary IBD. Not in this tree.
+
+Measured after deploying `ab15f616` to both seeds (still local
+binaries — this release replaces them with tarballs): inbound GETADDR
+answered 160/160 and 132/132. A fresh datadir with `dnsseed=0
+fixedseeds=1` kept both compiled seeds, processed 943+941 addresses
+from them, and committed headers off genesis.
 
 ## 0.34.4 follow-up: heavier competing fork (33c834f8 / 199523)
 
@@ -249,16 +285,20 @@ operator path is Case A `reconsiderblock`, not another invalidate.
 stalls; this follow-up is the remaining catch-up hole they pointed at
 from chaintips and per-peer bytes.
 
-## 0.34.4 follow-up: source-build canary exits
+## 0.34.5: source-build and CPU tarball start without a diagnostic flag
 
-A local `cmake --build` of 0.34.4+ changes the BUILD_RELEVANT
-fingerprint. The production canary then returns
-`build_provenance_mismatch`, `startup_canary_passed` is false, and
-consensus-mode startup **refuses** (`InitError`) unless
-`-allowunverifiablematmulconsensus=1`. The node does not fall back to
-an unverifiable GPU. Reseal, or pass the flag only for supervised
-diagnostics. macpro2's unsealed local binary needed that flag for this
-reason.
+0.34.4 exited (`InitError`) when consensus mode had no qualified
+ExactReplay provider: CPU tarball (`workspace_capacity=0`), and any
+`cmake --build` whose fingerprint no longer matched the sealed goldens
+(`canary=build_provenance_mismatch`). A fresh datadir then looked like
+a seed/discovery failure because the process never stayed up.
+
+0.34.5 **starts**. It warns `MatMul RC DEGRADED START`, withholds
+`NODE_MATMUL_CONSENSUS`, joins GETADDR, and stalls at the RC body
+boundary until a qualified GPU is present or goldens are resealed.
+Mining remains fail-closed. `-allowunverifiablematmulconsensus` is a
+deprecated no-op kept so existing `btx.conf` lines are not an error.
+Remove it.
 
 ## 0.34.3: consensus ExactReplay deadlock (tag v0.34.2)
 
@@ -450,11 +490,11 @@ archive. If a host refuses because it is configured trusted with
 threshold 1, switch it to `-matmulvalidation=consensus`. The override
 is the single-stolen-key hijack surface this rule removes.
 
-A CPU host with no qualified ExactReplay provider cannot start
-`-matmulvalidation=consensus` either. That is a different fail-closed
-(`RefuseUnverifiableMatMulConsensusStartup`): Profile-1 needs a
-self-qualified accelerator, not a stolen-WIF skip. Do not pass
-`-allowunverifiablematmulconsensus=1` on unattended nodes. Public DNS
+A CPU host with no qualified ExactReplay provider **starts**
+`-matmulvalidation=consensus` in 0.34.5: it warns, withholds
+`NODE_MATMUL_CONSENSUS`, and cannot cross the RC body boundary. That is
+degraded discovery, not independent validation. Profile-1 still needs a
+self-qualified accelerator to advertise consensus or to mine. Public DNS
 seeds on CPU run `-matmulvalidation=relay`. A trusted archive still
 needs an M-of-N pin, which is not this M=2 startup guard's job to
 invent.
