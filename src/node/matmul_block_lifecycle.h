@@ -232,8 +232,7 @@ public:
 
     std::optional<std::pair<uint256, RetainedBody>> NextRetry(
         const uint256& preferred_parent,
-        Clock::time_point now = Clock::now(),
-        bool ignore_retry_delay = false)
+        Clock::time_point now = Clock::now())
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         PruneExpiredRetained(now);
@@ -241,7 +240,7 @@ public:
         for (auto it = m_entries.begin(); it != m_entries.end(); ++it) {
             const Entry& entry{it->second};
             if (!entry.body || IsActive(entry.state) ||
-                (!ignore_retry_delay && now < entry.body->retry_not_before)) {
+                now < entry.body->retry_not_before) {
                 continue;
             }
             if (entry.body->block->hashPrevBlock == preferred_parent) {
@@ -278,9 +277,10 @@ public:
 
     /**
      * Drop a stale inactive retained generation and re-install the body
-     * as a fresh retry. Repeated non-terminal deferral used to leave the
-     * same entry in BODY_RETAINED forever; after a few cycles the
-     * scheduler must requeue rather than spin.
+     * as a fresh retry without extending its capacity TTL. Repeated
+     * non-terminal deferral used to leave the same entry in BODY_RETAINED
+     * forever; after a few cycles the scheduler must requeue rather than
+     * spin, but requeueing must not pin retained bytes forever.
      */
     bool TerminalRequeue(const uint256& hash, Clock::duration delay,
                          Clock::time_point now = Clock::now())
@@ -294,7 +294,6 @@ public:
         RetainedBody body{*it->second.body};
         EraseEntry(it);
         body.deferral_count = 0;
-        body.stored_at = now;
         body.retry_not_before = now + delay;
         auto [nit, inserted] = m_entries.try_emplace(hash);
         (void)inserted;

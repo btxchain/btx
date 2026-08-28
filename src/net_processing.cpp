@@ -3193,11 +3193,8 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
             fork_child_hash = fork->GetBlockHash();
         }
     }
-    const bool idle_catchup{
-        m_matmul_pending_verifications.load(std::memory_order_relaxed) == 0 &&
-        m_matmul_rc_pending_verifications.load(std::memory_order_relaxed) == 0};
     const auto retry{m_matmul_block_lifecycle.NextRetry(
-        wanted, node::MatMulBlockLifecycle::Clock::now(), idle_catchup)};
+        wanted, node::MatMulBlockLifecycle::Clock::now())};
     if (!retry) return;
     candidate_hash = retry->first;
     candidate = retry->second;
@@ -13106,6 +13103,7 @@ void PeerManagerImpl::ProcessBlockSync(NodeId nodeid, CNode* node, const std::sh
     bool new_block{false};
     m_chainman.ProcessNewBlock(block, force_processing, min_pow_checked, &new_block);
     bool exact_replay_authenticated{false};
+    bool trusted_authority_terminal{false};
     bool terminal_failure{false};
     {
         LOCK(cs_main);
@@ -13119,6 +13117,15 @@ void PeerManagerImpl::ProcessBlockSync(NodeId nodeid, CNode* node, const std::sh
             index->IsValid(BLOCK_VALID_SCRIPTS);
         terminal_failure = index != nullptr &&
             (index->nStatus & BLOCK_FAILED_MASK) != 0;
+        const bool trusted_mirror{node::matmul_trusted::IsTrustedMirror()};
+        trusted_authority_terminal = index != nullptr && trusted_mirror &&
+            !terminal_failure &&
+            node::matmul_trusted::TrustedAuthorityRetainedBodyIsTerminal(
+                trusted_mirror,
+                m_chainman.ActiveChain().Contains(index),
+                (index->nStatus & BLOCK_HAVE_DATA) != 0,
+                index->IsValid(BLOCK_VALID_SCRIPTS), terminal_failure,
+                m_chainman.IndexHasTrustedMatMulAuthority(index));
         if (node::matmul_trusted::ShouldAdvanceBestKnownFromPeerBody(
                 index != nullptr, terminal_failure,
                 index != nullptr &&
@@ -13148,9 +13155,13 @@ void PeerManagerImpl::ProcessBlockSync(NodeId nodeid, CNode* node, const std::sh
     // A duplicate/no-op ProcessNewBlock result is not necessarily terminal:
     // another delivery can still own the asynchronous replay, and a local
     // accelerator failure deliberately leaves the candidate retryable. Keep
-    // that bounded observation until exact local authority succeeds, the
-    // index is permanently failed, or its TTL expires.
-    if (exact_replay_authenticated || terminal_failure) {
+    // that bounded observation until exact local authority succeeds, or, on a
+    // trusted mirror, until the block is already active, valid, and covered by
+    // trusted authority.
+    // Trusted terminal cleanup deliberately does not mint ExactReplay
+    // provenance. Permanent failure and the retained-body TTL are terminal too.
+    if (exact_replay_authenticated || trusted_authority_terminal ||
+        terminal_failure) {
         if (lifecycle_token) {
             m_matmul_block_lifecycle.Terminal(*lifecycle_token);
         } else {

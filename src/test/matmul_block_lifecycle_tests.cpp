@@ -139,7 +139,7 @@ BOOST_AUTO_TEST_CASE(repeated_deferral_terminal_requeues)
     BOOST_CHECK(!lifecycle.IsActive(hash, now + 2s));
 }
 
-BOOST_AUTO_TEST_CASE(idle_catchup_ignores_retry_cooldown)
+BOOST_AUTO_TEST_CASE(idle_scheduler_honors_retry_cooldown)
 {
     node::MatMulBlockLifecycle lifecycle{1, 100, 10min, 10min};
     const auto now{node::MatMulBlockLifecycle::Clock::now()};
@@ -148,7 +148,22 @@ BOOST_AUTO_TEST_CASE(idle_catchup_ignores_retry_cooldown)
     BOOST_REQUIRE(lifecycle.Retain(hash, Body(8, 50, now), now));
     BOOST_REQUIRE(lifecycle.RefreshRetry(hash, 60s, now));
     BOOST_CHECK(!lifecycle.NextRetry(uint256{}, now + 1s).has_value());
-    BOOST_CHECK(lifecycle.NextRetry(uint256{}, now + 1s, /*ignore_retry_delay=*/true).has_value());
+    BOOST_CHECK(lifecycle.NextRetry(uint256{}, now + 60s).has_value());
+}
+
+BOOST_AUTO_TEST_CASE(terminal_requeue_preserves_original_retention_ttl)
+{
+    node::MatMulBlockLifecycle lifecycle{1, 100, 10min, 10min};
+    const auto now{node::MatMulBlockLifecycle::Clock::now()};
+    const uint256 hash{
+        uint256::FromHex(std::string(63, '0') + "7").value()};
+    BOOST_REQUIRE(lifecycle.Retain(hash, Body(10, 50, now), now));
+    BOOST_REQUIRE(lifecycle.TerminalRequeue(hash, 60s, now + 9min));
+    BOOST_CHECK(lifecycle.HasRetainedBody(hash));
+
+    // Requeueing at minute nine must not restart the ten-minute capacity TTL.
+    BOOST_CHECK(!lifecycle.NextRetry(uint256{}, now + 10min + 1s).has_value());
+    BOOST_CHECK(!lifecycle.HasRetainedBody(hash));
 }
 
 BOOST_AUTO_TEST_CASE(capacity_does_not_evict_active_generation)

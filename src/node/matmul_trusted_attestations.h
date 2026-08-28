@@ -1890,6 +1890,22 @@ static constexpr auto GPU_RETAIN_ATTESTATION_RETRY{std::chrono::seconds{2}};
     return trusted_mirror && has_valid_gpu_attestation;
 }
 
+/** On a trusted mirror, a retained body needs no further network retry once it
+ *  is fully valid on the active chain and covered by trusted authority. This
+ *  is lifecycle terminality only: callers must not infer or persist
+ *  ExactReplay provenance from this result. */
+[[nodiscard]] inline bool TrustedAuthorityRetainedBodyIsTerminal(
+    bool trusted_mirror,
+    bool on_active_chain,
+    bool have_data,
+    bool valid_scripts,
+    bool failed,
+    bool has_trusted_authority)
+{
+    return trusted_mirror && on_active_chain && have_data && valid_scripts &&
+           !failed && has_trusted_authority;
+}
+
 /** GETMMATTEST historical regen / signer CUDA budget. Not validity.
  *
  *  Direct pin quorum may skip CUDA regen on any role (the pin already

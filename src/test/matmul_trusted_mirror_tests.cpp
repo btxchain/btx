@@ -3656,6 +3656,30 @@ BOOST_AUTO_TEST_CASE(blocklist_init_fail_closed_below_threshold)
                 std::string::npos);
 }
 
+BOOST_AUTO_TEST_CASE(trusted_active_retained_body_terminal_policy)
+{
+    using node::matmul_trusted::TrustedAuthorityRetainedBodyIsTerminal;
+
+    // Trusted cleanup is terminal without consulting or minting the local
+    // BLOCK_EXACT_REPLAY_VERIFIED provenance bit.
+    BOOST_CHECK(TrustedAuthorityRetainedBodyIsTerminal(
+        /*trusted_mirror=*/true, /*on_active_chain=*/true, /*have_data=*/true,
+        /*valid_scripts=*/true, /*failed=*/false,
+        /*has_trusted_authority=*/true));
+    BOOST_CHECK(!TrustedAuthorityRetainedBodyIsTerminal(
+        /*trusted_mirror=*/false, true, true, true, false, true));
+    BOOST_CHECK(!TrustedAuthorityRetainedBodyIsTerminal(
+        true, false, true, true, false, true));
+    BOOST_CHECK(!TrustedAuthorityRetainedBodyIsTerminal(
+        true, true, false, true, false, true));
+    BOOST_CHECK(!TrustedAuthorityRetainedBodyIsTerminal(
+        true, true, true, false, false, true));
+    BOOST_CHECK(!TrustedAuthorityRetainedBodyIsTerminal(
+        true, true, true, true, true, true));
+    BOOST_CHECK(!TrustedAuthorityRetainedBodyIsTerminal(
+        true, true, true, true, false, false));
+}
+
 BOOST_AUTO_TEST_CASE(matmulattestationserve_default_off_without_signer_or_trusted)
 {
     using node::matmul_trusted::DefaultMatMulAttestationServe;

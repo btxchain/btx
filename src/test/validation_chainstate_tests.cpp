@@ -18,6 +18,7 @@
 #include <sync.h>
 #include <test/util/chainstate.h>
 #include <test/util/coins.h>
+#include <test/util/logging.h>
 #include <test/util/random.h>
 #include <test/util/setup_common.h>
 #include <uint256.h>
@@ -34,6 +35,7 @@
 #include <optional>
 #include <chrono>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -3253,6 +3255,15 @@ BOOST_FIXTURE_TEST_CASE(chainstate_signer_progress_child_when_best_header_is_com
     BOOST_REQUIRE(ours_index != nullptr);
     BOOST_CHECK_EQUAL(ours_index->pprev, original_tip);
 
+    DebugLogHelper no_false_twin_warning{
+        "dual-quorum same-height twins",
+        [](const std::string* line) {
+            if (line != nullptr) {
+                throw std::runtime_error(
+                    "empty competing set logged a same-height twin");
+            }
+            return false;
+        }};
     {
         LOCK(::cs_main);
         chainman.SetBestHeader(fork_tip);
@@ -3371,6 +3382,7 @@ BOOST_FIXTURE_TEST_CASE(chainstate_signer_does_not_abandon_attested_tip_for_dual
                       signer, chain_id, replay_ctx, original_hash,
                       original_tip->nHeight) ==
                   matmul::trusted::AddResult::Accepted);
+    ASSERT_DEBUG_LOG("dual-quorum same-height twins");
     {
         LOCK(::cs_main);
         chainstate.ResetBlockFailureFlags(sibling);
