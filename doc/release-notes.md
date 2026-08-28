@@ -48,17 +48,18 @@ To receive release and update notifications, please subscribe to:
 
 # How to Upgrade
 
-Install 0.34.3. Two different `invalidateblock` operations exist. They
-use the same RPC and have **opposite** outcomes. Do not mix them.
+Install 0.34.3. Three different `invalidateblock` situations exist.
+Same RPC, three outcomes. One of them used to abort the node. Do not
+mix them.
 
-## Case A — fork-rejoin (0.34.1 split only): `invalidateblock` is required
+## Case A — fork-rejoin, full chainstate (0.34.1 split only): `invalidateblock` is required
 
-If you ran 0.34.1, binary replacement is not enough. That chainstate
-will not reorg onto the majority on restart. After installing 0.34.3,
-start the node, then invalidate **the first post-fork block**
-(reversible with `reconsiderblock`). Do not invalidate from a still-
-running 0.34.1 binary: that binary still rejects the majority chain.
-Upgrade first, then invalidate.
+If you ran 0.34.1 **without** an AssumeUTXO snapshot, binary replacement
+is not enough. That chainstate will not reorg onto the majority on
+restart. After installing 0.34.3, start the node, then invalidate
+**the first post-fork block** (reversible with `reconsiderblock`). Do
+not invalidate from a still-running 0.34.1 binary: that binary still
+rejects the majority chain. Upgrade first, then invalidate.
 
 ```
 btx-cli getchaintips
@@ -70,9 +71,34 @@ On the fork measured on macpro2 the first post-fork block is height
 `33c834f8056aca85a8591a304fe52affebe2770d6027e79845765547f8dfae82`.
 Your hash may differ; use `getchaintips`.
 
-If you never ran 0.34.1 (you stayed on the majority chain), skip Case A.
+If you never ran 0.34.1 (you stayed on the majority chain), skip Case A
+and Case B.
 
-## Case B — unauthenticated suffix (0.34.2 deadlock): `invalidateblock` is harmful
+## Case B — fork-rejoin, AssumeUTXO snapshot: do **not** `invalidateblock`
+
+If this node loaded the compiled AssumeUTXO snapshot at height 199300
+(`chainstate_snapshot/` exists), the first post-fork block 199299 sits
+**below** the snapshot base. That base has a block body but no undo
+data — it was never connected. `invalidateblock` of 199299 (and
+`reconsiderblock` of the majority chain) used to hit
+`DisconnectBlock: ReadBlockUndo nFile=-1`, then `Failed to disconnect
+block`, then abort. 0.34.3 refuses that reorg with a clear RPC error
+and leaves the node running.
+
+**Do not invalidateblock.** The background chainstate already follows
+the majority chain with complete undo data. Workaround, confirmed on a
+live miner:
+
+1. Stop `btxd` cleanly (`btx-cli stop`; wait for exit).
+2. Remove the `chainstate_snapshot/` directory from the datadir.
+3. Start once so the background chainstate becomes active. If prompted,
+   allow a shielded rebuild.
+4. Stop cleanly and start again.
+
+Then the node is on the majority chain. Case A `invalidateblock` is
+not needed after this fallback.
+
+## Case C — unauthenticated suffix (0.34.2 deadlock): `invalidateblock` is harmful
 
 If you ran 0.34.2 (or 0.34.3 before the admission fix) in
 `-matmulvalidation=consensus` and froze **exactly one block past the
@@ -149,6 +175,23 @@ earned `VERIFIED`, and the child stayed competing forever.
   is the shape **dixonping** asked for: one linear child, no sibling,
   authenticated work strictly less than chain work. It fails against
   tag v0.34.2 and passes here.
+
+## 0.34.3: assumeutxo `invalidateblock` no longer aborts the node
+
+A miner who rejoined the majority chain reported that
+`invalidateblock` of the first post-fork block (199299) on a node
+that had loaded the AssumeUTXO snapshot at 199300 crashed the
+process: `DisconnectBlock: ReadBlockUndo nFile=-1`, then `Failed to
+disconnect block`, then abort. The snapshot base has a body but no
+undo because it was never connected. `reconsiderblock` of the
+majority chain hit the same wall.
+
+0.34.3 refuses that reorg with a clear RPC error and leaves the node
+running. Regression:
+`validation_chainstatemanager_tests/snapshot_chainstate_refuses_invalidate_below_base`.
+The working recovery is Case B above: remove `chainstate_snapshot/`,
+let the background chainstate take over, shielded rebuild if
+prompted, then a clean start.
 
 ## 0.34.3: CUDA provenance
 

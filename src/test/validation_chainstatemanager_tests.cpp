@@ -230,6 +230,88 @@ BOOST_FIXTURE_TEST_CASE(chainstatemanager, TestChain100Setup)
     m_node.validation_signals->SyncWithValidationInterfaceQueue();
 }
 
+//! invalidateblock of a block at or below the assumeutxo base used to
+//! DisconnectTip the base (no undo, nFile=-1) and AbortNode. The 0.34.1
+//! fork-rejoin notes told operators to do exactly that. Refuse instead.
+BOOST_FIXTURE_TEST_CASE(snapshot_chainstate_refuses_invalidate_below_base, TestChain100Setup)
+{
+    ChainstateManager& manager = *m_node.chainman;
+    mineBlocks(10);
+    BOOST_CHECK_EQUAL(WITH_LOCK(manager.GetMutex(), return manager.ActiveHeight()), 110);
+
+    CBlockIndex* snapshot_base{WITH_LOCK(manager.GetMutex(), return manager.ActiveTip())};
+    BOOST_REQUIRE(snapshot_base != nullptr);
+    CBlockIndex* below_base{snapshot_base->pprev};
+    BOOST_REQUIRE(below_base != nullptr);
+
+    Chainstate& snapshot_cs = WITH_LOCK(::cs_main, return manager.ActivateExistingSnapshot(*snapshot_base->phashBlock));
+    snapshot_cs.InitCoinsDB(
+        /*cache_size_bytes=*/1 << 23, /*in_memory=*/true, /*should_wipe=*/false);
+    {
+        LOCK(::cs_main);
+        snapshot_cs.InitCoinsCache(1 << 23);
+        snapshot_cs.CoinsTip().SetBestBlock(snapshot_base->GetBlockHash());
+        for (Chainstate* cs : manager.GetAll()) {
+            cs->ClearBlockIndexCandidates();
+        }
+        snapshot_cs.LoadChainTip();
+        for (Chainstate* cs : manager.GetAll()) {
+            cs->PopulateBlockIndexCandidates();
+        }
+    }
+    BlockValidationState activate_state;
+    BOOST_REQUIRE(snapshot_cs.ActivateBestChain(activate_state, nullptr));
+    mineBlocks(1);
+    BOOST_REQUIRE_EQUAL(WITH_LOCK(manager.GetMutex(), return manager.ActiveHeight()), 111);
+    BOOST_REQUIRE_EQUAL(&snapshot_cs, &manager.ActiveChainstate());
+
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK(snapshot_cs.ReorgWouldDisconnectSnapshotBase(below_base));
+        BOOST_CHECK(!snapshot_cs.ReorgWouldDisconnectSnapshotBase(snapshot_base));
+        const CBlockIndex* child{manager.ActiveTip()};
+        BOOST_REQUIRE(child != nullptr);
+        BOOST_CHECK(!snapshot_cs.ReorgWouldDisconnectSnapshotBase(child));
+    }
+
+    const uint256 tip_before{
+        WITH_LOCK(manager.GetMutex(), return manager.ActiveTip()->GetBlockHash())};
+    const int height_before{WITH_LOCK(manager.GetMutex(), return manager.ActiveHeight())};
+
+    {
+        ASSERT_DEBUG_LOG("refusing to disconnect assumeutxo snapshot base");
+        BlockValidationState state;
+        BOOST_CHECK(!snapshot_cs.InvalidateBlock(state, below_base));
+        BOOST_CHECK(state.IsError());
+        BOOST_CHECK(state.GetRejectReason().find("assumeutxo snapshot base") != std::string::npos);
+    }
+    BOOST_CHECK_EQUAL(m_node.exit_status.load(), 0);
+    BOOST_CHECK_EQUAL(WITH_LOCK(manager.GetMutex(), return manager.ActiveHeight()), height_before);
+    BOOST_CHECK_EQUAL(WITH_LOCK(manager.GetMutex(), return manager.ActiveTip()->GetBlockHash()), tip_before);
+    BOOST_CHECK(manager.IsSnapshotActive());
+
+    {
+        ASSERT_DEBUG_LOG("refusing to disconnect assumeutxo snapshot base");
+        BlockValidationState state;
+        BOOST_CHECK(!snapshot_cs.InvalidateBlock(state, snapshot_base));
+        BOOST_CHECK(state.IsError());
+        BOOST_CHECK(state.GetRejectReason().find("assumeutxo snapshot base") != std::string::npos);
+    }
+    BOOST_CHECK_EQUAL(m_node.exit_status.load(), 0);
+    BOOST_CHECK_EQUAL(WITH_LOCK(manager.GetMutex(), return manager.ActiveHeight()), height_before);
+
+    CBlockIndex* child{WITH_LOCK(manager.GetMutex(), return manager.ActiveTip())};
+    BOOST_REQUIRE(child != nullptr);
+    BOOST_REQUIRE(child != snapshot_base);
+    BlockValidationState child_state;
+    BOOST_REQUIRE(snapshot_cs.InvalidateBlock(child_state, child));
+    BOOST_CHECK(child_state.IsValid());
+    BOOST_CHECK_EQUAL(WITH_LOCK(manager.GetMutex(), return manager.ActiveHeight()), 110);
+    BOOST_CHECK_EQUAL(m_node.exit_status.load(), 0);
+
+    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+}
+
 //! Test rebalancing the caches associated with each chainstate.
 BOOST_FIXTURE_TEST_CASE(chainstatemanager_rebalance_caches, TestChain100Setup)
 {

@@ -817,6 +817,16 @@ public:
     const CBlockIndex* SnapshotBase() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /**
+     * True when disconnecting from the current tip down to pindex_fork would
+     * DisconnectTip the assumeutxo snapshot base. That block's UTXO set starts
+     * there and has no ancestor state; it often has no undo (nFile=-1) because
+     * it was never ConnectBlock'd on this chainstate. Callers must refuse or
+     * park the reorg. Aborting is never the right response.
+     */
+    [[nodiscard]] bool ReorgWouldDisconnectSnapshotBase(const CBlockIndex* pindex_fork)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /**
      * The set of all CBlockIndex entries that have as much work as our current
      * tip or more, and transaction data needed to be validated (with
      * BLOCK_VALID_TRANSACTIONS for each block and its parents back to the

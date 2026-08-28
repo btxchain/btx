@@ -6843,6 +6843,64 @@ const CBlockIndex* Chainstate::SnapshotBase()
     return m_cached_snapshot_base;
 }
 
+bool Chainstate::ReorgWouldDisconnectSnapshotBase(const CBlockIndex* pindex_fork)
+{
+    AssertLockHeld(::cs_main);
+    const CBlockIndex* snap{SnapshotBase()};
+    if (snap == nullptr) return false;
+    if (!m_chain.Contains(snap)) return false;
+    if (pindex_fork == nullptr) return true;
+    return pindex_fork->nHeight < snap->nHeight;
+}
+
+namespace {
+//! Operator-facing reject reason for invalidateblock / reconsiderblock /
+//! ActivateBestChain when a reorg would disconnect the assumeutxo base.
+constexpr const char* SNAPSHOT_BASE_DISCONNECT_ERROR =
+    "Cannot reorg below the assumeutxo snapshot base; that block has no undo data. "
+    "Stop the node, remove the chainstate_snapshot directory, rebuild shielded state if prompted, "
+    "and start again so the background chainstate becomes active.";
+
+//! Park the competing branch so ABC does not retry the same disconnect, then
+//! set state.Error. Returns false. Never calls FatalError / AbortNode.
+bool ParkAndRefuseSnapshotBaseDisconnect(
+    Chainstate& chainstate,
+    BlockValidationState& state,
+    CBlockIndex* pindexMostWork,
+    const CBlockIndex* pindexFork,
+    const char* where)
+    EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+{
+    const CBlockIndex* snap{chainstate.SnapshotBase()};
+    LogWarning("%s: refusing reorg that would disconnect assumeutxo snapshot base "
+               "hash=%s height=%d (fork=%s height=%d, candidate=%s height=%d). "
+               "Remove chainstate_snapshot/ and restart onto the background chainstate. "
+               "Do not abort.\n",
+               where,
+               snap ? snap->GetBlockHash().ToString() : "none",
+               snap ? snap->nHeight : -1,
+               pindexFork ? pindexFork->GetBlockHash().ToString() : "none",
+               pindexFork ? pindexFork->nHeight : -1,
+               pindexMostWork ? pindexMostWork->GetBlockHash().ToString() : "none",
+               pindexMostWork ? pindexMostWork->nHeight : -1);
+    if (pindexMostWork != nullptr && pindexFork != nullptr) {
+        CBlockIndex* branch_root{pindexMostWork};
+        while (branch_root != nullptr && branch_root->pprev != pindexFork) {
+            branch_root = branch_root->pprev;
+        }
+        if (branch_root != nullptr && !chainstate.m_chain.Contains(branch_root)) {
+            if (chainstate.m_chainman.ParkReorgBranch(branch_root)) {
+                chainstate.EraseParkedBlockIndexCandidates();
+                if (chainstate.m_chain.Tip() != nullptr) {
+                    chainstate.setBlockIndexCandidates.insert(chainstate.m_chain.Tip());
+                }
+            }
+        }
+    }
+    return state.Error(SNAPSHOT_BASE_DISCONNECT_ERROR);
+}
+} // namespace
+
 void Chainstate::InitCoinsDB(
     size_t cache_size_bytes,
     bool in_memory,
@@ -9264,6 +9322,13 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
         LogError("DisconnectTip(): cannot disconnect genesis block\n");
         return FatalError(m_chainman.GetNotifications(), state, _("DisconnectTip: cannot disconnect genesis block."));
     }
+    if (const CBlockIndex* snap{SnapshotBase()}; snap != nullptr && pindexDelete == snap) {
+        // Snapshot base has a body but typically no undo (never connected on
+        // this chainstate). Refusing is recoverable; AbortNode is not.
+        LogWarning("DisconnectTip(): refusing to disconnect assumeutxo snapshot base %s height=%d\n",
+                   pindexDelete->GetBlockHash().ToString(), pindexDelete->nHeight);
+        return state.Error(SNAPSHOT_BASE_DISCONNECT_ERROR);
+    }
     // Read block from disk.
     std::shared_ptr<CBlock> pblock = std::make_shared<CBlock>();
     CBlock& block = *pblock;
@@ -10288,6 +10353,13 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
     const CBlockIndex* pindexFork = m_chain.FindFork(pindexMostWork);
     const Consensus::Params& consensus_params = m_chainman.GetConsensus();
 
+    // AssumeUTXO: a reorg whose fork is below the snapshot base cannot be
+    // applied — the base has no undo. Refuse/park. Never FatalError.
+    if (ReorgWouldDisconnectSnapshotBase(pindexFork)) {
+        return ParkAndRefuseSnapshotBaseDisconnect(
+            *this, state, pindexMostWork, pindexFork, "ActivateBestChainStep");
+    }
+
     // ---------------------------------------------------------------------
     // Deep-reorg defense (issue: "no reorg-depth limit"). PER-NODE fork-choice
     // policy only; parking does not make the candidate block intrinsically
@@ -10470,6 +10542,13 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
             // This is likely a fatal error, but keep the mempool consistent,
             // just in case. Only remove from the mempool in this case.
             MaybeUpdateMempoolForReorg(disconnectpool, false);
+
+            // Missing undo on the assumeutxo snapshot base is a reorg we can
+            // decline, not a corrupted local database. AbortNode is wrong.
+            if (SnapshotBase() != nullptr && m_chain.Tip() == SnapshotBase()) {
+                return ParkAndRefuseSnapshotBaseDisconnect(
+                    *this, state, pindexMostWork, pindexFork, "ActivateBestChainStep");
+            }
 
             // If we're unable to disconnect a block during normal operation,
             // then that is a failure of our local system -- we should abort
@@ -10980,6 +11059,24 @@ bool Chainstate::InvalidateBlock(BlockValidationState& state, CBlockIndex* pinde
     // running, as that could cause the tip to change while we disconnect
     // blocks.
     WAIT_LOCK(m_chainstate_mutex, chainstate_lock);
+
+    {
+        LOCK(cs_main);
+        // Invalidating an ancestor of the assumeutxo base (or the base itself)
+        // would DisconnectTip that base. The 0.34.1 fork-rejoin notes told
+        // operators to invalidateblock 199299 while a 199300 snapshot was
+        // loaded; ReadBlockUndo nFile=-1 then AbortNode. Refuse instead.
+        if (m_chain.Contains(pindex) && ReorgWouldDisconnectSnapshotBase(pindex->pprev)) {
+            const CBlockIndex* snap{SnapshotBase()};
+            LogWarning("InvalidateBlock: refusing to disconnect assumeutxo snapshot base "
+                       "hash=%s height=%d (invalidate target hash=%s height=%d). "
+                       "Remove chainstate_snapshot/ and restart onto the background chainstate.\n",
+                       snap ? snap->GetBlockHash().ToString() : "none",
+                       snap ? snap->nHeight : -1,
+                       pindex->GetBlockHash().ToString(), pindex->nHeight);
+            return state.Error(SNAPSHOT_BASE_DISCONNECT_ERROR);
+        }
+    }
 
     // We'll be acquiring and releasing cs_main below, to allow the validation
     // callbacks to run. However, we should keep the block index in a

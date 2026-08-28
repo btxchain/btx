@@ -2441,7 +2441,10 @@ void InvalidateBlock(ChainstateManager& chainman, const uint256 block_hash) {
 static RPCHelpMan invalidateblock()
 {
     return RPCHelpMan{"invalidateblock",
-                "\nPermanently marks a block as invalid, as if it violated a consensus rule.\n",
+                "\nPermanently marks a block as invalid, as if it violated a consensus rule.\n"
+                "On an assumeutxo snapshot chainstate this RPC is refused (the node stays "
+                "running) if the reorg would disconnect the snapshot base — that block has "
+                "no undo data. Remove the chainstate_snapshot directory and restart instead.\n",
                 {
                     {"blockhash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "the hash of the block to mark as invalid"},
                 },
@@ -2492,7 +2495,10 @@ static RPCHelpMan reconsiderblock()
 {
     return RPCHelpMan{"reconsiderblock",
                 "\nRemoves invalidity status of a block, its ancestors and its descendants, reconsider them for activation.\n"
-                "This can be used to undo the effects of invalidateblock.\n",
+                "This can be used to undo the effects of invalidateblock.\n"
+                "On an assumeutxo snapshot chainstate a reorg whose fork is below the "
+                "snapshot base is refused (the node stays running). Remove the "
+                "chainstate_snapshot directory and restart instead.\n",
                 {
                     {"blockhash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "the hash of the block to reconsider"},
                 },
