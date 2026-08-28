@@ -321,6 +321,16 @@ public:
      *  (g_msgproc_mutex). Tests must not hold that mutex. */
     virtual void RetryMatMulDeferredBodiesForTest() = 0;
 
+    /** Session-lived: this address already failed a low-work headers
+     *  presync. A reconnect must not reclaim the scarce initial-sync slot
+     *  (MendeMatthias / v0.34.4). */
+    virtual void NoteLowWorkHeadersSyncFailureForTest(const CNetAddr& addr)
+        EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex) = 0;
+    /** Pretend Checkpoints().GetHeight() is this value. Regtest last
+     *  checkpoint is 0, which would otherwise make height preference a
+     *  no-op. Cleared by ResetMatMulVerifyAdmissionForTest. */
+    virtual void SetInitialHeadersSyncAnchorForTest(int32_t height) = 0;
+
     /**
      * Evict extra outbound peers. If we think our tip may be stale, connect to an extra outbound.
      * Public for unit testing.

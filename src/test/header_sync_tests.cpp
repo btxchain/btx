@@ -101,4 +101,49 @@ BOOST_AUTO_TEST_CASE(must_probe_table)
     BOOST_CHECK(node::HeaderSyncMustProbe(199310, 199310, true, true, false));
 }
 
+BOOST_AUTO_TEST_CASE(initial_sync_prefers_checkpoint_anchor_and_skips_low_work_failures)
+{
+    // MendeMatthias / v0.34.4: mainnet checkpoint 186000 is the
+    // nMinimumChainWork IBD anchor. Peers at 128530 / 185109 / 189611 must
+    // not take the single nSyncStarted slot when a 200131 peer is live.
+    constexpr int32_t kAnchor{186000};
+    BOOST_CHECK(node::InitialHeadersSyncPeerMeetsAnchor(200131, kAnchor));
+    BOOST_CHECK(node::InitialHeadersSyncPeerMeetsAnchor(189611, kAnchor));
+    BOOST_CHECK(!node::InitialHeadersSyncPeerMeetsAnchor(185109, kAnchor));
+    BOOST_CHECK(!node::InitialHeadersSyncPeerMeetsAnchor(128530, kAnchor));
+    BOOST_CHECK(node::InitialHeadersSyncPeerMeetsAnchor(186000, kAnchor));
+    BOOST_CHECK(node::InitialHeadersSyncPeerMeetsAnchor(0, /*regtest*/ 0));
+    BOOST_CHECK(node::InitialHeadersSyncPeerMeetsAnchor(-1, 0));
+
+    BOOST_CHECK(node::InitialHeadersSyncPeerPreferred(200131, kAnchor, false));
+    BOOST_CHECK(node::InitialHeadersSyncPeerPreferred(189611, kAnchor, false));
+    BOOST_CHECK(!node::InitialHeadersSyncPeerPreferred(189611, kAnchor, true));
+    BOOST_CHECK(!node::InitialHeadersSyncPeerPreferred(200131, kAnchor, true));
+    BOOST_CHECK(!node::InitialHeadersSyncPeerPreferred(128530, kAnchor, false));
+
+    // Preferred peer connected: a short peer must not claim.
+    BOOST_CHECK(!node::MayClaimInitialHeadersSyncSlot(
+        /*slot_free=*/true, /*sync=*/true, /*peer_preferred=*/false,
+        /*any_preferred=*/true));
+    // No preferred peer connected: a short peer may still claim so IBD
+    // cannot deadlock.
+    BOOST_CHECK(node::MayClaimInitialHeadersSyncSlot(
+        true, true, /*peer_preferred=*/false, /*any_preferred=*/false));
+    BOOST_CHECK(node::MayClaimInitialHeadersSyncSlot(
+        true, true, /*peer_preferred=*/true, /*any_preferred=*/true));
+    BOOST_CHECK(!node::MayClaimInitialHeadersSyncSlot(
+        /*slot_free=*/false, true, true, true));
+    BOOST_CHECK(!node::MayClaimInitialHeadersSyncSlot(
+        true, /*sync=*/false, true, true));
+
+    // A 200131 peer must take the slot from a 128530 holder.
+    BOOST_CHECK(node::ShouldYieldInitialHeadersSyncSlot(
+        /*holder_has_slot=*/true, /*holder_preferred=*/false,
+        /*challenger_preferred=*/true));
+    BOOST_CHECK(!node::ShouldYieldInitialHeadersSyncSlot(
+        true, /*holder_preferred=*/true, true));
+    BOOST_CHECK(!node::ShouldYieldInitialHeadersSyncSlot(
+        false, false, true));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

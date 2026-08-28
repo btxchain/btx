@@ -116,6 +116,59 @@ namespace node {
     return known_not_ahead();
 }
 
+/**
+ * Mainnet checkpoint 186000 is the nMinimumChainWork IBD anchor. A peer
+ * advertising below it cannot finish HeadersSyncState presync past that
+ * work, so it burns the single nSyncStarted slot and disconnects
+ * (MendeMatthias / v0.34.4: 128530 / 185109 / 189611 got 23–29 MB of
+ * getheaders while 200131 got one 90-byte request).
+ *
+ * Anchor height <= 0 (regtest, empty checkpoints) treats every peer as
+ * meeting the bar.
+ */
+[[nodiscard]] inline bool InitialHeadersSyncPeerMeetsAnchor(
+    int32_t peer_starting_height, int32_t checkpoint_anchor_height)
+{
+    if (checkpoint_anchor_height <= 0) return true;
+    return peer_starting_height >= checkpoint_anchor_height;
+}
+
+[[nodiscard]] inline bool InitialHeadersSyncPeerPreferred(
+    int32_t peer_starting_height,
+    int32_t checkpoint_anchor_height,
+    bool peer_failed_low_work_headers_sync)
+{
+    if (peer_failed_low_work_headers_sync) return false;
+    return InitialHeadersSyncPeerMeetsAnchor(peer_starting_height,
+                                             checkpoint_anchor_height);
+}
+
+/** Claim the scarce initial IBD headers-sync slot (nSyncStarted == 0).
+ *  When any connected peer is preferred, a non-preferred peer must not
+ *  take it. When none is connected, a non-preferred peer may still claim
+ *  so header sync cannot deadlock. */
+[[nodiscard]] inline bool MayClaimInitialHeadersSyncSlot(
+    bool slot_free,
+    bool sync_blocks_and_headers_from_peer,
+    bool peer_preferred,
+    bool any_preferred_peer_connected)
+{
+    if (!slot_free || !sync_blocks_and_headers_from_peer) return false;
+    if (any_preferred_peer_connected && !peer_preferred) return false;
+    return true;
+}
+
+/** A preferred peer may take the slot from a non-preferred holder so a
+ *  short-chain presync cannot occupy the only IBD slot while a
+ *  checkpoint-height peer is live. */
+[[nodiscard]] inline bool ShouldYieldInitialHeadersSyncSlot(
+    bool holder_has_slot,
+    bool holder_preferred,
+    bool challenger_preferred)
+{
+    return holder_has_slot && !holder_preferred && challenger_preferred;
+}
+
 } // namespace node
 
 #endif // BTX_NODE_HEADER_SYNC_H

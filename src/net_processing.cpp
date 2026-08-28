@@ -1101,6 +1101,12 @@ struct CNodeState {
     /** VERSION nStartingHeight. -1 until handshake. Used to decide whether
      *  a preferred archive actually had the catch-up suffix at connect. */
     int m_starting_height{-1};
+    /** Remote address, copied from Peer so initial-sync preference can
+     *  consult the session-lived low-work failure set without GetPeerRef. */
+    CNetAddr m_addr{};
+    /** NODE_NETWORK or NODE_NETWORK_LIMITED from VERSION. Discovery-only
+     *  peers must not count as "preferred connected" for the IBD slot. */
+    bool m_can_serve_blocks{false};
     /** Configured NoBan / addnode. Combined with the archive bit these peers
      *  are treated as attestation-authority for download/header-follow even
      *  before a recent MMATTEST (chicken-egg: the signer cannot prove until
@@ -1297,6 +1303,8 @@ public:
         }
         ResetMatMulEncDrVerdictsForTest();
         ResetMatMulRCWinnerAuthorityForTest();
+        m_low_work_headers_failed_addrs.clear();
+        m_initial_sync_anchor_override_for_test.reset();
     }
     bool HasMatMulRetainedBodyForTest(const uint256& hash) const override
     {
@@ -1310,6 +1318,15 @@ public:
         EXCLUSIVE_LOCKS_REQUIRED(!cs_main, !NetEventsInterface::g_msgproc_mutex)
     {
         RetryMatMulDeferredBodies();
+    }
+    void NoteLowWorkHeadersSyncFailureForTest(const CNetAddr& addr) override
+        EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex)
+    {
+        m_low_work_headers_failed_addrs.insert(addr);
+    }
+    void SetInitialHeadersSyncAnchorForTest(int32_t height) override
+    {
+        m_initial_sync_anchor_override_for_test = height;
     }
     void ProcessMessage(CNode& pfrom, const std::string& msg_type, DataStream& vRecv,
                         const std::chrono::microseconds time_received, const std::atomic<bool>& interruptMsgProc) override
@@ -1347,6 +1364,14 @@ private:
     /** Insert m_node_states if InitializeNode deferred it to avoid blocking
      *  the net thread on cs_main. */
     void EnsureNodeState(Peer& peer) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
+    [[nodiscard]] int32_t InitialHeadersSyncAnchorHeight() const;
+    [[nodiscard]] bool PeerFailedLowWorkHeadersSync(const CNetAddr& addr) const
+        EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
+    [[nodiscard]] bool AnyPreferredInitialHeadersSyncPeer(int32_t anchor) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main, g_msgproc_mutex);
+    void YieldNonPreferredInitialHeadersSyncSlots(int32_t anchor, NodeId challenger)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main, g_msgproc_mutex, !m_peer_mutex);
 
     /** Mark a peer as misbehaving, which will cause it to be disconnected and its
      *  address discouraged. */
@@ -1700,6 +1725,14 @@ private:
 
     /** Number of nodes with fSyncStarted. */
     int nSyncStarted GUARDED_BY(cs_main) = 0;
+
+    /** Addresses that already failed a low-work HeadersSyncState presync
+     *  this session. Survives disconnect so a reconnect cannot reclaim the
+     *  single nSyncStarted IBD slot (MendeMatthias / v0.34.4: 128530 /
+     *  185109 / 189611 burned the slot below the height-186000
+     *  nMinimumChainWork checkpoint while 200131 sat idle). */
+    std::set<CNetAddr> m_low_work_headers_failed_addrs;
+    std::optional<int32_t> m_initial_sync_anchor_override_for_test;
 
     /** Hash of the last block we received via INV */
     uint256 m_last_block_inv_triggering_headers_sync GUARDED_BY(g_msgproc_mutex){};
@@ -5403,6 +5436,7 @@ void PeerManagerImpl::InitializeNode(const CNode& node, ServiceFlags our_service
             it->second.m_noban = peer->m_init_noban;
             it->second.m_manual = peer->m_init_manual;
             it->second.m_inbound = peer->m_init_inbound;
+            it->second.m_addr = peer->m_addr;
             peer->m_node_state_pending.store(false, std::memory_order_release);
         } else {
             peer->m_node_state_pending.store(true, std::memory_order_release);
@@ -5428,7 +5462,63 @@ void PeerManagerImpl::EnsureNodeState(Peer& peer)
     it->second.m_noban = peer.m_init_noban;
     it->second.m_manual = peer.m_init_manual;
     it->second.m_inbound = peer.m_init_inbound;
+    it->second.m_addr = peer.m_addr;
     peer.m_node_state_pending.store(false, std::memory_order_release);
+}
+
+int32_t PeerManagerImpl::InitialHeadersSyncAnchorHeight() const
+{
+    return m_initial_sync_anchor_override_for_test.value_or(
+        m_chainparams.Checkpoints().GetHeight());
+}
+
+bool PeerManagerImpl::PeerFailedLowWorkHeadersSync(const CNetAddr& addr) const
+{
+    AssertLockHeld(g_msgproc_mutex);
+    return m_low_work_headers_failed_addrs.count(addr) != 0;
+}
+
+bool PeerManagerImpl::AnyPreferredInitialHeadersSyncPeer(int32_t anchor) const
+{
+    AssertLockHeld(cs_main);
+    AssertLockHeld(g_msgproc_mutex);
+    for (const auto& [id, st] : m_node_states) {
+        (void)id;
+        if (!st.m_can_serve_blocks) continue;
+        if (node::InitialHeadersSyncPeerPreferred(
+                st.m_starting_height, anchor,
+                PeerFailedLowWorkHeadersSync(st.m_addr))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void PeerManagerImpl::YieldNonPreferredInitialHeadersSyncSlots(int32_t anchor, NodeId challenger)
+{
+    AssertLockHeld(cs_main);
+    AssertLockHeld(g_msgproc_mutex);
+    for (auto& [id, st] : m_node_states) {
+        if (id == challenger) continue;
+        if (!st.fSyncStarted) continue;
+        const bool holder_preferred{node::InitialHeadersSyncPeerPreferred(
+            st.m_starting_height, anchor,
+            PeerFailedLowWorkHeadersSync(st.m_addr))};
+        if (!node::ShouldYieldInitialHeadersSyncSlot(
+                /*holder_has_slot=*/true, holder_preferred,
+                /*challenger_preferred=*/true)) {
+            continue;
+        }
+        st.fSyncStarted = false;
+        if (nSyncStarted > 0) --nSyncStarted;
+        if (PeerRef yielded{GetPeerRef(id)}) {
+            yielded->m_headers_sync_timeout = 0us;
+            LOCK(yielded->m_headers_sync_mutex);
+            yielded->m_headers_sync.reset();
+        }
+        LogInfo("yielding initial headers-sync slot peer=%d to checkpoint-height peer=%d\n",
+                id, challenger);
+    }
 }
 
 void PeerManagerImpl::ReattemptInitialBroadcast(CScheduler& scheduler)
@@ -8227,6 +8317,9 @@ bool PeerManagerImpl::IsContinuationOfLowWorkHeadersSync(Peer& peer, CNode& pfro
     if (peer.m_headers_sync) {
         auto result = peer.m_headers_sync->ProcessNextHeaders(headers, headers.size() == m_opts.max_headers_result);
         if (!result.success) {
+            // Reconnect of the same address must not reclaim the scarce
+            // IBD headers-sync slot (MendeMatthias / v0.34.4).
+            m_low_work_headers_failed_addrs.insert(pfrom.addr);
             LogDebug(BCLog::NET, "Disconnecting peer=%d after low-work headers sync failure\n", pfrom.GetId());
             headers.clear();
             pfrom.fDisconnect = true;
@@ -13804,6 +13897,8 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 NODE_MATMUL_TRUSTED_MIRROR;
             state->m_node_network =
                 (nServices & NODE_NETWORK) == NODE_NETWORK;
+            state->m_can_serve_blocks = CanServeBlocks(*peer);
+            state->m_addr = peer->m_addr;
             state->m_starting_height = starting_height;
             MaybeSeedGpuSignedFrontierBestKnown(pfrom.GetId(), *state);
             MaybeSeedLocalSignerLostTwinBestKnown(pfrom.GetId(), *state);
@@ -19041,9 +19136,41 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
             // (CanServeBlocks). Nesting it here made HeaderSyncMustProbe's
             // true result unreachable (live 2026-08-28: getheaders=0 against
             // peers advertising hundreds ahead).
+            //
+            // Initial-sync peer selection (MendeMatthias / v0.34.4): a fresh
+            // node at headers=0 gave the scarce nSyncStarted slot to peers
+            // parked at 128530 / 185109 / 189611 (23–29 MB of headers) while
+            // the peer advertising 200131 got one 90-byte getheaders. Presync
+            // ended below the height-186000 nMinimumChainWork checkpoint,
+            // failed low-work, disconnected, and restarted. Prefer VERSION
+            // height at or above the checkpoint; de-prioritize addresses that
+            // already failed that presync. Extra near-tip slots stay ungated.
             const bool near_tip_headers{!tip_is_stale};
+            const int32_t initial_sync_anchor{InitialHeadersSyncAnchorHeight()};
+            const bool peer_preferred{node::InitialHeadersSyncPeerPreferred(
+                peer->m_starting_height.load(),
+                initial_sync_anchor,
+                PeerFailedLowWorkHeadersSync(peer->m_addr))};
+            if (peer_preferred && !near_tip_headers) {
+                YieldNonPreferredInitialHeadersSyncSlots(initial_sync_anchor,
+                                                         pto->GetId());
+            }
+            const bool any_preferred{
+                AnyPreferredInitialHeadersSyncPeer(initial_sync_anchor)};
             const bool may_claim_initial_sync_slot{
-                nSyncStarted == 0 && sync_blocks_and_headers_from_peer};
+                node::MayClaimInitialHeadersSyncSlot(
+                    nSyncStarted == 0,
+                    sync_blocks_and_headers_from_peer,
+                    peer_preferred,
+                    any_preferred)};
+            if (!may_claim_initial_sync_slot && !near_tip_headers &&
+                sync_blocks_and_headers_from_peer && any_preferred &&
+                !peer_preferred) {
+                LogDebug(BCLog::NET,
+                         "skipping initial headers-sync slot for peer=%d "
+                         "startheight=%d (prefer checkpoint-height peers)\n",
+                         pto->GetId(), peer->m_starting_height.load());
+            }
             if (may_claim_initial_sync_slot || near_tip_headers) {
                 const CBlockIndex* pindexStart = HeaderSyncLocatorIndex(m_chainman);
                 /* If possible, start at the block preceding the currently

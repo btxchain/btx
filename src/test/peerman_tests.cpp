@@ -7814,6 +7814,162 @@ BOOST_AUTO_TEST_CASE(invalidateblock_moves_best_header_off_dead_branch_and_gethe
     node::matmul_trusted::ResetForTest();
 }
 
+BOOST_AUTO_TEST_CASE(initial_headers_sync_prefers_checkpoint_height_peer)
+{
+    // MendeMatthias / sealed v0.34.4: a fresh node with the network at
+    // 200131 gave the scarce IBD slot to peers at 128530 / 185109 / 189611
+    // (7898–9850 bytes of getheaders, 23–29 MB back) while the tip
+    // advertiser received 90 bytes and one request. Presync ended below
+    // checkpoint 186000, failed low-work, disconnected, restarted.
+    // Regtest last checkpoint is 0; inject the mainnet anchor.
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    node::matmul_trusted::ResetForTest();
+    ResetSharedPeermanFixture(m_node);
+    PeerManager& peerman{*Assert(m_node.peerman)};
+    ConnmanTestMsg& connman{static_cast<ConnmanTestMsg&>(*m_node.connman)};
+    const CBlockIndex* tip{
+        WITH_LOCK(::cs_main, return m_node.chainman->ActiveChain().Tip())};
+    BOOST_REQUIRE(tip != nullptr);
+    SetMockTime(std::chrono::seconds{tip->GetBlockTime()} + std::chrono::hours{48});
+    peerman.SetInitialHeadersSyncAnchorForTest(186000);
+
+    const ServiceFlags services{ServiceFlags(
+        NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS)};
+    const CAddress addr_short{
+        LookupNumeric("192.0.2.11", Params().GetDefaultPort()), NODE_NONE};
+    const CAddress addr_tall{
+        LookupNumeric("192.0.2.12", Params().GetDefaultPort()), NODE_NONE};
+    CNode short_peer{/*id=*/5400, /*sock=*/nullptr, addr_short,
+                     /*nKeyedNetGroupIn=*/5400, /*nLocalHostNonceIn=*/0,
+                     CAddress{}, /*addrNameIn=*/"initial-sync-short",
+                     ConnectionType::OUTBOUND_FULL_RELAY,
+                     /*inbound_onion=*/false, /*network_key=*/0};
+    CNode tall_peer{/*id=*/5401, /*sock=*/nullptr, addr_tall,
+                    /*nKeyedNetGroupIn=*/5401, /*nLocalHostNonceIn=*/0,
+                    CAddress{}, /*addrNameIn=*/"initial-sync-tall",
+                    ConnectionType::OUTBOUND_FULL_RELAY,
+                    /*inbound_onion=*/false, /*network_key=*/0};
+    struct FinalizePeers {
+        PeerManager& peerman;
+        CNode& a;
+        CNode& b;
+        ~FinalizePeers()
+        {
+            peerman.FinalizeNode(a);
+            peerman.FinalizeNode(b);
+        }
+    } finalize{peerman, short_peer, tall_peer};
+
+    connman.Handshake(short_peer, /*successfully_connected=*/true, services,
+                      services, PROTOCOL_VERSION, /*relay_txs=*/true,
+                      /*starting_height=*/128530);
+    CNodeStateStats short_stats;
+    BOOST_REQUIRE(peerman.GetNodeStateStats(short_peer.GetId(), short_stats));
+    BOOST_REQUIRE(short_stats.m_headers_sync_started);
+    BOOST_REQUIRE_EQUAL(short_stats.m_total_headers_sync_peer_count, 1);
+
+    connman.Handshake(tall_peer, /*successfully_connected=*/true, services,
+                      services, PROTOCOL_VERSION, /*relay_txs=*/true,
+                      /*starting_height=*/200131);
+    BOOST_REQUIRE(peerman.GetNodeStateStats(short_peer.GetId(), short_stats));
+    CNodeStateStats tall_stats;
+    BOOST_REQUIRE(peerman.GetNodeStateStats(tall_peer.GetId(), tall_stats));
+    BOOST_CHECK_MESSAGE(
+        !short_stats.m_headers_sync_started,
+        "checkpoint-height peer must take the IBD slot from a short presync");
+    BOOST_CHECK(tall_stats.m_headers_sync_started);
+    BOOST_CHECK_EQUAL(tall_stats.m_total_headers_sync_peer_count, 1);
+}
+
+BOOST_AUTO_TEST_CASE(initial_headers_sync_deprioritizes_low_work_failure)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    node::matmul_trusted::ResetForTest();
+    ResetSharedPeermanFixture(m_node);
+    PeerManager& peerman{*Assert(m_node.peerman)};
+    ConnmanTestMsg& connman{static_cast<ConnmanTestMsg&>(*m_node.connman)};
+    const CBlockIndex* tip{
+        WITH_LOCK(::cs_main, return m_node.chainman->ActiveChain().Tip())};
+    BOOST_REQUIRE(tip != nullptr);
+    SetMockTime(std::chrono::seconds{tip->GetBlockTime()} + std::chrono::hours{48});
+
+    const ServiceFlags services{ServiceFlags(
+        NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS)};
+    const CAddress addr_failed{
+        LookupNumeric("192.0.2.21", Params().GetDefaultPort()), NODE_NONE};
+    const CAddress addr_ok{
+        LookupNumeric("192.0.2.22", Params().GetDefaultPort()), NODE_NONE};
+    CNode failed_peer{/*id=*/5410, /*sock=*/nullptr, addr_failed,
+                      /*nKeyedNetGroupIn=*/5410, /*nLocalHostNonceIn=*/0,
+                      CAddress{}, /*addrNameIn=*/"initial-sync-low-work",
+                      ConnectionType::OUTBOUND_FULL_RELAY,
+                      /*inbound_onion=*/false, /*network_key=*/0};
+    CNode ok_peer{/*id=*/5411, /*sock=*/nullptr, addr_ok,
+                  /*nKeyedNetGroupIn=*/5411, /*nLocalHostNonceIn=*/0,
+                  CAddress{}, /*addrNameIn=*/"initial-sync-ok",
+                  ConnectionType::OUTBOUND_FULL_RELAY,
+                  /*inbound_onion=*/false, /*network_key=*/0};
+    struct FinalizePeers {
+        PeerManager& peerman;
+        CNode& a;
+        CNode& b;
+        ~FinalizePeers()
+        {
+            peerman.FinalizeNode(a);
+            peerman.FinalizeNode(b);
+        }
+    } finalize{peerman, failed_peer, ok_peer};
+
+    connman.Handshake(failed_peer, /*successfully_connected=*/true, services,
+                      services, PROTOCOL_VERSION, /*relay_txs=*/true,
+                      /*starting_height=*/200131);
+    CNodeStateStats failed_stats;
+    BOOST_REQUIRE(peerman.GetNodeStateStats(failed_peer.GetId(), failed_stats));
+    BOOST_REQUIRE(failed_stats.m_headers_sync_started);
+    peerman.NoteLowWorkHeadersSyncFailureForTest(failed_peer.addr);
+
+    connman.Handshake(ok_peer, /*successfully_connected=*/true, services,
+                      services, PROTOCOL_VERSION, /*relay_txs=*/true,
+                      /*starting_height=*/200131);
+    BOOST_REQUIRE(peerman.GetNodeStateStats(failed_peer.GetId(), failed_stats));
+    CNodeStateStats ok_stats;
+    BOOST_REQUIRE(peerman.GetNodeStateStats(ok_peer.GetId(), ok_stats));
+    BOOST_CHECK_MESSAGE(
+        !failed_stats.m_headers_sync_started,
+        "a peer that already failed low-work presync must yield the IBD slot");
+    BOOST_CHECK(ok_stats.m_headers_sync_started);
+    BOOST_CHECK_EQUAL(ok_stats.m_total_headers_sync_peer_count, 1);
+}
+
+BOOST_AUTO_TEST_CASE(recalculate_best_header_runs_when_unconfigured)
+{
+    // Independent validators: -matmulvalidation=consensus and no
+    // -matmultrustedpubkey. IsConfigured() is false; startup and
+    // ActivateSnapshot must still call RecalculateBestHeader, the only
+    // path that can lower m_best_header (MendeMatthias).
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    node::matmul_trusted::ResetForTest();
+    BOOST_REQUIRE(!node::matmul_trusted::IsConfigured());
+    ResetSharedPeermanFixture(m_node);
+    ChainstateManager& chainman{*Assert(m_node.chainman)};
+    const CBlockIndex* tip{
+        WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip())};
+    BOOST_REQUIRE(tip != nullptr);
+    if (tip->pprev == nullptr) {
+        mineBlock(m_node, std::chrono::seconds{tip->GetBlockTime() + 1});
+        tip = WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip());
+        BOOST_REQUIRE(tip != nullptr);
+    }
+    BOOST_REQUIRE(tip->pprev != nullptr);
+    WITH_LOCK(::cs_main, {
+        chainman.SetBestHeader(const_cast<CBlockIndex*>(tip->pprev));
+        BOOST_CHECK_LT(chainman.m_best_header->nHeight, tip->nHeight);
+        chainman.RecalculateBestHeader();
+        BOOST_REQUIRE(chainman.m_best_header != nullptr);
+        BOOST_CHECK_GE(chainman.m_best_header->nHeight, tip->nHeight);
+    });
+}
+
 BOOST_AUTO_TEST_SUITE_END()
 
 // Fresh RegTestingSetup is genesis (tip=0), matching the 2026-08-26 field
