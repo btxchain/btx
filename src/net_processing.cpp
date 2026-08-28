@@ -10282,11 +10282,17 @@ void PeerManagerImpl::MaybeStartMatMulRCHeaderVerification(
             return;
         }
         const CBlockIndex* parent{index.pprev};
-        if (parent == nullptr ||
+        if (parent == nullptr) return;
+        authenticated_tip_child = parent == active_tip;
+        // v0.34.3 W1a: a direct child of the active ExactReplay-connected
+        // tip is the followed chain even while authenticated work lags. Keep
+        // the historical authenticated-work gate for non-active branches,
+        // but do not make header-first validation of the live successor wait
+        // for an attestation that may never arrive.
+        if (!authenticated_tip_child &&
             parent->nAuthenticatedChainWork != parent->nChainWork) {
             return;
         }
-        authenticated_tip_child = parent == active_tip;
         const CBlockIndex* peer_best{
             State(node.GetId()) != nullptr
                 ? State(node.GetId())->pindexBestKnownBlock
@@ -12074,15 +12080,16 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                             block->hashPrevBlock)};
                     const CBlockIndex* active_tip{
                         m_chainman.ActiveTip()};
-                    if (parent != nullptr &&
-                        parent->nAuthenticatedChainWork ==
-                            parent->nChainWork) {
+                    if (parent != nullptr) {
                         if (parent == active_tip) {
                             // Complete-body admission already ran CheckBlock,
                             // AcceptBlockHeader, and the contextual body-only
                             // checks. Preserve the sibling-flood guard by
                             // granting immediate mining preemption only to the
-                            // unique followed child of this authenticated tip.
+                            // unique followed child of the live tip. W1a does
+                            // not require authenticated work to equal chainwork
+                            // here: every connected ancestor already passed
+                            // ExactReplay, PoW, and script validation.
                             const bool prechecked{
                                 matmul_admission.state !=
                                 MatMulBlockAdmission::State::NOT_PRECHECKED};
@@ -12094,7 +12101,8 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                                       ActiveTipValidation
                                 : node::MatMulVerifyWorker::Priority::
                                       AuthenticatedTipChild;
-                        } else {
+                        } else if (parent->nAuthenticatedChainWork ==
+                                   parent->nChainWork) {
                             priority = node::MatMulVerifyWorker::Priority::
                                 CompetingBranch;
                         }
@@ -16147,8 +16155,9 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                         active_tip->nHeight + MATMUL_RC_NEAR_TIP_DEPTH};
                 const bool eligible_parent{
                     pindex->pprev != nullptr &&
-                    pindex->pprev->nAuthenticatedChainWork ==
-                        pindex->pprev->nChainWork};
+                    (pindex->pprev == active_tip ||
+                     pindex->pprev->nAuthenticatedChainWork ==
+                         pindex->pprev->nChainWork)};
                 const bool unverified{
                     (pindex->nStatus &
                      (BLOCK_FAILED_MASK | BLOCK_EXACT_REPLAY_VERIFIED)) == 0 &&

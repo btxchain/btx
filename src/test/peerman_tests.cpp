@@ -4535,8 +4535,19 @@ BOOST_AUTO_TEST_CASE(linear_tip_child_replays_when_authenticated_work_lags)
     (void)connman.ProcessMessagesOnce(peer);
     connman.FlushSendBuffer(peer);
 
+    // Header-first replay must use the v0.34.3 followed-tip definition too.
+    // Before the integration fix it returned early solely because the active
+    // parent's authenticated work lagged, leaving validation to wait for the
+    // complete body (and mining pre-emption unable to begin at the header).
+    BOOST_REQUIRE(PeermanWaitFor([&] {
+        return replayed.load(std::memory_order_relaxed);
+    }));
+
     {
-        ASSERT_DEBUG_LOG("direct authenticated tip-child");
+        // Header-first replay may already own the followed-tip verification
+        // slot, so the complete body can join or consume its verdict without
+        // traversing the body-only "direct authenticated tip-child" log site.
+        // The cap diagnostic remains forbidden for either path.
         DebugLogHelper no_cap(
             "MatMul pending verification cap reached",
             [](const std::string* line) {
