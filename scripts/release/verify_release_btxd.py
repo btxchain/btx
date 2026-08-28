@@ -30,7 +30,10 @@ while meaning nothing at all (MendeMatthias). The real binary is
 to that file; passing the wrapper without a sibling `.real` is FAIL.
 
 Pass btxd (ZMQ + portability + launch) and btx-cli (portability only)
-as separate arguments. Do not stage a tarball that fails either.
+as separate arguments. `--archive` unpacks a shippable tarball/zip and
+gates `libexec/btxd.real` (or `bin/btxd`). Guix, cut, collect, and
+publish all invoke this script; an unrecognized file is FAIL, not a
+skip. A skipped gate is how issues 111 and 122 shipped twice.
 """
 
 from __future__ import annotations
@@ -40,6 +43,9 @@ import re
 import struct
 import subprocess
 import sys
+import tarfile
+import tempfile
+import zipfile
 from pathlib import Path
 
 
@@ -135,6 +141,14 @@ def verify_linux(path: Path) -> None:
         )
 
 
+def verify_windows(path: Path) -> None:
+    """PE has no ldd. The 111/122 miss is still visible as missing ENABLE_ZMQ help."""
+    if requires_zmq(path) and not has_enable_zmq_help(path):
+        raise VerifyError(
+            f"{path}: missing ENABLE_ZMQ help text — this Windows btxd was built without ZMQ"
+        )
+
+
 def verify_macos_portable(path: Path, dylibs: list[str] | None = None) -> None:
     if dylibs is None:
         dylibs = macho_dylibs(path)
@@ -171,11 +185,29 @@ def classify(path: Path) -> str:
     prefix = read_prefix(path, 4)
     if prefix == ELF_MAGIC:
         return "elf"
+    if prefix[:2] == b"MZ":
+        return "pe"
     if len(prefix) == 4:
         magic = struct.unpack_from("<I", prefix, 0)[0]
         if magic == MACHO_MAGIC_64LE:
             return "macho"
     return "other"
+
+
+def native_launch_possible(kind: str) -> bool:
+    """True when this host can actually exec the classified binary.
+
+    linux-x86_64-cpu / linux-x86_64-cuda must launch on Linux. macos-arm64-metal
+    must launch on Darwin. Cross-compile (Mach-O on Linux Guix) still runs the
+    static ZMQ checks; launch is skipped only when exec format cannot succeed.
+    """
+    if kind == "elf":
+        return sys.platform.startswith("linux")
+    if kind == "macho":
+        return sys.platform == "darwin"
+    if kind == "pe":
+        return sys.platform.startswith("win")
+    return False
 
 
 def requires_zmq(path: Path) -> bool:
@@ -242,7 +274,12 @@ def verify_binary(path: Path) -> str:
         want_zmq = requires_zmq(path)
         verify_macos(path, require_zmq=want_zmq)
         return "macos-static-zmq" if want_zmq else "macos-portable-cli"
-    raise VerifyError(f"{path}: not an ELF or Mach-O binary (refusing to ship an untyped file)")
+    if kind == "pe":
+        verify_windows(path)
+        return "windows-zmq-help" if requires_zmq(path) else "windows-cli"
+    raise VerifyError(
+        f"{path}: not an ELF, Mach-O, or PE binary (refusing to ship an untyped file)"
+    )
 
 
 def verify_launch(path: Path, timeout: float = 30.0) -> None:
@@ -259,12 +296,10 @@ def verify_launch(path: Path, timeout: float = 30.0) -> None:
             timeout=timeout,
             check=False,
         )
-    except FileNotFoundError as exc:
-        raise VerifyError(f"{path}: cannot execute: {exc}") from exc
-    except PermissionError as exc:
-        raise VerifyError(f"{path}: cannot execute: {exc}") from exc
     except subprocess.TimeoutExpired as exc:
         raise VerifyError(f"{path}: `{path.name} -version` timed out after {timeout}s") from exc
+    except OSError as exc:
+        raise VerifyError(f"{path}: cannot execute: {exc}") from exc
     if result.returncode != 0:
         err = (result.stderr or result.stdout or "").strip()
         raise VerifyError(
@@ -278,23 +313,148 @@ def verify_btxd(path: Path) -> str:
     return verify_binary(path)
 
 
+def verify_path_for_ship(path: Path) -> str:
+    """Resolve wrappers, refuse untyped files, check ZMQ, and launch when native."""
+    path = resolve_verify_target(path)
+    kind = classify(path)
+    if kind == "other":
+        raise VerifyError(
+            f"{path}: not an ELF, Mach-O, or PE binary (refusing to ship an untyped file)"
+        )
+    how = verify_binary(path)
+    if is_daemon(path):
+        if native_launch_possible(kind):
+            verify_launch(path)
+            how = f"{how}+launch"
+        else:
+            how = f"{how}+launch-skipped-cross"
+            print(
+                f"verify_release_btxd: note skip launch for {path} "
+                f"({kind} is not executable on {sys.platform}); static checks passed",
+                file=sys.stderr,
+            )
+    return how
+
+
+def extract_release_archive(archive: Path, dest: Path) -> None:
+    name = archive.name.lower()
+    try:
+        if name.endswith(".zip"):
+            with zipfile.ZipFile(archive) as handle:
+                handle.extractall(dest)
+            return
+        if name.endswith((".tar.gz", ".tgz", ".tar.xz", ".tar.bz2", ".tar")):
+            with tarfile.open(archive, "r:*") as handle:
+                kwargs: dict[str, object] = {}
+                if sys.version_info >= (3, 12):
+                    kwargs["filter"] = "data"
+                handle.extractall(dest, **kwargs)
+            return
+    except (tarfile.TarError, zipfile.BadZipFile, OSError) as exc:
+        raise VerifyError(f"{archive}: not a readable shippable archive: {exc}") from exc
+    raise VerifyError(f"{archive}: not a recognized archive (.tar.gz/.zip)")
+
+
+def _prefer_bin_then_any(paths: list[Path]) -> Path:
+    preferred = [path for path in paths if path.parent.name == "bin"]
+    chosen = preferred or paths
+    if len(chosen) != 1:
+        names = ", ".join(str(path) for path in chosen)
+        raise VerifyError(f"archive contains multiple candidate binaries: {names}")
+    return chosen[0]
+
+
+def find_packaged_btxd(root: Path) -> Path:
+    reals = sorted(path for path in root.rglob("btxd.real") if path.is_file())
+    if reals:
+        if len(reals) != 1:
+            raise VerifyError(
+                "archive contains multiple libexec/btxd.real files: "
+                + ", ".join(str(path) for path in reals)
+            )
+        return reals[0]
+    found = [path for path in root.rglob("btxd") if path.is_file()]
+    found.extend(path for path in root.rglob("btxd.exe") if path.is_file())
+    if not found:
+        raise VerifyError(f"{root}: archive contains no btxd (looked for libexec/btxd.real, bin/btxd)")
+    return _prefer_bin_then_any(found)
+
+
+def find_packaged_cli(root: Path) -> Path | None:
+    reals = sorted(path for path in root.rglob("btx-cli.real") if path.is_file())
+    if len(reals) == 1:
+        return reals[0]
+    if len(reals) > 1:
+        raise VerifyError(
+            "archive contains multiple libexec/btx-cli.real files: "
+            + ", ".join(str(path) for path in reals)
+        )
+    found = [path for path in root.rglob("btx-cli") if path.is_file()]
+    found.extend(path for path in root.rglob("btx-cli.exe") if path.is_file())
+    if not found:
+        return None
+    return _prefer_bin_then_any(found)
+
+
+def verify_archive(archive: Path) -> str:
+    """Unpack a shippable tarball/zip and gate the real btxd (and btx-cli if present)."""
+    if not archive.is_file():
+        raise VerifyError(f"{archive}: missing archive")
+    with tempfile.TemporaryDirectory(prefix="btx-verify-archive-") as tmpdir:
+        dest = Path(tmpdir)
+        extract_release_archive(archive, dest)
+        btxd = find_packaged_btxd(dest)
+        how = verify_path_for_ship(btxd)
+        cli = find_packaged_cli(dest)
+        if cli is not None:
+            cli = resolve_verify_target(cli)
+            kind = classify(cli)
+            if kind == "other":
+                raise VerifyError(
+                    f"{cli}: not an ELF, Mach-O, or PE binary (refusing to ship an untyped file)"
+                )
+            verify_binary(cli)
+            how = f"{how}+cli"
+        return how
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "binaries",
-        nargs="+",
+        nargs="*",
         type=Path,
         help="Paths to btxd, btx-cli, or libexec/btxd.real. A packaged "
         "bin/btxd #!/bin/sh wrapper is followed to libexec/btxd.real; "
         "ldd/otool on the wrapper itself is refused.",
     )
     parser.add_argument(
+        "--archive",
+        action="append",
+        default=[],
+        type=Path,
+        dest="archives",
+        help="Shippable .tar.gz/.zip to unpack and gate (libexec/btxd.real or bin/btxd). "
+        "Required on the Guix/cut/publish path that produces the user download.",
+    )
+    parser.add_argument(
         "--allow-non-binary",
         action="store_true",
-        help="Exit 0 on non-ELF/Mach-O inputs (unit-test stubs only).",
+        help="Exit 0 on non-ELF/Mach-O/PE inputs (unit-test stubs only; never for release).",
     )
     args = parser.parse_args(argv)
+    if not args.binaries and not args.archives:
+        parser.error("pass at least one binary or --archive")
     failures = 0
+    for raw in args.archives:
+        path = raw.expanduser().resolve()
+        try:
+            how = verify_archive(path)
+        except VerifyError as exc:
+            print(f"verify_release_btxd: FAIL {exc}", file=sys.stderr)
+            failures += 1
+            continue
+        print(f"verify_release_btxd: PASS archive {path} ({how})")
     for raw in args.binaries:
         path = raw.expanduser().resolve()
         if not path.is_file():
@@ -312,14 +472,14 @@ def main(argv: list[str] | None = None) -> int:
             if args.allow_non_binary:
                 print(f"verify_release_btxd: SKIP non-binary {path}")
                 continue
-            print(f"verify_release_btxd: FAIL {path}: not an ELF or Mach-O binary", file=sys.stderr)
+            print(
+                f"verify_release_btxd: FAIL {path}: not an ELF, Mach-O, or PE binary",
+                file=sys.stderr,
+            )
             failures += 1
             continue
         try:
-            how = verify_binary(path)
-            if is_daemon(path):
-                verify_launch(path)
-                how = f"{how}+launch"
+            how = verify_path_for_ship(path)
         except VerifyError as exc:
             print(f"verify_release_btxd: FAIL {exc}", file=sys.stderr)
             failures += 1

@@ -118,8 +118,14 @@ class CutReleaseTest(unittest.TestCase):
                 self.module.run_checked = original_run_checked
 
             self.assertEqual(exit_code, 0)
-            self.assertEqual(len(commands), 2)
-            collect_command = commands[0]
+            self.assertEqual(len(commands), 3)
+            verify_command = commands[0]
+            self.assertEqual(verify_command[0], sys.executable)
+            self.assertTrue(
+                verify_command[1].endswith("/scripts/release/verify_release_btxd.py")
+            )
+            self.assertIn("--archive", verify_command)
+            collect_command = commands[1]
             self.assertEqual(collect_command[0], sys.executable)
             self.assertTrue(
                 collect_command[1].endswith("/scripts/release/collect_release_assets.py")
@@ -127,6 +133,7 @@ class CutReleaseTest(unittest.TestCase):
             self.assertEqual(collect_command[2], "--output-dir")
             for host in self.module.PRIMARY_GUIX_OUTPUTS:
                 self.assertIn(str(primary_assets[host].resolve()), collect_command)
+                self.assertIn(str(primary_assets[host].resolve()), verify_command)
             self.assertNotIn(
                 str((output_dir / "x86_64-linux-gnu" / "bitcoin-29.2-x86_64-linux-gnu-debug.tar.gz").resolve()),
                 collect_command,
@@ -137,7 +144,7 @@ class CutReleaseTest(unittest.TestCase):
             )
             self.assertIn("--attestations-dir", collect_command)
             self.assertIn(str((root / "guix.sigs" / "29.2").resolve()), collect_command)
-            self.assertIn("--dry-run", commands[1])
+            self.assertIn("--dry-run", commands[2])
 
             summary = json.loads(output.getvalue())
             self.assertEqual(summary["guix_output_dir"], str(output_dir.resolve()))
@@ -184,15 +191,17 @@ class CutReleaseTest(unittest.TestCase):
                 self.module.run_checked = original_run_checked
 
             self.assertEqual(exit_code, 0)
-            self.assertEqual(len(commands), 4)
+            self.assertEqual(len(commands), 5)
             self.assertIn("generate_assumeutxo.py", commands[0][1])
             self.assertIn("--rollback", commands[0])
-            self.assertIn("collect_release_assets.py", commands[1][1])
+            self.assertIn("verify_release_btxd.py", commands[1][1])
+            self.assertIn("--archive", commands[1])
+            self.assertIn("collect_release_assets.py", commands[2][1])
             for host in self.module.PRIMARY_GUIX_OUTPUTS:
-                self.assertIn(str(primary_assets[host].resolve()), commands[1])
-            self.assertIn("--dry-run", commands[2])
-            self.assertIn("--publish", commands[3])
-            self.assertNotIn("--dry-run", commands[3])
+                self.assertIn(str(primary_assets[host].resolve()), commands[2])
+            self.assertIn("--dry-run", commands[3])
+            self.assertIn("--publish", commands[4])
+            self.assertNotIn("--dry-run", commands[4])
 
             summary = json.loads(output.getvalue())
             self.assertTrue(summary["snapshot"].endswith("release-artifacts/29.2/snapshot/snapshot.dat"))
@@ -250,16 +259,18 @@ class CutReleaseTest(unittest.TestCase):
                 self.module.run_checked = original_run_checked
 
             self.assertEqual(exit_code, 0)
-            self.assertEqual(len(commands), 3)
-            self.assertIn("collect_release_assets.py", commands[0][1])
+            self.assertEqual(len(commands), 4)
+            self.assertIn("verify_release_btxd.py", commands[0][1])
+            self.assertIn("--archive", commands[0])
+            self.assertIn("collect_release_assets.py", commands[1][1])
             for host in self.module.PRIMARY_GUIX_OUTPUTS:
-                self.assertIn(str(primary_assets[host].resolve()), commands[0])
-            self.assertIn("--dry-run", commands[1])
-            self.assertIn("btx-agent-setup.py", commands[2][1])
-            self.assertIn("--platform", commands[2])
-            self.assertIn("linux-x86_64", commands[2])
-            self.assertIn("--force", commands[2])
-            self.assertIn("--json", commands[2])
+                self.assertIn(str(primary_assets[host].resolve()), commands[1])
+            self.assertIn("--dry-run", commands[2])
+            self.assertIn("btx-agent-setup.py", commands[3][1])
+            self.assertIn("--platform", commands[3])
+            self.assertIn("linux-x86_64", commands[3])
+            self.assertIn("--force", commands[3])
+            self.assertIn("--json", commands[3])
 
             summary = json.loads(output.getvalue())
             self.assertEqual(summary["smoke_platform"], "linux-x86_64")

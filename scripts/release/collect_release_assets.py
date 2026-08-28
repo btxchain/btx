@@ -8,6 +8,7 @@ The script is intentionally simple:
 
 - copy one or more source files or directories into a fresh bundle directory
 - add the fast-start snapshot artifacts as first-class release assets
+- gate every primary binary archive with verify_release_btxd.py (ZMQ + launch)
 - emit a release manifest and SHA256SUMS file for the final bundle
 
 Directory sources are flattened into the bundle directory. Asset names must be
@@ -23,6 +24,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+import importlib.util
 import shutil
 import subprocess
 import sys
@@ -49,13 +51,13 @@ PRIMARY_BINARY_EXCLUDE_TOKENS = (
     "source",
 )
 PLATFORM_ALIASES = {
-    "linux-x86_64": ("x86_64-linux-gnu",),
-    "linux-x86_64-cuda12": ("x86_64-linux-gnu-cuda12",),
-    "linux-x86_64-cuda13": ("x86_64-linux-gnu-cuda13",),
+    "linux-x86_64": ("x86_64-linux-gnu", "linux-x86_64-cpu"),
+    "linux-x86_64-cuda12": ("x86_64-linux-gnu-cuda12", "linux-x86_64-cuda12"),
+    "linux-x86_64-cuda13": ("x86_64-linux-gnu-cuda13", "linux-x86_64-cuda13"),
     "linux-arm64": ("aarch64-linux-gnu", "arm64-linux-gnu"),
     "windows-x86_64": ("x86_64-w64-mingw32", "win64"),
     "macos-x86_64": ("x86_64-apple-darwin",),
-    "macos-arm64": ("arm64-apple-darwin", "aarch64-apple-darwin"),
+    "macos-arm64": ("arm64-apple-darwin", "aarch64-apple-darwin", "macos-arm64-metal"),
 }
 DEFAULT_REQUIRED_PLATFORMS = (
     "linux-x86_64",
@@ -472,6 +474,35 @@ def validate_required_platforms(
         )
 
 
+def _load_verify_release_btxd():
+    script = Path(__file__).with_name("verify_release_btxd.py")
+    spec = importlib.util.spec_from_file_location("verify_release_btxd", script)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"unable to load {script}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def verify_staged_primary_archives(staged_assets: list[tuple[str, Path]]) -> None:
+    """Fail closed if any primary binary archive would ship without a ZMQ-linked btxd.
+
+    The native packager already runs this gate. Guix does not go through that
+    packager, so collect (the path that builds the bundle users download) must.
+    An unrecognized file inside the archive is FAIL, not a skip.
+    """
+    archives = [
+        path
+        for _source, path in staged_assets
+        if classify_primary_platform_asset(path.name) is not None
+    ]
+    if not archives:
+        return
+    module = _load_verify_release_btxd()
+    for archive in archives:
+        module.verify_archive(archive)
+
+
 def write_checksum_file(bundle_dir: Path, checksum_name: str) -> None:
     checksum_path = bundle_dir / checksum_name
     checksum_lines = []
@@ -546,6 +577,7 @@ def main(argv: list[str]) -> int:
         manifest["platform_assets"],
         args.required_platform,
     )
+    verify_staged_primary_archives(staged_assets)
     release_manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 
     checksum_path = bundle_dir / args.checksum_name

@@ -703,7 +703,13 @@ trees had passed `-DWITH_ZMQ=ON`; the CPU tree had not.
   text advertises ZMQ without a real libzmq link, and on macOS refuses
   any `/opt/homebrew` load command. Since 0.34.1 it also refuses to
   treat the packaged `bin/btxd` shell wrapper as the binary: it
-  verifies `libexec/btxd.real`.
+  verifies `libexec/btxd.real`. Since 0.34.5 the same script is a
+  fail-non-zero step of Guix `build.sh`, native `package_release_archive.py`,
+  `collect_release_assets.py`, `cut_release.py`, `cut_local_release.py`,
+  and `publish_github_release.py`. An unrecognized file is FAIL, not a
+  skip. `--archive` unpacks the tarball users download and gates the
+  real binary. `test/util/verify_release_btxd_test.py` proves the gate
+  exits non-zero on a `btxd` built without ZMQ (the 0.33.4.2 CPU shape).
 - [release-process.md](release-process.md) makes that `ldd`/`otool`
   check mandatory before a tarball is staged.
 

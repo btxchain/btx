@@ -4,12 +4,15 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import pathlib
 import struct
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -215,6 +218,111 @@ class VerifyReleaseBtxdTest(unittest.TestCase):
         self.assertTrue(self.mod.is_daemon(pathlib.Path("libexec/btxd.real")))
         self.assertFalse(self.mod.is_daemon(pathlib.Path("libexec/btx-cli.real")))
         self.assertFalse(self.mod.requires_zmq(pathlib.Path("libexec/btx-cli.real")))
+
+    def test_cli_refuses_unrecognized_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = pathlib.Path(tmpdir) / "btxd"
+            path.write_text("daemon\n", encoding="utf-8")
+            proc = subprocess.run(
+                [sys.executable, str(SCRIPT), str(path)],
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(proc.returncode, 0, proc.stderr.decode())
+            self.assertIn(b"FAIL", proc.stderr)
+            self.assertIn(b"not an ELF", proc.stderr)
+            self.assertEqual(self.mod.main([str(path)]), 1)
+
+    def test_gate_fails_when_handed_btxd_built_without_zmq(self) -> None:
+        """A gate nobody has seen fail is not a gate. This is the 111/122 shape."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            btxd = pathlib.Path(tmpdir) / "btxd"
+            self._write_03342_shaped_elf(btxd)
+            self.assertEqual(self.mod.classify(btxd), "elf")
+            with self.assertRaises(self.mod.VerifyError) as caught:
+                self.mod.verify_path_for_ship(btxd)
+            self.assertIn("ENABLE_ZMQ help text", str(caught.exception))
+            proc = subprocess.run(
+                [sys.executable, str(SCRIPT), str(btxd)],
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(proc.returncode, 0, proc.stderr.decode())
+            self.assertIn(b"FAIL", proc.stderr)
+            self.assertEqual(self.mod.main([str(btxd)]), 1)
+
+    def test_gate_fails_when_help_present_but_libzmq_not_linked(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            btxd = pathlib.Path(tmpdir) / "btxd"
+            btxd.write_bytes(b"\x7fELF" + b"\x00" * 8 + b"Enable publish hash block")
+            with mock.patch.object(self.mod, "elf_needed_ldd", return_value=["libc.so.6"]):
+                with self.assertRaises(self.mod.VerifyError) as caught:
+                    self.mod.verify_linux(btxd)
+                self.assertIn("libzmq", str(caught.exception))
+                self.assertEqual(self.mod.main([str(btxd)]), 1)
+
+    def test_pe_without_zmq_help_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            btxd = pathlib.Path(tmpdir) / "btxd.exe"
+            btxd.write_bytes(b"MZ" + b"\x00" * 32 + b"-zmqpubhashblock\x00")
+            self.assertEqual(self.mod.classify(btxd), "pe")
+            with self.assertRaises(self.mod.VerifyError) as caught:
+                self.mod.verify_binary(btxd)
+            self.assertIn("ENABLE_ZMQ help text", str(caught.exception))
+
+    def test_macho_without_zmq_help_fails(self) -> None:
+        header = struct.pack("<IIIIIIII", 0xFEEDFACF, 0x0100000C, 0, 2, 0, 0, 0, 0)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = pathlib.Path(tmpdir) / "btxd"
+            path.write_bytes(header)
+            self.assertEqual(self.mod.classify(path), "macho")
+            with self.assertRaises(self.mod.VerifyError) as caught:
+                self.mod.verify_macos(path, require_zmq=True)
+            self.assertIn("ENABLE_ZMQ help text", str(caught.exception))
+
+    def _write_tar_with_member(self, archive: pathlib.Path, member: str, payload: bytes) -> None:
+        with tarfile.open(archive, "w:gz") as handle:
+            info = tarfile.TarInfo(member)
+            info.size = len(payload)
+            handle.addfile(info, io.BytesIO(payload))
+
+    def test_archive_gate_fails_on_btxd_built_without_zmq(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            archive = pathlib.Path(tmpdir) / "btx-0.34.5-x86_64-linux-gnu.tar.gz"
+            payload = b"\x7fELF" + b"\x00" * 12 + b"-zmqpubhashblock\x00"
+            self._write_tar_with_member(archive, "btx-0.34.5/libexec/btxd.real", payload)
+            proc = subprocess.run(
+                [sys.executable, str(SCRIPT), "--archive", str(archive)],
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(proc.returncode, 0, proc.stderr.decode())
+            self.assertIn(b"FAIL", proc.stderr)
+            self.assertIn(b"ENABLE_ZMQ help text", proc.stderr)
+            with self.assertRaises(self.mod.VerifyError):
+                self.mod.verify_archive(archive)
+            self.assertEqual(self.mod.main(["--archive", str(archive)]), 1)
+
+    def test_archive_gate_fails_on_unreadable_tarball(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            archive = pathlib.Path(tmpdir) / "btx-0.34.5-linux-x86_64-cpu.tar.gz"
+            archive.write_bytes(b"not a tarball")
+            proc = subprocess.run(
+                [sys.executable, str(SCRIPT), "--archive", str(archive)],
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(proc.returncode, 0, proc.stderr.decode())
+            self.assertIn(b"FAIL", proc.stderr)
+
+    def test_cli_requires_binary_or_archive(self) -> None:
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPT)],
+            capture_output=True,
+            check=False,
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn(b"binary or --archive", proc.stderr)
 
 
 if __name__ == "__main__":

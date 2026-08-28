@@ -7,6 +7,10 @@
 This command ties together the existing BTX release helpers so operators can
 run one release-cut command instead of manually coordinating Guix outputs,
 assumeutxo snapshot generation, bundle staging, and GitHub publication.
+
+Every primary archive is gated with scripts/release/verify_release_btxd.py
+before collect/publish. Guix does not go through package_release_archive.py,
+so this is the cut-path enforcement of the ZMQ ship bar.
 """
 
 from __future__ import annotations
@@ -235,6 +239,20 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 def run_checked(command: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None) -> None:
     subprocess.run(command, cwd=str(cwd) if cwd else None, env=env, check=True)
+
+
+def build_verify_archives_command(repo_root: Path, archives: list[Path]) -> list[str]:
+    if not archives:
+        raise ValueError(
+            "verify_release_btxd: no primary archives to gate; refusing to cut an empty ship set"
+        )
+    command = [
+        sys.executable,
+        str(repo_root / "scripts" / "release" / "verify_release_btxd.py"),
+    ]
+    for archive in archives:
+        command.extend(["--archive", str(archive)])
+    return command
 
 
 def resolve_guix_hosts(args: argparse.Namespace) -> list[str]:
@@ -499,6 +517,10 @@ def main(argv: list[str]) -> int:
         raise ValueError(
             "snapshot.dat and snapshot.manifest.json must be provided together"
         )
+
+    # Guix tarballs never pass through package_release_archive.py. Gate the
+    # actual archives before collect/publish can treat a missing run as a pass.
+    run_checked(build_verify_archives_command(repo_root, primary_archives), cwd=repo_root)
 
     collect_command = build_collect_command(
         args,

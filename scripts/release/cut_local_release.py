@@ -13,6 +13,7 @@ publisher contract, and optionally publishes the result.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 from pathlib import Path
 import subprocess
@@ -116,6 +117,40 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 def run_checked(command: list[str], *, cwd: Path | None = None) -> None:
     subprocess.run(command, cwd=str(cwd) if cwd else None, check=True)
+
+
+def packaged_archive_paths(
+    repo_root: Path,
+    archive_dir: Path,
+    version: str,
+    platform_ids: list[str],
+) -> list[Path]:
+    script = Path(__file__).with_name("package_release_archive.py")
+    if not script.is_file():
+        script = repo_root / "scripts" / "release" / "package_release_archive.py"
+    spec = importlib.util.spec_from_file_location("package_release_archive", script)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"unable to load {script}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return [
+        archive_dir / module.archive_filename(version, platform_id, None)
+        for platform_id in platform_ids
+    ]
+
+
+def build_verify_archives_command(repo_root: Path, archives: list[Path]) -> list[str]:
+    if not archives:
+        raise ValueError(
+            "verify_release_btxd: no primary archives to gate; refusing to cut an empty ship set"
+        )
+    command = [
+        sys.executable,
+        str(repo_root / "scripts" / "release" / "verify_release_btxd.py"),
+    ]
+    for archive in archives:
+        command.extend(["--archive", str(archive)])
+    return command
 
 
 def parse_platform_spec(raw_spec: str) -> dict[str, Path | str]:
@@ -321,6 +356,18 @@ def main(argv: list[str]) -> int:
                 cwd=repo_root,
             )
 
+        run_checked(
+            build_verify_archives_command(
+                repo_root,
+                packaged_archive_paths(
+                    repo_root,
+                    archive_dir,
+                    derive_version_from_tag(args.tag),
+                    platform_ids,
+                ),
+            ),
+            cwd=repo_root,
+        )
         run_checked(build_collect_command(args, repo_root, archive_dir, platform_ids), cwd=repo_root)
 
     run_checked(build_publish_command(args, repo_root, dry_run=True), cwd=repo_root)
