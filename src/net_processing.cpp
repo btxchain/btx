@@ -8065,6 +8065,13 @@ arith_uint256 PeerManagerImpl::GetAntiDoSWorkThreshold()
     return std::max(near_chaintip_work, m_chainman.MinimumChainWork());
 }
 
+static const CBlockIndex* HeaderSyncLocatorIndex(ChainstateManager& chainman)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    return node::HeaderSyncLocatorStart(
+        chainman.m_best_header, chainman.ActiveChain().Tip());
+}
+
 /**
  * Special handling for unconnecting headers that might be part of a block
  * announcement.
@@ -8084,13 +8091,15 @@ void PeerManagerImpl::HandleUnconnectingHeaders(CNode& pfrom, Peer& peer,
         return;
     }
 
-    // Try to fill in the missing headers.
-    const CBlockIndex* best_header{WITH_LOCK(cs_main, return m_chainman.m_best_header)};
-    if (MaybeSendGetHeaders(pfrom, GetLocator(best_header), peer)) {
+    // Try to fill in the missing headers. Start from the connected tip when
+    // m_best_header sits behind it (live 0.34.3: locators from 199023 walked
+    // the 0.34.1 fork instead of asking for tip+1).
+    const CBlockIndex* locator_start{WITH_LOCK(cs_main, return HeaderSyncLocatorIndex(m_chainman))};
+    if (MaybeSendGetHeaders(pfrom, GetLocator(locator_start), peer)) {
         LogDebug(BCLog::NET, "received header %s: missing prev block %s, sending getheaders (%d) to end (peer=%d)\n",
             headers[0].GetHash().ToString(),
             headers[0].hashPrevBlock.ToString(),
-            best_header->nHeight,
+            locator_start != nullptr ? locator_start->nHeight : -1,
             pfrom.GetId());
     }
 
@@ -10896,6 +10905,18 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
                     peer.m_should_discourage = true;
                 }
                 pfrom.fDisconnect = true;
+            } else if (peer.m_starting_height.load() > tip_height) {
+                const CBlockIndex* start{WITH_LOCK(cs_main, return HeaderSyncLocatorIndex(m_chainman))};
+                if (start != nullptr && start->pprev) start = start->pprev;
+                if (start != nullptr) {
+                    MaybeSendGetHeaders(pfrom, GetLocator(start), peer);
+                }
+            } else {
+                // Connecting duplicates cleared the 2-minute gate at
+                // m_last_getheaders_timestamp. Restore it so SendMessages
+                // cannot hot-loop the same locator (live 0.34.3 + 0.34.1
+                // fork peer: hundreds of getheaders/sec from 199023).
+                peer.m_last_getheaders_timestamp = NodeClock::now();
             }
             return;
         }
@@ -11029,6 +11050,10 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
                            state.GetDebugMessage(), pfrom.GetId());
             }
             MaybePunishNodeForBlock(pfrom.GetId(), state, via_compact_block, "invalid header received");
+            // Cached-invalid batches (33c834f8 on the 0.34.1 fork) also
+            // cleared the getheaders gate. Hold the 2-minute inflight
+            // window so we do not re-request the same fork from 199023.
+            peer.m_last_getheaders_timestamp = NodeClock::now();
             return;
         }
         LogDebug(BCLog::NET, "Disconnecting peer=%d: failed to process headers message without invalid-state classification (%s)\n",
@@ -14573,10 +14598,12 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             CNodeState& state{*Assert(State(pfrom.GetId()))};
             if (state.fSyncStarted || (!peer->m_inv_triggered_getheaders_before_sync && *best_block != m_last_block_inv_triggering_headers_sync)) {
                 const bool sent_getheaders{
-                    MaybeSendGetHeaders(pfrom, GetLocator(m_chainman.m_best_header), *peer)};
+                    MaybeSendGetHeaders(pfrom, GetLocator(HeaderSyncLocatorIndex(m_chainman)), *peer)};
                 if (sent_getheaders) {
+                    const CBlockIndex* locator_start{HeaderSyncLocatorIndex(m_chainman)};
                     LogDebug(BCLog::NET, "getheaders (%d) %s to peer=%d\n",
-                            m_chainman.m_best_header->nHeight, best_block->ToString(),
+                            locator_start != nullptr ? locator_start->nHeight : -1,
+                            best_block->ToString(),
                             pfrom.GetId());
                 }
                 if (sent_getheaders && !state.fSyncStarted) {
@@ -15352,7 +15379,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         if (!prev_block) {
             // Doesn't connect (or is genesis), instead of DoSing in AcceptBlockHeader, request deeper headers
             if (!m_chainman.IsInitialBlockDownload()) {
-                MaybeSendGetHeaders(pfrom, GetLocator(m_chainman.m_best_header), *peer);
+                MaybeSendGetHeaders(pfrom, GetLocator(HeaderSyncLocatorIndex(m_chainman)), *peer);
             }
             return;
         }
@@ -17052,8 +17079,8 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                             CBlockLocator locator;
                             {
                                 LOCK(cs_main);
-                                if (m_chainman.m_best_header) {
-                                    locator = GetLocator(m_chainman.m_best_header);
+                                if (const CBlockIndex* start{HeaderSyncLocatorIndex(m_chainman)}) {
+                                    locator = GetLocator(start);
                                 }
                             }
                             if (!locator.vHave.empty() &&
@@ -18660,6 +18687,10 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
         if (m_chainman.m_best_header == nullptr) {
             m_chainman.SetBestHeader(m_chainman.ActiveChain().Tip());
         }
+        // Self-heal without reindex: PreferTrustAdjustedHeader can leave
+        // m_best_header on an authenticated ancestor below the connected
+        // tip (live 0.34.3: headers=199024, blocks=199310).
+        m_chainman.EnsureBestHeaderNotBehindConnectedTip();
 
         // Stalled-chain restart: IsInitialBlockDownload stays true when the
         // tip is older than -maxtipage even if nChainWork is sufficient.
@@ -18755,8 +18786,8 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
         }
         const CBlockIndex* tip_for_headers{m_chainman.ActiveChain().Tip()};
         const bool tip_is_stale{
-            m_chainman.m_best_header != nullptr &&
-            m_chainman.m_best_header->Time() <= NodeClock::now() - 24h};
+            tip_for_headers != nullptr &&
+            tip_for_headers->Time() <= NodeClock::now() - 24h};
         const bool headers_in_flight{
             peer->m_last_getheaders_timestamp != NodeClock::time_point{} &&
             NodeClock::now() - peer->m_last_getheaders_timestamp <= HEADERS_RESPONSE_TIME};
@@ -18765,7 +18796,10 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
             peer->m_starting_height.load(),
             state.pindexBestKnownBlock == nullptr,
             tip_is_stale,
-            headers_in_flight)};
+            headers_in_flight,
+            state.pindexBestKnownBlock != nullptr
+                ? state.pindexBestKnownBlock->nHeight
+                : -1)};
 
         // F1/F2: a peer advertising above our tip with no best-known is
         // enough to request headers. fPreferredDownload remains a
@@ -18805,17 +18839,18 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
             const bool may_claim_initial_sync_slot{
                 nSyncStarted == 0 && sync_blocks_and_headers_from_peer};
             if (may_claim_initial_sync_slot || near_tip_headers || must_probe) {
-                const CBlockIndex* pindexStart = m_chainman.m_best_header;
+                const CBlockIndex* pindexStart = HeaderSyncLocatorIndex(m_chainman);
                 /* If possible, start at the block preceding the currently
                    best known header.  This ensures that we always get a
                    non-empty list of headers back as long as the peer
                    is up-to-date.  With a non-empty response, we can initialise
                    the peer's known best block.  This wouldn't be possible
-                   if we requested starting at m_chainman.m_best_header and
+                   if we requested starting at the locator origin and
                    got back an empty response.  */
-                if (pindexStart->pprev)
+                if (pindexStart != nullptr && pindexStart->pprev)
                     pindexStart = pindexStart->pprev;
-                if (MaybeSendGetHeaders(*pto, GetLocator(pindexStart), *peer)) {
+                if (pindexStart != nullptr &&
+                    MaybeSendGetHeaders(*pto, GetLocator(pindexStart), *peer)) {
                     LogDebug(BCLog::NET, "initial getheaders (%d) to peer=%d (startheight:%d)\n", pindexStart->nHeight, pto->GetId(), peer->m_starting_height);
 
                     if (may_claim_initial_sync_slot || near_tip_headers) {
@@ -18871,20 +18906,18 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                      tip_for_headers != nullptr ? tip_for_headers->nHeight : -1,
                      state.pindexBestKnownBlock != nullptr ? "set" : "null");
         };
-        if (state.pindexBestKnownBlock == nullptr && CanServeBlocks(*peer) &&
+        if (must_probe && CanServeBlocks(*peer) &&
             !m_chainman.m_blockman.LoadingBlocks() && !pto->IsAddrFetchConn()) {
             const CBlockIndex* tip{m_chainman.ActiveChain().Tip()};
             if (tip == nullptr) {
                 log_probe_declined("no_local_tip");
-            } else if (!must_probe) {
-                log_probe_declined("starting_not_above_tip");
             } else {
                 auto& last_probe{m_best_known_probe_at[pto->GetId()]};
                 if (last_probe.count() != 0 &&
                     current_time - last_probe <= BEST_KNOWN_PROBE_INTERVAL) {
                     log_probe_declined("probe_interval");
                 } else {
-                    const CBlockIndex* start{m_chainman.m_best_header};
+                    const CBlockIndex* start{HeaderSyncLocatorIndex(m_chainman)};
                     if (start != nullptr && start->pprev) start = start->pprev;
                     if (start == nullptr) {
                         log_probe_declined("no_locator_start");
@@ -18899,9 +18932,7 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                     }
                 }
             }
-        } else if (state.pindexBestKnownBlock == nullptr &&
-                   tip_for_headers != nullptr &&
-                   peer->m_starting_height.load() > tip_for_headers->nHeight) {
+        } else if (must_probe) {
             const char* reason = !CanServeBlocks(*peer) ? "cannot_serve_blocks" :
                                  m_chainman.m_blockman.LoadingBlocks() ? "loading_blocks" :
                                  pto->IsAddrFetchConn() ? "addr_fetch" : "unknown";

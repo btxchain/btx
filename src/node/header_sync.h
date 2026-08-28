@@ -5,9 +5,36 @@
 #ifndef BTX_NODE_HEADER_SYNC_H
 #define BTX_NODE_HEADER_SYNC_H
 
+#include <chain.h>
+
 #include <cstdint>
 
 namespace node {
+
+/**
+ * Locator origin for getheaders.
+ *
+ * Bitcoin uses m_best_header as "headers ≥ tip". PreferTrustAdjustedHeader
+ * can rank a fully-authenticated ancestor (live: headers=199024) above a
+ * long unauthenticated connected tip (blocks=199310). Locators then start
+ * 286 blocks behind the active chain, and the only peer advertising above
+ * us answers from the 0.34.1 fork (33c834f8) in a hot loop.
+ *
+ * Use the connected tip when best_header is behind it or on a competing
+ * fork that does not extend it. Keep a HEADER_ONLY suffix that already
+ * extends the tip so we still ask for tip+N+1.
+ */
+[[nodiscard]] inline const CBlockIndex* HeaderSyncLocatorStart(
+    const CBlockIndex* best_header, const CBlockIndex* active_tip)
+{
+    if (active_tip == nullptr) return best_header;
+    if (best_header != nullptr &&
+        best_header->nHeight >= active_tip->nHeight &&
+        best_header->GetAncestor(active_tip->nHeight) == active_tip) {
+        return best_header;
+    }
+    return active_tip;
+}
 
 /**
  * True when we must send getheaders to learn a peer's best block.
@@ -27,19 +54,34 @@ namespace node {
  * `headers_in_flight` is accepted so callers can pass the live
  * SendMessages snapshot; it is never a gate. Never consults
  * preferred-peer count, IBD, or MatMul service bits (0.34.1 F1).
+ *
+ * `best_known_height` is -1 when BestKnown is null. A peer whose
+ * BestKnown is pinned at our own tip (or below) while VERSION
+ * advertised above us must still be probed: otherwise getheaders
+ * stops after the first duplicate batch and we never learn tip+1.
+ *
+ * VERSION is a handshake snapshot. When the tip is stale, also probe
+ * peers who advertised *below* us (live 0.34.3: 57 peers at
+ * 199294–199309, the only peer above us on the 0.34.1 fork).
  */
 [[nodiscard]] inline bool HeaderSyncMustProbe(
     int32_t local_tip_height,
     int32_t peer_starting_height,
     bool best_known_is_null,
     bool tip_is_stale,
-    bool headers_in_flight)
+    bool headers_in_flight,
+    int32_t best_known_height = -1)
 {
     (void)headers_in_flight;
-    if (!best_known_is_null) return false;
-    if (peer_starting_height > local_tip_height) return true;
-    return tip_is_stale && local_tip_height >= 0 &&
-           peer_starting_height >= local_tip_height;
+    const auto known_not_ahead = [&] {
+        if (best_known_is_null) return true;
+        return best_known_height <= local_tip_height;
+    };
+    if (peer_starting_height > local_tip_height) {
+        return known_not_ahead();
+    }
+    if (!tip_is_stale || local_tip_height < 0) return false;
+    return known_not_ahead();
 }
 
 } // namespace node

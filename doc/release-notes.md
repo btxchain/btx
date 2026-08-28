@@ -1,4 +1,10 @@
-# STOP: 0.34.1 partitions nodes from mainnet. Do not run it.
+# STOP: 0.34.1 partitions nodes from mainnet. 0.34.2 deadlocks. 0.34.3
+# catches up one block then stalls with headers below blocks.
+
+**v0.34.4** is the binary that unsticks a node whose `m_best_header` sits
+below its connected tip (live 0.34.3: `blocks=199310`, `headers=199024`).
+Install 0.34.4. Do not run 0.34.1. Do not run 0.34.2 on a consensus
+node. 0.34.3 is superseded for this catch-up stall.
 
 **v0.34.1 is an accidental consensus hard fork.** Commit `1c87fcd6`
 (PR 119) set `consensus.nMatMulStallRecoveryHeight = 199299` in
@@ -13,8 +19,10 @@ stranded; 73 never left the real chain.
 
 **v0.34.2 withdraws that re-anchor** but shipped without the
 ExactReplay admission fix, so every `-matmulvalidation=consensus` node
-froze exactly one block past the last attested height. **v0.34.3 is
-the binary that unsticks that deadlock.**
+froze exactly one block past the last attested height. **v0.34.3
+unsticks that deadlock** but left `m_best_header` on the last
+fully-authenticated ancestor, so getheaders never asked for tip+1.
+**v0.34.4 is the headers-below-blocks fix.**
 
 This split was made visible by per-peer byte tables and chaintips from
 **MendeMatthias**, **jarekpiot**, **Jpp-matata**, and **dixonping**.
@@ -29,11 +37,12 @@ public DNS hosts are not chain-tip oracles, and a node with no pin
 membership, no attestor key, and no trusted-mirror pin must be able to
 reach tip and keep advancing on ExactReplay alone.
 
-`CLIENT_VERSION` in this tree is **0.34.3**. The `v0.34` tag and 0.34.0
+`CLIENT_VERSION` in this tree is **0.34.4**. The `v0.34` tag and 0.34.0
 seal remain the pool-close cut. 0.34.1 is withdrawn: it partitions
 nodes from mainnet. 0.34.2 is withdrawn for consensus nodes: it deadlocks
-one block past the last attestation. Freeze `F` is recorded in
-[0.34.3-freeze.md](evidence/0.34.3-freeze.md); seal and tarballs follow
+one block past the last attestation. 0.34.3 is withdrawn for the
+headers-below-blocks stall. Freeze `F` is recorded in
+[0.34.4-freeze.md](evidence/0.34.4-freeze.md); seal and tarballs follow
 the corpus. Git describe on `main` remains the 0.33.4.2
 line until 0.34 merges
 ([release-notes-0.33.4.2.md](release-notes/release-notes-0.33.4.2.md)).
@@ -48,7 +57,7 @@ To receive release and update notifications, please subscribe to:
 
 # How to Upgrade
 
-Install 0.34.3. Three different `invalidateblock` situations exist.
+Install 0.34.4. Three different `invalidateblock` situations exist.
 Same RPC, three outcomes. One of them used to abort the node. Do not
 mix them.
 

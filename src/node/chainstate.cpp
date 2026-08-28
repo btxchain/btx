@@ -152,6 +152,14 @@ static ChainstateLoadResult CompleteChainstateInitialization(
                       : "null",
                   chainman.m_best_header ? chainman.m_best_header->nHeight : -1);
     }
+    // LoadBlockIndex ranks by PreferTrustAdjustedHeader. An unconfigured
+    // consensus miner (macpro2 0.34.3: no -matmultrustedpubkey) skips
+    // Recalculate and keeps m_best_header on the last fully-authenticated
+    // ancestor (headers=199024, blocks=199310). Snap it to the connected
+    // tip so getheaders locators ask for tip+1.
+    if (chainman.ActiveChain().Tip() != nullptr) {
+        chainman.EnsureBestHeaderNotBehindConnectedTip();
+    }
 
     auto chainstates{chainman.GetAll()};
     if (std::any_of(chainstates.begin(), chainstates.end(),

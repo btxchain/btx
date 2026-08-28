@@ -54,6 +54,7 @@ add_executable(test_btx
   getarg_tests.cpp
   hash_tests.cpp
   headers_sync_chainwork_tests.cpp
+  header_sync_tests.cpp
   httpserver_tests.cpp
   i2p_tests.cpp
   interfaces_tests.cpp
