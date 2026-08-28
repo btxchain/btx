@@ -696,8 +696,12 @@ LastCommonRootFirstResult ClampLastCommonToRootFirst(const CBlockIndex* last_com
  * competitor forever (live: last_common=199299, tip=199300,
  * lowest_missing=twin of the active tip).
  *
- * A hole that is not a descendant of `tip` is dropped. Descendants of the
- * connected tip (the way forward) are re-derived from `tip`.
+ * A hole that is not a descendant of `tip` is dropped, except a strictly
+ * heavier competing fork (live 2026-08-28: last_common snapped to 199312,
+ * lowest_missing dropped, root-first select=no_missing_body
+ * reason=advanced_past_active_tip, inflight=0 while peers advertised
+ * 199596). Descendants of the connected tip (the way forward) are
+ * re-derived from `tip`.
  */
 LastCommonRootFirstResult AdvanceLastCommonPastActiveTip(LastCommonRootFirstResult in,
                                                          const CBlockIndex* tip,

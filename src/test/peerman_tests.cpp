@@ -7437,6 +7437,93 @@ BOOST_AUTO_TEST_CASE(heavier_competing_fork_probes_and_getdata_past_short_reorg)
     node::matmul_trusted::ResetForTest();
 }
 
+BOOST_AUTO_TEST_CASE(heavier_competing_fork_n_plus_72_getdata_fork_child)
+{
+    // Operator 2026-08-28: tip N, accepted BestKnown N+72 forking at N-k
+    // (live k=14, peer 275 synH=199384 vs tip 199312). lowest_missing is
+    // the fork child; GETDATA must go out even past short-reorg depth 6.
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    node::matmul_trusted::ResetForTest();
+    ResetSharedPeermanFixture(m_node);
+    ChainstateManager& chainman{*Assert(m_node.chainman)};
+    PeerManager& peerman{*Assert(m_node.peerman)};
+    ConnmanTestMsg& connman{static_cast<ConnmanTestMsg&>(*m_node.connman)};
+
+    constexpr int k_below{14};
+    constexpr int k_ahead{72};
+    const CBlockIndex* fork_root{
+        WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip())};
+    BOOST_REQUIRE(fork_root != nullptr);
+    for (int i = 0; i < k_below; ++i) {
+        mineBlock(m_node, std::chrono::seconds{fork_root->GetBlockTime() + 1 + i});
+    }
+    const CBlockIndex* tip{
+        WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip())};
+    BOOST_REQUIRE(tip != nullptr);
+    BOOST_REQUIRE_EQUAL(tip->nHeight, fork_root->nHeight + k_below);
+    {
+        LOCK(::cs_main);
+        for (CBlockIndex* walk{const_cast<CBlockIndex*>(tip)}; walk != nullptr;
+             walk = walk->pprev) {
+            walk->nAuthenticatedChainWork = walk->nChainWork;
+        }
+        chainman.SetBestHeader(const_cast<CBlockIndex*>(tip));
+        peerman.SetBestBlock(tip->nHeight,
+                             std::chrono::seconds{tip->GetBlockTime()});
+    }
+
+    std::vector<CBlockIndex*> fork;
+    const CBlockIndex* walk{fork_root};
+    for (int i = 0; i < k_below + k_ahead; ++i) {
+        fork.push_back(MakePeermanHeaderChild(chainman, *walk, 0xb0 + (i & 0xff)));
+        walk = fork.back();
+    }
+    BOOST_REQUIRE_EQUAL(fork.size(), static_cast<size_t>(k_below + k_ahead));
+    BOOST_REQUIRE_EQUAL(fork.back()->nHeight, tip->nHeight + k_ahead);
+    BOOST_CHECK(WITH_LOCK(::cs_main, return fork.back()->GetAncestor(tip->nHeight) != tip));
+    BOOST_CHECK(WITH_LOCK(::cs_main, return fork.back()->nChainWork > tip->nChainWork));
+
+    SetMockTime(std::chrono::seconds{tip->GetBlockTime() + 55 * 3600});
+    BOOST_REQUIRE(!chainman.IsInitialBlockDownload());
+
+    const ServiceFlags services{ServiceFlags(
+        NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS)};
+    CNode peer{/*id=*/5400, /*sock=*/nullptr, CAddress{},
+               /*nKeyedNetGroupIn=*/5400, /*nLocalHostNonceIn=*/0,
+               CAddress{}, /*addrNameIn=*/"heavier-fork-n-plus-72",
+               ConnectionType::OUTBOUND_FULL_RELAY,
+               /*inbound_onion=*/false, /*network_key=*/0};
+    connman.Handshake(peer, /*successfully_connected=*/true, services, services,
+                      PROTOCOL_VERSION, /*relay_txs=*/true,
+                      /*starting_height=*/fork.back()->nHeight);
+    connman.FlushSendBuffer(peer);
+
+    std::vector<CBlock> hdrs;
+    hdrs.reserve(fork.size());
+    for (CBlockIndex* idx : fork) hdrs.emplace_back(idx->GetBlockHeader());
+    BOOST_REQUIRE(connman.ReceiveMsgFrom(
+        peer, NetMsg::Make(NetMsgType::HEADERS, TX_WITH_WITNESS(hdrs))));
+    peer.fPauseSend = false;
+    (void)connman.ProcessMessagesOnce(peer);
+    connman.FlushSendBuffer(peer);
+
+    CNodeStateStats learned;
+    BOOST_REQUIRE(peerman.GetNodeStateStats(peer.GetId(), learned));
+    BOOST_CHECK_EQUAL(learned.nSyncHeight, fork.back()->nHeight);
+
+    SetMockTime(std::chrono::seconds{GetTime() + 180});
+    peer.fPauseSend = false;
+    BOOST_CHECK(peerman.SendMessages(&peer));
+    BOOST_REQUIRE_MESSAGE(
+        CountQueuedGetDataForHash(peer, fork.front()->GetBlockHash()) > 0,
+        "heavier competing fork N+72 forking at N-k must GETDATA the fork child");
+
+    peerman.FinalizeNode(peer);
+    NeutralizeUnconnectedHeaders(chainman);
+    peerman.ResetMatMulVerifyAdmissionForTest();
+    node::matmul_trusted::ResetForTest();
+}
+
 BOOST_AUTO_TEST_CASE(must_probe_getheaders_without_sync_slot_or_network)
 {
     // Live 2026-08-28: HeaderSyncMustProbe was true (VERSION 199546 vs tip

@@ -396,6 +396,19 @@ LastCommonRootFirstResult AdvanceLastCommonPastActiveTip(LastCommonRootFirstResu
     if (tip == nullptr || in.last_common == nullptr) return in;
     if (in.last_common->nHeight >= tip->nHeight) return in;
 
+    // F3 dropped equal-work EncDr twins so they could not occupy inflight.
+    // A strictly heavier competing fork has its missing root at or below
+    // the connected tip (live 2026-08-28: hole 199304 vs tip 199312, LCA
+    // 199294, claimed work of headers-only 199384 > active 199312). Snapping
+    // last_common onto the active tip drops that hole; FindNextBlocks then
+    // skips every competing hash with height <= tip. Keep ClampLastCommon's
+    // last_common + lowest_missing so GETDATA can start at the fork root.
+    if (best_known != nullptr &&
+        best_known->nChainWork > tip->nChainWork &&
+        best_known->GetAncestor(tip->nHeight) != tip) {
+        return in;
+    }
+
     LastCommonRootFirstResult out = in;
     out.last_common = tip;
     out.clamped = true;
@@ -406,11 +419,20 @@ LastCommonRootFirstResult AdvanceLastCommonPastActiveTip(LastCommonRootFirstResu
     }
     out.lowest_missing = FindLowestMissingBody(tip, best_known, active_chain);
     // FindLowestMissingBody LCAs `tip` with `best_known`, so a sibling fork
-    // still yields a hole at or below the connected tip. That is the live
-    // pin; drop it. Keep only descendants of the connected tip.
+    // still yields a hole at or below the connected tip. Equal-work EncDr
+    // twins are the F3 pin: drop those. A strictly heavier competing fork
+    // must keep the hole (live 2026-08-28: 199299 vs tip 199312).
     if (out.lowest_missing != nullptr &&
         out.lowest_missing->GetAncestor(tip->nHeight) != tip) {
-        out.lowest_missing = nullptr;
+        const bool heavier_fork{
+            best_known != nullptr &&
+            best_known->nChainWork > tip->nChainWork &&
+            best_known->GetAncestor(tip->nHeight) != tip &&
+            best_known->GetAncestor(out.lowest_missing->nHeight) ==
+                out.lowest_missing};
+        if (!heavier_fork) {
+            out.lowest_missing = nullptr;
+        }
     }
     return out;
 }

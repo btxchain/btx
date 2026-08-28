@@ -10208,9 +10208,20 @@ CBlockIndex* Chainstate::FindMostWorkChain()
             // same candidate escape PARK; applying hysteresis here first would
             // make the escape unreachable when the branch is only one-work-unit
             // ahead (the normal already-have-data recovery case).
+            const bool stale_heavier_escape{
+                old_tip != nullptr &&
+                node::matmul_trusted::ConsensusMinerMayReorgPastParkForStaleHeavierFork(
+                    node::matmul_trusted::IsTrustedMirror(),
+                    pindexNew->nHeight >= old_tip->nHeight &&
+                        pindexNew->GetAncestor(old_tip->nHeight) == old_tip,
+                    pindexNew->nChainWork > old_tip->nChainWork,
+                    node::matmul_trusted::ConsensusMinerTipStaleVsDirectFetchWindow(
+                        old_tip->GetBlockTime(), GetTime(),
+                        consensus_params.nPowTargetSpacing))};
             const bool recovery_escape{
                 m_chainman.IsAutomaticReorgRecoveryCandidate(pindexNew) ||
-                m_chainman.IsAttestedAbandonForkCandidate(pindexNew)};
+                m_chainman.IsAttestedAbandonForkCandidate(pindexNew) ||
+                stale_heavier_escape};
             if (old_tip != nullptr &&
                 fork != nullptr &&
                 fork != old_tip &&
@@ -10418,9 +10429,21 @@ bool Chainstate::ActivateBestChainStep(BlockValidationState& state, CBlockIndex*
         const bool warn =
             warn_depth != kernel::REORG_PROTECTION_DEPTH_DISABLED &&
             reorg_depth > static_cast<int>(warn_depth);
+        const bool stale_heavier_escape{
+            pindexOldTip != nullptr &&
+            node::matmul_trusted::ConsensusMinerMayReorgPastParkForStaleHeavierFork(
+                node::matmul_trusted::IsTrustedMirror(),
+                pindexMostWork->nHeight >= pindexOldTip->nHeight &&
+                    pindexMostWork->GetAncestor(pindexOldTip->nHeight) ==
+                        pindexOldTip,
+                pindexMostWork->nChainWork > pindexOldTip->nChainWork,
+                node::matmul_trusted::ConsensusMinerTipStaleVsDirectFetchWindow(
+                    pindexOldTip->GetBlockTime(), GetTime(),
+                    consensus_params.nPowTargetSpacing))};
         const bool recovery_escape{
             m_chainman.IsAutomaticReorgRecoveryCandidate(pindexMostWork) ||
-            m_chainman.IsAttestedAbandonForkCandidate(pindexMostWork)};
+            m_chainman.IsAttestedAbandonForkCandidate(pindexMostWork) ||
+            stale_heavier_escape};
         const bool park = kernel::DeepReorgShouldPark(
             cm_opts.deep_reorg_action, park_depth, reorg_depth, recovery_escape);
 
@@ -21081,8 +21104,19 @@ void ChainstateManager::EnsureBestHeaderNotBehindConnectedTip()
         SetBestHeader(tip);
         return;
     }
+
+    // BLOCK_FAILED_MASK covers FAILED_VALID and FAILED_CHILD. Do not call
+    // RecalculateBestHeader from here: that function returns through this
+    // path and would recurse.
+    const bool failed_branch{
+        (m_best_header->nStatus & BLOCK_FAILED_MASK) != 0 ||
+        !m_best_header->IsValid(BLOCK_VALID_TREE)};
     const bool follows_tip{m_best_header->nHeight >= tip->nHeight &&
                            m_best_header->GetAncestor(tip->nHeight) == tip};
+    if (failed_branch) {
+        SetBestHeader(tip);
+        return;
+    }
     if (!follows_tip && m_best_header->nHeight < tip->nHeight) {
         SetBestHeader(tip);
     }

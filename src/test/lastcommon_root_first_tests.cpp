@@ -299,4 +299,102 @@ BOOST_AUTO_TEST_CASE(last_common_behind_tip_advances_past_same_height_twin)
     BOOST_CHECK(advanced.lowest_missing == nullptr);
 }
 
+BOOST_AUTO_TEST_CASE(heavier_competing_fork_keeps_missing_root_below_tip)
+{
+    // Live 2026-08-28: AdvanceLastCommonPastActiveTip snapped last_common
+    // to tip 199312 and dropped lowest_missing=199304 on a heavier fork
+    // (LCA 199294). FindNextBlocks then skipped every competing hash with
+    // height <= tip (F3), so GETDATA never fired while getheaders did.
+    ChainFixture f;
+    CBlockIndex* genesis = f.Add(nullptr, 0);
+    ChainFixture::MarkHaveData(genesis, /*have_chain_txs=*/true);
+
+    std::vector<CBlockIndex*> active_blocks;
+    active_blocks.push_back(genesis);
+    for (int h = 1; h <= 8; ++h) {
+        CBlockIndex* idx = f.Add(active_blocks.back(), h);
+        ChainFixture::MarkHaveData(idx, /*have_chain_txs=*/true);
+        active_blocks.push_back(idx);
+    }
+    CBlockIndex* tip = active_blocks.back();
+
+    std::vector<CBlockIndex*> fork;
+    fork.push_back(genesis);
+    for (int h = 1; h <= 16; ++h) {
+        fork.push_back(f.Add(fork.back(), h));
+    }
+    BOOST_CHECK(fork.back()->nChainWork > tip->nChainWork);
+    BOOST_CHECK(fork.back()->GetAncestor(tip->nHeight) != tip);
+
+    CChain active;
+    active.SetTip(*tip);
+
+    const LastCommonRootFirstResult clamped = ClampLastCommonToRootFirst(
+        /*last_common=*/genesis,
+        /*best_known=*/fork.back(),
+        /*tip=*/tip,
+        &active);
+    BOOST_REQUIRE(clamped.lowest_missing != nullptr);
+    BOOST_CHECK_EQUAL(clamped.lowest_missing->nHeight, 1);
+    BOOST_CHECK_EQUAL(clamped.last_common->nHeight, 0);
+
+    const LastCommonRootFirstResult advanced = AdvanceLastCommonPastActiveTip(
+        clamped, tip, fork.back(), &active);
+    BOOST_REQUIRE(advanced.lowest_missing != nullptr);
+    BOOST_CHECK_EQUAL(advanced.lowest_missing->nHeight, 1);
+    BOOST_CHECK_EQUAL(advanced.last_common->nHeight, 0);
+    BOOST_CHECK(advanced.last_common != tip);
+}
+
+BOOST_AUTO_TEST_CASE(heavier_fork_n_plus_72_keeps_fork_child_missing)
+{
+    // Operator 2026-08-28: tip N, BestKnown N+72 forking at N-k (live k=14,
+    // headers 199384 vs tip 199312, LCA 199298). lowest_missing must be
+    // the fork child, not none.
+    constexpr int k_below{14};
+    constexpr int k_ahead{72};
+    ChainFixture f;
+    CBlockIndex* genesis = f.Add(nullptr, 0);
+    ChainFixture::MarkHaveData(genesis, /*have_chain_txs=*/true);
+
+    std::vector<CBlockIndex*> active_blocks;
+    active_blocks.push_back(genesis);
+    for (int h = 1; h <= k_below; ++h) {
+        CBlockIndex* idx = f.Add(active_blocks.back(), h);
+        ChainFixture::MarkHaveData(idx, /*have_chain_txs=*/true);
+        active_blocks.push_back(idx);
+    }
+    CBlockIndex* tip = active_blocks.back();
+    BOOST_CHECK_EQUAL(tip->nHeight, k_below);
+
+    std::vector<CBlockIndex*> fork;
+    fork.push_back(genesis);
+    for (int h = 1; h <= k_below + k_ahead; ++h) {
+        fork.push_back(f.Add(fork.back(), h));
+    }
+    BOOST_CHECK_EQUAL(fork.back()->nHeight, k_below + k_ahead);
+    BOOST_CHECK(fork.back()->nChainWork > tip->nChainWork);
+    BOOST_CHECK(fork.back()->GetAncestor(tip->nHeight) != tip);
+
+    CChain active;
+    active.SetTip(*tip);
+
+    const LastCommonRootFirstResult clamped = ClampLastCommonToRootFirst(
+        /*last_common=*/genesis,
+        /*best_known=*/fork.back(),
+        /*tip=*/tip,
+        &active);
+    BOOST_REQUIRE(clamped.lowest_missing != nullptr);
+    BOOST_CHECK_EQUAL(clamped.lowest_missing->nHeight, 1);
+    BOOST_CHECK(clamped.lowest_missing == fork[1]);
+
+    const LastCommonRootFirstResult advanced = AdvanceLastCommonPastActiveTip(
+        clamped, tip, fork.back(), &active);
+    BOOST_REQUIRE(advanced.lowest_missing != nullptr);
+    BOOST_CHECK_EQUAL(advanced.lowest_missing->nHeight, 1);
+    BOOST_CHECK(advanced.lowest_missing == fork[1]);
+    BOOST_CHECK_EQUAL(advanced.last_common->nHeight, 0);
+    BOOST_CHECK(advanced.last_common != tip);
+}
+
 BOOST_AUTO_TEST_SUITE_END()
