@@ -17,7 +17,6 @@ RcExactReplaySlotReuseOrderingTestResult
 RunRcExactReplaySlotReuseOrderingTest()
 {
     RcExactReplaySlotReuseOrderingTestResult result;
-    result.interlock_supported = false;
     result.detail = "CUDA ExactReplay unavailable";
     return result;
 }
