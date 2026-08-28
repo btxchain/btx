@@ -437,7 +437,7 @@ for be in backends[1:]:
             if record.get(field) != ref_record.get(field) or record.get(field) is None:
                 mismatches.append({"nonce": n, "backend": be, "reason": f"{field}_mismatch"})
 
-required = {"cuda"}
+required = set(backends)
 present = set(backends)
 cuda_metal_present = {"cuda", "metal"}.issubset(present)
 cuda_metal_failures = [
@@ -491,7 +491,7 @@ payload = {
         for be in backends
     },
     "notes": [
-        "This tree ships the classes it measured (CUDA). Additional Metal/HIP rows are added by the builder that measured them.",
+        "This tree ships the classes it measured. A cohort of one admitted family (Metal-only, CUDA-only, HIP-only) is valid; extra families must byte-match.",
         "When more than one GPU backend is present they must be byte-identical on the same frozen canary headers.",
         "HIP remains an optional provider; any supplied HIP corpus must match the required cohort exactly.",
         "CPU ExactReplay is not an accepted independent reproduction path for Epoch-A production goldens.",
@@ -515,7 +515,7 @@ print(json.dumps({"wrote": str(out_path), "cuda_metal_match": cuda_metal_match, 
 if mismatches or coverage_failures:
     raise SystemExit("header/digest/coverage mismatch across backends")
 if not complete_match and not allow_partial:
-    raise SystemExit("incomplete production-golden set (need cuda with matching digests)")
+    raise SystemExit("incomplete production-golden set (measured backends must agree)")
 PY
 
 # Re-parse the raw artifacts through the release-grade validator.  The legacy

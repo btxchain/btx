@@ -147,11 +147,10 @@ private:
 
 /** Reviewed production goldens compiled into this source revision.
  *
- * This tree ships the classes it measured (CUDA). Additional provider rows
- * (Metal class, HIP, …) are added by the builder that measured them, in that
- * builder's manifest, then resealed. Portable CPU is not an accepted
- * independent reproduction path. Extra families present in a cohort must
- * byte-match the CUDA digest.
+ * This tree ships the classes it measured. Additional provider rows
+ * are added by the builder that measured them, in that builder's
+ * manifest. Portable CPU is not an accepted independent reproduction
+ * path. Extra families present in a cohort must byte-match each other.
  */
 [[nodiscard]] const std::vector<RCProductionGoldenManifestEntry>&
 CommittedRCProductionGoldenManifest();
@@ -161,7 +160,8 @@ CommittedRCProductionGoldenManifest();
 [[nodiscard]] std::vector<RCProductionGoldenManifestEntry>
 ParseRCProductionGoldenManifestData(std::string_view encoded);
 
-/** Require one coherent independently reproduced CUDA cohort; other families optional. */
+/** Require one coherent independently reproduced cohort. Any single
+ *  admitted family (CUDA, Metal, HIP, …) is enough; CUDA is not required. */
 [[nodiscard]] bool RCProductionGoldenManifestCohortValid(
     const std::vector<RCProductionGoldenManifestEntry>& manifest);
 

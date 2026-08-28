@@ -198,9 +198,7 @@ bool GoldenEvidenceIdentityValid(
 
 // A provider family and a device architecture that cannot describe the same
 // hardware are a data-entry error at best. Reject the combination outright so a
-// hand-written manifest entry cannot claim, say, {family:"metal", arch:"sm_120"}
-// and thereby satisfy the two-provider cohort requirement with one vendor's
-// silicon named twice.
+// hand-written manifest entry cannot claim, say, {family:"metal", arch:"sm_120"}.
 bool GoldenArchitectureMatchesFamily(const std::string& family,
                                      const std::string& architecture)
 {
@@ -219,10 +217,9 @@ bool GoldenArchitectureMatchesFamily(const std::string& family,
             architecture.compare(architecture.size() - 6, 6, "_class") == 0 &&
             architecture.front() == 'm';
     }
-    // Unknown families are not eligible for the production cohort. Requiring
-    // CUDA plus Metal is not enough by itself: otherwise an arbitrary third
-    // entry can acquire manifest authority without a defined architecture
-    // binding or a production identity probe.
+    // Unknown families are not eligible for the production cohort: an
+    // arbitrary third entry must not acquire manifest authority without a
+    // defined architecture binding or a production identity probe.
     return false;
 }
 
@@ -436,13 +433,12 @@ std::string ReadPublicSysctlString(const char* name)
 bool RCProductionGoldenManifestCohortValid(
     const std::vector<RCProductionGoldenManifestEntry>& manifest)
 {
-    // This line ships the classes it measured. CUDA is required. Metal (and
-    // HIP) rows are optional: a fork adds them to *its* manifest after it
-    // measures. Requiring Metal here forced either a name-class blessing or a
-    // third-party submission, both of which 0.34 exists to stop.
+    // Any non-empty set of coherent rows is a valid cohort. CUDA is not
+    // required: a Metal-only (or HIP-only) fork must be able to ship a
+    // manifest measured on hardware it actually owns. Rows must still agree
+    // on workload, digest, source_revision, and source_tree_fingerprint.
     if (manifest.empty()) return false;
     const auto& reference{manifest.front()};
-    bool has_cuda{false};
     std::set<std::pair<std::string, std::string>> provider_classes;
     for (const auto& entry : manifest) {
         if (!entry.independently_reproduced || entry.expected_digest.IsNull() ||
@@ -472,9 +468,8 @@ bool RCProductionGoldenManifestCohortValid(
             entry.provider_class.provider_family,
             entry.provider_class.device_architecture)};
         if (!provider_classes.insert(provider_class).second) return false;
-        has_cuda = has_cuda || entry.provider_class.provider_family == "cuda";
     }
-    return has_cuda;
+    return true;
 }
 
 bool RCProductionGoldenManifestMatchesBuild(
@@ -718,12 +713,20 @@ static RCProductionCanaryStatus RunRCProductionStartupCanaryImpl(
     }
 
     if (!out.build_provenance_matches) {
-        out.outcome = RCProductionCanaryOutcome::BuildProvenanceMismatch;
-        out.reason = out.build_source_dirty
-            ? "running_binary_built_from_dirty_source"
-            : "production_manifest_does_not_match_running_binary";
-        StoreStatus(out);
-        return out;
+        // Advisory only (0.34.5). A source-tree fingerprint is an authorship
+        // claim about who compiled this binary, not a check that ExactReplay
+        // is byte-identical. Skipping the episode here used to withhold
+        // NODE_MATMUL_CONSENSUS and clear the GEMM backend, so a clone that
+        // self-qualified on its own GPU could not validate. Continue; the
+        // CPU-versus-GPU ExactGemmS8S8 self-qual and the digest check below
+        // remain fail-closed. build_provenance_matches stays false for RPC.
+        LogPrintf(
+            "MatMul RC production canary: build provenance is advisory "
+            "(matches=0 dirty=%d fingerprint=%s). Continuing to runtime "
+            "ExactGemm self-qualification and digest check; this is not a "
+            "startup refusal.\n",
+            out.build_source_dirty ? 1 : 0,
+            out.build_source_tree_fingerprint);
     }
 
     if (!out.provider_identity.complete) {

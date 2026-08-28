@@ -55,15 +55,15 @@ Any other change in that scope — including a one-line compile fix — moves th
 fingerprint and burns any corpus already recorded against the previous freeze.
 
 **Source-build path.** A tree compiled after `F` without a matching
-seal is not the released binary. The production canary fails
-`build_provenance_mismatch` and mining / `NODE_MATMUL_CONSENSUS` stay
-fail-closed. **Startup does not exit.** Consensus mode warns
-(`MatMul RC DEGRADED START`), joins discovery and header-sync, and
-stalls at the RC body boundary until a qualified device is present or
-the operator reseals goldens against the new fingerprint (below) and
-relinks. `-allowunverifiablematmulconsensus` is a deprecated no-op kept
-so existing config lines are not an InitError. Forks are expected to
-measure their own goldens; they are not expected to have ours.
+seal is not the released binary. The production canary still *runs*
+the ExactGemm CPU-versus-GPU self-qual and, when a golden row exists,
+the production-shape digest check. **Build provenance is advisory.**
+`build_provenance_mismatch` warns and continues; it does not exit and
+it does not skip verification. Mining / `NODE_MATMUL_CONSENSUS` follow
+runtime self-qualification and digest agreement, not the source-tree
+fingerprint. A fork measures its own goldens on hardware it owns; a
+Metal-only (or HIP-only) cohort is valid. `-allowunverifiablematmulconsensus`
+is a deprecated no-op.
 
 CPU ExactReplay is not an independent production golden. The required cohort is
 **CUDA**. Metal and HIP are optional; if supplied they must match exactly.

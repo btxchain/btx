@@ -179,14 +179,14 @@ competing-fork follow-up (0.34.4 closed the header gap; it did not
 request the heavier 33c834f8 fork). Keep Metal `.metallib` files next
 to `btxd`. Back up wallets and configuration before upgrading.
 
-**Building 0.34.5 from source starts; it does not mine until resealed.**
-Compiling moves the BUILD_RELEVANT fingerprint. The production canary
-then fails `build_provenance_mismatch` and ExactReplay is not
-self-qualified, so `NODE_MATMUL_CONSENSUS` is withheld. The process
-**starts** (`MatMul RC DEGRADED START`), can discover peers and sync
-headers, and stalls at the RC body boundary. Reseal goldens against
-the new fingerprint (see [release-process.md](release-process.md)).
-`-allowunverifiablematmulconsensus` is a deprecated no-op.
+**Building 0.34.5 from source is how a fork is supposed to work.**
+Compile, self-qualify ExactGemmS8S8 on *your* GPU (CPU-versus-device
+must be byte-identical), and participate. Consensus judges your
+blocks. **Build provenance is advisory:** a source-tree fingerprint
+mismatch warns and continues; it does not exit and it does not skip
+verification. A Metal-only (or HIP-only) golden cohort is valid; CUDA
+hardware is not required to ship a manifest.
+`-allowunverifiablematmulconsensus` is a deprecated no-op. Remove it.
 
 Tarball SHA256s are filled in when the three assets are staged (Linux
 CPU, Linux CUDA, macOS arm64 Metal). Every shipped `btxd` is linked
@@ -234,8 +234,23 @@ build then **exited** at startup, which looked like the same failure.
 - Doc correction: do **not** `invalidateblock` 33c834f8. Recover with
   `reconsiderblock` if you already did.
 - Consensus/CPU/source-build **starts** without
-  `-allowunverifiablematmulconsensus` (deprecated no-op). Mining stays
-  fail-closed until canary=passed.
+  `-allowunverifiablematmulconsensus` (deprecated no-op).
+- **Build provenance is advisory.** `build_provenance_mismatch` warns
+  and continues. Runtime ExactGemmS8S8 CPU-versus-GPU self-qual stays
+  fail-closed; that is the real protection. The fingerprint is an
+  authorship claim, not a correctness property. A clone that self-
+  qualifies on its own hardware validates; consensus judges the blocks.
+  Case provenance *would* have caught that self-qual at toy/medium
+  shape can miss a production-shape digest bug: the production canary
+  episode still runs when a golden row exists and still fail-closes on
+  `digest_mismatch`. It no longer fail-closes on fingerprint alone.
+- **CUDA is not required to ship a manifest.**
+  `RCProductionGoldenManifestCohortValid` accepts a Metal-only or
+  HIP-only cohort. Rows in one cohort still share `source_revision`,
+  fingerprint, and digest. Requiring Nvidia silicon to publish goldens
+  was a vendor dependency; MendeMatthias could not self-seal an
+  Apple-only fork without either buying CUDA hardware or rebinding a
+  CUDA row he had not measured.
 
 **Dropped (invalidateblock workarounds, never shipped):**
 
@@ -285,20 +300,28 @@ operator path is Case A `reconsiderblock`, not another invalidate.
 stalls; this follow-up is the remaining catch-up hole they pointed at
 from chaintips and per-peer bytes.
 
-## 0.34.5: source-build and CPU tarball start without a diagnostic flag
+## 0.34.5: provenance is advisory; a single-family cohort is valid
 
-0.34.4 exited (`InitError`) when consensus mode had no qualified
-ExactReplay provider: CPU tarball (`workspace_capacity=0`), and any
-`cmake --build` whose fingerprint no longer matched the sealed goldens
-(`canary=build_provenance_mismatch`). A fresh datadir then looked like
-a seed/discovery failure because the process never stayed up.
+0.34.4 treated `build_provenance_mismatch` as a hard canary failure:
+the episode never ran, GEMM was cleared, and consensus startup
+`InitError`'d unless `-allowunverifiablematmulconsensus=1`. A source
+build and a CPU tarball looked like a dead node. That is not
+decentralized.
 
-0.34.5 **starts**. It warns `MatMul RC DEGRADED START`, withholds
-`NODE_MATMUL_CONSENSUS`, joins GETADDR, and stalls at the RC body
-boundary until a qualified GPU is present or goldens are resealed.
-Mining remains fail-closed. `-allowunverifiablematmulconsensus` is a
-deprecated no-op kept so existing `btx.conf` lines are not an error.
-Remove it.
+0.34.5:
+
+- **Starts.** No diagnostic flag. CPU without a GPU warns
+  `MatMul RC DEGRADED START`, withholds `NODE_MATMUL_CONSENSUS`, and
+  stalls at the RC body boundary (it cannot ExactReplay Profile-1).
+- **Provenance warns.** Fingerprint miss logs `build provenance is
+  advisory` and continues. Self-qual and (when a golden row exists)
+  the production-shape digest check still fail closed.
+- **One family is enough.** Metal-only and HIP-only manifests are
+  valid. CUDA is not a gate.
+
+Remove `allowunverifiablematmulconsensus` from every `btx.conf`. If a
+legitimately built node still needs that flag, that is a bug in this
+change.
 
 ## 0.34.3: consensus ExactReplay deadlock (tag v0.34.2)
 

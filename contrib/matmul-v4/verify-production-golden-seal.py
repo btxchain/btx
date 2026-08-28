@@ -339,8 +339,8 @@ def comparison_payload(
                         {"nonce": expected["header_nonce"], "backend": artifact.backend, "reason": f"{field}_mismatch"}
                     )
     present = {artifact.backend for artifact in artifacts}
-    required = {"cuda"}
-    complete = required.issubset(present) and not mismatches
+    required = present
+    complete = required.issubset(present) and not mismatches and bool(required)
     cuda_metal = {"cuda", "metal"}.issubset(present) and not mismatches
     payload = {
         "evidence_kind": "multi_gpu_profile1_exactreplay_golden_compare",
@@ -352,7 +352,7 @@ def comparison_payload(
         "per_episode_consensus_macs": PER_EPISODE_MACS,
         "backends_requested": [artifact.backend for artifact in artifacts],
         "backends_succeeded": [artifact.backend for artifact in artifacts],
-        "required_for_manifest": ["cuda"],
+        "required_for_manifest": sorted(required),
         "complete_multi_gpu_match": complete,
         "cuda_metal_match": cuda_metal,
         "allow_partial": allow_partial,
@@ -422,7 +422,7 @@ def compare_command(args: argparse.Namespace) -> int:
     require(not payload["mismatches"], "header/digest mismatch across backends")
     require(
         payload["complete_multi_gpu_match"] or args.allow_partial,
-        "incomplete production-golden set (need cuda with matching digests)",
+        "incomplete production-golden set (measured backends must agree)",
     )
     return 0
 
@@ -448,7 +448,7 @@ def parse_manifest(path: Path) -> list[ManifestEntry]:
     require("\r" not in text, f"{path}: manifest must use LF line endings")
     lines = text.splitlines()
     require(lines and lines[0] == MANIFEST_MAGIC, f"{path}: wrong manifest magic")
-    require(len(lines) >= 2, f"{path}: a CUDA entry is required")
+    require(len(lines) >= 2, f"{path}: at least one provider entry is required")
     entries: list[ManifestEntry] = []
     for line_number, line in enumerate(lines[1:], 2):
         fields = line.split("|")
@@ -551,7 +551,6 @@ def seal_command(args: argparse.Namespace) -> int:
         ("canary_nonce_start", 1),
         ("episodes", 8),
         ("per_episode_consensus_macs", PER_EPISODE_MACS),
-        ("required_for_manifest", ["cuda"]),
         ("complete_multi_gpu_match", True),
         ("allow_partial", False),
         ("mismatches", []),
@@ -559,9 +558,13 @@ def seal_command(args: argparse.Namespace) -> int:
     ):
         require(comparison.get(field) == expected, f"{compare_relative}: {field} mismatch")
     succeeded = set(comparison.get("backends_succeeded", []))
-    require("cuda" in succeeded, f"{compare_relative}: CUDA provider missing")
+    require(succeeded, f"{compare_relative}: no backends succeeded")
+    require(
+        set(comparison.get("required_for_manifest") or []) == succeeded,
+        f"{compare_relative}: required_for_manifest must equal the measured backends",
+    )
     require(families <= succeeded, f"{compare_relative}: manifest families missing from comparison")
-    if "metal" in families:
+    if "cuda" in families and "metal" in families:
         require(comparison.get("cuda_metal_match") is True, f"{compare_relative}: cuda_metal_match mismatch")
     by_backend = comparison.get("by_backend")
     require(isinstance(by_backend, dict), f"{compare_relative}: missing by_backend")

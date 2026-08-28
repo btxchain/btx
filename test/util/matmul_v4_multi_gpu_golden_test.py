@@ -225,9 +225,13 @@ class MultiGpuGoldenComparatorTest(unittest.TestCase):
         result = self.run_compare({"cuda": artifact("cuda"), "metal": artifact("metal")})
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_missing_metal_fails(self) -> None:
+    def test_cuda_only_cohort_passes(self) -> None:
         result = self.run_compare({"cuda": artifact("cuda")})
-        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_metal_only_cohort_passes(self) -> None:
+        result = self.run_compare({"metal": artifact("metal")})
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_optional_divergent_hip_fails(self) -> None:
         result = self.run_compare(

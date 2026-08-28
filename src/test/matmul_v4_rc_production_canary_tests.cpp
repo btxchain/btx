@@ -89,24 +89,21 @@ std::vector<rc::RCProductionGoldenManifestEntry> GoldenCohort()
 
 BOOST_AUTO_TEST_CASE(committed_manifest_is_a_valid_single_freeze_cohort)
 {
-    // Pins the property that made populating the manifest legitimate: a
-    // structurally valid cohort that includes CUDA, agrees on workload and
-    // provenance, and uses one row per provider class. Metal is optional.
+    // This tree currently ships CUDA (+ optional Metal). That is a property
+    // of *our* committed data, not of the validator: a Metal-only cohort
+    // must also be structurally valid (see golden_cohort_accepts_single_family).
     const auto& manifest{rc::CommittedRCProductionGoldenManifest()};
     BOOST_REQUIRE(!manifest.empty());
     BOOST_CHECK(rc::RCProductionGoldenManifestCohortValid(manifest));
 
     const auto& reference{manifest.front()};
-    bool has_cuda{false};
     for (const auto& entry : manifest) {
-        if (entry.provider_class.provider_family == "cuda") has_cuda = true;
         BOOST_CHECK(entry.independently_reproduced);
         BOOST_CHECK_EQUAL(entry.source_revision, reference.source_revision);
         BOOST_CHECK_EQUAL(entry.source_tree_fingerprint, reference.source_tree_fingerprint);
         BOOST_CHECK_EQUAL(entry.header_nonce, reference.header_nonce);
         BOOST_CHECK(entry.expected_digest == reference.expected_digest);
     }
-    BOOST_CHECK(has_cuda);
 }
 
 BOOST_AUTO_TEST_CASE(data_only_manifest_parser_is_strict_and_inert)
@@ -335,12 +332,14 @@ BOOST_AUTO_TEST_CASE(duplicate_exact_manifest_authority_fails_closed)
     BOOST_CHECK(rc::FindRCProductionGolden(Provider(), Epoch(), manifest) == nullptr);
 }
 
-BOOST_AUTO_TEST_CASE(golden_cohort_rejects_missing_or_divergent_backend)
+BOOST_AUTO_TEST_CASE(golden_cohort_rejects_divergent_backend)
 {
     auto cohort{GoldenCohort()};
     BOOST_CHECK(rc::RCProductionGoldenManifestCohortValid(cohort));
     BOOST_CHECK(rc::RCProductionGoldenManifestCohortValid({cohort[0]}));
-    BOOST_CHECK(!rc::RCProductionGoldenManifestCohortValid({cohort[1]}));
+    // Metal-only is a valid cohort. Requiring CUDA here is what blocked an
+    // Apple-only fork from shipping a manifest measured on its own silicon.
+    BOOST_CHECK(rc::RCProductionGoldenManifestCohortValid({cohort[1]}));
 
     auto divergent{cohort};
     divergent[1].expected_digest = NonNullDigest(0x43);
@@ -381,6 +380,33 @@ BOOST_AUTO_TEST_CASE(golden_cohort_rejects_missing_or_divergent_backend)
     };
     divergent.push_back(unknown);
     BOOST_CHECK(!rc::RCProductionGoldenManifestCohortValid(divergent));
+}
+
+BOOST_AUTO_TEST_CASE(golden_cohort_accepts_single_family)
+{
+    auto cohort{GoldenCohort()};
+    BOOST_CHECK(rc::RCProductionGoldenManifestCohortValid({cohort[0]}));
+    BOOST_CHECK(rc::RCProductionGoldenManifestCohortValid({cohort[1]}));
+
+    auto hip{Golden()};
+    hip.id = "unit-test-hip";
+    hip.provider_class = {
+        .provider_family = "hip",
+        .device_architecture = "gfx1200",
+    };
+    BOOST_CHECK(rc::RCProductionGoldenManifestCohortValid({hip}));
+    BOOST_CHECK(!rc::RCProductionGoldenManifestCohortValid({}));
+}
+
+BOOST_AUTO_TEST_CASE(build_provenance_mismatch_does_not_hide_a_valid_golden)
+{
+    // Provenance is advisory: a fingerprint miss must not make FindGolden
+    // return null or invalidate the cohort. Runtime ExactGemm still gates.
+    auto cohort{GoldenCohort()};
+    BOOST_REQUIRE(rc::RCProductionGoldenManifestCohortValid(cohort));
+    BOOST_CHECK(!rc::RCProductionGoldenManifestMatchesBuild(
+        cohort, std::string(64, '4'), /*build_source_dirty=*/false));
+    BOOST_CHECK(rc::FindRCProductionGolden(Provider(), Epoch(), cohort) != nullptr);
 }
 
 BOOST_AUTO_TEST_CASE(golden_cohort_must_match_clean_running_implementation)
