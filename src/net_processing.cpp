@@ -456,6 +456,17 @@ static bool IsNarrowCatchUpWindow(const ChainstateManager& chainman,
         node::CATCHUP_FAR_BEHIND_YIELD, uncapped);
 }
 
+/** Uncapped followed-header suffix is at least CATCHUP_FAR_BEHIND_YIELD.
+ *  Capped FollowedChainAhead is 0 on a local signer at frontier==tip with
+ *  a HEADER_ONLY suffix, so callers must use this, not blocks_behind. */
+static bool CatchUpFarBehind(const ChainstateManager& chainman,
+                             const CBlockIndex* peer_best = nullptr)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    return node::CatchUpFarBehindYieldsGpuProtect(
+        UncappedFollowedChainAhead(chainman, peer_best));
+}
+
 /** 1-wide GETDATA only while near the tip *and* not far behind. Signed-frontier
  *  catch-up used to clamp every peer to 1 even when 1136 headers sat ahead. */
 static bool CatchUpOneWideFetch(const ChainstateManager& chainman,
@@ -463,8 +474,7 @@ static bool CatchUpOneWideFetch(const ChainstateManager& chainman,
                                 const CBlockIndex* peer_best = nullptr)
     EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
-    if (node::CatchUpFarBehindYieldsGpuProtect(
-            UncappedFollowedChainAhead(chainman, peer_best))) {
+    if (CatchUpFarBehind(chainman, peer_best)) {
         return false;
     }
     return IsNarrowCatchUpWindow(chainman, peer_best) || signed_frontier_catch_up;
@@ -3756,14 +3766,20 @@ int PeerManagerImpl::ReclaimStaleInFlightBlockRequests(std::chrono::microseconds
         TargetSpacingForTip(m_chainman.ActiveTip(), m_chainparams.GetConsensus())};
     const auto spacing_deadline{
         BlockDownloadSpacingTimeout(spacing, std::max(0, m_peers_downloading_from - 1))};
-    const auto reclaim_after_default = DownloadFailoverCatchUp(m_chainman)
+    const bool far_behind{CatchUpFarBehind(m_chainman)};
+    const auto silence_deadline{
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            node::matmul_trusted::CATCHUP_PEER_SILENCE_TIMEOUT)};
+    const auto reclaim_after_default = far_behind
+                                   ? silence_deadline
+                                   : DownloadFailoverCatchUp(m_chainman)
                                    ? spacing_deadline
                                    : std::chrono::duration_cast<std::chrono::microseconds>(
                                          BLOCK_INFLIGHT_HARD_RECLAIM_AFTER);
     const bool signed_frontier_catch_up{IsSignedFrontierBodyCatchUp()};
     for (const auto& [nodeid, state] : m_node_states) {
         auto reclaim_after{reclaim_after_default};
-        if (DownloadFailoverCatchUp(m_chainman)) {
+        if (DownloadFailoverCatchUp(m_chainman) && !far_behind) {
             reclaim_after = std::max(CatchUpDownloadTimeoutForPeer(nodeid, state),
                                      spacing_deadline);
         }
@@ -3784,7 +3800,8 @@ int PeerManagerImpl::ReclaimStaleInFlightBlockRequests(std::chrono::microseconds
                                           ? entry.requested_at
                                           : state.m_downloading_since;
             const bool untimestamped = requested_at.count() == 0;
-            const auto limit{keep_gpu_pipeline ? gpu_reclaim_after : reclaim_after};
+            const auto limit{far_behind ? reclaim_after
+                                        : (keep_gpu_pipeline ? gpu_reclaim_after : reclaim_after)};
             const bool aged = !untimestamped && now >= requested_at + limit;
             if (!untimestamped && !aged) continue;
             stale.emplace_back(nodeid, entry.pindex->GetBlockHash());
@@ -3816,8 +3833,8 @@ int PeerManagerImpl::ReclaimStaleInFlightBlockRequests(std::chrono::microseconds
         peers_reclaimed.insert(nodeid);
     }
     // Pause stripped peers so the next FindNextBlocksToDownload pass prefers
-    // a different source. Do not pause the only signed-frontier archive/manual
-    // source: that hand-off is what filled 16 miner slots (live 2026-08-16).
+    // a different source. Do not pause when far behind (the GETDATA pool is
+    // tiny) or when this is the only signed-frontier archive/manual source.
     const int preferred_sources{CountSignedFrontierBodySources()};
     for (NodeId nodeid : peers_reclaimed) {
         if (CNodeState* state = State(nodeid)) {
@@ -3825,7 +3842,10 @@ int PeerManagerImpl::ReclaimStaleInFlightBlockRequests(std::chrono::microseconds
                 signed_frontier_catch_up &&
                 PeerIsSignedFrontierBodySource(nodeid, *state) &&
                 preferred_sources <= 1};
-            if (!keep_only_source) {
+            if (!keep_only_source &&
+                node::matmul_trusted::CatchUpMayPauseOnSlowDelivery(
+                    far_behind, /*keep_catchup_source=*/false,
+                    /*last_gpu_or_frontier_source=*/false)) {
                 state->m_block_download_paused_until =
                     now + BLOCK_DOWNLOAD_TIMEOUT_REREQUEST_COOLDOWN;
             }
@@ -3858,6 +3878,7 @@ int PeerManagerImpl::ExpireOverdueBlockDownloads(std::chrono::microseconds now)
 
     const bool suffix_failover{DownloadFailoverCatchUp(m_chainman)};
     const bool signed_frontier_catch_up{IsSignedFrontierBodyCatchUp()};
+    const bool far_behind{CatchUpFarBehind(m_chainman)};
     const auto followed_deadline{
         std::chrono::duration_cast<std::chrono::microseconds>(
             BLOCK_CATCHUP_DOWNLOAD_TIMEOUT)};
@@ -3896,6 +3917,25 @@ int PeerManagerImpl::ExpireOverdueBlockDownloads(std::chrono::microseconds now)
         const auto gpu_deadline{
             std::chrono::duration_cast<std::chrono::microseconds>(
                 BLOCK_INFLIGHT_HARD_RECLAIM_AFTER)};
+        uint64_t now_recv{0};
+        m_connman.ForNode(nodeid, [&](CNode* pnode) {
+            LOCK(pnode->cs_vRecv);
+            now_recv = pnode->nRecvBytes;
+            return true;
+        });
+        // Far behind: expire only when the peer has delivered nothing at
+        // all (no ~4KiB recv on any in-flight GETDATA). A peer that is
+        // feeding bodies on a 60–90s cadence must not lose other requests.
+        bool peer_delivering{false};
+        if (far_behind) {
+            for (const QueuedBlock& entry : state.vBlocksInFlight) {
+                if (now_recv > entry.recv_bytes_at_request + 4096) {
+                    peer_delivering = true;
+                    break;
+                }
+            }
+            if (peer_delivering) continue;
+        }
         std::optional<OverdueEntry> oldest;
         std::chrono::microseconds oldest_age{0us};
         for (const QueuedBlock& entry : state.vBlocksInFlight) {
@@ -3907,27 +3947,19 @@ int PeerManagerImpl::ExpireOverdueBlockDownloads(std::chrono::microseconds now)
             if (m_matmul_block_lifecycle.HasRetainedBody(entry.pindex->GetBlockHash())) {
                 continue;
             }
-            uint64_t now_recv{entry.recv_bytes_at_request};
-            m_connman.ForNode(nodeid, [&](CNode* pnode) {
-                LOCK(pnode->cs_vRecv);
-                now_recv = pnode->nRecvBytes;
-                return true;
-            });
-            // ~4KiB of new recv since GETDATA is a body on the wire / in
-            // msghand, not silence. Pings are far smaller.
             if (now_recv > entry.recv_bytes_at_request + 4096) continue;
 
             const auto requested_at = entry.requested_at.count() > 0
                                           ? entry.requested_at
                                           : state.m_downloading_since;
             const bool untimestamped = requested_at.count() == 0;
-            auto deadline = keep_gpu_pipeline ? gpu_deadline : spacing_deadline;
-            if (suffix_failover &&
-                hash_has_fresh_other_owner(entry.pindex->GetBlockHash(), nodeid)) {
-                // Unique-owner waits the spacing cadence. A duplicate that
-                // another peer already holds fresh may fail over at 15s.
-                deadline = std::min(deadline, followed_deadline);
-            }
+            const auto deadline = keep_gpu_pipeline && !far_behind
+                ? gpu_deadline
+                : node::matmul_trusted::CatchUpInFlightExpireDeadline(
+                      far_behind, spacing_deadline, followed_deadline,
+                      suffix_failover &&
+                          hash_has_fresh_other_owner(entry.pindex->GetBlockHash(),
+                                                     nodeid));
             if (!untimestamped && now < requested_at + deadline) {
                 continue;
             }
@@ -3963,7 +3995,10 @@ int PeerManagerImpl::ExpireOverdueBlockDownloads(std::chrono::microseconds now)
         const bool only_eligible_source{
             (peers_downloading_before <= 1) ||
             (last_gpu_or_frontier_source && capable_frontier_sources <= 1)};
-        if (keep_catchup_source && last_gpu_or_frontier_source) {
+        const bool may_pause{node::matmul_trusted::CatchUpMayPauseOnSlowDelivery(
+            far_behind, keep_catchup_source, last_gpu_or_frontier_source)};
+        if (node::matmul_trusted::CatchUpNeverPunishSlowDelivery(far_behind) ||
+            (keep_catchup_source && last_gpu_or_frontier_source)) {
             state->m_block_download_timeout_count = 0;
         } else {
             ++state->m_block_download_timeout_count;
@@ -3971,22 +4006,24 @@ int PeerManagerImpl::ExpireOverdueBlockDownloads(std::chrono::microseconds now)
         const bool persistent{
             state->m_block_download_timeout_count >=
             BLOCK_DOWNLOAD_TIMEOUT_DISCONNECT_AFTER};
-        const bool skip_pause{keep_catchup_source && last_gpu_or_frontier_source};
-        if (!skip_pause) {
+        if (may_pause) {
             state->m_block_download_paused_until =
                 now + (persistent ? MANUAL_PEER_BLOCK_DOWNLOAD_COOLDOWN
                                   : BLOCK_DOWNLOAD_TIMEOUT_REREQUEST_COOLDOWN);
         }
-        if (persistent && !state->m_manual && !state->m_noban &&
-            !keep_catchup_source && !only_eligible_source) {
+        if (node::matmul_trusted::CatchUpMayDisconnectOnSlowDelivery(
+                far_behind, persistent, state->m_manual || state->m_noban,
+                keep_catchup_source, only_eligible_source)) {
             disconnect.insert(item.nodeid);
         }
         LogInfo("Block download deadline: releasing %s (height %d) from "
-                "silent peer=%d after %ds; %s (consecutive_timeouts=%d%s%s)\n",
+                "silent peer=%d after %ds; %s (consecutive_timeouts=%d%s%s%s)\n",
                 item.hash.ToString(), item.height, item.nodeid, item.age_s,
-                skip_pause ? "kept last catch-up source" : "paused for re-request from a different peer",
+                may_pause ? "paused for re-request from a different peer"
+                          : "kept catch-up source",
                 state->m_block_download_timeout_count,
                 keep_catchup_source ? ", keep_catchup_source" : "",
+                far_behind ? ", far_behind" : "",
                 disconnect.count(item.nodeid) ? ", disconnecting" : "");
     }
 
@@ -12947,7 +12984,8 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
                                            node::matmul_trusted::IsTrustedMirror(),
                                            indexed->GetAncestor(tip->nHeight) == tip,
                                            indexed->pprev == tip,
-                                           indexed->nHeight, tip->nHeight)) {
+                                           indexed->nHeight, tip->nHeight,
+                                           CatchUpFarBehind(m_chainman, peer_best))) {
                                 // Root-first pipeline: keep HAVE_DATA so
                                 // ConnectTip ExactReplays in order. HEADER_ONLY
                                 // here discarded 16-wide GETDATA and left the
@@ -19914,7 +19952,12 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
             m_block_stalling_timeout.store(phase_floor);
             stalling_timeout = phase_floor;
         }
-        if (state.m_stalling_since.count() && state.m_stalling_since < current_time - stalling_timeout) {
+        const bool far_behind_download{CatchUpFarBehind(m_chainman, state.pindexBestKnownBlock)};
+        if (far_behind_download) {
+            // 750ms–2s stalling disconnect is self-harm during catch-up: the
+            // eligible GETDATA set is manual/noban plus outbound archive/mirror.
+            state.m_stalling_since = 0us;
+        } else if (state.m_stalling_since.count() && state.m_stalling_since < current_time - stalling_timeout) {
             // Stalling only triggers when the block download window cannot move. During normal steady state,
             // the download window should be much larger than the to-be-downloaded set of blocks, so disconnection
             // should only happen during initial block download.
@@ -19949,7 +19992,7 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
         // blocks so peers can't advertise non-existing block hashes to
         // unreasonably increase our timeout. The MAX cap stops the timeout from
         // growing without bound as peer count rises (HANDOVER item 2).
-        if (state.vBlocksInFlight.size() > 0) {
+        if (!far_behind_download && state.vBlocksInFlight.size() > 0) {
             QueuedBlock &queuedBlock = state.vBlocksInFlight.front();
             // Capture before RemoveBlockRequest may decrement the counter.
             const int peers_downloading_before = m_peers_downloading_from;
@@ -20262,9 +20305,12 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                 LogDebug(BCLog::NET, "Requesting block %s (%d) peer=%d\n", pindex->GetBlockHash().ToString(),
                     pindex->nHeight, pto->GetId());
             }
-            if (state.vBlocksInFlight.empty() && staller != -1) {
-                if (State(staller)->m_stalling_since == 0us) {
-                    State(staller)->m_stalling_since = current_time;
+            if (state.vBlocksInFlight.empty() && staller != -1 &&
+                !CatchUpFarBehind(m_chainman)) {
+                if (CNodeState* staller_state = State(staller);
+                    staller_state != nullptr &&
+                    staller_state->m_stalling_since == 0us) {
+                    staller_state->m_stalling_since = current_time;
                     LogDebug(BCLog::NET, "Stall started peer=%d\n", staller);
                 }
             }

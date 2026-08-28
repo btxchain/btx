@@ -1357,7 +1357,7 @@ static constexpr auto GETMMATTEST_HISTORICAL_TOKEN_REFILL{std::chrono::seconds{4
     bool signed_frontier_catch_up,
     int stall_headers_ahead = 2,
     int narrow_max_ahead = 32,
-    int far_behind_yield = 200,
+    int far_behind_yield = 100,
     int uncapped_ahead = -1)
 {
     if (ibd) return false;
@@ -1370,20 +1370,26 @@ static constexpr auto GETMMATTEST_HISTORICAL_TOKEN_REFILL{std::chrono::seconds{4
 
 /** Persist a followed-chain descendant (height > tip, ancestor at tip is
  *  the tip) as HAVE_DATA without occupying ExactReplay. ConnectTip still
- *  ExactReplays in root-first order. Immediate tip-children stay on the
- *  ExactReplay / HEADER_ONLY twin-storm path. Trusted mirrors keep their
- *  GETMMATTEST persist path. */
+ *  ExactReplays in root-first order. Near the tip, immediate children stay
+ *  on the ExactReplay / HEADER_ONLY twin-storm path and trusted mirrors
+ *  keep GETMMATTEST. Far behind, persist every followed-chain body we
+ *  actually need — dropping them to protect the GPU was the live HEADER_ONLY
+ *  re-getdata churn (180 drops / 3000 log lines after eae5de60). Competing
+ *  forks that do not extend the tip still drop. */
 [[nodiscard]] inline bool PersistFollowedSuffixBodyWithoutGpu(
     bool trusted_mirror,
     bool extends_active_tip,
     bool pprev_is_tip,
     int32_t index_height,
-    int32_t tip_height)
+    int32_t tip_height,
+    bool far_behind = false)
 {
-    if (trusted_mirror) return false;
     if (!extends_active_tip) return false;
+    if (index_height <= tip_height) return false;
+    if (far_behind) return true;
+    if (trusted_mirror) return false;
     if (pprev_is_tip) return false;
-    return index_height > tip_height;
+    return true;
 }
 
 /** Who may take getdata during signed-frontier catch-up.
@@ -1944,6 +1950,68 @@ static constexpr auto ARCHIVE_BLOCK_SERVE_WAIT_IDLE{std::chrono::milliseconds{50
         return true;
     }
     return signed_frontier_catch_up && !persistent_timeout;
+}
+
+/** Far-behind catch-up: expire a peer only after this much complete
+ *  silence (no ~4KiB recv progress on any in-flight GETDATA). Per-request
+ *  15s/90s was the live 177-release / 60-disconnect stall after eae5de60.
+ *  Bodies arrive on a 60–90s cadence; a few minutes of wait is still
+ *  faster than destroying the tiny archive GETDATA pool. */
+inline constexpr auto CATCHUP_PEER_SILENCE_TIMEOUT{std::chrono::minutes{5}};
+
+/** Slow delivery is not malice when we are the ones behind. Unconditional:
+ *  do not pause and do not disconnect for block-download timeouts. */
+[[nodiscard]] inline bool CatchUpNeverPunishSlowDelivery(bool far_behind)
+{
+    return far_behind;
+}
+
+/** Pause only when we are not far behind AND this is not the last GPU /
+ *  frontier source. keep_catchup_source alone is not enough: live logs
+ *  showed 128 keep_catchup_source hits with 144 pauses because skip_pause
+ *  also required last_gpu_or_frontier_source. */
+[[nodiscard]] inline bool CatchUpMayPauseOnSlowDelivery(
+    bool far_behind,
+    bool keep_catchup_source,
+    bool last_gpu_or_frontier_source)
+{
+    if (CatchUpNeverPunishSlowDelivery(far_behind)) return false;
+    return !(keep_catchup_source && last_gpu_or_frontier_source);
+}
+
+/** Disconnect only when not far behind, the timeout is persistent, the
+ *  peer is not manual/noban, keep_catchup_source is false, and we still
+ *  have another eligible source (peers_downloading_before /
+ *  CountCapableSignedFrontierBodySources). Far-behind is unconditional. */
+[[nodiscard]] inline bool CatchUpMayDisconnectOnSlowDelivery(
+    bool far_behind,
+    bool persistent,
+    bool manual_or_noban,
+    bool keep_catchup_source,
+    bool only_eligible_source)
+{
+    if (CatchUpNeverPunishSlowDelivery(far_behind)) return false;
+    return persistent && !manual_or_noban && !keep_catchup_source &&
+           !only_eligible_source;
+}
+
+/** In-flight expire deadline. Far behind: peer-silence window, never the
+ *  15s duplicate-owner clamp. Near tip: spacing formula, optionally
+ *  clamped to 15s when another peer already holds a fresh copy. */
+[[nodiscard]] inline std::chrono::microseconds CatchUpInFlightExpireDeadline(
+    bool far_behind,
+    std::chrono::microseconds spacing_deadline,
+    std::chrono::microseconds duplicate_clamp,
+    bool hash_has_fresh_other_owner)
+{
+    if (far_behind) {
+        return std::chrono::duration_cast<std::chrono::microseconds>(
+            CATCHUP_PEER_SILENCE_TIMEOUT);
+    }
+    if (hash_has_fresh_other_owner) {
+        return std::min(spacing_deadline, duplicate_clamp);
+    }
+    return spacing_deadline;
 }
 
 /** Archive msghand skip while bodies lag the GPU followed headers, not

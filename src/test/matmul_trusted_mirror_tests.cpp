@@ -1517,6 +1517,13 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
         /*trusted_mirror=*/true, true, false, 199338, 199336));
     BOOST_CHECK(!PersistFollowedSuffixBodyWithoutGpu(
         false, /*extends_active_tip=*/false, false, 199338, 199336));
+    BOOST_CHECK(PersistFollowedSuffixBodyWithoutGpu(
+        false, true, /*pprev_is_tip=*/true, 199337, 199336, /*far_behind=*/true));
+    BOOST_CHECK(PersistFollowedSuffixBodyWithoutGpu(
+        /*trusted_mirror=*/true, true, false, 199338, 199336, /*far_behind=*/true));
+    BOOST_CHECK(!PersistFollowedSuffixBodyWithoutGpu(
+        false, /*extends_active_tip=*/false, false, 199338, 199336,
+        /*far_behind=*/true));
     using node::matmul_trusted::PreferSignedFrontierCatchUpBlockPeer;
     BOOST_CHECK(!PreferSignedFrontierCatchUpBlockPeer(
         /*signed_frontier_catch_up=*/true, /*has_archive_bit=*/false,
@@ -2049,6 +2056,44 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(KeepCatchupSourceOnDownloadTimeout(true, true, true));
     BOOST_CHECK(KeepCatchupSourceOnDownloadTimeout(false, true, true));
     BOOST_CHECK(!KeepCatchupSourceOnDownloadTimeout(false, true, false));
+    using node::matmul_trusted::CatchUpNeverPunishSlowDelivery;
+    using node::matmul_trusted::CatchUpMayPauseOnSlowDelivery;
+    using node::matmul_trusted::CatchUpMayDisconnectOnSlowDelivery;
+    using node::matmul_trusted::CatchUpInFlightExpireDeadline;
+    BOOST_CHECK(!CatchUpNeverPunishSlowDelivery(/*far_behind=*/false));
+    BOOST_CHECK(CatchUpNeverPunishSlowDelivery(/*far_behind=*/true));
+    BOOST_CHECK(!CatchUpMayPauseOnSlowDelivery(
+        /*far_behind=*/true, /*keep_catchup_source=*/false,
+        /*last_gpu_or_frontier_source=*/false));
+    BOOST_CHECK(CatchUpMayPauseOnSlowDelivery(false, false, false));
+    BOOST_CHECK(!CatchUpMayPauseOnSlowDelivery(false, true, true));
+    BOOST_CHECK(CatchUpMayPauseOnSlowDelivery(false, true, false));
+    BOOST_CHECK(!CatchUpMayDisconnectOnSlowDelivery(
+        /*far_behind=*/true, /*persistent=*/true, /*manual_or_noban=*/false,
+        /*keep_catchup_source=*/false, /*only_eligible_source=*/false));
+    BOOST_CHECK(CatchUpMayDisconnectOnSlowDelivery(
+        false, true, false, false, false));
+    BOOST_CHECK(!CatchUpMayDisconnectOnSlowDelivery(
+        false, true, false, false, /*only_eligible_source=*/true));
+    BOOST_CHECK(!CatchUpMayDisconnectOnSlowDelivery(
+        false, true, /*manual_or_noban=*/true, false, false));
+    {
+        const auto spacing{std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::seconds{90})};
+        const auto clamp{std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::seconds{15})};
+        BOOST_CHECK_EQUAL(
+            CatchUpInFlightExpireDeadline(false, spacing, clamp, false).count(),
+            spacing.count());
+        BOOST_CHECK_EQUAL(
+            CatchUpInFlightExpireDeadline(false, spacing, clamp, true).count(),
+            clamp.count());
+        BOOST_CHECK_EQUAL(
+            CatchUpInFlightExpireDeadline(true, spacing, clamp, true).count(),
+            std::chrono::microseconds{
+                node::matmul_trusted::CATCHUP_PEER_SILENCE_TIMEOUT}
+                .count());
+    }
     using node::matmul_trusted::SkipExactReplayForGpuAttestation;
     using node::matmul_trusted::HistoricalExactReplayCoveredByPinQuorum;
     using node::matmul_trusted::SignAuthoritativeServesGetMmAttest;

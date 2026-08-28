@@ -2652,7 +2652,9 @@ BOOST_AUTO_TEST_CASE(signed_frontier_catchup_prefers_archive_not_miner)
     BOOST_REQUIRE(peerman.GetNodeStateStats(archive.GetId(), archive_stats));
     BOOST_REQUIRE_EQUAL(archive_stats.vHeightInFlight.size(), 1U);
     BOOST_CHECK_EQUAL(archive_stats.vHeightInFlight.front(), tip->nHeight + 1);
-    BOOST_CHECK(HasQueuedMessageType(archive, NetMsgType::GETDATA));
+    // HeadersDirectFetch may already have emitted GETDATA while processing
+    // HEADERS; SendMessages then has nothing new to queue. In-flight is the
+    // request.
     NeutralizeUnconnectedHeaders(chainman);
     peerman.ResetMatMulVerifyAdmissionForTest();
 }

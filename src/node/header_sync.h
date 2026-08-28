@@ -145,9 +145,13 @@ namespace node {
 
 /** GPU-protect 1-wide / HEADER_ONLY competing must yield when the node is
  *  this far behind the followed header tip. A signer that cannot sync is
- *  worse than a signer whose GPU is briefly busy. Live 0.34.5: 1136-deep
- *  suffix, 1 block/min network, 1-wide can never catch up. */
-inline constexpr int CATCHUP_FAR_BEHIND_YIELD{200};
+ *  worse than a signer whose GPU is briefly busy. Also the absolute
+ *  no-pause / no-disconnect bar for slow block delivery: the eligible
+ *  GETDATA pool is tiny (manual/noban + outbound archive/mirror), and
+ *  disconnecting those sources is why catch-up sprinted then starved
+ *  (live 0.34.5 after eae5de60: 19 blocks in 5 min, then 3 min dead,
+ *  60 disconnects). */
+inline constexpr int CATCHUP_FAR_BEHIND_YIELD{100};
 
 [[nodiscard]] inline bool CatchUpFarBehindYieldsGpuProtect(
     int uncapped_followed_ahead,
