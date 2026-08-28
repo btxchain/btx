@@ -8231,6 +8231,14 @@ BOOST_AUTO_TEST_CASE(best_known_probe_is_rate_limited_and_skips_height_zero)
     const CBlockIndex* tip{
         WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip())};
     BOOST_REQUIRE(tip != nullptr);
+    // Isolated runs sit at genesis (tip=0). Height 0 is then a real IBD
+    // peer, not the live 0.34.5 spam (tip=199334, advertisers at 0).
+    if (tip->nHeight == 0) {
+        mineBlock(m_node, std::chrono::seconds{tip->GetBlockTime() + 1});
+        tip = WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip());
+        BOOST_REQUIRE(tip != nullptr);
+        BOOST_REQUIRE_GT(tip->nHeight, 0);
+    }
     {
         LOCK(::cs_main);
         chainman.SetBestHeader(const_cast<CBlockIndex*>(tip));
