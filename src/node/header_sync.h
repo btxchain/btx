@@ -7,6 +7,7 @@
 
 #include <chain.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 
@@ -216,14 +217,19 @@ inline constexpr int CATCHUP_FAR_BEHIND_YIELD{100};
 /** Claim the scarce initial IBD headers-sync slot (nSyncStarted == 0).
  *  When any connected peer is preferred, a non-preferred peer must not
  *  take it. When none is connected, a non-preferred peer may still claim
- *  so header sync cannot deadlock. */
+ *  so header sync cannot deadlock — except an address currently in
+ *  low-work presync backoff: retrying it immediately was the live
+ *  161-presync / 162-abort livelock (empty datadir, 45 minutes,
+ *  headers=0). */
 [[nodiscard]] inline bool MayClaimInitialHeadersSyncSlot(
     bool slot_free,
     bool sync_blocks_and_headers_from_peer,
     bool peer_preferred,
-    bool any_preferred_peer_connected)
+    bool any_preferred_peer_connected,
+    bool peer_in_low_work_backoff = false)
 {
     if (!slot_free || !sync_blocks_and_headers_from_peer) return false;
+    if (peer_in_low_work_backoff) return false;
     if (any_preferred_peer_connected && !peer_preferred) return false;
     return true;
 }
@@ -237,6 +243,44 @@ inline constexpr int CATCHUP_FAR_BEHIND_YIELD{100};
     bool challenger_preferred)
 {
     return holder_has_slot && !holder_preferred && challenger_preferred;
+}
+
+/** Progressive retry after a low-work HeadersSyncState abort. Base matches
+ *  BEST_KNOWN_PROBE_INTERVAL (2 min); doubles per failure, capped. */
+inline constexpr auto LOW_WORK_HEADERS_FAILURE_BACKOFF_BASE{std::chrono::minutes{2}};
+inline constexpr auto LOW_WORK_HEADERS_FAILURE_BACKOFF_MAX{std::chrono::minutes{32}};
+
+[[nodiscard]] inline std::chrono::seconds LowWorkHeadersFailureBackoff(int fail_count)
+{
+    if (fail_count <= 0) return std::chrono::seconds{0};
+    int shift = fail_count - 1;
+    if (shift > 4) shift = 4;
+    auto delay = LOW_WORK_HEADERS_FAILURE_BACKOFF_BASE * (1 << shift);
+    if (delay > LOW_WORK_HEADERS_FAILURE_BACKOFF_MAX) {
+        delay = LOW_WORK_HEADERS_FAILURE_BACKOFF_MAX;
+    }
+    return std::chrono::duration_cast<std::chrono::seconds>(delay);
+}
+
+[[nodiscard]] inline bool LowWorkHeadersFailureInBackoff(
+    bool recorded_failure,
+    std::chrono::microseconds now,
+    std::chrono::microseconds retry_after)
+{
+    if (!recorded_failure) return false;
+    return now < retry_after;
+}
+
+/** Apply BLOCK_DOWNLOAD_TIMEOUT_MIN after the spacing cap, not before.
+ *  Fast-phase spacing is 250ms so cap = 750ms < 10s floor; the previous
+ *  min(max(computed, floor), cap) discarded the floor and disconnected
+ *  the only genesis-to-anchor body source on its first timeout. */
+[[nodiscard]] inline std::chrono::microseconds BlockDownloadTimeoutRespectFloor(
+    std::chrono::microseconds computed,
+    std::chrono::microseconds floor,
+    std::chrono::microseconds cap)
+{
+    return std::max(std::min(computed, cap), floor);
 }
 
 } // namespace node

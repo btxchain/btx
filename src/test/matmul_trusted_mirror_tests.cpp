@@ -2068,6 +2068,8 @@ BOOST_AUTO_TEST_CASE(above_frontier_and_parked_branch_do_not_admit)
     BOOST_CHECK(CatchUpMayPauseOnSlowDelivery(false, false, false));
     BOOST_CHECK(!CatchUpMayPauseOnSlowDelivery(false, true, true));
     BOOST_CHECK(CatchUpMayPauseOnSlowDelivery(false, true, false));
+    BOOST_CHECK(!CatchUpMayPauseOnSlowDelivery(
+        false, false, false, /*peers_downloading_before=*/1));
     BOOST_CHECK(!CatchUpMayDisconnectOnSlowDelivery(
         /*far_behind=*/true, /*persistent=*/true, /*manual_or_noban=*/false,
         /*keep_catchup_source=*/false, /*only_eligible_source=*/false));

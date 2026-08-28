@@ -8228,6 +8228,73 @@ BOOST_AUTO_TEST_CASE(initial_headers_sync_deprioritizes_low_work_failure)
     BOOST_CHECK_EQUAL(ok_stats.m_total_headers_sync_peer_count, 1);
 }
 
+BOOST_AUTO_TEST_CASE(low_work_presync_failure_does_not_immediately_retry)
+{
+    // Auditor: 161 PRESYNC STARTS / 162 ABORTS / 1 COMPLETE on a fresh
+    // empty datadir. Failed addresses were re-probed every 2 minutes
+    // because m_low_work_headers_failed was only a slot-preference hint.
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    node::matmul_trusted::ResetForTest();
+    ResetSharedPeermanFixture(m_node);
+    PeerManager& peerman{*Assert(m_node.peerman)};
+    ConnmanTestMsg& connman{static_cast<ConnmanTestMsg&>(*m_node.connman)};
+    const CBlockIndex* tip{
+        WITH_LOCK(::cs_main, return m_node.chainman->ActiveChain().Tip())};
+    BOOST_REQUIRE(tip != nullptr);
+    SetMockTime(std::chrono::seconds{tip->GetBlockTime()} + std::chrono::hours{48});
+    peerman.SetInitialHeadersSyncAnchorForTest(186000);
+
+    const ServiceFlags services{ServiceFlags(
+        NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS)};
+    const CAddress addr{
+        LookupNumeric("192.0.2.31", Params().GetDefaultPort()), NODE_NONE};
+    CNode first{/*id=*/5430, /*sock=*/nullptr, addr,
+                /*nKeyedNetGroupIn=*/5430, /*nLocalHostNonceIn=*/0,
+                CAddress{}, /*addrNameIn=*/"low-work-first",
+                ConnectionType::OUTBOUND_FULL_RELAY,
+                /*inbound_onion=*/false, /*network_key=*/0};
+    connman.Handshake(first, /*successfully_connected=*/true, services,
+                      services, PROTOCOL_VERSION, /*relay_txs=*/true,
+                      /*starting_height=*/200131);
+    CNodeStateStats first_stats;
+    BOOST_REQUIRE(peerman.GetNodeStateStats(first.GetId(), first_stats));
+    BOOST_REQUIRE(first_stats.m_headers_sync_started);
+    peerman.NoteLowWorkHeadersSyncFailureForTest(first.addr);
+    peerman.FinalizeNode(first);
+
+    CNode retry{/*id=*/5431, /*sock=*/nullptr, addr,
+                /*nKeyedNetGroupIn=*/5431, /*nLocalHostNonceIn=*/0,
+                CAddress{}, /*addrNameIn=*/"low-work-retry",
+                ConnectionType::OUTBOUND_FULL_RELAY,
+                /*inbound_onion=*/false, /*network_key=*/0};
+    connman.Handshake(retry, /*successfully_connected=*/true, services,
+                      services, PROTOCOL_VERSION, /*relay_txs=*/true,
+                      /*starting_height=*/200131);
+    CNodeStateStats retry_stats;
+    BOOST_REQUIRE(peerman.GetNodeStateStats(retry.GetId(), retry_stats));
+    BOOST_CHECK_MESSAGE(
+        !retry_stats.m_headers_sync_started,
+        "a just-failed presync address must not immediately reclaim the IBD slot");
+    BOOST_CHECK(!HasQueuedMessageType(retry, NetMsgType::GETHEADERS));
+
+    SetMockTime(std::chrono::seconds{GetTime() + 121});
+    peerman.FinalizeNode(retry);
+    CNode later{/*id=*/5432, /*sock=*/nullptr, addr,
+                /*nKeyedNetGroupIn=*/5432, /*nLocalHostNonceIn=*/0,
+                CAddress{}, /*addrNameIn=*/"low-work-later",
+                ConnectionType::OUTBOUND_FULL_RELAY,
+                /*inbound_onion=*/false, /*network_key=*/0};
+    connman.Handshake(later, /*successfully_connected=*/true, services,
+                      services, PROTOCOL_VERSION, /*relay_txs=*/true,
+                      /*starting_height=*/200131);
+    CNodeStateStats later_stats;
+    BOOST_REQUIRE(peerman.GetNodeStateStats(later.GetId(), later_stats));
+    BOOST_CHECK_MESSAGE(
+        later_stats.m_headers_sync_started,
+        "after backoff the same address may retry when no preferred peer is live");
+    peerman.FinalizeNode(later);
+}
+
 BOOST_AUTO_TEST_CASE(recalculate_best_header_runs_when_unconfigured)
 {
     // Independent validators: -matmulvalidation=consensus and no

@@ -6,6 +6,8 @@
 #include <node/header_sync.h>
 #include <test/util/setup_common.h>
 
+#include <chrono>
+
 #include <boost/test/unit_test.hpp>
 
 BOOST_FIXTURE_TEST_SUITE(header_sync_tests, BasicTestingSetup)
@@ -164,6 +166,40 @@ BOOST_AUTO_TEST_CASE(initial_sync_prefers_checkpoint_anchor_and_skips_low_work_f
         /*slot_free=*/false, true, true, true));
     BOOST_CHECK(!node::MayClaimInitialHeadersSyncSlot(
         true, /*sync=*/false, true, true));
+
+    BOOST_CHECK(!node::MayClaimInitialHeadersSyncSlot(
+        true, true, true, true, /*peer_in_low_work_backoff=*/true));
+    BOOST_CHECK(!node::MayClaimInitialHeadersSyncSlot(
+        true, true, /*peer_preferred=*/false, /*any_preferred=*/false,
+        /*peer_in_low_work_backoff=*/true));
+
+    BOOST_CHECK_EQUAL(node::LowWorkHeadersFailureBackoff(0).count(), 0);
+    BOOST_CHECK_EQUAL(node::LowWorkHeadersFailureBackoff(1).count(), 120);
+    BOOST_CHECK_EQUAL(node::LowWorkHeadersFailureBackoff(2).count(), 240);
+    BOOST_CHECK_EQUAL(node::LowWorkHeadersFailureBackoff(5).count(), 1920);
+    BOOST_CHECK_EQUAL(node::LowWorkHeadersFailureBackoff(9).count(), 1920);
+    BOOST_CHECK(!node::LowWorkHeadersFailureInBackoff(false, std::chrono::microseconds{10}, std::chrono::microseconds{20}));
+    BOOST_CHECK(node::LowWorkHeadersFailureInBackoff(true, std::chrono::microseconds{10}, std::chrono::microseconds{20}));
+    BOOST_CHECK(!node::LowWorkHeadersFailureInBackoff(true, std::chrono::microseconds{20}, std::chrono::microseconds{20}));
+
+    {
+        const auto floor{std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::seconds{10})};
+        const auto computed_fast{std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::milliseconds{250})};
+        const auto cap_fast{std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::milliseconds{750})};
+        BOOST_CHECK_EQUAL(
+            node::BlockDownloadTimeoutRespectFloor(computed_fast, floor, cap_fast).count(),
+            floor.count());
+        const auto computed_normal{std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::seconds{90})};
+        const auto cap_normal{std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::seconds{270})};
+        BOOST_CHECK_EQUAL(
+            node::BlockDownloadTimeoutRespectFloor(computed_normal, floor, cap_normal).count(),
+            computed_normal.count());
+    }
 
     // A 200131 peer must take the slot from a 128530 holder.
     BOOST_CHECK(node::ShouldYieldInitialHeadersSyncSlot(

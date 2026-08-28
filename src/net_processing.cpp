@@ -729,14 +729,14 @@ static std::chrono::microseconds BlockDownloadSpacingTimeout(
     std::chrono::milliseconds spacing, int n_other_peers)
 {
     const int others{std::max(0, n_other_peers)};
-    return std::min(
-        std::max(
-            std::chrono::duration_cast<std::chrono::microseconds>(
-                spacing * (BLOCK_DOWNLOAD_TIMEOUT_BASE +
-                           BLOCK_DOWNLOAD_TIMEOUT_PER_PEER * others)),
-            std::chrono::duration_cast<std::chrono::microseconds>(BLOCK_DOWNLOAD_TIMEOUT_MIN)),
-        std::chrono::duration_cast<std::chrono::microseconds>(
-            spacing * BLOCK_DOWNLOAD_TIMEOUT_MAX_MULT));
+    const auto computed{std::chrono::duration_cast<std::chrono::microseconds>(
+        spacing * (BLOCK_DOWNLOAD_TIMEOUT_BASE +
+                   BLOCK_DOWNLOAD_TIMEOUT_PER_PEER * others))};
+    const auto floor{std::chrono::duration_cast<std::chrono::microseconds>(
+        BLOCK_DOWNLOAD_TIMEOUT_MIN)};
+    const auto cap{std::chrono::duration_cast<std::chrono::microseconds>(
+        spacing * BLOCK_DOWNLOAD_TIMEOUT_MAX_MULT)};
+    return node::BlockDownloadTimeoutRespectFloor(computed, floor, cap);
 }
 
 // Internal stuff
@@ -1383,7 +1383,7 @@ public:
         }
         ResetMatMulEncDrVerdictsForTest();
         ResetMatMulRCWinnerAuthorityForTest();
-        m_low_work_headers_failed_addrs.clear();
+        m_low_work_headers_failed.clear();
         m_initial_sync_anchor_override_for_test.reset();
     }
     bool HasMatMulRetainedBodyForTest(const uint256& hash) const override
@@ -1402,7 +1402,7 @@ public:
     void NoteLowWorkHeadersSyncFailureForTest(const CNetAddr& addr) override
         EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex)
     {
-        m_low_work_headers_failed_addrs.insert(addr);
+        RecordLowWorkHeadersSyncFailure(addr);
     }
     void SetInitialHeadersSyncAnchorForTest(int32_t height) override
     {
@@ -1447,6 +1447,11 @@ private:
 
     [[nodiscard]] int32_t InitialHeadersSyncAnchorHeight() const;
     [[nodiscard]] bool PeerFailedLowWorkHeadersSync(const CNetAddr& addr) const
+        EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
+    [[nodiscard]] bool PeerLowWorkHeadersSyncInBackoff(
+        const CNetAddr& addr, std::chrono::microseconds now) const
+        EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
+    void RecordLowWorkHeadersSyncFailure(const CNetAddr& addr)
         EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
     [[nodiscard]] bool AnyPreferredInitialHeadersSyncPeer(int32_t anchor) const
         EXCLUSIVE_LOCKS_REQUIRED(cs_main, g_msgproc_mutex);
@@ -1807,11 +1812,15 @@ private:
     int nSyncStarted GUARDED_BY(cs_main) = 0;
 
     /** Addresses that already failed a low-work HeadersSyncState presync
-     *  this session. Survives disconnect so a reconnect cannot reclaim the
-     *  single nSyncStarted IBD slot (MendeMatthias / v0.34.4: 128530 /
-     *  185109 / 189611 burned the slot below the height-186000
-     *  nMinimumChainWork checkpoint while 200131 sat idle). */
-    std::set<CNetAddr> m_low_work_headers_failed_addrs;
+     *  this session. Survives disconnect so a reconnect cannot immediately
+     *  restart presync (auditor: 161 PRESYNC STARTS / 162 ABORTS on a
+     *  fresh empty datadir). Slot preference still consults "ever failed";
+     *  the presync ENTRY gate and best-known probe consult retry_after. */
+    struct LowWorkHeadersFailure {
+        int fail_count{0};
+        std::chrono::microseconds retry_after{0us};
+    };
+    std::map<CNetAddr, LowWorkHeadersFailure> m_low_work_headers_failed;
     std::optional<int32_t> m_initial_sync_anchor_override_for_test;
 
     /** Hash of the last block we received via INV */
@@ -3845,7 +3854,8 @@ int PeerManagerImpl::ReclaimStaleInFlightBlockRequests(std::chrono::microseconds
             if (!keep_only_source &&
                 node::matmul_trusted::CatchUpMayPauseOnSlowDelivery(
                     far_behind, /*keep_catchup_source=*/false,
-                    /*last_gpu_or_frontier_source=*/false)) {
+                    /*last_gpu_or_frontier_source=*/false,
+                    m_peers_downloading_from)) {
                 state->m_block_download_paused_until =
                     now + BLOCK_DOWNLOAD_TIMEOUT_REREQUEST_COOLDOWN;
             }
@@ -3996,7 +4006,8 @@ int PeerManagerImpl::ExpireOverdueBlockDownloads(std::chrono::microseconds now)
             (peers_downloading_before <= 1) ||
             (last_gpu_or_frontier_source && capable_frontier_sources <= 1)};
         const bool may_pause{node::matmul_trusted::CatchUpMayPauseOnSlowDelivery(
-            far_behind, keep_catchup_source, last_gpu_or_frontier_source)};
+            far_behind, keep_catchup_source, last_gpu_or_frontier_source,
+            peers_downloading_before)};
         if (node::matmul_trusted::CatchUpNeverPunishSlowDelivery(far_behind) ||
             (keep_catchup_source && last_gpu_or_frontier_source)) {
             state->m_block_download_timeout_count = 0;
@@ -5787,7 +5798,30 @@ int32_t PeerManagerImpl::InitialHeadersSyncAnchorHeight() const
 bool PeerManagerImpl::PeerFailedLowWorkHeadersSync(const CNetAddr& addr) const
 {
     AssertLockHeld(g_msgproc_mutex);
-    return m_low_work_headers_failed_addrs.count(addr) != 0;
+    return m_low_work_headers_failed.count(addr) != 0;
+}
+
+bool PeerManagerImpl::PeerLowWorkHeadersSyncInBackoff(
+    const CNetAddr& addr, std::chrono::microseconds now) const
+{
+    AssertLockHeld(g_msgproc_mutex);
+    const auto it{m_low_work_headers_failed.find(addr)};
+    if (it == m_low_work_headers_failed.end()) return false;
+    return node::LowWorkHeadersFailureInBackoff(true, now, it->second.retry_after);
+}
+
+void PeerManagerImpl::RecordLowWorkHeadersSyncFailure(const CNetAddr& addr)
+{
+    AssertLockHeld(g_msgproc_mutex);
+    auto& rec{m_low_work_headers_failed[addr]};
+    ++rec.fail_count;
+    const auto backoff{std::chrono::duration_cast<std::chrono::microseconds>(
+        node::LowWorkHeadersFailureBackoff(rec.fail_count))};
+    rec.retry_after = GetTime<std::chrono::microseconds>() + backoff;
+    LogInfo("low-work headers sync failure: addr=%s count=%d backoff=%ds "
+            "(not retrying this address until backoff elapses)\n",
+            addr.ToStringAddr(), rec.fail_count,
+            static_cast<int>(count_seconds(node::LowWorkHeadersFailureBackoff(rec.fail_count))));
 }
 
 bool PeerManagerImpl::AnyPreferredInitialHeadersSyncPeer(int32_t anchor) const
@@ -8637,7 +8671,7 @@ bool PeerManagerImpl::IsContinuationOfLowWorkHeadersSync(Peer& peer, CNode& pfro
         if (!result.success) {
             // Reconnect of the same address must not reclaim the scarce
             // IBD headers-sync slot (MendeMatthias / v0.34.4).
-            m_low_work_headers_failed_addrs.insert(pfrom.addr);
+            RecordLowWorkHeadersSyncFailure(pfrom.addr);
             LogDebug(BCLog::NET, "Disconnecting peer=%d after low-work headers sync failure\n", pfrom.GetId());
             headers.clear();
             pfrom.fDisconnect = true;
@@ -8747,6 +8781,13 @@ bool PeerManagerImpl::TryLowWorkHeadersSync(
         // otherwise they don't have more headers after this so no point in
         // trying to sync their too-little-work chain.
         if (headers.size() == m_opts.max_headers_result && peer_sync_eligible) {
+            if (PeerLowWorkHeadersSyncInBackoff(
+                    pfrom.addr, GetTime<std::chrono::microseconds>())) {
+                LogDebug(BCLog::NET,
+                         "skipping low-work headers presync restart from peer=%d "
+                         "(address already failed; backoff not elapsed)\n",
+                         pfrom.GetId());
+            } else {
             // Note: we could advance to the last header in this set that is
             // known to us, rather than starting at the first header (which we
             // may already have); however this is unlikely to matter much since
@@ -8764,6 +8805,7 @@ bool PeerManagerImpl::TryLowWorkHeadersSync(
             // is created, process the headers using it as normal. Failures are
             // handled inside of IsContinuationOfLowWorkHeadersSync.
             (void)IsContinuationOfLowWorkHeadersSync(peer, pfrom, headers);
+            }
         } else {
             LogDebug(BCLog::NET, "Ignoring low-work chain (height=%u) from peer=%d\n", chain_start_header->nHeight + headers.size(), pfrom.GetId());
         }
@@ -19498,6 +19540,8 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
             // already failed that presync. Extra near-tip slots stay ungated.
             const bool near_tip_headers{!tip_is_stale};
             const int32_t initial_sync_anchor{InitialHeadersSyncAnchorHeight()};
+            const bool peer_in_low_work_backoff{PeerLowWorkHeadersSyncInBackoff(
+                peer->m_addr, current_time)};
             const bool peer_preferred{node::InitialHeadersSyncPeerPreferred(
                 peer->m_starting_height.load(),
                 initial_sync_anchor,
@@ -19513,7 +19557,8 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                     nSyncStarted == 0,
                     sync_blocks_and_headers_from_peer,
                     peer_preferred,
-                    any_preferred)};
+                    any_preferred,
+                    peer_in_low_work_backoff)};
             if (!may_claim_initial_sync_slot && !near_tip_headers &&
                 sync_blocks_and_headers_from_peer && any_preferred &&
                 !peer_preferred) {
@@ -19603,6 +19648,9 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
         };
         if (must_probe && !m_chainman.m_blockman.LoadingBlocks() &&
             !pto->IsAddrFetchConn()) {
+            if (PeerLowWorkHeadersSyncInBackoff(peer->m_addr, current_time)) {
+                log_probe_declined("low_work_backoff");
+            } else {
             const CBlockIndex* tip{m_chainman.ActiveChain().Tip()};
             if (tip == nullptr) {
                 log_probe_declined("no_local_tip");
@@ -19627,6 +19675,7 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                         log_probe_declined("getheaders_in_flight");
                     }
                 }
+            }
             }
         } else if (must_probe) {
             const char* reason = m_chainman.m_blockman.LoadingBlocks() ? "loading_blocks" :
@@ -19953,9 +20002,11 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
             stalling_timeout = phase_floor;
         }
         const bool far_behind_download{CatchUpFarBehind(m_chainman, state.pindexBestKnownBlock)};
-        if (far_behind_download) {
-            // 750ms–2s stalling disconnect is self-harm during catch-up: the
-            // eligible GETDATA set is manual/noban plus outbound archive/mirror.
+        const bool only_download_source{m_peers_downloading_from <= 1};
+        if (far_behind_download || only_download_source) {
+            // 750ms–2s stalling disconnect is self-harm during catch-up and
+            // during genesis-to-anchor IBD: the only body source must not
+            // be dropped on its first stall.
             state.m_stalling_since = 0us;
         } else if (state.m_stalling_since.count() && state.m_stalling_since < current_time - stalling_timeout) {
             // Stalling only triggers when the block download window cannot move. During normal steady state,
@@ -20067,20 +20118,12 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                     }
                 }
                 ++state.m_block_download_timeout_count;
-                // Prefer re-request over disconnect when other download peers
-                // exist: dropping this peer also discards its other useful
-                // in-flight blocks. Still disconnect if this is the only
-                // download peer or the peer keeps timing out — except the
-                // last GPU/frontier source during signed-frontier catch-up
-                // (live public CPU archive 2026-08-16: 3 timeouts disconnected peer=1027,
-                // the only attested body source).
-                const bool can_rerequest_elsewhere = peers_downloading_before > 1;
+                // Never disconnect the only download source for slow
+                // delivery — the same rule as far-behind catch-up, applied
+                // to genesis-to-anchor IBD. Fast-phase spacing used to
+                // defeat the 10s floor and drop that peer on first timeout.
                 const bool persistent_timeout =
                     state.m_block_download_timeout_count >= BLOCK_DOWNLOAD_TIMEOUT_DISCONNECT_AFTER;
-                // Do not sum GPU-authority + frontier-source counts: the
-                // live GPU is both, so the sum is 2 and the keep-source
-                // gate never fired (a public CPU archive 2026-08-16T15:41Z, peer=225
-                // disconnected after 3 timeouts with download_peers_was=1).
                 const bool last_gpu_or_frontier_source{
                     PeerIsGpuAuthority(pto->GetId(), state) ||
                     PeerIsSignedFrontierBodySource(pto->GetId(), state)};
@@ -20091,11 +20134,21 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                 if (keep_catchup_source && last_gpu_or_frontier_source) {
                     state.m_block_download_timeout_count = 0;
                 }
-                if ((can_rerequest_elsewhere && !persistent_timeout) ||
-                    keep_catchup_source) {
-                    const bool only_source{
-                        keep_catchup_source && last_gpu_or_frontier_source};
-                    if (!only_source) {
+                const bool only_eligible_source{
+                    peers_downloading_before <= 1 ||
+                    (last_gpu_or_frontier_source &&
+                     CountCapableSignedFrontierBodySources() <= 1)};
+                const bool may_disconnect{
+                    node::matmul_trusted::CatchUpMayDisconnectOnSlowDelivery(
+                        far_behind_download, persistent_timeout,
+                        pto->IsManualConn() || state.m_noban,
+                        keep_catchup_source, only_eligible_source)};
+                const bool may_pause{
+                    node::matmul_trusted::CatchUpMayPauseOnSlowDelivery(
+                        far_behind_download, keep_catchup_source,
+                        last_gpu_or_frontier_source, peers_downloading_before)};
+                if (!may_disconnect) {
+                    if (may_pause) {
                         state.m_block_download_paused_until =
                             current_time + BLOCK_DOWNLOAD_TIMEOUT_REREQUEST_COOLDOWN;
                     }

@@ -1973,9 +1973,11 @@ inline constexpr auto CATCHUP_PEER_SILENCE_TIMEOUT{std::chrono::minutes{5}};
 [[nodiscard]] inline bool CatchUpMayPauseOnSlowDelivery(
     bool far_behind,
     bool keep_catchup_source,
-    bool last_gpu_or_frontier_source)
+    bool last_gpu_or_frontier_source,
+    int peers_downloading_before = 2)
 {
     if (CatchUpNeverPunishSlowDelivery(far_behind)) return false;
+    if (peers_downloading_before <= 1) return false;
     return !(keep_catchup_source && last_gpu_or_frontier_source);
 }
 
