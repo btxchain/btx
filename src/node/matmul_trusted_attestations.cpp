@@ -1333,6 +1333,83 @@ matmul::trusted::AddResult SignAuthoritative(
     return result;
 }
 
+bool ClearFailedLocalAttestation(const uint256& block_hash,
+                                 int32_t block_height,
+                                 size_t& removed_attestations,
+                                 std::string& error)
+{
+    removed_attestations = 0;
+    error.clear();
+    auto store{Store()};
+    if (!store) {
+        error = "MatMul attestation store is not configured";
+        return false;
+    }
+    const auto local_signer{store->LocalSignerPubKey()};
+    if (!local_signer.has_value()) {
+        error = "No local MatMul attestation signer is configured";
+        return false;
+    }
+
+    const auto retained{Get(block_hash, block_height)};
+    const bool local_signature_retained{std::any_of(
+        retained.begin(), retained.end(), [&](const auto& attestation) {
+            return attestation.signer == *local_signer;
+        })};
+    if (!local_signature_retained) {
+        error = "The local signer has no retained attestation for that block";
+        return false;
+    }
+    removed_attestations = retained.size();
+
+    // Drain the append-only worker before deleting the authoritative LevelDB
+    // record. Otherwise a queued pre-clear signature could be written back
+    // after this function returns.
+    if (!FlushPersistence(error)) return false;
+    {
+        std::lock_guard io_lock{g_persist_io_mutex};
+        if (g_durable_db && g_durable_namespace.has_value()) {
+            const DurableAttestationKey key{
+                .authority_namespace = *g_durable_namespace,
+                .height = block_height,
+                .block_hash = block_hash};
+            if (!g_durable_db->Erase(key, /*fSync=*/true)) {
+                error = "Failed to erase durable MatMul attestation record";
+                return false;
+            }
+        }
+    }
+
+    store->Erase(block_hash, block_height);
+    const bool released_mint{
+        store->ForgetLocalMintedHash(block_hash, block_height)};
+    {
+        std::lock_guard lock{g_mutex};
+        const auto local_it{g_local_signed_hash_by_height.find(block_height)};
+        if (local_it != g_local_signed_hash_by_height.end() &&
+            local_it->second == block_hash) {
+            g_local_signed_hash_by_height.erase(local_it);
+        }
+        const auto height_it{g_attested_by_height.find(block_height)};
+        if (height_it != g_attested_by_height.end()) {
+            height_it->second.erase(block_hash);
+            if (height_it->second.empty()) {
+                g_attested_by_height.erase(height_it);
+            }
+        }
+        g_highest_attested_height = g_attested_by_height.empty()
+            ? -1
+            : g_attested_by_height.rbegin()->first;
+    }
+
+    LogWarning(
+        "Cleared failed local MatMul attestation block=%s height=%d "
+        "records=%zu released_mint=%d; published signatures remain valid\n",
+        block_hash.ToString(), block_height, removed_attestations,
+        released_mint);
+    return true;
+}
+
 std::optional<matmul::trusted::UtxoSnapshotSignature> SignUtxoSnapshot(
     const matmul::trusted::UtxoSnapshotStatement& statement)
 {

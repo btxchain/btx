@@ -486,6 +486,148 @@ RPCHelpMan getmatmulattestations()
         }};
 }
 
+RPCHelpMan clearlocalmatmulattestation()
+{
+    return RPCHelpMan{
+        "clearlocalmatmulattestation",
+        "Emergency local signer recovery. Remove every locally retained "
+        "attestation for a failed, off-active-chain block so the local key "
+        "can attest the locally ExactReplay-verified active block at the same "
+        "height. This only clears local state: any previously published "
+        "signature remains valid and signing the replacement is same-key "
+        "equivocation under the current attestation context. After reviewing "
+        "the result, call getmatmulattestations for replacementblockhash to "
+        "sign/export the replacement.\n",
+        {
+            {"failedblockhash", RPCArg::Type::STR_HEX,
+             RPCArg::Optional::NO,
+             "Failed off-active-chain block whose local attestation state "
+             "will be erased"},
+            {"replacementblockhash", RPCArg::Type::STR_HEX,
+             RPCArg::Optional::NO,
+             "Locally ExactReplay-verified active-chain block at the same "
+             "height"},
+            {"acknowledge_equivocation", RPCArg::Type::BOOL,
+             RPCArg::Optional::NO,
+             "Must be true to acknowledge that published signatures cannot "
+             "be revoked"},
+        },
+        RPCResult{RPCResult::Type::OBJ, "", "",
+            {
+                {RPCResult::Type::STR_HEX, "cleared_blockhash", ""},
+                {RPCResult::Type::NUM, "height", ""},
+                {RPCResult::Type::NUM, "removed_attestations", ""},
+                {RPCResult::Type::BOOL, "replacement_on_active_chain", ""},
+                {RPCResult::Type::BOOL, "replacement_exact_replay_verified", ""},
+                {RPCResult::Type::STR_HEX, "replacement_blockhash", ""},
+                {RPCResult::Type::STR, "next_command", ""},
+                {RPCResult::Type::STR, "warning", ""},
+            }},
+        RPCExamples{HelpExampleCli(
+            "clearlocalmatmulattestation",
+            "\"failedhash\" \"activehash\" true")},
+        [](const RPCHelpMan&, const JSONRPCRequest& request) {
+            if (!request.params[2].get_bool()) {
+                throw JSONRPCError(
+                    RPC_INVALID_PARAMETER,
+                    "acknowledge_equivocation must be true");
+            }
+            if (!node::matmul_trusted::HasLocalSigner()) {
+                throw JSONRPCError(
+                    RPC_MISC_ERROR,
+                    "No local MatMul attestation signer is configured");
+            }
+
+            ChainstateManager& chainman{EnsureAnyChainman(request.context)};
+            const uint256 failed_hash{
+                ParseHashV(request.params[0], "failedblockhash")};
+            const uint256 replacement_hash{
+                ParseHashV(request.params[1], "replacementblockhash")};
+            int32_t height{-1};
+            {
+                LOCK(cs_main);
+                const CBlockIndex* const failed{
+                    chainman.m_blockman.LookupBlockIndex(failed_hash)};
+                const CBlockIndex* const replacement{
+                    chainman.m_blockman.LookupBlockIndex(replacement_hash)};
+                if (failed == nullptr) {
+                    throw JSONRPCError(
+                        RPC_INVALID_ADDRESS_OR_KEY,
+                        "Unknown failedblockhash");
+                }
+                if (replacement == nullptr) {
+                    throw JSONRPCError(
+                        RPC_INVALID_ADDRESS_OR_KEY,
+                        "Unknown replacementblockhash");
+                }
+                if (chainman.ActiveChain().Contains(failed)) {
+                    throw JSONRPCError(
+                        RPC_INVALID_PARAMETER,
+                        "failedblockhash is on the active chain");
+                }
+                if (!(failed->nStatus & BLOCK_FAILED_MASK)) {
+                    throw JSONRPCError(
+                        RPC_INVALID_PARAMETER,
+                        "failedblockhash is not marked failed; refusing to "
+                        "clear a valid competing attestation");
+                }
+                if (failed->nHeight != replacement->nHeight) {
+                    throw JSONRPCError(
+                        RPC_INVALID_PARAMETER,
+                        "Replacement block is at a different height");
+                }
+                if (!chainman.ActiveChain().Contains(replacement)) {
+                    throw JSONRPCError(
+                        RPC_INVALID_PARAMETER,
+                        "replacementblockhash is not on the active chain");
+                }
+                if ((replacement->nStatus & BLOCK_FAILED_MASK) ||
+                    !(replacement->nStatus & BLOCK_EXACT_REPLAY_VERIFIED)) {
+                    throw JSONRPCError(
+                        RPC_INVALID_PARAMETER,
+                        "replacementblockhash has not completed local Exact "
+                        "Replay validation");
+                }
+                if (!chainman.GetConsensus()
+                         .IsMatMulTrustedReplayAttestationActive(
+                             replacement->nHeight)) {
+                    throw JSONRPCError(
+                        RPC_INVALID_PARAMETER,
+                        "Replacement height is outside the MatMul "
+                        "attestation regime");
+                }
+                height = failed->nHeight;
+            }
+
+            size_t removed_attestations{0};
+            std::string error;
+            if (!node::matmul_trusted::ClearFailedLocalAttestation(
+                    failed_hash, height, removed_attestations, error)) {
+                throw JSONRPCError(RPC_MISC_ERROR, error);
+            }
+
+            UniValue result{UniValue::VOBJ};
+            result.pushKV("cleared_blockhash", failed_hash.GetHex());
+            result.pushKV("height", height);
+            result.pushKV("removed_attestations",
+                          static_cast<uint64_t>(removed_attestations));
+            result.pushKV("replacement_on_active_chain", true);
+            result.pushKV("replacement_exact_replay_verified", true);
+            result.pushKV("replacement_blockhash",
+                          replacement_hash.GetHex());
+            result.pushKV(
+                "next_command",
+                strprintf("getmatmulattestations %s",
+                          replacement_hash.GetHex()));
+            result.pushKV(
+                "warning",
+                "Local state was cleared, but previously published "
+                "signatures remain valid. Signing the replacement creates "
+                "same-key equivocation in the current authority context.");
+            return result;
+        }};
+}
+
 RPCHelpMan submitmatmulattestations()
 {
     return RPCHelpMan{
@@ -1150,6 +1292,7 @@ void RegisterMatMulTrustedRPCCommands(CRPCTable& table)
         {"mining", &listmatmulattestationblocklist},
         {"blockchain", &getfinalityinfo},
         {"mining", &getmatmulattestations},
+        {"hidden", &clearlocalmatmulattestation},
         {"mining", &submitmatmulattestations},
         {"mining", &submitmatmulrefutation},
     };

@@ -1200,6 +1200,19 @@ void AttestationStore::Erase(const uint256& block_hash, int32_t block_height)
     m_changed.notify_all();
 }
 
+bool AttestationStore::ForgetLocalMintedHash(const uint256& block_hash,
+                                             int32_t block_height)
+{
+    std::lock_guard lock{m_mutex};
+    const auto it{m_local_minted_hash_by_height.find(block_height)};
+    if (it == m_local_minted_hash_by_height.end() ||
+        it->second != block_hash) {
+        return false;
+    }
+    m_local_minted_hash_by_height.erase(it);
+    return true;
+}
+
 void AttestationStore::PruneExpired()
 {
     {

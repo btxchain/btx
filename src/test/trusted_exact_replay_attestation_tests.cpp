@@ -267,6 +267,27 @@ BOOST_AUTO_TEST_CASE(config_validation_and_local_signer)
     BOOST_CHECK_THROW(AttestationStore{bad}, std::invalid_argument);
 }
 
+BOOST_AUTO_TEST_CASE(explicit_failed_hash_recovery_releases_local_mint)
+{
+    const auto keys{MakeKeys(1)};
+    const uint256 chain{TestHash(0x35)};
+    auto config{MakeConfig(chain, keys, /*threshold=*/1)};
+    config.local_signer = keys[0];
+    AttestationStore store{config};
+
+    const uint256 failed{TestHash(0x36)};
+    const uint256 replacement{TestHash(0x37)};
+    BOOST_REQUIRE(store.SignLocal(failed, 9) == AddResult::Accepted);
+    BOOST_CHECK(store.SignLocal(replacement, 9) ==
+                AddResult::HeightOccupied);
+
+    store.Erase(failed, 9);
+    BOOST_CHECK(store.ForgetLocalMintedHash(failed, 9));
+    BOOST_CHECK(!store.ForgetLocalMintedHash(failed, 9));
+    BOOST_CHECK(store.SignLocal(replacement, 9) == AddResult::Accepted);
+    BOOST_CHECK(store.HasQuorum(replacement, 9));
+}
+
 BOOST_AUTO_TEST_CASE(unique_signer_quorum_and_rejections)
 {
     const auto keys{MakeKeys(3)};

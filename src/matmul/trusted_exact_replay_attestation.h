@@ -429,6 +429,14 @@ public:
         std::vector<ExactReplayAttestation>* quorum = nullptr);
 
     void Erase(const uint256& block_hash, int32_t block_height);
+
+    /**
+     * Forget the in-process one-hash mint marker, but only when it names the
+     * caller-supplied hash. Emergency recovery callers must separately erase
+     * the retained/durable attestation and prove that hash failed validation.
+     */
+    [[nodiscard]] bool ForgetLocalMintedHash(const uint256& block_hash,
+                                             int32_t block_height);
     void PruneExpired();
 
     [[nodiscard]] StoreStats GetStats() const;
