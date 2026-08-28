@@ -1969,11 +1969,13 @@ public:
     //! header in our block-index not known to be invalid, recalculate it.
     void RecalculateBestHeader() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
-    /** Snap m_best_header up to ActiveTip when it sits strictly below the
-     *  connected chain (an authenticated ancestor, or any fork shorter than
-     *  the tip). PreferTrustAdjustedHeader can rank that ancestor above a
-     *  long unauthenticated suffix; getheaders locators then never ask for
-     *  tip+1. Competing forks *ahead* of the tip are left alone. */
+    /** Snap m_best_header onto a valid index at or above ActiveTip.
+     *  Two live stalls share this gap: PreferTrustAdjustedHeader can leave
+     *  best_header on an authenticated ancestor *below* the connected tip
+     *  (0.34.3: headers=199024, blocks=199310), or *on an invalidateblock'd
+     *  suffix that still descends from the tip* (Case B snapshot: tip=199300,
+     *  headers=199303 failed, best_header_ahead=3, in_flight=0). Competing
+     *  valid forks ahead of the tip are left alone. */
     void EnsureBestHeaderNotBehindConnectedTip() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /** Publish a new authoritative followed header and its exact height. */
