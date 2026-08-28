@@ -101,13 +101,14 @@ void ResetForTest();
     matmul::trusted::ExactReplayAttestation* produced = nullptr);
 
 /**
- * Emergency local recovery for an attestation whose block index is already
- * failed. The RPC caller is responsible for proving chainstate conditions.
- * Removes every locally retained vote for the hash, including the durable DB
- * record, and releases this process's one-hash mint marker. This cannot revoke
- * signatures that were already published.
+ * Emergency local recovery for an attestation whose block is no longer on the
+ * active chain. The RPC caller is responsible for proving the chainstate and
+ * replacement-ExactReplay conditions. Removes every locally retained vote for
+ * the hash, including the durable DB record, and releases this process's
+ * one-hash mint marker. This cannot revoke signatures that were already
+ * published.
  */
-[[nodiscard]] bool ClearFailedLocalAttestation(
+[[nodiscard]] bool ClearLocalAttestation(
     const uint256& block_hash,
     int32_t block_height,
     size_t& removed_attestations,

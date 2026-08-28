@@ -1333,10 +1333,10 @@ matmul::trusted::AddResult SignAuthoritative(
     return result;
 }
 
-bool ClearFailedLocalAttestation(const uint256& block_hash,
-                                 int32_t block_height,
-                                 size_t& removed_attestations,
-                                 std::string& error)
+bool ClearLocalAttestation(const uint256& block_hash,
+                           int32_t block_height,
+                           size_t& removed_attestations,
+                           std::string& error)
 {
     removed_attestations = 0;
     error.clear();
@@ -1403,7 +1403,7 @@ bool ClearFailedLocalAttestation(const uint256& block_hash,
     }
 
     LogWarning(
-        "Cleared failed local MatMul attestation block=%s height=%d "
+        "Cleared off-chain local MatMul attestation block=%s height=%d "
         "records=%zu released_mint=%d; published signatures remain valid\n",
         block_hash.ToString(), block_height, removed_attestations,
         released_mint);

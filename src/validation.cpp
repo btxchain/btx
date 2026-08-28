@@ -13710,7 +13710,8 @@ bool ChainstateManager::IsMatMulRecomputeAssumeValidTrusted(const CBlockIndex* p
 }
 
 bool ChainstateManager::PersistMatMulExactReplayVerdict(
-    const uint256& block_hash)
+    const uint256& block_hash,
+    bool create_attestation)
 {
     AssertLockHeld(::cs_main);
     CBlockIndex* index{m_blockman.LookupBlockIndex(block_hash)};
@@ -13718,7 +13719,8 @@ bool ChainstateManager::PersistMatMulExactReplayVerdict(
     index->nStatus |= BLOCK_EXACT_REPLAY_VERIFIED;
     m_blockman.m_dirty_blockindex.insert(index);
     CacheMatMulEncDrVerdict(block_hash, true);
-    if (GetMatMulValidationMode() ==
+    if (create_attestation &&
+        GetMatMulValidationMode() ==
             kernel::MatMulValidationMode::CONSENSUS &&
         GetConsensus().IsMatMulTrustedReplayAttestationActive(
             index->nHeight) &&
@@ -14039,7 +14041,8 @@ static bool ContextualCheckBlock(const CBlock& block,
                                  // TestBlockValidity constructs CCoinsViewCache/CBlockIndex AFTER
                                  // this call and re-asserts pindexPrev==Tip().
                                  [[maybe_unused]] bool may_release_cs_main = true,
-                                 MatMulRCAuthorityProvenance* rc_authority = nullptr) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+                                 MatMulRCAuthorityProvenance* rc_authority = nullptr,
+                                 bool force_matmul_exact_replay = false) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
 {
     AssertLockHeld(::cs_main);
     if (rc_authority != nullptr) {
@@ -14174,7 +14177,7 @@ static bool ContextualCheckBlock(const CBlock& block,
                 consensusParams.IsMatMulTrustedReplayAttestationActive(
                     nHeight)};
             const bool recompute_assumevalid_trusted =
-                !trusted_profile1 &&
+                !force_matmul_exact_replay && !trusted_profile1 &&
                 (chainman.IsMatMulRecomputeAssumeValidTrusted(
                     chainman.m_blockman.LookupBlockIndex(block.GetHash()), nHeight) ||
                 // P2P admission may have made the same trust decision under
@@ -14290,7 +14293,7 @@ static bool ContextualCheckBlock(const CBlock& block,
                 };
                 std::string winner_authority_provider;
                 const bool winner_reseal_authority{
-                    !trusted_profile1 &&
+                    !force_matmul_exact_replay && !trusted_profile1 &&
                     consensusParams.IsMatMulRCProfile1Active(nHeight) &&
                     !consensusParams.IsMatMulRCCoupledActive(nHeight) &&
                     ConsumeMatMulRCWinnerResealAuthority(
@@ -14321,7 +14324,8 @@ static bool ContextualCheckBlock(const CBlock& block,
                         "block=%s height=%d provider=%s\n",
                         block.GetHash().ToString(), nHeight,
                         winner_authority_provider);
-                } else if (!test_hook_forces_release &&
+                } else if (!force_matmul_exact_replay &&
+                    !test_hook_forces_release &&
                     exact_index != nullptr &&
                     (exact_index->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) &&
                     // A durable bit must never outrank a recorded failure.
@@ -14338,7 +14342,8 @@ static bool ContextualCheckBlock(const CBlock& block,
                                 LOCAL_EXACT_REPLAY;
                     }
                 } else if (const auto memo{
-                               test_hook_forces_release
+                               (force_matmul_exact_replay ||
+                                test_hook_forces_release)
                                    ? std::optional<bool>{}
                                    : LookupMatMulEncDrVerdict(block.GetHash())};
                            memo.has_value()) {
@@ -14381,6 +14386,15 @@ static bool ContextualCheckBlock(const CBlock& block,
                     if (const auto fake{
                             RunMatMulExactReplayUnderReleasedCsMainHook()}) {
                         encdr_ok = *fake;
+                        if (encdr_ok && force_matmul_exact_replay &&
+                            rc_authority != nullptr &&
+                            consensusParams.IsMatMulRCActive(nHeight) &&
+                            !consensusParams.IsMatMulRCCoupledActive(
+                                nHeight)) {
+                            *rc_authority =
+                                MatMulRCAuthorityProvenance::
+                                    LOCAL_EXACT_REPLAY;
+                        }
                     } else {
                         if (consensusParams.IsMatMulRCCoupledActive(nHeight)) {
                             encdr_ok = CheckMatMulProofOfWork_RCCoupled(block, consensusParams, nHeight);
@@ -14528,6 +14542,101 @@ static bool ContextualCheckBlock(const CBlock& block,
     }
 
     return ContextualCheckBlockBodyOnly(block, state, chainman, pindexPrev);
+}
+
+bool ChainstateManager::ExactReplayActiveMatMulBlock(
+    const uint256& block_hash,
+    BlockValidationState& state,
+    MatMulExactReplayRecoveryResult& result)
+{
+    AssertLockHeld(::cs_main);
+    result = {};
+
+    CBlockIndex* const index{m_blockman.LookupBlockIndex(block_hash)};
+    if (index == nullptr) {
+        return state.Error("Unknown ExactReplay recovery block");
+    }
+    if (GetMatMulValidationMode() !=
+        kernel::MatMulValidationMode::CONSENSUS) {
+        return state.Error(
+            "Fresh ExactReplay recovery requires consensus MatMul validation mode");
+    }
+    if ((index->nStatus & BLOCK_FAILED_MASK) != 0) {
+        return state.Error("ExactReplay recovery block is marked failed");
+    }
+    if (!ActiveChain().Contains(index)) {
+        return state.Error("ExactReplay recovery block is not on the active chain");
+    }
+    if ((index->nStatus & BLOCK_HAVE_DATA) == 0) {
+        return state.Error("ExactReplay recovery block body is unavailable");
+    }
+    if (!index->IsValid(BLOCK_VALID_SCRIPTS)) {
+        return state.Error(
+            "ExactReplay recovery block has not completed script validation");
+    }
+    if (!GetConsensus().IsMatMulTrustedReplayAttestationActive(
+            index->nHeight)) {
+        return state.Error(
+            "ExactReplay recovery block is outside the Profile-1 attestation regime");
+    }
+
+    result.height = index->nHeight;
+    result.previously_verified =
+        (index->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0;
+    if (const CBlockIndex* const tip{ActiveTip()}) {
+        result.tip_before = tip->GetBlockHash();
+        result.tip_height_before = tip->nHeight;
+    }
+
+    CBlock block;
+    if (!m_blockman.ReadBlock(block, *index)) {
+        return state.Error(
+            "Unable to read ExactReplay recovery block body from disk");
+    }
+    if (!CheckBlock(block, state, GetConsensus())) return false;
+
+    MatMulRCAuthorityProvenance rc_authority{
+        MatMulRCAuthorityProvenance::NONE};
+    if (!ContextualCheckBlock(
+            block, state, *this, index->pprev,
+            /*fCheckPOW=*/true,
+            /*may_release_cs_main=*/true,
+            &rc_authority,
+            /*force_matmul_exact_replay=*/true)) {
+        return false;
+    }
+
+    // ContextualCheckBlock released cs_main for the GPU operation. Do not
+    // persist a recovery verdict if a concurrent reorg moved this hash away
+    // from the requested active-chain height while ExactReplay was running.
+    CBlockIndex* const current{m_blockman.LookupBlockIndex(block_hash)};
+    if (current == nullptr || current != index ||
+        (current->nStatus & BLOCK_FAILED_MASK) != 0 ||
+        ActiveChain()[result.height] != current) {
+        return state.Error(
+            "Active chain changed at the ExactReplay recovery height");
+    }
+    if (rc_authority != MatMulRCAuthorityProvenance::LOCAL_EXACT_REPLAY) {
+        return state.Error(
+            "ExactReplay recovery did not produce local ExactReplay provenance");
+    }
+    if (!PersistMatMulExactReplayVerdict(
+            block_hash, /*create_attestation=*/false)) {
+        return state.Error("Unable to persist ExactReplay recovery verdict");
+    }
+
+    if (const CBlockIndex* const tip{ActiveTip()}) {
+        result.tip_after = tip->GetBlockHash();
+        result.tip_height_after = tip->nHeight;
+    }
+    LogWarning(
+        "Fresh active-chain MatMul ExactReplay recovery succeeded block=%s "
+        "height=%d previously_verified=%d tip_before=%s:%d tip_after=%s:%d; "
+        "attestation signing deferred\n",
+        block_hash.ToString(), result.height, result.previously_verified,
+        result.tip_before.ToString(), result.tip_height_before,
+        result.tip_after.ToString(), result.tip_height_after);
+    return true;
 }
 
 bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValidationState& state, CBlockIndex** ppindex, bool min_pow_checked)

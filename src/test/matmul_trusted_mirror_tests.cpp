@@ -703,12 +703,12 @@ BOOST_AUTO_TEST_CASE(partial_quorum_is_never_accepted)
                 matmul::trusted::WaitResult::Timeout);
 }
 
-BOOST_AUTO_TEST_CASE(clear_failed_local_attestation_releases_height)
+BOOST_AUTO_TEST_CASE(clear_off_chain_local_attestation_releases_height)
 {
     RuntimeReset reset;
     const CKey signer{NewKey()};
     const uint256 chain{Hex256('a')};
-    const uint256 failed{Hex256('b')};
+    const uint256 occupied{Hex256('b')};
     const uint256 replacement{Hex256('c')};
 
     matmul::trusted::StoreConfig config;
@@ -722,17 +722,17 @@ BOOST_AUTO_TEST_CASE(clear_failed_local_attestation_releases_height)
         std::move(config), /*trusted_mirror=*/false,
         /*serve=*/true, std::chrono::milliseconds{5}, error));
 
-    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(failed, 199303) ==
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(occupied, 199303) ==
                   matmul::trusted::AddResult::Accepted);
     BOOST_CHECK(node::matmul_trusted::SignAuthoritative(
                     replacement, 199303) ==
                 matmul::trusted::AddResult::HeightOccupied);
 
     size_t removed{0};
-    BOOST_REQUIRE(node::matmul_trusted::ClearFailedLocalAttestation(
-        failed, 199303, removed, error));
+    BOOST_REQUIRE(node::matmul_trusted::ClearLocalAttestation(
+        occupied, 199303, removed, error));
     BOOST_CHECK_EQUAL(removed, 1U);
-    BOOST_CHECK(!node::matmul_trusted::HasQuorum(failed, 199303));
+    BOOST_CHECK(!node::matmul_trusted::HasQuorum(occupied, 199303));
     BOOST_CHECK(!node::matmul_trusted::HasLocalSignatureAtHeight(
         replacement, 199303));
     BOOST_CHECK(node::matmul_trusted::SignAuthoritative(
@@ -3508,17 +3508,17 @@ BOOST_AUTO_TEST_CASE(sign_authoritative_height_occupied_after_durable_reload)
                 same == matmul::trusted::AddResult::Accepted);
 }
 
-BOOST_AUTO_TEST_CASE(clear_failed_local_attestation_erases_durable_record)
+BOOST_AUTO_TEST_CASE(clear_off_chain_local_attestation_erases_durable_record)
 {
     RuntimeReset reset;
     const CKey signer{NewKey()};
     const uint256 chain{Hex256('1')};
     const uint256 context{Hex256('2')};
-    const uint256 failed{Hex256('3')};
+    const uint256 occupied{Hex256('3')};
     const uint256 replacement{Hex256('4')};
     const fs::path archive{
         m_args.GetDataDirNet() /
-        "matmul_attestations_failed_local_clear.dat"};
+        "matmul_attestations_off_chain_local_clear.dat"};
 
     const auto configure = [&] {
         matmul::trusted::StoreConfig config;
@@ -3536,20 +3536,20 @@ BOOST_AUTO_TEST_CASE(clear_failed_local_attestation_erases_durable_record)
     configure();
     std::string error;
     BOOST_REQUIRE(node::matmul_trusted::OpenPersistence(archive, error));
-    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(failed, 199303) ==
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(occupied, 199303) ==
                   matmul::trusted::AddResult::Accepted);
     BOOST_REQUIRE(node::matmul_trusted::FlushPersistence(error));
     size_t removed{0};
-    BOOST_REQUIRE(node::matmul_trusted::ClearFailedLocalAttestation(
-        failed, 199303, removed, error));
+    BOOST_REQUIRE(node::matmul_trusted::ClearLocalAttestation(
+        occupied, 199303, removed, error));
     BOOST_CHECK_EQUAL(removed, 1U);
-    BOOST_CHECK(node::matmul_trusted::Get(failed, 199303).empty());
+    BOOST_CHECK(node::matmul_trusted::Get(occupied, 199303).empty());
 
     node::matmul_trusted::ResetForTest();
     configure();
     error.clear();
     BOOST_REQUIRE(node::matmul_trusted::OpenPersistence(archive, error));
-    BOOST_CHECK(node::matmul_trusted::Get(failed, 199303).empty());
+    BOOST_CHECK(node::matmul_trusted::Get(occupied, 199303).empty());
     BOOST_CHECK(!node::matmul_trusted::HasLocalSignatureAtHeight(
         replacement, 199303));
     BOOST_CHECK(node::matmul_trusted::SignAuthoritative(

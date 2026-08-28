@@ -13,6 +13,7 @@
 #include <matmul/trusted_exact_replay_attestation.h>
 #include <node/matmul_trusted_attestations.h>
 #include <node/warnings.h>
+#include <pow.h>
 #include <random.h>
 #include <rpc/blockchain.h>
 #include <sync.h>
@@ -4031,6 +4032,179 @@ BOOST_FIXTURE_TEST_CASE(chainstate_exact_replay_drops_cs_main_for_recompute, Tes
     waiter.join();
     BOOST_CHECK(hook_saw_unlocked.load(std::memory_order_acquire));
     BOOST_CHECK(waiter_got_lock.load(std::memory_order_acquire));
+}
+
+BOOST_FIXTURE_TEST_CASE(chainstate_attestation_recovery_freshly_exact_replays_active_replacement,
+                        TestChain100Setup)
+{
+    // Emergency same-height recovery must not reuse assumevalid, a process
+    // memo, or a durable ExactReplay bit. It must run the pure predicate with
+    // cs_main released, persist local provenance without trying to sign into
+    // the occupied height, and leave chain selection untouched.
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    Chainstate& chainstate = chainman.ActiveChainstate();
+    auto& consensus = const_cast<Consensus::Params&>(Params().GetConsensus());
+    auto& mode = const_cast<kernel::MatMulValidationMode&>(
+        chainman.m_options.matmul_validation_mode);
+    const int32_t saved_v4{consensus.nMatMulV4Height};
+    const int32_t saved_bmx{consensus.nMatMulBMX4CHeight};
+    const int32_t saved_rc{consensus.nMatMulRCHeight};
+    const auto saved_mode{mode};
+    struct Restore {
+        Consensus::Params& consensus;
+        int32_t v4;
+        int32_t bmx;
+        int32_t rc;
+        kernel::MatMulValidationMode& mode;
+        kernel::MatMulValidationMode saved_mode;
+        ~Restore()
+        {
+            SetMatMulExactReplayUnderReleasedCsMainHookForTest(nullptr);
+            node::matmul_trusted::ResetForTest();
+            consensus.nMatMulV4Height = v4;
+            consensus.nMatMulBMX4CHeight = bmx;
+            consensus.nMatMulRCHeight = rc;
+            mode = saved_mode;
+        }
+    } restore{consensus, saved_v4, saved_bmx, saved_rc, mode, saved_mode};
+
+    CBlockIndex* const parent{
+        WITH_LOCK(::cs_main, return chainstate.m_chain.Tip())};
+    BOOST_REQUIRE(parent != nullptr);
+    const int32_t replacement_height{parent->nHeight + 1};
+    consensus.nMatMulV4Height = replacement_height;
+    consensus.nMatMulBMX4CHeight = replacement_height;
+    consensus.nMatMulRCHeight = replacement_height;
+    BOOST_REQUIRE(consensus.IsMatMulTrustedReplayAttestationActive(
+        replacement_height));
+    mode = kernel::MatMulValidationMode::CONSENSUS;
+
+    CKey signer;
+    signer.MakeNewKey(/*fCompressed=*/true);
+    matmul::trusted::StoreConfig config;
+    config.chain_id = uint256::ONE;
+    config.replay_authority_context =
+        uint256::FromHex(std::string(64, 'c')).value();
+    config.trusted_signers = {signer.GetPubKey()};
+    config.threshold = 1;
+    config.local_signer = signer;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/false, /*serve=*/true,
+        std::chrono::milliseconds{50}, error));
+
+    std::atomic<int> exact_replay_calls{0};
+    std::atomic<bool> exact_replay_verdict{true};
+    SetMatMulExactReplayUnderReleasedCsMainHookForTest(
+        [&]() -> std::optional<bool> {
+            AssertLockNotHeld(::cs_main);
+            ++exact_replay_calls;
+            return exact_replay_verdict.load();
+        });
+
+    const CScript script{
+        GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()))};
+    const auto replacement{std::make_shared<const CBlock>(
+        CreateBlock({}, script, chainstate))};
+    bool new_block{false};
+    BOOST_REQUIRE(chainman.ProcessNewBlock(
+        replacement, /*force_processing=*/true,
+        /*min_pow_checked=*/true, &new_block));
+    BOOST_REQUIRE(new_block);
+    CBlockIndex* const replacement_index{WITH_LOCK(::cs_main, {
+        return chainman.m_blockman.LookupBlockIndex(replacement->GetHash());
+    })};
+    BOOST_REQUIRE(replacement_index != nullptr);
+    BOOST_REQUIRE(WITH_LOCK(::cs_main, {
+        return chainstate.m_chain.Tip() == replacement_index &&
+               replacement_index->IsValid(BLOCK_VALID_SCRIPTS) &&
+               (replacement_index->nStatus & BLOCK_HAVE_DATA) != 0;
+    }));
+    BOOST_CHECK(!(replacement_index->nStatus &
+                  BLOCK_EXACT_REPLAY_VERIFIED));
+
+    const uint256 occupied_hash{
+        uint256::FromHex(std::string(64, 'd')).value()};
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(
+                      occupied_hash, replacement_height) ==
+                  matmul::trusted::AddResult::Accepted);
+    BOOST_CHECK(node::matmul_trusted::SignAuthoritative(
+                    replacement->GetHash(), replacement_height) ==
+                matmul::trusted::AddResult::HeightOccupied);
+
+    // A normal validation re-entry could now use this memo. Recovery must not.
+    CacheMatMulEncDrVerdict(replacement->GetHash(), true);
+    exact_replay_calls.store(0);
+    exact_replay_verdict.store(false);
+    ChainstateManager::MatMulExactReplayRecoveryResult failed_result;
+    BlockValidationState failed_replay_state;
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK(!chainman.ExactReplayActiveMatMulBlock(
+            replacement->GetHash(), failed_replay_state, failed_result));
+        BOOST_CHECK(failed_replay_state.IsInvalid());
+        BOOST_CHECK_EQUAL(chainstate.m_chain.Tip(), replacement_index);
+        BOOST_CHECK(!(replacement_index->nStatus &
+                      BLOCK_EXACT_REPLAY_VERIFIED));
+    }
+    BOOST_CHECK_EQUAL(exact_replay_calls.load(), 1);
+    BOOST_CHECK(!node::matmul_trusted::Get(
+                    occupied_hash, replacement_height).empty());
+
+    exact_replay_verdict.store(true);
+    exact_replay_calls.store(0);
+    ChainstateManager::MatMulExactReplayRecoveryResult replay_result;
+    BlockValidationState replay_state;
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman.ExactReplayActiveMatMulBlock(
+            replacement->GetHash(), replay_state, replay_result));
+        BOOST_CHECK(replacement_index->nStatus &
+                    BLOCK_EXACT_REPLAY_VERIFIED);
+        BOOST_CHECK_EQUAL(chainstate.m_chain.Tip(), replacement_index);
+    }
+    BOOST_CHECK_EQUAL(exact_replay_calls.load(), 1);
+    BOOST_CHECK_EQUAL(replay_result.height, replacement_height);
+    BOOST_CHECK(!replay_result.previously_verified);
+    BOOST_CHECK_EQUAL(replay_result.tip_before,
+                      replacement->GetHash());
+    BOOST_CHECK_EQUAL(replay_result.tip_after,
+                      replacement->GetHash());
+
+    // Repeat with the newly durable bit present. Recovery is explicitly a
+    // fresh replay operation, not an idempotent status-bit lookup.
+    exact_replay_calls.store(0);
+    ChainstateManager::MatMulExactReplayRecoveryResult repeated_result;
+    replay_state = BlockValidationState{};
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainman.ExactReplayActiveMatMulBlock(
+            replacement->GetHash(), replay_state, repeated_result));
+        BOOST_CHECK_EQUAL(chainstate.m_chain.Tip(), replacement_index);
+    }
+    BOOST_CHECK_EQUAL(exact_replay_calls.load(), 1);
+    BOOST_CHECK(repeated_result.previously_verified);
+
+    // Persisting recovery provenance did not auto-sign and therefore did not
+    // erase or bypass the height-occupied guard.
+    BOOST_CHECK(node::matmul_trusted::Get(
+                    replacement->GetHash(), replacement_height).empty());
+    BOOST_CHECK(!node::matmul_trusted::Get(
+                    occupied_hash, replacement_height).empty());
+    BOOST_CHECK(node::matmul_trusted::SignAuthoritative(
+                    replacement->GetHash(), replacement_height) ==
+                matmul::trusted::AddResult::HeightOccupied);
+
+    size_t removed{0};
+    BOOST_REQUIRE(node::matmul_trusted::ClearLocalAttestation(
+        occupied_hash, replacement_height, removed, error));
+    BOOST_CHECK_EQUAL(removed, 1U);
+    BOOST_CHECK(node::matmul_trusted::SignAuthoritative(
+                    replacement->GetHash(), replacement_height) ==
+                matmul::trusted::AddResult::Accepted);
+    BOOST_CHECK_EQUAL(
+        WITH_LOCK(::cs_main, return chainstate.m_chain.Tip()),
+        replacement_index);
 }
 
 //! Production cadence extra is last ConnectTip / hold-anchor / now,now — not

@@ -1391,8 +1391,33 @@ public:
     /** Persist a successful header-derived ExactReplay verdict. Does not
      *  raise BLOCK_VALID_* by itself. Recomputes authenticated chain work
      *  for this block's lineage so GETHEADERS and trust-adjusted ranking
-     *  see the ExactReplayed prefix (body-first then replay left work stale). */
-    bool PersistMatMulExactReplayVerdict(const uint256& block_hash)
+     *  see the ExactReplayed prefix (body-first then replay left work stale).
+     *  Recovery callers pass create_attestation=false until the conflicting
+     *  local height occupant has been durably cleared. */
+    bool PersistMatMulExactReplayVerdict(
+        const uint256& block_hash,
+        bool create_attestation = true)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    struct MatMulExactReplayRecoveryResult {
+        int32_t height{-1};
+        bool previously_verified{false};
+        uint256 tip_before{};
+        int32_t tip_height_before{-1};
+        uint256 tip_after{};
+        int32_t tip_height_after{-1};
+    };
+
+    /** Freshly ExactReplay a stored active-chain Profile-1 block, bypassing
+     *  assumevalid, the process verdict memo, and an existing durable replay
+     *  bit. The expensive pure computation releases cs_main. After re-locking,
+     *  the target must still occupy the same active-chain height before the
+     *  successful verdict is persisted. This does not invalidate, disconnect,
+     *  activate, reconsider, or sign any block. */
+    bool ExactReplayActiveMatMulBlock(
+        const uint256& block_hash,
+        BlockValidationState& state,
+        MatMulExactReplayRecoveryResult& result)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /** Record that a trusted mirror observed pin coverage of this hash.
