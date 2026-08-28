@@ -48,6 +48,17 @@ Ada (4090), Hopper (H100), and B200/B300 are outside the sealed golden
 manifest and cannot self-qualify. Archive / consensus operators on sm_120
 should pin the 13.2 / 13.4 combo before expecting `NODE_MATMUL_CONSENSUS`.
 
+## Building from source (canary exits, it does not degrade)
+
+A local compile of a sealed release moves the BUILD_RELEVANT fingerprint.
+The production canary then fails `build_provenance_mismatch` and a
+`-matmulvalidation=consensus` node **refuses startup**
+(`RefuseUnverifiableMatMulConsensusStartup`) rather than running an
+unqualified GPU. Reseal against the new fingerprint
+([release-process.md](release-process.md)) or pass
+`-allowunverifiablematmulconsensus=1` only while you are sitting at the
+console. That flag is the documented escape, not a production default.
+
 ## Competing-branch / “zombie” ExactReplay
 
 If headers for a better-work chain arrive while the node still holds a local

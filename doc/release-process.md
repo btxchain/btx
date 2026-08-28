@@ -54,6 +54,14 @@ strict schema), so excluding it is the only way sealing is not a fixed point.
 Any other change in that scope — including a one-line compile fix — moves the
 fingerprint and burns any corpus already recorded against the previous freeze.
 
+**Source-build warning.** A tree compiled after `F` without a matching
+seal is not the released binary. The production canary fails
+`build_provenance_mismatch` and `-matmulvalidation=consensus` **exits**
+(`RefuseUnverifiableMatMulConsensusStartup`) instead of starting with a
+degraded GPU. That is intentional. Either finish the reseal below, or
+pass `-allowunverifiablematmulconsensus=1` only as a supervised escape.
+Do not ship or run an unattended node on that flag.
+
 CPU ExactReplay is not an independent production golden. The required cohort is
 **CUDA**. Metal and HIP are optional; if supplied they must match exactly.
 
