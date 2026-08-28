@@ -12627,11 +12627,22 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
         {
             LOCK(cs_main);
             const CBlockIndex* active_tip{m_chainman.ActiveTip()};
+            // In CONSENSUS mode ExactReplay is the authority and signer
+            // attestations never advance nAuthenticatedChainWork, so a linear
+            // child of the active (ExactReplay-connected) tip must still qualify
+            // for the authenticated tip-child RC slot. Otherwise every consensus
+            // node deadlocks one block past the last attestation (competing path
+            // is reserved to zero slots via MATMUL_RESERVED_AUTHENTICATED_TIP_CHILD_SLOTS).
+            // TRUSTED mode is unchanged: attestation still gates there.
+            const bool consensus_mode_tip_authority{
+                m_chainman.GetMatMulValidationMode() ==
+                    kernel::MatMulValidationMode::CONSENSUS};
             direct_authenticated_tip_child =
                 active_tip != nullptr &&
                 block.hashPrevBlock == active_tip->GetBlockHash() &&
-                active_tip->nAuthenticatedChainWork ==
-                    active_tip->nChainWork;
+                (active_tip->nAuthenticatedChainWork ==
+                    active_tip->nChainWork ||
+                 consensus_mode_tip_authority);
         }
     }
     // RC admission tickets are an ephemeral near-tip anti-DoS policy, not
