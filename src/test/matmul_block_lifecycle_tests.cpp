@@ -117,6 +117,28 @@ BOOST_AUTO_TEST_CASE(retry_cooldown_prevents_header_only_hot_loop)
     BOOST_CHECK(lifecycle.NextRetry(uint256{}, now + 60s).has_value());
 }
 
+BOOST_AUTO_TEST_CASE(repeated_deferral_terminal_requeues)
+{
+    node::MatMulBlockLifecycle lifecycle{1, 100, 10min, 10min};
+    const auto now{node::MatMulBlockLifecycle::Clock::now()};
+    const uint256 hash{
+        uint256::FromHex(std::string(63, '0') + "6").value()};
+    BOOST_REQUIRE(lifecycle.Retain(hash, Body(9, 50, now), now));
+    BOOST_CHECK_EQUAL(lifecycle.RetainedDeferralCount(hash), 0U);
+
+    BOOST_REQUIRE(lifecycle.RefreshRetry(hash, 60s, now));
+    BOOST_REQUIRE(lifecycle.RefreshRetry(hash, 60s, now + 1s));
+    BOOST_CHECK_EQUAL(lifecycle.RetainedDeferralCount(hash), 2U);
+    BOOST_CHECK(!lifecycle.NextRetry(uint256{}, now + 30s).has_value());
+
+    BOOST_REQUIRE(lifecycle.TerminalRequeue(hash, 60s, now + 2s));
+    BOOST_CHECK_EQUAL(lifecycle.RetainedDeferralCount(hash), 0U);
+    BOOST_CHECK(lifecycle.HasRetainedBody(hash));
+    BOOST_CHECK(!lifecycle.NextRetry(uint256{}, now + 2s + 59s).has_value());
+    BOOST_CHECK(lifecycle.NextRetry(uint256{}, now + 2s + 60s).has_value());
+    BOOST_CHECK(!lifecycle.IsActive(hash, now + 2s));
+}
+
 BOOST_AUTO_TEST_CASE(idle_catchup_ignores_retry_cooldown)
 {
     node::MatMulBlockLifecycle lifecycle{1, 100, 10min, 10min};

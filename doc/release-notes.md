@@ -11,17 +11,16 @@ recomputes a different ASERT target for every majority header after
 (re-anchored). About 21 of 94 reachable peers ran 0.34.1 and were
 stranded; 73 never left the real chain.
 
-**v0.34.2 withdraws that re-anchor.** `nMatMulStallRecoveryHeight` is
-`INT_MAX` again. **Replacing the binary alone does not rejoin.** An
-already-split chainstate will not reorg on restart. After installing
-0.34.2, operators must also `invalidateblock` their first post-fork
-block (reversible with `reconsiderblock`). On the measured 0.34.1
-branch that block is height 199295,
-`33c834f8056aca85a8591a304fe52affebe2770d6027e79845765547f8dfae82`.
-Confirm with `getchaintips` before invalidating.
+**v0.34.2 withdraws that re-anchor** but shipped without the
+ExactReplay admission fix, so every `-matmulvalidation=consensus` node
+froze exactly one block past the last attested height. **v0.34.3 is
+the binary that unsticks that deadlock.**
 
 This split was made visible by per-peer byte tables and chaintips from
 **MendeMatthias**, **jarekpiot**, **Jpp-matata**, and **dixonping**.
+The 0.34.2 deadlock was read off tag `v0.34.2` by **jarekpiot** and
+independently confirmed on macpro2; **dixonping** asked for the
+regression test that 0.34.2 lacked.
 
 ---
 
@@ -30,10 +29,11 @@ public DNS hosts are not chain-tip oracles, and a node with no pin
 membership, no attestor key, and no trusted-mirror pin must be able to
 reach tip and keep advancing on ExactReplay alone.
 
-`CLIENT_VERSION` in this tree is **0.34.2**. The `v0.34` tag and 0.34.0
+`CLIENT_VERSION` in this tree is **0.34.3**. The `v0.34` tag and 0.34.0
 seal remain the pool-close cut. 0.34.1 is withdrawn: it partitions
-nodes from mainnet. Freeze `F` is recorded in
-[0.34.2-freeze.md](evidence/0.34.2-freeze.md); seal and tarballs follow
+nodes from mainnet. 0.34.2 is withdrawn for consensus nodes: it deadlocks
+one block past the last attestation. Freeze `F` is recorded in
+[0.34.3-freeze.md](evidence/0.34.3-freeze.md); seal and tarballs follow
 the corpus. Git describe on `main` remains the 0.33.4.2
 line until 0.34 merges
 ([release-notes-0.33.4.2.md](release-notes/release-notes-0.33.4.2.md)).
@@ -48,34 +48,57 @@ To receive release and update notifications, please subscribe to:
 
 # How to Upgrade
 
-**If you are on 0.34.1, binary replacement is not enough.** Install
-0.34.2, start the node, then invalidate your first post-fork block:
+Install 0.34.3. Two different `invalidateblock` operations exist. They
+use the same RPC and have **opposite** outcomes. Do not mix them.
+
+## Case A — fork-rejoin (0.34.1 split only): `invalidateblock` is required
+
+If you ran 0.34.1, binary replacement is not enough. That chainstate
+will not reorg onto the majority on restart. After installing 0.34.3,
+start the node, then invalidate **the first post-fork block**
+(reversible with `reconsiderblock`). Do not invalidate from a still-
+running 0.34.1 binary: that binary still rejects the majority chain.
+Upgrade first, then invalidate.
 
 ```
 btx-cli getchaintips
 btx-cli invalidateblock <hash of the first block on your 0.34.1 branch>
 ```
 
-That `invalidateblock` is reversible with `reconsiderblock`. Do not
-invalidate from a still-running 0.34.1 binary: that binary still
-rejects the majority chain. Upgrade first, then invalidate.
-
 On the fork measured on macpro2 the first post-fork block is height
 199295, hash
 `33c834f8056aca85a8591a304fe52affebe2770d6027e79845765547f8dfae82`.
 Your hash may differ; use `getchaintips`.
 
-If you never ran 0.34.1 (you stayed on the majority chain), replace
-the binaries as usual: shut down cleanly, wait for exit, install
-0.34.2. No `invalidateblock` is required.
+If you never ran 0.34.1 (you stayed on the majority chain), skip Case A.
 
-Keep Metal `.metallib` files next to `btxd`. Back up wallets and
-configuration before upgrading.
+## Case B — unauthenticated suffix (0.34.2 deadlock): `invalidateblock` is harmful
+
+If you ran 0.34.2 (or 0.34.3 before the admission fix) in
+`-matmulvalidation=consensus` and froze **exactly one block past the
+last attested height**, do **not** `invalidateblock` that unauthenticated
+suffix. **jarekpiot** measured that this reorgs onto shorter competing
+forks, the original chain will not reconnect, and the suffix then hits
+a second pending-cap at occupancy 8/8. A **clean restart** recovers to
+the stuck-but-stable tip; the 0.34.3 binary then ExactReplays the
+linear child and walks forward. Same command as Case A, opposite
+outcome.
+
+## After replacing the binary
+
+Shut down cleanly, wait for exit, install 0.34.3. Keep Metal `.metallib`
+files next to `btxd`. Back up wallets and configuration before
+upgrading.
 
 Tarball SHA256s are filled in when the three assets are staged (Linux
 CPU, Linux CUDA, macOS arm64 Metal). Every shipped `btxd` is linked
-with ZMQ (`ldd` shows `libzmq` on Linux; macOS statically links
-`libzmq.a`). See [#111](https://github.com/btxchain/btx/issues/111) and
+with ZMQ. **Verify `libexec/btxd.real`, not `bin/btxd`.** Since 0.34.1
+`bin/btxd` is a `#!/bin/sh` wrapper: `ldd bin/btxd` and
+`otool -L bin/btxd` return nothing and look like a clean pass while
+meaning nothing at all. The real binary is `libexec/btxd.real` on both
+Linux and macOS. `python3 scripts/release/verify_release_btxd.py`
+follows the wrapper; `ldd libexec/btxd.real` must show `libzmq` on
+Linux. See [#111](https://github.com/btxchain/btx/issues/111) and
 [#122](https://github.com/btxchain/btx/issues/122) below.
 
 # Compatibility
@@ -90,6 +113,64 @@ partitioned the network. `nMatMulStallRecoveryHeight` is `INT_MAX`;
 `num/den` stay `1/1`.
 
 # Notable Changes
+
+## 0.34.3: consensus ExactReplay deadlock (tag v0.34.2)
+
+Every `-matmulvalidation=consensus` node on v0.34.2 froze exactly one
+block past the last attested height. The stall survived a clean restart.
+GPU sat at 0%. Logs looped `Re-admitting budget-deferred body` then
+`MatMul pending verification cap reached` about once a second.
+
+Cause, read off the tag by **jarekpiot** and confirmed on macpro2:
+`IsBlockAuthenticated` only via `BLOCK_EXACT_REPLAY_VERIFIED` or
+`BLOCK_TRUSTED_REPLAY_ATTESTED`; with signers retired, ExactReplay is
+the only authenticator left. `direct_authenticated_tip_child` required
+`active_tip->nAuthenticatedChainWork == active_tip->nChainWork`, which
+is false forever once the tip is past the last attested block. The
+default pending cap is 1 job and the competing lane reserved 1
+*work-unit* from a cap denominated in work-units, so
+`CanStartCompetingMatMulRCVerification` never returned true. The sole
+linear tip-child was classed competing, never ExactReplayed, never
+earned `VERIFIED`, and the child stayed competing forever.
+
+0.34.3:
+
+- A linear child of the active ExactReplay-connected tip qualifies as
+  `direct_authenticated_tip_child` even when authenticated work lags
+  (`TRUSTED` mode unchanged). This is the fix **jarekpiot** independently
+  proposed.
+- Competing ExactReplay reserves one *job*, not one work-unit, and
+  shares the single-job cap when idle.
+- Authority-mode nodes parse inbound `BLOCK` / `CMPCTBLOCK` /
+  `BLOCKTXN` / `INV` again. `TX` / `MEMPOOL` / `FEEFILTER` stay dropped.
+- Budget-deferred bodies retry on the refill schedule, not at 1–2 Hz;
+  repeated deferral is terminal-with-requeue.
+- `peerman_tests/linear_tip_child_replays_when_authenticated_work_lags`
+  is the shape **dixonping** asked for: one linear child, no sibling,
+  authenticated work strictly less than chain work. It fails against
+  tag v0.34.2 and passes here.
+
+## 0.34.3: CUDA provenance
+
+**MendeMatthias** independently verified the source seals. They are
+intact: `build_relevant_tree` over `CMakeLists.txt cmake src
+contrib/matmul-v4` excluding the manifest `.data` matches v0.34
+`68bc97a7…`, v0.34.1 `5773990f…`, v0.34.2 `187e19ba…`. The manifest
+correctly describes the tag. A `build_provenance_mismatch` from the
+shipped 0.34.2 linux-x86_64-cuda tarball means **that binary was not
+compiled from the tag** (dirty worktree, wrong commit, or stale object
+dir). The remedy is a rebuild from a clean checkout of the tag in a
+fresh build directory, not a manifest edit. 0.34.3 CUDA is linked
+after the seal so `canary=passed`.
+
+## 0.34.3: verify `libexec/btxd.real`, never the wrapper
+
+Since 0.34.1, packaged `bin/btxd` is a `#!/bin/sh` wrapper.
+`otool -L bin/btxd` and `ldd bin/btxd` return nothing and read as a
+clean pass while meaning nothing at all. **MendeMatthias** showed this;
+we made the same mistake. The real binary is `libexec/btxd.real` on
+Linux and macOS. `scripts/release/verify_release_btxd.py` follows the
+wrapper and fails if `.real` is missing.
 
 ## Notice to trusted-mirror operators: repoint or move to consensus
 
@@ -361,7 +442,9 @@ trees had passed `-DWITH_ZMQ=ON`; the CPU tree had not.
 - `find_package(ZeroMQ … REQUIRED)` when the option is on.
 - `scripts/release/verify_release_btxd.py` refuses a `btxd` whose help
   text advertises ZMQ without a real libzmq link, and on macOS refuses
-  any `/opt/homebrew` load command.
+  any `/opt/homebrew` load command. Since 0.34.1 it also refuses to
+  treat the packaged `bin/btxd` shell wrapper as the binary: it
+  verifies `libexec/btxd.real`.
 - [release-process.md](release-process.md) makes that `ldd`/`otool`
   check mandatory before a tarball is staged.
 

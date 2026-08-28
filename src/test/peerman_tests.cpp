@@ -4405,6 +4405,187 @@ BOOST_AUTO_TEST_CASE(rc_pending_cap_still_retains_for_retry)
     }
 }
 
+// v0.34.2 network-wide deadlock (jarekpiot, independently confirmed on
+// macpro2; dixonping asked for this exact shape). One linear tip-child,
+// no competing sibling at that height, active tip past the last attested
+// block so nAuthenticatedChainWork < nChainWork. Tag v0.34.2 classified
+// that child as competing, subtracted one work-unit from a one-job cap,
+// and never ExactReplayed. The child must take the authenticated lane,
+// occupy the reserved RC slot, ExactReplay, and connect.
+BOOST_AUTO_TEST_CASE(linear_tip_child_replays_when_authenticated_work_lags)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+
+    node::matmul_trusted::ResetForTest();
+    ResetSharedPeermanFixture(m_node);
+    ResetGlobalMatMulRCBudgetForTest();
+    ConnmanTestMsg& connman = static_cast<ConnmanTestMsg&>(*m_node.connman);
+    PeerManager& peerman = *m_node.peerman;
+
+    auto& mode = const_cast<kernel::MatMulValidationMode&>(
+        m_node.chainman->m_options.matmul_validation_mode);
+    const auto saved_mode{mode};
+    struct RestoreMode {
+        kernel::MatMulValidationMode& mode;
+        kernel::MatMulValidationMode saved;
+        ~RestoreMode() { mode = saved; }
+    } restore_mode{mode, saved_mode};
+    mode = kernel::MatMulValidationMode::CONSENSUS;
+
+    Consensus::Params& consensus = const_cast<Consensus::Params&>(
+        m_node.chainman->GetParams().GetConsensus());
+    auto restore_heights{SaveMatMulHeights(consensus)};
+
+    const CBlockIndex* tip{
+        WITH_LOCK(::cs_main, return m_node.chainman->ActiveChain().Tip())};
+    BOOST_REQUIRE(tip != nullptr);
+    SetMockTime(std::chrono::seconds{tip->GetBlockTime() + 1});
+    peerman.SetBestBlock(tip->nHeight, std::chrono::seconds{tip->GetBlockTime()});
+    ActivateRcAtTip(consensus, *tip);
+    // Production deadlock: one-job pending cap. Unthrottle the 1/min
+    // rate windows so a budget miss cannot masquerade as the lane bug.
+    consensus.nMatMulRCMaxPendingVerifications = 1;
+    consensus.nMatMulRCPeerVerifyBudgetPerMin = 16;
+    consensus.nMatMulRCGlobalVerifyBudgetPerMin = 16;
+    BOOST_REQUIRE(consensus.IsMatMulRCFamilyActive(tip->nHeight + 1));
+    BOOST_REQUIRE_EQUAL(MatMulRCWorkUnits(consensus, tip->nHeight + 1), 1U);
+
+    {
+        LOCK(::cs_main);
+        CBlockIndex* tip_nc{
+            const_cast<CBlockIndex*>(m_node.chainman->ActiveTip())};
+        BOOST_REQUIRE(tip_nc != nullptr);
+        BOOST_REQUIRE(tip_nc->nChainWork > 0);
+        BOOST_REQUIRE(tip_nc->nAuthenticatedChainWork == tip_nc->nChainWork);
+        tip_nc->nAuthenticatedChainWork -= 1;
+        BOOST_REQUIRE(tip_nc->nAuthenticatedChainWork < tip_nc->nChainWork);
+    }
+
+    std::atomic<bool> replayed{false};
+    CBlock child{MineTipChild(m_node, *tip, /*extra_time=*/0)};
+    const uint256 child_hash{child.GetHash()};
+    BOOST_REQUIRE(child.hashPrevBlock == tip->GetBlockHash());
+    peerman.InstallMatMulVerifyOverrideForTest(
+        [&](const CBlock& block, int32_t, std::optional<int64_t>) {
+            if (block.GetHash() == child_hash) {
+                replayed.store(true, std::memory_order_relaxed);
+            }
+            return true;
+        });
+    struct ClearOverride {
+        PeerManager& peerman;
+        ~ClearOverride() { peerman.InstallMatMulVerifyOverrideForTest({}); }
+    } clear_override{peerman};
+
+    const ServiceFlags services{ServiceFlags(
+        NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS)};
+    CNode peer{/*id=*/224,
+               /*sock=*/nullptr,
+               CAddress{PeermanTestService(0x1800007f), NODE_NETWORK},
+               /*nKeyedNetGroupIn=*/0x18,
+               /*nLocalHostNonceIn=*/0,
+               CAddress{},
+               /*addrNameIn=*/"linear-unattested-tip-child",
+               ConnectionType::OUTBOUND_FULL_RELAY,
+               /*inbound_onion=*/false,
+               /*network_key=*/0};
+    connman.Handshake(peer, /*successfully_connected=*/true, services, services,
+                      PROTOCOL_VERSION, /*relay_txs=*/true);
+    connman.AddTestNode(peer);
+    connman.FlushSendBuffer(peer);
+    struct FinalizePeer {
+        ConnmanTestMsg& connman;
+        PeerManager& peerman;
+        CNode& node;
+        ~FinalizePeer()
+        {
+            peerman.FinalizeNode(node);
+            connman.RemoveTestNode(node);
+        }
+    } finalize{connman, peerman, peer};
+
+    const auto ticket{GrindTicket(child.GetBlockHeader(), consensus.powLimit)};
+    std::vector<CBlock> headers{CBlock{child.GetBlockHeader()}};
+    BOOST_REQUIRE(connman.ReceiveMsgFrom(
+        peer, NetMsg::Make(NetMsgType::HEADERS, TX_WITH_WITNESS(headers))));
+    peer.fPauseSend = false;
+    (void)connman.ProcessMessagesOnce(peer);
+    BOOST_CHECK(peerman.SendMessages(&peer));
+    {
+        LOCK(::cs_main);
+        int at_height{0};
+        for (const auto& [hash, index] : m_node.chainman->m_blockman.m_block_index) {
+            (void)hash;
+            if (index.nHeight == tip->nHeight + 1) ++at_height;
+        }
+        BOOST_REQUIRE_EQUAL(at_height, 1);
+        const CBlockIndex* child_idx{
+            m_node.chainman->m_blockman.LookupBlockIndex(child_hash)};
+        BOOST_REQUIRE(child_idx != nullptr);
+        BOOST_REQUIRE(child_idx->pprev == m_node.chainman->ActiveTip());
+        BOOST_REQUIRE(m_node.chainman->ActiveTip()->nAuthenticatedChainWork <
+                      m_node.chainman->ActiveTip()->nChainWork);
+    }
+
+    connman.FlushSendBuffer(peer);
+    BOOST_REQUIRE(connman.ReceiveMsgFrom(
+        peer, NetMsg::Make(NetMsgType::RCADMIT, ticket)));
+    peer.fPauseSend = false;
+    (void)connman.ProcessMessagesOnce(peer);
+    connman.FlushSendBuffer(peer);
+
+    {
+        ASSERT_DEBUG_LOG("direct authenticated tip-child");
+        DebugLogHelper no_cap(
+            "MatMul pending verification cap reached",
+            [](const std::string* line) {
+                if (line != nullptr) {
+                    throw std::runtime_error(
+                        "linear tip-child hit the competing pending cap "
+                        "(v0.34.2 deadlock still present)");
+                }
+                return false;
+            });
+        BOOST_REQUIRE(connman.ReceiveMsgFrom(
+            peer, NetMsg::Make(NetMsgType::BLOCK, TX_WITH_WITNESS(child))));
+        peer.fPauseSend = false;
+        (void)connman.ProcessMessagesOnce(peer);
+    }
+    BOOST_CHECK(!peer.fDisconnect);
+    BOOST_CHECK(!peerman.HasMatMulRetainedBodyForTest(child_hash));
+
+    BOOST_REQUIRE(PeermanWaitFor([&] {
+        LOCK(::cs_main);
+        const CBlockIndex* idx{
+            m_node.chainman->m_blockman.LookupBlockIndex(child_hash)};
+        return idx != nullptr &&
+               (idx->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0 &&
+               (idx->nStatus & BLOCK_HAVE_DATA) != 0 &&
+               m_node.chainman->ActiveChain().Contains(idx) &&
+               idx->IsValid(BLOCK_VALID_SCRIPTS);
+    }));
+    BOOST_CHECK(replayed.load(std::memory_order_relaxed));
+    BOOST_CHECK_EQUAL(
+        WITH_LOCK(::cs_main,
+                  return m_node.chainman->ActiveChain().Tip()->GetBlockHash()),
+        child_hash);
+
+    CBlockIndex* connected{WITH_LOCK(::cs_main, {
+        CBlockIndex* idx{
+            m_node.chainman->m_blockman.LookupBlockIndex(child_hash)};
+        return (idx != nullptr && m_node.chainman->ActiveChain().Contains(idx))
+                   ? idx
+                   : nullptr;
+    })};
+    if (connected != nullptr) {
+        BlockValidationState invalidate_state;
+        (void)m_node.chainman->ActiveChainstate().InvalidateBlock(
+            invalidate_state, connected);
+    }
+    NeutralizeUnconnectedHeaders(*Assert(m_node.chainman));
+    peerman.ResetMatMulVerifyAdmissionForTest();
+}
+
 // Local signer / miner must not spend ExactReplay GPU on a competing EncDr
 // sibling. HEADER_ONLY remains the policy; the pending-cap retain path must
 // not reopen that GPU.

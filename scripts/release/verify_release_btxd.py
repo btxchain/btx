@@ -23,6 +23,12 @@ and requires exit 0. Bundle CUDA runtime libs with `$ORIGIN` rpath
 (see `bundle_cuda_runtime_libs.py`) so that launch succeeds without a
 toolkit install.
 
+Since 0.34.1 the published `bin/btxd` is a `#!/bin/sh` wrapper. `ldd`
+and `otool -L` on that path return nothing and look like a clean pass
+while meaning nothing at all (MendeMatthias). The real binary is
+`libexec/btxd.real` on Linux and macOS. This script follows the wrapper
+to that file; passing the wrapper without a sibling `.real` is FAIL.
+
 Pass btxd (ZMQ + portability + launch) and btx-cli (portability only)
 as separate arguments. Do not stage a tarball that fails either.
 """
@@ -174,7 +180,55 @@ def classify(path: Path) -> str:
 
 def requires_zmq(path: Path) -> bool:
     name = path.name.lower()
+    if name.endswith(".exe"):
+        name = name[:-4]
+    if name.endswith(".real"):
+        name = name[:-5]
     return not name.startswith("btx-cli")
+
+
+def is_daemon(path: Path) -> bool:
+    name = path.name.lower()
+    if name.endswith(".exe"):
+        name = name[:-4]
+    if name.endswith(".real"):
+        name = name[:-5]
+    return name == "btxd"
+
+
+def is_shell_wrapper(path: Path) -> bool:
+    """True for the 0.34.1+ bin/btxd #!/bin/sh launcher, not the ELF/Mach-O."""
+    try:
+        prefix = path.read_bytes()[:80]
+    except OSError:
+        return False
+    if not prefix.startswith(b"#!"):
+        return False
+    return b"/bin/sh" in prefix or b"/usr/bin/env" in prefix
+
+
+def packaged_real_binary(wrapper: Path) -> Path:
+    """bin/btxd wrapper -> libexec/btxd.real. Raises if the real binary is missing."""
+    name = wrapper.name
+    if name.endswith(".exe"):
+        name = name[:-4]
+    expected = wrapper.parent.parent / "libexec" / f"{name}.real"
+    if not expected.is_file():
+        raise VerifyError(
+            f"{wrapper}: this is a #!/bin/sh wrapper (bin/btxd and bin/btx-cli "
+            f"since 0.34.1). ldd/otool on the wrapper is a vacuous pass — it "
+            f"is not an ELF or Mach-O. The real binary is {expected}. "
+            "MendeMatthias: otool -L bin/btxd on the 0.34.1 tarball returned "
+            "nothing and looked clean while meaning nothing at all."
+        )
+    return expected
+
+
+def resolve_verify_target(path: Path) -> Path:
+    """Follow packaged wrappers to libexec/*.real; leave build-tree binaries alone."""
+    if is_shell_wrapper(path):
+        return packaged_real_binary(path)
+    return path
 
 
 def verify_binary(path: Path) -> str:
@@ -189,10 +243,6 @@ def verify_binary(path: Path) -> str:
         verify_macos(path, require_zmq=want_zmq)
         return "macos-static-zmq" if want_zmq else "macos-portable-cli"
     raise VerifyError(f"{path}: not an ELF or Mach-O binary (refusing to ship an untyped file)")
-
-
-def is_daemon(path: Path) -> bool:
-    return path.name.lower().startswith("btxd")
 
 
 def verify_launch(path: Path, timeout: float = 30.0) -> None:
@@ -234,7 +284,9 @@ def main(argv: list[str] | None = None) -> int:
         "binaries",
         nargs="+",
         type=Path,
-        help="Paths to btxd and/or btx-cli (or btxd.real) to verify.",
+        help="Paths to btxd, btx-cli, or libexec/btxd.real. A packaged "
+        "bin/btxd #!/bin/sh wrapper is followed to libexec/btxd.real; "
+        "ldd/otool on the wrapper itself is refused.",
     )
     parser.add_argument(
         "--allow-non-binary",
@@ -247,6 +299,12 @@ def main(argv: list[str] | None = None) -> int:
         path = raw.expanduser().resolve()
         if not path.is_file():
             print(f"verify_release_btxd: FAIL missing {path}", file=sys.stderr)
+            failures += 1
+            continue
+        try:
+            path = resolve_verify_target(path)
+        except VerifyError as exc:
+            print(f"verify_release_btxd: FAIL {exc}", file=sys.stderr)
             failures += 1
             continue
         kind = classify(path)

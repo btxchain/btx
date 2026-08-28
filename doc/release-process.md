@@ -10,10 +10,16 @@ Release Process
 * Update `btx.conf` template content and commit changes if they exist, see [gen-bitcoin-conf.sh](/contrib/devtools/README.md#gen-bitcoin-confsh).
 * **ZMQ is required on every shipped `btxd`.** Configure CPU, CUDA, and Metal
   release trees with `-DWITH_ZMQ=ON` (the CMake default is ON; pass it anyway).
-  After the link, run `python3 scripts/release/verify_release_btxd.py <btxd> <btx-cli>`:
-  Linux `ldd` must show `libzmq`; macOS must statically link `libzmq.a`,
-  `libevent_*.a`, and `libomp.a` — `otool -L` must show **zero** `/opt/homebrew`
-  or `/usr/local/opt` paths on both binaries. A Homebrew `libevent`/`libomp`
+  After the link, run `python3 scripts/release/verify_release_btxd.py` on the
+  **real binary**, not the packaged launcher:
+  - unpackaged build tree: `build-*/bin/btxd` (this path is still ELF/Mach-O)
+  - published tarball: `libexec/btxd.real` (or pass `bin/btxd` and the script
+    follows the wrapper)
+  Since 0.34.1, `bin/btxd` is a `#!/bin/sh` wrapper. `ldd bin/btxd` and
+  `otool -L bin/btxd` return nothing and look like a clean pass while
+  meaning nothing at all. Linux `ldd` on `libexec/btxd.real` must show
+  `libzmq`; macOS `otool -L libexec/btxd.real` must show **zero**
+  `/opt/homebrew` or `/usr/local/opt` paths. A Homebrew `libevent`/`libomp`
   dylib is not a shippable public artifact. CMake's configure summary must
   print `ZeroMQ ... ON` and, on macOS, `Libevent linkage ... static:`.
   Do not ship a binary that contains `-zmqpubhashblock` strings without linking
@@ -117,7 +123,10 @@ missing even when `brew install zeromq` succeeded. Prefer static `libzmq.a`
 (CMake already does this on Apple) so the shipped `btxd` has **no Homebrew
 zmq dylib**. Libevent and libomp must be static too (`libevent_core.a`,
 `libomp.a`) — a dylib under `/opt/homebrew` will not launch on a clean Mac.
-Verify:
+Verify the **real binary**. Since 0.34.1, packaged `bin/btxd` is a
+`#!/bin/sh` wrapper; `otool -L bin/btxd` / `ldd bin/btxd` are vacuous.
+
+Build tree (unpackaged, still ELF/Mach-O):
 
 ```bash
 otool -L build-metal/bin/btxd | grep homebrew   # must print nothing
@@ -126,6 +135,17 @@ otool -L build-metal/bin/btxd | grep -i zmq     # must print nothing (static)
 strings build-metal/bin/btxd | grep -F 'Enable publish hash block'
 python3 scripts/release/verify_release_btxd.py \
   build-metal/bin/btxd build-metal/bin/btx-cli
+```
+
+Published tarball (wrapper in `bin/`, real binary in `libexec/`):
+
+```bash
+otool -L libexec/btxd.real | grep homebrew   # must print nothing
+otool -L libexec/btx-cli.real | grep homebrew
+otool -L libexec/btxd.real | grep -i zmq     # must print nothing (static)
+python3 scripts/release/verify_release_btxd.py \
+  libexec/btxd.real libexec/btx-cli.real
+# or pass bin/btxd — the script follows the wrapper to libexec/btxd.real
 ```
 
 AppleClang with `-fopenmp` cannot capture structured bindings in lambdas
@@ -140,11 +160,14 @@ object instead. The macOS 15 SDK libc++ still lacks `std::jthread` /
 
 Pass `-DWITH_ZMQ=ON`. `pkg-config --exists libzmq` must succeed in the same
 environment that runs cmake (a user-local `libzmq.pc` is invisible unless
-`PKG_CONFIG_PATH` is set). After link:
+`PKG_CONFIG_PATH` is set). After link, verify the **real binary**
+(`build-cuda/bin/btxd` in the build tree; `libexec/btxd.real` in a
+published tarball — `ldd bin/btxd` on the wrapper is a vacuous pass):
 
 ```bash
 ldd build-cuda/bin/btxd | grep zmq    # must show libzmq
 python3 scripts/release/verify_release_btxd.py build-cuda/bin/btxd
+# packaged: ldd libexec/btxd.real | grep zmq
 ```
 
 Do not `SIGKILL` a production `btxd` to free a GPU. Nice the corpus
