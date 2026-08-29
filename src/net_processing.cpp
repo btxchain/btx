@@ -20605,6 +20605,27 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
             !m_chainman.m_blockman.LoadingBlocks() &&
             !pto->IsAddrFetchConn() &&
             peer_may_serve_bodies};
+        // Convergence spread: drive the catch-up fetch across EVERY body-
+        // serving peer concurrently, not one-at-a-time. drive_stalled_tower_
+        // fetch above needs a globally-empty in-flight map, so once one peer
+        // has blocks in flight no other peer qualifies (and in IBD the sync
+        // slot blocks them), leaving a self-qualified archive fetching ~1
+        // block/min behind a 400+ block tower. This fires whenever we are
+        // behind the followed header tower, the peer can serve bodies, and it
+        // has spare per-peer capacity, bounded by BLOCK_DOWNLOAD_WINDOW.
+        const bool behind_header_tower{
+            tip_for_headers != nullptr && m_chainman.m_best_header != nullptr &&
+            m_chainman.m_best_header->nHeight - tip_for_headers->nHeight >=
+                BLOCK_FETCH_STALL_HEADERS_AHEAD};
+        const bool spread_catchup_fetch{
+            !m_chainman.m_blockman.LoadingBlocks() &&
+            !pto->IsAddrFetchConn() &&
+            node::HeaderSyncMaySpreadCatchUpFetch(
+                behind_header_tower, peer_may_serve_bodies,
+                state.vBlocksInFlight.size(),
+                static_cast<size_t>(MAX_BLOCKS_IN_TRANSIT_PER_PEER),
+                mapBlocksInFlight.size(),
+                static_cast<size_t>(BLOCK_DOWNLOAD_WINDOW))};
         const bool should_request_blocks_from_peer{
             node::matmul_trusted::TrustedMirrorGpuMayServeBlocks(
                 PeerIsGpuAuthority(pto->GetId(), state),
@@ -20622,7 +20643,8 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                 /*request_window_open=*/true, sync_blocks_and_headers_from_peer,
                 IsLimitedPeer(*peer), m_chainman.IsInitialBlockDownload(),
                 state.vBlocksInFlight.size(), MAX_BLOCKS_IN_TRANSIT_PER_PEER)};
-        if (!should_request_blocks_from_peer && !drive_stalled_tower_fetch) {
+        if (!should_request_blocks_from_peer && !drive_stalled_tower_fetch &&
+            !spread_catchup_fetch) {
             const CBlockIndex* tip{m_chainman.ActiveChain().Tip()};
             const int best_header_ahead{
                 tip != nullptr && m_chainman.m_best_header != nullptr
@@ -20665,7 +20687,8 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                          sync_blocks_and_headers_from_peer);
             }
         }
-        if (drive_stalled_tower_fetch || should_request_blocks_from_peer) {
+        if (drive_stalled_tower_fetch || should_request_blocks_from_peer ||
+            spread_catchup_fetch) {
             if (drive_stalled_tower_fetch &&
                 (m_last_stalled_tower_drive.count() == 0 ||
                  current_time >= m_last_stalled_tower_drive +
@@ -20693,11 +20716,12 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
             }
             std::vector<const CBlockIndex*> vToDownload;
             NodeId staller = -1;
-            auto get_inflight_budget = [&state, drive_stalled_tower_fetch]() {
+            auto get_inflight_budget = [&state, drive_stalled_tower_fetch,
+                                        spread_catchup_fetch]() {
                 const int remaining{
                     MAX_BLOCKS_IN_TRANSIT_PER_PEER -
                     static_cast<int>(state.vBlocksInFlight.size())};
-                if (drive_stalled_tower_fetch) {
+                if (drive_stalled_tower_fetch || spread_catchup_fetch) {
                     return std::max(1, remaining);
                 }
                 return std::max(0, remaining);

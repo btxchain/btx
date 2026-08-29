@@ -387,6 +387,34 @@ inline constexpr auto LOW_WORK_HEADERS_FAILURE_BACKOFF_MAX{std::chrono::minutes{
     return peer_starting_height > tip_height ||
            best_known_height > tip_height;
 }
+/** N/A-seed convergence: once ONE peer has in-flight blocks,
+ *  HeaderSyncMustDriveFetchWhileStalled (which requires a GLOBALLY empty
+ *  in-flight map) stops firing, and in IBD the sync-slot gate blocks every
+ *  other peer, so a self-qualified archive behind a heavy header tower fetches
+ *  one-peer-at-a-time (~1 block/min against a 400+ block gap). Permit SPREADING
+ *  the catch-up fetch across every body-serving peer concurrently: fire for a
+ *  peer that can serve bodies and still has spare per-peer in-flight capacity,
+ *  as long as the GLOBAL in-flight count is below the download window. This
+ *  does not require the global map to be empty, so peers 2..N pipeline
+ *  alongside peer 1. Per-peer MAX_BLOCKS_IN_TRANSIT_PER_PEER and the global
+ *  BLOCK_DOWNLOAD_WINDOW still bound total outstanding work, and every body is
+ *  still fully ExactReplay'd before ConnectTip. The connectability of the
+ *  followed tower (extends / short-reorg / parked) is still decided by
+ *  FindNextBlocksToDownload's branch gates. */
+[[nodiscard]] inline bool HeaderSyncMaySpreadCatchUpFetch(
+    bool behind_header_tower,
+    bool peer_may_serve_bodies,
+    size_t peer_blocks_in_flight,
+    size_t max_blocks_per_peer,
+    size_t global_blocks_in_flight,
+    size_t download_window)
+{
+    if (!behind_header_tower) return false;
+    if (!peer_may_serve_bodies) return false;
+    if (peer_blocks_in_flight >= max_blocks_per_peer) return false;
+    return global_blocks_in_flight < download_window;
+}
+
 
 /** PARK must not freeze GETDATA of a long heavier HEADER_ONLY tower.
  *  FindNextBlocksToDownload used to return at PARKED_NEEDS_OPERATOR

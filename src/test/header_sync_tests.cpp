@@ -312,6 +312,28 @@ BOOST_AUTO_TEST_CASE(seed_best_known_from_header_tower_skips_at_tip_peer)
     BOOST_CHECK(!node::HeaderSyncMustDriveFetchWhileStalled(
         true, kTip, /*header_not_ahead=*/kTip, kTower, kTower));
 
+    // Convergence spread: fetch fires for EVERY body-serving peer with spare
+    // capacity even when the global in-flight map is NON-empty (peer 1 already
+    // downloading), bounded by the download window -- so a self-qualified
+    // archive behind a heavy tower pipelines across peers instead of ~1
+    // block/min from one peer.
+    BOOST_CHECK(node::HeaderSyncMaySpreadCatchUpFetch(
+        /*behind_header_tower=*/true, /*peer_may_serve_bodies=*/true,
+        /*peer_blocks_in_flight=*/0, /*max_blocks_per_peer=*/16,
+        /*global_blocks_in_flight=*/16, /*download_window=*/1024));
+    // Not behind the tower -> no spread.
+    BOOST_CHECK(!node::HeaderSyncMaySpreadCatchUpFetch(
+        false, true, 0, 16, 16, 1024));
+    // Peer cannot serve bodies -> no spread.
+    BOOST_CHECK(!node::HeaderSyncMaySpreadCatchUpFetch(
+        true, false, 0, 16, 16, 1024));
+    // Peer per-peer window already full -> no more from this peer.
+    BOOST_CHECK(!node::HeaderSyncMaySpreadCatchUpFetch(
+        true, true, /*peer_blocks_in_flight=*/16, 16, 16, 1024));
+    // Global download window full -> stop adding work.
+    BOOST_CHECK(!node::HeaderSyncMaySpreadCatchUpFetch(
+        true, true, 0, 16, /*global_blocks_in_flight=*/1024, 1024));
+
     BOOST_CHECK(node::HeaderSyncMayFetchParkedHeavierTower(
         /*stalled=*/true, /*trusted_mirror=*/false, /*parked=*/true,
         /*heavier=*/true, kTower, kTip));
