@@ -100,6 +100,7 @@
 #include <span>
 #include <string>
 #include <tuple>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -17578,12 +17579,29 @@ bool ChainstateManager::MaybeClearStaleInvalidMarksForValidationEpoch()
         return false;
     }
 
-    auto has_manual = [](const CBlockIndex* pindex) {
-        for (const CBlockIndex* walk{pindex}; walk != nullptr; walk = walk->pprev) {
-            if (walk->nStatus & BLOCK_MANUALLY_INVALIDATED) return true;
+    // Walking pprev to genesis per index is O(n*height) and can stall
+    // LoadBlockIndex for tens of minutes on a poisoned archive with
+    // thousands of headers-only tips. Parent-first marking is equivalent
+    // and O(n).
+    std::vector<CBlockIndex*> by_height{m_blockman.GetAllBlockIndices()};
+    std::sort(by_height.begin(), by_height.end(), CBlockIndexHeightOnlyComparator{});
+    std::unordered_set<const CBlockIndex*> manual_lineage;
+    manual_lineage.reserve(by_height.size());
+    for (CBlockIndex* pindex : by_height) {
+        if ((pindex->nStatus & BLOCK_MANUALLY_INVALIDATED) != 0 ||
+            (pindex->pprev != nullptr &&
+             manual_lineage.find(pindex->pprev) != manual_lineage.end())) {
+            manual_lineage.insert(pindex);
         }
-        return false;
+    }
+    auto has_manual = [&](const CBlockIndex* pindex) {
+        return manual_lineage.find(pindex) != manual_lineage.end();
     };
+    LogPrintf("%s: validation-epoch scan index_entries=%u manual_lineage=%u "
+              "(stored_epoch=%u compiled_epoch=%u)\n",
+              __func__, static_cast<unsigned>(by_height.size()),
+              static_cast<unsigned>(manual_lineage.size()), stored,
+              m_compiled_validation_epoch);
     auto more_work = [](const CBlockIndex& current, const CBlockIndex& candidate) {
         if (current.nChainWork != candidate.nChainWork) {
             return current.nChainWork < candidate.nChainWork;
@@ -17595,17 +17613,18 @@ bool ChainstateManager::MaybeClearStaleInvalidMarksForValidationEpoch()
     };
 
     CBlockIndex* best_work{nullptr};
-    for (auto& [_, block_index] : m_blockman.m_block_index) {
-        if (has_manual(&block_index)) continue;
-        if ((block_index.nStatus & BLOCK_VALID_MASK) < BLOCK_VALID_TREE) continue;
-        if (best_work == nullptr || more_work(*best_work, block_index)) {
-            best_work = &block_index;
+    for (CBlockIndex* pindex : by_height) {
+        if (has_manual(pindex)) continue;
+        if ((pindex->nStatus & BLOCK_VALID_MASK) < BLOCK_VALID_TREE) continue;
+        if (best_work == nullptr || more_work(*best_work, *pindex)) {
+            best_work = pindex;
         }
     }
 
     std::vector<CBlockIndex*> to_revalidate;
     uint32_t skipped_manual{0};
-    for (auto& [_, block_index] : m_blockman.m_block_index) {
+    for (CBlockIndex* pindex : by_height) {
+        CBlockIndex& block_index{*pindex};
         if ((block_index.nStatus & BLOCK_FAILED_MASK) == 0) continue;
         if (has_manual(&block_index)) {
             ++skipped_manual;
