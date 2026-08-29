@@ -9707,13 +9707,16 @@ BOOST_AUTO_TEST_CASE(inflight_payload_bytes_grant_expiry_grace)
                       starting_tip->nHeight + 1);
     connman.FlushSendBuffer(delivering);
 
-    // Incomplete compact-block reconstruction: BLOCKTXN for the inflight
-    // hash with no matching PartiallyDownloadedBlock stays in flight, and
-    // the payload is well under 4KiB.
+    // Incomplete compact-block reconstruction: a BLOCKTXN that actually
+    // carries transactions (E-1: empty/zero-tx BLOCKTXN credits 0 bytes)
+    // keeps the GETDATA in flight, and the payload is well under 4KiB.
     BlockTransactions resp;
     resp.blockhash = child_hash;
+    BOOST_REQUIRE(!child.vtx.empty());
+    resp.txn.push_back(child.vtx[0]);
     CSerializedNetMsg txn_msg{NetMsg::Make(NetMsgType::BLOCKTXN, resp)};
     BOOST_REQUIRE_LT(txn_msg.data.size(), 4096U);
+    BOOST_REQUIRE_GT(txn_msg.data.size(), 0U);
     delivering.fPauseSend = false;
     BOOST_REQUIRE(connman.ReceiveMsgFrom(delivering, std::move(txn_msg)));
     delivering.fPauseSend = false;
@@ -9731,6 +9734,123 @@ BOOST_AUTO_TEST_CASE(inflight_payload_bytes_grant_expiry_grace)
         "a <4KiB BLOCKTXN payload must keep the GETDATA in flight");
     BOOST_CHECK_EQUAL(delivering_after.vHeightInFlight.front(),
                       starting_tip->nHeight + 1);
+
+    NeutralizeUnconnectedHeaders(chainman);
+    peerman.ResetMatMulVerifyAdmissionForTest();
+}
+
+BOOST_AUTO_TEST_CASE(chatter_does_not_grant_inflight_expiry_grace)
+{
+    // SF-9: ExpireOverdue used to treat any ≥4KiB of nRecvBytes as "the
+    // block is on the wire". Ping/addr chatter must not keep a silent
+    // GETDATA in flight past the deadline; only this-request block payload
+    // grants grace (SF-6), and nRecvBlockMessages is not advanced by pings.
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    ResetSharedPeermanFixture(m_node);
+    ChainstateManager& chainman{*Assert(m_node.chainman)};
+    PeerManager& peerman{*Assert(m_node.peerman)};
+    ConnmanTestMsg& connman{static_cast<ConnmanTestMsg&>(*m_node.connman)};
+    const CBlockIndex* starting_tip{
+        WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip())};
+    BOOST_REQUIRE(starting_tip != nullptr);
+    SetMockTime(std::chrono::seconds{starting_tip->GetBlockTime() + 3600});
+    BOOST_REQUIRE(!chainman.IsInitialBlockDownload());
+
+    CBlock child = node::BlockAssembler{
+        chainman.ActiveChainstate(), nullptr, {}, m_node}
+                       .CreateNewBlock()
+                       ->block;
+    child.hashMerkleRoot = BlockMerkleRoot(child);
+    BOOST_REQUIRE(MineHeaderForConsensus(
+        child, static_cast<uint32_t>(starting_tip->nHeight + 1),
+        chainman.GetConsensus(), 5'000'000,
+        starting_tip->GetMedianTimePast()));
+    child.fChecked = true;
+    BlockValidationState hdr_state;
+    BOOST_REQUIRE_MESSAGE(
+        chainman.ProcessNewBlockHeaders(
+            {{child.GetBlockHeader()}}, /*min_pow_checked=*/true, hdr_state),
+        hdr_state.ToString());
+    CBlockIndex* child_index{WITH_LOCK(
+        ::cs_main, return chainman.m_blockman.LookupBlockIndex(child.GetHash()))};
+    BOOST_REQUIRE(child_index != nullptr);
+
+    const ServiceFlags services{ServiceFlags(NODE_NETWORK | NODE_WITNESS)};
+    CNode chatty{/*id=*/5460, /*sock=*/nullptr, CAddress{},
+                 /*nKeyedNetGroupIn=*/5460, /*nLocalHostNonceIn=*/0,
+                 CAddress{}, /*addrNameIn=*/"sf9-chatty",
+                 ConnectionType::OUTBOUND_FULL_RELAY,
+                 /*inbound_onion=*/false, /*network_key=*/0};
+    CNode watcher{/*id=*/5461, /*sock=*/nullptr, CAddress{},
+                  /*nKeyedNetGroupIn=*/5461, /*nLocalHostNonceIn=*/0,
+                  CAddress{}, /*addrNameIn=*/"sf9-watcher",
+                  ConnectionType::INBOUND,
+                  /*inbound_onion=*/false, /*network_key=*/0};
+    connman.Handshake(chatty, /*successfully_connected=*/true, services,
+                      services, PROTOCOL_VERSION, /*relay_txs=*/true);
+    connman.Handshake(watcher, /*successfully_connected=*/true, services,
+                      services, PROTOCOL_VERSION, /*relay_txs=*/true,
+                      /*starting_height=*/0);
+    connman.AddTestNode(chatty);
+    connman.AddTestNode(watcher);
+    struct FinalizePeers {
+        PeerManager& peerman;
+        ConnmanTestMsg& connman;
+        CNode& chatty;
+        CNode& watcher;
+        ~FinalizePeers()
+        {
+            peerman.FinalizeNode(chatty);
+            peerman.FinalizeNode(watcher);
+            connman.RemoveTestNode(chatty);
+            connman.RemoveTestNode(watcher);
+        }
+    } finalize{peerman, connman, chatty, watcher};
+
+    std::vector<CBlock> hdrs;
+    {
+        LOCK(::cs_main);
+        hdrs.emplace_back(child_index->GetBlockHeader());
+    }
+    chatty.fPauseSend = false;
+    connman.FlushSendBuffer(chatty);
+    BOOST_REQUIRE(connman.ReceiveMsgFrom(
+        chatty, NetMsg::Make(NetMsgType::HEADERS, TX_WITH_WITNESS(hdrs))));
+    chatty.fPauseSend = false;
+    (void)connman.ProcessMessagesOnce(chatty);
+    chatty.fPauseSend = false;
+    BOOST_CHECK(peerman.SendMessages(&chatty));
+    CNodeStateStats queued;
+    BOOST_REQUIRE(peerman.GetNodeStateStats(chatty.GetId(), queued));
+    BOOST_REQUIRE_EQUAL(queued.vHeightInFlight.size(), 1U);
+    connman.FlushSendBuffer(chatty);
+
+    const uint64_t blocks_before{
+        chatty.nRecvBlockMessages.load(std::memory_order_relaxed)};
+    uint64_t nonce{1};
+    for (int i = 0; i < 200; ++i) {
+        chatty.fPauseSend = false;
+        BOOST_REQUIRE(connman.ReceiveMsgFrom(
+            chatty, NetMsg::Make(NetMsgType::PING, nonce++)));
+        chatty.fPauseSend = false;
+        (void)connman.ProcessMessagesOnce(chatty);
+        // PONGs share the loopback transport with injected PINGs.
+        // Drain them or SetMessageToSend fails after the send buffer fills.
+        connman.FlushSendBuffer(chatty);
+    }
+    BOOST_REQUIRE_GT(chatty.nRecvBytes, 4096U);
+    BOOST_CHECK_EQUAL(
+        chatty.nRecvBlockMessages.load(std::memory_order_relaxed),
+        blocks_before);
+
+    SetMockTime(std::chrono::seconds{GetTime() + 136});
+    watcher.fPauseSend = false;
+    BOOST_CHECK(peerman.SendMessages(&watcher));
+    CNodeStateStats after;
+    BOOST_REQUIRE(peerman.GetNodeStateStats(chatty.GetId(), after));
+    BOOST_REQUIRE_MESSAGE(
+        after.vHeightInFlight.empty(),
+        "≥4KiB of ping chatter must not keep a silent GETDATA in flight");
 
     NeutralizeUnconnectedHeaders(chainman);
     peerman.ResetMatMulVerifyAdmissionForTest();

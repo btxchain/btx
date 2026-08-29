@@ -499,11 +499,14 @@ inline constexpr auto HEADER_SYNC_INFLIGHT_GRACE_MAX_AGE{std::chrono::minutes{5}
 /** ExpireOverdue grants grace iff this GETDATA has received payload
  *  bytes AND has not been in flight past HEADER_SYNC_INFLIGHT_GRACE_MAX_AGE.
  *  Peer-total nRecvBytes (pings, addrs, prior traffic) is not a substitute,
- *  and there is no 4KiB chatter margin (SF-6). The age cap is the E-1 fix:
- *  a genuinely-delivering peer finishes a block in well under the cap, while
- *  a trickle-staller's slot is reclaimed instead of pinned forever. Callers
- *  that pass only recv_bytes (unit tests, non-catch-up paths) keep the old
- *  unbounded-any-byte behavior via the defaults. */
+ *  and there is no 4KiB chatter margin (SF-6/SF-9). nRecvBlockMessages counts
+ *  parsed BLOCK/CMPCTBLOCK/BLOCKTXN only; ExpireOverdue still requires
+ *  this-request payload bytes, not "any block message from this peer".
+ *  The age cap is the E-1 fix: a genuinely-delivering peer finishes a block
+ *  in well under the cap, while a trickle-staller's slot is reclaimed
+ *  instead of pinned forever. Callers that pass only recv_bytes (unit
+ *  tests, non-catch-up paths) keep the old unbounded-any-byte behavior via
+ *  the defaults. */
 [[nodiscard]] inline bool HeaderSyncInFlightPayloadGrantsGrace(
     uint64_t recv_bytes_for_request,
     std::chrono::microseconds request_age = std::chrono::microseconds::zero(),

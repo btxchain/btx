@@ -1035,6 +1035,11 @@ public:
      * peer eviction criterium in CConnman::AttemptToEvictConnection. */
     std::atomic<std::chrono::seconds> m_last_block_time{0s};
 
+    /** Count of fully-parsed block-body messages (BLOCK / CMPCTBLOCK /
+     *  BLOCKTXN). Ping/addr/inv chatter does not increment this; ExpireOverdue
+     *  must not treat nRecvBytes growth as delivery (SF-9). */
+    std::atomic<uint64_t> nRecvBlockMessages{0};
+
     /** UNIX epoch time of the last transaction received from this peer that we
      * had not yet seen (e.g. not already received from another peer) and that
      * was accepted into our mempool. Used as an inbound peer eviction criterium

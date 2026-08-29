@@ -797,9 +797,10 @@ struct QueuedBlock {
      * block from its own request instant makes the timeout independent of
      * what else that peer happens to deliver. */
     std::chrono::microseconds requested_at{0us};
-    /** Peer recv-byte counter at request time. ExpireOverdue must not treat
-     *  a block that is already on the wire / in the msghand queue as silent. */
-    uint64_t recv_bytes_at_request{0};
+    /** Block-body messages received from this peer when the GETDATA was
+     *  issued. Chatter (ping/addr) does not advance nRecvBlockMessages, so
+     *  this cannot be used as a substitute for this-request payload (SF-9). */
+    uint64_t recv_blocks_at_request{0};
     /** Payload bytes of THIS GETDATA (BLOCK / CMPCTBLOCK / BLOCKTXN /
      *  chunked manifest or chunk). Chatter and prior traffic do not
      *  increment it; any value > 0 means the peer is delivering (SF-6). */
@@ -3669,13 +3670,12 @@ bool PeerManagerImpl::BlockRequested(NodeId nodeid, const CBlockIndex& block, st
     std::list<QueuedBlock>::iterator it = state->vBlocksInFlight.insert(state->vBlocksInFlight.end(),
             {&block, std::unique_ptr<PartiallyDownloadedBlock>(pit ? new PartiallyDownloadedBlock(&m_mempool) : nullptr),
              GetTime<std::chrono::microseconds>()});
-    uint64_t recv_at{0};
+    uint64_t recv_blocks_at{0};
     m_connman.ForNode(nodeid, [&](CNode* pnode) {
-        LOCK(pnode->cs_vRecv);
-        recv_at = pnode->nRecvBytes;
+        recv_blocks_at = pnode->nRecvBlockMessages.load(std::memory_order_relaxed);
         return true;
     });
-    it->recv_bytes_at_request = recv_at;
+    it->recv_blocks_at_request = recv_blocks_at;
     if (state->vBlocksInFlight.size() == 1) {
         // We're starting a block download (batch) from this peer.
         state->m_downloading_since = GetTime<std::chrono::microseconds>();
@@ -16512,6 +16512,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             Misbehaving(*peer, strprintf("trailing data after cmpctblock = %u bytes", vRecv.size()));
             return;
         }
+        pfrom.nRecvBlockMessages.fetch_add(1, std::memory_order_relaxed);
         WITH_LOCK(cs_main, NoteInFlightRequestPayload(
                                pfrom.GetId(), cmpctblock.header.GetHash(),
                                payload_bytes));
@@ -16949,6 +16950,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             Misbehaving(*peer, strprintf("trailing data after blocktxn = %u bytes", vRecv.size()));
             return;
         }
+        pfrom.nRecvBlockMessages.fetch_add(1, std::memory_order_relaxed);
         // E-1: a zero-tx BLOCKTXN (33 bytes) carries no block payload and must
         // not credit in-flight progress -- otherwise it pins the slot forever.
         // Only a BLOCKTXN that actually delivered transactions counts.
@@ -18711,6 +18713,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             Misbehaving(*peer, strprintf("trailing data after block = %u bytes", vRecv.size()));
             return;
         }
+        pfrom.nRecvBlockMessages.fetch_add(1, std::memory_order_relaxed);
         WITH_LOCK(cs_main, NoteInFlightRequestPayload(
                                pfrom.GetId(), pblock->GetHash(), payload_bytes));
         NotePeerServedBlockBody(pfrom.GetId());
