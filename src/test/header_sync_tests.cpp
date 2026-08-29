@@ -401,6 +401,23 @@ BOOST_AUTO_TEST_CASE(seed_best_known_from_header_tower_skips_at_tip_peer)
         BOOST_CHECK(!node::HeaderSyncInFlightPayloadGrantsGrace(
             0, std::chrono::microseconds::zero(), cap));
     }
+    // C2/E-1/E-6 catch-up serve eligibility.
+    using node::ConsensusCatchUpServeEligible;
+    // Non-consensus peer: never.
+    BOOST_CHECK(!ConsensusCatchUpServeEligible(
+        /*peer_is_consensus=*/false, true, true, true));
+    // Consensus + behind + established BestKnown: eligible (honest archive).
+    BOOST_CHECK(ConsensusCatchUpServeEligible(
+        true, /*best_known_established=*/true, /*peer_behind_our_tip=*/true,
+        /*peer_on_competing_fork=*/false));
+    // Consensus + competing fork + established: eligible (fork corroboration).
+    BOOST_CHECK(ConsensusCatchUpServeEligible(true, true, false, true));
+    // E-1/E-6: no established BestKnown (VERSION-only sybil) -> NOT eligible.
+    BOOST_CHECK(!ConsensusCatchUpServeEligible(
+        true, /*best_known_established=*/false, true, true));
+    // Consensus, established, but neither behind nor competing (near-tip
+    // extender on our chain) -> not a catch-up target.
+    BOOST_CHECK(!ConsensusCatchUpServeEligible(true, true, false, false));
     BOOST_CHECK_EQUAL(
         node::HeadersDirectFetchCap(/*root_first=*/true, /*proven=*/true,
                                     /*one_wide=*/true, 16, 1),

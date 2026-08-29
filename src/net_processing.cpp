@@ -20005,16 +20005,36 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                 (pto->m_nServices.load(std::memory_order_relaxed) &
                  static_cast<uint64_t>(NODE_MATMUL_CONSENSUS)) ==
                 static_cast<uint64_t>(NODE_MATMUL_CONSENSUS)};
-            const int peer_height{
-                state.pindexBestKnownBlock != nullptr
-                    ? state.pindexBestKnownBlock->nHeight
-                    : peer->m_starting_height.load()};
+            // E-1/E-6: require PROVEN progress, not a self-declared VERSION
+            // height. A real catching-up verifier has exchanged headers, so
+            // pindexBestKnownBlock is set; a silent inbound sybil that merely
+            // advertised NODE_MATMUL_CONSENSUS + a low nStartingHeight
+            // (unauthenticated) never establishes BestKnown and therefore
+            // gets NO catch-up-serve privileges (getdata drain / MMATTEST /
+            // body-ingest bypass). This closes the VERSION-height lie that
+            // re-opened the serving-GPU msghand peg.
+            const CBlockIndex* const bk{state.pindexBestKnownBlock};
             const bool peer_behind_our_tip{
-                tip_for_headers != nullptr && peer_height >= 0 &&
-                peer_height <
+                bk != nullptr && tip_for_headers != nullptr &&
+                bk->nHeight <
                     tip_for_headers->nHeight - BLOCK_FETCH_STALL_HEADERS_AHEAD};
+            // C2: fork-awareness. A CONSENSUS peer whose established BestKnown
+            // is on a COMPETING fork (not on our active chain) at similar or
+            // greater height is ALSO a catch-up serve target -- it needs our
+            // active-chain MMATTEST to corroborate a fork it cannot otherwise
+            // resolve (postmortem 201633: the 201687 twin vs our 201686 is
+            // "behind by >2"=false but still needs corroboration). The
+            // dual_spread guard in the GETMMATTEST handler still refuses to
+            // serve the competing twin's own signature once another hash at
+            // that height has quorum.
+            const bool peer_on_competing_fork{
+                bk != nullptr && tip_for_headers != nullptr &&
+                !m_chainman.ActiveChain().Contains(bk) &&
+                bk->GetAncestor(tip_for_headers->nHeight) != tip_for_headers};
             pto->m_consensus_catchup_serve.store(
-                peer_is_consensus && peer_behind_our_tip,
+                node::ConsensusCatchUpServeEligible(
+                    peer_is_consensus, /*best_known_established=*/bk != nullptr,
+                    peer_behind_our_tip, peer_on_competing_fork),
                 std::memory_order_relaxed);
         }
 

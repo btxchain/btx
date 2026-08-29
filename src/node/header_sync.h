@@ -512,6 +512,23 @@ inline constexpr auto HEADER_SYNC_INFLIGHT_GRACE_MAX_AGE{std::chrono::minutes{5}
     if (recv_bytes_for_request == 0) return false;
     return request_age < max_grace_age;
 }
+/** C2/E-1/E-6: which CONSENSUS peers get catch-up serve privileges (getdata
+ *  drain, cached-MMATTEST serve, body-ingest bypass). Gate on ESTABLISHED
+ *  progress (a real BestKnown from exchanged headers) so a silent inbound
+ *  sybil that only advertised NODE_MATMUL_CONSENSUS + a low, unauthenticated
+ *  VERSION height gets nothing. Fork-aware: a peer that is behind our tip
+ *  (honest catch-up) OR on a competing fork at similar/greater height (needs
+ *  our active-chain MMATTEST to corroborate) both qualify. */
+[[nodiscard]] inline bool ConsensusCatchUpServeEligible(
+    bool peer_is_consensus,
+    bool best_known_established,
+    bool peer_behind_our_tip,
+    bool peer_on_competing_fork)
+{
+    if (!peer_is_consensus) return false;
+    if (!best_known_established) return false;
+    return peer_behind_our_tip || peer_on_competing_fork;
+}
 
 /** Direct-fetch cap: 1-wide catch-up used to request only the single
  *  lowest hole per HEADERS event. A proven body source (frontier / GPU /
