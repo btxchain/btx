@@ -6875,7 +6875,17 @@ bool PeerManagerImpl::ConsumeMatMulVerificationBudgetForPeer(
             m_chainman.BestFollowedHeaderHeight()};
         const int behind{std::max(0, best_followed_height - active_height)};
         progress_scale = 1;
-        if (behind >= MATMUL_RC_CATCHUP_DEPTH_THRESHOLD) {
+        // adv5/E-4: best_followed_height is a HEADER height, inflatable by cheap
+        // forged extending headers. Only lift the catch-up ExactReplay budget
+        // when there is REAL pending body work -- an honest deep catch-up has
+        // many bodies queued for RC ExactReplay, while a header-only forge at a
+        // current tip has none. This raises the forge cost from "7 cheap
+        // headers" to "flood real bodies" (bandwidth + each fails ExactReplay
+        // one job, bounded), and preserves the honest deep-catch-up lift.
+        const bool real_body_backlog{
+            m_matmul_rc_pending_verifications.load(std::memory_order_relaxed) > 0 ||
+            m_matmul_pending_verifications.load(std::memory_order_relaxed) > 0};
+        if (real_body_backlog && behind >= MATMUL_RC_CATCHUP_DEPTH_THRESHOLD) {
             progress_scale = LimitMatMulRCCatchupScaleToScheduler(
                 std::clamp<uint32_t>(
                     static_cast<uint32_t>(behind / MATMUL_RC_CATCHUP_DEPTH_THRESHOLD),
