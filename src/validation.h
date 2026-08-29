@@ -1194,6 +1194,14 @@ private:
     //! use paced-dump first-seen (headers arrived together hours ago).
     mutable std::optional<int64_t> m_last_tip_connect_time GUARDED_BY(::cs_main);
     mutable std::optional<int64_t> m_last_tip_connect_mono GUARDED_BY(::cs_main);
+    //! RB-16 fix: MockableSteadyClock seconds of the last ConnectTip that was
+    //! progress toward the BEST-KNOWN chain (tip reaches/beats m_best_header,
+    //! or m_best_header extends the tip). A tip that only connects blocks on a
+    //! strictly-LIGHTER competing fork (a slowly growing minority fork) keeps
+    //! m_last_tip_connect_mono fresh, so the acquisition-escape staleness gate
+    //! must be defined on the BETTER-CHAIN axis, not on "any ConnectTip".
+    mutable std::optional<int64_t> m_last_better_chain_progress_mono
+        GUARDED_BY(::cs_main);
     //! RB-16 acquisition escape valve: fork-root hashes of heavier COMPETING
     //! towers currently EXEMPT from the unauthenticated-header-lead (72) cap and
     //! the last-common heavier-fork snap, so a node whose tip is STALE can
@@ -1202,7 +1210,11 @@ private:
     //! MIGRATION stays gated by park / deepforkautoresolve / quorum / operator.
     //! Value = heaviest candidate tip chainwork seen on that tower, for
     //! lightest-eviction so the real majority chain always keeps a slot.
-    //! Bounded to ACQUISITION_ESCAPE_MAX_TOWERS; cleared on any ConnectTip.
+    //! Bounded to ACQUISITION_ESCAPE_MAX_TOWERS; cleared only on a
+    //! better-chain-progress ConnectTip (a minority-fork-only connect must not
+    //! wipe a tower mid-acquisition, or the +72 request cap re-arms and the
+    //! tower can never re-register: it needs a past-cap header that no longer
+    //! arrives once the chase stops).
     mutable std::map<uint256, arith_uint256> m_acquisition_exempt_towers
         GUARDED_BY(::cs_main);
     mutable std::optional<int> m_cadence_hold_logged_allowed GUARDED_BY(::cs_main);
@@ -1713,12 +1725,24 @@ public:
     //! dump-header origin selection can be driven without mining a new chain.
     void ResetCadenceHoldStateForTest() EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     //! Test-only: drive the acquisition-escape staleness clock directly so the
-    //! stale-tip path can be exercised without a 600s wall-clock wait.
+    //! stale-tip path can be exercised without a 600s wall-clock wait. Also
+    //! refreshes the better-chain progress clock, mirroring a HEALTHY
+    //! (progress) ConnectTip.
     void SetLastTipConnectMonoForTest(std::optional<int64_t> mono)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
     {
         AssertLockHeld(::cs_main);
         m_last_tip_connect_mono = mono;
+        m_last_better_chain_progress_mono = mono;
+    }
+    //! Test-only: age ONLY the better-chain progress clock while leaving the
+    //! tip-connect clock fresh -- a tip that keeps connecting blocks on a
+    //! strictly-lighter competing (minority) fork.
+    void SetAcquisitionProgressMonoForTest(std::optional<int64_t> mono)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        AssertLockHeld(::cs_main);
+        m_last_better_chain_progress_mono = mono;
     }
     //! Test-only RAII: point ActiveChainstate() at `stub` so production
     //! cadence-hold reads a real m_from_snapshot_blockhash. Restores the

@@ -11703,10 +11703,36 @@ void ChainstateManager::NoteTipConnected(int64_t now)
 {
     AssertLockHeld(::cs_main);
     m_last_tip_connect_time = now;
-    m_last_tip_connect_mono = CadenceHoldMonotonicNowSeconds();
-    // RB-16: the tip advanced, so the acquisition stall is over -- release all
-    // exempt-tower slots (a migration onto the acquired chain also lands here).
-    m_acquisition_exempt_towers.clear();
+    const int64_t mono{CadenceHoldMonotonicNowSeconds()};
+    m_last_tip_connect_mono = mono;
+    // RB-16 fix: anti-stale credit must be earned on the BETTER-CHAIN axis,
+    // not by any ConnectTip. A tip that only extends a strictly-lighter
+    // COMPETING fork while a heavier tower is known (m_best_header) keeps
+    // resetting m_last_tip_connect_mono, so the escape valve never fires and
+    // the +72 header-lead cap keeps dropping the majority headers (live
+    // rtx6000: tip 199394->199398 on a minority fork, headers stuck at
+    // 199801, valve log lines=0). Only connects that advance toward / onto
+    // the best-known chain refresh the progress clock; a slowly growing
+    // minority fork lets it age past ACQUISITION_ESCAPE_STALL_SECONDS.
+    const CBlockIndex* const tip{m_active_chainstate != nullptr
+                                     ? m_active_chainstate->m_chain.Tip()
+                                     : nullptr};
+    const CBlockIndex* const best{m_best_header};
+    const bool better_chain_progress{
+        tip == nullptr || best == nullptr ||
+        best->GetAncestor(tip->nHeight) == tip || tip->nChainWork >= best->nChainWork};
+    if (better_chain_progress) {
+        m_last_better_chain_progress_mono = mono;
+    }
+    // RB-16: the tip advanced on the better chain, so the acquisition stall is
+    // over -- release all exempt-tower slots (a migration onto the acquired
+    // chain also lands here). A minority-fork-only connect must NOT clear the
+    // slots: wiping them mid-acquisition re-arms the +72 request cap, and the
+    // tower can never re-register (re-registration needs a past-cap header
+    // that stops arriving once the getheaders chase stops).
+    if (better_chain_progress) {
+        m_acquisition_exempt_towers.clear();
+    }
 }
 
 bool ChainstateManager::AcquisitionTipIsStale() const
@@ -11716,8 +11742,24 @@ bool ChainstateManager::AcquisitionTipIsStale() const
     // IBD already exempts the header-lead caps and fetches freely.
     if (IsInitialBlockDownload()) return false;
     if (!m_last_tip_connect_mono.has_value()) return false;
-    return (CadenceHoldMonotonicNowSeconds() - *m_last_tip_connect_mono) >=
-           ACQUISITION_ESCAPE_STALL_SECONDS;
+    const int64_t now{CadenceHoldMonotonicNowSeconds()};
+    // Frozen tip: no successful ConnectTip at all for the stall window.
+    if ((now - *m_last_tip_connect_mono) >= ACQUISITION_ESCAPE_STALL_SECONDS) return true;
+    // RB-16 fix: the tip IS connecting, but only on a strictly-lighter
+    // COMPETING fork while a heavier tower is known (e.g. a minority fork that
+    // slowly extends: 199394->199398). Those connects reset m_last_tip_connect_
+    // mono, so the frozen path never trips. The node is still ACQUISITION-
+    // stale: no progress toward the known heavier tower for the stall window.
+    const CBlockIndex* const tip{m_active_chainstate->m_chain.Tip()};
+    const CBlockIndex* const best{m_best_header};
+    if (tip == nullptr || best == nullptr) return false;
+    if (!(best->nChainWork > tip->nChainWork)) return false;
+    if (best->GetAncestor(tip->nHeight) == tip) return false; // best extends tip
+    // Never made better-chain progress (e.g. booted onto the minority fork) or
+    // last made it longer than the stall window ago: acquisition-stale.
+    return !m_last_better_chain_progress_mono.has_value() ||
+           (now - *m_last_better_chain_progress_mono) >=
+               ACQUISITION_ESCAPE_STALL_SECONDS;
 }
 
 bool ChainstateManager::AcquisitionEscapeActive(const CBlockIndex* candidate) const
@@ -11802,6 +11844,7 @@ void ChainstateManager::ResetCadenceHoldStateForTest()
     m_cadence_hold_anchor_mono.reset();
     m_last_tip_connect_time.reset();
     m_last_tip_connect_mono.reset();
+    m_last_better_chain_progress_mono.reset();
     m_cadence_hold_logged_allowed.reset();
 }
 

@@ -5452,6 +5452,40 @@ BOOST_FIXTURE_TEST_CASE(rb16_acquisition_escape_valve, TestChain100Setup)
         BOOST_CHECK_LE(ChainstateManager::ACQUISITION_ESCAPE_MAX_TOWERS, size_t{2});
     }
 
+    // (c) RB-16 fix: the valve must fire for a tip that ONLY advances on a
+    // strictly-LIGHTER COMPETING fork while a heavier tower is known (a
+    // slowly growing minority fork -- live rtx6000 connected 199394->199398
+    // and never tripped the valve because every ConnectTip reset the stall
+    // clock). Staleness is defined on the BETTER-CHAIN axis: the tip
+    // "connecting" a losing-fork block just now must not disarm the valve.
+    {
+        LOCK(::cs_main);
+        const int64_t later{
+            mono_now + ChainstateManager::ACQUISITION_ESCAPE_STALL_SECONDS};
+        SetMockTime(later);
+        chainman.SetBestHeader(b_tip); // known heavier competing tower
+        // (c1) The node kept connecting ONLY minority-fork blocks through the
+        // stall window: its tip-connect clock is FRESH (a losing-fork block
+        // connected just now) while its better-chain progress clock is
+        // ancient. The valve must still engage.
+        chainman.SetLastTipConnectMonoForTest(later);
+        chainman.SetAcquisitionProgressMonoForTest(mono_now - 1);
+        BOOST_CHECK(chainman.AcquisitionTipIsStale());
+        BOOST_CHECK(chainman.AcquisitionEscapeMayAcquireHeavierFork(b_tip));
+        BOOST_CHECK(chainman.AcquisitionEscapeActive(b_tip));
+        // (c2) Healthy control: same ancient progress clock, but the best-known
+        // header EXTENDS the tip (same chain) -> not stale.
+        chainman.SetBestHeader(a_tip);
+        BOOST_CHECK(!chainman.AcquisitionTipIsStale());
+        // (c3) A minority-only ConnectTip must NOT refresh the better-chain
+        // progress clock: with the heavier competing tower known again, a
+        // losing-fork connect just now still leaves the node stale.
+        chainman.SetBestHeader(b_tip);
+        chainman.NoteTipConnected(later);
+        BOOST_CHECK(chainman.AcquisitionTipIsStale());
+        SetMockTime(mono_now);
+    }
+
     // (a cont.) MIGRATION is a separate, still-gated step: explicitly activating
     // the acquired heavier chain connects it (every body ExactReplayed on the
     // way), and the successful connect CLEARS the exempt set (memory-only).
