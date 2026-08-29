@@ -82,19 +82,6 @@ bool WrongGemmS8S8(const std::vector<int8_t>& /*L*/, const std::vector<int8_t>& 
     return true;
 }
 
-/** Matches the CPU oracle below production-like intensive dims; diverges when
- *  inner or cols reach 256. Self-qual toy/medium stay at d_ff=128. */
-bool ScaleSelectiveGemmS8S8(const std::vector<int8_t>& L, const std::vector<int8_t>& R,
-                            uint32_t rows, uint32_t inner, uint32_t cols,
-                            std::vector<int32_t>& out)
-{
-    if (inner >= 256 || cols >= 256) {
-        out.assign(static_cast<size_t>(rows) * cols, 123456789);
-        return true;
-    }
-    return OracleGemmS8S8(L, R, rows, inner, cols, out);
-}
-
 bool WrongGemmS32S8(const std::vector<int32_t>& /*L*/, const std::vector<int8_t>& /*R*/,
                     uint32_t rows, uint32_t /*inner*/, uint32_t cols, std::vector<int32_t>& out)
 {
@@ -126,6 +113,19 @@ bool OracleGemmS8S8(const std::vector<int8_t>& L, const std::vector<int8_t>& R,
 {
     out = lt::ExactGemmS8S8(L, R, rows, inner, cols);
     return true;
+}
+
+/** Matches the CPU oracle below production-like intensive dims; diverges when
+ *  inner or cols reach 256. Self-qual toy/medium stay at d_ff=128. */
+bool ScaleSelectiveGemmS8S8(const std::vector<int8_t>& L, const std::vector<int8_t>& R,
+                            uint32_t rows, uint32_t inner, uint32_t cols,
+                            std::vector<int32_t>& out)
+{
+    if (inner >= 256 || cols >= 256) {
+        out.assign(static_cast<size_t>(rows) * cols, 123456789);
+        return true;
+    }
+    return OracleGemmS8S8(L, R, rows, inner, cols, out);
 }
 
 /** Deliberately separate test entry point for the alternate-provider state
