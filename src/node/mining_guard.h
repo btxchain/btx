@@ -84,6 +84,15 @@ MiningChainGuardOptions GetMiningChainGuardOptions(const NodeContext& node);
 
 /** Test-only: allow MaybeRequestMiningChainGuardRecovery to enroll immediately. */
 void ResetMiningChainGuardMeshRefreshForTest();
+/** Test-only: allow the next recovery call to escalate outbound churn. */
+void ResetMiningChainGuardRecoveryEscalationForTest();
+
+/** True when recovery may call SetTryNewOutboundPeer / StartExtraBlockRelayPeers. */
+inline bool MiningChainGuardRecoveryEscalationDue(int64_t now, int64_t last, int interval)
+{
+    if (interval <= 0) return true;
+    return last <= 0 || now - last >= interval;
+}
 
 MiningChainGuardStatus EvaluateMiningChainGuard(
     int local_tip_height,

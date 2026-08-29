@@ -25,6 +25,7 @@
 namespace node {
 namespace {
 std::atomic<int64_t> g_last_default_mesh_refresh{0};
+std::atomic<int64_t> g_last_guard_recovery_escalation{0};
 
 int ComputeMedianTip(std::vector<int> peer_heights)
 {
@@ -52,6 +53,11 @@ const std::vector<std::string>& DefaultMiningPeerMesh()
 void ResetMiningChainGuardMeshRefreshForTest()
 {
     g_last_default_mesh_refresh.store(0);
+}
+
+void ResetMiningChainGuardRecoveryEscalationForTest()
+{
+    g_last_guard_recovery_escalation.store(0);
 }
 
 MiningChainGuardOptions GetMiningChainGuardOptions(const NodeContext& node)
@@ -529,13 +535,21 @@ void MaybeRequestMiningChainGuardRecovery(const MiningChainGuardStatus& status, 
         status.reason == "peer_tip_hash_mismatch" ||
         status.reason == "deferred_reorg_candidate" ||
         status.reason == "peer_monitor_unavailable") {
-        node.connman->SetTryNewOutboundPeer(true);
-        node.connman->StartExtraBlockRelayPeers();
+        const int64_t now = GetTime<std::chrono::seconds>().count();
+        const int escalation_interval = std::max(
+            options.mesh_refresh_seconds, DEFAULT_MINING_CHAIN_GUARD_MESH_REFRESH_SECONDS);
+        int64_t last_escalation = g_last_guard_recovery_escalation.load();
+        while (MiningChainGuardRecoveryEscalationDue(now, last_escalation, escalation_interval) &&
+               !g_last_guard_recovery_escalation.compare_exchange_weak(last_escalation, now)) {
+        }
+        if (MiningChainGuardRecoveryEscalationDue(now, last_escalation, escalation_interval)) {
+            node.connman->SetTryNewOutboundPeer(true);
+            node.connman->StartExtraBlockRelayPeers();
+        }
 
         if (options.refresh_default_mesh &&
             options.mesh_refresh_seconds > 0 &&
             status.network_active) {
-            const int64_t now = GetTime<std::chrono::seconds>().count();
             int64_t last = g_last_default_mesh_refresh.load();
             while (now - last >= options.mesh_refresh_seconds &&
                    !g_last_default_mesh_refresh.compare_exchange_weak(last, now)) {

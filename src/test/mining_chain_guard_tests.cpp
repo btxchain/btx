@@ -8,6 +8,7 @@
 #include <rpc/server.h>
 #include <test/util/setup_common.h>
 #include <univalue.h>
+#include <util/time.h>
 
 #include <boost/test/unit_test.hpp>
 
@@ -547,9 +548,20 @@ BOOST_AUTO_TEST_CASE(catch_up_visibility_is_not_reclassified_as_insufficient_pee
     BOOST_CHECK(!node::ShouldPauseMiningByChainGuard(refined));
 }
 
+BOOST_AUTO_TEST_CASE(recovery_escalation_due_debounces_within_interval)
+{
+    BOOST_CHECK(node::MiningChainGuardRecoveryEscalationDue(/*now=*/1000, /*last=*/0, /*interval=*/60));
+    BOOST_CHECK(!node::MiningChainGuardRecoveryEscalationDue(/*now=*/1000, /*last=*/1000, /*interval=*/60));
+    BOOST_CHECK(!node::MiningChainGuardRecoveryEscalationDue(/*now=*/1059, /*last=*/1000, /*interval=*/60));
+    BOOST_CHECK(node::MiningChainGuardRecoveryEscalationDue(/*now=*/1060, /*last=*/1000, /*interval=*/60));
+    BOOST_CHECK(node::MiningChainGuardRecoveryEscalationDue(/*now=*/50, /*last=*/100, /*interval=*/0));
+}
+
 BOOST_FIXTURE_TEST_CASE(miningpeermesh_replaces_defaults_and_rpc_reports_it, TestingSetup)
 {
     node::ResetMiningChainGuardMeshRefreshForTest();
+    node::ResetMiningChainGuardRecoveryEscalationForTest();
+    SetMockTime(1'000);
 
     UniValue mesh{UniValue::VARR};
     mesh.push_back("fork.example:19335");
@@ -574,6 +586,11 @@ BOOST_FIXTURE_TEST_CASE(miningpeermesh_replaces_defaults_and_rpc_reports_it, Tes
     status.network_active = true;
     status.reason = "insufficient_peer_consensus";
     node::MaybeRequestMiningChainGuardRecovery(status, m_node);
+    BOOST_CHECK(m_node.connman->GetTryNewOutboundPeer());
+    m_node.connman->SetTryNewOutboundPeer(false);
+    SetMockTime(1'001);
+    node::MaybeRequestMiningChainGuardRecovery(status, m_node);
+    BOOST_CHECK(!m_node.connman->GetTryNewOutboundPeer());
 
     std::set<std::string> added;
     for (const auto& info : m_node.connman->GetAddedNodeInfo(/*include_connected=*/true)) {
@@ -597,6 +614,7 @@ BOOST_FIXTURE_TEST_CASE(miningpeermesh_replaces_defaults_and_rpc_reports_it, Tes
     BOOST_REQUIRE_EQUAL(reported.size(), 2U);
     BOOST_CHECK_EQUAL(reported[0].get_str(), "fork.example:19335");
     BOOST_CHECK_EQUAL(reported[1].get_str(), "other.example:19335");
+    SetMockTime(0);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
