@@ -241,6 +241,8 @@ run_lint() {
   python3 test/util/matmul_v4_asert_calibration_test.py
   python3 test/util/verify_release_btxd_test.py
   python3 test/util/package_release_archive_test.py
+  python3 test/util/issue_122_zmq_release_gate_test.py
+  python3 test/util/issue_116_attestation_publish_sites_test.py
   python3 test/util/cut_release_test.py
   python3 test/util/cut_local_release_test.py
   python3 test/util/release_bundle_manifest_test.py
@@ -360,6 +362,8 @@ run_production_readiness() {
   python3 test/util/matmul_v4_asert_assembly_test.py
   python3 test/util/verify_release_btxd_test.py
   python3 test/util/package_release_archive_test.py
+  python3 test/util/issue_122_zmq_release_gate_test.py
+  python3 test/util/issue_116_attestation_publish_sites_test.py
   python3 test/util/cut_release_test.py
   python3 test/util/cut_local_release_test.py
   python3 test/util/release_bundle_manifest_test.py
