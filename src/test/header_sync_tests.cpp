@@ -435,6 +435,14 @@ BOOST_AUTO_TEST_CASE(seed_best_known_from_header_tower_skips_at_tip_peer)
     // Consensus, established, but neither behind nor competing (near-tip
     // extender on our chain) -> not a catch-up target.
     BOOST_CHECK(!ConsensusCatchUpServeEligible(true, true, false, false));
+
+    // adv5/E-6 drain cap: archive/mirror unbounded, consensus-catchup bounded,
+    // near-tip miner one.
+    using node::ConsensusCatchUpBlockServeCap;
+    BOOST_CHECK_EQUAL(ConsensusCatchUpBlockServeCap(
+        /*archive_or_mirror=*/true, /*consensus_catchup=*/true, 4), -1);
+    BOOST_CHECK_EQUAL(ConsensusCatchUpBlockServeCap(false, true, 4), 4);
+    BOOST_CHECK_EQUAL(ConsensusCatchUpBlockServeCap(false, false, 4), 1);
     BOOST_CHECK_EQUAL(
         node::HeadersDirectFetchCap(/*root_first=*/true, /*proven=*/true,
                                     /*one_wide=*/true, 16, 1),

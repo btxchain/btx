@@ -125,6 +125,12 @@ static const unsigned int MAX_INV_SZ = 50000;
 static const unsigned int MAX_GETDATA_SZ = 1000;
 /** Number of blocks that can be requested at any given time from a single peer. */
 static const int MAX_BLOCKS_IN_TRANSIT_PER_PEER = 16;
+/** adv5/E-6: bounded per-msghand-visit body serve for a CONSENSUS-catchup peer
+ *  (the m_consensus_catchup_serve flag is one-header-cheap, so its serve must
+ *  not be the unbounded drain a true ARCHIVE/MIRROR target gets). >1 for real
+ *  throughput across the peer spread; small enough that a forged flag cannot
+ *  pin the upload/msghand. */
+static constexpr int CONSENSUS_CATCHUP_BLOCK_SERVE_PER_VISIT{4};
 /** IBD/catch-up: how many peers may hold in-flight GETDATA at once. The
  *  inbound fallback used to require mapBlocksInFlight.empty(), so one
  *  preferred peer's 16-slot window was the only parallelism (SF-4). */
@@ -8600,20 +8606,25 @@ void PeerManagerImpl::ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic
     const bool drain_archive_blocks{
         node::matmul_trusted::MsghandPeerIsArchiveServeTarget(
             pfrom.IsManualConn() || !pfrom.IsInboundConn(),
-            pfrom.HasArchiveOrMirrorService()) ||
-        // A converging CONSENSUS verifier (behind our tip, no ARCHIVE bit)
-        // drains all its queued catch-up bodies in one visit so it is not
-        // clamped to one block per ~45s msghand lap. It is not routed to the
-        // ArchiveBlockServe worker (that only serves ARCHIVE/MIRROR peers),
-        // so msghand stays its serve path -- skip_archive_blocks below keys
-        // only on the archive service bit.
+            pfrom.HasArchiveOrMirrorService())};
+    const bool consensus_catchup_serve{
         pfrom.m_consensus_catchup_serve.load(std::memory_order_relaxed)};
+    // adv5/E-6: the consensus-catchup flag is one-header-cheap, so its serve
+    // is BOUNDED per msghand visit -- a forged flag cannot drive the unbounded
+    // upload/msghand peg the old drain-all path allowed. A TRUE ARCHIVE/MIRROR
+    // serve target still drains unbounded (block_serve_cap<0); a near-tip miner
+    // still gets one. A behind CONSENSUS archive gets a bounded batch, which
+    // across the peer spread is real throughput without a single-peer peg.
+    const int block_serve_cap{node::ConsensusCatchUpBlockServeCap(
+        drain_archive_blocks, consensus_catchup_serve,
+        CONSENSUS_CATCHUP_BLOCK_SERVE_PER_VISIT)};
     const bool skip_archive_blocks{
         node::matmul_trusted::MsghandSkipArchiveBlockGetData(
             node::matmul_trusted::HasLocalSigner(),
             m_connman.ArchiveBlockServeRunning(),
             drain_archive_blocks)};
     if (!skip_archive_blocks) {
+        int served{0};
         while (it != peer.m_getdata_requests.end() && !pfrom.fPauseSend) {
             if (interruptMsgProc) break;
             if (!it->IsGenBlkMsg()) {
@@ -8623,7 +8634,8 @@ void PeerManagerImpl::ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic
             const CInv& inv = *it++;
             (void)ProcessGetBlockData(pfrom, peer, inv, /*try_cs_main=*/false,
                                       /*hold_g_msgproc=*/true);
-            if (!drain_archive_blocks) break;
+            ++served;
+            if (block_serve_cap >= 0 && served >= block_serve_cap) break;
         }
     }
 
@@ -20056,7 +20068,15 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
             const bool peer_on_competing_fork{
                 bk != nullptr && tip_for_headers != nullptr &&
                 !m_chainman.ActiveChain().Contains(bk) &&
-                bk->GetAncestor(tip_for_headers->nHeight) != tip_for_headers};
+                bk->GetAncestor(tip_for_headers->nHeight) != tip_for_headers &&
+                // adv5: require STRICTLY-HEAVIER competing work, not merely
+                // "not on our chain". A replayed old losing twin or a 1-block
+                // side-fork below tip has less work than our tip and no longer
+                // qualifies -- so a ~85-byte stale-header message can no longer
+                // buy fork-corroboration serve privileges. The legitimate
+                // stranded-signer winning twin (201687 > 201686) is strictly
+                // heavier and still qualifies.
+                bk->nChainWork > tip_for_headers->nChainWork};
             pto->m_consensus_catchup_serve.store(
                 node::ConsensusCatchUpServeEligible(
                     peer_is_consensus, /*best_known_established=*/bk != nullptr,

@@ -530,6 +530,19 @@ inline constexpr auto HEADER_SYNC_INFLIGHT_GRACE_MAX_AGE{std::chrono::minutes{5}
     return peer_behind_our_tip || peer_on_competing_fork;
 }
 
+/** adv5/E-6: per-msghand-visit body-serve cap. A true ARCHIVE/MIRROR serve
+ *  target drains unbounded (-1). A CONSENSUS-catchup peer (one-header-cheap
+ *  flag) gets a bounded batch. A near-tip miner gets one. */
+[[nodiscard]] inline int ConsensusCatchUpBlockServeCap(
+    bool archive_or_mirror_target,
+    bool consensus_catchup,
+    int catchup_cap)
+{
+    if (archive_or_mirror_target) return -1;
+    if (consensus_catchup) return catchup_cap;
+    return 1;
+}
+
 /** Direct-fetch cap: 1-wide catch-up used to request only the single
  *  lowest hole per HEADERS event. A proven body source (frontier / GPU /
  *  archive / already served a body) may take the full per-peer window of
