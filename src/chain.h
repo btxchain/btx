@@ -739,17 +739,40 @@ LastCommonRootFirstResult ClampLastCommonToRootFirst(const CBlockIndex* last_com
                                                      const CChain* active_chain);
 
 /**
+ * Keep last_common at a heavier competing-fork LCA only while that LCA is
+ * still near the connected tip (lost-twin / short reorg; live 2026-08-28
+ * Δ≈18). A deep HEADER_ONLY tower (rtx6000 2026-08-29: last_common=199312,
+ * tip=199394, Δ=82, m_best_header=199801) must snap last_common onto the
+ * tip so FindNextBlocks does not fill the download window with competing
+ * twins of bodies we already have. Fetch only; ExactReplay before ConnectTip
+ * is unchanged.
+ */
+inline constexpr int LAST_COMMON_KEEP_HEAVIER_FORK_BELOW{24};
+
+[[nodiscard]] inline bool LastCommonKeepHeavierCompetingFork(
+    bool heavier_competing,
+    int32_t tip_height,
+    int32_t last_common_height)
+{
+    if (!heavier_competing) return false;
+    if (last_common_height < 0 || tip_height < last_common_height) return false;
+    return (tip_height - last_common_height) <= LAST_COMMON_KEEP_HEAVIER_FORK_BELOW;
+}
+
+/**
  * 0.34.1 F3: if last_common sits strictly behind the connected tip, snap it
  * to the tip so FindNextBlocksToDownload cannot pin GETDATA on a same-height
  * competitor forever (live: last_common=199299, tip=199300,
  * lowest_missing=twin of the active tip).
  *
  * A hole that is not a descendant of `tip` is dropped, except a strictly
- * heavier competing fork (live 2026-08-28: last_common snapped to 199312,
- * lowest_missing dropped, root-first select=no_missing_body
- * reason=advanced_past_active_tip, inflight=0 while peers advertised
- * 199596). Descendants of the connected tip (the way forward) are
- * re-derived from `tip`.
+ * heavier competing fork whose LCA is still within
+ * LAST_COMMON_KEEP_HEAVIER_FORK_BELOW of the tip (live 2026-08-28: hole
+ * 199304 vs tip 199312). A long withdrawn HEADER_ONLY tower must not win
+ * this exception (rtx6000: last_common sat at 199312 while tip was 199394,
+ * select=already_at_peer_best / no useful GETDATA, block_recv=0).
+ * Descendants of the connected tip (the way forward) are re-derived from
+ * `tip`.
  */
 LastCommonRootFirstResult AdvanceLastCommonPastActiveTip(LastCommonRootFirstResult in,
                                                          const CBlockIndex* tip,

@@ -8499,6 +8499,116 @@ BOOST_AUTO_TEST_CASE(heavier_competing_fork_n_plus_72_getdata_fork_child)
     node::matmul_trusted::ResetForTest();
 }
 
+BOOST_AUTO_TEST_CASE(deep_competing_tower_does_not_seed_or_pin_last_common)
+{
+    // rtx6000 2026-08-29: last_common=199312, tip=199394 (Δ=82),
+    // m_best_header=199801 on withdrawn 33c834f8. Seeding that tower as
+    // BestKnown from VERSION 202410 pinned last_common at the LCA and
+    // produced block_recv=0. A peer that never sent those headers must
+    // not inherit the tower; a peer that did must snap last_common onto
+    // the connected tip and not GETDATA competing twins of bodies we
+    // already have.
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    node::matmul_trusted::ResetForTest();
+    ResetSharedPeermanFixture(m_node);
+    ChainstateManager& chainman{*Assert(m_node.chainman)};
+    PeerManager& peerman{*Assert(m_node.peerman)};
+    ConnmanTestMsg& connman{static_cast<ConnmanTestMsg&>(*m_node.connman)};
+
+    constexpr int k_below{82};
+    constexpr int k_ahead{20};
+    const CBlockIndex* fork_root{
+        WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip())};
+    BOOST_REQUIRE(fork_root != nullptr);
+    for (int i = 0; i < k_below; ++i) {
+        mineBlock(m_node, std::chrono::seconds{fork_root->GetBlockTime() + 1 + i});
+    }
+    const CBlockIndex* tip{
+        WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip())};
+    BOOST_REQUIRE(tip != nullptr);
+    BOOST_REQUIRE_EQUAL(tip->nHeight, fork_root->nHeight + k_below);
+    BOOST_REQUIRE_GT(tip->nHeight - fork_root->nHeight,
+                     LAST_COMMON_KEEP_HEAVIER_FORK_BELOW);
+
+    std::vector<CBlockIndex*> fork;
+    const CBlockIndex* walk{fork_root};
+    for (int i = 0; i < k_below + k_ahead; ++i) {
+        fork.push_back(MakePeermanHeaderChild(chainman, *walk, 0xd0 + (i & 0xff)));
+        walk = fork.back();
+    }
+    BOOST_REQUIRE_EQUAL(fork.back()->nHeight, tip->nHeight + k_ahead);
+    BOOST_CHECK(WITH_LOCK(::cs_main, return fork.back()->GetAncestor(tip->nHeight) != tip));
+    BOOST_CHECK(WITH_LOCK(::cs_main, return fork.back()->nChainWork > tip->nChainWork));
+    {
+        LOCK(::cs_main);
+        for (CBlockIndex* w{const_cast<CBlockIndex*>(tip)}; w != nullptr;
+             w = w->pprev) {
+            w->nAuthenticatedChainWork = w->nChainWork;
+        }
+        chainman.SetBestHeader(fork.back());
+        peerman.SetBestBlock(tip->nHeight,
+                             std::chrono::seconds{tip->GetBlockTime()});
+    }
+
+    SetMockTime(std::chrono::seconds{tip->GetBlockTime() + 55 * 3600});
+    BOOST_REQUIRE(!chainman.IsInitialBlockDownload());
+
+    const ServiceFlags services{ServiceFlags(
+        NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_CONSENSUS)};
+    CNode seed_peer{/*id=*/5500, /*sock=*/nullptr, CAddress{},
+                    /*nKeyedNetGroupIn=*/5500, /*nLocalHostNonceIn=*/0,
+                    CAddress{}, /*addrNameIn=*/"deep-tower-seed",
+                    ConnectionType::OUTBOUND_FULL_RELAY,
+                    /*inbound_onion=*/false, /*network_key=*/0};
+    connman.Handshake(seed_peer, /*successfully_connected=*/true, services,
+                      services, PROTOCOL_VERSION, /*relay_txs=*/true,
+                      /*starting_height=*/fork.back()->nHeight);
+    connman.FlushSendBuffer(seed_peer);
+    SetMockTime(std::chrono::seconds{GetTime() + 180});
+    seed_peer.fPauseSend = false;
+    BOOST_CHECK(peerman.SendMessages(&seed_peer));
+    CNodeStateStats seeded;
+    BOOST_REQUIRE(peerman.GetNodeStateStats(seed_peer.GetId(), seeded));
+    BOOST_CHECK_NE(seeded.nSyncHeight, fork.back()->nHeight);
+
+    CNode body_peer{/*id=*/5501, /*sock=*/nullptr, CAddress{},
+                    /*nKeyedNetGroupIn=*/5501, /*nLocalHostNonceIn=*/0,
+                    CAddress{}, /*addrNameIn=*/"deep-tower-headers",
+                    ConnectionType::OUTBOUND_FULL_RELAY,
+                    /*inbound_onion=*/false, /*network_key=*/0};
+    connman.Handshake(body_peer, /*successfully_connected=*/true, services,
+                      services, PROTOCOL_VERSION, /*relay_txs=*/true,
+                      /*starting_height=*/fork.back()->nHeight);
+    connman.FlushSendBuffer(body_peer);
+    std::vector<CBlock> hdrs;
+    hdrs.reserve(fork.size());
+    for (CBlockIndex* idx : fork) hdrs.emplace_back(idx->GetBlockHeader());
+    BOOST_REQUIRE(connman.ReceiveMsgFrom(
+        body_peer, NetMsg::Make(NetMsgType::HEADERS, TX_WITH_WITNESS(hdrs))));
+    body_peer.fPauseSend = false;
+    (void)connman.ProcessMessagesOnce(body_peer);
+    connman.FlushSendBuffer(body_peer);
+
+    CNodeStateStats learned;
+    BOOST_REQUIRE(peerman.GetNodeStateStats(body_peer.GetId(), learned));
+    BOOST_CHECK_EQUAL(learned.nSyncHeight, fork.back()->nHeight);
+
+    SetMockTime(std::chrono::seconds{GetTime() + 180});
+    body_peer.fPauseSend = false;
+    BOOST_CHECK(peerman.SendMessages(&body_peer));
+    CNodeStateStats after;
+    BOOST_REQUIRE(peerman.GetNodeStateStats(body_peer.GetId(), after));
+    BOOST_CHECK_GE(after.nCommonHeight, tip->nHeight);
+    BOOST_CHECK_EQUAL(
+        CountQueuedGetDataForHash(body_peer, fork.front()->GetBlockHash()), 0U);
+
+    peerman.FinalizeNode(seed_peer);
+    peerman.FinalizeNode(body_peer);
+    NeutralizeUnconnectedHeaders(chainman);
+    peerman.ResetMatMulVerifyAdmissionForTest();
+    node::matmul_trusted::ResetForTest();
+}
+
 BOOST_AUTO_TEST_CASE(header_tower_seeds_best_known_without_duplicate_headers)
 {
     // A live consensus-archive node 2026-08-29: buffer pool ready, deferred-replay gone, but

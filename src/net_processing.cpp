@@ -5779,15 +5779,23 @@ void PeerManagerImpl::FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, c
             // competitor of the connected tip. That pin is what kept
             // mapBlocksInFlight non-empty and shut the inverted preferred-peer
             // header-sync hatch. Equal-work EncDr twins stay skipped.
-            // Strictly heavier competing forks must still GETDATA the hole
-            // at or below tip (live 2026-08-28: 199304 vs tip 199312).
+            // Strictly heavier competing forks may still GETDATA a hole at
+            // or below tip (live 2026-08-28: 199304 vs tip 199312), but only
+            // while last_common is near the tip. A deep withdrawn tower
+            // (rtx6000: last_common=199312, tip=199394) must not fill the
+            // window with competing twins of bodies we already have.
             if (tip != nullptr && pindex->nHeight <= tip->nHeight &&
                 activeChain != nullptr && !activeChain->Contains(pindex)) {
                 const bool heavier_fork_hole{
                     state->pindexBestKnownBlock != nullptr &&
                     state->pindexBestKnownBlock->nChainWork > tip->nChainWork &&
                     state->pindexBestKnownBlock->GetAncestor(pindex->nHeight) ==
-                        pindex};
+                        pindex &&
+                    LastCommonKeepHeavierCompetingFork(
+                        true, tip->nHeight,
+                        state->pindexLastCommonBlock != nullptr
+                            ? state->pindexLastCommonBlock->nHeight
+                            : pindex->nHeight)};
                 if (!heavier_fork_hole) {
                     continue;
                 }
@@ -10260,9 +10268,20 @@ void PeerManagerImpl::MaybeSeedBestKnownFromHeaderTower(
         best->nHeight >= tip->nHeight &&
         best->GetAncestor(tip->nHeight) == tip};
     const bool heavier{best->nChainWork > tip->nChainWork};
+    // Locators already refuse a long competing HEADER_ONLY tower (lead >
+    // HEADER_SYNC_SHORT_COMPETING_LOCATOR_LEAD). Seeding must match: a
+    // withdrawn 33c834f8 tower (rtx6000: m_best_header=199801 vs tip=199394)
+    // must not become BestKnown. LastCommonAncestor then pinned
+    // last_common at 199312 (82 behind) and FindNextBlocks walked competing
+    // twins of bodies we already have. Short lost-twin forks (lead ≤ 6)
+    // still seed.
+    const bool seed_from_tower{
+        extends ||
+        node::HeaderSyncChaseHeavierCompetingLocator(
+            /*extends_active_tip=*/false, heavier, best->nHeight,
+            tip->nHeight)};
     if (!node::HeaderSyncMaySeedBestKnownFromHeaderTower(
-            tip->nHeight, starting, known, best->nHeight,
-            extends || heavier)) {
+            tip->nHeight, starting, known, best->nHeight, seed_from_tower)) {
         return;
     }
     const int32_t seed_h{node::HeaderSyncSeedBestKnownHeight(

@@ -402,10 +402,16 @@ LastCommonRootFirstResult AdvanceLastCommonPastActiveTip(LastCommonRootFirstResu
     // 199294, claimed work of headers-only 199384 > active 199312). Snapping
     // last_common onto the active tip drops that hole; FindNextBlocks then
     // skips every competing hash with height <= tip. Keep ClampLastCommon's
-    // last_common + lowest_missing so GETDATA can start at the fork root.
-    if (best_known != nullptr &&
+    // last_common + lowest_missing so GETDATA can start at the fork root —
+    // but only while the LCA is still near the tip. A deep HEADER_ONLY
+    // tower (rtx6000: last_common=199312, tip=199394, Δ=82) must not pin
+    // the walk 82 blocks behind bodies we already have.
+    const bool heavier_competing{
+        best_known != nullptr &&
         best_known->nChainWork > tip->nChainWork &&
-        best_known->GetAncestor(tip->nHeight) != tip) {
+        best_known->GetAncestor(tip->nHeight) != tip};
+    if (LastCommonKeepHeavierCompetingFork(
+            heavier_competing, tip->nHeight, in.last_common->nHeight)) {
         return in;
     }
 
@@ -420,19 +426,12 @@ LastCommonRootFirstResult AdvanceLastCommonPastActiveTip(LastCommonRootFirstResu
     out.lowest_missing = FindLowestMissingBody(tip, best_known, active_chain);
     // FindLowestMissingBody LCAs `tip` with `best_known`, so a sibling fork
     // still yields a hole at or below the connected tip. Equal-work EncDr
-    // twins are the F3 pin: drop those. A strictly heavier competing fork
-    // must keep the hole (live 2026-08-28: 199299 vs tip 199312).
+    // twins are the F3 pin: drop those. Short heavier competing forks
+    // already returned above; a deep withdrawn tower's competing hole
+    // is also dropped so the walk starts at the connected tip.
     if (out.lowest_missing != nullptr &&
         out.lowest_missing->GetAncestor(tip->nHeight) != tip) {
-        const bool heavier_fork{
-            best_known != nullptr &&
-            best_known->nChainWork > tip->nChainWork &&
-            best_known->GetAncestor(tip->nHeight) != tip &&
-            best_known->GetAncestor(out.lowest_missing->nHeight) ==
-                out.lowest_missing};
-        if (!heavier_fork) {
-            out.lowest_missing = nullptr;
-        }
+        out.lowest_missing = nullptr;
     }
     return out;
 }

@@ -346,6 +346,16 @@ BOOST_AUTO_TEST_CASE(heavier_competing_fork_keeps_missing_root_below_tip)
     BOOST_CHECK(advanced.last_common != tip);
 }
 
+BOOST_AUTO_TEST_CASE(keep_heavier_fork_helper_near_tip_only)
+{
+    BOOST_CHECK(LastCommonKeepHeavierCompetingFork(true, 199312, 199294));
+    BOOST_CHECK(LastCommonKeepHeavierCompetingFork(true, 199312, 199288));
+    BOOST_CHECK(!LastCommonKeepHeavierCompetingFork(true, 199312, 199287));
+    BOOST_CHECK(!LastCommonKeepHeavierCompetingFork(true, 199394, 199312));
+    BOOST_CHECK(!LastCommonKeepHeavierCompetingFork(false, 199312, 199294));
+    BOOST_CHECK(!LastCommonKeepHeavierCompetingFork(true, 10, -1));
+}
+
 BOOST_AUTO_TEST_CASE(heavier_fork_n_plus_72_keeps_fork_child_missing)
 {
     // Operator 2026-08-28: tip N, BestKnown N+72 forking at N-k (live k=14,
@@ -395,6 +405,70 @@ BOOST_AUTO_TEST_CASE(heavier_fork_n_plus_72_keeps_fork_child_missing)
     BOOST_CHECK(advanced.lowest_missing == fork[1]);
     BOOST_CHECK_EQUAL(advanced.last_common->nHeight, 0);
     BOOST_CHECK(advanced.last_common != tip);
+}
+
+BOOST_AUTO_TEST_CASE(deep_competing_tower_advances_last_common_to_tip)
+{
+    // rtx6000 2026-08-29: last_common=199312, tip=199394 (Δ=82),
+    // m_best_header=199801 on withdrawn 33c834f8. The unbounded keep-hole
+    // left last_common 82 behind; FindNextBlocks walked competing twins
+    // and GETDATA never requested tip+1. Snap last_common onto the tip
+    // and drop the competing hole.
+    constexpr int k_shared{10};
+    constexpr int k_below{82};
+    constexpr int k_ahead{407};
+    ChainFixture f;
+    CBlockIndex* genesis = f.Add(nullptr, 0);
+    ChainFixture::MarkHaveData(genesis, /*have_chain_txs=*/true);
+
+    std::vector<CBlockIndex*> shared;
+    shared.push_back(genesis);
+    for (int h = 1; h <= k_shared; ++h) {
+        CBlockIndex* idx = f.Add(shared.back(), h);
+        ChainFixture::MarkHaveData(idx, /*have_chain_txs=*/true);
+        shared.push_back(idx);
+    }
+
+    std::vector<CBlockIndex*> active_blocks = shared;
+    for (int h = k_shared + 1; h <= k_shared + k_below; ++h) {
+        CBlockIndex* idx = f.Add(active_blocks.back(), h);
+        ChainFixture::MarkHaveData(idx, /*have_chain_txs=*/true);
+        active_blocks.push_back(idx);
+    }
+    CBlockIndex* tip = active_blocks.back();
+    BOOST_CHECK_EQUAL(tip->nHeight, k_shared + k_below);
+
+    std::vector<CBlockIndex*> fork = shared;
+    for (int h = k_shared + 1; h <= k_shared + k_below + k_ahead; ++h) {
+        fork.push_back(f.Add(fork.back(), h));
+    }
+    BOOST_CHECK_EQUAL(fork.back()->nHeight, k_shared + k_below + k_ahead);
+    BOOST_CHECK(fork.back()->nChainWork > tip->nChainWork);
+    BOOST_CHECK(fork.back()->GetAncestor(tip->nHeight) != tip);
+    BOOST_CHECK(LastCommonAncestor(tip, fork.back()) == shared.back());
+    BOOST_CHECK_EQUAL(tip->nHeight - shared.back()->nHeight, k_below);
+
+    CChain active;
+    active.SetTip(*tip);
+
+    const LastCommonRootFirstResult clamped = ClampLastCommonToRootFirst(
+        /*last_common=*/shared.back(),
+        /*best_known=*/fork.back(),
+        /*tip=*/tip,
+        &active);
+    BOOST_REQUIRE(clamped.last_common != nullptr);
+    BOOST_CHECK_EQUAL(clamped.last_common->nHeight, k_shared);
+    BOOST_REQUIRE(clamped.lowest_missing != nullptr);
+    BOOST_CHECK_EQUAL(clamped.lowest_missing->nHeight, k_shared + 1);
+
+    const LastCommonRootFirstResult advanced = AdvanceLastCommonPastActiveTip(
+        clamped, tip, fork.back(), &active);
+    BOOST_CHECK(advanced.clamped);
+    BOOST_CHECK_EQUAL(std::string(advanced.reason), "advanced_past_active_tip");
+    BOOST_REQUIRE(advanced.last_common != nullptr);
+    BOOST_CHECK(advanced.last_common == tip);
+    BOOST_CHECK_EQUAL(advanced.last_common->nHeight, tip->nHeight);
+    BOOST_CHECK(advanced.lowest_missing == nullptr);
 }
 
 BOOST_AUTO_TEST_CASE(header_tower_best_known_finds_first_missing_body)

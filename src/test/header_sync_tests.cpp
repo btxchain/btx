@@ -72,6 +72,12 @@ BOOST_AUTO_TEST_CASE(locator_start_does_not_chase_long_competing_header_tower)
     // 199801 on withdrawn 33c834f8 (lead 416).
     BOOST_CHECK(!node::HeaderSyncChaseHeavierCompetingLocator(
         /*extends_active_tip=*/false, /*heavier=*/true, 199801, 199385));
+    // rtx6000 2026-08-29: tip 199394 vs withdrawn tower 199801 (lead 407).
+    // Must not seed BestKnown / chase locators from that tower.
+    BOOST_CHECK(!node::HeaderSyncChaseHeavierCompetingLocator(
+        false, true, 199801, 199394));
+    BOOST_CHECK(node::HeaderSyncChaseHeavierCompetingLocator(
+        false, true, 199398, 199394));
     BOOST_CHECK(node::HeaderSyncChaseHeavierCompetingLocator(
         false, true, 11, 10));
     BOOST_CHECK(!node::HeaderSyncChaseHeavierCompetingLocator(
@@ -302,6 +308,17 @@ BOOST_AUTO_TEST_CASE(seed_best_known_from_header_tower_skips_at_tip_peer)
         kTip, kTower, -1, kTower, /*not_extends_or_heavier=*/false));
     BOOST_CHECK(!node::HeaderSyncMaySeedBestKnownFromHeaderTower(
         kTip, kTower, -1, /*header_not_ahead=*/kTip, true));
+    // Production call site is extends || ChaseHeavier, not "any heavier".
+    // rtx6000: competing 199801 vs tip 199394 must not seed; a tip-extending
+    // tower still does.
+    BOOST_CHECK(!node::HeaderSyncMaySeedBestKnownFromHeaderTower(
+        199394, 202410, /*best_known=*/-1, 199801,
+        /*extends=*/false || node::HeaderSyncChaseHeavierCompetingLocator(
+            false, /*heavier=*/true, 199801, 199394)));
+    BOOST_CHECK(node::HeaderSyncMaySeedBestKnownFromHeaderTower(
+        199394, 202410, -1, 199801,
+        /*extends=*/true || node::HeaderSyncChaseHeavierCompetingLocator(
+            false, true, 199801, 199394)));
 
     BOOST_CHECK_EQUAL(
         node::HeaderSyncSeedBestKnownHeight(kTip, kTower, kTower), kTower);
