@@ -20080,21 +20080,18 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
         if (try_restore_prepared_transition(*persisted_mutation_marker)) {
             return finish_success();
         }
-        // §11 / production restart tax: a clean stop (or a ConnectBlock that
-        // already PersistShieldedState'd the tip) can leave a stale marker whose
-        // target already matches the active tip AND the durable tip snapshot.
-        // Falling through to rebuild_from_chain then costs ~1–2h of archive IO
-        // even though there is nothing to repair. If the tip-matched snapshot
-        // still carries a verifying full-state pin (and nullifier accumulator),
-        // clear the stale marker and continue into the ordinary restore path.
-        //
-        // Intentionally require pin+accumulator evidence: a LEGACY marker on a
-        // tip-matched snapshot WITHOUT a pin still means "unknown prefix of a
-        // multi-store mutation may have committed" and must fail closed / rebuild
-        // (see chainstatemanager_rejects_stale_legacy_marker_when_pruned).
-        if (tip != nullptr &&
-            persisted_mutation_marker->target_tip_height == tip->nHeight &&
-            persisted_mutation_marker->target_tip_hash == tip->GetBlockHash()) {
+        // Issue #74 / unclean-shutdown restart tax: ConnectBlock writes a
+        // PREPARED marker before PersistShieldedState seals the pin, and a
+        // crash can also leave a LEGACY marker. Falling through to
+        // rebuild_from_chain then replays genesis→tip (minutes on an archive)
+        // even when the durable snapshot is still cryptographically sealed.
+        // If the on-disk pin+accumulator still match the live stores, the
+        // snapshot was not mixed — clear the leftover marker and continue into
+        // the ordinary fast-restore / gap-catch-up path. Marker target may
+        // differ from the active tip (crash during the next ConnectBlock);
+        // gap-only catch-up below repairs that. A missing or mismatched pin
+        // still means the stores may be mixed and must rebuild or fail closed.
+        {
             shielded::ShieldedMerkleTree stale_marker_tree;
             std::vector<uint256> stale_marker_anchor_roots;
             uint256 stale_marker_tip_hash;
@@ -20111,14 +20108,14 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
                     stale_marker_balance,
                     stale_marker_commitment_digest,
                     stale_marker_registry_snapshot) &&
-                stale_marker_tip_hash == tip->GetBlockHash() &&
-                stale_marker_tip_height == tip->nHeight) {
+                !stale_marker_tip_hash.IsNull() &&
+                stale_marker_tip_height >= 0) {
                 const auto persisted_accumulator =
                     m_shielded_nullifiers->ReadPersistedNullifierAccumulator();
                 const auto persisted_pin =
                     m_shielded_nullifiers->ReadPersistedShieldedStatePin();
                 // Load the frontier into the live managers just long enough to
-                // recompute the pin against the durable tip snapshot. This does
+                // recompute the pin against the durable snapshot. This does
                 // not publish HasShieldedState() until finish_success / restore.
                 // Pin V3 covers unshield velocity, so load it before hashing.
                 m_shielded_merkle_tree = stale_marker_tree;
@@ -20132,28 +20129,29 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
                         restored_registry->CanMaterializeAllEntries()) {
                         m_shielded_account_registry = std::move(*restored_registry);
                         const auto current_pin = ComputeShieldedSnapshotStatePin();
-                        const bool tip_matched_credential_ok =
+                        const bool sealed_pin_ok =
                             persisted_accumulator.has_value() &&
                             *persisted_accumulator ==
                                 m_shielded_nullifiers->NullifierAccumulatorDigest() &&
                             persisted_pin.has_value() &&
                             current_pin.has_value() &&
                             *persisted_pin == *current_pin;
-                        // Only PREPARED journals are eligible: a LEGACY marker on a
-                        // tip-matched snapshot still means an unknown multi-store
-                        // mutation prefix and must rebuild / fail closed when pruned.
-                        if (tip_matched_credential_ok &&
-                            persisted_mutation_marker->IsPreparedTransitionJournal() &&
+                        if (sealed_pin_ok &&
                             m_shielded_nullifiers->ClearMutationMarker()) {
                             LogPrintf(
-                                "EnsureShieldedStateInitialized: clearing stale tip-matched "
-                                "PREPARED mutation marker at height=%d hash=%s; durable "
-                                "snapshot already matches the active tip with verifying "
-                                "pin+accumulator (skipping from-genesis rebuild)\n",
-                                tip->nHeight,
-                                tip->GetBlockHash().ToString());
-                            // Drop the temporary live loads; the tip-matched restore
-                            // path below re-reads and validates the same snapshot.
+                                "EnsureShieldedStateInitialized: clearing leftover %s "
+                                "mutation marker after unclean shutdown at marker_height=%d "
+                                "marker_hash=%s persisted_height=%d persisted_hash=%s; "
+                                "sealed pin+accumulator verified (fast-restore, skipping "
+                                "from-genesis rebuild)\n",
+                                persisted_mutation_marker->IsPreparedTransitionJournal()
+                                    ? "PREPARED" : "legacy",
+                                persisted_mutation_marker->target_tip_height,
+                                persisted_mutation_marker->target_tip_hash.ToString(),
+                                stale_marker_tip_height,
+                                stale_marker_tip_hash.ToString());
+                            // Drop the temporary live loads; the restore path
+                            // below re-reads and validates the same snapshot.
                             reset_shielded_state();
                             persisted_mutation_marker.reset();
                         } else {
@@ -20190,7 +20188,7 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
                           tip ? tip->GetBlockHash().ToString() : uint256{}.ToString());
                 return false;
             } else {
-                LogPrintf("EnsureShieldedStateInitialized: found in-flight mutation marker target_height=%d target_hash=%s; rebuilding full shielded state from chain\n",
+                LogPrintf("EnsureShieldedStateInitialized: found in-flight mutation marker target_height=%d target_hash=%s whose sealed pin is missing or does not match the live stores; rebuilding full shielded state from chain\n",
                           persisted_mutation_marker->target_tip_height,
                           persisted_mutation_marker->target_tip_hash.ToString());
                 if (!rebuild_from_chain()) {
@@ -20201,7 +20199,7 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
         }
     }
 
-    LogPrintf("EnsureShieldedStateInitialized: rebuilding from tip height=%d hash=%s retention=%s\n",
+    LogPrintf("EnsureShieldedStateInitialized: loading persisted shielded state at tip height=%d hash=%s retention=%s\n",
               tip ? tip->nHeight : -1,
               tip ? tip->GetBlockHash().ToString() : uint256{}.ToString(),
               m_options.retain_shielded_commitment_index ? "full" : "externalized");
@@ -20314,6 +20312,17 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
                           actual_commitment_index_digest->ToString());
                 return false;
             }
+        } else if (tip != nullptr &&
+                   GetConsensus().IsShieldedPoolDisabled(tip->nHeight)) {
+            // Shielding is discontinued at nShieldedPoolDisableHeight. The
+            // commitment-position index is not a consensus input past that
+            // height (spends are invalid), so a digest mismatch must not
+            // force a multi-minute from-genesis index replay on an opt-in
+            // -shieldedstate=1 node. Restore the sealed frontier instead.
+            LogPrintf("EnsureShieldedStateInitialized: skipping commitment-index rebuild at height=%d hash=%s because the shielded pool is closed; restoring the sealed frontier without a from-genesis index replay\n",
+                      persisted_tip_height,
+                      persisted_tip_hash.ToString());
+            restored_index = true;
         } else {
             if (!persisted_commitment_index_digest.has_value()) {
                 LogPrintf("EnsureShieldedStateInitialized: persisted state missing commitment index digest at height=%d hash=%s tree_size=%u root=%s; rebuilding commitment index from chain\n",
@@ -20343,11 +20352,15 @@ bool ChainstateManager::EnsureShieldedStateInitialized()
         // position) when the index is absent; it simply cannot itself PRODUCE witnesses until it can
         // rebuild the index from un-pruned blocks.
         const bool commitment_index_present = m_shielded_merkle_tree.HasCommitmentIndex();
+        const bool pool_closed_index_optional =
+            tip != nullptr && GetConsensus().IsShieldedPoolDisabled(tip->nHeight);
         const bool commitment_index_unrebuildable_under_pruning =
             !commitment_index_present &&
             !ShieldedFullRebuildBlocksAvailable(*m_active_chainstate, tip);
         if (restored_index &&
-            (commitment_index_present || commitment_index_unrebuildable_under_pruning)) {
+            (commitment_index_present ||
+             commitment_index_unrebuildable_under_pruning ||
+             pool_closed_index_optional)) {
             const auto loaded_anchor_roots = m_shielded_anchor_roots;
             const auto loaded_account_registry_roots = persisted_account_registry_roots;
             bool anchor_history_rebuilt{false};
