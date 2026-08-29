@@ -1188,6 +1188,10 @@ struct CNodeState {
     /** VERSION nStartingHeight. -1 until handshake. Used to decide whether
      *  a preferred archive actually had the catch-up suffix at connect. */
     int m_starting_height{-1};
+    /** True once this peer has delivered a BLOCK/CMPCTBLOCK/BLOCKTXN body.
+     *  FindNextBlocks prefers proven body sources once any peer has served
+     *  (SF-3). Header-only work is not body availability. */
+    bool m_has_served_block{false};
     /** Remote address, copied from Peer so initial-sync preference can
      *  consult the session-lived low-work failure set without GetPeerRef. */
     CNetAddr m_addr{};
@@ -2512,6 +2516,7 @@ private:
      *  issue-116 unit test. */
     void PersistExactReplayVerdictAndRelay(const uint256& hash)
         LOCKS_EXCLUDED(cs_main);
+    void NotePeerServedBlockBody(NodeId nodeid);
     void MaybeLogAttestationServe(const char* reason,
                                   const uint256& hash,
                                   int32_t height,
@@ -3580,6 +3585,14 @@ void PeerManagerImpl::RemoveBlockRequest(const uint256& hash, std::optional<Node
         state.m_stalling_since = 0us;
 
         range.first = mapBlocksInFlight.erase(range.first);
+    }
+}
+
+void PeerManagerImpl::NotePeerServedBlockBody(NodeId nodeid)
+{
+    LOCK(cs_main);
+    if (CNodeState* state{State(nodeid)}) {
+        state->m_has_served_block = true;
     }
 }
 
@@ -5112,6 +5125,30 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
     const bool this_peer_frontier_source{
         PeerIsSignedFrontierBodySource(peer.m_id, *state, &peer)};
     const bool this_peer_gpu{PeerIsGpuAuthority(peer.m_id, *state)};
+    // Convergence spread (FindNextBlocksToDownload half): the signed-frontier
+    // PREFER gates below only allow the single preferred frontier source once
+    // the global in-flight map is non-empty (i.e. !stalled_behind_header_tower),
+    // so after peer 1 gets any block in flight EVERY other NODE_NETWORK peer
+    // holding the tower is skipped ("signed_frontier_prefer_archive") and the
+    // fetch pins to one dead-end owner (~1 block/min, live rtx6000). Mirror the
+    // SendMessages spread here: when we are behind the followed header tower and
+    // THIS peer can serve bodies with spare capacity, bypass the prefer gates so
+    // idle body-serving peers get owners in parallel. Bounded by
+    // MAX_BLOCKS_IN_TRANSIT_PER_PEER / BLOCK_DOWNLOAD_WINDOW; bodies are
+    // self-validating and still fully ExactReplay'd + M-of-N before ConnectTip.
+    const bool catch_up_spread{
+        tip != nullptr && m_chainman.m_best_header != nullptr &&
+        node::HeaderSyncMaySpreadCatchUpFetch(
+            m_chainman.m_best_header->nHeight - tip->nHeight >=
+                BLOCK_FETCH_STALL_HEADERS_AHEAD,
+            node::matmul_trusted::StalledTowerFetchPeerMayServeBodies(
+                this_peer_gpu, CanServeBlocks(peer),
+                /*version_handshake_complete=*/peer.m_starting_height.load() >= 0,
+                state->m_manual, state->m_noban),
+            state->vBlocksInFlight.size(),
+            static_cast<size_t>(MAX_BLOCKS_IN_TRANSIT_PER_PEER),
+            mapBlocksInFlight.size(),
+            static_cast<size_t>(BLOCK_DOWNLOAD_WINDOW))};
     const int32_t attestor_park{node::matmul_trusted::AttestorDriftYieldDepth(
         m_chainman.m_options.max_reorg_depth_park.value_or(
             kernel::GetReorgProtectionProfileSettings(
@@ -5133,7 +5170,7 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
             signed_frontier.blocks_behind,
             attestor_park)};
     const bool attestor_yielding{yield_to_this_peer || yield_to_frontier};
-    if (!stalled_behind_header_tower &&
+    if (!stalled_behind_header_tower && !catch_up_spread &&
         node::matmul_trusted::SkipNonPreferredSignedFrontierBodyPeer(
             IsSignedFrontierBodyCatchUp(),
             this_peer_frontier_source,
@@ -5141,7 +5178,7 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
         log_skip("signed_frontier_prefer_archive");
         return;
     }
-    if (!stalled_behind_header_tower &&
+    if (!stalled_behind_header_tower && !catch_up_spread &&
         !PeerMaySignedFrontierCatchUpGetData(peer, *state)) {
         log_skip("signed_frontier_not_getdata_source");
         return;
@@ -5289,6 +5326,28 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
         log_skip(state->pindexBestKnownBlock == nullptr ? "no_best_known"
                                                         : "peer_work_not_interesting");
         return;
+    }
+
+    // SF-3: claimed nChainWork of a HEADER_ONLY BestKnown is not body
+    // availability. Once any peer has delivered a body, skip peers that
+    // never have — unless they are manual/noban or the GPU/frontier source.
+    // Fresh IBD (nobody has served) keeps the work-only gate.
+    {
+        bool any_served{false};
+        for (const auto& [id, st] : m_node_states) {
+            if (st.m_has_served_block) {
+                any_served = true;
+                break;
+            }
+        }
+        if (node::HeaderSyncSkipPeerWithoutBodyAvailability(
+                state->m_has_served_block,
+                state->m_manual || state->m_noban,
+                this_peer_frontier_source || this_peer_gpu,
+                any_served)) {
+            log_skip("no_body_availability");
+            return;
+        }
     }
 
     // While an AssumeUtxo snapshot is still being validated, avoid downloading
@@ -16281,6 +16340,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             Misbehaving(*peer, strprintf("trailing data after cmpctblock = %u bytes", vRecv.size()));
             return;
         }
+        NotePeerServedBlockBody(pfrom.GetId());
 
         // Ignore while importing, but free any in-flight slot for this hash.
         if (m_chainman.m_blockman.LoadingBlocks()) {
@@ -16713,6 +16773,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             Misbehaving(*peer, strprintf("trailing data after blocktxn = %u bytes", vRecv.size()));
             return;
         }
+        NotePeerServedBlockBody(pfrom.GetId());
 
         if (m_chainman.IsDiscoveryRelay()) {
             WITH_LOCK(cs_main, RemoveBlockRequest(resp.blockhash, pfrom.GetId()));
@@ -18458,6 +18519,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             Misbehaving(*peer, strprintf("trailing data after block = %u bytes", vRecv.size()));
             return;
         }
+        NotePeerServedBlockBody(pfrom.GetId());
 
         if (m_chainman.IsDiscoveryRelay()) {
             WITH_LOCK(cs_main, RemoveBlockRequest(pblock->GetHash(), pfrom.GetId()));
