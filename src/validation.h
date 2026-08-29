@@ -1228,6 +1228,10 @@ private:
     mutable std::map<uint256, arith_uint256> m_acquisition_exempt_towers
         GUARDED_BY(::cs_main);
     mutable std::optional<int> m_cadence_hold_logged_allowed GUARDED_BY(::cs_main);
+    //! Rate limit for the deepforkautoresolve verdict diagnostic in
+    //! DeepForkAutoResolveMayAct (at most one LogInfo line per interval,
+    //! except acted=1 verdicts, which always log).
+    mutable int64_t m_deep_fork_verdict_log_time_s GUARDED_BY(::cs_main){0};
     std::optional<node::ReorgRecoveryRecord> m_reorg_recovery GUARDED_BY(::cs_main);
     /**
      * Authenticated/quorum branch tips used by exceptional shallow-race
@@ -1923,15 +1927,35 @@ public:
     struct DeepForkAutoResolveVerdict {
         bool enabled{false};
         bool in_scope{false};
+        bool heavier{false};
         bool no_deterministic_tiebreak{false};
         bool candidate_usable{false};
         bool seen_live{false};
         bool sustained{false};
+        //! Whole competing suffix (fork+1..candidate) carries BLOCK_HAVE_DATA
+        //! + BLOCK_EXACT_REPLAY_VERIFIED (the RB-16 acquisition stack's
+        //! product). Informational for MayAct's own return value (unchanged);
+        //! REQUIRED by DeepForkAutoResolveMayUnpark, so only a fully
+        //! ExactReplay-acquired tower may lift its own deep-reorg park.
+        bool suffix_exact_replayed{false};
         bool acted{false};
         int reorg_depth{0};
     };
     bool DeepForkAutoResolveMayAct(const CBlockIndex* candidate,
                                    DeepForkAutoResolveVerdict* verdict = nullptr)
+        const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    /**
+     * RB-16 migration hand-off: may a PARKED deep-reorg branch containing
+     * `candidate` be atomically un-parked so the normal ActivateBestChain /
+     * ConnectTip path can migrate to it? STRICTER than MayAct alone: every
+     * MayAct observation gate must hold AND the entire competing suffix must
+     * be BLOCK_HAVE_DATA + BLOCK_EXACT_REPLAY_VERIFIED. A header-only or
+     * partially verified heavier tower therefore can never lift its own park
+     * (depth-6 dump-and-run protection intact); after the unpark, ConnectTip
+     * still refuses any unverified body ("ExactReplay required before
+     * ConnectTip") and ConnectBlock still runs full UTXO/script validation.
+     */
+    [[nodiscard]] bool DeepForkAutoResolveMayUnpark(const CBlockIndex* candidate)
         const EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     std::optional<node::ReorgRecoveryRecord> GetReorgRecoveryRecord() const EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
     {

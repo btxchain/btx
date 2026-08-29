@@ -10047,15 +10047,28 @@ CBlockIndex* Chainstate::FindMostWorkChain()
                  m_chain.Tip() != nullptr &&
                  pindexNew->nChainWork >= m_chain.Tip()->nChainWork) ||
                 pindexNew == unique_abandon};
-            if (!authority_escape ||
+            // Deep-fork auto-resolve park-escape (RB-16 migration hand-off):
+            // mirror the TryAddBlockIndexCandidate unpark for a parked
+            // candidate already in the set (unique_abandon insert / unpark
+            // re-add races). Requires the FULL-suffix ExactReplay predicate
+            // on top of every MayAct observation gate; a header-only or
+            // partially verified heavier rewrite still stays parked.
+            const bool deep_fork_escape{
+                !authority_escape &&
+                m_chainman.DeepForkAutoResolveMayUnpark(pindexNew)};
+            if ((!authority_escape && !deep_fork_escape) ||
                 !m_chainman.UnparkReorgBranchContainingBlock(pindexNew)) {
                 skipped_this_call.insert(pindexNew);
                 setBlockIndexCandidates.erase(pindexNew);
                 ++skipped_count;
                 continue;
             }
-            LogWarning("%s: auto-unparked uniquely attested authority branch hash=%s height=%d (park-escape; unattested heavier rewrites stay parked)\n",
-                       __func__, pindexNew->GetBlockHash().ToString(),
+            LogWarning("%s: auto-unparked %s branch hash=%s height=%d (park-escape; unattested heavier rewrites stay parked)\n",
+                       __func__,
+                       deep_fork_escape
+                           ? "fully-ExactReplay-verified deep-fork (deepforkautoresolve)"
+                           : "uniquely attested authority",
+                       pindexNew->GetBlockHash().ToString(),
                        pindexNew->nHeight);
         }
         if (pindexNew != unique_abandon &&
@@ -11369,8 +11382,32 @@ void Chainstate::TryAddBlockIndexCandidate(CBlockIndex* pindex)
         m_chain.Contains(pindex)) {
         return;
     }
-    const bool parked{m_chainman.IsOnParkedReorgBranch(pindex)};
+    bool parked{m_chainman.IsOnParkedReorgBranch(pindex)};
     const bool defer_losing{m_chainman.ShouldDeferLosingTipExtension(pindex)};
+    // RB-16 migration hand-off (precondition deadlock fix): the park veto
+    // below kept a fully-acquired, fully-ExactReplay-verified heavier fork
+    // out of setBlockIndexCandidates forever, so FindMostWorkChain never
+    // consulted DeepForkAutoResolveMayAct for it and the deep-fork
+    // auto-resolve escape (ActivateBestChainStep) was unreachable (live
+    // rtx6000: tip=199416, verified majority tower 201500 stayed
+    // "valid-headers"). When every -deepforkautoresolve observation gate
+    // holds AND the whole competing suffix is HAVE_DATA +
+    // EXACT_REPLAY_VERIFIED, atomically unpark so the NORMAL
+    // ActivateBestChain/ConnectTip path -- which still refuses unverified
+    // bodies and still runs full UTXO/script ConnectBlock -- can migrate.
+    // Deterministic layers (quorum, attested abandon, shallow recovery,
+    // operator invalidate) keep priority inside MayAct; armed losing-tip
+    // deferral keeps priority here.
+    if (parked && !defer_losing &&
+        m_chainman.DeepForkAutoResolveMayUnpark(pindex) &&
+        m_chainman.UnparkReorgBranchContainingBlock(pindex)) {
+        LogWarning("%s: auto-unparked deep-fork branch hash=%s height=%d "
+                   "(deepforkautoresolve: suffix fully ExactReplay-verified; "
+                   "header-only/partially-verified towers stay parked)\n",
+                   __func__, pindex->GetBlockHash().ToString(),
+                   pindex->nHeight);
+        parked = false;
+    }
     if (parked || defer_losing) {
         if (pindex != nullptr && tip != nullptr && pindex->pprev == tip) {
             // Live 2026-08-16: HEADER_ONLY tip-child re-announces hit this
@@ -12480,6 +12517,28 @@ bool ChainstateManager::DeepForkAutoResolveMayAct(
     DeepForkAutoResolveVerdict v;
     const auto finish = [&](bool acted) {
         v.acted = acted;
+        // Rate-limited operator diagnostic: whenever a DEEP candidate is
+        // scored (in_scope), show exactly which observation gates hold so a
+        // live node explains why it does or does not migrate. acted=1
+        // verdicts are rare and decisive; always log those.
+        if (v.in_scope && candidate != nullptr) {
+            constexpr int64_t VERDICT_LOG_INTERVAL_S{30};
+            const int64_t log_now_s{GetTime()};
+            if (acted || log_now_s - m_deep_fork_verdict_log_time_s >=
+                             VERDICT_LOG_INTERVAL_S) {
+                m_deep_fork_verdict_log_time_s = log_now_s;
+                LogInfo("deepforkautoresolve verdict candidate=%s height=%d "
+                        "reorg_depth=%d enabled=%d in_scope=%d heavier=%d "
+                        "no_deterministic_tiebreak=%d candidate_usable=%d "
+                        "seen_live=%d sustained=%d suffix_exact_replayed=%d "
+                        "acted=%d\n",
+                        candidate->GetBlockHash().ToString(),
+                        candidate->nHeight, v.reorg_depth, v.enabled,
+                        v.in_scope, v.heavier, v.no_deterministic_tiebreak,
+                        v.candidate_usable, v.seen_live, v.sustained,
+                        v.suffix_exact_replayed, acted);
+            }
+        }
         if (verdict != nullptr) *verdict = v;
         return acted;
     };
@@ -12508,6 +12567,7 @@ bool ChainstateManager::DeepForkAutoResolveMayAct(
     if (!v.in_scope) return finish(false);
     // Local policy only follows STRICTLY-heavier work, never equal work.
     if (!(candidate->nChainWork > tip->nChainWork)) return finish(false);
+    v.heavier = true;
 
     // Layer 1 (deterministic) stays authoritative: never let observation
     // override or duplicate a quorum / attested-abandon / shallow-recovery
@@ -12538,7 +12598,15 @@ bool ChainstateManager::DeepForkAutoResolveMayAct(
     bool seen_live{true};
     int64_t first_seen_min{std::numeric_limits<int64_t>::max()};
     int64_t first_seen_max{std::numeric_limits<int64_t>::min()};
+    v.suffix_exact_replayed = true;
     for (const CBlockIndex* b{candidate}; b != nullptr && b != fork; b = b->pprev) {
+        // Diagnostic + MayUnpark predicate: full-suffix BLOCK_HAVE_DATA +
+        // BLOCK_EXACT_REPLAY_VERIFIED coverage. Does NOT change this
+        // function's own return value.
+        if (!(b->nStatus & BLOCK_HAVE_DATA) ||
+            (b->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) == 0) {
+            v.suffix_exact_replayed = false;
+        }
         // The whole suffix must be body-present + ExactReplay-valid, not just
         // the tip -- otherwise a partially-validated dump could pass.
         if (!(b->nStatus & BLOCK_HAVE_DATA) ||
@@ -12567,6 +12635,24 @@ bool ChainstateManager::DeepForkAutoResolveMayAct(
     if (!v.sustained) return finish(false);
 
     return finish(true);
+}
+
+bool ChainstateManager::DeepForkAutoResolveMayUnpark(
+    const CBlockIndex* candidate) const
+{
+    AssertLockHeld(::cs_main);
+    DeepForkAutoResolveVerdict v;
+    if (!DeepForkAutoResolveMayAct(candidate, &v)) return false;
+    // STRICTER than MayAct alone: lifting a deep-reorg PARK additionally
+    // requires the ENTIRE competing suffix to carry BLOCK_HAVE_DATA +
+    // BLOCK_EXACT_REPLAY_VERIFIED (the RB-16 acquisition stack's product).
+    // A header-only or partially verified heavier tower can therefore never
+    // lift its own park (depth-6 dump-and-run stays rejected). After the
+    // unpark, migration still runs the NORMAL path: ConnectTip refuses any
+    // body without the verified bit ("ExactReplay required before
+    // ConnectTip") and ConnectBlock runs the full UTXO/script validation; a
+    // ConnectBlock failure marks the branch BLOCK_FAILED as usual.
+    return v.suffix_exact_replayed;
 }
 
 void ChainstateManager::NoteAuthenticatedRecoveryCandidate(CBlockIndex* candidate)
