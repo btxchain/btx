@@ -5860,11 +5860,27 @@ void PeerManagerImpl::FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, c
                     state->pindexBestKnownBlock->nChainWork > tip->nChainWork &&
                     state->pindexBestKnownBlock->GetAncestor(pindex->nHeight) ==
                         pindex &&
-                    LastCommonKeepHeavierCompetingFork(
-                        true, tip->nHeight,
-                        state->pindexLastCommonBlock != nullptr
-                            ? state->pindexLastCommonBlock->nHeight
-                            : pindex->nHeight)};
+                    // RB-16: the 24-block LAST_COMMON_KEEP_HEAVIER_FORK_BELOW
+                    // clamp was written to stop a WITHDRAWN deep tower filling
+                    // the window with competing twins. But a strictly-heavier
+                    // stale tower we are ACQUIRING must be fetched CONTIGUOUSLY
+                    // from its fork root (root-first), which is >24 below the
+                    // tip (live rtx6000: root 199312, tip 199416, Δ=104). Without
+                    // this the walk skips every body at/below tip, so the fork
+                    // never assembles from the root and the tip cannot migrate
+                    // even though the bodies ExactReplay fine (encdr_ok=1).
+                    // AcquisitionEscapeActive self-guards (stale + strictly-
+                    // heavier + off-active-chain + tip+2048 lead + in the <=2
+                    // exempt-tower set), and non-acquiring nodes keep the exact
+                    // 24-clamp behavior. Migration stays park/deepforkautoresolve
+                    // gated; ConnectTip still refuses the reorg.
+                    (m_chainman.AcquisitionEscapeActive(
+                         state->pindexBestKnownBlock) ||
+                     LastCommonKeepHeavierCompetingFork(
+                         true, tip->nHeight,
+                         state->pindexLastCommonBlock != nullptr
+                             ? state->pindexLastCommonBlock->nHeight
+                             : pindex->nHeight))};
                 if (!heavier_fork_hole) {
                     continue;
                 }
