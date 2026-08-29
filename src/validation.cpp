@@ -11778,6 +11778,23 @@ bool ChainstateManager::AcquisitionEscapeActive(const CBlockIndex* candidate) co
     return m_acquisition_exempt_towers.count(fork->GetBlockHash()) != 0;
 }
 
+bool ChainstateManager::AcquisitionEscapeCoversBlock(const CBlockIndex* index) const
+{
+    AssertLockHeld(::cs_main);
+    if (index == nullptr || m_active_chainstate == nullptr) return false;
+    if (m_acquisition_exempt_towers.empty()) return false;
+    if (!AcquisitionTipIsStale()) return false;
+    // A block already on our active chain is not "being acquired".
+    if (m_active_chainstate->m_chain.Contains(index)) return false;
+    // The block's fork root (LCA with the active chain) must be an exempt
+    // tower root. This is true for every ancestor of the acquired tower tip,
+    // regardless of the individual block's own work -- so a low mid-tower body
+    // is covered even though it is below the minority tip in chainwork.
+    const CBlockIndex* const fork{m_active_chainstate->m_chain.FindFork(index)};
+    if (fork == nullptr) return false;
+    return m_acquisition_exempt_towers.count(fork->GetBlockHash()) != 0;
+}
+
 bool ChainstateManager::AcquisitionEscapeMayAcquireHeavierFork(
     const CBlockIndex* candidate)
 {

@@ -1888,6 +1888,17 @@ public:
     //! Read-only: is `candidate`'s tower currently under acquisition escape?
     [[nodiscard]] bool AcquisitionEscapeActive(const CBlockIndex* candidate) const
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+    //! Read-only: does an ACTIVE acquisition-escape exempt tower COVER this
+    //! block (the block sits on that heavier competing fork we are deliberately
+    //! acquiring while stale-stuck)? Unlike AcquisitionEscapeActive this does
+    //! NOT require the block itself to out-work the tip -- a low mid-tower body
+    //! is below the minority tip in work but must still be ExactReplay-admitted.
+    //! Used to ADMIT ExactReplay (bypass the parked-branch veto and the
+    //! competing-body budget deferral) for the tower we are acquiring; bounded
+    //! by the same <=2 towers + stuck-state gate. Migration stays park/
+    //! deepforkautoresolve-gated; a fake tower's bodies fail ExactReplay.
+    [[nodiscard]] bool AcquisitionEscapeCoversBlock(const CBlockIndex* index) const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
     /**
      * LOCAL POLICY (-deepforkautoresolve): may this node auto-migrate to a
      * DEEP (> park_depth) strictly-heavier competing fork because network

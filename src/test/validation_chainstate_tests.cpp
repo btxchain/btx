@@ -5441,6 +5441,16 @@ BOOST_FIXTURE_TEST_CASE(rb16_acquisition_escape_valve, TestChain100Setup)
         // idempotent re-register
         BOOST_CHECK(chainman.AcquisitionEscapeMayAcquireHeavierFork(b_tip));
 
+        // RB-16 ExactReplay admission: every block ON the acquired tower is
+        // COVERED so its ExactReplay is admitted (not budget-deferred / not
+        // parked-vetoed), even a LOW mid-tower body below the minority tip in
+        // work -- which AcquisitionEscapeActive (strictly-heavier) rejects.
+        BOOST_CHECK(chainman.AcquisitionEscapeCoversBlock(b_tip));
+        BOOST_CHECK(chainman.AcquisitionEscapeCoversBlock(b.front()));
+        BOOST_CHECK(!chainman.AcquisitionEscapeActive(b.front())); // below tip work
+        // A block on our own active chain is never "being acquired".
+        BOOST_CHECK(!chainman.AcquisitionEscapeCoversBlock(a_tip));
+
         // (5) equal/less-work never triggers: A's own tip is not heavier.
         BOOST_CHECK(!chainman.AcquisitionEscapeMayAcquireHeavierFork(a_tip));
 

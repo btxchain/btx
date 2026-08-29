@@ -4840,8 +4840,20 @@ static bool TrustedMirrorMayDownloadIndex(
     EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
     if (tip == nullptr || index == nullptr) return false;
-    if (chainman.IsOnParkedReorgBranch(index)) return false;
+    // RB-16: a body on the heavier competing tower we are actively ACQUIRING
+    // (stale-stuck, bounded <=2 exempt towers) must be ExactReplay-admitted --
+    // acquisition means fetch + VALIDATE. This bypasses the parked-branch veto
+    // (a previously-parked tower we are now deliberately acquiring). Trusted
+    // mirrors still never P2P ExactReplay. Migration stays park/
+    // deepforkautoresolve-gated; a fake tower's bodies fail ExactReplay and are
+    // re-parked; RB-6 GPU budget still bounds the work.
+    if (chainman.IsOnParkedReorgBranch(index) &&
+        !chainman.AcquisitionEscapeCoversBlock(index)) return false;
     if (node::matmul_trusted::IsTrustedMirror()) return false;
+    if (chainman.AcquisitionEscapeCoversBlock(index)) {
+        g_configured_claimed_tip_child = index->GetBlockHash();
+        return true;
+    }
     // Live 2026-08-20: local-signer ExactReplay required pprev==tip, so the
     // attested equal-work sibling (LCA+1) was HEADER_ONLY-skipped and the
     // node sat inflight=0 / GPU 0% for 45+ minutes.
@@ -12622,6 +12634,20 @@ void PeerManagerImpl::ProcessBlock(CNode& node, const std::shared_ptr<const CBlo
                 m_chainman, *block,
                 force_processing || is_retained_retry ||
                     matmul_admission.retain_as_requested);
+            // RB-16: a body on the heavier competing tower we are ACQUIRING is
+            // not the tip-child, so it is not an authenticated-chain-progress
+            // candidate and would be budget-DEFERRED as an ordinary competing
+            // body -> never validated -> migration never proceeds. Admit it to
+            // the progress lane (bounded by the same <=2 towers + stuck gate +
+            // RB-6 GPU budget) so the acquired chain actually ExactReplays.
+            if (!progress_lane) {
+                const CBlockIndex* const bidx{
+                    m_chainman.m_blockman.LookupBlockIndex(hash)};
+                if (bidx != nullptr &&
+                    m_chainman.AcquisitionEscapeCoversBlock(bidx)) {
+                    progress_lane = true;
+                }
+            }
         }
         if (ConsumeMatMulVerificationBudgetForPeer(
                 *peer, node.nKeyedNetGroup,
