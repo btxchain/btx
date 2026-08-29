@@ -24,23 +24,48 @@ namespace node {
  *
  * Use the connected tip when best_header is behind it, or on a competing
  * fork that is not strictly heavier. Keep a HEADER_ONLY suffix that
- * already extends the tip so we still ask for tip+N+1. A heavier valid
- * disconnected fork above the tip is the locator origin (jarekpiot:
- * chasing 0d5ffded@199398 must not restart at the losing connected tip).
+ * already extends the tip so we still ask for tip+N+1.
+ *
+ * A short heavier disconnected fork (lead ≤ HEADER_SYNC_SHORT_COMPETING_LOCATOR_LEAD)
+ * is still the locator origin (jarekpiot: chasing 0d5ffded@199398 must not
+ * restart at the losing connected tip). A long HEADER_ONLY competing
+ * tower (live rtx6000 2026-08-29: tip 199385, m_best_header 199801 on
+ * withdrawn 33c834f8) must not be: locators from that tower never learn
+ * tip-extending headers from peers advertising above us, so BestKnown
+ * stays at the frozen tip and FindNextBlocks reports already_at_peer_best.
  */
+inline constexpr int HEADER_SYNC_SHORT_COMPETING_LOCATOR_LEAD{6};
+
+[[nodiscard]] inline bool HeaderSyncChaseHeavierCompetingLocator(
+    bool extends_active_tip,
+    bool heavier,
+    int32_t best_header_height,
+    int32_t tip_height)
+{
+    if (extends_active_tip || !heavier) return false;
+    if (best_header_height <= tip_height) return false;
+    return (best_header_height - tip_height) <=
+           HEADER_SYNC_SHORT_COMPETING_LOCATOR_LEAD;
+}
+
 [[nodiscard]] inline const CBlockIndex* HeaderSyncLocatorStart(
     const CBlockIndex* best_header, const CBlockIndex* active_tip)
 {
     if (active_tip == nullptr) return best_header;
     if (best_header == nullptr) return active_tip;
-    if (best_header->nHeight >= active_tip->nHeight &&
-        best_header->GetAncestor(active_tip->nHeight) == active_tip) {
+    const bool extends_tip{
+        best_header->nHeight >= active_tip->nHeight &&
+        best_header->GetAncestor(active_tip->nHeight) == active_tip};
+    if (extends_tip) {
         return best_header;
     }
     if (best_header->nHeight < active_tip->nHeight) {
         return active_tip;
     }
-    if (best_header->nChainWork > active_tip->nChainWork) {
+    if (HeaderSyncChaseHeavierCompetingLocator(
+            /*extends_active_tip=*/false,
+            best_header->nChainWork > active_tip->nChainWork,
+            best_header->nHeight, active_tip->nHeight)) {
         return best_header;
     }
     return active_tip;

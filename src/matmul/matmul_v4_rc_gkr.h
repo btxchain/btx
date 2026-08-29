@@ -1073,6 +1073,11 @@ inline constexpr uint32_t kRCExactReplayMaxAdjudicationAttempts{2};
 /** Process startup configuration. Set before validation workers start. */
 void SetRCExactReplayExecutionPolicy(RCExactReplayExecutionPolicy policy);
 [[nodiscard]] RCExactReplayExecutionPolicy GetRCExactReplayExecutionPolicy();
+/** Operator -allowunverifiablematmulconsensus: still ExactReplay catch-up
+ *  when the device missed the production canary. Mining / NODE_MATMUL_CONSENSUS
+ *  stay fail-closed. Default off. */
+void SetRCExactReplayAllowUnverifiableCatchUp(bool allow);
+[[nodiscard]] bool GetRCExactReplayAllowUnverifiableCatchUp();
 [[nodiscard]] const char* RCExactReplayExecutionPolicyName(
     RCExactReplayExecutionPolicy policy);
 [[nodiscard]] const char* ExactReplayVerifyOutcomeName(

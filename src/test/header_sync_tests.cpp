@@ -66,6 +66,51 @@ BOOST_AUTO_TEST_CASE(locator_start_chases_heavier_disconnected_fork)
     BOOST_CHECK_EQUAL(node::HeaderSyncLocatorStart(&lighter, &tip), &tip);
 }
 
+BOOST_AUTO_TEST_CASE(locator_start_does_not_chase_long_competing_header_tower)
+{
+    // Direct predicate: live rtx6000 2026-08-29 tip 199385 vs m_best_header
+    // 199801 on withdrawn 33c834f8 (lead 416).
+    BOOST_CHECK(!node::HeaderSyncChaseHeavierCompetingLocator(
+        /*extends_active_tip=*/false, /*heavier=*/true, 199801, 199385));
+    BOOST_CHECK(node::HeaderSyncChaseHeavierCompetingLocator(
+        false, true, 11, 10));
+    BOOST_CHECK(!node::HeaderSyncChaseHeavierCompetingLocator(
+        /*extends_active_tip=*/true, true, 199801, 199385));
+    BOOST_CHECK(!node::HeaderSyncChaseHeavierCompetingLocator(
+        false, /*heavier=*/false, 11, 10));
+
+    CBlockIndex tip;
+    tip.nHeight = 10;
+    tip.nChainWork = arith_uint256{1};
+    CBlockIndex other_parent;
+    other_parent.nHeight = 10;
+    other_parent.nChainWork = arith_uint256{1};
+
+    // Contiguous competing fork so GetAncestor(tip) walks pprev, not a skip.
+    CBlockIndex fork[8];
+    CBlockIndex* prev{&other_parent};
+    arith_uint256 work{2};
+    for (int i = 0; i < 8; ++i) {
+        fork[i].nHeight = 11 + i;
+        fork[i].pprev = prev;
+        fork[i].nChainWork = work;
+        work += 1;
+        prev = &fork[i];
+    }
+    BOOST_CHECK_EQUAL(fork[5].GetAncestor(10), &other_parent);
+    BOOST_CHECK(fork[5].GetAncestor(10) != &tip);
+    BOOST_CHECK_EQUAL(
+        fork[5].nHeight - tip.nHeight,
+        node::HEADER_SYNC_SHORT_COMPETING_LOCATOR_LEAD);
+    BOOST_CHECK_EQUAL(node::HeaderSyncLocatorStart(&fork[5], &tip), &fork[5]);
+
+    BOOST_CHECK_EQUAL(
+        fork[6].nHeight - tip.nHeight,
+        node::HEADER_SYNC_SHORT_COMPETING_LOCATOR_LEAD + 1);
+    BOOST_CHECK_EQUAL(node::HeaderSyncLocatorStart(&fork[6], &tip), &tip);
+    BOOST_CHECK_EQUAL(node::HeaderSyncLocatorStart(&fork[7], &tip), &tip);
+}
+
 BOOST_AUTO_TEST_CASE(must_probe_table)
 {
     // starting > tip, BestKnown null

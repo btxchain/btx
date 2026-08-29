@@ -40,6 +40,7 @@ namespace matmul::v4::rc {
 namespace {
 std::atomic<RCExactReplayExecutionPolicy> g_exact_replay_execution_policy{
     RCExactReplayExecutionPolicy::AutoFallback};
+std::atomic<bool> g_allow_unverifiable_catchup_replay{false};
 std::mutex g_last_exact_replay_mutex;
 std::optional<ExactReplayVerifyResult> g_last_exact_replay;
 std::mutex g_exact_replay_provider_health_mutex;
@@ -136,6 +137,44 @@ void EnforceStrictProductionEligibility(
     acceleration.gemm = {};
 }
 
+enum class ProductionGateAction {
+    Pass,
+    UnverifiableDevice,
+    UnverifiableCpu,
+    ZeroGemm,
+};
+
+ProductionGateAction ApplyStrictProductionEligibilityGate(
+    RCExactReplayAcceleration& acceleration,
+    const bool production_eligible,
+    const bool production_gate_required,
+    std::string& resolution_reason)
+{
+    if (!acceleration.require_device || production_eligible ||
+        !production_gate_required) {
+        return ProductionGateAction::Pass;
+    }
+    if (g_allow_unverifiable_catchup_replay.load(std::memory_order_acquire)) {
+        if (acceleration.gemm.gemm_s8s8 != nullptr) {
+            // Catch-up ExactReplay on the available device. The CUDA
+            // digest buffer pool is lazy: the first GEMM call initializes
+            // it. Zeroing the GEMM here left digest_requests=0 and
+            // buffer_pool_uninitialized (live rtx6000 2026-08-29).
+            resolution_reason += ":unverifiable_catchup_replay";
+            return ProductionGateAction::UnverifiableDevice;
+        }
+        acceleration.require_device = false;
+        acceleration.gemm = {};
+        acceleration.backend = "cpu_unverifiable_catchup";
+        resolution_reason += ":unverifiable_catchup_cpu";
+        return ProductionGateAction::UnverifiableCpu;
+    }
+    EnforceStrictProductionEligibility(
+        acceleration, production_eligible, production_gate_required);
+    resolution_reason += ":not_production_eligible";
+    return ProductionGateAction::ZeroGemm;
+}
+
 } // namespace
 
 bool RCExactReplayRequiresProductionEligibility(
@@ -182,6 +221,16 @@ void ClearRCValidatorReadinessLossNotifier()
 void SetRCExactReplayExecutionPolicy(RCExactReplayExecutionPolicy policy)
 {
     g_exact_replay_execution_policy.store(policy, std::memory_order_release);
+}
+
+void SetRCExactReplayAllowUnverifiableCatchUp(bool allow)
+{
+    g_allow_unverifiable_catchup_replay.store(allow, std::memory_order_release);
+}
+
+bool GetRCExactReplayAllowUnverifiableCatchUp()
+{
+    return g_allow_unverifiable_catchup_replay.load(std::memory_order_acquire);
 }
 
 RCExactReplayExecutionPolicy GetRCExactReplayExecutionPolicy()
@@ -283,6 +332,7 @@ void ResetRCExactReplayProviderHealthForTest()
         g_exact_replay_provider_health_mutex};
     g_exact_replay_provider_health = {};
     g_exact_replay_provider_quarantines.clear();
+    g_allow_unverifiable_catchup_replay.store(false, std::memory_order_release);
 }
 
 bool RegisterRCExactReplayAlternateProvider(
@@ -5486,30 +5536,22 @@ ExactReplayVerifyResult VerifyBoundedExactReplay(
     std::string resolution_reason{resolved.reason};
     const bool production_gate_required{
         RCExactReplayRequiresProductionEligibility(params)};
-    if (acceleration.require_device && !resolved.production_eligible &&
-        production_gate_required) {
-        // Strict consensus acceptance is the enforcement boundary, not merely
-        // a service-advertisement hint. A self-qualified device that did not
-        // match the committed production golden/startup canary must therefore
-        // remain retryable and must not authenticate chainwork. Hardware and
-        // relay campaigns use the explicit pre-activation AutoFallback mode or
-        // the injected test/harness entry point; they cannot weaken mainnet's
-        // strict path.
-        EnforceStrictProductionEligibility(
-            acceleration, resolved.production_eligible,
-            production_gate_required);
-        resolution_reason += ":not_production_eligible";
-    }
+    const auto gate{ApplyStrictProductionEligibilityGate(
+        acceleration, resolved.production_eligible, production_gate_required,
+        resolution_reason)};
     acceleration.output_row_tile = 256;
-    auto result = policy == RCExactReplayExecutionPolicy::StrictDevice
-        ? VerifyStrictWithAlternates(
-              header, params, height, target, std::move(acceleration),
-              resolution_reason)
-        : VerifyBoundedExactReplayImpl(
-              header, params, height, target, std::move(acceleration));
+    auto result =
+        (policy == RCExactReplayExecutionPolicy::StrictDevice &&
+         gate != ProductionGateAction::UnverifiableCpu)
+            ? VerifyStrictWithAlternates(
+                  header, params, height, target, std::move(acceleration),
+                  resolution_reason)
+            : VerifyBoundedExactReplayImpl(
+                  header, params, height, target, std::move(acceleration));
     result.execution_policy = policy;
     result.require_device =
-        policy == RCExactReplayExecutionPolicy::StrictDevice;
+        policy == RCExactReplayExecutionPolicy::StrictDevice &&
+        gate != ProductionGateAction::UnverifiableCpu;
     result.acceleration_resolution_reason = resolution_reason;
     {
         std::lock_guard<std::mutex> lock{
@@ -5544,14 +5586,19 @@ VerifyBoundedExactReplayWithProductionEligibilityForTest(
     bool production_eligible,
     const arith_uint256* target)
 {
-    EnforceStrictProductionEligibility(
-        acceleration, production_eligible,
-        /*production_gate_required=*/true);
-    return VerifyStrictWithAlternates(
-        header, params, height, target, std::move(acceleration),
-        production_eligible
-            ? "test_resolved_backend"
-            : "test_resolved_backend:not_production_eligible");
+    std::string reason{"test_resolved_backend"};
+    const auto gate{ApplyStrictProductionEligibilityGate(
+        acceleration, production_eligible, /*production_gate_required=*/true,
+        reason)};
+    ExactReplayVerifyResult result =
+        gate == ProductionGateAction::UnverifiableCpu
+            ? VerifyBoundedExactReplayImpl(
+                  header, params, height, target, std::move(acceleration))
+            : VerifyStrictWithAlternates(
+                  header, params, height, target, std::move(acceleration),
+                  reason);
+    result.acceleration_resolution_reason = std::move(reason);
+    return result;
 }
 
 RCProdVerifyResult VerifyRCWinnerOrExactReplay(const CBlockHeader& header,

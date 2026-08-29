@@ -1433,6 +1433,65 @@ BOOST_AUTO_TEST_CASE(rc_strict_resolver_rejects_self_qualified_nonproduction_bac
     rc::ResetRCExactReplayProviderHealthForTest();
 }
 
+BOOST_AUTO_TEST_CASE(rc_allow_unverifiable_catchup_still_exactreplays)
+{
+    // -allowunverifiablematmulconsensus must not skip ExactReplay. A canary
+    // miss used to zero the GEMM, then strict-device failed with
+    // strict_device_no_eligible_provider (live rtx6000: digest_requests=0,
+    // buffer_pool_uninitialized). Catch-up must still replay on the available
+    // GEMM, or on CPU if the device backend was gated empty.
+    rc::ClearRCExactReplayAlternateProviders();
+    rc::ResetRCExactReplayProviderHealthForTest();
+    CBlockHeader header{MakeRCHeader(0x50524f4447415445)};
+    header.matmul_dim = 64;
+    const auto params{rc::MakeToyRCEpisodeParams()};
+    header.matmul_digest =
+        rc::RecomputeResidentCurriculumReference(
+            header, params, /*height=*/0);
+
+    lt::ExactGemmBackend exact_backend;
+    exact_backend.gemm_s8s8 = &OracleGemmS8S8;
+    const rc::RCExactReplayAcceleration acceleration{
+        .gemm = exact_backend,
+        .backend = "test:self-qualified",
+        .require_device = true,
+        .output_row_tile = 16,
+    };
+
+    rc::SetRCExactReplayAllowUnverifiableCatchUp(true);
+    const auto device_catchup{
+        rc::VerifyBoundedExactReplayWithProductionEligibilityForTest(
+            header, params, /*height=*/0, acceleration,
+            /*production_eligible=*/false)};
+    BOOST_REQUIRE(device_catchup.ok);
+    BOOST_CHECK_GT(device_catchup.device_gemm_calls, 0U);
+    BOOST_CHECK_EQUAL(device_catchup.cpu_gemm_calls, 0U);
+    BOOST_CHECK(
+        device_catchup.acceleration_resolution_reason.find(
+            ":unverifiable_catchup_replay") != std::string::npos);
+
+    const rc::RCExactReplayAcceleration cpu_accel{
+        .gemm = {},
+        .backend = "test:no-device",
+        .require_device = true,
+        .output_row_tile = 16,
+    };
+    const auto cpu_catchup{
+        rc::VerifyBoundedExactReplayWithProductionEligibilityForTest(
+            header, params, /*height=*/0, cpu_accel,
+            /*production_eligible=*/false)};
+    BOOST_REQUIRE(cpu_catchup.ok);
+    BOOST_CHECK_EQUAL(cpu_catchup.device_gemm_calls, 0U);
+    BOOST_CHECK_GT(cpu_catchup.cpu_gemm_calls, 0U);
+    BOOST_CHECK(
+        cpu_catchup.acceleration_resolution_reason.find(
+            ":unverifiable_catchup_cpu") != std::string::npos);
+    BOOST_CHECK_EQUAL(cpu_catchup.acceleration_backend, "cpu_unverifiable_catchup");
+
+    rc::ResetRCExactReplayProviderHealthForTest();
+    BOOST_CHECK(!rc::GetRCExactReplayAllowUnverifiableCatchUp());
+}
+
 BOOST_AUTO_TEST_CASE(rc_execution_policy_and_last_replay_telemetry)
 {
     auto& scheduler{rc::GetRCAcceleratorScheduler()};
