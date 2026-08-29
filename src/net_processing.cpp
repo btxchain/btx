@@ -3442,10 +3442,16 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
             const CBlockIndex* const idx{
                 m_chainman.m_blockman.LookupBlockIndex(candidate_hash)};
             allow = node::matmul_trusted::ShouldRetryBudgetDeferredWhileFrontierOffChain(
-                /*frontier_off_active_chain=*/true,
-                IndexIsShortReorgAttestedForkChild(m_chainman, tip, idx),
-                m_chainman.IndexIsOnSignedFrontierChain(idx),
-                IndexIsFollowedTipChild(m_chainman, tip, idx));
+                        /*frontier_off_active_chain=*/true,
+                        IndexIsShortReorgAttestedForkChild(m_chainman, tip, idx),
+                        m_chainman.IndexIsOnSignedFrontierChain(idx),
+                        IndexIsFollowedTipChild(m_chainman, tip, idx))
+                    // RB-16: a retained body on the tower we are acquiring must
+                    // be re-driven, not fossilized on the 10-min off-frontier
+                    // retry -- otherwise a covered body that momentarily lost
+                    // the RC slot race never gets re-admitted.
+                    || (idx != nullptr &&
+                        m_chainman.AcquisitionEscapeCoversBlock(idx));
         }
         if (!allow) {
             if (m_matmul_block_lifecycle.RefreshRetry(
@@ -13780,11 +13786,26 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
         return true;
     }
     bool direct_authenticated_tip_child{false};
+    // RB-16: set when this body sits on the heavier competing tower we are
+    // actively ACQUIRING (stale-stuck). Such a body is not a tip-child, so
+    // without this it takes the competing RC lane; with the default RC cap=1
+    // that lane has zero capacity, ReserveMatMulRCVerificationSlot fails, and
+    // the body RETAINs forever -- never reaching the GPU throttle that already
+    // admits it (live rtx6000: 36MB fetched, deferred=41, GPU 0%, tip stuck).
+    // Giving it the reserved (progress) lane lets the acquired suffix
+    // ExactReplay. Migration stays park/deepforkautoresolve-gated; the tower
+    // set is bounded (<=2) and RB-6 GPU budget still bounds the work.
+    bool acquisition_covered{false};
     if (rc_profile && exact_encdr_profile &&
         m_matmul_verify_worker) {
         {
             LOCK(cs_main);
             const CBlockIndex* active_tip{m_chainman.ActiveTip()};
+            const CBlockIndex* const covered_index{
+                m_chainman.m_blockman.LookupBlockIndex(block_hash)};
+            acquisition_covered =
+                covered_index != nullptr &&
+                m_chainman.AcquisitionEscapeCoversBlock(covered_index);
             // A direct child of the active tip is the followed chain by
             // definition: every connected ancestor already passed PoW,
             // ExactReplay and script validation. Requiring the tip's
@@ -14110,7 +14131,8 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
     const bool reserved = rc_profile
         ? ReserveMatMulRCVerificationSlot(m_matmul_rc_pending_verifications, params,
                                           exact_reference_height, work,
-                                          direct_authenticated_tip_child)
+                                          direct_authenticated_tip_child ||
+                                              acquisition_covered)
         : ReserveMatMulVerificationSlot(m_matmul_pending_verifications, params,
                                         exact_reference_height, work);
     if (!reserved) {
