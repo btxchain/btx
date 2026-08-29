@@ -1549,6 +1549,10 @@ public:
     std::atomic<int32_t> m_best_followed_header_height{-1};
     uint32_t m_invalid_marks_cleared_on_upgrade{0};
     uint32_t m_compiled_validation_epoch{BLOCK_VALIDATION_EPOCH};
+    //! 0 means the production default (512). Tests set 1 to force a
+    //! checkpoint after every re-checked block (SF-14).
+    size_t m_epoch_heal_recheck_batch_for_test{0};
+    bool m_epoch_heal_abort_after_checkpoint_for_test{false};
     //! When true, IsMatMulRecomputeAssumeValidTrusted is false. Epoch
     //! revalidation must not honor buried-recompute trust for blocks the
     //! previous binary rejected.
@@ -2284,8 +2288,9 @@ public:
      * marks on the heaviest data-backed lineage, re-run CheckBlockHeader /
      * ContextualCheckBlockHeader and (when BLOCK_HAVE_DATA) CheckBlock /
      * ContextualCheckBlock with assumevalid trust disabled, remake genuine
-     * invalids, and persist nStatus + epoch + parked roots in one block-tree
-     * batch. Parked deep-reorg branches are never unparked here; only
+     * invalids, and persist nStatus + epoch + parked roots. Progress is
+     * checkpointed by height so a crash does not redo already-rechecked
+     * blocks. Parked deep-reorg branches are never unparked here; only
      * UnparkReorgBranchContainingBlock / reorg-recovery may drop a park.
      * ConnectBlock does not re-run ContextualCheck*; a flags-only clear
      * would accept a block the old binary rejected for ExactReplay/ASERT.
@@ -2297,6 +2302,14 @@ public:
     void SetCompiledValidationEpochForTest(uint32_t epoch)
     {
         m_compiled_validation_epoch = epoch;
+    }
+    void SetEpochHealRecheckBatchForTest(size_t n)
+    {
+        m_epoch_heal_recheck_batch_for_test = n;
+    }
+    void SetEpochHealAbortAfterCheckpointForTest(bool abort_after)
+    {
+        m_epoch_heal_abort_after_checkpoint_for_test = abort_after;
     }
     [[nodiscard]] uint32_t InvalidMarksClearedOnUpgrade() const
     {

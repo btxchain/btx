@@ -17629,18 +17629,28 @@ bool ChainstateManager::MaybeClearStaleInvalidMarksForValidationEpoch()
     uint32_t stored{0};
     const bool have_stored{
         m_blockman.m_block_tree_db->ReadValidationEpoch(stored)};
+    uint32_t watermark{0};
+    if (!m_blockman.m_block_tree_db->ReadValidationEpochHealWatermark(watermark)) {
+        LogError("%s: failed to read validation-epoch heal watermark\n", __func__);
+        return false;
+    }
     if (!pending && have_stored && stored >= m_compiled_validation_epoch) {
         return true;
     }
-    if (pending && have_stored && stored >= m_compiled_validation_epoch) {
-        return m_blockman.m_block_tree_db->WriteValidationEpochPending(false);
+    // pending && stored >= compiled is a crash-resume, not "done". Keep
+    // pending and skip already-checkpointed heights (SF-14).
+    if (!(pending && have_stored && stored >= m_compiled_validation_epoch)) {
+        if (!m_blockman.m_block_tree_db->WriteValidationEpochPending(true)) {
+            LogError("%s: failed to persist validation-epoch pending marker "
+                     "(stored_epoch=%u compiled_epoch=%u)\n",
+                     __func__, stored, m_compiled_validation_epoch);
+            return false;
+        }
     }
-
-    if (!m_blockman.m_block_tree_db->WriteValidationEpochPending(true)) {
-        LogError("%s: failed to persist validation-epoch pending marker "
-                 "(stored_epoch=%u compiled_epoch=%u)\n",
-                 __func__, stored, m_compiled_validation_epoch);
-        return false;
+    if (watermark > 0) {
+        LogPrintf("%s: resuming validation-epoch heal from height %u "
+                  "(stored_epoch=%u compiled_epoch=%u)\n",
+                  __func__, watermark, stored, m_compiled_validation_epoch);
     }
 
     // Walking pprev to genesis per index is O(n*height) and can stall
@@ -17699,17 +17709,13 @@ bool ChainstateManager::MaybeClearStaleInvalidMarksForValidationEpoch()
             best_work->GetAncestor(block_index.nHeight) != &block_index) {
             continue;
         }
-        block_index.nStatus &= ~BLOCK_FAILED_MASK;
-        m_blockman.m_dirty_blockindex.insert(&block_index);
-        m_failed_blocks.erase(&block_index);
+        if (block_index.nHeight <= static_cast<int>(watermark)) {
+            continue;
+        }
         to_revalidate.push_back(&block_index);
-        LogPrintf("%s: clearing failure flags for block %s at height=%d "
-                  "validation-epoch upgrade\n",
-                  __func__, block_index.GetBlockHash().ToString(),
-                  block_index.nHeight);
     }
     m_best_invalid = nullptr;
-    m_invalid_marks_cleared_on_upgrade = static_cast<uint32_t>(to_revalidate.size());
+    m_invalid_marks_cleared_on_upgrade = 0;
 
     std::sort(to_revalidate.begin(), to_revalidate.end(),
               node::CBlockIndexHeightOnlyComparator{});
@@ -17747,73 +17753,103 @@ bool ChainstateManager::MaybeClearStaleInvalidMarksForValidationEpoch()
     UntrustedEpochRevalidation untrusted{*this};
 
     uint32_t remade{0};
-    for (CBlockIndex* pindex : to_revalidate) {
+    const size_t batch_n{
+        m_epoch_heal_recheck_batch_for_test > 0 ? m_epoch_heal_recheck_batch_for_test
+                                                : size_t{512}};
+    auto persist_checkpoint = [&](uint32_t wm) -> bool {
+        const std::optional<uint32_t> wm_opt{wm};
+        return m_blockman.WriteBlockIndexDB(m_compiled_validation_epoch,
+                                            /*validation_epoch_pending=*/true,
+                                            &m_parked_reorg_branch_roots,
+                                            &wm_opt);
+    };
+    for (size_t offset = 0; offset < to_revalidate.size();) {
         if (m_interrupt) return false;
-        if (pindex->nStatus & BLOCK_FAILED_MASK) continue;
+        const size_t end{std::min(offset + batch_n, to_revalidate.size())};
+        uint32_t batch_last_height{watermark};
+        for (size_t i = offset; i < end; ++i) {
+            CBlockIndex* pindex = to_revalidate[i];
+            pindex->nStatus &= ~BLOCK_FAILED_MASK;
+            m_blockman.m_dirty_blockindex.insert(pindex);
+            m_failed_blocks.erase(pindex);
+            ++m_invalid_marks_cleared_on_upgrade;
+            LogPrintf("%s: clearing failure flags for block %s at height=%d "
+                      "validation-epoch upgrade\n",
+                      __func__, pindex->GetBlockHash().ToString(),
+                      pindex->nHeight);
+            batch_last_height = static_cast<uint32_t>(std::max(pindex->nHeight, 0));
 
-        const CBlockHeader header{pindex->GetBlockHeader()};
-        BlockValidationState header_state;
-        if (!CheckBlockHeader(header, header_state, GetConsensus()) ||
-            (pindex->pprev != nullptr &&
-             !ContextualCheckBlockHeader(header, header_state, m_blockman, *this,
-                                         pindex->pprev))) {
-            LogWarning("%s: re-marked %s height=%d after header re-check (%s)\n",
-                       __func__, pindex->GetBlockHash().ToString(), pindex->nHeight,
-                       header_state.ToString());
-            mark_failed_valid(pindex);
-            ++remade;
-            continue;
-        }
-
-        if ((pindex->nStatus & BLOCK_HAVE_DATA) == 0) continue;
-        // Provider-less / quorum-pending startup is retryable. ConnectTip
-        // already retries ExactReplay; permanently re-poisoning here made
-        // every CPU-only / early-boot heal a one-way trap (SF-11).
-        if (m_active_chainstate == nullptr) {
-            LogWarning("%s: deferred body re-check for %s height=%d "
-                       "(no chainstate yet); ConnectTip retries\n",
-                       __func__, pindex->GetBlockHash().ToString(), pindex->nHeight);
-            continue;
-        }
-        CBlock block;
-        BlockValidationState body_state;
-        if (ConsumeRetryableMatMulConnectFailureForTest(body_state)) {
-            LogWarning("%s: deferred body re-check for %s height=%d (%s); "
-                       "ConnectTip retries\n",
-                       __func__, pindex->GetBlockHash().ToString(), pindex->nHeight,
-                       body_state.ToString());
-            continue;
-        }
-        if (!ReadShieldedRebuildBlock(*m_active_chainstate, *pindex, block)) {
-            LogWarning("%s: deferred body re-check for %s height=%d "
-                       "(body unreadable at startup); ConnectTip retries\n",
-                       __func__, pindex->GetBlockHash().ToString(), pindex->nHeight);
-            continue;
-        }
-        if (!CheckBlock(block, body_state, GetConsensus())) {
-            LogWarning("%s: re-marked %s height=%d after body re-check (%s)\n",
-                       __func__, pindex->GetBlockHash().ToString(), pindex->nHeight,
-                       body_state.ToString());
-            mark_failed_valid(pindex);
-            ++remade;
-            continue;
-        }
-        if (!ContextualCheckBlock(block, body_state, *this, pindex->pprev,
-                                  /*fCheckPOW=*/true,
-                                  /*may_release_cs_main=*/true)) {
-            if (body_state.IsError()) {
-                LogWarning("%s: deferred body re-check for %s height=%d (%s); "
-                           "ConnectTip retries\n",
-                           __func__, pindex->GetBlockHash().ToString(),
-                           pindex->nHeight, body_state.ToString());
-                continue;
+            const CBlockHeader header{pindex->GetBlockHeader()};
+            BlockValidationState header_state;
+            if (!CheckBlockHeader(header, header_state, GetConsensus()) ||
+                (pindex->pprev != nullptr &&
+                 !ContextualCheckBlockHeader(header, header_state, m_blockman, *this,
+                                             pindex->pprev))) {
+                LogWarning("%s: re-marked %s height=%d after header re-check (%s)\n",
+                           __func__, pindex->GetBlockHash().ToString(), pindex->nHeight,
+                           header_state.ToString());
+                mark_failed_valid(pindex);
+                ++remade;
+            } else if ((pindex->nStatus & BLOCK_HAVE_DATA) != 0) {
+                // Provider-less / quorum-pending startup is retryable. ConnectTip
+                // already retries ExactReplay; permanently re-poisoning here made
+                // every CPU-only / early-boot heal a one-way trap (SF-11).
+                if (m_active_chainstate == nullptr) {
+                    LogWarning("%s: deferred body re-check for %s height=%d "
+                               "(no chainstate yet); ConnectTip retries\n",
+                               __func__, pindex->GetBlockHash().ToString(),
+                               pindex->nHeight);
+                } else {
+                    CBlock block;
+                    BlockValidationState body_state;
+                    if (ConsumeRetryableMatMulConnectFailureForTest(body_state)) {
+                        LogWarning("%s: deferred body re-check for %s height=%d (%s); "
+                                   "ConnectTip retries\n",
+                                   __func__, pindex->GetBlockHash().ToString(),
+                                   pindex->nHeight, body_state.ToString());
+                    } else if (!ReadShieldedRebuildBlock(*m_active_chainstate, *pindex, block)) {
+                        LogWarning("%s: deferred body re-check for %s height=%d "
+                                   "(body unreadable at startup); ConnectTip retries\n",
+                                   __func__, pindex->GetBlockHash().ToString(),
+                                   pindex->nHeight);
+                    } else if (!CheckBlock(block, body_state, GetConsensus())) {
+                        LogWarning("%s: re-marked %s height=%d after body re-check (%s)\n",
+                                   __func__, pindex->GetBlockHash().ToString(),
+                                   pindex->nHeight, body_state.ToString());
+                        mark_failed_valid(pindex);
+                        ++remade;
+                    } else if (!ContextualCheckBlock(block, body_state, *this, pindex->pprev,
+                                                     /*fCheckPOW=*/true,
+                                                     /*may_release_cs_main=*/true)) {
+                        if (body_state.IsError()) {
+                            LogWarning("%s: deferred body re-check for %s height=%d (%s); "
+                                       "ConnectTip retries\n",
+                                       __func__, pindex->GetBlockHash().ToString(),
+                                       pindex->nHeight, body_state.ToString());
+                        } else {
+                            LogWarning("%s: re-marked %s height=%d after body re-check (%s)\n",
+                                       __func__, pindex->GetBlockHash().ToString(),
+                                       pindex->nHeight, body_state.ToString());
+                            mark_failed_valid(pindex);
+                            ++remade;
+                        }
+                    }
+                }
             }
-            LogWarning("%s: re-marked %s height=%d after body re-check (%s)\n",
-                       __func__, pindex->GetBlockHash().ToString(), pindex->nHeight,
-                       body_state.ToString());
-            mark_failed_valid(pindex);
-            ++remade;
+            if (m_interrupt) {
+                if (!persist_checkpoint(batch_last_height)) return false;
+                return false;
+            }
         }
+        if (!persist_checkpoint(batch_last_height)) return false;
+        watermark = batch_last_height;
+        if (m_epoch_heal_abort_after_checkpoint_for_test) {
+            m_epoch_heal_abort_after_checkpoint_for_test = false;
+            LogWarning("%s: aborting epoch heal after checkpoint height=%u (test)\n",
+                       __func__, watermark);
+            return false;
+        }
+        offset = end;
     }
 
     m_failed_blocks.clear();
@@ -17870,9 +17906,11 @@ bool ChainstateManager::MaybeClearStaleInvalidMarksForValidationEpoch()
         }
     }
 
+    const std::optional<uint32_t> erase_watermark{std::nullopt};
     if (!m_blockman.WriteBlockIndexDB(m_compiled_validation_epoch,
                                       /*validation_epoch_pending=*/false,
-                                      &m_parked_reorg_branch_roots)) {
+                                      &m_parked_reorg_branch_roots,
+                                      &erase_watermark)) {
         LogError("%s: failed to persist epoch-%u revalidation "
                  "(stored_epoch=%u cleared=%u remade=%u)\n",
                  __func__, m_compiled_validation_epoch, stored,

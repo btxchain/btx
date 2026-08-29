@@ -4858,4 +4858,93 @@ BOOST_FIXTURE_TEST_CASE(validation_epoch_does_not_unpark_protected_branch, TestC
     }
 }
 
+BOOST_FIXTURE_TEST_CASE(validation_epoch_resume_skips_watermarked_heights, TestChain100Setup)
+{
+    // SF-14: a checkpointed heal must not re-touch heights <= watermark.
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    Chainstate& chainstate = chainman.ActiveChainstate();
+
+    CBlockIndex* below{nullptr};
+    CBlockIndex* above{nullptr};
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainstate.m_chain.Height() >= 80);
+        below = chainstate.m_chain[40];
+        above = chainstate.m_chain[80];
+        BOOST_REQUIRE(below && above);
+        for (CBlockIndex* pindex : {below, above}) {
+            pindex->nStatus &= ~(BLOCK_HAVE_UNDO | BLOCK_MANUALLY_INVALIDATED |
+                                 BLOCK_FAILED_MASK);
+            pindex->nStatus |= BLOCK_FAILED_VALID;
+            chainman.m_failed_blocks.insert(pindex);
+        }
+        const uint32_t compiled{chainman.GetBlockValidationEpoch()};
+        BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->WriteValidationEpoch(compiled));
+        BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->WriteValidationEpochPending(true));
+        BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->WriteValidationEpochHealWatermark(
+            static_cast<uint32_t>(below->nHeight)));
+        BOOST_REQUIRE(chainman.MaybeClearStaleInvalidMarksForValidationEpoch());
+        BOOST_CHECK(below->nStatus & BLOCK_FAILED_MASK);
+        BOOST_CHECK_EQUAL(above->nStatus & BLOCK_FAILED_MASK, 0U);
+        bool pending{true};
+        BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->ReadValidationEpochPending(pending));
+        BOOST_CHECK(!pending);
+        uint32_t wm{99};
+        BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->ReadValidationEpochHealWatermark(wm));
+        BOOST_CHECK_EQUAL(wm, 0U);
+        uint32_t stored{0};
+        BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->ReadValidationEpoch(stored));
+        BOOST_CHECK_EQUAL(stored, compiled);
+    }
+}
+
+BOOST_FIXTURE_TEST_CASE(validation_epoch_resumes_after_checkpoint_abort, TestChain100Setup)
+{
+    // SF-14: abort after the first batch, then resume from that height
+    // instead of re-walking the whole chain.
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    Chainstate& chainstate = chainman.ActiveChainstate();
+    chainman.SetEpochHealRecheckBatchForTest(1);
+
+    CBlockIndex* first{nullptr};
+    CBlockIndex* second{nullptr};
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE(chainstate.m_chain.Height() >= 80);
+        first = chainstate.m_chain[40];
+        second = chainstate.m_chain[80];
+        BOOST_REQUIRE(first && second);
+        for (CBlockIndex* pindex : {first, second}) {
+            pindex->nStatus &= ~(BLOCK_HAVE_UNDO | BLOCK_MANUALLY_INVALIDATED |
+                                 BLOCK_FAILED_MASK);
+            pindex->nStatus |= BLOCK_FAILED_VALID;
+            chainman.m_failed_blocks.insert(pindex);
+        }
+        BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->WriteValidationEpoch(0));
+        chainman.SetEpochHealAbortAfterCheckpointForTest(true);
+        BOOST_CHECK(!chainman.MaybeClearStaleInvalidMarksForValidationEpoch());
+        BOOST_CHECK_EQUAL(first->nStatus & BLOCK_FAILED_MASK, 0U);
+        BOOST_CHECK(second->nStatus & BLOCK_FAILED_MASK);
+        uint32_t wm{0};
+        BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->ReadValidationEpochHealWatermark(wm));
+        BOOST_CHECK_EQUAL(wm, static_cast<uint32_t>(first->nHeight));
+        bool pending{false};
+        BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->ReadValidationEpochPending(pending));
+        BOOST_CHECK(pending);
+        uint32_t stored{0};
+        BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->ReadValidationEpoch(stored));
+        BOOST_CHECK_EQUAL(stored, chainman.GetBlockValidationEpoch());
+        {
+            ASSERT_DEBUG_LOG("resuming validation-epoch heal from height");
+            BOOST_REQUIRE(chainman.MaybeClearStaleInvalidMarksForValidationEpoch());
+        }
+        BOOST_CHECK_EQUAL(first->nStatus & BLOCK_FAILED_MASK, 0U);
+        BOOST_CHECK_EQUAL(second->nStatus & BLOCK_FAILED_MASK, 0U);
+        BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->ReadValidationEpochPending(pending));
+        BOOST_CHECK(!pending);
+        BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->ReadValidationEpochHealWatermark(wm));
+        BOOST_CHECK_EQUAL(wm, 0U);
+    }
+}
+
 BOOST_AUTO_TEST_SUITE_END()

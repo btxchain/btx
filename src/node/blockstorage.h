@@ -90,7 +90,7 @@ class BlockTreeDB : public CDBWrapper
 {
 public:
     using CDBWrapper::CDBWrapper;
-    bool WriteBatchSync(const std::vector<std::pair<int, const CBlockFileInfo*>>& fileInfo, int nLastFile, const std::vector<const CBlockIndex*>& blockinfo, const std::unordered_map<std::string, node::PruneLockInfo>& prune_locks, const std::optional<uint256>& matmul_replay_context = std::nullopt, const std::optional<uint32_t>& validation_epoch = std::nullopt, const std::optional<bool>& validation_epoch_pending = std::nullopt, const std::set<uint256>* parked_reorg_branches = nullptr);
+    bool WriteBatchSync(const std::vector<std::pair<int, const CBlockFileInfo*>>& fileInfo, int nLastFile, const std::vector<const CBlockIndex*>& blockinfo, const std::unordered_map<std::string, node::PruneLockInfo>& prune_locks, const std::optional<uint256>& matmul_replay_context = std::nullopt, const std::optional<uint32_t>& validation_epoch = std::nullopt, const std::optional<bool>& validation_epoch_pending = std::nullopt, const std::set<uint256>* parked_reorg_branches = nullptr, const std::optional<uint32_t>* validation_epoch_heal_watermark = nullptr);
     bool ReadBlockFileInfo(int nFile, CBlockFileInfo& info);
     bool ReadLastBlockFile(int& nFile);
     bool WriteReindexing(
@@ -108,6 +108,8 @@ public:
     bool ReadValidationEpoch(uint32_t& epoch);
     bool WriteValidationEpochPending(bool pending);
     bool ReadValidationEpochPending(bool& pending);
+    bool WriteValidationEpochHealWatermark(std::optional<uint32_t> height);
+    bool ReadValidationEpochHealWatermark(uint32_t& height);
     bool WriteFlag(const std::string& name, bool fValue);
     bool ReadFlag(const std::string& name, bool& fValue);
     bool LoadBlockIndexGuts(const Consensus::Params& consensusParams, std::function<CBlockIndex*(const uint256&)> insertBlockIndex, const util::SignalInterrupt& interrupt)
@@ -508,7 +510,8 @@ public:
 
     bool WriteBlockIndexDB(std::optional<uint32_t> validation_epoch = std::nullopt,
                            std::optional<bool> validation_epoch_pending = std::nullopt,
-                           const std::set<uint256>* parked_reorg_branches = nullptr) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+                           const std::set<uint256>* parked_reorg_branches = nullptr,
+                           const std::optional<uint32_t>* validation_epoch_heal_watermark = nullptr) EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
     /** Queue a block-index row for the next WriteBlockIndexDB batch. */
     void MarkBlockIndexDirty(CBlockIndex& index) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
