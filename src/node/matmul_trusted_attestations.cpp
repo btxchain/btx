@@ -361,18 +361,15 @@ bool ImportAttestations(
              std::vector<matmul::trusted::ExactReplayAttestation>> durable;
     for (size_t index{0}; index < loaded.size(); ++index) {
         const auto& attestation{loaded[index]};
-        const auto verified{store->OpenAttestorsEnabled()
-                                ? matmul::trusted::VerifyAttestationCrypto(
-                                      attestation, store->ChainId(),
-                                      store->ReplayAuthorityContext(),
-                                      attestation.statement.block_hash,
-                                      attestation.statement.block_height)
-                                : matmul::trusted::VerifyAttestation(
-                                      attestation, store->ChainId(),
-                                      store->ReplayAuthorityContext(),
-                                      attestation.statement.block_hash,
-                                      attestation.statement.block_height,
-                                      store->TrustedSigners())};
+        // Durable/WAL/archive records seed the signed frontier only for
+        // current pin members. Open/Heard signatures are directory, not
+        // authority; VerifyAttestationCrypto would mint a frontier from them.
+        const auto verified{matmul::trusted::VerifyAttestation(
+            attestation, store->ChainId(),
+            store->ReplayAuthorityContext(),
+            attestation.statement.block_hash,
+            attestation.statement.block_height,
+            store->TrustedSigners())};
         if (verified != matmul::trusted::VerifyResult::Valid) {
             // Flat V1 archives/WALs predate authority namespaces. Preserve
             // intentional chain/context/signer rotation by ignoring a
@@ -401,13 +398,15 @@ bool ImportAttestations(
         const auto result{store->Add(
             attestation, attestation.statement.block_hash,
             attestation.statement.block_height)};
-        if (result == matmul::trusted::AddResult::BlocklistedSigner) {
+        if (result == matmul::trusted::AddResult::BlocklistedSigner ||
+            result == matmul::trusted::AddResult::Heard ||
+            result == matmul::trusted::AddResult::UntrustedSigner ||
+            result == matmul::trusted::AddResult::FrozenSigner) {
             continue;
         }
         if (result != matmul::trusted::AddResult::Accepted &&
             result != matmul::trusted::AddResult::Duplicate &&
-            result != matmul::trusted::AddResult::Capacity &&
-            result != matmul::trusted::AddResult::Heard) {
+            result != matmul::trusted::AddResult::Capacity) {
             error = strprintf(
                 "attestation archive record %zu from %s was rejected: %s",
                 index, fs::PathToString(source),
@@ -520,6 +519,7 @@ bool LoadDurableAttestations(
             return false;
         }
         std::set<CPubKey> seen;
+        std::vector<matmul::trusted::ExactReplayAttestation> pin_only;
         for (const auto& attestation : attestations) {
             if (attestation.statement.block_hash != key.block_hash ||
                 attestation.statement.block_height != key.height ||
@@ -527,19 +527,13 @@ bool LoadDurableAttestations(
                 error = "durable attestation database key/value mismatch";
                 return false;
             }
-            const auto verified{store->OpenAttestorsEnabled()
-                                    ? matmul::trusted::VerifyAttestationCrypto(
-                                          attestation, store->ChainId(),
-                                          store->ReplayAuthorityContext(),
-                                          key.block_hash, key.height)
-                                    : matmul::trusted::VerifyAttestation(
-                                          attestation, store->ChainId(),
-                                          store->ReplayAuthorityContext(),
-                                          key.block_hash, key.height,
-                                          store->TrustedSigners())};
+            const auto verified{matmul::trusted::VerifyAttestation(
+                attestation, store->ChainId(),
+                store->ReplayAuthorityContext(),
+                key.block_hash, key.height,
+                store->TrustedSigners())};
             if (verified != matmul::trusted::VerifyResult::Valid) {
-                if (store->OpenAttestorsEnabled() ||
-                    verified != matmul::trusted::VerifyResult::UntrustedSigner) {
+                if (verified != matmul::trusted::VerifyResult::UntrustedSigner) {
                     error = strprintf(
                         "durable attestation database record rejected: %s",
                         matmul::trusted::VerifyResultName(verified));
@@ -547,37 +541,26 @@ bool LoadDurableAttestations(
                 }
                 continue;
             }
+            pin_only.push_back(attestation);
         }
-        if (store->OpenAttestorsEnabled()) {
-            size_t pin_votes{0};
-            for (const auto& attestation : attestations) {
-                if (store->TrustedSigners().count(attestation.signer) != 0) {
-                    ++pin_votes;
-                }
-            }
-            if (pin_votes >= store->Threshold()) {
-                for (const auto& attestation : attestations) {
-                    if (store->TrustedSigners().count(attestation.signer) == 0) {
-                        store->AdmitOpenSigner(attestation.signer);
-                    }
-                }
-            }
+        if (pin_only.empty()) {
+            continue;
         }
         const TailKey tail_key{key.height, key.block_hash};
         const bool pin_quorum{store->HasQuorumFromAttestations(
-            attestations, key.block_hash, key.height)};
+            pin_only, key.block_hash, key.height)};
         if (pin_quorum) {
             highest = std::max(highest, key.height);
             if (local_pk.has_value()) {
-                for (const auto& attestation : attestations) {
+                for (const auto& attestation : pin_only) {
                     if (attestation.signer == *local_pk) {
                         local_signed.emplace(key.height, key.block_hash);
                     }
                 }
             }
         }
-        hot_tail_attestations += attestations.size();
-        hot_tail.emplace(tail_key, std::move(attestations));
+        hot_tail_attestations += pin_only.size();
+        hot_tail.emplace(tail_key, std::move(pin_only));
         while (hot_tail.size() > store->MaxBlocks() ||
                hot_tail_attestations > store->MaxAttestations()) {
             hot_tail_attestations -= hot_tail.begin()->second.size();
@@ -635,9 +618,13 @@ bool PersistDurableAttestations(
         error = "durable attestation authority namespace is unavailable";
         return false;
     }
+    auto store{Store()};
     std::map<DurableAttestationKey,
              std::vector<matmul::trusted::ExactReplayAttestation>> grouped;
     for (const auto& attestation : pending) {
+        if (!store || !store->IsAuthoritySigner(attestation.signer)) {
+            continue;
+        }
         grouped[DurableAttestationKey{
             .authority_namespace = *g_durable_namespace,
             .height = attestation.statement.block_height,
@@ -654,13 +641,21 @@ bool PersistDurableAttestations(
             return false;
         }
         std::set<CPubKey> seen;
-        for (const auto& existing : attestations) seen.insert(existing.signer);
-        for (auto& addition : additions) {
-            if (seen.insert(addition.signer).second) {
-                attestations.push_back(std::move(addition));
+        std::vector<matmul::trusted::ExactReplayAttestation> kept;
+        for (const auto& existing : attestations) {
+            if (store && store->IsAuthoritySigner(existing.signer) &&
+                seen.insert(existing.signer).second) {
+                kept.push_back(existing);
             }
         }
-        write_batch.Write(key, attestations);
+        for (auto& addition : additions) {
+            if (seen.insert(addition.signer).second) {
+                kept.push_back(std::move(addition));
+            }
+        }
+        if (!kept.empty()) {
+            write_batch.Write(key, kept);
+        }
     }
     if (!grouped.empty() && !g_durable_db->WriteBatch(write_batch, true)) {
         error = "failed to sync durable attestation batch";
@@ -680,6 +675,11 @@ std::vector<matmul::trusted::ExactReplayAttestation> ReadDurableAttestations(
                               .height = block_height,
                               .block_hash = block_hash}, out)};
     if (status.status != CDBWrapper::ReadStatus::Code::OK) return {};
+    if (auto store{Store()}) {
+        std::erase_if(out, [&](const matmul::trusted::ExactReplayAttestation& a) {
+            return !store->IsAuthoritySigner(a.signer);
+        });
+    }
     return out;
 }
 

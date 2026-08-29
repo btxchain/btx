@@ -3259,6 +3259,66 @@ BOOST_AUTO_TEST_CASE(attestations_survive_simulated_restart)
     }
 }
 
+BOOST_AUTO_TEST_CASE(open_archive_records_do_not_seed_signed_frontier)
+{
+    RuntimeReset reset;
+    const CKey pin{NewKey()};
+    const CKey open{NewKey()};
+    const uint256 chain{Hex256('d')};
+    const uint256 context{Hex256('e')};
+    const uint256 pin_block{Hex256('1')};
+    const uint256 open_block{Hex256('2')};
+    const fs::path archive{
+        m_args.GetDataDirNet() / "matmul_attestations_open_archive.dat"};
+
+    constexpr char magic[16] = "BTX_MMATTEST_V1";
+    DataStream encoded;
+    encoded.write(AsBytes(Span{magic, sizeof(magic)}));
+    encoded << uint64_t{2};
+    {
+        matmul::trusted::ExactReplayStatement statement;
+        statement.chain_id = chain;
+        statement.block_hash = pin_block;
+        statement.block_height = 10;
+        statement.replay_authority_context = context;
+        const auto attestation{matmul::trusted::SignStatement(statement, pin)};
+        BOOST_REQUIRE(attestation.has_value());
+        encoded << *attestation;
+    }
+    {
+        matmul::trusted::ExactReplayStatement statement;
+        statement.chain_id = chain;
+        statement.block_hash = open_block;
+        statement.block_height = 50;
+        statement.replay_authority_context = context;
+        const auto attestation{matmul::trusted::SignStatement(statement, open)};
+        BOOST_REQUIRE(attestation.has_value());
+        encoded << *attestation;
+    }
+    BOOST_REQUIRE(WriteBinaryFile(
+        archive,
+        std::string{reinterpret_cast<const char*>(encoded.data()),
+                    encoded.size()}));
+
+    matmul::trusted::StoreConfig config;
+    config.chain_id = chain;
+    config.replay_authority_context = context;
+    config.trusted_signers = {pin.GetPubKey()};
+    config.threshold = 1;
+    config.open_attestors = true;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/true,
+        /*serve=*/true, std::chrono::milliseconds{50}, error));
+    BOOST_REQUIRE(node::matmul_trusted::OpenPersistence(archive, error));
+    BOOST_CHECK(node::matmul_trusted::HasQuorum(pin_block, 10));
+    BOOST_CHECK(!node::matmul_trusted::HasQuorum(open_block, 50));
+    BOOST_REQUIRE(node::matmul_trusted::HighestAttestedHeight().has_value());
+    BOOST_CHECK_EQUAL(*node::matmul_trusted::HighestAttestedHeight(), 10);
+    BOOST_CHECK(node::matmul_trusted::Get(open_block, 50).empty());
+    BOOST_CHECK(node::matmul_trusted::HeardAttestations().empty());
+}
+
 BOOST_AUTO_TEST_CASE(durable_history_outlives_bounded_hot_cache)
 {
     RuntimeReset reset;
