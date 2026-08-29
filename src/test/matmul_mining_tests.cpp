@@ -587,6 +587,12 @@ BOOST_AUTO_TEST_CASE(getmininginfo_backend_runtime_includes_v4_dispatch_stats)
         + backend.find_value("requested_metal").getInt<uint64_t>()
         + backend.find_value("requested_cuda").getInt<uint64_t>();
     BOOST_CHECK_GE(requested_total, 1U);
+    // Issue 43: production v4 Metal kernels must move requested_metal / metal_successes,
+    // not only the nested v4_dispatch object.
+    const uint64_t v4_metal_ok =
+        v4.find_value("metal_ok").getInt<uint64_t>() + v4.find_value("metal_batch_ok").getInt<uint64_t>();
+    BOOST_CHECK_GE(backend.find_value("requested_metal").getInt<uint64_t>(), v4_metal_ok);
+    BOOST_CHECK_GE(backend.find_value("metal_successes").getInt<uint64_t>(), v4_metal_ok);
 }
 
 BOOST_AUTO_TEST_CASE(getmininginfo_required_backend_satisfied_false_when_rc_quarantined)
