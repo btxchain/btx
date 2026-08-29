@@ -3691,7 +3691,7 @@ BOOST_AUTO_TEST_CASE(sign_authoritative_height_occupied_after_hot_cache_eviction
                       evict, occupied_height + 1) ==
                   matmul::trusted::AddResult::Accepted);
     BOOST_CHECK(!node::matmul_trusted::HasQuorumInMemory(first, occupied_height));
-    BOOST_CHECK(!node::matmul_trusted::HasCompetingQuorum(twin, occupied_height));
+    BOOST_CHECK(node::matmul_trusted::HasCompetingQuorum(twin, occupied_height));
     BOOST_CHECK(node::matmul_trusted::HasLocalSignatureAtHeight(
         twin, occupied_height));
     BOOST_CHECK(!node::matmul_trusted::HasLocalSignatureAtHeight(
@@ -3746,13 +3746,62 @@ BOOST_AUTO_TEST_CASE(sign_authoritative_height_occupied_after_durable_reload)
     error.clear();
     BOOST_REQUIRE(node::matmul_trusted::OpenPersistence(archive, error));
     BOOST_CHECK(!node::matmul_trusted::HasQuorumInMemory(first, 10));
-    BOOST_CHECK(!node::matmul_trusted::HasCompetingQuorum(twin, 10));
+    BOOST_CHECK(node::matmul_trusted::HasCompetingQuorum(twin, 10));
     BOOST_CHECK(node::matmul_trusted::HasLocalSignatureAtHeight(twin, 10));
     BOOST_CHECK(node::matmul_trusted::SignAuthoritative(twin, 10) ==
                 matmul::trusted::AddResult::HeightOccupied);
     const auto same{node::matmul_trusted::SignAuthoritative(first, 10)};
     BOOST_CHECK(same == matmul::trusted::AddResult::Duplicate ||
                 same == matmul::trusted::AddResult::Accepted);
+}
+
+BOOST_AUTO_TEST_CASE(competing_quorum_survives_hint_window_eviction)
+{
+    RuntimeReset reset;
+    const CKey local{NewKey()};
+    const CKey other{NewKey()};
+    const uint256 chain{Hex256('3')};
+    const uint256 context{Hex256('4')};
+    matmul::trusted::StoreConfig config;
+    config.chain_id = chain;
+    config.replay_authority_context = context;
+    config.trusted_signers = {local.GetPubKey(), other.GetPubKey()};
+    config.threshold = 1;
+    config.local_signer = local;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/false,
+        /*serve=*/true, std::chrono::milliseconds{10}, error));
+
+    const uint256 occupied{(HashWriter{} << uint64_t{1}).GetHash()};
+    matmul::trusted::ExactReplayStatement statement;
+    statement.chain_id = chain;
+    statement.block_hash = occupied;
+    statement.block_height = 1;
+    statement.replay_authority_context = context;
+    const auto foreign{matmul::trusted::SignStatement(statement, other)};
+    BOOST_REQUIRE(foreign.has_value());
+    BOOST_REQUIRE(node::matmul_trusted::Add(*foreign, occupied, 1) ==
+                  matmul::trusted::AddResult::Accepted);
+    BOOST_CHECK(node::matmul_trusted::HasQuorum(occupied, 1));
+    BOOST_CHECK(!node::matmul_trusted::HasLocalSignatureAtHeight(
+        (HashWriter{} << uint64_t{0}).GetHash(), 1));
+
+    for (int32_t height = 2; height <= 514; ++height) {
+        const uint256 hash{(HashWriter{} << uint64_t{static_cast<uint64_t>(height)}).GetHash()};
+        BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(hash, height) ==
+                      matmul::trusted::AddResult::Accepted);
+    }
+    bool height_1_still_hinted{false};
+    for (const auto& hint : node::matmul_trusted::AttestedFrontierHints()) {
+        if (hint.height == 1) height_1_still_hinted = true;
+    }
+    BOOST_CHECK(!height_1_still_hinted);
+
+    const uint256 twin{(HashWriter{} << uint64_t{999}).GetHash()};
+    BOOST_CHECK(node::matmul_trusted::HasCompetingQuorum(twin, 1));
+    BOOST_CHECK(node::matmul_trusted::SignAuthoritative(twin, 1) ==
+                matmul::trusted::AddResult::HeightOccupied);
 }
 
 BOOST_AUTO_TEST_CASE(reorg_and_rpc_release_sign_authoritative_mint_slot)

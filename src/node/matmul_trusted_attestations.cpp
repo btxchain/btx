@@ -60,6 +60,10 @@ uint256 g_authority_peer_tip_hash{};
 //! not last-writer: dual-attested siblings (live 2026-08-15) must both stay
 //! visible to FindUniqueCompetingAttestedIndex after restart.
 std::map<int32_t, std::set<uint256>> g_attested_by_height;
+//! Pin-quorum hashes at every height, not just the 512-block FMWC hint
+//! window. HasCompetingQuorum / SignAuthoritative consult this so an
+//! evicted-height re-joining signer cannot mint a second twin.
+std::map<int32_t, std::set<uint256>> g_quorum_hashes_by_height;
 //! Height -> hash this process's local key already signed. Survives hot-cache
 //! eviction; populated at durable load and on each local Sign. First hash wins.
 std::map<int32_t, uint256> g_local_signed_hash_by_height;
@@ -357,6 +361,7 @@ bool ImportAttestations(
     const uint256 authority_namespace{AuthorityNamespace(*store)};
     const auto local_pk{store->LocalSignerPubKey()};
     std::map<int32_t, uint256> local_signed;
+    std::map<int32_t, std::set<uint256>> imported_quorum;
     std::map<DurableAttestationKey,
              std::vector<matmul::trusted::ExactReplayAttestation>> durable;
     for (size_t index{0}; index < loaded.size(); ++index) {
@@ -417,6 +422,8 @@ bool ImportAttestations(
         if (store->HasQuorum(attestation.statement.block_hash,
                              attestation.statement.block_height)) {
             highest = std::max(highest, attestation.statement.block_height);
+            imported_quorum[attestation.statement.block_height].insert(
+                attestation.statement.block_hash);
             if (local_pk.has_value()) {
                 for (const auto& vote :
                      store->GetAttestations(attestation.statement.block_hash,
@@ -468,6 +475,11 @@ bool ImportAttestations(
         std::lock_guard lock{g_mutex};
         g_highest_attested_height =
             std::max(g_highest_attested_height, highest);
+        for (const auto& [height, hashes] : imported_quorum) {
+            for (const auto& hash : hashes) {
+                g_quorum_hashes_by_height[height].insert(hash);
+            }
+        }
         for (const auto& [height, hash] : local_signed) {
             g_local_signed_hash_by_height.emplace(height, hash);
         }
@@ -496,6 +508,7 @@ bool LoadDurableAttestations(
     int32_t highest{-1};
     const auto local_pk{store->LocalSignerPubKey()};
     std::map<int32_t, uint256> local_signed;
+    std::map<int32_t, std::set<uint256>> all_quorum;
     // Verify the complete namespace, but hydrate only the newest cache-sized
     // tail. Adding every historical record to a full bounded store makes each
     // later insertion scan the entire cache for an eviction candidate.
@@ -551,6 +564,7 @@ bool LoadDurableAttestations(
             pin_only, key.block_hash, key.height)};
         if (pin_quorum) {
             highest = std::max(highest, key.height);
+            all_quorum[key.height].insert(key.block_hash);
             if (local_pk.has_value()) {
                 for (const auto& attestation : pin_only) {
                     if (attestation.signer == *local_pk) {
@@ -590,6 +604,11 @@ bool LoadDurableAttestations(
         std::lock_guard lock{g_mutex};
         g_highest_attested_height =
             std::max(g_highest_attested_height, highest);
+        for (const auto& [height, hashes] : all_quorum) {
+            for (const auto& hash : hashes) {
+                g_quorum_hashes_by_height[height].insert(hash);
+            }
+        }
         for (const auto& [height, hash] : local_signed) {
             g_local_signed_hash_by_height.emplace(height, hash);
         }
@@ -1079,6 +1098,7 @@ void Reset()
     g_authority_peer_tip_hint = -1;
     g_authority_peer_tip_hash.SetNull();
     g_attested_by_height.clear();
+    g_quorum_hashes_by_height.clear();
     g_local_signed_hash_by_height.clear();
     g_persist_enabled = false;
     g_persist_path.clear();
@@ -1323,23 +1343,17 @@ matmul::trusted::AddResult SignAuthoritative(
 {
     auto store{Store()};
     if (!store) return matmul::trusted::AddResult::NoLocalSigner;
-    // Never mint a second local signature at a height that already has
-    // quorum on a different hash (live 2026-08-15: 94f70747 then a9590c15
-    // at 190354). In-memory hints cover the hot window; SignLocal also
-    // refuses against the store's own buckets. The local-signed height map
-    // survives hot-cache eviction (durable load + each local Sign).
-    // Hashes this node itself disconnected do not occupy: that is a local
-    // validated reorg, not a stolen-WIF jam.
+    // Dual-quorum: never mint a second local signature at a height that
+    // already has pin quorum on a different hash (live 2026-08-15:
+    // 94f70747 then a9590c15 at 190354). g_quorum_hashes_by_height survives
+    // the 512-block FMWC hint window and hot-cache eviction. The
+    // local-signed height map also survives eviction (durable load + each
+    // local Sign). Hashes this node itself disconnected do not occupy:
+    // that is a local validated reorg, not a stolen-WIF jam.
     if (HasLocalSignatureAtHeight(block_hash, block_height)) {
         return matmul::trusted::AddResult::HeightOccupied;
     }
-    for (const auto& hint : AttestedFrontierHints()) {
-        if (hint.height != block_height || hint.hash == block_hash ||
-            hint.hash.IsNull()) {
-            continue;
-        }
-        if (!HasQuorumInMemory(hint.hash, hint.height)) continue;
-        if (store->IsOffActiveChain(hint.height, hint.hash)) continue;
+    if (HasCompetingQuorum(block_hash, block_height)) {
         return matmul::trusted::AddResult::HeightOccupied;
     }
     matmul::trusted::ExactReplayAttestation signed_attestation;
@@ -1503,11 +1517,18 @@ bool HasQuorumInMemory(const uint256& block_hash, int32_t block_height)
 bool HasCompetingQuorum(const uint256& block_hash, int32_t block_height)
 {
     if (block_height < 0 || block_hash.IsNull()) return false;
-    for (const auto& hint : AttestedFrontierHints()) {
-        if (hint.height == block_height && hint.hash != block_hash &&
-            !hint.hash.IsNull() && HasQuorumInMemory(hint.hash, hint.height)) {
-            return true;
-        }
+    std::set<uint256> others;
+    {
+        std::lock_guard lock{g_mutex};
+        const auto it{g_quorum_hashes_by_height.find(block_height)};
+        if (it == g_quorum_hashes_by_height.end()) return false;
+        others = it->second;
+    }
+    auto store{Store()};
+    for (const auto& other : others) {
+        if (other == block_hash || other.IsNull()) continue;
+        if (store && store->IsOffActiveChain(block_height, other)) continue;
+        return true;
     }
     return false;
 }
@@ -1609,6 +1630,7 @@ void NoteAcceptedAttestationHeight(int32_t height, const uint256& hash)
         g_highest_attested_height = height;
     }
     if (!hash.IsNull()) {
+        g_quorum_hashes_by_height[height].insert(hash);
         g_attested_by_height[height].insert(hash);
         const int32_t floor_height{
             g_highest_attested_height - ATTESTED_FRONTIER_HINT_WINDOW};
