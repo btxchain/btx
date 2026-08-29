@@ -2700,6 +2700,8 @@ private:
     std::chrono::microseconds m_last_overdue_expire GUARDED_BY(cs_main){0us};
     /** Rate-limit the production-visible root-first download summary line. */
     std::chrono::microseconds m_last_root_first_summary GUARDED_BY(cs_main){0us};
+    /** Rate-limit stalled-tower-drive LogInfo (hoisted GETDATA pass). */
+    std::chrono::microseconds m_last_stalled_tower_drive GUARDED_BY(cs_main){0us};
     /** Set when last_common sits on HAVE_DATA above the connected tip so
      *  SendMessages can ActivateBestChain after releasing cs_main. */
     bool m_need_activate_best_chain GUARDED_BY(cs_main){false};
@@ -19652,20 +19654,22 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                 sync_blocks_and_headers_from_peer = true;
             }
         }
-        if (node::HeaderSyncMustDriveFetchWhileStalled(
-                mapBlocksInFlight.empty(),
-                tip_for_headers != nullptr ? tip_for_headers->nHeight : -1,
-                m_chainman.m_best_header != nullptr
-                    ? m_chainman.m_best_header->nHeight
-                    : -1,
-                state.m_starting_height >= 0
-                    ? state.m_starting_height
-                    : peer->m_starting_height.load(),
-                state.pindexBestKnownBlock != nullptr
-                    ? state.pindexBestKnownBlock->nHeight
-                    : -1)) {
-            // IBD's sync-peer gate otherwise skips FindNextBlocks after
-            // BestKnown is seeded and must_probe goes false.
+        // Computed once for this SendMessages pass. GETDATA for this
+        // predicate is hoisted below (like must_probe in 8b0b0425) so it
+        // does not sit inside CanServeBlocks / should_request / fSyncStarted.
+        const bool stalled_behind_header_tower{node::HeaderSyncMustDriveFetchWhileStalled(
+            mapBlocksInFlight.empty(),
+            tip_for_headers != nullptr ? tip_for_headers->nHeight : -1,
+            m_chainman.m_best_header != nullptr
+                ? m_chainman.m_best_header->nHeight
+                : -1,
+            state.m_starting_height >= 0
+                ? state.m_starting_height
+                : peer->m_starting_height.load(),
+            state.pindexBestKnownBlock != nullptr
+                ? state.pindexBestKnownBlock->nHeight
+                : -1)};
+        if (stalled_behind_header_tower) {
             sync_blocks_and_headers_from_peer = true;
         }
 
@@ -20169,7 +20173,8 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
             // during genesis-to-anchor IBD: the only body source must not
             // be dropped on its first stall.
             state.m_stalling_since = 0us;
-        } else if (state.m_stalling_since.count() && state.m_stalling_since < current_time - stalling_timeout) {
+        } else if (!stalled_behind_header_tower &&
+                   state.m_stalling_since.count() && state.m_stalling_since < current_time - stalling_timeout) {
             // Stalling only triggers when the block download window cannot move. During normal steady state,
             // the download window should be much larger than the to-be-downloaded set of blocks, so disconnection
             // should only happen during initial block download.
@@ -20409,28 +20414,23 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
         MaybeRecoverStalledBlockFetch(current_time);
         std::vector<CInv> vGetData;
         const bool can_request_blocks_from_peer{current_time >= state.m_block_download_paused_until};
-        const CBlockIndex* const tip_for_fetch{m_chainman.ActiveChain().Tip()};
-        const bool stalled_behind_header_tower{node::HeaderSyncMustDriveFetchWhileStalled(
-            mapBlocksInFlight.empty(),
-            tip_for_fetch != nullptr ? tip_for_fetch->nHeight : -1,
-            m_chainman.m_best_header != nullptr
-                ? m_chainman.m_best_header->nHeight
-                : -1,
-            state.m_starting_height >= 0
-                ? state.m_starting_height
-                : peer->m_starting_height.load(),
-            state.pindexBestKnownBlock != nullptr
-                ? state.pindexBestKnownBlock->nHeight
-                : -1)};
+        // Hoisted like must_probe (8b0b0425): GETDATA must not sit inside
+        // TrustedMirrorGpuMayServeBlocks → CanServeBlocks, the IBD sync
+        // slot, fPreferredDownload, or PeerMay. Those gates left a stalled
+        // consensus archive at inflight=0 with the predicate true (rtx6000
+        // 2026-08-29: headers=199801, blocks=199387, zero getdata).
+        const bool drive_stalled_tower_fetch{
+            stalled_behind_header_tower &&
+            !m_chainman.m_blockman.LoadingBlocks() &&
+            !pto->IsAddrFetchConn()};
         const bool should_request_blocks_from_peer{
             node::matmul_trusted::TrustedMirrorGpuMayServeBlocks(
                 PeerIsGpuAuthority(pto->GetId(), state),
                 CanServeBlocks(*peer),
                 /*version_handshake_complete=*/peer->m_starting_height.load() >= 0) &&
-            (PeerMaySignedFrontierCatchUpGetData(*peer, state) ||
-             stalled_behind_header_tower) &&
+            PeerMaySignedFrontierCatchUpGetData(*peer, state) &&
             can_request_blocks_from_peer &&
-            (ShouldRequestBlocksFromMatMulPeer(
+            ShouldRequestBlocksFromMatMulPeer(
                 // Fetching is not validating: an ordinary peer may relay a
                 // block we then validate ourselves. Passing eligibility as
                 // true keeps the tier a PREFERENCE (see fPreferredDownload
@@ -20439,9 +20439,8 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                 /*can_serve_blocks=*/true, /*peer_is_eligible=*/true,
                 /*request_window_open=*/true, sync_blocks_and_headers_from_peer,
                 IsLimitedPeer(*peer), m_chainman.IsInitialBlockDownload(),
-                state.vBlocksInFlight.size(), MAX_BLOCKS_IN_TRANSIT_PER_PEER) ||
-             stalled_behind_header_tower)};
-        if (!should_request_blocks_from_peer) {
+                state.vBlocksInFlight.size(), MAX_BLOCKS_IN_TRANSIT_PER_PEER)};
+        if (!should_request_blocks_from_peer && !drive_stalled_tower_fetch) {
             const CBlockIndex* tip{m_chainman.ActiveChain().Tip()};
             const int best_header_ahead{
                 tip != nullptr && m_chainman.m_best_header != nullptr
@@ -20484,11 +20483,42 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                          sync_blocks_and_headers_from_peer);
             }
         }
-        if (should_request_blocks_from_peer) {
+        if (drive_stalled_tower_fetch || should_request_blocks_from_peer) {
+            if (drive_stalled_tower_fetch &&
+                (m_last_stalled_tower_drive.count() == 0 ||
+                 current_time >= m_last_stalled_tower_drive +
+                                     BLOCK_ROOT_FIRST_SUMMARY_INTERVAL)) {
+                m_last_stalled_tower_drive = current_time;
+                const CBlockIndex* const tip_for_fetch{m_chainman.ActiveChain().Tip()};
+                LogInfo("stalled-tower-drive: getdata pass peer=%d tip=%d "
+                        "best_header=%d advertised=%d best_known=%d "
+                        "in_flight_global=%d fSyncStarted=%d can_serve=%d "
+                        "preferred=%d ibd=%d should_request=%d\n",
+                        pto->GetId(),
+                        tip_for_fetch != nullptr ? tip_for_fetch->nHeight : -1,
+                        m_chainman.m_best_header != nullptr
+                            ? m_chainman.m_best_header->nHeight
+                            : -1,
+                        peer->m_starting_height.load(),
+                        state.pindexBestKnownBlock != nullptr
+                            ? state.pindexBestKnownBlock->nHeight
+                            : -1,
+                        static_cast<int>(mapBlocksInFlight.size()),
+                        state.fSyncStarted, CanServeBlocks(*peer),
+                        state.fPreferredDownload,
+                        m_chainman.IsInitialBlockDownload(),
+                        should_request_blocks_from_peer);
+            }
             std::vector<const CBlockIndex*> vToDownload;
             NodeId staller = -1;
-            auto get_inflight_budget = [&state]() {
-                return std::max(0, MAX_BLOCKS_IN_TRANSIT_PER_PEER - static_cast<int>(state.vBlocksInFlight.size()));
+            auto get_inflight_budget = [&state, drive_stalled_tower_fetch]() {
+                const int remaining{
+                    MAX_BLOCKS_IN_TRANSIT_PER_PEER -
+                    static_cast<int>(state.vBlocksInFlight.size())};
+                if (drive_stalled_tower_fetch) {
+                    return std::max(1, remaining);
+                }
+                return std::max(0, remaining);
             };
 
             // If a snapshot chainstate is in use, we want to find its next blocks
