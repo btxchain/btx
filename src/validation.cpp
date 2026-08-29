@@ -17829,23 +17829,12 @@ bool ChainstateManager::MaybeClearStaleInvalidMarksForValidationEpoch()
         }
     }
 
-    uint32_t unparked{0};
-    for (CBlockIndex* pindex : to_revalidate) {
-        if (pindex->nStatus & BLOCK_FAILED_MASK) continue;
-        const CBlockIndex* root{FindParkedReorgBranchRoot(pindex)};
-        if (root == nullptr) continue;
-        const uint256 root_hash{root->GetBlockHash()};
-        if (!m_parked_reorg_branch_roots.erase(root_hash)) continue;
-        ++unparked;
-        LogWarning("%s: unparking reorg branch root %s height=%d "
-                   "(was FAILED, re-validated under epoch %u)\n",
-                   __func__, root_hash.ToString(), root->nHeight,
-                   m_compiled_validation_epoch);
-    }
-
+    // Depth-6 park is independent of FAILED. Clearing a stale poison mark
+    // must not unpark: UnparkReorgBranchContainingBlock / reorg-recovery
+    // are the only paths that drop a parked root (SF-13).
     for (const uint256& parked : m_parked_reorg_branch_roots) {
         LogPrintf("%s: leaving parked reorg branch %s "
-                  "(not previously FAILED, or operator-invalid)\n",
+                  "(heal never unparks; operator/reorg-recovery only)\n",
                   __func__, parked.ToString());
     }
 
@@ -17885,17 +17874,17 @@ bool ChainstateManager::MaybeClearStaleInvalidMarksForValidationEpoch()
                                       /*validation_epoch_pending=*/false,
                                       &m_parked_reorg_branch_roots)) {
         LogError("%s: failed to persist epoch-%u revalidation "
-                 "(stored_epoch=%u cleared=%u remade=%u unparked=%u)\n",
+                 "(stored_epoch=%u cleared=%u remade=%u)\n",
                  __func__, m_compiled_validation_epoch, stored,
-                 m_invalid_marks_cleared_on_upgrade, remade, unparked);
+                 m_invalid_marks_cleared_on_upgrade, remade);
         return false;
     }
     LogWarning("validation epoch %u -> %u: cleared %u BLOCK_FAILED_* mark(s) "
                "on the heaviest data-backed lineage, re-checked headers/bodies, "
-               "re-marked %u, unparked %u, left %u operator-invalid; "
+               "re-marked %u, unparked 0, left %u operator-invalid; "
                "ActivateBestChain follows after LoadChainTip\n",
                stored, m_compiled_validation_epoch,
-               m_invalid_marks_cleared_on_upgrade, remade, unparked,
+               m_invalid_marks_cleared_on_upgrade, remade,
                skipped_manual);
     return true;
 }

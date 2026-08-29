@@ -4783,4 +4783,79 @@ BOOST_FIXTURE_TEST_CASE(validation_epoch_defers_when_no_data_backed_lineage, Tes
     }
 }
 
+BOOST_FIXTURE_TEST_CASE(validation_epoch_does_not_unpark_protected_branch, TestChain100Setup)
+{
+    // SF-13: a park-protected competing branch that also carries a FAILED
+    // poison mark must stay parked after the heal. Clearing stale FAILED
+    // is not a license to undo depth-6 reorg protection.
+    ChainstateManager& chainman = *Assert(m_node.chainman);
+    Chainstate& chainstate = chainman.ActiveChainstate();
+    const CScript script = GetScriptForDestination(PKHash(coinbaseKey.GetPubKey()));
+    auto& action = const_cast<kernel::DeepReorgAction&>(
+        chainman.m_options.deep_reorg_action);
+    auto& park_depth = const_cast<std::optional<uint32_t>&>(
+        chainman.m_options.max_reorg_depth_park);
+    auto& hysteresis = const_cast<std::optional<uint32_t>&>(
+        chainman.m_options.reorg_hysteresis_work_margin);
+    action = kernel::DeepReorgAction::PARK;
+    park_depth = 6;
+    hysteresis = 0;
+
+    CBlockIndex* original_tip{WITH_LOCK(::cs_main, return chainstate.m_chain.Tip())};
+    BOOST_REQUIRE(original_tip != nullptr);
+    const uint256 original_hash = original_tip->GetBlockHash();
+
+    BlockValidationState inval;
+    BOOST_REQUIRE(chainstate.InvalidateBlock(inval, original_tip));
+    std::vector<CBlockIndex*> attacker;
+    for (int i = 0; i < 8; ++i) {
+        const uint256 h = CreateAndProcessBlock({}, script).GetHash();
+        attacker.push_back(WITH_LOCK(::cs_main, {
+            return chainman.m_blockman.LookupBlockIndex(h);
+        }));
+        BOOST_REQUIRE(attacker.back() != nullptr);
+    }
+    CBlockIndex* parked_root = attacker.front();
+    BOOST_REQUIRE(chainstate.InvalidateBlock(inval, parked_root));
+    {
+        LOCK(::cs_main);
+        chainstate.ResetBlockFailureFlags(original_tip);
+    }
+    BlockValidationState abc;
+    BOOST_REQUIRE(chainstate.ActivateBestChain(abc));
+    {
+        LOCK(::cs_main);
+        BOOST_REQUIRE_EQUAL(chainstate.m_chain.Tip()->GetBlockHash(), original_hash);
+        chainstate.ResetBlockFailureFlags(parked_root);
+        BOOST_REQUIRE(chainman.ParkReorgBranch(parked_root));
+        BOOST_CHECK(chainman.IsOnParkedReorgBranch(attacker.back()));
+        // Poison the parked root the way a buggy build did: FAILED without
+        // MANUAL and without HAVE_UNDO (connected-then-disconnected undo
+        // would look like pre-0.34.5 operator intent after SF-15).
+        parked_root->nStatus &= ~(BLOCK_HAVE_UNDO | BLOCK_MANUALLY_INVALIDATED |
+                                  BLOCK_FAILED_MASK);
+        parked_root->nStatus |= BLOCK_FAILED_VALID;
+        chainman.m_failed_blocks.insert(parked_root);
+        BOOST_CHECK(parked_root->nStatus & BLOCK_HAVE_DATA);
+        BOOST_CHECK_EQUAL(parked_root->nStatus & BLOCK_HAVE_UNDO, 0U);
+        BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->WriteValidationEpoch(0));
+        BOOST_REQUIRE(chainman.MaybeClearStaleInvalidMarksForValidationEpoch());
+        BOOST_CHECK_EQUAL(parked_root->nStatus & BLOCK_FAILED_MASK, 0U);
+        const auto parked = chainman.GetParkedReorgBranchRoots();
+        BOOST_REQUIRE_EQUAL(parked.size(), 1U);
+        BOOST_CHECK_EQUAL(parked.front(), parked_root->GetBlockHash());
+        std::set<uint256> persisted;
+        BOOST_REQUIRE(chainman.m_blockman.m_block_tree_db->ReadParkedReorgBranches(persisted));
+        BOOST_CHECK(persisted.count(parked_root->GetBlockHash()));
+        BOOST_CHECK(chainman.IsOnParkedReorgBranch(attacker.back()));
+    }
+    abc = BlockValidationState{};
+    BOOST_REQUIRE(chainstate.ActivateBestChain(abc));
+    {
+        LOCK(::cs_main);
+        BOOST_CHECK_EQUAL(chainstate.m_chain.Tip()->GetBlockHash(), original_hash);
+        BOOST_CHECK(chainman.IsOnParkedReorgBranch(attacker.back()));
+    }
+}
+
 BOOST_AUTO_TEST_SUITE_END()

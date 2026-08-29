@@ -2281,11 +2281,12 @@ public:
     /**
      * If the on-disk validation epoch is older than the compiled epoch (or a
      * pending-revalidation marker is set), clear non-manual BLOCK_FAILED_*
-     * marks on the heaviest-work lineage, re-run CheckBlockHeader /
+     * marks on the heaviest data-backed lineage, re-run CheckBlockHeader /
      * ContextualCheckBlockHeader and (when BLOCK_HAVE_DATA) CheckBlock /
      * ContextualCheckBlock with assumevalid trust disabled, remake genuine
-     * invalids, unpark branches that were FAILED and now re-validated, and
-     * persist nStatus + epoch + parked roots in one block-tree batch.
+     * invalids, and persist nStatus + epoch + parked roots in one block-tree
+     * batch. Parked deep-reorg branches are never unparked here; only
+     * UnparkReorgBranchContainingBlock / reorg-recovery may drop a park.
      * ConnectBlock does not re-run ContextualCheck*; a flags-only clear
      * would accept a block the old binary rejected for ExactReplay/ASERT.
      * BLOCK_MANUALLY_INVALIDATED (invalidateblock) is never cleared here.
