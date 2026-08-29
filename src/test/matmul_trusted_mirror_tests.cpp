@@ -557,6 +557,14 @@ BOOST_AUTO_TEST_CASE(discovery_relay_addr_policy_hides_gpu_attestors)
         true, true, true, /*same_ip=*/false, true));
     BOOST_CHECK(!MayRetainInboundSelfAnnouncement(
         true, true, true, true, /*may_advertise_endpoint=*/false));
+    // RB-15 (all nodes): drop an inbound peer's self-ADDR on the accepted
+    // SOURCE port; a same-IP self-ADDR on a DIFFERENT (listen) port is kept.
+    using node::discovery_relay::IsInboundSourcePortSelfAnnouncement;
+    BOOST_CHECK(IsInboundSourcePortSelfAnnouncement(
+        /*inbound=*/true, /*same_netaddr=*/true, /*same_port=*/true));
+    BOOST_CHECK(!IsInboundSourcePortSelfAnnouncement(true, true, /*same_port=*/false));
+    BOOST_CHECK(!IsInboundSourcePortSelfAnnouncement(true, /*same_netaddr=*/false, true));
+    BOOST_CHECK(!IsInboundSourcePortSelfAnnouncement(/*inbound=*/false, true, true));
     BOOST_CHECK(MayPushConnectedPeerSocketAddress(/*inbound=*/false));
     BOOST_CHECK(!MayPushConnectedPeerSocketAddress(/*inbound=*/true));
 

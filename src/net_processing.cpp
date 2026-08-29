@@ -15627,6 +15627,20 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             // Bitcoin-family network for the active chain.
             if (IsLikelyCrossNetworkPort(addr.GetPort(), m_chainparams.GetDefaultPort())) continue;
 
+            // RB-15 (extended to ALL nodes, not only discovery relays): an
+            // inbound peer's self-ADDR carrying the ACCEPTED SOURCE port is the
+            // ephemeral, undialable endpoint -- persisting/gossiping it pollutes
+            // addrman with unreachable entries. The peer's real listen endpoint
+            // arrives on a different port (VERSION addrMe / a distinct
+            // self-ADDR), so dropping the source-port variant loses nothing.
+            if (node::discovery_relay::IsInboundSourcePortSelfAnnouncement(
+                    pfrom.IsInboundConn(),
+                    static_cast<const CNetAddr&>(addr) ==
+                        static_cast<const CNetAddr&>(pfrom.addr),
+                    addr.GetPort() == pfrom.addr.GetPort())) {
+                continue;
+            }
+
             if (addr.nTime <= NodeSeconds{100000000s} || addr.nTime > current_a_time + 10min) {
                 addr.nTime = current_a_time - 5 * 24h;
             }

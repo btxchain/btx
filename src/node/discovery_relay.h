@@ -300,6 +300,18 @@ inline constexpr int MAX_INBOUND_DISCOVERY_ONLY{4};
     return may_advertise_endpoint;
 }
 
+//! RB-15 (all nodes): drop an inbound peer's self-ADDR that carries the
+//! ACCEPTED SOURCE port -- the ephemeral, undialable endpoint of the accepted
+//! socket. The peer's real listen endpoint arrives on a different port, so
+//! this loses nothing while keeping addrman/gossip free of unreachable entries.
+[[nodiscard]] inline bool IsInboundSourcePortSelfAnnouncement(
+    bool inbound,
+    bool same_netaddr,
+    bool same_port)
+{
+    return inbound && same_netaddr && same_port;
+}
+
 //! GETADDR extra-push of a currently-connected peer's socket address.
 //! Outbound/manual endpoints are the address we dialed (listen port).
 //! Inbound socket addresses are ephemeral source ports and must never
