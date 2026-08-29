@@ -3306,6 +3306,43 @@ void PeerManagerImpl::RefreshMatMulDeferredBodyRetry(
 //! synchronous-replay fallback.
 static constexpr int ACQUISITION_ESCAPE_FETCH_LOOKAHEAD{16};
 
+//! RB-16 CONVERGENCE: minimum gap between two acquired-frontier ExactReplay
+//! re-admissions. The replay itself is SYNCHRONOUS on the scheduler thread
+//! (ContextualCheckBlock ENC-DR recompute, ~12s GPU), so this constant only
+//! trims dead time between consecutive frontier bodies -- a 122..1700-body
+//! tower ground at the followed-tip-child's 15s cadence adds ~50 minutes of
+//! pure idle waiting. It cannot hot-spin: each pass either performs a full
+//! replay (device-serialized), persists BLOCK_EXACT_REPLAY_VERIFIED (the
+//! walk then skips the body forever), or fails the branch (BLOCK_FAILED
+//! kills parent-connectability for every descendant).
+static constexpr int64_t MATMUL_ACQ_FRONTIER_REPLAY_MIN_GAP_S{2};
+
+//! RB-16 LEAD-OVERFLOW: fetch-side acquisition gates must not disarm when the
+//! network extends the acquired tower past tip + ACQUISITION_ESCAPE_MAX_LEAD
+//! while our tip stays frozen. AcquisitionEscapeActive measures the lead
+//! against the (frozen) tip, so a stall lasting longer than ~2048 network
+//! blocks makes it return false and every escape-gated fetch behavior -- the
+//! 72e4d19c GETDATA window clamp, the last_common root-first keep, the
+//! parked-tower GETDATA exemption, and the below-tip hole exemption --
+//! disarms at once (live rtx6000 2026-08-30: best_header 201500 - tip 199416
+//! = 2084 > 2048; getdata churned 200999+ floating bodies through the
+//! retained store while the on-disk frontier sat unverified).
+//! AcquisitionEscapeCoversBlock tolerates the overflow yet stays bounded:
+//! the tower ROOT can only have been registered under the +2048 cap
+//! (600s-stale-gated, <=2 towers, strictly-heavier work), and the re-armed
+//! window clamp keeps fetch within frontier + ACQUISITION_ESCAPE_FETCH_
+//! LOOKAHEAD. Header-INDEX growth keeps its cap: the +72 header-chase bypass
+//! deliberately still uses AcquisitionEscapeActive, not this helper.
+[[nodiscard]] static bool AcquisitionFetchEscapeActive(
+    const ChainstateManager& chainman,
+    const CBlockIndex* best_known)
+    EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+{
+    AssertLockHeld(cs_main);
+    return chainman.AcquisitionEscapeActive(best_known) ||
+           chainman.AcquisitionEscapeCoversBlock(best_known);
+}
+
 //! RB-16 CONVERGENCE: while acquiring a heavier competing tower (stale tip,
 //! registered exempt tower), find the LOWEST unverified body above the fork
 //! root whose parent is already connectable -- parent on the active chain
@@ -3376,6 +3413,7 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
         int32_t reverify_height{-1};
         std::optional<CBlockHeader> reverify_header;
         bool need_exact_replay{false};
+        bool reverify_acquired_frontier{false};
         std::shared_ptr<CBlock> replay_block;
         {
             LOCK(cs_main);
@@ -3404,7 +3442,106 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
                     }
                 }
             }
-            if (child != nullptr &&
+            // RB-16 PRIORITY: evaluate the acquired-tower frontier FIRST.
+            // While acquiring (stale tip, m_best_header on a strictly-heavier
+            // COMPETING tower) the genuine followed-tip-child cannot exist --
+            // FindLowestUnverifiedAcquiredBody nulls itself when best_header
+            // extends the tip, so the two selections are mutually exclusive.
+            // But IndexIsAttestedChainTipChild's local-signer fallback returns
+            // true for ANY non-failed tip-child whenever m_best_header sits on
+            // a competing fork above the tip, so the candidate scan above can
+            // surface a minority-fork child every tick and the old else-if
+            // chain then never reached the frontier driver: nothing was ever
+            // ExactReplay-verified root-first and the heavier fork never
+            // assembled (live rtx6000 2026-08-30: frontier 199295..199298 on
+            // disk HAVE_DATA, "acquisition replay" fired 0 times, tip frozen
+            // at 199416 below a 201500 tower). Driving the frontier outranks
+            // re-admitting a minority-fork child: only the frontier lets a
+            // connected heavier chain exist for deepforkautoresolve to act on.
+            const CBlockIndex* const acq{
+                FindLowestUnverifiedAcquiredBody(m_chainman)};
+            const bool acq_selected{
+                acq != nullptr &&
+                (acq->nStatus & BLOCK_HAVE_DATA) != 0 &&
+                !m_matmul_block_lifecycle.IsActive(acq->GetBlockHash())};
+            // Rate-limited decision trace: the live node must show when the
+            // frontier driver is skipped (body not fetched yet / verify in
+            // progress) or idle (no parent-connectable covered body at all),
+            // not just when it runs.
+            if (acq != nullptr && !acq_selected) {
+                static std::atomic<int64_t> s_last_acq_skip_log{0};
+                const int64_t trace_now{count_seconds(now_s)};
+                if (trace_now - s_last_acq_skip_log.load(std::memory_order_relaxed) >= 15) {
+                    s_last_acq_skip_log.store(trace_now, std::memory_order_relaxed);
+                    LogInfo("acquisition replay: frontier body height=%d "
+                            "hash=%s not drivable (have_data=%d "
+                            "verify_active=%d); waiting for fetch/verdict\n",
+                            acq->nHeight, acq->GetBlockHash().ToString(),
+                            (acq->nStatus & BLOCK_HAVE_DATA) != 0 ? 1 : 0,
+                            m_matmul_block_lifecycle.IsActive(
+                                acq->GetBlockHash()) ? 1 : 0);
+                }
+            } else if (acq == nullptr && tip != nullptr &&
+                       followed != nullptr &&
+                       followed->nChainWork > tip->nChainWork &&
+                       followed->GetAncestor(tip->nHeight) != tip &&
+                       m_chainman.AcquisitionTipIsStale()) {
+                static std::atomic<int64_t> s_last_acq_idle_log{0};
+                const int64_t trace_now{count_seconds(now_s)};
+                if (trace_now - s_last_acq_idle_log.load(std::memory_order_relaxed) >= 15) {
+                    s_last_acq_idle_log.store(trace_now, std::memory_order_relaxed);
+                    LogInfo("acquisition replay: driver idle -- no unverified "
+                            "parent-connectable covered body between the fork "
+                            "root and best_header %d (tip %d); check tower "
+                            "registration / FAILED ancestors\n",
+                            followed->nHeight, tip->nHeight);
+                }
+            }
+            if (acq_selected) {
+                    // RB-16 CONVERGENCE: drive the acquired tower's on-disk
+                    // frontier body through ExactReplay ROOT-FIRST. The
+                    // followed tip-child path below never fires here
+                    // (best_header is on a COMPETING fork), so without this a
+                    // deeply-behind node ExactReplays only freshly-ARRIVING
+                    // high covered bodies while the low HAVE_DATA range from
+                    // the fork root rots unverified, ConnectTip defers, and
+                    // the tip freezes forever (live rtx6000: tip 199416,
+                    // headers 201500, replays at 199460+ with 199313..199459
+                    // unverified). Deliberately NO unpark here: migration
+                    // stays park/deepforkautoresolve-gated -- this only orders
+                    // body VALIDATION so a connected heavier chain can exist
+                    // for that gate to act on. Bodies not yet on disk are the
+                    // fetch pipeline's / retained-lifecycle's job.
+                    const CBlockIndex* const acq_fork{
+                        m_chainman.ActiveChain().FindFork(acq)};
+                    reverify_hash = acq->GetBlockHash();
+                    reverify_height = acq->nHeight;
+                    reverify_header = acq->GetBlockHeader();
+                    // Selected precisely because BLOCK_EXACT_REPLAY_VERIFIED
+                    // is unset (and this block is CONSENSUS + !mirror).
+                    need_exact_replay = true;
+                    reverify_acquired_frontier = true;
+                    replay_block = std::make_shared<CBlock>();
+                    if (!m_chainman.m_blockman.ReadBlock(*replay_block, *acq)) {
+                        replay_block.reset();
+                    }
+                    if (count_seconds(now_s) -
+                            m_followed_tip_child_replay_at.load(
+                                std::memory_order_relaxed) >=
+                        MATMUL_ACQ_FRONTIER_REPLAY_MIN_GAP_S) {
+                        LogInfo("acquisition replay: driving lowest-missing "
+                                "covered body height=%d hash=%s have_body=%s "
+                                "(fork_root %d, tip %d, best_header %d)\n",
+                                acq->nHeight,
+                                acq->GetBlockHash().ToString(),
+                                replay_block ? "yes" : "no",
+                                acq_fork != nullptr ? acq_fork->nHeight : -1,
+                                tip != nullptr ? tip->nHeight : -1,
+                                m_chainman.m_best_header != nullptr
+                                    ? m_chainman.m_best_header->nHeight
+                                    : -1);
+                    }
+            } else if (child != nullptr &&
                 (m_chainman.IndexIsFollowedTipChild(tip, child) ||
                  m_chainman.IndexIsAttestedChainTipChild(tip, child)) &&
                 (child->nStatus & BLOCK_HAVE_DATA) != 0 &&
@@ -3454,59 +3591,16 @@ void PeerManagerImpl::RetryMatMulDeferredBodies()
                     if (!m_chainman.m_blockman.ReadBlock(*replay_block, *fork_child)) {
                         replay_block.reset();
                     }
-            } else if (const CBlockIndex* const acq{
-                           FindLowestUnverifiedAcquiredBody(m_chainman)};
-                       acq != nullptr &&
-                       (acq->nStatus & BLOCK_HAVE_DATA) != 0 &&
-                       !m_matmul_block_lifecycle.IsActive(
-                           acq->GetBlockHash())) {
-                    // RB-16 CONVERGENCE: drive the acquired tower's on-disk
-                    // frontier body through ExactReplay ROOT-FIRST. The
-                    // followed tip-child path above never fires here
-                    // (best_header is on a COMPETING fork), so without this a
-                    // deeply-behind node ExactReplays only freshly-ARRIVING
-                    // high covered bodies while the low HAVE_DATA range from
-                    // the fork root rots unverified, ConnectTip defers, and
-                    // the tip freezes forever (live rtx6000: tip 199416,
-                    // headers 201500, replays at 199460+ with 199313..199459
-                    // unverified). Deliberately NO unpark here: migration
-                    // stays park/deepforkautoresolve-gated -- this only orders
-                    // body VALIDATION so a connected heavier chain can exist
-                    // for that gate to act on. Bodies not yet on disk are the
-                    // fetch pipeline's / retained-lifecycle's job.
-                    const CBlockIndex* const acq_fork{
-                        m_chainman.ActiveChain().FindFork(acq)};
-                    reverify_hash = acq->GetBlockHash();
-                    reverify_height = acq->nHeight;
-                    reverify_header = acq->GetBlockHeader();
-                    // Selected precisely because BLOCK_EXACT_REPLAY_VERIFIED
-                    // is unset (and this block is CONSENSUS + !mirror).
-                    need_exact_replay = true;
-                    replay_block = std::make_shared<CBlock>();
-                    if (!m_chainman.m_blockman.ReadBlock(*replay_block, *acq)) {
-                        replay_block.reset();
-                    }
-                    if (count_seconds(now_s) -
-                            m_followed_tip_child_replay_at.load(
-                                std::memory_order_relaxed) >= 15) {
-                        LogInfo("acquisition replay: driving lowest-missing "
-                                "covered body height=%d hash=%s have_body=%s "
-                                "(fork_root %d, tip %d, best_header %d)\n",
-                                acq->nHeight,
-                                acq->GetBlockHash().ToString(),
-                                replay_block ? "yes" : "no",
-                                acq_fork != nullptr ? acq_fork->nHeight : -1,
-                                tip != nullptr ? tip->nHeight : -1,
-                                m_chainman.m_best_header != nullptr
-                                    ? m_chainman.m_best_header->nHeight
-                                    : -1);
-                    }
             }
         }
         const int64_t now_count{count_seconds(now_s)};
+        // Acquired-frontier grinds are paced by the synchronous GPU replay
+        // itself; the 15s cadence stays for the followed / short-reorg
+        // tip-child re-admissions it was tuned for.
         const bool due{
             now_count - m_followed_tip_child_replay_at.load(std::memory_order_relaxed) >=
-            15};
+            (reverify_acquired_frontier ? MATMUL_ACQ_FRONTIER_REPLAY_MIN_GAP_S
+                                        : int64_t{15})};
         if (reverify_header && due) {
             m_followed_tip_child_replay_at.store(now_count, std::memory_order_relaxed);
             LogInfo("Followed HAVE_DATA tip-child still unconnected "
@@ -5529,8 +5623,9 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
         // DOWNLOAD only; migration stays park/deepforkautoresolve-gated and
         // ConnectTip still refuses the parked reorg until a covered body's
         // ExactReplay + the migration policy permit it. Bounded/self-guarded via
-        // AcquisitionEscapeActive (stale + strictly-heavier + tip+2048 lead).
-        !m_chainman.AcquisitionEscapeActive(state->pindexBestKnownBlock) &&
+        // AcquisitionFetchEscapeActive (stale + registered exempt tower; lead
+        // measured at registration so a long stall cannot disarm the fetch).
+        !AcquisitionFetchEscapeActive(m_chainman, state->pindexBestKnownBlock) &&
         !node::HeaderSyncMayFetchParkedHeavierTower(
             stalled_header_tower,
             node::matmul_trusted::IsTrustedMirror(),
@@ -5684,8 +5779,9 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
         &m_chainman.ActiveChain(),
         // RB-16: a stale tip acquiring a heavier tower keeps last_common at the
         // fork root instead of snapping past it (else lowest_missing is dropped
-        // and inflight stays 0 forever).
-        m_chainman.AcquisitionEscapeActive(state->pindexBestKnownBlock))};
+        // and inflight stays 0 forever). Lead-overflow tolerant: a stall longer
+        // than +2048 network blocks must not re-arm the deep-tower snap.
+        AcquisitionFetchEscapeActive(m_chainman, state->pindexBestKnownBlock))};
     state->pindexLastCommonBlock = root_first.last_common;
         if (root_first.lowest_missing != nullptr &&
         !IsHeaderOnlyFetchSuppressed(m_chainman, tip, root_first.lowest_missing,
@@ -5913,7 +6009,10 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
     // connectable gate) and would only churn the bounded retained store /
     // re-getdata; the window slides up as each frontier body verifies.
     // Self-guarded like 43e2aa87: non-acquiring nodes are untouched.
-    if (m_chainman.AcquisitionEscapeActive(state->pindexBestKnownBlock)) {
+    // Lead-overflow tolerant (live rtx6000 2026-08-30: lead 2084 > 2048
+    // disarmed this clamp and getdata churned 200999+ while the frontier
+    // sat on disk at 199295).
+    if (AcquisitionFetchEscapeActive(m_chainman, state->pindexBestKnownBlock)) {
         if (const CBlockIndex* const acq_frontier{
                 FindLowestUnverifiedAcquiredBody(m_chainman)};
             acq_frontier != nullptr &&
@@ -6063,13 +6162,13 @@ void PeerManagerImpl::FindNextBlocks(std::vector<const CBlockIndex*>& vBlocks, c
                     // this the walk skips every body at/below tip, so the fork
                     // never assembles from the root and the tip cannot migrate
                     // even though the bodies ExactReplay fine (encdr_ok=1).
-                    // AcquisitionEscapeActive self-guards (stale + strictly-
-                    // heavier + off-active-chain + tip+2048 lead + in the <=2
-                    // exempt-tower set), and non-acquiring nodes keep the exact
+                    // AcquisitionFetchEscapeActive self-guards (stale +
+                    // registered <=2 exempt-tower set, lead capped at
+                    // registration), and non-acquiring nodes keep the exact
                     // 24-clamp behavior. Migration stays park/deepforkautoresolve
                     // gated; ConnectTip still refuses the reorg.
-                    (m_chainman.AcquisitionEscapeActive(
-                         state->pindexBestKnownBlock) ||
+                    (AcquisitionFetchEscapeActive(
+                         m_chainman, state->pindexBestKnownBlock) ||
                      LastCommonKeepHeavierCompetingFork(
                          true, tip->nHeight,
                          state->pindexLastCommonBlock != nullptr
