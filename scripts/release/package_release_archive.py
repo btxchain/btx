@@ -75,9 +75,12 @@ PLATFORM_CONFIGS = {
     },
 }
 # Operator-facing aliases for the three 0.34.5 ship targets. Same bytes as the
-# canonical ids; extra keys so a cut that says linux-x86_64-cpu / macos-arm64-metal
-# cannot bypass the gate by using a name the packager does not recognize.
+# canonical ids; extra keys so a cut that says linux-x86_64-cpu /
+# linux-x86_64-cuda / macos-arm64-metal cannot bypass the gate by using a
+# name the packager does not recognize. Bare cuda is the published 0.34 name
+# (no 12/13 suffix); it packs the same tree as cuda12.
 PLATFORM_CONFIGS["linux-x86_64-cpu"] = dict(PLATFORM_CONFIGS["linux-x86_64"])
+PLATFORM_CONFIGS["linux-x86_64-cuda"] = dict(PLATFORM_CONFIGS["linux-x86_64-cuda12"])
 PLATFORM_CONFIGS["macos-arm64-metal"] = dict(PLATFORM_CONFIGS["macos-arm64"])
 SUPPORT_FILES = load_support_files()
 

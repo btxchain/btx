@@ -9,9 +9,12 @@ A gate nobody has seen fail is not a gate. This file:
      requires a non-zero exit (ldd does not show libzmq).
   2. Requires the same non-zero failure for an unrecognized (non-ELF) file.
   3. Drops that no-ZMQ ELF into a shippable tarball for each 0.34.5 target
-     name (linux-x86_64-cpu, linux-x86_64-cuda12 / the CUDA artifact,
-     macos-arm64-metal) and actually invokes the packager, cut, collect,
-     publish, and Guix pre-tarball invocation. A skip reads as a failure.
+     name (linux-x86_64-cpu, linux-x86_64-cuda including the published
+     unversioned name, macos-arm64-metal) and actually invokes the packager,
+     cut, collect, publish, and Guix pre-tarball invocation. A skip reads
+     as a failure.
+  4. An unclassified ship archive (a name collect cannot map to a platform)
+     is a hard FAILURE, not a skip.
 
 Do not weaken an assertion to make a case pass. A silent skip is how 111
 and 122 shipped twice.
@@ -39,11 +42,12 @@ COLLECT = ROOT / "scripts" / "release" / "collect_release_assets.py"
 PUBLISH = ROOT / "scripts" / "release" / "publish_github_release.py"
 GUIX_BUILD = ROOT / "contrib" / "guix" / "libexec" / "build.sh"
 
-# Operator-facing 0.34.5 ship targets. CUDA artifacts are named cuda12/cuda13
-# (there is no packager id `linux-x86_64-cuda` without a toolkit version).
+# Operator-facing 0.34.5 ship targets, including the published CUDA name
+# with no 12/13 suffix (btx-*-linux-x86_64-cuda.tar.gz).
 SHIP_ARCHIVES = (
     ("linux-x86_64-cpu", "btx-0.34.5-linux-x86_64-cpu.tar.gz"),
     ("linux-x86_64-cpu", "btx-0.34.5-x86_64-linux-gnu.tar.gz"),
+    ("linux-x86_64-cuda", "btx-0.34.5-linux-x86_64-cuda.tar.gz"),
     ("linux-x86_64-cuda", "btx-0.34.5-x86_64-linux-gnu-cuda12.tar.gz"),
     ("linux-x86_64-cuda", "btx-0.34.5-x86_64-linux-gnu-cuda13.tar.gz"),
     ("macos-arm64-metal", "btx-0.34.5-macos-arm64-metal.tar.gz"),
@@ -52,6 +56,7 @@ SHIP_ARCHIVES = (
 
 PACKAGE_PLATFORM_IDS = (
     "linux-x86_64-cpu",
+    "linux-x86_64-cuda",
     "linux-x86_64-cuda12",
     "macos-arm64-metal",
 )
@@ -260,8 +265,49 @@ class Issue122ZmqReleaseGateTest(unittest.TestCase):
                             info["platform_id"]: {"asset_name": filename}
                         }
                     }
-                    with self.assertRaisesRegex(RuntimeError, "ZMQ/release gate failed"):
+                    with self.assertRaisesRegex(RuntimeError, "ZMQ/release gate failed|libzmq"):
                         self.publish.verify_bundle_btxd_archives(bundle, manifest)
+
+    def test_unclassified_ship_archive_is_hard_failure(self) -> None:
+        """A name collect cannot classify must not skip the ZMQ gate."""
+        self.assertIsNotNone(
+            self.collect.classify_primary_platform_asset(
+                "btx-0.34.5-linux-x86_64-cuda.tar.gz"
+            ),
+            "published CUDA name must classify as primary so it is gated",
+        )
+        unknown = "btx-0.34.5-linux-powerpc.tar.gz"
+        self.assertIsNone(
+            self.collect.classify_primary_platform_asset(unknown),
+            "powerpc is not a known platform; used to prove fail-closed",
+        )
+        self.assertTrue(self.collect.is_gated_ship_archive(unknown))
+        self.assertFalse(
+            self.collect.is_gated_ship_archive("btx-0.34.5.tar.gz"),
+            "version-only source tarball is not a ship-matrix binary",
+        )
+        self.assertFalse(
+            self.collect.is_gated_ship_archive(
+                "btx-0.34.5-x86_64-linux-gnu-debug.tar.gz"
+            )
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            archive = pathlib.Path(tmpdir) / unknown
+            write_archive_with_real(archive, self.nozmq_btxd)
+            with self.assertRaisesRegex(
+                RuntimeError, "unclassified shippable archive"
+            ):
+                self.collect.verify_staged_primary_archives([("staged", archive)])
+            bundle = pathlib.Path(tmpdir) / "bundle"
+            bundle.mkdir()
+            staged = bundle / unknown
+            staged.write_bytes(archive.read_bytes())
+            with self.assertRaisesRegex(
+                RuntimeError, "unclassified shippable archive"
+            ):
+                self.publish.verify_bundle_btxd_archives(
+                    bundle, {"platform_assets": {}}
+                )
 
     def test_native_packager_fails_closed_for_all_three_platform_ids(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

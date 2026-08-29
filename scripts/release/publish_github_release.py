@@ -266,8 +266,39 @@ def _load_verify_release_btxd():
     return module
 
 
+def _load_collect_release_assets():
+    cached = getattr(_load_collect_release_assets, "_module", None)
+    if cached is not None:
+        return cached
+    script = Path(__file__).with_name("collect_release_assets.py")
+    spec = importlib.util.spec_from_file_location("collect_release_assets", script)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"unable to load {script}")
+    module = importlib.util.module_from_spec(spec)
+    # dataclasses.dataclass reads sys.modules[cls.__module__]; a spec-only
+    # load without this registration raises AttributeError on 3.14.
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    _load_collect_release_assets._module = module
+    return module
+
+
 def verify_bundle_btxd_archives(bundle_dir: Path, manifest: dict[str, Any]) -> None:
     """Last line of defense: do not upload a tarball whose btxd was never gated."""
+    collect = _load_collect_release_assets()
+    staged = [
+        ("bundle", path)
+        for path in sorted(bundle_dir.iterdir(), key=lambda item: item.name)
+        if path.is_file()
+    ]
+    # Fail closed on unclassified ship archives even when platform_assets is
+    # empty. Skipping that case is how linux-x86_64-cuda would publish ungated.
+    try:
+        collect.verify_staged_primary_archives(staged)
+    except RuntimeError as exc:
+        if "unclassified shippable archive" in str(exc):
+            raise
+        raise RuntimeError(f"ZMQ/release gate failed: {exc}") from exc
     platform_assets = manifest.get("platform_assets") or {}
     if not platform_assets:
         return

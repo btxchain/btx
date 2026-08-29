@@ -6869,6 +6869,12 @@ BOOST_AUTO_TEST_CASE(signer_serve_zero_pushes_new_attestations_refuses_getmmatte
                       PROTOCOL_VERSION, /*relay_txs=*/true);
     connman.AddTestNode(peer);
     connman.FlushSendBuffer(peer);
+    m_node.validation_signals->RegisterValidationInterface(&peerman);
+    struct UnregisterPeerman {
+        ValidationSignals& signals;
+        CValidationInterface* iface;
+        ~UnregisterPeerman() { signals.UnregisterValidationInterface(iface); }
+    } unregister{*m_node.validation_signals, &peerman};
     struct FinalizePeer {
         ConnmanTestMsg& connman;
         PeerManager& peerman;
@@ -6941,8 +6947,9 @@ BOOST_AUTO_TEST_CASE(signer_serve_zero_pushes_new_attestations_refuses_getmmatte
 // Issue 116: PersistMatMulExactReplayVerdict used to SignAuthoritative and
 // return without MMATTEST, so a GETMMATTEST-triggered / header-first ExactReplay
 // was stored and never announced. ProcessNewBlock here is AcceptBlock Persist
-// without ProcessBlockSync (no site A). The helper is the production persist
-// path header-first and historical reverify now share.
+// without ProcessBlockSync. ProcessNewBlockFinished must still gossip (the
+// generate/submitblock miss). The persist helper remains the header-first /
+// historical reverify path.
 BOOST_AUTO_TEST_CASE(exact_replay_persist_path_pushes_mmattest)
 {
     LOCK(NetEventsInterface::g_msgproc_mutex);
@@ -7020,6 +7027,12 @@ BOOST_AUTO_TEST_CASE(exact_replay_persist_path_pushes_mmattest)
                       PROTOCOL_VERSION, /*relay_txs=*/true);
     connman.AddTestNode(peer);
     connman.FlushSendBuffer(peer);
+    m_node.validation_signals->RegisterValidationInterface(&peerman);
+    struct UnregisterPeerman {
+        ValidationSignals& signals;
+        CValidationInterface* iface;
+        ~UnregisterPeerman() { signals.UnregisterValidationInterface(iface); }
+    } unregister{*m_node.validation_signals, &peerman};
     struct FinalizePeer {
         ConnmanTestMsg& connman;
         PeerManager& peerman;
@@ -7042,7 +7055,13 @@ BOOST_AUTO_TEST_CASE(exact_replay_persist_path_pushes_mmattest)
                (idx->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0 &&
                m_node.chainman->ActiveChain().Contains(idx);
     }));
-    m_node.validation_signals->SyncWithValidationInterfaceQueue();
+    // generate/submitblock call ProcessNewBlock only. ProcessNewBlockFinished
+    // must gossip via RelayLocalExactReplayAttestation (same helper as
+    // ProcessBlockSync used to inline).
+    BOOST_REQUIRE(PeermanWaitFor(
+        [&] { return HasQueuedMessageType(peer, NetMsgType::MMATTEST); }));
+    BOOST_CHECK(node::matmul_trusted::HasQuorum(child_hash, parent->nHeight + 1));
+    connman.FlushSendBuffer(peer);
     BOOST_CHECK(!HasQueuedMessageType(peer, NetMsgType::MMATTEST));
 
     peerman.PersistExactReplayVerdictAndRelayForTest(child_hash);

@@ -69,6 +69,20 @@ class ReleaseBundleManifestTest(unittest.TestCase):
         self.assertIsNotNone(metal_info)
         self.assertEqual(metal_info["platform_id"], "macos-arm64")
 
+        cuda_ship = self.module.classify_primary_platform_asset(
+            "btx-0.34.5-linux-x86_64-cuda.tar.gz"
+        )
+        self.assertIsNotNone(cuda_ship)
+        self.assertEqual(cuda_ship["platform_id"], "linux-x86_64-cuda")
+        self.assertEqual(cuda_ship["flavor"], "cuda")
+        self.assertNotEqual(
+            self.module.classify_primary_platform_asset(
+                "btx-0.34.5-linux-x86_64-cuda12.tar.gz"
+            )["platform_id"],
+            "linux-x86_64-cuda",
+            "cuda12 must not collapse into the unversioned CUDA id",
+        )
+
     def test_build_manifest_includes_platform_assets(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             bundle_dir = pathlib.Path(tmpdir)

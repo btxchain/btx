@@ -6,22 +6,22 @@
 
 PersistMatMulExactReplayVerdict used to SignAuthoritative and return without
 a push, so a GETMMATTEST-triggered ExactReplay was stored and never sent.
+generate/submitblock call ProcessNewBlock only (never ProcessBlockSync), so
+a locally mined block was persisted and never published unsolicited.
 Log-string counting has produced false results on this project; this harness
 uses getpeerinfo bytessent_per_msg only.
 
 A trusted-mirror IBD pair stalls requesting height-1 GETMMATTEST
 (not_profile1) and never reaches a Profile-1 hash. Drive the archive with a
-P2P GETMMATTEST for a Profile-1 tip hash instead:
+P2P peer at protocol 800001 advertising NODE_MATMUL_TRUSTED_MIRROR:
 
   1. One consensus archive with a local signing key, serving GETMMATTEST.
-  2. Mine through toy Profile-1 (RPC generate = ProcessNewBlock / AcceptBlock,
-     no ProcessBlockSync gossip).
-  3. Handshake a P2P peer at protocol 800001 advertising
-     NODE_MATMUL_TRUSTED_MIRROR, send getmmattest for the tip, and require
-     bytessent_per_msg['mmattest'] to increase.
+  2. Handshake the P2P peer first, then mine through toy Profile-1 (RPC
+     generate = ProcessNewBlock). bytessent_per_msg['mmattest'] must rise
+     with bytesrecv_per_msg['getmmattest'] still 0 (unsolicited publish).
+  3. GETMMATTEST the tip and require mmattest bytes to move again
+     (solicited cache/serve path).
 
-That is cache-empty GETMMATTEST: RPC generate left accepted=0, the handler
-must mint and push. getpeerinfo bytessent_per_msg['mmattest'] must rise.
 Do not weaken the counter assertion to make a case pass.
 """
 
@@ -116,35 +116,47 @@ class Issue116MmAttestWireTest(BitcoinTestFramework):
         assert status["local_signer"] is True
         assert status["serves_attestations"] is True
 
-        self.log.info("Mine through toy Profile-1 with no peer connected")
-        self.generate(archive, ACTIVATION_HEIGHT + 2, sync_fun=self.no_op)
-        assert_equal(archive.getblockcount(), ACTIVATION_HEIGHT + 2)
-        status = archive.getmatmultrustedstatus()
         self.log.info(
-            "after generate accepted=" + str(status.get("accepted"))
-        )
-        assert_equal(peer_msg_bytes(archive, True, "mmattest"), 0)
-
-        self.log.info(
-            "Handshake a trusted-mirror P2P peer and GETMMATTEST the Profile-1 tip"
+            "Handshake a trusted-mirror P2P peer before mining so generate "
+            "can publish unsolicited"
         )
         peer = archive.add_p2p_connection(
             MmAttestPeer(),
             services=NODE_NETWORK | NODE_WITNESS | NODE_MATMUL_TRUSTED_MIRROR,
         )
-        before = peer_msg_bytes(archive, True, "mmattest")
         self.dump_counters("after-handshake")
-        assert_equal(before, 0)
+        assert_equal(peer_msg_bytes(archive, True, "mmattest"), 0)
+        assert_equal(peer_msg_bytes(archive, False, "getmmattest"), 0)
 
+        self.log.info("Mine through toy Profile-1 with the peer already connected")
+        self.generate(archive, ACTIVATION_HEIGHT + 2, sync_fun=self.no_op)
+        assert_equal(archive.getblockcount(), ACTIVATION_HEIGHT + 2)
+
+        def archive_sent_unsolicited_mmattest():
+            return peer_msg_bytes(archive, True, "mmattest") > 0
+
+        self.wait_until(archive_sent_unsolicited_mmattest, timeout=120)
+        self.dump_counters("after-generate")
+        unsolicited = peer_msg_bytes(archive, True, "mmattest")
+        asked = peer_msg_bytes(archive, False, "getmmattest")
+        self.log.info(
+            f"unsolicited after generate mmattest={unsolicited} "
+            f"getmmattest_recv={asked}"
+        )
+        assert_greater_than(unsolicited, 0)
+        assert_equal(asked, 0)
+
+        self.log.info("GETMMATTEST the Profile-1 tip (solicited serve path)")
+        before = peer_msg_bytes(archive, True, "mmattest")
         tip_hex = archive.getbestblockhash()
         tip = int(tip_hex, 16)
         self.log.info(f"GETMMATTEST {tip_hex} height={archive.getblockcount()}")
         peer.send_and_ping(msg_generic(b"getmmattest", ser_uint256(tip)))
 
-        def archive_sent_mmattest():
+        def archive_sent_solicited_mmattest():
             return peer_msg_bytes(archive, True, "mmattest") > before
 
-        self.wait_until(archive_sent_mmattest, timeout=120)
+        self.wait_until(archive_sent_solicited_mmattest, timeout=120)
         self.dump_counters("after-getmmattest")
         sent = peer_msg_bytes(archive, True, "mmattest")
         asked = peer_msg_bytes(archive, False, "getmmattest")

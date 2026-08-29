@@ -6,9 +6,10 @@ survived the last round. This inventory fails closed if a new production
 call appears, or if a net_processing PersistMatMulExactReplayVerdict call
 no longer gossips in the following window.
 
-AcceptBlock (validation.cpp) mints via Persist without a P2P publish in
-the same function. That is a listed finding, not a silent skip: RPC
-generate/submitblock go through ProcessNewBlock only, not ProcessBlockSync.
+AcceptBlock (validation.cpp) still mints via Persist without a P2P publish
+in the same function (validation must not gossip). generate/submitblock
+are covered by ProcessNewBlock -> ProcessNewBlockFinished ->
+MaybeRelayLocalExactReplayAttestation -> RelayLocalExactReplayAttestation.
 """
 
 from __future__ import annotations
@@ -75,6 +76,17 @@ def window_has_relay(path: pathlib.Path, line_no: int, depth: int = 24) -> bool:
     return "RelayLocalExactReplayAttestation" in chunk
 
 
+def function_contains(path: pathlib.Path, func_name: str, needle: str) -> bool:
+    text = path.read_text(encoding="utf-8")
+    marker = f"PeerManagerImpl::{func_name}("
+    start = text.find(marker)
+    if start < 0:
+        return False
+    nxt = text.find("\nvoid PeerManagerImpl::", start + len(marker))
+    body = text[start : nxt if nxt >= 0 else start + 4000]
+    return needle in body
+
+
 class Issue116AttestationPublishSitesTest(unittest.TestCase):
     def test_production_signauthoritative_call_files_are_exactly_the_known_set(self) -> None:
         found: dict[pathlib.Path, list[int]] = {}
@@ -97,20 +109,44 @@ class Issue116AttestationPublishSitesTest(unittest.TestCase):
         )
 
     def test_signauthoritative_call_counts(self) -> None:
-        # Definition + each production call. Line numbers are asserted as
-        # counts so a new call in a known file still fails.
+        val_hits = calls_in(SRC / "validation.cpp", SIGN_CALL)
         self.assertEqual(
-            calls_in(SRC / "validation.cpp", SIGN_CALL),
-            [13701],
-            "PersistMatMulExactReplayVerdict must be the only validation.cpp mint",
+            len(val_hits),
+            1,
+            f"PersistMatMulExactReplayVerdict must be the only validation.cpp mint: {val_hits}",
         )
-        self.assertEqual(
-            calls_in(SRC / "net_processing.cpp", SIGN_CALL),
-            [13824, 17538, 17589],
-            "net_processing SignAuthoritative sites changed",
+        val = (SRC / "validation.cpp").read_text(encoding="utf-8")
+        persist_def = val.find("ChainstateManager::PersistMatMulExactReplayVerdict")
+        self.assertGreater(persist_def, 0)
+        self.assertLess(
+            persist_def,
+            val.find("SignAuthoritative", persist_def),
+            "validation.cpp SignAuthoritative must live in PersistMatMulExactReplayVerdict",
         )
+        net_hits = calls_in(SRC / "net_processing.cpp", SIGN_CALL)
         self.assertEqual(
-            calls_in(SRC / "rpc" / "matmul_trusted.cpp", SIGN_CALL),
+            len(net_hits),
+            3,
+            f"net_processing SignAuthoritative sites changed: {net_hits}",
+        )
+        self.assertTrue(
+            function_contains(
+                SRC / "net_processing.cpp",
+                "MaybeRelayLocalExactReplayAttestation",
+                "SignAuthoritative",
+            ),
+            "MaybeRelayLocalExactReplayAttestation must be the ProcessNewBlock mint",
+        )
+        self.assertTrue(
+            function_contains(
+                SRC / "net_processing.cpp",
+                "MaybeRelayLocalExactReplayAttestation",
+                "RelayLocalExactReplayAttestation",
+            ),
+        )
+        rpc_hits = calls_in(SRC / "rpc" / "matmul_trusted.cpp", SIGN_CALL)
+        self.assertEqual(
+            rpc_hits,
             [464],
             "rpc/matmul_trusted.cpp SignAuthoritative sites changed",
         )
@@ -118,8 +154,8 @@ class Issue116AttestationPublishSitesTest(unittest.TestCase):
     def test_net_processing_persist_callers_gossip(self) -> None:
         persist = calls_in(SRC / "net_processing.cpp", PERSIST_CALL)
         self.assertEqual(
-            persist,
-            [10316, 10988, 11144, 12701, 13722],
+            len(persist),
+            5,
             "net_processing PersistMatMulExactReplayVerdict sites changed; "
             f"found {persist}",
         )
@@ -133,25 +169,58 @@ class Issue116AttestationPublishSitesTest(unittest.TestCase):
     def test_acceptblock_persist_has_no_p2p_publish_in_window(self) -> None:
         persist = calls_in(SRC / "validation.cpp", PERSIST_CALL)
         self.assertEqual(
-            persist,
-            [14879],
+            len(persist),
+            1,
             f"validation.cpp persist call sites changed: {persist}",
         )
         self.assertFalse(
-            window_has_relay(SRC / "validation.cpp", 14879),
-            "AcceptBlock persist grew a gossip call; update the Issue 116 "
-            "inventory if that is now the publish path",
+            window_has_relay(SRC / "validation.cpp", persist[0]),
+            "AcceptBlock persist grew a gossip call; validation must not P2P",
         )
 
-    def test_processblocksync_and_getmmattest_push_after_sign(self) -> None:
-        net = SRC / "net_processing.cpp"
-        self.assertTrue(window_has_relay(net, 13824))
+    def test_processnewblock_finished_reuses_relay_helper(self) -> None:
+        validation = (SRC / "validation.cpp").read_text(encoding="utf-8")
+        self.assertIn(
+            "ProcessNewBlockFinished(*block)",
+            validation,
+            "ProcessNewBlock must fire ProcessNewBlockFinished so generate/"
+            "submitblock gossip without ProcessBlockSync",
+        )
+        net = (SRC / "net_processing.cpp").read_text(encoding="utf-8")
+        self.assertIn("void PeerManagerImpl::ProcessNewBlockFinished", net)
+        self.assertTrue(
+            function_contains(
+                SRC / "net_processing.cpp",
+                "ProcessNewBlockFinished",
+                "MaybeRelayLocalExactReplayAttestation",
+            ),
+        )
+        self.assertNotIn(
+            "SignAuthoritative",
+            net[
+                net.find("void PeerManagerImpl::ProcessBlockSync") : net.find(
+                    "void PeerManagerImpl::ProcessCompactBlockTxns"
+                )
+            ],
+            "ProcessBlockSync must reuse ProcessNewBlockFinished rather than "
+            "a second Sign+Relay path",
+        )
         # GETMMATTEST regen / covered-sign both fall through to push_mmattest.
-        lines = net.read_text(encoding="utf-8").splitlines()
-        after_regen = "\n".join(lines[17537:17640])
-        self.assertIn("push_mmattest", after_regen)
-        after_covered = "\n".join(lines[17588:17640])
-        self.assertIn("push_mmattest", after_covered)
+        net_hits = calls_in(SRC / "net_processing.cpp", SIGN_CALL)
+        lines = net.splitlines()
+        last_getmm = net_hits[-1]
+        after = "\n".join(lines[last_getmm - 1 : last_getmm - 1 + 60])
+        self.assertIn(
+            "push_mmattest",
+            after,
+            f"GETMMATTEST SignAuthoritative at {last_getmm} lost push_mmattest",
+        )
+        getmm_chunk = "\n".join(lines[net_hits[1] - 1 : last_getmm + 60])
+        self.assertGreaterEqual(
+            getmm_chunk.count("SignAuthoritative"),
+            2,
+            "GETMMATTEST must keep regen and covered-sign mint sites",
+        )
 
 
 if __name__ == "__main__":

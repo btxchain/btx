@@ -1321,6 +1321,8 @@ public:
         EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
     void NewPoWValidBlock(const CBlockIndex *pindex, const std::shared_ptr<const CBlock>& pblock) override
         EXCLUSIVE_LOCKS_REQUIRED(!m_most_recent_block_mutex);
+    void ProcessNewBlockFinished(const CBlock& block) override
+        LOCKS_EXCLUDED(cs_main);
 
     /** Implement NetEventsInterface */
     void InitializeNode(const CNode& node, ServiceFlags our_services) override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_tx_download_mutex);
@@ -2483,6 +2485,12 @@ private:
      *  inbound peer attestations. */
     void RelayLocalExactReplayAttestation(
         matmul::trusted::ExactReplayAttestation produced)
+        LOCKS_EXCLUDED(cs_main);
+    /** If this process ExactReplay-verified `hash` on the active chain and
+     *  has a local signer, SignAuthoritative and RelayLocalExactReplayAttestation.
+     *  Shared by ProcessNewBlockFinished (generate/submitblock and the P2P
+     *  ProcessBlockSync path) so those sites do not grow a parallel push. */
+    void MaybeRelayLocalExactReplayAttestation(const uint256& hash)
         LOCKS_EXCLUDED(cs_main);
     /** Persist a local ExactReplay verdict and gossip if this process just
      *  signed. Shared by header-first / historical Persist callers and the
@@ -7428,6 +7436,11 @@ void PeerManagerImpl::BlockDisconnected(const std::shared_ptr<const CBlock> &blo
 {
     LOCK(m_tx_download_mutex);
     m_txdownloadman.BlockDisconnected();
+}
+
+void PeerManagerImpl::ProcessNewBlockFinished(const CBlock& block)
+{
+    MaybeRelayLocalExactReplayAttestation(block.GetHash());
 }
 
 /**
@@ -13695,6 +13708,45 @@ bool PeerManagerImpl::AdmitMatMulBlockVerification(
     return true;
 }
 
+void PeerManagerImpl::MaybeRelayLocalExactReplayAttestation(const uint256& hash)
+{
+    AssertLockNotHeld(cs_main);
+    if (m_chainman.GetMatMulValidationMode() !=
+            kernel::MatMulValidationMode::CONSENSUS ||
+        !node::matmul_trusted::HasLocalSigner()) {
+        return;
+    }
+    int32_t exact_height{-1};
+    {
+        LOCK(cs_main);
+        const CBlockIndex* index{m_chainman.m_blockman.LookupBlockIndex(hash)};
+        if (index != nullptr &&
+            (index->nStatus & BLOCK_EXACT_REPLAY_VERIFIED) != 0 &&
+            (index->nStatus & BLOCK_FAILED_MASK) == 0 &&
+            m_chainparams.GetConsensus().IsMatMulTrustedReplayAttestationActive(
+                index->nHeight) &&
+            m_chainman.ActiveChain().Contains(index)) {
+            exact_height = index->nHeight;
+        }
+    }
+    if (exact_height < 0) {
+        return;
+    }
+    matmul::trusted::ExactReplayAttestation produced;
+    const auto result{
+        node::matmul_trusted::SignAuthoritative(hash, exact_height, &produced)};
+    if (node::matmul_trusted::SignAuthoritativeServesGetMmAttest(result)) {
+        RelayLocalExactReplayAttestation(std::move(produced));
+    } else {
+        LogWarning(
+            "Failed to create MatMul ExactReplay "
+            "attestation block=%s height=%d result=%s\n",
+            hash.ToString(),
+            exact_height,
+            matmul::trusted::AddResultName(result));
+    }
+}
+
 void PeerManagerImpl::RelayLocalExactReplayAttestation(
     matmul::trusted::ExactReplayAttestation produced)
 {
@@ -13796,46 +13848,6 @@ void PeerManagerImpl::ProcessBlockSync(NodeId nodeid, CNode* node, const std::sh
             block->GetHash(), "non-terminal replay result");
     }
     if (new_block || exact_replay_authenticated) {
-        if (exact_replay_authenticated &&
-            m_chainman.GetMatMulValidationMode() ==
-                kernel::MatMulValidationMode::CONSENSUS &&
-            node::matmul_trusted::HasLocalSigner()) {
-            int32_t exact_height{-1};
-            {
-                LOCK(cs_main);
-                const CBlockIndex* index{
-                    m_chainman.m_blockman.LookupBlockIndex(
-                        block->GetHash())};
-                if (index != nullptr &&
-                    (index->nStatus &
-                     BLOCK_EXACT_REPLAY_VERIFIED) &&
-                    !(index->nStatus & BLOCK_FAILED_MASK) &&
-                    m_chainparams.GetConsensus()
-                        .IsMatMulTrustedReplayAttestationActive(
-                            index->nHeight) &&
-                    m_chainman.ActiveChain().Contains(index)) {
-                    exact_height = index->nHeight;
-                }
-            }
-            if (exact_height >= 0) {
-                matmul::trusted::ExactReplayAttestation
-                    produced;
-                const auto result{
-                    node::matmul_trusted::SignAuthoritative(
-                        block->GetHash(), exact_height,
-                        &produced)};
-                if (node::matmul_trusted::SignAuthoritativeServesGetMmAttest(result)) {
-                    RelayLocalExactReplayAttestation(std::move(produced));
-                } else {
-                    LogWarning(
-                        "Failed to create MatMul ExactReplay "
-                        "attestation block=%s height=%d result=%s\n",
-                        block->GetHash().ToString(),
-                        exact_height,
-                        matmul::trusted::AddResultName(result));
-                }
-            }
-        }
         if (new_block) {
             if (node != nullptr) {
                 // Message-thread path: identical to the historical direct access.

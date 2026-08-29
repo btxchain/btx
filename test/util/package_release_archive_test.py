@@ -229,6 +229,10 @@ class PackageReleaseArchiveTest(unittest.TestCase):
             self.module.archive_filename("0.34.5", "linux-x86_64-cuda12", None),
             "btx-0.34.5-x86_64-linux-gnu-cuda12.tar.gz",
         )
+        self.assertEqual(
+            self.module.archive_filename("0.34.5", "linux-x86_64-cuda", None),
+            self.module.archive_filename("0.34.5", "linux-x86_64-cuda12", None),
+        )
 
     def test_verify_shipped_btxd_refuses_unrecognized_file(self):
         with tempfile.TemporaryDirectory() as tmpdir:

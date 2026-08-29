@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 import importlib.util
+import re
 import shutil
 import subprocess
 import sys
@@ -54,11 +55,20 @@ PLATFORM_ALIASES = {
     "linux-x86_64": ("x86_64-linux-gnu", "linux-x86_64-cpu"),
     "linux-x86_64-cuda12": ("x86_64-linux-gnu-cuda12", "linux-x86_64-cuda12"),
     "linux-x86_64-cuda13": ("x86_64-linux-gnu-cuda13", "linux-x86_64-cuda13"),
+    # Published 0.34 CUDA tarball is the unversioned operator name. Alias
+    # "linux-x86_64-cuda" is a substring of cuda12/cuda13, so classify()
+    # matches the versioned ids first.
+    "linux-x86_64-cuda": ("linux-x86_64-cuda", "x86_64-linux-gnu-cuda"),
     "linux-arm64": ("aarch64-linux-gnu", "arm64-linux-gnu"),
     "windows-x86_64": ("x86_64-w64-mingw32", "win64"),
     "macos-x86_64": ("x86_64-apple-darwin",),
     "macos-arm64": ("arm64-apple-darwin", "aarch64-apple-darwin", "macos-arm64-metal"),
 }
+# btx-0.34.5.tar.gz / bitcoin-29.2.tar.gz: source, not a platform binary.
+SOURCE_RELEASE_ARCHIVE_RE = re.compile(
+    r"^(btx|bitcoin)-[0-9]+(?:[.][0-9]+)*(?:rc[0-9]+)?(?:[.]tar[.](?:gz|xz|bz2)|[.]tgz|[.]zip)$",
+    re.IGNORECASE,
+)
 DEFAULT_REQUIRED_PLATFORMS = (
     "linux-x86_64",
     "linux-x86_64-cuda12",
@@ -84,13 +94,38 @@ def detect_archive_format(name: str) -> str | None:
     return None
 
 
+def is_source_release_archive(name: str) -> bool:
+    return SOURCE_RELEASE_ARCHIVE_RE.fullmatch(name) is not None
+
+
+def is_excluded_primary_binary(name: str) -> bool:
+    lowered = name.lower()
+    return any(token in lowered for token in PRIMARY_BINARY_EXCLUDE_TOKENS)
+
+
+def is_gated_ship_archive(name: str) -> bool:
+    """True when this file must classify as a primary platform archive.
+
+    Debug/src/codesigning extras and the version-only source tarball are not
+    the ship matrix. Any other archive suffix is: unclassified is FAIL, not
+    a skip (issues 111/122 through a name the alias table did not list).
+    """
+    if detect_archive_format(name) is None:
+        return False
+    if is_excluded_primary_binary(name):
+        return False
+    if is_source_release_archive(name):
+        return False
+    return True
+
+
 def classify_primary_platform_asset(name: str) -> dict[str, str] | None:
     archive_format = detect_archive_format(name)
     if archive_format is None:
         return None
 
     lowered = name.lower()
-    if any(token in lowered for token in PRIMARY_BINARY_EXCLUDE_TOKENS):
+    if is_excluded_primary_binary(name):
         return None
 
     for platform_id in ("linux-x86_64-cuda12", "linux-x86_64-cuda13"):
@@ -116,6 +151,9 @@ def build_platform_classification(platform_id: str, name: str, archive_format: s
     elif arch.endswith("-cuda13"):
         arch = arch.removesuffix("-cuda13")
         flavor = "cuda13"
+    elif arch.endswith("-cuda"):
+        arch = arch.removesuffix("-cuda")
+        flavor = "cuda"
     return {
         "platform_id": platform_id,
         "os": operating_system,
@@ -490,12 +528,26 @@ def verify_staged_primary_archives(staged_assets: list[tuple[str, Path]]) -> Non
     The native packager already runs this gate. Guix does not go through that
     packager, so collect (the path that builds the bundle users download) must.
     An unrecognized file inside the archive is FAIL, not a skip.
+    A staged archive that does not classify as a known platform is also FAIL:
+    skipping unclassified names is how a published linux-x86_64-cuda tarball
+    would bypass the gate (issues 111/122 through a different door).
     """
-    archives = [
-        path
-        for _source, path in staged_assets
-        if classify_primary_platform_asset(path.name) is not None
-    ]
+    unclassified: list[str] = []
+    archives: list[Path] = []
+    for _source, path in staged_assets:
+        name = path.name
+        if not is_gated_ship_archive(name):
+            continue
+        if classify_primary_platform_asset(name) is None:
+            unclassified.append(name)
+        else:
+            archives.append(path)
+    if unclassified:
+        raise RuntimeError(
+            "unclassified shippable archive(s); refusing to collect "
+            "(an artifact we cannot classify must never be publishable): "
+            + ", ".join(unclassified)
+        )
     if not archives:
         return
     module = _load_verify_release_btxd()

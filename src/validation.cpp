@@ -15008,12 +15008,21 @@ bool ChainstateManager::ProcessNewBlock(const std::shared_ptr<const CBlock>& blo
 
     Chainstate* bg_chain{WITH_LOCK(cs_main, return BackgroundSyncInProgress() ? m_ibd_chainstate.get() : nullptr)};
     BlockValidationState bg_state;
+    bool bg_ok{true};
     if (bg_chain && !bg_chain->ActivateBestChain(bg_state, block)) {
         LogError("%s: [background] ActivateBestChain failed (%s)\n", __func__, bg_state.ToString());
-        return false;
+        bg_ok = false;
      }
 
-    return true;
+    // generate/submitblock never enter ProcessBlockSync. Gossip a locally
+    // signed ExactReplay attestation here so a mined block is published
+    // unsolicited. Reindex/ReplayBlocks do not call ProcessNewBlock, so
+    // they do not mint-and-push every historical height.
+    if (m_options.signals) {
+        m_options.signals->ProcessNewBlockFinished(*block);
+    }
+
+    return bg_ok;
 }
 
 MempoolAcceptResult ChainstateManager::ProcessTransaction(const CTransactionRef& tx, bool test_accept, const ignore_rejects_type& ignore_rejects)
