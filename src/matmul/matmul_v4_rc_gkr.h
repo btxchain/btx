@@ -1006,6 +1006,13 @@ struct ExactReplayVerifyResult {
     RCExactReplayExecutionPolicy execution_policy{
         RCExactReplayExecutionPolicy::AutoFallback};
     bool require_device{false};
+    // V1/RB-8: this verdict was produced by an UNQUALIFIED device on the
+    // opt-in -allowunverifiablematmulconsensus path (canary/golden miss).
+    // Such a device's self-consistent GEMM must NOT be a consensus authority:
+    // validation requires a trusted attestation quorum before it may accept
+    // the body. A self-qualified device (production_eligible) never sets this,
+    // so the full-GPU-speed mainline is unaffected even with a leftover flag.
+    bool unqualified_device_authority{false};
     uint256 digest{};
     double verify_s{0};
     size_t rss_kib{0};

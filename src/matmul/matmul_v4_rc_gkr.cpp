@@ -5559,6 +5559,8 @@ ExactReplayVerifyResult VerifyBoundedExactReplay(
     result.require_device =
         policy == RCExactReplayExecutionPolicy::StrictDevice &&
         gate != ProductionGateAction::UnverifiableCpu;
+    result.unqualified_device_authority =
+        gate == ProductionGateAction::UnverifiableDevice;
     result.acceleration_resolution_reason = resolution_reason;
     {
         std::lock_guard<std::mutex> lock{
@@ -5604,6 +5606,8 @@ VerifyBoundedExactReplayWithProductionEligibilityForTest(
             : VerifyStrictWithAlternates(
                   header, params, height, target, std::move(acceleration),
                   reason);
+    result.unqualified_device_authority =
+        gate == ProductionGateAction::UnverifiableDevice;
     result.acceleration_resolution_reason = std::move(reason);
     return result;
 }

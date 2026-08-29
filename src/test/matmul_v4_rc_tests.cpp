@@ -1482,6 +1482,19 @@ BOOST_AUTO_TEST_CASE(rc_allow_unverifiable_catchup_still_exactreplays)
     BOOST_CHECK(
         device_catchup.acceleration_resolution_reason.find(
             ":unverifiable_catchup_replay") != std::string::npos);
+    // V1/RB-8: the UnverifiableDevice verdict is flagged non-authoritative so
+    // validation requires a trusted attestation quorum before accepting the
+    // body (an unqualified GEMM must not be a consensus authority).
+    BOOST_CHECK(device_catchup.unqualified_device_authority);
+
+    // A self-qualified device (production_eligible) with the SAME leftover
+    // flag takes the Pass path: full GPU speed, never non-authoritative.
+    const auto self_qualified_with_flag{
+        rc::VerifyBoundedExactReplayWithProductionEligibilityForTest(
+            header, params, /*height=*/0, acceleration,
+            /*production_eligible=*/true)};
+    BOOST_REQUIRE(self_qualified_with_flag.ok);
+    BOOST_CHECK(!self_qualified_with_flag.unqualified_device_authority);
 
     const rc::RCExactReplayAcceleration cpu_accel{
         .gemm = {},
@@ -1501,6 +1514,10 @@ BOOST_AUTO_TEST_CASE(rc_allow_unverifiable_catchup_still_exactreplays)
             ":unverifiable_catchup_cpu") != std::string::npos);
     BOOST_CHECK_EQUAL(cpu_catchup.acceleration_backend, "cpu_unverifiable_catchup");
     BOOST_CHECK(!cpu_catchup.require_device);
+    // The explicit CPU-oracle hatch (UnverifiableCpu) IS an independent
+    // validation, so it is authoritative on that opt-in box; only the
+    // untrusted-device GEMM verdict is gated on attestations.
+    BOOST_CHECK(!cpu_catchup.unqualified_device_authority);
 
     // Header-tower catch-up still rejects a tampered digest. The flag
     // opts out of device self-qualification, not out of ExactReplay.

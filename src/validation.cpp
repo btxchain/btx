@@ -40,6 +40,7 @@
 #include <policy/settings.h>
 #include <policy/truc_policy.h>
 #include <matmul/matmul_v4_rc.h>
+#include <matmul/matmul_v4_rc_gkr.h>
 #include <matmul/matmul_v4_rc_stage3_consensus.h>
 #include <matmul/matmul_v4_rc_stage3_producer.h>
 #include <pow.h>
@@ -14293,6 +14294,47 @@ static bool ContextualCheckBlock(const CBlock& block,
                     const bool valid{
                         outcome ==
                         MatMulRCValidationOutcome::VALID};
+                    // V1/RB-8: an UNQUALIFIED device (canary/golden miss +
+                    // -allowunverifiablematmulconsensus) is NOT a consensus
+                    // authority. Its self-consistent GEMM cannot accept a body
+                    // alone -- a wrong-but-deterministic kernel would "verify"
+                    // a forged body matching its own output (split-brain /
+                    // wrong-chain island). Require a trusted attestation quorum
+                    // (follow the pin); if none covers the block, defer/stall
+                    // at the RC boundary rather than self-accept. This is NOT a
+                    // CPU-oracle. It is confined to the opt-in degraded path: a
+                    // self-qualified device (production_eligible) never sets
+                    // unqualified_device_authority, so the full-GPU-speed
+                    // mainline is byte-for-byte unchanged even with a leftover
+                    // flag (rtx6000-class).
+                    if (valid &&
+                        matmul::v4::rc::GetLastExactReplayVerifyResult()
+                            .value_or(
+                                matmul::v4::rc::ExactReplayVerifyResult{})
+                            .unqualified_device_authority) {
+                        const CBlockIndex* const uq_index{
+                            chainman.m_blockman.LookupBlockIndex(
+                                block.GetHash())};
+                        const bool have_quorum{
+                            chainman.IndexHasTrustedMatMulAuthority(
+                                uq_index) ||
+                            node::matmul_trusted::HasQuorumInMemory(
+                                block.GetHash(), nHeight)};
+                        if (!have_quorum) {
+                            rc_local_execution_failure = true;
+                            rc_execution_detail =
+                                "unqualified device is not a consensus "
+                                "authority: trusted attestation quorum "
+                                "required (follow the pin)";
+                            return false;
+                        }
+                        if (rc_authority != nullptr) {
+                            *rc_authority =
+                                MatMulRCAuthorityProvenance::
+                                    TRUSTED_SIGNER_QUORUM;
+                        }
+                        return true;
+                    }
                     if (valid && rc_authority != nullptr) {
                         *rc_authority =
                             MatMulRCAuthorityProvenance::
