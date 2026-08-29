@@ -267,6 +267,106 @@ BOOST_AUTO_TEST_CASE(config_validation_and_local_signer)
     BOOST_CHECK_THROW(AttestationStore{bad}, std::invalid_argument);
 }
 
+BOOST_AUTO_TEST_CASE(reorg_releases_mint_slot_inbound_cannot)
+{
+    const auto keys{MakeKeys(2)};
+    const uint256 chain{TestHash(0x61)};
+    const uint256 hash_a{TestHash(0x62)};
+    const uint256 hash_b{TestHash(0x63)};
+    const uint256 hash_c{TestHash(0x64)};
+    auto config{MakeConfig(chain, keys, /*threshold=*/2)};
+    config.local_signer = keys[0];
+    config.open_attestors = true;
+    AttestationStore store{config};
+
+    ExactReplayAttestation minted_a;
+    BOOST_REQUIRE(store.SignLocal(hash_a, 20, &minted_a) == AddResult::Accepted);
+    BOOST_CHECK(store.LocalMintedHash(20) == hash_a);
+    BOOST_CHECK(store.SignLocal(hash_b, 20) == AddResult::HeightOccupied);
+
+    // Inbound competing hash (stolen-WIF copy of the local pin key) must not
+    // release the mint slot. Add() is the P2P path.
+    BOOST_CHECK(store.Add(MustSign(MakeStatement(chain, hash_c, 20), keys[0]),
+                          hash_c, 20) == AddResult::Accepted);
+    BOOST_CHECK(store.LocalMintedHash(20) == hash_a);
+    BOOST_CHECK(!store.IsOffActiveChain(20, hash_c));
+    BOOST_CHECK(store.SignLocal(hash_b, 20) == AddResult::HeightOccupied);
+
+    // Disconnecting a hash this node did not mint also must not release.
+    BOOST_CHECK(!store.NotifyActiveChainBlockDisconnected(20, hash_c));
+    BOOST_CHECK(store.LocalMintedHash(20) == hash_a);
+    BOOST_CHECK(store.SignLocal(hash_b, 20) == AddResult::HeightOccupied);
+
+    // Own validated reorg of the minted hash releases the slot.
+    BOOST_CHECK(store.NotifyActiveChainBlockDisconnected(20, hash_a));
+    BOOST_CHECK(!store.LocalMintedHash(20).has_value());
+    BOOST_CHECK(store.IsOffActiveChain(20, hash_a));
+
+    ExactReplayAttestation minted_b;
+    BOOST_CHECK(store.SignLocal(hash_b, 20, &minted_b) == AddResult::Accepted);
+    BOOST_CHECK(store.LocalMintedHash(20) == hash_b);
+    BOOST_CHECK(minted_b.statement.block_hash == hash_b);
+    BOOST_CHECK_EQUAL(store.GetAttestations(hash_b, 20).size(), 1);
+    BOOST_CHECK(store.GetAttestations(hash_a, 20).size() >= 1);
+
+    // Open attestor who signed the disconnected hash can re-sign the new one
+    // without being frozen for equivocation.
+    const auto extra{MakeKeys(1)};
+    BOOST_CHECK(store.Add(MustSign(MakeStatement(chain, hash_a, 21), extra[0]),
+                          hash_a, 21) == AddResult::Heard);
+    store.NotifyActiveChainBlockDisconnected(21, hash_a);
+    BOOST_CHECK(store.Add(MustSign(MakeStatement(chain, hash_b, 21), extra[0]),
+                          hash_b, 21) == AddResult::Heard);
+    BOOST_CHECK(!store.IsFrozenOpenSigner(extra[0].GetPubKey()));
+}
+
+BOOST_AUTO_TEST_CASE(competing_quorum_still_occupies_after_reorg_of_other_hash)
+{
+    const auto keys{MakeKeys(2)};
+    const uint256 chain{TestHash(0x71)};
+    const uint256 hash_a{TestHash(0x72)};
+    const uint256 hash_b{TestHash(0x73)};
+    const uint256 hash_c{TestHash(0x74)};
+    auto config{MakeConfig(chain, keys, /*threshold=*/2)};
+    config.local_signer = keys[0];
+    AttestationStore store{config};
+
+    BOOST_REQUIRE(store.SignLocal(hash_a, 30) == AddResult::Accepted);
+    BOOST_REQUIRE(store.Add(MustSign(MakeStatement(chain, hash_c, 30), keys[0]),
+                            hash_c, 30) == AddResult::Accepted);
+    BOOST_REQUIRE(store.Add(MustSign(MakeStatement(chain, hash_c, 30), keys[1]),
+                            hash_c, 30) == AddResult::Accepted);
+    BOOST_CHECK(store.HasQuorum(hash_c, 30));
+    BOOST_CHECK(store.SignLocal(hash_b, 30) == AddResult::HeightOccupied);
+
+    // Reorging the hash we minted must not drop the competing-quorum guard
+    // on a hash that is still off our chain (stolen-WIF / dual-attest jam).
+    BOOST_CHECK(store.NotifyActiveChainBlockDisconnected(30, hash_a));
+    BOOST_CHECK(!store.LocalMintedHash(30).has_value());
+    BOOST_CHECK(store.SignLocal(hash_b, 30) == AddResult::HeightOccupied);
+}
+
+BOOST_AUTO_TEST_CASE(rpc_clear_local_mint_slots)
+{
+    const auto keys{MakeKeys(2)};
+    const uint256 chain{TestHash(0x81)};
+    auto config{MakeConfig(chain, keys, /*threshold=*/2)};
+    config.local_signer = keys[0];
+    AttestationStore store{config};
+
+    BOOST_REQUIRE(store.SignLocal(TestHash(0x82), 40) == AddResult::Accepted);
+    BOOST_REQUIRE(store.SignLocal(TestHash(0x83), 41) == AddResult::Accepted);
+    BOOST_CHECK(store.SignLocal(TestHash(0x84), 40) == AddResult::HeightOccupied);
+
+    BOOST_CHECK_EQUAL(store.ClearLocalMintSlots(40, 41), 2);
+    BOOST_CHECK(!store.LocalMintedHash(40).has_value());
+    BOOST_CHECK(!store.LocalMintedHash(41).has_value());
+    BOOST_CHECK(store.SignLocal(TestHash(0x84), 40) == AddResult::Accepted);
+    BOOST_CHECK_EQUAL(store.GetAttestations(TestHash(0x84), 40).size(), 1);
+    BOOST_CHECK_EQUAL(store.ClearLocalMintSlots(40, 40), 1);
+    BOOST_CHECK_EQUAL(store.ClearLocalMintSlots(40, 40), 0);
+}
+
 BOOST_AUTO_TEST_CASE(unique_signer_quorum_and_rejections)
 {
     const auto keys{MakeKeys(3)};

@@ -366,6 +366,46 @@ public:
         ExactReplayAttestation* produced = nullptr);
 
     /**
+     * This node's own validated BlockDisconnected. If this process SignLocal'd
+     * `disconnected_hash` at `height`, release that mint slot so the node can
+     * re-mint the hash it now follows. Also drops open-directory entries for
+     * that (height, hash) so a reorg is not treated as open-key equivocation.
+     *
+     * Call only from this process's chainstate (DisconnectTip /
+     * BlockDisconnected). Inbound P2P / Add() of a competing hash must never
+     * call this: that is the stolen-WIF jam the mint guard exists to stop.
+     */
+    bool NotifyActiveChainBlockDisconnected(int32_t height,
+                                            const uint256& disconnected_hash);
+
+    /**
+     * Inverse of disconnect: the hash is on the active chain again, so its
+     * pin quorum may occupy the mint slot once more.
+     */
+    void NotifyActiveChainBlockConnected(int32_t height,
+                                         const uint256& connected_hash);
+
+    /**
+     * Operator recovery: erase local mint slots in [from_height, to_height]
+     * inclusive, and the open-directory rows for those heights. Does not
+     * delete stored attestations, does not accept a competing hash, and does
+     * not skip the other_quorum stolen-WIF guard. Returns the number of mint
+     * slots removed.
+     */
+    size_t ClearLocalMintSlots(int32_t from_height, int32_t to_height);
+
+    /** Hash this process SignLocal'd at height, if the mint slot is held. */
+    [[nodiscard]] std::optional<uint256> LocalMintedHash(int32_t height) const;
+
+    /** Heights in [from_height, to_height] that currently hold a mint slot. */
+    [[nodiscard]] std::vector<int32_t> LocalMintedHeights(
+        int32_t from_height, int32_t to_height) const;
+
+    /** True after NotifyActiveChainBlockDisconnected until the hash reconnects. */
+    [[nodiscard]] bool IsOffActiveChain(int32_t height,
+                                        const uint256& block_hash) const;
+
+    /**
      * Sign an attested-fast-forward UTXO snapshot statement with the optional
      * local key. Does not store the signature; callers assemble manifests.
      */
@@ -546,6 +586,11 @@ private:
     void RefreshPinRefutedLocked(const BlockKey& key);
     void CapRefutationsLocked();
     void CapFrozenOpenLocked();
+    void CapOffActiveChainLocked();
+    void ReleaseOpenSignedMatchingHashLocked(int32_t height,
+                                             const uint256& block_hash);
+    [[nodiscard]] bool OccupyingCompetingQuorumLocked(
+        int32_t block_height, const uint256& block_hash) const;
     /**
      * Make room for one additional signature.
      *
@@ -598,6 +643,12 @@ private:
     bool m_durable_retention{false};
     /** Heights this process SignLocal'd. Relayed copies of local_pk do not count. */
     std::map<int32_t, uint256> m_local_minted_hash_by_height;
+    /**
+     * Hashes this node's own validated reorg disconnected. other_quorum skips
+     * these so a legitimate chain switch can re-mint; inbound MMATTEST cannot
+     * insert here.
+     */
+    std::set<BlockKey> m_off_active_chain;
 };
 
 } // namespace matmul::trusted

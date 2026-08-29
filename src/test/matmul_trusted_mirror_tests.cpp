@@ -3648,6 +3648,72 @@ BOOST_AUTO_TEST_CASE(sign_authoritative_height_occupied_after_durable_reload)
                 same == matmul::trusted::AddResult::Accepted);
 }
 
+BOOST_AUTO_TEST_CASE(reorg_and_rpc_release_sign_authoritative_mint_slot)
+{
+    RuntimeReset reset;
+    const CKey signer{NewKey()};
+    const CKey other{NewKey()};
+    const uint256 chain{Hex256('1')};
+    const uint256 context{Hex256('2')};
+    matmul::trusted::StoreConfig config;
+    config.chain_id = chain;
+    config.replay_authority_context = context;
+    config.trusted_signers = {signer.GetPubKey(), other.GetPubKey()};
+    config.threshold = 2;
+    config.local_signer = signer;
+    std::string error;
+    BOOST_REQUIRE(node::matmul_trusted::Configure(
+        std::move(config), /*trusted_mirror=*/false,
+        /*serve=*/true, std::chrono::milliseconds{10}, error));
+
+    const uint256 hash_a{Hex256('a')};
+    const uint256 hash_b{Hex256('b')};
+    const uint256 hash_c{Hex256('c')};
+    constexpr int32_t height{50};
+
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(hash_a, height) ==
+                  matmul::trusted::AddResult::Accepted);
+    BOOST_CHECK(node::matmul_trusted::LocalMintedHash(height) == hash_a);
+    BOOST_CHECK(node::matmul_trusted::HasLocalSignatureAtHeight(hash_b, height));
+    BOOST_CHECK(node::matmul_trusted::SignAuthoritative(hash_b, height) ==
+                matmul::trusted::AddResult::HeightOccupied);
+
+    matmul::trusted::ExactReplayStatement stolen;
+    stolen.chain_id = chain;
+    stolen.block_hash = hash_c;
+    stolen.block_height = height;
+    stolen.replay_authority_context = context;
+    const auto stolen_att{matmul::trusted::SignStatement(stolen, signer)};
+    BOOST_REQUIRE(stolen_att);
+    BOOST_CHECK(node::matmul_trusted::Add(*stolen_att, hash_c, height) ==
+                matmul::trusted::AddResult::Accepted);
+    BOOST_CHECK(node::matmul_trusted::LocalMintedHash(height) == hash_a);
+    BOOST_CHECK(node::matmul_trusted::SignAuthoritative(hash_b, height) ==
+                matmul::trusted::AddResult::HeightOccupied);
+
+    BOOST_CHECK(node::matmul_trusted::NotifyActiveChainBlockDisconnected(
+        height, hash_a));
+    BOOST_CHECK(!node::matmul_trusted::LocalMintedHash(height).has_value());
+    BOOST_CHECK(!node::matmul_trusted::HasLocalSignatureAtHeight(hash_b, height));
+
+    matmul::trusted::ExactReplayAttestation produced;
+    BOOST_CHECK(node::matmul_trusted::SignAuthoritative(
+                    hash_b, height, &produced) ==
+                matmul::trusted::AddResult::Accepted);
+    BOOST_CHECK(produced.statement.block_hash == hash_b);
+    BOOST_CHECK_EQUAL(
+        node::matmul_trusted::Get(hash_b, height).size(), 1);
+
+    BOOST_REQUIRE(node::matmul_trusted::SignAuthoritative(hash_a, height + 1) ==
+                  matmul::trusted::AddResult::Accepted);
+    BOOST_CHECK_EQUAL(
+        node::matmul_trusted::ClearMintedAttestations(height + 1, height + 1),
+        1);
+    BOOST_CHECK(!node::matmul_trusted::LocalMintedHash(height + 1).has_value());
+    BOOST_CHECK(node::matmul_trusted::SignAuthoritative(hash_c, height + 1) ==
+                matmul::trusted::AddResult::Accepted);
+}
+
 BOOST_AUTO_TEST_CASE(blocklist_pin_votes_and_persist_across_restart)
 {
     RuntimeReset reset;

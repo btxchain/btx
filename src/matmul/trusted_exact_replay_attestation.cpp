@@ -8,10 +8,12 @@
 
 #include <algorithm>
 #include <limits>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace matmul::trusted {
 namespace {
@@ -872,22 +874,20 @@ AddResult AttestationStore::SignLocal(
             ++m_stats.rejected;
             return AddResult::BlocklistedSigner;
         }
-        for (auto it = m_buckets.lower_bound(BlockKey{block_height, uint256{}});
-             it != m_buckets.end() && it->first.height == block_height; ++it) {
-            if (it->first.hash == block_hash) continue;
-            const bool other_quorum{HasQuorumLocked(it->first, it->second)};
-            const auto minted{m_local_minted_hash_by_height.find(block_height)};
-            const bool minted_other_hash{
-                minted != m_local_minted_hash_by_height.end() &&
-                minted->second != block_hash};
-            // Relayed copies of this node's pubkey (stolen-WIF MMATTEST) must
-            // not occupy the mint slot. Only a competing *quorum* or a hash
-            // this process already SignLocal'd refuses. Otherwise one stolen
-            // pin key jams the honest attestor and freezes every M=2 mirror.
-            if (minted_other_hash || other_quorum) {
-                ++m_stats.rejected;
-                return AddResult::HeightOccupied;
-            }
+        const auto minted{m_local_minted_hash_by_height.find(block_height)};
+        const bool minted_other_hash{
+            minted != m_local_minted_hash_by_height.end() &&
+            minted->second != block_hash};
+        // Relayed copies of this node's pubkey (stolen-WIF MMATTEST) must
+        // not occupy the mint slot. Only a competing *on-chain quorum* or a
+        // hash this process already SignLocal'd refuses. Otherwise one stolen
+        // pin key jams the honest attestor and freezes every M=2 mirror.
+        // A hash this node itself disconnected no longer occupies: that is a
+        // local validated reorg, not an inbound competing attestation.
+        if (minted_other_hash ||
+            OccupyingCompetingQuorumLocked(block_height, block_hash)) {
+            ++m_stats.rejected;
+            return AddResult::HeightOccupied;
         }
     }
     ExactReplayStatement statement;
@@ -913,6 +913,125 @@ AddResult AttestationStore::SignLocal(
         *produced = std::move(*attestation);
     }
     return result;
+}
+
+void AttestationStore::CapOffActiveChainLocked()
+{
+    while (m_off_active_chain.size() > m_config.max_blocks &&
+           !m_off_active_chain.empty()) {
+        m_off_active_chain.erase(m_off_active_chain.begin());
+    }
+}
+
+void AttestationStore::ReleaseOpenSignedMatchingHashLocked(
+    int32_t height, const uint256& block_hash)
+{
+    auto height_it{m_open_signed_at_height.find(height)};
+    if (height_it == m_open_signed_at_height.end()) return;
+    auto& signers{height_it->second};
+    for (auto it = signers.begin(); it != signers.end();) {
+        if (it->second == block_hash) {
+            it = signers.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    if (signers.empty()) {
+        m_open_signed_at_height.erase(height_it);
+    }
+}
+
+bool AttestationStore::OccupyingCompetingQuorumLocked(
+    int32_t block_height, const uint256& block_hash) const
+{
+    for (auto it = m_buckets.lower_bound(BlockKey{block_height, uint256{}});
+         it != m_buckets.end() && it->first.height == block_height; ++it) {
+        if (it->first.hash == block_hash) continue;
+        if (m_off_active_chain.count(it->first) != 0) continue;
+        if (HasQuorumLocked(it->first, it->second)) return true;
+    }
+    return false;
+}
+
+bool AttestationStore::NotifyActiveChainBlockDisconnected(
+    int32_t height, const uint256& disconnected_hash)
+{
+    if (height < 0 || disconnected_hash.IsNull()) return false;
+    std::lock_guard lock{m_mutex};
+    m_off_active_chain.insert(BlockKey{height, disconnected_hash});
+    CapOffActiveChainLocked();
+    ReleaseOpenSignedMatchingHashLocked(height, disconnected_hash);
+    const auto minted{m_local_minted_hash_by_height.find(height)};
+    if (minted == m_local_minted_hash_by_height.end() ||
+        minted->second != disconnected_hash) {
+        return false;
+    }
+    m_local_minted_hash_by_height.erase(minted);
+    return true;
+}
+
+void AttestationStore::NotifyActiveChainBlockConnected(
+    int32_t height, const uint256& connected_hash)
+{
+    if (height < 0 || connected_hash.IsNull()) return;
+    std::lock_guard lock{m_mutex};
+    m_off_active_chain.erase(BlockKey{height, connected_hash});
+}
+
+size_t AttestationStore::ClearLocalMintSlots(int32_t from_height,
+                                             int32_t to_height)
+{
+    if (from_height > to_height) return 0;
+    std::lock_guard lock{m_mutex};
+    size_t cleared{0};
+    auto it{m_local_minted_hash_by_height.lower_bound(from_height)};
+    while (it != m_local_minted_hash_by_height.end() &&
+           it->first <= to_height) {
+        m_open_signed_at_height.erase(it->first);
+        it = m_local_minted_hash_by_height.erase(it);
+        ++cleared;
+    }
+    // Heights that only had open-directory rows (no local mint) still need
+    // a consistent wipe so an operator can recover an open attestor too.
+    auto open_it{m_open_signed_at_height.lower_bound(from_height)};
+    while (open_it != m_open_signed_at_height.end() &&
+           open_it->first <= to_height) {
+        open_it = m_open_signed_at_height.erase(open_it);
+    }
+    return cleared;
+}
+
+std::optional<uint256> AttestationStore::LocalMintedHash(int32_t height) const
+{
+    std::lock_guard lock{m_mutex};
+    const auto it{m_local_minted_hash_by_height.find(height)};
+    if (it == m_local_minted_hash_by_height.end() || it->second.IsNull()) {
+        return std::nullopt;
+    }
+    return it->second;
+}
+
+std::vector<int32_t> AttestationStore::LocalMintedHeights(
+    int32_t from_height, int32_t to_height) const
+{
+    std::vector<int32_t> out;
+    if (from_height > to_height) return out;
+    std::lock_guard lock{m_mutex};
+    auto it{m_local_minted_hash_by_height.lower_bound(from_height)};
+    while (it != m_local_minted_hash_by_height.end() &&
+           it->first <= to_height) {
+        out.push_back(it->first);
+        ++it;
+    }
+    return out;
+}
+
+bool AttestationStore::IsOffActiveChain(int32_t height,
+                                        const uint256& block_hash) const
+{
+    if (height < 0 || block_hash.IsNull()) return false;
+    std::lock_guard lock{m_mutex};
+    return m_off_active_chain.count(BlockKey{height, block_hash}) != 0;
 }
 
 std::optional<UtxoSnapshotSignature> AttestationStore::SignUtxoSnapshot(

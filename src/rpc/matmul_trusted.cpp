@@ -1138,6 +1138,66 @@ RPCHelpMan listmatmulattestationblocklist()
         }};
 }
 
+RPCHelpMan clearmintedattestation()
+{
+    return RPCHelpMan{
+        "clearmintedattestation",
+        "Release this node's local ExactReplay attestation mint slot at a "
+        "height or inclusive height range so the node can SignLocal / serve "
+        "the hash it now follows after a chain switch.\n"
+        "This does not delete stored attestations, does not forge or accept "
+        "any statement, and does not skip the competing-quorum stolen-WIF "
+        "guard. Re-minting still requires a local ExactReplay via the normal "
+        "SignAuthoritative path. Inbound P2P MMATTEST cannot invoke this.\n",
+        {
+            {"height", RPCArg::Type::NUM, RPCArg::Optional::NO,
+             "First height whose local mint slot should be released"},
+            {"end_height", RPCArg::Type::NUM, RPCArg::DefaultHint{"height"},
+             "Inclusive end of the range. Omit to clear only `height`."},
+        },
+        RPCResult{RPCResult::Type::OBJ, "", "",
+            {
+                {RPCResult::Type::NUM, "cleared",
+                 "Number of distinct heights whose local mint slot was released"},
+                {RPCResult::Type::NUM, "from_height", ""},
+                {RPCResult::Type::NUM, "to_height", ""},
+            }},
+        RPCExamples{
+            HelpExampleCli("clearmintedattestation", "199295") +
+            HelpExampleCli("clearmintedattestation", "199290 199295")},
+        [](const RPCHelpMan& self, const JSONRPCRequest& request) {
+            if (!node::matmul_trusted::IsConfigured()) {
+                throw JSONRPCError(
+                    RPC_MISC_ERROR,
+                    "MatMul attestation store is not configured");
+            }
+            const int from_height{self.Arg<int>("height")};
+            int to_height{from_height};
+            if (request.params.size() > 1 && !request.params[1].isNull()) {
+                to_height = self.Arg<int>("end_height");
+            }
+            if (from_height < 0 || to_height < 0) {
+                throw JSONRPCError(
+                    RPC_INVALID_PARAMETER,
+                    "Height must be non-negative");
+            }
+            if (from_height > to_height) {
+                throw JSONRPCError(
+                    RPC_INVALID_PARAMETER,
+                    "end_height must be >= height");
+            }
+            UniValue out{UniValue::VOBJ};
+            out.pushKV(
+                "cleared",
+                static_cast<uint64_t>(
+                    node::matmul_trusted::ClearMintedAttestations(
+                        from_height, to_height)));
+            out.pushKV("from_height", from_height);
+            out.pushKV("to_height", to_height);
+            return out;
+        }};
+}
+
 } // namespace
 
 void RegisterMatMulTrustedRPCCommands(CRPCTable& table)
@@ -1152,6 +1212,7 @@ void RegisterMatMulTrustedRPCCommands(CRPCTable& table)
         {"mining", &getmatmulattestations},
         {"mining", &submitmatmulattestations},
         {"mining", &submitmatmulrefutation},
+        {"mining", &clearmintedattestation},
     };
     for (const auto& command : commands) {
         table.appendCommand(command.name, &command);

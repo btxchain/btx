@@ -1303,8 +1303,18 @@ matmul::trusted::AddResult SignAuthoritative(
     // at 190354). In-memory hints cover the hot window; SignLocal also
     // refuses against the store's own buckets. The local-signed height map
     // survives hot-cache eviction (durable load + each local Sign).
-    if (HasCompetingQuorum(block_hash, block_height) ||
-        HasLocalSignatureAtHeight(block_hash, block_height)) {
+    // Hashes this node itself disconnected do not occupy: that is a local
+    // validated reorg, not a stolen-WIF jam.
+    if (HasLocalSignatureAtHeight(block_hash, block_height)) {
+        return matmul::trusted::AddResult::HeightOccupied;
+    }
+    for (const auto& hint : AttestedFrontierHints()) {
+        if (hint.height != block_height || hint.hash == block_hash ||
+            hint.hash.IsNull()) {
+            continue;
+        }
+        if (!HasQuorumInMemory(hint.hash, hint.height)) continue;
+        if (store->IsOffActiveChain(hint.height, hint.hash)) continue;
         return matmul::trusted::AddResult::HeightOccupied;
     }
     matmul::trusted::ExactReplayAttestation signed_attestation;
@@ -1331,6 +1341,84 @@ matmul::trusted::AddResult SignAuthoritative(
         PersistAfterMutation(signed_attestation);
     }
     return result;
+}
+
+bool NotifyActiveChainBlockDisconnected(int32_t height,
+                                        const uint256& disconnected_hash)
+{
+    if (height < 0 || disconnected_hash.IsNull()) return false;
+    auto store{Store()};
+    const bool released_store{
+        store && store->NotifyActiveChainBlockDisconnected(
+                     height, disconnected_hash)};
+    bool released_hint{false};
+    {
+        std::lock_guard lock{g_mutex};
+        const auto it{g_local_signed_hash_by_height.find(height)};
+        if (it != g_local_signed_hash_by_height.end() &&
+            it->second == disconnected_hash) {
+            g_local_signed_hash_by_height.erase(it);
+            released_hint = true;
+        }
+    }
+    if (released_store || released_hint) {
+        LogPrintf("matmul: released local mint slot at height %d after "
+                  "active-chain disconnect of %s\n",
+                  height, disconnected_hash.ToString());
+    }
+    return released_store || released_hint;
+}
+
+void NotifyActiveChainBlockConnected(int32_t height,
+                                     const uint256& connected_hash)
+{
+    if (height < 0 || connected_hash.IsNull()) return;
+    auto store{Store()};
+    if (store) {
+        store->NotifyActiveChainBlockConnected(height, connected_hash);
+    }
+}
+
+size_t ClearMintedAttestations(int32_t from_height, int32_t to_height)
+{
+    if (from_height > to_height) return 0;
+    std::set<int32_t> cleared;
+    auto store{Store()};
+    if (store) {
+        for (const int32_t height :
+             store->LocalMintedHeights(from_height, to_height)) {
+            cleared.insert(height);
+        }
+        store->ClearLocalMintSlots(from_height, to_height);
+    }
+    {
+        std::lock_guard lock{g_mutex};
+        auto it{g_local_signed_hash_by_height.lower_bound(from_height)};
+        while (it != g_local_signed_hash_by_height.end() &&
+               it->first <= to_height) {
+            cleared.insert(it->first);
+            it = g_local_signed_hash_by_height.erase(it);
+        }
+    }
+    if (!cleared.empty()) {
+        LogPrintf("matmul: operator cleared %zu local mint slot(s) in [%d, %d]\n",
+                  cleared.size(), from_height, to_height);
+    }
+    return cleared.size();
+}
+
+std::optional<uint256> LocalMintedHash(int32_t height)
+{
+    auto store{Store()};
+    if (store) {
+        if (auto minted{store->LocalMintedHash(height)}) return minted;
+    }
+    std::lock_guard lock{g_mutex};
+    const auto it{g_local_signed_hash_by_height.find(height)};
+    if (it == g_local_signed_hash_by_height.end() || it->second.IsNull()) {
+        return std::nullopt;
+    }
+    return it->second;
 }
 
 std::optional<matmul::trusted::UtxoSnapshotSignature> SignUtxoSnapshot(

@@ -9394,6 +9394,12 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
     if (m_chainman.m_options.signals) {
         m_chainman.m_options.signals->BlockDisconnected(pblock, pindexDelete);
     }
+    // Own validated reorg only: release the local mint slot if this process
+    // SignLocal'd the hash that just left the active chain. Must not wait for
+    // the async validation queue — SignAuthoritative of the new tip can run
+    // immediately. Inbound MMATTEST never reaches this path.
+    node::matmul_trusted::NotifyActiveChainBlockDisconnected(
+        pindexDelete->nHeight, pindexDelete->GetBlockHash());
 
     if (m_mempool) {
         // add mempool stats sample
@@ -10918,6 +10924,8 @@ bool Chainstate::ActivateBestChain(BlockValidationState& state, std::shared_ptr<
                     if (m_chainman.m_options.signals) {
                         m_chainman.m_options.signals->BlockConnected(chainstate_role, trace.pblock, trace.pindex);
                     }
+                    node::matmul_trusted::NotifyActiveChainBlockConnected(
+                        trace.pindex->nHeight, trace.pindex->GetBlockHash());
                 }
 
                 if (IsRetryableMatMulActivationError(state)) {

@@ -100,6 +100,25 @@ void ResetForTest();
     int32_t block_height,
     matmul::trusted::ExactReplayAttestation* produced = nullptr);
 /**
+ * This node's own validated BlockDisconnected. Releases the local mint slot
+ * when the minted hash left the active chain, so SignAuthoritative can
+ * re-mint the hash this node now follows. Must be called from DisconnectTip
+ * / CValidationInterface::BlockDisconnected. Must never be called from
+ * inbound MMATTEST / Add().
+ */
+bool NotifyActiveChainBlockDisconnected(int32_t height,
+                                        const uint256& disconnected_hash);
+/** Inverse: the hash is on the active chain again. */
+void NotifyActiveChainBlockConnected(int32_t height,
+                                     const uint256& connected_hash);
+/**
+ * Operator RPC path: clear local mint slots in [from_height, to_height]
+ * inclusive. Consensus-neutral: only what this process will re-mint/serve.
+ * Returns the number of distinct heights whose mint slot was released.
+ */
+size_t ClearMintedAttestations(int32_t from_height, int32_t to_height);
+[[nodiscard]] std::optional<uint256> LocalMintedHash(int32_t height);
+/**
  * Sign a UTXO snapshot statement with the configured local attestation key.
  * Returns nullopt when unconfigured or the statement's chain/authority fields
  * do not match the local trusted-mirror configuration.
